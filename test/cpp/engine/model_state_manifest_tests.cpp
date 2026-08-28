@@ -137,6 +137,24 @@ std::string CaptureValidationError(const ModelStateManifest& manifest,
   return {};
 }
 
+TEST(ModelStateManifestTest, ReportsStateGroupCapabilities) {
+  const ModelStateManifest hybrid{MakeSparseDecoder()};
+  EXPECT_TRUE(hybrid.HasStateGroupKind(
+      Config::Model::Decoder::StateGroupKind::PagedKeyValue));
+  EXPECT_TRUE(hybrid.HasStateGroupKind(
+      Config::Model::Decoder::StateGroupKind::FixedConv));
+  EXPECT_TRUE(hybrid.HasStateGroupKind(
+      Config::Model::Decoder::StateGroupKind::FixedRecurrent));
+  EXPECT_TRUE(hybrid.HasFixedStateGroups());
+
+  Config::Model::Decoder legacy;
+  legacy.num_hidden_layers = 4;
+  const ModelStateManifest dense{legacy};
+  EXPECT_FALSE(dense.HasStateGroupKind(
+      Config::Model::Decoder::StateGroupKind::PagedKeyValue));
+  EXPECT_FALSE(dense.HasFixedStateGroups());
+}
+
 TEST(ModelStateManifestTest, ValidatesEveryExpandedBinding) {
   const ModelStateManifest manifest{MakeSparseDecoder()};
   const auto metadata = MakeValidMetadata();
@@ -240,13 +258,11 @@ TEST(ModelStateManifestTest, DecoderModelLoadsWithValidDecoderBindings) {
   EXPECT_NO_THROW(CreateModel(GetOrtEnv(), std::move(valid_config)));
 }
 
-TEST(ModelStateManifestTest, RejectsFixedUntilDecoderBindingLands) {
-  // Composite resource management is present, but the compatibility gate stays closed until the
-  // next PR binds fixed tensors into production decoder execution.
+TEST(ModelStateManifestTest, AcceptsFixedDynamicEngineContract) {
+  // Packed hybrid IO binds fixed tensors at the same boundary where compatibility is enabled.
   auto decoder = MakeSparseDecoder();
-  EXPECT_THROW(
-      ModelStateManifest::ValidateDynamicEngineCompatibility(decoder),
-      std::runtime_error);
+  EXPECT_NO_THROW(
+      ModelStateManifest::ValidateDynamicEngineCompatibility(decoder));
 }
 
 TEST(ModelStateManifestTest, RejectsFixedGroupsWithoutPagedGroup) {

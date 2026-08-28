@@ -231,6 +231,7 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model)
   }
 
   max_batch_size_ = max_batch_size;
+  block_table_index_ = std::make_unique<RequestIndex>(max_batch_size_);
   graph_capture_ = IsGraphCaptureEnabled(decoder.session_options);
   if (graph_capture_) {
     max_block_table_rows_ = max_batch_size_;
@@ -270,6 +271,11 @@ void PagedKeyValueCache::Add(std::shared_ptr<Request> request) {
   if (!CanAdd(request)) {
     throw std::runtime_error("Not enough free blocks available to serve the request.");
   }
+  if (block_table_index_->Find(request.get()) ||
+      block_table_index_->Size() >= block_table_index_->Capacity()) {
+    throw std::logic_error(
+        "Paged cache request index cannot admit this request.");
+  }
 
   // Reserve the blocks the prompt will need, but leave their slots empty. The slots are marked
   // used in AppendTokens() once the tokens are actually written to the cache. Marking them here
@@ -286,6 +292,10 @@ void PagedKeyValueCache::Add(std::shared_ptr<Request> request) {
 
   block_tables_.emplace_back(
       PagedCacheBlockTable{request.get(), 0, std::move(reserved_blocks), std::move(window_blocks)});
+  if (!block_table_index_->Insert(
+          request.get(), block_tables_.size() - 1)) {
+    std::terminate();
+  }
 }
 
 bool PagedKeyValueCache::CanAppendTokens(std::shared_ptr<Request> request) const {
@@ -366,6 +376,7 @@ void PagedKeyValueCache::AppendTokens(std::shared_ptr<Request> request) {
 void PagedKeyValueCache::Remove(std::shared_ptr<Request> request) {
   RemovePagedCacheBlockTable(*block_pool_, window_block_pool_.get(),
                              block_tables_, request.get());
+  RebuildBlockTableIndex();
 }
 
 void PagedKeyValueCache::ValidateRemove(const void* request_id) const {
@@ -376,31 +387,41 @@ void PagedKeyValueCache::ValidateRemove(const void* request_id) const {
 void PagedKeyValueCache::RemoveValidated(const void* request_id) noexcept {
   RemoveValidatedPagedCacheBlockTable(
       *block_pool_, window_block_pool_.get(), block_tables_, request_id);
+  RebuildBlockTableIndex();
+}
+
+bool PagedKeyValueCache::OwnsRequest(
+    const void* request_id) const noexcept {
+  const auto index = block_table_index_->Find(request_id);
+  return index && *index < block_tables_.size() &&
+         block_tables_[*index].request_id_ == request_id;
 }
 
 size_t PagedKeyValueCache::CommittedSlots(
     const void* request_id) const {
-  const PagedCacheBlockTable* match = nullptr;
-  for (const auto& table : block_tables_) {
-    if (table.request_id_ != request_id) {
-      continue;
-    }
-    if (match) {
-      throw StepPlanningConsistencyError(
-          "A request owns more than one paged cache table.");
-    }
-    match = &table;
-  }
-  if (!match) {
+  const auto index = block_table_index_->Find(request_id);
+  if (!index || *index >= block_tables_.size() ||
+      block_tables_[*index].request_id_ != request_id) {
     throw StepPlanningConsistencyError(
         "A cache resident has no committed paged cache table.");
   }
-  return match->committed_slots_;
+  return block_tables_[*index].committed_slots_;
 }
 
 PagedCacheReservation PagedKeyValueCache::Reserve(std::span<const PagedCacheReservationRequest> requests) {
   return PagedCacheReservation{*block_pool_, block_tables_, requests,
-                               window_block_pool_.get(), window_ring_blocks_};
+                               window_block_pool_.get(), window_ring_blocks_,
+                               block_table_index_.get()};
+}
+
+void PagedKeyValueCache::RebuildBlockTableIndex() noexcept {
+  block_table_index_->Clear();
+  for (size_t index = 0; index < block_tables_.size(); ++index) {
+    if (!block_table_index_->Insert(
+            block_tables_[index].request_id_, index)) {
+      std::terminate();
+    }
+  }
 }
 
 StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
@@ -472,22 +493,16 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
     ++selected_requests;
   };
   const auto find_table = [this](const void* request_id) {
-    const auto it = std::find_if(block_tables_.begin(), block_tables_.end(),
-                                 [request_id](const PagedCacheBlockTable& table) {
-                                   return table.request_id_ == request_id;
-                                 });
-    return it == block_tables_.end() ? nullptr : &*it;
+    const auto index = block_table_index_->Find(request_id);
+    return index ? &block_tables_[*index] : nullptr;
   };
-  std::vector<const void*> request_ids;
-  request_ids.reserve(plan.requests.size());
+  RequestIndex request_ids{plan.requests.size()};
   for (size_t i = 0; i < plan.requests.size(); ++i) {
     const auto& candidate = plan.requests[i];
-    if (std::find(request_ids.begin(), request_ids.end(),
-                  candidate.request_id) != request_ids.end()) {
+    if (!request_ids.Insert(candidate.request_id, i)) {
       throw StepPlanningConsistencyError(
           "Step plan contains a duplicate request.");
     }
-    request_ids.push_back(candidate.request_id);
 
     const auto* table = find_table(candidate.request_id);
     if (candidate.newly_admitted && table) {

@@ -507,17 +507,24 @@ TEST(PagedKeyValueCacheManifestTest, RejectsFixedStateGroupsAbsentFromSession) {
       std::runtime_error);
 }
 
-TEST(PagedKeyValueCacheManifestTest, PublicEngineRejectsFixedStateWhileGateIsClosed) {
+TEST(PagedKeyValueCacheManifestTest, PublicEngineAcceptsPackedFixedState) {
   auto model = LoadSyntheticCompositeModel();
 
+  EXPECT_NO_THROW({
+    auto engine = std::make_shared<Engine>(model);
+  });
+}
+
+TEST(PagedKeyValueCacheManifestTest, RejectsFixedStateWithStaticBatching) {
+  auto model = LoadSyntheticCompositeModel();
+  model->config_->engine.dynamic_batching.reset();
   EXPECT_THROW(
       {
         try {
-          auto engine = std::make_shared<Engine>(model);
+          auto manager = CacheManager::Create(model);
         } catch (const std::runtime_error& error) {
           EXPECT_NE(
-              std::string{error.what()}.find(
-                  "does not yet support fixed decoder state groups"),
+              std::string{error.what()}.find("require engine.dynamic_batching"),
               std::string::npos)
               << error.what();
           throw;

@@ -4,6 +4,7 @@
 #include "engine.h"
 #include "admission.h"
 #include "decode_first_scheduler_policy.h"
+#include "request_index.h"
 #include "sequence_positions.h"
 
 namespace Generators {
@@ -236,21 +237,28 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     return result;
   }
 
+  RequestIndex candidate_index{candidates.size()};
+  for (size_t index = 0; index < candidates.size(); ++index) {
+    if (!candidate_index.Insert(
+            candidates[index].entry.request_id, index)) {
+      throw StepPlanningConsistencyError(
+          "Scheduler candidates contain an invalid or duplicate request.");
+    }
+  }
   std::vector<DecodeFirstBudgetCandidate> selected_candidates;
   std::vector<size_t> selected_processed_lengths;
   selected_candidates.reserve(plan.requests.size());
   selected_processed_lengths.reserve(plan.requests.size());
   for (const auto& entry : plan.requests) {
-    const auto candidate = std::find_if(
-        candidates.begin(), candidates.end(),
-        [&entry](const Candidate& value) {
-          return value.entry.request_id == entry.request_id;
-        });
-    if (candidate == candidates.end())
+    const auto candidate_index_value =
+        candidate_index.Find(entry.request_id);
+    if (!candidate_index_value)
       throw StepPlanningConsistencyError(
           "Cache planning selected an unknown request.");
-    selected_candidates.push_back(candidate->budget);
-    selected_processed_lengths.push_back(candidate->processed_sequence_length);
+    const auto& candidate = candidates[*candidate_index_value];
+    selected_candidates.push_back(candidate.budget);
+    selected_processed_lengths.push_back(
+        candidate.processed_sequence_length);
   }
   std::vector<size_t> token_counts;
   try {

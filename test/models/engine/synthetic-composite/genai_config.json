@@ -22,6 +22,7 @@
         "block_table": "block_table",
         "cumulative_sequence_lengths": "cumulative_sequence_lengths",
         "past_sequence_lengths": "past_sequence_lengths",
+        "position_ids": "position_ids",
         "past_key_names": "past_key_values.%d.key",
         "past_value_names": "past_key_values.%d.value",
         "past_conv_names": "past_conv.%d",

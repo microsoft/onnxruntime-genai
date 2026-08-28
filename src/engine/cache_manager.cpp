@@ -15,15 +15,6 @@ namespace Generators {
 
 namespace {
 
-bool HasFixedStateGroups(const ModelStateManifest& manifest) {
-  return std::any_of(
-      manifest.StateGroups().begin(), manifest.StateGroups().end(),
-      [](const Config::Model::Decoder::StateGroup& group) {
-        return group.kind == Config::Model::Decoder::StateGroupKind::FixedConv ||
-               group.kind == Config::Model::Decoder::StateGroupKind::FixedRecurrent;
-      });
-}
-
 // One transaction reservation over both the paged KV cache and, when the model declares fixed
 // decoder-state groups, the fixed-state pool. It plans and reserves both up front, validates both
 // before publishing either, stages all fallible fixed device work into inactive banks during
@@ -192,9 +183,14 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
 }  // namespace
 
 std::unique_ptr<CacheManager> CacheManager::Create(std::shared_ptr<Model> model) {
+  const ModelStateManifest manifest{model->config_->model.decoder};
   if (model->config_->engine.dynamic_batching) {
     ModelStateManifest::ValidateDynamicEngineCompatibility(model->config_->model.decoder);
     return std::make_unique<PagedCacheManager>(model);
+  }
+  if (manifest.HasFixedStateGroups()) {
+    throw std::runtime_error(
+        "Fixed decoder state groups require engine.dynamic_batching");
   }
 
   return std::make_unique<StaticCacheManager>(model);
@@ -306,22 +302,9 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model)
   // the composite path degrades to paged-only. Its capacity matches the paged batch limit so paged
   // admission (bounded by max_batch_size) can never outrun fixed slots.
   ModelStateManifest manifest{model->config_->model.decoder};
-  if (HasFixedStateGroups(manifest)) {
+  if (manifest.HasFixedStateGroups()) {
     auto fixed_state_pool = std::make_unique<FixedStatePool>(
         model, model_->config_->engine.dynamic_batching->max_batch_size);
-    // Continuous batching schedules a variable number of rows per step, so a fixed group whose
-    // tensors declare a static (non-symbolic) batch axis can never be served: every reservation
-    // would have to have exactly that many rows. Reject it here, at load, with a clear message
-    // rather than constructing the pool and failing fatally on the first step whose row count
-    // differs from the static extent (FixedStatePool::Reserve enforces the exact match). The public
-    // compatibility gate remains closed in this PR; this additional check protects direct manager
-    // construction in component tests and remains necessary when the packed-IO follow-up opens it.
-    if (fixed_state_pool->SessionBatchSize() != 0) {
-      throw std::runtime_error(
-          "Dynamic batching requires fixed decoder state groups with a dynamic batch axis, but "
-          "this model declares a fixed (static) batch dimension of " +
-          std::to_string(fixed_state_pool->SessionBatchSize()) + ".");
-    }
     fixed_state_pool_ = std::move(fixed_state_pool);
   }
   // Allocate fixed banks before auto-sizing paged KV. ComputeNumBlocks queries current device free
@@ -457,8 +440,7 @@ std::vector<std::shared_ptr<Request>> PagedCacheManager::AllocatedRequests() con
 }
 
 bool PagedCacheManager::IsResident(const std::shared_ptr<Request>& request) const {
-  return std::find(cache_allocated_requests_.begin(), cache_allocated_requests_.end(), request) !=
-         cache_allocated_requests_.end();
+  return key_value_cache_->OwnsRequest(request.get());
 }
 
 StepPlanningResult PagedCacheManager::PlanStepResources(StepPlan& plan) const {
@@ -476,7 +458,9 @@ StepPlanningResult PagedCacheManager::PlanStepResources(StepPlan& plan) const {
         "Paged and fixed state committed ownership counts differ.");
   }
   for (const auto& request : cache_allocated_requests_) {
-    if (!fixed_state_pool_->OwnsCommittedSlot(request.get())) {
+    const auto fixed_state =
+        fixed_state_pool_->CommittedState(request.get());
+    if (!fixed_state) {
       throw StepPlanningConsistencyError(
           "A paged cache resident has no committed fixed state slot.");
     }
@@ -484,8 +468,7 @@ StepPlanningResult PagedCacheManager::PlanStepResources(StepPlan& plan) const {
     if (processed_tokens < 0 ||
         key_value_cache_->CommittedSlots(request.get()) !=
             static_cast<size_t>(processed_tokens) ||
-        fixed_state_pool_->CommittedTokens(
-            fixed_state_pool_->HandleFor(request.get())) !=
+        fixed_state->committed_tokens !=
             static_cast<uint64_t>(processed_tokens)) {
       throw StepPlanningConsistencyError(
           "A resident request and its decoder state have different committed token boundaries.");

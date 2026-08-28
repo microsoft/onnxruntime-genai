@@ -146,11 +146,16 @@ PagedCacheReservation::PagedCacheReservation(
     std::vector<PagedCacheBlockTable>& committed_tables,
     std::span<const PagedCacheReservationRequest> requests,
     BlockPool* window_block_pool,
-    size_t window_ring_blocks)
+    size_t window_ring_blocks,
+    RequestIndex* table_index)
     : block_pool_{&block_pool},
       window_block_pool_{window_block_pool},
       window_ring_blocks_{window_ring_blocks},
-      committed_tables_{&committed_tables} {
+      committed_tables_{&committed_tables},
+      table_index_{table_index},
+      resident_table_index_{committed_tables.size()},
+      delta_index_{requests.size()},
+      delta_visit_generations_(requests.size()) {
   if ((window_block_pool_ == nullptr) != (window_ring_blocks_ == 0)) {
     throw std::runtime_error("Paged cache window reservation configuration is inconsistent.");
   }
@@ -158,6 +163,26 @@ PagedCacheReservation::PagedCacheReservation(
   new_tables_.reserve(requests.size());
   committed_tables.reserve(CheckedAdd(
       committed_tables.size(), requests.size(), "table capacity"));
+  if (table_index_ &&
+      table_index_->Size() != committed_tables.size()) {
+    throw std::logic_error(
+        "Paged cache request index does not match committed tables.");
+  }
+  for (size_t index = 0; index < committed_tables.size(); ++index) {
+    const auto request_id = committed_tables[index].request_id_;
+    if (!request_id ||
+        !resident_table_index_.Insert(request_id, index)) {
+      throw std::logic_error(
+          "Paged cache committed tables contain an invalid or duplicate request.");
+    }
+    if (table_index_) {
+      const auto indexed = table_index_->Find(request_id);
+      if (!indexed || *indexed != index) {
+        throw std::logic_error(
+            "Paged cache request index does not match committed tables.");
+      }
+    }
+  }
 
   size_t reserved_block_count = 0;
   size_t reserved_window_block_count = 0;
@@ -165,16 +190,12 @@ PagedCacheReservation::PagedCacheReservation(
   std::unordered_set<const Block*> touched_committed_blocks;
   std::unordered_set<const Block*> resident_window_blocks;
   for (const auto& request : requests) {
-    const bool duplicate_request =
-        std::any_of(deltas_.begin(), deltas_.end(),
-                    [&request](const PagedCacheReservationDelta& delta) {
-                      return delta.request_id == request.request_id;
-                    });
-    if (!request.request_id || duplicate_request) {
+    if (!request.request_id ||
+        !delta_index_.Insert(request.request_id, deltas_.size())) {
       throw std::runtime_error("Paged cache reservation contains an invalid or duplicate request.");
     }
 
-    auto* committed_table = FindTable(committed_tables, request.request_id);
+    auto* committed_table = FindCommittedTable(request.request_id);
     if (request.newly_admitted == (committed_table != nullptr)) {
       throw std::runtime_error("Paged cache reservation request membership does not match the committed cache.");
     }
@@ -342,9 +363,16 @@ PagedCacheReservation::PagedCacheReservation(PagedCacheReservation&& other) noex
       window_block_pool_{std::exchange(other.window_block_pool_, nullptr)},
       window_ring_blocks_{std::exchange(other.window_ring_blocks_, 0)},
       committed_tables_{std::exchange(other.committed_tables_, nullptr)},
+      table_index_{std::exchange(other.table_index_, nullptr)},
+      resident_table_index_{std::move(other.resident_table_index_)},
       reserved_blocks_{std::move(other.reserved_blocks_)},
       reserved_window_blocks_{std::move(other.reserved_window_blocks_)},
       deltas_{std::move(other.deltas_)},
+      delta_index_{std::move(other.delta_index_)},
+      delta_visit_generations_{
+          std::move(other.delta_visit_generations_)},
+      next_delta_visit_generation_{
+          std::exchange(other.next_delta_visit_generation_, 1)},
       new_tables_{std::move(other.new_tables_)},
       advance_blocks_{std::move(other.advance_blocks_)},
       resident_table_snapshots_{std::move(other.resident_table_snapshots_)},
@@ -385,12 +413,10 @@ void PagedCacheReservation::FillBlockTable(std::span<const void* const> request_
   }
 
   std::fill(output.begin(), output.end(), int32_t{-1});
+  const uint64_t visit_generation = BeginDeltaResolution();
   for (size_t row = 0; row < request_ids.size(); ++row) {
-    if (std::find(request_ids.begin(), request_ids.begin() + static_cast<ptrdiff_t>(row), request_ids[row]) !=
-        request_ids.begin() + static_cast<ptrdiff_t>(row)) {
-      throw std::runtime_error("Paged cache block table contains a duplicate request.");
-    }
-    const auto& delta = FindDelta(request_ids[row]);
+    const auto& delta =
+        ResolveDelta(request_ids[row], visit_generation);
     const auto* table = FindCommittedTable(request_ids[row]);
     size_t column = 0;
     if (table) {
@@ -417,8 +443,10 @@ void PagedCacheReservation::FillWindowBlockTable(
     throw std::runtime_error("Paged cache window block table output has an invalid shape.");
   }
 
+  const uint64_t visit_generation = BeginDeltaResolution();
   for (size_t row = 0; row < request_ids.size(); ++row) {
-    const auto& delta = FindDelta(request_ids[row]);
+    const auto& delta =
+        ResolveDelta(request_ids[row], visit_generation);
     const auto* table = FindCommittedTable(request_ids[row]);
     for (size_t column = 0; column < columns; ++column) {
       const size_t ring_column = WindowRingColumn(column, window_ring_blocks_);
@@ -460,25 +488,22 @@ void PagedCacheReservation::ValidateCommit() const {
   size_t new_table_count = 0;
   size_t assigned_reserved_blocks = 0;
   size_t assigned_reserved_window_blocks = 0;
-  std::unordered_set<const void*> committed_request_ids;
-  committed_request_ids.reserve(committed_tables_->size());
-  for (const auto& table : *committed_tables_) {
-    if (!table.request_id_ ||
-        !committed_request_ids.insert(table.request_id_).second) {
+  for (size_t index = 0; index < committed_tables_->size(); ++index) {
+    const auto& table = (*committed_tables_)[index];
+    const auto indexed = resident_table_index_.Find(table.request_id_);
+    if (!table.request_id_ || !indexed || *indexed != index) {
       throw std::logic_error(
           "Paged cache committed tables contain an invalid or duplicate request.");
     }
   }
-  std::vector<const void*> request_ids;
-  request_ids.reserve(deltas_.size());
-  for (const auto& delta : deltas_) {
-    if (!delta.request_id ||
-        std::find(request_ids.begin(), request_ids.end(), delta.request_id) !=
-            request_ids.end()) {
+  for (size_t delta_index = 0; delta_index < deltas_.size();
+       ++delta_index) {
+    const auto& delta = deltas_[delta_index];
+    const auto indexed = delta_index_.Find(delta.request_id);
+    if (!delta.request_id || !indexed || *indexed != delta_index) {
       throw std::logic_error(
           "Paged cache reservation contains an invalid request delta.");
     }
-    request_ids.push_back(delta.request_id);
 
     const auto* table = FindCommittedTable(delta.request_id);
     if (delta.newly_admitted == (table != nullptr)) {
@@ -560,6 +585,8 @@ void PagedCacheReservation::ValidateCommit() const {
   if (assigned_reserved_blocks != reserved_blocks_.size() ||
       assigned_reserved_window_blocks != reserved_window_blocks_.size() ||
       new_table_count != new_tables_.size() ||
+      (table_index_ &&
+       new_table_count > table_index_->Capacity() - table_index_->Size()) ||
       new_table_count >
           committed_tables_->capacity() - committed_tables_->size()) {
     throw std::logic_error(
@@ -626,7 +653,7 @@ void PagedCacheReservation::CommitValidated() {
   size_t new_table_index = 0;
   bool occupancy_changed = false;
   for (const auto& delta : deltas_) {
-    PagedCacheBlockTable* table = FindTable(*committed_tables_, delta.request_id);
+    PagedCacheBlockTable* table = FindCommittedTable(delta.request_id);
     if (delta.newly_admitted) {
       table = &new_tables_.at(new_table_index++);
     }
@@ -644,6 +671,11 @@ void PagedCacheReservation::CommitValidated() {
 
     if (delta.newly_admitted) {
       committed_tables_->push_back(std::move(*table));
+      if (table_index_ &&
+          !table_index_->Insert(
+              delta.request_id, committed_tables_->size() - 1)) {
+        std::terminate();
+      }
     }
   }
   if (occupancy_changed) {
@@ -680,20 +712,47 @@ void PagedCacheReservation::Release() {
   state_ = PagedCacheReservationState::Released;
 }
 
-const PagedCacheBlockTable* PagedCacheReservation::FindCommittedTable(const void* request_id) const {
-  const auto* table = FindTable(*committed_tables_, request_id);
-  return table;
+PagedCacheBlockTable* PagedCacheReservation::FindCommittedTable(
+    const void* request_id) {
+  return const_cast<PagedCacheBlockTable*>(
+      std::as_const(*this).FindCommittedTable(request_id));
 }
 
-const PagedCacheReservationDelta& PagedCacheReservation::FindDelta(const void* request_id) const {
-  const auto it = std::find_if(deltas_.begin(), deltas_.end(),
-                               [request_id](const PagedCacheReservationDelta& delta) {
-                                 return delta.request_id == request_id;
-                               });
-  if (it == deltas_.end()) {
-    throw std::runtime_error("Request is not part of the paged cache reservation.");
+const PagedCacheBlockTable* PagedCacheReservation::FindCommittedTable(
+    const void* request_id) const {
+  const auto index = resident_table_index_.Find(request_id);
+  if (!index) {
+    return nullptr;
   }
-  return *it;
+  if (*index >= committed_tables_->size() ||
+      (*committed_tables_)[*index].request_id_ != request_id) {
+    throw std::logic_error(
+        "Paged cache reservation index does not match committed tables.");
+  }
+  return &(*committed_tables_)[*index];
+}
+
+uint64_t PagedCacheReservation::BeginDeltaResolution() const {
+  if (next_delta_visit_generation_ ==
+      std::numeric_limits<uint64_t>::max()) {
+    std::fill(delta_visit_generations_.begin(),
+              delta_visit_generations_.end(), 0);
+    next_delta_visit_generation_ = 1;
+  }
+  return next_delta_visit_generation_++;
+}
+
+const PagedCacheReservationDelta& PagedCacheReservation::ResolveDelta(
+    const void* request_id, uint64_t visit_generation) const {
+  const auto index = delta_index_.Find(request_id);
+  if (!index || *index >= deltas_.size() ||
+      delta_visit_generations_[*index] == visit_generation ||
+      deltas_[*index].request_id != request_id) {
+    throw std::runtime_error(
+        "Paged cache block table contains an invalid or duplicate request.");
+  }
+  delta_visit_generations_[*index] = visit_generation;
+  return deltas_[*index];
 }
 
 void PagedCacheReservation::ValidateResidentTablesUnchanged() const {

@@ -19,8 +19,9 @@ struct ExecutionContext {
   const StepPlan* plan{};
   PagedCacheReservation* cache_reservation{};
   // Fixed decoder-state resources for this step, in scheduled request row order. Empty when the
-  // model has no fixed groups. The reservation owns the handles, bindings, names, and OrtValue
-  // objects; these views remain valid only for this synchronous transaction.
+  // model has no fixed groups. HybridDecoderIO binds them alongside packed inputs. The reservation
+  // owns the handles, bindings, names, and OrtValue objects; these views remain valid only for this
+  // synchronous transaction.
   std::span<const FixedStateSlotHandle> fixed_state_slots;
   std::span<const FixedStateBinding> fixed_state_bindings;
   size_t fixed_state_staging_bytes{};

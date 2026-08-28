@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -56,6 +57,11 @@ struct FixedStateSlotHandle {
   }
 
   bool operator==(const FixedStateSlotHandle&) const = default;
+};
+
+struct FixedStateCommittedState {
+  FixedStateSlotHandle handle;
+  uint64_t committed_tokens{};
 };
 
 // One scheduled row of a reservation: the request identity and the processed-token count the
@@ -171,15 +177,10 @@ class FixedStatePool {
   // Snapshot().committed_slots for the composite planner's per-step consistency check, so planning
   // does not allocate a full snapshot on the hot path.
   size_t CommittedSlotCount() const;
-  // The session's fixed (static) axis-0 extent shared by every fixed binding, or 0 when the batch
-  // axis is dynamic. Continuous batching varies the per-step row count, so a non-zero value is
-  // incompatible with dynamic batching; the composite manager uses this to reject such a model at
-  // load rather than fail fatally on the first step whose row count differs from the fixed extent.
-  size_t SessionBatchSize() const;
   size_t PersistentBytes() const;
   size_t ZeroingScratchBytes() const;
   size_t ActiveStagingBytes() const;
-  // Gather+output staging bytes a reservation of `row_count` scheduled rows will allocate. A pure
+  // Gather+output staging bytes a reservation of `row_count` scheduled rows will view. A pure
   // function of the pool's tensor geometry, so composite step planning can size the transaction
   // before the reservation exists; it equals the resulting reservation's PlannedStagingBytes().
   size_t PlannedStagingBytes(size_t row_count) const;
@@ -189,6 +190,8 @@ class FixedStatePool {
   // (which throws when the request owns nothing), for the composite planner's per-row ownership
   // cross-check.
   bool OwnsCommittedSlot(const void* request_id) const;
+  std::optional<FixedStateCommittedState> CommittedState(
+      const void* request_id) const noexcept;
   // Admits a batch in scheduled row order. Ownership is inferred per request: an identity that
   // already owns a committed slot is treated as resident and keeps that slot; any other identity is
   // admitted provisionally and only becomes discoverable committed ownership on Commit.

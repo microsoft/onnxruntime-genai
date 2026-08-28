@@ -13,13 +13,13 @@ wire the real ``PagedCacheManager`` (so a real ``PagedKeyValueCache`` and real
 ``RecordingModelExecutor`` that fabricates logits, so the ONNX graph is never
 executed.
 
-Because the graph is never run by those tests, the fixed present outputs are
-produced with ``Identity`` pass-throughs. The paged portion reuses the exact
-executable graph from ``create_synthetic_paged_model.py`` so the paged cache and
-manifest validate identically to the paged fixture. The production dynamic
-decoder (``VarlenDecoderIO``) does not bind fixed inputs/outputs yet, so this
-composite graph intentionally cannot run through the real dynamic engine; only
-the ownership integration is exercised.
+The first fixed convolution state increments on every run and feeds back into
+the next-token score; the remaining fixed outputs are ``Identity`` pass-throughs.
+The graph also consumes packed absolute ``position_ids``. The paged portion reuses the executable graph from
+``create_synthetic_paged_model.py`` so the paged cache and manifest validate
+identically to the paged fixture. ``HybridDecoderIO`` binds the fixed tensors
+alongside the packed inputs, making the graph useful for both ownership tests
+with a recording executor and end-to-end dynamic Engine tests.
 
 Layer assignment (disjoint cover of 6 layers):
 
@@ -64,15 +64,18 @@ def _decoder_graph():
     initializers = [
         _const("c0", i64(0)),
         _const("c1", i64(1)),
+        _const("c2", i64(2)),
         _const("cB", i64(BLOCK_SIZE)),
         _const("cV", i64(VOCAB_SIZE)),
         _const("axis0", i64([0])),
         _const("axis1", i64([1])),
+        _const("axes12", i64([1, 2])),
         _const("start1", i64([1])),
         _const("end_all", i64([np.iinfo(np.int64).max])),
         _const("flat", i64([-1])),
         _const("cache_shape", i64([NUM_BLOCKS, BLOCK_SIZE, 1, 1])),
         _const("vocab_range", np.arange(VOCAB_SIZE, dtype=np.int64).reshape(1, VOCAB_SIZE)),
+        _const("state_one", np.asarray(1.0, dtype=np.float32)),
     ]
 
     nodes = []
@@ -131,10 +134,14 @@ def _decoder_graph():
     node("Gather", ["present_key_flat", "first_slot"], ["first_key"], axis=0)
     node("Gather", ["present_value_flat", "phys"], ["cur_value"], axis=0)
 
-    node("Add", ["pos", "c1"], ["current_length"])
+    node("Gather", ["position_ids", "c2"], ["text_position_ids"], axis=0)
+    node("Add", ["text_position_ids", "c1"], ["current_length"])
     node("Cast", ["current_length"], ["current_length_f"], to=TensorProto.FLOAT)
+    node("ReduceSum", ["past_conv.0", "axes12"], ["fixed_state_sum"], keepdims=0)
+    node("Gather", ["fixed_state_sum", "row_id"], ["fixed_state_bias"], axis=0)
     node("Add", ["first_key", "cur_value"], ["first_plus_cur"])
-    node("Add", ["first_plus_cur", "current_length_f"], ["score_f"])
+    node("Add", ["first_plus_cur", "current_length_f"], ["base_score_f"])
+    node("Add", ["base_score_f", "fixed_state_bias"], ["score_f"])
     node("Cast", ["score_f"], ["score"], to=TensorProto.INT64)
     node("Div", ["score", "cV"], ["score_div"])
     node("Mul", ["score_div", "cV"], ["score_floor"])
@@ -152,6 +159,7 @@ def _decoder_graph():
         helper.make_tensor_value_info("input_ids", TensorProto.INT64, ["num_tokens"]),
         helper.make_tensor_value_info("cumulative_sequence_lengths", TensorProto.INT32, ["batch_plus_1"]),
         helper.make_tensor_value_info("past_sequence_lengths", TensorProto.INT32, ["batch"]),
+        helper.make_tensor_value_info("position_ids", TensorProto.INT64, [3, "num_tokens"]),
         helper.make_tensor_value_info("block_table", TensorProto.INT32, ["batch", "max_blocks"]),
         helper.make_tensor_value_info("past_key_values.1.key", TensorProto.FLOAT, cache_shape),
         helper.make_tensor_value_info("past_key_values.1.value", TensorProto.FLOAT, cache_shape),
@@ -166,10 +174,9 @@ def _decoder_graph():
         helper.make_tensor_value_info("present.4.value", TensorProto.FLOAT, cache_shape),
     ]
 
-    # Fixed state groups: pass each present-state output straight through from its past-state input
-    # with an Identity so it inherits the dynamic batch axis. The graph is never executed by the
-    # composite tests, so the values do not matter; only the declared session I/O has to let the
-    # FixedStatePool validate geometry and allocate its own banks.
+    # Fixed state groups use a dynamic batch axis. Most outputs pass through unchanged; conv layer
+    # 0 increments its state so the Python integration test observes fixed-state commit and
+    # re-gather behavior in subsequent logits.
     def add_fixed_group(prefix, layer_ids, row_dims):
         for layer in layer_ids:
             in_name = f"past_{prefix}.{layer}"
@@ -177,7 +184,10 @@ def _decoder_graph():
             shape = ["batch_size", *row_dims]
             inputs.append(helper.make_tensor_value_info(in_name, TensorProto.FLOAT, shape))
             outputs.append(helper.make_tensor_value_info(out_name, TensorProto.FLOAT, shape))
-            nodes.append(helper.make_node("Identity", [in_name], [out_name]))
+            if prefix == "conv" and layer == 0:
+                nodes.append(helper.make_node("Add", [in_name, "state_one"], [out_name]))
+            else:
+                nodes.append(helper.make_node("Identity", [in_name], [out_name]))
 
     add_fixed_group("conv", CONV_LAYERS, CONV_ROW)
     add_fixed_group("recurrent", RECURRENT_LAYERS, RECURRENT_ROW)
@@ -224,6 +234,7 @@ def create_config(output_dir):
                     "block_table": "block_table",
                     "cumulative_sequence_lengths": "cumulative_sequence_lengths",
                     "past_sequence_lengths": "past_sequence_lengths",
+                    "position_ids": "position_ids",
                     "past_key_names": "past_key_values.%d.key",
                     "past_value_names": "past_key_values.%d.value",
                     "past_conv_names": "past_conv.%d",

@@ -15,6 +15,7 @@
 #include "generator/generators.h"
 #include "../models/model.h"
 #include "../models/model_state_manifest.h"
+#include "request_index.h"
 #include "../models/utils.h"
 
 namespace Generators {
@@ -141,6 +142,7 @@ struct FixedStateReservation::Storage {
   std::vector<bool> provisional;
   std::vector<uint64_t> expected_state_generations;
   std::vector<uint64_t> target_tokens;
+  std::vector<std::shared_ptr<OrtValue>> staging_backing;
   std::vector<std::unique_ptr<OrtValue>> gathered_inputs;
   std::vector<std::unique_ptr<OrtValue>> staged_outputs;
   // The reservation owns the binding name strings so accessors stay valid even after the pool is
@@ -165,6 +167,11 @@ struct FixedStatePool::Impl {
     // a failed prepare cannot corrupt the visible (active) state. See PrepareCommit/PublishCommit.
     std::array<std::unique_ptr<OrtValue>, 2> banks;
     std::unique_ptr<OrtValue> zero_row;  // [1, row...] reusable zeroed gather source.
+    // Capacity-sized backing storage shared by the single live reservation. Reservations expose
+    // exact-row tensor views over these buffers, so staging allocation is paid before paged KV
+    // auto-sizing and cannot fail after a step is planned.
+    std::shared_ptr<OrtValue> gathered_staging;
+    std::shared_ptr<OrtValue> output_staging;
   };
 
   struct Slot {
@@ -181,26 +188,17 @@ struct FixedStatePool::Impl {
       : model{std::move(model_value)},
         device{model ? model->p_device_kvcache_ : nullptr},
         capacity{capacity_value},
-        slots(capacity_value) {}
+        slots(capacity_value),
+        committed_index(capacity_value) {}
 
   Slot* FindSlot(const void* request_id) {
-    const auto it = std::find_if(
-        slots.begin(), slots.end(),
-        [request_id](const Slot& slot) {
-          return slot.ownership != FixedStateSlotOwnership::Free &&
-                 slot.request_id == request_id;
-        });
-    return it == slots.end() ? nullptr : &*it;
+    const auto index = committed_index.Find(request_id);
+    return index ? &slots[*index] : nullptr;
   }
 
   const Slot* FindSlot(const void* request_id) const {
-    const auto it = std::find_if(
-        slots.begin(), slots.end(),
-        [request_id](const Slot& slot) {
-          return slot.ownership != FixedStateSlotOwnership::Free &&
-                 slot.request_id == request_id;
-        });
-    return it == slots.end() ? nullptr : &*it;
+    const auto index = committed_index.Find(request_id);
+    return index ? &slots[*index] : nullptr;
   }
 
   size_t SlotIndex(const Slot& slot) const {
@@ -307,6 +305,7 @@ struct FixedStatePool::Impl {
   FixedStateReservation* active_reservation{};
   std::vector<TensorSpec> tensors;
   std::vector<Slot> slots;
+  RequestIndex committed_index;
 };
 
 FixedStateReservation::FixedStateReservation(
@@ -492,24 +491,15 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity)
 
       spec.row_bytes = CheckedMultiply(
           geometry.row_element_count, Ort::SizeOf(spec.data_type), "row size");
-      // Two persistent banks per tensor so publish can flip banks without any device copy.
+      // Two state banks and two staging buffers remain allocated for the pool lifetime.
       impl_->persistent_bytes = CheckedAdd(
           impl_->persistent_bytes,
           CheckedMultiply(CheckedMultiply(capacity, spec.row_bytes, "persistent allocation"),
-                          spec.banks.size(), "persistent allocation"),
+                          spec.banks.size() + 2, "persistent allocation"),
           "persistent allocation");
       impl_->zeroing_scratch_bytes = CheckedAdd(
           impl_->zeroing_scratch_bytes, spec.row_bytes,
           "zeroing scratch allocation");
-
-      const auto bank_shape = StorageShape(capacity, spec.session_shape);
-      const auto zero_shape = StorageShape(1, spec.session_shape);
-      for (auto& bank : spec.banks) {
-        bank = OrtValue::CreateTensor(
-            impl_->device->GetAllocator(), bank_shape, spec.data_type);
-      }
-      spec.zero_row = OrtValue::CreateTensor(
-          impl_->device->GetAllocator(), zero_shape, spec.data_type);
 
       impl_->tensors.push_back(std::move(spec));
     }
@@ -519,12 +509,28 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity)
     throw std::runtime_error(
         "Fixed state pool requires at least one fixed state binding.");
   }
-  // A session with a fixed batch dimension can only ever be served with exactly that many rows, so
-  // a pool too small to hold a single batch could never satisfy any reservation.
-  if (impl_->fixed_session_batch_size != 0 &&
-      impl_->fixed_session_batch_size > capacity) {
+  if (impl_->fixed_session_batch_size != 0) {
     throw std::runtime_error(
-        "Fixed state pool capacity is smaller than the session's fixed batch dimension.");
+        "Dynamic batching requires fixed decoder state groups with a dynamic batch axis, but "
+        "this model declares a fixed (static) batch dimension of " +
+        std::to_string(impl_->fixed_session_batch_size) + ".");
+  }
+
+  // Geometry and compatibility validation is complete. Only now allocate persistent banks,
+  // zero rows, and capacity-sized staging so invalid static-batch models fail before device work.
+  for (auto& spec : impl_->tensors) {
+    const auto bank_shape = StorageShape(capacity, spec.session_shape);
+    const auto zero_shape = StorageShape(1, spec.session_shape);
+    for (auto& bank : spec.banks) {
+      bank = OrtValue::CreateTensor(
+          impl_->device->GetAllocator(), bank_shape, spec.data_type);
+    }
+    spec.zero_row = OrtValue::CreateTensor(
+        impl_->device->GetAllocator(), zero_shape, spec.data_type);
+    spec.gathered_staging = OrtValue::CreateTensor(
+        impl_->device->GetAllocator(), bank_shape, spec.data_type);
+    spec.output_staging = OrtValue::CreateTensor(
+        impl_->device->GetAllocator(), bank_shape, spec.data_type);
   }
 
   // Allocate and validate every tensor before enqueueing device work. Once the first asynchronous
@@ -572,14 +578,7 @@ size_t FixedStatePool::AvailableSlots() const {
 }
 
 size_t FixedStatePool::CommittedSlotCount() const {
-  return static_cast<size_t>(std::count_if(
-      impl_->slots.begin(), impl_->slots.end(), [](const Impl::Slot& slot) {
-        return slot.ownership == FixedStateSlotOwnership::Committed;
-      }));
-}
-
-size_t FixedStatePool::SessionBatchSize() const {
-  return impl_->fixed_session_batch_size;
+  return impl_->committed_index.Size();
 }
 
 size_t FixedStatePool::PersistentBytes() const {
@@ -624,11 +623,18 @@ FixedStateSlotHandle FixedStatePool::HandleFor(
 }
 
 bool FixedStatePool::OwnsCommittedSlot(const void* request_id) const {
-  if (!request_id) {
-    return false;
+  return impl_->committed_index.Find(request_id).has_value();
+}
+
+std::optional<FixedStateCommittedState> FixedStatePool::CommittedState(
+    const void* request_id) const noexcept {
+  const auto index = impl_->committed_index.Find(request_id);
+  if (!index) {
+    return std::nullopt;
   }
-  const auto* slot = impl_->FindSlot(request_id);
-  return slot && slot->ownership == FixedStateSlotOwnership::Committed;
+  const auto& slot = impl_->slots[*index];
+  return FixedStateCommittedState{
+      impl_->MakeHandle(slot), slot.committed_tokens};
 }
 
 FixedStateReservation FixedStatePool::Reserve(
@@ -643,12 +649,6 @@ FixedStateReservation FixedStatePool::Reserve(
     throw std::runtime_error(
         "Fixed state reservation exceeds pool capacity.");
   }
-  if (impl_->fixed_session_batch_size != 0 &&
-      impl_->fixed_session_batch_size != requests.size()) {
-    throw std::runtime_error(
-        "Fixed state reservation does not match the session's fixed batch dimension.");
-  }
-
   const uint64_t reservation_id = impl_->next_reservation_id;
   if (reservation_id == 0 ||
       reservation_id == std::numeric_limits<uint64_t>::max()) {
@@ -678,11 +678,14 @@ FixedStateReservation FixedStatePool::Reserve(
     }
   }
 
+  size_t next_free_index = 0;
   const auto next_free_slot = [&]() -> size_t {
-    for (size_t index = 0; index < impl_->slots.size(); ++index) {
-      if (!slot_taken[index]) {
-        return index;
-      }
+    while (next_free_index < impl_->slots.size() &&
+           slot_taken[next_free_index]) {
+      ++next_free_index;
+    }
+    if (next_free_index < impl_->slots.size()) {
+      return next_free_index++;
     }
     throw std::runtime_error(
         "Not enough free slots for the complete fixed state reservation.");
@@ -726,6 +729,7 @@ FixedStateReservation FixedStatePool::Reserve(
   storage->provisional.resize(requests.size());
   storage->expected_state_generations.resize(requests.size());
   storage->target_tokens.resize(requests.size());
+  storage->staging_backing.reserve(impl_->tensors.size() * 2);
   storage->gathered_inputs.reserve(impl_->tensors.size());
   storage->staged_outputs.reserve(impl_->tensors.size());
   storage->input_names.reserve(impl_->tensors.size());
@@ -735,10 +739,18 @@ FixedStateReservation FixedStatePool::Reserve(
   const size_t batch_rows = requests.size();
   for (auto& spec : impl_->tensors) {
     const auto shape = StorageShape(batch_rows, spec.session_shape);
+    const size_t tensor_bytes = CheckedMultiply(
+        batch_rows, spec.row_bytes, "staging tensor view");
     auto gathered = OrtValue::CreateTensor(
-        impl_->device->GetAllocator(), shape, spec.data_type);
+        spec.gathered_staging->GetTensorMemoryInfo(),
+        spec.gathered_staging->GetTensorMutableData<void>(),
+        tensor_bytes, shape, spec.data_type);
     auto staged = OrtValue::CreateTensor(
-        impl_->device->GetAllocator(), shape, spec.data_type);
+        spec.output_staging->GetTensorMemoryInfo(),
+        spec.output_staging->GetTensorMutableData<void>(),
+        tensor_bytes, shape, spec.data_type);
+    storage->staging_backing.push_back(spec.gathered_staging);
+    storage->staging_backing.push_back(spec.output_staging);
 
     storage->staging_bytes = CheckedAdd(
         storage->staging_bytes,
@@ -860,6 +872,7 @@ void FixedStatePool::ReleaseValidated(
   slot.committed_tokens = 0;
   slot.reservation_id = 0;
   slot.ownership = FixedStateSlotOwnership::Free;
+  static_cast<void>(impl_->committed_index.Erase(handle.request_id));
 }
 
 uint64_t FixedStatePool::StateGeneration(
@@ -1002,6 +1015,10 @@ void FixedStatePool::PublishCommit(FixedStateReservation& reservation) noexcept 
     if (storage.provisional[row]) {
       slot.reservation_id = 0;
       slot.ownership = FixedStateSlotOwnership::Committed;
+      if (!impl_->committed_index.Insert(
+              slot.request_id, storage.handles[row].slot)) {
+        std::terminate();
+      }
     }
   }
   reservation.state_ = FixedStateReservationState::Committed;

@@ -114,7 +114,10 @@ TEST(PagedCacheReservationTest, ProposedBlockTableIncludesReservationsAndPadding
       PagedCacheReservationRequest{kRequestA, 5, false},
       PagedCacheReservationRequest{kRequestB, 1, true},
   };
-  PagedCacheReservation reservation{pool, tables, requests};
+  RequestIndex table_index{2};
+  ASSERT_TRUE(table_index.Insert(kRequestA, 0));
+  PagedCacheReservation reservation{
+      pool, tables, requests, nullptr, 0, &table_index};
   const std::array request_ids{kRequestB, kRequestA};
   std::array<int32_t, 6> block_table;
 
@@ -126,6 +129,26 @@ TEST(PagedCacheReservationTest, ProposedBlockTableIncludesReservationsAndPadding
   EXPECT_EQ(block_table[3], 0);
   EXPECT_EQ(block_table[4], 1);
   EXPECT_EQ(block_table[5], -1);
+
+  reservation.Commit();
+  EXPECT_EQ(table_index.Find(kRequestA), 0u);
+  EXPECT_EQ(table_index.Find(kRequestB), 1u);
+}
+
+TEST(PagedCacheReservationTest, BlockTableRejectsDuplicateRowsWithIndexedDeltas) {
+  BlockPool pool{kBlockSize, 2};
+  std::vector<PagedCacheBlockTable> tables;
+  const std::array requests{
+      PagedCacheReservationRequest{kRequestA, 1, true},
+      PagedCacheReservationRequest{kRequestB, 1, true},
+  };
+  PagedCacheReservation reservation{pool, tables, requests};
+  const std::array duplicate_request_ids{kRequestA, kRequestA};
+  std::array<int32_t, 2> block_table;
+
+  EXPECT_THROW(
+      reservation.FillBlockTable(duplicate_request_ids, 1, block_table),
+      std::runtime_error);
 }
 
 TEST(PagedCacheReservationTest, ReleaseIsIdempotentAndBlocksCanBeReused) {
