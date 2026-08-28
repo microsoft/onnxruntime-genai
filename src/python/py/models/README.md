@@ -22,6 +22,7 @@ This folder contains the model builder for quickly creating optimized and quanti
     - [Exclude Language Modeling Head](#exclude-language-modeling-head)
     - [Prune Language Modeling Head](#prune-language-modeling-head)
     - [Include Last Hidden States Output](#include-last-hidden-states-output)
+    - [Include Auxiliary Hidden States Output](#include-auxiliary-hidden-states-output)
     - [Build with Paged Attention](#build-with-paged-attention)
     - [Disable Windowed KV Cache](#disable-windowed-kv-cache)
     - [Enable Shared Embeddings](#enable-shared-embeddings)
@@ -277,6 +278,18 @@ python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p pr
 ```
 
 Note that this is the same as outputting embeddings since the last hidden states are also known as the embeddings.
+
+#### Include Auxiliary Hidden States Output
+
+Set `aux_hidden_state_layers` to a comma-separated list of decoder layer indices to expose the residual streams entering those layers. The selected streams are concatenated along the hidden dimension into an `aux_hidden_states` output for speculative block drafters such as EAGLE3 or DFlash. The default is empty (disabled), and every index must be in `[1, num_hidden_layers)`.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options aux_hidden_state_layers=5,19,33
+
+# From source:
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options aux_hidden_state_layers=5,19,33
+```
 
 #### Build with Paged Attention
 

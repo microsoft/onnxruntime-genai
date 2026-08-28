@@ -651,6 +651,9 @@ class Qwen35MoEModel(MTPModel):
         mtp_options["filename"] = "mtp.onnx"
         mtp_options.pop("include_hidden_states", None)
         mtp_options.pop("exclude_lm_head", None)
+        # The head is one layer deep and drafts for itself, so it never taps the target's
+        # residual streams; inheriting the target's tap set would fail its layer-range check.
+        mtp_options.pop("aux_hidden_state_layers", None)
         self.mtp = self.get_mtp_model_class()(
             copy.deepcopy(config),
             self.mtp_attrs["io_dtype"],
