@@ -300,9 +300,9 @@ void VarlenDecoderIO::PreparePositionIds(
                  });
   auto position_ids = std::make_unique<Tensor>(
       model->p_device_inputs_, Ort::TypeToTensorType<int64_t>);
-  const std::array<int64_t, 1> position_shape{
+    const std::array<int64_t, 1> packed_position_shape{
       static_cast<int64_t>(num_tokens)};
-  position_ids->CreateTensor(position_shape);
+    position_ids->CreateTensor(packed_position_shape);
   auto position_span = position_ids->GetDeviceSpan<int64_t>();
   auto position_cpu = position_span.CpuSpan();
 
