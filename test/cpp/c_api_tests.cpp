@@ -1009,8 +1009,7 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
       OgaTurnParamsSetStopSequences(unsupported_params.get(), nullptr)};
   ASSERT_NE(null_stop_sequences_result, nullptr);
   EXPECT_NE(
-      std::string(null_stop_sequences_result->GetError()).find(
-          "stop_sequences must not be null"),
+      std::string(null_stop_sequences_result->GetError()).find("stop_sequences must not be null"),
       std::string::npos);
 
   // The setter is explicitly unsupported, so a non-null collection is validated only as a handle:
@@ -1021,8 +1020,7 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
           reinterpret_cast<const OgaSequences*>(uintptr_t{1}))};
   ASSERT_NE(sentinel_stop_sequences_result, nullptr);
   EXPECT_NE(
-      std::string(sentinel_stop_sequences_result->GetError()).find(
-          "not implemented"),
+      std::string(sentinel_stop_sequences_result->GetError()).find("not implemented"),
       std::string::npos);
   unsupported_request->Close();
 
@@ -1078,13 +1076,15 @@ TEST(CAPITests, EngineBulkRunValidationAndReusableStorage) {
   auto first = create_one_token_request();
   auto second = create_one_token_request();
 
-  size_t event_count = 17;
+  // Keep the count separate from stack event records. Invalid oversized strides below must not
+  // accidentally make an adjacent stack variable appear to overlap the synthetic buffer range.
+  auto event_count_storage = std::make_unique<size_t>(17);
+  auto& event_count = *event_count_storage;
   std::unique_ptr<OgaResult> null_count_result{
       OgaEngineRun(engine.get(), nullptr, 0, 0, nullptr)};
   ASSERT_NE(null_count_result, nullptr);
   EXPECT_NE(
-      std::string(null_count_result->GetError()).find(
-          "out_event_count must not be null"),
+      std::string(null_count_result->GetError()).find("out_event_count must not be null"),
       std::string::npos);
 
   std::unique_ptr<OgaResult> null_engine_result{
@@ -1092,8 +1092,7 @@ TEST(CAPITests, EngineBulkRunValidationAndReusableStorage) {
   ASSERT_NE(null_engine_result, nullptr);
   EXPECT_EQ(event_count, 0u);
   EXPECT_NE(
-      std::string(null_engine_result->GetError()).find(
-          "engine must not be null"),
+      std::string(null_engine_result->GetError()).find("engine must not be null"),
       std::string::npos);
 
   event_count = 17;
@@ -1124,8 +1123,7 @@ TEST(CAPITests, EngineBulkRunValidationAndReusableStorage) {
   ASSERT_NE(owned_zero_capacity_off_thread_result, nullptr);
   EXPECT_EQ(zero_capacity_off_thread_count, 0u);
   EXPECT_NE(
-      std::string(owned_zero_capacity_off_thread_result->GetError()).find(
-          "owner thread"),
+      std::string(owned_zero_capacity_off_thread_result->GetError()).find("owner thread"),
       std::string::npos);
 
   event_count = 17;
@@ -1136,8 +1134,7 @@ TEST(CAPITests, EngineBulkRunValidationAndReusableStorage) {
   ASSERT_NE(null_buffer_result, nullptr);
   EXPECT_EQ(event_count, 0u);
   EXPECT_NE(
-      std::string(null_buffer_result->GetError()).find(
-          "event_buffer must not be null"),
+      std::string(null_buffer_result->GetError()).find("event_buffer must not be null"),
       std::string::npos);
 
   alignas(OgaEngineEvent)
@@ -1151,8 +1148,7 @@ TEST(CAPITests, EngineBulkRunValidationAndReusableStorage) {
   ASSERT_NE(misaligned_buffer_result, nullptr);
   EXPECT_EQ(event_count, 0u);
   EXPECT_NE(
-      std::string(misaligned_buffer_result->GetError()).find(
-          "aligned for OgaEngineEvent"),
+      std::string(misaligned_buffer_result->GetError()).find("aligned for OgaEngineEvent"),
       std::string::npos);
 
   OgaEngineEvent event{};
@@ -1165,8 +1161,7 @@ TEST(CAPITests, EngineBulkRunValidationAndReusableStorage) {
   ASSERT_NE(short_stride_result, nullptr);
   EXPECT_EQ(event_count, 0u);
   EXPECT_NE(
-      std::string(short_stride_result->GetError()).find(
-          "at least sizeof(OgaEngineEvent)"),
+      std::string(short_stride_result->GetError()).find("at least sizeof(OgaEngineEvent)"),
       std::string::npos);
 
   event_count = 17;
@@ -1177,8 +1172,7 @@ TEST(CAPITests, EngineBulkRunValidationAndReusableStorage) {
   ASSERT_NE(misaligned_stride_result, nullptr);
   EXPECT_EQ(event_count, 0u);
   EXPECT_NE(
-      std::string(misaligned_stride_result->GetError()).find(
-          "preserve OgaEngineEvent alignment"),
+      std::string(misaligned_stride_result->GetError()).find("preserve OgaEngineEvent alignment"),
       std::string::npos);
 
   event_count = 17;
@@ -1207,8 +1201,7 @@ TEST(CAPITests, EngineBulkRunValidationAndReusableStorage) {
   ASSERT_NE(overlapping_count_result, nullptr);
   EXPECT_EQ(overlapping_count.application_value, 17u);
   EXPECT_NE(
-      std::string(overlapping_count_result->GetError()).find(
-          "must not overlap event_buffer"),
+      std::string(overlapping_count_result->GetError()).find("must not overlap event_buffer"),
       std::string::npos);
   EXPECT_TRUE(engine->HasPendingRequests());
 
@@ -1221,8 +1214,7 @@ TEST(CAPITests, EngineBulkRunValidationAndReusableStorage) {
   ASSERT_NE(undersized_result, nullptr);
   EXPECT_EQ(event_count, 0u);
   EXPECT_NE(
-      std::string(undersized_result->GetError()).find(
-          "struct_size is too small"),
+      std::string(undersized_result->GetError()).find("struct_size is too small"),
       std::string::npos);
 
   event.struct_size = sizeof(event) + alignof(OgaEngineEvent);
@@ -1234,8 +1226,7 @@ TEST(CAPITests, EngineBulkRunValidationAndReusableStorage) {
   ASSERT_NE(size_exceeds_stride_result, nullptr);
   EXPECT_EQ(event_count, 0u);
   EXPECT_NE(
-      std::string(size_exceeds_stride_result->GetError()).find(
-          "must not exceed event_stride"),
+      std::string(size_exceeds_stride_result->GetError()).find("must not exceed event_stride"),
       std::string::npos);
 
   std::array<OgaEngineEvent, 2> invalid_later{};
@@ -1278,8 +1269,7 @@ TEST(CAPITests, EngineBulkRunValidationAndReusableStorage) {
   ASSERT_NE(owned_invalid_reserved_off_thread_result, nullptr);
   EXPECT_EQ(invalid_reserved_off_thread_count, 0u);
   EXPECT_NE(
-      std::string(owned_invalid_reserved_off_thread_result->GetError()).find(
-          "reserved must be zero"),
+      std::string(owned_invalid_reserved_off_thread_result->GetError()).find("reserved must be zero"),
       std::string::npos);
 
   invalid_later[1].reserved = 0;

@@ -143,16 +143,12 @@ def run(args):
         if args.guidance:
             request.close()
             final_params = og.GeneratorParams(model)
-            final_params.set_search_options(
-                do_sample=False, max_length=args.max_length
-            )
+            final_params.set_search_options(do_sample=False, max_length=args.max_length)
             request = engine.create_request(final_params)
             final_context = prompt_tokens + tool_call_tokens + continuation_tokens
             request.begin_turn(np.asarray(final_context, dtype=np.int32))
         else:
-            request.begin_turn(
-                np.asarray(continuation_tokens, dtype=np.int32)
-            )
+            request.begin_turn(np.asarray(continuation_tokens, dtype=np.int32))
 
         final_output, _ = generate(engine, request, tokenizer)
         final_output = final_output.strip()

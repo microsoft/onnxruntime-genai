@@ -47,7 +47,7 @@ def predicted_tokens(prompt, max_new_tokens):
 
 
 class _Sink:
-    __slots__ = ("tokens", "finish_reason", "usage")
+    __slots__ = ("finish_reason", "tokens", "usage")
 
     def __init__(self):
         self.tokens = []
@@ -215,10 +215,8 @@ def test_isolated_matches_simultaneous(model):
     engine = og.Engine(model)
     sink_a, sink_b = _Sink(), _Sink()
     sinks = {}
-    requests = [
-        _create_request(engine, model, _PROMPT_A, max_new, sink_a, sinks),
-        _create_request(engine, model, _PROMPT_B, max_new, sink_b, sinks),
-    ]
+    _create_request(engine, model, _PROMPT_A, max_new, sink_a, sinks)
+    _create_request(engine, model, _PROMPT_B, max_new, sink_b, sinks)
     assert engine.has_pending_requests()
     _run(engine, sinks)
 
@@ -451,9 +449,7 @@ def test_begin_turn_copies_non_contiguous_token_views(model, tokens):
     logical_tokens = tokens.tolist()
     engine = og.Engine(model)
     params = og.GeneratorParams(model)
-    params.set_search_options(
-        do_sample=False, max_length=len(logical_tokens) + 3
-    )
+    params.set_search_options(do_sample=False, max_length=len(logical_tokens) + 3)
     request = engine.create_request(params)
     sink = _Sink()
     sinks = {request: sink}
@@ -467,9 +463,7 @@ def test_begin_turn_copies_non_contiguous_token_views(model, tokens):
 def test_begin_turn_accepts_read_only_tokens_and_rejects_multiple_dimensions(model):
     engine = og.Engine(model)
     params = og.GeneratorParams(model)
-    params.set_search_options(
-        do_sample=False, max_length=len(_PROMPT_A) + 1
-    )
+    params.set_search_options(do_sample=False, max_length=len(_PROMPT_A) + 1)
 
     read_only_tokens = np.asarray(_PROMPT_A, dtype=np.int32)
     read_only_tokens.setflags(write=False)
@@ -480,9 +474,7 @@ def test_begin_turn_accepts_read_only_tokens_and_rejects_multiple_dimensions(mod
 
     invalid_request = engine.create_request(params)
     with pytest.raises(ValueError, match="one-dimensional"):
-        invalid_request.begin_turn(
-            np.asarray([_PROMPT_A, _PROMPT_A], dtype=np.int32)
-        )
+        invalid_request.begin_turn(np.asarray([_PROMPT_A, _PROMPT_A], dtype=np.int32))
     invalid_request.close()
 
 

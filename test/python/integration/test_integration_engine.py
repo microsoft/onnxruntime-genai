@@ -233,10 +233,8 @@ def test_isolated_matches_batched(bundle):
     engine = og.Engine(bundle.model)
     sinks = {p: _Sink() for p in _PROMPTS}
     sinks_by_request = {}
-    requests = [
+    for p, sink in sinks.items():
         _create_request(engine, bundle.model, bundle.tokenizer.encode(p), max_new, sink, sinks_by_request)
-        for p, sink in sinks.items()
-    ]
     _run(engine, sinks_by_request)
 
     assert sinks[prompt].tokens == isolated, "batched output diverged from the isolated run"
@@ -253,10 +251,8 @@ def test_output_isolation(bundle):
     engine = og.Engine(bundle.model)
     s0, s1 = _Sink(), _Sink()
     sinks = {}
-    requests = [
-        _create_request(engine, bundle.model, bundle.tokenizer.encode(p0), max_new, s0, sinks),
-        _create_request(engine, bundle.model, bundle.tokenizer.encode(p1), max_new, s1, sinks),
-    ]
+    _create_request(engine, bundle.model, bundle.tokenizer.encode(p0), max_new, s0, sinks)
+    _create_request(engine, bundle.model, bundle.tokenizer.encode(p1), max_new, s1, sinks)
     _run(engine, sinks)
 
     assert s0.tokens == isolated0
@@ -281,9 +277,7 @@ def test_completion_isolation(bundle):
         sinks,
         min_new_tokens=short_new,
     )
-    _create_request(
-        engine, bundle.model, bundle.tokenizer.encode(long_prompt), long_new, long_sink, sinks
-    )
+    _create_request(engine, bundle.model, bundle.tokenizer.encode(long_prompt), long_new, long_sink, sinks)
     _run(engine, sinks)
 
     assert len(short_sink.tokens) == short_new, "forced-length request did not stop at its bound"

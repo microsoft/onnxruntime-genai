@@ -1648,29 +1648,29 @@ OgaResult* OgaTurnParamsSetMaxGeneratedTokens(
   OGA_CATCH
 }
 
-#define OGA_UNIMPLEMENTED_TURN_SETTER(name, signature) \
-  OgaResult* name signature {                          \
-    OGA_TRY                                             \
-    if (!params) {                                      \
+#define OGA_UNIMPLEMENTED_TURN_SETTER(name, signature)      \
+  OgaResult* name signature {                               \
+    OGA_TRY                                                 \
+    if (!params) {                                          \
       throw std::runtime_error("params must not be null."); \
-    }                                                   \
-    params->ValidateOwnerThread();                       \
+    }                                                       \
+    params->ValidateOwnerThread();                          \
     throw std::runtime_error(#name " is not implemented."); \
-    return nullptr;                                     \
-    OGA_CATCH                                           \
+    return nullptr;                                         \
+    OGA_CATCH                                               \
   }
 
 OGA_UNIMPLEMENTED_TURN_SETTER(
-    OgaTurnParamsSetTemperature, (OgaTurnParams* params, float))
+    OgaTurnParamsSetTemperature, (OgaTurnParams * params, float))
 OGA_UNIMPLEMENTED_TURN_SETTER(
-    OgaTurnParamsSetTopP, (OgaTurnParams* params, float))
+    OgaTurnParamsSetTopP, (OgaTurnParams * params, float))
 OGA_UNIMPLEMENTED_TURN_SETTER(
-    OgaTurnParamsSetTopK, (OgaTurnParams* params, int32_t))
+    OgaTurnParamsSetTopK, (OgaTurnParams * params, int32_t))
 OGA_UNIMPLEMENTED_TURN_SETTER(
-    OgaTurnParamsSetSeed, (OgaTurnParams* params, uint64_t))
+    OgaTurnParamsSetSeed, (OgaTurnParams * params, uint64_t))
 OGA_UNIMPLEMENTED_TURN_SETTER(
     OgaTurnParamsSetGuidance,
-    (OgaTurnParams* params, const char*, const char*))
+    (OgaTurnParams * params, const char*, const char*))
 
 #undef OGA_UNIMPLEMENTED_TURN_SETTER
 

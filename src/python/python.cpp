@@ -772,7 +772,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("set_top_k", &OgaTurnParams::SetTopK)
       .def("set_seed", &OgaTurnParams::SetSeed)
       .def("set_stop_sequences", [](OgaTurnParams& params,
-                                     const std::vector<std::vector<int32_t>>& values) {
+                                    const std::vector<std::vector<int32_t>>& values) {
         auto sequences = OgaSequences::Create();
         for (const auto& value : values)
           sequences->Append(value.data(), value.size());
@@ -806,16 +806,13 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def_property_readonly("flags", [](const OgaEngineEvent& event) {
         return static_cast<OgaEngineEventFlags>(event.flags);
       })
-      .def_readonly("request", &OgaEngineEvent::request,
-                    pybind11::return_value_policy::reference)
+      .def_readonly("request", &OgaEngineEvent::request, pybind11::return_value_policy::reference)
       .def_readonly("turn_id", &OgaEngineEvent::turn_id)
-      .def_property_readonly(
-          "token",
-          [](const OgaEngineEvent& event) -> pybind11::object {
-            if ((event.flags & OgaEngineEventFlag_Token) == 0)
-              return pybind11::none();
-            return pybind11::int_(event.token);
-          })
+      .def_property_readonly("token", [](const OgaEngineEvent& event) -> pybind11::object {
+        if ((event.flags & OgaEngineEventFlag_Token) == 0)
+          return pybind11::none();
+        return pybind11::int_(event.token);
+      })
       .def_readonly("finish_reason", &OgaEngineEvent::finish_reason)
       .def_readonly("error_code", &OgaEngineEvent::error_code)
       .def_readonly("usage", &OgaEngineEvent::usage);

@@ -452,7 +452,6 @@ TEST_F(EngineRunTest, ContinuedUnreadOutputPreservesOrder) {
   event = RunOne(*engine.engine);
   ASSERT_EQ(event.request, request);
   ASSERT_EQ(request->status_, RequestStatus::TurnComplete);
-
 }
 
 TEST_F(EngineRunTest, PerTurnBudgetsPublishOneTerminalNotificationAcrossContinuations) {
