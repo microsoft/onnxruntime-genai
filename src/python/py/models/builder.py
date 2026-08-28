@@ -174,6 +174,22 @@ def check_extra_options(
             raise ValueError("state_window must be a non-negative integer.")
         extra_options["state_window"] = state_window
 
+    if "state_update_capacity" in extra_options:
+        # The kernel packs every captured transition into one fixed-width capsule per layer, so the
+        # number of tokens a single forward can record is bounded by that capsule. Keep this limit
+        # synchronized with kMaxStateUpdateCapacity in src/config.cpp and the model-builder README.
+        max_state_update_capacity = 8
+        message = f"state_update_capacity must be an integer from 0 through {max_state_update_capacity}."
+        try:
+            state_update_capacity = int(extra_options["state_update_capacity"])
+        except (TypeError, ValueError) as e:
+            raise ValueError(message) from e
+        if not 0 <= state_update_capacity <= max_state_update_capacity:
+            raise ValueError(message)
+        if state_update_capacity and not extra_options.get("use_paged_attention", False):
+            raise ValueError("state_update_capacity requires use_paged_attention=true.")
+        extra_options["state_update_capacity"] = state_update_capacity
+
     if "mtp_quant_config" in extra_options:
         mtp_quant_config = extra_options["mtp_quant_config"]
         if not isinstance(mtp_quant_config, QuantConfig):
@@ -737,18 +753,29 @@ def get_args():
                     layer i, so indices must lie in [1, num_hidden_layers). Default is empty (disabled).
                 mtp_quant_config = JSON object/file: Configure MTP I/O, dense weights, MoE, and runtime using the
                     structured QuantConfig schema independently from the main model.
-                state_window = Widen Qwen3.6 recurrent/conv state I/O to [W, B, ...]. Default is 0 (disabled).
+                linear_attn_op = linear_attention/gated_delta_net: Select the recurrent operator for non-paged
+                    Qwen3.5/3.8 exports. Default is linear_attention. Paged exports always use GatedDeltaNet and
+                    ignore this option. gated_delta_net is CUDA-only, requires state_window=0, and supports fp16
+                    or bf16 I/O.
+                state_update_capacity = Number of compact Qwen3.5/3.8 state updates to capture. Default is 0 (disabled).
+                    Must be an integer from 0 through 8 and requires use_paged_attention=true. This experimental
+                    contract requires Engine runtime work beyond the current onnxruntime-genai#2454 head.
+                state_window = Configure hybrid Qwen recurrent/conv state history. Default is 0 (disabled).
                     Must be a non-negative integer. For MTP verification, W must be at least num_speculative_tokens + 1.
+                    Qwen3.5/3.8 exports using GatedDeltaNet (paged, or linear_attn_op=gated_delta_net) require
+                    state_window=0.
                     Requires ONNX Runtime kernels that implement this attribute.
                 use_paged_attention = Build the model with PagedAttention for the continuous-batching engine. Default is false.
                     Replaces GroupQueryAttention with the PagedAttention contrib op, packs all sequences into a single
                     flattened token axis (`input_ids` becomes 1D), stores the KV-cache in paged
-                    [num_blocks, block_size, num_kv_heads, head_size] buffers, and removes the `attention_mask` and
-                    `position_ids` inputs in favor of the `block_table`, `cumulative_sequence_lengths`, and
-                    `past_sequence_lengths` metadata inputs. With prune_lm_head=true, selects the final packed hidden
-                    state for each sequence so the model outputs [batch_size, vocab_size] logits. By default, the model
-                    outputs [num_tokens, vocab_size] logits. Currently only supported for the CUDA execution provider
-                    with fp16 or bf16 precision. Cannot be combined with exclude_embeds or exclude_lm_head.
+                    [num_blocks, block_size, num_kv_heads, head_size] buffers, and removes the `attention_mask` input.
+                    It also removes `position_ids` when RoPE is fused; architectures with external MRoPE retain packed
+                    position IDs (for example, Qwen3.5/3.8 uses [3, num_tokens]). The block_table,
+                    cumulative_sequence_lengths, and past_sequence_lengths metadata inputs are added. With
+                    prune_lm_head=true, selects the final packed hidden state for each sequence so the model outputs
+                    [batch_size, vocab_size] logits. By default, the model outputs [num_tokens, vocab_size] logits.
+                    Currently only supported for the CUDA execution provider with fp16 or bf16 precision. Cannot be
+                    combined with exclude_embeds or exclude_lm_head.
                 paged_block_size = 256/512/768/...: Paged KV-cache block size used when use_paged_attention is set.
                     Must be a positive multiple of 256 (required by the ONNX Runtime PagedAttention CUDA kernel).
                     Default is 256. Also written to the `engine.dynamic_batching` section of genai_config.json.

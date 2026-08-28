@@ -60,7 +60,9 @@ class Qwen25VLTextModel(Model):
 
     def make_inputs_and_outputs(self):
         # Qwen2.5-VL uses 3D position_ids
-        self.input_shapes["position_ids"] = [3, "batch_size", "sequence_length"]
+        self.input_shapes["position_ids"] = (
+            [3, "num_tokens"] if self.use_paged_attention else [3, "batch_size", "sequence_length"]
+        )
         super().make_inputs_and_outputs()
 
 
@@ -112,8 +114,20 @@ class VideoChatFlashQwenModel(QwenModel):
 
 
 class Qwen35TextModel(Model):
+    def validate_gated_delta_net_options(self, use_paged_attention, linear_attn_op, state_window, ep):
+        uses_gated_delta_net = use_paged_attention or linear_attn_op == "gated_delta_net"
+        if uses_gated_delta_net and ep != "cuda":
+            raise ValueError("GatedDeltaNet exports require the CUDA execution provider")
+        if uses_gated_delta_net and state_window:
+            raise ValueError("GatedDeltaNet exports commit an unwindowed recurrent state and require state_window=0")
+
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+        self.linear_attn_op = str(extra_options.get("linear_attn_op", "linear_attention")).lower()
+        if self.linear_attn_op not in ("linear_attention", "gated_delta_net"):
+            raise ValueError("linear_attn_op must be one of: linear_attention, gated_delta_net")
+        self.configure_gated_delta_net_io()
 
         # OffsetRMSNorm: Qwen3.5 uses (1 + weight) * RMSNorm(x).
         # Pre-bake the +1 into the weight initializer so the base class's
@@ -126,9 +140,74 @@ class Qwen35TextModel(Model):
         self.rope_attrs["cast"]["root_input"] = True
         self.rope_attrs["cast"]["output_0"] = True
 
+    def configure_gated_delta_net_io(self):
+        """Declare every linear-attention graph binding, so emitters never respell a name or shape."""
+        linear_layers = [
+            layer_id for layer_id, layer_type in enumerate(self.layer_types) if layer_type == "linear_attention"
+        ]
+        if not linear_layers:
+            # Without a linear-attention layer nothing below is emitted, so the capacity has no bindings.
+            self.context_length_attrs["state_update_capacity"] = 0
+            return
+
+        self.validate_gated_delta_net_options(
+            self.use_paged_attention,
+            self.linear_attn_op,
+            self.context_length_attrs["state_window"],
+            self.ep,
+        )
+
+        if self.use_paged_attention:
+            conv_shape = ["batch_size", self.linear_conv_dim, self.linear_conv_kernel_dim - 1]
+            self.input_shapes["past.conv"] = conv_shape
+            self.output_shapes["present.conv"] = conv_shape
+
+        if self.use_paged_attention or self.linear_attn_op == "gated_delta_net":
+            recurrent_shape = [
+                "batch_size",
+                self.linear_num_value_heads,
+                self.linear_value_head_dim,
+                self.linear_key_head_dim,
+            ]
+            self.input_types["past.recurrent"] = ir.DataType.FLOAT
+            self.input_shapes["past.recurrent"] = recurrent_shape
+            self.output_types["present.recurrent"] = ir.DataType.FLOAT
+            self.output_shapes["present.recurrent"] = recurrent_shape
+
+        capacity = self.context_length_attrs["state_update_capacity"]
+        if not capacity:
+            return
+
+        self.input_names["state_update.capture_count"] = "state_update_capture_count"
+        self.input_types["state_update.capture_count"] = ir.DataType.INT32
+        self.input_shapes["state_update.capture_count"] = ["batch_size"]
+        self.input_names["state_update.active"] = "state_update_active"
+        self.input_types["state_update.active"] = ir.DataType.INT32
+        self.input_shapes["state_update.active"] = [1]
+
+        self.output_names["state_update.conv_value"] = {
+            layer_id: f"state_update.{layer_id}.conv_value" for layer_id in linear_layers
+        }
+        self.output_types["state_update.conv_value"] = self.io_dtype
+        self.output_shapes["state_update.conv_value"] = ["batch_size", capacity, self.linear_conv_dim]
+
+        # One capsule packs each captured token's decay gates, key row, and value row back to back.
+        capsule_width = capacity * (
+            self.linear_num_value_heads
+            + self.linear_num_key_heads * self.linear_key_head_dim
+            + self.linear_num_value_heads * self.linear_value_head_dim
+        )
+        self.output_names["state_update.recurrent_capsule"] = {
+            layer_id: f"state_update.{layer_id}.recurrent_capsule" for layer_id in linear_layers
+        }
+        self.output_types["state_update.recurrent_capsule"] = ir.DataType.FLOAT
+        self.output_shapes["state_update.recurrent_capsule"] = ["batch_size", capsule_width]
+
     def make_inputs_and_outputs(self):
         # Qwen-3.5 uses 3D position_ids
-        self.input_shapes["position_ids"] = [3, "batch_size", "sequence_length"]
+        self.input_shapes["position_ids"] = (
+            [3, "num_tokens"] if self.use_paged_attention else [3, "batch_size", "sequence_length"]
+        )
         super().make_inputs_and_outputs()
 
     def is_packed_matmul_supported(self):
@@ -151,7 +230,7 @@ class Qwen35TextModel(Model):
     def make_attention(self, layer_id, attention, root_input, **kwargs):
         """Dispatch to full attention or GatedDeltaNet based on layer type."""
         if self.layer_types[layer_id] == "linear_attention":
-            self.make_gated_delta_net(layer_id, attention, root_input)
+            self.make_qwen_gated_delta_net(layer_id, attention, root_input)
         else:
             super().make_attention(layer_id, attention, root_input, **kwargs)
 
@@ -163,19 +242,26 @@ class Qwen35TextModel(Model):
         super().make_attention_input_proj(layer_id, attention, root_input, **kwargs)
 
         q_size = self.num_attn_heads * self.head_size
+        token_shape = ["num_tokens"] if self.use_paged_attention else ["batch_size", "sequence_length"]
+        q_gate_reshape = [0, self.num_attn_heads, self.head_size * 2]
+        q_reshape = [0, q_size]
+        if not self.use_paged_attention:
+            q_gate_reshape.insert(1, 0)
+            q_reshape.insert(1, 0)
+
         rs_qg_name = f"/model/layers.{layer_id}/attn/q_gate/Reshape"
         rs_qg_output = f"{rs_qg_name}/output_0"
         self.make_reshape(
             rs_qg_name,
-            [self.attention_attrs["q_path"], f"/model/constants/INT64/[0, 0, {self.num_attn_heads}, {self.head_size * 2}]"],
+            [self.attention_attrs["q_path"], f"/model/constants/INT64/{q_gate_reshape}"],
             self.io_dtype,
-            ["batch_size", "sequence_length", self.num_attn_heads, self.head_size * 2],
+            [*token_shape, self.num_attn_heads, self.head_size * 2],
         )
 
         split_name = f"/model/layers.{layer_id}/attn/q_gate/Split"
         q_4d_output = f"{split_name}/output_0"
         gate_4d_output = f"{split_name}/output_1"
-        q_gate_shape = ["batch_size", "sequence_length", self.num_attn_heads, self.head_size]
+        q_gate_shape = [*token_shape, self.num_attn_heads, self.head_size]
         self.make_split(
             split_name,
             inputs=[rs_qg_output, f"/model/constants/INT64/[{self.head_size}, {self.head_size}]"],
@@ -188,17 +274,17 @@ class Qwen35TextModel(Model):
         rs_q_name = f"/model/layers.{layer_id}/attn/q_proj/Reshape"
         self.make_reshape(
             rs_q_name,
-            [q_4d_output, f"/model/constants/INT64/[0, 0, {q_size}]"],
+            [q_4d_output, f"/model/constants/INT64/{q_reshape}"],
             self.io_dtype,
-            ["batch_size", "sequence_length", q_size],
+            [*token_shape, q_size],
         )
 
         rs_g_name = f"/model/layers.{layer_id}/attn/gate/Reshape"
         self.make_reshape(
             rs_g_name,
-            [gate_4d_output, f"/model/constants/INT64/[0, 0, {q_size}]"],
+            [gate_4d_output, f"/model/constants/INT64/{q_reshape}"],
             self.io_dtype,
-            ["batch_size", "sequence_length", q_size],
+            [*token_shape, q_size],
         )
 
         self.attention_attrs["q_path"] = f"{rs_q_name}/output_0"
@@ -207,13 +293,14 @@ class Qwen35TextModel(Model):
     def make_attention_output_proj(self, layer_id, attention, root_input, **kwargs):
         """Apply Qwen3.5's attention output gate before the shared output projection."""
         q_size = self.num_attn_heads * self.head_size
+        output_shape = self.make_hidden_state_shape(last_dim=q_size)
         attn_name = f"/model/layers.{layer_id}/attn/{self.attention_attrs['op_type']}"
         sigmoid_name = f"/model/layers.{layer_id}/attn/gate/Sigmoid"
         self.make_sigmoid(
             sigmoid_name,
             self.attention_attrs["gate_path"],
             self.io_dtype,
-            ["batch_size", "sequence_length", q_size],
+            output_shape,
         )
 
         gated_name = f"/model/layers.{layer_id}/attn/gate/Mul"
@@ -221,53 +308,83 @@ class Qwen35TextModel(Model):
             gated_name,
             [f"{attn_name}/output_0", f"{sigmoid_name}/output_0"],
             self.io_dtype,
-            ["batch_size", "sequence_length", q_size],
+            output_shape,
         )
         self.attention_attrs["o_path"] = f"{gated_name}/output_0"
 
         super().make_attention_output_proj(layer_id, attention, root_input, **kwargs)
 
-    def make_gated_delta_net(self, layer_id, linear_attn, root_input):
-        """Build GatedDeltaNet using fused CausalConvWithState + LinearAttention ops.
+    def make_qwen_gated_delta_net(self, layer_id, linear_attn, root_input):
+        """Build the Qwen linear-attention layer for dense or packed token layouts.
 
         Uses com.microsoft contrib ops:
-        - CausalConvWithState: fused depthwise conv1d + SiLU + carry state
-        - LinearAttention: fused 3D-packed linear attention with GQA
+        - CausalConvWithState / VarlenCausalConvWithState
+        - LinearAttention / GatedDeltaNet
         """
         basename = f"/model/layers.{layer_id}/linear_attn"
 
-        # Projections, conv weight init, QKV transpose
-        z_name, b_name, a_name, qkv_t_output, conv_weight_name = self.make_linear_attention_input_proj(
+        z_name, b_name, a_name, conv_input, conv_weight_name = self.make_linear_attention_input_proj(
             layer_id, linear_attn, root_input
         )
 
-        # --- Fused conv: CausalConvWithState (com.microsoft) ---
         conv_bias_name = f"model.layers.{layer_id}.linear_attn.conv1d.bias"
         self.make_initializer(torch.zeros(self.linear_conv_dim, dtype=torch.float32), conv_bias_name, to=self.io_dtype)
+
+        if self.use_paged_attention:
+            conv_op_name = f"{basename}/VarlenCausalConvWithState"
+            self.make_varlen_causal_conv_with_state(
+                conv_op_name,
+                root_input=conv_input,
+                weight=conv_weight_name,
+                bias=conv_bias_name,
+                cumulative_sequence_length=self.input_names["cumulative_sequence_lengths"],
+                past_conv_state=self.input_names["past.conv"][layer_id],
+                present_conv_state=self.output_names["present.conv"][layer_id],
+                output_shape=["num_tokens", self.linear_conv_dim],
+                present_conv_shape=self.output_shapes["present.conv"],
+                **self.make_conv_state_update_kwargs(layer_id),
+            )
+            linear_output = self.make_gated_delta_net_layer(
+                layer_id,
+                linear_attn,
+                f"{conv_op_name}/output_0",
+                b_name,
+                a_name,
+            )
+            self.make_linear_attention_output_proj(layer_id, linear_attn, linear_output, z_name)
+            return
 
         conv_op_name = f"{basename}/CausalConvWithState"
         self.make_causal_conv_with_state(
             conv_op_name,
-            root_input=qkv_t_output,
+            root_input=conv_input,
             weight=conv_weight_name,
             bias=conv_bias_name,
             past_conv_state=self.input_names["past.conv"][layer_id],
             present_conv_state=self.output_names["present.conv"][layer_id],
             channels=self.linear_conv_dim,
         )
-        conv_output = f"{conv_op_name}/output_0"
-
         conv_out_t_name = f"{basename}/conv_out/Transpose"
         conv_out_t_output = f"{conv_out_t_name}/output_0"
         self.make_transpose(
             conv_out_t_name,
-            conv_output,
+            f"{conv_op_name}/output_0",
             self.io_dtype,
             ["batch_size", "sequence_length", self.linear_conv_dim],
             [0, 2, 1],
         )
 
-        # Split QKV, L2 norm, gates
+        if self.linear_attn_op == "gated_delta_net":
+            linear_output = self.make_gated_delta_net_layer(
+                layer_id,
+                linear_attn,
+                conv_out_t_output,
+                b_name,
+                a_name,
+            )
+            self.make_linear_attention_output_proj(layer_id, linear_attn, linear_output, z_name)
+            return
+
         q_scaled_output, k_norm_out, v_out, g_output, beta_output = self.make_linear_attention_normalize_and_gate(
             layer_id,
             linear_attn,
@@ -297,6 +414,120 @@ class Qwen35TextModel(Model):
         # Gated RMSNorm + output projection
         self.make_linear_attention_output_proj(layer_id, linear_attn, la_output, z_name)
 
+    def make_conv_state_update_kwargs(self, layer_id):
+        """Compact convolution-capture bindings for this layer, or nothing when capture is disabled."""
+        capacity = self.context_length_attrs["state_update_capacity"]
+        if not capacity:
+            return {}
+        return {
+            "state_update_capacity": capacity,
+            "state_update_capture_count": self.input_names["state_update.capture_count"],
+            "state_update_value": self.output_names["state_update.conv_value"][layer_id],
+            "state_update_value_shape": self.output_shapes["state_update.conv_value"],
+        }
+
+    def make_recurrent_state_update_kwargs(self, layer_id):
+        """Compact recurrent-capture bindings for this layer, or nothing when capture is disabled."""
+        capacity = self.context_length_attrs["state_update_capacity"]
+        if not capacity:
+            return {}
+        return {
+            "state_update_capacity": capacity,
+            "state_update_capture_count": self.input_names["state_update.capture_count"],
+            "state_update_active": self.input_names["state_update.active"],
+            "state_update_capsule": self.output_names["state_update.recurrent_capsule"][layer_id],
+            "state_update_capsule_shape": self.output_shapes["state_update.recurrent_capsule"],
+        }
+
+    def make_gated_delta_net_layer(self, layer_id, linear_attn, conv_output, b_name, a_name):
+        """Split the conv output into per-head Q/K/V and run GatedDeltaNet over dense or packed tokens."""
+        basename = f"/model/layers.{layer_id}/linear_attn"
+        packed = self.use_paged_attention
+        token_shape = ["num_tokens"] if packed else ["batch_size", "sequence_length"]
+        # Reshape constants keep every token axis, so packed layouts carry one leading 0 and dense two.
+        kept_axes = "0" if packed else "0, 0"
+        key_heads, key_head_dim = self.linear_num_key_heads, self.linear_key_head_dim
+        value_heads, value_head_dim = self.linear_num_value_heads, self.linear_value_head_dim
+        key_dim, value_dim = self.linear_key_dim, self.linear_value_dim
+
+        split_name = f"{basename}/split_qkv/Split"
+        split_outputs = [f"{split_name}/output_{index}" for index in range(3)]
+        self.make_split(
+            split_name,
+            inputs=[conv_output, f"/model/constants/INT64/[{key_dim}, {key_dim}, {value_dim}]"],
+            outputs=split_outputs,
+            dtypes=[self.io_dtype] * 3,
+            shapes=[[*token_shape, key_dim], [*token_shape, key_dim], [*token_shape, value_dim]],
+            axis=-1,
+        )
+
+        head_paths = []
+        for tag, split_output, num_heads, head_dim in (
+            ("q", split_outputs[0], key_heads, key_head_dim),
+            ("k", split_outputs[1], key_heads, key_head_dim),
+            ("v", split_outputs[2], value_heads, value_head_dim),
+        ):
+            reshape_name = f"{basename}/{tag}_heads/Reshape"
+            self.make_reshape(
+                reshape_name,
+                [split_output, f"/model/constants/INT64/[{kept_axes}, {num_heads}, {head_dim}]"],
+                self.io_dtype,
+                [*token_shape, num_heads, head_dim],
+            )
+            head_paths.append(f"{reshape_name}/output_0")
+
+        # The kernel applies Qwen's own gate arithmetic, so the raw checkpoint tensors are exported as-is.
+        a_log_name = f"model.layers.{layer_id}.linear_attn.A_log"
+        self.make_initializer(linear_attn.A_log, a_log_name, to=ir.DataType.FLOAT)
+        dt_bias_name = f"model.layers.{layer_id}.linear_attn.dt_bias"
+        self.make_initializer(linear_attn.dt_bias, dt_bias_name, to=ir.DataType.FLOAT)
+
+        op_name = f"{basename}/GatedDeltaNet"
+        recurrent_shape = self.output_shapes["present.recurrent"]
+        shared_kwargs = {
+            "q_path": head_paths[0],
+            "k_path": head_paths[1],
+            "v_path": head_paths[2],
+            "decay": f"{a_name}/output_0",
+            "beta": f"{b_name}/output_0",
+            "a_log": a_log_name,
+            "dt_bias": dt_bias_name,
+            "gate_shape": [*token_shape, value_heads],
+            "gate_activation": "qwen",
+            "beta_activation": "sigmoid",
+            "qk_l2_norm": 1,
+            "update_rule": "gated_delta",
+            "scale": 0.0,
+            "output_shape": [*token_shape, value_heads, value_head_dim],
+        }
+        if packed:
+            self.make_varlen_gated_delta_net(
+                op_name,
+                cumulative_sequence_length=self.input_names["cumulative_sequence_lengths"],
+                past_recurrent_state=self.input_names["past.recurrent"][layer_id],
+                present_recurrent_state=self.output_names["present.recurrent"][layer_id],
+                present_recurrent_shape=recurrent_shape,
+                **self.make_recurrent_state_update_kwargs(layer_id),
+                **shared_kwargs,
+            )
+        else:
+            self.make_gated_delta_net(
+                op_name,
+                initial_state=self.input_names["past.recurrent"][layer_id],
+                final_state=self.output_names["present.recurrent"][layer_id],
+                state_shape=recurrent_shape,
+                **shared_kwargs,
+            )
+
+        reshape_name = f"{basename}/gdn_out/Reshape"
+        self.make_reshape(
+            reshape_name,
+            [f"{op_name}/output_0", f"/model/constants/INT64/[{kept_axes}, {value_dim}]"],
+            self.io_dtype,
+            [*token_shape, value_dim],
+        )
+        return f"{reshape_name}/output_0"
+
     def make_linear_attention_input_proj(self, layer_id, attention, root_input):
         """Build linear projections, conv weight initializer, and QKV transpose.
 
@@ -317,20 +548,22 @@ class Qwen35TextModel(Model):
         a_name = f"{basename}/a_proj/MatMul"
         self.make_matmul(attention.in_proj_a, a_name, root_input)
 
-        qkv_t_name = f"{basename}/qkv_proj/Transpose"
-        qkv_t_output = f"{qkv_t_name}/output_0"
-        self.make_transpose(
-            qkv_t_name,
-            f"{qkv_name}/output_0",
-            self.io_dtype,
-            ["batch_size", self.linear_conv_dim, "sequence_length"],
-            [0, 2, 1],
-        )
+        conv_input = f"{qkv_name}/output_0"
+        if not self.use_paged_attention:
+            qkv_t_name = f"{basename}/qkv_proj/Transpose"
+            conv_input = f"{qkv_t_name}/output_0"
+            self.make_transpose(
+                qkv_t_name,
+                f"{qkv_name}/output_0",
+                self.io_dtype,
+                ["batch_size", self.linear_conv_dim, "sequence_length"],
+                [0, 2, 1],
+            )
 
         conv_weight_name = f"model.layers.{layer_id}.linear_attn.conv1d.weight"
         self.make_initializer(attention.conv1d.weight, conv_weight_name, to=self.io_dtype)
 
-        return z_name, b_name, a_name, qkv_t_output, conv_weight_name
+        return z_name, b_name, a_name, conv_input, conv_weight_name
 
     def make_linear_attention_normalize_and_gate(self, layer_id, attention, conv_out_3d, b_name, a_name):
         """Split QKV, per-head L2 norm, Q scale, and compute decay/beta gates.
@@ -404,6 +637,11 @@ class Qwen35TextModel(Model):
             z_name: Name of the z-gate projection MatMul node.
         """
         basename = f"/model/layers.{layer_id}/linear_attn"
+        output_shape = (
+            ["num_tokens", self.linear_value_dim]
+            if self.use_paged_attention
+            else ["batch_size", "sequence_length", self.linear_value_dim]
+        )
         norm_weight = f"model.layers.{layer_id}.linear_attn.norm.weight"
         self.make_initializer(attention.norm.weight, norm_weight, to=self.io_dtype)
 
@@ -413,7 +651,7 @@ class Qwen35TextModel(Model):
             root_input=attn_output_3d,
             scale=norm_weight,
             gate=f"{z_name}/output_0",
-            shape=["batch_size", "sequence_length", self.linear_value_dim],
+            shape=output_shape,
             epsilon=self.layernorm_attrs["epsilon"],
         )
 
@@ -609,9 +847,6 @@ class Qwen35MoEModel(MTPModel):
         if self.mtp_attrs["build"]:
             self.make_mtp_model(config, io_dtype, onnx_dtype, ep, cache_dir, decoder_options)
 
-        self.bos_token_id = self.decoder.bos_token_id
-        self.eos_token_id = self.decoder.eos_token_id
-        self.pad_token_id = self.decoder.pad_token_id
         self.vocab_size = self.decoder.vocab_size
         self.hf_token = self.decoder.hf_token
         self.hf_remote = self.decoder.hf_remote

@@ -365,6 +365,10 @@ struct DecoderInputs_Element : JSON::Element {
       v_.past_conv_names = JSON::Get<std::string_view>(value);
     } else if (name == "past_recurrent_names") {
       v_.past_recurrent_names = JSON::Get<std::string_view>(value);
+    } else if (name == "state_update_capture_count") {
+      v_.state_update_capture_count = JSON::Get<std::string_view>(value);
+    } else if (name == "state_update_active") {
+      v_.state_update_active = JSON::Get<std::string_view>(value);
     } else if (name == "hidden_states") {
       v_.hidden_states = JSON::Get<std::string_view>(value);
     } else if (name == "targets") {
@@ -406,6 +410,10 @@ struct DecoderOutputs_Element : JSON::Element {
       v_.present_conv_names = JSON::Get<std::string_view>(value);
     } else if (name == "present_recurrent_names") {
       v_.present_recurrent_names = JSON::Get<std::string_view>(value);
+    } else if (name == "state_update_conv_value_names") {
+      v_.state_update_conv_value_names = JSON::Get<std::string_view>(value);
+    } else if (name == "state_update_recurrent_capsule_names") {
+      v_.state_update_recurrent_capsule_names = JSON::Get<std::string_view>(value);
     } else if (name == "hidden_states") {
       v_.hidden_states = JSON::Get<std::string_view>(value);
     } else if (name == "outputs") {
@@ -747,6 +755,13 @@ struct Decoder_Element : JSON::Element {
       v_.num_key_value_heads = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "head_size") {
       v_.head_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "state_update_capacity") {
+      // The kernel packs every captured transition for a layer into one fixed-width capsule output.
+      // Keep this limit synchronized with check_extra_options in builder.py and the model-builder README.
+      constexpr int kMaxStateUpdateCapacity = 8;
+      v_.state_update_capacity = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.state_update_capacity < 0 || v_.state_update_capacity > kMaxStateUpdateCapacity)
+        throw std::runtime_error("state_update_capacity must be between 0 and " + std::to_string(kMaxStateUpdateCapacity));
     } else if (name == "conv_cache_size") {
       v_.conv_cache_size = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else {
