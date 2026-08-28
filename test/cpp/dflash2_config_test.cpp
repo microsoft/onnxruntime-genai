@@ -1,17 +1,22 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include <gtest/gtest.h>
-
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
+#include <gtest/gtest.h>
+
 #include "dflash2_drafter.h"
+#include "ort_genai.h"
 
 namespace Generators::test {
 namespace {
+
+namespace fs_std = std::filesystem;
 
 Config MakeDflash2Config() {
   Config config;
@@ -101,6 +106,24 @@ std::pair<FakeModelStateMetadata, FakeModelStateMetadata> MakeCompatibleMetadata
     }
   }
   return {std::move(target), std::move(drafter)};
+}
+
+fs_std::path WriteDsparkConfig(std::string_view section_name) {
+  const auto root = fs_std::temp_directory_path() /
+                    ("ortgenai_dspark_config_" + std::string{section_name});
+  std::error_code error;
+  fs_std::remove_all(root, error);
+  fs_std::create_directories(root);
+
+  std::ofstream out(root / "genai_config.json", std::ios::binary);
+  out << "{ \"model\": { \"type\": \"tiny-test-model\","
+         " \"vocab_size\": 16, \"context_length\": 32,"
+         " \"decoder\": { \"filename\": \"model.onnx\" }, \""
+      << section_name
+      << "\": { \"filename\": \"dspark.onnx\", \"num_hidden_layers\": 1,"
+         " \"num_key_value_heads\": 2, \"head_size\": 8, \"block_size\": 4,"
+         " \"num_draft_tokens\": 4, \"selector_top_k\": 2 } }, \"search\": {} }";
+  return root;
 }
 
 }  // namespace
@@ -226,8 +249,19 @@ TEST(Dflash2ConfigTest, RequiresCompleteDrafterContract) {
 
 TEST(Dflash2ConfigTest, RequiresOneDraftPerNonAnchorBlockRow) {
   auto config = MakeDflash2Config();
-  config.model.dflash2.num_draft_tokens = 2;
+  config.model.dflash2.num_draft_tokens = 1;
   EXPECT_THROW(CreateDflash2Config(config), std::runtime_error);
+}
+
+TEST(Dflash2ConfigTest, AcceptsOneDraftPerDsparkBlockRow) {
+  auto config = MakeDflash2Config();
+  config.model.dflash2.num_draft_tokens = config.model.dflash2.block_size;
+  EXPECT_NO_THROW(CreateDflash2Config(config));
+}
+
+TEST(Dflash2ConfigTest, ParsesDsparkAlias) {
+  EXPECT_NO_THROW(OgaConfig::Create(WriteDsparkConfig("dspark").string().c_str()));
+  EXPECT_THROW(OgaConfig::Create(WriteDsparkConfig("dspark2").string().c_str()), std::exception);
 }
 
 TEST(Dflash2ConfigTest, ProjectsDrafterWithoutTargetState) {
@@ -247,10 +281,11 @@ TEST(Dflash2ConfigTest, AccountsForWindowedPagedCache) {
   EXPECT_EQ(Dflash2Drafter::PoolBlocks(config, 8, 3), 15u);
 }
 
-TEST(Dflash2ConfigTest, RejectsUnboundedCachePool) {
+TEST(Dflash2ConfigTest, BillsFullAttentionCachePerTargetBlock) {
   auto config = MakeDflash2Config();
   config.model.dflash2.sliding_window = 0;
-  EXPECT_THROW(Dflash2Drafter::PoolBlocks(config, 8, 3), std::runtime_error);
+  EXPECT_EQ(Dflash2Drafter::PoolBlocks(config, 8, 3), 0u);
+  EXPECT_GT(Dflash2Drafter::BytesPerBlock(config, 8), 0u);
 }
 
 TEST(Dflash2ConfigTest, RejectsInvalidCachePoolGeometry) {
