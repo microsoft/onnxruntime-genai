@@ -122,7 +122,7 @@ def _generate_isolated(model, prompt_tokens, max_new_tokens, *, min_new_tokens=0
     sink = _Sink()
     engine = og.Engine(model)
     sinks = {}
-    request = _create_request(engine, model, prompt_tokens, max_new_tokens, sink, sinks, min_new_tokens=min_new_tokens)
+    _create_request(engine, model, prompt_tokens, max_new_tokens, sink, sinks, min_new_tokens=min_new_tokens)
     _run(engine, sinks)
     del engine
     gc.collect()
@@ -204,7 +204,7 @@ def test_staggered_admission(bundle):
 
     sink_a = _Sink()
     sinks = {}
-    request_a = _create_request(engine, bundle.model, prompt_a, max_new, sink_a, sinks)
+    _create_request(engine, bundle.model, prompt_a, max_new, sink_a, sinks)
 
     for _ in range(3):
         if not engine.has_pending_requests():
@@ -215,7 +215,7 @@ def test_staggered_admission(bundle):
     assert len(sink_a.tokens) > 0, "first request produced nothing before staggered admission"
 
     sink_b = _Sink()
-    request_b = _create_request(engine, bundle.model, prompt_b, max_new, sink_b, sinks)
+    _create_request(engine, bundle.model, prompt_b, max_new, sink_b, sinks)
 
     _run(engine, sinks)
 
@@ -272,7 +272,7 @@ def test_completion_isolation(bundle):
     engine = og.Engine(bundle.model)
     short_sink, long_sink = _Sink(), _Sink()
     sinks = {}
-    short_request = _create_request(
+    _create_request(
         engine,
         bundle.model,
         bundle.tokenizer.encode(short_prompt),
@@ -281,7 +281,7 @@ def test_completion_isolation(bundle):
         sinks,
         min_new_tokens=short_new,
     )
-    long_request = _create_request(
+    _create_request(
         engine, bundle.model, bundle.tokenizer.encode(long_prompt), long_new, long_sink, sinks
     )
     _run(engine, sinks)
@@ -334,7 +334,7 @@ def test_close_request_stops_output(bundle):
     sink_a, sink_b = _Sink(), _Sink()
     sinks = {}
     request_a = _create_request(engine, bundle.model, bundle.tokenizer.encode(_PROMPTS[0]), max_new, sink_a, sinks)
-    request_b = _create_request(engine, bundle.model, sibling_prompt, max_new, sink_b, sinks)
+    _create_request(engine, bundle.model, sibling_prompt, max_new, sink_b, sinks)
 
     for _ in range(4):
         if not engine.has_pending_requests():
@@ -361,7 +361,7 @@ def test_engine_teardown_and_recreation(bundle):
     first = og.Engine(bundle.model)
     sink1 = _Sink()
     first_sinks = {}
-    first_request = _create_request(first, bundle.model, prompt_tokens, max_new, sink1, first_sinks)
+    _create_request(first, bundle.model, prompt_tokens, max_new, sink1, first_sinks)
     _run(first, first_sinks)
     assert sink1.tokens == expected
     del first
@@ -371,6 +371,6 @@ def test_engine_teardown_and_recreation(bundle):
     assert not second.has_pending_requests()
     sink2 = _Sink()
     second_sinks = {}
-    second_request = _create_request(second, bundle.model, prompt_tokens, max_new, sink2, second_sinks)
+    _create_request(second, bundle.model, prompt_tokens, max_new, sink2, second_sinks)
     _run(second, second_sinks)
     assert sink2.tokens == expected
