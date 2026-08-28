@@ -108,7 +108,12 @@ class QuantAutoModel(QuantizedModel):
             lm.bits = self.global_bits
             lm.group_size = gs
             self.lm_head = lm
-            break
+            return
+
+        raise RuntimeError(
+            "dequantize_embedding: could not find model.embed_tokens.weight/scales/(q)zeros "
+            "in any safetensors shard. The embedding table cannot be dequantized."
+        )
 
     def set_properties(self):
         """Derive in_features, out_features, bits, and group_size from tensor shapes.
