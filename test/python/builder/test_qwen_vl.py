@@ -386,8 +386,35 @@ def test_qwen35_applies_mrope_to_q_and_k(monkeypatch):
     assert model.attention_attrs["k_path"] == "/model/layers.2/attn/k_rotary/MRotaryEmbedding/output_0"
 
 
-def test_qwen35_attention_input_proj_splits_per_head_gate(monkeypatch):
+@pytest.mark.parametrize(
+    ("use_paged_attention", "q_gate_reshape", "q_gate_shape", "q_reshape", "q_shape"),
+    [
+        (
+            False,
+            "/model/constants/INT64/[0, 0, 16, 256]",
+            ["batch_size", "sequence_length", 16, 128],
+            "/model/constants/INT64/[0, 0, 2048]",
+            ["batch_size", "sequence_length", 2048],
+        ),
+        (
+            True,
+            "/model/constants/INT64/[0, 16, 256]",
+            ["num_tokens", 16, 128],
+            "/model/constants/INT64/[0, 2048]",
+            ["num_tokens", 2048],
+        ),
+    ],
+)
+def test_qwen35_attention_input_proj_splits_per_head_gate(
+    monkeypatch,
+    use_paged_attention,
+    q_gate_reshape,
+    q_gate_shape,
+    q_reshape,
+    q_shape,
+):
     model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.use_paged_attention = use_paged_attention
     model.num_attn_heads = 16
     model.head_size = 128
     model.io_dtype = ir.DataType.FLOAT16
@@ -416,15 +443,33 @@ def test_qwen35_attention_input_proj_splits_per_head_gate(monkeypatch):
     assert calls[1][0:3] == (
         "reshape",
         "/model/layers.3/attn/q_gate/Reshape",
-        ["q_gate", "/model/constants/INT64/[0, 0, 16, 256]"],
+        ["q_gate", q_gate_reshape],
     )
+    assert calls[1][3] == [*q_gate_shape[:-1], 256]
     assert calls[2][0:2] == ("split", "/model/layers.3/attn/q_gate/Split")
+    assert calls[2][4] == [q_gate_shape, q_gate_shape]
+    assert calls[3][2][1] == q_reshape
+    assert calls[3][3] == q_shape
+    assert calls[4][2][1] == q_reshape
+    assert calls[4][3] == q_shape
     assert model.attention_attrs["q_path"] == "/model/layers.3/attn/q_proj/Reshape/output_0"
     assert model.attention_attrs["gate_path"] == "/model/layers.3/attn/gate/Reshape/output_0"
 
 
-def test_qwen35_attention_output_proj_gates_before_base_projection(monkeypatch):
+@pytest.mark.parametrize(
+    ("use_paged_attention", "output_shape"),
+    [
+        (False, ["batch_size", "sequence_length", 2048]),
+        (True, ["num_tokens", 2048]),
+    ],
+)
+def test_qwen35_attention_output_proj_gates_before_base_projection(
+    monkeypatch,
+    use_paged_attention,
+    output_shape,
+):
     model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.use_paged_attention = use_paged_attention
     model.num_attn_heads = 16
     model.head_size = 128
     model.io_dtype = ir.DataType.FLOAT16
@@ -453,7 +498,7 @@ def test_qwen35_attention_output_proj_gates_before_base_projection(monkeypatch):
     model.make_attention_output_proj(3, object(), "hidden_states")
 
     assert calls == [
-        ("sigmoid", "/model/layers.3/attn/gate/Sigmoid", "gate", ["batch_size", "sequence_length", 2048]),
+        ("sigmoid", "/model/layers.3/attn/gate/Sigmoid", "gate", output_shape),
         (
             "mul",
             "/model/layers.3/attn/gate/Mul",
@@ -461,7 +506,7 @@ def test_qwen35_attention_output_proj_gates_before_base_projection(monkeypatch):
                 "/model/layers.3/attn/GroupQueryAttention/output_0",
                 "/model/layers.3/attn/gate/Sigmoid/output_0",
             ],
-            ["batch_size", "sequence_length", 2048],
+            output_shape,
         ),
         ("base_output", 3, "hidden_states", "/model/layers.3/attn/gate/Mul/output_0"),
     ]

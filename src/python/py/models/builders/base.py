@@ -1158,6 +1158,10 @@ class Model:
             inputs["past_conv_names"] = "past.%d.conv"
         if "past.recurrent" in self.input_names:
             inputs["past_recurrent_names"] = "past.%d.recurrent"
+        if "state_update.capture_count" in self.input_names:
+            inputs["state_update_capture_count"] = self.input_names["state_update.capture_count"]
+        if "state_update.active" in self.input_names:
+            inputs["state_update_active"] = self.input_names["state_update.active"]
 
         # Create outputs dict
         outputs = {}
@@ -1171,6 +1175,10 @@ class Model:
             outputs["present_conv_names"] = "present.%d.conv"
         if "present.recurrent" in self.output_names:
             outputs["present_recurrent_names"] = "present.%d.recurrent"
+        if "state_update.conv_value" in self.output_names:
+            outputs["state_update_conv_value_names"] = "state_update.%d.conv_value"
+        if "state_update.recurrent_capsule" in self.output_names:
+            outputs["state_update_recurrent_capsule_names"] = "state_update.%d.recurrent_capsule"
 
         bos_token_id = config.bos_token_id if getattr(config, "bos_token_id", None) is not None else 1
         eos_token_id = config.eos_token_id
@@ -1277,6 +1285,8 @@ class Model:
         state_groups = self.make_decoder_state_groups(inputs, outputs)
         if state_groups:
             genai_config["model"]["decoder"]["state_groups"] = state_groups
+        if getattr(self, "state_update_capacity", 0):
+            genai_config["model"]["decoder"]["state_update_capacity"] = self.state_update_capacity
 
         self.update_genai_config(genai_config)
 
@@ -3834,7 +3844,7 @@ class Model:
         final_state = kwargs["final_state"]
         attributes = {
             "update_rule": kwargs.get("update_rule", "gated_delta"),
-            "scale": kwargs.get("scale", 1.0),
+            "scale": kwargs.get("scale", 0.0),
         }
         for attribute in ("gate_activation", "beta_activation"):
             if kwargs.get(attribute):
@@ -3903,7 +3913,7 @@ class Model:
 
         attributes = {
             "update_rule": kwargs.get("update_rule", "gated_delta"),
-            "scale": kwargs.get("scale", 1.0),
+            "scale": kwargs.get("scale", 0.0),
             "gate_activation": kwargs.get("gate_activation", "none"),
             "beta_activation": kwargs.get("beta_activation", "none"),
             "qk_l2_norm": kwargs.get("qk_l2_norm", 0),

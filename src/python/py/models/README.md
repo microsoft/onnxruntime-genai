@@ -415,17 +415,17 @@ A multi-token verify forward can additionally carry a window of recurrent/conv s
 
 #### Compact State Updates (Qwen3.5/3.8)
 
-Paged Qwen3.5/3.8 exports can capture compact convolution and GatedDeltaNet transitions for speculative tokens instead of returning full recurrent-state checkpoints. Set `linear_attn_op=gated_delta_net` to select the GatedDeltaNet path and `state_update_capacity=N` to reserve updates for up to `N` tokens. The capacity defaults to `0` (disabled), must be an integer from `0` through `8`, and requires `use_paged_attention=true` and `state_window >= state_update_capacity + 1`.
+Paged Qwen3.5/3.8 exports can capture compact convolution and GatedDeltaNet transitions for speculative tokens instead of returning full recurrent-state checkpoints. Set `state_update_capacity=N` to reserve updates for up to `N` tokens. The capacity defaults to `0` (disabled), must be an integer from `0` through `8`, and requires `use_paged_attention=true`. Paged Qwen3.5/3.8 exports use GatedDeltaNet regardless of `linear_attn_op` and support CUDA with `fp16` model I/O. When enabled, `genai_config.json` records the capacity, the `state_update_capture_count` and `state_update_active` input bindings, and the per-layer convolution-value and recurrent-capsule output templates.
 
 ```bash
 # From wheel:
-python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p fp16 -e cuda -c cache_dir_for_hf_files --extra_options use_paged_attention=true linear_attn_op=gated_delta_net state_update_capacity=3 state_window=4
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p fp16 -e cuda -c cache_dir_for_hf_files --extra_options use_paged_attention=true state_update_capacity=3
 
 # From source:
-python builder.py -m model_name -o path_to_output_folder -p fp16 -e cuda -c cache_dir_for_hf_files --extra_options use_paged_attention=true linear_attn_op=gated_delta_net state_update_capacity=3 state_window=4
+python builder.py -m model_name -o path_to_output_folder -p fp16 -e cuda -c cache_dir_for_hf_files --extra_options use_paged_attention=true state_update_capacity=3
 ```
 
-For non-paged Qwen3.5/3.8 exports, `linear_attn_op` also accepts `linear_attention`, which is the default. Compact state-update inputs and outputs are omitted when `state_update_capacity=0`. Both modes require ONNX Runtime kernels that implement the selected contrib operators.
+For non-paged Qwen3.5/3.8 exports, `linear_attn_op` accepts `linear_attention` (the default) or `gated_delta_net`. Dense GatedDeltaNet exports require `state_window=0`. Compact state-update inputs and outputs are omitted when `state_update_capacity=0`. Both modes require ONNX Runtime kernels that implement the selected contrib operators.
 
 #### Enable WebGPU Graph Capture
 

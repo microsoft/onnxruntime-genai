@@ -360,6 +360,7 @@ struct Config {
       int num_key_value_heads{};
       int num_hidden_layers{};
       int head_size{};
+      int state_update_capacity{};
 
       // Hybrid SSM+Attention (LFM2) parameters
       std::vector<std::string> layer_types;  // Per-layer type: "conv" or "full_attention"
@@ -423,6 +424,8 @@ struct Config {
         std::string attention_metadata{Defaults::AttentionMetadataName};
         std::string past_conv_names{Defaults::PastConvName};  // Conv cache input name template (LFM2)
         std::string past_recurrent_names{Defaults::PastRecurrentName};
+        std::string state_update_capture_count;
+        std::string state_update_active;
 
         // Last hidden-state input (e.g. the MTP head consumes the main model's hidden state).
         // Empty unless the model graph takes a hidden_states input.
@@ -449,6 +452,8 @@ struct Config {
         std::string rnn_states{Defaults::RnnStatesName};
         std::string present_conv_names{Defaults::PresentConvName};  // Conv cache output name template (LFM2)
         std::string present_recurrent_names{Defaults::PresentRecurrentName};
+        std::string state_update_conv_value_names;
+        std::string state_update_recurrent_capsule_names;
         std::string hidden_states;  // Last hidden state output (when exported with include_hidden_states; e.g. fed to the MTP head)
 
         // RNNT decoder outputs

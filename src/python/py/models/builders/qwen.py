@@ -112,15 +112,21 @@ class VideoChatFlashQwenModel(QwenModel):
 
 
 class Qwen35TextModel(Model):
-    def validate_state_update_options(self, capacity, use_paged_attention, linear_attn_op, state_window):
+    def validate_state_update_options(self, capacity, use_paged_attention):
         if capacity < 0 or capacity > 8:
             raise ValueError("state_update_capacity must be between 0 and 8")
         if capacity and not use_paged_attention:
             raise ValueError("state_update_capacity requires use_paged_attention=true")
-        if capacity and linear_attn_op != "gated_delta_net":
-            raise ValueError("state_update_capacity requires linear_attn_op=gated_delta_net")
-        if capacity and state_window < capacity + 1:
-            raise ValueError("state_window must be at least state_update_capacity + 1")
+
+    def validate_gated_delta_net_options(self, use_paged_attention, linear_attn_op, state_window, ep, io_dtype):
+        if use_paged_attention and ep != "cuda":
+            raise ValueError("GatedDeltaNet paged exports require the CUDA execution provider")
+        if not use_paged_attention and linear_attn_op == "gated_delta_net" and state_window:
+            raise ValueError("linear_attn_op=gated_delta_net requires state_window=0 for non-paged exports")
+        if (use_paged_attention or linear_attn_op == "gated_delta_net") and ir.DataType(
+            io_dtype
+        ) == ir.DataType.BFLOAT16:
+            raise ValueError("GatedDeltaNet does not support bfloat16 model I/O")
 
     def parse_state_update_capacity(self, value):
         if isinstance(value, bool):
@@ -139,17 +145,24 @@ class Qwen35TextModel(Model):
             raise ValueError("linear_attn_op must be one of: linear_attention, gated_delta_net")
         self.state_update_capacity = self.parse_state_update_capacity(extra_options.get("state_update_capacity", 0))
 
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        use_paged_attention = extra_options.get("use_paged_attention", False)
+        state_window = int(extra_options.get("state_window", 0))
+        self.validate_state_update_options(self.state_update_capacity, use_paged_attention)
 
-        state_window = getattr(self, "context_length_attrs", {}).get(
-            "state_window", int(extra_options.get("state_window", 0))
-        )
-        self.validate_state_update_options(
-            self.state_update_capacity,
-            getattr(self, "use_paged_attention", False),
-            self.linear_attn_op,
-            state_window,
-        )
+        text_config = getattr(config, "text_config", config)
+        layer_types = getattr(text_config, "layer_types", None)
+        num_layers = int(extra_options.get("num_hidden_layers", len(layer_types) if layer_types is not None else 0))
+        has_linear_attention = layer_types is None or "linear_attention" in layer_types[:num_layers]
+        if has_linear_attention:
+            self.validate_gated_delta_net_options(
+                use_paged_attention,
+                self.linear_attn_op,
+                state_window,
+                ep,
+                io_dtype,
+            )
+
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.configure_gated_delta_net_io()
 
         # OffsetRMSNorm: Qwen3.5 uses (1 + weight) * RMSNorm(x).
@@ -257,19 +270,26 @@ class Qwen35TextModel(Model):
         super().make_attention_input_proj(layer_id, attention, root_input, **kwargs)
 
         q_size = self.num_attn_heads * self.head_size
+        token_shape = ["num_tokens"] if self.use_paged_attention else ["batch_size", "sequence_length"]
+        q_gate_reshape = [0, self.num_attn_heads, self.head_size * 2]
+        q_reshape = [0, q_size]
+        if not self.use_paged_attention:
+            q_gate_reshape.insert(1, 0)
+            q_reshape.insert(1, 0)
+
         rs_qg_name = f"/model/layers.{layer_id}/attn/q_gate/Reshape"
         rs_qg_output = f"{rs_qg_name}/output_0"
         self.make_reshape(
             rs_qg_name,
-            [self.attention_attrs["q_path"], f"/model/constants/INT64/[0, 0, {self.num_attn_heads}, {self.head_size * 2}]"],
+            [self.attention_attrs["q_path"], f"/model/constants/INT64/{q_gate_reshape}"],
             self.io_dtype,
-            ["batch_size", "sequence_length", self.num_attn_heads, self.head_size * 2],
+            [*token_shape, self.num_attn_heads, self.head_size * 2],
         )
 
         split_name = f"/model/layers.{layer_id}/attn/q_gate/Split"
         q_4d_output = f"{split_name}/output_0"
         gate_4d_output = f"{split_name}/output_1"
-        q_gate_shape = ["batch_size", "sequence_length", self.num_attn_heads, self.head_size]
+        q_gate_shape = [*token_shape, self.num_attn_heads, self.head_size]
         self.make_split(
             split_name,
             inputs=[rs_qg_output, f"/model/constants/INT64/[{self.head_size}, {self.head_size}]"],
@@ -282,17 +302,17 @@ class Qwen35TextModel(Model):
         rs_q_name = f"/model/layers.{layer_id}/attn/q_proj/Reshape"
         self.make_reshape(
             rs_q_name,
-            [q_4d_output, f"/model/constants/INT64/[0, 0, {q_size}]"],
+            [q_4d_output, f"/model/constants/INT64/{q_reshape}"],
             self.io_dtype,
-            ["batch_size", "sequence_length", q_size],
+            [*token_shape, q_size],
         )
 
         rs_g_name = f"/model/layers.{layer_id}/attn/gate/Reshape"
         self.make_reshape(
             rs_g_name,
-            [gate_4d_output, f"/model/constants/INT64/[0, 0, {q_size}]"],
+            [gate_4d_output, f"/model/constants/INT64/{q_reshape}"],
             self.io_dtype,
-            ["batch_size", "sequence_length", q_size],
+            [*token_shape, q_size],
         )
 
         self.attention_attrs["q_path"] = f"{rs_q_name}/output_0"
@@ -301,13 +321,14 @@ class Qwen35TextModel(Model):
     def make_attention_output_proj(self, layer_id, attention, root_input, **kwargs):
         """Apply Qwen3.5's attention output gate before the shared output projection."""
         q_size = self.num_attn_heads * self.head_size
+        output_shape = self.make_hidden_state_shape(last_dim=q_size)
         attn_name = f"/model/layers.{layer_id}/attn/{self.attention_attrs['op_type']}"
         sigmoid_name = f"/model/layers.{layer_id}/attn/gate/Sigmoid"
         self.make_sigmoid(
             sigmoid_name,
             self.attention_attrs["gate_path"],
             self.io_dtype,
-            ["batch_size", "sequence_length", q_size],
+            output_shape,
         )
 
         gated_name = f"/model/layers.{layer_id}/attn/gate/Mul"
@@ -315,7 +336,7 @@ class Qwen35TextModel(Model):
             gated_name,
             [f"{attn_name}/output_0", f"{sigmoid_name}/output_0"],
             self.io_dtype,
-            ["batch_size", "sequence_length", q_size],
+            output_shape,
         )
         self.attention_attrs["o_path"] = f"{gated_name}/output_0"
 
@@ -504,8 +525,7 @@ class Qwen35TextModel(Model):
             state_update_capsule=f"state_update.{layer_id}.recurrent_capsule",
             state_update_capsule_shape=[
                 "batch_size",
-                self.state_update_capacity
-                * (value_heads + key_heads * key_head_dim + value_heads * value_head_dim),
+                self.state_update_capacity * (value_heads + key_heads * key_head_dim + value_heads * value_head_dim),
             ],
         )
 

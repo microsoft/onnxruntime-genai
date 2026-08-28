@@ -740,11 +740,10 @@ def get_args():
                 linear_attn_op = linear_attention/gated_delta_net: Select the recurrent operator for non-paged
                     Qwen3.5/3.8 exports. Default is linear_attention. Paged exports use GatedDeltaNet.
                 state_update_capacity = Number of compact Qwen3.5/3.8 state updates to capture. Default is 0 (disabled).
-                    Must be an integer from 0 through 8 and requires use_paged_attention=true,
-                    linear_attn_op=gated_delta_net, and state_window >= state_update_capacity + 1.
+                    Must be an integer from 0 through 8 and requires use_paged_attention=true.
                 state_window = Configure hybrid Qwen recurrent/conv state history. Default is 0 (disabled).
                     Must be a non-negative integer. For MTP verification, W must be at least num_speculative_tokens + 1.
-                    For compact state updates, W must be at least state_update_capacity + 1.
+                    Non-paged linear_attn_op=gated_delta_net exports require state_window=0.
                     Requires ONNX Runtime kernels that implement this attribute.
                 use_paged_attention = Build the model with PagedAttention for the continuous-batching engine. Default is false.
                     Replaces GroupQueryAttention with the PagedAttention contrib op, packs all sequences into a single

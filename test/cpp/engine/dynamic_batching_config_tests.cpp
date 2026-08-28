@@ -82,13 +82,18 @@ TEST(DecoderStateGroupsConfigTest, PreservesLegacyManifestAbsence) {
 TEST(DecoderStateGroupsConfigTest, ParsesSparseHybridManifest) {
   const auto config = LoadDecoderConfig(R"({
     "num_hidden_layers": 4,
+    "state_update_capacity": 3,
     "inputs": {
       "past_conv_names": "past_key_values.%d.conv_state",
-      "past_recurrent_names": "past_key_values.%d.recurrent_state"
+      "past_recurrent_names": "past_key_values.%d.recurrent_state",
+      "state_update_capture_count": "state_update_capture_count",
+      "state_update_active": "state_update_active"
     },
     "outputs": {
       "present_conv_names": "present.%d.conv_state",
-      "present_recurrent_names": "present.%d.recurrent_state"
+      "present_recurrent_names": "present.%d.recurrent_state",
+      "state_update_conv_value_names": "state_update.%d.conv_value",
+      "state_update_recurrent_capsule_names": "state_update.%d.recurrent_capsule"
     },
     "state_groups": [
       {
@@ -119,6 +124,11 @@ TEST(DecoderStateGroupsConfigTest, ParsesSparseHybridManifest) {
   EXPECT_EQ(config.model.decoder.inputs.past_recurrent_names, "past_key_values.%d.recurrent_state");
   EXPECT_EQ(config.model.decoder.outputs.present_conv_names, "present.%d.conv_state");
   EXPECT_EQ(config.model.decoder.outputs.present_recurrent_names, "present.%d.recurrent_state");
+  EXPECT_EQ(config.model.decoder.state_update_capacity, 3);
+  EXPECT_EQ(config.model.decoder.inputs.state_update_capture_count, "state_update_capture_count");
+  EXPECT_EQ(config.model.decoder.inputs.state_update_active, "state_update_active");
+  EXPECT_EQ(config.model.decoder.outputs.state_update_conv_value_names, "state_update.%d.conv_value");
+  EXPECT_EQ(config.model.decoder.outputs.state_update_recurrent_capsule_names, "state_update.%d.recurrent_capsule");
 }
 
 TEST(DecoderStateGroupsConfigTest, OverlayValidationIsTransactional) {
