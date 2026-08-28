@@ -26,6 +26,11 @@
     return nil;
   }
 
+  if (!config) {
+    OGASaveCodeAndDescriptionToError(0x0A, @"config must not be nil.", error);
+    return nil;
+  }
+
   try {
     _tokenizer = OgaTokenizer::Create([config CXXAPIOgaConfig]);
     return self;
