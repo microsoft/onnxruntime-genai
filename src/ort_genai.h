@@ -914,21 +914,27 @@ struct OgaTurnParams : OgaAbstract {
   void SetMaxGeneratedTokens(uint64_t value) {
     OgaCheckResult(OgaTurnParamsSetMaxGeneratedTokens(this, value));
   }
+  /** Reserved for future use; currently throws a not-implemented error. */
   void SetTemperature(float value) {
     OgaCheckResult(OgaTurnParamsSetTemperature(this, value));
   }
+  /** Reserved for future use; currently throws a not-implemented error. */
   void SetTopP(float value) {
     OgaCheckResult(OgaTurnParamsSetTopP(this, value));
   }
+  /** Reserved for future use; currently throws a not-implemented error. */
   void SetTopK(int32_t value) {
     OgaCheckResult(OgaTurnParamsSetTopK(this, value));
   }
+  /** Reserved for future use; currently throws a not-implemented error. */
   void SetSeed(uint64_t value) {
     OgaCheckResult(OgaTurnParamsSetSeed(this, value));
   }
+  /** Reserved for future use; currently throws a not-implemented error. */
   void SetStopSequences(const OgaSequences& values) {
     OgaCheckResult(OgaTurnParamsSetStopSequences(this, &values));
   }
+  /** Reserved for future use; currently throws a not-implemented error. */
   void SetGuidance(const char* type, const char* data) {
     OgaCheckResult(OgaTurnParamsSetGuidance(this, type, data));
   }
@@ -999,13 +1005,13 @@ struct OgaEngine : OgaAbstract {
   size_t Run(OgaEngineEvent* storage, size_t capacity) {
     if (capacity != 0) {
       if (!storage) {
-        throw std::invalid_argument(
+        throw std::runtime_error(
             "storage must not be null when capacity is positive.");
       }
       const uintptr_t storage_begin =
           reinterpret_cast<uintptr_t>(storage);
       if (storage_begin % alignof(OgaEngineEvent) != 0) {
-        throw std::invalid_argument(
+        throw std::runtime_error(
             "storage must be aligned for OgaEngineEvent.");
       }
       if (capacity >

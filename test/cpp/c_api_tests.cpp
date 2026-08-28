@@ -1330,7 +1330,7 @@ TEST(CAPITests, EngineCppRunReturnsPopulatedStoragePrefix) {
 
   EXPECT_THROW(
       static_cast<void>(engine->Run(nullptr, 1)),
-      std::invalid_argument);
+      std::runtime_error);
 
   std::array<OgaEngineEvent, 4> storage{};
   storage[2].flags = 0x1234;
@@ -1523,8 +1523,30 @@ TEST(CAPITests, EngineRequestCAbiAndRaiiContracts) {
   EXPECT_FALSE(engine->HasPendingRequests());
   EXPECT_EQ(RunOne(*engine).flags, OgaEngineEventFlag_None);
 
-  auto unsupported = engine->CreateRequest(*params)->CreateTurnParams();
-  EXPECT_THROW(unsupported->SetTemperature(0.5f), std::runtime_error);
+  auto unsupported_request = engine->CreateRequest(*params);
+  auto unsupported = unsupported_request->CreateTurnParams();
+  auto stop_sequences = OgaSequences::Create();
+
+  const auto expect_not_implemented = [](auto&& setter) {
+    try {
+      setter();
+      FAIL() << "Expected a not-implemented error.";
+    } catch (const std::runtime_error& error) {
+      EXPECT_NE(
+          std::string(error.what()).find("not implemented"),
+          std::string::npos);
+    }
+  };
+
+  expect_not_implemented([&] { unsupported->SetTemperature(0.5f); });
+  expect_not_implemented([&] { unsupported->SetTopP(0.5f); });
+  expect_not_implemented([&] { unsupported->SetTopK(5); });
+  expect_not_implemented([&] { unsupported->SetSeed(42); });
+  expect_not_implemented(
+      [&] { unsupported->SetStopSequences(*stop_sequences); });
+  expect_not_implemented(
+      [&] { unsupported->SetGuidance("regex", "[0-9]+"); });
+  unsupported_request->Close();
 }
 
 class ParametrizedTopKCAPITestsTests : public ::testing::TestWithParam<bool> {

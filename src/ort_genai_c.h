@@ -1341,12 +1341,16 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestCreateTurnParams(
 OGA_EXPORT void OGA_API_CALL OgaDestroyTurnParams(OgaTurnParams* params);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnParamsSetMaxGeneratedTokens(
     OgaTurnParams* params, uint64_t max_generated_tokens);
+/** \brief Reserved for future use; currently returns a not-implemented result. */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnParamsSetTemperature(
     OgaTurnParams* params, float temperature);
+/** \brief Reserved for future use; currently returns a not-implemented result. */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnParamsSetTopP(
     OgaTurnParams* params, float top_p);
+/** \brief Reserved for future use; currently returns a not-implemented result. */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnParamsSetTopK(
     OgaTurnParams* params, int32_t top_k);
+/** \brief Reserved for future use; currently returns a not-implemented result. */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnParamsSetSeed(
     OgaTurnParams* params, uint64_t seed);
 /**
@@ -1357,6 +1361,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnParamsSetSeed(
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnParamsSetStopSequences(
     OgaTurnParams* params, const OgaSequences* stop_sequences);
+/** \brief Reserved for future use; currently returns a not-implemented result. */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnParamsSetGuidance(
     OgaTurnParams* params, const char* guidance_type,
     const char* guidance_data);

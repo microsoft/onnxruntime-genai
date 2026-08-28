@@ -767,18 +767,20 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         return OgaTurnParams::Create(request);
       }))
       .def("set_max_generated_tokens", &OgaTurnParams::SetMaxGeneratedTokens)
-      .def("set_temperature", &OgaTurnParams::SetTemperature)
-      .def("set_top_p", &OgaTurnParams::SetTopP)
-      .def("set_top_k", &OgaTurnParams::SetTopK)
-      .def("set_seed", &OgaTurnParams::SetSeed)
-      .def("set_stop_sequences", [](OgaTurnParams& params,
-                                    const std::vector<std::vector<int32_t>>& values) {
+      .def("set_temperature", &OgaTurnParams::SetTemperature,
+           "Reserved for future use; currently raises a not-implemented error.")
+      .def("set_top_p", &OgaTurnParams::SetTopP,
+           "Reserved for future use; currently raises a not-implemented error.")
+      .def("set_top_k", &OgaTurnParams::SetTopK,
+           "Reserved for future use; currently raises a not-implemented error.")
+      .def("set_seed", &OgaTurnParams::SetSeed,
+           "Reserved for future use; currently raises a not-implemented error.")
+      .def("set_stop_sequences", [](OgaTurnParams& params, const std::vector<std::vector<int32_t>>& values) {
         auto sequences = OgaSequences::Create();
         for (const auto& value : values)
           sequences->Append(value.data(), value.size());
-        params.SetStopSequences(*sequences);
-      })
-      .def("set_guidance", &OgaTurnParams::SetGuidance);
+        params.SetStopSequences(*sequences); }, "Reserved for future use; currently raises a not-implemented error.")
+      .def("set_guidance", &OgaTurnParams::SetGuidance, "Reserved for future use; currently raises a not-implemented error.");
 
   pybind11::class_<OgaRequest>(m, "Request")
       .def(

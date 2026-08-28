@@ -300,6 +300,29 @@ def test_per_turn_budget_is_independent_and_snapshotted(model):
     request.close()
 
 
+@pytest.mark.parametrize(
+    ("setter", "args"),
+    [
+        ("set_temperature", (0.5,)),
+        ("set_top_p", (0.5,)),
+        ("set_top_k", (5,)),
+        ("set_seed", (42,)),
+        ("set_stop_sequences", ([[1, 2]],)),
+        ("set_guidance", ("regex", "[0-9]+")),
+    ],
+)
+def test_unsupported_turn_params_setters_raise(model, setter, args):
+    engine = og.Engine(model)
+    params = og.GeneratorParams(model)
+    request = engine.create_request(params)
+    turn_params = og.TurnParams(request)
+
+    with pytest.raises(RuntimeError, match="not implemented"):
+        getattr(turn_params, setter)(*args)
+
+    request.close()
+
+
 def test_request_total_limit_and_cancel_metadata(model):
     engine = og.Engine(model)
     params = og.GeneratorParams(model)
