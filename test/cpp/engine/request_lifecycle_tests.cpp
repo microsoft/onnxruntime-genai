@@ -206,7 +206,8 @@ TEST_F(RequestLifecycleTest, InvalidEosTokenIsRejected) {
     auto params = MakeGreedyParams(*model);
 
     try {
-      [[maybe_unused]] auto request = std::make_shared<Request>(params);
+      [[maybe_unused]] auto request = std::make_shared<Request>(
+          params, static_cast<size_t>(params->search.max_length));
       FAIL() << "Expected invalid eos_token_id to be rejected";
     } catch (const std::runtime_error& e) {
       EXPECT_NE(std::string(e.what()).find("eos_token_id"), std::string::npos);
@@ -222,7 +223,8 @@ TEST_F(RequestLifecycleTest, InvalidVocabSizeIsRejected) {
     auto params = std::make_shared<GeneratorParams>(config);
 
     try {
-      [[maybe_unused]] auto request = std::make_shared<Request>(params);
+      [[maybe_unused]] auto request = std::make_shared<Request>(
+          params, static_cast<size_t>(params->search.max_length));
       FAIL() << "Expected invalid vocab_size to be rejected";
     } catch (const std::runtime_error& e) {
       EXPECT_NE(std::string(e.what()).find("vocab_size must be 1 or greater"), std::string::npos);

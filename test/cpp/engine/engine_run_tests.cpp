@@ -100,6 +100,9 @@ class FailingPostProcessingDevice final : public DeviceInterface {
   std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
     return inner_.GetMemoryInfo();
   }
+  std::string GetExecutionProviderName() const override {
+    return inner_.GetExecutionProviderName();
+  }
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
     return inner_.AllocateBase(size);
   }
@@ -111,6 +114,9 @@ class FailingPostProcessingDevice final : public DeviceInterface {
   }
   std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override {
     return inner_.CreateBeam(params);
+  }
+  std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) override {
+    return inner_.CreateKeyValueCache(state);
   }
   void Synchronize() override { inner_.Synchronize(); }
 
