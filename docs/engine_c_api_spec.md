@@ -51,8 +51,6 @@ with an Engine-bound opaque `OgaRequestParams` is deferred until that ownership 
 
 ```c
 typedef struct OgaRequestOptions {
-  uint32_t struct_size;
-  uint32_t reserved; /* Must be zero. */
   uint64_t max_session_tokens; /* 0 = snapshotted generation_params.search.max_length. */
 } OgaRequestOptions;
 ```
@@ -60,10 +58,6 @@ typedef struct OgaRequestOptions {
 Rules:
 
 - `OgaRequestOptions` is a public fixed-field structure, not an opaque handle.
-- The caller zero-initializes the structure and sets `struct_size`.
-- An undersized structure is rejected before Request mutation.
-- A larger structure is accepted; unknown trailing bytes are ignored.
-- `reserved` must be zero.
 - Conversion from `uint64_t` to internal sizes is checked before mutation.
 - Null options or zero `max_session_tokens` use the Request's snapshotted
   `OgaGeneratorParams.search.max_length`. That search value normally defaults from the model context
@@ -221,8 +215,8 @@ Scheduler `max_scheduled_tokens` is not usage: it is a per-step budget shared ac
 
 `OgaEngineEvent` records are caller-allocated. The caller sets every slot's `struct_size` before
 each call. The implementation validates the complete buffer before making progress, preserves each
-size, writes no bytes beyond the Version 1 fields, and fully initializes every Version 1 field in
-the populated prefix.
+size, writes no bytes beyond the declared `OgaEngineEvent` fields, and fully initializes those
+fields in the populated prefix.
 
 Every function returning `OgaResult*` returns null on success or an owned error object on failure;
 the caller releases that object with `OgaDestroyResult`, and its diagnostic string is valid until
@@ -350,8 +344,8 @@ Turn returns true, and later calls return false.
 - The complete storage layout, including checked `event_capacity * event_stride`, is validated
   before Request reclamation, event draining, scheduling, mutation, or model progress. An invalid
   later slot therefore cannot cause partial event writes or partial Engine progress.
-- The caller's `struct_size` is preserved for every returned record. Version 1 fields are fully
-  initialized, trailing bytes are untouched, and unused slots are untouched.
+- The caller's `struct_size` is preserved for every returned record. Declared `OgaEngineEvent`
+  fields are fully initialized, trailing bytes are untouched, and unused slots are untouched.
 
 The caller-owned buffer is the public output storage, not an allocation-free guarantee for the C
 adapter: the current C implementation creates temporary internal event storage for a positive
@@ -560,7 +554,8 @@ the classic Generator parameter type.
 
 Future event fields can be appended to `OgaEngineEvent`. Callers opt in by supplying a larger
 record, setting `struct_size` to that record size, and using an aligned stride at least that large.
-Version 1 preserves the size and trailing bytes rather than assuming the extra fields exist.
+The implementation preserves the size and trailing bytes rather than assuming the extra fields
+exist.
 
 ## Language surfaces
 
@@ -574,8 +569,9 @@ Version 1 preserves the size and trailing bytes rather than assuming the extra f
 - When compiled as C++20 or later, `OgaEngine::Run(std::span<OgaEngineEvent>)` returns a
   `std::span<const OgaEngineEvent>` over the populated prefix. The C++17 wrapper still exposes
   the pointer/count overload.
-- The convenience wrapper accepts exact Version 1 storage and initializes only `struct_size` and
-  `reserved` in every reusable slot. Future-sized or padded records use the C API directly.
+- The convenience wrapper accepts standard `OgaEngineEvent` storage and initializes only
+  `struct_size` and `reserved` in every reusable slot. Future-sized or padded records use the C API
+  directly.
 - No unseen-token methods.
 
 ### Python
@@ -609,7 +605,7 @@ is part of the current source surface.
 
 ## Implemented phases
 
-1. Added fixed-width public `OgaRequestOptions`, opaque `OgaTurnParams`, renamed finish reasons, event flags,
+1. Added public `OgaRequestOptions`, opaque `OgaTurnParams`, renamed finish reasons, event flags,
    usage, and caller-sized event declarations.
 2. Implemented Turn parameter creation, supported limit snapshotting, explicit unsupported setters,
    zero-based Turn IDs, and named cancellation.
@@ -625,7 +621,7 @@ commit buildable; the completed change exposes events only.
 
 ### ABI and validation
 
-- Exact V1 sizes and offsets are asserted for supported ABIs.
+- Published sizes and offsets are asserted for supported ABIs.
 - Null positive-capacity buffers, null count pointers, misaligned buffers, short or misaligned
   strides, multiplication overflow, undersized records, `struct_size > stride`, and nonzero
   reserved fields are rejected before mutation or progress.

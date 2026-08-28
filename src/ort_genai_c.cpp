@@ -161,8 +161,8 @@ static_assert(
 
 static_assert(sizeof(OgaFinishReason) == sizeof(uint32_t));
 static_assert(sizeof(OgaErrorCode) == sizeof(uint32_t));
-static_assert(sizeof(OgaRequestOptions) == 16);
-static_assert(offsetof(OgaRequestOptions, max_session_tokens) == 8);
+static_assert(sizeof(OgaRequestOptions) == 8);
+static_assert(offsetof(OgaRequestOptions, max_session_tokens) == 0);
 static_assert(sizeof(OgaTurnUsage) == 24);
 static_assert(sizeof(OgaEngineEvent) == 64);
 static_assert(offsetof(OgaEngineEvent, request) == 8);
@@ -1585,11 +1585,6 @@ OgaResult* OgaEngineCreateRequest(
   }
   uint64_t max_session_tokens{};
   if (options) {
-    ValidateOptionsStructSize(
-        options->struct_size, sizeof(OgaRequestOptions), "OgaRequestOptions");
-    if (options->reserved != 0) {
-      throw std::runtime_error("OgaRequestOptions.reserved must be zero.");
-    }
     max_session_tokens = options->max_session_tokens;
   }
   if (max_session_tokens > std::numeric_limits<size_t>::max()) {

@@ -824,8 +824,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           [](OgaEngine& engine, PyGeneratorParams& params,
              std::optional<uint64_t> max_session_tokens) {
             if (max_session_tokens) {
-              const OgaRequestOptions options{
-                  sizeof(OgaRequestOptions), 0, *max_session_tokens};
+              const OgaRequestOptions options{*max_session_tokens};
               return engine.CreateRequest(*params.params_, &options);
             }
             return engine.CreateRequest(*params.params_);

@@ -170,13 +170,10 @@ input, continuation input, and the previously generated token replayed during co
 do not count. A later turn may begin whenever its input still leaves room for at least one generated
 token under the cumulative limit, and it may choose a different per-Turn limit.
 
-`OgaRequestOptions` is a public sized Version 1 structure, not an opaque handle. Callers
-zero-initialize it, set `struct_size`, and leave `reserved` zero. Null options and zero
+`OgaRequestOptions` is a public structure, not an opaque handle. Null options and zero
 `max_session_tokens` use the Request's snapshotted `OgaGeneratorParams.search.max_length`. That
 search value normally defaults from the model context length, but a caller may set it lower before
-Request creation. Undersized structures fail before mutation; larger structures are accepted and
-trailing bytes are ignored. `OgaTurnParams` is opaque and reusable; `BeginTurn()` snapshots
-supported values.
+Request creation. `OgaTurnParams` is opaque and reusable; `BeginTurn()` snapshots supported values.
 
 ### `Active`
 
@@ -300,15 +297,15 @@ This separation between search length and processed length is what lets each mod
 
 The low-level engine API advances through repeated calls to synchronous bulk `Run()`. The canonical
 C operation receives a caller buffer, record capacity, byte stride, and output count. The C++
-wrapper receives exact Version 1 `std::span<OgaEngineEvent>` storage and returns a const span over
-the populated prefix. Python exposes `Engine.run(max_events=1) -> list[EngineEvent]`.
+wrapper receives a `std::span<OgaEngineEvent>` and returns a const span over the populated prefix.
+Python exposes `Engine.run(max_events=1) -> list[EngineEvent]`.
 
 Every positive-capacity C call validates the complete output layout before any Request reclamation,
 event draining, scheduling, mutation, or model progress: non-null buffer and count, buffer
 alignment, minimum/aligned stride, checked capacity-times-stride, and every slot's `struct_size`
 range and zero `reserved` field. Invalid later slots therefore cause no partial writes or progress.
-Returned records preserve each caller `struct_size`, initialize every Version 1 field, and do not
-touch trailing bytes or unused slots.
+Returned records preserve each caller `struct_size`, initialize every declared `OgaEngineEvent`
+field, and do not touch trailing bytes or unused slots.
 
 Capacity zero is an owner-thread-validated no-op: the buffer may be null, stride is ignored, count
 becomes zero, and no reclamation, draining, scheduling, or model work occurs. A permanently

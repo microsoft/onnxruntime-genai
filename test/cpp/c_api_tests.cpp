@@ -924,37 +924,9 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
   EXPECT_EQ(cancelled.flags, OgaEngineEventFlag_TurnFinished);
   EXPECT_EQ(cancelled.finish_reason, OgaFinishReason_Cancelled);
 
-  struct FutureRequestOptions {
-    OgaRequestOptions options;
-    uint64_t future_field;
-  };
-  FutureRequestOptions future_request_options{
-      {sizeof(FutureRequestOptions), 0, /*max_session_tokens=*/8}, 42};
-  auto future_options_request =
-      engine->CreateRequest(*params, &future_request_options.options);
-  future_options_request->Close();
-
-  OgaRequestOptions undersized_request_options{
-      sizeof(OgaRequestOptions) - 1, 0, 8};
-  OgaRequest* raw_request = reinterpret_cast<OgaRequest*>(uintptr_t{1});
-  std::unique_ptr<OgaResult> undersized_request_options_result{
-      OgaEngineCreateRequest(
-          engine.get(), params.get(), &undersized_request_options,
-          &raw_request)};
-  ASSERT_NE(undersized_request_options_result, nullptr);
-  EXPECT_EQ(raw_request, nullptr);
-  EXPECT_NE(std::string(undersized_request_options_result->GetError()).find("struct_size is too small"),
-            std::string::npos);
-
-  OgaRequestOptions reserved_request_options{
-      sizeof(OgaRequestOptions), 1, 0};
-  std::unique_ptr<OgaResult> reserved_request_options_result{
-      OgaEngineCreateRequest(
-          engine.get(), params.get(), &reserved_request_options, &raw_request)};
-  ASSERT_NE(reserved_request_options_result, nullptr);
-  EXPECT_EQ(raw_request, nullptr);
-  EXPECT_NE(std::string(reserved_request_options_result->GetError()).find("reserved must be zero"),
-            std::string::npos);
+  const OgaRequestOptions request_options{/*max_session_tokens=*/8};
+  auto options_request = engine->CreateRequest(*params, &request_options);
+  options_request->Close();
 
   auto pending_request = engine->CreateRequest(*params);
   EXPECT_EQ(pending_request->BeginTurn(input_tokens), 0u);

@@ -994,7 +994,7 @@ struct OgaEngine : OgaAbstract {
   }
 
   /**
-   * Runs one drain-or-execute Engine operation into exact Version 1 event storage.
+   * Runs one drain-or-execute Engine operation into OgaEngineEvent storage.
    */
   size_t Run(OgaEngineEvent* storage, size_t capacity) {
     if (capacity != 0) {
@@ -1032,9 +1032,9 @@ struct OgaEngine : OgaAbstract {
 
 #if OGA_USE_SPAN
   /**
-   * Runs one drain-or-execute Engine operation into exact Version 1 event storage.
+   * Runs one drain-or-execute Engine operation into OgaEngineEvent storage.
    *
-   * This wrapper initializes only the required Version 1 slot headers. Use OgaEngineRun directly
+   * This wrapper initializes only the required slot headers. Use OgaEngineRun directly
    * for caller-defined future-sized records or padded strides.
    */
   std::span<const OgaEngineEvent> Run(std::span<OgaEngineEvent> storage) {

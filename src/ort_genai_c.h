@@ -118,17 +118,13 @@ typedef enum OgaErrorCode {
 } OgaErrorCode;
 
 /**
- * \brief Public Version 1 options copied by OgaEngineCreateRequest.
+ * \brief Public options copied by OgaEngineCreateRequest.
  *
- * Zero-initialize the structure and set struct_size to sizeof(OgaRequestOptions). reserved must
- * remain zero. Larger structures are accepted and unknown trailing bytes are ignored.
  * max_session_tokens == 0 uses the Request's snapshotted OgaGeneratorParams search.max_length.
  * That search limit normally defaults from the model context length, but the caller may set it
  * lower before Request creation.
  */
 typedef struct OgaRequestOptions {
-  uint32_t struct_size;
-  uint32_t reserved;
   uint64_t max_session_tokens;
 } OgaRequestOptions;
 
