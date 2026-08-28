@@ -155,6 +155,39 @@ def test_num_hidden_layers_truncates_configured_layer_types(monkeypatch):
     assert model.layer_types == ["linear_attention", "linear_attention"]
 
 
+def _make_paged_attention_init_model(execution_provider, io_dtype):
+    model = Model.__new__(Model)
+    model.num_attn_heads = 8
+    model.num_kv_heads = 2
+    model.head_size = 64
+    model.use_paged_attention = True
+    model.ep = execution_provider
+    model.io_dtype = io_dtype
+    model.extra_options = {}
+    model.attention_attrs = {"q_norm": False, "k_norm": False}
+    model.matmul_attrs = {"use_lora": False}
+    model.rope_attrs = {}
+    model.input_names = {"position_ids": "position_ids", "attention_metadata": "attention_metadata"}
+    return model
+
+
+def test_webgpu_paged_attention_accepts_fp16_and_keeps_metadata():
+    model = _make_paged_attention_init_model("webgpu", ir.DataType.FLOAT16)
+
+    model.make_attention_init(types.SimpleNamespace())
+
+    assert model.attention_attrs["op_type"] == "PagedAttention"
+    assert "attention_metadata" in model.input_names
+
+
+@pytest.mark.parametrize("io_dtype", [ir.DataType.FLOAT, ir.DataType.BFLOAT16])
+def test_webgpu_paged_attention_rejects_unsupported_io_dtype(io_dtype):
+    model = _make_paged_attention_init_model("webgpu", io_dtype)
+
+    with pytest.raises(NotImplementedError, match="WebGPU with FP16"):
+        model.make_attention_init(types.SimpleNamespace())
+
+
 def _load_builder_entrypoint_module():
     # `builder.py` imports the concrete model classes via `from builders import (...)`.
     # Provide a stub `builders` module so we can import the lightweight precision helpers
