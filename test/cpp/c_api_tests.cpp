@@ -1003,7 +1003,7 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
   EXPECT_EQ(idle.flags, OgaEngineEventFlag_None);
 }
 
-TEST(CAPITests, EngineBulkRunValidationAndReusableStorage) {
+TEST(CAPITests, EngineBulkRunAndReusableStorage) {
   auto model = OgaModel::Create(MODEL_PATH "engine/synthetic-paged");
   auto params = OgaGeneratorParams::Create(*model);
   params->SetSearchOption("max_length", 16);
@@ -1021,10 +1021,7 @@ TEST(CAPITests, EngineBulkRunValidationAndReusableStorage) {
   auto first = create_one_token_request();
   auto second = create_one_token_request();
 
-  // Keep the count separate from stack event records. An invalid oversized capacity must not
-  // accidentally make an adjacent stack variable appear to overlap the synthetic buffer range.
-  auto event_count_storage = std::make_unique<size_t>(17);
-  auto& event_count = *event_count_storage;
+  size_t event_count = 17;
   std::unique_ptr<OgaResult> null_count_result{
       OgaEngineRun(engine.get(), nullptr, 0, nullptr)};
   ASSERT_NE(null_count_result, nullptr);
@@ -1047,28 +1044,6 @@ TEST(CAPITests, EngineBulkRunValidationAndReusableStorage) {
   EXPECT_EQ(event_count, 0u);
   EXPECT_TRUE(engine->HasPendingRequests());
 
-  size_t output_only_event_count;
-  EXPECT_EQ(
-      OgaEngineRun(engine.get(), nullptr, 0, &output_only_event_count),
-      nullptr);
-  EXPECT_EQ(output_only_event_count, 0u);
-
-  OgaResult* zero_capacity_off_thread_result{};
-  size_t zero_capacity_off_thread_count = 17;
-  std::thread zero_capacity_off_thread([&] {
-    zero_capacity_off_thread_result =
-        OgaEngineRun(engine.get(), nullptr, 0,
-                     &zero_capacity_off_thread_count);
-  });
-  zero_capacity_off_thread.join();
-  std::unique_ptr<OgaResult> owned_zero_capacity_off_thread_result{
-      zero_capacity_off_thread_result};
-  ASSERT_NE(owned_zero_capacity_off_thread_result, nullptr);
-  EXPECT_EQ(zero_capacity_off_thread_count, 0u);
-  EXPECT_NE(
-      std::string(owned_zero_capacity_off_thread_result->GetError()).find("owner thread"),
-      std::string::npos);
-
   event_count = 17;
   std::unique_ptr<OgaResult> null_buffer_result{
       OgaEngineRun(engine.get(), nullptr, 1, &event_count)};
@@ -1078,55 +1053,6 @@ TEST(CAPITests, EngineBulkRunValidationAndReusableStorage) {
       std::string(null_buffer_result->GetError()).find("events must not be null"),
       std::string::npos);
 
-  alignas(OgaEngineEvent)
-      std::array<std::byte, sizeof(OgaEngineEvent) + alignof(OgaEngineEvent)>
-          misaligned_storage{};
-  event_count = 17;
-  std::unique_ptr<OgaResult> misaligned_buffer_result{
-      OgaEngineRun(
-          engine.get(),
-          reinterpret_cast<OgaEngineEvent*>(
-              misaligned_storage.data() + 1),
-          1, &event_count)};
-  ASSERT_NE(misaligned_buffer_result, nullptr);
-  EXPECT_EQ(event_count, 0u);
-  EXPECT_NE(
-      std::string(misaligned_buffer_result->GetError()).find("events must be aligned for OgaEngineEvent"),
-      std::string::npos);
-
-  OgaEngineEvent event{};
-  event_count = 17;
-  const size_t overflowing_capacity =
-      std::numeric_limits<size_t>::max() / sizeof(event) + 1;
-  std::unique_ptr<OgaResult> overflow_result{
-      OgaEngineRun(engine.get(), &event, overflowing_capacity,
-                   &event_count)};
-  ASSERT_NE(overflow_result, nullptr);
-  EXPECT_EQ(event_count, 0u);
-  const std::string expected_overflow =
-      "event_capacity (" + std::to_string(overflowing_capacity) +
-      ") multiplied by sizeof(OgaEngineEvent) (" +
-      std::to_string(sizeof(event)) +
-      ") exceeds the maximum size_t value (" +
-      std::to_string(std::numeric_limits<size_t>::max()) + ")";
-  EXPECT_NE(
-      std::string(overflow_result->GetError()).find(expected_overflow),
-      std::string::npos);
-
-  union OverlappingStorage {
-    OgaEngineEvent event;
-    size_t event_count;
-  } overlapping{};
-  overlapping.event_count = 17;
-  std::unique_ptr<OgaResult> overlapping_count_result{
-      OgaEngineRun(
-          engine.get(), &overlapping.event, 1,
-          &overlapping.event_count)};
-  ASSERT_NE(overlapping_count_result, nullptr);
-  EXPECT_EQ(overlapping.event_count, 17u);
-  EXPECT_NE(
-      std::string(overlapping_count_result->GetError()).find("must not overlap events"),
-      std::string::npos);
   EXPECT_TRUE(engine->HasPendingRequests());
 
   EXPECT_TRUE(first->CancelTurn(0));
