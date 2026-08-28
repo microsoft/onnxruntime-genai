@@ -105,9 +105,9 @@ jobs:
           config = json.loads(config_path.read_text(encoding="utf-8"))
           dynamic_batching = config["engine"]["dynamic_batching"]
           previous = dynamic_batching.get("gpu_utilization_factor")
-          dynamic_batching["gpu_utilization_factor"] = 0.3
+          dynamic_batching["gpu_utilization_factor"] = 0.5
           config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
-          print(f"{config_path}: gpu_utilization_factor {previous} -> 0.3")
+          print(f"{config_path}: gpu_utilization_factor {previous} -> 0.5")
       PY
     displayName: 'Limit benchmark KV-cache allocation'
 

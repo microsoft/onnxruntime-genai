@@ -97,6 +97,11 @@ ScenarioExecutionOutput ContinuationScenario::Execute(const ScenarioConfig& conf
       params.back()->SetSearchOption("random_seed", kRandomSeed + i);
       initial_prompts.push_back(MakeSequences(request_tokens[request_index]));
       requests.emplace_back(OgaRequest::Create(*params.back()));
+      // Creating the request with max_session_tokens reserves enough sequence storage for the
+      // whole conversation. Before starting the first turn, lower max_length so this response
+      // generates only generation_tokens instead of consuming the budget for all later turns.
+      params.back()->SetSearchOption(
+          "max_length", static_cast<double>(base_prompt_count + config.generation_tokens));
       requests.back()->AddTokens(*initial_prompts.back());
       requests.back()->SetOpaqueData(&request_tokens[request_index]);
       engineResources.engine->Add(*requests.back());
@@ -172,6 +177,18 @@ ScenarioExecutionOutput ContinuationScenario::Execute(const ScenarioConfig& conf
             throw std::runtime_error(Name() + ": no generated tokens available for continuation");
           }
           continuation_prompts.push_back(MakeSequences(generated_segments[request_index]));
+          // max_length is the limit for the complete sequence, not just the next response. Each
+          // time we continue, the sequence grows by the generated tokens from the previous turn.
+          // Increase the limit to include those continuation tokens and leave room for another
+          // generation_tokens response. The request keeps using the full buffer reserved above.
+          const size_t next_turn_max_length =
+              request_tokens[request_index].size() + generated_segments[request_index].size() +
+              static_cast<size_t>(config.generation_tokens);
+          if (next_turn_max_length > max_session_tokens) {
+            throw std::runtime_error(Name() + ": continuation exceeded preallocated session capacity");
+          }
+          params[request_index]->SetSearchOption(
+              "max_length", static_cast<double>(next_turn_max_length));
           requests[request_index]->Continue(*continuation_prompts.back());
           request_tokens[request_index].insert(
               request_tokens[request_index].end(), generated_segments[request_index].begin(),
