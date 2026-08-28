@@ -174,6 +174,9 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
   }
 
   std::unique_ptr<Dflash2Drafter> dflash2_drafter;
+  std::shared_ptr<Dflash2Model> dflash2_model;
+  size_t dflash2_bytes_per_block = 0;
+  size_t dflash2_max_batch_size = 0;
   if (!model->config_->model.dflash2.filename.empty()) {
     if (!model->config_->engine.dynamic_batching) {
       throw std::runtime_error("An Engine-hosted DFlash 2 drafter requires dynamic batching.");
@@ -195,20 +198,33 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
 
     const auto& batching = *model->config_->engine.dynamic_batching;
     const size_t paged_block_size = static_cast<size_t>(batching.block_size);
-    auto dflash2_model = std::make_shared<Dflash2Model>(
+    dflash2_max_batch_size = static_cast<size_t>(batching.max_batch_size);
+    dflash2_model = std::make_shared<Dflash2Model>(
         CreateDflash2Config(*model->config_), GetOrtEnv());
     ValidateDflash2ModelCompatibility(
         *model->config_, model->session_info_, dflash2_model->session_info_);
-    // Built before the main pool so the pool's free-memory measurement already excludes it. The
-    // drafter is windowed, so its footprint depends on the batch size, not the context length.
-    dflash2_drafter = std::make_unique<Dflash2Drafter>(
-        dflash2_model, paged_block_size,
-        Dflash2Drafter::PoolBlocks(*model->config_, paged_block_size,
-                                   static_cast<size_t>(batching.max_batch_size)));
+    const size_t pool_blocks = Dflash2Drafter::PoolBlocks(
+        *model->config_, paged_block_size, dflash2_max_batch_size);
+    if (pool_blocks != 0) {
+      // A windowed drafter's fixed batch-scaled pool is visible to the target's free-memory probe.
+      dflash2_drafter = std::make_unique<Dflash2Drafter>(
+          dflash2_model, paged_block_size, pool_blocks);
+    } else {
+      // A full-attention drafter mirrors the target pool and is billed per target block.
+      dflash2_bytes_per_block =
+          Dflash2Drafter::BytesPerBlock(*model->config_, paged_block_size);
+    }
   }
 
   std::shared_ptr<CacheManager> cache_manager =
-      CacheManager::Create(model, mtp_bytes_per_block);
+      CacheManager::Create(model, mtp_bytes_per_block + dflash2_bytes_per_block);
+  if (dflash2_model && !dflash2_drafter) {
+    // The query block can spill one block beyond committed target context per active request.
+    dflash2_drafter = std::make_unique<Dflash2Drafter>(
+        dflash2_model,
+        static_cast<size_t>(model->config_->engine.dynamic_batching->block_size),
+        cache_manager->Snapshot().total_blocks + dflash2_max_batch_size);
+  }
   auto scheduler = Scheduler::Create(model, cache_manager);
   auto model_executor = ModelExecutor::Create(model, cache_manager);
 
