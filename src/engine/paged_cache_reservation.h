@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include "../span.h"
@@ -13,11 +14,40 @@
 
 namespace Generators {
 
-struct PagedCacheBlockTable {
-  const void* request_id{};
-  size_t committed_slots{};
-  std::vector<std::shared_ptr<Block>> blocks;
-  std::vector<std::shared_ptr<Block>> window_blocks;
+struct PagedKeyValueCache;
+
+class PagedCacheBlockTable {
+ public:
+  PagedCacheBlockTable() = default;
+  explicit PagedCacheBlockTable(
+      const void* request_id,
+      size_t committed_slots,
+      std::vector<std::shared_ptr<Block>> blocks = {},
+      std::vector<std::shared_ptr<Block>> window_blocks = {})
+      : request_id_{request_id},
+        committed_slots_{committed_slots},
+        blocks_{std::move(blocks)},
+        window_blocks_{std::move(window_blocks)} {}
+  PagedCacheBlockTable(const PagedCacheBlockTable&) = default;
+  PagedCacheBlockTable(PagedCacheBlockTable&&) noexcept = default;
+  PagedCacheBlockTable& operator=(const PagedCacheBlockTable& other);
+  PagedCacheBlockTable& operator=(PagedCacheBlockTable&& other) noexcept;
+
+  const void* RequestId() const { return request_id_; }
+  size_t CommittedSlots() const { return committed_slots_; }
+  const std::vector<std::shared_ptr<Block>>& Blocks() const { return blocks_; }
+  const std::vector<std::shared_ptr<Block>>& WindowBlocks() const { return window_blocks_; }
+  uint64_t MutationGeneration() const { return mutation_generation_; }
+
+ private:
+  friend class PagedCacheReservation;
+  friend struct PagedKeyValueCache;
+
+  const void* request_id_{};
+  size_t committed_slots_{};
+  std::vector<std::shared_ptr<Block>> blocks_;
+  std::vector<std::shared_ptr<Block>> window_blocks_;
+  uint64_t mutation_generation_{};
 };
 
 struct PagedCacheReservationRequest {
@@ -32,12 +62,14 @@ struct PagedCacheReservationRequest {
 struct PagedCacheReservationDelta {
   const void* request_id{};
   size_t committed_slots{};
+  uint64_t table_generation{};
   size_t target_slots{};
-  size_t tail_slots_to_consume{};
   size_t reserved_block_offset{};
   size_t reserved_block_count{};
   size_t reserved_window_block_offset{};
   size_t reserved_window_block_count{};
+  size_t advance_block_offset{};
+  size_t advance_block_count{};
   bool newly_admitted{};
 };
 
@@ -83,12 +115,37 @@ class PagedCacheReservation {
   void FillWindowBlockTable(std::span<const void* const> request_ids,
                             size_t columns,
                             std::span<int32_t> output) const;
+  // Validates every precondition this reservation's own CommitValidated relies on, without
+  // mutating any state. For a reservation that still satisfies the publish contract it is the only
+  // part of committing expected to fail under the Engine's serialized transaction contract.
+  void ValidateCommit() const;
+  // Publishes a reservation that ValidateCommit has already accepted. For a single reservation it
+  // moves preallocated blocks and tables into the committed cache and performs no fallible
+  // allocation or device work. Before mutation it preflights every delta again using only
+  // allocation-free state, ownership, generation, boundary, and occupancy checks. See the
+  // implementation for why it is intentionally not marked noexcept.
+  void CommitValidated();
+  // Convenience wrapper preserving the original single-call contract: ValidateCommit then
+  // CommitValidated.
   void Commit();
   void Release();
 
  private:
+  struct ResidentTableSnapshot {
+    const void* request_id{};
+    size_t committed_slots{};
+    uint64_t mutation_generation{};
+    const std::shared_ptr<Block>* blocks_data{};
+    size_t block_count{};
+    const std::shared_ptr<Block>* window_blocks_data{};
+    size_t window_block_count{};
+  };
+
   const PagedCacheBlockTable* FindCommittedTable(const void* request_id) const;
   const PagedCacheReservationDelta& FindDelta(const void* request_id) const;
+  void ValidateResidentTablesUnchanged() const;
+  void ValidateAdvancePreconditions(const PagedCacheReservationDelta& delta,
+                                    const PagedCacheBlockTable& table) const;
   void AdvanceCommittedSlots(PagedCacheBlockTable& table, size_t target_slots);
 
   BlockPool* block_pool_{};
@@ -99,6 +156,10 @@ class PagedCacheReservation {
   std::vector<std::shared_ptr<Block>> reserved_window_blocks_;
   std::vector<PagedCacheReservationDelta> deltas_;
   std::vector<PagedCacheBlockTable> new_tables_;
+  std::vector<const Block*> advance_blocks_;
+  std::vector<ResidentTableSnapshot> resident_table_snapshots_;
+  uint64_t block_pool_generation_{};
+  uint64_t window_block_pool_generation_{};
   PagedCacheReservationState state_{PagedCacheReservationState::Released};
 };
 

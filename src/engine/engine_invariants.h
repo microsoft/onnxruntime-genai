@@ -51,7 +51,6 @@ struct RequestReservationSnapshot {
   const void* request_id{nullptr};
   size_t committed_slots{};
   size_t target_slots{};
-  size_t tail_slots_to_consume{};
   std::vector<size_t> reserved_block_ids;
 };
 

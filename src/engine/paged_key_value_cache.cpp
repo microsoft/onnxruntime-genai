@@ -291,20 +291,20 @@ void PagedKeyValueCache::Add(std::shared_ptr<Request> request) {
 bool PagedKeyValueCache::CanAppendTokens(std::shared_ptr<Request> request) const {
   const auto block_table_it = std::find_if(block_tables_.begin(), block_tables_.end(),
                                            [&request](const PagedCacheBlockTable& block_table) {
-                                             return block_table.request_id == request.get();
+                                             return block_table.request_id_ == request.get();
                                            });
   if (block_table_it == block_tables_.end()) {
     throw std::runtime_error("Given request is not found in the cache.");
   }
 
   const size_t required_slots = RequiredSlots(request);
-  const size_t used_slots = block_table_it->committed_slots;
+  const size_t used_slots = block_table_it->committed_slots_;
   if (required_slots <= used_slots) {
     return true;
   }
 
   const size_t num_slots_available =
-      block_table_it->blocks.size() * block_pool_->BlockSize() - used_slots +
+      block_table_it->blocks_.size() * block_pool_->BlockSize() - used_slots +
       block_pool_->AvailableBlocks() * block_pool_->BlockSize();
 
   return num_slots_available >= required_slots - used_slots;
@@ -325,33 +325,42 @@ void PagedKeyValueCache::AppendTokens(std::shared_ptr<Request> request) {
 
   const auto block_table_it = std::find_if(block_tables_.begin(), block_tables_.end(),
                                            [&request](const PagedCacheBlockTable& block_table) {
-                                             return block_table.request_id == request.get();
+                                             return block_table.request_id_ == request.get();
                                            });
   assert(block_table_it != block_tables_.end());
 
   const size_t required_slots = RequiredSlots(request);
-  const size_t used_slots = block_table_it->committed_slots;
-  assert(UsedSlots(block_table_it->blocks) == used_slots);
+  const size_t used_slots = block_table_it->committed_slots_;
+  assert(UsedSlots(block_table_it->blocks_) == used_slots);
   assert(used_slots == static_cast<size_t>(request->ProcessedSequenceLength()));
   if (required_slots <= used_slots) {
     return;
   }
-  size_t num_slots = required_slots - used_slots;
+  const size_t growth = required_slots - used_slots;
+  const size_t committed_capacity =
+      block_table_it->blocks_.size() * block_pool_->BlockSize();
+  const size_t tail_capacity = committed_capacity - used_slots;
+  const size_t new_slots = growth > tail_capacity ? growth - tail_capacity : 0;
+  const size_t new_block_count = block_pool_->BlocksNeeded(new_slots);
 
+  // Complete every fallible allocation before changing existing block occupancy.
+  block_table_it->blocks_.reserve(
+      block_table_it->blocks_.size() + new_block_count);
+  auto allocated_blocks = block_pool_->AllocateBlocks(new_slots);
+
+  size_t num_slots = growth - new_slots;
   size_t block_index = used_slots / block_pool_->BlockSize();
-  while (num_slots > 0 && block_index < block_table_it->blocks.size()) {
-    auto& block = block_table_it->blocks[block_index++];
+  while (num_slots > 0 && block_index < block_table_it->blocks_.size()) {
+    auto& block = block_table_it->blocks_[block_index++];
     const size_t slots = std::min(num_slots, block->EmptySlots());
     block->AddSlots(slots);
     num_slots -= slots;
   }
-
-  if (num_slots > 0) {
-    auto allocated_blocks = block_pool_->AllocateBlocks(num_slots);
-    std::move(allocated_blocks.begin(), allocated_blocks.end(),
-              std::back_inserter(block_table_it->blocks));
-  }
-  block_table_it->committed_slots = required_slots;
+  std::move(allocated_blocks.begin(), allocated_blocks.end(),
+            std::back_inserter(block_table_it->blocks_));
+  block_table_it->committed_slots_ = required_slots;
+  ++block_table_it->mutation_generation_;
+  block_pool_->RecordOccupancyMutation();
 }
 
 void PagedKeyValueCache::Remove(std::shared_ptr<Request> request) {
@@ -397,14 +406,14 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
   // through, holding the blocks it already took. PagedCacheReservation reserves the same blocks.
   const auto calculate_growth = [&](const RequestStepPlan& entry,
                                     const PagedCacheBlockTable* table) {
-    const size_t committed_slots = table ? table->committed_slots : 0;
+    const size_t committed_slots = table ? table->committed_slots_ : 0;
     if (entry.target_cache_slots < committed_slots) {
       throw std::runtime_error("Step plan target precedes the committed cache boundary.");
     }
 
     const size_t reserved_slots =
         std::max(entry.whole_sequence_cache_slots, entry.target_cache_slots);
-    const size_t committed_blocks = table ? table->blocks.size() : 0;
+    const size_t committed_blocks = table ? table->blocks_.size() : 0;
     const size_t committed_capacity = committed_blocks * block_pool_->BlockSize();
     const size_t additional_slots =
         reserved_slots > committed_capacity ? reserved_slots - committed_capacity : 0;
@@ -432,7 +441,7 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
   const auto find_table = [this](const void* request_id) {
     const auto it = std::find_if(block_tables_.begin(), block_tables_.end(),
                                  [request_id](const PagedCacheBlockTable& table) {
-                                   return table.request_id == request_id;
+                                   return table.request_id_ == request_id;
                                  });
     return it == block_tables_.end() ? nullptr : &*it;
   };
@@ -529,9 +538,9 @@ PagedCacheSnapshot PagedKeyValueCache::Snapshot() const {
   snapshot.requests.reserve(block_tables_.size());
   for (const auto& block_table : block_tables_) {
     RequestBlockSnapshot request_snapshot;
-    request_snapshot.request_id = block_table.request_id;
-    request_snapshot.block_ids.reserve(block_table.blocks.size());
-    for (const auto& block : block_table.blocks) {
+    request_snapshot.request_id = block_table.request_id_;
+    request_snapshot.block_ids.reserve(block_table.blocks_.size());
+    for (const auto& block : block_table.blocks_) {
       request_snapshot.block_ids.push_back(block->Id());
       request_snapshot.used_slots += block->Size();
       request_snapshot.empty_slots += block->EmptySlots();
@@ -545,9 +554,9 @@ PagedCacheSnapshot PagedKeyValueCache::Snapshot() const {
     snapshot.window_blocks.requests.reserve(block_tables_.size());
     for (const auto& block_table : block_tables_) {
       RequestBlockSnapshot request_snapshot;
-      request_snapshot.request_id = block_table.request_id;
-      request_snapshot.block_ids.reserve(block_table.window_blocks.size());
-      for (const auto& block : block_table.window_blocks) {
+      request_snapshot.request_id = block_table.request_id_;
+      request_snapshot.block_ids.reserve(block_table.window_blocks_.size());
+      for (const auto& block : block_table.window_blocks_) {
         request_snapshot.block_ids.push_back(block->Id());
       }
       snapshot.window_blocks.requests.push_back(std::move(request_snapshot));
@@ -575,7 +584,6 @@ PagedCacheSnapshot PagedKeyValueCache::Snapshot(
     request_reservation.request_id = delta.request_id;
     request_reservation.committed_slots = delta.committed_slots;
     request_reservation.target_slots = delta.target_slots;
-    request_reservation.tail_slots_to_consume = delta.tail_slots_to_consume;
     request_reservation.reserved_block_ids.reserve(
         delta.reserved_block_count);
     for (size_t i = 0; i < delta.reserved_block_count; ++i) {
@@ -618,7 +626,7 @@ void PagedKeyValueCache::FillBlockTables(const std::vector<std::shared_ptr<Reque
   for (auto& block_table : block_tables_) {
     auto it = std::find_if(requests.begin(), requests.end(),
                            [&block_table](const std::shared_ptr<Request>& request) {
-                             return request.get() == block_table.request_id;
+                             return request.get() == block_table.request_id_;
                            });
     if (it == requests.end()) {
       throw std::runtime_error("Given request is not found in the cache. Please add it before requesting block tables.");
@@ -629,16 +637,16 @@ void PagedKeyValueCache::FillBlockTables(const std::vector<std::shared_ptr<Reque
       // Repeat the ring across every column. There is nothing to pad: whichever column the
       // operator reaches for, the ring block it names is the one holding that position.
       for (size_t j = 0; j < columns; ++j) {
-        const auto& block = block_table.window_blocks[WindowRingColumn(j, window_ring_blocks_)];
+        const auto& block = block_table.window_blocks_[WindowRingColumn(j, window_ring_blocks_)];
         data[index * columns + j] = static_cast<int32_t>(block->Id());
       }
       continue;
     }
 
-    for (size_t j = 0; j < block_table.blocks.size(); ++j) {
-      data[index * columns + j] = static_cast<int32_t>(block_table.blocks[j]->Id());
+    for (size_t j = 0; j < block_table.blocks_.size(); ++j) {
+      data[index * columns + j] = static_cast<int32_t>(block_table.blocks_[j]->Id());
     }
-    for (size_t j = block_table.blocks.size(); j < columns; ++j) {
+    for (size_t j = block_table.blocks_.size(); j < columns; ++j) {
       data[index * columns + j] = block_tables_pad_value;
     }
   }
@@ -649,9 +657,9 @@ std::pair<OrtValue*, const char*> PagedKeyValueCache::BlockTables(const std::vec
   for (auto& block_table : block_tables_) {
     if (std::find_if(requests.begin(), requests.end(),
                      [&block_table](const std::shared_ptr<Request>& request) {
-                       return request.get() == block_table.request_id;
+                       return request.get() == block_table.request_id_;
                      }) != requests.end()) {
-      max_blocks = std::max(max_blocks, block_table.blocks.size());
+      max_blocks = std::max(max_blocks, block_table.blocks_.size());
     } else {
       throw std::runtime_error("Given request is not found in the cache. Please add it before requesting block tables.");
     }

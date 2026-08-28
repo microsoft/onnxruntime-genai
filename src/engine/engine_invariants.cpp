@@ -124,11 +124,6 @@ std::vector<InvariantViolation> ValidateCacheInvariants(const PagedCacheSnapshot
       add("Request " + PtrId(reservation.request_id) +
           " transaction target precedes its committed slot boundary.");
     }
-    if (reservation.tail_slots_to_consume >
-        reservation.target_slots - reservation.committed_slots) {
-      add("Request " + PtrId(reservation.request_id) +
-          " transaction tail-slot growth exceeds total growth.");
-    }
     for (const size_t block_id : reservation.reserved_block_ids) {
       if (reserved_blocks.find(block_id) == reserved_blocks.end()) {
         add("Request " + PtrId(reservation.request_id) +

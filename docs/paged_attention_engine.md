@@ -586,6 +586,33 @@ A request's `PagedCacheBlockTable` owns these blocks. The table records:
 
 Every physical block must be in exactly one of these states. The invariant helpers under `engine_invariants.*` validate total accounting, single ownership, valid block identifiers, reservation accounting, and consistency between request progress and cache progress.
 
+Paged-cache publication exposes a validate/publish split for the composite transaction introduced
+by the next Engine integration step. The current Engine continues to use the `Commit()` convenience
+wrapper.
+`ValidateCommit()` is repeatable and mutates nothing; it verifies request ownership, token
+boundaries and scalar table/pool mutation generations, unique committed request tables, empty
+reserved blocks, reserved-span accounting, touched-block mappings and occupancy, resident window
+rings, and preallocated vector capacity. It also snapshots every committed resident table in order,
+including requests omitted from the step, and requires its request identity, generation, block
+mapping storage, committed-token boundary, and full/window mapping sizes to remain unchanged
+through publication. Table replacement advances the destination generation even when vector
+storage is reused. These
+checks are independent of already-committed context blocks; their work is proportional to resident
+request tables, scheduled requests, current growth, and the fixed window ring.
+`CommitValidated()` allocation-free preflights every resident snapshot, delta, and captured growth
+mapping again before publishing the already-validated block handles and advancing committed slots.
+`Commit()` remains the single-reservation convenience wrapper that calls both phases.
+
+A future composite transaction must validate every participating state reservation before
+publishing any of them. Changing cache ownership, slot occupancy, block identity, or vector
+headroom after validation invalidates the publish preconditions and is a fatal
+transaction-contract error. A transaction must aggregate all paged-cache changes that share a
+block pool into one `PagedCacheReservation`. This is a caller-enforced precondition: pool
+generations reject overlapping reservations that allocate, free, or advance block occupancy.
+`Block` identity and occupancy cannot be assigned through exposed handles; only the pool, cache,
+and reservation mutation paths can advance occupancy, and each records the change in the pool
+generation.
+
 ## Sliding-window paged layers
 
 The runtime can store selected sliding-window layers in a fixed ring instead of growing their KV
