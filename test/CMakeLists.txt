@@ -16,6 +16,11 @@ file(GLOB test_srcs CONFIGURE_DEPENDS
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/reinit_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/search_checkpoint_tests.cpp")
 
+# unit_tests links the shared library, which exports only the public C API on Windows. The stop
+# string matcher is a self-contained internal component (no ORT, no genai dependencies), so compile
+# its translation unit directly into the test binary rather than relying on exported symbols.
+list(APPEND test_srcs "${CMAKE_SOURCE_DIR}/src/stop_string_matcher.cpp")
+
 if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)
   message(STATUS "Including CUDA kernel tests in the build.")
   file(GLOB cuda_kernel_test_srcs CONFIGURE_DEPENDS
