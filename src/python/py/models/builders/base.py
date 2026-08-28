@@ -612,6 +612,17 @@ class Model:
         self.include_hidden_states = self.extra_options.get("include_hidden_states", False)
         self.prune_lm_head = self.extra_options.get("prune_lm_head", False)
 
+        # Auxiliary hidden states for an EAGLE3/DFlash-style drafter. Entry `i` is the residual
+        # stream *entering* decoder layer i, which only exists as a tensor inside layer i's skip
+        # layer norm -- taking the layer boundary instead is an off-by-one that silently yields a
+        # drafter whose acceptance rate saturates at 1.000.
+        self.aux_hidden_state_layers = [
+            int(layer_id)
+            for layer_id in str(self.extra_options.get("aux_hidden_state_layers", "")).replace(" ", "").split(",")
+            if layer_id
+        ]
+        self.aux_hidden_state_taps = {}
+
         if self.prune_lm_head and self.exclude_lm_head:
             self.prune_lm_head = False
 
@@ -625,6 +636,19 @@ class Model:
 
         if not (self.include_hidden_states or self.exclude_lm_head):
             del self.output_names["hidden_states"]
+
+        if self.aux_hidden_state_layers:
+            invalid = [i for i in self.aux_hidden_state_layers if not 1 <= i < self.num_layers]
+            if invalid:
+                raise ValueError(
+                    f"aux_hidden_state_layers {invalid} are outside [1, {self.num_layers}); entry i is the "
+                    "residual stream entering decoder layer i."
+                )
+            self.output_names["aux_hidden_states"] = "aux_hidden_states"
+            self.output_types["aux_hidden_states"] = self.io_dtype
+            self.output_shapes["aux_hidden_states"] = self.make_hidden_state_shape(
+                last_dim=self.hidden_size * len(self.aux_hidden_state_layers)
+            )
 
         if self.exclude_lm_head:
             del self.output_names["logits"]
@@ -2620,6 +2644,9 @@ class Model:
 
             # Assign output 3 of current SkipLayerNorm as root input to next SkipLayerNorm
             self.layernorm_attrs["root_input"] = output_3
+
+            if location == "input" and layer_id in self.aux_hidden_state_layers:
+                self.aux_hidden_state_taps[layer_id] = (outputs[3], new_io_dtype)
 
     def make_layernorm_casts(self, name, inputs, outputs, old_dtype, new_dtype):
         # Name = name of original LayerNorm op as if the cast nodes did not exist
@@ -5267,6 +5294,7 @@ class Model:
                     self.make_lm_head(module)
 
         # Make post-processing nodes
+        self.make_aux_hidden_states()
         self.make_postprocessing_nodes()
 
         del self.weights
@@ -5746,6 +5774,28 @@ class Model:
         # For most cases, position_ids are already properly formatted as 2D tensors
         # with int64 values matching input_ids shape, so we can use them directly
         return self.input_names["position_ids"]
+
+    def make_aux_hidden_states(self):
+        """Concatenate the tapped residual streams into the ``aux_hidden_states`` output."""
+        if not self.aux_hidden_state_layers:
+            return
+
+        missing = [i for i in self.aux_hidden_state_layers if i not in self.aux_hidden_state_taps]
+        if missing:
+            raise ValueError(f"No residual-stream tap was emitted for aux_hidden_state_layers {missing}.")
+
+        inputs = []
+        for layer_id in self.aux_hidden_state_layers:
+            name, dtype = self.aux_hidden_state_taps[layer_id]
+            if dtype != self.io_dtype:
+                cast_name = f"/model/aux_hidden_states/{layer_id}/Cast"
+                self.make_cast(cast_name, name, self.io_dtype, shape=self.make_hidden_state_shape())
+                name = f"{cast_name}/output_0"
+            inputs.append(name)
+
+        output = self.output_names["aux_hidden_states"]
+        self.make_node("Concat", inputs=inputs, outputs=[output], name="/model/aux_hidden_states/Concat", axis=-1)
+        self.make_value(output, self.io_dtype, shape=self.output_shapes["aux_hidden_states"])
 
     def make_postprocessing_nodes(self):
         # For most models, no postprocessing subgraph is needed

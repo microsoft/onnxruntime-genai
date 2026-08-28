@@ -731,6 +731,10 @@ def get_args():
                 include_hidden_states = Include hidden states as output from your ONNX model.
                     Use this option when you want to have the hidden states as an output from your ONNX model.
                     In addition to `logits`, you will have `hidden_states` as an output to your ONNX model.
+                aux_hidden_state_layers = Comma-separated decoder layer indices whose incoming residual
+                    streams are concatenated into an extra `aux_hidden_states` output, for a speculative
+                    block drafter such as EAGLE3 or DFlash. Entry `i` is the residual stream entering
+                    layer i, so indices must lie in [1, num_hidden_layers). Default is empty (disabled).
                 mtp_quant_config = JSON object/file: Configure MTP I/O, dense weights, MoE, and runtime using the
                     structured QuantConfig schema independently from the main model.
                 state_window = Widen Qwen3.6 recurrent/conv state I/O to [W, B, ...]. Default is 0 (disabled).
