@@ -21,6 +21,26 @@ import torch
 from safetensors.torch import load_file
 
 
+def normalize_vlm_weight_name(name):
+    """Normalize a checkpoint tensor key for VLM/Quark conventions.
+
+    Returns None if the tensor should be skipped (vision-tower weights), or
+    the normalized key string otherwise.
+    """
+    # Skip vision tower weights in VLM checkpoints
+    if name.startswith(("model.visual.", "model.vision.", "visual.")):
+        return None
+    # Normalize common VLM prefix so existing LLM regex + parsing keeps working
+    if name.startswith("model.language_model."):
+        name = "model." + name[len("model.language_model."):]
+    # Normalize Quark weight_quantizer.* naming to flat weight_* naming
+    name = name.replace(".weight_quantizer.scale", ".weight_scale")
+    name = name.replace(".weight_quantizer.zero_point", ".weight_zero_point")
+    # Normalize quant_auto .zeros suffix to .qzeros
+    name = re.sub(r'\.zeros$', '.qzeros', name)
+    return name
+
+
 class QuantizedTensorModule:
     def __init__(self):
         self.qweight = None
@@ -271,6 +291,9 @@ class QuantizedModel:
 
                     if name == "model.embed_tokens.weight" or name == "transformer.embedding.word_embeddings.weight":
                         self.embedding.weight = tensor
+                    elif name in {"model.embed_tokens.scales", "model.embed_tokens.qzeros", "model.embed_tokens.g_idx"}:
+                        # Embedding quantization params (quant_auto with tied weights); skip — embedding lookup uses float weights
+                        continue
                     elif name == "model.norm.weight" or name == "transformer.encoder.final_layernorm.weight":
                         self.final_norm.weight = tensor
                     elif name == "model.norm.bias" or name == "transformer.encoder.final_layernorm.bias":
@@ -518,8 +541,8 @@ class QuantizedModel:
                             # model.layers.layer_id.self_attention.query_key_value.qweight
                             # model.layers.layer_id.self_attn.qkv_proj.weight
                             # model.layers.layer_id.self_attention.query_key_value.weight
-                            if quant_type == "olive":
-                                # Olive: (out_features, in_features), split on dim=0
+                            if quant_type in {"olive", "quant_auto"}:
+                                # Olive/QAT: (out_features, in_features), split on dim=0
                                 tensor_map["self_attn.q_proj.qweight"] = tensor[:q_size, :]
                                 tensor_map["self_attn.k_proj.qweight"] = tensor[q_size : q_size + kv_size, :]
                                 tensor_map["self_attn.v_proj.qweight"] = tensor[q_size + kv_size :, :]
@@ -540,7 +563,18 @@ class QuantizedModel:
                             # model.layers.layer_id.self_attention.query_key_value.scales
                             # model.layers.layer_id.self_attn.qkv_proj.weight_scale
                             # model.layers.layer_id.self_attention.query_key_value.weight_scale
-                            if quant_type == "olive":
+                            if quant_type == "quant_auto":
+                                # quant_auto: scales stored as (out*n_groups, 1) in output-first flat order.
+                                # Split flat along dim=0 at q_size*ng and kv_size*ng boundaries to keep
+                                # each slice in (out_i*n_groups, 1) flat form so pack_ort_format preserves order.
+                                qkv_out = q_size + kv_size + kv_size
+                                ng = tensor.shape[0] // qkv_out
+                                q_rows  = q_size  * ng
+                                kv_rows = kv_size * ng
+                                tensor_map["self_attn.q_proj.scales"] = tensor[:q_rows, :]
+                                tensor_map["self_attn.k_proj.scales"] = tensor[q_rows : q_rows + kv_rows, :]
+                                tensor_map["self_attn.v_proj.scales"] = tensor[q_rows + kv_rows :, :]
+                            elif quant_type == "olive":
                                 # Olive: (out_features, num_groups), split on dim=0
                                 tensor_map["self_attn.q_proj.scales"] = tensor[:q_size, :]
                                 tensor_map["self_attn.k_proj.scales"] = tensor[q_size : q_size + kv_size, :]
@@ -567,6 +601,15 @@ class QuantizedModel:
                                 tensor_map["self_attn.q_proj.qzeros"] = tensor[:q_dim, :]
                                 tensor_map["self_attn.k_proj.qzeros"] = tensor[q_dim : q_dim + kv_dim, :]
                                 tensor_map["self_attn.v_proj.qzeros"] = tensor[q_dim + kv_dim :, :]
+                            elif quant_type == "quant_auto":
+                                # quant_auto: zeros stored as (out*n_groups, 1) in output-first flat order.
+                                qkv_out = q_size + kv_size + kv_size
+                                ng = tensor.shape[0] // qkv_out
+                                q_rows  = q_size  * ng
+                                kv_rows = kv_size * ng
+                                tensor_map["self_attn.q_proj.qzeros"] = tensor[:q_rows, :]
+                                tensor_map["self_attn.k_proj.qzeros"] = tensor[q_rows : q_rows + kv_rows, :]
+                                tensor_map["self_attn.v_proj.qzeros"] = tensor[q_rows + kv_rows :, :]
                             else:
                                 # AWQ/GPTQ/Quark: int32 packing, split on dim=1
                                 q_dim = (
@@ -605,8 +648,8 @@ class QuantizedModel:
                             # model.layers.layer_id.mlp.dense_h_to_4h.qweight
                             # model.layers.layer_id.mlp.gate_up_proj.weight
                             # model.layers.layer_id.mlp.dense_h_to_4h.weight
-                            if quant_type == "olive":
-                                # Olive: (out_features, in_features), split on dim=0
+                            if quant_type in {"olive", "quant_auto"}:
+                                # Olive/QAT: (out_features, in_features), split on dim=0
                                 tensor_map["mlp.gate_proj.qweight"] = tensor[:intermediate_size, :]
                                 tensor_map["mlp.up_proj.qweight"] = tensor[intermediate_size:, :]
                             else:
@@ -628,7 +671,13 @@ class QuantizedModel:
                             # model.layers.layer_id.mlp.dense_h_to_4h.scales
                             # model.layers.layer_id.mlp.gate_up_proj.weight_scale
                             # model.layers.layer_id.mlp.dense_h_to_4h.weight_scale
-                            if quant_type == "olive":
+                            if quant_type == "quant_auto":
+                                # quant_auto: scales stored as (out*n_groups, 1) in output-first flat order.
+                                ng = tensor.shape[0] // (2 * intermediate_size)
+                                mid = intermediate_size * ng
+                                tensor_map["mlp.gate_proj.scales"] = tensor[:mid, :]
+                                tensor_map["mlp.up_proj.scales"] = tensor[mid:, :]
+                            elif quant_type == "olive":
                                 # Olive: (out_features, num_groups), split on dim=0
                                 tensor_map["mlp.gate_proj.scales"] = tensor[:intermediate_size, :]
                                 tensor_map["mlp.up_proj.scales"] = tensor[intermediate_size:, :]
@@ -651,6 +700,12 @@ class QuantizedModel:
                                 intermediate_dim = intermediate_size // (8 // local_bits)
                                 tensor_map["mlp.gate_proj.qzeros"] = tensor[:intermediate_dim, :]
                                 tensor_map["mlp.up_proj.qzeros"] = tensor[intermediate_dim:, :]
+                            elif quant_type == "quant_auto":
+                                # quant_auto: zeros stored as (out*n_groups, 1) in output-first flat order.
+                                ng = tensor.shape[0] // (2 * intermediate_size)
+                                mid = intermediate_size * ng
+                                tensor_map["mlp.gate_proj.qzeros"] = tensor[:mid, :]
+                                tensor_map["mlp.up_proj.qzeros"] = tensor[mid:, :]
                             else:
                                 # AWQ/GPTQ/Quark: int32 packing, split on dim=1
                                 intermediate_dim = (
@@ -1061,3 +1116,4 @@ class QuantizedModel:
             module.qzeros = intzeros_pt.contiguous().byte()
         else:
             module.qzeros = intzeros_pt.contiguous()
+
