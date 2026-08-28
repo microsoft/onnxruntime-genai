@@ -1004,11 +1004,18 @@ class Qwen35MoEModel(MTPModel):
         if not self.decoder.use_paged_attention:
             raise ValueError("dflash2_path requires use_paged_attention=true.")
 
+        num_draft_tokens = None
+        if "dflash2_num_draft_tokens" in extra_options:
+            try:
+                num_draft_tokens = int(extra_options["dflash2_num_draft_tokens"])
+            except (TypeError, ValueError) as e:
+                raise ValueError("dflash2_num_draft_tokens must be a positive integer.") from e
+            if num_draft_tokens < 1:
+                raise ValueError("dflash2_num_draft_tokens must be a positive integer.")
+
         self.dflash2_attrs = {
             "io_dtype": io_dtype,
-            "num_draft_tokens": (
-                int(extra_options["dflash2_num_draft_tokens"]) if "dflash2_num_draft_tokens" in extra_options else None
-            ),
+            "num_draft_tokens": num_draft_tokens,
         }
 
         with open(os.path.join(self.dflash2_path, "config.json"), encoding="utf-8") as handle:

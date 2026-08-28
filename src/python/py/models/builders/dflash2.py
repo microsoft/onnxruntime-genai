@@ -42,9 +42,6 @@ import torch
 from onnx_ir.tensor_adapters import TorchTensor, to_torch_dtype
 from tqdm import tqdm
 
-# The drafter's own weights are dense and small; only the shared LM head is quantized.
-_MASK_SENTINEL = "dflash2"
-
 
 class DFlash2Builder:
     """Emits ``dflash2.onnx`` from a DFlash 2 draft checkpoint plus the target's
@@ -99,7 +96,9 @@ class DFlash2Builder:
         self.mask_token_id = int(dfl["mask_token_id"])
         self.target_layer_ids = list(dfl["target_layer_ids"])
         # Query tokens per request: the anchor (bonus) token plus one mask token per draft.
-        self.block_size = int(num_draft_tokens) + 1 if num_draft_tokens else int(dfl["block_size"])
+        if num_draft_tokens is not None and int(num_draft_tokens) < 1:
+            raise ValueError("num_draft_tokens must be a positive integer.")
+        self.block_size = int(num_draft_tokens) + 1 if num_draft_tokens is not None else int(dfl["block_size"])
         self.num_draft_tokens = self.block_size - 1
         self.input_embedding_scale = float(dfl.get("input_embedding_scale", 1.0))
         self.aux_hidden_size = self.hidden_size * len(self.target_layer_ids)
@@ -129,7 +128,8 @@ class DFlash2Builder:
         return value
 
     def make_node(self, op_type, inputs, outputs, *, name, domain="", **attrs):
-        assert name not in self.node_names, f"duplicate node name {name}"
+        if name in self.node_names:
+            raise ValueError(f"duplicate node name {name}")
         node = ir.node(
             op_type,
             inputs=[self.make_value(n) for n in inputs],
@@ -603,7 +603,9 @@ class DFlash2Builder:
         self.make_value(attn_out, self.io_dtype, ["num_tokens", self.num_heads * self.head_size])
         for suffix in ("key", "value"):
             self.make_value(
-                f"present.{i}.{suffix}", self.io_dtype, ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
+                f"present.{i}.{suffix}",
+                self.io_dtype,
+                ["num_blocks", self.paged_block_size, self.num_kv_heads, self.head_size],
             )
 
         block_out = self.binary(
@@ -872,7 +874,7 @@ class DFlash2Builder:
                     self.make_value(
                         f"past_key_values.{i}.{suffix}",
                         self.io_dtype,
-                        ["num_blocks", "block_size", self.num_kv_heads, self.head_size],
+                        ["num_blocks", self.paged_block_size, self.num_kv_heads, self.head_size],
                     )
                 )
 

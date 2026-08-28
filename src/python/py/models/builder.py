@@ -754,9 +754,9 @@ def get_args():
                 dflash2_path = Path to a DFlash 2 draft checkpoint. Exports an auxiliary `dflash2.onnx`
                     block drafter beside the target model and adds a `dflash2` section to
                     genai_config.json. Requires use_paged_attention=true, and requires
-                    aux_hidden_state_layers to match the drafter's `target_layer_ids`.
+                    aux_hidden_state_layers to match the drafter's `target_layer_ids`. Default is unset (disabled).
                 dflash2_num_draft_tokens = Override the number of draft tokens the DFlash 2 block
-                    drafter proposes per step. Default is taken from the draft checkpoint.
+                    drafter proposes per step. Must be a positive integer. Default is taken from the draft checkpoint.
                 mtp_quant_config = JSON object/file: Configure MTP I/O, dense weights, MoE, and runtime using the
                     structured QuantConfig schema independently from the main model.
                 linear_attn_op = linear_attention/gated_delta_net: Select the recurrent operator for non-paged

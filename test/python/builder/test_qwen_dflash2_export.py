@@ -4,7 +4,9 @@
 import json
 import types
 
+import onnx_ir as ir
 import pytest
+
 from models.builders.dflash2 import DFlash2Builder
 from models.builders.mtp import MTPModel
 from models.builders.qwen import Qwen35MoEModel
@@ -15,7 +17,28 @@ TARGET_LAYER_IDS = [1, 11, 21]
 def _draft_checkpoint(tmp_path, target_layer_ids=TARGET_LAYER_IDS):
     draft_dir = tmp_path / "dflash2_draft"
     draft_dir.mkdir()
-    (draft_dir / "config.json").write_text(json.dumps({"dflash_config": {"target_layer_ids": target_layer_ids}}))
+    config = {
+        "hidden_size": 8,
+        "num_hidden_layers": 1,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 1,
+        "head_dim": 4,
+        "intermediate_size": 16,
+        "vocab_size": 32,
+        "rms_norm_eps": 1e-6,
+        "max_position_embeddings": 128,
+        "rope_parameters": {"rope_theta": 10000.0},
+        "dflash_config": {
+            "conv_kernel_size": 2,
+            "conv_group_size": 4,
+            "selector_rank": 4,
+            "selector_top_k": 2,
+            "mask_token_id": 31,
+            "target_layer_ids": target_layer_ids,
+            "block_size": 5,
+        },
+    }
+    (draft_dir / "config.json").write_text(json.dumps(config))
     return str(draft_dir)
 
 
@@ -78,6 +101,20 @@ def test_draft_token_count_can_be_overridden(tmp_path):
     assert model.dflash2_attrs["num_draft_tokens"] == 5
 
 
+@pytest.mark.parametrize("num_draft_tokens", ["0", "-1"])
+def test_draft_token_count_must_be_positive(tmp_path, num_draft_tokens):
+    model = _composite()
+
+    with pytest.raises(ValueError, match="positive integer"):
+        model.make_dflash2_init(
+            io_dtype=None,
+            extra_options={
+                "dflash2_path": _draft_checkpoint(tmp_path),
+                "dflash2_num_draft_tokens": num_draft_tokens,
+            },
+        )
+
+
 def test_genai_config_gains_the_drafter_and_the_target_tap(tmp_path):
     config_path = tmp_path / "genai_config.json"
     config_path.write_text(json.dumps({"model": {"decoder": {}}}))
@@ -109,6 +146,28 @@ def test_shared_initializers_are_recorded_once_on_both_sides(tmp_path):
 
 def test_builder_exposes_the_api_the_composite_drives():
     assert all(hasattr(DFlash2Builder, name) for name in ("make_model", "save_model", "genai_config_section"))
+
+
+def test_duplicate_node_names_are_rejected():
+    builder = object.__new__(DFlash2Builder)
+    builder.node_names = {"duplicate"}
+
+    with pytest.raises(ValueError, match="duplicate node name duplicate"):
+        builder.make_node("Identity", [], [], name="duplicate")
+
+
+def test_kv_cache_uses_configured_paged_block_size(tmp_path):
+    builder = DFlash2Builder(
+        _draft_checkpoint(tmp_path),
+        str(tmp_path),
+        ir.DataType.FLOAT16,
+        paged_block_size=512,
+        max_position_embeddings=128,
+    )
+
+    builder._declare_io()
+
+    assert builder.values["past_key_values.0.key"].shape[1] == 512
 
 
 @pytest.fixture

@@ -24,6 +24,7 @@ This folder contains the model builder for quickly creating optimized and quanti
     - [Include Last Hidden States Output](#include-last-hidden-states-output)
     - [Include Auxiliary Hidden States Output](#include-auxiliary-hidden-states-output)
     - [Build with Paged Attention](#build-with-paged-attention)
+    - [Build a DFlash 2 Block Drafter](#build-a-dflash-2-block-drafter)
     - [Disable Windowed KV Cache](#disable-windowed-kv-cache)
     - [Enable Shared Embeddings](#enable-shared-embeddings)
     - [Enable CUDA Graph Capture](#enable-cuda-graph-capture)
@@ -307,6 +308,20 @@ python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o pa
 
 # From source:
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e cuda -c cache_dir_to_store_temp_files --extra_options use_paged_attention=true prune_lm_head=true
+```
+
+#### Build a DFlash 2 Block Drafter
+
+Set `dflash2_path` to a DFlash 2 checkpoint to export an auxiliary `dflash2.onnx` block drafter beside a Qwen3.5 MoE target model. The target must use paged attention, and `aux_hidden_state_layers` must exactly match the drafter checkpoint's `target_layer_ids`. The drafter reuses the target's embedding and LM-head initializers, so both checkpoints must use compatible tensors.
+
+`dflash2_num_draft_tokens` optionally overrides how many tokens the drafter proposes per step. It must be a positive integer; by default, the builder uses the draft checkpoint's block size minus the anchor token.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -i path_to_target_model -o path_to_output_folder -p fp16 -e cuda -c cache_dir_for_hf_files --extra_options use_paged_attention=true aux_hidden_state_layers=1,11,21 dflash2_path=path_to_dflash2_checkpoint dflash2_num_draft_tokens=4
+
+# From source:
+python builder.py -i path_to_target_model -o path_to_output_folder -p fp16 -e cuda -c cache_dir_for_hf_files --extra_options use_paged_attention=true aux_hidden_state_layers=1,11,21 dflash2_path=path_to_dflash2_checkpoint dflash2_num_draft_tokens=4
 ```
 
 #### Disable Windowed KV Cache
