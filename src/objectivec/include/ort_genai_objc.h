@@ -164,7 +164,7 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  * @return The instance, or nil if an error occurs.
  */
 - (nullable instancetype)initWithConfig:(OGAConfig*)config
-                                 error:(NSError**)error NS_DESIGNATED_INITIALIZER;
+                                  error:(NSError**)error NS_DESIGNATED_INITIALIZER;
 
 /**
  * Creates a tokenizer.
