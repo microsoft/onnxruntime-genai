@@ -77,11 +77,16 @@ class QuantAutoModel(QuantizedModel):
             if not weight_file.endswith(".safetensors"):
                 continue
             weights = load_file(os.path.join(input_path, weight_file))
-            if "model.embed_tokens.scales" not in weights:
+            # Accept either .zeros or .qzeros; require all three tensors in the same shard
+            zp_key = next(
+                (k for k in ("model.embed_tokens.zeros", "model.embed_tokens.qzeros") if k in weights),
+                None,
+            )
+            if not all(k in weights for k in ("model.embed_tokens.weight", "model.embed_tokens.scales")) or zp_key is None:
                 continue
             w  = weights["model.embed_tokens.weight"]   # (vocab, hidden) int4 values as F16
             sc = weights["model.embed_tokens.scales"]   # (vocab*ng, 1)
-            zp = weights["model.embed_tokens.zeros"]    # (vocab*ng, 1)
+            zp = weights[zp_key]                        # (vocab*ng, 1)
 
             # Infer group size from tensor shapes rather than hard-coding
             ng = sc.numel() // w.shape[0]
