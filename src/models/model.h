@@ -161,6 +161,11 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   SessionInfo session_info_;
 
+  // Lazily initialized, model-local constrained-decoding assets. The concrete state lives in
+  // constrained_logits_processor.cpp so builds without llguidance do not depend on its types.
+  mutable std::mutex guidance_cache_mutex_;
+  mutable std::shared_ptr<GuidanceCacheState> guidance_cache_;
+
   /// Create session options from config. Public so components like VAD can create
   /// properly configured sessions using the GenAI infrastructure.
   void CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,

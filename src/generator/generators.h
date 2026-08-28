@@ -49,6 +49,7 @@ struct TransducerState;
 struct Search;
 struct Tokenizer;
 struct ConstrainedLogitsProcessor;
+struct GuidanceCacheState;
 
 struct ExtraInput {  // Extra inputs provided via SetInputs()
   std::string name;

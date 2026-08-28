@@ -438,6 +438,10 @@ std::shared_ptr<Request> Engine::StepDynamic() {
           std::current_exception());
     }
 
+    // This is speculative preparation for the next step. Its no-throw boundary leaves failed
+    // cursors dirty so mask construction retries when the next logits application needs it.
+    scheduled_requests.ScheduleGuidanceMasks();
+
     // Step() returns one ready request at a time. Keep the rest queued so draining this committed
     // batch does not trigger another model execution.
     ready_requests_.swap(staged_ready_requests_);

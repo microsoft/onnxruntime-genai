@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <memory>
 #include <span>
 #include <vector>
@@ -84,6 +85,29 @@ inline std::shared_ptr<Request> MintAssignedRequest(const std::shared_ptr<Engine
 // The model's end-of-stream token, used to script a request to completion.
 inline int32_t EosToken(const Model& model) {
   return model.config_->model.eos_token_id.empty() ? 0 : model.config_->model.eos_token_id.front();
+}
+
+// Scripted logits that make `token` the unambiguous argmax, for tests that drive Request's static
+// generation path (GenerateNextTokens/CompleteGeneration) with a deterministic next token.
+inline DeviceSpan<float> LogitsForToken(Model& model, int32_t token) {
+  auto logits = model.p_device_inputs_->Allocate<float>(
+      static_cast<size_t>(model.config_->model.vocab_size));
+  auto cpu_logits = logits.CpuSpan();
+  std::fill(cpu_logits.begin(), cpu_logits.end(), 0.0f);
+  cpu_logits[token] = 100.0f;
+  logits.CopyCpuToDevice();
+  return logits;
+}
+
+// Like LogitsForToken, but also gives `fallback_token` a smaller-but-still-large score. Tests use
+// this to distinguish "the raw model logits picked this token" from "a logits processor masked
+// everything else," since a fake/real guidance processor still has to out-mask a strong runner-up.
+inline DeviceSpan<float> LogitsFavoringToken(Model& model, int32_t preferred_token,
+                                             int32_t fallback_token) {
+  auto logits = LogitsForToken(model, preferred_token);
+  logits.CpuSpan()[fallback_token] = 50.0f;
+  logits.CopyCpuToDevice();
+  return logits;
 }
 
 }  // namespace test

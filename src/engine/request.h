@@ -20,6 +20,15 @@ struct Request;
 struct ScheduledRequests;
 struct StaticBatchScheduler;
 
+namespace test {
+// Test-only seam (see test/engine/guidance_processor_tests.cpp) that installs a caller-provided
+// ConstrainedLogitsProcessor on a Request without needing a real, USE_GUIDANCE-backed grammar
+// engine. This lets Request's guidance bookkeeping (staging, rollback, and the transactional
+// reset in Continue()) be tested with a lightweight fake regardless of how this build was
+// configured.
+struct RequestGuidanceTestAccess;
+}  // namespace test
+
 template <>
 struct ExternalRefCountedTraits<Request> {
   static constexpr bool notify_external_reference_changes = true;
@@ -137,13 +146,13 @@ struct Request : std::enable_shared_from_this<Request>,
    * results and to update the request status. Splitting the two lets the engine launch every
    * scheduled request's token selection before it synchronizes with the device once.
    */
-  void GenerateNextTokens(DeviceSpan<float> logits);
+  void GenerateNextTokens(DeviceSpan<float> logits, bool guidance_applied = false);
 
   void ValidateEngineCompatibility() const;
   void SaveStateForTransaction();
   void SaveStateForExternalSamplingTransaction();
-  RequestStepResult ApplyLogitsForTransaction(DeviceSpan<float> logits);
-  void PrepareGenerationForTransaction(DeviceSpan<float> logits);
+  RequestStepResult ApplyLogitsForTransaction(DeviceSpan<float> logits, bool guidance_applied = false);
+  void PrepareGenerationForTransaction(DeviceSpan<float> logits, bool guidance_applied = false);
   RequestStepResult StageGenerationForTransaction(
       const RequestStepPlan& plan);
   void RestoreStateForTransaction();
@@ -261,7 +270,10 @@ struct Request : std::enable_shared_from_this<Request>,
    * @brief Runs everything token selection needs before the sampler: sequence bookkeeping,
    *        handing the logits to the search, and applying the logits processors.
    */
-  void PrepareGeneration(DeviceSpan<float> logits);
+  void PrepareGeneration(DeviceSpan<float> logits, bool guidance_applied = false);
+
+  bool HasGuidance() const { return guidance_logits_processor_ != nullptr; }
+  std::span<const uint32_t> GetReadyGuidanceMask();
 
   /**
    * @brief Launches the per-sequence tail after a batched sampler has filled the bound slot.
@@ -315,6 +327,7 @@ struct Request : std::enable_shared_from_this<Request>,
   friend struct ExternalRefCounted<Request>;
   friend struct ScheduledRequests;
   friend struct StaticBatchScheduler;
+  friend struct test::RequestGuidanceTestAccess;
 
   void CompleteClose();
   void OnFirstExternalReference() noexcept;
@@ -339,7 +352,7 @@ struct Request : std::enable_shared_from_this<Request>,
   std::weak_ptr<Engine> engine_;
   std::atomic<bool> externally_abandoned_{false};
 
-  void ApplyLogitsProcessors(DeviceSpan<float> logits);
+  void ApplyLogitsProcessors(DeviceSpan<float> logits, bool guidance_applied);
   void SelectNextToken();
   RequestStepResult StageGeneration(int64_t sequence_length_before);
   void CommitGuidanceToken(const RequestStepResult& result);

@@ -122,7 +122,7 @@ Each config is a list of scenario entries:
 | `prompt_length_k` | RULER prompt length in thousands of tokens; active decode length for `mixed_workload`. Required by scenarios that use it and rejected by `capacity_pressure`, which has a fixed prompt profile. |
 | `model_path` | Folder containing the ONNX model and `genai_config.json`. |
 | `execution_provider` | e.g. `cuda`. |
-| `execution_provider_library` | Path to the provider plugin. Required for `cuda`, registered once per process. |
+| `execution_provider_library` | Optional path to a provider plugin, registered once per process. Omit it when using a source-built ORT whose provider is loaded through the legacy provider path. |
 | `generation_tokens` | Tokens generated per request. |
 
 `mixed_workload` runs one long-prefill request alongside active decode requests. The full and

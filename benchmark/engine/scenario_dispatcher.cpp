@@ -77,8 +77,9 @@ void RegisterExecutionProviderLibraries(const std::vector<ScenarioConfig>& confi
         config.execution_provider == "cuda" ? "CUDAExecutionProvider" : "WebGpuExecutionProvider";
 
     if (config.execution_provider_library.empty()) {
-      throw std::invalid_argument(
-          "execution_provider_library is required when execution_provider is '" + config.execution_provider + "'");
+      // A source-built ORT may expose its provider through the legacy provider path instead of a
+      // separately registered plugin EP. In that case AppendProvider() below performs the setup.
+      continue;
     }
 
     const fs::path provider_library = fs::absolute(config.execution_provider_library);

@@ -10,6 +10,17 @@ namespace Generators {
 
 struct DecoderIO;
 
+enum class BatchedGuidanceMaskStatus {
+  NoEligibleGuidance,
+  Ready,
+  FallbackRequired,
+};
+
+BatchedGuidanceMaskStatus CollectBatchedGuidanceMasks(
+    std::span<const std::shared_ptr<Request>> requests,
+    size_t words_per_row,
+    std::vector<uint32_t>& masks);
+
 struct BatchedSamplingPlan {
   void Reserve(size_t capacity) {
     requests.reserve(capacity);
@@ -29,6 +40,8 @@ struct BatchedSamplingPlan {
   std::vector<DeviceSpan<float>> logits;
   std::vector<BatchedSamplingParams> params;
   std::vector<BatchedSamplerState*> states;
+  std::vector<uint32_t> guidance_masks;
+  DeviceSpan<uint32_t> guidance_device_masks;
 };
 
 struct ScheduledRequests {
@@ -72,6 +85,7 @@ struct ScheduledRequests {
   std::vector<DeviceSpan<float>> ProcessLogits();
 
   void GenerateNextTokens();
+  void ScheduleGuidanceMasks() noexcept;
   void BeginTransaction();
   void GenerateNextTokensForTransaction(
       const StepPlan& plan,
@@ -81,7 +95,8 @@ struct ScheduledRequests {
 
  private:
   bool PrepareBatchedSamplingPlan(bool require_transaction_support);
-  bool TryGenerateNextTokensBatched(std::vector<DeviceSpan<float>>& logits);
+  bool TryGenerateNextTokensBatched(std::vector<DeviceSpan<float>>& logits, bool guidance_applied);
+  bool TryApplyBatchedGuidanceMasks(std::vector<DeviceSpan<float>>& logits);
 
   std::vector<std::shared_ptr<Request>> requests_;
   std::shared_ptr<Model> model_;

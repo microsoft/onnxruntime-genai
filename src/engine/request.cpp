@@ -54,21 +54,10 @@ Request::Request(std::shared_ptr<GeneratorParams> params)
     throw std::runtime_error("Guidance fast-forward tokens are not supported by the engine.");
   }
 
-  const bool has_guidance_type = !params->guidance_type.empty();
-  const bool has_guidance_data = !params->guidance_data.empty();
-  if (has_guidance_type != has_guidance_data) {
-    throw std::runtime_error("Guidance type and data must be provided together.");
-  }
-  const bool guidance_requested = has_guidance_type && has_guidance_data;
-  if (guidance_requested && !params->model_) {
-    throw std::runtime_error("Engine guidance requires request parameters associated with a model.");
-  }
-  if (guidance_requested) {
-    guidance_logits_processor_ = CreateGuidanceLogitsProcessor(*params->model_, params);
-  }
-  if (guidance_requested && !guidance_logits_processor_) {
-    throw std::runtime_error("Engine guidance is unavailable. Build with use_guidance=true.");
-  }
+  // CreateGuidanceLogitsProcessor(params) validates the request (malformed/unsupported type),
+  // requires an associated model, and rejects a valid request outright when this build was not
+  // compiled with use_guidance=true. See constrained_logits_processor.h/.cpp.
+  guidance_logits_processor_ = CreateGuidanceLogitsProcessor(params);
 
   // The engine drives one independent search per request, so completion is batched: see
   // ScheduledRequests::GenerateNextTokens().
@@ -229,6 +218,16 @@ void Request::Continue(std::span<const int32_t> tokens) {
     throw std::logic_error("The request host token mirror does not have reserved continuation capacity.");
   }
 
+  // Build the next turn's grammar cursor before mutating any request/search state: clone the
+  // just-completed processor and reset the clone in place. Cloning first means the completed
+  // processor is never touched, so if the clone or its reset throws, this request is left exactly
+  // as it was and Continue() can simply be retried. The clone is only installed below, after the
+  // token append has committed.
+  std::unique_ptr<ConstrainedLogitsProcessor> next_guidance_processor;
+  if (guidance_logits_processor_) {
+    next_guidance_processor = guidance_logits_processor_->CloneForNewTurn();
+  }
+
   auto device_tokens = AllocateOnDevice(*params_, tokens);
   search_->SaveStateForTransaction();
   try {
@@ -248,6 +247,12 @@ void Request::Continue(std::span<const int32_t> tokens) {
   tokens_host_.insert(tokens_host_.end(), tokens.begin(), tokens.end());
   prompt_sequence_length_ = CurrentSequenceLength();
   status_ = RequestStatus::Assigned;
+  // The append committed successfully; swap in the freshly reset grammar cursor now.
+  // unique_ptr::swap is noexcept, so this cannot fail after everything above has already
+  // succeeded.
+  if (next_guidance_processor) {
+    guidance_logits_processor_.swap(next_guidance_processor);
+  }
 }
 
 int64_t Request::CurrentSequenceLength() const {
@@ -340,8 +345,8 @@ bool Request::IsPrefill() const {
   return processed_sequence_length_ < prompt_sequence_length_;
 }
 
-void Request::GenerateNextTokens(DeviceSpan<float> logits) {
-  PrepareGeneration(logits);
+void Request::GenerateNextTokens(DeviceSpan<float> logits, bool guidance_applied) {
+  PrepareGeneration(logits, guidance_applied);
 
   auto& search_params = search_->params_->search;
   if (!search_params.do_sample || search_params.top_k == 1 || search_params.temperature == 0) {
@@ -398,15 +403,15 @@ void Request::SaveStateForExternalSamplingTransaction() {
   transaction_rng_ = rng_;
 }
 
-RequestStepResult Request::ApplyLogitsForTransaction(DeviceSpan<float> logits) {
+RequestStepResult Request::ApplyLogitsForTransaction(DeviceSpan<float> logits, bool guidance_applied) {
   const auto sequence_length_before = CurrentSequenceLength();
-  PrepareGenerationForTransaction(logits);
+  PrepareGenerationForTransaction(logits, guidance_applied);
   SelectNextToken();
   return StageGeneration(sequence_length_before);
 }
 
-void Request::PrepareGenerationForTransaction(DeviceSpan<float> logits) {
-  ApplyLogitsProcessors(logits);
+void Request::PrepareGenerationForTransaction(DeviceSpan<float> logits, bool guidance_applied) {
+  ApplyLogitsProcessors(logits, guidance_applied);
 }
 
 RequestStepResult Request::StageGenerationForTransaction(
@@ -452,9 +457,9 @@ void Request::CommitStep(const RequestStepPlan& plan,
   status_ = result.done ? RequestStatus::TurnComplete : RequestStatus::Active;
 }
 
-void Request::ApplyLogitsProcessors(DeviceSpan<float> logits) {
+void Request::ApplyLogitsProcessors(DeviceSpan<float> logits, bool guidance_applied) {
   search_->SetLogits(logits);
-  if (guidance_logits_processor_) {
+  if (guidance_logits_processor_ && !guidance_applied) {
     guidance_logits_processor_->ProcessLogits(logits);
   }
   auto& search_params = search_->params_->search;
@@ -492,9 +497,10 @@ RequestStepResult Request::StageGeneration(int64_t sequence_length_before) {
       done,
   };
   CommitGuidanceToken(result);
-  if (done && guidance_logits_processor_) {
-    guidance_logits_processor_->Reset();
-  }
+  // The grammar cursor is intentionally left as-is on completion: resetting it here would mutate
+  // this request before we know a continuation will actually happen. Continue() clones and resets
+  // a fresh cursor transactionally instead, so a request that reaches TurnComplete and is never
+  // continued (or fails to continue) keeps its finished cursor untouched.
   return result;
 }
 
@@ -505,9 +511,14 @@ void Request::CommitGuidanceToken(const RequestStepResult& result) {
   }
 }
 
-void Request::PrepareGeneration(DeviceSpan<float> logits) {
+void Request::PrepareGeneration(DeviceSpan<float> logits, bool guidance_applied) {
   processed_sequence_length_ = search_->GetSequence(0).size();
-  ApplyLogitsProcessors(logits);
+  ApplyLogitsProcessors(logits, guidance_applied);
+}
+
+std::span<const uint32_t> Request::GetReadyGuidanceMask() {
+  return guidance_logits_processor_ ? guidance_logits_processor_->GetReadyMask()
+                                    : std::span<const uint32_t>{};
 }
 
 const Config::Search& Request::SearchOptions() const {
@@ -555,9 +566,6 @@ void Request::CompleteGeneration() {
 
   if (search_->IsDone()) {
     status_ = RequestStatus::TurnComplete;
-    if (guidance_logits_processor_) {
-      guidance_logits_processor_->Reset();
-    }
   }
 }
 

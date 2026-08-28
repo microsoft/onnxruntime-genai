@@ -4,8 +4,11 @@
 #include "request.h"
 
 #include "engine.h"
+#include "../constrained_logits_processor.h"
 #include "../search.h"
+#include <cstdint>
 #include <exception>
+#include <limits>
 
 namespace Generators {
 
@@ -110,8 +113,9 @@ void ScheduledRequests::GenerateNextTokens() {
 
   try {
     auto logits = ProcessLogits();
+    const bool guidance_applied = TryApplyBatchedGuidanceMasks(logits);
 
-    if (TryGenerateNextTokensBatched(logits))
+    if (TryGenerateNextTokensBatched(logits, guidance_applied))
       return;
 
     // Every request owns an independent single-sequence search, so token selection runs once per
@@ -121,7 +125,7 @@ void ScheduledRequests::GenerateNextTokens() {
     for (size_t request_idx = 0; request_idx < requests_.size(); ++request_idx) {
       if (IsExecuting(requests_[request_idx]->status_) &&
           requests_[request_idx]->IsChunkComplete()) {
-        requests_[request_idx]->GenerateNextTokens(logits[request_idx]);
+        requests_[request_idx]->GenerateNextTokens(logits[request_idx], guidance_applied);
       }
     }
 
@@ -132,6 +136,7 @@ void ScheduledRequests::GenerateNextTokens() {
       }
     }
 
+    ScheduleGuidanceMasks();
     for (const auto& request : requests_) {
       if (IsExecuting(request->status_) &&
           !request->IsChunkComplete())
@@ -162,7 +167,8 @@ std::vector<DeviceSpan<float>> ScheduledRequests::ProcessLogits() {
 
 // Samples all active requests through the scheduler-owned sampler. It owns the reusable workspace
 // and groups rows by resolved sampling parameters, while each Request owns its persistent RNG state.
-bool ScheduledRequests::TryGenerateNextTokensBatched(std::vector<DeviceSpan<float>>& logits) {
+bool ScheduledRequests::TryGenerateNextTokensBatched(std::vector<DeviceSpan<float>>& logits,
+                                                     bool guidance_applied) {
   if (!PrepareBatchedSamplingPlan(false))
     return false;
 
@@ -176,7 +182,8 @@ bool ScheduledRequests::TryGenerateNextTokensBatched(std::vector<DeviceSpan<floa
     return true;
 
   for (size_t request_idx = 0; request_idx < sampling_plan_->requests.size(); ++request_idx) {
-    sampling_plan_->requests[request_idx]->PrepareGeneration(sampling_plan_->logits[request_idx]);
+    sampling_plan_->requests[request_idx]->PrepareGeneration(sampling_plan_->logits[request_idx],
+                                                             guidance_applied);
   }
 
   auto next_tokens = batched_sampler_->Sample(sampling_plan_->logits, sampling_plan_->params,
@@ -194,12 +201,113 @@ bool ScheduledRequests::TryGenerateNextTokensBatched(std::vector<DeviceSpan<floa
   for (auto* request : sampling_plan_->requests) {
     request->CompleteGeneration();
   }
+  ScheduleGuidanceMasks();
   for (const auto& request : requests_) {
     if (IsExecuting(request->status_) &&
         !request->IsChunkComplete())
       request->AdvanceChunk();
   }
 
+  return true;
+}
+
+void ScheduledRequests::ScheduleGuidanceMasks() noexcept {
+  try {
+    std::vector<ConstrainedLogitsProcessor*> processors;
+    processors.reserve(requests_.size());
+    for (const auto& request : requests_) {
+      if (request->guidance_logits_processor_ &&
+          !request->IsTurnComplete()) {
+        processors.push_back(request->guidance_logits_processor_.get());
+      }
+    }
+    ScheduleGuidanceMaskComputation(processors);
+  } catch (const std::exception& error) {
+    if (g_log.enabled && g_log.warning) {
+      Log("warning") << "Guidance mask precomputation was deferred: "
+                     << error.what() << std::endl;
+    }
+  } catch (...) {
+    if (g_log.enabled && g_log.warning) {
+      Log("warning",
+          "Guidance mask precomputation was deferred after a non-standard exception.");
+    }
+  }
+}
+
+// Builds one contiguous mask row per scheduled request. Unguided and partial-prefill rows remain
+// pass-through; eligible guided decode rows receive their ready grammar mask. Keeping this
+// selection independent of the CUDA transfer makes row routing directly testable.
+BatchedGuidanceMaskStatus CollectBatchedGuidanceMasks(
+    std::span<const std::shared_ptr<Request>> requests,
+    size_t words_per_row,
+    std::vector<uint32_t>& masks) {
+  masks.assign(requests.size() * words_per_row,
+               std::numeric_limits<uint32_t>::max());
+  bool has_guidance = false;
+  for (size_t row = 0; row < requests.size(); ++row) {
+    const auto& request = requests[row];
+    if (!request->HasGuidance() || !request->IsChunkComplete()) {
+      continue;
+    }
+    if (request->ScheduledTokenCount() == 0) {
+      return BatchedGuidanceMaskStatus::FallbackRequired;
+    }
+    const auto mask = request->GetReadyGuidanceMask();
+    if (mask.size() != words_per_row) {
+      return BatchedGuidanceMaskStatus::FallbackRequired;
+    }
+    std::copy(mask.begin(), mask.end(),
+              masks.begin() +
+                  static_cast<std::ptrdiff_t>(row * words_per_row));
+    has_guidance = true;
+  }
+  return has_guidance ? BatchedGuidanceMaskStatus::Ready
+                      : BatchedGuidanceMaskStatus::NoEligibleGuidance;
+}
+
+bool ScheduledRequests::TryApplyBatchedGuidanceMasks(std::vector<DeviceSpan<float>>& logits) {
+  if (!sampling_plan_ || logits.empty()) {
+    return false;
+  }
+  const auto device_type = model_->p_device_scoring_->GetType();
+  if (device_type != DeviceType::CUDA && device_type != DeviceType::NvTensorRtRtx) {
+    return false;
+  }
+  if (std::none_of(
+          requests_.begin(), requests_.end(),
+          [](const auto& request) { return request->HasGuidance(); })) {
+    return false;
+  }
+
+  const size_t vocab_size = static_cast<size_t>(model_->config_->model.vocab_size);
+  const size_t words_per_row = (vocab_size + 31) / 32;
+  float* const first_row = logits.front().Span().data();
+  for (size_t i = 0; i < logits.size(); ++i) {
+    if (logits[i].size() != vocab_size ||
+        logits[i].Span().data() != first_row + i * vocab_size) {
+      return false;
+    }
+  }
+
+  if (CollectBatchedGuidanceMasks(
+          requests_, words_per_row,
+          sampling_plan_->guidance_masks) !=
+      BatchedGuidanceMaskStatus::Ready) {
+    return false;
+  }
+
+  if (sampling_plan_->guidance_device_masks.size() !=
+      sampling_plan_->guidance_masks.size()) {
+    sampling_plan_->guidance_device_masks =
+        model_->p_device_scoring_->Allocate<uint32_t>(sampling_plan_->guidance_masks.size());
+  }
+  copy(std::span<const uint32_t>{sampling_plan_->guidance_masks},
+       sampling_plan_->guidance_device_masks.CpuSpan());
+  sampling_plan_->guidance_device_masks.CopyCpuToDevice();
+  model_->p_device_scoring_->LaunchAddLogitsMask(
+      first_row, static_cast<int>(logits.size()), static_cast<int>(vocab_size),
+      sampling_plan_->guidance_device_masks.Span().data());
   return true;
 }
 
@@ -269,6 +377,7 @@ void ScheduledRequests::GenerateNextTokensForTransaction(
   }
 
   auto logits = ProcessLogits();
+  const bool guidance_applied = TryApplyBatchedGuidanceMasks(logits);
   results.assign(requests_.size(), RequestStepResult{});
   if (transaction_uses_batched_sampler_) {
     sampling_plan_->logits.clear();
@@ -281,7 +390,7 @@ void ScheduledRequests::GenerateNextTokensForTransaction(
         throw std::logic_error("Batched sampling plan does not match the scheduled requests.");
       }
       sampling_plan_->logits.push_back(logits[i]);
-      requests_[i]->PrepareGenerationForTransaction(logits[i]);
+      requests_[i]->PrepareGenerationForTransaction(logits[i], guidance_applied);
       ++sampling_index;
     }
     if (sampling_index != sampling_plan_->requests.size())
@@ -308,7 +417,7 @@ void ScheduledRequests::GenerateNextTokensForTransaction(
 
   for (size_t i = 0; i < requests_.size(); ++i) {
     if (requests_[i]->IsChunkComplete())
-      results[i] = requests_[i]->ApplyLogitsForTransaction(logits[i]);
+      results[i] = requests_[i]->ApplyLogitsForTransaction(logits[i], guidance_applied);
   }
 }
 

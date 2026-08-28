@@ -402,6 +402,36 @@ OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaModel** out) 
   return OgaCreateModelWithRuntimeSettings(config_path, nullptr, out);
 }
 
+OgaResult* OGA_API_CALL OgaModelGetGuidanceCacheCount(
+    const OgaModel* model, const char* name, uint64_t* value) {
+  OGA_TRY
+  if (!model || !name || !value) {
+    throw std::invalid_argument("model, name, and value must not be null.");
+  }
+  const auto stats = Generators::GetGuidanceCacheStats(*model);
+  const std::string_view key{name};
+  if (key == "tokenizer_initializations")
+    *value = stats.tokenizer_initializations;
+  else if (key == "grammar_hits")
+    *value = stats.grammar_hits;
+  else if (key == "grammar_misses")
+    *value = stats.grammar_misses;
+  else if (key == "grammar_waits")
+    *value = stats.grammar_waits;
+  else if (key == "grammar_compile_microseconds")
+    *value = stats.grammar_compile_microseconds;
+  else if (key == "grammar_evictions")
+    *value = stats.grammar_evictions;
+  else if (key == "cached_grammars")
+    *value = stats.cached_grammars;
+  else if (key == "cached_key_bytes")
+    *value = stats.cached_key_bytes;
+  else
+    throw std::runtime_error(std::string(name) + " is an invalid guidance cache counter.");
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaModelGetType(const OgaModel* model, const char** out) {
   OGA_TRY
   *out = AllocOgaString(model->config_->model.type.c_str());
