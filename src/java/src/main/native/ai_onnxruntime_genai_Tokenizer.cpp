@@ -23,6 +23,30 @@ Java_ai_onnxruntime_genai_Tokenizer_createTokenizer(JNIEnv* env, jobject thiz, j
   return reinterpret_cast<jlong>(tokenizer);
 }
 
+JNIEXPORT jlong JNICALL
+Java_ai_onnxruntime_genai_Tokenizer_createTokenizerFromConfig(JNIEnv* env, jobject thiz, jlong config_handle) {
+  const OgaConfig* config = reinterpret_cast<const OgaConfig*>(config_handle);
+  OgaTokenizer* tokenizer = nullptr;
+
+  if (ThrowIfError(env, OgaCreateTokenizerFromConfig(config, &tokenizer))) {
+    return 0;
+  }
+
+  return reinterpret_cast<jlong>(tokenizer);
+}
+
+JNIEXPORT jlong JNICALL
+Java_ai_onnxruntime_genai_Tokenizer_createTokenizerFromPath(JNIEnv* env, jobject thiz, jstring model_path) {
+  CString path{env, model_path};
+  OgaTokenizer* tokenizer = nullptr;
+
+  if (ThrowIfError(env, OgaCreateTokenizerFromPath(path, &tokenizer))) {
+    return 0;
+  }
+
+  return reinterpret_cast<jlong>(tokenizer);
+}
+
 JNIEXPORT void JNICALL
 Java_ai_onnxruntime_genai_Tokenizer_destroyTokenizer(JNIEnv* env, jobject thiz, jlong tokenizer_handle) {
   OgaTokenizer* tokenizer = reinterpret_cast<OgaTokenizer*>(tokenizer_handle);

@@ -157,6 +157,26 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
                                  error:(NSError**)error NS_DESIGNATED_INITIALIZER;
 
 /**
+ * Creates a tokenizer.
+ *
+ * @param config The config to use.
+ * @param error Optional error information set if an error occurs.
+ * @return The instance, or nil if an error occurs.
+ */
+- (nullable instancetype)initWithConfig:(OGAConfig*)config
+                                 error:(NSError**)error NS_DESIGNATED_INITIALIZER;
+
+/**
+ * Creates a tokenizer.
+ *
+ * @param path The path to the ONNX GenAI model folder.
+ * @param error Optional error information set if an error occurs.
+ * @return The instance, or nil if an error occurs.
+ */
+- (nullable instancetype)initWithPath:(NSString*)path
+                                error:(NSError**)error NS_DESIGNATED_INITIALIZER;
+
+/**
  * Return the int representation of the BOS token.
  *
  * @return The BOS token id
