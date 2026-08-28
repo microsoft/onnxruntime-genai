@@ -831,6 +831,13 @@ class Qwen35MoETextModel(Qwen35TextModel):
 class Qwen35MoEModel(MTPModel):
     """Composite Qwen3.5 MoE builder for the decoder and optional MTP graph."""
 
+    # Extra options naming a block drafter. The Engine drives one drafter per model, so any of
+    # these supersedes the MTP head rather than shipping beside it.
+    block_drafter_options = ("dflash2_path",)
+
+    def requested_block_drafter(self, extra_options):
+        return next((name for name in self.block_drafter_options if extra_options.get(name)), None)
+
     def get_decoder_model_class(self):
         return Qwen35MoETextModel
 
@@ -846,6 +853,10 @@ class Qwen35MoEModel(MTPModel):
         self.mtp = None
         if self.mtp_attrs["build"]:
             self.make_mtp_model(config, io_dtype, onnx_dtype, ep, cache_dir, decoder_options)
+
+        self.dflash2 = None
+        self.dflash2_shared_initializers = []
+        self.make_dflash2_init(io_dtype, extra_options)
 
         self.vocab_size = self.decoder.vocab_size
         self.hf_token = self.decoder.hf_token
@@ -863,6 +874,12 @@ class Qwen35MoEModel(MTPModel):
         self.mtp_attrs["build"] = (num_mtp_layers or 0) > 0
         self.mtp_attrs["shared_initializer_names"] = {"model.embed_tokens.weight"}
         self.mtp_attrs["shared_initializer_prefixes"] = ("lm_head.MatMul.",)
+
+        block_drafter = self.requested_block_drafter(extra_options)
+        if self.mtp_attrs["build"] and block_drafter:
+            print(f"Skipping the MTP head: {block_drafter} supersedes it.")
+            self.mtp_attrs["build"] = False
+
         if not self.mtp_attrs["build"]:
             return decoder_options
 
@@ -889,6 +906,9 @@ class Qwen35MoEModel(MTPModel):
         # The head is one layer deep and drafts for itself, so it never taps the target's
         # residual streams; inheriting the target's tap set would fail its layer-range check.
         mtp_options.pop("aux_hidden_state_layers", None)
+        # A block drafter reads the target's aux hidden states, so it is never nested in the head.
+        mtp_options.pop("dflash2_path", None)
+        mtp_options.pop("dflash2_num_draft_tokens", None)
         self.mtp = self.get_mtp_model_class()(
             copy.deepcopy(config),
             self.mtp_attrs["io_dtype"],
@@ -916,6 +936,7 @@ class Qwen35MoEModel(MTPModel):
         if self.mtp is not None:
             print("Building MTP (multi-token prediction) head -> mtp.onnx")
             self.mtp.make_model(input_path)
+        self.make_dflash2_model(input_path)
 
     def save_model(self, output_dir):
         self.decoder.save_model(output_dir)
@@ -924,12 +945,15 @@ class Qwen35MoEModel(MTPModel):
             self.mtp_attrs["shared_initializers"] = self.share_initializers(
                 output_dir, self.decoder.filename, self.mtp.filename
             )
+        self.save_dflash2_model(output_dir)
 
     def make_genai_config(self, config, extra_kwargs, out_dir):
         self.decoder.model_type = self.model_type
         self.decoder.make_genai_config(config, extra_kwargs, out_dir)
         if self.mtp is not None:
             self.add_mtp_to_genai_config(out_dir)
+        if self.dflash2 is not None:
+            self.add_dflash2_to_genai_config(out_dir)
 
     def add_mtp_to_genai_config(self, out_dir):
         config_path = os.path.join(out_dir, "genai_config.json")
@@ -967,6 +991,83 @@ class Qwen35MoEModel(MTPModel):
 
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
         self.decoder.save_processing(model_name_or_path, extra_kwargs, out_dir)
+
+    def make_dflash2_init(self, io_dtype, extra_options):
+        """DFlash 2 block drafter, exported as an auxiliary ``dflash2.onnx``.
+
+        ``dflash2_path`` points at the draft checkpoint. The drafter has no embedding and no
+        LM head of its own, so both come from the target and are shared on disk.
+        """
+        self.dflash2_path = extra_options.get("dflash2_path")
+        if not self.dflash2_path:
+            return
+        if not self.decoder.use_paged_attention:
+            raise ValueError("dflash2_path requires use_paged_attention=true.")
+
+        self.dflash2_attrs = {
+            "io_dtype": io_dtype,
+            "num_draft_tokens": (
+                int(extra_options["dflash2_num_draft_tokens"]) if "dflash2_num_draft_tokens" in extra_options else None
+            ),
+        }
+
+        with open(os.path.join(self.dflash2_path, "config.json"), encoding="utf-8") as handle:
+            target_layer_ids = json.load(handle)["dflash_config"]["target_layer_ids"]
+        expected = ",".join(str(i) for i in target_layer_ids)
+        actual = ",".join(str(i) for i in self.decoder.aux_hidden_state_layers)
+        if actual != expected:
+            raise ValueError(
+                f"The DFlash 2 drafter needs aux_hidden_state_layers={expected} on the main model, got '{actual}'."
+            )
+
+    def make_dflash2_model(self, input_path):
+        if not self.dflash2_path:
+            return
+        from .dflash2 import DFlash2Builder  # noqa: PLC0415
+
+        print("Building DFlash 2 draft model -> dflash2.onnx")
+        target_dir = input_path if input_path and os.path.isdir(input_path) else self.decoder.model_name_or_path
+        self.dflash2 = DFlash2Builder(
+            self.dflash2_path,
+            target_dir,
+            self.dflash2_attrs["io_dtype"],
+            self.decoder.attention_attrs["paged_block_size"],
+            self.decoder.original_context_length or self.decoder.context_length,
+            num_draft_tokens=self.dflash2_attrs["num_draft_tokens"],
+        )
+        self.dflash2.make_model()
+
+    def save_dflash2_model(self, output_dir):
+        if self.dflash2 is None:
+            return
+        self.dflash2.save_model(output_dir)
+        self.dflash2_shared_initializers = self.share_initializers(
+            output_dir, self.decoder.filename, self.dflash2.filename
+        )
+
+    def add_dflash2_to_genai_config(self, out_dir):
+        config_path = os.path.join(out_dir, "genai_config.json")
+        with open(config_path) as config_file:
+            genai_config = json.load(config_file)
+
+        decoder = genai_config["model"]["decoder"]
+        decoder.setdefault("outputs", {}).setdefault("aux_hidden_states", "aux_hidden_states")
+
+        section = self.dflash2.genai_config_section()
+        section["aux_hidden_state_layers"] = list(self.decoder.aux_hidden_state_layers)
+        if self.dflash2_shared_initializers:
+            existing = decoder.get("shared_initializers", [])
+            known = {json.dumps(entry, sort_keys=True) for entry in existing}
+            for entry in self.dflash2_shared_initializers:
+                if json.dumps(entry, sort_keys=True) not in known:
+                    existing.append(entry)
+            decoder["shared_initializers"] = existing
+            section["shared_initializers"] = self.dflash2_shared_initializers
+        genai_config["model"]["dflash2"] = section
+
+        with open(config_path, "w") as config_file:
+            json.dump(genai_config, config_file, indent=4)
+        print("Added 'dflash2' section to genai_config.json")
 
 
 class Qwen35MTPModel(Qwen35MoETextModel):
