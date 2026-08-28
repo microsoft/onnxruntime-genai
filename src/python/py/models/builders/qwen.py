@@ -114,14 +114,12 @@ class VideoChatFlashQwenModel(QwenModel):
 
 
 class Qwen35TextModel(Model):
-    def validate_gated_delta_net_options(self, use_paged_attention, linear_attn_op, state_window, ep, io_dtype):
+    def validate_gated_delta_net_options(self, use_paged_attention, linear_attn_op, state_window, ep):
         uses_gated_delta_net = use_paged_attention or linear_attn_op == "gated_delta_net"
         if uses_gated_delta_net and ep != "cuda":
             raise ValueError("GatedDeltaNet exports require the CUDA execution provider")
         if uses_gated_delta_net and state_window:
             raise ValueError("GatedDeltaNet exports commit an unwindowed recurrent state and require state_window=0")
-        if uses_gated_delta_net and ir.DataType(io_dtype) == ir.DataType.BFLOAT16:
-            raise ValueError("GatedDeltaNet does not support bfloat16 model I/O")
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
@@ -157,7 +155,6 @@ class Qwen35TextModel(Model):
             self.linear_attn_op,
             self.context_length_attrs["state_window"],
             self.ep,
-            self.io_dtype,
         )
 
         if self.use_paged_attention:

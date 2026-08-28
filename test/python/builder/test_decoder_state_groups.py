@@ -415,15 +415,42 @@ def test_dense_gated_delta_net_casts_gates_to_float32():
     ]
 
 
+def test_dense_gated_delta_net_supports_bfloat16_io():
+    model = _recording_model()
+    model.io_dtype = base_module.ir.DataType.BFLOAT16
+    model.make_gated_delta_net(
+        "/gdn",
+        q_path="q",
+        k_path="k",
+        v_path="v",
+        initial_state="past",
+        final_state="present",
+        decay="a",
+        beta="b",
+        gate_shape=["batch_size", "sequence_length", 3],
+        output_shape=["batch_size", "sequence_length", 3, 8],
+        state_shape=["batch_size", 3, 8, 4],
+    )
+
+    assert model.values[-2] == (
+        "/gdn/output_0",
+        base_module.ir.DataType.BFLOAT16,
+        ["batch_size", "sequence_length", 3, 8],
+    )
+    assert model.values[-1] == (
+        "present",
+        base_module.ir.DataType.FLOAT,
+        ["batch_size", 3, 8, 4],
+    )
+
+
 @pytest.mark.parametrize(
-    ("use_paged_attention", "linear_attn_op", "state_window", "ep", "io_dtype", "message"),
+    ("use_paged_attention", "linear_attn_op", "state_window", "ep", "message"),
     [
-        (True, "linear_attention", 0, "webgpu", base_module.ir.DataType.FLOAT16, "CUDA execution provider"),
-        (False, "gated_delta_net", 0, "webgpu", base_module.ir.DataType.FLOAT16, "CUDA execution provider"),
-        (True, "linear_attention", 1, "cuda", base_module.ir.DataType.FLOAT16, "require state_window=0"),
-        (False, "gated_delta_net", 1, "cuda", base_module.ir.DataType.FLOAT16, "require state_window=0"),
-        (True, "linear_attention", 0, "cuda", base_module.ir.DataType.BFLOAT16, "bfloat16 model I/O"),
-        (False, "gated_delta_net", 0, "cuda", base_module.ir.DataType.BFLOAT16, "bfloat16 model I/O"),
+        (True, "linear_attention", 0, "webgpu", "CUDA execution provider"),
+        (False, "gated_delta_net", 0, "webgpu", "CUDA execution provider"),
+        (True, "linear_attention", 1, "cuda", "require state_window=0"),
+        (False, "gated_delta_net", 1, "cuda", "require state_window=0"),
     ],
 )
 def test_qwen35_gated_delta_net_option_validation(
@@ -431,7 +458,6 @@ def test_qwen35_gated_delta_net_option_validation(
     linear_attn_op,
     state_window,
     ep,
-    io_dtype,
     message,
 ):
     model = Qwen35TextModel.__new__(Qwen35TextModel)
@@ -441,17 +467,20 @@ def test_qwen35_gated_delta_net_option_validation(
             linear_attn_op,
             state_window,
             ep,
-            io_dtype,
         )
 
 
-def _packed_gated_delta_net_model(capacity=3, layer_types=("linear_attention", "full_attention")):
+def _packed_gated_delta_net_model(
+    capacity=3,
+    layer_types=("linear_attention", "full_attention"),
+    io_dtype=base_module.ir.DataType.FLOAT16,
+):
     model = Qwen35TextModel.__new__(Qwen35TextModel)
     model.use_paged_attention = True
     model.linear_attn_op = "gated_delta_net"
     model.ep = "cuda"
     model.context_length_attrs = {"state_window": 0, "state_update_capacity": capacity}
-    model.io_dtype = base_module.ir.DataType.FLOAT16
+    model.io_dtype = io_dtype
     model.layer_types = list(layer_types)
     model.linear_conv_dim = 48
     model.linear_key_dim = 8
@@ -468,6 +497,17 @@ def _packed_gated_delta_net_model(capacity=3, layer_types=("linear_attention", "
     model.output_types = {"present.conv": model.io_dtype, "present.recurrent": model.io_dtype}
     model.output_shapes = {"present.conv": [4, "old"], "present.recurrent": [4, "old"]}
     return model
+
+
+def test_qwen38_packed_bfloat16_io_keeps_recurrent_state_float32():
+    model = _packed_gated_delta_net_model(io_dtype=base_module.ir.DataType.BFLOAT16)
+
+    model.configure_gated_delta_net_io()
+
+    assert model.input_types["past.conv"] == base_module.ir.DataType.BFLOAT16
+    assert model.output_types["present.conv"] == base_module.ir.DataType.BFLOAT16
+    assert model.input_types["past.recurrent"] == base_module.ir.DataType.FLOAT
+    assert model.output_types["present.recurrent"] == base_module.ir.DataType.FLOAT
 
 
 def test_qwen38_packed_io_uses_unwindowed_v_major_state_and_compact_updates():
