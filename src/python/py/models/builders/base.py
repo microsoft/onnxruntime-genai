@@ -786,9 +786,9 @@ class Model:
                 and not self.extra_options.get("disable_qkv_fusion", False)
             )
 
-            # PagedAttention fuses the rotary embeddings, so `position_ids` is not needed as an input.
-            self.attention_attrs["use_rope_in_attn"] = True
-            if "position_ids" in self.input_names:
+            # Some architectures require a separate RoPE op before PagedAttention.
+            self.attention_attrs["use_rope_in_attn"] = self.is_fused_rope_supported()
+            if self.attention_attrs["use_rope_in_attn"] and "position_ids" in self.input_names:
                 del self.input_names["position_ids"]
 
         elif self.is_gqa_supported():
@@ -3003,12 +3003,12 @@ class Model:
         # Applies MRoPE (multi-modal rotary position embeddings) to `root_input` using the
         # MRotaryEmbedding (com.microsoft) contrib op.
         #
-        # Unlike the standard RotaryEmbedding op, MRotaryEmbedding natively accepts a 3D
-        # `position_ids` tensor of shape (3, batch_size, sequence_length) (one position stream
-        # per T/H/W dimension) together with static cos/sin caches indexed by position, and
-        # internally combines the three streams per-column according to the `mrope_section`
-        # and `mrope_layout` attributes. This removes the need to manually compute dynamic
-        # cos/sin caches per token or to flatten/interleave them before calling RotaryEmbedding.
+        # Unlike the standard RotaryEmbedding op, MRotaryEmbedding natively accepts one position
+        # stream per T/H/W dimension: (3, batch_size, sequence_length) for dense inputs or
+        # (3, num_tokens) for packed inputs. Together with static cos/sin caches indexed by
+        # position, it combines the streams per-column according to the `mrope_section` and
+        # `mrope_layout` attributes. This removes the need to manually compute dynamic cos/sin
+        # caches per token or to flatten/interleave them before calling RotaryEmbedding.
         #
         #      q_or_k (B, S, N*H)     position_ids (3, B, S)     cos_cache, sin_cache (M, H/2)
         #                  \                    |                    /
@@ -3032,7 +3032,11 @@ class Model:
             mrope_section=self.rope_attrs["mrope_section"],
             mrope_layout=self.rope_attrs["mrope_layout"],
         )
-        self.make_value(output, kwargs.pop("dtype"), shape=["batch_size", "sequence_length", self.head_size * num_heads])
+        self.make_value(
+            output,
+            kwargs.pop("dtype"),
+            shape=self.make_hidden_state_shape(last_dim=self.head_size * num_heads),
+        )
 
     def make_rotary_embedding_multi_cache(self, **kwargs):
         cos_cache_name = kwargs.get("cos_cache_name", "cos_cache")
@@ -3886,11 +3890,16 @@ class Model:
         state_update_capacity = kwargs.get("state_update_capacity", 0)
         if a_log or state_update_capacity:
             inputs.extend([a_log, dt_bias])
+        state_update_capture_count = kwargs.get("state_update_capture_count", "")
+        state_update_active = kwargs.get("state_update_active", "")
+        if bool(state_update_capture_count) != bool(state_update_active):
+            raise ValueError("state_update_capture_count and state_update_active must be provided together")
         if state_update_capacity:
-            inputs.append(kwargs["state_update_capture_count"])
-            state_update_active = kwargs.get("state_update_active", "")
-            if state_update_active:
-                inputs.append(state_update_active)
+            if not state_update_capture_count:
+                raise ValueError(
+                    "state_update_capture_count and state_update_active are required when state_update_capacity is set"
+                )
+            inputs.extend([state_update_capture_count, state_update_active])
 
         output = f"{name}/output_0"
         present_recurrent = kwargs["present_recurrent_state"]

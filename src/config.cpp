@@ -757,6 +757,7 @@ struct Decoder_Element : JSON::Element {
       v_.head_size = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "state_update_capacity") {
       // The kernel packs every captured transition for a layer into one fixed-width capsule output.
+      // Keep this limit synchronized with check_extra_options in builder.py and the model-builder README.
       constexpr int kMaxStateUpdateCapacity = 8;
       v_.state_update_capacity = SafeDoubleToInt(JSON::Get<double>(value), name);
       if (v_.state_update_capacity < 0 || v_.state_update_capacity > kMaxStateUpdateCapacity)

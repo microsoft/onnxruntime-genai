@@ -176,14 +176,15 @@ def check_extra_options(
 
     if "state_update_capacity" in extra_options:
         # The kernel packs every captured transition into one fixed-width capsule per layer, so the
-        # number of tokens a single forward can record is bounded by that capsule.
-        max_capacity = 8
-        message = f"state_update_capacity must be an integer from 0 through {max_capacity}."
+        # number of tokens a single forward can record is bounded by that capsule. Keep this limit
+        # synchronized with kMaxStateUpdateCapacity in src/config.cpp and the model-builder README.
+        max_state_update_capacity = 8
+        message = f"state_update_capacity must be an integer from 0 through {max_state_update_capacity}."
         try:
             state_update_capacity = int(extra_options["state_update_capacity"])
         except (TypeError, ValueError) as e:
             raise ValueError(message) from e
-        if not 0 <= state_update_capacity <= max_capacity:
+        if not 0 <= state_update_capacity <= max_state_update_capacity:
             raise ValueError(message)
         if state_update_capacity and not extra_options.get("use_paged_attention", False):
             raise ValueError("state_update_capacity requires use_paged_attention=true.")
@@ -765,12 +766,14 @@ def get_args():
                 use_paged_attention = Build the model with PagedAttention for the continuous-batching engine. Default is false.
                     Replaces GroupQueryAttention with the PagedAttention contrib op, packs all sequences into a single
                     flattened token axis (`input_ids` becomes 1D), stores the KV-cache in paged
-                    [num_blocks, block_size, num_kv_heads, head_size] buffers, and removes the `attention_mask` and
-                    `position_ids` inputs in favor of the `block_table`, `cumulative_sequence_lengths`, and
-                    `past_sequence_lengths` metadata inputs. With prune_lm_head=true, selects the final packed hidden
-                    state for each sequence so the model outputs [batch_size, vocab_size] logits. By default, the model
-                    outputs [num_tokens, vocab_size] logits. Currently only supported for the CUDA execution provider
-                    with fp16 or bf16 precision. Cannot be combined with exclude_embeds or exclude_lm_head.
+                    [num_blocks, block_size, num_kv_heads, head_size] buffers, and removes the `attention_mask` input.
+                    It also removes `position_ids` when RoPE is fused; architectures with external MRoPE retain packed
+                    position IDs (for example, Qwen3.5/3.8 uses [3, num_tokens]). The block_table,
+                    cumulative_sequence_lengths, and past_sequence_lengths metadata inputs are added. With
+                    prune_lm_head=true, selects the final packed hidden state for each sequence so the model outputs
+                    [batch_size, vocab_size] logits. By default, the model outputs [num_tokens, vocab_size] logits.
+                    Currently only supported for the CUDA execution provider with fp16 or bf16 precision. Cannot be
+                    combined with exclude_embeds or exclude_lm_head.
                 paged_block_size = 256/512/768/...: Paged KV-cache block size used when use_paged_attention is set.
                     Must be a positive multiple of 256 (required by the ONNX Runtime PagedAttention CUDA kernel).
                     Default is 256. Also written to the `engine.dynamic_batching` section of genai_config.json.

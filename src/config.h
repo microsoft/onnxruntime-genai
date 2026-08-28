@@ -30,6 +30,10 @@ struct Config {
     static constexpr std::string_view PresentValueName = "present.%d.value";
     static constexpr std::string_view PresentConvName = "present.%d.conv";
     static constexpr std::string_view PresentRecurrentName = "present.%d.recurrent";
+    static constexpr std::string_view StateUpdateCaptureCountName = "state_update_capture_count";
+    static constexpr std::string_view StateUpdateActiveName = "state_update_active";
+    static constexpr std::string_view StateUpdateConvValueName = "state_update.%d.conv_value";
+    static constexpr std::string_view StateUpdateRecurrentCapsuleName = "state_update.%d.recurrent_capsule";
     static constexpr std::string_view HiddenStatesName = "hidden_states";
     static constexpr std::string_view RnnStatesName = "rnn_states";
     static constexpr std::string_view RnnStatesPrevName = "rnn_states_prev";
@@ -426,8 +430,8 @@ struct Config {
         std::string attention_metadata{Defaults::AttentionMetadataName};
         std::string past_conv_names{Defaults::PastConvName};  // Conv cache input name template (LFM2)
         std::string past_recurrent_names{Defaults::PastRecurrentName};
-        std::string state_update_capture_count;  // Per-sequence count of transitions to capture this forward
-        std::string state_update_active;         // Flag selecting whether the forward captures transitions at all
+        std::string state_update_capture_count{Defaults::StateUpdateCaptureCountName};  // Per-sequence capture count
+        std::string state_update_active{Defaults::StateUpdateActiveName};               // Capture enable flag
 
         // Last hidden-state input (e.g. the MTP head consumes the main model's hidden state).
         // Empty unless the model graph takes a hidden_states input.
@@ -454,9 +458,9 @@ struct Config {
         std::string rnn_states{Defaults::RnnStatesName};
         std::string present_conv_names{Defaults::PresentConvName};  // Conv cache output name template (LFM2)
         std::string present_recurrent_names{Defaults::PresentRecurrentName};
-        std::string state_update_conv_value_names;         // Captured conv values output name template
-        std::string state_update_recurrent_capsule_names;  // Captured recurrent transitions output name template
-        std::string hidden_states;                         // Last hidden state output (when exported with include_hidden_states; e.g. fed to the MTP head)
+        std::string state_update_conv_value_names{Defaults::StateUpdateConvValueName};
+        std::string state_update_recurrent_capsule_names{Defaults::StateUpdateRecurrentCapsuleName};
+        std::string hidden_states;  // Last hidden state output (when exported with include_hidden_states; e.g. fed to the MTP head)
 
         // RNNT decoder outputs
         std::string outputs;

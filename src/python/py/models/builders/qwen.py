@@ -60,7 +60,9 @@ class Qwen25VLTextModel(Model):
 
     def make_inputs_and_outputs(self):
         # Qwen2.5-VL uses 3D position_ids
-        self.input_shapes["position_ids"] = [3, "batch_size", "sequence_length"]
+        self.input_shapes["position_ids"] = (
+            [3, "num_tokens"] if self.use_paged_attention else [3, "batch_size", "sequence_length"]
+        )
         super().make_inputs_and_outputs()
 
 
@@ -206,7 +208,9 @@ class Qwen35TextModel(Model):
 
     def make_inputs_and_outputs(self):
         # Qwen-3.5 uses 3D position_ids
-        self.input_shapes["position_ids"] = [3, "batch_size", "sequence_length"]
+        self.input_shapes["position_ids"] = (
+            [3, "num_tokens"] if self.use_paged_attention else [3, "batch_size", "sequence_length"]
+        )
         super().make_inputs_and_outputs()
 
     def is_packed_matmul_supported(self):

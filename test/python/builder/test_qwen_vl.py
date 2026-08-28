@@ -157,12 +157,24 @@ def test_qwen_vl_uses_separate_qkv_and_mrope(monkeypatch, model_class):
 @pytest.mark.parametrize("model_class", [Qwen25VLTextModel, Qwen3VLTextModel])
 def test_qwen_vl_decoder_uses_3d_position_ids(monkeypatch, model_class):
     model = model_class.__new__(model_class)
+    model.use_paged_attention = False
     model.input_shapes = {"position_ids": ["batch_size", "sequence_length"]}
     monkeypatch.setattr(Model, "make_inputs_and_outputs", lambda self: None)
 
     model.make_inputs_and_outputs()
 
     assert model.input_shapes["position_ids"] == [3, "batch_size", "sequence_length"]
+
+
+def test_qwen35_paged_decoder_uses_packed_3d_position_ids(monkeypatch):
+    model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.use_paged_attention = True
+    model.input_shapes = {"position_ids": ["batch_size", "sequence_length"]}
+    monkeypatch.setattr(Model, "make_inputs_and_outputs", lambda self: None)
+
+    model.make_inputs_and_outputs()
+
+    assert model.input_shapes["position_ids"] == [3, "num_tokens"]
 
 
 @pytest.mark.parametrize(
@@ -174,6 +186,8 @@ def test_qwen_vl_decoder_uses_3d_position_ids(monkeypatch, model_class):
 )
 def test_qwen_vl_emits_layout_specific_mrotary_embedding(layout, sections):
     model = Model.__new__(Model)
+    model.use_paged_attention = False
+    model.hidden_size = 2048
     model.head_size = 128
     model.rope_attrs = {
         "interleaved": 0,
@@ -218,6 +232,36 @@ def test_qwen_vl_emits_layout_specific_mrotary_embedding(layout, sections):
     assert node["attributes"]["mrope_section"] == sections
     assert node["attributes"]["mrope_layout"] == layout
     assert model.values == [("q_rotated", ir.DataType.FLOAT, ["batch_size", "sequence_length", 2048])]
+
+
+def test_qwen35_paged_mrotary_embedding_uses_packed_output_shape():
+    model = Model.__new__(Model)
+    model.use_paged_attention = True
+    model.hidden_size = 2048
+    model.head_size = 128
+    model.rope_attrs = {
+        "interleaved": 0,
+        "rotary_embedding_dim": 32,
+        "mrope_section": [11, 11, 10],
+        "mrope_layout": 1,
+    }
+    model.nodes = []
+    model.values = []
+    model.make_node = lambda op_type, **kwargs: model.nodes.append((op_type, kwargs))
+    model.make_value = lambda name, dtype, shape: model.values.append((name, dtype, shape))
+
+    model.make_mrotary_embedding(
+        "/model/layers.0/attn/q_rotary/MRotaryEmbedding",
+        "q",
+        "q_rotated",
+        position_ids="position_ids",
+        cos_cache_name="cos_cache",
+        sin_cache_name="sin_cache",
+        num_heads=16,
+        dtype=ir.DataType.FLOAT,
+    )
+
+    assert model.values == [("q_rotated", ir.DataType.FLOAT, ["num_tokens", 2048])]
 
 
 def test_qwen3_vl_keeps_qk_norm_outputs_in_fp32(monkeypatch):
@@ -283,6 +327,7 @@ def test_qwen35_configures_interleaved_partial_mrope(monkeypatch):
     assert model.rope_attrs["mrope_layout"] == 1
     assert model.rope_attrs["rotary_embedding_dim"] == 32
     assert model.rope_attrs["cast"] == {"use_fp32": True, "root_input": True, "output_0": True}
+    assert model.linear_attn_op == "linear_attention"
     assert not model.is_fused_rope_supported()
 
 
@@ -386,6 +431,66 @@ def test_qwen35_applies_mrope_to_q_and_k(monkeypatch):
     ]
     assert model.attention_attrs["q_path"] == "/model/layers.2/attn/q_rotary/MRotaryEmbedding/output_0"
     assert model.attention_attrs["k_path"] == "/model/layers.2/attn/k_rotary/MRotaryEmbedding/output_0"
+
+
+def test_qwen35_paged_attention_keeps_external_mrope(monkeypatch):
+    model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.num_attn_heads = 16
+    model.num_kv_heads = 4
+    model.head_size = 128
+    model.use_paged_attention = True
+    model.ep = "cuda"
+    model.io_dtype = ir.DataType.FLOAT16
+    model.extra_options = {}
+    model.input_names = {"position_ids": "position_ids"}
+    model.matmul_attrs = {"use_lora": False}
+    model.rope_attrs = {"op_type": "MRotaryEmbedding", "interleaved": 0}
+    model.attention_attrs = {
+        "q_norm": False,
+        "k_norm": False,
+        "rope": True,
+        "scale": 0.0,
+        "softcap": 0.0,
+    }
+    model.kv_cache_attrs = {"quant_scheme": "none"}
+    model.window_size = None
+    calls = []
+    nodes = []
+
+    monkeypatch.setattr(
+        model,
+        "make_rotary_embedding_op",
+        lambda name, root_input, position_ids: calls.append((name, root_input, position_ids)),
+    )
+    model.make_node = lambda op_type, **kwargs: nodes.append((op_type, kwargs))
+    model.make_value = lambda *_args, **_kwargs: None
+
+    model.make_attention_init(types.SimpleNamespace())
+    model.attention_attrs["q_path"] = "q"
+    model.attention_attrs["k_path"] = "k"
+    model.make_attention_qk_rope(2)
+    model.make_paged_attention(
+        "/model/layers.2/attn/PagedAttention",
+        q_path=model.attention_attrs["q_path"],
+        k_path=model.attention_attrs["k_path"],
+        v_path="v",
+        cumulative_sequence_lengths="cumulative_sequence_lengths",
+        past_sequence_lengths="past_sequence_lengths",
+        block_table="block_table",
+    )
+
+    assert model.input_names["position_ids"] == "position_ids"
+    assert calls == [
+        ("/model/layers.2/attn/q_rotary/MRotaryEmbedding", "q", "position_ids"),
+        ("/model/layers.2/attn/k_rotary/MRotaryEmbedding", "k", "position_ids"),
+    ]
+    assert nodes[0][0] == "PagedAttention"
+    assert nodes[0][1]["inputs"][:3] == [
+        "/model/layers.2/attn/q_rotary/MRotaryEmbedding/output_0",
+        "/model/layers.2/attn/k_rotary/MRotaryEmbedding/output_0",
+        "v",
+    ]
+    assert nodes[0][1]["do_rotary"] is False
 
 
 @pytest.mark.parametrize(

@@ -328,6 +328,36 @@ def test_varlen_ops_omit_compact_state_updates_at_zero_capacity():
     assert "state_update_capacity" not in gdn
 
 
+def test_varlen_gated_delta_net_requires_compact_state_update_input_pair():
+    model = _recording_model()
+    common = {
+        "q_path": "q",
+        "k_path": "k",
+        "v_path": "v",
+        "cumulative_sequence_length": "cu",
+        "past_recurrent_state": "past",
+        "present_recurrent_state": "present",
+        "decay": "a",
+        "beta": "b",
+        "a_log": "a_log",
+        "dt_bias": "dt_bias",
+        "gate_shape": ["num_tokens", 3],
+        "state_update_capacity": 3,
+        "state_update_capsule": "capsule",
+        "state_update_capsule_shape": ["batch_size", 105],
+        "output_shape": ["num_tokens", 3, 8],
+        "present_recurrent_shape": ["batch_size", 3, 8, 4],
+    }
+
+    with pytest.raises(ValueError, match="state_update_capture_count and state_update_active are required"):
+        model.make_varlen_gated_delta_net("/gdn", **common)
+
+    with pytest.raises(
+        ValueError, match="state_update_capture_count and state_update_active must be provided together"
+    ):
+        model.make_varlen_gated_delta_net("/gdn", state_update_capture_count="capture_count", **common)
+
+
 def test_dense_and_packed_gated_delta_net_share_one_attribute_policy():
     model = _recording_model()
     shared = dict(

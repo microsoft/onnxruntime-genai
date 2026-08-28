@@ -79,6 +79,16 @@ TEST(DecoderStateGroupsConfigTest, PreservesLegacyManifestAbsence) {
   EXPECT_FALSE(config.model.decoder.state_groups.has_value());
 }
 
+TEST(DecoderStateGroupsConfigTest, UsesDefaultStateUpdateBindings) {
+  const auto config = LoadDecoderConfig(R"({ "state_update_capacity": 3 })");
+
+  EXPECT_EQ(config.model.decoder.inputs.state_update_capture_count, Config::Defaults::StateUpdateCaptureCountName);
+  EXPECT_EQ(config.model.decoder.inputs.state_update_active, Config::Defaults::StateUpdateActiveName);
+  EXPECT_EQ(config.model.decoder.outputs.state_update_conv_value_names, Config::Defaults::StateUpdateConvValueName);
+  EXPECT_EQ(config.model.decoder.outputs.state_update_recurrent_capsule_names,
+            Config::Defaults::StateUpdateRecurrentCapsuleName);
+}
+
 TEST(DecoderStateGroupsConfigTest, ParsesSparseHybridManifest) {
   const auto config = LoadDecoderConfig(R"({
     "num_hidden_layers": 4,
