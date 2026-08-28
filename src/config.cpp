@@ -756,7 +756,11 @@ struct Decoder_Element : JSON::Element {
     } else if (name == "head_size") {
       v_.head_size = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "state_update_capacity") {
+      // The kernel packs every captured transition for a layer into one fixed-width capsule output.
+      constexpr int kMaxStateUpdateCapacity = 8;
       v_.state_update_capacity = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.state_update_capacity < 0 || v_.state_update_capacity > kMaxStateUpdateCapacity)
+        throw std::runtime_error("state_update_capacity must be between 0 and " + std::to_string(kMaxStateUpdateCapacity));
     } else if (name == "conv_cache_size") {
       v_.conv_cache_size = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else {

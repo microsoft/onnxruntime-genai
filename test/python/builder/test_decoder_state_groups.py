@@ -54,6 +54,7 @@ def _make_config_model(model_type, layer_types=None, use_paged_attention=True):
     model.context_length_attrs = {
         "state_window": 0,
         "state_window_dims": [],
+        "state_update_capacity": 0,
         "window_kv_cache": True,
         "window_kv_cache_slack": 0,
     }
@@ -185,7 +186,7 @@ def test_qwen38_official_geometry_emits_exact_sparse_groups(monkeypatch, tmp_pat
 
 def test_qwen38_compact_state_update_bindings_are_emitted(monkeypatch, tmp_path):
     model = _make_config_model(Qwen35TextModel, layer_types=["linear_attention", "full_attention"])
-    model.state_update_capacity = 3
+    model.context_length_attrs["state_update_capacity"] = 3
     model.input_names["state_update.capture_count"] = "state_update_capture_count"
     model.input_names["state_update.active"] = "state_update_active"
     model.output_names["state_update.conv_value"] = {0: "state_update.0.conv_value"}
@@ -198,6 +199,15 @@ def test_qwen38_compact_state_update_bindings_are_emitted(monkeypatch, tmp_path)
     assert decoder["inputs"]["state_update_active"] == "state_update_active"
     assert decoder["outputs"]["state_update_conv_value_names"] == "state_update.%d.conv_value"
     assert decoder["outputs"]["state_update_recurrent_capsule_names"] == "state_update.%d.recurrent_capsule"
+
+
+def test_qwen38_capacity_without_bindings_is_not_recorded(monkeypatch, tmp_path):
+    model = _make_config_model(Qwen35TextModel, layer_types=["linear_attention", "full_attention"])
+    model.context_length_attrs["state_update_capacity"] = 3
+
+    decoder = _write_config(monkeypatch, tmp_path, model)["model"]["decoder"]
+
+    assert "state_update_capacity" not in decoder
 
 
 def test_varlen_ops_emit_compact_state_updates_at_exact_slots():
@@ -264,7 +274,6 @@ def test_varlen_ops_emit_compact_state_updates_at_exact_slots():
     assert gdn["outputs"] == ["/gdn/output_0", "present", "state_update.0.recurrent_capsule"]
     assert gdn["state_update_capacity"] == 3
     assert gdn["scale"] == 0.0
-    assert "arithmetic_mode" not in gdn
 
 
 def test_varlen_ops_omit_compact_state_updates_at_zero_capacity():
@@ -319,80 +328,69 @@ def test_varlen_ops_omit_compact_state_updates_at_zero_capacity():
     assert "state_update_capacity" not in gdn
 
 
-def test_dense_gated_delta_net_defaults_to_ort_scale():
+def test_dense_and_packed_gated_delta_net_share_one_attribute_policy():
+    model = _recording_model()
+    shared = dict(
+        q_path="q",
+        k_path="k",
+        v_path="v",
+        decay="a",
+        beta="b",
+        gate_shape=["batch_size", "sequence_length", 3],
+        output_shape=["batch_size", "sequence_length", 3, 8],
+    )
+    model.make_gated_delta_net("/gdn", initial_state="past", final_state="present", state_shape=[3], **shared)
+    dense = model.nodes[-1][1]
+
+    model.make_varlen_gated_delta_net(
+        "/varlen_gdn",
+        cumulative_sequence_length="cu",
+        past_recurrent_state="past",
+        present_recurrent_state="present",
+        present_recurrent_shape=[3],
+        **shared,
+    )
+    packed = model.nodes[-1][1]
+
+    attributes = ("update_rule", "scale", "gate_activation", "beta_activation", "qk_l2_norm", "chunk_size")
+    assert {key: dense[key] for key in attributes} == {key: packed[key] for key in attributes}
+    assert dense["scale"] == 0.0
+    assert dense["chunk_size"] == 64
+
+
+def test_dense_gated_delta_net_casts_gates_to_float32():
     model = _recording_model()
     model.make_gated_delta_net(
         "/gdn",
         q_path="q",
         k_path="k",
         v_path="v",
-        past_recurrent_state="past",
         initial_state="past",
         final_state="present",
         decay="a",
         beta="b",
+        gate_shape=["batch_size", "sequence_length", 3],
         output_shape=["batch_size", "sequence_length", 3, 8],
         state_shape=["batch_size", 3, 8, 4],
     )
 
-    assert model.nodes[-1][1]["scale"] == 0.0
-
-
-def test_varlen_ops_reject_obsolete_checkpoint_outputs():
-    model = _recording_model()
-    with pytest.raises(ValueError, match="checkpoint outputs are no longer supported"):
-        model.make_varlen_causal_conv_with_state(
-            "/conv",
-            prefix_conv_state="checkpoint",
-        )
-    with pytest.raises(ValueError, match="checkpoint outputs are no longer supported"):
-        model.make_varlen_gated_delta_net(
-            "/gdn",
-            checkpoints="checkpoint",
-        )
-
-
-def test_varlen_gated_delta_net_rejects_separate_state_update_outputs():
-    model = _recording_model()
-    with pytest.raises(ValueError, match="separate state-update outputs are no longer supported"):
-        model.make_varlen_gated_delta_net(
-            "/gdn",
-            state_update_decay="decay_update",
-        )
-
-
-@pytest.mark.parametrize("make_gated_delta_net", ["make_gated_delta_net", "make_varlen_gated_delta_net"])
-def test_gated_delta_net_rejects_bfloat16_io(make_gated_delta_net):
-    model = _recording_model()
-    model.io_dtype = base_module.ir.DataType.BFLOAT16
-
-    with pytest.raises(ValueError, match="does not support bfloat16 model I/O"):
-        getattr(model, make_gated_delta_net)("/gdn")
-
-
-@pytest.mark.parametrize(
-    ("capacity", "use_paged_attention", "message"),
-    [
-        (-1, True, "between 0 and 8"),
-        (9, True, "between 0 and 8"),
-        (3, False, "use_paged_attention=true"),
-    ],
-)
-def test_qwen38_compact_state_update_option_validation(
-    capacity,
-    use_paged_attention,
-    message,
-):
-    model = Qwen35TextModel.__new__(Qwen35TextModel)
-    with pytest.raises(ValueError, match=message):
-        model.validate_state_update_options(capacity, use_paged_attention)
+    assert model.casts == [
+        ("/gdn/decay_fp32/Cast", "a", base_module.ir.DataType.FLOAT, ["batch_size", "sequence_length", 3]),
+        ("/gdn/beta_fp32/Cast", "b", base_module.ir.DataType.FLOAT, ["batch_size", "sequence_length", 3]),
+    ]
+    assert model.nodes[-1][1]["inputs"][4:7] == [
+        "/gdn/decay_fp32/Cast/output_0",
+        "/gdn/beta_fp32/Cast/output_0",
+        "past",
+    ]
 
 
 @pytest.mark.parametrize(
     ("use_paged_attention", "linear_attn_op", "state_window", "ep", "io_dtype", "message"),
     [
         (True, "linear_attention", 0, "webgpu", base_module.ir.DataType.FLOAT16, "CUDA execution provider"),
-        (False, "gated_delta_net", 1, "cuda", base_module.ir.DataType.FLOAT16, "requires state_window=0"),
+        (True, "linear_attention", 1, "cuda", base_module.ir.DataType.FLOAT16, "require state_window=0"),
+        (False, "gated_delta_net", 1, "cuda", base_module.ir.DataType.FLOAT16, "require state_window=0"),
         (True, "linear_attention", 0, "cuda", base_module.ir.DataType.BFLOAT16, "bfloat16 model I/O"),
         (False, "gated_delta_net", 0, "cuda", base_module.ir.DataType.BFLOAT16, "bfloat16 model I/O"),
     ],
@@ -416,23 +414,17 @@ def test_qwen35_gated_delta_net_option_validation(
         )
 
 
-@pytest.mark.parametrize("capacity", [True, 1.5, "1.5", None])
-def test_qwen38_compact_state_update_capacity_requires_integer(capacity):
-    model = Qwen35TextModel.__new__(Qwen35TextModel)
-    with pytest.raises(ValueError, match="must be an integer"):
-        model.parse_state_update_capacity(capacity)
-
-    assert model.parse_state_update_capacity("3") == 3
-
-
-def test_qwen38_packed_io_uses_unwindowed_v_major_state_and_compact_updates():
+def _packed_gated_delta_net_model(capacity=3, layer_types=("linear_attention", "full_attention")):
     model = Qwen35TextModel.__new__(Qwen35TextModel)
     model.use_paged_attention = True
     model.linear_attn_op = "gated_delta_net"
-    model.state_update_capacity = 3
+    model.ep = "cuda"
+    model.context_length_attrs = {"state_window": 0, "state_update_capacity": capacity}
     model.io_dtype = base_module.ir.DataType.FLOAT16
-    model.layer_types = ["linear_attention", "full_attention"]
+    model.layer_types = list(layer_types)
     model.linear_conv_dim = 48
+    model.linear_key_dim = 8
+    model.linear_value_dim = 24
     model.linear_conv_kernel_dim = 4
     model.linear_num_key_heads = 2
     model.linear_num_value_heads = 3
@@ -444,6 +436,11 @@ def test_qwen38_packed_io_uses_unwindowed_v_major_state_and_compact_updates():
     model.output_names = {}
     model.output_types = {"present.conv": model.io_dtype, "present.recurrent": model.io_dtype}
     model.output_shapes = {"present.conv": [4, "old"], "present.recurrent": [4, "old"]}
+    return model
+
+
+def test_qwen38_packed_io_uses_unwindowed_v_major_state_and_compact_updates():
+    model = _packed_gated_delta_net_model()
 
     model.configure_gated_delta_net_io()
 
@@ -459,8 +456,46 @@ def test_qwen38_packed_io_uses_unwindowed_v_major_state_and_compact_updates():
     assert model.output_names["state_update.recurrent_capsule"] == {0: "state_update.0.recurrent_capsule"}
 
 
+def test_qwen38_capacity_is_cleared_without_linear_attention_layers():
+    model = _packed_gated_delta_net_model(layer_types=("full_attention",))
+
+    model.configure_gated_delta_net_io()
+
+    assert model.context_length_attrs["state_update_capacity"] == 0
+    assert "state_update.capture_count" not in model.input_names
+
+
+def test_qwen38_packed_layer_reuses_declared_state_update_bindings(monkeypatch):
+    model = _packed_gated_delta_net_model()
+    model.configure_gated_delta_net_io()
+    model.input_names["cumulative_sequence_lengths"] = "cumulative_sequence_lengths"
+    model.input_names["past.recurrent"] = {0: "past"}
+    model.output_names["present.recurrent"] = {0: "present"}
+    model.make_split = lambda *args, **kwargs: None
+    model.make_reshape = lambda *args, **kwargs: None
+    model.make_initializer = lambda *args, **kwargs: None
+    calls = []
+    monkeypatch.setattr(Model, "make_varlen_gated_delta_net", lambda self, name, **kwargs: calls.append(kwargs))
+
+    model.make_gated_delta_net_layer(0, SimpleNamespace(A_log="a_log", dt_bias="dt_bias"), "conv", "b", "a")
+
+    gdn = calls[0]
+    assert gdn["state_update_capture_count"] == model.input_names["state_update.capture_count"]
+    assert gdn["state_update_active"] == model.input_names["state_update.active"]
+    assert gdn["state_update_capsule"] == model.output_names["state_update.recurrent_capsule"][0]
+    assert gdn["state_update_capsule_shape"] == model.output_shapes["state_update.recurrent_capsule"]
+    assert gdn["present_recurrent_shape"] == model.output_shapes["present.recurrent"]
+    assert model.make_conv_state_update_kwargs(0) == {
+        "state_update_capacity": 3,
+        "state_update_capture_count": model.input_names["state_update.capture_count"],
+        "state_update_value": model.output_names["state_update.conv_value"][0],
+        "state_update_value_shape": model.output_shapes["state_update.conv_value"],
+    }
+
+
 def test_qwen38_dense_gated_delta_net_exports_raw_a_log(monkeypatch):
     model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.use_paged_attention = False
     model.io_dtype = base_module.ir.DataType.FLOAT16
     model.linear_key_dim = 8
     model.linear_value_dim = 24
@@ -470,16 +505,16 @@ def test_qwen38_dense_gated_delta_net_exports_raw_a_log(monkeypatch):
     model.linear_value_head_dim = 8
     model.input_names = {"past.recurrent": {1: "past"}}
     model.output_names = {"present.recurrent": {1: "present"}}
+    model.output_shapes = {"present.recurrent": ["batch_size", 3, 8, 4]}
     model.make_split = lambda *args, **kwargs: None
     model.make_reshape = lambda *args, **kwargs: None
-    model.make_cast = lambda *args, **kwargs: None
     initializers = []
     model.make_initializer = lambda *args, **kwargs: initializers.append((args, kwargs))
     calls = []
     monkeypatch.setattr(Model, "make_gated_delta_net", lambda self, name, **kwargs: calls.append((name, kwargs)))
 
     a_log = qwen_module.torch.tensor([0.25, -0.5, 0.0])
-    output = model.make_dense_gated_delta_net(
+    output = model.make_gated_delta_net_layer(
         1,
         SimpleNamespace(A_log=a_log, dt_bias="dt_bias_value"),
         "conv_output",
@@ -488,9 +523,10 @@ def test_qwen38_dense_gated_delta_net_exports_raw_a_log(monkeypatch):
     )
 
     gdn = calls[0][1]
-    assert "arithmetic_mode" not in gdn
     assert gdn["a_log"] == "model.layers.1.linear_attn.A_log"
     assert gdn["state_shape"] == ["batch_size", 3, 8, 4]
+    assert gdn["gate_shape"] == ["batch_size", "sequence_length", 3]
+    assert "state_update_capacity" not in gdn
     exported_a_log = next(args[0] for args, _ in initializers if args[1] == gdn["a_log"])
     qwen_module.torch.testing.assert_close(exported_a_log, a_log)
     assert output.endswith("/gdn_out/Reshape/output_0")

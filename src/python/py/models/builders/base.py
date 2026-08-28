@@ -55,6 +55,7 @@ class Model:
         self.context_length_attrs = {
             "state_window": 0,                                                                                                       # Retained per-position recurrent/conv states
             "state_window_dims": [],                                                                                                 # Optional leading dimensions for state windows
+            "state_update_capacity": 0,                                                                                              # Per-token state transitions captured compactly by a forward
             "window_kv_cache": True,                                                                                                 # Use bounded KV caches for sliding-attention layers
             "window_kv_cache_slack": 0,                                                                                              # Positions beyond the window; 0 uses the EP default
         }
@@ -519,6 +520,11 @@ class Model:
 
         # Leading-axis window extent to splice into the state shapes, or none when unwindowed.
         self.context_length_attrs["state_window_dims"] = [state_window] if state_window else []
+
+        # Instead of retaining a window of whole states, a forward can emit up to N compact per-token
+        # transitions (a conv value plus a recurrent capsule per layer) that the engine replays to land
+        # on any accepted prefix. 0 (the default) omits the capture I/O entirely.
+        self.context_length_attrs["state_update_capacity"] = int(self.extra_options.get("state_update_capacity", 0))
 
         # Zero lets the runtime choose the EP-specific number of positions retained beyond the window.
         self.context_length_attrs["window_kv_cache_slack"] = 0
@@ -1285,8 +1291,10 @@ class Model:
         state_groups = self.make_decoder_state_groups(inputs, outputs)
         if state_groups:
             genai_config["model"]["decoder"]["state_groups"] = state_groups
-        if getattr(self, "state_update_capacity", 0):
-            genai_config["model"]["decoder"]["state_update_capacity"] = self.state_update_capacity
+        if "state_update.capture_count" in self.input_names:
+            genai_config["model"]["decoder"]["state_update_capacity"] = self.context_length_attrs[
+                "state_update_capacity"
+            ]
 
         self.update_genai_config(genai_config)
 
@@ -2040,9 +2048,6 @@ class Model:
 
     def make_varlen_causal_conv_with_state(self, name, **kwargs):
         """Emit packed causal convolution with optional compact state updates."""
-        if kwargs.get("prefix_conv_state") or kwargs.get("max_checkpoints"):
-            raise ValueError("VarlenCausalConvWithState checkpoint outputs are no longer supported")
-
         inputs = [
             kwargs["root_input"],
             kwargs["weight"],
@@ -2057,11 +2062,8 @@ class Model:
         output = f"{name}/output_0"
         present_conv = kwargs["present_conv_state"]
         outputs = [output, present_conv]
-        state_update_value = kwargs.get("state_update_value", "")
         if state_update_capacity:
-            if not state_update_value:
-                raise ValueError("state_update_value is required when state_update_capacity is positive")
-            outputs.append(state_update_value)
+            outputs.append(kwargs["state_update_value"])
 
         attributes = {"activation": kwargs.get("activation", "silu")}
         if state_update_capacity:
@@ -2077,7 +2079,7 @@ class Model:
         self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
         self.make_value(present_conv, self.io_dtype, shape=kwargs["present_conv_shape"])
         if state_update_capacity:
-            self.make_value(state_update_value, self.io_dtype, shape=kwargs["state_update_value_shape"])
+            self.make_value(kwargs["state_update_value"], self.io_dtype, shape=kwargs["state_update_value_shape"])
 
     def make_gated_rms_norm(self, name, root_input, scale, gate, shape, epsilon=1e-5):
         output = f"{name}/output_0"
@@ -3814,23 +3816,35 @@ class Model:
         )
         self.make_value(output, self.io_dtype, shape=["batch_size", "sequence_length", self.linear_value_dim])
 
+    def make_gated_delta_net_attributes(self, kwargs):
+        """Attribute policy shared by the dense and packed emitters so both layouts stay equivalent."""
+        return {
+            "update_rule": kwargs.get("update_rule", "gated_delta"),
+            "scale": kwargs.get("scale", 0.0),
+            "gate_activation": kwargs.get("gate_activation", "none"),
+            "beta_activation": kwargs.get("beta_activation", "none"),
+            "qk_l2_norm": kwargs.get("qk_l2_norm", 0),
+            "chunk_size": kwargs.get("chunk_size", 64),
+        }
+
+    def make_gated_delta_net_gates(self, name, kwargs):
+        """Cast the decay/beta gates to the float32 the kernel accumulates in."""
+        decay_cast = f"{name}/decay_fp32/Cast"
+        beta_cast = f"{name}/beta_fp32/Cast"
+        self.make_cast(decay_cast, kwargs["decay"], ir.DataType.FLOAT, kwargs["gate_shape"])
+        self.make_cast(beta_cast, kwargs["beta"], ir.DataType.FLOAT, kwargs["gate_shape"])
+        return f"{decay_cast}/output_0", f"{beta_cast}/output_0"
+
     def make_gated_delta_net(self, name, **kwargs):
         """Emit dense GatedDeltaNet with token-major inputs and V-major float32 state."""
-        if self.io_dtype == ir.DataType.BFLOAT16:
-            raise ValueError(
-                "GatedDeltaNet evaluation does not support bfloat16 model I/O; "
-                "the current ORT kernel registers float and float16 only"
-            )
-        if kwargs.get("checkpoints") or kwargs.get("state_checkpoints"):
-            raise ValueError("GatedDeltaNet checkpoint outputs are no longer supported")
-
+        decay, beta = self.make_gated_delta_net_gates(name, kwargs)
         inputs = [
             kwargs["q_path"],
             kwargs["k_path"],
             kwargs["v_path"],
             kwargs.get("cu_seqlens", ""),
-            kwargs["decay"],
-            kwargs["beta"],
+            decay,
+            beta,
             kwargs["initial_state"],
         ]
         a_log = kwargs.get("a_log", "")
@@ -3842,51 +3856,27 @@ class Model:
 
         output = f"{name}/output_0"
         final_state = kwargs["final_state"]
-        attributes = {
-            "update_rule": kwargs.get("update_rule", "gated_delta"),
-            "scale": kwargs.get("scale", 0.0),
-        }
-        for attribute in ("gate_activation", "beta_activation"):
-            if kwargs.get(attribute):
-                attributes[attribute] = kwargs[attribute]
-        for attribute in ("qk_l2_norm", "chunk_size"):
-            if kwargs.get(attribute):
-                attributes[attribute] = kwargs[attribute]
-
         self.make_node(
             "GatedDeltaNet",
             inputs=inputs,
             outputs=[output, final_state],
             name=name,
             domain="com.microsoft",
-            **attributes,
+            **self.make_gated_delta_net_attributes(kwargs),
         )
         self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
         self.make_value(final_state, ir.DataType.FLOAT, shape=kwargs["state_shape"])
 
     def make_varlen_gated_delta_net(self, name, **kwargs):
         """Emit packed GatedDeltaNet with optional compact transition capsules."""
-        if self.io_dtype == ir.DataType.BFLOAT16:
-            raise ValueError(
-                "GatedDeltaNet evaluation does not support bfloat16 model I/O; "
-                "the current ORT kernel registers float and float16 only"
-            )
-        if kwargs.get("checkpoints") or kwargs.get("state_checkpoints"):
-            raise ValueError("GatedDeltaNet checkpoint outputs are no longer supported")
-        if any(kwargs.get(output) for output in ("state_update_decay", "state_update_key", "state_update_delta")):
-            raise ValueError("GatedDeltaNet separate state-update outputs are no longer supported")
-
-        decay_cast = f"{name}/decay_fp32/Cast"
-        beta_cast = f"{name}/beta_fp32/Cast"
-        self.make_cast(decay_cast, kwargs["decay"], ir.DataType.FLOAT, kwargs["gate_shape"])
-        self.make_cast(beta_cast, kwargs["beta"], ir.DataType.FLOAT, kwargs["gate_shape"])
+        decay, beta = self.make_gated_delta_net_gates(name, kwargs)
         inputs = [
             kwargs["q_path"],
             kwargs["k_path"],
             kwargs["v_path"],
             kwargs["cumulative_sequence_length"],
-            f"{decay_cast}/output_0",
-            f"{beta_cast}/output_0",
+            decay,
+            beta,
             kwargs["past_recurrent_state"],
         ]
         a_log = kwargs.get("a_log", "")
@@ -3905,20 +3895,10 @@ class Model:
         output = f"{name}/output_0"
         present_recurrent = kwargs["present_recurrent_state"]
         outputs = [output, present_recurrent]
-        state_update_capsule = kwargs.get("state_update_capsule", "")
         if state_update_capacity:
-            if not state_update_capsule:
-                raise ValueError("state_update_capsule is required when state_update_capacity is positive")
-            outputs.append(state_update_capsule)
+            outputs.append(kwargs["state_update_capsule"])
 
-        attributes = {
-            "update_rule": kwargs.get("update_rule", "gated_delta"),
-            "scale": kwargs.get("scale", 0.0),
-            "gate_activation": kwargs.get("gate_activation", "none"),
-            "beta_activation": kwargs.get("beta_activation", "none"),
-            "qk_l2_norm": kwargs.get("qk_l2_norm", 0),
-            "chunk_size": kwargs.get("chunk_size", 64),
-        }
+        attributes = self.make_gated_delta_net_attributes(kwargs)
         if state_update_capacity:
             attributes["state_update_capacity"] = state_update_capacity
         self.make_node(
@@ -3933,7 +3913,7 @@ class Model:
         self.make_value(present_recurrent, ir.DataType.FLOAT, shape=kwargs["present_recurrent_shape"])
         if state_update_capacity:
             self.make_value(
-                state_update_capsule,
+                kwargs["state_update_capsule"],
                 ir.DataType.FLOAT,
                 shape=kwargs["state_update_capsule_shape"],
             )

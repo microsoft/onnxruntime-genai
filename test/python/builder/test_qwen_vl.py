@@ -248,6 +248,8 @@ def test_qwen35_configures_interleaved_partial_mrope(monkeypatch):
         self.make_config_init(config)
         self.head_size = 128
         self.q_size = 2048
+        self.layer_types = ["full_attention"]
+        self.context_length_attrs = {"state_window": 0, "state_update_capacity": 0}
         self.input_shapes = {"position_ids": ["batch_size", "sequence_length"]}
         self.layernorm_attrs = {"cast": {}, "add_offset": 0}
         self.attention_attrs = {"q_norm": False, "k_norm": False}
@@ -434,7 +436,9 @@ def test_qwen35_attention_input_proj_splits_per_head_gate(
     monkeypatch.setattr(
         model,
         "make_split",
-        lambda name, inputs, outputs, dtypes, shapes, axis: calls.append(("split", name, inputs, outputs, shapes, axis)),
+        lambda name, inputs, outputs, dtypes, shapes, axis: calls.append(
+            ("split", name, inputs, outputs, shapes, axis)
+        ),
     )
 
     model.make_attention_input_proj(3, object(), "hidden_states")
@@ -661,6 +665,7 @@ def test_qwen35_linear_attention_uses_fused_gate(monkeypatch):
 def test_qwen35_linear_attention_uses_gated_rms_norm(monkeypatch):
     model = Qwen35TextModel.__new__(Qwen35TextModel)
     model.io_dtype = ir.DataType.FLOAT16
+    model.use_paged_attention = False
     model.linear_value_dim = 2048
     model.layernorm_attrs = {"epsilon": 1e-6}
     model.layernorm_attrs["skip_input"] = ""
@@ -733,9 +738,7 @@ def test_qwen35_moe_combines_shared_expert_with_gated_add(monkeypatch):
     monkeypatch.setattr(
         model,
         "make_gated_add",
-        lambda name, root_input, scaled_input, gate, shape: calls.append(
-            (name, root_input, scaled_input, gate, shape)
-        ),
+        lambda name, root_input, scaled_input, gate, shape: calls.append((name, root_input, scaled_input, gate, shape)),
     )
 
     model.make_moe(1, mlp, "hidden_states")
