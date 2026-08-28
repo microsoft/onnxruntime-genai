@@ -19,7 +19,8 @@ Model
 
 The redesign must:
 
-- preserve current request-level generation configurability;
+- preserve the supported request-level `OgaGeneratorParams` configuration for one-sequence,
+  one-beam Engine Requests; unsupported modes remain rejected;
 - make Request and Turn limits explicit;
 - identify every Turn;
 - cancel only the intended Turn;
@@ -116,12 +117,13 @@ Initial implementation status:
 | --- | --- |
 | `max_generated_tokens` | Implemented end to end; zero uses the configured/default limit |
 | `temperature`, `top_p`, `top_k`, `seed` | Setter returns an explicit not-implemented error |
-| token-ID stop sequences | Setter accepts the existing ragged `OgaSequences` collection, returns an explicit not-implemented error, and does not retain or dereference it |
+| token-ID stop sequences | A null collection is rejected; a non-null collection is not dereferenced or retained and returns an explicit not-implemented error |
 | guidance | Setter returns an explicit not-implemented error and does not retain/dereference input |
 
 Unsupported requested behavior must never be accepted and ignored. `OgaTurnParams` may be reused, but
 `OgaRequestBeginTurn` snapshots all supported values before returning. A params object is bound to
-the Request that created it; passing it to another Request is rejected.
+the Request that created it; passing it to another Request is rejected. The params object does not
+keep the Request alive. Using it after the bound Request is closed or destroyed returns an error.
 
 ### Finish reasons and event flags
 
@@ -149,10 +151,10 @@ typedef enum OgaEngineEventFlags {
 `OgaEngineEventFlags` is a bitmask, not a mutually exclusive type. In particular, a final model step
 may emit one event with both `Token` and `TurnFinished`.
 
-The public token loop is `Tokens(request, turn_id)`: callers pump `OgaEngineRun`, iterate the
-populated event prefix, test the `Token` bit rather than comparing flags for equality, treat
-`event.request` as a borrowed identity alias for their owned Request handle, use `event.turn_id` as
-the Request-local Turn identity, and consume `event.token` only when `Token` is set.
+The public token loop pumps `OgaEngineRun`, iterates the populated event prefix, tests the `Token`
+bit rather than comparing flags for equality, treats `event.request` as a borrowed identity alias
+for the caller's owned Request handle, uses `event.turn_id` as the Request-local Turn identity, and
+consumes `event.token` only when `Token` is set.
 
 `OgaFinishReason_StopSequence` reserves the intended vocabulary but is not emitted until stop
 sequences are implemented end to end.
@@ -163,7 +165,7 @@ sequences are implemented end to end.
 typedef struct OgaTurnUsage {
   uint64_t prompt_tokens;
   uint64_t generated_tokens;
-  uint64_t cached_prompt_tokens; /* Cross-request prefix-cache hits; currently unimplemented, so always 0 */
+  uint64_t cached_prompt_tokens; /* Currently always 0. */
 } OgaTurnUsage;
 
 typedef enum OgaErrorCode {
@@ -214,13 +216,19 @@ Invalid arguments, invalid structure sizes, incompatible handles, and owner-thre
 
 `prompt_tokens` is the number of input IDs accepted by the current `BeginTurn`.
 `generated_tokens` is the number of visible output tokens committed for the Turn.
-`cached_prompt_tokens` has the exact contract documented in the structure comment. Scheduler
-`max_scheduled_tokens` is not usage: it is a per-step budget shared across Requests.
+`cached_prompt_tokens` is currently always zero; no prefix-cache hit accounting is exposed.
+Scheduler `max_scheduled_tokens` is not usage: it is a per-step budget shared across Requests.
 
 `OgaEngineEvent` records are caller-allocated. The caller sets every slot's `struct_size` before
 each call. The implementation validates the complete buffer before making progress, preserves each
 size, writes no bytes beyond the Version 1 fields, and fully initializes every Version 1 field in
 the populated prefix.
+
+Every function returning `OgaResult*` returns null on success or an owned error object on failure;
+the caller releases that object with `OgaDestroyResult`, and its diagnostic string is valid until
+then. The C++ wrapper converts a non-null result to `std::runtime_error`. API misuse and validation
+failures are reported this way; callers must use event flags and `error_code`, not diagnostic-string
+parsing, to classify operational Run outcomes.
 
 ### Engine, Request, and Turn operations
 
@@ -271,13 +279,30 @@ caller's handle ownership. The Model remains alive until the Engine and any othe
 are destroyed. The input Model handle must be valid during `OgaCreateEngine` and is not usable by the
 caller after that handle is released.
 
+The Engine records its owner thread when it is created. Engine operations, Request operations, and
+Turn-parameter setters are not thread-safe and must be called serially from that owner thread.
+Destroying a Request handle only publishes an atomic abandonment marker when it is the final public
+handle; the Engine performs the actual close and cleanup at its next owner-thread boundary. This
+deferred-release behavior does not permit concurrent access to the Engine or Request.
+
 Destroying an Engine closes all bound Requests and purges events. Surviving Request handles remain
 valid closed tombstones that the caller must still destroy. A resident static batch is released as
 shared Engine storage during teardown, not through independent per-Request deallocation.
 
+Request creation snapshots the supplied generation parameters. Engine Requests require
+`search.batch_size == 1` and `search.num_beams == 1`; `top_p` must be in `[0, 1]`, and `top_k`
+must be nonnegative. Guidance fast-forward tokens are unsupported, and guidance type and data
+must either both be present or both be absent. The parameters must belong to the same `OgaModel`
+instance used to create the Engine. Creation itself does not queue work.
+
 Input IDs are copied before `BeginTurn` returns. The public count is fixed-width and is converted to
 `size_t` only after range validation. A pointer/count pair is canonical because an Engine Request is
 one sequence; accepting multi-sequence `OgaSequences` would obscure that constraint.
+`input_ids_count` must be nonzero for a successful Turn. A null `input_ids` pointer is accepted only
+with a zero count, which is then rejected by `BeginTurn` as an empty input.
+On success, `OgaEngineCreateRequest` and `OgaRequestCreateTurnParams` return caller-owned handles
+that must be released with their matching destroy functions. `BeginTurn` copies supported values
+from `turn_params` and does not retain either the params handle or the caller's input buffer.
 
 Turn IDs:
 
@@ -287,6 +312,13 @@ Turn IDs:
 - are returned through `out_turn_id`;
 - are repeated on every event for that Turn;
 - are checked for exhaustion before admission mutates state.
+
+`BeginTurn` is valid for a new Request or after the current Turn is complete. Before a continuation
+Turn is admitted, all undelivered events for that Request must be drained with `OgaEngineRun`.
+Normal continuation requires the Request's model state to remain resident. A canceled Turn that has
+not processed any model tokens may be restarted while nonresident; otherwise the normal residency
+and device-specific continuous-decoding rules apply. Static batching supports continuous decoding
+only when its resident batch contains one Request.
 
 `CancelTurn` behavior:
 
@@ -298,7 +330,10 @@ Turn IDs:
 | Request has never started or is closed | Error |
 
 Cancellation is owner-thread-only, preserves committed Request/Search/KV state and visible tokens,
-and publishes a `TurnFinished` event with reason `Cancelled`.
+and publishes a `TurnFinished` event with reason `Cancelled`. If an undelivered token event for
+the same Turn already exists, cancellation merges the terminal fields into that event rather than
+creating a second event. Cancellation is idempotent by Turn ID: the first matching queued or active
+Turn returns true, and later calls return false.
 
 `OgaEngineRun` uses caller-owned reusable storage:
 
@@ -306,7 +341,11 @@ and publishes a `TurnFinished` event with reason `Cancelled`.
 - `event_stride` is the byte distance between record starts. It must be aligned for
   `OgaEngineEvent` and at least `sizeof(OgaEngineEvent)`.
 - `out_event_count` receives the number of records written in the buffer prefix and is set to zero
-  before later validation or Engine work. It must not overlap the event storage.
+  before later validation or Engine work. It must not overlap the event storage. On the specific
+  overlap error detected by Version 1, the implementation restores the caller's original count
+  value before returning the error. Version 1 detects a count pointer whose starting address lies
+  inside the event range; callers must keep the complete `size_t` object outside that range and
+  must not rely on the count value after any invalid call.
 - Every positive-capacity slot must be aligned, have
   `sizeof(OgaEngineEvent) <= struct_size <= event_stride`, and have `reserved == 0`.
 - The complete storage layout, including checked `event_capacity * event_stride`, is validated
@@ -315,6 +354,11 @@ and publishes a `TurnFinished` event with reason `Cancelled`.
 - The caller's `struct_size` is preserved for every returned record. Version 1 fields are fully
   initialized, trailing bytes are untouched, and unused slots are untouched.
 
+The caller-owned buffer is the public output storage, not an allocation-free guarantee for the C
+adapter: the current C implementation creates temporary internal event storage for a positive
+capacity call. The C++20 span wrapper passes that caller storage to `OgaEngineRun`, so it has the
+same C-adapter allocation behavior.
+
 Capacity zero is an owner-thread-validated no-op. `event_buffer` may be null, `event_stride` is
 ignored, the count becomes zero, and the call performs no reclamation, event drain, scheduling, or
 model work. A permanently unhealthy Engine still returns its stored fatal error.
@@ -322,10 +366,10 @@ model work. A permanently unhealthy Engine still returns its stored fatal error.
 ## State machine
 
 ```text
-Created
+RequestCreated/Unassigned
    | BeginTurn -> turn_id
    v
-TurnActive -- Token events ------------------------------------+
+Assigned/Active -- Token event -------------------------------+
    |                                                          |
    +-- Token | TurnFinished(reason) --> TurnComplete           |
    |                                      |                   |
@@ -376,7 +420,7 @@ Conceptual positive-capacity `Run` flow:
 
 ```cpp
 size_t Engine::Run(std::span<EngineEvent> output) {
-  ReclaimAbandonedRequestsAndEvents();
+  ReclaimAbandonedRequests();
 
   if (HasRetainedEvents())
     return DrainPendingEvents(output);
@@ -402,11 +446,15 @@ The operation is drain-or-execute:
 - A chunked partial-prefill transaction may commit cache and Request progress while producing no
   event. In that case the call succeeds with count zero and `HasPendingRequests()` remains true. The
   Engine does not loop internally to force token output.
+- If planning identifies an unserviceable Request, the Engine publishes that Request's failure
+  event first and does not execute otherwise fitting work in the same call. Remaining executable
+  Requests are considered by a later `Run`.
 
 `OgaEngineHasPendingRequests` returns true when either pending events or schedulable work exist.
 Before answering, it reclaims Requests whose final public handle was released. This is an
 owner-thread Engine boundary, so abandonment cannot leave stale schedulable work or retained events
-hidden behind a false result.
+hidden behind a false result. A false result does not close or release turn-complete Requests;
+callers must close or abandon those handles explicitly.
 
 The Engine API has no public asynchronous event queue. Hosts that want uninterrupted inference copy
 events into an application-owned bounded queue and continue pumping the owner thread. If the host
@@ -462,7 +510,8 @@ Callers must never read `event.token` merely because a record was returned. They
 - A fatal Engine failure produces `Failed` with a null Request and prevents later model execution.
 - Detailed diagnostics continue to use the library's established result/error facilities.
 - Output validation, API misuse, and owner-thread violations return `OgaResult` with count zero and
-  no Engine progress.
+  no Engine progress, except that the specifically detected `out_event_count` overlap case
+  restores the original count value as described above.
 - Capacity, retryable, unserviceable, contract-failure, and first fatal-execution outcomes remain
   typed events. After the fatal event is delivered, later `Run` calls return the stored fatal error.
 
@@ -481,14 +530,16 @@ The required mapping is:
 
 `UnserviceableRequest` is terminal for the affected Turn because retrying the unchanged Request
 would loop forever. The Engine resolves the internal Request pointer, removes it from admission,
-sets its finish reason to `Failed`, and publishes exactly one terminal event.
+sets its finish reason to `Failed`, and publishes exactly one terminal event. The Engine remains
+healthy; a later `BeginTurn` for that Request is subject to the normal continuation residency rules
+(and normally fails on the dynamic path because the failed Request was deallocated).
 
 `ExecutionContractFailure` represents a broken scheduler/transaction invariant.
 `FatalExecutionFailure` represents execution or rollback failure that leaves Engine state
 untrustworthy. Both mark the Engine permanently unhealthy before publishing the event.
 
-Implementation should centralize this policy in a typed mapping helper rather than duplicating it
-across planning, execution, post-processing, and commit paths.
+The current implementation centralizes this policy in its typed `EventFromStepError` mapping rather
+than parsing diagnostic strings.
 
 ## Deferred additions
 
@@ -519,8 +570,9 @@ Version 1 preserves the size and trailing bytes rather than assuming the extra f
 - RAII `OgaTurnParams`.
 - `OgaRequest::BeginTurn` returns `uint64_t`.
 - `OgaRequest::CancelTurn(uint64_t) -> bool`.
-- `OgaEngine::Run(std::span<OgaEngineEvent>)` returns a
-  `std::span<const OgaEngineEvent>` over the populated prefix.
+- When compiled as C++20 or later, `OgaEngine::Run(std::span<OgaEngineEvent>)` returns a
+  `std::span<const OgaEngineEvent>` over the populated prefix. The C++17 wrapper still exposes
+  the non-span Engine operations and callers use the C API for `Run`.
 - The convenience wrapper accepts exact Version 1 storage and initializes only `struct_size` and
   `reserved` in every reusable slot. Future-sized or padded records use the C API directly.
 - No unseen-token methods.
@@ -529,18 +581,24 @@ Version 1 preserves the size and trailing bytes rather than assuming the extra f
 
 - `Request.begin_turn(tokens, turn_params=None) -> int`.
 - `Request.cancel_turn(turn_id) -> bool`.
-- `TurnParams.set_stop_sequences(token_id_sequences)` accepts a ragged collection of token-ID
-  sequences and currently raises the explicit not-implemented error.
+- `TurnParams.set_stop_sequences(token_id_sequences)` converts the ragged collection to a temporary
+  `OgaSequences`; the current C API then raises the explicit not-implemented error. A null C
+  collection is rejected before that status is returned.
 - `Engine.run(max_events: int = 1) -> list[EngineEvent]`.
 - `max_events=0` is the capacity-zero no-op and a negative value is rejected.
 - The returned list contains only the populated prefix; its default capacity preserves
   one-event-at-a-time behavior while larger values expose complete transaction output when it fits.
 - `EngineEvent` exposes flags, borrowed Request, Turn ID, optional token, finish reason, error code,
-  and usage.
+  and usage. The event object does not retain the Request; keep the original Python `Request`
+  object alive while using `event.request`.
+- `Request.begin_turn` currently flattens the `numpy` array's data pointer and element count through
+  the binding's `ToSpan` helper; the binding does not explicitly validate rank before calling the
+  C++ wrapper.
 - No `has_unseen_tokens` or `get_unseen_token`.
 
 Examples and integration tests must consume `event.token` and use flag checks. Managed wrappers must
-not turn cancellation into a callback that races the owner-thread `Run`.
+not turn cancellation into a callback that races the owner-thread `Run`; no managed Engine wrapper
+is part of the current source surface.
 
 ### Benchmarks and examples
 
