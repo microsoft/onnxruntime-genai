@@ -186,7 +186,7 @@ struct StateSlotDesc {
 
 // Increment whenever DeviceInterface's virtual layout changes. Dynamically loaded add-ons must
 // report this exact version before the host can safely call through the C++ interface.
-inline constexpr uint32_t kDeviceInterfaceVersion = 3;
+inline constexpr uint32_t kDeviceInterfaceVersion = 2;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}

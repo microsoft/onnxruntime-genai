@@ -35,7 +35,7 @@ struct TokenizerStream : LeakChecked<TokenizerStream> {
 std::vector<int32_t> PadInputs(std::span<std::span<const int32_t>> sequences, int32_t pad_token_id);
 
 struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenizer>, ExternalRefCounted<Tokenizer> {
-  Tokenizer(Config& config);
+  Tokenizer(const Config& config);
 
   std::unique_ptr<TokenizerStream> CreateStream() const;
 
