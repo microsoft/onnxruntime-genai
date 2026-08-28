@@ -222,23 +222,18 @@ TEST(BlockPoolTest, ValidateFreeIsPureAndPublicationIsNoexcept) {
   EXPECT_EQ(pool.MutationGeneration(), generation + 1);
 }
 
-TEST(BlockPoolTest, FreeValidatedMisuseIsANoop) {
+TEST(BlockPoolTest, FreeValidatedMisuseFailsFast) {
   BlockPool pool(kBlockSize, 1);
   const auto blocks = pool.AllocateBlocks(kBlockSize);
-  const auto generation = pool.MutationGeneration();
   const std::array<std::shared_ptr<Block>, 1> null_block{nullptr};
   const std::array<std::shared_ptr<Block>, 1> out_of_range{
       std::make_shared<Block>(pool.Capacity(), 0, kBlockSize)};
   const std::array<std::shared_ptr<Block>, 2> duplicate{
       blocks[0], blocks[0]};
 
-  pool.FreeValidated(null_block);
-  pool.FreeValidated(out_of_range);
-  pool.FreeValidated(duplicate);
-
-  EXPECT_TRUE(pool.Owns(blocks[0]));
-  EXPECT_EQ(pool.AvailableBlocks(), 0u);
-  EXPECT_EQ(pool.MutationGeneration(), generation);
+  EXPECT_DEATH_IF_SUPPORTED(pool.FreeValidated(null_block), "");
+  EXPECT_DEATH_IF_SUPPORTED(pool.FreeValidated(out_of_range), "");
+  EXPECT_DEATH_IF_SUPPORTED(pool.FreeValidated(duplicate), "");
 }
 
 }  // namespace

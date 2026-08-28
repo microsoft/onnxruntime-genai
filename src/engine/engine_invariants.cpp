@@ -349,13 +349,14 @@ std::vector<InvariantViolation> ValidateCompositeStateInvariants(
     request_states.emplace(request.request_id, &request);
   }
 
-  for (const auto& [request_id, paged] : paged_owners) {
+  for (const auto& paged : cache.requests) {
+    const void* request_id = paged.request_id;
     const auto fixed_it = fixed_owners.find(request_id);
     if (fixed_it == fixed_owners.end()) {
       add("Paged cache Request " + PtrId(request_id) + " has no committed fixed state slot.");
       continue;
     }
-    if (fixed_it->second->committed_tokens != paged->used_slots) {
+    if (fixed_it->second->committed_tokens != paged.used_slots) {
       add("Request " + PtrId(request_id) +
           " has different paged and fixed committed token boundaries.");
     }
@@ -364,15 +365,16 @@ std::vector<InvariantViolation> ValidateCompositeStateInvariants(
         (request_it->second->processed_sequence_length < 0 ||
          static_cast<uint64_t>(
              request_it->second->processed_sequence_length) !=
-             paged->used_slots)) {
+             paged.used_slots)) {
       add("Request " + PtrId(request_id) +
           " has different request and decoder-state committed token boundaries.");
     }
   }
-  for (const auto& [request_id, slot] : fixed_owners) {
-    static_cast<void>(slot);
-    if (paged_owners.find(request_id) == paged_owners.end()) {
-      add("Fixed state Request " + PtrId(request_id) + " has no committed paged cache ownership.");
+  for (const auto& slot : fixed.slots) {
+    if (slot.ownership == FixedStateSlotOwnership::Committed &&
+        paged_owners.find(slot.request_id) == paged_owners.end()) {
+      add("Fixed state Request " + PtrId(slot.request_id) +
+          " has no committed paged cache ownership.");
     }
   }
 

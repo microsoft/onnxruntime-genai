@@ -195,8 +195,8 @@ class FixedStatePool {
   FixedStateReservation Reserve(std::span<const FixedStateReservationRequest> requests);
   void Release(const FixedStateSlotHandle& handle);
   void ValidateRelease(const FixedStateSlotHandle& handle) const;
-  // Host-only publication for an unchanged handle accepted by ValidateRelease(). Defensive
-  // guards make direct misuse a no-op.
+  // Host-only publication for an unchanged handle accepted by ValidateRelease(). A guard failure
+  // is an impossible publication invariant violation and terminates rather than orphaning state.
   void ReleaseValidated(const FixedStateSlotHandle& handle) noexcept;
 
   uint64_t StateGeneration(const FixedStateSlotHandle& handle) const;

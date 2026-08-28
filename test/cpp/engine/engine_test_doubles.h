@@ -471,10 +471,7 @@ inline CompositeDoublesEngine MakeCompositeDoublesEngine(std::shared_ptr<Model> 
   // Bypass the public compatibility gate so this PR can exercise the complete composite resource
   // manager before the following packed-IO PR enables fixed-state model execution.
   auto cache = std::make_shared<PagedCacheManager>(model);
-  auto* cache_observer = dynamic_cast<PagedCacheManager*>(cache.get());
-  if (!cache_observer) {
-    throw std::logic_error("Composite Engine tests require a paged cache manager.");
-  }
+  auto* cache_observer = cache.get();
   auto scheduler = Scheduler::Create(model, cache);
   auto executor = std::make_unique<RecordingModelExecutor>(model, cache, forced_token);
   auto* executor_observer = executor.get();

@@ -174,7 +174,7 @@ TEST_F(FixedStatePoolTest, ValidateReleaseIsPureAndPublicationIsNoexcept) {
   EXPECT_EQ(pool->AvailableSlots(), 1u);
 }
 
-TEST_F(FixedStatePoolTest, ReleaseValidatedMisuseIsANoop) {
+TEST_F(FixedStatePoolTest, ReleaseValidatedMisuseFailsFast) {
   auto pool = MakePool(1);
   auto other_pool = MakePool(1);
   const auto handle = MakeResident(*pool, kRequestA, 1.0f);
@@ -187,19 +187,14 @@ TEST_F(FixedStatePoolTest, ReleaseValidatedMisuseIsANoop) {
   auto stale_generation = handle;
   ++stale_generation.generation;
 
-  pool->ReleaseValidated(out_of_range);
-  pool->ReleaseValidated(wrong_pool);
-  pool->ReleaseValidated(wrong_request);
-  pool->ReleaseValidated(stale_generation);
-
-  EXPECT_TRUE(pool->OwnsCommittedSlot(kRequestA));
-  EXPECT_EQ(pool->AvailableSlots(), 0u);
+  EXPECT_DEATH_IF_SUPPORTED(pool->ReleaseValidated(out_of_range), "");
+  EXPECT_DEATH_IF_SUPPORTED(pool->ReleaseValidated(wrong_pool), "");
+  EXPECT_DEATH_IF_SUPPORTED(pool->ReleaseValidated(wrong_request), "");
+  EXPECT_DEATH_IF_SUPPORTED(pool->ReleaseValidated(stale_generation), "");
 
   auto requests = One(kRequestA, 2);
   auto reservation = pool->Reserve(requests);
-  pool->ReleaseValidated(handle);
-  EXPECT_TRUE(pool->OwnsCommittedSlot(kRequestA));
-  EXPECT_EQ(pool->AvailableSlots(), 0u);
+  EXPECT_DEATH_IF_SUPPORTED(pool->ReleaseValidated(handle), "");
 }
 
 TEST_F(FixedStatePoolTest, StagedOutputsBecomeVisibleOnlyAfterCommit) {

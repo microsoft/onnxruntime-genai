@@ -4,8 +4,9 @@
 #include "generator/generators.h"
 #include "block.h"
 
-#include <numeric>
 #include <algorithm>
+#include <exception>
+#include <numeric>
 
 namespace Generators {
 
@@ -136,7 +137,7 @@ void BlockPool::ValidateFree(
 void BlockPool::FreeValidated(
     std::span<const std::shared_ptr<Block>> blocks) noexcept {
   if (!CanFreeValidated(blocks)) {
-    return;
+    std::terminate();
   }
   for (const auto& block : blocks) {
     blocks_[block->Id()].reset();

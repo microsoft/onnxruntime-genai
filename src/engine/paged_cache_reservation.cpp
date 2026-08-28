@@ -4,6 +4,7 @@
 #include "paged_cache_reservation.h"
 
 #include <algorithm>
+#include <exception>
 #include <limits>
 #include <stdexcept>
 #include <string_view>
@@ -131,7 +132,7 @@ void RemoveValidatedPagedCacheBlockTable(
   if (!block_pool.CanFreeValidated(table->Blocks()) ||
       (window_block_pool &&
        !window_block_pool->CanFreeValidated(table->WindowBlocks()))) {
-    return;
+    std::terminate();
   }
   block_pool.FreeValidated(table->Blocks());
   if (window_block_pool) {

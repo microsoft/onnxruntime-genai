@@ -844,13 +844,13 @@ void FixedStatePool::ReleaseValidated(
   if (!impl_ || impl_->active_reservation_id != 0 ||
       handle.pool != this ||
       handle.slot >= impl_->slots.size()) {
-    return;
+    std::terminate();
   }
   auto& slot = impl_->slots[handle.slot];
   if (slot.ownership != FixedStateSlotOwnership::Committed ||
       slot.request_id != handle.request_id ||
       slot.generation != handle.generation) {
-    return;
+    std::terminate();
   }
   // No zeroing on release: the slot's persistent banks are never read again until a future
   // admission either gathers the reusable zero row (a new owner) or a commit fully overwrites the

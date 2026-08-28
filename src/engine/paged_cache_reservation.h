@@ -83,7 +83,7 @@ void ValidateRemovePagedCacheBlockTable(
     const std::vector<PagedCacheBlockTable>& committed_tables,
     const void* request_id);
 // Allocation-free publication for state accepted by ValidateRemovePagedCacheBlockTable().
-// Defensive guards make direct misuse a no-op.
+// An ownership guard failure terminates rather than silently orphaning state.
 void RemoveValidatedPagedCacheBlockTable(
     BlockPool& block_pool,
     BlockPool* window_block_pool,

@@ -4,7 +4,10 @@
 #include "cache_manager.h"
 
 #include <algorithm>
+#include <exception>
 #include <optional>
+#include <stdexcept>
+#include <string>
 
 #include "../models/model_state_manifest.h"
 
@@ -421,8 +424,8 @@ void PagedCacheManager::Deallocate(std::vector<std::shared_ptr<Request>>& reques
   }
 
   // Validate every ownership system before releasing the first resource. Publication below is
-  // allocation-free and noexcept, so fixed slots, full/window paged blocks, and manager membership
-  // cannot be left at different removal boundaries.
+  // allocation-free and noexcept. Any disagreement during publication is an impossible invariant
+  // violation and terminates rather than silently orphaning one ownership system.
   for (const auto& handle : fixed_handles) {
     fixed_state_pool_->ValidateRelease(handle);
   }

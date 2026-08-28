@@ -387,6 +387,25 @@ TEST(InvariantValidatorTest, CompositeRejectsMismatchedTokenBoundary) {
                    .empty());
 }
 
+TEST(InvariantValidatorTest, CompositeViolationsFollowSnapshotOrder) {
+  auto fixed = MakeValidFixedState();
+  fixed.slots[0] = FixedStateSlotSnapshot{
+      nullptr, 0, 0, 0, 0, FixedStateSlotOwnership::Free};
+  ++fixed.free_slots;
+  --fixed.committed_slots;
+  ++fixed.slots[1].committed_tokens;
+
+  const auto violations = ValidateCompositeStateInvariants(
+      MakeValidCache(), fixed, MakeValidCompositeRequests());
+
+  ASSERT_EQ(violations.size(), 2u);
+  EXPECT_NE(violations[0].message.find("has no committed fixed state slot"),
+            std::string::npos);
+  EXPECT_NE(violations[1].message.find(
+                "different paged and fixed committed token boundaries"),
+            std::string::npos);
+}
+
 TEST(InvariantValidatorTest, CompositeRejectsRequestStateBoundaryMismatch) {
   auto requests = MakeValidCompositeRequests();
   --requests[0].processed_sequence_length;
