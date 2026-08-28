@@ -6,6 +6,7 @@
 // GPU; they validate slot arithmetic, allocation/reservation semantics, capacity accounting, and
 // free-time ownership guards deterministically.
 
+#include <array>
 #include <limits>
 #include <memory>
 #include <type_traits>
