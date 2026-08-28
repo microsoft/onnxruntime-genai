@@ -9,7 +9,9 @@ import sys
 import types
 from pathlib import Path
 
+import numpy as np
 import onnx_ir as ir
+import onnxruntime as ort
 import pytest
 import torch
 
@@ -234,21 +236,31 @@ def test_qwen_vl_emits_layout_specific_mrotary_embedding(layout, sections):
     assert model.values == [("q_rotated", ir.DataType.FLOAT, ["batch_size", "sequence_length", 2048])]
 
 
-def test_qwen35_paged_mrotary_embedding_uses_packed_output_shape():
+def test_qwen35_paged_mrotary_embedding_runs_with_merged_ort_abi(tmp_path):
     model = Model.__new__(Model)
     model.use_paged_attention = True
-    model.hidden_size = 2048
-    model.head_size = 128
+    model.hidden_size = 16
+    model.head_size = 8
     model.rope_attrs = {
         "interleaved": 0,
-        "rotary_embedding_dim": 32,
-        "mrope_section": [11, 11, 10],
+        "rotary_embedding_dim": 8,
+        "mrope_section": [1, 1, 2],
         "mrope_layout": 1,
     }
-    model.nodes = []
-    model.values = []
-    model.make_node = lambda op_type, **kwargs: model.nodes.append((op_type, kwargs))
-    model.make_value = lambda name, dtype, shape: model.values.append((name, dtype, shape))
+    model.values = {}
+    model.node_names = set()
+    graph = ir.Graph(
+        inputs=(),
+        outputs=(),
+        nodes=(),
+        opset_imports={"": 21, "com.microsoft": 1},
+        name="packed_mrope_test",
+    )
+    model.model = ir.Model(graph, ir_version=10)
+    graph.inputs.append(model.make_value("q", ir.DataType.FLOAT, ["num_tokens", model.hidden_size]))
+    graph.inputs.append(model.make_value("position_ids", ir.DataType.INT64, [3, "num_tokens"]))
+    graph.inputs.append(model.make_value("cos_cache", ir.DataType.FLOAT, [4, 4]))
+    graph.inputs.append(model.make_value("sin_cache", ir.DataType.FLOAT, [4, 4]))
 
     model.make_mrotary_embedding(
         "/model/layers.0/attn/q_rotary/MRotaryEmbedding",
@@ -257,11 +269,40 @@ def test_qwen35_paged_mrotary_embedding_uses_packed_output_shape():
         position_ids="position_ids",
         cos_cache_name="cos_cache",
         sin_cache_name="sin_cache",
-        num_heads=16,
+        num_heads=2,
         dtype=ir.DataType.FLOAT,
     )
+    graph.outputs.append(model.make_value("q_rotated"))
 
-    assert model.values == [("q_rotated", ir.DataType.FLOAT, ["num_tokens", 2048])]
+    model_path = tmp_path / "packed_mrope.onnx"
+    ir.save(model.model, model_path)
+    session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+
+    q = np.arange(96, dtype=np.float32).reshape(6, model.hidden_size)
+    position_ids = np.array(
+        [
+            [0, 1, 2, 0, 1, 2],
+            [1, 2, 3, 1, 2, 3],
+            [2, 3, 0, 2, 3, 0],
+        ],
+        dtype=np.int64,
+    )
+    cos_cache = np.ones((4, 4), dtype=np.float32)
+    sin_cache = np.zeros((4, 4), dtype=np.float32)
+    (q_rotated,) = session.run(
+        None,
+        {
+            "q": q,
+            "position_ids": position_ids,
+            "cos_cache": cos_cache,
+            "sin_cache": sin_cache,
+        },
+    )
+
+    np.testing.assert_array_equal(q_rotated, q)
+    assert session.get_inputs()[0].shape == ["num_tokens", model.hidden_size]
+    assert session.get_inputs()[1].shape == [3, "num_tokens"]
+    assert session.get_outputs()[0].shape == ["num_tokens", model.hidden_size]
 
 
 def test_qwen3_vl_keeps_qk_norm_outputs_in_fp32(monkeypatch):

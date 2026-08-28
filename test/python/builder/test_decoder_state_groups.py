@@ -419,6 +419,7 @@ def test_dense_gated_delta_net_casts_gates_to_float32():
     ("use_paged_attention", "linear_attn_op", "state_window", "ep", "io_dtype", "message"),
     [
         (True, "linear_attention", 0, "webgpu", base_module.ir.DataType.FLOAT16, "CUDA execution provider"),
+        (False, "gated_delta_net", 0, "webgpu", base_module.ir.DataType.FLOAT16, "CUDA execution provider"),
         (True, "linear_attention", 1, "cuda", base_module.ir.DataType.FLOAT16, "require state_window=0"),
         (False, "gated_delta_net", 1, "cuda", base_module.ir.DataType.FLOAT16, "require state_window=0"),
         (True, "linear_attention", 0, "cuda", base_module.ir.DataType.BFLOAT16, "bfloat16 model I/O"),

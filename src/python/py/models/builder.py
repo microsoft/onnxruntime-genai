@@ -755,9 +755,11 @@ def get_args():
                     structured QuantConfig schema independently from the main model.
                 linear_attn_op = linear_attention/gated_delta_net: Select the recurrent operator for non-paged
                     Qwen3.5/3.8 exports. Default is linear_attention. Paged exports always use GatedDeltaNet and
-                    ignore this option. gated_delta_net requires state_window=0 and does not support bfloat16 I/O.
+                    ignore this option. gated_delta_net is CUDA-only, requires state_window=0, and does not support
+                    bfloat16 I/O.
                 state_update_capacity = Number of compact Qwen3.5/3.8 state updates to capture. Default is 0 (disabled).
-                    Must be an integer from 0 through 8 and requires use_paged_attention=true.
+                    Must be an integer from 0 through 8 and requires use_paged_attention=true. This experimental
+                    contract requires Engine runtime work beyond the current onnxruntime-genai#2454 head.
                 state_window = Configure hybrid Qwen recurrent/conv state history. Default is 0 (disabled).
                     Must be a non-negative integer. For MTP verification, W must be at least num_speculative_tokens + 1.
                     Qwen3.5/3.8 exports using GatedDeltaNet (paged, or linear_attn_op=gated_delta_net) require
