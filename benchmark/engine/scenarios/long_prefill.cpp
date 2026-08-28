@@ -4,6 +4,7 @@
 #include "scenarios/long_prefill.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <iostream>
 #include <memory>
@@ -82,12 +83,16 @@ ScenarioExecutionOutput LongPrefillScenario::Execute(const ScenarioConfig& confi
         prompt_tokens->SequenceData(0), prompt_token_count});
 
     const auto start = std::chrono::steady_clock::now();
-    auto* ready_request = engineResources.engine->Run();
+    std::array<OgaEngineEvent, 1> event_storage;
+    std::span<const OgaEngineEvent> events;
+    while (events.empty() && engineResources.engine->HasPendingRequests()) {
+      events = engineResources.engine->Run(event_storage);
+    }
     const auto first_token = std::chrono::steady_clock::now();
-    if (!ready_request || !ready_request->HasUnseenTokens()) {
+    if (events.empty() ||
+        (events.front().flags & OgaEngineEventFlag_Token) == 0) {
       throw std::runtime_error("long_prefill did not produce a first token");
     }
-    ready_request->GetUnseenToken();
     request->Close();
 
     const double prefill_ms = std::chrono::duration<double, std::milli>(first_token - start).count();

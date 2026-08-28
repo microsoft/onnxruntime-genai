@@ -12,6 +12,7 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -67,10 +68,11 @@ ScenarioExecutionOutput MixedWorkloadScenario::Execute(const ScenarioConfig& con
   const size_t prefill_prompt_count = prefill_prompt->SequenceCount(0);
 
   ScenarioExecutionOutput output;
-  std::vector<double> ttft_values;
+  std::vector<double> decode_ttft_values;
   std::vector<double> inter_token_latency_values;
   nlohmann::json e2e_ms_values = nlohmann::json::array();
   nlohmann::json tokens_per_s_values = nlohmann::json::array();
+  nlohmann::json prefill_ttft_ms_values = nlohmann::json::array();
   const int total_runs = config.warmup_runs + config.measured_runs;
   int measured_run_index = 0;
 
@@ -86,6 +88,7 @@ ScenarioExecutionOutput MixedWorkloadScenario::Execute(const ScenarioConfig& con
     std::vector<double> first_token_ms(static_cast<size_t>(config.concurrency), -1.0);
     std::vector<std::chrono::steady_clock::time_point> last_token_time(static_cast<size_t>(config.concurrency));
     std::vector<std::vector<double>> request_itl_ms(static_cast<size_t>(config.concurrency));
+    std::unordered_map<OgaRequest*, size_t> request_indices;
     params.reserve(static_cast<size_t>(config.concurrency));
     requests.reserve(static_cast<size_t>(config.concurrency));
 
@@ -103,38 +106,60 @@ ScenarioExecutionOutput MixedWorkloadScenario::Execute(const ScenarioConfig& con
       params.back()->SetSearchOption("max_length", static_cast<double>(prompt_count + generation_tokens));
       params.back()->SetSearchOption("random_seed", kRandomSeed);
       request_tokens[static_cast<size_t>(i)].assign(prompt->SequenceData(0), prompt->SequenceData(0) + prompt_count);
-      requests.emplace_back(OgaRequest::Create(*params.back()));
-      requests.back()->AddTokens(*prompt);
-      requests.back()->SetOpaqueData(&request_tokens[static_cast<size_t>(i)]);
-      engineResources.engine->Add(*requests.back());
+      requests.emplace_back(
+          engineResources.engine->CreateRequest(*params.back()));
+      request_indices.emplace(requests.back().get(), static_cast<size_t>(i));
+      requests.back()->BeginTurn(std::span<const int32_t>{
+          prompt->SequenceData(0), prompt_count});
     }
 
     // Measure whether the long prefill delays decode first-token and inter-token latency.
-    while (auto ready_request = engineResources.engine->Step()) {
+    std::vector<OgaEngineEvent> event_storage(
+        static_cast<size_t>(config.concurrency));
+    while (engineResources.engine->HasPendingRequests()) {
+      const auto events = engineResources.engine->Run(event_storage);
       const auto now = std::chrono::steady_clock::now();
-      auto* tokens = reinterpret_cast<std::vector<int32_t>*>(ready_request->GetOpaqueData());
-      if (tokens == nullptr) {
-        throw std::runtime_error(Name() + ": null opaque data from request");
-      }
-      const auto base_addr = reinterpret_cast<std::uintptr_t>(request_tokens.data());
-      const auto ptr_addr = reinterpret_cast<std::uintptr_t>(tokens);
-      const auto end_addr = reinterpret_cast<std::uintptr_t>(request_tokens.data() + request_tokens.size());
-      if (ptr_addr < base_addr || ptr_addr >= end_addr) {
-        throw std::runtime_error(Name() + ": opaque data pointer not in request_tokens");
-      }
-      const size_t request_index = (ptr_addr - base_addr) / sizeof(std::vector<int32_t>);
-      while (ready_request->HasUnseenTokens()) {
-        tokens->push_back(ready_request->GetUnseenToken());
-        ++generated_tokens;
-        const double elapsed_ms = std::chrono::duration<double, std::milli>(now - run_start).count();
-        if (first_token_ms[request_index] < 0.0) {
-          first_token_ms[request_index] = elapsed_ms;
-        } else {
-          request_itl_ms[request_index].push_back(
-              std::chrono::duration<double, std::milli>(now - last_token_time[request_index]).count());
+      for (const auto& event : events) {
+        if (!event.request) {
+          if ((event.flags & OgaEngineEventFlag_Failed) != 0) {
+            throw std::runtime_error(
+                Name() + ": Engine failed without a request-specific outcome");
+          }
+          continue;
         }
-        last_token_time[request_index] = now;
+
+        const auto request_it = request_indices.find(event.request);
+        if (request_it == request_indices.end()) {
+          throw std::runtime_error(
+              Name() + ": event request has no mixed-workload state");
+        }
+        const size_t request_index = request_it->second;
+
+        if ((event.flags & OgaEngineEventFlag_Token) != 0) {
+          request_tokens[request_index].push_back(event.token);
+          ++generated_tokens;
+          const double elapsed_ms =
+              std::chrono::duration<double, std::milli>(
+                  now - run_start)
+                  .count();
+          if (first_token_ms[request_index] < 0.0) {
+            first_token_ms[request_index] = elapsed_ms;
+          } else {
+            request_itl_ms[request_index].push_back(
+                std::chrono::duration<double, std::milli>(
+                    now - last_token_time[request_index])
+                    .count());
+          }
+          last_token_time[request_index] = now;
+        }
+
+        if ((event.flags & OgaEngineEventFlag_TurnFinished) != 0) {
+          event.request->Close();
+        }
       }
+    }
+    for (const auto& request : requests) {
+      request->Close();
     }
 
     const auto run_end = std::chrono::steady_clock::now();
@@ -173,9 +198,9 @@ ScenarioExecutionOutput MixedWorkloadScenario::Execute(const ScenarioConfig& con
   }
 
   memory.Stop();
-  output.ttft_p5_ms = Percentile(ttft_values, 5.0);
-  output.ttft_p50_ms = Percentile(ttft_values, 50.0);
-  output.ttft_p95_ms = Percentile(ttft_values, 95.0);
+  output.ttft_p5_ms = Percentile(decode_ttft_values, 5.0);
+  output.ttft_p50_ms = Percentile(decode_ttft_values, 50.0);
+  output.ttft_p95_ms = Percentile(decode_ttft_values, 95.0);
   output.inter_token_latency_p50_ms = Percentile(inter_token_latency_values, 50.0);
   output.inter_token_latency_p95_ms = Percentile(inter_token_latency_values, 95.0);
   output.peak_device_memory_mb = BytesToMb(memory.PeakDeviceBytes());

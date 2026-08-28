@@ -1444,33 +1444,99 @@ OgaResult* OgaCreateEngine(OgaModel* model, OgaEngine** out) {
   OGA_CATCH
 }
 
-OgaResult* OgaEngineRun(OgaEngine* engine, OgaEngineEvent* out_event) {
+OgaResult* OgaEngineRun(
+    OgaEngine* engine,
+    void* event_buffer,
+    size_t event_capacity,
+    size_t event_stride,
+    size_t* out_event_count) {
   OGA_TRY
+  if (!out_event_count) {
+    throw std::runtime_error("out_event_count must not be null.");
+  }
+  const size_t original_event_count = *out_event_count;
+  *out_event_count = 0;
   if (!engine) {
     throw std::runtime_error("engine must not be null.");
   }
-  if (!out_event) {
-    throw std::runtime_error("out_event must not be null.");
+
+  if (event_capacity == 0) {
+    engine->Run({});
+    return nullptr;
   }
-  ValidateOptionsStructSize(
-      out_event->struct_size, sizeof(OgaEngineEvent), "OgaEngineEvent");
-  if (out_event->reserved != 0) {
-    throw std::runtime_error("OgaEngineEvent.reserved must be zero.");
+  if (!event_buffer) {
+    throw std::runtime_error(
+        "event_buffer must not be null when event_capacity is positive.");
   }
-  const auto event = engine->Run();
-  out_event->struct_size = sizeof(OgaEngineEvent);
-  out_event->flags = event.flags;
-  out_event->request =
-      event.request ? ReturnBorrowed<OgaRequest>(event.request) : nullptr;
-  out_event->turn_id = event.turn_id;
-  out_event->token = event.token;
-  out_event->reserved = 0;
-  out_event->finish_reason = ToCFinishReason(event.finish_reason);
-  out_event->error_code = static_cast<OgaErrorCode>(event.error_code);
-  out_event->usage = {
-      event.usage.prompt_tokens,
-      event.usage.generated_tokens,
-      event.usage.cached_prompt_tokens};
+  if (reinterpret_cast<uintptr_t>(event_buffer) % alignof(OgaEngineEvent) != 0) {
+    throw std::runtime_error(
+        "event_buffer must be aligned for OgaEngineEvent.");
+  }
+  if (event_stride < sizeof(OgaEngineEvent)) {
+    throw std::runtime_error(
+        "event_stride must be at least sizeof(OgaEngineEvent).");
+  }
+  if (event_stride % alignof(OgaEngineEvent) != 0) {
+    throw std::runtime_error(
+        "event_stride must preserve OgaEngineEvent alignment.");
+  }
+  if (event_capacity > std::numeric_limits<size_t>::max() / event_stride) {
+    throw std::overflow_error("event_capacity * event_stride overflows size_t.");
+  }
+  const size_t event_buffer_size = event_capacity * event_stride;
+  if (event_buffer_size >
+      std::numeric_limits<uintptr_t>::max() -
+          reinterpret_cast<uintptr_t>(event_buffer)) {
+    throw std::overflow_error("event_buffer address range overflows uintptr_t.");
+  }
+  const uintptr_t event_buffer_begin =
+      reinterpret_cast<uintptr_t>(event_buffer);
+  const uintptr_t event_buffer_end =
+      event_buffer_begin + event_buffer_size;
+  const uintptr_t event_count_begin =
+      reinterpret_cast<uintptr_t>(out_event_count);
+  if (event_count_begin >= event_buffer_begin &&
+      event_count_begin < event_buffer_end) {
+    *out_event_count = original_event_count;
+    throw std::runtime_error(
+        "out_event_count must not overlap event_buffer.");
+  }
+
+  auto* const buffer = static_cast<std::byte*>(event_buffer);
+  for (size_t i = 0; i < event_capacity; ++i) {
+    const auto* const event =
+        reinterpret_cast<const OgaEngineEvent*>(buffer + i * event_stride);
+    ValidateOptionsStructSize(
+        event->struct_size, sizeof(OgaEngineEvent), "OgaEngineEvent");
+    if (event->struct_size > event_stride) {
+      throw std::runtime_error(
+          "OgaEngineEvent.struct_size must not exceed event_stride.");
+    }
+    if (event->reserved != 0) {
+      throw std::runtime_error("OgaEngineEvent.reserved must be zero.");
+    }
+  }
+
+  std::vector<Generators::EngineEvent> events(event_capacity);
+  const size_t event_count = engine->Run(events);
+  for (size_t i = 0; i < event_count; ++i) {
+    auto* const out_event =
+        reinterpret_cast<OgaEngineEvent*>(buffer + i * event_stride);
+    const auto& event = events[i];
+    out_event->flags = event.flags;
+    out_event->request =
+        event.request ? ReturnBorrowed<OgaRequest>(event.request) : nullptr;
+    out_event->turn_id = event.turn_id;
+    out_event->token = event.token;
+    out_event->reserved = 0;
+    out_event->finish_reason = ToCFinishReason(event.finish_reason);
+    out_event->error_code = static_cast<OgaErrorCode>(event.error_code);
+    out_event->usage = {
+        event.usage.prompt_tokens,
+        event.usage.generated_tokens,
+        event.usage.cached_prompt_tokens};
+  }
+  *out_event_count = event_count;
   return nullptr;
   OGA_CATCH
 }

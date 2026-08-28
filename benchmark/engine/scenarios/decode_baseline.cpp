@@ -12,6 +12,7 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -89,6 +90,7 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
     std::vector<std::unique_ptr<OgaGeneratorParams>> params;
     std::vector<RequestRunState> request_states(static_cast<size_t>(config.concurrency));
     std::vector<std::unique_ptr<OgaRequest>> requests;
+    std::unordered_map<OgaRequest*, RequestRunState*> request_states_by_request;
 
     params.reserve(static_cast<size_t>(config.concurrency));
     requests.reserve(static_cast<size_t>(config.concurrency));
@@ -109,35 +111,45 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
           prompt_tokens->SequenceData(0), prompt_tokens->SequenceData(0) + prompt_token_count);
 
       requests.emplace_back(engineResources.engine->CreateRequest(*params.back()));
-      requests.back()->SetOpaqueData(&request_state);
+      request_states_by_request.emplace(
+          requests.back().get(), &request_state);
       requests.back()->BeginTurn(std::span<const int32_t>{
           prompt_tokens->SequenceData(0), prompt_token_count});
     }
 
+    std::vector<OgaEngineEvent> event_storage(
+        static_cast<size_t>(config.concurrency));
     while (engineResources.engine->HasPendingRequests()) {
-      auto* ready_request = engineResources.engine->Run();
-      if (!ready_request) {
-        throw std::runtime_error(log_tag + ": Engine returned no ready request while work remained");
-      }
+      const auto events = engineResources.engine->Run(event_storage);
       const auto now = std::chrono::steady_clock::now();
-      auto* request_state = static_cast<RequestRunState*>(ready_request->GetOpaqueData());
-      if (!request_state) {
-        throw std::runtime_error(log_tag + ": ready request has no benchmark state");
-      }
-
-      while (ready_request->HasUnseenTokens()) {
-        request_state->tokens.push_back(ready_request->GetUnseenToken());
-        ++generated_tokens;
-
-        const double elapsed_ms = std::chrono::duration<double, std::milli>(now - run_start).count();
-        if (request_state->first_token_ms < 0.0) {
-          request_state->first_token_ms = elapsed_ms;
-        } else {
-          request_state->inter_token_latency_ms.push_back(
-              std::chrono::duration<double, std::milli>(now - request_state->last_token_time).count());
+      for (const auto& event : events) {
+        const auto state_it =
+            request_states_by_request.find(event.request);
+        if (state_it == request_states_by_request.end()) {
+          throw std::runtime_error(
+              log_tag + ": event request has no benchmark state");
         }
+        auto* request_state = state_it->second;
 
-        request_state->last_token_time = now;
+        if ((event.flags & OgaEngineEventFlag_Token) != 0) {
+          request_state->tokens.push_back(event.token);
+          ++generated_tokens;
+
+          const double elapsed_ms =
+              std::chrono::duration<double, std::milli>(
+                  now - run_start)
+                  .count();
+          if (request_state->first_token_ms < 0.0) {
+            request_state->first_token_ms = elapsed_ms;
+          } else {
+            request_state->inter_token_latency_ms.push_back(
+                std::chrono::duration<double, std::milli>(
+                    now - request_state->last_token_time)
+                    .count());
+          }
+
+          request_state->last_token_time = now;
+        }
       }
     }
     for (const auto& request : requests) {

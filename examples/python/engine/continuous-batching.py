@@ -129,10 +129,8 @@ class Engine:
             while self.engine.has_pending_requests() or request_pool.delayed_prompts:
                 request_pool.admit_due_request()
                 if self.engine.has_pending_requests():
-                    event = self.engine.run()
-                    if event.flags == og.EngineEventFlags.NONE:
-                        raise RuntimeError("Engine returned idle while work remained")
-                    self.tokens_decoded += request_pool.drain(event)
+                    for event in self.engine.run(8):
+                        self.tokens_decoded += request_pool.drain(event)
                     continue
                 request_pool.wait_for_next_admission()
         finally:

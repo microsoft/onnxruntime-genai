@@ -826,7 +826,25 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           },
           pybind11::arg("params"),
           pybind11::arg("max_session_tokens") = pybind11::none())
-      .def("run", &OgaEngine::Run)
+      .def(
+          "run",
+          [](OgaEngine& engine, pybind11::ssize_t max_events) {
+            if (max_events < 0) {
+              throw pybind11::value_error(
+                  "max_events must be nonnegative.");
+            }
+            if (static_cast<uintmax_t>(max_events) >
+                std::numeric_limits<size_t>::max()) {
+              throw pybind11::value_error(
+                  "max_events does not fit in size_t.");
+            }
+            std::vector<OgaEngineEvent> events(
+                static_cast<size_t>(max_events));
+            const auto populated = engine.Run(events);
+            events.resize(populated.size());
+            return events;
+          },
+          pybind11::arg("max_events") = 1)
       .def("has_pending_requests", &OgaEngine::HasPendingRequests);
 
   pybind11::class_<OgaStreamingProcessor>(m, "StreamingProcessor")

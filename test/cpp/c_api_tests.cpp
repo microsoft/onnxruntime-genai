@@ -25,6 +25,16 @@
 
 #include "test_utils.h"
 
+namespace {
+
+OgaEngineEvent RunOne(OgaEngine& engine) {
+  std::array<OgaEngineEvent, 1> storage;
+  const auto events = engine.Run(storage);
+  return events.empty() ? OgaEngineEvent{} : events.front();
+}
+
+}  // namespace
+
 TEST(CAPITests, Config) {
 #if TEST_PHI2
   // Test modifying config settings
@@ -893,7 +903,7 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
   auto turn_params = request->CreateTurnParams();
   turn_params->SetMaxGeneratedTokens(1);
   EXPECT_EQ(request->BeginTurn(input_tokens, turn_params.get()), 0u);
-  const auto event = engine->Run();
+  const auto event = RunOne(*engine);
   EXPECT_EQ(event.request, request.get());
   EXPECT_EQ(event.turn_id, 0u);
   EXPECT_EQ(event.flags,
@@ -908,7 +918,7 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
   EXPECT_EQ(second_turn, 1u);
   EXPECT_TRUE(request->CancelTurn(second_turn));
   EXPECT_FALSE(request->CancelTurn(second_turn));
-  const auto cancelled = engine->Run();
+  const auto cancelled = RunOne(*engine);
   EXPECT_EQ(cancelled.request, request.get());
   EXPECT_EQ(cancelled.turn_id, second_turn);
   EXPECT_EQ(cancelled.flags, OgaEngineEventFlag_TurnFinished);
@@ -950,13 +960,17 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
   EXPECT_EQ(pending_request->BeginTurn(input_tokens), 0u);
   OgaEngineEvent reserved_event{
       sizeof(OgaEngineEvent), 0, nullptr, 0, 0, 1};
+  size_t reserved_event_count{};
   std::unique_ptr<OgaResult> reserved_event_result{
-      OgaEngineRun(engine.get(), &reserved_event)};
+      OgaEngineRun(
+          engine.get(), &reserved_event, 1, sizeof(reserved_event),
+          &reserved_event_count)};
   ASSERT_NE(reserved_event_result, nullptr);
+  EXPECT_EQ(reserved_event_count, 0u);
   EXPECT_NE(std::string(reserved_event_result->GetError()).find("reserved must be zero"),
             std::string::npos);
   EXPECT_TRUE(engine->HasPendingRequests());
-  const auto pending_event = engine->Run();
+  const auto pending_event = RunOne(*engine);
   EXPECT_EQ(pending_event.request, pending_request.get());
   pending_request->Close();
 
@@ -1037,9 +1051,332 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
   } idle{};
   idle.event.struct_size = sizeof(FutureEvent);
   idle.untouched = 42;
-  OgaCheckResult(OgaEngineRun(engine.get(), &idle.event));
+  size_t idle_event_count{};
+  OgaCheckResult(OgaEngineRun(
+      engine.get(), &idle.event, 1, sizeof(FutureEvent),
+      &idle_event_count));
+  EXPECT_EQ(idle_event_count, 0u);
   EXPECT_EQ(idle.event.flags, OgaEngineEventFlag_None);
   EXPECT_EQ(idle.untouched, 42u);
+}
+
+TEST(CAPITests, EngineBulkRunValidationAndReusableStorage) {
+  auto model = OgaModel::Create(MODEL_PATH "engine/synthetic-paged");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 16);
+  auto engine = OgaEngine::Create(*model);
+  const std::array<int32_t, 3> input_tokens{2, 3, 4};
+
+  const auto create_one_token_request = [&] {
+    auto request = engine->CreateRequest(*params);
+    auto turn_params = request->CreateTurnParams();
+    turn_params->SetMaxGeneratedTokens(1);
+    request->BeginTurn(input_tokens, turn_params.get());
+    return request;
+  };
+
+  auto first = create_one_token_request();
+  auto second = create_one_token_request();
+
+  size_t event_count = 17;
+  std::unique_ptr<OgaResult> null_count_result{
+      OgaEngineRun(engine.get(), nullptr, 0, 0, nullptr)};
+  ASSERT_NE(null_count_result, nullptr);
+  EXPECT_NE(
+      std::string(null_count_result->GetError()).find(
+          "out_event_count must not be null"),
+      std::string::npos);
+
+  std::unique_ptr<OgaResult> null_engine_result{
+      OgaEngineRun(nullptr, nullptr, 0, 0, &event_count)};
+  ASSERT_NE(null_engine_result, nullptr);
+  EXPECT_EQ(event_count, 0u);
+  EXPECT_NE(
+      std::string(null_engine_result->GetError()).find(
+          "engine must not be null"),
+      std::string::npos);
+
+  event_count = 17;
+  EXPECT_EQ(
+      OgaEngineRun(engine.get(), nullptr, 0, 1, &event_count),
+      nullptr);
+  EXPECT_EQ(event_count, 0u);
+  EXPECT_TRUE(engine->HasPendingRequests());
+
+  OgaResult* zero_capacity_off_thread_result{};
+  size_t zero_capacity_off_thread_count = 17;
+  std::thread zero_capacity_off_thread([&] {
+    zero_capacity_off_thread_result =
+        OgaEngineRun(
+            engine.get(), nullptr, 0, 1,
+            &zero_capacity_off_thread_count);
+  });
+  zero_capacity_off_thread.join();
+  std::unique_ptr<OgaResult> owned_zero_capacity_off_thread_result{
+      zero_capacity_off_thread_result};
+  ASSERT_NE(owned_zero_capacity_off_thread_result, nullptr);
+  EXPECT_EQ(zero_capacity_off_thread_count, 0u);
+  EXPECT_NE(
+      std::string(owned_zero_capacity_off_thread_result->GetError()).find(
+          "owner thread"),
+      std::string::npos);
+
+  event_count = 17;
+  std::unique_ptr<OgaResult> null_buffer_result{
+      OgaEngineRun(
+          engine.get(), nullptr, 1, sizeof(OgaEngineEvent),
+          &event_count)};
+  ASSERT_NE(null_buffer_result, nullptr);
+  EXPECT_EQ(event_count, 0u);
+  EXPECT_NE(
+      std::string(null_buffer_result->GetError()).find(
+          "event_buffer must not be null"),
+      std::string::npos);
+
+  alignas(OgaEngineEvent)
+      std::array<std::byte, sizeof(OgaEngineEvent) + alignof(OgaEngineEvent)>
+          misaligned_storage{};
+  event_count = 17;
+  std::unique_ptr<OgaResult> misaligned_buffer_result{
+      OgaEngineRun(
+          engine.get(), misaligned_storage.data() + 1, 1,
+          sizeof(OgaEngineEvent), &event_count)};
+  ASSERT_NE(misaligned_buffer_result, nullptr);
+  EXPECT_EQ(event_count, 0u);
+  EXPECT_NE(
+      std::string(misaligned_buffer_result->GetError()).find(
+          "aligned for OgaEngineEvent"),
+      std::string::npos);
+
+  OgaEngineEvent event{};
+  event.struct_size = sizeof(event);
+  event_count = 17;
+  std::unique_ptr<OgaResult> short_stride_result{
+      OgaEngineRun(
+          engine.get(), &event, 1, sizeof(event) - 1,
+          &event_count)};
+  ASSERT_NE(short_stride_result, nullptr);
+  EXPECT_EQ(event_count, 0u);
+  EXPECT_NE(
+      std::string(short_stride_result->GetError()).find(
+          "at least sizeof(OgaEngineEvent)"),
+      std::string::npos);
+
+  event_count = 17;
+  std::unique_ptr<OgaResult> misaligned_stride_result{
+      OgaEngineRun(
+          engine.get(), &event, 1, sizeof(event) + 1,
+          &event_count)};
+  ASSERT_NE(misaligned_stride_result, nullptr);
+  EXPECT_EQ(event_count, 0u);
+  EXPECT_NE(
+      std::string(misaligned_stride_result->GetError()).find(
+          "preserve OgaEngineEvent alignment"),
+      std::string::npos);
+
+  event_count = 17;
+  std::unique_ptr<OgaResult> overflow_result{
+      OgaEngineRun(
+          engine.get(), &event,
+          std::numeric_limits<size_t>::max() / sizeof(event) + 1,
+          sizeof(event), &event_count)};
+  ASSERT_NE(overflow_result, nullptr);
+  EXPECT_EQ(event_count, 0u);
+  EXPECT_NE(
+      std::string(overflow_result->GetError()).find("overflows size_t"),
+      std::string::npos);
+
+  struct EventWithApplicationData {
+    OgaEngineEvent event;
+    size_t application_value;
+  } overlapping_count{};
+  overlapping_count.event.struct_size = sizeof(overlapping_count);
+  overlapping_count.application_value = 17;
+  std::unique_ptr<OgaResult> overlapping_count_result{
+      OgaEngineRun(
+          engine.get(), &overlapping_count, 1,
+          sizeof(overlapping_count),
+          &overlapping_count.application_value)};
+  ASSERT_NE(overlapping_count_result, nullptr);
+  EXPECT_EQ(overlapping_count.application_value, 17u);
+  EXPECT_NE(
+      std::string(overlapping_count_result->GetError()).find(
+          "must not overlap event_buffer"),
+      std::string::npos);
+  EXPECT_TRUE(engine->HasPendingRequests());
+
+  event.struct_size = sizeof(event) - 1;
+  event_count = 17;
+  std::unique_ptr<OgaResult> undersized_result{
+      OgaEngineRun(
+          engine.get(), &event, 1, sizeof(event),
+          &event_count)};
+  ASSERT_NE(undersized_result, nullptr);
+  EXPECT_EQ(event_count, 0u);
+  EXPECT_NE(
+      std::string(undersized_result->GetError()).find(
+          "struct_size is too small"),
+      std::string::npos);
+
+  event.struct_size = sizeof(event) + alignof(OgaEngineEvent);
+  event_count = 17;
+  std::unique_ptr<OgaResult> size_exceeds_stride_result{
+      OgaEngineRun(
+          engine.get(), &event, 1, sizeof(event),
+          &event_count)};
+  ASSERT_NE(size_exceeds_stride_result, nullptr);
+  EXPECT_EQ(event_count, 0u);
+  EXPECT_NE(
+      std::string(size_exceeds_stride_result->GetError()).find(
+          "must not exceed event_stride"),
+      std::string::npos);
+
+  std::array<OgaEngineEvent, 2> invalid_later{};
+  for (auto& slot : invalid_later) {
+    slot.struct_size = sizeof(OgaEngineEvent);
+  }
+  invalid_later[0].flags = 0x1234;
+  invalid_later[0].token = 42;
+  invalid_later[1].reserved = 1;
+  const auto first_before = invalid_later[0];
+  event_count = 17;
+  std::unique_ptr<OgaResult> invalid_later_result{
+      OgaEngineRun(
+          engine.get(), invalid_later.data(), invalid_later.size(),
+          sizeof(OgaEngineEvent), &event_count)};
+  ASSERT_NE(invalid_later_result, nullptr);
+  EXPECT_EQ(event_count, 0u);
+  EXPECT_EQ(invalid_later[0].struct_size, first_before.struct_size);
+  EXPECT_EQ(invalid_later[0].flags, first_before.flags);
+  EXPECT_EQ(invalid_later[0].token, first_before.token);
+  EXPECT_TRUE(engine->HasPendingRequests());
+  EXPECT_TRUE(first->CancelTurn(0));
+  EXPECT_TRUE(second->CancelTurn(0));
+
+  OgaEngineEvent invalid_reserved{};
+  invalid_reserved.struct_size = sizeof(invalid_reserved);
+  invalid_reserved.reserved = 1;
+  OgaResult* invalid_reserved_off_thread_result{};
+  size_t invalid_reserved_off_thread_count = 17;
+  std::thread invalid_reserved_off_thread([&] {
+    invalid_reserved_off_thread_result =
+        OgaEngineRun(
+            engine.get(), &invalid_reserved, 1,
+            sizeof(invalid_reserved),
+            &invalid_reserved_off_thread_count);
+  });
+  invalid_reserved_off_thread.join();
+  std::unique_ptr<OgaResult> owned_invalid_reserved_off_thread_result{
+      invalid_reserved_off_thread_result};
+  ASSERT_NE(owned_invalid_reserved_off_thread_result, nullptr);
+  EXPECT_EQ(invalid_reserved_off_thread_count, 0u);
+  EXPECT_NE(
+      std::string(owned_invalid_reserved_off_thread_result->GetError()).find(
+          "reserved must be zero"),
+      std::string::npos);
+
+  invalid_later[1].reserved = 0;
+  OgaCheckResult(OgaEngineRun(
+      engine.get(), invalid_later.data(), invalid_later.size(),
+      sizeof(OgaEngineEvent), &event_count));
+  ASSERT_EQ(event_count, invalid_later.size());
+  EXPECT_EQ(invalid_later[0].request, first.get());
+  EXPECT_EQ(invalid_later[1].request, second.get());
+  EXPECT_EQ(invalid_later[0].struct_size, sizeof(OgaEngineEvent));
+  EXPECT_EQ(invalid_later[1].struct_size, sizeof(OgaEngineEvent));
+  first->Close();
+  second->Close();
+
+  struct FutureEvent {
+    OgaEngineEvent event;
+    std::array<std::byte, 16> trailing;
+  };
+  std::array<FutureEvent, 2> future_events{};
+  for (auto& slot : future_events) {
+    slot.event.struct_size = sizeof(FutureEvent);
+    slot.trailing.fill(std::byte{0x5a});
+  }
+  future_events[1].event.flags = 0x4321;
+  future_events[1].event.token = 73;
+  const auto unused_before = future_events[1];
+
+  auto future_request = create_one_token_request();
+  OgaCheckResult(OgaEngineRun(
+      engine.get(), future_events.data(), future_events.size(),
+      sizeof(FutureEvent), &event_count));
+  ASSERT_EQ(event_count, 1u);
+  EXPECT_EQ(future_events[0].event.request, future_request.get());
+  EXPECT_EQ(future_events[0].event.struct_size, sizeof(FutureEvent));
+  EXPECT_TRUE(std::all_of(
+      future_events[0].trailing.begin(),
+      future_events[0].trailing.end(),
+      [](std::byte value) { return value == std::byte{0x5a}; }));
+  EXPECT_EQ(
+      std::memcmp(
+          &future_events[1], &unused_before, sizeof(FutureEvent)),
+      0);
+  future_request->Close();
+
+  auto reusable_request = engine->CreateRequest(*params);
+  auto reusable_turn_params = reusable_request->CreateTurnParams();
+  reusable_turn_params->SetMaxGeneratedTokens(2);
+  reusable_request->BeginTurn(input_tokens, reusable_turn_params.get());
+  OgaEngineEvent reusable{};
+  reusable.struct_size = sizeof(reusable);
+
+  OgaCheckResult(OgaEngineRun(
+      engine.get(), &reusable, 1, sizeof(reusable),
+      &event_count));
+  ASSERT_EQ(event_count, 1u);
+  EXPECT_EQ(reusable.struct_size, sizeof(reusable));
+  EXPECT_EQ(reusable.request, reusable_request.get());
+
+  OgaCheckResult(OgaEngineRun(
+      engine.get(), &reusable, 1, sizeof(reusable),
+      &event_count));
+  ASSERT_EQ(event_count, 1u);
+  EXPECT_EQ(reusable.struct_size, sizeof(reusable));
+  EXPECT_EQ(reusable.request, reusable_request.get());
+  EXPECT_NE(
+      reusable.flags & OgaEngineEventFlag_TurnFinished, 0u);
+  reusable_request->Close();
+}
+
+TEST(CAPITests, EngineCppRunReturnsPopulatedStoragePrefix) {
+  auto model = OgaModel::Create(MODEL_PATH "engine/synthetic-paged");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 16);
+  auto engine = OgaEngine::Create(*model);
+  const std::array<int32_t, 3> input_tokens{2, 3, 4};
+
+  const auto create_request = [&] {
+    auto request = engine->CreateRequest(*params);
+    auto turn_params = request->CreateTurnParams();
+    turn_params->SetMaxGeneratedTokens(1);
+    request->BeginTurn(input_tokens, turn_params.get());
+    return request;
+  };
+  auto first = create_request();
+  auto second = create_request();
+
+  std::array<OgaEngineEvent, 4> storage{};
+  storage[2].flags = 0x1234;
+  storage[3].flags = 0x5678;
+  const auto events = engine->Run(storage);
+
+  ASSERT_EQ(events.size(), 2u);
+  EXPECT_EQ(events.data(), storage.data());
+  EXPECT_EQ(events[0].request, first.get());
+  EXPECT_EQ(events[1].request, second.get());
+  EXPECT_EQ(storage[0].struct_size, sizeof(OgaEngineEvent));
+  EXPECT_EQ(storage[1].struct_size, sizeof(OgaEngineEvent));
+  EXPECT_EQ(storage[2].struct_size, sizeof(OgaEngineEvent));
+  EXPECT_EQ(storage[3].struct_size, sizeof(OgaEngineEvent));
+  EXPECT_EQ(storage[2].flags, 0x1234u);
+  EXPECT_EQ(storage[3].flags, 0x5678u);
+
+  first->Close();
+  second->Close();
 }
 
 TEST(CAPITests, EngineRetainsModelAfterPublicHandleRelease) {
@@ -1064,7 +1401,12 @@ TEST(CAPITests, EngineRetainsModelAfterPublicHandleRelease) {
 
   OgaEngineEvent idle{};
   idle.struct_size = sizeof(idle);
-  EXPECT_EQ(OgaEngineRun(engine, &idle), nullptr);
+  size_t idle_event_count{};
+  EXPECT_EQ(
+      OgaEngineRun(
+          engine, &idle, 1, sizeof(idle), &idle_event_count),
+      nullptr);
+  EXPECT_EQ(idle_event_count, 0u);
   EXPECT_EQ(idle.flags, OgaEngineEventFlag_None);
 
   OgaDestroyEngine(engine);
@@ -1145,7 +1487,7 @@ struct Phi2Test {
 
     EXPECT_TRUE(engine->HasPendingRequests());
     while (engine->HasPendingRequests()) {
-      auto event = engine->Run();
+      auto event = RunOne(*engine);
       auto* ready_request = event.request;
       ASSERT_NE(ready_request, nullptr);
       auto it = requests_by_handle.find(ready_request);
@@ -1155,7 +1497,7 @@ struct Phi2Test {
         it->second->generated_tokens.push_back(event.token);
       }
     }
-    EXPECT_EQ(engine->Run().flags, OgaEngineEventFlag_None);
+    EXPECT_EQ(RunOne(*engine).flags, OgaEngineEventFlag_None);
 
     for (auto& owned_request : requests) {
       EXPECT_NO_THROW(owned_request.request->Close());
@@ -1197,7 +1539,7 @@ TEST(CAPITests, EngineRequestCAbiAndRaiiContracts) {
   one_token_turn->SetMaxGeneratedTokens(3);
   ASSERT_TRUE(engine->HasPendingRequests());
 
-  const auto event = engine->Run();
+  const auto event = RunOne(*engine);
   ASSERT_EQ(event.request, owned_request.get());
   EXPECT_EQ(event.turn_id, 0u);
   EXPECT_NE(event.flags & OgaEngineEventFlag_TurnFinished, 0u);
@@ -1206,7 +1548,7 @@ TEST(CAPITests, EngineRequestCAbiAndRaiiContracts) {
   EXPECT_NO_THROW(owned_request->Close());
   EXPECT_NO_THROW(owned_request->Close());
   EXPECT_FALSE(engine->HasPendingRequests());
-  EXPECT_EQ(engine->Run().flags, OgaEngineEventFlag_None);
+  EXPECT_EQ(RunOne(*engine).flags, OgaEngineEventFlag_None);
 
   auto unsupported = engine->CreateRequest(*params)->CreateTurnParams();
   EXPECT_THROW(unsupported->SetTemperature(0.5f), std::runtime_error);

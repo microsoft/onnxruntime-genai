@@ -285,7 +285,7 @@ TEST_F(RequestLifecycleTest, CancelQueuedTurnPublishesTerminalReadyAndCanContinu
 
   const std::vector<int32_t> continuation{5};
   EXPECT_THROW(request->BeginTurn(continuation), std::runtime_error);
-  EXPECT_EQ(engine_.engine->Run().request, request);
+  EXPECT_EQ(RunOne(*engine_.engine).request, request);
   EXPECT_FALSE(engine_.engine->HasPendingRequests());
 
   EXPECT_EQ(request->BeginTurn(continuation), 1u);
@@ -306,7 +306,7 @@ TEST_F(RequestLifecycleTest, CancelActiveTurnPreservesResidentState) {
   EXPECT_TRUE(request->Cancel(request->CurrentTurnId()));
   EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
   EXPECT_EQ(request->FinishReason(), GenerationFinishReason::Canceled);
-  EXPECT_EQ(engine_.engine->Run().request, request);
+  EXPECT_EQ(RunOne(*engine_.engine).request, request);
 
   request->BeginTurn(std::vector<int32_t>{5});
   EXPECT_EQ(request->status_, RequestStatus::Assigned);
@@ -317,7 +317,7 @@ TEST_F(RequestLifecycleTest, CancelCompletedTurnPreservesOriginalFinishReason) {
   auto request = NewRequest();
   engine_.executor->SetForcedToken(EosToken(*model_));
   request->BeginTurn(Prompt());
-  ASSERT_EQ(engine_.engine->Run().request, request);
+  ASSERT_EQ(RunOne(*engine_.engine).request, request);
   ASSERT_EQ(request->status_, RequestStatus::TurnComplete);
   ASSERT_EQ(request->FinishReason(), GenerationFinishReason::EosToken);
 
@@ -412,7 +412,7 @@ TEST_F(RequestLifecycleTest, BeginTurnAfterTurnCompleteQueuesNextTurn) {
   const int64_t assigned_length = static_cast<int64_t>(prompt.size());
   EXPECT_EQ(request->CurrentTurnId(), 0u);
 
-  engine_.engine->Run();
+  RunOne(*engine_.engine);
   ASSERT_EQ(request->status_, RequestStatus::TurnComplete);
   std::vector<int32_t> more{5, 6};
   request->BeginTurn(more);
@@ -421,7 +421,7 @@ TEST_F(RequestLifecycleTest, BeginTurnAfterTurnCompleteQueuesNextTurn) {
   EXPECT_EQ(request->CurrentSequenceLength(), assigned_length + static_cast<int64_t>(more.size()));
   EXPECT_EQ(request->status_, RequestStatus::Assigned);
   EXPECT_FALSE(request->IsTurnComplete());
-  EXPECT_EQ(engine_.engine->Run().request, request);
+  EXPECT_EQ(RunOne(*engine_.engine).request, request);
   EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
   EXPECT_TRUE(request->IsTurnComplete());
 }
@@ -429,7 +429,7 @@ TEST_F(RequestLifecycleTest, BeginTurnAfterTurnCompleteQueuesNextTurn) {
 TEST_F(RequestLifecycleTest, ContinuationBeyondContextIsRejectedBeforeMutation) {
   auto prompt = Prompt();
   auto request = CreateRequestWithPrompt(engine_.engine, *model_, prompt);
-  engine_.engine->Run();
+  RunOne(*engine_.engine);
   ASSERT_EQ(request->status_, RequestStatus::TurnComplete);
   const auto before = request->Snapshot();
 
@@ -453,7 +453,7 @@ TEST_F(RequestLifecycleTest, FailedContinuationAppendPreservesCompletedTurnState
   auto request = CreateEngineRequest(engine_.engine, *params);
   engine_.executor->SetForcedToken(/*token=*/5);
   request->BeginTurn(Prompt(), std::optional<size_t>{1});
-  ASSERT_EQ(engine_.engine->Run().request, request);
+  ASSERT_EQ(RunOne(*engine_.engine).request, request);
   ASSERT_TRUE(request->IsTurnComplete());
   const auto before = request->Snapshot();
 
@@ -481,7 +481,7 @@ TEST_F(RequestLifecycleTest, FailedContinuationRestoreClosesRequestAndPoisonsEng
   params->p_device = &device;
   auto request = CreateEngineRequest(engine_.engine, *params);
   request->BeginTurn(Prompt());
-  ASSERT_EQ(engine_.engine->Run().request, request);
+  ASSERT_EQ(RunOne(*engine_.engine).request, request);
   ASSERT_TRUE(request->IsTurnComplete());
   ASSERT_EQ(engine_.cache->AllocatedCount(), 1u);
 
@@ -497,7 +497,7 @@ TEST_F(RequestLifecycleTest, FailedContinuationRestoreClosesRequestAndPoisonsEng
   EXPECT_EQ(request->status_, RequestStatus::Closed);
   EXPECT_EQ(engine_.cache->AllocatedCount(), 0u);
   EXPECT_THROW(request->BeginTurn(std::vector<int32_t>{6}), std::runtime_error);
-  EXPECT_THROW(static_cast<void>(engine_.engine->Run()), EngineStepError);
+  EXPECT_THROW(static_cast<void>(RunOne(*engine_.engine)), EngineStepError);
 }
 
 TEST_F(RequestLifecycleTest, ContinuationPreservesUnreadOutputAndHidesInputTokens) {

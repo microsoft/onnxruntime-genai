@@ -151,7 +151,7 @@ TEST_F(EngineRunTest, SingleRequestSchedulesThenDecodesThenReturns) {
   auto request = CreateRequestWithPrompt(engine.engine, *model_, prompt);
   ASSERT_TRUE(engine.engine->HasPendingRequests());
 
-  auto ready = engine.engine->Run();
+  auto ready = RunOne(*engine.engine);
 
   EXPECT_EQ(ready.request, request);
   EXPECT_TRUE(request->IsTurnComplete());
@@ -166,12 +166,12 @@ TEST_F(EngineRunTest, SingleRequestSchedulesThenDecodesThenReturns) {
   EXPECT_LT(decode_at, allocate_at);
   // EOS completes without a visible token, but its terminal ready notification is still published
   // exactly once.
-  EXPECT_EQ(engine.engine->Run().flags, EngineEventFlagNone);
+  EXPECT_EQ(RunOne(*engine.engine).flags, EngineEventFlagNone);
 }
 
-// Several requests that all fit are decoded together in a single batch, and the remaining ready
-// requests are drained without any further model execution.
-TEST_F(EngineRunTest, FittingRequestsShareOneDecodeAndDrainWithoutReexecuting) {
+// Several requests that all fit are decoded together in a single batch and returned by one bulk
+// operation when caller capacity is sufficient.
+TEST_F(EngineRunTest, FittingRequestsShareOneDecodeAndReturnAllEvents) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
 
   // These test-only shared_ptr requests never acquire an external reference. Repeated Run
@@ -183,14 +183,14 @@ TEST_F(EngineRunTest, FittingRequestsShareOneDecodeAndDrainWithoutReexecuting) {
     requests.push_back(request);
   }
 
+  std::array<EngineEvent, 3> storage;
+  const size_t event_count = engine.engine->Run(storage);
+  ASSERT_EQ(event_count, storage.size());
+
   std::vector<std::shared_ptr<Request>> returned;
-  for (auto event = engine.engine->Run();
-       event.flags != EngineEventFlagNone;
-       event = engine.engine->Run()) {
+  for (const auto& event : storage) {
     returned.push_back(event.request);
   }
-
-  EXPECT_EQ(returned.size(), 3u);
   auto sorted_requests = requests;
   std::sort(sorted_requests.begin(), sorted_requests.end());
   std::sort(returned.begin(), returned.end());
@@ -204,6 +204,58 @@ TEST_F(EngineRunTest, FittingRequestsShareOneDecodeAndDrainWithoutReexecuting) {
   EXPECT_FALSE(engine.engine->HasPendingRequests());
 }
 
+TEST_F(EngineRunTest, CapacityOneExecutesOnceThenDrainsOverflow) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
+  std::vector<std::shared_ptr<Request>> requests;
+  for (int32_t seed : {10, 20, 30}) {
+    auto prompt = Prompt(seed);
+    requests.push_back(
+        CreateRequestWithPrompt(engine.engine, *model_, prompt));
+  }
+
+  std::array<EngineEvent, 1> storage;
+  ASSERT_EQ(engine.engine->Run(storage), 1u);
+  EXPECT_EQ(storage[0].request, requests[0]);
+  EXPECT_EQ(engine.executor->decode_calls, 1);
+
+  ASSERT_EQ(engine.engine->Run(storage), 1u);
+  EXPECT_EQ(storage[0].request, requests[1]);
+  EXPECT_EQ(engine.executor->decode_calls, 1);
+
+  ASSERT_EQ(engine.engine->Run(storage), 1u);
+  EXPECT_EQ(storage[0].request, requests[2]);
+  EXPECT_EQ(engine.executor->decode_calls, 1);
+}
+
+TEST_F(EngineRunTest, RetainedEventsDrainWithoutExecutingIntoSpareCapacity) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
+  std::vector<std::shared_ptr<Request>> requests;
+  for (int32_t seed : {10, 20, 30}) {
+    auto prompt = Prompt(seed);
+    requests.push_back(
+        CreateRequestWithPrompt(engine.engine, *model_, prompt));
+  }
+
+  std::array<EngineEvent, 1> first_storage;
+  ASSERT_EQ(engine.engine->Run(first_storage), 1u);
+  EXPECT_EQ(first_storage[0].request, requests[0]);
+  EXPECT_EQ(engine.executor->decode_calls, 1);
+
+  requests[0]->BeginTurn(
+      std::array<int32_t, 1>{5}, std::optional<size_t>{1});
+
+  std::array<EngineEvent, 4> drain_storage;
+  ASSERT_EQ(engine.engine->Run(drain_storage), 2u);
+  EXPECT_EQ(drain_storage[0].request, requests[1]);
+  EXPECT_EQ(drain_storage[1].request, requests[2]);
+  EXPECT_EQ(engine.executor->decode_calls, 1);
+  EXPECT_TRUE(engine.engine->HasPendingRequests());
+
+  ASSERT_EQ(engine.engine->Run(drain_storage), 1u);
+  EXPECT_EQ(drain_storage[0].request, requests[0]);
+  EXPECT_EQ(engine.executor->decode_calls, 2);
+}
+
 TEST_F(EngineRunTest, CreateRequestReclaimsAbandonedTurnCompleteAtCapacity) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/1, EosToken(*model_));
   auto first_prompt = Prompt(10);
@@ -211,7 +263,7 @@ TEST_F(EngineRunTest, CreateRequestReclaimsAbandonedTurnCompleteAtCapacity) {
   ExternalRequestReference first_external{*first};
   first->BeginTurn(first_prompt);
 
-  ASSERT_EQ(engine.engine->Run().request, first);
+  ASSERT_EQ(RunOne(*engine.engine).request, first);
   ASSERT_EQ(first->status_, RequestStatus::TurnComplete);
   ASSERT_EQ(engine.cache->AllocatedCount(), 1u);
 
@@ -226,7 +278,7 @@ TEST_F(EngineRunTest, CreateRequestReclaimsAbandonedTurnCompleteAtCapacity) {
   EXPECT_EQ(engine.cache->AllocatedCount(), 0u);
   EXPECT_EQ(engine.cache->deallocate_calls, 1);
 
-  EXPECT_EQ(engine.engine->Run().request, second);
+  EXPECT_EQ(RunOne(*engine.engine).request, second);
   EXPECT_EQ(second->status_, RequestStatus::TurnComplete);
   EXPECT_EQ(engine.cache->AllocatedCount(), 1u);
 
@@ -245,13 +297,13 @@ TEST_F(EngineRunTest, RunReclaimsAbandonedTurnCompleteBeforePlanningAtCapacity) 
   first->BeginTurn(first_prompt);
   second->BeginTurn(second_prompt);
 
-  ASSERT_EQ(engine.engine->Run().request, first);
+  ASSERT_EQ(RunOne(*engine.engine).request, first);
   ASSERT_EQ(first->status_, RequestStatus::TurnComplete);
   ASSERT_EQ(second->status_, RequestStatus::Assigned);
   ASSERT_EQ(engine.cache->AllocatedCount(), 1u);
   first_external.Release();
 
-  EXPECT_EQ(engine.engine->Run().request, second);
+  EXPECT_EQ(RunOne(*engine.engine).request, second);
   EXPECT_EQ(first->status_, RequestStatus::Closed);
   EXPECT_EQ(second->status_, RequestStatus::TurnComplete);
   EXPECT_EQ(engine.cache->AllocatedCount(), 1u);
@@ -277,7 +329,7 @@ TEST_F(EngineRunTest, RunPurgesAbandonedReadyAndQueuedRequestsExactlyOnce) {
   ready_orphan->BeginTurn(ready_orphan_prompt);
   queued_orphan->BeginTurn(queued_orphan_prompt);
 
-  ASSERT_EQ(engine.engine->Run().request, survivor);
+  ASSERT_EQ(RunOne(*engine.engine).request, survivor);
   ASSERT_EQ(survivor->status_, RequestStatus::TurnComplete);
   ASSERT_EQ(ready_orphan->status_, RequestStatus::TurnComplete);
   ASSERT_EQ(queued_orphan->status_, RequestStatus::Assigned);
@@ -288,7 +340,7 @@ TEST_F(EngineRunTest, RunPurgesAbandonedReadyAndQueuedRequestsExactlyOnce) {
   ASSERT_EQ(engine.cache->deallocate_calls, 0);
 
   // Cleanup runs before Run can drain the orphan's ready notification or plan the queued orphan.
-  EXPECT_EQ(engine.engine->Run().flags, EngineEventFlagNone);
+  EXPECT_EQ(RunOne(*engine.engine).flags, EngineEventFlagNone);
   EXPECT_EQ(ready_orphan->status_, RequestStatus::Closed);
   EXPECT_EQ(queued_orphan->status_, RequestStatus::Closed);
   EXPECT_EQ(survivor->status_, RequestStatus::TurnComplete);
@@ -297,7 +349,7 @@ TEST_F(EngineRunTest, RunPurgesAbandonedReadyAndQueuedRequestsExactlyOnce) {
   EXPECT_EQ(engine.executor->decode_calls, 1);
 
   // Closed requests were removed from Engine ownership, so another boundary cannot clean them twice.
-  EXPECT_EQ(engine.engine->Run().flags, EngineEventFlagNone);
+  EXPECT_EQ(RunOne(*engine.engine).flags, EngineEventFlagNone);
   EXPECT_EQ(engine.cache->deallocate_calls, 2);
 
   survivor->Close();
@@ -310,13 +362,13 @@ TEST_F(EngineRunTest, ReacquiringExternalReferenceCancelsDeferredAbandonment) {
   auto request = CreateEngineRequest(engine.engine, *model_);
   ExternalRequestReference initial_external{*request};
   request->BeginTurn(prompt);
-  ASSERT_EQ(engine.engine->Run().request, request);
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
   ASSERT_EQ(request->status_, RequestStatus::TurnComplete);
 
   initial_external.Release();
   ExternalRequestReference reacquired_external{*request};
 
-  EXPECT_EQ(engine.engine->Run().flags, EngineEventFlagNone);
+  EXPECT_EQ(RunOne(*engine.engine).flags, EngineEventFlagNone);
   EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
   EXPECT_EQ(engine.cache->AllocatedCount(), 1u);
   EXPECT_EQ(engine.cache->deallocate_calls, 0);
@@ -332,7 +384,7 @@ TEST_F(EngineRunTest, BeginTurnRejectsUndrainedReadyNotificationWithoutMutation)
   auto first = CreateRequestWithPrompt(engine.engine, *model_, first_prompt);
   auto second = CreateRequestWithPrompt(engine.engine, *model_, second_prompt);
 
-  ASSERT_EQ(engine.engine->Run().request, first);
+  ASSERT_EQ(RunOne(*engine.engine).request, first);
   ASSERT_EQ(engine.executor->decode_calls, 1);
   ASSERT_EQ(first->status_, RequestStatus::TurnComplete);
   ASSERT_EQ(second->status_, RequestStatus::TurnComplete);
@@ -351,7 +403,7 @@ TEST_F(EngineRunTest, BeginTurnRejectsUndrainedReadyNotificationWithoutMutation)
   EXPECT_EQ(rejected.current_sequence_length, before.current_sequence_length);
   EXPECT_EQ(rejected.processed_sequence_length, before.processed_sequence_length);
 
-  EXPECT_EQ(engine.engine->Run().request, second);
+  EXPECT_EQ(RunOne(*engine.engine).request, second);
   EXPECT_EQ(engine.executor->decode_calls, 1);
 
   EXPECT_NO_THROW(second->BeginTurn(continuation));
@@ -366,32 +418,32 @@ TEST_F(EngineRunTest, ContinuedUnreadOutputPreservesOrder) {
   auto prompt = Prompt(10);
   auto request = CreateRequestWithPrompt(engine.engine, *model_, prompt);
 
-  auto event = engine.engine->Run();
+  auto event = RunOne(*engine.engine);
   ASSERT_EQ(event.request, request);
   EXPECT_EQ(event.token, 5);
 
   engine.executor->SetForcedToken(6);
-  event = engine.engine->Run();
+  event = RunOne(*engine.engine);
   ASSERT_EQ(event.request, request);
   EXPECT_EQ(event.token, 6);
   engine.executor->SetForcedToken(7);
-  event = engine.engine->Run();
+  event = RunOne(*engine.engine);
   ASSERT_EQ(event.request, request);
   EXPECT_EQ(event.token, 7);
   engine.executor->SetForcedToken(EosToken(*model_));
-  event = engine.engine->Run();
+  event = RunOne(*engine.engine);
   ASSERT_EQ(event.request, request);
   ASSERT_EQ(request->status_, RequestStatus::TurnComplete);
 
   const std::vector<int32_t> continuation{8, 9};
   request->BeginTurn(continuation);
   engine.executor->SetForcedToken(10);
-  event = engine.engine->Run();
+  event = RunOne(*engine.engine);
   ASSERT_EQ(event.request, request);
   EXPECT_EQ(event.token, 10);
 
   engine.executor->SetForcedToken(EosToken(*model_));
-  event = engine.engine->Run();
+  event = RunOne(*engine.engine);
   ASSERT_EQ(event.request, request);
   ASSERT_EQ(request->status_, RequestStatus::TurnComplete);
 
@@ -413,7 +465,7 @@ TEST_F(EngineRunTest, PerTurnBudgetsPublishOneTerminalNotificationAcrossContinua
 
     size_t terminal_notifications = 0;
     while (!request->IsTurnComplete()) {
-      auto event = engine.engine->Run();
+      auto event = RunOne(*engine.engine);
       ASSERT_EQ(event.request, request);
       if ((event.flags & EngineEventFlagTurnFinished) != 0) {
         ++terminal_notifications;
@@ -421,7 +473,7 @@ TEST_F(EngineRunTest, PerTurnBudgetsPublishOneTerminalNotificationAcrossContinua
     }
 
     EXPECT_EQ(terminal_notifications, 1u);
-    EXPECT_EQ(engine.engine->Run().flags, EngineEventFlagNone);
+    EXPECT_EQ(RunOne(*engine.engine).flags, EngineEventFlagNone);
   };
 
   run_turn(prompt, /*max_generated_tokens=*/2);
@@ -454,9 +506,9 @@ TEST_F(EngineRunTest, BackpressureFormsAFreshBatchAcrossRuns) {
 
   std::vector<std::shared_ptr<Request>> returned;
   int removals = 0;
-  for (auto event = engine.engine->Run();
+  for (auto event = RunOne(*engine.engine);
        event.flags != EngineEventFlagNone;
-       event = engine.engine->Run()) {
+       event = RunOne(*engine.engine)) {
     auto ready = event.request;
     // The fixture's executor forces end-of-stream, so every request Run hands back is finished.
     EXPECT_TRUE(ready->IsTurnComplete());
@@ -488,8 +540,39 @@ TEST_F(EngineRunTest, RunWithNoRequestsReturnsNull) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
 
   EXPECT_FALSE(engine.engine->HasPendingRequests());
-  EXPECT_EQ(engine.engine->Run().flags, EngineEventFlagNone);
+  EXPECT_EQ(RunOne(*engine.engine).flags, EngineEventFlagNone);
   EXPECT_EQ(engine.executor->decode_calls, 0);
+}
+
+TEST_F(EngineRunTest, ZeroCapacityValidatesOwnerThreadWithoutReclaimingOrProgressing) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
+  auto request = CreateRequestWithPrompt(
+      engine.engine, *model_, Prompt(10));
+  ExternalRequestReference public_handle{*request};
+  public_handle.Release();
+
+  std::exception_ptr off_thread_error;
+  std::thread off_owner_thread([&] {
+    try {
+      static_cast<void>(engine.engine->Run({}));
+    } catch (...) {
+      off_thread_error = std::current_exception();
+    }
+  });
+  off_owner_thread.join();
+
+  ASSERT_NE(off_thread_error, nullptr);
+  EXPECT_THROW(std::rethrow_exception(off_thread_error),
+               std::runtime_error);
+  EXPECT_EQ(request->status_, RequestStatus::Assigned);
+  EXPECT_EQ(engine.executor->decode_calls, 0);
+
+  EXPECT_EQ(engine.engine->Run({}), 0u);
+  EXPECT_EQ(request->status_, RequestStatus::Assigned);
+  EXPECT_EQ(engine.executor->decode_calls, 0);
+
+  EXPECT_FALSE(engine.engine->HasPendingRequests());
+  EXPECT_EQ(request->status_, RequestStatus::Closed);
 }
 
 TEST_F(EngineRunTest, HasPendingRequestsReclaimsPubliclyDestroyedUnassignedRequest) {
@@ -573,7 +656,7 @@ TEST_F(EngineRunTest, HasPendingRequestsPurgesDestroyedTurnCompleteEventWithoutA
   ExternalRequestReference survivor_handle{*survivor};
   ExternalRequestReference abandoned_handle{*abandoned};
 
-  ASSERT_EQ(engine.engine->Run().request, survivor);
+  ASSERT_EQ(RunOne(*engine.engine).request, survivor);
   ASSERT_EQ(survivor->status_, RequestStatus::TurnComplete);
   ASSERT_EQ(abandoned->status_, RequestStatus::TurnComplete);
   ASSERT_EQ(engine.cache->AllocatedCount(), 2u);
@@ -585,12 +668,12 @@ TEST_F(EngineRunTest, HasPendingRequestsPurgesDestroyedTurnCompleteEventWithoutA
   EXPECT_EQ(survivor->status_, RequestStatus::TurnComplete);
   EXPECT_EQ(engine.cache->AllocatedCount(), 1u);
   EXPECT_EQ(engine.cache->deallocate_calls, 1);
-  EXPECT_EQ(engine.engine->Run().flags, EngineEventFlagNone);
+  EXPECT_EQ(RunOne(*engine.engine).flags, EngineEventFlagNone);
 
   survivor->BeginTurn(std::array<int32_t, 1>{5},
                       std::optional<size_t>{1});
   EXPECT_TRUE(engine.engine->HasPendingRequests());
-  EXPECT_EQ(engine.engine->Run().request, survivor);
+  EXPECT_EQ(RunOne(*engine.engine).request, survivor);
   EXPECT_EQ(survivor->status_, RequestStatus::TurnComplete);
 
   survivor->Close();
@@ -634,7 +717,7 @@ TEST_F(EngineRunTest, StaticBatchingPreservesOrderingAndReusesResidentContinuati
   auto request = CreateEngineRequest(engine, *model_);
   request->BeginTurn(prompt, std::optional<size_t>{1});
 
-  EXPECT_EQ(engine->Run().request, request);
+  EXPECT_EQ(RunOne(*engine).request, request);
   EXPECT_EQ(executor_observer->decode_calls, 1);
   EXPECT_LT(IndexOf(*trace, "Allocate"), IndexOf(*trace, "Decode"));
 
@@ -643,10 +726,37 @@ TEST_F(EngineRunTest, StaticBatchingPreservesOrderingAndReusesResidentContinuati
   request->BeginTurn(continuation, std::optional<size_t>{1});
   ASSERT_EQ(request->status_, RequestStatus::Assigned);
 
-  EXPECT_EQ(engine->Run().request, request);
+  EXPECT_EQ(RunOne(*engine).request, request);
   EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
   EXPECT_EQ(executor_observer->decode_calls, 2);
   EXPECT_EQ(cache_observer->allocate_calls, allocations_before);
+}
+
+TEST_F(EngineRunTest, StaticBatchReturnsAllRowEventsWhenCapacitySuffices) {
+  model_->config_->engine.dynamic_batching.reset();
+  auto cache = std::make_shared<RecordingCacheManager>(
+      model_, /*capacity=*/4, nullptr, /*supports_dynamic_batching=*/false);
+  auto scheduler = Scheduler::Create(model_, cache);
+  auto executor = std::make_unique<RecordingModelExecutor>(
+      model_, cache, /*forced_token=*/5);
+  auto* executor_observer = executor.get();
+  EngineDependencies dependencies{cache, std::move(scheduler),
+                                  std::move(executor)};
+  auto engine = std::make_shared<Engine>(model_, std::move(dependencies));
+  auto first = CreateEngineRequest(engine, *model_);
+  auto second = CreateEngineRequest(engine, *model_);
+  first->BeginTurn(Prompt(10), std::optional<size_t>{1});
+  second->BeginTurn(Prompt(20), std::optional<size_t>{1});
+
+  std::array<EngineEvent, 2> storage;
+  ASSERT_EQ(engine->Run(storage), storage.size());
+  EXPECT_EQ(storage[0].request, first);
+  EXPECT_EQ(storage[1].request, second);
+  EXPECT_EQ(executor_observer->decode_calls, 1);
+  EXPECT_EQ(storage[0].flags,
+            EngineEventFlagToken | EngineEventFlagTurnFinished);
+  EXPECT_EQ(storage[1].flags,
+            EngineEventFlagToken | EngineEventFlagTurnFinished);
 }
 
 TEST_F(EngineRunTest, StaticExecutionFailureTerminatesRequestsAndMarksEngineUnhealthy) {
@@ -663,10 +773,10 @@ TEST_F(EngineRunTest, StaticExecutionFailureTerminatesRequestsAndMarksEngineUnhe
   auto request = CreateRequestWithPrompt(engine, *model_, Prompt(10));
   executor_observer->SetNextFailure(ScriptedExecutionFailure::Fatal);
 
-  const auto failure = engine->Run();
+  const auto failure = RunOne(*engine);
   EXPECT_EQ(failure.flags, EngineEventFlagFailed);
   EXPECT_EQ(failure.error_code, EngineErrorCode::EngineExecutionFailure);
-  EXPECT_THROW(static_cast<void>(engine->Run()), EngineStepError);
+  EXPECT_THROW(static_cast<void>(RunOne(*engine)), EngineStepError);
 
   EXPECT_EQ(executor_observer->decode_calls, 1);
   EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
@@ -690,7 +800,7 @@ TEST_F(EngineRunTest, StaticHasPendingClosesAbandonedResidentWithoutIndividualDe
   ExternalRequestReference external{*request};
   request->BeginTurn(prompt);
 
-  ASSERT_EQ(engine->Run().request, request);
+  ASSERT_EQ(RunOne(*engine).request, request);
   ASSERT_EQ(request->status_, RequestStatus::TurnComplete);
   ASSERT_EQ(cache->AllocatedCount(), 1u);
   external.Release();
@@ -702,7 +812,7 @@ TEST_F(EngineRunTest, StaticHasPendingClosesAbandonedResidentWithoutIndividualDe
   EXPECT_EQ(cache->deallocate_calls, 0);
 
   // A static row is logically closed once but remains physically resident until batch recycling.
-  EXPECT_EQ(engine->Run().flags, EngineEventFlagNone);
+  EXPECT_EQ(RunOne(*engine).flags, EngineEventFlagNone);
   EXPECT_EQ(cache->deallocate_calls, 0);
 }
 
@@ -718,13 +828,13 @@ TEST_F(EngineRunTest, StaticContinuationFailsAfterBatchRecycling) {
 
   auto first_prompt = Prompt(10);
   auto first = CreateRequestWithPrompt(engine, *model_, first_prompt);
-  ASSERT_EQ(engine->Run().request, first);
+  ASSERT_EQ(RunOne(*engine).request, first);
   ASSERT_EQ(first->status_, RequestStatus::TurnComplete);
 
   auto second_prompt = Prompt(20);
   auto second = CreateRequestWithPrompt(engine, *model_, second_prompt);
   for (int run = 0; run < 2 && cache->IsResident(first); ++run) {
-    ASSERT_NE(engine->Run().flags, EngineEventFlagNone);
+    ASSERT_NE(RunOne(*engine).flags, EngineEventFlagNone);
   }
   ASSERT_FALSE(cache->IsResident(first));
 
@@ -748,7 +858,7 @@ TEST_F(EngineRunTest, StaticContinuationRejectsMultiRowBatchAfterPeerCloses) {
   auto second_prompt = Prompt(20);
   auto first = CreateRequestWithPrompt(engine, *model_, first_prompt);
   auto second = CreateRequestWithPrompt(engine, *model_, second_prompt);
-  ASSERT_EQ(engine->Run().request, first);
+  ASSERT_EQ(RunOne(*engine).request, first);
   ASSERT_EQ(first->status_, RequestStatus::TurnComplete);
   ASSERT_EQ(second->status_, RequestStatus::TurnComplete);
 
@@ -766,7 +876,7 @@ TEST_F(EngineRunTest, RunDoesNotReturnNullWhenCapacityDefersPendingWork) {
   auto request = CreateEngineRequest(engine.engine, *model_);
   request->BeginTurn(prompt, std::optional<size_t>{1});
 
-  const auto deferred = engine.engine->Run();
+  const auto deferred = RunOne(*engine.engine);
   EXPECT_EQ(deferred.flags, EngineEventFlagCapacityBlocked);
   EXPECT_EQ(deferred.error_code, EngineErrorCode::CapacityDeferred);
 
@@ -774,7 +884,7 @@ TEST_F(EngineRunTest, RunDoesNotReturnNullWhenCapacityDefersPendingWork) {
   EXPECT_EQ(request->status_, RequestStatus::Assigned);
 
   engine.cache->SetCanAllocate(true);
-  EXPECT_EQ(engine.engine->Run().request, request);
+  EXPECT_EQ(RunOne(*engine.engine).request, request);
 }
 
 TEST_F(EngineRunTest, RetryableExecutionFailureRollsBackAndCanRetry) {
@@ -786,7 +896,7 @@ TEST_F(EngineRunTest, RetryableExecutionFailureRollsBackAndCanRetry) {
   engine.executor->SetNextFailure(
       ScriptedExecutionFailure::RetryableDuringExecution);
 
-  const auto retryable = engine.engine->Run();
+  const auto retryable = RunOne(*engine.engine);
   EXPECT_EQ(retryable.flags, EngineEventFlagRetryable);
   EXPECT_EQ(retryable.error_code, EngineErrorCode::RetryableExecution);
 
@@ -796,18 +906,18 @@ TEST_F(EngineRunTest, RetryableExecutionFailureRollsBackAndCanRetry) {
   EXPECT_EQ(engine.cache->AllocatedCount(), 0u);
   EXPECT_TRUE(engine.engine->HasPendingRequests());
 
-  auto ready = engine.engine->Run();
+  auto ready = RunOne(*engine.engine);
   EXPECT_EQ(ready.request, request);
   EXPECT_TRUE(request->IsTurnComplete());
   EXPECT_EQ(ready.token, 5);
-  EXPECT_EQ(engine.engine->Run().flags, EngineEventFlagNone);
+  EXPECT_EQ(RunOne(*engine.engine).flags, EngineEventFlagNone);
 }
 
 TEST_F(EngineRunTest, ContinuedResidentRollsBackToQueuedAndCanRetry) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
   auto prompt = Prompt(10);
   auto request = CreateRequestWithPrompt(engine.engine, *model_, prompt);
-  ASSERT_EQ(engine.engine->Run().request, request);
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
   ASSERT_EQ(request->status_, RequestStatus::TurnComplete);
   ASSERT_EQ(engine.cache->AllocatedCount(), 1u);
 
@@ -818,7 +928,7 @@ TEST_F(EngineRunTest, ContinuedResidentRollsBackToQueuedAndCanRetry) {
   engine.executor->SetNextFailure(
       ScriptedExecutionFailure::RetryableDuringExecution);
 
-  EXPECT_EQ(engine.engine->Run().flags, EngineEventFlagRetryable);
+  EXPECT_EQ(RunOne(*engine.engine).flags, EngineEventFlagRetryable);
 
   const auto rolled_back = request->Snapshot();
   EXPECT_EQ(rolled_back.status, RequestStatus::Assigned);
@@ -827,24 +937,39 @@ TEST_F(EngineRunTest, ContinuedResidentRollsBackToQueuedAndCanRetry) {
             before.processed_sequence_length);
   EXPECT_EQ(engine.cache->AllocatedCount(), 1u);
 
-  auto ready = engine.engine->Run();
+  auto ready = RunOne(*engine.engine);
   EXPECT_EQ(ready.request, request);
   EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
 }
 
-TEST_F(EngineRunTest, ContinuedResidentUsesChunkedPrefillBeforeSampling) {
+TEST_F(EngineRunTest, PartialPrefillCommitsOneTransactionAndReturnsNoEvents) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
   auto prompt = Prompt(10);
   auto params = MakeGreedyParams(*model_);
   params->search.chunk_size = 2;
   auto request = CreateRequestWithPrompt(engine.engine, *params, prompt);
-  ASSERT_EQ(engine.engine->Run().request, request);
+
+  std::array<EngineEvent, 1> storage;
+  EXPECT_EQ(engine.engine->Run(storage), 0u);
+  EXPECT_EQ(engine.executor->decode_calls, 1);
+  EXPECT_EQ(request->ProcessedSequenceLength(), 2);
+  EXPECT_TRUE(request->IsPrefill());
+  EXPECT_TRUE(engine.engine->HasPendingRequests());
+
+  ASSERT_EQ(engine.engine->Run(storage), 1u);
+  EXPECT_EQ(storage[0].request, request);
+  EXPECT_EQ(engine.executor->decode_calls, 2);
   ASSERT_EQ(request->status_, RequestStatus::TurnComplete);
 
   const size_t calls_before = engine.executor->decoded_token_counts.size();
   const std::vector<int32_t> continuation{5, 6, 7, 8, 9};
   request->BeginTurn(continuation);
-  ASSERT_EQ(engine.engine->Run().request, request);
+  EXPECT_EQ(engine.engine->Run(storage), 0u);
+  EXPECT_TRUE(engine.engine->HasPendingRequests());
+  EXPECT_EQ(engine.engine->Run(storage), 0u);
+  EXPECT_TRUE(engine.engine->HasPendingRequests());
+  ASSERT_EQ(engine.engine->Run(storage), 1u);
+  EXPECT_EQ(storage[0].request, request);
 
   ASSERT_EQ(engine.executor->decoded_token_counts.size(), calls_before + 3);
   EXPECT_EQ(engine.executor->decoded_token_counts[calls_before], 2u);
@@ -859,14 +984,14 @@ TEST_F(EngineRunTest, UnserviceableContinuationPublishesTerminalFailure) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
   auto prompt = Prompt(10);
   auto request = CreateRequestWithPrompt(engine.engine, *model_, prompt);
-  ASSERT_EQ(engine.engine->Run().request, request);
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
   ASSERT_EQ(request->status_, RequestStatus::TurnComplete);
 
   const std::vector<int32_t> continuation{5, 6};
   request->BeginTurn(continuation);
   engine.cache->SetUnserviceableRequest(request);
 
-  const auto failure = engine.engine->Run();
+  const auto failure = RunOne(*engine.engine);
   EXPECT_EQ(failure.request, request);
   EXPECT_EQ(failure.flags,
             EngineEventFlagTurnFinished | EngineEventFlagFailed);
@@ -884,7 +1009,7 @@ TEST_F(EngineRunTest, ExecutionCapacityFailureRollsBackWithoutPoisoningEngine) {
   const auto before = request->Snapshot();
   engine.executor->SetNextFailure(ScriptedExecutionFailure::CapacityExceeded);
 
-  const auto capacity = engine.engine->Run();
+  const auto capacity = RunOne(*engine.engine);
   EXPECT_EQ(capacity.flags, EngineEventFlagCapacityBlocked);
   EXPECT_EQ(capacity.error_code,
             EngineErrorCode::ExecutionCapacityExceeded);
@@ -898,7 +1023,7 @@ TEST_F(EngineRunTest, ExecutionCapacityFailureRollsBackWithoutPoisoningEngine) {
   EXPECT_EQ(engine.cache->AllocatedCount(), 0u);
   EXPECT_TRUE(engine.engine->HasPendingRequests());
 
-  auto ready = engine.engine->Run();
+  auto ready = RunOne(*engine.engine);
   EXPECT_EQ(ready.request, request);
   EXPECT_TRUE(request->IsTurnComplete());
 }
@@ -910,7 +1035,7 @@ TEST_F(EngineRunTest, PostProcessingFailureRestoresSearchAndCanRetry) {
   const auto before = request->Snapshot();
   engine.executor->SetNextFailure(ScriptedExecutionFailure::PostProcessing);
 
-  EXPECT_EQ(engine.engine->Run().flags, EngineEventFlagRetryable);
+  EXPECT_EQ(RunOne(*engine.engine).flags, EngineEventFlagRetryable);
 
   const auto rolled_back = request->Snapshot();
   EXPECT_EQ(rolled_back.status, before.status);
@@ -919,7 +1044,7 @@ TEST_F(EngineRunTest, PostProcessingFailureRestoresSearchAndCanRetry) {
             before.processed_sequence_length);
   EXPECT_EQ(engine.cache->AllocatedCount(), 0u);
 
-  auto ready = engine.engine->Run();
+  auto ready = RunOne(*engine.engine);
   EXPECT_EQ(ready.request, request);
   EXPECT_TRUE(request->IsTurnComplete());
 }
@@ -940,7 +1065,7 @@ TEST_F(EngineRunTest, LaterRequestFailureRestoresEarlierSample) {
 
   control->fail = true;
 
-  EXPECT_EQ(engine.engine->Run().flags, EngineEventFlagRetryable);
+  EXPECT_EQ(RunOne(*engine.engine).flags, EngineEventFlagRetryable);
 
   EXPECT_EQ(first->Snapshot().current_sequence_length,
             first_before.current_sequence_length);
@@ -951,7 +1076,7 @@ TEST_F(EngineRunTest, LaterRequestFailureRestoresEarlierSample) {
   EXPECT_EQ(engine.cache->AllocatedCount(), 0u);
 
   control->fail = false;
-  auto ready = engine.engine->Run();
+  auto ready = RunOne(*engine.engine);
   EXPECT_EQ(ready.request, first);
   EXPECT_EQ(first->CurrentSequenceLength(),
             first_before.current_sequence_length + 1);
@@ -966,11 +1091,11 @@ TEST_F(EngineRunTest, ClosingUndrainedReadyRequestPurgesItFromQueue) {
   auto first = CreateRequestWithPrompt(engine.engine, *model_, first_prompt);
   auto second = CreateRequestWithPrompt(engine.engine, *model_, second_prompt);
 
-  ASSERT_EQ(engine.engine->Run().request, first);
+  ASSERT_EQ(RunOne(*engine.engine).request, first);
   second->Close();
   ASSERT_EQ(second->status_, RequestStatus::Closed);
 
-  EXPECT_EQ(engine.engine->Run().request, first);
+  EXPECT_EQ(RunOne(*engine.engine).request, first);
 }
 
 TEST_F(EngineRunTest, ClosingOnlyDrainedReadyRequestClearsQueue) {
@@ -978,11 +1103,11 @@ TEST_F(EngineRunTest, ClosingOnlyDrainedReadyRequestClearsQueue) {
   auto prompt = Prompt(10);
   auto request = CreateRequestWithPrompt(engine.engine, *model_, prompt);
 
-  ASSERT_EQ(engine.engine->Run().request, request);
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
   request->Close();
 
   EXPECT_EQ(request->status_, RequestStatus::Closed);
-  EXPECT_EQ(engine.engine->Run().flags, EngineEventFlagNone);
+  EXPECT_EQ(RunOne(*engine.engine).flags, EngineEventFlagNone);
 }
 
 TEST_F(EngineRunTest, StaticTurnCompleteRowIsNotRepublishedWhilePeerRuns) {
@@ -1008,12 +1133,12 @@ TEST_F(EngineRunTest, StaticTurnCompleteRowIsNotRepublishedWhilePeerRuns) {
   auto first = CreateRequestWithPrompt(engine, *first_params, first_prompt);
   auto second = CreateRequestWithPrompt(engine, *second_params, second_prompt);
 
-  ASSERT_EQ(engine->Run().request, first);
+  ASSERT_EQ(RunOne(*engine).request, first);
   ASSERT_EQ(first->status_, RequestStatus::TurnComplete);
-  ASSERT_EQ(engine->Run().request, second);  // Drain the other event from the same model run.
+  ASSERT_EQ(RunOne(*engine).request, second);  // Drain the other event from the same model run.
   ASSERT_EQ(executor_observer->decode_calls, 1);
 
-  EXPECT_EQ(engine->Run().request, second);
+  EXPECT_EQ(RunOne(*engine).request, second);
   EXPECT_EQ(executor_observer->decode_calls, 2);
 }
 
@@ -1023,10 +1148,12 @@ TEST_F(EngineRunTest, FatalExecutionFailureMarksEngineUnhealthy) {
   auto request = CreateRequestWithPrompt(engine.engine, *model_, prompt);
   engine.executor->SetNextFailure(ScriptedExecutionFailure::Fatal);
 
-  const auto failure = engine.engine->Run();
+  const auto failure = RunOne(*engine.engine);
   EXPECT_EQ(failure.flags, EngineEventFlagFailed);
   EXPECT_EQ(failure.error_code, EngineErrorCode::EngineExecutionFailure);
-  EXPECT_THROW(static_cast<void>(engine.engine->Run()), EngineStepError);
+  EXPECT_THROW(
+      static_cast<void>(engine.engine->Run({})), EngineStepError);
+  EXPECT_THROW(static_cast<void>(RunOne(*engine.engine)), EngineStepError);
 
   EXPECT_EQ(engine.executor->decode_calls, 1);
   EXPECT_EQ(engine.cache->AllocatedCount(), 0u);
@@ -1038,13 +1165,13 @@ TEST_F(EngineRunTest, BeginTurnIsRejectedAfterEngineBecomesUnhealthy) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
   auto first_prompt = Prompt(10);
   auto first = CreateRequestWithPrompt(engine.engine, *model_, first_prompt);
-  ASSERT_EQ(engine.engine->Run().request, first);
+  ASSERT_EQ(RunOne(*engine.engine).request, first);
   ASSERT_EQ(first->status_, RequestStatus::TurnComplete);
 
   auto second_prompt = Prompt(20);
   auto second = CreateRequestWithPrompt(engine.engine, *model_, second_prompt);
   engine.executor->SetNextFailure(ScriptedExecutionFailure::Fatal);
-  EXPECT_EQ(engine.engine->Run().flags, EngineEventFlagFailed);
+  EXPECT_EQ(RunOne(*engine.engine).flags, EngineEventFlagFailed);
 
   const auto before = first->Snapshot();
   const std::vector<int32_t> continuation{5, 6};
@@ -1064,10 +1191,10 @@ TEST_F(EngineRunTest, UnserviceableRequestDoesNotBlockFittingRequest) {
       CreateRequestWithPrompt(engine.engine, *model_, fitting_prompt);
   engine.cache->SetUnserviceableRequest(too_large);
 
-  const auto failed = engine.engine->Run();
+  const auto failed = RunOne(*engine.engine);
   EXPECT_EQ(failed.request, too_large);
   EXPECT_EQ(failed.error_code, EngineErrorCode::RequestUnserviceable);
-  EXPECT_EQ(engine.engine->Run().request, fitting);
+  EXPECT_EQ(RunOne(*engine.engine).request, fitting);
 }
 
 TEST_F(EngineRunTest, LaterFailurePreservesEarlierCommittedCycle) {
@@ -1077,13 +1204,13 @@ TEST_F(EngineRunTest, LaterFailurePreservesEarlierCommittedCycle) {
   auto first = CreateRequestWithPrompt(engine.engine, *model_, first_prompt);
   auto second = CreateRequestWithPrompt(engine.engine, *model_, second_prompt);
 
-  EXPECT_EQ(engine.engine->Run().request, first);
+  EXPECT_EQ(RunOne(*engine.engine).request, first);
   const auto committed = first->Snapshot();
   ASSERT_EQ(engine.cache->AllocatedCount(), 1u);
   engine.executor->SetNextFailure(
       ScriptedExecutionFailure::RetryableBeforeExecution);
 
-  EXPECT_EQ(engine.engine->Run().flags, EngineEventFlagRetryable);
+  EXPECT_EQ(RunOne(*engine.engine).flags, EngineEventFlagRetryable);
 
   const auto after_abort = first->Snapshot();
   EXPECT_EQ(after_abort.status, committed.status);
@@ -1099,14 +1226,14 @@ TEST_F(EngineRunTest, MixedDecodeAndPrefillCommitPlanOwnedTokenCounts) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5);
   auto first_prompt = Prompt(10);
   auto decode = CreateRequestWithPrompt(engine.engine, *model_, first_prompt);
-  ASSERT_EQ(engine.engine->Run().request, decode);
+  ASSERT_EQ(RunOne(*engine.engine).request, decode);
   const auto decode_before_mixed = decode->Snapshot();
 
   const std::vector<int32_t> long_prompt{2, 3, 4, 5, 6};
   auto prefill =
       CreateRequestWithPrompt(engine.engine, *model_, long_prompt);
 
-  EXPECT_EQ(engine.engine->Run().request, decode);
+  EXPECT_EQ(RunOne(*engine.engine).request, decode);
 
   ASSERT_EQ(engine.executor->decoded_batch_sizes.size(), 2u);
   EXPECT_EQ(engine.executor->decoded_batch_sizes[1], 2u);
@@ -1126,7 +1253,7 @@ TEST_F(EngineRunTest, MixedRunRollbackPreservesProgressAndCacheResidents) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5);
   auto first_prompt = Prompt(10);
   auto decode = CreateRequestWithPrompt(engine.engine, *model_, first_prompt);
-  ASSERT_EQ(engine.engine->Run().request, decode);
+  ASSERT_EQ(RunOne(*engine.engine).request, decode);
 
   const std::vector<int32_t> long_prompt{2, 3, 4, 5, 6};
   auto prefill =
@@ -1137,7 +1264,7 @@ TEST_F(EngineRunTest, MixedRunRollbackPreservesProgressAndCacheResidents) {
   engine.executor->SetNextFailure(
       ScriptedExecutionFailure::RetryableDuringExecution);
 
-  EXPECT_EQ(engine.engine->Run().flags, EngineEventFlagRetryable);
+  EXPECT_EQ(RunOne(*engine.engine).flags, EngineEventFlagRetryable);
 
   const auto decode_after = decode->Snapshot();
   const auto prefill_after = prefill->Snapshot();
@@ -1152,7 +1279,7 @@ TEST_F(EngineRunTest, MixedRunRollbackPreservesProgressAndCacheResidents) {
             prefill_before.processed_sequence_length);
   EXPECT_EQ(engine.cache->AllocatedCount(), 1u);
 
-  EXPECT_EQ(engine.engine->Run().request, decode);
+  EXPECT_EQ(RunOne(*engine.engine).request, decode);
   EXPECT_EQ(prefill->ProcessedSequenceLength(), 2);
   EXPECT_EQ(engine.cache->AllocatedCount(), 2u);
 }

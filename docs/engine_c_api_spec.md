@@ -149,10 +149,10 @@ typedef enum OgaEngineEventFlags {
 `OgaEngineEventFlags` is a bitmask, not a mutually exclusive type. In particular, a final model step
 may emit one event with both `Token` and `TurnFinished`.
 
-The public token loop is `Tokens(request, turn_id)`: callers pump `OgaEngineRun`, test the `Token`
-bit rather than comparing flags for equality, treat `event.request` as a borrowed identity alias for
-their owned Request handle, use `event.turn_id` as the Request-local Turn identity, and consume
-`event.token` only when `Token` is set.
+The public token loop is `Tokens(request, turn_id)`: callers pump `OgaEngineRun`, iterate the
+populated event prefix, test the `Token` bit rather than comparing flags for equality, treat
+`event.request` as a borrowed identity alias for their owned Request handle, use `event.turn_id` as
+the Request-local Turn identity, and consume `event.token` only when `Token` is set.
 
 `OgaFinishReason_StopSequence` reserves the intended vocabulary but is not emitted until stop
 sequences are implemented end to end.
@@ -199,7 +199,7 @@ Payload validity is determined by flags:
 
 | Flags | Valid payload |
 | --- | --- |
-| `None` | Engine is idle; remaining fields are zero or null |
+| `None` | Reserved zero value; no-work is represented by `out_event_count == 0` |
 | `Token` | `request`, `turn_id`, and `token` |
 | `TurnFinished` | `request`, `turn_id`, `finish_reason`, and `usage` |
 | `Token \| TurnFinished` | Final visible token and terminal payload from the same committed step |
@@ -217,9 +217,10 @@ Invalid arguments, invalid structure sizes, incompatible handles, and owner-thre
 `cached_prompt_tokens` has the exact contract documented in the structure comment. Scheduler
 `max_scheduled_tokens` is not usage: it is a per-step budget shared across Requests.
 
-`OgaEngineEvent` is caller-allocated. The caller sets `struct_size` before every call. The
-implementation validates the writable size before making progress, writes no bytes beyond it, and
-fully initializes every field present in the initial version.
+`OgaEngineEvent` records are caller-allocated. The caller sets every slot's `struct_size` before
+each call. The implementation validates the complete buffer before making progress, preserves each
+size, writes no bytes beyond the Version 1 fields, and fully initializes every Version 1 field in
+the populated prefix.
 
 ### Engine, Request, and Turn operations
 
@@ -254,7 +255,10 @@ void OgaDestroyRequest(OgaRequest* request);
 
 OgaResult* OgaEngineRun(
     OgaEngine* engine,
-    OgaEngineEvent* out_event);
+    void* event_buffer,
+    size_t event_capacity,
+    size_t event_stride,
+    size_t* out_event_count);
 
 OgaResult* OgaEngineHasPendingRequests(
     OgaEngine* engine,
@@ -295,6 +299,25 @@ Turn IDs:
 
 Cancellation is owner-thread-only, preserves committed Request/Search/KV state and visible tokens,
 and publishes a `TurnFinished` event with reason `Cancelled`.
+
+`OgaEngineRun` uses caller-owned reusable storage:
+
+- `event_capacity` is the number of records available.
+- `event_stride` is the byte distance between record starts. It must be aligned for
+  `OgaEngineEvent` and at least `sizeof(OgaEngineEvent)`.
+- `out_event_count` receives the number of records written in the buffer prefix and is set to zero
+  before later validation or Engine work. It must not overlap the event storage.
+- Every positive-capacity slot must be aligned, have
+  `sizeof(OgaEngineEvent) <= struct_size <= event_stride`, and have `reserved == 0`.
+- The complete storage layout, including checked `event_capacity * event_stride`, is validated
+  before Request reclamation, event draining, scheduling, mutation, or model progress. An invalid
+  later slot therefore cannot cause partial event writes or partial Engine progress.
+- The caller's `struct_size` is preserved for every returned record. Version 1 fields are fully
+  initialized, trailing bytes are untouched, and unused slots are untouched.
+
+Capacity zero is an owner-thread-validated no-op. `event_buffer` may be null, `event_stride` is
+ignored, the count becomes zero, and the call performs no reclamation, event drain, scheduling, or
+model work. A permanently unhealthy Engine still returns its stored fatal error.
 
 ## State machine
 
@@ -349,27 +372,36 @@ combined event per affected Request, so the maximum retained count is bounded by
 size. Reserving before execution prevents normal event publication from allocating after model and
 cache state have committed.
 
-Conceptual `Run` flow:
+Conceptual positive-capacity `Run` flow:
 
 ```cpp
-EngineEvent Engine::Run() {
+size_t Engine::Run(std::span<EngineEvent> output) {
   ReclaimAbandonedRequestsAndEvents();
 
-  if (auto event = DrainPendingEvent())
-    return *event;
+  if (HasRetainedEvents())
+    return DrainPendingEvents(output);
 
   if (!scheduler_->HasPendingRequests())
-    return IdleEvent();
+    return 0;
 
-  ExecuteAndCommitOneStep();
+  ExecuteAndCommitAtMostOneStep();
   PopulatePendingEventsFromCommittedResults();
-  return DrainPendingEvent().value_or(IdleEvent());
+  return DrainPendingEvents(output);
 }
 ```
 
-If one batch advances Requests A, B, and C, the first `EngineRun` returns A's event. Later calls
-return B and C without executing another model step. Only after all retained events are drained may
-the Engine schedule more work.
+The operation is drain-or-execute:
+
+- If retained events exist at call entry, the call drains up to capacity in FIFO order and performs
+  no model transaction, even if output capacity remains.
+- Otherwise the call executes at most one static step or one dynamic transaction.
+- If that committed step produces events for Requests A, B, and C and capacity is at least three,
+  all three are returned by the same call.
+- If capacity is one, A is returned and B/C remain retained. Later calls drain B/C without model
+  execution. Only after retained overflow is empty may a later call schedule more work.
+- A chunked partial-prefill transaction may commit cache and Request progress while producing no
+  event. In that case the call succeeds with count zero and `HasPendingRequests()` remains true. The
+  Engine does not loop internally to force token output.
 
 `OgaEngineHasPendingRequests` returns true when either pending events or schedulable work exist.
 Before answering, it reclaims Requests whose final public handle was released. This is an
@@ -406,14 +438,15 @@ OgaRequestGetUnseenToken
 and remove their internal unseen-index FIFO bookkeeping.
 
 At successful step commit, the Engine already knows the Request, Turn ID, selected token, terminal
-state, finish reason, and usage. It captures those values in `PendingEngineEvent`. `OgaEngineRun`
-copies `event.token` directly to caller storage.
+state, finish reason, and usage. It captures those values in `PendingEngineEvent`. One committed
+step produces at most one combined event per affected Request. `OgaEngineRun` copies the available
+FIFO prefix directly to caller storage and retains overflow.
 
 `tokens_host_` and the Search sequence remain authoritative resident conversation state. Event
 delivery does not remove tokens from that state. Because token and Turn ID are captured together at
 commit, no `GeneratedTokenRecord` or per-Turn token range is required.
 
-Callers must never read `event.token` merely because an event is non-idle. They check
+Callers must never read `event.token` merely because a record was returned. They check
 `event.flags & OgaEngineEventFlag_Token`; the same event can also carry
 `OgaEngineEventFlag_TurnFinished`.
 
@@ -428,7 +461,10 @@ Callers must never read `event.token` merely because an event is non-idle. They 
   admission, and does not poison unrelated Requests.
 - A fatal Engine failure produces `Failed` with a null Request and prevents later model execution.
 - Detailed diagnostics continue to use the library's established result/error facilities.
-- An output-structure validation error is detected before scheduler or model progress.
+- Output validation, API misuse, and owner-thread violations return `OgaResult` with count zero and
+  no Engine progress.
+- Capacity, retryable, unserviceable, contract-failure, and first fatal-execution outcomes remain
+  typed events. After the fatal event is delivered, later `Run` calls return the stored fatal error.
 
 The required mapping is:
 
@@ -470,10 +506,11 @@ Request creation. It should preserve search setters while hiding internal `Gener
 This is deferred until Search, RNG, sampling, guidance, and execution ownership are separated from
 the classic Generator parameter type.
 
-### Bulk events
+### Larger event records
 
-Initial `EngineRun` returns exactly one event. A future bulk drain API requires explicit capacity,
-element stride, partial-drain, and backpressure semantics and should be justified by profiling.
+Future event fields can be appended to `OgaEngineEvent`. Callers opt in by supplying a larger
+record, setting `struct_size` to that record size, and using an aligned stride at least that large.
+Version 1 preserves the size and trailing bytes rather than assuming the extra fields exist.
 
 ## Language surfaces
 
@@ -482,7 +519,10 @@ element stride, partial-drain, and backpressure semantics and should be justifie
 - RAII `OgaTurnParams`.
 - `OgaRequest::BeginTurn` returns `uint64_t`.
 - `OgaRequest::CancelTurn(uint64_t) -> bool`.
-- `OgaEngine::Run` returns `OgaEngineEvent` by value.
+- `OgaEngine::Run(std::span<OgaEngineEvent>)` returns a
+  `std::span<const OgaEngineEvent>` over the populated prefix.
+- The convenience wrapper accepts exact Version 1 storage and initializes only `struct_size` and
+  `reserved` in every reusable slot. Future-sized or padded records use the C API directly.
 - No unseen-token methods.
 
 ### Python
@@ -491,7 +531,10 @@ element stride, partial-drain, and backpressure semantics and should be justifie
 - `Request.cancel_turn(turn_id) -> bool`.
 - `TurnParams.set_stop_sequences(token_id_sequences)` accepts a ragged collection of token-ID
   sequences and currently raises the explicit not-implemented error.
-- `Engine.run() -> EngineEvent`.
+- `Engine.run(max_events: int = 1) -> list[EngineEvent]`.
+- `max_events=0` is the capacity-zero no-op and a negative value is rejected.
+- The returned list contains only the populated prefix; its default capacity preserves
+  one-event-at-a-time behavior while larger values expose complete transaction output when it fits.
 - `EngineEvent` exposes flags, borrowed Request, Turn ID, optional token, finish reason, error code,
   and usage.
 - No `has_unseen_tokens` or `get_unseen_token`.
@@ -524,9 +567,14 @@ commit buildable; the completed change exposes events only.
 ### ABI and validation
 
 - Exact V1 sizes and offsets are asserted for supported ABIs.
-- Undersized Request options and Engine events are rejected before mutation or progress.
-- Larger structures are accepted and trailing bytes are untouched.
-- Nonzero reserved fields are rejected.
+- Null positive-capacity buffers, null count pointers, misaligned buffers, short or misaligned
+  strides, multiplication overflow, undersized records, `struct_size > stride`, and nonzero
+  reserved fields are rejected before mutation or progress.
+- Every slot is validated before any slot is written; invalid later slots leave the complete event
+  buffer unchanged.
+- Larger structures and padded strides are accepted. Caller `struct_size`, trailing bytes, unused
+  slots, and reusable headers are preserved.
+- Capacity zero validates the owner thread and otherwise does no work.
 - `uint64_t` counts that do not fit internal types are rejected.
 - Unsupported Turn setters return explicit not-implemented errors.
 
@@ -541,11 +589,15 @@ commit buildable; the completed change exposes events only.
 
 ### Event delivery
 
-- Idle returns `flags == None`.
+- No event output returns count zero; partial prefill can do so while work remains.
 - One token event is emitted for every visible generated token.
 - A final visible token and completion are emitted together.
 - Every token and terminal event carries the correct Turn ID.
-- A multi-Request batch retains and drains every event before further inference.
+- A multi-Request transaction returns all events in one call when capacity suffices.
+- Capacity one executes once and drains retained overflow on later calls without more inference.
+- Draining retained events never executes a new transaction, even when the output buffer has spare
+  capacity.
+- Static multi-row output follows the same bulk delivery contract.
 - `HasPendingRequests` remains true while events are retained.
 - Event output validation failure causes no model progress.
 - Closing one Request removes only that Request's retained events.

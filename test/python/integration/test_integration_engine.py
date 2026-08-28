@@ -99,13 +99,21 @@ def _drain(event, sinks) -> bool:
     return bool(event.flags & og.EngineEventFlags.TURN_FINISHED)
 
 
+def _next_event(engine):
+    while engine.has_pending_requests():
+        events = engine.run()
+        assert len(events) <= 1
+        if events:
+            return events[0]
+    raise AssertionError("Engine completed without producing an event")
+
+
 def _run(engine, sinks, *, max_steps=_MAX_STEPS) -> None:
     steps = 0
     while engine.has_pending_requests():
-        event = engine.run()
-        assert event.flags != og.EngineEventFlags.NONE, "engine.run() returned idle while work remained"
-        if _drain(event, sinks):
-            event.request.close()
+        for event in engine.run(8):
+            if _drain(event, sinks):
+                event.request.close()
         steps += 1
         assert steps <= max_steps, "engine.run() exceeded the safety bound; possible non-termination"
 
@@ -201,9 +209,7 @@ def test_staggered_admission(bundle):
     for _ in range(3):
         if not engine.has_pending_requests():
             break
-        event = engine.run()
-        if event.flags == og.EngineEventFlags.NONE:
-            break
+        event = _next_event(engine)
         if _drain(event, sinks):
             event.request.close()
     assert len(sink_a.tokens) > 0, "first request produced nothing before staggered admission"
@@ -333,9 +339,7 @@ def test_close_request_stops_output(bundle):
     for _ in range(4):
         if not engine.has_pending_requests():
             break
-        event = engine.run()
-        if event.flags == og.EngineEventFlags.NONE:
-            break
+        event = _next_event(engine)
         if _drain(event, sinks):
             event.request.close()
     assert len(sink_a.tokens) > 0, "request A produced nothing before close"

@@ -134,16 +134,17 @@ struct Engine : std::enable_shared_from_this<Engine>,
   }
 
   /**
-   * @brief Advances the state of a subset of the Requests the Engine is currently
-   *        serving.
+   * @brief Drains retained events or advances one model transaction.
    *
-   * This function schedules the execution of the model for the subset of requests
-   * that are ready to be processed (as determined by the scheduling strategy).
-   * Once these requests are scheduled, the Engine offloads the execution to the
-   * model executor and updates the requests' states with the newly generated
-   * tokens.
+   * A non-empty output span first reclaims abandoned Requests. If events are retained, it copies
+   * only those events. Otherwise it executes at most one static step or dynamic transaction, copies
+   * the available event prefix, and retains overflow. An empty span validates the owner thread and
+   * Engine health and performs no other work.
+   *
+   * @param events Caller-owned storage for internal Engine events.
+   * @return The number of populated records in the output prefix.
    */
-  EngineEvent Run();
+  size_t Run(std::span<EngineEvent> events);
 
   /**
    * @brief Checks if there are any pending requests in the Engine.
@@ -162,9 +163,10 @@ struct Engine : std::enable_shared_from_this<Engine>,
   void CloseRequest(const std::shared_ptr<Request>& request);
   bool CancelRequest(const std::shared_ptr<Request>& request, uint64_t turn_id);
   void ReclaimAbandonedRequests();
-  EngineEvent DrainPendingEvent();
-  EngineEvent RunDynamic();
-  EngineEvent RunStatic();
+  size_t DrainPendingEvents(std::span<EngineEvent> events);
+  void RetainEvent(EngineEvent event);
+  void RunDynamic();
+  void RunStatic();
   EngineEvent EventFromStep(const std::shared_ptr<Request>& request,
                             const RequestStepResult& result) const;
   EngineEvent EventFromStepError(const EngineStepError& error);

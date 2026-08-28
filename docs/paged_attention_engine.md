@@ -91,7 +91,7 @@ When `model->config_->engine.dynamic_batching` is present:
 - `PagedCacheManager::SupportsDynamicBatching()` returns `true`.
 - `Scheduler::Create()` returns `DynamicBatchScheduler`.
 - `SimpleDecoder` uses `VarlenDecoderIO`.
-- `Engine::Run()` calls `RunDynamic()`.
+- `Engine::Run(output)` calls `RunDynamic()` when no retained events exist.
 
 Dynamic batching limits scheduled rows with `max_batch_size` and limits the total
 query tokens in one model run with `max_scheduled_tokens`. The token limit defaults
@@ -298,21 +298,49 @@ This separation between search length and processed length is what lets each mod
 
 ## `Engine::Run()` and event draining
 
-The low-level engine API advances through repeated calls to synchronous `Run()`.
+The low-level engine API advances through repeated calls to synchronous bulk `Run()`. The canonical
+C operation receives a caller buffer, record capacity, byte stride, and output count. The C++
+wrapper receives exact Version 1 `std::span<OgaEngineEvent>` storage and returns a const span over
+the populated prefix. Python exposes `Engine.run(max_events=1) -> list[EngineEvent]`.
 
-Before executing new work, `Run()` drains `pending_events_`. One model invocation may produce an
-event for several Requests, but `Run()` returns one event at a time. Remaining events are returned
-by later calls without another model execution. Each event retains its Request internally until
-delivery; the public pointer is borrowed and is valid only while the caller retains its owned
-Request handle.
+Every positive-capacity C call validates the complete output layout before any Request reclamation,
+event draining, scheduling, mutation, or model progress: non-null buffer and count, buffer
+alignment, minimum/aligned stride, checked capacity-times-stride, and every slot's `struct_size`
+range and zero `reserved` field. Invalid later slots therefore cause no partial writes or progress.
+Returned records preserve each caller `struct_size`, initialize every Version 1 field, and do not
+touch trailing bytes or unused slots.
+
+Capacity zero is an owner-thread-validated no-op: the buffer may be null, stride is ignored, count
+becomes zero, and no reclamation, draining, scheduling, or model work occurs. A permanently
+unhealthy Engine still returns its stored fatal error.
+
+A positive-capacity call is strictly drain-or-execute:
+
+1. Validate the owner thread and reclaim abandoned Requests.
+2. If `pending_events_` contains retained output, drain up to capacity in FIFO order and return.
+   Do not execute another model transaction even when the caller buffer has spare slots.
+3. Otherwise execute at most one static step or one dynamic transaction.
+4. Copy up to capacity produced events and retain overflow in `pending_events_`.
+
+When capacity covers the complete affected batch, one call returns all of that transaction's
+events. Capacity one expresses one-event-at-a-time behavior through the same implementation: the
+first call executes once and later calls drain retained overflow without more model execution.
+Each retained event owns its Request internally until it is copied; the public pointer remains
+borrowed and is valid only while the caller retains its owned Request handle.
 
 A committed step emits a token event, a terminal event, or one combined
 `Token | TurnFinished` event. EOS can emit terminal completion without a visible token. Event
-delivery does not mutate the Request's retained logical sequence.
+delivery does not mutate the Request's retained logical sequence. One successful committed step
+produces at most one combined event per affected Request.
+
+A chunked partial-prefill transaction can commit cache and Request progress without producing an
+event. `Run()` then returns count zero while `HasPendingRequests()` remains true. It does not loop
+internally to force a token event.
 
 This distinction is important:
 
-- One call to `Run()` does not always mean one model invocation.
+- One positive-capacity call either drains retained events or attempts at most one model
+  transaction.
 - Draining a previously committed batch does not change model or cache state.
 - `Request::Close()` purges undrained events for that Request.
 - `HasPendingRequests()` first reclaims abandoned Requests, then is true while either the ready
@@ -910,26 +938,29 @@ turn_params.set_max_generated_tokens(128)
 turn_id = request.begin_turn(initial_tokens, turn_params)
 
 while engine.has_pending_requests():
-    event = engine.run()
-    if event.flags & og.EngineEventFlags.TOKEN:
-        # event.request is a borrowed identity alias; event.turn_id is Request-local.
-        token = event.token
-        # Stream or process the token.
-    if event.flags & og.EngineEventFlags.TURN_FINISHED:
-        reason = event.finish_reason
+    for event in engine.run(max_events=8):
+        if event.flags & og.EngineEventFlags.TOKEN:
+            # event.request is a borrowed identity alias; event.turn_id is Request-local.
+            token = event.token
+            # Stream or process the token.
+        if event.flags & og.EngineEventFlags.TURN_FINISHED:
+            reason = event.finish_reason
 
 turn_params.set_max_generated_tokens(64)
 turn_id = request.begin_turn(next_turn_tokens, turn_params)
 
-# Repeat engine.run(), then close when continuation is no longer needed.
+# Repeat engine.run(max_events=...), then close when continuation is no longer needed.
 request.close()
 ```
 
-One event is returned at a time. Flags are a bitmask, so callers test the `TOKEN` bit rather than
-comparing flags for equality; `TOKEN | TURN_FINISHED` can be combined, and `event.token` is consumed
-only when `TOKEN` is set. `event.request` is a borrowed alias of the caller-owned Request handle,
-while `event.turn_id` identifies the Request-local Turn. A turn-complete dynamic request remains
-cache-resident until explicit close, which releases dynamic cache ownership immediately.
+`max_events=1` provides capacity-one behavior; larger capacities return the complete transaction
+output when it fits. An empty list can represent committed partial-prefill progress, so callers
+continue while `has_pending_requests()` remains true. Flags are a bitmask, so callers test the
+`TOKEN` bit rather than comparing flags for equality; `TOKEN | TURN_FINISHED` can be combined, and
+`event.token` is consumed only when `TOKEN` is set. `event.request` is a borrowed alias of the
+caller-owned Request handle, while `event.turn_id` identifies the Request-local Turn. A
+turn-complete dynamic request remains cache-resident until explicit close, which releases dynamic
+cache ownership immediately.
 
 ## Keeping this document current
 

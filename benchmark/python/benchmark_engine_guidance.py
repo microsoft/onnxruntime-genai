@@ -55,18 +55,16 @@ def generate(engine, request, tokenizer, request_started_at):
     started = time.perf_counter()
 
     while engine.has_pending_requests():
-        event = engine.run()
-        if event.flags == og.EngineEventFlags.NONE:
-            raise RuntimeError("Engine returned idle while work remained")
-        if event.request is not request:
-            raise RuntimeError("Engine returned an unknown request")
-        if event.flags & og.EngineEventFlags.TOKEN:
-            now = time.perf_counter()
-            if first_token_at is None:
-                first_token_at = now
-            last_token_at = now
-            token_count += 1
-            fragments.append(stream.decode(event.token))
+        for event in engine.run(8):
+            if event.request is not request:
+                raise RuntimeError("Engine returned an unknown request")
+            if event.flags & og.EngineEventFlags.TOKEN:
+                now = time.perf_counter()
+                if first_token_at is None:
+                    first_token_at = now
+                last_token_at = now
+                token_count += 1
+                fragments.append(stream.decode(event.token))
 
     completed = time.perf_counter()
     if first_token_at is None:

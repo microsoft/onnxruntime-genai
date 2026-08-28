@@ -13,6 +13,7 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -84,6 +85,8 @@ ScenarioExecutionOutput CapacityPressureScenario::Execute(const ScenarioConfig& 
     std::vector<size_t> prompt_counts(static_cast<size_t>(config.concurrency));
     std::vector<double> first_token_ms(static_cast<size_t>(config.concurrency), -1.0);
     std::vector<bool> admitted(static_cast<size_t>(config.concurrency), false);
+    std::vector<bool> rejected(static_cast<size_t>(config.concurrency), false);
+    std::unordered_map<OgaRequest*, size_t> request_indices;
     params.reserve(static_cast<size_t>(config.concurrency));
     requests.reserve(static_cast<size_t>(config.concurrency));
 
@@ -92,9 +95,9 @@ ScenarioExecutionOutput CapacityPressureScenario::Execute(const ScenarioConfig& 
     int rejected_count = 0;
     size_t generated_tokens = 0;
 
-    // Admission phase: submit each pressure prompt independently and record whether
-    // engine->Add accepts it. Rejections are expected data for this benchmark, not
-    // immediate scenario failures. Preemption is deliberately out of scope for now.
+    // Queue every pressure prompt independently. The turn API defers capacity decisions until
+    // execution, so request-specific failure events are benchmark data rather than immediate
+    // scenario failures. Preemption is deliberately out of scope for now.
     for (int i = 0; i < config.concurrency; ++i) {
       const size_t request_index = static_cast<size_t>(i);
       const auto& prompt = pressure_prompts[request_index];
@@ -104,45 +107,75 @@ ScenarioExecutionOutput CapacityPressureScenario::Execute(const ScenarioConfig& 
       params.back()->SetSearchOption("max_length", static_cast<double>(prompt_count + config.generation_tokens));
       params.back()->SetSearchOption("random_seed", kRandomSeed);
       request_tokens[request_index].assign(prompt->SequenceData(0), prompt->SequenceData(0) + prompt_count);
-      requests.emplace_back(OgaRequest::Create(*params.back()));
-      requests.back()->AddTokens(*prompt);
-      requests.back()->SetOpaqueData(&request_tokens[request_index]);
 
       try {
-        engineResources.engine->Add(*requests.back());
-        admitted[request_index] = true;
-        ++admitted_count;
+        auto request = engineResources.engine->CreateRequest(*params.back());
+        request->BeginTurn(std::span<const int32_t>{
+            prompt->SequenceData(0), prompt_count});
+        request_indices.emplace(request.get(), request_index);
+        requests.push_back(std::move(request));
       } catch (const std::exception& ex) {
+        rejected[request_index] = true;
         ++rejected_count;
-        std::cout << tag << "Admission rejected for request " << i
+        std::cout << tag << "Turn rejected for request " << i
                   << " prompt_length_k=" << kPromptLengthsK[request_index]
                   << ": " << ex.what() << std::endl;
       }
     }
 
-    // Execution phase: drain only the requests that were admitted. Each admitted request
-    // generates one token, which is enough to force prefill/cache allocation and measure TTFT.
-    while (auto ready_request = engineResources.engine->Step()) {
+    // Execution phase: caller-buffered events reveal which queued requests were admitted to model
+    // execution and which were permanently unserviceable. Completed requests are closed promptly
+    // so deferred peers can reuse their cache capacity.
+    std::vector<OgaEngineEvent> event_storage(
+        static_cast<size_t>(config.concurrency));
+    while (engineResources.engine->HasPendingRequests()) {
+      const auto events = engineResources.engine->Run(event_storage);
       const auto now = std::chrono::steady_clock::now();
-      auto* tokens = reinterpret_cast<std::vector<int32_t>*>(ready_request->GetOpaqueData());
-      if (tokens == nullptr) {
-        throw std::runtime_error(Name() + ": null opaque data from request");
-      }
-      const auto base_addr = reinterpret_cast<std::uintptr_t>(request_tokens.data());
-      const auto ptr_addr = reinterpret_cast<std::uintptr_t>(tokens);
-      const auto end_addr = reinterpret_cast<std::uintptr_t>(request_tokens.data() + request_tokens.size());
-      if (ptr_addr < base_addr || ptr_addr >= end_addr) {
-        throw std::runtime_error(Name() + ": opaque data pointer not in request_tokens");
-      }
-      const size_t request_index = (ptr_addr - base_addr) / sizeof(std::vector<int32_t>);
-      while (ready_request->HasUnseenTokens()) {
-        // The first emitted token marks successful completion for an admitted pressure request.
-        tokens->push_back(ready_request->GetUnseenToken());
-        ++generated_tokens;
-        if (first_token_ms[request_index] < 0.0) {
-          first_token_ms[request_index] = std::chrono::duration<double, std::milli>(now - run_start).count();
+      for (const auto& event : events) {
+        if (!event.request) {
+          if ((event.flags & OgaEngineEventFlag_Failed) != 0) {
+            throw std::runtime_error(
+                Name() + ": Engine failed without a request-specific outcome");
+          }
+          continue;
+        }
+
+        const auto request_it = request_indices.find(event.request);
+        if (request_it == request_indices.end()) {
+          throw std::runtime_error(
+              Name() + ": event request has no pressure benchmark state");
+        }
+        const size_t request_index = request_it->second;
+
+        if ((event.flags & OgaEngineEventFlag_Failed) != 0) {
+          if (!rejected[request_index]) {
+            rejected[request_index] = true;
+            ++rejected_count;
+          }
+        } else if (!admitted[request_index]) {
+          admitted[request_index] = true;
+          ++admitted_count;
+        }
+
+        if ((event.flags & OgaEngineEventFlag_Token) != 0) {
+          // The first emitted token establishes TTFT for an admitted pressure request.
+          request_tokens[request_index].push_back(event.token);
+          ++generated_tokens;
+          if (first_token_ms[request_index] < 0.0) {
+            first_token_ms[request_index] =
+                std::chrono::duration<double, std::milli>(
+                    now - run_start)
+                    .count();
+          }
+        }
+
+        if ((event.flags & OgaEngineEventFlag_TurnFinished) != 0) {
+          event.request->Close();
         }
       }
+    }
+    for (const auto& request : requests) {
+      request->Close();
     }
 
     const auto run_end = std::chrono::steady_clock::now();
@@ -165,8 +198,8 @@ ScenarioExecutionOutput CapacityPressureScenario::Execute(const ScenarioConfig& 
     admitted_values.push_back(admitted_count);
     rejected_values.push_back(rejected_count);
 
-    // Request-level output includes only admitted requests. Rejected admissions are reported
-    // separately in scenario_metrics so the benchmark can distinguish rejection from truncation.
+    // Request-level output includes only requests admitted to execution. Rejected requests are
+    // reported separately so the benchmark can distinguish unserviceable work from truncation.
     for (int i = 0; i < config.concurrency; ++i) {
       const size_t request_index = static_cast<size_t>(i);
       if (!admitted[request_index]) {
@@ -183,8 +216,8 @@ ScenarioExecutionOutput CapacityPressureScenario::Execute(const ScenarioConfig& 
     ++measured_run_index;
   }
 
-  // preemption_enabled=false is intentional: this version measures admission only.
-  // Future work can add preemption/resume metrics without changing the admission counts.
+  // preemption_enabled=false is intentional: this version measures service and rejection under
+  // pressure without preempting active work.
   memory.Stop();
   output.ttft_p5_ms = Percentile(ttft_values, 5.0);
   output.ttft_p50_ms = Percentile(ttft_values, 50.0);

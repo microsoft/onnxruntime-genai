@@ -93,20 +93,26 @@ def _drain(event, sinks):
 
 
 def _step_once(engine, sinks, *, close_completed=True):
-    event = engine.run()
-    if event.flags == og.EngineEventFlags.NONE:
-        return False
-    if _drain(event, sinks) and close_completed:
-        event.request.close()
-    return True
+    events = engine.run(8)
+    for event in events:
+        if _drain(event, sinks) and close_completed:
+            event.request.close()
+    return bool(events)
+
+
+def _next_event(engine):
+    while engine.has_pending_requests():
+        events = engine.run()
+        assert len(events) <= 1
+        if events:
+            return events[0]
+    raise AssertionError("Engine completed without producing an event")
 
 
 def _run(engine, sinks, *, max_steps=_MAX_STEPS, close_completed=True):
     steps = 0
     while engine.has_pending_requests():
-        assert _step_once(engine, sinks, close_completed=close_completed), (
-            "engine.run() returned no request while work remained"
-        )
+        _step_once(engine, sinks, close_completed=close_completed)
         steps += 1
         assert steps <= max_steps, "engine.run() exceeded the safety bound; possible non-termination"
 
@@ -152,6 +158,38 @@ def test_model_declares_per_request_fp16_logits():
     assert len(tensor_type.shape.dim) == 2
     assert tensor_type.shape.dim[0].dim_param == "batch_size"
     assert tensor_type.shape.dim[1].dim_value == _VOCAB_SIZE
+
+
+def test_run_returns_lists_for_default_zero_and_bulk_capacity(model):
+    engine = og.Engine(model)
+    sinks = {}
+    first = _create_request(engine, model, _PROMPT_A, 1, _Sink(), sinks)
+    second = _create_request(engine, model, _PROMPT_B, 1, _Sink(), sinks)
+
+    assert engine.run(0) == []
+    assert engine.has_pending_requests()
+    with pytest.raises(ValueError, match="nonnegative"):
+        engine.run(-1)
+    with pytest.raises((OverflowError, TypeError)):
+        engine.run(1 << 100)
+
+    default_events = engine.run()
+    assert isinstance(default_events, list)
+    assert len(default_events) == 1
+    assert default_events[0].request is first
+
+    retained_events = engine.run(8)
+    assert len(retained_events) == 1
+    assert retained_events[0].request is second
+
+    third = _create_request(engine, model, _PROMPT_A, 1, _Sink(), sinks)
+    fourth = _create_request(engine, model, _PROMPT_B, 1, _Sink(), sinks)
+    bulk_events = engine.run(8)
+    assert len(bulk_events) == 2
+    assert [event.request for event in bulk_events] == [third, fourth]
+
+    for request in (first, second, third, fourth):
+        request.close()
 
 
 def test_deterministic_tokens(model):
@@ -283,7 +321,7 @@ def test_request_total_limit_and_cancel_metadata(model):
     turn_id = canceled.begin_turn(np.asarray(_PROMPT_A, dtype=np.int32))
     assert canceled.cancel_turn(turn_id)
     assert not canceled.cancel_turn(turn_id)
-    event = engine.run()
+    event = _next_event(engine)
     assert event.request is canceled
     assert event.finish_reason == og.FinishReason.CANCELLED
     canceled.close()
@@ -300,7 +338,7 @@ def test_zero_turn_budget_uses_default_limit(model):
     turn_params.set_max_generated_tokens(0)
     assert request.begin_turn(prompt, turn_params) == 0
     assert engine.has_pending_requests()
-    assert engine.run().request is request
+    assert _next_event(engine).request is request
     request.close()
 
 
@@ -331,7 +369,7 @@ def test_continuation_while_peer_remains_active(model):
     reference = _create_request(reference_engine, model, _PROMPT_A, short_max_new, reference_sink, reference_sinks)
     reference_finished = False
     while not reference_finished:
-        event = reference_engine.run()
+        event = _next_event(reference_engine)
         assert event.request is reference
         reference_finished = _drain(event, reference_sinks)
     reference.begin_turn(np.asarray(follow_up, dtype=np.int32))
@@ -345,14 +383,14 @@ def test_continuation_while_peer_remains_active(model):
 
     short_finished = False
     while not short_finished:
-        event = engine.run()
+        event = _next_event(engine)
         finished = _drain(event, sinks)
         short_finished = finished and event.request is short
         if finished and event.request is not short:
             event.request.close()
 
     for _ in range(3):
-        event = engine.run()
+        event = _next_event(engine)
         assert event.flags != og.EngineEventFlags.NONE
         _drain(event, sinks)
 
@@ -368,7 +406,7 @@ def test_continuation_waits_for_ready_notification(model):
     first = _create_request(engine, model, [5, 8, 57], 40, _Sink(), sinks)
     second = _create_request(engine, model, [6, 8, 56], 40, _Sink(), sinks)
 
-    event = engine.run()
+    event = _next_event(engine)
     assert event.request is first
     assert _drain(event, sinks)
 
@@ -376,7 +414,7 @@ def test_continuation_waits_for_ready_notification(model):
     with pytest.raises(RuntimeError, match="event is pending"):
         second.begin_turn(continuation)
 
-    event = engine.run()
+    event = _next_event(engine)
     assert event.request is second
     assert _drain(event, sinks)
     second.begin_turn(continuation)
@@ -401,12 +439,12 @@ def test_request_lifecycle_operations(model):
     sinks = {}
     request = _create_request(engine, model, _PROMPT_A, 61, sink, sinks)
 
-    event = engine.run()
+    event = _next_event(engine)
     assert event.request is request
     finished = _drain(event, sinks)
 
     while not finished:
-        event = engine.run()
+        event = _next_event(engine)
         finished = _drain(event, sinks)
 
     request.begin_turn(np.asarray([12], dtype=np.int32))
@@ -456,13 +494,13 @@ def test_close_is_valid_and_idempotent_from_every_state(model, state):
     if state != "created":
         request.begin_turn(np.asarray(_PROMPT_LONG, dtype=np.int32))
     if state == "active":
-        event = engine.run()
+        event = _next_event(engine)
         assert event.request is request
         _drain(event, sinks)
     elif state == "turn-complete":
         finished = False
         while not finished:
-            event = engine.run()
+            event = _next_event(engine)
             assert event.request is request
             finished = _drain(event, sinks)
 
@@ -487,7 +525,7 @@ def test_events_deliver_tokens_across_turns(model):
 
         finished = False
         while not finished:
-            event = engine.run()
+            event = _next_event(engine)
             assert event.request is request
             if event.token is not None:
                 tokens.append(event.token)
@@ -496,7 +534,7 @@ def test_events_deliver_tokens_across_turns(model):
         request.begin_turn(follow_up)
         finished = False
         while not finished:
-            event = engine.run()
+            event = _next_event(engine)
             assert event.request is request
             if event.token is not None:
                 tokens.append(event.token)
@@ -518,7 +556,7 @@ def test_last_handle_release_reclaims_retained_capacity(model):
 
     completed = set()
     while len(completed) != len(requests):
-        event = engine.run()
+        event = _next_event(engine)
         if _drain(event, sinks_by_request):
             completed.add(event.request)
 

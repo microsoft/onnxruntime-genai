@@ -991,12 +991,25 @@ struct OgaEngine : OgaAbstract {
     return std::unique_ptr<OgaRequest>(request);
   }
 
-  OgaEngineEvent Run() {
-    OgaEngineEvent event{};
-    event.struct_size = sizeof(event);
-    OgaCheckResult(OgaEngineRun(this, &event));
-    return event;
+#if OGA_USE_SPAN
+  /**
+   * Runs one drain-or-execute Engine operation into exact Version 1 event storage.
+   *
+   * This wrapper initializes only the required Version 1 slot headers. Use OgaEngineRun directly
+   * for caller-defined future-sized records or padded strides.
+   */
+  std::span<const OgaEngineEvent> Run(std::span<OgaEngineEvent> storage) {
+    for (auto& event : storage) {
+      event.struct_size = sizeof(OgaEngineEvent);
+      event.reserved = 0;
+    }
+    size_t event_count{};
+    OgaCheckResult(OgaEngineRun(
+        this, storage.data(), storage.size(), sizeof(OgaEngineEvent),
+        &event_count));
+    return storage.first(event_count);
   }
+#endif
 
   static void operator delete(void* p) { OgaDestroyEngine(reinterpret_cast<OgaEngine*>(p)); }
 };

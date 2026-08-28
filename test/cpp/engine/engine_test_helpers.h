@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <array>
 #include <memory>
 #include <span>
 #include <vector>
@@ -99,6 +100,13 @@ inline std::shared_ptr<Request> CreateRequestWithPrompt(
 // The model's end-of-stream token, used to script a request to completion.
 inline int32_t EosToken(const Model& model) {
   return model.config_->model.eos_token_id.empty() ? 0 : model.config_->model.eos_token_id.front();
+}
+
+// Test-only capacity-one adapter over the canonical bulk Engine operation.
+inline EngineEvent RunOne(Engine& engine) {
+  std::array<EngineEvent, 1> storage;
+  const size_t event_count = engine.Run(storage);
+  return event_count == 0 ? EngineEvent{} : std::move(storage.front());
 }
 
 }  // namespace test

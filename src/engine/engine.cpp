@@ -466,24 +466,35 @@ void Engine::ValidateRequestCanContinue(
       restore_error);
 }
 
-EngineEvent Engine::Run() {
+size_t Engine::Run(std::span<EngineEvent> events) {
   ValidateOwnerThread();
+  if (events.empty()) {
+    if (health_ == EngineHealth::Unhealthy) {
+      std::rethrow_exception(fatal_error_);
+    }
+    return 0;
+  }
   ReclaimAbandonedRequests();
   if (pending_event_index_ < pending_events_.size()) {
-    return DrainPendingEvent();
+    return DrainPendingEvents(events);
   }
   if (health_ == EngineHealth::Unhealthy) {
     std::rethrow_exception(fatal_error_);
   }
   try {
-    return cache_manager_->SupportsDynamicBatching() ? RunDynamic() : RunStatic();
+    if (cache_manager_->SupportsDynamicBatching()) {
+      RunDynamic();
+    } else {
+      RunStatic();
+    }
   } catch (const EngineStepError& error) {
-    return EventFromStepError(error);
+    RetainEvent(EventFromStepError(error));
   }
+  return DrainPendingEvents(events);
 }
 
-EngineEvent Engine::RunStatic() {
-  while (scheduler_->HasPendingRequests()) {
+void Engine::RunStatic() {
+  if (scheduler_->HasPendingRequests()) {
     auto scheduled_requests = scheduler_->Schedule();
 
     try {
@@ -506,17 +517,13 @@ EngineEvent Engine::RunStatic() {
             EventFromStep(scheduled_requests[i], step_results_[i]));
       }
     }
-    if (!staged_events_.empty()) {
-      pending_events_.swap(staged_events_);
-      pending_event_index_ = 0;
-      return DrainPendingEvent();
-    }
+    pending_events_.swap(staged_events_);
+    pending_event_index_ = 0;
   }
-  return {};
 }
 
-EngineEvent Engine::RunDynamic() {
-  while (scheduler_->HasPendingRequests()) {
+void Engine::RunDynamic() {
+  if (scheduler_->HasPendingRequests()) {
     // A dynamic step is a transaction with six phases:
     // plan -> reserve cache -> checkpoint request state -> execute -> stage sampled tokens -> commit.
     // Nothing becomes externally visible until the final commit succeeds.
@@ -536,17 +543,19 @@ EngineEvent Engine::RunDynamic() {
       ++transaction_metrics_.capacity_deferrals;
     }
     if (planning_result.unserviceable_request_id) {
-      return FailUnserviceableRequest(
-          planning_result.unserviceable_request_id);
+      RetainEvent(FailUnserviceableRequest(
+          planning_result.unserviceable_request_id));
+      return;
     }
     if (!planning_result.executable) {
       const auto outcome = planning_result.outcome;
       if (outcome.kind == StepOutcomeKind::NoWork &&
           !scheduler_->HasPendingRequests()) {
-        return {};
+        return;
       }
       if (outcome.kind == StepOutcomeKind::UnserviceableRequest) {
-        return FailUnserviceableRequest(outcome.request_id);
+        RetainEvent(FailUnserviceableRequest(outcome.request_id));
+        return;
       }
       if (outcome.kind == StepOutcomeKind::CapacityDeferred) {
         throw EngineStepError{
@@ -753,20 +762,28 @@ EngineEvent Engine::RunDynamic() {
     pending_events_.swap(staged_events_);
     pending_event_index_ = 0;
     ++transaction_metrics_.committed_steps;
-    if (!pending_events_.empty()) {
-      return DrainPendingEvent();
-    }
   }
-  return {};
 }
 
-EngineEvent Engine::DrainPendingEvent() {
+size_t Engine::DrainPendingEvents(std::span<EngineEvent> events) {
+  const size_t event_count = std::min(
+      events.size(), pending_events_.size() - pending_event_index_);
+  std::copy_n(
+      pending_events_.begin() + static_cast<ptrdiff_t>(pending_event_index_),
+      event_count, events.begin());
+  pending_event_index_ += event_count;
   if (pending_event_index_ == pending_events_.size()) {
     pending_events_.clear();
     pending_event_index_ = 0;
-    return {};
   }
-  return pending_events_[pending_event_index_++];
+  return event_count;
+}
+
+void Engine::RetainEvent(EngineEvent event) {
+  staged_events_.clear();
+  staged_events_.push_back(std::move(event));
+  pending_events_.swap(staged_events_);
+  pending_event_index_ = 0;
 }
 
 EngineEvent Engine::EventFromStep(
