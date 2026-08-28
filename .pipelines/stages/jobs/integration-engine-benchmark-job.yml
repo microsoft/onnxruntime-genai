@@ -88,29 +88,6 @@ jobs:
         vstsPackageVersion: '1.0.0'
         downloadDirectory: '$(Build.Repository.LocalPath)/build/engine-benchmark-home/models/qwen2.5-7b-instruct'
 
-  # Keep the paged KV-cache below the CUDA arena's large-allocation growth
-  # boundary on 96 GB H100 GPUs. The downloaded Universal Packages remain immutable.
-  - bash: |
-      set -euo pipefail
-      python3 - <<'PY'
-      import json
-      from pathlib import Path
-
-      model_root = Path("$(Build.Repository.LocalPath)/build/engine-benchmark-home/models")
-      config_paths = sorted(model_root.glob("*/genai_config.json"))
-      if not config_paths:
-          raise RuntimeError(f"No benchmark model configs found under {model_root}")
-
-      for config_path in config_paths:
-          config = json.loads(config_path.read_text(encoding="utf-8"))
-          dynamic_batching = config["engine"]["dynamic_batching"]
-          previous = dynamic_batching.get("gpu_utilization_factor")
-          dynamic_batching["gpu_utilization_factor"] = 0.5
-          config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
-          print(f"{config_path}: gpu_utilization_factor {previous} -> 0.5")
-      PY
-    displayName: 'Limit benchmark KV-cache allocation'
-
   - bash: |
       set -e -x
       test -f '$(Build.Repository.LocalPath)/build/engine-benchmark-home/models/qwen2.5-0.5b-instruct/genai_config.json'
