@@ -33,9 +33,6 @@ class FakeComponent:
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         self.config = config
         self.extra_options = extra_options
-        self.bos_token_id = 1
-        self.eos_token_id = 2
-        self.pad_token_id = 0
         self.vocab_size = 32
         self.hf_token = True
         self.hf_remote = False
@@ -81,6 +78,21 @@ def test_dense_composite_with_mtp_uses_dense_components(monkeypatch):
     assert isinstance(model.mtp, FakeComponent)
     assert model.decoder.extra_options["include_hidden_states"] is True
     assert model.mtp.extra_options["filename"] == "mtp.onnx"
+
+
+def test_dense_config_only_composite_does_not_require_decoder_token_ids(monkeypatch):
+    monkeypatch.setitem(Qwen35Model.__init__.__globals__, "Qwen35TextModel", FakeComponent)
+
+    model = Qwen35Model(
+        SimpleNamespace(),
+        ir.DataType.FLOAT16,
+        ir.DataType.FLOAT16,
+        "cpu",
+        None,
+        {"config_only": True},
+    )
+
+    assert model.decoder.extra_options["config_only"] is True
 
 
 def test_declared_mtp_layers_include_hidden_states():
@@ -264,6 +276,56 @@ def test_compressed_tensors_mtp_loader_consumes_parsed_modules():
 
     assert mtp.embedding is parsed.embedding
     assert mtp.layers == [layer]
+
+
+def test_safetensors_mtp_loader_uses_keys_api(monkeypatch, tmp_path):
+    import safetensors.torch as safetensors_torch
+
+    tensors = {
+        "model.embed_tokens.weight": torch.ones((4, 2)),
+        "lm_head.weight": torch.ones((4, 2)),
+        "mtp.fc.weight": torch.ones((2, 4)),
+    }
+
+    class KeysOnlySafeOpen:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exception_type, exception, traceback):
+            return False
+
+        def keys(self):
+            return tensors.keys()
+
+        def get_tensor(self, key):
+            return tensors[key]
+
+    def open_safetensors(shard, framework):
+        assert shard == str(tmp_path / "model.safetensors")
+        assert framework == "pt"
+        return KeysOnlySafeOpen()
+
+    captured = {}
+
+    def capture_from_state(cls, mtp_state, embed_weight, lm_head_weight, layer_config, is_moe):
+        captured["mtp_state"] = mtp_state
+        captured["embed_weight"] = embed_weight
+        captured["lm_head_weight"] = lm_head_weight
+        captured["layer_config"] = layer_config
+        captured["is_moe"] = is_moe
+        return SimpleNamespace()
+
+    (tmp_path / "model.safetensors").touch()
+    monkeypatch.setattr(safetensors_torch, "safe_open", open_safetensors)
+    monkeypatch.setattr(QwenMTPModel, "from_state", classmethod(capture_from_state))
+
+    QwenMTPModel.from_safetensors(tmp_path, layer_config="config", is_moe=False)
+
+    assert captured["mtp_state"]["mtp.fc.weight"] is tensors["mtp.fc.weight"]
+    assert captured["embed_weight"] is tensors["model.embed_tokens.weight"]
+    assert captured["lm_head_weight"] is tensors["lm_head.weight"]
+    assert captured["layer_config"] == "config"
+    assert captured["is_moe"] is False
 
 
 def test_dense_mtp_state_uses_dense_decoder_layer(monkeypatch):

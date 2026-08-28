@@ -847,9 +847,6 @@ class Qwen35MoEModel(MTPModel):
         if self.mtp_attrs["build"]:
             self.make_mtp_model(config, io_dtype, onnx_dtype, ep, cache_dir, decoder_options)
 
-        self.bos_token_id = self.decoder.bos_token_id
-        self.eos_token_id = self.decoder.eos_token_id
-        self.pad_token_id = self.decoder.pad_token_id
         self.vocab_size = self.decoder.vocab_size
         self.hf_token = self.decoder.hf_token
         self.hf_remote = self.decoder.hf_remote
