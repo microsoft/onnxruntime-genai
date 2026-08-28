@@ -1814,7 +1814,8 @@ struct Model_Element : JSON::Element {
     if (name == "mtp") {
       return mtp_;
     }
-    if (name == "dflash2") {
+    if (name == "dflash2" || name == "dspark") {
+      // DSpark replaces DFlash's candidate selector with a Markov head but emits the same lattice.
       return dflash2_;
     }
     throw JSON::unknown_value_error{};

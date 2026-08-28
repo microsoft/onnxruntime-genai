@@ -132,8 +132,11 @@ std::unique_ptr<Config> CreateDflash2Config(const Config& config) {
       dflash2.block_size <= 1 || dflash2.num_draft_tokens <= 0 || dflash2.selector_top_k <= 0) {
     throw std::runtime_error("model.dflash2 geometry must be positive and describe a block of >1 token.");
   }
-  if (dflash2.num_draft_tokens != dflash2.block_size - 1) {
-    throw std::runtime_error("model.dflash2.num_draft_tokens must be block_size - 1.");
+  if (dflash2.num_draft_tokens < dflash2.block_size - 1 ||
+      dflash2.num_draft_tokens > dflash2.block_size) {
+    // DFlash 2's anchor row predicts nothing; every DSpark row predicts a token.
+    throw std::runtime_error(
+        "model.dflash2.num_draft_tokens must be block_size or block_size - 1.");
   }
   // Every non-anchor query row feeds this id straight into the drafter's embedding lookup, so an
   // out-of-range value is either a crash or silently meaningless drafts.
@@ -271,16 +274,29 @@ std::unique_ptr<State> Dflash2Model::CreateState(DeviceSpan<int32_t>, const Gene
   throw std::logic_error("The DFlash 2 drafter is driven by the Engine and has no State.");
 }
 
-size_t Dflash2Drafter::PoolBlocks(const Config& config, size_t paged_block_size,
-                                  size_t max_batch_size) {
+size_t Dflash2Drafter::BytesPerBlock(const Config& config, size_t paged_block_size) {
   const auto& dflash2 = config.model.dflash2;
   if (dflash2.filename.empty()) {
     return 0;
   }
-  if (dflash2.sliding_window <= 0) {
-    throw std::runtime_error(
-        "The Engine-hosted DFlash 2 drafter requires a sliding window; a full-attention drafter "
-        "would need a cache as large as the target's.");
+  // K and V, for every layer, for every slot in a block. The cache element width follows the
+  // drafter body, which is bfloat16.
+  size_t bytes = CheckedMultiply(size_t{2}, static_cast<size_t>(dflash2.num_hidden_layers),
+                                 "DFlash 2 cache bytes per block");
+  bytes = CheckedMultiply(bytes, paged_block_size, "DFlash 2 cache bytes per block");
+  bytes = CheckedMultiply(bytes, static_cast<size_t>(dflash2.num_key_value_heads),
+                          "DFlash 2 cache bytes per block");
+  bytes = CheckedMultiply(bytes, static_cast<size_t>(dflash2.head_size),
+                          "DFlash 2 cache bytes per block");
+  return CheckedMultiply(bytes, sizeof(uint16_t), "DFlash 2 cache bytes per block");
+}
+
+size_t Dflash2Drafter::PoolBlocks(const Config& config, size_t paged_block_size,
+                                  size_t max_batch_size) {
+  const auto& dflash2 = config.model.dflash2;
+  if (dflash2.filename.empty() || dflash2.sliding_window <= 0) {
+    // Full attention is sized against the target's block count through BytesPerBlock().
+    return 0;
   }
   if (paged_block_size == 0) {
     throw std::runtime_error("The DFlash 2 paged cache block size must be positive.");
