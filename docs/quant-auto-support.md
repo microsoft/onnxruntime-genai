@@ -1,10 +1,14 @@
-# quant_auto Support in quantized_model.py
+# quant_auto Support
 
 ## Context
 
 A model using `quant_method: quant_auto` could not be exported through OGA's model builder. The format uses a custom quantization scheme developed for NPU deployment that differs from all four formats OGA previously supported (AWQ, GPTQ, Olive, Quark).
 
-**File changed:** `src/python/py/models/quantized_model.py`
+**Files changed:**
+- `src/python/py/models/loaders/quant_auto.py` — new `QuantAutoModel` loader
+- `src/python/py/models/loaders/base.py` — `.zeros` → `.qzeros` name normalization
+- `src/python/py/models/loaders/quant_model.py` — dispatch for `quant_auto`
+- `src/python/py/models/builders/base.py` — tied-embedding export fixes
 
 ---
 
@@ -87,12 +91,13 @@ proj.group_size = proj.in_features // n_groups
 
 ### 5. Config Loading — bits/group_size Absent
 
-**Problem:** The base `_load_quant_config()` reads `config["bits"]` and `config["group_size"]` directly. The quant_auto config only contains `{"quant_method": "quant_auto"}` — accessing missing keys raises a `KeyError` immediately.
+**Problem:** `QuantizedModel.__init__` reads `config["bits"]` and `config["group_size"]` directly. The quant_auto config only contains `{"quant_method": "quant_auto"}` — accessing missing keys raises a `KeyError` immediately.
 
-**Fix:** `QuantAutoModel._load_quant_config()` uses `.get()` with safe defaults:
+**Fix:** `QuantAutoModel.__init__` extracts the values with `.get()` before calling `super().__init__()`, passing them as keyword arguments so the base class never touches the missing keys:
 ```python
-self.global_bits       = quant_attrs["config"].get("bits", 4)
-self.global_group_size = quant_attrs["config"].get("group_size", -1)  # -1 = infer per-module
+global_bits = quant_attrs["config"].get("bits", 4)
+global_group_size = quant_attrs["config"].get("group_size", -1)
+super().__init__(..., global_bits=global_bits, global_group_size=global_group_size)
 ```
 
 ---
@@ -103,7 +108,7 @@ self.global_group_size = quant_attrs["config"].get("group_size", -1)  # -1 = inf
 
 Additionally, `lm_head` (tied to the embedding via `tie_word_embeddings=True`) was being processed as a separate `QuantizedTensorModule` — packing the raw int4 embedding values through `pack_ort_format` and producing a `MatMulNBits` node with completely wrong scales.
 
-**Fix:** `QuantAutoModel._dequantize_embedding()` runs after `super().__init__()` and loads the embedding's scales and zeros from the safetensors files. The **embedding Gather** table is dequantized to float16 so token lookups return proper activations:
+**Fix:** `QuantAutoModel.dequantize_embedding()` runs after `super().__init__()` and loads the embedding's scales and zeros from the safetensors files. The group size is inferred from tensor shapes (`ng = sc.numel() // vocab; gs = hidden // ng`). The **embedding Gather** table is dequantized to float16 so token lookups return proper activations:
 ```python
 w_dq = ((w.float().reshape(-1, gs) - zp.float()) * sc.float()).reshape(w.shape).half()
 self.embedding.weight = w_dq

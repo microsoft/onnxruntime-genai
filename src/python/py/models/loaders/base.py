@@ -281,7 +281,7 @@ class QuantizedModel:
 
                 # Map weights to modules
                 for raw_name, tensor in weights.items():
-                    name = QuantizedModel.normalize_weight_name(self, raw_name)
+                    name = self.normalize_weight_name(raw_name)
                     if name is None:
                         continue
 

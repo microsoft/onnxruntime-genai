@@ -1053,10 +1053,10 @@ class Model:
         # the MatMulNBits naming scheme rather than the to_nbits naming scheme. Return those
         # names directly so make_embedding's GatherBlockQuantized references the right initializers.
         # self.weights is the loaded model object (set in make_model before make_embedding runs).
-        _wlm = getattr(self.weights, "lm_head", None)
-        if _wlm is not None and getattr(_wlm, "qweight", None) is not None:
-            bits = _wlm.bits
-            has_zeros = getattr(_wlm, "qzeros", None) is not None
+        wlm = getattr(getattr(self, "weights", None), "lm_head", None)
+        if wlm is not None and getattr(wlm, "qweight", None) is not None:
+            bits = wlm.bits
+            has_zeros = getattr(wlm, "qzeros", None) is not None
             return (
                 bits,
                 "lm_head.MatMulNBits.qweight",
@@ -2503,12 +2503,12 @@ class Model:
             input_names = [weight_reshape_output, self.input_names["input_ids"]]
             # For pre-quantized lm_head, pack_ort_format flattens scales/zeros to 1D but
             # GatherBlockQuantized requires the same rank as data (2D). Compute once here.
-            _wlm = getattr(self.weights, "lm_head", None)
-            _wlm_prequantized = _wlm is not None and getattr(_wlm, "qweight", None) is not None
+            wlm = getattr(getattr(self, "weights", None), "lm_head", None)
+            wlm_prequantized = wlm is not None and getattr(wlm, "qweight", None) is not None
             if tied_weight_scale_name:
                 # Reshape scales from (vocab*ng,) to (vocab, ng).
-                if _wlm_prequantized:
-                    ng = _wlm.scales.numel() // _wlm.out_features
+                if wlm_prequantized:
+                    ng = wlm.scales.numel() // wlm.out_features
                     scale_reshape_name = f"{basename}/scales/Reshape"
                     self.make_reshape(scale_reshape_name, [tied_weight_scale_name, f"/model/constants/INT64/[{self.vocab_size}, {ng}]"],
                                       dtype=self.io_dtype, shape=[self.vocab_size, ng])
@@ -2516,8 +2516,8 @@ class Model:
                 input_names.append(tied_weight_scale_name)
             if tied_weight_zp_name:
                 # Same rank requirement for zero points — reshape from 1D to 2D.
-                if _wlm_prequantized:
-                    ng_packed = _wlm.qzeros.numel() // _wlm.out_features
+                if wlm_prequantized:
+                    ng_packed = wlm.qzeros.numel() // wlm.out_features
                     zp_reshape_name = f"{basename}/zeros/Reshape"
                     self.make_reshape(zp_reshape_name, [tied_weight_zp_name, f"/model/constants/INT64/[{self.vocab_size}, {ng_packed}]"],
                                       dtype=ir.DataType.UINT8, shape=[self.vocab_size, ng_packed])

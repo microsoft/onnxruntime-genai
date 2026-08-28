@@ -5,6 +5,7 @@
 # --------------------------------------------------------------------------
 
 import os
+import re
 
 import torch
 from safetensors.torch import load_file
@@ -17,15 +18,21 @@ class QuantAutoModel(QuantizedModel):
     quant_auto format (quant_method: quant_auto):
     - weight: (out_features, in_features) float16 containing integer values (no bitwise packing)
     - scales: (out_features * num_groups, 1) float16
-    - zeros:  (out_features * num_groups, 1) float16 (renamed to qzeros by normalize_vlm_weight_name)
+    - zeros:  (out_features * num_groups, 1) float16 (renamed to qzeros by normalize_weight_name)
     - bits and group_size are not in config; inferred from tensor shapes
     """
 
     def __init__(self, quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers):
-        super().__init__(quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers)
+        # quant_auto configs omit bits/group_size; supply defaults so the base class does not KeyError
+        global_bits = quant_attrs["config"].get("bits", 4)
+        global_group_size = quant_attrs["config"].get("group_size", -1)
+        super().__init__(
+            quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers,
+            global_bits=global_bits, global_group_size=global_group_size,
+        )
 
         # Dequantize embedding: base class stored raw int4 F16 values; load scales/zeros and dequant
-        self._dequantize_embedding(input_path)
+        self.dequantize_embedding(input_path)
 
         for i, layer in enumerate(self.layers):
             if i >= self.num_layers:
@@ -45,7 +52,14 @@ class QuantAutoModel(QuantizedModel):
             self.repack(self.lm_head)
             self.lm_head.g_idx = None
 
-    def _dequantize_embedding(self, input_path):
+    def normalize_weight_name(self, name):
+        """Map .zeros suffix to .qzeros so existing loading patterns match."""
+        name = super().normalize_weight_name(name)
+        if name is not None:
+            name = re.sub(r"\.zeros$", ".qzeros", name)
+        return name
+
+    def dequantize_embedding(self, input_path):
         """Set up the tied embedding and lm_head from the QAT model's int4 tensors.
 
         The embedding (and lm_head) is quantized in the QAT model: `weight` holds int4
@@ -68,7 +82,10 @@ class QuantAutoModel(QuantizedModel):
             w  = weights["model.embed_tokens.weight"]   # (vocab, hidden) int4 values as F16
             sc = weights["model.embed_tokens.scales"]   # (vocab*ng, 1)
             zp = weights["model.embed_tokens.zeros"]    # (vocab*ng, 1)
-            gs = 32
+
+            # Infer group size from tensor shapes rather than hard-coding
+            ng = sc.numel() // w.shape[0]
+            gs = w.shape[1] // ng
 
             # Embedding Gather uses dequantized fp16 weights
             w_dq = ((w.float().reshape(-1, gs) - zp.float()) * sc.float()).reshape(w.shape).half()
@@ -88,15 +105,10 @@ class QuantAutoModel(QuantizedModel):
             self.lm_head = lm
             break
 
-    def _load_quant_config(self, quant_attrs):
-        # quant_auto config has no bits/group_size fields; use defaults, infer per-module in set_properties
-        self.global_bits = quant_attrs["config"].get("bits", 4)
-        self.global_group_size = quant_attrs["config"].get("group_size", -1)
-
     def set_properties(self):
         """Derive in_features, out_features, bits, and group_size from tensor shapes.
         Weights are (out_features, in_features) F16 with 1 value per element — no packing factor."""
-        def _configure(proj):
+        def configure(proj):
             if proj.qweight is None:
                 return
             proj.out_features = proj.qweight.shape[0]
@@ -109,7 +121,7 @@ class QuantAutoModel(QuantizedModel):
             self.set_g_idx(proj)
 
         if isinstance(self.lm_head, QuantizedTensorModule):
-            _configure(self.lm_head)
+            configure(self.lm_head)
 
         for module in self.layers:
             for proj in [
@@ -121,7 +133,7 @@ class QuantAutoModel(QuantizedModel):
                 module.mlp.up_proj,
                 module.mlp.down_proj,
             ]:
-                _configure(proj)
+                configure(proj)
 
     def repack(self, module):
         """Weights are already integer-valued F16; cast to int32 and repack to ORT format directly."""
