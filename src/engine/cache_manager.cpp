@@ -95,6 +95,10 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
     return fixed_reservation_ ? fixed_reservation_->PlannedStagingBytes() : 0;
   }
 
+  size_t FixedStateNewSlotCount() const override {
+    return fixed_reservation_ ? fixed_reservation_->NewSlotCount() : 0;
+  }
+
   void ValidateCommit() const override {
     if (committed_) {
       throw std::logic_error(
@@ -339,6 +343,10 @@ bool PagedCacheManager::CanAllocate(const std::vector<std::shared_ptr<Request>>&
 }
 
 void PagedCacheManager::Allocate(const std::vector<std::shared_ptr<Request>>& requests) {
+  if (fixed_state_pool_) {
+    throw std::logic_error(
+        "Composite models require transactional cache allocation.");
+  }
   for (auto& request : requests) {
     cache_allocated_requests_.push_back(request);
     key_value_cache_->Add(request);
@@ -346,6 +354,10 @@ void PagedCacheManager::Allocate(const std::vector<std::shared_ptr<Request>>& re
 }
 
 void PagedCacheManager::Step() {
+  if (fixed_state_pool_) {
+    throw std::logic_error(
+        "Composite models require transactional cache steps.");
+  }
   for (auto& request : cache_allocated_requests_) {
     if (IsTurnComplete(request->status_)) {
       continue;

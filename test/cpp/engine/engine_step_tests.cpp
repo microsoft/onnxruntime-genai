@@ -1360,6 +1360,25 @@ TEST_F(EngineStepTest, CompositeReservationRowOrderMismatchIsFatal) {
   }
 }
 
+TEST_F(EngineStepTest, CompositeReservationNewSlotCountMismatchIsFatal) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/4, EosToken(*model_));
+  auto request = MintRequest(*model_, Prompt(10));
+  engine.engine->AddRequest(request);
+  engine.cache->ScriptFixedStateMismatch(
+      FixedStateResourcePlan{true, 1, 1, 0},
+      {FixedStateSlotHandle{nullptr, request.get(), 0, 0}},
+      /*staging_bytes=*/0,
+      /*reservation_new_slot_count=*/0);
+
+  try {
+    static_cast<void>(engine.engine->Step());
+    FAIL() << "Expected a fatal fixed-state new-slot-count mismatch.";
+  } catch (const EngineStepError& error) {
+    EXPECT_EQ(error.Outcome().kind,
+              StepOutcomeKind::ExecutionContractFailure);
+  }
+}
+
 TEST_F(EngineStepTest, CompositeCapacityBackpressureDefersNewAdmission) {
   model_ = LoadSyntheticCompositeModel();
   model_->config_->engine.dynamic_batching->max_batch_size = 2;

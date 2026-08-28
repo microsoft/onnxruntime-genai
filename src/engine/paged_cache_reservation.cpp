@@ -128,6 +128,11 @@ void RemoveValidatedPagedCacheBlockTable(
     return;
   }
 
+  if (!block_pool.CanFreeValidated(table->Blocks()) ||
+      (window_block_pool &&
+       !window_block_pool->CanFreeValidated(table->WindowBlocks()))) {
+    return;
+  }
   block_pool.FreeValidated(table->Blocks());
   if (window_block_pool) {
     window_block_pool->FreeValidated(table->WindowBlocks());

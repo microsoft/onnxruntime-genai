@@ -390,7 +390,7 @@ The paged sub-reservation:
 
 Reservation is all-or-nothing. If all planned blocks cannot be reserved, the engine treats that as an execution contract failure because planning had already declared the step executable.
 
-The fixed sub-reservation, when present, admits the same rows in the same order. A request that already owns a committed fixed slot keeps it; every other request is admitted provisionally into a free slot. The reservation gathers each row's committed (or zeroed, for a new admission) state into a contiguous model input and allocates a separate staged output tensor. Its `target_tokens` mirror the paged `target_cache_slots`, so both states commit at one token boundary. `StepPlan::fixed_state` records the fixed row count, new-slot count, and staging bytes; `Engine::StepDynamic()` then proves the reservation matches that plan exactly -- required flag, row count, staging bytes, and per-row request identity -- and fails fatally on any mismatch. A composite reservation wraps exactly one paged reservation and the Engine holds at most one at a time, so the paged split-commit contract (its constructor reserves its own `committed_tables_` headroom, and the pool permits a single live reservation) holds without any cross-reservation aggregate check.
+The fixed sub-reservation, when present, admits the same rows in the same order. A request that already owns a committed fixed slot keeps it; every other request is admitted provisionally into a free slot. The reservation gathers each row's committed (or zeroed, for a new admission) state into a contiguous model input and allocates a separate staged output tensor. Its `target_tokens` mirror the paged `target_cache_slots`, so both states commit at one token boundary. `StepPlan::fixed_state` records the fixed row count, new-slot count, and staging bytes; `Engine::StepDynamic()` then proves the reservation matches that plan exactly -- required flag, row count, new-slot count, staging bytes, and per-row request identity -- and fails fatally on any mismatch. A composite reservation wraps exactly one paged reservation and the Engine holds at most one at a time, so the paged split-commit contract (its constructor reserves its own `committed_tables_` headroom, and the pool permits a single live reservation) holds without any cross-reservation aggregate check.
 
 While the reservation is active, decoder input preparation can view a combined block table containing:
 
@@ -559,7 +559,7 @@ The model may have written data into reserved cache memory and into fixed output
 The engine becomes unhealthy when it cannot prove that all components still agree on state. Examples include:
 
 - Reservation fails after an executable plan was produced.
-- The reservation does not match the planned fixed-state resources (required flag, row count, staging bytes, or per-row request identity).
+- The reservation does not match the planned fixed-state resources (required flag, row count, new-slot count, staging bytes, or per-row request identity).
 - Preparing the composite commit fails (for example a fixed staging copy fails while writing an inactive bank).
 - An unknown model execution failure occurs.
 - Rollback itself fails.

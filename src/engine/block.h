@@ -82,7 +82,10 @@ struct BlockPool {
 
   void Free(const std::vector<std::shared_ptr<Block>>& blocks);
   void ValidateFree(std::span<const std::shared_ptr<Block>> blocks) const;
+  // Allocation-free publication for an unchanged span accepted by ValidateFree(). Defensive
+  // guards make direct misuse a no-op rather than an out-of-bounds access.
   void FreeValidated(std::span<const std::shared_ptr<Block>> blocks) noexcept;
+  bool CanFreeValidated(std::span<const std::shared_ptr<Block>> blocks) const noexcept;
 
   size_t BlocksNeeded(size_t num_slots);
 
@@ -96,7 +99,10 @@ struct BlockPool {
 
   const size_t block_size_;
   const size_t capacity_;
-  std::vector<std::shared_ptr<Block>> blocks_{capacity_};
+  std::vector<std::shared_ptr<Block>> blocks_;
+  // Preallocated scratch for allocation-free duplicate detection in validated publication.
+  mutable std::vector<uint64_t> validation_marks_;
+  mutable uint64_t validation_epoch_{};
   uint64_t mutation_generation_{};
 };
 

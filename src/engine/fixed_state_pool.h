@@ -118,6 +118,7 @@ class FixedStateReservation {
   std::span<const FixedStateBinding> Bindings() const;
   std::span<const uint64_t> TargetTokens() const;
   size_t PlannedStagingBytes() const;
+  size_t NewSlotCount() const;
 
   // Commit is split into three phases so a composite Engine transaction can validate and stage all
   // of its resources, synchronize once, and then publish them at a single infallible boundary:
@@ -194,6 +195,8 @@ class FixedStatePool {
   FixedStateReservation Reserve(std::span<const FixedStateReservationRequest> requests);
   void Release(const FixedStateSlotHandle& handle);
   void ValidateRelease(const FixedStateSlotHandle& handle) const;
+  // Host-only publication for an unchanged handle accepted by ValidateRelease(). Defensive
+  // guards make direct misuse a no-op.
   void ReleaseValidated(const FixedStateSlotHandle& handle) noexcept;
 
   uint64_t StateGeneration(const FixedStateSlotHandle& handle) const;

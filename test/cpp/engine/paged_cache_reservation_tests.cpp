@@ -369,6 +369,11 @@ TEST(PagedCacheReservationTest, RemovalPreflightValidatesBothPoolsBeforeMutation
   EXPECT_EQ(pool.AvailableBlocks(), 0u);
   EXPECT_EQ(window_pool.AvailableBlocks(), 1u);
   EXPECT_EQ(tables.size(), 1u);
+
+  RemoveValidatedPagedCacheBlockTable(
+      pool, &window_pool, tables, kRequestA);
+  EXPECT_TRUE(pool.Owns(block));
+  EXPECT_EQ(tables.size(), 1u);
 }
 
 TEST(PagedCacheReservationTest, ValidatedRemovalPublishesBothPoolsNoexcept) {

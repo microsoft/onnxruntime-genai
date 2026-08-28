@@ -51,7 +51,10 @@ std::vector<size_t> Block::SlotIds() const {
 }
 
 BlockPool::BlockPool(size_t block_size, size_t num_blocks)
-    : block_size_(block_size), capacity_(num_blocks) {}
+    : block_size_(block_size),
+      capacity_(num_blocks),
+      blocks_(num_blocks),
+      validation_marks_(num_blocks) {}
 
 std::vector<std::shared_ptr<Block>> BlockPool::AllocateBlocks(size_t num_slots, bool mark_slots_used) {
   const size_t blocks_needed = BlocksNeeded(num_slots);
@@ -132,12 +135,33 @@ void BlockPool::ValidateFree(
 
 void BlockPool::FreeValidated(
     std::span<const std::shared_ptr<Block>> blocks) noexcept {
+  if (!CanFreeValidated(blocks)) {
+    return;
+  }
   for (const auto& block : blocks) {
     blocks_[block->Id()].reset();
   }
   if (!blocks.empty()) {
     ++mutation_generation_;
   }
+}
+
+bool BlockPool::CanFreeValidated(
+    std::span<const std::shared_ptr<Block>> blocks) const noexcept {
+  ++validation_epoch_;
+  if (validation_epoch_ == 0) {
+    std::fill(validation_marks_.begin(), validation_marks_.end(), 0);
+    ++validation_epoch_;
+  }
+  for (const auto& block : blocks) {
+    if (!block || block->Id() >= blocks_.size() ||
+        blocks_[block->Id()] != block ||
+        validation_marks_[block->Id()] == validation_epoch_) {
+      return false;
+    }
+    validation_marks_[block->Id()] = validation_epoch_;
+  }
+  return true;
 }
 
 void BlockPool::RollbackReservedBlocks(

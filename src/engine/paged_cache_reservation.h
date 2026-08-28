@@ -82,6 +82,8 @@ void ValidateRemovePagedCacheBlockTable(
     const BlockPool* window_block_pool,
     const std::vector<PagedCacheBlockTable>& committed_tables,
     const void* request_id);
+// Allocation-free publication for state accepted by ValidateRemovePagedCacheBlockTable().
+// Defensive guards make direct misuse a no-op.
 void RemoveValidatedPagedCacheBlockTable(
     BlockPool& block_pool,
     BlockPool* window_block_pool,

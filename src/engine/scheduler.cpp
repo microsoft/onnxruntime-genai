@@ -227,13 +227,9 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
   }
 
   const auto& dynamic_batching = *model_->config_->engine.dynamic_batching;
-  try {
-    plan.scheduled_request_limit = DecodeFirstProvisionalRequestLimit(
-        dynamic_batching.max_scheduled_tokens,
-        dynamic_batching.max_batch_size);
-  } catch (const std::invalid_argument& error) {
-    throw StepPlanningConsistencyError(error.what());
-  }
+  plan.scheduled_request_limit = DecodeFirstProvisionalRequestLimit(
+      dynamic_batching.max_scheduled_tokens,
+      dynamic_batching.max_batch_size);
 
   auto result = cache_manager_->PlanStepResources(plan);
   if (!result.executable) {

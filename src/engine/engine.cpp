@@ -282,7 +282,7 @@ std::shared_ptr<Request> Engine::StepDynamic() {
       // Reserve every paged block, fixed slot, and fixed staging tensor the complete plan needs up
       // front. The reservation can build model inputs, but it does not alter committed ownership or
       // token boundaries until Commit(). Prove the reservation matches the plan exactly -- required
-      // flag, row count, staging bytes, and per-row request identity -- so a plan/reservation
+      // flag, row count, new-slot count, staging bytes, and per-row request identity -- so a plan/reservation
       // divergence fails here (fatal) rather than silently committing mismatched state.
       reservation = cache_manager_->ReserveStep(step_plan_);
       const auto fixed_slots = reservation->FixedStateSlots();
@@ -291,6 +291,8 @@ std::shared_ptr<Request> Engine::StepDynamic() {
           (has_fixed_state &&
            step_plan_.fixed_state.row_count != step_plan_.requests.size()) ||
           fixed_slots.size() != step_plan_.fixed_state.row_count ||
+          reservation->FixedStateNewSlotCount() !=
+              step_plan_.fixed_state.new_slot_count ||
           reservation->FixedStateStagingBytes() !=
               step_plan_.fixed_state.staging_bytes) {
         throw std::logic_error(

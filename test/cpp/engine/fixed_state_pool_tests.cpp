@@ -174,6 +174,34 @@ TEST_F(FixedStatePoolTest, ValidateReleaseIsPureAndPublicationIsNoexcept) {
   EXPECT_EQ(pool->AvailableSlots(), 1u);
 }
 
+TEST_F(FixedStatePoolTest, ReleaseValidatedMisuseIsANoop) {
+  auto pool = MakePool(1);
+  auto other_pool = MakePool(1);
+  const auto handle = MakeResident(*pool, kRequestA, 1.0f);
+  auto out_of_range = handle;
+  out_of_range.slot = pool->Capacity();
+  auto wrong_pool = handle;
+  wrong_pool.pool = other_pool.get();
+  auto wrong_request = handle;
+  wrong_request.request_id = kRequestB;
+  auto stale_generation = handle;
+  ++stale_generation.generation;
+
+  pool->ReleaseValidated(out_of_range);
+  pool->ReleaseValidated(wrong_pool);
+  pool->ReleaseValidated(wrong_request);
+  pool->ReleaseValidated(stale_generation);
+
+  EXPECT_TRUE(pool->OwnsCommittedSlot(kRequestA));
+  EXPECT_EQ(pool->AvailableSlots(), 0u);
+
+  auto requests = One(kRequestA, 2);
+  auto reservation = pool->Reserve(requests);
+  pool->ReleaseValidated(handle);
+  EXPECT_TRUE(pool->OwnsCommittedSlot(kRequestA));
+  EXPECT_EQ(pool->AvailableSlots(), 0u);
+}
+
 TEST_F(FixedStatePoolTest, StagedOutputsBecomeVisibleOnlyAfterCommit) {
   auto pool = MakePool(1);
   MakeResident(*pool, kRequestA, 4.0f);

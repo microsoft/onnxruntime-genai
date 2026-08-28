@@ -188,6 +188,8 @@ struct RecordingCacheManager : CacheManager {
         // consistency guard to fire without a real fixed-state pool.
         fixed_state_slots_ = cache.scripted_fixed_slots_;
         fixed_state_staging_bytes_ = cache.scripted_fixed_staging_bytes_;
+        fixed_state_new_slot_count_ =
+            cache.scripted_fixed_new_slot_count_;
         throw_prepare_ =
             std::exchange(cache.throw_prepare_failure_, false);
       }
@@ -198,6 +200,10 @@ struct RecordingCacheManager : CacheManager {
 
       size_t FixedStateStagingBytes() const override {
         return fixed_state_staging_bytes_;
+      }
+
+      size_t FixedStateNewSlotCount() const override {
+        return fixed_state_new_slot_count_;
       }
 
       void PrepareCommit() override {
@@ -226,6 +232,7 @@ struct RecordingCacheManager : CacheManager {
       std::vector<std::shared_ptr<Request>> newly_admitted_;
       std::vector<FixedStateSlotHandle> fixed_state_slots_;
       size_t fixed_state_staging_bytes_{};
+      size_t fixed_state_new_slot_count_{};
       bool throw_prepare_{};
       bool committed_{};
       bool released_{};
@@ -254,11 +261,15 @@ struct RecordingCacheManager : CacheManager {
   }
   void ThrowPrepareFailureOnce() { throw_prepare_failure_ = true; }
   // Forces the composite plan/reservation consistency guard in Engine::StepDynamic. PlanStepResources
-  // publishes `plan`, and every reservation reports `slots`/`staging_bytes`, so a test can make the
-  // planned fixed-state resources disagree with the reservation the Engine actually receives.
+  // publishes `plan`, and every reservation reports slots, new-slot count, and staging bytes, so a
+  // test can make the planned resources disagree with the reservation the Engine actually receives.
   void ScriptFixedStateMismatch(FixedStateResourcePlan plan,
                                 std::vector<FixedStateSlotHandle> slots,
-                                size_t staging_bytes) {
+                                size_t staging_bytes,
+                                std::optional<size_t> reservation_new_slot_count =
+                                    std::nullopt) {
+    scripted_fixed_new_slot_count_ =
+        reservation_new_slot_count.value_or(plan.new_slot_count);
     scripted_fixed_plan_ = plan;
     scripted_fixed_slots_ = std::move(slots);
     scripted_fixed_staging_bytes_ = staging_bytes;
@@ -287,6 +298,7 @@ struct RecordingCacheManager : CacheManager {
   std::optional<FixedStateResourcePlan> scripted_fixed_plan_;
   std::vector<FixedStateSlotHandle> scripted_fixed_slots_;
   size_t scripted_fixed_staging_bytes_{};
+  size_t scripted_fixed_new_slot_count_{};
 };
 
 // A DecoderIO that fabricates logits instead of running the model: for each scheduled request it

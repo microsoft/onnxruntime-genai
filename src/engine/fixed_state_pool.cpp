@@ -365,6 +365,14 @@ size_t FixedStateReservation::PlannedStagingBytes() const {
   return storage_ ? storage_->staging_bytes : 0;
 }
 
+size_t FixedStateReservation::NewSlotCount() const {
+  return storage_
+             ? static_cast<size_t>(std::count(
+                   storage_->provisional.begin(),
+                   storage_->provisional.end(), true))
+             : 0;
+}
+
 void FixedStateReservation::ValidateCommit() const {
   if (!pool_ || state_ != FixedStateReservationState::Reserved) {
     throw std::logic_error(
@@ -833,7 +841,17 @@ void FixedStatePool::ValidateRelease(
 
 void FixedStatePool::ReleaseValidated(
     const FixedStateSlotHandle& handle) noexcept {
+  if (!impl_ || impl_->active_reservation_id != 0 ||
+      handle.pool != this ||
+      handle.slot >= impl_->slots.size()) {
+    return;
+  }
   auto& slot = impl_->slots[handle.slot];
+  if (slot.ownership != FixedStateSlotOwnership::Committed ||
+      slot.request_id != handle.request_id ||
+      slot.generation != handle.generation) {
+    return;
+  }
   // No zeroing on release: the slot's persistent banks are never read again until a future
   // admission either gathers the reusable zero row (a new owner) or a commit fully overwrites the
   // bank it publishes.

@@ -21,6 +21,7 @@ struct CacheStepReservation {
   virtual std::span<const FixedStateSlotHandle> FixedStateSlots() const { return {}; }
   virtual std::span<const FixedStateBinding> FixedStateBindings() const { return {}; }
   virtual size_t FixedStateStagingBytes() const { return 0; }
+  virtual size_t FixedStateNewSlotCount() const { return 0; }
   // Validate every ownership and capacity precondition of the whole reservation without publishing
   // or performing device work. PrepareCommit additionally performs all fallible device work (fixed
   // staging into inactive banks) so the subsequent Commit() crosses the boundary without retry.

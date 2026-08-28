@@ -526,6 +526,21 @@ TEST(PagedKeyValueCacheManifestTest, PublicEngineRejectsFixedStateWhileGateIsClo
       std::runtime_error);
 }
 
+TEST(PagedKeyValueCacheManifestTest, LegacyCompositeEntryPointsRejectBeforeDivergence) {
+  auto model = LoadSyntheticCompositeModel();
+  PagedCacheManager manager{model};
+  auto owner = MakeDoublesEngine(
+                   model, /*capacity=*/1, EosToken(*model))
+                   .engine;
+  const std::array<int32_t, 3> prompt{2, 3, 4};
+  auto request = MintAssignedRequest(owner, *model, prompt);
+
+  EXPECT_THROW(manager.Allocate({request}), std::logic_error);
+  EXPECT_THROW(manager.Step(), std::logic_error);
+  EXPECT_FALSE(manager.IsResident(request));
+  EXPECT_EQ(manager.ResidentRequestCount(), 0u);
+}
+
 TEST(PagedKeyValueCacheManifestTest, RejectsMalformedPagedGroup) {
   auto model = LoadSyntheticPagedModel();
   model->config_->model.decoder.state_groups->front().layer_ids.clear();

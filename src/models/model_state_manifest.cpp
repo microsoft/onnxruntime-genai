@@ -296,6 +296,7 @@ void ModelStateManifest::ValidateDynamicEngineCompatibility(const Decoder& decod
     throw std::runtime_error(
         "Dynamic batching requires exactly one paged_kv decoder state group");
   }
+  // Validate the structural paged contract first; fixed support is the final capability gate.
   if (has_fixed_group) {
     throw std::runtime_error(
         "Dynamic batching does not yet support fixed decoder state groups");
