@@ -757,6 +757,15 @@ def get_args():
                     aux_hidden_state_layers to match the drafter's `target_layer_ids`. Default is unset (disabled).
                 dflash2_num_draft_tokens = Override the number of draft tokens the DFlash 2 block
                     drafter proposes per step. Must be a positive integer. Default is taken from the draft checkpoint.
+                dspark_path = Path to a DSpark draft checkpoint. Exports an auxiliary `dspark.onnx`
+                    block drafter beside the target model and adds a `dspark` section to
+                    genai_config.json. Mutually exclusive with dflash2_path. Requires
+                    use_paged_attention=true. SpecForge taps each target layer's output, so
+                    aux_hidden_state_layers must be the drafter's `target_layer_ids` each plus one.
+                dspark_num_draft_tokens = Override the number of draft tokens the DSpark block
+                    drafter proposes per step. Must be a positive integer. Default is taken from the draft checkpoint.
+                dspark_top_k = Candidates the DSpark lattice keeps per block slot. Must be a positive integer no
+                    greater than the drafter vocabulary size. Default is 16.
                 mtp_quant_config = JSON object/file: Configure MTP I/O, dense weights, MoE, and runtime using the
                     structured QuantConfig schema independently from the main model.
                 linear_attn_op = linear_attention/gated_delta_net: Select the recurrent operator for non-paged

@@ -25,6 +25,7 @@ This folder contains the model builder for quickly creating optimized and quanti
     - [Include Auxiliary Hidden States Output](#include-auxiliary-hidden-states-output)
     - [Build with Paged Attention](#build-with-paged-attention)
     - [Build a DFlash 2 Block Drafter](#build-a-dflash-2-block-drafter)
+    - [Build a DSpark Block Drafter](#build-a-dspark-block-drafter)
     - [Disable Windowed KV Cache](#disable-windowed-kv-cache)
     - [Enable Shared Embeddings](#enable-shared-embeddings)
     - [Enable CUDA Graph Capture](#enable-cuda-graph-capture)
@@ -322,6 +323,20 @@ python -m onnxruntime_genai.models.builder -i path_to_target_model -o path_to_ou
 
 # From source:
 python builder.py -i path_to_target_model -o path_to_output_folder -p fp16 -e cuda -c cache_dir_for_hf_files --extra_options use_paged_attention=true aux_hidden_state_layers=1,11,21 dflash2_path=path_to_dflash2_checkpoint dflash2_num_draft_tokens=4
+```
+
+#### Build a DSpark Block Drafter
+
+Set `dspark_path` to a DSpark checkpoint to export an auxiliary `dspark.onnx` block drafter beside a Qwen3.5 or Qwen3.8 target model. The target must use paged attention. SpecForge identifies the target layers whose outputs are tapped, while `aux_hidden_state_layers` identifies residual streams entering layers, so each configured auxiliary layer must be one greater than the corresponding `target_layer_ids` entry in the DSpark checkpoint. The drafter reuses the target's embedding and LM-head initializers. `dspark_path` and `dflash2_path` are mutually exclusive.
+
+`dspark_num_draft_tokens` optionally overrides how many tokens the drafter proposes per step and must be a positive integer. `dspark_top_k` controls how many candidates the lattice keeps per block slot; it defaults to `16` and must be a positive integer no greater than the drafter vocabulary size.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -i path_to_target_model -o path_to_output_folder -p fp16 -e cuda -c cache_dir_for_hf_files --extra_options use_paged_attention=true aux_hidden_state_layers=1,11,21 dspark_path=path_to_dspark_checkpoint dspark_num_draft_tokens=4 dspark_top_k=16
+
+# From source:
+python builder.py -i path_to_target_model -o path_to_output_folder -p fp16 -e cuda -c cache_dir_for_hf_files --extra_options use_paged_attention=true aux_hidden_state_layers=1,11,21 dspark_path=path_to_dspark_checkpoint dspark_num_draft_tokens=4 dspark_top_k=16
 ```
 
 #### Disable Windowed KV Cache
