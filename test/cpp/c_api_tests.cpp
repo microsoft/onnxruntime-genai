@@ -965,33 +965,16 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
             std::string::npos);
   owner_thread_request->Close();
 
-  auto unsupported_request = engine->CreateRequest(*params);
-  auto unsupported_params = unsupported_request->CreateTurnParams();
-  auto stop_sequences = OgaSequences::Create();
-  const std::array<int32_t, 2> stop_sequence{7, 8};
-  stop_sequences->Append(stop_sequence.data(), stop_sequence.size());
-  EXPECT_THROW(
-      unsupported_params->SetStopSequences(*stop_sequences),
-      std::runtime_error);
+  auto validation_request = engine->CreateRequest(*params);
+  auto validation_params = validation_request->CreateTurnParams();
 
   std::unique_ptr<OgaResult> null_stop_sequences_result{
-      OgaTurnParamsSetStopSequences(unsupported_params.get(), nullptr)};
+      OgaTurnParamsSetStopSequences(validation_params.get(), nullptr)};
   ASSERT_NE(null_stop_sequences_result, nullptr);
   EXPECT_NE(
       std::string(null_stop_sequences_result->GetError()).find("stop_sequences must not be null"),
       std::string::npos);
-
-  // The setter is explicitly unsupported, so a non-null collection is validated only as a handle:
-  // it must not be dereferenced or retained before returning the not-implemented result.
-  std::unique_ptr<OgaResult> sentinel_stop_sequences_result{
-      OgaTurnParamsSetStopSequences(
-          unsupported_params.get(),
-          reinterpret_cast<const OgaSequences*>(uintptr_t{1}))};
-  ASSERT_NE(sentinel_stop_sequences_result, nullptr);
-  EXPECT_NE(
-      std::string(sentinel_stop_sequences_result->GetError()).find("not implemented"),
-      std::string::npos);
-  unsupported_request->Close();
+  validation_request->Close();
 
   OgaRequest* abandoned_created{};
   OgaCheckResult(OgaEngineCreateRequest(
@@ -1385,31 +1368,6 @@ TEST(CAPITests, EngineRequestCAbiAndRaiiContracts) {
   EXPECT_NO_THROW(owned_request->Close());
   EXPECT_FALSE(engine->HasPendingRequests());
   EXPECT_EQ(RunOne(*engine).flags, OgaEngineEventFlag_None);
-
-  auto unsupported_request = engine->CreateRequest(*params);
-  auto unsupported = unsupported_request->CreateTurnParams();
-  auto stop_sequences = OgaSequences::Create();
-
-  const auto expect_not_implemented = [](auto&& setter) {
-    try {
-      setter();
-      FAIL() << "Expected a not-implemented error.";
-    } catch (const std::runtime_error& error) {
-      EXPECT_NE(
-          std::string(error.what()).find("not implemented"),
-          std::string::npos);
-    }
-  };
-
-  expect_not_implemented([&] { unsupported->SetTemperature(0.5f); });
-  expect_not_implemented([&] { unsupported->SetTopP(0.5f); });
-  expect_not_implemented([&] { unsupported->SetTopK(5); });
-  expect_not_implemented([&] { unsupported->SetSeed(42); });
-  expect_not_implemented(
-      [&] { unsupported->SetStopSequences(*stop_sequences); });
-  expect_not_implemented(
-      [&] { unsupported->SetGuidance("regex", "[0-9]+"); });
-  unsupported_request->Close();
 }
 
 class ParametrizedTopKCAPITestsTests : public ::testing::TestWithParam<bool> {

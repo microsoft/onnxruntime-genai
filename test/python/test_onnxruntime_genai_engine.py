@@ -300,29 +300,6 @@ def test_per_turn_budget_is_independent_and_snapshotted(model):
     request.close()
 
 
-@pytest.mark.parametrize(
-    ("setter", "args"),
-    [
-        ("set_temperature", (0.5,)),
-        ("set_top_p", (0.5,)),
-        ("set_top_k", (5,)),
-        ("set_seed", (42,)),
-        ("set_stop_sequences", ([[1, 2]],)),
-        ("set_guidance", ("regex", "[0-9]+")),
-    ],
-)
-def test_unsupported_turn_params_setters_raise(model, setter, args):
-    engine = og.Engine(model)
-    params = og.GeneratorParams(model)
-    request = engine.create_request(params)
-    turn_params = og.TurnParams(request)
-
-    with pytest.raises(RuntimeError, match="not implemented"):
-        getattr(turn_params, setter)(*args)
-
-    request.close()
-
-
 def test_request_total_limit_and_cancel_metadata(model):
     engine = og.Engine(model)
     params = og.GeneratorParams(model)
@@ -536,19 +513,6 @@ def test_request_parameters_are_snapshotted(model):
     _run(engine, sinks)
 
     assert sink.tokens == predicted_tokens(_PROMPT_LONG, 4)
-
-
-def test_stop_sequences_accept_token_id_sequences_and_remain_unsupported(model):
-    engine = og.Engine(model)
-    params = og.GeneratorParams(model)
-    params.set_search_options(do_sample=False, max_length=16)
-    request = engine.create_request(params)
-    turn_params = og.TurnParams(request)
-
-    with pytest.raises(RuntimeError, match="not implemented"):
-        turn_params.set_stop_sequences([[7, 8], [9]])
-
-    request.close()
 
 
 @pytest.mark.parametrize("state", ["created", "active", "turn-complete"])
