@@ -74,6 +74,15 @@ def test_blank_option_adds_no_auxiliary_output(aux_option):
     assert "aux_hidden_states" not in model.output_names
 
 
+@pytest.mark.parametrize("aux_option", ["1,two,3", None])
+def test_non_integer_layer_option_reports_its_name(aux_option):
+    model = _outputs_model(None)
+    model.extra_options["aux_hidden_state_layers"] = aux_option
+
+    with pytest.raises(ValueError, match="aux_hidden_state_layers must be a comma-separated list of integers"):
+        model.make_outputs_init()
+
+
 def test_option_registers_one_output_wide_enough_for_every_tap():
     model = _outputs_model("1, 3, 5")
 
@@ -177,6 +186,54 @@ def test_a_tap_in_another_dtype_is_cast_to_the_model_io_dtype(tmp_path):
 
     assert aux_hidden_states.dtype == np.float32
     assert aux_hidden_states.shape == (1, 2, 8)
+
+
+def test_layernorm_tap_reuses_the_casted_residual(monkeypatch):
+    model = Model.__new__(Model)
+    model.io_dtype = ir.DataType.FLOAT16
+    model.include_hidden_states = False
+    model.exclude_lm_head = False
+    model.aux_hidden_state_layers = [1]
+    model.aux_hidden_state_taps = {}
+    model.layernorm_attrs = {
+        "root_input": "root_input",
+        "skip_input": "skip_input",
+        "add_offset": 0,
+        "epsilon": 1e-6,
+        "last_layernorm": False,
+        "cast": {
+            "use_fp32": True,
+            "root_input": False,
+            "skip_input": False,
+            "output_0": False,
+            "output_3": True,
+        },
+    }
+    model.values = {
+        "root_input": types.SimpleNamespace(dtype=ir.DataType.FLOAT16, shape=["batch_size", "sequence_length", 4]),
+        "skip_input": types.SimpleNamespace(dtype=ir.DataType.FLOAT16, shape=["batch_size", "sequence_length", 4]),
+    }
+
+    def make_value(name, dtype, shape):
+        value = types.SimpleNamespace(dtype=dtype, shape=shape)
+        model.values[name] = value
+        return value
+
+    monkeypatch.setattr(model, "make_initializer", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(model, "make_node", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(model, "make_value", make_value)
+    monkeypatch.setattr(model, "make_layernorm_subgraph", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(model, "make_hidden_state_shape", lambda: ["batch_size", "sequence_length", 4])
+
+    model.make_layernorm(
+        1,
+        types.SimpleNamespace(weight=np.ones(4, dtype=np.float32)),
+        skip=True,
+        simple=True,
+        location="input",
+    )
+
+    assert model.aux_hidden_state_taps[1] == ("/model/layers.1/input_layernorm/output_3", ir.DataType.FLOAT16)
 
 
 def test_the_mtp_head_does_not_inherit_the_target_tap_set():

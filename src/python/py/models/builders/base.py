@@ -616,11 +616,16 @@ class Model:
         # stream *entering* decoder layer i, which only exists as a tensor inside layer i's skip
         # layer norm -- taking the layer boundary instead is an off-by-one that silently yields a
         # drafter whose acceptance rate saturates at 1.000.
-        self.aux_hidden_state_layers = [
-            int(layer_id)
-            for layer_id in str(self.extra_options.get("aux_hidden_state_layers", "")).replace(" ", "").split(",")
-            if layer_id
-        ]
+        aux_hidden_state_layers = self.extra_options.get("aux_hidden_state_layers", "")
+        try:
+            self.aux_hidden_state_layers = [
+                int(layer_id) for layer_id in str(aux_hidden_state_layers).split(",") if layer_id.strip()
+            ]
+        except ValueError as error:
+            raise ValueError(
+                "aux_hidden_state_layers must be a comma-separated list of integers, "
+                f"got {aux_hidden_state_layers!r}."
+            ) from error
         self.aux_hidden_state_taps = {}
 
         if self.prune_lm_head and self.exclude_lm_head:
@@ -2646,7 +2651,7 @@ class Model:
             self.layernorm_attrs["root_input"] = output_3
 
             if location == "input" and layer_id in self.aux_hidden_state_layers:
-                self.aux_hidden_state_taps[layer_id] = (outputs[3], new_io_dtype)
+                self.aux_hidden_state_taps[layer_id] = (output_3, self.values[output_3].dtype)
 
     def make_layernorm_casts(self, name, inputs, outputs, old_dtype, new_dtype):
         # Name = name of original LayerNorm op as if the cast nodes did not exist
