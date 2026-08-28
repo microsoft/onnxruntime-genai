@@ -1698,8 +1698,14 @@ struct StaticBatching_Element : JSON::Element {
   explicit StaticBatching_Element(std::optional<Config::Engine::StaticBatching>& v) : v_{v} {}
 
   void OnValue(std::string_view name, JSON::Value value) override {
+    if (!v_)
+      v_ = Config::Engine::StaticBatching{};
+
     if (name == "max_batch_size") {
-      v_->max_batch_size = static_cast<size_t>(JSON::Get<double>(value));
+      const auto parsed_value = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (parsed_value <= 0)
+        throw std::runtime_error("max_batch_size must be > 0");
+      v_->max_batch_size = static_cast<size_t>(parsed_value);
     } else {
       throw JSON::unknown_value_error{};
     }
