@@ -1331,9 +1331,7 @@ class Model:
             )
         return state_groups
 
-    @staticmethod
-    def make_paged_key_value_state_group(layer_ids, inputs, outputs):
-        return {
+    def make_paged_key_value_state_group(self, layer_ids, inputs, outputs):
             "kind": "paged_kv",
             "layer_ids": layer_ids,
             "bindings": {

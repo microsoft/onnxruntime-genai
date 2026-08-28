@@ -275,6 +275,12 @@ void VarlenDecoderIO::PreparePositionIds(
   if (!model->session_info_.HasInput(position_ids_name)) {
     return;
   }
+  const auto position_shape = model->session_info_.GetInputShape(position_ids_name);
+  if (position_shape.size() != 1) {
+    throw std::runtime_error(
+        "Dynamic batching only supports packed position_ids with rank 1 [num_tokens]; got rank " +
+        std::to_string(position_shape.size()) + " for input '" + position_ids_name + "'.");
+  }
   if (graph_buffers_ != nullptr) {
     throw std::logic_error(
         "Packed position_ids are not supported by CUDA graph capture.");
