@@ -97,14 +97,15 @@ ScenarioExecutionOutput ContinuationScenario::Execute(const ScenarioConfig& conf
       params.back()->SetSearchOption("random_seed", kRandomSeed + i);
       initial_prompts.push_back(MakeSequences(request_tokens[request_index]));
       requests.emplace_back(OgaRequest::Create(*params.back()));
-      // Creating the request with max_session_tokens reserves enough sequence storage for the
-      // whole conversation. Before starting the first turn, lower max_length so this response
-      // generates only generation_tokens instead of consuming the budget for all later turns.
-      params.back()->SetSearchOption(
-          "max_length", static_cast<double>(base_prompt_count + config.generation_tokens));
       requests.back()->AddTokens(*initial_prompts.back());
       requests.back()->SetOpaqueData(&request_tokens[request_index]);
       engineResources.engine->Add(*requests.back());
+      // Adding the request while max_length is max_session_tokens reserves enough device and host
+      // sequence storage for the whole conversation. Once that storage exists, lower max_length
+      // so the first response generates only generation_tokens instead of consuming the budget
+      // for all later turns. Each continuation raises this active limit again below.
+      params.back()->SetSearchOption(
+          "max_length", static_cast<double>(base_prompt_count + config.generation_tokens));
     }
 
     const auto run_start = std::chrono::steady_clock::now();
