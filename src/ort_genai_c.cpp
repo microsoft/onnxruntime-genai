@@ -1455,6 +1455,9 @@ OgaResult* OgaRequestContinue(OgaRequest* request, const OgaSequences* tokens) {
 
 OgaResult* OgaRequestSetDraftTokens(OgaRequest* request, const OgaSequences* tokens) {
   OGA_TRY
+  if (!request || !tokens) {
+    throw std::invalid_argument("request and tokens must not be null.");
+  }
   if (tokens->size() > 1) {
     throw std::runtime_error("Request draft tokens must contain at most one sequence.");
   }
@@ -1463,7 +1466,8 @@ OgaResult* OgaRequestSetDraftTokens(OgaRequest* request, const OgaSequences* tok
   OGA_CATCH
 }
 
-OgaResult* OgaRequestHasUnseenTokens(const OgaRequest* request, bool* out) {  OGA_TRY
+OgaResult* OgaRequestHasUnseenTokens(const OgaRequest* request, bool* out) {
+  OGA_TRY
   *out = request->HasUnseenTokens();
   return nullptr;
   OGA_CATCH

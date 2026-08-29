@@ -2010,3 +2010,12 @@ TEST(CAPITests, LoadAudiosFromBuffersRejectsEmptyBuffer) {
   // audios should not have been created
   EXPECT_EQ(audios, nullptr);
 }
+
+TEST(CAPITests, RequestSetDraftTokensRejectsNullArguments) {
+  OgaResult* result = OgaRequestSetDraftTokens(nullptr, nullptr);
+
+  ASSERT_NE(result, nullptr);
+  EXPECT_NE(std::string(OgaResultGetError(result)).find("must not be null"),
+            std::string::npos);
+  OgaDestroyResult(result);
+}

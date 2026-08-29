@@ -753,21 +753,16 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         auto sequences = OgaSequences::Create();
         auto tokens_span = ToSpan(tokens);
         sequences->Append(tokens_span.data(), tokens_span.size());
-        request.SetDraftTokens(*sequences);
-      },
-           "Propose speculative draft tokens for the next engine step.")
+        request.SetDraftTokens(*sequences); }, "Propose speculative draft tokens for the next engine step.")
       .def("has_unseen_tokens", &OgaRequest::HasUnseenTokens)
       .def("is_turn_complete", &OgaRequest::IsTurnComplete, "Return whether the current generation turn is complete.")
       .def("get_unseen_token", &OgaRequest::GetUnseenToken)
-      .def("set_opaque_data", [](OgaRequest& request, pybind11::object opaque_data) {
-        request.SetOpaqueData(opaque_data.ptr());
-      })
+      .def("set_opaque_data", [](OgaRequest& request, pybind11::object opaque_data) { request.SetOpaqueData(opaque_data.ptr()); })
       .def("get_opaque_data", [](OgaRequest& request) -> pybind11::object {
         auto opaque_data = request.GetOpaqueData();
         if (!opaque_data)
           return pybind11::none();
-        return pybind11::reinterpret_borrow<pybind11::object>(static_cast<PyObject*>(opaque_data));
-      });
+        return pybind11::reinterpret_borrow<pybind11::object>(static_cast<PyObject*>(opaque_data)); });
 
   pybind11::class_<OgaEngine>(m, "Engine")
       .def(pybind11::init([](OgaModel& model) { return OgaEngine::Create(model); }))
