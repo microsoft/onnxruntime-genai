@@ -54,7 +54,7 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
         fixed_requests.push_back(FixedStateReservationRequest{
             entry.request_id,
             entry.target_cache_slots,
-          entry.draft_token_count,
+            entry.draft_token_count,
         });
       }
       if (entry.newly_admitted) {

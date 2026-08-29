@@ -460,8 +460,8 @@ void PagedCacheReservation::FillWindowBlockTable(
 }
 
 void PagedCacheReservation::CommitPrefix(const void* request_id,
-                                        size_t step_slots,
-                                        size_t kept_slots) {
+                                         size_t step_slots,
+                                         size_t kept_slots) {
   if (state_ != PagedCacheReservationState::Reserved) {
     throw std::logic_error("Paged cache reservation is no longer accepting prefix commits.");
   }

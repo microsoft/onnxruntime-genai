@@ -269,6 +269,9 @@ void Request::SetDraftTokens(std::span<const int32_t> tokens) {
   if (tokens.empty()) {
     return;
   }
+  if (guidance_logits_processor_) {
+    throw std::runtime_error("Speculative draft tokens are not supported with guidance.");
+  }
 
   const auto& search = params_->search;
   // Verification compares the target model's argmax against each draft, which only reproduces the

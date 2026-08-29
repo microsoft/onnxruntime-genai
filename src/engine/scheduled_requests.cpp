@@ -168,7 +168,9 @@ std::vector<DeviceSpan<float>> ScheduledRequests::ProcessLogits() {
 
   std::vector<DeviceSpan<float>> logits = decoder_state_->ProcessLogits();
   if (logits.size() != expected_rows) {
-    throw std::runtime_error("Logits size does not match the number of requests.");
+    throw std::runtime_error(
+        "Logits row count does not match the packed step: expected " +
+        std::to_string(expected_rows) + ", got " + std::to_string(logits.size()) + ".");
   }
 
   return logits;

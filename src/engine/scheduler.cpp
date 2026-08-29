@@ -271,7 +271,7 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     selected_processed_lengths.push_back(
         candidate.processed_sequence_length);
     selected_remaining_lengths.push_back(
-      candidate.remaining_token_count);
+        candidate.remaining_token_count);
   }
   std::vector<size_t> token_counts;
   try {

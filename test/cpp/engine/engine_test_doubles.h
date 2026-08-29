@@ -443,8 +443,8 @@ struct RecordingModelExecutor : ModelExecutor {
     scheduled_requests.AddDecoderState(
         std::make_unique<ScriptedDecoderIO>(
             model_, scheduled_requests, cache_manager_, forced_token_,
-        failure == ScriptedExecutionFailure::PostProcessing,
-        context.plan, verify_row_tokens_));
+            failure == ScriptedExecutionFailure::PostProcessing,
+            context.plan, verify_row_tokens_));
     static_cast<void>(context);
   }
 
