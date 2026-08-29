@@ -134,12 +134,8 @@ def _decoder_graph():
     graph.name = "synthetic_composite_decoder"
     graph.input.extend(
         [
-            helper.make_tensor_value_info(
-                "position_ids", TensorProto.INT64, [3, "num_tokens"]
-            ),
-            helper.make_tensor_value_info(
-                "state_update_capture_count", TensorProto.INT32, ["batch_size"]
-            ),
+            helper.make_tensor_value_info("position_ids", TensorProto.INT64, [3, "num_tokens"]),
+            helper.make_tensor_value_info("state_update_capture_count", TensorProto.INT32, ["batch_size"]),
         ]
     )
     graph.initializer.extend(
@@ -163,13 +159,9 @@ def _decoder_graph():
     nodes = list(graph.node)
     score_index = next(index for index, node in enumerate(nodes) if "score_f" in node.output)
     nodes[score_index].output[0] = "base_score_f"
-    current_length_index = next(
-        index for index, node in enumerate(nodes) if "current_length" in node.output
-    )
+    current_length_index = next(index for index, node in enumerate(nodes) if "current_length" in node.output)
     nodes[current_length_index].input[0] = "text_position_ids"
-    position_node = helper.make_node(
-        "Gather", ["position_ids", "c2"], ["text_position_ids"], axis=0
-    )
+    position_node = helper.make_node("Gather", ["position_ids", "c2"], ["text_position_ids"], axis=0)
     fixed_bias_nodes = [
         helper.make_node("ReduceSum", ["past_conv.0", "axes12"], ["fixed_state_sum"], keepdims=0),
         helper.make_node("Gather", ["fixed_state_sum", "row_id"], ["fixed_state_bias"], axis=0),

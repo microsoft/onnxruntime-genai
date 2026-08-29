@@ -940,7 +940,7 @@ FixedStateReservation FixedStatePool::Reserve(
       storage->state_update_active->GetTensorMutableData<int32_t>()[0] =
           capture_state_updates ? 1 : 0;
       storage->staging_bytes = CheckedAdd(
-        storage->staging_bytes, sizeof(int32_t), "state_update active staging allocation");
+          storage->staging_bytes, sizeof(int32_t), "state_update active staging allocation");
     }
   }
   for (auto& spec : impl_->tensors) {
