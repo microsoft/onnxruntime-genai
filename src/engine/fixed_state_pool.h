@@ -195,8 +195,9 @@ class FixedStatePool {
   size_t ActiveStagingBytes() const;
   // Gather+output staging bytes a reservation of `row_count` scheduled rows will view. A pure
   // function of the pool's tensor geometry, so composite step planning can size the transaction
-  // before the reservation exists; it equals the resulting reservation's PlannedStagingBytes().
-  size_t PlannedStagingBytes(size_t row_count) const;
+  // before the reservation exists; it equals the resulting reservation's PlannedStagingBytes() for
+  // a reservation whose rows request compact captures iff `captures_state_updates` is set.
+  size_t PlannedStagingBytes(size_t row_count, bool captures_state_updates = false) const;
   bool SupportsStateUpdates() const;
   size_t StateUpdateCapacity() const;
 

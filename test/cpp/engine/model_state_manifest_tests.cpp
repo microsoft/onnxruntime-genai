@@ -143,9 +143,7 @@ TEST(ModelStateManifestTest, ReportsStateGroupCapabilities) {
   EXPECT_TRUE(hybrid.HasStateGroupKind(
       Config::Model::Decoder::StateGroupKind::PagedKeyValue));
   EXPECT_TRUE(hybrid.HasStateGroupKind(
-      Config::Model::Decoder::StateGroupKind::FixedConv));
-  EXPECT_TRUE(hybrid.HasStateGroupKind(
-      Config::Model::Decoder::StateGroupKind::FixedRecurrent));
+      Config::Model::Decoder::StateGroupKind::Fixed));
   EXPECT_TRUE(hybrid.HasFixedStateGroups());
 
   Config::Model::Decoder legacy;

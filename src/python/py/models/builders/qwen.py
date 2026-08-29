@@ -713,7 +713,14 @@ class Qwen35TextModel(Model):
             return []
 
         full_attention_layers = [
-            layer_id for layer_id, layer_type in enumerate(self.layer_types) if layer_type == "full_attention"
+            layer_id
+            for layer_id, layer_type in enumerate(self.layer_types)
+            if layer_type in {"full_attention", "sliding_attention"}
+        ]
+        conv_layers = [
+            layer_id
+            for layer_id, layer_type in enumerate(self.layer_types)
+            if layer_type in {"conv", "linear_attention"}
         ]
         linear_attention_layers = [
             layer_id for layer_id, layer_type in enumerate(self.layer_types) if layer_type == "linear_attention"
@@ -728,13 +735,13 @@ class Qwen35TextModel(Model):
             self.context_length_attrs["state_update_capacity"] if "state_update_capture_count" in inputs else 0
         )
 
-        for state_name, input_key, output_key in (
-            ("conv", "past_conv_names", "present_conv_names"),
-            ("recurrent", "past_recurrent_names", "present_recurrent_names"),
+        for state_name, layer_ids, input_key, output_key in (
+            ("conv", conv_layers, "past_conv_names", "present_conv_names"),
+            ("recurrent", linear_attention_layers, "past_recurrent_names", "present_recurrent_names"),
         ):
             group = {
                 "kind": "fixed",
-                "layer_ids": linear_attention_layers,
+                "layer_ids": layer_ids,
                 "bindings": {
                     "state": {
                         "input": inputs[input_key],

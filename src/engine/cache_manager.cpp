@@ -50,7 +50,9 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
       if (fixed_state_pool) {
         // Fixed and paged track the same per-request cache-slot boundary: the fixed target_tokens
         // mirror the paged target so both commit at one token boundary. The pool infers resident
-        // vs. new ownership itself, so no newly_admitted flag is passed.
+        // vs. new ownership itself, so no newly_admitted flag is passed. capture_count stays 0
+        // until MTP scheduling requests compact state_update captures, so no step currently
+        // reaches FixedStateReservation::CommitPrefix.
         fixed_requests.push_back(FixedStateReservationRequest{
             entry.request_id,
             entry.target_cache_slots,

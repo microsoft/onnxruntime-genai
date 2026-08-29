@@ -13,7 +13,6 @@
 #include <charconv>
 #include <cstdarg>
 #include <cstring>
-#include <limits>
 #include <mutex>
 #include <random>
 #include <system_error>
@@ -526,8 +525,12 @@ struct CudaInterfaceImplBase : DeviceInterface {
 
   void ReplayStateUpdates(const StateUpdateReplayDesc* descriptors, size_t count) override {
     if (count == 0) return;
-    if (count > static_cast<size_t>(std::numeric_limits<int>::max())) {
-      throw std::runtime_error("Compact state replay descriptor count exceeds CUDA launch limits.");
+    // One descriptor maps to one gridDim.y slice in LaunchReplayStateUpdates.
+    constexpr size_t kMaxDescriptors = 65535;
+    if (count > kMaxDescriptors) {
+      throw std::runtime_error(
+          "Compact state replay needs " + std::to_string(count) +
+          " descriptors, which exceeds the CUDA grid limit of " + std::to_string(kMaxDescriptors) + ".");
     }
     std::scoped_lock lock{state_update_replay_mutex_};
     cudaStream_t stream = GetStream();

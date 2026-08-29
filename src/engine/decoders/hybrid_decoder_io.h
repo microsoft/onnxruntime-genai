@@ -21,7 +21,10 @@ struct HybridDecoderIO : DecoderIO {
   std::vector<DeviceSpan<float>> ProcessLogits() override;
 
  private:
+  // Takes the context by parameter: this IO is moved into ScheduledRequests and outlives the
+  // ExecutionContext that Engine::Step keeps on its stack.
   void BindFixedState(const ExecutionContext& execution_context);
+
   VarlenDecoderIO varlen_io_;
 };
 

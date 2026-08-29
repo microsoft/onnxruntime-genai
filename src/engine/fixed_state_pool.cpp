@@ -727,9 +727,10 @@ size_t FixedStatePool::ActiveStagingBytes() const {
   return impl_->active_staging_bytes;
 }
 
-size_t FixedStatePool::PlannedStagingBytes(size_t row_count) const {
-  // One gather input and one staged output per fixed tensor, each `row_count` rows wide. This
-  // mirrors the accumulation in Reserve() so the plan and the resulting reservation agree exactly.
+size_t FixedStatePool::PlannedStagingBytes(size_t row_count, bool captures_state_updates) const {
+  // One gather input and one staged output per fixed tensor, each `row_count` rows wide, plus the
+  // compact capture buffers when the step requests them. This mirrors the accumulation in Reserve()
+  // so the plan and the resulting reservation agree exactly.
   size_t bytes = 0;
   if (impl_->state_update_capacity != 0) {
     bytes = CheckedAdd(
@@ -747,6 +748,13 @@ size_t FixedStatePool::PlannedStagingBytes(size_t row_count) const {
             CheckedMultiply(row_count, spec.row_bytes, "staging allocation"),
             2, "staging allocation"),
         "staging allocation");
+    if (captures_state_updates) {
+      bytes = CheckedAdd(
+          bytes,
+          CheckedMultiply(row_count, spec.state_update_row_bytes,
+                          "state_update staging allocation"),
+          "state_update staging allocation");
+    }
   }
   return bytes;
 }
@@ -805,7 +813,9 @@ FixedStateReservation FixedStatePool::Reserve(
       [](const FixedStateReservationRequest& request) { return request.capture_count != 0; });
   if (capture_state_updates && !SupportsStateUpdates()) {
     throw std::runtime_error(
-        "This model's fixed state bindings declare no compact state_update outputs.");
+        impl_->state_update_capacity != 0
+            ? "This model's fixed state bindings disable compact state_update capture."
+            : "This model's fixed state bindings declare no compact state_update outputs.");
   }
   if (SupportsStateUpdates()) {
     for (const auto& request : requests) {
