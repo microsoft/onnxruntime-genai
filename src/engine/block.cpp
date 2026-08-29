@@ -4,8 +4,9 @@
 #include "generator/generators.h"
 #include "block.h"
 
-#include <numeric>
 #include <algorithm>
+#include <exception>
+#include <numeric>
 
 namespace Generators {
 
@@ -51,7 +52,10 @@ std::vector<size_t> Block::SlotIds() const {
 }
 
 BlockPool::BlockPool(size_t block_size, size_t num_blocks)
-    : block_size_(block_size), capacity_(num_blocks) {}
+    : block_size_(block_size),
+      capacity_(num_blocks),
+      blocks_(num_blocks),
+      validation_marks_(num_blocks) {}
 
 std::vector<std::shared_ptr<Block>> BlockPool::AllocateBlocks(size_t num_slots, bool mark_slots_used) {
   const size_t blocks_needed = BlocksNeeded(num_slots);
@@ -92,10 +96,15 @@ std::vector<std::shared_ptr<Block>> BlockPool::ReserveBlocks(size_t num_slots) {
 }
 
 void BlockPool::Free(const std::vector<std::shared_ptr<Block>>& blocks) {
+  ValidateFree(blocks);
+  FreeValidated(blocks);
+}
+
+void BlockPool::ValidateFree(
+    std::span<const std::shared_ptr<Block>> blocks) const {
   // Validate every block before mutating any pool state so that an invalid request (a null block,
   // an out-of-range id, a block this pool does not currently own, or the same block listed twice)
-  // is rejected without partially freeing the batch. Work stays proportional to the batch size
-  // rather than the pool capacity.
+  // is rejected without partially freeing the batch.
   std::vector<size_t> ids;
   ids.reserve(blocks.size());
   for (const auto& block : blocks) {
@@ -116,14 +125,20 @@ void BlockPool::Free(const std::vector<std::shared_ptr<Block>>& blocks) {
 
     ids.push_back(id);
   }
-
   std::sort(ids.begin(), ids.end());
   const auto duplicate = std::adjacent_find(ids.begin(), ids.end());
   if (duplicate != ids.end()) {
-    throw std::runtime_error("Cannot free block with id " + std::to_string(*duplicate) +
-                             " more than once in the same call.");
+    throw std::runtime_error(
+        "Cannot free block with id " + std::to_string(*duplicate) +
+        " more than once in the same call.");
   }
+}
 
+void BlockPool::FreeValidated(
+    std::span<const std::shared_ptr<Block>> blocks) noexcept {
+  if (!CanFreeValidated(blocks)) {
+    std::terminate();
+  }
   for (const auto& block : blocks) {
     blocks_[block->Id()].reset();
   }
@@ -132,12 +147,35 @@ void BlockPool::Free(const std::vector<std::shared_ptr<Block>>& blocks) {
   }
 }
 
+bool BlockPool::CanFreeValidated(
+    std::span<const std::shared_ptr<Block>> blocks) const noexcept {
+  ++validation_epoch_;
+  if (validation_epoch_ == 0) {
+    std::fill(validation_marks_.begin(), validation_marks_.end(), 0);
+    ++validation_epoch_;
+  }
+  for (const auto& block : blocks) {
+    if (!block || block->Id() >= blocks_.size() ||
+        blocks_[block->Id()] != block ||
+        validation_marks_[block->Id()] == validation_epoch_) {
+      return false;
+    }
+    validation_marks_[block->Id()] = validation_epoch_;
+  }
+  return true;
+}
+
 void BlockPool::RollbackReservedBlocks(
     const std::vector<std::shared_ptr<Block>>& blocks) noexcept {
+  bool released = false;
   for (const auto& block : blocks) {
-    blocks_[block->Id()].reset();
+    if (block && block->Id() < blocks_.size() &&
+        blocks_[block->Id()] == block) {
+      blocks_[block->Id()].reset();
+      released = true;
+    }
   }
-  if (!blocks.empty()) {
+  if (released) {
     ++mutation_generation_;
   }
 }

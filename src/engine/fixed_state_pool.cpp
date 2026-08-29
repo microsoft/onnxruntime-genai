@@ -365,6 +365,14 @@ size_t FixedStateReservation::PlannedStagingBytes() const {
   return storage_ ? storage_->staging_bytes : 0;
 }
 
+size_t FixedStateReservation::NewSlotCount() const {
+  return storage_
+             ? static_cast<size_t>(std::count(
+                   storage_->provisional.begin(),
+                   storage_->provisional.end(), true))
+             : 0;
+}
+
 void FixedStateReservation::ValidateCommit() const {
   if (!pool_ || state_ != FixedStateReservationState::Reserved) {
     throw std::logic_error(
@@ -563,6 +571,17 @@ size_t FixedStatePool::AvailableSlots() const {
   return impl_->FreeSlotCount();
 }
 
+size_t FixedStatePool::CommittedSlotCount() const {
+  return static_cast<size_t>(std::count_if(
+      impl_->slots.begin(), impl_->slots.end(), [](const Impl::Slot& slot) {
+        return slot.ownership == FixedStateSlotOwnership::Committed;
+      }));
+}
+
+size_t FixedStatePool::SessionBatchSize() const {
+  return impl_->fixed_session_batch_size;
+}
+
 size_t FixedStatePool::PersistentBytes() const {
   return impl_->persistent_bytes;
 }
@@ -573,6 +592,21 @@ size_t FixedStatePool::ZeroingScratchBytes() const {
 
 size_t FixedStatePool::ActiveStagingBytes() const {
   return impl_->active_staging_bytes;
+}
+
+size_t FixedStatePool::PlannedStagingBytes(size_t row_count) const {
+  // One gather input and one staged output per fixed tensor, each `row_count` rows wide. This
+  // mirrors the accumulation in Reserve() so the plan and the resulting reservation agree exactly.
+  size_t bytes = 0;
+  for (const auto& spec : impl_->tensors) {
+    bytes = CheckedAdd(
+        bytes,
+        CheckedMultiply(
+            CheckedMultiply(row_count, spec.row_bytes, "staging allocation"),
+            2, "staging allocation"),
+        "staging allocation");
+  }
+  return bytes;
 }
 
 FixedStateSlotHandle FixedStatePool::HandleFor(
@@ -587,6 +621,14 @@ FixedStateSlotHandle FixedStatePool::HandleFor(
         "Request does not own a committed fixed state slot.");
   }
   return impl_->MakeHandle(*slot);
+}
+
+bool FixedStatePool::OwnsCommittedSlot(const void* request_id) const {
+  if (!request_id) {
+    return false;
+  }
+  const auto* slot = impl_->FindSlot(request_id);
+  return slot && slot->ownership == FixedStateSlotOwnership::Committed;
 }
 
 FixedStateReservation FixedStatePool::Reserve(
@@ -780,10 +822,36 @@ FixedStateReservation FixedStatePool::Reserve(
 }
 
 void FixedStatePool::Release(const FixedStateSlotHandle& handle) {
-  impl_->EnsureHealthy();
+  // Deliberately not gated on EnsureHealthy(): releasing a committed slot only resets host-side
+  // ownership metadata and never reads or writes a persistent bank, so it is safe even after a
+  // failed commit left the pool unhealthy. Teardown depends on this -- a fatal device error marks
+  // both the pool and the Engine unhealthy, and the Engine must still be able to remove/reap its
+  // requests (releasing paged blocks and this fixed slot) without the release itself throwing and
+  // masking the recorded fatal error. EnsureIdle() still holds: a live reservation owns the pool.
+  ValidateRelease(handle);
+  ReleaseValidated(handle);
+}
+
+void FixedStatePool::ValidateRelease(
+    const FixedStateSlotHandle& handle) const {
   impl_->EnsureIdle();
-  auto& slot = impl_->ValidateHandle(
-      handle, FixedStateSlotOwnership::Committed);
+  static_cast<void>(impl_->ValidateHandle(
+      handle, FixedStateSlotOwnership::Committed));
+}
+
+void FixedStatePool::ReleaseValidated(
+    const FixedStateSlotHandle& handle) noexcept {
+  if (!impl_ || impl_->active_reservation_id != 0 ||
+      handle.pool != this ||
+      handle.slot >= impl_->slots.size()) {
+    std::terminate();
+  }
+  auto& slot = impl_->slots[handle.slot];
+  if (slot.ownership != FixedStateSlotOwnership::Committed ||
+      slot.request_id != handle.request_id ||
+      slot.generation != handle.generation) {
+    std::terminate();
+  }
   // No zeroing on release: the slot's persistent banks are never read again until a future
   // admission either gathers the reusable zero row (a new owner) or a commit fully overwrites the
   // bank it publishes.

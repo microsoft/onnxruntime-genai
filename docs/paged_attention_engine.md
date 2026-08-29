@@ -8,7 +8,7 @@ Update this document whenever a change affects request admission, scheduling, pa
 
 The `Engine` can use either static batching or dynamic batching. This document focuses on the dynamic path used by models configured with `engine.dynamic_batching`, because that path provides continuous batching and uses the paged KV cache.
 
-The current dynamic path manages paged KV decoder state together with per-request search and sampler state. A standalone `FixedStatePool` exists for `fixed_conv` and `fixed_recurrent` manifest groups, but the dynamic Engine still rejects those groups and does not construct, bind, or commit the pool. Future execution support must be selected from model capabilities rather than model names, and every Engine-owned mutable state must participate in the same transaction boundary.
+The dynamic path manages paged KV decoder state together with per-request search and sampler state. When the decoder manifest also declares `fixed_conv` or `fixed_recurrent` state groups, `PagedCacheManager` owns a `FixedStatePool` and reserves, stages, and commits its per-request slots inside the same transaction as the paged blocks. This integrates fixed-state ownership only: `VarlenDecoderIO` does not yet bind those tensors to model execution, so a hybrid graph still cannot run through the production dynamic decoder. Future execution support must be selected from model capabilities rather than model names, and every Engine-owned mutable state must participate in the same transaction boundary.
 
 > **Transitional low-level API:** `AddTokens()` plus `AddRequest()`, `Continue()`, repeated `Step()` calls, token-at-a-time unseen-output access, and `Remove()` are a transitional host-facing surface. The production host API is expected to wrap or replace these operations; do not treat their current shape as the final high-level contract.
 >
@@ -45,7 +45,7 @@ return an already-ready request, if one exists
     |
 plan a runnable batch
     |
-reserve all KV-cache growth needed by that plan
+reserve all paged and fixed decoder state needed by that plan
     |
 preflight generated-output bookkeeping
     |
@@ -62,7 +62,12 @@ commit search state, cache state, and request bookkeeping
 return ready requests one at a time
 ```
 
-The step is transactional. Planning and reservation do not immediately change committed request or cache state. If a recoverable failure occurs before commit, the engine restores the request search state and releases the reserved cache blocks. A failure during the commit boundary is considered fatal because the engine can no longer guarantee that all cooperating components agree on the committed state.
+The step is transactional before publication. Planning, reservation, execution, and fixed-state
+preparation do not change committed state; recoverable failure restores request/search state and
+releases all reservations. Once publication begins, containment is **fail-stop**, not rollback:
+request/search, paged, fixed, and request-bookkeeping publication is ordered and prevalidated, but
+an unexpected internal failure may occur after an earlier component publishes. The Engine then
+becomes permanently unhealthy rather than exposing the partially published state to further steps.
 
 ## How the dynamic path is selected
 
@@ -101,7 +106,11 @@ When an explicit manifest is present, model loading resolves each group's decode
 
 The dynamic Engine requires exactly one `paged_kv` group. It allocates cache tensors only for that group's logical layer IDs, expands their exact binding names without renumbering, derives the cache dtype from the first validated key input, and sizes an automatic block pool using the number of participating full-attention layers after reserving storage for participating sliding-window layers. Every configured sliding-window layer must belong to the paged group. Multiple paged groups are rejected because the Engine currently owns one shared paged pool. The synthesized legacy group preserves dense sequential behavior when no explicit manifest exists.
 
-Fixed groups remain unsupported by the dynamic Engine: `ValidateDynamicEngineCompatibility` rejects `fixed_conv` and `fixed_recurrent` until request-owned fixed-state transactions are integrated. A standalone `FixedStatePool` (below) can already validate, allocate, and transactionally stage those groups, but the Engine does not construct it or bind it to model execution, so they still only describe graph state.
+The composite resource manager can reserve, stage, and commit `fixed_conv` and
+`fixed_recurrent` groups together with the
+required `paged_kv` group, but this branch intentionally keeps the dynamic compatibility gate in
+place because the production decoder does not bind fixed tensors yet. The packed hybrid decoder IO
+follow-up removes that gate at the same boundary where real model execution becomes available.
 
 ## Request lifecycle
 
@@ -173,8 +182,8 @@ longer need continuation when deterministic immediate reclamation is required.
 
 `Remove()` is legal from `Assigned`, `Active`, and `TurnComplete`, and moves the request to
 terminal `Closed`. On the dynamic path, removal immediately erases scheduler membership and releases
-committed paged-cache ownership. The Engine also removes any undrained ready-queue entries for that
-request.
+committed paged-cache ownership and, for a composite model, the request's committed fixed-state slot.
+The Engine also removes any undrained ready-queue entries for that request.
 
 Calling `Remove()` for an already terminal `Closed` request is an engine-agnostic idempotent no-op because the request no longer has an owner. Removing an `Unassigned` request remains invalid, as does asking an Engine other than the request's owner to remove a nonterminal request. This idempotence does not relax the external serialization requirement.
 
@@ -370,9 +379,9 @@ The scheduler also marks whether the step is eligible for CUDA graph capture. A 
 
 ### 5. Reserve the complete cache transaction
 
-`PagedCacheManager::ReserveStep()` creates a `PagedCacheReservation`.
+`PagedCacheManager::ReserveStep()` creates a composite reservation: a `PagedCacheReservation` and, when the model has `fixed` groups, a `FixedStateReservation`. Both use the same scheduled row order.
 
-The reservation:
+The paged sub-reservation:
 
 - Reserves every new physical block required by the selected plan.
 - Records how far each request's committed slot count would advance.
@@ -380,6 +389,8 @@ The reservation:
 - Leaves the committed block tables and allocated-request list unchanged.
 
 Reservation is all-or-nothing. If all planned blocks cannot be reserved, the engine treats that as an execution contract failure because planning had already declared the step executable.
+
+The fixed sub-reservation, when present, admits the same rows in the same order. A request that already owns a committed fixed slot keeps it; every other request is admitted provisionally into a free slot. The reservation gathers each row's committed (or zeroed, for a new admission) state into a contiguous model input and allocates a separate staged output tensor. Its `target_tokens` mirror the paged `target_cache_slots`, so both states commit at one token boundary. `StepPlan::fixed_state` records the fixed row count, new-slot count, and staging bytes; `Engine::StepDynamic()` then proves the reservation matches that plan exactly -- required flag, row count, new-slot count, staging bytes, and per-row request identity -- and fails fatally on any mismatch. A composite reservation wraps exactly one paged reservation and the Engine holds at most one at a time, so the paged split-commit contract (its constructor reserves its own `committed_tables_` headroom, and the pool permits a single live reservation) holds without any cross-reservation aggregate check.
 
 While the reservation is active, decoder input preparation can view a combined block table containing:
 
@@ -407,6 +418,8 @@ These checkpoints allow the engine to undo mutations caused by logits processing
 On the transactional dynamic path, `PagedCacheManager::PrepareStep()` updates the model-facing KV-cache state using the active reservation and the block-table width selected during planning. This does not commit the reservation.
 
 The physical key and value cache tensors are long-lived. What changes per step is the block table that maps each request's logical sequence blocks to physical cache blocks.
+
+`ExecutionContext` also exposes the fixed slot handles, staged bindings, and staging-byte count in the exact scheduled request order. The production executor forwards this context to the decoder, but `VarlenDecoderIO` intentionally does not bind the fixed inputs or outputs yet.
 
 ### 8. Pack variable-length model inputs
 
@@ -471,17 +484,25 @@ Requests that appended a token or became complete are placed in a staged ready l
 
 The commit order in `Engine::StepDynamic()` is deliberate:
 
-1. Commit the request search checkpoints and sampler checkpoint.
-2. Commit the paged-cache reservation.
-3. Commit each request's lightweight bookkeeping.
-4. Publish the staged ready list.
+1. Prepare the reservation: validate every ownership and capacity precondition of both sub-reservations and copy each fixed staged output into its slot's inactive persistent bank, synchronizing without publishing anything. This is the last step that performs fallible device work, and a failure here is fatal even though committed state is intact, because a partially written inactive bank cannot be proven consistent for a retry. The publish steps below do only host-side work; they can still throw on a state-machine misuse (for example a double publish), and the Engine treats any such throw as fatal too.
+2. Commit the request search checkpoints and sampler checkpoint.
+3. Publish the reservation: paged occupancy first, then the fixed bank flip.
+4. Commit each request's lightweight bookkeeping.
+5. Publish the staged ready list.
+
+Everything after step 1 crosses the commit boundary and is never retried. This is a fail-stop
+publication interval: a throw is fatal and the Engine is not used again; already published
+components are not rolled back.
 
 Committing the cache reservation:
 
+- Flips each selected fixed slot to its freshly prepared bank, advances its state generation and committed token boundary, and publishes provisional fixed-slot ownership (`FixedStateReservation::PublishCommit()` is `noexcept`).
 - Adds reserved blocks to existing block tables.
 - Adds provisional block tables for newly admitted requests.
 - Advances committed cache-slot counts.
 - Adds newly admitted requests to the cache manager's allocated-request list.
+
+Paged publication (`PagedCacheReservation::CommitValidated()`) is deliberately not `noexcept`, but for this single validated reservation it performs no fallible allocation or device work, so it cannot leave paged and fixed state at different token boundaries in practice; the Engine still treats any throw at this point as fatal.
 
 Committing request bookkeeping:
 
@@ -527,17 +548,19 @@ Request validation and post-processing failures are treated as retryable batch a
 Rollback performs both parts:
 
 1. Restore request search state and sampler state from their checkpoints.
-2. Release every block held by the paged-cache reservation.
+2. Release the composite reservation: discard any staged fixed outputs and provisional fixed slots (leaving resident slots untouched), and release every block held by the paged-cache reservation.
 
 After a successful rollback, committed request state and committed cache state match the state before the step began. The caller receives an `EngineStepError` with either `RetryableBatchAbort` or `ExecutionCapacityExceeded`, and the engine remains healthy. Calling `Step()` again with unchanged memory availability and workload composition may produce the same capacity failure.
 
-The model may have written data into reserved cache memory before the failure. Releasing the reservation is still safe because those blocks were never added to committed block tables. Future users of those blocks overwrite the relevant slots before treating them as valid cache contents.
+The model may have written data into reserved cache memory and into fixed output staging before the failure. Discard is safe because neither was published as committed ownership or state: reserved blocks were never added to committed block tables, and staged fixed outputs were never copied into a slot's active bank. Future users overwrite that storage before treating it as valid.
 
 ### Fatal failure
 
 The engine becomes unhealthy when it cannot prove that all components still agree on state. Examples include:
 
 - Reservation fails after an executable plan was produced.
+- The reservation does not match the planned fixed-state resources (required flag, row count, new-slot count, staging bytes, or per-row request identity).
+- Preparing the composite commit fails (for example a fixed staging copy fails while writing an inactive bank).
 - An unknown model execution failure occurs.
 - Rollback itself fails.
 - Any part of the commit boundary fails.
@@ -584,11 +607,10 @@ A request's `PagedCacheBlockTable` owns these blocks. The table records:
 - The number of slots containing committed tokens.
 - The ordered physical blocks used by the request.
 
-Every physical block must be in exactly one of these states. The invariant helpers under `engine_invariants.*` validate total accounting, single ownership, valid block identifiers, reservation accounting, and consistency between request progress and cache progress.
+Every physical block must be in exactly one of these states. The invariant helpers under `engine_invariants.*` validate total accounting, single ownership, valid block identifiers, reservation accounting, and consistency between request progress and cache progress. For a composite model, `ValidateCompositeStateInvariants()` additionally requires paged and fixed committed ownership to name the same requests and each request's fixed committed-token boundary to equal its paged committed-slot count.
 
-Paged-cache publication exposes a validate/publish split for the composite transaction introduced
-by the next Engine integration step. The current Engine continues to use the `Commit()` convenience
-wrapper.
+Paged-cache publication exposes a validate/publish split used by the current composite transaction.
+Paged-only execution can still use the `Commit()` convenience wrapper.
 `ValidateCommit()` is repeatable and mutates nothing; it verifies request ownership, token
 boundaries and scalar table/pool mutation generations, unique committed request tables, empty
 reserved blocks, reserved-span accounting, touched-block mappings and occupancy, resident window
@@ -694,8 +716,9 @@ double buffering lets the commit be split into three phases so that a composite
 Engine transaction can validate and stage all of its resources, synchronize once,
 and then publish them at a single infallible boundary:
 
-- **`ValidateCommit()`** is the fallible host-side preflight. It is `const`, mutates
-  nothing, and proves every checkpointed slot is exactly where the reservation
+- **`ValidateCommit()`** is `const`, mutates nothing, and performs every host-side
+  precondition check before device work begins. It proves every checkpointed slot
+  is exactly where the reservation
   left it (ownership, identity, generation, and reservation id), that publishing it
   cannot overflow a generation, and that no row regresses below its slot's
   `committed_tokens`.
@@ -738,10 +761,23 @@ gather/output staging bytes separately. The two-bank design trades roughly doubl
 the persistent footprint for a publish that is a host-only bank flip with no device
 copy, which is what lets `PublishCommit()` be `noexcept`.
 
-This pool is not yet part of the Engine transaction, scheduler capacity model, or
-decoder bindings, and the dynamic Engine still rejects fixed-state groups. Those
-integrations must commit paged KV, fixed state, request/search state, and ready
-events at one boundary before hybrid execution is enabled.
+`PagedCacheManager` owns this pool (with `max_batch_size` slots) whenever the
+decoder has `fixed_conv` or `fixed_recurrent` groups, and integrates it into the dynamic transaction:
+`PlanStepResources()` plans fixed rows atomically with paged blocks, `ReserveStep()`
+reserves both, `PrepareCommit()`/`Commit()` stage and publish both, and
+`Deallocate()` validates and then releases both through a no-throw publication boundary. Explicit
+removal and abandoned-request reclamation release a request's fixed slot together with its paged
+blocks; a completed turn remains resident until one of those lifecycle events. The pool is not yet bound to model execution:
+`VarlenDecoderIO` does not consume the fixed bindings, so a hybrid graph still cannot run through the
+production dynamic decoder path. Enabling hybrid execution is the remaining step;
+ownership, staging, rollback, publication, and invariant validation already commit
+paged KV, fixed state, request/search state, and ready events at one boundary.
+
+Per-step fixed-state gather and output tensors are still allocated by each reservation. Their
+reported staging bytes are checked against the plan but are not subtracted from automatic paged-KV
+capacity. Before the compatibility gate is opened, the execution integration must preallocate or
+otherwise budget this staging footprint and ensure allocation pressure is handled as capacity
+backpressure rather than a fatal contract failure.
 
 ## Prefill, decode, and mixed batches
 

@@ -4,6 +4,7 @@
 #include <array>
 #include <limits>
 #include <type_traits>
+#include <type_traits>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -150,6 +151,27 @@ TEST(PagedCacheReservationTest, ReleaseIsIdempotentAndBlocksCanBeReused) {
   const std::array request_b_id{kRequestB};
   second.FillBlockTable(request_b_id, 1, second_table);
   EXPECT_EQ(second_table[0], first_table[0]);
+}
+
+TEST(PagedCacheReservationTest, DestructorDoesNotReleaseReissuedBlocks) {
+  static_assert(std::is_nothrow_destructible_v<PagedCacheReservation>);
+  BlockPool pool{kBlockSize, 1};
+  std::vector<PagedCacheBlockTable> tables;
+  const std::array requests{
+      PagedCacheReservationRequest{kRequestA, 1, true},
+  };
+  std::shared_ptr<Block> current;
+  {
+    PagedCacheReservation reservation{pool, tables, requests};
+    const std::vector<std::shared_ptr<Block>> stale{
+        reservation.ReservedBlocks().begin(),
+        reservation.ReservedBlocks().end()};
+    pool.Free(stale);
+    current = pool.ReserveBlocks(1)[0];
+  }
+
+  EXPECT_TRUE(pool.Owns(current));
+  EXPECT_EQ(pool.AvailableBlocks(), 0u);
 }
 
 TEST(PagedCacheReservationTest, CommitPublishesNewOwnershipExactlyOnce) {
@@ -325,6 +347,54 @@ TEST(PagedCacheReservationTest, CommittedWindowBlocksCanBeRemovedAndReused) {
   ASSERT_EQ(tables.size(), 1u);
   EXPECT_EQ(tables[0].WindowBlocks()[0]->Id(), first_window_blocks[0]->Id());
   EXPECT_EQ(tables[0].WindowBlocks()[1]->Id(), first_window_blocks[1]->Id());
+}
+
+TEST(PagedCacheReservationTest, RemovalPreflightValidatesBothPoolsBeforeMutation) {
+  BlockPool pool{kBlockSize, 1};
+  BlockPool window_pool{kBlockSize, 1};
+  auto blocks = pool.AllocateBlocks(kBlockSize);
+  const auto block = blocks[0];
+  const auto foreign_window =
+      std::make_shared<Block>(0, kBlockSize, kBlockSize);
+  std::vector<PagedCacheBlockTable> tables{
+      PagedCacheBlockTable{
+          kRequestA, kBlockSize, std::move(blocks), {foreign_window}},
+  };
+
+  EXPECT_THROW(
+      ValidateRemovePagedCacheBlockTable(
+          pool, &window_pool, tables, kRequestA),
+      std::runtime_error);
+  EXPECT_TRUE(pool.Owns(block));
+  EXPECT_EQ(pool.AvailableBlocks(), 0u);
+  EXPECT_EQ(window_pool.AvailableBlocks(), 1u);
+  EXPECT_EQ(tables.size(), 1u);
+
+  EXPECT_DEATH_IF_SUPPORTED(
+      RemoveValidatedPagedCacheBlockTable(
+          pool, &window_pool, tables, kRequestA),
+      "");
+  EXPECT_TRUE(pool.Owns(block));
+  EXPECT_EQ(tables.size(), 1u);
+}
+
+TEST(PagedCacheReservationTest, ValidatedRemovalPublishesBothPoolsNoexcept) {
+  BlockPool pool{kBlockSize, 1};
+  BlockPool window_pool{kBlockSize, 1};
+  std::vector<PagedCacheBlockTable> tables{
+      PagedCacheBlockTable{
+          kRequestA, kBlockSize, pool.AllocateBlocks(kBlockSize),
+          window_pool.AllocateBlocks(kBlockSize)},
+  };
+
+  ValidateRemovePagedCacheBlockTable(
+      pool, &window_pool, tables, kRequestA);
+  RemoveValidatedPagedCacheBlockTable(
+      pool, &window_pool, tables, kRequestA);
+
+  EXPECT_TRUE(tables.empty());
+  EXPECT_EQ(pool.AvailableBlocks(), 1u);
+  EXPECT_EQ(window_pool.AvailableBlocks(), 1u);
 }
 
 TEST(PagedCacheReservationTest, WindowTableUsesReservedRingBeforeCommit) {

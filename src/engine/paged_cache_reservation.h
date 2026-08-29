@@ -77,6 +77,18 @@ void RemovePagedCacheBlockTable(BlockPool& block_pool,
                                 BlockPool* window_block_pool,
                                 std::vector<PagedCacheBlockTable>& committed_tables,
                                 const void* request_id);
+void ValidateRemovePagedCacheBlockTable(
+    const BlockPool& block_pool,
+    const BlockPool* window_block_pool,
+    const std::vector<PagedCacheBlockTable>& committed_tables,
+    const void* request_id);
+// Allocation-free publication for state accepted by ValidateRemovePagedCacheBlockTable().
+// An ownership guard failure terminates rather than silently orphaning state.
+void RemoveValidatedPagedCacheBlockTable(
+    BlockPool& block_pool,
+    BlockPool* window_block_pool,
+    std::vector<PagedCacheBlockTable>& committed_tables,
+    const void* request_id) noexcept;
 
 enum class PagedCacheReservationState {
   Reserved,
@@ -96,7 +108,7 @@ class PagedCacheReservation {
   PagedCacheReservation& operator=(PagedCacheReservation&&) = delete;
   PagedCacheReservation(const PagedCacheReservation&) = delete;
   PagedCacheReservation& operator=(const PagedCacheReservation&) = delete;
-  ~PagedCacheReservation();
+  ~PagedCacheReservation() noexcept;
 
   PagedCacheReservationState State() const { return state_; }
   size_t ReservedBlockCount() const { return reserved_blocks_.size(); }

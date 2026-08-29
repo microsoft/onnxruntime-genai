@@ -17,6 +17,10 @@ struct Request;
 
 using StepTransactionId = uint64_t;
 
+struct StepPlanningConsistencyError : std::runtime_error {
+  using std::runtime_error::runtime_error;
+};
+
 enum class StepOutcomeKind {
   NoWork,
   CapacityDeferred,
@@ -60,12 +64,24 @@ struct RequestStepPlan {
   bool newly_admitted{};
 };
 
+// Fixed decoder-state demand for a step, planned atomically with the paged-block demand so the
+// Engine can prove the reservation matches the plan before any state is published. Row order
+// mirrors StepPlan::requests exactly. `required` is false (and every count zero) when the model has
+// no fixed groups, which keeps the dense paged path unchanged.
+struct FixedStateResourcePlan {
+  bool required{};          // The plan needs fixed slots this step (the model has fixed groups).
+  size_t row_count{};       // Fixed rows the reservation must expose, one per scheduled request.
+  size_t new_slot_count{};  // Rows that admit a fresh request and consume a free fixed slot.
+  size_t staging_bytes{};   // Gather+output staging bytes the reservation must allocate.
+};
+
 struct StepPlan {
   StepTransactionId transaction_id{};
   std::vector<RequestStepPlan> requests;
   size_t scheduled_request_limit{};  // Provisional rows cache feasibility may select.
   size_t token_count{};
   size_t proposed_block_table_columns{};
+  FixedStateResourcePlan fixed_state;
   bool graph_capture_eligible{};
 
   bool Empty() const { return requests.empty(); }

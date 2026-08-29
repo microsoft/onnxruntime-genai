@@ -368,6 +368,36 @@ void PagedKeyValueCache::Remove(std::shared_ptr<Request> request) {
                              block_tables_, request.get());
 }
 
+void PagedKeyValueCache::ValidateRemove(const void* request_id) const {
+  ValidateRemovePagedCacheBlockTable(
+      *block_pool_, window_block_pool_.get(), block_tables_, request_id);
+}
+
+void PagedKeyValueCache::RemoveValidated(const void* request_id) noexcept {
+  RemoveValidatedPagedCacheBlockTable(
+      *block_pool_, window_block_pool_.get(), block_tables_, request_id);
+}
+
+size_t PagedKeyValueCache::CommittedSlots(
+    const void* request_id) const {
+  const PagedCacheBlockTable* match = nullptr;
+  for (const auto& table : block_tables_) {
+    if (table.request_id_ != request_id) {
+      continue;
+    }
+    if (match) {
+      throw StepPlanningConsistencyError(
+          "A request owns more than one paged cache table.");
+    }
+    match = &table;
+  }
+  if (!match) {
+    throw StepPlanningConsistencyError(
+        "A cache resident has no committed paged cache table.");
+  }
+  return match->committed_slots_;
+}
+
 PagedCacheReservation PagedKeyValueCache::Reserve(std::span<const PagedCacheReservationRequest> requests) {
   return PagedCacheReservation{*block_pool_, block_tables_, requests,
                                window_block_pool_.get(), window_ring_blocks_};
@@ -376,14 +406,16 @@ PagedCacheReservation PagedKeyValueCache::Reserve(std::span<const PagedCacheRese
 StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
   const size_t committed_request_count = block_tables_.size();
   if (committed_request_count > max_batch_size_) {
-    throw std::runtime_error("Committed paged cache requests exceed the configured batch size.");
+    throw StepPlanningConsistencyError(
+        "Committed paged cache requests exceed the configured batch size.");
   }
   const size_t scheduled_request_limit =
       plan.scheduled_request_limit == 0
           ? max_batch_size_
           : plan.scheduled_request_limit;
   if (scheduled_request_limit > max_batch_size_) {
-    throw std::runtime_error("Step plan request limit exceeds the configured batch size.");
+    throw StepPlanningConsistencyError(
+        "Step plan request limit exceeds the configured batch size.");
   }
 
   const size_t available_blocks = block_pool_->AvailableBlocks();
@@ -408,7 +440,8 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
                                     const PagedCacheBlockTable* table) {
     const size_t committed_slots = table ? table->committed_slots_ : 0;
     if (entry.target_cache_slots < committed_slots) {
-      throw std::runtime_error("Step plan target precedes the committed cache boundary.");
+      throw StepPlanningConsistencyError(
+          "Step plan target precedes the committed cache boundary.");
     }
 
     const size_t reserved_slots =
@@ -451,16 +484,19 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
     const auto& candidate = plan.requests[i];
     if (std::find(request_ids.begin(), request_ids.end(),
                   candidate.request_id) != request_ids.end()) {
-      throw std::runtime_error("Step plan contains a duplicate request.");
+      throw StepPlanningConsistencyError(
+          "Step plan contains a duplicate request.");
     }
     request_ids.push_back(candidate.request_id);
 
     const auto* table = find_table(candidate.request_id);
     if (candidate.newly_admitted && table) {
-      throw std::runtime_error("New step plan request already belongs to the paged cache.");
+      throw StepPlanningConsistencyError(
+          "New step plan request already belongs to the paged cache.");
     }
     if (!candidate.newly_admitted && !table) {
-      throw std::runtime_error("Step plan resident membership does not match the committed cache.");
+      throw StepPlanningConsistencyError(
+          "Step plan resident membership does not match the committed cache.");
     }
 
     const auto growth = calculate_growth(candidate, table);

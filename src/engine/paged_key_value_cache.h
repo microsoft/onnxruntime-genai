@@ -66,6 +66,9 @@ struct PagedKeyValueCache {
   void AppendTokens(std::shared_ptr<Request> request);
 
   void Remove(std::shared_ptr<Request> request);
+  void ValidateRemove(const void* request_id) const;
+  void RemoveValidated(const void* request_id) noexcept;
+  size_t CommittedSlots(const void* request_id) const;
 
   PagedCacheReservation Reserve(std::span<const PagedCacheReservationRequest> requests);
 
