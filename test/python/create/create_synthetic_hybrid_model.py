@@ -92,13 +92,9 @@ def create_decoder(output_dir):
             key_name = f"state_update.{layer}.recurrent_key"
             delta_name = f"state_update.{layer}.recurrent_delta"
             capsule_name = f"state_update.{layer}.recurrent_capsule"
-            capsule_width = STATE_UPDATE_CAPACITY * (
-                row_dims[0] + row_dims[2] + row_dims[0] * row_dims[1]
-            )
+            capsule_width = STATE_UPDATE_CAPACITY * (row_dims[0] + row_dims[2] + row_dims[0] * row_dims[1])
             outputs.append(
-                helper.make_tensor_value_info(
-                    capsule_name, TensorProto.FLOAT, ["batch_size", capsule_width]
-                )
+                helper.make_tensor_value_info(capsule_name, TensorProto.FLOAT, ["batch_size", capsule_width])
             )
             decay_base = f"{decay_name}/base"
             key_base = f"{key_name}/base"

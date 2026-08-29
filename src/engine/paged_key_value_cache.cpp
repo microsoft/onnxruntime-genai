@@ -21,11 +21,11 @@ StateGroup ResolvePagedKeyValueGroup(const Config::Model::Decoder& decoder) {
     StateGroup group;
     group.kind = StateGroupKind::PagedKeyValue;
     group.key = Config::Model::Decoder::StateBinding{
-      decoder.inputs.past_key_names,
-      decoder.outputs.present_key_names};
+        decoder.inputs.past_key_names,
+        decoder.outputs.present_key_names};
     group.value = Config::Model::Decoder::StateBinding{
-      decoder.inputs.past_value_names,
-      decoder.outputs.present_value_names};
+        decoder.inputs.past_value_names,
+        decoder.outputs.present_value_names};
     group.layer_ids.reserve(decoder.num_hidden_layers);
     for (int layer_id = 0; layer_id < decoder.num_hidden_layers; ++layer_id) {
       group.layer_ids.push_back(layer_id);

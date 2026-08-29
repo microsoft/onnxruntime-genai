@@ -74,22 +74,22 @@ Config::Model::Decoder MakeSparseDecoder() {
   decoder.state_groups = std::vector<Decoder::StateGroup>{
       Decoder::StateGroup{
           Decoder::StateGroupKind::PagedKeyValue,
-        {1, 3},
-        Decoder::StateBinding{"past.%d.key", "present.%d.key"},
-        Decoder::StateBinding{"past.%d.value", "present.%d.value"},
-        std::nullopt},
+          {1, 3},
+          Decoder::StateBinding{"past.%d.key", "present.%d.key"},
+          Decoder::StateBinding{"past.%d.value", "present.%d.value"},
+          std::nullopt},
       Decoder::StateGroup{
-        Decoder::StateGroupKind::Fixed,
-        {0, 2},
-        std::nullopt,
-        std::nullopt,
-        Decoder::StateBinding{"past.%d.conv", "present.%d.conv"}},
+          Decoder::StateGroupKind::Fixed,
+          {0, 2},
+          std::nullopt,
+          std::nullopt,
+          Decoder::StateBinding{"past.%d.conv", "present.%d.conv"}},
       Decoder::StateGroup{
-        Decoder::StateGroupKind::Fixed,
-        {0, 2},
-        std::nullopt,
-        std::nullopt,
-        Decoder::StateBinding{"past.%d.recurrent", "present.%d.recurrent"}}};
+          Decoder::StateGroupKind::Fixed,
+          {0, 2},
+          std::nullopt,
+          std::nullopt,
+          Decoder::StateBinding{"past.%d.recurrent", "present.%d.recurrent"}}};
   return decoder;
 }
 
