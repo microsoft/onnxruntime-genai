@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <limits>
 #include <numeric>
+#include <string>
+#include <string_view>
 
 namespace Generators {
 
@@ -28,6 +30,28 @@ struct PackedLayout {
   int32_t min_kv_len{std::numeric_limits<int32_t>::max()};
 };
 
+size_t CheckedAdd(size_t left, size_t right, std::string_view description) {
+  if (right > std::numeric_limits<size_t>::max() - left) {
+    throw std::runtime_error(std::string{description} + " exceeds the supported size range.");
+  }
+  return left + right;
+}
+
+size_t CheckedMultiply(size_t left, size_t right, std::string_view description) {
+  if (left != 0 && right > std::numeric_limits<size_t>::max() / left) {
+    throw std::runtime_error(std::string{description} + " exceeds the supported size range.");
+  }
+  return left * right;
+}
+
+int32_t CheckedMetadataValue(size_t value, std::string_view description) {
+  if (value > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+    throw std::runtime_error(
+        std::string{description} + " exceeds the int32 attention metadata range.");
+  }
+  return static_cast<int32_t>(value);
+}
+
 }  // namespace
 
 std::unique_ptr<Config> CreateDflash2Config(const Config& config) {
@@ -36,11 +60,19 @@ std::unique_ptr<Config> CreateDflash2Config(const Config& config) {
     throw std::runtime_error("model.dflash2.filename is required to create a DFlash 2 drafter.");
   }
   if (dflash2.num_hidden_layers <= 0 || dflash2.num_key_value_heads <= 0 || dflash2.head_size <= 0 ||
-      dflash2.block_size <= 1 || dflash2.num_draft_tokens <= 0) {
+      dflash2.block_size <= 1 || dflash2.num_draft_tokens <= 0 || dflash2.selector_top_k <= 0) {
     throw std::runtime_error("model.dflash2 geometry must be positive and describe a block of >1 token.");
   }
   if (dflash2.num_draft_tokens != dflash2.block_size - 1) {
     throw std::runtime_error("model.dflash2.num_draft_tokens must be block_size - 1.");
+  }
+  if (dflash2.run_options) {
+    for (const auto& [name, value] : *dflash2.run_options) {
+      if (name == "disable_synchronize_execution_providers" && value == "1") {
+        throw std::runtime_error(
+            "model.dflash2.run_options cannot disable execution-provider synchronization.");
+      }
+    }
   }
 
   auto projected = std::make_unique<Config>(config);
@@ -57,6 +89,37 @@ std::unique_ptr<Config> CreateDflash2Config(const Config& config) {
   decoder.state_groups.reset();
   decoder.sliding_window.reset();
   return projected;
+}
+
+void ValidateDflash2ModelCompatibility(const Config& config,
+                                       const ModelStateMetadata& target_metadata,
+                                       const ModelStateMetadata& drafter_metadata) {
+  const auto& dflash2 = config.model.dflash2;
+  const auto& target_aux_output = dflash2.main_aux_hidden_states;
+  if (target_aux_output.empty() || !target_metadata.HasOutput(target_aux_output)) {
+    throw std::runtime_error(
+        "model.dflash2.main_aux_hidden_states must name a main-model output.");
+  }
+
+  const auto& drafter_aux_input = dflash2.inputs.aux_hidden_states;
+  if (drafter_aux_input.empty() || !drafter_metadata.HasInput(drafter_aux_input)) {
+    throw std::runtime_error(
+        "model.dflash2.inputs.aux_hidden_states must name a drafter-model input.");
+  }
+
+  const auto target_aux_shape = target_metadata.GetOutputShape(target_aux_output);
+  const auto drafter_aux_shape = drafter_metadata.GetInputShape(drafter_aux_input);
+  if (target_aux_shape.size() != 2 || target_aux_shape[1] <= 0 ||
+      drafter_aux_shape.size() != 2 || drafter_aux_shape[1] <= 0 ||
+      target_aux_shape[1] != drafter_aux_shape[1]) {
+    throw std::runtime_error(
+        "DFlash 2 requires matching 2-D auxiliary hidden-state tensors with a static width.");
+  }
+  if (target_metadata.GetOutputDataType(target_aux_output) !=
+      drafter_metadata.GetInputDataType(drafter_aux_input)) {
+    throw std::runtime_error(
+        "DFlash 2 requires matching auxiliary hidden-state tensor types.");
+  }
 }
 
 Dflash2Model::Dflash2Model(std::unique_ptr<Config> config, OrtEnv& ort_env)
@@ -82,7 +145,7 @@ size_t Dflash2Drafter::BytesPerBlock(const Config& config, size_t paged_block_si
 }
 
 size_t Dflash2Drafter::PoolBlocks(const Config& config, size_t paged_block_size,
-                                 size_t max_batch_size) {
+                                  size_t max_batch_size) {
   const auto& dflash2 = config.model.dflash2;
   if (dflash2.filename.empty()) {
     return 0;
@@ -218,15 +281,20 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     block_slot_of_feed[block_feed_indices[slot]] = slot;
   }
 
-  const size_t num_block_rows = block_feed_indices.size() * block_size;
+  const size_t num_block_rows =
+      CheckedMultiply(block_feed_indices.size(), block_size, "DFlash 2 block rows");
+  CheckedMetadataValue(num_block_rows, "DFlash 2 block rows");
   size_t num_ctx_rows = 0;
   for (const auto& feed : feeds) {
-    num_ctx_rows += feed.aux_row_count;
+    num_ctx_rows = CheckedAdd(num_ctx_rows, feed.aux_row_count, "DFlash 2 context rows");
   }
 
   PackedLayout layout;
-  layout.q_row_map.reserve(num_ctx_rows + num_block_rows);
-  layout.qkv_row_map.reserve(num_ctx_rows + num_block_rows);
+  const size_t reserved_rows =
+      CheckedAdd(num_ctx_rows, num_block_rows, "DFlash 2 packed rows");
+  CheckedMetadataValue(reserved_rows, "DFlash 2 packed rows");
+  layout.q_row_map.reserve(reserved_rows);
+  layout.qkv_row_map.reserve(reserved_rows);
   layout.block_row_index.reserve(num_block_rows);
   layout.cumulative_sequence_lengths.reserve(feeds.size() + 1);
   layout.past_sequence_lengths.reserve(feeds.size());
@@ -250,48 +318,70 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     if (context_window_ != 0 && feed.aux_row_count > context_window_) {
       dropped = feed.aux_row_count - context_window_;
     }
-    ingest_begin[i] = feed.aux_row_begin + dropped;
+    ingest_begin[i] = CheckedAdd(feed.aux_row_begin, dropped, "DFlash 2 auxiliary row offset");
     ingest_count[i] = feed.aux_row_count - dropped;
-    num_ctx_rows += ingest_count[i];
+    num_ctx_rows = CheckedAdd(num_ctx_rows, ingest_count[i], "DFlash 2 context rows");
   }
+  CheckedMetadataValue(
+      CheckedAdd(num_ctx_rows, num_block_rows, "DFlash 2 packed rows"),
+      "DFlash 2 packed rows");
 
   for (size_t i = 0; i < feeds.size(); ++i) {
     const auto& feed = feeds[i];
     auto& state = requests_[feed.request];
-    const size_t first_position = feed.first_position + (feed.aux_row_count - ingest_count[i]);
+    const size_t first_position = CheckedAdd(
+        feed.first_position, feed.aux_row_count - ingest_count[i],
+        "DFlash 2 first position");
 
     const size_t slot = block_slot_of_feed[i];
     const bool has_block = slot < block_feed_indices.size();
     const size_t block_rows = has_block ? block_size : 0;
-    const size_t query_len = ingest_count[i] + block_rows;
+    const size_t query_len =
+        CheckedAdd(ingest_count[i], block_rows, "DFlash 2 query length");
     if (query_len == 0) {
       throw std::logic_error("A DFlash 2 feed carries neither context nor a query block.");
     }
-    const size_t total_positions = first_position + query_len;
+    const size_t total_positions =
+        CheckedAdd(first_position, query_len, "DFlash 2 KV length");
     EnsureBlocks(state, total_positions);
-    max_blocks = std::max(max_blocks,
-                          (total_positions + paged_block_size_ - 1) / paged_block_size_);
+    max_blocks = std::max(
+        max_blocks, (total_positions - 1) / paged_block_size_ + 1);
 
     // Context rows borrow the block's first query row; their attention output is discarded.
-    const int32_t borrowed_q_row = has_block ? static_cast<int32_t>(slot * block_size) : 0;
+    const size_t first_block_row =
+        CheckedMultiply(slot, block_size, "DFlash 2 block row index");
+    const int32_t borrowed_q_row = has_block
+                                       ? CheckedMetadataValue(first_block_row, "DFlash 2 query row")
+                                       : 0;
     for (size_t row = 0; row < ingest_count[i]; ++row) {
       layout.q_row_map.push_back(borrowed_q_row);
-      layout.qkv_row_map.push_back(static_cast<int32_t>(num_block_rows + ctx_row + row));
+      layout.qkv_row_map.push_back(CheckedMetadataValue(
+          CheckedAdd(num_block_rows, CheckedAdd(ctx_row, row, "DFlash 2 context row"),
+                     "DFlash 2 QKV row"),
+          "DFlash 2 QKV row"));
     }
     for (size_t row = 0; row < block_rows; ++row) {
-      layout.block_row_index.push_back(static_cast<int32_t>(layout.q_row_map.size()));
-      layout.q_row_map.push_back(static_cast<int32_t>(slot * block_size + row));
-      layout.qkv_row_map.push_back(static_cast<int32_t>(slot * block_size + row));
+      layout.block_row_index.push_back(
+          CheckedMetadataValue(layout.q_row_map.size(), "DFlash 2 packed row"));
+      const int32_t block_row = CheckedMetadataValue(
+          CheckedAdd(first_block_row, row, "DFlash 2 block row"), "DFlash 2 block row");
+      layout.q_row_map.push_back(block_row);
+      layout.qkv_row_map.push_back(block_row);
     }
-    ctx_row += ingest_count[i];
+    ctx_row = CheckedAdd(ctx_row, ingest_count[i], "DFlash 2 context row");
 
-    layout.cumulative_sequence_lengths.push_back(static_cast<int32_t>(layout.q_row_map.size()));
-    layout.past_sequence_lengths.push_back(static_cast<int32_t>(first_position));
-    layout.max_query_len = std::max(layout.max_query_len, static_cast<int32_t>(query_len));
-    layout.max_kv_len = std::max(layout.max_kv_len, static_cast<int32_t>(total_positions));
-    layout.min_kv_len = std::min(layout.min_kv_len, static_cast<int32_t>(total_positions));
+    layout.cumulative_sequence_lengths.push_back(
+        CheckedMetadataValue(layout.q_row_map.size(), "DFlash 2 cumulative sequence length"));
+    layout.past_sequence_lengths.push_back(
+        CheckedMetadataValue(first_position, "DFlash 2 past sequence length"));
+    const int32_t query_length = CheckedMetadataValue(query_len, "DFlash 2 query length");
+    const int32_t kv_length = CheckedMetadataValue(total_positions, "DFlash 2 KV length");
+    layout.max_query_len = std::max(layout.max_query_len, query_length);
+    layout.max_kv_len = std::max(layout.max_kv_len, kv_length);
+    layout.min_kv_len = std::min(layout.min_kv_len, kv_length);
 
-    state.cached_positions = feed.first_position + feed.aux_row_count;
+    state.cached_positions = CheckedAdd(
+        feed.first_position, feed.aux_row_count, "DFlash 2 cached positions");
   }
 
   const size_t num_tokens = layout.q_row_map.size();
@@ -310,7 +400,8 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
 
   auto packed_aux = make(aux_type_, {static_cast<int64_t>(num_ctx_rows),
                                      static_cast<int64_t>(aux_hidden_size_)});
-  const size_t aux_row_bytes = aux_hidden_size_ * Ort::SizeOf(aux_type_);
+  const size_t aux_row_bytes =
+      CheckedMultiply(aux_hidden_size_, Ort::SizeOf(aux_type_), "DFlash 2 auxiliary row bytes");
   auto source_bytes = aux_hidden_states.GetByteSpan();
   auto destination_bytes = packed_aux->GetByteSpan();
   size_t destination_row = 0;
@@ -391,12 +482,12 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
 
   std::vector<const char*> input_names{
       config_.inputs.aux_hidden_states.c_str(), config_.inputs.input_ids.c_str(),
-      config_.inputs.q_row_map.c_str(),         config_.inputs.qkv_row_map.c_str(),
-      config_.inputs.block_row_index.c_str(),   config_.inputs.cumulative_sequence_lengths.c_str(),
+      config_.inputs.q_row_map.c_str(), config_.inputs.qkv_row_map.c_str(),
+      config_.inputs.block_row_index.c_str(), config_.inputs.cumulative_sequence_lengths.c_str(),
       config_.inputs.past_sequence_lengths.c_str(), config_.inputs.block_table.c_str(),
       config_.inputs.attention_metadata.c_str()};
-  std::vector<OrtValue*> inputs{packed_aux->GetOrtTensor(),  input_ids->GetOrtTensor(),
-                                q_row_map->GetOrtTensor(),   qkv_row_map->GetOrtTensor(),
+  std::vector<OrtValue*> inputs{packed_aux->GetOrtTensor(), input_ids->GetOrtTensor(),
+                                q_row_map->GetOrtTensor(), qkv_row_map->GetOrtTensor(),
                                 block_row_index->GetOrtTensor(), cumulative->GetOrtTensor(),
                                 past_lengths->GetOrtTensor(), block_table->GetOrtTensor(),
                                 metadata->GetOrtTensor()};

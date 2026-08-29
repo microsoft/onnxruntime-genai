@@ -1026,6 +1026,13 @@ Graph buffers are allocated once at configured limits and reshaped as static vie
 
 Prefill and mixed-token steps use graph id `-1`, which tells the CUDA execution provider to run eagerly.
 
+An Engine-hosted DFlash 2 drafter also forces eager target execution. Its target decoder output is
+the packed auxiliary hidden-state tensor named by `model.dflash2.main_aux_hidden_states`; that
+variable-size output does not have persistent graph buffers. Engine construction validates its
+rank, element type, and static width against the drafter input before allocating cache resources.
+The drafter run is synchronous because its packed inputs and outputs are owned by one proposal
+call, so `model.dflash2.run_options` cannot disable execution-provider synchronization.
+
 ## Backpressure and fairness
 
 Continuous batching does not mean every pending request runs on every step.
