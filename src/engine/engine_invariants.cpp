@@ -220,6 +220,10 @@ std::vector<InvariantViolation> ValidateRequestInvariants(const RequestStateSnap
         ") exceeds current length (" + std::to_string(request.current_sequence_length) + ").");
   }
 
+  if (request.has_current_turn && request.current_turn_id == 0) {
+    add("Request " + id + " uses reserved turn id zero.");
+  }
+
   if (IsExecutable(request.status)) {
     if (!request.has_current_turn) {
       add("Executable Request " + id + " has no assigned turn id.");

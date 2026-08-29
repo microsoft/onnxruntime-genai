@@ -48,6 +48,12 @@ struct CacheManager {
 
   virtual void Deallocate(std::vector<std::shared_ptr<Request>>& requests) = 0;
 
+  // Engine teardown cannot use the normal Request close path because the Request's weak Engine
+  // reference has already expired. This no-throw path must release any cache ownership for the
+  // Request before the Engine drops its final strong Request reference.
+  virtual void DetachRequestForTeardown(
+      const std::shared_ptr<Request>& request) noexcept = 0;
+
   virtual bool SupportsDynamicBatching() const = 0;
 
   virtual size_t MaxBatchSize() const { return 4; }
@@ -97,6 +103,9 @@ struct StaticCacheManager : CacheManager {
 
   void Deallocate(std::vector<std::shared_ptr<Request>>& requests) override;
 
+  void DetachRequestForTeardown(
+      const std::shared_ptr<Request>& request) noexcept override;
+
   bool SupportsDynamicBatching() const override;
 
   std::vector<std::shared_ptr<Request>> AllocatedRequests() const override;
@@ -124,6 +133,9 @@ struct PagedCacheManager : CacheManager {
                    ExecutionContext& context) override;
 
   void Deallocate(std::vector<std::shared_ptr<Request>>& requests) override;
+
+  void DetachRequestForTeardown(
+      const std::shared_ptr<Request>& request) noexcept override;
 
   bool SupportsDynamicBatching() const override;
 

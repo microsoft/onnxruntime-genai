@@ -104,9 +104,13 @@ OgaResult* OgaTurnOptionsSetSeed(
     OgaTurnOptions* options,
     uint64_t seed);
 
-OgaResult* OgaTurnOptionsSetStopSequences(
+OgaResult* OgaTurnOptionsSetStopTokenIds(
     OgaTurnOptions* options,
-    const OgaSequences* stop_sequences);
+    const OgaSequences* stop_token_ids);
+
+OgaResult* OgaTurnOptionsSetStopStrings(
+    OgaTurnOptions* options,
+    const OgaStringArray* stop_strings);
 
 OgaResult* OgaTurnOptionsSetGuidance(
     OgaTurnOptions* options,
@@ -120,7 +124,7 @@ Initial implementation status:
 | --- | --- |
 | `max_generated_tokens` | Implemented end to end; zero uses the configured/default limit |
 | `temperature`, `top_p`, `top_k`, `seed` | Setter returns an explicit not-implemented error |
-| token-ID stop sequences | A null collection is rejected; a non-null collection is not dereferenced or retained and returns an explicit not-implemented error |
+| token-ID stop sequences and UTF-8 stop strings | Each has a distinct setter. A null collection is rejected; a non-null collection is not dereferenced or retained and returns an explicit not-implemented error |
 | guidance | Setter returns an explicit not-implemented error and does not retain/dereference input |
 
 Unsupported requested behavior must never be accepted and ignored. `OgaTurnOptions` may be reused,
@@ -182,7 +186,7 @@ typedef uint32_t OgaErrorCode;
 OgaResult* OgaEngineEventGetFlags(
     const OgaEngineEvent* event, OgaEngineEventFlags* out);
 OgaResult* OgaEngineEventGetRequest(
-    const OgaEngineEvent* event, OgaRequest** out);
+    const OgaEngineEvent* event, const OgaRequest** out);
 OgaResult* OgaEngineEventGetTurnId(
     const OgaEngineEvent* event, uint64_t* out);
 OgaResult* OgaEngineEventGetToken(
@@ -231,9 +235,9 @@ initialize the output to its zero/null value before rejecting a null event. The 
 Buffer accessors are the two deliberate direct-return exceptions: count returns zero for a null
 Buffer, and indexed access returns null for a null Buffer or an out-of-range index.
 
-`OgaEngineEventGetRequest` returns a borrowed identity alias, never an owned Request handle.
+`OgaEngineEventGetRequest` returns a const borrowed identity alias, never an owned Request handle.
 `OgaEngineEventGetUsage` returns a borrowed usage view. Event and usage pointers are valid only
-until the next `OgaEngineRun` using their Buffer or Buffer destruction.
+until the next validated `OgaEngineRun` using their Buffer or Buffer destruction.
 
 Every function returning `OgaResult*` returns null on success or an owned error object on failure;
 the caller releases that object with `OgaDestroyResult`, and its diagnostic string is valid until
@@ -321,21 +325,22 @@ are destroyed. The input Model handle must be valid during `OgaCreateEngine` and
 caller after that handle is released.
 
 The Engine records its owner thread when it is created. Engine operations, Request operations, and
-Turn-parameter setters are not thread-safe and must be called serially from that owner thread.
+Turn-option setters are not thread-safe and must be called serially from that owner thread.
 Destroying a Request handle only publishes an atomic abandonment marker when it is the final public
-handle; the Engine performs the actual close and cleanup at its next owner-thread boundary. This
-deferred-release behavior does not permit concurrent access to the Engine or Request.
+handle; this final release may occur on another thread. The Engine strongly retains the Request and
+performs the actual close, runtime-state release, and cleanup at its next owner-thread boundary.
+This deferred-release behavior does not permit concurrent Request operations.
 
 Destroying an Engine closes all bound Requests and purges events. Surviving Request handles remain
-valid closed tombstones that the caller must still destroy. A resident static batch is released as
-shared Engine storage during teardown, not through independent per-Request deallocation.
+valid lightweight closed tombstones that the caller must still destroy. Teardown uses a no-throw
+detach path that releases scheduler/cache ownership and Request runtime state without relying on the
+already-expired weak Engine reference. A resident static batch is released as shared Engine storage.
 
 An Event Buffer stores a weak Engine reference and does not keep its bound Engine alive. Run rejects
-a Buffer created by another Engine. If the Engine handle is destroyed first, a later Run using its
-Buffer returns an error without dereferencing the stale Engine pointer; the Buffer remains owned by
-the caller and must still be destroyed. Buffer creation and Run honor the Engine owner thread.
-Buffer access, Run, and destruction are serialized; getters may read immutable views but must not
-race a Run or destruction.
+a Buffer created by another Engine. Both the Engine and Buffer handles must be live for every Run;
+after Engine destruction, the Buffer remains owned by the caller and must still be destroyed without
+being passed to Run. Buffer creation and Run honor the Engine owner thread. Buffer access, Run, and
+destruction are serialized; getters may read immutable views but must not race a Run or destruction.
 
 Request creation snapshots the supplied generation parameters. Engine Requests require
 `search.batch_size == 1` and `search.num_beams == 1`; `top_p` must be in `[0, 1]`, and `top_k`
@@ -355,7 +360,7 @@ do not retain either handle or the caller's input buffer.
 
 Turn IDs:
 
-- start at zero independently for every Request;
+- start at one independently for every Request; zero means no Turn;
 - increase monotonically;
 - are assigned only after successful admission;
 - are returned through `out_turn_id`;
@@ -448,9 +453,11 @@ pending_events_.reserve(cache_manager_->MaxBatchSize());
 ```
 
 `reserve` allocates capacity without constructing events. A committed step produces at most one
-combined event per affected Request, so the maximum retained count is bounded by the scheduled batch
-size. Reserving before execution prevents normal event publication from allocating after model and
-cache state have committed.
+combined event per affected Request, so normal retained output is bounded by the scheduled batch
+size. Request creation grows the retained-event capacity to the tracked Request count because fatal
+handling publishes a terminal event for every executable Turn, including Requests outside the
+failed batch. This keeps event publication allocation-free after model/cache commit and after the
+Engine becomes unhealthy.
 
 Conceptual positive-capacity `Run` flow:
 
@@ -500,11 +507,12 @@ Closing a Request removes its undelivered internal events. Events already copied
 are application-owned and must be discarded there if no longer useful. Destroying an Engine closes
 its Requests and discards pending events.
 
-Close and final-handle abandonment both logically remove a Request from scheduling and purge its
-undelivered events. On the dynamic path, committed paged-cache ownership is released immediately.
-On the static path, a resident row is part of a shared batch allocation and cannot be physically
-released per Request; the closed/abandoned Request is no longer scheduled or returned, but its row,
-Request/Search storage, and shared cache allocation may remain until the whole batch recycles.
+Close and final-handle abandonment both logically remove a Request from scheduling, purge its
+undelivered events, and release its Search, guidance, sampler, and parameter runtime state on the
+owner thread. On the dynamic path, committed paged-cache ownership is released immediately. On the
+static path, a resident row is part of a shared batch allocation and cannot be physically released
+per Request; the closed/abandoned tombstone is no longer scheduled or returned, but its row and
+shared cache allocation may remain until the whole batch recycles.
 
 The event's `request` is borrowed. It remains valid only while the caller retains the owned Request
 handle. Internal pending events hold a `shared_ptr<Request>` until delivery, but that does not relax
@@ -543,12 +551,14 @@ Callers must never consume the token getter merely because an event was returned
   publication.
 - An unserviceable Request produces `TurnFinished | Failed`, is removed from scheduler/cache
   admission, and does not poison unrelated Requests.
-- A fatal Engine failure produces `Failed` with a null Request and prevents later model execution.
+- A fatal Engine failure produces `TurnFinished | Failed` for every affected Turn and prevents
+  later model execution. If no Turn is affected, it produces `Failed` with a null Request.
 - Detailed diagnostics continue to use the library's established result/error facilities.
 - Invalid Buffer use, API misuse, and owner-thread violations return `OgaResult` with Buffer count
   zero and no Engine progress.
 - Capacity, retryable, unserviceable, contract-failure, and first fatal-execution outcomes remain
-  typed events. After the fatal event is delivered, later `Run` calls return the stored fatal error.
+  typed events. After all fatal events are delivered, later `Run` calls return the stored fatal
+  error.
 
 The required mapping is:
 
@@ -560,8 +570,8 @@ The required mapping is:
 | `ExecutionCapacityExceeded` | `CapacityBlocked` | `ExecutionCapacityExceeded` | Yes | Yes |
 | `RetryableBatchAbort` | `Retryable` | `RetryableExecution` | Yes | Yes |
 | `UnserviceableRequest` | `TurnFinished \| Failed` | `RequestUnserviceable` | Yes | No current-Turn progress |
-| `ExecutionContractFailure` | `Failed` | `EngineContractFailure` | No | No further execution |
-| `FatalExecutionFailure` | `Failed` | `EngineExecutionFailure` | No | No further execution |
+| `ExecutionContractFailure` | `TurnFinished \| Failed` per affected Turn | `EngineContractFailure` | No | No further execution |
+| `FatalExecutionFailure` | `TurnFinished \| Failed` per affected Turn | `EngineExecutionFailure` | No | No further execution |
 
 `UnserviceableRequest` is terminal for the affected Turn because retrying the unchanged Request
 would loop forever. The Engine resolves the internal Request pointer, removes it from admission,
@@ -571,7 +581,9 @@ healthy; a later `BeginTurn` for that Request is subject to the normal continuat
 
 `ExecutionContractFailure` represents a broken scheduler/transaction invariant.
 `FatalExecutionFailure` represents execution or rollback failure that leaves Engine state
-untrustworthy. Both mark the Engine permanently unhealthy before publishing the event.
+untrustworthy. Both mark the Engine permanently unhealthy, mark every executable Turn failed, and
+publish its terminal event before later `Run` calls return the stored fatal error. With no affected
+Turn, the Engine publishes one request-less `Failed` event instead.
 
 The current implementation centralizes this policy in its typed `EventFromStepError` mapping rather
 than parsing diagnostic strings.
@@ -601,8 +613,8 @@ the classic Generator parameter type.
 - `OgaEngine::Run(OgaEngineEventBuffer&)` returns the populated count.
 - `OgaEngineEventBuffer::Get(index)` returns a borrowed event pointer.
 - Event and usage wrappers expose getters only. `OgaEngineEvent::Request()` returns an optional
-  non-owning `std::reference_wrapper<OgaRequest>`; it never exposes an owning or deletable handle
-  for the borrowed Request.
+  non-owning `std::reference_wrapper<const OgaRequest>`; it never exposes an owning, mutable, or
+  deletable handle for the borrowed Request.
 - No unseen-token methods.
 
 ### Python
@@ -611,12 +623,14 @@ the classic Generator parameter type.
 - `Engine.create_request(params, options=None) -> Request`.
 - `Request.begin_turn(tokens, turn_options=None) -> int`.
 - `Request.cancel_turn(turn_id) -> bool`.
-- `TurnOptions.set_stop_sequences(token_id_sequences)` converts the ragged collection to a temporary
-  `OgaSequences`; the current C API then raises the explicit not-implemented error. A null C
-  collection is rejected before that status is returned.
+- `TurnOptions.set_stop_token_ids(token_id_sequences)` converts the ragged collection to a temporary
+  `OgaSequences`; `TurnOptions.set_stop_strings(strings)` converts strings to a temporary
+  `OgaStringArray`. The current C API returns the explicit not-implemented error for either
+  non-null collection.
 - `Engine.create_event_buffer(capacity) -> EngineEventBuffer`.
 - `Engine.run(buffer) -> EngineEventBuffer`; the returned object is the same reusable Buffer and is
-  a Python sequence over its populated borrowed event views.
+  a Python sequence over its populated borrowed event views. The binding releases the GIL for the
+  complete native Run and reacquires it before returning or translating an exception.
 - A zero-capacity Buffer is the capacity-zero no-op. Negative or unrepresentable capacities are
   rejected during Buffer creation.
 - `EngineEvent` exposes flags, borrowed Request, Turn ID, optional token, finish reason, error code,
@@ -643,7 +657,7 @@ is part of the current source surface.
 1. Added opaque Engine option, event, usage, and reusable Buffer handles; kept finish reasons,
    event flags, and error codes fixed-width.
 2. Implemented Turn option creation, supported limit snapshotting, explicit unsupported setters,
-   zero-based Turn IDs, and named cancellation.
+   nonzero Turn IDs, and named cancellation.
 3. Replaced internal ready-Request retention with pre-reserved pending event storage.
 4. Captured token and terminal payload atomically at transaction commit on dynamic and static paths.
 5. Replaced `OgaEngineRun` and removed unseen-token delivery.
@@ -661,7 +675,8 @@ commit buildable; the completed change exposes events only.
   public ABI.
 - Null handles and null getter outputs are rejected safely.
 - Direct count/get access is null- and bounds-safe.
-- A Buffer from another or destroyed Engine is rejected before model progress.
+- A Buffer from another live Engine is rejected before model progress.
+- A Buffer remains safely destructible after its Engine is destroyed and is not passed to Run.
 - Capacity zero validates the owner thread and otherwise does no work.
 - `uint64_t` counts that do not fit internal types are rejected.
 - Unsupported Turn setters return explicit not-implemented errors.
@@ -669,7 +684,7 @@ commit buildable; the completed change exposes events only.
 ### Request and Turn lifecycle
 
 - Request settings are snapshotted at creation.
-- Turn IDs begin at zero and failed admission does not consume an ID.
+- Turn IDs begin at one, zero means no Turn, and failed admission does not consume an ID.
 - IDs increase across continuation Turns and exhaustion is rejected before mutation.
 - Named stale cancellation cannot cancel a successor Turn.
 - Repeated cancellation is idempotent.
@@ -706,10 +721,11 @@ commit buildable; the completed change exposes events only.
 - Retryable non-capacity abort emits `Retryable/RetryableExecution` after rollback.
 - An unserviceable Request is removed from admission, emits exactly one
   `TurnFinished | Failed/RequestUnserviceable` event, and does not affect unrelated Requests.
-- Contract failure emits `Failed/EngineContractFailure`, has no borrowed Request, and permanently
-  prevents later execution.
-- Fatal execution failure emits `Failed/EngineExecutionFailure`, has no borrowed Request, and
-  permanently prevents later execution.
+- Contract failure emits one `TurnFinished | Failed/EngineContractFailure` event for every affected
+  Turn and permanently prevents later execution.
+- Fatal execution failure emits one `TurnFinished | Failed/EngineExecutionFailure` event for every
+  affected Turn and permanently prevents later execution.
+- A fatal failure with no affected Turn emits one request-less Engine failure event.
 - API misuse returns `OgaResult` without a misleading operational event.
 
 ### Cross-surface behavior

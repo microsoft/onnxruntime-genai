@@ -186,17 +186,13 @@ bool ScheduledRequests::TryGenerateNextTokensBatched(
 
   next_tokens.CopyDeviceToCpu();
 
-  for (auto* request : sampling_plan_->requests) {
-    const auto result = request->CompleteGeneration();
+  for (size_t sampling_index = 0;
+       sampling_index < sampling_plan_->requests.size();
+       ++sampling_index) {
+    const auto result =
+        sampling_plan_->requests[sampling_index]->CompleteGeneration();
     if (results) {
-      const auto it = std::find_if(
-          requests_.begin(), requests_.end(),
-          [request](const std::shared_ptr<Request>& candidate) {
-            return candidate.get() == request;
-          });
-      if (it == requests_.end())
-        throw std::logic_error("Batched sampling request is not in the scheduled batch.");
-      (*results)[static_cast<size_t>(it - requests_.begin())] = result;
+      (*results)[sampling_plan_->result_indices[sampling_index]] = result;
     }
   }
   for (const auto& request : requests_) {
@@ -216,7 +212,10 @@ bool ScheduledRequests::PrepareBatchedSamplingPlan(
   }
 
   sampling_plan_->Clear();
-  for (const auto& request : requests_) {
+  for (size_t request_index = 0;
+       request_index < requests_.size();
+       ++request_index) {
+    const auto& request = requests_[request_index];
     // Dynamic transactions keep newly admitted and continued requests Queued until commit, while
     // the static scheduler moves every executable row to Active before constructing the batch.
     const bool status_is_executable =
@@ -232,6 +231,7 @@ bool ScheduledRequests::PrepareBatchedSamplingPlan(
       return false;
     }
     sampling_plan_->requests.push_back(request.get());
+    sampling_plan_->result_indices.push_back(request_index);
     sampling_plan_->params.push_back(*args);
     sampling_plan_->states.push_back(&request->SamplingState(*batched_sampler_));
   }

@@ -89,6 +89,9 @@ void Request::OnFirstExternalReference() noexcept {
 
 void Request::OnLastExternalReference() noexcept {
   externally_abandoned_.store(true, std::memory_order_release);
+  if (auto engine = engine_.lock()) {
+    engine->abandonment_pending_.store(true, std::memory_order_release);
+  }
 }
 
 bool Request::IsExternallyAbandoned() const noexcept {
@@ -129,9 +132,15 @@ bool Request::Cancel(uint64_t turn_id) {
   return engine->CancelRequest(shared_from_this(), turn_id);
 }
 
-void Request::CompleteClose() {
+void Request::CompleteClose() noexcept {
   engine_.reset();
   status_ = RequestStatus::Closed;
+  guidance_transaction_checkpoint_.reset();
+  guidance_logits_processor_.reset();
+  batched_sampler_state_.reset();
+  search_.reset();
+  params_.reset();
+  std::vector<int32_t>{}.swap(tokens_host_);
 }
 
 uint64_t Request::BeginTurn(
@@ -276,18 +285,20 @@ void Request::ValidateEngineCompatibility() const {
 }
 
 void Request::SaveStateForTransaction() {
-  if (guidance_logits_processor_) {
-    guidance_transaction_checkpoint_ = guidance_logits_processor_->Clone();
-  }
+  auto guidance_checkpoint = guidance_logits_processor_
+                                 ? guidance_logits_processor_->Clone()
+                                 : nullptr;
   search_->SaveStateForTransaction();
+  guidance_transaction_checkpoint_ = std::move(guidance_checkpoint);
   transaction_rng_ = rng_;
 }
 
 void Request::SaveStateForExternalSamplingTransaction() {
-  if (guidance_logits_processor_) {
-    guidance_transaction_checkpoint_ = guidance_logits_processor_->Clone();
-  }
+  auto guidance_checkpoint = guidance_logits_processor_
+                                 ? guidance_logits_processor_->Clone()
+                                 : nullptr;
   search_->SaveStateForExternalSamplingTransaction();
+  guidance_transaction_checkpoint_ = std::move(guidance_checkpoint);
   transaction_rng_ = rng_;
 }
 
@@ -356,6 +367,12 @@ void Request::ApplyLogitsProcessors(DeviceSpan<float> logits) {
   search_->ApplyMinLength(search_params.min_length);
   search_->ApplyRepetitionPenalty(search_params.repetition_penalty);
   search_->ApplyNoRepeatNgram(search_params.no_repeat_ngram_size);
+}
+
+void Request::ResetGuidanceForNewTurn() {
+  if (guidance_logits_processor_) {
+    guidance_logits_processor_->Reset();
+  }
 }
 
 void Request::SelectNextToken() {

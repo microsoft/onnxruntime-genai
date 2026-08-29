@@ -309,11 +309,11 @@ TEST(InvariantValidatorTest, ProcessedBeyondCurrentReported) {
   EXPECT_FALSE(ValidateRequestInvariants(request).empty());
 }
 
-TEST(InvariantValidatorTest, ZeroTurnIdIsValidWhenAssigned) {
+TEST(InvariantValidatorTest, ZeroTurnIdIsRejectedWhenAssigned) {
   auto request = MakeValidRequest(kRequestA, RequestStatus::Active, 10, 4);
   request.current_turn_id = 0;
   request.has_current_turn = true;
-  EXPECT_TRUE(ValidateRequestInvariants(request).empty());
+  EXPECT_FALSE(ValidateRequestInvariants(request).empty());
 }
 
 TEST(InvariantValidatorTest, TurnCompleteRequestWithFinalUnprocessedTokenIsValid) {

@@ -933,8 +933,8 @@ struct OgaEngineEvent : OgaAbstract {
     return value;
   }
 
-  std::optional<std::reference_wrapper<OgaRequest>> Request() const {
-    OgaRequest* value{};
+  std::optional<std::reference_wrapper<const OgaRequest>> Request() const {
+    const OgaRequest* value{};
     OgaCheckResult(OgaEngineEventGetRequest(this, &value));
     if (!value) {
       return std::nullopt;
@@ -1038,8 +1038,12 @@ struct OgaTurnOptions : OgaAbstract {
     OgaCheckResult(OgaTurnOptionsSetSeed(this, value));
   }
   /** Reserved for future use; currently throws a not-implemented error. */
-  void SetStopSequences(const OgaSequences& values) {
-    OgaCheckResult(OgaTurnOptionsSetStopSequences(this, &values));
+  void SetStopTokenIds(const OgaSequences& values) {
+    OgaCheckResult(OgaTurnOptionsSetStopTokenIds(this, &values));
+  }
+  /** Reserved for future use; currently throws a not-implemented error. */
+  void SetStopStrings(const OgaStringArray& values) {
+    OgaCheckResult(OgaTurnOptionsSetStopStrings(this, &values));
   }
   /** Reserved for future use; currently throws a not-implemented error. */
   void SetGuidance(const char* type, const char* data) {

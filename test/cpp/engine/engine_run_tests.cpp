@@ -620,6 +620,26 @@ TEST_F(EngineRunTest, HasPendingRequestsReclaimsPubliclyDestroyedUnassignedReque
   EXPECT_EQ(engine.executor->decode_calls, 0);
 }
 
+TEST_F(EngineRunTest, OffThreadFinalReleaseBeforeBeginTurnDefersDestructionToOwnerThread) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
+  auto request = CreateEngineRequest(engine.engine, *model_);
+  ExternalRequestReference public_handle{*request};
+  std::weak_ptr<Request> request_lifetime = request;
+  request.reset();
+
+  std::thread final_release([&] {
+    public_handle.Release();
+  });
+  final_release.join();
+
+  // The Engine's strong tracking reference keeps Search and other runtime state alive until an
+  // owner-thread boundary performs reclamation.
+  EXPECT_FALSE(request_lifetime.expired());
+  EXPECT_FALSE(engine.engine->HasPendingRequests());
+  EXPECT_TRUE(request_lifetime.expired());
+  EXPECT_EQ(engine.cache->deallocate_calls, 1);
+}
+
 TEST_F(EngineRunTest, HasPendingRequestsReclaimsPubliclyDestroyedQueuedRequest) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
   auto request = CreateRequestWithPrompt(
@@ -717,7 +737,7 @@ TEST_F(EngineRunTest, DestroyingEngineClosesRequestWhosePublicHandleSurvives) {
       model_, /*capacity=*/8);
   auto scheduler = Scheduler::Create(model_, cache);
   auto executor = std::make_unique<RecordingModelExecutor>(
-      model_, cache, EosToken(*model_));
+      model_, cache, /*forced_token=*/5);
   EngineDependencies dependencies{
       cache, std::move(scheduler), std::move(executor)};
   auto engine = std::make_shared<Engine>(
@@ -725,10 +745,15 @@ TEST_F(EngineRunTest, DestroyingEngineClosesRequestWhosePublicHandleSurvives) {
   auto request = CreateRequestWithPrompt(
       engine, *model_, Prompt(10));
   ExternalRequestReference public_request{*request};
+  ASSERT_EQ(RunOne(*engine).request, request);
+  ASSERT_EQ(cache->AllocatedCount(), 1u);
+  ASSERT_EQ(request->status_, RequestStatus::Active);
 
   engine.reset();
 
   EXPECT_EQ(request->status_, RequestStatus::Closed);
+  EXPECT_EQ(cache->AllocatedCount(), 0u);
+  EXPECT_EQ(cache->deallocate_calls, 1);
   EXPECT_NO_THROW(public_request.Release());
 }
 
@@ -806,7 +831,11 @@ TEST_F(EngineRunTest, StaticExecutionFailureTerminatesRequestsAndMarksEngineUnhe
   executor_observer->SetNextFailure(ScriptedExecutionFailure::Fatal);
 
   const auto failure = RunOne(*engine);
-  EXPECT_EQ(failure.flags, EngineEventFlagFailed);
+  EXPECT_EQ(failure.request, request);
+  EXPECT_EQ(failure.turn_id, request->CurrentTurnId());
+  EXPECT_EQ(failure.flags,
+            EngineEventFlagTurnFinished | EngineEventFlagFailed);
+  EXPECT_EQ(failure.finish_reason, GenerationFinishReason::Failed);
   EXPECT_EQ(failure.error_code, EngineErrorCode::EngineExecutionFailure);
   EXPECT_THROW(static_cast<void>(RunOne(*engine)), EngineStepError);
 
@@ -1181,7 +1210,11 @@ TEST_F(EngineRunTest, FatalExecutionFailureMarksEngineUnhealthy) {
   engine.executor->SetNextFailure(ScriptedExecutionFailure::Fatal);
 
   const auto failure = RunOne(*engine.engine);
-  EXPECT_EQ(failure.flags, EngineEventFlagFailed);
+  EXPECT_EQ(failure.request, request);
+  EXPECT_EQ(failure.turn_id, request->CurrentTurnId());
+  EXPECT_EQ(failure.flags,
+            EngineEventFlagTurnFinished | EngineEventFlagFailed);
+  EXPECT_EQ(failure.finish_reason, GenerationFinishReason::Failed);
   EXPECT_EQ(failure.error_code, EngineErrorCode::EngineExecutionFailure);
   EXPECT_THROW(
       static_cast<void>(engine.engine->Run({})), EngineStepError);
@@ -1191,6 +1224,35 @@ TEST_F(EngineRunTest, FatalExecutionFailureMarksEngineUnhealthy) {
   EXPECT_EQ(engine.cache->AllocatedCount(), 0u);
   request->Close();
   EXPECT_EQ(request->status_, RequestStatus::Closed);
+}
+
+TEST_F(EngineRunTest, FatalExecutionFailurePublishesEveryAffectedTurn) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
+  auto first = CreateRequestWithPrompt(
+      engine.engine, *model_, Prompt(10));
+  auto second = CreateRequestWithPrompt(
+      engine.engine, *model_, Prompt(20));
+  engine.executor->SetNextFailure(ScriptedExecutionFailure::Fatal);
+
+  std::array<EngineEvent, 2> events;
+  ASSERT_EQ(engine.engine->Run(events), events.size());
+  EXPECT_EQ(events[0].request, first);
+  EXPECT_EQ(events[1].request, second);
+  for (const auto& event : events) {
+    ASSERT_NE(event.request, nullptr);
+    EXPECT_EQ(event.turn_id, event.request->CurrentTurnId());
+    EXPECT_EQ(event.flags,
+              EngineEventFlagTurnFinished | EngineEventFlagFailed);
+    EXPECT_EQ(event.finish_reason, GenerationFinishReason::Failed);
+    EXPECT_EQ(event.error_code, EngineErrorCode::EngineExecutionFailure);
+    EXPECT_EQ(event.usage.prompt_tokens, event.request->TurnPromptTokens());
+    EXPECT_EQ(event.usage.generated_tokens,
+              event.request->TurnGeneratedTokens());
+  }
+  EXPECT_EQ(first->status_, RequestStatus::TurnComplete);
+  EXPECT_EQ(second->status_, RequestStatus::TurnComplete);
+  EXPECT_FALSE(engine.engine->HasPendingRequests());
+  EXPECT_THROW(static_cast<void>(RunOne(*engine.engine)), EngineStepError);
 }
 
 TEST_F(EngineRunTest, StaticSchedulerFailureMarksEngineUnhealthy) {
@@ -1209,7 +1271,11 @@ TEST_F(EngineRunTest, StaticSchedulerFailureMarksEngineUnhealthy) {
   auto request = CreateRequestWithPrompt(engine, *model_, Prompt(10));
 
   const auto failure = RunOne(*engine);
-  EXPECT_EQ(failure.flags, EngineEventFlagFailed);
+  EXPECT_EQ(failure.request, request);
+  EXPECT_EQ(failure.turn_id, request->CurrentTurnId());
+  EXPECT_EQ(failure.flags,
+            EngineEventFlagTurnFinished | EngineEventFlagFailed);
+  EXPECT_EQ(failure.finish_reason, GenerationFinishReason::Failed);
   EXPECT_EQ(failure.error_code, EngineErrorCode::EngineContractFailure);
   EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
   EXPECT_EQ(request->FinishReason(), GenerationFinishReason::Failed);
@@ -1230,7 +1296,9 @@ TEST_F(EngineRunTest, BeginTurnIsRejectedAfterEngineBecomesUnhealthy) {
   auto second_prompt = Prompt(20);
   auto second = CreateRequestWithPrompt(engine.engine, *model_, second_prompt);
   engine.executor->SetNextFailure(ScriptedExecutionFailure::Fatal);
-  EXPECT_EQ(RunOne(*engine.engine).flags, EngineEventFlagFailed);
+  EXPECT_EQ(
+      RunOne(*engine.engine).flags,
+      EngineEventFlagTurnFinished | EngineEventFlagFailed);
 
   const auto before = first->Snapshot();
   const std::vector<int32_t> continuation{5, 6};

@@ -54,6 +54,14 @@ void StaticBatchScheduler::RemoveRequest(std::shared_ptr<Request> request) {
   }
 }
 
+void StaticBatchScheduler::DetachRequestForTeardown(
+    const std::shared_ptr<Request>& request) noexcept {
+  cache_manager_->DetachRequestForTeardown(request);
+  requests_pool_.erase(
+      std::remove(requests_pool_.begin(), requests_pool_.end(), request),
+      requests_pool_.end());
+}
+
 ScheduledRequests StaticBatchScheduler::Schedule() {
   const auto allocated_requests = cache_manager_->AllocatedRequests();
 
@@ -124,6 +132,14 @@ void DynamicBatchScheduler::RemoveRequest(std::shared_ptr<Request> request) {
   cache_manager_->Deallocate(requests_to_remove);
 
   requests_pool_.erase(std::remove(requests_pool_.begin(), requests_pool_.end(), request), requests_pool_.end());
+}
+
+void DynamicBatchScheduler::DetachRequestForTeardown(
+    const std::shared_ptr<Request>& request) noexcept {
+  cache_manager_->DetachRequestForTeardown(request);
+  requests_pool_.erase(
+      std::remove(requests_pool_.begin(), requests_pool_.end(), request),
+      requests_pool_.end());
 }
 
 ScheduledRequests DynamicBatchScheduler::Schedule() {

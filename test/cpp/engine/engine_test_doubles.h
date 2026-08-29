@@ -71,6 +71,15 @@ struct RecordingCacheManager : CacheManager {
     }
   }
 
+  void DetachRequestForTeardown(
+      const std::shared_ptr<Request>& request) noexcept override {
+    deallocate_calls++;
+    if (trace_) trace_->Record("DetachRequestForTeardown");
+    allocated_.erase(
+        std::remove(allocated_.begin(), allocated_.end(), request),
+        allocated_.end());
+  }
+
   bool SupportsDynamicBatching() const override {
     return supports_dynamic_batching_;
   }

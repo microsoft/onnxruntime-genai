@@ -8,6 +8,8 @@ from __future__ import annotations
 import gc
 import json
 import logging
+import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -147,6 +149,47 @@ def _generate_isolated(model, prompt, max_new_tokens):
     del engine
     gc.collect()
     return sink.tokens
+
+
+def test_engine_run_releases_gil(model):
+    engine = og.Engine(model)
+    params = og.GeneratorParams(model)
+    params.set_search_options(
+        do_sample=False,
+        max_length=len(_PROMPT_LONG) + 4,
+    )
+    request = engine.create_request(params)
+    request.begin_turn(np.asarray(_PROMPT_LONG, dtype=np.int32))
+    event_buffer = engine.create_event_buffer(1)
+
+    worker_ready = threading.Event()
+    allow_worker = threading.Event()
+    worker_progressed = threading.Event()
+
+    def worker():
+        worker_ready.set()
+        allow_worker.wait()
+        worker_progressed.set()
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    assert worker_ready.wait(timeout=5)
+
+    previous_switch_interval = sys.getswitchinterval()
+    try:
+        # Prevent the interpreter's periodic thread switch from satisfying the assertion. The
+        # worker can acquire the GIL here only while the native Engine Run has explicitly released
+        # it.
+        sys.setswitchinterval(10.0)
+        allow_worker.set()
+        engine.run(event_buffer)
+        assert worker_progressed.is_set()
+    finally:
+        sys.setswitchinterval(previous_switch_interval)
+        thread.join(timeout=5)
+        request.close()
+
+    assert not thread.is_alive()
 
 
 def test_model_declares_paged_config():
@@ -322,7 +365,7 @@ def test_per_turn_budget_is_independent_and_snapshotted(model):
 
     turn_options = og.TurnOptions(request)
     turn_options.set_max_generated_tokens(3)
-    assert request.begin_turn(prompt, turn_options) == 0
+    assert request.begin_turn(prompt, turn_options) == 1
     _run(engine, sinks, close_completed=False)
 
     assert sink.tokens == predicted_tokens(_PROMPT_LONG, 3)
@@ -332,7 +375,7 @@ def test_per_turn_budget_is_independent_and_snapshotted(model):
 
     continuation = np.asarray([12], dtype=np.int32)
     turn_options.set_max_generated_tokens(2)
-    assert request.begin_turn(continuation, turn_options) == 1
+    assert request.begin_turn(continuation, turn_options) == 2
     _run(engine, sinks, close_completed=False)
 
     assert len(sink.tokens) == 5
@@ -349,7 +392,7 @@ def test_request_total_limit_and_cancel_metadata(model):
     sink = _Sink()
     sinks = {request: sink}
 
-    assert request.begin_turn(np.asarray(_PROMPT_LONG, dtype=np.int32)) == 0
+    assert request.begin_turn(np.asarray(_PROMPT_LONG, dtype=np.int32)) == 1
     _run(engine, sinks, close_completed=False)
     assert len(sink.tokens) == 2
     assert sink.finish_reason == og.FinishReason.MAX_SESSION_TOKENS
@@ -377,7 +420,7 @@ def test_zero_turn_budget_uses_default_limit(model):
 
     turn_options = og.TurnOptions(request)
     turn_options.set_max_generated_tokens(0)
-    assert request.begin_turn(prompt, turn_options) == 0
+    assert request.begin_turn(prompt, turn_options) == 1
     _run(engine, sinks, close_completed=False)
 
     expected_generated_tokens = 16 - len(prompt)
@@ -605,8 +648,8 @@ def test_events_deliver_tokens_across_turns(model):
             finished = bool(event.flags & og.EngineEventFlags.TURN_FINISHED)
         return tokens
 
-    first_turn_tokens = run_turn(np.asarray(_PROMPT_A, dtype=np.int32), 0)
-    second_turn_tokens = run_turn(follow_up, 1)
+    first_turn_tokens = run_turn(np.asarray(_PROMPT_A, dtype=np.int32), 1)
+    second_turn_tokens = run_turn(follow_up, 2)
 
     assert first_turn_tokens
     assert second_turn_tokens

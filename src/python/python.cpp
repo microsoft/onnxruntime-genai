@@ -830,11 +830,16 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
            "Reserved for future use; currently raises a not-implemented error.")
       .def("set_seed", &OgaTurnOptions::SetSeed,
            "Reserved for future use; currently raises a not-implemented error.")
-      .def("set_stop_sequences", [](OgaTurnOptions& options, const std::vector<std::vector<int32_t>>& values) {
+      .def("set_stop_token_ids", [](OgaTurnOptions& options, const std::vector<std::vector<int32_t>>& values) {
         auto sequences = OgaSequences::Create();
         for (const auto& value : values)
           sequences->Append(value.data(), value.size());
-        options.SetStopSequences(*sequences); }, "Reserved for future use; currently raises a not-implemented error.")
+        options.SetStopTokenIds(*sequences); }, "Reserved for future use; currently raises a not-implemented error.")
+      .def("set_stop_strings", [](OgaTurnOptions& options, const std::vector<std::string>& values) {
+        auto strings = OgaStringArray::Create();
+        for (const auto& value : values)
+          strings->Add(value.c_str());
+        options.SetStopStrings(*strings); }, "Reserved for future use; currently raises a not-implemented error.")
       .def("set_guidance", &OgaTurnOptions::SetGuidance, "Reserved for future use; currently raises a not-implemented error.");
 
   pybind11::class_<OgaRequest>(m, "Request")
@@ -927,7 +932,10 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           [](OgaEngine& engine, pybind11::object buffer_object) {
             auto& buffer =
                 buffer_object.cast<OgaEngineEventBuffer&>();
-            engine.Run(buffer);
+            {
+              pybind11::gil_scoped_release release;
+              engine.Run(buffer);
+            }
             return buffer_object;
           },
           pybind11::arg("buffer"))

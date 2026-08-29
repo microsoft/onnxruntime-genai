@@ -90,7 +90,8 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
     std::vector<std::unique_ptr<OgaGeneratorParams>> params;
     std::vector<RequestRunState> request_states(static_cast<size_t>(config.concurrency));
     std::vector<std::unique_ptr<OgaRequest>> requests;
-    std::unordered_map<OgaRequest*, RequestRunState*> request_states_by_request;
+    std::unordered_map<const OgaRequest*, RequestRunState*>
+        request_states_by_request;
 
     params.reserve(static_cast<size_t>(config.concurrency));
     requests.reserve(static_cast<size_t>(config.concurrency));

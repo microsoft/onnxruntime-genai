@@ -7,6 +7,7 @@
 // create/begin/schedule/continue/close move a request between Unassigned, Assigned, Active,
 // TurnComplete, and Closed.
 
+#include <array>
 #include <memory>
 #include <limits>
 #include <optional>
@@ -276,7 +277,7 @@ TEST_F(RequestLifecycleTest, CancelQueuedTurnPublishesTerminalReadyAndCanContinu
   auto request = NewRequest();
   const auto prompt = Prompt();
   const auto turn_id = request->BeginTurn(prompt);
-  ASSERT_EQ(turn_id, 0u);
+  ASSERT_EQ(turn_id, 1u);
 
   EXPECT_TRUE(request->Cancel(turn_id));
   EXPECT_FALSE(request->Cancel(turn_id));
@@ -291,8 +292,8 @@ TEST_F(RequestLifecycleTest, CancelQueuedTurnPublishesTerminalReadyAndCanContinu
   EXPECT_EQ(RunOne(*engine_.engine).request, request);
   EXPECT_FALSE(engine_.engine->HasPendingRequests());
 
-  EXPECT_EQ(request->BeginTurn(continuation), 1u);
-  EXPECT_EQ(request->CurrentTurnId(), 1u);
+  EXPECT_EQ(request->BeginTurn(continuation), 2u);
+  EXPECT_EQ(request->CurrentTurnId(), 2u);
   EXPECT_EQ(request->FinishReason(), GenerationFinishReason::None);
   EXPECT_EQ(request->status_, RequestStatus::Assigned);
   EXPECT_EQ(request->CurrentSequenceLength(),
@@ -313,7 +314,7 @@ TEST_F(RequestLifecycleTest, CancelActiveTurnPreservesResidentState) {
 
   request->BeginTurn(std::vector<int32_t>{5});
   EXPECT_EQ(request->status_, RequestStatus::Assigned);
-  EXPECT_EQ(request->CurrentTurnId(), 1u);
+  EXPECT_EQ(request->CurrentTurnId(), 2u);
 }
 
 TEST_F(RequestLifecycleTest, CancelCompletedTurnPreservesOriginalFinishReason) {
@@ -405,14 +406,14 @@ TEST_F(RequestLifecycleTest, BeginTurnAfterTurnCompleteQueuesNextTurn) {
   auto prompt = Prompt();
   auto request = CreateRequestWithPrompt(engine_.engine, *model_, prompt);
   const int64_t assigned_length = static_cast<int64_t>(prompt.size());
-  EXPECT_EQ(request->CurrentTurnId(), 0u);
+  EXPECT_EQ(request->CurrentTurnId(), 1u);
 
   RunOne(*engine_.engine);
   ASSERT_EQ(request->status_, RequestStatus::TurnComplete);
   std::vector<int32_t> more{5, 6};
   request->BeginTurn(more);
 
-  EXPECT_EQ(request->CurrentTurnId(), 1u);
+  EXPECT_EQ(request->CurrentTurnId(), 2u);
   EXPECT_EQ(request->CurrentSequenceLength(), assigned_length + static_cast<int64_t>(more.size()));
   EXPECT_EQ(request->status_, RequestStatus::Assigned);
   EXPECT_FALSE(request->IsTurnComplete());
@@ -855,6 +856,85 @@ TEST_F(RequestLifecycleTest, GuidanceMasksTokensAndRollsBackWithSearchState) {
   request->SaveStateForTransaction();
   const auto staged_second = request->ApplyLogitsForTransaction(second_logits);
   EXPECT_EQ(staged_second.token, expected_tokens.front());
+  request->RestoreStateForTransaction();
+}
+
+TEST_F(RequestLifecycleTest, BeginTurnAfterCancellationResetsGuidance) {
+  auto guidance_model = CreateModel(
+      GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto guidance_engine = MakeDoublesEngine(guidance_model, /*capacity=*/8,
+                                           EosToken(*guidance_model));
+  auto tokenizer = guidance_model->CreateTokenizer();
+  const auto first_tokens = tokenizer->Encode("!");
+  const auto second_tokens = tokenizer->Encode("a");
+  ASSERT_EQ(first_tokens.size(), 1u);
+  ASSERT_EQ(second_tokens.size(), 1u);
+
+  auto params = MakeGreedyParams(*guidance_model);
+  params->SetGuidance("regex", "!a", false);
+  auto request = CreateEngineRequest(guidance_engine.engine, *params);
+  const auto turn_id = request->BeginTurn(Prompt());
+
+  guidance_engine.executor->SetForcedToken(first_tokens.front());
+  EXPECT_EQ(RunOne(*guidance_engine.engine).token, first_tokens.front());
+
+  ASSERT_TRUE(request->Cancel(turn_id));
+  EXPECT_EQ(
+      RunOne(*guidance_engine.engine).finish_reason,
+      GenerationFinishReason::Canceled);
+
+  request->BeginTurn(std::array<int32_t, 1>{5});
+  auto first_logits = LogitsFavoringToken(
+      *guidance_model, second_tokens.front(), first_tokens.front());
+  request->SaveStateForTransaction();
+  EXPECT_EQ(
+      request->ApplyLogitsForTransaction(first_logits).token,
+      first_tokens.front());
+  request->RestoreStateForTransaction();
+}
+
+TEST_F(RequestLifecycleTest, FailedBeginTurnRestoresGuidanceCursor) {
+  auto guidance_model = CreateModel(
+      GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto guidance_engine = MakeDoublesEngine(guidance_model, /*capacity=*/8,
+                                           EosToken(*guidance_model));
+  auto tokenizer = guidance_model->CreateTokenizer();
+  const auto first_tokens = tokenizer->Encode("!");
+  const auto second_tokens = tokenizer->Encode("a");
+  ASSERT_EQ(first_tokens.size(), 1u);
+  ASSERT_EQ(second_tokens.size(), 1u);
+
+  auto control = std::make_shared<FailingContinuationControl>();
+  auto params = MakeGreedyParams(*guidance_model);
+  FailingContinuationDevice device{*params->p_device, control};
+  params->p_device = &device;
+  params->SetGuidance("regex", "!a", false);
+  auto request = CreateEngineRequest(guidance_engine.engine, *params);
+  const auto turn_id = request->BeginTurn(Prompt());
+
+  guidance_engine.executor->SetForcedToken(first_tokens.front());
+  EXPECT_EQ(RunOne(*guidance_engine.engine).token, first_tokens.front());
+
+  ASSERT_TRUE(request->Cancel(turn_id));
+  EXPECT_EQ(
+      RunOne(*guidance_engine.engine).finish_reason,
+      GenerationFinishReason::Canceled);
+
+  control->fail_append = true;
+  try {
+    request->BeginTurn(std::array<int32_t, 1>{5});
+    FAIL() << "Expected continuation append failure";
+  } catch (const std::runtime_error& error) {
+    EXPECT_STREQ(error.what(), "Injected continuation append failure.");
+  }
+  control->fail_append = false;
+
+  auto second_logits = LogitsFavoringToken(
+      *guidance_model, first_tokens.front(), second_tokens.front());
+  request->SaveStateForTransaction();
+  EXPECT_EQ(
+      request->ApplyLogitsForTransaction(second_logits).token,
+      second_tokens.front());
   request->RestoreStateForTransaction();
 }
 

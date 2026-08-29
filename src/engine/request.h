@@ -252,7 +252,7 @@ struct Request : std::enable_shared_from_this<Request>,
   friend struct ScheduledRequests;
   friend struct StaticBatchScheduler;
 
-  void CompleteClose();
+  void CompleteClose() noexcept;
   void OnFirstExternalReference() noexcept;
   void OnLastExternalReference() noexcept;
   bool IsExternallyAbandoned() const noexcept;
@@ -267,7 +267,7 @@ struct Request : std::enable_shared_from_this<Request>,
   size_t turn_generated_tokens_{};
   const size_t max_total_tokens_;
   uint64_t current_turn_id_{};
-  uint64_t next_turn_id_{};
+  uint64_t next_turn_id_{1};
   bool has_current_turn_{};
   bool turn_id_exhausted_{};
   GenerationFinishReason finish_reason_{GenerationFinishReason::None};
@@ -282,6 +282,7 @@ struct Request : std::enable_shared_from_this<Request>,
   std::atomic<bool> externally_abandoned_{false};
 
   void ApplyLogitsProcessors(DeviceSpan<float> logits);
+  void ResetGuidanceForNewTurn();
   void SelectNextToken();
   RequestStepResult StageGeneration(int64_t sequence_length_before);
   void CommitGuidanceToken(const RequestStepResult& result);

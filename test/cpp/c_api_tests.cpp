@@ -29,7 +29,7 @@ namespace {
 
 struct EngineEventSnapshot {
   OgaEngineEventFlags flags{};
-  OgaRequest* request{};
+  const OgaRequest* request{};
   uint64_t turn_id{};
   int32_t token{};
   OgaFinishReason finish_reason{};
@@ -932,10 +932,10 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
 
   auto turn_options = request->CreateTurnOptions();
   turn_options->SetMaxGeneratedTokens(1);
-  EXPECT_EQ(request->BeginTurn(input_tokens, turn_options.get()), 0u);
+  EXPECT_EQ(request->BeginTurn(input_tokens, turn_options.get()), 1u);
   const auto event = RunOne(*engine);
   EXPECT_EQ(event.request, request.get());
-  EXPECT_EQ(event.turn_id, 0u);
+  EXPECT_EQ(event.turn_id, 1u);
   EXPECT_EQ(event.flags,
             OgaEngineEventFlag_Token | OgaEngineEventFlag_TurnFinished);
   EXPECT_EQ(event.finish_reason, OgaFinishReason_MaxGeneratedTokens);
@@ -945,7 +945,7 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
 
   const std::array<int32_t, 1> continuation{5};
   const auto second_turn = request->BeginTurn(continuation);
-  EXPECT_EQ(second_turn, 1u);
+  EXPECT_EQ(second_turn, 2u);
   EXPECT_TRUE(request->CancelTurn(second_turn));
   EXPECT_FALSE(request->CancelTurn(second_turn));
   const auto cancelled = RunOne(*engine);
@@ -999,11 +999,17 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
   auto validation_request = engine->CreateRequest(*params);
   auto validation_options = validation_request->CreateTurnOptions();
 
-  std::unique_ptr<OgaResult> null_stop_sequences_result{
-      OgaTurnOptionsSetStopSequences(validation_options.get(), nullptr)};
-  ASSERT_NE(null_stop_sequences_result, nullptr);
+  std::unique_ptr<OgaResult> null_stop_token_ids_result{
+      OgaTurnOptionsSetStopTokenIds(validation_options.get(), nullptr)};
+  ASSERT_NE(null_stop_token_ids_result, nullptr);
   EXPECT_NE(
-      std::string(null_stop_sequences_result->GetError()).find("stop_sequences must not be null"),
+      std::string(null_stop_token_ids_result->GetError()).find("stop_token_ids must not be null"),
+      std::string::npos);
+  std::unique_ptr<OgaResult> null_stop_strings_result{
+      OgaTurnOptionsSetStopStrings(validation_options.get(), nullptr)};
+  ASSERT_NE(null_stop_strings_result, nullptr);
+  EXPECT_NE(
+      std::string(null_stop_strings_result->GetError()).find("stop_strings must not be null"),
       std::string::npos);
   validation_request->Close();
 
@@ -1022,7 +1028,7 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
   OgaCheckResult(OgaRequestBeginTurn(
       abandoned_queued, nullptr, input_tokens.data(),
       input_tokens.size(), &abandoned_turn_id));
-  EXPECT_EQ(abandoned_turn_id, 0u);
+  EXPECT_EQ(abandoned_turn_id, 1u);
   OgaDestroyRequest(abandoned_queued);
   EXPECT_FALSE(engine->HasPendingRequests());
 
@@ -1125,8 +1131,8 @@ TEST(CAPITests, EngineBulkRunAndReusableStorage) {
       std::string::npos);
   EXPECT_EQ(buffer->Count(), 0u);
 
-  EXPECT_TRUE(first->CancelTurn(0));
-  EXPECT_TRUE(second->CancelTurn(0));
+  EXPECT_TRUE(first->CancelTurn(1));
+  EXPECT_TRUE(second->CancelTurn(1));
 
   OgaCheckResult(OgaEngineRun(engine.get(), buffer.get()));
   ASSERT_EQ(OgaEngineEventBufferGetCount(buffer.get()), 1u);
@@ -1138,7 +1144,7 @@ TEST(CAPITests, EngineBulkRunAndReusableStorage) {
       OgaEngineEventBufferGet(buffer.get(), 0);
   ASSERT_NE(first_event, nullptr);
 
-  OgaRequest* borrowed_request{};
+  const OgaRequest* borrowed_request{};
   OgaEngineEventFlags flags{};
   uint64_t turn_id{};
   int32_t token{};
@@ -1154,7 +1160,7 @@ TEST(CAPITests, EngineBulkRunAndReusableStorage) {
   OgaCheckResult(OgaEngineEventGetUsage(first_event, &usage));
   EXPECT_EQ(borrowed_request, first.get());
   EXPECT_EQ(flags, OgaEngineEventFlag_TurnFinished);
-  EXPECT_EQ(turn_id, 0u);
+  EXPECT_EQ(turn_id, 1u);
   EXPECT_EQ(finish_reason, OgaFinishReason_Cancelled);
   EXPECT_EQ(error_code, OgaErrorCode_None);
   ASSERT_NE(usage, nullptr);
@@ -1191,7 +1197,6 @@ TEST(CAPITests, EngineBulkRunAndReusableStorage) {
 
   OgaCheckResult(OgaEngineRun(engine.get(), buffer.get()));
   ASSERT_EQ(OgaEngineEventBufferGetCount(buffer.get()), 1u);
-  EXPECT_EQ(OgaEngineEventBufferGet(buffer.get(), 0), first_event);
   EXPECT_EQ(&buffer->Get(0)->Request()->get(), second.get());
 
   first->Close();
@@ -1209,10 +1214,10 @@ TEST(CAPITests, EngineBulkRunAndReusableStorage) {
   EXPECT_EQ(&reusable->Request()->get(), reusable_request.get());
 
   ASSERT_EQ(engine->Run(*reusable_buffer), 1u);
-  EXPECT_EQ(reusable_buffer->Get(0), reusable);
-  EXPECT_EQ(&reusable->Request()->get(), reusable_request.get());
+  EXPECT_EQ(&reusable_buffer->Get(0)->Request()->get(), reusable_request.get());
   EXPECT_NE(
-      reusable->Flags() & OgaEngineEventFlag_TurnFinished, 0u);
+      reusable_buffer->Get(0)->Flags() & OgaEngineEventFlag_TurnFinished,
+      0u);
   reusable_request->Close();
 }
 
@@ -1275,12 +1280,6 @@ TEST(CAPITests, EngineRetainsModelAfterPublicHandleRelease) {
   EXPECT_EQ(OgaEngineEventBufferGetCount(buffer), 0u);
 
   OgaDestroyEngine(engine);
-  std::unique_ptr<OgaResult> destroyed_engine_result{
-      OgaEngineRun(engine, buffer)};
-  ASSERT_NE(destroyed_engine_result, nullptr);
-  EXPECT_NE(
-      std::string(destroyed_engine_result->GetError()).find("Engine has been destroyed"),
-      std::string::npos);
   EXPECT_EQ(OgaEngineEventBufferGetCount(buffer), 0u);
   OgaDestroyEngineEventBuffer(buffer);
 }
@@ -1408,13 +1407,13 @@ TEST(CAPITests, EngineRequestCAbiAndRaiiContracts) {
   auto owned_request = engine->CreateRequest(*params);
   auto one_token_turn = owned_request->CreateTurnOptions();
   one_token_turn->SetMaxGeneratedTokens(1);
-  EXPECT_EQ(owned_request->BeginTurn(input_tokens, one_token_turn.get()), 0u);
+  EXPECT_EQ(owned_request->BeginTurn(input_tokens, one_token_turn.get()), 1u);
   one_token_turn->SetMaxGeneratedTokens(3);
   ASSERT_TRUE(engine->HasPendingRequests());
 
   const auto event = RunOne(*engine);
   ASSERT_EQ(event.request, owned_request.get());
-  EXPECT_EQ(event.turn_id, 0u);
+  EXPECT_EQ(event.turn_id, 1u);
   EXPECT_NE(event.flags & OgaEngineEventFlag_TurnFinished, 0u);
   EXPECT_EQ(event.finish_reason, OgaFinishReason_MaxGeneratedTokens);
 

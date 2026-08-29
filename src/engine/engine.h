@@ -163,6 +163,8 @@ struct Engine : std::enable_shared_from_this<Engine>,
                      std::span<const int32_t> tokens,
                      std::optional<size_t> max_generated_tokens);
   void CloseRequest(const std::shared_ptr<Request>& request);
+  void DetachRequestForTeardown(
+      const std::shared_ptr<Request>& request) noexcept;
   bool CancelRequest(const std::shared_ptr<Request>& request, uint64_t turn_id);
   void ReclaimAbandonedRequests();
   size_t DrainPendingEvents(std::span<EngineEvent> events);
@@ -171,7 +173,9 @@ struct Engine : std::enable_shared_from_this<Engine>,
   void RunStatic();
   EngineEvent EventFromStep(const std::shared_ptr<Request>& request,
                             const RequestStepResult& result) const;
-  EngineEvent EventFromStepError(const EngineStepError& error);
+  EngineEvent EventFromStepError(
+      const EngineStepError& error,
+      std::exception_ptr caught_error) noexcept;
   std::shared_ptr<Request> FindTrackedRequest(const void* request_id) const;
   EngineEvent FailUnserviceableRequest(const void* request_id);
   void ValidateRequestCanContinue(
@@ -198,10 +202,11 @@ struct Engine : std::enable_shared_from_this<Engine>,
   EngineTransactionMetrics transaction_metrics_;
   StepPlan step_plan_;
   std::vector<RequestStepResult> step_results_;
-  std::vector<std::weak_ptr<Request>> tracked_requests_;
+  std::vector<std::shared_ptr<Request>> tracked_requests_;
   std::vector<EngineEvent> pending_events_;
   std::vector<EngineEvent> staged_events_;
   size_t pending_event_index_{};
+  std::atomic<bool> abandonment_pending_{false};
 
   friend struct Request;
 };

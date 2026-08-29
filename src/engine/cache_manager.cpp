@@ -166,6 +166,20 @@ void StaticCacheManager::Deallocate(std::vector<std::shared_ptr<Request>>& reque
   cache_allocated_requests_.clear();
 }
 
+void StaticCacheManager::DetachRequestForTeardown(
+    const std::shared_ptr<Request>& request) noexcept {
+  if (!IsResident(request)) {
+    return;
+  }
+
+  // Static cache storage belongs to the whole batch. Engine teardown may therefore release the
+  // complete batch when detaching any resident Request.
+  key_value_cache_.reset();
+  key_value_cache_state_.reset();
+  params_.reset();
+  cache_allocated_requests_.clear();
+}
+
 std::vector<std::shared_ptr<Request>> StaticCacheManager::AllocatedRequests() const {
   return cache_allocated_requests_;
 }
@@ -247,6 +261,28 @@ void PagedCacheManager::Deallocate(std::vector<std::shared_ptr<Request>>& reques
                        return std::find(requests.begin(), requests.end(), request) != requests.end();
                      }),
       cache_allocated_requests_.end());
+}
+
+void PagedCacheManager::DetachRequestForTeardown(
+    const std::shared_ptr<Request>& request) noexcept {
+  const auto allocated = std::find(
+      cache_allocated_requests_.begin(),
+      cache_allocated_requests_.end(), request);
+  if (allocated == cache_allocated_requests_.end()) {
+    return;
+  }
+
+  try {
+    key_value_cache_->Remove(request);
+    cache_allocated_requests_.erase(allocated);
+  } catch (...) {
+    // Teardown cannot leave retained cache-manager collaborators owning device resources. If the
+    // precise per-Request release fails, release the complete paged cache instead.
+    key_value_cache_.reset();
+    key_value_cache_state_.reset();
+    params_.reset();
+    cache_allocated_requests_.clear();
+  }
 }
 
 bool PagedCacheManager::SupportsDynamicBatching() const { return true; }

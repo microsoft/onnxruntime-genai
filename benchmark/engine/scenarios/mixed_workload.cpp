@@ -88,7 +88,7 @@ ScenarioExecutionOutput MixedWorkloadScenario::Execute(const ScenarioConfig& con
     std::vector<double> first_token_ms(static_cast<size_t>(config.concurrency), -1.0);
     std::vector<std::chrono::steady_clock::time_point> last_token_time(static_cast<size_t>(config.concurrency));
     std::vector<std::vector<double>> request_itl_ms(static_cast<size_t>(config.concurrency));
-    std::unordered_map<OgaRequest*, size_t> request_indices;
+    std::unordered_map<const OgaRequest*, size_t> request_indices;
     params.reserve(static_cast<size_t>(config.concurrency));
     requests.reserve(static_cast<size_t>(config.concurrency));
 
@@ -155,7 +155,7 @@ ScenarioExecutionOutput MixedWorkloadScenario::Execute(const ScenarioConfig& con
         }
 
         if ((event.Flags() & OgaEngineEventFlag_TurnFinished) != 0) {
-          event.Request()->get().Close();
+          requests[request_index]->Close();
         }
       }
     }

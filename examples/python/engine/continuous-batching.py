@@ -13,17 +13,16 @@ import tqdm
 from datasets import load_dataset
 
 
-def require_request_event(event: og.EngineEvent) -> og.Request:
+def request_for_event(event: og.EngineEvent) -> og.Request | None:
     if event.request is not None:
         return event.request
-    if event.flags & og.EngineEventFlags.FAILED:
-        outcome = "failed"
-    elif event.flags & og.EngineEventFlags.CAPACITY_BLOCKED:
-        outcome = "was capacity-blocked"
-    elif event.flags & og.EngineEventFlags.RETRYABLE:
-        outcome = "reported a retryable failure"
-    else:
-        outcome = "returned an invalid request-less event"
+    if event.flags & (og.EngineEventFlags.CAPACITY_BLOCKED | og.EngineEventFlags.RETRYABLE):
+        return None
+    outcome = (
+        "failed"
+        if event.flags & og.EngineEventFlags.FAILED
+        else "returned an invalid request-less event"
+    )
     raise RuntimeError(f"Engine {outcome}; error_code={event.error_code}")
 
 
@@ -100,7 +99,9 @@ class RequestPool:
         self.next_admission_time = time.monotonic() + 1
 
     def drain(self, event: og.EngineEvent):
-        request = require_request_event(event)
+        request = request_for_event(event)
+        if request is None:
+            return 0
         client_request = self.requests.get(request)
         assert client_request is not None, "Canonical request not found in the pool"
         token_count = 0

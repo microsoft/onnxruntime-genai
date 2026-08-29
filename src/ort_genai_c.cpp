@@ -1517,7 +1517,7 @@ OgaResult* OgaEngineEventGetFlags(
 
 OgaResult* OgaEngineEventGetRequest(
     const OgaEngineEvent* event,
-    OgaRequest** out) {
+    const OgaRequest** out) {
   OGA_TRY
   if (!out) {
     throw std::runtime_error("out must not be null.");
@@ -1803,18 +1803,33 @@ OGA_UNIMPLEMENTED_TURN_SETTER(
 
 #undef OGA_UNIMPLEMENTED_TURN_SETTER
 
-OgaResult* OgaTurnOptionsSetStopSequences(
-    OgaTurnOptions* options, const OgaSequences* stop_sequences) {
+OgaResult* OgaTurnOptionsSetStopTokenIds(
+    OgaTurnOptions* options, const OgaSequences* stop_token_ids) {
   OGA_TRY
   if (!options) {
     throw std::runtime_error("options must not be null.");
   }
-  if (!stop_sequences) {
-    throw std::runtime_error("stop_sequences must not be null.");
+  if (!stop_token_ids) {
+    throw std::runtime_error("stop_token_ids must not be null.");
   }
   options->ValidateOwnerThread();
   throw std::runtime_error(
-      "OgaTurnOptionsSetStopSequences is not implemented.");
+      "OgaTurnOptionsSetStopTokenIds is not implemented.");
+  OGA_CATCH
+}
+
+OgaResult* OgaTurnOptionsSetStopStrings(
+    OgaTurnOptions* options, const OgaStringArray* stop_strings) {
+  OGA_TRY
+  if (!options) {
+    throw std::runtime_error("options must not be null.");
+  }
+  if (!stop_strings) {
+    throw std::runtime_error("stop_strings must not be null.");
+  }
+  options->ValidateOwnerThread();
+  throw std::runtime_error(
+      "OgaTurnOptionsSetStopStrings is not implemented.");
   OGA_CATCH
 }
 

@@ -86,7 +86,9 @@ ScenarioExecutionOutput CapacityPressureScenario::Execute(const ScenarioConfig& 
     std::vector<double> first_token_ms(static_cast<size_t>(config.concurrency), -1.0);
     std::vector<bool> admitted(static_cast<size_t>(config.concurrency), false);
     std::vector<bool> rejected(static_cast<size_t>(config.concurrency), false);
-    std::unordered_map<OgaRequest*, size_t> request_indices;
+    std::vector<OgaRequest*> request_handles(
+        static_cast<size_t>(config.concurrency), nullptr);
+    std::unordered_map<const OgaRequest*, size_t> request_indices;
     params.reserve(static_cast<size_t>(config.concurrency));
     requests.reserve(static_cast<size_t>(config.concurrency));
 
@@ -111,6 +113,7 @@ ScenarioExecutionOutput CapacityPressureScenario::Execute(const ScenarioConfig& 
       try {
         auto request = engineResources.engine->CreateRequest(*params.back());
         request->BeginTurn(prompt->SequenceData(0), prompt_count);
+        request_handles[request_index] = request.get();
         request_indices.emplace(request.get(), request_index);
         requests.push_back(std::move(request));
       } catch (const std::exception& ex) {
@@ -171,7 +174,11 @@ ScenarioExecutionOutput CapacityPressureScenario::Execute(const ScenarioConfig& 
         }
 
         if ((event.Flags() & OgaEngineEventFlag_TurnFinished) != 0) {
-          event.Request()->get().Close();
+          if (!request_handles[request_index]) {
+            throw std::runtime_error(
+                Name() + ": completed event has no owned Request handle");
+          }
+          request_handles[request_index]->Close();
         }
       }
     }

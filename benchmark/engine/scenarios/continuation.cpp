@@ -78,7 +78,7 @@ ScenarioExecutionOutput ContinuationScenario::Execute(const ScenarioConfig& conf
     std::vector<std::unique_ptr<OgaRequest>> requests;
     std::vector<std::unique_ptr<OgaTurnOptions>> turn_options;
     std::vector<std::vector<int32_t>> request_tokens(static_cast<size_t>(config.concurrency));
-    std::unordered_map<OgaRequest*, size_t> request_indices;
+    std::unordered_map<const OgaRequest*, size_t> request_indices;
     params.reserve(static_cast<size_t>(config.concurrency));
     requests.reserve(static_cast<size_t>(config.concurrency));
     turn_options.reserve(static_cast<size_t>(config.concurrency));

@@ -13,6 +13,7 @@ struct DecoderIO;
 struct BatchedSamplingPlan {
   void Reserve(size_t capacity) {
     requests.reserve(capacity);
+    result_indices.reserve(capacity);
     logits.reserve(capacity);
     params.reserve(capacity);
     states.reserve(capacity);
@@ -20,12 +21,14 @@ struct BatchedSamplingPlan {
 
   void Clear() {
     requests.clear();
+    result_indices.clear();
     logits.clear();
     params.clear();
     states.clear();
   }
 
   std::vector<Request*> requests;
+  std::vector<size_t> result_indices;
   std::vector<DeviceSpan<float>> logits;
   std::vector<BatchedSamplingParams> params;
   std::vector<BatchedSamplerState*> states;

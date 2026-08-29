@@ -13,7 +13,7 @@ The current dynamic path manages paged KV decoder state together with per-reques
 > **Experimental low-level API:** An Engine creates model-bound Requests. `BeginTurn()` queues both
 > initial input and later continuation input and snapshots an opaque `TurnOptions` object. Request
 > creation can also snapshot a prompt-plus-generated session-token limit. Successful Turns receive
-> zero-based, monotonically increasing request-local IDs. `Run()` performs synchronous progress and
+> nonzero, monotonically increasing request-local IDs; zero means no Turn. `Run()` performs synchronous progress and
 > returns one typed `EngineEvent`; token and completion payloads are selected by event flags.
 > `CancelTurn(turn_id)` stops only the named Turn, and `Close()` releases Engine resources.
 > `OgaCreateEngine` retains shared ownership of the underlying Model, so the caller may release its
@@ -22,10 +22,10 @@ The current dynamic path manages paged KV decoder state together with per-reques
 >
 > **Single-owner requirement:** One host-owned thread must perform all Engine and Request operations,
 > including request creation, `BeginTurn()`, `Run()`, `CancelTurn()`,
-> `Close()`, and handle destruction. Other host threads marshal commands and copied inputs to that owner. The
+> and `Close()`. Other host threads marshal commands and copied inputs to that owner. The
 > Engine enforces its owner thread and has no worker thread. Final
-> handle abandonment publishes an atomic marker as a safety net; cleanup runs at the next serialized
-> Engine boundary.
+> Request-handle release may occur on another thread because it only publishes an atomic marker.
+> The Engine strongly retains the Request until cleanup runs at the next serialized Engine boundary.
 
 The main implementation is under `src/engine/`:
 
@@ -206,14 +206,16 @@ Rewind is implemented, callers that need to discard canceled input or release ca
 
 Every completed Turn publishes exactly one terminal event. A final visible token and completion may
 be combined in one event. An unserviceable Request receives `TurnFinished | Failed`; fatal Engine
-failure returns a request-null `Failed` event and makes later progress calls rethrow the stored
-failure.
+failure emits `TurnFinished | Failed` for every affected Turn and makes later progress calls
+rethrow the stored failure. A fatal failure with no affected Turn returns a request-null `Failed`
+event.
 
 A turn-complete request remains Engine-owned. Once admitted, it normally remains resident; a turn
 canceled before initial admission has not allocated cache state. `Close()` ends logical ownership
 immediately and releases dynamic cache resources; static batch storage may remain until batch
 recycling. If every external handle is released instead, the request is marked abandoned and
-reclaimed at the next serialized Engine boundary, including `HasPendingRequests()`.
+reclaimed at the next serialized Engine boundary, including `HasPendingRequests()`. An atomic
+Engine-level pending flag makes the common no-abandonment boundary allocation-free.
 
 Planning skips turn-complete residents and does not release their cache. Retained requests still
 consume paged-cache blocks and a batch slot, so applications must call `Close()` when they no
@@ -224,11 +226,15 @@ longer need continuation when deterministic immediate reclamation is required.
 `Close()` is legal from every state, is sequentially idempotent, and moves the request to terminal
 `Closed`. On the dynamic path, close immediately erases scheduler membership and releases
 committed paged-cache ownership. The Engine also removes any undrained pending events for that
-request. Final-handle abandonment performs the same logical removal and event purge when the Engine
-next reaches an owner-thread boundary.
+request. Close and owner-thread abandonment reclamation release Search, guidance, sampler, and
+parameter runtime state before the Engine drops its strong Request reference. Final-handle
+abandonment performs the same logical removal and event purge when the Engine next reaches an
+owner-thread boundary.
 
 Events already copied by the host remain host-owned. Destroying the Engine terminalizes every bound
-Request; surviving external handles are closed tombstones and still must be destroyed.
+Request through a teardown-specific no-throw detach path that does not rely on the Request's expired
+weak Engine reference. Scheduler/cache ownership and Request runtime state are released first;
+surviving external handles are lightweight closed tombstones and still must be destroyed.
 
 ### `Closed`
 
@@ -247,10 +253,10 @@ Request progress uses these values:
 | `processed_sequence_length_` | Number of sequence tokens already represented in the committed KV cache |
 | `turn_prompt_tokens_` | Input tokens accepted by the current Turn |
 | `turn_generated_tokens_` | Generated output tokens committed during the current turn; reset only by a successful `BeginTurn()` |
-| `current_turn_id_` | Request-local `uint64_t` ID assigned after successful Turn admission; starts at 0 and increases monotonically |
+| `current_turn_id_` | Request-local `uint64_t` ID assigned after successful Turn admission; starts at 1 and increases monotonically; 0 means no Turn |
 | `finish_reason_` | Strongly typed reason for current-turn completion; `None` while generation is in progress |
 
-Turn IDs use the complete `uint64_t` range. Once `UINT64_MAX` has been assigned, a later
+Turn IDs use the nonzero `uint64_t` range. Once `UINT64_MAX` has been assigned, a later
 `BeginTurn()` fails before mutation rather than wrapping to zero.
 
 The turn also snapshots an optional `max_generated_tokens`. This is Request bookkeeping, not
@@ -303,9 +309,10 @@ provides RAII Buffer ownership and borrowed event/usage getters. Python exposes
 `Engine.create_event_buffer(capacity)` and a sequence-like `Engine.run(buffer)` result.
 
 The Buffer is permanently bound to its creating Engine and stores only a weak Engine reference.
-Run rejects a Buffer from another or destroyed Engine. After handle, binding, and owner-thread
-validation, Run invalidates every previously borrowed event and usage view from that Buffer, resets
-its count, and reuses the preallocated internal event storage without constructing a per-Run
+Run requires both handles to remain live and rejects a Buffer from another Engine. After handle,
+binding, and owner-thread validation, Run invalidates every previously borrowed event and usage view
+from that Buffer, resets its count, and reuses the preallocated internal event storage without
+constructing a per-Run
 vector.
 
 Capacity zero is an owner-thread-validated no-op: count remains zero and no reclamation, draining,
@@ -325,7 +332,8 @@ events. Capacity one expresses one-event-at-a-time behavior through the same imp
 first call executes once and later calls drain retained overflow without more model execution.
 Each retained event owns its Request internally until it is copied; the public pointer remains
 borrowed. A Buffer event holds the Request internally for the lifetime of that view, but the
-returned `OgaRequest*` is never an independently owned handle and is invalidated with the event.
+returned `const OgaRequest*` is never an independently owned handle and is invalidated with the
+event.
 
 A committed step emits a token event, a terminal event, or one combined
 `Token | TurnFinished` event. EOS can emit terminal completion without a visible token. Event
@@ -538,6 +546,10 @@ For eligible pure decode shapes, the decoder may capture or replay a CUDA graph.
 3. Runs the per-request sequence and EOS handling.
 4. Produces a `RequestStepResult` for each request.
 
+The reusable batched-sampling plan records each sampled Request's scheduled result index. Batched
+completion therefore places results directly in linear time without searching the scheduled batch
+again for every sampled Request.
+
 The result records:
 
 - The sampled token, if a token was appended.
@@ -630,7 +642,12 @@ The engine becomes unhealthy when it cannot prove that all components still agre
 - Any part of the commit boundary fails.
 - The scheduler returns an invalid planning outcome.
 
-The engine stores the fatal error and rethrows it on later `Run()` calls. Continuing would risk using request search state and cache block tables from different logical steps.
+The engine stores the fatal error and marks every executable Turn complete with reason `Failed`.
+Before rethrowing the stored error on later `Run()` calls, it emits one
+`TurnFinished | Failed` event per affected Turn with the Turn's Request, ID, usage, and Engine
+failure code. A fatal failure with no affected Turn emits one request-less Engine failure event.
+Continuing would risk using request search state and cache block tables from different logical
+steps.
 
 ### Step outcomes
 
@@ -920,9 +937,9 @@ too, although static execution does not use the dynamic reservation/checkpoint t
 Close or abandonment logically removes a Request from scheduling and purges its undelivered events.
 A closed Request that is already resident in a static batch nevertheless remains part of that
 shared physical allocation until the batch is recycled. It is not sampled or returned again, but
-its row, Request/Search storage, and cache allocation can remain alive for the lifetime of the
-batch. Static cleanup therefore must not be described or tested as immediate per-Request
-deallocation.
+its row and cache allocation can remain alive for the lifetime of the batch. Request Search and
+other device-affine runtime state are released at the owner-thread close boundary. Static cleanup
+therefore must not be described or tested as immediate per-Request cache deallocation.
 
 Changes to shared types such as `Request`, `ScheduledRequests`, `ModelExecutor`, or `SimpleDecoder` should be checked against both paths. This document should be updated only where behavior is shared or where the dynamic path changes.
 
@@ -941,8 +958,12 @@ turn_id = request.begin_turn(initial_tokens, turn_options)
 while engine.has_pending_requests():
     for event in engine.run(max_events=8):
         if event.request is None:
-            # CapacityBlocked and Retryable leave the Engine reusable; production hosts may retry
-            # with admission control/backoff. This minimal loop surfaces every Engine-level event.
+            if event.flags & (
+                og.EngineEventFlags.CAPACITY_BLOCKED
+                | og.EngineEventFlags.RETRYABLE
+            ):
+                # No progress committed. The Engine remains healthy and pending work can retry.
+                continue
             raise RuntimeError(
                 f"Engine-level event: flags={event.flags}, error_code={event.error_code}"
             )

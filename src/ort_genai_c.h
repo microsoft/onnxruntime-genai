@@ -1293,13 +1293,13 @@ OGA_EXPORT const OgaEngineEvent* OGA_API_CALL OgaEngineEventBufferGet(
  * success. Scalar outputs are initialized to zero and pointer outputs to null before a null event
  * is rejected. Payload meaning is selected by OgaEngineEventFlags.
  *
- * OgaEngineEventGetRequest returns a borrowed Request alias that must not be destroyed.
+ * OgaEngineEventGetRequest returns a const borrowed Request alias that must not be destroyed.
  * OgaEngineEventGetUsage returns a borrowed usage view. Both have the event view's lifetime.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineEventGetFlags(
     const OgaEngineEvent* event, OgaEngineEventFlags* out);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineEventGetRequest(
-    const OgaEngineEvent* event, OgaRequest** out);
+    const OgaEngineEvent* event, const OgaRequest** out);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineEventGetTurnId(
     const OgaEngineEvent* event, uint64_t* out);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineEventGetToken(
@@ -1385,11 +1385,19 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetSeed(
 /**
  * \brief Sets token-ID stop sequences for a Turn.
  *
- * This operation is currently not implemented. stop_sequences is not dereferenced or retained
+ * This operation is currently not implemented. stop_token_ids is not dereferenced or retained
  * before the not-implemented result is returned.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetStopSequences(
-    OgaTurnOptions* options, const OgaSequences* stop_sequences);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetStopTokenIds(
+    OgaTurnOptions* options, const OgaSequences* stop_token_ids);
+/**
+ * \brief Sets UTF-8 stop strings for a Turn.
+ *
+ * This operation is currently not implemented. stop_strings is not dereferenced or retained
+ * before the not-implemented result is returned.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetStopStrings(
+    OgaTurnOptions* options, const OgaStringArray* stop_strings);
 /** \brief Reserved for future use; currently returns a not-implemented result. */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetGuidance(
     OgaTurnOptions* options, const char* guidance_type,
@@ -1425,9 +1433,11 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestClose(OgaRequest* request);
  * \brief Destroys the given request.
  *
  * Releasing the final owned handle without first calling OgaRequestClose marks the Request
- * abandoned for reclamation at the next owner-thread Engine boundary. Reclamation has the same
- * logical scheduling and event-purge behavior as Close. A resident static-batch row and shared
- * cache allocation may still remain until the batch is recycled.
+ * abandoned for reclamation at the next owner-thread Engine boundary. This final handle release
+ * may occur on another thread because the Engine strongly retains the Request and the release only
+ * publishes an atomic marker. Reclamation has the same logical scheduling, event-purge, and
+ * runtime-state release behavior as Close. A resident static-batch row and shared cache allocation
+ * may still remain until the batch is recycled.
  *
  * \param[in] request A Request handle returned by OgaEngineCreateRequest.
  */

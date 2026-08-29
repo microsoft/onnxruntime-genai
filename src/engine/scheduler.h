@@ -44,6 +44,20 @@ struct Scheduler {
   virtual void RemoveRequest(std::shared_ptr<Request> request) = 0;
 
   /**
+   * @brief Removes scheduler and cache ownership during Engine destruction.
+   *
+   * Unlike normal removal, this path cannot consult the Request's weak Engine reference and must
+   * not throw from the Engine destructor.
+   */
+  virtual void DetachRequestForTeardown(
+      const std::shared_ptr<Request>& request) noexcept {
+    try {
+      RemoveRequest(request);
+    } catch (...) {
+    }
+  }
+
+  /**
    * @brief Steps through the Scheduler to process requests.
    * @return An instance of ScheduledRequests struct.
    *
@@ -86,6 +100,9 @@ struct StaticBatchScheduler : Scheduler {
 
   void RemoveRequest(std::shared_ptr<Request> request) override;
 
+  void DetachRequestForTeardown(
+      const std::shared_ptr<Request>& request) noexcept override;
+
   ScheduledRequests Schedule() override;
 
   bool HasPendingRequests() const override;
@@ -102,6 +119,9 @@ struct DynamicBatchScheduler : Scheduler {
   void AddRequest(std::shared_ptr<Request> request) override;
 
   void RemoveRequest(std::shared_ptr<Request> request) override;
+
+  void DetachRequestForTeardown(
+      const std::shared_ptr<Request>& request) noexcept override;
 
   ScheduledRequests Schedule() override;
 
