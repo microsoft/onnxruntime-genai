@@ -364,6 +364,7 @@ struct Request : std::enable_shared_from_this<Request>,
   std::weak_ptr<Engine> engine_;
   std::atomic<bool> externally_abandoned_{false};
 
+  const char* DraftTokenValidationError() const noexcept;
   void ApplyLogitsProcessors(DeviceSpan<float> logits, bool guidance_applied);
   void ResetGuidanceForNewTurn();
   void SelectNextToken();
