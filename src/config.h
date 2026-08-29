@@ -405,6 +405,8 @@ struct Config {
         GatedDeltaNet,
       };
 
+      static constexpr int MaxStateUpdateCapacity = 8;
+
       struct StateUpdate {
         StateUpdateKind kind{StateUpdateKind::Invalid};
         int capacity{};

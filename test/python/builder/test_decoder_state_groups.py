@@ -239,16 +239,16 @@ def test_qwen38_compact_state_update_bindings_are_emitted(monkeypatch, tmp_path)
     model = _make_config_model(Qwen35TextModel, layer_types=["linear_attention", "full_attention"])
     model.context_length_attrs["state_update_capacity"] = 3
     model.linear_num_key_heads = 2
-    model.input_names["state_update.capture_count"] = "state_update_capture_count"
-    model.input_names["state_update.active"] = "state_update_active"
+    model.input_names["state_update.capture_count"] = "custom_state_update_capture_count"
+    model.input_names["state_update.active"] = "custom_state_update_active"
     model.output_names["state_update.conv_value"] = {0: "state_update.0.conv_value"}
     model.output_names["state_update.recurrent_capsule"] = {0: "state_update.0.recurrent_capsule"}
 
     decoder = _write_config(monkeypatch, tmp_path, model)["model"]["decoder"]
 
     assert decoder["state_update_capacity"] == 3
-    assert decoder["inputs"]["state_update_capture_count"] == "state_update_capture_count"
-    assert decoder["inputs"]["state_update_active"] == "state_update_active"
+    assert decoder["inputs"]["state_update_capture_count"] == "custom_state_update_capture_count"
+    assert decoder["inputs"]["state_update_active"] == "custom_state_update_active"
     assert decoder["outputs"]["state_update_conv_value_names"] == "state_update.%d.conv_value"
     assert decoder["outputs"]["state_update_recurrent_capsule_names"] == "state_update.%d.recurrent_capsule"
 

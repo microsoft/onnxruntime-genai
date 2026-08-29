@@ -144,8 +144,7 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
 
   void Release() override {
     if (committed_) {
-      throw std::logic_error(
-          "Cannot release a committed composite cache step reservation.");
+      throw std::logic_error("Cannot release a committed composite cache step reservation.");
     }
     // Discard the fixed provisional slots and release the paged blocks. Neither was published, so
     // both are safe to reclaim. Aggregate errors so one failure does not skip the other cleanup.

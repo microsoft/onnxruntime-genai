@@ -516,8 +516,6 @@ using DecoderStateGroupKind = Config::Model::Decoder::StateGroupKind;
 using DecoderStateUpdate = Config::Model::Decoder::StateUpdate;
 using DecoderStateUpdateKind = Config::Model::Decoder::StateUpdateKind;
 
-constexpr int kMaxStateUpdateCapacity = 8;
-
 struct StateUpdate_Element : JSON::Element {
   explicit StateUpdate_Element(DecoderStateUpdate& v) : v_{v} {}
 
@@ -536,9 +534,9 @@ struct StateUpdate_Element : JSON::Element {
     } else if (name == "capacity") {
       const auto capacity = SafeDoubleToInt64(
           JSON::Get<double>(value), "model.decoder.state_groups.state_update.capacity");
-      if (capacity < 1 || capacity > kMaxStateUpdateCapacity) {
+      if (capacity < 1 || capacity > Config::Model::Decoder::MaxStateUpdateCapacity) {
         throw std::runtime_error("Decoder state update capacity must be in [1, " +
-                                 std::to_string(kMaxStateUpdateCapacity) + "]");
+                                 std::to_string(Config::Model::Decoder::MaxStateUpdateCapacity) + "]");
       }
       v_.capacity = static_cast<int>(capacity);
     } else if (name == "capture_count") {
@@ -876,10 +874,11 @@ struct Decoder_Element : JSON::Element {
     } else if (name == "state_update_capacity") {
       // The kernel packs every captured transition for a layer into one fixed-width capsule output.
       // Keep this limit synchronized with check_extra_options in builder.py and the model-builder README.
-      constexpr int kMaxStateUpdateCapacity = 8;
       v_.state_update_capacity = SafeDoubleToInt(JSON::Get<double>(value), name);
-      if (v_.state_update_capacity < 0 || v_.state_update_capacity > kMaxStateUpdateCapacity)
-        throw std::runtime_error("state_update_capacity must be between 0 and " + std::to_string(kMaxStateUpdateCapacity));
+      if (v_.state_update_capacity < 0 ||
+          v_.state_update_capacity > Config::Model::Decoder::MaxStateUpdateCapacity)
+        throw std::runtime_error("state_update_capacity must be between 0 and " +
+                                 std::to_string(Config::Model::Decoder::MaxStateUpdateCapacity));
     } else if (name == "conv_cache_size") {
       v_.conv_cache_size = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else {

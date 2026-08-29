@@ -585,7 +585,10 @@ class Qwen35TextModel(Model):
         v_out = f"{split_qkv_name}/output_2"
         self.make_split(
             split_qkv_name,
-            inputs=[conv_out_3d, f"/model/constants/INT64/[{self.linear_key_dim}, {self.linear_key_dim}, {self.linear_value_dim}]"],
+            inputs=[
+                conv_out_3d,
+                f"/model/constants/INT64/[{self.linear_key_dim}, {self.linear_key_dim}, {self.linear_value_dim}]",
+            ],
             outputs=[q_out, k_out, v_out],
             dtypes=[self.io_dtype] * 3,
             shapes=[
@@ -603,7 +606,12 @@ class Qwen35TextModel(Model):
         # Scale Q by 1/sqrt(head_k_dim)
         scale_name = f"/model/constants/{self.io_dtype}/{float(1.0 / np.sqrt(self.linear_key_head_dim))}"
         q_scaled_name = f"{basename}/q_scaled/Mul"
-        self.make_mul(q_scaled_name, [q_norm_out, scale_name], self.io_dtype, ["batch_size", "sequence_length", self.linear_key_dim])
+        self.make_mul(
+            q_scaled_name,
+            [q_norm_out, scale_name],
+            self.io_dtype,
+            ["batch_size", "sequence_length", self.linear_key_dim],
+        )
         q_scaled_output = f"{q_scaled_name}/output_0"
 
         # g = -exp(A_log) * softplus(a + dt_bias), beta = sigmoid(b)
@@ -713,13 +721,17 @@ class Qwen35TextModel(Model):
         state_groups = []
         if full_attention_layers:
             state_groups.append(self.make_paged_key_value_state_group(full_attention_layers, inputs, outputs))
+        if not linear_attention_layers:
+            return state_groups
+
+        state_update_capacity = (
+            self.context_length_attrs["state_update_capacity"] if "state_update_capture_count" in inputs else 0
+        )
 
         for state_name, input_key, output_key in (
             ("conv", "past_conv_names", "present_conv_names"),
             ("recurrent", "past_recurrent_names", "present_recurrent_names"),
         ):
-            if not linear_attention_layers:
-                continue
             group = {
                 "kind": "fixed",
                 "layer_ids": linear_attention_layers,
@@ -730,27 +742,23 @@ class Qwen35TextModel(Model):
                     }
                 },
             }
-            state_update_capacity = (
-                self.context_length_attrs["state_update_capacity"]
-                if "state_update.capture_count" in self.input_names
-                else 0
-            )
             if state_update_capacity:
                 state_update = {
                     "kind": "causal_conv" if state_name == "conv" else "gated_delta_net",
                     "capacity": state_update_capacity,
-                    "capture_count": "state_update_capture_count",
-                    "active": "state_update_active",
+                    "capture_count": inputs["state_update_capture_count"],
+                    "active": inputs["state_update_active"],
                 }
                 if state_name == "conv":
-                    state_update["value"] = "state_update.%d.conv_value"
+                    state_update["value"] = outputs["state_update_conv_value_names"]
                 else:
-                    state_update["capsule"] = "state_update.%d.recurrent_capsule"
+                    state_update["capsule"] = outputs["state_update_recurrent_capsule_names"]
                     state_update["key_head_count"] = self.linear_num_key_heads
                 group["state_update"] = state_update
             state_groups.append(group)
 
         return state_groups
+
 
 class Qwen35MoETextModel(Qwen35TextModel):
     """Qwen3.5 MoE hybrid model builder.
@@ -764,6 +772,7 @@ class Qwen35MoETextModel(Qwen35TextModel):
     The attention side (GatedDeltaNet linear + gated full) is inherited
     unchanged from the parent class.
     """
+
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 

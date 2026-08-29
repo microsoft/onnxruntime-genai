@@ -333,8 +333,10 @@ void ModelStateManifest::ValidateConfig(const Decoder& decoder) {
       if (update.kind == StateUpdateKind::Invalid) {
         throw std::runtime_error(group_label + " state_update is missing kind");
       }
-      if (update.capacity < 1 || update.capacity > 8) {
-        throw std::runtime_error(group_label + " state_update capacity must be in [1, 8]");
+      if (update.capacity < 1 || update.capacity > Decoder::MaxStateUpdateCapacity) {
+        throw std::runtime_error(
+            group_label + " state_update capacity must be in [1, " +
+            std::to_string(Decoder::MaxStateUpdateCapacity) + "]");
       }
       if (update.capture_count.empty()) {
         throw std::runtime_error(group_label + " state_update is missing capture_count");
@@ -455,12 +457,12 @@ void ModelStateManifest::ValidateSession(const ModelStateMetadata& metadata) con
         const auto output_name = ExpandBinding(binding.output, layer_id);
         if (!metadata.HasInput(input_name)) {
           throw std::runtime_error(
-            group_label + " binding '" + std::string{semantic} +
+              group_label + " binding '" + std::string{semantic} +
               "' input was not found: " + input_name);
         }
         if (!metadata.HasOutput(output_name)) {
           throw std::runtime_error(
-            group_label + " binding '" + std::string{semantic} +
+              group_label + " binding '" + std::string{semantic} +
               "' output was not found: " + output_name);
         }
 
@@ -472,7 +474,7 @@ void ModelStateManifest::ValidateSession(const ModelStateMetadata& metadata) con
             metadata.GetOutputDataType(output_name),
             metadata.GetOutputShape(output_name),
             output_name};
-          ValidateCompatiblePair(group_label, semantic, input, output);
+        ValidateCompatiblePair(group_label, semantic, input, output);
 
         if (group.kind == StateGroupKind::PagedKeyValue) {
           ValidatePagedGeometry(group_label, input, paged_reference);

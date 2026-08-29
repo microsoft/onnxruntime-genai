@@ -37,8 +37,6 @@ import os
 
 import numpy as np
 import onnx
-from onnx import TensorProto, helper, numpy_helper
-
 from create_synthetic_paged_model import (
     BLOCK_SIZE,
     CONTEXT_LENGTH,
@@ -48,8 +46,11 @@ from create_synthetic_paged_model import (
     NUM_LAYERS,
     PAGED_LAYERS,
     VOCAB_SIZE,
+)
+from create_synthetic_paged_model import (
     _decoder_graph as _paged_decoder_graph,
 )
+from onnx import TensorProto, helper, numpy_helper
 
 CONV_LAYERS = [0, 3]
 RECURRENT_LAYERS = [2, 5]
@@ -95,14 +96,8 @@ def _fixed_group(prefix, layer_ids, row_dims):
         key_name = f"state_update.{layer}.recurrent_key"
         delta_name = f"state_update.{layer}.recurrent_delta"
         capsule_name = f"state_update.{layer}.recurrent_capsule"
-        capsule_width = STATE_UPDATE_CAPACITY * (
-            row_dims[0] + row_dims[2] + row_dims[0] * row_dims[1]
-        )
-        outputs.append(
-            helper.make_tensor_value_info(
-                capsule_name, TensorProto.FLOAT, ["batch_size", capsule_width]
-            )
-        )
+        capsule_width = STATE_UPDATE_CAPACITY * (row_dims[0] + row_dims[2] + row_dims[0] * row_dims[1])
+        outputs.append(helper.make_tensor_value_info(capsule_name, TensorProto.FLOAT, ["batch_size", capsule_width]))
         decay_base = f"{decay_name}/base"
         key_base = f"{key_name}/base"
         delta_base = f"{delta_name}/base"
@@ -161,16 +156,12 @@ def _decoder_graph():
     )
 
     conv_inputs, conv_outputs, conv_nodes = _fixed_group("conv", CONV_LAYERS, CONV_ROW)
-    recurrent_inputs, recurrent_outputs, recurrent_nodes = _fixed_group(
-        "recurrent", RECURRENT_LAYERS, RECURRENT_ROW
-    )
+    recurrent_inputs, recurrent_outputs, recurrent_nodes = _fixed_group("recurrent", RECURRENT_LAYERS, RECURRENT_ROW)
     graph.input.extend([*conv_inputs, *recurrent_inputs])
     graph.output.extend([*conv_outputs, *recurrent_outputs])
 
     nodes = list(graph.node)
-    score_index = next(
-        index for index, node in enumerate(nodes) if "score_f" in node.output
-    )
+    score_index = next(index for index, node in enumerate(nodes) if "score_f" in node.output)
     nodes[score_index].output[0] = "base_score_f"
     current_length_index = next(
         index for index, node in enumerate(nodes) if "current_length" in node.output
@@ -180,9 +171,7 @@ def _decoder_graph():
         "Gather", ["position_ids", "c2"], ["text_position_ids"], axis=0
     )
     fixed_bias_nodes = [
-        helper.make_node(
-            "ReduceSum", ["past_conv.0", "axes12"], ["fixed_state_sum"], keepdims=0
-        ),
+        helper.make_node("ReduceSum", ["past_conv.0", "axes12"], ["fixed_state_sum"], keepdims=0),
         helper.make_node("Gather", ["fixed_state_sum", "row_id"], ["fixed_state_bias"], axis=0),
         helper.make_node("Add", ["base_score_f", "fixed_state_bias"], ["score_f"]),
     ]
@@ -218,9 +207,7 @@ def create_config(output_dir):
         {
             "kind": "fixed",
             "layer_ids": CONV_LAYERS,
-            "bindings": {
-                "state": {"input": "past_conv.%d", "output": "present_conv.%d"}
-            },
+            "bindings": {"state": {"input": "past_conv.%d", "output": "present_conv.%d"}},
             "state_update": {
                 "kind": "causal_conv",
                 "capacity": STATE_UPDATE_CAPACITY,
@@ -311,9 +298,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--output_dir",
-        default=os.path.join(
-            os.path.dirname(__file__), "..", "..", "models", "engine", "synthetic-composite"
-        ),
+        default=os.path.join(os.path.dirname(__file__), "..", "..", "models", "engine", "synthetic-composite"),
     )
     output_dir = os.path.normpath(parser.parse_args().output_dir)
     os.makedirs(output_dir, exist_ok=True)

@@ -529,15 +529,18 @@ struct CudaInterfaceImplBase : DeviceInterface {
     if (count > static_cast<size_t>(std::numeric_limits<int>::max())) {
       throw std::runtime_error("Compact state replay descriptor count exceeds CUDA launch limits.");
     }
+    std::scoped_lock lock{state_update_replay_mutex_};
+    cudaStream_t stream = GetStream();
     if (state_update_replay_capacity_ < count) {
       state_update_replay_descriptors_ = CudaMallocArray<StateUpdateReplayDesc>(count);
       state_update_replay_capacity_ = count;
     }
     CUDA_CHECK(cudaMemcpyAsync(state_update_replay_descriptors_.get(), descriptors,
                                count * sizeof(StateUpdateReplayDesc), cudaMemcpyHostToDevice,
-                               GetStream()));
+                               stream));
     cuda::LaunchReplayStateUpdates(
-        state_update_replay_descriptors_.get(), static_cast<int>(count), GetStream());
+        state_update_replay_descriptors_.get(), static_cast<int>(count), stream);
+    CUDA_CHECK(cudaStreamSynchronize(stream));
   }
 
   bool TopKScores(const void* logits, ONNXTensorElementDataType logits_type, int num_rows, int vocab_size,
@@ -653,6 +656,7 @@ struct CudaInterfaceImplBase : DeviceInterface {
   cuda_host_unique_ptr<int32_t> topk_indices_host_;  // pinned host buffer for the top-k index copy
   cuda_host_unique_ptr<float> topk_scores_host_;     // pinned host buffer for the top-k score copy
   size_t topk_host_count_{0};
+  std::mutex state_update_replay_mutex_;
   cuda_unique_ptr<StateUpdateReplayDesc> state_update_replay_descriptors_;
   size_t state_update_replay_capacity_{0};
 };
