@@ -3,6 +3,10 @@
 
 #include <gtest/gtest.h>
 
+#include <string>
+#include <unordered_map>
+#include <vector>
+
 #include "dflash2_drafter.h"
 
 namespace Generators::test {
@@ -29,6 +33,57 @@ Config MakeDflash2Config() {
   return config;
 }
 
+struct TensorMetadata {
+  ONNXTensorElementDataType data_type;
+  std::vector<int64_t> shape;
+};
+
+class FakeModelStateMetadata final : public ModelStateMetadata {
+ public:
+  void AddInput(std::string name, ONNXTensorElementDataType data_type,
+                std::vector<int64_t> shape) {
+    inputs_.insert_or_assign(
+        std::move(name), TensorMetadata{data_type, std::move(shape)});
+  }
+
+  void AddOutput(std::string name, ONNXTensorElementDataType data_type,
+                 std::vector<int64_t> shape) {
+    outputs_.insert_or_assign(
+        std::move(name), TensorMetadata{data_type, std::move(shape)});
+  }
+
+  bool HasInput(const std::string& name) const override { return inputs_.contains(name); }
+  bool HasOutput(const std::string& name) const override { return outputs_.contains(name); }
+
+  ONNXTensorElementDataType GetInputDataType(const std::string& name) const override {
+    return inputs_.at(name).data_type;
+  }
+
+  ONNXTensorElementDataType GetOutputDataType(const std::string& name) const override {
+    return outputs_.at(name).data_type;
+  }
+
+  std::vector<int64_t> GetInputShape(const std::string& name) const override {
+    return inputs_.at(name).shape;
+  }
+
+  std::vector<int64_t> GetOutputShape(const std::string& name) const override {
+    return outputs_.at(name).shape;
+  }
+
+ private:
+  std::unordered_map<std::string, TensorMetadata> inputs_;
+  std::unordered_map<std::string, TensorMetadata> outputs_;
+};
+
+std::pair<FakeModelStateMetadata, FakeModelStateMetadata> MakeCompatibleMetadata() {
+  FakeModelStateMetadata target;
+  target.AddOutput("aux_hidden_states", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16, {-1, 64});
+  FakeModelStateMetadata drafter;
+  drafter.AddInput("aux_hidden_states", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16, {-1, 64});
+  return {std::move(target), std::move(drafter)};
+}
+
 }  // namespace
 
 TEST(Dflash2ConfigTest, RequiresDrafterFilename) {
@@ -41,6 +96,76 @@ TEST(Dflash2ConfigTest, RequiresCompleteGeometry) {
   auto config = MakeDflash2Config();
   config.model.dflash2.num_key_value_heads = 0;
   EXPECT_THROW(CreateDflash2Config(config), std::runtime_error);
+}
+
+TEST(Dflash2ConfigTest, RequiresPositiveSelectorTopK) {
+  auto config = MakeDflash2Config();
+  config.model.dflash2.selector_top_k = 0;
+  EXPECT_THROW(CreateDflash2Config(config), std::runtime_error);
+}
+
+TEST(Dflash2ConfigTest, RejectsAsynchronousExecution) {
+  auto config = MakeDflash2Config();
+  config.model.dflash2.run_options = Config::RunOptions{
+      {"disable_synchronize_execution_providers", "1"}};
+  EXPECT_THROW(CreateDflash2Config(config), std::runtime_error);
+}
+
+TEST(Dflash2ConfigTest, AcceptsCompatibleAuxiliaryHiddenStates) {
+  const auto config = MakeDflash2Config();
+  const auto [target, drafter] = MakeCompatibleMetadata();
+  EXPECT_NO_THROW(ValidateDflash2ModelCompatibility(config, target, drafter));
+}
+
+TEST(Dflash2ConfigTest, UsesConfiguredTargetOutput) {
+  auto config = MakeDflash2Config();
+  config.model.dflash2.main_aux_hidden_states = "custom_aux_hidden_states";
+  FakeModelStateMetadata target;
+  target.AddOutput("custom_aux_hidden_states", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16, {-1, 64});
+  FakeModelStateMetadata drafter;
+  drafter.AddInput("aux_hidden_states", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16, {-1, 64});
+  EXPECT_NO_THROW(ValidateDflash2ModelCompatibility(config, target, drafter));
+}
+
+TEST(Dflash2ConfigTest, RequiresConfiguredTargetOutput) {
+  const auto config = MakeDflash2Config();
+  FakeModelStateMetadata target;
+  FakeModelStateMetadata drafter;
+  drafter.AddInput("aux_hidden_states", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16, {-1, 64});
+  EXPECT_THROW(ValidateDflash2ModelCompatibility(config, target, drafter), std::runtime_error);
+}
+
+TEST(Dflash2ConfigTest, RequiresConfiguredDrafterInput) {
+  const auto config = MakeDflash2Config();
+  FakeModelStateMetadata target;
+  target.AddOutput("aux_hidden_states", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16, {-1, 64});
+  const FakeModelStateMetadata drafter;
+  EXPECT_THROW(ValidateDflash2ModelCompatibility(config, target, drafter), std::runtime_error);
+}
+
+TEST(Dflash2ConfigTest, RequiresTwoDimensionalAuxiliaryTensors) {
+  const auto config = MakeDflash2Config();
+  auto [target, drafter] = MakeCompatibleMetadata();
+  target.AddOutput("aux_hidden_states", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16, {-1, 4, 16});
+  EXPECT_THROW(ValidateDflash2ModelCompatibility(config, target, drafter), std::runtime_error);
+
+  std::tie(target, drafter) = MakeCompatibleMetadata();
+  drafter.AddInput("aux_hidden_states", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16, {-1, 4, 16});
+  EXPECT_THROW(ValidateDflash2ModelCompatibility(config, target, drafter), std::runtime_error);
+}
+
+TEST(Dflash2ConfigTest, RequiresMatchingAuxiliaryWidth) {
+  const auto config = MakeDflash2Config();
+  auto [target, drafter] = MakeCompatibleMetadata();
+  drafter.AddInput("aux_hidden_states", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16, {-1, 32});
+  EXPECT_THROW(ValidateDflash2ModelCompatibility(config, target, drafter), std::runtime_error);
+}
+
+TEST(Dflash2ConfigTest, RequiresMatchingAuxiliaryType) {
+  const auto config = MakeDflash2Config();
+  auto [target, drafter] = MakeCompatibleMetadata();
+  drafter.AddInput("aux_hidden_states", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, {-1, 64});
+  EXPECT_THROW(ValidateDflash2ModelCompatibility(config, target, drafter), std::runtime_error);
 }
 
 TEST(Dflash2ConfigTest, RequiresOneDraftPerNonAnchorBlockRow) {

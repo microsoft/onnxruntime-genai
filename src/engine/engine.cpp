@@ -227,10 +227,27 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
     if (!model->config_->engine.dynamic_batching) {
       throw std::runtime_error("An Engine-hosted DFlash 2 drafter requires dynamic batching.");
     }
+    auto& dflash2 = model->config_->model.dflash2;
+    auto& target_aux_output = model->config_->model.decoder.outputs.aux_hidden_states;
+    if (dflash2.main_aux_hidden_states.empty()) {
+      dflash2.main_aux_hidden_states = target_aux_output;
+    }
+    if (dflash2.main_aux_hidden_states.empty()) {
+      throw std::runtime_error(
+          "model.dflash2.main_aux_hidden_states must name a main-model output.");
+    }
+    target_aux_output = dflash2.main_aux_hidden_states;
+    if (!model->session_info_.HasOutput(target_aux_output)) {
+      throw std::runtime_error(
+          "model.dflash2.main_aux_hidden_states must name a main-model output.");
+    }
+
     const auto& batching = *model->config_->engine.dynamic_batching;
     const size_t paged_block_size = static_cast<size_t>(batching.block_size);
     auto dflash2_model = std::make_shared<Dflash2Model>(
         CreateDflash2Config(*model->config_), GetOrtEnv());
+    ValidateDflash2ModelCompatibility(
+        *model->config_, model->session_info_, dflash2_model->session_info_);
     // Built before the main pool so the pool's free-memory measurement already excludes it. The
     // drafter is windowed, so its footprint depends on the batch size, not the context length.
     dflash2_drafter = std::make_unique<Dflash2Drafter>(
