@@ -508,7 +508,18 @@ size_t Engine::Run(std::span<EngineEvent> events) {
 
 void Engine::RunStatic() {
   if (scheduler_->HasPendingRequests()) {
-    auto scheduled_requests = scheduler_->Schedule();
+    auto scheduled_requests = [&]() -> ScheduledRequests {
+      try {
+        return scheduler_->Schedule();
+      } catch (...) {
+        MarkUnhealthyAndThrow(
+            StepOutcomeKind::ExecutionContractFailure,
+            /*transaction_id=*/0,
+            nullptr,
+            "Static scheduler failed and the Engine is no longer healthy.",
+            std::current_exception());
+      }
+    }();
 
     try {
       model_executor_->Decode(scheduled_requests);

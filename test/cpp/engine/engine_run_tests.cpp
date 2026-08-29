@@ -125,6 +125,33 @@ class FailingPostProcessingDevice final : public DeviceInterface {
   std::shared_ptr<RequestPostProcessingControl> control_;
 };
 
+class ThrowingStaticScheduler final : public Scheduler {
+ public:
+  explicit ThrowingStaticScheduler(std::shared_ptr<Model> model)
+      : Scheduler{std::move(model)} {}
+
+  void AddRequest(std::shared_ptr<Request> request) override {
+    request_ = std::move(request);
+  }
+
+  void RemoveRequest(std::shared_ptr<Request> request) override {
+    if (request_ == request) {
+      request_.reset();
+    }
+  }
+
+  ScheduledRequests Schedule() override {
+    throw std::runtime_error("Injected static scheduler failure.");
+  }
+
+  bool HasPendingRequests() const override {
+    return request_ != nullptr;
+  }
+
+ private:
+  std::shared_ptr<Request> request_;
+};
+
 class EngineRunTest : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -1164,6 +1191,33 @@ TEST_F(EngineRunTest, FatalExecutionFailureMarksEngineUnhealthy) {
   EXPECT_EQ(engine.cache->AllocatedCount(), 0u);
   request->Close();
   EXPECT_EQ(request->status_, RequestStatus::Closed);
+}
+
+TEST_F(EngineRunTest, StaticSchedulerFailureMarksEngineUnhealthy) {
+  model_->config_->engine.dynamic_batching.reset();
+  auto cache = std::make_shared<RecordingCacheManager>(
+      model_, /*capacity=*/8, nullptr, /*supports_dynamic_batching=*/false);
+  auto scheduler = std::make_unique<ThrowingStaticScheduler>(model_);
+  auto executor = std::make_unique<RecordingModelExecutor>(
+      model_, cache, EosToken(*model_));
+  auto* executor_observer = executor.get();
+  EngineDependencies dependencies{
+      cache, std::move(scheduler), std::move(executor)};
+  auto engine = std::make_shared<Engine>(
+      model_, std::move(dependencies));
+
+  auto request = CreateRequestWithPrompt(engine, *model_, Prompt(10));
+
+  const auto failure = RunOne(*engine);
+  EXPECT_EQ(failure.flags, EngineEventFlagFailed);
+  EXPECT_EQ(failure.error_code, EngineErrorCode::EngineContractFailure);
+  EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
+  EXPECT_EQ(request->FinishReason(), GenerationFinishReason::Failed);
+  EXPECT_EQ(executor_observer->decode_calls, 0);
+  EXPECT_EQ(cache->AllocatedCount(), 0u);
+
+  EXPECT_THROW(static_cast<void>(engine->Run({})), EngineStepError);
+  EXPECT_THROW(static_cast<void>(RunOne(*engine)), EngineStepError);
 }
 
 TEST_F(EngineRunTest, BeginTurnIsRejectedAfterEngineBecomesUnhealthy) {
