@@ -487,7 +487,7 @@ struct RecordingModelExecutor : ModelExecutor {
         std::make_unique<ScriptedDecoderIO>(
             model_, scheduled_requests, cache_manager_, forced_token_,
             failure == ScriptedExecutionFailure::PostProcessing,
-        context.plan, verify_row_tokens_, hidden_size_, hidden_type_));
+            context.plan, verify_row_tokens_, hidden_size_, hidden_type_));
     static_cast<void>(context);
   }
 

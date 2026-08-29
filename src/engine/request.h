@@ -392,6 +392,7 @@ struct Request : std::enable_shared_from_this<Request>,
   std::weak_ptr<Engine> engine_;
   const Engine* engine_identity_{};
 
+  const char* DraftTokenValidationError() const noexcept;
   void ApplyLogitsProcessors(DeviceSpan<float> logits, bool guidance_applied);
   void ResetGuidanceForNewTurn();
   void SelectNextToken();

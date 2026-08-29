@@ -244,8 +244,7 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
                                                     ? static_cast<size_t>(search.max_length - committed_length_after_step - 1)
                                                     : size_t{0}});
       if (!result.token_appended || result.done ||
-          search.repetition_penalty != 1.0f || search.no_repeat_ngram_size > 0 ||
-          search.min_length > entry.request->CurrentSequenceLength() ||
+          entry.request->DraftTokenValidationError() ||
           max_draft_tokens == 0) {
         continue;
       }
@@ -465,6 +464,8 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
       feedback_hidden = copy_hidden_rows(*head_hidden, feedback_rows);
     }
 
+    // Keep each stage's decoder I/O alive until the final device-to-host copy completes; device
+    // ArgMax can still be reading its logits after Decode returns.
     std::vector<std::unique_ptr<ScheduledRequests>> pending_device_requests;
     pending_device_requests.reserve(max_draft_tokens - 1);
 
@@ -596,11 +597,18 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
 
 void Engine::RollbackMtpStep(MtpStep& step) {
   std::exception_ptr rollback_error;
+  try {
+    mtp_model_->p_device_scoring_->Synchronize();
+  } catch (...) {
+    rollback_error = std::current_exception();
+  }
   if (step.reservation) {
     try {
       step.reservation->Release();
     } catch (...) {
-      rollback_error = std::current_exception();
+      if (!rollback_error) {
+        rollback_error = std::current_exception();
+      }
     }
     step.reservation.reset();
   }
