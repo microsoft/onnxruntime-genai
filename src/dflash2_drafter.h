@@ -32,6 +32,11 @@ struct Dflash2Model : Model {
 // applies to the drafter session unchanged.
 std::unique_ptr<Config> CreateDflash2Config(const Config& config);
 
+// Validates the auxiliary hidden-state tensor passed from the target to the drafter.
+void ValidateDflash2ModelCompatibility(const Config& config,
+                                       const ModelStateMetadata& target_metadata,
+                                       const ModelStateMetadata& drafter_metadata);
+
 /**
  * @brief Runs the DFlash 2 block drafter for one engine step.
  *

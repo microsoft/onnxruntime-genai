@@ -38,7 +38,8 @@ SimpleDecoder::SimpleDecoder(std::shared_ptr<DecoderOnly_Model> model,
   if (IsGraphCaptureEnabled(model_->config_->model.decoder.session_options) &&
       cache_manager_->SupportsDynamicBatching() &&
       !has_fixed_state_groups_ &&
-      !has_position_ids) {
+      !has_position_ids &&
+      model_->config_->model.decoder.outputs.aux_hidden_states.empty()) {
     graph_buffers_ = std::make_unique<VarlenGraphBuffers>(*model_);
   }
 }
