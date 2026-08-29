@@ -42,8 +42,9 @@ inline std::shared_ptr<Model> LoadSyntheticHybridModel() {
 // config declares one paged_kv group (layers [1, 4]) alongside two fixed decoder state groups
 // (convolution [0, 3] and recurrent [2, 5]) plus engine.dynamic_batching, so CacheManager::Create
 // builds a real PagedKeyValueCache and a real FixedStatePool. The composite tests drive it with the
-// recording executor doubles, so the ONNX graph is never executed; the fixed present outputs are
-// Identity pass-throughs and only the declared session I/O has to validate.
+// recording executor doubles, while the Python integration test executes the graph. Most fixed
+// outputs are Identity pass-throughs; convolution layer 0 increments its state so committed
+// fixed-state propagation affects observable logits.
 inline std::shared_ptr<Model> LoadSyntheticCompositeModel() {
   return CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-composite");
 }

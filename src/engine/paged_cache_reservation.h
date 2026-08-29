@@ -11,6 +11,7 @@
 
 #include "../span.h"
 #include "block.h"
+#include "request_index.h"
 
 namespace Generators {
 
@@ -103,7 +104,8 @@ class PagedCacheReservation {
                         std::vector<PagedCacheBlockTable>& committed_tables,
                         std::span<const PagedCacheReservationRequest> requests,
                         BlockPool* window_block_pool = nullptr,
-                        size_t window_ring_blocks = 0);
+                        size_t window_ring_blocks = 0,
+                        RequestIndex* table_index = nullptr);
   PagedCacheReservation(PagedCacheReservation&& other) noexcept;
   PagedCacheReservation& operator=(PagedCacheReservation&&) = delete;
   PagedCacheReservation(const PagedCacheReservation&) = delete;
@@ -153,8 +155,11 @@ class PagedCacheReservation {
     size_t window_block_count{};
   };
 
+  PagedCacheBlockTable* FindCommittedTable(const void* request_id);
   const PagedCacheBlockTable* FindCommittedTable(const void* request_id) const;
-  const PagedCacheReservationDelta& FindDelta(const void* request_id) const;
+  uint64_t BeginDeltaResolution() const;
+  const PagedCacheReservationDelta& ResolveDelta(
+      const void* request_id, uint64_t visit_generation) const;
   void ValidateResidentTablesUnchanged() const;
   void ValidateAdvancePreconditions(const PagedCacheReservationDelta& delta,
                                     const PagedCacheBlockTable& table) const;
@@ -164,9 +169,14 @@ class PagedCacheReservation {
   BlockPool* window_block_pool_{};
   size_t window_ring_blocks_{};
   std::vector<PagedCacheBlockTable>* committed_tables_{};
+  RequestIndex* table_index_{};
+  RequestIndex resident_table_index_;
   std::vector<std::shared_ptr<Block>> reserved_blocks_;
   std::vector<std::shared_ptr<Block>> reserved_window_blocks_;
   std::vector<PagedCacheReservationDelta> deltas_;
+  RequestIndex delta_index_;
+  mutable std::vector<uint64_t> delta_visit_generations_;
+  mutable uint64_t next_delta_visit_generation_{1};
   std::vector<PagedCacheBlockTable> new_tables_;
   std::vector<const Block*> advance_blocks_;
   std::vector<ResidentTableSnapshot> resident_table_snapshots_;

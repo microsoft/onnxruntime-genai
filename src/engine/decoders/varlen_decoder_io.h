@@ -19,6 +19,11 @@ struct AttentionMetadataValues {
 
 inline constexpr size_t kAttentionMetadataElementCount = 3;
 
+void ValidatePackedPositionIdsInput(
+    ONNXTensorElementDataType data_type,
+    std::span<const int64_t> shape,
+    std::span<const char* const> symbolic_shape = {});
+
 AttentionMetadataValues GetAttentionMetadataForPlan(const StepPlan& plan);
 AttentionMetadataValues GetAttentionMetadataForGraph(size_t block_table_columns, size_t block_size);
 AttentionMetadataValues GetAttentionMetadataForGraphStep(
@@ -78,19 +83,23 @@ struct VarlenDecoderIO : DecoderIO {
                   ScheduledRequests& scheduled_requests,
                   std::shared_ptr<CacheManager> cache_manager,
                   const ExecutionContext* execution_context = nullptr,
-                  VarlenGraphBuffers* graph_buffers = nullptr);
+                  VarlenGraphBuffers* graph_buffers = nullptr,
+                  size_t position_planes = 0);
 
   std::vector<DeviceSpan<float>> ProcessLogits() override;
 
  private:
   void PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
+  void PreparePositionIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
   void PrepareAttentionMetadata(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
   void PrepareLogits(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
 
   // Non-null when this step is being captured or replayed, in which case the tensors below are
   // borrowed from the holder instead of being allocated fresh.
   VarlenGraphBuffers* graph_buffers_{};
-  const ExecutionContext* execution_context_{};
+  const StepPlan* plan_{};
+  size_t block_table_columns_{};
+  size_t position_planes_{};
   std::vector<std::unique_ptr<Tensor>> owned_inputs_;
   std::unique_ptr<Tensor> logits_;
   Tensor* active_logits_{};

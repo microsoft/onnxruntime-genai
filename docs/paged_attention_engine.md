@@ -8,7 +8,7 @@ Update this document whenever a change affects request admission, scheduling, pa
 
 The `Engine` can use either static batching or dynamic batching. This document focuses on the dynamic path used by models configured with `engine.dynamic_batching`, because that path provides continuous batching and uses the paged KV cache.
 
-The dynamic path manages paged KV decoder state together with per-request search and sampler state. When the decoder manifest also declares `fixed_conv` or `fixed_recurrent` state groups, `PagedCacheManager` owns a `FixedStatePool` and reserves, stages, and commits its per-request slots inside the same transaction as the paged blocks. This integrates fixed-state ownership only: `VarlenDecoderIO` does not yet bind those tensors to model execution, so a hybrid graph still cannot run through the production dynamic decoder. Future execution support must be selected from model capabilities rather than model names, and every Engine-owned mutable state must participate in the same transaction boundary.
+The dynamic path manages paged KV decoder state together with per-request search and sampler state. When the decoder manifest also declares `fixed_conv` or `fixed_recurrent` state groups, `PagedCacheManager` owns a `FixedStatePool` and reserves, stages, and commits its per-request slots inside the same transaction as the paged blocks. `HybridDecoderIO` binds those fixed tensors alongside the existing packed variable-length contract. Execution is selected from manifest capabilities rather than model names, and every Engine-owned mutable state participates in the same transaction boundary.
 
 > **Transitional low-level API:** `AddTokens()` plus `AddRequest()`, `Continue()`, repeated `Step()` calls, token-at-a-time unseen-output access, and `Remove()` are a transitional host-facing surface. The production host API is expected to wrap or replace these operations; do not treat their current shape as the final high-level contract.
 >
@@ -106,11 +106,10 @@ When an explicit manifest is present, model loading resolves each group's decode
 
 The dynamic Engine requires exactly one `paged_kv` group. It allocates cache tensors only for that group's logical layer IDs, expands their exact binding names without renumbering, derives the cache dtype from the first validated key input, and sizes an automatic block pool using the number of participating full-attention layers after reserving storage for participating sliding-window layers. Every configured sliding-window layer must belong to the paged group. Multiple paged groups are rejected because the Engine currently owns one shared paged pool. The synthesized legacy group preserves dense sequential behavior when no explicit manifest exists.
 
-The composite resource manager can reserve, stage, and commit `fixed_conv` and
-`fixed_recurrent` groups together with the
-required `paged_kv` group, but this branch intentionally keeps the dynamic compatibility gate in
-place because the production decoder does not bind fixed tensors yet. The packed hybrid decoder IO
-follow-up removes that gate at the same boundary where real model execution becomes available.
+`fixed_conv` and `fixed_recurrent` groups may accompany the required `paged_kv` group. `ValidateDynamicEngineCompatibility` accepts them (it still rejects any configuration without exactly one `paged_kv` group), and `PagedCacheManager` constructs a `FixedStatePool` with `max_batch_size` slots when at least one fixed group is present. The composite manager reserves, stages, and commits fixed slots together with the paged blocks (see "Fixed request-state pools" below), while `HybridDecoderIO` binds their gathered inputs and staged outputs alongside the packed variable-length inputs. Expanded fixed bindings must resolve to real session inputs and outputs; the pool rejects absent or incompatible bindings.
+
+Fixed state currently requires `engine.dynamic_batching`; static batching is rejected because
+`StaticBatchDecoderIO` does not own request-indexed fixed-state bindings.
 
 ## Request lifecycle
 
@@ -379,7 +378,7 @@ The scheduler also marks whether the step is eligible for CUDA graph capture. A 
 
 ### 5. Reserve the complete cache transaction
 
-`PagedCacheManager::ReserveStep()` creates a composite reservation: a `PagedCacheReservation` and, when the model has `fixed` groups, a `FixedStateReservation`. Both use the same scheduled row order.
+`PagedCacheManager::ReserveStep()` creates a composite reservation: a `PagedCacheReservation` and, when the model has `fixed_conv` or `fixed_recurrent` groups, a `FixedStateReservation`. Both use the same scheduled row order.
 
 The paged sub-reservation:
 
@@ -419,11 +418,12 @@ On the transactional dynamic path, `PagedCacheManager::PrepareStep()` updates th
 
 The physical key and value cache tensors are long-lived. What changes per step is the block table that maps each request's logical sequence blocks to physical cache blocks.
 
-`ExecutionContext` also exposes the fixed slot handles, staged bindings, and staging-byte count in the exact scheduled request order. The production executor forwards this context to the decoder, but `VarlenDecoderIO` intentionally does not bind the fixed inputs or outputs yet.
+`ExecutionContext` also exposes the fixed slot handles, staged bindings, and staging-byte count in the exact scheduled request order. `HybridDecoderIO` adopts the complete `VarlenDecoderIO` contract and appends these fixed bindings without changing packed token order or logits processing.
 
 ### 8. Pack variable-length model inputs
 
-`SimpleDecoder` chooses `VarlenDecoderIO` for the dynamic path.
+`SimpleDecoder` chooses `VarlenDecoderIO` for paged-only models and `HybridDecoderIO` (which
+composes `VarlenDecoderIO`) when fixed state groups are present.
 
 `VarlenDecoderIO` builds three coordinated inputs:
 
@@ -432,6 +432,16 @@ input_ids                    all requests' unprocessed tokens concatenated
 cumulative_sequence_lengths  boundaries of each request in the flat token array
 past_sequence_lengths        committed KV length and write position for each request
 ```
+
+When the graph declares `position_ids`, it also builds one absolute int64 position per packed
+token. Request row `i` starts at its committed `past_sequence_lengths[i]`, so a token at local
+offset `j` receives position `past_sequence_lengths[i] + j`. Models may consume either `[num_tokens]`
+or Qwen MRoPE `[3, num_tokens]` geometry; the latter repeats each text position across all three
+MRoPE axes for the text-only decoder path. Multimodal per-axis coordinates are outside the Engine
+contract. The StepPlan row, token count, and packed offset are validated before this optional
+tensor is copied to the model-input device.
+Packed models with this input execute eagerly because the current persistent CUDA graph buffers
+do not own stable position-ID storage.
 
 Using the previous example:
 
@@ -450,6 +460,13 @@ The decoder also prepares a CPU `int32[3]` attention metadata input:
 ```
 
 The first two values are upper bounds. The third is a lower bound on the longest per-request KV sequence and lets the paged attention operator decide whether split-KV decode is worthwhile. Supplying these values lets the operator choose its backend and size its work without reading sequence lengths back from the device. Models using this contract must expose the three-element input; the Engine no longer emits the legacy two-element form. This requires ONNX Runtime commit `0d291bc5d39d8e62150c2c30f174812834344b48` or a later package containing the three-element PagedAttention metadata contract.
+
+Pure-decode steps and mixed prefill/decode steps may select different numerically valid CUDA
+backends. Floating-point reassociation can therefore flip a near-tied greedy token when batch
+composition changes even though request state and continuation are correct. Qualification should
+use continuation/replay invariants, tolerant logits or top-k comparisons, and task-level quality;
+bitwise token equality across batch compositions is available only when every selected backend is
+batch-invariant.
 
 ### 9. Run the decoder once
 
@@ -679,10 +696,10 @@ shape as the full-context table.
 against session metadata and, for every fixed binding, additionally checks that
 the input and output describe one per-request row of identical, statically known,
 non-batch geometry with a batch axis (axis 0) that is either dynamic or a positive
-fixed extent. A fixed batch on either the input or the output constrains the whole
-binding: it is adopted as the pool's fixed batch size and every reservation must
-match it, and the pool refuses to construct if that batch cannot fit in capacity.
-It rejects a zero batch, two different fixed batch extents on input and output,
+fixed extent. Geometry validation recognizes fixed extents so it can diagnose asymmetric
+bindings, but the continuous-batching pool requires a dynamic batch axis and rejects every
+positive fixed extent before allocating device storage. It also rejects a zero batch,
+two different fixed batch extents on input and output,
 dynamic or mismatched non-batch axes, and dtype mismatches. Every dtype and
 per-request row size is derived from that validated geometry, and state is
 allocated with the model state-device allocator. The initial implementation
@@ -756,8 +773,8 @@ bank is written by the commit that publishes it before it is ever gathered, and 
 slot's inactive bank is only ever written (never read) before it becomes active, so
 the persistent banks never need construction-time zeroing. The pool therefore does
 not zero on release, and does not zero gather or staged tensors. It reports its
-persistent bank bytes (both banks), reusable zeroing scratch bytes, and active
-gather/output staging bytes separately. The two-bank design trades roughly double
+persistent bytes (both state banks and both staging buffers), reusable zeroing scratch bytes, and
+the active reservation's viewed gather/output staging bytes separately. The two-bank design trades roughly double
 the persistent footprint for a publish that is a host-only bank flip with no device
 copy, which is what lets `PublishCommit()` be `noexcept`.
 
@@ -767,17 +784,21 @@ decoder has `fixed_conv` or `fixed_recurrent` groups, and integrates it into the
 reserves both, `PrepareCommit()`/`Commit()` stage and publish both, and
 `Deallocate()` validates and then releases both through a no-throw publication boundary. Explicit
 removal and abandoned-request reclamation release a request's fixed slot together with its paged
-blocks; a completed turn remains resident until one of those lifecycle events. The pool is not yet bound to model execution:
-`VarlenDecoderIO` does not consume the fixed bindings, so a hybrid graph still cannot run through the
-production dynamic decoder path. Enabling hybrid execution is the remaining step;
-ownership, staging, rollback, publication, and invariant validation already commit
-paged KV, fixed state, request/search state, and ready events at one boundary.
+blocks; a completed turn remains resident until one of those lifecycle events. `HybridDecoderIO` composes the packed
+`VarlenDecoderIO` inputs and logits handling with the reservation's fixed input and
+staged output bindings. Fixed-state models execute eagerly because packed position and
+transaction-scoped state bindings are not yet part of the CUDA graph compatibility contract.
 
-Per-step fixed-state gather and output tensors are still allocated by each reservation. Their
-reported staging bytes are checked against the plan but are not subtracted from automatic paged-KV
-capacity. Before the compatibility gate is opened, the execution integration must preallocate or
-otherwise budget this staging footprint and ensure allocation pressure is handled as capacity
-backpressure rather than a fatal contract failure.
+The pool allocates capacity-sized gather and output staging buffers at construction, before paged
+KV auto-sizing queries available memory. Each reservation creates exact-row tensor views over that
+storage. This keeps per-step staging inside the model's memory budget and prevents a planned step
+from failing later because its fixed-state device buffers could not be allocated.
+
+Fixed slots and paged block tables each maintain a preallocated flat request index. Ownership
+publication updates these indexes without allocation, while planning resolves every resident and
+selected row in O(1)-average lookup time. The composite request/paged/fixed consistency sweep is
+therefore linear in resident and scheduled request counts rather than quadratic; this claim does
+not cover unrelated queue ordering or bulk-removal compaction.
 
 ## Prefill, decode, and mixed batches
 

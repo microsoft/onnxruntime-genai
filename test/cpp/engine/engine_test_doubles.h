@@ -468,8 +468,8 @@ inline DoublesEngine MakeDoublesEngine(std::shared_ptr<Model> model, size_t capa
 
 inline CompositeDoublesEngine MakeCompositeDoublesEngine(std::shared_ptr<Model> model,
                                                          int32_t forced_token) {
-  // Bypass the public compatibility gate so this PR can exercise the complete composite resource
-  // manager before the following packed-IO PR enables fixed-state model execution.
+  // Use a recording executor so these tests can inspect composite transaction behavior without
+  // depending on the synthetic ONNX graph's logits.
   auto cache = std::make_shared<PagedCacheManager>(model);
   auto* cache_observer = cache.get();
   auto scheduler = Scheduler::Create(model, cache);
