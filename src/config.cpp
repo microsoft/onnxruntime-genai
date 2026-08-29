@@ -25,8 +25,11 @@ std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   if (mtp.filename.empty()) {
     throw std::runtime_error("model.mtp.filename is required to create an MTP decoder.");
   }
-  if (mtp.num_hidden_layers <= 0 || mtp.num_key_value_heads <= 0 || mtp.head_size <= 0) {
-    throw std::runtime_error("model.mtp layer count, KV head count, and head size must be positive.");
+  if (mtp.num_hidden_layers != 1) {
+    throw std::runtime_error("model.mtp.num_hidden_layers must be 1.");
+  }
+  if (mtp.num_key_value_heads <= 0 || mtp.head_size <= 0) {
+    throw std::runtime_error("model.mtp KV head count and head size must be positive.");
   }
 
   auto projected = std::make_unique<Config>(config);
