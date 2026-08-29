@@ -113,29 +113,31 @@ ScenarioExecutionOutput MixedWorkloadScenario::Execute(const ScenarioConfig& con
     }
 
     // Measure whether the long prefill delays decode first-token and inter-token latency.
-    std::vector<OgaEngineEvent> event_storage(
+    auto event_buffer = engineResources.engine->CreateEventBuffer(
         static_cast<size_t>(config.concurrency));
     size_t consecutive_retries = 0;
     while (engineResources.engine->HasPendingRequests()) {
       const size_t event_count = engineResources.engine->Run(
-          event_storage.data(), event_storage.size());
+          *event_buffer);
       const auto now = std::chrono::steady_clock::now();
       for (size_t event_index = 0; event_index < event_count; ++event_index) {
-        const auto& event = event_storage[event_index];
+        const auto& event = *event_buffer->Get(event_index);
         if (!RequireRequestEvent(
                 event, Name(), consecutive_retries)) {
           continue;
         }
 
-        const auto request_it = request_indices.find(event.request);
+        const auto request = event.Request();
+        const auto request_it = request_indices.find(
+            request ? &request->get() : nullptr);
         if (request_it == request_indices.end()) {
           throw std::runtime_error(
               Name() + ": event request has no mixed-workload state");
         }
         const size_t request_index = request_it->second;
 
-        if ((event.flags & OgaEngineEventFlag_Token) != 0) {
-          request_tokens[request_index].push_back(event.token);
+        if ((event.Flags() & OgaEngineEventFlag_Token) != 0) {
+          request_tokens[request_index].push_back(event.Token());
           ++generated_tokens;
           const double elapsed_ms =
               std::chrono::duration<double, std::milli>(
@@ -152,8 +154,8 @@ ScenarioExecutionOutput MixedWorkloadScenario::Execute(const ScenarioConfig& con
           last_token_time[request_index] = now;
         }
 
-        if ((event.flags & OgaEngineEventFlag_TurnFinished) != 0) {
-          event.request->Close();
+        if ((event.Flags() & OgaEngineEventFlag_TurnFinished) != 0) {
+          event.Request()->get().Close();
         }
       }
     }

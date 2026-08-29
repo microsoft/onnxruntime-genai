@@ -83,24 +83,24 @@ ScenarioExecutionOutput LongPrefillScenario::Execute(const ScenarioConfig& confi
         prompt_tokens->SequenceData(0), prompt_token_count);
 
     const auto start = std::chrono::steady_clock::now();
-    std::array<OgaEngineEvent, 1> event_storage;
+    auto event_buffer = engineResources.engine->CreateEventBuffer(1);
     size_t event_count = 0;
     size_t consecutive_retries = 0;
     bool has_request_event = false;
     while (!has_request_event &&
            engineResources.engine->HasPendingRequests()) {
       event_count = engineResources.engine->Run(
-          event_storage.data(), event_storage.size());
+          *event_buffer);
       if (event_count != 0) {
         has_request_event = RequireRequestEvent(
-            event_storage[0], Name(), consecutive_retries);
+            *event_buffer->Get(0), Name(), consecutive_retries);
       }
     }
     const auto first_token = std::chrono::steady_clock::now();
     if (!has_request_event) {
       throw std::runtime_error("long_prefill did not produce a first token");
     }
-    if ((event_storage[0].flags & OgaEngineEventFlag_Token) == 0) {
+    if ((event_buffer->Get(0)->Flags() & OgaEngineEventFlag_Token) == 0) {
       throw std::runtime_error("long_prefill did not produce a first token");
     }
     request->Close();

@@ -24,9 +24,9 @@ The redesign must:
 - make Request and Turn limits explicit;
 - identify every Turn;
 - cancel only the intended Turn;
-- return typed, caller-buffered Engine events;
+- return typed Engine events through reusable opaque storage;
 - deliver tokens only through events;
-- keep ABI-visible structures concrete and fixed-width;
+- keep public Engine handles opaque and behavioral constants fixed-width;
 - preserve the single-host-owner-thread contract.
 
 ## C API
@@ -35,13 +35,18 @@ The redesign must:
 
 ```c
 typedef struct OgaEngine OgaEngine;
+typedef struct OgaEngineEvent OgaEngineEvent;
+typedef struct OgaEngineEventBuffer OgaEngineEventBuffer;
 typedef struct OgaRequest OgaRequest;
-typedef struct OgaTurnParams OgaTurnParams;
+typedef struct OgaRequestOptions OgaRequestOptions;
+typedef struct OgaTurnOptions OgaTurnOptions;
+typedef struct OgaTurnUsage OgaTurnUsage;
 ```
 
-`OgaTurnParams` is opaque because sampling, stop-sequence, and guidance settings are expected to
-evolve and may eventually contain copied pointer-backed data. Adding setter functions is ABI-safe
-and avoids public field-presence rules for values where zero is meaningful.
+Every new Engine API object is opaque. `OgaRequestOptions` and `OgaTurnOptions` can evolve through
+setters without public field-presence rules. `OgaEngineEvent` and `OgaTurnUsage` expose data only
+through getters, so the API publishes no layout, size, alignment, version, or stride contract.
+`OgaEngineEventBuffer` owns the event objects and exposes borrowed views.
 
 `OgaGeneratorParams` remains in Request creation initially. Internally, `Search`, RNG, sampling,
 guidance, allocation limits, and model execution currently consume `GeneratorParams`. Replacing it
@@ -50,14 +55,18 @@ with an Engine-bound opaque `OgaRequestParams` is deferred until that ownership 
 ### Request options
 
 ```c
-typedef struct OgaRequestOptions {
-  uint64_t max_session_tokens; /* 0 = snapshotted generation_params.search.max_length. */
-} OgaRequestOptions;
+OgaResult* OgaCreateRequestOptions(OgaRequestOptions** out);
+
+void OgaDestroyRequestOptions(OgaRequestOptions* options);
+
+OgaResult* OgaRequestOptionsSetMaxSessionTokens(
+    OgaRequestOptions* options,
+    uint64_t max_session_tokens);
 ```
 
 Rules:
 
-- `OgaRequestOptions` is a public fixed-field structure, not an opaque handle.
+- `OgaRequestOptions` is an opaque, reusable, caller-owned handle.
 - Conversion from `uint64_t` to internal sizes is checked before mutation.
 - Null options or zero `max_session_tokens` use the Request's snapshotted
   `OgaGeneratorParams.search.max_length`. That search value normally defaults from the model context
@@ -66,41 +75,41 @@ Rules:
 - The value counts the initial input, generated tokens, and continuation input over the complete
   resident Request.
 
-### Turn parameters
+### Turn options
 
 ```c
-OgaResult* OgaRequestCreateTurnParams(
+OgaResult* OgaRequestCreateTurnOptions(
     OgaRequest* request,
-    OgaTurnParams** out);
+    OgaTurnOptions** out);
 
-void OgaDestroyTurnParams(OgaTurnParams* params);
+void OgaDestroyTurnOptions(OgaTurnOptions* options);
 
-OgaResult* OgaTurnParamsSetMaxGeneratedTokens(
-    OgaTurnParams* params,
+OgaResult* OgaTurnOptionsSetMaxGeneratedTokens(
+    OgaTurnOptions* options,
     uint64_t max_generated_tokens);
 
-OgaResult* OgaTurnParamsSetTemperature(
-    OgaTurnParams* params,
+OgaResult* OgaTurnOptionsSetTemperature(
+    OgaTurnOptions* options,
     float temperature);
 
-OgaResult* OgaTurnParamsSetTopP(
-    OgaTurnParams* params,
+OgaResult* OgaTurnOptionsSetTopP(
+    OgaTurnOptions* options,
     float top_p);
 
-OgaResult* OgaTurnParamsSetTopK(
-    OgaTurnParams* params,
+OgaResult* OgaTurnOptionsSetTopK(
+    OgaTurnOptions* options,
     int32_t top_k);
 
-OgaResult* OgaTurnParamsSetSeed(
-    OgaTurnParams* params,
+OgaResult* OgaTurnOptionsSetSeed(
+    OgaTurnOptions* options,
     uint64_t seed);
 
-OgaResult* OgaTurnParamsSetStopSequences(
-    OgaTurnParams* params,
+OgaResult* OgaTurnOptionsSetStopSequences(
+    OgaTurnOptions* options,
     const OgaSequences* stop_sequences);
 
-OgaResult* OgaTurnParamsSetGuidance(
-    OgaTurnParams* params,
+OgaResult* OgaTurnOptionsSetGuidance(
+    OgaTurnOptions* options,
     const char* guidance_type,
     const char* guidance_data);
 ```
@@ -114,41 +123,42 @@ Initial implementation status:
 | token-ID stop sequences | A null collection is rejected; a non-null collection is not dereferenced or retained and returns an explicit not-implemented error |
 | guidance | Setter returns an explicit not-implemented error and does not retain/dereference input |
 
-Unsupported requested behavior must never be accepted and ignored. `OgaTurnParams` may be reused, but
-`OgaRequestBeginTurn` snapshots all supported values before returning. A params object is bound to
-the Request that created it; passing it to another Request is rejected. The params object does not
+Unsupported requested behavior must never be accepted and ignored. `OgaTurnOptions` may be reused,
+but `OgaRequestBeginTurn` snapshots all supported values before returning. An options object is
+bound to the Request that created it; passing it to another Request is rejected. The options object does not
 keep the Request alive. Using it after the bound Request is closed or destroyed returns an error.
 
 ### Finish reasons and event flags
 
 ```c
-typedef enum OgaFinishReason {
-  OgaFinishReason_None = 0,
-  OgaFinishReason_Eos = 1,
-  OgaFinishReason_StopSequence = 2, /* Reserved; not emitted initially. */
-  OgaFinishReason_MaxGeneratedTokens = 3,
-  OgaFinishReason_MaxSessionTokens = 4,
-  OgaFinishReason_Cancelled = 5,
-  OgaFinishReason_Failed = 6
-} OgaFinishReason;
+typedef uint32_t OgaFinishReason;
+#define OgaFinishReason_None ((OgaFinishReason)0)
+#define OgaFinishReason_Eos ((OgaFinishReason)1)
+#define OgaFinishReason_StopSequence ((OgaFinishReason)2)
+#define OgaFinishReason_MaxGeneratedTokens ((OgaFinishReason)3)
+#define OgaFinishReason_MaxSessionTokens ((OgaFinishReason)4)
+#define OgaFinishReason_Cancelled ((OgaFinishReason)5)
+#define OgaFinishReason_Failed ((OgaFinishReason)6)
 
-typedef enum OgaEngineEventFlags {
-  OgaEngineEventFlag_None = 0,
-  OgaEngineEventFlag_Token = 1u << 0,
-  OgaEngineEventFlag_TurnFinished = 1u << 1,
-  OgaEngineEventFlag_CapacityBlocked = 1u << 2,
-  OgaEngineEventFlag_Failed = 1u << 3,
-  OgaEngineEventFlag_Retryable = 1u << 4
-} OgaEngineEventFlags;
+typedef uint32_t OgaEngineEventFlags;
+#define OgaEngineEventFlag_None ((OgaEngineEventFlags)0)
+#define OgaEngineEventFlag_Token ((OgaEngineEventFlags)(1u << 0))
+#define OgaEngineEventFlag_TurnFinished ((OgaEngineEventFlags)(1u << 1))
+#define OgaEngineEventFlag_CapacityBlocked ((OgaEngineEventFlags)(1u << 2))
+#define OgaEngineEventFlag_Failed ((OgaEngineEventFlags)(1u << 3))
+#define OgaEngineEventFlag_Retryable ((OgaEngineEventFlags)(1u << 4))
 ```
 
 `OgaEngineEventFlags` is a bitmask, not a mutually exclusive type. In particular, a final model step
 may emit one event with both `Token` and `TurnFinished`.
 
+The public types are fixed-width integer typedefs rather than C enums. Adding a constant therefore
+cannot change a field or parameter's ABI width under compiler enum-size options.
+
 The public token loop pumps `OgaEngineRun`, iterates the populated event prefix, tests the `Token`
-bit rather than comparing flags for equality, treats `event.request` as a borrowed identity alias
-for the caller's owned Request handle, uses `event.turn_id` as the Request-local Turn identity, and
-consumes `event.token` only when `Token` is set.
+bit rather than comparing flags for equality, treats the Request getter result as a borrowed
+identity alias for the caller's owned Request handle, uses the Turn ID getter as the Request-local
+Turn identity, and consumes the token getter only when `Token` is set.
 
 `OgaFinishReason_StopSequence` reserves the intended vocabulary but is not emitted until stop
 sequences are implemented end to end.
@@ -156,34 +166,40 @@ sequences are implemented end to end.
 ### Usage and events
 
 ```c
-typedef struct OgaTurnUsage {
-  uint64_t prompt_tokens;
-  uint64_t generated_tokens;
-  uint64_t cached_prompt_tokens; /* Currently always 0. */
-} OgaTurnUsage;
+typedef struct OgaEngineEvent OgaEngineEvent;
+typedef struct OgaEngineEventBuffer OgaEngineEventBuffer;
+typedef struct OgaTurnUsage OgaTurnUsage;
 
-typedef enum OgaErrorCode {
-  OgaErrorCode_None = 0,
-  OgaErrorCode_CapacityDeferred = 1,
-  OgaErrorCode_ExecutionCapacityExceeded = 2,
-  OgaErrorCode_RetryableExecution = 3,
-  OgaErrorCode_RequestUnserviceable = 4,
-  OgaErrorCode_EngineContractFailure = 5,
-  OgaErrorCode_EngineExecutionFailure = 6
-} OgaErrorCode;
+typedef uint32_t OgaErrorCode;
+#define OgaErrorCode_None ((OgaErrorCode)0)
+#define OgaErrorCode_CapacityDeferred ((OgaErrorCode)1)
+#define OgaErrorCode_ExecutionCapacityExceeded ((OgaErrorCode)2)
+#define OgaErrorCode_RetryableExecution ((OgaErrorCode)3)
+#define OgaErrorCode_RequestUnserviceable ((OgaErrorCode)4)
+#define OgaErrorCode_EngineContractFailure ((OgaErrorCode)5)
+#define OgaErrorCode_EngineExecutionFailure ((OgaErrorCode)6)
 
-typedef struct OgaEngineEvent {
-  uint32_t flags;
+OgaResult* OgaEngineEventGetFlags(
+    const OgaEngineEvent* event, OgaEngineEventFlags* out);
+OgaResult* OgaEngineEventGetRequest(
+    const OgaEngineEvent* event, OgaRequest** out);
+OgaResult* OgaEngineEventGetTurnId(
+    const OgaEngineEvent* event, uint64_t* out);
+OgaResult* OgaEngineEventGetToken(
+    const OgaEngineEvent* event, int32_t* out);
+OgaResult* OgaEngineEventGetFinishReason(
+    const OgaEngineEvent* event, OgaFinishReason* out);
+OgaResult* OgaEngineEventGetErrorCode(
+    const OgaEngineEvent* event, OgaErrorCode* out);
+OgaResult* OgaEngineEventGetUsage(
+    const OgaEngineEvent* event, const OgaTurnUsage** out);
 
-  OgaRequest* request; /* Borrowed; NULL for Engine-level events. */
-  uint64_t turn_id;
-
-  int32_t token;
-
-  OgaFinishReason finish_reason;
-  OgaErrorCode error_code;
-  OgaTurnUsage usage;
-} OgaEngineEvent;
+OgaResult* OgaTurnUsageGetPromptTokens(
+    const OgaTurnUsage* usage, uint64_t* out);
+OgaResult* OgaTurnUsageGetGeneratedTokens(
+    const OgaTurnUsage* usage, uint64_t* out);
+OgaResult* OgaTurnUsageGetCachedPromptTokens(
+    const OgaTurnUsage* usage, uint64_t* out);
 ```
 
 The error codes describe public behavior while preserving the distinctions needed to map existing
@@ -193,7 +209,7 @@ Payload validity is determined by flags:
 
 | Flags | Valid payload |
 | --- | --- |
-| `None` | Reserved zero value; no-work is represented by `out_event_count == 0` |
+| `None` | Reserved zero value; no-work is represented by Buffer count zero |
 | `Token` | `request`, `turn_id`, and `token` |
 | `TurnFinished` | `request`, `turn_id`, `finish_reason`, and `usage` |
 | `Token \| TurnFinished` | Final visible token and terminal payload from the same committed step |
@@ -210,8 +226,14 @@ produce `Failed` events. Capacity pressure is operational and does not set `Fail
 `cached_prompt_tokens` is currently always zero; no prefix-cache hit accounting is exposed.
 Scheduler `max_scheduled_tokens` is not usage: it is a per-step budget shared across Requests.
 
-`OgaEngineEvent` records are caller-allocated as a contiguous array. The implementation validates
-the complete buffer range before making progress and fully initializes the populated prefix.
+Event getters require non-null event and output pointers and return `OgaResult*` on misuse. They
+initialize the output to its zero/null value before rejecting a null event. The count and indexed
+Buffer accessors are the two deliberate direct-return exceptions: count returns zero for a null
+Buffer, and indexed access returns null for a null Buffer or an out-of-range index.
+
+`OgaEngineEventGetRequest` returns a borrowed identity alias, never an owned Request handle.
+`OgaEngineEventGetUsage` returns a borrowed usage view. Event and usage pointers are valid only
+until the next `OgaEngineRun` using their Buffer or Buffer destruction.
 
 Every function returning `OgaResult*` returns null on success or an owned error object on failure;
 the caller releases that object with `OgaDestroyResult`, and its diagnostic string is valid until
@@ -236,7 +258,7 @@ OgaResult* OgaEngineCreateRequest(
 
 OgaResult* OgaRequestBeginTurn(
     OgaRequest* request,
-    const OgaTurnParams* turn_params,
+    const OgaTurnOptions* turn_options,
     const int32_t* input_ids,
     uint64_t input_ids_count,
     uint64_t* out_turn_id);
@@ -250,15 +272,46 @@ OgaResult* OgaRequestClose(OgaRequest* request);
 
 void OgaDestroyRequest(OgaRequest* request);
 
+OgaResult* OgaCreateEngineEventBuffer(
+    OgaEngine* engine,
+    size_t capacity,
+    OgaEngineEventBuffer** out);
+
+void OgaDestroyEngineEventBuffer(
+    OgaEngineEventBuffer* buffer);
+
 OgaResult* OgaEngineRun(
     OgaEngine* engine,
-    OgaEngineEvent* events,
-    size_t event_capacity,
-    size_t* out_event_count);
+    OgaEngineEventBuffer* buffer);
+
+size_t OgaEngineEventBufferGetCount(
+    const OgaEngineEventBuffer* buffer);
+
+const OgaEngineEvent* OgaEngineEventBufferGet(
+    const OgaEngineEventBuffer* buffer,
+    size_t index);
 
 OgaResult* OgaEngineHasPendingRequests(
     OgaEngine* engine,
     bool* out);
+```
+
+Typical event draining creates the Buffer once and reuses it:
+
+```c
+OgaEngineEventBuffer* buffer = NULL;
+OgaCreateEngineEventBuffer(engine, 4, &buffer);
+while (has_pending) {
+  OgaEngineRun(engine, buffer);
+  size_t count = OgaEngineEventBufferGetCount(buffer);
+  for (size_t i = 0; i < count; ++i) {
+    const OgaEngineEvent* event = OgaEngineEventBufferGet(buffer, i);
+    OgaEngineEventFlags flags = OgaEngineEventFlag_None;
+    OgaEngineEventGetFlags(event, &flags);
+    /* Read only payloads selected by flags. */
+  }
+}
+OgaDestroyEngineEventBuffer(buffer);
 ```
 
 On successful `OgaCreateEngine`, the Engine retains shared ownership of the underlying Model. The
@@ -277,6 +330,13 @@ Destroying an Engine closes all bound Requests and purges events. Surviving Requ
 valid closed tombstones that the caller must still destroy. A resident static batch is released as
 shared Engine storage during teardown, not through independent per-Request deallocation.
 
+An Event Buffer stores a weak Engine reference and does not keep its bound Engine alive. Run rejects
+a Buffer created by another Engine. If the Engine handle is destroyed first, a later Run using its
+Buffer returns an error without dereferencing the stale Engine pointer; the Buffer remains owned by
+the caller and must still be destroyed. Buffer creation and Run honor the Engine owner thread.
+Buffer access, Run, and destruction are serialized; getters may read immutable views but must not
+race a Run or destruction.
+
 Request creation snapshots the supplied generation parameters. Engine Requests require
 `search.batch_size == 1` and `search.num_beams == 1`; `top_p` must be in `[0, 1]`, and `top_k`
 must be nonnegative. Guidance fast-forward tokens are unsupported, and guidance type and data
@@ -288,9 +348,10 @@ Input IDs are copied before `BeginTurn` returns. The public count is fixed-width
 one sequence; accepting multi-sequence `OgaSequences` would obscure that constraint.
 `input_ids_count` must be nonzero for a successful Turn. A null `input_ids` pointer is accepted only
 with a zero count, which is then rejected by `BeginTurn` as an empty input.
-On success, `OgaEngineCreateRequest` and `OgaRequestCreateTurnParams` return caller-owned handles
-that must be released with their matching destroy functions. `BeginTurn` copies supported values
-from `turn_params` and does not retain either the params handle or the caller's input buffer.
+On success, `OgaCreateRequestOptions`, `OgaEngineCreateRequest`, and
+`OgaRequestCreateTurnOptions` return caller-owned handles that must be released with their matching
+destroy functions. Request and Turn creation copy supported values from their options handles and
+do not retain either handle or the caller's input buffer.
 
 Turn IDs:
 
@@ -323,28 +384,19 @@ the same Turn already exists, cancellation merges the terminal fields into that 
 creating a second event. Cancellation is idempotent by Turn ID: the first matching queued or active
 Turn returns true, and later calls return false.
 
-`OgaEngineRun` uses caller-owned reusable storage:
+`OgaEngineRun` uses an opaque, caller-owned reusable Buffer:
 
-- `event_capacity` is the number of records available.
-- `out_event_count` receives the number of records written in the buffer prefix and is set to zero
-  before later validation or Engine work. It must not overlap the event storage. The complete
-  `size_t` object is checked for overlap before the implementation writes through the pointer, so
-  the count remains unchanged for that specific validation error. Callers must not rely on the
-  count value after any invalid call.
-- For positive capacity, `events` points to a contiguous, aligned array of `OgaEngineEvent`.
-- The complete storage range, including checked
-  `event_capacity * sizeof(OgaEngineEvent)`, is validated before Request reclamation, event
-  draining, scheduling, mutation, or model progress.
-- Populated records are fully initialized, and unused slots are untouched.
+- Buffer creation allocates storage for exactly the requested event capacity.
+- Run reuses that storage directly; it does not allocate a temporary event vector.
+- After handle, binding, and owner-thread validation, Run invalidates the Buffer's prior event and
+  usage views and resets its count.
+- A successful Run exposes the populated prefix through `GetCount` and `Get`.
+- Events beyond the Buffer capacity remain retained by the Engine and drain on later calls.
+- The Buffer is permanently bound to the creating Engine and does not keep that Engine alive.
 
-The caller-owned buffer is the public output storage, not an allocation-free guarantee for the C
-adapter: the current C implementation creates temporary internal event storage for a positive
-capacity call. The C++20 span wrapper passes that caller storage to `OgaEngineRun`, so it has the
-same C-adapter allocation behavior.
-
-Capacity zero is an owner-thread-validated no-op. `events` may be null, the count becomes zero, and
-the call performs no reclamation, event drain, scheduling, or model work. A permanently unhealthy
-Engine still returns its stored fatal error.
+Capacity zero is an owner-thread-validated no-op. The Buffer count remains zero and the call
+performs no reclamation, event drain, scheduling, or model work. A permanently unhealthy Engine
+still returns its stored fatal error.
 
 ## State machine
 
@@ -471,15 +523,15 @@ and remove their internal unseen-index FIFO bookkeeping.
 
 At successful step commit, the Engine already knows the Request, Turn ID, selected token, terminal
 state, finish reason, and usage. It captures those values in `PendingEngineEvent`. One committed
-step produces at most one combined event per affected Request. `OgaEngineRun` copies the available
-FIFO prefix directly to caller storage and retains overflow.
+step produces at most one combined event per affected Request. `OgaEngineRun` moves the available
+FIFO prefix into the reusable Buffer storage and retains overflow.
 
 `tokens_host_` and the Search sequence remain authoritative resident conversation state. Event
 delivery does not remove tokens from that state. Because token and Turn ID are captured together at
 commit, no `GeneratedTokenRecord` or per-Turn token range is required.
 
-Callers must never read `event.token` merely because a record was returned. They check
-`event.flags & OgaEngineEventFlag_Token`; the same event can also carry
+Callers must never consume the token getter merely because an event was returned. They check
+`flags & OgaEngineEventFlag_Token`; the same event can also carry
 `OgaEngineEventFlag_TurnFinished`.
 
 ## Failure and capacity behavior
@@ -493,9 +545,8 @@ Callers must never read `event.token` merely because a record was returned. They
   admission, and does not poison unrelated Requests.
 - A fatal Engine failure produces `Failed` with a null Request and prevents later model execution.
 - Detailed diagnostics continue to use the library's established result/error facilities.
-- Output validation, API misuse, and owner-thread violations return `OgaResult` with count zero and
-  no Engine progress, except that an overlapping `out_event_count` is rejected before the count can
-  safely be written.
+- Invalid Buffer use, API misuse, and owner-thread violations return `OgaResult` with Buffer count
+  zero and no Engine progress.
 - Capacity, retryable, unserviceable, contract-failure, and first fatal-execution outcomes remain
   typed events. After the fatal event is delivered, later `Run` calls return the stored fatal error.
 
@@ -543,36 +594,41 @@ the classic Generator parameter type.
 
 ### C++
 
-- RAII `OgaTurnParams`.
+- RAII `OgaRequestOptions` and `OgaTurnOptions`.
+- RAII `OgaEngineEventBuffer`, created once with `OgaEngine::CreateEventBuffer(capacity)`.
 - `OgaRequest::BeginTurn` returns `uint64_t`.
 - `OgaRequest::CancelTurn(uint64_t) -> bool`.
-- `OgaEngine::Run(OgaEngineEvent*, size_t)` returns the populated record count and is available in
-  C++17 and later.
-- When compiled as C++20 or later, `OgaEngine::Run(std::span<OgaEngineEvent>)` returns a
-  `std::span<const OgaEngineEvent>` over the populated prefix. The C++17 wrapper still exposes
-  the pointer/count overload.
+- `OgaEngine::Run(OgaEngineEventBuffer&)` returns the populated count.
+- `OgaEngineEventBuffer::Get(index)` returns a borrowed event pointer.
+- Event and usage wrappers expose getters only. `OgaEngineEvent::Request()` returns an optional
+  non-owning `std::reference_wrapper<OgaRequest>`; it never exposes an owning or deletable handle
+  for the borrowed Request.
 - No unseen-token methods.
 
 ### Python
 
-- `Request.begin_turn(tokens, turn_params=None) -> int`.
+- `RequestOptions.set_max_session_tokens(value)` configures the cumulative Request limit.
+- `Engine.create_request(params, options=None) -> Request`.
+- `Request.begin_turn(tokens, turn_options=None) -> int`.
 - `Request.cancel_turn(turn_id) -> bool`.
-- `TurnParams.set_stop_sequences(token_id_sequences)` converts the ragged collection to a temporary
+- `TurnOptions.set_stop_sequences(token_id_sequences)` converts the ragged collection to a temporary
   `OgaSequences`; the current C API then raises the explicit not-implemented error. A null C
   collection is rejected before that status is returned.
-- `Engine.run(max_events: int = 1) -> list[EngineEvent]`.
-- `max_events=0` is the capacity-zero no-op and a negative value is rejected.
-- The returned list contains only the populated prefix; its default capacity preserves
-  one-event-at-a-time behavior while larger values expose complete transaction output when it fits.
+- `Engine.create_event_buffer(capacity) -> EngineEventBuffer`.
+- `Engine.run(buffer) -> EngineEventBuffer`; the returned object is the same reusable Buffer and is
+  a Python sequence over its populated borrowed event views.
+- A zero-capacity Buffer is the capacity-zero no-op. Negative or unrepresentable capacities are
+  rejected during Buffer creation.
 - `EngineEvent` exposes flags, borrowed Request, Turn ID, optional token, finish reason, error code,
-  and usage. The event object does not retain the Request; keep the original Python `Request`
-  object alive while using `event.request`.
+  and borrowed usage. Indexed event views keep their Buffer object alive. Both event and usage data
+  are invalidated by the next Run using that Buffer, so applications copy any values that must
+  persist.
 - `Request.begin_turn` requires one logical dimension and converts input to a C-contiguous `int32`
   array when necessary before calling the C++ wrapper. Read-only and strided arrays are accepted
   through that conversion; multidimensional arrays are rejected.
 - No `has_unseen_tokens` or `get_unseen_token`.
 
-Examples and integration tests must consume `event.token` and use flag checks. Managed wrappers must
+Examples and integration tests must consume tokens through event views and use flag checks. Managed wrappers must
 not turn cancellation into a callback that races the owner-thread `Run`; no managed Engine wrapper
 is part of the current source surface.
 
@@ -584,9 +640,9 @@ is part of the current source surface.
 
 ## Implemented phases
 
-1. Added public `OgaRequestOptions`, opaque `OgaTurnParams`, renamed finish reasons, event flags,
-   usage, and caller-buffered event declarations.
-2. Implemented Turn parameter creation, supported limit snapshotting, explicit unsupported setters,
+1. Added opaque Engine option, event, usage, and reusable Buffer handles; kept finish reasons,
+   event flags, and error codes fixed-width.
+2. Implemented Turn option creation, supported limit snapshotting, explicit unsupported setters,
    zero-based Turn IDs, and named cancellation.
 3. Replaced internal ready-Request retention with pre-reserved pending event storage.
 4. Captured token and terminal payload atomically at transaction commit on dynamic and static paths.
@@ -600,10 +656,12 @@ commit buildable; the completed change exposes events only.
 
 ### ABI and validation
 
-- Published sizes and offsets are asserted for supported ABIs.
-- Null positive-capacity buffers, null count pointers, misaligned buffers, multiplication overflow,
-  address-range overflow, and overlapping output counts are rejected before mutation or progress.
-- Populated records are fully initialized and unused slots are preserved.
+- Finish reasons, event flags, and error codes are fixed-width typedefs.
+- Event, usage, and Buffer layouts, sizes, offsets, alignments, versions, and strides are not
+  public ABI.
+- Null handles and null getter outputs are rejected safely.
+- Direct count/get access is null- and bounds-safe.
+- A Buffer from another or destroyed Engine is rejected before model progress.
 - Capacity zero validates the owner thread and otherwise does no work.
 - `uint64_t` counts that do not fit internal types are rejected.
 - Unsupported Turn setters return explicit not-implemented errors.
@@ -629,7 +687,8 @@ commit buildable; the completed change exposes events only.
   capacity.
 - Static multi-row output follows the same bulk delivery contract.
 - `HasPendingRequests` remains true while events are retained.
-- Event output validation failure causes no model progress.
+- Invalid Buffer use causes no model progress.
+- Reusing a Buffer invalidates all prior event and usage views without allocating per Run.
 - Closing one Request removes only that Request's retained events.
 - Abandonment and Engine destruction leave no borrowed pending handles.
 

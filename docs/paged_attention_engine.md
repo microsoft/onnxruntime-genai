@@ -11,7 +11,7 @@ The `Engine` can use either static batching or dynamic batching. This document f
 The current dynamic path manages paged KV decoder state together with per-request search and sampler state. A standalone `FixedStatePool` exists for `fixed_conv` and `fixed_recurrent` manifest groups, but the dynamic Engine still rejects those groups and does not construct, bind, or commit the pool. Future execution support must be selected from model capabilities rather than model names, and every Engine-owned mutable state must participate in the same transaction boundary.
 
 > **Experimental low-level API:** An Engine creates model-bound Requests. `BeginTurn()` queues both
-> initial input and later continuation input and snapshots an opaque `TurnParams` object. Request
+> initial input and later continuation input and snapshots an opaque `TurnOptions` object. Request
 > creation can also snapshot a prompt-plus-generated session-token limit. Successful Turns receive
 > zero-based, monotonically increasing request-local IDs. `Run()` performs synchronous progress and
 > returns one typed `EngineEvent`; token and completion payloads are selected by event flags.
@@ -129,10 +129,10 @@ The engine creates throughput by batching several independent requests, not by p
 The important request states are:
 
 ```text
-Unassigned (Created) -- BeginTurn(tokens, turn_params) --> Assigned (Queued) -- schedule --> Active
+Unassigned (Created) -- BeginTurn(tokens, turn_options) --> Assigned (Queued) -- schedule --> Active
                               ^                                           |
                               |                                           | turn stops
-                              +----- BeginTurn(tokens, turn_params) -- TurnComplete
+                              +----- BeginTurn(tokens, turn_options) -- TurnComplete
 
 Unassigned (Created) -+
 Assigned (Queued) ----+
@@ -163,17 +163,17 @@ sequence limit for the entire Request: the initial
 prompt, generated output, and every continuation input all count against the same limit. It defaults
 to `max_length`, cannot exceed `max_length`, and is not reset by `BeginTurn()`.
 
-Opaque nullable `TurnParams` are separate. Null, or setting `max_generated_tokens` to zero, means
+Opaque nullable `TurnOptions` are separate. Null, or setting `max_generated_tokens` to zero, means
 that no per-Turn limit applies beyond the cumulative Request limit. The current Turn counts only
 generated tokens appended as output. Initial
 input, continuation input, and the previously generated token replayed during continuation prefill
 do not count. A later turn may begin whenever its input still leaves room for at least one generated
 token under the cumulative limit, and it may choose a different per-Turn limit.
 
-`OgaRequestOptions` is a public structure, not an opaque handle. Null options and zero
+`OgaRequestOptions` is an opaque, reusable handle. Null options and zero
 `max_session_tokens` use the Request's snapshotted `OgaGeneratorParams.search.max_length`. That
 search value normally defaults from the model context length, but a caller may set it lower before
-Request creation. `OgaTurnParams` is opaque and reusable; `BeginTurn()` snapshots supported values.
+Request creation. `OgaTurnOptions` is opaque and reusable; `BeginTurn()` snapshots supported values.
 
 ### `Active`
 
@@ -189,7 +189,7 @@ appended to the logical sequence or emitted as a token event.
 The next continuation fragment is therefore responsible for any turn-boundary tokens required by
 the model's chat template.
 
-`BeginTurn(tokens, turn_params)` appends the next input fragment and moves a resident Request back
+`BeginTurn(tokens, turn_options)` appends the next input fragment and moves a resident Request back
 to `Assigned`. The completed Turn's terminal event must first be drained; calling `BeginTurn()`
 while any event for the Request is pending fails without mutation. Turn-scoped
 generated count and limit reset only after all validation, input allocation, Search append, and
@@ -297,18 +297,20 @@ This separation between search length and processed length is what lets each mod
 ## `Engine::Run()` and event draining
 
 The low-level engine API advances through repeated calls to synchronous bulk `Run()`. The canonical
-C operation receives a contiguous `OgaEngineEvent` array, record capacity, and output count. The
-C++ wrapper receives a `std::span<OgaEngineEvent>` and returns a const span over the populated
-prefix. Python exposes `Engine.run(max_events=1) -> list[EngineEvent]`.
+C operation receives an Engine-bound `OgaEngineEventBuffer` whose capacity was allocated once.
+After Run, count and indexed access expose borrowed opaque `OgaEngineEvent` views. The C++ wrapper
+provides RAII Buffer ownership and borrowed event/usage getters. Python exposes
+`Engine.create_event_buffer(capacity)` and a sequence-like `Engine.run(buffer)` result.
 
-Every positive-capacity C call validates the complete output range before any Request reclamation,
-event draining, scheduling, mutation, or model progress: non-null buffer and count, buffer
-alignment, checked capacity-times-record-size, address range, and count overlap. Returned records
-initialize every `OgaEngineEvent` field and do not touch unused slots.
+The Buffer is permanently bound to its creating Engine and stores only a weak Engine reference.
+Run rejects a Buffer from another or destroyed Engine. After handle, binding, and owner-thread
+validation, Run invalidates every previously borrowed event and usage view from that Buffer, resets
+its count, and reuses the preallocated internal event storage without constructing a per-Run
+vector.
 
-Capacity zero is an owner-thread-validated no-op: the buffer may be null, count becomes zero, and no
-reclamation, draining, scheduling, or model work occurs. A permanently unhealthy Engine still
-returns its stored fatal error.
+Capacity zero is an owner-thread-validated no-op: count remains zero and no reclamation, draining,
+scheduling, or model work occurs. A permanently unhealthy Engine still returns its stored fatal
+error.
 
 A positive-capacity call is strictly drain-or-execute:
 
@@ -316,13 +318,14 @@ A positive-capacity call is strictly drain-or-execute:
 2. If `pending_events_` contains retained output, drain up to capacity in FIFO order and return.
    Do not execute another model transaction even when the caller buffer has spare slots.
 3. Otherwise execute at most one static step or one dynamic transaction.
-4. Copy up to capacity produced events and retain overflow in `pending_events_`.
+4. Move up to capacity produced events into the Buffer and retain overflow in `pending_events_`.
 
 When capacity covers the complete affected batch, one call returns all of that transaction's
 events. Capacity one expresses one-event-at-a-time behavior through the same implementation: the
 first call executes once and later calls drain retained overflow without more model execution.
 Each retained event owns its Request internally until it is copied; the public pointer remains
-borrowed and is valid only while the caller retains its owned Request handle.
+borrowed. A Buffer event holds the Request internally for the lifetime of that view, but the
+returned `OgaRequest*` is never an independently owned handle and is invalidated with the event.
 
 A committed step emits a token event, a terminal event, or one combined
 `Token | TurnFinished` event. EOS can emit terminal completion without a visible token. Event
@@ -928,10 +931,12 @@ Changes to shared types such as `Request`, `ScheduledRequests`, `ModelExecutor`,
 The language bindings currently expose the same basic low-level loop. Production hosts are expected to wrap this surface or use its replacement rather than expose it as their stable API:
 
 ```python
-request = engine.create_request(generation_params, max_session_tokens=4096)
-turn_params = og.TurnParams(request)
-turn_params.set_max_generated_tokens(128)
-turn_id = request.begin_turn(initial_tokens, turn_params)
+request_options = og.RequestOptions()
+request_options.set_max_session_tokens(4096)
+request = engine.create_request(generation_params, request_options)
+turn_options = og.TurnOptions(request)
+turn_options.set_max_generated_tokens(128)
+turn_id = request.begin_turn(initial_tokens, turn_options)
 
 while engine.has_pending_requests():
     for event in engine.run(max_events=8):
@@ -948,8 +953,8 @@ while engine.has_pending_requests():
         if event.flags & og.EngineEventFlags.TURN_FINISHED:
             reason = event.finish_reason
 
-turn_params.set_max_generated_tokens(64)
-turn_id = request.begin_turn(next_turn_tokens, turn_params)
+turn_options.set_max_generated_tokens(64)
+turn_id = request.begin_turn(next_turn_tokens, turn_options)
 
 # Repeat engine.run(max_events=...), then close when continuation is no longer needed.
 request.close()

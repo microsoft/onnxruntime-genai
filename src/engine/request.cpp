@@ -12,11 +12,11 @@
 
 namespace Generators {
 
-void TurnParams::ValidateOwnerThread() const {
+void TurnOptions::ValidateOwnerThread() const {
   auto bound_request = request.lock();
   if (!bound_request) {
     throw std::runtime_error(
-        "Cannot use Turn parameters after their Request has been destroyed.");
+        "Cannot use Turn options after their Request has been destroyed.");
   }
   bound_request->ValidateOwnerThread();
 }

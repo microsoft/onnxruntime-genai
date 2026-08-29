@@ -20,7 +20,11 @@ struct Request;
 struct ScheduledRequests;
 struct StaticBatchScheduler;
 
-struct TurnParams {
+struct RequestOptions {
+  std::optional<size_t> max_session_tokens;
+};
+
+struct TurnOptions {
   std::weak_ptr<Request> request;
   std::optional<size_t> max_generated_tokens;
 

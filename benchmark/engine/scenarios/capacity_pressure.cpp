@@ -122,31 +122,33 @@ ScenarioExecutionOutput CapacityPressureScenario::Execute(const ScenarioConfig& 
       }
     }
 
-    // Execution phase: caller-buffered events reveal which queued requests were admitted to model
+    // Execution phase: buffered events reveal which queued requests were admitted to model
     // execution and which were permanently unserviceable. Completed requests are closed promptly
     // so deferred peers can reuse their cache capacity.
-    std::vector<OgaEngineEvent> event_storage(
+    auto event_buffer = engineResources.engine->CreateEventBuffer(
         static_cast<size_t>(config.concurrency));
     size_t consecutive_retries = 0;
     while (engineResources.engine->HasPendingRequests()) {
       const size_t event_count = engineResources.engine->Run(
-          event_storage.data(), event_storage.size());
+          *event_buffer);
       const auto now = std::chrono::steady_clock::now();
       for (size_t event_index = 0; event_index < event_count; ++event_index) {
-        const auto& event = event_storage[event_index];
+        const auto& event = *event_buffer->Get(event_index);
         if (!RequireRequestEvent(
                 event, Name(), consecutive_retries)) {
           continue;
         }
 
-        const auto request_it = request_indices.find(event.request);
+        const auto request = event.Request();
+        const auto request_it = request_indices.find(
+            request ? &request->get() : nullptr);
         if (request_it == request_indices.end()) {
           throw std::runtime_error(
               Name() + ": event request has no pressure benchmark state");
         }
         const size_t request_index = request_it->second;
 
-        if ((event.flags & OgaEngineEventFlag_Failed) != 0) {
+        if ((event.Flags() & OgaEngineEventFlag_Failed) != 0) {
           if (!rejected[request_index]) {
             rejected[request_index] = true;
             ++rejected_count;
@@ -156,9 +158,9 @@ ScenarioExecutionOutput CapacityPressureScenario::Execute(const ScenarioConfig& 
           ++admitted_count;
         }
 
-        if ((event.flags & OgaEngineEventFlag_Token) != 0) {
+        if ((event.Flags() & OgaEngineEventFlag_Token) != 0) {
           // The first emitted token establishes TTFT for an admitted pressure request.
-          request_tokens[request_index].push_back(event.token);
+          request_tokens[request_index].push_back(event.Token());
           ++generated_tokens;
           if (first_token_ms[request_index] < 0.0) {
             first_token_ms[request_index] =
@@ -168,8 +170,8 @@ ScenarioExecutionOutput CapacityPressureScenario::Execute(const ScenarioConfig& 
           }
         }
 
-        if ((event.flags & OgaEngineEventFlag_TurnFinished) != 0) {
-          event.request->Close();
+        if ((event.Flags() & OgaEngineEventFlag_TurnFinished) != 0) {
+          event.Request()->get().Close();
         }
       }
     }

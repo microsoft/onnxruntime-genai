@@ -82,11 +82,11 @@ class RequestPool:
         )
         request = self.engine.create_request(params)
         self.requests[request] = client_request
-        turn_params = og.TurnParams(request)
-        turn_params.set_max_generated_tokens(128)
+        turn_options = og.TurnOptions(request)
+        turn_options.set_max_generated_tokens(128)
         request.begin_turn(
             np.asarray(tokens, dtype=np.int32),
-            turn_params,
+            turn_options,
         )
 
     def admit_initial_requests(self):
@@ -138,12 +138,13 @@ class Engine:
 
     def run(self, request_pool: RequestPool):
         request_pool.admit_initial_requests()
+        event_buffer = self.engine.create_event_buffer(8)
         start = time.time()
         try:
             while self.engine.has_pending_requests() or request_pool.delayed_prompts:
                 request_pool.admit_due_request()
                 if self.engine.has_pending_requests():
-                    for event in self.engine.run(8):
+                    for event in self.engine.run(event_buffer):
                         self.tokens_decoded += request_pool.drain(event)
                     continue
                 request_pool.wait_for_next_admission()

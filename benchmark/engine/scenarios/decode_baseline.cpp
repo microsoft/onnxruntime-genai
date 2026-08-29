@@ -117,29 +117,29 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
           prompt_tokens->SequenceData(0), prompt_token_count);
     }
 
-    std::vector<OgaEngineEvent> event_storage(
+    auto event_buffer = engineResources.engine->CreateEventBuffer(
         static_cast<size_t>(config.concurrency));
     size_t consecutive_retries = 0;
     while (engineResources.engine->HasPendingRequests()) {
       const size_t event_count = engineResources.engine->Run(
-          event_storage.data(), event_storage.size());
+          *event_buffer);
       const auto now = std::chrono::steady_clock::now();
       for (size_t event_index = 0; event_index < event_count; ++event_index) {
-        const auto& event = event_storage[event_index];
+        const auto& event = *event_buffer->Get(event_index);
         if (!RequireRequestEvent(
                 event, Name(), consecutive_retries)) {
           continue;
         }
         const auto state_it =
-            request_states_by_request.find(event.request);
+            request_states_by_request.find(&event.Request()->get());
         if (state_it == request_states_by_request.end()) {
           throw std::runtime_error(
               log_tag + ": event request has no benchmark state");
         }
         auto* request_state = state_it->second;
 
-        if ((event.flags & OgaEngineEventFlag_Token) != 0) {
-          request_state->tokens.push_back(event.token);
+        if ((event.Flags() & OgaEngineEventFlag_Token) != 0) {
+          request_state->tokens.push_back(event.Token());
           ++generated_tokens;
 
           const double elapsed_ms =

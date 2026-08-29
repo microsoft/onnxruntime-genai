@@ -79,79 +79,44 @@ typedef struct OgaAudios OgaAudios;
 typedef struct OgaStringArray OgaStringArray;
 typedef struct OgaAdapters OgaAdapters;
 typedef struct OgaEngine OgaEngine;
+typedef struct OgaEngineEvent OgaEngineEvent;
+typedef struct OgaEngineEventBuffer OgaEngineEventBuffer;
 typedef struct OgaRequest OgaRequest;
-typedef struct OgaTurnParams OgaTurnParams;
+typedef struct OgaRequestOptions OgaRequestOptions;
+typedef struct OgaTurnOptions OgaTurnOptions;
+typedef struct OgaTurnUsage OgaTurnUsage;
 typedef struct OgaStreamingProcessor OgaStreamingProcessor;
 
 /**
  * \brief Reason why an Engine Request's generation turn stopped.
  */
-typedef enum OgaFinishReason {
-  OgaFinishReason_None = 0,
-  OgaFinishReason_Eos = 1,
-  OgaFinishReason_StopSequence = 2,
-  OgaFinishReason_MaxGeneratedTokens = 3,
-  OgaFinishReason_MaxSessionTokens = 4,
-  OgaFinishReason_Cancelled = 5,
-  OgaFinishReason_Failed = 6,
-} OgaFinishReason;
+typedef uint32_t OgaFinishReason;
+#define OgaFinishReason_None ((OgaFinishReason)0)
+#define OgaFinishReason_Eos ((OgaFinishReason)1)
+#define OgaFinishReason_StopSequence ((OgaFinishReason)2)
+#define OgaFinishReason_MaxGeneratedTokens ((OgaFinishReason)3)
+#define OgaFinishReason_MaxSessionTokens ((OgaFinishReason)4)
+#define OgaFinishReason_Cancelled ((OgaFinishReason)5)
+#define OgaFinishReason_Failed ((OgaFinishReason)6)
 
 /** \brief Bit flags describing the payload present in an OgaEngineEvent. */
-typedef enum OgaEngineEventFlags {
-  OgaEngineEventFlag_None = 0,
-  OgaEngineEventFlag_Token = 1u << 0,
-  OgaEngineEventFlag_TurnFinished = 1u << 1,
-  OgaEngineEventFlag_CapacityBlocked = 1u << 2,
-  OgaEngineEventFlag_Failed = 1u << 3,
-  OgaEngineEventFlag_Retryable = 1u << 4,
-} OgaEngineEventFlags;
+typedef uint32_t OgaEngineEventFlags;
+#define OgaEngineEventFlag_None ((OgaEngineEventFlags)0)
+#define OgaEngineEventFlag_Token ((OgaEngineEventFlags)(1u << 0))
+#define OgaEngineEventFlag_TurnFinished ((OgaEngineEventFlags)(1u << 1))
+#define OgaEngineEventFlag_CapacityBlocked ((OgaEngineEventFlags)(1u << 2))
+#define OgaEngineEventFlag_Failed ((OgaEngineEventFlags)(1u << 3))
+#define OgaEngineEventFlag_Retryable ((OgaEngineEventFlags)(1u << 4))
 
 /** \brief Stable behavioral classification for an Engine event. */
-typedef enum OgaErrorCode {
-  OgaErrorCode_None = 0,
-  OgaErrorCode_CapacityDeferred = 1,
-  OgaErrorCode_ExecutionCapacityExceeded = 2,
-  OgaErrorCode_RetryableExecution = 3,
-  OgaErrorCode_RequestUnserviceable = 4,
-  OgaErrorCode_EngineContractFailure = 5,
-  OgaErrorCode_EngineExecutionFailure = 6,
-} OgaErrorCode;
-
-/**
- * \brief Public options copied by OgaEngineCreateRequest.
- *
- * max_session_tokens == 0 uses the Request's snapshotted OgaGeneratorParams search.max_length.
- * That search limit normally defaults from the model context length, but the caller may set it
- * lower before Request creation.
- */
-typedef struct OgaRequestOptions {
-  uint64_t max_session_tokens;
-} OgaRequestOptions;
-
-/** \brief Token accounting for one generation Turn. */
-typedef struct OgaTurnUsage {
-  uint64_t prompt_tokens;
-  uint64_t generated_tokens;
-  uint64_t cached_prompt_tokens;
-} OgaTurnUsage;
-
-/**
- * \brief One caller-buffered Engine event.
- *
- * Pump OgaEngineRun while work remains and inspect flags as a bitmask: Token and TurnFinished may be
- * combined. request is a borrowed identity alias for the caller-owned OgaRequest, and turn_id
- * identifies the Request-local Turn. Consume token only when Token is set. The borrowed request
- * remains valid only while the caller retains the owned OgaRequest handle.
- */
-typedef struct OgaEngineEvent {
-  uint32_t flags;
-  OgaRequest* request;
-  uint64_t turn_id;
-  int32_t token;
-  OgaFinishReason finish_reason;
-  OgaErrorCode error_code;
-  OgaTurnUsage usage;
-} OgaEngineEvent;
+typedef uint32_t OgaErrorCode;
+#define OgaErrorCode_None ((OgaErrorCode)0)
+#define OgaErrorCode_CapacityDeferred ((OgaErrorCode)1)
+#define OgaErrorCode_ExecutionCapacityExceeded ((OgaErrorCode)2)
+#define OgaErrorCode_RetryableExecution ((OgaErrorCode)3)
+#define OgaErrorCode_RequestUnserviceable ((OgaErrorCode)4)
+#define OgaErrorCode_EngineContractFailure ((OgaErrorCode)5)
+#define OgaErrorCode_EngineExecutionFailure ((OgaErrorCode)6)
 
 //! @}
 
@@ -168,9 +133,10 @@ typedef struct OgaEngineEvent {
  * \note C++ callers should prefer the OgaHandle RAII wrapper in ort_genai.h; C# callers should prefer the
  *       OgaHandle IDisposable wrapper. Both invoke OgaShutdown() on destruction.
  *
- * \note Lifetime contract: no OgaModel / OgaGenerator / OgaTokenizer / OgaTensor / OgaEngine / OgaRequest, or any
- *       object that holds device memory, may outlive OgaShutdown(). The caller MUST destroy every such object before
- *       calling OgaShutdown(). Calling OgaShutdown() with such objects still alive is undefined behavior (typically a
+ * \note Lifetime contract: no OgaModel / OgaGenerator / OgaTokenizer / OgaTensor / OgaEngine /
+ *       OgaEngineEventBuffer / OgaRequest, or any object that holds device memory, may outlive
+ *       OgaShutdown(). The caller MUST destroy every such object before calling OgaShutdown().
+ *       Calling OgaShutdown() with such objects still alive is undefined behavior (typically a
  *       crash when the buffer is freed through a now-invalid allocator).
  *
  * \note Re-initialization: OgaShutdown() is a full teardown -- it destroys GenAI's ONNX Runtime environment and unloads
@@ -1269,27 +1235,89 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateEngine(OgaModel* model, OgaEngine** 
 OGA_EXPORT void OGA_API_CALL OgaDestroyEngine(OgaEngine* engine);
 
 /**
- * \brief Runs synchronous Engine progress and copies typed events to caller-owned storage.
+ * \brief Creates reusable event storage bound to one Engine.
  *
- * For positive event_capacity, events must point to a contiguous array of OgaEngineEvent records. A
- * call drains retained events or executes at most one model transaction, but never both. Capacity
- * one provides one-event-at-a-time behavior through this same operation. A successful partial
- * prefill may return zero events while work remains pending. out_event_count must not overlap the
- * event storage.
+ * The Buffer allocates its event capacity once and does not retain the Engine. It may only be used
+ * with the same live Engine on that Engine's owner thread. Destroying the Engine invalidates the
+ * Buffer for OgaEngineRun, but the Buffer must still be released with
+ * OgaDestroyEngineEventBuffer. Buffer access, Run, and destruction must be serialized; getters
+ * must not race a Run or destruction.
  *
- * For zero event_capacity, events may be null. The call validates the Engine owner thread and
- * health, sets *out_event_count to zero, and performs no other Engine work.
+ * \param[in] engine The Engine to bind.
+ * \param[in] capacity Maximum number of borrowed events exposed after one Run.
+ * \param[out] out The caller-owned Buffer handle.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateEngineEventBuffer(
+    OgaEngine* engine, size_t capacity, OgaEngineEventBuffer** out);
+
+/** \brief Releases an Engine event Buffer and invalidates all of its borrowed views. */
+OGA_EXPORT void OGA_API_CALL OgaDestroyEngineEventBuffer(
+    OgaEngineEventBuffer* buffer);
+
+/**
+ * \brief Runs synchronous Engine progress into reusable Engine-owned-format storage.
+ *
+ * After the Buffer, Engine binding, and owner thread are validated, its previously borrowed event
+ * and usage views are invalidated. A call drains retained events or executes at most one model
+ * transaction, but never both. Overflow remains retained by the Engine for later calls. Capacity one provides
+ * one-event-at-a-time behavior through this same operation. A successful partial prefill may
+ * produce zero events while work remains pending.
  *
  * \param[in] engine The Engine to advance.
- * \param[out] events Caller-owned contiguous event storage.
- * \param[in] event_capacity Number of event records available in events.
- * \param[out] out_event_count Number of records written, in the prefix of events.
+ * \param[in,out] buffer Reusable Buffer created for this Engine.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineRun(
-    OgaEngine* engine,
-    OgaEngineEvent* events,
-    size_t event_capacity,
-    size_t* out_event_count);
+    OgaEngine* engine, OgaEngineEventBuffer* buffer);
+
+/**
+ * \brief Returns the number of borrowed event views produced by the last successful Run.
+ *
+ * Returns zero for a null Buffer.
+ */
+OGA_EXPORT size_t OGA_API_CALL OgaEngineEventBufferGetCount(
+    const OgaEngineEventBuffer* buffer);
+
+/**
+ * \brief Returns a borrowed event view at index.
+ *
+ * Returns null when buffer is null or index is out of bounds. The returned pointer is valid only
+ * until the next OgaEngineRun using this Buffer or Buffer destruction.
+ */
+OGA_EXPORT const OgaEngineEvent* OGA_API_CALL OgaEngineEventBufferGet(
+    const OgaEngineEventBuffer* buffer, size_t index);
+
+/**
+ * \brief Reads fields from a borrowed opaque Engine event.
+ *
+ * Each getter below returns an owned OgaResult on a null event or output pointer and null on
+ * success. Scalar outputs are initialized to zero and pointer outputs to null before a null event
+ * is rejected. Payload meaning is selected by OgaEngineEventFlags.
+ *
+ * OgaEngineEventGetRequest returns a borrowed Request alias that must not be destroyed.
+ * OgaEngineEventGetUsage returns a borrowed usage view. Both have the event view's lifetime.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineEventGetFlags(
+    const OgaEngineEvent* event, OgaEngineEventFlags* out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineEventGetRequest(
+    const OgaEngineEvent* event, OgaRequest** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineEventGetTurnId(
+    const OgaEngineEvent* event, uint64_t* out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineEventGetToken(
+    const OgaEngineEvent* event, int32_t* out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineEventGetFinishReason(
+    const OgaEngineEvent* event, OgaFinishReason* out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineEventGetErrorCode(
+    const OgaEngineEvent* event, OgaErrorCode* out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineEventGetUsage(
+    const OgaEngineEvent* event, const OgaTurnUsage** out);
+
+/** \brief Reads counters from a borrowed opaque Turn usage view. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnUsageGetPromptTokens(
+    const OgaTurnUsage* usage, uint64_t* out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnUsageGetGeneratedTokens(
+    const OgaTurnUsage* usage, uint64_t* out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnUsageGetCachedPromptTokens(
+    const OgaTurnUsage* usage, uint64_t* out);
 
 /**
  * \brief Checks if the engine has any pending requests to process.
@@ -1325,41 +1353,51 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineCreateRequest(
     const OgaRequestOptions* options, OgaRequest** out);
 
 /**
- * \brief Creates reusable Turn parameters bound to one Request.
+ * \brief Creates reusable Request options.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestCreateTurnParams(
-    OgaRequest* request, OgaTurnParams** out);
-OGA_EXPORT void OGA_API_CALL OgaDestroyTurnParams(OgaTurnParams* params);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnParamsSetMaxGeneratedTokens(
-    OgaTurnParams* params, uint64_t max_generated_tokens);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateRequestOptions(
+    OgaRequestOptions** out);
+OGA_EXPORT void OGA_API_CALL OgaDestroyRequestOptions(
+    OgaRequestOptions* options);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestOptionsSetMaxSessionTokens(
+    OgaRequestOptions* options, uint64_t max_session_tokens);
+
+/**
+ * \brief Creates reusable Turn options bound to one Request.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestCreateTurnOptions(
+    OgaRequest* request, OgaTurnOptions** out);
+OGA_EXPORT void OGA_API_CALL OgaDestroyTurnOptions(OgaTurnOptions* options);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetMaxGeneratedTokens(
+    OgaTurnOptions* options, uint64_t max_generated_tokens);
 /** \brief Reserved for future use; currently returns a not-implemented result. */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnParamsSetTemperature(
-    OgaTurnParams* params, float temperature);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetTemperature(
+    OgaTurnOptions* options, float temperature);
 /** \brief Reserved for future use; currently returns a not-implemented result. */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnParamsSetTopP(
-    OgaTurnParams* params, float top_p);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetTopP(
+    OgaTurnOptions* options, float top_p);
 /** \brief Reserved for future use; currently returns a not-implemented result. */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnParamsSetTopK(
-    OgaTurnParams* params, int32_t top_k);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetTopK(
+    OgaTurnOptions* options, int32_t top_k);
 /** \brief Reserved for future use; currently returns a not-implemented result. */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnParamsSetSeed(
-    OgaTurnParams* params, uint64_t seed);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetSeed(
+    OgaTurnOptions* options, uint64_t seed);
 /**
  * \brief Sets token-ID stop sequences for a Turn.
  *
  * This operation is currently not implemented. stop_sequences is not dereferenced or retained
  * before the not-implemented result is returned.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnParamsSetStopSequences(
-    OgaTurnParams* params, const OgaSequences* stop_sequences);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetStopSequences(
+    OgaTurnOptions* options, const OgaSequences* stop_sequences);
 /** \brief Reserved for future use; currently returns a not-implemented result. */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnParamsSetGuidance(
-    OgaTurnParams* params, const char* guidance_type,
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetGuidance(
+    OgaTurnOptions* options, const char* guidance_type,
     const char* guidance_data);
 
-/** \brief Begins a Turn, copying input and supported parameters before return. */
+/** \brief Begins a Turn, copying input and supported options before return. */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestBeginTurn(
-    OgaRequest* request, const OgaTurnParams* turn_params,
+    OgaRequest* request, const OgaTurnOptions* turn_options,
     const int32_t* input_ids, uint64_t input_ids_count,
     uint64_t* out_turn_id);
 

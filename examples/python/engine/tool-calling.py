@@ -42,8 +42,9 @@ def generate(engine, request, tokenizer):
     stream = tokenizer.create_stream()
     fragments = []
     token_ids = []
+    event_buffer = engine.create_event_buffer(8)
     while engine.has_pending_requests():
-        for event in engine.run(8):
+        for event in engine.run(event_buffer):
             if require_request_event(event) is not request:
                 raise RuntimeError("Engine returned an unknown request")
             if event.flags & og.EngineEventFlags.TOKEN:

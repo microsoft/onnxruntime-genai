@@ -8,6 +8,7 @@ from __future__ import annotations
 import gc
 import json
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -55,6 +56,13 @@ class _Sink:
         self.usage = None
 
 
+@dataclass(frozen=True)
+class _UsageSnapshot:
+    prompt_tokens: int
+    generated_tokens: int
+    cached_prompt_tokens: int
+
+
 @pytest.fixture(params=_DEVICES)
 def device(request):
     return request.param
@@ -87,13 +95,19 @@ def _drain(event, sinks):
         sink.tokens.append(event.token)
     if event.flags & og.EngineEventFlags.TURN_FINISHED:
         sink.finish_reason = event.finish_reason
-        sink.usage = event.usage
+        sink.usage = _UsageSnapshot(
+            prompt_tokens=event.usage.prompt_tokens,
+            generated_tokens=event.usage.generated_tokens,
+            cached_prompt_tokens=event.usage.cached_prompt_tokens,
+        )
         return True
     return False
 
 
-def _step_once(engine, sinks, *, close_completed=True):
-    events = engine.run(8)
+def _step_once(engine, sinks, *, close_completed=True, event_buffer=None):
+    if event_buffer is None:
+        event_buffer = engine.create_event_buffer(8)
+    events = engine.run(event_buffer)
     for event in events:
         if _drain(event, sinks) and close_completed:
             event.request.close()
@@ -101,8 +115,9 @@ def _step_once(engine, sinks, *, close_completed=True):
 
 
 def _next_event(engine):
+    event_buffer = engine.create_event_buffer(1)
     while engine.has_pending_requests():
-        events = engine.run()
+        events = engine.run(event_buffer)
         assert len(events) <= 1
         if events:
             return events[0]
@@ -111,8 +126,14 @@ def _next_event(engine):
 
 def _run(engine, sinks, *, max_steps=_MAX_STEPS, close_completed=True):
     steps = 0
+    event_buffer = engine.create_event_buffer(8)
     while engine.has_pending_requests():
-        _step_once(engine, sinks, close_completed=close_completed)
+        _step_once(
+            engine,
+            sinks,
+            close_completed=close_completed,
+            event_buffer=event_buffer,
+        )
         steps += 1
         assert steps <= max_steps, "engine.run() exceeded the safety bound; possible non-termination"
 
@@ -160,33 +181,51 @@ def test_model_declares_per_request_fp16_logits():
     assert tensor_type.shape.dim[1].dim_value == _VOCAB_SIZE
 
 
-def test_run_returns_lists_for_default_zero_and_bulk_capacity(model):
+def test_run_reuses_buffer_for_zero_one_and_bulk_capacity(model):
     engine = og.Engine(model)
     sinks = {}
     first = _create_request(engine, model, _PROMPT_A, 1, _Sink(), sinks)
     second = _create_request(engine, model, _PROMPT_B, 1, _Sink(), sinks)
 
-    assert engine.run(0) == []
+    zero_buffer = engine.create_event_buffer(0)
+    assert engine.run(zero_buffer) is zero_buffer
+    assert len(zero_buffer) == 0
     assert engine.has_pending_requests()
-    with pytest.raises(ValueError, match="nonnegative"):
-        engine.run(-1)
     with pytest.raises((OverflowError, TypeError)):
-        engine.run(1 << 100)
+        engine.create_event_buffer(-1)
+    with pytest.raises((OverflowError, TypeError)):
+        engine.create_event_buffer(1 << 100)
 
-    default_events = engine.run()
-    assert isinstance(default_events, list)
-    assert len(default_events) == 1
-    assert default_events[0].request is first
+    one_buffer = engine.create_event_buffer(1)
+    other_engine = og.Engine(model)
+    with pytest.raises(RuntimeError, match="Engine that created it"):
+        other_engine.run(one_buffer)
+    assert len(one_buffer) == 0
 
-    retained_events = engine.run(8)
+    assert engine.run(one_buffer) is one_buffer
+    assert isinstance(one_buffer, og.EngineEventBuffer)
+    assert len(one_buffer) == 1
+    assert one_buffer[0].request is first
+    assert one_buffer[-1].request is first
+    with pytest.raises(IndexError):
+        _ = one_buffer[1]
+
+    retained_events = engine.run(one_buffer)
     assert len(retained_events) == 1
     assert retained_events[0].request is second
 
     third = _create_request(engine, model, _PROMPT_A, 1, _Sink(), sinks)
     fourth = _create_request(engine, model, _PROMPT_B, 1, _Sink(), sinks)
-    bulk_events = engine.run(8)
+    bulk_buffer = engine.create_event_buffer(8)
+    bulk_events = engine.run(bulk_buffer)
     assert len(bulk_events) == 2
     assert [event.request for event in bulk_events] == [third, fourth]
+    borrowed_event = bulk_events[0]
+    borrowed_usage = borrowed_event.usage
+    del bulk_events, bulk_buffer
+    gc.collect()
+    assert borrowed_event.request is third
+    assert borrowed_usage.prompt_tokens == len(_PROMPT_A)
 
     for request in (first, second, third, fourth):
         request.close()
@@ -281,9 +320,9 @@ def test_per_turn_budget_is_independent_and_snapshotted(model):
     sinks = {request: sink}
     prompt = np.asarray(_PROMPT_LONG, dtype=np.int32)
 
-    turn_params = og.TurnParams(request)
-    turn_params.set_max_generated_tokens(3)
-    assert request.begin_turn(prompt, turn_params) == 0
+    turn_options = og.TurnOptions(request)
+    turn_options.set_max_generated_tokens(3)
+    assert request.begin_turn(prompt, turn_options) == 0
     _run(engine, sinks, close_completed=False)
 
     assert sink.tokens == predicted_tokens(_PROMPT_LONG, 3)
@@ -292,8 +331,8 @@ def test_per_turn_budget_is_independent_and_snapshotted(model):
     assert sink.usage.generated_tokens == 3
 
     continuation = np.asarray([12], dtype=np.int32)
-    turn_params.set_max_generated_tokens(2)
-    assert request.begin_turn(continuation, turn_params) == 1
+    turn_options.set_max_generated_tokens(2)
+    assert request.begin_turn(continuation, turn_options) == 1
     _run(engine, sinks, close_completed=False)
 
     assert len(sink.tokens) == 5
@@ -304,7 +343,9 @@ def test_request_total_limit_and_cancel_metadata(model):
     engine = og.Engine(model)
     params = og.GeneratorParams(model)
     params.set_search_options(do_sample=False, max_length=32)
-    request = engine.create_request(params, max_session_tokens=len(_PROMPT_LONG) + 2)
+    request_options = og.RequestOptions()
+    request_options.set_max_session_tokens(len(_PROMPT_LONG) + 2)
+    request = engine.create_request(params, request_options)
     sink = _Sink()
     sinks = {request: sink}
 
@@ -334,9 +375,9 @@ def test_zero_turn_budget_uses_default_limit(model):
     sinks = {request: sink}
     prompt = np.asarray(_PROMPT_A, dtype=np.int32)
 
-    turn_params = og.TurnParams(request)
-    turn_params.set_max_generated_tokens(0)
-    assert request.begin_turn(prompt, turn_params) == 0
+    turn_options = og.TurnOptions(request)
+    turn_options.set_max_generated_tokens(0)
+    assert request.begin_turn(prompt, turn_options) == 0
     _run(engine, sinks, close_completed=False)
 
     expected_generated_tokens = 16 - len(prompt)

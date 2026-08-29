@@ -76,12 +76,12 @@ ScenarioExecutionOutput ContinuationScenario::Execute(const ScenarioConfig& conf
 
     std::vector<std::unique_ptr<OgaGeneratorParams>> params;
     std::vector<std::unique_ptr<OgaRequest>> requests;
-    std::vector<std::unique_ptr<OgaTurnParams>> turn_params;
+    std::vector<std::unique_ptr<OgaTurnOptions>> turn_options;
     std::vector<std::vector<int32_t>> request_tokens(static_cast<size_t>(config.concurrency));
     std::unordered_map<OgaRequest*, size_t> request_indices;
     params.reserve(static_cast<size_t>(config.concurrency));
     requests.reserve(static_cast<size_t>(config.concurrency));
-    turn_params.reserve(static_cast<size_t>(config.concurrency));
+    turn_options.reserve(static_cast<size_t>(config.concurrency));
 
     const size_t max_session_tokens =
         base_prompt_count + static_cast<size_t>((2 * kContinuationTurns) - 1) * config.generation_tokens;
@@ -94,12 +94,12 @@ ScenarioExecutionOutput ContinuationScenario::Execute(const ScenarioConfig& conf
       requests.emplace_back(
           engineResources.engine->CreateRequest(*params.back()));
       request_indices.emplace(requests.back().get(), request_index);
-      turn_params.push_back(requests.back()->CreateTurnParams());
-      turn_params.back()->SetMaxGeneratedTokens(
+      turn_options.push_back(requests.back()->CreateTurnOptions());
+      turn_options.back()->SetMaxGeneratedTokens(
           static_cast<uint64_t>(config.generation_tokens));
       requests.back()->BeginTurn(
           base_prompt->SequenceData(0), base_prompt_count,
-          turn_params.back().get());
+          turn_options.back().get());
     }
 
     const auto run_start = std::chrono::steady_clock::now();
@@ -114,38 +114,40 @@ ScenarioExecutionOutput ContinuationScenario::Execute(const ScenarioConfig& conf
       const auto turn_start = std::chrono::steady_clock::now();
 
       // Drain the current turn for the resident requests before beginning their next Turns.
-      std::vector<OgaEngineEvent> event_storage(
+      auto event_buffer = engineResources.engine->CreateEventBuffer(
           static_cast<size_t>(config.concurrency));
       size_t consecutive_retries = 0;
       while (engineResources.engine->HasPendingRequests()) {
         const size_t event_count = engineResources.engine->Run(
-            event_storage.data(), event_storage.size());
+            *event_buffer);
         const auto now = std::chrono::steady_clock::now();
         for (size_t event_index = 0; event_index < event_count; ++event_index) {
-          const auto& event = event_storage[event_index];
+          const auto& event = *event_buffer->Get(event_index);
           if (!RequireRequestEvent(
                   event, Name(), consecutive_retries)) {
             continue;
           }
 
-          const auto request_it = request_indices.find(event.request);
+          const auto request = event.Request();
+          const auto request_it = request_indices.find(
+              request ? &request->get() : nullptr);
           if (request_it == request_indices.end()) {
             throw std::runtime_error(
                 Name() + ": event request has no continuation state");
           }
           const size_t request_index = request_it->second;
 
-          if ((event.flags & OgaEngineEventFlag_Failed) != 0) {
+          if ((event.Flags() & OgaEngineEventFlag_Failed) != 0) {
             throw std::runtime_error(
                 Name() + ": continuation request failed with error code " +
-                std::to_string(static_cast<int>(event.error_code)));
+                std::to_string(static_cast<int>(event.ErrorCode())));
           }
 
-          if ((event.flags & OgaEngineEventFlag_Token) != 0) {
+          if ((event.Flags() & OgaEngineEventFlag_Token) != 0) {
             // The first token establishes TTFT for this turn; later tokens contribute
             // inter-token latency samples for the same logical session.
-            request_tokens[request_index].push_back(event.token);
-            generated_segments[request_index].push_back(event.token);
+            request_tokens[request_index].push_back(event.Token());
+            generated_segments[request_index].push_back(event.Token());
             ++generated_tokens;
             const double elapsed_ms =
                 std::chrono::duration<double, std::milli>(
@@ -191,7 +193,7 @@ ScenarioExecutionOutput ContinuationScenario::Execute(const ScenarioConfig& conf
           requests[request_index]->BeginTurn(
               generated_segments[request_index].data(),
               generated_segments[request_index].size(),
-              turn_params[request_index].get());
+              turn_options[request_index].get());
           request_tokens[request_index].insert(
               request_tokens[request_index].end(), generated_segments[request_index].begin(),
               generated_segments[request_index].end());

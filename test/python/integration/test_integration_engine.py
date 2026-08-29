@@ -100,8 +100,9 @@ def _drain(event, sinks) -> bool:
 
 
 def _next_event(engine):
+    event_buffer = engine.create_event_buffer(1)
     while engine.has_pending_requests():
-        events = engine.run()
+        events = engine.run(event_buffer)
         assert len(events) <= 1
         if events:
             return events[0]
@@ -110,8 +111,9 @@ def _next_event(engine):
 
 def _run(engine, sinks, *, max_steps=_MAX_STEPS) -> None:
     steps = 0
+    event_buffer = engine.create_event_buffer(8)
     while engine.has_pending_requests():
-        for event in engine.run(8):
+        for event in engine.run(event_buffer):
             if _drain(event, sinks):
                 event.request.close()
         steps += 1

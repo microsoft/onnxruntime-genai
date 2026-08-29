@@ -11,6 +11,35 @@
 
 using namespace pybind11::literals;
 
+enum class PyFinishReason : uint32_t {
+  None = OgaFinishReason_None,
+  Eos = OgaFinishReason_Eos,
+  StopSequence = OgaFinishReason_StopSequence,
+  MaxGeneratedTokens = OgaFinishReason_MaxGeneratedTokens,
+  MaxSessionTokens = OgaFinishReason_MaxSessionTokens,
+  Cancelled = OgaFinishReason_Cancelled,
+  Failed = OgaFinishReason_Failed,
+};
+
+enum class PyEngineEventFlags : uint32_t {
+  None = OgaEngineEventFlag_None,
+  Token = OgaEngineEventFlag_Token,
+  TurnFinished = OgaEngineEventFlag_TurnFinished,
+  CapacityBlocked = OgaEngineEventFlag_CapacityBlocked,
+  Failed = OgaEngineEventFlag_Failed,
+  Retryable = OgaEngineEventFlag_Retryable,
+};
+
+enum class PyEngineErrorCode : uint32_t {
+  None = OgaErrorCode_None,
+  CapacityDeferred = OgaErrorCode_CapacityDeferred,
+  ExecutionCapacityExceeded = OgaErrorCode_ExecutionCapacityExceeded,
+  RetryableExecution = OgaErrorCode_RetryableExecution,
+  RequestUnserviceable = OgaErrorCode_RequestUnserviceable,
+  EngineContractFailure = OgaErrorCode_EngineContractFailure,
+  EngineExecutionFailure = OgaErrorCode_EngineExecutionFailure,
+};
+
 // If a parameter to a C++ function is an array of float16, this type will let pybind11::array_t<Ort::Float16_t> map to numpy's float16 format
 namespace pybind11 {
 namespace detail {
@@ -731,56 +760,82 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("unload", &OgaAdapters::UnloadAdapter)
       .def("load", &OgaAdapters::LoadAdapter);
 
-  pybind11::enum_<OgaFinishReason>(m, "FinishReason")
-      .value("NONE", OgaFinishReason_None)
-      .value("EOS", OgaFinishReason_Eos)
-      .value("STOP_SEQUENCE", OgaFinishReason_StopSequence)
-      .value("MAX_GENERATED_TOKENS", OgaFinishReason_MaxGeneratedTokens)
-      .value("MAX_SESSION_TOKENS", OgaFinishReason_MaxSessionTokens)
-      .value("CANCELLED", OgaFinishReason_Cancelled)
-      .value("FAILED", OgaFinishReason_Failed);
+  pybind11::enum_<PyFinishReason>(m, "FinishReason")
+      .value("NONE", PyFinishReason::None)
+      .value("EOS", PyFinishReason::Eos)
+      .value("STOP_SEQUENCE", PyFinishReason::StopSequence)
+      .value("MAX_GENERATED_TOKENS", PyFinishReason::MaxGeneratedTokens)
+      .value("MAX_SESSION_TOKENS", PyFinishReason::MaxSessionTokens)
+      .value("CANCELLED", PyFinishReason::Cancelled)
+      .value("FAILED", PyFinishReason::Failed);
 
-  pybind11::enum_<OgaErrorCode>(m, "EngineErrorCode")
-      .value("NONE", OgaErrorCode_None)
-      .value("CAPACITY_DEFERRED", OgaErrorCode_CapacityDeferred)
-      .value("EXECUTION_CAPACITY_EXCEEDED", OgaErrorCode_ExecutionCapacityExceeded)
-      .value("RETRYABLE_EXECUTION", OgaErrorCode_RetryableExecution)
-      .value("REQUEST_UNSERVICEABLE", OgaErrorCode_RequestUnserviceable)
-      .value("ENGINE_CONTRACT_FAILURE", OgaErrorCode_EngineContractFailure)
-      .value("ENGINE_EXECUTION_FAILURE", OgaErrorCode_EngineExecutionFailure);
+  pybind11::enum_<PyEngineErrorCode>(m, "EngineErrorCode")
+      .value("NONE", PyEngineErrorCode::None)
+      .value("CAPACITY_DEFERRED", PyEngineErrorCode::CapacityDeferred)
+      .value("EXECUTION_CAPACITY_EXCEEDED", PyEngineErrorCode::ExecutionCapacityExceeded)
+      .value("RETRYABLE_EXECUTION", PyEngineErrorCode::RetryableExecution)
+      .value("REQUEST_UNSERVICEABLE", PyEngineErrorCode::RequestUnserviceable)
+      .value("ENGINE_CONTRACT_FAILURE", PyEngineErrorCode::EngineContractFailure)
+      .value("ENGINE_EXECUTION_FAILURE", PyEngineErrorCode::EngineExecutionFailure);
 
-  pybind11::enum_<OgaEngineEventFlags>(m, "EngineEventFlags", pybind11::arithmetic())
-      .value("NONE", OgaEngineEventFlag_None)
-      .value("TOKEN", OgaEngineEventFlag_Token)
-      .value("TURN_FINISHED", OgaEngineEventFlag_TurnFinished)
-      .value("CAPACITY_BLOCKED", OgaEngineEventFlag_CapacityBlocked)
-      .value("FAILED", OgaEngineEventFlag_Failed)
-      .value("RETRYABLE", OgaEngineEventFlag_Retryable);
+  pybind11::enum_<PyEngineEventFlags>(m, "EngineEventFlags", pybind11::arithmetic())
+      .value("NONE", PyEngineEventFlags::None)
+      .value("TOKEN", PyEngineEventFlags::Token)
+      .value("TURN_FINISHED", PyEngineEventFlags::TurnFinished)
+      .value("CAPACITY_BLOCKED", PyEngineEventFlags::CapacityBlocked)
+      .value("FAILED", PyEngineEventFlags::Failed)
+      .value("RETRYABLE", PyEngineEventFlags::Retryable)
+      .def(
+          "__and__",
+          [](PyEngineEventFlags lhs, PyEngineEventFlags rhs) {
+            return static_cast<uint32_t>(lhs) &
+                   static_cast<uint32_t>(rhs);
+          },
+          pybind11::is_operator())
+      .def(
+          "__or__",
+          [](PyEngineEventFlags lhs, PyEngineEventFlags rhs) {
+            return static_cast<PyEngineEventFlags>(
+                static_cast<uint32_t>(lhs) |
+                static_cast<uint32_t>(rhs));
+          },
+          pybind11::is_operator());
 
-  pybind11::class_<OgaTurnUsage>(m, "TurnUsage")
-      .def_readonly("prompt_tokens", &OgaTurnUsage::prompt_tokens)
-      .def_readonly("generated_tokens", &OgaTurnUsage::generated_tokens)
-      .def_readonly("cached_prompt_tokens", &OgaTurnUsage::cached_prompt_tokens);
+  pybind11::class_<
+      OgaTurnUsage,
+      std::unique_ptr<OgaTurnUsage, pybind11::nodelete>>(m, "TurnUsage")
+      .def_property_readonly(
+          "prompt_tokens", &OgaTurnUsage::PromptTokens)
+      .def_property_readonly(
+          "generated_tokens", &OgaTurnUsage::GeneratedTokens)
+      .def_property_readonly(
+          "cached_prompt_tokens", &OgaTurnUsage::CachedPromptTokens);
 
-  pybind11::class_<OgaTurnParams>(m, "TurnParams")
-      .def(pybind11::init([](OgaRequest& request) {
-        return OgaTurnParams::Create(request);
+  pybind11::class_<OgaRequestOptions>(m, "RequestOptions")
+      .def(pybind11::init([] {
+        return OgaRequestOptions::Create();
       }))
-      .def("set_max_generated_tokens", &OgaTurnParams::SetMaxGeneratedTokens)
-      .def("set_temperature", &OgaTurnParams::SetTemperature,
+      .def("set_max_session_tokens", &OgaRequestOptions::SetMaxSessionTokens);
+
+  pybind11::class_<OgaTurnOptions>(m, "TurnOptions")
+      .def(pybind11::init([](OgaRequest& request) {
+        return OgaTurnOptions::Create(request);
+      }))
+      .def("set_max_generated_tokens", &OgaTurnOptions::SetMaxGeneratedTokens)
+      .def("set_temperature", &OgaTurnOptions::SetTemperature,
            "Reserved for future use; currently raises a not-implemented error.")
-      .def("set_top_p", &OgaTurnParams::SetTopP,
+      .def("set_top_p", &OgaTurnOptions::SetTopP,
            "Reserved for future use; currently raises a not-implemented error.")
-      .def("set_top_k", &OgaTurnParams::SetTopK,
+      .def("set_top_k", &OgaTurnOptions::SetTopK,
            "Reserved for future use; currently raises a not-implemented error.")
-      .def("set_seed", &OgaTurnParams::SetSeed,
+      .def("set_seed", &OgaTurnOptions::SetSeed,
            "Reserved for future use; currently raises a not-implemented error.")
-      .def("set_stop_sequences", [](OgaTurnParams& params, const std::vector<std::vector<int32_t>>& values) {
+      .def("set_stop_sequences", [](OgaTurnOptions& options, const std::vector<std::vector<int32_t>>& values) {
         auto sequences = OgaSequences::Create();
         for (const auto& value : values)
           sequences->Append(value.data(), value.size());
-        params.SetStopSequences(*sequences); }, "Reserved for future use; currently raises a not-implemented error.")
-      .def("set_guidance", &OgaTurnParams::SetGuidance, "Reserved for future use; currently raises a not-implemented error.");
+        options.SetStopSequences(*sequences); }, "Reserved for future use; currently raises a not-implemented error.")
+      .def("set_guidance", &OgaTurnOptions::SetGuidance, "Reserved for future use; currently raises a not-implemented error.");
 
   pybind11::class_<OgaRequest>(m, "Request")
       .def(
@@ -790,68 +845,92 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
                  int32_t,
                  pybind11::array::c_style | pybind11::array::forcecast>
                  tokens,
-             OgaTurnParams* turn_params) -> uint64_t {
+             OgaTurnOptions* turn_options) -> uint64_t {
             if (tokens.ndim() != 1) {
               throw pybind11::value_error(
                   "tokens must be a one-dimensional array.");
             }
             return request.BeginTurn(
                 tokens.data(), static_cast<size_t>(tokens.size()),
-                turn_params);
+                turn_options);
           },
           pybind11::arg("tokens"),
-          pybind11::arg("turn_params") = pybind11::none())
+          pybind11::arg("turn_options") = pybind11::none())
       .def("cancel_turn", &OgaRequest::CancelTurn)
       .def("close", &OgaRequest::Close);
 
-  pybind11::class_<OgaEngineEvent>(m, "EngineEvent")
+  pybind11::class_<
+      OgaEngineEvent,
+      std::unique_ptr<OgaEngineEvent, pybind11::nodelete>>(m, "EngineEvent")
       .def_property_readonly("flags", [](const OgaEngineEvent& event) {
-        return static_cast<OgaEngineEventFlags>(event.flags);
+        return static_cast<PyEngineEventFlags>(event.Flags());
       })
-      .def_readonly("request", &OgaEngineEvent::request, pybind11::return_value_policy::reference)
-      .def_readonly("turn_id", &OgaEngineEvent::turn_id)
-      .def_property_readonly("token", [](const OgaEngineEvent& event) -> pybind11::object {
-        if ((event.flags & OgaEngineEventFlag_Token) == 0)
+      .def_property_readonly("request", [](pybind11::object self) -> pybind11::object {
+        const auto request =
+            self.cast<const OgaEngineEvent&>().Request();
+        if (!request) {
           return pybind11::none();
-        return pybind11::int_(event.token);
+        }
+        return pybind11::cast(
+            &request->get(),
+            pybind11::return_value_policy::reference_internal,
+            self);
       })
-      .def_readonly("finish_reason", &OgaEngineEvent::finish_reason)
-      .def_readonly("error_code", &OgaEngineEvent::error_code)
-      .def_readonly("usage", &OgaEngineEvent::usage);
+      .def_property_readonly("turn_id", &OgaEngineEvent::TurnId)
+      .def_property_readonly("token", [](const OgaEngineEvent& event) -> pybind11::object {
+        if ((event.Flags() & OgaEngineEventFlag_Token) == 0)
+          return pybind11::none();
+        return pybind11::int_(event.Token());
+      })
+      .def_property_readonly("finish_reason", [](const OgaEngineEvent& event) {
+        return static_cast<PyFinishReason>(event.FinishReason());
+      })
+      .def_property_readonly("error_code", [](const OgaEngineEvent& event) {
+        return static_cast<PyEngineErrorCode>(event.ErrorCode());
+      })
+      .def_property_readonly("usage", &OgaEngineEvent::Usage, pybind11::return_value_policy::reference_internal);
+
+  pybind11::class_<OgaEngineEventBuffer>(m, "EngineEventBuffer")
+      .def("__len__", &OgaEngineEventBuffer::Count)
+      .def(
+          "__getitem__",
+          [](const OgaEngineEventBuffer& buffer,
+             pybind11::ssize_t index) -> const OgaEngineEvent* {
+            const auto count = buffer.Count();
+            if (index < 0) {
+              index += static_cast<pybind11::ssize_t>(count);
+            }
+            if (index < 0 ||
+                static_cast<uintmax_t>(index) >= count) {
+              throw pybind11::index_error();
+            }
+            return buffer.Get(static_cast<size_t>(index));
+          },
+          pybind11::return_value_policy::reference_internal);
 
   pybind11::class_<OgaEngine>(m, "Engine")
       .def(pybind11::init([](OgaModel& model) { return OgaEngine::Create(model); }))
       .def(
           "create_request",
           [](OgaEngine& engine, PyGeneratorParams& params,
-             std::optional<uint64_t> max_session_tokens) {
-            if (max_session_tokens) {
-              const OgaRequestOptions options{*max_session_tokens};
-              return engine.CreateRequest(*params.params_, &options);
-            }
-            return engine.CreateRequest(*params.params_);
+             OgaRequestOptions* options) {
+            return engine.CreateRequest(*params.params_, options);
           },
           pybind11::arg("params"),
-          pybind11::arg("max_session_tokens") = pybind11::none())
+          pybind11::arg("options") = pybind11::none())
+      .def(
+          "create_event_buffer",
+          &OgaEngine::CreateEventBuffer,
+          pybind11::arg("capacity"))
       .def(
           "run",
-          [](OgaEngine& engine, pybind11::ssize_t max_events) {
-            if (max_events < 0) {
-              throw pybind11::value_error(
-                  "max_events must be nonnegative.");
-            }
-            if (static_cast<uintmax_t>(max_events) >
-                std::numeric_limits<size_t>::max()) {
-              throw pybind11::value_error(
-                  "max_events does not fit in size_t.");
-            }
-            std::vector<OgaEngineEvent> events(
-                static_cast<size_t>(max_events));
-            const auto populated = engine.Run(events);
-            events.resize(populated.size());
-            return events;
+          [](OgaEngine& engine, pybind11::object buffer_object) {
+            auto& buffer =
+                buffer_object.cast<OgaEngineEventBuffer&>();
+            engine.Run(buffer);
+            return buffer_object;
           },
-          pybind11::arg("max_events") = 1)
+          pybind11::arg("buffer"))
       .def("has_pending_requests", &OgaEngine::HasPendingRequests);
 
   pybind11::class_<OgaStreamingProcessor>(m, "StreamingProcessor")

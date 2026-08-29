@@ -146,6 +146,9 @@ struct Engine : std::enable_shared_from_this<Engine>,
    */
   size_t Run(std::span<EngineEvent> events);
 
+  /** @brief Throws unless called from the Engine owner thread. */
+  void ValidateOwnerThread() const;
+
   /**
    * @brief Checks if there are any pending requests in the Engine.
    *
@@ -156,7 +159,6 @@ struct Engine : std::enable_shared_from_this<Engine>,
   bool HasPendingRequests();
 
  private:
-  void ValidateOwnerThread() const;
   uint64_t BeginTurn(const std::shared_ptr<Request>& request,
                      std::span<const int32_t> tokens,
                      std::optional<size_t> max_generated_tokens);
