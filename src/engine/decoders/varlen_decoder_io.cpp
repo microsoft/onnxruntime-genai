@@ -257,7 +257,7 @@ void VarlenDecoderIO::PrepareHiddenStatesInput(
     }
     graph_buffers_->hidden_states_input->CreateTensor(expected_shape, /*make_static=*/true);
     graph_buffers_->hidden_states_input->GetByteSpan().CopyFrom(
-      ByteWrapTensor(*model->p_device_inputs_, *hidden_states_input_));
+        ByteWrapTensor(*model->p_device_inputs_, *hidden_states_input_));
     active_hidden_states_input = graph_buffers_->hidden_states_input->GetOrtTensor();
   }
 

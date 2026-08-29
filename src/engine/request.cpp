@@ -195,6 +195,22 @@ int64_t Request::CommittedSequenceLength() const {
   return CurrentSequenceLength() - static_cast<int64_t>(staged_draft_count_);
 }
 
+const char* Request::DraftTokenValidationError() const noexcept {
+  if (guidance_logits_processor_) {
+    return "Speculative draft tokens are not supported with guidance.";
+  }
+  const auto& search = params_->search;
+  if (search.do_sample && search.top_k != 1 && search.temperature != 0 && search.top_k <= 0) {
+    return "Sampled speculative draft tokens require a positive top_k.";
+  }
+  if (search.repetition_penalty != 1.0f || search.no_repeat_ngram_size > 0 ||
+      search.min_length > CurrentSequenceLength()) {
+    return "Speculative draft tokens require repetition_penalty 1, no_repeat_ngram_size 0, and a "
+           "sequence already past min_length.";
+  }
+  return nullptr;
+}
+
 void Request::SetDraftTokens(std::span<const int32_t> tokens) {
   if (staged_draft_count_ != 0) {
     throw std::runtime_error("Cannot replace draft tokens while a step is in flight.");
@@ -210,23 +226,8 @@ void Request::SetDraftTokens(std::span<const int32_t> tokens) {
     throw std::runtime_error(
         "Speculative draft tokens may only be proposed when the request is ready to decode.");
   }
-  if (guidance_logits_processor_) {
-    throw std::runtime_error("Speculative draft tokens are not supported with guidance.");
-  }
-
-  const auto& search = params_->search;
-  // Sampled verification extracts a bounded target distribution for every row. Pure nucleus
-  // sampling has no bounded sparse support and stays on the standard path.
-  if (search.do_sample && search.top_k != 1 && search.temperature != 0 && search.top_k <= 0) {
-    throw std::runtime_error("Sampled speculative draft tokens require top_k greater than 1.");
-  }
-  // The draft rows are read before any logits processor runs, so a processor that would change a
-  // row's argmax has to be inactive for every position this step verifies.
-  if (search.repetition_penalty != 1.0f || search.no_repeat_ngram_size > 0 ||
-      search.min_length > CurrentSequenceLength()) {
-    throw std::runtime_error(
-        "Speculative draft tokens require repetition_penalty 1, no_repeat_ngram_size 0, and a "
-        "sequence already past min_length.");
+  if (const char* error = DraftTokenValidationError()) {
+    throw std::runtime_error(error);
   }
   auto engine = engine_.lock();
   if (!engine) {

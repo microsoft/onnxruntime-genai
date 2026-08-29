@@ -510,6 +510,25 @@ bool PagedCacheManager::IsResident(const std::shared_ptr<Request>& request) cons
 
 StepPlanningResult PagedCacheManager::PlanStepResources(StepPlan& plan) const {
   plan.fixed_state = {};
+  if (fixed_state_pool_) {
+    const bool has_prefill = std::any_of(
+        plan.requests.begin(), plan.requests.end(),
+        [](const RequestStepPlan& entry) { return entry.is_prefill; });
+    const bool has_drafts = std::any_of(
+        plan.requests.begin(), plan.requests.end(),
+        [](const RequestStepPlan& entry) { return entry.draft_token_count != 0; });
+    if (has_prefill && has_drafts) {
+      // Packed recurrent operators cannot capture intermediate draft checkpoints while a prefill
+      // shares the step. Remove those optional rows before paged capacity planning so they cannot
+      // displace a request that the actual mixed step has room to execute.
+      for (auto& entry : plan.requests) {
+        entry.unprocessed_token_count -= entry.draft_token_count;
+        entry.target_cache_slots -= entry.draft_token_count;
+        entry.whole_sequence_cache_slots -= entry.draft_token_count;
+        entry.draft_token_count = 0;
+      }
+    }
+  }
   auto result = key_value_cache_->PlanStepResources(plan);
   if (!fixed_state_pool_) {
     return result;
@@ -543,21 +562,6 @@ StepPlanningResult PagedCacheManager::PlanStepResources(StepPlan& plan) const {
     return result;
   }
 
-  const bool has_prefill = std::any_of(
-      plan.requests.begin(), plan.requests.end(),
-      [](const RequestStepPlan& entry) { return entry.is_prefill; });
-  const bool has_drafts = std::any_of(
-      plan.requests.begin(), plan.requests.end(),
-      [](const RequestStepPlan& entry) { return entry.draft_token_count != 0; });
-  if (has_prefill && has_drafts) {
-    // Packed recurrent operators choose one execution plan for the whole batch. A long prefill
-    // selects the chunked GDN path, which only publishes final state and cannot provide the
-    // intermediate checkpoints needed to reject a draft. Keep every selected request progressing
-    // in this mixed step, but verify drafts only once the selected batch is decode-only.
-    for (auto& entry : plan.requests) {
-      entry.draft_token_count = 0;
-    }
-  }
   size_t new_slot_count = 0;
   for (const auto& entry : plan.requests) {
     // Cross-check per-request ownership against the fixed pool: a resident must own a committed
