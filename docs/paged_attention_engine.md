@@ -1026,12 +1026,12 @@ configuration. DFlash 2 uses `block_size - 1` draft rows because its first row i
 predicts from all `block_size` rows.
 
 The target decoder output is the packed auxiliary hidden-state tensor named by
-`main_aux_hidden_states`; that variable-size output does not have persistent graph buffers. Engine
-construction validates its rank, element type, and static width against the drafter input. It also
-validates the drafter's lattice outputs and every paged-cache input/output, including the page size,
-before allocating cache resources. The drafter run is synchronous because its packed inputs and
-outputs are owned by one proposal call, so its run options cannot disable execution-provider
-synchronization.
+`model.dflash2.main_aux_hidden_states` or `model.dspark.main_aux_hidden_states`; that variable-size
+output does not have persistent graph buffers. Engine construction validates its rank, element type,
+and static width against the drafter input. It also validates the drafter's lattice outputs and every
+paged-cache input/output, including the page size, before allocating cache resources. The drafter run
+is synchronous because its packed inputs and outputs are owned by one proposal call, so its run
+options cannot disable execution-provider synchronization.
 
 The direct drafter session also uses graph id `-1`: its variable-shaped proposal tensors are
 allocated per call and therefore cannot be captured safely. If this optional post-commit drafter
