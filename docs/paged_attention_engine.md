@@ -1335,9 +1335,10 @@ Graph buffers are allocated once at configured limits and reshaped as static vie
 Prefill and mixed-token steps use graph id `-1`, which tells the CUDA execution provider to run eagerly.
 
 An Engine-hosted DFlash 2 or DSpark block drafter consumes the packed auxiliary hidden-state tensor
-named by `main_aux_hidden_states`. `model.dspark` is a configuration alias for the shared DFlash 2
-runtime, and both sections cannot appear in one configuration. DFlash 2 uses `block_size - 1` draft
-rows because its first row is an anchor; DSpark predicts from all `block_size` rows.
+named by `model.dflash2.main_aux_hidden_states` or `model.dspark.main_aux_hidden_states`.
+`model.dspark` is a configuration alias for the shared DFlash 2 runtime, and both sections cannot
+appear in one configuration. DFlash 2 uses `block_size - 1` draft rows because its first row is an
+anchor; DSpark predicts from all `block_size` rows.
 
 Single-token target decode steps bind that auxiliary output through persistent graph buffers and
 remain eligible for CUDA graph capture; prefill and draft-verification steps remain eager. Engine
