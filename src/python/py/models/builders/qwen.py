@@ -727,7 +727,7 @@ class Qwen35TextModel(Model):
         ]
         state_groups = []
         if full_attention_layers:
-            state_groups.append(self.make_paged_key_value_state_group(full_attention_layers, inputs, outputs))
+            state_groups.append(self.make_paged_key_value_state_group(full_attention_layers))
         if not linear_attention_layers:
             return state_groups
 
@@ -735,31 +735,19 @@ class Qwen35TextModel(Model):
             self.context_length_attrs["state_update_capacity"] if "state_update_capture_count" in inputs else 0
         )
 
-        for state_name, layer_ids, input_key, output_key in (
-            ("conv", conv_layers, "past_conv_names", "present_conv_names"),
-            ("recurrent", linear_attention_layers, "past_recurrent_names", "present_recurrent_names"),
+        for state_name, layer_ids in (
+            ("conv", conv_layers),
+            ("recurrent", linear_attention_layers),
         ):
             group = {
-                "kind": "fixed",
+                "kind": f"fixed_{state_name}",
                 "layer_ids": layer_ids,
-                "bindings": {
-                    "state": {
-                        "input": inputs[input_key],
-                        "output": outputs[output_key],
-                    }
-                },
             }
             if state_update_capacity:
                 state_update = {
-                    "kind": "causal_conv" if state_name == "conv" else "gated_delta_net",
                     "capacity": state_update_capacity,
-                    "capture_count": inputs["state_update_capture_count"],
-                    "active": inputs["state_update_active"],
                 }
-                if state_name == "conv":
-                    state_update["value"] = outputs["state_update_conv_value_names"]
-                else:
-                    state_update["capsule"] = outputs["state_update_recurrent_capsule_names"]
+                if state_name == "recurrent":
                     state_update["key_head_count"] = self.linear_num_key_heads
                 group["state_update"] = state_update
             state_groups.append(group)

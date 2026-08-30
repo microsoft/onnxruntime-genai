@@ -121,10 +121,6 @@ def test_common_paged_builder_emits_paged_kv_group(monkeypatch, tmp_path):
         {
             "kind": "paged_kv",
             "layer_ids": list(range(64)),
-            "bindings": {
-                "key": {"input": "past_key_values.%d.key", "output": "present.%d.key"},
-                "value": {"input": "past_key_values.%d.value", "output": "present.%d.value"},
-            },
         }
     ]
 
@@ -159,10 +155,6 @@ def test_qwen_all_attention_builder_emits_paged_kv_group(monkeypatch, tmp_path):
                 {
                     "kind": "paged_kv",
                     "layer_ids": [0],
-                    "bindings": {
-                        "key": {"input": "past_key_values.%d.key", "output": "present.%d.key"},
-                        "value": {"input": "past_key_values.%d.value", "output": "present.%d.value"},
-                    },
                 }
             ],
         ),
@@ -170,9 +162,8 @@ def test_qwen_all_attention_builder_emits_paged_kv_group(monkeypatch, tmp_path):
             ["conv"],
             [
                 {
-                    "kind": "fixed",
+                    "kind": "fixed_conv",
                     "layer_ids": [0],
-                    "bindings": {"state": {"input": "past.%d.conv", "output": "present.%d.conv"}},
                 }
             ],
         ),
@@ -180,14 +171,12 @@ def test_qwen_all_attention_builder_emits_paged_kv_group(monkeypatch, tmp_path):
             ["linear_attention"],
             [
                 {
-                    "kind": "fixed",
+                    "kind": "fixed_conv",
                     "layer_ids": [0],
-                    "bindings": {"state": {"input": "past.%d.conv", "output": "present.%d.conv"}},
                 },
                 {
-                    "kind": "fixed",
+                    "kind": "fixed_recurrent",
                     "layer_ids": [0],
-                    "bindings": {"state": {"input": "past.%d.recurrent", "output": "present.%d.recurrent"}},
                 },
             ],
         ),
@@ -222,8 +211,8 @@ def test_qwen38_official_geometry_emits_exact_sparse_groups(monkeypatch, tmp_pat
     groups = config["model"]["decoder"]["state_groups"]
     assert [group["kind"] for group in groups] == [
         "paged_kv",
-        "fixed",
-        "fixed",
+        "fixed_conv",
+        "fixed_recurrent",
     ]
     assert groups[0]["layer_ids"] == list(range(3, 64, 4))
     assert groups[1]["layer_ids"] == [i for i in range(64) if (i + 1) % 4 != 0]
@@ -278,22 +267,14 @@ def test_qwen38_compact_state_groups_are_checkpoint_free(monkeypatch, tmp_path):
 
     conv_group, recurrent_group = config["model"]["decoder"]["state_groups"][1:]
     assert conv_group["state_update"] == {
-        "kind": "causal_conv",
         "capacity": 3,
-        "capture_count": "state_update_capture_count",
-        "active": "state_update_active",
-        "value": "state_update.%d.conv_value",
     }
     assert recurrent_group["state_update"] == {
-        "kind": "gated_delta_net",
         "capacity": 3,
-        "capture_count": "state_update_capture_count",
-        "active": "state_update_active",
-        "capsule": "state_update.%d.recurrent_capsule",
         "key_head_count": 2,
     }
     for group in (conv_group, recurrent_group):
-        assert "checkpoints" not in group["bindings"]["state"]
+        assert "bindings" not in group
         assert "checkpoint_count" not in group
         assert "checkpoint_alignment" not in group
 

@@ -514,7 +514,6 @@ struct SharedInitializers_Element : JSON::Element {
 using DecoderStateGroup = Config::Model::Decoder::StateGroup;
 using DecoderStateGroupKind = Config::Model::Decoder::StateGroupKind;
 using DecoderStateUpdate = Config::Model::Decoder::StateUpdate;
-using DecoderStateUpdateKind = Config::Model::Decoder::StateUpdateKind;
 
 struct StateUpdate_Element : JSON::Element {
   explicit StateUpdate_Element(DecoderStateUpdate& v) : v_{v} {}
@@ -522,15 +521,6 @@ struct StateUpdate_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "enabled") {
       v_.enabled = JSON::Get<bool>(value);
-    } else if (name == "kind") {
-      const auto kind = JSON::Get<std::string_view>(value);
-      if (kind == "causal_conv") {
-        v_.kind = DecoderStateUpdateKind::CausalConv;
-      } else if (kind == "gated_delta_net") {
-        v_.kind = DecoderStateUpdateKind::GatedDeltaNet;
-      } else {
-        throw std::runtime_error("Unsupported decoder state update kind '" + std::string{kind} + "'");
-      }
     } else if (name == "capacity") {
       const auto capacity = SafeDoubleToInt64(
           JSON::Get<double>(value), "model.decoder.state_groups.state_update.capacity");
@@ -539,14 +529,6 @@ struct StateUpdate_Element : JSON::Element {
                                  std::to_string(Config::Model::Decoder::MaxStateUpdateCapacity) + "]");
       }
       v_.capacity = static_cast<int>(capacity);
-    } else if (name == "capture_count") {
-      v_.capture_count = JSON::Get<std::string_view>(value);
-    } else if (name == "value") {
-      v_.value = JSON::Get<std::string_view>(value);
-    } else if (name == "active") {
-      v_.active = JSON::Get<std::string_view>(value);
-    } else if (name == "capsule") {
-      v_.capsule = JSON::Get<std::string_view>(value);
     } else if (name == "key_head_count") {
       const auto count = SafeDoubleToInt64(
           JSON::Get<double>(value), "model.decoder.state_groups.state_update.key_head_count");
@@ -554,6 +536,12 @@ struct StateUpdate_Element : JSON::Element {
         throw std::runtime_error("Decoder state update key_head_count must be positive");
       }
       v_.key_head_count = static_cast<int>(count);
+    } else if (name == "kind" || name == "capture_count" || name == "value" ||
+               name == "active" || name == "capsule") {
+      throw std::runtime_error(
+          "Legacy decoder state_update field '" + std::string{name} +
+          "' is no longer supported; move state-update binding templates to "
+          "model.decoder.inputs and model.decoder.outputs");
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -561,57 +549,6 @@ struct StateUpdate_Element : JSON::Element {
 
  private:
   DecoderStateUpdate& v_;
-};
-
-struct StateBinding_Element : JSON::Element {
-  explicit StateBinding_Element(Config::Model::Decoder::StateBinding& v) : v_{v} {}
-
-  void OnValue(std::string_view name, JSON::Value value) override {
-    if (name == "input") {
-      v_.input = JSON::Get<std::string_view>(value);
-    } else if (name == "output") {
-      v_.output = JSON::Get<std::string_view>(value);
-    } else {
-      throw JSON::unknown_value_error{};
-    }
-  }
-
- private:
-  Config::Model::Decoder::StateBinding& v_;
-};
-
-struct StateBindings_Element : JSON::Element {
-  explicit StateBindings_Element(DecoderStateGroup& v) : v_{v} {}
-
-  Element& OnObject(std::string_view name) override {
-    std::optional<Config::Model::Decoder::StateBinding>* binding{};
-    std::unique_ptr<StateBinding_Element>* element{};
-    if (name == "key") {
-      binding = &v_.key;
-      element = &key_;
-    } else if (name == "value") {
-      binding = &v_.value;
-      element = &value_;
-    } else if (name == "state") {
-      binding = &v_.state;
-      element = &state_;
-    } else {
-      throw JSON::unknown_value_error{};
-    }
-
-    if (binding->has_value()) {
-      throw std::runtime_error("Duplicate decoder state binding semantic '" + std::string{name} + "'");
-    }
-    binding->emplace();
-    *element = std::make_unique<StateBinding_Element>(binding->value());
-    return **element;
-  }
-
- private:
-  DecoderStateGroup& v_;
-  std::unique_ptr<StateBinding_Element> key_;
-  std::unique_ptr<StateBinding_Element> value_;
-  std::unique_ptr<StateBinding_Element> state_;
 };
 
 struct StateGroup_Element : JSON::Element {
@@ -622,8 +559,15 @@ struct StateGroup_Element : JSON::Element {
       const auto kind = JSON::Get<std::string_view>(value);
       if (kind == "paged_kv") {
         v_.kind = DecoderStateGroupKind::PagedKeyValue;
+      } else if (kind == "fixed_conv") {
+        v_.kind = DecoderStateGroupKind::FixedConv;
+      } else if (kind == "fixed_recurrent") {
+        v_.kind = DecoderStateGroupKind::FixedRecurrent;
       } else if (kind == "fixed") {
-        v_.kind = DecoderStateGroupKind::Fixed;
+        throw std::runtime_error(
+            "Decoder state group kind 'fixed' is no longer supported; use 'fixed_conv' or "
+            "'fixed_recurrent' and move binding templates to model.decoder.inputs and "
+            "model.decoder.outputs");
       } else {
         throw std::runtime_error("Unsupported decoder state group kind '" + std::string{kind} + "'");
       }
@@ -633,9 +577,6 @@ struct StateGroup_Element : JSON::Element {
   }
 
   Element& OnObject(std::string_view name) override {
-    if (name == "bindings") {
-      return bindings_;
-    }
     if (name == "state_update") {
       if (v_.state_update) {
         throw std::runtime_error("Duplicate decoder state_update declaration");
@@ -643,6 +584,11 @@ struct StateGroup_Element : JSON::Element {
       v_.state_update.emplace();
       state_update_ = std::make_unique<StateUpdate_Element>(*v_.state_update);
       return *state_update_;
+    }
+    if (name == "bindings") {
+      throw std::runtime_error(
+          "Legacy decoder state group bindings are no longer supported; move binding templates "
+          "to model.decoder.inputs and model.decoder.outputs");
     }
     throw JSON::unknown_value_error{};
   }
@@ -657,7 +603,6 @@ struct StateGroup_Element : JSON::Element {
  private:
   DecoderStateGroup& v_;
   IntArray_Element layer_ids_{v_.layer_ids};
-  StateBindings_Element bindings_{v_};
   std::unique_ptr<StateUpdate_Element> state_update_;
 };
 

@@ -63,7 +63,7 @@ def test_fixture_declares_sparse_paged_and_fixed_groups():
     config = json.loads((_MODEL_DIR / "genai_config.json").read_text())
     groups = config["model"]["decoder"]["state_groups"]
     assert config["model"]["decoder"]["inputs"]["position_ids"] == "position_ids"
-    assert [group["kind"] for group in groups] == ["fixed", "paged_kv", "fixed"]
+    assert [group["kind"] for group in groups] == ["fixed_conv", "paged_kv", "fixed_recurrent"]
     assert [group["layer_ids"] for group in groups] == [[0, 3], [1, 4], [2, 5]]
 
 
