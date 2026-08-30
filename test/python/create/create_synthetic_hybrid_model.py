@@ -183,37 +183,31 @@ def create_config(output_dir):
                     "input_ids": "input_ids",
                     "attention_mask": "attention_mask",
                     "position_ids": "position_ids",
+                    "past_conv_names": "past_conv.%d",
+                    "past_recurrent_names": "past_recurrent.%d",
+                    "state_update_capture_count": "state_update_capture_count",
+                    "state_update_active": "state_update_active",
                 },
                 "outputs": {
                     "logits": "logits",
+                    "present_conv_names": "present_conv.%d",
+                    "present_recurrent_names": "present_recurrent.%d",
+                    "state_update_conv_value_names": "state_update.%d.conv_value",
+                    "state_update_recurrent_capsule_names": "state_update.%d.recurrent_capsule",
                 },
                 "state_groups": [
                     {
-                        "kind": "fixed",
+                        "kind": "fixed_conv",
                         "layer_ids": CONV_LAYERS,
-                        "bindings": {
-                            "state": {"input": "past_conv.%d", "output": "present_conv.%d"},
-                        },
                         "state_update": {
-                            "kind": "causal_conv",
                             "capacity": STATE_UPDATE_CAPACITY,
-                            "capture_count": "state_update_capture_count",
-                            "active": "state_update_active",
-                            "value": "state_update.%d.conv_value",
                         },
                     },
                     {
-                        "kind": "fixed",
+                        "kind": "fixed_recurrent",
                         "layer_ids": RECURRENT_LAYERS,
-                        "bindings": {
-                            "state": {"input": "past_recurrent.%d", "output": "present_recurrent.%d"},
-                        },
                         "state_update": {
-                            "kind": "gated_delta_net",
                             "capacity": STATE_UPDATE_CAPACITY,
-                            "capture_count": "state_update_capture_count",
-                            "active": "state_update_active",
-                            "capsule": "state_update.%d.recurrent_capsule",
                             "key_head_count": 1,
                         },
                     },

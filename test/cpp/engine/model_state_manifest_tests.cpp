@@ -71,25 +71,24 @@ Config::Model::Decoder MakeSparseDecoder() {
 
   Decoder decoder;
   decoder.num_hidden_layers = 4;
+  decoder.inputs.past_key_names = "past.%d.key";
+  decoder.inputs.past_value_names = "past.%d.value";
+  decoder.inputs.past_conv_names = "past.%d.conv";
+  decoder.inputs.past_recurrent_names = "past.%d.recurrent";
+  decoder.outputs.present_key_names = "present.%d.key";
+  decoder.outputs.present_value_names = "present.%d.value";
+  decoder.outputs.present_conv_names = "present.%d.conv";
+  decoder.outputs.present_recurrent_names = "present.%d.recurrent";
   decoder.state_groups = std::vector<Decoder::StateGroup>{
       Decoder::StateGroup{
           Decoder::StateGroupKind::PagedKeyValue,
-          {1, 3},
-          Decoder::StateBinding{"past.%d.key", "present.%d.key"},
-          Decoder::StateBinding{"past.%d.value", "present.%d.value"},
-          std::nullopt},
+          {1, 3}},
       Decoder::StateGroup{
-          Decoder::StateGroupKind::Fixed,
-          {0, 2},
-          std::nullopt,
-          std::nullopt,
-          Decoder::StateBinding{"past.%d.conv", "present.%d.conv"}},
+          Decoder::StateGroupKind::FixedConv,
+          {0, 2}},
       Decoder::StateGroup{
-          Decoder::StateGroupKind::Fixed,
-          {0, 2},
-          std::nullopt,
-          std::nullopt,
-          Decoder::StateBinding{"past.%d.recurrent", "present.%d.recurrent"}}};
+          Decoder::StateGroupKind::FixedRecurrent,
+          {0, 2}}};
   return decoder;
 }
 
@@ -143,7 +142,9 @@ TEST(ModelStateManifestTest, ReportsStateGroupCapabilities) {
   EXPECT_TRUE(hybrid.HasStateGroupKind(
       Config::Model::Decoder::StateGroupKind::PagedKeyValue));
   EXPECT_TRUE(hybrid.HasStateGroupKind(
-      Config::Model::Decoder::StateGroupKind::Fixed));
+      Config::Model::Decoder::StateGroupKind::FixedConv));
+  EXPECT_TRUE(hybrid.HasStateGroupKind(
+      Config::Model::Decoder::StateGroupKind::FixedRecurrent));
   EXPECT_TRUE(hybrid.HasFixedStateGroups());
 
   Config::Model::Decoder legacy;
@@ -226,7 +227,7 @@ TEST(ModelStateManifestTest, RejectsIncompatiblePagedGeometry) {
 
 TEST(ModelStateManifestTest, RejectsMissingFixedConvDecoderBinding) {
   auto decoder = MakeSparseDecoder();
-  (*decoder.state_groups)[1].state->input = "missing.%d.conv";
+  decoder.inputs.past_conv_names = "missing.%d.conv";
   const ModelStateManifest manifest{decoder};
   const auto metadata = MakeValidMetadata();
 
@@ -238,12 +239,9 @@ TEST(ModelStateManifestTest, DecoderModelLoadValidatesDecoderBindings) {
   const auto model_path = fs::path{std::string{MODEL_PATH "engine/dummy-decoder"}};
   const auto invalid_overlay = R"({
     "model": {"decoder": {
+      "outputs": {"present_key_names": "missing.%d.key"},
       "state_groups": [{
-        "kind": "paged_kv", "layer_ids": [0],
-        "bindings": {
-          "key": {"input": "past_key_values.%d.key", "output": "missing.%d.key"},
-          "value": {"input": "past_key_values.%d.value", "output": "present.%d.value"}
-        }
+        "kind": "paged_kv", "layer_ids": [0]
       }]
     }}
   })";
@@ -256,11 +254,7 @@ TEST(ModelStateManifestTest, DecoderModelLoadsWithValidDecoderBindings) {
   const auto valid_overlay = R"({
     "model": {"decoder": {
       "state_groups": [{
-        "kind": "paged_kv", "layer_ids": [0],
-        "bindings": {
-          "key": {"input": "past_key_values.%d.key", "output": "present.%d.key"},
-          "value": {"input": "past_key_values.%d.value", "output": "present.%d.value"}
-        }
+        "kind": "paged_kv", "layer_ids": [0]
       }]
     }}
   })";
@@ -299,7 +293,8 @@ TEST(ModelStateManifestTest, AcceptsSparsePagedDynamicEngineContract) {
   decoder.state_groups->erase(
       std::remove_if(decoder.state_groups->begin(), decoder.state_groups->end(),
                      [](const auto& group) {
-                       return group.kind == Config::Model::Decoder::StateGroupKind::Fixed;
+                       return group.kind == Config::Model::Decoder::StateGroupKind::FixedConv ||
+                              group.kind == Config::Model::Decoder::StateGroupKind::FixedRecurrent;
                      }),
       decoder.state_groups->end());
 

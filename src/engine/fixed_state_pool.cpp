@@ -29,6 +29,18 @@ std::string ExpandBinding(const std::string& binding, int layer_id) {
   return name;
 }
 
+std::pair<const std::string&, const std::string&> FixedStateTemplates(
+    const Config::Model::Decoder& decoder,
+    StateGroupKind kind) {
+  if (kind == StateGroupKind::FixedConv) {
+    return {decoder.inputs.past_conv_names, decoder.outputs.present_conv_names};
+  }
+  if (kind == StateGroupKind::FixedRecurrent) {
+    return {decoder.inputs.past_recurrent_names, decoder.outputs.present_recurrent_names};
+  }
+  throw std::logic_error("Fixed state pool received a non-fixed state group.");
+}
+
 size_t CheckedMultiply(size_t left, size_t right, std::string_view description) {
   if (left != 0 && right > std::numeric_limits<size_t>::max() / left) {
     throw std::runtime_error(
@@ -519,19 +531,20 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity)
   const ModelStateManifest manifest{impl_->model->config_->model.decoder};
   manifest.ValidateSession(impl_->model->session_info_);
 
+  const auto& decoder = impl_->model->config_->model.decoder;
   for (const auto& group : manifest.StateGroups()) {
-    if (group.kind != StateGroupKind::Fixed) {
+    if (group.kind != StateGroupKind::FixedConv &&
+        group.kind != StateGroupKind::FixedRecurrent) {
       continue;
     }
-    if (!group.state) {
-      throw std::logic_error("Fixed state pool received a fixed group without a state binding.");
-    }
+    const auto [input_template, output_template] =
+        FixedStateTemplates(decoder, group.kind);
     for (const int layer_id : group.layer_ids) {
       Impl::TensorSpec spec;
       spec.kind = group.kind;
       spec.layer_id = layer_id;
-      spec.input_name = ExpandBinding(group.state->input, layer_id);
-      spec.output_name = ExpandBinding(group.state->output, layer_id);
+      spec.input_name = ExpandBinding(input_template, layer_id);
+      spec.output_name = ExpandBinding(output_template, layer_id);
       spec.data_type =
           impl_->model->session_info_.GetInputDataType(spec.input_name);
       spec.session_shape =
@@ -559,10 +572,12 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity)
       if (group.state_update) {
         const auto& update = *group.state_update;
         spec.state_update_enabled = update.enabled;
-        spec.state_update_kind = update.kind;
+        spec.state_update_kind = group.kind == StateGroupKind::FixedConv
+                                     ? Config::Model::Decoder::StateUpdateKind::CausalConv
+                                     : Config::Model::Decoder::StateUpdateKind::GatedDeltaNet;
         spec.state_update_capacity = static_cast<size_t>(update.capacity);
-        spec.state_update_capture_count_name = update.capture_count;
-        spec.state_update_active_name = update.active;
+        spec.state_update_capture_count_name = decoder.inputs.state_update_capture_count;
+        spec.state_update_active_name = decoder.inputs.state_update_active;
 
         const auto load_update_output = [&](const std::string& output_template) {
           Impl::StateUpdateOutputSpec output;
@@ -588,14 +603,20 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity)
           return output;
         };
 
-        spec.state_update_value = load_update_output(update.value);
-        spec.state_update_capsule = load_update_output(update.capsule);
+        spec.state_update_value = load_update_output(
+            group.kind == StateGroupKind::FixedConv
+                ? decoder.outputs.state_update_conv_value_names
+                : std::string{});
+        spec.state_update_capsule = load_update_output(
+            group.kind == StateGroupKind::FixedRecurrent
+                ? decoder.outputs.state_update_recurrent_capsule_names
+                : std::string{});
         spec.state_update_row_bytes = CheckedAdd(
             spec.state_update_value.row_bytes, spec.state_update_capsule.row_bytes,
             "state_update staging allocation");
         spec.state_update_channel_count = static_cast<size_t>(spec.session_shape[1]);
         spec.state_update_state_width = static_cast<size_t>(spec.session_shape[2]);
-        if (update.kind == Config::Model::Decoder::StateUpdateKind::CausalConv) {
+        if (group.kind == StateGroupKind::FixedConv) {
           const size_t element_size = Ort::SizeOf(spec.data_type);
           if (element_size != 2 && element_size != 4) {
             throw std::runtime_error(

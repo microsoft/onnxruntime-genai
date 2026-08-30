@@ -136,10 +136,10 @@ TEST_F(FixedStatePoolTest, UsesManifestBindingOrderAndSessionGeometry) {
 
   ASSERT_EQ(reservation.Bindings().size(), 4u);
   using Kind = Config::Model::Decoder::StateGroupKind;
-  EXPECT_EQ(reservation.Bindings()[0].kind, Kind::Fixed);
-  EXPECT_EQ(reservation.Bindings()[1].kind, Kind::Fixed);
-  EXPECT_EQ(reservation.Bindings()[2].kind, Kind::Fixed);
-  EXPECT_EQ(reservation.Bindings()[3].kind, Kind::Fixed);
+  EXPECT_EQ(reservation.Bindings()[0].kind, Kind::FixedConv);
+  EXPECT_EQ(reservation.Bindings()[1].kind, Kind::FixedConv);
+  EXPECT_EQ(reservation.Bindings()[2].kind, Kind::FixedRecurrent);
+  EXPECT_EQ(reservation.Bindings()[3].kind, Kind::FixedRecurrent);
   // Convolution group first, then recurrent group, each in layer order.
   EXPECT_EQ(reservation.Bindings()[0].layer_id, 0);
   EXPECT_STREQ(reservation.Bindings()[0].input_name, "past_conv.0");
@@ -465,9 +465,17 @@ TEST_F(FixedStatePoolTest, ReportsPersistentStagingAndReleaseAccounting) {
   constexpr size_t bytes_per_request =
       2 * (2 * 3) * sizeof(float) +     // convolution: 2 layers, row [2, 3]
       2 * (2 * 2 * 2) * sizeof(float);  // recurrent: 2 layers, row [2, 2, 2]
+    constexpr size_t state_update_bytes_per_request =
+      2 * (3 * 2) * sizeof(float) +            // convolution: 2 layers, row [3, 2]
+      2 * (3 * (2 + 2 + 2 * 2)) * sizeof(float);  // recurrent: 2 layers, row [24]
+    constexpr size_t persistent_state_update_control_bytes =
+      3 * sizeof(int32_t) + sizeof(int32_t);  // capacity-sized counts plus one active flag
   constexpr size_t state_update_control_bytes = 2 * sizeof(int32_t) + sizeof(int32_t);
-  // Two state banks plus capacity-sized gather and output staging buffers.
-  EXPECT_EQ(pool->PersistentBytes(), 4 * 3 * bytes_per_request);
+    // Two state banks, capacity-sized state/output/update staging, and update controls.
+    EXPECT_EQ(pool->PersistentBytes(),
+        4 * 3 * bytes_per_request +
+          3 * state_update_bytes_per_request +
+          persistent_state_update_control_bytes);
   EXPECT_EQ(pool->ZeroingScratchBytes(), bytes_per_request);
   EXPECT_EQ(pool->ActiveStagingBytes(), 0u);
 

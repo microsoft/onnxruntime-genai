@@ -197,44 +197,21 @@ def create_decoder(output_dir):
 def create_config(output_dir):
     state_groups = [
         {
-            "kind": "fixed",
+            "kind": "fixed_conv",
             "layer_ids": CONV_LAYERS,
-            "bindings": {"state": {"input": "past_conv.%d", "output": "present_conv.%d"}},
             "state_update": {
-                "kind": "causal_conv",
                 "capacity": STATE_UPDATE_CAPACITY,
-                "capture_count": "state_update_capture_count",
-                "value": "state_update.%d.conv_value",
             },
         },
         {
             "kind": "paged_kv",
             "layer_ids": PAGED_LAYERS,
-            "bindings": {
-                "key": {
-                    "input": "past_key_values.%d.key",
-                    "output": "present.%d.key",
-                },
-                "value": {
-                    "input": "past_key_values.%d.value",
-                    "output": "present.%d.value",
-                },
-            },
         },
         {
-            "kind": "fixed",
+            "kind": "fixed_recurrent",
             "layer_ids": RECURRENT_LAYERS,
-            "bindings": {
-                "state": {
-                    "input": "past_recurrent.%d",
-                    "output": "present_recurrent.%d",
-                }
-            },
             "state_update": {
-                "kind": "gated_delta_net",
                 "capacity": STATE_UPDATE_CAPACITY,
-                "capture_count": "state_update_capture_count",
-                "capsule": "state_update.%d.recurrent_capsule",
                 "key_head_count": 1,
             },
         },
@@ -262,13 +239,21 @@ def create_config(output_dir):
                     "past_sequence_lengths": "past_sequence_lengths",
                     "attention_metadata": "attention_metadata",
                     "position_ids": "position_ids",
-                    "past_key_names": "legacy_past.%d.key",
-                    "past_value_names": "legacy_past.%d.value",
+                    "past_key_names": "past_key_values.%d.key",
+                    "past_value_names": "past_key_values.%d.value",
+                    "past_conv_names": "past_conv.%d",
+                    "past_recurrent_names": "past_recurrent.%d",
+                    "state_update_capture_count": "state_update_capture_count",
+                    "state_update_active": "",
                 },
                 "outputs": {
                     "logits": "logits",
-                    "present_key_names": "legacy_present.%d.key",
-                    "present_value_names": "legacy_present.%d.value",
+                    "present_key_names": "present.%d.key",
+                    "present_value_names": "present.%d.value",
+                    "present_conv_names": "present_conv.%d",
+                    "present_recurrent_names": "present_recurrent.%d",
+                    "state_update_conv_value_names": "state_update.%d.conv_value",
+                    "state_update_recurrent_capsule_names": "state_update.%d.recurrent_capsule",
                 },
                 "state_groups": state_groups,
             },
