@@ -33,11 +33,15 @@ void Request::ValidateOwnerThread() const {
   engine->ValidateOwnerThread();
 }
 
-Request::Request(std::shared_ptr<GeneratorParams> params, size_t max_total_tokens)
+Request::Request(
+    std::shared_ptr<GeneratorParams> params,
+    size_t max_total_tokens,
+    std::shared_ptr<std::atomic<bool>> abandonment_pending)
     : max_total_tokens_{max_total_tokens},
       params_{params},
       rng_{CreateRandomGenerator(params->search.random_seed)},
-      search_{CreateSearch(*params)} {
+      search_{CreateSearch(*params)},
+      abandonment_pending_{std::move(abandonment_pending)} {
   // A request is one sequence: the engine batches requests, not rows within a request. Several
   // places here read row 0 only (UnprocessedTokens, CurrentSequenceLength) or take the tail of the
   // next-token span, so a wider search would silently mirror the wrong row's tokens.
@@ -89,9 +93,7 @@ void Request::OnFirstExternalReference() noexcept {
 
 void Request::OnLastExternalReference() noexcept {
   externally_abandoned_.store(true, std::memory_order_release);
-  if (auto engine = engine_.lock()) {
-    engine->abandonment_pending_.store(true, std::memory_order_release);
-  }
+  abandonment_pending_->store(true, std::memory_order_release);
 }
 
 bool Request::IsExternallyAbandoned() const noexcept {

@@ -542,7 +542,7 @@ TEST(PagedKeyValueCacheManifestTest, LegacyCompositeEntryPointsRejectBeforeDiver
                    model, /*capacity=*/1, EosToken(*model))
                    .engine;
   const std::array<int32_t, 3> prompt{2, 3, 4};
-  auto request = MintAssignedRequest(owner, *model, prompt);
+  auto request = CreateRequestWithPrompt(owner, *model, prompt);
 
   EXPECT_THROW(manager.Allocate({request}), std::logic_error);
   EXPECT_THROW(manager.Step(), std::logic_error);

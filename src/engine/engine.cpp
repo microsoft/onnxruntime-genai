@@ -140,7 +140,8 @@ std::shared_ptr<Request> Engine::CreateRequest(const GeneratorParams& params,
   }
 
   auto request = std::make_shared<Request>(
-      CloneRequestParams(params, *model_), max_total_tokens);
+      CloneRequestParams(params, *model_), max_total_tokens,
+      abandonment_pending_);
   request->ValidateEngineCompatibility();
 
   // Fatal handling may need one terminal event for every tracked Request. Grow that storage before
@@ -354,6 +355,10 @@ void Engine::CloseRequest(const std::shared_ptr<Request>& request) {
   if (!request || request->engine_.lock().get() != this) {
     throw std::runtime_error("Cannot close a request that does not belong to this engine.");
   }
+  if (StaticBatchNeedsRequest(request)) {
+    throw std::runtime_error(
+        "Cannot close a resident static-batch request while another row is still executable.");
+  }
 
   scheduler_->RemoveRequest(request);
 
@@ -411,7 +416,7 @@ void Engine::ReclaimAbandonedRequests() {
   // can safely perform the normal removal sequence: logical scheduler removal, ready-notification
   // purge, and terminal close. Dynamic cache ownership is released immediately; a resident static
   // batch row can remain physically retained until its shared batch is recycled.
-  if (!abandonment_pending_.exchange(false, std::memory_order_acq_rel)) {
+  if (!abandonment_pending_->exchange(false, std::memory_order_acq_rel)) {
     return;
   }
 
@@ -422,9 +427,18 @@ void Engine::ReclaimAbandonedRequests() {
           return request &&
                  !IsClosed(request->status_) &&
                  request->engine_.lock().get() == this &&
-                 request->IsExternallyAbandoned();
+                 request->IsExternallyAbandoned() &&
+                 !StaticBatchNeedsRequest(request);
         });
     if (abandoned == tracked_requests_.end()) {
+      if (std::any_of(
+              tracked_requests_.begin(), tracked_requests_.end(),
+              [](const std::shared_ptr<Request>& request) {
+                return request && !IsClosed(request->status_) &&
+                       request->IsExternallyAbandoned();
+              })) {
+        abandonment_pending_->store(true, std::memory_order_release);
+      }
       return;
     }
 
@@ -435,6 +449,20 @@ void Engine::ReclaimAbandonedRequests() {
       CloseRequest(request);
     }
   }
+}
+
+bool Engine::StaticBatchNeedsRequest(
+    const std::shared_ptr<Request>& request) const {
+  if (cache_manager_->SupportsDynamicBatching() ||
+      !cache_manager_->IsResident(request)) {
+    return false;
+  }
+  const auto residents = cache_manager_->AllocatedRequests();
+  return std::any_of(
+      residents.begin(), residents.end(),
+      [&request](const std::shared_ptr<Request>& resident) {
+        return resident != request && IsExecutable(resident->status_);
+      });
 }
 
 void Engine::ValidateRequestCanContinue(

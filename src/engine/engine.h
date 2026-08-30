@@ -167,6 +167,8 @@ struct Engine : std::enable_shared_from_this<Engine>,
       const std::shared_ptr<Request>& request) noexcept;
   bool CancelRequest(const std::shared_ptr<Request>& request, uint64_t turn_id);
   void ReclaimAbandonedRequests();
+  bool StaticBatchNeedsRequest(
+      const std::shared_ptr<Request>& request) const;
   size_t DrainPendingEvents(std::span<EngineEvent> events);
   void RetainEvent(EngineEvent event);
   void RunDynamic();
@@ -206,7 +208,8 @@ struct Engine : std::enable_shared_from_this<Engine>,
   std::vector<EngineEvent> pending_events_;
   std::vector<EngineEvent> staged_events_;
   size_t pending_event_index_{};
-  std::atomic<bool> abandonment_pending_{false};
+  const std::shared_ptr<std::atomic<bool>> abandonment_pending_{
+      std::make_shared<std::atomic<bool>>(false)};
 
   friend struct Request;
 };

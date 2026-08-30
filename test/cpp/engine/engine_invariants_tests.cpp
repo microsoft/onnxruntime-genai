@@ -84,8 +84,8 @@ FixedStatePoolSnapshot MakeValidFixedState() {
 
 std::vector<RequestStateSnapshot> MakeValidCompositeRequests() {
   return {
-      MakeValidRequest(kRequestA, RequestStatus::Active, 6, kBlockSize + 1, kBlockSize + 1),
-      MakeValidRequest(kRequestB, RequestStatus::Active, 5, kBlockSize, kBlockSize),
+      MakeValidRequest(kRequestA, RequestStatus::Active, 6, kBlockSize + 1),
+      MakeValidRequest(kRequestB, RequestStatus::Active, 5, kBlockSize),
   };
 }
 
@@ -380,7 +380,7 @@ TEST(InvariantValidatorTest, CompositeRejectsFixedOwnerWithoutPagedTable) {
   fixed.committed_slots = 3;
   fixed.free_slots = 0;
   auto requests = MakeValidCompositeRequests();
-  requests.push_back(MakeValidRequest(kRequestC, RequestStatus::Active, 5, kBlockSize, kBlockSize));
+  requests.push_back(MakeValidRequest(kRequestC, RequestStatus::Active, 5, kBlockSize));
   EXPECT_FALSE(
       ValidateCompositeStateInvariants(MakeValidCache(), fixed, requests).empty());
 }

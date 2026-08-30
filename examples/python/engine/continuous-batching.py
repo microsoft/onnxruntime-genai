@@ -18,11 +18,7 @@ def request_for_event(event: og.EngineEvent) -> og.Request | None:
         return event.request
     if event.flags & (og.EngineEventFlags.CAPACITY_BLOCKED | og.EngineEventFlags.RETRYABLE):
         return None
-    outcome = (
-        "failed"
-        if event.flags & og.EngineEventFlags.FAILED
-        else "returned an invalid request-less event"
-    )
+    outcome = "failed" if event.flags & og.EngineEventFlags.FAILED else "returned an invalid request-less event"
     raise RuntimeError(f"Engine {outcome}; error_code={event.error_code}")
 
 

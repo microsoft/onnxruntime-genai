@@ -136,10 +136,14 @@ TEST_F(SchedulerContractTest, ExecutionOrderingPreservesAssignedTokenBudgets) {
   model_->config_->engine.dynamic_batching->max_scheduled_tokens = 3;
   DynamicBatchScheduler scheduler(model_, cache);
 
-  auto first = Assigned(10);
-  auto second = Assigned(20);
-  first->Params()->search.chunk_size = 1;
-  second->Params()->search.chunk_size = 3;
+  auto first_params = MakeGreedyParams(*model_);
+  first_params->search.chunk_size = 1;
+  auto first = CreateRequestWithPrompt(
+      assign_target_, *first_params, Prompt(10));
+  auto second_params = MakeGreedyParams(*model_);
+  second_params->search.chunk_size = 3;
+  auto second = CreateRequestWithPrompt(
+      assign_target_, *second_params, Prompt(20));
   scheduler.AddRequest(first);
   scheduler.AddRequest(second);
   StepPlan plan;

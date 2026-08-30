@@ -60,7 +60,11 @@ struct Request : std::enable_shared_from_this<Request>,
    * @brief Constructs a Request object with the given generator parameters.
    * @param params Shared pointer to GeneratorParams containing generation configuration.
    */
-  Request(std::shared_ptr<GeneratorParams> params, size_t max_total_tokens);
+  Request(
+      std::shared_ptr<GeneratorParams> params,
+      size_t max_total_tokens,
+      std::shared_ptr<std::atomic<bool>> abandonment_pending =
+          std::make_shared<std::atomic<bool>>(false));
   ~Request();
 
   /**
@@ -278,6 +282,7 @@ struct Request : std::enable_shared_from_this<Request>,
   std::unique_ptr<ConstrainedLogitsProcessor> guidance_logits_processor_;
   std::unique_ptr<ConstrainedLogitsProcessor> guidance_transaction_checkpoint_;
   std::unique_ptr<BatchedSamplerState> batched_sampler_state_;
+  const std::shared_ptr<std::atomic<bool>> abandonment_pending_;
   std::weak_ptr<Engine> engine_;
   std::atomic<bool> externally_abandoned_{false};
 
