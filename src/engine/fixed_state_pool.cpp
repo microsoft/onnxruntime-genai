@@ -207,6 +207,8 @@ struct FixedStatePool::Impl {
     // auto-sizing and cannot fail after a step is planned.
     std::shared_ptr<OrtValue> gathered_staging;
     std::shared_ptr<OrtValue> output_staging;
+    std::shared_ptr<OrtValue> state_update_value_staging;
+    std::shared_ptr<OrtValue> state_update_capsule_staging;
   };
 
   struct Slot {
@@ -338,6 +340,8 @@ struct FixedStatePool::Impl {
   size_t state_update_capacity{};
   std::string state_update_capture_count_name;
   std::string state_update_active_name;
+  std::shared_ptr<OrtValue> state_update_capture_count_staging;
+  std::shared_ptr<OrtValue> state_update_active_staging;
   uint64_t next_reservation_id{1};
   uint64_t active_reservation_id{};
   bool healthy{true};
@@ -633,6 +637,11 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity)
           CheckedMultiply(CheckedMultiply(capacity, spec.row_bytes, "persistent allocation"),
                           spec.banks.size() + 2, "persistent allocation"),
           "persistent allocation");
+      impl_->persistent_bytes = CheckedAdd(
+          impl_->persistent_bytes,
+          CheckedMultiply(capacity, spec.state_update_row_bytes,
+                          "state_update persistent allocation"),
+          "state_update persistent allocation");
       impl_->zeroing_scratch_bytes = CheckedAdd(
           impl_->zeroing_scratch_bytes, spec.row_bytes,
           "zeroing scratch allocation");
@@ -664,6 +673,18 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity)
   impl_->state_update_capacity = state_update_capacity;
   impl_->state_update_capture_count_name = state_update_capture_count_name;
   impl_->state_update_active_name = state_update_active_name;
+  if (impl_->state_update_capacity != 0) {
+    impl_->persistent_bytes = CheckedAdd(
+        impl_->persistent_bytes,
+        CheckedMultiply(capacity, sizeof(int32_t),
+                        "state_update capture_count persistent allocation"),
+        "state_update capture_count persistent allocation");
+    if (!impl_->state_update_active_name.empty()) {
+      impl_->persistent_bytes = CheckedAdd(
+          impl_->persistent_bytes, sizeof(int32_t),
+          "state_update active persistent allocation");
+    }
+  }
   if (impl_->fixed_session_batch_size != 0) {
     throw std::runtime_error(
         "Dynamic batching requires fixed decoder state groups with a dynamic batch axis, but "
@@ -686,6 +707,28 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity)
         impl_->device->GetAllocator(), bank_shape, spec.data_type);
     spec.output_staging = OrtValue::CreateTensor(
         impl_->device->GetAllocator(), bank_shape, spec.data_type);
+    const auto allocate_state_update_staging = [&](const Impl::StateUpdateOutputSpec& output) {
+      if (output.name.empty()) {
+        return std::shared_ptr<OrtValue>{};
+      }
+      return std::shared_ptr<OrtValue>{OrtValue::CreateTensor(
+          impl_->device->GetAllocator(), StorageShape(capacity, output.session_shape),
+          output.data_type)};
+    };
+    spec.state_update_value_staging = allocate_state_update_staging(spec.state_update_value);
+    spec.state_update_capsule_staging = allocate_state_update_staging(spec.state_update_capsule);
+  }
+  if (impl_->state_update_capacity != 0) {
+    const std::array<int64_t, 1> capture_count_shape{static_cast<int64_t>(capacity)};
+    impl_->state_update_capture_count_staging = OrtValue::CreateTensor(
+        impl_->device->GetAllocator(), capture_count_shape,
+        ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+    if (!impl_->state_update_active_name.empty()) {
+      const std::array<int64_t, 1> active_shape{1};
+      impl_->state_update_active_staging = OrtValue::CreateTensor(
+          impl_->model->allocator_cpu_, active_shape,
+          ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+    }
   }
 
   // Allocate and validate every tensor before enqueueing device work. Once the first asynchronous
@@ -927,7 +970,7 @@ FixedStateReservation FixedStatePool::Reserve(
   storage->provisional.resize(requests.size());
   storage->expected_state_generations.resize(requests.size());
   storage->target_tokens.resize(requests.size());
-  storage->staging_backing.reserve(impl_->tensors.size() * 2);
+  storage->staging_backing.reserve(impl_->tensors.size() * 4 + 2);
   storage->capture_counts.resize(requests.size());
   storage->commit_step_tokens.assign(requests.size(), 0);
   storage->commit_kept_tokens.assign(requests.size(), 0);
@@ -946,8 +989,12 @@ FixedStateReservation FixedStatePool::Reserve(
     storage->state_update_capture_count_name = impl_->state_update_capture_count_name;
     const std::array<int64_t, 1> capture_count_shape{static_cast<int64_t>(batch_rows)};
     storage->state_update_capture_count = OrtValue::CreateTensor(
-        impl_->device->GetAllocator(), capture_count_shape,
+        impl_->state_update_capture_count_staging->GetTensorMemoryInfo(),
+        impl_->state_update_capture_count_staging->GetTensorMutableData<void>(),
+        CheckedMultiply(batch_rows, sizeof(int32_t), "capture_count tensor view"),
+        capture_count_shape,
         ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+    storage->staging_backing.push_back(impl_->state_update_capture_count_staging);
     storage->staging_bytes = CheckedAdd(
         storage->staging_bytes,
         CheckedMultiply(batch_rows, sizeof(int32_t), "capture_count staging allocation"),
@@ -956,8 +1003,11 @@ FixedStateReservation FixedStatePool::Reserve(
       storage->state_update_active_name = impl_->state_update_active_name;
       const std::array<int64_t, 1> active_shape{1};
       storage->state_update_active = OrtValue::CreateTensor(
-          impl_->model->allocator_cpu_, active_shape,
+          impl_->state_update_active_staging->GetTensorMemoryInfo(),
+          impl_->state_update_active_staging->GetTensorMutableData<void>(),
+          sizeof(int32_t), active_shape,
           ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+      storage->staging_backing.push_back(impl_->state_update_active_staging);
       storage->state_update_active->GetTensorMutableData<int32_t>()[0] =
           capture_state_updates ? 1 : 0;
       storage->staging_bytes = CheckedAdd(
@@ -979,16 +1029,24 @@ FixedStateReservation FixedStatePool::Reserve(
     storage->staging_backing.push_back(spec.gathered_staging);
     storage->staging_backing.push_back(spec.output_staging);
     FixedStateReservation::Storage::StateUpdateTensors state_updates;
-    const auto allocate_update_output = [&](const Impl::StateUpdateOutputSpec& output) {
+    const auto make_update_output_view = [&storage, batch_rows, capture_state_updates](
+                                             const Impl::StateUpdateOutputSpec& output,
+                                             const std::shared_ptr<OrtValue>& backing) {
       if (!capture_state_updates || output.name.empty()) {
         return std::unique_ptr<OrtValue>{};
       }
-      return OrtValue::CreateTensor(
-          impl_->device->GetAllocator(), StorageShape(batch_rows, output.session_shape),
-          output.data_type);
+      const size_t tensor_bytes = CheckedMultiply(
+          batch_rows, output.row_bytes, "state_update tensor view");
+      auto view = OrtValue::CreateTensor(
+          backing->GetTensorMemoryInfo(), backing->GetTensorMutableData<void>(),
+          tensor_bytes, StorageShape(batch_rows, output.session_shape), output.data_type);
+      storage->staging_backing.push_back(backing);
+      return view;
     };
-    state_updates.value = allocate_update_output(spec.state_update_value);
-    state_updates.capsule = allocate_update_output(spec.state_update_capsule);
+    state_updates.value = make_update_output_view(
+        spec.state_update_value, spec.state_update_value_staging);
+    state_updates.capsule = make_update_output_view(
+        spec.state_update_capsule, spec.state_update_capsule_staging);
 
     storage->staging_bytes = CheckedAdd(
         storage->staging_bytes,
