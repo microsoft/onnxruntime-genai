@@ -19,7 +19,13 @@ Scheduler::Scheduler(std::shared_ptr<Model> model)
   if (engine_config.static_batching)
     max_batch_size = std::max(max_batch_size, engine_config.static_batching->max_batch_size);
 
-  batched_sampling_plan_.Reserve(max_batch_size);
+  size_t max_verification_rows = max_batch_size;
+  if (engine_config.dynamic_batching) {
+    max_verification_rows = std::max(
+        max_verification_rows,
+        engine_config.dynamic_batching->max_scheduled_tokens);
+  }
+  batched_sampling_plan_.Reserve(max_batch_size, max_verification_rows);
   batched_sampler_ = model->p_device_scoring_->CreateBatchedSampler(
       max_batch_size, model->config_->model.vocab_size);
 }
@@ -184,15 +190,16 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     candidate.entry.request = request;
     candidate.entry.request_id = request.get();
     candidate.entry.sequence_length_before = snapshot.current_sequence_length;
-    candidate.entry.unprocessed_token_count = 1;
     // Drafts extend a decode step, which by definition ends at the sequence tail. A prefill chunk
     // has committed tokens of its own left to push through, so it can never verify one.
     candidate.entry.draft_token_count =
         snapshot.is_prefill
             ? 0
             : std::min(request->PendingDraftTokenCount(), max_draft_token_count);
+    candidate.entry.unprocessed_token_count = 1 + candidate.entry.draft_token_count;
     candidate.entry.target_cache_slots = RequiredSlots(
-        static_cast<size_t>(snapshot.processed_sequence_length), 1);
+      static_cast<size_t>(snapshot.processed_sequence_length),
+      candidate.entry.unprocessed_token_count);
     candidate.entry.whole_sequence_cache_slots =
         SlotsForWholeSequence(snapshot.current_sequence_length);
     candidate.entry.is_prefill = snapshot.is_prefill;
@@ -206,6 +213,7 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
         snapshot.is_prefill,
         static_cast<size_t>(remaining_token_count),
         prefill_token_cap,
+      candidate.entry.draft_token_count,
     };
     candidate.processed_sequence_length =
         static_cast<size_t>(snapshot.processed_sequence_length);
@@ -256,10 +264,8 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
   }
   std::vector<DecodeFirstBudgetCandidate> selected_candidates;
   std::vector<size_t> selected_processed_lengths;
-  std::vector<size_t> selected_remaining_lengths;
   selected_candidates.reserve(plan.requests.size());
   selected_processed_lengths.reserve(plan.requests.size());
-  selected_remaining_lengths.reserve(plan.requests.size());
   for (const auto& entry : plan.requests) {
     const auto candidate_index_value =
         candidate_index.Find(entry.request_id);
@@ -270,8 +276,6 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     selected_candidates.push_back(candidate.budget);
     selected_processed_lengths.push_back(
         candidate.processed_sequence_length);
-    selected_remaining_lengths.push_back(
-        candidate.remaining_token_count);
   }
   std::vector<size_t> token_counts;
   try {
@@ -285,6 +289,7 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     auto& entry = plan.requests[index];
     entry.scheduling_order = index;
     entry.unprocessed_token_count = token_counts[index];
+    entry.draft_token_count = entry.is_prefill ? 0 : token_counts[index] - 1;
     entry.target_cache_slots = RequiredSlots(
         selected_processed_lengths[index],
         entry.unprocessed_token_count);
@@ -299,12 +304,7 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
   for (size_t i = 0; i < plan.requests.size(); ++i) {
     auto& entry = plan.requests[i];
     const size_t scheduling_index = entry.scheduling_order;
-    // The budget only distributes committed tokens. A step that stops short of the sequence tail
-    // has no row that predicts the first draft, so it cannot verify one.
-    if (token_counts[scheduling_index] != selected_remaining_lengths[scheduling_index]) {
-      entry.draft_token_count = 0;
-    }
-    entry.unprocessed_token_count = token_counts[scheduling_index] + entry.draft_token_count;
+    entry.unprocessed_token_count = token_counts[scheduling_index];
     entry.target_cache_slots = RequiredSlots(
         selected_processed_lengths[scheduling_index],
         entry.unprocessed_token_count);

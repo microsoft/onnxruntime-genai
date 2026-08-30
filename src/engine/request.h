@@ -169,7 +169,10 @@ struct Request : std::enable_shared_from_this<Request>,
 
   void AppendDraftsForTransaction(size_t draft_count);
   std::span<const int32_t> StagedDraftTokens() const;
-  void RewindDraftsForTransaction(size_t accepted_count);
+  void CommitAcceptedDraftsForTransaction(size_t accepted_count);
+  bool DraftVerificationCompletedGeneration() const noexcept {
+    return draft_verification_completed_generation_;
+  }
 
   void ValidateEngineCompatibility() const;
   void SaveStateForTransaction();
@@ -369,6 +372,7 @@ struct Request : std::enable_shared_from_this<Request>,
   std::vector<int32_t> draft_tokens_;
   size_t staged_draft_count_{};
   size_t accepted_draft_count_{};
+  bool draft_verification_completed_generation_{};
   std::shared_ptr<GeneratorParams> params_;
   std::mt19937 rng_;
   std::mt19937 transaction_rng_;

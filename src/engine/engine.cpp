@@ -576,7 +576,8 @@ bool Engine::HasPendingRequests() const {
 }
 
 size_t Engine::MaxDraftTokensPerStep() const {
-  return cache_manager_->SupportsDynamicBatching()
+  return cache_manager_->SupportsDynamicBatching() &&
+                 model_executor_->SupportsDraftVerification()
              ? cache_manager_->MaxDraftTokensPerStep()
              : 0;
 }

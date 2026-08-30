@@ -120,7 +120,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
 
   /**
    * @brief Speculative draft tokens a request may attach to one decode step.
-   * @return Zero when this Engine cannot roll a rejected draft back.
+    * @return Zero when this Engine cannot verify and roll back draft tokens.
    */
   size_t MaxDraftTokensPerStep() const;
 

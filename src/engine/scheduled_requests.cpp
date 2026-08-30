@@ -178,6 +178,49 @@ std::vector<DeviceSpan<float>> ScheduledRequests::ProcessLogits() {
 
 std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
     std::vector<DeviceSpan<float>>& verify_rows) {
+  if (!sampling_plan_) {
+    throw std::logic_error("Draft verification requires scheduler-owned argmax storage.");
+  }
+  auto& predicted_tokens = sampling_plan_->verification_tokens;
+  predicted_tokens.resize(verify_rows.size());
+
+  bool rows_are_contiguous = !verify_rows.empty();
+  const size_t vocab_size = static_cast<size_t>(model_->config_->model.vocab_size);
+  const float* first_row = rows_are_contiguous
+                               ? verify_rows.front().Span().data()
+                               : nullptr;
+  for (size_t row = 0; row < verify_rows.size() && rows_are_contiguous; ++row) {
+    rows_are_contiguous =
+        verify_rows[row].size() == vocab_size &&
+        verify_rows[row].Span().data() == first_row + row * vocab_size;
+  }
+
+  const bool used_device_argmax =
+      rows_are_contiguous &&
+      model_->p_device_scoring_->ArgMax(
+          first_row, Ort::TypeToTensorType<float>,
+          static_cast<int>(verify_rows.size()),
+          model_->config_->model.vocab_size, predicted_tokens.data());
+  if (!used_device_argmax) {
+    const bool rows_share_buffer =
+        !verify_rows.empty() &&
+        std::all_of(verify_rows.begin() + 1, verify_rows.end(),
+                    [&verify_rows](const DeviceSpan<float>& row) {
+                      return row.SameBufferAs(verify_rows.front());
+                    });
+    if (rows_share_buffer) {
+      verify_rows.front().CopyDeviceToCpu();
+    }
+    for (size_t row = 0; row < verify_rows.size(); ++row) {
+      auto row_values = rows_share_buffer
+                            ? verify_rows[row].CpuSpan()
+                            : verify_rows[row].CopyDeviceToCpu();
+      predicted_tokens[row] = static_cast<int32_t>(
+          std::max_element(row_values.begin(), row_values.end()) -
+          row_values.begin());
+    }
+  }
+
   std::vector<DeviceSpan<float>> sampled_rows;
   sampled_rows.reserve(requests_.size());
   size_t row = 0;
@@ -195,15 +238,12 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
     const auto drafts = requests_[i]->StagedDraftTokens();
     size_t accepted_count = 0;
     while (accepted_count < draft_count) {
-      auto row_values = verify_rows[row + accepted_count].CopyDeviceToCpu();
-      const auto predicted = static_cast<int32_t>(
-          std::max_element(row_values.begin(), row_values.end()) - row_values.begin());
-      if (predicted != drafts[accepted_count]) {
+      if (predicted_tokens[row + accepted_count] != drafts[accepted_count]) {
         break;
       }
       ++accepted_count;
     }
-    requests_[i]->RewindDraftsForTransaction(accepted_count);
+    requests_[i]->CommitAcceptedDraftsForTransaction(accepted_count);
     sampled_rows.push_back(verify_rows[row + accepted_count]);
     row += draft_count + 1;
   }
@@ -328,20 +368,41 @@ void ScheduledRequests::GenerateNextTokensForTransaction(
   results.assign(requests_.size(), RequestStepResult{});
   if (transaction_uses_batched_sampler_) {
     sampling_plan_->logits.clear();
-    size_t sampling_index = 0;
+    const size_t original_sampling_count = sampling_plan_->requests.size();
+    size_t source_sampling_index = 0;
+    size_t active_sampling_count = 0;
     for (size_t i = 0; i < requests_.size(); ++i) {
       if (!requests_[i]->IsChunkComplete())
         continue;
-      if (sampling_index >= sampling_plan_->requests.size() ||
-          sampling_plan_->requests[sampling_index] != requests_[i].get()) {
+      if (source_sampling_index >= original_sampling_count ||
+          sampling_plan_->requests[source_sampling_index] != requests_[i].get()) {
         throw std::logic_error("Batched sampling plan does not match the scheduled requests.");
       }
-      sampling_plan_->logits.push_back(logits[i]);
-      requests_[i]->PrepareGenerationForTransaction(logits[i]);
-      ++sampling_index;
+      if (requests_[i]->DraftVerificationCompletedGeneration()) {
+        results[i].done = true;
+      } else {
+        if (active_sampling_count != source_sampling_index) {
+          sampling_plan_->requests[active_sampling_count] =
+              sampling_plan_->requests[source_sampling_index];
+          sampling_plan_->params[active_sampling_count] =
+              sampling_plan_->params[source_sampling_index];
+          sampling_plan_->states[active_sampling_count] =
+              sampling_plan_->states[source_sampling_index];
+        }
+        sampling_plan_->logits.push_back(logits[i]);
+        requests_[i]->PrepareGenerationForTransaction(logits[i]);
+        ++active_sampling_count;
+      }
+      ++source_sampling_index;
     }
-    if (sampling_index != sampling_plan_->requests.size())
+    if (source_sampling_index != original_sampling_count)
       throw std::logic_error("Batched sampling plan does not match the scheduled requests.");
+    sampling_plan_->requests.resize(active_sampling_count);
+    sampling_plan_->params.resize(active_sampling_count);
+    sampling_plan_->states.resize(active_sampling_count);
+
+    if (active_sampling_count == 0)
+      return;
 
     auto next_tokens = batched_sampler_->Sample(
         sampling_plan_->logits, sampling_plan_->params,
@@ -352,19 +413,21 @@ void ScheduledRequests::GenerateNextTokensForTransaction(
       sampling_plan_->requests[i]->OnNextTokensSampled();
     }
     next_tokens.CopyDeviceToCpu();
-    sampling_index = 0;
     for (size_t i = 0; i < requests_.size(); ++i) {
-      if (!requests_[i]->IsChunkComplete())
+      if (!requests_[i]->IsChunkComplete() ||
+          requests_[i]->DraftVerificationCompletedGeneration())
         continue;
       results[i] = requests_[i]->StageGenerationForTransaction(plan.requests[i]);
-      ++sampling_index;
     }
     return;
   }
 
   for (size_t i = 0; i < requests_.size(); ++i) {
-    if (requests_[i]->IsChunkComplete())
+    if (requests_[i]->DraftVerificationCompletedGeneration()) {
+      results[i].done = true;
+    } else if (requests_[i]->IsChunkComplete()) {
       results[i] = requests_[i]->ApplyLogitsForTransaction(logits[i]);
+    }
   }
 }
 

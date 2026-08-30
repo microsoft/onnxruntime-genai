@@ -456,6 +456,12 @@ struct RecordingModelExecutor : ModelExecutor {
   void SetVerifyRowTokens(std::vector<int32_t> tokens) {
     verify_row_tokens_ = std::move(tokens);
   }
+  bool SupportsDraftVerification() const override {
+    return supports_draft_verification_;
+  }
+  void SetSupportsDraftVerification(bool supported) {
+    supports_draft_verification_ = supported;
+  }
 
   int decode_calls{0};
   std::vector<size_t> decoded_batch_sizes;
@@ -470,6 +476,7 @@ struct RecordingModelExecutor : ModelExecutor {
   ScriptedExecutionFailure next_failure_{ScriptedExecutionFailure::None};
   std::function<void(ExecutionContext&)> on_execute_;
   std::vector<int32_t> verify_row_tokens_;
+  bool supports_draft_verification_{true};
 };
 
 // An Engine wired with the recording doubles above, together with non-owning observers of those

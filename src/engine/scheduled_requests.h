@@ -11,11 +11,12 @@ namespace Generators {
 struct DecoderIO;
 
 struct BatchedSamplingPlan {
-  void Reserve(size_t capacity) {
+  void Reserve(size_t capacity, size_t verification_capacity) {
     requests.reserve(capacity);
     logits.reserve(capacity);
     params.reserve(capacity);
     states.reserve(capacity);
+    verification_tokens.reserve(verification_capacity);
   }
 
   void Clear() {
@@ -29,6 +30,7 @@ struct BatchedSamplingPlan {
   std::vector<DeviceSpan<float>> logits;
   std::vector<BatchedSamplingParams> params;
   std::vector<BatchedSamplerState*> states;
+  std::vector<int32_t> verification_tokens;
 };
 
 struct ScheduledRequests {

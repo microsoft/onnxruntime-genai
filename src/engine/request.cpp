@@ -293,7 +293,7 @@ void Request::SetDraftTokens(std::span<const int32_t> tokens) {
   }
   const size_t max_drafts = engine->MaxDraftTokensPerStep();
   if (max_drafts == 0) {
-    throw std::runtime_error("This engine cannot roll back a rejected draft token.");
+    throw std::runtime_error("This engine does not support speculative draft verification.");
   }
   if (tokens.size() > max_drafts) {
     throw std::runtime_error(
@@ -324,21 +324,41 @@ void Request::AppendDraftsForTransaction(size_t draft_count) {
   tokens_host_.insert(tokens_host_.end(), drafts.begin(), drafts.end());
   staged_draft_count_ = draft_count;
   accepted_draft_count_ = 0;
+  draft_verification_completed_generation_ = false;
 }
 
-void Request::RewindDraftsForTransaction(size_t accepted_count) {
+void Request::CommitAcceptedDraftsForTransaction(size_t accepted_count) {
   if (accepted_count > staged_draft_count_) {
     throw std::logic_error("The step accepted more draft tokens than it staged.");
   }
-  const size_t rejected_count = staged_draft_count_ - accepted_count;
-  accepted_draft_count_ = accepted_count;
-  if (rejected_count == 0) {
-    return;
-  }
+  const size_t proposed_count = staged_draft_count_;
+  const size_t committed_length =
+      static_cast<size_t>(CurrentSequenceLength()) - proposed_count;
+  tokens_host_.resize(tokens_host_.size() - proposed_count);
+  search_->RewindTo(committed_length);
+  staged_draft_count_ = 0;
+  accepted_draft_count_ = 0;
+  draft_verification_completed_generation_ = false;
 
-  staged_draft_count_ = accepted_count;
-  tokens_host_.resize(tokens_host_.size() - rejected_count);
-  search_->RewindTo(static_cast<size_t>(CurrentSequenceLength()) - rejected_count);
+  for (size_t offset = 0; offset < accepted_count; ++offset) {
+    const int32_t token = draft_tokens_[offset];
+    const int64_t sequence_length_before = CurrentSequenceLength();
+    search_->CommitToken(token);
+    const int64_t sequence_length_after = CurrentSequenceLength();
+    if (sequence_length_after == sequence_length_before + 1) {
+      tokens_host_.push_back(token);
+      ++staged_draft_count_;
+      ++accepted_draft_count_;
+    } else if (sequence_length_after != sequence_length_before ||
+               !search_->IsDone()) {
+      throw std::logic_error(
+          "Committing an accepted draft produced an invalid sequence transition.");
+    }
+    if (search_->IsDone()) {
+      draft_verification_completed_generation_ = true;
+      break;
+    }
+  }
 }
 
 void Request::DiscardStagedDrafts() noexcept {
@@ -347,6 +367,7 @@ void Request::DiscardStagedDrafts() noexcept {
     staged_draft_count_ = 0;
   }
   accepted_draft_count_ = 0;
+  draft_verification_completed_generation_ = false;
 }
 
 RequestStateSnapshot Request::Snapshot() const {
@@ -559,6 +580,7 @@ void Request::CommitStep(const RequestStepPlan& plan,
   draft_tokens_.clear();
   staged_draft_count_ = 0;
   accepted_draft_count_ = 0;
+  draft_verification_completed_generation_ = false;
 }
 
 void Request::ApplyLogitsProcessors(DeviceSpan<float> logits) {

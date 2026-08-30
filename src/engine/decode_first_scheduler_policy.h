@@ -15,6 +15,7 @@ struct DecodeFirstBudgetCandidate {
   bool is_prefill{};
   size_t pending_token_count{};
   std::optional<size_t> prefill_token_cap;
+    size_t decode_extra_token_count{};
 };
 
 std::vector<size_t> DecodeFirstCandidateOrder(
