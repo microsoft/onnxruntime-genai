@@ -147,7 +147,7 @@ struct FixedStateReservation::Storage {
   std::vector<bool> provisional;
   std::vector<uint64_t> expected_state_generations;
   std::vector<uint64_t> target_tokens;
-  std::vector<std::shared_ptr<OrtValue>> staging_backing;
+  std::vector<std::shared_ptr<OrtValue>> binding_backing;
   std::vector<size_t> capture_counts;
   std::vector<std::unique_ptr<OrtValue>> gathered_inputs;
   std::vector<std::unique_ptr<OrtValue>> staged_outputs;
@@ -970,7 +970,7 @@ FixedStateReservation FixedStatePool::Reserve(
   storage->provisional.resize(requests.size());
   storage->expected_state_generations.resize(requests.size());
   storage->target_tokens.resize(requests.size());
-  storage->staging_backing.reserve(impl_->tensors.size() * 4 + 2);
+  storage->binding_backing.reserve(impl_->tensors.size() * 4 + 2);
   storage->capture_counts.resize(requests.size());
   storage->commit_step_tokens.assign(requests.size(), 0);
   storage->commit_kept_tokens.assign(requests.size(), 0);
@@ -994,7 +994,7 @@ FixedStateReservation FixedStatePool::Reserve(
         CheckedMultiply(batch_rows, sizeof(int32_t), "capture_count tensor view"),
         capture_count_shape,
         ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
-    storage->staging_backing.push_back(impl_->state_update_capture_count_staging);
+    storage->binding_backing.push_back(impl_->state_update_capture_count_staging);
     storage->staging_bytes = CheckedAdd(
         storage->staging_bytes,
         CheckedMultiply(batch_rows, sizeof(int32_t), "capture_count staging allocation"),
@@ -1007,7 +1007,7 @@ FixedStateReservation FixedStatePool::Reserve(
           impl_->state_update_active_staging->GetTensorMutableData<void>(),
           sizeof(int32_t), active_shape,
           ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
-      storage->staging_backing.push_back(impl_->state_update_active_staging);
+      storage->binding_backing.push_back(impl_->state_update_active_staging);
       storage->state_update_active->GetTensorMutableData<int32_t>()[0] =
           capture_state_updates ? 1 : 0;
       storage->staging_bytes = CheckedAdd(
@@ -1026,8 +1026,8 @@ FixedStateReservation FixedStatePool::Reserve(
         spec.output_staging->GetTensorMemoryInfo(),
         spec.output_staging->GetTensorMutableData<void>(),
         tensor_bytes, shape, spec.data_type);
-    storage->staging_backing.push_back(spec.gathered_staging);
-    storage->staging_backing.push_back(spec.output_staging);
+    storage->binding_backing.push_back(spec.gathered_staging);
+    storage->binding_backing.push_back(spec.output_staging);
     FixedStateReservation::Storage::StateUpdateTensors state_updates;
     const auto make_update_output_view = [&storage, batch_rows, capture_state_updates](
                                              const Impl::StateUpdateOutputSpec& output,
@@ -1040,7 +1040,7 @@ FixedStateReservation FixedStatePool::Reserve(
       auto view = OrtValue::CreateTensor(
           backing->GetTensorMemoryInfo(), backing->GetTensorMutableData<void>(),
           tensor_bytes, StorageShape(batch_rows, output.session_shape), output.data_type);
-      storage->staging_backing.push_back(backing);
+      storage->binding_backing.push_back(backing);
       return view;
     };
     state_updates.value = make_update_output_view(
