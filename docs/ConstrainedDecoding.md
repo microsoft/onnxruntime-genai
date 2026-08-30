@@ -21,18 +21,6 @@ Least-recently-used entries are evicted first. Active requests and asynchronous 
 shared ownership of their assets, so eviction or model-handle release does not invalidate in-flight
 generation.
 
-Python applications can inspect cache behavior:
-
-```python
-stats = model.get_guidance_cache_stats()
-print(stats["grammar_hits"], stats["grammar_misses"])
-```
-
-The returned dictionary contains `tokenizer_initializations`, `grammar_hits`, `grammar_misses`,
-`grammar_waits`, `grammar_compile_microseconds`, `grammar_evictions`, `cached_grammars`, and
-`cached_key_bytes`. The grammar count reports ready compiled entries; key bytes also include
-single-flight compilations that are still in progress.
-
 Builds created without guidance support reject a request that supplies guidance instead of silently
 generating unconstrained output. Configure the build with `USE_GUIDANCE=ON` (or the corresponding
 build-script option) before enabling guidance in `GeneratorParams`.

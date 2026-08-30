@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <future>
 #include <fstream>
+#include <iterator>
 #include <list>
 #include <memory>
 #include <mutex>
@@ -108,6 +109,8 @@ struct GuidanceTokenizerAsset {
 }  // namespace
 
 struct GuidanceGrammarAsset {
+  // Keep initial_constraint after tokenizer: reverse member destruction frees the constraint
+  // before the tokenizer it references.
   std::shared_ptr<const GuidanceTokenizerAsset> tokenizer;
   std::shared_ptr<LlgConstraint> initial_constraint;
   // Serializes clones of the one model-shared initial cursor. Request-local cursors are cloned
@@ -127,6 +130,7 @@ struct GuidanceCacheState {
   std::unordered_map<std::string, GrammarEntry> grammars;
   std::list<std::string> lru;
   size_t cached_key_bytes{};
+  size_t pending_key_bytes{};
   uint64_t tokenizer_initializations{};
   uint64_t grammar_hits{};
   uint64_t grammar_misses{};
@@ -136,6 +140,14 @@ struct GuidanceCacheState {
 };
 
 namespace {
+
+void EvictLeastRecentlyUsedGrammar(GuidanceCacheState& cache) {
+  const auto lru_entry = std::prev(cache.lru.end());
+  cache.cached_key_bytes -= lru_entry->size();
+  cache.grammars.erase(*lru_entry);
+  cache.lru.erase(lru_entry);
+  ++cache.grammar_evictions;
+}
 
 struct ParallelMaskJob {
   struct Output {
@@ -371,23 +383,19 @@ std::shared_ptr<const GuidanceGrammarAsset> GetGrammarAsset(
       promise = std::make_shared<std::promise<std::shared_ptr<const GuidanceGrammarAsset>>>();
       future = promise->get_future().share();
       ++cache->grammar_misses;
-      while (!cache->lru.empty() &&
-             (cache->grammars.size() >= kMaxCachedGrammars ||
-              !FitsGrammarCacheKeyBytes(
-                  cache->cached_key_bytes, key.size()))) {
-        const std::string evicted_key = cache->lru.back();
-        cache->lru.pop_back();
-        cache->cached_key_bytes -= evicted_key.size();
-        cache->grammars.erase(evicted_key);
-        ++cache->grammar_evictions;
+      const bool cacheable =
+          FitsGrammarCacheKeyBytes(cache->pending_key_bytes, key.size());
+      while (cacheable && !cache->lru.empty() &&
+             !FitsGrammarCacheKeyBytes(cache->cached_key_bytes, key.size())) {
+        EvictLeastRecentlyUsedGrammar(*cache);
       }
-      if (cache->grammars.size() < kMaxCachedGrammars &&
-          FitsGrammarCacheKeyBytes(
-              cache->cached_key_bytes, key.size())) {
+      if (cacheable &&
+          FitsGrammarCacheKeyBytes(cache->cached_key_bytes, key.size())) {
         cache->grammars.emplace(
             key, GuidanceCacheState::GrammarEntry{
                      future, cache->lru.end(), false});
         cache->cached_key_bytes += key.size();
+        cache->pending_key_bytes += key.size();
         cached_entry = true;
       }
     }
@@ -411,20 +419,30 @@ std::shared_ptr<const GuidanceGrammarAsset> GetGrammarAsset(
           throw std::logic_error(
               "Pending guidance grammar disappeared from the cache.");
         }
+        while (cache->lru.size() >= kMaxCachedGrammars) {
+          EvictLeastRecentlyUsedGrammar(*cache);
+        }
         cache->lru.push_front(key);
         inserted->second.lru_iterator = cache->lru.begin();
         inserted->second.ready = true;
+        cache->pending_key_bytes -= key.size();
       }
     } catch (...) {
-      promise->set_exception(std::current_exception());
+      const auto error = std::current_exception();
       if (cached_entry) {
         std::lock_guard lock(cache->mutex);
         const auto inserted = cache->grammars.find(key);
         if (inserted != cache->grammars.end()) {
-          cache->cached_key_bytes -= key.size();
+          if (inserted->second.lru_iterator != cache->lru.end()) {
+            cache->lru.erase(inserted->second.lru_iterator);
+          } else {
+            cache->pending_key_bytes -= inserted->first.size();
+          }
+          cache->cached_key_bytes -= inserted->first.size();
           cache->grammars.erase(inserted);
         }
       }
+      promise->set_exception(error);
       throw;
     }
     promise->set_value(std::move(asset));
@@ -525,6 +543,8 @@ void GuidanceLogitsProcessor::EnsureMaskReady() {
   try {
     masks_ = pending.get();
   } catch (...) {
+    // Submission and future-delivery failures can be retried. A cursor poisoned by llguidance
+    // remains dirty so subsequent attempts continue to fail rather than reuse a stale mask.
     mask_dirty_ = true;
     throw;
   }

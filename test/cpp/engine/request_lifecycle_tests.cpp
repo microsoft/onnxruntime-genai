@@ -882,6 +882,32 @@ TEST_F(RequestLifecycleTest, GuidanceCacheEvictionKeepsLiveProcessorAssetsValid)
   first_processor.reset();
 }
 
+TEST_F(RequestLifecycleTest, OversizedGuidanceGrammarDoesNotEvictCachedEntries) {
+  auto guidance_model = CreateModel(
+      GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+
+  auto cached_params = MakeGreedyParams(*guidance_model);
+  cached_params->SetGuidance("regex", "!", false);
+  auto cached_processor =
+      CreateGuidanceLogitsProcessor(*guidance_model, cached_params);
+  const auto before = GetGuidanceCacheStats(*guidance_model);
+  ASSERT_EQ(before.cached_grammars, 1u);
+
+  std::string oversized_schema(16u * 1024u * 1024u, ' ');
+  oversized_schema.front() = 'x';
+  auto oversized_params = MakeGreedyParams(*guidance_model);
+  oversized_params->SetGuidance(
+      "json_schema", oversized_schema.c_str(), false);
+  EXPECT_THROW(
+      CreateGuidanceLogitsProcessor(*guidance_model, oversized_params),
+      std::runtime_error);
+
+  const auto after = GetGuidanceCacheStats(*guidance_model);
+  EXPECT_EQ(after.cached_grammars, before.cached_grammars);
+  EXPECT_EQ(after.cached_key_bytes, before.cached_key_bytes);
+  EXPECT_EQ(after.grammar_evictions, before.grammar_evictions);
+}
+
 TEST_F(RequestLifecycleTest, GuidanceCacheDoesNotRetainFailedCompilations) {
   auto guidance_model = CreateModel(
       GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");

@@ -282,12 +282,6 @@ struct OgaModel : OgaAbstract {
     return p;
   }
 
-  uint64_t GetGuidanceCacheCount(const char* name) const {
-    uint64_t value;
-    OgaCheckResult(OgaModelGetGuidanceCacheCount(this, name, &value));
-    return value;
-  }
-
   static void operator delete(void* p) { OgaDestroyModel(reinterpret_cast<OgaModel*>(p)); }
 };
 

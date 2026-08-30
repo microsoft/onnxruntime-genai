@@ -36,7 +36,8 @@ struct ConstrainedLogitsProcessor {
   virtual void ProcessLogits(DeviceSpan<float> logits) = 0;
 
   // Returns a host-resident mask row when the processor supports scheduler-owned batched
-  // application. An empty span asks the scheduler to use ProcessLogits() instead.
+  // application. An empty span asks the scheduler to use ProcessLogits() instead. The returned
+  // span is invalidated by any subsequent call on the same processor.
   virtual std::span<const uint32_t> GetReadyMask() { return {}; }
 
   // Reset is used to reset the constraints of the logits processor and then recompute the mask, used after rewinding
@@ -117,6 +118,8 @@ struct GuidanceLogitsProcessor : public ConstrainedLogitsProcessor {
   std::shared_future<std::vector<uint32_t>> pending_masks_;
   bool mask_dirty_{};
   DeviceSpan<uint32_t> device_masks_;
+  // Keep constraints after the grammar asset: reverse member destruction releases every cursor
+  // before the asset releases its llguidance tokenizer.
   std::shared_ptr<const struct GuidanceGrammarAsset> grammar_asset_;
   std::vector<std::shared_ptr<LlgConstraint>> llg_constraints_;
 

@@ -220,6 +220,11 @@ void ScheduledRequests::ScheduleGuidanceMasks() noexcept {
       }
     }
     ScheduleGuidanceMaskComputation(processors);
+  } catch (const std::logic_error& error) {
+    if (g_log.enabled) {
+      Log("error") << "Guidance mask precomputation invariant violated: "
+                   << error.what() << std::endl;
+    }
   } catch (const std::exception& error) {
     if (g_log.enabled && g_log.warning) {
       Log("warning") << "Guidance mask precomputation was deferred: "

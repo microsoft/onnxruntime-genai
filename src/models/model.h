@@ -9,6 +9,7 @@
 #include "generator/generators.h"
 #include "utils.h"
 #include <map>
+#include <mutex>
 #include <optional>
 #include "models/io/adapters.h"
 #include "models/io/extra_outputs.h"

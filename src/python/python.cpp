@@ -595,15 +595,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def_property_readonly("type", [](const OgaModel& model) -> std::string { return model.GetType().p_; })
       .def_property_readonly(
           "device_type", [](const OgaModel& model) -> std::string { return model.GetDeviceType().p_; }, "The device type the model is running on")
-      .def("get_guidance_cache_stats", [](const OgaModel& model) {
-        pybind11::dict stats;
-        for (const char* name : {"tokenizer_initializations", "grammar_hits", "grammar_misses",
-                                 "grammar_waits", "grammar_compile_microseconds", "grammar_evictions",
-                                 "cached_grammars", "cached_key_bytes"}) {
-          stats[name] = model.GetGuidanceCacheCount(name);
-        }
-        return stats;
-      })
       .def("create_multimodal_processor", [](const OgaModel& model) { return OgaMultiModalProcessor::Create(model); })
       .def("create_streaming_processor", [](OgaModel& model) { return OgaStreamingProcessor::Create(model); }, "Create a StreamingProcessor for mel spectrogram extraction from raw audio.");
 

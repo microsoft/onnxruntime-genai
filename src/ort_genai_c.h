@@ -425,17 +425,6 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateModelFromConfig(const OgaConfig* con
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateModelWithRuntimeSettings(const char* config_path, const OgaRuntimeSettings* settings, OgaModel** out);
 
 /**
- * \brief Gets a constrained-decoding cache counter for a loaded model.
- * \param[in] model The model whose cache is queried.
- * \param[in] name Counter name: tokenizer_initializations, grammar_hits, grammar_misses,
- * grammar_waits, grammar_compile_microseconds, grammar_evictions,
- * cached_grammars, or cached_key_bytes.
- * \param[out] value The counter value.
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaModelGetGuidanceCacheCount(
-    const OgaModel* model, const char* name, uint64_t* value);
-
-/**
  * \brief Returns the type of the model.
  * \param[in] model The model to get the type from.
  * \param[out] out The type of the model. Must be destroyed with OgaDestroyString

@@ -555,7 +555,9 @@ copy-on-write cursors. After a dynamic step commits, the Engine submits one para
 for dirty cursors so CPU mask work overlaps the next model forward. Contiguous CUDA logits rows use
 one host-to-device mask transfer and one mask kernel; unguided and partial-prefill rows receive
 pass-through masks. If speculative mask submission fails, the committed step remains valid and the
-dirty cursor retries mask construction when the next step needs it.
+dirty cursor retries mask construction when the next step needs it. Transient submission and
+future-delivery failures can recover this way; an error reported by llguidance permanently poisons
+that cursor and continues to fail rather than allowing generation with a stale mask.
 
 Guidance fast-forward tokens are not currently supported by the Engine. Requests that enable them
 are rejected because each forced token would also need a corresponding model execution and paged
