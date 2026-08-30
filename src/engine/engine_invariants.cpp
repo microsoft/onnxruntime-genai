@@ -229,6 +229,70 @@ std::vector<InvariantViolation> ValidateRequestInvariants(const RequestStateSnap
   return violations;
 }
 
+std::vector<InvariantViolation> ValidateFixedStateInvariants(
+    const FixedStatePoolSnapshot& fixed) {
+  std::vector<InvariantViolation> violations;
+  const auto add = [&violations](std::string message) {
+    violations.push_back(InvariantViolation{std::move(message)});
+  };
+
+  if (!fixed.healthy) {
+    add("Fixed state pool is unhealthy.");
+  }
+
+  // Total accounting: every slot is free, reserved by the in-flight transaction, or committed.
+  if (fixed.free_slots + fixed.reserved_slots + fixed.committed_slots != fixed.capacity) {
+    add("Fixed state free (" + std::to_string(fixed.free_slots) + ") + reserved (" +
+        std::to_string(fixed.reserved_slots) + ") + committed (" +
+        std::to_string(fixed.committed_slots) + ") != capacity (" +
+        std::to_string(fixed.capacity) + ").");
+  }
+  if (fixed.slots.size() != fixed.capacity) {
+    add("Fixed state slot snapshot size (" + std::to_string(fixed.slots.size()) +
+        ") != capacity (" + std::to_string(fixed.capacity) + ").");
+  }
+
+  size_t free_slots = 0;
+  size_t reserved_slots = 0;
+  size_t committed_slots = 0;
+  std::unordered_set<const void*> owners;
+  std::unordered_set<size_t> slot_ids;
+  for (const auto& slot : fixed.slots) {
+    if (slot.slot >= fixed.capacity || !slot_ids.insert(slot.slot).second) {
+      add("Fixed state slot " + std::to_string(slot.slot) + " is out of range or duplicated.");
+    }
+    switch (slot.ownership) {
+      case FixedStateSlotOwnership::Free:
+        ++free_slots;
+        // A free slot must retain no request identity or committed progress.
+        if (slot.request_id || slot.state_generation != 0 || slot.committed_tokens != 0) {
+          add("Free fixed state slot " + std::to_string(slot.slot) + " retains request state.");
+        }
+        break;
+      case FixedStateSlotOwnership::Reserved:
+        ++reserved_slots;
+        break;
+      case FixedStateSlotOwnership::Committed:
+        ++committed_slots;
+        break;
+    }
+    // Single ownership: an owned slot names a request, and no request owns two slots.
+    if (slot.ownership != FixedStateSlotOwnership::Free) {
+      if (!slot.request_id) {
+        add("Owned fixed state slot " + std::to_string(slot.slot) + " has no request identity.");
+      } else if (!owners.insert(slot.request_id).second) {
+        add("Request " + PtrId(slot.request_id) + " owns more than one fixed state slot.");
+      }
+    }
+  }
+  if (free_slots != fixed.free_slots || reserved_slots != fixed.reserved_slots ||
+      committed_slots != fixed.committed_slots) {
+    add("Fixed state ownership totals do not match the slot listing.");
+  }
+
+  return violations;
+}
+
 std::vector<InvariantViolation> ValidateInvariants(const PagedCacheSnapshot& cache,
                                                    const std::vector<RequestStateSnapshot>& requests) {
   std::vector<InvariantViolation> violations = ValidateCacheInvariants(cache);
@@ -254,6 +318,69 @@ std::vector<InvariantViolation> ValidateInvariants(const PagedCacheSnapshot& cac
   return violations;
 }
 
+std::vector<InvariantViolation> ValidateCompositeStateInvariants(
+    const PagedCacheSnapshot& cache,
+    const FixedStatePoolSnapshot& fixed,
+    const std::vector<RequestStateSnapshot>& requests) {
+  auto violations = ValidateInvariants(cache, requests);
+  auto fixed_violations = ValidateFixedStateInvariants(fixed);
+  violations.insert(violations.end(), fixed_violations.begin(), fixed_violations.end());
+  const auto add = [&violations](std::string message) {
+    violations.push_back(InvariantViolation{std::move(message)});
+  };
+
+  // Committed paged and fixed ownership are published together in one transaction, so their
+  // committed sets must match exactly and each request must sit at one token boundary in both. This
+  // holds at every observation point: nothing is published until commit, so an in-flight
+  // reservation's new admissions appear only as paged reservation deltas and reserved fixed slots,
+  // never as committed ownership on either side.
+  std::unordered_map<const void*, const RequestBlockSnapshot*> paged_owners;
+  for (const auto& request : cache.requests) {
+    paged_owners.emplace(request.request_id, &request);
+  }
+  std::unordered_map<const void*, const FixedStateSlotSnapshot*> fixed_owners;
+  for (const auto& slot : fixed.slots) {
+    if (slot.ownership == FixedStateSlotOwnership::Committed) {
+      fixed_owners.emplace(slot.request_id, &slot);
+    }
+  }
+  std::unordered_map<const void*, const RequestStateSnapshot*> request_states;
+  for (const auto& request : requests) {
+    request_states.emplace(request.request_id, &request);
+  }
+
+  for (const auto& paged : cache.requests) {
+    const void* request_id = paged.request_id;
+    const auto fixed_it = fixed_owners.find(request_id);
+    if (fixed_it == fixed_owners.end()) {
+      add("Paged cache Request " + PtrId(request_id) + " has no committed fixed state slot.");
+      continue;
+    }
+    if (fixed_it->second->committed_tokens != paged.used_slots) {
+      add("Request " + PtrId(request_id) +
+          " has different paged and fixed committed token boundaries.");
+    }
+    const auto request_it = request_states.find(request_id);
+    if (request_it != request_states.end() &&
+        (request_it->second->processed_sequence_length < 0 ||
+         static_cast<uint64_t>(
+             request_it->second->processed_sequence_length) !=
+             paged.used_slots)) {
+      add("Request " + PtrId(request_id) +
+          " has different request and decoder-state committed token boundaries.");
+    }
+  }
+  for (const auto& slot : fixed.slots) {
+    if (slot.ownership == FixedStateSlotOwnership::Committed &&
+        paged_owners.find(slot.request_id) == paged_owners.end()) {
+      add("Fixed state Request " + PtrId(slot.request_id) +
+          " has no committed paged cache ownership.");
+    }
+  }
+
+  return violations;
+}
+
 void ThrowIfInvariantsViolated(const PagedCacheSnapshot& cache,
                                const std::vector<RequestStateSnapshot>& requests) {
   const auto violations = ValidateInvariants(cache, requests);
@@ -263,6 +390,24 @@ void ThrowIfInvariantsViolated(const PagedCacheSnapshot& cache,
 
   std::ostringstream oss;
   oss << "Engine invariant validation failed with " << violations.size() << " violation(s):";
+  for (const auto& violation : violations) {
+    oss << "\n  - " << violation.message;
+  }
+  throw std::runtime_error(oss.str());
+}
+
+void ThrowIfCompositeStateInvariantsViolated(
+    const PagedCacheSnapshot& cache,
+    const FixedStatePoolSnapshot& fixed,
+    const std::vector<RequestStateSnapshot>& requests) {
+  const auto violations = ValidateCompositeStateInvariants(cache, fixed, requests);
+  if (violations.empty()) {
+    return;
+  }
+
+  std::ostringstream oss;
+  oss << "Composite Engine invariant validation failed with " << violations.size()
+      << " violation(s):";
   for (const auto& violation : violations) {
     oss << "\n  - " << violation.message;
   }

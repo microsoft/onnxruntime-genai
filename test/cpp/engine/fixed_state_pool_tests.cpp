@@ -130,6 +130,33 @@ TEST_F(FixedStatePoolTest, UsesManifestBindingOrderAndSessionGeometry) {
   EXPECT_EQ(reservation.TargetTokens()[0], 1u);
 }
 
+TEST_F(FixedStatePoolTest, ReusesPreallocatedStagingAcrossReservations) {
+  auto pool = MakePool(2);
+  std::vector<void*> input_addresses;
+  std::vector<void*> output_addresses;
+  {
+    auto first_requests = One(kRequestA);
+    auto first = pool->Reserve(first_requests);
+    for (const auto& binding : first.Bindings()) {
+      input_addresses.push_back(
+          binding.input->GetTensorMutableData<void>());
+      output_addresses.push_back(
+          binding.output->GetTensorMutableData<void>());
+    }
+    first.Discard();
+  }
+
+  auto second_requests = One(kRequestB);
+  auto second = pool->Reserve(second_requests);
+  ASSERT_EQ(second.Bindings().size(), input_addresses.size());
+  for (size_t index = 0; index < second.Bindings().size(); ++index) {
+    EXPECT_EQ(second.Bindings()[index].input->GetTensorMutableData<void>(),
+              input_addresses[index]);
+    EXPECT_EQ(second.Bindings()[index].output->GetTensorMutableData<void>(),
+              output_addresses[index]);
+  }
+}
+
 TEST_F(FixedStatePoolTest, FreshRowsGatherZeroAndCommitPublishes) {
   auto pool = MakePool(1);
   {
@@ -158,6 +185,43 @@ TEST_F(FixedStatePoolTest, SlotReuseGathersZeroAfterRelease) {
   EXPECT_EQ(reservation.Handles()[0].slot, handle_a.slot);
   EXPECT_GT(reservation.Handles()[0].generation, handle_a.generation);
   ExpectInputRows(reservation, 0, 0.0f);  // Reused slot must not leak the released request's state.
+}
+
+TEST_F(FixedStatePoolTest, ValidateReleaseIsPureAndPublicationIsNoexcept) {
+  auto pool = MakePool(1);
+  const auto handle = MakeResident(*pool, kRequestA, 1.0f);
+
+  pool->ValidateRelease(handle);
+
+  EXPECT_TRUE(pool->OwnsCommittedSlot(kRequestA));
+  EXPECT_EQ(pool->AvailableSlots(), 0u);
+  static_assert(noexcept(pool->ReleaseValidated(handle)));
+  pool->ReleaseValidated(handle);
+  EXPECT_FALSE(pool->OwnsCommittedSlot(kRequestA));
+  EXPECT_EQ(pool->AvailableSlots(), 1u);
+}
+
+TEST_F(FixedStatePoolTest, ReleaseValidatedMisuseFailsFast) {
+  auto pool = MakePool(1);
+  auto other_pool = MakePool(1);
+  const auto handle = MakeResident(*pool, kRequestA, 1.0f);
+  auto out_of_range = handle;
+  out_of_range.slot = pool->Capacity();
+  auto wrong_pool = handle;
+  wrong_pool.pool = other_pool.get();
+  auto wrong_request = handle;
+  wrong_request.request_id = kRequestB;
+  auto stale_generation = handle;
+  ++stale_generation.generation;
+
+  EXPECT_DEATH_IF_SUPPORTED(pool->ReleaseValidated(out_of_range), "");
+  EXPECT_DEATH_IF_SUPPORTED(pool->ReleaseValidated(wrong_pool), "");
+  EXPECT_DEATH_IF_SUPPORTED(pool->ReleaseValidated(wrong_request), "");
+  EXPECT_DEATH_IF_SUPPORTED(pool->ReleaseValidated(stale_generation), "");
+
+  auto requests = One(kRequestA, 2);
+  auto reservation = pool->Reserve(requests);
+  EXPECT_DEATH_IF_SUPPORTED(pool->ReleaseValidated(handle), "");
 }
 
 TEST_F(FixedStatePoolTest, StagedOutputsBecomeVisibleOnlyAfterCommit) {
@@ -368,8 +432,8 @@ TEST_F(FixedStatePoolTest, ReportsPersistentStagingAndReleaseAccounting) {
   constexpr size_t bytes_per_request =
       2 * (2 * 3) * sizeof(float) +  // convolution: 2 layers, row [2, 3]
       2 * (2 * 2) * sizeof(float);   // recurrent: 2 layers, row [2, 2]
-  // Two persistent banks per tensor so publish is a bank flip with no device copy.
-  EXPECT_EQ(pool->PersistentBytes(), 2 * 3 * bytes_per_request);
+  // Two state banks plus capacity-sized gather and output staging buffers.
+  EXPECT_EQ(pool->PersistentBytes(), 4 * 3 * bytes_per_request);
   EXPECT_EQ(pool->ZeroingScratchBytes(), bytes_per_request);
   EXPECT_EQ(pool->ActiveStagingBytes(), 0u);
 
@@ -528,6 +592,7 @@ TEST_F(FixedStatePoolTest, ReservationAccessorsSafeAfterPoolDestruction) {
     auto pool = MakePool(1);
     auto requests = One(kRequestA);
     reservation.emplace(pool->Reserve(requests));
+    FillStagedRows(*reservation, 0, 7.0f);
     for (const auto& binding : reservation->Bindings()) {
       input_names.emplace_back(binding.input_name);
     }
@@ -541,6 +606,8 @@ TEST_F(FixedStatePoolTest, ReservationAccessorsSafeAfterPoolDestruction) {
   for (size_t index = 0; index < input_names.size(); ++index) {
     EXPECT_EQ(input_names[index], reservation->Bindings()[index].input_name);
   }
+  EXPECT_FLOAT_EQ(
+      reservation->Bindings()[0].output->GetTensorData<float>()[0], 7.0f);
   EXPECT_THROW(reservation->ValidateCommit(), std::logic_error);
   EXPECT_THROW(reservation->PrepareCommit(), std::logic_error);
   reservation.reset();

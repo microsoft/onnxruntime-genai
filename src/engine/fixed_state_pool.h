@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -56,6 +57,11 @@ struct FixedStateSlotHandle {
   }
 
   bool operator==(const FixedStateSlotHandle&) const = default;
+};
+
+struct FixedStateCommittedState {
+  FixedStateSlotHandle handle;
+  uint64_t committed_tokens{};
 };
 
 // One scheduled row of a reservation: the request identity and the processed-token count the
@@ -118,6 +124,7 @@ class FixedStateReservation {
   std::span<const FixedStateBinding> Bindings() const;
   std::span<const uint64_t> TargetTokens() const;
   size_t PlannedStagingBytes() const;
+  size_t NewSlotCount() const;
 
   // Commit is split into three phases so a composite Engine transaction can validate and stage all
   // of its resources, synchronize once, and then publish them at a single infallible boundary:
@@ -166,16 +173,34 @@ class FixedStatePool {
 
   size_t Capacity() const;
   size_t AvailableSlots() const;
+  // Number of slots that currently hold committed ownership. Cheap counterpart to
+  // Snapshot().committed_slots for the composite planner's per-step consistency check, so planning
+  // does not allocate a full snapshot on the hot path.
+  size_t CommittedSlotCount() const;
   size_t PersistentBytes() const;
   size_t ZeroingScratchBytes() const;
   size_t ActiveStagingBytes() const;
+  // Gather+output staging bytes a reservation of `row_count` scheduled rows will view. A pure
+  // function of the pool's tensor geometry, so composite step planning can size the transaction
+  // before the reservation exists; it equals the resulting reservation's PlannedStagingBytes().
+  size_t PlannedStagingBytes(size_t row_count) const;
 
   FixedStateSlotHandle HandleFor(const void* request_id) const;
+  // True when `request_id` currently owns a committed slot. Non-throwing counterpart to HandleFor
+  // (which throws when the request owns nothing), for the composite planner's per-row ownership
+  // cross-check.
+  bool OwnsCommittedSlot(const void* request_id) const;
+  std::optional<FixedStateCommittedState> CommittedState(
+      const void* request_id) const noexcept;
   // Admits a batch in scheduled row order. Ownership is inferred per request: an identity that
   // already owns a committed slot is treated as resident and keeps that slot; any other identity is
   // admitted provisionally and only becomes discoverable committed ownership on Commit.
   FixedStateReservation Reserve(std::span<const FixedStateReservationRequest> requests);
   void Release(const FixedStateSlotHandle& handle);
+  void ValidateRelease(const FixedStateSlotHandle& handle) const;
+  // Host-only publication for an unchanged handle accepted by ValidateRelease(). A guard failure
+  // is an impossible publication invariant violation and terminates rather than orphaning state.
+  void ReleaseValidated(const FixedStateSlotHandle& handle) noexcept;
 
   uint64_t StateGeneration(const FixedStateSlotHandle& handle) const;
   uint64_t CommittedTokens(const FixedStateSlotHandle& handle) const;

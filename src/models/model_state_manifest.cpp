@@ -3,6 +3,7 @@
 
 #include "model_state_manifest.h"
 
+#include <algorithm>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -169,6 +170,19 @@ ModelStateManifest::ModelStateManifest(const Decoder& decoder)
   ValidateConfig(decoder);
 }
 
+bool ModelStateManifest::HasStateGroupKind(StateGroupKind kind) const {
+  return std::any_of(
+      state_groups_.begin(), state_groups_.end(),
+      [kind](const StateGroup& group) {
+        return group.kind == kind;
+      });
+}
+
+bool ModelStateManifest::HasFixedStateGroups() const {
+  return HasStateGroupKind(StateGroupKind::FixedConv) ||
+         HasStateGroupKind(StateGroupKind::FixedRecurrent);
+}
+
 void ModelStateManifest::ValidateConfig(const Decoder& decoder) {
   if (!decoder.state_groups) {
     return;
@@ -283,11 +297,6 @@ void ModelStateManifest::ValidateDynamicEngineCompatibility(const Decoder& decod
 
   size_t paged_group_count = 0;
   for (const auto& group : *decoder.state_groups) {
-    if (group.kind == StateGroupKind::FixedConv ||
-        group.kind == StateGroupKind::FixedRecurrent) {
-      throw std::runtime_error(
-          "Dynamic batching does not yet support fixed decoder state groups");
-    }
     if (group.kind == StateGroupKind::PagedKeyValue) {
       ++paged_group_count;
     }
