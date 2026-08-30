@@ -27,6 +27,8 @@ parameters:
   type: boolean
 - name: linux_x64_engine
   type: boolean
+- name: run_full_engine_benchmark
+  type: boolean
 - name: build_macos_arm64
   type: boolean
 - name: macos_arm64_cpu
@@ -56,6 +58,14 @@ stages:
           --pr  "${{ join(',', parameters.pr_models) }}" \
           --all "${{ join(',', parameters.all_models) }}"
       displayName: 'Check pr_models / all_models match models.py'
+
+- stage: integration_engine_benchmark_linux_x64
+  displayName: 'Engine Benchmark'
+  dependsOn: []
+  jobs:
+  - template: jobs/integration-engine-benchmark-job.yml
+    parameters:
+      run_full_engine_benchmark: ${{ parameters.run_full_engine_benchmark }}
 
 - ${{ if eq(parameters.build_windows_x64, true) }}:
   - stage: build_win_x64

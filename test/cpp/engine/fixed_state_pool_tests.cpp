@@ -136,10 +136,10 @@ TEST_F(FixedStatePoolTest, UsesManifestBindingOrderAndSessionGeometry) {
 
   ASSERT_EQ(reservation.Bindings().size(), 4u);
   using Kind = Config::Model::Decoder::StateGroupKind;
-  EXPECT_EQ(reservation.Bindings()[0].kind, Kind::Fixed);
-  EXPECT_EQ(reservation.Bindings()[1].kind, Kind::Fixed);
-  EXPECT_EQ(reservation.Bindings()[2].kind, Kind::Fixed);
-  EXPECT_EQ(reservation.Bindings()[3].kind, Kind::Fixed);
+  EXPECT_EQ(reservation.Bindings()[0].kind, Kind::FixedConv);
+  EXPECT_EQ(reservation.Bindings()[1].kind, Kind::FixedConv);
+  EXPECT_EQ(reservation.Bindings()[2].kind, Kind::FixedRecurrent);
+  EXPECT_EQ(reservation.Bindings()[3].kind, Kind::FixedRecurrent);
   // Convolution group first, then recurrent group, each in layer order.
   EXPECT_EQ(reservation.Bindings()[0].layer_id, 0);
   EXPECT_STREQ(reservation.Bindings()[0].input_name, "past_conv.0");
@@ -163,23 +163,34 @@ TEST_F(FixedStatePoolTest, UsesManifestBindingOrderAndSessionGeometry) {
   EXPECT_EQ(reservation.TargetTokens()[0], 1u);
 }
 
-TEST_F(FixedStatePoolTest, ReusesPreallocatedStagingAcrossReservations) {
+TEST_F(FixedStatePoolTest, ReusesPreallocatedStagingAcrossReservationBatchSizes) {
   auto pool = MakePool(2);
   std::vector<void*> input_addresses;
   std::vector<void*> output_addresses;
+  std::vector<void*> update_addresses;
+  void* capture_count_address{};
+  void* active_address{};
   {
-    auto first_requests = One(kRequestA);
+    auto first_requests = One(kRequestA, /*target_tokens=*/4, /*capture_count=*/3);
     auto first = pool->Reserve(first_requests);
     for (const auto& binding : first.Bindings()) {
       input_addresses.push_back(
           binding.input->GetTensorMutableData<void>());
       output_addresses.push_back(
           binding.output->GetTensorMutableData<void>());
+      OrtValue* update = binding.state_update_value
+                             ? binding.state_update_value
+                             : binding.state_update_capsule;
+      ASSERT_NE(update, nullptr);
+      update_addresses.push_back(update->GetTensorMutableData<void>());
     }
+    capture_count_address = first.Bindings()[0].state_update_capture_count->GetTensorMutableData<void>();
+    active_address = first.Bindings()[0].state_update_active->GetTensorMutableData<void>();
     first.Discard();
   }
 
-  auto second_requests = One(kRequestB);
+  const std::array<Request, 2> second_requests{
+      Request{kRequestB, 4, 3}, Request{kRequestC, 3, 2}};
   auto second = pool->Reserve(second_requests);
   ASSERT_EQ(second.Bindings().size(), input_addresses.size());
   for (size_t index = 0; index < second.Bindings().size(); ++index) {
@@ -187,7 +198,20 @@ TEST_F(FixedStatePoolTest, ReusesPreallocatedStagingAcrossReservations) {
               input_addresses[index]);
     EXPECT_EQ(second.Bindings()[index].output->GetTensorMutableData<void>(),
               output_addresses[index]);
+    OrtValue* update = second.Bindings()[index].state_update_value
+                           ? second.Bindings()[index].state_update_value
+                           : second.Bindings()[index].state_update_capsule;
+    ASSERT_NE(update, nullptr);
+    EXPECT_EQ(update->GetTensorMutableData<void>(), update_addresses[index]);
   }
+  EXPECT_EQ(second.Bindings()[0].state_update_capture_count->GetTensorMutableData<void>(),
+            capture_count_address);
+  EXPECT_EQ(second.Bindings()[0].state_update_active->GetTensorMutableData<void>(),
+            active_address);
+  EXPECT_EQ(second.Bindings()[0].state_update_value->GetTensorTypeAndShapeInfo()->GetShape(),
+            (std::vector<int64_t>{2, 3, 2}));
+  EXPECT_EQ(second.Bindings()[2].state_update_capsule->GetTensorTypeAndShapeInfo()->GetShape(),
+            (std::vector<int64_t>{2, 24}));
 }
 
 TEST_F(FixedStatePoolTest, FreshRowsGatherZeroAndCommitPublishes) {
@@ -573,9 +597,17 @@ TEST_F(FixedStatePoolTest, ReportsPersistentStagingAndReleaseAccounting) {
   constexpr size_t bytes_per_request =
       2 * (2 * 3) * sizeof(float) +     // convolution: 2 layers, row [2, 3]
       2 * (2 * 2 * 2) * sizeof(float);  // recurrent: 2 layers, row [2, 2, 2]
+  constexpr size_t state_update_bytes_per_request =
+      2 * (3 * 2) * sizeof(float) +               // convolution: 2 layers, row [3, 2]
+      2 * (3 * (2 + 2 + 2 * 2)) * sizeof(float);  // recurrent: 2 layers, row [24]
+  constexpr size_t persistent_state_update_control_bytes =
+      3 * sizeof(int32_t) + sizeof(int32_t);  // capacity-sized counts plus one active flag
   constexpr size_t state_update_control_bytes = 2 * sizeof(int32_t) + sizeof(int32_t);
-  // Two state banks plus capacity-sized gather and output staging buffers.
-  EXPECT_EQ(pool->PersistentBytes(), 4 * 3 * bytes_per_request);
+  // Two state banks, capacity-sized state/output/update staging, and update controls.
+  EXPECT_EQ(pool->PersistentBytes(),
+            4 * 3 * bytes_per_request +
+                3 * state_update_bytes_per_request +
+                persistent_state_update_control_bytes);
   EXPECT_EQ(pool->ZeroingScratchBytes(), bytes_per_request);
   EXPECT_EQ(pool->ActiveStagingBytes(), 0u);
 

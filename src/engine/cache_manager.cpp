@@ -451,24 +451,19 @@ void PagedCacheManager::Deallocate(std::vector<std::shared_ptr<Request>>& reques
 
 void PagedCacheManager::DetachRequestForTeardown(
     const std::shared_ptr<Request>& request) noexcept {
-  const auto allocated = std::find(
-      cache_allocated_requests_.begin(),
-      cache_allocated_requests_.end(), request);
-  if (allocated == cache_allocated_requests_.end()) {
+  if (std::find(cache_allocated_requests_.begin(),
+                cache_allocated_requests_.end(),
+                request) == cache_allocated_requests_.end()) {
     return;
   }
 
-  try {
-    key_value_cache_->Remove(request);
-    cache_allocated_requests_.erase(allocated);
-  } catch (...) {
-    // Teardown cannot leave retained cache-manager collaborators owning device resources. If the
-    // precise per-Request release fails, release the complete paged cache instead.
-    key_value_cache_.reset();
-    key_value_cache_state_.reset();
-    params_.reset();
-    cache_allocated_requests_.clear();
-  }
+  // Engine teardown invalidates every resident Request, so release the complete paged and fixed
+  // cache state at once rather than walking ownership systems that cannot be used again.
+  fixed_state_pool_.reset();
+  key_value_cache_.reset();
+  key_value_cache_state_.reset();
+  params_.reset();
+  cache_allocated_requests_.clear();
 }
 
 bool PagedCacheManager::SupportsDynamicBatching() const { return true; }

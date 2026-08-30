@@ -215,6 +215,31 @@ TEST(EngineLifetimeTest, EngineRetainsModelForItsLifetime) {
   EXPECT_TRUE(model_observer.expired());
 }
 
+TEST(EngineLifetimeTest, DestroyingEngineReleasesCompositeCacheStorage) {
+  auto model = LoadSyntheticCompositeModel();
+  auto cache = std::make_shared<PagedCacheManager>(model);
+  auto scheduler = Scheduler::Create(model, cache);
+  auto executor = std::make_unique<RecordingModelExecutor>(
+      model, cache, /*forced_token=*/5);
+  EngineDependencies dependencies{
+      cache, std::move(scheduler), std::move(executor)};
+  auto engine = std::make_shared<Engine>(model, std::move(dependencies));
+  auto first = CreateRequestWithPrompt(engine, *model, Prompt(10));
+  auto second = CreateRequestWithPrompt(engine, *model, Prompt(20));
+
+  EXPECT_EQ(RunOne(*engine).request, first);
+  EXPECT_EQ(RunOne(*engine).request, second);
+  ASSERT_EQ(cache->ResidentRequestCount(), 2u);
+  ASSERT_TRUE(cache->FixedStateSnapshot().has_value());
+
+  engine.reset();
+
+  EXPECT_EQ(cache->ResidentRequestCount(), 0u);
+  EXPECT_FALSE(cache->FixedStateSnapshot().has_value());
+  EXPECT_EQ(first->status_, RequestStatus::Closed);
+  EXPECT_EQ(second->status_, RequestStatus::Closed);
+}
+
 // One request: Run decodes the proposed batch exactly once, commits its cache allocation, and
 // returns the request.
 TEST_F(EngineRunTest, SingleRequestSchedulesThenDecodesThenReturns) {

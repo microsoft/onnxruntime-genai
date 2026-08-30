@@ -44,6 +44,7 @@ target_compile_definitions(engine_benchmark PRIVATE
 
 target_link_libraries(engine_benchmark PRIVATE
   onnxruntime-genai
+  Threads::Threads
   ${CMAKE_DL_LIBS}
 )
 
