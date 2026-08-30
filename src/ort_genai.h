@@ -338,6 +338,18 @@ struct OgaTokenizer : OgaAbstract {
     return std::unique_ptr<OgaTokenizer>(p);
   }
 
+  static std::unique_ptr<OgaTokenizer> Create(const OgaConfig& config) {
+    OgaTokenizer* p;
+    OgaCheckResult(OgaCreateTokenizerFromConfig(&config, &p));
+    return std::unique_ptr<OgaTokenizer>(p);
+  }
+
+  static std::unique_ptr<OgaTokenizer> Create(const char* config_path) {
+    OgaTokenizer* p;
+    OgaCheckResult(OgaCreateTokenizerFromPath(config_path, &p));
+    return std::unique_ptr<OgaTokenizer>(p);
+  }
+
   void UpdateOptions(const char* const* keys, const char* const* values, size_t num_options) {
     OgaCheckResult(OgaUpdateTokenizerOptions(this, keys, values, num_options));
   }

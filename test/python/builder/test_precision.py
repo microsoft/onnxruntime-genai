@@ -237,7 +237,7 @@ def test_add_special_token_ids_uses_first_available_candidate():
 
 def test_add_special_token_ids_omits_tokens_not_in_vocabulary():
     config = types.SimpleNamespace()
-    tokenizer = types.SimpleNamespace(get_vocab=lambda: {})
+    tokenizer = types.SimpleNamespace(get_vocab=dict)
 
     builder_module.add_special_token_ids(config, tokenizer)
 
@@ -475,6 +475,28 @@ def test_state_window_is_normalized(monkeypatch):
     _run_check_extra_options(monkeypatch, options)
 
     assert options["state_window"] == 3
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({"use_paged_attention": "true", "state_update_capacity": "-1"}, "0 through 8"),
+        ({"use_paged_attention": "true", "state_update_capacity": "9"}, "0 through 8"),
+        ({"use_paged_attention": "true", "state_update_capacity": "abc"}, "0 through 8"),
+        ({"state_update_capacity": "3"}, "requires use_paged_attention=true"),
+    ],
+)
+def test_state_update_capacity_is_validated(monkeypatch, options, message):
+    with pytest.raises(ValueError, match=message):
+        _run_check_extra_options(monkeypatch, options)
+
+
+def test_state_update_capacity_is_normalized(monkeypatch):
+    options = {"use_paged_attention": "true", "state_update_capacity": "3"}
+
+    _run_check_extra_options(monkeypatch, options)
+
+    assert options["state_update_capacity"] == 3
 
 
 def test_num_hidden_layers_rejects_more_layers_than_configured(monkeypatch):

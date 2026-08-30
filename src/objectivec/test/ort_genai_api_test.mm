@@ -36,6 +36,31 @@ NS_ASSUME_NONNULL_BEGIN
   return path;
 }
 
+- (void)testTokenizerCreateFromConfigAndPath {
+  NSError* error = nil;
+  NSString* input = @"She sells sea shells by the sea shore.";
+
+  OGAConfig* config = [[OGAConfig alloc] initWithPath:[ORTGenAIAPITest getModelPath] error:&error];
+  ORTAssertNullableResultSuccessful(config, error);
+
+  OGATokenizer* tokenizerFromConfig = [[OGATokenizer alloc] initWithConfig:config error:&error];
+  ORTAssertNullableResultSuccessful(tokenizerFromConfig, error);
+
+  OGATokenizer* tokenizerFromPath = [[OGATokenizer alloc] initWithPath:[ORTGenAIAPITest getModelPath] error:&error];
+  ORTAssertNullableResultSuccessful(tokenizerFromPath, error);
+
+  OGASequences* sequences = [tokenizerFromConfig encode:input error:&error];
+  ORTAssertNullableResultSuccessful(sequences, error);
+
+  const int32_t* sequenceData = [sequences sequenceDataAtIndex:0 error:&error];
+  XCTAssertNil(error);
+  size_t sequenceLength = [sequences sequenceCountAtIndex:0 error:&error];
+  XCTAssertNil(error);
+  NSString* decoded = [tokenizerFromPath decode:sequenceData length:sequenceLength error:&error];
+  ORTAssertNullableResultSuccessful(decoded, error);
+  XCTAssertEqualObjects(input, decoded);
+}
+
 - (void)testTensor_And_AddExtraInput {
   // Create a [3 4] shaped tensor
   std::array<float, 12> data{0, 1, 2, 3,

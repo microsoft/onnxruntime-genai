@@ -1009,6 +1009,27 @@ OgaResult* OGA_API_CALL OgaCreateTokenizer(const OgaModel* model, OgaTokenizer**
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaCreateTokenizerFromConfig(const OgaConfig* config, OgaTokenizer** out) {
+  OGA_TRY
+  if (!config || !out)
+    throw std::invalid_argument("config and out must not be null.");
+  auto tokenizer = std::make_shared<Generators::Tokenizer>(*config);
+  *out = ReturnShared<OgaTokenizer>(tokenizer);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaCreateTokenizerFromPath(const char* model_path, OgaTokenizer** out) {
+  OGA_TRY
+  if (!model_path || !out)
+    throw std::invalid_argument("model_path and out must not be null.");
+  auto config = Generators::CreateConfig(Generators::GetOrtEnv(), model_path);
+  auto tokenizer = std::make_shared<Generators::Tokenizer>(*config);
+  *out = ReturnShared<OgaTokenizer>(tokenizer);
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaUpdateTokenizerOptions(
     OgaTokenizer* tokenizer,
     const char* const* keys,

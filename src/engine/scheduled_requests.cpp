@@ -4,6 +4,7 @@
 #include "request.h"
 
 #include "engine.h"
+#include "request_index.h"
 #include "../search.h"
 #include <exception>
 
@@ -48,12 +49,10 @@ ScheduledRequests::ScheduledRequests(const StepPlan& plan,
                                      BatchedSamplingPlan* sampling_plan)
     : model_{std::move(model)}, batched_sampler_{batched_sampler}, sampling_plan_{sampling_plan} {
   requests_.reserve(plan.requests.size());
-  std::vector<const void*> request_ids;
-  request_ids.reserve(plan.requests.size());
+  RequestIndex request_ids{plan.requests.size()};
   for (const auto& entry : plan.requests) {
     if (!entry.request || entry.request_id != entry.request.get() ||
-        std::find(request_ids.begin(), request_ids.end(), entry.request_id) !=
-            request_ids.end()) {
+        !request_ids.Insert(entry.request_id, request_ids.Size())) {
       throw std::runtime_error("The dynamic step plan contains an invalid request.");
     }
     if (!IsExecutable(entry.request->status_)) {
@@ -70,7 +69,6 @@ ScheduledRequests::ScheduledRequests(const StepPlan& plan,
           ") must be positive and no greater than the remaining token count (" +
           std::to_string(remaining) + ").");
     }
-    request_ids.push_back(entry.request_id);
   }
   for (const auto& entry : plan.requests) {
     entry.request->BindScheduledTokenCount(

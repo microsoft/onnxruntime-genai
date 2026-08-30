@@ -7,6 +7,8 @@
 #include <memory>
 #include <vector>
 
+#include "../span.h"
+
 namespace Generators {
 
 class PagedCacheBlockTable;
@@ -79,6 +81,11 @@ struct BlockPool {
   std::vector<std::shared_ptr<Block>> ReserveBlocks(size_t num_slots);
 
   void Free(const std::vector<std::shared_ptr<Block>>& blocks);
+  void ValidateFree(std::span<const std::shared_ptr<Block>> blocks) const;
+  // Allocation-free publication for an unchanged span accepted by ValidateFree(). A guard failure
+  // is an impossible publication invariant violation and terminates rather than orphaning blocks.
+  void FreeValidated(std::span<const std::shared_ptr<Block>> blocks) noexcept;
+  bool CanFreeValidated(std::span<const std::shared_ptr<Block>> blocks) const noexcept;
 
   size_t BlocksNeeded(size_t num_slots);
 
@@ -92,7 +99,12 @@ struct BlockPool {
 
   const size_t block_size_;
   const size_t capacity_;
-  std::vector<std::shared_ptr<Block>> blocks_{capacity_};
+  std::vector<std::shared_ptr<Block>> blocks_;
+  // Preallocated scratch for allocation-free duplicate detection in validated publication.
+  // Validation mutates this scratch even through const methods and therefore relies on the
+  // Engine's external serialization; it is not safe for concurrent inspection.
+  mutable std::vector<uint64_t> validation_marks_;
+  mutable uint64_t validation_epoch_{};
   uint64_t mutation_generation_{};
 };
 

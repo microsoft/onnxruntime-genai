@@ -6,6 +6,7 @@
 // GPU; they validate slot arithmetic, allocation/reservation semantics, capacity accounting, and
 // free-time ownership guards deterministically.
 
+#include <array>
 #include <limits>
 #include <memory>
 #include <type_traits>
@@ -203,6 +204,36 @@ TEST(BlockPoolTest, RepeatedAllocateFreeCyclesPreserveTotals) {
     EXPECT_EQ(pool.AvailableBlocks(), kNumBlocks);
     EXPECT_EQ(pool.Capacity(), kNumBlocks);
   }
+}
+
+TEST(BlockPoolTest, ValidateFreeIsPureAndPublicationIsNoexcept) {
+  BlockPool pool(kBlockSize, 2);
+  auto blocks = pool.AllocateBlocks(2 * kBlockSize);
+  const auto generation = pool.MutationGeneration();
+
+  pool.ValidateFree(blocks);
+
+  EXPECT_EQ(pool.AvailableBlocks(), 0u);
+  EXPECT_EQ(pool.MutationGeneration(), generation);
+  const std::span<const std::shared_ptr<Block>> block_span{blocks};
+  static_assert(noexcept(pool.FreeValidated(block_span)));
+  pool.FreeValidated(block_span);
+  EXPECT_EQ(pool.AvailableBlocks(), 2u);
+  EXPECT_EQ(pool.MutationGeneration(), generation + 1);
+}
+
+TEST(BlockPoolTest, FreeValidatedMisuseFailsFast) {
+  BlockPool pool(kBlockSize, 1);
+  const auto blocks = pool.AllocateBlocks(kBlockSize);
+  const std::array<std::shared_ptr<Block>, 1> null_block{nullptr};
+  const std::array<std::shared_ptr<Block>, 1> out_of_range{
+      std::make_shared<Block>(pool.Capacity(), 0, kBlockSize)};
+  const std::array<std::shared_ptr<Block>, 2> duplicate{
+      blocks[0], blocks[0]};
+
+  EXPECT_DEATH_IF_SUPPORTED(pool.FreeValidated(null_block), "");
+  EXPECT_DEATH_IF_SUPPORTED(pool.FreeValidated(out_of_range), "");
+  EXPECT_DEATH_IF_SUPPORTED(pool.FreeValidated(duplicate), "");
 }
 
 }  // namespace

@@ -828,6 +828,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaSpeculativeStatsGetBool(
     const OgaSpeculativeStats* stats, const char* name, bool* value);
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateTokenizer(const OgaModel* model, OgaTokenizer** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateTokenizerFromConfig(const OgaConfig* config, OgaTokenizer** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateTokenizerFromPath(const char* config_path, OgaTokenizer** out);
 OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizer(OgaTokenizer*);
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateMultiModalProcessor(const OgaModel* model, OgaMultiModalProcessor** out);

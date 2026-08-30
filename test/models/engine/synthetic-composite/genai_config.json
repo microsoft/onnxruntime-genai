@@ -1,0 +1,106 @@
+{
+  "model": {
+    "type": "decoder",
+    "bos_token_id": 0,
+    "eos_token_id": 1,
+    "pad_token_id": 0,
+    "vocab_size": 64,
+    "context_length": 128,
+    "decoder": {
+      "session_options": {
+        "log_id": "onnxruntime-genai",
+        "provider_options": []
+      },
+      "filename": "decoder.onnx",
+      "num_attention_heads": 1,
+      "num_key_value_heads": 1,
+      "head_size": 1,
+      "hidden_size": 1,
+      "num_hidden_layers": 6,
+      "inputs": {
+        "input_ids": "input_ids",
+        "block_table": "block_table",
+        "cumulative_sequence_lengths": "cumulative_sequence_lengths",
+        "past_sequence_lengths": "past_sequence_lengths",
+        "attention_metadata": "attention_metadata",
+        "position_ids": "position_ids",
+        "past_key_names": "legacy_past.%d.key",
+        "past_value_names": "legacy_past.%d.value"
+      },
+      "outputs": {
+        "logits": "logits",
+        "present_key_names": "legacy_present.%d.key",
+        "present_value_names": "legacy_present.%d.value"
+      },
+      "state_groups": [
+        {
+          "kind": "fixed",
+          "layer_ids": [
+            0,
+            3
+          ],
+          "bindings": {
+            "state": {
+              "input": "past_conv.%d",
+              "output": "present_conv.%d"
+            }
+          },
+          "state_update": {
+            "kind": "causal_conv",
+            "capacity": 3,
+            "capture_count": "state_update_capture_count",
+            "value": "state_update.%d.conv_value"
+          }
+        },
+        {
+          "kind": "paged_kv",
+          "layer_ids": [
+            1,
+            4
+          ],
+          "bindings": {
+            "key": {
+              "input": "past_key_values.%d.key",
+              "output": "present.%d.key"
+            },
+            "value": {
+              "input": "past_key_values.%d.value",
+              "output": "present.%d.value"
+            }
+          }
+        },
+        {
+          "kind": "fixed",
+          "layer_ids": [
+            2,
+            5
+          ],
+          "bindings": {
+            "state": {
+              "input": "past_recurrent.%d",
+              "output": "present_recurrent.%d"
+            }
+          },
+          "state_update": {
+            "kind": "gated_delta_net",
+            "capacity": 3,
+            "capture_count": "state_update_capture_count",
+            "capsule": "state_update.%d.recurrent_capsule",
+            "key_head_count": 1
+          }
+        }
+      ]
+    }
+  },
+  "search": {
+    "max_length": 128,
+    "do_sample": false
+  },
+  "engine": {
+    "dynamic_batching": {
+      "block_size": 4,
+      "num_blocks": 128,
+      "max_batch_size": 8
+    }
+  }
+}

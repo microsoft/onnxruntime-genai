@@ -24,6 +24,8 @@ const char kRequestStorageA{};
 const char kRequestStorageB{};
 const void* const kRequestA = &kRequestStorageA;
 const void* const kRequestB = &kRequestStorageB;
+const char kRequestStorageC{};
+const void* const kRequestC = &kRequestStorageC;
 
 constexpr size_t kBlockSize = 4;
 
@@ -58,6 +60,33 @@ RequestStateSnapshot MakeValidRequest(const void* id, RequestStatus status, int6
           ? GenerationFinishReason::ContextLimit
           : GenerationFinishReason::None;
   return request;
+}
+
+// A consistent fixed-state pool that matches MakeValidCache(): A and B each own one committed slot
+// whose committed_tokens equals that request's paged used_slots (A: kBlockSize+1, B: kBlockSize);
+// one slot is free. Helpers below mutate copies to violate a single invariant at a time.
+FixedStatePoolSnapshot MakeValidFixedState() {
+  FixedStatePoolSnapshot fixed;
+  fixed.capacity = 3;
+  fixed.free_slots = 1;
+  fixed.reserved_slots = 0;
+  fixed.committed_slots = 2;
+  fixed.healthy = true;
+  fixed.slots = {
+      FixedStateSlotSnapshot{kRequestA, 0, /*generation=*/1, /*state_generation=*/2,
+                             /*committed_tokens=*/kBlockSize + 1,
+                             FixedStateSlotOwnership::Committed},
+      FixedStateSlotSnapshot{kRequestB, 1, 1, 1, kBlockSize, FixedStateSlotOwnership::Committed},
+      FixedStateSlotSnapshot{nullptr, 2, 0, 0, 0, FixedStateSlotOwnership::Free},
+  };
+  return fixed;
+}
+
+std::vector<RequestStateSnapshot> MakeValidCompositeRequests() {
+  return {
+      MakeValidRequest(kRequestA, RequestStatus::Active, 6, kBlockSize + 1, kBlockSize + 1),
+      MakeValidRequest(kRequestB, RequestStatus::Active, 5, kBlockSize, kBlockSize),
+  };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -292,6 +321,122 @@ TEST(InvariantValidatorTest, ZeroBlockTableColumnsIsAllowed) {
   auto cache = MakeValidCache();
   cache.block_table_columns = 0;  // 0 means "cache does not use a block table"
   EXPECT_TRUE(ValidateCacheInvariants(cache).empty());
+}
+
+// ---------------------------------------------------------------------------------------------
+// Fixed and composite state invariants
+// ---------------------------------------------------------------------------------------------
+
+TEST(InvariantValidatorTest, ValidFixedStateHasNoViolations) {
+  EXPECT_TRUE(ValidateFixedStateInvariants(MakeValidFixedState()).empty());
+}
+
+TEST(InvariantValidatorTest, FixedStateRejectsDuplicateOwnership) {
+  auto fixed = MakeValidFixedState();
+  fixed.slots[1].request_id = kRequestA;  // A now owns two committed slots
+  EXPECT_FALSE(ValidateFixedStateInvariants(fixed).empty());
+}
+
+TEST(InvariantValidatorTest, FixedStateRejectsUnhealthyPool) {
+  auto fixed = MakeValidFixedState();
+  fixed.healthy = false;
+  EXPECT_FALSE(ValidateFixedStateInvariants(fixed).empty());
+}
+
+TEST(InvariantValidatorTest, FixedStateRejectsTotalAccountingMismatch) {
+  auto fixed = MakeValidFixedState();
+  fixed.committed_slots = 3;  // free + reserved + committed no longer equals capacity
+  EXPECT_FALSE(ValidateFixedStateInvariants(fixed).empty());
+}
+
+TEST(InvariantValidatorTest, FixedStateRejectsResidualFreeSlot) {
+  auto fixed = MakeValidFixedState();
+  fixed.slots[2].committed_tokens = 1;  // a free slot must retain no committed progress
+  EXPECT_FALSE(ValidateFixedStateInvariants(fixed).empty());
+}
+
+TEST(InvariantValidatorTest, ValidCompositeOwnershipHasNoViolations) {
+  EXPECT_TRUE(ValidateCompositeStateInvariants(
+                  MakeValidCache(), MakeValidFixedState(), MakeValidCompositeRequests())
+                  .empty());
+}
+
+TEST(InvariantValidatorTest, CompositeRejectsPagedOwnerWithoutFixedSlot) {
+  auto fixed = MakeValidFixedState();
+  // Drop B's fixed slot: the paged cache still owns a table for B, so the two disagree.
+  fixed.slots[1] = FixedStateSlotSnapshot{nullptr, 1, 0, 0, 0, FixedStateSlotOwnership::Free};
+  fixed.committed_slots = 1;
+  fixed.free_slots = 2;
+  EXPECT_FALSE(ValidateCompositeStateInvariants(
+                   MakeValidCache(), fixed, MakeValidCompositeRequests())
+                   .empty());
+}
+
+TEST(InvariantValidatorTest, CompositeRejectsFixedOwnerWithoutPagedTable) {
+  auto fixed = MakeValidFixedState();
+  // Commit the third fixed slot to a request the paged cache does not own.
+  fixed.slots[2] = FixedStateSlotSnapshot{kRequestC, 2, 1, 1, kBlockSize,
+                                          FixedStateSlotOwnership::Committed};
+  fixed.committed_slots = 3;
+  fixed.free_slots = 0;
+  auto requests = MakeValidCompositeRequests();
+  requests.push_back(MakeValidRequest(kRequestC, RequestStatus::Active, 5, kBlockSize, kBlockSize));
+  EXPECT_FALSE(
+      ValidateCompositeStateInvariants(MakeValidCache(), fixed, requests).empty());
+}
+
+TEST(InvariantValidatorTest, CompositeRejectsMismatchedTokenBoundary) {
+  auto fixed = MakeValidFixedState();
+  fixed.slots[0].committed_tokens = kBlockSize + 2;  // A's fixed boundary no longer matches paged used
+  EXPECT_FALSE(ValidateCompositeStateInvariants(
+                   MakeValidCache(), fixed, MakeValidCompositeRequests())
+                   .empty());
+}
+
+TEST(InvariantValidatorTest, CompositeViolationsFollowSnapshotOrder) {
+  auto fixed = MakeValidFixedState();
+  fixed.slots[0] = FixedStateSlotSnapshot{
+      nullptr, 0, 0, 0, 0, FixedStateSlotOwnership::Free};
+  ++fixed.free_slots;
+  --fixed.committed_slots;
+  ++fixed.slots[1].committed_tokens;
+
+  const auto violations = ValidateCompositeStateInvariants(
+      MakeValidCache(), fixed, MakeValidCompositeRequests());
+
+  ASSERT_EQ(violations.size(), 2u);
+  EXPECT_NE(violations[0].message.find("has no committed fixed state slot"),
+            std::string::npos);
+  EXPECT_NE(violations[1].message.find(
+                "different paged and fixed committed token boundaries"),
+            std::string::npos);
+}
+
+TEST(InvariantValidatorTest, CompositeRejectsRequestStateBoundaryMismatch) {
+  auto requests = MakeValidCompositeRequests();
+  --requests[0].processed_sequence_length;
+
+  const auto violations = ValidateCompositeStateInvariants(
+      MakeValidCache(), MakeValidFixedState(), requests);
+
+  EXPECT_NE(std::find_if(
+                violations.begin(), violations.end(),
+                [](const InvariantViolation& violation) {
+                  return violation.message.find(
+                             "request and decoder-state committed token boundaries") !=
+                         std::string::npos;
+                }),
+            violations.end());
+}
+
+TEST(InvariantValidatorTest, ThrowIfCompositeInvariantsViolatedThrowsOnMismatch) {
+  auto fixed = MakeValidFixedState();
+  fixed.slots[0].committed_tokens = kBlockSize + 2;
+  EXPECT_THROW(ThrowIfCompositeStateInvariantsViolated(
+                   MakeValidCache(), fixed, MakeValidCompositeRequests()),
+               std::runtime_error);
+  EXPECT_NO_THROW(ThrowIfCompositeStateInvariantsViolated(
+      MakeValidCache(), MakeValidFixedState(), MakeValidCompositeRequests()));
 }
 
 // ---------------------------------------------------------------------------------------------

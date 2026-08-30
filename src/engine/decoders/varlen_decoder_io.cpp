@@ -4,17 +4,37 @@
 #include "varlen_decoder_io.h"
 
 #include <algorithm>
+#include <array>
 #include <limits>
+#include <numeric>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 #include "../../models/decoder_only.h"
 #include "../paged_key_value_cache.h"
 #include "../sequence_positions.h"
 
-#include <string_view>
-
 namespace Generators {
+
+void ValidatePackedPositionIdsInput(
+    ONNXTensorElementDataType data_type,
+    std::span<const int64_t> shape,
+    std::span<const char* const> symbolic_shape) {
+  const bool packed_vector = shape.size() == 1 && shape[0] < 0;
+  const bool packed_mrope =
+      shape.size() == 2 && shape[0] == 3 && shape[1] < 0;
+  const char* token_dimension =
+      symbolic_shape.size() == shape.size() ? symbolic_shape.back() : nullptr;
+  if (data_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 ||
+      (!packed_vector && !packed_mrope) ||
+      (token_dimension &&
+       std::string_view{token_dimension} == "batch_size")) {
+    throw std::runtime_error(
+        "Packed hybrid execution requires position_ids with dynamic int64 "
+        "[num_tokens] or [3, num_tokens] geometry");
+  }
+}
 
 namespace {
 
@@ -145,10 +165,14 @@ VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
                                  ScheduledRequests& scheduled_requests,
                                  std::shared_ptr<CacheManager> cache_manager,
                                  const ExecutionContext* execution_context,
-                                 VarlenGraphBuffers* graph_buffers)
+                                 VarlenGraphBuffers* graph_buffers,
+                                 size_t position_planes)
     : DecoderIO(model, scheduled_requests, cache_manager),
       graph_buffers_{graph_buffers},
-      execution_context_{execution_context} {
+      plan_{execution_context ? execution_context->plan : nullptr},
+      block_table_columns_{
+          execution_context ? execution_context->block_table_columns : 0},
+      position_planes_{position_planes} {
   // Logits with a symbolic batch_size first dimension contain one row per request. Any other first
   // dimension is treated as one row per packed token.
   const auto logits_symbolic_shape =
@@ -158,6 +182,7 @@ VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
                           std::string_view(logits_symbolic_shape[0]) != "batch_size";
 
   PrepareInputIds(model, scheduled_requests);
+  PreparePositionIds(model, scheduled_requests);
   PrepareAttentionMetadata(model, scheduled_requests);
   PrepareLogits(model, scheduled_requests);
 
@@ -174,7 +199,7 @@ VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
 }
 
 void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests) {
-  const StepPlan* plan = execution_context_ ? execution_context_->plan : nullptr;
+  const StepPlan* plan = plan_;
   if (plan && plan->requests.size() != scheduled_requests.size()) {
     throw std::runtime_error("Step plan size does not match the scheduled batch.");
   }
@@ -265,6 +290,71 @@ void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, 
   if (owned_sequence_lengths) owned_inputs_.push_back(std::move(owned_sequence_lengths));
 }
 
+void VarlenDecoderIO::PreparePositionIds(
+    std::shared_ptr<DecoderOnly_Model> model,
+    ScheduledRequests& scheduled_requests) {
+  if (position_planes_ == 0) {
+    return;
+  }
+  const std::string& position_ids_name =
+      model->config_->model.decoder.inputs.position_ids;
+  if (graph_buffers_ != nullptr) {
+    throw std::logic_error(
+        "Packed position_ids are not supported by CUDA graph capture.");
+  }
+
+  const StepPlan* plan = plan_;
+  if (plan && plan->requests.size() != scheduled_requests.size()) {
+    throw std::logic_error(
+        "Step plan size does not match packed position_ids batch.");
+  }
+  const size_t num_tokens =
+      plan ? plan->token_count
+           : std::accumulate(
+                 scheduled_requests.begin(), scheduled_requests.end(), size_t{0},
+                 [](size_t sum, const std::shared_ptr<Request>& request) {
+                   return sum + request->ScheduledTokenCount();
+                 });
+  auto position_ids = std::make_unique<Tensor>(
+      model->p_device_inputs_, Ort::TypeToTensorType<int64_t>);
+  const std::vector<int64_t> position_shape =
+      position_planes_ == 1
+          ? std::vector<int64_t>{static_cast<int64_t>(num_tokens)}
+          : std::vector<int64_t>{3, static_cast<int64_t>(num_tokens)};
+  position_ids->CreateTensor(position_shape);
+  auto position_span = position_ids->GetDeviceSpan<int64_t>();
+  auto position_cpu = position_span.CpuSpan();
+
+  size_t packed_offset = 0;
+  for (size_t row = 0; row < scheduled_requests.size(); ++row) {
+    const auto& request = scheduled_requests[row];
+    const size_t token_count = request->ScheduledTokenCount();
+    if (plan) {
+      const auto& entry = plan->requests[row];
+      if (entry.request != request ||
+          entry.packed_token_offset != packed_offset ||
+          entry.unprocessed_token_count != token_count) {
+        throw std::logic_error(
+            "Step plan token layout does not match packed position_ids.");
+      }
+    }
+    const int64_t first_position = request->ProcessedSequenceLength();
+    for (size_t token = 0; token < token_count; ++token) {
+      const int64_t position =
+          first_position + static_cast<int64_t>(token);
+      for (size_t plane = 0; plane < position_planes_; ++plane) {
+        position_cpu[plane * num_tokens + packed_offset + token] = position;
+      }
+    }
+    packed_offset += token_count;
+  }
+  position_span.CopyCpuToDevice();
+
+  input_names_.push_back(position_ids_name.c_str());
+  inputs_.push_back(position_ids->GetOrtTensor());
+  owned_inputs_.push_back(std::move(position_ids));
+}
+
 // PagedAttention accepts an optional `attention_metadata` CPU input holding
 // [max_query_len_bound, max_kv_len_bound, max_kv_len_lower_bound]. The first two values are upper
 // bounds and the third value is a lower bound on the longest live KV sequence. The operator
@@ -284,15 +374,15 @@ void VarlenDecoderIO::PrepareAttentionMetadata(std::shared_ptr<DecoderOnly_Model
 
   AttentionMetadataValues metadata;
   if (graph_buffers_ != nullptr) {
-    if (execution_context_ == nullptr || execution_context_->plan == nullptr) {
+    if (plan_ == nullptr) {
       throw std::runtime_error("Captured attention metadata requires a step plan.");
     }
     metadata = GetAttentionMetadataForGraphStep(
-        *execution_context_->plan,
-        execution_context_->block_table_columns,
+        *plan_,
+        block_table_columns_,
         model->config_->engine.dynamic_batching->block_size);
-  } else if (execution_context_ && execution_context_->plan) {
-    metadata = GetAttentionMetadataForPlan(*execution_context_->plan);
+  } else if (plan_) {
+    metadata = GetAttentionMetadataForPlan(*plan_);
   } else {
     for (auto& request : scheduled_requests) {
       const int32_t query_len =
@@ -319,7 +409,7 @@ void VarlenDecoderIO::PrepareAttentionMetadata(std::shared_ptr<DecoderOnly_Model
 void VarlenDecoderIO::PrepareLogits(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests) {
   size_t logits_rows = scheduled_requests.size();
   if (logits_are_per_token_) {
-    const StepPlan* plan = execution_context_ ? execution_context_->plan : nullptr;
+    const StepPlan* plan = plan_;
     logits_rows =
         plan ? plan->token_count
              : std::accumulate(scheduled_requests.begin(), scheduled_requests.end(), size_t{0},
@@ -348,8 +438,8 @@ void VarlenDecoderIO::PrepareLogits(std::shared_ptr<DecoderOnly_Model> model, Sc
 std::vector<DeviceSpan<float>> VarlenDecoderIO::ProcessLogits() {
   std::vector<size_t> valid_token_indices(scheduled_requests_.size());
   if (logits_are_per_token_) {
-    if (execution_context_ && execution_context_->plan) {
-      const auto& plan = *execution_context_->plan;
+    if (plan_) {
+      const auto& plan = *plan_;
       if (plan.requests.size() != scheduled_requests_.size()) {
         throw std::runtime_error("Step plan size does not match logits batch size.");
       }

@@ -175,6 +175,25 @@ TEST(CAPITests, TokenizerCAPI) {
 #endif
 }
 
+TEST(CAPITests, TokenizerCreateFromConfigAndPath) {
+#if TEST_PHI2
+  const char* input_string = "She sells sea shells by the sea shore.";
+
+  auto config = OgaConfig::Create(PHI2_PATH);
+  auto tokenizer_from_config = OgaTokenizer::Create(*config);
+  auto tokenizer_from_path = OgaTokenizer::Create(PHI2_PATH);
+
+  ASSERT_EQ(tokenizer_from_config->GetBosTokenId(), 50256);
+  ASSERT_EQ(tokenizer_from_path->GetBosTokenId(), 50256);
+
+  auto input_sequences = OgaSequences::Create();
+  tokenizer_from_config->Encode(input_string, *input_sequences);
+
+  auto out_string = tokenizer_from_path->Decode(input_sequences->SequenceData(0), input_sequences->SequenceCount(0));
+  ASSERT_STREQ(input_string, out_string);
+#endif
+}
+
 TEST(CAPITests, EncodeBatchEmptyInputThrows) {
 #if TEST_PHI2
   auto model = OgaModel::Create(PHI2_PATH);

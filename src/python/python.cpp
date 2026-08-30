@@ -523,6 +523,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   pybind11::class_<OgaTokenizer>(m, "Tokenizer")
       .def(pybind11::init([](const OgaModel& model) { return OgaTokenizer::Create(model); }))
+      .def(pybind11::init([](const OgaConfig& config) { return OgaTokenizer::Create(config); }))
+      .def(pybind11::init([](const std::string& config_path) { return OgaTokenizer::Create(config_path.c_str()); }))
       .def_property_readonly("bos_token_id", &OgaTokenizer::GetBosTokenId)
       .def_property_readonly("eos_token_ids", [](const OgaTokenizer& t) {
         return ToPython(t.GetEosTokenIds());
