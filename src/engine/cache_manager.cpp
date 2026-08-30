@@ -201,11 +201,13 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
 }  // namespace
 
 std::unique_ptr<CacheManager> CacheManager::Create(std::shared_ptr<Model> model,
-                                                   size_t auxiliary_bytes_per_block) {
+                                                   size_t auxiliary_bytes_per_block,
+                                                   size_t auxiliary_reserved_memory_bytes) {
   const ModelStateManifest manifest{model->config_->model.decoder};
   if (model->config_->engine.dynamic_batching) {
     ModelStateManifest::ValidateDynamicEngineCompatibility(model->config_->model.decoder);
-    return std::make_unique<PagedCacheManager>(model, auxiliary_bytes_per_block);
+    return std::make_unique<PagedCacheManager>(
+        model, auxiliary_bytes_per_block, auxiliary_reserved_memory_bytes);
   }
   if (manifest.HasFixedStateGroups()) {
     throw std::runtime_error(
@@ -329,7 +331,8 @@ bool StaticCacheManager::IsResident(const std::shared_ptr<Request>& request) con
 }
 
 PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
-                                     size_t auxiliary_bytes_per_block)
+                                     size_t auxiliary_bytes_per_block,
+                                     size_t auxiliary_reserved_memory_bytes)
     : CacheManager(model),
       params_(std::make_shared<GeneratorParams>(*model_)) {
   // The paged cache resolves its own paged_kv group. The fixed pool is created only when the
@@ -344,7 +347,8 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
   }
   // Size the primary and auxiliary paged caches from one memory budget. The fixed pool above is
   // already reflected in the free-memory query used by the paged cache.
-  key_value_cache_ = std::make_unique<PagedKeyValueCache>(model, auxiliary_bytes_per_block);
+  key_value_cache_ = std::make_unique<PagedKeyValueCache>(
+      model, auxiliary_bytes_per_block, auxiliary_reserved_memory_bytes);
   key_value_cache_state_ = std::make_unique<KeyValueCacheState>(*params_, *model_);
 }
 
