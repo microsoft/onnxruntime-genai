@@ -298,14 +298,15 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
   plan.graph_capture_eligible = true;
   for (size_t i = 0; i < plan.requests.size(); ++i) {
     auto& entry = plan.requests[i];
+    const size_t scheduling_index = entry.scheduling_order;
     // The budget only distributes committed tokens. A step that stops short of the sequence tail
     // has no row that predicts the first draft, so it cannot verify one.
-    if (token_counts[i] != selected_remaining_lengths[i]) {
+    if (token_counts[scheduling_index] != selected_remaining_lengths[scheduling_index]) {
       entry.draft_token_count = 0;
     }
-    entry.unprocessed_token_count = token_counts[i] + entry.draft_token_count;
+    entry.unprocessed_token_count = token_counts[scheduling_index] + entry.draft_token_count;
     entry.target_cache_slots = RequiredSlots(
-        selected_processed_lengths[i],
+        selected_processed_lengths[scheduling_index],
         entry.unprocessed_token_count);
     entry.packed_token_offset = packed_token_offset;
     entry.logits_row_index =
