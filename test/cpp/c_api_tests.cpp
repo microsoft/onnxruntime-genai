@@ -1356,7 +1356,7 @@ struct Phi2Test {
     };
     std::vector<OwnedRequest> requests;
     requests.reserve(batch_size_);
-    std::unordered_map<OgaRequest*, OwnedRequest*> requests_by_handle;
+    std::unordered_map<const OgaRequest*, OwnedRequest*> requests_by_handle;
 
     const char* input_strings[] = {
         "This is a test.",

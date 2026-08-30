@@ -80,17 +80,15 @@ ScenarioExecutionOutput CapacityPressureScenario::Execute(const ScenarioConfig& 
   for (int run = 0; run < total_runs; ++run) {
     const bool is_warmup = run < config.warmup_runs;
     std::vector<std::unique_ptr<OgaGeneratorParams>> params;
-    std::vector<std::unique_ptr<OgaRequest>> requests;
+    std::vector<std::unique_ptr<OgaRequest>> requests(
+        static_cast<size_t>(config.concurrency));
     std::vector<std::vector<int32_t>> request_tokens(static_cast<size_t>(config.concurrency));
     std::vector<size_t> prompt_counts(static_cast<size_t>(config.concurrency));
     std::vector<double> first_token_ms(static_cast<size_t>(config.concurrency), -1.0);
     std::vector<bool> admitted(static_cast<size_t>(config.concurrency), false);
     std::vector<bool> rejected(static_cast<size_t>(config.concurrency), false);
-    std::vector<OgaRequest*> request_handles(
-        static_cast<size_t>(config.concurrency), nullptr);
     std::unordered_map<const OgaRequest*, size_t> request_indices;
     params.reserve(static_cast<size_t>(config.concurrency));
-    requests.reserve(static_cast<size_t>(config.concurrency));
 
     const auto run_start = std::chrono::steady_clock::now();
     int admitted_count = 0;
@@ -113,9 +111,8 @@ ScenarioExecutionOutput CapacityPressureScenario::Execute(const ScenarioConfig& 
       try {
         auto request = engineResources.engine->CreateRequest(*params.back());
         request->BeginTurn(prompt->SequenceData(0), prompt_count);
-        request_handles[request_index] = request.get();
         request_indices.emplace(request.get(), request_index);
-        requests.push_back(std::move(request));
+        requests[request_index] = std::move(request);
       } catch (const std::exception& ex) {
         rejected[request_index] = true;
         ++rejected_count;
@@ -174,16 +171,18 @@ ScenarioExecutionOutput CapacityPressureScenario::Execute(const ScenarioConfig& 
         }
 
         if ((event.Flags() & OgaEngineEventFlag_TurnFinished) != 0) {
-          if (!request_handles[request_index]) {
+          if (!requests[request_index]) {
             throw std::runtime_error(
                 Name() + ": completed event has no owned Request handle");
           }
-          request_handles[request_index]->Close();
+          requests[request_index]->Close();
         }
       }
     }
     for (const auto& request : requests) {
-      request->Close();
+      if (request) {
+        request->Close();
+      }
     }
 
     const auto run_end = std::chrono::steady_clock::now();

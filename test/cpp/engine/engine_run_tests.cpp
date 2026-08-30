@@ -37,6 +37,46 @@ int IndexOf(const CallTrace& trace, const std::string& entry) {
   return it == trace.entries.end() ? -1 : static_cast<int>(it - trace.entries.begin());
 }
 
+// Number of per-request elements (product of every non-batch axis) in a fixed-state tensor row.
+size_t FixedRowElements(const OrtValue& value) {
+  const auto shape = value.GetTensorTypeAndShapeInfo()->GetShape();
+  size_t elements = 1;
+  for (size_t axis = 1; axis < shape.size(); ++axis) {
+    elements *= static_cast<size_t>(shape[axis]);
+  }
+  return elements;
+}
+
+// Asserts every element of one fixed-state input row equals `expected`. The composite tests run on
+// CPU, so both direct bank views and fallback staging tensors are directly addressable.
+void ExpectFixedInputRow(const FixedStateBinding& binding, size_t row, float expected) {
+  const size_t row_elements = FixedRowElements(*binding.input);
+  const auto* data = binding.input->GetTensorData<float>();
+  for (size_t index = 0; index < row_elements; ++index) {
+    EXPECT_FLOAT_EQ(data[row * row_elements + index], expected);
+  }
+}
+
+// Fills one fixed-state output row with `value`, simulating a model writing its next state.
+void FillFixedOutputRow(const FixedStateBinding& binding, size_t row, float value) {
+  const size_t row_elements = FixedRowElements(*binding.output);
+  auto* data = binding.output->GetTensorMutableData<float>();
+  std::fill_n(data + row * row_elements, row_elements, value);
+}
+
+const FixedStateSlotSnapshot& FixedSlotFor(const FixedStatePoolSnapshot& snapshot,
+                                           const void* request_id) {
+  const auto slot = std::find_if(
+      snapshot.slots.begin(), snapshot.slots.end(),
+      [request_id](const FixedStateSlotSnapshot& candidate) {
+        return candidate.request_id == request_id;
+      });
+  if (slot == snapshot.slots.end()) {
+    throw std::logic_error("Fixed state slot was not found.");
+  }
+  return *slot;
+}
+
 class ExternalRequestReference {
  public:
   explicit ExternalRequestReference(Request& request) : request_{&request} {
@@ -1481,6 +1521,580 @@ TEST_F(EngineRunTest, MixedRunRollbackPreservesProgressAndCacheResidents) {
   EXPECT_EQ(RunOne(*engine.engine).request, decode);
   EXPECT_EQ(prefill->ProcessedSequenceLength(), 2);
   EXPECT_EQ(engine.cache->AllocatedCount(), 2u);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Composite decoder-state transactions (paged KV + fixed state pool)
+//
+// These wire the real PagedCacheManager (real PagedKeyValueCache and real FixedStatePool) over the
+// recording model-executor double. The executor fabricates logits and never runs the ONNX graph, so
+// the fixed state tensors are inspected and written by the execution callback in physical row order.
+// ---------------------------------------------------------------------------------------------
+
+TEST_F(EngineRunTest, DensePagedModelHasNoFixedStateReservation) {
+  model_ = LoadSyntheticPagedModel();
+  auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
+  auto request = CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+  engine.executor->SetExecutionCallback([](ExecutionContext& context) {
+    ASSERT_NE(context.plan, nullptr);
+    EXPECT_FALSE(context.plan->fixed_state.required);
+    EXPECT_EQ(context.plan->fixed_state.row_count, 0u);
+    EXPECT_EQ(context.plan->fixed_state.new_slot_count, 0u);
+    EXPECT_EQ(context.plan->fixed_state.staging_bytes, 0u);
+    EXPECT_TRUE(context.fixed_state_slots.empty());
+    EXPECT_TRUE(context.fixed_state_bindings.empty());
+    EXPECT_EQ(context.fixed_state_staging_bytes, 0u);
+  });
+
+  EXPECT_EQ(RunOne(*engine.engine).request, request);
+  EXPECT_FALSE(engine.cache->FixedStateSnapshot().has_value());
+}
+
+TEST_F(EngineRunTest, CompositeReservationExposesRowsAndCommitsBothStates) {
+  model_ = LoadSyntheticCompositeModel();
+  auto engine = MakeCompositeDoublesEngine(model_, /*forced_token=*/5);
+  auto first = CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+  auto second = CreateRequestWithPrompt(engine.engine, *model_, Prompt(20));
+
+  engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
+    ASSERT_NE(context.plan, nullptr);
+    ASSERT_TRUE(context.plan->fixed_state.required);
+    EXPECT_EQ(context.plan->fixed_state.row_count, 2u);
+    EXPECT_EQ(context.plan->fixed_state.new_slot_count, 2u);
+    EXPECT_GT(context.fixed_state_staging_bytes, 0u);
+    EXPECT_EQ(context.fixed_state_staging_bytes,
+              context.plan->fixed_state.staging_bytes);
+    ASSERT_EQ(context.fixed_state_slots.size(), 2u);
+    // conv layers [0, 3] plus recurrent layers [2, 5] => four fixed tensors.
+    ASSERT_EQ(context.fixed_state_bindings.size(), 4u);
+    for (size_t row = 0; row < context.plan->requests.size(); ++row) {
+      EXPECT_EQ(context.fixed_state_slots[row].request_id,
+                context.plan->requests[row].request_id);
+      for (const auto& binding : context.fixed_state_bindings) {
+        ExpectFixedInputRow(binding, row, 0.0f);
+        FillFixedOutputRow(binding, row, row == 0 ? 11.0f : 22.0f);
+      }
+    }
+    const auto fixed = engine.cache->FixedStateSnapshot();
+    ASSERT_TRUE(fixed.has_value());
+    EXPECT_TRUE(ValidateCompositeStateInvariants(
+                    engine.cache->Snapshot(context.cache_reservation), *fixed,
+                    {first->Snapshot(), second->Snapshot()})
+                    .empty());
+  });
+
+  EXPECT_EQ(RunOne(*engine.engine).request, first);
+  const auto fixed = engine.cache->FixedStateSnapshot();
+  ASSERT_TRUE(fixed.has_value());
+  EXPECT_EQ(fixed->committed_slots, 2u);
+  EXPECT_EQ(fixed->reserved_slots, 0u);
+  EXPECT_EQ(fixed->free_slots, fixed->capacity - 2);
+  EXPECT_EQ(FixedSlotFor(*fixed, first.get()).state_generation, 1u);
+  EXPECT_EQ(FixedSlotFor(*fixed, first.get()).committed_tokens, 3u);
+  EXPECT_EQ(FixedSlotFor(*fixed, second.get()).state_generation, 1u);
+  EXPECT_EQ(FixedSlotFor(*fixed, second.get()).committed_tokens, 3u);
+  EXPECT_TRUE(ValidateCompositeStateInvariants(
+                  engine.cache->Snapshot(), *fixed,
+                  {first->Snapshot(), second->Snapshot()})
+                  .empty());
+}
+
+TEST_F(EngineRunTest, CompositeExecutionFailureDiscardsBothAndRetryMatches) {
+  model_ = LoadSyntheticCompositeModel();
+  auto engine = MakeCompositeDoublesEngine(model_, /*forced_token=*/5);
+  auto request = CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+  int callback_calls = 0;
+  engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
+    ++callback_calls;
+    ASSERT_EQ(context.fixed_state_slots.size(), 1u);
+    for (const auto& binding : context.fixed_state_bindings) {
+      ExpectFixedInputRow(binding, 0, 0.0f);
+      FillFixedOutputRow(binding, 0, 7.0f);
+    }
+  });
+  engine.executor->SetNextFailure(
+      ScriptedExecutionFailure::RetryableDuringExecution);
+
+  const auto retryable = RunOne(*engine.engine);
+  EXPECT_EQ(retryable.flags, EngineEventFlagRetryable);
+  EXPECT_EQ(retryable.error_code, EngineErrorCode::RetryableExecution);
+
+  auto fixed = engine.cache->FixedStateSnapshot();
+  ASSERT_TRUE(fixed.has_value());
+  EXPECT_EQ(fixed->committed_slots, 0u);
+  EXPECT_EQ(fixed->reserved_slots, 0u);
+  EXPECT_EQ(fixed->free_slots, fixed->capacity);
+  EXPECT_TRUE(engine.cache->Snapshot().requests.empty());
+  EXPECT_EQ(request->Snapshot().processed_sequence_length, 0);
+
+  EXPECT_EQ(RunOne(*engine.engine).request, request);
+  fixed = engine.cache->FixedStateSnapshot();
+  ASSERT_TRUE(fixed.has_value());
+  EXPECT_EQ(callback_calls, 2);
+  EXPECT_EQ(fixed->committed_slots, 1u);
+  EXPECT_EQ(FixedSlotFor(*fixed, request.get()).state_generation, 1u);
+  EXPECT_EQ(FixedSlotFor(*fixed, request.get()).committed_tokens, 3u);
+}
+
+TEST_F(EngineRunTest, CompositePostProcessingFailurePreservesResidentState) {
+  model_ = LoadSyntheticCompositeModel();
+  auto engine = MakeCompositeDoublesEngine(model_, /*forced_token=*/5);
+  auto request = CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+  float expected_input = 0.0f;
+  float staged_output = 5.0f;
+  engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
+    for (const auto& binding : context.fixed_state_bindings) {
+      ExpectFixedInputRow(binding, 0, expected_input);
+      FillFixedOutputRow(binding, 0, staged_output);
+    }
+  });
+
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
+  expected_input = 5.0f;
+  staged_output = 99.0f;
+  engine.executor->SetNextFailure(ScriptedExecutionFailure::PostProcessing);
+  EXPECT_EQ(RunOne(*engine.engine).flags, EngineEventFlagRetryable);
+
+  auto fixed = engine.cache->FixedStateSnapshot();
+  ASSERT_TRUE(fixed.has_value());
+  EXPECT_EQ(FixedSlotFor(*fixed, request.get()).state_generation, 1u);
+  EXPECT_EQ(FixedSlotFor(*fixed, request.get()).committed_tokens, 3u);
+  ASSERT_EQ(engine.cache->Snapshot().requests.size(), 1u);
+  EXPECT_EQ(engine.cache->Snapshot().requests[0].used_slots, 3u);
+
+  staged_output = 6.0f;
+  EXPECT_EQ(RunOne(*engine.engine).request, request);
+  fixed = engine.cache->FixedStateSnapshot();
+  ASSERT_TRUE(fixed.has_value());
+  EXPECT_EQ(FixedSlotFor(*fixed, request.get()).state_generation, 2u);
+  EXPECT_EQ(FixedSlotFor(*fixed, request.get()).committed_tokens, 4u);
+}
+
+TEST_F(EngineRunTest, CompositeChunkFailureRetriesAndContinuesResidentState) {
+  model_ = LoadSyntheticCompositeModel();
+  auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
+  const std::vector<int32_t> prompt{2, 3, 4, 5, 6};
+  auto params = MakeGreedyParams(*model_);
+  params->search.chunk_size = 2;
+  auto request = CreateRequestWithPrompt(engine.engine, *params, prompt);
+
+  size_t execution_count = 0;
+  engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
+    ++execution_count;
+    const float expected_input =
+        execution_count == 1
+            ? 0.0f
+        : execution_count <= 3
+            ? 1.0f
+            : static_cast<float>(execution_count - 1);
+    for (const auto& binding : context.fixed_state_bindings) {
+      ExpectFixedInputRow(binding, 0, expected_input);
+      FillFixedOutputRow(binding, 0, static_cast<float>(execution_count));
+    }
+    if (execution_count == 1) {
+      engine.executor->SetNextFailure(
+          ScriptedExecutionFailure::RetryableDuringExecution);
+    }
+  });
+
+  std::array<EngineEvent, 1> storage;
+  EXPECT_EQ(engine.engine->Run(storage), 0u);
+  EXPECT_EQ(request->ProcessedSequenceLength(), 2);
+  EXPECT_EQ(RunOne(*engine.engine).flags, EngineEventFlagRetryable);
+
+  auto fixed = engine.cache->FixedStateSnapshot();
+  ASSERT_TRUE(fixed.has_value());
+  EXPECT_EQ(request->ProcessedSequenceLength(), 2);
+  EXPECT_EQ(FixedSlotFor(*fixed, request.get()).committed_tokens, 2u);
+  EXPECT_EQ(FixedSlotFor(*fixed, request.get()).state_generation, 1u);
+  ASSERT_EQ(engine.cache->Snapshot().requests.size(), 1u);
+  EXPECT_EQ(engine.cache->Snapshot().requests[0].used_slots, 2u);
+
+  EXPECT_EQ(engine.engine->Run(storage), 0u);
+  EXPECT_EQ(request->ProcessedSequenceLength(), 4);
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
+  EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
+  EXPECT_EQ(request->ProcessedSequenceLength(), 5);
+  fixed = engine.cache->FixedStateSnapshot();
+  ASSERT_TRUE(fixed.has_value());
+  EXPECT_EQ(FixedSlotFor(*fixed, request.get()).committed_tokens, 5u);
+
+  const std::vector<int32_t> continuation{7, 8, 9};
+  request->BeginTurn(continuation);
+  EXPECT_EQ(engine.engine->Run(storage), 0u);
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
+  EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
+  EXPECT_EQ(request->ProcessedSequenceLength(), 8);
+  fixed = engine.cache->FixedStateSnapshot();
+  ASSERT_TRUE(fixed.has_value());
+  EXPECT_EQ(FixedSlotFor(*fixed, request.get()).committed_tokens, 8u);
+  EXPECT_EQ(FixedSlotFor(*fixed, request.get()).state_generation,
+            execution_count - 1);
+}
+
+TEST_F(EngineRunTest, CompositeReservationRequiredMismatchIsFatal) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/4, EosToken(*model_));
+  engine.cache->ScriptFixedStateMismatch(
+      FixedStateResourcePlan{true, 1, 1, 256}, /*slots=*/{},
+      /*staging_bytes=*/0);
+  auto request = CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+
+  const auto failure = RunOne(*engine.engine);
+  EXPECT_EQ(failure.request, request);
+  EXPECT_EQ(failure.flags,
+            EngineEventFlagTurnFinished | EngineEventFlagFailed);
+  EXPECT_EQ(failure.error_code, EngineErrorCode::EngineContractFailure);
+  EXPECT_THROW(static_cast<void>(RunOne(*engine.engine)), EngineStepError);
+}
+
+TEST_F(EngineRunTest, PlanningAllocationFailureDoesNotPoisonEngine) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/4, EosToken(*model_));
+  auto request = CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+  engine.cache->ThrowPlanningBadAllocOnce();
+
+  EXPECT_THROW(static_cast<void>(RunOne(*engine.engine)), std::bad_alloc);
+  EXPECT_EQ(request->status_, RequestStatus::Assigned);
+  EXPECT_EQ(engine.cache->AllocatedCount(), 0u);
+  EXPECT_EQ(RunOne(*engine.engine).request, request);
+}
+
+TEST_F(EngineRunTest, PlanningConsistencyFailurePoisonsEngine) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/4, EosToken(*model_));
+  auto request = CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+  engine.cache->ThrowPlanningConsistencyOnce();
+
+  const auto failure = RunOne(*engine.engine);
+  EXPECT_EQ(failure.request, request);
+  EXPECT_EQ(failure.flags,
+            EngineEventFlagTurnFinished | EngineEventFlagFailed);
+  EXPECT_EQ(failure.error_code, EngineErrorCode::EngineContractFailure);
+  EXPECT_THROW(static_cast<void>(RunOne(*engine.engine)), EngineStepError);
+}
+
+TEST_F(EngineRunTest, OverselectedTokenBudgetPoisonsEngine) {
+  model_->config_->engine.dynamic_batching->max_scheduled_tokens = 1;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/4, EosToken(*model_));
+  auto first = CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+  auto second = CreateRequestWithPrompt(engine.engine, *model_, Prompt(11));
+  engine.cache->OverselectPlanningOnce();
+
+  std::array<EngineEvent, 2> failures;
+  ASSERT_EQ(engine.engine->Run(failures), failures.size());
+  EXPECT_EQ(failures[0].request, first);
+  EXPECT_EQ(failures[1].request, second);
+  for (const auto& failure : failures) {
+    EXPECT_EQ(failure.flags,
+              EngineEventFlagTurnFinished | EngineEventFlagFailed);
+    EXPECT_EQ(failure.error_code, EngineErrorCode::EngineContractFailure);
+  }
+  EXPECT_THROW(static_cast<void>(RunOne(*engine.engine)), EngineStepError);
+}
+
+TEST_F(EngineRunTest, CommitPreparationFailureRestoresRequestStateBeforeFatal) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/4, /*forced_token=*/7);
+  auto request = CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+  const auto sequence_length = request->CurrentSequenceLength();
+  engine.cache->ThrowPrepareFailureOnce();
+
+  const auto failure = RunOne(*engine.engine);
+  EXPECT_EQ(failure.request, request);
+  EXPECT_EQ(failure.flags,
+            EngineEventFlagTurnFinished | EngineEventFlagFailed);
+  EXPECT_EQ(failure.error_code, EngineErrorCode::EngineContractFailure);
+  EXPECT_EQ(request->CurrentSequenceLength(), sequence_length);
+  EXPECT_EQ(request->ProcessedSequenceLength(), 0);
+  EXPECT_EQ(engine.cache->AllocatedCount(), 0u);
+  EXPECT_THROW(static_cast<void>(RunOne(*engine.engine)), EngineStepError);
+}
+
+TEST_F(EngineRunTest, CompositeReservationOverreportedRowsAreFatal) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/4, EosToken(*model_));
+  auto request = CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+  static const char extra_request_storage{};
+  engine.cache->ScriptFixedStateMismatch(
+      FixedStateResourcePlan{true, 2, 1, 0},
+      {
+          FixedStateSlotHandle{nullptr, request.get(), 0, 0},
+          FixedStateSlotHandle{nullptr, &extra_request_storage, 1, 0},
+      },
+      /*staging_bytes=*/0);
+
+  const auto failure = RunOne(*engine.engine);
+  EXPECT_EQ(failure.request, request);
+  EXPECT_EQ(failure.flags,
+            EngineEventFlagTurnFinished | EngineEventFlagFailed);
+  EXPECT_EQ(failure.error_code, EngineErrorCode::EngineContractFailure);
+}
+
+TEST_F(EngineRunTest, CompositeReservationRowOrderMismatchIsFatal) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/4, EosToken(*model_));
+  auto request = CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+  static const char other_storage{};
+  engine.cache->ScriptFixedStateMismatch(
+      FixedStateResourcePlan{true, 1, 1, 0},
+      {FixedStateSlotHandle{nullptr, &other_storage, 0, 0}},
+      /*staging_bytes=*/0);
+
+  const auto failure = RunOne(*engine.engine);
+  EXPECT_EQ(failure.request, request);
+  EXPECT_EQ(failure.flags,
+            EngineEventFlagTurnFinished | EngineEventFlagFailed);
+  EXPECT_EQ(failure.error_code, EngineErrorCode::EngineContractFailure);
+}
+
+TEST_F(EngineRunTest, CompositeReservationNewSlotCountMismatchIsFatal) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/4, EosToken(*model_));
+  auto request = CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+  engine.cache->ScriptFixedStateMismatch(
+      FixedStateResourcePlan{true, 1, 1, 0},
+      {FixedStateSlotHandle{nullptr, request.get(), 0, 0}},
+      /*staging_bytes=*/0,
+      /*reservation_new_slot_count=*/0);
+
+  const auto failure = RunOne(*engine.engine);
+  EXPECT_EQ(failure.request, request);
+  EXPECT_EQ(failure.flags,
+            EngineEventFlagTurnFinished | EngineEventFlagFailed);
+  EXPECT_EQ(failure.error_code, EngineErrorCode::EngineContractFailure);
+}
+
+TEST_F(EngineRunTest, CompositeCapacityBackpressureDefersNewAdmission) {
+  model_ = LoadSyntheticCompositeModel();
+  model_->config_->engine.dynamic_batching->max_batch_size = 2;
+  auto engine = MakeCompositeDoublesEngine(model_, /*forced_token=*/5);
+  auto first = CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+  auto second = CreateRequestWithPrompt(engine.engine, *model_, Prompt(20));
+  engine.executor->SetExecutionCallback([](ExecutionContext& context) {
+    for (size_t row = 0; row < context.fixed_state_slots.size(); ++row) {
+      for (const auto& binding : context.fixed_state_bindings) {
+        FillFixedOutputRow(binding, row, 1.0f);
+      }
+    }
+  });
+
+  ASSERT_EQ(RunOne(*engine.engine).request, first);
+  ASSERT_EQ(RunOne(*engine.engine).request, second);
+  auto fixed = engine.cache->FixedStateSnapshot();
+  ASSERT_TRUE(fixed.has_value());
+  ASSERT_EQ(fixed->capacity, 2u);
+  EXPECT_EQ(fixed->committed_slots, 2u);
+  EXPECT_EQ(fixed->free_slots, 0u);
+
+  auto third = CreateRequestWithPrompt(engine.engine, *model_, Prompt(30));
+  size_t observed_new_slots = 999;
+  engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
+    observed_new_slots = context.plan->fixed_state.new_slot_count;
+    for (size_t row = 0; row < context.fixed_state_slots.size(); ++row) {
+      for (const auto& binding : context.fixed_state_bindings) {
+        FillFixedOutputRow(binding, row, 2.0f);
+      }
+    }
+  });
+  ASSERT_EQ(RunOne(*engine.engine).request, first);
+  EXPECT_EQ(observed_new_slots, 0u);
+  fixed = engine.cache->FixedStateSnapshot();
+  ASSERT_TRUE(fixed.has_value());
+  EXPECT_EQ(fixed->committed_slots, 2u);
+  EXPECT_EQ(fixed->free_slots, 0u);
+  EXPECT_FALSE(engine.cache->IsResident(third));
+  EXPECT_EQ(third->status_, RequestStatus::Assigned);
+}
+
+TEST_F(EngineRunTest, CompositeRemovalReleasesBothAndIsolatesSibling) {
+  model_ = LoadSyntheticCompositeModel();
+  auto engine = MakeCompositeDoublesEngine(model_, /*forced_token=*/5);
+  auto first = CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+  auto second = CreateRequestWithPrompt(engine.engine, *model_, Prompt(20));
+  engine.executor->SetExecutionCallback([](ExecutionContext& context) {
+    for (size_t row = 0; row < context.fixed_state_slots.size(); ++row) {
+      for (const auto& binding : context.fixed_state_bindings) {
+        FillFixedOutputRow(binding, row, 10.0f + static_cast<float>(row));
+      }
+    }
+  });
+
+  ASSERT_EQ(RunOne(*engine.engine).request, first);
+  auto fixed = engine.cache->FixedStateSnapshot();
+  ASSERT_TRUE(fixed.has_value());
+  ASSERT_EQ(fixed->committed_slots, 2u);
+  const auto second_generation =
+      FixedSlotFor(*fixed, second.get()).state_generation;
+
+  first->Close();
+  EXPECT_FALSE(engine.cache->IsResident(first));
+
+  fixed = engine.cache->FixedStateSnapshot();
+  ASSERT_TRUE(fixed.has_value());
+  EXPECT_EQ(fixed->committed_slots, 1u);
+  EXPECT_EQ(fixed->free_slots, fixed->capacity - 1);
+  EXPECT_EQ(FixedSlotFor(*fixed, second.get()).state_generation,
+            second_generation);
+  ASSERT_EQ(engine.cache->Snapshot().requests.size(), 1u);
+  EXPECT_EQ(engine.cache->Snapshot().requests[0].request_id, second.get());
+  EXPECT_TRUE(ValidateCompositeStateInvariants(
+                  engine.cache->Snapshot(), *fixed, {second->Snapshot()})
+                  .empty());
+}
+
+TEST_F(EngineRunTest, CompositeStagedOutputInvisibleUntilPublish) {
+  model_ = LoadSyntheticCompositeModel();
+  auto engine = MakeCompositeDoublesEngine(model_, /*forced_token=*/5);
+  auto request = CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+  float committed_value = 0.0f;
+  engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
+    for (const auto& binding : context.fixed_state_bindings) {
+      ExpectFixedInputRow(binding, 0, committed_value);
+      FillFixedOutputRow(binding, 0, committed_value + 1.0f);
+    }
+    committed_value += 1.0f;
+  });
+
+  EXPECT_EQ(RunOne(*engine.engine).request, request);
+  auto fixed = engine.cache->FixedStateSnapshot();
+  ASSERT_TRUE(fixed.has_value());
+  EXPECT_EQ(FixedSlotFor(*fixed, request.get()).state_generation, 1u);
+  EXPECT_EQ(RunOne(*engine.engine).request, request);
+  fixed = engine.cache->FixedStateSnapshot();
+  ASSERT_TRUE(fixed.has_value());
+  EXPECT_EQ(FixedSlotFor(*fixed, request.get()).state_generation, 2u);
+}
+
+TEST_F(EngineRunTest, CompositeAggregateAdmissionCommitsEveryNewTable) {
+  model_ = LoadSyntheticCompositeModel();
+  auto engine = MakeCompositeDoublesEngine(model_, /*forced_token=*/5);
+  std::vector<std::shared_ptr<Request>> requests;
+  for (int i = 0; i < 3; ++i) {
+    requests.push_back(CreateRequestWithPrompt(
+        engine.engine, *model_, Prompt(10 * (i + 1))));
+  }
+  size_t observed_rows = 0;
+  size_t observed_new = 0;
+  engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
+    observed_rows = context.fixed_state_slots.size();
+    observed_new = context.plan->fixed_state.new_slot_count;
+    for (size_t row = 0; row < context.fixed_state_slots.size(); ++row) {
+      for (const auto& binding : context.fixed_state_bindings) {
+        FillFixedOutputRow(binding, row, 1.0f);
+      }
+    }
+  });
+
+  EXPECT_EQ(RunOne(*engine.engine).request, requests[0]);
+  EXPECT_EQ(observed_rows, 3u);
+  EXPECT_EQ(observed_new, 3u);
+  const auto fixed = engine.cache->FixedStateSnapshot();
+  ASSERT_TRUE(fixed.has_value());
+  EXPECT_EQ(fixed->committed_slots, 3u);
+  std::vector<RequestStateSnapshot> snapshots;
+  for (const auto& request : requests) {
+    EXPECT_TRUE(engine.cache->IsResident(request));
+    EXPECT_EQ(FixedSlotFor(*fixed, request.get()).committed_tokens, 3u);
+    snapshots.push_back(request->Snapshot());
+  }
+  EXPECT_EQ(engine.cache->Snapshot().requests.size(), 3u);
+  EXPECT_TRUE(
+      ValidateCompositeStateInvariants(
+          engine.cache->Snapshot(), *fixed, snapshots)
+          .empty());
+}
+
+TEST_F(EngineRunTest, CompositeCompletionRemovalFreesSlotForReadmission) {
+  model_ = LoadSyntheticCompositeModel();
+  auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
+  auto first = CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+  engine.executor->SetExecutionCallback([](ExecutionContext& context) {
+    for (const auto& binding : context.fixed_state_bindings) {
+      FillFixedOutputRow(binding, 0, 31.0f);
+    }
+  });
+
+  ASSERT_EQ(RunOne(*engine.engine).request, first);
+  ASSERT_TRUE(first->IsTurnComplete());
+  const auto completed = engine.cache->FixedStateSnapshot();
+  ASSERT_TRUE(completed.has_value());
+  const auto released_slot = FixedSlotFor(*completed, first.get()).slot;
+  const auto first_generation =
+      FixedSlotFor(*completed, first.get()).generation;
+
+  first->Close();
+  auto after_removal = engine.cache->FixedStateSnapshot();
+  ASSERT_TRUE(after_removal.has_value());
+  EXPECT_EQ(after_removal->committed_slots, 0u);
+
+  auto second = CreateRequestWithPrompt(engine.engine, *model_, Prompt(20));
+  engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
+    ASSERT_EQ(context.fixed_state_slots.size(), 1u);
+    EXPECT_EQ(context.fixed_state_slots[0].slot, released_slot);
+    for (const auto& binding : context.fixed_state_bindings) {
+      ExpectFixedInputRow(binding, 0, 0.0f);
+      FillFixedOutputRow(binding, 0, 41.0f);
+    }
+  });
+
+  EXPECT_EQ(RunOne(*engine.engine).request, second);
+  const auto fixed = engine.cache->FixedStateSnapshot();
+  ASSERT_TRUE(fixed.has_value());
+  EXPECT_EQ(fixed->committed_slots, 1u);
+  EXPECT_EQ(FixedSlotFor(*fixed, second.get()).slot, released_slot);
+  EXPECT_GT(FixedSlotFor(*fixed, second.get()).generation, first_generation);
+  ASSERT_EQ(engine.cache->Snapshot().requests.size(), 1u);
+  EXPECT_EQ(engine.cache->Snapshot().requests[0].request_id, second.get());
+}
+
+TEST_F(EngineRunTest, CompositeOrdersResidentRowsByFixedSlotButEventsBySchedulerRank) {
+  model_ = LoadSyntheticCompositeModel();
+  auto engine = MakeCompositeDoublesEngine(model_, /*forced_token=*/5);
+  auto first = CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+  auto second = CreateRequestWithPrompt(engine.engine, *model_, Prompt(20));
+  engine.executor->SetExecutionCallback([](ExecutionContext& context) {
+    for (size_t row = 0; row < context.fixed_state_slots.size(); ++row) {
+      for (const auto& binding : context.fixed_state_bindings) {
+        FillFixedOutputRow(binding, row, 10.0f + static_cast<float>(row));
+      }
+    }
+  });
+  EXPECT_EQ(RunOne(*engine.engine).request, first);
+  EXPECT_EQ(RunOne(*engine.engine).request, second);
+
+  auto fixed = engine.cache->FixedStateSnapshot();
+  ASSERT_TRUE(fixed.has_value());
+  ASSERT_EQ(FixedSlotFor(*fixed, first.get()).slot, 0u);
+  ASSERT_EQ(FixedSlotFor(*fixed, second.get()).slot, 1u);
+  first->Close();
+
+  auto replacement =
+      CreateRequestWithPrompt(engine.engine, *model_, Prompt(30));
+  engine.executor->SetExecutionCallback([](ExecutionContext& context) {
+    for (size_t row = 0; row < context.fixed_state_slots.size(); ++row) {
+      for (const auto& binding : context.fixed_state_bindings) {
+        FillFixedOutputRow(binding, row, 20.0f + static_cast<float>(row));
+      }
+    }
+  });
+  EXPECT_EQ(RunOne(*engine.engine).request, second);
+  EXPECT_EQ(RunOne(*engine.engine).request, replacement);
+
+  fixed = engine.cache->FixedStateSnapshot();
+  ASSERT_TRUE(fixed.has_value());
+  ASSERT_EQ(FixedSlotFor(*fixed, replacement.get()).slot, 0u);
+  ASSERT_EQ(FixedSlotFor(*fixed, second.get()).slot, 1u);
+
+  engine.executor->SetExecutionCallback(
+      [&](ExecutionContext& context) {
+        ASSERT_EQ(context.plan->fixed_state.new_slot_count, 0u);
+        ASSERT_EQ(context.plan->requests.size(), 2u);
+        EXPECT_EQ(context.plan->requests[0].request_id, replacement.get());
+        EXPECT_EQ(context.plan->requests[1].request_id, second.get());
+        EXPECT_EQ(context.fixed_state_slots[0].slot, 0u);
+        EXPECT_EQ(context.fixed_state_slots[1].slot, 1u);
+        for (const auto& binding : context.fixed_state_bindings) {
+          FillFixedOutputRow(binding, 0, 30.0f);
+          FillFixedOutputRow(binding, 1, 31.0f);
+        }
+      });
+  // Physical execution is fixed-slot ordered, but events retain the scheduler's decode order.
+  EXPECT_EQ(RunOne(*engine.engine).request, second);
+  EXPECT_EQ(RunOne(*engine.engine).request, replacement);
 }
 
 }  // namespace

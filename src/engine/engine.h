@@ -204,6 +204,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
   EngineTransactionMetrics transaction_metrics_;
   StepPlan step_plan_;
   std::vector<RequestStepResult> step_results_;
+  std::vector<size_t> staged_event_order_;
   std::vector<std::shared_ptr<Request>> tracked_requests_;
   std::vector<EngineEvent> pending_events_;
   std::vector<EngineEvent> staged_events_;

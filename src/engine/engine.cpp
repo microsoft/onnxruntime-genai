@@ -89,6 +89,7 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
   const size_t max_batch_size = cache_manager_->MaxBatchSize();
   step_plan_.requests.reserve(max_batch_size);
   step_results_.reserve(max_batch_size);
+  staged_event_order_.reserve(max_batch_size);
   pending_events_.reserve(max_batch_size);
   staged_events_.reserve(max_batch_size);
 }
@@ -602,11 +603,12 @@ void Engine::RunDynamic() {
     step_plan_.transaction_id = next_transaction_id_++;
     StepPlanningResult planning_result;
     try {
-      // Planning must report ordinary non-executable outcomes through its result. Any throw means
-      // the scheduler or cache violated its planning contract. For a composite model this also
-      // includes disagreement between paged and fixed committed ownership.
+      // Planning must report ordinary non-executable outcomes through its result. A composite
+      // cache consistency failure proves that paged and fixed committed ownership disagree and is
+      // fatal. Incidental failures such as allocation errors have not mutated Engine state and may
+      // propagate without poisoning the Engine.
       planning_result = scheduler_->PlanStep(step_plan_);
-    } catch (...) {
+    } catch (const StepPlanningConsistencyError&) {
       MarkUnhealthyAndThrow(
           StepOutcomeKind::ExecutionContractFailure,
           step_plan_.transaction_id,
@@ -809,11 +811,23 @@ void Engine::RunDynamic() {
           execution_error);
     }
 
+    staged_event_order_.clear();
     try {
       // Turn the final logits row for each packed request into a staged next-token result. Request
       // counters, host token mirrors, and completion status still remain unchanged in this phase.
       scheduled_requests.GenerateNextTokensForTransaction(
           step_plan_, step_results_);
+      for (size_t i = 0; i < step_plan_.requests.size(); ++i) {
+        if (step_results_[i].token_appended || step_results_[i].done) {
+          staged_event_order_.push_back(i);
+        }
+      }
+      std::sort(
+          staged_event_order_.begin(), staged_event_order_.end(),
+          [this](size_t left, size_t right) {
+            return step_plan_.requests[left].scheduling_order <
+                   step_plan_.requests[right].scheduling_order;
+          });
     } catch (const std::logic_error&) {
       const auto post_processing_error = std::current_exception();
       rollback_transaction();
@@ -876,11 +890,9 @@ void Engine::RunDynamic() {
     }
 
     staged_events_.clear();
-    for (size_t i = 0; i < step_plan_.requests.size(); ++i) {
-      if (step_results_[i].token_appended || step_results_[i].done) {
-        staged_events_.push_back(
-            EventFromStep(step_plan_.requests[i].request, step_results_[i]));
-      }
+    for (size_t i : staged_event_order_) {
+      staged_events_.push_back(
+          EventFromStep(step_plan_.requests[i].request, step_results_[i]));
     }
     pending_events_.swap(staged_events_);
     pending_event_index_ = 0;

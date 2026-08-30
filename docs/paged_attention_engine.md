@@ -358,8 +358,8 @@ This distinction is important:
   transaction.
 - Draining a previously committed batch does not change model or cache state.
 - `Request::Close()` purges undrained events for that Request.
-- `HasPendingRequests()` first reclaims abandoned Requests, then is true while either the ready
-  queue or scheduler contains work.
+- `HasPendingRequests()` first reclaims abandoned Requests, then is true while either the pending
+  event queue or scheduler contains work.
 
 If the engine has previously encountered a fatal transaction or execution failure, `Run()` rethrows
 the stored error instead of attempting more work.
@@ -480,7 +480,8 @@ Reservation is all-or-nothing. If all planned blocks cannot be reserved, the eng
 
 The fixed sub-reservation, when present, admits the same rows in the same order. A request that already owns a committed fixed slot keeps it; every other request is admitted provisionally into a free slot. After resource selection and token-budget assignment, an all-resident batch is ordered by fixed slot before packed offsets are calculated. When those slots form a contiguous interval, the pool normalizes any minority bank rows to a canonical active bank, then binds that bank interval directly as model input and the corresponding inactive-bank interval as model output. New admissions and fragmented intervals retain the gather/output staging fallback. Free slots have no visible bank, so admission aligns their bank selector with a coherent resident cohort; this prevents stale parity from a previous owner from unnecessarily disabling the next direct reservation.
 
-Physical execution ordering does not change ready-notification ordering. Each row retains its logical scheduler rank, and the Engine restores that order when it publishes ready requests after the transaction commits.
+Physical execution ordering does not change event ordering. Each row retains its logical scheduler
+rank, and the Engine restores that order when it publishes the transaction's events after commit.
 
 The fixed `target_tokens` mirror the paged `target_cache_slots`, so both states commit at one token boundary. `StepPlan::fixed_state` records the fixed row count, new-slot count, and binding footprint; `Engine::StepDynamic()` then proves the reservation matches that plan exactly -- required flag, row count, new-slot count, bytes, and per-row request identity -- and fails fatally on any mismatch. A composite reservation wraps exactly one paged reservation and the Engine holds at most one at a time, so the paged split-commit contract (its constructor reserves its own `committed_tables_` headroom, and the pool permits a single live reservation) holds without any cross-reservation aggregate check.
 
@@ -666,7 +667,16 @@ Rollback performs both parts:
 1. Restore request search state and sampler state from their checkpoints.
 2. Release the composite reservation: discard any staged fixed outputs and provisional fixed slots (leaving resident slots untouched), and release every block held by the paged-cache reservation.
 
-After a successful rollback, committed request state and committed cache state match the state before the step began. The caller receives an `EngineStepError` with either `RetryableBatchAbort` or `ExecutionCapacityExceeded`, and the engine remains healthy. Calling `Run()` again with unchanged memory availability and workload composition may produce the same capacity failure.
+After a successful rollback, committed request state and committed cache state match the state
+before the step began. `Run()` translates `RetryableBatchAbort` into a `Retryable` event and
+`ExecutionCapacityExceeded` into a `CapacityBlocked` event; the engine remains healthy. Calling
+`Run()` again with unchanged memory availability and workload composition may produce the same
+failure.
+
+Planning allocation failures occur before reservation or request mutation. They propagate to the
+caller without marking the Engine unhealthy, so a later `Run()` may retry. A
+`StepPlanningConsistencyError`, by contrast, proves that committed paged and fixed ownership
+disagree and is fatal.
 
 In particular, rollback does not change the turn's generated-token count, lifecycle status,
 pending-event queue or continuation state. A retry therefore observes
@@ -684,6 +694,7 @@ The engine becomes unhealthy when it cannot prove that all components still agre
 - An unknown model execution failure occurs.
 - Rollback itself fails.
 - Any part of the commit boundary fails.
+- Planning detects inconsistent committed paged and fixed state.
 - The scheduler returns an invalid planning outcome.
 
 The engine stores the fatal error and marks every executable Turn complete with reason `Failed`.
