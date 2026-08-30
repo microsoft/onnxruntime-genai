@@ -536,6 +536,12 @@ struct StateUpdate_Element : JSON::Element {
         throw std::runtime_error("Decoder state update key_head_count must be positive");
       }
       v_.key_head_count = static_cast<int>(count);
+    } else if (name == "kind" || name == "capture_count" || name == "value" ||
+               name == "active" || name == "capsule") {
+      throw std::runtime_error(
+          "Legacy decoder state_update field '" + std::string{name} +
+          "' is no longer supported; move state-update binding templates to "
+          "model.decoder.inputs and model.decoder.outputs");
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -557,6 +563,11 @@ struct StateGroup_Element : JSON::Element {
         v_.kind = DecoderStateGroupKind::FixedConv;
       } else if (kind == "fixed_recurrent") {
         v_.kind = DecoderStateGroupKind::FixedRecurrent;
+      } else if (kind == "fixed") {
+        throw std::runtime_error(
+            "Decoder state group kind 'fixed' is no longer supported; use 'fixed_conv' or "
+            "'fixed_recurrent' and move binding templates to model.decoder.inputs and "
+            "model.decoder.outputs");
       } else {
         throw std::runtime_error("Unsupported decoder state group kind '" + std::string{kind} + "'");
       }
@@ -573,6 +584,11 @@ struct StateGroup_Element : JSON::Element {
       v_.state_update.emplace();
       state_update_ = std::make_unique<StateUpdate_Element>(*v_.state_update);
       return *state_update_;
+    }
+    if (name == "bindings") {
+      throw std::runtime_error(
+          "Legacy decoder state group bindings are no longer supported; move binding templates "
+          "to model.decoder.inputs and model.decoder.outputs");
     }
     throw JSON::unknown_value_error{};
   }

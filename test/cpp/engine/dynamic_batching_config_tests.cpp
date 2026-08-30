@@ -179,6 +179,27 @@ TEST(DecoderStateGroupsConfigTest, RejectsMissingOrUnknownKind) {
       "Unsupported decoder state group kind 'unknown'");
 }
 
+TEST(DecoderStateGroupsConfigTest, RejectsLegacySchemaWithMigrationGuidance) {
+  ExpectStateGroupError(
+      R"({"num_hidden_layers": 1, "state_groups": [{
+        "kind": "fixed", "layer_ids": [0]
+      }]})",
+      "use 'fixed_conv' or 'fixed_recurrent'");
+
+  ExpectStateGroupError(
+      R"({"num_hidden_layers": 1, "state_groups": [{
+        "kind": "fixed_conv", "layer_ids": [0],
+        "state_update": {"kind": "causal_conv", "capacity": 3}
+      }]})",
+      "Legacy decoder state_update field 'kind'");
+
+  ExpectStateGroupError(
+      R"({"num_hidden_layers": 1, "state_groups": [{
+        "kind": "fixed_conv", "layer_ids": [0], "bindings": {}
+      }]})",
+      "move binding templates to model.decoder.inputs and model.decoder.outputs");
+}
+
 TEST(DecoderStateGroupsConfigTest, AllowsIndependentFixedGroupsOnTheSameLayer) {
   EXPECT_NO_THROW(LoadDecoderConfig(
       R"({"num_hidden_layers": 1,
