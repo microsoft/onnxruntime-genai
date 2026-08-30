@@ -137,6 +137,8 @@ class FixedStateReservation {
   size_t PlannedStagingBytes() const;
   size_t NewSlotCount() const;
   bool CapturesStateUpdates() const;
+  // True when model inputs and outputs view the active and inactive persistent banks directly.
+  bool UsesDirectBindings() const;
   void CommitPrefix(size_t row, size_t step_tokens, size_t kept_tokens);
 
   // Commit is split into three phases so a composite Engine transaction can validate and stage all
@@ -192,11 +194,12 @@ class FixedStatePool {
   size_t CommittedSlotCount() const;
   size_t PersistentBytes() const;
   size_t ZeroingScratchBytes() const;
+  // Retained staging API reports the live input/output binding footprint. Direct bank views overlap
+  // PersistentBytes(); fallback and compact-update buffers use dedicated storage.
   size_t ActiveStagingBytes() const;
-  // Gather+output staging bytes a reservation of `row_count` scheduled rows will view. A pure
-  // function of the pool's tensor geometry, so composite step planning can size the transaction
-  // before the reservation exists; it equals the resulting reservation's PlannedStagingBytes() for
-  // a reservation whose rows request compact captures iff `captures_state_updates` is set.
+  // Input/output binding footprint for `row_count` scheduled rows, plus compact capture storage
+  // when requested. A pure function of tensor geometry, so composite planning can verify the
+  // reservation before its direct-binding eligibility is known.
   size_t PlannedStagingBytes(size_t row_count, bool captures_state_updates = false) const;
   bool SupportsStateUpdates() const;
   size_t StateUpdateCapacity() const;

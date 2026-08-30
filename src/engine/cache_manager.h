@@ -95,6 +95,10 @@ struct CacheManager {
     throw std::logic_error("Cache manager does not support transactional step planning.");
   }
 
+  // Reorders already-selected and budgeted rows for execution without changing request
+  // admission or per-request token budgets.
+  virtual void OrderStepForExecution(StepPlan&) const {}
+
   virtual std::unique_ptr<CacheStepReservation> ReserveStep(const StepPlan&) {
     throw std::logic_error("Cache manager does not support transactional reservation.");
   }
@@ -177,6 +181,8 @@ struct PagedCacheManager : CacheManager {
   }
 
   StepPlanningResult PlanStepResources(StepPlan& plan) const override;
+
+  void OrderStepForExecution(StepPlan& plan) const override;
 
   std::unique_ptr<CacheStepReservation> ReserveStep(const StepPlan& plan) override;
 

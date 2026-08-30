@@ -29,6 +29,14 @@ std::vector<int32_t> Prompt(int32_t seed) {
   return {base, base + 1, base + 2};
 }
 
+struct ReverseExecutionOrderCacheManager : RecordingCacheManager {
+  using RecordingCacheManager::RecordingCacheManager;
+
+  void OrderStepForExecution(StepPlan& plan) const override {
+    std::reverse(plan.requests.begin(), plan.requests.end());
+  }
+};
+
 class SchedulerContractTest : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -120,6 +128,37 @@ TEST_F(SchedulerContractTest, DynamicPreservesRequestOrder) {
   EXPECT_EQ(plan.requests[0].request, first);
   EXPECT_EQ(plan.requests[1].request, second);
   EXPECT_EQ(plan.requests[2].request, third);
+}
+
+TEST_F(SchedulerContractTest, ExecutionOrderingPreservesAssignedTokenBudgets) {
+  auto cache = std::make_shared<ReverseExecutionOrderCacheManager>(
+      model_, /*capacity=*/8);
+  model_->config_->engine.dynamic_batching->max_scheduled_tokens = 3;
+  DynamicBatchScheduler scheduler(model_, cache);
+
+  auto first = Assigned(10);
+  auto second = Assigned(20);
+  first->Params()->search.chunk_size = 1;
+  second->Params()->search.chunk_size = 3;
+  scheduler.AddRequest(first);
+  scheduler.AddRequest(second);
+  StepPlan plan;
+
+  const auto result = scheduler.PlanStep(plan);
+
+  ASSERT_TRUE(result.executable);
+  ASSERT_EQ(plan.requests.size(), 2u);
+  EXPECT_EQ(plan.requests[0].request, second);
+  EXPECT_EQ(plan.requests[0].scheduling_order, 1u);
+  EXPECT_EQ(plan.requests[0].unprocessed_token_count, 2u);
+  EXPECT_EQ(plan.requests[0].packed_token_offset, 0u);
+  EXPECT_EQ(plan.requests[0].logits_row_index, 1u);
+  EXPECT_EQ(plan.requests[1].request, first);
+  EXPECT_EQ(plan.requests[1].scheduling_order, 0u);
+  EXPECT_EQ(plan.requests[1].unprocessed_token_count, 1u);
+  EXPECT_EQ(plan.requests[1].packed_token_offset, 2u);
+  EXPECT_EQ(plan.requests[1].logits_row_index, 2u);
+  EXPECT_EQ(plan.token_count, 3u);
 }
 
 TEST_F(SchedulerContractTest, DynamicHonorsCapacityBackpressure) {

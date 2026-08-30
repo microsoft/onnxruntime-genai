@@ -1578,6 +1578,63 @@ TEST_F(EngineStepTest, CompositeCompletionRemovalFreesSlotForReadmission) {
   EXPECT_EQ(engine.cache->Snapshot().requests[0].request_id, second.get());
 }
 
+TEST_F(EngineStepTest, CompositeOrdersResidentRowsByFixedSlotAfterAdmission) {
+  model_ = LoadSyntheticCompositeModel();
+  auto engine = MakeCompositeDoublesEngine(model_, /*forced_token=*/5);
+  auto first = MintRequest(*model_, Prompt(10));
+  auto second = MintRequest(*model_, Prompt(20));
+  engine.engine->AddRequest(first);
+  engine.engine->AddRequest(second);
+  engine.executor->SetExecutionCallback([](ExecutionContext& context) {
+    for (size_t row = 0; row < context.fixed_state_slots.size(); ++row) {
+      for (const auto& binding : context.fixed_state_bindings) {
+        FillFixedOutputRow(binding, row, 10.0f + static_cast<float>(row));
+      }
+    }
+  });
+  EXPECT_EQ(engine.engine->Step(), first);
+  EXPECT_EQ(engine.engine->Step(), second);
+
+  auto fixed = engine.cache->FixedStateSnapshot();
+  ASSERT_TRUE(fixed.has_value());
+  ASSERT_EQ(FixedSlotFor(*fixed, first.get()).slot, 0u);
+  ASSERT_EQ(FixedSlotFor(*fixed, second.get()).slot, 1u);
+  first->Remove();
+
+  auto replacement = MintRequest(*model_, Prompt(30));
+  engine.engine->AddRequest(replacement);
+  engine.executor->SetExecutionCallback([](ExecutionContext& context) {
+    for (size_t row = 0; row < context.fixed_state_slots.size(); ++row) {
+      for (const auto& binding : context.fixed_state_bindings) {
+        FillFixedOutputRow(binding, row, 20.0f + static_cast<float>(row));
+      }
+    }
+  });
+  EXPECT_EQ(engine.engine->Step(), second);
+  EXPECT_EQ(engine.engine->Step(), replacement);
+
+  fixed = engine.cache->FixedStateSnapshot();
+  ASSERT_TRUE(fixed.has_value());
+  ASSERT_EQ(FixedSlotFor(*fixed, replacement.get()).slot, 0u);
+  ASSERT_EQ(FixedSlotFor(*fixed, second.get()).slot, 1u);
+
+  engine.executor->SetExecutionCallback(
+      [&](ExecutionContext& context) {
+        ASSERT_EQ(context.plan->fixed_state.new_slot_count, 0u);
+        ASSERT_EQ(context.plan->requests.size(), 2u);
+        EXPECT_EQ(context.plan->requests[0].request_id, replacement.get());
+        EXPECT_EQ(context.plan->requests[1].request_id, second.get());
+        EXPECT_EQ(context.fixed_state_slots[0].slot, 0u);
+        EXPECT_EQ(context.fixed_state_slots[1].slot, 1u);
+        for (const auto& binding : context.fixed_state_bindings) {
+          FillFixedOutputRow(binding, 0, 30.0f);
+          FillFixedOutputRow(binding, 1, 31.0f);
+        }
+      });
+  EXPECT_EQ(engine.engine->Step(), second);
+  EXPECT_EQ(engine.engine->Step(), replacement);
+}
+
 }  // namespace
 }  // namespace test
 }  // namespace Generators

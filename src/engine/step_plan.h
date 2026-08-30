@@ -62,6 +62,7 @@ struct RequestStepPlan {
   size_t whole_sequence_cache_slots{};  // KV slots the whole sequence needs; admitted and reserved on this.
   bool is_prefill{};
   bool newly_admitted{};
+  size_t scheduling_order{};  // Logical scheduler order before physical execution ordering.
 };
 
 // Fixed decoder-state demand for a step, planned atomically with the paged-block demand so the
@@ -72,7 +73,7 @@ struct FixedStateResourcePlan {
   bool required{};          // The plan needs fixed slots this step (the model has fixed groups).
   size_t row_count{};       // Fixed rows the reservation must expose, one per scheduled request.
   size_t new_slot_count{};  // Rows that admit a fresh request and consume a free fixed slot.
-  size_t staging_bytes{};   // Gather+output staging bytes the reservation must allocate.
+  size_t staging_bytes{};   // Input/output binding footprint; direct views overlap persistent banks.
 };
 
 struct StepPlan {

@@ -510,6 +510,25 @@ StepPlanningResult PagedCacheManager::PlanStepResources(StepPlan& plan) const {
   return result;
 }
 
+void PagedCacheManager::OrderStepForExecution(StepPlan& plan) const {
+  if (!fixed_state_pool_ ||
+      std::any_of(plan.requests.begin(), plan.requests.end(),
+                  [](const RequestStepPlan& entry) { return entry.newly_admitted; })) {
+    return;
+  }
+
+  std::sort(plan.requests.begin(), plan.requests.end(),
+            [this](const RequestStepPlan& left, const RequestStepPlan& right) {
+              const auto left_state = fixed_state_pool_->CommittedState(left.request_id);
+              const auto right_state = fixed_state_pool_->CommittedState(right.request_id);
+              if (!left_state || !right_state) {
+                throw StepPlanningConsistencyError(
+                    "Cannot order a resident batch with missing fixed state.");
+              }
+              return left_state->handle.slot < right_state->handle.slot;
+            });
+}
+
 std::unique_ptr<CacheStepReservation> PagedCacheManager::ReserveStep(const StepPlan& plan) {
   return std::make_unique<CompositeCacheStepReservation>(
       *key_value_cache_, fixed_state_pool_.get(), cache_allocated_requests_, plan);
