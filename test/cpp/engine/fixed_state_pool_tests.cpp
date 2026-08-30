@@ -287,6 +287,7 @@ TEST_F(FixedStatePoolTest, StagedOutputsBecomeVisibleOnlyAfterCommit) {
   {
     auto requests = One(kRequestA);
     auto reservation = pool->Reserve(requests);
+    ASSERT_TRUE(reservation.UsesDirectBindings());
     for (const auto& binding : reservation.Bindings()) {
       ExpectInputRow(binding, 0, 4.0f);
       FillStagedRow(binding, 0, 9.0f);
@@ -362,6 +363,113 @@ TEST_F(FixedStatePoolTest, RepeatedCommitsAdvanceGenerationAndTokens) {
   auto requests = One(kRequestA);
   auto reservation = pool->Reserve(requests);
   ExpectInputRows(reservation, 0, 2.0f);
+}
+
+TEST_F(FixedStatePoolTest, ResidentRowsBindDirectlyAndAlternateBanks) {
+  auto pool = MakePool(2);
+  MakeResident(*pool, kRequestA, 11.0f);
+  MakeResident(*pool, kRequestB, 22.0f);
+
+  const std::array<Request, 2> requests{Request{kRequestA, 2}, Request{kRequestB, 2}};
+  void* first_input{};
+  void* first_output{};
+  {
+    auto reservation = pool->Reserve(requests);
+    ASSERT_TRUE(reservation.UsesDirectBindings());
+    ASSERT_EQ(reservation.Bindings().size(), 4u);
+    for (const auto& binding : reservation.Bindings()) {
+      ExpectInputRow(binding, 0, 11.0f);
+      ExpectInputRow(binding, 1, 22.0f);
+    }
+    first_input = reservation.Bindings()[0].input->GetTensorMutableData<void>();
+    first_output = reservation.Bindings()[0].output->GetTensorMutableData<void>();
+    EXPECT_NE(first_input, first_output);
+    FillStagedRows(reservation, 0, 33.0f);
+    FillStagedRows(reservation, 1, 44.0f);
+    reservation.Commit();
+  }
+
+  auto reservation = pool->Reserve(requests);
+  ASSERT_TRUE(reservation.UsesDirectBindings());
+  EXPECT_EQ(reservation.Bindings()[0].input->GetTensorMutableData<void>(), first_output);
+  EXPECT_EQ(reservation.Bindings()[0].output->GetTensorMutableData<void>(), first_input);
+  ExpectInputRows(reservation, 0, 33.0f);
+  ExpectInputRows(reservation, 1, 44.0f);
+}
+
+TEST_F(FixedStatePoolTest, DirectBindingsFallBackForUnsupportedRowLayouts) {
+  auto pool = MakePool(3);
+  MakeResident(*pool, kRequestA, 11.0f);
+  MakeResident(*pool, kRequestB, 22.0f);
+
+  {
+    const std::array<Request, 2> reordered{Request{kRequestB, 2}, Request{kRequestA, 2}};
+    auto reservation = pool->Reserve(reordered);
+    EXPECT_FALSE(reservation.UsesDirectBindings());
+    reservation.Discard();
+  }
+  {
+    const std::array<Request, 2> with_admission{Request{kRequestA, 2}, Request{kRequestC, 1}};
+    auto reservation = pool->Reserve(with_admission);
+    EXPECT_FALSE(reservation.UsesDirectBindings());
+    reservation.Discard();
+  }
+  {
+    auto reservation = pool->Reserve(One(kRequestA, 2));
+    ASSERT_TRUE(reservation.UsesDirectBindings());
+    FillStagedRows(reservation, 0, 33.0f);
+    reservation.Commit();
+  }
+  {
+    const std::array<Request, 2> mixed_banks{Request{kRequestA, 3}, Request{kRequestB, 2}};
+    auto reservation = pool->Reserve(mixed_banks);
+    ASSERT_TRUE(reservation.UsesDirectBindings());
+    ExpectInputRows(reservation, 0, 33.0f);
+    ExpectInputRows(reservation, 1, 22.0f);
+  }
+}
+
+TEST_F(FixedStatePoolTest, DirectBindingsSupportContiguousRowsAtNonzeroOffset) {
+  auto pool = MakePool(3);
+  const auto handle_a = MakeResident(*pool, kRequestA, 11.0f);
+  MakeResident(*pool, kRequestB, 22.0f);
+  MakeResident(*pool, kRequestC, 33.0f);
+  pool->Release(handle_a);
+
+  const std::array<Request, 2> requests{Request{kRequestB, 2}, Request{kRequestC, 2}};
+  auto reservation = pool->Reserve(requests);
+  ASSERT_TRUE(reservation.UsesDirectBindings());
+  ASSERT_EQ(reservation.Handles()[0].slot, 1u);
+  ASSERT_EQ(reservation.Handles()[1].slot, 2u);
+  ExpectInputRows(reservation, 0, 22.0f);
+  ExpectInputRows(reservation, 1, 33.0f);
+}
+
+TEST_F(FixedStatePoolTest, AdmissionAlignsReusedSlotWithResidentBank) {
+  auto pool = MakePool(2);
+  const auto handle_a = MakeResident(*pool, kRequestA, 11.0f);
+  MakeResident(*pool, kRequestB, 22.0f);
+  pool->Release(handle_a);
+  {
+    auto reservation = pool->Reserve(One(kRequestB, 2));
+    ASSERT_TRUE(reservation.UsesDirectBindings());
+    FillStagedRows(reservation, 0, 23.0f);
+    reservation.Commit();
+  }
+  {
+    const std::array<Request, 2> admission{Request{kRequestC, 1}, Request{kRequestB, 3}};
+    auto reservation = pool->Reserve(admission);
+    ASSERT_FALSE(reservation.UsesDirectBindings());
+    FillStagedRows(reservation, 0, 33.0f);
+    FillStagedRows(reservation, 1, 24.0f);
+    reservation.Commit();
+  }
+
+  const std::array<Request, 2> resident{Request{kRequestC, 2}, Request{kRequestB, 4}};
+  auto reservation = pool->Reserve(resident);
+  ASSERT_TRUE(reservation.UsesDirectBindings());
+  ExpectInputRows(reservation, 0, 33.0f);
+  ExpectInputRows(reservation, 1, 24.0f);
 }
 
 TEST_F(FixedStatePoolTest, RejectsCommitThatRegressesCommittedTokens) {
@@ -561,6 +669,7 @@ TEST_F(FixedStatePoolTest, CompactPartialAcceptanceReplaysConvAndGdn) {
   MakeResident(*pool, kRequestA, 4.0f);
   {
     auto reservation = pool->Reserve(One(kRequestA, 4, 3));
+    ASSERT_TRUE(reservation.UsesDirectBindings());
     FillStagedRows(reservation, 0, 99.0f);
     const std::array<float, 6> conv_values{10.0f, 11.0f, 20.0f, 21.0f, 30.0f, 31.0f};
     const std::array<float, 6> decay{0.5f, 0.25f, 1.0f, 0.5f, 1.0f, 1.0f};
@@ -589,6 +698,75 @@ TEST_F(FixedStatePoolTest, CompactPartialAcceptanceReplaysConvAndGdn) {
   ExpectInputRow(reservation.Bindings()[1], 0, expected_conv);
   ExpectInputRow(reservation.Bindings()[2], 0, expected_gdn);
   ExpectInputRow(reservation.Bindings()[3], 0, expected_gdn);
+}
+
+TEST_F(FixedStatePoolTest, DirectBindingsMixPartialAndFullAcceptance) {
+  auto pool = MakePool(2);
+  MakeResident(*pool, kRequestA, 4.0f);
+  MakeResident(*pool, kRequestB, 5.0f);
+  {
+    auto reservation = pool->Reserve(One(kRequestA, 2));
+    ASSERT_TRUE(reservation.UsesDirectBindings());
+    FillStagedRows(reservation, 0, 4.0f);
+    reservation.Commit();
+  }
+
+  const std::array<Request, 2> requests{
+      Request{kRequestA, 4, 3}, Request{kRequestB, 4, 3}};
+  {
+    auto reservation = pool->Reserve(requests);
+    ASSERT_TRUE(reservation.UsesDirectBindings());
+    FillStagedRows(reservation, 0, 99.0f);
+    FillStagedRows(reservation, 1, 77.0f);
+    const std::array<float, 6> conv_values{10.0f, 11.0f, 20.0f, 21.0f, 30.0f, 31.0f};
+    const std::array<float, 6> decay{0.5f, 0.25f, 1.0f, 0.5f, 1.0f, 1.0f};
+    const std::array<float, 6> key{2.0f, 3.0f, 4.0f, 5.0f, 1.0f, 1.0f};
+    const std::array<float, 12> delta{
+        1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f,
+        7.0f, 8.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    for (const auto& binding : reservation.Bindings()) {
+      if (binding.state_update_kind ==
+          Config::Model::Decoder::StateUpdateKind::CausalConv) {
+        FillConvUpdates(binding, 0, conv_values);
+      } else {
+        FillGdnUpdates(binding, 0, decay, key, delta);
+      }
+    }
+    reservation.CommitPrefix(0, 4, 2);
+    reservation.CommitPrefix(1, 4, 4);
+    reservation.Commit();
+  }
+
+  EXPECT_EQ(pool->CommittedTokens(pool->HandleFor(kRequestA)), 2u);
+  EXPECT_EQ(pool->CommittedTokens(pool->HandleFor(kRequestB)), 4u);
+  const std::array<Request, 2> committed{
+      Request{kRequestA, 2}, Request{kRequestB, 4}};
+  auto reservation = pool->Reserve(committed);
+  ASSERT_TRUE(reservation.UsesDirectBindings());
+  const std::array<float, 6> expected_conv{4.0f, 10.0f, 20.0f, 4.0f, 11.0f, 21.0f};
+  const std::array<float, 8> expected_gdn{
+      24.0f, 30.0f, 30.0f, 38.0f, 31.5f, 40.0f, 36.5f, 46.5f};
+  ExpectInputRow(reservation.Bindings()[0], 0, expected_conv);
+  ExpectInputRow(reservation.Bindings()[2], 0, expected_gdn);
+  ExpectInputRows(reservation, 1, 77.0f);
+}
+
+TEST_F(FixedStatePoolTest, DirectBindingStorageOutlivesPool) {
+  std::optional<FixedStateReservation> reservation;
+  {
+    auto pool = MakePool(1);
+    MakeResident(*pool, kRequestA, 4.0f);
+    reservation.emplace(pool->Reserve(One(kRequestA, 2)));
+    ASSERT_TRUE(reservation->UsesDirectBindings());
+    ExpectInputRows(*reservation, 0, 4.0f);
+    FillStagedRows(*reservation, 0, 7.0f);
+  }
+
+  EXPECT_EQ(reservation->State(), FixedStateReservationState::Failed);
+  ExpectInputRows(*reservation, 0, 4.0f);
+  for (const auto& binding : reservation->Bindings()) {
+    EXPECT_FLOAT_EQ(binding.output->GetTensorData<float>()[0], 7.0f);
+  }
 }
 
 #if USE_CUDA
@@ -628,6 +806,7 @@ TEST(CudaFixedStatePoolTest, CompactPartialAcceptanceReplaysConvAndGdn) {
   }
   {
     auto reservation = pool.Reserve(One(kRequestA, 4, 3));
+    ASSERT_TRUE(reservation.UsesDirectBindings());
     for (const auto& binding : reservation.Bindings()) {
       fill_tensor_value(*binding.output, 99.0f);
     }

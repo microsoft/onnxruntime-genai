@@ -268,17 +268,22 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     throw StepPlanningConsistencyError(error.what());
   }
 
+  for (size_t index = 0; index < plan.requests.size(); ++index) {
+    auto& entry = plan.requests[index];
+    entry.scheduling_order = index;
+    entry.unprocessed_token_count = token_counts[index];
+    entry.target_cache_slots = RequiredSlots(
+        selected_processed_lengths[index],
+        entry.unprocessed_token_count);
+  }
+  cache_manager_->OrderStepForExecution(plan);
+
   // VarlenDecoderIO concatenates every request's pending tokens into one flat input. These offsets
   // describe that packed layout and identify the last logits row for each request, which is the row
   // used to sample its next token.
   size_t packed_token_offset = 0;
   plan.graph_capture_eligible = true;
-  for (size_t i = 0; i < plan.requests.size(); ++i) {
-    auto& entry = plan.requests[i];
-    entry.unprocessed_token_count = token_counts[i];
-    entry.target_cache_slots = RequiredSlots(
-        selected_processed_lengths[i],
-        entry.unprocessed_token_count);
+  for (auto& entry : plan.requests) {
     entry.packed_token_offset = packed_token_offset;
     entry.logits_row_index =
         packed_token_offset + entry.unprocessed_token_count - 1;
