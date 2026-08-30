@@ -56,6 +56,17 @@ def test_config(test_data_path):
     config.append_provider("slide rule")
 
 
+def test_tokenizer_create_from_config_and_path(test_data_path):
+    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    text = "She sells sea shells by the sea shore."
+
+    config = og.Config(model_path)
+    tokenizer_from_config = og.Tokenizer(config)
+    tokenizer_from_path = og.Tokenizer(model_path)
+
+    assert tokenizer_from_path.decode(tokenizer_from_config.encode(text)) == text
+
+
 def test_telemetry_control():
     og.disable_telemetry_events()
     og.enable_telemetry_events()

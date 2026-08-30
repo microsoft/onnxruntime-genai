@@ -196,7 +196,6 @@ def create_config(output_dir):
                     "cumulative_sequence_lengths": "cumulative_sequence_lengths",
                     "past_sequence_lengths": "past_sequence_lengths",
                     "attention_metadata": "attention_metadata",
-                    "attention_metadata": "attention_metadata",
                     "past_key_names": "past_key_values.%d.key",
                     "past_value_names": "past_key_values.%d.value",
                 },

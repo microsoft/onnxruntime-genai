@@ -79,16 +79,31 @@ TEST(DecoderStateGroupsConfigTest, PreservesLegacyManifestAbsence) {
   EXPECT_FALSE(config.model.decoder.state_groups.has_value());
 }
 
+TEST(DecoderStateGroupsConfigTest, UsesDefaultStateUpdateBindings) {
+  const auto config = LoadDecoderConfig(R"({ "state_update_capacity": 3 })");
+
+  EXPECT_EQ(config.model.decoder.inputs.state_update_capture_count, Config::Defaults::StateUpdateCaptureCountName);
+  EXPECT_EQ(config.model.decoder.inputs.state_update_active, Config::Defaults::StateUpdateActiveName);
+  EXPECT_EQ(config.model.decoder.outputs.state_update_conv_value_names, Config::Defaults::StateUpdateConvValueName);
+  EXPECT_EQ(config.model.decoder.outputs.state_update_recurrent_capsule_names,
+            Config::Defaults::StateUpdateRecurrentCapsuleName);
+}
+
 TEST(DecoderStateGroupsConfigTest, ParsesSparseHybridManifest) {
   const auto config = LoadDecoderConfig(R"({
     "num_hidden_layers": 4,
+    "state_update_capacity": 3,
     "inputs": {
       "past_conv_names": "past_key_values.%d.conv_state",
-      "past_recurrent_names": "past_key_values.%d.recurrent_state"
+      "past_recurrent_names": "past_key_values.%d.recurrent_state",
+      "state_update_capture_count": "state_update_capture_count",
+      "state_update_active": "state_update_active"
     },
     "outputs": {
       "present_conv_names": "present.%d.conv_state",
-      "present_recurrent_names": "present.%d.recurrent_state"
+      "present_recurrent_names": "present.%d.recurrent_state",
+      "state_update_conv_value_names": "state_update.%d.conv_value",
+      "state_update_recurrent_capsule_names": "state_update.%d.recurrent_capsule"
     },
     "state_groups": [
       {
@@ -119,14 +134,18 @@ TEST(DecoderStateGroupsConfigTest, ParsesSparseHybridManifest) {
   EXPECT_EQ(config.model.decoder.inputs.past_recurrent_names, "past_key_values.%d.recurrent_state");
   EXPECT_EQ(config.model.decoder.outputs.present_conv_names, "present.%d.conv_state");
   EXPECT_EQ(config.model.decoder.outputs.present_recurrent_names, "present.%d.recurrent_state");
+  EXPECT_EQ(config.model.decoder.state_update_capacity, 3);
+  EXPECT_EQ(config.model.decoder.inputs.state_update_capture_count, "state_update_capture_count");
+  EXPECT_EQ(config.model.decoder.inputs.state_update_active, "state_update_active");
+  EXPECT_EQ(config.model.decoder.outputs.state_update_conv_value_names, "state_update.%d.conv_value");
+  EXPECT_EQ(config.model.decoder.outputs.state_update_recurrent_capsule_names, "state_update.%d.recurrent_capsule");
 }
 
 TEST(DecoderStateGroupsConfigTest, OverlayValidationIsTransactional) {
   auto config = LoadDecoderConfig(R"({
     "num_hidden_layers": 1,
     "state_groups": [{
-      "kind": "fixed_conv",
-      "layer_ids": [0]
+      "kind": "fixed_conv", "layer_ids": [0]
     }]
   })");
 
@@ -134,8 +153,7 @@ TEST(DecoderStateGroupsConfigTest, OverlayValidationIsTransactional) {
       OverlayConfig(config, R"({
         "model": {"decoder": {
           "state_groups": [{
-            "kind": "fixed_conv",
-            "layer_ids": [1]
+            "kind": "fixed_conv", "layer_ids": [1]
           }]
         }}
       })"),
@@ -159,6 +177,27 @@ TEST(DecoderStateGroupsConfigTest, RejectsMissingOrUnknownKind) {
         "kind": "unknown", "layer_ids": [0]
       }]})",
       "Unsupported decoder state group kind 'unknown'");
+}
+
+TEST(DecoderStateGroupsConfigTest, RejectsLegacySchemaWithMigrationGuidance) {
+  ExpectStateGroupError(
+      R"({"num_hidden_layers": 1, "state_groups": [{
+        "kind": "fixed", "layer_ids": [0]
+      }]})",
+      "use 'fixed_conv' or 'fixed_recurrent'");
+
+  ExpectStateGroupError(
+      R"({"num_hidden_layers": 1, "state_groups": [{
+        "kind": "fixed_conv", "layer_ids": [0],
+        "state_update": {"kind": "causal_conv", "capacity": 3}
+      }]})",
+      "Legacy decoder state_update field 'kind'");
+
+  ExpectStateGroupError(
+      R"({"num_hidden_layers": 1, "state_groups": [{
+        "kind": "fixed_conv", "layer_ids": [0], "bindings": {}
+      }]})",
+      "move binding templates to model.decoder.inputs and model.decoder.outputs");
 }
 
 TEST(DecoderStateGroupsConfigTest, AllowsIndependentFixedGroupsOnTheSameLayer) {

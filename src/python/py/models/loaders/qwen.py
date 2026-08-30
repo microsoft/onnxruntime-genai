@@ -68,7 +68,7 @@ class QwenMTPModel:
         embed_keys = {"model.embed_tokens.weight", "model.language_model.embed_tokens.weight"}
         for shard in shards:
             with safetensors_torch.safe_open(shard, framework="pt") as safetensors_file:
-                for key in safetensors_file:
+                for key in safetensors_file.keys():
                     if key.startswith("mtp."):
                         mtp_state[key] = safetensors_file.get_tensor(key)
                     elif key in embed_keys:

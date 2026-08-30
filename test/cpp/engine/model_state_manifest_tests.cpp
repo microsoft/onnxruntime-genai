@@ -137,6 +137,24 @@ std::string CaptureValidationError(const ModelStateManifest& manifest,
   return {};
 }
 
+TEST(ModelStateManifestTest, ReportsStateGroupCapabilities) {
+  const ModelStateManifest hybrid{MakeSparseDecoder()};
+  EXPECT_TRUE(hybrid.HasStateGroupKind(
+      Config::Model::Decoder::StateGroupKind::PagedKeyValue));
+  EXPECT_TRUE(hybrid.HasStateGroupKind(
+      Config::Model::Decoder::StateGroupKind::FixedConv));
+  EXPECT_TRUE(hybrid.HasStateGroupKind(
+      Config::Model::Decoder::StateGroupKind::FixedRecurrent));
+  EXPECT_TRUE(hybrid.HasFixedStateGroups());
+
+  Config::Model::Decoder legacy;
+  legacy.num_hidden_layers = 4;
+  const ModelStateManifest dense{legacy};
+  EXPECT_FALSE(dense.HasStateGroupKind(
+      Config::Model::Decoder::StateGroupKind::PagedKeyValue));
+  EXPECT_FALSE(dense.HasFixedStateGroups());
+}
+
 TEST(ModelStateManifestTest, ValidatesEveryExpandedBinding) {
   const ModelStateManifest manifest{MakeSparseDecoder()};
   const auto metadata = MakeValidMetadata();
@@ -222,7 +240,9 @@ TEST(ModelStateManifestTest, DecoderModelLoadValidatesDecoderBindings) {
   const auto invalid_overlay = R"({
     "model": {"decoder": {
       "outputs": {"present_key_names": "missing.%d.key"},
-      "state_groups": [{"kind": "paged_kv", "layer_ids": [0]}]
+      "state_groups": [{
+        "kind": "paged_kv", "layer_ids": [0]
+      }]
     }}
   })";
   auto invalid_config = std::make_unique<Config>(model_path, invalid_overlay);
@@ -233,20 +253,38 @@ TEST(ModelStateManifestTest, DecoderModelLoadsWithValidDecoderBindings) {
   const auto model_path = fs::path{std::string{MODEL_PATH "engine/dummy-decoder"}};
   const auto valid_overlay = R"({
     "model": {"decoder": {
-      "state_groups": [{"kind": "paged_kv", "layer_ids": [0]}]
+      "state_groups": [{
+        "kind": "paged_kv", "layer_ids": [0]
+      }]
     }}
   })";
   auto valid_config = std::make_unique<Config>(model_path, valid_overlay);
   EXPECT_NO_THROW(CreateModel(GetOrtEnv(), std::move(valid_config)));
 }
 
-TEST(ModelStateManifestTest, RejectsFixedDynamicEngineContract) {
+TEST(ModelStateManifestTest, AcceptsFixedDynamicEngineContract) {
+  // Packed hybrid IO binds fixed tensors at the same boundary where compatibility is enabled.
   auto decoder = MakeSparseDecoder();
+  EXPECT_NO_THROW(
+      ModelStateManifest::ValidateDynamicEngineCompatibility(decoder));
+}
+
+TEST(ModelStateManifestTest, RejectsFixedGroupsWithoutPagedGroup) {
+  // Enabling fixed groups must not weaken the "exactly one paged_kv group" rule: a decoder that
+  // declares only fixed groups still has no paged pool to run through and is rejected.
+  auto decoder = MakeSparseDecoder();
+  decoder.state_groups->erase(
+      std::remove_if(decoder.state_groups->begin(), decoder.state_groups->end(),
+                     [](const auto& group) {
+                       return group.kind ==
+                              Config::Model::Decoder::StateGroupKind::PagedKeyValue;
+                     }),
+      decoder.state_groups->end());
   try {
     ModelStateManifest::ValidateDynamicEngineCompatibility(decoder);
-    FAIL() << "Expected the fixed state contract to be rejected";
+    FAIL() << "Expected a decoder without a paged_kv group to be rejected";
   } catch (const std::runtime_error& error) {
-    EXPECT_NE(std::string{error.what()}.find("fixed decoder state"), std::string::npos) << error.what();
+    EXPECT_NE(std::string{error.what()}.find("paged_kv"), std::string::npos) << error.what();
   }
 }
 

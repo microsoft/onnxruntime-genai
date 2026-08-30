@@ -4,6 +4,7 @@
 #include "engine.h"
 #include "admission.h"
 #include "decode_first_scheduler_policy.h"
+#include "request_index.h"
 #include "sequence_positions.h"
 
 namespace Generators {
@@ -147,6 +148,7 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
   plan.scheduled_request_limit = 0;
   plan.token_count = 0;
   plan.proposed_block_table_columns = 0;
+  plan.fixed_state = {};
   plan.graph_capture_eligible = false;
 
   struct Candidate {
@@ -166,12 +168,14 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     const bool valid_status =
         newly_admitted ? IsQueued(snapshot.status) : IsExecutable(snapshot.status);
     if (!valid_status) {
-      throw std::runtime_error("Request status is invalid for dynamic step planning.");
+      throw StepPlanningConsistencyError(
+          "Request status is invalid for dynamic step planning.");
     }
     const auto remaining_token_count =
         snapshot.current_sequence_length - snapshot.processed_sequence_length;
     if (remaining_token_count <= 0) {
-      throw std::runtime_error("Cannot plan a request with no unprocessed tokens.");
+      throw StepPlanningConsistencyError(
+          "Cannot plan a request with no unprocessed tokens.");
     }
 
     Candidate candidate;
@@ -233,35 +237,53 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     return result;
   }
 
+  RequestIndex candidate_index{candidates.size()};
+  for (size_t index = 0; index < candidates.size(); ++index) {
+    if (!candidate_index.Insert(
+            candidates[index].entry.request_id, index)) {
+      throw StepPlanningConsistencyError(
+          "Scheduler candidates contain an invalid or duplicate request.");
+    }
+  }
   std::vector<DecodeFirstBudgetCandidate> selected_candidates;
   std::vector<size_t> selected_processed_lengths;
   selected_candidates.reserve(plan.requests.size());
   selected_processed_lengths.reserve(plan.requests.size());
   for (const auto& entry : plan.requests) {
-    const auto candidate = std::find_if(
-        candidates.begin(), candidates.end(),
-        [&entry](const Candidate& value) {
-          return value.entry.request_id == entry.request_id;
-        });
-    if (candidate == candidates.end())
-      throw std::logic_error("Cache planning selected an unknown request.");
-    selected_candidates.push_back(candidate->budget);
-    selected_processed_lengths.push_back(candidate->processed_sequence_length);
+    const auto candidate_index_value =
+        candidate_index.Find(entry.request_id);
+    if (!candidate_index_value)
+      throw StepPlanningConsistencyError(
+          "Cache planning selected an unknown request.");
+    const auto& candidate = candidates[*candidate_index_value];
+    selected_candidates.push_back(candidate.budget);
+    selected_processed_lengths.push_back(
+        candidate.processed_sequence_length);
   }
-  const auto token_counts = AllocateDecodeFirstTokenBudget(
-      selected_candidates, dynamic_batching.max_scheduled_tokens);
+  std::vector<size_t> token_counts;
+  try {
+    token_counts = AllocateDecodeFirstTokenBudget(
+        selected_candidates, dynamic_batching.max_scheduled_tokens);
+  } catch (const std::invalid_argument& error) {
+    throw StepPlanningConsistencyError(error.what());
+  }
+
+  for (size_t index = 0; index < plan.requests.size(); ++index) {
+    auto& entry = plan.requests[index];
+    entry.scheduling_order = index;
+    entry.unprocessed_token_count = token_counts[index];
+    entry.target_cache_slots = RequiredSlots(
+        selected_processed_lengths[index],
+        entry.unprocessed_token_count);
+  }
+  cache_manager_->OrderStepForExecution(plan);
 
   // VarlenDecoderIO concatenates every request's pending tokens into one flat input. These offsets
   // describe that packed layout and identify the last logits row for each request, which is the row
   // used to sample its next token.
   size_t packed_token_offset = 0;
   plan.graph_capture_eligible = true;
-  for (size_t i = 0; i < plan.requests.size(); ++i) {
-    auto& entry = plan.requests[i];
-    entry.unprocessed_token_count = token_counts[i];
-    entry.target_cache_slots = RequiredSlots(
-        selected_processed_lengths[i],
-        entry.unprocessed_token_count);
+  for (auto& entry : plan.requests) {
     entry.packed_token_offset = packed_token_offset;
     entry.logits_row_index =
         packed_token_offset + entry.unprocessed_token_count - 1;

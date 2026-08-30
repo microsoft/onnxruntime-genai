@@ -65,5 +65,7 @@ void LaunchFinalizeCrossQK(cudaStream_t stream,
 // by `descs` (device memory, {base, slot_bytes} pairs). One launch replaces `count` memcpys.
 void LaunchCopyStateSlots(const void* descs, int count, int src_slot, int dst_slot, cudaStream_t stream);
 
+void LaunchReplayStateUpdates(const void* descs, int count, cudaStream_t stream);
+
 }  // namespace cuda
 }  // namespace Generators

@@ -55,6 +55,7 @@ class Model:
         self.context_length_attrs = {
             "state_window": 0,                                                                                                       # Retained per-position recurrent/conv states
             "state_window_dims": [],                                                                                                 # Optional leading dimensions for state windows
+            "state_update_capacity": 0,                                                                                              # Per-token state transitions captured compactly by a forward
             "window_kv_cache": True,                                                                                                 # Use bounded KV caches for sliding-attention layers
             "window_kv_cache_slack": 0,                                                                                              # Positions beyond the window; 0 uses the EP default
         }
@@ -520,6 +521,11 @@ class Model:
         # Leading-axis window extent to splice into the state shapes, or none when unwindowed.
         self.context_length_attrs["state_window_dims"] = [state_window] if state_window else []
 
+        # Instead of retaining a window of whole states, a forward can emit up to N compact per-token
+        # transitions (a conv value plus a recurrent capsule per layer) that the engine replays to land
+        # on any accepted prefix. 0 (the default) omits the capture I/O entirely.
+        self.context_length_attrs["state_update_capacity"] = int(self.extra_options.get("state_update_capacity", 0))
+
         # Zero lets the runtime choose the EP-specific number of positions retained beyond the window.
         self.context_length_attrs["window_kv_cache_slack"] = 0
 
@@ -612,6 +618,22 @@ class Model:
         self.include_hidden_states = self.extra_options.get("include_hidden_states", False)
         self.prune_lm_head = self.extra_options.get("prune_lm_head", False)
 
+        # Auxiliary hidden states for an EAGLE3/DFlash-style drafter. Entry `i` is the residual
+        # stream *entering* decoder layer i, which only exists as a tensor inside layer i's skip
+        # layer norm -- taking the layer boundary instead is an off-by-one that silently yields a
+        # drafter whose acceptance rate saturates at 1.000.
+        aux_hidden_state_layers = self.extra_options.get("aux_hidden_state_layers", "")
+        try:
+            self.aux_hidden_state_layers = [
+                int(layer_id) for layer_id in str(aux_hidden_state_layers).split(",") if layer_id.strip()
+            ]
+        except ValueError as error:
+            raise ValueError(
+                "aux_hidden_state_layers must be a comma-separated list of integers, "
+                f"got {aux_hidden_state_layers!r}."
+            ) from error
+        self.aux_hidden_state_taps = {}
+
         if self.prune_lm_head and self.exclude_lm_head:
             self.prune_lm_head = False
 
@@ -625,6 +647,19 @@ class Model:
 
         if not (self.include_hidden_states or self.exclude_lm_head):
             del self.output_names["hidden_states"]
+
+        if self.aux_hidden_state_layers:
+            invalid = [i for i in self.aux_hidden_state_layers if not 1 <= i < self.num_layers]
+            if invalid:
+                raise ValueError(
+                    f"aux_hidden_state_layers {invalid} are outside [1, {self.num_layers}); entry i is the "
+                    "residual stream entering decoder layer i."
+                )
+            self.output_names["aux_hidden_states"] = "aux_hidden_states"
+            self.output_types["aux_hidden_states"] = self.io_dtype
+            self.output_shapes["aux_hidden_states"] = self.make_hidden_state_shape(
+                last_dim=self.hidden_size * len(self.aux_hidden_state_layers)
+            )
 
         if self.exclude_lm_head:
             del self.output_names["logits"]
@@ -726,11 +761,12 @@ class Model:
             valid_paged_configurations = {
                 ("cuda", ir.DataType.FLOAT16),
                 ("cuda", ir.DataType.BFLOAT16),
+                ("webgpu", ir.DataType.FLOAT16),
             }
             if (self.ep, self.io_dtype) not in valid_paged_configurations:
                 raise NotImplementedError(
-                    "PagedAttention (use_paged_attention=true) is currently only supported for the CUDA "
-                    f"execution provider with FP16 or BF16 precision, not ({self.ep}, {self.io_dtype})."
+                    "PagedAttention (use_paged_attention=true) requires CUDA with FP16/BF16 or WebGPU "
+                    f"with FP16, not ({self.ep}, {self.io_dtype})."
                 )
             block_size = int(self.extra_options.get("paged_block_size", 256))
             self.attention_attrs["paged_block_size"] = block_size
@@ -750,9 +786,9 @@ class Model:
                 and not self.extra_options.get("disable_qkv_fusion", False)
             )
 
-            # PagedAttention fuses the rotary embeddings, so `position_ids` is not needed as an input.
-            self.attention_attrs["use_rope_in_attn"] = True
-            if "position_ids" in self.input_names:
+            # Some architectures require a separate RoPE op before PagedAttention.
+            self.attention_attrs["use_rope_in_attn"] = self.is_fused_rope_supported()
+            if self.attention_attrs["use_rope_in_attn"] and "position_ids" in self.input_names:
                 del self.input_names["position_ids"]
 
         elif self.is_gqa_supported():
@@ -1128,6 +1164,10 @@ class Model:
             inputs["past_conv_names"] = "past.%d.conv"
         if "past.recurrent" in self.input_names:
             inputs["past_recurrent_names"] = "past.%d.recurrent"
+        if "state_update.capture_count" in self.input_names:
+            inputs["state_update_capture_count"] = self.input_names["state_update.capture_count"]
+        if "state_update.active" in self.input_names:
+            inputs["state_update_active"] = self.input_names["state_update.active"]
 
         # Create outputs dict
         outputs = {}
@@ -1141,6 +1181,10 @@ class Model:
             outputs["present_conv_names"] = "present.%d.conv"
         if "present.recurrent" in self.output_names:
             outputs["present_recurrent_names"] = "present.%d.recurrent"
+        if "state_update.conv_value" in self.output_names:
+            outputs["state_update_conv_value_names"] = "state_update.%d.conv_value"
+        if "state_update.recurrent_capsule" in self.output_names:
+            outputs["state_update_recurrent_capsule_names"] = "state_update.%d.recurrent_capsule"
 
         bos_token_id = config.bos_token_id if getattr(config, "bos_token_id", None) is not None else 1
         eos_token_id = config.eos_token_id
@@ -1247,6 +1291,10 @@ class Model:
         state_groups = self.make_decoder_state_groups(inputs, outputs)
         if state_groups:
             genai_config["model"]["decoder"]["state_groups"] = state_groups
+        if "state_update.capture_count" in self.input_names:
+            genai_config["model"]["decoder"]["state_update_capacity"] = self.context_length_attrs[
+                "state_update_capacity"
+            ]
 
         self.update_genai_config(genai_config)
 
@@ -1301,12 +1349,28 @@ class Model:
 
         state_groups = []
         if full_attention_layers:
-            state_groups.append({"kind": "paged_kv", "layer_ids": full_attention_layers})
+            state_groups.append(self.make_paged_key_value_state_group(full_attention_layers))
         if conv_layers:
-            state_groups.append({"kind": "fixed_conv", "layer_ids": conv_layers})
+            state_groups.append(
+                {
+                    "kind": "fixed_conv",
+                    "layer_ids": conv_layers,
+                }
+            )
         if recurrent_layers:
-            state_groups.append({"kind": "fixed_recurrent", "layer_ids": recurrent_layers})
+            state_groups.append(
+                {
+                    "kind": "fixed_recurrent",
+                    "layer_ids": recurrent_layers,
+                }
+            )
         return state_groups
+
+    def make_paged_key_value_state_group(self, layer_ids):
+        return {
+            "kind": "paged_kv",
+            "layer_ids": layer_ids,
+        }
 
     def make_key_value_cache_names(self, layer_id):
         """
@@ -1998,6 +2062,41 @@ class Model:
         )
         self.make_value(output, self.io_dtype, shape=["batch_size", kwargs["channels"], "sequence_length"])
 
+    def make_varlen_causal_conv_with_state(self, name, **kwargs):
+        """Emit packed causal convolution with optional compact state updates."""
+        inputs = [
+            kwargs["root_input"],
+            kwargs["weight"],
+            kwargs["cumulative_sequence_length"],
+            kwargs["bias"],
+            kwargs["past_conv_state"],
+        ]
+        state_update_capacity = kwargs.get("state_update_capacity", 0)
+        if state_update_capacity:
+            inputs.append(kwargs["state_update_capture_count"])
+
+        output = f"{name}/output_0"
+        present_conv = kwargs["present_conv_state"]
+        outputs = [output, present_conv]
+        if state_update_capacity:
+            outputs.append(kwargs["state_update_value"])
+
+        attributes = {"activation": kwargs.get("activation", "silu")}
+        if state_update_capacity:
+            attributes["state_update_capacity"] = state_update_capacity
+        self.make_node(
+            "VarlenCausalConvWithState",
+            inputs=inputs,
+            outputs=outputs,
+            name=name,
+            domain="com.microsoft",
+            **attributes,
+        )
+        self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
+        self.make_value(present_conv, self.io_dtype, shape=kwargs["present_conv_shape"])
+        if state_update_capacity:
+            self.make_value(kwargs["state_update_value"], self.io_dtype, shape=kwargs["state_update_value_shape"])
+
     def make_gated_rms_norm(self, name, root_input, scale, gate, shape, epsilon=1e-5):
         output = f"{name}/output_0"
         self.make_node(
@@ -2620,6 +2719,9 @@ class Model:
             # Assign output 3 of current SkipLayerNorm as root input to next SkipLayerNorm
             self.layernorm_attrs["root_input"] = output_3
 
+            if location == "input" and layer_id in self.aux_hidden_state_layers:
+                self.aux_hidden_state_taps[layer_id] = (output_3, self.values[output_3].dtype)
+
     def make_layernorm_casts(self, name, inputs, outputs, old_dtype, new_dtype):
         # Name = name of original LayerNorm op as if the cast nodes did not exist
         # Inputs = inputs into the original LayerNorm op as if the cast nodes did not exist
@@ -2917,27 +3019,48 @@ class Model:
         # Applies MRoPE (multi-modal rotary position embeddings) to `root_input` using the
         # MRotaryEmbedding (com.microsoft) contrib op.
         #
-        # Unlike the standard RotaryEmbedding op, MRotaryEmbedding natively accepts a 3D
-        # `position_ids` tensor of shape (3, batch_size, sequence_length) (one position stream
-        # per T/H/W dimension) together with static cos/sin caches indexed by position, and
-        # internally combines the three streams per-column according to the `mrope_section`
-        # and `mrope_layout` attributes. This removes the need to manually compute dynamic
-        # cos/sin caches per token or to flatten/interleave them before calling RotaryEmbedding.
+        # MRotaryEmbedding accepts one position stream per T/H/W dimension. Packed model inputs
+        # retain their flattened ABI, but are promoted to the operator's required rank-3 ABI.
         #
         #      q_or_k (B, S, N*H)     position_ids (3, B, S)     cos_cache, sin_cache (M, H/2)
         #                  \                    |                    /
         #                   +-------------------+-------------------+
         #                                        |
-        #                          MRotaryEmbedding (com.microsoft)
+        #                    [Unsqueeze] --> MRotaryEmbedding --> [Squeeze]
         #                                        |
         #                                 output (B, S, N*H)
         num_heads = kwargs.pop("num_heads")
-        inputs = [root_input, kwargs.pop("position_ids"), kwargs.pop("cos_cache_name"), kwargs.pop("sin_cache_name")]
+        position_ids = kwargs.pop("position_ids")
+        dtype = kwargs.pop("dtype")
+        mrope_input = root_input
+        mrope_position_ids = position_ids
+        mrope_output = output
+
+        if self.use_paged_attention:
+            input_unsqueeze_name = f"{name}/input/Unsqueeze"
+            self.make_unsqueeze(
+                input_unsqueeze_name,
+                [root_input, "/model/constants/INT64/[0]"],
+                dtype,
+                [1, "num_tokens", self.head_size * num_heads],
+            )
+            position_ids_unsqueeze_name = f"{name}/position_ids/Unsqueeze"
+            self.make_unsqueeze(
+                position_ids_unsqueeze_name,
+                [position_ids, "/model/constants/INT64/[1]"],
+                ir.DataType.INT64,
+                [3, 1, "num_tokens"],
+            )
+            mrope_input = f"{input_unsqueeze_name}/output_0"
+            mrope_position_ids = f"{position_ids_unsqueeze_name}/output_0"
+            mrope_output = f"{name}/rank3_output_0"
+
+        inputs = [mrope_input, mrope_position_ids, kwargs.pop("cos_cache_name"), kwargs.pop("sin_cache_name")]
 
         self.make_node(
             "MRotaryEmbedding",
             inputs=inputs,
-            outputs=[output],
+            outputs=[mrope_output],
             name=name,
             domain="com.microsoft",
             interleaved=self.rope_attrs["interleaved"],
@@ -2945,8 +3068,24 @@ class Model:
             num_heads=num_heads,
             mrope_section=self.rope_attrs["mrope_section"],
             mrope_layout=self.rope_attrs["mrope_layout"],
+            is_packed_batching=int(self.use_paged_attention),
         )
-        self.make_value(output, kwargs.pop("dtype"), shape=["batch_size", "sequence_length", self.head_size * num_heads])
+        self.make_value(
+            mrope_output,
+            dtype,
+            shape=[1, "num_tokens", self.head_size * num_heads]
+            if self.use_paged_attention
+            else self.make_hidden_state_shape(last_dim=self.head_size * num_heads),
+        )
+
+        if self.use_paged_attention:
+            self.make_node(
+                "Squeeze",
+                inputs=[mrope_output, "/model/constants/INT64/[0]"],
+                outputs=[output],
+                name=f"{name}/output/Squeeze",
+            )
+            self.make_value(output, dtype, shape=["num_tokens", self.head_size * num_heads])
 
     def make_rotary_embedding_multi_cache(self, **kwargs):
         cos_cache_name = kwargs.get("cos_cache_name", "cos_cache")
@@ -3729,6 +3868,113 @@ class Model:
             state_window=self.context_length_attrs["state_window"],
         )
         self.make_value(output, self.io_dtype, shape=["batch_size", "sequence_length", self.linear_value_dim])
+
+    def make_gated_delta_net_attributes(self, kwargs):
+        """Attribute policy shared by the dense and packed emitters so both layouts stay equivalent."""
+        return {
+            "update_rule": kwargs.get("update_rule", "gated_delta"),
+            "scale": kwargs.get("scale", 0.0),
+            "gate_activation": kwargs.get("gate_activation", "none"),
+            "beta_activation": kwargs.get("beta_activation", "none"),
+            "qk_l2_norm": kwargs.get("qk_l2_norm", 0),
+            "chunk_size": kwargs.get("chunk_size", 64),
+        }
+
+    def make_gated_delta_net_gates(self, name, kwargs):
+        """Cast the decay/beta gates to the float32 the kernel accumulates in."""
+        decay_cast = f"{name}/decay_fp32/Cast"
+        beta_cast = f"{name}/beta_fp32/Cast"
+        self.make_cast(decay_cast, kwargs["decay"], ir.DataType.FLOAT, kwargs["gate_shape"])
+        self.make_cast(beta_cast, kwargs["beta"], ir.DataType.FLOAT, kwargs["gate_shape"])
+        return f"{decay_cast}/output_0", f"{beta_cast}/output_0"
+
+    def make_gated_delta_net(self, name, **kwargs):
+        """Emit dense GatedDeltaNet with token-major inputs and V-major float32 state."""
+        decay, beta = self.make_gated_delta_net_gates(name, kwargs)
+        inputs = [
+            kwargs["q_path"],
+            kwargs["k_path"],
+            kwargs["v_path"],
+            kwargs.get("cu_seqlens", ""),
+            decay,
+            beta,
+            kwargs["initial_state"],
+        ]
+        a_log = kwargs.get("a_log", "")
+        dt_bias = kwargs.get("dt_bias", "")
+        if bool(a_log) != bool(dt_bias):
+            raise ValueError("a_log and dt_bias must be set together")
+        if a_log:
+            inputs.extend([a_log, dt_bias])
+
+        output = f"{name}/output_0"
+        final_state = kwargs["final_state"]
+        self.make_node(
+            "GatedDeltaNet",
+            inputs=inputs,
+            outputs=[output, final_state],
+            name=name,
+            domain="com.microsoft",
+            **self.make_gated_delta_net_attributes(kwargs),
+        )
+        self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
+        self.make_value(final_state, ir.DataType.FLOAT, shape=kwargs["state_shape"])
+
+    def make_varlen_gated_delta_net(self, name, **kwargs):
+        """Emit packed GatedDeltaNet with optional compact transition capsules."""
+        decay, beta = self.make_gated_delta_net_gates(name, kwargs)
+        inputs = [
+            kwargs["q_path"],
+            kwargs["k_path"],
+            kwargs["v_path"],
+            kwargs["cumulative_sequence_length"],
+            decay,
+            beta,
+            kwargs["past_recurrent_state"],
+        ]
+        a_log = kwargs.get("a_log", "")
+        dt_bias = kwargs.get("dt_bias", "")
+        if bool(a_log) != bool(dt_bias):
+            raise ValueError("a_log and dt_bias must be set together")
+        state_update_capacity = kwargs.get("state_update_capacity", 0)
+        if a_log or state_update_capacity:
+            inputs.extend([a_log, dt_bias])
+        state_update_capture_count = kwargs.get("state_update_capture_count", "")
+        state_update_active = kwargs.get("state_update_active", "")
+        if bool(state_update_capture_count) != bool(state_update_active):
+            raise ValueError("state_update_capture_count and state_update_active must be provided together")
+        if state_update_capacity:
+            if not state_update_capture_count:
+                raise ValueError(
+                    "state_update_capture_count and state_update_active are required when state_update_capacity is set"
+                )
+            inputs.extend([state_update_capture_count, state_update_active])
+
+        output = f"{name}/output_0"
+        present_recurrent = kwargs["present_recurrent_state"]
+        outputs = [output, present_recurrent]
+        if state_update_capacity:
+            outputs.append(kwargs["state_update_capsule"])
+
+        attributes = self.make_gated_delta_net_attributes(kwargs)
+        if state_update_capacity:
+            attributes["state_update_capacity"] = state_update_capacity
+        self.make_node(
+            "GatedDeltaNet",
+            inputs=inputs,
+            outputs=outputs,
+            name=name,
+            domain="com.microsoft",
+            **attributes,
+        )
+        self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
+        self.make_value(present_recurrent, ir.DataType.FLOAT, shape=kwargs["present_recurrent_shape"])
+        if state_update_capacity:
+            self.make_value(
+                kwargs["state_update_capsule"],
+                ir.DataType.FLOAT,
+                shape=kwargs["state_update_capsule_shape"],
+            )
 
     def make_linear_attention_gate(self, name, a, dt_bias, decay_scale, b, shape):
         decay = f"{name}/output_0"
@@ -5266,6 +5512,7 @@ class Model:
                     self.make_lm_head(module)
 
         # Make post-processing nodes
+        self.make_aux_hidden_states()
         self.make_postprocessing_nodes()
 
         del self.weights
@@ -5745,6 +5992,28 @@ class Model:
         # For most cases, position_ids are already properly formatted as 2D tensors
         # with int64 values matching input_ids shape, so we can use them directly
         return self.input_names["position_ids"]
+
+    def make_aux_hidden_states(self):
+        """Concatenate the tapped residual streams into the ``aux_hidden_states`` output."""
+        if not self.aux_hidden_state_layers:
+            return
+
+        missing = [i for i in self.aux_hidden_state_layers if i not in self.aux_hidden_state_taps]
+        if missing:
+            raise ValueError(f"No residual-stream tap was emitted for aux_hidden_state_layers {missing}.")
+
+        inputs = []
+        for layer_id in self.aux_hidden_state_layers:
+            name, dtype = self.aux_hidden_state_taps[layer_id]
+            if dtype != self.io_dtype:
+                cast_name = f"/model/aux_hidden_states/{layer_id}/Cast"
+                self.make_cast(cast_name, name, self.io_dtype, shape=self.make_hidden_state_shape())
+                name = f"{cast_name}/output_0"
+            inputs.append(name)
+
+        output = self.output_names["aux_hidden_states"]
+        self.make_node("Concat", inputs=inputs, outputs=[output], name="/model/aux_hidden_states/Concat", axis=-1)
+        self.make_value(output, self.io_dtype, shape=self.output_shapes["aux_hidden_states"])
 
     def make_postprocessing_nodes(self):
         # For most models, no postprocessing subgraph is needed

@@ -3,10 +3,18 @@
 
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <vector>
 
+#include "../span.h"
+
 namespace Generators {
+
+class PagedCacheBlockTable;
+class PagedCacheReservation;
+struct PagedKeyValueCache;
+struct BlockPool;
 
 /*
  * Block represents a contiguous set of slots in the paged key-value cache.
@@ -15,6 +23,10 @@ namespace Generators {
  */
 struct Block {
   Block(size_t id, size_t slots, size_t block_size);
+  Block(const Block&) = default;
+  Block(Block&&) = default;
+  Block& operator=(const Block&) = delete;
+  Block& operator=(Block&&) = delete;
 
   size_t Id() const;
 
@@ -26,13 +38,16 @@ struct Block {
 
   size_t EmptySlots() const;
 
-  void AddSlot();
-
-  void AddSlots(size_t slots);
-
   std::vector<size_t> SlotIds() const;
 
  private:
+  friend class PagedCacheBlockTable;
+  friend class PagedCacheReservation;
+  friend struct PagedKeyValueCache;
+  friend struct BlockPool;
+  void AddSlot();
+  void AddSlots(size_t slots);
+
   size_t id_;
   size_t size_;
   size_t capacity_;
@@ -54,6 +69,9 @@ struct BlockPool {
 
   size_t BlockSize() const;
 
+  bool Owns(const std::shared_ptr<Block>& block) const;
+  uint64_t MutationGeneration() const { return mutation_generation_; }
+
   // Allocates enough blocks to hold `num_slots` and marks those slots used.
   std::vector<std::shared_ptr<Block>> AllocateBlocks(size_t num_slots);
 
@@ -63,15 +81,31 @@ struct BlockPool {
   std::vector<std::shared_ptr<Block>> ReserveBlocks(size_t num_slots);
 
   void Free(const std::vector<std::shared_ptr<Block>>& blocks);
+  void ValidateFree(std::span<const std::shared_ptr<Block>> blocks) const;
+  // Allocation-free publication for an unchanged span accepted by ValidateFree(). A guard failure
+  // is an impossible publication invariant violation and terminates rather than orphaning blocks.
+  void FreeValidated(std::span<const std::shared_ptr<Block>> blocks) noexcept;
+  bool CanFreeValidated(std::span<const std::shared_ptr<Block>> blocks) const noexcept;
 
   size_t BlocksNeeded(size_t num_slots);
 
  private:
+  friend class PagedCacheReservation;
+  friend struct PagedKeyValueCache;
+
   std::vector<std::shared_ptr<Block>> AllocateBlocks(size_t num_slots, bool mark_slots_used);
+  void RollbackReservedBlocks(const std::vector<std::shared_ptr<Block>>& blocks) noexcept;
+  void RecordOccupancyMutation() noexcept { ++mutation_generation_; }
 
   const size_t block_size_;
   const size_t capacity_;
-  std::vector<std::shared_ptr<Block>> blocks_{capacity_};
+  std::vector<std::shared_ptr<Block>> blocks_;
+  // Preallocated scratch for allocation-free duplicate detection in validated publication.
+  // Validation mutates this scratch even through const methods and therefore relies on the
+  // Engine's external serialization; it is not safe for concurrent inspection.
+  mutable std::vector<uint64_t> validation_marks_;
+  mutable uint64_t validation_epoch_{};
+  uint64_t mutation_generation_{};
 };
 
 }  // namespace Generators
