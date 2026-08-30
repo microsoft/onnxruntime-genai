@@ -39,8 +39,6 @@ def main() -> int:
     for gpu_id in gpu_ids:
         available_gpus.put(gpu_id)
 
-    if args.out.exists():
-        shutil.rmtree(args.out)
     args.out.mkdir(parents=True, exist_ok=True)
 
     def run_scenario(item):
