@@ -752,9 +752,14 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("has_unseen_tokens", &OgaRequest::HasUnseenTokens)
       .def("is_turn_complete", &OgaRequest::IsTurnComplete, "Return whether the current generation turn is complete.")
       .def("get_unseen_token", &OgaRequest::GetUnseenToken)
-      .def("set_opaque_data", [](OgaRequest& request, pybind11::object opaque_data) {
-        request.SetOpaqueData(opaque_data.ptr());
-      })
+      .def(
+          "set_opaque_data", [](OgaRequest& request, pybind11::object opaque_data) {
+            request.SetOpaqueData(opaque_data.ptr());
+          },
+          // The core stores the PyObject* unowned, so tie its lifetime to the request that
+          // holds it; otherwise passing a temporary frees it and get_opaque_data() returns
+          // a dangling pointer.
+          pybind11::keep_alive<1, 2>())
       .def("get_opaque_data", [](OgaRequest& request) -> pybind11::object {
         auto opaque_data = request.GetOpaqueData();
         if (!opaque_data)
