@@ -71,6 +71,7 @@ struct FixedStateCommittedState {
 struct FixedStateReservationRequest {
   const void* request_id{};
   uint64_t target_tokens{};
+  size_t capture_count{};
 };
 
 struct FixedStateBinding {
@@ -80,6 +81,16 @@ struct FixedStateBinding {
   OrtValue* input{};
   const char* output_name{};
   OrtValue* output{};
+  Config::Model::Decoder::StateUpdateKind state_update_kind{};
+  size_t state_update_capacity{};
+  const char* state_update_capture_count_name{};
+  OrtValue* state_update_capture_count{};
+  const char* state_update_active_name{};
+  OrtValue* state_update_active{};
+  const char* state_update_value_name{};
+  OrtValue* state_update_value{};
+  const char* state_update_capsule_name{};
+  OrtValue* state_update_capsule{};
 };
 
 enum class FixedStateReservationState {
@@ -125,6 +136,8 @@ class FixedStateReservation {
   std::span<const uint64_t> TargetTokens() const;
   size_t PlannedStagingBytes() const;
   size_t NewSlotCount() const;
+  bool CapturesStateUpdates() const;
+  void CommitPrefix(size_t row, size_t step_tokens, size_t kept_tokens);
 
   // Commit is split into three phases so a composite Engine transaction can validate and stage all
   // of its resources, synchronize once, and then publish them at a single infallible boundary:
@@ -182,8 +195,11 @@ class FixedStatePool {
   size_t ActiveStagingBytes() const;
   // Gather+output staging bytes a reservation of `row_count` scheduled rows will view. A pure
   // function of the pool's tensor geometry, so composite step planning can size the transaction
-  // before the reservation exists; it equals the resulting reservation's PlannedStagingBytes().
-  size_t PlannedStagingBytes(size_t row_count) const;
+  // before the reservation exists; it equals the resulting reservation's PlannedStagingBytes() for
+  // a reservation whose rows request compact captures iff `captures_state_updates` is set.
+  size_t PlannedStagingBytes(size_t row_count, bool captures_state_updates = false) const;
+  bool SupportsStateUpdates() const;
+  size_t StateUpdateCapacity() const;
 
   FixedStateSlotHandle HandleFor(const void* request_id) const;
   // True when `request_id` currently owns a committed slot. Non-throwing counterpart to HandleFor

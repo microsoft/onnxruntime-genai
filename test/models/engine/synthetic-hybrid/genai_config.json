@@ -20,29 +20,52 @@
       "inputs": {
         "input_ids": "input_ids",
         "attention_mask": "attention_mask",
-        "position_ids": "position_ids",
-        "past_conv_names": "past_conv.%d",
-        "past_recurrent_names": "past_recurrent.%d"
+        "position_ids": "position_ids"
       },
       "outputs": {
-        "logits": "logits",
-        "present_conv_names": "present_conv.%d",
-        "present_recurrent_names": "present_recurrent.%d"
+        "logits": "logits"
       },
       "state_groups": [
         {
-          "kind": "fixed_conv",
+          "kind": "fixed",
           "layer_ids": [
             0,
             3
-          ]
+          ],
+          "bindings": {
+            "state": {
+              "input": "past_conv.%d",
+              "output": "present_conv.%d"
+            }
+          },
+          "state_update": {
+            "kind": "causal_conv",
+            "capacity": 3,
+            "capture_count": "state_update_capture_count",
+            "active": "state_update_active",
+            "value": "state_update.%d.conv_value"
+          }
         },
         {
-          "kind": "fixed_recurrent",
+          "kind": "fixed",
           "layer_ids": [
             2,
             5
-          ]
+          ],
+          "bindings": {
+            "state": {
+              "input": "past_recurrent.%d",
+              "output": "present_recurrent.%d"
+            }
+          },
+          "state_update": {
+            "kind": "gated_delta_net",
+            "capacity": 3,
+            "capture_count": "state_update_capture_count",
+            "active": "state_update_active",
+            "capsule": "state_update.%d.recurrent_capsule",
+            "key_head_count": 1
+          }
         }
       ]
     }

@@ -5,7 +5,7 @@
 # --------------------------------------------------------------------------
 """Create the deterministic composite model used by the Engine composite tests.
 
-This model declares one ``paged_kv`` decoder state group *and* two ``fixed``
+This model declares one ``paged_kv`` decoder state group and two ``fixed``
 decoder state groups, plus ``engine.dynamic_batching``. It is the fixture for
 the C++ composite-transaction tests (``engine_step_tests.cpp``): those tests
 wire the real ``PagedCacheManager`` (so a real ``PagedKeyValueCache`` and real
@@ -25,7 +25,7 @@ Layer assignment (disjoint cover of 6 layers):
 
     fixed convolution: layer_ids [0, 3], state shape [batch, 2, 3]
     paged_kv:          layer_ids [1, 4]
-    fixed recurrent:   layer_ids [2, 5], state shape [batch, 2, 2]
+    fixed recurrent:   layer_ids [2, 5], state shape [batch, 2, 2, 2]
 
 Both fixed groups declare a dynamic (symbolic) batch axis 0, so the pool admits
 any batch size up to capacity.
@@ -37,20 +37,26 @@ import os
 
 import numpy as np
 import onnx
+from create_synthetic_paged_model import (
+    BLOCK_SIZE,
+    CONTEXT_LENGTH,
+    EOS_TOKEN_ID,
+    MAX_BATCH_SIZE,
+    NUM_BLOCKS,
+    NUM_LAYERS,
+    PAGED_LAYERS,
+    VOCAB_SIZE,
+)
+from create_synthetic_paged_model import (
+    _decoder_graph as _paged_decoder_graph,
+)
 from onnx import TensorProto, helper, numpy_helper
 
-VOCAB_SIZE = 64
-NUM_LAYERS = 6
-PAGED_LAYERS = [1, 4]
 CONV_LAYERS = [0, 3]
 RECURRENT_LAYERS = [2, 5]
 CONV_ROW = [2, 3]
-RECURRENT_ROW = [2, 2]
-BLOCK_SIZE = 4
-NUM_BLOCKS = 128
-MAX_BATCH_SIZE = 8
-CONTEXT_LENGTH = 128
-EOS_TOKEN_ID = 1
+RECURRENT_ROW = [2, 2, 2]
+STATE_UPDATE_CAPACITY = 3
 
 
 def _const(name, array):
@@ -59,140 +65,121 @@ def _const(name, array):
     return tensor
 
 
-def _decoder_graph():
-    i64 = lambda v: np.asarray(v, dtype=np.int64)  # noqa: E731
-    initializers = [
-        _const("c0", i64(0)),
-        _const("c1", i64(1)),
-        _const("c2", i64(2)),
-        _const("cB", i64(BLOCK_SIZE)),
-        _const("cV", i64(VOCAB_SIZE)),
-        _const("axis0", i64([0])),
-        _const("axis1", i64([1])),
-        _const("axes12", i64([1, 2])),
-        _const("start1", i64([1])),
-        _const("end_all", i64([np.iinfo(np.int64).max])),
-        _const("flat", i64([-1])),
-        _const("cache_shape", i64([NUM_BLOCKS, BLOCK_SIZE, 1, 1])),
-        _const("vocab_range", np.arange(VOCAB_SIZE, dtype=np.int64).reshape(1, VOCAB_SIZE)),
-        _const("state_one", np.asarray(1.0, dtype=np.float32)),
-    ]
-
+def _fixed_group(prefix, layer_ids, row_dims):
+    inputs = []
+    outputs = []
     nodes = []
+    for layer in layer_ids:
+        input_name = f"past_{prefix}.{layer}"
+        output_name = f"present_{prefix}.{layer}"
+        shape = ["batch_size", *row_dims]
+        inputs.append(helper.make_tensor_value_info(input_name, TensorProto.FLOAT, shape))
+        outputs.append(helper.make_tensor_value_info(output_name, TensorProto.FLOAT, shape))
+        if prefix == "conv" and layer == 0:
+            nodes.append(helper.make_node("Add", [input_name, "state_one"], [output_name]))
+        else:
+            nodes.append(helper.make_node("Identity", [input_name], [output_name]))
 
-    def node(op_type, inputs, outputs, **attrs):
-        nodes.append(helper.make_node(op_type, inputs, outputs, **attrs))
+        if prefix == "conv":
+            update_name = f"state_update.{layer}.conv_value"
+            outputs.append(
+                helper.make_tensor_value_info(
+                    update_name,
+                    TensorProto.FLOAT,
+                    ["batch_size", STATE_UPDATE_CAPACITY, row_dims[0]],
+                )
+            )
+            nodes.append(helper.make_node("Transpose", [input_name], [update_name], perm=[0, 2, 1]))
+            continue
 
-    # Derive each packed token's request row from the cumulative boundaries.
-    node("Shape", ["input_ids"], ["ids_shape"])
-    node("Squeeze", ["ids_shape"], ["num_tokens"])
-    node("Range", ["c0", "num_tokens", "c1"], ["token_index"])
-    node("Slice", ["cumulative_sequence_lengths", "start1", "end_all", "axis0"], ["boundaries_i32"])
-    node("Cast", ["boundaries_i32"], ["boundaries"], to=TensorProto.INT64)
-    node("Unsqueeze", ["token_index", "axis1"], ["token_index_col"])
-    node("Unsqueeze", ["boundaries", "axis0"], ["boundaries_row"])
-    node("GreaterOrEqual", ["token_index_col", "boundaries_row"], ["at_or_past"])
-    node("Cast", ["at_or_past"], ["at_or_past_i64"], to=TensorProto.INT64)
-    node("ReduceSum", ["at_or_past_i64", "axis1"], ["row_id"], keepdims=0)
+        decay_name = f"state_update.{layer}.recurrent_decay"
+        key_name = f"state_update.{layer}.recurrent_key"
+        delta_name = f"state_update.{layer}.recurrent_delta"
+        capsule_name = f"state_update.{layer}.recurrent_capsule"
+        capsule_width = STATE_UPDATE_CAPACITY * (row_dims[0] + row_dims[2] + row_dims[0] * row_dims[1])
+        outputs.append(helper.make_tensor_value_info(capsule_name, TensorProto.FLOAT, ["batch_size", capsule_width]))
+        decay_base = f"{decay_name}/base"
+        key_base = f"{key_name}/base"
+        delta_base = f"{delta_name}/base"
+        decay_step = f"{decay_name}/step"
+        key_step = f"{key_name}/step"
+        delta_step = f"{delta_name}/step"
+        nodes.extend(
+            [
+                helper.make_node("ReduceSum", [input_name, "gdn_decay_axes"], [decay_base], keepdims=0),
+                helper.make_node("Unsqueeze", [decay_base, "state_update_axis"], [decay_step]),
+                helper.make_node("Concat", [decay_step] * STATE_UPDATE_CAPACITY, [decay_name], axis=1),
+                helper.make_node("ReduceSum", [input_name, "gdn_key_axes"], [key_base], keepdims=0),
+                helper.make_node("Unsqueeze", [key_base, "gdn_key_unsqueeze_axes"], [key_step]),
+                helper.make_node("Concat", [key_step] * STATE_UPDATE_CAPACITY, [key_name], axis=1),
+                helper.make_node("ReduceSum", [input_name, "gdn_delta_axes"], [delta_base], keepdims=0),
+                helper.make_node("Unsqueeze", [delta_base, "state_update_axis"], [delta_step]),
+                helper.make_node("Concat", [delta_step] * STATE_UPDATE_CAPACITY, [delta_name], axis=1),
+                helper.make_node("Flatten", [decay_name], [f"{decay_name}/flat"], axis=1),
+                helper.make_node("Flatten", [key_name], [f"{key_name}/flat"], axis=1),
+                helper.make_node("Flatten", [delta_name], [f"{delta_name}/flat"], axis=1),
+                helper.make_node(
+                    "Concat",
+                    [f"{decay_name}/flat", f"{key_name}/flat", f"{delta_name}/flat"],
+                    [capsule_name],
+                    axis=1,
+                ),
+            ]
+        )
+    return inputs, outputs, nodes
 
-    # Compute the token's absolute position within its request.
-    node("Cast", ["cumulative_sequence_lengths"], ["cum_i64"], to=TensorProto.INT64)
-    node("Gather", ["cum_i64", "row_id"], ["row_start"], axis=0)
-    node("Sub", ["token_index", "row_start"], ["offset_in_row"])
-    node("Cast", ["past_sequence_lengths"], ["past_i64"], to=TensorProto.INT64)
-    node("Gather", ["past_i64", "row_id"], ["past_of_row"], axis=0)
-    node("Add", ["past_of_row", "offset_in_row"], ["pos"])
 
-    # Map each request position to its physical cache slot.
-    node("Div", ["pos", "cB"], ["block_col"])
-    node("Mul", ["block_col", "cB"], ["block_col_base"])
-    node("Sub", ["pos", "block_col_base"], ["slot_in_block"])
-    node("Cast", ["block_table"], ["block_table_i64"], to=TensorProto.INT64)
-    node("Unsqueeze", ["row_id", "axis1"], ["row_id_col"])
-    node("Unsqueeze", ["block_col", "axis1"], ["block_col_col"])
-    node("Concat", ["row_id_col", "block_col_col"], ["block_gather_index"], axis=1)
-    node("GatherND", ["block_table_i64", "block_gather_index"], ["block_id"])
-    node("Mul", ["block_id", "cB"], ["block_base"])
-    node("Add", ["block_base", "slot_in_block"], ["phys"])
+def _decoder_graph():
+    graph = _paged_decoder_graph()
+    graph.name = "synthetic_composite_decoder"
+    graph.input.extend(
+        [
+            helper.make_tensor_value_info("position_ids", TensorProto.INT64, [3, "num_tokens"]),
+            helper.make_tensor_value_info("state_update_capture_count", TensorProto.INT32, ["batch_size"]),
+        ]
+    )
+    graph.initializer.extend(
+        [
+            _const("state_one", np.asarray(1.0, dtype=np.float32)),
+            _const("c2", np.asarray(2, dtype=np.int64)),
+            _const("axes12", np.asarray([1, 2], dtype=np.int64)),
+            _const("state_update_axis", np.asarray([1], dtype=np.int64)),
+            _const("gdn_decay_axes", np.asarray([2, 3], dtype=np.int64)),
+            _const("gdn_key_axes", np.asarray([1, 2], dtype=np.int64)),
+            _const("gdn_key_unsqueeze_axes", np.asarray([1, 2], dtype=np.int64)),
+            _const("gdn_delta_axes", np.asarray([3], dtype=np.int64)),
+        ]
+    )
 
-    # Write tokens to the key and value caches.
-    node("Cast", ["input_ids"], ["token_f"], to=TensorProto.FLOAT)
-    node("Reshape", ["past_key_values.1.key", "flat"], ["past_key_flat"])
-    node("Reshape", ["past_key_values.1.value", "flat"], ["past_value_flat"])
-    node("Unsqueeze", ["phys", "axis1"], ["scatter_index"])
-    node("ScatterND", ["past_key_flat", "scatter_index", "token_f"], ["present_key_flat"])
-    node("ScatterND", ["past_value_flat", "scatter_index", "token_f"], ["present_value_flat"])
-    node("Reshape", ["present_key_flat", "cache_shape"], ["present.1.key"])
-    node("Reshape", ["present_value_flat", "cache_shape"], ["present.1.value"])
-    node("Identity", ["past_key_values.4.key"], ["present.4.key"])
-    node("Identity", ["past_key_values.4.value"], ["present.4.value"])
+    conv_inputs, conv_outputs, conv_nodes = _fixed_group("conv", CONV_LAYERS, CONV_ROW)
+    recurrent_inputs, recurrent_outputs, recurrent_nodes = _fixed_group("recurrent", RECURRENT_LAYERS, RECURRENT_ROW)
+    graph.input.extend([*conv_inputs, *recurrent_inputs])
+    graph.output.extend([*conv_outputs, *recurrent_outputs])
 
-    # Read the request's first token and the current token through the cache.
-    node("Gather", ["block_table_i64", "c0"], ["first_block_id"], axis=1)
-    node("Mul", ["first_block_id", "cB"], ["first_slot_per_row"])
-    node("Gather", ["first_slot_per_row", "row_id"], ["first_slot"], axis=0)
-    node("Gather", ["present_key_flat", "first_slot"], ["first_key"], axis=0)
-    node("Gather", ["present_value_flat", "phys"], ["cur_value"], axis=0)
-
-    node("Gather", ["position_ids", "c2"], ["text_position_ids"], axis=0)
-    node("Add", ["text_position_ids", "c1"], ["current_length"])
-    node("Cast", ["current_length"], ["current_length_f"], to=TensorProto.FLOAT)
-    node("ReduceSum", ["past_conv.0", "axes12"], ["fixed_state_sum"], keepdims=0)
-    node("Gather", ["fixed_state_sum", "row_id"], ["fixed_state_bias"], axis=0)
-    node("Add", ["first_key", "cur_value"], ["first_plus_cur"])
-    node("Add", ["first_plus_cur", "current_length_f"], ["base_score_f"])
-    node("Add", ["base_score_f", "fixed_state_bias"], ["score_f"])
-    node("Cast", ["score_f"], ["score"], to=TensorProto.INT64)
-    node("Div", ["score", "cV"], ["score_div"])
-    node("Mul", ["score_div", "cV"], ["score_floor"])
-    node("Sub", ["score", "score_floor"], ["next_token"])
-
-    node("Unsqueeze", ["next_token", "axis1"], ["next_token_col"])
-    node("Equal", ["next_token_col", "vocab_range"], ["is_next_per_token"])
-
-    node("Sub", ["boundaries", "c1"], ["last_token_index"])
-    node("Gather", ["is_next_per_token", "last_token_index"], ["is_next_per_request"], axis=0)
-    node("Cast", ["is_next_per_request"], ["logits"], to=TensorProto.FLOAT16)
-
-    cache_shape = [NUM_BLOCKS, BLOCK_SIZE, 1, 1]
-    inputs = [
-        helper.make_tensor_value_info("input_ids", TensorProto.INT64, ["num_tokens"]),
-        helper.make_tensor_value_info("cumulative_sequence_lengths", TensorProto.INT32, ["batch_plus_1"]),
-        helper.make_tensor_value_info("past_sequence_lengths", TensorProto.INT32, ["batch"]),
-        helper.make_tensor_value_info("position_ids", TensorProto.INT64, [3, "num_tokens"]),
-        helper.make_tensor_value_info("block_table", TensorProto.INT32, ["batch", "max_blocks"]),
-        helper.make_tensor_value_info("past_key_values.1.key", TensorProto.FLOAT, cache_shape),
-        helper.make_tensor_value_info("past_key_values.1.value", TensorProto.FLOAT, cache_shape),
-        helper.make_tensor_value_info("past_key_values.4.key", TensorProto.FLOAT, cache_shape),
-        helper.make_tensor_value_info("past_key_values.4.value", TensorProto.FLOAT, cache_shape),
+    nodes = list(graph.node)
+    score_index = next(index for index, node in enumerate(nodes) if "score_f" in node.output)
+    nodes[score_index].output[0] = "base_score_f"
+    current_length_index = next(index for index, node in enumerate(nodes) if "current_length" in node.output)
+    nodes[current_length_index].input[0] = "text_position_ids"
+    position_node = helper.make_node("Gather", ["position_ids", "c2"], ["text_position_ids"], axis=0)
+    fixed_bias_nodes = [
+        helper.make_node("ReduceSum", ["past_conv.0", "axes12"], ["fixed_state_sum"], keepdims=0),
+        helper.make_node("Gather", ["fixed_state_sum", "row_id"], ["fixed_state_bias"], axis=0),
+        helper.make_node("Add", ["base_score_f", "fixed_state_bias"], ["score_f"]),
     ]
-    outputs = [
-        helper.make_tensor_value_info("logits", TensorProto.FLOAT16, ["batch_size", VOCAB_SIZE]),
-        helper.make_tensor_value_info("present.1.key", TensorProto.FLOAT, cache_shape),
-        helper.make_tensor_value_info("present.1.value", TensorProto.FLOAT, cache_shape),
-        helper.make_tensor_value_info("present.4.key", TensorProto.FLOAT, cache_shape),
-        helper.make_tensor_value_info("present.4.value", TensorProto.FLOAT, cache_shape),
-    ]
-
-    # Fixed state groups use a dynamic batch axis. Most outputs pass through unchanged; conv layer
-    # 0 increments its state so the Python integration test observes fixed-state commit and
-    # re-gather behavior in subsequent logits.
-    def add_fixed_group(prefix, layer_ids, row_dims):
-        for layer in layer_ids:
-            in_name = f"past_{prefix}.{layer}"
-            out_name = f"present_{prefix}.{layer}"
-            shape = ["batch_size", *row_dims]
-            inputs.append(helper.make_tensor_value_info(in_name, TensorProto.FLOAT, shape))
-            outputs.append(helper.make_tensor_value_info(out_name, TensorProto.FLOAT, shape))
-            if prefix == "conv" and layer == 0:
-                nodes.append(helper.make_node("Add", [in_name, "state_one"], [out_name]))
-            else:
-                nodes.append(helper.make_node("Identity", [in_name], [out_name]))
-
-    add_fixed_group("conv", CONV_LAYERS, CONV_ROW)
-    add_fixed_group("recurrent", RECURRENT_LAYERS, RECURRENT_ROW)
-
-    return helper.make_graph(nodes, "synthetic_composite_decoder", inputs, outputs, initializer=initializers)
+    graph.ClearField("node")
+    graph.node.extend(
+        [
+            *nodes[:current_length_index],
+            position_node,
+            *nodes[current_length_index : score_index + 1],
+            *fixed_bias_nodes,
+            *nodes[score_index + 1 :],
+            *conv_nodes,
+            *recurrent_nodes,
+        ]
+    )
+    return graph
 
 
 def create_decoder(output_dir):
@@ -204,12 +191,54 @@ def create_decoder(output_dir):
         producer_version="0.0.0",
     )
     onnx.checker.check_model(model)
-    path = os.path.join(output_dir, "decoder.onnx")
-    onnx.save_model(model, path)
-    print(f"  Saved decoder -> {path}")
+    onnx.save_model(model, os.path.join(output_dir, "decoder.onnx"))
 
 
 def create_config(output_dir):
+    state_groups = [
+        {
+            "kind": "fixed",
+            "layer_ids": CONV_LAYERS,
+            "bindings": {"state": {"input": "past_conv.%d", "output": "present_conv.%d"}},
+            "state_update": {
+                "kind": "causal_conv",
+                "capacity": STATE_UPDATE_CAPACITY,
+                "capture_count": "state_update_capture_count",
+                "value": "state_update.%d.conv_value",
+            },
+        },
+        {
+            "kind": "paged_kv",
+            "layer_ids": PAGED_LAYERS,
+            "bindings": {
+                "key": {
+                    "input": "past_key_values.%d.key",
+                    "output": "present.%d.key",
+                },
+                "value": {
+                    "input": "past_key_values.%d.value",
+                    "output": "present.%d.value",
+                },
+            },
+        },
+        {
+            "kind": "fixed",
+            "layer_ids": RECURRENT_LAYERS,
+            "bindings": {
+                "state": {
+                    "input": "past_recurrent.%d",
+                    "output": "present_recurrent.%d",
+                }
+            },
+            "state_update": {
+                "kind": "gated_delta_net",
+                "capacity": STATE_UPDATE_CAPACITY,
+                "capture_count": "state_update_capture_count",
+                "capsule": "state_update.%d.recurrent_capsule",
+                "key_head_count": 1,
+            },
+        },
+    ]
     config = {
         "model": {
             "type": "decoder",
@@ -219,10 +248,7 @@ def create_config(output_dir):
             "vocab_size": VOCAB_SIZE,
             "context_length": CONTEXT_LENGTH,
             "decoder": {
-                "session_options": {
-                    "log_id": "onnxruntime-genai",
-                    "provider_options": [],
-                },
+                "session_options": {"log_id": "onnxruntime-genai", "provider_options": []},
                 "filename": "decoder.onnx",
                 "num_attention_heads": 1,
                 "num_key_value_heads": 1,
@@ -234,33 +260,17 @@ def create_config(output_dir):
                     "block_table": "block_table",
                     "cumulative_sequence_lengths": "cumulative_sequence_lengths",
                     "past_sequence_lengths": "past_sequence_lengths",
+                    "attention_metadata": "attention_metadata",
                     "position_ids": "position_ids",
-                    "past_key_names": "past_key_values.%d.key",
-                    "past_value_names": "past_key_values.%d.value",
-                    "past_conv_names": "past_conv.%d",
-                    "past_recurrent_names": "past_recurrent.%d",
+                    "past_key_names": "legacy_past.%d.key",
+                    "past_value_names": "legacy_past.%d.value",
                 },
                 "outputs": {
                     "logits": "logits",
-                    "present_key_names": "present.%d.key",
-                    "present_value_names": "present.%d.value",
-                    "present_conv_names": "present_conv.%d",
-                    "present_recurrent_names": "present_recurrent.%d",
+                    "present_key_names": "legacy_present.%d.key",
+                    "present_value_names": "legacy_present.%d.value",
                 },
-                "state_groups": [
-                    {
-                        "kind": "fixed_conv",
-                        "layer_ids": CONV_LAYERS,
-                    },
-                    {
-                        "kind": "paged_kv",
-                        "layer_ids": PAGED_LAYERS,
-                    },
-                    {
-                        "kind": "fixed_recurrent",
-                        "layer_ids": RECURRENT_LAYERS,
-                    },
-                ],
+                "state_groups": state_groups,
             },
         },
         "search": {"max_length": CONTEXT_LENGTH, "do_sample": False},
@@ -269,30 +279,23 @@ def create_config(output_dir):
                 "block_size": BLOCK_SIZE,
                 "num_blocks": NUM_BLOCKS,
                 "max_batch_size": MAX_BATCH_SIZE,
-            },
+            }
         },
     }
-    path = os.path.join(output_dir, "genai_config.json")
-    with open(path, "w") as f:
-        json.dump(config, f, indent=2)
-    print(f"  Saved config -> {path}")
+    with open(os.path.join(output_dir, "genai_config.json"), "w") as file:
+        json.dump(config, file, indent=2)
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--output_dir",
-        default=os.path.join(
-            os.path.dirname(__file__), "..", "..", "models", "engine", "synthetic-composite"
-        ),
+        default=os.path.join(os.path.dirname(__file__), "..", "..", "models", "engine", "synthetic-composite"),
     )
-    args = parser.parse_args()
-    output_dir = os.path.normpath(args.output_dir)
+    output_dir = os.path.normpath(parser.parse_args().output_dir)
     os.makedirs(output_dir, exist_ok=True)
-    print(f"Creating synthetic composite engine test model in {output_dir}")
     create_decoder(output_dir)
     create_config(output_dir)
-    print("Done!")
 
 
 if __name__ == "__main__":

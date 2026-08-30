@@ -488,8 +488,10 @@ TEST(PagedKeyValueCacheManifestTest, RejectsFixedStateGroupsAbsentFromSession) {
   // session has no such tensors, so pool construction rejects the group at session validation.
   auto model = LoadSyntheticPagedModel();
   Config::Model::Decoder::StateGroup fixed_group;
-  fixed_group.kind = Config::Model::Decoder::StateGroupKind::FixedConv;
+  fixed_group.kind = Config::Model::Decoder::StateGroupKind::Fixed;
   fixed_group.layer_ids = {0};
+  fixed_group.state = Config::Model::Decoder::StateBinding{
+      "past_fixed.%d", "present_fixed.%d"};
   model->config_->model.decoder.state_groups->push_back(std::move(fixed_group));
 
   EXPECT_THROW(

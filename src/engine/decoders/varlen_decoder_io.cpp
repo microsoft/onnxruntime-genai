@@ -4,16 +4,16 @@
 #include "varlen_decoder_io.h"
 
 #include <algorithm>
+#include <array>
 #include <limits>
+#include <numeric>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 #include "../../models/decoder_only.h"
 #include "../paged_key_value_cache.h"
 #include "../sequence_positions.h"
-
-#include <array>
-#include <string_view>
 
 namespace Generators {
 

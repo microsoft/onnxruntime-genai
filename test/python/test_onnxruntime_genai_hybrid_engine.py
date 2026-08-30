@@ -6,11 +6,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import numpy as np
 import onnxruntime_genai as og
 import pytest
+from _test_utils import register_plugin_providers
+
+register_plugin_providers(logging.getLogger(__name__))
 
 _MODEL_DIR = Path(__file__).resolve().parent.parent / "models" / "engine" / "synthetic-composite"
 _DEVICES = ["cpu"] + (["cuda"] if og.is_cuda_available() else [])
@@ -59,11 +63,7 @@ def test_fixture_declares_sparse_paged_and_fixed_groups():
     config = json.loads((_MODEL_DIR / "genai_config.json").read_text())
     groups = config["model"]["decoder"]["state_groups"]
     assert config["model"]["decoder"]["inputs"]["position_ids"] == "position_ids"
-    assert [group["kind"] for group in groups] == [
-        "fixed_conv",
-        "paged_kv",
-        "fixed_recurrent",
-    ]
+    assert [group["kind"] for group in groups] == ["fixed", "paged_kv", "fixed"]
     assert [group["layer_ids"] for group in groups] == [[0, 3], [1, 4], [2, 5]]
 
 

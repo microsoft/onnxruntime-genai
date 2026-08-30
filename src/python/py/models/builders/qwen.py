@@ -585,7 +585,10 @@ class Qwen35TextModel(Model):
         v_out = f"{split_qkv_name}/output_2"
         self.make_split(
             split_qkv_name,
-            inputs=[conv_out_3d, f"/model/constants/INT64/[{self.linear_key_dim}, {self.linear_key_dim}, {self.linear_value_dim}]"],
+            inputs=[
+                conv_out_3d,
+                f"/model/constants/INT64/[{self.linear_key_dim}, {self.linear_key_dim}, {self.linear_value_dim}]",
+            ],
             outputs=[q_out, k_out, v_out],
             dtypes=[self.io_dtype] * 3,
             shapes=[
@@ -603,7 +606,12 @@ class Qwen35TextModel(Model):
         # Scale Q by 1/sqrt(head_k_dim)
         scale_name = f"/model/constants/{self.io_dtype}/{float(1.0 / np.sqrt(self.linear_key_head_dim))}"
         q_scaled_name = f"{basename}/q_scaled/Mul"
-        self.make_mul(q_scaled_name, [q_norm_out, scale_name], self.io_dtype, ["batch_size", "sequence_length", self.linear_key_dim])
+        self.make_mul(
+            q_scaled_name,
+            [q_norm_out, scale_name],
+            self.io_dtype,
+            ["batch_size", "sequence_length", self.linear_key_dim],
+        )
         q_scaled_output = f"{q_scaled_name}/output_0"
 
         # g = -exp(A_log) * softplus(a + dt_bias), beta = sigmoid(b)
@@ -700,6 +708,65 @@ class Qwen35TextModel(Model):
         )
         return unflat_out
 
+    def make_decoder_state_groups(self, inputs, outputs):
+        if not self.use_paged_attention:
+            return []
+
+        full_attention_layers = [
+            layer_id
+            for layer_id, layer_type in enumerate(self.layer_types)
+            if layer_type in {"full_attention", "sliding_attention"}
+        ]
+        conv_layers = [
+            layer_id
+            for layer_id, layer_type in enumerate(self.layer_types)
+            if layer_type in {"conv", "linear_attention"}
+        ]
+        linear_attention_layers = [
+            layer_id for layer_id, layer_type in enumerate(self.layer_types) if layer_type == "linear_attention"
+        ]
+        state_groups = []
+        if full_attention_layers:
+            state_groups.append(self.make_paged_key_value_state_group(full_attention_layers, inputs, outputs))
+        if not linear_attention_layers:
+            return state_groups
+
+        state_update_capacity = (
+            self.context_length_attrs["state_update_capacity"] if "state_update_capture_count" in inputs else 0
+        )
+
+        for state_name, layer_ids, input_key, output_key in (
+            ("conv", conv_layers, "past_conv_names", "present_conv_names"),
+            ("recurrent", linear_attention_layers, "past_recurrent_names", "present_recurrent_names"),
+        ):
+            group = {
+                "kind": "fixed",
+                "layer_ids": layer_ids,
+                "bindings": {
+                    "state": {
+                        "input": inputs[input_key],
+                        "output": outputs[output_key],
+                    }
+                },
+            }
+            if state_update_capacity:
+                state_update = {
+                    "kind": "causal_conv" if state_name == "conv" else "gated_delta_net",
+                    "capacity": state_update_capacity,
+                    "capture_count": inputs["state_update_capture_count"],
+                    "active": inputs["state_update_active"],
+                }
+                if state_name == "conv":
+                    state_update["value"] = outputs["state_update_conv_value_names"]
+                else:
+                    state_update["capsule"] = outputs["state_update_recurrent_capsule_names"]
+                    state_update["key_head_count"] = self.linear_num_key_heads
+                group["state_update"] = state_update
+            state_groups.append(group)
+
+        return state_groups
+
+
 class Qwen35MoETextModel(Qwen35TextModel):
     """Qwen3.5 MoE hybrid model builder.
 
@@ -712,6 +779,7 @@ class Qwen35MoETextModel(Qwen35TextModel):
     The attention side (GatedDeltaNet linear + gated full) is inherited
     unchanged from the parent class.
     """
+
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 

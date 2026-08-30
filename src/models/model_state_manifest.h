@@ -36,8 +36,6 @@ class ModelStateManifest {
 
  private:
   std::vector<Config::Model::Decoder::StateGroup> state_groups_;
-  Config::Model::Decoder::Inputs inputs_;
-  Config::Model::Decoder::Outputs outputs_;
 };
 
 }  // namespace Generators

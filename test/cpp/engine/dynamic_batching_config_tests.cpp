@@ -108,15 +108,25 @@ TEST(DecoderStateGroupsConfigTest, ParsesSparseHybridManifest) {
     "state_groups": [
       {
         "kind": "paged_kv",
-        "layer_ids": [3]
+        "layer_ids": [3],
+        "bindings": {
+          "key": {"input": "past_key_values.%d.key", "output": "present.%d.key"},
+          "value": {"input": "past_key_values.%d.value", "output": "present.%d.value"}
+        }
       },
       {
-        "kind": "fixed_conv",
-        "layer_ids": [0, 1, 2]
+        "kind": "fixed",
+        "layer_ids": [0, 1, 2],
+        "bindings": {
+          "state": {"input": "past_key_values.%d.conv_state", "output": "present.%d.conv_state"}
+        }
       },
       {
-        "kind": "fixed_recurrent",
-        "layer_ids": [0, 1, 2]
+        "kind": "fixed",
+        "layer_ids": [0, 1, 2],
+        "bindings": {
+          "state": {"input": "past_key_values.%d.recurrent_state", "output": "present.%d.recurrent_state"}
+        }
       }
     ]
   })");
@@ -126,9 +136,9 @@ TEST(DecoderStateGroupsConfigTest, ParsesSparseHybridManifest) {
   ASSERT_EQ(state_groups.size(), 3u);
   EXPECT_EQ(state_groups[0].kind, Config::Model::Decoder::StateGroupKind::PagedKeyValue);
   EXPECT_EQ(state_groups[0].layer_ids, std::vector<int>({3}));
-  EXPECT_EQ(state_groups[1].kind, Config::Model::Decoder::StateGroupKind::FixedConv);
+  EXPECT_EQ(state_groups[1].kind, Config::Model::Decoder::StateGroupKind::Fixed);
   EXPECT_EQ(state_groups[1].layer_ids, std::vector<int>({0, 1, 2}));
-  EXPECT_EQ(state_groups[2].kind, Config::Model::Decoder::StateGroupKind::FixedRecurrent);
+  EXPECT_EQ(state_groups[2].kind, Config::Model::Decoder::StateGroupKind::Fixed);
   EXPECT_EQ(state_groups[2].layer_ids, std::vector<int>({0, 1, 2}));
   EXPECT_EQ(config.model.decoder.inputs.past_conv_names, "past_key_values.%d.conv_state");
   EXPECT_EQ(config.model.decoder.inputs.past_recurrent_names, "past_key_values.%d.recurrent_state");
@@ -145,8 +155,8 @@ TEST(DecoderStateGroupsConfigTest, OverlayValidationIsTransactional) {
   auto config = LoadDecoderConfig(R"({
     "num_hidden_layers": 1,
     "state_groups": [{
-      "kind": "fixed_conv",
-      "layer_ids": [0]
+      "kind": "fixed", "layer_ids": [0],
+      "bindings": {"state": {"input": "past.%d", "output": "present.%d"}}
     }]
   })");
 
@@ -154,8 +164,8 @@ TEST(DecoderStateGroupsConfigTest, OverlayValidationIsTransactional) {
       OverlayConfig(config, R"({
         "model": {"decoder": {
           "state_groups": [{
-            "kind": "fixed_conv",
-            "layer_ids": [1]
+            "kind": "fixed", "layer_ids": [1],
+            "bindings": {"state": {"input": "past.%d", "output": "present.%d"}}
           }]
         }}
       })"),
@@ -163,7 +173,7 @@ TEST(DecoderStateGroupsConfigTest, OverlayValidationIsTransactional) {
 
   ASSERT_TRUE(config.model.decoder.state_groups);
   ASSERT_EQ(config.model.decoder.state_groups->size(), 1u);
-  EXPECT_EQ(config.model.decoder.state_groups->front().kind, Config::Model::Decoder::StateGroupKind::FixedConv);
+  EXPECT_EQ(config.model.decoder.state_groups->front().kind, Config::Model::Decoder::StateGroupKind::Fixed);
   EXPECT_EQ(config.model.decoder.state_groups->front().layer_ids, std::vector<int>({0}));
 }
 
@@ -183,40 +193,42 @@ TEST(DecoderStateGroupsConfigTest, RejectsMissingOrUnknownKind) {
 
 TEST(DecoderStateGroupsConfigTest, AllowsIndependentFixedGroupsOnTheSameLayer) {
   EXPECT_NO_THROW(LoadDecoderConfig(
-      R"({"num_hidden_layers": 1,
-          "inputs": {"past_recurrent_names": "past_recurrent.%d"},
-          "outputs": {"present_recurrent_names": "present_recurrent.%d"},
-          "state_groups": [
-            {"kind": "fixed_conv", "layer_ids": [0]},
-            {"kind": "fixed_recurrent", "layer_ids": [0]}
-          ]})"));
+      R"({"num_hidden_layers": 1, "state_groups": [
+        {"kind": "fixed", "layer_ids": [0],
+         "bindings": {"state": {"input": "past_conv.%d", "output": "present_conv.%d"}}},
+        {"kind": "fixed", "layer_ids": [0],
+         "bindings": {"state": {"input": "past_recurrent.%d", "output": "present_recurrent.%d"}}}
+      ]})"));
 }
 
 TEST(DecoderStateGroupsConfigTest, RejectsMalformedBindingTemplates) {
   ExpectStateGroupError(
-      R"({"num_hidden_layers": 1,
-          "inputs": {"past_recurrent_names": "past.recurrent"},
-          "state_groups": [{"kind": "fixed_recurrent", "layer_ids": [0]}]})",
+      R"({"num_hidden_layers": 1, "state_groups": [{
+        "kind": "fixed", "layer_ids": [0],
+        "bindings": {"state": {"input": "past.recurrent", "output": "present.%d.recurrent"}}
+      }]})",
       "expected exactly one %d");
 
   ExpectStateGroupError(
-      R"({"num_hidden_layers": 1,
-          "inputs": {"past_recurrent_names": "past.%d.recurrent"},
-          "outputs": {"present_recurrent_names": ""},
-          "state_groups": [{"kind": "fixed_recurrent", "layer_ids": [0]}]})",
+      R"({"num_hidden_layers": 1, "state_groups": [{
+        "kind": "fixed", "layer_ids": [0],
+        "bindings": {"state": {"input": "past.%d.recurrent"}}
+      }]})",
       "missing its output template");
 }
 
 TEST(DecoderStateGroupsConfigTest, RejectsDuplicateOrOutOfRangeLayerIds) {
   ExpectStateGroupError(
       R"({"num_hidden_layers": 2, "state_groups": [{
-        "kind": "fixed_recurrent", "layer_ids": [0, 0]
+        "kind": "fixed", "layer_ids": [0, 0],
+        "bindings": {"state": {"input": "past.%d", "output": "present.%d"}}
       }]})",
       "duplicate layer_id 0");
 
   ExpectStateGroupError(
       R"({"num_hidden_layers": 2, "state_groups": [{
-        "kind": "fixed_recurrent", "layer_ids": [2]
+        "kind": "fixed", "layer_ids": [2],
+        "bindings": {"state": {"input": "past.%d", "output": "present.%d"}}
       }]})",
       "outside [0, num_hidden_layers)");
 }
@@ -224,26 +236,24 @@ TEST(DecoderStateGroupsConfigTest, RejectsDuplicateOrOutOfRangeLayerIds) {
 TEST(DecoderStateGroupsConfigTest, RejectsPagedLayerOverlap) {
   ExpectStateGroupError(
       R"({"num_hidden_layers": 1, "state_groups": [
-        {"kind": "paged_kv", "layer_ids": [0]},
-        {"kind": "paged_kv", "layer_ids": [0]}
+        {"kind": "paged_kv", "layer_ids": [0], "bindings": {
+          "key": {"input": "past_a.%d.key", "output": "present_a.%d.key"},
+          "value": {"input": "past_a.%d.value", "output": "present_a.%d.value"}}},
+        {"kind": "paged_kv", "layer_ids": [0], "bindings": {
+          "key": {"input": "past_b.%d.key", "output": "present_b.%d.key"},
+          "value": {"input": "past_b.%d.value", "output": "present_b.%d.value"}}}
       ]})",
       "overlaps another paged_kv group at layer_id 0");
 }
 
 TEST(DecoderStateGroupsConfigTest, RejectsDuplicateExpandedBindings) {
   ExpectStateGroupError(
-      R"({"num_hidden_layers": 1,
-          "inputs": {
-            "past_conv_names": "past.%d",
-            "past_recurrent_names": "past.%d"
-          },
-          "outputs": {
-            "present_recurrent_names": "present_recurrent.%d"
-          },
-          "state_groups": [
-            {"kind": "fixed_conv", "layer_ids": [0]},
-            {"kind": "fixed_recurrent", "layer_ids": [0]}
-          ]})",
+      R"({"num_hidden_layers": 1, "state_groups": [
+        {"kind": "fixed", "layer_ids": [0],
+         "bindings": {"state": {"input": "past.%d", "output": "present_conv.%d"}}},
+        {"kind": "fixed", "layer_ids": [0],
+         "bindings": {"state": {"input": "past.%d", "output": "present_recurrent.%d"}}}
+      ]})",
       "resolves more than one binding to 'past.0'");
 }
 
