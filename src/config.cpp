@@ -1816,6 +1816,11 @@ struct Model_Element : JSON::Element {
     }
     if (name == "dflash2" || name == "dspark") {
       // DSpark replaces DFlash's candidate selector with a Markov head but emits the same lattice.
+      if (block_drafter_seen_) {
+        throw std::runtime_error("Only one of model.dflash2 and model.dspark may be configured");
+      }
+      block_drafter_seen_ = true;
+      v_.dflash2.is_dspark = name == "dspark";
       return dflash2_;
     }
     throw JSON::unknown_value_error{};
@@ -1835,6 +1840,7 @@ struct Model_Element : JSON::Element {
   VAD_Element vad_{v_.vad};
   Mtp_Element mtp_{v_.mtp};
   Dflash2_Element dflash2_{v_.dflash2};
+  bool block_drafter_seen_{};
 };
 
 // Throws std::runtime_error (rather than std::overflow_error/std::invalid_argument) on failure.
