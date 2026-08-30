@@ -59,7 +59,8 @@ size_t PagedKeyValueCacheBytesPerBlock(const std::shared_ptr<Model>& model);
 struct PagedKeyValueCache {
  public:
   explicit PagedKeyValueCache(std::shared_ptr<Model> model,
-                              size_t auxiliary_bytes_per_block = 0);
+                              size_t auxiliary_bytes_per_block = 0,
+                              size_t auxiliary_reserved_memory_bytes = 0);
 
   bool CanAdd(std::shared_ptr<Request> request) const;
 

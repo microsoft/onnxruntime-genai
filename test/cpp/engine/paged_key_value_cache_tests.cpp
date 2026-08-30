@@ -427,6 +427,31 @@ TEST(PagedKeyValueCacheManifestTest, BlockCapacityUsesParticipatingLayerCount) {
           /*full_layer_count=*/2,
           /*element_size=*/2),
       std::runtime_error);
+
+  EXPECT_THROW(
+      ComputePagedBlockCapacity(
+          /*available_memory_bytes=*/10240,
+          /*gpu_utilization_factor=*/1.0f,
+          /*reserved_memory_bytes=*/0,
+          /*block_size=*/std::numeric_limits<size_t>::max(),
+          /*num_key_value_heads=*/2,
+          /*head_size=*/1,
+          /*full_layer_count=*/1,
+          /*element_size=*/1),
+      std::overflow_error);
+
+  EXPECT_THROW(
+      ComputePagedBlockCapacity(
+          /*available_memory_bytes=*/10240,
+          /*gpu_utilization_factor=*/1.0f,
+          /*reserved_memory_bytes=*/0,
+          /*block_size=*/4,
+          /*num_key_value_heads=*/1,
+          /*head_size=*/2,
+          /*full_layer_count=*/2,
+          /*element_size=*/2,
+          /*auxiliary_bytes_per_block=*/std::numeric_limits<size_t>::max()),
+      std::overflow_error);
 }
 
 TEST(PagedKeyValueCacheManifestTest, AllocatesSparseSlidingAndFullLayerCaches) {
