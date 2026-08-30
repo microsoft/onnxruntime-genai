@@ -135,7 +135,7 @@ struct FixedStateReservation::Storage {
   std::vector<bool> provisional;
   std::vector<uint64_t> expected_state_generations;
   std::vector<uint64_t> target_tokens;
-  std::vector<std::shared_ptr<OrtValue>> staging_backing;
+  std::vector<std::shared_ptr<OrtValue>> binding_backing;
   std::vector<size_t> capture_counts;
   std::vector<std::unique_ptr<OrtValue>> gathered_inputs;
   std::vector<std::unique_ptr<OrtValue>> staged_outputs;
@@ -155,6 +155,7 @@ struct FixedStateReservation::Storage {
   std::vector<FixedStateBinding> bindings;
   size_t staging_bytes{};
   bool captures_state_updates{};
+  bool uses_direct_bindings{};
 };
 
 struct FixedStatePool::Impl {
@@ -188,7 +189,7 @@ struct FixedStatePool::Impl {
     // Two persistent [capacity, row...] banks per tensor. Each slot reads its currently active bank
     // and a commit stages into the inactive bank, so publish is a bank flip with no device work and
     // a failed prepare cannot corrupt the visible (active) state. See PrepareCommit/PublishCommit.
-    std::array<std::unique_ptr<OrtValue>, 2> banks;
+    std::array<std::shared_ptr<OrtValue>, 2> banks;
     std::unique_ptr<OrtValue> zero_row;  // [1, row...] reusable zeroed gather source.
     // Capacity-sized backing storage shared by the single live reservation. Reservations expose
     // exact-row tensor views over these buffers, so staging allocation is paid before paged KV
@@ -401,6 +402,10 @@ size_t FixedStateReservation::NewSlotCount() const {
 
 bool FixedStateReservation::CapturesStateUpdates() const {
   return storage_ && storage_->captures_state_updates;
+}
+
+bool FixedStateReservation::UsesDirectBindings() const {
+  return storage_ && storage_->uses_direct_bindings;
 }
 
 void FixedStateReservation::CommitPrefix(size_t row, size_t step_tokens, size_t kept_tokens) {
@@ -728,9 +733,9 @@ size_t FixedStatePool::ActiveStagingBytes() const {
 }
 
 size_t FixedStatePool::PlannedStagingBytes(size_t row_count, bool captures_state_updates) const {
-  // One gather input and one staged output per fixed tensor, each `row_count` rows wide, plus the
-  // compact capture buffers when the step requests them. This mirrors the accumulation in Reserve()
-  // so the plan and the resulting reservation agree exactly.
+  // One input and one output binding per fixed tensor, each `row_count` rows wide, plus compact
+  // capture buffers when requested. Direct views overlap persistent banks; the byte footprint stays
+  // geometry-only so the plan and reservation agree before eligibility is determined.
   size_t bytes = 0;
   if (impl_->state_update_capacity != 0) {
     bytes = CheckedAdd(
@@ -899,6 +904,83 @@ FixedStateReservation FixedStatePool::Reserve(
     plan.push_back(row);
   }
 
+  // A free slot's bank selector has no visible meaning. Align every provisional row with a
+  // coherent resident cohort so their first joint commit leaves all rows on the same bank and the
+  // next reservation can use direct bindings. When there are no residents, choose bank zero as the
+  // canonical starting point so reused free slots do not inherit stale parity from prior owners.
+  std::optional<uint8_t> admission_active_bank;
+  bool mixed_resident_banks = false;
+  for (const auto& row : plan) {
+    if (row.provisional) {
+      continue;
+    }
+    const uint8_t active_bank = impl_->slots[row.slot_index].active_bank;
+    if (!admission_active_bank) {
+      admission_active_bank = active_bank;
+    } else if (*admission_active_bank != active_bank) {
+      mixed_resident_banks = true;
+      break;
+    }
+  }
+  const uint8_t provisional_active_bank =
+      mixed_resident_banks ? 0 : admission_active_bank.value_or(0);
+
+  // A contiguous resident interval can bind directly after all rows use the same active bank.
+  // Normalize only minority rows by copying their visible state to the cohort's canonical bank.
+  // The copy does not advance request state: both banks contain the same committed value, and the
+  // host bank selector changes only after every copy completes successfully.
+  bool direct_layout = true;
+  const size_t first_direct_slot = plan.front().slot_index;
+  size_t bank_one_count = 0;
+  for (size_t row = 0; row < plan.size(); ++row) {
+    direct_layout &= !plan[row].provisional &&
+                     plan[row].slot_index == first_direct_slot + row;
+    if (!plan[row].provisional) {
+      bank_one_count += impl_->slots[plan[row].slot_index].active_bank;
+    }
+  }
+  uint8_t direct_active_bank = 0;
+  if (direct_layout) {
+    const size_t bank_zero_count = plan.size() - bank_one_count;
+    direct_active_bank = bank_one_count > bank_zero_count
+                             ? 1
+                         : bank_zero_count > bank_one_count
+                             ? 0
+                             : impl_->slots[first_direct_slot].active_bank;
+    bool normalization_enqueued = false;
+    try {
+      for (const auto& spec : impl_->tensors) {
+        for (const auto& row : plan) {
+          const auto& slot = impl_->slots[row.slot_index];
+          if (slot.active_bank == direct_active_bank) {
+            continue;
+          }
+          auto destination = ByteWrapTensor(
+                                 *impl_->device, *spec.banks[direct_active_bank])
+                                 .subspan(row.slot_index * spec.row_bytes, spec.row_bytes);
+          const auto source =
+              ByteWrapTensor(*impl_->device, *spec.banks[slot.active_bank])
+                  .subspan(row.slot_index * spec.row_bytes, spec.row_bytes);
+          destination.CopyFrom(source);
+          normalization_enqueued = true;
+        }
+      }
+      if (normalization_enqueued) {
+        impl_->device->Synchronize();
+        for (const auto& row : plan) {
+          impl_->slots[row.slot_index].active_bank = direct_active_bank;
+        }
+      }
+    } catch (...) {
+      impl_->healthy = false;
+      try {
+        impl_->device->Synchronize();
+      } catch (...) {
+      }
+      throw;
+    }
+  }
+
   // Phase 2: allocate staging tensors and record binding metadata (host allocations only).
   auto storage = std::make_unique<FixedStateReservation::Storage>();
   storage->model_keepalive = impl_->model;
@@ -906,7 +988,7 @@ FixedStateReservation FixedStatePool::Reserve(
   storage->provisional.resize(requests.size());
   storage->expected_state_generations.resize(requests.size());
   storage->target_tokens.resize(requests.size());
-  storage->staging_backing.reserve(impl_->tensors.size() * 2);
+  storage->binding_backing.reserve(impl_->tensors.size() * 2);
   storage->capture_counts.resize(requests.size());
   storage->commit_step_tokens.assign(requests.size(), 0);
   storage->commit_kept_tokens.assign(requests.size(), 0);
@@ -921,6 +1003,7 @@ FixedStateReservation FixedStatePool::Reserve(
   storage->bindings.reserve(impl_->tensors.size());
 
   const size_t batch_rows = requests.size();
+  storage->uses_direct_bindings = direct_layout;
   if (impl_->state_update_capacity != 0) {
     storage->state_update_capture_count_name = impl_->state_update_capture_count_name;
     const std::array<int64_t, 1> capture_count_shape{static_cast<int64_t>(batch_rows)};
@@ -947,16 +1030,31 @@ FixedStateReservation FixedStatePool::Reserve(
     const auto shape = StorageShape(batch_rows, spec.session_shape);
     const size_t tensor_bytes = CheckedMultiply(
         batch_rows, spec.row_bytes, "staging tensor view");
+    OrtValue* input_backing =
+        storage->uses_direct_bindings
+            ? spec.banks[direct_active_bank].get()
+            : spec.gathered_staging.get();
+    OrtValue* output_backing =
+        storage->uses_direct_bindings
+            ? spec.banks[direct_active_bank ^ 1u].get()
+            : spec.output_staging.get();
+    const size_t byte_offset =
+        storage->uses_direct_bindings ? first_direct_slot * spec.row_bytes : 0;
     auto gathered = OrtValue::CreateTensor(
-        spec.gathered_staging->GetTensorMemoryInfo(),
-        spec.gathered_staging->GetTensorMutableData<void>(),
+        input_backing->GetTensorMemoryInfo(),
+        static_cast<uint8_t*>(input_backing->GetTensorMutableData<void>()) + byte_offset,
         tensor_bytes, shape, spec.data_type);
     auto staged = OrtValue::CreateTensor(
-        spec.output_staging->GetTensorMemoryInfo(),
-        spec.output_staging->GetTensorMutableData<void>(),
+        output_backing->GetTensorMemoryInfo(),
+        static_cast<uint8_t*>(output_backing->GetTensorMutableData<void>()) + byte_offset,
         tensor_bytes, shape, spec.data_type);
-    storage->staging_backing.push_back(spec.gathered_staging);
-    storage->staging_backing.push_back(spec.output_staging);
+    if (storage->uses_direct_bindings) {
+      storage->binding_backing.push_back(spec.banks[direct_active_bank]);
+      storage->binding_backing.push_back(spec.banks[direct_active_bank ^ 1u]);
+    } else {
+      storage->binding_backing.push_back(spec.gathered_staging);
+      storage->binding_backing.push_back(spec.output_staging);
+    }
     FixedStateReservation::Storage::StateUpdateTensors state_updates;
     const auto allocate_update_output = [&](const Impl::StateUpdateOutputSpec& output) {
       if (!capture_state_updates || output.name.empty()) {
@@ -1050,17 +1148,19 @@ FixedStateReservation FixedStatePool::Reserve(
       }
       capture_count_span.CopyCpuToDevice();
     }
-    for (size_t tensor_index = 0; tensor_index < impl_->tensors.size();
-         ++tensor_index) {
-      const auto& spec = impl_->tensors[tensor_index];
-      auto& gathered = *storage->gathered_inputs[tensor_index];
-      for (size_t row = 0; row < plan.size(); ++row) {
-        if (plan[row].provisional) {
-          impl_->GatherZeroRow(spec, row, gathered);
-        } else {
-          impl_->GatherResidentRow(spec, plan[row].slot_index,
-                                   impl_->slots[plan[row].slot_index].active_bank,
-                                   row, gathered);
+    if (!storage->uses_direct_bindings) {
+      for (size_t tensor_index = 0; tensor_index < impl_->tensors.size();
+           ++tensor_index) {
+        const auto& spec = impl_->tensors[tensor_index];
+        auto& gathered = *storage->gathered_inputs[tensor_index];
+        for (size_t row = 0; row < plan.size(); ++row) {
+          if (plan[row].provisional) {
+            impl_->GatherZeroRow(spec, row, gathered);
+          } else {
+            impl_->GatherResidentRow(spec, plan[row].slot_index,
+                                     impl_->slots[plan[row].slot_index].active_bank,
+                                     row, gathered);
+          }
         }
       }
     }
@@ -1088,6 +1188,7 @@ FixedStateReservation FixedStatePool::Reserve(
     slot.state_generation = 0;
     slot.committed_tokens = 0;
     slot.reservation_id = reservation_id;
+    slot.active_bank = provisional_active_bank;
     slot.ownership = FixedStateSlotOwnership::Reserved;
   }
 
@@ -1249,8 +1350,10 @@ void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
         const uint8_t inactive_bank = slot.active_bank ^ 1u;
         const size_t kept_tokens = storage.commit_kept_tokens[row];
         if (kept_tokens == 0 || kept_tokens == storage.commit_step_tokens[row]) {
-          impl_->StageRowIntoInactiveBank(
-              spec, storage.handles[row].slot, inactive_bank, row, staged);
+          if (!storage.uses_direct_bindings) {
+            impl_->StageRowIntoInactiveBank(
+                spec, storage.handles[row].slot, inactive_bank, row, staged);
+          }
           continue;
         }
 
