@@ -317,22 +317,33 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
       }
     }
 
+    const auto reduce_draft_count = [&](RequestStepPlan& entry) {
+      --entry.draft_token_count;
+      --entry.unprocessed_token_count;
+      token_counts[entry.scheduling_order] = entry.unprocessed_token_count;
+      entry.target_cache_slots = RequiredSlots(
+          selected_processed_lengths[entry.scheduling_order],
+          entry.unprocessed_token_count);
+    };
     bool reduced_draft_count = false;
     for (auto& entry : budgeted_requests) {
       if (!planned_requests.Find(entry.request_id) &&
           entry.draft_token_count != 0) {
-        --entry.draft_token_count;
-        --entry.unprocessed_token_count;
-        token_counts[entry.scheduling_order] = entry.unprocessed_token_count;
-        entry.target_cache_slots = RequiredSlots(
-            selected_processed_lengths[entry.scheduling_order],
-            entry.unprocessed_token_count);
+        reduce_draft_count(entry);
         reduced_draft_count = true;
       }
     }
     if (!reduced_draft_count) {
-      throw StepPlanningConsistencyError(
-          "Final cache planning rejected required request work.");
+      const auto optional_work = std::find_if(
+          budgeted_requests.rbegin(), budgeted_requests.rend(),
+          [](const RequestStepPlan& entry) {
+            return entry.draft_token_count != 0;
+          });
+      if (optional_work == budgeted_requests.rend()) {
+        throw StepPlanningConsistencyError(
+            "Final cache planning rejected required request work.");
+      }
+      reduce_draft_count(*optional_work);
     }
     plan.requests = budgeted_requests;
   }

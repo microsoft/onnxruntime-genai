@@ -133,6 +133,31 @@ def test_model_declares_three_value_attention_metadata():
     assert tensor_type.shape.dim[0].dim_value == 3
 
 
+def test_strided_request_tokens_are_copied_contiguously(model):
+    prompt_storage = np.asarray(
+        [_PROMPT_A[0], 31, _PROMPT_A[1], 32, _PROMPT_A[2], 33],
+        dtype=np.int32,
+    )
+    prompt = prompt_storage[::2]
+    assert not prompt.flags.c_contiguous
+    max_new_tokens = 4
+    params = og.GeneratorParams(model)
+    params.set_search_options(
+        do_sample=False,
+        max_length=len(prompt) + max_new_tokens,
+    )
+    request = og.Request(params)
+    request.add_tokens(prompt)
+    sink = _Sink()
+    request.set_opaque_data(sink)
+    engine = og.Engine(model)
+    engine.add_request(request)
+
+    _run(engine)
+
+    assert sink.tokens == predicted_tokens(_PROMPT_A, max_new_tokens)
+
+
 def test_model_declares_per_request_fp16_logits():
     graph = onnx.load(_MODEL_DIR / "decoder.onnx", load_external_data=False).graph
     logits = next(output for output in graph.output if output.name == "logits")

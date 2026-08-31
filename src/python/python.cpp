@@ -10,6 +10,10 @@
 
 using namespace pybind11::literals;
 
+template <typename T>
+using ContiguousArray = pybind11::array_t<
+    T, pybind11::array::c_style | pybind11::array::forcecast>;
+
 // If a parameter to a C++ function is an array of float16, this type will let pybind11::array_t<Ort::Float16_t> map to numpy's float16 format
 namespace pybind11 {
 namespace detail {
@@ -29,7 +33,7 @@ struct npy_format_descriptor<Ort::Float16_t> {
 }  // namespace pybind11
 
 template <typename T>
-std::span<T> ToSpan(pybind11::array_t<T> v) {
+std::span<T> ToSpan(ContiguousArray<T> v) {
   if constexpr (std::is_const_v<T>)
     return {v.data(), static_cast<size_t>(v.size())};
   else
@@ -308,7 +312,7 @@ struct PyGenerator {
     generator_->AppendTokens(ToSpan<int32_t>(tokens));
   }
 
-  void AppendTokens(pybind11::array_t<int32_t>& tokens) {
+  void AppendTokens(ContiguousArray<int32_t>& tokens) {
     generator_->AppendTokens(ToSpan(tokens));
   }
 
@@ -528,7 +532,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         t.Encode(s.c_str(), *sequences);
         return ToPython(sequences->Get(0)); })
       .def("to_token_id", &OgaTokenizer::ToTokenId)
-      .def("decode", [](const OgaTokenizer& t, pybind11::array_t<int32_t> tokens) -> std::string { return t.Decode(ToSpan(tokens)).p_; })
+      .def("decode", [](const OgaTokenizer& t, ContiguousArray<int32_t> tokens) -> std::string { return t.Decode(ToSpan(tokens)).p_; })
       .def("apply_chat_template", [](const OgaTokenizer& t, const char* messages, const char* template_str, const char* tools, bool add_generation_prompt) -> std::string { return t.ApplyChatTemplate(template_str, messages, tools, add_generation_prompt).p_; }, pybind11::arg("messages"), pybind11::kw_only(), pybind11::arg("template_str") = nullptr, pybind11::arg("tools") = nullptr, pybind11::arg("add_generation_prompt") = true)
       .def("encode_batch", [](const OgaTokenizer& t, std::vector<std::string> strings) {
         std::vector<const char*> c_strings;
@@ -605,7 +609,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("get_output", &PyGenerator::GetOutput)
       .def("set_inputs", &PyGenerator::SetInputs)
       .def("set_model_input", &PyGenerator::SetModelInput)
-      .def("append_tokens", pybind11::overload_cast<pybind11::array_t<int32_t>&>(&PyGenerator::AppendTokens))
+      .def("append_tokens", pybind11::overload_cast<ContiguousArray<int32_t>&>(&PyGenerator::AppendTokens))
       .def("append_tokens", pybind11::overload_cast<OgaTensor&>(&PyGenerator::AppendTokens))
       .def("token_count", &PyGenerator::TokenCount)
       .def("get_logits", &PyGenerator::GetLogits)
@@ -721,7 +725,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           },
           pybind11::arg("prompt") = pybind11::none())
       .def("create_stream", [](OgaMultiModalProcessor& processor) { return OgaTokenizerStream::Create(processor); })
-      .def("decode", [](OgaMultiModalProcessor& processor, pybind11::array_t<int32_t> tokens) -> std::string {
+      .def("decode", [](OgaMultiModalProcessor& processor, ContiguousArray<int32_t> tokens) -> std::string {
         return processor.Decode(ToSpan(tokens)).p_;
       });
 
@@ -737,19 +741,19 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           [](PyGeneratorParams& params) {
             return OgaRequest::Create(*params.params_);
           }))
-      .def("add_tokens", [](OgaRequest& request, pybind11::array_t<int32_t> tokens) {
+      .def("add_tokens", [](OgaRequest& request, ContiguousArray<int32_t> tokens) {
         auto sequences = OgaSequences::Create();
         auto tokens_span = ToSpan(tokens);
         sequences->Append(tokens_span.data(), tokens_span.size());
         request.AddTokens(*sequences);
       })
-      .def("continue_with", [](OgaRequest& request, pybind11::array_t<int32_t> tokens) {
+      .def("continue_with", [](OgaRequest& request, ContiguousArray<int32_t> tokens) {
         auto sequences = OgaSequences::Create();
         auto tokens_span = ToSpan(tokens);
         sequences->Append(tokens_span.data(), tokens_span.size());
         request.Continue(*sequences);
       })
-      .def("set_draft_tokens", [](OgaRequest& request, pybind11::array_t<int32_t> tokens) {
+      .def("set_draft_tokens", [](OgaRequest& request, ContiguousArray<int32_t> tokens) {
         auto sequences = OgaSequences::Create();
         auto tokens_span = ToSpan(tokens);
         sequences->Append(tokens_span.data(), tokens_span.size());

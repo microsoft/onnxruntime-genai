@@ -1946,6 +1946,40 @@ TEST_F(EngineStepTest, SpeculativeDraftFallsBackWhenOnlyBaseDecodeFitsCache) {
   EXPECT_EQ(after.requests[0].block_ids.size(), 1u);
 }
 
+TEST_F(EngineStepTest, SpeculativeDraftDoesNotDisplaceAnotherRequestsDecode) {
+  model_ = LoadSyntheticPagedModel();
+  auto& config = *model_->config_->engine.dynamic_batching;
+  config.num_blocks = 3;
+  config.max_batch_size = 2;
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto engine = MakeCompositeDoublesEngine(model_, filler);
+
+  auto first = MintRequest(*model_, Prompt(10));
+  auto second = MintRequest(
+      *model_, std::array<int32_t, 4>{20, 21, 22, 23});
+  engine.engine->AddRequest(first);
+  engine.engine->AddRequest(second);
+  ASSERT_EQ(engine.engine->Step(), first);
+  ASSERT_EQ(engine.engine->Step(), second);
+  while (first->HasUnseenTokens()) first->UnseenToken();
+  while (second->HasUnseenTokens()) second->UnseenToken();
+
+  config.max_scheduled_tokens = 3;
+  first->SetDraftTokens(std::array<int32_t, 1>{11});
+  engine.executor->SetExecutionCallback([](ExecutionContext& context) {
+    ASSERT_NE(context.plan, nullptr);
+    ASSERT_EQ(context.plan->requests.size(), 2u);
+    EXPECT_EQ(context.plan->token_count, 2u);
+    EXPECT_EQ(context.plan->requests[0].draft_token_count, 0u);
+    EXPECT_EQ(context.plan->requests[1].draft_token_count, 0u);
+  });
+
+  EXPECT_EQ(engine.engine->Step(), first);
+  EXPECT_EQ(engine.engine->Step(), second);
+  EXPECT_EQ(first->PendingDraftTokenCount(), 0u);
+}
+
 TEST_F(EngineStepTest, FixedStateCaptureUsesFinalBudgetedDraftCount) {
   model_ = LoadSyntheticCompositeModel();
   const int32_t eos = EosToken(*model_);
