@@ -22,12 +22,16 @@
         "attention_mask": "attention_mask",
         "position_ids": "position_ids",
         "past_conv_names": "past_conv.%d",
-        "past_recurrent_names": "past_recurrent.%d"
+        "past_recurrent_names": "past_recurrent.%d",
+        "state_update_capture_count": "state_update_capture_count",
+        "state_update_active": "state_update_active"
       },
       "outputs": {
         "logits": "logits",
         "present_conv_names": "present_conv.%d",
-        "present_recurrent_names": "present_recurrent.%d"
+        "present_recurrent_names": "present_recurrent.%d",
+        "state_update_conv_value_names": "state_update.%d.conv_value",
+        "state_update_recurrent_capsule_names": "state_update.%d.recurrent_capsule"
       },
       "state_groups": [
         {
@@ -35,14 +39,21 @@
           "layer_ids": [
             0,
             3
-          ]
+          ],
+          "state_update": {
+            "capacity": 3
+          }
         },
         {
           "kind": "fixed_recurrent",
           "layer_ids": [
             2,
             5
-          ]
+          ],
+          "state_update": {
+            "capacity": 3,
+            "key_head_count": 1
+          }
         }
       ]
     }

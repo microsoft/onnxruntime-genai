@@ -117,7 +117,12 @@ def _recording_model():
 def test_common_paged_builder_emits_paged_kv_group(monkeypatch, tmp_path):
     config = _write_config(monkeypatch, tmp_path, _make_config_model(Model))
 
-    assert config["model"]["decoder"]["state_groups"] == [{"kind": "paged_kv", "layer_ids": list(range(64))}]
+    assert config["model"]["decoder"]["state_groups"] == [
+        {
+            "kind": "paged_kv",
+            "layer_ids": list(range(64)),
+        }
+    ]
 
 
 def test_common_nonpaged_builder_preserves_manifest_absence(monkeypatch, tmp_path):
@@ -137,19 +142,42 @@ def test_qwen_all_attention_builder_emits_paged_kv_group(monkeypatch, tmp_path):
         _make_config_model(Qwen35TextModel, layer_types=["full_attention"] * 64),
     )
 
-    assert config["model"]["decoder"]["state_groups"] == [{"kind": "paged_kv", "layer_ids": list(range(64))}]
+    assert config["model"]["decoder"]["state_groups"][0]["kind"] == "paged_kv"
+    assert config["model"]["decoder"]["state_groups"][0]["layer_ids"] == list(range(64))
 
 
 @pytest.mark.parametrize(
     ("layer_types", "expected"),
     [
-        (["sliding_attention"], [{"kind": "paged_kv", "layer_ids": [0]}]),
-        (["conv"], [{"kind": "fixed_conv", "layer_ids": [0]}]),
+        (
+            ["sliding_attention"],
+            [
+                {
+                    "kind": "paged_kv",
+                    "layer_ids": [0],
+                }
+            ],
+        ),
+        (
+            ["conv"],
+            [
+                {
+                    "kind": "fixed_conv",
+                    "layer_ids": [0],
+                }
+            ],
+        ),
         (
             ["linear_attention"],
             [
-                {"kind": "fixed_conv", "layer_ids": [0]},
-                {"kind": "fixed_recurrent", "layer_ids": [0]},
+                {
+                    "kind": "fixed_conv",
+                    "layer_ids": [0],
+                },
+                {
+                    "kind": "fixed_recurrent",
+                    "layer_ids": [0],
+                },
             ],
         ),
     ],
@@ -157,7 +185,19 @@ def test_qwen_all_attention_builder_emits_paged_kv_group(monkeypatch, tmp_path):
 def test_state_groups_are_added_only_for_matching_layers(layer_types, expected):
     model = _make_config_model(Model, layer_types=layer_types)
 
-    assert model.make_decoder_state_groups({}, {}) == expected
+    inputs = {
+        "past_key_names": "past_key_values.%d.key",
+        "past_value_names": "past_key_values.%d.value",
+        "past_conv_names": "past.%d.conv",
+        "past_recurrent_names": "past.%d.recurrent",
+    }
+    outputs = {
+        "present_key_names": "present.%d.key",
+        "present_value_names": "present.%d.value",
+        "present_conv_names": "present.%d.conv",
+        "present_recurrent_names": "present.%d.recurrent",
+    }
+    assert model.make_decoder_state_groups(inputs, outputs) == expected
 
 
 def test_qwen38_official_geometry_emits_exact_sparse_groups(monkeypatch, tmp_path):
@@ -187,16 +227,17 @@ def test_qwen38_official_geometry_emits_exact_sparse_groups(monkeypatch, tmp_pat
 def test_qwen38_compact_state_update_bindings_are_emitted(monkeypatch, tmp_path):
     model = _make_config_model(Qwen35TextModel, layer_types=["linear_attention", "full_attention"])
     model.context_length_attrs["state_update_capacity"] = 3
-    model.input_names["state_update.capture_count"] = "state_update_capture_count"
-    model.input_names["state_update.active"] = "state_update_active"
+    model.linear_num_key_heads = 2
+    model.input_names["state_update.capture_count"] = "custom_state_update_capture_count"
+    model.input_names["state_update.active"] = "custom_state_update_active"
     model.output_names["state_update.conv_value"] = {0: "state_update.0.conv_value"}
     model.output_names["state_update.recurrent_capsule"] = {0: "state_update.0.recurrent_capsule"}
 
     decoder = _write_config(monkeypatch, tmp_path, model)["model"]["decoder"]
 
     assert decoder["state_update_capacity"] == 3
-    assert decoder["inputs"]["state_update_capture_count"] == "state_update_capture_count"
-    assert decoder["inputs"]["state_update_active"] == "state_update_active"
+    assert decoder["inputs"]["state_update_capture_count"] == "custom_state_update_capture_count"
+    assert decoder["inputs"]["state_update_active"] == "custom_state_update_active"
     assert decoder["outputs"]["state_update_conv_value_names"] == "state_update.%d.conv_value"
     assert decoder["outputs"]["state_update_recurrent_capsule_names"] == "state_update.%d.recurrent_capsule"
 
@@ -208,6 +249,34 @@ def test_qwen38_capacity_without_bindings_is_not_recorded(monkeypatch, tmp_path)
     decoder = _write_config(monkeypatch, tmp_path, model)["model"]["decoder"]
 
     assert "state_update_capacity" not in decoder
+
+
+def test_qwen38_compact_state_groups_are_checkpoint_free(monkeypatch, tmp_path):
+    model = _make_config_model(
+        Qwen35TextModel,
+        layer_types=["linear_attention", "full_attention"],
+    )
+    model.num_layers = 2
+    model.context_length_attrs["state_update_capacity"] = 3
+    model.linear_num_key_heads = 2
+    model.input_names["state_update.capture_count"] = "state_update_capture_count"
+    model.input_names["state_update.active"] = "state_update_active"
+    model.output_names["state_update.conv_value"] = {0: "state_update.0.conv_value"}
+    model.output_names["state_update.recurrent_capsule"] = {0: "state_update.0.recurrent_capsule"}
+    config = _write_config(monkeypatch, tmp_path, model)
+
+    conv_group, recurrent_group = config["model"]["decoder"]["state_groups"][1:]
+    assert conv_group["state_update"] == {
+        "capacity": 3,
+    }
+    assert recurrent_group["state_update"] == {
+        "capacity": 3,
+        "key_head_count": 2,
+    }
+    for group in (conv_group, recurrent_group):
+        assert "bindings" not in group
+        assert "checkpoint_count" not in group
+        assert "checkpoint_alignment" not in group
 
 
 def test_varlen_ops_emit_compact_state_updates_at_exact_slots():

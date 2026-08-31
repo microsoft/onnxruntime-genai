@@ -240,7 +240,9 @@ TEST(ModelStateManifestTest, DecoderModelLoadValidatesDecoderBindings) {
   const auto invalid_overlay = R"({
     "model": {"decoder": {
       "outputs": {"present_key_names": "missing.%d.key"},
-      "state_groups": [{"kind": "paged_kv", "layer_ids": [0]}]
+      "state_groups": [{
+        "kind": "paged_kv", "layer_ids": [0]
+      }]
     }}
   })";
   auto invalid_config = std::make_unique<Config>(model_path, invalid_overlay);
@@ -251,7 +253,9 @@ TEST(ModelStateManifestTest, DecoderModelLoadsWithValidDecoderBindings) {
   const auto model_path = fs::path{std::string{MODEL_PATH "engine/dummy-decoder"}};
   const auto valid_overlay = R"({
     "model": {"decoder": {
-      "state_groups": [{"kind": "paged_kv", "layer_ids": [0]}]
+      "state_groups": [{
+        "kind": "paged_kv", "layer_ids": [0]
+      }]
     }}
   })";
   auto valid_config = std::make_unique<Config>(model_path, valid_overlay);

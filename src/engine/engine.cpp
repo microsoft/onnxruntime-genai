@@ -444,6 +444,18 @@ std::shared_ptr<Request> Engine::StepDynamic() {
       // counters, host token mirrors, and completion status still remain unchanged in this phase.
       scheduled_requests.GenerateNextTokensForTransaction(
           step_plan_, step_results_);
+      // A verify step planned cache slots for every draft. Narrow the reservation to the accepted
+      // prefix before anything is staged, so the paged and fixed states commit at one boundary.
+      for (size_t i = 0; i < step_plan_.requests.size(); ++i) {
+        const auto& entry = step_plan_.requests[i];
+        if (entry.draft_token_count == 0) {
+          continue;
+        }
+        reservation->CommitPrefix(
+            i, entry.request_id, entry.unprocessed_token_count,
+            entry.unprocessed_token_count - entry.draft_token_count +
+                entry.request->AcceptedDraftTokenCount());
+      }
       staged_ready_requests_.clear();
       for (size_t i = 0; i < step_plan_.requests.size(); ++i) {
         auto& request = step_plan_.requests[i].request;
@@ -451,6 +463,23 @@ std::shared_ptr<Request> Engine::StepDynamic() {
           staged_ready_requests_.push_back(request);
         }
       }
+      std::sort(staged_ready_requests_.begin(), staged_ready_requests_.end(),
+                [this](const std::shared_ptr<Request>& left,
+                       const std::shared_ptr<Request>& right) {
+                  const auto scheduling_order = [this](const Request* request) {
+                    const auto entry = std::find_if(
+                        step_plan_.requests.begin(), step_plan_.requests.end(),
+                        [request](const RequestStepPlan& candidate) {
+                          return candidate.request_id == request;
+                        });
+                    if (entry == step_plan_.requests.end()) {
+                      throw std::logic_error(
+                          "Ready request is absent from the committed step plan.");
+                    }
+                    return entry->scheduling_order;
+                  };
+                  return scheduling_order(left.get()) < scheduling_order(right.get());
+                });
     } catch (...) {
       const auto post_processing_error = std::current_exception();
       rollback_transaction();
@@ -548,6 +577,13 @@ std::shared_ptr<Request> Engine::DrainReadyRequest() {
 bool Engine::HasPendingRequests() const {
   return ready_request_index_ < ready_requests_.size() ||
          scheduler_->HasPendingRequests();
+}
+
+size_t Engine::MaxDraftTokensPerStep() const {
+  return cache_manager_->SupportsDynamicBatching() &&
+                 model_executor_->SupportsDraftVerification()
+             ? cache_manager_->MaxDraftTokensPerStep()
+             : 0;
 }
 
 }  // namespace Generators

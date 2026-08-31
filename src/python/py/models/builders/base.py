@@ -1349,12 +1349,28 @@ class Model:
 
         state_groups = []
         if full_attention_layers:
-            state_groups.append({"kind": "paged_kv", "layer_ids": full_attention_layers})
+            state_groups.append(self.make_paged_key_value_state_group(full_attention_layers))
         if conv_layers:
-            state_groups.append({"kind": "fixed_conv", "layer_ids": conv_layers})
+            state_groups.append(
+                {
+                    "kind": "fixed_conv",
+                    "layer_ids": conv_layers,
+                }
+            )
         if recurrent_layers:
-            state_groups.append({"kind": "fixed_recurrent", "layer_ids": recurrent_layers})
+            state_groups.append(
+                {
+                    "kind": "fixed_recurrent",
+                    "layer_ids": recurrent_layers,
+                }
+            )
         return state_groups
+
+    def make_paged_key_value_state_group(self, layer_ids):
+        return {
+            "kind": "paged_kv",
+            "layer_ids": layer_ids,
+        }
 
     def make_key_value_cache_names(self, layer_id):
         """

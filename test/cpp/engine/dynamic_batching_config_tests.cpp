@@ -145,8 +145,7 @@ TEST(DecoderStateGroupsConfigTest, OverlayValidationIsTransactional) {
   auto config = LoadDecoderConfig(R"({
     "num_hidden_layers": 1,
     "state_groups": [{
-      "kind": "fixed_conv",
-      "layer_ids": [0]
+      "kind": "fixed_conv", "layer_ids": [0]
     }]
   })");
 
@@ -154,8 +153,7 @@ TEST(DecoderStateGroupsConfigTest, OverlayValidationIsTransactional) {
       OverlayConfig(config, R"({
         "model": {"decoder": {
           "state_groups": [{
-            "kind": "fixed_conv",
-            "layer_ids": [1]
+            "kind": "fixed_conv", "layer_ids": [1]
           }]
         }}
       })"),
@@ -179,6 +177,27 @@ TEST(DecoderStateGroupsConfigTest, RejectsMissingOrUnknownKind) {
         "kind": "unknown", "layer_ids": [0]
       }]})",
       "Unsupported decoder state group kind 'unknown'");
+}
+
+TEST(DecoderStateGroupsConfigTest, RejectsLegacySchemaWithMigrationGuidance) {
+  ExpectStateGroupError(
+      R"({"num_hidden_layers": 1, "state_groups": [{
+        "kind": "fixed", "layer_ids": [0]
+      }]})",
+      "use 'fixed_conv' or 'fixed_recurrent'");
+
+  ExpectStateGroupError(
+      R"({"num_hidden_layers": 1, "state_groups": [{
+        "kind": "fixed_conv", "layer_ids": [0],
+        "state_update": {"kind": "causal_conv", "capacity": 3}
+      }]})",
+      "Legacy decoder state_update field 'kind'");
+
+  ExpectStateGroupError(
+      R"({"num_hidden_layers": 1, "state_groups": [{
+        "kind": "fixed_conv", "layer_ids": [0], "bindings": {}
+      }]})",
+      "move binding templates to model.decoder.inputs and model.decoder.outputs");
 }
 
 TEST(DecoderStateGroupsConfigTest, AllowsIndependentFixedGroupsOnTheSameLayer) {

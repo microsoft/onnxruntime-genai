@@ -459,11 +459,33 @@ void PagedCacheReservation::FillWindowBlockTable(
   }
 }
 
+void PagedCacheReservation::CommitPrefix(const void* request_id,
+                                         size_t step_slots,
+                                         size_t kept_slots) {
+  if (state_ != PagedCacheReservationState::Reserved) {
+    throw std::logic_error("Paged cache reservation is no longer accepting prefix commits.");
+  }
+  const auto delta = std::find_if(deltas_.begin(), deltas_.end(),
+                                  [request_id](const PagedCacheReservationDelta& candidate) {
+                                    return candidate.request_id == request_id;
+                                  });
+  if (delta == deltas_.end()) {
+    throw std::runtime_error("Request is not part of the paged cache reservation.");
+  }
+  if (kept_slots == 0 || kept_slots > step_slots ||
+      step_slots != delta->target_slots - delta->committed_slots) {
+    throw std::runtime_error(
+        "Paged cache prefix commit must keep between one and step_slots of the slots this step "
+        "planned.");
+  }
+
+  delta->target_slots = delta->committed_slots + kept_slots;
+}
+
 void PagedCacheReservation::Commit() {
   ValidateCommit();
   CommitValidated();
 }
-
 void PagedCacheReservation::ValidateCommit() const {
   if (state_ != PagedCacheReservationState::Reserved) {
     throw std::logic_error("Paged cache reservation can only be committed once.");

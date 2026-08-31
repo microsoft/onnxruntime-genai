@@ -395,9 +395,24 @@ struct Config {
         FixedRecurrent,
       };
 
+      enum class StateUpdateKind {
+        Invalid,
+        CausalConv,
+        GatedDeltaNet,
+      };
+
+      static constexpr int MaxStateUpdateCapacity = 8;
+
+      struct StateUpdate {
+        int capacity{};
+        bool enabled{true};
+        int key_head_count{};
+      };
+
       struct StateGroup {
         StateGroupKind kind{StateGroupKind::Invalid};
         std::vector<int> layer_ids;
+        std::optional<StateUpdate> state_update;
       };
 
       // Absence preserves the legacy dense, sequential paged-KV contract.

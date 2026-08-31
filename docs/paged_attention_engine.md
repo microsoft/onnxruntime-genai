@@ -106,7 +106,7 @@ When an explicit manifest is present, model loading resolves each group's decode
 
 The dynamic Engine requires exactly one `paged_kv` group. It allocates cache tensors only for that group's logical layer IDs, expands their exact binding names without renumbering, derives the cache dtype from the first validated key input, and sizes an automatic block pool using the number of participating full-attention layers after reserving storage for participating sliding-window layers. Every configured sliding-window layer must belong to the paged group. Multiple paged groups are rejected because the Engine currently owns one shared paged pool. The synthesized legacy group preserves dense sequential behavior when no explicit manifest exists.
 
-`fixed_conv` and `fixed_recurrent` groups may accompany the required `paged_kv` group. `ValidateDynamicEngineCompatibility` accepts them (it still rejects any configuration without exactly one `paged_kv` group), and `PagedCacheManager` constructs a `FixedStatePool` with `max_batch_size` slots when at least one fixed group is present. The composite manager reserves, stages, and commits fixed slots together with the paged blocks (see "Fixed request-state pools" below), while `HybridDecoderIO` binds their gathered inputs and staged outputs alongside the packed variable-length inputs. Expanded fixed bindings must resolve to real session inputs and outputs; the pool rejects absent or incompatible bindings.
+`fixed_conv` and `fixed_recurrent` groups may accompany the required `paged_kv` group. `ValidateDynamicEngineCompatibility` accepts them (it still rejects any configuration without exactly one `paged_kv` group), and `PagedCacheManager` constructs a `FixedStatePool` with `max_batch_size` slots when at least one fixed group is present. The composite manager reserves and commits fixed slots together with the paged blocks (see "Fixed request-state pools" below), while `HybridDecoderIO` binds either direct bank views or gathered/staged fallback tensors alongside the packed variable-length inputs. Expanded fixed bindings must resolve to real session inputs and outputs; the pool rejects absent or incompatible bindings.
 
 Fixed state currently requires `engine.dynamic_batching`; static batching is rejected because
 `StaticBatchDecoderIO` does not own request-indexed fixed-state bindings.
@@ -296,20 +296,23 @@ be `Active` or `Assigned`; an `Assigned` resident is a queued continuation.
 It then snapshots nonresident waiting requests from the scheduler pool. These are `Assigned` and are marked as newly admitted candidates.
 
 The scheduler orders candidates with decodes first. Order remains stable among
-decodes and among prefills. Each candidate initially contributes one provisional
-token so cache feasibility can be decided before a large prefill consumes the
-global token budget.
+decodes and among prefills. Before cache planning, it assigns the global token
+budget to the first `min(max_scheduled_tokens, max_batch_size)` candidates:
+decodes receive optional draft tokens first, then prefills expand in stable
+order. Later candidates remain one-token fallbacks so cache planning can skip a
+blocked early request and still admit smaller work.
 
 For each candidate, the scheduler records a `RequestStepPlan` containing:
 
 - The request identity.
 - The sequence length before the transaction.
-- The provisional number of unprocessed tokens.
+- The budgeted number of unprocessed tokens and speculative drafts.
 - The number of cache slots required after the model run.
 - Whether the work is prefill.
 - Whether the request is newly admitted.
 
-At this point, the plan contains candidates. It has not yet been reduced to the requests that fit or expanded to the final token counts.
+At this point, the plan contains budgeted candidates. It has not yet been reduced
+to the requests that fit.
 
 ### 3. Plan paged-cache resources and admission
 
@@ -327,6 +330,10 @@ skip an infeasible candidate and continue to later candidates, so a blocked
 prefill does not hide smaller work that can run. It matches residents by request
 identity rather than block-table position, and the plan may contain an ordered
 subset of residents.
+
+Speculative drafts are optional. If their incremental block growth would defer
+or permanently reject a runnable decode, the planner trims drafts until the
+request fits, down to its mandatory one-token decode.
 
 Scheduled rows cannot exceed `max_batch_size`. Separately, all committed
 residents, including omitted ones, count toward residency capacity. A new
@@ -348,11 +355,11 @@ If at least one request fits, the step is executable even when other requests we
 
 ### 4. Finalize the packed token layout
 
-After cache planning selects the batch, each decode keeps its one-token
-contribution. Every selected prefill also keeps its provisional token, then
-prefills expand in stable order while tokens remain. A prefill contribution is
-bounded by its remaining prompt, `search.chunk_size` when configured, and
-`max_scheduled_tokens`.
+After cache planning selects the batch, the scheduler preserves each selected
+entry's budgeted contribution. A prefill contribution is bounded by its
+remaining prompt, `search.chunk_size` when configured, and
+`max_scheduled_tokens`. Optional drafts may be fewer than initially budgeted
+when paged-cache capacity requires a smaller verify step.
 
 The scheduler recomputes cache targets and assigns each request:
 
@@ -389,7 +396,11 @@ The paged sub-reservation:
 
 Reservation is all-or-nothing. If all planned blocks cannot be reserved, the engine treats that as an execution contract failure because planning had already declared the step executable.
 
-The fixed sub-reservation, when present, admits the same rows in the same order. A request that already owns a committed fixed slot keeps it; every other request is admitted provisionally into a free slot. The reservation gathers each row's committed (or zeroed, for a new admission) state into a contiguous model input and allocates a separate staged output tensor. Its `target_tokens` mirror the paged `target_cache_slots`, so both states commit at one token boundary. `StepPlan::fixed_state` records the fixed row count, new-slot count, and staging bytes; `Engine::StepDynamic()` then proves the reservation matches that plan exactly -- required flag, row count, new-slot count, staging bytes, and per-row request identity -- and fails fatally on any mismatch. A composite reservation wraps exactly one paged reservation and the Engine holds at most one at a time, so the paged split-commit contract (its constructor reserves its own `committed_tables_` headroom, and the pool permits a single live reservation) holds without any cross-reservation aggregate check.
+The fixed sub-reservation, when present, admits the same rows in the same order. A request that already owns a committed fixed slot keeps it; every other request is admitted provisionally into a free slot. After resource selection and token-budget assignment, an all-resident batch is ordered by fixed slot before packed offsets are calculated. When those slots form a contiguous interval, the pool normalizes any minority bank rows to a canonical active bank, then binds that bank interval directly as model input and the corresponding inactive-bank interval as model output. New admissions and fragmented intervals retain the gather/output staging fallback. Free slots have no visible bank, so admission aligns their bank selector with a coherent resident cohort; this prevents stale parity from a previous owner from unnecessarily disabling the next direct reservation.
+
+Physical execution ordering does not change ready-notification ordering. Each row retains its logical scheduler rank, and the Engine restores that order when it publishes ready requests after the transaction commits.
+
+The fixed `target_tokens` mirror the paged `target_cache_slots`, so both states commit at one token boundary. `StepPlan::fixed_state` records the fixed row count, new-slot count, and binding footprint; `Engine::StepDynamic()` then proves the reservation matches that plan exactly -- required flag, row count, new-slot count, bytes, and per-row request identity -- and fails fatally on any mismatch. A composite reservation wraps exactly one paged reservation and the Engine holds at most one at a time, so the paged split-commit contract (its constructor reserves its own `committed_tables_` headroom, and the pool permits a single live reservation) holds without any cross-reservation aggregate check.
 
 While the reservation is active, decoder input preparation can view a combined block table containing:
 
@@ -418,7 +429,7 @@ On the transactional dynamic path, `PagedCacheManager::PrepareStep()` updates th
 
 The physical key and value cache tensors are long-lived. What changes per step is the block table that maps each request's logical sequence blocks to physical cache blocks.
 
-`ExecutionContext` also exposes the fixed slot handles, staged bindings, and staging-byte count in the exact scheduled request order. `HybridDecoderIO` adopts the complete `VarlenDecoderIO` contract and appends these fixed bindings without changing packed token order or logits processing.
+`ExecutionContext` also exposes the fixed slot handles, state bindings, and binding-byte count in the exact scheduled request order. `HybridDecoderIO` adopts the complete `VarlenDecoderIO` contract and appends these fixed bindings without changing packed token order or logits processing.
 
 ### 8. Pack variable-length model inputs
 
@@ -501,7 +512,7 @@ Requests that appended a token or became complete are placed in a staged ready l
 
 The commit order in `Engine::StepDynamic()` is deliberate:
 
-1. Prepare the reservation: validate every ownership and capacity precondition of both sub-reservations and copy each fixed staged output into its slot's inactive persistent bank, synchronizing without publishing anything. This is the last step that performs fallible device work, and a failure here is fatal even though committed state is intact, because a partially written inactive bank cannot be proven consistent for a retry. The publish steps below do only host-side work; they can still throw on a state-machine misuse (for example a double publish), and the Engine treats any such throw as fatal too.
+1. Prepare the reservation: validate every ownership and capacity precondition of both sub-reservations. A fallback reservation copies each fixed staged output into its slot's inactive persistent bank. A direct reservation has already written full-step outputs there; if speculative verification keeps only a prefix, compact replay reconstructs the accepted state from the untouched active bank into that same inactive bank. Preparation synchronizes without publishing anything. This is the last step that performs fallible device work, and a failure here is fatal even though committed state is intact, because a partially written inactive bank cannot be proven consistent for a retry. The publish steps below do only host-side work; they can still throw on a state-machine misuse (for example a double publish), and the Engine treats any such throw as fatal too.
 2. Commit the request search checkpoints and sampler checkpoint.
 3. Publish the reservation: paged occupancy first, then the fixed bank flip.
 4. Commit each request's lightweight bookkeeping.
@@ -563,6 +574,11 @@ Guidance fast-forward tokens are not currently supported by the Engine. Requests
 are rejected because each forced token would also need a corresponding model execution and paged
 KV-cache advancement inside the transaction.
 
+Speculative draft tokens are also rejected for guided requests. Draft verification compares the
+target model's unprocessed argmax rows, while guidance changes which tokens are valid at each
+position; combining them requires guidance-aware verification semantics rather than applying one
+mask only to the final sampled row.
+
 ## Rollback and failure handling
 
 The dynamic path separates failures into recoverable batch failures and fatal engine failures.
@@ -578,7 +594,7 @@ Rollback performs both parts:
 
 After a successful rollback, committed request state and committed cache state match the state before the step began. The caller receives an `EngineStepError` with either `RetryableBatchAbort` or `ExecutionCapacityExceeded`, and the engine remains healthy. Calling `Step()` again with unchanged memory availability and workload composition may produce the same capacity failure.
 
-The model may have written data into reserved cache memory and into fixed output staging before the failure. Discard is safe because neither was published as committed ownership or state: reserved blocks were never added to committed block tables, and staged fixed outputs were never copied into a slot's active bank. Future users overwrite that storage before treating it as valid.
+The model may have written data into reserved cache memory and into fixed output staging or an inactive direct bank before the failure. Discard is safe because neither was published as committed ownership or state: reserved blocks were never added to committed block tables, and the fixed active bank was never changed. Future users overwrite that storage before treating it as valid.
 
 ### Fatal failure
 
@@ -727,14 +743,15 @@ that is not discoverable as committed ownership until commit. There is no separa
 allocation surface.
 
 A reservation accepts requests in scheduled row order and exposes ordered handles,
-bindings, and target tokens. It gathers each resident row from the slot's active
-persistent bank and each freshly admitted row from a single reusable zeroed row,
-into contiguous model inputs, and allocates distinct staged output tensors. It
-never binds an output over committed state. All host validation and slot planning
-complete before any device copy is enqueued; once gather copies are in flight the
-pool synchronizes before returning, and a failure drains the device and marks the
-pool unhealthy without leaving partially mutated slots. The reservation reports its
-`PlannedStagingBytes` (gather plus staged output) up front.
+bindings, and target tokens. A contiguous resident interval binds its active bank
+directly as model input and its inactive bank as model output. If resident banks
+differ, the pool first copies only minority rows into a canonical bank and changes
+their selectors after synchronization; this representation-only normalization does
+not advance request state. New admissions and fragmented intervals gather committed
+or zero state into contiguous model inputs and use distinct staged outputs. No path
+binds an output over visible committed state. The reservation reports its input/output
+binding footprint through the retained `PlannedStagingBytes` API; direct views overlap
+storage already counted by `PersistentBytes`.
 
 Every tensor is backed by two persistent `[capacity, row...]` banks, and each slot
 records which bank is currently active (holds its visible committed state). This
@@ -748,11 +765,13 @@ and then publish them at a single infallible boundary:
   left it (ownership, identity, generation, and reservation id), that publishing it
   cannot overflow a generation, and that no row regresses below its slot's
   `committed_tokens`.
-- **`PrepareCommit()`** is the fallible device-staging phase: it re-validates, then
-  copies each staged output row into the slot's **inactive** bank and synchronizes.
-  The active (visible) bank is never touched, so a failure leaves committed state
-  exactly as it was; it drains the device and marks the pool unhealthy because the
-  inactive banks may be left partially written. The reservation becomes `Prepared`.
+- **`PrepareCommit()`** is the fallible device-completion phase: it re-validates,
+  copies fallback outputs into the **inactive** bank, or replays a partially accepted
+  compact update over a direct output, and synchronizes. A fully accepted direct
+  output needs no state copy. The active (visible) bank is never touched, so a
+  failure leaves committed state exactly as it was; it drains the device and marks
+  the pool unhealthy because the inactive banks may be left partially written. The
+  reservation becomes `Prepared`.
 - **`PublishCommit()`** is `noexcept` and performs no fallible or device work: it
   flips each slot to its freshly written bank, advances `state_generation`, sets
   `committed_tokens` to the row's `target_tokens`, and publishes provisional
@@ -768,10 +787,11 @@ consistent but cannot prove the inactive banks are whole), and `Discard()` on a
 failed reservation is a no-op.
 
 Only one reservation is live at a time. A reservation holds the pool's
-single-reservation lock and its gather/output staging memory for its whole
+single-reservation lock and its input/output binding backing for its whole
 lifetime, and both are released when the reservation object is destroyed (an
-uncommitted or prepared reservation also discards itself then). `ActiveStagingBytes`
-therefore tracks the live reservation. The caller admits the next batch by letting
+uncommitted or prepared reservation also discards itself then). The retained
+`ActiveStagingBytes` API tracks the live binding footprint, which overlaps persistent
+banks for a direct reservation. The caller admits the next batch by letting
 the previous reservation go out of scope after committing or discarding it; a
 committed reservation's accessors stay valid until then because they read
 reservation-owned storage.
@@ -783,7 +803,7 @@ slot's inactive bank is only ever written (never read) before it becomes active,
 the persistent banks never need construction-time zeroing. The pool therefore does
 not zero on release, and does not zero gather or staged tensors. It reports its
 persistent bytes (both state banks and both staging buffers), reusable zeroing scratch bytes, and
-the active reservation's viewed gather/output staging bytes separately. The two-bank design trades roughly double
+the active reservation's input/output binding footprint separately. The two-bank design trades roughly double
 the persistent footprint for a publish that is a host-only bank flip with no device
 copy, which is what lets `PublishCommit()` be `noexcept`.
 
@@ -795,13 +815,14 @@ reserves both, `PrepareCommit()`/`Commit()` stage and publish both, and
 removal and abandoned-request reclamation release a request's fixed slot together with its paged
 blocks; a completed turn remains resident until one of those lifecycle events. `HybridDecoderIO` composes the packed
 `VarlenDecoderIO` inputs and logits handling with the reservation's fixed input and
-staged output bindings. Fixed-state models execute eagerly because packed position and
+output bindings. Fixed-state models execute eagerly because packed position and
 transaction-scoped state bindings are not yet part of the CUDA graph compatibility contract.
 
 The pool allocates capacity-sized gather and output staging buffers at construction, before paged
-KV auto-sizing queries available memory. Each reservation creates exact-row tensor views over that
-storage. This keeps per-step staging inside the model's memory budget and prevents a planned step
-from failing later because its fixed-state device buffers could not be allocated.
+KV auto-sizing queries available memory. Fallback reservations create exact-row tensor views over
+that storage; eligible resident reservations instead view exact intervals of the persistent banks.
+This keeps fallback staging inside the model's memory budget and prevents a planned step from
+failing later because its fixed-state device buffers could not be allocated.
 
 Fixed slots and paged block tables each maintain a preallocated flat request index. Ownership
 publication updates these indexes without allocation, while planning resolves every resident and
@@ -876,7 +897,8 @@ The current ordering policy is:
 
 1. Consider decodes first, preserving their resident order.
 2. Consider prefills afterward, preserving resident order and then scheduler-pool order.
-3. Give every feasible selected row one token before expanding selected prefills in stable order.
+3. Give every candidate in the provisional request-limit prefix one token, then budget decode
+   drafts and prefill expansion before cache feasibility is evaluated.
 
 Requests skipped because of token, row, or temporary cache capacity remain pending for a later step. Phase 1 does not rotate service or promote waiting prefills, so sustained decode demand can starve prefill work.
 

@@ -71,6 +71,7 @@ struct FixedStateCommittedState {
 struct FixedStateReservationRequest {
   const void* request_id{};
   uint64_t target_tokens{};
+  size_t capture_count{};
 };
 
 struct FixedStateBinding {
@@ -80,6 +81,16 @@ struct FixedStateBinding {
   OrtValue* input{};
   const char* output_name{};
   OrtValue* output{};
+  Config::Model::Decoder::StateUpdateKind state_update_kind{};
+  size_t state_update_capacity{};
+  const char* state_update_capture_count_name{};
+  OrtValue* state_update_capture_count{};
+  const char* state_update_active_name{};
+  OrtValue* state_update_active{};
+  const char* state_update_value_name{};
+  OrtValue* state_update_value{};
+  const char* state_update_capsule_name{};
+  OrtValue* state_update_capsule{};
 };
 
 enum class FixedStateReservationState {
@@ -125,6 +136,14 @@ class FixedStateReservation {
   std::span<const uint64_t> TargetTokens() const;
   size_t PlannedStagingBytes() const;
   size_t NewSlotCount() const;
+  bool CapturesStateUpdates() const;
+  // True when model inputs and outputs view the active and inactive persistent banks directly.
+  bool UsesDirectBindings() const;
+
+  // Commits only the first `kept_tokens` of the `step_tokens` this row's request contributed,
+  // by replaying the captured compact updates through the accepted transition and lowering the
+  // row's committed token boundary by the rejected tokens. Must be called before PrepareCommit.
+  void CommitPrefix(size_t row, size_t step_tokens, size_t kept_tokens);
 
   // Commit is split into three phases so a composite Engine transaction can validate and stage all
   // of its resources, synchronize once, and then publish them at a single infallible boundary:
@@ -179,11 +198,15 @@ class FixedStatePool {
   size_t CommittedSlotCount() const;
   size_t PersistentBytes() const;
   size_t ZeroingScratchBytes() const;
+  // Retained staging API reports the live input/output binding footprint. Direct bank views overlap
+  // PersistentBytes(); fallback and compact-update buffers use dedicated storage.
   size_t ActiveStagingBytes() const;
-  // Gather+output staging bytes a reservation of `row_count` scheduled rows will view. A pure
-  // function of the pool's tensor geometry, so composite step planning can size the transaction
-  // before the reservation exists; it equals the resulting reservation's PlannedStagingBytes().
-  size_t PlannedStagingBytes(size_t row_count) const;
+  // Input/output binding footprint for `row_count` scheduled rows, plus compact capture storage
+  // when requested. A pure function of tensor geometry, so composite planning can verify the
+  // reservation before its direct-binding eligibility is known.
+  size_t PlannedStagingBytes(size_t row_count, bool captures_state_updates = false) const;
+  bool SupportsStateUpdates() const;
+  size_t StateUpdateCapacity() const;
 
   FixedStateSlotHandle HandleFor(const void* request_id) const;
   // True when `request_id` currently owns a committed slot. Non-throwing counterpart to HandleFor
