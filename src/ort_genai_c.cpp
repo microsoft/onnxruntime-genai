@@ -1695,6 +1695,19 @@ OgaResult* OgaEngineHasPendingRequests(OgaEngine* engine, bool* out) {
   OGA_CATCH
 }
 
+OgaResult* OgaEngineMaxDraftTokensPerProposal(const OgaEngine* engine, size_t* out) {
+  OGA_TRY
+  if (!engine) {
+    throw std::runtime_error("engine must not be null.");
+  }
+  if (!out) {
+    throw std::runtime_error("out must not be null.");
+  }
+  *out = engine->MaxDraftTokensPerStep();
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OgaEngineCreateRequest(
     OgaEngine* engine,
     const OgaGeneratorParams* params,
@@ -1750,6 +1763,23 @@ OgaResult* OgaRequestOptionsSetMaxSessionTokens(
   } else {
     options->max_session_tokens = static_cast<size_t>(max_session_tokens);
   }
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaRequestSetDraftTokens(OgaRequest* request, const OgaSequences* tokens) {
+  OGA_TRY
+  if (!request) {
+    throw std::runtime_error("request must not be null.");
+  }
+  if (!tokens) {
+    throw std::runtime_error("tokens must not be null.");
+  }
+  request->ValidateOwnerThread();
+  if (tokens->size() > 1) {
+    throw std::runtime_error("Request draft tokens must contain at most one sequence.");
+  }
+  request->SetDraftTokens(tokens->size() == 0 ? std::span<const int32_t>{} : (*tokens)[0]);
   return nullptr;
   OGA_CATCH
 }

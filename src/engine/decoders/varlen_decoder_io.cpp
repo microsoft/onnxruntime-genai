@@ -471,7 +471,8 @@ std::vector<DeviceSpan<float>> VarlenDecoderIO::ProcessLogits() {
                               return entry.draft_token_count != 0;
                             })) {
       throw std::runtime_error(
-          "Verifying draft tokens requires a model whose logits have one row per token.");
+          "Verifying draft tokens requires a model whose logits have one row per packed token; "
+          "this model returned only one logits row per request.");
     }
     for (size_t i = 0; i < scheduled_requests_.size(); ++i) {
       valid_token_indices.push_back(i);

@@ -694,6 +694,8 @@ commit buildable; the completed change exposes events only.
 
 - No event output returns count zero; partial prefill can do so while work remains.
 - One token event is emitted for every visible generated token.
+- A speculative decode transaction emits accepted draft tokens in order before its correction or
+  bonus token; output-buffer overflow retains the remaining token events without executing again.
 - A final visible token and completion are emitted together.
 - Every token and terminal event carries the correct Turn ID.
 - A multi-Request transaction returns all events in one call when capacity suffices.

@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <array>
+
 #include "generator/generators.h"
 #include "request_status.h"
 #include "engine_invariants.h"
@@ -41,6 +43,8 @@ struct RequestStepResult {
   bool token_appended{};
   bool done{};
   GenerationFinishReason finish_reason{GenerationFinishReason::None};
+  std::array<int32_t, kMaxGeneratedTokensPerStep> visible_tokens{};
+  size_t visible_token_count{};
 };
 
 /**
@@ -112,12 +116,12 @@ struct Request : std::enable_shared_from_this<Request>,
    * @brief Proposes speculative draft tokens for this request's next step.
    * @param tokens Draft continuation of the sequence, in order. An empty span clears the proposal.
    *
-   * The next decode step then runs 1 + tokens.size() rows, verifies each draft against the target
-   * model's own prediction, and keeps the accepted prefix. Only greedy requests may propose drafts,
-   * because verification compares argmax tokens rather than sampling probabilities.
+   * The request must be ready to decode. The next step then runs 1 + tokens.size() rows, verifies
+   * each draft against the target model's own prediction, and keeps the accepted prefix. Only
+   * greedy requests may propose drafts, because verification compares argmax tokens rather than
+   * sampling probabilities.
    *
-   * The proposal applies to the next step only. A committed step consumes it even when it could not
-   * verify it (a prefill chunk, for one); a rolled back step leaves it pending.
+   * The proposal applies to the next committed decode step; a rolled back step leaves it pending.
    */
   void SetDraftTokens(std::span<const int32_t> tokens);
 
@@ -341,6 +345,9 @@ struct Request : std::enable_shared_from_this<Request>,
   void ApplyLogitsProcessors(DeviceSpan<float> logits);
   void ResetGuidanceForNewTurn();
   void SelectNextToken();
+  void StageVisibleTokens(RequestStepResult& result,
+                          size_t committed_count,
+                          std::optional<int32_t> sampled_token) const;
   RequestStepResult StageGeneration(int64_t sequence_length_before);
   void CommitGuidanceToken(const RequestStepResult& result);
 };

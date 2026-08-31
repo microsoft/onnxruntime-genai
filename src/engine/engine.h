@@ -179,8 +179,8 @@ struct Engine : std::enable_shared_from_this<Engine>,
   void RetainEvent(EngineEvent event);
   void RunDynamic();
   void RunStatic();
-  EngineEvent EventFromStep(const std::shared_ptr<Request>& request,
-                            const RequestStepResult& result) const;
+  void AppendEventsFromStep(const std::shared_ptr<Request>& request,
+                            const RequestStepResult& result);
   EngineEvent EventFromStepError(
       const EngineStepError& error,
       std::exception_ptr caught_error) noexcept;

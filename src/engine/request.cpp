@@ -201,9 +201,13 @@ void Request::SetDraftTokens(std::span<const int32_t> tokens) {
   if (IsClosed(status_)) {
     throw std::runtime_error("Cannot propose draft tokens for a closed request.");
   }
-  draft_tokens_.clear();
   if (tokens.empty()) {
+    draft_tokens_.clear();
     return;
+  }
+  if (!IsExecuting(status_) || IsPrefill()) {
+    throw std::runtime_error(
+        "Speculative draft tokens may only be proposed when the request is ready to decode.");
   }
   if (guidance_logits_processor_) {
     throw std::runtime_error("Speculative draft tokens are not supported with guidance.");
@@ -466,7 +470,11 @@ void Request::PrepareGenerationForTransaction(DeviceSpan<float> logits) {
 
 RequestStepResult Request::StageGenerationForTransaction(
     const RequestStepPlan& plan) {
-  return StageGeneration(plan.sequence_length_before);
+  // Accepted drafts have already extended the sequence, so the baseline has to match the one
+  // ApplyLogitsForTransaction reads after they commit. Without the offset a step that ends on an
+  // unappended EOS would look like it appended a token.
+  return StageGeneration(
+      plan.sequence_length_before + static_cast<int64_t>(accepted_draft_count_));
 }
 
 RequestStepResult Request::StageDraftCompletionForTransaction() {
@@ -489,12 +497,14 @@ RequestStepResult Request::StageDraftCompletionForTransaction() {
       finish_reason = GenerationFinishReason::EosToken;
     }
   }
-  return RequestStepResult{
+  RequestStepResult result{
       0,
       false,
       true,
       finish_reason,
   };
+  StageVisibleTokens(result, accepted_draft_count_, std::nullopt);
+  return result;
 }
 
 void Request::RestoreStateForTransaction() {
@@ -546,6 +556,27 @@ void Request::CommitStep(const RequestStepPlan& plan,
   staged_draft_count_ = 0;
   accepted_draft_count_ = 0;
   draft_verification_completed_generation_ = false;
+}
+
+// Records the tokens this step makes externally visible, in sequence order. Accepted drafts are
+// already in tokens_host_; a freshly sampled token is only appended by CommitStep.
+void Request::StageVisibleTokens(RequestStepResult& result,
+                                 size_t committed_count,
+                                 std::optional<int32_t> sampled_token) const {
+  if (committed_count + (sampled_token ? 1u : 0u) > result.visible_tokens.size()) {
+    throw std::logic_error(
+        "A single engine step produced more visible tokens than it can report.");
+  }
+  if (committed_count > tokens_host_.size()) {
+    throw std::logic_error(
+        "The host token mirror is missing tokens this step committed.");
+  }
+  const auto committed = std::span<const int32_t>{tokens_host_}.last(committed_count);
+  std::copy(committed.begin(), committed.end(), result.visible_tokens.begin());
+  result.visible_token_count = committed.size();
+  if (sampled_token) {
+    result.visible_tokens[result.visible_token_count++] = *sampled_token;
+  }
 }
 
 void Request::ApplyLogitsProcessors(DeviceSpan<float> logits) {
@@ -610,6 +641,9 @@ RequestStepResult Request::StageGeneration(int64_t sequence_length_before) {
       done,
       finish_reason,
   };
+  StageVisibleTokens(
+      result, accepted_draft_count_,
+      token_appended ? std::optional<int32_t>{token} : std::nullopt);
   CommitGuidanceToken(result);
   if (done && guidance_logits_processor_) {
     guidance_logits_processor_->Reset();
@@ -691,12 +725,14 @@ RequestStepResult Request::CompleteGeneration() {
       guidance_logits_processor_->Reset();
     }
   }
-  return RequestStepResult{
+  RequestStepResult result{
       token,
       new_token_count != 0,
       Generators::IsTurnComplete(status_),
       finish_reason_,
   };
+  StageVisibleTokens(result, new_token_count, std::nullopt);
+  return result;
 }
 
 }  // namespace Generators

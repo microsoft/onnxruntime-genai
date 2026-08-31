@@ -25,6 +25,7 @@ struct StepPlanningConsistencyError : std::runtime_error {
 // packed recurrent-state operators checkpoint at most eight tokens, so no cache can roll back
 // further than a step of that length.
 inline constexpr size_t kMaxDraftTokensPerStep = 7;
+inline constexpr size_t kMaxGeneratedTokensPerStep = kMaxDraftTokensPerStep + 1;
 
 enum class StepOutcomeKind {
   NoWork,

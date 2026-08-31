@@ -59,9 +59,7 @@ def register_ep(ep: str, ep_path: str, use_winml: bool) -> None:
             "WebGpuExecutionProvider": "onnxruntime_ep_webgpu",
         }
         package_name = plugin_ep_packages.get(ep)
-        package_names = (
-            tuple(dict.fromkeys(plugin_ep_packages.values())) if ep == "follow_config" else (package_name,)
-        )
+        package_names = tuple(dict.fromkeys(plugin_ep_packages.values())) if ep == "follow_config" else (package_name,)
         for package_name in package_names:
             if package_name is None:
                 continue

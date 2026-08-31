@@ -169,6 +169,10 @@ std::vector<DeviceSpan<float>> ScheduledRequests::ProcessLogits() {
 
 std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
     std::vector<DeviceSpan<float>>& verify_rows) {
+  if (std::none_of(draft_token_counts_.begin(), draft_token_counts_.end(),
+                   [](size_t draft_count) { return draft_count != 0; })) {
+    return std::move(verify_rows);
+  }
   if (!sampling_plan_) {
     throw std::logic_error("Draft verification requires scheduler-owned argmax storage.");
   }

@@ -2460,3 +2460,65 @@ TEST(CAPITests, LoadAudiosFromBuffersRejectsEmptyBuffer) {
   // audios should not have been created
   EXPECT_EQ(audios, nullptr);
 }
+
+TEST(CAPITests, RequestSetDraftTokensRejectsNullArguments) {
+  OgaResult* result = OgaRequestSetDraftTokens(nullptr, nullptr);
+
+  ASSERT_NE(result, nullptr);
+  EXPECT_NE(std::string(OgaResultGetError(result)).find("must not be null"),
+            std::string::npos);
+  OgaDestroyResult(result);
+}
+
+TEST(CAPITests, RequestSetDraftTokensRunsProposal) {
+  auto model = OgaModel::Create(
+      MODEL_PATH "engine/synthetic-paged-per-token");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 16);
+  auto engine = OgaEngine::Create(*model);
+
+  size_t max_drafts{};
+  OgaCheckResult(OgaEngineMaxDraftTokensPerProposal(
+      engine.get(), &max_drafts));
+  ASSERT_GE(max_drafts, 2u);
+
+  OgaResult* off_thread_result{};
+  std::thread off_owner_thread([&] {
+    size_t unused{};
+    off_thread_result = OgaEngineMaxDraftTokensPerProposal(
+        engine.get(), &unused);
+  });
+  off_owner_thread.join();
+  std::unique_ptr<OgaResult> owned_off_thread_result{off_thread_result};
+  ASSERT_NE(owned_off_thread_result, nullptr);
+  EXPECT_NE(
+      std::string(owned_off_thread_result->GetError()).find("owner thread"),
+      std::string::npos);
+
+  auto request = engine->CreateRequest(*params);
+  auto turn_options = request->CreateTurnOptions();
+  turn_options->SetMaxGeneratedTokens(4);
+  const std::array<int32_t, 3> prompt{2, 3, 4};
+  request->BeginTurn(prompt, turn_options.get());
+  EXPECT_EQ(RunOne(*engine).token, 9);
+
+  const std::array<int32_t, 2> proposed_tokens{15, 22};
+  auto proposal = OgaSequences::Create();
+  proposal->Append(proposed_tokens.data(), proposed_tokens.size());
+  OgaCheckResult(OgaRequestSetDraftTokens(
+      request.get(), proposal.get()));
+
+  auto buffer = engine->CreateEventBuffer(3);
+  ASSERT_EQ(engine->Run(*buffer), 3u);
+  const std::array<int32_t, 3> expected_tokens{15, 22, 30};
+  for (size_t index = 0; index < expected_tokens.size(); ++index) {
+    const auto* event = buffer->Get(index);
+    ASSERT_NE(event, nullptr);
+    EXPECT_EQ(event->Token(), expected_tokens[index]);
+    EXPECT_NE(event->Flags() & OgaEngineEventFlag_Token, 0u);
+  }
+  EXPECT_NE(
+      buffer->Get(2)->Flags() & OgaEngineEventFlag_TurnFinished,
+      0u);
+  request->Close();
+}

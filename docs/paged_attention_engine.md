@@ -364,6 +364,45 @@ This distinction is important:
 If the engine has previously encountered a fatal transaction or execution failure, `Run()` rethrows
 the stored error instead of attempting more work.
 
+## Caller-supplied speculative drafts
+
+The dynamic Engine can verify a caller-supplied continuation together with a request's next decode
+token. This is separate from the `Generator` API's draft-model and n-gram strategies: the Engine
+does not create a proposer. The caller proposes tokens for one request before the next step with
+`Request::SetDraftTokens` (`OgaRequestSetDraftTokens` in C or `Request.set_draft_tokens` in Python).
+
+Query the internal `Engine::MaxDraftTokensPerStep` capability through
+`OgaEngineMaxDraftTokensPerProposal`, `OgaEngine::MaxDraftTokensPerProposal`, or
+`Engine.max_draft_tokens_per_proposal` before proposing work. Zero means that the decoder does not
+return one logits row per packed token or that its cache/state cannot commit an accepted prefix.
+The reported value is a capability limit, not a guarantee that every proposed token fits the next
+step's global token budget or current cache capacity.
+
+The request must already belong to the Engine, have completed prefill, and be ready to decode.
+Verification currently supports only requests whose resolved search mode is greedy (`do_sample` is
+false, `top_k` is 1, or `temperature` is zero), with no guidance, repetition penalty,
+no-repeat-ngram processing, or active minimum-length processing. Passing an empty sequence clears a
+pending proposal.
+
+For a decode with K scheduled drafts, the packed input is the request's one unprocessed token
+followed by the K drafts. The decoder must return K+1 logits rows for that request. Row `i` predicts
+draft `i`; verification accepts the longest prefix whose tokens equal the target argmax. The first
+nonmatching row supplies the replacement token, or row K supplies a bonus token when every draft is
+accepted. Accepted drafts and the replacement or bonus are published together, so one model run can
+publish several ordered token events. If the caller's event buffer cannot hold all of them, `Run()`
+retains the overflow and drains it on subsequent calls before executing the model again. Callers
+must process all returned events before reusing the buffer.
+
+Draft rows are optional scheduler work. Admission first reserves one mandatory token for every
+selected request, then distributes remaining `max_scheduled_tokens` and cache capacity to drafts.
+If the optimistic draft width does not fit, the scheduler shortens or removes draft work without
+dropping another selected request's mandatory decode. Prefill never verifies drafts.
+
+A committed decode consumes the complete proposal, including drafts omitted by budgeting. A
+retryable rollback restores the request and leaves the proposal pending for retry. During commit,
+the cache reservation is narrowed from the scheduled K+1 slots to the accepted prefix plus the
+request's mandatory token; paged KV and fixed recurrent state publish at that same boundary.
+
 ## One dynamic step in detail
 
 `Engine::RunDynamic()` coordinates the complete transaction.
