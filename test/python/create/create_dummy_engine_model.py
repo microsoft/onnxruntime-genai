@@ -7,17 +7,11 @@
 
 The engine unit tests need to mint real ``Request`` objects. Constructing a
 ``Request`` builds a ``Search`` from the model's ``GeneratorParams`` and, on
-assignment, allocates prompt tokens on the model's device. None of that runs
-the ONNX graph: the tests drive the scheduler and engine with recording test
-doubles that stand in for the cache manager and the model executor, so the
-model never performs a forward pass.
-
-Because the graph is never executed, it only has to *load* as a decoder-only
-``Generators::Model`` on CPU. This script therefore emits a minimal graph that
-declares the decoder inputs and outputs (and zero-filled output initializers)
-but contains no compute nodes, following the same "contents don't matter"
-approach as ``create_dummy_model.py``. This keeps the checked-in artifact tiny
-and free of any execution-provider-specific operators.
+assignment, allocates prompt tokens on the model's device. Most tests drive
+the scheduler and Engine with recording doubles, while a small public-API
+regression also executes the static path. The graph therefore emits
+shape-correct zero logits and zero-filled cache outputs. It remains tiny and
+free of execution-provider-specific operators.
 
 Usage:
   python create_dummy_engine_model.py [--output_dir OUTPUT_DIR]
@@ -31,8 +25,7 @@ import numpy as np
 import onnx
 from onnx import TensorProto, helper, numpy_helper
 
-# Tiny decoder-only configuration. The values only need to be internally
-# consistent so the model loads; they are never used to compute anything.
+# Tiny decoder-only configuration.
 VOCAB_SIZE = 32
 HEAD_SIZE = 4
 NUM_KV_HEADS = 2
@@ -40,15 +33,38 @@ NUM_LAYERS = 1
 CONTEXT_LENGTH = 128
 
 
-def _zeros(name, shape, dtype=np.float32):
-    tensor = numpy_helper.from_array(np.zeros(shape, dtype=dtype))
-    tensor.name = name
-    return tensor
-
-
 def create_decoder(output_dir):
+    nodes = [
+        helper.make_node("Shape", ["input_ids"], ["input_shape"]),
+        helper.make_node("Concat", ["input_shape", "vocab_dimension"], ["logits_shape"], axis=0),
+        helper.make_node("Expand", ["zero_logit", "logits_shape"], ["logits"]),
+        helper.make_node("Shape", ["attention_mask"], ["attention_shape"]),
+        helper.make_node(
+            "Gather",
+            ["attention_shape", "cache_batch_index"],
+            ["cache_batch_dimension"],
+            axis=0,
+        ),
+        helper.make_node(
+            "Gather",
+            ["attention_shape", "cache_sequence_index"],
+            ["cache_sequence_dimension"],
+            axis=0,
+        ),
+        helper.make_node(
+            "Concat",
+            [
+                "cache_batch_dimension",
+                "cache_heads_dimension",
+                "cache_sequence_dimension",
+                "cache_head_dimension",
+            ],
+            ["present_cache_shape"],
+            axis=0,
+        ),
+    ]
     inputs = [
-        helper.make_tensor_value_info("input_ids", TensorProto.INT32, ["batch_size", "sequence_length"]),
+        helper.make_tensor_value_info("input_ids", TensorProto.INT64, ["batch_size", "sequence_length"]),
         helper.make_tensor_value_info("attention_mask", TensorProto.INT64, ["batch_size", "total_sequence_length"]),
         helper.make_tensor_value_info("position_ids", TensorProto.INT64, ["batch_size", "sequence_length"]),
     ]
@@ -56,29 +72,53 @@ def create_decoder(output_dir):
         helper.make_tensor_value_info("logits", TensorProto.FLOAT, ["batch_size", "sequence_length", VOCAB_SIZE]),
     ]
     initializers = [
-        _zeros("logits", (2, 2, VOCAB_SIZE)),
+        numpy_helper.from_array(np.asarray([0.0], dtype=np.float32), name="zero_logit"),
+        numpy_helper.from_array(np.asarray([VOCAB_SIZE], dtype=np.int64), name="vocab_dimension"),
+        numpy_helper.from_array(np.asarray([0], dtype=np.int64), name="cache_batch_index"),
+        numpy_helper.from_array(np.asarray([1], dtype=np.int64), name="cache_sequence_index"),
+        numpy_helper.from_array(
+            np.asarray([NUM_KV_HEADS], dtype=np.int64),
+            name="cache_heads_dimension",
+        ),
+        numpy_helper.from_array(np.asarray([HEAD_SIZE], dtype=np.int64), name="cache_head_dimension"),
+        numpy_helper.from_array(np.asarray([0.0], dtype=np.float32), name="zero_cache"),
     ]
 
     for layer in range(NUM_LAYERS):
         for kv in ("key", "value"):
+            # This fixture is shared by conventional static-cache tests and paged-cache unit tests.
+            # Keep all cache axes symbolic so each path can validate and bind its own layout without
+            # treating the other path's concrete axis order as paged geometry.
+            cache_shape = [
+                "cache_axis_0",
+                "cache_axis_1",
+                "cache_axis_2",
+                "cache_axis_3",
+            ]
             inputs.append(
                 helper.make_tensor_value_info(
                     f"past_key_values.{layer}.{kv}",
                     TensorProto.FLOAT,
-                    ["batch_size", NUM_KV_HEADS, "past_sequence_length", HEAD_SIZE],
+                    cache_shape,
                 )
             )
             outputs.append(
                 helper.make_tensor_value_info(
                     f"present.{layer}.{kv}",
                     TensorProto.FLOAT,
-                    ["batch_size", NUM_KV_HEADS, "total_sequence_length", HEAD_SIZE],
+                    cache_shape,
                 )
             )
-            initializers.append(_zeros(f"present.{layer}.{kv}", (2, NUM_KV_HEADS, 2, HEAD_SIZE)))
+            nodes.append(
+                helper.make_node(
+                    "Expand",
+                    ["zero_cache", "present_cache_shape"],
+                    [f"present.{layer}.{kv}"],
+                )
+            )
 
     graph = helper.make_graph(
-        nodes=[],
+        nodes=nodes,
         name="dummy_decoder",
         inputs=inputs,
         outputs=outputs,
@@ -100,7 +140,7 @@ def create_decoder(output_dir):
 def create_config(output_dir):
     config = {
         "model": {
-            "type": "gpt2",
+            "type": "decoder",
             "bos_token_id": 0,
             "eos_token_id": 1,
             "pad_token_id": 0,
@@ -143,9 +183,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--output_dir",
-        default=os.path.join(
-            os.path.dirname(__file__), "..", "..", "models", "engine", "dummy-decoder"
-        ),
+        default=os.path.join(os.path.dirname(__file__), "..", "..", "models", "engine", "dummy-decoder"),
     )
     args = parser.parse_args()
     output_dir = os.path.normpath(args.output_dir)

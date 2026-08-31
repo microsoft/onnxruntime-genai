@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -42,6 +43,10 @@ void MixedWorkloadScenario::ValidateConfig(const ScenarioConfig& config) const {
   }
   if (!IsAllowedConcurrency(config.concurrency)) {
     throw std::invalid_argument("mixed_workload requires concurrency in [4,8]");
+  }
+  if (config.generation_tokens < 2) {
+    throw std::invalid_argument(
+        "mixed_workload requires generation_tokens >= 2 so decode requests remain active after prefetch");
   }
 }
 
@@ -79,21 +84,28 @@ ScenarioExecutionOutput MixedWorkloadScenario::Execute(const ScenarioConfig& con
   for (int run = 0; run < total_runs; ++run) {
     const bool is_warmup = run < config.warmup_runs;
 
-    // Co-schedule one 128K prefill with active decode requests in the same engine workload.
+    // Prefetch the short requests through their first sampled token, then admit one 128K prefill so
+    // the measured mixed workload contains active decodes rather than concurrent initial prefills.
     std::vector<std::unique_ptr<OgaGeneratorParams>> params;
     std::vector<std::unique_ptr<OgaRequest>> requests;
     std::vector<std::vector<int32_t>> request_tokens(static_cast<size_t>(config.concurrency));
+    std::vector<std::optional<size_t>> first_post_admission_decode_ordinals(
+        static_cast<size_t>(config.concurrency));
     std::vector<size_t> prompt_counts(static_cast<size_t>(config.concurrency), decode_prompt_count);
     std::vector<int> target_generation_tokens(static_cast<size_t>(config.concurrency), config.generation_tokens);
     std::vector<double> first_token_ms(static_cast<size_t>(config.concurrency), -1.0);
     std::vector<std::chrono::steady_clock::time_point> last_token_time(static_cast<size_t>(config.concurrency));
     std::vector<std::vector<double>> request_itl_ms(static_cast<size_t>(config.concurrency));
+    std::vector<std::optional<size_t>> first_token_ordinals(static_cast<size_t>(config.concurrency));
+    std::vector<bool> request_finished(static_cast<size_t>(config.concurrency), false);
     std::unordered_map<const OgaRequest*, size_t> request_indices;
     params.reserve(static_cast<size_t>(config.concurrency));
     requests.reserve(static_cast<size_t>(config.concurrency));
 
-    const auto run_start = std::chrono::steady_clock::now();
-    size_t generated_tokens = 0;
+    std::chrono::steady_clock::time_point measurement_start;
+    bool long_prefill_admitted = false;
+    size_t token_event_ordinal = 0;
+    size_t measured_generated_tokens = 0;
     for (int i = 0; i < config.concurrency; ++i) {
       const auto& prompt = i == 0 ? prefill_prompt : decode_prompt;
       const size_t prompt_count = i == 0 ? prefill_prompt_count : decode_prompt_count;
@@ -109,17 +121,17 @@ ScenarioExecutionOutput MixedWorkloadScenario::Execute(const ScenarioConfig& con
       requests.emplace_back(
           engineResources.engine->CreateRequest(*params.back()));
       request_indices.emplace(requests.back().get(), static_cast<size_t>(i));
-      requests.back()->BeginTurn(prompt->SequenceData(0), prompt_count);
+      if (i != 0) {
+        requests.back()->BeginTurn(prompt->SequenceData(0), prompt_count);
+      }
     }
 
-    // Measure whether the long prefill delays decode first-token and inter-token latency.
     auto event_buffer = engineResources.engine->CreateEventBuffer(
         static_cast<size_t>(config.concurrency));
     size_t consecutive_retries = 0;
-    while (engineResources.engine->HasPendingRequests()) {
-      const size_t event_count = engineResources.engine->Run(
-          *event_buffer);
-      const auto now = std::chrono::steady_clock::now();
+    const auto process_events = [&](size_t event_count,
+                                    std::chrono::steady_clock::time_point now,
+                                    bool prefetching_decodes) {
       for (size_t event_index = 0; event_index < event_count; ++event_index) {
         const auto& event = *event_buffer->Get(event_index);
         if (!RequireRequestEvent(
@@ -137,15 +149,31 @@ ScenarioExecutionOutput MixedWorkloadScenario::Execute(const ScenarioConfig& con
         const size_t request_index = request_it->second;
 
         if ((event.Flags() & OgaEngineEventFlag_Token) != 0) {
+          const size_t ordinal = ++token_event_ordinal;
           request_tokens[request_index].push_back(event.Token());
-          ++generated_tokens;
-          const double elapsed_ms =
-              std::chrono::duration<double, std::milli>(
-                  now - run_start)
-                  .count();
-          if (first_token_ms[request_index] < 0.0) {
-            first_token_ms[request_index] = elapsed_ms;
-          } else {
+          if (!first_token_ordinals[request_index]) {
+            first_token_ordinals[request_index] = ordinal;
+          }
+          if (request_index == 0 && !long_prefill_admitted) {
+            throw std::runtime_error(
+                Name() + ": long-prefill token arrived before its turn was admitted");
+          }
+          if (long_prefill_admitted) {
+            ++measured_generated_tokens;
+            if (request_index != 0 &&
+                !first_post_admission_decode_ordinals[request_index]) {
+              first_post_admission_decode_ordinals[request_index] = ordinal;
+            }
+            const double elapsed_ms =
+                std::chrono::duration<double, std::milli>(
+                    now - measurement_start)
+                    .count();
+            if (first_token_ms[request_index] < 0.0) {
+              first_token_ms[request_index] = elapsed_ms;
+            }
+          }
+          if (long_prefill_admitted &&
+              last_token_time[request_index].time_since_epoch().count() != 0) {
             request_itl_ms[request_index].push_back(
                 std::chrono::duration<double, std::milli>(
                     now - last_token_time[request_index])
@@ -155,8 +183,87 @@ ScenarioExecutionOutput MixedWorkloadScenario::Execute(const ScenarioConfig& con
         }
 
         if ((event.Flags() & OgaEngineEventFlag_TurnFinished) != 0) {
+          request_finished[request_index] = true;
           requests[request_index]->Close();
+          if (prefetching_decodes) {
+            throw std::runtime_error(
+                Name() +
+                ": a short request completed before the long prefill was admitted; "
+                "the run did not establish an active-decode workload");
+          }
         }
+      }
+    };
+
+    // Drive every short request through initial prefill and one sampled token. That sampled token
+    // remains unprocessed, which is the active-decode boundary consumed by the next model step.
+    const size_t decode_request_count =
+        static_cast<size_t>(config.concurrency - 1);
+    while (true) {
+      const size_t prefetched = static_cast<size_t>(std::count_if(
+          first_token_ordinals.begin() + 1,
+          first_token_ordinals.end(),
+          [](const std::optional<size_t>& ordinal) {
+            return ordinal.has_value();
+          }));
+      if (prefetched == decode_request_count) {
+        break;
+      }
+      if (!engineResources.engine->HasPendingRequests()) {
+        throw std::runtime_error(
+            Name() +
+            ": decode prefetch ended before every short request reached active decode");
+      }
+      const size_t event_count = engineResources.engine->Run(*event_buffer);
+      process_events(
+          event_count, std::chrono::steady_clock::now(),
+          /*prefetching_decodes=*/true);
+    }
+    for (size_t request_index = 1;
+         request_index < static_cast<size_t>(config.concurrency);
+         ++request_index) {
+      if (request_finished[request_index]) {
+        throw std::runtime_error(
+            Name() +
+            ": a prefetched short request is not active when the long prefill is admitted");
+      }
+      if (request_tokens[request_index].size() -
+              prompt_counts[request_index] !=
+          1) {
+        throw std::runtime_error(
+            Name() +
+            ": each short request must contribute exactly one prefetch token "
+            "before the long prefill is admitted");
+      }
+    }
+
+    measurement_start = std::chrono::steady_clock::now();
+    long_prefill_admitted = true;
+    requests[0]->BeginTurn(
+        prefill_prompt->SequenceData(0), prefill_prompt_count);
+
+    // Measure the long prefill's interference with the already-active decode streams.
+    while (engineResources.engine->HasPendingRequests()) {
+      const size_t event_count = engineResources.engine->Run(*event_buffer);
+      process_events(
+          event_count, std::chrono::steady_clock::now(),
+          /*prefetching_decodes=*/false);
+    }
+
+    if (!first_token_ordinals[0]) {
+      throw std::runtime_error(
+          Name() + ": the long-prefill request produced no token event");
+    }
+    for (size_t request_index = 1;
+         request_index < static_cast<size_t>(config.concurrency);
+         ++request_index) {
+      if (!first_post_admission_decode_ordinals[request_index] ||
+          *first_post_admission_decode_ordinals[request_index] >=
+              *first_token_ordinals[0]) {
+        throw std::runtime_error(
+            Name() +
+            ": post-admission decode token events must precede the long "
+            "request's first token");
       }
     }
     for (const auto& request : requests) {
@@ -164,8 +271,13 @@ ScenarioExecutionOutput MixedWorkloadScenario::Execute(const ScenarioConfig& con
     }
 
     const auto run_end = std::chrono::steady_clock::now();
-    const double elapsed_ms = std::chrono::duration<double, std::milli>(run_end - run_start).count();
-    const double tokens_per_s = static_cast<double>(generated_tokens) / std::max(0.001, elapsed_ms / 1000.0);
+    const double elapsed_ms =
+        std::chrono::duration<double, std::milli>(
+            run_end - measurement_start)
+            .count();
+    const double tokens_per_s =
+        static_cast<double>(measured_generated_tokens) /
+        std::max(0.001, elapsed_ms / 1000.0);
     std::cout << tag << (is_warmup ? "Warmup run " : "Run ")
               << (is_warmup ? run + 1 : measured_run_index + 1) << " complete: elapsed_ms=" << elapsed_ms
               << ", tokens_per_s=" << tokens_per_s << std::endl;
@@ -213,6 +325,8 @@ ScenarioExecutionOutput MixedWorkloadScenario::Execute(const ScenarioConfig& con
       {"decode_prompt_tokens", decode_prompt_count},
       {"prefill_prompt_tokens", prefill_prompt_count},
       {"prefill_generation_tokens", kPrefillGenerationTokens},
+      {"decode_prefetch_tokens", 1},
+      {"decode_before_prefill_token_order_validated", true},
       {"peak_host_memory_mb", BytesToMb(memory.PeakHostBytes())},
   };
   return output;

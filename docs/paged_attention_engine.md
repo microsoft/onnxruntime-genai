@@ -13,8 +13,9 @@ The dynamic path manages paged KV decoder state together with per-request search
 > **Experimental low-level API:** An Engine creates model-bound Requests. `BeginTurn()` queues both
 > initial input and later continuation input and snapshots an opaque `TurnOptions` object. Request
 > creation can also snapshot a prompt-plus-generated session-token limit. Successful Turns receive
-> nonzero, monotonically increasing request-local IDs; zero means no Turn. `Run()` performs synchronous progress and
-> returns one typed `EngineEvent`; token and completion payloads are selected by event flags.
+> nonzero, monotonically increasing request-local IDs; zero means no Turn. `Run(event_buffer)`
+> performs synchronous progress and fills a reusable caller-owned event buffer; token and completion
+> payloads are selected by event flags.
 > `CancelTurn(turn_id)` stops only the named Turn, and `Close()` releases Engine resources.
 > `OgaCreateEngine` retains shared ownership of the underlying Model, so the caller may release its
 > `OgaModel` handle after successful Engine creation. The Model remains alive until Engine teardown
@@ -54,7 +55,7 @@ The paged KV cache makes this practical. A request does not need one large conti
 At a high level, one dynamic engine step is:
 
 ```text
-drain one pending Engine event, if one exists
+drain retained Engine events into the caller buffer, if any exist
     |
 plan a runnable batch
     |
@@ -72,7 +73,7 @@ sample and stage one result per request
     |
 commit search state, cache state, and request bookkeeping
     |
-return committed events one at a time
+publish committed events and drain up to the caller buffer's capacity
 ```
 
 The step is transactional before publication. Planning, reservation, execution, and fixed-state
@@ -115,7 +116,14 @@ The group kind defines the state transition:
 
 Configuration loading rejects unknown kinds, malformed decoder templates, duplicate IDs or logical layers, and conflicting resolved names. Overlay application validates a complete copy and publishes it only on success. When `state_groups` is absent, the typed configuration retains the legacy dense paged-KV behavior over `0..num_hidden_layers-1` using the existing decoder key/value templates; it does not insert a synthetic group into the parsed configuration.
 
-When an explicit manifest is present, model loading resolves each group's decoder templates, expands every name, and verifies that its decoder input and output exist with compatible dtype and shape. Paged tensors must also have compatible rank-four geometry throughout their group.
+When an explicit manifest is present, model loading resolves each group's decoder templates,
+expands every name, and verifies that its decoder input and output exist with compatible dtype and
+shape. Paged tensors must also have compatible rank-four per-block geometry throughout their group;
+axis 0 may differ between full-context and windowed layers because they can use different pools.
+During dynamic Engine construction, after automatic pool sizing and before cache allocation, every
+concrete paged graph dimension is checked against the selected pool's block count,
+`engine.dynamic_batching.block_size`, `model.decoder.num_key_value_heads`, and
+`model.decoder.head_size`. Negative symbolic dimensions remain valid.
 
 The dynamic Engine requires exactly one `paged_kv` group. It allocates cache tensors only for that group's logical layer IDs, expands their exact binding names without renumbering, derives the cache dtype from the first validated key input, and sizes an automatic block pool using the number of participating full-attention layers after reserving storage for participating sliding-window layers. Every configured sliding-window layer must belong to the paged group. Multiple paged groups are rejected because the Engine currently owns one shared paged pool. The synthesized legacy group preserves dense sequential behavior when no explicit manifest exists.
 
@@ -235,9 +243,12 @@ longer need continuation when deterministic immediate reclamation is required.
 `Closed`. On the dynamic path, close immediately erases scheduler membership and releases
 committed paged-cache ownership and, for a composite model, the request's committed fixed-state slot.
 The Engine also removes any undrained pending events for that request. Close and owner-thread
-abandonment reclamation release Search, guidance, sampler, and parameter runtime state before the
-Engine drops its strong Request reference. Final-handle abandonment performs the same logical
-removal and event purge when the Engine next reaches an owner-thread boundary.
+abandonment reclamation perform the same logical removal and event purge at an owner-thread
+boundary. A nonresident Request, a dynamic Request, or a static Request whose shared batch has no
+executable peer releases Search, guidance, sampler, parameter, and host-token runtime state at that
+boundary. If a resident static peer is still executable, logical Close still succeeds immediately,
+but that device-affine runtime is retained as inert row state until the peer no longer depends on
+the shared batch.
 
 Events already copied by the host remain host-owned. Destroying the Engine terminalizes every bound
 Request through a teardown-specific no-throw detach path that does not rely on the Request's expired
@@ -434,6 +445,8 @@ The planner distinguishes temporary capacity pressure from a request that can ne
 - `UnserviceableRequest` means the request would exceed the total cache or supported block-table width even if the cache were otherwise empty.
 
 If at least one request fits, the step is executable even when other requests were deferred or found unserviceable. This allows useful work to continue instead of letting one request block the whole engine.
+An unserviceable candidate omitted from an otherwise executable compact plan is failed only on a
+later non-executable planning pass; the fitting plan commits first.
 
 ### 4. Finalize the packed token layout
 
@@ -483,7 +496,7 @@ The fixed sub-reservation, when present, admits the same rows in the same order.
 Physical execution ordering does not change event ordering. Each row retains its logical scheduler
 rank, and the Engine restores that order when it publishes the transaction's events after commit.
 
-The fixed `target_tokens` mirror the paged `target_cache_slots`, so both states commit at one token boundary. `StepPlan::fixed_state` records the fixed row count, new-slot count, and binding footprint; `Engine::StepDynamic()` then proves the reservation matches that plan exactly -- required flag, row count, new-slot count, bytes, and per-row request identity -- and fails fatally on any mismatch. A composite reservation wraps exactly one paged reservation and the Engine holds at most one at a time, so the paged split-commit contract (its constructor reserves its own `committed_tables_` headroom, and the pool permits a single live reservation) holds without any cross-reservation aggregate check.
+The fixed `target_tokens` mirror the paged `target_cache_slots`, so both states commit at one token boundary. `StepPlan::fixed_state` records the fixed row count, new-slot count, and binding footprint; `Engine::RunDynamic()` then proves the reservation matches that plan exactly -- required flag, row count, new-slot count, bytes, and per-row request identity -- and fails fatally on any mismatch. A composite reservation wraps exactly one paged reservation and the Engine holds at most one at a time, so the paged split-commit contract (its constructor reserves its own `committed_tables_` headroom, and the pool permits a single live reservation) holds without any cross-reservation aggregate check.
 
 While the reservation is active, decoder input preparation can view a combined block table containing:
 
@@ -631,7 +644,9 @@ For a new request or queued continuation, this commit is the point where it move
 to `Active` or `TurnComplete`. The dynamic transaction path does not need a separate visible
 scheduling state between those states.
 
-Finally, the engine swaps `staged_events_` into `pending_events_`. The first event is returned immediately, and later calls drain the rest without another model run.
+Finally, the engine swaps `staged_events_` into `pending_events_`. The current `Run()` drains as many
+events as its caller-owned Buffer can hold, and later calls drain any retained overflow without
+another model run.
 
 ## Constrained decoding and tool calling
 
@@ -703,6 +718,11 @@ Before rethrowing the stored error on later `Run()` calls, it emits one
 failure code. A fatal failure with no affected Turn emits one request-less Engine failure event.
 Continuing would risk using request search state and cache block tables from different logical
 steps.
+
+Both vectors that can be swapped into the pending-event role reserve fatal-delivery capacity before
+a Request becomes visible to the Engine. Fatal handling constructs and stores its durable exception
+and preflights the complete terminal-event count before changing any Request status, so event
+publication cannot allocate or partially terminalize the tracked Requests.
 
 ### Step outcomes
 
@@ -1014,9 +1034,11 @@ too, although static execution does not use the dynamic reservation/checkpoint t
 Close or abandonment logically removes a Request from scheduling and purges its undelivered events.
 A closed Request that is already resident in a static batch nevertheless remains part of that
 shared physical allocation until the batch is recycled. It is not sampled or returned again, but
-its row and cache allocation can remain alive for the lifetime of the batch. Request Search and
-other device-affine runtime state are released at the owner-thread close boundary. Static cleanup
-therefore must not be described or tested as immediate per-Request cache deallocation.
+its row and cache allocation can remain alive for the lifetime of the batch. When an executable
+peer still needs that shared batch, the closed row's Request Search and other device-affine runtime
+state are also retained as inert padding state. The Engine releases that runtime on its owner
+thread as soon as no executable peer depends on it; shared cache storage still follows whole-batch
+recycling.
 
 Changes to shared types such as `Request`, `ScheduledRequests`, `ModelExecutor`, or `SimpleDecoder` should be checked against both paths. This document should be updated only where behavior is shared or where the dynamic path changes.
 
@@ -1031,9 +1053,10 @@ request = engine.create_request(generation_params, request_options)
 turn_options = og.TurnOptions(request)
 turn_options.set_max_generated_tokens(128)
 turn_id = request.begin_turn(initial_tokens, turn_options)
+event_buffer = engine.create_event_buffer(8)
 
 while engine.has_pending_requests():
-    for event in engine.run(max_events=8):
+    for event in engine.run(event_buffer):
         if event.request is None:
             if event.flags & (
                 og.EngineEventFlags.CAPACITY_BLOCKED
@@ -1054,18 +1077,18 @@ while engine.has_pending_requests():
 turn_options.set_max_generated_tokens(64)
 turn_id = request.begin_turn(next_turn_tokens, turn_options)
 
-# Repeat engine.run(max_events=...), then close when continuation is no longer needed.
+# Reuse event_buffer for the next Turn, then close when continuation is no longer needed.
 request.close()
 ```
 
-`max_events=1` provides capacity-one behavior; larger capacities return the complete transaction
-output when it fits. An empty list can represent committed partial-prefill progress, so callers
-continue while `has_pending_requests()` remains true. Flags are a bitmask, so callers test the
-`TOKEN` bit rather than comparing flags for equality; `TOKEN | TURN_FINISHED` can be combined, and
-`event.token` is consumed only when `TOKEN` is set. `event.request` is a borrowed alias of the
-caller-owned Request handle, while `event.turn_id` identifies the Request-local Turn. A
-turn-complete dynamic request remains cache-resident until explicit close, which releases dynamic
-cache ownership immediately.
+A capacity-one event buffer provides one-event-at-a-time behavior; larger capacities return the
+complete transaction output when it fits. A populated result with length zero can represent
+committed partial-prefill progress, so callers continue while `has_pending_requests()` remains
+true. Flags are a bitmask, so callers test the `TOKEN` bit rather than comparing flags for equality;
+`TOKEN | TURN_FINISHED` can be combined, and `event.token` is consumed only when `TOKEN` is set.
+`event.request` is a borrowed alias of the caller-owned Request handle, while `event.turn_id`
+identifies the Request-local Turn. A turn-complete dynamic request remains cache-resident until
+explicit close, which releases dynamic cache ownership immediately.
 
 ## Keeping this document current
 
@@ -1080,7 +1103,7 @@ The document needs review when a change affects any of the following:
 - Model inputs required by paged attention.
 - Sampling, logits processing, or random-state ownership.
 - Transaction checkpoints, rollback, failure classification, or commit ordering.
-- Ready-result behavior or public engine API semantics.
+- Event-buffer delivery or public Engine API semantics.
 - CUDA graph eligibility or graph shape bucketing.
 
 Prefer describing current behavior directly. If a design is proposed but not implemented, label it clearly as future work or keep it in a separate design document. Remove or revise statements that stop matching the code.

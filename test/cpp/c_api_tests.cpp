@@ -1057,6 +1057,44 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
   EXPECT_EQ(idle_buffer->Get(0), nullptr);
 }
 
+TEST(CAPITests, StaticEngineCloseIsIdempotentWhilePeerRemainsActive) {
+  auto model = OgaModel::Create(MODEL_PATH "engine/dummy-decoder");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 10);
+  auto engine = OgaEngine::Create(*model);
+  const std::array<int32_t, 5> long_input_tokens{2, 3, 4, 5, 6};
+  const std::array<int32_t, 3> short_input_tokens{2, 3, 4};
+
+  const auto create_request = [&](std::span<const int32_t> input_tokens) {
+    auto request = engine->CreateRequest(*params);
+    auto turn_options = request->CreateTurnOptions();
+    turn_options->SetMaxGeneratedTokens(2);
+    request->BeginTurn(input_tokens, turn_options.get());
+    return request;
+  };
+  auto first = create_request(long_input_tokens);
+  auto second = create_request(short_input_tokens);
+  auto buffer = engine->CreateEventBuffer(2);
+
+  ASSERT_EQ(engine->Run(*buffer), 2u);
+  ASSERT_EQ(buffer->Count(), 2u);
+
+  std::unique_ptr<OgaResult> first_close{OgaRequestClose(first.get())};
+  EXPECT_EQ(first_close, nullptr);
+  std::unique_ptr<OgaResult> second_first_close{OgaRequestClose(first.get())};
+  EXPECT_EQ(second_first_close, nullptr);
+
+  ASSERT_EQ(engine->Run(*buffer), 1u);
+  ASSERT_EQ(buffer->Count(), 1u);
+  ASSERT_TRUE(buffer->Get(0)->Request().has_value());
+  EXPECT_EQ(&buffer->Get(0)->Request()->get(), second.get());
+  EXPECT_NE(
+      buffer->Get(0)->Flags() & OgaEngineEventFlag_TurnFinished,
+      0u);
+
+  second->Close();
+}
+
 TEST(CAPITests, EngineBulkRunAndReusableStorage) {
   auto model = OgaModel::Create(MODEL_PATH "engine/synthetic-paged");
   auto params = OgaGeneratorParams::Create(*model);

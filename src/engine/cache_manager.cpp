@@ -263,14 +263,17 @@ void StaticCacheManager::Allocate(const std::vector<std::shared_ptr<Request>>& r
 bool StaticCacheManager::SupportsDynamicBatching() const { return false; }
 
 void StaticCacheManager::Step() {
-  auto request_with_max_sequence_length =
+  // Static rows share one physical sequence extent. A logically closed row retained for an
+  // executable peer can still be the longest row, so the common cache length must not shrink just
+  // because that row no longer contributes tokens or logits.
+  const auto request_with_max_sequence_length =
       std::max_element(
           cache_allocated_requests_.begin(), cache_allocated_requests_.end(),
           [](const std::shared_ptr<Request>& a, const std::shared_ptr<Request>& b) {
             return a->CurrentSequenceLength() < b->CurrentSequenceLength();
           });
-
-  const int64_t max_sequence_length = (*request_with_max_sequence_length)->CurrentSequenceLength();
+  const int64_t max_sequence_length =
+      (*request_with_max_sequence_length)->CurrentSequenceLength();
 
   key_value_cache_->Update({}, static_cast<int>(max_sequence_length));
 }
@@ -361,7 +364,7 @@ void PagedCacheManager::Step() {
         "Composite models require transactional cache steps.");
   }
   for (auto& request : cache_allocated_requests_) {
-    if (IsTurnComplete(request->status_)) {
+    if (!IsExecuting(request->status_)) {
       continue;
     }
 
@@ -459,6 +462,7 @@ void PagedCacheManager::DetachRequestForTeardown(
 
   // Engine teardown invalidates every resident Request, so release the complete paged and fixed
   // cache state at once rather than walking ownership systems that cannot be used again.
+  detached_for_teardown_ = true;
   fixed_state_pool_.reset();
   key_value_cache_.reset();
   key_value_cache_state_.reset();
@@ -473,6 +477,13 @@ std::vector<std::shared_ptr<Request>> PagedCacheManager::AllocatedRequests() con
 }
 
 bool PagedCacheManager::IsResident(const std::shared_ptr<Request>& request) const {
+  if (detached_for_teardown_) {
+    return false;
+  }
+  if (!key_value_cache_) {
+    throw std::logic_error(
+        "Paged cache manager has no key-value cache outside Engine teardown.");
+  }
   return key_value_cache_->OwnsRequest(request.get());
 }
 

@@ -4,6 +4,7 @@
 #include "model_state_manifest.h"
 
 #include <algorithm>
+#include <array>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -118,6 +119,21 @@ bool ShapesCompatible(const std::vector<int64_t>& left,
   return true;
 }
 
+bool PagedShapesCompatible(const std::vector<int64_t>& left,
+                           const std::vector<int64_t>& right) {
+  if (left.size() != right.size()) {
+    return false;
+  }
+  // Axis 0 is pool capacity. Full-context and windowed layers can intentionally use different
+  // pools, so structural manifest validation compares only the common per-block geometry here.
+  for (size_t i = 1; i < left.size(); ++i) {
+    if (left[i] >= 0 && right[i] >= 0 && left[i] != right[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
 std::string ShapeString(const std::vector<int64_t>& shape) {
   std::ostringstream output;
   output << '[';
@@ -169,11 +185,68 @@ void ValidatePagedGeometry(std::string_view group_label,
     return;
   }
   if (tensor.data_type != reference->data_type ||
-      !ShapesCompatible(tensor.shape, reference->shape)) {
+      !PagedShapesCompatible(tensor.shape, reference->shape)) {
     throw std::runtime_error(
         std::string{group_label} + " has incompatible paged geometry between '" +
         reference->name + "' " + ShapeString(reference->shape) +
         " and '" + tensor.name + "' " + ShapeString(tensor.shape));
+  }
+}
+
+void ValidatePagedTensorGeometry(
+    const TensorMetadata& tensor,
+    int layer_id,
+    size_t expected_block_count,
+    bool windowed,
+    size_t block_size,
+    size_t num_key_value_heads,
+    size_t head_size) {
+  if (tensor.shape.size() != 4) {
+    throw std::runtime_error(
+        "Paged cache tensor '" + tensor.name + "' for layer " +
+        std::to_string(layer_id) +
+        " must have rank 4 [num_blocks, block_size, num_key_value_heads, head_size]; got rank " +
+        std::to_string(tensor.shape.size()) + " with shape " +
+        ShapeString(tensor.shape) + ".");
+  }
+
+  const std::array<size_t, 4> expected{
+      expected_block_count,
+      block_size,
+      num_key_value_heads,
+      head_size,
+  };
+  const std::array<std::string_view, 4> axis_names{
+      "num_blocks",
+      "block_size",
+      "num_key_value_heads",
+      "head_size",
+  };
+  for (size_t axis = 0; axis < expected.size(); ++axis) {
+    const int64_t actual = tensor.shape[axis];
+    if (actual < 0 ||
+        static_cast<uint64_t>(actual) == static_cast<uint64_t>(expected[axis])) {
+      continue;
+    }
+
+    std::string source;
+    if (axis == 0) {
+      source = windowed
+                   ? " for the windowed paged cache pool."
+                   : " for the full-context paged cache pool.";
+    } else if (axis == 1) {
+      source = " from engine.dynamic_batching.block_size.";
+    } else if (axis == 2) {
+      source = " from model.decoder.num_key_value_heads.";
+    } else {
+      source = " from model.decoder.head_size.";
+    }
+    throw std::runtime_error(
+        "Paged cache tensor '" + tensor.name + "' for layer " +
+        std::to_string(layer_id) + " has incompatible axis " +
+        std::to_string(axis) + " (" + std::string{axis_names[axis]} +
+        "): graph dimension " + std::to_string(actual) + "; expected " +
+        std::to_string(expected[axis]) + source);
   }
 }
 
@@ -517,8 +590,67 @@ void ModelStateManifest::ValidateSession(const ModelStateMetadata& metadata) con
   }
 }
 
+void ModelStateManifest::ValidatePagedCacheGeometry(
+    const Decoder& decoder,
+    const StateGroup& paged_group,
+    const ModelStateMetadata& metadata,
+    size_t full_block_count,
+    size_t window_block_count,
+    const std::set<int>& windowed_layers,
+    size_t block_size) {
+  for (const auto& binding :
+       StateBindingsFor(decoder.inputs, decoder.outputs,
+                        StateGroupKind::PagedKeyValue)) {
+    for (const int layer_id : paged_group.layer_ids) {
+      const auto input_name = ExpandBinding(binding.input, layer_id);
+      const auto output_name = ExpandBinding(binding.output, layer_id);
+      if (!metadata.HasInput(input_name)) {
+        throw std::runtime_error(
+            "Paged cache tensor input was not found: " + input_name);
+      }
+      if (!metadata.HasOutput(output_name)) {
+        throw std::runtime_error(
+            "Paged cache tensor output was not found: " + output_name);
+      }
+
+      const bool windowed = windowed_layers.contains(layer_id);
+      const size_t expected_block_count =
+          windowed ? window_block_count : full_block_count;
+      ValidatePagedTensorGeometry(
+          TensorMetadata{
+              metadata.GetInputDataType(input_name),
+              metadata.GetInputShape(input_name),
+              input_name},
+          layer_id, expected_block_count, windowed, block_size,
+          static_cast<size_t>(decoder.num_key_value_heads),
+          static_cast<size_t>(decoder.head_size));
+      ValidatePagedTensorGeometry(
+          TensorMetadata{
+              metadata.GetOutputDataType(output_name),
+              metadata.GetOutputShape(output_name),
+              output_name},
+          layer_id, expected_block_count, windowed, block_size,
+          static_cast<size_t>(decoder.num_key_value_heads),
+          static_cast<size_t>(decoder.head_size));
+    }
+  }
+}
+
 void ModelStateManifest::ValidateDynamicEngineCompatibility(const Decoder& decoder) {
   ValidateConfig(decoder);
+
+  if (decoder.num_hidden_layers <= 0) {
+    throw std::runtime_error(
+        "Dynamic batching requires model.decoder.num_hidden_layers to be greater than zero.");
+  }
+  if (decoder.num_key_value_heads <= 0) {
+    throw std::runtime_error(
+        "Dynamic batching requires model.decoder.num_key_value_heads to be greater than zero.");
+  }
+  if (decoder.head_size <= 0) {
+    throw std::runtime_error(
+        "Dynamic batching requires model.decoder.head_size to be greater than zero.");
+  }
 
   if (!decoder.state_groups) {
     return;

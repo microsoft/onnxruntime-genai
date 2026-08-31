@@ -305,6 +305,8 @@ Typical event draining creates the Buffer once and reuses it:
 ```c
 OgaEngineEventBuffer* buffer = NULL;
 OgaCreateEngineEventBuffer(engine, 4, &buffer);
+bool has_pending = false;
+OgaEngineHasPendingRequests(engine, &has_pending);
 while (has_pending) {
   OgaEngineRun(engine, buffer);
   size_t count = OgaEngineEventBufferGetCount(buffer);
@@ -314,6 +316,7 @@ while (has_pending) {
     OgaEngineEventGetFlags(event, &flags);
     /* Read only payloads selected by flags. */
   }
+  OgaEngineHasPendingRequests(engine, &has_pending);
 }
 OgaDestroyEngineEventBuffer(buffer);
 ```
@@ -489,9 +492,9 @@ The operation is drain-or-execute:
 - A chunked partial-prefill transaction may commit cache and Request progress while producing no
   event. In that case the call succeeds with count zero and `HasPendingRequests()` remains true. The
   Engine does not loop internally to force token output.
-- If planning identifies an unserviceable Request, the Engine publishes that Request's failure
-  event first and does not execute otherwise fitting work in the same call. Remaining executable
-  Requests are considered by a later `Run`.
+- If planning omits an unserviceable Request from an otherwise executable compact plan, the Engine
+  executes and publishes the fitting work first. The omitted Request is failed on a later
+  non-executable planning pass.
 
 `OgaEngineHasPendingRequests` returns true when either pending events or schedulable work exist.
 Before answering, it reclaims Requests whose final public handle was released. This is an
@@ -508,11 +511,13 @@ are application-owned and must be discarded there if no longer useful. Destroyin
 its Requests and discards pending events.
 
 Close and final-handle abandonment both logically remove a Request from scheduling, purge its
-undelivered events, and release its Search, guidance, sampler, and parameter runtime state on the
-owner thread. On the dynamic path, committed paged-cache ownership is released immediately. On the
-static path, a resident row is part of a shared batch allocation and cannot be physically released
-per Request; the closed/abandoned tombstone is no longer scheduled or returned, but its row and
-shared cache allocation may remain until the whole batch recycles.
+undelivered events, and release device-affine runtime state on the owner thread. On the dynamic
+path, committed paged-cache ownership and Request runtime are released immediately. On the static
+path, a resident row is part of a shared batch allocation and cannot be physically released per
+Request; the closed/abandoned tombstone is no longer scheduled or returned. If an executable peer
+still needs the shared batch, the closed row's Search, guidance, sampler, parameter, and token
+runtime remain as inert padding state until that peer stops executing. The shared row and cache
+allocation may remain until the whole batch recycles.
 
 The event's `request` is borrowed. It remains valid only while the caller retains the owned Request
 handle. Internal pending events hold a `shared_ptr<Request>` until delivery, but that does not relax
@@ -660,7 +665,8 @@ is part of the current source surface.
    nonzero Turn IDs, and named cancellation.
 3. Replaced internal ready-Request retention with pre-reserved pending event storage.
 4. Captured token and terminal payload atomically at transaction commit on dynamic and static paths.
-5. Replaced `OgaEngineRun` and removed unseen-token delivery.
+5. Replaced the old ready-Request-returning `OgaEngineRun` behavior with caller-buffered event
+   delivery and removed unseen-token delivery.
 6. Updated C++, Python, examples, benchmarks, architecture documentation, and tests.
 
 Do not temporarily maintain two token-delivery paths unless required solely to keep an intermediate

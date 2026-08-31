@@ -7,6 +7,8 @@
 
 #include "onnxruntime_c_api.h"
 
+#include <set>
+
 namespace Generators {
 
 struct ModelStateMetadata {
@@ -26,6 +28,14 @@ class ModelStateManifest {
 
   static void ValidateConfig(const Config::Model::Decoder& decoder);
   static void ValidateDynamicEngineCompatibility(const Config::Model::Decoder& decoder);
+  static void ValidatePagedCacheGeometry(
+      const Config::Model::Decoder& decoder,
+      const Config::Model::Decoder::StateGroup& paged_group,
+      const ModelStateMetadata& metadata,
+      size_t full_block_count,
+      size_t window_block_count,
+      const std::set<int>& windowed_layers,
+      size_t block_size);
   void ValidateSession(const ModelStateMetadata& metadata) const;
 
   // Read-only access to the validated decoder state groups, in declaration order. Owners of a

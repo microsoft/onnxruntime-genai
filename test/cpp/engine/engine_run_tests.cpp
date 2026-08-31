@@ -235,6 +235,8 @@ TEST(EngineLifetimeTest, DestroyingEngineReleasesCompositeCacheStorage) {
   engine.reset();
 
   EXPECT_EQ(cache->ResidentRequestCount(), 0u);
+  EXPECT_FALSE(cache->IsResident(first));
+  EXPECT_FALSE(cache->IsResident(second));
   EXPECT_FALSE(cache->FixedStateSnapshot().has_value());
   EXPECT_EQ(first->status_, RequestStatus::Closed);
   EXPECT_EQ(second->status_, RequestStatus::Closed);
@@ -896,13 +898,14 @@ TEST_F(EngineRunTest, StaticBatchReturnsAllRowEventsWhenCapacitySuffices) {
             EngineEventFlagToken | EngineEventFlagTurnFinished);
 }
 
-TEST_F(EngineRunTest, StaticCloseRejectsStateReleaseNeededByExecutablePeer) {
+TEST_F(EngineRunTest, StaticCloseIsLogicalWhileExecutablePeerRetainsSharedBatch) {
   model_->config_->engine.dynamic_batching.reset();
   auto cache = std::make_shared<RecordingCacheManager>(
       model_, /*capacity=*/4, nullptr, /*supports_dynamic_batching=*/false);
   auto scheduler = Scheduler::Create(model_, cache);
   auto executor = std::make_unique<RecordingModelExecutor>(
       model_, cache, /*forced_token=*/5);
+  auto* executor_observer = executor.get();
   EngineDependencies dependencies{cache, std::move(scheduler),
                                   std::move(executor)};
   auto engine = std::make_shared<Engine>(model_, std::move(dependencies));
@@ -916,12 +919,48 @@ TEST_F(EngineRunTest, StaticCloseRejectsStateReleaseNeededByExecutablePeer) {
   ASSERT_EQ(first->status_, RequestStatus::Active);
   ASSERT_EQ(second->status_, RequestStatus::Active);
 
-  EXPECT_THROW(first->Close(), std::runtime_error);
-  EXPECT_EQ(first->status_, RequestStatus::Active);
-  EXPECT_EQ(engine->Run(storage), storage.size());
-  EXPECT_EQ(first->status_, RequestStatus::TurnComplete);
-  EXPECT_EQ(second->status_, RequestStatus::TurnComplete);
   EXPECT_NO_THROW(first->Close());
+  EXPECT_EQ(first->status_, RequestStatus::Closed);
+  EXPECT_TRUE(cache->IsResident(first));
+
+  ASSERT_EQ(engine->Run(storage), 1u);
+  EXPECT_EQ(storage[0].request, second);
+  EXPECT_EQ(first->status_, RequestStatus::Closed);
+  EXPECT_EQ(second->status_, RequestStatus::TurnComplete);
+  EXPECT_EQ(cache->AllocatedCount(), 2u);
+  ASSERT_EQ(executor_observer->decoded_batch_sizes.size(), 2u);
+  EXPECT_EQ(executor_observer->decoded_batch_sizes[1], 2u);
+  EXPECT_NO_THROW(first->Close());
+}
+
+TEST_F(EngineRunTest, StaticClosedRowIsReclaimedWhenSharedBatchRecycles) {
+  model_->config_->engine.dynamic_batching.reset();
+  auto cache = std::make_shared<StaticCacheManager>(model_);
+  auto scheduler = Scheduler::Create(model_, cache);
+  auto executor = std::make_unique<RecordingModelExecutor>(
+      model_, cache, /*forced_token=*/5);
+  EngineDependencies dependencies{cache, std::move(scheduler),
+                                  std::move(executor)};
+  auto engine = std::make_shared<Engine>(model_, std::move(dependencies));
+  auto first = CreateEngineRequest(engine, *model_);
+  auto second = CreateEngineRequest(engine, *model_);
+  first->BeginTurn(Prompt(10), std::optional<size_t>{2});
+  second->BeginTurn(Prompt(20), std::optional<size_t>{2});
+
+  std::array<EngineEvent, 2> storage;
+  ASSERT_EQ(engine->Run(storage), storage.size());
+  first->Close();
+  ASSERT_EQ(engine->Run(storage), 1u);
+  ASSERT_TRUE(cache->IsResident(first));
+  ASSERT_TRUE(cache->IsResident(second));
+
+  auto replacement = CreateEngineRequest(engine, *model_);
+  replacement->BeginTurn(Prompt(30), std::optional<size_t>{1});
+  ASSERT_EQ(engine->Run(storage), 1u);
+  EXPECT_EQ(storage[0].request, replacement);
+  EXPECT_FALSE(cache->IsResident(first));
+  EXPECT_FALSE(cache->IsResident(second));
+  EXPECT_TRUE(cache->IsResident(replacement));
 }
 
 TEST_F(EngineRunTest, StaticAbandonmentDefersStateReleaseUntilPeersComplete) {
@@ -945,8 +984,9 @@ TEST_F(EngineRunTest, StaticAbandonmentDefersStateReleaseUntilPeersComplete) {
   first_handle.Release();
 
   EXPECT_TRUE(engine->HasPendingRequests());
-  EXPECT_EQ(first->status_, RequestStatus::Active);
-  ASSERT_EQ(engine->Run(storage), storage.size());
+  EXPECT_EQ(first->status_, RequestStatus::Closed);
+  ASSERT_EQ(engine->Run(storage), 1u);
+  EXPECT_EQ(storage[0].request, second);
 
   EXPECT_FALSE(engine->HasPendingRequests());
   EXPECT_EQ(first->status_, RequestStatus::Closed);
@@ -1392,6 +1432,39 @@ TEST_F(EngineRunTest, FatalExecutionFailurePublishesEveryAffectedTurn) {
   EXPECT_THROW(static_cast<void>(RunOne(*engine.engine)), EngineStepError);
 }
 
+TEST_F(EngineRunTest, FatalDeliveryRetainsCapacityAcrossSuccessfulPublicationSwap) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/2, EosToken(*model_));
+  std::vector<std::shared_ptr<Request>> requests;
+  for (int32_t seed : {10, 20, 30, 40, 50}) {
+    requests.push_back(
+        CreateRequestWithPrompt(engine.engine, *model_, Prompt(seed)));
+  }
+
+  // The first successful publication swaps the staged and pending vectors. Both queues must retain
+  // enough capacity for all tracked requests even though this committed batch contains only two.
+  std::array<EngineEvent, 2> first_events;
+  ASSERT_EQ(engine.engine->Run(first_events), first_events.size());
+  EXPECT_EQ(first_events[0].request, requests[0]);
+  EXPECT_EQ(first_events[1].request, requests[1]);
+  requests[0]->Close();
+  requests[1]->Close();
+
+  engine.executor->SetNextFailure(ScriptedExecutionFailure::Fatal);
+  std::array<EngineEvent, 3> fatal_events;
+  ASSERT_EQ(engine.engine->Run(fatal_events), fatal_events.size());
+  for (size_t i = 0; i < fatal_events.size(); ++i) {
+    EXPECT_EQ(fatal_events[i].request, requests[i + 2]);
+    EXPECT_EQ(
+        fatal_events[i].flags,
+        EngineEventFlagTurnFinished | EngineEventFlagFailed);
+    EXPECT_EQ(
+        fatal_events[i].error_code,
+        EngineErrorCode::EngineExecutionFailure);
+    EXPECT_EQ(requests[i + 2]->status_, RequestStatus::TurnComplete);
+  }
+  EXPECT_THROW(static_cast<void>(RunOne(*engine.engine)), EngineStepError);
+}
+
 TEST_F(EngineRunTest, StaticSchedulerFailureMarksEngineUnhealthy) {
   model_->config_->engine.dynamic_batching.reset();
   auto cache = std::make_shared<RecordingCacheManager>(
@@ -1455,10 +1528,15 @@ TEST_F(EngineRunTest, UnserviceableRequestDoesNotBlockFittingRequest) {
       CreateRequestWithPrompt(engine.engine, *model_, fitting_prompt);
   engine.cache->SetUnserviceableRequest(too_large);
 
+  const auto committed = RunOne(*engine.engine);
+  EXPECT_EQ(committed.request, fitting);
+  EXPECT_EQ(engine.executor->decode_calls, 1);
+  EXPECT_EQ(too_large->status_, RequestStatus::Assigned);
+
   const auto failed = RunOne(*engine.engine);
   EXPECT_EQ(failed.request, too_large);
   EXPECT_EQ(failed.error_code, EngineErrorCode::RequestUnserviceable);
-  EXPECT_EQ(RunOne(*engine.engine).request, fitting);
+  EXPECT_EQ(engine.executor->decode_calls, 1);
 }
 
 TEST_F(EngineRunTest, LaterFailurePreservesEarlierCommittedCycle) {
