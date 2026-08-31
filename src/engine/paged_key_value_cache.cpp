@@ -6,6 +6,7 @@
 #include <limits>
 #include <numeric>
 #include <set>
+#include <string_view>
 
 #include "sequence_positions.h"
 #include "window_ring.h"
@@ -16,6 +17,13 @@ namespace {
 
 using StateGroup = Config::Model::Decoder::StateGroup;
 using StateGroupKind = Config::Model::Decoder::StateGroupKind;
+
+size_t CheckedMultiply(size_t left, size_t right, std::string_view description) {
+  if (left != 0 && right > std::numeric_limits<size_t>::max() / left) {
+    throw std::overflow_error(std::string{description} + " overflows size_t");
+  }
+  return left * right;
+}
 
 StateGroup ResolvePagedKeyValueGroup(const Config::Model::Decoder& decoder) {
   if (!decoder.state_groups) {
@@ -94,11 +102,14 @@ std::set<int> WindowedLayers(const std::shared_ptr<Model>& model,
 size_t BytesPerBlock(const std::shared_ptr<Model>& model,
                      ONNXTensorElementDataType dtype) {
   constexpr size_t num_caches_per_layer = 2;  // key and value
-  return model->config_->engine.dynamic_batching->block_size *
-         model->config_->model.decoder.num_key_value_heads *
-         model->config_->model.decoder.head_size *
-         Ort::SizeOf(dtype) *
-         num_caches_per_layer;
+  size_t bytes = static_cast<size_t>(model->config_->engine.dynamic_batching->block_size);
+  for (const size_t factor : {
+           static_cast<size_t>(model->config_->model.decoder.num_key_value_heads),
+           static_cast<size_t>(model->config_->model.decoder.head_size), Ort::SizeOf(dtype),
+           num_caches_per_layer}) {
+    bytes = CheckedMultiply(bytes, factor, "Paged cache bytes per block");
+  }
+  return bytes;
 }
 
 // Blocks per layer for the layers that keep the whole sequence. The windowed layers are budgeted
@@ -220,7 +231,8 @@ size_t PagedKeyValueCacheBytesPerBlock(const std::shared_ptr<Model>& model) {
   const auto dtype = KeyValueCacheType(model, paged_group);
   const auto windowed = WindowedLayers(model, paged_group);
   const size_t full_layer_count = paged_group.layer_ids.size() - windowed.size();
-  return full_layer_count * BytesPerBlock(model, dtype);
+  return CheckedMultiply(full_layer_count, BytesPerBlock(model, dtype),
+                         "Full-attention paged cache bytes per block");
 }
 
 PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
@@ -254,16 +266,20 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
 
     window_live_span_ = WindowLiveSpan(*chunk_size, window_size_);
     window_ring_blocks_ = WindowRingBlocks(*chunk_size, window_size_, block_size);
-    num_window_blocks = window_ring_blocks_ * max_batch_size;
+    num_window_blocks = CheckedMultiply(window_ring_blocks_, max_batch_size,
+                                        "Windowed paged cache block count");
   }
 
   const size_t num_full_layers = paged_group.layer_ids.size() - windowed.size();
   if (num_full_layers == 0) {
     throw std::runtime_error("A paged model needs at least one layer that keeps the whole sequence.");
   }
+  const size_t windowed_bytes = CheckedMultiply(
+      CheckedMultiply(num_window_blocks, windowed.size(),
+                      "Windowed paged cache allocation"),
+      BytesPerBlock(model, dtype), "Windowed paged cache allocation");
   const auto num_blocks = ComputeNumBlocks(model_, num_full_layers,
-                                           num_window_blocks * windowed.size() *
-                                               BytesPerBlock(model, dtype),
+                                           windowed_bytes,
                                            dtype,
                                            auxiliary_bytes_per_block,
                                            auxiliary_reserved_memory_bytes);

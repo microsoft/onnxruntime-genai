@@ -141,6 +141,18 @@ fs_std::path WriteDuplicateBlockDrafterConfig() {
   return root;
 }
 
+fs_std::path WriteIncompleteBlockDrafterConfig() {
+  const auto root = fs_std::temp_directory_path() / "ortgenai_incomplete_block_drafter_config";
+  std::error_code error;
+  fs_std::remove_all(root, error);
+  fs_std::create_directories(root);
+
+  std::ofstream out(root / "genai_config.json", std::ios::binary);
+  out << R"({"model":{"type":"tiny-test-model","vocab_size":16,"context_length":32,)"
+         R"("decoder":{"filename":"model.onnx"},"dflash2":{ }},"search":{}})";
+  return root;
+}
+
 }  // namespace
 
 TEST(Dflash2ConfigTest, RequiresDrafterFilename) {
@@ -250,6 +262,28 @@ TEST(Dflash2ConfigTest, RequiresMatchingAuxiliaryType) {
   EXPECT_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8), std::runtime_error);
 }
 
+TEST(Dflash2ConfigTest, RequiresDynamicPackedDimensions) {
+  const auto config = MakeDflash2Config();
+  auto [target, drafter] = MakeCompatibleMetadata();
+  target.AddOutput("aux_hidden_states", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16, {1, 64});
+  EXPECT_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8), std::runtime_error);
+
+  std::tie(target, drafter) = MakeCompatibleMetadata();
+  drafter.AddInput("q_row_map", ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, {1});
+  EXPECT_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8), std::runtime_error);
+
+  std::tie(target, drafter) = MakeCompatibleMetadata();
+  drafter.AddInput("block_table", ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, {-1, 8});
+  EXPECT_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8), std::runtime_error);
+}
+
+TEST(Dflash2ConfigTest, RequiresUniqueRuntimeInputNames) {
+  auto config = MakeDflash2Config();
+  config.model.dflash2.inputs.qkv_row_map = config.model.dflash2.inputs.q_row_map;
+  const auto [target, drafter] = MakeCompatibleMetadata();
+  EXPECT_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8), std::runtime_error);
+}
+
 TEST(Dflash2ConfigTest, RequiresCompleteDrafterContract) {
   const auto config = MakeDflash2Config();
   auto [target, drafter] = MakeCompatibleMetadata();
@@ -313,6 +347,25 @@ TEST(Dflash2ConfigTest, ParsesDsparkAlias) {
 
 TEST(Dflash2ConfigTest, RejectsBothBlockDrafterAliases) {
   EXPECT_THROW(OgaConfig::Create(WriteDuplicateBlockDrafterConfig().string().c_str()),
+               std::runtime_error);
+}
+
+TEST(Dflash2ConfigTest, AllowsSameBlockDrafterAliasInOverlays) {
+  const auto root = WriteDsparkConfig("dspark");
+  EXPECT_NO_THROW(Config(fs::path{root.string()},
+                         R"({"model":{"dspark":{"selector_top_k":3}}})"));
+
+  auto config = OgaConfig::Create(root.string().c_str());
+  EXPECT_NO_THROW(config->Overlay(R"({"model":{"dspark":{"selector_top_k":3}}})"));
+}
+
+TEST(Dflash2ConfigTest, RejectsDifferentBlockDrafterAliasInOverlay) {
+  auto config = OgaConfig::Create(WriteDsparkConfig("dspark").string().c_str());
+  EXPECT_THROW(config->Overlay(R"({"model":{"dflash2":{"selector_top_k":3}}})"),
+               std::runtime_error);
+
+  config = OgaConfig::Create(WriteIncompleteBlockDrafterConfig().string().c_str());
+  EXPECT_THROW(config->Overlay(R"({"model":{"dspark":{"filename":"dspark.onnx"}}})"),
                std::runtime_error);
 }
 
@@ -398,6 +451,30 @@ TEST(Dflash2ConfigTest, RequiresUniqueCacheBindings) {
   auto config = MakeDflash2Config();
   config.model.dflash2.inputs.past_value_names = config.model.dflash2.inputs.past_key_names;
   const auto [target, drafter] = MakeCompatibleMetadata();
+  EXPECT_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8), std::runtime_error);
+}
+
+TEST(Dflash2ConfigTest, RequiresUniqueRuntimeOutputNames) {
+  auto config = MakeDflash2Config();
+  config.model.dflash2.block_size = 9;
+  config.model.dflash2.num_draft_tokens = 8;
+  config.model.dflash2.head_size = 2;
+  config.model.dflash2.outputs.scores = "present.0.key";
+  auto [target, drafter] = MakeCompatibleMetadata();
+  drafter.AddOutput("draft_candidate_ids", ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, {-1, 8, 2});
+  for (int layer = 0; layer < 3; ++layer) {
+    for (const auto* kind : {"key", "value"}) {
+      drafter.AddInput("past_key_values." + std::to_string(layer) + "." + kind,
+                       ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, {-1, 8, 2, 2});
+      drafter.AddOutput("present." + std::to_string(layer) + "." + kind,
+                        ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, {-1, 8, 2, 2});
+    }
+  }
+  EXPECT_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8), std::runtime_error);
+
+  config = MakeDflash2Config();
+  config.model.dflash2.outputs.scores = config.model.dflash2.outputs.candidate_ids;
+  std::tie(target, drafter) = MakeCompatibleMetadata();
   EXPECT_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8), std::runtime_error);
 }
 

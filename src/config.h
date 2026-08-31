@@ -557,6 +557,7 @@ struct Config {
     struct Dflash2 {
       std::string filename;  // e.g. "dflash2.onnx"
       bool is_dspark{};      // True when parsed from the model.dspark alias.
+      std::optional<bool> configured_alias_is_dspark;
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
       std::vector<SharedInitializer> shared_initializers;
