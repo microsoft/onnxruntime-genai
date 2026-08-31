@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <memory>
 #include <span>
 #include <unordered_map>
@@ -13,6 +14,10 @@
 namespace Generators {
 
 struct Request;
+
+size_t Dflash2DraftWidth(size_t capability_limit, size_t configured_limit,
+                         size_t sequence_length_after_step, size_t sequence_limit,
+                         size_t remaining_turn_tokens_after_step);
 
 /**
  * @brief Hosts the ``dflash2.onnx`` session.

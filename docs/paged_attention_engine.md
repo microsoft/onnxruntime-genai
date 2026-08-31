@@ -399,14 +399,17 @@ The dynamic Engine can verify a continuation together with a request's next deco
 can propose tokens before the next step with `Request::SetDraftTokens` (`OgaRequestSetDraftTokens`
 in C or `Request.set_draft_tokens` in Python). When `model.mtp` names an auxiliary draft head, the
 Engine also maintains an internal shadow Request and automatically proposes a chained greedy
-continuation after each committed target step.
+continuation after each committed target step. Alternatively, `model.dflash2` runs a block drafter
+over the target's packed auxiliary hidden states. A model cannot configure both automatic drafters.
 
 Query the internal `Engine::MaxDraftTokensPerStep` capability through
 `OgaEngineMaxDraftTokensPerProposal`, `OgaEngine::MaxDraftTokensPerProposal`, or
 `Engine.max_draft_tokens_per_proposal` before proposing work. Zero means that the decoder does not
 return one logits row per packed token or that its cache/state cannot commit an accepted prefix.
 The reported value is a capability limit, not a guarantee that every proposed token fits the next
-step's global token budget or current cache capacity.
+step's global token budget or current cache capacity. Automatic drafters also leave room for the
+target's correction token and cap each proposal by the Request's session limit and remaining Turn
+token budget.
 
 The request must already belong to the Engine, have completed prefill, and be ready to decode.
 Verification supports greedy target selection and random target sampling with a positive `top_k`;
@@ -1113,6 +1116,10 @@ variable-size output does not have persistent graph buffers. Engine construction
 rank, element type, and static width against the drafter input before allocating cache resources.
 The drafter run is synchronous because its packed inputs and outputs are owned by one proposal
 call, so `model.dflash2.run_options` cannot disable execution-provider synchronization.
+The direct drafter session also uses graph id `-1`: its variable-shaped proposal tensors are
+allocated per call and therefore cannot be captured safely. If this optional post-commit drafter
+run fails, the Engine discards any partial proposal, releases the drafter, and still publishes the
+already committed target events; subsequent Turns continue without automatic DFlash 2 proposals.
 
 ## Backpressure and fairness
 
