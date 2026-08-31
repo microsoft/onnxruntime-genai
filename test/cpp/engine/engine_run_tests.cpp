@@ -1789,7 +1789,7 @@ TEST_F(EngineRunTest, DraftProposalRequiresDecodeReadyRequest) {
   params->search.chunk_size = 2;
   auto request =
       CreateRequestWithPrompt(engine.engine, *params, Prompt(10));
-    EXPECT_THROW(
+  EXPECT_THROW(
       request->SetDraftTokens(std::vector<int32_t>{11, 12}),
       std::runtime_error);
 
