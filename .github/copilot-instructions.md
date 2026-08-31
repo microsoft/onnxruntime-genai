@@ -161,3 +161,16 @@ Tests are organized by language binding:
 - **Platform tests**: Android/iOS tests run via emulator/simulator
 
 Always test with actual model files from `test/models/` directory rather than mock data.
+
+## Model Builder Review Rules
+
+For any pull request that modifies files under `src/python/py/models/**`, reviewers and Copilot must apply:
+
+- `.github/instructions/python-model-builder.instructions.md`
+- `src/python/py/models/README.md`
+- `src/python/py/models/DESIGN.md`
+- `src/python/py/models/loaders/LOADERS.md`
+- `src/python/py/models/quantization/QUANTIZATION.md`
+
+When reviewing those files, prioritize these model-builder rules over generic guidance and flag violations explicitly.
+
