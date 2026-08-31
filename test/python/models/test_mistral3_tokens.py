@@ -230,6 +230,38 @@ class TestTokenExpansionIntegration:
         # invocation before model teardown — important for GPU memory cleanup.
         del generator
 
+    @pytest.mark.skipif(not _has_genai(), reason="onnxruntime_genai not installed")
+    def test_genai_processor_two_images_can_generate(self, test_data_path):
+        """Verify CPU prefill and generation work with two differently sized images."""
+        model_path = Path(test_data_path) / "mistral3"
+        image_paths = [
+            Path(test_data_path) / "images" / "australia.jpg",
+            Path(test_data_path) / "images" / "landscape.jpg",
+        ]
+        if not (model_path / "genai_config.json").is_file():
+            pytest.skip(f"Mistral3 model not found at {model_path} (missing genai_config.json)")
+        for image_path in image_paths:
+            if not image_path.is_file():
+                pytest.skip(f"Test image not found at {image_path}")
+
+        og = importlib.import_module("onnxruntime_genai")
+        model = og.Model(str(model_path))
+        processor = model.create_multimodal_processor()
+        images = og.Images.open(*(str(image_path) for image_path in image_paths))
+        inputs = processor(
+            "<s>[INST][IMG]\n[IMG]\nDescribe both images.[/INST]",
+            images=images,
+        )
+
+        params = og.GeneratorParams(model)
+        params.set_search_options(max_length=4096)
+        generator = og.Generator(model, params)
+        generator.set_inputs(inputs)
+        generator.generate_next_token()
+
+        assert generator.get_next_tokens().size == 1
+        del generator
+
 
 class TestMultiImageTokenExpansion:
     """Tests for multi-image token expansion logic.
