@@ -43,7 +43,7 @@ TEST(StopStringMatcherTest, NoMatchFlushesEverything) {
 }
 
 TEST(StopStringMatcherTest, NoStopStringsNeverMatches) {
-  StopStringMatcher matcher{{}};
+  StopStringMatcher matcher{std::vector<std::string>{}};
 
   EXPECT_FALSE(matcher.Consume("STOP anything at all").has_value());
   EXPECT_FALSE(matcher.Matched());
