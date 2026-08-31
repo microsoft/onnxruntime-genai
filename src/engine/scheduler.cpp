@@ -198,8 +198,8 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
             : std::min(request->PendingDraftTokenCount(), max_draft_token_count);
     candidate.entry.unprocessed_token_count = 1 + candidate.entry.draft_token_count;
     candidate.entry.target_cache_slots = RequiredSlots(
-      static_cast<size_t>(snapshot.processed_sequence_length),
-      candidate.entry.unprocessed_token_count);
+        static_cast<size_t>(snapshot.processed_sequence_length),
+        candidate.entry.unprocessed_token_count);
     candidate.entry.whole_sequence_cache_slots =
         SlotsForWholeSequence(snapshot.current_sequence_length);
     candidate.entry.is_prefill = snapshot.is_prefill;
@@ -213,7 +213,7 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
         snapshot.is_prefill,
         static_cast<size_t>(remaining_token_count),
         prefill_token_cap,
-      candidate.entry.draft_token_count,
+        candidate.entry.draft_token_count,
     };
     candidate.processed_sequence_length =
         static_cast<size_t>(snapshot.processed_sequence_length);
