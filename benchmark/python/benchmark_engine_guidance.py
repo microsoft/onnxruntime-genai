@@ -27,6 +27,20 @@ SCHEMA = {
 }
 
 
+def require_request_event(event: og.EngineEvent) -> og.Request:
+    if event.request is not None:
+        return event.request
+    if event.flags & og.EngineEventFlags.FAILED:
+        outcome = "failed"
+    elif event.flags & og.EngineEventFlags.CAPACITY_BLOCKED:
+        outcome = "was capacity-blocked"
+    elif event.flags & og.EngineEventFlags.RETRYABLE:
+        outcome = "reported a retryable failure"
+    else:
+        outcome = "returned an invalid request-less event"
+    raise RuntimeError(f"Engine {outcome}; error_code={event.error_code}")
+
+
 def percentile(values, percentile_value):
     ordered = sorted(values)
     if len(ordered) == 1:
@@ -53,18 +67,19 @@ def generate(engine, request, tokenizer, request_started_at):
     first_token_at = None
     last_token_at = None
     started = time.perf_counter()
+    event_buffer = engine.create_event_buffer(8)
 
-    while not request.is_turn_complete():
-        ready_request = engine.step()
-        if ready_request is None:
-            raise RuntimeError("Engine stopped before the request completed")
-        while ready_request.has_unseen_tokens():
-            now = time.perf_counter()
-            if first_token_at is None:
-                first_token_at = now
-            last_token_at = now
-            token_count += 1
-            fragments.append(stream.decode(ready_request.get_unseen_token()))
+    while engine.has_pending_requests():
+        for event in engine.run(event_buffer):
+            if require_request_event(event) is not request:
+                raise RuntimeError("Engine returned an unknown request")
+            if event.flags & og.EngineEventFlags.TOKEN:
+                now = time.perf_counter()
+                if first_token_at is None:
+                    first_token_at = now
+                last_token_at = now
+                token_count += 1
+                fragments.append(stream.decode(event.token))
 
     completed = time.perf_counter()
     if first_token_at is None:
@@ -105,17 +120,16 @@ def run_once(engine, model, tokenizer, prompt_tokens, max_length, guided):
     params.set_search_options(do_sample=False, max_length=max_length)
     if guided:
         params.set_guidance("lark_grammar", f"start: %json {json.dumps(SCHEMA)}\n")
-    request = og.Request(params)
-    request.add_tokens(np.asarray(prompt_tokens, dtype=np.int32))
+    request = engine.create_request(params)
     setup_ms = (time.perf_counter() - setup_started) * 1000
 
     try:
         admission_started = time.perf_counter()
-        engine.add_request(request)
+        request.begin_turn(np.asarray(prompt_tokens, dtype=np.int32))
         admission_ms = (time.perf_counter() - admission_started) * 1000
         output, metrics = generate(engine, request, tokenizer, setup_started)
     finally:
-        engine.remove_request(request)
+        request.close()
 
     metrics["setup_ms"] = setup_ms
     metrics["admission_ms"] = admission_ms
@@ -205,9 +219,7 @@ def run(args):
         baseline_throughput = unguided_summary["decode_tokens_per_second"]["p50"]
         guided_throughput = guided_summary["decode_tokens_per_second"]["p50"]
         summary["guided_decode_throughput_change_percent_p50"] = (
-            (guided_throughput - baseline_throughput) * 100 / baseline_throughput
-            if baseline_throughput > 0
-            else None
+            (guided_throughput - baseline_throughput) * 100 / baseline_throughput if baseline_throughput > 0 else None
         )
 
     output = json.dumps(summary, indent=2)

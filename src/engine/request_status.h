@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <cstdint>
+
 /**
  * @file request_status.h
  * @brief Defines the lifecycle status of an engine Request.
@@ -15,11 +17,21 @@
 namespace Generators {
 
 enum class RequestStatus {
-  Unassigned,    // Created: initial input may be added before submission to an Engine.
-  Assigned,      // Queued: submitted initial work or a resident continuation awaits execution.
+  Unassigned,    // Created and Engine-bound, with no turn queued.
+  Assigned,      // Queued: initial work or a resident continuation awaits execution.
   Active,        // The current generation turn is executable and owned by the Engine.
   TurnComplete,  // The current turn stopped; output and resident model state remain available.
-  Closed,        // Permanently terminal; no scheduler or cache resources remain owned.
+  Closed,        // Permanently terminal; never scheduled again. Static batch storage may linger.
+};
+
+enum class GenerationFinishReason : uint32_t {
+  None = 0,
+  EosToken = 1,
+  StopToken = 2,
+  TurnLimit = 3,
+  ContextLimit = 4,
+  Canceled = 5,
+  Failed = 6,
 };
 
 constexpr bool IsQueued(RequestStatus status) noexcept {
