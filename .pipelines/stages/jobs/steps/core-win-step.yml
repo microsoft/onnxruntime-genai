@@ -301,6 +301,10 @@ steps:
     if (-not $zip) {
       Write-Error "ASSERT FAIL: no CPack .zip found in $pkgDir"; exit 1
     }
+    if ('${{ parameters.ep }}' -eq 'winml' -and
+        $zip.Name -notlike '*-win-${{ parameters.arch }}-winml.zip') {
+      Write-Error "ASSERT FAIL: WinML archive name does not identify its EP: $($zip.Name)"; exit 1
+    }
     Write-Host "CPack archive: $($zip.FullName)"
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $entries = [System.IO.Compression.ZipFile]::OpenRead($zip.FullName).Entries.FullName
