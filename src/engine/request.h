@@ -121,7 +121,8 @@ struct Request : std::enable_shared_from_this<Request>,
    * greedy requests may propose drafts, because verification compares argmax tokens rather than
    * sampling probabilities.
    *
-   * The proposal applies to the next committed decode step; a rolled back step leaves it pending.
+   * The proposal applies to the current turn's next committed decode step. A rolled back step
+   * leaves it pending, while canceling the turn discards it.
    */
   void SetDraftTokens(std::span<const int32_t> tokens);
 

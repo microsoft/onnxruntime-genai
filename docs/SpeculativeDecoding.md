@@ -129,9 +129,9 @@ This API has a different ownership boundary from the automatic `Generator` strat
   supported.
 - Verification is greedy and accepts the longest prefix matching the target model's argmax rows.
 - Guidance and logits penalties are not supported for a request carrying a proposal.
-- The proposal applies to the next committed decode operation. Budgeting or cache pressure may
-  verify fewer drafts and still consumes the proposal. A rolled-back operation preserves it for
-  retry.
+- The proposal belongs to the current turn and applies to its next committed decode operation.
+  Budgeting or cache pressure may verify fewer drafts and still consumes the proposal. A
+  rolled-back operation preserves it for retry, while canceling the turn discards it.
 - One verification run can publish several ordered token events: accepted drafts followed by one
   target replacement or bonus token.
 
