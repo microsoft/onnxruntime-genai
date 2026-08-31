@@ -1691,7 +1691,8 @@ struct Embedding_Element : JSON::Element {
 };
 
 struct Model_Element : JSON::Element {
-  explicit Model_Element(Config::Model& v) : v_{v} {}
+  explicit Model_Element(Config::Model& v)
+      : v_{v}, block_drafter_alias_{v_.dflash2.configured_alias_is_dspark} {}
 
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "type") {
@@ -1813,11 +1814,13 @@ struct Model_Element : JSON::Element {
     }
     if (name == "dflash2" || name == "dspark") {
       // DSpark replaces DFlash's candidate selector with a Markov head but emits the same lattice.
-      if (block_drafter_seen_) {
+      const bool is_dspark = name == "dspark";
+      if (block_drafter_alias_.has_value() && *block_drafter_alias_ != is_dspark) {
         throw std::runtime_error("Only one of model.dflash2 and model.dspark may be configured");
       }
-      block_drafter_seen_ = true;
-      v_.dflash2.is_dspark = name == "dspark";
+      block_drafter_alias_ = is_dspark;
+      v_.dflash2.is_dspark = is_dspark;
+      v_.dflash2.configured_alias_is_dspark = is_dspark;
       return dflash2_;
     }
     throw JSON::unknown_value_error{};
@@ -1837,7 +1840,7 @@ struct Model_Element : JSON::Element {
   VAD_Element vad_{v_.vad};
   Mtp_Element mtp_{v_.mtp};
   Dflash2_Element dflash2_{v_.dflash2};
-  bool block_drafter_seen_{};
+  std::optional<bool> block_drafter_alias_;
 };
 
 // Throws std::runtime_error (rather than std::overflow_error/std::invalid_argument) on failure.
