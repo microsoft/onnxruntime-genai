@@ -1589,6 +1589,120 @@ TEST_F(EngineRunTest, SpeculativeRunKeepsAcceptedPrefixAndEmitsAllTokens) {
   EXPECT_EQ(request->PendingDraftTokenCount(), 0u);
 }
 
+TEST_F(EngineRunTest, SampledSpeculativeRunKeepsAcceptedPrefixAndCorrection) {
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, filler);
+  engine.cache->SetMaxDraftTokensPerStep(3);
+  auto params = MakeGreedyParams(*model_);
+  params->search.do_sample = true;
+  params->search.top_k = 3;
+  params->search.temperature = 0.01f;
+  params->search.random_seed = 1234;
+
+  auto request = CreateRequestWithPrompt(engine.engine, *params, Prompt(10));
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
+  const int64_t length_after_prefill = request->CurrentSequenceLength();
+  const size_t generated_after_prefill = request->TurnGeneratedTokens();
+
+  request->SetDraftTokens(std::vector<int32_t>{11, 12, 13});
+  engine.executor->SetVerifyRowTokens({11, 12, 21, 22});
+
+  std::array<EngineEvent, 3> events;
+  ASSERT_EQ(engine.engine->Run(events), 3u);
+  EXPECT_EQ(events[0].token, 11);
+  EXPECT_EQ(events[1].token, 12);
+  EXPECT_EQ(events[2].token, 21);
+  for (const auto& event : events) {
+    EXPECT_EQ(event.request, request);
+    EXPECT_EQ(event.flags, EngineEventFlagToken);
+  }
+  EXPECT_EQ(request->CurrentSequenceLength(), length_after_prefill + 3);
+  EXPECT_EQ(request->TurnGeneratedTokens(), generated_after_prefill + 3);
+  EXPECT_EQ(request->PendingDraftTokenCount(), 0u);
+  ASSERT_EQ(engine.cache->prefix_commits.size(), 1u);
+  EXPECT_EQ(engine.cache->prefix_commits[0].kept_tokens, 3u);
+  const auto stats = engine.engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.draft_tokens_proposed, 3u);
+  EXPECT_EQ(stats.draft_tokens_evaluated, 3u);
+  EXPECT_EQ(stats.draft_tokens_accepted, 2u);
+}
+
+TEST_F(EngineRunTest, SampledSpeculativeBatchHandlesMixedDraftLengths) {
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, filler);
+  engine.cache->SetMaxDraftTokensPerStep(3);
+  std::vector<std::shared_ptr<Request>> requests;
+  for (int32_t prompt_seed : {20, 30}) {
+    auto params = MakeGreedyParams(*model_);
+    params->search.do_sample = true;
+    params->search.top_k = 3;
+    params->search.temperature = 0.01f;
+    params->search.random_seed = static_cast<unsigned int>(1234 + prompt_seed);
+    requests.push_back(
+        CreateRequestWithPrompt(engine.engine, *params, Prompt(prompt_seed)));
+  }
+
+  std::array<EngineEvent, 2> prefill_events;
+  ASSERT_EQ(engine.engine->Run(prefill_events), 2u);
+  requests[0]->SetDraftTokens(std::vector<int32_t>{11, 12, 13});
+  requests[1]->SetDraftTokens(std::vector<int32_t>{14});
+  engine.executor->SetVerifyRowTokens({11, 22, 23, 24, 14, 25});
+
+  std::array<EngineEvent, 4> events;
+  ASSERT_EQ(engine.engine->Run(events), 4u);
+  EXPECT_EQ(events[0].request, requests[0]);
+  EXPECT_EQ(events[0].token, 11);
+  EXPECT_EQ(events[1].request, requests[0]);
+  EXPECT_EQ(events[1].token, 22);
+  EXPECT_EQ(events[2].request, requests[1]);
+  EXPECT_EQ(events[2].token, 14);
+  EXPECT_EQ(events[3].request, requests[1]);
+  EXPECT_EQ(events[3].token, 25);
+  for (const auto& event : events) {
+    EXPECT_EQ(event.flags, EngineEventFlagToken);
+  }
+  const auto stats = engine.engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.rounds, 2u);
+  EXPECT_EQ(stats.draft_tokens_proposed, 4u);
+  EXPECT_EQ(stats.draft_tokens_evaluated, 3u);
+  EXPECT_EQ(stats.draft_tokens_accepted, 2u);
+}
+
+TEST_F(EngineRunTest, SampledSpeculativeRunRespectsTurnTokenLimit) {
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, filler);
+  engine.cache->SetMaxDraftTokensPerStep(3);
+  auto params = MakeGreedyParams(*model_);
+  params->search.do_sample = true;
+  params->search.top_k = 3;
+  params->search.temperature = 0.01f;
+  params->search.random_seed = 1234;
+  auto request = CreateEngineRequest(engine.engine, *params);
+  request->BeginTurn(Prompt(10), std::optional<size_t>{3});
+
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
+  ASSERT_EQ(request->TurnGeneratedTokens(), 1u);
+  const int64_t length_after_prefill = request->CurrentSequenceLength();
+
+  request->SetDraftTokens(std::vector<int32_t>{11, 12, 13});
+  engine.executor->SetVerifyRowTokens({11, 12, 13, 25});
+
+  std::array<EngineEvent, 4> events;
+  ASSERT_EQ(engine.engine->Run(events), 2u);
+  EXPECT_EQ(events[0].token, 11);
+  EXPECT_EQ(events[0].flags, EngineEventFlagToken);
+  EXPECT_EQ(events[1].token, 12);
+  EXPECT_EQ(events[1].flags,
+            EngineEventFlagToken | EngineEventFlagTurnFinished);
+  EXPECT_EQ(events[1].finish_reason, GenerationFinishReason::TurnLimit);
+  EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
+  EXPECT_EQ(request->CurrentSequenceLength(), length_after_prefill + 2);
+  EXPECT_EQ(request->TurnGeneratedTokens(), 3u);
+}
+
 // The bonus row predicting EOS ends the turn without appending it, so the step's only visible
 // tokens are the accepted drafts.
 TEST_F(EngineRunTest, SpeculativeRunWithEosBonusTokenEmitsOnlyAcceptedDrafts) {

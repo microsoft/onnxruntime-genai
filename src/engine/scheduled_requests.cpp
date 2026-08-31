@@ -343,9 +343,11 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
 
     if (UsesRandomSampling(requests_[i]->SearchOptions())) {
       const auto drafts = requests_[i]->StagedDraftTokens();
+      const size_t token_budget = requests_[i]->RemainingTurnTokenBudget();
       requests_[i]->RewindDraftsForTransaction(0);
       size_t accepted_count = 0;
-      for (; accepted_count < draft_count; ++accepted_count) {
+      while (accepted_count < draft_count &&
+             selected_tokens[i].size() < token_budget) {
         const auto selection = BuildTargetSelection(
             row + accepted_count, verify_rows[row + accepted_count],
             requests_[i]->SearchOptions(), topk, sampling_scratch);
@@ -353,8 +355,10 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
         selected_tokens[i].push_back(token);
         if (token != drafts[accepted_count] || requests_[i]->IsStopToken(token))
           break;
+        ++accepted_count;
       }
-      if (accepted_count == draft_count) {
+      if (accepted_count == draft_count &&
+          selected_tokens[i].size() < token_budget) {
         const auto selection = BuildTargetSelection(
             row + draft_count, verify_rows[row + draft_count],
             requests_[i]->SearchOptions(), topk, sampling_scratch);
@@ -456,6 +460,10 @@ bool ScheduledRequests::PrepareBatchedSamplingPlan(
     if (!status_is_executable ||
         !request->IsChunkComplete())
       continue;
+    if (require_transaction_support && draft_token_counts_[request_index] != 0 &&
+        UsesRandomSampling(request->SearchOptions())) {
+      continue;
+    }
 
     const auto args = ResolveSampleArgs(request->SearchOptions());
     if (!args || !request->SupportsBatchedSampling()) {
@@ -474,16 +482,14 @@ void ScheduledRequests::BeginTransaction() {
   if (transaction_checkpoint_count_ != 0 || sampler_checkpoint_active_)
     throw std::logic_error("Scheduled request transaction is already active.");
 
-  bool has_sampled_drafts = false;
-  for (size_t i = 0; i < requests_.size(); ++i) {
-    has_sampled_drafts = has_sampled_drafts ||
-                         (draft_token_counts_[i] != 0 &&
-                          UsesRandomSampling(requests_[i]->SearchOptions()));
-  }
-  transaction_uses_batched_sampler_ = !has_sampled_drafts && PrepareBatchedSamplingPlan(true);
+  transaction_uses_batched_sampler_ = PrepareBatchedSamplingPlan(true);
   try {
     for (const auto& request : requests_) {
-      if (transaction_uses_batched_sampler_)
+      const bool uses_batched_sampler =
+          transaction_uses_batched_sampler_ &&
+          std::find(sampling_plan_->requests.begin(), sampling_plan_->requests.end(),
+                    request.get()) != sampling_plan_->requests.end();
+      if (uses_batched_sampler)
         request->SaveStateForExternalSamplingTransaction();
       else
         request->SaveStateForTransaction();
@@ -521,16 +527,18 @@ void ScheduledRequests::GenerateNextTokensForTransaction(
   std::vector<size_t> accepted_draft_counts;
   auto logits = SelectSampledRows(verify_rows, selected_tokens, accepted_draft_counts);
   results.assign(requests_.size(), RequestStepResult{});
+  std::vector<bool> sampled_by_batched_sampler(requests_.size(), false);
   if (transaction_uses_batched_sampler_) {
     sampling_plan_->logits.clear();
     const size_t original_sampling_count = sampling_plan_->requests.size();
     size_t source_sampling_index = 0;
     size_t active_sampling_count = 0;
-    for (size_t i = 0; i < requests_.size(); ++i) {
-      if (!requests_[i]->IsChunkComplete())
-        continue;
-      if (source_sampling_index >= original_sampling_count ||
-          sampling_plan_->requests[source_sampling_index] != requests_[i].get()) {
+    for (; source_sampling_index < original_sampling_count;
+         ++source_sampling_index) {
+      const size_t i = sampling_plan_->result_indices[source_sampling_index];
+      if (i >= requests_.size() ||
+          sampling_plan_->requests[source_sampling_index] != requests_[i].get() ||
+          !requests_[i]->IsChunkComplete()) {
         throw std::logic_error("Batched sampling plan does not match the scheduled requests.");
       }
       if (requests_[i]->DraftVerificationCompletedGeneration()) {
@@ -544,38 +552,35 @@ void ScheduledRequests::GenerateNextTokensForTransaction(
               sampling_plan_->params[source_sampling_index];
           sampling_plan_->states[active_sampling_count] =
               sampling_plan_->states[source_sampling_index];
+          sampling_plan_->result_indices[active_sampling_count] = i;
         }
         sampling_plan_->logits.push_back(logits[i]);
         requests_[i]->PrepareGenerationForTransaction(logits[i]);
+        sampled_by_batched_sampler[i] = true;
         ++active_sampling_count;
       }
-      ++source_sampling_index;
     }
-    if (source_sampling_index != original_sampling_count)
-      throw std::logic_error("Batched sampling plan does not match the scheduled requests.");
     sampling_plan_->requests.resize(active_sampling_count);
+    sampling_plan_->result_indices.resize(active_sampling_count);
     sampling_plan_->params.resize(active_sampling_count);
     sampling_plan_->states.resize(active_sampling_count);
 
-    if (active_sampling_count == 0)
-      return;
-
-    auto next_tokens = batched_sampler_->Sample(
-        sampling_plan_->logits, sampling_plan_->params,
-        sampling_plan_->states, model_->config_->model.vocab_size);
-    for (size_t i = 0; i < sampling_plan_->requests.size(); ++i) {
-      if (!sampling_plan_->requests[i]->BindNextTokensSlot(next_tokens.subspan(i, 1)))
-        throw std::runtime_error("The request search rejected the batched sampler output.");
-      sampling_plan_->requests[i]->OnNextTokensSampled();
+    if (active_sampling_count != 0) {
+      auto next_tokens = batched_sampler_->Sample(
+          sampling_plan_->logits, sampling_plan_->params,
+          sampling_plan_->states, model_->config_->model.vocab_size);
+      for (size_t i = 0; i < sampling_plan_->requests.size(); ++i) {
+        if (!sampling_plan_->requests[i]->BindNextTokensSlot(next_tokens.subspan(i, 1)))
+          throw std::runtime_error("The request search rejected the batched sampler output.");
+        sampling_plan_->requests[i]->OnNextTokensSampled();
+      }
+      next_tokens.CopyDeviceToCpu();
+      for (size_t i = 0; i < requests_.size(); ++i) {
+        if (sampled_by_batched_sampler[i]) {
+          results[i] = requests_[i]->StageGenerationForTransaction(plan.requests[i]);
+        }
+      }
     }
-    next_tokens.CopyDeviceToCpu();
-    for (size_t i = 0; i < requests_.size(); ++i) {
-      if (!requests_[i]->IsChunkComplete() ||
-          requests_[i]->DraftVerificationCompletedGeneration())
-        continue;
-      results[i] = requests_[i]->StageGenerationForTransaction(plan.requests[i]);
-    }
-    return;
   }
 
   size_t sampled_request_count = 0;
@@ -614,7 +619,6 @@ void ScheduledRequests::GenerateNextTokensForTransaction(
         stage_tokens.CopyCpuToDevice();
         for (size_t row = 0; row < active.size(); ++row) {
           auto& request = requests_[active[row]];
-          request->sequence_length_before_sampling_ = request->CurrentSequenceLength();
           if (!request->BindNextTokensSlot(stage_tokens.subspan(row, 1)))
             throw std::logic_error("Sampled draft commit lost batched-search support.");
           request->OnNextTokensSampled();
@@ -622,28 +626,42 @@ void ScheduledRequests::GenerateNextTokensForTransaction(
         stage_tokens.CopyDeviceToCpu();
         for (size_t row = 0; row < active.size(); ++row) {
           const size_t request_index = active[row];
-          const auto stage_result = requests_[request_index]->StageGenerationForTransaction();
-          if (stage + 1 == selected_tokens[request_index].size())
+          auto stage_plan = plan.requests[request_index];
+          if (stage + 1 == selected_tokens[request_index].size()) {
+            requests_[request_index]->RecordSampledDraftAcceptance(
+                accepted_draft_counts[request_index]);
+          } else {
+            stage_plan.sequence_length_before =
+                requests_[request_index]->CurrentSequenceLength() - 1;
+          }
+          const auto stage_result =
+              requests_[request_index]->StageGenerationForTransaction(stage_plan);
+          if (stage + 1 == selected_tokens[request_index].size()) {
             results[request_index] = stage_result;
-          else if (!stage_result.token_appended || stage_result.done)
+          } else if (!stage_result.token_appended || stage_result.done) {
             throw std::logic_error("An accepted sampled draft unexpectedly ended the request.");
+          }
         }
       } else {
         for (size_t request_index : active) {
           auto& request = requests_[request_index];
-          request->sequence_length_before_sampling_ = request->CurrentSequenceLength();
+          auto stage_plan = plan.requests[request_index];
+          stage_plan.sequence_length_before = request->CurrentSequenceLength();
           request->search_->CommitToken(selected_tokens[request_index][stage]);
-          const auto stage_result = request->StageGenerationForTransaction();
-          if (stage + 1 == selected_tokens[request_index].size())
+          if (stage + 1 == selected_tokens[request_index].size()) {
+            request->RecordSampledDraftAcceptance(
+                accepted_draft_counts[request_index]);
+            stage_plan = plan.requests[request_index];
+          }
+          const auto stage_result =
+              request->StageGenerationForTransaction(stage_plan);
+          if (stage + 1 == selected_tokens[request_index].size()) {
             results[request_index] = stage_result;
-          else if (!stage_result.token_appended || stage_result.done)
+          } else if (!stage_result.token_appended || stage_result.done) {
             throw std::logic_error("An accepted sampled draft unexpectedly ended the request.");
+          }
         }
       }
-    }
-    for (size_t i = 0; i < requests_.size(); ++i) {
-      if (!selected_tokens[i].empty())
-        requests_[i]->RecordSampledDraftAcceptance(accepted_draft_counts[i]);
     }
   }
 
@@ -651,7 +669,8 @@ void ScheduledRequests::GenerateNextTokensForTransaction(
     if (requests_[i]->DraftVerificationCompletedGeneration()) {
       results[i] =
           requests_[i]->StageDraftCompletionForTransaction();
-    } else if (requests_[i]->IsChunkComplete() && selected_tokens[i].empty()) {
+    } else if (requests_[i]->IsChunkComplete() && selected_tokens[i].empty() &&
+               !sampled_by_batched_sampler[i]) {
       results[i] = requests_[i]->ApplyLogitsForTransaction(logits[i]);
     }
   }

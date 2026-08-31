@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <limits>
 
 #include "generator/generators.h"
 #include "request_status.h"
@@ -183,6 +184,14 @@ struct Request : std::enable_shared_from_this<Request>,
   GenerationFinishReason FinishReason() const noexcept { return finish_reason_; }
   size_t TurnPromptTokens() const noexcept { return turn_prompt_tokens_; }
   size_t TurnGeneratedTokens() const noexcept { return turn_generated_tokens_; }
+  size_t RemainingTurnTokenBudget() const noexcept {
+    if (!turn_max_generated_tokens_) {
+      return std::numeric_limits<size_t>::max();
+    }
+    return turn_generated_tokens_ < *turn_max_generated_tokens_
+               ? *turn_max_generated_tokens_ - turn_generated_tokens_
+               : 0;
+  }
 
   RequestStatus Status() const noexcept { return status_; }
 
