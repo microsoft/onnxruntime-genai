@@ -7,6 +7,7 @@
 #include <exception>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <unordered_set>
 #include <utility>
