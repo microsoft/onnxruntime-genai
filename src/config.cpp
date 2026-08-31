@@ -20,6 +20,43 @@ namespace Generators {
 
 int64_t SafeDoubleToInt64(double x, std::string_view name);
 
+namespace {
+
+void InheritProviderOptions(const Config::SessionOptions& parent,
+                            Config::SessionOptions& child) {
+  if (child.providers.empty()) {
+    child.providers = parent.providers;
+  }
+
+  for (const auto& parent_provider : parent.provider_options) {
+    auto child_provider = std::find_if(
+        child.provider_options.begin(), child.provider_options.end(),
+        [&parent_provider](const Config::ProviderOptions& provider) {
+          return provider.name == parent_provider.name;
+        });
+    if (child_provider == child.provider_options.end()) {
+      child.provider_options.push_back(parent_provider);
+      continue;
+    }
+
+    if (!child_provider->device_filtering_options) {
+      child_provider->device_filtering_options = parent_provider.device_filtering_options;
+    }
+    for (const auto& parent_option : parent_provider.options) {
+      const bool overridden = std::any_of(
+          child_provider->options.begin(), child_provider->options.end(),
+          [&parent_option](const Config::NamedString& option) {
+            return option.first == parent_option.first;
+          });
+      if (!overridden) {
+        child_provider->options.push_back(parent_option);
+      }
+    }
+  }
+}
+
+}  // namespace
+
 std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   const auto& mtp = config.model.mtp;
   if (mtp.filename.empty()) {
@@ -31,12 +68,17 @@ std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   if (mtp.num_key_value_heads <= 0 || mtp.head_size <= 0) {
     throw std::runtime_error("model.mtp KV head count and head size must be positive.");
   }
+  if (config.model.decoder.hidden_size <= 0) {
+    throw std::runtime_error("model.decoder.hidden_size must be positive to create an MTP decoder.");
+  }
 
   auto projected = std::make_unique<Config>(config);
   auto& decoder = projected->model.decoder;
   decoder.filename = mtp.filename;
   if (mtp.session_options) {
     decoder.session_options = *mtp.session_options;
+    InheritProviderOptions(config.model.decoder.session_options,
+                           decoder.session_options);
   }
   decoder.run_options = mtp.run_options;
   decoder.shared_initializers = mtp.shared_initializers;

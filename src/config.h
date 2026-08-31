@@ -7,6 +7,7 @@
 #include "provider_options.h"
 
 #include <functional>
+#include <memory>
 
 namespace Generators {
 
