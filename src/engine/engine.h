@@ -7,6 +7,8 @@
 #include "model_executor.h"
 #include "scheduler.h"
 
+#include <thread>
+
 /**
  * @file engine.h
  * @brief Defines the Engine class, which serves as the core component for managing
@@ -19,6 +21,41 @@ namespace Generators {
 enum class EngineHealth {
   Healthy,
   Unhealthy,
+};
+
+enum class EngineErrorCode : uint32_t {
+  None = 0,
+  CapacityDeferred = 1,
+  ExecutionCapacityExceeded = 2,
+  RetryableExecution = 3,
+  RequestUnserviceable = 4,
+  EngineContractFailure = 5,
+  EngineExecutionFailure = 6,
+};
+
+enum EngineEventFlag : uint32_t {
+  EngineEventFlagNone = 0,
+  EngineEventFlagToken = 1u << 0,
+  EngineEventFlagTurnFinished = 1u << 1,
+  EngineEventFlagCapacityBlocked = 1u << 2,
+  EngineEventFlagFailed = 1u << 3,
+  EngineEventFlagRetryable = 1u << 4,
+};
+
+struct TurnUsage {
+  uint64_t prompt_tokens{};
+  uint64_t generated_tokens{};
+  uint64_t cached_prompt_tokens{};
+};
+
+struct EngineEvent {
+  std::shared_ptr<Request> request;
+  uint64_t turn_id{};
+  uint32_t flags{};
+  int32_t token{};
+  GenerationFinishReason finish_reason{GenerationFinishReason::None};
+  EngineErrorCode error_code{EngineErrorCode::None};
+  TurnUsage usage{};
 };
 
 /**
@@ -71,6 +108,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
    * to constructing those collaborators inline.
    */
   Engine(std::shared_ptr<Model> model);
+  ~Engine();
 
   /**
    * @brief Dependency-injecting constructor.
@@ -88,35 +126,37 @@ struct Engine : std::enable_shared_from_this<Engine>,
    */
   static EngineDependencies CreateDependencies(std::shared_ptr<Model> model);
 
-  /**
-   * @brief Adds a request to the Engine for processing.
-   * @param request A shared pointer to the Request object to be added.
-   */
-  void AddRequest(std::shared_ptr<Request> request);
+  std::shared_ptr<Request> CreateRequest(const GeneratorParams& params,
+                                         size_t max_total_tokens);
+  std::shared_ptr<Request> CreateRequest(const GeneratorParams& params) {
+    return CreateRequest(
+        params, static_cast<size_t>(params.search.max_length));
+  }
 
   /**
-   * @brief Removes a previously added request from the Engine.
-   * @param request A shared pointer to the Request object to be removed.
-   */
-  void RemoveRequest(std::shared_ptr<Request> request);
-
-  /**
-   * @brief Advances the state of a subset of the Requests the Engine is currently
-   *        serving.
+   * @brief Drains retained events or advances one model transaction.
    *
-   * This function schedules the execution of the model for the subset of requests
-   * that are ready to be processed (as determined by the scheduling strategy).
-   * Once these requests are scheduled, the Engine offloads the execution to the
-   * model executor and updates the requests' states with the newly generated
-   * tokens.
+   * A non-empty output span first reclaims abandoned Requests. If events are retained, it copies
+   * only those events. Otherwise it executes at most one static step or dynamic transaction, copies
+   * the available event prefix, and retains overflow. An empty span validates the owner thread and
+   * Engine health and performs no other work.
+   *
+   * @param events Caller-owned storage for internal Engine events.
+   * @return The number of populated records in the output prefix.
    */
-  std::shared_ptr<Request> Step();
+  size_t Run(std::span<EngineEvent> events);
+
+  /** @brief Throws unless called from the Engine owner thread. */
+  void ValidateOwnerThread() const;
 
   /**
    * @brief Checks if there are any pending requests in the Engine.
+   *
+   * Reclaims Requests whose final public handle was released before checking retained events and
+   * schedulable work.
    * @return True if there are pending requests; otherwise, false.
    */
-  bool HasPendingRequests() const;
+  bool HasPendingRequests();
 
   /**
    * @brief Speculative draft tokens a request may attach to one decode step.
@@ -125,11 +165,30 @@ struct Engine : std::enable_shared_from_this<Engine>,
   size_t MaxDraftTokensPerStep() const;
 
  private:
+  uint64_t BeginTurn(const std::shared_ptr<Request>& request,
+                     std::span<const int32_t> tokens,
+                     std::optional<size_t> max_generated_tokens);
+  void CloseRequest(const std::shared_ptr<Request>& request);
+  void DetachRequestForTeardown(
+      const std::shared_ptr<Request>& request) noexcept;
+  bool CancelRequest(const std::shared_ptr<Request>& request, uint64_t turn_id);
   void ReclaimAbandonedRequests();
-  std::shared_ptr<Request> DrainReadyRequest();
-  std::shared_ptr<Request> StepDynamic();
-  std::shared_ptr<Request> StepStatic();
-  void ValidateRequestCanContinue(const std::shared_ptr<Request>& request) const;
+  bool StaticBatchNeedsRequest(
+      const std::shared_ptr<Request>& request) const;
+  size_t DrainPendingEvents(std::span<EngineEvent> events);
+  void RetainEvent(EngineEvent event);
+  void RunDynamic();
+  void RunStatic();
+  void AppendEventsFromStep(const std::shared_ptr<Request>& request,
+                            const RequestStepResult& result);
+  EngineEvent EventFromStepError(
+      const EngineStepError& error,
+      std::exception_ptr caught_error) noexcept;
+  std::shared_ptr<Request> FindTrackedRequest(const void* request_id) const;
+  EngineEvent FailUnserviceableRequest(const void* request_id);
+  void ValidateRequestCanContinue(
+      const std::shared_ptr<Request>& request,
+      bool allow_nonresident = false) const;
   [[noreturn]] void HandleContinuationRestoreFailure(
       const std::shared_ptr<Request>& request,
       std::exception_ptr append_error,
@@ -144,16 +203,20 @@ struct Engine : std::enable_shared_from_this<Engine>,
   std::shared_ptr<CacheManager> cache_manager_;    // The cache manager for handling cached data.
   std::unique_ptr<Scheduler> scheduler_;           // The scheduler responsible for managing execution order.
   std::unique_ptr<ModelExecutor> model_executor_;  // The executor responsible for running the model.
+  const std::thread::id owner_thread_{std::this_thread::get_id()};
   EngineHealth health_{EngineHealth::Healthy};
   std::exception_ptr fatal_error_;
   StepTransactionId next_transaction_id_{1};
   EngineTransactionMetrics transaction_metrics_;
   StepPlan step_plan_;
   std::vector<RequestStepResult> step_results_;
-  std::vector<std::weak_ptr<Request>> tracked_requests_;
-  std::vector<std::shared_ptr<Request>> ready_requests_;
-  std::vector<std::shared_ptr<Request>> staged_ready_requests_;
-  size_t ready_request_index_{};
+  std::vector<size_t> staged_event_order_;
+  std::vector<std::shared_ptr<Request>> tracked_requests_;
+  std::vector<EngineEvent> pending_events_;
+  std::vector<EngineEvent> staged_events_;
+  size_t pending_event_index_{};
+  const std::shared_ptr<std::atomic<bool>> abandonment_pending_{
+      std::make_shared<std::atomic<bool>>(false)};
 
   friend struct Request;
 };

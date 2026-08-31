@@ -3,7 +3,11 @@
 
 #pragma once
 
+#include <cstdint>
+#include <functional>
+#include <limits>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <vector>
 
@@ -914,19 +918,180 @@ struct OgaAdapters : OgaAbstract {
   static void operator delete(void* p) { OgaDestroyAdapters(reinterpret_cast<OgaAdapters*>(p)); }
 };
 
+struct OgaTurnUsage : OgaAbstract {
+  uint64_t PromptTokens() const {
+    uint64_t value{};
+    OgaCheckResult(OgaTurnUsageGetPromptTokens(this, &value));
+    return value;
+  }
+
+  uint64_t GeneratedTokens() const {
+    uint64_t value{};
+    OgaCheckResult(OgaTurnUsageGetGeneratedTokens(this, &value));
+    return value;
+  }
+
+  uint64_t CachedPromptTokens() const {
+    uint64_t value{};
+    OgaCheckResult(OgaTurnUsageGetCachedPromptTokens(this, &value));
+    return value;
+  }
+};
+
+struct OgaEngineEvent : OgaAbstract {
+  OgaEngineEventFlags Flags() const {
+    OgaEngineEventFlags value{};
+    OgaCheckResult(OgaEngineEventGetFlags(this, &value));
+    return value;
+  }
+
+  std::optional<std::reference_wrapper<const OgaRequest>> Request() const {
+    const OgaRequest* value{};
+    OgaCheckResult(OgaEngineEventGetRequest(this, &value));
+    if (!value) {
+      return std::nullopt;
+    }
+    return *value;
+  }
+
+  uint64_t TurnId() const {
+    uint64_t value{};
+    OgaCheckResult(OgaEngineEventGetTurnId(this, &value));
+    return value;
+  }
+
+  int32_t Token() const {
+    int32_t value{};
+    OgaCheckResult(OgaEngineEventGetToken(this, &value));
+    return value;
+  }
+
+  OgaFinishReason FinishReason() const {
+    OgaFinishReason value{};
+    OgaCheckResult(OgaEngineEventGetFinishReason(this, &value));
+    return value;
+  }
+
+  OgaErrorCode ErrorCode() const {
+    OgaErrorCode value{};
+    OgaCheckResult(OgaEngineEventGetErrorCode(this, &value));
+    return value;
+  }
+
+  const OgaTurnUsage& Usage() const {
+    const OgaTurnUsage* value{};
+    OgaCheckResult(OgaEngineEventGetUsage(this, &value));
+    return *value;
+  }
+};
+
+struct OgaEngineEventBuffer : OgaAbstract {
+  static std::unique_ptr<OgaEngineEventBuffer> Create(
+      OgaEngine& engine, size_t capacity) {
+    OgaEngineEventBuffer* buffer{};
+    OgaCheckResult(OgaCreateEngineEventBuffer(&engine, capacity, &buffer));
+    return std::unique_ptr<OgaEngineEventBuffer>(buffer);
+  }
+
+  size_t Count() const {
+    return OgaEngineEventBufferGetCount(this);
+  }
+
+  const OgaEngineEvent* Get(size_t index) const {
+    return OgaEngineEventBufferGet(this, index);
+  }
+
+  static void operator delete(void* p) {
+    OgaDestroyEngineEventBuffer(
+        reinterpret_cast<OgaEngineEventBuffer*>(p));
+  }
+};
+
+struct OgaRequestOptions : OgaAbstract {
+  static std::unique_ptr<OgaRequestOptions> Create() {
+    OgaRequestOptions* options{};
+    OgaCheckResult(OgaCreateRequestOptions(&options));
+    return std::unique_ptr<OgaRequestOptions>(options);
+  }
+
+  void SetMaxSessionTokens(uint64_t value) {
+    OgaCheckResult(OgaRequestOptionsSetMaxSessionTokens(this, value));
+  }
+
+  static void operator delete(void* p) {
+    OgaDestroyRequestOptions(reinterpret_cast<OgaRequestOptions*>(p));
+  }
+};
+
+struct OgaTurnOptions : OgaAbstract {
+  static std::unique_ptr<OgaTurnOptions> Create(OgaRequest& request) {
+    OgaTurnOptions* options{};
+    OgaCheckResult(OgaRequestCreateTurnOptions(&request, &options));
+    return std::unique_ptr<OgaTurnOptions>(options);
+  }
+
+  void SetMaxGeneratedTokens(uint64_t value) {
+    OgaCheckResult(OgaTurnOptionsSetMaxGeneratedTokens(this, value));
+  }
+  /** Reserved for future use; currently throws a not-implemented error. */
+  void SetTemperature(float value) {
+    OgaCheckResult(OgaTurnOptionsSetTemperature(this, value));
+  }
+  /** Reserved for future use; currently throws a not-implemented error. */
+  void SetTopP(float value) {
+    OgaCheckResult(OgaTurnOptionsSetTopP(this, value));
+  }
+  /** Reserved for future use; currently throws a not-implemented error. */
+  void SetTopK(int32_t value) {
+    OgaCheckResult(OgaTurnOptionsSetTopK(this, value));
+  }
+  /** Reserved for future use; currently throws a not-implemented error. */
+  void SetSeed(uint64_t value) {
+    OgaCheckResult(OgaTurnOptionsSetSeed(this, value));
+  }
+  /** Reserved for future use; currently throws a not-implemented error. */
+  void SetStopTokenIds(const OgaSequences& values) {
+    OgaCheckResult(OgaTurnOptionsSetStopTokenIds(this, &values));
+  }
+  /** Reserved for future use; currently throws a not-implemented error. */
+  void SetStopStrings(const OgaStringArray& values) {
+    OgaCheckResult(OgaTurnOptionsSetStopStrings(this, &values));
+  }
+  /** Reserved for future use; currently throws a not-implemented error. */
+  void SetGuidance(const char* type, const char* data) {
+    OgaCheckResult(OgaTurnOptionsSetGuidance(this, type, data));
+  }
+
+  static void operator delete(void* p) {
+    OgaDestroyTurnOptions(reinterpret_cast<OgaTurnOptions*>(p));
+  }
+};
+
 struct OgaRequest : OgaAbstract {
-  static std::unique_ptr<OgaRequest> Create(OgaGeneratorParams& params) {
-    OgaRequest* p;
-    OgaCheckResult(OgaCreateRequest(&params, &p));
-    return std::unique_ptr<OgaRequest>(p);
+  uint64_t BeginTurn(const int32_t* input_ids, size_t input_ids_count,
+                     const OgaTurnOptions* options = nullptr) {
+    uint64_t turn_id{};
+    OgaCheckResult(OgaRequestBeginTurn(
+        this, options, input_ids, static_cast<uint64_t>(input_ids_count),
+        &turn_id));
+    return turn_id;
   }
 
-  void AddTokens(const OgaSequences& tokens) {
-    OgaCheckResult(OgaRequestAddTokens(this, &tokens));
+#if OGA_USE_SPAN
+  uint64_t BeginTurn(std::span<const int32_t> input_ids,
+                     const OgaTurnOptions* options = nullptr) {
+    return BeginTurn(input_ids.data(), input_ids.size(), options);
+  }
+#endif
+
+  std::unique_ptr<OgaTurnOptions> CreateTurnOptions() {
+    return OgaTurnOptions::Create(*this);
   }
 
-  void Continue(const OgaSequences& tokens) {
-    OgaCheckResult(OgaRequestContinue(this, &tokens));
+  bool CancelTurn(uint64_t turn_id) {
+    bool cancelled{};
+    OgaCheckResult(OgaRequestCancelTurn(this, turn_id, &cancelled));
+    return cancelled;
   }
 
   /**
@@ -936,35 +1101,8 @@ struct OgaRequest : OgaAbstract {
     OgaCheckResult(OgaRequestSetDraftTokens(this, &tokens));
   }
 
-  /**
-   * \brief Returns whether the current generation turn is complete.
-   */
-  bool IsTurnComplete() const {
-    bool is_turn_complete{};
-    OgaCheckResult(OgaRequestIsTurnComplete(this, &is_turn_complete));
-    return is_turn_complete;
-  }
-
-  bool HasUnseenTokens() const {
-    bool has_unseen_tokens{};
-    OgaCheckResult(OgaRequestHasUnseenTokens(this, &has_unseen_tokens));
-    return has_unseen_tokens;
-  }
-
-  int32_t GetUnseenToken() {
-    int32_t token;
-    OgaCheckResult(OgaRequestGetUnseenToken(this, &token));
-    return token;
-  }
-
-  void SetOpaqueData(void* data) {
-    OgaCheckResult(OgaRequestSetOpaqueData(this, data));
-  }
-
-  void* GetOpaqueData() {
-    void* data;
-    OgaCheckResult(OgaRequestGetOpaqueData(this, &data));
-    return data;
+  void Close() {
+    OgaCheckResult(OgaRequestClose(this));
   }
 
   static void operator delete(void* p) { OgaDestroyRequest(reinterpret_cast<OgaRequest*>(p)); }
@@ -992,29 +1130,22 @@ struct OgaEngine : OgaAbstract {
     return count;
   }
 
-  /**
-   * \brief Submits a request to the engine.
-   *
-   * Ownership continues after the current turn completes. Remove() releases resources immediately;
-   * releasing the final external handle instead defers reclamation until the next Add() or Step().
-   */
-  void Add(OgaRequest& request) {
-    OgaCheckResult(OgaEngineAddRequest(this, &request));
+  std::unique_ptr<OgaRequest> CreateRequest(
+      const OgaGeneratorParams& params,
+      const OgaRequestOptions* options = nullptr) {
+    OgaRequest* request{};
+    OgaCheckResult(OgaEngineCreateRequest(this, &params, options, &request));
+    return std::unique_ptr<OgaRequest>(request);
   }
 
-  /**
-   * \brief Removes a request and releases engine ownership.
-   *
-   * Repeated calls after the request has already been removed are successful no-ops.
-   */
-  void Remove(OgaRequest& request) {
-    OgaCheckResult(OgaEngineRemoveRequest(this, &request));
+  std::unique_ptr<OgaEngineEventBuffer> CreateEventBuffer(
+      size_t capacity) {
+    return OgaEngineEventBuffer::Create(*this, capacity);
   }
 
-  std::unique_ptr<OgaRequest> Step() {
-    OgaRequest* request;
-    OgaCheckResult(OgaEngineStep(this, &request));
-    return request ? std::unique_ptr<OgaRequest>(request) : nullptr;
+  size_t Run(OgaEngineEventBuffer& buffer) {
+    OgaCheckResult(OgaEngineRun(this, &buffer));
+    return buffer.Count();
   }
 
   static void operator delete(void* p) { OgaDestroyEngine(reinterpret_cast<OgaEngine*>(p)); }

@@ -4,9 +4,24 @@
 import argparse
 import json
 
+import numpy as np
 import onnxruntime_genai as og
 
 MAX_LENGTH = 1024
+
+
+def require_request_event(event: og.EngineEvent) -> og.Request:
+    if event.request is not None:
+        return event.request
+    if event.flags & og.EngineEventFlags.FAILED:
+        outcome = "failed"
+    elif event.flags & og.EngineEventFlags.CAPACITY_BLOCKED:
+        outcome = "was capacity-blocked"
+    elif event.flags & og.EngineEventFlags.RETRYABLE:
+        outcome = "reported a retryable failure"
+    else:
+        outcome = "returned an invalid request-less event"
+    raise RuntimeError(f"Engine {outcome}; error_code={event.error_code}")
 
 
 def run(args: argparse.Namespace):
@@ -30,11 +45,9 @@ def run(args: argparse.Namespace):
         tokenizer.apply_chat_template(messages=system_message, add_generation_prompt=False),
     )
     session_token_count = len(system_tokens)
-    request = og.Request(params)
-    request.add_tokens(system_tokens)
-
     streaming_tokenizer = tokenizer.create_stream()
-    request_added = False
+    request = engine.create_request(params)
+    first_turn = True
 
     try:
         while prompt := input("🫵  : "):
@@ -51,29 +64,36 @@ def run(args: argparse.Namespace):
                 break
 
             session_token_count += len(turn_tokens)
-            if request_added:
-                request.continue_with(turn_tokens)
+            if first_turn:
+                input_tokens = np.concatenate(
+                    (
+                        np.asarray(system_tokens, dtype=np.int32),
+                        np.asarray(turn_tokens, dtype=np.int32),
+                    )
+                )
+                first_turn = False
             else:
-                request.add_tokens(turn_tokens)
-                engine.add_request(request)
-                request_added = True
+                input_tokens = np.asarray(turn_tokens, dtype=np.int32)
+            request.begin_turn(input_tokens)
 
             print("🤖 :", end="", flush=True)
 
-            while ready_request := engine.step():
-                while ready_request.has_unseen_tokens():
-                    token = int(ready_request.get_unseen_token())
-                    session_token_count += 1
-                    print(
-                        streaming_tokenizer.decode(token),
-                        end="",
-                        flush=True,
-                    )
-
+            event_buffer = engine.create_event_buffer(8)
+            while engine.has_pending_requests():
+                for event in engine.run(event_buffer):
+                    if require_request_event(event) is not request:
+                        raise RuntimeError("Engine returned an unknown request")
+                    if event.flags & og.EngineEventFlags.TOKEN:
+                        token = int(event.token)
+                        session_token_count += 1
+                        print(
+                            streaming_tokenizer.decode(token),
+                            end="",
+                            flush=True,
+                        )
             print()
     finally:
-        if request_added:
-            engine.remove_request(request)
+        request.close()
 
 
 if __name__ == "__main__":

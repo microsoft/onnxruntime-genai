@@ -482,7 +482,7 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
   const auto select = [&](size_t request_index,
                           const CacheGrowth& growth) {
     // Compact selected entries in place. Requests skipped for temporary capacity pressure remain
-    // pending with their committed block tables untouched and can be reconsidered next Step().
+    // pending with their committed block tables untouched and can be reconsidered next Run().
     planned_blocks += growth.new_blocks;
     max_blocks_per_request =
         std::max(max_blocks_per_request, growth.proposed_blocks);

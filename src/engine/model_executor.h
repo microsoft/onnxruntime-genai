@@ -37,7 +37,7 @@ class ModelExecutionError : public std::runtime_error {
  * the real decoder-backed executor via Create; supplying an alternative implementation (for example
  * one that returns scripted outcomes or injects an execution failure) lets the Engine's execution
  * path be exercised without running a real model. Only Decode is part of the boundary because
- * Engine::Step drives decoding; encoding stays on the concrete executor until it becomes part of the
+ * Engine::Run drives decoding; encoding stays on the concrete executor until it becomes part of the
  * Engine execution path.
  */
 struct ModelExecutor {

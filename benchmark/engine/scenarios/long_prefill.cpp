@@ -4,6 +4,7 @@
 #include "scenarios/long_prefill.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <iostream>
 #include <memory>
@@ -77,17 +78,32 @@ ScenarioExecutionOutput LongPrefillScenario::Execute(const ScenarioConfig& confi
     params->SetSearchOption("max_length", static_cast<double>(prompt_token_count + static_cast<size_t>(config.generation_tokens)));
     params->SetSearchOption("random_seed", kRandomSeed);
 
-    auto request = OgaRequest::Create(*params);
-    request->AddTokens(*prompt_tokens);
-    engineResources.engine->Add(*request);
+    auto request = engineResources.engine->CreateRequest(*params);
+    request->BeginTurn(
+        prompt_tokens->SequenceData(0), prompt_token_count);
 
     const auto start = std::chrono::steady_clock::now();
-    auto ready_request = engineResources.engine->Step();
+    auto event_buffer = engineResources.engine->CreateEventBuffer(1);
+    size_t event_count = 0;
+    size_t consecutive_retries = 0;
+    bool has_request_event = false;
+    while (!has_request_event &&
+           engineResources.engine->HasPendingRequests()) {
+      event_count = engineResources.engine->Run(
+          *event_buffer);
+      if (event_count != 0) {
+        has_request_event = RequireRequestEvent(
+            *event_buffer->Get(0), Name(), consecutive_retries);
+      }
+    }
     const auto first_token = std::chrono::steady_clock::now();
-    if (!ready_request || !ready_request->HasUnseenTokens()) {
+    if (!has_request_event) {
       throw std::runtime_error("long_prefill did not produce a first token");
     }
-    ready_request->GetUnseenToken();
+    if ((event_buffer->Get(0)->Flags() & OgaEngineEventFlag_Token) == 0) {
+      throw std::runtime_error("long_prefill did not produce a first token");
+    }
+    request->Close();
 
     const double prefill_ms = std::chrono::duration<double, std::milli>(first_token - start).count();
     const double prompt_processing_tps = static_cast<double>(prompt_token_count) / std::max(0.001, prefill_ms / 1000.0);

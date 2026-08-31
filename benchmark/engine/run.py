@@ -3,15 +3,15 @@
 """Run each benchmark scenario in a separate process."""
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import shutil
 import subprocess
 import tempfile
 import time
-from queue import Queue
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from queue import Queue
 
 
 def main() -> int:
@@ -19,11 +19,12 @@ def main() -> int:
     parser.add_argument("--executable", type=Path, required=True)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--cuda_visible_devices", required=True,
-                        help="Comma-separated GPU IDs; each scenario waits for and uses one available GPU.")
     parser.add_argument(
-        "--verbose", dest="verbose", action="store_true", help="Print each benchmark process's output."
+        "--cuda_visible_devices",
+        required=True,
+        help="Comma-separated GPU IDs; each scenario waits for and uses one available GPU.",
     )
+    parser.add_argument("--verbose", dest="verbose", action="store_true", help="Print each benchmark process's output.")
     args = parser.parse_args()
     benchmark_start = time.perf_counter()
 
@@ -43,8 +44,8 @@ def main() -> int:
 
     def run_scenario(item):
         index, scenario = item
-        with tempfile.TemporaryDirectory() as scenario_dir:
-            scenario_dir = Path(scenario_dir)
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            scenario_dir = Path(temporary_directory)
             temp_config = scenario_dir / "scenario.json"
             scenario_out = scenario_dir / "out"
             scenario_out.mkdir()
@@ -59,6 +60,7 @@ def main() -> int:
                 print(f"Starting {label} on GPU {gpu_id}", flush=True)
                 completed = subprocess.run(
                     [str(args.executable), "--config", str(temp_config), "--out", str(scenario_out)],
+                    check=False,
                     env=environment,
                     capture_output=not args.verbose,
                     text=True,

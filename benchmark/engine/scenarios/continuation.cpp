@@ -12,6 +12,7 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -26,12 +27,6 @@ constexpr int kContinuationTurns = 3;
 
 bool IsAllowedConcurrency(int concurrency) {
   return concurrency == 4 || concurrency == 8;
-}
-
-std::unique_ptr<OgaSequences> MakeSequences(const std::vector<int32_t>& tokens) {
-  auto sequences = OgaSequences::Create();
-  sequences->Append(tokens.data(), tokens.size());
-  return sequences;
 }
 
 }  // namespace
@@ -81,11 +76,12 @@ ScenarioExecutionOutput ContinuationScenario::Execute(const ScenarioConfig& conf
 
     std::vector<std::unique_ptr<OgaGeneratorParams>> params;
     std::vector<std::unique_ptr<OgaRequest>> requests;
-    std::vector<std::unique_ptr<OgaSequences>> initial_prompts;
+    std::vector<std::unique_ptr<OgaTurnOptions>> turn_options;
     std::vector<std::vector<int32_t>> request_tokens(static_cast<size_t>(config.concurrency));
+    std::unordered_map<const OgaRequest*, size_t> request_indices;
     params.reserve(static_cast<size_t>(config.concurrency));
     requests.reserve(static_cast<size_t>(config.concurrency));
-    initial_prompts.reserve(static_cast<size_t>(config.concurrency));
+    turn_options.reserve(static_cast<size_t>(config.concurrency));
 
     const size_t max_session_tokens =
         base_prompt_count + static_cast<size_t>((2 * kContinuationTurns) - 1) * config.generation_tokens;
@@ -95,17 +91,15 @@ ScenarioExecutionOutput ContinuationScenario::Execute(const ScenarioConfig& conf
       params.emplace_back(OgaGeneratorParams::Create(*engineResources.model));
       params.back()->SetSearchOption("max_length", static_cast<double>(max_session_tokens));
       params.back()->SetSearchOption("random_seed", kRandomSeed + i);
-      initial_prompts.push_back(MakeSequences(request_tokens[request_index]));
-      requests.emplace_back(OgaRequest::Create(*params.back()));
-      requests.back()->AddTokens(*initial_prompts.back());
-      requests.back()->SetOpaqueData(&request_tokens[request_index]);
-      engineResources.engine->Add(*requests.back());
-      // Adding the request while max_length is max_session_tokens reserves enough device and host
-      // sequence storage for the whole conversation. Once that storage exists, lower max_length
-      // so the first response generates only generation_tokens instead of consuming the budget
-      // for all later turns. Each continuation raises this active limit again below.
-      params.back()->SetSearchOption(
-          "max_length", static_cast<double>(base_prompt_count + config.generation_tokens));
+      requests.emplace_back(
+          engineResources.engine->CreateRequest(*params.back()));
+      request_indices.emplace(requests.back().get(), request_index);
+      turn_options.push_back(requests.back()->CreateTurnOptions());
+      turn_options.back()->SetMaxGeneratedTokens(
+          static_cast<uint64_t>(config.generation_tokens));
+      requests.back()->BeginTurn(
+          base_prompt->SequenceData(0), base_prompt_count,
+          turn_options.back().get());
     }
 
     const auto run_start = std::chrono::steady_clock::now();
@@ -119,35 +113,56 @@ ScenarioExecutionOutput ContinuationScenario::Execute(const ScenarioConfig& conf
 
       const auto turn_start = std::chrono::steady_clock::now();
 
-      // Drain the current turn for the resident requests before calling Continue().
-      while (auto ready_request = engineResources.engine->Step()) {
+      // Drain the current turn for the resident requests before beginning their next Turns.
+      auto event_buffer = engineResources.engine->CreateEventBuffer(
+          static_cast<size_t>(config.concurrency));
+      size_t consecutive_retries = 0;
+      while (engineResources.engine->HasPendingRequests()) {
+        const size_t event_count = engineResources.engine->Run(
+            *event_buffer);
         const auto now = std::chrono::steady_clock::now();
-        auto* tokens = reinterpret_cast<std::vector<int32_t>*>(ready_request->GetOpaqueData());
-        if (tokens == nullptr) {
-          throw std::runtime_error(Name() + ": null opaque data from request");
-        }
-        const auto base_addr = reinterpret_cast<std::uintptr_t>(request_tokens.data());
-        const auto ptr_addr = reinterpret_cast<std::uintptr_t>(tokens);
-        const auto end_addr = reinterpret_cast<std::uintptr_t>(request_tokens.data() + request_tokens.size());
-        if (ptr_addr < base_addr || ptr_addr >= end_addr) {
-          throw std::runtime_error(Name() + ": opaque data pointer not in request_tokens");
-        }
-        const size_t request_index = (ptr_addr - base_addr) / sizeof(std::vector<int32_t>);
-        while (ready_request->HasUnseenTokens()) {
-          // First unseen token establishes TTFT for this turn; later unseen tokens contribute
-          // inter-token latency samples for the same logical session.
-          const int32_t token = ready_request->GetUnseenToken();
-          tokens->push_back(token);
-          generated_segments[request_index].push_back(token);
-          ++generated_tokens;
-          const double elapsed_ms = std::chrono::duration<double, std::milli>(now - turn_start).count();
-          if (first_token_ms[request_index] < 0.0) {
-            first_token_ms[request_index] = elapsed_ms;
-          } else {
-            request_itl_ms[request_index].push_back(
-                std::chrono::duration<double, std::milli>(now - last_token_time[request_index]).count());
+        for (size_t event_index = 0; event_index < event_count; ++event_index) {
+          const auto& event = *event_buffer->Get(event_index);
+          if (!RequireRequestEvent(
+                  event, Name(), consecutive_retries)) {
+            continue;
           }
-          last_token_time[request_index] = now;
+
+          const auto request = event.Request();
+          const auto request_it = request_indices.find(
+              request ? &request->get() : nullptr);
+          if (request_it == request_indices.end()) {
+            throw std::runtime_error(
+                Name() + ": event request has no continuation state");
+          }
+          const size_t request_index = request_it->second;
+
+          if ((event.Flags() & OgaEngineEventFlag_Failed) != 0) {
+            throw std::runtime_error(
+                Name() + ": continuation request failed with error code " +
+                std::to_string(static_cast<int>(event.ErrorCode())));
+          }
+
+          if ((event.Flags() & OgaEngineEventFlag_Token) != 0) {
+            // The first token establishes TTFT for this turn; later tokens contribute
+            // inter-token latency samples for the same logical session.
+            request_tokens[request_index].push_back(event.Token());
+            generated_segments[request_index].push_back(event.Token());
+            ++generated_tokens;
+            const double elapsed_ms =
+                std::chrono::duration<double, std::milli>(
+                    now - turn_start)
+                    .count();
+            if (first_token_ms[request_index] < 0.0) {
+              first_token_ms[request_index] = elapsed_ms;
+            } else {
+              request_itl_ms[request_index].push_back(
+                  std::chrono::duration<double, std::milli>(
+                      now - last_token_time[request_index])
+                      .count());
+            }
+            last_token_time[request_index] = now;
+          }
         }
       }
 
@@ -170,32 +185,23 @@ ScenarioExecutionOutput ContinuationScenario::Execute(const ScenarioConfig& conf
       }
 
       if (turn + 1 < kContinuationTurns) {
-        std::vector<std::unique_ptr<OgaSequences>> continuation_prompts;
-        continuation_prompts.reserve(static_cast<size_t>(config.concurrency));
         for (int i = 0; i < config.concurrency; ++i) {
           const size_t request_index = static_cast<size_t>(i);
           if (generated_segments[request_index].empty()) {
             throw std::runtime_error(Name() + ": no generated tokens available for continuation");
           }
-          continuation_prompts.push_back(MakeSequences(generated_segments[request_index]));
-          // max_length is the limit for the complete sequence, not just the next response. Each
-          // time we continue, the sequence grows by the generated tokens from the previous turn.
-          // Increase the limit to include those continuation tokens and leave room for another
-          // generation_tokens response. The request keeps using the full buffer reserved above.
-          const size_t next_turn_max_length =
-              request_tokens[request_index].size() + generated_segments[request_index].size() +
-              static_cast<size_t>(config.generation_tokens);
-          if (next_turn_max_length > max_session_tokens) {
-            throw std::runtime_error(Name() + ": continuation exceeded preallocated session capacity");
-          }
-          params[request_index]->SetSearchOption(
-              "max_length", static_cast<double>(next_turn_max_length));
-          requests[request_index]->Continue(*continuation_prompts.back());
+          requests[request_index]->BeginTurn(
+              generated_segments[request_index].data(),
+              generated_segments[request_index].size(),
+              turn_options[request_index].get());
           request_tokens[request_index].insert(
               request_tokens[request_index].end(), generated_segments[request_index].begin(),
               generated_segments[request_index].end());
         }
       }
+    }
+    for (const auto& request : requests) {
+      request->Close();
     }
 
     const auto run_end = std::chrono::steady_clock::now();
