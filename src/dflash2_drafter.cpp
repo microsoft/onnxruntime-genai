@@ -102,10 +102,6 @@ void RequireTensor(const ModelStateMetadata& metadata, const std::string& name,
   }
 }
 
-bool DimensionMatches(int64_t actual, int expected) {
-  return actual < 0 || actual == expected;
-}
-
 }  // namespace
 
 size_t Dflash2DraftWidth(size_t capability_limit, size_t configured_limit,
@@ -187,11 +183,12 @@ ONNXTensorElementDataType ValidateDflash2ModelCompatibility(
 
   const auto target_aux_shape = target_metadata.GetOutputShape(target_aux_output);
   const auto drafter_aux_shape = drafter_metadata.GetInputShape(drafter_aux_input);
-  if (target_aux_shape.size() != 2 || target_aux_shape[1] <= 0 ||
-      drafter_aux_shape.size() != 2 || drafter_aux_shape[1] <= 0 ||
+  if (target_aux_shape.size() != 2 || target_aux_shape[0] >= 0 || target_aux_shape[1] <= 0 ||
+      drafter_aux_shape.size() != 2 || drafter_aux_shape[0] >= 0 || drafter_aux_shape[1] <= 0 ||
       target_aux_shape[1] != drafter_aux_shape[1]) {
     throw std::runtime_error(
-        "DFlash 2 requires matching 2-D auxiliary hidden-state tensors with a static width.");
+        "DFlash 2 requires matching 2-D auxiliary hidden-state tensors with dynamic rows and a "
+        "static width.");
   }
   if (target_metadata.GetOutputDataType(target_aux_output) !=
       drafter_metadata.GetInputDataType(drafter_aux_input)) {
@@ -200,24 +197,43 @@ ONNXTensorElementDataType ValidateDflash2ModelCompatibility(
   }
 
   const auto& inputs = dflash2.inputs;
+  std::unordered_set<std::string> input_names;
   for (const auto* name : {&inputs.q_row_map, &inputs.qkv_row_map,
                            &inputs.block_row_index, &inputs.cumulative_sequence_lengths,
                            &inputs.past_sequence_lengths}) {
     RequireTensor(drafter_metadata, *name, true, Ort::TypeToTensorType<int32_t>, 1);
+    if (drafter_metadata.GetInputShape(*name)[0] >= 0 || !input_names.insert(*name).second) {
+      throw std::runtime_error(
+          "model.dflash2 packed vector inputs must have dynamic lengths and unique names.");
+    }
   }
   RequireTensor(drafter_metadata, inputs.input_ids, true,
                 Ort::TypeToTensorType<int64_t>, 1);
+  if (drafter_metadata.GetInputShape(inputs.input_ids)[0] >= 0 ||
+      !input_names.insert(inputs.input_ids).second) {
+    throw std::runtime_error(
+        "model.dflash2 input_ids must have a dynamic length and a unique name.");
+  }
   RequireTensor(drafter_metadata, inputs.block_table, true,
                 Ort::TypeToTensorType<int32_t>, 2);
+  const auto block_table_shape = drafter_metadata.GetInputShape(inputs.block_table);
+  if (block_table_shape[0] >= 0 || block_table_shape[1] >= 0 ||
+      !input_names.insert(inputs.block_table).second) {
+    throw std::runtime_error(
+        "model.dflash2 block_table must have two dynamic dimensions and a unique name.");
+  }
   RequireTensor(drafter_metadata, inputs.attention_metadata, true,
                 Ort::TypeToTensorType<int32_t>, 1);
   const auto metadata_shape = drafter_metadata.GetInputShape(inputs.attention_metadata);
-  if (!DimensionMatches(metadata_shape[0], 3)) {
-    throw std::runtime_error("model.dflash2 attention_metadata must contain three values.");
+  if (metadata_shape[0] != 3 || !input_names.insert(inputs.attention_metadata).second) {
+    throw std::runtime_error(
+        "model.dflash2 attention_metadata must contain three values and have a unique name.");
+  }
+  if (!input_names.insert(inputs.aux_hidden_states).second) {
+    throw std::runtime_error("model.dflash2 input names must be unique.");
   }
 
   ONNXTensorElementDataType cache_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
-  std::unordered_set<std::string> cache_input_names;
   std::unordered_set<std::string> cache_output_names;
   for (int layer = 0; layer < dflash2.num_hidden_layers; ++layer) {
     const std::array<std::pair<std::string, std::string>, 2> cache_names{
@@ -226,7 +242,7 @@ ONNXTensorElementDataType ValidateDflash2ModelCompatibility(
         std::pair{ComposeKeyValueName(dflash2.inputs.past_value_names, layer),
                   ComposeKeyValueName(dflash2.outputs.present_value_names, layer)}};
     for (const auto& [input_name, output_name] : cache_names) {
-      if (!cache_input_names.insert(input_name).second ||
+      if (!input_names.insert(input_name).second ||
           !cache_output_names.insert(output_name).second) {
         throw std::runtime_error("DFlash 2 cache input and output names must be unique.");
       }
@@ -261,8 +277,11 @@ ONNXTensorElementDataType ValidateDflash2ModelCompatibility(
 
   const auto& candidate_ids = dflash2.outputs.candidate_ids;
   const auto& scores = dflash2.outputs.scores;
-  if (!drafter_metadata.HasOutput(candidate_ids) || !drafter_metadata.HasOutput(scores)) {
-    throw std::runtime_error("DFlash 2 requires configured candidate and score outputs.");
+  if (!cache_output_names.insert(candidate_ids).second ||
+      !cache_output_names.insert(scores).second ||
+      !drafter_metadata.HasOutput(candidate_ids) || !drafter_metadata.HasOutput(scores)) {
+    throw std::runtime_error(
+        "DFlash 2 requires unique configured candidate, score, and cache outputs.");
   }
   const auto candidate_shape = drafter_metadata.GetOutputShape(candidate_ids);
   const auto score_shape = drafter_metadata.GetOutputShape(scores);
