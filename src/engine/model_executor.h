@@ -52,6 +52,8 @@ struct ModelExecutor {
   virtual void Decode(ScheduledRequests& scheduled_requests,
                       ExecutionContext& context) = 0;
 
+  virtual bool SupportsDraftVerification() const { return false; }
+
   virtual ~ModelExecutor() = default;
 };
 
@@ -70,6 +72,8 @@ struct DecoderModelExecutor : ModelExecutor {
 
   void Decode(ScheduledRequests& scheduled_requests,
               ExecutionContext& context) override;
+
+  bool SupportsDraftVerification() const override;
 
  private:
   std::shared_ptr<Model> model_;

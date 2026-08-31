@@ -300,6 +300,41 @@ TEST_F(CudaSearchCheckpointTest, ExternalSamplingRollbackRestoresSearchTailState
   EXPECT_EQ(external_search->GetSequenceLengths().CopyDeviceToCpu()[0], 5);
 }
 
+TEST_F(CudaSearchCheckpointTest, CommitTokenStopsAtFirstEosWithoutAppendingIt) {
+  auto single_params = CreateGeneratorParams(*model);
+  single_params->search.batch_size = 1;
+  single_params->search.max_length = 8;
+  auto single_search = CreateSearch(*single_params);
+  auto input = single_params->p_device->Allocate<int32_t>(1);
+  input.CpuSpan()[0] = 1;
+  input.CopyCpuToDevice();
+  single_search->AppendTokens(input);
+
+  single_search->CommitToken(3);
+
+  EXPECT_TRUE(single_search->IsDone());
+  EXPECT_EQ(single_search->GetSequenceLength(), 1);
+}
+
+TEST_F(CudaSearchCheckpointTest, CommitTokenStopsAtMiddleEosWithoutAppendingIt) {
+  auto single_params = CreateGeneratorParams(*model);
+  single_params->search.batch_size = 1;
+  single_params->search.max_length = 8;
+  auto single_search = CreateSearch(*single_params);
+  auto input = single_params->p_device->Allocate<int32_t>(1);
+  input.CpuSpan()[0] = 1;
+  input.CopyCpuToDevice();
+  single_search->AppendTokens(input);
+
+  single_search->CommitToken(2);
+  ASSERT_FALSE(single_search->IsDone());
+  ASSERT_EQ(single_search->GetSequenceLength(), 2);
+  single_search->CommitToken(3);
+
+  EXPECT_TRUE(single_search->IsDone());
+  EXPECT_EQ(single_search->GetSequenceLength(), 2);
+}
+
 TEST_F(CudaSearchCheckpointTest, RollbackRestoresDoneEosAndLengthState) {
   auto input = Tokens({1, 2});
   search->AppendTokens(input);

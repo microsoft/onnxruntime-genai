@@ -817,6 +817,18 @@ void Engine::RunDynamic() {
       // counters, host token mirrors, and completion status still remain unchanged in this phase.
       scheduled_requests.GenerateNextTokensForTransaction(
           step_plan_, step_results_);
+      // A verify step planned cache slots for every draft. Narrow the reservation to the accepted
+      // prefix before anything is staged, so the paged and fixed states commit at one boundary.
+      for (size_t i = 0; i < step_plan_.requests.size(); ++i) {
+        const auto& entry = step_plan_.requests[i];
+        if (entry.draft_token_count == 0) {
+          continue;
+        }
+        reservation->CommitPrefix(
+            i, entry.request_id, entry.unprocessed_token_count,
+            entry.unprocessed_token_count - entry.draft_token_count +
+                entry.request->AcceptedDraftTokenCount());
+      }
       for (size_t i = 0; i < step_plan_.requests.size(); ++i) {
         if (step_results_[i].token_appended || step_results_[i].done) {
           staged_event_order_.push_back(i);
@@ -1092,6 +1104,13 @@ bool Engine::HasPendingRequests() {
   ReclaimAbandonedRequests();
   return pending_event_index_ < pending_events_.size() ||
          scheduler_->HasPendingRequests();
+}
+
+size_t Engine::MaxDraftTokensPerStep() const {
+  return cache_manager_->SupportsDynamicBatching() &&
+                 model_executor_->SupportsDraftVerification()
+             ? cache_manager_->MaxDraftTokensPerStep()
+             : 0;
 }
 
 }  // namespace Generators

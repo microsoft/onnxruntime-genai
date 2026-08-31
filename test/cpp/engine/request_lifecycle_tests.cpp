@@ -821,6 +821,22 @@ TEST_F(RequestLifecycleTest, RequestRejectsIncompleteGuidanceConfiguration) {
 }
 
 #if USE_GUIDANCE
+TEST_F(RequestLifecycleTest, RequestRejectsDraftTokensWithGuidance) {
+  auto guidance_model = CreateModel(
+      GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto guidance_engine = MakeDoublesEngine(guidance_model, /*capacity=*/8,
+                                           EosToken(*guidance_model));
+  guidance_engine.cache->SetMaxDraftTokensPerStep(3);
+
+  auto params = MakeGreedyParams(*guidance_model);
+  params->SetGuidance("regex", "!!", false);
+  auto request = CreateEngineRequest(guidance_engine.engine, *params);
+  request->BeginTurn(Prompt());
+
+  EXPECT_THROW(request->SetDraftTokens(std::array<int32_t, 1>{11}),
+               std::runtime_error);
+}
+
 TEST_F(RequestLifecycleTest, GuidanceMasksTokensAndRollsBackWithSearchState) {
   auto guidance_model = CreateModel(
       GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");

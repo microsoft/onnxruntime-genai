@@ -11,12 +11,13 @@ namespace Generators {
 struct DecoderIO;
 
 struct BatchedSamplingPlan {
-  void Reserve(size_t capacity) {
+  void Reserve(size_t capacity, size_t verification_capacity) {
     requests.reserve(capacity);
     result_indices.reserve(capacity);
     logits.reserve(capacity);
     params.reserve(capacity);
     states.reserve(capacity);
+    verification_tokens.reserve(verification_capacity);
   }
 
   void Clear() {
@@ -32,6 +33,7 @@ struct BatchedSamplingPlan {
   std::vector<DeviceSpan<float>> logits;
   std::vector<BatchedSamplingParams> params;
   std::vector<BatchedSamplerState*> states;
+  std::vector<int32_t> verification_tokens;
 };
 
 struct ScheduledRequests {
@@ -86,8 +88,15 @@ struct ScheduledRequests {
   bool PrepareBatchedSamplingPlan(bool require_transaction_support);
   bool TryGenerateNextTokensBatched(std::vector<DeviceSpan<float>>& logits,
                                     std::vector<RequestStepResult>* results = nullptr);
+  // Verifies each drafted request's proposal against the target model's own rows, rewinds the
+  // rejected tail, and returns the one row per request that the sampler must select from.
+  std::vector<DeviceSpan<float>> SelectSampledRows(
+      std::vector<DeviceSpan<float>>& verify_rows);
 
   std::vector<std::shared_ptr<Request>> requests_;
+  // Drafts the transaction stages onto each request's sequence, in scheduled row order. Empty
+  // outside a dynamic step plan.
+  std::vector<size_t> draft_token_counts_;
   std::shared_ptr<Model> model_;
   std::unique_ptr<DecoderIO> decoder_state_;
   std::unique_ptr<ExecutionContext> execution_context_;
