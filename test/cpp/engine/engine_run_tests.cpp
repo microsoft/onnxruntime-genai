@@ -1779,7 +1779,7 @@ TEST_F(EngineRunTest, DraftsRequireRollbackAndPerTokenLogitsCapabilities) {
       std::runtime_error);
 }
 
-TEST_F(EngineRunTest, PrefillConsumesDraftProposalWithoutVerifyingIt) {
+TEST_F(EngineRunTest, DraftProposalRequiresDecodeReadyRequest) {
   const int32_t eos = EosToken(*model_);
   const int32_t filler = eos == 5 ? 6 : 5;
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, filler);
@@ -1789,7 +1789,9 @@ TEST_F(EngineRunTest, PrefillConsumesDraftProposalWithoutVerifyingIt) {
   params->search.chunk_size = 2;
   auto request =
       CreateRequestWithPrompt(engine.engine, *params, Prompt(10));
-  request->SetDraftTokens(std::vector<int32_t>{11, 12});
+    EXPECT_THROW(
+      request->SetDraftTokens(std::vector<int32_t>{11, 12}),
+      std::runtime_error);
 
   std::array<EngineEvent, 1> storage;
   EXPECT_EQ(engine.engine->Run(storage), 0u);
@@ -1802,6 +1804,30 @@ TEST_F(EngineRunTest, PrefillConsumesDraftProposalWithoutVerifyingIt) {
   EXPECT_EQ(storage[0].request, request);
   ASSERT_EQ(engine.executor->decoded_token_counts.size(), 2u);
   EXPECT_EQ(engine.executor->decoded_token_counts[1], 1u);
+}
+
+TEST_F(EngineRunTest, InvalidDraftReplacementPreservesPendingProposal) {
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, filler);
+  engine.cache->SetMaxDraftTokensPerStep(3);
+
+  auto request =
+      CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
+  request->SetDraftTokens(std::vector<int32_t>{11, 12});
+
+  EXPECT_THROW(
+      request->SetDraftTokens(std::vector<int32_t>{11, 12, 13, 14}),
+      std::runtime_error);
+  EXPECT_EQ(request->PendingDraftTokenCount(), 2u);
+
+  engine.executor->SetVerifyRowTokens({11, 12, 25});
+  std::array<EngineEvent, 3> events;
+  ASSERT_EQ(engine.engine->Run(events), 3u);
+  EXPECT_EQ(events[0].token, 11);
+  EXPECT_EQ(events[1].token, 12);
+  EXPECT_EQ(events[2].token, 25);
 }
 
 // ---------------------------------------------------------------------------------------------

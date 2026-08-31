@@ -1102,6 +1102,7 @@ bool Engine::HasPendingRequests() {
 }
 
 size_t Engine::MaxDraftTokensPerStep() const {
+  ValidateOwnerThread();
   return cache_manager_->SupportsDynamicBatching() &&
                  model_executor_->SupportsDraftVerification()
              ? cache_manager_->MaxDraftTokensPerStep()

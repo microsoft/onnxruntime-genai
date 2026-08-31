@@ -22,6 +22,7 @@ from _test_utils import register_plugin_providers
 register_plugin_providers(logging.getLogger(__name__))
 
 _MODEL_DIR = Path(__file__).resolve().parent.parent / "models" / "engine" / "synthetic-paged"
+_DRAFT_MODEL_DIR = Path(__file__).resolve().parent.parent / "models" / "engine" / "synthetic-paged-per-token"
 
 _VOCAB_SIZE = 64
 _BLOCK_SIZE = 4
@@ -73,6 +74,15 @@ def device(request):
 @pytest.fixture
 def model(device):
     config = og.Config(str(_MODEL_DIR))
+    config.clear_providers()
+    if device != "cpu":
+        config.append_provider(device)
+    return og.Model(config)
+
+
+@pytest.fixture
+def draft_model(device):
+    config = og.Config(str(_DRAFT_MODEL_DIR))
     config.clear_providers()
     if device != "cpu":
         config.append_provider(device)
@@ -305,6 +315,35 @@ def test_deterministic_tokens(model):
     assert tokens == [21, 30, 40, 51, 63, 12, 26, 41, 57, 10, 28, 47]
     assert tokens == predicted_tokens(_PROMPT_A, max_new)
     assert len(tokens) == max_new
+
+
+def test_draft_proposal_public_api(draft_model):
+    prompt = np.asarray(_PROMPT_A, dtype=np.int32)
+    expected = predicted_tokens(_PROMPT_A, 4)
+    engine = og.Engine(draft_model)
+    params = og.GeneratorParams(draft_model)
+    params.set_search_options(
+        do_sample=False,
+        max_length=len(prompt) + len(expected),
+    )
+    request = engine.create_request(params)
+    turn_options = og.TurnOptions(request)
+    turn_options.set_max_generated_tokens(len(expected))
+    request.begin_turn(prompt, turn_options)
+    event_buffer = engine.create_event_buffer(3)
+
+    first_events = engine.run(event_buffer)
+    assert [event.token for event in first_events] == expected[:1]
+    assert engine.max_draft_tokens_per_proposal() >= 2
+    with pytest.raises(ValueError, match="one-dimensional"):
+        request.set_draft_tokens(np.asarray([expected[1:3]], dtype=np.int32))
+
+    request.set_draft_tokens(np.asarray(expected[1:3], dtype=np.int32))
+    proposal_events = engine.run(event_buffer)
+    assert [event.token for event in proposal_events] == expected[1:]
+    assert all(event.flags & og.EngineEventFlags.TOKEN for event in proposal_events)
+    assert proposal_events[-1].flags & og.EngineEventFlags.TURN_FINISHED
+    request.close()
 
 
 def test_isolated_matches_simultaneous(model):

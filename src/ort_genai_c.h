@@ -1432,13 +1432,12 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestCancelTurn(
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestClose(OgaRequest* request);
 
 /**
- * \brief Proposes speculative draft tokens for the request's next engine step.
+ * \brief Proposes speculative draft tokens for the request's next decode operation.
  *
- * The step then runs one row per draft on top of its own token, verifies each draft against the
- * model's prediction, and keeps the accepted prefix. The proposal applies to the next step only:
- * a committed step consumes it whether or not it could verify it. Passing an empty sequence clears
- * the proposal. Requires a greedy request and an engine whose cache can roll a rejected draft back
- * (see OgaEngineMaxDraftTokensPerStep).
+ * The request must be ready to decode. The operation then runs one row per draft on top of its own
+ * token, verifies each draft against the model's prediction, and keeps the accepted prefix. Passing
+ * an empty sequence clears the proposal. Requires a greedy request and an engine whose cache can
+ * roll a rejected draft back (see OgaEngineMaxDraftTokensPerProposal).
  *
  * \param[in] request The request to propose drafts for.
  * \param[in] tokens One sequence holding the draft continuation, in order.
@@ -1447,15 +1446,16 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestClose(OgaRequest* request);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestSetDraftTokens(OgaRequest* request, const OgaSequences* tokens);
 
 /**
- * \brief Reports how many speculative draft tokens one request may attach to a single engine step.
+ * \brief Reports how many speculative draft tokens one request may attach to a proposal.
  *
  * Zero means this engine cannot roll a rejected draft back, so OgaRequestSetDraftTokens will fail.
+ * This query must be called from the Engine owner thread.
  *
  * \param[in] engine The engine to query.
  * \param[out] out The maximum draft token count.
  * \return OgaResult containing the error message on failure, or nullptr on success.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineMaxDraftTokensPerStep(const OgaEngine* engine, size_t* out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineMaxDraftTokensPerProposal(const OgaEngine* engine, size_t* out);
 
 /**
  * \brief Destroys the given request.

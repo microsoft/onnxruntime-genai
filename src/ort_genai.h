@@ -1095,7 +1095,7 @@ struct OgaRequest : OgaAbstract {
   }
 
   /**
-   * \brief Proposes speculative draft tokens for the next engine step.
+   * \brief Proposes speculative draft tokens for the next decode operation.
    */
   void SetDraftTokens(const OgaSequences& tokens) {
     OgaCheckResult(OgaRequestSetDraftTokens(this, &tokens));
@@ -1122,11 +1122,11 @@ struct OgaEngine : OgaAbstract {
   }
 
   /**
-   * \brief Speculative draft tokens a request may attach to one step; zero when unsupported.
+   * \brief Speculative draft tokens a request may attach to one proposal; zero when unsupported.
    */
-  size_t MaxDraftTokensPerStep() const {
+  size_t MaxDraftTokensPerProposal() const {
     size_t count{};
-    OgaCheckResult(OgaEngineMaxDraftTokensPerStep(this, &count));
+    OgaCheckResult(OgaEngineMaxDraftTokensPerProposal(this, &count));
     return count;
   }
 

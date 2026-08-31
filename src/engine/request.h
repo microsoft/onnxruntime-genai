@@ -116,12 +116,12 @@ struct Request : std::enable_shared_from_this<Request>,
    * @brief Proposes speculative draft tokens for this request's next step.
    * @param tokens Draft continuation of the sequence, in order. An empty span clears the proposal.
    *
-   * The next decode step then runs 1 + tokens.size() rows, verifies each draft against the target
-   * model's own prediction, and keeps the accepted prefix. Only greedy requests may propose drafts,
-   * because verification compares argmax tokens rather than sampling probabilities.
+    * The request must be ready to decode. The next step then runs 1 + tokens.size() rows, verifies
+    * each draft against the target model's own prediction, and keeps the accepted prefix. Only
+    * greedy requests may propose drafts, because verification compares argmax tokens rather than
+    * sampling probabilities.
    *
-   * The proposal applies to the next step only. A committed step consumes it even when it could not
-   * verify it (a prefill chunk, for one); a rolled back step leaves it pending.
+    * The proposal applies to the next committed decode step; a rolled back step leaves it pending.
    */
   void SetDraftTokens(std::span<const int32_t> tokens);
 

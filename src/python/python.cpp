@@ -869,10 +869,14 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           pybind11::arg("turn_options") = pybind11::none())
       .def("cancel_turn", &OgaRequest::CancelTurn)
       .def("set_draft_tokens", [](OgaRequest& request, ContiguousArray<int32_t> tokens) {
+        if (tokens.ndim() != 1) {
+          throw pybind11::value_error(
+              "tokens must be a one-dimensional array.");
+        }
         auto sequences = OgaSequences::Create();
         auto tokens_span = ToSpan(tokens);
         sequences->Append(tokens_span.data(), tokens_span.size());
-        request.SetDraftTokens(*sequences); }, "Propose speculative draft tokens for the next engine step.")
+        request.SetDraftTokens(*sequences); }, "Propose speculative draft tokens for the next decode operation.")
       .def("close", &OgaRequest::Close);
 
   pybind11::class_<
@@ -951,8 +955,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           },
           pybind11::arg("buffer"))
       .def("has_pending_requests", &OgaEngine::HasPendingRequests)
-      .def("max_draft_tokens_per_step", &OgaEngine::MaxDraftTokensPerStep,
-           "Speculative draft tokens a request may attach to one step; zero when unsupported.");
+      .def("max_draft_tokens_per_proposal", &OgaEngine::MaxDraftTokensPerProposal,
+           "Speculative draft tokens a request may attach to one proposal; zero when unsupported.");
 
   pybind11::class_<OgaStreamingProcessor>(m, "StreamingProcessor")
       .def(pybind11::init([](OgaModel& model) { return OgaStreamingProcessor::Create(model); }),

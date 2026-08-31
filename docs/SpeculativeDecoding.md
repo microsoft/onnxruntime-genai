@@ -99,34 +99,45 @@ speculative_options = {
 Dynamic Engine clients can attach a proposed continuation to one request:
 
 ```python
-max_drafts = engine.max_draft_tokens_per_step()
+# After Run has produced this request's first token event, prefill is complete.
+event_buffer = engine.create_event_buffer(8)
+max_drafts = engine.max_draft_tokens_per_proposal()
 if max_drafts:
     request.set_draft_tokens(np.asarray(draft_ids[:max_drafts], dtype=np.int32))
 
-ready = engine.step()
-while ready is not None and ready.has_unseen_tokens():
-    token = ready.get_unseen_token()
+while engine.has_pending_requests():
+  events = engine.run(event_buffer)
+  for event in events:
+    if event.flags & og.EngineEventFlags.TOKEN:
+      consume(event.token)
+    if event.flags & og.EngineEventFlags.TURN_FINISHED:
+      finish(event.finish_reason)
 ```
 
-The corresponding C APIs are `OgaEngineMaxDraftTokensPerStep` and
-`OgaRequestSetDraftTokens`; the C++ wrappers are `OgaEngine::MaxDraftTokensPerStep` and
+Process every event in the reusable buffer before calling `run` again. If one model execution
+produces more events than the buffer holds, subsequent `run` calls drain the retained events before
+the Engine performs another model execution.
+
+The corresponding C APIs are `OgaEngineMaxDraftTokensPerProposal` and
+`OgaRequestSetDraftTokens`; the C++ wrappers are `OgaEngine::MaxDraftTokensPerProposal` and
 `OgaRequest::SetDraftTokens`.
 
 This API has a different ownership boundary from the automatic `Generator` strategies:
 
 - The application owns proposal generation; the Engine only verifies the supplied IDs.
-- The request must already be submitted to the Engine, and only dynamic batching is supported.
+- The request must have completed prefill and be ready to decode; only dynamic batching is
+  supported.
 - Verification is greedy and accepts the longest prefix matching the target model's argmax rows.
 - Guidance and logits penalties are not supported for a request carrying a proposal.
-- The proposal applies to the next committed step. Budgeting or cache pressure may verify fewer
-  drafts, and prefill verifies none; either case still consumes the proposal. A rolled-back step
-  preserves it for retry.
-- One verification run can publish several unseen tokens: accepted drafts followed by one target
-  replacement or bonus token. Callers must drain all unseen tokens from each ready request.
+- The proposal applies to the next committed decode operation. Budgeting or cache pressure may
+  verify fewer drafts and still consumes the proposal. A rolled-back operation preserves it for
+  retry.
+- One verification run can publish several ordered token events: accepted drafts followed by one
+  target replacement or bonus token.
 
-`max_draft_tokens_per_step()` returns zero when the model emits only one logits row per request or
-its cache/state cannot commit a partial speculative prefix. A positive value is the per-request
-capability limit; the scheduler may use a smaller width for a particular step.
+`max_draft_tokens_per_proposal()` returns zero when the model emits only one logits row per request
+or its cache/state cannot commit a partial speculative prefix. A positive value is the per-request
+capability limit; the scheduler may use a smaller width for a particular operation.
 
 ## Model configuration
 

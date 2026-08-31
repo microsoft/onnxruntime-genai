@@ -1695,7 +1695,7 @@ OgaResult* OgaEngineHasPendingRequests(OgaEngine* engine, bool* out) {
   OGA_CATCH
 }
 
-OgaResult* OgaEngineMaxDraftTokensPerStep(const OgaEngine* engine, size_t* out) {
+OgaResult* OgaEngineMaxDraftTokensPerProposal(const OgaEngine* engine, size_t* out) {
   OGA_TRY
   if (!engine) {
     throw std::runtime_error("engine must not be null.");

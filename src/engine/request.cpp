@@ -201,9 +201,13 @@ void Request::SetDraftTokens(std::span<const int32_t> tokens) {
   if (IsClosed(status_)) {
     throw std::runtime_error("Cannot propose draft tokens for a closed request.");
   }
-  draft_tokens_.clear();
   if (tokens.empty()) {
+    draft_tokens_.clear();
     return;
+  }
+  if (!IsExecuting(status_) || IsPrefill()) {
+    throw std::runtime_error(
+        "Speculative draft tokens may only be proposed when the request is ready to decode.");
   }
   if (guidance_logits_processor_) {
     throw std::runtime_error("Speculative draft tokens are not supported with guidance.");
