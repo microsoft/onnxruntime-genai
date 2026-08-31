@@ -95,6 +95,7 @@ TEST(MtpDecoderConfigTest, ProjectsPagedDecoderWithoutMainFixedState) {
   EXPECT_TRUE(projected->model.mtp.filename.empty());
   ASSERT_EQ(head.layer_types.size(), 1u);
   EXPECT_EQ(head.layer_types[0], "full_attention");
+  EXPECT_THROW(CreateMtpDecoderConfig(*projected), std::runtime_error);
 }
 
 TEST(MtpDecoderConfigTest, RejectsInvalidConfiguration) {
