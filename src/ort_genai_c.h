@@ -1427,9 +1427,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestCancelTurn(
  * Close is valid from every lifecycle state and is idempotent. It logically removes the Request
  * from scheduling and discards its undelivered events. Dynamic cache ownership is released
  * immediately. A resident static-batch row and its shared cache allocation may remain physically
- * retained until the whole batch is recycled. If an executable static peer still needs that
- * shared batch, device-affine Request runtime is released on the owner thread after the peer stops
- * executing.
+ * retained until the whole batch is recycled.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestClose(OgaRequest* request);
 
@@ -1441,8 +1439,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestClose(OgaRequest* request);
  * may occur on another thread because the Engine strongly retains the Request and the release only
  * publishes an atomic marker. Reclamation has the same logical scheduling, event-purge, and
  * runtime-state release behavior as Close. A resident static-batch row and shared cache allocation
- * may still remain until the batch is recycled, and its device-affine Request runtime may be
- * retained until an executable static peer stops using the shared batch.
+ * may still remain until the batch is recycled.
  *
  * \param[in] request A Request handle returned by OgaEngineCreateRequest.
  */

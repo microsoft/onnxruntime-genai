@@ -263,17 +263,14 @@ void StaticCacheManager::Allocate(const std::vector<std::shared_ptr<Request>>& r
 bool StaticCacheManager::SupportsDynamicBatching() const { return false; }
 
 void StaticCacheManager::Step() {
-  // Static rows share one physical sequence extent. A logically closed row retained for an
-  // executable peer can still be the longest row, so the common cache length must not shrink just
-  // because that row no longer contributes tokens or logits.
-  const auto request_with_max_sequence_length =
+  auto request_with_max_sequence_length =
       std::max_element(
           cache_allocated_requests_.begin(), cache_allocated_requests_.end(),
           [](const std::shared_ptr<Request>& a, const std::shared_ptr<Request>& b) {
             return a->CurrentSequenceLength() < b->CurrentSequenceLength();
           });
-  const int64_t max_sequence_length =
-      (*request_with_max_sequence_length)->CurrentSequenceLength();
+
+  const int64_t max_sequence_length = (*request_with_max_sequence_length)->CurrentSequenceLength();
 
   key_value_cache_->Update({}, static_cast<int>(max_sequence_length));
 }
@@ -364,7 +361,7 @@ void PagedCacheManager::Step() {
         "Composite models require transactional cache steps.");
   }
   for (auto& request : cache_allocated_requests_) {
-    if (!IsExecuting(request->status_)) {
+    if (IsTurnComplete(request->status_)) {
       continue;
     }
 

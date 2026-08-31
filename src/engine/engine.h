@@ -167,7 +167,6 @@ struct Engine : std::enable_shared_from_this<Engine>,
       const std::shared_ptr<Request>& request) noexcept;
   bool CancelRequest(const std::shared_ptr<Request>& request, uint64_t turn_id);
   void ReclaimAbandonedRequests();
-  void FinalizeDeferredStaticRequests();
   bool StaticBatchNeedsRequest(
       const std::shared_ptr<Request>& request) const;
   size_t DrainPendingEvents(std::span<EngineEvent> events);

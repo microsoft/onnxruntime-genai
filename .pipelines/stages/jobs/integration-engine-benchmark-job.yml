@@ -152,7 +152,6 @@ jobs:
 
   - task: PublishPipelineArtifact@1
     displayName: 'Publish engine benchmark results'
-    condition: succeededOrFailed()
     inputs:
       artifactName: 'engine-benchmark-results'
       targetPath: '$(Build.ArtifactStagingDirectory)/engine-benchmark'

@@ -145,13 +145,9 @@ std::shared_ptr<Request> Engine::CreateRequest(const GeneratorParams& params,
       abandonment_pending_);
   request->ValidateEngineCompatibility();
 
-  // Either event vector can become the pending queue after a publication swap. Fatal handling may
-  // then need one terminal event for every tracked Request, in addition to a retained request-less
-  // Engine event. Grow both vectors before publishing the Request so fatal delivery never allocates
-  // after the Engine becomes unhealthy.
-  const size_t event_capacity = tracked_requests_.size() + 2;
-  pending_events_.reserve(event_capacity);
-  staged_events_.reserve(event_capacity);
+  // Fatal handling may need one terminal event for every tracked Request. Grow that storage before
+  // publishing the Request so failure reporting never allocates after the Engine becomes unhealthy.
+  pending_events_.reserve(tracked_requests_.size() + 1);
   tracked_requests_.push_back(request);
   request->engine_ = shared_from_this();
   return request;
@@ -349,7 +345,6 @@ bool Engine::CancelRequest(const std::shared_ptr<Request>& request, uint64_t tur
   } else {
     pending_events_.push_back(std::move(terminal));
   }
-  FinalizeDeferredStaticRequests();
   return true;
 }
 
@@ -361,7 +356,10 @@ void Engine::CloseRequest(const std::shared_ptr<Request>& request) {
   if (!request || request->engine_.lock().get() != this) {
     throw std::runtime_error("Cannot close a request that does not belong to this engine.");
   }
-  const bool defer_static_runtime_cleanup = StaticBatchNeedsRequest(request);
+  if (StaticBatchNeedsRequest(request)) {
+    throw std::runtime_error(
+        "Cannot close a resident static-batch request while another row is still executable.");
+  }
 
   scheduler_->RemoveRequest(request);
 
@@ -379,23 +377,14 @@ void Engine::CloseRequest(const std::shared_ptr<Request>& request) {
           staged_events_.begin(), staged_events_.end(),
           [&request](const EngineEvent& event) { return event.request == request; }),
       staged_events_.end());
-
-  // Close is a logical lifecycle transition even when a resident static row must remain available
-  // as inert padding while an executable peer still depends on the shared batch. Keep the
-  // Request's device-affine runtime alive only for that physical dependency; it is never scheduled
-  // or returned after this status change.
-  request->status_ = RequestStatus::Closed;
-  if (!defer_static_runtime_cleanup) {
-    request->CompleteClose();
-    tracked_requests_.erase(
-        std::remove_if(
-            tracked_requests_.begin(), tracked_requests_.end(),
-            [&request](const std::shared_ptr<Request>& tracked) {
-              return tracked == request;
-            }),
-        tracked_requests_.end());
-  }
-  FinalizeDeferredStaticRequests();
+  request->CompleteClose();
+  tracked_requests_.erase(
+      std::remove_if(
+          tracked_requests_.begin(), tracked_requests_.end(),
+          [&request](const std::shared_ptr<Request>& tracked) {
+            return tracked == request;
+          }),
+      tracked_requests_.end());
 }
 
 void Engine::DetachRequestForTeardown(
@@ -425,11 +414,10 @@ void Engine::DetachRequestForTeardown(
 
 void Engine::ReclaimAbandonedRequests() {
   // ExternalRelease only publishes an atomic abandonment marker. The host's owner-thread boundary
-  // can safely perform the normal removal sequence: logical scheduler removal, event purge, and
-  // terminal close. Dynamic cache ownership is released immediately; a resident static batch row
-  // and its Request runtime remain physically retained only while an executable peer needs them.
+  // can safely perform the normal removal sequence: logical scheduler removal, ready-notification
+  // purge, and terminal close. Dynamic cache ownership is released immediately; a resident static
+  // batch row can remain physically retained until its shared batch is recycled.
   if (!abandonment_pending_->exchange(false, std::memory_order_acq_rel)) {
-    FinalizeDeferredStaticRequests();
     return;
   }
 
@@ -440,10 +428,18 @@ void Engine::ReclaimAbandonedRequests() {
           return request &&
                  !IsClosed(request->status_) &&
                  request->engine_.lock().get() == this &&
-                 request->IsExternallyAbandoned();
+                 request->IsExternallyAbandoned() &&
+                 !StaticBatchNeedsRequest(request);
         });
     if (abandoned == tracked_requests_.end()) {
-      FinalizeDeferredStaticRequests();
+      if (std::any_of(
+              tracked_requests_.begin(), tracked_requests_.end(),
+              [](const std::shared_ptr<Request>& request) {
+                return request && !IsClosed(request->status_) &&
+                       request->IsExternallyAbandoned();
+              })) {
+        abandonment_pending_->store(true, std::memory_order_release);
+      }
       return;
     }
 
@@ -456,44 +452,17 @@ void Engine::ReclaimAbandonedRequests() {
   }
 }
 
-void Engine::FinalizeDeferredStaticRequests() {
-  if (cache_manager_->SupportsDynamicBatching()) {
-    return;
-  }
-
-  for (const auto& request : tracked_requests_) {
-    if (request && IsClosed(request->status_) &&
-        request->engine_.lock().get() == this &&
-        !StaticBatchNeedsRequest(request)) {
-      // This is always reached on the Engine owner thread. Releasing Search, sampler, guidance,
-      // parameter, and token-mirror state here preserves device-affine destruction even when the
-      // public Close happened while a static peer was still executing.
-      request->CompleteClose();
-    }
-  }
-  tracked_requests_.erase(
-      std::remove_if(
-          tracked_requests_.begin(), tracked_requests_.end(),
-          [](const std::shared_ptr<Request>& request) {
-            return !request ||
-                   (IsClosed(request->status_) && request->engine_.expired());
-          }),
-      tracked_requests_.end());
-}
-
 bool Engine::StaticBatchNeedsRequest(
     const std::shared_ptr<Request>& request) const {
   if (cache_manager_->SupportsDynamicBatching() ||
       !cache_manager_->IsResident(request)) {
     return false;
   }
-
+  const auto residents = cache_manager_->AllocatedRequests();
   return std::any_of(
-      tracked_requests_.begin(), tracked_requests_.end(),
-      [this, &request](const std::shared_ptr<Request>& resident) {
-        return resident && resident != request &&
-               cache_manager_->IsResident(resident) &&
-               IsExecutable(resident->status_);
+      residents.begin(), residents.end(),
+      [&request](const std::shared_ptr<Request>& resident) {
+        return resident != request && IsExecutable(resident->status_);
       });
 }
 
@@ -623,7 +592,6 @@ void Engine::RunStatic() {
     }
     pending_events_.swap(staged_events_);
     pending_event_index_ = 0;
-    FinalizeDeferredStaticRequests();
   }
 }
 
@@ -651,12 +619,12 @@ void Engine::RunDynamic() {
     if (planning_result.capacity_deferred) {
       ++transaction_metrics_.capacity_deferrals;
     }
+    if (planning_result.unserviceable_request_id) {
+      RetainEvent(FailUnserviceableRequest(
+          planning_result.unserviceable_request_id));
+      return;
+    }
     if (!planning_result.executable) {
-      if (planning_result.unserviceable_request_id) {
-        RetainEvent(FailUnserviceableRequest(
-            planning_result.unserviceable_request_id));
-        return;
-      }
       const auto outcome = planning_result.outcome;
       if (outcome.kind == StepOutcomeKind::NoWork &&
           !scheduler_->HasPendingRequests()) {
@@ -1069,47 +1037,11 @@ EngineEvent Engine::EventFromStepError(
     const void* request_id,
     std::string message,
     std::exception_ptr error) {
-  std::exception_ptr durable_fatal_error;
-  try {
-    durable_fatal_error = std::make_exception_ptr(EngineStepError{
-        {outcome, transaction_id, request_id},
-        AddExceptionCause(std::move(message), error),
-    });
-  } catch (...) {
-    // The triggering exception is already durable. If allocating the richer EngineStepError fails,
-    // retain that original failure rather than mutating only part of the Engine's terminal state.
-    durable_fatal_error = error ? error : std::current_exception();
-  }
-  fatal_error_ = durable_fatal_error;
   health_ = EngineHealth::Unhealthy;
   if (outcome == StepOutcomeKind::FatalExecutionFailure ||
       outcome == StepOutcomeKind::ExecutionContractFailure) {
     ++transaction_metrics_.fatal_execution_failures;
   }
-
-  size_t required_event_count =
-      pending_events_.size() - pending_event_index_;
-  for (const auto& request : tracked_requests_) {
-    if (!request || !IsExecutable(request->status_)) {
-      continue;
-    }
-    const auto existing = std::find_if(
-        pending_events_.begin() + static_cast<ptrdiff_t>(pending_event_index_),
-        pending_events_.end(),
-        [&request](const EngineEvent& pending) {
-          return pending.request == request &&
-                 pending.turn_id == request->current_turn_id_;
-        });
-    if (existing == pending_events_.end()) {
-      ++required_event_count;
-    }
-  }
-  if (pending_events_.capacity() < required_event_count) {
-    // Request publication pre-reserves this capacity in both vectors that can be swapped into the
-    // pending role. If that invariant is ever broken, fail before terminalizing any subset.
-    std::rethrow_exception(fatal_error_);
-  }
-
   pending_events_.erase(
       pending_events_.begin(),
       pending_events_.begin() + static_cast<ptrdiff_t>(pending_event_index_));
@@ -1148,13 +1080,16 @@ EngineEvent Engine::EventFromStepError(
       }
     }
   }
+  fatal_error_ = std::make_exception_ptr(EngineStepError{
+      {outcome, transaction_id, request_id},
+      AddExceptionCause(std::move(message), error),
+  });
   std::rethrow_exception(fatal_error_);
 }
 
 bool Engine::HasPendingRequests() {
   ValidateOwnerThread();
   ReclaimAbandonedRequests();
-  FinalizeDeferredStaticRequests();
   return pending_event_index_ < pending_events_.size() ||
          scheduler_->HasPendingRequests();
 }

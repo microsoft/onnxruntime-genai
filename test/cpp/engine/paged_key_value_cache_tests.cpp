@@ -20,20 +20,15 @@ std::unique_ptr<PagedKeyValueCache> MakePagedCache(const std::shared_ptr<Model>&
   return std::make_unique<PagedKeyValueCache>(model);
 }
 
-std::string CapturePagedCacheConstructionError(
-    const std::shared_ptr<Model>& model) {
-  try {
-    static_cast<void>(MakePagedCache(model));
-  } catch (const std::runtime_error& error) {
-    return error.what();
-  }
-  return {};
-}
-
 class PagedKeyValueCacheTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    model_ = LoadSyntheticPagedSmallModel();
+    model_ = LoadDummyDecoderModel();
+    Config::Engine::DynamicBatching dynamic_batching;
+    dynamic_batching.block_size = 4;
+    dynamic_batching.num_blocks = 3;
+    dynamic_batching.max_batch_size = 2;
+    model_->config_->engine.dynamic_batching = dynamic_batching;
     assign_target_ =
         MakeDoublesEngine(model_, /*capacity=*/2, EosToken(*model_)).engine;
     cache_ = MakePagedCache(model_);
@@ -344,8 +339,8 @@ TEST(PagedKeyValueCacheManifestTest, AllocatesOnlySparseLogicalLayersUsingDecode
 TEST(PagedKeyValueCacheManifestTest, DenseLegacyManifestRetainsSequentialBindings) {
   auto model = LoadDummyDecoderModel();
   model->config_->engine.dynamic_batching = Config::Engine::DynamicBatching{};
-  model->config_->engine.dynamic_batching->block_size = 2;
-  model->config_->engine.dynamic_batching->num_blocks = 2;
+  model->config_->engine.dynamic_batching->block_size = 4;
+  model->config_->engine.dynamic_batching->num_blocks = 3;
   ASSERT_FALSE(model->config_->model.decoder.state_groups.has_value());
 
   auto cache = MakePagedCache(model);
@@ -361,62 +356,6 @@ TEST(PagedKeyValueCacheManifestTest, DenseLegacyManifestRetainsSequentialBinding
   EXPECT_EQ(
       cache->Cache()[0].first->GetTensorTypeAndShapeInfo()->GetElementType(),
       ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-}
-
-TEST(PagedKeyValueCacheManifestTest, RejectsConcretePagedPoolSizeMismatchAtConstruction) {
-  auto model = LoadSyntheticPagedModel();
-  model->config_->engine.dynamic_batching->num_blocks = 64;
-
-  const auto message = CapturePagedCacheConstructionError(model);
-  EXPECT_NE(
-      message.find(
-          "past_key_values.1.key' for layer 1 has incompatible axis 0 "
-          "(num_blocks): graph dimension 128; expected 64 for the "
-          "full-context paged cache pool."),
-      std::string::npos)
-      << message;
-}
-
-TEST(PagedKeyValueCacheManifestTest, RejectsConcretePagedBlockSizeMismatchAtConstruction) {
-  auto model = LoadSyntheticPagedModel();
-  model->config_->engine.dynamic_batching->block_size = 8;
-
-  const auto message = CapturePagedCacheConstructionError(model);
-  EXPECT_NE(
-      message.find(
-          "past_key_values.1.key' for layer 1 has incompatible axis 1 "
-          "(block_size): graph dimension 4; expected 8 from "
-          "engine.dynamic_batching.block_size."),
-      std::string::npos)
-      << message;
-}
-
-TEST(PagedKeyValueCacheManifestTest, RejectsConcretePagedHeadCountMismatchAtConstruction) {
-  auto model = LoadSyntheticPagedModel();
-  model->config_->model.decoder.num_key_value_heads = 2;
-
-  const auto message = CapturePagedCacheConstructionError(model);
-  EXPECT_NE(
-      message.find(
-          "past_key_values.1.key' for layer 1 has incompatible axis 2 "
-          "(num_key_value_heads): graph dimension 1; expected 2 from "
-          "model.decoder.num_key_value_heads."),
-      std::string::npos)
-      << message;
-}
-
-TEST(PagedKeyValueCacheManifestTest, RejectsConcretePagedHeadSizeMismatchAtConstruction) {
-  auto model = LoadSyntheticPagedModel();
-  model->config_->model.decoder.head_size = 2;
-
-  const auto message = CapturePagedCacheConstructionError(model);
-  EXPECT_NE(
-      message.find(
-          "past_key_values.1.key' for layer 1 has incompatible axis 3 "
-          "(head_size): graph dimension 1; expected 2 from "
-          "model.decoder.head_size."),
-      std::string::npos)
-      << message;
 }
 
 TEST(PagedKeyValueCacheManifestTest, CacheManagerConstructsFromSparseManifest) {
@@ -479,10 +418,10 @@ TEST(PagedKeyValueCacheManifestTest, AllocatesSparseSlidingAndFullLayerCaches) {
   auto model = LoadSyntheticPagedModel();
   auto& decoder = model->config_->model.decoder;
   decoder.sliding_window = Config::Model::Decoder::SlidingWindow{};
-  decoder.sliding_window->window_size = 33;
+  decoder.sliding_window->window_size = 4;
   decoder.sliding_window->layers = {1};
   decoder.inputs.block_table_windowed = decoder.inputs.block_table;
-  model->config_->search.chunk_size = 32;
+  model->config_->search.chunk_size = 4;
 
   auto cache = MakePagedCache(model);
   const auto values = cache->Cache();
@@ -490,29 +429,10 @@ TEST(PagedKeyValueCacheManifestTest, AllocatesSparseSlidingAndFullLayerCaches) {
   ASSERT_EQ(values.size(), 2u);
   EXPECT_EQ(
       values[0].first->GetTensorTypeAndShapeInfo()->GetShape(),
-      std::vector<int64_t>({128, 4, 1, 1}));
+      std::vector<int64_t>({16, 4, 1, 1}));
   EXPECT_EQ(
       values[1].first->GetTensorTypeAndShapeInfo()->GetShape(),
       std::vector<int64_t>({128, 4, 1, 1}));
-}
-
-TEST(PagedKeyValueCacheManifestTest, RejectsConcreteWindowPoolSizeMismatchAtConstruction) {
-  auto model = LoadSyntheticPagedModel();
-  auto& decoder = model->config_->model.decoder;
-  decoder.sliding_window = Config::Model::Decoder::SlidingWindow{};
-  decoder.sliding_window->window_size = 4;
-  decoder.sliding_window->layers = {1};
-  decoder.inputs.block_table_windowed = decoder.inputs.block_table;
-  model->config_->search.chunk_size = 4;
-
-  const auto message = CapturePagedCacheConstructionError(model);
-  EXPECT_NE(
-      message.find(
-          "past_key_values.1.key' for layer 1 has incompatible axis 0 "
-          "(num_blocks): graph dimension 128; expected 16 for the "
-          "windowed paged cache pool."),
-      std::string::npos)
-      << message;
 }
 
 TEST(PagedKeyValueCacheManifestTest, RejectsSlidingWindowLayersOutsidePagedGroup) {
@@ -638,8 +558,7 @@ TEST(PagedKeyValueCacheManifestTest, RejectsMalformedPagedGroup) {
           auto cache = MakePagedCache(model);
         } catch (const std::runtime_error& error) {
           EXPECT_NE(
-              std::string{error.what()}.find(
-                  "must contain at least one layer_id"),
+              std::string{error.what()}.find("requires a non-empty paged_kv decoder state group"),
               std::string::npos);
           throw;
         }
@@ -660,8 +579,7 @@ TEST(PagedKeyValueCacheManifestTest, RejectsEmptyLegacyPagedGroup) {
           auto cache = MakePagedCache(model);
         } catch (const std::runtime_error& error) {
           EXPECT_NE(
-              std::string{error.what()}.find(
-                  "model.decoder.num_hidden_layers to be greater than zero"),
+              std::string{error.what()}.find("at least one paged_kv decoder layer"),
               std::string::npos);
           throw;
         }

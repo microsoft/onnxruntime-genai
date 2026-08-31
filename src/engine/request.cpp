@@ -22,11 +22,11 @@ void TurnOptions::ValidateOwnerThread() const {
 }
 
 void Request::ValidateOwnerThread() const {
-  if (IsClosed(status_)) {
-    throw std::runtime_error("Cannot use a closed request.");
-  }
   auto engine = engine_.lock();
   if (!engine) {
+    if (IsClosed(status_)) {
+      throw std::runtime_error("Cannot use a closed request.");
+    }
     throw std::runtime_error(
         "Cannot use a Request after its Engine has been destroyed.");
   }
@@ -188,12 +188,6 @@ size_t Request::ScheduledTokenCount() const {
 }
 
 void Request::ScheduleTokens() {
-  // A completed or logically closed static row can remain in the shared physical batch while a
-  // peer executes. It contributes padding only and must not replay an unprocessed terminal token.
-  if (!IsExecuting(status_)) {
-    scheduled_token_count_ = 0;
-    return;
-  }
   const size_t unprocessed = static_cast<size_t>(CurrentSequenceLength() - processed_sequence_length_);
   scheduled_token_count_ = Generators::ScheduledTokenCount(unprocessed, params_->search.chunk_size);
 }

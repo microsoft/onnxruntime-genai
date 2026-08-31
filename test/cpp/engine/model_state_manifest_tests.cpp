@@ -4,7 +4,6 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
-#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -72,8 +71,6 @@ Config::Model::Decoder MakeSparseDecoder() {
 
   Decoder decoder;
   decoder.num_hidden_layers = 4;
-  decoder.num_key_value_heads = 4;
-  decoder.head_size = 128;
   decoder.inputs.past_key_names = "past.%d.key";
   decoder.inputs.past_value_names = "past.%d.value";
   decoder.inputs.past_conv_names = "past.%d.conv";
@@ -130,41 +127,10 @@ FakeModelStateMetadata MakeValidMetadata() {
   return metadata;
 }
 
-void SetPagedLayerShape(FakeModelStateMetadata& metadata,
-                        int layer_id,
-                        const std::vector<int64_t>& shape) {
-  for (const auto* semantic : {"key", "value"}) {
-    metadata.AddInput(
-        "past." + std::to_string(layer_id) + "." + semantic,
-        ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16, shape);
-    metadata.AddOutput(
-        "present." + std::to_string(layer_id) + "." + semantic,
-        ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16, shape);
-  }
-}
-
 std::string CaptureValidationError(const ModelStateManifest& manifest,
                                    const ModelStateMetadata& metadata) {
   try {
     manifest.ValidateSession(metadata);
-  } catch (const std::runtime_error& error) {
-    return error.what();
-  }
-  return {};
-}
-
-std::string CapturePagedGeometryError(
-    const Config::Model::Decoder& decoder,
-    const ModelStateMetadata& metadata,
-    size_t full_block_count,
-    size_t window_block_count,
-    const std::set<int>& windowed_layers,
-    size_t block_size) {
-  try {
-    ModelStateManifest::ValidatePagedCacheGeometry(
-        decoder, decoder.state_groups->front(), metadata,
-        full_block_count, window_block_count, windowed_layers,
-        block_size);
   } catch (const std::runtime_error& error) {
     return error.what();
   }
@@ -241,91 +207,6 @@ TEST(ModelStateManifestTest, AllowsDynamicDimensions) {
       {-1, -1, 4, 128});
 
   EXPECT_NO_THROW(manifest.ValidateSession(metadata));
-}
-
-TEST(ModelStateManifestTest, ValidatesConcreteAndDynamicPagedCacheGeometry) {
-  const auto decoder = MakeSparseDecoder();
-  auto metadata = MakeValidMetadata();
-  SetPagedLayerShape(metadata, 1, {128, 256, 4, 128});
-  SetPagedLayerShape(metadata, 3, {128, 256, 4, 128});
-  EXPECT_NO_THROW(ModelStateManifest::ValidatePagedCacheGeometry(
-      decoder, decoder.state_groups->front(), metadata,
-      /*full_block_count=*/128, /*window_block_count=*/16,
-      /*windowed_layers=*/{}, /*block_size=*/256));
-
-  SetPagedLayerShape(metadata, 1, {-1, -1, -1, -1});
-  EXPECT_NO_THROW(ModelStateManifest::ValidatePagedCacheGeometry(
-      decoder, decoder.state_groups->front(), metadata,
-      /*full_block_count=*/128, /*window_block_count=*/16,
-      /*windowed_layers=*/std::set<int>{1}, /*block_size=*/256));
-}
-
-TEST(ModelStateManifestTest, RejectsConfiguredPagedBlockCountMismatch) {
-  const auto decoder = MakeSparseDecoder();
-  auto metadata = MakeValidMetadata();
-  SetPagedLayerShape(metadata, 1, {8, 256, 4, 128});
-
-  const auto message = CapturePagedGeometryError(
-      decoder, metadata, /*full_block_count=*/128,
-      /*window_block_count=*/16, /*windowed_layers=*/std::set<int>{1},
-      /*block_size=*/256);
-  EXPECT_NE(
-      message.find(
-          "past.1.key' for layer 1 has incompatible axis 0 (num_blocks): "
-          "graph dimension 8; expected 16 for the windowed paged cache pool."),
-      std::string::npos)
-      << message;
-}
-
-TEST(ModelStateManifestTest, RejectsConfiguredPagedBlockSizeMismatch) {
-  const auto decoder = MakeSparseDecoder();
-  auto metadata = MakeValidMetadata();
-  SetPagedLayerShape(metadata, 1, {128, 128, 4, 128});
-
-  const auto message = CapturePagedGeometryError(
-      decoder, metadata, /*full_block_count=*/128,
-      /*window_block_count=*/16, /*windowed_layers=*/{},
-      /*block_size=*/256);
-  EXPECT_NE(
-      message.find(
-          "past.1.key' for layer 1 has incompatible axis 1 (block_size): "
-          "graph dimension 128; expected 256 from engine.dynamic_batching.block_size."),
-      std::string::npos)
-      << message;
-}
-
-TEST(ModelStateManifestTest, RejectsConfiguredPagedHeadCountMismatch) {
-  const auto decoder = MakeSparseDecoder();
-  auto metadata = MakeValidMetadata();
-  SetPagedLayerShape(metadata, 1, {128, 256, 8, 128});
-
-  const auto message = CapturePagedGeometryError(
-      decoder, metadata, /*full_block_count=*/128,
-      /*window_block_count=*/16, /*windowed_layers=*/{},
-      /*block_size=*/256);
-  EXPECT_NE(
-      message.find(
-          "past.1.key' for layer 1 has incompatible axis 2 (num_key_value_heads): "
-          "graph dimension 8; expected 4 from model.decoder.num_key_value_heads."),
-      std::string::npos)
-      << message;
-}
-
-TEST(ModelStateManifestTest, RejectsConfiguredPagedHeadSizeMismatch) {
-  const auto decoder = MakeSparseDecoder();
-  auto metadata = MakeValidMetadata();
-  SetPagedLayerShape(metadata, 1, {128, 256, 4, 64});
-
-  const auto message = CapturePagedGeometryError(
-      decoder, metadata, /*full_block_count=*/128,
-      /*window_block_count=*/16, /*windowed_layers=*/{},
-      /*block_size=*/256);
-  EXPECT_NE(
-      message.find(
-          "past.1.key' for layer 1 has incompatible axis 3 (head_size): "
-          "graph dimension 64; expected 128 from model.decoder.head_size."),
-      std::string::npos)
-      << message;
 }
 
 TEST(ModelStateManifestTest, RejectsIncompatiblePagedGeometry) {
@@ -423,8 +304,6 @@ TEST(ModelStateManifestTest, AcceptsSparsePagedDynamicEngineContract) {
 TEST(ModelStateManifestTest, AcceptsLegacyDynamicEngineContract) {
   Config::Model::Decoder decoder;
   decoder.num_hidden_layers = 4;
-  decoder.num_key_value_heads = 4;
-  decoder.head_size = 128;
 
   EXPECT_NO_THROW(ModelStateManifest::ValidateDynamicEngineCompatibility(decoder));
 }

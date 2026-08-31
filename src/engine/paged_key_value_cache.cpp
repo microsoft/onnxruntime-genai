@@ -173,7 +173,6 @@ size_t ComputePagedBlockCapacity(size_t available_memory_bytes,
 PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model)
     : model_(model) {
   const auto& decoder = model->config_->model.decoder;
-  ModelStateManifest::ValidateDynamicEngineCompatibility(decoder);
   const size_t block_size = model->config_->engine.dynamic_batching->block_size;
   const size_t max_batch_size = model->config_->engine.dynamic_batching->max_batch_size;
   const auto paged_group = ResolvePagedKeyValueGroup(decoder);
@@ -211,9 +210,6 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model)
                                            num_window_blocks * windowed.size() *
                                                BytesPerBlock(model, dtype),
                                            dtype);
-  ModelStateManifest::ValidatePagedCacheGeometry(
-      decoder, paged_group, model->session_info_, num_blocks,
-      num_window_blocks, windowed, block_size);
 
   for (const int layer_id : paged_group.layer_ids) {
     const auto blocks = windowed.count(layer_id) != 0 ? num_window_blocks : num_blocks;
