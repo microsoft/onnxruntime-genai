@@ -349,14 +349,13 @@ struct DeviceInterface {
 
 // A shared_ptr based type that we expose through our C API should inherit from this type.
 // ExternalAddRef must be called when returning an object through the C API
-// ExternalRelease must be called on the C API destroy method.
-template <typename T>
-struct ExternalRefCountedTraits {
-  static constexpr bool notify_external_reference_changes = false;
-};
-
 template <typename T>
 struct ExternalRefCounted {
+  ExternalRefCounted() = default;
+  explicit ExternalRefCounted(
+      std::shared_ptr<std::atomic<bool>> final_release_pending) noexcept
+      : final_release_pending_{std::move(final_release_pending)} {}
+
   void ExternalAddRef() {
     ExternalReferenceLock lock{*this};
     if (ref_count_ == 0) {
@@ -366,10 +365,6 @@ struct ExternalRefCounted {
       external_owner_ = std::move(owner);
       ref_count_ = 1;
       external_lifecycle_started_ = true;
-      if constexpr (ExternalRefCountedTraits<T>::notify_external_reference_changes) {
-        static_assert(noexcept(std::declval<T&>().OnFirstExternalReference()));
-        static_cast<T*>(this)->OnFirstExternalReference();
-      }
     } else {
       ++ref_count_;
     }
@@ -381,11 +376,8 @@ struct ExternalRefCounted {
       ExternalReferenceLock lock{*this};
       assert(ref_count_ > 0);
       if (--ref_count_ == 0) {
-        if constexpr (ExternalRefCountedTraits<T>::notify_external_reference_changes) {
-          static_assert(noexcept(std::declval<T&>().OnLastExternalReference()));
-          // Notify while the self-owner and lifecycle transition are protected. The hook may only
-          // publish deferred work; destruction still happens after releasing the member lock.
-          static_cast<T*>(this)->OnLastExternalReference();
+        if (final_release_pending_) {
+          final_release_pending_->store(true, std::memory_order_release);
         }
         released_owner = std::move(external_owner_);
       }
@@ -432,6 +424,7 @@ struct ExternalRefCounted {
   };
 
   std::shared_ptr<T> external_owner_;  // shared_ptr to ourselves to keep us alive
+  std::shared_ptr<std::atomic<bool>> final_release_pending_;
   int ref_count_{};                    // Guarded with external_owner_ and lifecycle state.
   bool external_lifecycle_started_{};  // Distinguishes never exposed from finally released.
   mutable std::atomic_flag external_reference_lock_ = ATOMIC_FLAG_INIT;

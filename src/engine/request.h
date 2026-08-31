@@ -17,8 +17,6 @@
 namespace Generators {
 
 struct Request;
-struct ScheduledRequests;
-struct StaticBatchScheduler;
 
 struct RequestOptions {
   std::optional<size_t> max_session_tokens;
@@ -31,16 +29,32 @@ struct TurnOptions {
   void ValidateOwnerThread() const;
 };
 
-template <>
-struct ExternalRefCountedTraits<Request> {
-  static constexpr bool notify_external_reference_changes = true;
-};
-
 struct RequestStepResult {
   int32_t token{};
   bool token_appended{};
   bool done{};
   GenerationFinishReason finish_reason{GenerationFinishReason::None};
+};
+
+struct RequestTurnAdmission {
+  RequestStatus status{RequestStatus::Unassigned};
+  size_t host_token_count{};
+  int64_t prompt_sequence_length{};
+  int64_t processed_sequence_length{};
+  std::optional<size_t> max_generated_tokens;
+  size_t generated_token_count{};
+  size_t prompt_token_count{};
+  uint64_t current_turn_id{};
+  uint64_t next_turn_id{};
+  bool has_current_turn{};
+  bool turn_id_exhausted{};
+  bool first_turn{};
+  bool transaction_started{};
+};
+
+struct RequestTurnCounters {
+  uint64_t prompt_tokens{};
+  uint64_t generated_tokens{};
 };
 
 /**
@@ -76,6 +90,30 @@ struct Request : std::enable_shared_from_this<Request>,
       std::span<const int32_t> tokens,
       std::optional<size_t> max_generated_tokens = std::nullopt);
   void ValidateOwnerThread() const;
+  void AttachToEngine(std::shared_ptr<Engine> engine) noexcept;
+  bool BelongsTo(const Engine& engine) const noexcept;
+  bool IsAwaitingFirstTurn() const noexcept;
+  bool IsRestartableCanceledTurn() const noexcept;
+  void ValidateTurnAdmission(
+      std::span<const int32_t> tokens,
+      std::optional<size_t> max_generated_tokens) const;
+  void ValidateContinuousDecodingSupport() const;
+  void PrepareTurnAdmission(
+      std::span<const int32_t> tokens,
+      RequestTurnAdmission& admission);
+  uint64_t CommitTurnAdmission(
+      std::optional<size_t> max_generated_tokens,
+      RequestTurnAdmission& admission);
+  void RollbackTurnAdmission(RequestTurnAdmission& admission);
+  bool CanCancelFromEngine(
+      const Engine& engine,
+      uint64_t turn_id) const;
+  RequestTurnCounters CompleteCancelFromEngine(
+      const Engine& engine,
+      uint64_t turn_id) noexcept;
+  void CompleteCloseFromEngine(const Engine& engine) noexcept;
+  void MarkFailedFromEngine(const Engine& engine) noexcept;
+  void CompleteFailedTurnFromEngine(const Engine& engine) noexcept;
 
   /**
    * @brief Returns a span of unprocessed tokens on the device.
@@ -288,15 +326,8 @@ struct Request : std::enable_shared_from_this<Request>,
   // Host-side mirror of the full sequence (prompt + generated tokens). Kept in step with the
   // search's device sequence so that streaming and input-id preparation never read it back.
   std::vector<int32_t> tokens_host_;
-  friend struct Engine;
-  friend struct ExternalRefCounted<Request>;
-  friend struct ScheduledRequests;
-  friend struct StaticBatchScheduler;
 
   void CompleteClose() noexcept;
-  void OnFirstExternalReference() noexcept;
-  void OnLastExternalReference() noexcept;
-  bool IsExternallyAbandoned() const noexcept;
   static DeviceSpan<int32_t> AllocateOnDevice(
       GeneratorParams& params,
       std::span<const int32_t> input_ids);
@@ -335,8 +366,8 @@ struct Request : std::enable_shared_from_this<Request>,
   std::unique_ptr<ConstrainedLogitsProcessor> guidance_logits_processor_;
   std::unique_ptr<ConstrainedLogitsProcessor> guidance_transaction_checkpoint_;
   std::unique_ptr<BatchedSamplerState> batched_sampler_state_;
-  const std::shared_ptr<std::atomic<bool>> abandonment_pending_;
   std::weak_ptr<Engine> engine_;
+  const Engine* engine_identity_{};
 
   void ApplyLogitsProcessors(DeviceSpan<float> logits);
   void ResetGuidanceForNewTurn();

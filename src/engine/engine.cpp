@@ -119,12 +119,13 @@ std::shared_ptr<Request> Engine::CreateRequest(const GeneratorParams& params,
       CloneRequestParams(params, *model_), max_total_tokens,
       abandonment_pending_);
   request->ValidateEngineCompatibility();
+  auto engine = shared_from_this();
 
   // Fatal handling may need one terminal event for every tracked Request. Grow that storage before
   // publishing the Request so failure reporting never allocates after the Engine becomes unhealthy.
   pending_events_.reserve(tracked_requests_.size() + 1);
   tracked_requests_.push_back(request);
-  request->engine_ = shared_from_this();
+  request->AttachToEngine(std::move(engine));
   return request;
 }
 
@@ -136,130 +137,45 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
   if (health_ == EngineHealth::Unhealthy) {
     std::rethrow_exception(fatal_error_);
   }
-  if (!request || request->engine_.lock().get() != this) {
+  if (!request || !request->BelongsTo(*this)) {
     throw std::runtime_error(
         "Cannot begin a turn for a request that does not belong to this engine.");
   }
-  if (max_generated_tokens && *max_generated_tokens == 0) {
-    throw std::runtime_error(
-        "max_generated_tokens (0) must be greater than zero.");
-  }
-  if (tokens.empty()) {
-    throw std::runtime_error(
-        "Expected at least one input token for generation. Received 0.");
-  }
-  if (request->turn_id_exhausted_) {
-    throw std::overflow_error(
-        "The request cannot admit another turn because its uint64 turn id space is exhausted.");
-  }
+  request->ValidateTurnAdmission(tokens, max_generated_tokens);
 
-  const bool first_turn = request->status_ == RequestStatus::Unassigned;
-  if (!first_turn && !IsTurnComplete(request->status_)) {
-    if (IsClosed(request->status_)) {
-      throw std::runtime_error("Cannot begin a turn for a closed request.");
-    }
-    throw std::runtime_error(
-        "BeginTurn is only valid for a new request or after the current turn is complete.");
-  }
-
+  const bool first_turn = request->IsAwaitingFirstTurn();
   if (first_turn) {
     if (cache_manager_->SupportsDynamicBatching()) {
       request->ValidateEngineCompatibility();
     }
   } else {
     const bool restartable_canceled_turn =
-        request->finish_reason_ == GenerationFinishReason::Canceled &&
-        request->processed_sequence_length_ == 0 &&
+        request->IsRestartableCanceledTurn() &&
         !cache_manager_->IsResident(request);
     ValidateRequestCanContinue(request, restartable_canceled_turn);
     if (!restartable_canceled_turn) {
-      const DeviceType cache_device =
-          request->params_->model_->p_device_kvcache_->GetType();
-      if (!SupportsContinuousDecoding(cache_device)) {
-        throw std::runtime_error(
-            "Continuous decoding is not supported on the selected KV-cache device type (" +
-            to_string(cache_device) + ").");
-      }
+      request->ValidateContinuousDecodingSupport();
     }
   }
 
-  const size_t sequence_length =
-      first_turn ? 0 : static_cast<size_t>(request->CurrentSequenceLength());
-  Request::ValidateAppendLength(
-      request->max_total_tokens_, sequence_length, tokens.size());
-  if (request->tokens_host_.capacity() <
-      request->tokens_host_.size() + tokens.size()) {
-    throw std::logic_error(
-        "The request host token mirror does not have reserved turn capacity.");
-  }
-
-  auto device_tokens = Request::AllocateOnDevice(*request->params_, tokens);
-  const RequestStatus status_before = request->status_;
-  const size_t host_size_before = request->tokens_host_.size();
-  const int64_t prompt_length_before = request->prompt_sequence_length_;
-  const int64_t processed_length_before =
-      request->processed_sequence_length_;
-  const auto turn_max_generated_tokens_before =
-      request->turn_max_generated_tokens_;
-  const size_t turn_generated_tokens_before =
-      request->turn_generated_tokens_;
-  const size_t turn_prompt_tokens_before = request->turn_prompt_tokens_;
-  const uint64_t current_turn_id_before = request->current_turn_id_;
-  const uint64_t next_turn_id_before = request->next_turn_id_;
-  const bool has_current_turn_before = request->has_current_turn_;
-  const bool turn_id_exhausted_before = request->turn_id_exhausted_;
+  RequestTurnAdmission admission;
   bool added_to_scheduler = false;
 
-  request->SaveStateForTransaction();
   try {
-    request->ResetGuidanceForNewTurn();
-    request->search_->AppendTokens(device_tokens);
-    request->tokens_host_.insert(
-        request->tokens_host_.end(), tokens.begin(), tokens.end());
-    request->prompt_sequence_length_ = request->CurrentSequenceLength();
+    request->PrepareTurnAdmission(tokens, admission);
     if (first_turn) {
-      request->processed_sequence_length_ = 0;
-      request->status_ = RequestStatus::Assigned;
       scheduler_->AddRequest(request);
       added_to_scheduler = true;
-    } else {
-      request->status_ = RequestStatus::Assigned;
     }
-    request->CommitStateForTransaction();
-    // Install the new turn's generation budget only after turn admission succeeds. This keeps
-    // BeginTurn transactional and copies the caller-owned options before they may go out of scope.
-    request->turn_max_generated_tokens_ = max_generated_tokens;
-    request->turn_prompt_tokens_ = tokens.size();
-    request->turn_generated_tokens_ = 0;
-    request->current_turn_id_ = request->next_turn_id_;
-    request->has_current_turn_ = true;
-    if (request->next_turn_id_ == std::numeric_limits<uint64_t>::max()) {
-      request->turn_id_exhausted_ = true;
-    } else {
-      ++request->next_turn_id_;
-    }
-    request->finish_reason_ = GenerationFinishReason::None;
-    return request->current_turn_id_;
+    return request->CommitTurnAdmission(
+        max_generated_tokens, admission);
   } catch (...) {
     const auto append_error = std::current_exception();
     try {
       if (added_to_scheduler) {
         scheduler_->RemoveRequest(request);
       }
-      request->status_ = status_before;
-      request->tokens_host_.resize(host_size_before);
-      request->prompt_sequence_length_ = prompt_length_before;
-      request->processed_sequence_length_ = processed_length_before;
-      request->turn_max_generated_tokens_ =
-          turn_max_generated_tokens_before;
-      request->turn_generated_tokens_ =
-          turn_generated_tokens_before;
-      request->turn_prompt_tokens_ = turn_prompt_tokens_before;
-      request->current_turn_id_ = current_turn_id_before;
-      request->next_turn_id_ = next_turn_id_before;
-      request->has_current_turn_ = has_current_turn_before;
-      request->turn_id_exhausted_ = turn_id_exhausted_before;
-      request->RestoreStateForTransaction();
+      request->RollbackTurnAdmission(admission);
     } catch (...) {
       HandleContinuationRestoreFailure(
           request, append_error, std::current_exception());
@@ -270,21 +186,11 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
 
 bool Engine::CancelRequest(const std::shared_ptr<Request>& request, uint64_t turn_id) {
   ValidateOwnerThread();
-  if (!request || request->engine_.lock().get() != this) {
+  if (!request) {
     throw std::runtime_error(
         "Cannot cancel a request that does not belong to this engine.");
   }
-  if (IsClosed(request->status_)) {
-    throw std::runtime_error("Cannot cancel a closed request.");
-  }
-  if (!request->has_current_turn_) {
-    throw std::runtime_error("Cannot cancel a request before a turn has begun.");
-  }
-  if (turn_id != request->current_turn_id_ ||
-      IsTurnComplete(request->status_)) {
-    return false;
-  }
-  if (!IsExecutable(request->status_)) {
+  if (!request->CanCancelFromEngine(*this, turn_id)) {
     return false;
   }
 
@@ -302,16 +208,16 @@ bool Engine::CancelRequest(const std::shared_ptr<Request>& request, uint64_t tur
     pending_events_.reserve(pending_events_.size() + 1);
   }
 
-  request->status_ = RequestStatus::TurnComplete;
-  request->finish_reason_ = GenerationFinishReason::Canceled;
+  const auto counters =
+      request->CompleteCancelFromEngine(*this, turn_id);
   EngineEvent terminal;
   terminal.request = request;
   terminal.turn_id = turn_id;
   terminal.flags = EngineEventFlagTurnFinished;
   terminal.finish_reason = GenerationFinishReason::Canceled;
   terminal.usage = {
-      request->turn_prompt_tokens_,
-      request->turn_generated_tokens_,
+      counters.prompt_tokens,
+      counters.generated_tokens,
       0};
   if (has_existing_event) {
     existing->flags |= terminal.flags;
@@ -328,7 +234,7 @@ void Engine::CloseRequest(const std::shared_ptr<Request>& request) {
   if (request && IsClosed(request->status_)) {
     return;
   }
-  if (!request || request->engine_.lock().get() != this) {
+  if (!request || !request->BelongsTo(*this)) {
     throw std::runtime_error("Cannot close a request that does not belong to this engine.");
   }
   if (StaticBatchNeedsRequest(request)) {
@@ -352,7 +258,7 @@ void Engine::CloseRequest(const std::shared_ptr<Request>& request) {
           staged_events_.begin(), staged_events_.end(),
           [&request](const EngineEvent& event) { return event.request == request; }),
       staged_events_.end());
-  request->CompleteClose();
+  request->CompleteCloseFromEngine(*this);
   tracked_requests_.erase(
       std::remove_if(
           tracked_requests_.begin(), tracked_requests_.end(),
@@ -384,7 +290,7 @@ void Engine::DetachRequestForTeardown(
           }),
       staged_events_.end());
   pending_event_index_ = 0;
-  request->CompleteClose();
+  request->CompleteCloseFromEngine(*this);
 }
 
 void Engine::ReclaimAbandonedRequests() {
@@ -402,8 +308,8 @@ void Engine::ReclaimAbandonedRequests() {
         [this](const std::shared_ptr<Request>& request) {
           return request &&
                  !IsClosed(request->status_) &&
-                 request->engine_.lock().get() == this &&
-                 request->IsExternallyAbandoned() &&
+                 request->BelongsTo(*this) &&
+                 request->ExternalReferencesAbandoned() &&
                  !StaticBatchNeedsRequest(request);
         });
     if (abandoned == tracked_requests_.end()) {
@@ -411,7 +317,7 @@ void Engine::ReclaimAbandonedRequests() {
               tracked_requests_.begin(), tracked_requests_.end(),
               [](const std::shared_ptr<Request>& request) {
                 return request && !IsClosed(request->status_) &&
-                       request->IsExternallyAbandoned();
+                       request->ExternalReferencesAbandoned();
               })) {
         abandonment_pending_->store(true, std::memory_order_release);
       }
@@ -421,7 +327,7 @@ void Engine::ReclaimAbandonedRequests() {
     auto request = *abandoned;
     // Recheck immediately before removal in case an external owner was reacquired before this
     // serialized boundary.
-    if (request->IsExternallyAbandoned()) {
+    if (request->ExternalReferencesAbandoned()) {
       CloseRequest(request);
     }
   }
@@ -447,7 +353,7 @@ void Engine::ValidateRequestCanContinue(
   if (health_ == EngineHealth::Unhealthy) {
     std::rethrow_exception(fatal_error_);
   }
-  if (request->engine_.lock().get() != this) {
+  if (!request->BelongsTo(*this)) {
     throw std::runtime_error("Cannot continue a request that does not belong to this engine.");
   }
 
@@ -480,7 +386,7 @@ void Engine::ValidateRequestCanContinue(
     const std::shared_ptr<Request>& request,
     std::exception_ptr append_error,
     std::exception_ptr restore_error) {
-  request->finish_reason_ = GenerationFinishReason::Failed;
+  request->MarkFailedFromEngine(*this);
   std::string message = AddExceptionCause(
       "Continuation append failed and its Search state could not be restored.",
       append_error);
@@ -490,7 +396,7 @@ void Engine::ValidateRequestCanContinue(
     message = AddExceptionCause(
         std::move(message) + " Closing the poisoned request also failed.",
         std::current_exception());
-    request->CompleteClose();
+    request->CompleteCloseFromEngine(*this);
   }
   MarkUnhealthyAndThrow(
       StepOutcomeKind::FatalExecutionFailure,
@@ -913,7 +819,7 @@ EngineEvent Engine::EventFromStep(
     const RequestStepResult& result) const {
   EngineEvent event;
   event.request = request;
-  event.turn_id = request->current_turn_id_;
+  event.turn_id = request->CurrentTurnId();
   if (result.token_appended) {
     event.flags |= EngineEventFlagToken;
     event.token = result.token;
@@ -922,8 +828,8 @@ EngineEvent Engine::EventFromStep(
     event.flags |= EngineEventFlagTurnFinished;
     event.finish_reason = result.finish_reason;
     event.usage = {
-        request->turn_prompt_tokens_,
-        request->turn_generated_tokens_,
+        request->TurnPromptTokens(),
+        request->TurnGeneratedTokens(),
         0};
   }
   return event;
@@ -950,18 +856,17 @@ EngineEvent Engine::FailUnserviceableRequest(const void* request_id) {
             "Invalid unserviceable Request identity."}));
   }
   scheduler_->RemoveRequest(request);
-  request->status_ = RequestStatus::TurnComplete;
-  request->finish_reason_ = GenerationFinishReason::Failed;
+  request->CompleteFailedTurnFromEngine(*this);
 
   EngineEvent event;
   event.request = request;
-  event.turn_id = request->current_turn_id_;
+  event.turn_id = request->CurrentTurnId();
   event.flags = EngineEventFlagTurnFinished | EngineEventFlagFailed;
   event.finish_reason = GenerationFinishReason::Failed;
   event.error_code = EngineErrorCode::RequestUnserviceable;
   event.usage = {
-      request->turn_prompt_tokens_,
-      request->turn_generated_tokens_,
+      request->TurnPromptTokens(),
+      request->TurnGeneratedTokens(),
       0};
   return event;
 }
@@ -1039,23 +944,22 @@ EngineEvent Engine::EventFromStepError(
           : EngineErrorCode::EngineExecutionFailure;
   for (const auto& request : tracked_requests_) {
     if (request && IsExecutable(request->status_)) {
-      request->status_ = RequestStatus::TurnComplete;
-      request->finish_reason_ = GenerationFinishReason::Failed;
+      request->CompleteFailedTurnFromEngine(*this);
       EngineEvent event;
       event.request = request;
-      event.turn_id = request->current_turn_id_;
+      event.turn_id = request->CurrentTurnId();
       event.flags = EngineEventFlagTurnFinished | EngineEventFlagFailed;
       event.finish_reason = GenerationFinishReason::Failed;
       event.error_code = error_code;
       event.usage = {
-          request->turn_prompt_tokens_,
-          request->turn_generated_tokens_,
+          request->TurnPromptTokens(),
+          request->TurnGeneratedTokens(),
           0};
       const auto existing = std::find_if(
           pending_events_.begin(), pending_events_.end(),
           [&request](const EngineEvent& pending) {
             return pending.request == request &&
-                   pending.turn_id == request->current_turn_id_;
+                   pending.turn_id == request->CurrentTurnId();
           });
       if (existing == pending_events_.end()) {
         pending_events_.push_back(std::move(event));
