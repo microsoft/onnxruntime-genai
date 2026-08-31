@@ -200,10 +200,55 @@ struct Config {
     int right_context_samples{};
     std::vector<int> tdt_durations;  // e.g., {0, 1, 2, 3, 4}
 
+    // Cache config consolidating KV/conv/recurrent cache settings. Defined once here and
+    // attached (via an optional field named "cache") to any component that can have stateful
+    // cache behavior (Decoder, Encoder, Vision, Embedding, Mtp), following the same
+    // per-component, no-inheritance convention already used for session_options/run_options.
+    // Does not include dtype/quantization (GenAI infers dtype from the model) or the
+    // memory/scheduling settings that live in Engine::DynamicBatching (left as-is, out of scope).
+    struct Cache {
+      struct Global {
+        std::string eviction_policy{"none"};  // "none" | "lru" | "fifo"
+        bool enable_prefix_caching{false};
+        std::optional<int> prefix_cache_max_entries;
+      } global;
+
+      struct KVCache {
+        size_t block_size{256};
+        std::optional<size_t> num_blocks;
+
+        // Mirrors Decoder::SlidingWindow field-for-field. Kept as a separate type (rather than
+        // reusing Decoder::SlidingWindow) to avoid a circular dependency between Cache (defined
+        // before Decoder, so every component can hold an optional<Cache>) and Decoder.
+        struct SlidingWindow {
+          int window_size{};
+          int pad_value{};
+          std::string alignment{"right"};
+          bool slide_key_value_cache{true};
+          bool slide_inputs{true};
+          std::vector<int> layers;
+          int cache_slack{0};
+        };
+        std::optional<SlidingWindow> sliding_window;
+      };
+      std::optional<KVCache> kv_cache;
+
+      struct ConvCache {
+        int cache_size{};
+      };
+      std::optional<ConvCache> conv_cache;
+
+      struct RecurrentCache {
+        std::optional<int> state_size;
+      };
+      std::optional<RecurrentCache> recurrent_cache;
+    };
+
     struct Encoder {
       std::string filename;
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
+      std::optional<Cache> cache;
 
       int hidden_size{};
       int num_attention_heads{};
@@ -241,6 +286,7 @@ struct Config {
       std::string filename;
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
+      std::optional<Cache> cache;
 
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};
@@ -258,6 +304,7 @@ struct Config {
       std::string filename;
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
+      std::optional<Cache> cache;
 
       // Qwen VL specific vision config values.
       // These are only needed for the QNN 3-stage pipeline (patch_embed → vision_attn → patch_merger),
@@ -357,6 +404,7 @@ struct Config {
       std::string filename;
       SessionOptions session_options;
       std::optional<RunOptions> run_options;
+      std::optional<Cache> cache;
       std::vector<SharedInitializer> shared_initializers;
 
       int hidden_size{};          // Not currently used, potentially useful for embeddings in the future
@@ -518,6 +566,7 @@ struct Config {
       std::string filename;  // e.g. "mtp.onnx"; used by model packaging/building tools
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
+      std::optional<Cache> cache;
       std::vector<SharedInitializer> shared_initializers;
 
       int num_hidden_layers{1};  // The MTP head has a single decoder layer.

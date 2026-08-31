@@ -751,6 +751,166 @@ struct SlidingWindow_Element : JSON::Element {
   std::unique_ptr<IntArray_Element> layers_;
 };
 
+using ModelCache = Config::Model::Cache;
+
+// Mirrors SlidingWindow_Element field-for-field but binds to Cache::KVCache::SlidingWindow.
+struct CacheKVCacheSlidingWindow_Element : JSON::Element {
+  explicit CacheKVCacheSlidingWindow_Element(ModelCache::KVCache::SlidingWindow& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "window_size") {
+      v_.window_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "pad_value") {
+      v_.pad_value = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "alignment") {
+      v_.alignment = JSON::Get<std::string_view>(value);
+    } else if (name == "slide_key_value_cache") {
+      v_.slide_key_value_cache = JSON::Get<bool>(value);
+    } else if (name == "slide_inputs") {
+      v_.slide_inputs = JSON::Get<bool>(value);
+    } else if (name == "cache_slack") {
+      v_.cache_slack = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnArray(std::string_view name) override {
+    if (name == "layers") {
+      if (!layers_) {
+        layers_ = std::make_unique<IntArray_Element>(v_.layers);
+      }
+      return *layers_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  ModelCache::KVCache::SlidingWindow& v_;
+  std::unique_ptr<IntArray_Element> layers_;
+};
+
+struct CacheKVCache_Element : JSON::Element {
+  explicit CacheKVCache_Element(ModelCache::KVCache& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "block_size") {
+      const auto parsed_value = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (parsed_value <= 0)
+        throw std::out_of_range("block_size must be > 0");
+      v_.block_size = static_cast<size_t>(parsed_value);
+    } else if (name == "num_blocks") {
+      const auto parsed_value = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (parsed_value <= 0)
+        throw std::out_of_range("num_blocks must be > 0");
+      v_.num_blocks = static_cast<size_t>(parsed_value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "sliding_window") {
+      v_.sliding_window = ModelCache::KVCache::SlidingWindow{};
+      sliding_window_ = std::make_unique<CacheKVCacheSlidingWindow_Element>(*v_.sliding_window);
+      return *sliding_window_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  ModelCache::KVCache& v_;
+  std::unique_ptr<CacheKVCacheSlidingWindow_Element> sliding_window_;
+};
+
+struct CacheConvCache_Element : JSON::Element {
+  explicit CacheConvCache_Element(ModelCache::ConvCache& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "cache_size") {
+      v_.cache_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  ModelCache::ConvCache& v_;
+};
+
+struct CacheRecurrentCache_Element : JSON::Element {
+  explicit CacheRecurrentCache_Element(ModelCache::RecurrentCache& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "state_size") {
+      v_.state_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  ModelCache::RecurrentCache& v_;
+};
+
+struct CacheGlobal_Element : JSON::Element {
+  explicit CacheGlobal_Element(ModelCache::Global& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "eviction_policy") {
+      const auto policy = JSON::Get<std::string_view>(value);
+      if (policy != "none" && policy != "lru" && policy != "fifo") {
+        throw std::runtime_error("cache.global.eviction_policy must be one of \"none\", \"lru\", \"fifo\"");
+      }
+      v_.eviction_policy = policy;
+    } else if (name == "enable_prefix_caching") {
+      v_.enable_prefix_caching = JSON::Get<bool>(value);
+    } else if (name == "prefix_cache_max_entries") {
+      v_.prefix_cache_max_entries = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  ModelCache::Global& v_;
+};
+
+// Parses the "cache" object attached to Decoder/Encoder/Vision/Embedding/Mtp. Shared across all
+// of those components since the schema is identical everywhere it appears.
+struct Cache_Element : JSON::Element {
+  explicit Cache_Element(ModelCache& v) : v_{v} {}
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "global") {
+      return global_;
+    }
+    if (name == "kv_cache") {
+      v_.kv_cache = ModelCache::KVCache{};
+      kv_cache_ = std::make_unique<CacheKVCache_Element>(*v_.kv_cache);
+      return *kv_cache_;
+    }
+    if (name == "conv_cache") {
+      v_.conv_cache = ModelCache::ConvCache{};
+      conv_cache_ = std::make_unique<CacheConvCache_Element>(*v_.conv_cache);
+      return *conv_cache_;
+    }
+    if (name == "recurrent_cache") {
+      v_.recurrent_cache = ModelCache::RecurrentCache{};
+      recurrent_cache_ = std::make_unique<CacheRecurrentCache_Element>(*v_.recurrent_cache);
+      return *recurrent_cache_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  ModelCache& v_;
+  CacheGlobal_Element global_{v_.global};
+  std::unique_ptr<CacheKVCache_Element> kv_cache_;
+  std::unique_ptr<CacheConvCache_Element> conv_cache_;
+  std::unique_ptr<CacheRecurrentCache_Element> recurrent_cache_;
+};
+
 struct Encoder_Element : JSON::Element {
   explicit Encoder_Element(Config::Model::Encoder& v) : v_{v} {}
 
@@ -783,6 +943,11 @@ struct Encoder_Element : JSON::Element {
       run_options_ = std::make_unique<RunOptions_Element>(*v_.run_options);
       return *run_options_;
     }
+    if (name == "cache") {
+      v_.cache = Config::Model::Cache{};
+      cache_ = std::make_unique<Cache_Element>(*v_.cache);
+      return *cache_;
+    }
     if (name == "inputs") {
       return inputs_;
     }
@@ -796,6 +961,7 @@ struct Encoder_Element : JSON::Element {
   Config::Model::Encoder& v_;
   std::unique_ptr<SessionOptions_Element> session_options_;
   std::unique_ptr<RunOptions_Element> run_options_;
+  std::unique_ptr<Cache_Element> cache_;
   EncoderInputs_Element inputs_{v_.inputs};
   EncoderOutputs_Element outputs_{v_.outputs};
 };
@@ -850,6 +1016,11 @@ struct Decoder_Element : JSON::Element {
       v_.sliding_window = Config::Model::Decoder::SlidingWindow{};
       return sliding_window_;
     }
+    if (name == "cache") {
+      v_.cache = Config::Model::Cache{};
+      cache_ = std::make_unique<Cache_Element>(*v_.cache);
+      return *cache_;
+    }
     // Support object-style pipeline: "pipeline": { "embeddings": { ... }, ... }
     if (name == "pipeline") {
       pipeline_object_ = std::make_unique<PipelineModelObject_Element>(v_.pipeline);
@@ -881,6 +1052,7 @@ struct Decoder_Element : JSON::Element {
   Config::Model::Decoder& v_;
   SessionOptions_Element session_options_{v_.session_options};
   std::unique_ptr<RunOptions_Element> run_options_;
+  std::unique_ptr<Cache_Element> cache_;
   DecoderInputs_Element inputs_{v_.inputs};
   DecoderOutputs_Element outputs_{v_.outputs};
   Pipeline_Element pipeline_{v_.pipeline};
@@ -970,6 +1142,11 @@ struct Mtp_Element : JSON::Element {
       run_options_ = std::make_unique<RunOptions_Element>(*v_.run_options);
       return *run_options_;
     }
+    if (name == "cache") {
+      v_.cache = Config::Model::Cache{};
+      cache_ = std::make_unique<Cache_Element>(*v_.cache);
+      return *cache_;
+    }
     if (name == "inputs") {
       return inputs_;
     }
@@ -990,6 +1167,7 @@ struct Mtp_Element : JSON::Element {
   Config::Model::Mtp& v_;
   std::unique_ptr<SessionOptions_Element> session_options_;
   std::unique_ptr<RunOptions_Element> run_options_;
+  std::unique_ptr<Cache_Element> cache_;
   MtpInputs_Element inputs_{v_.inputs};
   MtpOutputs_Element outputs_{v_.outputs};
   SharedInitializers_Element shared_initializers_{v_.shared_initializers};
@@ -1140,6 +1318,11 @@ struct Vision_Element : JSON::Element {
       run_options_ = std::make_unique<RunOptions_Element>(*v_.run_options);
       return *run_options_;
     }
+    if (name == "cache") {
+      v_.cache = Config::Model::Cache{};
+      cache_ = std::make_unique<Cache_Element>(*v_.cache);
+      return *cache_;
+    }
     if (name == "inputs") {
       return inputs_;
     }
@@ -1165,6 +1348,7 @@ struct Vision_Element : JSON::Element {
   Config::Model::Vision& v_;
   std::unique_ptr<SessionOptions_Element> session_options_;
   std::unique_ptr<RunOptions_Element> run_options_;
+  std::unique_ptr<Cache_Element> cache_;
   VisionInputs_Element inputs_{v_.inputs};
   VisionOutputs_Element outputs_{v_.outputs};
   VisionPipeline_Element pipeline_element_{v_.pipeline};
@@ -1416,6 +1600,11 @@ struct Embedding_Element : JSON::Element {
       run_options_ = std::make_unique<RunOptions_Element>(*v_.run_options);
       return *run_options_;
     }
+    if (name == "cache") {
+      v_.cache = Config::Model::Cache{};
+      cache_ = std::make_unique<Cache_Element>(*v_.cache);
+      return *cache_;
+    }
     if (name == "inputs") {
       return inputs_;
     }
@@ -1429,6 +1618,7 @@ struct Embedding_Element : JSON::Element {
   Config::Model::Embedding& v_;
   std::unique_ptr<SessionOptions_Element> session_options_;
   std::unique_ptr<RunOptions_Element> run_options_;
+  std::unique_ptr<Cache_Element> cache_;
   EmbeddingInputs_Element inputs_{v_.inputs};
   EmbeddingOutputs_Element outputs_{v_.outputs};
 };
@@ -2103,6 +2293,50 @@ struct RootObject_Element : JSON::Element {
   JSON::Element& t_;
 };
 
+// Backward compatibility: the legacy decoder.sliding_window / decoder.conv_cache_size fields
+// keep working exactly as before, but if only the legacy field was set in JSON, mirror its
+// value into the new decoder.cache.kv_cache.sliding_window / decoder.cache.conv_cache.cache_size
+// location for internal consistency. If both the legacy and new fields were set, the new
+// decoder.cache.* fields take precedence and a warning is logged (matching the "warning" log
+// label convention used elsewhere, e.g. constrained_logits_processor.cpp / qwen_vl_model.cpp).
+void ReconcileDecoderCacheLegacyFields(Config::Model::Decoder& decoder) {
+  if (decoder.sliding_window.has_value()) {
+    const bool new_field_set = decoder.cache.has_value() && decoder.cache->kv_cache.has_value() &&
+                                decoder.cache->kv_cache->sliding_window.has_value();
+    if (new_field_set) {
+      Log("warning",
+          "Both model.decoder.sliding_window and model.decoder.cache.kv_cache.sliding_window are "
+          "set; the latter takes precedence.");
+    } else {
+      if (!decoder.cache.has_value()) decoder.cache = Config::Model::Cache{};
+      if (!decoder.cache->kv_cache.has_value()) decoder.cache->kv_cache = Config::Model::Cache::KVCache{};
+      const auto& legacy = *decoder.sliding_window;
+      auto& mirrored = decoder.cache->kv_cache->sliding_window.emplace();
+      mirrored.window_size = legacy.window_size;
+      mirrored.pad_value = legacy.pad_value;
+      mirrored.alignment = legacy.alignment;
+      mirrored.slide_key_value_cache = legacy.slide_key_value_cache;
+      mirrored.slide_inputs = legacy.slide_inputs;
+      mirrored.layers = legacy.layers;
+      mirrored.cache_slack = legacy.cache_slack;
+    }
+  }
+
+  if (decoder.conv_cache_size != 0) {
+    const bool new_field_set = decoder.cache.has_value() && decoder.cache->conv_cache.has_value() &&
+                                decoder.cache->conv_cache->cache_size != 0;
+    if (new_field_set) {
+      Log("warning",
+          "Both model.decoder.conv_cache_size and model.decoder.cache.conv_cache.cache_size are "
+          "set; the latter takes precedence.");
+    } else {
+      if (!decoder.cache.has_value()) decoder.cache = Config::Model::Cache{};
+      if (!decoder.cache->conv_cache.has_value()) decoder.cache->conv_cache = Config::Model::Cache::ConvCache{};
+      decoder.cache->conv_cache->cache_size = decoder.conv_cache_size;
+    }
+  }
+}
+
 void ParseConfig(const fs::path& filename, std::string_view json_overlay, Config& config) {
   std::ifstream file = filename.open(std::ios::binary | std::ios::ate);
   if (!file.is_open()) {
@@ -2142,6 +2376,7 @@ void OverlayConfig(Config& config, std::string_view json) {
   Root_Element root{candidate};
   RootObject_Element element{root};
   JSON::Parse(element, json);
+  ReconcileDecoderCacheLegacyFields(candidate.model.decoder);
   ModelStateManifest::ValidateConfig(candidate.model.decoder);
   std::swap(config, candidate);
 }
@@ -2240,6 +2475,7 @@ void ValidateModelPaths(const Config& config) {
 
 Config::Config(const fs::path& path, std::string_view json_overlay) : config_path{path} {
   ParseConfig(path / "genai_config.json", json_overlay, *this);
+  ReconcileDecoderCacheLegacyFields(model.decoder);
   ModelStateManifest::ValidateConfig(model.decoder);
 
   if (model.context_length == 0 && !ModelType::IsRNNT(model.type)) {
