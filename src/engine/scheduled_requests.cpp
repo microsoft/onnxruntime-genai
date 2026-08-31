@@ -101,6 +101,10 @@ void ScheduledRequests::AddDecoderState(std::unique_ptr<DecoderIO> decoder_state
   decoder_state_ = std::move(decoder_state);
 }
 
+Tensor* ScheduledRequests::HiddenStates() const {
+  return decoder_state_ ? decoder_state_->HiddenStates() : nullptr;
+}
+
 void ScheduledRequests::GenerateNextTokens(std::vector<RequestStepResult>& results) {
   if (!decoder_state_) {
     throw std::runtime_error("Cannot generate next tokens without the decoder state.");

@@ -95,7 +95,7 @@ struct VarlenDecoderIO : DecoderIO {
   // The step's packed [total_num_tokens, hidden_size] hidden states, or null when the model does
   // not expose them. Row i corresponds to packed token i; logits have the same ordering only when
   // the model emits one logits row per packed token.
-  Tensor* HiddenStates() const { return active_hidden_states_; }
+  Tensor* HiddenStates() const override { return active_hidden_states_; }
 
  private:
   void PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);

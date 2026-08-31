@@ -151,7 +151,8 @@ VarlenGraphBuffers::VarlenGraphBuffers(DecoderOnly_Model& model) {
                        /*make_static=*/true);
 
   const auto& hidden_states_name = model.config_->model.decoder.outputs.hidden_states;
-  if (!hidden_states_name.empty() && model.session_info_.HasOutput(hidden_states_name)) {
+  if (!model.config_->model.mtp.filename.empty() &&
+      !hidden_states_name.empty() && model.session_info_.HasOutput(hidden_states_name)) {
     hidden_states = std::make_unique<Tensor>(model.p_device_inputs_,
                                              model.session_info_.GetOutputDataType(hidden_states_name));
     hidden_states->CreateTensor(std::vector<int64_t>{static_cast<int64_t>(max_batch_size),
@@ -451,10 +452,11 @@ void VarlenDecoderIO::PrepareLogits(std::shared_ptr<DecoderOnly_Model> model, Sc
 
 void VarlenDecoderIO::PrepareHiddenStates(std::shared_ptr<DecoderOnly_Model> model,
                                           ScheduledRequests& scheduled_requests) {
-  // Only models exported with include_hidden_states expose this; it is what an MTP draft head
-  // consumes. Leaving it unbound on every other model keeps their step byte-identical.
+  // Bind this optional output only when an MTP head is configured to consume it. A model may
+  // expose hidden states for other clients without requiring the Engine to produce them each step.
   const auto& hidden_states_name = model->config_->model.decoder.outputs.hidden_states;
-  if (hidden_states_name.empty() || !model->session_info_.HasOutput(hidden_states_name)) {
+  if (model->config_->model.mtp.filename.empty() ||
+      hidden_states_name.empty() || !model->session_info_.HasOutput(hidden_states_name)) {
     return;
   }
 

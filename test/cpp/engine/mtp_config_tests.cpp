@@ -23,12 +23,20 @@ TEST(MtpDecoderConfigTest, ProjectsPagedDecoderWithoutMainFixedState) {
   decoder.inputs.past_sequence_lengths = "past_sequence_lengths";
   decoder.inputs.attention_metadata = "attention_metadata";
   decoder.session_options.providers = {"cuda"};
+  decoder.session_options.intra_op_num_threads = 2;
+  decoder.session_options.config_entries = {
+      {"parent_entry", "keep"}, {"overridden_entry", "parent"}};
   decoder.session_options.provider_options.push_back(
       {"cuda", {{"device_id", "1"}, {"arena_extend_strategy", "kSameAsRequested"}}});
+  decoder.run_options = Config::RunOptions{
+      {"parent_run_option", "keep"}, {"overridden_run_option", "parent"}};
+  decoder.shared_initializers.push_back({"weight", "weights.bin"});
+  decoder.state_update_capacity = 4;
   decoder.sliding_window = Config::Model::Decoder::SlidingWindow{4096};
   decoder.state_groups.emplace();
   decoder.state_groups->push_back(Config::Model::Decoder::StateGroup{
       Config::Model::Decoder::StateGroupKind::FixedConv});
+  decoder.pipeline.push_back({"preprocess.onnx"});
 
   auto& mtp = config.model.mtp;
   mtp.filename = "mtp.onnx";
@@ -39,8 +47,12 @@ TEST(MtpDecoderConfigTest, ProjectsPagedDecoderWithoutMainFixedState) {
   mtp.outputs.hidden_states = "head_hidden_out";
   mtp.session_options.emplace();
   mtp.session_options->graph_optimization_level = ORT_DISABLE_ALL;
+  mtp.session_options->config_entries = {
+      {"overridden_entry", "mtp"}, {"mtp_entry", "head"}};
   mtp.session_options->provider_options.push_back(
       {"cuda", {{"arena_extend_strategy", "kNextPowerOfTwo"}}});
+  mtp.run_options = Config::RunOptions{
+      {"overridden_run_option", "mtp"}, {"mtp_run_option", "head"}};
 
   auto projected = CreateMtpDecoderConfig(config);
   const auto& head = projected->model.decoder;
@@ -56,6 +68,11 @@ TEST(MtpDecoderConfigTest, ProjectsPagedDecoderWithoutMainFixedState) {
   EXPECT_EQ(head.inputs.past_sequence_lengths, "past_sequence_lengths");
   EXPECT_EQ(head.inputs.attention_metadata, "attention_metadata");
   EXPECT_EQ(head.session_options.graph_optimization_level, ORT_DISABLE_ALL);
+  EXPECT_EQ(head.session_options.intra_op_num_threads, 2);
+  EXPECT_EQ(head.session_options.config_entries,
+            (std::vector<Config::NamedString>{{"overridden_entry", "mtp"},
+                                              {"mtp_entry", "head"},
+                                              {"parent_entry", "keep"}}));
   ASSERT_EQ(head.session_options.providers.size(), 1u);
   EXPECT_EQ(head.session_options.providers[0], "cuda");
   ASSERT_EQ(head.session_options.provider_options.size(), 1u);
@@ -65,8 +82,17 @@ TEST(MtpDecoderConfigTest, ProjectsPagedDecoderWithoutMainFixedState) {
   EXPECT_EQ(provider_options.options[0],
             Config::NamedString("arena_extend_strategy", "kNextPowerOfTwo"));
   EXPECT_EQ(provider_options.options[1], Config::NamedString("device_id", "1"));
+  ASSERT_TRUE(head.run_options.has_value());
+  EXPECT_EQ(*head.run_options,
+            (Config::RunOptions{{"overridden_run_option", "mtp"},
+                                {"mtp_run_option", "head"},
+                                {"parent_run_option", "keep"}}));
+  EXPECT_TRUE(head.shared_initializers.empty());
+  EXPECT_EQ(head.state_update_capacity, 0);
   EXPECT_FALSE(head.sliding_window.has_value());
   EXPECT_FALSE(head.state_groups.has_value());
+  EXPECT_TRUE(head.pipeline.empty());
+  EXPECT_TRUE(projected->model.mtp.filename.empty());
   ASSERT_EQ(head.layer_types.size(), 1u);
   EXPECT_EQ(head.layer_types[0], "full_attention");
 }

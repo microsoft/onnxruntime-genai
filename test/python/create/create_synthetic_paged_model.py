@@ -91,6 +91,8 @@ def _decoder_graph(logits_per_token=False):
 
     # Write tokens to the key and value caches.
     node("Cast", ["input_ids"], ["token_f"], to=TensorProto.FLOAT)
+    node("Cast", ["input_ids"], ["hidden_values"], to=TensorProto.FLOAT16)
+    node("Unsqueeze", ["hidden_values", "axis1"], ["hidden_states"])
     node("Reshape", [f"past_key_values.{WRITE_LAYER}.key", "flat"], ["past_key_flat"])
     node("Reshape", [f"past_key_values.{WRITE_LAYER}.value", "flat"], ["past_value_flat"])
     node("Unsqueeze", ["phys", "axis1"], ["scatter_index"])
@@ -150,6 +152,7 @@ def _decoder_graph(logits_per_token=False):
     ]
     outputs = [
         helper.make_tensor_value_info("logits", TensorProto.FLOAT16, logits_shape),
+        helper.make_tensor_value_info("hidden_states", TensorProto.FLOAT16, ["num_tokens", 1]),
         *[
             helper.make_tensor_value_info(f"present.{layer}.key", TensorProto.FLOAT, cache_shape)
             for layer in PAGED_LAYERS
@@ -206,6 +209,7 @@ def create_config(output_dir):
                 },
                 "outputs": {
                     "logits": "logits",
+                    "hidden_states": "hidden_states",
                     "present_key_names": "present.%d.key",
                     "present_value_names": "present.%d.value",
                 },

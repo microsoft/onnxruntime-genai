@@ -22,6 +22,20 @@ int64_t SafeDoubleToInt64(double x, std::string_view name);
 
 namespace {
 
+void InheritNamedStrings(const std::vector<Config::NamedString>& parent,
+                         std::vector<Config::NamedString>& child) {
+  for (const auto& parent_entry : parent) {
+    const bool overridden = std::any_of(
+        child.begin(), child.end(),
+        [&parent_entry](const Config::NamedString& entry) {
+          return entry.first == parent_entry.first;
+        });
+    if (!overridden) {
+      child.push_back(parent_entry);
+    }
+  }
+}
+
 void InheritProviderOptions(const Config::SessionOptions& parent,
                             Config::SessionOptions& child) {
   if (child.providers.empty()) {
@@ -55,6 +69,22 @@ void InheritProviderOptions(const Config::SessionOptions& parent,
   }
 }
 
+void InheritSessionOptions(const Config::SessionOptions& parent,
+                           Config::SessionOptions& child) {
+  if (!child.intra_op_num_threads) child.intra_op_num_threads = parent.intra_op_num_threads;
+  if (!child.inter_op_num_threads) child.inter_op_num_threads = parent.inter_op_num_threads;
+  if (!child.enable_cpu_mem_arena) child.enable_cpu_mem_arena = parent.enable_cpu_mem_arena;
+  if (!child.enable_mem_pattern) child.enable_mem_pattern = parent.enable_mem_pattern;
+  if (!child.log_id) child.log_id = parent.log_id;
+  if (!child.log_severity_level) child.log_severity_level = parent.log_severity_level;
+  if (!child.log_verbosity_level) child.log_verbosity_level = parent.log_verbosity_level;
+  if (!child.enable_profiling) child.enable_profiling = parent.enable_profiling;
+  if (!child.custom_ops_library) child.custom_ops_library = parent.custom_ops_library;
+  if (!child.graph_optimization_level) child.graph_optimization_level = parent.graph_optimization_level;
+  InheritNamedStrings(parent.config_entries, child.config_entries);
+  InheritProviderOptions(parent, child);
+}
+
 }  // namespace
 
 std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
@@ -77,10 +107,16 @@ std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   decoder.filename = mtp.filename;
   if (mtp.session_options) {
     decoder.session_options = *mtp.session_options;
-    InheritProviderOptions(config.model.decoder.session_options,
-                           decoder.session_options);
+    InheritSessionOptions(config.model.decoder.session_options,
+                          decoder.session_options);
   }
-  decoder.run_options = mtp.run_options;
+  if (mtp.run_options) {
+    decoder.run_options = *mtp.run_options;
+    if (config.model.decoder.run_options) {
+      InheritNamedStrings(*config.model.decoder.run_options, *decoder.run_options);
+    }
+  }
+  // An empty MTP list intentionally disables sharing the main decoder's initializers.
   decoder.shared_initializers = mtp.shared_initializers;
   decoder.num_hidden_layers = mtp.num_hidden_layers;
   decoder.num_key_value_heads = mtp.num_key_value_heads;
@@ -100,8 +136,11 @@ std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   // deliberately inherited above; fixed recurrent state and a main-model sliding window are not.
   decoder.layer_types.assign(static_cast<size_t>(mtp.num_hidden_layers), "full_attention");
   decoder.conv_cache_size = 0;
+  decoder.state_update_capacity = 0;
   decoder.sliding_window.reset();
   decoder.state_groups.reset();
+  decoder.pipeline.clear();
+  projected->model.mtp = {};
   return projected;
 }
 
