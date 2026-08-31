@@ -215,6 +215,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
   void CommitMtpStep(MtpStep& step);
   void PublishMtpDrafts(MtpStep& step);
   void RecordSpeculativeCommit(const StepPlan& plan) noexcept;
+  void CloseMtpRequest(const std::shared_ptr<Request>& request);
   [[noreturn]] void HandleContinuationRestoreFailure(
       const std::shared_ptr<Request>& request,
       std::exception_ptr append_error,
