@@ -74,6 +74,53 @@ const FixedStateSlotSnapshot& FixedSlotFor(const FixedStatePoolSnapshot& snapsho
   return *slot;
 }
 
+class CountingArgMaxDevice final : public DeviceInterface {
+ public:
+  explicit CountingArgMaxDevice(DeviceInterface& inner) : inner_{inner} {}
+
+  DeviceType GetType() const override { return inner_.GetType(); }
+  void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
+    inner_.InitOrt(api, allocator);
+  }
+  Ort::Allocator& GetAllocator() override { return inner_.GetAllocator(); }
+  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
+    return inner_.GetMemoryInfo();
+  }
+  std::string GetExecutionProviderName() const override {
+    return inner_.GetExecutionProviderName();
+  }
+  std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
+    return inner_.AllocateBase(size);
+  }
+  std::shared_ptr<DeviceBuffer> WrapMemoryBase(void* memory, size_t size) override {
+    return inner_.WrapMemoryBase(memory, size);
+  }
+  std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override {
+    return inner_.CreateGreedy(params);
+  }
+  std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override {
+    return inner_.CreateBeam(params);
+  }
+  std::unique_ptr<BatchedSampler> CreateBatchedSampler(size_t max_batch_size,
+                                                       int vocab_size) override {
+    return inner_.CreateBatchedSampler(max_batch_size, vocab_size);
+  }
+  void Synchronize() override { inner_.Synchronize(); }
+  bool ArgMax(const void* logits, ONNXTensorElementDataType logits_type,
+              int num_rows, int vocab_size, int32_t* out_tokens) override {
+    ++argmax_calls;
+    return inner_.ArgMax(logits, logits_type, num_rows, vocab_size, out_tokens);
+  }
+  std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) override {
+    return inner_.CreateKeyValueCache(state);
+  }
+
+  size_t argmax_calls{};
+
+ private:
+  DeviceInterface& inner_;
+};
+
 class ExternalRequestReference {
  public:
   explicit ExternalRequestReference(Request& request) : request_{&request} {
@@ -1845,6 +1892,91 @@ TEST_F(EngineStepTest, SpeculativeRowsStayWithinTheGlobalTokenBudget) {
   ASSERT_EQ(engine.executor->decoded_request_ids[2].size(), 2u);
   EXPECT_EQ(first->PendingDraftTokenCount(), 0u);
   EXPECT_EQ(second->PendingDraftTokenCount(), 0u);
+}
+
+TEST_F(EngineStepTest, OrdinaryDynamicStepSkipsVerificationArgMax) {
+  CountingArgMaxDevice counting_device{*model_->p_device_scoring_};
+  DeviceInterface* const original_device = model_->p_device_scoring_;
+  model_->p_device_scoring_ = &counting_device;
+  struct ScoringDeviceRestorer {
+    Model& model;
+    DeviceInterface* device;
+    ~ScoringDeviceRestorer() { model.p_device_scoring_ = device; }
+  } restore{*model_, original_device};
+
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
+  auto request = MintRequest(*model_, Prompt(10));
+  engine.engine->AddRequest(request);
+
+  EXPECT_EQ(engine.engine->Step(), request);
+  EXPECT_EQ(counting_device.argmax_calls, 0u);
+}
+
+TEST_F(EngineStepTest, SpeculativeDraftFallsBackWhenOnlyBaseDecodeFitsCache) {
+  model_ = LoadSyntheticPagedModel();
+  auto& config = *model_->config_->engine.dynamic_batching;
+  config.num_blocks = 1;
+  config.max_batch_size = 1;
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto engine = MakeCompositeDoublesEngine(model_, filler);
+
+  auto request = MintRequest(*model_, Prompt(10));
+  engine.engine->AddRequest(request);
+  ASSERT_EQ(engine.engine->Step(), request);
+  while (request->HasUnseenTokens()) request->UnseenToken();
+  const auto before = engine.cache->Snapshot();
+  ASSERT_EQ(before.free_blocks, 0u);
+
+  config.max_scheduled_tokens = 2;
+  request->SetDraftTokens(std::vector<int32_t>{11});
+  engine.executor->SetExecutionCallback([](ExecutionContext& context) {
+    ASSERT_NE(context.plan, nullptr);
+    ASSERT_EQ(context.plan->requests.size(), 1u);
+    EXPECT_EQ(context.plan->token_count, 1u);
+    EXPECT_EQ(context.plan->requests[0].draft_token_count, 0u);
+    EXPECT_EQ(context.plan->requests[0].target_cache_slots, 4u);
+  });
+
+  EXPECT_EQ(engine.engine->Step(), request);
+  EXPECT_EQ(request->PendingDraftTokenCount(), 0u);
+  const auto after = engine.cache->Snapshot();
+  ASSERT_EQ(after.requests.size(), 1u);
+  EXPECT_EQ(after.requests[0].used_slots, 4u);
+  EXPECT_EQ(after.requests[0].block_ids.size(), 1u);
+}
+
+TEST_F(EngineStepTest, FixedStateCaptureUsesFinalBudgetedDraftCount) {
+  model_ = LoadSyntheticCompositeModel();
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto engine = MakeCompositeDoublesEngine(model_, filler);
+
+  auto request = MintRequest(*model_, Prompt(10));
+  engine.engine->AddRequest(request);
+  ASSERT_EQ(engine.engine->Step(), request);
+  while (request->HasUnseenTokens()) request->UnseenToken();
+
+  model_->config_->engine.dynamic_batching->max_scheduled_tokens = 1;
+  request->SetDraftTokens(std::vector<int32_t>{11, 12});
+  bool observed_execution = false;
+  engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
+    observed_execution = true;
+    ASSERT_NE(context.plan, nullptr);
+    ASSERT_EQ(context.plan->requests.size(), 1u);
+    EXPECT_EQ(context.plan->token_count, 1u);
+    EXPECT_EQ(context.plan->requests[0].draft_token_count, 0u);
+    EXPECT_TRUE(context.plan->fixed_state.required);
+    EXPECT_EQ(context.fixed_state_staging_bytes,
+              context.plan->fixed_state.staging_bytes);
+    for (const auto& binding : context.fixed_state_bindings) {
+      FillFixedOutputRow(binding, 0, 1.0f);
+    }
+  });
+
+  EXPECT_EQ(engine.engine->Step(), request);
+  EXPECT_TRUE(observed_execution);
+  EXPECT_EQ(request->PendingDraftTokenCount(), 0u);
 }
 
 TEST_F(EngineStepTest, SpeculativePlanReservesThePagedBlockBeforeExecution) {
