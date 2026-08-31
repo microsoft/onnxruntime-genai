@@ -12,6 +12,32 @@
 
 namespace Generators {
 
+DeviceSpan<int32_t> Request::AllocateOnDevice(
+    GeneratorParams& params,
+    std::span<const int32_t> input_ids) {
+  auto device_tokens = params.p_device->Allocate<int32_t>(input_ids.size());
+  auto cpu_tokens = device_tokens.CpuSpan();
+  std::copy(input_ids.begin(), input_ids.end(), cpu_tokens.begin());
+  device_tokens.CopyCpuToDevice();
+  return device_tokens;
+}
+
+void Request::ValidateAppendLength(
+    size_t max_total_tokens,
+    size_t current_sequence_length,
+    size_t token_count) {
+  if (current_sequence_length >= max_total_tokens ||
+      token_count >= max_total_tokens - current_sequence_length) {
+    throw std::runtime_error(
+        "Appending input_tokens_count (" + std::to_string(token_count) +
+        ") to current_sequence_length (" +
+        std::to_string(current_sequence_length) +
+        ") must leave room for at least one generated token before "
+        "max_total_tokens (" +
+        std::to_string(max_total_tokens) + ").");
+  }
+}
+
 void TurnOptions::ValidateOwnerThread() const {
   auto bound_request = request.lock();
   if (!bound_request) {
@@ -209,7 +235,8 @@ void Request::SetDraftTokens(std::span<const int32_t> tokens) {
     throw std::runtime_error(
         "A step accepts at most " + std::to_string(max_drafts) + " draft tokens.");
   }
-  ValidateAppendLength(*params_, static_cast<size_t>(CurrentSequenceLength()), tokens.size());
+  ValidateAppendLength(
+      max_total_tokens_, static_cast<size_t>(CurrentSequenceLength()), tokens.size());
   if (tokens_host_.capacity() < tokens_host_.size() + tokens.size()) {
     throw std::logic_error("The request host token mirror does not have reserved draft capacity.");
   }

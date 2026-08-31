@@ -296,6 +296,13 @@ struct Request : std::enable_shared_from_this<Request>,
   void OnFirstExternalReference() noexcept;
   void OnLastExternalReference() noexcept;
   bool IsExternallyAbandoned() const noexcept;
+  static DeviceSpan<int32_t> AllocateOnDevice(
+      GeneratorParams& params,
+      std::span<const int32_t> input_ids);
+  static void ValidateAppendLength(
+      size_t max_total_tokens,
+      size_t current_sequence_length,
+      size_t token_count);
   // Drops whatever the step in flight staged past the committed sequence, leaving the host mirror
   // exactly as long as the search after its own transaction rewind.
   void DiscardStagedDrafts() noexcept;

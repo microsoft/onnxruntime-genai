@@ -28,31 +28,6 @@ std::shared_ptr<GeneratorParams> CloneRequestParams(
   return copy;
 }
 
-DeviceSpan<int32_t> AllocateOnDevice(
-    GeneratorParams& params,
-    std::span<const int32_t> input_ids) {
-  auto device_tokens = params.p_device->Allocate<int32_t>(input_ids.size());
-  auto cpu_tokens = device_tokens.CpuSpan();
-  std::copy(input_ids.begin(), input_ids.end(), cpu_tokens.begin());
-  device_tokens.CopyCpuToDevice();
-  return device_tokens;
-}
-
-void ValidateAppendLength(size_t max_total_tokens,
-                          size_t current_sequence_length,
-                          size_t token_count) {
-  if (current_sequence_length >= max_total_tokens ||
-      token_count >= max_total_tokens - current_sequence_length) {
-    throw std::runtime_error(
-        "Appending input_tokens_count (" + std::to_string(token_count) +
-        ") to current_sequence_length (" +
-        std::to_string(current_sequence_length) +
-        ") must leave room for at least one generated token before "
-        "max_total_tokens (" +
-        std::to_string(max_total_tokens) + ").");
-  }
-}
-
 std::string AddExceptionCause(std::string message, std::exception_ptr error) {
   try {
     std::rethrow_exception(error);
@@ -210,7 +185,7 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
 
   const size_t sequence_length =
       first_turn ? 0 : static_cast<size_t>(request->CurrentSequenceLength());
-  ValidateAppendLength(
+  Request::ValidateAppendLength(
       request->max_total_tokens_, sequence_length, tokens.size());
   if (request->tokens_host_.capacity() <
       request->tokens_host_.size() + tokens.size()) {
@@ -218,7 +193,7 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
         "The request host token mirror does not have reserved turn capacity.");
   }
 
-  auto device_tokens = AllocateOnDevice(*request->params_, tokens);
+  auto device_tokens = Request::AllocateOnDevice(*request->params_, tokens);
   const RequestStatus status_before = request->status_;
   const size_t host_size_before = request->tokens_host_.size();
   const int64_t prompt_length_before = request->prompt_sequence_length_;
