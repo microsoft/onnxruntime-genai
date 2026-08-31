@@ -61,12 +61,18 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
     throw std::runtime_error("Engine requires a non-null model executor.");
   }
 
+  fatal_fallback_error_ = std::make_exception_ptr(EngineStepError{
+      {StepOutcomeKind::ExecutionContractFailure, 0, nullptr},
+      "The Engine encountered a fatal failure while constructing its diagnostic error.",
+  });
   const size_t max_batch_size = cache_manager_->MaxBatchSize();
   step_plan_.requests.reserve(max_batch_size);
   step_results_.reserve(max_batch_size);
   staged_event_order_.reserve(max_batch_size);
   pending_events_.reserve(max_batch_size);
   staged_events_.reserve(max_batch_size);
+  fatal_events_.reserve(max_batch_size + 1);
+  deferred_static_closes_.reserve(max_batch_size);
 }
 
 Engine::~Engine() {
@@ -75,6 +81,7 @@ Engine::~Engine() {
     tracked_requests_.pop_back();
     DetachRequestForTeardown(request);
   }
+  ReleaseDeferredStaticCloseState();
 }
 
 EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
@@ -120,9 +127,10 @@ std::shared_ptr<Request> Engine::CreateRequest(const GeneratorParams& params,
       abandonment_pending_);
   request->ValidateEngineCompatibility();
 
-  // Fatal handling may need one terminal event for every tracked Request. Grow that storage before
-  // publishing the Request so failure reporting never allocates after the Engine becomes unhealthy.
-  pending_events_.reserve(tracked_requests_.size() + 1);
+  // Fatal handling may need one terminal event for every tracked Request plus a request-less
+  // fallback. Grow dedicated storage before publishing the Request so terminalization never
+  // depends on the capacity of the normal event vectors, which swap after every committed step.
+  fatal_events_.reserve(tracked_requests_.size() + 2);
   tracked_requests_.push_back(request);
   request->engine_ = shared_from_this();
   return request;
@@ -262,7 +270,7 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
       request->RestoreStateForTransaction();
     } catch (...) {
       HandleContinuationRestoreFailure(
-          request, append_error, std::current_exception());
+          request, std::current_exception());
     }
     std::rethrow_exception(append_error);
   }
@@ -287,6 +295,11 @@ bool Engine::CancelRequest(const std::shared_ptr<Request>& request, uint64_t tur
   if (!IsExecutable(request->status_)) {
     return false;
   }
+  const bool release_deferred_static_state =
+      !deferred_static_closes_.empty() &&
+      !cache_manager_->SupportsDynamicBatching() &&
+      cache_manager_->IsResident(request) &&
+      !StaticBatchNeedsRequest(request);
 
   pending_events_.erase(
       pending_events_.begin(),
@@ -320,6 +333,9 @@ bool Engine::CancelRequest(const std::shared_ptr<Request>& request, uint64_t tur
   } else {
     pending_events_.push_back(std::move(terminal));
   }
+  if (release_deferred_static_state) {
+    ReleaseDeferredStaticCloseState();
+  }
   return true;
 }
 
@@ -331,10 +347,11 @@ void Engine::CloseRequest(const std::shared_ptr<Request>& request) {
   if (!request || request->engine_.lock().get() != this) {
     throw std::runtime_error("Cannot close a request that does not belong to this engine.");
   }
-  if (StaticBatchNeedsRequest(request)) {
-    throw std::runtime_error(
-        "Cannot close a resident static-batch request while another row is still executable.");
-  }
+  const bool resident_static_row =
+      !cache_manager_->SupportsDynamicBatching() &&
+      cache_manager_->IsResident(request);
+  const bool retain_static_row_state =
+      resident_static_row && StaticBatchNeedsRequest(request);
 
   scheduler_->RemoveRequest(request);
 
@@ -352,7 +369,15 @@ void Engine::CloseRequest(const std::shared_ptr<Request>& request) {
           staged_events_.begin(), staged_events_.end(),
           [&request](const EngineEvent& event) { return event.request == request; }),
       staged_events_.end());
-  request->CompleteClose();
+  if (retain_static_row_state) {
+    deferred_static_closes_.push_back(request);
+    request->CompleteLogicalClose();
+  } else {
+    request->CompleteClose();
+    if (resident_static_row) {
+      ReleaseDeferredStaticCloseState();
+    }
+  }
   tracked_requests_.erase(
       std::remove_if(
           tracked_requests_.begin(), tracked_requests_.end(),
@@ -360,6 +385,13 @@ void Engine::CloseRequest(const std::shared_ptr<Request>& request) {
             return tracked == request;
           }),
       tracked_requests_.end());
+}
+
+void Engine::ReleaseDeferredStaticCloseState() noexcept {
+  for (const auto& request : deferred_static_closes_) {
+    request->CompleteClose();
+  }
+  deferred_static_closes_.clear();
 }
 
 void Engine::DetachRequestForTeardown(
@@ -396,34 +428,37 @@ void Engine::ReclaimAbandonedRequests() {
     return;
   }
 
-  while (true) {
-    const auto abandoned = std::find_if(
-        tracked_requests_.begin(), tracked_requests_.end(),
-        [this](const std::shared_ptr<Request>& request) {
-          return request &&
-                 !IsClosed(request->status_) &&
-                 request->engine_.lock().get() == this &&
-                 request->IsExternallyAbandoned() &&
-                 !StaticBatchNeedsRequest(request);
-        });
-    if (abandoned == tracked_requests_.end()) {
-      if (std::any_of(
-              tracked_requests_.begin(), tracked_requests_.end(),
-              [](const std::shared_ptr<Request>& request) {
-                return request && !IsClosed(request->status_) &&
-                       request->IsExternallyAbandoned();
-              })) {
-        abandonment_pending_->store(true, std::memory_order_release);
+  try {
+    while (true) {
+      const auto abandoned = std::find_if(
+          tracked_requests_.begin(), tracked_requests_.end(),
+          [this](const std::shared_ptr<Request>& request) {
+            return request &&
+                   !IsClosed(request->status_) &&
+                   request->engine_.lock().get() == this &&
+                   request->IsExternallyAbandoned();
+          });
+      if (abandoned == tracked_requests_.end()) {
+        return;
       }
-      return;
-    }
 
-    auto request = *abandoned;
-    // Recheck immediately before removal in case an external owner was reacquired before this
-    // serialized boundary.
-    if (request->IsExternallyAbandoned()) {
-      CloseRequest(request);
+      auto request = *abandoned;
+      // Recheck immediately before removal in case an external owner was reacquired before this
+      // serialized boundary.
+      if (request->IsExternallyAbandoned()) {
+        CloseRequest(request);
+      }
     }
+  } catch (const std::bad_alloc&) {
+    abandonment_pending_->store(true, std::memory_order_release);
+    throw;
+  } catch (...) {
+    MarkUnhealthyAndThrow(
+        StepOutcomeKind::ExecutionContractFailure,
+        /*transaction_id=*/0,
+        nullptr,
+        "Abandoned Request cleanup violated Engine ownership invariants.",
+        std::current_exception());
   }
 }
 
@@ -478,25 +513,24 @@ void Engine::ValidateRequestCanContinue(
 
 [[noreturn]] void Engine::HandleContinuationRestoreFailure(
     const std::shared_ptr<Request>& request,
-    std::exception_ptr append_error,
     std::exception_ptr restore_error) {
   request->finish_reason_ = GenerationFinishReason::Failed;
-  std::string message = AddExceptionCause(
-      "Continuation append failed and its Search state could not be restored.",
-      append_error);
   try {
     CloseRequest(request);
   } catch (...) {
-    message = AddExceptionCause(
-        std::move(message) + " Closing the poisoned request also failed.",
-        std::current_exception());
     request->CompleteClose();
+    MarkUnhealthyAndThrow(
+        StepOutcomeKind::FatalExecutionFailure,
+        /*transaction_id=*/0,
+        request.get(),
+        "Continuation append and restore failed, and closing the poisoned Request also failed.",
+        std::current_exception());
   }
   MarkUnhealthyAndThrow(
       StepOutcomeKind::FatalExecutionFailure,
       /*transaction_id=*/0,
       request.get(),
-      std::move(message),
+      "Continuation append failed and its Search state could not be restored.",
       restore_error);
 }
 
@@ -508,7 +542,14 @@ size_t Engine::Run(std::span<EngineEvent> events) {
     }
     return 0;
   }
-  ReclaimAbandonedRequests();
+  try {
+    ReclaimAbandonedRequests();
+  } catch (const EngineStepError&) {
+    if (pending_event_index_ < pending_events_.size()) {
+      return DrainPendingEvents(events);
+    }
+    throw;
+  }
   if (pending_event_index_ < pending_events_.size()) {
     return DrainPendingEvents(events);
   }
@@ -567,6 +608,13 @@ void Engine::RunStatic() {
     }
     pending_events_.swap(staged_events_);
     pending_event_index_ = 0;
+    if (std::none_of(
+            scheduled_requests.begin(), scheduled_requests.end(),
+            [](const std::shared_ptr<Request>& request) {
+              return IsExecutable(request->status_);
+            })) {
+      ReleaseDeferredStaticCloseState();
+    }
   }
 }
 
@@ -620,8 +668,7 @@ void Engine::RunDynamic() {
           step_plan_.transaction_id,
           outcome.request_id,
           "Dynamic scheduler returned no executable work while requests remain pending.",
-          std::make_exception_ptr(std::logic_error{
-              "Invalid dynamic scheduler planning outcome."}));
+          fatal_fallback_error_);
     }
 
     std::unique_ptr<CacheStepReservation> reservation;
@@ -946,8 +993,7 @@ EngineEvent Engine::FailUnserviceableRequest(const void* request_id) {
         step_plan_.transaction_id,
         request_id,
         "The scheduler identified an unknown or non-executable unserviceable Request.",
-        std::make_exception_ptr(std::logic_error{
-            "Invalid unserviceable Request identity."}));
+        fatal_fallback_error_);
   }
   scheduler_->RemoveRequest(request);
   request->status_ = RequestStatus::TurnComplete;
@@ -1022,25 +1068,38 @@ EngineEvent Engine::EventFromStepError(
     StepOutcomeKind outcome,
     StepTransactionId transaction_id,
     const void* request_id,
-    std::string message,
+    std::string_view message,
     std::exception_ptr error) {
-  health_ = EngineHealth::Unhealthy;
-  if (outcome == StepOutcomeKind::FatalExecutionFailure ||
-      outcome == StepOutcomeKind::ExecutionContractFailure) {
-    ++transaction_metrics_.fatal_execution_failures;
+  if (health_ == EngineHealth::Unhealthy) {
+    std::rethrow_exception(fatal_error_);
   }
-  pending_events_.erase(
-      pending_events_.begin(),
-      pending_events_.begin() + static_cast<ptrdiff_t>(pending_event_index_));
-  pending_event_index_ = 0;
+
+  std::exception_ptr durable_error = fatal_fallback_error_;
+  try {
+    durable_error = std::make_exception_ptr(EngineStepError{
+        {outcome, transaction_id, request_id},
+        AddExceptionCause(std::string{message}, error),
+    });
+  } catch (...) {
+    // The fallback was constructed with the Engine, before any Request could be published.
+  }
+
+  fatal_events_.clear();
+  for (size_t i = pending_event_index_; i < pending_events_.size(); ++i) {
+    const auto& pending = pending_events_[i];
+    if (!pending.request || !pending.request->IsExternallyAbandoned()) {
+      fatal_events_.push_back(pending);
+    }
+  }
   const auto error_code =
       outcome == StepOutcomeKind::ExecutionContractFailure
           ? EngineErrorCode::EngineContractFailure
           : EngineErrorCode::EngineExecutionFailure;
+  bool affected_turn = false;
   for (const auto& request : tracked_requests_) {
-    if (request && IsExecutable(request->status_)) {
-      request->status_ = RequestStatus::TurnComplete;
-      request->finish_reason_ = GenerationFinishReason::Failed;
+    if (request && IsExecutable(request->status_) &&
+        !request->IsExternallyAbandoned()) {
+      affected_turn = true;
       EngineEvent event;
       event.request = request;
       event.turn_id = request->current_turn_id_;
@@ -1052,13 +1111,13 @@ EngineEvent Engine::EventFromStepError(
           request->turn_generated_tokens_,
           0};
       const auto existing = std::find_if(
-          pending_events_.begin(), pending_events_.end(),
+          fatal_events_.begin(), fatal_events_.end(),
           [&request](const EngineEvent& pending) {
             return pending.request == request &&
                    pending.turn_id == request->current_turn_id_;
           });
-      if (existing == pending_events_.end()) {
-        pending_events_.push_back(std::move(event));
+      if (existing == fatal_events_.end()) {
+        fatal_events_.push_back(std::move(event));
       } else {
         existing->flags |= event.flags;
         existing->finish_reason = event.finish_reason;
@@ -1067,16 +1126,42 @@ EngineEvent Engine::EventFromStepError(
       }
     }
   }
-  fatal_error_ = std::make_exception_ptr(EngineStepError{
-      {outcome, transaction_id, request_id},
-      AddExceptionCause(std::move(message), error),
-  });
+  if (!affected_turn) {
+    EngineEvent event;
+    event.flags = EngineEventFlagFailed;
+    event.finish_reason = GenerationFinishReason::Failed;
+    event.error_code = error_code;
+    fatal_events_.push_back(std::move(event));
+  }
+
+  fatal_error_ = durable_error;
+  health_ = EngineHealth::Unhealthy;
+  if (outcome == StepOutcomeKind::FatalExecutionFailure ||
+      outcome == StepOutcomeKind::ExecutionContractFailure) {
+    ++transaction_metrics_.fatal_execution_failures;
+  }
+  for (const auto& request : tracked_requests_) {
+    if (request && IsExecutable(request->status_)) {
+      request->status_ = RequestStatus::TurnComplete;
+      request->finish_reason_ = GenerationFinishReason::Failed;
+    }
+  }
+  ReleaseDeferredStaticCloseState();
+  pending_events_.swap(fatal_events_);
+  pending_event_index_ = 0;
   std::rethrow_exception(fatal_error_);
 }
 
 bool Engine::HasPendingRequests() {
   ValidateOwnerThread();
-  ReclaimAbandonedRequests();
+  try {
+    ReclaimAbandonedRequests();
+  } catch (const EngineStepError&) {
+    if (pending_event_index_ < pending_events_.size()) {
+      return true;
+    }
+    throw;
+  }
   return pending_event_index_ < pending_events_.size() ||
          scheduler_->HasPendingRequests();
 }

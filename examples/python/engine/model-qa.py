@@ -11,11 +11,11 @@ MAX_LENGTH = 1024
 
 
 def require_request_event(event: og.EngineEvent) -> og.Request:
+    if event.flags & og.EngineEventFlags.FAILED:
+        raise RuntimeError(f"Generation failed; error_code={event.error_code}")
     if event.request is not None:
         return event.request
-    if event.flags & og.EngineEventFlags.FAILED:
-        outcome = "failed"
-    elif event.flags & og.EngineEventFlags.CAPACITY_BLOCKED:
+    if event.flags & og.EngineEventFlags.CAPACITY_BLOCKED:
         outcome = "was capacity-blocked"
     elif event.flags & og.EngineEventFlags.RETRYABLE:
         outcome = "reported a retryable failure"

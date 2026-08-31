@@ -175,6 +175,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
   void ReclaimAbandonedRequests();
   bool StaticBatchNeedsRequest(
       const std::shared_ptr<Request>& request) const;
+  void ReleaseDeferredStaticCloseState() noexcept;
   size_t DrainPendingEvents(std::span<EngineEvent> events);
   void RetainEvent(EngineEvent event);
   void RunDynamic();
@@ -191,12 +192,11 @@ struct Engine : std::enable_shared_from_this<Engine>,
       bool allow_nonresident = false) const;
   [[noreturn]] void HandleContinuationRestoreFailure(
       const std::shared_ptr<Request>& request,
-      std::exception_ptr append_error,
       std::exception_ptr restore_error);
   [[noreturn]] void MarkUnhealthyAndThrow(StepOutcomeKind outcome,
                                           StepTransactionId transaction_id,
                                           const void* request_id,
-                                          std::string message,
+                                          std::string_view message,
                                           std::exception_ptr error);
 
   std::shared_ptr<Model> model_;                   // The model used by the Engine.
@@ -206,6 +206,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
   const std::thread::id owner_thread_{std::this_thread::get_id()};
   EngineHealth health_{EngineHealth::Healthy};
   std::exception_ptr fatal_error_;
+  std::exception_ptr fatal_fallback_error_;
   StepTransactionId next_transaction_id_{1};
   EngineTransactionMetrics transaction_metrics_;
   StepPlan step_plan_;
@@ -214,6 +215,8 @@ struct Engine : std::enable_shared_from_this<Engine>,
   std::vector<std::shared_ptr<Request>> tracked_requests_;
   std::vector<EngineEvent> pending_events_;
   std::vector<EngineEvent> staged_events_;
+  std::vector<EngineEvent> fatal_events_;
+  std::vector<std::shared_ptr<Request>> deferred_static_closes_;
   size_t pending_event_index_{};
   const std::shared_ptr<std::atomic<bool>> abandonment_pending_{
       std::make_shared<std::atomic<bool>>(false)};

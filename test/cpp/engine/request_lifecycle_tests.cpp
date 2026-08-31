@@ -493,6 +493,11 @@ TEST_F(RequestLifecycleTest, FailedContinuationRestoreClosesRequestAndPoisonsEng
   EXPECT_EQ(request->status_, RequestStatus::Closed);
   EXPECT_EQ(engine_.cache->AllocatedCount(), 0u);
   EXPECT_THROW(request->BeginTurn(std::vector<int32_t>{6}), std::runtime_error);
+  const auto failure = RunOne(*engine_.engine);
+  EXPECT_EQ(failure.request, nullptr);
+  EXPECT_EQ(failure.flags, EngineEventFlagFailed);
+  EXPECT_EQ(failure.finish_reason, GenerationFinishReason::Failed);
+  EXPECT_EQ(failure.error_code, EngineErrorCode::EngineExecutionFailure);
   EXPECT_THROW(static_cast<void>(RunOne(*engine_.engine)), EngineStepError);
 }
 

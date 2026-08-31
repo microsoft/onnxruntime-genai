@@ -160,9 +160,13 @@ bool Request::Cancel(uint64_t turn_id) {
   return engine->CancelRequest(shared_from_this(), turn_id);
 }
 
-void Request::CompleteClose() noexcept {
+void Request::CompleteLogicalClose() noexcept {
   engine_.reset();
   status_ = RequestStatus::Closed;
+}
+
+void Request::CompleteClose() noexcept {
+  CompleteLogicalClose();
   guidance_transaction_checkpoint_.reset();
   guidance_logits_processor_.reset();
   batched_sampler_state_.reset();

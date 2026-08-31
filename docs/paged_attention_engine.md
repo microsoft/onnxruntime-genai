@@ -235,9 +235,12 @@ longer need continuation when deterministic immediate reclamation is required.
 `Closed`. On the dynamic path, close immediately erases scheduler membership and releases
 committed paged-cache ownership and, for a composite model, the request's committed fixed-state slot.
 The Engine also removes any undrained pending events for that request. Close and owner-thread
-abandonment reclamation release Search, guidance, sampler, and parameter runtime state before the
-Engine drops its strong Request reference. Final-handle abandonment performs the same logical
-removal and event purge when the Engine next reaches an owner-thread boundary.
+abandonment reclamation normally release Search, guidance, sampler, and parameter runtime state
+before the Engine drops its strong Request reference. A closed row in an executing static batch
+retains that private runtime state only until no executable peer can reference the shared physical
+batch; it remains logically closed and produces no further events during that interval.
+Final-handle abandonment performs the same logical removal and event purge when the Engine next
+reaches an owner-thread boundary.
 
 Events already copied by the host remain host-owned. Destroying the Engine terminalizes every bound
 Request through a teardown-specific no-throw detach path that does not rely on the Request's expired
@@ -334,6 +337,11 @@ A positive-capacity call is strictly drain-or-execute:
    Do not execute another model transaction even when the caller buffer has spare slots.
 3. Otherwise execute at most one static step or one dynamic transaction.
 4. Move up to capacity produced events into the Buffer and retain overflow in `pending_events_`.
+
+A transient allocation failure while reclaiming an abandoned Request aborts this call without
+changing Engine or Request state and is retried at the next owner-thread boundary. An ownership
+invariant failure during reclamation is fatal: `Run()` drains the retained terminal failure events
+through the supplied Buffer before later calls rethrow the stored Engine error.
 
 When capacity covers the complete affected batch, one call returns all of that transaction's
 events. Capacity one expresses one-event-at-a-time behavior through the same implementation: the
@@ -696,11 +704,15 @@ The engine becomes unhealthy when it cannot prove that all components still agre
 - Any part of the commit boundary fails.
 - Planning detects inconsistent committed paged and fixed state.
 - The scheduler returns an invalid planning outcome.
+- Abandoned-Request cleanup detects inconsistent cache or scheduler ownership.
 
 The engine stores the fatal error and marks every executable Turn complete with reason `Failed`.
 Before rethrowing the stored error on later `Run()` calls, it emits one
 `TurnFinished | Failed` event per affected Turn with the Turn's Request, ID, usage, and Engine
 failure code. A fatal failure with no affected Turn emits one request-less Engine failure event.
+An externally abandoned Request has no caller-owned handle and does not receive a request-bearing
+event; other executable Turns are still terminalized. `HasPendingRequests()` returns true while
+these retained fatal events need draining.
 Continuing would risk using request search state and cache block tables from different logical
 steps.
 
@@ -1015,8 +1027,9 @@ Close or abandonment logically removes a Request from scheduling and purges its 
 A closed Request that is already resident in a static batch nevertheless remains part of that
 shared physical allocation until the batch is recycled. It is not sampled or returned again, but
 its row and cache allocation can remain alive for the lifetime of the batch. Request Search and
-other device-affine runtime state are released at the owner-thread close boundary. Static cleanup
-therefore must not be described or tested as immediate per-Request cache deallocation.
+other device-affine runtime state are released when no executable peer can reference that physical
+row. Static cleanup therefore must not be described or tested as immediate per-Request cache
+deallocation.
 
 Changes to shared types such as `Request`, `ScheduledRequests`, `ModelExecutor`, or `SimpleDecoder` should be checked against both paths. This document should be updated only where behavior is shared or where the dynamic path changes.
 
@@ -1032,8 +1045,20 @@ turn_options = og.TurnOptions(request)
 turn_options.set_max_generated_tokens(128)
 turn_id = request.begin_turn(initial_tokens, turn_options)
 
+event_buffer = engine.create_event_buffer(8)
 while engine.has_pending_requests():
-    for event in engine.run(max_events=8):
+    for event in engine.run(event_buffer):
+        if event.flags & og.EngineEventFlags.FAILED:
+            if (
+                event.request is None
+                or event.error_code != og.EngineErrorCode.REQUEST_UNSERVICEABLE
+            ):
+                raise RuntimeError(
+                    f"Engine failure: flags={event.flags}, error_code={event.error_code}"
+                )
+            # This Request cannot make progress, but the Engine and other Requests remain healthy.
+            event.request.close()
+            continue
         if event.request is None:
             if event.flags & (
                 og.EngineEventFlags.CAPACITY_BLOCKED
@@ -1054,12 +1079,12 @@ while engine.has_pending_requests():
 turn_options.set_max_generated_tokens(64)
 turn_id = request.begin_turn(next_turn_tokens, turn_options)
 
-# Repeat engine.run(max_events=...), then close when continuation is no longer needed.
+# Repeat engine.run(event_buffer), then close when continuation is no longer needed.
 request.close()
 ```
 
-`max_events=1` provides capacity-one behavior; larger capacities return the complete transaction
-output when it fits. An empty list can represent committed partial-prefill progress, so callers
+An event buffer with capacity one provides capacity-one behavior; larger buffers return the
+complete transaction output when it fits. An empty list can represent committed partial-prefill progress, so callers
 continue while `has_pending_requests()` remains true. Flags are a bitmask, so callers test the
 `TOKEN` bit rather than comparing flags for equality; `TOKEN | TURN_FINISHED` can be combined, and
 `event.token` is consumed only when `TOKEN` is set. `event.request` is a borrowed alias of the

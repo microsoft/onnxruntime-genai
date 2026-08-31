@@ -328,8 +328,9 @@ The Engine records its owner thread when it is created. Engine operations, Reque
 Turn-option setters are not thread-safe and must be called serially from that owner thread.
 Destroying a Request handle only publishes an atomic abandonment marker when it is the final public
 handle; this final release may occur on another thread. The Engine strongly retains the Request and
-performs the actual close, runtime-state release, and cleanup at its next owner-thread boundary.
-This deferred-release behavior does not permit concurrent Request operations.
+performs the logical close and cleanup at its next owner-thread boundary. A resident static row
+retains the runtime state needed by an executable peer until the shared physical batch becomes
+quiescent. This deferred-release behavior does not permit concurrent Request operations.
 
 Destroying an Engine closes all bound Requests and purges events. Surviving Request handles remain
 valid lightweight closed tombstones that the caller must still destroy. Teardown uses a no-throw
@@ -497,7 +498,11 @@ The operation is drain-or-execute:
 Before answering, it reclaims Requests whose final public handle was released. This is an
 owner-thread Engine boundary, so abandonment cannot leave stale schedulable work or retained events
 hidden behind a false result. A false result does not close or release turn-complete Requests;
-callers must close or abandon those handles explicitly.
+callers must close or abandon those handles explicitly. If reclamation detects an ownership
+invariant failure, the Engine becomes unhealthy, terminal events are retained, and this operation
+returns true so the host can drain them through `OgaEngineRun`. A transient allocation failure
+returns an `OgaResult` without changing Engine or Request state; the next owner-thread boundary
+retries reclamation.
 
 The Engine API has no public asynchronous event queue. Hosts that want uninterrupted inference copy
 events into an application-owned bounded queue and continue pumping the owner thread. If the host
@@ -511,8 +516,9 @@ Close and final-handle abandonment both logically remove a Request from scheduli
 undelivered events, and release its Search, guidance, sampler, and parameter runtime state on the
 owner thread. On the dynamic path, committed paged-cache ownership is released immediately. On the
 static path, a resident row is part of a shared batch allocation and cannot be physically released
-per Request; the closed/abandoned tombstone is no longer scheduled or returned, but its row and
-shared cache allocation may remain until the whole batch recycles.
+per Request; the closed/abandoned tombstone is no longer sampled or returned, but its row, shared
+cache allocation, and runtime state needed to execute that row remain until no executable peer can
+reference them. The shared cache allocation itself may remain until the whole batch recycles.
 
 The event's `request` is borrowed. It remains valid only while the caller retains the owned Request
 handle. Internal pending events hold a `shared_ptr<Request>` until delivery, but that does not relax

@@ -292,6 +292,7 @@ struct Request : std::enable_shared_from_this<Request>,
   friend struct ScheduledRequests;
   friend struct StaticBatchScheduler;
 
+  void CompleteLogicalClose() noexcept;
   void CompleteClose() noexcept;
   void OnFirstExternalReference() noexcept;
   void OnLastExternalReference() noexcept;
