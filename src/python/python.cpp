@@ -965,9 +965,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("has_pending_requests", &OgaEngine::HasPendingRequests)
       .def("max_draft_tokens_per_proposal", &OgaEngine::MaxDraftTokensPerProposal,
            "Speculative draft tokens a request may attach to one proposal; zero when unsupported.")
-      .def("get_speculative_stats", [](const OgaEngine& engine) {
-        return ToSpeculativeStatsDict(*engine.GetSpeculativeStats());
-      }, "Return cumulative speculative-decoding telemetry.");
+      .def("get_speculative_stats", [](const OgaEngine& engine) { return ToSpeculativeStatsDict(*engine.GetSpeculativeStats()); }, "Return cumulative speculative-decoding telemetry.");
 
   pybind11::class_<OgaStreamingProcessor>(m, "StreamingProcessor")
       .def(pybind11::init([](OgaModel& model) { return OgaStreamingProcessor::Create(model); }),
