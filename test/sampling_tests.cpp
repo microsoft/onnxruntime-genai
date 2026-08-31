@@ -823,6 +823,9 @@ TEST(SamplingTests, BatchedSamplingTopPNvTensorRtRtx) {
                                    0.1f, 0.1f, 0.1f, 0.1f, 0.6f};
 
   setup.params->SetSearchOption("top_p", 0.25f);
+  // top_k defaults to 50, which exceeds this test's overlaid vocab_size and is rejected as an
+  // invalid request. Set top_k = vocab_size to express "consider all tokens" for pure top-p.
+  setup.params->SetSearchOption("top_k", vocab_size);
 
   auto generator = OgaGenerator::Create(*setup.model, *setup.params);
   generator->SetLogits(*OgaTensor::Create(logits_cpu.data(), std::array<int64_t, 2>{batch_size, vocab_size}));
@@ -901,6 +904,9 @@ TEST(SamplingTests, RandomizedSamplingTopPNvTensorRtRtx) {
   }
 
   setup.params->SetSearchOption("top_p", p);
+  // top_k defaults to 50, which exceeds this test's overlaid vocab_size and is rejected as an
+  // invalid request. Set top_k = vocab_size to express "consider all tokens" for pure top-p.
+  setup.params->SetSearchOption("top_k", vocab_size);
 
   std::random_device rd;
   std::mt19937 engine(rd());
