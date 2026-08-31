@@ -1769,9 +1769,13 @@ OgaResult* OgaRequestOptionsSetMaxSessionTokens(
 
 OgaResult* OgaRequestSetDraftTokens(OgaRequest* request, const OgaSequences* tokens) {
   OGA_TRY
-  if (!request || !tokens) {
-    throw std::invalid_argument("request and tokens must not be null.");
+  if (!request) {
+    throw std::runtime_error("request must not be null.");
   }
+  if (!tokens) {
+    throw std::runtime_error("tokens must not be null.");
+  }
+  request->ValidateOwnerThread();
   if (tokens->size() > 1) {
     throw std::runtime_error("Request draft tokens must contain at most one sequence.");
   }

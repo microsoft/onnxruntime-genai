@@ -345,6 +345,9 @@ struct Request : std::enable_shared_from_this<Request>,
   void ApplyLogitsProcessors(DeviceSpan<float> logits);
   void ResetGuidanceForNewTurn();
   void SelectNextToken();
+  void StageVisibleTokens(RequestStepResult& result,
+                          size_t committed_count,
+                          std::optional<int32_t> sampled_token) const;
   RequestStepResult StageGeneration(int64_t sequence_length_before);
   void CommitGuidanceToken(const RequestStepResult& result);
 };

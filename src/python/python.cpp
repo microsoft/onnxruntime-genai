@@ -950,9 +950,9 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
             return buffer_object;
           },
           pybind11::arg("buffer"))
-          .def("has_pending_requests", &OgaEngine::HasPendingRequests)
-          .def("max_draft_tokens_per_step", &OgaEngine::MaxDraftTokensPerStep,
-               "Speculative draft tokens a request may attach to one step; zero when unsupported.");
+      .def("has_pending_requests", &OgaEngine::HasPendingRequests)
+      .def("max_draft_tokens_per_step", &OgaEngine::MaxDraftTokensPerStep,
+           "Speculative draft tokens a request may attach to one step; zero when unsupported.");
 
   pybind11::class_<OgaStreamingProcessor>(m, "StreamingProcessor")
       .def(pybind11::init([](OgaModel& model) { return OgaStreamingProcessor::Create(model); }),

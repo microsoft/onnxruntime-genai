@@ -62,18 +62,18 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
   }
 
   const size_t max_batch_size = cache_manager_->MaxBatchSize();
-    if (max_batch_size > staged_events_.max_size() /
-                 kMaxGeneratedTokensPerStep) {
+  if (max_batch_size > staged_events_.max_size() /
+                           kMaxGeneratedTokensPerStep) {
     throw std::overflow_error(
-      "Engine event capacity exceeds the supported size.");
-    }
-    const size_t max_step_events =
+        "Engine event capacity exceeds the supported size.");
+  }
+  const size_t max_step_events =
       max_batch_size * kMaxGeneratedTokensPerStep;
   step_plan_.requests.reserve(max_batch_size);
   step_results_.reserve(max_batch_size);
   staged_event_order_.reserve(max_batch_size);
-    pending_events_.reserve(max_step_events);
-    staged_events_.reserve(max_step_events);
+  pending_events_.reserve(max_step_events);
+  staged_events_.reserve(max_step_events);
 }
 
 Engine::~Engine() {

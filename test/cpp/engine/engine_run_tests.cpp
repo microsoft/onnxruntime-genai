@@ -1589,6 +1589,40 @@ TEST_F(EngineRunTest, SpeculativeRunKeepsAcceptedPrefixAndEmitsAllTokens) {
   EXPECT_EQ(request->PendingDraftTokenCount(), 0u);
 }
 
+// The bonus row predicting EOS ends the turn without appending it, so the step's only visible
+// tokens are the accepted drafts.
+TEST_F(EngineRunTest, SpeculativeRunWithEosBonusTokenEmitsOnlyAcceptedDrafts) {
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, filler);
+  engine.cache->SetMaxDraftTokensPerStep(3);
+
+  auto request =
+      CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
+  const int64_t length_after_prefill = request->CurrentSequenceLength();
+  const size_t generated_after_prefill = request->TurnGeneratedTokens();
+
+  request->SetDraftTokens(std::vector<int32_t>{11, 12, 13});
+  engine.executor->SetVerifyRowTokens({11, 12, 13, eos});
+
+  std::array<EngineEvent, 4> events;
+  ASSERT_EQ(engine.engine->Run(events), 3u);
+
+  EXPECT_EQ(events[0].token, 11);
+  EXPECT_EQ(events[1].token, 12);
+  EXPECT_EQ(events[2].token, 13);
+  EXPECT_EQ(events[0].flags, EngineEventFlagToken);
+  EXPECT_EQ(events[1].flags, EngineEventFlagToken);
+  EXPECT_EQ(
+      events[2].flags,
+      EngineEventFlagToken | EngineEventFlagTurnFinished);
+  EXPECT_EQ(events[2].finish_reason, GenerationFinishReason::EosToken);
+  EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
+  EXPECT_EQ(request->CurrentSequenceLength(), length_after_prefill + 3);
+  EXPECT_EQ(request->TurnGeneratedTokens(), generated_after_prefill + 3);
+}
+
 TEST_F(EngineRunTest, SpeculativeRunAcceptingEveryDraftEmitsBonusToken) {
   const int32_t eos = EosToken(*model_);
   const int32_t filler = eos == 5 ? 6 : 5;

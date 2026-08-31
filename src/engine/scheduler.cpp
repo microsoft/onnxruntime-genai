@@ -305,52 +305,60 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
         entry.unprocessed_token_count);
   }
 
-  const size_t selected_request_count = plan.requests.size();
-  auto budgeted_requests = plan.requests;
-  while (true) {
-    const auto resource_result = cache_manager_->PlanStepResources(plan);
-    if (resource_result.executable &&
-        plan.requests.size() == selected_request_count) {
-      break;
-    }
+  // Only drafts push a request's reserved slots past the probe that was just validated: a prefill
+  // chunk reserves its whole sequence either way, and a draft-free decode still takes one slot. So
+  // a plan without drafts needs no second planning pass, and must not pay for one every step.
+  const bool plans_drafts = std::any_of(
+      plan.requests.begin(), plan.requests.end(),
+      [](const RequestStepPlan& entry) { return entry.draft_token_count != 0; });
+  if (plans_drafts) {
+    const size_t selected_request_count = plan.requests.size();
+    auto budgeted_requests = plan.requests;
+    while (true) {
+      const auto resource_result = cache_manager_->PlanStepResources(plan);
+      if (resource_result.executable &&
+          plan.requests.size() == selected_request_count) {
+        break;
+      }
 
-    RequestIndex planned_requests{plan.requests.size()};
-    for (size_t index = 0; index < plan.requests.size(); ++index) {
-      if (!planned_requests.Insert(plan.requests[index].request_id, index)) {
-        throw StepPlanningConsistencyError(
-            "Final cache planning selected a duplicate request.");
+      RequestIndex planned_requests{plan.requests.size()};
+      for (size_t index = 0; index < plan.requests.size(); ++index) {
+        if (!planned_requests.Insert(plan.requests[index].request_id, index)) {
+          throw StepPlanningConsistencyError(
+              "Final cache planning selected a duplicate request.");
+        }
       }
-    }
 
-    const auto reduce_draft_count = [&](RequestStepPlan& entry) {
-      --entry.draft_token_count;
-      --entry.unprocessed_token_count;
-      token_counts[entry.scheduling_order] = entry.unprocessed_token_count;
-      entry.target_cache_slots = RequiredSlots(
-          selected_processed_lengths[entry.scheduling_order],
-          entry.unprocessed_token_count);
-    };
-    bool reduced_draft_count = false;
-    for (auto& entry : budgeted_requests) {
-      if (!planned_requests.Find(entry.request_id) &&
-          entry.draft_token_count != 0) {
-        reduce_draft_count(entry);
-        reduced_draft_count = true;
+      const auto reduce_draft_count = [&](RequestStepPlan& entry) {
+        --entry.draft_token_count;
+        --entry.unprocessed_token_count;
+        token_counts[entry.scheduling_order] = entry.unprocessed_token_count;
+        entry.target_cache_slots = RequiredSlots(
+            selected_processed_lengths[entry.scheduling_order],
+            entry.unprocessed_token_count);
+      };
+      bool reduced_draft_count = false;
+      for (auto& entry : budgeted_requests) {
+        if (!planned_requests.Find(entry.request_id) &&
+            entry.draft_token_count != 0) {
+          reduce_draft_count(entry);
+          reduced_draft_count = true;
+        }
       }
-    }
-    if (!reduced_draft_count) {
-      const auto optional_work = std::find_if(
-          budgeted_requests.rbegin(), budgeted_requests.rend(),
-          [](const RequestStepPlan& entry) {
-            return entry.draft_token_count != 0;
-          });
-      if (optional_work == budgeted_requests.rend()) {
-        throw StepPlanningConsistencyError(
-            "Final cache planning rejected required request work.");
+      if (!reduced_draft_count) {
+        const auto optional_work = std::find_if(
+            budgeted_requests.rbegin(), budgeted_requests.rend(),
+            [](const RequestStepPlan& entry) {
+              return entry.draft_token_count != 0;
+            });
+        if (optional_work == budgeted_requests.rend()) {
+          throw StepPlanningConsistencyError(
+              "Final cache planning rejected required request work.");
+        }
+        reduce_draft_count(*optional_work);
       }
-      reduce_draft_count(*optional_work);
+      plan.requests = budgeted_requests;
     }
-    plan.requests = budgeted_requests;
   }
   cache_manager_->OrderStepForExecution(plan);
 
