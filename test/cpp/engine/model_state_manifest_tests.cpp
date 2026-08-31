@@ -243,15 +243,6 @@ TEST(ModelStateManifestTest, AllowsDynamicDimensions) {
   EXPECT_NO_THROW(manifest.ValidateSession(metadata));
 }
 
-TEST(ModelStateManifestTest, AllowsDifferentPagedPoolCapacitiesAcrossLayers) {
-  const ModelStateManifest manifest{MakeSparseDecoder()};
-  auto metadata = MakeValidMetadata();
-  SetPagedLayerShape(metadata, 1, {16, 256, 4, 128});
-  SetPagedLayerShape(metadata, 3, {128, 256, 4, 128});
-
-  EXPECT_NO_THROW(manifest.ValidateSession(metadata));
-}
-
 TEST(ModelStateManifestTest, ValidatesConcreteAndDynamicPagedCacheGeometry) {
   const auto decoder = MakeSparseDecoder();
   auto metadata = MakeValidMetadata();

@@ -119,21 +119,6 @@ bool ShapesCompatible(const std::vector<int64_t>& left,
   return true;
 }
 
-bool PagedShapesCompatible(const std::vector<int64_t>& left,
-                           const std::vector<int64_t>& right) {
-  if (left.size() != right.size()) {
-    return false;
-  }
-  // Axis 0 is pool capacity. Full-context and windowed layers can intentionally use different
-  // pools, so structural manifest validation compares only the common per-block geometry here.
-  for (size_t i = 1; i < left.size(); ++i) {
-    if (left[i] >= 0 && right[i] >= 0 && left[i] != right[i]) {
-      return false;
-    }
-  }
-  return true;
-}
-
 std::string ShapeString(const std::vector<int64_t>& shape) {
   std::ostringstream output;
   output << '[';
@@ -185,7 +170,7 @@ void ValidatePagedGeometry(std::string_view group_label,
     return;
   }
   if (tensor.data_type != reference->data_type ||
-      !PagedShapesCompatible(tensor.shape, reference->shape)) {
+      !ShapesCompatible(tensor.shape, reference->shape)) {
     throw std::runtime_error(
         std::string{group_label} + " has incompatible paged geometry between '" +
         reference->name + "' " + ShapeString(reference->shape) +

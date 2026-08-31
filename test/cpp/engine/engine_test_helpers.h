@@ -30,6 +30,10 @@ inline std::shared_ptr<Model> LoadSyntheticPagedModel() {
   return CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged");
 }
 
+inline std::shared_ptr<Model> LoadSyntheticPagedSmallModel() {
+  return CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged-small");
+}
+
 // Loads the tiny checked-in hybrid decoder used by the fixed-state-pool tests. Its config declares
 // two fixed decoder state groups (convolution layers [0, 3] and recurrent layers [2, 5]) whose
 // bindings resolve to real session inputs/outputs, so FixedStatePool can validate the manifest and

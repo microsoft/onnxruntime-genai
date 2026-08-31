@@ -19,6 +19,9 @@ cache_dir
 example-models
 *.onnx
 *.onnx.data
+!test/models/engine/
+!test/models/engine/synthetic-paged-small/
+!test/models/engine/synthetic-paged-small/*
 __pycache__
 benchmark/python/*.csv
 benchmark/python/*.json

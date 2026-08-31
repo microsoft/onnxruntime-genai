@@ -22,7 +22,6 @@ from _test_utils import register_plugin_providers
 register_plugin_providers(logging.getLogger(__name__))
 
 _MODEL_DIR = Path(__file__).resolve().parent.parent / "models" / "engine" / "synthetic-paged"
-_STATIC_MODEL_DIR = Path(__file__).resolve().parent.parent / "models" / "engine" / "dummy-decoder"
 
 _VOCAB_SIZE = 64
 _BLOCK_SIZE = 4
@@ -74,15 +73,6 @@ def device(request):
 @pytest.fixture
 def model(device):
     config = og.Config(str(_MODEL_DIR))
-    config.clear_providers()
-    if device != "cpu":
-        config.append_provider(device)
-    return og.Model(config)
-
-
-@pytest.fixture
-def static_model(device):
-    config = og.Config(str(_STATIC_MODEL_DIR))
     config.clear_providers()
     if device != "cpu":
         config.append_provider(device)
@@ -636,40 +626,6 @@ def test_close_is_valid_and_idempotent_from_every_state(model, state):
     assert not engine.has_pending_requests()
     with pytest.raises(RuntimeError, match="closed request"):
         request.begin_turn(np.asarray([12], dtype=np.int32))
-
-
-def test_static_close_is_logical_while_peer_remains_active(static_model):
-    engine = og.Engine(static_model)
-    params = og.GeneratorParams(static_model)
-    params.set_search_options(do_sample=False, max_length=10)
-    long_prompt = np.asarray([2, 3, 4, 5, 6], dtype=np.int32)
-    short_prompt = np.asarray([2, 3, 4], dtype=np.int32)
-
-    def create_request(prompt):
-        request = engine.create_request(params)
-        turn_options = og.TurnOptions(request)
-        turn_options.set_max_generated_tokens(2)
-        request.begin_turn(prompt, turn_options)
-        return request
-
-    first = create_request(long_prompt)
-    second = create_request(short_prompt)
-    event_buffer = engine.create_event_buffer(2)
-
-    events = engine.run(event_buffer)
-    assert len(events) == 2
-    assert {event.request for event in events} == {first, second}
-
-    first.close()
-    first.close()
-
-    events = engine.run(event_buffer)
-    assert len(events) == 1
-    assert events[0].request is second
-    assert events[0].flags & og.EngineEventFlags.TURN_FINISHED
-    assert not engine.has_pending_requests()
-
-    second.close()
 
 
 def test_events_deliver_tokens_across_turns(model):

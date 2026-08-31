@@ -203,7 +203,6 @@ struct PagedCacheManager : CacheManager {
   std::unique_ptr<PagedKeyValueCache> key_value_cache_;
   std::unique_ptr<FixedStatePool> fixed_state_pool_;
   std::vector<std::shared_ptr<Request>> cache_allocated_requests_;
-  bool detached_for_teardown_{};
 };
 
 }  // namespace Generators

@@ -227,12 +227,18 @@ def create_config(output_dir):
 
 
 def main():
+    global NUM_BLOCKS, MAX_BATCH_SIZE
+
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--output_dir",
         default=os.path.join(os.path.dirname(__file__), "..", "..", "models", "engine", "synthetic-paged"),
     )
+    parser.add_argument("--num_blocks", type=int, default=NUM_BLOCKS)
+    parser.add_argument("--max_batch_size", type=int, default=MAX_BATCH_SIZE)
     args = parser.parse_args()
+    NUM_BLOCKS = args.num_blocks
+    MAX_BATCH_SIZE = args.max_batch_size
     output_dir = os.path.normpath(args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
     create_decoder(output_dir)

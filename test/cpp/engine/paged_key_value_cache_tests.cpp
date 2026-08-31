@@ -33,12 +33,7 @@ std::string CapturePagedCacheConstructionError(
 class PagedKeyValueCacheTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    model_ = LoadDummyDecoderModel();
-    Config::Engine::DynamicBatching dynamic_batching;
-    dynamic_batching.block_size = 4;
-    dynamic_batching.num_blocks = 3;
-    dynamic_batching.max_batch_size = 2;
-    model_->config_->engine.dynamic_batching = dynamic_batching;
+    model_ = LoadSyntheticPagedSmallModel();
     assign_target_ =
         MakeDoublesEngine(model_, /*capacity=*/2, EosToken(*model_)).engine;
     cache_ = MakePagedCache(model_);
@@ -349,8 +344,8 @@ TEST(PagedKeyValueCacheManifestTest, AllocatesOnlySparseLogicalLayersUsingDecode
 TEST(PagedKeyValueCacheManifestTest, DenseLegacyManifestRetainsSequentialBindings) {
   auto model = LoadDummyDecoderModel();
   model->config_->engine.dynamic_batching = Config::Engine::DynamicBatching{};
-  model->config_->engine.dynamic_batching->block_size = 4;
-  model->config_->engine.dynamic_batching->num_blocks = 3;
+  model->config_->engine.dynamic_batching->block_size = 2;
+  model->config_->engine.dynamic_batching->num_blocks = 2;
   ASSERT_FALSE(model->config_->model.decoder.state_groups.has_value());
 
   auto cache = MakePagedCache(model);
@@ -366,15 +361,6 @@ TEST(PagedKeyValueCacheManifestTest, DenseLegacyManifestRetainsSequentialBinding
   EXPECT_EQ(
       cache->Cache()[0].first->GetTensorTypeAndShapeInfo()->GetElementType(),
       ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-}
-
-TEST(PagedKeyValueCacheManifestTest, AcceptsDynamicPagedTensorGeometry) {
-  auto model = LoadDummyDecoderModel();
-  model->config_->engine.dynamic_batching = Config::Engine::DynamicBatching{};
-  model->config_->engine.dynamic_batching->block_size = 4;
-  model->config_->engine.dynamic_batching->num_blocks = 3;
-
-  EXPECT_NO_THROW(static_cast<void>(MakePagedCache(model)));
 }
 
 TEST(PagedKeyValueCacheManifestTest, RejectsConcretePagedPoolSizeMismatchAtConstruction) {

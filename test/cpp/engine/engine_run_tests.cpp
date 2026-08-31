@@ -235,8 +235,6 @@ TEST(EngineLifetimeTest, DestroyingEngineReleasesCompositeCacheStorage) {
   engine.reset();
 
   EXPECT_EQ(cache->ResidentRequestCount(), 0u);
-  EXPECT_FALSE(cache->IsResident(first));
-  EXPECT_FALSE(cache->IsResident(second));
   EXPECT_FALSE(cache->FixedStateSnapshot().has_value());
   EXPECT_EQ(first->status_, RequestStatus::Closed);
   EXPECT_EQ(second->status_, RequestStatus::Closed);

@@ -125,12 +125,9 @@ Each config is a list of scenario entries:
 | `execution_provider_library` | Path to the provider plugin. Required for `cuda`, registered once per process. |
 | `generation_tokens` | Tokens generated per request. |
 
-`mixed_workload` first prefills every short request through one sampled token so each is waiting at
-an active-decode boundary. It then admits the long-prefill request and starts measurement. The full
-and focused matrices use a hardcoded 128K prefill at concurrency 4 and 8; the smoke test uses the
-smallest 0.5B, concurrency-4 entry. The scenario verifies that every short request emitted a token
-during prefetch and that every short request emits another decode token after long-prefill
-admission but before the long request's first token. The long-prefill request is intentionally
+`mixed_workload` runs one long-prefill request alongside active decode requests. The full and
+focused matrices use a hardcoded 128K prefill at concurrency 4 and 8; the smoke test uses the
+smallest 0.5B, concurrency-4 entry. In this scenario, the long-prefill request is intentionally
 capped to one generated token while decode requests keep `generation_tokens`; this keeps the
 prefill request from pushing max-length/context usage into unstable CUDA/KV-pressure territory
 while still measuring prefill-vs-decode interference.

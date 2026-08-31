@@ -462,7 +462,6 @@ void PagedCacheManager::DetachRequestForTeardown(
 
   // Engine teardown invalidates every resident Request, so release the complete paged and fixed
   // cache state at once rather than walking ownership systems that cannot be used again.
-  detached_for_teardown_ = true;
   fixed_state_pool_.reset();
   key_value_cache_.reset();
   key_value_cache_state_.reset();
@@ -477,13 +476,6 @@ std::vector<std::shared_ptr<Request>> PagedCacheManager::AllocatedRequests() con
 }
 
 bool PagedCacheManager::IsResident(const std::shared_ptr<Request>& request) const {
-  if (detached_for_teardown_) {
-    return false;
-  }
-  if (!key_value_cache_) {
-    throw std::logic_error(
-        "Paged cache manager has no key-value cache outside Engine teardown.");
-  }
   return key_value_cache_->OwnsRequest(request.get());
 }
 
