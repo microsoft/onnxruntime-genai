@@ -238,10 +238,22 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
       const auto& search = entry.request->SearchOptions();
       const int64_t committed_length_after_step =
           entry.request->CurrentSequenceLength();
+      const size_t sequence_limit =
+          std::min(static_cast<size_t>(search.max_length),
+                   entry.request->max_total_tokens_);
+      const size_t remaining_turn_tokens =
+          entry.request->RemainingTurnTokenBudget();
+      const size_t remaining_turn_tokens_after_step =
+          result.visible_token_count < remaining_turn_tokens
+              ? remaining_turn_tokens - result.visible_token_count
+              : 0;
       const size_t max_draft_tokens = std::min({MaxDraftTokensPerStep(),
                                                 static_cast<size_t>(entry.request->params_->speculative.max_draft_tokens),
-                                                committed_length_after_step + 1 < search.max_length
-                                                    ? static_cast<size_t>(search.max_length - committed_length_after_step - 1)
+                                                static_cast<size_t>(committed_length_after_step) + 1 < sequence_limit
+                                                    ? sequence_limit - static_cast<size_t>(committed_length_after_step) - 1
+                                                    : size_t{0},
+                                                remaining_turn_tokens_after_step > 1
+                                                    ? remaining_turn_tokens_after_step - 1
                                                     : size_t{0}});
       if (!result.token_appended || result.done ||
           entry.request->DraftTokenValidationError() ||
@@ -468,6 +480,8 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
     // ArgMax can still be reading its logits after Decode returns.
     std::vector<std::unique_ptr<ScheduledRequests>> pending_device_requests;
     pending_device_requests.reserve(max_draft_tokens - 1);
+    std::vector<std::unique_ptr<Tensor>> pending_device_inputs;
+    pending_device_inputs.reserve(max_draft_tokens - 1);
 
     for (size_t draft_index = 1; !active_feed_indices.empty(); ++draft_index) {
       StepPlan chain_plan;
@@ -536,6 +550,7 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
         if (device_draft_chain) {
           materialize_device_drafts();
           pending_device_requests.clear();
+          pending_device_inputs.clear();
           device_draft_chain = false;
         }
         chain_drafts = GreedyTokens(mtp_model_, chain_logits);
@@ -566,7 +581,12 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
           throw std::runtime_error(
               "Chained MTP hidden-state output does not match the active request batch.");
         }
-        feedback_hidden = copy_hidden_rows(*head_hidden, next_feedback_rows);
+        auto next_feedback_hidden =
+            copy_hidden_rows(*head_hidden, next_feedback_rows);
+        if (device_draft_chain) {
+          pending_device_inputs.push_back(std::move(feedback_hidden));
+        }
+        feedback_hidden = std::move(next_feedback_hidden);
       }
       if (device_draft_chain) {
         pending_device_requests.push_back(std::move(chain_requests));
@@ -834,13 +854,7 @@ void Engine::CloseRequest(const std::shared_ptr<Request>& request) {
       !cache_manager_->SupportsDynamicBatching() &&
       cache_manager_->IsResident(request);
 
-  if (const auto mtp_it = mtp_requests_.find(request.get());
-      mtp_it != mtp_requests_.end()) {
-    std::vector<std::shared_ptr<Request>> mtp_requests{mtp_it->second};
-    mtp_cache_manager_->Deallocate(mtp_requests);
-    mtp_it->second->CompleteClose();
-    mtp_requests_.erase(mtp_it);
-  }
+  CloseMtpRequest(request);
 
   pending_events_.erase(
       pending_events_.begin(),
@@ -869,6 +883,17 @@ void Engine::CloseRequest(const std::shared_ptr<Request>& request) {
             return tracked == request;
           }),
       tracked_requests_.end());
+}
+
+void Engine::CloseMtpRequest(const std::shared_ptr<Request>& request) {
+  const auto mtp_it = mtp_requests_.find(request.get());
+  if (mtp_it == mtp_requests_.end()) {
+    return;
+  }
+  std::vector<std::shared_ptr<Request>> mtp_requests{mtp_it->second};
+  mtp_cache_manager_->Deallocate(mtp_requests);
+  mtp_it->second->CompleteClose();
+  mtp_requests_.erase(mtp_it);
 }
 
 void Engine::DetachRequestForTeardown(
@@ -1506,6 +1531,7 @@ EngineEvent Engine::FailUnserviceableRequest(const void* request_id) {
             "Invalid unserviceable Request identity."}));
   }
   scheduler_->RemoveRequest(request);
+  CloseMtpRequest(request);
   request->CompleteFailedTurnFromEngine(*this);
 
   EngineEvent event;

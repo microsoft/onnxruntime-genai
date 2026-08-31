@@ -452,12 +452,11 @@ At Engine construction:
 pending_events_.reserve(cache_manager_->MaxBatchSize());
 ```
 
-`reserve` allocates capacity without constructing events. A committed step produces at most one
-combined event per affected Request, so normal retained output is bounded by the scheduled batch
-size. Request creation grows the retained-event capacity to the tracked Request count because fatal
-handling publishes a terminal event for every executable Turn, including Requests outside the
-failed batch. This keeps event publication allocation-free after model/cache commit and after the
-Engine becomes unhealthy.
+`reserve` allocates capacity without constructing events. A speculative transaction can produce up
+to `max_draft_tokens_per_step + 1` token events per affected Request. Request creation grows the
+retained-event capacity for the tracked Request count because fatal handling publishes a terminal
+event for every executable Turn, including Requests outside the failed batch. This keeps event
+publication allocation-free after model/cache commit and after the Engine becomes unhealthy.
 
 Conceptual positive-capacity `Run` flow:
 
@@ -529,10 +528,11 @@ OgaRequestGetUnseenToken
 
 and remove their internal unseen-index FIFO bookkeeping.
 
-At successful step commit, the Engine already knows the Request, Turn ID, selected token, terminal
-state, finish reason, and usage. It captures those values in `PendingEngineEvent`. One committed
-step produces at most one combined event per affected Request. `OgaEngineRun` moves the available
-FIFO prefix into the reusable Buffer storage and retains overflow.
+At successful step commit, the Engine already knows the Request, Turn ID, visible tokens, terminal
+state, finish reason, and usage. It captures those values in `PendingEngineEvent`. A speculative
+transaction emits accepted drafts followed by its correction or bonus token; only the final event
+carries terminal state when the Turn finishes. `OgaEngineRun` moves the available FIFO prefix into
+the reusable Buffer storage and retains overflow.
 
 `tokens_host_` and the Search sequence remain authoritative resident conversation state. Event
 delivery does not remove tokens from that state. Because token and Turn ID are captured together at

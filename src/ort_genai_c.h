@@ -1443,9 +1443,12 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestClose(OgaRequest* request);
  * \brief Proposes speculative draft tokens for the request's next decode operation.
  *
  * The request must be ready to decode. The operation then runs one row per draft on top of its own
- * token, verifies each draft against the model's prediction, and keeps the accepted prefix. Passing
- * an empty sequence clears the proposal. Requires a greedy request and an engine whose cache can
- * roll a rejected draft back (see OgaEngineMaxDraftTokensPerProposal).
+ * token, verifies each draft against the model's prediction, and keeps the accepted prefix. The
+ * proposal applies to the next step only:
+ * a committed step consumes it whether or not it could verify it. Passing an empty sequence clears
+ * the proposal. Random target sampling is supported for deterministic draft proposals when top_k
+ * is positive. Requires an engine whose cache can roll a rejected draft back (see
+ * OgaEngineMaxDraftTokensPerProposal).
  *
  * \param[in] request The request to propose drafts for.
  * \param[in] tokens One sequence holding the draft continuation, in order.

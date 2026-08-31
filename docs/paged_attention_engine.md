@@ -363,12 +363,13 @@ borrowed. A Buffer event holds the Request internally for the lifetime of that v
 returned `const OgaRequest*` is never an independently owned handle and is invalidated with the
 event.
 
-A committed step emits a token event, a terminal event, or one combined
-`Token | TurnFinished` event. EOS can emit terminal completion without a visible token. Event
-delivery does not mutate the Request's retained logical sequence. One successful committed step
-produces at most one combined event per affected Request. If speculative verification accepts a
-visible draft immediately before an accepted EOS ends the Turn, the accepted visible token and
-terminal completion share that combined event; the EOS itself is never emitted as a token.
+A committed step emits zero or more token events and may emit a terminal event. The final visible
+token can carry `Token | TurnFinished`; EOS can emit terminal completion without a visible token.
+Speculative verification emits each accepted draft and its correction or bonus as a separate token
+event in sequence order. If verification accepts a visible draft immediately before an accepted EOS
+ends the Turn, the accepted visible token and terminal completion share that combined event; the EOS
+itself is never emitted as a token. Event delivery does not mutate the Request's retained logical
+sequence.
 
 A chunked partial-prefill transaction can commit cache and Request progress without producing an
 event. `Run()` then returns count zero while `HasPendingRequests()` remains true. It does not loop
@@ -386,12 +387,13 @@ This distinction is important:
 If the engine has previously encountered a fatal transaction or execution failure, `Run()` rethrows
 the stored error instead of attempting more work.
 
-## Caller-supplied speculative drafts
+## Speculative drafts
 
-The dynamic Engine can verify a caller-supplied continuation together with a request's next decode
-token. This is separate from the `Generator` API's draft-model and n-gram strategies: the Engine
-does not create a proposer. The caller proposes tokens for one request before the next step with
-`Request::SetDraftTokens` (`OgaRequestSetDraftTokens` in C or `Request.set_draft_tokens` in Python).
+The dynamic Engine can verify a continuation together with a request's next decode token. A caller
+can propose tokens before the next step with `Request::SetDraftTokens` (`OgaRequestSetDraftTokens`
+in C or `Request.set_draft_tokens` in Python). When `model.mtp` names an auxiliary draft head, the
+Engine also maintains an internal shadow Request and automatically proposes a chained greedy
+continuation after each committed target step.
 
 Query the internal `Engine::MaxDraftTokensPerStep` capability through
 `OgaEngineMaxDraftTokensPerProposal`, `OgaEngine::MaxDraftTokensPerProposal`, or
@@ -401,16 +403,18 @@ The reported value is a capability limit, not a guarantee that every proposed to
 step's global token budget or current cache capacity.
 
 The request must already belong to the Engine, have completed prefill, and be ready to decode.
-Verification currently supports only requests whose resolved search mode is greedy (`do_sample` is
-false, `top_k` is 1, or `temperature` is zero), with no guidance, repetition penalty,
-no-repeat-ngram processing, or active minimum-length processing. Passing an empty sequence clears a
-pending proposal.
+Verification supports greedy target selection and random target sampling with a positive `top_k`;
+proposals remain deterministic. Guidance,
+repetition penalty, no-repeat-ngram processing, and active minimum-length processing are not
+supported. Passing an empty sequence clears a pending proposal.
 
 For a decode with K scheduled drafts, the packed input is the request's one unprocessed token
 followed by the K drafts. The decoder must return K+1 logits rows for that request. Row `i` predicts
 draft `i`; verification accepts the longest prefix whose tokens equal the target argmax. The first
 nonmatching row supplies the replacement token, or row K supplies a bonus token when every draft is
-accepted. Accepted drafts and the replacement or bonus are published together, so one model run can
+accepted. Under random target sampling, each target row is sampled and the deterministic draft is
+accepted when it matches that sample; the first mismatch is the correction token. Accepted drafts
+and the correction or bonus are published together, so one model run can
 publish several ordered token events. If the caller's event buffer cannot hold all of them, `Run()`
 retains the overflow and drains it on subsequent calls before executing the model again. Callers
 must process all returned events before reusing the buffer.
@@ -544,7 +548,7 @@ The fixed sub-reservation, when present, admits the same rows in the same order.
 Physical execution ordering does not change event ordering. Each row retains its logical scheduler
 rank, and the Engine restores that order when it publishes the transaction's events after commit.
 
-The fixed `target_tokens` mirror the paged `target_cache_slots`, so both states commit at one token boundary. `StepPlan::fixed_state` records the fixed row count, new-slot count, and binding footprint; `Engine::StepDynamic()` then proves the reservation matches that plan exactly -- required flag, row count, new-slot count, bytes, and per-row request identity -- and fails fatally on any mismatch. A composite reservation wraps exactly one paged reservation and the Engine holds at most one at a time, so the paged split-commit contract (its constructor reserves its own `committed_tables_` headroom, and the pool permits a single live reservation) holds without any cross-reservation aggregate check.
+The fixed `target_tokens` mirror the paged `target_cache_slots`, so both states commit at one token boundary. `StepPlan::fixed_state` records the fixed row count, new-slot count, and binding footprint; `Engine::RunDynamic()` then proves the reservation matches that plan exactly -- required flag, row count, new-slot count, bytes, and per-row request identity -- and fails fatally on any mismatch. A composite reservation wraps exactly one paged reservation and the Engine holds at most one at a time, so the paged split-commit contract (its constructor reserves its own `committed_tables_` headroom, and the pool permits a single live reservation) holds without any cross-reservation aggregate check.
 
 While the reservation is active, decoder input preparation can view a combined block table containing:
 
