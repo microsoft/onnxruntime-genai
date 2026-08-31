@@ -168,6 +168,12 @@ steps:
 # via cmake/nuget.cmake. Authenticate the pipeline identity; the build passes the
 # Lotus URL directly to every NuGet invocation.
 - ${{ if eq(parameters.ep, 'winml') }}:
+  - task: NuGetToolInstaller@1
+    displayName: 'Install NuGet CLI'
+    inputs:
+      versionSpec: '6.x'
+      checkLatest: true
+
   - task: NuGetAuthenticate@1
     displayName: 'Authenticate NuGet to Lotus feed (WinML SDK)'
 
