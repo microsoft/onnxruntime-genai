@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "engine.h"
+#include "../logging.h"
 #include "../search.h"
 
 #include <limits>
@@ -261,11 +262,17 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
     // The committed length this step ends at: the accepted prefix plus the token just sampled.
     const int64_t length_after_step = static_cast<int64_t>(first_position + valid_rows) +
                                       (results[i].token_appended ? 1 : 0);
-    const size_t width = std::min(
-        {max_drafts, static_cast<size_t>(entry.request->params_->speculative.max_draft_tokens),
-         length_after_step + 1 < search.max_length
-             ? static_cast<size_t>(search.max_length - length_after_step - 1)
-             : size_t{0}});
+    const size_t sequence_limit =
+        std::min(static_cast<size_t>(search.max_length), entry.request->max_total_tokens_);
+    const size_t remaining_turn_tokens = entry.request->RemainingTurnTokenBudget();
+    const size_t remaining_turn_tokens_after_step =
+        results[i].visible_token_count < remaining_turn_tokens
+            ? remaining_turn_tokens - results[i].visible_token_count
+            : 0;
+    const size_t width = Dflash2DraftWidth(
+        max_drafts, static_cast<size_t>(entry.request->params_->speculative.max_draft_tokens),
+        static_cast<size_t>(length_after_step), sequence_limit,
+        remaining_turn_tokens_after_step);
     feed.wants_drafts = width > 0 && results[i].token_appended && !results[i].done && greedy &&
                         search.repetition_penalty == 1.0f && search.no_repeat_ngram_size == 0 &&
                         search.min_length <= length_after_step;
@@ -1684,7 +1691,29 @@ void Engine::RunDynamic() {
         PublishMtpDrafts(*mtp_step);
       }
       if (dflash2_drafter_ && MaxDraftTokensPerStep() > 0) {
-        PublishDflash2Drafts(step_plan_, scheduled_requests);
+        try {
+          PublishDflash2Drafts(step_plan_, scheduled_requests);
+        } catch (...) {
+          const auto dflash2_error = std::current_exception();
+          for (const auto& feed : dflash2_feeds_) {
+            if (feed.request) {
+              feed.request->draft_tokens_.clear();
+            }
+          }
+          dflash2_drafter_.reset();
+          try {
+            try {
+              std::rethrow_exception(dflash2_error);
+            } catch (const std::exception& error) {
+              Log("warning", std::string{"Disabling DFlash 2 after proposal failure: "} + error.what());
+            } catch (...) {
+              Log("warning", "Disabling DFlash 2 after a non-standard proposal failure.");
+            }
+          } catch (...) {
+            // Warning emission must not turn an optional post-commit drafter failure into a fatal
+            // target transaction failure.
+          }
+        }
       }
     } catch (...) {
       MarkUnhealthyAndThrow(
@@ -1786,6 +1815,9 @@ EngineEvent Engine::FailUnserviceableRequest(const void* request_id) {
   }
   scheduler_->RemoveRequest(request);
   CloseMtpRequest(request);
+  if (dflash2_drafter_) {
+    dflash2_drafter_->Release(request.get());
+  }
   request->status_ = RequestStatus::TurnComplete;
   request->finish_reason_ = GenerationFinishReason::Failed;
 

@@ -11,6 +11,7 @@
 #include <numeric>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace Generators {
 
@@ -52,10 +53,78 @@ int32_t CheckedMetadataValue(size_t value, std::string_view description) {
   return static_cast<int32_t>(value);
 }
 
+void InheritProviderOptions(const Config::SessionOptions& parent,
+                            Config::SessionOptions& child) {
+  if (child.providers.empty()) {
+    child.providers = parent.providers;
+  }
+  for (const auto& parent_provider : parent.provider_options) {
+    auto child_provider = std::find_if(
+        child.provider_options.begin(), child.provider_options.end(),
+        [&parent_provider](const Config::ProviderOptions& provider) {
+          return provider.name == parent_provider.name;
+        });
+    if (child_provider == child.provider_options.end()) {
+      child.provider_options.push_back(parent_provider);
+      continue;
+    }
+    if (!child_provider->device_filtering_options) {
+      child_provider->device_filtering_options = parent_provider.device_filtering_options;
+    }
+    for (const auto& parent_option : parent_provider.options) {
+      const bool overridden = std::any_of(
+          child_provider->options.begin(), child_provider->options.end(),
+          [&parent_option](const Config::NamedString& option) {
+            return option.first == parent_option.first;
+          });
+      if (!overridden) {
+        child_provider->options.push_back(parent_option);
+      }
+    }
+  }
+}
+
+void RequireTensor(const ModelStateMetadata& metadata, const std::string& name,
+                   bool input, ONNXTensorElementDataType type, size_t rank) {
+  const bool present = input ? metadata.HasInput(name) : metadata.HasOutput(name);
+  if (name.empty() || !present) {
+    throw std::runtime_error(
+        "model.dflash2 " + std::string{input ? "input '" : "output '"} + name + "' is missing.");
+  }
+  const auto actual_type = input ? metadata.GetInputDataType(name) : metadata.GetOutputDataType(name);
+  const auto shape = input ? metadata.GetInputShape(name) : metadata.GetOutputShape(name);
+  if (actual_type != type || shape.size() != rank) {
+    throw std::runtime_error(
+        "model.dflash2 " + std::string{input ? "input '" : "output '"} + name +
+        "' has an incompatible type or rank.");
+  }
+}
+
+bool DimensionMatches(int64_t actual, int expected) {
+  return actual < 0 || actual == expected;
+}
+
 }  // namespace
+
+size_t Dflash2DraftWidth(size_t capability_limit, size_t configured_limit,
+                         size_t sequence_length_after_step, size_t sequence_limit,
+                         size_t remaining_turn_tokens_after_step) {
+  const size_t sequence_capacity =
+      sequence_length_after_step < sequence_limit &&
+              sequence_limit - sequence_length_after_step > 1
+          ? sequence_limit - sequence_length_after_step - 1
+          : 0;
+  const size_t turn_capacity =
+      remaining_turn_tokens_after_step > 1 ? remaining_turn_tokens_after_step - 1 : 0;
+  return std::min({capability_limit, configured_limit, sequence_capacity, turn_capacity});
+}
 
 std::unique_ptr<Config> CreateDflash2Config(const Config& config) {
   const auto& dflash2 = config.model.dflash2;
+  if (!config.model.mtp.filename.empty()) {
+    throw std::runtime_error(
+        "An Engine model cannot configure both model.mtp and model.dflash2.");
+  }
   if (dflash2.filename.empty()) {
     throw std::runtime_error("model.dflash2.filename is required to create a DFlash 2 drafter.");
   }
@@ -80,6 +149,8 @@ std::unique_ptr<Config> CreateDflash2Config(const Config& config) {
   decoder.filename = dflash2.filename;
   if (dflash2.session_options) {
     decoder.session_options = *dflash2.session_options;
+    InheritProviderOptions(config.model.decoder.session_options,
+                           decoder.session_options);
   }
   decoder.run_options = dflash2.run_options;
   decoder.shared_initializers = dflash2.shared_initializers;
@@ -120,6 +191,64 @@ void ValidateDflash2ModelCompatibility(const Config& config,
     throw std::runtime_error(
         "DFlash 2 requires matching auxiliary hidden-state tensor types.");
   }
+
+  const auto& inputs = dflash2.inputs;
+  for (const auto* name : {&inputs.q_row_map, &inputs.qkv_row_map,
+                           &inputs.block_row_index, &inputs.cumulative_sequence_lengths,
+                           &inputs.past_sequence_lengths}) {
+    RequireTensor(drafter_metadata, *name, true, Ort::TypeToTensorType<int32_t>, 1);
+  }
+  RequireTensor(drafter_metadata, inputs.input_ids, true,
+                Ort::TypeToTensorType<int64_t>, 1);
+  RequireTensor(drafter_metadata, inputs.block_table, true,
+                Ort::TypeToTensorType<int32_t>, 2);
+  RequireTensor(drafter_metadata, inputs.attention_metadata, true,
+                Ort::TypeToTensorType<int32_t>, 1);
+  const auto metadata_shape = drafter_metadata.GetInputShape(inputs.attention_metadata);
+  if (!DimensionMatches(metadata_shape[0], 3)) {
+    throw std::runtime_error("model.dflash2 attention_metadata must contain three values.");
+  }
+
+  RequireTensor(drafter_metadata, dflash2.outputs.candidate_ids, false,
+                Ort::TypeToTensorType<int32_t>, 3);
+  RequireTensor(drafter_metadata, dflash2.outputs.scores, false,
+                Ort::TypeToTensorType<float>, 4);
+  const auto candidate_shape = drafter_metadata.GetOutputShape(dflash2.outputs.candidate_ids);
+  const auto scores_shape = drafter_metadata.GetOutputShape(dflash2.outputs.scores);
+  if (!DimensionMatches(candidate_shape[1], dflash2.num_draft_tokens) ||
+      !DimensionMatches(candidate_shape[2], dflash2.selector_top_k) ||
+      !DimensionMatches(scores_shape[1], dflash2.num_draft_tokens) ||
+      !DimensionMatches(scores_shape[2], dflash2.selector_top_k) ||
+      !DimensionMatches(scores_shape[3], dflash2.selector_top_k)) {
+    throw std::runtime_error("model.dflash2 selector outputs do not match the configured geometry.");
+  }
+
+  ONNXTensorElementDataType cache_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
+  for (int layer = 0; layer < dflash2.num_hidden_layers; ++layer) {
+    for (const auto [input_pattern, output_pattern] : {
+             std::pair{&inputs.past_key_names, &dflash2.outputs.present_key_names},
+             std::pair{&inputs.past_value_names, &dflash2.outputs.present_value_names}}) {
+      const auto input_name = ComposeKeyValueName(*input_pattern, layer);
+      const auto output_name = ComposeKeyValueName(*output_pattern, layer);
+      if (input_name.empty() || !drafter_metadata.HasInput(input_name) ||
+          output_name.empty() || !drafter_metadata.HasOutput(output_name)) {
+        throw std::runtime_error("model.dflash2 cache input or output is missing.");
+      }
+      const auto input_type = drafter_metadata.GetInputDataType(input_name);
+      const auto output_type = drafter_metadata.GetOutputDataType(output_name);
+      const auto input_shape = drafter_metadata.GetInputShape(input_name);
+      const auto output_shape = drafter_metadata.GetOutputShape(output_name);
+      if (input_shape.size() != 4 || output_shape.size() != 4 || input_type != output_type ||
+          (cache_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED && input_type != cache_type) ||
+          !DimensionMatches(input_shape[2], dflash2.num_key_value_heads) ||
+          !DimensionMatches(input_shape[3], dflash2.head_size) ||
+          !DimensionMatches(output_shape[2], dflash2.num_key_value_heads) ||
+          !DimensionMatches(output_shape[3], dflash2.head_size)) {
+        throw std::runtime_error("model.dflash2 cache tensors do not match the configured geometry.");
+      }
+      cache_type = input_type;
+    }
+  }
 }
 
 Dflash2Model::Dflash2Model(std::unique_ptr<Config> config, OrtEnv& ort_env)
@@ -139,9 +268,14 @@ size_t Dflash2Drafter::BytesPerBlock(const Config& config, size_t paged_block_si
   }
   // K and V, for every layer, for every slot in a block. The cache element width follows the
   // drafter body, which is bfloat16.
-  return size_t{2} * static_cast<size_t>(dflash2.num_hidden_layers) * paged_block_size *
-         static_cast<size_t>(dflash2.num_key_value_heads) * static_cast<size_t>(dflash2.head_size) *
-         sizeof(uint16_t);
+  size_t bytes = CheckedMultiply(size_t{2}, static_cast<size_t>(dflash2.num_hidden_layers),
+                                 "DFlash 2 cache bytes per block");
+  bytes = CheckedMultiply(bytes, paged_block_size, "DFlash 2 cache bytes per block");
+  bytes = CheckedMultiply(bytes, static_cast<size_t>(dflash2.num_key_value_heads),
+                          "DFlash 2 cache bytes per block");
+  bytes = CheckedMultiply(bytes, static_cast<size_t>(dflash2.head_size),
+                          "DFlash 2 cache bytes per block");
+  return CheckedMultiply(bytes, sizeof(uint16_t), "DFlash 2 cache bytes per block");
 }
 
 size_t Dflash2Drafter::PoolBlocks(const Config& config, size_t paged_block_size,
@@ -155,12 +289,21 @@ size_t Dflash2Drafter::PoolBlocks(const Config& config, size_t paged_block_size,
         "The Engine-hosted DFlash 2 drafter requires a sliding window; a full-attention drafter "
         "would need a cache as large as the target's.");
   }
+  if (paged_block_size == 0) {
+    throw std::runtime_error("The DFlash 2 paged cache block size must be positive.");
+  }
   // The window bounds what a query block can ever read, so a request only needs a ring long enough
   // to hold that window plus the block itself, whatever its context length.
-  const size_t positions = static_cast<size_t>(dflash2.sliding_window) +
-                           2 * static_cast<size_t>(dflash2.block_size);
-  const size_t ring = (positions + paged_block_size - 1) / paged_block_size + 1;
-  return std::max(max_batch_size, size_t{1}) * ring;
+  const size_t positions = CheckedAdd(
+      static_cast<size_t>(dflash2.sliding_window),
+      CheckedMultiply(size_t{2}, static_cast<size_t>(dflash2.block_size),
+                      "DFlash 2 cache ring positions"),
+      "DFlash 2 cache ring positions");
+  const size_t rounded_blocks = positions / paged_block_size +
+                                static_cast<size_t>(positions % paged_block_size != 0);
+  const size_t ring = CheckedAdd(rounded_blocks, size_t{1}, "DFlash 2 cache ring blocks");
+  return CheckedMultiply(std::max(max_batch_size, size_t{1}), ring,
+                         "DFlash 2 cache block count");
 }
 
 Dflash2Drafter::Dflash2Drafter(std::shared_ptr<Dflash2Model> model, size_t paged_block_size,
@@ -199,9 +342,13 @@ Dflash2Drafter::Dflash2Drafter(std::shared_ptr<Dflash2Model> model, size_t paged
   run_options_ = OrtRunOptions::Create();
   if (model_->config_->model.decoder.run_options) {
     for (const auto& entry : *model_->config_->model.decoder.run_options) {
-      run_options_->AddConfigEntry(entry.first.c_str(), entry.second.c_str());
+      if (entry.first != "gpu_graph_id") {
+        run_options_->AddConfigEntry(entry.first.c_str(), entry.second.c_str());
+      }
     }
   }
+  // Proposal tensors are rebuilt for every packed batch, so their addresses are not capturable.
+  run_options_->AddConfigEntry("gpu_graph_id", "-1");
 }
 
 void Dflash2Drafter::AllocateCache() {
