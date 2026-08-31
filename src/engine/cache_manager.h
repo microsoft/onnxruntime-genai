@@ -18,6 +18,7 @@ struct CacheStepReservation {
   virtual PagedCacheReservation* PagedReservation() { return nullptr; }
   // Fixed decoder-state resources this reservation owns, in scheduled request row order. Empty for
   // a paged-only reservation.
+  virtual FixedStateReservation* FixedReservation() { return nullptr; }
   virtual std::span<const FixedStateSlotHandle> FixedStateSlots() const { return {}; }
   virtual std::span<const FixedStateBinding> FixedStateBindings() const { return {}; }
   virtual size_t FixedStateStagingBytes() const { return 0; }
@@ -25,6 +26,13 @@ struct CacheStepReservation {
   // Validate every ownership and capacity precondition of the whole reservation without publishing
   // or performing device work. PrepareCommit additionally performs all fallible device work (fixed
   // staging into inactive banks) so the subsequent Commit() crosses the boundary without retry.
+  // Narrows one scheduled row's step to the accepted prefix of a speculative verify, moving the
+  // paged KV boundary and the fixed decoder state to the same token together. Must be called
+  // before PrepareCommit.
+  virtual void CommitPrefix(size_t /*row*/, const void* /*request_id*/,
+                            size_t /*step_tokens*/, size_t /*kept_tokens*/) {
+    throw std::logic_error("Cache step reservation cannot commit a partial step.");
+  }
   virtual void ValidateCommit() const {}
   virtual void PrepareCommit() { ValidateCommit(); }
   virtual void Commit() = 0;
@@ -80,6 +88,11 @@ struct CacheManager {
   // Maximum query tokens one request can contribute to a step, or 0 when the cache imposes no
   // per-request limit. Sliding-window rings use this to prevent a step from overwriting live KV.
   virtual size_t MaxQueryTokensPerRequest() const { return 0; }
+
+  // Speculative draft tokens one request may attach to a decode step, or 0 when this cache cannot
+  // roll a rejected draft back. A verify step runs 1 + drafts tokens, so a model with recurrent
+  // state is capped by its checkpoint window.
+  virtual size_t MaxDraftTokensPerStep() const { return 0; }
 
   // Immutable snapshot of the cache's block accounting for invariant validation and state
   // inspection. Caches that do not use paged blocks return an empty snapshot.
@@ -166,6 +179,8 @@ struct PagedCacheManager : CacheManager {
   size_t MaxQueryTokensPerRequest() const override {
     return key_value_cache_->MaxQueryTokensPerRequest();
   }
+
+  size_t MaxDraftTokensPerStep() const override;
 
   PagedCacheSnapshot Snapshot() const override { return key_value_cache_->Snapshot(); }
 

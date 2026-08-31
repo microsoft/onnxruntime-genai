@@ -50,12 +50,11 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
       if (fixed_state_pool) {
         // Fixed and paged track the same per-request cache-slot boundary: the fixed target_tokens
         // mirror the paged target so both commit at one token boundary. The pool infers resident
-        // vs. new ownership itself, so no newly_admitted flag is passed. capture_count stays 0
-        // until MTP scheduling requests compact state_update captures, so no step currently
-        // reaches FixedStateReservation::CommitPrefix.
+        // vs. new ownership itself, so no newly_admitted flag is passed.
         fixed_requests.push_back(FixedStateReservationRequest{
             entry.request_id,
             entry.target_cache_slots,
+            entry.draft_token_count,
         });
       }
       if (entry.newly_admitted) {
@@ -77,6 +76,10 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
     return &*paged_reservation_;
   }
 
+  FixedStateReservation* FixedReservation() override {
+    return fixed_reservation_ ? &*fixed_reservation_ : nullptr;
+  }
+
   std::span<const FixedStateSlotHandle> FixedStateSlots() const override {
     return fixed_reservation_ ? fixed_reservation_->Handles()
                               : std::span<const FixedStateSlotHandle>{};
@@ -93,6 +96,20 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
 
   size_t FixedStateNewSlotCount() const override {
     return fixed_reservation_ ? fixed_reservation_->NewSlotCount() : 0;
+  }
+
+  void CommitPrefix(size_t row, const void* request_id,
+                    size_t step_tokens, size_t kept_tokens) override {
+    if (prepared_ || committed_) {
+      throw std::logic_error(
+          "Composite cache step reservation no longer accepts prefix commits.");
+    }
+    // Fixed first: it is the only one of the two that can reject the request (no checkpoints, or a
+    // step longer than the checkpoint window), so the paged boundary is never lowered on its own.
+    if (fixed_reservation_) {
+      fixed_reservation_->CommitPrefix(row, step_tokens, kept_tokens);
+    }
+    paged_reservation_->CommitPrefix(request_id, step_tokens, kept_tokens);
   }
 
   void ValidateCommit() const override {
@@ -436,6 +453,20 @@ void PagedCacheManager::Deallocate(std::vector<std::shared_ptr<Request>>& reques
 
 bool PagedCacheManager::SupportsDynamicBatching() const { return true; }
 
+size_t PagedCacheManager::MaxDraftTokensPerStep() const {
+  // Recurrent state can only be replayed through the compact transitions the operators captured.
+  // Without fixed state the paged KV boundary alone decides, and any tail slot can be left
+  // uncommitted.
+  size_t limit = kMaxDraftTokensPerStep;
+  if (fixed_state_pool_) {
+    limit = std::min(limit, fixed_state_pool_->StateUpdateCapacity());
+  }
+  if (const size_t query_cap = MaxQueryTokensPerRequest(); query_cap != 0) {
+    limit = std::min(limit, query_cap - 1);
+  }
+  return limit;
+}
+
 std::vector<std::shared_ptr<Request>> PagedCacheManager::AllocatedRequests() const {
   return cache_allocated_requests_;
 }
@@ -500,12 +531,19 @@ StepPlanningResult PagedCacheManager::PlanStepResources(StepPlan& plan) const {
     throw StepPlanningConsistencyError(
         "Paged planning selected more admissions than fixed state can reserve.");
   }
-
+  const bool capture_state_updates = std::any_of(
+      plan.requests.begin(), plan.requests.end(),
+      [](const RequestStepPlan& entry) { return entry.draft_token_count != 0; });
+  if (capture_state_updates && !fixed_state_pool_->SupportsStateUpdates()) {
+    throw std::logic_error(
+        "Planned draft verification on a model whose fixed state declares no compact updates.");
+  }
   plan.fixed_state = FixedStateResourcePlan{
       true,
       plan.requests.size(),
       new_slot_count,
-      fixed_state_pool_->PlannedStagingBytes(plan.requests.size()),
+      fixed_state_pool_->PlannedStagingBytes(
+          plan.requests.size(), capture_state_updates),
   };
   return result;
 }

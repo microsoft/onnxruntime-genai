@@ -45,6 +45,16 @@ std::vector<size_t> AllocateDecodeFirstTokenBudget(
     const auto& candidate = selected_candidates[i];
     if (candidate.pending_token_count == 0)
       throw std::invalid_argument("A scheduling candidate must have pending tokens.");
+    if (candidate.is_prefill)
+      continue;
+
+    const size_t additional_tokens =
+        std::min(candidate.decode_extra_token_count, remaining_budget);
+    token_counts[i] += additional_tokens;
+    remaining_budget -= additional_tokens;
+  }
+  for (size_t i = 0; i < selected_candidates.size(); ++i) {
+    const auto& candidate = selected_candidates[i];
     if (!candidate.is_prefill)
       continue;
 

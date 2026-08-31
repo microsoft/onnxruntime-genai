@@ -8,6 +8,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -80,6 +81,8 @@ struct RecordingCacheManager : CacheManager {
   size_t MaxBatchSize() const override { return capacity_; }
 
   size_t MaxQueryTokensPerRequest() const override { return max_query_tokens_per_request_; }
+
+  size_t MaxDraftTokensPerStep() const override { return max_draft_tokens_per_step_; }
 
   std::vector<std::shared_ptr<Request>> AllocatedRequests() const override { return allocated_; }
 
@@ -213,6 +216,14 @@ struct RecordingCacheManager : CacheManager {
         }
       }
 
+      void CommitPrefix(size_t row, const void* request_id,
+                        size_t step_tokens, size_t kept_tokens) override {
+        if (committed_) {
+          throw std::logic_error("Recording cache reservation is already committed.");
+        }
+        cache_.prefix_commits.push_back({row, request_id, step_tokens, kept_tokens});
+      }
+
       void Commit() override {
         if (committed_) {
           throw std::logic_error("Recording cache reservation can only commit once.");
@@ -252,6 +263,9 @@ struct RecordingCacheManager : CacheManager {
   void SetMaxQueryTokensPerRequest(size_t token_count) {
     max_query_tokens_per_request_ = token_count;
   }
+  void SetMaxDraftTokensPerStep(size_t token_count) {
+    max_draft_tokens_per_step_ = token_count;
+  }
   void ThrowPlanningBadAllocOnce() { throw_planning_bad_alloc_ = true; }
   void ThrowPlanningConsistencyOnce() {
     throw_planning_consistency_ = true;
@@ -276,6 +290,14 @@ struct RecordingCacheManager : CacheManager {
   }
   size_t AllocatedCount() const { return allocated_.size(); }
 
+  struct PrefixCommit {
+    size_t row{};
+    const void* request_id{};
+    size_t step_tokens{};
+    size_t kept_tokens{};
+  };
+  std::vector<PrefixCommit> prefix_commits;
+
   // Recorded call counts.
   mutable int can_allocate_calls{0};
   int allocate_calls{0};
@@ -285,6 +307,7 @@ struct RecordingCacheManager : CacheManager {
  private:
   size_t capacity_;
   size_t max_query_tokens_per_request_{};
+  size_t max_draft_tokens_per_step_{};
   mutable bool throw_planning_bad_alloc_{};
   mutable bool throw_planning_consistency_{};
   mutable bool overselect_planning_once_{};
@@ -304,26 +327,42 @@ struct RecordingCacheManager : CacheManager {
 // A DecoderIO that fabricates logits instead of running the model: for each scheduled request it
 // returns a vocab-sized logits row whose maximum is at `forced_token`, so the request's real greedy
 // search deterministically selects that token. Using the model's end-of-stream token drives requests
-// to completion in one step.
+// to completion in one step. A speculative step needs one row per draft in addition to the
+// request's ordinary row; `row_tokens` scripts the argmax of every row in packed order.
 struct ScriptedDecoderIO : DecoderIO {
   ScriptedDecoderIO(std::shared_ptr<Model> model, ScheduledRequests& scheduled_requests,
                     std::shared_ptr<CacheManager> cache_manager, int32_t forced_token,
-                    bool fail_process_logits = false)
+                    bool fail_process_logits = false,
+                    const StepPlan* plan = nullptr,
+                    std::span<const int32_t> row_tokens = {})
       : DecoderIO(model, scheduled_requests, cache_manager),
         vocab_size_{static_cast<int64_t>(model->config_->model.vocab_size)},
         fail_process_logits_{fail_process_logits} {
     if (forced_token < 0 || forced_token >= vocab_size_) {
       throw std::runtime_error("ScriptedDecoderIO: forced_token out of vocabulary range");
     }
-    const int64_t batch_size = static_cast<int64_t>(scheduled_requests.size());
+    size_t rows = scheduled_requests.size();
+    if (plan) {
+      for (const auto& entry : plan->requests) {
+        rows += entry.draft_token_count;
+      }
+    }
+    if (!row_tokens.empty() && row_tokens.size() != rows) {
+      throw std::runtime_error("ScriptedDecoderIO: row token script does not cover every row.");
+    }
+    row_count_ = rows;
     logits_ = std::make_unique<Tensor>(model->p_device_inputs_, Ort::TypeToTensorType<float>);
-    const std::array<int64_t, 2> shape{batch_size, vocab_size_};
+    const std::array<int64_t, 2> shape{static_cast<int64_t>(rows), vocab_size_};
     logits_->CreateTensor(shape);
     auto device_span = logits_->GetDeviceSpan<float>();
     auto cpu_span = device_span.CpuSpan();
     std::fill(cpu_span.begin(), cpu_span.end(), 0.0f);
-    for (int64_t row = 0; row < batch_size; ++row) {
-      cpu_span[row * vocab_size_ + forced_token] = 100.0f;
+    for (size_t row = 0; row < rows; ++row) {
+      const int32_t token = row_tokens.empty() ? forced_token : row_tokens[row];
+      if (token < 0 || token >= vocab_size_) {
+        throw std::runtime_error("ScriptedDecoderIO: scripted row token out of vocabulary range");
+      }
+      cpu_span[static_cast<int64_t>(row) * vocab_size_ + token] = 100.0f;
     }
     device_span.CopyCpuToDevice();
   }
@@ -334,7 +373,7 @@ struct ScriptedDecoderIO : DecoderIO {
     }
     std::vector<DeviceSpan<float>> rows;
     auto all = logits_->GetDeviceSpan<float>();
-    for (size_t i = 0; i < scheduled_requests_.size(); ++i) {
+    for (size_t i = 0; i < row_count_; ++i) {
       rows.push_back(all.subspan(i * vocab_size_, vocab_size_));
     }
     return rows;
@@ -342,6 +381,7 @@ struct ScriptedDecoderIO : DecoderIO {
 
  private:
   int64_t vocab_size_;
+  size_t row_count_{};
   bool fail_process_logits_{};
 };
 
@@ -403,7 +443,8 @@ struct RecordingModelExecutor : ModelExecutor {
     scheduled_requests.AddDecoderState(
         std::make_unique<ScriptedDecoderIO>(
             model_, scheduled_requests, cache_manager_, forced_token_,
-            failure == ScriptedExecutionFailure::PostProcessing));
+            failure == ScriptedExecutionFailure::PostProcessing,
+            context.plan, verify_row_tokens_));
     static_cast<void>(context);
   }
 
@@ -411,6 +452,15 @@ struct RecordingModelExecutor : ModelExecutor {
   void SetForcedToken(int32_t token) { forced_token_ = token; }
   void SetExecutionCallback(std::function<void(ExecutionContext&)> callback) {
     on_execute_ = std::move(callback);
+  }
+  void SetVerifyRowTokens(std::vector<int32_t> tokens) {
+    verify_row_tokens_ = std::move(tokens);
+  }
+  bool SupportsDraftVerification() const override {
+    return supports_draft_verification_;
+  }
+  void SetSupportsDraftVerification(bool supported) {
+    supports_draft_verification_ = supported;
   }
 
   int decode_calls{0};
@@ -425,6 +475,8 @@ struct RecordingModelExecutor : ModelExecutor {
   std::shared_ptr<CallTrace> trace_;
   ScriptedExecutionFailure next_failure_{ScriptedExecutionFailure::None};
   std::function<void(ExecutionContext&)> on_execute_;
+  std::vector<int32_t> verify_row_tokens_;
+  bool supports_draft_verification_{true};
 };
 
 // An Engine wired with the recording doubles above, together with non-owning observers of those

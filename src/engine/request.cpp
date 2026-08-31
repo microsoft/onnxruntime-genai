@@ -254,8 +254,124 @@ int64_t Request::CurrentSequenceLength() const {
   return search_->GetSequenceLength();
 }
 
+int64_t Request::CommittedSequenceLength() const {
+  return CurrentSequenceLength() - static_cast<int64_t>(staged_draft_count_);
+}
+
+void Request::SetDraftTokens(std::span<const int32_t> tokens) {
+  if (staged_draft_count_ != 0) {
+    throw std::runtime_error("Cannot replace draft tokens while a step is in flight.");
+  }
+  if (IsClosed(status_)) {
+    throw std::runtime_error("Cannot propose draft tokens for a closed request.");
+  }
+  draft_tokens_.clear();
+  if (tokens.empty()) {
+    return;
+  }
+  if (guidance_logits_processor_) {
+    throw std::runtime_error("Speculative draft tokens are not supported with guidance.");
+  }
+
+  const auto& search = params_->search;
+  // Verification compares the target model's argmax against each draft, which only reproduces the
+  // request's own token stream when that stream is greedy.
+  if (search.do_sample && search.top_k != 1 && search.temperature != 0) {
+    throw std::runtime_error("Speculative draft tokens require a greedy request.");
+  }
+  // The draft rows are read before any logits processor runs, so a processor that would change a
+  // row's argmax has to be inactive for every position this step verifies.
+  if (search.repetition_penalty != 1.0f || search.no_repeat_ngram_size > 0 ||
+      search.min_length > CurrentSequenceLength()) {
+    throw std::runtime_error(
+        "Speculative draft tokens require repetition_penalty 1, no_repeat_ngram_size 0, and a "
+        "sequence already past min_length.");
+  }
+  auto engine = engine_.lock();
+  if (!engine) {
+    throw std::runtime_error("Cannot propose draft tokens before the request is added to an engine.");
+  }
+  const size_t max_drafts = engine->MaxDraftTokensPerStep();
+  if (max_drafts == 0) {
+    throw std::runtime_error("This engine does not support speculative draft verification.");
+  }
+  if (tokens.size() > max_drafts) {
+    throw std::runtime_error(
+        "A step accepts at most " + std::to_string(max_drafts) + " draft tokens.");
+  }
+  ValidateAppendLength(*params_, static_cast<size_t>(CurrentSequenceLength()), tokens.size());
+  if (tokens_host_.capacity() < tokens_host_.size() + tokens.size()) {
+    throw std::logic_error("The request host token mirror does not have reserved draft capacity.");
+  }
+  draft_tokens_.assign(tokens.begin(), tokens.end());
+}
+
+std::span<const int32_t> Request::StagedDraftTokens() const {
+  return std::span<const int32_t>{draft_tokens_}.subspan(0, staged_draft_count_);
+}
+
+void Request::AppendDraftsForTransaction(size_t draft_count) {
+  if (draft_count == 0) {
+    return;
+  }
+  if (staged_draft_count_ != 0 || draft_count > draft_tokens_.size()) {
+    throw std::logic_error("The step staged more draft tokens than the request proposed.");
+  }
+
+  const std::span<const int32_t> drafts{draft_tokens_.data(), draft_count};
+  auto device_tokens = AllocateOnDevice(*params_, drafts);
+  search_->AppendTokens(device_tokens);
+  tokens_host_.insert(tokens_host_.end(), drafts.begin(), drafts.end());
+  staged_draft_count_ = draft_count;
+  accepted_draft_count_ = 0;
+  draft_verification_completed_generation_ = false;
+}
+
+void Request::CommitAcceptedDraftsForTransaction(size_t accepted_count) {
+  if (accepted_count > staged_draft_count_) {
+    throw std::logic_error("The step accepted more draft tokens than it staged.");
+  }
+  const size_t proposed_count = staged_draft_count_;
+  const size_t committed_length =
+      static_cast<size_t>(CurrentSequenceLength()) - proposed_count;
+  tokens_host_.resize(tokens_host_.size() - proposed_count);
+  search_->RewindTo(committed_length);
+  staged_draft_count_ = 0;
+  accepted_draft_count_ = 0;
+  draft_verification_completed_generation_ = false;
+
+  for (size_t offset = 0; offset < accepted_count; ++offset) {
+    const int32_t token = draft_tokens_[offset];
+    const int64_t sequence_length_before = CurrentSequenceLength();
+    search_->CommitToken(token);
+    const int64_t sequence_length_after = CurrentSequenceLength();
+    if (sequence_length_after == sequence_length_before + 1) {
+      tokens_host_.push_back(token);
+      ++staged_draft_count_;
+      ++accepted_draft_count_;
+    } else if (sequence_length_after != sequence_length_before ||
+               !search_->IsDone()) {
+      throw std::logic_error(
+          "Committing an accepted draft produced an invalid sequence transition.");
+    }
+    if (search_->IsDone()) {
+      draft_verification_completed_generation_ = true;
+      break;
+    }
+  }
+}
+
+void Request::DiscardStagedDrafts() noexcept {
+  if (staged_draft_count_ != 0) {
+    tokens_host_.resize(tokens_host_.size() - staged_draft_count_);
+    staged_draft_count_ = 0;
+  }
+  accepted_draft_count_ = 0;
+  draft_verification_completed_generation_ = false;
+}
+
 RequestStateSnapshot Request::Snapshot() const {
-  const int64_t current = CurrentSequenceLength();
+  const int64_t current = CommittedSequenceLength();
   RequestStateSnapshot snapshot;
   snapshot.request_id = this;
   snapshot.status = status_;
@@ -281,7 +397,9 @@ void Request::ScheduleTokens() {
 }
 
 void Request::BindScheduledTokenCount(size_t token_count) {
-  const int64_t remaining = CurrentSequenceLength() - processed_sequence_length_;
+  // A speculative step also sends the drafts the transaction is about to stage onto the sequence.
+  const int64_t remaining = CurrentSequenceLength() - processed_sequence_length_ +
+                            static_cast<int64_t>(draft_tokens_.size() - staged_draft_count_);
   if (remaining <= 0 || token_count == 0 ||
       token_count > static_cast<size_t>(remaining)) {
     throw std::runtime_error(
@@ -417,6 +535,7 @@ RequestStepResult Request::StageGenerationForTransaction(
 void Request::RestoreStateForTransaction() {
   search_->RestoreStateForTransaction();
   rng_ = transaction_rng_;
+  DiscardStagedDrafts();
   if (guidance_transaction_checkpoint_) {
     guidance_logits_processor_ = std::move(guidance_transaction_checkpoint_);
   }
@@ -425,6 +544,7 @@ void Request::RestoreStateForTransaction() {
 void Request::QueueStateRestoreForTransaction() {
   search_->QueueStateRestoreForTransaction();
   rng_ = transaction_rng_;
+  DiscardStagedDrafts();
 }
 
 void Request::CompleteStateRestoreForTransaction() {
@@ -441,15 +561,26 @@ void Request::CommitStateForTransaction() {
 
 void Request::CommitStep(const RequestStepPlan& plan,
                          const RequestStepResult& result) noexcept {
+  // ScheduledRequests reserved every append below before model execution. tokens_host_ retains its
+  // existing max-length reservation, so nothing at this commit boundary allocates.
+  const size_t accepted_drafts = accepted_draft_count_;
+  const size_t first_accepted_index = tokens_host_.size() - accepted_drafts;
+  for (size_t offset = 0; offset < accepted_drafts; ++offset) {
+    unseen_token_indices_.push_back(first_accepted_index + offset);
+  }
   if (result.token_appended) {
-    // ScheduledRequests reserved this append before model execution. tokens_host_ retains its
-    // existing max-length reservation, so neither push allocates at this commit boundary.
     const size_t token_index = tokens_host_.size();
     tokens_host_.push_back(result.token);
     unseen_token_indices_.push_back(token_index);
   }
-  processed_sequence_length_ = static_cast<int64_t>(plan.target_cache_slots);
+  // A verify step reserved cache slots for every draft; the rejected ones were never committed.
+  processed_sequence_length_ =
+      static_cast<int64_t>(plan.target_cache_slots - (plan.draft_token_count - accepted_drafts));
   status_ = result.done ? RequestStatus::TurnComplete : RequestStatus::Active;
+  draft_tokens_.clear();
+  staged_draft_count_ = 0;
+  accepted_draft_count_ = 0;
+  draft_verification_completed_generation_ = false;
 }
 
 void Request::ApplyLogitsProcessors(DeviceSpan<float> logits) {

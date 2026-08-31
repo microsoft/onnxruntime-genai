@@ -29,6 +29,15 @@ inline std::shared_ptr<Model> LoadSyntheticPagedModel() {
   return CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged");
 }
 
+#if USE_CUDA
+inline std::shared_ptr<Model> LoadSyntheticPagedCudaModel() {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged");
+  ClearProviders(*config);
+  SetProviderOption(*config, "cuda", {}, {});
+  return CreateModel(GetOrtEnv(), std::move(config));
+}
+#endif
+
 // Loads the tiny checked-in hybrid decoder used by the fixed-state-pool tests. Its config declares
 // two fixed decoder state groups (convolution layers [0, 3] and recurrent layers [2, 5]) whose
 // bindings resolve to real session inputs/outputs, so FixedStatePool can validate the manifest and

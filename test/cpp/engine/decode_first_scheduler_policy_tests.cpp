@@ -48,6 +48,19 @@ TEST(DecodeFirstSchedulerPolicyTest, DecodeDemandExhaustsTheBudget) {
                std::invalid_argument);
 }
 
+TEST(DecodeFirstSchedulerPolicyTest, SpeculativeRowsConsumeBudgetAfterEveryRequestGetsOneToken) {
+  const std::array selected{
+      DecodeFirstBudgetCandidate{false, 1, std::nullopt, 3},
+      DecodeFirstBudgetCandidate{false, 1, std::nullopt, 2},
+      DecodeFirstBudgetCandidate{true, 8, std::nullopt},
+  };
+
+  EXPECT_EQ(AllocateDecodeFirstTokenBudget(selected, 5),
+            (std::vector<size_t>{3, 1, 1}));
+  EXPECT_EQ(AllocateDecodeFirstTokenBudget(selected, 8),
+            (std::vector<size_t>{4, 3, 1}));
+}
+
 TEST(DecodeFirstSchedulerPolicyTest, PrefillsRespectPendingCapAndGlobalBudget) {
   const std::array selected{
       DecodeFirstBudgetCandidate{true, 2, std::nullopt},

@@ -139,6 +139,41 @@ struct Request : std::enable_shared_from_this<Request>,
    */
   void GenerateNextTokens(DeviceSpan<float> logits);
 
+  /**
+   * @brief Proposes speculative draft tokens for this request's next step.
+   * @param tokens Draft continuation of the sequence, in order. An empty span clears the proposal.
+   *
+   * The next decode step then runs 1 + tokens.size() rows, verifies each draft against the target
+   * model's own prediction, and keeps the accepted prefix. Only greedy requests may propose drafts,
+   * because verification compares argmax tokens rather than sampling probabilities.
+   *
+   * The proposal applies to the next step only. A committed step consumes it even when it could not
+   * verify it (a prefill chunk, for one); a rolled back step leaves it pending.
+   */
+  void SetDraftTokens(std::span<const int32_t> tokens);
+
+  /**
+   * @brief Draft tokens proposed for the next step but not yet sent through the model.
+   */
+  size_t PendingDraftTokenCount() const noexcept { return draft_tokens_.size(); }
+
+  /**
+   * @brief Drafts of the step in flight that the target model accepted.
+   */
+  size_t AcceptedDraftTokenCount() const noexcept { return accepted_draft_count_; }
+
+  /**
+   * @brief Sequence length excluding any drafts staged by the step in flight.
+   */
+  int64_t CommittedSequenceLength() const;
+
+  void AppendDraftsForTransaction(size_t draft_count);
+  std::span<const int32_t> StagedDraftTokens() const;
+  void CommitAcceptedDraftsForTransaction(size_t accepted_count);
+  bool DraftVerificationCompletedGeneration() const noexcept {
+    return draft_verification_completed_generation_;
+  }
+
   void ValidateEngineCompatibility() const;
   void SaveStateForTransaction();
   void SaveStateForExternalSamplingTransaction();
@@ -323,12 +358,21 @@ struct Request : std::enable_shared_from_this<Request>,
   // Runs before a scheduled step can execute. It keeps only useful consumed-prefix storage and
   // reserves every unseen-index append that the step can perform, so CommitStep stays noexcept.
   void PrepareForStep(size_t max_generated_token_indices);
+  // Drops whatever the step in flight staged past the committed sequence, leaving the host mirror
+  // exactly as long as the search after its own transaction rewind.
+  void DiscardStagedDrafts() noexcept;
 
   int64_t processed_sequence_length_{};
   // Sequence length the application's tokens reach up to. Everything below it is prompt, so the
   // request is still prefilling while processed_sequence_length_ has not caught up with it.
   int64_t prompt_sequence_length_{};
   size_t scheduled_token_count_{};
+  // Drafts proposed for the next step, the ones the step in flight staged onto the sequence, and
+  // the leading part of those the target model accepted.
+  std::vector<int32_t> draft_tokens_;
+  size_t staged_draft_count_{};
+  size_t accepted_draft_count_{};
+  bool draft_verification_completed_generation_{};
   std::shared_ptr<GeneratorParams> params_;
   std::mt19937 rng_;
   std::mt19937 transaction_rng_;

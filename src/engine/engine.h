@@ -118,6 +118,12 @@ struct Engine : std::enable_shared_from_this<Engine>,
    */
   bool HasPendingRequests() const;
 
+  /**
+   * @brief Speculative draft tokens a request may attach to one decode step.
+   * @return Zero when this Engine cannot verify and roll back draft tokens.
+   */
+  size_t MaxDraftTokensPerStep() const;
+
  private:
   void ReclaimAbandonedRequests();
   std::shared_ptr<Request> DrainReadyRequest();
