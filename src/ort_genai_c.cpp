@@ -5,18 +5,23 @@
 #include <utility>
 #include <cstdint>
 #include <cstddef>
+#include <cstring>
 #include <limits>
+#include <optional>
 #include "span.h"
 #include "ort_genai_c.h"
-#include "generators.h"
+#include "generator/generators.h"
 #include "models/model.h"
 #include "constrained_logits_processor.h"
 #include "runtime_settings.h"
 #include "search.h"
 #include "smartptrs.h"
-#include "mtp_generator.h"
+#include "generator/mtp_generator.h"
 #include "engine/engine.h"
-#include "models/streaming_processor.h"
+#include "models/preprocessing/genai_tokenizer.h"
+#include "models/preprocessing/multi_modal_processor.h"
+#include "models/preprocessing/processor.h"
+#include "models/preprocessing/streaming_processor.h"
 #include "models/nemotron_speech.h"
 #include "models/parakeet.h"
 #include "models/silero_vad.h"
@@ -30,6 +35,28 @@ namespace Generators {
 struct Result {
   explicit Result(const char* what) : what_{what} {}
   std::string what_;
+};
+
+struct EngineEventBuffer {
+  EngineEventBuffer(
+      std::weak_ptr<Engine> bound_engine,
+      const void* engine_identity,
+      size_t capacity)
+      : bound_engine{std::move(bound_engine)},
+        engine_identity{engine_identity},
+        events(capacity) {}
+
+  void Invalidate() noexcept {
+    for (size_t i = 0; i < count; ++i) {
+      events[i] = {};
+    }
+    count = 0;
+  }
+
+  std::weak_ptr<Engine> bound_engine;
+  const void* engine_identity{};
+  std::vector<EngineEvent> events;
+  size_t count{};
 };
 
 }  // namespace Generators
@@ -81,7 +108,12 @@ struct OgaTensor : Generators::Tensor, OgaAbstract {};
 struct OgaTokenizer : Generators::Tokenizer, OgaAbstract {};
 struct OgaTokenizerStream : Generators::TokenizerStream, OgaAbstract {};
 struct OgaEngine : Generators::Engine, OgaAbstract {};
+struct OgaEngineEvent : Generators::EngineEvent, OgaAbstract {};
+struct OgaEngineEventBuffer : Generators::EngineEventBuffer, OgaAbstract {};
 struct OgaRequest : Generators::Request, OgaAbstract {};
+struct OgaRequestOptions : Generators::RequestOptions, OgaAbstract {};
+struct OgaTurnOptions : Generators::TurnOptions, OgaAbstract {};
+struct OgaTurnUsage : Generators::TurnUsage, OgaAbstract {};
 struct OgaStreamingProcessor : Generators::StreamingProcessor, OgaAbstract {};
 
 // Helper function to return a shared pointer as a raw pointer. It won't compile if the types are wrong.
@@ -95,11 +127,46 @@ T* ReturnShared(std::shared_ptr<U>& p) {
   return static_cast<T*>(p.get());
 }
 
+template <typename T, typename U>
+T* ReturnBorrowed(const std::shared_ptr<U>& p) {
+  return static_cast<T*>(p.get());
+}
+
 // Helper function to return a unique pointer as a raw pointer. It won't compile if the types are wrong.
 template <typename T, typename U>
 T* ReturnUnique(std::unique_ptr<U> p) {
   return static_cast<T*>(p.release());
 }
+
+namespace {
+
+OgaFinishReason ToCFinishReason(
+    Generators::GenerationFinishReason finish_reason) {
+  using Generators::GenerationFinishReason;
+  switch (finish_reason) {
+    case GenerationFinishReason::None:
+      return OgaFinishReason_None;
+    case GenerationFinishReason::EosToken:
+      return OgaFinishReason_Eos;
+    case GenerationFinishReason::StopToken:
+      return OgaFinishReason_StopSequence;
+    case GenerationFinishReason::TurnLimit:
+      return OgaFinishReason_MaxGeneratedTokens;
+    case GenerationFinishReason::ContextLimit:
+      return OgaFinishReason_MaxSessionTokens;
+    case GenerationFinishReason::Canceled:
+      return OgaFinishReason_Cancelled;
+    case GenerationFinishReason::Failed:
+      return OgaFinishReason_Failed;
+  }
+  throw std::logic_error("Unknown generation finish reason.");
+}
+
+static_assert(sizeof(OgaFinishReason) == sizeof(uint32_t));
+static_assert(sizeof(OgaEngineEventFlags) == sizeof(uint32_t));
+static_assert(sizeof(OgaErrorCode) == sizeof(uint32_t));
+
+}  // namespace
 
 extern "C" {
 
@@ -942,6 +1009,27 @@ OgaResult* OGA_API_CALL OgaCreateTokenizer(const OgaModel* model, OgaTokenizer**
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaCreateTokenizerFromConfig(const OgaConfig* config, OgaTokenizer** out) {
+  OGA_TRY
+  if (!config || !out)
+    throw std::invalid_argument("config and out must not be null.");
+  auto tokenizer = std::make_shared<Generators::Tokenizer>(*config);
+  *out = ReturnShared<OgaTokenizer>(tokenizer);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaCreateTokenizerFromPath(const char* model_path, OgaTokenizer** out) {
+  OGA_TRY
+  if (!model_path || !out)
+    throw std::invalid_argument("model_path and out must not be null.");
+  auto config = Generators::CreateConfig(Generators::GetOrtEnv(), model_path);
+  auto tokenizer = std::make_shared<Generators::Tokenizer>(*config);
+  *out = ReturnShared<OgaTokenizer>(tokenizer);
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaUpdateTokenizerOptions(
     OgaTokenizer* tokenizer,
     const char* const* keys,
@@ -1044,17 +1132,6 @@ OgaResult* OGA_API_CALL OgaTokenizerDecode(const OgaTokenizer* tokenizer, const 
 OgaResult* OGA_API_CALL OgaTokenizerApplyChatTemplate(const OgaTokenizer* tokenizer, const char* template_str, const char* messages, const char* tools, bool add_generation_prompt, const char** out_string) {
   OGA_TRY
   *out_string = AllocOgaString(tokenizer->ApplyChatTemplate(template_str, messages, tools, add_generation_prompt));
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaTokenizerApplyChatTemplateWithOptions(const OgaTokenizer* tokenizer, const char* template_str,
-                                                                 const char* messages, const char* tools,
-                                                                 const char* template_kwargs, bool add_generation_prompt,
-                                                                 const char** out_string) {
-  OGA_TRY
-  *out_string = AllocOgaString(tokenizer->ApplyChatTemplateWithOptions(template_str, messages, tools,
-                                                                       template_kwargs, add_generation_prompt));
   return nullptr;
   OGA_CATCH
 }
@@ -1370,100 +1447,475 @@ OgaResult* OgaSetActiveAdapter(OgaGenerator* generator, OgaAdapters* adapters, c
 
 OgaResult* OgaCreateEngine(OgaModel* model, OgaEngine** out) {
   OGA_TRY
+  if (!out) {
+    throw std::runtime_error("out must not be null.");
+  }
+  *out = nullptr;
+  if (!model) {
+    throw std::runtime_error("model must not be null.");
+  }
   auto engine = std::make_shared<Generators::Engine>(model->shared_from_this());
   *out = ReturnShared<OgaEngine>(engine);
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OgaEngineStep(OgaEngine* engine, OgaRequest** request) {
+OgaResult* OgaCreateEngineEventBuffer(
+    OgaEngine* engine,
+    size_t capacity,
+    OgaEngineEventBuffer** out) {
   OGA_TRY
-  auto ready_request = engine->Step();
-  *request = ready_request ? ReturnShared<OgaRequest>(ready_request) : nullptr;
+  if (!out) {
+    throw std::runtime_error("out must not be null.");
+  }
+  *out = nullptr;
+  if (!engine) {
+    throw std::runtime_error("engine must not be null.");
+  }
+  engine->ValidateOwnerThread();
+  auto buffer = std::make_unique<Generators::EngineEventBuffer>(
+      engine->shared_from_this(), engine, capacity);
+  *out = ReturnUnique<OgaEngineEventBuffer>(std::move(buffer));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaEngineRun(
+    OgaEngine* engine,
+    OgaEngineEventBuffer* buffer) {
+  OGA_TRY
+  if (!buffer) {
+    throw std::runtime_error("buffer must not be null.");
+  }
+  if (!engine) {
+    throw std::runtime_error("engine must not be null.");
+  }
+  if (buffer->engine_identity != engine) {
+    throw std::runtime_error(
+        "buffer must be used with the Engine that created it.");
+  }
+  auto bound_engine = buffer->bound_engine.lock();
+  if (!bound_engine) {
+    throw std::runtime_error(
+        "Cannot use an Engine event Buffer after its Engine has been destroyed.");
+  }
+  bound_engine->ValidateOwnerThread();
+  buffer->Invalidate();
+  buffer->count = bound_engine->Run(buffer->events);
+  return nullptr;
+  OGA_CATCH
+}
+
+size_t OgaEngineEventBufferGetCount(
+    const OgaEngineEventBuffer* buffer) {
+  return buffer ? buffer->count : 0;
+}
+
+const OgaEngineEvent* OgaEngineEventBufferGet(
+    const OgaEngineEventBuffer* buffer,
+    size_t index) {
+  if (!buffer || index >= buffer->count) {
+    return nullptr;
+  }
+  return static_cast<const OgaEngineEvent*>(&buffer->events[index]);
+}
+
+OgaResult* OgaEngineEventGetFlags(
+    const OgaEngineEvent* event,
+    OgaEngineEventFlags* out) {
+  OGA_TRY
+  if (!out) {
+    throw std::runtime_error("out must not be null.");
+  }
+  *out = OgaEngineEventFlag_None;
+  if (!event) {
+    throw std::runtime_error("event must not be null.");
+  }
+  *out = event->flags;
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaEngineEventGetRequest(
+    const OgaEngineEvent* event,
+    const OgaRequest** out) {
+  OGA_TRY
+  if (!out) {
+    throw std::runtime_error("out must not be null.");
+  }
+  *out = nullptr;
+  if (!event) {
+    throw std::runtime_error("event must not be null.");
+  }
+  *out = event->request
+             ? ReturnBorrowed<OgaRequest>(event->request)
+             : nullptr;
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaEngineEventGetTurnId(
+    const OgaEngineEvent* event,
+    uint64_t* out) {
+  OGA_TRY
+  if (!out) {
+    throw std::runtime_error("out must not be null.");
+  }
+  *out = 0;
+  if (!event) {
+    throw std::runtime_error("event must not be null.");
+  }
+  *out = event->turn_id;
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaEngineEventGetToken(
+    const OgaEngineEvent* event,
+    int32_t* out) {
+  OGA_TRY
+  if (!out) {
+    throw std::runtime_error("out must not be null.");
+  }
+  *out = 0;
+  if (!event) {
+    throw std::runtime_error("event must not be null.");
+  }
+  *out = event->token;
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaEngineEventGetFinishReason(
+    const OgaEngineEvent* event,
+    OgaFinishReason* out) {
+  OGA_TRY
+  if (!out) {
+    throw std::runtime_error("out must not be null.");
+  }
+  *out = OgaFinishReason_None;
+  if (!event) {
+    throw std::runtime_error("event must not be null.");
+  }
+  *out = ToCFinishReason(event->finish_reason);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaEngineEventGetErrorCode(
+    const OgaEngineEvent* event,
+    OgaErrorCode* out) {
+  OGA_TRY
+  if (!out) {
+    throw std::runtime_error("out must not be null.");
+  }
+  *out = OgaErrorCode_None;
+  if (!event) {
+    throw std::runtime_error("event must not be null.");
+  }
+  *out = static_cast<OgaErrorCode>(event->error_code);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaEngineEventGetUsage(
+    const OgaEngineEvent* event,
+    const OgaTurnUsage** out) {
+  OGA_TRY
+  if (!out) {
+    throw std::runtime_error("out must not be null.");
+  }
+  *out = nullptr;
+  if (!event) {
+    throw std::runtime_error("event must not be null.");
+  }
+  *out = static_cast<const OgaTurnUsage*>(&event->usage);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaTurnUsageGetPromptTokens(
+    const OgaTurnUsage* usage,
+    uint64_t* out) {
+  OGA_TRY
+  if (!out) {
+    throw std::runtime_error("out must not be null.");
+  }
+  *out = 0;
+  if (!usage) {
+    throw std::runtime_error("usage must not be null.");
+  }
+  *out = usage->prompt_tokens;
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaTurnUsageGetGeneratedTokens(
+    const OgaTurnUsage* usage,
+    uint64_t* out) {
+  OGA_TRY
+  if (!out) {
+    throw std::runtime_error("out must not be null.");
+  }
+  *out = 0;
+  if (!usage) {
+    throw std::runtime_error("usage must not be null.");
+  }
+  *out = usage->generated_tokens;
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaTurnUsageGetCachedPromptTokens(
+    const OgaTurnUsage* usage,
+    uint64_t* out) {
+  OGA_TRY
+  if (!out) {
+    throw std::runtime_error("out must not be null.");
+  }
+  *out = 0;
+  if (!usage) {
+    throw std::runtime_error("usage must not be null.");
+  }
+  *out = usage->cached_prompt_tokens;
   return nullptr;
   OGA_CATCH
 }
 
 OgaResult* OgaEngineHasPendingRequests(OgaEngine* engine, bool* out) {
   OGA_TRY
+  if (!engine) {
+    throw std::runtime_error("engine must not be null.");
+  }
+  if (!out) {
+    throw std::runtime_error("out must not be null.");
+  }
   *out = engine->HasPendingRequests();
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OgaEngineAddRequest(OgaEngine* engine, OgaRequest* request) {
+OgaResult* OgaEngineCreateRequest(
+    OgaEngine* engine,
+    const OgaGeneratorParams* params,
+    const OgaRequestOptions* options,
+    OgaRequest** out) {
   OGA_TRY
-  engine->AddRequest(request->shared_from_this());
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OgaEngineRemoveRequest(OgaEngine* engine, OgaRequest* request) {
-  OGA_TRY
-  engine->RemoveRequest(request->shared_from_this());
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OgaCreateRequest(OgaGeneratorParams* params, OgaRequest** out) {
-  OGA_TRY
-  auto request = std::make_shared<Generators::Request>(params->shared_from_this());
+  if (!out) {
+    throw std::runtime_error("out must not be null.");
+  }
+  *out = nullptr;
+  if (!engine) {
+    throw std::runtime_error("engine must not be null.");
+  }
+  if (!params) {
+    throw std::runtime_error("params must not be null.");
+  }
+  const size_t max_total_tokens =
+      options && options->max_session_tokens
+          ? *options->max_session_tokens
+          : static_cast<size_t>(params->search.max_length);
+  auto request = engine->CreateRequest(*params, max_total_tokens);
   *out = ReturnShared<OgaRequest>(request);
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OgaRequestAddTokens(OgaRequest* request, const OgaSequences* tokens) {
+OgaResult* OgaCreateRequestOptions(OgaRequestOptions** out) {
   OGA_TRY
-  if (tokens->size() != 1) {
-    throw std::runtime_error("Request input must contain exactly one sequence.");
+  if (!out) {
+    throw std::runtime_error("out must not be null.");
   }
-  request->AddTokens((*tokens)[0]);
+  *out = nullptr;
+  *out = ReturnUnique<OgaRequestOptions>(
+      std::make_unique<Generators::RequestOptions>());
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OgaRequestContinue(OgaRequest* request, const OgaSequences* tokens) {
+OgaResult* OgaRequestOptionsSetMaxSessionTokens(
+    OgaRequestOptions* options, uint64_t max_session_tokens) {
   OGA_TRY
-  if (tokens->size() != 1) {
-    throw std::runtime_error("Request continuation must contain exactly one sequence.");
+  if (!options) {
+    throw std::runtime_error("options must not be null.");
   }
-  request->Continue((*tokens)[0]);
+  if (max_session_tokens > std::numeric_limits<size_t>::max()) {
+    throw std::overflow_error(
+        "max_session_tokens (" + std::to_string(max_session_tokens) +
+        ") exceeds the maximum internal size (" +
+        std::to_string(std::numeric_limits<size_t>::max()) + ").");
+  }
+  if (max_session_tokens == 0) {
+    options->max_session_tokens.reset();
+  } else {
+    options->max_session_tokens = static_cast<size_t>(max_session_tokens);
+  }
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OgaRequestHasUnseenTokens(const OgaRequest* request, bool* out) {
+OgaResult* OgaRequestCreateTurnOptions(
+    OgaRequest* request, OgaTurnOptions** out) {
   OGA_TRY
-  *out = request->HasUnseenTokens();
+  if (!request) {
+    throw std::runtime_error("request must not be null.");
+  }
+  if (!out) {
+    throw std::runtime_error("out must not be null.");
+  }
+  *out = nullptr;
+  request->ValidateOwnerThread();
+  if (Generators::IsClosed(request->Status())) {
+    throw std::runtime_error("Cannot create Turn options for a closed Request.");
+  }
+  auto options = std::make_unique<Generators::TurnOptions>();
+  options->request = request->shared_from_this();
+  *out = ReturnUnique<OgaTurnOptions>(std::move(options));
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OgaRequestGetUnseenToken(OgaRequest* request, int32_t* token) {
+OgaResult* OgaTurnOptionsSetMaxGeneratedTokens(
+    OgaTurnOptions* options, uint64_t max_generated_tokens) {
   OGA_TRY
-  *token = request->UnseenToken();
+  if (!options) {
+    throw std::runtime_error("options must not be null.");
+  }
+  options->ValidateOwnerThread();
+  if (max_generated_tokens > std::numeric_limits<size_t>::max()) {
+    throw std::overflow_error(
+        "max_generated_tokens (" +
+        std::to_string(max_generated_tokens) +
+        ") exceeds the maximum internal size (" +
+        std::to_string(std::numeric_limits<size_t>::max()) + ").");
+  }
+  if (max_generated_tokens == 0) {
+    options->max_generated_tokens.reset();
+  } else {
+    options->max_generated_tokens =
+        static_cast<size_t>(max_generated_tokens);
+  }
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OgaRequestIsTurnComplete(const OgaRequest* request, bool* out) {
+#define OGA_UNIMPLEMENTED_TURN_SETTER(name, signature)       \
+  OgaResult* name signature {                                \
+    OGA_TRY                                                  \
+    if (!options) {                                          \
+      throw std::runtime_error("options must not be null."); \
+    }                                                        \
+    options->ValidateOwnerThread();                          \
+    throw std::runtime_error(#name " is not implemented.");  \
+    OGA_CATCH                                                \
+  }
+
+OGA_UNIMPLEMENTED_TURN_SETTER(
+    OgaTurnOptionsSetTemperature, (OgaTurnOptions * options, float))
+OGA_UNIMPLEMENTED_TURN_SETTER(
+    OgaTurnOptionsSetTopP, (OgaTurnOptions * options, float))
+OGA_UNIMPLEMENTED_TURN_SETTER(
+    OgaTurnOptionsSetTopK, (OgaTurnOptions * options, int32_t))
+OGA_UNIMPLEMENTED_TURN_SETTER(
+    OgaTurnOptionsSetSeed, (OgaTurnOptions * options, uint64_t))
+OGA_UNIMPLEMENTED_TURN_SETTER(
+    OgaTurnOptionsSetGuidance,
+    (OgaTurnOptions * options, const char*, const char*))
+
+#undef OGA_UNIMPLEMENTED_TURN_SETTER
+
+OgaResult* OgaTurnOptionsSetStopTokenIds(
+    OgaTurnOptions* options, const OgaSequences* stop_token_ids) {
   OGA_TRY
-  *out = request->IsTurnComplete();
+  if (!options) {
+    throw std::runtime_error("options must not be null.");
+  }
+  if (!stop_token_ids) {
+    throw std::runtime_error("stop_token_ids must not be null.");
+  }
+  options->ValidateOwnerThread();
+  throw std::runtime_error(
+      "OgaTurnOptionsSetStopTokenIds is not implemented.");
+  OGA_CATCH
+}
+
+OgaResult* OgaTurnOptionsSetStopStrings(
+    OgaTurnOptions* options, const OgaStringArray* stop_strings) {
+  OGA_TRY
+  if (!options) {
+    throw std::runtime_error("options must not be null.");
+  }
+  if (!stop_strings) {
+    throw std::runtime_error("stop_strings must not be null.");
+  }
+  options->ValidateOwnerThread();
+  throw std::runtime_error(
+      "OgaTurnOptionsSetStopStrings is not implemented.");
+  OGA_CATCH
+}
+
+OgaResult* OgaRequestBeginTurn(
+    OgaRequest* request,
+    const OgaTurnOptions* turn_options,
+    const int32_t* input_ids,
+    uint64_t input_ids_count,
+    uint64_t* out_turn_id) {
+  OGA_TRY
+  if (!request) {
+    throw std::runtime_error("request must not be null.");
+  }
+  if (!out_turn_id) {
+    throw std::runtime_error("out_turn_id must not be null.");
+  }
+  *out_turn_id = 0;
+  request->ValidateOwnerThread();
+  std::optional<size_t> max_generated_tokens;
+  if (turn_options) {
+    const auto bound_request = turn_options->request.lock();
+    if (!bound_request || bound_request.get() != request) {
+      throw std::runtime_error(
+          "Turn options belong to a different or destroyed Request.");
+    }
+    max_generated_tokens = turn_options->max_generated_tokens;
+  }
+  if (!input_ids && input_ids_count != 0) {
+    throw std::runtime_error(
+        "input_ids must not be null when input_ids_count is nonzero.");
+  }
+  if (input_ids_count > std::numeric_limits<size_t>::max()) {
+    throw std::overflow_error(
+        "input_ids_count (" + std::to_string(input_ids_count) +
+        ") exceeds the maximum internal size (" +
+        std::to_string(std::numeric_limits<size_t>::max()) + ").");
+  }
+  *out_turn_id = request->BeginTurn(
+      std::span<const int32_t>{
+          input_ids, static_cast<size_t>(input_ids_count)},
+      max_generated_tokens);
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OgaRequestSetOpaqueData(OgaRequest* request, void* data) {
+OgaResult* OgaRequestCancelTurn(
+    OgaRequest* request, uint64_t turn_id, bool* out_cancelled) {
   OGA_TRY
-  request->SetOpaqueData(data);
+  if (!request) {
+    throw std::runtime_error("request must not be null.");
+  }
+  if (!out_cancelled) {
+    throw std::runtime_error("out_cancelled must not be null.");
+  }
+  *out_cancelled = request->Cancel(turn_id);
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaRequestGetOpaqueData(OgaRequest* request, void** data) {
+OgaResult* OgaRequestClose(OgaRequest* request) {
   OGA_TRY
-  *data = request->GetOpaqueData();
+  if (!request) {
+    throw std::runtime_error("request must not be null.");
+  }
+  request->Close();
   return nullptr;
   OGA_CATCH
 }
@@ -1492,7 +1944,16 @@ void OGA_API_CALL OgaDestroyNamedTensors(OgaNamedTensors* p) { delete static_cas
 void OGA_API_CALL OgaDestroyAdapters(OgaAdapters* p) { p->ExternalRelease(); }
 void OGA_API_CALL OgaDestroyRuntimeSettings(OgaRuntimeSettings* p) { delete static_cast<Generators::RuntimeSettings*>(p); }
 void OGA_API_CALL OgaDestroyEngine(OgaEngine* p) { p->ExternalRelease(); }
+void OGA_API_CALL OgaDestroyEngineEventBuffer(OgaEngineEventBuffer* p) {
+  delete static_cast<Generators::EngineEventBuffer*>(p);
+}
 void OGA_API_CALL OgaDestroyRequest(OgaRequest* p) { p->ExternalRelease(); }
+void OGA_API_CALL OgaDestroyRequestOptions(OgaRequestOptions* p) {
+  delete static_cast<Generators::RequestOptions*>(p);
+}
+void OGA_API_CALL OgaDestroyTurnOptions(OgaTurnOptions* p) {
+  delete static_cast<Generators::TurnOptions*>(p);
+}
 
 #if defined(_MSC_VER)
 #pragma warning(push)

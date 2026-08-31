@@ -8,8 +8,9 @@
 #include <string>
 #include <sys/types.h>
 
-#include "generators.h"
+#include "generator/generators.h"
 #include "models/model.h"
+#include "models/preprocessing/genai_tokenizer.h"
 #if USE_GUIDANCE
 #include "llguidance.h"
 #endif

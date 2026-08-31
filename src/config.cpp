@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 // Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Portions of this file consist of AI generated content.
-#include "generators.h"
+#include "generator/generators.h"
 #include "models/model_state_manifest.h"
 #include "models/model_type.h"
 #include "runtime_settings.h"
@@ -363,6 +363,12 @@ struct DecoderInputs_Element : JSON::Element {
       v_.attention_metadata = JSON::Get<std::string_view>(value);
     } else if (name == "past_conv_names") {
       v_.past_conv_names = JSON::Get<std::string_view>(value);
+    } else if (name == "past_recurrent_names") {
+      v_.past_recurrent_names = JSON::Get<std::string_view>(value);
+    } else if (name == "state_update_capture_count") {
+      v_.state_update_capture_count = JSON::Get<std::string_view>(value);
+    } else if (name == "state_update_active") {
+      v_.state_update_active = JSON::Get<std::string_view>(value);
     } else if (name == "hidden_states") {
       v_.hidden_states = JSON::Get<std::string_view>(value);
     } else if (name == "targets") {
@@ -402,6 +408,12 @@ struct DecoderOutputs_Element : JSON::Element {
       v_.rnn_states = JSON::Get<std::string_view>(value);
     } else if (name == "present_conv_names") {
       v_.present_conv_names = JSON::Get<std::string_view>(value);
+    } else if (name == "present_recurrent_names") {
+      v_.present_recurrent_names = JSON::Get<std::string_view>(value);
+    } else if (name == "state_update_conv_value_names") {
+      v_.state_update_conv_value_names = JSON::Get<std::string_view>(value);
+    } else if (name == "state_update_recurrent_capsule_names") {
+      v_.state_update_recurrent_capsule_names = JSON::Get<std::string_view>(value);
     } else if (name == "hidden_states") {
       v_.hidden_states = JSON::Get<std::string_view>(value);
     } else if (name == "outputs") {
@@ -501,78 +513,82 @@ struct SharedInitializers_Element : JSON::Element {
 
 using DecoderStateGroup = Config::Model::Decoder::StateGroup;
 using DecoderStateGroupKind = Config::Model::Decoder::StateGroupKind;
+using DecoderStateUpdate = Config::Model::Decoder::StateUpdate;
 
-struct StateBinding_Element : JSON::Element {
-  explicit StateBinding_Element(Config::Model::Decoder::StateBinding& v) : v_{v} {}
+struct StateUpdate_Element : JSON::Element {
+  explicit StateUpdate_Element(DecoderStateUpdate& v) : v_{v} {}
 
   void OnValue(std::string_view name, JSON::Value value) override {
-    if (name == "input") {
-      v_.input = JSON::Get<std::string_view>(value);
-    } else if (name == "output") {
-      v_.output = JSON::Get<std::string_view>(value);
+    if (name == "enabled") {
+      v_.enabled = JSON::Get<bool>(value);
+    } else if (name == "capacity") {
+      const auto capacity = SafeDoubleToInt64(
+          JSON::Get<double>(value), "model.decoder.state_groups.state_update.capacity");
+      if (capacity < 1 || capacity > Config::Model::Decoder::MaxStateUpdateCapacity) {
+        throw std::runtime_error("Decoder state update capacity must be in [1, " +
+                                 std::to_string(Config::Model::Decoder::MaxStateUpdateCapacity) + "]");
+      }
+      v_.capacity = static_cast<int>(capacity);
+    } else if (name == "key_head_count") {
+      const auto count = SafeDoubleToInt64(
+          JSON::Get<double>(value), "model.decoder.state_groups.state_update.key_head_count");
+      if (count < 1 || count > std::numeric_limits<int>::max()) {
+        throw std::runtime_error("Decoder state update key_head_count must be positive");
+      }
+      v_.key_head_count = static_cast<int>(count);
+    } else if (name == "kind" || name == "capture_count" || name == "value" ||
+               name == "active" || name == "capsule") {
+      throw std::runtime_error(
+          "Legacy decoder state_update field '" + std::string{name} +
+          "' is no longer supported; move state-update binding templates to "
+          "model.decoder.inputs and model.decoder.outputs");
     } else {
       throw JSON::unknown_value_error{};
     }
   }
 
  private:
-  Config::Model::Decoder::StateBinding& v_;
-};
-
-struct StateBindings_Element : JSON::Element {
-  explicit StateBindings_Element(DecoderStateGroup& v) : v_{v} {}
-
-  Element& OnObject(std::string_view name) override {
-    std::optional<Config::Model::Decoder::StateBinding>* binding{};
-    std::unique_ptr<StateBinding_Element>* element{};
-    if (name == "key") {
-      binding = &v_.key;
-      element = &key_;
-    } else if (name == "value") {
-      binding = &v_.value;
-      element = &value_;
-    } else if (name == "state") {
-      binding = &v_.state;
-      element = &state_;
-    } else {
-      throw JSON::unknown_value_error{};
-    }
-
-    if (binding->has_value()) {
-      throw std::runtime_error("Duplicate decoder state binding semantic '" + std::string{name} + "'");
-    }
-    binding->emplace();
-    *element = std::make_unique<StateBinding_Element>(binding->value());
-    return **element;
-  }
-
- private:
-  DecoderStateGroup& v_;
-  std::unique_ptr<StateBinding_Element> key_;
-  std::unique_ptr<StateBinding_Element> value_;
-  std::unique_ptr<StateBinding_Element> state_;
+  DecoderStateUpdate& v_;
 };
 
 struct StateGroup_Element : JSON::Element {
   explicit StateGroup_Element(DecoderStateGroup& v) : v_{v} {}
 
   void OnValue(std::string_view name, JSON::Value value) override {
-    if (name != "kind") {
-      throw JSON::unknown_value_error{};
-    }
-    const auto kind = JSON::Get<std::string_view>(value);
-    if (kind == "paged_kv") {
-      v_.kind = DecoderStateGroupKind::PagedKeyValue;
-    } else if (kind == "fixed") {
-      v_.kind = DecoderStateGroupKind::Fixed;
+    if (name == "kind") {
+      const auto kind = JSON::Get<std::string_view>(value);
+      if (kind == "paged_kv") {
+        v_.kind = DecoderStateGroupKind::PagedKeyValue;
+      } else if (kind == "fixed_conv") {
+        v_.kind = DecoderStateGroupKind::FixedConv;
+      } else if (kind == "fixed_recurrent") {
+        v_.kind = DecoderStateGroupKind::FixedRecurrent;
+      } else if (kind == "fixed") {
+        throw std::runtime_error(
+            "Decoder state group kind 'fixed' is no longer supported; use 'fixed_conv' or "
+            "'fixed_recurrent' and move binding templates to model.decoder.inputs and "
+            "model.decoder.outputs");
+      } else {
+        throw std::runtime_error("Unsupported decoder state group kind '" + std::string{kind} + "'");
+      }
     } else {
-      throw std::runtime_error("Unsupported decoder state group kind '" + std::string{kind} + "'");
+      throw JSON::unknown_value_error{};
     }
   }
 
   Element& OnObject(std::string_view name) override {
+    if (name == "state_update") {
+      if (v_.state_update) {
+        throw std::runtime_error("Duplicate decoder state_update declaration");
+      }
+      v_.state_update.emplace();
+      state_update_ = std::make_unique<StateUpdate_Element>(*v_.state_update);
+      return *state_update_;
+    }
     if (name == "bindings") {
-      return bindings_;
+      throw std::runtime_error(
+          "Legacy decoder state group bindings are no longer supported; move binding templates "
+          "to model.decoder.inputs and model.decoder.outputs");
     }
     throw JSON::unknown_value_error{};
   }
@@ -587,7 +603,7 @@ struct StateGroup_Element : JSON::Element {
  private:
   DecoderStateGroup& v_;
   IntArray_Element layer_ids_{v_.layer_ids};
-  StateBindings_Element bindings_{v_};
+  std::unique_ptr<StateUpdate_Element> state_update_;
 };
 
 struct StateGroups_Element : JSON::Element {
@@ -800,6 +816,14 @@ struct Decoder_Element : JSON::Element {
       v_.num_key_value_heads = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "head_size") {
       v_.head_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "state_update_capacity") {
+      // The kernel packs every captured transition for a layer into one fixed-width capsule output.
+      // Keep this limit synchronized with check_extra_options in builder.py and the model-builder README.
+      v_.state_update_capacity = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.state_update_capacity < 0 ||
+          v_.state_update_capacity > Config::Model::Decoder::MaxStateUpdateCapacity)
+        throw std::runtime_error("state_update_capacity must be between 0 and " +
+                                 std::to_string(Config::Model::Decoder::MaxStateUpdateCapacity));
     } else if (name == "conv_cache_size") {
       v_.conv_cache_size = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else {
@@ -1751,8 +1775,14 @@ struct StaticBatching_Element : JSON::Element {
   explicit StaticBatching_Element(std::optional<Config::Engine::StaticBatching>& v) : v_{v} {}
 
   void OnValue(std::string_view name, JSON::Value value) override {
+    if (!v_)
+      v_ = Config::Engine::StaticBatching{};
+
     if (name == "max_batch_size") {
-      v_->max_batch_size = static_cast<size_t>(JSON::Get<double>(value));
+      const auto parsed_value = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (parsed_value <= 0)
+        throw std::runtime_error("max_batch_size must be > 0");
+      v_->max_batch_size = static_cast<size_t>(parsed_value);
     } else {
       throw JSON::unknown_value_error{};
     }

@@ -3,6 +3,8 @@
 
 #include "request.h"
 
+#include <cmath>
+
 #include "engine.h"
 #include "sequence_positions.h"
 #include "../constrained_logits_processor.h"
@@ -10,17 +12,9 @@
 
 namespace Generators {
 
-RequestAdmissionPreparation::RequestAdmissionPreparation() = default;
-RequestAdmissionPreparation::~RequestAdmissionPreparation() = default;
-RequestAdmissionPreparation::RequestAdmissionPreparation(
-    RequestAdmissionPreparation&&) noexcept = default;
-RequestAdmissionPreparation& RequestAdmissionPreparation::operator=(
-    RequestAdmissionPreparation&&) noexcept = default;
-
-namespace {
-
-DeviceSpan<int32_t> AllocateOnDevice(GeneratorParams& params,
-                                     std::span<const int32_t> input_ids) {
+DeviceSpan<int32_t> Request::AllocateOnDevice(
+    GeneratorParams& params,
+    std::span<const int32_t> input_ids) {
   auto device_tokens = params.p_device->Allocate<int32_t>(input_ids.size());
   auto cpu_tokens = device_tokens.CpuSpan();
   std::copy(input_ids.begin(), input_ids.end(), cpu_tokens.begin());
@@ -28,34 +22,68 @@ DeviceSpan<int32_t> AllocateOnDevice(GeneratorParams& params,
   return device_tokens;
 }
 
-void ValidateAppendLength(const GeneratorParams& params,
-                          size_t current_sequence_length,
-                          size_t token_count) {
-  const size_t max_length = static_cast<size_t>(params.search.max_length);
-  if (current_sequence_length >= max_length ||
-      token_count >= max_length - current_sequence_length) {
+void Request::ValidateAppendLength(
+    size_t max_total_tokens,
+    size_t current_sequence_length,
+    size_t token_count) {
+  if (current_sequence_length >= max_total_tokens ||
+      token_count >= max_total_tokens - current_sequence_length) {
     throw std::runtime_error(
-        "Input tokens must leave room for at least one generated token before max_length (" +
-        std::to_string(params.search.max_length) + ").");
+        "Appending input_tokens_count (" + std::to_string(token_count) +
+        ") to current_sequence_length (" +
+        std::to_string(current_sequence_length) +
+        ") must leave room for at least one generated token before "
+        "max_total_tokens (" +
+        std::to_string(max_total_tokens) + ").");
   }
 }
 
-}  // namespace
+void TurnOptions::ValidateOwnerThread() const {
+  auto bound_request = request.lock();
+  if (!bound_request) {
+    throw std::runtime_error(
+        "Cannot use Turn options after their Request has been destroyed.");
+  }
+  bound_request->ValidateOwnerThread();
+}
 
-Request::Request(std::shared_ptr<GeneratorParams> params)
-    : params_{params},
+void Request::ValidateOwnerThread() const {
+  auto engine = engine_.lock();
+  if (!engine) {
+    if (IsClosed(status_)) {
+      throw std::runtime_error("Cannot use a closed request.");
+    }
+    throw std::runtime_error(
+        "Cannot use a Request after its Engine has been destroyed.");
+  }
+  engine->ValidateOwnerThread();
+}
+
+Request::Request(
+    std::shared_ptr<GeneratorParams> params,
+    size_t max_total_tokens,
+    std::shared_ptr<std::atomic<bool>> abandonment_pending)
+    : max_total_tokens_{max_total_tokens},
+      params_{params},
       rng_{CreateRandomGenerator(params->search.random_seed)},
-      search_{CreateSearch(*params)} {
+      search_{CreateSearch(*params)},
+      abandonment_pending_{std::move(abandonment_pending)} {
   // A request is one sequence: the engine batches requests, not rows within a request. Several
   // places here read row 0 only (UnprocessedTokens, CurrentSequenceLength) or take the tail of the
   // next-token span, so a wider search would silently mirror the wrong row's tokens.
   if (params->search.batch_size != 1) {
-    throw std::runtime_error("A request must have search.batch_size == 1; batch across requests instead.");
+    throw std::runtime_error(
+        "Engine requests require search.batch_size == 1; actual value is " +
+        std::to_string(params->search.batch_size) +
+        ". Batch across requests instead.");
   }
   // Beam search does not implement the deferred completion contract below, so its next tokens would
   // never be copied back from the device.
   if (params->search.num_beams != 1) {
-    throw std::runtime_error("A request must have search.num_beams == 1; beam search is not supported by the engine.");
+    throw std::runtime_error(
+        "Engine requests require search.num_beams == 1; actual value is " +
+        std::to_string(params->search.num_beams) +
+        ". Beam search is not supported by the Engine.");
   }
   if (params->guidance_ff_tokens_enabled) {
     throw std::runtime_error("Guidance fast-forward tokens are not supported by the engine.");
@@ -80,98 +108,19 @@ Request::Request(std::shared_ptr<GeneratorParams> params)
   // The engine drives one independent search per request, so completion is batched: see
   // ScheduledRequests::GenerateNextTokens().
   search_->DeferCompletion(true);
+  tokens_host_.reserve(max_total_tokens_);
 }
 
 Request::~Request() = default;
 
-bool Request::BelongsTo(const Engine& engine) const noexcept {
-  return engine_.lock().get() == &engine;
+void Request::OnFirstExternalReference() noexcept {}
+
+void Request::OnLastExternalReference() noexcept {
+  abandonment_pending_->store(true, std::memory_order_release);
 }
 
-void Request::CompleteCloseFromEngine(const Engine& engine) noexcept {
-  assert(BelongsTo(engine));
-  CompleteClose();
-}
-
-void Request::Assign(std::shared_ptr<Engine> engine) {
-  auto preparation = PrepareAdmission();
-  CommitAdmission(std::move(engine), std::move(preparation));
-}
-
-RequestAdmissionPreparation Request::PrepareAdmission() const {
-  if (status_ != RequestStatus::Unassigned) {
-    throw std::runtime_error("Cannot add the request to the engine since it is already assigned.");
-  }
-  if (prefill_input_ids_.empty()) {
-    throw std::runtime_error("Cannot add a request with no input tokens to the engine.");
-  }
-
-  RequestAdmissionPreparation preparation;
-  preparation.search = CreateSearch(*params_);
-  preparation.search->DeferCompletion(true);
-  auto device_tokens = AllocateOnDevice(*params_, prefill_input_ids_);
-  preparation.search->AppendTokens(device_tokens);
-  preparation.prompt_sequence_length = preparation.search->GetSequenceLength();
-  preparation.seen_sequence_length = preparation.prompt_sequence_length;
-  preparation.tokens_host.reserve(params_->search.max_length);
-  preparation.tokens_host.insert(
-      preparation.tokens_host.end(), prefill_input_ids_.begin(), prefill_input_ids_.end());
-  return preparation;
-}
-
-void Request::CommitAdmission(std::shared_ptr<Engine> engine,
-                              RequestAdmissionPreparation&& preparation) noexcept {
-  search_ = std::move(preparation.search);
-  batched_sampler_state_ = std::move(preparation.sampling_state);
-  tokens_host_ = std::move(preparation.tokens_host);
-  prompt_sequence_length_ = preparation.prompt_sequence_length;
-  seen_sequence_length_ = preparation.seen_sequence_length;
-  processed_sequence_length_ = 0;
-  prefill_input_ids_.clear();
-  engine_ = std::move(engine);
-  status_ = RequestStatus::Assigned;
-}
-
-void Request::PrepareForStep(size_t max_generated_token_indices) {
-  if (next_unseen_token_index_ > unseen_token_indices_.size()) {
-    throw std::logic_error("The unseen token cursor is outside the generated-token index queue.");
-  }
-
-  const size_t unread_token_count =
-      unseen_token_indices_.size() - next_unseen_token_index_;
-  const bool append_would_grow =
-      max_generated_token_indices >
-      unseen_token_indices_.capacity() - unseen_token_indices_.size();
-  if (next_unseen_token_index_ != 0 &&
-      (append_would_grow ||
-       next_unseen_token_index_ >= unread_token_count)) {
-    const auto unread_begin =
-        unseen_token_indices_.begin() +
-        static_cast<std::vector<size_t>::difference_type>(
-            next_unseen_token_index_);
-    unseen_token_indices_.erase(unseen_token_indices_.begin(), unread_begin);
-    next_unseen_token_index_ = 0;
-  }
-
-  if (max_generated_token_indices >
-      unseen_token_indices_.max_size() - unseen_token_indices_.size()) {
-    throw std::length_error(
-        "The generated-token index queue cannot represent this step.");
-  }
-  const size_t required_capacity =
-      unseen_token_indices_.size() + max_generated_token_indices;
-  if (required_capacity <= unseen_token_indices_.capacity()) {
-    return;
-  }
-
-  // Grow geometrically from the actual unread output needed by this step. Unlike reserving
-  // max_length, this keeps a streaming caller's index storage small while avoiding one allocation
-  // per token when output is allowed to accumulate.
-  const size_t target_capacity =
-      required_capacity > unseen_token_indices_.max_size() / 2
-          ? unseen_token_indices_.max_size()
-          : required_capacity * 2;
-  unseen_token_indices_.reserve(target_capacity);
+bool Request::IsExternallyAbandoned() const noexcept {
+  return ExternalReferencesAbandoned();
 }
 
 void Request::Schedule() {
@@ -186,10 +135,7 @@ void Request::Schedule() {
   status_ = RequestStatus::Active;
 }
 
-void Request::Remove() {
-  if (status_ == RequestStatus::Unassigned) {
-    throw std::runtime_error("Cannot close a request that has not been submitted to an engine.");
-  }
+void Request::Close() {
   if (IsClosed(status_)) {
     return;
   }
@@ -199,93 +145,180 @@ void Request::Remove() {
     CompleteClose();
     return;
   }
-  engine->RemoveRequest(shared_from_this());
+  engine->CloseRequest(shared_from_this());
+}
+
+bool Request::Cancel(uint64_t turn_id) {
+  auto engine = engine_.lock();
+  if (!engine) {
+    throw std::runtime_error(
+        "Cannot cancel after the request's engine has been destroyed.");
+  }
+  return engine->CancelRequest(shared_from_this(), turn_id);
 }
 
 void Request::CompleteClose() noexcept {
   engine_.reset();
   status_ = RequestStatus::Closed;
+  guidance_transaction_checkpoint_.reset();
+  guidance_logits_processor_.reset();
+  batched_sampler_state_.reset();
+  search_.reset();
+  params_.reset();
+  std::vector<int32_t>{}.swap(tokens_host_);
 }
 
-void Request::AddTokens(std::span<const int32_t> tokens) {
-  if (tokens.empty())
-    throw std::runtime_error("Expected at least one token for generation. Received 0.");
-
-  if (status_ != RequestStatus::Unassigned) {
-    if (IsTurnComplete()) {
-      throw std::runtime_error(
-          "AddTokens only accepts initial input; use the continuation API for another turn.");
-    }
-    if (IsClosed(status_)) {
-      throw std::runtime_error("Cannot add tokens to a closed request.");
-    }
-    throw std::runtime_error("AddTokens only accepts initial input before submission to an engine.");
-  }
-
-  ValidateAppendLength(*params_, prefill_input_ids_.size(), tokens.size());
-  std::copy(tokens.begin(), tokens.end(), std::back_inserter(prefill_input_ids_));
-}
-
-void Request::Continue(std::span<const int32_t> tokens) {
+uint64_t Request::BeginTurn(
+    std::span<const int32_t> tokens,
+    std::optional<size_t> max_generated_tokens) {
   if (IsClosed(status_)) {
-    throw std::runtime_error("Cannot continue a closed request.");
+    throw std::runtime_error("Cannot begin a turn for a closed request.");
   }
-  if (tokens.empty())
-    throw std::runtime_error("Expected at least one token for continuation. Received 0.");
-  if (!IsTurnComplete()) {
-    throw std::runtime_error("Continue is only valid after the current turn is complete.");
-  }
-
   auto engine = engine_.lock();
   if (!engine) {
-    throw std::runtime_error("Cannot continue a request after its engine has been destroyed.");
-  }
-  const DeviceType cache_device = params_->model_->p_device_kvcache_->GetType();
-  if (!SupportsContinuousDecoding(cache_device)) {
     throw std::runtime_error(
-        "Continuous decoding is not supported on the selected KV-cache device type (" +
-        to_string(cache_device) + ").");
+        "Cannot begin a turn after the request's engine has been destroyed.");
   }
-  engine->ValidateRequestCanContinue(shared_from_this());
-  ValidateAppendLength(*params_, static_cast<size_t>(CurrentSequenceLength()), tokens.size());
-  if (tokens_host_.capacity() < tokens_host_.size() + tokens.size()) {
-    throw std::logic_error("The request host token mirror does not have reserved continuation capacity.");
-  }
-
-  auto device_tokens = AllocateOnDevice(*params_, tokens);
-  search_->SaveStateForTransaction();
-  try {
-    search_->AppendTokens(device_tokens);
-    search_->CommitStateForTransaction();
-  } catch (...) {
-    const auto append_error = std::current_exception();
-    try {
-      search_->RestoreStateForTransaction();
-    } catch (...) {
-      engine->HandleContinuationRestoreFailure(
-          shared_from_this(), append_error, std::current_exception());
-    }
-    std::rethrow_exception(append_error);
-  }
-
-  tokens_host_.insert(tokens_host_.end(), tokens.begin(), tokens.end());
-  prompt_sequence_length_ = CurrentSequenceLength();
-  status_ = RequestStatus::Assigned;
+  return engine->BeginTurn(
+      shared_from_this(), tokens, max_generated_tokens);
 }
 
 int64_t Request::CurrentSequenceLength() const {
   return search_->GetSequenceLength();
 }
 
+int64_t Request::CommittedSequenceLength() const {
+  return CurrentSequenceLength() - static_cast<int64_t>(staged_draft_count_);
+}
+
+void Request::SetDraftTokens(std::span<const int32_t> tokens) {
+  if (staged_draft_count_ != 0) {
+    throw std::runtime_error("Cannot replace draft tokens while a step is in flight.");
+  }
+  if (IsClosed(status_)) {
+    throw std::runtime_error("Cannot propose draft tokens for a closed request.");
+  }
+  draft_tokens_.clear();
+  if (tokens.empty()) {
+    return;
+  }
+  if (guidance_logits_processor_) {
+    throw std::runtime_error("Speculative draft tokens are not supported with guidance.");
+  }
+
+  const auto& search = params_->search;
+  // Verification compares the target model's argmax against each draft, which only reproduces the
+  // request's own token stream when that stream is greedy.
+  if (search.do_sample && search.top_k != 1 && search.temperature != 0) {
+    throw std::runtime_error("Speculative draft tokens require a greedy request.");
+  }
+  // The draft rows are read before any logits processor runs, so a processor that would change a
+  // row's argmax has to be inactive for every position this step verifies.
+  if (search.repetition_penalty != 1.0f || search.no_repeat_ngram_size > 0 ||
+      search.min_length > CurrentSequenceLength()) {
+    throw std::runtime_error(
+        "Speculative draft tokens require repetition_penalty 1, no_repeat_ngram_size 0, and a "
+        "sequence already past min_length.");
+  }
+  auto engine = engine_.lock();
+  if (!engine) {
+    throw std::runtime_error("Cannot propose draft tokens before the request is added to an engine.");
+  }
+  const size_t max_drafts = engine->MaxDraftTokensPerStep();
+  if (max_drafts == 0) {
+    throw std::runtime_error("This engine does not support speculative draft verification.");
+  }
+  if (tokens.size() > max_drafts) {
+    throw std::runtime_error(
+        "A step accepts at most " + std::to_string(max_drafts) + " draft tokens.");
+  }
+  ValidateAppendLength(
+      max_total_tokens_, static_cast<size_t>(CurrentSequenceLength()), tokens.size());
+  if (tokens_host_.capacity() < tokens_host_.size() + tokens.size()) {
+    throw std::logic_error("The request host token mirror does not have reserved draft capacity.");
+  }
+  draft_tokens_.assign(tokens.begin(), tokens.end());
+}
+
+std::span<const int32_t> Request::StagedDraftTokens() const {
+  return std::span<const int32_t>{draft_tokens_}.subspan(0, staged_draft_count_);
+}
+
+void Request::AppendDraftsForTransaction(size_t draft_count) {
+  if (draft_count == 0) {
+    return;
+  }
+  if (staged_draft_count_ != 0 || draft_count > draft_tokens_.size()) {
+    throw std::logic_error("The step staged more draft tokens than the request proposed.");
+  }
+
+  const std::span<const int32_t> drafts{draft_tokens_.data(), draft_count};
+  auto device_tokens = AllocateOnDevice(*params_, drafts);
+  search_->AppendTokens(device_tokens);
+  tokens_host_.insert(tokens_host_.end(), drafts.begin(), drafts.end());
+  staged_draft_count_ = draft_count;
+  accepted_draft_count_ = 0;
+  draft_verification_completed_generation_ = false;
+}
+
+void Request::CommitAcceptedDraftsForTransaction(size_t accepted_count) {
+  if (accepted_count > staged_draft_count_) {
+    throw std::logic_error("The step accepted more draft tokens than it staged.");
+  }
+  const size_t proposed_count = staged_draft_count_;
+  const size_t committed_length =
+      static_cast<size_t>(CurrentSequenceLength()) - proposed_count;
+  tokens_host_.resize(tokens_host_.size() - proposed_count);
+  search_->RewindTo(committed_length);
+  staged_draft_count_ = 0;
+  accepted_draft_count_ = 0;
+  draft_verification_completed_generation_ = false;
+
+  for (size_t offset = 0; offset < accepted_count; ++offset) {
+    const int32_t token = draft_tokens_[offset];
+    const int64_t sequence_length_before = CurrentSequenceLength();
+    search_->CommitToken(token);
+    const int64_t sequence_length_after = CurrentSequenceLength();
+    if (sequence_length_after == sequence_length_before + 1) {
+      tokens_host_.push_back(token);
+      ++staged_draft_count_;
+      ++accepted_draft_count_;
+    } else if (sequence_length_after != sequence_length_before ||
+               !search_->IsDone()) {
+      throw std::logic_error(
+          "Committing an accepted draft produced an invalid sequence transition.");
+    }
+    const bool turn_limit_reached =
+        turn_max_generated_tokens_ &&
+        turn_generated_tokens_ + accepted_draft_count_ >=
+            *turn_max_generated_tokens_;
+    if (search_->IsDone() || turn_limit_reached) {
+      draft_verification_completed_generation_ = true;
+      break;
+    }
+  }
+}
+
+void Request::DiscardStagedDrafts() noexcept {
+  if (staged_draft_count_ != 0) {
+    tokens_host_.resize(tokens_host_.size() - staged_draft_count_);
+    staged_draft_count_ = 0;
+  }
+  accepted_draft_count_ = 0;
+  draft_verification_completed_generation_ = false;
+}
+
 RequestStateSnapshot Request::Snapshot() const {
-  const int64_t current = CurrentSequenceLength();
+  const int64_t current = CommittedSequenceLength();
   RequestStateSnapshot snapshot;
   snapshot.request_id = this;
   snapshot.status = status_;
   snapshot.current_sequence_length = current;
   snapshot.processed_sequence_length = processed_sequence_length_;
-  snapshot.seen_sequence_length = seen_sequence_length_;
   snapshot.is_prefill = IsPrefill();
+  snapshot.has_current_turn = has_current_turn_;
+  snapshot.current_turn_id = current_turn_id_;
+  snapshot.finish_reason = finish_reason_;
   return snapshot;
 }
 
@@ -304,11 +337,15 @@ void Request::ScheduleTokens() {
 }
 
 void Request::BindScheduledTokenCount(size_t token_count) {
-  const int64_t remaining = CurrentSequenceLength() - processed_sequence_length_;
+  // A speculative step also sends the drafts the transaction is about to stage onto the sequence.
+  const int64_t remaining = CurrentSequenceLength() - processed_sequence_length_ +
+                            static_cast<int64_t>(draft_tokens_.size() - staged_draft_count_);
   if (remaining <= 0 || token_count == 0 ||
       token_count > static_cast<size_t>(remaining)) {
     throw std::runtime_error(
-        "The dynamic step token count must be positive and no greater than the remaining tokens.");
+        "The dynamic step token count (" + std::to_string(token_count) +
+        ") must be positive and no greater than the remaining token count (" +
+        std::to_string(remaining) + ").");
   }
   scheduled_token_count_ = token_count;
 }
@@ -319,26 +356,6 @@ bool Request::IsChunkComplete() const {
 
 void Request::AdvanceChunk() {
   processed_sequence_length_ += static_cast<int64_t>(ScheduledTokenCount());
-}
-
-int32_t Request::UnseenToken() {
-  if (next_unseen_token_index_ >= unseen_token_indices_.size())
-    throw std::runtime_error("All tokens have been seen.");
-
-  const size_t token_index = unseen_token_indices_[next_unseen_token_index_++];
-  if (token_index >= tokens_host_.size())
-    throw std::runtime_error("The unseen token index is outside the host token sequence.");
-  seen_sequence_length_ = std::max(seen_sequence_length_, static_cast<int64_t>(token_index + 1));
-  const int32_t token = tokens_host_[token_index];
-  if (next_unseen_token_index_ == unseen_token_indices_.size()) {
-    unseen_token_indices_.clear();
-    next_unseen_token_index_ = 0;
-  }
-  return token;
-}
-
-bool Request::HasUnseenTokens() const {
-  return next_unseen_token_index_ < unseen_token_indices_.size();
 }
 
 DeviceSpan<int32_t> Request::UnprocessedTokens() {
@@ -375,10 +392,15 @@ void Request::GenerateNextTokens(DeviceSpan<float> logits) {
       throw std::runtime_error("TopK and TopP cannot be used with a beam search");
 
     // Sanity checks
-    if (search_params.top_p < 0.0f || search_params.top_p > 1.0f)
-      throw std::runtime_error("top_p must be between 0.0 and 1.0");
+    if (!std::isfinite(search_params.top_p) ||
+        search_params.top_p < 0.0f || search_params.top_p > 1.0f)
+      throw std::runtime_error(
+          "top_p (" + std::to_string(search_params.top_p) +
+          ") must be finite and between 0.0 and 1.0.");
     if (search_params.top_k < 0)
-      throw std::runtime_error("top_k must be 0 or greater");
+      throw std::runtime_error(
+          "top_k (" + std::to_string(search_params.top_k) +
+          ") must be 0 or greater.");
 
     if (search_params.top_p > 0.0f && search_params.top_p < 1.0f && search_params.top_k > 1) {
       search_->SampleTopKTopP(search_params.top_k, search_params.top_p, search_params.temperature,
@@ -397,27 +419,34 @@ void Request::ValidateEngineCompatibility() const {
   if (search.batch_size != 1 || search.num_beams != 1) {
     throw std::runtime_error("Engine requests require batch_size and num_beams to both be 1.");
   }
-  if (search.top_p < 0.0f || search.top_p > 1.0f) {
-    throw std::runtime_error("top_p must be between 0.0 and 1.0");
+  if (!std::isfinite(search.top_p) ||
+      search.top_p < 0.0f || search.top_p > 1.0f) {
+    throw std::runtime_error(
+        "top_p (" + std::to_string(search.top_p) +
+        ") must be finite and between 0.0 and 1.0.");
   }
   if (search.top_k < 0) {
-    throw std::runtime_error("top_k must be 0 or greater");
+    throw std::runtime_error(
+        "top_k (" + std::to_string(search.top_k) +
+        ") must be 0 or greater.");
   }
 }
 
 void Request::SaveStateForTransaction() {
-  if (guidance_logits_processor_) {
-    guidance_transaction_checkpoint_ = guidance_logits_processor_->Clone();
-  }
+  auto guidance_checkpoint = guidance_logits_processor_
+                                 ? guidance_logits_processor_->Clone()
+                                 : nullptr;
   search_->SaveStateForTransaction();
+  guidance_transaction_checkpoint_ = std::move(guidance_checkpoint);
   transaction_rng_ = rng_;
 }
 
 void Request::SaveStateForExternalSamplingTransaction() {
-  if (guidance_logits_processor_) {
-    guidance_transaction_checkpoint_ = guidance_logits_processor_->Clone();
-  }
+  auto guidance_checkpoint = guidance_logits_processor_
+                                 ? guidance_logits_processor_->Clone()
+                                 : nullptr;
   search_->SaveStateForExternalSamplingTransaction();
+  guidance_transaction_checkpoint_ = std::move(guidance_checkpoint);
   transaction_rng_ = rng_;
 }
 
@@ -437,9 +466,38 @@ RequestStepResult Request::StageGenerationForTransaction(
   return StageGeneration(plan.sequence_length_before);
 }
 
+RequestStepResult Request::StageDraftCompletionForTransaction() {
+  if (!draft_verification_completed_generation_) {
+    throw std::logic_error(
+        "Draft completion was staged before verification completed generation.");
+  }
+
+  GenerationFinishReason finish_reason = GenerationFinishReason::ContextLimit;
+  const bool turn_limit_reached =
+      turn_max_generated_tokens_ &&
+      turn_generated_tokens_ + accepted_draft_count_ >=
+          *turn_max_generated_tokens_;
+  if (turn_limit_reached) {
+    finish_reason = GenerationFinishReason::TurnLimit;
+  } else {
+    const auto next_tokens = search_->GetNextTokens().CpuSpan();
+    if (search_->IsDone() && !next_tokens.empty() &&
+        contains(params_->config.model.eos_token_id, next_tokens.back())) {
+      finish_reason = GenerationFinishReason::EosToken;
+    }
+  }
+  return RequestStepResult{
+      0,
+      false,
+      true,
+      finish_reason,
+  };
+}
+
 void Request::RestoreStateForTransaction() {
   search_->RestoreStateForTransaction();
   rng_ = transaction_rng_;
+  DiscardStagedDrafts();
   if (guidance_transaction_checkpoint_) {
     guidance_logits_processor_ = std::move(guidance_transaction_checkpoint_);
   }
@@ -448,6 +506,7 @@ void Request::RestoreStateForTransaction() {
 void Request::QueueStateRestoreForTransaction() {
   search_->QueueStateRestoreForTransaction();
   rng_ = transaction_rng_;
+  DiscardStagedDrafts();
 }
 
 void Request::CompleteStateRestoreForTransaction() {
@@ -464,15 +523,26 @@ void Request::CommitStateForTransaction() {
 
 void Request::CommitStep(const RequestStepPlan& plan,
                          const RequestStepResult& result) noexcept {
+  // Draft verification has already retained the accepted prefix in the host mirror and Search.
+  // tokens_host_ retains its existing max-length reservation, so the final append cannot allocate
+  // at this commit boundary.
+  const size_t accepted_drafts = accepted_draft_count_;
+  turn_generated_tokens_ += accepted_drafts;
   if (result.token_appended) {
-    // ScheduledRequests reserved this append before model execution. tokens_host_ retains its
-    // existing max-length reservation, so neither push allocates at this commit boundary.
-    const size_t token_index = tokens_host_.size();
     tokens_host_.push_back(result.token);
-    unseen_token_indices_.push_back(token_index);
+    ++turn_generated_tokens_;
   }
-  processed_sequence_length_ = static_cast<int64_t>(plan.target_cache_slots);
+  // A verify step reserved cache slots for every draft; the rejected ones were never committed.
+  processed_sequence_length_ =
+      static_cast<int64_t>(plan.target_cache_slots - (plan.draft_token_count - accepted_drafts));
   status_ = result.done ? RequestStatus::TurnComplete : RequestStatus::Active;
+  if (result.done) {
+    finish_reason_ = result.finish_reason;
+  }
+  draft_tokens_.clear();
+  staged_draft_count_ = 0;
+  accepted_draft_count_ = 0;
+  draft_verification_completed_generation_ = false;
 }
 
 void Request::ApplyLogitsProcessors(DeviceSpan<float> logits) {
@@ -484,6 +554,12 @@ void Request::ApplyLogitsProcessors(DeviceSpan<float> logits) {
   search_->ApplyMinLength(search_params.min_length);
   search_->ApplyRepetitionPenalty(search_params.repetition_penalty);
   search_->ApplyNoRepeatNgram(search_params.no_repeat_ngram_size);
+}
+
+void Request::ResetGuidanceForNewTurn() {
+  if (guidance_logits_processor_) {
+    guidance_logits_processor_->Reset();
+  }
 }
 
 void Request::SelectNextToken() {
@@ -503,16 +579,33 @@ void Request::SelectNextToken() {
 
 RequestStepResult Request::StageGeneration(int64_t sequence_length_before) {
   search_->CompleteGeneration();
-  const bool done = search_->IsDone();
+  const bool search_done = search_->IsDone();
   const bool token_appended = CurrentSequenceLength() > sequence_length_before;
-  int32_t token = 0;
-  if (token_appended) {
-    token = search_->GetNextTokens().CpuSpan().back();
+  const auto next_tokens = search_->GetNextTokens().CpuSpan();
+  const int32_t token = next_tokens.empty() ? 0 : next_tokens.back();
+  const size_t generated_tokens_after_step =
+      turn_generated_tokens_ + accepted_draft_count_ +
+      static_cast<size_t>(token_appended);
+  const bool turn_limit_reached =
+      turn_max_generated_tokens_ &&
+      generated_tokens_after_step >= *turn_max_generated_tokens_;
+  const bool context_limit_reached =
+      static_cast<size_t>(CurrentSequenceLength()) >= max_total_tokens_;
+  GenerationFinishReason finish_reason = GenerationFinishReason::None;
+  if (search_done && !next_tokens.empty() &&
+      contains(params_->config.model.eos_token_id, token)) {
+    finish_reason = GenerationFinishReason::EosToken;
+  } else if (turn_limit_reached) {
+    finish_reason = GenerationFinishReason::TurnLimit;
+  } else if (context_limit_reached || search_done) {
+    finish_reason = GenerationFinishReason::ContextLimit;
   }
+  const bool done = finish_reason != GenerationFinishReason::None;
   RequestStepResult result{
       token,
       token_appended,
       done,
+      finish_reason,
   };
   CommitGuidanceToken(result);
   if (done && guidance_logits_processor_) {
@@ -561,45 +654,52 @@ void Request::CommitSamplingState(std::unique_ptr<BatchedSamplerState> state) no
   }
 }
 
-void Request::CompleteGeneration() {
+RequestStepResult Request::CompleteGeneration() {
   search_->CompleteGeneration();
+  const auto next_tokens = search_->GetNextTokens().CpuSpan();
 
   const size_t sequence_length = static_cast<size_t>(CurrentSequenceLength());
+  size_t new_token_count{};
+  int32_t token{};
   if (sequence_length > tokens_host_.size()) {
-    const size_t new_token_count = sequence_length - tokens_host_.size();
-    auto next_tokens = search_->GetNextTokens().CpuSpan();
+    new_token_count = sequence_length - tokens_host_.size();
     if (new_token_count > next_tokens.size())
       throw std::runtime_error("The search produced fewer tokens than it appended to the sequence.");
     auto new_tokens = next_tokens.last(new_token_count);
 
-    const size_t first_new_token = tokens_host_.size();
     tokens_host_.insert(tokens_host_.end(), new_tokens.begin(), new_tokens.end());
-    for (size_t token_index = first_new_token; token_index < tokens_host_.size(); ++token_index) {
-      unseen_token_indices_.push_back(token_index);
-    }
+    token = new_tokens.back();
     if (guidance_logits_processor_) {
       guidance_logits_processor_->CommitTokens(new_tokens);
     }
+    turn_generated_tokens_ += new_token_count;
   }
 
-  if (search_->IsDone()) {
+  const bool turn_limit_reached =
+      turn_max_generated_tokens_ &&
+      turn_generated_tokens_ >= *turn_max_generated_tokens_;
+  const bool context_limit_reached =
+      static_cast<size_t>(CurrentSequenceLength()) >= max_total_tokens_;
+  if (search_->IsDone() || turn_limit_reached || context_limit_reached) {
     status_ = RequestStatus::TurnComplete;
+    if (search_->IsDone() && !next_tokens.empty() &&
+        contains(params_->config.model.eos_token_id, next_tokens.back())) {
+      finish_reason_ = GenerationFinishReason::EosToken;
+    } else if (turn_limit_reached) {
+      finish_reason_ = GenerationFinishReason::TurnLimit;
+    } else {
+      finish_reason_ = GenerationFinishReason::ContextLimit;
+    }
     if (guidance_logits_processor_) {
       guidance_logits_processor_->Reset();
     }
   }
-}
-
-std::shared_ptr<GeneratorParams> Request::Params() {
-  return params_;
-}
-
-void Request::SetOpaqueData(void* data) {
-  opaque_data_ = data;
-}
-
-void* Request::GetOpaqueData() {
-  return opaque_data_;
+  return RequestStepResult{
+      token,
+      new_token_count != 0,
+      Generators::IsTurnComplete(status_),
+      finish_reason_,
+  };
 }
 
 }  // namespace Generators

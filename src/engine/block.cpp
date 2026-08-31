@@ -1,11 +1,12 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include "../generators.h"
+#include "generator/generators.h"
 #include "block.h"
 
-#include <numeric>
 #include <algorithm>
+#include <exception>
+#include <numeric>
 
 namespace Generators {
 
@@ -51,32 +52,37 @@ std::vector<size_t> Block::SlotIds() const {
 }
 
 BlockPool::BlockPool(size_t block_size, size_t num_blocks)
-    : block_size_(block_size), capacity_(num_blocks) {}
+    : block_size_(block_size),
+      capacity_(num_blocks),
+      blocks_(num_blocks),
+      validation_marks_(num_blocks) {}
 
 std::vector<std::shared_ptr<Block>> BlockPool::AllocateBlocks(size_t num_slots, bool mark_slots_used) {
-  const auto allocate_block = [this](size_t slots) {
-    for (size_t i = 0; i < Capacity(); ++i) {
-      if (blocks_[i] == nullptr) {
-        blocks_[i] = std::make_shared<Block>(i, slots, block_size_);
-        return blocks_[i];
-      }
-    }
-    return std::shared_ptr<Block>();
-  };
-
-  if (BlocksNeeded(num_slots) > AvailableBlocks()) {
-    throw std::runtime_error("Requested number of blocks " + std::to_string(BlocksNeeded(num_slots)) +
+  const size_t blocks_needed = BlocksNeeded(num_slots);
+  if (blocks_needed > AvailableBlocks()) {
+    throw std::runtime_error("Requested number of blocks " + std::to_string(blocks_needed) +
                              " for number of slots " + std::to_string(num_slots) +
                              " exceeds available blocks " + std::to_string(AvailableBlocks()) + ".");
   }
 
   std::vector<std::shared_ptr<Block>> allocated_blocks;
-  for (size_t i = 0; i < num_slots; i += block_size_) {
-    auto block = allocate_block(mark_slots_used ? std::min(block_size_, num_slots - i) : 0);
-    if (!block) {
-      throw std::runtime_error("Failed to allocate a block.");
+  allocated_blocks.reserve(blocks_needed);
+  for (size_t id = 0; id < Capacity() && allocated_blocks.size() < blocks_needed; ++id) {
+    if (blocks_[id] == nullptr) {
+      const size_t allocated_slots = allocated_blocks.size() * block_size_;
+      const size_t slots =
+          mark_slots_used ? std::min(block_size_, num_slots - allocated_slots) : 0;
+      allocated_blocks.push_back(std::make_shared<Block>(id, slots, block_size_));
     }
-    allocated_blocks.push_back(block);
+  }
+
+  // Publish only after every allocation succeeds. Until this loop, an exception leaves the pool
+  // unchanged and the local handles clean themselves up.
+  for (const auto& block : allocated_blocks) {
+    blocks_[block->Id()] = block;
+  }
+  if (!allocated_blocks.empty()) {
+    ++mutation_generation_;
   }
   return allocated_blocks;
 }
@@ -90,10 +96,15 @@ std::vector<std::shared_ptr<Block>> BlockPool::ReserveBlocks(size_t num_slots) {
 }
 
 void BlockPool::Free(const std::vector<std::shared_ptr<Block>>& blocks) {
+  ValidateFree(blocks);
+  FreeValidated(blocks);
+}
+
+void BlockPool::ValidateFree(
+    std::span<const std::shared_ptr<Block>> blocks) const {
   // Validate every block before mutating any pool state so that an invalid request (a null block,
   // an out-of-range id, a block this pool does not currently own, or the same block listed twice)
-  // is rejected without partially freeing the batch. Work stays proportional to the batch size
-  // rather than the pool capacity.
+  // is rejected without partially freeing the batch.
   std::vector<size_t> ids;
   ids.reserve(blocks.size());
   for (const auto& block : blocks) {
@@ -114,16 +125,58 @@ void BlockPool::Free(const std::vector<std::shared_ptr<Block>>& blocks) {
 
     ids.push_back(id);
   }
-
   std::sort(ids.begin(), ids.end());
   const auto duplicate = std::adjacent_find(ids.begin(), ids.end());
   if (duplicate != ids.end()) {
-    throw std::runtime_error("Cannot free block with id " + std::to_string(*duplicate) +
-                             " more than once in the same call.");
+    throw std::runtime_error(
+        "Cannot free block with id " + std::to_string(*duplicate) +
+        " more than once in the same call.");
   }
+}
 
+void BlockPool::FreeValidated(
+    std::span<const std::shared_ptr<Block>> blocks) noexcept {
+  if (!CanFreeValidated(blocks)) {
+    std::terminate();
+  }
   for (const auto& block : blocks) {
     blocks_[block->Id()].reset();
+  }
+  if (!blocks.empty()) {
+    ++mutation_generation_;
+  }
+}
+
+bool BlockPool::CanFreeValidated(
+    std::span<const std::shared_ptr<Block>> blocks) const noexcept {
+  ++validation_epoch_;
+  if (validation_epoch_ == 0) {
+    std::fill(validation_marks_.begin(), validation_marks_.end(), 0);
+    ++validation_epoch_;
+  }
+  for (const auto& block : blocks) {
+    if (!block || block->Id() >= blocks_.size() ||
+        blocks_[block->Id()] != block ||
+        validation_marks_[block->Id()] == validation_epoch_) {
+      return false;
+    }
+    validation_marks_[block->Id()] = validation_epoch_;
+  }
+  return true;
+}
+
+void BlockPool::RollbackReservedBlocks(
+    const std::vector<std::shared_ptr<Block>>& blocks) noexcept {
+  bool released = false;
+  for (const auto& block : blocks) {
+    if (block && block->Id() < blocks_.size() &&
+        blocks_[block->Id()] == block) {
+      blocks_[block->Id()].reset();
+      released = true;
+    }
+  }
+  if (released) {
+    ++mutation_generation_;
   }
 }
 
@@ -143,8 +196,12 @@ size_t BlockPool::BlockSize() const {
   return block_size_;
 }
 
+bool BlockPool::Owns(const std::shared_ptr<Block>& block) const {
+  return block && block->Id() < Capacity() && blocks_[block->Id()] == block;
+}
+
 size_t BlockPool::BlocksNeeded(size_t num_slots) {
-  return (num_slots + block_size_ - 1) / block_size_;
+  return num_slots / block_size_ + (num_slots % block_size_ != 0);
 }
 
 }  // namespace Generators

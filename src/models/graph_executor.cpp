@@ -3,7 +3,7 @@
 
 #include "graph_executor.h"
 #include "graph_builder.h"
-#include "../generators.h"
+#include "generator/generators.h"
 #include <functional>
 #include <memory>
 #include <mutex>

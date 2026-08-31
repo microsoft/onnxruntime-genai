@@ -23,13 +23,13 @@
         "cumulative_sequence_lengths": "cumulative_sequence_lengths",
         "past_sequence_lengths": "past_sequence_lengths",
         "attention_metadata": "attention_metadata",
-        "past_key_names": "legacy_past.%d.key",
-        "past_value_names": "legacy_past.%d.value"
+        "past_key_names": "past_key_values.%d.key",
+        "past_value_names": "past_key_values.%d.value"
       },
       "outputs": {
         "logits": "logits",
-        "present_key_names": "legacy_present.%d.key",
-        "present_value_names": "legacy_present.%d.value"
+        "present_key_names": "present.%d.key",
+        "present_value_names": "present.%d.value"
       },
       "state_groups": [
         {
@@ -37,17 +37,7 @@
           "layer_ids": [
             1,
             4
-          ],
-          "bindings": {
-            "key": {
-              "input": "past_key_values.%d.key",
-              "output": "present.%d.key"
-            },
-            "value": {
-              "input": "past_key_values.%d.value",
-              "output": "present.%d.value"
-            }
-          }
+          ]
         }
       ]
     }

@@ -22,17 +22,67 @@ Two ways to run it are shown:
 Both require:
   * the main Qwen3.6 decoder exported with ``include_hidden_states=true`` (so it exposes
     a ``hidden_states`` output), and
-  * the MTP head (``mtp.onnx``, exported with ``enable_mtp=true``), loaded as a standalone
+    * the MTP head (``mtp.onnx``), exported when the model configuration declares MTP layers
     model whose ``hidden_states`` input is fed the main model's last hidden state.
 
 See ``qwen-3.6-mtp.md`` for the design and export instructions.
 """
 
 import argparse
+import copy
+import json
 import time
+from pathlib import Path
 
 import numpy as np
 import onnxruntime_genai as og
+
+
+def mtp_decoder_overlay(model_dir: Path):
+    """Map model.mtp onto model.decoder for a second session from one directory."""
+    with (model_dir / "genai_config.json").open(encoding="utf-8") as handle:
+        config = json.load(handle)
+
+    mtp = config["model"].get("mtp")
+    if mtp is None:
+        raise ValueError(f"{model_dir / 'genai_config.json'} has no model.mtp section")
+    decoder_config = config["model"]["decoder"]
+    if mtp.get("shared_initializers", []) != decoder_config.get("shared_initializers", []):
+        raise ValueError("decoder and MTP shared initializer manifests differ")
+
+    decoder = {
+        key: copy.deepcopy(mtp[key])
+        for key in ("filename", "num_hidden_layers", "num_key_value_heads", "head_size")
+        if key in mtp
+    }
+    decoder["inputs"] = copy.deepcopy(mtp["inputs"])
+    decoder["outputs"] = copy.deepcopy(mtp["outputs"])
+    decoder["outputs"]["hidden_states"] = "hidden_states_out"
+    return {"model": {"decoder": decoder}}
+
+
+def cuda_config(model_dir: Path, overlay=None):
+    config = og.Config(str(model_dir))
+    if overlay is not None:
+        config.overlay(json.dumps(overlay))
+    config.clear_providers()
+    config.append_provider("cuda")
+    return config
+
+
+def load_models(args):
+    if args.model_path:
+        model_dir = Path(args.model_path)
+        print("Loading main model...")
+        main_model = og.Model(cuda_config(model_dir))
+        print("Loading MTP head...")
+        mtp_model = og.Model(cuda_config(model_dir, mtp_decoder_overlay(model_dir)))
+        return main_model, mtp_model
+
+    print("Loading main model...")
+    main_model = og.Model(args.main_model_path)
+    print("Loading MTP head...")
+    return main_model, og.Model(args.mtp_model_path)
 
 
 class ReferenceMtpGenerator:
@@ -137,14 +187,16 @@ class ReferenceMtpGenerator:
 
 def run_builtin(main_model, mtp_model, tokenizer, prompt_tokens, args):
     """Run the built-in in-engine og.MtpGenerator (recommended path)."""
-    params = og.GeneratorParams(main_model)
-    params.set_search_options(max_length=args.max_length, do_sample=False)
-    gen = og.MtpGenerator(main_model, mtp_model, params)
     n_prompt = len(prompt_tokens)
+    max_length = min(args.max_length, n_prompt + args.max_new_tokens)
+    params = og.GeneratorParams(main_model)
+    params.set_search_options(max_length=max_length, do_sample=False)
+    params.set_speculative_options(max_draft_tokens=args.max_draft_tokens)
+    gen = og.MtpGenerator(main_model, mtp_model, params)
 
     gen.append_tokens(np.asarray(prompt_tokens, dtype=np.int32))
     start = time.perf_counter()
-    while not gen.is_done() and len(gen.get_sequence()) < n_prompt + args.max_new_tokens:
+    while not gen.is_done() and len(gen.get_sequence()) < max_length:
         gen.generate_next_token()
     elapsed = time.perf_counter() - start
 
@@ -161,11 +213,8 @@ def run_builtin(main_model, mtp_model, tokenizer, prompt_tokens, args):
 
 
 def main(args):
-    print("Loading main model...")
-    main_model = og.Model(args.main_model_path)
+    main_model, mtp_model = load_models(args)
     tokenizer = og.Tokenizer(main_model)
-    print("Loading MTP head...")
-    mtp_model = og.Model(args.mtp_model_path)
 
     reference = ReferenceMtpGenerator(main_model, mtp_model, max_length=args.max_length) if args.reference else None
 
@@ -197,25 +246,33 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Qwen3.6 MTP self-speculative decoding")
+    parser = argparse.ArgumentParser(description="Qwen3.x MTP self-speculative decoding")
+    parser.add_argument(
+        "--model_path",
+        help="One packaged model directory containing text.onnx, mtp.onnx, and genai_config.json",
+    )
     parser.add_argument(
         "-m",
         "--main_model_path",
-        required=True,
         help="Path to the main model folder (exported with include_hidden_states=true)",
     )
     parser.add_argument(
         "-d",
         "--mtp_model_path",
-        required=True,
         help="Path to the MTP head model folder (mtp.onnx + a genai_config.json declaring its hidden_states input)",
     )
     parser.add_argument("-n", "--max_new_tokens", type=int, default=128, help="Number of tokens to generate per prompt")
     parser.add_argument("--max_length", type=int, default=4096, help="Max sequence length")
+    parser.add_argument("--max_draft_tokens", type=int, default=3, help="Maximum MTP draft tokens per target forward")
     parser.add_argument("-p", "--prompts", nargs="*", default=None, help="Prompt(s) to run")
     parser.add_argument(
         "--reference",
         action="store_true",
         help="Use the pure-Python ReferenceMtpGenerator instead of the built-in og.MtpGenerator",
     )
-    main(parser.parse_args())
+    args = parser.parse_args()
+    if bool(args.model_path) == bool(args.main_model_path or args.mtp_model_path):
+        parser.error("provide either --model_path or both --main_model_path and --mtp_model_path")
+    if not args.model_path and not (args.main_model_path and args.mtp_model_path):
+        parser.error("--main_model_path and --mtp_model_path must be provided together")
+    main(args)

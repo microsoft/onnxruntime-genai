@@ -171,10 +171,25 @@ std::string ResolveModelPath(const std::string& model_path) {
 
   fs::path path = fs::absolute(expanded_path);
   if (!fs::exists(path)) {
-    throw std::invalid_argument("model_path does not exist: " + model_path);
+    throw std::invalid_argument("model_path does not exist: " + path.string());
   }
 
   return path.string();
+}
+
+EngineResources::EngineResources(const ScenarioConfig& config) {
+  const std::string resolved_model_path = ResolveModelPath(config.model_path);
+
+  oga_config = OgaConfig::Create(resolved_model_path.c_str());
+  oga_config->ClearProviders();
+  oga_config->AppendProvider(config.execution_provider.c_str());
+  model = OgaModel::Create(*oga_config);
+  tokenizer = OgaTokenizer::Create(*model);
+  engine = OgaEngine::Create(*model);
+}
+
+EngineResources CreateEngineResources(const ScenarioConfig& config) {
+  return EngineResources(config);
 }
 
 std::unique_ptr<OgaSequences> BuildRulerPromptTokens(

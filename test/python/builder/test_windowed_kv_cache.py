@@ -32,7 +32,7 @@ from types import SimpleNamespace
 import pytest
 
 BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
-sys.path.insert(0, str(BUILDERS_DIR.parents[1]))
+sys.path.insert(0, str(BUILDERS_DIR.parent))
 
 
 def _load_builder_module(module_name):
@@ -49,30 +49,46 @@ builders_package.__path__ = [str(BUILDERS_DIR)]
 
 base_module = _load_builder_module("base")
 Model = base_module.Model
-resolve_windowed_kv_cache_eps = base_module.resolve_windowed_kv_cache_eps
+
+
+def _new_model():
+    model = Model.__new__(Model)
+    model.context_length_attrs = {
+        "state_window": 0,
+        "state_window_dims": [],
+        "window_kv_cache_slack": 0,
+    }
+    return model
 
 
 # ===========================================================================
-# resolve_windowed_kv_cache_eps: the windowed_kv_cache opt-out
+# make_context_length_init: the windowed_kv_cache opt-out
 # ===========================================================================
+
+
+def _window_model(extra_options):
+    model = _new_model()
+    model.ep = "cuda"
+    model.extra_options = extra_options
+    model.make_context_length_init(SimpleNamespace(sliding_window=128))
+    return model
 
 
 def test_windowed_kv_cache_is_on_by_default():
-    assert resolve_windowed_kv_cache_eps({}) == {"trt-rtx", "cuda", "cpu"}
+    assert _window_model({}).uses_windowed_kv_cache() is True
 
 
 @pytest.mark.parametrize("extra_options", [{"windowed_kv_cache": False}, {"use_paged_attention": True}])
 def test_windowed_kv_cache_can_be_turned_off(extra_options):
     # Explicit opt-out builds a full-length-KV baseline; PagedAttention has no windowed-cache
     # mode, so it never qualifies either way.
-    assert resolve_windowed_kv_cache_eps(extra_options) == set()
+    assert _window_model(extra_options).uses_windowed_kv_cache() is False
 
 
-def test_windowed_kv_cache_eps_are_not_shared_between_models():
-    # The caller mutates nothing, but two models must not alias the same set.
-    first = resolve_windowed_kv_cache_eps({})
-    first.discard("cuda")
-    assert "cuda" in resolve_windowed_kv_cache_eps({})
+def test_windowed_kv_cache_policy_is_model_local():
+    disabled_model = _window_model({"windowed_kv_cache": False})
+    assert disabled_model.context_length_attrs["window_kv_cache"] is False
+    assert _window_model({}).context_length_attrs["window_kv_cache"] is True
 
 
 # ===========================================================================
@@ -81,11 +97,12 @@ def test_windowed_kv_cache_eps_are_not_shared_between_models():
 
 
 def _make_gqa_model(ep, window_size):
-    model = Model.__new__(Model)
+    model = _new_model()
     model.ep = ep
     model.extra_options = {}
-    model.eps_with_windowed_kv_cache = {"trt-rtx", "cuda", "cpu"}
-    model.kv_cache_quant_type = "none"
+    model.context_length_attrs["window_kv_cache"] = True
+    model.use_paged_attention = False
+    model.kv_cache_attrs = {"quant_scheme": "none", "quant_mode": "PER_TENSOR", "bit_width": 0}
     model.num_attn_heads = 8
     model.num_kv_heads = 2
     model.head_size = 16
@@ -159,7 +176,7 @@ def test_windowed_kv_cache_opt_out_omits_sliding_window_cache(ep):
     # With the opt-out the layer's cache is max_length-sized, so the kernel must index it in
     # absolute coordinates like a global layer does.
     model = _make_gqa_model(ep, window_size=128)
-    model.eps_with_windowed_kv_cache = set()
+    model.context_length_attrs["window_kv_cache"] = False
 
     model.make_group_query_attention("/gqa", layer_id=0, q_path="q", k_path="k", v_path="v")
 
@@ -178,12 +195,12 @@ _CACHE_SHAPE = ["batch_size", 2, "past_sequence_length", 16]
 
 
 def _make_shape_model(ep, local_layers=()):
-    model = Model.__new__(Model)
+    model = _new_model()
     model.ep = ep
-    model.eps_with_windowed_kv_cache = {"trt-rtx", "cuda", "cpu"}
-    model.use_windowed_paged_kv_cache = False  # the paged ring is covered by its own test module
-    if local_layers is not None:
-        model.is_local = lambda layer_id: layer_id in local_layers
+    model.context_length_attrs["window_kv_cache"] = True
+    model.use_paged_attention = False
+    model.window_size = 128
+    model.layer_types = ["sliding_attention" if local_layers and layer_id in local_layers else "full_attention" for layer_id in range(2)]
     return model
 
 
@@ -215,7 +232,7 @@ def test_non_windowed_ep_keeps_sequence_dim(ep):
 
 
 def test_model_without_alternating_attention_keeps_sequence_dim():
-    # Models that never define is_local have a uniform attention pattern.
+    # Models without sliding_attention layers have a uniform attention pattern.
     model = _make_shape_model("cuda", local_layers=None)
 
     assert model.make_key_value_cache_shape(0, list(_CACHE_SHAPE)) == _CACHE_SHAPE
@@ -225,7 +242,7 @@ def test_model_without_alternating_attention_keeps_sequence_dim():
 def test_windowed_kv_cache_opt_out_keeps_sequence_dim(ep):
     # With the opt-out every layer's cache is allocated at max_length, so they share one dim.
     model = _make_shape_model(ep, local_layers=(0,))
-    model.eps_with_windowed_kv_cache = set()
+    model.context_length_attrs["window_kv_cache"] = False
 
     assert model.make_key_value_cache_shape(0, list(_CACHE_SHAPE)) == _CACHE_SHAPE
 
@@ -241,19 +258,18 @@ class _NoGenerationConfig:
         raise FileNotFoundError("no generation_config.json")
 
 
-def _write_genai_config(monkeypatch, out_dir, ep, window_size, num_layers=4, eps_with_windowed_kv_cache=None):
-    hf_config = SimpleNamespace(eos_token_id=[2])
-    monkeypatch.setattr(base_module, "AutoConfig", SimpleNamespace(from_pretrained=lambda *a, **k: hf_config))
+def _write_genai_config(monkeypatch, out_dir, ep, window_size, num_layers=4, window_kv_cache=True):
+    hf_config = SimpleNamespace(bos_token_id=None, eos_token_id=[2], pad_token_id=None)
     monkeypatch.setattr(base_module, "GenerationConfig", _NoGenerationConfig)
 
-    model = Model.__new__(Model)
+    model = _new_model()
     model.hf_token = None
     model.hf_remote = False
     model.ep = ep
     model.ep_attrs = {ep: {}}
     model.extra_options = {}
     model.use_paged_attention = False
-    model.use_windowed_paged_kv_cache = False  # the paged ring is covered by its own test module
+    model.context_length_attrs["window_kv_cache"] = window_kv_cache
     model.past_present_share_buffer = True
     model.context_length = 1024
     model.filename = "model.onnx"
@@ -265,16 +281,13 @@ def _write_genai_config(monkeypatch, out_dir, ep, window_size, num_layers=4, eps
     model.model_type = "TestForCausalLM"
     model.vocab_size = 32
     model.window_size = window_size
-    model.eps_with_windowed_kv_cache = (
-        {"trt-rtx", "cuda", "cpu"} if eps_with_windowed_kv_cache is None else eps_with_windowed_kv_cache
-    )
-    model.window_kv_cache_slack = 0  # let runtime apply EP defaults
+    model.context_length_attrs["window_kv_cache_slack"] = 0  # let runtime apply EP defaults
     # Alternating attention: even layers are sliding-window layers.
     model.is_local = lambda layer_id: layer_id % 2 == 0
     model.input_names = {"input_ids": "input_ids", "past_key_values.key": [], "past_key_values.value": []}
     model.output_names = {"logits": "logits", "present.key": [], "present.value": []}
 
-    model.make_genai_config("model_name_or_path", {}, str(out_dir))
+    model.make_genai_config(hf_config, {}, str(out_dir))
     return json.loads((Path(out_dir) / "genai_config.json").read_text())
 
 
@@ -321,6 +334,6 @@ def test_genai_config_omits_sliding_window_without_a_window(monkeypatch, tmp_pat
 
 @pytest.mark.parametrize("ep", ["cuda", "trt-rtx", "cpu"])
 def test_genai_config_omits_sliding_window_when_opted_out(monkeypatch, tmp_path, ep):
-    config = _write_genai_config(monkeypatch, tmp_path, ep, window_size=128, eps_with_windowed_kv_cache=set())
+    config = _write_genai_config(monkeypatch, tmp_path, ep, window_size=128, window_kv_cache=False)
 
     assert "sliding_window" not in config["model"]["decoder"]

@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "request_status.h"
+#include "fixed_state_pool.h"
 
 /**
  * @file engine_invariants.h
@@ -21,8 +22,11 @@
  * state is inspected; the same snapshots and checks back runtime and telemetry consumers as the
  * Engine grows, and the Engine's correctness tests.
  *
- * This header deliberately depends only on lightweight standard types and RequestStatus so the
- * validator remains model- and device-independent and can be exercised without a real model.
+ * The paged-cache snapshots below depend only on lightweight standard types and RequestStatus so the
+ * validator remains model- and device-independent and can be exercised without a real model. The
+ * fixed decoder-state snapshot types (`FixedStatePoolSnapshot` and friends) are owned by
+ * `fixed_state_pool.h` and reused here for the composite checks; that header pulls in the ONNX C API
+ * type enum but no Engine or device state, and it does not include this header, so there is no cycle.
  */
 
 namespace Generators {
@@ -35,8 +39,10 @@ struct RequestStateSnapshot {
   RequestStatus status{RequestStatus::Unassigned};
   int64_t current_sequence_length{};    // Total tokens the Request's search currently holds.
   int64_t processed_sequence_length{};  // Tokens the model has already processed into the cache.
-  int64_t seen_sequence_length{};       // High-water sequence index of consumed generated output.
   bool is_prefill{};
+  bool has_current_turn{};
+  uint64_t current_turn_id{};
+  GenerationFinishReason finish_reason{GenerationFinishReason::None};
 };
 
 // Immutable view of one Request's block ownership within the paged cache.
@@ -51,7 +57,6 @@ struct RequestReservationSnapshot {
   const void* request_id{nullptr};
   size_t committed_slots{};
   size_t target_slots{};
-  size_t tail_slots_to_consume{};
   std::vector<size_t> reserved_block_ids;
 };
 
@@ -93,14 +98,34 @@ std::vector<InvariantViolation> ValidateCacheInvariants(const PagedCacheSnapshot
 // Pure invariant checks over a single Request snapshot.
 std::vector<InvariantViolation> ValidateRequestInvariants(const RequestStateSnapshot& request);
 
+// Pure invariant checks over the fixed decoder-state pool snapshot: total slot accounting, unique
+// slot ids, one owner per slot, clean free slots, and pool health. Reused snapshot type from
+// fixed_state_pool.h. Returns every violation found.
+std::vector<InvariantViolation> ValidateFixedStateInvariants(const FixedStatePoolSnapshot& fixed);
+
 // Cross-cutting checks that need both a Request's progress and its cache ownership, in addition to
 // the per-snapshot checks above.
 std::vector<InvariantViolation> ValidateInvariants(const PagedCacheSnapshot& cache,
                                                    const std::vector<RequestStateSnapshot>& requests);
 
+// Composite checks for a model that owns both paged KV and fixed decoder state. Runs the paged and
+// fixed per-snapshot checks and then requires the two to agree: every committed paged table owns a
+// committed fixed slot and vice versa, and each such request's fixed committed-token boundary equals
+// its paged committed-slot count. Both snapshots must be taken at the same observation point.
+std::vector<InvariantViolation> ValidateCompositeStateInvariants(
+    const PagedCacheSnapshot& cache,
+    const FixedStatePoolSnapshot& fixed,
+    const std::vector<RequestStateSnapshot>& requests);
+
 // Throwing convenience wrapper. Runs ValidateInvariants and throws std::runtime_error listing every
 // violation if the snapshots are inconsistent, so callers can fail fast with the full list.
 void ThrowIfInvariantsViolated(const PagedCacheSnapshot& cache,
                                const std::vector<RequestStateSnapshot>& requests);
+
+// Throwing convenience wrapper around ValidateCompositeStateInvariants.
+void ThrowIfCompositeStateInvariantsViolated(
+    const PagedCacheSnapshot& cache,
+    const FixedStatePoolSnapshot& fixed,
+    const std::vector<RequestStateSnapshot>& requests);
 
 }  // namespace Generators

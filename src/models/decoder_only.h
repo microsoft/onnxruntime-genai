@@ -1,12 +1,12 @@
 #pragma once
 #include "model.h"
-#include "input_ids.h"
-#include "logits.h"
-#include "kv_cache.h"
-#include "position_inputs.h"
-#include "extra_inputs.h"
-#include "hidden_states.h"
-#include "recurrent_state.h"
+#include "models/io/input_ids.h"
+#include "models/io/logits.h"
+#include "io/kv_cache.h"
+#include "models/io/position_inputs.h"
+#include "models/io/extra_inputs.h"
+#include "models/io/hidden_states.h"
+#include "models/io/recurrent_state.h"
 
 namespace Generators {
 

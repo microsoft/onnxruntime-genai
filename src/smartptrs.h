@@ -8,9 +8,11 @@
 #include <atomic>
 #include <cstring>
 #include <memory>
+#include <string>
 #include <thread>
 #include <type_traits>  // for std::remove_const_t
 #include <utility>
+#include "config.h"
 #include "span.h"
 #include "models/onnxruntime_api.h"  // for ONNXTensorElementDataType
 #include "provider_options.h"        // for ProviderOptions
@@ -23,6 +25,10 @@ struct Search;
 struct Sequences;
 struct GeneratorParams;
 struct Config;
+struct State;
+struct KeyValueCache;
+struct PositionInputs;
+struct DeviceInterface;
 
 // A DeviceBuffer is an abstract interface to a block of device memory (can be cuda/dml/cpu memory)
 // Note: For a CPU DeviceBuffer, there's only one block of memory on CPU, the copy methods are no-ops
@@ -107,6 +113,13 @@ struct DeviceSpan {
   friend struct DeviceSpan;  // All DeviceSpans are friends
 };
 
+struct PositionInputs {
+  virtual ~PositionInputs() = default;
+  virtual void Add() = 0;
+  virtual void Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) = 0;
+  virtual void RewindTo(size_t index) = 0;
+};
+
 struct BatchedSamplerState {
   virtual ~BatchedSamplerState() = default;
 };
@@ -152,6 +165,11 @@ enum struct DeviceType {
   MAX
 };
 
+DeviceInterface* GetDeviceInterface(DeviceType type);
+std::unique_ptr<PositionInputs> CreateStandardPositionInputs(State& state,
+                                                             DeviceSpan<int32_t> sequence_lengths,
+                                                             const std::string& attention_mask_name);
+
 // One windowed state tensor for DeviceInterface::CopyStateSlots: `base` is the start of the whole
 // [W, ...] buffer and `slot_bytes` is the size of one window slot.
 struct StateSlotDesc {
@@ -167,9 +185,33 @@ struct StateSlotDesc {
   }
 };
 
+enum class StateUpdateReplayKind : uint32_t {
+  CausalConv = 1,
+  GatedDeltaNet = 2,
+};
+
+struct StateUpdateReplayDesc {
+  const void* source_state;
+  void* destination_state;
+  const void* value;
+  const float* decay;
+  const float* key;
+  const float* delta;
+  uint64_t channel_count;
+  uint64_t state_width;
+  uint64_t key_width;
+  uint64_t key_head_count;
+  uint32_t capacity;
+  uint32_t kept_count;
+  uint32_t element_size;
+  StateUpdateReplayKind kind;
+};
+
+static_assert(std::is_trivially_copyable_v<StateUpdateReplayDesc>);
+
 // Increment whenever DeviceInterface's virtual layout changes. Dynamically loaded add-ons must
 // report this exact version before the host can safely call through the C++ interface.
-inline constexpr uint32_t kDeviceInterfaceVersion = 1;
+inline constexpr uint32_t kDeviceInterfaceVersion = 4;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}
@@ -178,6 +220,10 @@ struct DeviceInterface {
   virtual void InitOrt(const OrtApi& api, Ort::Allocator& allocator) = 0;
   virtual Ort::Allocator& GetAllocator() = 0;
   virtual std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const = 0;
+
+  // The execution provider name used when configuring session options for the trivial init
+  // session (see 'SetProviderSessionOptions'), e.g. "cuda", "DML", "QNN".
+  virtual std::string GetExecutionProviderName() const = 0;
 
   // Host-accessible (CPU-writable, GPU-readable) allocator for decode inputs, if the device
   // supports it. Null default -> callers keep the current device-memory path.
@@ -266,11 +312,49 @@ struct DeviceInterface {
   // Keep last for vtable/ABI stability.
   virtual bool CopyStateSlots(const void* /*descs_device*/, int /*count*/, int /*src_slot*/,
                               int /*dst_slot*/) { return false; }
+  // Creates the conventional (non-paged) model state cache. The selected EP owns cache policy so
+  // providers can replace the standard exposed past/present tensor implementation. Keep last for
+  // vtable/ABI stability.
+  virtual std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) = 0;
+  virtual bool ShouldClampZeroLengthKeyValueCacheOutputPlaceholders() const { return false; }
+  virtual bool ShouldZeroKeyValueCacheTensors() const { return true; }
+  virtual int GetWindowedKeyValueCacheSize(const Config::Model::Decoder& /*decoder*/,
+                                           const Config::Search& /*search*/,
+                                           int /*max_length*/) const { return 0; }
+  virtual bool UsesNonRewindableWindowedKeyValueCache(const Config::Model::Decoder& decoder) const {
+    return decoder.sliding_window &&
+           decoder.sliding_window->slide_key_value_cache;
+  }
+  virtual int GetKeyValueCacheQuantizationBits(const Config::SessionOptions& /*session_options*/) const { return 0; }
+  virtual bool ShouldUseStaticPositionInputsForSharedBuffers(const Config::Model& /*model*/) const { return false; }
+#if defined(onnxruntime_genai_cuda_EXPORTS) || defined(ORTGENAI_CUDA_ADDON_COMPILATION)
+  virtual DeviceInterface& GetCpuFallbackDevice() = 0;
+  virtual std::unique_ptr<PositionInputs> CreatePositionInputs(State& state,
+                                                               DeviceSpan<int32_t> sequence_lengths,
+                                                               const std::string& attention_mask_name) = 0;
+#else
+  virtual DeviceInterface& GetCpuFallbackDevice() {
+    return *GetDeviceInterface(DeviceType::CPU);
+  }
+  virtual std::unique_ptr<PositionInputs> CreatePositionInputs(State& state,
+                                                               DeviceSpan<int32_t> sequence_lengths,
+                                                               const std::string& attention_mask_name) {
+    return CreateStandardPositionInputs(state, sequence_lengths, attention_mask_name);
+  }
+#endif
+  virtual void ReplayStateUpdates(const StateUpdateReplayDesc* /*descs*/, size_t /*count*/) {
+    throw std::logic_error("Device does not support compact fixed-state replay.");
+  }
 };
 
 // A shared_ptr based type that we expose through our C API should inherit from this type.
 // ExternalAddRef must be called when returning an object through the C API
 // ExternalRelease must be called on the C API destroy method.
+template <typename T>
+struct ExternalRefCountedTraits {
+  static constexpr bool notify_external_reference_changes = false;
+};
+
 template <typename T>
 struct ExternalRefCounted {
   void ExternalAddRef() {
@@ -282,6 +366,10 @@ struct ExternalRefCounted {
       external_owner_ = std::move(owner);
       ref_count_ = 1;
       external_lifecycle_started_ = true;
+      if constexpr (ExternalRefCountedTraits<T>::notify_external_reference_changes) {
+        static_assert(noexcept(std::declval<T&>().OnFirstExternalReference()));
+        static_cast<T*>(this)->OnFirstExternalReference();
+      }
     } else {
       ++ref_count_;
     }
@@ -293,6 +381,12 @@ struct ExternalRefCounted {
       ExternalReferenceLock lock{*this};
       assert(ref_count_ > 0);
       if (--ref_count_ == 0) {
+        if constexpr (ExternalRefCountedTraits<T>::notify_external_reference_changes) {
+          static_assert(noexcept(std::declval<T&>().OnLastExternalReference()));
+          // Notify while the self-owner and lifecycle transition are protected. The hook may only
+          // publish deferred work; destruction still happens after releasing the member lock.
+          static_cast<T*>(this)->OnLastExternalReference();
+        }
         released_owner = std::move(external_owner_);
       }
     }

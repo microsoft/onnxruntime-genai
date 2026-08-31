@@ -19,7 +19,7 @@ env:
 
 jobs:
   windows-cpu-arm64-build:
-    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-win11-arm64-cpu2"]
+    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-win11-arm64-cpu2", "JobId=windows-cpu-arm64-build-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}"]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -114,7 +114,8 @@ jobs:
         run: |
           # Uninstalling LLVM/Clang as it is no longer required and causes issues with numpy installation
           choco uninstall llvm --yes
-          python -m pip install -r test\python\requirements.txt --user
+          Get-Content test\python\requirements.txt | Where-Object { $_ -notmatch '^numpy<2$' } | Set-Content $env:TEMP\requirements-win-arm64.txt
+          python -m pip install -r $env:TEMP\requirements-win-arm64.txt --user
           python -m pip install -r test\python\cpu\torch\requirements.txt --user
           python -m pip install -r test\python\cpu\ort\requirements.txt --user
           python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl"))

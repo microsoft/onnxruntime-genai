@@ -1,0 +1,248 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
+#include "scenarios/continuation.h"
+
+#include <algorithm>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <iostream>
+#include <memory>
+#include <random>
+#include <stdexcept>
+#include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+#include "ort_genai.h"
+#include "scenarios/utils.h"
+
+namespace engine_benchmark {
+namespace {
+
+constexpr int kRandomSeed = 42;
+constexpr int kContinuationTurns = 3;
+
+bool IsAllowedConcurrency(int concurrency) {
+  return concurrency == 4 || concurrency == 8;
+}
+
+}  // namespace
+
+static const ScenarioBase::Registrar<ContinuationScenario> kRegistrar("continuation");
+
+void ContinuationScenario::ValidateConfig(const ScenarioConfig& config) const {
+  ScenarioBase::ValidateConfig(config);
+
+  if (!config.prompt_length_k) {
+    throw std::invalid_argument("continuation requires prompt_length_k");
+  }
+  if (!IsAllowedConcurrency(config.concurrency)) {
+    throw std::invalid_argument("continuation requires concurrency in [4,8]");
+  }
+}
+
+ScenarioExecutionOutput ContinuationScenario::Execute(const ScenarioConfig& config, const BenchmarkContext&) const {
+  const std::string tag = "[" + Name() + "] ";
+  const int prompt_length_k = config.prompt_length_k.value();
+  std::cout << tag << "Execute start: model_path='" << config.model_path
+            << "', provider='" << config.execution_provider
+            << "', concurrency=" << config.concurrency
+            << ", continuation_turns=" << kContinuationTurns
+            << ", prompt_length_k=" << prompt_length_k
+            << ", generation_tokens=" << config.generation_tokens << std::endl;
+
+  MemorySampler memory;
+  memory.Start();
+  auto engineResources = CreateEngineResources(config);
+
+  std::mt19937 prompt_random(kRandomSeed);
+  auto base_prompt = BuildRulerPromptTokens(prompt_length_k, *engineResources.tokenizer, prompt_random);
+  const size_t base_prompt_count = base_prompt->SequenceCount(0);
+
+  ScenarioExecutionOutput output;
+  std::vector<double> ttft_values;
+  std::vector<double> inter_token_latency_values;
+  nlohmann::json e2e_ms_values = nlohmann::json::array();
+  nlohmann::json tokens_per_s_values = nlohmann::json::array();
+  nlohmann::json final_context_tokens_values = nlohmann::json::array();
+  const int total_runs = config.warmup_runs + config.measured_runs;
+  int measured_run_index = 0;
+
+  for (int run = 0; run < total_runs; ++run) {
+    const bool is_warmup = run < config.warmup_runs;
+
+    std::vector<std::unique_ptr<OgaGeneratorParams>> params;
+    std::vector<std::unique_ptr<OgaRequest>> requests;
+    std::vector<std::unique_ptr<OgaTurnOptions>> turn_options;
+    std::vector<std::vector<int32_t>> request_tokens(static_cast<size_t>(config.concurrency));
+    std::unordered_map<const OgaRequest*, size_t> request_indices;
+    params.reserve(static_cast<size_t>(config.concurrency));
+    requests.reserve(static_cast<size_t>(config.concurrency));
+    turn_options.reserve(static_cast<size_t>(config.concurrency));
+
+    const size_t max_session_tokens =
+        base_prompt_count + static_cast<size_t>((2 * kContinuationTurns) - 1) * config.generation_tokens;
+    for (int i = 0; i < config.concurrency; ++i) {
+      const size_t request_index = static_cast<size_t>(i);
+      request_tokens[request_index].assign(base_prompt->SequenceData(0), base_prompt->SequenceData(0) + base_prompt_count);
+      params.emplace_back(OgaGeneratorParams::Create(*engineResources.model));
+      params.back()->SetSearchOption("max_length", static_cast<double>(max_session_tokens));
+      params.back()->SetSearchOption("random_seed", kRandomSeed + i);
+      requests.emplace_back(
+          engineResources.engine->CreateRequest(*params.back()));
+      request_indices.emplace(requests.back().get(), request_index);
+      turn_options.push_back(requests.back()->CreateTurnOptions());
+      turn_options.back()->SetMaxGeneratedTokens(
+          static_cast<uint64_t>(config.generation_tokens));
+      requests.back()->BeginTurn(
+          base_prompt->SequenceData(0), base_prompt_count,
+          turn_options.back().get());
+    }
+
+    const auto run_start = std::chrono::steady_clock::now();
+    size_t generated_tokens = 0;
+
+    for (int turn = 0; turn < kContinuationTurns; ++turn) {
+      std::vector<double> first_token_ms(static_cast<size_t>(config.concurrency), -1.0);
+      std::vector<std::chrono::steady_clock::time_point> last_token_time(static_cast<size_t>(config.concurrency));
+      std::vector<std::vector<double>> request_itl_ms(static_cast<size_t>(config.concurrency));
+      std::vector<std::vector<int32_t>> generated_segments(static_cast<size_t>(config.concurrency));
+
+      const auto turn_start = std::chrono::steady_clock::now();
+
+      // Drain the current turn for the resident requests before beginning their next Turns.
+      auto event_buffer = engineResources.engine->CreateEventBuffer(
+          static_cast<size_t>(config.concurrency));
+      size_t consecutive_retries = 0;
+      while (engineResources.engine->HasPendingRequests()) {
+        const size_t event_count = engineResources.engine->Run(
+            *event_buffer);
+        const auto now = std::chrono::steady_clock::now();
+        for (size_t event_index = 0; event_index < event_count; ++event_index) {
+          const auto& event = *event_buffer->Get(event_index);
+          if (!RequireRequestEvent(
+                  event, Name(), consecutive_retries)) {
+            continue;
+          }
+
+          const auto request = event.Request();
+          const auto request_it = request_indices.find(
+              request ? &request->get() : nullptr);
+          if (request_it == request_indices.end()) {
+            throw std::runtime_error(
+                Name() + ": event request has no continuation state");
+          }
+          const size_t request_index = request_it->second;
+
+          if ((event.Flags() & OgaEngineEventFlag_Failed) != 0) {
+            throw std::runtime_error(
+                Name() + ": continuation request failed with error code " +
+                std::to_string(static_cast<int>(event.ErrorCode())));
+          }
+
+          if ((event.Flags() & OgaEngineEventFlag_Token) != 0) {
+            // The first token establishes TTFT for this turn; later tokens contribute
+            // inter-token latency samples for the same logical session.
+            request_tokens[request_index].push_back(event.Token());
+            generated_segments[request_index].push_back(event.Token());
+            ++generated_tokens;
+            const double elapsed_ms =
+                std::chrono::duration<double, std::milli>(
+                    now - turn_start)
+                    .count();
+            if (first_token_ms[request_index] < 0.0) {
+              first_token_ms[request_index] = elapsed_ms;
+            } else {
+              request_itl_ms[request_index].push_back(
+                  std::chrono::duration<double, std::milli>(
+                      now - last_token_time[request_index])
+                      .count());
+            }
+            last_token_time[request_index] = now;
+          }
+        }
+      }
+
+      for (int i = 0; i < config.concurrency; ++i) {
+        const size_t request_index = static_cast<size_t>(i);
+        const size_t actual_generated = generated_segments[request_index].size();
+        const bool completed = actual_generated == static_cast<size_t>(config.generation_tokens);
+
+        if (is_warmup) {
+          continue;
+        }
+
+        const double ttft_ms = std::max(0.0, first_token_ms[request_index]);
+        ttft_values.push_back(ttft_ms);
+        auto& samples = request_itl_ms[request_index];
+        const int request_id =
+            (measured_run_index * kContinuationTurns + turn) * config.concurrency + static_cast<int>(request_index);
+        output.requests.push_back({request_id, ttft_ms, Percentile(samples, 50.0), completed});
+        inter_token_latency_values.insert(inter_token_latency_values.end(), samples.begin(), samples.end());
+      }
+
+      if (turn + 1 < kContinuationTurns) {
+        for (int i = 0; i < config.concurrency; ++i) {
+          const size_t request_index = static_cast<size_t>(i);
+          if (generated_segments[request_index].empty()) {
+            throw std::runtime_error(Name() + ": no generated tokens available for continuation");
+          }
+          requests[request_index]->BeginTurn(
+              generated_segments[request_index].data(),
+              generated_segments[request_index].size(),
+              turn_options[request_index].get());
+          request_tokens[request_index].insert(
+              request_tokens[request_index].end(), generated_segments[request_index].begin(),
+              generated_segments[request_index].end());
+        }
+      }
+    }
+    for (const auto& request : requests) {
+      request->Close();
+    }
+
+    const auto run_end = std::chrono::steady_clock::now();
+    const double run_elapsed_ms = std::chrono::duration<double, std::milli>(run_end - run_start).count();
+    const double tokens_per_s = static_cast<double>(generated_tokens) / std::max(0.001, run_elapsed_ms / 1000.0);
+
+    std::cout << tag << (is_warmup ? "Warmup run " : "Run ")
+              << (is_warmup ? run + 1 : measured_run_index + 1)
+              << " complete: generated_tokens=" << generated_tokens
+              << ", elapsed_ms=" << run_elapsed_ms
+              << ", tokens_per_s=" << tokens_per_s << std::endl;
+
+    if (is_warmup) {
+      continue;
+    }
+
+    // Run-level metrics describe the complete multi-turn continuation exchange.
+    e2e_ms_values.push_back(run_elapsed_ms);
+    tokens_per_s_values.push_back(tokens_per_s);
+    final_context_tokens_values.push_back(request_tokens.empty() ? 0 : request_tokens.front().size());
+    ++measured_run_index;
+  }
+
+  // Summaries aggregate all measured turns; scenario_metrics keeps continuation-specific context.
+  memory.Stop();
+  output.ttft_p5_ms = Percentile(ttft_values, 5.0);
+  output.ttft_p50_ms = Percentile(ttft_values, 50.0);
+  output.ttft_p95_ms = Percentile(ttft_values, 95.0);
+  output.inter_token_latency_p50_ms = Percentile(inter_token_latency_values, 50.0);
+  output.inter_token_latency_p95_ms = Percentile(inter_token_latency_values, 95.0);
+  output.peak_device_memory_mb = BytesToMb(memory.PeakDeviceBytes());
+  output.steady_state_device_memory_mb = BytesToMb(memory.SteadyStateDeviceBytes());
+  output.scenario_metrics = {
+      {"e2e_ms", std::move(e2e_ms_values)},
+      {"tokens_per_s", std::move(tokens_per_s_values)},
+      {"base_prompt_tokens", base_prompt_count},
+      {"continuation_turns", kContinuationTurns},
+      {"final_context_tokens", std::move(final_context_tokens_values)},
+      {"peak_host_memory_mb", BytesToMb(memory.PeakHostBytes())},
+  };
+  return output;
+}
+
+}  // namespace engine_benchmark

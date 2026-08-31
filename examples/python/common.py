@@ -26,7 +26,7 @@ def set_logger(inputs: bool = True, outputs: bool = True) -> None:
 
 def register_ep(ep: str, ep_path: str, use_winml: bool) -> None:
     """
-    Register execution provider if path is provided or via Windows ML
+    Register an execution provider from an explicit path, Windows ML, or an installed plugin package.
 
     Args:
         ep (str): Name of execution provider
@@ -50,6 +50,29 @@ def register_ep(ep: str, ep_path: str, use_winml: bool) -> None:
         og.register_execution_provider_library(ep, ep_path)
 
         print(f"Registered {ep} from {ep_path} successfully!")
+    else:
+        plugin_ep_packages = {
+            "cuda": "onnxruntime_ep_cuda",
+            "CUDAExecutionProvider": "onnxruntime_ep_cuda",
+            "webgpu": "onnxruntime_ep_webgpu",
+            "WebGPU": "onnxruntime_ep_webgpu",
+            "WebGpuExecutionProvider": "onnxruntime_ep_webgpu",
+        }
+        package_name = plugin_ep_packages.get(ep)
+        package_names = (
+            tuple(dict.fromkeys(plugin_ep_packages.values())) if ep == "follow_config" else (package_name,)
+        )
+        for package_name in package_names:
+            if package_name is None:
+                continue
+            try:
+                ep_module = importlib.import_module(package_name)
+            except ImportError:
+                continue
+            plugin_name = ep_module.get_ep_name()
+            plugin_path = ep_module.get_library_path()
+            og.register_execution_provider_library(plugin_name, plugin_path)
+            print(f"Registered {plugin_name} from installed package {package_name} successfully!")
 
 
 def get_config(
@@ -117,6 +140,7 @@ def get_search_options(args: argparse.Namespace):
     search_options = {}
     names = [
         "batch_size",
+        "chunk_size",
         "do_sample",
         "max_length",
         "min_length",

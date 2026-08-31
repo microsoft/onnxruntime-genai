@@ -196,31 +196,18 @@ def create_config(output_dir):
                     "cumulative_sequence_lengths": "cumulative_sequence_lengths",
                     "past_sequence_lengths": "past_sequence_lengths",
                     "attention_metadata": "attention_metadata",
-                    "attention_metadata": "attention_metadata",
-                    # Intentionally absent from the graph: the Engine must use the
-                    # explicit state-group bindings instead of these legacy templates.
-                    "past_key_names": "legacy_past.%d.key",
-                    "past_value_names": "legacy_past.%d.value",
+                    "past_key_names": "past_key_values.%d.key",
+                    "past_value_names": "past_key_values.%d.value",
                 },
                 "outputs": {
                     "logits": "logits",
-                    "present_key_names": "legacy_present.%d.key",
-                    "present_value_names": "legacy_present.%d.value",
+                    "present_key_names": "present.%d.key",
+                    "present_value_names": "present.%d.value",
                 },
                 "state_groups": [
                     {
                         "kind": "paged_kv",
                         "layer_ids": PAGED_LAYERS,
-                        "bindings": {
-                            "key": {
-                                "input": "past_key_values.%d.key",
-                                "output": "present.%d.key",
-                            },
-                            "value": {
-                                "input": "past_key_values.%d.value",
-                                "output": "present.%d.value",
-                            },
-                        },
                     }
                 ],
             },
