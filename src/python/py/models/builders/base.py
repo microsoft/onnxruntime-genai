@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import ast
-import functools
 import json
 import os
 from pathlib import Path
@@ -44,12 +43,25 @@ from quantization import CudaQuantizer, QuantConfig, resolve_dtype
 
 
 class Model:
-    @classmethod
-    @functools.cache
-    def get_genai_commit(cls) -> str | None:
+    def get_genai_version(self) -> str | None:
+        """Return the GenAI package version when source metadata is available."""
+        try:
+            # Attempt to read the version information from the VERSION_INFO file in the repository root.
+            return (Path(__file__).resolve().parents[5] / "VERSION_INFO").read_text(encoding="utf-8").strip()
+        except OSError:
+            try:
+                # If VERSION_INFO file is missing, we are installing from whl package. Use the version from the package metadata.
+                from onnxruntime_genai import __version__
+
+                return __version__ or None
+            except ImportError:
+                return None
+
+    def get_genai_commit(self) -> str | None:
         """Return the current GenAI source revision when Git metadata is available."""
         repo_root = Path(__file__).resolve().parents[5]
         try:
+            # Attempt to get the current Git commit hash from the repository root.
             result = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
                 cwd=repo_root,
@@ -59,13 +71,20 @@ class Model:
             )
             return result.stdout.strip()
         except (OSError, subprocess.CalledProcessError):
-            return None
+            try:
+                # If Git metadata is unavailable, we are installing from whl package. Use the commit information from the package metadata.
+                from onnxruntime_genai import __commit__
 
-    @classmethod
-    def stamp_build_metadata(cls, model: ir.Model) -> None:
-        """Add the GenAI source revision to an exported ONNX graph."""
-        if commit := cls.get_genai_commit():
-            model.producer_version = commit
+                return __commit__ or None
+            except ImportError:
+                return None
+
+    def stamp_build_metadata(self, model: ir.Model) -> None:
+        """Add GenAI version and source revision to an exported ONNX graph."""
+        if version := self.get_genai_version():
+            model.producer_version = version
+        if commit := self.get_genai_commit():
+            model.metadata_props["producer_commit"] = commit
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         self.extra_options = extra_options
