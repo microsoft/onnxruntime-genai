@@ -1,0 +1,10 @@
+[
+  "Explain speculative decoding and why a small draft model can speed up a large one.",
+  "Describe what the acceptance rate of a speculative decoder measures and what lowers it.",
+  "Compare a block drafter that proposes several tokens at once with a drafter that proposes one token per step.",
+  "Explain why greedy speculative decoding can be lossless while sampled speculative decoding needs a correction step.",
+  "A unit test passes alone but fails in the full suite. Give a concise debugging plan.",
+  "Compare a paged key-value cache with one contiguous cache allocation per request.",
+  "Explain the difference between aggregate throughput and per-request latency.",
+  "List three tests for a scheduler that mixes prompt processing with token generation."
+]
