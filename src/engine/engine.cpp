@@ -66,7 +66,7 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
 
   fatal_fallback_error_ = std::make_exception_ptr(EngineStepError{
       {StepOutcomeKind::ExecutionContractFailure, 0, nullptr},
-      "The Engine encountered a fatal failure while constructing its diagnostic error.",
+      "The Engine encountered a fatal failure, and the underlying exception could not be recorded.",
   });
   const size_t max_batch_size = cache_manager_->MaxBatchSize();
   constexpr size_t fatal_event_overhead = 2;
