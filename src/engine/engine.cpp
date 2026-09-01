@@ -43,6 +43,35 @@ std::string AddExceptionCause(std::string message, std::exception_ptr error) {
   return message;
 }
 
+bool IsEngineStepErrorForOutcome(
+    const std::exception_ptr& error,
+    StepOutcomeKind outcome) noexcept {
+  if (!error) {
+    return false;
+  }
+  try {
+    std::rethrow_exception(error);
+  } catch (const EngineStepError& step_error) {
+    return step_error.Outcome().kind == outcome;
+  } catch (...) {
+    return false;
+  }
+}
+
+std::exception_ptr MakeFatalFallbackError(StepOutcomeKind outcome) {
+  auto fallback = std::make_exception_ptr(EngineStepError{
+      {outcome, 0, nullptr},
+      "The Engine encountered a fatal failure, and the underlying exception could not be recorded.",
+  });
+  if (!IsEngineStepErrorForOutcome(fallback, outcome)) {
+    if (!fallback) {
+      throw std::bad_exception{};
+    }
+    std::rethrow_exception(fallback);
+  }
+  return fallback;
+}
+
 }  // namespace
 
 Engine::Engine(std::shared_ptr<Model> model)
@@ -64,14 +93,10 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
     throw std::runtime_error("Engine requires a non-null model executor.");
   }
 
-  fatal_contract_fallback_error_ = std::make_exception_ptr(EngineStepError{
-      {StepOutcomeKind::ExecutionContractFailure, 0, nullptr},
-      "The Engine encountered a fatal failure, and the underlying exception could not be recorded.",
-  });
-  fatal_execution_fallback_error_ = std::make_exception_ptr(EngineStepError{
-      {StepOutcomeKind::FatalExecutionFailure, 0, nullptr},
-      "The Engine encountered a fatal failure, and the underlying exception could not be recorded.",
-  });
+  fatal_contract_fallback_error_ =
+      MakeFatalFallbackError(StepOutcomeKind::ExecutionContractFailure);
+  fatal_execution_fallback_error_ =
+      MakeFatalFallbackError(StepOutcomeKind::FatalExecutionFailure);
   const size_t max_batch_size = cache_manager_->MaxBatchSize();
   constexpr size_t fatal_event_overhead = 2;
   if (fatal_events_.max_size() < fatal_event_overhead ||
@@ -1018,14 +1043,8 @@ EngineEvent Engine::EventFromStepError(
         {outcome, transaction_id, request_id},
         AddExceptionCause(std::string{message}, error),
     });
-    try {
-      std::rethrow_exception(candidate_error);
-    } catch (const EngineStepError& candidate_step_error) {
-      if (candidate_step_error.Outcome().kind == outcome) {
-        durable_error = std::move(candidate_error);
-      }
-    } catch (...) {
-      // make_exception_ptr can capture an allocation or copy failure instead.
+    if (IsEngineStepErrorForOutcome(candidate_error, outcome)) {
+      durable_error = std::move(candidate_error);
     }
   } catch (...) {
     // The fallback was constructed with the Engine, before any Request could be published.
