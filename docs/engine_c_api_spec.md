@@ -330,7 +330,7 @@ Destroying a Request handle only publishes an atomic abandonment marker when it 
 handle; this final release may occur on another thread. The Engine strongly retains the Request and
 performs the logical close and cleanup at its next owner-thread boundary. A resident static row
 retains the runtime state needed by an executable peer until the shared physical batch becomes
-quiescent. This deferred-release behavior does not permit concurrent Request operations.
+recycled. This deferred-release behavior does not permit concurrent Request operations.
 
 Destroying an Engine closes all bound Requests and purges events. Surviving Request handles remain
 valid lightweight closed tombstones that the caller must still destroy. Teardown uses a no-throw
@@ -450,7 +450,10 @@ struct PendingEngineEvent {
 At Engine construction:
 
 ```cpp
-pending_events_.reserve(cache_manager_->MaxBatchSize());
+const size_t max_step_events =
+    cache_manager_->MaxBatchSize() * kMaxGeneratedTokensPerStep;
+pending_events_.reserve(max_step_events);
+staged_events_.reserve(max_step_events);
 ```
 
 `reserve` allocates capacity without constructing events. A committed step produces at most
@@ -517,8 +520,7 @@ undelivered events, and release its Search, guidance, sampler, and parameter run
 owner thread. On the dynamic path, committed paged-cache ownership is released immediately. On the
 static path, a resident row is part of a shared batch allocation and cannot be physically released
 per Request; the closed/abandoned tombstone is no longer sampled or returned, but its row, shared
-cache allocation, and row-essential runtime state remain while another row stays open. The shared
-allocation is released when its final open row closes or when the whole batch recycles.
+cache allocation, and row-essential runtime state may remain until the whole batch recycles.
 
 The event's `request` is borrowed. It remains valid only while the caller retains the owned Request
 handle. Internal pending events hold a `shared_ptr<Request>` until delivery, but that does not relax
@@ -535,10 +537,11 @@ OgaRequestGetUnseenToken
 
 and remove their internal unseen-index FIFO bookkeeping.
 
-At successful step commit, the Engine already knows the Request, Turn ID, selected token, terminal
-state, finish reason, and usage. It captures those values in `PendingEngineEvent`. One committed
-step produces at most one combined event per affected Request. `OgaEngineRun` moves the available
-FIFO prefix into the reusable Buffer storage and retains overflow.
+At successful step commit, the Engine already knows the Request, Turn ID, selected tokens, terminal
+state, finish reason, and usage. It captures those values in ordered `PendingEngineEvent` objects.
+A speculative step produces at most `kMaxGeneratedTokensPerStep` events per affected Request, with
+terminal state combined into the final visible token event when possible. `OgaEngineRun` moves the
+available FIFO prefix into the reusable Buffer storage and retains overflow.
 
 `tokens_host_` and the Search sequence remain authoritative resident conversation state. Event
 delivery does not remove tokens from that state. Because token and Turn ID are captured together at

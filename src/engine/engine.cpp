@@ -263,20 +263,6 @@ void Engine::CloseRequest(const std::shared_ptr<Request>& request) {
   if (!request || !request->BelongsTo(*this)) {
     throw std::runtime_error("Cannot close a request that does not belong to this engine.");
   }
-  const bool resident_static_row =
-      !cache_manager_->SupportsDynamicBatching() &&
-      cache_manager_->IsResident(request);
-  std::vector<std::shared_ptr<Request>> static_residents;
-  bool release_closed_static_batch = false;
-  if (resident_static_row) {
-    static_residents = cache_manager_->AllocatedRequests();
-    release_closed_static_batch = std::all_of(
-        static_residents.begin(), static_residents.end(),
-        [&request](const std::shared_ptr<Request>& resident) {
-          return resident == request || IsClosed(resident->status_);
-        });
-  }
-
   scheduler_->RemoveRequest(request);
   const bool retain_static_runtime_state =
       !cache_manager_->SupportsDynamicBatching() &&
@@ -297,13 +283,6 @@ void Engine::CloseRequest(const std::shared_ptr<Request>& request) {
           [&request](const EngineEvent& event) { return event.request == request; }),
       staged_events_.end());
   request->MarkClosedFromEngine(*this);
-  if (release_closed_static_batch) {
-    for (const auto& resident : static_residents) {
-      scheduler_->DetachRequestForTeardown(resident);
-    }
-    CompleteNonresidentClosedRequests();
-    return;
-  }
   if (retain_static_runtime_state) {
     return;
   }
@@ -347,8 +326,7 @@ void Engine::ReclaimAbandonedRequests() {
   // ExternalRelease only publishes an atomic abandonment marker. The host's owner-thread boundary
   // can safely perform the normal removal sequence: logical scheduler removal, ready-notification
   // purge, and terminal close. Dynamic cache ownership is released immediately; a resident static
-  // batch row can remain physically retained until the last open row closes or the batch is
-  // recycled.
+  // batch row can remain physically retained until the batch is recycled.
   if (!abandonment_pending_->exchange(false, std::memory_order_acq_rel)) {
     return;
   }

@@ -232,14 +232,14 @@ event.
 A turn-complete request remains Engine-owned. Once admitted, it normally remains resident; a turn
 canceled before initial admission has not allocated cache state. `Close()` ends logical ownership
 immediately and releases dynamic cache resources; static batch storage may remain until batch
-recycling or until the final open row closes. If every external handle is released instead, the
-request is marked abandoned and reclaimed at the next serialized Engine boundary, including
-`HasPendingRequests()`. An atomic Engine-level pending flag makes the common no-abandonment
-boundary allocation-free.
+recycling. If every external handle is released instead, the request is marked abandoned and
+reclaimed at the next serialized Engine boundary, including `HasPendingRequests()`. An atomic
+Engine-level pending flag makes the common no-abandonment boundary allocation-free.
 
 Planning skips turn-complete residents and does not release their cache. Retained requests still
 consume paged-cache blocks and a batch slot, so applications must call `Close()` when they no
-longer need continuation when deterministic immediate reclamation is required.
+longer need continuation. Dynamic resources are reclaimed immediately; static resources remain
+until the shared batch is recycled.
 
 ### `Close()`
 
@@ -254,25 +254,23 @@ A resident static row cannot release all runtime objects independently because t
 and shared cache allocation still read its Search sequence, parameters, host token mirror, and
 length metadata while another row executes. Static close releases sampling-only state immediately
 but retains that row-essential state, without logical execution or event delivery, until the
-complete static batch is recycled or its final open row closes on the Engine owner thread. The
-Engine then releases the retained runtime state and drops its strong Request reference, leaving any
-surviving public handle as a lightweight closed tombstone. A nonresident static Request completes
-physical close immediately.
+complete static batch is recycled on the Engine owner thread. The Engine then releases the retained
+runtime state and drops its strong Request reference, leaving any surviving public handle as a
+lightweight closed tombstone. A nonresident static Request completes physical close immediately.
 Final-handle abandonment performs the same logical removal and event purge at the next owner-thread
 boundary and follows the same dynamic-immediate or static-retained physical cleanup.
 
 Events already copied by the host remain host-owned. Destroying the Engine terminalizes every bound
 Request through a teardown-specific no-throw detach path that does not rely on the Request's expired
 weak Engine reference. Scheduler/cache ownership and Request runtime state are released first;
-surviving external handles are lightweight closed tombstones and still must be destroyed. Closing
-the final open row of a resident static batch also releases the shared static cache immediately.
+surviving external handles are lightweight closed tombstones and still must be destroyed.
 
 ### `Closed`
 
 `Closed` is distinct from `Unassigned` because close may already have destroyed residency and
 scheduler ownership. Returning to `Unassigned` would imply that the same logical sequence could be
-submitted as a new request. A closed static-batch row may remain physically allocated while another
-row remains open, but it is no longer sampled or returned.
+submitted as a new request. A closed static-batch row may remain physically allocated until the
+shared batch is recycled, but it is no longer sampled or returned.
 
 ## The request length counters
 
@@ -358,8 +356,8 @@ A positive-capacity call is strictly drain-or-execute:
 3. Otherwise execute at most one static step or one dynamic transaction.
 4. Move up to capacity produced events into the Buffer and retain overflow in `pending_events_`.
 
-A transient allocation failure while reclaiming an abandoned Request aborts this call without
-changing Engine or Request state and is retried at the next owner-thread boundary. An ownership
+A transient allocation failure while reclaiming abandoned Requests leaves completed cleanup intact,
+re-arms reclamation, and retries the remaining work at the next owner-thread boundary. An ownership
 invariant failure during reclamation is fatal: `Run()` drains the retained terminal failure events
 through the supplied Buffer before later calls rethrow the stored Engine error.
 
@@ -371,12 +369,13 @@ borrowed. A Buffer event holds the Request internally for the lifetime of that v
 returned `const OgaRequest*` is never an independently owned handle and is invalidated with the
 event.
 
-A committed step emits a token event, a terminal event, or one combined
-`Token | TurnFinished` event. EOS can emit terminal completion without a visible token. Event
-delivery does not mutate the Request's retained logical sequence. One successful committed step
-produces at most one combined event per affected Request. If speculative verification accepts a
-visible draft immediately before an accepted EOS ends the Turn, the accepted visible token and
-terminal completion share that combined event; the EOS itself is never emitted as a token.
+A committed step emits zero or more ordered token events and may emit a terminal event or combine
+`TurnFinished` with its final visible token event. EOS can emit terminal completion without a
+visible token. Event delivery does not mutate the Request's retained logical sequence. A
+speculative step produces at most `kMaxGeneratedTokensPerStep` events per affected Request. If
+speculative verification accepts a visible draft immediately before an accepted EOS ends the Turn,
+the accepted visible token and terminal completion share that combined event; the EOS itself is
+never emitted as a token.
 
 A chunked partial-prefill transaction can commit cache and Request progress without producing an
 event. `Run()` then returns count zero while `HasPendingRequests()` remains true. It does not loop
@@ -1099,13 +1098,13 @@ single-request batch remains resident. The per-turn generated-token budget appli
 too, although static execution does not use the dynamic reservation/checkpoint transaction.
 
 Close or abandonment logically removes a Request from scheduling and purges its undelivered events.
-A closed Request that is already resident in a static batch remains part of that shared physical
-allocation while another row remains open. It is not sampled or returned again. Request Search and
+A closed Request that is already resident in a static batch nevertheless remains part of that
+shared physical allocation until the batch is recycled. It is not sampled or returned again, but
+its row and cache allocation can remain alive for the lifetime of the batch. The Request's Search,
 parameters, host token mirror, and length metadata remain available only to keep that physical row
-safe; sampling-only state is released at logical close. When the whole batch is recycled or its
-final open row closes, the Engine releases the retained state on its owner thread and the closed
-Request becomes a lightweight tombstone. Individual rows cannot be physically deallocated while
-another row remains open.
+safe; sampling-only state is released at logical close. When the whole batch is recycled, the Engine
+releases the retained state on its owner thread and the closed Request becomes a lightweight
+tombstone.
 
 Changes to shared types such as `Request`, `ScheduledRequests`, `ModelExecutor`, or `SimpleDecoder` should be checked against both paths. This document should be updated only where behavior is shared or where the dynamic path changes.
 
