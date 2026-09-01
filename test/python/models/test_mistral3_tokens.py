@@ -260,7 +260,6 @@ class TestTokenExpansionIntegration:
         generator.generate_next_token()
 
         assert generator.get_next_tokens().size == 1
-        del generator
 
 
 class TestMultiImageTokenExpansion:
