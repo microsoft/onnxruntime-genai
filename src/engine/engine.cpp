@@ -272,7 +272,7 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
           entry.request->CurrentSequenceLength();
       const size_t sequence_limit =
           std::min(static_cast<size_t>(search.max_length),
-                   entry.request->max_total_tokens_);
+                   entry.request->MaxTotalTokens());
       const size_t remaining_turn_tokens =
           entry.request->RemainingTurnTokenBudget();
       const size_t remaining_turn_tokens_after_step =
@@ -280,7 +280,7 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
               ? remaining_turn_tokens - result.visible_token_count
               : 0;
       const size_t max_draft_tokens = std::min({MaxDraftTokensPerStep(),
-                                                static_cast<size_t>(entry.request->params_->speculative.max_draft_tokens),
+                                                static_cast<size_t>(entry.request->SpeculativeOptions().max_draft_tokens),
                                                 static_cast<size_t>(committed_length_after_step) + 1 < sequence_limit
                                                     ? sequence_limit - static_cast<size_t>(committed_length_after_step) - 1
                                                     : size_t{0},
@@ -318,12 +318,9 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
       } else {
         auto params = CreateGeneratorParams(*mtp_model_);
         params->search = search;
-        feed.shadow = std::make_shared<Request>(
-            std::move(params), entry.request->max_total_tokens_, abandonment_pending_);
-        feed.shadow->engine_ = shared_from_this();
-        feed.shadow->status_ = RequestStatus::Active;
-        feed.shadow->AppendTokensForAuxiliaryDecoder(feed.tokens);
-        feed.shadow->prompt_sequence_length_ = feed.shadow->CurrentSequenceLength();
+        feed.shadow = Request::CreateAuxiliaryDecoderRequest(
+            std::move(params), entry.request->MaxTotalTokens(),
+            abandonment_pending_, shared_from_this(), feed.tokens);
         feed.newly_created = true;
       }
       total_rows += feed.tokens.size();
@@ -932,7 +929,7 @@ void Engine::CloseMtpRequest(const std::shared_ptr<Request>& request) {
   }
   std::vector<std::shared_ptr<Request>> mtp_requests{mtp_it->second};
   mtp_cache_manager_->Deallocate(mtp_requests);
-  mtp_it->second->CompleteClose();
+  mtp_it->second->CompleteCloseFromEngine(*this);
   mtp_requests_.erase(mtp_it);
 }
 
@@ -950,7 +947,7 @@ void Engine::DetachRequestForTeardown(
       mtp_cache_manager_->Deallocate(mtp_requests);
     } catch (...) {
     }
-    mtp_it->second->CompleteClose();
+    mtp_it->second->CompleteCloseFromEngine(*this);
     mtp_requests_.erase(mtp_it);
   }
   pending_events_.erase(

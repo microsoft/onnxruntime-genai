@@ -553,6 +553,23 @@ void Request::AdvanceChunk() {
   processed_sequence_length_ += static_cast<int64_t>(ScheduledTokenCount());
 }
 
+std::shared_ptr<Request> Request::CreateAuxiliaryDecoderRequest(
+    std::shared_ptr<GeneratorParams> params,
+    size_t max_total_tokens,
+    std::shared_ptr<std::atomic<bool>> abandonment_pending,
+    const std::shared_ptr<Engine>& engine,
+    std::span<const int32_t> tokens) {
+  auto request = std::make_shared<Request>(
+      std::move(params), max_total_tokens, std::move(abandonment_pending));
+  request->AttachToEngine(engine);
+  // The shadow is never admitted through BeginTurn, so it starts decoding directly and treats the
+  // tokens it mirrors from the target as its prompt.
+  request->status_ = RequestStatus::Active;
+  request->AppendTokensForAuxiliaryDecoder(tokens);
+  request->prompt_sequence_length_ = request->CurrentSequenceLength();
+  return request;
+}
+
 void Request::AppendTokensForAuxiliaryDecoder(std::span<const int32_t> tokens) {
   if (status_ != RequestStatus::Active || tokens.empty() ||
       processed_sequence_length_ != CurrentSequenceLength()) {
@@ -924,6 +941,10 @@ std::span<const uint32_t> Request::GetReadyGuidanceMask() {
 
 const Config::Search& Request::SearchOptions() const {
   return search_->params_->search;
+}
+
+const Config::Speculative& Request::SpeculativeOptions() const {
+  return params_->speculative;
 }
 
 bool Request::BindNextTokensSlot(DeviceSpan<int32_t> slot) {

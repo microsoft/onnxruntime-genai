@@ -120,6 +120,35 @@ struct Request : std::enable_shared_from_this<Request>,
   void MarkFailedFromEngine(const Engine& engine) noexcept;
   void CompleteFailedTurnFromEngine(const Engine& engine) noexcept;
 
+  // Engine-hosted MTP head requests mirror a target request's committed tokens in a
+  // scheduler-private shadow the Engine owns outright. They never sample and never enter the
+  // public turn API, so they are admitted through this factory instead of BeginTurn.
+  static std::shared_ptr<Request> CreateAuxiliaryDecoderRequest(
+      std::shared_ptr<GeneratorParams> params,
+      size_t max_total_tokens,
+      std::shared_ptr<std::atomic<bool>> abandonment_pending,
+      const std::shared_ptr<Engine>& engine,
+      std::span<const int32_t> tokens);
+  void AppendTokensForAuxiliaryDecoder(std::span<const int32_t> tokens);
+  void AppendTokensForAuxiliaryDecoder(DeviceSpan<int32_t> tokens);
+  void RewindAuxiliaryDecoderTo(size_t sequence_length);
+  void CommitAuxiliaryDecoderStep() noexcept;
+
+  /**
+   * @brief Total tokens (prompt plus generated) this request may ever reach.
+   */
+  size_t MaxTotalTokens() const noexcept { return max_total_tokens_; }
+
+  /**
+   * @brief The speculative-decoding options this request was created with.
+   */
+  const Config::Speculative& SpeculativeOptions() const;
+
+  /**
+   * @brief Why the pending draft proposal cannot be verified, or nullptr when it can.
+   */
+  const char* DraftTokenValidationError() const noexcept;
+
   /**
    * @brief Returns a span of unprocessed tokens on the device.
    * @return DeviceSpan containing unprocessed token IDs.
@@ -362,13 +391,6 @@ struct Request : std::enable_shared_from_this<Request>,
   // Drops whatever the step in flight staged past the committed sequence, leaving the host mirror
   // exactly as long as the search after its own transaction rewind.
   void DiscardStagedDrafts() noexcept;
-  // The Engine-hosted MTP head mirrors target-committed tokens in a scheduler-private request. It
-  // never samples from this request; these helpers append decided tokens and advance its processed
-  // boundary only after the auxiliary cache transaction commits.
-  void AppendTokensForAuxiliaryDecoder(std::span<const int32_t> tokens);
-  void AppendTokensForAuxiliaryDecoder(DeviceSpan<int32_t> tokens);
-  void RewindAuxiliaryDecoderTo(size_t sequence_length);
-  void CommitAuxiliaryDecoderStep() noexcept;
 
   int64_t processed_sequence_length_{};
   // Sequence length the application's tokens reach up to. Everything below it is prompt, so the
@@ -402,7 +424,6 @@ struct Request : std::enable_shared_from_this<Request>,
   std::weak_ptr<Engine> engine_;
   const Engine* engine_identity_{};
 
-  const char* DraftTokenValidationError() const noexcept;
   void ApplyLogitsProcessors(DeviceSpan<float> logits, bool guidance_applied);
   void SelectNextToken();
   void StageVisibleTokens(RequestStepResult& result,
