@@ -1014,10 +1014,19 @@ EngineEvent Engine::EventFromStepError(
           ? fatal_contract_fallback_error_
           : fatal_execution_fallback_error_;
   try {
-    durable_error = std::make_exception_ptr(EngineStepError{
+    auto candidate_error = std::make_exception_ptr(EngineStepError{
         {outcome, transaction_id, request_id},
         AddExceptionCause(std::string{message}, error),
     });
+    try {
+      std::rethrow_exception(candidate_error);
+    } catch (const EngineStepError& candidate_step_error) {
+      if (candidate_step_error.Outcome().kind == outcome) {
+        durable_error = std::move(candidate_error);
+      }
+    } catch (...) {
+      // make_exception_ptr can capture an allocation or copy failure instead.
+    }
   } catch (...) {
     // The fallback was constructed with the Engine, before any Request could be published.
   }
