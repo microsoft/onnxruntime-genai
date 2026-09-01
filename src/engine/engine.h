@@ -18,23 +18,6 @@
 
 namespace Generators {
 
-struct Engine;
-
-namespace detail {
-uint64_t BeginRequestTurn(
-    Engine& engine,
-    const std::shared_ptr<Request>& request,
-    std::span<const int32_t> tokens,
-    std::optional<size_t> max_generated_tokens);
-void CloseRequest(
-    Engine& engine,
-    const std::shared_ptr<Request>& request);
-bool CancelRequest(
-    Engine& engine,
-    const std::shared_ptr<Request>& request,
-    uint64_t turn_id);
-}  // namespace detail
-
 enum class EngineHealth {
   Healthy,
   Unhealthy,
@@ -235,18 +218,11 @@ struct Engine : std::enable_shared_from_this<Engine>,
   const std::shared_ptr<std::atomic<bool>> abandonment_pending_{
       std::make_shared<std::atomic<bool>>(false)};
 
-  friend uint64_t detail::BeginRequestTurn(
-      Engine& engine,
-      const std::shared_ptr<Request>& request,
+  friend uint64_t Request::BeginTurn(
       std::span<const int32_t> tokens,
       std::optional<size_t> max_generated_tokens);
-  friend void detail::CloseRequest(
-      Engine& engine,
-      const std::shared_ptr<Request>& request);
-  friend bool detail::CancelRequest(
-      Engine& engine,
-      const std::shared_ptr<Request>& request,
-      uint64_t turn_id);
+  friend void Request::Close();
+  friend bool Request::Cancel(uint64_t turn_id);
 };
 
 }  // namespace Generators
