@@ -57,6 +57,8 @@ struct VarlenGraphBuffers {
   std::unique_ptr<Tensor> cumulative_sequence_lengths;
   std::unique_ptr<Tensor> past_sequence_lengths;
   std::unique_ptr<Tensor> logits;
+  // Null unless the model was exported with include_hidden_states.
+  std::unique_ptr<Tensor> hidden_states;
   size_t max_batch_size{};
 };
 
@@ -74,6 +76,8 @@ struct VarlenGraphBuffers {
  * Outputs:
  * - Logits - float16/float32[batch_size, vocab_size] for one row per request, or
  *   float16/float32[total_num_tokens, vocab_size] for one row per packed token.
+ * - Hidden States - float16/float32[total_num_tokens, hidden_size], only when the model was
+ *   exported with include_hidden_states. This is what an MTP draft head consumes.
  *
  * The inputs prepared by this class are compatible with models that use the
  * PagedAttention operator.
@@ -88,11 +92,21 @@ struct VarlenDecoderIO : DecoderIO {
 
   std::vector<DeviceSpan<float>> ProcessLogits() override;
 
+  // The step's packed [total_num_tokens, hidden_size] hidden states, or null when the model does
+  // not expose them. Row i corresponds to packed token i; logits have the same ordering only when
+  // the model emits one logits row per packed token.
+  Tensor* HiddenStates() const override { return active_hidden_states_; }
+
  private:
   void PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
   void PreparePositionIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
   void PrepareAttentionMetadata(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
   void PrepareLogits(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
+  void PrepareHiddenStates(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
+
+  // Number of packed token rows in this step, which is what both the logits and the hidden states
+  // are indexed by.
+  size_t TokenCount(ScheduledRequests& scheduled_requests) const;
 
   // Non-null when this step is being captured or replayed, in which case the tensors below are
   // borrowed from the holder instead of being allocated fresh.
@@ -104,6 +118,8 @@ struct VarlenDecoderIO : DecoderIO {
   std::unique_ptr<Tensor> logits_;
   Tensor* active_logits_{};
   std::unique_ptr<Tensor> logits_fp32_;
+  std::unique_ptr<Tensor> hidden_states_;
+  Tensor* active_hidden_states_{};
   bool logits_are_per_token_{true};
 };
 

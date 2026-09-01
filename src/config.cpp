@@ -20,6 +20,130 @@ namespace Generators {
 
 int64_t SafeDoubleToInt64(double x, std::string_view name);
 
+namespace {
+
+void InheritNamedStrings(const std::vector<Config::NamedString>& parent,
+                         std::vector<Config::NamedString>& child) {
+  for (const auto& parent_entry : parent) {
+    const bool overridden = std::any_of(
+        child.begin(), child.end(),
+        [&parent_entry](const Config::NamedString& entry) {
+          return entry.first == parent_entry.first;
+        });
+    if (!overridden) {
+      child.push_back(parent_entry);
+    }
+  }
+}
+
+void InheritProviderOptions(const Config::SessionOptions& parent,
+                            Config::SessionOptions& child) {
+  if (child.providers.empty()) {
+    child.providers = parent.providers;
+  }
+
+  for (const auto& parent_provider : parent.provider_options) {
+    auto child_provider = std::find_if(
+        child.provider_options.begin(), child.provider_options.end(),
+        [&parent_provider](const Config::ProviderOptions& provider) {
+          return provider.name == parent_provider.name;
+        });
+    if (child_provider == child.provider_options.end()) {
+      child.provider_options.push_back(parent_provider);
+      continue;
+    }
+
+    if (!child_provider->device_filtering_options) {
+      child_provider->device_filtering_options = parent_provider.device_filtering_options;
+    }
+    for (const auto& parent_option : parent_provider.options) {
+      const bool overridden = std::any_of(
+          child_provider->options.begin(), child_provider->options.end(),
+          [&parent_option](const Config::NamedString& option) {
+            return option.first == parent_option.first;
+          });
+      if (!overridden) {
+        child_provider->options.push_back(parent_option);
+      }
+    }
+  }
+}
+
+void InheritSessionOptions(const Config::SessionOptions& parent,
+                           Config::SessionOptions& child) {
+  if (!child.intra_op_num_threads) child.intra_op_num_threads = parent.intra_op_num_threads;
+  if (!child.inter_op_num_threads) child.inter_op_num_threads = parent.inter_op_num_threads;
+  if (!child.enable_cpu_mem_arena) child.enable_cpu_mem_arena = parent.enable_cpu_mem_arena;
+  if (!child.enable_mem_pattern) child.enable_mem_pattern = parent.enable_mem_pattern;
+  if (!child.log_id) child.log_id = parent.log_id;
+  if (!child.log_severity_level) child.log_severity_level = parent.log_severity_level;
+  if (!child.log_verbosity_level) child.log_verbosity_level = parent.log_verbosity_level;
+  if (!child.enable_profiling) child.enable_profiling = parent.enable_profiling;
+  if (!child.custom_ops_library) child.custom_ops_library = parent.custom_ops_library;
+  if (!child.graph_optimization_level) child.graph_optimization_level = parent.graph_optimization_level;
+  InheritNamedStrings(parent.config_entries, child.config_entries);
+  InheritProviderOptions(parent, child);
+}
+
+}  // namespace
+
+std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
+  const auto& mtp = config.model.mtp;
+  if (mtp.filename.empty()) {
+    throw std::runtime_error("model.mtp.filename is required to create an MTP decoder.");
+  }
+  if (mtp.num_hidden_layers != 1) {
+    throw std::runtime_error("model.mtp.num_hidden_layers must be 1.");
+  }
+  if (mtp.num_key_value_heads <= 0 || mtp.head_size <= 0) {
+    throw std::runtime_error("model.mtp KV head count and head size must be positive.");
+  }
+  if (config.model.decoder.hidden_size <= 0) {
+    throw std::runtime_error("model.decoder.hidden_size must be positive to create an MTP decoder.");
+  }
+
+  auto projected = std::make_unique<Config>(config);
+  auto& decoder = projected->model.decoder;
+  decoder.filename = mtp.filename;
+  if (mtp.session_options) {
+    decoder.session_options = *mtp.session_options;
+    InheritSessionOptions(config.model.decoder.session_options,
+                          decoder.session_options);
+  }
+  if (mtp.run_options) {
+    decoder.run_options = *mtp.run_options;
+    if (config.model.decoder.run_options) {
+      InheritNamedStrings(*config.model.decoder.run_options, *decoder.run_options);
+    }
+  }
+  // An empty MTP list intentionally disables sharing the main decoder's initializers.
+  decoder.shared_initializers = mtp.shared_initializers;
+  decoder.num_hidden_layers = mtp.num_hidden_layers;
+  decoder.num_key_value_heads = mtp.num_key_value_heads;
+  decoder.head_size = mtp.head_size;
+
+  decoder.inputs.input_ids = mtp.inputs.input_ids;
+  decoder.inputs.hidden_states = mtp.inputs.hidden_states;
+  decoder.inputs.position_ids = mtp.inputs.position_ids;
+  decoder.inputs.past_key_names = mtp.inputs.past_key_names;
+  decoder.inputs.past_value_names = mtp.inputs.past_value_names;
+  decoder.outputs.logits = mtp.outputs.logits;
+  decoder.outputs.hidden_states = mtp.outputs.hidden_states;
+  decoder.outputs.present_key_names = mtp.outputs.present_key_names;
+  decoder.outputs.present_value_names = mtp.outputs.present_value_names;
+
+  // The MTP graph is one full-attention layer. Paged-attention metadata and block-table names are
+  // deliberately inherited above; fixed recurrent state and a main-model sliding window are not.
+  decoder.layer_types.assign(static_cast<size_t>(mtp.num_hidden_layers), "full_attention");
+  decoder.conv_cache_size = 0;
+  decoder.state_update_capacity = 0;
+  decoder.sliding_window.reset();
+  decoder.state_groups.reset();
+  decoder.pipeline.clear();
+  projected->model.mtp = {};
+  return projected;
+}
+
 // Normalizes historical casings, short aliases, and full ORT names (e.g.
 // "CUDAExecutionProvider") to the canonical dispatch-table name; unknown names pass through.
 std::string_view NormalizeProviderName(std::string_view name) {

@@ -54,6 +54,8 @@ struct DecoderIO : ModelIO {
    */
   virtual std::vector<DeviceSpan<float>> ProcessLogits() = 0;
 
+  virtual Tensor* HiddenStates() const { return nullptr; }
+
  protected:
   ScheduledRequests& scheduled_requests_;
   std::shared_ptr<CacheManager> cache_manager_;

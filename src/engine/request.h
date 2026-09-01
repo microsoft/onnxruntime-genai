@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <array>
+
 #include "generator/generators.h"
 #include "request_status.h"
 #include "engine_invariants.h"
@@ -16,7 +18,12 @@
 
 namespace Generators {
 
+namespace test {
+struct RequestGuidanceTestAccess;
+}
+
 struct Request;
+struct ScheduledRequests;
 
 struct RequestOptions {
   std::optional<size_t> max_session_tokens;
@@ -34,9 +41,8 @@ struct RequestStepResult {
   bool token_appended{};
   bool done{};
   GenerationFinishReason finish_reason{GenerationFinishReason::None};
-  // Usually mirrors token_appended. Draft verification can instead publish its last accepted
-  // visible token when a later accepted EOS completes the turn without appending that EOS.
-  bool token_visible{};
+  std::array<int32_t, kMaxGeneratedTokensPerStep> visible_tokens{};
+  size_t visible_token_count{};
 };
 
 struct RequestTurnAdmission {
@@ -150,18 +156,19 @@ struct Request : std::enable_shared_from_this<Request>,
    * results and to update the request status. Splitting the two lets the engine launch every
    * scheduled request's token selection before it synchronizes with the device once.
    */
-  void GenerateNextTokens(DeviceSpan<float> logits);
+  void GenerateNextTokens(DeviceSpan<float> logits, bool guidance_applied = false);
 
   /**
    * @brief Proposes speculative draft tokens for this request's next step.
    * @param tokens Draft continuation of the sequence, in order. An empty span clears the proposal.
    *
-   * The next decode step then runs 1 + tokens.size() rows, verifies each draft against the target
-   * model's own prediction, and keeps the accepted prefix. Only greedy requests may propose drafts,
-   * because verification compares argmax tokens rather than sampling probabilities.
+   * The request must be ready to decode. The next step then runs 1 + tokens.size() rows, verifies
+   * each draft against the target model's own prediction, and keeps the accepted prefix. Only
+   * greedy requests may propose drafts, because verification compares argmax tokens rather than
+   * sampling probabilities.
    *
-   * The proposal applies to the next step only. A committed step consumes it even when it could not
-   * verify it (a prefill chunk, for one); a rolled back step leaves it pending.
+   * The proposal applies to the current turn's next committed decode step. A rolled back step
+   * leaves it pending, while canceling the turn discards it.
    */
   void SetDraftTokens(std::span<const int32_t> tokens);
 
@@ -190,8 +197,10 @@ struct Request : std::enable_shared_from_this<Request>,
   void ValidateEngineCompatibility() const;
   void SaveStateForTransaction();
   void SaveStateForExternalSamplingTransaction();
-  RequestStepResult ApplyLogitsForTransaction(DeviceSpan<float> logits);
-  void PrepareGenerationForTransaction(DeviceSpan<float> logits);
+  RequestStepResult ApplyLogitsForTransaction(DeviceSpan<float> logits,
+                                              bool guidance_applied = false);
+  void PrepareGenerationForTransaction(DeviceSpan<float> logits,
+                                       bool guidance_applied = false);
   RequestStepResult StageGenerationForTransaction(
       const RequestStepPlan& plan);
   RequestStepResult StageDraftCompletionForTransaction();
@@ -313,7 +322,9 @@ struct Request : std::enable_shared_from_this<Request>,
    * @brief Runs everything token selection needs before the sampler: sequence bookkeeping,
    *        handing the logits to the search, and applying the logits processors.
    */
-  void PrepareGeneration(DeviceSpan<float> logits);
+  void PrepareGeneration(DeviceSpan<float> logits, bool guidance_applied = false);
+  bool HasGuidance() const { return guidance_logits_processor_ != nullptr; }
+  std::span<const uint32_t> GetReadyGuidanceMask();
 
   /**
    * @brief Launches the per-sequence tail after a batched sampler has filled the bound slot.
@@ -332,6 +343,8 @@ struct Request : std::enable_shared_from_this<Request>,
   // Host-side mirror of the full sequence (prompt + generated tokens). Kept in step with the
   // search's device sequence so that streaming and input-id preparation never read it back.
   std::vector<int32_t> tokens_host_;
+  friend struct ScheduledRequests;
+  friend struct test::RequestGuidanceTestAccess;
 
   void CompleteClose() noexcept;
   static DeviceSpan<int32_t> AllocateOnDevice(
@@ -375,9 +388,12 @@ struct Request : std::enable_shared_from_this<Request>,
   std::weak_ptr<Engine> engine_;
   const Engine* engine_identity_{};
 
-  void ApplyLogitsProcessors(DeviceSpan<float> logits);
+  void ApplyLogitsProcessors(DeviceSpan<float> logits, bool guidance_applied);
   void ResetGuidanceForNewTurn();
   void SelectNextToken();
+  void StageVisibleTokens(RequestStepResult& result,
+                          size_t committed_count,
+                          std::optional<int32_t> sampled_token) const;
   RequestStepResult StageGeneration(int64_t sequence_length_before);
   void CommitGuidanceToken(const RequestStepResult& result);
 };

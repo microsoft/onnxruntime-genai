@@ -89,21 +89,7 @@ Request::Request(
     throw std::runtime_error("Guidance fast-forward tokens are not supported by the engine.");
   }
 
-  const bool has_guidance_type = !params->guidance_type.empty();
-  const bool has_guidance_data = !params->guidance_data.empty();
-  if (has_guidance_type != has_guidance_data) {
-    throw std::runtime_error("Guidance type and data must be provided together.");
-  }
-  const bool guidance_requested = has_guidance_type && has_guidance_data;
-  if (guidance_requested && !params->model_) {
-    throw std::runtime_error("Engine guidance requires request parameters associated with a model.");
-  }
-  if (guidance_requested) {
-    guidance_logits_processor_ = CreateGuidanceLogitsProcessor(*params->model_, params);
-  }
-  if (guidance_requested && !guidance_logits_processor_) {
-    throw std::runtime_error("Engine guidance is unavailable. Build with use_guidance=true.");
-  }
+  guidance_logits_processor_ = CreateGuidanceLogitsProcessor(params);
 
   // The engine drives one independent search per request, so completion is batched: see
   // ScheduledRequests::GenerateNextTokens().
@@ -271,6 +257,7 @@ RequestTurnCounters Request::CompleteCancelFromEngine(
   assert(turn_id == current_turn_id_);
   assert(!Generators::IsTurnComplete(status_));
   assert(IsExecutable(status_));
+  draft_tokens_.clear();
   status_ = RequestStatus::TurnComplete;
   finish_reason_ = GenerationFinishReason::Canceled;
   return {turn_prompt_tokens_, turn_generated_tokens_};
@@ -385,9 +372,13 @@ void Request::SetDraftTokens(std::span<const int32_t> tokens) {
   if (IsClosed(status_)) {
     throw std::runtime_error("Cannot propose draft tokens for a closed request.");
   }
-  draft_tokens_.clear();
   if (tokens.empty()) {
+    draft_tokens_.clear();
     return;
+  }
+  if (!IsExecuting(status_) || IsPrefill()) {
+    throw std::runtime_error(
+        "Speculative draft tokens may only be proposed when the request is ready to decode.");
   }
   if (guidance_logits_processor_) {
     throw std::runtime_error("Speculative draft tokens are not supported with guidance.");
@@ -567,8 +558,8 @@ bool Request::IsPrefill() const {
   return processed_sequence_length_ < prompt_sequence_length_;
 }
 
-void Request::GenerateNextTokens(DeviceSpan<float> logits) {
-  PrepareGeneration(logits);
+void Request::GenerateNextTokens(DeviceSpan<float> logits, bool guidance_applied) {
+  PrepareGeneration(logits, guidance_applied);
 
   auto& search_params = search_->params_->search;
   if (!search_params.do_sample || search_params.top_k == 1 || search_params.temperature == 0) {
@@ -637,20 +628,26 @@ void Request::SaveStateForExternalSamplingTransaction() {
   transaction_rng_ = rng_;
 }
 
-RequestStepResult Request::ApplyLogitsForTransaction(DeviceSpan<float> logits) {
+RequestStepResult Request::ApplyLogitsForTransaction(DeviceSpan<float> logits,
+                                                     bool guidance_applied) {
   const auto sequence_length_before = CurrentSequenceLength();
-  PrepareGenerationForTransaction(logits);
+  PrepareGenerationForTransaction(logits, guidance_applied);
   SelectNextToken();
   return StageGeneration(sequence_length_before);
 }
 
-void Request::PrepareGenerationForTransaction(DeviceSpan<float> logits) {
-  ApplyLogitsProcessors(logits);
+void Request::PrepareGenerationForTransaction(DeviceSpan<float> logits,
+                                              bool guidance_applied) {
+  ApplyLogitsProcessors(logits, guidance_applied);
 }
 
 RequestStepResult Request::StageGenerationForTransaction(
     const RequestStepPlan& plan) {
-  return StageGeneration(plan.sequence_length_before);
+  // Accepted drafts have already extended the sequence, so the baseline has to match the one
+  // ApplyLogitsForTransaction reads after they commit. Without the offset a step that ends on an
+  // unappended EOS would look like it appended a token.
+  return StageGeneration(
+      plan.sequence_length_before + static_cast<int64_t>(accepted_draft_count_));
 }
 
 RequestStepResult Request::StageDraftCompletionForTransaction() {
@@ -673,14 +670,14 @@ RequestStepResult Request::StageDraftCompletionForTransaction() {
       finish_reason = GenerationFinishReason::EosToken;
     }
   }
-  const bool token_visible = accepted_draft_count_ != 0;
-  return RequestStepResult{
-      token_visible ? draft_tokens_[accepted_draft_count_ - 1] : 0,
+  RequestStepResult result{
+      0,
       false,
       true,
       finish_reason,
-      token_visible,
   };
+  StageVisibleTokens(result, accepted_draft_count_, std::nullopt);
+  return result;
 }
 
 void Request::RestoreStateForTransaction() {
@@ -734,9 +731,31 @@ void Request::CommitStep(const RequestStepPlan& plan,
   draft_verification_completed_generation_ = false;
 }
 
-void Request::ApplyLogitsProcessors(DeviceSpan<float> logits) {
+// Records the tokens this step makes externally visible, in sequence order. Accepted drafts are
+// already in tokens_host_; a freshly sampled token is only appended by CommitStep.
+void Request::StageVisibleTokens(RequestStepResult& result,
+                                 size_t committed_count,
+                                 std::optional<int32_t> sampled_token) const {
+  if (committed_count + (sampled_token ? 1u : 0u) > result.visible_tokens.size()) {
+    throw std::logic_error(
+        "A single engine step produced more visible tokens than it can report.");
+  }
+  if (committed_count > tokens_host_.size()) {
+    throw std::logic_error(
+        "The host token mirror is missing tokens this step committed.");
+  }
+  const auto committed = std::span<const int32_t>{tokens_host_}.last(committed_count);
+  std::copy(committed.begin(), committed.end(), result.visible_tokens.begin());
+  result.visible_token_count = committed.size();
+  if (sampled_token) {
+    result.visible_tokens[result.visible_token_count++] = *sampled_token;
+  }
+}
+
+void Request::ApplyLogitsProcessors(DeviceSpan<float> logits,
+                                    bool guidance_applied) {
   search_->SetLogits(logits);
-  if (guidance_logits_processor_) {
+  if (guidance_logits_processor_ && !guidance_applied) {
     guidance_logits_processor_->ProcessLogits(logits);
   }
   auto& search_params = search_->params_->search;
@@ -795,8 +814,10 @@ RequestStepResult Request::StageGeneration(int64_t sequence_length_before) {
       token_appended,
       done,
       finish_reason,
-      token_appended,
   };
+  StageVisibleTokens(
+      result, accepted_draft_count_,
+      token_appended ? std::optional<int32_t>{token} : std::nullopt);
   CommitGuidanceToken(result);
   if (done && guidance_logits_processor_) {
     guidance_logits_processor_->Reset();
@@ -811,9 +832,15 @@ void Request::CommitGuidanceToken(const RequestStepResult& result) {
   }
 }
 
-void Request::PrepareGeneration(DeviceSpan<float> logits) {
+void Request::PrepareGeneration(DeviceSpan<float> logits,
+                                bool guidance_applied) {
   processed_sequence_length_ = search_->GetSequence(0).size();
-  ApplyLogitsProcessors(logits);
+  ApplyLogitsProcessors(logits, guidance_applied);
+}
+
+std::span<const uint32_t> Request::GetReadyGuidanceMask() {
+  return guidance_logits_processor_ ? guidance_logits_processor_->GetReadyMask()
+                                    : std::span<const uint32_t>{};
 }
 
 const Config::Search& Request::SearchOptions() const {
@@ -884,13 +911,14 @@ RequestStepResult Request::CompleteGeneration() {
       guidance_logits_processor_->Reset();
     }
   }
-  return RequestStepResult{
+  RequestStepResult result{
       token,
       new_token_count != 0,
       Generators::IsTurnComplete(status_),
       finish_reason_,
-      new_token_count != 0,
   };
+  StageVisibleTokens(result, new_token_count, std::nullopt);
+  return result;
 }
 
 }  // namespace Generators

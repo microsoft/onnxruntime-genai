@@ -168,6 +168,12 @@ steps:
 # via cmake/nuget.cmake. Authenticate the pipeline identity; the build passes the
 # Lotus URL directly to every NuGet invocation.
 - ${{ if eq(parameters.ep, 'winml') }}:
+  - task: NuGetToolInstaller@1
+    displayName: 'Install NuGet CLI'
+    inputs:
+      versionSpec: '6.x'
+      checkLatest: true
+
   - task: NuGetAuthenticate@1
     displayName: 'Authenticate NuGet to Lotus feed (WinML SDK)'
 
@@ -300,6 +306,10 @@ steps:
     $zip = Get-ChildItem -Path $pkgDir -Filter '*.zip' -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $zip) {
       Write-Error "ASSERT FAIL: no CPack .zip found in $pkgDir"; exit 1
+    }
+    if ('${{ parameters.ep }}' -eq 'winml' -and
+        $zip.Name -notlike '*-win-${{ parameters.arch }}-winml.zip') {
+      Write-Error "ASSERT FAIL: WinML archive name does not identify its EP: $($zip.Name)"; exit 1
     }
     Write-Host "CPack archive: $($zip.FullName)"
     Add-Type -AssemblyName System.IO.Compression.FileSystem

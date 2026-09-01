@@ -19,6 +19,7 @@ struct HybridDecoderIO : DecoderIO {
                   size_t position_planes);
 
   std::vector<DeviceSpan<float>> ProcessLogits() override;
+  Tensor* HiddenStates() const override { return varlen_io_.HiddenStates(); }
 
  private:
   // Takes the context by parameter: this IO is moved into ScheduledRequests and outlives the

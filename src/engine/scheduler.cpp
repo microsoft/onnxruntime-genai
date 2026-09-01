@@ -275,7 +275,12 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
   const auto order = DecodeFirstCandidateOrder(budget_candidates);
   plan.requests.reserve(candidates.size());
   for (size_t candidate_index : order) {
-    plan.requests.push_back(candidates[candidate_index].entry);
+    auto entry = candidates[candidate_index].entry;
+    entry.draft_token_count = 0;
+    entry.unprocessed_token_count = 1;
+    entry.target_cache_slots = RequiredSlots(
+        candidates[candidate_index].processed_sequence_length, 1);
+    plan.requests.push_back(std::move(entry));
   }
 
   const auto& dynamic_batching = *model_->config_->engine.dynamic_batching;
@@ -327,6 +332,62 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     entry.target_cache_slots = RequiredSlots(
         selected_processed_lengths[index],
         entry.unprocessed_token_count);
+  }
+
+  // Only drafts push a request's reserved slots past the probe that was just validated: a prefill
+  // chunk reserves its whole sequence either way, and a draft-free decode still takes one slot. So
+  // a plan without drafts needs no second planning pass, and must not pay for one every step.
+  const bool plans_drafts = std::any_of(
+      plan.requests.begin(), plan.requests.end(),
+      [](const RequestStepPlan& entry) { return entry.draft_token_count != 0; });
+  if (plans_drafts) {
+    const size_t selected_request_count = plan.requests.size();
+    auto budgeted_requests = plan.requests;
+    while (true) {
+      const auto resource_result = cache_manager_->PlanStepResources(plan);
+      if (resource_result.executable &&
+          plan.requests.size() == selected_request_count) {
+        break;
+      }
+
+      RequestIndex planned_requests{plan.requests.size()};
+      for (size_t index = 0; index < plan.requests.size(); ++index) {
+        if (!planned_requests.Insert(plan.requests[index].request_id, index)) {
+          throw StepPlanningConsistencyError(
+              "Final cache planning selected a duplicate request.");
+        }
+      }
+
+      const auto reduce_draft_count = [&](RequestStepPlan& entry) {
+        --entry.draft_token_count;
+        --entry.unprocessed_token_count;
+        token_counts[entry.scheduling_order] = entry.unprocessed_token_count;
+        entry.target_cache_slots = RequiredSlots(
+            selected_processed_lengths[entry.scheduling_order],
+            entry.unprocessed_token_count);
+      };
+      bool reduced_draft_count = false;
+      for (auto& entry : budgeted_requests) {
+        if (!planned_requests.Find(entry.request_id) &&
+            entry.draft_token_count != 0) {
+          reduce_draft_count(entry);
+          reduced_draft_count = true;
+        }
+      }
+      if (!reduced_draft_count) {
+        const auto optional_work = std::find_if(
+            budgeted_requests.rbegin(), budgeted_requests.rend(),
+            [](const RequestStepPlan& entry) {
+              return entry.draft_token_count != 0;
+            });
+        if (optional_work == budgeted_requests.rend()) {
+          throw StepPlanningConsistencyError(
+              "Final cache planning rejected required request work.");
+        }
+        reduce_draft_count(*optional_work);
+      }
+      plan.requests = budgeted_requests;
+    }
   }
   cache_manager_->OrderStepForExecution(plan);
 
