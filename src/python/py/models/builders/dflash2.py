@@ -42,6 +42,8 @@ import torch
 from onnx_ir.tensor_adapters import TorchTensor, to_torch_dtype
 from tqdm import tqdm
 
+from builders.base import Model
+
 
 class DFlash2Builder:
     """Emits ``dflash2.onnx`` from a DFlash 2 draft checkpoint plus the target's
@@ -928,6 +930,7 @@ class DFlash2Builder:
                 pbar.update()
                 pbar.set_description(f"Saving {tensor.name} ({tensor.dtype.short_name()}, {tensor.shape})")
 
+            Model.stamp_build_metadata(self.model)
             ir.save(
                 self.model,
                 out_path,
