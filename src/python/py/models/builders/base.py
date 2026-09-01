@@ -9,8 +9,11 @@
 from __future__ import annotations
 
 import ast
+import functools
 import json
 import os
+from pathlib import Path
+import subprocess
 from collections.abc import Sequence
 
 import numpy as np
@@ -38,6 +41,29 @@ from transformers import (
 )
 
 from quantization import CudaQuantizer, QuantConfig, resolve_dtype
+
+
+@functools.cache
+def get_genai_commit() -> str | None:
+    """Return the current GenAI source revision when Git metadata is available."""
+    repo_root = Path(__file__).resolve().parents[5]
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def stamp_build_metadata(model: ir.Model) -> None:
+    """Add the GenAI source revision to an exported ONNX graph."""
+    if commit := get_genai_commit():
+        model.producer_version = commit
 
 
 class Model:
@@ -1670,6 +1696,7 @@ class Model:
                 pbar.update()
                 pbar.set_description(f"Saving {tensor.name} ({tensor.dtype.short_name()}, {tensor.shape})")
 
+            stamp_build_metadata(model)
             ir.save(
                 model,
                 out_path,

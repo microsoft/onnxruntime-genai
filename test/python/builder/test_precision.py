@@ -464,6 +464,35 @@ def test_qwen35_moe_architecture_selects_composite_builder(monkeypatch, tmp_path
     assert captured["processing"][0] == "fake-model"
 
 
+def _make_empty_onnx_model():
+    graph = ir.Graph(inputs=(), outputs=(), nodes=(), opset_imports={"": 22})
+    return ir.Model(graph, ir_version=10, producer_name="onnxruntime-genai")
+
+
+def test_stamp_build_metadata_sets_genai_commit(monkeypatch):
+    result = types.SimpleNamespace(stdout="0123456789abcdef\n")
+    monkeypatch.setattr(base_module.subprocess, "run", lambda *args, **kwargs: result)
+    base_module.get_genai_commit.cache_clear()
+    model = _make_empty_onnx_model()
+
+    base_module.stamp_build_metadata(model)
+
+    assert model.producer_version == "0123456789abcdef"
+
+
+def test_stamp_build_metadata_handles_missing_git(monkeypatch):
+    def missing_git(*args, **kwargs):
+        raise FileNotFoundError
+
+    monkeypatch.setattr(base_module.subprocess, "run", missing_git)
+    base_module.get_genai_commit.cache_clear()
+    model = _make_empty_onnx_model()
+
+    base_module.stamp_build_metadata(model)
+
+    assert model.producer_version is None
+
+
 def test_state_window_must_be_non_negative(monkeypatch):
     with pytest.raises(ValueError, match="non-negative integer"):
         _run_check_extra_options(monkeypatch, {"state_window": "-1"})
