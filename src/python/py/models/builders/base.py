@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import subprocess
 from collections.abc import Sequence
 
 import numpy as np
@@ -1635,6 +1636,57 @@ class Model:
             init.CopyFrom(numpy_helper.from_array(np.ascontiguousarray(packed), init.name))
             node.attribute.append(onnx_helper.make_attribute("weight_prepacked", prepack_mode))
 
+    @classmethod
+    def get_genai_version(cls) -> str | None:
+        """Return the GenAI package version when source metadata is available."""
+        # Attempt to read the version information from the VERSION_INFO file in the repository root.
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", ".."))
+        version_info_path = os.path.join(repo_root, "VERSION_INFO")
+        if os.path.exists(version_info_path):
+            try:
+                with open(version_info_path, encoding="utf-8") as version_info:
+                    return version_info.read().strip()
+            except OSError:
+                pass
+
+        try:
+            # If VERSION_INFO file is missing, we are installing from whl package. Use the version from the package metadata.
+            from onnxruntime_genai import __version__
+
+            return __version__ or None
+        except ImportError:
+            return None
+
+    @classmethod
+    def get_genai_commit(cls) -> str | None:
+        """Return the current GenAI source revision when Git metadata is available."""
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", ".."))
+        try:
+            # Attempt to get the current Git commit hash from the repository root.
+            result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo_root,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            return result.stdout.strip()
+        except (OSError, subprocess.CalledProcessError):
+            try:
+                # If Git metadata is unavailable, we are installing from whl package. Use the commit information from the package metadata.
+                from onnxruntime_genai import __commit__
+
+                return __commit__ or None
+            except ImportError:
+                return None
+
+    @classmethod
+    def stamp_build_metadata(cls, model: ir.Model) -> None:
+        """Add GenAI version and an optional abbreviated source revision to an exported ONNX graph."""
+        if version := cls.get_genai_version():
+            commit_suffix = f"+{commit[:7]}" if (commit := cls.get_genai_commit()) else ""
+            model.producer_version = f"{version}{commit_suffix}"
+
     def save_model(self, out_dir):
         print(f"Saving ONNX model in {out_dir}")
 
@@ -1670,6 +1722,7 @@ class Model:
                 pbar.update()
                 pbar.set_description(f"Saving {tensor.name} ({tensor.dtype.short_name()}, {tensor.shape})")
 
+            Model.stamp_build_metadata(model)
             ir.save(
                 model,
                 out_path,

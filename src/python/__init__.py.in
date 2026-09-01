@@ -4,6 +4,7 @@
 from onnxruntime_genai import _dll_directory
 
 __version__ = "@VERSION_INFO@"
+__commit__ = "@GENAI_COMMIT@"
 __id__ = "@TARGET_NAME@"
 
 _dll_directory.add_onnxruntime_dependency(__id__)
