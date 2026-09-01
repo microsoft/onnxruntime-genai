@@ -343,6 +343,12 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
     }
 
     if (UsesRandomSampling(requests_[i]->SearchOptions())) {
+      // Draft acceptance is sequential: each row is drawn only if the previous draw matched its
+      // draft, which the batched device sampler cannot express. These draws therefore come from
+      // the Request's own host stream (checkpointed with the transaction) rather than its device
+      // BatchedSamplerState. search.random_seed consequently reproduces a given decode path, not
+      // output across decode paths, because whether drafts are admitted depends on batch
+      // composition. See "Seeded sampling" in docs/paged_attention_engine.md.
       const auto drafts = requests_[i]->StagedDraftTokens();
       const size_t token_budget = requests_[i]->RemainingTurnTokenBudget();
       requests_[i]->RewindDraftsForTransaction(0);
@@ -501,6 +507,26 @@ BatchedGuidanceMaskStatus CollectBatchedGuidanceMasks(
                       : BatchedGuidanceMaskStatus::NoEligibleGuidance;
 }
 
+float* PackedLogitsRowBase(std::vector<DeviceSpan<float>>& logits, size_t vocab_size) {
+  if (logits.empty() || vocab_size == 0) {
+    return nullptr;
+  }
+  // Span() dereferences the row's backing buffer, and an empty row has none, so every row must be
+  // proven to be a full vocabulary row before any pointer is taken.
+  for (const auto& row : logits) {
+    if (row.size() != vocab_size) {
+      return nullptr;
+    }
+  }
+  float* const first_row = logits.front().Span().data();
+  for (size_t i = 0; i < logits.size(); ++i) {
+    if (logits[i].Span().data() != first_row + i * vocab_size) {
+      return nullptr;
+    }
+  }
+  return first_row;
+}
+
 bool ScheduledRequests::TryApplyBatchedGuidanceMasks(std::vector<DeviceSpan<float>>& logits) {
   if (!sampling_plan_ || logits.empty()) {
     return false;
@@ -517,12 +543,9 @@ bool ScheduledRequests::TryApplyBatchedGuidanceMasks(std::vector<DeviceSpan<floa
 
   const size_t vocab_size = static_cast<size_t>(model_->config_->model.vocab_size);
   const size_t words_per_row = (vocab_size + 31) / 32;
-  float* const first_row = logits.front().Span().data();
-  for (size_t i = 0; i < logits.size(); ++i) {
-    if (logits[i].size() != vocab_size ||
-        logits[i].Span().data() != first_row + i * vocab_size) {
-      return false;
-    }
+  float* const first_row = PackedLogitsRowBase(logits, vocab_size);
+  if (!first_row) {
+    return false;
   }
 
   if (CollectBatchedGuidanceMasks(

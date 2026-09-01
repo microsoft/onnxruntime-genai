@@ -169,6 +169,8 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
     mtp_model = std::make_shared<DecoderOnly_Model>(
         CreateMtpDecoderConfig(*model->config_), GetOrtEnv());
     mtp_bytes_per_block = PagedKeyValueCacheBytesPerBlock(mtp_model);
+    // The head consumes the target decoder's packed hidden states, so the target must emit them.
+    model->config_->engine.hidden_states_output_required = true;
   }
 
   std::shared_ptr<CacheManager> cache_manager =
@@ -809,6 +811,12 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
   RequestTurnAdmission admission;
   bool added_to_scheduler = false;
 
+  // A continuation appends a prompt the MTP shadow never sees, so keeping the shadow would leave it
+  // a concatenation of generated tokens across turns with the intervening prompt missing. Drop it
+  // here so the next drafted step rebuilds a suffix-local shadow, matching fresh-turn semantics.
+  // Doing it before admission keeps a rolled back turn consistent: the shadow is simply rebuilt.
+  CloseMtpRequest(request);
+
   try {
     request->PrepareTurnAdmission(tokens, admission);
     if (first_turn) {
@@ -858,6 +866,9 @@ bool Engine::CancelRequest(const std::shared_ptr<Request>& request, uint64_t tur
 
   const auto counters =
       request->CompleteCancelFromEngine(*this, turn_id);
+  // The canceled turn's suffix is gone, so the shadow that mirrored it must not survive into the
+  // next turn.
+  CloseMtpRequest(request);
   EngineEvent terminal;
   terminal.request = request;
   terminal.turn_id = turn_id;
@@ -1394,7 +1405,21 @@ void Engine::RunDynamic() {
             entry.unprocessed_token_count - entry.draft_token_count +
                 entry.request->AcceptedDraftTokenCount());
       }
-      mtp_step = PrepareMtpStep(step_plan_, step_results_, scheduled_requests);
+      // MTP drafting is optional acceleration inside a mandatory target transaction. A recoverable
+      // head failure (cache pressure, shape mismatch, binding or session error) must not roll the
+      // committed target pass back, or a persistent failure would repeat forever with no progress.
+      // PrepareMtpStep restores every piece of MTP state before it rethrows, so the target step can
+      // commit without drafts. Contract violations and failed MTP rollback stay fatal below.
+      try {
+        mtp_step = PrepareMtpStep(step_plan_, step_results_, scheduled_requests);
+      } catch (const MtpRollbackError&) {
+        throw;
+      } catch (const std::logic_error&) {
+        throw;
+      } catch (...) {
+        mtp_step.reset();
+        ++speculative_stats_.standard_fallback_steps;
+      }
       for (size_t i = 0; i < step_plan_.requests.size(); ++i) {
         if (step_results_[i].visible_token_count != 0 ||
             step_results_[i].done) {
@@ -1717,7 +1742,10 @@ size_t Engine::MaxDraftTokensPerStep() const {
              : 0;
 }
 
-SpeculativeStats Engine::GetSpeculativeStats() const noexcept {
+SpeculativeStats Engine::GetSpeculativeStats() const {
+  // The counters are plain members mutated by Run(), so reading them from a monitoring thread
+  // would be a data race.
+  ValidateOwnerThread();
   auto stats = speculative_stats_;
   if (stats.draft_tokens_evaluated != 0) {
     stats.acceptance_rate = static_cast<float>(stats.draft_tokens_accepted) /

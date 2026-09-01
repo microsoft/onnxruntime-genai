@@ -2238,7 +2238,7 @@ TEST_F(EngineRunTest, InvalidDraftReplacementPreservesPendingProposal) {
   EXPECT_EQ(events[2].token, 25);
 }
 
-TEST_F(EngineRunTest, MtpPlanningAbortRestoresExistingShadowForRetry) {
+TEST_F(EngineRunTest, MtpPlanningFailureCommitsTargetStepWithoutDrafts) {
   model_ = LoadSyntheticPagedMtpModel();
   const int32_t eos = EosToken(*model_);
   const int32_t filler = eos == 5 ? 6 : 5;
@@ -2246,27 +2246,122 @@ TEST_F(EngineRunTest, MtpPlanningAbortRestoresExistingShadowForRetry) {
   auto request = CreateRequestWithPrompt(
       engine.engine, *model_, Prompt(10));
 
-  ASSERT_EQ(RunOne(*engine.engine).request, request);
+  std::array<EngineEvent, 8> storage;
+  ASSERT_GT(engine.engine->Run(storage), 0u);
   ASSERT_GT(request->PendingDraftTokenCount(), 0u);
   ASSERT_EQ(engine.mtp_cache->AllocatedCount(), 1u);
   const auto before_abort = request->Snapshot();
-  const size_t pending_drafts = request->PendingDraftTokenCount();
   const int draft_calls_before_abort = engine.mtp_executor->decode_calls;
 
+  // MTP drafting is optional acceleration: a recoverable head failure must release only MTP state
+  // and still let the mandatory target step commit.
   engine.mtp_cache->ThrowPlanningBadAllocOnce();
-  const auto retryable = RunOne(*engine.engine);
-  EXPECT_EQ(retryable.flags, EngineEventFlagRetryable);
-  EXPECT_EQ(request->Snapshot().current_sequence_length,
+  const size_t degraded_count = engine.engine->Run(storage);
+  ASSERT_GT(degraded_count, 0u);
+  EXPECT_EQ(storage.front().request, request);
+  EXPECT_NE(storage.front().flags & EngineEventFlagToken, 0u);
+  EXPECT_GT(request->Snapshot().current_sequence_length,
             before_abort.current_sequence_length);
-  EXPECT_EQ(request->Snapshot().processed_sequence_length,
-            before_abort.processed_sequence_length);
-  EXPECT_EQ(request->PendingDraftTokenCount(), pending_drafts);
+  EXPECT_EQ(request->PendingDraftTokenCount(), 0u);
   EXPECT_EQ(engine.mtp_cache->AllocatedCount(), 1u);
+  EXPECT_EQ(engine.engine->GetSpeculativeStats().standard_fallback_steps, 1u);
 
-  const auto retried = RunOne(*engine.engine);
-  EXPECT_EQ(retried.request, request);
-  EXPECT_NE(retried.flags & EngineEventFlagToken, 0u);
+  // The next step drafts again from the restored shadow.
+  ASSERT_GT(engine.engine->Run(storage), 0u);
+  EXPECT_GT(request->PendingDraftTokenCount(), 0u);
   EXPECT_GT(engine.mtp_executor->decode_calls, draft_calls_before_abort);
+  EXPECT_EQ(engine.engine->GetSpeculativeStats().standard_fallback_steps, 1u);
+}
+
+TEST_F(EngineRunTest, PersistentMtpFailureKeepsTheRequestAdvancing) {
+  model_ = LoadSyntheticPagedMtpModel();
+  const int32_t eos = EosToken(*model_);
+  auto engine = MakeMtpDoublesEngine(model_, eos == 5 ? 6 : 5);
+  auto request = CreateRequestWithPrompt(
+      engine.engine, *model_, Prompt(10));
+
+  // A head failure that never clears must degrade to ordinary decoding instead of livelocking on
+  // a rolled back target step that commits no progress.
+  engine.mtp_cache->ThrowPlanningBadAllocAlways();
+  std::array<EngineEvent, 8> storage;
+  int64_t previous_length = request->Snapshot().current_sequence_length;
+  constexpr int kSteps = 4;
+  for (int step = 0; step < kSteps; ++step) {
+    const size_t count = engine.engine->Run(storage);
+    ASSERT_EQ(count, 1u);
+    ASSERT_EQ(storage.front().request, request);
+    ASSERT_NE(storage.front().flags & EngineEventFlagToken, 0u);
+    const int64_t length = request->Snapshot().current_sequence_length;
+    EXPECT_GT(length, previous_length);
+    previous_length = length;
+    EXPECT_EQ(request->PendingDraftTokenCount(), 0u);
+  }
+  EXPECT_EQ(engine.engine->GetSpeculativeStats().standard_fallback_steps,
+            static_cast<size_t>(kSteps));
+}
+
+TEST_F(EngineRunTest, ContinuationDropsTheMtpShadowFromThePreviousTurn) {
+  model_ = LoadSyntheticPagedMtpModel();
+  const int32_t eos = EosToken(*model_);
+  auto engine = MakeMtpDoublesEngine(model_, eos == 5 ? 6 : 5);
+  auto request = CreateRequestWithPrompt(
+      engine.engine, *model_, Prompt(10));
+
+  std::array<EngineEvent, 8> storage;
+  ASSERT_GT(engine.engine->Run(storage), 0u);
+  ASSERT_EQ(engine.mtp_cache->AllocatedCount(), 1u);
+
+  engine.executor->SetForcedToken(eos);
+  bool turn_finished = false;
+  for (int attempt = 0; attempt < 8 && !turn_finished; ++attempt) {
+    const size_t count = engine.engine->Run(storage);
+    for (size_t i = 0; i < count; ++i) {
+      turn_finished |= (storage[i].flags & EngineEventFlagTurnFinished) != 0;
+    }
+  }
+  ASSERT_TRUE(turn_finished);
+  ASSERT_EQ(engine.mtp_cache->AllocatedCount(), 1u);
+
+  // The new turn appends a prompt the shadow never sees, so keeping it would leave the shadow a
+  // concatenation of generated tokens across turns with the intervening prompt missing.
+  request->BeginTurn(Prompt(4));
+  EXPECT_EQ(engine.mtp_cache->AllocatedCount(), 0u);
+
+  engine.executor->SetForcedToken(eos == 5 ? 6 : 5);
+  ASSERT_GT(engine.engine->Run(storage), 0u);
+  EXPECT_EQ(engine.mtp_cache->AllocatedCount(), 1u);
+}
+
+TEST_F(EngineRunTest, CancelDropsTheMtpShadow) {
+  model_ = LoadSyntheticPagedMtpModel();
+  const int32_t eos = EosToken(*model_);
+  auto engine = MakeMtpDoublesEngine(model_, eos == 5 ? 6 : 5);
+  auto request = CreateRequestWithPrompt(
+      engine.engine, *model_, Prompt(10));
+
+  std::array<EngineEvent, 8> storage;
+  ASSERT_GT(engine.engine->Run(storage), 0u);
+  ASSERT_EQ(engine.mtp_cache->AllocatedCount(), 1u);
+
+  EXPECT_TRUE(request->Cancel(request->CurrentTurnId()));
+  EXPECT_EQ(engine.mtp_cache->AllocatedCount(), 0u);
+}
+
+TEST_F(EngineRunTest, SpeculativeStatsRejectOffOwnerThreadReads) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
+
+  std::exception_ptr off_thread_error;
+  std::thread off_owner_thread([&] {
+    try {
+      static_cast<void>(engine.engine->GetSpeculativeStats());
+    } catch (...) {
+      off_thread_error = std::current_exception();
+    }
+  });
+  off_owner_thread.join();
+
+  ASSERT_NE(off_thread_error, nullptr);
+  EXPECT_THROW(std::rethrow_exception(off_thread_error), std::runtime_error);
 }
 
 TEST_F(EngineRunTest, MtpRollbackFailureMarksEngineUnhealthy) {

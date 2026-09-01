@@ -21,6 +21,12 @@ BatchedGuidanceMaskStatus CollectBatchedGuidanceMasks(
     size_t words_per_row,
     std::vector<uint32_t>& masks);
 
+// Returns the base pointer of the packed logits block when every entry is a full vocabulary row
+// laid out back to back, or nullptr otherwise. A sampled request that verified drafts contributes
+// an empty row, which has no backing buffer at all, so every row must be proven before any pointer
+// is taken from one.
+float* PackedLogitsRowBase(std::vector<DeviceSpan<float>>& logits, size_t vocab_size);
+
 struct BatchedSamplingPlan {
   void Reserve(size_t capacity, size_t verification_capacity) {
     requests.reserve(capacity);

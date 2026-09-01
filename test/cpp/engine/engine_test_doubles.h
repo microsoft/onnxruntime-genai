@@ -104,7 +104,8 @@ struct RecordingCacheManager : CacheManager {
   size_t ResidentRequestCount() const override { return allocated_.size(); }
 
   StepPlanningResult PlanStepResources(StepPlan& plan) const override {
-    if (std::exchange(throw_planning_bad_alloc_, false)) {
+    if (always_throw_planning_bad_alloc_ ||
+        std::exchange(throw_planning_bad_alloc_, false)) {
       throw std::bad_alloc{};
     }
     if (std::exchange(throw_planning_consistency_, false)) {
@@ -293,6 +294,7 @@ struct RecordingCacheManager : CacheManager {
     max_draft_tokens_per_step_ = token_count;
   }
   void ThrowPlanningBadAllocOnce() { throw_planning_bad_alloc_ = true; }
+  void ThrowPlanningBadAllocAlways() { always_throw_planning_bad_alloc_ = true; }
   void ThrowPlanningConsistencyOnce() {
     throw_planning_consistency_ = true;
   }
@@ -340,6 +342,7 @@ struct RecordingCacheManager : CacheManager {
   size_t max_query_tokens_per_request_{};
   size_t max_draft_tokens_per_step_{};
   mutable bool throw_planning_bad_alloc_{};
+  mutable bool always_throw_planning_bad_alloc_{};
   mutable bool throw_planning_consistency_{};
   mutable bool overselect_planning_once_{};
   bool throw_prepare_failure_{};

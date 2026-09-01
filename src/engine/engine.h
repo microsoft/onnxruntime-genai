@@ -170,8 +170,11 @@ struct Engine : std::enable_shared_from_this<Engine>,
 
   /**
    * @brief Returns cumulative speculative-decoding work and acceptance statistics.
+   *
+   * Must be called from the Engine owner thread: the counters are updated by Run() without
+   * synchronization.
    */
-  SpeculativeStats GetSpeculativeStats() const noexcept;
+  SpeculativeStats GetSpeculativeStats() const;
 
   uint64_t BeginTurn(const std::shared_ptr<Request>& request,
                      std::span<const int32_t> tokens,

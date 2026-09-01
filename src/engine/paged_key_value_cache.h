@@ -44,6 +44,14 @@ size_t ComputePagedBlockCapacity(size_t available_memory_bytes,
                                  size_t element_size,
                                  size_t auxiliary_bytes_per_block = 0);
 
+// Resolves an explicitly configured engine.dynamic_batching.num_blocks into the target pool's
+// block count. num_blocks is the whole paged budget: an Engine-hosted MTP head is given the same
+// block count as the target, so the target pool shrinks until both pools together cost what the
+// configured count would have cost on its own.
+size_t ResolveConfiguredPagedBlockCount(size_t configured_num_blocks,
+                                        size_t primary_bytes_per_block,
+                                        size_t auxiliary_bytes_per_block);
+
 size_t PagedKeyValueCacheBytesPerBlock(const std::shared_ptr<Model>& model);
 
 /*

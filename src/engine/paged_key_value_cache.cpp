@@ -3,6 +3,7 @@
 
 #include "cache_manager.h"
 
+#include <limits>
 #include <numeric>
 #include <set>
 
@@ -109,7 +110,10 @@ size_t ComputeNumBlocks(std::shared_ptr<Model> model,
                         ONNXTensorElementDataType dtype,
                         size_t auxiliary_bytes_per_block) {
   if (model->config_->engine.dynamic_batching->num_blocks.has_value()) {
-    return *model->config_->engine.dynamic_batching->num_blocks;
+    return ResolveConfiguredPagedBlockCount(
+        *model->config_->engine.dynamic_batching->num_blocks,
+        BytesPerBlock(model, dtype) * full_layer_count,
+        auxiliary_bytes_per_block);
   }
 
   size_t free_bytes, total_bytes;
@@ -169,6 +173,32 @@ size_t ComputePagedBlockCapacity(size_t available_memory_bytes,
       element_size * num_caches_per_layer;
   return (budget - reserved_memory_bytes) /
          (primary_bytes_per_block + auxiliary_bytes_per_block);
+}
+
+size_t ResolveConfiguredPagedBlockCount(size_t configured_num_blocks,
+                                        size_t primary_bytes_per_block,
+                                        size_t auxiliary_bytes_per_block) {
+  if (primary_bytes_per_block == 0) {
+    throw std::invalid_argument(
+        "Paged cache primary bytes per block must be greater than zero");
+  }
+  if (auxiliary_bytes_per_block == 0) {
+    return configured_num_blocks;
+  }
+  if (configured_num_blocks >
+      std::numeric_limits<size_t>::max() / primary_bytes_per_block) {
+    throw std::runtime_error(
+        "engine.dynamic_batching.num_blocks is too large for the paged key-value cache.");
+  }
+  const size_t blocks =
+      (configured_num_blocks * primary_bytes_per_block) /
+      (primary_bytes_per_block + auxiliary_bytes_per_block);
+  if (blocks == 0) {
+    throw std::runtime_error(
+        "engine.dynamic_batching.num_blocks is too small to hold both the target and the "
+        "MTP head key-value caches.");
+  }
+  return blocks;
 }
 
 size_t PagedKeyValueCacheBytesPerBlock(const std::shared_ptr<Model>& model) {

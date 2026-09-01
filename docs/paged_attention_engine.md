@@ -429,6 +429,46 @@ retryable rollback restores the request and leaves the proposal pending for retr
 the cache reservation is narrowed from the scheduled K+1 slots to the accepted prefix plus the
 request's mandatory token; paged KV and fixed recurrent state publish at that same boundary.
 
+### Engine-hosted MTP head: operational contract
+
+`model.mtp` turns the head on automatically for every request the dynamic Engine decodes. Server
+authors should size capacity and handle failures against the following behaviors.
+
+**Auxiliary memory accounting.** The head is a second paged pool that always holds the same block
+count as the target pool, so both are sized from one budget. With
+`engine.dynamic_batching.gpu_utilization_factor`, the auxiliary bytes per block are folded into the
+capacity computation. With an explicit `engine.dynamic_batching.num_blocks`, that value is the
+combined budget: the target pool is scaled down so target plus head together cost what the
+configured block count would have cost without a head. A `num_blocks` too small to leave at least
+one block for each pool is rejected at Engine construction.
+
+**Failure isolation.** The target decode is mandatory; MTP drafting is optional acceleration. A
+recoverable head failure (cache pressure, shape mismatch, binding or session error) releases only
+MTP state, and the target step still commits — without drafts for that step — and increments
+`standard_fallback_steps` in the speculative statistics. Only a contract violation, or a failure to
+roll MTP state back, marks the Engine unhealthy. A persistent head failure therefore degrades to
+ordinary decoding instead of stalling the request.
+
+**Shadow lifecycle.** The head's shadow Request mirrors only the suffix the target committed during
+the current turn. Beginning a continuation and canceling a turn both drop the shadow and release its
+auxiliary blocks, so the next drafted step rebuilds it from the new turn's suffix. Closing the
+request releases it as well.
+
+**Mixed prefill batches.** Drafts are proposed only for requests that committed a decode token in
+the step. A request that was prefilling, finished its turn, or has a proposal the Engine cannot
+verify is skipped for that step and picks drafting back up on its next decode step.
+
+**Seeded sampling.** `search.random_seed` reproduces output for a given decode path, not across
+decode paths. A verified drafted step draws its target tokens from the Request's own host random
+stream because acceptance is sequential, while an ordinary batched step draws from the device
+sampler state. Whether drafts are admitted depends on batch composition and cache pressure, so a
+seeded run is only bit-reproducible against another run scheduled the same way. Disable `model.mtp`
+when exact cross-scheduling reproducibility is required.
+
+**Telemetry thread ownership.** `Engine::GetSpeculativeStats` (`OgaEngineGetSpeculativeStats`,
+`Engine.get_speculative_stats`) reads counters that `Run()` mutates without synchronization. Like
+every other Engine query, it must be called from the Engine's owner thread and throws otherwise.
+
 ## One dynamic step in detail
 
 `Engine::RunDynamic()` coordinates the complete transaction.
