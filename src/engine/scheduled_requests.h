@@ -90,7 +90,6 @@ struct ScheduledRequests {
   Tensor* HiddenStates() const;
 
   std::vector<DeviceSpan<float>> ProcessLogits();
-  Tensor* HiddenStates() const;
 
   void GenerateNextTokens(std::vector<RequestStepResult>& results);
   void ScheduleGuidanceMasks() noexcept;
