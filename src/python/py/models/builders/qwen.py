@@ -83,6 +83,43 @@ class Qwen3VLTextModel(Qwen25VLTextModel):
         # Qwen3-VL uses the Interleaved MRotaryEmbedding layout.
         self.rope_attrs["mrope_layout"] = 1
 
+        # DeepStack: the vision encoder emits len(deepstack_visual_indexes) extra feature
+        # tensors (3 for the 4B model, from vision layers [5, 11, 17]). These are scattered to
+        # full length (batch, seq, hidden) by embedding.onnx and injected into the residual
+        # stream after decoder layers 0/1/2 (feature i -> layer i), matching HF's
+        # Qwen3VLTextModel._deepstack_process. We declare them as extra decoder inputs and add
+        # them in make_layer. During generation there are no image tokens, so embedding.onnx
+        # emits all-zeros and the Adds become no-ops.
+        vision_config = getattr(config, "vision_config", None)
+        ds_indexes = getattr(vision_config, "deepstack_visual_indexes", None) if vision_config else None
+        self.num_deepstack = len(ds_indexes) if ds_indexes else 3
+        # Full-length (batch, seq, hidden) scattered features produced by embedding.onnx are
+        # named "deepstack_{i}" (the per-token vision->embedding tensors are named
+        # "deepstack_features_{i}"). This matches genai_config decoder.inputs.deepstack.
+        for i in range(self.num_deepstack):
+            name = f"deepstack_{i}"
+            self.input_names[name] = name
+            self.input_types[name] = self.io_dtype
+            self.input_shapes[name] = ["batch_size", "sequence_length", self.hidden_size]
+
+    def make_layer(self, layer_id, layer):
+        # Build the standard decoder layer, then inject the DeepStack feature for this layer
+        # (layers 0..num_deepstack-1) into the residual stream. After make_layer the
+        # layernorm "skip_input" points at this layer's MLP down_proj output, which the next
+        # layer's input SkipLayerNorm adds to the residual (output_3 = root_input + skip_input).
+        # Adding deepstack_{layer_id} to that skip_input makes the next layer's residual (and its
+        # normalized input) include the DeepStack feature -- exactly HF's
+        # "hidden_states[image_positions] += visual_embeds after layer i".
+        super().make_layer(layer_id, layer)
+        if layer_id < self.num_deepstack:
+            skip_input = self.layernorm_attrs["skip_input"]
+            ds_name = f"deepstack_{layer_id}"
+            add_name = f"/model/layers.{layer_id}/deepstack/Add"
+            add_output = f"{add_name}/output_0"
+            self.make_node("Add", inputs=[skip_input, ds_name], outputs=[add_output], name=add_name)
+            self.make_value(add_output, self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size])
+            self.layernorm_attrs["skip_input"] = add_output
+
     def make_qk_norm(self, layer_id, attention):
         # Before: SimplifiedLayerNorm --> Cast from FP32 to io_dtype --> Reshape --> Cast from io_dtype to FP32 --> MRotaryEmbedding
         # After:  SimplifiedLayerNorm --> Reshape --> MRotaryEmbedding

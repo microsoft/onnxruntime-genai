@@ -246,11 +246,13 @@ struct Config {
         std::string input_ids{Defaults::InputIdsName};
         std::string image_features{Defaults::ImageFeaturesName};
         std::string audio_features{Defaults::AudioFeaturesName};
+        std::vector<std::string> deepstack_features;  // Qwen3-VL per-token DeepStack features (from vision)
       } inputs;
 
       struct Outputs {
         std::string embeddings{Defaults::InputsEmbedsName};
         std::string per_layer_inputs;  // Gemma4: per-layer conditioning from embedding to decoder
+        std::vector<std::string> deepstack;  // Qwen3-VL full-length scattered DeepStack features (to decoder)
       } outputs;
     } embedding;
 
@@ -297,6 +299,7 @@ struct Config {
 
       struct Outputs {
         std::string image_features{Defaults::ImageFeaturesName};
+        std::vector<std::string> deepstack_features;  // Qwen3-VL per-token DeepStack features (one per deepstack_visual_index)
       } outputs;
     } vision;
 
@@ -474,6 +477,8 @@ struct Config {
 
         // Parakeet TDT decoder (prediction network) extra inputs
         std::string targets_length;
+
+        std::vector<std::string> deepstack;  // Qwen3-VL full-length scattered DeepStack features (per-layer inject)
       } inputs;
 
       struct Outputs {

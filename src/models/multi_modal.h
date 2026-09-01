@@ -57,6 +57,9 @@ struct VisionState : State {
   int64_t num_images_{};
   ExtraInputs extra_inputs_{*this};  // Model inputs
   std::unique_ptr<MultiModalFeatures> image_features_;
+  // Qwen3-VL DeepStack: extra per-token vision outputs (one per deepstack_visual_index).
+  // Same shape/type as image_features; consumed by the embedding model.
+  std::vector<std::unique_ptr<MultiModalFeatures>> deepstack_features_;
 };
 
 // QwenVisionState: per-image slicing loop for Qwen2.5-VL / Qwen3-VL.
@@ -168,6 +171,10 @@ struct EmbeddingState : State {
   Embeddings inputs_embeds_{*this, Embeddings::Mode::Output,  // Model output
                             model_.config_->model.embedding.outputs.embeddings};
   std::unique_ptr<Embeddings> per_layer_inputs_;  // Optional model output (Gemma4)
+  // Qwen3-VL DeepStack: per-token features in (from vision), full-length scattered features out
+  // (to decoder). The scatter (input_ids==image_token) is done inside embedding.onnx.
+  std::vector<std::unique_ptr<MultiModalFeatures>> deepstack_features_in_;  // Optional model inputs
+  std::vector<std::unique_ptr<Embeddings>> deepstack_out_;                  // Model outputs
 };
 
 struct DecoderState : State {
@@ -197,6 +204,8 @@ struct DecoderState : State {
                             model_.config_->model.decoder.inputs.embeddings};
   std::unique_ptr<Embeddings> per_layer_inputs_;        // Optional model input (Gemma4: per-layer conditioning)
   std::unique_ptr<DefaultInputIDs> decoder_input_ids_;  // Optional model input (e.g., Gemma4 decoder needs input_ids)
+  // Qwen3-VL DeepStack: full-length scattered features injected after decoder layers 0/1/2.
+  std::vector<std::unique_ptr<Embeddings>> deepstack_in_;  // Model inputs
   std::unique_ptr<PositionInputs> position_inputs_;     // Model input
   std::unique_ptr<KeyValueCache> kv_cache_;             // Model input
   std::unique_ptr<RecurrentState> recurrent_state_;     // Model input (for hybrid models)

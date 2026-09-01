@@ -104,6 +104,17 @@ struct Int_Array_Element : JSON::Element {
   std::vector<int>& v_;
 };
 
+struct StringArray_Element : JSON::Element {
+  explicit StringArray_Element(std::vector<std::string>& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    v_.push_back(std::string{JSON::Get<std::string_view>(value)});
+  }
+
+ private:
+  std::vector<std::string>& v_;
+};
+
 struct DeviceFilteringOptions_Element : JSON::Element {
   explicit DeviceFilteringOptions_Element(Config::DeviceFilteringOptions& v) : v_{v} {}
 
@@ -386,8 +397,16 @@ struct DecoderInputs_Element : JSON::Element {
     }
   }
 
+  Element& OnArray(std::string_view name) override {
+    if (name == "deepstack") {
+      return deepstack_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
  private:
   Config::Model::Decoder::Inputs& v_;
+  StringArray_Element deepstack_{v_.deepstack};
 };
 
 struct DecoderOutputs_Element : JSON::Element {
@@ -431,17 +450,6 @@ struct DecoderOutputs_Element : JSON::Element {
 
  private:
   Config::Model::Decoder::Outputs& v_;
-};
-
-struct StringArray_Element : JSON::Element {
-  explicit StringArray_Element(std::vector<std::string>& v) : v_{v} {}
-
-  void OnValue(std::string_view name, JSON::Value value) override {
-    v_.push_back(std::string{JSON::Get<std::string_view>(value)});
-  }
-
- private:
-  std::vector<std::string>& v_;
 };
 
 struct IntArray_Element : JSON::Element {
@@ -1084,8 +1092,16 @@ struct VisionOutputs_Element : JSON::Element {
     }
   }
 
+  Element& OnArray(std::string_view name) override {
+    if (name == "deepstack_features") {
+      return deepstack_features_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
  private:
   Config::Model::Vision::Outputs& v_;
+  StringArray_Element deepstack_features_{v_.deepstack_features};
 };
 
 // Vision pipeline support structures
@@ -1428,8 +1444,16 @@ struct EmbeddingInputs_Element : JSON::Element {
     }
   }
 
+  Element& OnArray(std::string_view name) override {
+    if (name == "deepstack_features") {
+      return deepstack_features_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
  private:
   Config::Model::Embedding::Inputs& v_;
+  StringArray_Element deepstack_features_{v_.deepstack_features};
 };
 
 struct EmbeddingOutputs_Element : JSON::Element {
@@ -1445,8 +1469,16 @@ struct EmbeddingOutputs_Element : JSON::Element {
     }
   }
 
+  Element& OnArray(std::string_view name) override {
+    if (name == "deepstack") {
+      return deepstack_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
  private:
   Config::Model::Embedding::Outputs& v_;
+  StringArray_Element deepstack_{v_.deepstack};
 };
 
 struct Embedding_Element : JSON::Element {
