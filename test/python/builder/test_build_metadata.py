@@ -59,6 +59,7 @@ def test_stamp_build_metadata_uses_version_when_commit_is_unavailable(monkeypatc
 
     monkeypatch.setattr(base_module.subprocess, "run", missing_git)
     monkeypatch.setattr(base_module.Model, "get_genai_version", classmethod(lambda cls: GENAI_VERSION))
+    monkeypatch.setitem(sys.modules, "onnxruntime_genai", types.SimpleNamespace(__commit__=""))
     model = _make_empty_onnx_model()
 
     Model.stamp_build_metadata(model)
