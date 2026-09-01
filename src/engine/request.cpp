@@ -63,11 +63,11 @@ Request::Request(
     std::shared_ptr<GeneratorParams> params,
     size_t max_total_tokens,
     std::shared_ptr<std::atomic<bool>> abandonment_pending)
-    : max_total_tokens_{max_total_tokens},
+    : ExternalRefCounted<Request>{std::move(abandonment_pending)},
+      max_total_tokens_{max_total_tokens},
       params_{params},
       rng_{CreateRandomGenerator(params->search.random_seed)},
-      search_{CreateSearch(*params)},
-      abandonment_pending_{std::move(abandonment_pending)} {
+      search_{CreateSearch(*params)} {
   // A request is one sequence: the engine batches requests, not rows within a request. Several
   // places here read row 0 only (UnprocessedTokens, CurrentSequenceLength) or take the tail of the
   // next-token span, so a wider search would silently mirror the wrong row's tokens.
@@ -99,17 +99,183 @@ Request::Request(
 
 Request::~Request() = default;
 
-void Request::OnFirstExternalReference() noexcept {
-  externally_abandoned_.store(false, std::memory_order_release);
+void Request::AttachToEngine(std::shared_ptr<Engine> engine) noexcept {
+  assert(engine);
+  assert(!engine_identity_);
+  engine_identity_ = engine.get();
+  engine_ = std::move(engine);
 }
 
-void Request::OnLastExternalReference() noexcept {
-  externally_abandoned_.store(true, std::memory_order_release);
-  abandonment_pending_->store(true, std::memory_order_release);
+bool Request::BelongsTo(const Engine& engine) const noexcept {
+  return engine_identity_ == &engine;
 }
 
-bool Request::IsExternallyAbandoned() const noexcept {
-  return externally_abandoned_.load(std::memory_order_acquire);
+bool Request::IsAwaitingFirstTurn() const noexcept {
+  return status_ == RequestStatus::Unassigned;
+}
+
+bool Request::IsRestartableCanceledTurn() const noexcept {
+  return finish_reason_ == GenerationFinishReason::Canceled &&
+         processed_sequence_length_ == 0;
+}
+
+void Request::ValidateTurnAdmission(
+    std::span<const int32_t> tokens,
+    std::optional<size_t> max_generated_tokens) const {
+  if (max_generated_tokens && *max_generated_tokens == 0) {
+    throw std::runtime_error(
+        "max_generated_tokens (0) must be greater than zero.");
+  }
+  if (tokens.empty()) {
+    throw std::runtime_error(
+        "Expected at least one input token for generation. Received 0.");
+  }
+  if (turn_id_exhausted_) {
+    throw std::overflow_error(
+        "The request cannot admit another turn because its uint64 turn id space is exhausted.");
+  }
+
+  const bool first_turn = IsAwaitingFirstTurn();
+  if (!first_turn && !Generators::IsTurnComplete(status_)) {
+    if (IsClosed(status_)) {
+      throw std::runtime_error("Cannot begin a turn for a closed request.");
+    }
+    throw std::runtime_error(
+        "BeginTurn is only valid for a new request or after the current turn is complete.");
+  }
+
+  const size_t sequence_length =
+      first_turn ? 0 : static_cast<size_t>(CurrentSequenceLength());
+  ValidateAppendLength(max_total_tokens_, sequence_length, tokens.size());
+  if (tokens_host_.capacity() < tokens_host_.size() + tokens.size()) {
+    throw std::logic_error(
+        "The request host token mirror does not have reserved turn capacity.");
+  }
+}
+
+void Request::ValidateContinuousDecodingSupport() const {
+  const DeviceType cache_device =
+      params_->model_->p_device_kvcache_->GetType();
+  if (!SupportsContinuousDecoding(cache_device)) {
+    throw std::runtime_error(
+        "Continuous decoding is not supported on the selected KV-cache device type (" +
+        to_string(cache_device) + ").");
+  }
+}
+
+void Request::PrepareTurnAdmission(
+    std::span<const int32_t> tokens,
+    RequestTurnAdmission& admission) {
+  auto device_tokens = AllocateOnDevice(*params_, tokens);
+  const bool first_turn = IsAwaitingFirstTurn();
+  admission.status = status_;
+  admission.host_token_count = tokens_host_.size();
+  admission.prompt_sequence_length = prompt_sequence_length_;
+  admission.processed_sequence_length = processed_sequence_length_;
+
+  SaveStateForTransaction();
+  admission.transaction_started = true;
+  ResetGuidanceForNewTurn();
+  search_->AppendTokens(device_tokens);
+  tokens_host_.insert(tokens_host_.end(), tokens.begin(), tokens.end());
+  prompt_sequence_length_ = CurrentSequenceLength();
+  if (first_turn) {
+    processed_sequence_length_ = 0;
+  }
+  status_ = RequestStatus::Assigned;
+}
+
+uint64_t Request::CommitTurnAdmission(
+    std::optional<size_t> max_generated_tokens,
+    RequestTurnAdmission& admission) {
+  assert(admission.transaction_started);
+  CommitStateForTransaction();
+  turn_max_generated_tokens_ = max_generated_tokens;
+  turn_prompt_tokens_ = tokens_host_.size() - admission.host_token_count;
+  turn_generated_tokens_ = 0;
+  current_turn_id_ = next_turn_id_;
+  has_current_turn_ = true;
+  if (next_turn_id_ == std::numeric_limits<uint64_t>::max()) {
+    turn_id_exhausted_ = true;
+  } else {
+    ++next_turn_id_;
+  }
+  finish_reason_ = GenerationFinishReason::None;
+  admission.transaction_started = false;
+  return current_turn_id_;
+}
+
+void Request::RollbackTurnAdmission(RequestTurnAdmission& admission) {
+  if (!admission.transaction_started) {
+    return;
+  }
+  status_ = admission.status;
+  tokens_host_.resize(admission.host_token_count);
+  prompt_sequence_length_ = admission.prompt_sequence_length;
+  processed_sequence_length_ = admission.processed_sequence_length;
+  RestoreStateForTransaction();
+  admission.transaction_started = false;
+}
+
+bool Request::CanCancelFromEngine(
+    const Engine& engine,
+    uint64_t turn_id) const {
+  if (!BelongsTo(engine)) {
+    throw std::runtime_error(
+        "Cannot cancel a request that does not belong to this engine.");
+  }
+  if (IsClosed(status_)) {
+    throw std::runtime_error("Cannot cancel a closed request.");
+  }
+  if (!has_current_turn_) {
+    throw std::runtime_error("Cannot cancel a request before a turn has begun.");
+  }
+  return turn_id == current_turn_id_ &&
+         !Generators::IsTurnComplete(status_) &&
+         IsExecutable(status_);
+}
+
+RequestTurnCounters Request::CompleteCancelFromEngine(
+    const Engine& engine,
+    uint64_t turn_id) noexcept {
+  assert(BelongsTo(engine));
+  assert(has_current_turn_);
+  assert(turn_id == current_turn_id_);
+  assert(!Generators::IsTurnComplete(status_));
+  assert(IsExecutable(status_));
+  draft_tokens_.clear();
+  status_ = RequestStatus::TurnComplete;
+  finish_reason_ = GenerationFinishReason::Canceled;
+  return {turn_prompt_tokens_, turn_generated_tokens_};
+}
+
+void Request::MarkClosedFromEngine(const Engine& engine) noexcept {
+  assert(BelongsTo(engine));
+  status_ = RequestStatus::Closed;
+  guidance_transaction_checkpoint_.reset();
+  guidance_logits_processor_.reset();
+  batched_sampler_state_.reset();
+  std::vector<int32_t>{}.swap(draft_tokens_);
+  staged_draft_count_ = 0;
+  accepted_draft_count_ = 0;
+  draft_verification_completed_generation_ = false;
+}
+
+void Request::CompleteCloseFromEngine(const Engine& engine) noexcept {
+  MarkClosedFromEngine(engine);
+  CompleteClose();
+}
+
+void Request::MarkFailedFromEngine(const Engine& engine) noexcept {
+  assert(BelongsTo(engine));
+  finish_reason_ = GenerationFinishReason::Failed;
+}
+
+void Request::CompleteFailedTurnFromEngine(const Engine& engine) noexcept {
+  assert(BelongsTo(engine));
+  assert(IsExecutable(status_));
+  status_ = RequestStatus::TurnComplete;
+  finish_reason_ = GenerationFinishReason::Failed;
 }
 
 void Request::Schedule() {
@@ -148,12 +314,17 @@ bool Request::Cancel(uint64_t turn_id) {
 
 void Request::CompleteClose() noexcept {
   engine_.reset();
+  engine_identity_ = nullptr;
   status_ = RequestStatus::Closed;
   guidance_transaction_checkpoint_.reset();
   guidance_logits_processor_.reset();
   batched_sampler_state_.reset();
   search_.reset();
   params_.reset();
+  std::vector<int32_t>{}.swap(draft_tokens_);
+  staged_draft_count_ = 0;
+  accepted_draft_count_ = 0;
+  draft_verification_completed_generation_ = false;
   std::vector<int32_t>{}.swap(tokens_host_);
 }
 
@@ -678,6 +849,12 @@ BatchedSamplerState& Request::SamplingState(BatchedSampler& sampler) {
   if (!batched_sampler_state_ || !sampler.OwnsState(*batched_sampler_state_))
     batched_sampler_state_ = sampler.CreateState(search_->params_->search.random_seed);
   return *batched_sampler_state_;
+}
+
+void Request::CommitSamplingState(std::unique_ptr<BatchedSamplerState> state) noexcept {
+  if (state) {
+    batched_sampler_state_ = std::move(state);
+  }
 }
 
 RequestStepResult Request::CompleteGeneration() {
