@@ -35,16 +35,18 @@ ScheduledRequests Scheduler::CreateScheduledRequests(const StepPlan& plan) {
                            GetBatchedSamplingPlan()};
 }
 
-void Scheduler::AddRequest(std::shared_ptr<Request> request) {
-  auto preparation = PrepareAddRequest(request);
-  CommitAddRequest(std::move(request), std::move(preparation));
+std::unique_ptr<BatchedSamplerState> Scheduler::CreateSamplingState(
+    const Request& request) const {
+  if (auto* sampler = GetBatchedSampler()) {
+    return sampler->CreateState(request.SearchOptions().random_seed);
+  }
+  return nullptr;
 }
 
 StaticBatchScheduler::StaticBatchScheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager)
     : Scheduler{model}, model_{model}, cache_manager_{cache_manager} {}
 
-SchedulerAdmissionPreparation StaticBatchScheduler::PrepareAddRequest(
-    const std::shared_ptr<Request>& request) {
+void StaticBatchScheduler::AddRequest(std::shared_ptr<Request> request) {
   // The static batch decoder rebuilds its contiguous cache from the whole sequence every step, so it
   // cannot resume a half written prompt. Only the paged cache can hold one.
   if (request->SearchOptions().chunk_size.value_or(0) != 0) {
@@ -52,18 +54,8 @@ SchedulerAdmissionPreparation StaticBatchScheduler::PrepareAddRequest(
         "search.chunk_size requires dynamic batching; the static batch scheduler cannot chunk a prefill.");
   }
   requests_pool_.reserve(requests_pool_.size() + 1);
-  SchedulerAdmissionPreparation preparation;
-  if (auto* sampler = GetBatchedSampler()) {
-    preparation.sampling_state =
-        sampler->CreateState(request->SearchOptions().random_seed);
-  }
-  return preparation;
-}
-
-void StaticBatchScheduler::CommitAddRequest(
-    std::shared_ptr<Request> request,
-    SchedulerAdmissionPreparation&& preparation) noexcept {
-  request->CommitSamplingState(std::move(preparation.sampling_state));
+  auto sampling_state = CreateSamplingState(*request);
+  request->CommitSamplingState(std::move(sampling_state));
   requests_pool_.push_back(std::move(request));
 }
 
@@ -145,21 +137,10 @@ bool StaticBatchScheduler::HasPendingRequests() const {
 DynamicBatchScheduler::DynamicBatchScheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager)
     : Scheduler{model}, model_{model}, cache_manager_{cache_manager} {}
 
-SchedulerAdmissionPreparation DynamicBatchScheduler::PrepareAddRequest(
-    const std::shared_ptr<Request>& request) {
+void DynamicBatchScheduler::AddRequest(std::shared_ptr<Request> request) {
   requests_pool_.reserve(requests_pool_.size() + 1);
-  SchedulerAdmissionPreparation preparation;
-  if (auto* sampler = GetBatchedSampler()) {
-    preparation.sampling_state =
-        sampler->CreateState(request->SearchOptions().random_seed);
-  }
-  return preparation;
-}
-
-void DynamicBatchScheduler::CommitAddRequest(
-    std::shared_ptr<Request> request,
-    SchedulerAdmissionPreparation&& preparation) noexcept {
-  request->CommitSamplingState(std::move(preparation.sampling_state));
+  auto sampling_state = CreateSamplingState(*request);
+  request->CommitSamplingState(std::move(sampling_state));
   requests_pool_.push_back(std::move(request));
 }
 

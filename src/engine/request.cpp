@@ -167,18 +167,11 @@ void Request::PrepareTurnAdmission(
     std::span<const int32_t> tokens,
     RequestTurnAdmission& admission) {
   auto device_tokens = AllocateOnDevice(*params_, tokens);
+  const bool first_turn = IsAwaitingFirstTurn();
   admission.status = status_;
   admission.host_token_count = tokens_host_.size();
   admission.prompt_sequence_length = prompt_sequence_length_;
   admission.processed_sequence_length = processed_sequence_length_;
-  admission.max_generated_tokens = turn_max_generated_tokens_;
-  admission.generated_token_count = turn_generated_tokens_;
-  admission.prompt_token_count = turn_prompt_tokens_;
-  admission.current_turn_id = current_turn_id_;
-  admission.next_turn_id = next_turn_id_;
-  admission.has_current_turn = has_current_turn_;
-  admission.turn_id_exhausted = turn_id_exhausted_;
-  admission.first_turn = IsAwaitingFirstTurn();
 
   SaveStateForTransaction();
   admission.transaction_started = true;
@@ -186,7 +179,7 @@ void Request::PrepareTurnAdmission(
   search_->AppendTokens(device_tokens);
   tokens_host_.insert(tokens_host_.end(), tokens.begin(), tokens.end());
   prompt_sequence_length_ = CurrentSequenceLength();
-  if (admission.first_turn) {
+  if (first_turn) {
     processed_sequence_length_ = 0;
   }
   status_ = RequestStatus::Assigned;
@@ -220,13 +213,6 @@ void Request::RollbackTurnAdmission(RequestTurnAdmission& admission) {
   tokens_host_.resize(admission.host_token_count);
   prompt_sequence_length_ = admission.prompt_sequence_length;
   processed_sequence_length_ = admission.processed_sequence_length;
-  turn_max_generated_tokens_ = admission.max_generated_tokens;
-  turn_generated_tokens_ = admission.generated_token_count;
-  turn_prompt_tokens_ = admission.prompt_token_count;
-  current_turn_id_ = admission.current_turn_id;
-  next_turn_id_ = admission.next_turn_id;
-  has_current_turn_ = admission.has_current_turn;
-  turn_id_exhausted_ = admission.turn_id_exhausted;
   RestoreStateForTransaction();
   admission.transaction_started = false;
 }

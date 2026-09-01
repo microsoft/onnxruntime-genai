@@ -209,14 +209,7 @@ class ThrowingStaticScheduler final : public Scheduler {
   explicit ThrowingStaticScheduler(std::shared_ptr<Model> model)
       : Scheduler{std::move(model)} {}
 
-  SchedulerAdmissionPreparation PrepareAddRequest(
-      const std::shared_ptr<Request>& /*request*/) override {
-    return {};
-  }
-
-  void CommitAddRequest(
-      std::shared_ptr<Request> request,
-      SchedulerAdmissionPreparation&& /*preparation*/) noexcept override {
+  void AddRequest(std::shared_ptr<Request> request) override {
     request_ = std::move(request);
   }
 

@@ -50,14 +50,6 @@ struct RequestTurnAdmission {
   size_t host_token_count{};
   int64_t prompt_sequence_length{};
   int64_t processed_sequence_length{};
-  std::optional<size_t> max_generated_tokens;
-  size_t generated_token_count{};
-  size_t prompt_token_count{};
-  uint64_t current_turn_id{};
-  uint64_t next_turn_id{};
-  bool has_current_turn{};
-  bool turn_id_exhausted{};
-  bool first_turn{};
   bool transaction_started{};
 };
 

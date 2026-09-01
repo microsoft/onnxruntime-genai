@@ -16,10 +16,6 @@
 
 namespace Generators {
 
-struct SchedulerAdmissionPreparation {
-  std::unique_ptr<BatchedSamplerState> sampling_state;
-};
-
 struct Scheduler {
   /**
    * @brief Constructs a Scheduler instance with the specified model and cache manager.
@@ -37,12 +33,7 @@ struct Scheduler {
    * This function adds the request to the internal pool of requests and marks it
    * as pending for scheduling.
    */
-  void AddRequest(std::shared_ptr<Request> request);
-  virtual SchedulerAdmissionPreparation PrepareAddRequest(
-      const std::shared_ptr<Request>& request) = 0;
-  virtual void CommitAddRequest(
-      std::shared_ptr<Request> request,
-      SchedulerAdmissionPreparation&& preparation) noexcept = 0;
+  virtual void AddRequest(std::shared_ptr<Request> request) = 0;
 
   /**
    * @brief Removes a request from the Scheduler.
@@ -93,6 +84,8 @@ struct Scheduler {
   virtual ~Scheduler() = default;
 
  protected:
+  std::unique_ptr<BatchedSamplerState> CreateSamplingState(
+      const Request& request) const;
   BatchedSampler* GetBatchedSampler() const { return batched_sampler_.get(); }
   BatchedSamplingPlan* GetBatchedSamplingPlan() { return &batched_sampling_plan_; }
 
@@ -105,11 +98,7 @@ struct Scheduler {
 struct StaticBatchScheduler : Scheduler {
   StaticBatchScheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager);
 
-  SchedulerAdmissionPreparation PrepareAddRequest(
-      const std::shared_ptr<Request>& request) override;
-  void CommitAddRequest(
-      std::shared_ptr<Request> request,
-      SchedulerAdmissionPreparation&& preparation) noexcept override;
+  void AddRequest(std::shared_ptr<Request> request) override;
 
   void RemoveRequest(std::shared_ptr<Request> request) override;
 
@@ -129,11 +118,7 @@ struct StaticBatchScheduler : Scheduler {
 struct DynamicBatchScheduler : Scheduler {
   DynamicBatchScheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager);
 
-  SchedulerAdmissionPreparation PrepareAddRequest(
-      const std::shared_ptr<Request>& request) override;
-  void CommitAddRequest(
-      std::shared_ptr<Request> request,
-      SchedulerAdmissionPreparation&& preparation) noexcept override;
+  void AddRequest(std::shared_ptr<Request> request) override;
 
   void RemoveRequest(std::shared_ptr<Request> request) override;
 

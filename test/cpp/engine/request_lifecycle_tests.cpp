@@ -183,13 +183,12 @@ class FailingAdmissionScheduler final : public DynamicBatchScheduler {
                             std::shared_ptr<CacheManager> cache_manager)
       : DynamicBatchScheduler(std::move(model), std::move(cache_manager)) {}
 
-  SchedulerAdmissionPreparation PrepareAddRequest(
-      const std::shared_ptr<Request>& request) override {
+  void AddRequest(std::shared_ptr<Request> request) override {
     if (fail_preparation_) {
       throw std::runtime_error(
           "Injected scheduler admission preparation failure.");
     }
-    return DynamicBatchScheduler::PrepareAddRequest(request);
+    DynamicBatchScheduler::AddRequest(std::move(request));
   }
 
   void SetFailPreparation(bool fail) { fail_preparation_ = fail; }
