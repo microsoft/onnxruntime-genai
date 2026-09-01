@@ -164,13 +164,13 @@ struct Engine : std::enable_shared_from_this<Engine>,
    */
   size_t MaxDraftTokensPerStep() const;
 
- private:
   uint64_t BeginTurn(const std::shared_ptr<Request>& request,
                      std::span<const int32_t> tokens,
                      std::optional<size_t> max_generated_tokens);
   void CloseRequest(const std::shared_ptr<Request>& request);
   bool CancelRequest(const std::shared_ptr<Request>& request, uint64_t turn_id);
 
+ private:
   void DetachRequestForTeardown(
       const std::shared_ptr<Request>& request) noexcept;
   void ReclaimAbandonedRequests();
@@ -217,12 +217,6 @@ struct Engine : std::enable_shared_from_this<Engine>,
   size_t pending_event_index_{};
   const std::shared_ptr<std::atomic<bool>> abandonment_pending_{
       std::make_shared<std::atomic<bool>>(false)};
-
-  friend uint64_t Request::BeginTurn(
-      std::span<const int32_t> tokens,
-      std::optional<size_t> max_generated_tokens);
-  friend void Request::Close();
-  friend bool Request::Cancel(uint64_t turn_id);
 };
 
 }  // namespace Generators
