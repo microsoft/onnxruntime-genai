@@ -524,7 +524,6 @@ StepPlanningResult PagedCacheManager::PlanStepResources(StepPlan& plan) const {
       for (auto& entry : plan.requests) {
         entry.unprocessed_token_count -= entry.draft_token_count;
         entry.target_cache_slots -= entry.draft_token_count;
-        entry.whole_sequence_cache_slots -= entry.draft_token_count;
         entry.draft_token_count = 0;
       }
     }
