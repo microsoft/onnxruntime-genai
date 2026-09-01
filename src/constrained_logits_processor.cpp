@@ -642,7 +642,9 @@ void GuidanceLogitsProcessor::Reset() {
 // Independent grammar cursor at the current state. Immutable tokenizer and initial-grammar assets
 // remain model-owned. Constraints are shared initially so transaction checkpoints are cheap; every
 // production mutation path detaches them first through the COW checks in CommitTokens() and
-// ScheduleGuidanceMaskComputation().
+// ScheduleGuidanceMaskComputation(). A checkpoint never retains in-flight work: if that work fails,
+// rollback must restore a dirty cursor that can submit a fresh job rather than the same exceptional
+// shared_future.
 std::unique_ptr<ConstrainedLogitsProcessor> GuidanceLogitsProcessor::Clone() const {
   auto clone = std::unique_ptr<GuidanceLogitsProcessor>(new GuidanceLogitsProcessor());
   clone->params_ = params_;
@@ -650,8 +652,7 @@ std::unique_ptr<ConstrainedLogitsProcessor> GuidanceLogitsProcessor::Clone() con
   clone->grammar_asset_ = grammar_asset_;
   clone->mask_words_per_row_ = mask_words_per_row_;
   clone->masks_ = masks_;
-  clone->pending_masks_ = pending_masks_;
-  clone->mask_dirty_ = mask_dirty_;
+  clone->mask_dirty_ = mask_dirty_ || pending_masks_.valid();
   clone->ff_tokens_batch_ = ff_tokens_batch_;
   clone->llg_constraints_ = llg_constraints_;
   return clone;

@@ -49,7 +49,7 @@ class SchedulerContractTest : public ::testing::Test {
 
   std::shared_ptr<Request> Assigned(int32_t seed) {
     auto prompt = Prompt(seed);
-    return MintAssignedRequest(assign_target_, *model_, prompt);
+    return CreateRequestWithPrompt(assign_target_, *model_, prompt);
   }
 
   void MakePrefillResident(
@@ -136,10 +136,14 @@ TEST_F(SchedulerContractTest, ExecutionOrderingPreservesAssignedTokenBudgets) {
   model_->config_->engine.dynamic_batching->max_scheduled_tokens = 3;
   DynamicBatchScheduler scheduler(model_, cache);
 
-  auto first = Assigned(10);
-  auto second = Assigned(20);
-  first->Params()->search.chunk_size = 1;
-  second->Params()->search.chunk_size = 3;
+  auto first_params = MakeGreedyParams(*model_);
+  first_params->search.chunk_size = 1;
+  auto first = CreateRequestWithPrompt(
+      assign_target_, *first_params, Prompt(10));
+  auto second_params = MakeGreedyParams(*model_);
+  second_params->search.chunk_size = 3;
+  auto second = CreateRequestWithPrompt(
+      assign_target_, *second_params, Prompt(20));
   scheduler.AddRequest(first);
   scheduler.AddRequest(second);
   StepPlan plan;
@@ -445,8 +449,10 @@ TEST_F(SchedulerContractTest, PrefillRespectsChunkAndGlobalCaps) {
   auto cache = std::make_shared<RecordingCacheManager>(model_, /*capacity=*/8);
   model_->config_->engine.dynamic_batching->max_scheduled_tokens = 2;
   DynamicBatchScheduler scheduler(model_, cache);
-  auto request = Assigned(10);
-  request->Params()->search.chunk_size = 1;
+  auto params = MakeGreedyParams(*model_);
+  params->search.chunk_size = 1;
+  auto prompt = Prompt(10);
+  auto request = CreateRequestWithPrompt(assign_target_, *params, prompt);
   scheduler.AddRequest(request);
   StepPlan plan;
 
@@ -463,8 +469,10 @@ TEST_F(SchedulerContractTest, CacheQueryCapBoundsOversizedRequestChunk) {
   auto cache = std::make_shared<RecordingCacheManager>(model_, /*capacity=*/8);
   cache->SetMaxQueryTokensPerRequest(2);
   DynamicBatchScheduler scheduler(model_, cache);
-  auto request = Assigned(10);
-  request->Params()->search.chunk_size = 7;
+  auto params = MakeGreedyParams(*model_);
+  params->search.chunk_size = 7;
+  auto prompt = Prompt(10);
+  auto request = CreateRequestWithPrompt(assign_target_, *params, prompt);
   scheduler.AddRequest(request);
   StepPlan plan;
 
@@ -480,8 +488,10 @@ TEST_F(SchedulerContractTest, CacheQueryCapBoundsUnchunkedRequest) {
   auto cache = std::make_shared<RecordingCacheManager>(model_, /*capacity=*/8);
   cache->SetMaxQueryTokensPerRequest(2);
   DynamicBatchScheduler scheduler(model_, cache);
-  auto request = Assigned(10);
-  request->Params()->search.chunk_size = 0;
+  auto params = MakeGreedyParams(*model_);
+  params->search.chunk_size = 0;
+  auto prompt = Prompt(10);
+  auto request = CreateRequestWithPrompt(assign_target_, *params, prompt);
   scheduler.AddRequest(request);
   StepPlan plan;
 
@@ -588,7 +598,7 @@ TEST_F(SchedulerContractTest, ProductionCacheReservesGloballyChunkedPrompt) {
   config.max_scheduled_tokens = 2;
   auto cache = std::make_shared<PagedCacheManager>(model_);
   DynamicBatchScheduler scheduler(model_, cache);
-  auto request = MintAssignedRequest(
+  auto request = CreateRequestWithPrompt(
       assign_target_, *model_,
       std::array<int32_t, 9>{2, 3, 4, 5, 6, 7, 8, 9, 10});
   scheduler.AddRequest(request);

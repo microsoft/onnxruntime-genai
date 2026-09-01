@@ -61,17 +61,20 @@ void StaticBatchScheduler::RemoveRequest(std::shared_ptr<Request> request) {
   }
 }
 
+void StaticBatchScheduler::DetachRequestForTeardown(
+    const std::shared_ptr<Request>& request) noexcept {
+  cache_manager_->DetachRequestForTeardown(request);
+  requests_pool_.erase(
+      std::remove(requests_pool_.begin(), requests_pool_.end(), request),
+      requests_pool_.end());
+}
+
 ScheduledRequests StaticBatchScheduler::Schedule() {
   const auto allocated_requests = cache_manager_->AllocatedRequests();
 
   for (const auto& request : allocated_requests) {
     if (IsQueued(request->status_)) {
-      // Prepare before the queued-to-active transition so allocation failure leaves the request at
-      // its last externally visible boundary.
-      request->PrepareForStep(kMaxGeneratedTokenIndicesPerStep);
       request->Schedule();
-    } else if (IsExecuting(request->status_)) {
-      request->PrepareForStep(kMaxGeneratedTokenIndicesPerStep);
     }
   }
 
@@ -88,12 +91,6 @@ ScheduledRequests StaticBatchScheduler::Schedule() {
     std::vector<std::shared_ptr<Request>> batch_requests(requests_to_schedule.begin(),
                                                          requests_to_schedule.begin() + batch_size);
     if (cache_manager_->CanAllocate(batch_requests)) {
-      // Static cache allocation publishes the new batch immediately. Reserve output bookkeeping
-      // first so a bad_alloc cannot leave cache ownership committed without a runnable request.
-      for (auto& request : batch_requests) {
-        request->PrepareForStep(kMaxGeneratedTokenIndicesPerStep);
-      }
-
       // Before allocating, we need to ensure that the existing requests in the cache manager
       // are terminal and no longer need to remain in the scheduler pool.
       for (auto& request : allocated_requests) {
@@ -144,6 +141,14 @@ void DynamicBatchScheduler::RemoveRequest(std::shared_ptr<Request> request) {
   requests_pool_.erase(std::remove(requests_pool_.begin(), requests_pool_.end(), request), requests_pool_.end());
 }
 
+void DynamicBatchScheduler::DetachRequestForTeardown(
+    const std::shared_ptr<Request>& request) noexcept {
+  cache_manager_->DetachRequestForTeardown(request);
+  requests_pool_.erase(
+      std::remove(requests_pool_.begin(), requests_pool_.end(), request),
+      requests_pool_.end());
+}
+
 ScheduledRequests DynamicBatchScheduler::Schedule() {
   throw std::logic_error(
       "Dynamic batching requires transactional step planning.");
@@ -161,6 +166,7 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     RequestStepPlan entry;
     DecodeFirstBudgetCandidate budget;
     size_t processed_sequence_length{};
+    size_t remaining_token_count{};
   };
   const auto allocated_requests = cache_manager_->AllocatedRequests();
   std::vector<Candidate> candidates;
@@ -216,6 +222,7 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     };
     candidate.processed_sequence_length =
         static_cast<size_t>(snapshot.processed_sequence_length);
+    candidate.remaining_token_count = static_cast<size_t>(remaining_token_count);
     candidates.push_back(std::move(candidate));
   };
 
@@ -238,15 +245,13 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     budget_candidates.push_back(candidate.budget);
   const auto order = DecodeFirstCandidateOrder(budget_candidates);
   plan.requests.reserve(candidates.size());
-  std::vector<DecodeFirstBudgetCandidate> ordered_budget_candidates;
-  std::vector<size_t> ordered_processed_lengths;
-  ordered_budget_candidates.reserve(candidates.size());
-  ordered_processed_lengths.reserve(candidates.size());
   for (size_t candidate_index : order) {
-    plan.requests.push_back(candidates[candidate_index].entry);
-    ordered_budget_candidates.push_back(candidates[candidate_index].budget);
-    ordered_processed_lengths.push_back(
-        candidates[candidate_index].processed_sequence_length);
+    auto entry = candidates[candidate_index].entry;
+    entry.draft_token_count = 0;
+    entry.unprocessed_token_count = 1;
+    entry.target_cache_slots = RequiredSlots(
+        candidates[candidate_index].processed_sequence_length, 1);
+    plan.requests.push_back(std::move(entry));
   }
 
   const auto& dynamic_batching = *model_->config_->engine.dynamic_batching;
@@ -254,75 +259,107 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
       dynamic_batching.max_scheduled_tokens,
       dynamic_batching.max_batch_size);
 
-  // Budget the candidates most likely to be selected before cache feasibility evaluates their
-  // growth. Later candidates remain one-token fallbacks so the cache can skip a blocked request
-  // and admit a later fitting one without considering drafts the global budget cannot execute.
-  const size_t budgeted_candidate_count =
-      std::min(plan.requests.size(), plan.scheduled_request_limit);
-  std::vector<size_t> token_counts;
-  try {
-    token_counts = AllocateDecodeFirstTokenBudget(
-        std::span<const DecodeFirstBudgetCandidate>{ordered_budget_candidates}
-            .first(budgeted_candidate_count),
-        dynamic_batching.max_scheduled_tokens);
-  } catch (const std::invalid_argument& error) {
-    throw StepPlanningConsistencyError(error.what());
-  }
-  for (size_t index = 0; index < plan.requests.size(); ++index) {
-    auto& entry = plan.requests[index];
-    entry.unprocessed_token_count =
-        index < token_counts.size() ? token_counts[index] : 1;
-    entry.draft_token_count =
-        entry.is_prefill ? 0 : entry.unprocessed_token_count - 1;
-    entry.target_cache_slots = RequiredSlots(
-        ordered_processed_lengths[index],
-        entry.unprocessed_token_count);
-  }
-
-  RequestIndex candidate_request_ids{candidates.size()};
-  for (size_t index = 0; index < candidates.size(); ++index) {
-    if (!candidate_request_ids.Insert(
-            candidates[index].entry.request_id, index)) {
-      throw StepPlanningConsistencyError(
-          "Scheduler candidates contain an invalid or duplicate request.");
-    }
-  }
   auto result = cache_manager_->PlanStepResources(plan);
   if (!result.executable) {
     return result;
   }
 
-  if (plan.requests.size() > plan.scheduled_request_limit) {
-    throw StepPlanningConsistencyError(
-        "Cache planning selected more requests than the scheduled row limit.");
+  RequestIndex candidate_index{candidates.size()};
+  for (size_t index = 0; index < candidates.size(); ++index) {
+    if (!candidate_index.Insert(
+            candidates[index].entry.request_id, index)) {
+      throw StepPlanningConsistencyError(
+          "Scheduler candidates contain an invalid or duplicate request.");
+    }
   }
-  RequestIndex selected_request_ids{plan.requests.size()};
-  size_t selected_token_count = 0;
-  for (size_t index = 0; index < plan.requests.size(); ++index) {
-    const auto& entry = plan.requests[index];
-    const auto candidate_index =
-        candidate_request_ids.Find(entry.request_id);
-    if (!entry.request || entry.request_id != entry.request.get() ||
-        !candidate_index ||
-        candidates[*candidate_index].entry.request != entry.request ||
-        !selected_request_ids.Insert(entry.request_id, index)) {
+  std::vector<DecodeFirstBudgetCandidate> selected_candidates;
+  std::vector<size_t> selected_processed_lengths;
+  selected_candidates.reserve(plan.requests.size());
+  selected_processed_lengths.reserve(plan.requests.size());
+  for (const auto& entry : plan.requests) {
+    const auto candidate_index_value =
+        candidate_index.Find(entry.request_id);
+    if (!candidate_index_value)
       throw StepPlanningConsistencyError(
-          "Cache planning returned an invalid or duplicate request.");
-    }
-    if (entry.unprocessed_token_count == 0 ||
-        selected_token_count > dynamic_batching.max_scheduled_tokens ||
-        entry.unprocessed_token_count >
-            dynamic_batching.max_scheduled_tokens - selected_token_count) {
-      throw StepPlanningConsistencyError(
-          "Cache planning exceeded the scheduled token budget.");
-    }
-    selected_token_count += entry.unprocessed_token_count;
+          "Cache planning selected an unknown request.");
+    const auto& candidate = candidates[*candidate_index_value];
+    selected_candidates.push_back(candidate.budget);
+    selected_processed_lengths.push_back(
+        candidate.processed_sequence_length);
+  }
+  std::vector<size_t> token_counts;
+  try {
+    token_counts = AllocateDecodeFirstTokenBudget(
+        selected_candidates, dynamic_batching.max_scheduled_tokens);
+  } catch (const std::invalid_argument& error) {
+    throw StepPlanningConsistencyError(error.what());
   }
 
   for (size_t index = 0; index < plan.requests.size(); ++index) {
-    plan.requests[index].scheduling_order = index;
+    auto& entry = plan.requests[index];
+    entry.scheduling_order = index;
+    entry.unprocessed_token_count = token_counts[index];
+    entry.draft_token_count = entry.is_prefill ? 0 : token_counts[index] - 1;
+    entry.target_cache_slots = RequiredSlots(
+        selected_processed_lengths[index],
+        entry.unprocessed_token_count);
   }
-  cache_manager_->FinalizeStepResources(plan);
+
+  // Only drafts push a request's reserved slots past the probe that was just validated: a prefill
+  // chunk reserves its whole sequence either way, and a draft-free decode still takes one slot. So
+  // a plan without drafts needs no second planning pass, and must not pay for one every step.
+  const bool plans_drafts = std::any_of(
+      plan.requests.begin(), plan.requests.end(),
+      [](const RequestStepPlan& entry) { return entry.draft_token_count != 0; });
+  if (plans_drafts) {
+    const size_t selected_request_count = plan.requests.size();
+    auto budgeted_requests = plan.requests;
+    while (true) {
+      const auto resource_result = cache_manager_->PlanStepResources(plan);
+      if (resource_result.executable &&
+          plan.requests.size() == selected_request_count) {
+        break;
+      }
+
+      RequestIndex planned_requests{plan.requests.size()};
+      for (size_t index = 0; index < plan.requests.size(); ++index) {
+        if (!planned_requests.Insert(plan.requests[index].request_id, index)) {
+          throw StepPlanningConsistencyError(
+              "Final cache planning selected a duplicate request.");
+        }
+      }
+
+      const auto reduce_draft_count = [&](RequestStepPlan& entry) {
+        --entry.draft_token_count;
+        --entry.unprocessed_token_count;
+        token_counts[entry.scheduling_order] = entry.unprocessed_token_count;
+        entry.target_cache_slots = RequiredSlots(
+            selected_processed_lengths[entry.scheduling_order],
+            entry.unprocessed_token_count);
+      };
+      bool reduced_draft_count = false;
+      for (auto& entry : budgeted_requests) {
+        if (!planned_requests.Find(entry.request_id) &&
+            entry.draft_token_count != 0) {
+          reduce_draft_count(entry);
+          reduced_draft_count = true;
+        }
+      }
+      if (!reduced_draft_count) {
+        const auto optional_work = std::find_if(
+            budgeted_requests.rbegin(), budgeted_requests.rend(),
+            [](const RequestStepPlan& entry) {
+              return entry.draft_token_count != 0;
+            });
+        if (optional_work == budgeted_requests.rend()) {
+          throw StepPlanningConsistencyError(
+              "Final cache planning rejected required request work.");
+        }
+        reduce_draft_count(*optional_work);
+      }
+      plan.requests = budgeted_requests;
+    }
+  }
   cache_manager_->OrderStepForExecution(plan);
 
   // VarlenDecoderIO concatenates every request's pending tokens into one flat input. These offsets
@@ -332,6 +369,11 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
   plan.graph_capture_eligible = true;
   for (size_t i = 0; i < plan.requests.size(); ++i) {
     auto& entry = plan.requests[i];
+    const size_t scheduling_index = entry.scheduling_order;
+    entry.unprocessed_token_count = token_counts[scheduling_index];
+    entry.target_cache_slots = RequiredSlots(
+        selected_processed_lengths[scheduling_index],
+        entry.unprocessed_token_count);
     entry.packed_token_offset = packed_token_offset;
     entry.logits_row_index =
         packed_token_offset + entry.unprocessed_token_count - 1;

@@ -255,11 +255,12 @@ void StaticCacheManager::Allocate(const std::vector<std::shared_ptr<Request>>& r
         std::max_element(
             requests.begin(), requests.end(),
             [](const std::shared_ptr<Request>& a, const std::shared_ptr<Request>& b) {
-              return a->Params()->search.max_length < b->Params()->search.max_length;
+              return a->SearchOptions().max_length < b->SearchOptions().max_length;
             });
 
     params_ = std::make_shared<GeneratorParams>(*model_);
-    params_->search.max_length = (*request_with_max_max_sequence_length)->Params()->search.max_length;
+    params_->search.max_length =
+        (*request_with_max_max_sequence_length)->SearchOptions().max_length;
     params_->search.batch_size = static_cast<int>(cache_allocated_requests_.size());
 
     key_value_cache_state_ = std::make_unique<KeyValueCacheState>(*params_, *model_);
@@ -297,6 +298,20 @@ void StaticCacheManager::Deallocate(std::vector<std::shared_ptr<Request>>& reque
     throw std::runtime_error("Cannot dynamically deallocate statically batched requests.");
   }
 
+  key_value_cache_.reset();
+  key_value_cache_state_.reset();
+  params_.reset();
+  cache_allocated_requests_.clear();
+}
+
+void StaticCacheManager::DetachRequestForTeardown(
+    const std::shared_ptr<Request>& request) noexcept {
+  if (!IsResident(request)) {
+    return;
+  }
+
+  // Static cache storage belongs to the whole batch. Engine teardown may therefore release the
+  // complete batch when detaching any resident Request.
   key_value_cache_.reset();
   key_value_cache_state_.reset();
   params_.reset();
@@ -451,6 +466,23 @@ void PagedCacheManager::Deallocate(std::vector<std::shared_ptr<Request>>& reques
       cache_allocated_requests_.end());
 }
 
+void PagedCacheManager::DetachRequestForTeardown(
+    const std::shared_ptr<Request>& request) noexcept {
+  if (std::find(cache_allocated_requests_.begin(),
+                cache_allocated_requests_.end(),
+                request) == cache_allocated_requests_.end()) {
+    return;
+  }
+
+  // Engine teardown invalidates every resident Request, so release the complete paged and fixed
+  // cache state at once rather than walking ownership systems that cannot be used again.
+  fixed_state_pool_.reset();
+  key_value_cache_.reset();
+  key_value_cache_state_.reset();
+  params_.reset();
+  cache_allocated_requests_.clear();
+}
+
 bool PagedCacheManager::SupportsDynamicBatching() const { return true; }
 
 size_t PagedCacheManager::MaxDraftTokensPerStep() const {
@@ -510,16 +542,6 @@ StepPlanningResult PagedCacheManager::PlanStepResources(StepPlan& plan) const {
     return result;
   }
 
-  FinalizeStepResources(plan);
-  return result;
-}
-
-void PagedCacheManager::FinalizeStepResources(StepPlan& plan) const {
-  plan.fixed_state = {};
-  if (!fixed_state_pool_) {
-    return;
-  }
-
   size_t new_slot_count = 0;
   for (const auto& entry : plan.requests) {
     // Cross-check per-request ownership against the fixed pool: a resident must own a committed
@@ -555,6 +577,7 @@ void PagedCacheManager::FinalizeStepResources(StepPlan& plan) const {
       fixed_state_pool_->PlannedStagingBytes(
           plan.requests.size(), capture_state_updates),
   };
+  return result;
 }
 
 void PagedCacheManager::OrderStepForExecution(StepPlan& plan) const {

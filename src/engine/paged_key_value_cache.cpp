@@ -482,7 +482,7 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
   const auto select = [&](size_t request_index,
                           const CacheGrowth& growth) {
     // Compact selected entries in place. Requests skipped for temporary capacity pressure remain
-    // pending with their committed block tables untouched and can be reconsidered next Step().
+    // pending with their committed block tables untouched and can be reconsidered next Run().
     planned_blocks += growth.new_blocks;
     max_blocks_per_request =
         std::max(max_blocks_per_request, growth.proposed_blocks);
@@ -498,7 +498,7 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
   };
   RequestIndex request_ids{plan.requests.size()};
   for (size_t i = 0; i < plan.requests.size(); ++i) {
-    auto& candidate = plan.requests[i];
+    const auto& candidate = plan.requests[i];
     if (!request_ids.Insert(candidate.request_id, i)) {
       throw StepPlanningConsistencyError(
           "Step plan contains a duplicate request.");
@@ -514,17 +514,7 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
           "Step plan resident membership does not match the committed cache.");
     }
 
-    auto growth = calculate_growth(candidate, table);
-    // Drafts are optional acceleration work. Reduce them until the request fits rather than
-    // deferring or rejecting a base decode that can make progress without the full proposal.
-    while (candidate.draft_token_count > 0 &&
-           (permanently_unserviceable(growth) ||
-            planned_blocks + growth.new_blocks > available_blocks)) {
-      --candidate.draft_token_count;
-      --candidate.unprocessed_token_count;
-      --candidate.target_cache_slots;
-      growth = calculate_growth(candidate, table);
-    }
+    const auto growth = calculate_growth(candidate, table);
     if (permanently_unserviceable(growth)) {
       if (!unserviceable_request_id) {
         unserviceable_request_id = candidate.request_id;

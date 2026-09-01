@@ -70,6 +70,12 @@ struct CacheManager {
 
   virtual void Deallocate(std::vector<std::shared_ptr<Request>>& requests) = 0;
 
+  // Engine teardown cannot use the normal Request close path because the Request's weak Engine
+  // reference has already expired. This no-throw path must release any cache ownership for the
+  // Request before the Engine drops its final strong Request reference.
+  virtual void DetachRequestForTeardown(
+      const std::shared_ptr<Request>& request) noexcept = 0;
+
   virtual bool SupportsDynamicBatching() const = 0;
 
   virtual size_t MaxBatchSize() const { return 4; }
@@ -108,11 +114,6 @@ struct CacheManager {
     throw std::logic_error("Cache manager does not support transactional step planning.");
   }
 
-  // Refreshes resource requirements after the scheduler assigns the final per-request token and
-  // draft counts. Paged selection is already complete; cache managers with count-dependent
-  // auxiliary state can update only that state here.
-  virtual void FinalizeStepResources(StepPlan&) const {}
-
   // Reorders already-selected and budgeted rows for execution without changing request
   // admission or per-request token budgets.
   virtual void OrderStepForExecution(StepPlan&) const {}
@@ -138,6 +139,9 @@ struct StaticCacheManager : CacheManager {
   void Step() override;
 
   void Deallocate(std::vector<std::shared_ptr<Request>>& requests) override;
+
+  void DetachRequestForTeardown(
+      const std::shared_ptr<Request>& request) noexcept override;
 
   bool SupportsDynamicBatching() const override;
 
@@ -166,6 +170,9 @@ struct PagedCacheManager : CacheManager {
                    ExecutionContext& context) override;
 
   void Deallocate(std::vector<std::shared_ptr<Request>>& requests) override;
+
+  void DetachRequestForTeardown(
+      const std::shared_ptr<Request>& request) noexcept override;
 
   bool SupportsDynamicBatching() const override;
 
@@ -201,8 +208,6 @@ struct PagedCacheManager : CacheManager {
   }
 
   StepPlanningResult PlanStepResources(StepPlan& plan) const override;
-
-  void FinalizeStepResources(StepPlan& plan) const override;
 
   void OrderStepForExecution(StepPlan& plan) const override;
 

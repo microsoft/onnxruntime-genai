@@ -18,6 +18,9 @@
 
 namespace Generators {
 
+struct Model;
+struct Tokenizer;
+
 namespace test {
 struct GuidanceProcessorTestAccess;
 }

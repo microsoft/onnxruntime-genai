@@ -74,20 +74,10 @@ ScheduledRequests::ScheduledRequests(const StepPlan& plan,
     if (remaining <= 0 || entry.unprocessed_token_count == 0 ||
         entry.unprocessed_token_count > static_cast<size_t>(remaining)) {
       throw std::runtime_error(
-          "The dynamic step token count must be positive and no greater than the remaining tokens.");
-    }
-  }
-  // Complete every potentially allocating output-bookkeeping operation before binding the plan or
-  // executing the model. A partial prefill cannot sample, while a chunk-complete single-sequence
-  // request can append its accepted drafts plus one generated token.
-  for (const auto& entry : plan.requests) {
-    const auto remaining =
-        static_cast<size_t>(entry.request->CurrentSequenceLength() -
-                            entry.request->ProcessedSequenceLength()) +
-        entry.draft_token_count;
-    if (entry.unprocessed_token_count == remaining) {
-      entry.request->PrepareForStep(kMaxGeneratedTokenIndicesPerStep +
-                                    entry.draft_token_count);
+          "The dynamic step token count (" +
+          std::to_string(entry.unprocessed_token_count) +
+          ") must be positive and no greater than the remaining token count (" +
+          std::to_string(remaining) + ").");
     }
   }
   for (const auto& entry : plan.requests) {
@@ -114,7 +104,7 @@ void ScheduledRequests::AddDecoderState(std::unique_ptr<DecoderIO> decoder_state
   decoder_state_ = std::move(decoder_state);
 }
 
-void ScheduledRequests::GenerateNextTokens() {
+void ScheduledRequests::GenerateNextTokens(std::vector<RequestStepResult>& results) {
   if (!decoder_state_) {
     throw std::runtime_error("Cannot generate next tokens without the decoder state.");
   }
@@ -122,8 +112,9 @@ void ScheduledRequests::GenerateNextTokens() {
   try {
     auto logits = ProcessLogits();
     const bool guidance_applied = TryApplyBatchedGuidanceMasks(logits);
+    results.assign(requests_.size(), RequestStepResult{});
 
-    if (TryGenerateNextTokensBatched(logits, guidance_applied))
+    if (TryGenerateNextTokensBatched(logits, guidance_applied, &results))
       return;
 
     // Every request owns an independent single-sequence search, so token selection runs once per
@@ -140,7 +131,7 @@ void ScheduledRequests::GenerateNextTokens() {
     for (size_t request_idx = 0; request_idx < requests_.size(); ++request_idx) {
       if (IsExecuting(requests_[request_idx]->status_) &&
           requests_[request_idx]->IsChunkComplete()) {
-        requests_[request_idx]->CompleteGeneration();
+        results[request_idx] = requests_[request_idx]->CompleteGeneration();
       }
     }
 
@@ -184,7 +175,7 @@ std::vector<DeviceSpan<float>> ScheduledRequests::ProcessLogits() {
 std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
     std::vector<DeviceSpan<float>>& verify_rows) {
   if (std::none_of(draft_token_counts_.begin(), draft_token_counts_.end(),
-                   [](size_t count) { return count != 0; })) {
+                   [](size_t draft_count) { return draft_count != 0; })) {
     return std::move(verify_rows);
   }
   if (!sampling_plan_) {
@@ -261,8 +252,10 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
 
 // Samples all active requests through the scheduler-owned sampler. It owns the reusable workspace
 // and groups rows by resolved sampling parameters, while each Request owns its persistent RNG state.
-bool ScheduledRequests::TryGenerateNextTokensBatched(std::vector<DeviceSpan<float>>& logits,
-                                                     bool guidance_applied) {
+bool ScheduledRequests::TryGenerateNextTokensBatched(
+    std::vector<DeviceSpan<float>>& logits,
+    bool guidance_applied,
+    std::vector<RequestStepResult>* results) {
   if (!PrepareBatchedSamplingPlan(false))
     return false;
 
@@ -276,8 +269,8 @@ bool ScheduledRequests::TryGenerateNextTokensBatched(std::vector<DeviceSpan<floa
     return true;
 
   for (size_t request_idx = 0; request_idx < sampling_plan_->requests.size(); ++request_idx) {
-    sampling_plan_->requests[request_idx]->PrepareGeneration(sampling_plan_->logits[request_idx],
-                                                             guidance_applied);
+    sampling_plan_->requests[request_idx]->PrepareGeneration(
+        sampling_plan_->logits[request_idx], guidance_applied);
   }
 
   auto next_tokens = batched_sampler_->Sample(sampling_plan_->logits, sampling_plan_->params,
@@ -292,8 +285,14 @@ bool ScheduledRequests::TryGenerateNextTokensBatched(std::vector<DeviceSpan<floa
 
   next_tokens.CopyDeviceToCpu();
 
-  for (auto* request : sampling_plan_->requests) {
-    request->CompleteGeneration();
+  for (size_t sampling_index = 0;
+       sampling_index < sampling_plan_->requests.size();
+       ++sampling_index) {
+    const auto result =
+        sampling_plan_->requests[sampling_index]->CompleteGeneration();
+    if (results) {
+      (*results)[sampling_plan_->result_indices[sampling_index]] = result;
+    }
   }
   ScheduleGuidanceMasks();
   for (const auto& request : requests_) {
@@ -334,9 +333,6 @@ void ScheduledRequests::ScheduleGuidanceMasks() noexcept {
   }
 }
 
-// Builds one contiguous mask row per scheduled request. Unguided and partial-prefill rows remain
-// pass-through; eligible guided decode rows receive their ready grammar mask. Keeping this
-// selection independent of the CUDA transfer makes row routing directly testable.
 BatchedGuidanceMaskStatus CollectBatchedGuidanceMasks(
     std::span<const std::shared_ptr<Request>> requests,
     size_t words_per_row,
@@ -418,7 +414,10 @@ bool ScheduledRequests::PrepareBatchedSamplingPlan(
   }
 
   sampling_plan_->Clear();
-  for (const auto& request : requests_) {
+  for (size_t request_index = 0;
+       request_index < requests_.size();
+       ++request_index) {
+    const auto& request = requests_[request_index];
     // Dynamic transactions keep newly admitted and continued requests Queued until commit, while
     // the static scheduler moves every executable row to Active before constructing the batch.
     const bool status_is_executable =
@@ -434,6 +433,7 @@ bool ScheduledRequests::PrepareBatchedSamplingPlan(
       return false;
     }
     sampling_plan_->requests.push_back(request.get());
+    sampling_plan_->result_indices.push_back(request_index);
     sampling_plan_->params.push_back(*args);
     sampling_plan_->states.push_back(&request->SamplingState(*batched_sampler_));
   }
@@ -497,7 +497,8 @@ void ScheduledRequests::GenerateNextTokensForTransaction(
         throw std::logic_error("Batched sampling plan does not match the scheduled requests.");
       }
       if (requests_[i]->DraftVerificationCompletedGeneration()) {
-        results[i].done = true;
+        results[i] =
+            requests_[i]->StageDraftCompletionForTransaction();
       } else {
         if (active_sampling_count != source_sampling_index) {
           sampling_plan_->requests[active_sampling_count] =
@@ -542,7 +543,8 @@ void ScheduledRequests::GenerateNextTokensForTransaction(
 
   for (size_t i = 0; i < requests_.size(); ++i) {
     if (requests_[i]->DraftVerificationCompletedGeneration()) {
-      results[i].done = true;
+      results[i] =
+          requests_[i]->StageDraftCompletionForTransaction();
     } else if (requests_[i]->IsChunkComplete()) {
       results[i] = requests_[i]->ApplyLogitsForTransaction(logits[i], guidance_applied);
     }

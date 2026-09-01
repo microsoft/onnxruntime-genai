@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>  // for memcmp
@@ -10,6 +11,7 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 #include <regex>
 #include "span.h"
@@ -22,6 +24,46 @@
 #include <gtest/gtest.h>
 
 #include "test_utils.h"
+
+namespace {
+
+struct EngineEventSnapshot {
+  OgaEngineEventFlags flags{};
+  const OgaRequest* request{};
+  uint64_t turn_id{};
+  int32_t token{};
+  OgaFinishReason finish_reason{};
+  OgaErrorCode error_code{};
+  uint64_t prompt_tokens{};
+  uint64_t generated_tokens{};
+  uint64_t cached_prompt_tokens{};
+};
+
+EngineEventSnapshot Snapshot(const OgaEngineEvent* event) {
+  if (!event) {
+    return {};
+  }
+  const auto& usage = event->Usage();
+  const auto request = event->Request();
+  return {
+      event->Flags(),
+      request ? &request->get() : nullptr,
+      event->TurnId(),
+      event->Token(),
+      event->FinishReason(),
+      event->ErrorCode(),
+      usage.PromptTokens(),
+      usage.GeneratedTokens(),
+      usage.CachedPromptTokens()};
+}
+
+EngineEventSnapshot RunOne(OgaEngine& engine) {
+  auto buffer = engine.CreateEventBuffer(1);
+  engine.Run(*buffer);
+  return Snapshot(buffer->Get(0));
+}
+
+}  // namespace
 
 TEST(CAPITests, Config) {
 #if TEST_PHI2
@@ -899,6 +941,368 @@ TEST(CAPITests, SetTerminate) {
 #endif
 }
 
+TEST(CAPITests, EngineRequestTurnAndEventContracts) {
+  auto model = OgaModel::Create(MODEL_PATH "engine/synthetic-paged");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 16);
+  auto engine = OgaEngine::Create(*model);
+  auto request = engine->CreateRequest(*params);
+  const std::array<int32_t, 3> input_tokens{2, 3, 4};
+
+  auto turn_options = request->CreateTurnOptions();
+  turn_options->SetMaxGeneratedTokens(1);
+  EXPECT_EQ(request->BeginTurn(input_tokens, turn_options.get()), 1u);
+  const auto event = RunOne(*engine);
+  EXPECT_EQ(event.request, request.get());
+  EXPECT_EQ(event.turn_id, 1u);
+  EXPECT_EQ(event.flags,
+            OgaEngineEventFlag_Token | OgaEngineEventFlag_TurnFinished);
+  EXPECT_EQ(event.finish_reason, OgaFinishReason_MaxGeneratedTokens);
+  EXPECT_EQ(event.prompt_tokens, input_tokens.size());
+  EXPECT_EQ(event.generated_tokens, 1u);
+  EXPECT_EQ(event.cached_prompt_tokens, 0u);
+
+  const std::array<int32_t, 1> continuation{5};
+  const auto second_turn = request->BeginTurn(continuation);
+  EXPECT_EQ(second_turn, 2u);
+  EXPECT_TRUE(request->CancelTurn(second_turn));
+  EXPECT_FALSE(request->CancelTurn(second_turn));
+  const auto cancelled = RunOne(*engine);
+  EXPECT_EQ(cancelled.request, request.get());
+  EXPECT_EQ(cancelled.turn_id, second_turn);
+  EXPECT_EQ(cancelled.flags, OgaEngineEventFlag_TurnFinished);
+  EXPECT_EQ(cancelled.finish_reason, OgaFinishReason_Cancelled);
+
+  auto request_options = OgaRequestOptions::Create();
+  request_options->SetMaxSessionTokens(8);
+  auto options_request = engine->CreateRequest(*params, request_options.get());
+  options_request->Close();
+
+  auto excessive_request_options = OgaRequestOptions::Create();
+  excessive_request_options->SetMaxSessionTokens(17);
+  try {
+    static_cast<void>(
+        engine->CreateRequest(*params, excessive_request_options.get()));
+    FAIL() << "Expected max_session_tokens above max_length to fail.";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(
+        std::string(error.what()).find("max_total_tokens (17)"),
+        std::string::npos);
+    EXPECT_NE(
+        std::string(error.what()).find("max_length (16)"),
+        std::string::npos);
+  }
+
+  auto owner_thread_request = engine->CreateRequest(*params);
+  auto owner_thread_options = owner_thread_request->CreateTurnOptions();
+  OgaResult* create_options_result{};
+  OgaResult* set_options_result{};
+  std::thread off_owner_thread([&] {
+    OgaTurnOptions* unused_options{};
+    create_options_result =
+        OgaRequestCreateTurnOptions(owner_thread_request.get(), &unused_options);
+    set_options_result =
+        OgaTurnOptionsSetMaxGeneratedTokens(owner_thread_options.get(), 1);
+  });
+  off_owner_thread.join();
+  std::unique_ptr<OgaResult> owned_create_options_result{create_options_result};
+  std::unique_ptr<OgaResult> owned_set_options_result{set_options_result};
+  ASSERT_NE(owned_create_options_result, nullptr);
+  ASSERT_NE(owned_set_options_result, nullptr);
+  EXPECT_NE(std::string(owned_create_options_result->GetError()).find("owner thread"),
+            std::string::npos);
+  EXPECT_NE(std::string(owned_set_options_result->GetError()).find("owner thread"),
+            std::string::npos);
+  owner_thread_request->Close();
+
+  auto validation_request = engine->CreateRequest(*params);
+  auto validation_options = validation_request->CreateTurnOptions();
+
+  std::unique_ptr<OgaResult> null_stop_token_ids_result{
+      OgaTurnOptionsSetStopTokenIds(validation_options.get(), nullptr)};
+  ASSERT_NE(null_stop_token_ids_result, nullptr);
+  EXPECT_NE(
+      std::string(null_stop_token_ids_result->GetError()).find("stop_token_ids must not be null"),
+      std::string::npos);
+  std::unique_ptr<OgaResult> null_stop_strings_result{
+      OgaTurnOptionsSetStopStrings(validation_options.get(), nullptr)};
+  ASSERT_NE(null_stop_strings_result, nullptr);
+  EXPECT_NE(
+      std::string(null_stop_strings_result->GetError()).find("stop_strings must not be null"),
+      std::string::npos);
+  validation_request->Close();
+
+  OgaRequest* abandoned_created{};
+  OgaCheckResult(OgaEngineCreateRequest(
+      engine.get(), params.get(), nullptr, &abandoned_created));
+  ASSERT_NE(abandoned_created, nullptr);
+  OgaDestroyRequest(abandoned_created);
+  EXPECT_FALSE(engine->HasPendingRequests());
+
+  OgaRequest* abandoned_queued{};
+  OgaCheckResult(OgaEngineCreateRequest(
+      engine.get(), params.get(), nullptr, &abandoned_queued));
+  ASSERT_NE(abandoned_queued, nullptr);
+  uint64_t abandoned_turn_id{};
+  OgaCheckResult(OgaRequestBeginTurn(
+      abandoned_queued, nullptr, input_tokens.data(),
+      input_tokens.size(), &abandoned_turn_id));
+  EXPECT_EQ(abandoned_turn_id, 1u);
+  OgaDestroyRequest(abandoned_queued);
+  EXPECT_FALSE(engine->HasPendingRequests());
+
+  auto idle_buffer = engine->CreateEventBuffer(1);
+  EXPECT_EQ(engine->Run(*idle_buffer), 0u);
+  EXPECT_EQ(idle_buffer->Count(), 0u);
+  EXPECT_EQ(idle_buffer->Get(0), nullptr);
+}
+
+TEST(CAPITests, EngineBulkRunAndReusableStorage) {
+  auto model = OgaModel::Create(MODEL_PATH "engine/synthetic-paged");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 16);
+  auto engine = OgaEngine::Create(*model);
+  const std::array<int32_t, 3> input_tokens{2, 3, 4};
+
+  const auto create_one_token_request = [&] {
+    auto request = engine->CreateRequest(*params);
+    auto turn_options = request->CreateTurnOptions();
+    turn_options->SetMaxGeneratedTokens(1);
+    request->BeginTurn(input_tokens, turn_options.get());
+    return request;
+  };
+
+  auto first = create_one_token_request();
+  auto second = create_one_token_request();
+
+  std::unique_ptr<OgaResult> null_out_result{
+      OgaCreateEngineEventBuffer(engine.get(), 1, nullptr)};
+  ASSERT_NE(null_out_result, nullptr);
+  EXPECT_NE(
+      std::string(null_out_result->GetError()).find("out must not be null"),
+      std::string::npos);
+
+  OgaEngineEventBuffer* unused_buffer{};
+  std::unique_ptr<OgaResult> null_engine_result{
+      OgaCreateEngineEventBuffer(nullptr, 1, &unused_buffer)};
+  ASSERT_NE(null_engine_result, nullptr);
+  EXPECT_EQ(unused_buffer, nullptr);
+  EXPECT_NE(
+      std::string(null_engine_result->GetError()).find("engine must not be null"),
+      std::string::npos);
+
+  OgaEngineEventBuffer* off_thread_buffer{};
+  OgaResult* off_thread_create_result{};
+  std::thread create_off_owner([&] {
+    off_thread_create_result =
+        OgaCreateEngineEventBuffer(engine.get(), 1, &off_thread_buffer);
+  });
+  create_off_owner.join();
+  std::unique_ptr<OgaResult> owned_off_thread_create_result{
+      off_thread_create_result};
+  ASSERT_NE(owned_off_thread_create_result, nullptr);
+  EXPECT_EQ(off_thread_buffer, nullptr);
+  EXPECT_NE(
+      std::string(owned_off_thread_create_result->GetError()).find("owner thread"),
+      std::string::npos);
+
+  auto zero_capacity_buffer = engine->CreateEventBuffer(0);
+  EXPECT_EQ(engine->Run(*zero_capacity_buffer), 0u);
+  EXPECT_TRUE(engine->HasPendingRequests());
+
+  std::unique_ptr<OgaResult> null_buffer_result{
+      OgaEngineRun(engine.get(), nullptr)};
+  ASSERT_NE(null_buffer_result, nullptr);
+  EXPECT_NE(
+      std::string(null_buffer_result->GetError()).find("buffer must not be null"),
+      std::string::npos);
+
+  auto buffer = engine->CreateEventBuffer(1);
+  OgaResult* off_thread_run_result{};
+  std::thread run_off_owner([&] {
+    off_thread_run_result = OgaEngineRun(engine.get(), buffer.get());
+  });
+  run_off_owner.join();
+  std::unique_ptr<OgaResult> owned_off_thread_run_result{
+      off_thread_run_result};
+  ASSERT_NE(owned_off_thread_run_result, nullptr);
+  EXPECT_NE(
+      std::string(owned_off_thread_run_result->GetError()).find("owner thread"),
+      std::string::npos);
+  EXPECT_EQ(buffer->Count(), 0u);
+  EXPECT_TRUE(engine->HasPendingRequests());
+
+  std::unique_ptr<OgaResult> null_run_engine_result{
+      OgaEngineRun(nullptr, buffer.get())};
+  ASSERT_NE(null_run_engine_result, nullptr);
+  EXPECT_NE(
+      std::string(null_run_engine_result->GetError()).find("engine must not be null"),
+      std::string::npos);
+  EXPECT_TRUE(engine->HasPendingRequests());
+  EXPECT_EQ(buffer->Count(), 0u);
+
+  auto other_engine = OgaEngine::Create(*model);
+  std::unique_ptr<OgaResult> wrong_engine_result{
+      OgaEngineRun(other_engine.get(), buffer.get())};
+  ASSERT_NE(wrong_engine_result, nullptr);
+  EXPECT_NE(
+      std::string(wrong_engine_result->GetError()).find("Engine that created it"),
+      std::string::npos);
+  EXPECT_EQ(buffer->Count(), 0u);
+
+  EXPECT_TRUE(first->CancelTurn(1));
+  EXPECT_TRUE(second->CancelTurn(1));
+
+  OgaCheckResult(OgaEngineRun(engine.get(), buffer.get()));
+  ASSERT_EQ(OgaEngineEventBufferGetCount(buffer.get()), 1u);
+  EXPECT_EQ(OgaEngineEventBufferGetCount(nullptr), 0u);
+  EXPECT_EQ(OgaEngineEventBufferGet(nullptr, 0), nullptr);
+  EXPECT_EQ(OgaEngineEventBufferGet(buffer.get(), 1), nullptr);
+
+  const OgaEngineEvent* first_event =
+      OgaEngineEventBufferGet(buffer.get(), 0);
+  ASSERT_NE(first_event, nullptr);
+
+  const OgaRequest* borrowed_request{};
+  OgaEngineEventFlags flags{};
+  uint64_t turn_id{};
+  int32_t token{};
+  OgaFinishReason finish_reason{};
+  OgaErrorCode error_code{};
+  const OgaTurnUsage* usage{};
+  OgaCheckResult(OgaEngineEventGetRequest(first_event, &borrowed_request));
+  OgaCheckResult(OgaEngineEventGetFlags(first_event, &flags));
+  OgaCheckResult(OgaEngineEventGetTurnId(first_event, &turn_id));
+  OgaCheckResult(OgaEngineEventGetToken(first_event, &token));
+  OgaCheckResult(OgaEngineEventGetFinishReason(first_event, &finish_reason));
+  OgaCheckResult(OgaEngineEventGetErrorCode(first_event, &error_code));
+  OgaCheckResult(OgaEngineEventGetUsage(first_event, &usage));
+  EXPECT_EQ(borrowed_request, first.get());
+  EXPECT_EQ(flags, OgaEngineEventFlag_TurnFinished);
+  EXPECT_EQ(turn_id, 1u);
+  EXPECT_EQ(finish_reason, OgaFinishReason_Cancelled);
+  EXPECT_EQ(error_code, OgaErrorCode_None);
+  ASSERT_NE(usage, nullptr);
+
+  uint64_t prompt_tokens{};
+  uint64_t generated_tokens{};
+  uint64_t cached_prompt_tokens{};
+  OgaCheckResult(OgaTurnUsageGetPromptTokens(usage, &prompt_tokens));
+  OgaCheckResult(OgaTurnUsageGetGeneratedTokens(usage, &generated_tokens));
+  OgaCheckResult(
+      OgaTurnUsageGetCachedPromptTokens(usage, &cached_prompt_tokens));
+  EXPECT_EQ(prompt_tokens, input_tokens.size());
+  EXPECT_EQ(generated_tokens, 0u);
+  EXPECT_EQ(cached_prompt_tokens, 0u);
+
+  std::unique_ptr<OgaResult> null_event_result{
+      OgaEngineEventGetFlags(nullptr, &flags)};
+  ASSERT_NE(null_event_result, nullptr);
+  EXPECT_EQ(flags, OgaEngineEventFlag_None);
+  std::unique_ptr<OgaResult> null_event_out_result{
+      OgaEngineEventGetFlags(first_event, nullptr)};
+  ASSERT_NE(null_event_out_result, nullptr);
+  std::unique_ptr<OgaResult> null_usage_result{
+      OgaTurnUsageGetPromptTokens(nullptr, &prompt_tokens)};
+  ASSERT_NE(null_usage_result, nullptr);
+  EXPECT_EQ(prompt_tokens, 0u);
+
+  std::unique_ptr<OgaResult> populated_wrong_engine_result{
+      OgaEngineRun(other_engine.get(), buffer.get())};
+  ASSERT_NE(populated_wrong_engine_result, nullptr);
+  EXPECT_EQ(buffer->Count(), 1u);
+  EXPECT_EQ(buffer->Get(0), first_event);
+  EXPECT_EQ(&buffer->Get(0)->Request()->get(), first.get());
+
+  OgaCheckResult(OgaEngineRun(engine.get(), buffer.get()));
+  ASSERT_EQ(OgaEngineEventBufferGetCount(buffer.get()), 1u);
+  EXPECT_EQ(&buffer->Get(0)->Request()->get(), second.get());
+
+  first->Close();
+  second->Close();
+
+  auto reusable_request = engine->CreateRequest(*params);
+  auto reusable_turn_options = reusable_request->CreateTurnOptions();
+  reusable_turn_options->SetMaxGeneratedTokens(2);
+  reusable_request->BeginTurn(input_tokens, reusable_turn_options.get());
+  auto reusable_buffer = engine->CreateEventBuffer(1);
+
+  ASSERT_EQ(engine->Run(*reusable_buffer), 1u);
+  const OgaEngineEvent* reusable = reusable_buffer->Get(0);
+  ASSERT_NE(reusable, nullptr);
+  EXPECT_EQ(&reusable->Request()->get(), reusable_request.get());
+
+  ASSERT_EQ(engine->Run(*reusable_buffer), 1u);
+  EXPECT_EQ(&reusable_buffer->Get(0)->Request()->get(), reusable_request.get());
+  EXPECT_NE(
+      reusable_buffer->Get(0)->Flags() & OgaEngineEventFlag_TurnFinished,
+      0u);
+  reusable_request->Close();
+}
+
+TEST(CAPITests, EngineCppRunReturnsBorrowedBufferViews) {
+  auto model = OgaModel::Create(MODEL_PATH "engine/synthetic-paged");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 16);
+  auto engine = OgaEngine::Create(*model);
+  const std::array<int32_t, 3> input_tokens{2, 3, 4};
+
+  const auto create_request = [&] {
+    auto request = engine->CreateRequest(*params);
+    auto turn_options = request->CreateTurnOptions();
+    turn_options->SetMaxGeneratedTokens(1);
+    request->BeginTurn(input_tokens, turn_options.get());
+    return request;
+  };
+  auto first = create_request();
+  auto second = create_request();
+
+  auto buffer = engine->CreateEventBuffer(4);
+  ASSERT_EQ(engine->Run(*buffer), 2u);
+  ASSERT_EQ(buffer->Count(), 2u);
+  ASSERT_NE(buffer->Get(0), nullptr);
+  ASSERT_NE(buffer->Get(1), nullptr);
+  EXPECT_EQ(&buffer->Get(0)->Request()->get(), first.get());
+  EXPECT_EQ(&buffer->Get(1)->Request()->get(), second.get());
+  EXPECT_EQ(buffer->Get(2), nullptr);
+
+  first->Close();
+  second->Close();
+}
+
+TEST(CAPITests, EngineRetainsModelAfterPublicHandleRelease) {
+  OgaModel* model{};
+  ASSERT_EQ(
+      OgaCreateModel(MODEL_PATH "engine/synthetic-paged", &model),
+      nullptr);
+  ASSERT_NE(model, nullptr);
+
+  OgaEngine* engine{};
+  ASSERT_EQ(OgaCreateEngine(model, &engine), nullptr);
+  ASSERT_NE(engine, nullptr);
+
+  OgaDestroyModel(model);
+  model = nullptr;
+
+  bool has_pending_requests = true;
+  EXPECT_EQ(
+      OgaEngineHasPendingRequests(engine, &has_pending_requests),
+      nullptr);
+  EXPECT_FALSE(has_pending_requests);
+
+  OgaEngineEventBuffer* buffer{};
+  EXPECT_EQ(
+      OgaCreateEngineEventBuffer(engine, 1, &buffer),
+      nullptr);
+  ASSERT_NE(buffer, nullptr);
+  EXPECT_EQ(OgaEngineRun(engine, buffer), nullptr);
+  EXPECT_EQ(OgaEngineEventBufferGetCount(buffer), 0u);
+
+  OgaDestroyEngine(engine);
+  EXPECT_EQ(OgaEngineEventBufferGetCount(buffer), 0u);
+  OgaDestroyEngineEventBuffer(buffer);
+}
+
 // DML doesn't support batch_size > 1
 #if TEST_PHI2 && !USE_DML
 
@@ -946,8 +1350,13 @@ struct Phi2Test {
     constexpr size_t per_request_batch_size = 1;
     params_->SetSearchOption("batch_size", static_cast<int>(per_request_batch_size));
 
-    std::vector<std::unique_ptr<OgaRequest>> requests_;
-    std::array<std::vector<int32_t>, 3> generated_tokens;
+    struct OwnedRequest {
+      std::unique_ptr<OgaRequest> request;
+      std::vector<int32_t> generated_tokens;
+    };
+    std::vector<OwnedRequest> requests;
+    requests.reserve(batch_size_);
+    std::unordered_map<const OgaRequest*, OwnedRequest*> requests_by_handle;
 
     const char* input_strings[] = {
         "This is a test.",
@@ -958,29 +1367,35 @@ struct Phi2Test {
     for (size_t i = 0; i < batch_size_; i++) {
       auto input_sequence = OgaSequences::Create();
       tokenizer_->Encode(input_strings[i], *input_sequence);
-      generated_tokens[i] = std::vector<int32_t>(input_sequence->SequenceData(0),
-                                                 input_sequence->SequenceData(0) + input_sequence->SequenceCount(0));
-      requests_.emplace_back(OgaRequest::Create(*params_));
-      requests_.back()->AddTokens(*input_sequence);
-      requests_.back()->SetOpaqueData(&generated_tokens[i]);
-
-      engine->Add(*requests_.back());
+      auto input_tokens = std::span<const int32_t>{
+          input_sequence->SequenceData(0), input_sequence->SequenceCount(0)};
+      requests.push_back({engine->CreateRequest(*params_),
+                          std::vector<int32_t>(input_tokens.begin(), input_tokens.end())});
+      auto& owned_request = requests.back();
+      requests_by_handle.emplace(owned_request.request.get(), &owned_request);
+      owned_request.request->BeginTurn(input_tokens);
     }
 
-    while (auto request = engine->Step()) {
-      while (request->HasUnseenTokens()) {
-        auto* tokens = reinterpret_cast<std::vector<int32_t>*>(request->GetOpaqueData());
-        tokens->push_back(request->GetUnseenToken());
+    EXPECT_TRUE(engine->HasPendingRequests());
+    while (engine->HasPendingRequests()) {
+      auto event = RunOne(*engine);
+      auto* ready_request = event.request;
+      ASSERT_NE(ready_request, nullptr);
+      auto it = requests_by_handle.find(ready_request);
+      ASSERT_NE(it, requests_by_handle.end());
+      EXPECT_EQ(ready_request, it->second->request.get());
+      if ((event.flags & OgaEngineEventFlag_Token) != 0) {
+        it->second->generated_tokens.push_back(event.token);
       }
     }
+    EXPECT_EQ(RunOne(*engine).flags, OgaEngineEventFlag_None);
 
-    for (size_t i = 0; i < batch_size_; i++) {
-      EXPECT_TRUE(requests_[i]->IsTurnComplete());
-      EXPECT_NO_THROW(engine->Remove(*requests_[i]));
-      EXPECT_FALSE(requests_[i]->IsTurnComplete());
-      EXPECT_NO_THROW(engine->Remove(*requests_[i]));
+    for (auto& owned_request : requests) {
+      EXPECT_NO_THROW(owned_request.request->Close());
+      EXPECT_NO_THROW(owned_request.request->Close());
 
-      auto out_string = tokenizer_->Decode(generated_tokens[i].data(), generated_tokens[i].size());
+      auto out_string = tokenizer_->Decode(owned_request.generated_tokens.data(),
+                                           owned_request.generated_tokens.size());
       std::cout << "Decoded string:" << out_string << std::endl;
     }
   }
@@ -991,6 +1406,41 @@ struct Phi2Test {
   std::unique_ptr<OgaGeneratorParams> params_;
   const size_t batch_size_ = 3;
 };
+
+TEST(CAPITests, EngineRequestCAbiAndRaiiContracts) {
+  if (!test_utils::IsEngineTestsEnabled()) {
+    GTEST_SKIP() << "Skipping Engine test for DML/WebGPU";
+  }
+
+  auto model = OgaModel::Create(PHI2_PATH);
+  auto tokenizer = OgaTokenizer::Create(*model);
+  auto params = OgaGeneratorParams::Create(*model);
+  auto engine = OgaEngine::Create(*model);
+  auto input_sequences = OgaSequences::Create();
+  tokenizer->Encode("This is a test.", *input_sequences);
+  auto input_tokens = std::span<const int32_t>{
+      input_sequences->SequenceData(0), input_sequences->SequenceCount(0)};
+  params->SetSearchOption(
+      "max_length", static_cast<int>(input_tokens.size() + 4));
+
+  auto owned_request = engine->CreateRequest(*params);
+  auto one_token_turn = owned_request->CreateTurnOptions();
+  one_token_turn->SetMaxGeneratedTokens(1);
+  EXPECT_EQ(owned_request->BeginTurn(input_tokens, one_token_turn.get()), 1u);
+  one_token_turn->SetMaxGeneratedTokens(3);
+  ASSERT_TRUE(engine->HasPendingRequests());
+
+  const auto event = RunOne(*engine);
+  ASSERT_EQ(event.request, owned_request.get());
+  EXPECT_EQ(event.turn_id, 1u);
+  EXPECT_NE(event.flags & OgaEngineEventFlag_TurnFinished, 0u);
+  EXPECT_EQ(event.finish_reason, OgaFinishReason_MaxGeneratedTokens);
+
+  EXPECT_NO_THROW(owned_request->Close());
+  EXPECT_NO_THROW(owned_request->Close());
+  EXPECT_FALSE(engine->HasPendingRequests());
+  EXPECT_EQ(RunOne(*engine).flags, OgaEngineEventFlag_None);
+}
 
 class ParametrizedTopKCAPITestsTests : public ::testing::TestWithParam<bool> {
 };
@@ -2009,4 +2459,66 @@ TEST(CAPITests, LoadAudiosFromBuffersRejectsEmptyBuffer) {
   OgaDestroyResult(result);
   // audios should not have been created
   EXPECT_EQ(audios, nullptr);
+}
+
+TEST(CAPITests, RequestSetDraftTokensRejectsNullArguments) {
+  OgaResult* result = OgaRequestSetDraftTokens(nullptr, nullptr);
+
+  ASSERT_NE(result, nullptr);
+  EXPECT_NE(std::string(OgaResultGetError(result)).find("must not be null"),
+            std::string::npos);
+  OgaDestroyResult(result);
+}
+
+TEST(CAPITests, RequestSetDraftTokensRunsProposal) {
+  auto model = OgaModel::Create(
+      MODEL_PATH "engine/synthetic-paged-per-token");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 16);
+  auto engine = OgaEngine::Create(*model);
+
+  size_t max_drafts{};
+  OgaCheckResult(OgaEngineMaxDraftTokensPerProposal(
+      engine.get(), &max_drafts));
+  ASSERT_GE(max_drafts, 2u);
+
+  OgaResult* off_thread_result{};
+  std::thread off_owner_thread([&] {
+    size_t unused{};
+    off_thread_result = OgaEngineMaxDraftTokensPerProposal(
+        engine.get(), &unused);
+  });
+  off_owner_thread.join();
+  std::unique_ptr<OgaResult> owned_off_thread_result{off_thread_result};
+  ASSERT_NE(owned_off_thread_result, nullptr);
+  EXPECT_NE(
+      std::string(owned_off_thread_result->GetError()).find("owner thread"),
+      std::string::npos);
+
+  auto request = engine->CreateRequest(*params);
+  auto turn_options = request->CreateTurnOptions();
+  turn_options->SetMaxGeneratedTokens(4);
+  const std::array<int32_t, 3> prompt{2, 3, 4};
+  request->BeginTurn(prompt, turn_options.get());
+  EXPECT_EQ(RunOne(*engine).token, 9);
+
+  const std::array<int32_t, 2> proposed_tokens{15, 22};
+  auto proposal = OgaSequences::Create();
+  proposal->Append(proposed_tokens.data(), proposed_tokens.size());
+  OgaCheckResult(OgaRequestSetDraftTokens(
+      request.get(), proposal.get()));
+
+  auto buffer = engine->CreateEventBuffer(3);
+  ASSERT_EQ(engine->Run(*buffer), 3u);
+  const std::array<int32_t, 3> expected_tokens{15, 22, 30};
+  for (size_t index = 0; index < expected_tokens.size(); ++index) {
+    const auto* event = buffer->Get(index);
+    ASSERT_NE(event, nullptr);
+    EXPECT_EQ(event->Token(), expected_tokens[index]);
+    EXPECT_NE(event->Flags() & OgaEngineEventFlag_Token, 0u);
+  }
+  EXPECT_NE(
+      buffer->Get(2)->Flags() & OgaEngineEventFlag_TurnFinished,
+      0u);
+  request->Close();
 }

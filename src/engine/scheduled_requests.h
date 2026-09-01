@@ -24,6 +24,7 @@ BatchedGuidanceMaskStatus CollectBatchedGuidanceMasks(
 struct BatchedSamplingPlan {
   void Reserve(size_t capacity, size_t verification_capacity) {
     requests.reserve(capacity);
+    result_indices.reserve(capacity);
     logits.reserve(capacity);
     params.reserve(capacity);
     states.reserve(capacity);
@@ -32,12 +33,14 @@ struct BatchedSamplingPlan {
 
   void Clear() {
     requests.clear();
+    result_indices.clear();
     logits.clear();
     params.clear();
     states.clear();
   }
 
   std::vector<Request*> requests;
+  std::vector<size_t> result_indices;
   std::vector<DeviceSpan<float>> logits;
   std::vector<BatchedSamplingParams> params;
   std::vector<BatchedSamplerState*> states;
@@ -86,7 +89,7 @@ struct ScheduledRequests {
 
   std::vector<DeviceSpan<float>> ProcessLogits();
 
-  void GenerateNextTokens();
+  void GenerateNextTokens(std::vector<RequestStepResult>& results);
   void ScheduleGuidanceMasks() noexcept;
   void BeginTransaction();
   void GenerateNextTokensForTransaction(
@@ -97,7 +100,9 @@ struct ScheduledRequests {
 
  private:
   bool PrepareBatchedSamplingPlan(bool require_transaction_support);
-  bool TryGenerateNextTokensBatched(std::vector<DeviceSpan<float>>& logits, bool guidance_applied);
+  bool TryGenerateNextTokensBatched(std::vector<DeviceSpan<float>>& logits,
+                                    bool guidance_applied,
+                                    std::vector<RequestStepResult>* results = nullptr);
   bool TryApplyBatchedGuidanceMasks(std::vector<DeviceSpan<float>>& logits);
   // Verifies each drafted request's proposal against the target model's own rows, rewinds the
   // rejected tail, and returns the one row per request that the sampler must select from.

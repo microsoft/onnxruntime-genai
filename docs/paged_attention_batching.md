@@ -1,6 +1,8 @@
 # Engine Batching Design
 
 > This document records the design and performance history of engine batching work. For the authoritative description of the current continuous-batching implementation, including paged-cache transactions, rollback, and commit ordering, see [Paged Attention Engine](paged_attention_engine.md).
+> Caller-supplied speculative drafts were added after the batching phases described here; their
+> scheduling and commit behavior is documented in [Caller-supplied speculative drafts](paged_attention_engine.md#caller-supplied-speculative-drafts).
 
 Status: "Phase 1" is [PR #2343](https://github.com/microsoft/onnxruntime-genai/pull/2343);
 "Phase 2" is [PR #2345](https://github.com/microsoft/onnxruntime-genai/pull/2345), stacked on it.
@@ -392,9 +394,9 @@ Generator design" option in its strongest form. It was rejected because it requi
 `Sequences` to carry a per-row length cursor (today: one `current_length_`, and `GetSequence(i)`
 depends on it), reworking every kernel that writes at a shared `past_length` offset, moving
 per-request `GeneratorParams` into per-row arrays, and adding row allocation/eviction to `Search`.
-It also collides with `Request`'s public lifecycle — `Assign`, `Remove`, `AddTokens`, and `Continue` can all be
-called outside the engine. It is a plausible long-term direction, but it is a rewrite of the search
-layer, and Phase 2 gets most of the benefit without touching any of it.
+It also collides with the Engine-owned Request lifecycle and its externally serialized
+`BeginTurn`/`Run`/`Close` contract. It is a plausible long-term direction, but it is a rewrite of the
+search layer, and Phase 2 gets most of the benefit without touching any of it.
 
 **Batch `CheckForEOSAndPad` and `AppendNextTokensToSequences` too.** Worth roughly 0.16 ms. Needs
 per-row done flags, per-row EOS token sets and pointer-array kernels because each request's

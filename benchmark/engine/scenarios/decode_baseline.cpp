@@ -12,6 +12,7 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -22,6 +23,13 @@ namespace engine_benchmark {
 namespace {
 
 constexpr int kRandomSeed = 42;
+
+struct RequestRunState {
+  std::vector<int32_t> tokens;
+  double first_token_ms{-1.0};
+  std::chrono::steady_clock::time_point last_token_time;
+  std::vector<double> inter_token_latency_ms;
+};
 
 bool IsAllowedConcurrency(int concurrency) {
   return concurrency == 1 || concurrency == 2 || concurrency == 4 || concurrency == 8;
@@ -80,11 +88,10 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
     const bool is_warmup = run < config.warmup_runs;
 
     std::vector<std::unique_ptr<OgaGeneratorParams>> params;
+    std::vector<RequestRunState> request_states(static_cast<size_t>(config.concurrency));
     std::vector<std::unique_ptr<OgaRequest>> requests;
-    std::vector<std::vector<int32_t>> request_tokens(static_cast<size_t>(config.concurrency));
-    std::vector<double> first_token_ms(static_cast<size_t>(config.concurrency), -1.0);
-    std::vector<std::chrono::steady_clock::time_point> last_token_time(static_cast<size_t>(config.concurrency));
-    std::vector<std::vector<double>> request_itl_ms(static_cast<size_t>(config.concurrency));
+    std::unordered_map<const OgaRequest*, RequestRunState*>
+        request_states_by_request;
 
     params.reserve(static_cast<size_t>(config.concurrency));
     requests.reserve(static_cast<size_t>(config.concurrency));
@@ -100,48 +107,61 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
           "max_length", static_cast<double>(max_length));
       params.back()->SetSearchOption("random_seed", kRandomSeed);
 
-      request_tokens[static_cast<size_t>(i)].assign(
+      auto& request_state = request_states[static_cast<size_t>(i)];
+      request_state.tokens.assign(
           prompt_tokens->SequenceData(0), prompt_tokens->SequenceData(0) + prompt_token_count);
 
-      requests.emplace_back(OgaRequest::Create(*params.back()));
-      requests.back()->AddTokens(*prompt_tokens);
-      requests.back()->SetOpaqueData(&request_tokens[static_cast<size_t>(i)]);
-      engineResources.engine->Add(*requests.back());
+      requests.emplace_back(engineResources.engine->CreateRequest(*params.back()));
+      request_states_by_request.emplace(
+          requests.back().get(), &request_state);
+      requests.back()->BeginTurn(
+          prompt_tokens->SequenceData(0), prompt_token_count);
     }
 
-    while (auto ready_request = engineResources.engine->Step()) {
+    auto event_buffer = engineResources.engine->CreateEventBuffer(
+        static_cast<size_t>(config.concurrency));
+    size_t consecutive_retries = 0;
+    while (engineResources.engine->HasPendingRequests()) {
+      const size_t event_count = engineResources.engine->Run(
+          *event_buffer);
       const auto now = std::chrono::steady_clock::now();
-      auto* tokens = reinterpret_cast<std::vector<int32_t>*>(ready_request->GetOpaqueData());
-      if (tokens == nullptr) {
-        throw std::runtime_error(log_tag + ": null opaque data from request");
-      }
-
-      const auto base_addr = reinterpret_cast<std::uintptr_t>(request_tokens.data());
-      const auto ptr_addr = reinterpret_cast<std::uintptr_t>(tokens);
-      const auto end_addr =
-          reinterpret_cast<std::uintptr_t>(request_tokens.data() + request_tokens.size());
-
-      if (ptr_addr < base_addr || ptr_addr >= end_addr) {
-        throw std::runtime_error(log_tag + ": opaque data pointer not in request_tokens");
-      }
-
-      const auto request_index =
-          static_cast<size_t>((ptr_addr - base_addr) / sizeof(std::vector<int32_t>));
-
-      while (ready_request->HasUnseenTokens()) {
-        tokens->push_back(ready_request->GetUnseenToken());
-        ++generated_tokens;
-
-        const double elapsed_ms = std::chrono::duration<double, std::milli>(now - run_start).count();
-        if (first_token_ms[request_index] < 0.0) {
-          first_token_ms[request_index] = elapsed_ms;
-        } else {
-          request_itl_ms[request_index].push_back(
-              std::chrono::duration<double, std::milli>(now - last_token_time[request_index]).count());
+      for (size_t event_index = 0; event_index < event_count; ++event_index) {
+        const auto& event = *event_buffer->Get(event_index);
+        if (!RequireRequestEvent(
+                event, Name(), consecutive_retries)) {
+          continue;
         }
+        const auto state_it =
+            request_states_by_request.find(&event.Request()->get());
+        if (state_it == request_states_by_request.end()) {
+          throw std::runtime_error(
+              log_tag + ": event request has no benchmark state");
+        }
+        auto* request_state = state_it->second;
 
-        last_token_time[request_index] = now;
+        if ((event.Flags() & OgaEngineEventFlag_Token) != 0) {
+          request_state->tokens.push_back(event.Token());
+          ++generated_tokens;
+
+          const double elapsed_ms =
+              std::chrono::duration<double, std::milli>(
+                  now - run_start)
+                  .count();
+          if (request_state->first_token_ms < 0.0) {
+            request_state->first_token_ms = elapsed_ms;
+          } else {
+            request_state->inter_token_latency_ms.push_back(
+                std::chrono::duration<double, std::milli>(
+                    now - request_state->last_token_time)
+                    .count());
+          }
+
+          request_state->last_token_time = now;
+        }
       }
+    }
+    for (const auto& request : requests) {
+      request->Close();
     }
 
     const auto run_end = std::chrono::steady_clock::now();
@@ -164,12 +184,13 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
     tokens_per_s_values.push_back(tokens_per_s);
 
     for (int i = 0; i < config.concurrency; ++i) {
-      const double ttft_ms = std::max(0.0, first_token_ms[static_cast<size_t>(i)]);
+      auto& request_state = request_states[static_cast<size_t>(i)];
+      const double ttft_ms = std::max(0.0, request_state.first_token_ms);
       ttft_values.push_back(ttft_ms);
 
       // Each request record reports its own median inter-token latency, not the global one.
-      auto& request_samples = request_itl_ms[static_cast<size_t>(i)];
-      const size_t actual_generated = request_tokens[static_cast<size_t>(i)].size() - prompt_token_count;
+      auto& request_samples = request_state.inter_token_latency_ms;
+      const size_t actual_generated = request_state.tokens.size() - prompt_token_count;
       const bool completed = actual_generated == static_cast<size_t>(config.generation_tokens);
       output.requests.push_back(
           {measured_run_index * config.concurrency + i, ttft_ms, Percentile(request_samples, 50.0), completed});

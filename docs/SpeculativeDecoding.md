@@ -14,6 +14,12 @@ They also share proposal-width controls, optional cooldown behavior, lifecycle h
 statistics. The target model decides every committed token; speculative work does not relax the
 target model's decoding distribution.
 
+The continuous-batching `Engine` also has a lower-level API for **caller-supplied greedy draft
+proposals**. It is not a third automatic proposer strategy: the application produces the draft
+tokens and attaches them to an individual `Request` for its next Engine step. See
+[Engine caller-supplied proposals](#engine-caller-supplied-proposals) and
+[Paged Attention Engine](paged_attention_engine.md#caller-supplied-speculative-drafts).
+
 ## Choose a method
 
 Use **base speculative decoding** when:
@@ -87,6 +93,51 @@ speculative_options = {
 `GeneratorParams.get_speculative_options()` returns the effective configuration stored in
 `GeneratorParams`. It does not return the controller's current adaptive width; use
 `generator.get_speculative_stats()["effective_k"]` for that value.
+
+## Engine caller-supplied proposals
+
+Dynamic Engine clients can attach a proposed continuation to one request:
+
+```python
+# After Run has produced this request's first token event, prefill is complete.
+event_buffer = engine.create_event_buffer(8)
+max_drafts = engine.max_draft_tokens_per_proposal()
+if max_drafts:
+    request.set_draft_tokens(np.asarray(draft_ids[:max_drafts], dtype=np.int32))
+
+while engine.has_pending_requests():
+  events = engine.run(event_buffer)
+  for event in events:
+    if event.flags & og.EngineEventFlags.TOKEN:
+      consume(event.token)
+    if event.flags & og.EngineEventFlags.TURN_FINISHED:
+      finish(event.finish_reason)
+```
+
+Process every event in the reusable buffer before calling `run` again. If one model execution
+produces more events than the buffer holds, subsequent `run` calls drain the retained events before
+the Engine performs another model execution.
+
+The corresponding C APIs are `OgaEngineMaxDraftTokensPerProposal` and
+`OgaRequestSetDraftTokens`; the C++ wrappers are `OgaEngine::MaxDraftTokensPerProposal` and
+`OgaRequest::SetDraftTokens`.
+
+This API has a different ownership boundary from the automatic `Generator` strategies:
+
+- The application owns proposal generation; the Engine only verifies the supplied IDs.
+- The request must have completed prefill and be ready to decode; only dynamic batching is
+  supported.
+- Verification is greedy and accepts the longest prefix matching the target model's argmax rows.
+- Guidance and logits penalties are not supported for a request carrying a proposal.
+- The proposal applies to the next committed decode operation. Budgeting or cache pressure may
+  verify fewer drafts and still consumes the proposal. A rolled-back operation preserves it for
+  retry.
+- One verification run can publish several ordered token events: accepted drafts followed by one
+  target replacement or bonus token.
+
+`max_draft_tokens_per_proposal()` returns zero when the model emits only one logits row per request
+or its cache/state cannot commit a partial speculative prefix. A positive value is the per-request
+capability limit; the scheduler may use a smaller width for a particular operation.
 
 ## Model configuration
 
@@ -210,7 +261,10 @@ rewind/resume, and external logits APIs.
 | Hybrid SSM/attention state | Not supported | Not supported |
 | Model-managed state | May be used only when its rewind behavior satisfies the base path | Not supported |
 | Pruned last-token-only logits | Functional through sequential target verification, without the intended batched-verification benefit | Not supported |
-| Engine and continuous batching | Not supported | Not supported |
+| Automatic proposing in Engine and continuous batching | Not supported | Not supported |
+
+Caller-supplied greedy proposals are available through the separate Engine request API described
+above; this does not enable either automatic proposer in the table.
 
 Base speculative decoding also rejects `no_repeat_ngram_size != 0`. This search option is distinct
 from the `ngram_size` option that enables n-gram decoding.
