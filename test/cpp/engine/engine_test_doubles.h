@@ -207,6 +207,8 @@ struct RecordingCacheManager : CacheManager {
             cache.scripted_fixed_new_slot_count_;
         throw_prepare_ =
             std::exchange(cache.throw_prepare_failure_, false);
+        throw_release_ =
+            std::exchange(cache.throw_release_failure_, false);
       }
 
       std::span<const FixedStateSlotHandle> FixedStateSlots() const override {
@@ -249,6 +251,10 @@ struct RecordingCacheManager : CacheManager {
         if (committed_) {
           throw std::logic_error("Cannot release a committed recording cache reservation.");
         }
+        if (throw_release_) {
+          throw std::runtime_error(
+              "Injected cache transaction release failure.");
+        }
         cache_.reservation_release_calls++;
         released_ = true;
       }
@@ -259,6 +265,7 @@ struct RecordingCacheManager : CacheManager {
       size_t fixed_state_staging_bytes_{};
       size_t fixed_state_new_slot_count_{};
       bool throw_prepare_{};
+      bool throw_release_{};
       bool committed_{};
       bool released_{};
     };
@@ -293,6 +300,7 @@ struct RecordingCacheManager : CacheManager {
     overselect_planning_once_ = true;
   }
   void ThrowPrepareFailureOnce() { throw_prepare_failure_ = true; }
+  void ThrowReleaseFailureOnce() { throw_release_failure_ = true; }
   // Forces the composite plan/reservation consistency guard in Engine::StepDynamic. PlanStepResources
   // publishes `plan`, and every reservation reports slots, new-slot count, and staging bytes, so a
   // test can make the planned resources disagree with the reservation the Engine actually receives.
@@ -335,6 +343,7 @@ struct RecordingCacheManager : CacheManager {
   mutable bool throw_planning_consistency_{};
   mutable bool overselect_planning_once_{};
   bool throw_prepare_failure_{};
+  bool throw_release_failure_{};
   std::shared_ptr<CallTrace> trace_;
   bool can_allocate_verdict_{true};
   const void* unserviceable_request_id_{};
@@ -676,6 +685,37 @@ inline CompositeDoublesEngine MakeCompositeDoublesEngine(std::shared_ptr<Model> 
   EngineDependencies dependencies{std::move(cache), std::move(scheduler), std::move(executor)};
   auto engine = std::make_shared<Engine>(std::move(model), std::move(dependencies));
   return CompositeDoublesEngine{std::move(engine), cache_observer, executor_observer};
+}
+
+inline MtpDoublesEngine MakeMtpDoublesEngine(std::shared_ptr<Model> model,
+                                             int32_t forced_token) {
+  auto cache = std::make_shared<RecordingCacheManager>(model, /*capacity=*/8);
+  cache->SetMaxDraftTokensPerStep(3);
+  auto* cache_observer = cache.get();
+  auto scheduler = Scheduler::Create(model, cache);
+  auto executor = std::make_unique<RecordingModelExecutor>(
+      model, cache, forced_token);
+  executor->EnableHiddenStatesOutput(model->config_->model.decoder.hidden_size);
+  auto* executor_observer = executor.get();
+
+  auto mtp_model = std::make_shared<DecoderOnly_Model>(
+      CreateMtpDecoderConfig(*model->config_), GetOrtEnv());
+  auto mtp_cache = std::make_shared<RecordingCacheManager>(
+      mtp_model, /*capacity=*/8);
+  auto* mtp_cache_observer = mtp_cache.get();
+  auto mtp_executor = std::make_unique<RecordingModelExecutor>(
+      mtp_model, mtp_cache, forced_token);
+  mtp_executor->EnableHiddenStatesOutput(
+      mtp_model->config_->model.decoder.hidden_size);
+  auto* mtp_executor_observer = mtp_executor.get();
+
+  EngineDependencies dependencies{
+      std::move(cache), std::move(scheduler), std::move(executor),
+      std::move(mtp_model), std::move(mtp_cache), std::move(mtp_executor)};
+  auto engine = std::make_shared<Engine>(std::move(model), std::move(dependencies));
+  return MtpDoublesEngine{
+      nullptr, std::move(engine), cache_observer, executor_observer,
+      mtp_cache_observer, mtp_executor_observer, nullptr};
 }
 
 }  // namespace test

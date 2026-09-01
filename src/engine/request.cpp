@@ -581,6 +581,7 @@ void Request::RestoreStateForTransaction() {
   staged_draft_count_ = 0;
   accepted_draft_count_ = 0;
   scheduled_token_count_ = 0;
+  draft_verification_completed_generation_ = false;
   if (guidance_transaction_checkpoint_) {
     guidance_logits_processor_ = std::move(guidance_transaction_checkpoint_);
   }
@@ -594,6 +595,7 @@ void Request::QueueStateRestoreForTransaction() {
   staged_draft_count_ = 0;
   accepted_draft_count_ = 0;
   scheduled_token_count_ = 0;
+  draft_verification_completed_generation_ = false;
 }
 
 void Request::CompleteStateRestoreForTransaction() {

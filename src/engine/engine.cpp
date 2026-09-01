@@ -6,13 +6,15 @@
 
 #include <limits>
 
-#include "../search.h"
-
 namespace Generators {
 
 static_assert(kMaxDraftTokensPerStep < kSpeculativeAcceptanceLengthBins);
 
 namespace {
+
+struct MtpRollbackError : std::runtime_error {
+  using std::runtime_error::runtime_error;
+};
 
 std::shared_ptr<GeneratorParams> CloneRequestParams(
     const GeneratorParams& source,
@@ -230,6 +232,36 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
   feeds.reserve(target_plan.requests.size());
   std::vector<std::shared_ptr<Request>> checkpointed_shadows;
   checkpointed_shadows.reserve(target_plan.requests.size());
+  const auto restore_checkpointed_shadows = [&]() {
+    std::exception_ptr rollback_error;
+    for (auto it = checkpointed_shadows.rbegin();
+         it != checkpointed_shadows.rend(); ++it) {
+      try {
+        (*it)->RestoreStateForTransaction();
+      } catch (...) {
+        if (!rollback_error) {
+          rollback_error = std::current_exception();
+        }
+      }
+    }
+    if (rollback_error) {
+      std::rethrow_exception(rollback_error);
+    }
+  };
+  const auto rollback_setup_and_rethrow =
+      [&](std::exception_ptr setup_error) -> void {
+    try {
+      restore_checkpointed_shadows();
+    } catch (...) {
+      auto message = AddExceptionCause(
+          "MTP shadow setup failed.", setup_error);
+      message = AddExceptionCause(
+          std::move(message) + " Shadow rollback also failed.",
+          std::current_exception());
+      throw MtpRollbackError(std::move(message));
+    }
+    std::rethrow_exception(setup_error);
+  };
   size_t total_rows = 0;
   try {
     for (size_t i = 0; i < target_plan.requests.size(); ++i) {
@@ -298,54 +330,52 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
       feeds.push_back(std::move(feed));
     }
   } catch (...) {
-    const auto setup_error = std::current_exception();
-    for (auto it = checkpointed_shadows.rbegin(); it != checkpointed_shadows.rend(); ++it) {
-      try {
-        (*it)->RestoreStateForTransaction();
-      } catch (...) {
-      }
-    }
-    std::rethrow_exception(setup_error);
+    rollback_setup_and_rethrow(std::current_exception());
   }
   if (feeds.empty()) {
     return nullptr;
   }
 
-  auto step = std::make_unique<MtpStep>();
-  step->plan.transaction_id = target_plan.transaction_id;
-  step->plan.scheduled_request_limit = feeds.size();
-  step->plan.token_count = total_rows;
-  step->target_requests.reserve(feeds.size());
-  step->newly_created.reserve(feeds.size());
-  step->drafts.resize(feeds.size());
+  std::unique_ptr<MtpStep> step;
+  try {
+    step = std::make_unique<MtpStep>();
+    step->plan.transaction_id = target_plan.transaction_id;
+    step->plan.scheduled_request_limit = feeds.size();
+    step->plan.token_count = total_rows;
+    step->target_requests.reserve(feeds.size());
+    step->newly_created.reserve(feeds.size());
+    step->drafts.resize(feeds.size());
 
-  size_t packed_offset = 0;
-  for (const auto& feed : feeds) {
-    const size_t token_count = feed.tokens.size();
-    const size_t processed = static_cast<size_t>(feed.shadow->ProcessedSequenceLength());
-    step->plan.requests.push_back(RequestStepPlan{
-        feed.shadow,
-        feed.shadow.get(),
-        feed.shadow->CurrentSequenceLength(),
-        token_count,
-        0,
-        packed_offset,
-        packed_offset + token_count - 1,
-        processed + token_count,
-        static_cast<size_t>(feed.shadow->CurrentSequenceLength()) +
-            feed.max_draft_tokens - 1,
-        feed.shadow->IsPrefill(),
-        feed.newly_created,
-    });
-    step->target_requests.push_back(feed.target);
-    step->newly_created.push_back(feed.newly_created);
-    packed_offset += token_count;
-  }
-  step->plan.graph_capture_eligible = std::all_of(
-      step->plan.requests.begin(), step->plan.requests.end(),
-      [](const RequestStepPlan& entry) {
-        return !entry.is_prefill && entry.unprocessed_token_count == 1;
+    size_t packed_offset = 0;
+    for (const auto& feed : feeds) {
+      const size_t token_count = feed.tokens.size();
+      const size_t processed = static_cast<size_t>(feed.shadow->ProcessedSequenceLength());
+      step->plan.requests.push_back(RequestStepPlan{
+          feed.shadow,
+          feed.shadow.get(),
+          feed.shadow->CurrentSequenceLength(),
+          token_count,
+          0,
+          packed_offset,
+          packed_offset + token_count - 1,
+          processed + token_count,
+          static_cast<size_t>(feed.shadow->CurrentSequenceLength()) +
+              feed.max_draft_tokens - 1,
+          feed.shadow->IsPrefill(),
+          feed.newly_created,
       });
+      step->target_requests.push_back(feed.target);
+      step->newly_created.push_back(feed.newly_created);
+      packed_offset += token_count;
+    }
+    step->plan.graph_capture_eligible = std::all_of(
+        step->plan.requests.begin(), step->plan.requests.end(),
+        [](const RequestStepPlan& entry) {
+          return !entry.is_prefill && entry.unprocessed_token_count == 1;
+        });
+  } catch (...) {
+    rollback_setup_and_rethrow(std::current_exception());
+  }
 
   try {
     const auto planning = mtp_cache_manager_->PlanStepResources(step->plan);
@@ -609,8 +639,18 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
       }
     }
   } catch (...) {
-    RollbackMtpStep(*step);
-    throw;
+    const auto preparation_error = std::current_exception();
+    try {
+      RollbackMtpStep(*step);
+    } catch (...) {
+      auto message = AddExceptionCause(
+          "MTP step preparation failed.", preparation_error);
+      message = AddExceptionCause(
+          std::move(message) + " MTP rollback also failed.",
+          std::current_exception());
+      throw MtpRollbackError(std::move(message));
+    }
+    std::rethrow_exception(preparation_error);
   }
   return step;
 }
@@ -1460,6 +1500,16 @@ void Engine::RunDynamic() {
             return step_plan_.requests[left].scheduling_order <
                    step_plan_.requests[right].scheduling_order;
           });
+    } catch (const MtpRollbackError&) {
+      const auto rollback_error = std::current_exception();
+      rollback_transaction();
+      ++transaction_metrics_.post_processing_aborts;
+      MarkUnhealthyAndThrow(
+          StepOutcomeKind::FatalExecutionFailure,
+          step_plan_.transaction_id,
+          nullptr,
+          "MTP rollback failed and the Engine is no longer healthy.",
+          rollback_error);
     } catch (const std::logic_error&) {
       const auto post_processing_error = std::current_exception();
       rollback_transaction();

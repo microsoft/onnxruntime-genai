@@ -318,6 +318,9 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
       const auto resource_result = cache_manager_->PlanStepResources(plan);
       if (resource_result.executable &&
           plan.requests.size() == selected_request_count) {
+        for (const auto& entry : plan.requests) {
+          token_counts[entry.scheduling_order] = entry.unprocessed_token_count;
+        }
         break;
       }
 
