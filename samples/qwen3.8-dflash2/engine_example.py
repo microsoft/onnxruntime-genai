@@ -27,8 +27,7 @@ def detect_drafter(model_dir: Path) -> tuple[str | None, int]:
     declared = [key for key in DRAFTER_KEYS if model.get(key, {}).get("filename")]
     if len(declared) > 1:
         raise ValueError(
-            f"'{config_path}' declares more than one drafter ({', '.join(declared)}). "
-            "Exactly one is supported."
+            f"'{config_path}' declares more than one drafter ({', '.join(declared)}). Exactly one is supported."
         )
     if not declared:
         return None, 0
@@ -85,9 +84,7 @@ def load_prompts(path: Path) -> list[str]:
         or not values
         or any(not isinstance(value, str) or not value.strip() for value in values)
     ):
-        raise ValueError(
-            f"Prompt file '{path}' must contain a non-empty JSON array of non-empty strings."
-        )
+        raise ValueError(f"Prompt file '{path}' must contain a non-empty JSON array of non-empty strings.")
     return values
 
 
@@ -113,17 +110,12 @@ def register_cuda_plugin(
         resolved_library = library_path.expanduser().resolve()
 
     if not resolved_library.is_file():
-        raise FileNotFoundError(
-            f"CUDA plugin EP library was not found: {resolved_library}"
-        )
+        raise FileNotFoundError(f"CUDA plugin EP library was not found: {resolved_library}")
     og.register_execution_provider_library(
         registration_name,
         str(resolved_library),
     )
-    print(
-        f"Registered CUDA plugin EP '{registration_name}' from "
-        f"{resolved_library}"
-    )
+    print(f"Registered CUDA plugin EP '{registration_name}' from {resolved_library}")
 
 
 def build_overlay(args, drafter: str | None) -> dict:
@@ -163,9 +155,7 @@ def run_warmup(
         while engine.has_pending_requests():
             for event in engine.run(event_buffer):
                 if event.flags & og.EngineEventFlags.FAILED:
-                    raise RuntimeError(
-                        f"Warmup request failed; error_code={event.error_code}"
-                    )
+                    raise RuntimeError(f"Warmup request failed; error_code={event.error_code}")
     finally:
         request.close()
 
@@ -194,19 +184,14 @@ def speculative_metrics(
     metrics = {key: delta(key) for key in counters}
 
     evaluated = metrics["draft_tokens_evaluated"]
-    metrics["acceptance_rate"] = (
-        metrics["draft_tokens_accepted"] / evaluated if evaluated else None
-    )
+    metrics["acceptance_rate"] = metrics["draft_tokens_accepted"] / evaluated if evaluated else None
     target_forwards = metrics["target_forward_passes"]
-    metrics["output_tokens_per_target_forward"] = (
-        output_tokens / target_forwards if target_forwards else None
-    )
+    metrics["output_tokens_per_target_forward"] = output_tokens / target_forwards if target_forwards else None
 
     histogram = stats.get("acceptance_length_histogram") or []
     base_histogram = (baseline.get("acceptance_length_histogram") or []) if baseline else []
     metrics["acceptance_length_histogram"] = [
-        bucket - (base_histogram[index] if index < len(base_histogram) else 0)
-        for index, bucket in enumerate(histogram)
+        bucket - (base_histogram[index] if index < len(base_histogram) else 0) for index, bucket in enumerate(histogram)
     ]
     return metrics
 
@@ -328,10 +313,7 @@ def main() -> None:
         batch_size = 1
     if batch_size <= 0:
         parser.error("--batch-size must be positive")
-    prompts = [
-        prompt_pool[index % len(prompt_pool)]
-        for index in range(batch_size)
-    ]
+    prompts = [prompt_pool[index % len(prompt_pool)] for index in range(batch_size)]
 
     if args.max_new_tokens <= 0:
         parser.error("--max-new-tokens must be positive")
@@ -344,11 +326,7 @@ def main() -> None:
 
     model_dir = args.model.expanduser().resolve()
     drafter, configured_draft_tokens = detect_drafter(model_dir)
-    max_draft_tokens = (
-        args.max_draft_tokens
-        if args.max_draft_tokens is not None
-        else configured_draft_tokens
-    )
+    max_draft_tokens = args.max_draft_tokens if args.max_draft_tokens is not None else configured_draft_tokens
     speculative = drafter is not None and not args.no_drafter and max_draft_tokens > 0
     if args.no_drafter and drafter is None:
         parser.error(f"--no-drafter was passed but '{model_dir}' declares no drafter")
@@ -375,20 +353,14 @@ def main() -> None:
     event_buffer = engine.create_event_buffer(args.event_buffer_capacity)
 
     template_str = chat_template(model_dir, args.thinking, args.reasoning_effort)
-    input_ids_by_index = {
-        index: encode_prompt(tokenizer, prompt, template_str)
-        for index, prompt in enumerate(prompts)
-    }
+    input_ids_by_index = {index: encode_prompt(tokenizer, prompt, template_str) for index, prompt in enumerate(prompts)}
     oversized = {
         index: len(input_ids)
         for index, input_ids in input_ids_by_index.items()
         if len(input_ids) > args.max_prompt_tokens
     }
     if oversized:
-        details = ", ".join(
-            f"request {index}: {length}"
-            for index, length in oversized.items()
-        )
+        details = ", ".join(f"request {index}: {length}" for index, length in oversized.items())
         parser.error(
             f"Prompt token count exceeds --max-prompt-tokens={args.max_prompt_tokens} "
             f"({details}). Raise the limit explicitly for a long-context test."
@@ -433,19 +405,14 @@ def main() -> None:
                 if event.request is None:
                     # Engine-level notices such as CAPACITY_BLOCKED carry no request.
                     if event.flags & og.EngineEventFlags.FAILED:
-                        raise RuntimeError(
-                            f"Engine failed; flags={event.flags}, "
-                            f"error_code={event.error_code}"
-                        )
+                        raise RuntimeError(f"Engine failed; flags={event.flags}, error_code={event.error_code}")
                     continue
                 index = requests[event.request]
                 if event.flags & og.EngineEventFlags.TOKEN:
                     outputs[index].append(int(event.token))
                     token_times[index].append(time.perf_counter())
                 if event.flags & og.EngineEventFlags.FAILED:
-                    raise RuntimeError(
-                        f"Request {index} failed; error_code={event.error_code}"
-                    )
+                    raise RuntimeError(f"Request {index} failed; error_code={event.error_code}")
                 if event.flags & og.EngineEventFlags.TURN_FINISHED:
                     finished_at[index] = time.perf_counter()
                     event.request.close()
@@ -460,27 +427,13 @@ def main() -> None:
         print(f"Response {index + 1}: {tokenizer.decode(outputs[index])}")
 
     if args.metrics:
-        first_token_at = {
-            index: times[0] for index, times in token_times.items() if times
-        }
-        last_token_at = {
-            index: times[-1] for index, times in token_times.items() if times
-        }
+        first_token_at = {index: times[0] for index, times in token_times.items() if times}
+        last_token_at = {index: times[-1] for index, times in token_times.items() if times}
         all_requests_produced_tokens = len(first_token_at) == len(prompts)
-        last_first_token_at = (
-            max(first_token_at.values()) if all_requests_produced_tokens else None
-        )
-        prompt_seconds = (
-            last_first_token_at - benchmark_start
-            if last_first_token_at is not None
-            else None
-        )
+        last_first_token_at = max(first_token_at.values()) if all_requests_produced_tokens else None
+        prompt_seconds = last_first_token_at - benchmark_start if last_first_token_at is not None else None
         steady_decode_tokens = (
-            sum(
-                timestamp > last_first_token_at
-                for times in token_times.values()
-                for timestamp in times
-            )
+            sum(timestamp > last_first_token_at for times in token_times.values() for timestamp in times)
             if last_first_token_at is not None
             else 0
         )
@@ -499,11 +452,7 @@ def main() -> None:
             "input_tokens": sum(map(len, input_ids_by_index.values())),
             "output_tokens": output_tokens,
             "ttft_seconds": {
-                str(index): (
-                    first_token_at[index] - submitted_at[index]
-                    if index in first_token_at
-                    else None
-                )
+                str(index): (first_token_at[index] - submitted_at[index] if index in first_token_at else None)
                 for index in range(len(prompts))
             },
             "all_requests_ttft_seconds": prompt_seconds,
@@ -513,20 +462,14 @@ def main() -> None:
                 else None
             ),
             "steady_decode_tokens_per_second": (
-                steady_decode_tokens / decode_seconds
-                if decode_seconds is not None and decode_seconds > 0
-                else None
+                steady_decode_tokens / decode_seconds if decode_seconds is not None and decode_seconds > 0 else None
             ),
             "total_seconds": (
-                max(finished_at.values()) - benchmark_start
-                if len(finished_at) == len(prompts)
-                else None
+                max(finished_at.values()) - benchmark_start if len(finished_at) == len(prompts) else None
             ),
         }
         if speculative:
-            metrics["speculative"] = speculative_metrics(
-                engine, output_tokens, stats_baseline
-            )
+            metrics["speculative"] = speculative_metrics(engine, output_tokens, stats_baseline)
         print("\nMetrics:")
         print(json.dumps(metrics, indent=2, sort_keys=True))
 

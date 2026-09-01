@@ -14,7 +14,9 @@ easy to:
 - measure time to first token, prompt throughput, and decode throughput;
 - use built-in CUDA or a CUDA plugin execution provider.
 
-For the non-speculative version of this sample, see [`../qwen3.8`](../qwen3.8).
+For a non-speculative baseline, run this same sample with `--no-drafter`: it drops
+the drafter session and decodes one token per target forward from the same model
+directory, so the two runs are directly comparable.
 
 The sample is drafter-agnostic. It reads `genai_config.json` and picks up
 whichever of `model.dflash2`, `model.dspark`, or `model.mtp` declares a
@@ -239,11 +241,80 @@ Read `output_tokens_per_target_forward` as the headline number;
 `acceptance_rate` explains it. Both are workload-specific and are not a
 substitute for a task-level quality evaluation.
 
+## Sweep contexts and batch sizes
+
+`benchmark.py` runs a matrix of context lengths and batch sizes and, by default,
+runs both the speculative and the `--no-drafter` arm so every cell gets a
+speedup. Prompts are synthesized from filler text to hit a requested token
+length, so context is controlled rather than dependent on the bundled prompts.
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python benchmark.py \
+  --model ~/models_local/qwen3.8-27b-nvfp4-int8-kv-dflash2 \
+  --context-length 512 --context-length 2048 --context-length 8192 \
+  --batch-size 1 --batch-size 4 \
+  --generate-length 256 \
+  --max-batch-size 4 --num-blocks 512 \
+  --json-out bench.json
+```
+
+It prints a markdown table and optionally writes the full per-cell record as
+JSON:
+
+| ctx | batch | arm | prompt tok | TTFT s | decode tok/s | accept | tok/target fwd | speedup |
+| ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 512 | 1 | speculative | 492 | 0.114 | 158.0 | 0.724 | 3.28 | 2.153x |
+| 2048 | 1 | speculative | 2028 | 0.320 | 170.1 | 0.742 | 3.56 | 2.334x |
+| 2048 | 4 | speculative | 2028 | 0.964 | 416.9 | 0.787 | 16.00 | 1.548x |
+
+`--arms speculative` or `--arms baseline` runs a single arm; the speedup column
+needs both. Each arm loads the model once and reuses one engine across its cells,
+so `--max-batch-size` and `--num-blocks` must cover the largest cell.
+
+The script warms up at the largest context and batch size before measuring.
+Without that, the first measured cell absorbs first-touch allocation and reads
+roughly twice as slow as it should. `--no-warmup` disables it, which is only
+useful for measuring cold-start cost deliberately. Keep `--generate-length` at a
+few hundred tokens: the decode-rate window is the span after every request has
+produced its first token, and very short generations make it noisy.
+
+### Requirements for speculation to engage
+
+The engine silently decodes one token per forward unless all of these hold, so a
+benchmark that violates one measures the baseline while reporting the
+speculative arm:
+
+- greedy decoding, or sampling with a positive `top_k`;
+- `repetition_penalty == 1` and `no_repeat_ngram_size == 0`;
+- the sequence is already past `min_length`.
+
+The last one is easy to trip: pinning `min_length` to `max_length` to force a
+fixed output length disables drafting for the entire run. `benchmark.py`
+therefore sets only `max_length`, and reports `completed_full_length` per cell so
+a request that stopped early on EOS is visible instead of quietly skewing the
+rate.
+
 ## Interpreting FP16 versus INT8 KV
 
-INT8 KV cache is a capacity win, not a general throughput win. It halves the
-paged pool (8 MiB versus 16 MiB per 256-token block), which is what makes very
-long contexts fit on a single H200. At short context the two are close, but
-INT8's target forward has been measured slower than FP16's as context grows,
-because quantized prefill still needs a dequantized gather. Compare the two
-model directories at a fixed `--num-blocks` if you want a controlled A/B.
+INT8 KV cache is first of all a capacity win. It halves the paged pool (8 MiB
+versus 16 MiB per 256-token block), which is what makes very long contexts fit on
+a single H200.
+
+It is competitive on speed too, once the speculative paged XQA kernel is
+available for a quantized cache. Measured on H200 with generation 256 and a
+draft width of 7, decode throughput in tokens per second:
+
+| Context | batch | INT8 KV | FP16 KV |
+| ---: | ---: | ---: | ---: |
+| 512 | 1 | 156.6 | 364.6 |
+| 2048 | 1 | 233.1 | 184.2 |
+| 8192 | 1 | 161.2 | 133.9 |
+| 32768 | 1 | 178.5 | 119.0 |
+
+INT8 leads from 2K upward and the gap widens with context; FP16 leads at very
+short context. Treat the cross-dtype numbers as indicative only: the two arms
+follow different token trajectories and their acceptance rates differ (0.72
+versus 0.98 in the 512/1 cell above), so throughput mixes engine speed with
+acceptance luck. `output_tokens_per_target_forward` is the acceptance-aware
+figure, and a fixed `--num-blocks` on both sides is what makes the comparison
+controlled.
