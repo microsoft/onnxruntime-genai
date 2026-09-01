@@ -13,8 +13,10 @@ The dynamic path manages paged KV decoder state together with per-request search
 > **Experimental low-level API:** An Engine creates model-bound Requests. `BeginTurn()` queues both
 > initial input and later continuation input and snapshots an opaque `TurnOptions` object. Request
 > creation can also snapshot a prompt-plus-generated session-token limit. Successful Turns receive
-> nonzero, monotonically increasing request-local IDs; zero means no Turn. `Run()` performs synchronous progress and
-> returns one typed `EngineEvent`; token and completion payloads are selected by event flags.
+> nonzero, monotonically increasing request-local IDs; zero means no Turn. `Run()` performs
+> synchronous progress and writes zero or more typed `EngineEvent` records into caller-provided
+> storage; capacity one preserves one-event pacing. Token and completion payloads are selected by
+> event flags.
 > `CancelTurn(turn_id)` stops only the named Turn, and `Close()` releases Engine resources.
 > `OgaCreateEngine` retains shared ownership of the underlying Model, so the caller may release its
 > `OgaModel` handle after successful Engine creation. The Model remains alive until Engine teardown
@@ -56,7 +58,7 @@ The paged KV cache makes this practical. A request does not need one large conti
 At a high level, one dynamic engine step is:
 
 ```text
-drain one pending Engine event, if one exists
+drain pending Engine events up to caller capacity, if any exist
     |
 plan a runnable batch
     |
@@ -74,7 +76,7 @@ sample and stage one result per request
     |
 commit search state, cache state, and request bookkeeping
     |
-return committed events one at a time
+write committed events up to caller capacity and retain overflow
 ```
 
 The step is transactional before publication. Planning, reservation, execution, and fixed-state
@@ -241,12 +243,21 @@ longer need continuation when deterministic immediate reclamation is required.
 ### `Close()`
 
 `Close()` is legal from every state, is sequentially idempotent, and moves the request to terminal
-`Closed`. On the dynamic path, close immediately erases scheduler membership and releases
-committed paged-cache ownership and, for a composite model, the request's committed fixed-state slot.
-The Engine also removes any undrained pending events for that request. Close and owner-thread
-abandonment reclamation release Search, guidance, sampler, and parameter runtime state before the
-Engine drops its strong Request reference. Final-handle abandonment performs the same logical
-removal and event purge when the Engine next reaches an owner-thread boundary.
+`Closed`. The Engine immediately excludes it from scheduling and removes any undrained pending
+events for that request. On the dynamic path, close also immediately releases committed paged-cache
+ownership and, for a composite model, the request's committed fixed-state slot. Search, guidance,
+sampler, parameter, and token-mirror state are then released before the Engine drops its strong
+Request reference.
+
+A resident static row cannot release all runtime objects independently because the static decoder
+and shared cache allocation still read its Search sequence, parameters, host token mirror, and
+length metadata while another row executes. Static close releases sampling-only state immediately
+but retains that row-essential state, without logical execution or event delivery, until the
+complete static batch is recycled on the Engine owner thread. The Engine then releases the retained
+runtime state and drops its strong Request reference, leaving any surviving public handle as a
+lightweight closed tombstone. A nonresident static Request completes physical close immediately.
+Final-handle abandonment performs the same logical removal and event purge at the next owner-thread
+boundary and follows the same dynamic-immediate or static-retained physical cleanup.
 
 Events already copied by the host remain host-owned. Destroying the Engine terminalizes every bound
 Request through a teardown-specific no-throw detach path that does not rely on the Request's expired
@@ -355,7 +366,9 @@ event.
 A committed step emits a token event, a terminal event, or one combined
 `Token | TurnFinished` event. EOS can emit terminal completion without a visible token. Event
 delivery does not mutate the Request's retained logical sequence. One successful committed step
-produces at most one combined event per affected Request.
+produces at most one combined event per affected Request. If speculative verification accepts a
+visible draft immediately before an accepted EOS ends the Turn, the accepted visible token and
+terminal completion share that combined event; the EOS itself is never emitted as a token.
 
 A chunked partial-prefill transaction can commit cache and Request progress without producing an
 event. `Run()` then returns count zero while `HasPendingRequests()` remains true. It does not loop
@@ -1028,9 +1041,12 @@ too, although static execution does not use the dynamic reservation/checkpoint t
 Close or abandonment logically removes a Request from scheduling and purges its undelivered events.
 A closed Request that is already resident in a static batch nevertheless remains part of that
 shared physical allocation until the batch is recycled. It is not sampled or returned again, but
-its row and cache allocation can remain alive for the lifetime of the batch. Request Search and
-other device-affine runtime state are released at the owner-thread close boundary. Static cleanup
-therefore must not be described or tested as immediate per-Request cache deallocation.
+its row and cache allocation can remain alive for the lifetime of the batch. The Request's Search,
+parameters, host token mirror, and length metadata remain available only to keep that physical row
+safe; sampling-only state is released at logical close. When the whole batch is recycled, the Engine
+releases the retained state on its owner thread and the closed Request becomes a lightweight
+tombstone. Static cleanup therefore must not be described or tested as either deferred logical
+close or immediate per-Request physical deallocation.
 
 Changes to shared types such as `Request`, `ScheduledRequests`, `ModelExecutor`, or `SimpleDecoder` should be checked against both paths. This document should be updated only where behavior is shared or where the dynamic path changes.
 

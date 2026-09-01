@@ -1019,13 +1019,15 @@ TEST_F(EngineRunTest, StaticBatchReturnsAllRowEventsWhenCapacitySuffices) {
             EngineEventFlagToken | EngineEventFlagTurnFinished);
 }
 
-TEST_F(EngineRunTest, StaticCloseRejectsStateReleaseNeededByExecutablePeer) {
+TEST_F(EngineRunTest, StaticCloseLogicallyRemovesActiveRowWhilePeerContinues) {
   model_->config_->engine.dynamic_batching.reset();
-  auto cache = std::make_shared<RecordingCacheManager>(
-      model_, /*capacity=*/4, nullptr, /*supports_dynamic_batching=*/false);
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto cache = std::make_shared<StaticCacheManager>(model_);
   auto scheduler = Scheduler::Create(model_, cache);
   auto executor = std::make_unique<RecordingModelExecutor>(
-      model_, cache, /*forced_token=*/5);
+      model_, cache, filler);
+  auto* executor_observer = executor.get();
   EngineDependencies dependencies{cache, std::move(scheduler),
                                   std::move(executor)};
   auto engine = std::make_shared<Engine>(model_, std::move(dependencies));
@@ -1034,46 +1036,105 @@ TEST_F(EngineRunTest, StaticCloseRejectsStateReleaseNeededByExecutablePeer) {
   first->BeginTurn(Prompt(10), std::optional<size_t>{2});
   second->BeginTurn(Prompt(20), std::optional<size_t>{2});
 
-  std::array<EngineEvent, 2> storage;
-  ASSERT_EQ(engine->Run(storage), storage.size());
+  // Capacity one retains the second row's first token event inside the Engine.
+  ASSERT_EQ(RunOne(*engine).request, first);
   ASSERT_EQ(first->status_, RequestStatus::Active);
   ASSERT_EQ(second->status_, RequestStatus::Active);
+  ASSERT_EQ(executor_observer->decode_calls, 1);
+  ASSERT_EQ(cache->ResidentRequestCount(), 2u);
+  const int64_t closed_length = second->CurrentSequenceLength();
+  const int64_t closed_processed = second->ProcessedSequenceLength();
+  const size_t closed_generated = second->TurnGeneratedTokens();
+  const int searches_while_resident = LeakChecked<Search>::Count();
 
-  EXPECT_THROW(first->Close(), std::runtime_error);
-  EXPECT_EQ(first->status_, RequestStatus::Active);
-  EXPECT_EQ(engine->Run(storage), storage.size());
+  EXPECT_NO_THROW(second->Close());
+  EXPECT_EQ(second->status_, RequestStatus::Closed);
+  EXPECT_TRUE(second->BelongsTo(*engine));
+  EXPECT_EQ(cache->ResidentRequestCount(), 2u);
+  EXPECT_EQ(LeakChecked<Search>::Count(), searches_while_resident);
+
+  // Close purged the retained event, so Run executes the next batch step instead of returning the
+  // closed row. Only the peer samples and publishes an event.
+  const auto peer_event = RunOne(*engine);
+  EXPECT_EQ(peer_event.request, first);
+  EXPECT_EQ(peer_event.flags,
+            EngineEventFlagToken | EngineEventFlagTurnFinished);
+  EXPECT_EQ(executor_observer->decode_calls, 2);
   EXPECT_EQ(first->status_, RequestStatus::TurnComplete);
-  EXPECT_EQ(second->status_, RequestStatus::TurnComplete);
-  EXPECT_NO_THROW(first->Close());
+  EXPECT_EQ(second->status_, RequestStatus::Closed);
+  EXPECT_EQ(second->CurrentSequenceLength(), closed_length);
+  EXPECT_EQ(second->ProcessedSequenceLength(), closed_processed);
+  EXPECT_EQ(second->TurnGeneratedTokens(), closed_generated);
+  EXPECT_EQ(LeakChecked<Search>::Count(), searches_while_resident);
+
+  // New work recycles the all-terminal static batch. The Engine completes the retained close on
+  // its owner thread before executing the replacement row, leaving only a lightweight tombstone.
+  auto replacement = CreateEngineRequest(engine, *model_);
+  replacement->BeginTurn(Prompt(30), std::optional<size_t>{1});
+  const int searches_before_recycle = LeakChecked<Search>::Count();
+  EXPECT_EQ(RunOne(*engine).request, replacement);
+  EXPECT_FALSE(second->BelongsTo(*engine));
+  EXPECT_FALSE(cache->IsResident(second));
+  EXPECT_EQ(cache->ResidentRequestCount(), 1u);
+  EXPECT_EQ(LeakChecked<Search>::Count(), searches_before_recycle - 1);
 }
 
-TEST_F(EngineRunTest, StaticAbandonmentDefersStateReleaseUntilPeersComplete) {
+TEST_F(EngineRunTest, StaticAbandonmentLogicallyRemovesActiveRowAtNextBoundary) {
   model_->config_->engine.dynamic_batching.reset();
-  auto cache = std::make_shared<RecordingCacheManager>(
-      model_, /*capacity=*/4, nullptr, /*supports_dynamic_batching=*/false);
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto cache = std::make_shared<StaticCacheManager>(model_);
   auto scheduler = Scheduler::Create(model_, cache);
   auto executor = std::make_unique<RecordingModelExecutor>(
-      model_, cache, /*forced_token=*/5);
+      model_, cache, filler);
+  auto* executor_observer = executor.get();
   EngineDependencies dependencies{cache, std::move(scheduler),
                                   std::move(executor)};
   auto engine = std::make_shared<Engine>(model_, std::move(dependencies));
   auto first = CreateEngineRequest(engine, *model_);
   auto second = CreateEngineRequest(engine, *model_);
-  ExternalRequestReference first_handle{*first};
+  ExternalRequestReference second_handle{*second};
   first->BeginTurn(Prompt(10), std::optional<size_t>{2});
   second->BeginTurn(Prompt(20), std::optional<size_t>{2});
 
-  std::array<EngineEvent, 2> storage;
-  ASSERT_EQ(engine->Run(storage), storage.size());
-  first_handle.Release();
+  // Capacity one retains the second row's first token event inside the Engine.
+  ASSERT_EQ(RunOne(*engine).request, first);
+  ASSERT_EQ(first->status_, RequestStatus::Active);
+  ASSERT_EQ(second->status_, RequestStatus::Active);
+  ASSERT_EQ(executor_observer->decode_calls, 1);
+  const int64_t closed_length = second->CurrentSequenceLength();
+  const int64_t closed_processed = second->ProcessedSequenceLength();
+  const size_t closed_generated = second->TurnGeneratedTokens();
+  const int searches_while_resident = LeakChecked<Search>::Count();
 
+  second_handle.Release();
   EXPECT_TRUE(engine->HasPendingRequests());
-  EXPECT_EQ(first->status_, RequestStatus::Active);
-  ASSERT_EQ(engine->Run(storage), storage.size());
+  EXPECT_EQ(second->status_, RequestStatus::Closed);
+  EXPECT_TRUE(second->BelongsTo(*engine));
+  EXPECT_EQ(cache->ResidentRequestCount(), 2u);
+  EXPECT_EQ(LeakChecked<Search>::Count(), searches_while_resident);
 
-  EXPECT_FALSE(engine->HasPendingRequests());
-  EXPECT_EQ(first->status_, RequestStatus::Closed);
-  EXPECT_EQ(second->status_, RequestStatus::TurnComplete);
+  // The abandonment boundary purged the retained event. Only the peer advances and publishes.
+  const auto peer_event = RunOne(*engine);
+  EXPECT_EQ(peer_event.request, first);
+  EXPECT_EQ(peer_event.flags,
+            EngineEventFlagToken | EngineEventFlagTurnFinished);
+  EXPECT_EQ(executor_observer->decode_calls, 2);
+  EXPECT_EQ(first->status_, RequestStatus::TurnComplete);
+  EXPECT_EQ(second->status_, RequestStatus::Closed);
+  EXPECT_EQ(second->CurrentSequenceLength(), closed_length);
+  EXPECT_EQ(second->ProcessedSequenceLength(), closed_processed);
+  EXPECT_EQ(second->TurnGeneratedTokens(), closed_generated);
+  EXPECT_EQ(LeakChecked<Search>::Count(), searches_while_resident);
+
+  auto replacement = CreateEngineRequest(engine, *model_);
+  replacement->BeginTurn(Prompt(30), std::optional<size_t>{1});
+  const int searches_before_recycle = LeakChecked<Search>::Count();
+  EXPECT_EQ(RunOne(*engine).request, replacement);
+  EXPECT_FALSE(second->BelongsTo(*engine));
+  EXPECT_FALSE(cache->IsResident(second));
+  EXPECT_EQ(cache->ResidentRequestCount(), 1u);
+  EXPECT_EQ(LeakChecked<Search>::Count(), searches_before_recycle - 1);
 }
 
 TEST_F(EngineRunTest, StaticExecutionFailureTerminatesRequestsAndMarksEngineUnhealthy) {
@@ -1750,7 +1811,9 @@ TEST_F(EngineRunTest, SpeculativeRunStopsAtAcceptedEos) {
   const auto event = RunOne(*engine.engine);
 
   EXPECT_EQ(event.request, request);
-  EXPECT_EQ(event.flags, EngineEventFlagTurnFinished);
+  EXPECT_EQ(event.flags,
+            EngineEventFlagToken | EngineEventFlagTurnFinished);
+  EXPECT_EQ(event.token, 11);
   EXPECT_EQ(event.finish_reason, GenerationFinishReason::EosToken);
   EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
   EXPECT_EQ(request->FinishReason(), GenerationFinishReason::EosToken);
@@ -1760,6 +1823,77 @@ TEST_F(EngineRunTest, SpeculativeRunStopsAtAcceptedEos) {
   ASSERT_EQ(engine.cache->prefix_commits.size(), 1u);
   EXPECT_EQ(engine.cache->prefix_commits[0].kept_tokens, 2u);
 }
+
+#if USE_CUDA
+TEST_F(EngineRunTest, CudaSpeculativeRunStopsWhenTheFirstDraftIsEos) {
+  model_ = LoadSyntheticPagedCudaModel();
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto engine = MakeCompositeDoublesEngine(model_, filler);
+
+  auto request =
+      CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
+  const int64_t length_after_prefill = request->CurrentSequenceLength();
+  const size_t generated_after_prefill = request->TurnGeneratedTokens();
+
+  request->SetDraftTokens(std::vector<int32_t>{eos, 12});
+  engine.executor->SetVerifyRowTokens({eos, 12, 25});
+
+  const auto event = RunOne(*engine.engine);
+
+  EXPECT_EQ(event.request, request);
+  EXPECT_EQ(event.flags, EngineEventFlagTurnFinished);
+  EXPECT_EQ(event.flags & EngineEventFlagToken, 0u);
+  EXPECT_EQ(event.finish_reason, GenerationFinishReason::EosToken);
+  EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
+  EXPECT_EQ(request->FinishReason(), GenerationFinishReason::EosToken);
+  EXPECT_EQ(request->CurrentSequenceLength(), length_after_prefill);
+  EXPECT_EQ(request->ProcessedSequenceLength(), length_after_prefill);
+  EXPECT_EQ(request->TurnGeneratedTokens(), generated_after_prefill);
+
+  const auto cache = engine.cache->Snapshot();
+  ASSERT_EQ(cache.requests.size(), 1u);
+  EXPECT_EQ(cache.requests[0].request_id, request.get());
+  EXPECT_EQ(cache.requests[0].used_slots,
+            static_cast<size_t>(length_after_prefill));
+}
+
+TEST_F(EngineRunTest, CudaSpeculativeRunStopsAtAnAcceptedMiddleEos) {
+  model_ = LoadSyntheticPagedCudaModel();
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto engine = MakeCompositeDoublesEngine(model_, filler);
+
+  auto request =
+      CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
+  const int64_t length_after_prefill = request->CurrentSequenceLength();
+  const size_t generated_after_prefill = request->TurnGeneratedTokens();
+
+  request->SetDraftTokens(std::vector<int32_t>{11, eos, 13});
+  engine.executor->SetVerifyRowTokens({11, eos, 13, 25});
+
+  const auto event = RunOne(*engine.engine);
+
+  EXPECT_EQ(event.request, request);
+  EXPECT_EQ(event.flags,
+            EngineEventFlagToken | EngineEventFlagTurnFinished);
+  EXPECT_EQ(event.token, 11);
+  EXPECT_EQ(event.finish_reason, GenerationFinishReason::EosToken);
+  EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
+  EXPECT_EQ(request->FinishReason(), GenerationFinishReason::EosToken);
+  EXPECT_EQ(request->CurrentSequenceLength(), length_after_prefill + 1);
+  EXPECT_EQ(request->ProcessedSequenceLength(), length_after_prefill + 1);
+  EXPECT_EQ(request->TurnGeneratedTokens(), generated_after_prefill + 1);
+
+  const auto cache = engine.cache->Snapshot();
+  ASSERT_EQ(cache.requests.size(), 1u);
+  EXPECT_EQ(cache.requests[0].request_id, request.get());
+  EXPECT_EQ(cache.requests[0].used_slots,
+            static_cast<size_t>(length_after_prefill + 1));
+}
+#endif
 
 TEST_F(EngineRunTest, RolledBackSpeculativeRunLeavesProposalPendingAndRetryable) {
   const int32_t eos = EosToken(*model_);

@@ -94,6 +94,7 @@ void Engine::ValidateOwnerThread() const {
 std::shared_ptr<Request> Engine::CreateRequest(const GeneratorParams& params,
                                                size_t max_total_tokens) {
   ValidateOwnerThread();
+  CompleteNonresidentClosedRequests();
   ReclaimAbandonedRequests();
   if (health_ == EngineHealth::Unhealthy) {
     std::rethrow_exception(fatal_error_);
@@ -133,6 +134,7 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
                            std::span<const int32_t> tokens,
                            std::optional<size_t> max_generated_tokens) {
   ValidateOwnerThread();
+  CompleteNonresidentClosedRequests();
   ReclaimAbandonedRequests();
   if (health_ == EngineHealth::Unhealthy) {
     std::rethrow_exception(fatal_error_);
@@ -237,12 +239,11 @@ void Engine::CloseRequest(const std::shared_ptr<Request>& request) {
   if (!request || !request->BelongsTo(*this)) {
     throw std::runtime_error("Cannot close a request that does not belong to this engine.");
   }
-  if (StaticBatchNeedsRequest(request)) {
-    throw std::runtime_error(
-        "Cannot close a resident static-batch request while another row is still executable.");
-  }
 
   scheduler_->RemoveRequest(request);
+  const bool retain_static_runtime_state =
+      !cache_manager_->SupportsDynamicBatching() &&
+      cache_manager_->IsResident(request);
 
   pending_events_.erase(
       pending_events_.begin(),
@@ -258,6 +259,11 @@ void Engine::CloseRequest(const std::shared_ptr<Request>& request) {
           staged_events_.begin(), staged_events_.end(),
           [&request](const EngineEvent& event) { return event.request == request; }),
       staged_events_.end());
+  request->MarkClosedFromEngine(*this);
+  if (retain_static_runtime_state) {
+    return;
+  }
+
   request->CompleteCloseFromEngine(*this);
   tracked_requests_.erase(
       std::remove_if(
@@ -309,18 +315,9 @@ void Engine::ReclaimAbandonedRequests() {
           return request &&
                  !IsClosed(request->status_) &&
                  request->BelongsTo(*this) &&
-                 request->ExternalReferencesAbandoned() &&
-                 !StaticBatchNeedsRequest(request);
+                 request->ExternalReferencesAbandoned();
         });
     if (abandoned == tracked_requests_.end()) {
-      if (std::any_of(
-              tracked_requests_.begin(), tracked_requests_.end(),
-              [](const std::shared_ptr<Request>& request) {
-                return request && !IsClosed(request->status_) &&
-                       request->ExternalReferencesAbandoned();
-              })) {
-        abandonment_pending_->store(true, std::memory_order_release);
-      }
       return;
     }
 
@@ -333,18 +330,20 @@ void Engine::ReclaimAbandonedRequests() {
   }
 }
 
-bool Engine::StaticBatchNeedsRequest(
-    const std::shared_ptr<Request>& request) const {
-  if (cache_manager_->SupportsDynamicBatching() ||
-      !cache_manager_->IsResident(request)) {
-    return false;
-  }
-  const auto residents = cache_manager_->AllocatedRequests();
-  return std::any_of(
-      residents.begin(), residents.end(),
-      [&request](const std::shared_ptr<Request>& resident) {
-        return resident != request && IsExecutable(resident->status_);
-      });
+void Engine::CompleteNonresidentClosedRequests() {
+  tracked_requests_.erase(
+      std::remove_if(
+          tracked_requests_.begin(), tracked_requests_.end(),
+          [this](const std::shared_ptr<Request>& request) {
+            if (!request || !IsClosed(request->status_) ||
+                !request->BelongsTo(*this) ||
+                cache_manager_->IsResident(request)) {
+              return false;
+            }
+            request->CompleteCloseFromEngine(*this);
+            return true;
+          }),
+      tracked_requests_.end());
 }
 
 void Engine::ValidateRequestCanContinue(
@@ -414,6 +413,7 @@ size_t Engine::Run(std::span<EngineEvent> events) {
     }
     return 0;
   }
+  CompleteNonresidentClosedRequests();
   ReclaimAbandonedRequests();
   if (pending_event_index_ < pending_events_.size()) {
     return DrainPendingEvents(events);
@@ -450,6 +450,10 @@ void Engine::RunStatic() {
             std::current_exception());
       }
     }();
+    // Scheduling may recycle an all-terminal static batch. Closed rows retain their Search,
+    // parameters, host tokens, and length metadata only until that shared allocation is gone;
+    // finish their physical close before executing the replacement batch.
+    CompleteNonresidentClosedRequests();
 
     try {
       model_executor_->Decode(scheduled_requests);
@@ -466,7 +470,7 @@ void Engine::RunStatic() {
     staged_events_.clear();
     for (size_t i = 0; i < scheduled_requests.size(); ++i) {
       if (!IsClosed(scheduled_requests[i]->status_) &&
-          (step_results_[i].token_appended || step_results_[i].done)) {
+          (step_results_[i].token_visible || step_results_[i].done)) {
         staged_events_.push_back(
             EventFromStep(scheduled_requests[i], step_results_[i]));
       }
@@ -711,7 +715,7 @@ void Engine::RunDynamic() {
                 entry.request->AcceptedDraftTokenCount());
       }
       for (size_t i = 0; i < step_plan_.requests.size(); ++i) {
-        if (step_results_[i].token_appended || step_results_[i].done) {
+        if (step_results_[i].token_visible || step_results_[i].done) {
           staged_event_order_.push_back(i);
         }
       }
@@ -820,7 +824,7 @@ EngineEvent Engine::EventFromStep(
   EngineEvent event;
   event.request = request;
   event.turn_id = request->CurrentTurnId();
-  if (result.token_appended) {
+  if (result.token_visible) {
     event.flags |= EngineEventFlagToken;
     event.token = result.token;
   }
@@ -980,6 +984,7 @@ EngineEvent Engine::EventFromStepError(
 
 bool Engine::HasPendingRequests() {
   ValidateOwnerThread();
+  CompleteNonresidentClosedRequests();
   ReclaimAbandonedRequests();
   return pending_event_index_ < pending_events_.size() ||
          scheduler_->HasPendingRequests();

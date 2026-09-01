@@ -34,6 +34,9 @@ struct RequestStepResult {
   bool token_appended{};
   bool done{};
   GenerationFinishReason finish_reason{GenerationFinishReason::None};
+  // Usually mirrors token_appended. Draft verification can instead publish its last accepted
+  // visible token when a later accepted EOS completes the turn without appending that EOS.
+  bool token_visible{};
 };
 
 struct RequestTurnAdmission {
@@ -111,6 +114,9 @@ struct Request : std::enable_shared_from_this<Request>,
   RequestTurnCounters CompleteCancelFromEngine(
       const Engine& engine,
       uint64_t turn_id) noexcept;
+  // Publishes logical close without destroying runtime state that a resident static row still
+  // needs. CompleteCloseFromEngine finishes both logical and physical close.
+  void MarkClosedFromEngine(const Engine& engine) noexcept;
   void CompleteCloseFromEngine(const Engine& engine) noexcept;
   void MarkFailedFromEngine(const Engine& engine) noexcept;
   void CompleteFailedTurnFromEngine(const Engine& engine) noexcept;

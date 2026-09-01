@@ -174,8 +174,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
   void DetachRequestForTeardown(
       const std::shared_ptr<Request>& request) noexcept;
   void ReclaimAbandonedRequests();
-  bool StaticBatchNeedsRequest(
-      const std::shared_ptr<Request>& request) const;
+  void CompleteNonresidentClosedRequests();
   size_t DrainPendingEvents(std::span<EngineEvent> events);
   void RetainEvent(EngineEvent event);
   void RunDynamic();

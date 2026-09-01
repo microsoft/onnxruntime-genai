@@ -276,8 +276,20 @@ RequestTurnCounters Request::CompleteCancelFromEngine(
   return {turn_prompt_tokens_, turn_generated_tokens_};
 }
 
-void Request::CompleteCloseFromEngine(const Engine& engine) noexcept {
+void Request::MarkClosedFromEngine(const Engine& engine) noexcept {
   assert(BelongsTo(engine));
+  status_ = RequestStatus::Closed;
+  guidance_transaction_checkpoint_.reset();
+  guidance_logits_processor_.reset();
+  batched_sampler_state_.reset();
+  std::vector<int32_t>{}.swap(draft_tokens_);
+  staged_draft_count_ = 0;
+  accepted_draft_count_ = 0;
+  draft_verification_completed_generation_ = false;
+}
+
+void Request::CompleteCloseFromEngine(const Engine& engine) noexcept {
+  MarkClosedFromEngine(engine);
   CompleteClose();
 }
 
@@ -336,6 +348,10 @@ void Request::CompleteClose() noexcept {
   batched_sampler_state_.reset();
   search_.reset();
   params_.reset();
+  std::vector<int32_t>{}.swap(draft_tokens_);
+  staged_draft_count_ = 0;
+  accepted_draft_count_ = 0;
+  draft_verification_completed_generation_ = false;
   std::vector<int32_t>{}.swap(tokens_host_);
 }
 
@@ -657,11 +673,13 @@ RequestStepResult Request::StageDraftCompletionForTransaction() {
       finish_reason = GenerationFinishReason::EosToken;
     }
   }
+  const bool token_visible = accepted_draft_count_ != 0;
   return RequestStepResult{
-      0,
+      token_visible ? draft_tokens_[accepted_draft_count_ - 1] : 0,
       false,
       true,
       finish_reason,
+      token_visible,
   };
 }
 
@@ -777,6 +795,7 @@ RequestStepResult Request::StageGeneration(int64_t sequence_length_before) {
       token_appended,
       done,
       finish_reason,
+      token_appended,
   };
   CommitGuidanceToken(result);
   if (done && guidance_logits_processor_) {
@@ -870,6 +889,7 @@ RequestStepResult Request::CompleteGeneration() {
       new_token_count != 0,
       Generators::IsTurnComplete(status_),
       finish_reason_,
+      new_token_count != 0,
   };
 }
 
