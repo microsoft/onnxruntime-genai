@@ -859,9 +859,8 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
   const bool turn_id_exhausted_before = request->turn_id_exhausted_;
   bool added_to_scheduler = false;
 
-  request->SaveStateForTransaction();
+  request->SaveStateForNewTurnTransaction();
   try {
-    request->ResetGuidanceForNewTurn();
     request->search_->AppendTokens(device_tokens);
     request->tokens_host_.insert(
         request->tokens_host_.end(), tokens.begin(), tokens.end());

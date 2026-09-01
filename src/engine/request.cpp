@@ -510,6 +510,18 @@ void Request::SaveStateForTransaction() {
   transaction_tokens_host_size_ = tokens_host_.size();
 }
 
+void Request::SaveStateForNewTurnTransaction() {
+  auto new_turn_guidance = guidance_logits_processor_
+                               ? guidance_logits_processor_->CloneForNewTurn()
+                               : nullptr;
+  search_->SaveStateForTransaction();
+  guidance_transaction_checkpoint_ =
+      std::exchange(guidance_logits_processor_, std::move(new_turn_guidance));
+  transaction_rng_ = rng_;
+  transaction_processed_sequence_length_ = processed_sequence_length_;
+  transaction_tokens_host_size_ = tokens_host_.size();
+}
+
 void Request::SaveStateForExternalSamplingTransaction() {
   auto guidance_checkpoint = guidance_logits_processor_
                                  ? guidance_logits_processor_->Clone()
@@ -665,12 +677,6 @@ void Request::ApplyLogitsProcessors(DeviceSpan<float> logits,
   search_->ApplyMinLength(search_params.min_length);
   search_->ApplyRepetitionPenalty(search_params.repetition_penalty);
   search_->ApplyNoRepeatNgram(search_params.no_repeat_ngram_size);
-}
-
-void Request::ResetGuidanceForNewTurn() {
-  if (guidance_logits_processor_) {
-    guidance_logits_processor_->Reset();
-  }
 }
 
 void Request::SelectNextToken() {

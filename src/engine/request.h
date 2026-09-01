@@ -158,6 +158,7 @@ struct Request : std::enable_shared_from_this<Request>,
 
   void ValidateEngineCompatibility() const;
   void SaveStateForTransaction();
+  void SaveStateForNewTurnTransaction();
   void SaveStateForExternalSamplingTransaction();
   RequestStepResult ApplyLogitsForTransaction(DeviceSpan<float> logits,
                                               bool guidance_applied = false);
@@ -375,7 +376,6 @@ struct Request : std::enable_shared_from_this<Request>,
 
   const char* DraftTokenValidationError() const noexcept;
   void ApplyLogitsProcessors(DeviceSpan<float> logits, bool guidance_applied);
-  void ResetGuidanceForNewTurn();
   void SelectNextToken();
   void StageVisibleTokens(RequestStepResult& result,
                           size_t committed_count,
