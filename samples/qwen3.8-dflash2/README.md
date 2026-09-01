@@ -243,10 +243,17 @@ substitute for a task-level quality evaluation.
 
 ## Sweep contexts and batch sizes
 
-`benchmark.py` runs a matrix of context lengths and batch sizes and, by default,
+`benchmark.py` runs a matrix of workloads and batch sizes and, by default,
 runs both the speculative and the `--no-drafter` arm so every cell gets a
-speedup. Prompts are synthesized from filler text to hit a requested token
-length, so context is controlled rather than dependent on the bundled prompts.
+speedup. It has two ways to source prompts, and the choice matters more than it
+looks: acceptance depends on how predictable the text is, so the prompt content
+is part of the measurement, not just its length.
+
+### Synthetic contexts (default)
+
+Prompts are synthesized from a pool of varied passages up to a requested token
+length, which makes context length the controlled variable. Use this to see how
+a single workload scales with context and batch size.
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python benchmark.py \
@@ -258,20 +265,71 @@ CUDA_VISIBLE_DEVICES=0 python benchmark.py \
   --json-out bench.json
 ```
 
+The passages are deliberately varied and the pool is rotated per cycle, because
+filler built by repeating one sentence is trivially predictable: the drafter
+copies it with an induction head and acceptance comes out far higher than any
+real workload would give. `--context-file` substitutes your own text. Treat
+synthetic numbers as a scaling curve, not as an acceptance rate you can quote.
+
+### Real prompts with `--dataset`
+
+For acceptance and speedup numbers meant to represent a workload, drive the
+sweep from a speculative-decoding prompt set. `--dataset` reads a `.jsonl` or
+`.parquet` file with `category` and `turns` fields and makes each category one
+row of the sweep:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python benchmark.py \
+  --model ~/models_local/qwen3.8-27b-nvfp4-int8-kv-dflash2 \
+  --dataset ~/data/spec_bench/question.jsonl \
+  --dataset-category math_reasoning --dataset-category summarization \
+  --dataset-category qa \
+  --dataset-limit 8 --batch-size 1 --generate-length 256
+```
+
+Two public sets use this schema:
+
+- [Spec-Bench](https://github.com/hemingkx/Spec-Bench) (Apache-2.0),
+  `data/spec_bench/question.jsonl`, 480 items across translation,
+  summarization, qa, math_reasoning and rag.
+- [nvidia/SPEED-Bench](https://huggingface.co/datasets/nvidia/SPEED-Bench)
+  (parquet, needs `pyarrow`). Its qualitative split is built for acceptance
+  measurement; its throughput split has fixed input-length buckets. Some records
+  ship as placeholders and must be filled in with NVIDIA's `prepare_data.py`
+  first; the loader skips any that are still empty.
+
+Neither dataset is redistributed here and neither is downloaded automatically —
+point `--dataset` at a local copy and check its license. The loader uses only
+the first turn of each item, so results are not comparable to those projects'
+leaderboards; the point is a realistic prompt mix, not a reproduced score.
+
+Category spread is the reason to bother. On the same engine and generation
+length, real prompts separate by more than 1.5x in accepted tokens per target
+forward, and a synthetic run reports one number that hides it:
+
+| workload | prompt tok | accept | tok/target fwd |
+| --- | ---: | ---: | ---: |
+| math_reasoning | 67 | 0.888 | 5.12 |
+| qa | 22 | 0.759 | 3.67 |
+| summarization | 689 | 0.710 | 3.20 |
+| synthetic ctx=512 | 512 | 0.777 | 3.76 |
+
+### Reading the output
+
 It prints a markdown table and optionally writes the full per-cell record as
 JSON:
 
-| ctx | batch | arm | prompt tok | TTFT s | decode tok/s | accept | tok/target fwd | speedup |
-| ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 512 | 1 | speculative | 492 | 0.114 | 158.0 | 0.724 | 3.28 | 2.153x |
-| 2048 | 1 | speculative | 2028 | 0.320 | 170.1 | 0.742 | 3.56 | 2.334x |
-| 2048 | 4 | speculative | 2028 | 0.964 | 416.9 | 0.787 | 16.00 | 1.548x |
+| workload | batch | arm | prompt tok | TTFT s | decode tok/s | accept | tok/target fwd | speedup |
+| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 512 | 1 | speculative | 512 | 0.115 | 184.5 | 0.777 | 3.76 | 2.516x |
+| 2048 | 1 | speculative | 2046 | 0.317 | 195.3 | 0.800 | 4.00 | 2.669x |
+| 512 | 1 | baseline | 512 | 0.097 | 73.3 | - | - | - |
 
 `--arms speculative` or `--arms baseline` runs a single arm; the speedup column
 needs both. Each arm loads the model once and reuses one engine across its cells,
 so `--max-batch-size` and `--num-blocks` must cover the largest cell.
 
-The script warms up at the largest context and batch size before measuring.
+The script warms up at the largest workload and batch size before measuring.
 Without that, the first measured cell absorbs first-touch allocation and reads
 roughly twice as slow as it should. `--no-warmup` disables it, which is only
 useful for measuring cold-start cost deliberately. Keep `--generate-length` at a
