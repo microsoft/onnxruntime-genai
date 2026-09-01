@@ -885,6 +885,10 @@ void Engine::RunDynamic() {
           std::current_exception());
     }
 
+    // This is speculative preparation for the next step. Its no-throw boundary leaves failed
+    // cursors dirty so mask construction retries when the next logits application needs it.
+    scheduled_requests.ScheduleGuidanceMasks();
+
     staged_events_.clear();
     for (size_t i : staged_event_order_) {
       AppendEventsFromStep(

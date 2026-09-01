@@ -89,21 +89,7 @@ Request::Request(
     throw std::runtime_error("Guidance fast-forward tokens are not supported by the engine.");
   }
 
-  const bool has_guidance_type = !params->guidance_type.empty();
-  const bool has_guidance_data = !params->guidance_data.empty();
-  if (has_guidance_type != has_guidance_data) {
-    throw std::runtime_error("Guidance type and data must be provided together.");
-  }
-  const bool guidance_requested = has_guidance_type && has_guidance_data;
-  if (guidance_requested && !params->model_) {
-    throw std::runtime_error("Engine guidance requires request parameters associated with a model.");
-  }
-  if (guidance_requested) {
-    guidance_logits_processor_ = CreateGuidanceLogitsProcessor(*params->model_, params);
-  }
-  if (guidance_requested && !guidance_logits_processor_) {
-    throw std::runtime_error("Engine guidance is unavailable. Build with use_guidance=true.");
-  }
+  guidance_logits_processor_ = CreateGuidanceLogitsProcessor(params);
 
   // The engine drives one independent search per request, so completion is batched: see
   // ScheduledRequests::GenerateNextTokens().
@@ -387,8 +373,8 @@ bool Request::IsPrefill() const {
   return processed_sequence_length_ < prompt_sequence_length_;
 }
 
-void Request::GenerateNextTokens(DeviceSpan<float> logits) {
-  PrepareGeneration(logits);
+void Request::GenerateNextTokens(DeviceSpan<float> logits, bool guidance_applied) {
+  PrepareGeneration(logits, guidance_applied);
 
   auto& search_params = search_->params_->search;
   if (!search_params.do_sample || search_params.top_k == 1 || search_params.temperature == 0) {
@@ -457,15 +443,17 @@ void Request::SaveStateForExternalSamplingTransaction() {
   transaction_rng_ = rng_;
 }
 
-RequestStepResult Request::ApplyLogitsForTransaction(DeviceSpan<float> logits) {
+RequestStepResult Request::ApplyLogitsForTransaction(DeviceSpan<float> logits,
+                                                     bool guidance_applied) {
   const auto sequence_length_before = CurrentSequenceLength();
-  PrepareGenerationForTransaction(logits);
+  PrepareGenerationForTransaction(logits, guidance_applied);
   SelectNextToken();
   return StageGeneration(sequence_length_before);
 }
 
-void Request::PrepareGenerationForTransaction(DeviceSpan<float> logits) {
-  ApplyLogitsProcessors(logits);
+void Request::PrepareGenerationForTransaction(DeviceSpan<float> logits,
+                                              bool guidance_applied) {
+  ApplyLogitsProcessors(logits, guidance_applied);
 }
 
 RequestStepResult Request::StageGenerationForTransaction(
@@ -579,9 +567,10 @@ void Request::StageVisibleTokens(RequestStepResult& result,
   }
 }
 
-void Request::ApplyLogitsProcessors(DeviceSpan<float> logits) {
+void Request::ApplyLogitsProcessors(DeviceSpan<float> logits,
+                                    bool guidance_applied) {
   search_->SetLogits(logits);
-  if (guidance_logits_processor_) {
+  if (guidance_logits_processor_ && !guidance_applied) {
     guidance_logits_processor_->ProcessLogits(logits);
   }
   auto& search_params = search_->params_->search;
@@ -658,9 +647,15 @@ void Request::CommitGuidanceToken(const RequestStepResult& result) {
   }
 }
 
-void Request::PrepareGeneration(DeviceSpan<float> logits) {
+void Request::PrepareGeneration(DeviceSpan<float> logits,
+                                bool guidance_applied) {
   processed_sequence_length_ = search_->GetSequence(0).size();
-  ApplyLogitsProcessors(logits);
+  ApplyLogitsProcessors(logits, guidance_applied);
+}
+
+std::span<const uint32_t> Request::GetReadyGuidanceMask() {
+  return guidance_logits_processor_ ? guidance_logits_processor_->GetReadyMask()
+                                    : std::span<const uint32_t>{};
 }
 
 const Config::Search& Request::SearchOptions() const {

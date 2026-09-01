@@ -18,6 +18,10 @@
 
 namespace Generators {
 
+namespace test {
+struct RequestGuidanceTestAccess;
+}
+
 struct Request;
 struct ScheduledRequests;
 struct StaticBatchScheduler;
@@ -110,7 +114,7 @@ struct Request : std::enable_shared_from_this<Request>,
    * results and to update the request status. Splitting the two lets the engine launch every
    * scheduled request's token selection before it synchronizes with the device once.
    */
-  void GenerateNextTokens(DeviceSpan<float> logits);
+  void GenerateNextTokens(DeviceSpan<float> logits, bool guidance_applied = false);
 
   /**
    * @brief Proposes speculative draft tokens for this request's next step.
@@ -151,8 +155,10 @@ struct Request : std::enable_shared_from_this<Request>,
   void ValidateEngineCompatibility() const;
   void SaveStateForTransaction();
   void SaveStateForExternalSamplingTransaction();
-  RequestStepResult ApplyLogitsForTransaction(DeviceSpan<float> logits);
-  void PrepareGenerationForTransaction(DeviceSpan<float> logits);
+  RequestStepResult ApplyLogitsForTransaction(DeviceSpan<float> logits,
+                                              bool guidance_applied = false);
+  void PrepareGenerationForTransaction(DeviceSpan<float> logits,
+                                       bool guidance_applied = false);
   RequestStepResult StageGenerationForTransaction(
       const RequestStepPlan& plan);
   RequestStepResult StageDraftCompletionForTransaction();
@@ -274,7 +280,9 @@ struct Request : std::enable_shared_from_this<Request>,
    * @brief Runs everything token selection needs before the sampler: sequence bookkeeping,
    *        handing the logits to the search, and applying the logits processors.
    */
-  void PrepareGeneration(DeviceSpan<float> logits);
+  void PrepareGeneration(DeviceSpan<float> logits, bool guidance_applied = false);
+  bool HasGuidance() const { return guidance_logits_processor_ != nullptr; }
+  std::span<const uint32_t> GetReadyGuidanceMask();
 
   /**
    * @brief Launches the per-sequence tail after a batched sampler has filled the bound slot.
@@ -296,6 +304,7 @@ struct Request : std::enable_shared_from_this<Request>,
   friend struct ExternalRefCounted<Request>;
   friend struct ScheduledRequests;
   friend struct StaticBatchScheduler;
+  friend struct test::RequestGuidanceTestAccess;
 
   void CompleteClose() noexcept;
   void OnFirstExternalReference() noexcept;
@@ -343,7 +352,7 @@ struct Request : std::enable_shared_from_this<Request>,
   std::weak_ptr<Engine> engine_;
   std::atomic<bool> externally_abandoned_{false};
 
-  void ApplyLogitsProcessors(DeviceSpan<float> logits);
+  void ApplyLogitsProcessors(DeviceSpan<float> logits, bool guidance_applied);
   void ResetGuidanceForNewTurn();
   void SelectNextToken();
   void StageVisibleTokens(RequestStepResult& result,

@@ -2297,7 +2297,7 @@ def qwen3_guidance_model_path(qwen3_model_path):
         generator.append_tokens(np.array([_PROMPT], dtype=np.int32))
         generator.generate_next_token()
     except Exception as error:
-        if "guidance is unavailable" in str(error):
+        if "guidance is unavailable" in str(error).lower():
             pytest.skip("ONNX Runtime GenAI was built without guidance support")
         raise
     return qwen3_model_path
