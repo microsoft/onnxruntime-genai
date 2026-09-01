@@ -221,9 +221,10 @@ event.
 A turn-complete request remains Engine-owned. Once admitted, it normally remains resident; a turn
 canceled before initial admission has not allocated cache state. `Close()` ends logical ownership
 immediately and releases dynamic cache resources; static batch storage may remain until batch
-recycling. If every external handle is released instead, the request is marked abandoned and
-reclaimed at the next serialized Engine boundary, including `HasPendingRequests()`. An atomic
-Engine-level pending flag makes the common no-abandonment boundary allocation-free.
+recycling or until the final open row closes. If every external handle is released instead, the
+request is marked abandoned and reclaimed at the next serialized Engine boundary, including
+`HasPendingRequests()`. An atomic Engine-level pending flag makes the common no-abandonment
+boundary allocation-free.
 
 Planning skips turn-complete residents and does not release their cache. Retained requests still
 consume paged-cache blocks and a batch slot, so applications must call `Close()` when they no
@@ -245,14 +246,15 @@ reaches an owner-thread boundary.
 Events already copied by the host remain host-owned. Destroying the Engine terminalizes every bound
 Request through a teardown-specific no-throw detach path that does not rely on the Request's expired
 weak Engine reference. Scheduler/cache ownership and Request runtime state are released first;
-surviving external handles are lightweight closed tombstones and still must be destroyed.
+surviving external handles are lightweight closed tombstones and still must be destroyed. Closing
+the final open row of a resident static batch also releases the shared static cache immediately.
 
 ### `Closed`
 
 `Closed` is distinct from `Unassigned` because close may already have destroyed residency and
 scheduler ownership. Returning to `Unassigned` would imply that the same logical sequence could be
-submitted as a new request. A closed static-batch row may remain physically allocated until the
-batch is recycled, but it is no longer sampled or returned.
+submitted as a new request. A closed static-batch row may remain physically allocated while another
+row remains open, but it is no longer sampled or returned.
 
 ## The request length counters
 
@@ -1024,12 +1026,11 @@ single-request batch remains resident. The per-turn generated-token budget appli
 too, although static execution does not use the dynamic reservation/checkpoint transaction.
 
 Close or abandonment logically removes a Request from scheduling and purges its undelivered events.
-A closed Request that is already resident in a static batch nevertheless remains part of that
-shared physical allocation until the batch is recycled. It is not sampled or returned again, but
-its row and cache allocation can remain alive for the lifetime of the batch. Request Search and
+A closed Request that is already resident in a static batch remains part of that shared physical
+allocation while another row remains open. It is not sampled or returned again. Request Search and
 other device-affine runtime state are released when no executable peer can reference that physical
-row. Static cleanup therefore must not be described or tested as immediate per-Request cache
-deallocation.
+row. Closing the final open row releases the entire shared allocation immediately; individual rows
+cannot be deallocated while another row remains open.
 
 Changes to shared types such as `Request`, `ScheduledRequests`, `ModelExecutor`, or `SimpleDecoder` should be checked against both paths. This document should be updated only where behavior is shared or where the dynamic path changes.
 

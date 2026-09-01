@@ -350,8 +350,22 @@ void Engine::CloseRequest(const std::shared_ptr<Request>& request) {
   const bool resident_static_row =
       !cache_manager_->SupportsDynamicBatching() &&
       cache_manager_->IsResident(request);
-  const bool retain_static_row_state =
-      resident_static_row && StaticBatchNeedsRequest(request);
+  std::vector<std::shared_ptr<Request>> static_residents;
+  bool retain_static_row_state = false;
+  bool release_closed_static_batch = false;
+  if (resident_static_row) {
+    static_residents = cache_manager_->AllocatedRequests();
+    retain_static_row_state = std::any_of(
+        static_residents.begin(), static_residents.end(),
+        [&request](const std::shared_ptr<Request>& resident) {
+          return resident != request && IsExecutable(resident->status_);
+        });
+    release_closed_static_batch = std::all_of(
+        static_residents.begin(), static_residents.end(),
+        [&request](const std::shared_ptr<Request>& resident) {
+          return resident == request || IsClosed(resident->status_);
+        });
+  }
 
   scheduler_->RemoveRequest(request);
 
@@ -376,6 +390,11 @@ void Engine::CloseRequest(const std::shared_ptr<Request>& request) {
     request->CompleteClose();
     if (resident_static_row) {
       ReleaseDeferredStaticCloseState();
+    }
+  }
+  if (release_closed_static_batch) {
+    for (const auto& resident : static_residents) {
+      scheduler_->DetachRequestForTeardown(resident);
     }
   }
   tracked_requests_.erase(
@@ -423,7 +442,8 @@ void Engine::ReclaimAbandonedRequests() {
   // ExternalRelease only publishes an atomic abandonment marker. The host's owner-thread boundary
   // can safely perform the normal removal sequence: logical scheduler removal, ready-notification
   // purge, and terminal close. Dynamic cache ownership is released immediately; a resident static
-  // batch row can remain physically retained until its shared batch is recycled.
+  // batch row can remain physically retained until the last open row closes or the batch is
+  // recycled.
   if (!abandonment_pending_->exchange(false, std::memory_order_acq_rel)) {
     return;
   }

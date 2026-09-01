@@ -271,6 +271,39 @@ TEST(EngineLifetimeTest, DestroyingEngineReleasesDeferredStaticCloseState) {
   EXPECT_NO_THROW(second->Close());
 }
 
+TEST(EngineLifetimeTest, ClosingEveryResidentStaticRequestReleasesSharedBatch) {
+  auto model = LoadDummyDecoderModel();
+  model->config_->engine.dynamic_batching.reset();
+  auto cache = std::make_shared<RecordingCacheManager>(
+      model, /*capacity=*/2, nullptr, /*supports_dynamic_batching=*/false);
+  auto scheduler = Scheduler::Create(model, cache);
+  auto executor = std::make_unique<RecordingModelExecutor>(
+      model, cache, /*forced_token=*/5);
+  EngineDependencies dependencies{
+      cache, std::move(scheduler), std::move(executor)};
+  auto engine = std::make_shared<Engine>(model, std::move(dependencies));
+  auto first = CreateEngineRequest(engine, *model);
+  auto second = CreateEngineRequest(engine, *model);
+  first->BeginTurn(Prompt(10), std::optional<size_t>{2});
+  second->BeginTurn(Prompt(20), std::optional<size_t>{2});
+
+  std::array<EngineEvent, 2> events;
+  ASSERT_EQ(engine->Run(events), events.size());
+  first->Close();
+  ASSERT_EQ(first->status_, RequestStatus::Closed);
+  ASSERT_EQ(second->status_, RequestStatus::Active);
+  ASSERT_EQ(cache->AllocatedCount(), 2u);
+
+  second->Close();
+
+  EXPECT_EQ(first->status_, RequestStatus::Closed);
+  EXPECT_EQ(second->status_, RequestStatus::Closed);
+  EXPECT_EQ(cache->AllocatedCount(), 0u);
+
+  engine.reset();
+  EXPECT_EQ(cache->AllocatedCount(), 0u);
+}
+
 // One request: Run decodes the proposed batch exactly once, commits its cache allocation, and
 // returns the request.
 TEST_F(EngineRunTest, SingleRequestSchedulesThenDecodesThenReturns) {
@@ -1203,7 +1236,7 @@ TEST_F(EngineRunTest, StaticFatalFailureAfterLogicalCloseFailsExecutablePeer) {
   EXPECT_THROW(static_cast<void>(RunOne(*engine)), EngineStepError);
 }
 
-TEST_F(EngineRunTest, StaticHasPendingClosesAbandonedResidentWithoutIndividualDeallocation) {
+TEST_F(EngineRunTest, StaticHasPendingClosesAbandonedFinalResidentAndReleasesBatch) {
   model_->config_->engine.dynamic_batching.reset();
   auto cache = std::make_shared<RecordingCacheManager>(
       model_, /*capacity=*/1, nullptr, /*supports_dynamic_batching=*/false);
@@ -1227,12 +1260,12 @@ TEST_F(EngineRunTest, StaticHasPendingClosesAbandonedResidentWithoutIndividualDe
   EXPECT_FALSE(engine->HasPendingRequests());
   EXPECT_EQ(request->status_, RequestStatus::Closed);
   EXPECT_EQ(executor_observer->decode_calls, 1);
-  EXPECT_EQ(cache->AllocatedCount(), 1u);
-  EXPECT_EQ(cache->deallocate_calls, 0);
+  EXPECT_EQ(cache->AllocatedCount(), 0u);
+  EXPECT_EQ(cache->deallocate_calls, 1);
 
-  // A static row is logically closed once but remains physically resident until batch recycling.
+  // Repeated boundaries do not attempt to release the shared batch again.
   EXPECT_EQ(RunOne(*engine).flags, EngineEventFlagNone);
-  EXPECT_EQ(cache->deallocate_calls, 0);
+  EXPECT_EQ(cache->deallocate_calls, 1);
 }
 
 TEST_F(EngineRunTest, StaticContinuationFailsAfterBatchRecycling) {
