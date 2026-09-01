@@ -2501,27 +2501,9 @@ class Model:
             # https://github.com/microsoft/onnxruntime/blob/0c9356cb986fd4cd2c5d510909d31186010ba226/onnxruntime/python/tools/quantization/neural_compressor/weight_only.py#L73
             self.make_reshape(weight_reshape_name, weight_reshape_inputs, dtype=ir.DataType.UINT8, shape=[self.vocab_size, flat_dim])
             input_names = [weight_reshape_output, self.input_names["input_ids"]]
-            # For pre-quantized lm_head, pack_ort_format flattens scales/zeros to 1D but
-            # GatherBlockQuantized requires the same rank as data (2D). Compute once here.
-            wlm = getattr(getattr(self, "weights", None), "lm_head", None)
-            wlm_prequantized = wlm is not None and getattr(wlm, "qweight", None) is not None
             if tied_weight_scale_name:
-                # Reshape scales from (vocab*ng,) to (vocab, ng).
-                if wlm_prequantized:
-                    ng = wlm.scales.numel() // wlm.out_features
-                    scale_reshape_name = f"{basename}/scales/Reshape"
-                    self.make_reshape(scale_reshape_name, [tied_weight_scale_name, f"/model/constants/INT64/[{self.vocab_size}, {ng}]"],
-                                      dtype=self.io_dtype, shape=[self.vocab_size, ng])
-                    tied_weight_scale_name = f"{scale_reshape_name}/output_0"
                 input_names.append(tied_weight_scale_name)
             if tied_weight_zp_name:
-                # Same rank requirement for zero points — reshape from 1D to 2D.
-                if wlm_prequantized:
-                    ng_packed = wlm.qzeros.numel() // wlm.out_features
-                    zp_reshape_name = f"{basename}/zeros/Reshape"
-                    self.make_reshape(zp_reshape_name, [tied_weight_zp_name, f"/model/constants/INT64/[{self.vocab_size}, {ng_packed}]"],
-                                      dtype=ir.DataType.UINT8, shape=[self.vocab_size, ng_packed])
-                    tied_weight_zp_name = f"{zp_reshape_name}/output_0"
                 input_names.append(tied_weight_zp_name)
 
             self.make_node(

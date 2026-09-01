@@ -51,6 +51,15 @@ class QuantAutoModel(QuantizedModel):
         if isinstance(self.lm_head, QuantizedTensorModule) and self.lm_head.qweight is not None:
             self.repack(self.lm_head)
             self.lm_head.g_idx = None
+            # GatherBlockQuantized requires scales/zeros to be 2D (vocab, n_groups).
+            # pack_ort_format flattens them to 1D; reshape here so the initializer is
+            # already the right shape and no Reshape op is needed in the graph.
+            lm = self.lm_head
+            ng = lm.scales.numel() // lm.out_features
+            lm.scales = lm.scales.reshape(lm.out_features, ng)
+            if lm.qzeros is not None:
+                ng_packed = lm.qzeros.numel() // lm.out_features
+                lm.qzeros = lm.qzeros.reshape(lm.out_features, ng_packed)
 
     def normalize_weight_name(self, name):
         """Map .zeros suffix to .qzeros so existing loading patterns match."""
