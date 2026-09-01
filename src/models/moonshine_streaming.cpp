@@ -109,8 +109,8 @@ std::unique_ptr<State> MoonshineStreamingModel::CreateState(DeviceSpan<int32_t> 
 MoonshineFrontendSubState::MoonshineFrontendSubState(const MoonshineStreamingModel& model,
                                                      const GeneratorParams& params)
     : State{params, model},
-      model_{model} {
-  config_ = model.moonshine_config_;
+      model_{model},
+      config_{model.moonshine_config_} {
   AllocateStateBuffers();
 
   // Inputs: audio_chunk (set per-run) + the 5 persistent state buffers.
@@ -352,9 +352,8 @@ DeviceSpan<float> MoonshineDecoderKvSubState::Run(int /*total_length*/,
 MoonshineStreamingState::MoonshineStreamingState(const MoonshineStreamingModel& model,
                                                  const GeneratorParams& params)
     : TransducerState{params, model},
-      moonshine_model_{model} {
-  config_ = model.moonshine_config_;
-
+      moonshine_model_{model},
+      config_{model.moonshine_config_} {
   // Create the five ONNX sub-states (each needs the real GeneratorParams).
   frontend_state_ = std::make_unique<MoonshineFrontendSubState>(model, params);
   encoder_state_ = std::make_unique<MoonshineEncoderSubState>(model, params);

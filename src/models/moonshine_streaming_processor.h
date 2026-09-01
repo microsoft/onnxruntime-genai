@@ -30,7 +30,7 @@ struct MoonshineStreamingProcessor : StreamingProcessor {
 
  private:
   Model& model_;
-  MoonshineConfig config_;
+  const MoonshineConfig& config_;
 
   std::vector<float> audio_buffer_;
 

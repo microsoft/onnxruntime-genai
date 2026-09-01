@@ -1216,8 +1216,6 @@ struct Model_Element : JSON::Element {
       v_.sample_rate = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "chunk_samples") {
       v_.chunk_samples = SafeDoubleToInt(JSON::Get<double>(value), name);
-    } else if (name == "overlap_samples") {
-      v_.overlap_samples = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "blank_id") {
       v_.blank_id = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "max_symbols_per_step") {

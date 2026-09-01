@@ -129,7 +129,7 @@ struct MoonshineFrontendSubState : State {
   friend struct MoonshineStreamingState;
 
   const MoonshineStreamingModel& model_;
-  MoonshineConfig config_;
+  const MoonshineConfig& config_;
 
   std::unique_ptr<OrtValue> sample_buffer_;
   std::unique_ptr<OrtValue> sample_len_;
@@ -258,7 +258,7 @@ struct MoonshineStreamingState : TransducerState {
 
  private:
   const MoonshineStreamingModel& moonshine_model_;
-  MoonshineConfig config_;
+  const MoonshineConfig& config_;
 
   // ---- Owned ONNX sub-states (one per session) --------------------------
   std::unique_ptr<MoonshineFrontendSubState> frontend_state_;
