@@ -42,6 +42,27 @@ std::string AddExceptionCause(std::string message, std::exception_ptr error) {
 
 }  // namespace
 
+uint64_t detail::BeginRequestTurn(
+    Engine& engine,
+    const std::shared_ptr<Request>& request,
+    std::span<const int32_t> tokens,
+    std::optional<size_t> max_generated_tokens) {
+  return engine.BeginTurn(request, tokens, max_generated_tokens);
+}
+
+void detail::CloseRequest(
+    Engine& engine,
+    const std::shared_ptr<Request>& request) {
+  engine.CloseRequest(request);
+}
+
+bool detail::CancelRequest(
+    Engine& engine,
+    const std::shared_ptr<Request>& request,
+    uint64_t turn_id) {
+  return engine.CancelRequest(request, turn_id);
+}
+
 Engine::Engine(std::shared_ptr<Model> model)
     : Engine(model, CreateDependencies(model)) {}
 

@@ -314,7 +314,7 @@ void Request::Close() {
     CompleteClose();
     return;
   }
-  engine->CloseRequest(shared_from_this());
+  detail::CloseRequest(*engine, shared_from_this());
 }
 
 bool Request::Cancel(uint64_t turn_id) {
@@ -323,7 +323,7 @@ bool Request::Cancel(uint64_t turn_id) {
     throw std::runtime_error(
         "Cannot cancel after the request's engine has been destroyed.");
   }
-  return engine->CancelRequest(shared_from_this(), turn_id);
+  return detail::CancelRequest(*engine, shared_from_this(), turn_id);
 }
 
 void Request::CompleteClose() noexcept {
@@ -353,8 +353,8 @@ uint64_t Request::BeginTurn(
     throw std::runtime_error(
         "Cannot begin a turn after the request's engine has been destroyed.");
   }
-  return engine->BeginTurn(
-      shared_from_this(), tokens, max_generated_tokens);
+  return detail::BeginRequestTurn(
+      *engine, shared_from_this(), tokens, max_generated_tokens);
 }
 
 int64_t Request::CurrentSequenceLength() const {
