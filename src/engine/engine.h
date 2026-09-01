@@ -206,7 +206,8 @@ struct Engine : std::enable_shared_from_this<Engine>,
   const std::thread::id owner_thread_{std::this_thread::get_id()};
   EngineHealth health_{EngineHealth::Healthy};
   std::exception_ptr fatal_error_;
-  std::exception_ptr fatal_fallback_error_;
+  std::exception_ptr fatal_contract_fallback_error_;
+  std::exception_ptr fatal_execution_fallback_error_;
   StepTransactionId next_transaction_id_{1};
   EngineTransactionMetrics transaction_metrics_;
   StepPlan step_plan_;

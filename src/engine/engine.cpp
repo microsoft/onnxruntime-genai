@@ -64,8 +64,12 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
     throw std::runtime_error("Engine requires a non-null model executor.");
   }
 
-  fatal_fallback_error_ = std::make_exception_ptr(EngineStepError{
+  fatal_contract_fallback_error_ = std::make_exception_ptr(EngineStepError{
       {StepOutcomeKind::ExecutionContractFailure, 0, nullptr},
+      "The Engine encountered a fatal failure, and the underlying exception could not be recorded.",
+  });
+  fatal_execution_fallback_error_ = std::make_exception_ptr(EngineStepError{
+      {StepOutcomeKind::FatalExecutionFailure, 0, nullptr},
       "The Engine encountered a fatal failure, and the underlying exception could not be recorded.",
   });
   const size_t max_batch_size = cache_manager_->MaxBatchSize();
@@ -1005,7 +1009,10 @@ EngineEvent Engine::EventFromStepError(
     std::rethrow_exception(fatal_error_);
   }
 
-  std::exception_ptr durable_error = fatal_fallback_error_;
+  std::exception_ptr durable_error =
+      outcome == StepOutcomeKind::ExecutionContractFailure
+          ? fatal_contract_fallback_error_
+          : fatal_execution_fallback_error_;
   try {
     durable_error = std::make_exception_ptr(EngineStepError{
         {outcome, transaction_id, request_id},
