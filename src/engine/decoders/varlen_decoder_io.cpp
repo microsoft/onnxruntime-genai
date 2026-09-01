@@ -149,6 +149,16 @@ VarlenGraphBuffers::VarlenGraphBuffers(DecoderOnly_Model& model) {
   logits->CreateTensor(std::vector<int64_t>{static_cast<int64_t>(max_batch_size),
                                             static_cast<int64_t>(model.config_->model.vocab_size)},
                        /*make_static=*/true);
+
+  const auto& hidden_states_name = model.config_->model.decoder.outputs.hidden_states;
+  if (!model.config_->model.mtp.filename.empty() &&
+      !hidden_states_name.empty() && model.session_info_.HasOutput(hidden_states_name)) {
+    hidden_states = std::make_unique<Tensor>(model.p_device_inputs_,
+                                             model.session_info_.GetOutputDataType(hidden_states_name));
+    hidden_states->CreateTensor(std::vector<int64_t>{static_cast<int64_t>(max_batch_size),
+                                                     static_cast<int64_t>(model.config_->model.decoder.hidden_size)},
+                                /*make_static=*/true);
+  }
 }
 
 int VarlenGraphBuffers::GraphId(size_t batch_size, size_t block_table_columns) {
@@ -185,6 +195,7 @@ VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
   PreparePositionIds(model, scheduled_requests);
   PrepareAttentionMetadata(model, scheduled_requests);
   PrepareLogits(model, scheduled_requests);
+  PrepareHiddenStates(model, scheduled_requests);
 
   auto cache = cache_manager->Cache();
   for (size_t i = 0; i < cache->input_names_.size(); ++i) {
@@ -408,17 +419,19 @@ void VarlenDecoderIO::PrepareAttentionMetadata(std::shared_ptr<DecoderOnly_Model
   owned_inputs_.push_back(std::move(metadata_tensor));
 }
 
-void VarlenDecoderIO::PrepareLogits(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests) {
-  size_t logits_rows = scheduled_requests.size();
-  if (logits_are_per_token_) {
-    const StepPlan* plan = plan_;
-    logits_rows =
-        plan ? plan->token_count
-             : std::accumulate(scheduled_requests.begin(), scheduled_requests.end(), size_t{0},
-                               [](size_t sum, const std::shared_ptr<Request>& request) {
-                                 return sum + request->ScheduledTokenCount();
-                               });
+size_t VarlenDecoderIO::TokenCount(ScheduledRequests& scheduled_requests) const {
+  const StepPlan* plan = plan_;
+  if (plan) {
+    return plan->token_count;
   }
+  return std::accumulate(scheduled_requests.begin(), scheduled_requests.end(), size_t{0},
+                         [](size_t sum, const std::shared_ptr<Request>& request) {
+                           return sum + request->ScheduledTokenCount();
+                         });
+}
+
+void VarlenDecoderIO::PrepareLogits(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests) {
+  const size_t logits_rows = logits_are_per_token_ ? TokenCount(scheduled_requests) : scheduled_requests.size();
   const std::vector<int64_t> logits_shape = {
       static_cast<int64_t>(logits_rows),
       static_cast<int64_t>(model->config_->model.vocab_size)};
@@ -435,6 +448,36 @@ void VarlenDecoderIO::PrepareLogits(std::shared_ptr<DecoderOnly_Model> model, Sc
 
   output_names_.push_back(model->config_->model.decoder.outputs.logits.c_str());
   outputs_.push_back(active_logits_->GetOrtTensor());
+}
+
+void VarlenDecoderIO::PrepareHiddenStates(std::shared_ptr<DecoderOnly_Model> model,
+                                          ScheduledRequests& scheduled_requests) {
+  // Bind this optional output only when an MTP head is configured to consume it. A model may
+  // expose hidden states for other clients without requiring the Engine to produce them each step.
+  const auto& hidden_states_name = model->config_->model.decoder.outputs.hidden_states;
+  if (model->config_->model.mtp.filename.empty() ||
+      hidden_states_name.empty() || !model->session_info_.HasOutput(hidden_states_name)) {
+    return;
+  }
+
+  // Always one row per packed token, matching the packed input order, so a draft head can be fed
+  // the hidden state of whichever tokens the verify step accepted. Note this is not necessarily
+  // the logits row count: a pruned LM head emits only one logits row per request.
+  const std::vector<int64_t> hidden_states_shape = {
+      static_cast<int64_t>(TokenCount(scheduled_requests)),
+      static_cast<int64_t>(model->config_->model.decoder.hidden_size)};
+  if (graph_buffers_ != nullptr && graph_buffers_->hidden_states != nullptr) {
+    graph_buffers_->hidden_states->CreateTensor(hidden_states_shape, /*make_static=*/true);
+    active_hidden_states_ = graph_buffers_->hidden_states.get();
+  } else {
+    hidden_states_ = std::make_unique<Tensor>(model->p_device_inputs_,
+                                              model->session_info_.GetOutputDataType(hidden_states_name));
+    hidden_states_->CreateTensor(hidden_states_shape);
+    active_hidden_states_ = hidden_states_.get();
+  }
+
+  output_names_.push_back(hidden_states_name.c_str());
+  outputs_.push_back(active_hidden_states_->GetOrtTensor());
 }
 
 std::vector<DeviceSpan<float>> VarlenDecoderIO::ProcessLogits() {

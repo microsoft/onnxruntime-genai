@@ -248,6 +248,7 @@ def create_config(output_dir):
                 },
                 "outputs": {
                     "logits": "logits",
+                    "hidden_states": "hidden_states",
                     "present_key_names": "present.%d.key",
                     "present_value_names": "present.%d.value",
                     "present_conv_names": "present_conv.%d",

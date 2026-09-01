@@ -309,6 +309,7 @@ bool Engine::CancelRequest(const std::shared_ptr<Request>& request, uint64_t tur
     pending_events_.reserve(pending_events_.size() + 1);
   }
 
+  request->draft_tokens_.clear();
   request->status_ = RequestStatus::TurnComplete;
   request->finish_reason_ = GenerationFinishReason::Canceled;
   EngineEvent terminal;
