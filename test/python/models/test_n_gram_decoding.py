@@ -1,0 +1,3326 @@
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License
+
+"""End-to-end tests for model-free n-gram speculative decoding."""
+
+from __future__ import annotations
+
+import copy
+import json
+import os
+import re
+import shutil
+from pathlib import Path
+
+import numpy as np
+import onnxruntime_genai as og
+import pytest
+from _test_utils import assert_cross_shape_output_compatible
+
+_PROMPT = [785, 3838, 374, 279, 6722, 315, 9625, 30]
+_REPETITIVE_PROMPT = [785, 3838, 374, 785, 3838]
+_CHAINED_QWEN_PROMPT = [785, 3838, 374, 785, 3838, 374]
+
+
+def _assert_cross_shape_equal(actual, expected, model_path, prompt):
+    assert_cross_shape_output_compatible(
+        actual, expected, os.path.abspath(model_path), tuple(prompt))
+
+
+@pytest.fixture(scope="module")
+def qwen3_model_path(request):
+    test_models = request.config.getoption("--test_models")
+    candidate = os.path.join(test_models, "qwen3-speculative", "qwen3-0.6b")
+    if not os.path.exists(os.path.join(candidate, "genai_config.json")):
+        pytest.skip("qwen3-0.6b test model is unavailable")
+    return candidate
+
+
+def _generator(model_path, prompt, max_length, *, ngram_size=0,
+               max_draft_tokens=4, ngram_chained_lookup=False,
+               min_adaptive_k=0,
+               cooldown=False,
+               **search_options):
+    model = og.Model(model_path)
+    params = og.GeneratorParams(model)
+    options = {"do_sample": False, "max_length": max_length}
+    options.update(search_options)
+    params.set_search_options(**options)
+    if ngram_size:
+        params.set_speculative_options(
+            ngram_size=ngram_size,
+            max_draft_tokens=max_draft_tokens,
+            ngram_chained_lookup=ngram_chained_lookup,
+            min_adaptive_k=min_adaptive_k,
+            cooldown=cooldown,
+        )
+    generator = og.Generator(model, params)
+    generator.append_tokens(np.array([prompt], dtype=np.int32))
+    return generator
+
+
+def _finish(generator):
+    while not generator.is_done():
+        generator.generate_next_token()
+    return [int(token) for token in generator.get_sequence(0)]
+
+
+def _generate_steps(generator, count):
+    for _ in range(count):
+        assert not generator.is_done()
+        generator.generate_next_token()
+
+
+def _generate(model_path, prompt, max_length, *, ngram_size=0,
+              max_draft_tokens=4, ngram_chained_lookup=False,
+              min_adaptive_k=0,
+              cooldown=False,
+              **search_options):
+    generator = _generator(
+        model_path,
+        prompt,
+        max_length,
+        ngram_size=ngram_size,
+        max_draft_tokens=max_draft_tokens,
+        ngram_chained_lookup=ngram_chained_lookup,
+        min_adaptive_k=min_adaptive_k,
+        cooldown=cooldown,
+        **search_options,
+    )
+    sequence = _finish(generator)
+    return sequence, generator.get_speculative_stats()
+
+
+def _build_self_speculative_model(source_dir, dest_dir):
+    source_dir = os.path.abspath(source_dir)
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    with open(os.path.join(source_dir, "genai_config.json")) as config_file:
+        config = json.load(config_file)
+
+    decoder = copy.deepcopy(config["model"]["decoder"])
+    model_path = os.path.join(source_dir, decoder["filename"])
+    decoder["filename"] = os.path.basename(model_path)
+    os.link(model_path, dest_dir / decoder["filename"])
+    config["model"]["type"] = "speculative"
+    config["model"]["decoder"] = decoder
+    config["model"]["draft"] = copy.deepcopy(decoder)
+    with open(dest_dir / "genai_config.json", "w") as config_file:
+        json.dump(config, config_file, indent=2)
+    return os.fspath(dest_dir)
+
+
+def _make_tiny_ngram_model(directory, logits_table, *, prune_logits=False,
+                           decoder_overrides=None):
+    onnx = pytest.importorskip("onnx")
+    from onnx import TensorProto, helper, numpy_helper
+
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    logits_table = np.asarray(logits_table, dtype=np.float32)
+    vocab_size = logits_table.shape[0]
+    assert logits_table.shape == (vocab_size, vocab_size)
+
+    input_ids = helper.make_tensor_value_info(
+        "input_ids", TensorProto.INT32, ["batch", "sequence"])
+    attention_mask = helper.make_tensor_value_info(
+        "attention_mask", TensorProto.INT32, ["batch", "total_sequence"])
+    output_sequence = 1 if prune_logits else "sequence"
+    logits = helper.make_tensor_value_info(
+        "logits", TensorProto.FLOAT, ["batch", output_sequence, vocab_size])
+    nodes = [
+        helper.make_node(
+            "Gather", ["logits_table", "input_ids"], ["all_logits"], axis=0)
+    ]
+    initializers = [numpy_helper.from_array(logits_table, "logits_table")]
+    if prune_logits:
+        initializers.append(
+            numpy_helper.from_array(np.array([-1], dtype=np.int64), "last_index"))
+        nodes.append(helper.make_node(
+            "Gather", ["all_logits", "last_index"], ["logits"], axis=1))
+    else:
+        nodes.append(helper.make_node("Identity", ["all_logits"], ["logits"]))
+
+    graph = helper.make_graph(
+        nodes, "tiny_ngram", [input_ids, attention_mask], [logits], initializers)
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    model.ir_version = 10
+    onnx.save(model, directory / "model.onnx")
+
+    decoder = {
+        "session_options": {"provider_options": []},
+        "filename": "model.onnx",
+        "head_size": 1,
+        "hidden_size": 1,
+        "num_attention_heads": 1,
+        "num_key_value_heads": 1,
+        "num_hidden_layers": 0,
+        "inputs": {
+            "input_ids": "input_ids",
+            "attention_mask": "attention_mask",
+            "past_key_names": "past_key_values.%d.key",
+            "past_value_names": "past_key_values.%d.value",
+        },
+        "outputs": {
+            "logits": "logits",
+            "present_key_names": "present.%d.key",
+            "present_value_names": "present.%d.value",
+        },
+    }
+    if decoder_overrides:
+        decoder.update(decoder_overrides)
+    config = {
+        "model": {
+            "type": "llama",
+            "vocab_size": vocab_size,
+            "context_length": 64,
+            "bos_token_id": 0,
+            "eos_token_id": [vocab_size - 1],
+            "pad_token_id": 0,
+            "decoder": decoder,
+        },
+        "search": {"max_length": 64},
+    }
+    with open(directory / "genai_config.json", "w") as config_file:
+        json.dump(config, config_file, indent=2)
+    return os.fspath(directory)
+
+
+def _make_constant_guidance_model(
+        directory, tokenizer_source, selected_token):
+    onnx = pytest.importorskip("onnx")
+    from onnx import TensorProto, helper, numpy_helper
+
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    with open(os.path.join(tokenizer_source, "genai_config.json")) as config_file:
+        source_config = json.load(config_file)["model"]
+    vocab_size = source_config["vocab_size"]
+
+    input_ids = helper.make_tensor_value_info(
+        "input_ids", TensorProto.INT32, ["batch", "sequence"])
+    attention_mask = helper.make_tensor_value_info(
+        "attention_mask", TensorProto.INT32, ["batch", "total_sequence"])
+    logits = helper.make_tensor_value_info(
+        "logits", TensorProto.FLOAT, ["batch", "sequence", vocab_size])
+    constant_logits = np.full(vocab_size, -20.0, dtype=np.float32)
+    constant_logits[selected_token] = 20.0
+    nodes = [
+        helper.make_node("Shape", ["input_ids"], ["input_shape"]),
+        helper.make_node(
+            "Concat", ["input_shape", "vocab_axis"], ["logits_shape"], axis=0),
+        helper.make_node(
+            "Expand", ["constant_logits", "logits_shape"], ["logits"]),
+    ]
+    initializers = [
+        numpy_helper.from_array(
+            constant_logits, "constant_logits"),
+        numpy_helper.from_array(
+            np.array([vocab_size], dtype=np.int64), "vocab_axis"),
+    ]
+    graph = helper.make_graph(
+        nodes, "constant_guidance", [input_ids, attention_mask], [logits],
+        initializers)
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    model.ir_version = 10
+    onnx.save(model, directory / "model.onnx")
+
+    for filename in ("tokenizer.json", "tokenizer_config.json", "chat_template.jinja"):
+        source = Path(tokenizer_source) / filename
+        if source.exists():
+            shutil.copy2(source, directory / filename)
+
+    config = {
+        "model": {
+            "type": "llama",
+            "vocab_size": vocab_size,
+            "context_length": 64,
+            "bos_token_id": source_config["bos_token_id"],
+            "eos_token_id": source_config["eos_token_id"],
+            "pad_token_id": source_config["pad_token_id"],
+            "decoder": {
+                "session_options": {"provider_options": []},
+                "filename": "model.onnx",
+                "head_size": 1,
+                "hidden_size": 1,
+                "num_attention_heads": 1,
+                "num_key_value_heads": 1,
+                "num_hidden_layers": 0,
+                "inputs": {
+                    "input_ids": "input_ids",
+                    "attention_mask": "attention_mask",
+                    "past_key_names": "past_key_values.%d.key",
+                    "past_value_names": "past_key_values.%d.value",
+                },
+                "outputs": {
+                    "logits": "logits",
+                    "present_key_names": "present.%d.key",
+                    "present_value_names": "present.%d.value",
+                },
+            },
+        },
+        "search": {"max_length": 64},
+    }
+    with open(directory / "genai_config.json", "w") as config_file:
+        json.dump(config, config_file, indent=2)
+    return os.fspath(directory)
+
+
+def _transition_logits(transitions, vocab_size=10):
+    table = np.full((vocab_size, vocab_size), -20.0, dtype=np.float32)
+    for token in range(vocab_size):
+        table[token, (token + 1) % (vocab_size - 1)] = 20.0
+    for source, target in transitions.items():
+        table[source, :] = -20.0
+        table[source, target] = 20.0
+    return table
+
+
+def _assert_stats_consistent(stats):
+    assert stats["rounds"] == (
+        stats["completed_rounds"] +
+        stats["interrupted_rounds"] +
+        stats["active_rounds"]
+    )
+    assert stats["draft_tokens_accepted"] <= stats["draft_tokens_evaluated"]
+    assert stats["draft_tokens_evaluated"] <= stats["draft_tokens_proposed"]
+    assert stats["tokens_queued"] == (
+        stats["tokens_emitted"] +
+        stats["tokens_discarded"] +
+        stats["tokens_buffered"]
+    )
+    assert 0.0 <= stats["acceptance_rate"] <= 1.0
+    assert (
+        stats["full_accept_rounds"] +
+        stats["partial_accept_rounds"] +
+        stats["zero_accept_rounds"]
+    ) <= stats["completed_rounds"]
+    assert stats["target_forward_passes"] == (
+        stats["target_verify_forward_passes"] +
+        stats["target_reanchor_forward_passes"] +
+        stats["target_reconciliation_forward_passes"]
+    )
+    assert stats["total_target_ms"] == pytest.approx(
+        stats["total_target_verify_ms"] +
+        stats["total_target_reanchor_ms"],
+        rel=1e-6,
+        abs=1e-4,
+    )
+    assert stats["ngram_chained_tokens_proposed"] <= \
+        stats["ngram_lookup_tokens_proposed"]
+    assert stats["ngram_lookup_tokens_proposed"] <= \
+        stats["draft_tokens_proposed"]
+    assert stats["total_ngram_history_sync_ms"] >= 0.0
+    assert stats["total_ngram_lookup_ms"] >= 0.0
+
+
+def _invalid_guard_params(model, guard):
+    params = og.GeneratorParams(model)
+    search_options = {
+        "do_sample": False,
+        "max_length": len(_PROMPT) + 4,
+    }
+    if guard == "batch_size":
+        search_options["batch_size"] = 2
+    elif guard == "num_beams":
+        search_options["num_beams"] = 2
+    elif guard == "num_return_sequences":
+        search_options["num_return_sequences"] = 2
+    else:
+        raise ValueError(f"Unknown n-gram guard: {guard}")
+    params.set_search_options(**search_options)
+    params.set_speculative_options(ngram_size=3)
+    return params
+
+
+class TestNGramControlledSemantics:
+    def test_observability_distinguishes_lookup_miss_from_round(self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "ngram_observability_miss",
+            _transition_logits({1: 2}),
+        )
+        prompt = [1, 2, 3, 4]
+        generator = _generator(
+            model_path,
+            prompt,
+            len(prompt) + 1,
+            ngram_size=3,
+            max_draft_tokens=2,
+        )
+
+        generator.generate_next_token()
+        stats = generator.get_speculative_stats()
+
+        assert stats["rounds"] == 0
+        assert stats["ngram_lookup_hits"] == 0
+        assert stats["ngram_lookup_misses"] == 1
+        assert stats["ngram_lookup_tokens_proposed"] == 0
+        assert stats["standard_fallback_steps"] == 1
+        assert stats["ngram_history_syncs"] == 1
+        assert stats["ngram_history_tokens_synced"] == len(prompt)
+        assert stats["full_accept_rounds"] == 0
+        assert stats["partial_accept_rounds"] == 0
+        assert stats["zero_accept_rounds"] == 0
+        _assert_stats_consistent(stats)
+
+    def test_shared_cooldown_skips_one_step_after_three_zero_accept_rounds(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "ngram_cooldown",
+            _transition_logits({1: 2, 2: 3, 3: 1}),
+        )
+        prompt = [1, 4, 2, 4, 3, 4, 1]
+        generator = _generator(
+            model_path,
+            prompt,
+            len(prompt) + 5,
+            ngram_size=2,
+            max_draft_tokens=2,
+            cooldown=True,
+        )
+
+        _generate_steps(generator, 3)
+        before_fallback = generator.get_speculative_stats()
+        assert before_fallback["rounds"] == 3
+        assert before_fallback["draft_tokens_accepted"] == 0
+        assert before_fallback["cooldown_entries"] == 1
+        assert before_fallback["cooldown_steps"] == 0
+        assert before_fallback["cooldown_remaining"] == 1
+
+        generator.generate_next_token()
+        after_fallback = generator.get_speculative_stats()
+        assert after_fallback["rounds"] == 3
+        assert after_fallback["cooldown_steps"] == 1
+        assert after_fallback["cooldown_remaining"] == 0
+        assert after_fallback["standard_fallback_steps"] == 1
+
+        actual = _finish(generator)
+        expected, _ = _generate(
+            model_path, prompt, len(prompt) + 5)
+        assert actual == expected
+        assert generator.get_speculative_stats()["rounds"] == 4
+
+    def test_disabled_cooldown_preserves_continuous_speculation(self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "ngram_cooldown_disabled",
+            _transition_logits({1: 2, 2: 3, 3: 1}),
+        )
+        prompt = [1, 4, 2, 4, 3, 4, 1]
+        generator = _generator(
+            model_path,
+            prompt,
+            len(prompt) + 5,
+            ngram_size=2,
+            max_draft_tokens=2,
+        )
+
+        _generate_steps(generator, 3)
+        before_fourth_attempt = generator.get_speculative_stats()
+        assert before_fourth_attempt["rounds"] == 3
+        assert before_fourth_attempt["draft_tokens_accepted"] == 0
+        assert before_fourth_attempt["cooldown_entries"] == 0
+        assert before_fourth_attempt["cooldown_remaining"] == 0
+
+        generator.generate_next_token()
+        stats = generator.get_speculative_stats()
+        assert stats["rounds"] == 4
+        assert stats["cooldown_entries"] == 0
+        assert stats["cooldown_steps"] == 0
+        assert stats["cooldown_remaining"] == 0
+        assert stats["standard_fallback_steps"] == 0
+
+    def test_chained_lookup_crosses_occurrences_and_fills_target_batch(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "chained_cross_occurrences",
+            _transition_logits({2: 3, 3: 4, 4: 5, 5: 6}),
+        )
+        prompt = [1, 2, 3, 8, 2, 3, 4, 8, 3, 4, 5, 8, 1, 2]
+        max_length = len(prompt) + 4
+
+        contiguous = _generator(
+            model_path, prompt, max_length,
+            ngram_size=3, max_draft_tokens=3)
+        chained = _generator(
+            model_path, prompt, max_length,
+            ngram_size=3, max_draft_tokens=3,
+            ngram_chained_lookup=True)
+
+        contiguous.generate_next_token()
+        chained.generate_next_token()
+        contiguous_stats = contiguous.get_speculative_stats()
+        chained_stats = chained.get_speculative_stats()
+
+        assert [int(token) for token in contiguous.get_sequence(0)] == prompt + [3]
+        assert [int(token) for token in chained.get_sequence(0)] == prompt + [3]
+        assert contiguous_stats["draft_tokens_proposed"] == 3
+        assert contiguous_stats["draft_tokens_evaluated"] == 2
+        assert contiguous_stats["draft_tokens_accepted"] == 1
+        assert chained_stats["draft_tokens_proposed"] == 3
+        assert chained_stats["draft_tokens_evaluated"] == 3
+        assert chained_stats["draft_tokens_accepted"] == 3
+        assert chained_stats["bonus_tokens"] == 1
+        assert chained_stats["target_forward_passes"] == 1
+        assert chained_stats["draft_forward_passes"] == 0
+        assert contiguous_stats["ngram_lookup_hits"] == 1
+        assert contiguous_stats["ngram_lookup_misses"] == 0
+        assert contiguous_stats["ngram_lookup_tokens_proposed"] == 3
+        assert contiguous_stats["ngram_chained_tokens_proposed"] == 0
+        assert chained_stats["ngram_lookup_hits"] == 1
+        assert chained_stats["ngram_lookup_misses"] == 0
+        assert chained_stats["ngram_lookup_tokens_proposed"] == 3
+        assert chained_stats["ngram_chained_tokens_proposed"] == 2
+        assert chained_stats["ngram_history_syncs"] == 1
+        assert chained_stats["ngram_history_tokens_synced"] == len(prompt)
+        assert chained_stats["target_verify_forward_passes"] == 1
+        assert chained_stats["target_reanchor_forward_passes"] == 0
+        _assert_stats_consistent(contiguous_stats)
+        _assert_stats_consistent(chained_stats)
+
+    def test_chained_lookup_cycle_fills_maximum_supported_k(self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "chained_cycle",
+            _transition_logits({1: 2, 2: 1}),
+        )
+        prompt = [1, 2, 1, 2]
+        generator = _generator(
+            model_path, prompt, len(prompt) + 17,
+            ngram_size=2, max_draft_tokens=16,
+            ngram_chained_lookup=True)
+
+        generator.generate_next_token()
+        stats = generator.get_speculative_stats()
+
+        assert int(generator.get_sequence(0)[-1]) == 1
+        assert stats["rounds"] == 1
+        assert stats["draft_tokens_proposed"] == 16
+        assert stats["draft_tokens_evaluated"] == 16
+        assert stats["draft_tokens_accepted"] == 16
+        assert stats["bonus_tokens"] == 1
+        assert stats["tokens_queued"] == 17
+        assert stats["tokens_emitted"] == 1
+        assert stats["tokens_buffered"] == 16
+        assert stats["target_forward_passes"] == 1
+        _assert_stats_consistent(stats)
+
+    def test_chained_lookup_keeps_one_visible_token_per_call(self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "chained_streaming",
+            _transition_logits({1: 2, 2: 1}),
+        )
+        prompt = [1, 2, 1, 2]
+        generator = _generator(
+            model_path, prompt, len(prompt) + 20,
+            ngram_size=2, max_draft_tokens=16,
+            ngram_chained_lookup=True)
+
+        calls = 0
+        while not generator.is_done():
+            old_length = len(generator.get_sequence(0))
+            generator.generate_next_token()
+            assert len(generator.get_sequence(0)) == old_length + 1
+            calls += 1
+
+        stats = generator.get_speculative_stats()
+        assert calls == 20
+        assert stats["tokens_emitted"] == 20
+        assert stats["draft_forward_passes"] == 0
+        _assert_stats_consistent(stats)
+
+    def test_disabling_chained_lookup_preserves_contiguous_behavior(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "chained_disabled",
+            _transition_logits({2: 3, 3: 4, 4: 5}),
+        )
+        prompt = [1, 2, 3, 8, 2, 3, 4, 8, 3, 4, 5, 8, 1, 2]
+        options = {
+            "ngram_size": 3,
+            "max_draft_tokens": 4,
+        }
+
+        omitted, omitted_stats = _generate(
+            model_path, prompt, len(prompt) + 8, **options)
+        disabled, disabled_stats = _generate(
+            model_path, prompt, len(prompt) + 8,
+            ngram_chained_lookup=False, **options)
+
+        assert disabled == omitted
+        for key in (
+                "rounds",
+                "draft_tokens_proposed",
+                "draft_tokens_evaluated",
+                "draft_tokens_accepted",
+                "tokens_queued",
+                "tokens_emitted",
+                "tokens_discarded",
+                "tokens_buffered",
+                "target_forward_passes",
+                "draft_forward_passes"):
+            assert disabled_stats[key] == omitted_stats[key]
+        _assert_stats_consistent(disabled_stats)
+        _assert_stats_consistent(omitted_stats)
+
+    def test_chained_lookup_respects_remaining_length_budget(self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "chained_max_length",
+            _transition_logits({1: 2, 2: 1}),
+        )
+        prompt = [1, 2, 1, 2]
+        result, stats = _generate(
+            model_path, prompt, len(prompt) + 1,
+            ngram_size=2, max_draft_tokens=16,
+            ngram_chained_lookup=True)
+
+        assert result == prompt + [1]
+        assert stats["draft_tokens_proposed"] == 1
+        assert stats["draft_tokens_evaluated"] == 1
+        assert stats["draft_tokens_accepted"] == 1
+        assert stats["tokens_emitted"] == 1
+        assert stats["tokens_discarded"] == 1
+        assert stats["interrupted_rounds"] == 1
+        _assert_stats_consistent(stats)
+
+    def test_chained_lookup_stops_verification_at_first_rejection(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "chained_rejection",
+            _transition_logits({2: 3, 3: 7}),
+        )
+        prompt = [1, 2, 3, 8, 2, 3, 4, 8, 3, 4, 5, 8, 1, 2]
+        result, stats = _generate(
+            model_path, prompt, len(prompt) + 2,
+            ngram_size=3, max_draft_tokens=8,
+            ngram_chained_lookup=True)
+
+        assert result == prompt + [3, 7]
+        assert stats["draft_tokens_proposed"] == 2
+        assert stats["draft_tokens_evaluated"] == 2
+        assert stats["draft_tokens_accepted"] == 1
+        assert stats["correction_tokens"] == 1
+        assert stats["bonus_tokens"] == 0
+        _assert_stats_consistent(stats)
+
+    def test_chained_lookup_eos_discards_unobserved_synthetic_tail(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "chained_eos",
+            _transition_logits({2: 9, 9: 2}),
+        )
+        prompt = [2, 9, 2]
+        result, stats = _generate(
+            model_path, prompt, len(prompt) + 8,
+            ngram_size=2, max_draft_tokens=8,
+            ngram_chained_lookup=True)
+
+        assert result == prompt
+        assert stats["draft_tokens_proposed"] == 8
+        assert stats["draft_tokens_accepted"] >= 1
+        assert stats["tokens_emitted"] == 0
+        assert stats["tokens_discarded"] == stats["tokens_queued"]
+        assert stats["interrupted_rounds"] == 1
+        _assert_stats_consistent(stats)
+
+    def test_chained_lookup_sampling_matches_standard_on_controlled_model(
+            self, tmp_path):
+        table = np.full((10, 10), -20.0, dtype=np.float32)
+        table[:, 1:5] = np.array([0.0, 0.2, 0.4, 0.6], dtype=np.float32)
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "chained_sampling", table)
+        prompt = [1, 2, 1, 2]
+        outputs = set()
+
+        for seed in range(24):
+            options = {
+                "do_sample": True,
+                "top_k": 4,
+                "temperature": 0.8,
+                "random_seed": seed,
+            }
+            expected, _ = _generate(
+                model_path, prompt, len(prompt) + 12, **options)
+            actual, stats = _generate(
+                model_path, prompt, len(prompt) + 12,
+                ngram_size=2, max_draft_tokens=8,
+                ngram_chained_lookup=True, **options)
+
+            assert actual == expected
+            assert stats["draft_forward_passes"] == 0
+            _assert_stats_consistent(stats)
+            outputs.add(tuple(actual[len(prompt):]))
+
+        assert len(outputs) > 1
+
+    def test_chained_lookup_and_adaptive_k_share_effective_budget(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "chained_adaptive",
+            _transition_logits({1: 2, 2: 1}),
+        )
+        prompt = [1, 2, 1, 2]
+        generator = _generator(
+            model_path, prompt, len(prompt) + 24,
+            ngram_size=2, max_draft_tokens=1,
+            ngram_chained_lookup=True,
+            min_adaptive_k=2)
+
+        for _ in range(6):
+            generator.generate_next_token()
+        stats = generator.get_speculative_stats()
+
+        assert stats["completed_rounds"] == 2
+        assert stats["draft_tokens_proposed"] == 4
+        assert stats["draft_tokens_accepted"] == 4
+        assert stats["effective_k"] == 3
+        assert stats["adaptive_k_increases"] == 1
+        assert stats["adaptive_k_observations"] == 2
+        _assert_stats_consistent(stats)
+
+    def test_chained_lookup_mid_round_append_discards_synthetic_tail(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "chained_append",
+            _transition_logits({1: 2, 2: 1, 7: 1}),
+        )
+        prompt = [1, 2, 1, 2]
+        max_length = len(prompt) + 16
+        generator = _generator(
+            model_path, prompt, max_length,
+            ngram_size=2, max_draft_tokens=8,
+            ngram_chained_lookup=True)
+        generator.generate_next_token()
+        before_append = generator.get_speculative_stats()
+        committed = [int(token) for token in generator.get_sequence(0)]
+
+        generator.append_tokens(np.array([[7, 1, 2]], dtype=np.int32))
+        actual = _finish(generator)
+        expected, _ = _generate(
+            model_path, committed + [7, 1, 2], max_length,
+            ngram_size=2, max_draft_tokens=8,
+            ngram_chained_lookup=True)
+        stats = generator.get_speculative_stats()
+
+        assert before_append["active_rounds"] == 1
+        assert before_append["tokens_buffered"] > 0
+        assert actual == expected
+        assert stats["interrupted_rounds"] >= 1
+        assert stats["active_rounds"] == 0
+        assert stats["tokens_buffered"] == 0
+        _assert_stats_consistent(stats)
+
+    def test_chained_lookup_rewind_rebuilds_only_committed_history(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "chained_rewind",
+            _transition_logits({1: 2, 2: 1}),
+        )
+        prompt = [1, 2, 1, 2]
+        max_length = len(prompt) + 18
+        expected, _ = _generate(
+            model_path, prompt, max_length,
+            ngram_size=2, max_draft_tokens=8,
+            ngram_chained_lookup=True)
+        generator = _generator(
+            model_path, prompt, max_length,
+            ngram_size=2, max_draft_tokens=8,
+            ngram_chained_lookup=True)
+        generator.generate_next_token()
+        assert generator.get_speculative_stats()["tokens_buffered"] > 0
+
+        generator.rewind_to(0)
+        generator.append_tokens(np.array([prompt], dtype=np.int32))
+        actual = _finish(generator)
+        stats = generator.get_speculative_stats()
+
+        assert actual == expected
+        assert stats["interrupted_rounds"] >= 1
+        assert stats["draft_forward_passes"] == 0
+        _assert_stats_consistent(stats)
+
+    def test_chained_lookup_set_logits_reanchors_without_indexing_drafts(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "chained_set_logits",
+            _transition_logits({1: 2, 2: 1, 7: 1}),
+        )
+        prompt = [1, 2, 1, 2]
+        max_length = len(prompt) + 16
+        generator = _generator(
+            model_path, prompt, max_length,
+            ngram_size=2, max_draft_tokens=8,
+            ngram_chained_lookup=True)
+        generator.generate_next_token()
+        assert generator.get_speculative_stats()["tokens_buffered"] > 0
+
+        forced_logits = np.full_like(generator.get_logits(), -1e9)
+        forced_logits[0, 0, 7] = 1e9
+        generator.set_logits(forced_logits)
+        generator.generate_next_token()
+        assert int(generator.get_sequence(0)[-1]) == 7
+
+        committed = [int(token) for token in generator.get_sequence(0)]
+        actual = _finish(generator)
+        expected, _ = _generate(
+            model_path, committed, max_length,
+            ngram_size=2, max_draft_tokens=8,
+            ngram_chained_lookup=True)
+
+        assert actual == expected
+        _assert_stats_consistent(generator.get_speculative_stats())
+
+    def test_chained_lookup_state_is_independent_between_generators(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "chained_isolation",
+            _transition_logits({2: 3, 3: 4, 4: 5}),
+        )
+        prompt = [1, 2, 3, 8, 2, 3, 4, 8, 3, 4, 5, 8, 1, 2]
+        chained = _generator(
+            model_path, prompt, len(prompt) + 8,
+            ngram_size=3, max_draft_tokens=3,
+            ngram_chained_lookup=True)
+        contiguous = _generator(
+            model_path, prompt, len(prompt) + 8,
+            ngram_size=3, max_draft_tokens=3,
+            ngram_chained_lookup=False)
+
+        chained.generate_next_token()
+        contiguous.generate_next_token()
+        chained_stats = chained.get_speculative_stats()
+        contiguous_stats = contiguous.get_speculative_stats()
+
+        assert chained_stats["draft_tokens_accepted"] == 3
+        assert contiguous_stats["draft_tokens_accepted"] == 1
+        assert [int(token) for token in chained.get_sequence(0)] == \
+            [int(token) for token in contiguous.get_sequence(0)]
+
+    def test_adaptive_k_starts_at_two_and_waits_for_smoothed_evidence(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "adaptive_initial",
+            _transition_logits({1: 2, 2: 1}),
+        )
+        prompt = [1, 2, 1, 2]
+        generator = _generator(
+            model_path, prompt, len(prompt) + 12,
+            ngram_size=3, max_draft_tokens=4, min_adaptive_k=2)
+
+        assert generator.get_speculative_stats()["effective_k"] == 2
+        generator.generate_next_token()
+        active = generator.get_speculative_stats()
+        assert active["active_rounds"] == 1
+        assert active["effective_k"] == 2
+        generator.generate_next_token()
+        generator.generate_next_token()
+        stats = generator.get_speculative_stats()
+
+        assert stats["completed_rounds"] == 1
+        assert stats["draft_tokens_proposed"] == 2
+        assert stats["draft_tokens_evaluated"] == 2
+        assert stats["draft_tokens_accepted"] == 2
+        assert stats["effective_k"] == 2
+        assert stats["adaptive_k_observations"] == 1
+        assert stats["adaptive_k_probes"] == 0
+        assert stats["adaptive_k_increases"] == 0
+        assert stats["adaptive_k_decreases"] == 0
+
+        for _ in range(3):
+            generator.generate_next_token()
+        probing = generator.get_speculative_stats()
+        assert probing["completed_rounds"] == 2
+        assert probing["draft_tokens_proposed"] == 4
+        assert probing["draft_tokens_accepted"] == 4
+        assert probing["effective_k"] == 3
+        assert probing["adaptive_k_observations"] == 2
+        assert probing["adaptive_k_probes"] == 1
+        assert probing["adaptive_k_increases"] == 1
+
+    def test_adaptive_k_partial_acceptance_does_not_overreact_to_one_round(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "adaptive_partial",
+            _transition_logits({2: 3, 3: 5}),
+        )
+        prompt = [1, 2, 3, 4, 1, 2]
+        generator = _generator(
+            model_path, prompt, len(prompt) + 8,
+            ngram_size=3, max_draft_tokens=4, min_adaptive_k=2)
+
+        generator.generate_next_token()
+        generator.generate_next_token()
+        stats = generator.get_speculative_stats()
+
+        assert stats["draft_tokens_proposed"] == 2
+        assert stats["draft_tokens_evaluated"] == 2
+        assert stats["draft_tokens_accepted"] == 1
+        assert stats["effective_k"] == 2
+        assert stats["adaptive_k_observations"] == 1
+        assert stats["adaptive_k_probes"] == 0
+        assert stats["adaptive_k_decreases"] == 0
+
+    def test_adaptive_k_zero_acceptance_does_not_overreact_to_one_round(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "adaptive_zero", _transition_logits({2: 5}))
+        prompt = [1, 2, 3, 4, 1, 2]
+        generator = _generator(
+            model_path, prompt, len(prompt) + 8,
+            ngram_size=3, max_draft_tokens=4, min_adaptive_k=2)
+
+        generator.generate_next_token()
+        stats = generator.get_speculative_stats()
+
+        assert stats["draft_tokens_proposed"] == 2
+        assert stats["draft_tokens_evaluated"] == 1
+        assert stats["draft_tokens_accepted"] == 0
+        assert stats["effective_k"] == 2
+        assert stats["adaptive_k_observations"] == 1
+        assert stats["adaptive_k_probes"] == 0
+        assert stats["adaptive_k_decreases"] == 0
+
+    def test_adaptive_k_lookup_miss_does_not_change_policy(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "adaptive_miss", _transition_logits({}))
+        prompt = [1, 3, 5]
+        generator = _generator(
+            model_path, prompt, len(prompt) + 1,
+            ngram_size=4, max_draft_tokens=8, min_adaptive_k=2)
+
+        generator.generate_next_token()
+        stats = generator.get_speculative_stats()
+
+        assert stats["rounds"] == 0
+        assert stats["effective_k"] == 2
+        assert stats["adaptive_k_observations"] == 0
+        assert stats["adaptive_k_increases"] == 0
+        assert stats["adaptive_k_decreases"] == 0
+
+    def test_adaptive_k_interrupted_round_does_not_update_policy(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "adaptive_interrupted",
+            _transition_logits({1: 2, 2: 1}),
+        )
+        prompt = [1, 2, 1, 2]
+        generator = _generator(
+            model_path, prompt, len(prompt) + 1,
+            ngram_size=3, max_draft_tokens=4, min_adaptive_k=2)
+
+        generator.generate_next_token()
+        stats = generator.get_speculative_stats()
+
+        assert generator.is_done()
+        assert stats["interrupted_rounds"] == 1
+        assert stats["effective_k"] == 2
+        assert stats["adaptive_k_observations"] == 0
+        assert stats["adaptive_k_increases"] == 0
+        assert stats["adaptive_k_decreases"] == 0
+
+    def test_adaptive_k_mid_round_append_does_not_train_on_discarded_output(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "adaptive_append",
+            _transition_logits({1: 2, 2: 1}),
+        )
+        prompt = [1, 2, 1, 2]
+        generator = _generator(
+            model_path, prompt, len(prompt) + 12,
+            ngram_size=3, max_draft_tokens=4, min_adaptive_k=2)
+        generator.generate_next_token()
+        assert generator.get_speculative_stats()["active_rounds"] == 1
+
+        generator.append_tokens(np.array([[1, 2]], dtype=np.int32))
+        stats = generator.get_speculative_stats()
+
+        assert stats["interrupted_rounds"] == 1
+        assert stats["effective_k"] == 2
+        assert stats["adaptive_k_observations"] == 0
+        assert stats["adaptive_k_increases"] == 0
+        assert stats["adaptive_k_decreases"] == 0
+
+    def test_adaptive_k_reset_restores_initial_width(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "adaptive_reset",
+            _transition_logits({1: 2, 2: 1}),
+        )
+        prompt = [1, 2, 1, 2]
+        generator = _generator(
+            model_path, prompt, len(prompt) + 12,
+            ngram_size=3, max_draft_tokens=4, min_adaptive_k=2)
+        for _ in range(6):
+            generator.generate_next_token()
+        assert generator.get_speculative_stats()["effective_k"] == 3
+
+        generator.rewind_to(0)
+        generator.append_tokens(np.array([prompt], dtype=np.int32))
+        stats = generator.get_speculative_stats()
+
+        assert stats["effective_k"] == 2
+        assert stats["adaptive_k_increases"] == 1
+        assert stats["adaptive_k_throughput"] == 0.0
+
+    def test_adaptive_k_is_independent_between_generators(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "adaptive_isolation",
+            _transition_logits({1: 2, 2: 1}),
+        )
+        prompt = [1, 2, 1, 2]
+        first = _generator(
+            model_path, prompt, len(prompt) + 12,
+            ngram_size=3, max_draft_tokens=4, min_adaptive_k=2)
+        second = _generator(
+            model_path, prompt, len(prompt) + 12,
+            ngram_size=3, max_draft_tokens=4, min_adaptive_k=2)
+
+        for _ in range(6):
+            first.generate_next_token()
+
+        assert first.get_speculative_stats()["effective_k"] == 3
+        assert second.get_speculative_stats()["effective_k"] == 2
+        assert second.get_speculative_stats()["adaptive_k_observations"] == 0
+        assert second.get_speculative_stats()["adaptive_k_increases"] == 0
+
+    def test_disabling_adaptive_k_preserves_fixed_width_behavior(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "adaptive_disabled",
+            _transition_logits({1: 2, 2: 1}),
+        )
+        prompt = [1, 2, 1, 2]
+        generator = _generator(
+            model_path, prompt, len(prompt) + 8,
+            ngram_size=3, max_draft_tokens=4, min_adaptive_k=0)
+
+        generator.generate_next_token()
+        stats = generator.get_speculative_stats()
+
+        assert stats["draft_tokens_proposed"] == 2
+        assert stats["effective_k"] == 4
+        assert stats["adaptive_k_increases"] == 0
+        assert stats["adaptive_k_decreases"] == 0
+        assert stats["adaptive_k_observations"] == 0
+        assert stats["adaptive_k_probes"] == 0
+
+    def test_adaptive_k_floor_one_starts_at_one(
+            self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "adaptive_k1",
+            _transition_logits({1: 2, 2: 1}),
+        )
+        prompt = [1, 2, 1, 2]
+        result, stats = _generate(
+            model_path, prompt, len(prompt) + 2,
+            ngram_size=3, max_draft_tokens=4, min_adaptive_k=1)
+
+        assert result == prompt + [1, 2]
+        assert stats["effective_k"] == 1
+        assert stats["adaptive_k_increases"] == 0
+
+    def test_all_proposals_accept_then_bonus_is_buffered(self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "all_accept", _transition_logits({1: 2, 2: 1}))
+        prompt = [1, 2, 1, 2]
+        generator = _generator(
+            model_path, prompt, len(prompt) + 3,
+            ngram_size=3, max_draft_tokens=2)
+
+        for expected_token in [1, 2, 1]:
+            old_length = len(generator.get_sequence(0))
+            generator.generate_next_token()
+            assert len(generator.get_sequence(0)) == old_length + 1
+            assert int(generator.get_sequence(0)[-1]) == expected_token
+
+        stats = generator.get_speculative_stats()
+        assert stats["rounds"] == 1
+        assert stats["completed_rounds"] == 1
+        assert stats["draft_tokens_proposed"] == 2
+        assert stats["draft_tokens_evaluated"] == 2
+        assert stats["draft_tokens_accepted"] == 2
+        assert stats["bonus_tokens"] == 1
+        assert stats["correction_tokens"] == 0
+        assert stats["tokens_queued"] == 3
+        assert stats["tokens_emitted"] == 3
+        assert stats["target_forward_passes"] == 1
+        assert stats["draft_forward_passes"] == 0
+        assert stats["full_accept_rounds"] == 1
+        assert stats["partial_accept_rounds"] == 0
+        assert stats["zero_accept_rounds"] == 0
+        _assert_stats_consistent(stats)
+
+    def test_first_proposal_rejection_stops_verification(self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "first_reject", _transition_logits({2: 5}))
+        prompt = [1, 2, 3, 4, 1, 2]
+        generator = _generator(
+            model_path, prompt, len(prompt) + 4,
+            ngram_size=3, max_draft_tokens=2)
+        generator.generate_next_token()
+        result = [int(token) for token in generator.get_sequence(0)]
+        stats = generator.get_speculative_stats()
+
+        assert result == prompt + [5]
+        assert stats["draft_tokens_proposed"] == 2
+        assert stats["draft_tokens_evaluated"] == 1
+        assert stats["draft_tokens_accepted"] == 0
+        assert stats["correction_tokens"] == 1
+        assert stats["bonus_tokens"] == 0
+        assert stats["full_accept_rounds"] == 0
+        assert stats["partial_accept_rounds"] == 0
+        assert stats["zero_accept_rounds"] == 1
+        _assert_stats_consistent(stats)
+
+    def test_partial_acceptance_commits_prefix_then_correction(self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "partial_accept", _transition_logits({2: 3, 3: 5}))
+        prompt = [1, 2, 3, 4, 1, 2]
+        result, stats = _generate(
+            model_path, prompt, len(prompt) + 2,
+            ngram_size=3, max_draft_tokens=2)
+
+        assert result == prompt + [3, 5]
+        assert stats["draft_tokens_proposed"] == 2
+        assert stats["draft_tokens_evaluated"] == 2
+        assert stats["draft_tokens_accepted"] == 1
+        assert stats["correction_tokens"] == 1
+        assert stats["bonus_tokens"] == 0
+        assert stats["full_accept_rounds"] == 0
+        assert stats["partial_accept_rounds"] == 1
+        assert stats["zero_accept_rounds"] == 0
+        _assert_stats_consistent(stats)
+
+    def test_max_length_discards_precomputed_bonus(self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "max_length", _transition_logits({1: 2, 2: 1}))
+        prompt = [1, 2, 1, 2]
+        result, stats = _generate(
+            model_path, prompt, len(prompt) + 1,
+            ngram_size=3, max_draft_tokens=4)
+
+        assert result == prompt + [1]
+        assert stats["draft_tokens_proposed"] == 1
+        assert stats["draft_tokens_accepted"] == 1
+        assert stats["bonus_tokens"] == 1
+        assert stats["tokens_queued"] == 2
+        assert stats["tokens_emitted"] == 1
+        assert stats["tokens_discarded"] == 1
+        assert stats["interrupted_rounds"] == 1
+        _assert_stats_consistent(stats)
+
+    def test_eos_in_accepted_proposal_discards_remaining_buffer(self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "accepted_eos", _transition_logits({2: 9, 9: 5}))
+        prompt = [1, 2, 9, 4, 1, 2]
+        result, stats = _generate(
+            model_path, prompt, len(prompt) + 4,
+            ngram_size=3, max_draft_tokens=2)
+
+        assert result == prompt
+        assert stats["draft_tokens_accepted"] == 1
+        assert stats["correction_tokens"] == 1
+        assert stats["tokens_queued"] == 2
+        assert stats["tokens_emitted"] == 0
+        assert stats["tokens_discarded"] == 2
+        assert stats["interrupted_rounds"] == 1
+        _assert_stats_consistent(stats)
+
+    def test_k1_and_lookup_miss_match_standard_greedy(self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "k1_and_miss", _transition_logits({1: 2, 2: 1}))
+        repetitive = [1, 2, 1, 2]
+        unique = [1, 3, 5]
+
+        standard, _ = _generate(
+            model_path, repetitive, len(repetitive) + 8)
+        k1, k1_stats = _generate(
+            model_path, repetitive, len(repetitive) + 8,
+            ngram_size=3, max_draft_tokens=1)
+        miss, miss_stats = _generate(
+            model_path, unique, len(unique) + 1,
+            ngram_size=4, max_draft_tokens=4)
+
+        assert k1 == standard
+        assert k1_stats["draft_tokens_proposed"] > 0
+        assert miss == unique + [6]
+        assert miss_stats["rounds"] == 0
+        assert miss_stats["draft_forward_passes"] == 0
+
+    def test_sampling_matches_standard_across_mixed_hits_and_misses(self, tmp_path):
+        table = np.full((10, 10), -20.0, dtype=np.float32)
+        table[:, 1:5] = np.array([0.0, 0.2, 0.4, 0.6], dtype=np.float32)
+        model_path = _make_tiny_ngram_model(tmp_path / "sampling", table)
+        prompt = [1, 2, 1, 2]
+        outputs = set()
+
+        for seed in range(24):
+            options = {
+                "do_sample": True,
+                "top_k": 4,
+                "temperature": 0.8,
+                "random_seed": seed,
+            }
+            standard, _ = _generate(
+                model_path, prompt, len(prompt) + 10, **options)
+            ngram, stats = _generate(
+                model_path, prompt, len(prompt) + 10,
+                ngram_size=3, max_draft_tokens=4, **options)
+            assert ngram == standard
+            assert stats["draft_forward_passes"] == 0
+            outputs.add(tuple(ngram[len(prompt):]))
+
+        assert len(outputs) > 1
+
+    @pytest.mark.parametrize("min_adaptive_k", [1, 2, 4])
+    def test_min_adaptive_k_qwen_greedy_matches_standard_decoding(
+            self, qwen3_model_path, min_adaptive_k):
+        max_length = len(_REPETITIVE_PROMPT) + 24
+        expected, _ = _generate(
+            qwen3_model_path, _REPETITIVE_PROMPT, max_length)
+        actual, stats = _generate(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=4,
+            min_adaptive_k=min_adaptive_k,
+        )
+
+        assert actual == expected
+        assert stats["rounds"] > 0
+        assert stats["draft_forward_passes"] == 0
+        assert min_adaptive_k <= stats["effective_k"] <= 16
+        _assert_stats_consistent(stats)
+
+    @pytest.mark.parametrize("seed", [0, 7, 1234])
+    def test_qwen_sampling_k1_matches_standard_rng_stream(
+            self, qwen3_model_path, seed):
+        max_length = len(_REPETITIVE_PROMPT) + 24
+        options = {
+            "do_sample": True,
+            "top_k": 40,
+            "top_p": 0.95,
+            "temperature": 0.8,
+            "random_seed": seed,
+        }
+        expected, _ = _generate(
+            qwen3_model_path, _REPETITIVE_PROMPT, max_length, **options)
+        actual, stats = _generate(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=1,
+            **options,
+        )
+
+        assert actual == expected
+        assert stats["draft_forward_passes"] == 0
+        assert stats["effective_k"] == 1
+        _assert_stats_consistent(stats)
+
+    def test_adaptive_k_qwen_sampling_collects_telemetry_and_varies_by_seed(
+            self, qwen3_model_path):
+        max_k = 8
+        max_length = len(_REPETITIVE_PROMPT) + 24
+        outputs = set()
+
+        for seed in (0, 7, 1234):
+            options = {
+                "do_sample": True,
+                "top_k": 40,
+                "top_p": 0.95,
+                "temperature": 0.8,
+                "random_seed": seed,
+                "ngram_size": 3,
+                "max_draft_tokens": max_k,
+                "min_adaptive_k": 2,
+            }
+            result, stats = _generate(
+                qwen3_model_path, _REPETITIVE_PROMPT, max_length, **options)
+
+            assert stats["rounds"] > 0
+            assert stats["draft_forward_passes"] == 0
+            assert stats["adaptive_k_observations"] > 0
+            assert stats["adaptive_k_throughput"] > 0.0
+            assert 2 <= stats["effective_k"] <= 16
+            _assert_stats_consistent(stats)
+            outputs.add(tuple(result[len(_REPETITIVE_PROMPT):]))
+
+        assert len(outputs) > 1
+
+    def test_mid_round_append_discards_pending_tokens_and_rebuilds(self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "mid_round_append", _transition_logits({1: 2, 2: 1}))
+        prompt = [1, 2, 1, 2]
+        max_length = len(prompt) + 12
+        generator = _generator(
+            model_path, prompt, max_length,
+            ngram_size=3, max_draft_tokens=4)
+        generator.generate_next_token()
+        assert generator.get_speculative_stats()["active_rounds"] == 1
+
+        committed = [int(token) for token in generator.get_sequence(0)]
+        appended = [7, 1, 2]
+        generator.append_tokens(np.array([appended], dtype=np.int32))
+        actual = _finish(generator)
+
+        expected, _ = _generate(
+            model_path, committed + appended, max_length,
+            ngram_size=3, max_draft_tokens=4)
+        stats = generator.get_speculative_stats()
+        assert actual == expected
+        assert stats["interrupted_rounds"] >= 1
+        assert stats["active_rounds"] == 0
+        assert stats["tokens_buffered"] == 0
+        _assert_stats_consistent(stats)
+
+    def test_mid_round_append_discards_unobserved_sampling_draws(self, tmp_path):
+        table = _transition_logits({1: 2, 2: 1})
+        table[7, :] = -20.0
+        table[7, 3:5] = 0.0
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "sampling_append", table)
+        prompt = [1, 2, 1, 2]
+        outputs = set()
+
+        def run(seed, ngram_size):
+            generator = _generator(
+                model_path, prompt, len(prompt) + 8,
+                ngram_size=ngram_size, max_draft_tokens=4,
+                do_sample=True, top_k=2, random_seed=seed)
+            generator.generate_next_token()
+            assert int(generator.get_sequence(0)[-1]) == 1
+            generator.append_tokens(np.array([[7]], dtype=np.int32))
+            return _finish(generator)
+
+        for seed in range(16):
+            expected = run(seed, 0)
+            actual = run(seed, 3)
+            assert actual == expected
+            outputs.add(tuple(actual[len(prompt) + 2:]))
+
+        assert len(outputs) > 1
+
+    @pytest.mark.parametrize("ngram_size", [0, 3])
+    def test_interleaved_sampling_generators_have_independent_rng_streams(
+            self, tmp_path, ngram_size):
+        table = np.full((10, 10), -20.0, dtype=np.float32)
+        table[:, 1:5] = np.array([0.0, 0.2, 0.4, 0.6], dtype=np.float32)
+        model_path = _make_tiny_ngram_model(
+            tmp_path / f"interleaved_{ngram_size}", table)
+        prompt = [1, 2, 1, 2]
+        max_length = len(prompt) + 12
+        options = {
+            "do_sample": True,
+            "top_k": 4,
+            "temperature": 0.8,
+            "random_seed": 2468,
+        }
+        expected, _ = _generate(
+            model_path, prompt, max_length, ngram_size=ngram_size,
+            **options)
+
+        first = _generator(
+            model_path, prompt, max_length, ngram_size=ngram_size,
+            **options)
+        second = _generator(
+            model_path, prompt, max_length, ngram_size=ngram_size,
+            **options)
+        while not first.is_done() or not second.is_done():
+            if not first.is_done():
+                first.generate_next_token()
+            if not second.is_done():
+                second.generate_next_token()
+
+        assert [int(token) for token in first.get_sequence(0)] == expected
+        assert [int(token) for token in second.get_sequence(0)] == expected
+
+    def test_get_logits_mid_round_is_side_effect_free(self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "get_logits", _transition_logits({1: 2, 2: 1}))
+        prompt = [1, 2, 1, 2]
+        max_length = len(prompt) + 10
+
+        baseline = _generator(
+            model_path, prompt, max_length,
+            ngram_size=3, max_draft_tokens=4)
+        baseline.generate_next_token()
+        expected = _finish(baseline)
+
+        inspected = _generator(
+            model_path, prompt, max_length,
+            ngram_size=3, max_draft_tokens=4)
+        inspected.generate_next_token()
+        first = inspected.get_logits().copy()
+        second = inspected.get_logits().copy()
+        np.testing.assert_array_equal(first, second)
+        assert _finish(inspected) == expected
+
+    def test_set_logits_mid_round_forces_token_and_reanchors(self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "set_logits", _transition_logits({1: 2, 2: 1}))
+        prompt = [1, 2, 1, 2]
+        max_length = len(prompt) + 12
+        generator = _generator(
+            model_path, prompt, max_length,
+            ngram_size=3, max_draft_tokens=4)
+        generator.generate_next_token()
+        assert generator.get_speculative_stats()["active_rounds"] == 1
+
+        forced_token = 7
+        forced_logits = np.full_like(generator.get_logits(), -1e9)
+        forced_logits[0, 0, forced_token] = 1e9
+        generator.set_logits(forced_logits)
+        generator.generate_next_token()
+        assert int(generator.get_sequence(0)[-1]) == forced_token
+
+        committed = [int(token) for token in generator.get_sequence(0)]
+        actual = _finish(generator)
+        expected, _ = _generate(
+            model_path, committed, max_length,
+            ngram_size=3, max_draft_tokens=4)
+        assert actual == expected
+
+
+class TestNGramDecoding:
+    def test_options_round_trip_and_validation(self, qwen3_model_path):
+        model = og.Model(qwen3_model_path)
+        params = og.GeneratorParams(model)
+        assert params.get_speculative_options()["ngram_chained_lookup"] is False
+        assert params.get_speculative_options()["cooldown"] is False
+        params.set_speculative_options(
+            ngram_size=4,
+            max_draft_tokens=8,
+            ngram_chained_lookup=True,
+            min_adaptive_k=2,
+            cooldown=True,
+        )
+        options = params.get_speculative_options()
+        assert options["ngram_size"] == 4
+        assert options["max_draft_tokens"] == 8
+        assert options["ngram_chained_lookup"] is True
+        assert options["min_adaptive_k"] == 2
+        assert options["cooldown"] is True
+
+        with pytest.raises(Exception, match="ngram_size"):
+            params.set_speculative_options(ngram_size=1)
+        with pytest.raises(Exception, match="ngram_size"):
+            params.set_speculative_options(ngram_size=17)
+        with pytest.raises(Exception, match="max_draft_tokens"):
+            params.set_speculative_options(max_draft_tokens=0)
+        with pytest.raises(Exception, match="max_draft_tokens"):
+            params.set_speculative_options(max_draft_tokens=17)
+        with pytest.raises(Exception, match="ngram_chained_lookup"):
+            params.set_speculative_options(ngram_chained_lookup=2)
+        with pytest.raises(Exception, match="ngram_chained_lookup"):
+            params.set_speculative_options(ngram_chained_lookup=0.5)
+        with pytest.raises(Exception, match="adaptive_k"):
+            params.set_speculative_options(adaptive_k=True)
+        with pytest.raises(Exception, match="cooldown"):
+            params.set_speculative_options(cooldown=2)
+        with pytest.raises(Exception, match="cooldown"):
+            params.set_speculative_options(cooldown=0.5)
+
+    def test_chained_lookup_requires_ngram_decoding(self, qwen3_model_path):
+        model = og.Model(qwen3_model_path)
+        params = og.GeneratorParams(model)
+        params.set_search_options(
+            do_sample=False,
+            max_length=len(_PROMPT) + 4,
+        )
+        params.set_speculative_options(ngram_chained_lookup=True)
+
+        with pytest.raises(
+                Exception,
+                match="ngram_chained_lookup.*requires.*ngram_size"):
+            og.Generator(model, params)
+
+    def test_chained_lookup_cannot_enable_draft_model_speculation(
+            self, qwen3_model_path, tmp_path):
+        model_path = _build_self_speculative_model(
+            qwen3_model_path, tmp_path / "chained_draft_model")
+        model = og.Model(model_path)
+        params = og.GeneratorParams(model)
+        params.set_search_options(
+            do_sample=False,
+            max_length=len(_PROMPT) + 4,
+        )
+        params.set_speculative_options(
+            ngram_size=3,
+            ngram_chained_lookup=True,
+        )
+
+        with pytest.raises(
+                Exception,
+                match="cannot be combined with draft-model"):
+            og.Generator(model, params)
+
+    @pytest.mark.parametrize("ngram_size", [2, 3, 4])
+    @pytest.mark.parametrize("max_draft_tokens", [2, 4, 8])
+    def test_chained_lookup_qwen_greedy_matches_standard(
+            self, qwen3_model_path, ngram_size, max_draft_tokens):
+        max_length = len(_CHAINED_QWEN_PROMPT) + 24
+        expected, _ = _generate(
+            qwen3_model_path, _CHAINED_QWEN_PROMPT, max_length)
+        actual, stats = _generate(
+            qwen3_model_path,
+            _CHAINED_QWEN_PROMPT,
+            max_length,
+            ngram_size=ngram_size,
+            max_draft_tokens=max_draft_tokens,
+            ngram_chained_lookup=True,
+        )
+
+        _assert_cross_shape_equal(
+            actual, expected, qwen3_model_path, _CHAINED_QWEN_PROMPT)
+        assert stats["rounds"] > 0
+        assert stats["draft_tokens_proposed"] > 0
+        assert stats["draft_forward_passes"] == 0
+        _assert_stats_consistent(stats)
+
+    def test_chained_lookup_qwen_initial_miss_uses_standard_path(
+            self, qwen3_model_path):
+        max_length = len(_PROMPT) + 4
+        expected, _ = _generate(qwen3_model_path, _PROMPT, max_length)
+        actual, stats = _generate(
+            qwen3_model_path,
+            _PROMPT,
+            max_length,
+            ngram_size=16,
+            max_draft_tokens=16,
+            ngram_chained_lookup=True,
+        )
+
+        assert actual == expected
+        assert stats["rounds"] == 0
+        assert stats["draft_tokens_proposed"] == 0
+        assert stats["draft_forward_passes"] == 0
+
+    @pytest.mark.parametrize(
+        "search_options",
+        [
+            {"repetition_penalty": 1.1},
+            {"min_length": len(_REPETITIVE_PROMPT) + 12},
+            {"repetition_penalty": 1.1,
+             "min_length": len(_REPETITIVE_PROMPT) + 12},
+        ],
+    )
+    def test_chained_lookup_qwen_preserves_logits_processor_behavior(
+            self, qwen3_model_path, search_options):
+        max_length = len(_REPETITIVE_PROMPT) + 16
+        expected, _ = _generate(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=8,
+            **search_options)
+        actual, stats = _generate(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=8,
+            ngram_chained_lookup=True,
+            **search_options,
+        )
+
+        assert actual == expected
+        assert stats["draft_forward_passes"] == 0
+        _assert_stats_consistent(stats)
+
+    @pytest.mark.parametrize("seed", [0, 7, 1234])
+    def test_chained_lookup_qwen_k1_matches_standard_sampling_rng(
+            self, qwen3_model_path, seed):
+        max_length = len(_REPETITIVE_PROMPT) + 24
+        search_options = {
+            "do_sample": True,
+            "top_k": 40,
+            "top_p": 0.95,
+            "temperature": 0.8,
+            "random_seed": seed,
+        }
+        expected, _ = _generate(
+            qwen3_model_path, _REPETITIVE_PROMPT, max_length,
+            **search_options)
+        actual, stats = _generate(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=1,
+            ngram_chained_lookup=True,
+            **search_options,
+        )
+
+        assert actual == expected
+        assert stats["effective_k"] == 1
+        assert stats["draft_forward_passes"] == 0
+        _assert_stats_consistent(stats)
+
+    def test_chained_lookup_qwen_sampling_is_repeatable_and_varies_by_seed(
+            self, qwen3_model_path):
+        max_length = len(_REPETITIVE_PROMPT) + 24
+        outputs = set()
+
+        for seed in (0, 7, 1234):
+            options = {
+                "ngram_size": 3,
+                "max_draft_tokens": 8,
+                "ngram_chained_lookup": True,
+                "do_sample": True,
+                "top_k": 40,
+                "top_p": 0.95,
+                "temperature": 0.8,
+                "random_seed": seed,
+            }
+            first, first_stats = _generate(
+                qwen3_model_path, _REPETITIVE_PROMPT, max_length, **options)
+            second, second_stats = _generate(
+                qwen3_model_path, _REPETITIVE_PROMPT, max_length, **options)
+
+            assert first == second
+            assert first_stats["draft_tokens_proposed"] == \
+                second_stats["draft_tokens_proposed"]
+            assert first_stats["draft_tokens_accepted"] == \
+                second_stats["draft_tokens_accepted"]
+            assert first_stats["draft_forward_passes"] == 0
+            assert second_stats["draft_forward_passes"] == 0
+            _assert_stats_consistent(first_stats)
+            _assert_stats_consistent(second_stats)
+            outputs.add(tuple(first[len(_REPETITIVE_PROMPT):]))
+
+        assert len(outputs) > 1
+
+    def test_repetitive_prompt_matches_standard_greedy(self, qwen3_model_path):
+        max_length = len(_REPETITIVE_PROMPT) + 12
+        expected, _ = _generate(
+            qwen3_model_path, _REPETITIVE_PROMPT, max_length)
+        actual, stats = _generate(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=4,
+        )
+
+        assert actual == expected
+        assert stats["rounds"] > 0
+        assert stats["draft_tokens_proposed"] > 0
+        assert stats["draft_forward_passes"] == 0
+        assert stats["draft_tokens_accepted"] <= stats["draft_tokens_evaluated"]
+        assert stats["draft_tokens_evaluated"] <= stats["draft_tokens_proposed"]
+
+    def test_lookup_miss_uses_standard_greedy_path(self, qwen3_model_path):
+        max_length = len(_PROMPT) + 4
+        expected, _ = _generate(qwen3_model_path, _PROMPT, max_length)
+        actual, stats = _generate(
+            qwen3_model_path,
+            _PROMPT,
+            max_length,
+            ngram_size=16,
+        )
+
+        assert actual == expected
+        assert stats["rounds"] == 0
+        assert stats["draft_forward_passes"] == 0
+
+    @pytest.mark.parametrize(
+        "search_options",
+        [
+            {"repetition_penalty": 1.1},
+            {"min_length": len(_REPETITIVE_PROMPT) + 8},
+        ],
+    )
+    def test_logits_penalties_match_standard_greedy(
+            self, qwen3_model_path, search_options):
+        max_length = len(_REPETITIVE_PROMPT) + 10
+        expected, _ = _generate(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            **search_options,
+        )
+        actual, _ = _generate(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+            **search_options,
+        )
+        assert actual == expected
+
+    def test_rewind_and_resume_matches_clean_run(self, qwen3_model_path):
+        max_length = len(_REPETITIVE_PROMPT) + 10
+        expected, _ = _generate(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+        )
+
+        generator = _generator(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+        )
+        for _ in range(3):
+            generator.generate_next_token()
+        generator.rewind_to(0)
+        generator.append_tokens(
+            np.array([_REPETITIVE_PROMPT], dtype=np.int32))
+
+        assert _finish(generator) == expected
+
+    def test_k1_nonzero_rewind_matches_uninterrupted_generation(
+            self, qwen3_model_path):
+        """K=1 resumes the same sequential greedy trajectory after a nonzero rewind."""
+        max_length = len(_REPETITIVE_PROMPT) + 18
+        expected, _ = _generate(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=1,
+        )
+        generator = _generator(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=1,
+        )
+        for _ in range(5):
+            generator.generate_next_token()
+
+        generator.rewind_to(len(_REPETITIVE_PROMPT) + 2)
+
+        assert _finish(generator) == expected
+        assert generator.get_speculative_stats()["draft_forward_passes"] == 0
+
+    @pytest.mark.parametrize("max_draft_tokens", [1, 2, 4, 8])
+    @pytest.mark.parametrize("rewind_offset", [0, 1, 3])
+    def test_nonzero_direct_rewind_matches_boundary_reappend(
+            self, qwen3_model_path, max_draft_tokens, rewind_offset):
+        """Direct nonzero rewind must match explicitly re-appending its boundary token."""
+        max_length = len(_REPETITIVE_PROMPT) + 18
+        rewind_length = len(_REPETITIVE_PROMPT) + rewind_offset
+        generated_tokens = rewind_offset + 3
+
+        direct = _generator(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=max_draft_tokens,
+        )
+        for _ in range(generated_tokens):
+            direct.generate_next_token()
+        boundary_token = int(direct.get_sequence(0)[rewind_length])
+        direct.rewind_to(rewind_length)
+        direct_sequence = _finish(direct)
+
+        reappended = _generator(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=max_draft_tokens,
+        )
+        for _ in range(generated_tokens):
+            reappended.generate_next_token()
+        reappended.rewind_to(rewind_length)
+        reappended.append_tokens(
+            np.array([[boundary_token]], dtype=np.int32))
+        reappended_sequence = _finish(reappended)
+
+        assert direct_sequence == reappended_sequence
+        assert direct.get_speculative_stats()["draft_forward_passes"] == 0
+        assert reappended.get_speculative_stats()["draft_forward_passes"] == 0
+
+    @pytest.mark.parametrize("max_draft_tokens", [2, 4])
+    def test_sampling_nonzero_rewind_matches_boundary_reappend(
+            self, qwen3_model_path, max_draft_tokens):
+        """Sampling preserves its canonical RNG stream across equivalent rewind flows."""
+        max_length = len(_REPETITIVE_PROMPT) + 18
+        rewind_length = len(_REPETITIVE_PROMPT) + 2
+        search_options = {
+            "do_sample": True,
+            "top_k": 20,
+            "top_p": 0.8,
+            "temperature": 0.7,
+            "random_seed": 2468,
+        }
+
+        direct = _generator(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=max_draft_tokens,
+            **search_options,
+        )
+        for _ in range(5):
+            direct.generate_next_token()
+        boundary_token = int(direct.get_sequence(0)[rewind_length])
+        direct.rewind_to(rewind_length)
+        direct_sequence = _finish(direct)
+
+        reappended = _generator(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=max_draft_tokens,
+            **search_options,
+        )
+        for _ in range(5):
+            reappended.generate_next_token()
+        reappended.rewind_to(rewind_length)
+        reappended.append_tokens(
+            np.array([[boundary_token]], dtype=np.int32))
+        reappended_sequence = _finish(reappended)
+
+        assert direct_sequence == reappended_sequence
+
+    @pytest.mark.parametrize("max_draft_tokens", [1, 4])
+    def test_get_logits_after_nonzero_rewind_matches_boundary_reappend(
+            self, qwen3_model_path, max_draft_tokens):
+        """Post-rewind logits and subsequent generation match explicit boundary replay."""
+        max_length = len(_REPETITIVE_PROMPT) + 18
+        rewind_length = len(_REPETITIVE_PROMPT) + 1
+
+        direct = _generator(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=max_draft_tokens,
+        )
+        for _ in range(4):
+            direct.generate_next_token()
+        boundary_token = int(direct.get_sequence(0)[rewind_length])
+        direct.rewind_to(rewind_length)
+        direct_logits = direct.get_logits().copy()
+
+        reappended = _generator(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=max_draft_tokens,
+        )
+        for _ in range(4):
+            reappended.generate_next_token()
+        reappended.rewind_to(rewind_length)
+        reappended.append_tokens(
+            np.array([[boundary_token]], dtype=np.int32))
+        reappended_logits = reappended.get_logits().copy()
+
+        np.testing.assert_array_equal(direct_logits, reappended_logits)
+        assert _finish(direct) == _finish(reappended)
+
+    def test_nonzero_rewind_discards_mid_round_buffer_and_resumes(
+            self, tmp_path):
+        """Rewind invalidates buffered proposal tokens and rebuilds lookup state."""
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "rewind_mid_round",
+            _transition_logits({1: 2, 2: 1}),
+        )
+        prompt = [1, 2, 1, 2]
+        max_length = len(prompt) + 10
+        generator = _generator(
+            model_path,
+            prompt,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=4,
+        )
+        generator.generate_next_token()
+        before = generator.get_speculative_stats()
+        assert before["active_rounds"] == 1
+        assert before["tokens_buffered"] > 0
+
+        generator.rewind_to(len(prompt) - 1)
+        after = generator.get_speculative_stats()
+
+        assert after["active_rounds"] == 0
+        assert after["interrupted_rounds"] == before["interrupted_rounds"] + 1
+        assert after["tokens_buffered"] == 0
+        assert after["tokens_discarded"] == (
+            before["tokens_discarded"] + before["tokens_buffered"])
+
+        expected, _ = _generate(
+            model_path,
+            prompt,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=4,
+        )
+        assert _finish(generator) == expected
+        _assert_stats_consistent(generator.get_speculative_stats())
+
+    def test_nonzero_rewind_with_shared_kv_buffer_matches_reappend(
+            self, qwen3_model_path):
+        """The shared KV-buffer path satisfies the same nonzero rewind contract."""
+        max_length = len(_REPETITIVE_PROMPT) + 18
+        rewind_length = len(_REPETITIVE_PROMPT) + 2
+        search_options = {"past_present_share_buffer": True}
+
+        direct = _generator(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=4,
+            **search_options,
+        )
+        for _ in range(5):
+            direct.generate_next_token()
+        boundary_token = int(direct.get_sequence(0)[rewind_length])
+        direct.rewind_to(rewind_length)
+        direct_sequence = _finish(direct)
+
+        reappended = _generator(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=4,
+            **search_options,
+        )
+        for _ in range(5):
+            reappended.generate_next_token()
+        reappended.rewind_to(rewind_length)
+        reappended.append_tokens(
+            np.array([[boundary_token]], dtype=np.int32))
+
+        assert direct_sequence == _finish(reappended)
+
+    @pytest.mark.parametrize("max_draft_tokens", [2, 4])
+    def test_repeated_rewind_append_cycles_are_deterministic(
+            self, qwen3_model_path, max_draft_tokens):
+        """Repeated nonzero rewind/resume and append cycles must be deterministic."""
+        max_length = len(_REPETITIVE_PROMPT) + 32
+        first_append = [785, 6722]
+        second_append = [3838, 374]
+
+        def run():
+            generator = _generator(
+                qwen3_model_path,
+                _REPETITIVE_PROMPT,
+                max_length,
+                ngram_size=3,
+                max_draft_tokens=max_draft_tokens,
+            )
+            for _ in range(5):
+                generator.generate_next_token()
+
+            generator.rewind_to(len(_REPETITIVE_PROMPT) + 2)
+            for _ in range(2):
+                generator.generate_next_token()
+            first_append_start = len(generator.get_sequence(0))
+            generator.append_tokens(
+                np.array([first_append], dtype=np.int32))
+            assert [
+                int(token)
+                for token in generator.get_sequence(0)[first_append_start:]
+            ] == first_append
+
+            for _ in range(3):
+                generator.generate_next_token()
+            generator.rewind_to(len(generator.get_sequence(0)) - 2)
+            for _ in range(2):
+                generator.generate_next_token()
+            second_append_start = len(generator.get_sequence(0))
+            generator.append_tokens(
+                np.array([second_append], dtype=np.int32))
+            assert [
+                int(token)
+                for token in generator.get_sequence(0)[second_append_start:]
+            ] == second_append
+
+            actual = _finish(generator)
+            stats = generator.get_speculative_stats()
+
+            assert stats["rounds"] > 0
+            assert stats["draft_forward_passes"] == 0
+            _assert_stats_consistent(stats)
+            return actual
+
+        assert run() == run()
+
+    def test_repeated_full_rewind_and_reprefill_is_stable(
+            self, qwen3_model_path):
+        """Full reset and reprefill can reuse one n-gram generator without state leakage."""
+        max_length = len(_REPETITIVE_PROMPT) + 16
+        generator = _generator(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=4,
+        )
+        results = [_finish(generator)]
+
+        for _ in range(2):
+            generator.rewind_to(0)
+            generator.append_tokens(
+                np.array([_REPETITIVE_PROMPT], dtype=np.int32))
+            results.append(_finish(generator))
+
+        assert results[1] == results[0]
+        assert results[2] == results[0]
+        assert generator.get_speculative_stats()["draft_forward_passes"] == 0
+
+    def test_mid_generation_append_preserves_committed_prefix(
+            self, qwen3_model_path):
+        max_length = len(_REPETITIVE_PROMPT) + 14
+        generator = _generator(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+        )
+        generator.generate_next_token()
+        committed = [int(token) for token in generator.get_sequence(0)]
+        appended = [785, 3838]
+        generator.append_tokens(np.array([appended], dtype=np.int32))
+        result = _finish(generator)
+
+        assert result[:len(committed)] == committed
+        assert result[len(committed):len(committed) + len(appended)] == appended
+
+    def test_sampling_lookup_miss_uses_canonical_rng(self, qwen3_model_path):
+        max_length = len(_PROMPT) + 4
+        search_options = {
+            "do_sample": True,
+            "top_k": 0,
+            "top_p": 0.8,
+            "temperature": 0.7,
+            "random_seed": 42,
+        }
+        expected, _ = _generate(
+            qwen3_model_path, _PROMPT, max_length, **search_options)
+        actual, stats = _generate(
+            qwen3_model_path,
+            _PROMPT,
+            max_length,
+            ngram_size=16,
+            **search_options,
+        )
+
+        assert actual == expected
+        assert stats["rounds"] == 0
+        assert stats["draft_forward_passes"] == 0
+
+    @pytest.mark.parametrize(
+        "search_options",
+        [
+            {"top_k": 0, "top_p": 0.0, "temperature": 1.0},
+            {"top_k": 20, "temperature": 0.6},
+            {"top_k": 0, "top_p": 0.8, "temperature": 0.9},
+            {"top_k": 20, "top_p": 0.8, "temperature": 0.7,
+             "repetition_penalty": 1.1},
+            {"top_k": 20, "temperature": 0.7,
+             "min_length": len(_REPETITIVE_PROMPT) + 8},
+        ],
+    )
+    def test_sampling_matches_standard_with_fixed_seed(
+            self, qwen3_model_path, search_options):
+        max_length = len(_REPETITIVE_PROMPT) + 10
+        options = {
+            "do_sample": True,
+            "random_seed": 1234,
+            **search_options,
+        }
+        expected, _ = _generate(
+            qwen3_model_path, _REPETITIVE_PROMPT, max_length, **options)
+        actual, stats = _generate(
+            qwen3_model_path,
+            _REPETITIVE_PROMPT,
+            max_length,
+            ngram_size=3,
+            max_draft_tokens=4,
+            **options,
+        )
+
+        assert actual == expected
+        assert stats["rounds"] > 0
+        assert stats["draft_tokens_proposed"] > 0
+        assert stats["draft_forward_passes"] == 0
+
+    @pytest.mark.parametrize(
+        "search_options",
+        [
+            {"do_sample": True, "top_k": 1, "random_seed": 9},
+            {"do_sample": True, "top_k": 20, "temperature": 0.0,
+             "random_seed": 9},
+        ],
+    )
+    def test_degenerate_sampling_settings_use_greedy_semantics(
+            self, qwen3_model_path, search_options):
+        max_length = len(_REPETITIVE_PROMPT) + 10
+        expected, _ = _generate(
+            qwen3_model_path, _REPETITIVE_PROMPT, max_length,
+            **search_options)
+        actual, stats = _generate(
+            qwen3_model_path, _REPETITIVE_PROMPT, max_length,
+            ngram_size=3, max_draft_tokens=4, **search_options)
+
+        assert actual == expected
+        assert stats["rounds"] > 0
+        assert stats["draft_forward_passes"] == 0
+
+    def test_sampling_is_deterministic_for_fixed_seed(self, qwen3_model_path):
+        max_length = len(_REPETITIVE_PROMPT) + 10
+        options = {
+            "do_sample": True,
+            "top_k": 20,
+            "top_p": 0.8,
+            "temperature": 0.7,
+            "random_seed": 5678,
+        }
+
+        first, _ = _generate(
+            qwen3_model_path, _REPETITIVE_PROMPT, max_length,
+            ngram_size=3, **options)
+        second, _ = _generate(
+            qwen3_model_path, _REPETITIVE_PROMPT, max_length,
+            ngram_size=3, **options)
+
+        assert first == second
+
+    @pytest.mark.parametrize(
+        ("ngram_size", "max_draft_tokens", "prompt"),
+        [
+            (2, 1, _REPETITIVE_PROMPT),
+            (16, 16, [785, 3838] * 16),
+        ],
+    )
+    def test_supported_option_boundaries_match_standard(
+            self, qwen3_model_path, ngram_size, max_draft_tokens, prompt):
+        max_length = len(prompt) + 8
+        expected, _ = _generate(qwen3_model_path, prompt, max_length)
+        actual, stats = _generate(
+            qwen3_model_path, prompt, max_length,
+            ngram_size=ngram_size, max_draft_tokens=max_draft_tokens)
+
+        assert actual == expected
+        assert stats["rounds"] > 0
+        assert stats["draft_forward_passes"] == 0
+        _assert_stats_consistent(stats)
+
+    @pytest.mark.parametrize(
+        "search_options",
+        [
+            {"past_present_share_buffer": True},
+            {"chunk_size": 2},
+            {"past_present_share_buffer": True, "chunk_size": 2},
+        ],
+    )
+    def test_kv_buffer_and_chunked_prefill_match_standard(
+            self, qwen3_model_path, search_options):
+        max_length = len(_REPETITIVE_PROMPT) + 12
+        expected, _ = _generate(
+            qwen3_model_path, _REPETITIVE_PROMPT, max_length,
+            **search_options)
+        actual, stats = _generate(
+            qwen3_model_path, _REPETITIVE_PROMPT, max_length,
+            ngram_size=3, max_draft_tokens=4, **search_options)
+
+        assert actual == expected
+        assert stats["rounds"] > 0
+        assert stats["draft_forward_passes"] == 0
+        _assert_stats_consistent(stats)
+
+    def test_long_run_has_one_visible_token_per_call_and_consistent_stats(
+            self, qwen3_model_path):
+        max_length = len(_REPETITIVE_PROMPT) + 40
+        generator = _generator(
+            qwen3_model_path, _REPETITIVE_PROMPT, max_length,
+            ngram_size=3, max_draft_tokens=8)
+
+        while not generator.is_done():
+            old_length = len(generator.get_sequence(0))
+            generator.generate_next_token()
+            new_length = len(generator.get_sequence(0))
+            assert new_length - old_length in (0, 1)
+            if new_length == old_length:
+                assert generator.is_done()
+
+        actual = [int(token) for token in generator.get_sequence(0)]
+        stats = generator.get_speculative_stats()
+        assert actual[:len(_REPETITIVE_PROMPT)] == _REPETITIVE_PROMPT
+        assert len(_REPETITIVE_PROMPT) < len(actual) <= max_length
+        assert stats["rounds"] > 1
+        assert stats["active_rounds"] == 0
+        assert stats["draft_forward_passes"] == 0
+        assert stats["correction_tokens"] + stats["bonus_tokens"] == stats["rounds"]
+        _assert_stats_consistent(stats)
+
+    def test_get_logits_does_not_change_sampling_or_logical_stats(
+            self, qwen3_model_path):
+        max_length = len(_REPETITIVE_PROMPT) + 16
+        options = {
+            "do_sample": True,
+            "top_k": 20,
+            "top_p": 0.8,
+            "temperature": 0.7,
+            "random_seed": 4321,
+        }
+
+        def run(inspect_logits):
+            generator = _generator(
+                qwen3_model_path, _REPETITIVE_PROMPT, max_length,
+                ngram_size=3, max_draft_tokens=4, **options)
+            generator.generate_next_token()
+            if inspect_logits:
+                first = generator.get_logits().copy()
+                second = generator.get_logits().copy()
+                np.testing.assert_array_equal(first, second)
+            sequence = _finish(generator)
+            stats = generator.get_speculative_stats()
+            counters = {
+                key: stats[key]
+                for key in (
+                    "rounds", "completed_rounds", "interrupted_rounds",
+                    "active_rounds", "draft_tokens_proposed",
+                    "draft_tokens_evaluated", "draft_tokens_accepted",
+                    "correction_tokens", "bonus_tokens", "tokens_queued",
+                    "tokens_emitted", "tokens_discarded", "tokens_buffered",
+                    "draft_forward_passes",
+                )
+            }
+            return sequence, counters
+
+        _assert_cross_shape_equal(
+            run(True), run(False), qwen3_model_path, _REPETITIVE_PROMPT)
+
+    def test_set_logits_reanchors_before_continuing(self, qwen3_model_path):
+        max_length = len(_REPETITIVE_PROMPT) + 16
+        generator = _generator(
+            qwen3_model_path, _REPETITIVE_PROMPT, max_length,
+            ngram_size=3, max_draft_tokens=4)
+        generator.generate_next_token()
+        forced_token = _REPETITIVE_PROMPT[0]
+        forced_logits = np.full_like(generator.get_logits(), -1e9)
+        forced_logits[0, 0, forced_token] = 1e9
+        generator.set_logits(forced_logits)
+        generator.generate_next_token()
+        assert int(generator.get_sequence(0)[-1]) == forced_token
+
+        committed = [int(token) for token in generator.get_sequence(0)]
+        actual = _finish(generator)
+        expected, _ = _generate(
+            qwen3_model_path, committed, max_length,
+            ngram_size=3, max_draft_tokens=4)
+        _assert_cross_shape_equal(
+            actual, expected, qwen3_model_path, _REPETITIVE_PROMPT)
+
+    def test_interleaved_generators_do_not_share_lookup_state(
+            self, qwen3_model_path):
+        model = og.Model(qwen3_model_path)
+
+        def make_generator(prompt):
+            params = og.GeneratorParams(model)
+            params.set_search_options(
+                do_sample=False, max_length=len(prompt) + 10)
+            params.set_speculative_options(
+                ngram_size=3, max_draft_tokens=4)
+            generator = og.Generator(model, params)
+            generator.append_tokens(np.array([prompt], dtype=np.int32))
+            return generator
+
+        first = make_generator(_REPETITIVE_PROMPT)
+        second_prompt = [785, 3838, 785, 3838]
+        second = make_generator(second_prompt)
+        while not first.is_done() or not second.is_done():
+            if not first.is_done():
+                first.generate_next_token()
+            if not second.is_done():
+                second.generate_next_token()
+
+        first_expected, _ = _generate(
+            qwen3_model_path, _REPETITIVE_PROMPT,
+            len(_REPETITIVE_PROMPT) + 10)
+        second_expected, _ = _generate(
+            qwen3_model_path, second_prompt, len(second_prompt) + 10)
+        assert [int(token) for token in first.get_sequence(0)] == first_expected
+        assert [int(token) for token in second.get_sequence(0)] == second_expected
+
+
+_NGRAM_GUIDANCE_CASES = [
+    ("regex", r"[0-9]{3}-[0-9]{3}", "regex"),
+    (
+        "json_schema",
+        json.dumps({
+            "x-guidance": {
+                "whitespace_flexible": False,
+                "key_separator": ": ",
+                "item_separator": ", ",
+            },
+            "type": "object",
+            "properties": {
+                "answer": {
+                    "type": "integer",
+                    "enum": [42],
+                },
+            },
+            "required": ["answer"],
+            "additionalProperties": False,
+        }),
+        "json",
+    ),
+    ("lark_grammar", 'start: "answer:" /[0-9]{2}/', "lark"),
+]
+
+
+@pytest.fixture(scope="module")
+def qwen3_guidance_model_path(qwen3_model_path):
+    model = og.Model(qwen3_model_path)
+    params = og.GeneratorParams(model)
+    params.set_search_options(
+        do_sample=False,
+        max_length=len(_PROMPT) + 2,
+    )
+    params.set_speculative_options(
+        ngram_size=3,
+        max_draft_tokens=2,
+    )
+    params.set_guidance("regex", r"[0-9]")
+    try:
+        generator = og.Generator(model, params)
+        generator.append_tokens(np.array([_PROMPT], dtype=np.int32))
+        generator.generate_next_token()
+    except Exception as error:
+        if "guidance is unavailable" in str(error).lower():
+            pytest.skip("ONNX Runtime GenAI was built without guidance support")
+        raise
+    return qwen3_model_path
+
+
+def _guided_generator(model_path, prompt, *, guidance_type, guidance_data,
+                      max_length, ngram_size=0, max_draft_tokens=4,
+                      ngram_chained_lookup=False,
+                      min_adaptive_k=0, enable_ff_tokens=False,
+                      **search_options):
+    model = og.Model(model_path)
+    params = og.GeneratorParams(model)
+    options = {
+        "do_sample": False,
+        "max_length": max_length,
+    }
+    options.update(search_options)
+    params.set_search_options(**options)
+    if ngram_size:
+        params.set_speculative_options(
+            ngram_size=ngram_size,
+            max_draft_tokens=max_draft_tokens,
+            ngram_chained_lookup=ngram_chained_lookup,
+            min_adaptive_k=min_adaptive_k,
+        )
+    params.set_guidance(
+        guidance_type,
+        guidance_data,
+        enable_ff_tokens,
+    )
+    generator = og.Generator(model, params)
+    generator.append_tokens(np.array([prompt], dtype=np.int32))
+    return generator
+
+
+def _guided_tail(generator, prompt_length):
+    sequence = _finish(generator)
+    return sequence[prompt_length:]
+
+
+def _decode_tokens(model_path, tokens):
+    return og.Tokenizer(og.Model(model_path)).decode(tokens)
+
+
+def _assert_guidance_output(text, output_kind):
+    if output_kind == "regex":
+        assert re.fullmatch(r"[0-9]{3}-[0-9]{3}", text)
+    elif output_kind == "json":
+        value = json.loads(text)
+        assert set(value) == {"answer"}
+        assert isinstance(value["answer"], int)
+        assert not isinstance(value["answer"], bool)
+        assert value["answer"] == 42
+    elif output_kind == "lark":
+        assert re.fullmatch(r"answer:[0-9]{2}", text)
+    else:
+        raise AssertionError(f"Unknown guidance output kind: {output_kind}")
+
+
+def _run_guided(model_path, prompt, *, guidance_type, guidance_data,
+                max_length, ngram_size=0, max_draft_tokens=4,
+                ngram_chained_lookup=False,
+                min_adaptive_k=0, enable_ff_tokens=False, **search_options):
+    generator = _guided_generator(
+        model_path,
+        prompt,
+        guidance_type=guidance_type,
+        guidance_data=guidance_data,
+        max_length=max_length,
+        ngram_size=ngram_size,
+        max_draft_tokens=max_draft_tokens,
+        ngram_chained_lookup=ngram_chained_lookup,
+        min_adaptive_k=min_adaptive_k,
+        enable_ff_tokens=enable_ff_tokens,
+        **search_options,
+    )
+    tail = _guided_tail(generator, len(prompt))
+    return tail, _decode_tokens(model_path, tail), generator.get_speculative_stats()
+
+
+def _grammar_probe_prompt(model_path):
+    tokenizer = og.Tokenizer(og.Model(model_path))
+    digit_tokens = [int(token) for token in tokenizer.encode("7")]
+    invalid_tokens = [int(token) for token in tokenizer.encode("x")]
+    if len(digit_tokens) != 1 or len(invalid_tokens) != 1:
+        pytest.skip("The guidance proposal test requires single-token '7' and 'x'")
+    if not re.fullmatch(r"[0-9]", tokenizer.decode(digit_tokens)):
+        pytest.skip("The tokenizer does not decode the selected digit token stably")
+    if re.fullmatch(r"[0-9]", tokenizer.decode(invalid_tokens)):
+        pytest.skip("The tokenizer's selected invalid token is unexpectedly a digit")
+
+    context = _PROMPT[-2:]
+    prompt = _PROMPT + context + digit_tokens + invalid_tokens + context
+    return prompt
+
+
+def _forced_literal_lookup_prompt(model_path, literal, minimum_tokens):
+    literal_tokens = [
+        int(token) for token in og.Tokenizer(og.Model(model_path)).encode(literal)
+    ]
+    if len(literal_tokens) < minimum_tokens:
+        pytest.skip(
+            f"The forced literal requires at least {minimum_tokens} tokenizer tokens")
+    context = _PROMPT[-2:]
+    return _PROMPT + context + literal_tokens + context, literal_tokens
+
+
+class TestNGramGuidance:
+    @pytest.mark.parametrize("max_draft_tokens", [2, 4, 8])
+    @pytest.mark.parametrize(
+        "guidance_type,guidance_data,output_kind",
+        _NGRAM_GUIDANCE_CASES,
+    )
+    def test_chained_lookup_greedy_matches_regular_guidance(
+            self, qwen3_guidance_model_path, max_draft_tokens,
+            guidance_type, guidance_data, output_kind):
+        max_length = len(_REPETITIVE_PROMPT) + 64
+        expected, expected_text, _ = _run_guided(
+            qwen3_guidance_model_path,
+            _REPETITIVE_PROMPT,
+            guidance_type=guidance_type,
+            guidance_data=guidance_data,
+            max_length=max_length,
+        )
+        actual, actual_text, stats = _run_guided(
+            qwen3_guidance_model_path,
+            _REPETITIVE_PROMPT,
+            guidance_type=guidance_type,
+            guidance_data=guidance_data,
+            max_length=max_length,
+            ngram_size=3,
+            max_draft_tokens=max_draft_tokens,
+            ngram_chained_lookup=True,
+        )
+
+        assert actual == expected
+        assert actual_text == expected_text
+        _assert_guidance_output(actual_text, output_kind)
+        assert stats["draft_forward_passes"] == 0
+        _assert_stats_consistent(stats)
+
+    @pytest.mark.parametrize("seed", [0, 7, 1234])
+    def test_chained_lookup_sampled_guidance_is_repeatable_and_valid(
+            self, qwen3_guidance_model_path, seed):
+        kwargs = {
+            "guidance_type": "lark_grammar",
+            "guidance_data": 'start: "answer:" /[0-9]{2}/',
+            "max_length": len(_REPETITIVE_PROMPT) + 64,
+            "ngram_size": 3,
+            "max_draft_tokens": 8,
+            "ngram_chained_lookup": True,
+            "do_sample": True,
+            "random_seed": seed,
+            "top_k": 40,
+            "top_p": 0.95,
+            "temperature": 0.8,
+        }
+
+        first, first_text, first_stats = _run_guided(
+            qwen3_guidance_model_path, _REPETITIVE_PROMPT, **kwargs)
+        second, second_text, second_stats = _run_guided(
+            qwen3_guidance_model_path, _REPETITIVE_PROMPT, **kwargs)
+
+        assert first == second
+        assert first_text == second_text
+        assert re.fullmatch(r"answer:[0-9]{2}", first_text)
+        assert first_stats["draft_tokens_proposed"] == \
+            second_stats["draft_tokens_proposed"]
+        assert first_stats["draft_tokens_accepted"] == \
+            second_stats["draft_tokens_accepted"]
+        assert first_stats["draft_forward_passes"] == 0
+        assert second_stats["draft_forward_passes"] == 0
+        _assert_stats_consistent(first_stats)
+        _assert_stats_consistent(second_stats)
+
+    def test_chained_lookup_filters_synthetic_candidates_on_grammar_clone(
+            self, qwen3_guidance_model_path):
+        prompt = _grammar_probe_prompt(qwen3_guidance_model_path)
+        generator = _guided_generator(
+            qwen3_guidance_model_path,
+            prompt,
+            guidance_type="regex",
+            guidance_data=r"[0-9]{8}",
+            max_length=len(prompt) + 8,
+            ngram_size=3,
+            max_draft_tokens=8,
+            ngram_chained_lookup=True,
+        )
+        generator.generate_next_token()
+        stats = generator.get_speculative_stats()
+        actual_token = int(generator.get_sequence(0)[len(prompt)])
+
+        regular = _guided_generator(
+            qwen3_guidance_model_path,
+            prompt,
+            guidance_type="regex",
+            guidance_data=r"[0-9]{8}",
+            max_length=len(prompt) + 8,
+        )
+        regular.generate_next_token()
+
+        assert stats["rounds"] == 1
+        assert 1 <= stats["draft_tokens_proposed"] <= 8
+        assert stats["ngram_lookup_hits"] == 1
+        assert stats["ngram_lookup_misses"] == 0
+        assert stats["ngram_lookup_tokens_proposed"] >= 1
+        assert stats["ngram_chained_tokens_proposed"] == (
+            stats["ngram_lookup_tokens_proposed"] - 1)
+        assert stats["ngram_grammar_candidate_rejections"] == 1
+        assert actual_token == int(regular.get_sequence(0)[len(prompt)])
+        assert re.fullmatch(
+            r"[0-9]+",
+            _decode_tokens(qwen3_guidance_model_path, [actual_token]),
+        )
+        _assert_stats_consistent(stats)
+
+    def test_chained_lookup_fast_forward_carry_remains_ordered(
+            self, qwen3_guidance_model_path):
+        literal = "The capital of France is Paris and Berlin is in Germany."
+        prompt, _ = _forced_literal_lookup_prompt(
+            qwen3_guidance_model_path, literal, minimum_tokens=9)
+        expected, expected_text, _ = _run_guided(
+            qwen3_guidance_model_path,
+            prompt,
+            guidance_type="lark_grammar",
+            guidance_data=f'start: "{literal}"',
+            max_length=len(prompt) + 64,
+            ngram_size=3,
+            max_draft_tokens=8,
+            enable_ff_tokens=True,
+        )
+
+        actual, actual_text, stats = _run_guided(
+            qwen3_guidance_model_path,
+            prompt,
+            guidance_type="lark_grammar",
+            guidance_data=f'start: "{literal}"',
+            max_length=len(prompt) + 64,
+            ngram_size=3,
+            max_draft_tokens=8,
+            ngram_chained_lookup=True,
+            enable_ff_tokens=True,
+        )
+
+        assert actual == expected
+        assert actual_text == expected_text
+        assert actual_text.strip() == literal
+        assert stats["draft_forward_passes"] == 0
+        _assert_stats_consistent(stats)
+
+    def test_chained_lookup_and_adaptive_k_compose_under_guidance(
+            self, qwen3_guidance_model_path):
+        expected = "1 1 1 1 1 1 1 1"
+        tail, text, stats = _run_guided(
+            qwen3_guidance_model_path,
+            _PROMPT,
+            guidance_type="lark_grammar",
+            guidance_data=f'start: "{expected}"',
+            max_length=len(_PROMPT) + 32,
+            ngram_size=2,
+            max_draft_tokens=1,
+            ngram_chained_lookup=True,
+            min_adaptive_k=2,
+        )
+
+        assert tail
+        assert text.strip() == expected
+        assert stats["rounds"] > 0
+        assert stats["draft_tokens_proposed"] > 0
+        assert stats["draft_forward_passes"] == 0
+        assert 2 <= stats["effective_k"] <= 16
+        _assert_stats_consistent(stats)
+
+    @pytest.mark.parametrize(
+        "guidance_type,guidance_data,output_kind",
+        _NGRAM_GUIDANCE_CASES,
+    )
+    def test_adaptive_k_greedy_matches_regular_guidance(
+            self, qwen3_guidance_model_path, guidance_type,
+            guidance_data, output_kind):
+        max_length = len(_PROMPT) + 64
+        expected, expected_text, _ = _run_guided(
+            qwen3_guidance_model_path,
+            _PROMPT,
+            guidance_type=guidance_type,
+            guidance_data=guidance_data,
+            max_length=max_length,
+        )
+        actual, actual_text, stats = _run_guided(
+            qwen3_guidance_model_path,
+            _PROMPT,
+            guidance_type=guidance_type,
+            guidance_data=guidance_data,
+            max_length=max_length,
+            ngram_size=3,
+            max_draft_tokens=8,
+            min_adaptive_k=2,
+        )
+
+        assert actual == expected
+        assert actual_text == expected_text
+        _assert_guidance_output(actual_text, output_kind)
+        assert stats["draft_forward_passes"] == 0
+        assert 2 <= stats["effective_k"] <= 16
+        _assert_stats_consistent(stats)
+
+    @pytest.mark.parametrize("seed", [0, 7, 1234])
+    def test_adaptive_k_sampled_guidance_is_valid(
+            self, qwen3_guidance_model_path, seed):
+        options = {
+            "do_sample": True,
+            "random_seed": seed,
+            "top_k": 40,
+            "top_p": 0.95,
+            "temperature": 0.8,
+        }
+        max_length = len(_PROMPT) + 64
+
+        result, text, stats = _run_guided(
+            qwen3_guidance_model_path,
+            _PROMPT,
+            guidance_type="lark_grammar",
+            guidance_data='start: "answer:" /[0-9]{2}/',
+            max_length=max_length,
+            ngram_size=3,
+            max_draft_tokens=8,
+            min_adaptive_k=2,
+            **options,
+        )
+        assert result
+        assert re.fullmatch(r"answer:[0-9]{2}", text)
+        assert 2 <= stats["effective_k"] <= 16
+        _assert_stats_consistent(stats)
+
+    def test_adaptive_k_fast_forward_carry_remains_grammar_correct(
+            self, qwen3_guidance_model_path):
+        literal = "The capital of France is Paris and Berlin is in Germany."
+        prompt, _ = _forced_literal_lookup_prompt(
+            qwen3_guidance_model_path, literal, minimum_tokens=9)
+        max_length = len(prompt) + 64
+
+        actual, actual_text, stats = _run_guided(
+            qwen3_guidance_model_path,
+            prompt,
+            guidance_type="lark_grammar",
+            guidance_data=f'start: "{literal}"',
+            max_length=max_length,
+            ngram_size=3,
+            max_draft_tokens=8,
+            min_adaptive_k=2,
+            enable_ff_tokens=True,
+        )
+
+        assert actual
+        assert actual_text.strip() == literal
+        assert 2 <= stats["effective_k"] <= 16
+        assert stats["draft_forward_passes"] == 0
+        _assert_stats_consistent(stats)
+
+    @pytest.mark.parametrize("max_draft_tokens", [1, 2, 4, 8])
+    @pytest.mark.parametrize(
+        "guidance_type,guidance_data,output_kind",
+        _NGRAM_GUIDANCE_CASES,
+    )
+    def test_greedy_matches_regular_guidance_for_every_grammar(
+            self, qwen3_guidance_model_path, max_draft_tokens,
+            guidance_type, guidance_data, output_kind):
+        max_length = len(_PROMPT) + 64
+        expected, expected_text, _ = _run_guided(
+            qwen3_guidance_model_path,
+            _PROMPT,
+            guidance_type=guidance_type,
+            guidance_data=guidance_data,
+            max_length=max_length,
+        )
+        actual, actual_text, stats = _run_guided(
+            qwen3_guidance_model_path,
+            _PROMPT,
+            guidance_type=guidance_type,
+            guidance_data=guidance_data,
+            max_length=max_length,
+            ngram_size=3,
+            max_draft_tokens=max_draft_tokens,
+        )
+
+        assert actual == expected
+        assert actual_text == expected_text
+        _assert_guidance_output(actual_text, output_kind)
+        assert stats["draft_forward_passes"] == 0
+        _assert_stats_consistent(stats)
+
+    @pytest.mark.parametrize(
+        "guidance_type,guidance_data,output_kind",
+        _NGRAM_GUIDANCE_CASES,
+    )
+    @pytest.mark.parametrize("seed", [0, 7, 1234])
+    def test_sampled_k1_matches_regular_guidance_rng_stream(
+            self, qwen3_guidance_model_path, guidance_type, guidance_data,
+            output_kind, seed):
+        options = {
+            "do_sample": True,
+            "random_seed": seed,
+            "top_k": 40,
+            "top_p": 0.95,
+            "temperature": 0.8,
+        }
+        max_length = len(_PROMPT) + 64
+        expected, _, _ = _run_guided(
+            qwen3_guidance_model_path,
+            _PROMPT,
+            guidance_type=guidance_type,
+            guidance_data=guidance_data,
+            max_length=max_length,
+            **options,
+        )
+        actual, text, stats = _run_guided(
+            qwen3_guidance_model_path,
+            _PROMPT,
+            guidance_type=guidance_type,
+            guidance_data=guidance_data,
+            max_length=max_length,
+            ngram_size=3,
+            max_draft_tokens=1,
+            **options,
+        )
+
+        assert actual == expected
+        _assert_guidance_output(text, output_kind)
+        assert stats["draft_forward_passes"] == 0
+        _assert_stats_consistent(stats)
+
+    @pytest.mark.parametrize("max_draft_tokens", [2, 4, 8])
+    @pytest.mark.parametrize("seed", [0, 1, 17, 1234])
+    def test_sampled_regex_is_valid_and_seed_deterministic(
+            self, qwen3_guidance_model_path, max_draft_tokens, seed):
+        kwargs = {
+            "guidance_type": "regex",
+            "guidance_data": r"[0-9]{3}-[0-9]{3}",
+            "max_length": len(_PROMPT) + 32,
+            "ngram_size": 3,
+            "max_draft_tokens": max_draft_tokens,
+            "do_sample": True,
+            "random_seed": seed,
+            "top_k": 40,
+            "top_p": 0.95,
+            "temperature": 0.9,
+        }
+        first, first_text, first_stats = _run_guided(
+            qwen3_guidance_model_path, _PROMPT, **kwargs)
+        second, second_text, second_stats = _run_guided(
+            qwen3_guidance_model_path, _PROMPT, **kwargs)
+
+        assert first == second
+        assert first_text == second_text
+        assert re.fullmatch(r"[0-9]{3}-[0-9]{3}", first_text)
+        assert first_stats["draft_forward_passes"] == 0
+        assert second_stats["draft_forward_passes"] == 0
+        _assert_stats_consistent(first_stats)
+        _assert_stats_consistent(second_stats)
+
+    def test_sampled_guidance_uses_target_sampling_not_greedy(
+            self, qwen3_guidance_model_path):
+        prompt = _grammar_probe_prompt(qwen3_guidance_model_path)
+        outputs = set()
+        for seed in range(20):
+            generator = _guided_generator(
+                qwen3_guidance_model_path,
+                prompt,
+                guidance_type="regex",
+                guidance_data=r"[0-9]{8}",
+                max_length=len(prompt) + 8,
+                ngram_size=3,
+                max_draft_tokens=4,
+                do_sample=True,
+                random_seed=seed,
+                top_p=1.0,
+                temperature=2.0,
+            )
+            generator.generate_next_token()
+            generated = int(generator.get_sequence(0)[len(prompt)])
+            text = _decode_tokens(qwen3_guidance_model_path, [generated])
+            assert re.fullmatch(r"[0-9]+", text)
+            assert generator.get_speculative_stats()["rounds"] == 1
+            outputs.add(generated)
+
+        assert len(outputs) > 1, (
+            "sampled n-gram guidance produced the same target token for 20 seeds")
+
+    def test_proposal_clone_filters_invalid_tail_without_mutating_grammar(
+            self, qwen3_guidance_model_path):
+        prompt = _grammar_probe_prompt(qwen3_guidance_model_path)
+        generator = _guided_generator(
+            qwen3_guidance_model_path,
+            prompt,
+            guidance_type="regex",
+            guidance_data=r"[0-9]{8}",
+            max_length=len(prompt) + 8,
+            ngram_size=3,
+            max_draft_tokens=4,
+        )
+        generator.generate_next_token()
+        stats = generator.get_speculative_stats()
+        actual_token = int(generator.get_sequence(0)[len(prompt)])
+
+        regular = _guided_generator(
+            qwen3_guidance_model_path,
+            prompt,
+            guidance_type="regex",
+            guidance_data=r"[0-9]{8}",
+            max_length=len(prompt) + 8,
+        )
+        regular.generate_next_token()
+
+        assert stats["rounds"] == 1
+        assert stats["draft_tokens_proposed"] == 1
+        assert actual_token == int(regular.get_sequence(0)[len(prompt)])
+        assert re.fullmatch(
+            r"[0-9]+", _decode_tokens(qwen3_guidance_model_path, [actual_token]))
+
+    @pytest.mark.parametrize("max_draft_tokens", [2, 4, 8])
+    def test_committed_guided_tokens_feed_later_ngram_lookup(
+            self, qwen3_guidance_model_path, max_draft_tokens):
+        expected = "1 1 1 1 1 1 1 1"
+        tail, text, stats = _run_guided(
+            qwen3_guidance_model_path,
+            _PROMPT,
+            guidance_type="lark_grammar",
+            guidance_data=f'start: "{expected}"',
+            max_length=len(_PROMPT) + 32,
+            ngram_size=2,
+            max_draft_tokens=max_draft_tokens,
+        )
+
+        assert text.strip() == expected
+        assert tail
+        assert stats["rounds"] > 0
+        assert stats["draft_tokens_proposed"] > 0
+        assert stats["draft_tokens_evaluated"] > 0
+        assert stats["draft_forward_passes"] == 0
+        _assert_stats_consistent(stats)
+
+    @pytest.mark.parametrize("max_draft_tokens", [1, 2, 4, 8])
+    def test_each_call_exposes_at_most_one_guided_token(
+            self, qwen3_guidance_model_path, max_draft_tokens):
+        generator = _guided_generator(
+            qwen3_guidance_model_path,
+            _REPETITIVE_PROMPT,
+            guidance_type="regex",
+            guidance_data=r"[0-9]{12}",
+            max_length=len(_REPETITIVE_PROMPT) + 20,
+            ngram_size=3,
+            max_draft_tokens=max_draft_tokens,
+        )
+
+        while not generator.is_done():
+            length_before = len(generator.get_sequence(0))
+            generator.generate_next_token()
+            length_after = len(generator.get_sequence(0))
+            assert length_after - length_before in (0, 1)
+
+        text = _decode_tokens(
+            qwen3_guidance_model_path,
+            [int(token) for token in generator.get_sequence(0)][
+                len(_REPETITIVE_PROMPT):],
+        )
+        assert re.fullmatch(r"[0-9]{12}", text)
+        stats = generator.get_speculative_stats()
+        assert not stats["formula_supported"]
+        assert stats["expected_tokens_per_round"] == 0.0
+        assert stats["estimated_speedup"] == 0.0
+        assert stats["draft_forward_passes"] == 0
+        _assert_stats_consistent(stats)
+
+    def test_buffered_sampling_rewind_restores_unseen_rng_draws(
+            self, qwen3_guidance_model_path):
+        literal = "The answer is exactly seven."
+        guidance_data = f'start: "{literal}"'
+        prompt, _ = _forced_literal_lookup_prompt(
+            qwen3_guidance_model_path,
+            literal,
+            minimum_tokens=4,
+        )
+        options = {
+            "do_sample": True,
+            "random_seed": 9876,
+            "top_k": 2,
+            "temperature": 0.01,
+        }
+
+        reference = _guided_generator(
+            qwen3_guidance_model_path,
+            prompt,
+            guidance_type="lark_grammar",
+            guidance_data=guidance_data,
+            max_length=len(prompt) + 32,
+            enable_ff_tokens=True,
+            **options,
+        )
+        reference.generate_next_token()
+        reference.rewind_to(0)
+        reference.append_tokens(np.array([prompt], dtype=np.int32))
+        expected = _guided_tail(reference, len(prompt))
+
+        generator = _guided_generator(
+            qwen3_guidance_model_path,
+            prompt,
+            guidance_type="lark_grammar",
+            guidance_data=guidance_data,
+            max_length=len(prompt) + 32,
+            ngram_size=3,
+            max_draft_tokens=4,
+            enable_ff_tokens=True,
+            **options,
+        )
+        generator.generate_next_token()
+        stats_before_rewind = generator.get_speculative_stats()
+        assert stats_before_rewind["rounds"] == 1
+        assert stats_before_rewind["draft_tokens_proposed"] == 4
+        assert stats_before_rewind["draft_tokens_evaluated"] == 1
+        assert stats_before_rewind["draft_tokens_accepted"] == 1
+        assert stats_before_rewind["tokens_buffered"] == 3
+
+        generator.rewind_to(0)
+        generator.append_tokens(np.array([prompt], dtype=np.int32))
+        actual = _guided_tail(generator, len(prompt))
+
+        assert actual == expected
+        assert _decode_tokens(qwen3_guidance_model_path, actual).strip() == literal
+
+    def test_rejected_sampling_forced_tokens_share_rng_checkpoint(
+            self, qwen3_guidance_model_path, tmp_path):
+        tokenizer = og.Tokenizer(og.Model(qwen3_guidance_model_path))
+        proposal_tokens = [int(token) for token in tokenizer.encode("7")]
+        target_tokens = [int(token) for token in tokenizer.encode("8")]
+        if len(proposal_tokens) != 1 or len(target_tokens) != 1:
+            pytest.skip("The rejection test requires single-token digits")
+
+        model_path = _make_constant_guidance_model(
+            tmp_path / "rejected_forced_rng",
+            qwen3_guidance_model_path,
+            target_tokens[0],
+        )
+        context = _PROMPT[-2:]
+        prompt = _PROMPT + context + proposal_tokens + context
+        guidance_data = 'start: ("7" | "8") " cats"'
+        options = {
+            "do_sample": True,
+            "random_seed": 2468,
+            "top_k": 2,
+            "temperature": 0.01,
+        }
+
+        reference = _guided_generator(
+            model_path,
+            prompt,
+            guidance_type="lark_grammar",
+            guidance_data=guidance_data,
+            max_length=len(prompt) + 16,
+            enable_ff_tokens=True,
+            **options,
+        )
+        reference.generate_next_token()
+        reference.rewind_to(0)
+        reference.append_tokens(np.array([prompt], dtype=np.int32))
+        expected = _guided_tail(reference, len(prompt))
+
+        generator = _guided_generator(
+            model_path,
+            prompt,
+            guidance_type="lark_grammar",
+            guidance_data=guidance_data,
+            max_length=len(prompt) + 16,
+            ngram_size=3,
+            max_draft_tokens=4,
+            enable_ff_tokens=True,
+            **options,
+        )
+        generator.generate_next_token()
+        stats = generator.get_speculative_stats()
+        assert stats["rounds"] == 1
+        assert stats["draft_tokens_evaluated"] == 1
+        assert stats["draft_tokens_accepted"] == 0
+        assert stats["correction_tokens"] == 1
+        assert stats["tokens_buffered"] > 0
+
+        generator.rewind_to(0)
+        generator.append_tokens(np.array([prompt], dtype=np.int32))
+        actual = _guided_tail(generator, len(prompt))
+
+        assert actual == expected
+        assert _decode_tokens(model_path, actual).strip() == "8 cats"
+
+    @pytest.mark.parametrize("max_draft_tokens", [1, 4, 8])
+    @pytest.mark.parametrize(
+        "guidance_type,guidance_data,output_kind",
+        _NGRAM_GUIDANCE_CASES,
+    )
+    def test_rewind_to_zero_restarts_clean_grammar_and_lookup(
+            self, qwen3_guidance_model_path, max_draft_tokens,
+            guidance_type, guidance_data, output_kind):
+        kwargs = {
+            "guidance_type": guidance_type,
+            "guidance_data": guidance_data,
+            "max_length": len(_PROMPT) + 64,
+            "ngram_size": 3,
+            "max_draft_tokens": max_draft_tokens,
+        }
+        expected, expected_text, _ = _run_guided(
+            qwen3_guidance_model_path, _PROMPT, **kwargs)
+        generator = _guided_generator(
+            qwen3_guidance_model_path, _PROMPT, **kwargs)
+        for _ in range(3):
+            if generator.is_done():
+                break
+            generator.generate_next_token()
+        generator.rewind_to(0)
+        generator.append_tokens(np.array([_PROMPT], dtype=np.int32))
+        actual = _guided_tail(generator, len(_PROMPT))
+        actual_text = _decode_tokens(qwen3_guidance_model_path, actual)
+
+        assert actual == expected
+        assert actual_text == expected_text
+        _assert_guidance_output(actual_text, output_kind)
+
+    @pytest.mark.parametrize("max_draft_tokens", [1, 4, 8])
+    def test_bounded_grammar_forces_eos_before_max_length(
+            self, qwen3_guidance_model_path, max_draft_tokens):
+        pattern = r"[0-9]{3}-[0-9]{3}"
+        generator = _guided_generator(
+            qwen3_guidance_model_path,
+            _REPETITIVE_PROMPT,
+            guidance_type="regex",
+            guidance_data=pattern,
+            max_length=len(_REPETITIVE_PROMPT) + 64,
+            ngram_size=3,
+            max_draft_tokens=max_draft_tokens,
+        )
+        tail = _guided_tail(generator, len(_REPETITIVE_PROMPT))
+
+        assert generator.is_done()
+        assert len(generator.get_sequence(0)) < len(_REPETITIVE_PROMPT) + 64
+        assert re.fullmatch(
+            pattern, _decode_tokens(qwen3_guidance_model_path, tail))
+        _assert_stats_consistent(generator.get_speculative_stats())
+
+    @pytest.mark.parametrize("max_draft_tokens", [1, 4, 8])
+    def test_max_length_discards_buffered_guided_tail_safely(
+            self, qwen3_guidance_model_path, max_draft_tokens):
+        max_new_tokens = 5
+        generator = _guided_generator(
+            qwen3_guidance_model_path,
+            _REPETITIVE_PROMPT,
+            guidance_type="regex",
+            guidance_data=r"[0-9]{100}",
+            max_length=len(_REPETITIVE_PROMPT) + max_new_tokens,
+            ngram_size=3,
+            max_draft_tokens=max_draft_tokens,
+        )
+        tail = _guided_tail(generator, len(_REPETITIVE_PROMPT))
+        text = _decode_tokens(qwen3_guidance_model_path, tail)
+
+        assert generator.is_done()
+        assert len(tail) == max_new_tokens
+        assert re.fullmatch(r"[0-9]+", text)
+        assert len(text) <= 100
+        _assert_stats_consistent(generator.get_speculative_stats())
+
+    @pytest.mark.parametrize("max_draft_tokens", [1, 4])
+    @pytest.mark.parametrize("repetition_penalty", [1.0, 1.2])
+    def test_guidance_composes_with_repetition_penalty(
+            self, qwen3_guidance_model_path, max_draft_tokens,
+            repetition_penalty):
+        kwargs = {
+            "guidance_type": "regex",
+            "guidance_data": r"[0-9]{8}",
+            "max_length": len(_REPETITIVE_PROMPT) + 24,
+            "repetition_penalty": repetition_penalty,
+        }
+        expected, _, _ = _run_guided(
+            qwen3_guidance_model_path, _REPETITIVE_PROMPT, **kwargs)
+        actual, text, stats = _run_guided(
+            qwen3_guidance_model_path,
+            _REPETITIVE_PROMPT,
+            ngram_size=3,
+            max_draft_tokens=max_draft_tokens,
+            **kwargs,
+        )
+
+        assert actual == expected
+        assert re.fullmatch(r"[0-9]{8}", text)
+        _assert_stats_consistent(stats)
+
+    def test_interleaved_sampled_generators_keep_independent_guidance_rng(
+            self, qwen3_guidance_model_path):
+        kwargs = {
+            "guidance_type": "regex",
+            "guidance_data": r"[0-9]{12}",
+            "max_length": len(_REPETITIVE_PROMPT) + 24,
+            "ngram_size": 3,
+            "max_draft_tokens": 4,
+            "do_sample": True,
+            "random_seed": 314159,
+            "top_k": 40,
+            "top_p": 0.95,
+            "temperature": 0.9,
+        }
+        expected, _, _ = _run_guided(
+            qwen3_guidance_model_path, _REPETITIVE_PROMPT, **kwargs)
+        first = _guided_generator(
+            qwen3_guidance_model_path, _REPETITIVE_PROMPT, **kwargs)
+        second = _guided_generator(
+            qwen3_guidance_model_path, _REPETITIVE_PROMPT, **kwargs)
+
+        while not first.is_done() or not second.is_done():
+            if not first.is_done():
+                first.generate_next_token()
+            if not second.is_done():
+                second.generate_next_token()
+
+        first_tail = [
+            int(token) for token in first.get_sequence(0)
+        ][len(_REPETITIVE_PROMPT):]
+        second_tail = [
+            int(token) for token in second.get_sequence(0)
+        ][len(_REPETITIVE_PROMPT):]
+        assert first_tail == expected
+        assert second_tail == expected
+        assert first_tail == second_tail
+
+    def test_fast_forward_tokens_share_one_batched_verify_round(
+            self, qwen3_guidance_model_path):
+        literal = "The capital of France is Paris and Berlin is in Germany."
+        prompt, literal_tokens = _forced_literal_lookup_prompt(
+            qwen3_guidance_model_path,
+            literal,
+            minimum_tokens=9,
+        )
+        generator = _guided_generator(
+            qwen3_guidance_model_path,
+            prompt,
+            guidance_type="lark_grammar",
+            guidance_data=f'start: "{literal}"',
+            max_length=len(prompt) + len(literal_tokens) + 4,
+            ngram_size=3,
+            max_draft_tokens=4,
+            enable_ff_tokens=True,
+        )
+        length_before = len(generator.get_sequence(0))
+        generator.generate_next_token()
+        stats = generator.get_speculative_stats()
+
+        assert len(generator.get_sequence(0)) == length_before + 1
+        assert stats["rounds"] == 1
+        assert stats["draft_tokens_proposed"] == 4
+        assert stats["draft_tokens_evaluated"] == 1
+        assert stats["draft_tokens_accepted"] == 1
+        assert stats["tokens_buffered"] == 3
+        assert stats["target_forward_passes"] == 1
+
+        tail = _guided_tail(generator, len(prompt))
+        assert _decode_tokens(qwen3_guidance_model_path, tail).strip() == literal
+        final_stats = generator.get_speculative_stats()
+        assert final_stats["draft_tokens_proposed"] > (
+            final_stats["draft_tokens_evaluated"])
+        assert final_stats["target_forward_passes"] < len(tail)
+        assert final_stats["draft_forward_passes"] == 0
+        _assert_stats_consistent(final_stats)
+
+    def test_fast_forward_carry_spans_multiple_k_limited_rounds(
+            self, qwen3_guidance_model_path):
+        literal = "One two three four five six seven eight nine ten eleven twelve."
+        prompt, literal_tokens = _forced_literal_lookup_prompt(
+            qwen3_guidance_model_path,
+            literal,
+            minimum_tokens=8,
+        )
+        generator = _guided_generator(
+            qwen3_guidance_model_path,
+            prompt,
+            guidance_type="lark_grammar",
+            guidance_data=f'start: "{literal}"',
+            max_length=len(prompt) + len(literal_tokens) + 4,
+            ngram_size=3,
+            max_draft_tokens=2,
+            enable_ff_tokens=True,
+        )
+
+        generator.generate_next_token()
+        first_round = generator.get_speculative_stats()
+        assert first_round["rounds"] == 1
+        assert first_round["draft_tokens_proposed"] == 2
+        assert first_round["draft_tokens_evaluated"] == 1
+        assert first_round["tokens_buffered"] == 1
+
+        generator.generate_next_token()
+        generator.generate_next_token()
+        second_round = generator.get_speculative_stats()
+        assert second_round["rounds"] == 2
+        assert second_round["draft_tokens_proposed"] == 4
+        assert second_round["draft_tokens_evaluated"] == 1
+        assert second_round["tokens_buffered"] == 1
+
+        tail = _guided_tail(generator, len(prompt))
+        assert _decode_tokens(qwen3_guidance_model_path, tail).strip() == literal
+        _assert_stats_consistent(generator.get_speculative_stats())
+
+    @pytest.mark.parametrize("max_draft_tokens", [2, 4, 8])
+    def test_rewind_clears_fast_forward_carry_and_buffer(
+            self, qwen3_guidance_model_path, max_draft_tokens):
+        literal = "The constrained answer is exactly forty two and remains stable."
+        prompt, literal_tokens = _forced_literal_lookup_prompt(
+            qwen3_guidance_model_path,
+            literal,
+            minimum_tokens=max_draft_tokens + 1,
+        )
+        kwargs = {
+            "guidance_type": "lark_grammar",
+            "guidance_data": f'start: "{literal}"',
+            "max_length": len(prompt) + len(literal_tokens) + 4,
+            "ngram_size": 3,
+            "max_draft_tokens": max_draft_tokens,
+            "enable_ff_tokens": True,
+        }
+        expected, _, _ = _run_guided(
+            qwen3_guidance_model_path,
+            prompt,
+            **kwargs,
+        )
+        generator = _guided_generator(
+            qwen3_guidance_model_path,
+            prompt,
+            **kwargs,
+        )
+        generator.generate_next_token()
+        assert generator.get_speculative_stats()["tokens_buffered"] == (
+            max_draft_tokens - 1)
+
+        generator.rewind_to(0)
+        generator.append_tokens(np.array([prompt], dtype=np.int32))
+        actual = _guided_tail(generator, len(prompt))
+
+        assert actual == expected
+        assert _decode_tokens(qwen3_guidance_model_path, actual).strip() == literal
+        _assert_stats_consistent(generator.get_speculative_stats())
+
+
+class TestNGramCapabilityGuards:
+    def test_pruned_logits_model_is_rejected_before_state_creation(self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "pruned_logits",
+            _transition_logits({1: 2, 2: 1}),
+            prune_logits=True)
+        model = og.Model(model_path)
+        params = og.GeneratorParams(model)
+        params.set_search_options(do_sample=False, max_length=12)
+        params.set_speculative_options(ngram_size=3)
+
+        with pytest.raises(Exception, match="pruned last-token-only logits"):
+            og.Generator(model, params)
+
+    def test_sliding_kv_cache_model_is_rejected_before_state_creation(self, tmp_path):
+        model_path = _make_tiny_ngram_model(
+            tmp_path / "sliding_kv",
+            _transition_logits({1: 2, 2: 1}),
+            decoder_overrides={
+                "sliding_window": {
+                    "window_size": 8,
+                    "slide_key_value_cache": True,
+                },
+            })
+        model = og.Model(model_path)
+        params = og.GeneratorParams(model)
+        params.set_search_options(do_sample=False, max_length=12)
+        params.set_speculative_options(ngram_size=3)
+
+        with pytest.raises(Exception, match="rewindable KV cache"):
+            og.Generator(model, params)
+
+    @pytest.mark.parametrize(
+        ("guard", "message"),
+        [
+            ("batch_size", "batch_size"),
+            ("num_beams", "beam search"),
+            ("num_return_sequences", "num_return_sequences"),
+        ],
+    )
+    def test_unsupported_generator_config_fails_fast(
+            self, qwen3_model_path, guard, message):
+        model = og.Model(qwen3_model_path)
+        with pytest.raises(Exception, match=message):
+            og.Generator(model, _invalid_guard_params(model, guard))
+
+    @pytest.mark.parametrize(
+        "guard",
+        ["batch_size", "num_beams", "num_return_sequences"],
+    )
+    def test_guard_failure_does_not_corrupt_model(
+            self, qwen3_model_path, guard):
+        model = og.Model(qwen3_model_path)
+        with pytest.raises(Exception):
+            og.Generator(model, _invalid_guard_params(model, guard))
+
+        valid = og.GeneratorParams(model)
+        valid.set_search_options(
+            do_sample=False,
+            max_length=len(_PROMPT) + 4,
+        )
+        valid.set_speculative_options(ngram_size=3)
+        generator = og.Generator(model, valid)
+        generator.append_tokens(np.array([_PROMPT], dtype=np.int32))
+        assert len(_finish(generator)) > len(_PROMPT)
+
+    def test_draft_model_combination_is_rejected(
+            self, qwen3_model_path, tmp_path):
+        model_path = _build_self_speculative_model(
+            qwen3_model_path, tmp_path / "ngram_with_draft")
+        model = og.Model(model_path)
+        params = og.GeneratorParams(model)
+        params.set_search_options(
+            do_sample=False,
+            max_length=len(_PROMPT) + 4,
+        )
+        params.set_speculative_options(ngram_size=3)
+
+        with pytest.raises(Exception, match="cannot be combined"):
+            og.Generator(model, params)

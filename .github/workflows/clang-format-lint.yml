@@ -20,14 +20,15 @@ jobs:
     runs-on:
       - self-hosted
       - "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU"
+      - "JobId=lint-cpp-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}"
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           submodules: 'false'
 
       - name: Check format
-        uses: microsoft/onnxruntime-github-actions/format-lint-check@v0.0.6
+        uses: microsoft/onnxruntime-github-actions/format-lint-check@9e3f6d0517cad4c4055d8ddd8b8bbadcc08e4e9a # v0.0.6
         with:
           llvm-version: '20.1.0'
           llvm-sha256-hash: '954ac51498519f6ed9540714fb04bc401f70039b296a8160dd1559be380788d7'

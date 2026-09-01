@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-#include "../generators.h"
+#include "generator/generators.h"
 #include "moonshine_streaming.h"
 
 namespace Generators {

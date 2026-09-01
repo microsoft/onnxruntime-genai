@@ -22,22 +22,22 @@ jobs:
     #       it doesn't work on macos-14.
     #         HVF error: HV_UNSUPPORTED
     #       it works on macos-13 but with macos-15 being released soon that isn't a long term solution.
-    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU"]
+    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU", "JobId=android_x64-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}"]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           submodules: true
 
       - name: Setup Java 17
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
         with:
           java-version: '17'
           distribution: 'temurin'
           cache: 'gradle'
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
+        uses: gradle/actions/setup-gradle@d9c87d481d55275bb5441eef3fe0e46805f9ef70 # v3.5.0
         with:
           gradle-version: '8.6'
 
@@ -72,7 +72,7 @@ jobs:
           sudo apt-get install jq
 
       - name: Checkout OnnxRuntime GenAI repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           submodules: true
 
@@ -94,12 +94,12 @@ jobs:
         run: |
           set -e -x
           rm -rf build
-          ./build.sh --android --android_api=27 --android_ndk_path=${ANDROID_NDK_HOME} --config=RelWithDebInfo --android_abi=${{ env.ANDROID_ABI }} --parallel --build_java --update --skip_wheel
+          python3 build.py --android --android_api=27 --android_ndk_path=${ANDROID_NDK_HOME} --config=RelWithDebInfo --android_abi=${{ env.ANDROID_ABI }} --parallel --build_java --update --skip_wheel
 
       - name: Run Android build
         run: |
           set -e -x
-          ./build.sh --android --android_api=27 --android_ndk_path=${ANDROID_NDK_HOME} --config=RelWithDebInfo --android_abi=${{ env.ANDROID_ABI }} --parallel --build_java --build --skip_wheel
+          python3 build.py --android --android_api=27 --android_ndk_path=${ANDROID_NDK_HOME} --config=RelWithDebInfo --android_abi=${{ env.ANDROID_ABI }} --parallel --build_java --build --skip_wheel
 
       - name: Enable KVM group perms so Android emulator can run
         run: |
@@ -110,4 +110,4 @@ jobs:
       - name: Run Android tests
         run: |
           set -e -x
-          ./build.sh --android --android_api=27 --android_ndk_path=${ANDROID_NDK_HOME} --config=RelWithDebInfo --android_abi=${{ env.ANDROID_ABI }} --parallel --build_java --android_run_emulator --test
+          python3 build.py --android --android_api=27 --android_ndk_path=${ANDROID_NDK_HOME} --config=RelWithDebInfo --android_abi=${{ env.ANDROID_ABI }} --parallel --build_java --android_run_emulator --test

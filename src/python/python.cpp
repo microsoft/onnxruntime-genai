@@ -7,8 +7,42 @@
 #include "../models/onnxruntime_api.h"
 #include "../ort_genai.h"
 #include <iostream>
+#include <optional>
 
 using namespace pybind11::literals;
+
+template <typename T>
+using ContiguousArray = pybind11::array_t<
+    T, pybind11::array::c_style | pybind11::array::forcecast>;
+
+enum class PyFinishReason : uint32_t {
+  None = OgaFinishReason_None,
+  Eos = OgaFinishReason_Eos,
+  StopSequence = OgaFinishReason_StopSequence,
+  MaxGeneratedTokens = OgaFinishReason_MaxGeneratedTokens,
+  MaxSessionTokens = OgaFinishReason_MaxSessionTokens,
+  Cancelled = OgaFinishReason_Cancelled,
+  Failed = OgaFinishReason_Failed,
+};
+
+enum class PyEngineEventFlags : uint32_t {
+  None = OgaEngineEventFlag_None,
+  Token = OgaEngineEventFlag_Token,
+  TurnFinished = OgaEngineEventFlag_TurnFinished,
+  CapacityBlocked = OgaEngineEventFlag_CapacityBlocked,
+  Failed = OgaEngineEventFlag_Failed,
+  Retryable = OgaEngineEventFlag_Retryable,
+};
+
+enum class PyEngineErrorCode : uint32_t {
+  None = OgaErrorCode_None,
+  CapacityDeferred = OgaErrorCode_CapacityDeferred,
+  ExecutionCapacityExceeded = OgaErrorCode_ExecutionCapacityExceeded,
+  RetryableExecution = OgaErrorCode_RetryableExecution,
+  RequestUnserviceable = OgaErrorCode_RequestUnserviceable,
+  EngineContractFailure = OgaErrorCode_EngineContractFailure,
+  EngineExecutionFailure = OgaErrorCode_EngineExecutionFailure,
+};
 
 // If a parameter to a C++ function is an array of float16, this type will let pybind11::array_t<Ort::Float16_t> map to numpy's float16 format
 namespace pybind11 {
@@ -29,7 +63,7 @@ struct npy_format_descriptor<Ort::Float16_t> {
 }  // namespace pybind11
 
 template <typename T>
-std::span<T> ToSpan(pybind11::array_t<T> v) {
+std::span<T> ToSpan(ContiguousArray<T> v) {
   if constexpr (std::is_const_v<T>)
     return {v.data(), static_cast<size_t>(v.size())};
   else
@@ -192,6 +226,30 @@ struct PyGeneratorParams {
     }
   }
 
+  void SetSpeculativeOptions(const pybind11::kwargs& dict) {
+    for (auto& entry : dict) {
+      auto name = entry.first.cast<std::string>();
+      if (pybind11::isinstance<pybind11::float_>(entry.second)) {
+        params_->SetSpeculativeNumber(name.c_str(), entry.second.cast<double>());
+      } else if (pybind11::isinstance<pybind11::bool_>(entry.second)) {
+        params_->SetSpeculativeBool(name.c_str(), entry.second.cast<bool>());
+      } else if (pybind11::isinstance<pybind11::int_>(entry.second)) {
+        params_->SetSpeculativeNumber(name.c_str(), entry.second.cast<int>());
+      } else
+        throw std::runtime_error("Unknown speculative option type, must be bool, int, or float: " + name);
+    }
+  }
+
+  pybind11::dict GetSpeculativeOptions() {
+    pybind11::dict d;
+    d["max_draft_tokens"] = params_->GetSpeculativeNumber("max_draft_tokens");
+    d["ngram_size"] = params_->GetSpeculativeNumber("ngram_size");
+    d["ngram_chained_lookup"] = params_->GetSpeculativeBool("ngram_chained_lookup");
+    d["min_adaptive_k"] = params_->GetSpeculativeNumber("min_adaptive_k");
+    d["cooldown"] = params_->GetSpeculativeBool("cooldown");
+    return d;
+  }
+
   void SetGuidance(const std::string& type, const std::string& data, bool enable_ff_tokens = false) {
     params_->SetGuidance(type.c_str(), data.c_str(), enable_ff_tokens);
   }
@@ -220,6 +278,36 @@ struct PyGeneratorParams {
 
   std::vector<pybind11::object> refs_;  // References to data we want to ensure doesn't get garbage collected
 };
+
+pybind11::dict ToSpeculativeStatsDict(const OgaSpeculativeStats& stats) {
+  pybind11::dict d;
+  for (const char* key : {"rounds", "completed_rounds", "interrupted_rounds", "active_rounds",
+                          "draft_tokens_proposed", "draft_tokens_evaluated", "draft_tokens_accepted",
+                          "correction_tokens", "bonus_tokens", "tokens_queued", "tokens_emitted",
+                          "tokens_discarded", "tokens_buffered", "draft_forward_passes",
+                          "target_forward_passes", "effective_k", "adaptive_k_increases",
+                          "adaptive_k_decreases", "adaptive_k_observations",
+                          "adaptive_k_probes", "cooldown_entries", "cooldown_steps",
+                          "cooldown_remaining", "standard_fallback_steps",
+                          "full_accept_rounds", "partial_accept_rounds", "zero_accept_rounds",
+                          "target_verify_forward_passes", "target_reanchor_forward_passes",
+                          "target_reconciliation_forward_passes", "ngram_lookup_hits",
+                          "ngram_lookup_misses", "ngram_lookup_tokens_proposed",
+                          "ngram_chained_tokens_proposed", "ngram_grammar_candidate_rejections",
+                          "ngram_history_syncs", "ngram_history_tokens_synced"})
+    d[key] = stats.GetCount(key);
+  d["formula_supported"] = stats.GetBool("formula_supported");
+  for (const char* key : {"total_draft_ms", "total_target_ms", "total_reconciliation_ms",
+                          "total_target_verify_ms", "total_target_reanchor_ms",
+                          "total_ngram_history_sync_ms", "total_ngram_lookup_ms",
+                          "avg_draft_ms_per_token", "acceptance_rate", "avg_draft_tokens_per_round",
+                          "mean_emitted_tokens_per_round", "expected_tokens_per_round",
+                          "avg_target_ms_per_round", "target_baseline_ms_per_token",
+                          "target_overhead_ratio", "estimated_speedup", "observed_speedup",
+                          "adaptive_k_throughput"})
+    d[key] = stats.GetNumber(key);
+  return d;
+}
 
 struct PyGenerator {
   PyGenerator(const OgaModel& model, PyGeneratorParams& params) {
@@ -254,7 +342,7 @@ struct PyGenerator {
     generator_->AppendTokens(ToSpan<int32_t>(tokens));
   }
 
-  void AppendTokens(pybind11::array_t<int32_t>& tokens) {
+  void AppendTokens(ContiguousArray<int32_t>& tokens) {
     generator_->AppendTokens(ToSpan(tokens));
   }
 
@@ -278,6 +366,15 @@ struct PyGenerator {
     generator_->RewindTo(new_length);
   }
 
+  void SnapshotState() {
+    generator_->SnapshotState();
+  }
+
+  void SetHiddenStates(pybind11::array& hidden_states) {
+    hidden_states_holder_ = ToOgaTensor(hidden_states, /*copy*/ true);
+    generator_->SetHiddenStates(*hidden_states_holder_);
+  }
+
   bool IsDone() {
     return generator_->IsDone();
   }
@@ -290,8 +387,47 @@ struct PyGenerator {
     generator_->SetRuntimeOption(key.c_str(), value.c_str());
   }
 
+  pybind11::dict GetSpeculativeStats() {
+    auto stats = generator_->GetSpeculativeStats();
+    return ToSpeculativeStatsDict(*stats);
+  }
+
  private:
   std::unique_ptr<OgaGenerator> generator_;
+  std::unique_ptr<OgaTensor> hidden_states_holder_;  // Keeps the staged hidden_states alive across the next step
+};
+
+struct PyMtpGenerator {
+  PyMtpGenerator(const OgaModel& main_model, const OgaModel& mtp_model, PyGeneratorParams& params) {
+    generator_ = OgaMtpGenerator::Create(main_model, mtp_model, *params.params_);
+  }
+
+  void AppendTokens(pybind11::array_t<int32_t> tokens) {
+    if (tokens.ndim() != 1)
+      throw std::runtime_error("input_ids must be a 1D array");
+    generator_->AppendTokens(tokens.data(), tokens.size());
+  }
+
+  void GenerateNextToken() { generator_->GenerateNextToken(); }
+  void Reset() { generator_->Reset(); }
+  bool IsDone() const { return generator_->IsDone(); }
+
+  pybind11::array_t<int32_t> GetSequence() {
+    return pybind11::array_t<int32_t>({static_cast<pybind11::ssize_t>(generator_->GetSequenceCount())},
+                                      generator_->GetSequenceData());
+  }
+
+  pybind11::dict GetStats() {
+    auto stats = generator_->GetSpeculativeStats();
+    pybind11::dict d = ToSpeculativeStatsDict(*stats);
+    d["forwards"] = d["target_forward_passes"];
+    d["accepts"] = d["draft_tokens_accepted"];
+    d["trials"] = d["draft_tokens_evaluated"];
+    return d;
+  }
+
+ private:
+  std::unique_ptr<OgaMtpGenerator> generator_;
 };
 
 void SetLogOptions(const pybind11::kwargs& dict) {
@@ -343,6 +479,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   pybind11::class_<PyGeneratorParams>(m, "GeneratorParams")
       .def(pybind11::init<const OgaModel&>())
       .def("set_search_options", &PyGeneratorParams::SetSearchOptions)  // See config.h 'struct Search' for the options
+      .def("set_speculative_options", &PyGeneratorParams::SetSpeculativeOptions)
+      .def("get_speculative_options", &PyGeneratorParams::GetSpeculativeOptions)
       .def("set_guidance", &PyGeneratorParams::SetGuidance,
            pybind11::arg("type"), pybind11::arg("data"),
            pybind11::arg("enable_ff_tokens") = false)
@@ -389,11 +527,17 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   pybind11::class_<OgaTokenizer>(m, "Tokenizer")
       .def(pybind11::init([](const OgaModel& model) { return OgaTokenizer::Create(model); }))
+      .def(pybind11::init([](const OgaConfig& config) { return OgaTokenizer::Create(config); }))
+      .def(pybind11::init([](const std::string& config_path) { return OgaTokenizer::Create(config_path.c_str()); }))
       .def_property_readonly("bos_token_id", &OgaTokenizer::GetBosTokenId)
       .def_property_readonly("eos_token_ids", [](const OgaTokenizer& t) {
         return ToPython(t.GetEosTokenIds());
       })
       .def_property_readonly("pad_token_id", &OgaTokenizer::GetPadTokenId)
+      .def_property_readonly("bot_token_id", &OgaTokenizer::GetBotTokenId)
+      .def_property_readonly("eot_token_id", &OgaTokenizer::GetEotTokenId)
+      .def_property_readonly("bor_token_id", &OgaTokenizer::GetBorTokenId)
+      .def_property_readonly("eor_token_id", &OgaTokenizer::GetEorTokenId)
       .def("update_options", [](OgaTokenizer& t, pybind11::kwargs kwargs) {
         std::vector<std::string> key_storage;
         std::vector<std::string> value_storage;
@@ -418,7 +562,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         t.Encode(s.c_str(), *sequences);
         return ToPython(sequences->Get(0)); })
       .def("to_token_id", &OgaTokenizer::ToTokenId)
-      .def("decode", [](const OgaTokenizer& t, pybind11::array_t<int32_t> tokens) -> std::string { return t.Decode(ToSpan(tokens)).p_; })
+      .def("decode", [](const OgaTokenizer& t, ContiguousArray<int32_t> tokens) -> std::string { return t.Decode(ToSpan(tokens)).p_; })
       .def("apply_chat_template", [](const OgaTokenizer& t, const char* messages, const char* template_str, const char* tools, bool add_generation_prompt) -> std::string { return t.ApplyChatTemplate(template_str, messages, tools, add_generation_prompt).p_; }, pybind11::arg("messages"), pybind11::kw_only(), pybind11::arg("template_str") = nullptr, pybind11::arg("tools") = nullptr, pybind11::arg("add_generation_prompt") = true)
       .def("encode_batch", [](const OgaTokenizer& t, std::vector<std::string> strings) {
         std::vector<const char*> c_strings;
@@ -495,17 +639,29 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("get_output", &PyGenerator::GetOutput)
       .def("set_inputs", &PyGenerator::SetInputs)
       .def("set_model_input", &PyGenerator::SetModelInput)
-      .def("append_tokens", pybind11::overload_cast<pybind11::array_t<int32_t>&>(&PyGenerator::AppendTokens))
+      .def("append_tokens", pybind11::overload_cast<ContiguousArray<int32_t>&>(&PyGenerator::AppendTokens))
       .def("append_tokens", pybind11::overload_cast<OgaTensor&>(&PyGenerator::AppendTokens))
       .def("token_count", &PyGenerator::TokenCount)
       .def("get_logits", &PyGenerator::GetLogits)
       .def("set_logits", &PyGenerator::SetLogits)
       .def("generate_next_token", &PyGenerator::GenerateNextToken)
       .def("rewind_to", &PyGenerator::RewindTo)
+      .def("snapshot_state", &PyGenerator::SnapshotState)
+      .def("set_hidden_states", &PyGenerator::SetHiddenStates)
       .def("get_next_tokens", &PyGenerator::GetNextTokens)
       .def("get_sequence", &PyGenerator::GetSequence)
       .def("set_active_adapter", &PyGenerator::SetActiveAdapter)
-      .def("set_runtime_option", &PyGenerator::SetRuntimeOption);
+      .def("set_runtime_option", &PyGenerator::SetRuntimeOption)
+      .def("get_speculative_stats", &PyGenerator::GetSpeculativeStats);
+
+  pybind11::class_<PyMtpGenerator>(m, "MtpGenerator")
+      .def(pybind11::init<const OgaModel&, const OgaModel&, PyGeneratorParams&>())
+      .def("append_tokens", &PyMtpGenerator::AppendTokens)
+      .def("generate_next_token", &PyMtpGenerator::GenerateNextToken)
+      .def("reset", &PyMtpGenerator::Reset)
+      .def("is_done", &PyMtpGenerator::IsDone)
+      .def("get_sequence", &PyMtpGenerator::GetSequence)
+      .def("get_stats", &PyMtpGenerator::GetStats);
 
   pybind11::class_<OgaImages>(m, "Images")
       .def_static("open", [](pybind11::args image_paths) {
@@ -599,7 +755,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           },
           pybind11::arg("prompt") = pybind11::none())
       .def("create_stream", [](OgaMultiModalProcessor& processor) { return OgaTokenizerStream::Create(processor); })
-      .def("decode", [](OgaMultiModalProcessor& processor, pybind11::array_t<int32_t> tokens) -> std::string {
+      .def("decode", [](OgaMultiModalProcessor& processor, ContiguousArray<int32_t> tokens) -> std::string {
         return processor.Decode(ToSpan(tokens)).p_;
       });
 
@@ -610,36 +766,197 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("unload", &OgaAdapters::UnloadAdapter)
       .def("load", &OgaAdapters::LoadAdapter);
 
+  pybind11::enum_<PyFinishReason>(m, "FinishReason")
+      .value("NONE", PyFinishReason::None)
+      .value("EOS", PyFinishReason::Eos)
+      .value("STOP_SEQUENCE", PyFinishReason::StopSequence)
+      .value("MAX_GENERATED_TOKENS", PyFinishReason::MaxGeneratedTokens)
+      .value("MAX_SESSION_TOKENS", PyFinishReason::MaxSessionTokens)
+      .value("CANCELLED", PyFinishReason::Cancelled)
+      .value("FAILED", PyFinishReason::Failed);
+
+  pybind11::enum_<PyEngineErrorCode>(m, "EngineErrorCode")
+      .value("NONE", PyEngineErrorCode::None)
+      .value("CAPACITY_DEFERRED", PyEngineErrorCode::CapacityDeferred)
+      .value("EXECUTION_CAPACITY_EXCEEDED", PyEngineErrorCode::ExecutionCapacityExceeded)
+      .value("RETRYABLE_EXECUTION", PyEngineErrorCode::RetryableExecution)
+      .value("REQUEST_UNSERVICEABLE", PyEngineErrorCode::RequestUnserviceable)
+      .value("ENGINE_CONTRACT_FAILURE", PyEngineErrorCode::EngineContractFailure)
+      .value("ENGINE_EXECUTION_FAILURE", PyEngineErrorCode::EngineExecutionFailure);
+
+  pybind11::enum_<PyEngineEventFlags>(m, "EngineEventFlags", pybind11::arithmetic())
+      .value("NONE", PyEngineEventFlags::None)
+      .value("TOKEN", PyEngineEventFlags::Token)
+      .value("TURN_FINISHED", PyEngineEventFlags::TurnFinished)
+      .value("CAPACITY_BLOCKED", PyEngineEventFlags::CapacityBlocked)
+      .value("FAILED", PyEngineEventFlags::Failed)
+      .value("RETRYABLE", PyEngineEventFlags::Retryable)
+      .def(
+          "__and__",
+          [](PyEngineEventFlags lhs, PyEngineEventFlags rhs) {
+            return static_cast<uint32_t>(lhs) &
+                   static_cast<uint32_t>(rhs);
+          },
+          pybind11::is_operator())
+      .def(
+          "__or__",
+          [](PyEngineEventFlags lhs, PyEngineEventFlags rhs) {
+            return static_cast<PyEngineEventFlags>(
+                static_cast<uint32_t>(lhs) |
+                static_cast<uint32_t>(rhs));
+          },
+          pybind11::is_operator());
+
+  pybind11::class_<
+      OgaTurnUsage,
+      std::unique_ptr<OgaTurnUsage, pybind11::nodelete>>(m, "TurnUsage")
+      .def_property_readonly(
+          "prompt_tokens", &OgaTurnUsage::PromptTokens)
+      .def_property_readonly(
+          "generated_tokens", &OgaTurnUsage::GeneratedTokens)
+      .def_property_readonly(
+          "cached_prompt_tokens", &OgaTurnUsage::CachedPromptTokens);
+
+  pybind11::class_<OgaRequestOptions>(m, "RequestOptions")
+      .def(pybind11::init([] {
+        return OgaRequestOptions::Create();
+      }))
+      .def("set_max_session_tokens", &OgaRequestOptions::SetMaxSessionTokens);
+
+  pybind11::class_<OgaTurnOptions>(m, "TurnOptions")
+      .def(pybind11::init([](OgaRequest& request) {
+        return OgaTurnOptions::Create(request);
+      }))
+      .def("set_max_generated_tokens", &OgaTurnOptions::SetMaxGeneratedTokens)
+      .def("set_temperature", &OgaTurnOptions::SetTemperature,
+           "Reserved for future use; currently raises a not-implemented error.")
+      .def("set_top_p", &OgaTurnOptions::SetTopP,
+           "Reserved for future use; currently raises a not-implemented error.")
+      .def("set_top_k", &OgaTurnOptions::SetTopK,
+           "Reserved for future use; currently raises a not-implemented error.")
+      .def("set_seed", &OgaTurnOptions::SetSeed,
+           "Reserved for future use; currently raises a not-implemented error.")
+      .def("set_stop_token_ids", [](OgaTurnOptions& options, const std::vector<std::vector<int32_t>>& values) {
+        auto sequences = OgaSequences::Create();
+        for (const auto& value : values)
+          sequences->Append(value.data(), value.size());
+        options.SetStopTokenIds(*sequences); }, "Reserved for future use; currently raises a not-implemented error.")
+      .def("set_stop_strings", [](OgaTurnOptions& options, const std::vector<std::string>& values) {
+        auto strings = OgaStringArray::Create();
+        for (const auto& value : values)
+          strings->Add(value.c_str());
+        options.SetStopStrings(*strings); }, "Reserved for future use; currently raises a not-implemented error.")
+      .def("set_guidance", &OgaTurnOptions::SetGuidance, "Reserved for future use; currently raises a not-implemented error.");
+
   pybind11::class_<OgaRequest>(m, "Request")
-      .def(pybind11::init(
-          [](PyGeneratorParams& params) {
-            return OgaRequest::Create(*params.params_);
-          }))
-      .def("add_tokens", [](OgaRequest& request, pybind11::array_t<int32_t> tokens) {
+      .def(
+          "begin_turn",
+          [](OgaRequest& request,
+             pybind11::array_t<
+                 int32_t,
+                 pybind11::array::c_style | pybind11::array::forcecast>
+                 tokens,
+             OgaTurnOptions* turn_options) -> uint64_t {
+            if (tokens.ndim() != 1) {
+              throw pybind11::value_error(
+                  "tokens must be a one-dimensional array.");
+            }
+            return request.BeginTurn(
+                tokens.data(), static_cast<size_t>(tokens.size()),
+                turn_options);
+          },
+          pybind11::arg("tokens"),
+          pybind11::arg("turn_options") = pybind11::none())
+      .def("cancel_turn", &OgaRequest::CancelTurn)
+      .def("set_draft_tokens", [](OgaRequest& request, ContiguousArray<int32_t> tokens) {
+        if (tokens.ndim() != 1) {
+          throw pybind11::value_error(
+              "tokens must be a one-dimensional array.");
+        }
         auto sequences = OgaSequences::Create();
         auto tokens_span = ToSpan(tokens);
         sequences->Append(tokens_span.data(), tokens_span.size());
-        request.AddTokens(*sequences);
+        request.SetDraftTokens(*sequences); }, "Propose speculative draft tokens for the next decode operation.")
+      .def("close", &OgaRequest::Close);
+
+  pybind11::class_<
+      OgaEngineEvent,
+      std::unique_ptr<OgaEngineEvent, pybind11::nodelete>>(m, "EngineEvent")
+      .def_property_readonly("flags", [](const OgaEngineEvent& event) {
+        return static_cast<PyEngineEventFlags>(event.Flags());
       })
-      .def("has_unseen_tokens", &OgaRequest::HasUnseenTokens)
-      .def("is_done", &OgaRequest::IsDone)
-      .def("get_unseen_token", &OgaRequest::GetUnseenToken)
-      .def("set_opaque_data", [](OgaRequest& request, pybind11::object opaque_data) {
-        request.SetOpaqueData(opaque_data.ptr());
-      })
-      .def("get_opaque_data", [](OgaRequest& request) -> pybind11::object {
-        auto opaque_data = request.GetOpaqueData();
-        if (!opaque_data)
+      .def_property_readonly("request", [](pybind11::object self) -> pybind11::object {
+        const auto request =
+            self.cast<const OgaEngineEvent&>().Request();
+        if (!request) {
           return pybind11::none();
-        return pybind11::reinterpret_borrow<pybind11::object>(static_cast<PyObject*>(opaque_data));
-      });
+        }
+        return pybind11::cast(
+            &request->get(),
+            pybind11::return_value_policy::reference_internal,
+            self);
+      })
+      .def_property_readonly("turn_id", &OgaEngineEvent::TurnId)
+      .def_property_readonly("token", [](const OgaEngineEvent& event) -> pybind11::object {
+        if ((event.Flags() & OgaEngineEventFlag_Token) == 0)
+          return pybind11::none();
+        return pybind11::int_(event.Token());
+      })
+      .def_property_readonly("finish_reason", [](const OgaEngineEvent& event) {
+        return static_cast<PyFinishReason>(event.FinishReason());
+      })
+      .def_property_readonly("error_code", [](const OgaEngineEvent& event) {
+        return static_cast<PyEngineErrorCode>(event.ErrorCode());
+      })
+      .def_property_readonly("usage", &OgaEngineEvent::Usage, pybind11::return_value_policy::reference_internal);
+
+  pybind11::class_<OgaEngineEventBuffer>(m, "EngineEventBuffer")
+      .def("__len__", &OgaEngineEventBuffer::Count)
+      .def(
+          "__getitem__",
+          [](const OgaEngineEventBuffer& buffer,
+             pybind11::ssize_t index) -> const OgaEngineEvent* {
+            const auto count = buffer.Count();
+            if (index < 0) {
+              index += static_cast<pybind11::ssize_t>(count);
+            }
+            if (index < 0 ||
+                static_cast<uintmax_t>(index) >= count) {
+              throw pybind11::index_error();
+            }
+            return buffer.Get(static_cast<size_t>(index));
+          },
+          pybind11::return_value_policy::reference_internal);
 
   pybind11::class_<OgaEngine>(m, "Engine")
       .def(pybind11::init([](OgaModel& model) { return OgaEngine::Create(model); }))
-      .def("add_request", &OgaEngine::Add)
-      .def("step", &OgaEngine::Step)
-      .def("remove_request", &OgaEngine::Remove)
-      .def("has_pending_requests", &OgaEngine::HasPendingRequests);
+      .def(
+          "create_request",
+          [](OgaEngine& engine, PyGeneratorParams& params,
+             OgaRequestOptions* options) {
+            return engine.CreateRequest(*params.params_, options);
+          },
+          pybind11::arg("params"),
+          pybind11::arg("options") = pybind11::none())
+      .def(
+          "create_event_buffer",
+          &OgaEngine::CreateEventBuffer,
+          pybind11::arg("capacity"))
+      .def(
+          "run",
+          [](OgaEngine& engine, pybind11::object buffer_object) {
+            auto& buffer =
+                buffer_object.cast<OgaEngineEventBuffer&>();
+            {
+              pybind11::gil_scoped_release release;
+              engine.Run(buffer);
+            }
+            return buffer_object;
+          },
+          pybind11::arg("buffer"))
+      .def("has_pending_requests", &OgaEngine::HasPendingRequests)
+      .def("max_draft_tokens_per_proposal", &OgaEngine::MaxDraftTokensPerProposal,
+           "Speculative draft tokens a request may attach to one proposal; zero when unsupported.");
 
   pybind11::class_<OgaStreamingProcessor>(m, "StreamingProcessor")
       .def(pybind11::init([](OgaModel& model) { return OgaStreamingProcessor::Create(model); }),
@@ -688,10 +1005,11 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   m.def("set_log_options", &SetLogOptions);
   m.def("set_log_callback", &SetLogCallback);
+  m.def("enable_telemetry_events", []() { OgaSetTelemetryEnabled(true); }, "Enable non-essential ONNX Runtime GenAI telemetry events.");
+  m.def("disable_telemetry_events", []() { OgaSetTelemetryEnabled(false); }, "Disable non-essential ONNX Runtime GenAI telemetry events.");
 
   m.def("is_cuda_available", []() { return USE_CUDA != 0; });
   m.def("is_dml_available", []() { return USE_DML != 0; });
-  m.def("is_rocm_available", []() { return USE_ROCM != 0; });
   m.def("is_webgpu_available", []() { return true; });
   m.def("is_qnn_available", []() { return true; });
   m.def("is_openvino_available", []() { return true; });

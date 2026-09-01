@@ -2,16 +2,23 @@
 // Licensed under the MIT License.
 
 #pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
 #include "model.h"
-#include "input_ids.h"
-#include "multi_modal_features.h"
-#include "embeddings.h"
-#include "extra_inputs.h"
-#include "logits.h"
-#include "kv_cache.h"
-#include "position_inputs.h"
+#include "models/io/input_ids.h"
+#include "models/io/multi_modal_features.h"
+#include "models/io/embeddings.h"
+#include "models/io/extra_inputs.h"
+#include "models/io/logits.h"
+#include "io/kv_cache.h"
+#include "models/io/position_inputs.h"
 #include "model_type.h"
-#include "recurrent_state.h"
+#include "models/io/recurrent_state.h"
 
 namespace Generators {
 
@@ -84,6 +91,40 @@ struct PixtralVisionState : VisionState {
   std::vector<int64_t> image_widths_;
 };
 
+inline void ValidateImageGridThwLayoutAndCount(const std::vector<int64_t>& shape,
+                                               size_t elem_count,
+                                               int64_t num_images,
+                                               const char* tensor_name) {
+  if (num_images < 0) {
+    throw std::runtime_error(std::string(tensor_name) + " num_images must be non-negative");
+  }
+
+  if (shape.size() != 2) {
+    throw std::runtime_error(std::string(tensor_name) + " must have rank 2 [num_images, 3]");
+  }
+
+  if (shape[0] < 0 || shape[1] < 0) {
+    throw std::runtime_error(std::string(tensor_name) + " dimensions must be non-negative");
+  }
+
+  if (shape[1] != 3) {
+    throw std::runtime_error(std::string(tensor_name) + " second dimension must be 3");
+  }
+
+  const size_t shape_image_count = static_cast<size_t>(shape[0]);
+  const size_t expected_image_count = static_cast<size_t>(num_images);
+  if (shape_image_count < expected_image_count) {
+    throw std::runtime_error(std::string(tensor_name) + " shape[0] (" + std::to_string(shape_image_count) +
+                             ") is less than required image count (" + std::to_string(expected_image_count) + ")");
+  }
+
+  if (elem_count % 3 != 0 || elem_count / 3 < expected_image_count) {
+    throw std::runtime_error(std::string(tensor_name) + " element count (" + std::to_string(elem_count) +
+                             ") is less than required for " + std::to_string(num_images) +
+                             " images (need at least 3 values per image)");
+  }
+}
+
 // Factory: pick the right VisionState subclass based on model type.
 std::unique_ptr<VisionState> CreateVisionState(const MultiModalLanguageModel& model, const GeneratorParams& params);
 
@@ -138,6 +179,14 @@ struct DecoderState : State {
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int current_length, DeviceSpan<int32_t> beam_indices);
 
+  // Prefill chunking (see search.chunk_size). The embedding model still runs once over the whole
+  // prompt (it is a lookup/projection), while the decoder prefill is split into several runs so the
+  // peak attention workspace scales with the chunk size instead of the full prompt length.
+  bool SupportsPrefillChunking() const;
+  void PrepareEmbeddingsForPrefill(size_t new_length);
+  DeviceSpan<float> RunPrefillWithChunking(int current_length, DeviceSpan<int32_t>& next_tokens,
+                                           DeviceSpan<int32_t> next_indices, size_t chunk_size);
+
  private:
   friend struct MultiModalPipelineState;
 
@@ -149,7 +198,7 @@ struct DecoderState : State {
   std::unique_ptr<Embeddings> per_layer_inputs_;        // Optional model input (Gemma4: per-layer conditioning)
   std::unique_ptr<DefaultInputIDs> decoder_input_ids_;  // Optional model input (e.g., Gemma4 decoder needs input_ids)
   std::unique_ptr<PositionInputs> position_inputs_;     // Model input
-  DefaultKeyValueCache kv_cache_{*this};                // Model input
+  std::unique_ptr<KeyValueCache> kv_cache_;             // Model input
   std::unique_ptr<RecurrentState> recurrent_state_;     // Model input (for hybrid models)
   Logits logits_{*this};                                // Model output
 };

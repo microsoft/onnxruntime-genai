@@ -114,9 +114,7 @@ def test_qwen3_vl_vision_dynamic_grid_dim(test_data_path):
     """
     onnx = pytest.importorskip("onnx")
 
-    vision_path = os.path.join(
-        test_data_path, "qwen3-vl", "dummy_vision.onnx"
-    )
+    vision_path = os.path.join(test_data_path, "qwen3-vl", "dummy_vision.onnx")
     model = onnx.load(vision_path)
 
     # Find image_grid_thw input
@@ -399,7 +397,7 @@ def test_qwen3_vl_pixel_values_shape(test_data_path, relative_image_path):
     "model_name,expected_patch_dim",
     [
         ("qwen2-5-vl", 1176),  # Qwen2.5-VL: patch_size=14, 14*14*3*2=1176
-        ("qwen3-vl", 1536),    # Qwen3-VL:   patch_size=16, 16*16*3*2=1536
+        ("qwen3-vl", 1536),  # Qwen3-VL:   patch_size=16, 16*16*3*2=1536
     ],
 )
 @pytest.mark.parametrize("relative_image_path", [Path("images") / "australia.jpg"])

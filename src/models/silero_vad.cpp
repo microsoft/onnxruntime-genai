@@ -6,7 +6,7 @@
 #include <stdexcept>
 #include <vector>
 
-#include "../generators.h"
+#include "generator/generators.h"
 #include "silero_vad.h"
 
 namespace Generators {

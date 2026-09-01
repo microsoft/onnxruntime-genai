@@ -6,22 +6,33 @@
 #include <algorithm>
 #include <array>
 #include <climits>
+#include <filesystem>
+#include <functional>
+#include <fstream>
+#include <mutex>
 #include <random>
 #include <set>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_set>
+#include <unordered_map>
 
-#include "../generators.h"
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
+
+#include "generator/generators.h"
 #include "../search.h"
 #include "../tracing.h"
 #include "model.h"
 #include "model_package.h"
 #include "gpt.h"
 #include "decoder_only.h"
+#include "speculative_decoding.h"
 #include "whisper.h"
 #include "parakeet.h"
-#include "parakeet_processor.h"
 #include "nemotron_speech.h"
 #include "moonshine_streaming.h"
 #include "multi_modal.h"
@@ -29,23 +40,11 @@
 #include "marian.h"
 #include "decoder_only_pipeline.h"
 #include "qwen_vl_model.h"
-#include "qwen2_5_vl_image_processor.h"
-#include "videochat_flash_processor.h"
-#include "mistral3_image_processor.h"
-#include "../dml/interface.h"
-#include "../openvino/interface.h"
-#include "../qnn/interface.h"
-#include "../ryzenai/interface.h"
+#include "ep/dml/interface.h"
+#include "ep/openvino/interface.h"
+#include "ep/qnn/interface.h"
+#include "ep/ryzenai/interface.h"
 #include "session_options.h"
-
-#if defined(_WIN32)
-#include <direct.h>
-#define GETCWD _getcwd
-#else
-#include <unistd.h>
-#define GETCWD getcwd
-#include <limits.h>
-#endif
 
 namespace Generators {
 
@@ -54,6 +53,24 @@ namespace {
 constexpr const char* kOrtSessionOptionsModelExternalInitializersFileFolderPath =
     "session.model_external_initializers_file_folder_path";
 constexpr const char* kOrtSessionOptionEpContextFilePath = "ep.context_file_path";
+
+struct SharedInitializerEntry {
+  DeviceSpan<uint8_t> device_data;
+  std::unique_ptr<OrtValue> shared_view;
+};
+
+std::mutex g_shared_initializers_mutex;
+std::unordered_map<std::string, std::weak_ptr<SharedInitializerEntry>> g_shared_initializers;
+
+std::string SharedInitializerFileIdentity(const fs::path& path) {
+#ifndef _WIN32
+  struct stat file_info = {};
+  if (::stat(path.c_str(), &file_info) == 0) {
+    return std::to_string(file_info.st_dev) + ":" + std::to_string(file_info.st_ino);
+  }
+#endif
+  return path.string();
+}
 
 // Session-option config keys whose values are file/folder path references. When a model is loaded
 // from a package these may be sha256: shared-asset URIs or relative paths, so their values are
@@ -70,14 +87,24 @@ State::State(const GeneratorParams& params, const Model& model)
       params_{params.shared_from_this()},
       run_options_{OrtRunOptions::Create()},
       extra_outputs_{*this} {
-  // Generate a random id for graph capture
+  // Generate a random id for graph capture of the default (1-token) decode shape.
   if (params_->use_graph_capture) {
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<> dis(1, INT_MAX);
-    graph_id_value_ = dis(gen);
-    graph_id_ = std::to_string(graph_id_value_);
+    GraphIdForLength(1, 0);
   }
+}
+
+const std::string& State::GraphIdForLength(int graph_capture_length, int graph_capture_variant) {
+  const int graph_key = graph_capture_length * 2 + graph_capture_variant;
+  auto it = graph_ids_.find(graph_key);
+  if (it != graph_ids_.end()) {
+    return it->second.text;
+  }
+  // Distinct random annotation id per captured length (ORT captures one graph per id).
+  std::random_device rd;
+  std::mt19937 gen(rd());
+  std::uniform_int_distribution<> dis(1, INT_MAX);
+  const int id_value = dis(gen);
+  return graph_ids_.emplace(graph_key, GraphId{id_value, std::to_string(id_value)}).first->second.text;
 }
 
 void State::DumpInputs() {
@@ -102,13 +129,14 @@ void State::DumpOutputs() {
   }
 }
 
-void State::Run(OrtSession& session, bool graph_capture_this_run) {
+void State::Run(OrtSession& session, bool graph_capture_this_run, int graph_capture_length,
+                int graph_capture_variant) {
   DurationTrace trace{"State::Run"};
 
   if (params_->use_graph_capture) {
     graph_capture_session_ = &session;
     if (graph_capture_this_run) {
-      run_options_->AddConfigEntry("gpu_graph_id", graph_id_.c_str());
+      run_options_->AddConfigEntry("gpu_graph_id", GraphIdForLength(graph_capture_length, graph_capture_variant).c_str());
     } else {
       run_options_->AddConfigEntry("gpu_graph_id", "-1");
     }
@@ -242,14 +270,22 @@ State::~State() {
   // in try/catch because destructors must not throw -- a throw during unwinding
   // would call std::terminate.
 #if ORT_API_VERSION >= 27
-  if (graph_capture_session_ && graph_id_value_ > 0) {
-    try {
-      graph_capture_session_->ReleaseCapturedGraph(graph_id_value_);
-    } catch (...) {
-      // Best-effort cleanup; swallow to keep the destructor non-throwing.
-      if (g_log.enabled && g_log.ort_lib) {
-        Log("ort_lib") << "ReleaseCapturedGraph(id=" << graph_id_value_
-                       << ") failed: unknown exception" << std::endl;
+  if (graph_capture_session_) {
+    // Speculative decoding (MTP) may capture more than one input length, each with its
+    // own annotation id, so release every id that was handed out.
+    for (const auto& length_and_id : graph_ids_) {
+      const int id_value = length_and_id.second.value;
+      if (id_value <= 0) {
+        continue;
+      }
+      try {
+        graph_capture_session_->ReleaseCapturedGraph(id_value);
+      } catch (...) {
+        // Best-effort cleanup; swallow to keep the destructor non-throwing.
+        if (g_log.enabled && g_log.ort_lib) {
+          Log("ort_lib") << "ReleaseCapturedGraph(id=" << id_value
+                         << ") failed: unknown exception" << std::endl;
+        }
       }
     }
   }
@@ -262,156 +298,9 @@ State::~State() {
   }
 }
 
-std::vector<int32_t> PadInputs(std::span<std::span<const int32_t>> sequences, int32_t pad_token_id) {
-  bool pad_right_{true};
-
-  size_t max_length = 0;
-  for (auto& sequence : sequences)
-    max_length = std::max(max_length, sequence.size());
-
-  std::vector<int32_t> result(max_length * sequences.size());
-  std::span<int32_t> result_span(result);
-
-  // Copy and pad the sequences with pad_token_id
-  for (size_t i = 0; i < sequences.size(); i++) {
-    auto output_span = result_span.subspan(i * max_length, max_length);
-    auto input_span = sequences[i];
-
-    auto pad_count = max_length - input_span.size();
-    if (pad_right_) {
-      std::copy(input_span.begin(), input_span.end(), output_span.begin());
-      std::fill(output_span.end() - pad_count, output_span.end(), pad_token_id);
-    } else {
-      std::fill(output_span.begin(), output_span.begin() + pad_count, pad_token_id);
-      std::copy(input_span.begin(), input_span.end(), output_span.begin() + pad_count);
-    }
-  }
-
-  return result;
-}
-
 void CheckResult(extError_t error) {
   if (error != kOrtxOK)
     throw std::runtime_error(OrtxGetLastErrorMessage());
-}
-
-TokenizerStream::TokenizerStream(const Tokenizer& tokenizer)
-    : tokenizer_{tokenizer.shared_from_this()} {
-  CheckResult(OrtxCreate(kOrtxKindDetokenizerCache, cache_.Address()));
-}
-
-const std::string& TokenizerStream::Decode(int32_t token) {
-  const char* string;
-  CheckResult(OrtxDetokenizeCached(tokenizer_->tokenizer_, cache_, token, &string));
-  chunk_ = string;
-  return chunk_;
-}
-
-Tokenizer::Tokenizer(Config& config) : bos_token_id_{config.model.bos_token_id},
-                                       eos_token_id_{config.model.eos_token_id},
-                                       pad_token_id_{config.model.pad_token_id} {
-  // Default tokenizer options
-  const char* keys[] = {"add_special_tokens", "skip_special_tokens"};
-  const char* values[] = {"false", "true"};
-
-  // Resolve tokenizer_dir (may be empty, relative, absolute, or a "sha256:" shared-asset reference).
-  const fs::path tokenizer_dir = config.ResolvePath(config.model.tokenizer_dir);
-  CheckResult(OrtxCreateTokenizerWithOptions(tokenizer_.Address(), tokenizer_dir.string().c_str(), keys, values, 2));
-}
-
-std::unique_ptr<TokenizerStream> Tokenizer::CreateStream() const {
-  return std::make_unique<TokenizerStream>(*this);
-}
-
-void Tokenizer::UpdateOptions(const char* const* keys, const char* const* values, size_t num_options) {
-  // Tap into ORT Extensions API
-  CheckResult(OrtxUpdateTokenizerOptions(tokenizer_, const_cast<const char**>(keys), const_cast<const char**>(values), num_options));
-}
-
-std::vector<int32_t> Tokenizer::Encode(const char* text) const {
-  OrtxPtr<OrtxTokenId2DArray> ids;
-  CheckResult(OrtxTokenize(tokenizer_, &text, 1, ids.Address()));
-
-  const extTokenId_t* tokens;
-  size_t count;
-  CheckResult(OrtxTokenId2DArrayGetItem(ids, 0, &tokens, &count));
-  return {tokens, tokens + count};
-}
-
-std::string Tokenizer::Decode(std::span<const int32_t> tokens) const {
-  OrtxPtr<OrtxStringArray> ortx_string_array;
-  CheckResult(OrtxDetokenize1D(tokenizer_, reinterpret_cast<const uint32_t*>(tokens.data()), tokens.size(), ortx_string_array.Address()));
-
-  const char* string;
-  CheckResult(OrtxStringArrayGetItem(ortx_string_array, 0, &string));
-  return string;
-}
-
-std::string Tokenizer::ApplyChatTemplate(const char* template_str, const char* messages, const char* tools, bool add_generation_prompt) const {
-  ort_extensions::OrtxObjectPtr<OrtxTensorResult> templated_text;
-  CheckResult(OrtxApplyChatTemplate(tokenizer_, template_str, messages, tools, templated_text.ToBeAssigned(), add_generation_prompt, false /*tokenize*/));
-
-  ort_extensions::OrtxObjectPtr<OrtxTensor> tensor;
-  CheckResult(OrtxTensorResultGetAt(templated_text.get(), 0, tensor.ToBeAssigned()));
-
-  const char* text_ptr{};
-  CheckResult(OrtxGetTensorData(tensor.get(), reinterpret_cast<const void**>(&text_ptr), nullptr, nullptr));
-
-  return text_ptr;
-}
-
-std::vector<int32_t> Tokenizer::EncodeBatch(std::span<const std::string> strings) const {
-  std::vector<std::vector<int32_t>> sequences;
-  std::vector<std::span<const int32_t>> span_sequences;
-  for (size_t i = 0; i < strings.size(); i++) {
-    sequences.emplace_back(Encode(strings[i].c_str()));
-    span_sequences.emplace_back(sequences.back());
-  }
-
-  return PadInputs(span_sequences, pad_token_id_);
-}
-
-std::shared_ptr<Tensor> Tokenizer::EncodeBatch(std::span<const char*> strings) const {
-  if (strings.empty()) {
-    throw std::runtime_error("EncodeBatch: input strings must not be empty");
-  }
-  for (size_t i = 0; i < strings.size(); i++) {
-    if (strings[i] == nullptr) {
-      throw std::runtime_error("EncodeBatch: input string at index " + std::to_string(i) + " must not be null");
-    }
-  }
-
-  std::vector<std::vector<int32_t>> sequences;
-  std::vector<std::span<const int32_t>> span_sequences;
-  for (size_t i = 0; i < strings.size(); i++) {
-    sequences.emplace_back(Encode(strings[i]));
-    span_sequences.emplace_back(sequences.back());
-  }
-
-  auto encoded = PadInputs(span_sequences, pad_token_id_);  // TODO: Pad directly into tensor vs copying?
-
-  auto shape = std::array<int64_t, 2>{static_cast<int64_t>(strings.size()), static_cast<int64_t>(encoded.size() / strings.size())};
-  auto ort_tensor_ = OrtValue::CreateTensor<int32_t>(Ort::Allocator::GetWithDefaultOptions(), shape);
-  auto tensor = std::make_shared<Tensor>(std::move(ort_tensor_));
-  std::copy(encoded.begin(), encoded.end(), tensor->GetMutableData<int32_t>());
-
-  return tensor;
-}
-
-std::vector<std::string> Tokenizer::DecodeBatch(std::span<const int32_t> sequences, size_t count) const {
-  if (sequences.size() % count != 0)
-    throw std::runtime_error("DecodeBatch: sequences must be evenly divisible by the count");
-  size_t sequence_length = sequences.size() / count;
-  std::vector<std::string> strings;
-  for (size_t i = 0; i < count; i++)
-    strings.emplace_back(Decode(sequences.subspan(sequence_length * i, sequence_length)));
-  return strings;
-}
-
-int32_t Tokenizer::TokenToTokenId(const char* token) const {
-  extTokenId_t token_id;
-  CheckResult(OrtxConvertTokenToId(tokenizer_, token, &token_id));
-  return token_id;
 }
 
 // Since Python/Others can and will hold onto a generator object past the model object's lifetime we need to ensure
@@ -434,14 +323,10 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   // re-use it for all models.
   // This ensures memory allocated on-device for model inputs/outputs is valid for the lifetime of GenAI.
 
-  // Names for the device types used by 'SetProviderSessionOptions'
-  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "QNN", "OpenVINO (Not used, see above)", "NvTensorRtRtx", "RyzenAI"};
-  static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
-
   // Create an OrtSessionOptions and set the options to use the DeviceType we're using here
   auto session_options = OrtSessionOptions::Create();
   std::vector<Config::ProviderOptions> provider_options_list;
-  const char* provider_name = device_type_names[static_cast<int>(type)];
+  std::string provider_name = device.GetExecutionProviderName();
   Config::ProviderOptions init_session_provider_options{provider_name, {}};
 
   // Look up the user-supplied provider options entry for this provider (if any),
@@ -451,54 +336,75 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   const auto& user_provider_options_list = config.model.decoder.session_options.provider_options;
   const auto user_provider_options_it = std::find_if(
       user_provider_options_list.begin(), user_provider_options_list.end(),
-      [provider_name](const Config::ProviderOptions& po) { return po.name == provider_name; });
+      [&provider_name](const Config::ProviderOptions& po) { return po.name == provider_name; });
   const Config::ProviderOptions* user_provider_options =
       user_provider_options_it != user_provider_options_list.end() ? &*user_provider_options_it : nullptr;
   if (user_provider_options)
     init_session_provider_options.device_filtering_options = user_provider_options->device_filtering_options;
+
   device.ShapeInitSessionProviderOptions(init_session_provider_options, user_provider_options);
 
   provider_options_list.emplace_back(std::move(init_session_provider_options));
-  const std::vector<std::string> providers{device_type_names[static_cast<int>(type)]};
+  const std::vector<std::string> providers{provider_name};
   SetProviderSessionOptions(*session_options, providers, provider_options_list, true, config);
   session_options->SetLogSeverityLevel(ORT_LOGGING_LEVEL_ERROR);  // Errors only here, as warnings are not useful to the user
 
   const auto trivial_model = GetTrivialModel();
   allocator.session_ = OrtSession::Create(GetOrtEnv(), trivial_model.data(), trivial_model.size(), session_options.get());
 
-  // Names for the device memory types used by 'OrtMemoryInfo::Create'
-  static const char* device_memory_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buf", "QnnHtpShared", "QnnHtpShared", "OpenVINO (Not used, see above)", "Cuda", "Cpu"};
-  static_assert(std::size(device_memory_type_names) == static_cast<size_t>(DeviceType::MAX));
-
-  // Get the allocator from the OrtSession for the DeviceType (it's called 'AllocatorCreate' but it's really 'AllocatorGet')
-  auto name = device_memory_type_names[static_cast<int>(type)];
+  // Bind the allocator to the selected device rather than assuming device 0.
+  allocator.device_id_ = device.GetDeviceId(user_provider_options);
   try {
-    auto memory_info = OrtMemoryInfo::Create(name, OrtAllocatorType::OrtDeviceAllocator,
-                                             0, OrtMemType::OrtMemTypeDefault);
+    auto memory_info = device.GetMemoryInfo();
     allocator.allocator_ = Ort::Allocator::Create(*allocator.session_, *memory_info);
   } catch (const Ort::Exception& e) {
-    // WebGPU memory type name changed from "WebGPU_Buffer" to "WebGPU_Buf" in ORT 1.24.3.
-    // Try the old name before giving up.
-    if (type == DeviceType::WEBGPU) {
-      auto fallback_info = OrtMemoryInfo::Create("WebGPU_Buffer", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-      try {
-        allocator.allocator_ = Ort::Allocator::Create(*allocator.session_, *fallback_info);
-      } catch (const Ort::Exception& fallback_e) {
-        throw std::runtime_error(
-            "Failed to create allocator for WebGPU. "
-            "Primary name '" +
-            std::string(name) + "' error: " + std::string(e.what()) +
-            "; fallback 'WebGPU_Buffer' error: " + std::string(fallback_e.what()));
-      }
-    } else {
-      throw std::runtime_error("Failed to create allocator for " + std::string(name) + ": " + std::string(e.what()));
-    }
+    throw std::runtime_error("Failed to create allocator for " + to_string(type) + ": " + std::string(e.what()));
   }
   if (!allocator.allocator_) {
     allocator = {};  // Reset everything just to be safe
-    throw std::runtime_error("Unexpected failure to create device memory allocator for " + std::string(name));
+    throw std::runtime_error("Unexpected failure to create device memory allocator for " + to_string(type));
   }
   device.InitOrt(*Ort::api, *allocator.allocator_);
+
+  // Let the device set up any additional allocators it offers (e.g. host-accessible memory for
+  // decode inputs). Devices that offer none leave the defaults in place.
+  device.InitDeviceAllocators(user_provider_options, allocator.device_id_);
+  allocator.host_accessible_allocator_ = device.GetHostAccessibleAllocator();
+}
+
+// Update provider options using values from a parent if they are not already specified in the child.
+// Used for pipeline models that opt in to inheritance to ensure that top-level provider options are
+// communicated into the options for those component models.
+static void InheritParentProviderOptions(const std::vector<Config::ProviderOptions>& parent_provider_options,
+                                         std::vector<Config::ProviderOptions>& child_provider_options) {
+  std::unordered_set<std::string> child_ep_option_keys;
+  for (const auto& parent_provider_option : parent_provider_options) {
+    auto child_provider_option_it = std::find_if(
+        child_provider_options.begin(),
+        child_provider_options.end(),
+        [&parent_provider_option](const Config::ProviderOptions& po) { return po.name == parent_provider_option.name; });
+    if (child_provider_option_it == child_provider_options.end()) {
+      // Child has no provider option for this provider, so just copy from parent.
+      child_provider_options.emplace_back(parent_provider_option);
+    } else {
+      // Use device filtering options from parent if not already set
+      if (!child_provider_option_it->device_filtering_options.has_value()) {
+        child_provider_option_it->device_filtering_options = parent_provider_option.device_filtering_options;
+      }
+
+      // Merge parent EP provider options
+      child_ep_option_keys.clear();
+      for (const auto& opt : child_provider_option_it->options) {
+        child_ep_option_keys.insert(opt.first);
+      }
+
+      for (const auto& parent_opt : parent_provider_option.options) {
+        if (child_ep_option_keys.find(parent_opt.first) == child_ep_option_keys.end()) {
+          child_provider_option_it->options.emplace_back(parent_opt);
+        }
+      }
+    }
+  }
 }
 
 void SessionInfo::Add(OrtSession& session) {
@@ -582,6 +488,11 @@ std::vector<const char*> SessionInfo::GetOutputSymbolicShape(const std::string& 
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   CreateSessionOptions();
   EnsureDeviceOrtInit(*p_device_, *config_);
+  AddSharedInitializers();
+
+  // Inputs-only interface backed by a host-accessible allocation, so the CPU updates the small
+  // decode inputs in place with no per-step roundtrip. Null if the device offers no such allocator.
+  DeviceInterface* p_host_accessible_inputs = p_device_->GetHostAccessibleDevice();
 
   // Only CUDA, TRT-RTX, RyzenAI and DML does every input on the device
   // For WebGPU, use device memory only if graph capture is enabled, otherwise use CPU
@@ -589,8 +500,13 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
       p_device_->GetType() == DeviceType::RyzenAI ||
       (p_device_->GetType() == DeviceType::WEBGPU && IsGraphCaptureEnabled(config_->model.decoder.session_options)))
     p_device_inputs_ = p_device_;
+  else if (p_host_accessible_inputs)
+    p_device_inputs_ = p_host_accessible_inputs;
   else
     p_device_inputs_ = GetDeviceInterface(DeviceType::CPU);
+
+  // Logits are read back on the CPU every step, which is slow from a host-accessible allocation.
+  p_device_logits_ = (p_device_->GetType() == DeviceType::AMDGPU) ? GetDeviceInterface(DeviceType::CPU) : p_device_inputs_;
 
   // Search and sampling are performed on the CPU for all device types,
   // except for CUDA and NvTensorRtRtx, where this is performed on the device.
@@ -602,6 +518,62 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
 
   // The kvcache is always allocated in device memory
   p_device_kvcache_ = p_device_;
+}
+
+void Model::AddSharedInitializers() {
+  for (const auto& initializer : config_->model.decoder.shared_initializers) {
+    if (initializer.name.empty() || initializer.data_file.empty() || initializer.length.empty() ||
+        initializer.shape.empty() || initializer.data_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED) {
+      throw std::runtime_error("Invalid shared initializer metadata for '" + initializer.name + "'.");
+    }
+
+    const fs::path data_path = config_->ResolvePath(initializer.data_file);
+    const std::string data_path_string = data_path.string();
+    const uint64_t offset = initializer.offset.empty() ? 0 : std::stoull(initializer.offset);
+    const size_t length = static_cast<size_t>(std::stoull(initializer.length));
+    const auto data_type = static_cast<ONNXTensorElementDataType>(initializer.data_type);
+    auto memory_info = p_device_->GetMemoryInfo();
+
+    std::ostringstream key;
+    key << SharedInitializerFileIdentity(data_path) << ':' << offset << ':' << length << ':'
+        << initializer.data_type << ':'
+        << memory_info->GetDeviceType() << ':' << memory_info->GetDeviceId();
+    for (int64_t dimension : initializer.shape) {
+      key << ':' << dimension;
+    }
+
+    std::shared_ptr<SharedInitializerEntry> entry;
+    {
+      std::lock_guard lock{g_shared_initializers_mutex};
+      if (auto it = g_shared_initializers.find(key.str()); it != g_shared_initializers.end()) {
+        entry = it->second.lock();
+      }
+
+      if (!entry) {
+        std::ifstream input{data_path_string, std::ios::binary};
+        if (!input) {
+          throw std::runtime_error("Failed to open shared initializer data file: " + data_path_string);
+        }
+        input.seekg(static_cast<std::streamoff>(offset));
+        std::vector<uint8_t> bytes(length);
+        input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(length));
+        if (input.gcount() != static_cast<std::streamsize>(length)) {
+          throw std::runtime_error("Failed to read shared initializer '" + initializer.name + "' from " +
+                                   data_path_string);
+        }
+
+        entry = std::make_shared<SharedInitializerEntry>();
+        entry->device_data = p_device_->Allocate<uint8_t>(length);
+        entry->device_data.CopyFromCpu(bytes);
+        entry->shared_view = OrtValue::CreateTensor(
+            *memory_info, entry->device_data.Span().data(), length, initializer.shape, data_type);
+        g_shared_initializers[key.str()] = entry;
+      }
+    }
+
+    session_options_->AddInitializer(initializer.name.c_str(), *entry->shared_view);
+    shared_initializer_entries_.push_back(std::move(entry));
+  }
 }
 
 Model::~Model() {
@@ -620,15 +592,36 @@ Model::~Model() {
 #endif
 }
 
+static void AppendSessionProviders(Model& model,
+                                   const Config::SessionOptions& config_session_options,
+                                   OrtSessionOptions& session_options,
+                                   bool is_primary_session_options,
+                                   bool disable_graph_capture = false) {
+  auto session_device = SetProviderSessionOptions(session_options, config_session_options.providers,
+                                                  config_session_options.provider_options, is_primary_session_options,
+                                                  *model.config_, disable_graph_capture);
+
+  if (!model.p_device_) {
+    model.p_device_ = session_device;
+  } else if (session_device != nullptr && session_device->GetType() != model.p_device_->GetType()) {
+    throw std::runtime_error("Running a model with multiple providers is not supported. Encountered " +
+                             to_string(session_device->GetType()) + " and " + to_string(model.p_device_->GetType()));
+  }
+}
+
 void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
                                            OrtSessionOptions& session_options,
                                            bool is_primary_session_options,
-                                           bool disable_graph_capture) {
+                                           bool disable_graph_capture,
+                                           bool cloned_from_parent,
+                                           bool append_providers) {
   // Default to a limit of 16 threads to optimize performance
   constexpr int min_thread_nums = 1;
   constexpr int max_thread_nums = 16;
   int num_of_cores = std::max(min_thread_nums, static_cast<int>(std::thread::hardware_concurrency() / 2));
-  session_options.SetIntraOpNumThreads(std::min(num_of_cores, max_thread_nums));
+  if (!cloned_from_parent) {
+    session_options.SetIntraOpNumThreads(std::min(num_of_cores, max_thread_nums));
+  }
 
   if (config_session_options.intra_op_num_threads.has_value()) {
     session_options.SetIntraOpNumThreads(config_session_options.intra_op_num_threads.value());
@@ -689,57 +682,97 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 
     std::string custom_library_file_prefix = config_session_options.custom_ops_library.value();
 
-    // If relative path, try to resolve using multiple search locations
-    fs::path custom_library_path{custom_library_file_prefix};
-    if (custom_library_path.is_relative()) {
-      bool resolved = false;
+    std::filesystem::path custom_library_path{custom_library_file_prefix};
 
-      // First try: resolve relative to GenAI model folder (most intuitive for users)
-      fs::path model_relative_path = config_->config_path / custom_library_path;
-      if (fs::exists(model_relative_path)) {
-        custom_library_file_prefix = model_relative_path.string();
+    // Reject path traversal components regardless of absolute/relative
+    if (custom_library_file_prefix.find("..") != std::string::npos) {
+      throw std::runtime_error("custom_ops_library must not contain path traversal (..): " + custom_library_file_prefix);
+    }
+
+    // Build the set of allowed directories. The resolved library path must fall
+    // within one of these to prevent loading arbitrary libraries from disk.
+    std::vector<std::filesystem::path> allowed_dirs;
+
+    // 1. GenAI model folder
+    std::error_code ec;
+    auto model_dir = std::filesystem::canonical(std::filesystem::path(config_->config_path.string()), ec);
+    if (!ec) allowed_dirs.push_back(model_dir);
+
+    // 2. EP library directories
+    {
+      size_t num_devices = 0;
+      const OrtEpDevice* const* device_ptrs = nullptr;
+      Ort::GetEpDevices(&GetOrtEnv(), &device_ptrs, &num_devices);
+
+      for (size_t i = 0; i < num_devices; ++i) {
+        const OrtKeyValuePairs* keyvals = Ort::GetEpDeviceMetadata(device_ptrs[i]);
+        size_t num_entries = 0;
+        const char* const* keys = nullptr;
+        const char* const* values = nullptr;
+        Ort::GetKeyValuePairs(keyvals, &keys, &values, &num_entries);
+
+        for (size_t kvi = 0; kvi < num_entries; kvi++) {
+          if (std::string(keys[kvi]) == library_path_metadata_key_name) {
+            auto ep_dir = std::filesystem::canonical(std::filesystem::path(values[kvi]).parent_path(), ec);
+            if (!ec) allowed_dirs.push_back(ep_dir);
+          }
+        }
+      }
+    }
+
+    // 3. Current working directory
+    {
+      auto cwd = std::filesystem::current_path(ec);
+      if (!ec) {
+        auto cwd_canonical = std::filesystem::canonical(cwd, ec);
+        if (!ec) allowed_dirs.push_back(cwd_canonical);
+      }
+    }
+
+    // Resolve the library path. For relative paths, search allowed directories in order.
+    // For absolute paths, use as-is and validate against the allowlist.
+    bool resolved = false;
+    if (custom_library_path.is_relative()) {
+      for (const auto& dir : allowed_dirs) {
+        std::filesystem::path candidate = dir / custom_library_path;
+        if (std::filesystem::exists(candidate, ec)) {
+          custom_library_file_prefix = std::filesystem::canonical(candidate).string();
+          resolved = true;
+          break;
+        }
+      }
+    } else {
+      // Absolute path — canonicalize and validate below
+      auto canonical_path = std::filesystem::canonical(custom_library_path, ec);
+      if (!ec && std::filesystem::exists(canonical_path, ec)) {
+        custom_library_file_prefix = canonical_path.string();
         resolved = true;
       }
+    }
 
-      // Second try: resolve relative to EP library directory (for system-wide installations)
-      if (!resolved) {
-        size_t num_devices = 0;
-        const OrtEpDevice* const* device_ptrs = nullptr;
-        Ort::GetEpDevices(&GetOrtEnv(), &device_ptrs, &num_devices);
-
-        for (size_t i = 0; i < num_devices && !resolved; ++i) {
-          const OrtKeyValuePairs* keyvals = Ort::GetEpDeviceMetadata(device_ptrs[i]);
-          size_t num_entries = 0;
-          const char* const* keys = nullptr;
-          const char* const* values = nullptr;
-          Ort::GetKeyValuePairs(keyvals, &keys, &values, &num_entries);
-
-          for (size_t kvi = 0; kvi < num_entries; kvi++) {
-            const std::string key = keys[kvi];
-            const std::string val = values[kvi];
-            if (key == library_path_metadata_key_name) {
-              fs::path ep_library_dir = fs::path(val).parent_path();
-              fs::path resolved_path = ep_library_dir / custom_library_path;
-              if (fs::exists(resolved_path)) {
-                custom_library_file_prefix = resolved_path.string();
-                resolved = true;
-                break;
-              }
-            }
-          }
+    // Validate that the resolved path is under one of the allowed directories
+    if (resolved) {
+      std::filesystem::path resolved_canonical =
+          std::filesystem::canonical(std::filesystem::path(custom_library_file_prefix), ec);
+      if (ec) {
+        throw std::runtime_error("Failed to canonicalize custom_ops_library path: " + custom_library_file_prefix);
+      }
+      bool in_allowed_dir = false;
+      auto resolved_str = resolved_canonical.string();
+      for (const auto& dir : allowed_dirs) {
+        auto dir_str = dir.string();
+        // Check that resolved path starts with the allowed directory prefix
+        if (resolved_str.size() >= dir_str.size() &&
+            resolved_str.compare(0, dir_str.size(), dir_str) == 0 &&
+            (resolved_str.size() == dir_str.size() ||
+             resolved_str[dir_str.size()] == std::filesystem::path::preferred_separator)) {
+          in_allowed_dir = true;
+          break;
         }
       }
-
-      // Third try: resolve relative to current working directory (for development/portable apps)
-      if (!resolved) {
-        char cwd_buffer[PATH_MAX];
-        if (GETCWD(cwd_buffer, sizeof(cwd_buffer))) {
-          fs::path cwd_relative_path = fs::path(cwd_buffer) / custom_library_path;
-          if (fs::exists(cwd_relative_path)) {
-            custom_library_file_prefix = cwd_relative_path.string();
-            resolved = true;
-          }
-        }
+      if (!in_allowed_dir) {
+        throw std::runtime_error(
+            "custom_ops_library path is not within an allowed directory: " + custom_library_file_prefix);
       }
     }
 
@@ -752,29 +785,48 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     session_options.SetGraphOptimizationLevel(config_session_options.graph_optimization_level.value());
   }
 
-  auto session_device = SetProviderSessionOptions(session_options, config_session_options.providers,
-                                                  config_session_options.provider_options, is_primary_session_options,
-                                                  *config_, disable_graph_capture);
-
-  if (!p_device_) {
-    p_device_ = session_device;
-  } else if (session_device != nullptr && session_device->GetType() != p_device_->GetType()) {
-    throw std::runtime_error("Running a model with multiple providers is not supported. Encountered " +
-                             to_string(session_device->GetType()) + " and " + to_string(p_device_->GetType()));
+  if (append_providers) {
+    AppendSessionProviders(*this, config_session_options, session_options, is_primary_session_options, disable_graph_capture);
   }
 }
 
 void Model::CreateSessionOptions() {
   session_options_ = OrtSessionOptions::Create();
 
-  CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *session_options_, true);
+  CreateSessionOptionsFromConfig(config_->model.decoder.session_options,
+                                 *session_options_,
+                                 true,    // is_primary_session_options
+                                 false,   // disable_graph_capture
+                                 false,   // cloned_from_parent
+                                 false);  // append_providers. Note: providers are only appended to the main options after
+                                          //                         (potentially) cloning it for the pipeline models.
 
   for (auto& pipeline_model : config_->model.decoder.pipeline) {
     if (pipeline_model.session_options.has_value()) {
-      auto emplaced = pipeline_session_options_.emplace(pipeline_model.model_id, OrtSessionOptions::Create());
-      CreateSessionOptionsFromConfig(*pipeline_model.session_options, *emplaced.first->second, false);
+      Config::SessionOptions session_options = *pipeline_model.session_options;
+      if (pipeline_model.inherit_session_options) {
+        // Update config ProviderOptions for pipeline model with values from top-level options
+        InheritParentProviderOptions(config_->model.decoder.session_options.provider_options,
+                                     session_options.provider_options);
+      }
+
+      // When inheriting, clone the main OrtSessionOptions to use as the base, then overlay the options explicitly set
+      // for this pipeline model on top of it. Otherwise start from a fresh set of options.
+      auto emplaced = pipeline_model.inherit_session_options
+                          ? pipeline_session_options_.emplace(pipeline_model.model_id, session_options_->Clone())
+                          : pipeline_session_options_.emplace(pipeline_model.model_id, OrtSessionOptions::Create());
+      CreateSessionOptionsFromConfig(session_options,
+                                     *emplaced.first->second,
+                                     false,  // is_primary_session_options
+                                     false,  // disable_graph_capture
+                                     pipeline_model.inherit_session_options,
+                                     true);  // append_providers
     }
   }
+
+  // Append providers to the main session options only after cloning it for pipeline components, so that inheriting
+  // components do not get the top level providers appended twice.
+  AppendSessionProviders(*this, config_->model.decoder.session_options, *session_options_, true);
 
   // Fallback to CPU if no provider specific interface was set
   if (!p_device_)
@@ -783,7 +835,7 @@ void Model::CreateSessionOptions() {
 
 OrtSessionOptions* Model::GetSessionOptions(const std::string& model_id) const {
   auto session_options = pipeline_session_options_.find(model_id);
-  // Use the pipeline model session options id config defined it.
+  // Use the pipeline model session options if config defined it.
   if (session_options != pipeline_session_options_.end())
     return session_options->second.get();
 
@@ -792,6 +844,7 @@ OrtSessionOptions* Model::GetSessionOptions(const std::string& model_id) const {
 }
 
 std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::string& model_filename, OrtSessionOptions* session_options) {
+  std::unique_ptr<OrtSession> session;
   if (auto model_data_it = config_->model_data_spans_.find(model_filename);
       model_data_it != config_->model_data_spans_.end()) {
     // If model data was provided, load the model from memory
@@ -807,19 +860,20 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
       session_options->AddConfigEntry(kOrtSessionOptionsModelExternalInitializersFileFolderPath,
                                       external_initializers_path.string().c_str());
     }
-    return OrtSession::Create(ort_env, model_data_it->second.data(), model_data_it->second.size(), session_options);
+    session = OrtSession::Create(ort_env, model_data_it->second.data(), model_data_it->second.size(), session_options);
+  } else {
+    session = OrtSession::Create(ort_env, (config_->config_path / fs::path(model_filename)).c_str(), session_options);
   }
 
-  // Otherwise, load the model from the file system
-  return OrtSession::Create(ort_env, (config_->config_path / fs::path(model_filename)).c_str(), session_options);
-}
+  if (config_->model.decoder.state_groups &&
+      config_->model.decoder.pipeline.empty() &&
+      model_filename == config_->model.decoder.filename) {
+    SessionInfo decoder_session_info;
+    decoder_session_info.Add(*session);
+    ModelStateManifest{config_->model.decoder}.ValidateSession(decoder_session_info);
+  }
 
-std::shared_ptr<Tokenizer> Model::CreateTokenizer() const {
-  return std::make_shared<Tokenizer>(*config_);
-}
-
-std::shared_ptr<MultiModalProcessor> Model::CreateMultiModalProcessor() const {
-  return std::make_shared<MultiModalProcessor>(*config_, session_info_);
+  return session;
 }
 
 bool Model::IsPruned() const {
@@ -878,6 +932,8 @@ std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path, c
 }
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
+  if (config->model.draft)
+    return std::make_shared<SpeculativeDecodingModel>(std::move(config), ort_env);
   // Check if it's a pipeline model by checking if decoder.pipeline is configured
   if ((config->model.type == "fara" || config->model.type == "qwen2_5_vl" || config->model.type == "qwen3_vl") && !config->model.decoder.pipeline.empty())
     return std::make_shared<Qwen2_5_VL_PipelineModel>(std::move(config), ort_env);
@@ -936,14 +992,16 @@ void Cast(OrtValue& input, std::unique_ptr<OrtValue>& output, DeviceInterface& d
   auto input_info = input.GetTensorTypeAndShapeInfo();
   auto shape = input_info->GetShape();
 
-  if (output && shape != output->GetTensorTypeAndShapeInfo()->GetShape())
-    output = nullptr;
+  if (output) {
+    auto output_info = output->GetTensorTypeAndShapeInfo();
+    if (shape != output_info->GetShape() || output_type != output_info->GetElementType())
+      output = nullptr;
+  }
   if (!output)
     output = OrtValue::CreateTensor(device.GetAllocator(), shape, output_type);
 
   auto input_type = input_info->GetElementType();
   auto element_count = input_info->GetElementCount();
-
   if (element_count != output->GetTensorTypeAndShapeInfo()->GetElementCount())
     throw std::runtime_error("Cast: input and output element count mismatch");
 
@@ -992,40 +1050,6 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
     }
   }
   return expanded;
-}
-
-MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& session_info)
-    : tokenizer_{std::make_shared<Tokenizer>(config)},
-      processor_factory_{
-          {"phi3v", Processor::Create<PhiImageProcessor>},
-          {"whisper", Processor::Create<WhisperProcessor>},
-          {"parakeet_tdt", Processor::Create<ParakeetTdtProcessor>},
-          {"phi4mm", Processor::Create<PhiMultiModalProcessor>},
-          {"gemma3", Processor::Create<GemmaImageProcessor>},
-          {"gemma4", Processor::Create<Gemma4MultiModalProcessor>},
-          {"mistral3", Processor::Create<Mistral3ImageProcessor>},
-          {"fara", Processor::Create<QwenImageProcessor>},
-          {"qwen2_5_vl", Processor::Create<QwenImageProcessor>},
-          {"qwen3_vl", Processor::Create<QwenImageProcessor>},
-          {"qwen3_5", Processor::Create<QwenImageProcessor>},
-          {"qwen3_5_moe", Processor::Create<QwenImageProcessor>},
-          {"videochat_flash_qwen", Processor::Create<VideoChatFlashProcessor>}} {
-  auto processor = processor_factory_.find(config.model.type);
-  if (processor != processor_factory_.end()) {
-    processor_ = processor->second(config, session_info);
-  } else {
-    throw std::runtime_error("MultiModalProcessor cannot be created. " + config.model.type + " is not a registered multi-modal model type.");
-  }
-}
-
-std::unique_ptr<NamedTensors> MultiModalProcessor::Process(const std::string& prompt, const Images* images, const Audios* audios) const {
-  Payload payload{prompt, {}, images, audios};
-  return processor_->Process(*tokenizer_, payload);
-}
-
-std::unique_ptr<NamedTensors> MultiModalProcessor::Process(std::span<const char*> prompts, const Images* images, const Audios* audios) const {
-  Payload payload{"", prompts, images, audios};
-  return processor_->Process(*tokenizer_, payload);
 }
 
 }  // namespace Generators

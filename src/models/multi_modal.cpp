@@ -1,9 +1,12 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include "../generators.h"
+#include "generator/generators.h"
 #include "multi_modal.h"
+#include "models/io/default_position_inputs.h"
+#include "models/io/qwen_vl_position_inputs.h"
 #include <cstring>
+#include <algorithm>
 #include <numeric>
 
 namespace Generators {
@@ -80,9 +83,10 @@ int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs) {
     if (extra_inputs[i].name == Config::Defaults::ImageGridThwName) {
       assert(extra_inputs[i].tensor->ort_tensor_);
       const auto shape = extra_inputs[i].tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape();
-      if (!shape.empty()) {
-        return shape[0];  // num_images
-      }
+      const int64_t num_images = shape.empty() ? 0 : shape[0];
+      const size_t elem_count = extra_inputs[i].tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount();
+      ValidateImageGridThwLayoutAndCount(shape, elem_count, num_images, "image_grid_thw");
+      return num_images;
     }
   }
 
@@ -195,6 +199,10 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
 
   OrtValue* grid_full = inputs_[grid_idx];
   const int64_t* grid_data = grid_full->GetTensorData<int64_t>();
+
+  const auto grid_shape = grid_full->GetTensorTypeAndShapeInfo()->GetShape();
+  const size_t grid_elem_count = grid_full->GetTensorTypeAndShapeInfo()->GetElementCount();
+  ValidateImageGridThwLayoutAndCount(grid_shape, grid_elem_count, num_images_, "image_grid_thw");
 
   // Check if the ONNX model accepts dynamic num_images.
   // A non-positive dim-0 (0 or -1) in the model's input shape = dynamic/symbolic.
@@ -655,7 +663,8 @@ DeviceSpan<float> EmbeddingState::Run(int current_length, DeviceSpan<int32_t>& n
 DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params)
     : State{params, model},
       model_{model},
-      position_inputs_{CreatePositionInputs(*this, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask)},
+      position_inputs_{model_.p_device_inputs_->CreatePositionInputs(*this, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask)},
+      kv_cache_{model_.p_device_kvcache_->CreateKeyValueCache(*this)},
       recurrent_state_{CreateRecurrentState(*this)} {
   inputs_embeds_.Add();
 
@@ -683,7 +692,8 @@ DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int3
 
   position_inputs_->Add();
   logits_.Add();
-  kv_cache_.Add();
+  if (kv_cache_)
+    kv_cache_->Add();
   if (recurrent_state_)
     recurrent_state_->Add();
 }
@@ -693,8 +703,75 @@ DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& nex
     State::SetRunOptions(model_.config_->model.decoder.run_options.value());
   }
 
-  bool graph_capture_this_run = params_->use_graph_capture && inputs_embeds_.GetShape()[1] == 1;
-  State::Run(*model_.decoder_session_, graph_capture_this_run);
+  const int seq_len = static_cast<int>(inputs_embeds_.GetShape()[1]);
+  const bool graph_capture_this_run = params_->use_graph_capture && seq_len == 1;
+  const int graph_capture_variant = recurrent_state_ ? recurrent_state_->GraphCaptureVariant() : 0;
+
+  const int graph_id = seq_len * 2 + graph_capture_variant;
+  if (graph_capture_this_run && recurrent_state_ && recurrent_state_->ShouldFixUpGraphCapture(graph_id)) {
+    recurrent_state_->SaveForGraphCapture();
+    State::Run(*model_.decoder_session_, true, seq_len, graph_capture_variant);
+    recurrent_state_->RestoreAfterGraphCapture(graph_id);
+  }
+  State::Run(*model_.decoder_session_, graph_capture_this_run, seq_len, graph_capture_variant);
+  return logits_.Get();
+}
+
+bool DecoderState::SupportsPrefillChunking() const {
+  // Chunking slices the pre-computed embeddings along the sequence dimension, which is only
+  // contiguous for a single sequence. Continuous decoding of position ids/attention mask in
+  // DefaultPositionInputs is likewise restricted to a batch-beam size of one.
+  if (params_->BatchBeamSize() != 1)
+    return false;
+
+  // Qwen-VL's 3D mRoPE position ids are computed from the full prompt in a single pass, so they
+  // cannot be produced chunk by chunk. Fall back to a single prefill run for those models.
+  return dynamic_cast<const DefaultPositionInputs*>(position_inputs_.get()) != nullptr;
+}
+
+void DecoderState::PrepareEmbeddingsForPrefill(size_t new_length) {
+  // Allocate the embeddings buffers for the whole prompt. The embedding model writes into these
+  // buffers in one run; the decoder then consumes them chunk by chunk.
+  inputs_embeds_.UpdateSequenceLength(new_length);
+  if (per_layer_inputs_) per_layer_inputs_->UpdateSequenceLength(new_length);
+}
+
+DeviceSpan<float> DecoderState::RunPrefillWithChunking(int current_length, DeviceSpan<int32_t>& next_tokens,
+                                                       DeviceSpan<int32_t> next_indices, size_t chunk_size) {
+  if (model_.config_->model.decoder.run_options.has_value()) {
+    State::SetRunOptions(model_.config_->model.decoder.run_options.value());
+  }
+
+  const size_t num_tokens = next_tokens.size();
+  size_t processed_tokens = 0;
+  int length = current_length - static_cast<int>(num_tokens);
+
+  while (processed_tokens < num_tokens) {
+    const size_t current_chunk_size = std::min(chunk_size, num_tokens - processed_tokens);
+    auto chunk_tokens = next_tokens.subspan(processed_tokens, current_chunk_size);
+    length += static_cast<int>(current_chunk_size);
+
+    if (decoder_input_ids_) decoder_input_ids_->Update(chunk_tokens);
+    position_inputs_->Update(chunk_tokens, length, static_cast<int>(current_chunk_size));
+    kv_cache_->Update(next_indices, length);
+    if (recurrent_state_)
+      recurrent_state_->Update();
+    logits_.Update(chunk_tokens, current_chunk_size);
+
+    // Feed only this chunk's slice of the pre-computed embeddings to the decoder.
+    inputs_embeds_.UseChunkView(processed_tokens, current_chunk_size);
+    if (per_layer_inputs_) per_layer_inputs_->UseChunkView(processed_tokens, current_chunk_size);
+
+    // Graph capture is disabled during prefill chunking.
+    State::Run(*model_.decoder_session_, /*graph_capture_this_run=*/false);
+
+    processed_tokens += current_chunk_size;
+  }
+
+  inputs_embeds_.RestoreFullView();
+  if (per_layer_inputs_) per_layer_inputs_->RestoreFullView();
+
+  // Logits of the last chunk contain the logits for the last prompt token.
   return logits_.Get();
 }
 
@@ -703,7 +780,8 @@ void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int tot
   size_t new_length = next_tokens.size() / batch_size;
   if (decoder_input_ids_) decoder_input_ids_->Update(next_tokens);
   position_inputs_->Update(next_tokens, total_length, static_cast<int>(new_length));
-  kv_cache_.Update(beam_indices, total_length);
+  if (kv_cache_)
+    kv_cache_->Update(beam_indices, total_length);
   if (recurrent_state_)
     recurrent_state_->Update();
   logits_.Update(next_tokens, new_length);
@@ -714,7 +792,8 @@ void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int tot
 // Overload for pipeline to call
 void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int total_length, DeviceSpan<int32_t> beam_indices, size_t new_length) {
   if (decoder_input_ids_) decoder_input_ids_->Update(next_tokens);
-  kv_cache_.Update(beam_indices, total_length);
+  if (kv_cache_)
+    kv_cache_->Update(beam_indices, total_length);
   if (recurrent_state_)
     recurrent_state_->Update();
   logits_.Update(next_tokens, new_length);
@@ -790,7 +869,19 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
   //   - inputs_embeds -> |decoder_model| -> logits
 
   embedding_state_->UpdateInputsOutputs(next_tokens, is_prompt_);
-  decoder_state_->UpdateInputsOutputs(next_tokens, current_length, next_indices);
+
+  // Prefill chunking (search.chunk_size): during the prompt stage the decoder can process the
+  // prompt embeddings in several smaller runs to bound peak memory usage.
+  const auto& chunk_size_opt = params_->search.chunk_size;
+  const size_t num_tokens = next_tokens.size();
+  const bool chunk_prefill = is_prompt_ && chunk_size_opt.has_value() && chunk_size_opt.value() > 0 &&
+                             num_tokens > chunk_size_opt.value() && decoder_state_->SupportsPrefillChunking();
+
+  if (chunk_prefill) {
+    decoder_state_->PrepareEmbeddingsForPrefill(num_tokens);
+  } else {
+    decoder_state_->UpdateInputsOutputs(next_tokens, current_length, next_indices);
+  }
 
   if (is_prompt_) {
     if (num_image_tokens_ > 0 && vision_state_) {
@@ -821,7 +912,9 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
     }
     embedding_state_->Run(current_length, next_tokens, next_indices);
 
-    auto logits = decoder_state_->Run(current_length, next_tokens, next_indices);
+    auto logits = chunk_prefill
+                      ? decoder_state_->RunPrefillWithChunking(current_length, next_tokens, next_indices, chunk_size_opt.value())
+                      : decoder_state_->Run(current_length, next_tokens, next_indices);
 
     is_prompt_ = false;
     if (vision_state_) vision_state_.reset();  // The vision state is no longer needed in generation stage

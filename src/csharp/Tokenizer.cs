@@ -16,6 +16,16 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             Result.VerifySuccess(NativeMethods.OgaCreateTokenizer(model.Handle, out _tokenizerHandle));
         }
 
+        public Tokenizer(Config config)
+        {
+            Result.VerifySuccess(NativeMethods.OgaCreateTokenizerFromConfig(config.Handle, out _tokenizerHandle));
+        }
+
+        public Tokenizer(string modelPath)
+        {
+            Result.VerifySuccess(NativeMethods.OgaCreateTokenizerFromPath(StringUtils.ToUtf8(modelPath), out _tokenizerHandle));
+        }
+
         public Sequences EncodeBatch(string[] strings)
         {
             Result.VerifySuccess(NativeMethods.OgaCreateSequences(out IntPtr nativeSequences));
@@ -139,6 +149,42 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         {
             Result.VerifySuccess(NativeMethods.OgaTokenizerGetPadTokenId(_tokenizerHandle, out int padTokenId));
             return padTokenId;
+        }
+
+        /// <summary>
+        /// Returns the BOT (beginning of tool call) token ID, or -1 if not defined.
+        /// </summary>
+        public int GetBotTokenId()
+        {
+            Result.VerifySuccess(NativeMethods.OgaTokenizerGetBotTokenId(_tokenizerHandle, out int botTokenId));
+            return botTokenId;
+        }
+
+        /// <summary>
+        /// Returns the EOT (end of tool call) token ID, or -1 if not defined.
+        /// </summary>
+        public int GetEotTokenId()
+        {
+            Result.VerifySuccess(NativeMethods.OgaTokenizerGetEotTokenId(_tokenizerHandle, out int eotTokenId));
+            return eotTokenId;
+        }
+
+        /// <summary>
+        /// Returns the BOR (beginning of reasoning) token ID, or -1 if not defined.
+        /// </summary>
+        public int GetBorTokenId()
+        {
+            Result.VerifySuccess(NativeMethods.OgaTokenizerGetBorTokenId(_tokenizerHandle, out int borTokenId));
+            return borTokenId;
+        }
+
+        /// <summary>
+        /// Returns the EOR (end of reasoning) token ID, or -1 if not defined.
+        /// </summary>
+        public int GetEorTokenId()
+        {
+            Result.VerifySuccess(NativeMethods.OgaTokenizerGetEorTokenId(_tokenizerHandle, out int eorTokenId));
+            return eorTokenId;
         }
 
         public TokenizerStream CreateStream()

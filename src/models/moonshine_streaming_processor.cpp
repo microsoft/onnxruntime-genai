@@ -7,7 +7,7 @@
 #include <stdexcept>
 #include <string>
 
-#include "../generators.h"
+#include "generator/generators.h"
 #include "moonshine_streaming_processor.h"
 
 namespace Generators {

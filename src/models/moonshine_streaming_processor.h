@@ -17,7 +17,7 @@
 #pragma once
 
 #include "moonshine_streaming.h"
-#include "streaming_processor.h"
+#include "models/preprocessing/streaming_processor.h"
 
 namespace Generators {
 

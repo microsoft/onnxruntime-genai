@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
-#include "../generators.h"
+#include "generator/generators.h"
+#include "models/io/static_kv_cache.h"
 #include "whisper.h"
 
 namespace Generators {
@@ -30,11 +31,8 @@ void AudioEncoderState::SetExtraInputs(const std::vector<ExtraInput>& extra_inpu
   audio_features_ = std::make_unique<AudioFeatures>(*this, model_.config_->model.encoder.inputs.audio_features, extra_inputs);
   audio_features_->Add();
 
-  // Verify that the frame size is expected
-  const int num_frames = static_cast<int>(audio_features_->GetShape()[2]);
-  if (num_frames != GetNumFrames()) {
-    throw new std::runtime_error("Whisper uses num_frames = 3000. The provided inputs have num_frames = " + std::to_string(num_frames));
-  }
+  const auto& shape = audio_features_->GetShape();
+  ValidateWhisperAudioFeaturesShape(shape, GetNumFrames());
 
   // Add encoder hidden states
   auto hidden_states_shape = std::array<int64_t, 3>{params_->BatchBeamSize(), GetNumFrames() / 2, model_.config_->model.encoder.hidden_size};
@@ -54,7 +52,7 @@ DeviceSpan<float> AudioEncoderState::Run(int current_length, DeviceSpan<int32_t>
 WhisperDecoderState::WhisperDecoderState(const WhisperModel& model, const GeneratorParams& params, const int num_frames)
     : State{params, model},
       model_{model},
-      kv_cache_(CreateKeyValueCache(*this)),
+      kv_cache_(model_.p_device_kvcache_->CreateKeyValueCache(*this)),
       num_frames_{num_frames} {
   input_ids_.Add();
   logits_.Add();

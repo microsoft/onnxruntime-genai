@@ -30,7 +30,7 @@ namespace {
     << "    -i,--input_folder <path>\n"
     << "      Path to the ONNX model directory to benchmark, compatible with onnxruntime-genai.\n"
     << "    -e,--execution_provider <provider>\n"
-    << "      Execution provider to use. Valid values are: cpu, cuda, dml, NvTensorRtRtx. Default: " << defaults.execution_provider << "\n"
+    << "      Execution provider to use. Valid values are: cpu, cuda, dml, NvTensorRtRtx, AMDGPU. Default: " << defaults.execution_provider << "\n"
     << "    -b,--batch_size <number>\n"
     << "      Number of sequences to generate in parallel. Default: " << defaults.batch_size << "\n"
     << "    Prompt options:\n"
@@ -58,6 +58,14 @@ namespace {
     << "    --reuse_generator\n"
     << "      Reuse a single generator via RewindTo(0) instead of creating a new one per\n"
     << "      iteration. Disabled by default.\n"
+    << "    --profile_prefill\n"
+    << "      Enable ORT profiling for the prefill phase on the middle benchmark iteration.\n"
+    << "      Writes 'prefill_profile_<timestamp>.json'. Disabled by default.\n"
+    << "    --profile_generation\n"
+    << "      Enable ORT profiling for the token generation phase on the middle benchmark\n"
+    << "      iteration. Writes 'generation_profile_<timestamp>.json' (one file per generated\n"
+    << "      token). Disabled by default.\n"
+    << "      Middle iteration index (0-based) = num_iterations / 2.\n"
     << "    -v,--verbose\n"
     << "      Show more informational output.\n"
     << "    -h,--help\n"
@@ -90,8 +98,9 @@ std::string ReadFileContent(std::string_view file_path) {
 }
 
 void ValidateExecutionProvider(const std::string& provider) {
-  if (provider != "cpu" && provider != "cuda" && provider != "dml" && provider != "NvTensorRtRtx") {
-    throw std::runtime_error("Invalid execution provider: " + provider + ". Valid values are: cpu, cuda, dml, NvTensorRtRtx");
+  if (provider != "cpu" && provider != "cuda" && provider != "dml" && provider != "NvTensorRtRtx" &&
+      provider != "AMDGPU") {
+    throw std::runtime_error("Invalid execution provider: " + provider + ". Valid values are: cpu, cuda, dml, NvTensorRtRtx, AMDGPU");
   }
 }
 
@@ -153,6 +162,10 @@ Options ParseOptionsFromCommandLine(int argc, const char* const* argv) {
         opts.reuse_generator = true;
       } else if (arg == "--use_random_tokens") {
         opts.use_random_tokens = true;
+      } else if (arg == "--profile_prefill") {
+        opts.profile_prefill = true;
+      } else if (arg == "--profile_generation") {
+        opts.profile_generation = true;
       } else if (arg == "-v" || arg == "--verbose") {
         opts.verbose = true;
       } else if (arg == "-h" || arg == "--help") {

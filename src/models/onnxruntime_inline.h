@@ -121,6 +121,11 @@ inline size_t SizeOf(ONNXTensorElementDataType type) {
       return sizeof(Ort::Float16_t);
     case Ort::TypeToTensorType<Ort::BFloat16_t>:
       return sizeof(Ort::BFloat16_t);
+    // FP8 KV caches are stored as single-byte elements. There is no Ort wrapper type for them,
+    // so match the ONNX element type directly.
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E4M3FN:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT8E5M2:
+      return sizeof(uint8_t);
     default:
       throw std::runtime_error("Unsupported ONNXTensorElementDataType in GetTypeSize");
   }
@@ -433,6 +438,12 @@ inline OrtEnv& OrtEnv::CreateAndRegisterAllocator(const OrtMemoryInfo& mem_info,
   return *this;
 }
 
+inline Ort::Allocator* OrtEnv::GetSharedAllocator(const OrtMemoryInfo& mem_info) const {
+  OrtAllocator* p = nullptr;
+  Ort::ThrowOnError(Ort::api->GetSharedAllocator(const_cast<OrtEnv*>(this), &mem_info, &p));
+  return static_cast<Ort::Allocator*>(p);  // env-owned; may be nullptr if no match
+}
+
 inline void OrtEnv::CopyTensors(const std::vector<const OrtValue*>& src_tensors,
                                 const std::vector<OrtValue*>& dst_tensors,
                                 OrtSyncStream* stream) const {
@@ -721,11 +732,6 @@ inline OrtSessionOptions& OrtSessionOptions::AppendExecutionProvider_CUDA(const 
 
 inline OrtSessionOptions& OrtSessionOptions::AppendExecutionProvider_CUDA_V2(const OrtCUDAProviderOptionsV2& provider_options) {
   Ort::ThrowOnError(Ort::api->SessionOptionsAppendExecutionProvider_CUDA_V2(this, &provider_options));
-  return *this;
-}
-
-inline OrtSessionOptions& OrtSessionOptions::AppendExecutionProvider_ROCM(const OrtROCMProviderOptions& provider_options) {
-  Ort::ThrowOnError(Ort::api->SessionOptionsAppendExecutionProvider_ROCM(this, &provider_options));
   return *this;
 }
 
@@ -1531,9 +1537,9 @@ inline void OrtOp::Invoke(const OrtKernelContext* context,
                                        output_values, static_cast<int>(output_count)));
 }
 
-inline std::unique_ptr<OrtLoraAdapter> OrtLoraAdapter::Create(const ORTCHAR_T* adapter_file_path, OrtAllocator& allocator) {
+inline std::unique_ptr<OrtLoraAdapter> OrtLoraAdapter::Create(const ORTCHAR_T* adapter_file_path, OrtAllocator* allocator) {
   OrtLoraAdapter* p;
-  Ort::ThrowOnError(Ort::api->CreateLoraAdapter(adapter_file_path, &allocator, &p));
+  Ort::ThrowOnError(Ort::api->CreateLoraAdapter(adapter_file_path, allocator, &p));
   return std::unique_ptr<OrtLoraAdapter>{p};
 }
 

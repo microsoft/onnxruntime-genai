@@ -1,5 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+#pragma once
+
 namespace Generators {
 
 struct Tensor : std::enable_shared_from_this<Tensor>, LeakChecked<Tensor>, ExternalRefCounted<Tensor> {
@@ -10,7 +12,7 @@ struct Tensor : std::enable_shared_from_this<Tensor>, LeakChecked<Tensor>, Exter
 
   // A static tensor is allocated once on a buffer which is reused
   // A non-static tensor is allocated as a new OrtValue every time CreateTensor is called
-  void CreateTensor(std::span<const int64_t> shape, bool make_static = false);
+  void CreateTensor(std::span<const int64_t> shape, bool make_static = false, size_t static_capacity_bytes = 0);
 
   void MakeStatic();  // Make the tensor static, if it is not already
 

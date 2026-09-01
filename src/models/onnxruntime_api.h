@@ -201,6 +201,27 @@ inline void* LoadDynamicLibraryIfExists(const std::string& path) {
   return ort_lib_handle;
 }
 
+// RTLD_NOLOAD is a dlfcn extension available on Linux and macOS, but not on every POSIX platform.
+// Platforms without it continue through the existing dlopen fallback below.
+#if (defined(__linux__) || defined(MACOS_USE_DLOPEN)) && defined(RTLD_NOLOAD)
+inline void* GetLoadedDynamicLibraryIfExists(const std::string& path) {
+  LOG_INFO("Attempting to reuse loaded library %s", path.c_str());
+  dlerror();
+  void* ort_lib_handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
+  if (!ort_lib_handle) {
+    dlerror();
+    return nullptr;
+  }
+
+#if defined(RTLD_DI_ORIGIN)
+  char pathname[PATH_MAX];
+  dlinfo(ort_lib_handle, RTLD_DI_ORIGIN, &pathname);
+  LOG_INFO("Reusing loaded native library at %s", pathname);
+#endif
+  return ort_lib_handle;
+}
+#endif
+
 inline void InitApiWithDynamicFn(OrtApiBaseFn ort_api_base_fn) {
   if (ort_api_base_fn == nullptr) {
     throw std::runtime_error("OrtGetApiBase not found");
@@ -274,6 +295,20 @@ inline void InitApi() {
   }
 
 #if defined(__linux__)
+#if defined(RTLD_NOLOAD)
+  if (ort_lib_handle == nullptr) {
+    // Reuse any ORT image already loaded by the host before resolving a new path. In particular,
+    // a host may depend on the versioned SONAME while the unversioned sibling is also present.
+    // Loading the sibling first would create a second ORT environment that cannot see EPs the host
+    // registered with the original image.
+    ort_lib_handle = GetLoadedDynamicLibraryIfExists("libonnxruntime.so");
+  }
+
+  if (ort_lib_handle == nullptr) {
+    ort_lib_handle = GetLoadedDynamicLibraryIfExists("libonnxruntime.so.1");
+  }
+#endif
+
   if (ort_lib_handle == nullptr) {
     // For Android and NuGet Linux package, the file name is libonnxruntime.so
     // "libonnxruntime4j_jni.so" is also an option on Android if we have issues
@@ -287,6 +322,16 @@ inline void InitApi() {
 #endif
 
 #if defined(MACOS_USE_DLOPEN)
+#if defined(RTLD_NOLOAD)
+  if (ort_lib_handle == nullptr) {
+    ort_lib_handle = GetLoadedDynamicLibraryIfExists("libonnxruntime.dylib");
+  }
+
+  if (ort_lib_handle == nullptr) {
+    ort_lib_handle = GetLoadedDynamicLibraryIfExists("libonnxruntime.1.dylib");
+  }
+#endif
+
   if (ort_lib_handle == nullptr) {
     ort_lib_handle = LoadDynamicLibraryIfExists("libonnxruntime.dylib");
   }
@@ -527,6 +572,11 @@ struct OrtEnv {
 
   OrtEnv& CreateAndRegisterAllocator(const OrtMemoryInfo& mem_info, const OrtArenaCfg& arena_cfg);  ///< Wraps OrtApi::CreateAndRegisterAllocator
 
+  /// \brief Get an EP-advertised shared allocator matching mem_info (e.g. HOST_ACCESSIBLE), or
+  /// nullptr if none exists. Wraps OrtApi::GetSharedAllocator. The returned allocator is owned by
+  /// the OrtEnv — do NOT delete it.
+  Ort::Allocator* GetSharedAllocator(const OrtMemoryInfo& mem_info) const;
+
   /// \brief Copy tensors between devices. Wraps OrtApi::CopyTensors
   /// \param src_tensors Array of source OrtValue tensors
   /// \param dst_tensors Array of destination OrtValue tensors (must be pre-allocated)
@@ -667,7 +717,6 @@ struct OrtSessionOptions {
 
   OrtSessionOptions& AppendExecutionProvider_CUDA(const OrtCUDAProviderOptions& provider_options);               ///< Wraps OrtApi::SessionOptionsAppendExecutionProvider_CUDA
   OrtSessionOptions& AppendExecutionProvider_CUDA_V2(const OrtCUDAProviderOptionsV2& provider_options);          ///< Wraps OrtApi::SessionOptionsAppendExecutionProvider_CUDA_V2
-  OrtSessionOptions& AppendExecutionProvider_ROCM(const OrtROCMProviderOptions& provider_options);               ///< Wraps OrtApi::SessionOptionsAppendExecutionProvider_ROCM
   OrtSessionOptions& AppendExecutionProvider_OpenVINO(const OrtOpenVINOProviderOptions& provider_options);       ///< Wraps OrtApi::SessionOptionsAppendExecutionProvider_OpenVINO
   OrtSessionOptions& AppendExecutionProvider_TensorRT(const OrtTensorRTProviderOptions& provider_options);       ///< Wraps OrtApi::SessionOptionsAppendExecutionProvider_TensorRT
   OrtSessionOptions& AppendExecutionProvider_TensorRT_V2(const OrtTensorRTProviderOptionsV2& provider_options);  ///< Wraps OrtApi::SessionOptionsAppendExecutionProvider_TensorRT
@@ -1482,7 +1531,8 @@ struct OrtOp {
  *
  */
 struct OrtLoraAdapter {
-  static std::unique_ptr<OrtLoraAdapter> Create(const ORTCHAR_T* adapter_file_path, OrtAllocator& allocator);  ///< Wraps OrtApi::CreateOrtLoraAdapter
+  static std::unique_ptr<OrtLoraAdapter> Create(const ORTCHAR_T* adapter_file_path,
+                                                OrtAllocator* allocator = nullptr);  ///< Wraps OrtApi::CreateOrtLoraAdapter
 
   static void operator delete(void* p) { Ort::api->ReleaseLoraAdapter(reinterpret_cast<OrtLoraAdapter*>(p)); }
   Ort::Abstract make_abstract;

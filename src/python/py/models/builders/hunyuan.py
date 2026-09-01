@@ -23,34 +23,16 @@ class HunyuanDenseV1Model(Model):
     down_proj, input_layernorm, post_attention_layernorm) are standard.
     """
 
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        # Compute effective rope_theta from the Dynamic NTK-alpha scaling used by Hunyuan.
-        # From modular_hunyuan_v1_dense.py:
-        #   base = rope_theta * alpha ^ (head_dim / (head_dim - 2))
-        # With alpha=1000, head_dim=128:
-        #   effective_theta ≈ 10000 * 1000^(128/126) ≈ 10,359,000
-        # Transformers versions have used both rope_scaling and rope_parameters
-        # for RoPE metadata, so accept either shape before passing config to the base builder.
-        rope_config = getattr(config, "rope_scaling", None) or getattr(config, "rope_parameters", None)
-        if rope_config is not None:
-            base_theta = getattr(config, "rope_theta", None) or rope_config.get("rope_theta")
-            if base_theta is not None:
-                config.rope_theta = base_theta
-
-            alpha = rope_config.get("alpha", 1.0)
-            head_dim = getattr(config, "head_dim", None)
-            if head_dim is None:
-                head_dim = config.hidden_size // config.num_attention_heads
-            if alpha != 1.0 and base_theta is not None and head_dim is not None and head_dim > 2:
-                config.rope_theta = base_theta * (alpha ** (head_dim / (head_dim - 2)))
-
-        # Disable generic RoPE scaling: Hunyuan's effective theta is now baked into config.rope_theta above.
-        # Leaving these fields set would let the base builder apply another, non-Hunyuan scaling path.
-        config.rope_scaling = None
-        if hasattr(config, "rope_parameters"):
-            config.rope_parameters = None
-
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def make_rope_init(self, config):
+        if config.rope_parameters["rope_type"] == "dynamic":
+            # Hunyuan bakes dynamic NTK-alpha scaling into theta and then uses standard RoPE.
+            # Compute effective rope_theta from the Dynamic NTK-alpha scaling used by Hunyuan.
+            # From modular_hunyuan_v1_dense.py:
+            #   base = rope_theta * alpha ^ (head_dim / (head_dim - 2))
+            # With alpha=1000, head_dim=128:
+            #   effective_theta ≈ 10000 * 1000^(128/126) ≈ 10,359,000
+            alpha = config.rope_parameters["alpha"]
+            self.rope_attrs["theta"] *= alpha ** (self.head_size / (self.head_size - 2))
 
     def is_fused_rope_supported(self):
         # GQA fuses RoPE inside the attention op which makes it impossible to

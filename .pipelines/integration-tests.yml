@@ -32,6 +32,8 @@
 #   account. Each test job (one per model × ep combination) uses the
 #   agent's managed identity to azcopy just its own model directory, then
 #   runs pytest against that local copy.
+#   The Engine benchmark is self-contained: it uses the source model builder
+#   to export its selected Hugging Face models with PagedAttention enabled.
 #
 # Pipeline structure
 #   Per (os, arch):
@@ -39,6 +41,10 @@
 #     Stage 2: test jobs - one ADO job per (model, ep). Models run in
 #              parallel on separate agents, so each agent only needs disk
 #              for one model.
+#   Linux also has a separate paged Engine correctness stage that downloads
+#   the Linux wheel from Stage 1.
+#   A separate H100 stage builds and runs the native Engine benchmark. It uses
+#   smoke-test.json by default or config.json when Run Full Engine Benchmark is enabled.
 
 trigger:
   branches:
@@ -85,6 +91,11 @@ parameters:
   type: boolean
   default: true
 
+- name: linux_x64_engine
+  displayName: 'Run Linux x64 paged Engine tests'
+  type: boolean
+  default: true
+
 - name: macos_arm64_cpu
   displayName: 'Run macOS arm64 CPU tests'
   type: boolean
@@ -94,6 +105,11 @@ parameters:
   displayName: 'Run macOS arm64 WebGPU tests'
   type: boolean
   default: true
+
+- name: run_full_engine_benchmark
+  displayName: 'Run Full Engine Benchmark'
+  type: boolean
+  default: false
 
 # Suite contents - keep in sync with test/python/integration/models.py.
 # The validate_pipeline_in_sync stage runs test/python/integration/check_models_in_sync.py
@@ -154,13 +170,15 @@ stages:
       models: ${{ parameters.all_models }}
     # Skip the per-(os, arch) build if no test job needs it.
     build_windows_x64: ${{ or(parameters.windows_x64_cpu, parameters.windows_x64_cuda, parameters.windows_x64_webgpu) }}
-    build_linux_x64: ${{ or(parameters.linux_x64_cpu, parameters.linux_x64_cuda) }}
+    build_linux_x64: ${{ or(parameters.linux_x64_cpu, parameters.linux_x64_cuda, parameters.linux_x64_engine) }}
     build_macos_arm64: ${{ or(parameters.macos_arm64_cpu, parameters.macos_arm64_webgpu) }}
     windows_x64_cpu: ${{ parameters.windows_x64_cpu }}
     windows_x64_cuda: ${{ parameters.windows_x64_cuda }}
     windows_x64_webgpu: ${{ parameters.windows_x64_webgpu }}
     linux_x64_cpu: ${{ parameters.linux_x64_cpu }}
     linux_x64_cuda: ${{ parameters.linux_x64_cuda }}
+    linux_x64_engine: ${{ parameters.linux_x64_engine }}
+    run_full_engine_benchmark: ${{ parameters.run_full_engine_benchmark }}
     macos_arm64_cpu: ${{ parameters.macos_arm64_cpu }}
     macos_arm64_webgpu: ${{ parameters.macos_arm64_webgpu }}
 
