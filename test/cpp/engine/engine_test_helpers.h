@@ -30,6 +30,12 @@ inline std::shared_ptr<Model> LoadSyntheticPagedModel() {
   return CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged");
 }
 
+inline std::shared_ptr<Model> LoadSyntheticPagedMtpModel() {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged");
+  config->model.mtp.filename = "unused-mtp-head.onnx";
+  return CreateModel(GetOrtEnv(), std::move(config));
+}
+
 #if USE_CUDA
 inline std::shared_ptr<Model> LoadSyntheticPagedCudaModel() {
   auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged");
@@ -57,6 +63,12 @@ inline std::shared_ptr<Model> LoadSyntheticHybridModel() {
 // fixed-state propagation affects observable logits.
 inline std::shared_ptr<Model> LoadSyntheticCompositeModel() {
   return CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-composite");
+}
+
+inline std::shared_ptr<Model> LoadSyntheticCompositeMtpModel() {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-composite");
+  config->model.mtp.filename = "unused-mtp-head.onnx";
+  return CreateModel(GetOrtEnv(), std::move(config));
 }
 
 // Builds GeneratorParams for the dummy model with greedy, single-sequence search so a minted Request

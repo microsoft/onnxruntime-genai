@@ -12,6 +12,11 @@ This document describes the two speculative-decoding runtimes in onnxruntime-gen
 Both share the same sampling, penalty, verification and statistics code so that their outputs match
 plain autoregressive decoding.
 
+The continuous-batching Engine has a separate lower-level interface for caller-supplied greedy
+drafts. It does not run either proposer described here and does not use this `Generator` round state
+machine. See [Speculative decoding: Engine caller-supplied proposals](SpeculativeDecoding.md#engine-caller-supplied-proposals)
+and [Paged Attention Engine](paged_attention_engine.md#caller-supplied-speculative-drafts).
+
 ---
 
 ## 1. Why speculative decoding

@@ -1,6 +1,8 @@
 # Engine Batching Design
 
 > This document records the design and performance history of engine batching work. For the authoritative description of the current continuous-batching implementation, including paged-cache transactions, rollback, and commit ordering, see [Paged Attention Engine](paged_attention_engine.md).
+> Caller-supplied speculative drafts were added after the batching phases described here; their
+> scheduling and commit behavior is documented in [Caller-supplied speculative drafts](paged_attention_engine.md#caller-supplied-speculative-drafts).
 
 Status: "Phase 1" is [PR #2343](https://github.com/microsoft/onnxruntime-genai/pull/2343);
 "Phase 2" is [PR #2345](https://github.com/microsoft/onnxruntime-genai/pull/2345), stacked on it.

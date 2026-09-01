@@ -3,10 +3,10 @@
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 # --------------------------------------------------------------------------
-"""Create the deterministic paged model used by the Engine tests.
+"""Create deterministic paged models used by the Engine tests.
 
-The graph writes packed tokens through the supplied block table and emits one
-FP16 logits row per request for:
+The graph writes packed tokens through the supplied block table and emits FP16
+logits for:
 
     (first_prompt_token + current_token + current_length) % vocab_size
 """
@@ -36,7 +36,7 @@ def _const(name, array):
     return tensor
 
 
-def _decoder_graph():
+def _decoder_graph(logits_per_token=False):
     i64 = lambda v: np.asarray(v, dtype=np.int64)  # noqa: E731
     initializers = [
         _const("c0", i64(0)),
@@ -91,6 +91,8 @@ def _decoder_graph():
 
     # Write tokens to the key and value caches.
     node("Cast", ["input_ids"], ["token_f"], to=TensorProto.FLOAT)
+    node("Cast", ["input_ids"], ["hidden_values"], to=TensorProto.FLOAT16)
+    node("Unsqueeze", ["hidden_values", "axis1"], ["hidden_states"])
     node("Reshape", [f"past_key_values.{WRITE_LAYER}.key", "flat"], ["past_key_flat"])
     node("Reshape", [f"past_key_values.{WRITE_LAYER}.value", "flat"], ["past_value_flat"])
     node("Unsqueeze", ["phys", "axis1"], ["scatter_index"])
@@ -120,12 +122,17 @@ def _decoder_graph():
     node("Unsqueeze", ["next_token", "axis1"], ["next_token_col"])
     node("Equal", ["next_token_col", "vocab_range"], ["is_next_per_token"])
 
-    # Select each request's final packed token so the Engine exercises its
-    # [batch_size, vocab_size] output allocation and row mapping. Each boundary
-    # is an exclusive end offset, so subtracting one gives the final token index.
-    node("Sub", ["boundaries", "c1"], ["last_token_index"])
-    node("Gather", ["is_next_per_token", "last_token_index"], ["is_next_per_request"], axis=0)
-    node("Cast", ["is_next_per_request"], ["logits"], to=TensorProto.FLOAT16)
+    if logits_per_token:
+        node("Cast", ["is_next_per_token"], ["logits"], to=TensorProto.FLOAT16)
+        logits_shape = ["num_tokens", VOCAB_SIZE]
+    else:
+        # Select each request's final packed token so the Engine exercises its
+        # [batch_size, vocab_size] output allocation and row mapping. Each boundary
+        # is an exclusive end offset, so subtracting one gives the final token index.
+        node("Sub", ["boundaries", "c1"], ["last_token_index"])
+        node("Gather", ["is_next_per_token", "last_token_index"], ["is_next_per_request"], axis=0)
+        node("Cast", ["is_next_per_request"], ["logits"], to=TensorProto.FLOAT16)
+        logits_shape = ["batch_size", VOCAB_SIZE]
 
     cache_shape = [NUM_BLOCKS, BLOCK_SIZE, 1, 1]
     inputs = [
@@ -144,7 +151,8 @@ def _decoder_graph():
         ],
     ]
     outputs = [
-        helper.make_tensor_value_info("logits", TensorProto.FLOAT16, ["batch_size", VOCAB_SIZE]),
+        helper.make_tensor_value_info("logits", TensorProto.FLOAT16, logits_shape),
+        helper.make_tensor_value_info("hidden_states", TensorProto.FLOAT16, ["num_tokens", 1]),
         *[
             helper.make_tensor_value_info(f"present.{layer}.key", TensorProto.FLOAT, cache_shape)
             for layer in PAGED_LAYERS
@@ -157,9 +165,9 @@ def _decoder_graph():
     return helper.make_graph(nodes, "synthetic_paged_decoder", inputs, outputs, initializer=initializers)
 
 
-def create_decoder(output_dir):
+def create_decoder(output_dir, logits_per_token=False):
     model = helper.make_model(
-        _decoder_graph(),
+        _decoder_graph(logits_per_token),
         opset_imports=[helper.make_operatorsetid("", 17)],
         ir_version=9,
         producer_name="onnxruntime-genai",
@@ -201,6 +209,7 @@ def create_config(output_dir):
                 },
                 "outputs": {
                     "logits": "logits",
+                    "hidden_states": "hidden_states",
                     "present_key_names": "present.%d.key",
                     "present_value_names": "present.%d.value",
                 },
@@ -232,10 +241,11 @@ def main():
         "--output_dir",
         default=os.path.join(os.path.dirname(__file__), "..", "..", "models", "engine", "synthetic-paged"),
     )
+    parser.add_argument("--logits_per_token", action="store_true")
     args = parser.parse_args()
     output_dir = os.path.normpath(args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
-    create_decoder(output_dir)
+    create_decoder(output_dir, args.logits_per_token)
     create_config(output_dir)
 
 

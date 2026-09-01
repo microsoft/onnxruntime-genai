@@ -7,6 +7,7 @@
 #include "provider_options.h"
 
 #include <functional>
+#include <memory>
 
 namespace Generators {
 
@@ -518,6 +519,7 @@ struct Config {
       std::string filename;  // e.g. "mtp.onnx"; used by model packaging/building tools
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
+      // Empty intentionally means the head does not share the main decoder's initializers.
       std::vector<SharedInitializer> shared_initializers;
 
       int num_hidden_layers{1};  // The MTP head has a single decoder layer.
@@ -611,6 +613,10 @@ void SetSearchNumber(Config::Search& search, std::string_view name, double value
 void SetSearchBool(Config::Search& search, std::string_view name, bool value);
 void SetSpeculativeNumber(Config::Speculative& speculative, std::string_view name, double value);
 void SetSpeculativeBool(Config::Speculative& speculative, std::string_view name, bool value);
+// Build the decoder-model view used to run model.mtp as an internal session. The projection keeps
+// the main model's device, batching and paged-attention contract, but replaces model-specific
+// decoder state with the single MTP attention layer.
+std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);

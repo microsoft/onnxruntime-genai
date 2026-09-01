@@ -180,8 +180,8 @@ struct Engine : std::enable_shared_from_this<Engine>,
   void RetainEvent(EngineEvent event);
   void RunDynamic();
   void RunStatic();
-  EngineEvent EventFromStep(const std::shared_ptr<Request>& request,
-                            const RequestStepResult& result) const;
+  void AppendEventsFromStep(const std::shared_ptr<Request>& request,
+                            const RequestStepResult& result);
   EngineEvent EventFromStepError(
       const EngineStepError& error,
       std::exception_ptr caught_error) noexcept;
@@ -217,6 +217,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
   std::vector<EngineEvent> staged_events_;
   std::vector<EngineEvent> fatal_events_;
   std::vector<std::shared_ptr<Request>> deferred_static_closes_;
+  size_t max_step_event_count_{};
   size_t pending_event_index_{};
   const std::shared_ptr<std::atomic<bool>> abandonment_pending_{
       std::make_shared<std::atomic<bool>>(false)};

@@ -66,12 +66,21 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
       "The Engine encountered a fatal failure while constructing its diagnostic error.",
   });
   const size_t max_batch_size = cache_manager_->MaxBatchSize();
+  constexpr size_t fatal_event_overhead = 2;
+  if (fatal_events_.max_size() < fatal_event_overhead ||
+      max_batch_size > (fatal_events_.max_size() - fatal_event_overhead) /
+                           kMaxGeneratedTokensPerStep) {
+    throw std::overflow_error(
+        "Engine event capacity exceeds the supported size.");
+  }
+  max_step_event_count_ =
+      max_batch_size * kMaxGeneratedTokensPerStep;
   step_plan_.requests.reserve(max_batch_size);
   step_results_.reserve(max_batch_size);
   staged_event_order_.reserve(max_batch_size);
-  pending_events_.reserve(max_batch_size);
-  staged_events_.reserve(max_batch_size);
-  fatal_events_.reserve(max_batch_size + 1);
+  pending_events_.reserve(max_step_event_count_);
+  staged_events_.reserve(max_step_event_count_);
+  fatal_events_.reserve(max_step_event_count_ + 1);
   deferred_static_closes_.reserve(max_batch_size);
 }
 
@@ -127,10 +136,17 @@ std::shared_ptr<Request> Engine::CreateRequest(const GeneratorParams& params,
       abandonment_pending_);
   request->ValidateEngineCompatibility();
 
-  // Fatal handling may need one terminal event for every tracked Request plus a request-less
-  // fallback. Grow dedicated storage before publishing the Request so terminalization never
-  // depends on the capacity of the normal event vectors, which swap after every committed step.
-  fatal_events_.reserve(tracked_requests_.size() + 2);
+  // Fatal handling preserves every token event from the current step, then needs one terminal
+  // event per tracked Request plus a request-less fallback. Grow dedicated storage before
+  // publishing the Request so terminalization cannot allocate.
+  if (max_step_event_count_ >= fatal_events_.max_size() ||
+      tracked_requests_.size() >
+          fatal_events_.max_size() - max_step_event_count_ - 2) {
+    throw std::overflow_error(
+        "Engine fatal event capacity exceeds the supported size.");
+  }
+  fatal_events_.reserve(
+      max_step_event_count_ + tracked_requests_.size() + 2);
   tracked_requests_.push_back(request);
   request->engine_ = shared_from_this();
   return request;
@@ -306,15 +322,16 @@ bool Engine::CancelRequest(const std::shared_ptr<Request>& request, uint64_t tur
       pending_events_.begin() + static_cast<ptrdiff_t>(pending_event_index_));
   pending_event_index_ = 0;
   auto existing = std::find_if(
-      pending_events_.begin(), pending_events_.end(),
+      pending_events_.rbegin(), pending_events_.rend(),
       [&request, turn_id](const EngineEvent& event) {
         return event.request == request && event.turn_id == turn_id;
       });
-  const bool has_existing_event = existing != pending_events_.end();
+  const bool has_existing_event = existing != pending_events_.rend();
   if (!has_existing_event) {
     pending_events_.reserve(pending_events_.size() + 1);
   }
 
+  request->draft_tokens_.clear();
   request->status_ = RequestStatus::TurnComplete;
   request->finish_reason_ = GenerationFinishReason::Canceled;
   EngineEvent terminal;
@@ -621,9 +638,9 @@ void Engine::RunStatic() {
     staged_events_.clear();
     for (size_t i = 0; i < scheduled_requests.size(); ++i) {
       if (!IsClosed(scheduled_requests[i]->status_) &&
-          (step_results_[i].token_appended || step_results_[i].done)) {
-        staged_events_.push_back(
-            EventFromStep(scheduled_requests[i], step_results_[i]));
+          (step_results_[i].visible_token_count != 0 ||
+           step_results_[i].done)) {
+        AppendEventsFromStep(scheduled_requests[i], step_results_[i]);
       }
     }
     pending_events_.swap(staged_events_);
@@ -872,7 +889,8 @@ void Engine::RunDynamic() {
                 entry.request->AcceptedDraftTokenCount());
       }
       for (size_t i = 0; i < step_plan_.requests.size(); ++i) {
-        if (step_results_[i].token_appended || step_results_[i].done) {
+        if (step_results_[i].visible_token_count != 0 ||
+            step_results_[i].done) {
           staged_event_order_.push_back(i);
         }
       }
@@ -943,10 +961,14 @@ void Engine::RunDynamic() {
           std::current_exception());
     }
 
+    // This is speculative preparation for the next step. Its no-throw boundary leaves failed
+    // cursors dirty so mask construction retries when the next logits application needs it.
+    scheduled_requests.ScheduleGuidanceMasks();
+
     staged_events_.clear();
     for (size_t i : staged_event_order_) {
-      staged_events_.push_back(
-          EventFromStep(step_plan_.requests[i].request, step_results_[i]));
+      AppendEventsFromStep(
+          step_plan_.requests[i].request, step_results_[i]);
     }
     pending_events_.swap(staged_events_);
     pending_event_index_ = 0;
@@ -975,25 +997,37 @@ void Engine::RetainEvent(EngineEvent event) {
   pending_event_index_ = 0;
 }
 
-EngineEvent Engine::EventFromStep(
+void Engine::AppendEventsFromStep(
     const std::shared_ptr<Request>& request,
-    const RequestStepResult& result) const {
-  EngineEvent event;
-  event.request = request;
-  event.turn_id = request->current_turn_id_;
-  if (result.token_appended) {
-    event.flags |= EngineEventFlagToken;
-    event.token = result.token;
-  }
-  if (result.done) {
+    const RequestStepResult& result) {
+  const auto finish_turn = [&request, &result](EngineEvent& event) {
     event.flags |= EngineEventFlagTurnFinished;
     event.finish_reason = result.finish_reason;
     event.usage = {
         request->turn_prompt_tokens_,
         request->turn_generated_tokens_,
         0};
+  };
+
+  for (size_t i = 0; i < result.visible_token_count; ++i) {
+    EngineEvent event;
+    event.request = request;
+    event.turn_id = request->current_turn_id_;
+    event.flags = EngineEventFlagToken;
+    event.token = result.visible_tokens[i];
+    if (result.done && i + 1 == result.visible_token_count) {
+      finish_turn(event);
+    }
+    staged_events_.push_back(std::move(event));
   }
-  return event;
+
+  if (result.done && result.visible_token_count == 0) {
+    EngineEvent event;
+    event.request = request;
+    event.turn_id = request->current_turn_id_;
+    finish_turn(event);
+    staged_events_.push_back(std::move(event));
+  }
 }
 
 std::shared_ptr<Request> Engine::FindTrackedRequest(const void* request_id) const {
@@ -1131,12 +1165,12 @@ EngineEvent Engine::EventFromStepError(
           request->turn_generated_tokens_,
           0};
       const auto existing = std::find_if(
-          fatal_events_.begin(), fatal_events_.end(),
+          fatal_events_.rbegin(), fatal_events_.rend(),
           [&request](const EngineEvent& pending) {
             return pending.request == request &&
                    pending.turn_id == request->current_turn_id_;
           });
-      if (existing == fatal_events_.end()) {
+      if (existing == fatal_events_.rend()) {
         fatal_events_.push_back(std::move(event));
       } else {
         existing->flags |= event.flags;
@@ -1187,6 +1221,7 @@ bool Engine::HasPendingRequests() {
 }
 
 size_t Engine::MaxDraftTokensPerStep() const {
+  ValidateOwnerThread();
   return cache_manager_->SupportsDynamicBatching() &&
                  model_executor_->SupportsDraftVerification()
              ? cache_manager_->MaxDraftTokensPerStep()

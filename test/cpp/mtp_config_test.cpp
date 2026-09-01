@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include "ort_genai.h"
+#include "config.h"
 
 namespace Generators::test {
 namespace {
