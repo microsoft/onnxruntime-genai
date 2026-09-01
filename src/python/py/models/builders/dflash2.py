@@ -42,7 +42,7 @@ import torch
 from onnx_ir.tensor_adapters import TorchTensor, to_torch_dtype
 from tqdm import tqdm
 
-from builders.base import stamp_build_metadata
+from builders.base import Model
 
 
 class DFlash2Builder:
@@ -930,7 +930,7 @@ class DFlash2Builder:
                 pbar.update()
                 pbar.set_description(f"Saving {tensor.name} ({tensor.dtype.short_name()}, {tensor.shape})")
 
-            stamp_build_metadata(self.model)
+            Model.stamp_build_metadata(self.model)
             ir.save(
                 self.model,
                 out_path,

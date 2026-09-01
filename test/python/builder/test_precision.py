@@ -472,10 +472,10 @@ def _make_empty_onnx_model():
 def test_stamp_build_metadata_sets_genai_commit(monkeypatch):
     result = types.SimpleNamespace(stdout="0123456789abcdef\n")
     monkeypatch.setattr(base_module.subprocess, "run", lambda *args, **kwargs: result)
-    base_module.get_genai_commit.cache_clear()
+    Model.get_genai_commit.__func__.cache_clear()
     model = _make_empty_onnx_model()
 
-    base_module.stamp_build_metadata(model)
+    Model.stamp_build_metadata(model)
 
     assert model.producer_version == "0123456789abcdef"
 
@@ -485,10 +485,10 @@ def test_stamp_build_metadata_handles_missing_git(monkeypatch):
         raise FileNotFoundError
 
     monkeypatch.setattr(base_module.subprocess, "run", missing_git)
-    base_module.get_genai_commit.cache_clear()
+    Model.get_genai_commit.__func__.cache_clear()
     model = _make_empty_onnx_model()
 
-    base_module.stamp_build_metadata(model)
+    Model.stamp_build_metadata(model)
 
     assert model.producer_version is None
 
