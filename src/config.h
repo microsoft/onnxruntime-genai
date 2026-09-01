@@ -24,13 +24,13 @@ struct Config {
     static constexpr std::string_view PositionIdsName = "position_ids";
     static constexpr std::string_view PastKeyName = "past_key_values.%d.key";
     static constexpr std::string_view PastValueName = "past_key_values.%d.value";
-    static constexpr std::string_view PastConvName = "past.%d.conv";
-    static constexpr std::string_view PastRecurrentName = "past.%d.recurrent";
+    static constexpr std::string_view PastConvName = "past_key_values.%d.conv_state";
+    static constexpr std::string_view PastRecurrentName = "past_key_values.%d.recurrent_state";
     static constexpr std::string_view LogitsName = "logits";
     static constexpr std::string_view PresentKeyName = "present.%d.key";
     static constexpr std::string_view PresentValueName = "present.%d.value";
-    static constexpr std::string_view PresentConvName = "present.%d.conv";
-    static constexpr std::string_view PresentRecurrentName = "present.%d.recurrent";
+    static constexpr std::string_view PresentConvName = "present.%d.conv_state";
+    static constexpr std::string_view PresentRecurrentName = "present.%d.recurrent_state";
     static constexpr std::string_view StateUpdateCaptureCountName = "state_update_capture_count";
     static constexpr std::string_view StateUpdateActiveName = "state_update_active";
     static constexpr std::string_view StateUpdateConvValueName = "state_update.%d.conv_value";
