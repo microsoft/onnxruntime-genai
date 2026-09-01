@@ -1639,19 +1639,23 @@ class Model:
     @classmethod
     def get_genai_version(cls) -> str | None:
         """Return the GenAI package version when source metadata is available."""
-        try:
-            # Attempt to read the version information from the VERSION_INFO file in the repository root.
-            repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", ".."))
-            with open(os.path.join(repo_root, "VERSION_INFO"), encoding="utf-8") as version_info:
-                return version_info.read().strip()
-        except OSError:
+        # Attempt to read the version information from the VERSION_INFO file in the repository root.
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", ".."))
+        version_info_path = os.path.join(repo_root, "VERSION_INFO")
+        if os.path.exists(version_info_path):
             try:
-                # If VERSION_INFO file is missing, we are installing from whl package. Use the version from the package metadata.
-                from onnxruntime_genai import __version__
+                with open(version_info_path, encoding="utf-8") as version_info:
+                    return version_info.read().strip()
+            except OSError:
+                pass
 
-                return __version__ or None
-            except ImportError:
-                return None
+        try:
+            # If VERSION_INFO file is missing, we are installing from whl package. Use the version from the package metadata.
+            from onnxruntime_genai import __version__
+
+            return __version__ or None
+        except ImportError:
+            return None
 
     @classmethod
     def get_genai_commit(cls) -> str | None:

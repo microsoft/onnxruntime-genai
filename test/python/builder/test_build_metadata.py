@@ -68,10 +68,7 @@ def test_stamp_build_metadata_uses_version_when_commit_is_unavailable(monkeypatc
 
 
 def test_get_genai_version_uses_installed_package_metadata(monkeypatch):
-    def missing_version_info(*args, **kwargs):
-        raise FileNotFoundError
-
-    monkeypatch.setattr(base_module, "open", missing_version_info, raising=False)
+    monkeypatch.setattr(base_module.os.path, "exists", lambda _: False)
     monkeypatch.setitem(sys.modules, "onnxruntime_genai", types.SimpleNamespace(__version__=GENAI_VERSION))
 
     assert Model.get_genai_version() == GENAI_VERSION
