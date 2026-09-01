@@ -35,6 +35,14 @@ ScheduledRequests Scheduler::CreateScheduledRequests(const StepPlan& plan) {
                            GetBatchedSamplingPlan()};
 }
 
+std::unique_ptr<BatchedSamplerState> Scheduler::CreateSamplingState(
+    const Request& request) const {
+  if (auto* sampler = GetBatchedSampler()) {
+    return sampler->CreateState(request.SearchOptions().random_seed);
+  }
+  return nullptr;
+}
+
 StaticBatchScheduler::StaticBatchScheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager)
     : Scheduler{model}, model_{model}, cache_manager_{cache_manager} {}
 
@@ -45,9 +53,10 @@ void StaticBatchScheduler::AddRequest(std::shared_ptr<Request> request) {
     throw std::runtime_error(
         "search.chunk_size requires dynamic batching; the static batch scheduler cannot chunk a prefill.");
   }
-  if (auto* sampler = GetBatchedSampler())
-    request->SamplingState(*sampler);
-  requests_pool_.push_back(request);
+  requests_pool_.reserve(requests_pool_.size() + 1);
+  auto sampling_state = CreateSamplingState(*request);
+  request->CommitSamplingState(std::move(sampling_state));
+  requests_pool_.push_back(std::move(request));
 }
 
 void StaticBatchScheduler::RemoveRequest(std::shared_ptr<Request> request) {
@@ -129,9 +138,10 @@ DynamicBatchScheduler::DynamicBatchScheduler(std::shared_ptr<Model> model, std::
     : Scheduler{model}, model_{model}, cache_manager_{cache_manager} {}
 
 void DynamicBatchScheduler::AddRequest(std::shared_ptr<Request> request) {
-  if (auto* sampler = GetBatchedSampler())
-    request->SamplingState(*sampler);
-  requests_pool_.push_back(request);
+  requests_pool_.reserve(requests_pool_.size() + 1);
+  auto sampling_state = CreateSamplingState(*request);
+  request->CommitSamplingState(std::move(sampling_state));
+  requests_pool_.push_back(std::move(request));
 }
 
 void DynamicBatchScheduler::RemoveRequest(std::shared_ptr<Request> request) {

@@ -134,6 +134,69 @@ class FailingContinuationDevice final : public DeviceInterface {
   size_t kv_cache_creation_count_{};
 };
 
+class FailingAllocationDevice final : public DeviceInterface {
+ public:
+  explicit FailingAllocationDevice(DeviceInterface& inner) : inner_{inner} {}
+
+  DeviceType GetType() const override { return inner_.GetType(); }
+  void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
+    inner_.InitOrt(api, allocator);
+  }
+  Ort::Allocator& GetAllocator() override { return inner_.GetAllocator(); }
+  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
+    return inner_.GetMemoryInfo();
+  }
+  std::string GetExecutionProviderName() const override {
+    return inner_.GetExecutionProviderName();
+  }
+  std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
+    if (fail_allocation_) {
+      throw std::runtime_error(
+          "Injected request preparation allocation failure.");
+    }
+    return inner_.AllocateBase(size);
+  }
+  std::shared_ptr<DeviceBuffer> WrapMemoryBase(void* memory, size_t size) override {
+    return inner_.WrapMemoryBase(memory, size);
+  }
+  std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override {
+    return inner_.CreateGreedy(params);
+  }
+  std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override {
+    return inner_.CreateBeam(params);
+  }
+  std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) override {
+    return inner_.CreateKeyValueCache(state);
+  }
+  void Synchronize() override { inner_.Synchronize(); }
+
+  void SetFailAllocation(bool fail) { fail_allocation_ = fail; }
+
+ private:
+  DeviceInterface& inner_;
+  bool fail_allocation_{true};
+};
+
+class FailingAdmissionScheduler final : public DynamicBatchScheduler {
+ public:
+  FailingAdmissionScheduler(std::shared_ptr<Model> model,
+                            std::shared_ptr<CacheManager> cache_manager)
+      : DynamicBatchScheduler(std::move(model), std::move(cache_manager)) {}
+
+  void AddRequest(std::shared_ptr<Request> request) override {
+    if (fail_preparation_) {
+      throw std::runtime_error(
+          "Injected scheduler admission preparation failure.");
+    }
+    DynamicBatchScheduler::AddRequest(std::move(request));
+  }
+
+  void SetFailPreparation(bool fail) { fail_preparation_ = fail; }
+
+ private:
+  bool fail_preparation_{true};
+};
+
 static_assert(noexcept(std::declval<Request&>().CommitStep(
     std::declval<const RequestStepPlan&>(),
     std::declval<const RequestStepResult&>())));
@@ -239,6 +302,66 @@ TEST_F(RequestLifecycleTest, EmptyBeginTurnIsRejected) {
   auto request = NewRequest();
   EXPECT_THROW(request->BeginTurn({}), std::runtime_error);
   EXPECT_EQ(request->status_, RequestStatus::Unassigned);
+}
+
+TEST_F(RequestLifecycleTest,
+       DevicePreparationFailureLeavesFirstTurnUnassignedAndRetryAppendsPromptOnce) {
+  const auto prompt = Prompt();
+  auto params = MakeGreedyParams(*model_);
+  FailingAllocationDevice failing_device{*params->p_device};
+  params->p_device = &failing_device;
+  failing_device.SetFailAllocation(false);
+  auto request = CreateEngineRequest(engine_.engine, *params);
+
+  failing_device.SetFailAllocation(true);
+  EXPECT_THROW(request->BeginTurn(prompt), std::runtime_error);
+  EXPECT_EQ(request->Status(), RequestStatus::Unassigned);
+  EXPECT_EQ(request->CurrentSequenceLength(), 0);
+  EXPECT_FALSE(engine_.engine->HasPendingRequests());
+  EXPECT_EQ(engine_.cache->AllocatedCount(), 0u);
+
+  failing_device.SetFailAllocation(false);
+  EXPECT_EQ(request->BeginTurn(prompt), 1u);
+  EXPECT_EQ(request->Status(), RequestStatus::Assigned);
+  EXPECT_EQ(request->CurrentSequenceLength(),
+            static_cast<int64_t>(prompt.size()));
+  EXPECT_TRUE(engine_.engine->HasPendingRequests());
+  EXPECT_EQ(engine_.cache->AllocatedCount(), 0u);
+
+  request->Close();
+}
+
+TEST_F(RequestLifecycleTest,
+       SchedulerPreparationFailureLeavesFirstTurnUnassignedAndRetryAppendsPromptOnce) {
+  const auto prompt = Prompt();
+  auto cache =
+      std::make_shared<RecordingCacheManager>(model_, /*capacity=*/8);
+  auto scheduler =
+      std::make_unique<FailingAdmissionScheduler>(model_, cache);
+  auto* scheduler_observer = scheduler.get();
+  auto executor = std::make_unique<RecordingModelExecutor>(
+      model_, cache, EosToken(*model_));
+  EngineDependencies dependencies{
+      cache, std::move(scheduler), std::move(executor)};
+  auto engine =
+      std::make_shared<Engine>(model_, std::move(dependencies));
+  auto request = CreateEngineRequest(engine, *model_);
+
+  EXPECT_THROW(request->BeginTurn(prompt), std::runtime_error);
+  EXPECT_EQ(request->Status(), RequestStatus::Unassigned);
+  EXPECT_EQ(request->CurrentSequenceLength(), 0);
+  EXPECT_FALSE(engine->HasPendingRequests());
+  EXPECT_EQ(cache->AllocatedCount(), 0u);
+
+  scheduler_observer->SetFailPreparation(false);
+  EXPECT_EQ(request->BeginTurn(prompt), 1u);
+  EXPECT_EQ(request->Status(), RequestStatus::Assigned);
+  EXPECT_EQ(request->CurrentSequenceLength(),
+            static_cast<int64_t>(prompt.size()));
+  EXPECT_TRUE(engine->HasPendingRequests());
+  EXPECT_EQ(cache->AllocatedCount(), 0u);
+
+  request->Close();
 }
 
 TEST_F(RequestLifecycleTest, ZeroGeneratedTokenBudgetIsRejectedWithoutMutation) {

@@ -482,10 +482,6 @@ DeviceSpan<float> PixtralVisionState::Run(int current_length, DeviceSpan<int32_t
   size_t pv_elem_size = element_size(pv_type);
   size_t feat_elem_size = element_size(feat_type);
 
-  // Use the output tensor's actual memory info for sub-tensor views, so views
-  // match the underlying buffer's allocation (CPU or GPU).
-  const auto& feat_mem_info = feat_full->GetTensorMemoryInfo();
-  uint8_t* feat_raw = static_cast<uint8_t*>(feat_full->GetTensorMutableRawData());
   uint8_t* pv_raw = static_cast<uint8_t*>(pv_full->GetTensorMutableRawData());
 
   int64_t feat_offset = 0;
@@ -543,18 +539,21 @@ DeviceSpan<float> PixtralVisionState::Run(int current_length, DeviceSpan<int32_t
           ") + num_feats (" + std::to_string(num_feats) +
           ") exceeds pre-allocated feature buffer (" + std::to_string(total_feats) + ")");
 
-    // Create output sub-tensor view into the pre-allocated feature buffer.
+    // Run into a separate output tensor, then copy into the combined feature buffer.
     std::vector<int64_t> sub_feat_shape = {num_feats, hidden_size};
     auto sub_feat = OrtValue::CreateTensor(
-        feat_mem_info,
-        feat_raw + static_cast<size_t>(feat_offset * hidden_size) * feat_elem_size,
-        static_cast<size_t>(num_feats * hidden_size) * feat_elem_size,
-        std::span<const int64_t>(sub_feat_shape), feat_type);
+        model_.p_device_->GetAllocator(), sub_feat_shape, feat_type);
 
     inputs_[pv_idx] = sub_pv.get();
     outputs_[0] = sub_feat.get();
 
     State::Run(*model_.vision_session_);
+
+    size_t feature_offset_bytes = static_cast<size_t>(feat_offset * hidden_size) * feat_elem_size;
+    size_t feature_size_bytes = static_cast<size_t>(num_feats * hidden_size) * feat_elem_size;
+    ByteWrapTensor(*model_.p_device_, *feat_full)
+        .subspan(feature_offset_bytes, feature_size_bytes)
+        .CopyFrom(ByteWrapTensor(*model_.p_device_, *sub_feat));
 
     feat_offset += num_feats;
   }

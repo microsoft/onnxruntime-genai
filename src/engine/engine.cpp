@@ -29,6 +29,9 @@ std::shared_ptr<GeneratorParams> CloneRequestParams(
 }
 
 std::string AddExceptionCause(std::string message, std::exception_ptr error) {
+  if (!error) {
+    return message;
+  }
   try {
     std::rethrow_exception(error);
   } catch (const std::exception& cause) {
@@ -81,7 +84,6 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
   pending_events_.reserve(max_step_event_count_);
   staged_events_.reserve(max_step_event_count_);
   fatal_events_.reserve(max_step_event_count_ + 1);
-  deferred_static_closes_.reserve(max_batch_size);
 }
 
 Engine::~Engine() {
@@ -90,7 +92,6 @@ Engine::~Engine() {
     tracked_requests_.pop_back();
     DetachRequestForTeardown(request);
   }
-  ReleaseDeferredStaticCloseState();
 }
 
 EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
@@ -110,6 +111,7 @@ void Engine::ValidateOwnerThread() const {
 std::shared_ptr<Request> Engine::CreateRequest(const GeneratorParams& params,
                                                size_t max_total_tokens) {
   ValidateOwnerThread();
+  CompleteNonresidentClosedRequests();
   ReclaimAbandonedRequests();
   if (health_ == EngineHealth::Unhealthy) {
     std::rethrow_exception(fatal_error_);
@@ -135,6 +137,7 @@ std::shared_ptr<Request> Engine::CreateRequest(const GeneratorParams& params,
       CloneRequestParams(params, *model_), max_total_tokens,
       abandonment_pending_);
   request->ValidateEngineCompatibility();
+  auto engine = shared_from_this();
 
   // Fatal handling preserves every token event from the current step, then needs one terminal
   // event per tracked Request plus a request-less fallback. Grow dedicated storage before
@@ -148,7 +151,7 @@ std::shared_ptr<Request> Engine::CreateRequest(const GeneratorParams& params,
   fatal_events_.reserve(
       max_step_event_count_ + tracked_requests_.size() + 2);
   tracked_requests_.push_back(request);
-  request->engine_ = shared_from_this();
+  request->AttachToEngine(std::move(engine));
   return request;
 }
 
@@ -156,137 +159,53 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
                            std::span<const int32_t> tokens,
                            std::optional<size_t> max_generated_tokens) {
   ValidateOwnerThread();
+  CompleteNonresidentClosedRequests();
   ReclaimAbandonedRequests();
   if (health_ == EngineHealth::Unhealthy) {
     std::rethrow_exception(fatal_error_);
   }
-  if (!request || request->engine_.lock().get() != this) {
+  if (!request || !request->BelongsTo(*this)) {
     throw std::runtime_error(
         "Cannot begin a turn for a request that does not belong to this engine.");
   }
-  if (max_generated_tokens && *max_generated_tokens == 0) {
-    throw std::runtime_error(
-        "max_generated_tokens (0) must be greater than zero.");
-  }
-  if (tokens.empty()) {
-    throw std::runtime_error(
-        "Expected at least one input token for generation. Received 0.");
-  }
-  if (request->turn_id_exhausted_) {
-    throw std::overflow_error(
-        "The request cannot admit another turn because its uint64 turn id space is exhausted.");
-  }
+  request->ValidateTurnAdmission(tokens, max_generated_tokens);
 
-  const bool first_turn = request->status_ == RequestStatus::Unassigned;
-  if (!first_turn && !IsTurnComplete(request->status_)) {
-    if (IsClosed(request->status_)) {
-      throw std::runtime_error("Cannot begin a turn for a closed request.");
-    }
-    throw std::runtime_error(
-        "BeginTurn is only valid for a new request or after the current turn is complete.");
-  }
-
+  const bool first_turn = request->IsAwaitingFirstTurn();
   if (first_turn) {
     if (cache_manager_->SupportsDynamicBatching()) {
       request->ValidateEngineCompatibility();
     }
   } else {
     const bool restartable_canceled_turn =
-        request->finish_reason_ == GenerationFinishReason::Canceled &&
-        request->processed_sequence_length_ == 0 &&
+        request->IsRestartableCanceledTurn() &&
         !cache_manager_->IsResident(request);
     ValidateRequestCanContinue(request, restartable_canceled_turn);
     if (!restartable_canceled_turn) {
-      const DeviceType cache_device =
-          request->params_->model_->p_device_kvcache_->GetType();
-      if (!SupportsContinuousDecoding(cache_device)) {
-        throw std::runtime_error(
-            "Continuous decoding is not supported on the selected KV-cache device type (" +
-            to_string(cache_device) + ").");
-      }
+      request->ValidateContinuousDecodingSupport();
     }
   }
 
-  const size_t sequence_length =
-      first_turn ? 0 : static_cast<size_t>(request->CurrentSequenceLength());
-  Request::ValidateAppendLength(
-      request->max_total_tokens_, sequence_length, tokens.size());
-  if (request->tokens_host_.capacity() <
-      request->tokens_host_.size() + tokens.size()) {
-    throw std::logic_error(
-        "The request host token mirror does not have reserved turn capacity.");
-  }
-
-  auto device_tokens = Request::AllocateOnDevice(*request->params_, tokens);
-  const RequestStatus status_before = request->status_;
-  const size_t host_size_before = request->tokens_host_.size();
-  const int64_t prompt_length_before = request->prompt_sequence_length_;
-  const int64_t processed_length_before =
-      request->processed_sequence_length_;
-  const auto turn_max_generated_tokens_before =
-      request->turn_max_generated_tokens_;
-  const size_t turn_generated_tokens_before =
-      request->turn_generated_tokens_;
-  const size_t turn_prompt_tokens_before = request->turn_prompt_tokens_;
-  const uint64_t current_turn_id_before = request->current_turn_id_;
-  const uint64_t next_turn_id_before = request->next_turn_id_;
-  const bool has_current_turn_before = request->has_current_turn_;
-  const bool turn_id_exhausted_before = request->turn_id_exhausted_;
+  RequestTurnAdmission admission;
   bool added_to_scheduler = false;
 
-  request->SaveStateForTransaction();
   try {
-    request->ResetGuidanceForNewTurn();
-    request->search_->AppendTokens(device_tokens);
-    request->tokens_host_.insert(
-        request->tokens_host_.end(), tokens.begin(), tokens.end());
-    request->prompt_sequence_length_ = request->CurrentSequenceLength();
+    request->PrepareTurnAdmission(tokens, admission);
     if (first_turn) {
-      request->processed_sequence_length_ = 0;
-      request->status_ = RequestStatus::Assigned;
       scheduler_->AddRequest(request);
       added_to_scheduler = true;
-    } else {
-      request->status_ = RequestStatus::Assigned;
     }
-    request->CommitStateForTransaction();
-    // Install the new turn's generation budget only after turn admission succeeds. This keeps
-    // BeginTurn transactional and copies the caller-owned options before they may go out of scope.
-    request->turn_max_generated_tokens_ = max_generated_tokens;
-    request->turn_prompt_tokens_ = tokens.size();
-    request->turn_generated_tokens_ = 0;
-    request->current_turn_id_ = request->next_turn_id_;
-    request->has_current_turn_ = true;
-    if (request->next_turn_id_ == std::numeric_limits<uint64_t>::max()) {
-      request->turn_id_exhausted_ = true;
-    } else {
-      ++request->next_turn_id_;
-    }
-    request->finish_reason_ = GenerationFinishReason::None;
-    return request->current_turn_id_;
+    return request->CommitTurnAdmission(
+        max_generated_tokens, admission);
   } catch (...) {
     const auto append_error = std::current_exception();
     try {
       if (added_to_scheduler) {
         scheduler_->RemoveRequest(request);
       }
-      request->status_ = status_before;
-      request->tokens_host_.resize(host_size_before);
-      request->prompt_sequence_length_ = prompt_length_before;
-      request->processed_sequence_length_ = processed_length_before;
-      request->turn_max_generated_tokens_ =
-          turn_max_generated_tokens_before;
-      request->turn_generated_tokens_ =
-          turn_generated_tokens_before;
-      request->turn_prompt_tokens_ = turn_prompt_tokens_before;
-      request->current_turn_id_ = current_turn_id_before;
-      request->next_turn_id_ = next_turn_id_before;
-      request->has_current_turn_ = has_current_turn_before;
-      request->turn_id_exhausted_ = turn_id_exhausted_before;
-      request->RestoreStateForTransaction();
+      request->RollbackTurnAdmission(admission);
     } catch (...) {
       HandleContinuationRestoreFailure(
-          request, std::current_exception());
+          request, append_error, std::current_exception());
     }
     std::rethrow_exception(append_error);
   }
@@ -294,29 +213,13 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
 
 bool Engine::CancelRequest(const std::shared_ptr<Request>& request, uint64_t turn_id) {
   ValidateOwnerThread();
-  if (!request || request->engine_.lock().get() != this) {
+  if (!request) {
     throw std::runtime_error(
         "Cannot cancel a request that does not belong to this engine.");
   }
-  if (IsClosed(request->status_)) {
-    throw std::runtime_error("Cannot cancel a closed request.");
-  }
-  if (!request->has_current_turn_) {
-    throw std::runtime_error("Cannot cancel a request before a turn has begun.");
-  }
-  if (turn_id != request->current_turn_id_ ||
-      IsTurnComplete(request->status_)) {
+  if (!request->CanCancelFromEngine(*this, turn_id)) {
     return false;
   }
-  if (!IsExecutable(request->status_)) {
-    return false;
-  }
-  const bool release_deferred_static_state =
-      !deferred_static_closes_.empty() &&
-      !cache_manager_->SupportsDynamicBatching() &&
-      cache_manager_->IsResident(request) &&
-      !StaticBatchNeedsRequest(request);
-
   pending_events_.erase(
       pending_events_.begin(),
       pending_events_.begin() + static_cast<ptrdiff_t>(pending_event_index_));
@@ -331,17 +234,16 @@ bool Engine::CancelRequest(const std::shared_ptr<Request>& request, uint64_t tur
     pending_events_.reserve(pending_events_.size() + 1);
   }
 
-  request->draft_tokens_.clear();
-  request->status_ = RequestStatus::TurnComplete;
-  request->finish_reason_ = GenerationFinishReason::Canceled;
+  const auto counters =
+      request->CompleteCancelFromEngine(*this, turn_id);
   EngineEvent terminal;
   terminal.request = request;
   terminal.turn_id = turn_id;
   terminal.flags = EngineEventFlagTurnFinished;
   terminal.finish_reason = GenerationFinishReason::Canceled;
   terminal.usage = {
-      request->turn_prompt_tokens_,
-      request->turn_generated_tokens_,
+      counters.prompt_tokens,
+      counters.generated_tokens,
       0};
   if (has_existing_event) {
     existing->flags |= terminal.flags;
@@ -349,9 +251,6 @@ bool Engine::CancelRequest(const std::shared_ptr<Request>& request, uint64_t tur
     existing->usage = terminal.usage;
   } else {
     pending_events_.push_back(std::move(terminal));
-  }
-  if (release_deferred_static_state) {
-    ReleaseDeferredStaticCloseState();
   }
   return true;
 }
@@ -361,22 +260,16 @@ void Engine::CloseRequest(const std::shared_ptr<Request>& request) {
   if (request && IsClosed(request->status_)) {
     return;
   }
-  if (!request || request->engine_.lock().get() != this) {
+  if (!request || !request->BelongsTo(*this)) {
     throw std::runtime_error("Cannot close a request that does not belong to this engine.");
   }
   const bool resident_static_row =
       !cache_manager_->SupportsDynamicBatching() &&
       cache_manager_->IsResident(request);
   std::vector<std::shared_ptr<Request>> static_residents;
-  bool retain_static_row_state = false;
   bool release_closed_static_batch = false;
   if (resident_static_row) {
     static_residents = cache_manager_->AllocatedRequests();
-    retain_static_row_state = std::any_of(
-        static_residents.begin(), static_residents.end(),
-        [&request](const std::shared_ptr<Request>& resident) {
-          return resident != request && IsExecutable(resident->status_);
-        });
     release_closed_static_batch = std::all_of(
         static_residents.begin(), static_residents.end(),
         [&request](const std::shared_ptr<Request>& resident) {
@@ -385,6 +278,9 @@ void Engine::CloseRequest(const std::shared_ptr<Request>& request) {
   }
 
   scheduler_->RemoveRequest(request);
+  const bool retain_static_runtime_state =
+      !cache_manager_->SupportsDynamicBatching() &&
+      cache_manager_->IsResident(request);
 
   pending_events_.erase(
       pending_events_.begin(),
@@ -400,20 +296,19 @@ void Engine::CloseRequest(const std::shared_ptr<Request>& request) {
           staged_events_.begin(), staged_events_.end(),
           [&request](const EngineEvent& event) { return event.request == request; }),
       staged_events_.end());
-  if (retain_static_row_state) {
-    deferred_static_closes_.push_back(request);
-    request->CompleteLogicalClose();
-  } else {
-    request->CompleteClose();
-    if (resident_static_row) {
-      ReleaseDeferredStaticCloseState();
-    }
-  }
+  request->MarkClosedFromEngine(*this);
   if (release_closed_static_batch) {
     for (const auto& resident : static_residents) {
       scheduler_->DetachRequestForTeardown(resident);
     }
+    CompleteNonresidentClosedRequests();
+    return;
   }
+  if (retain_static_runtime_state) {
+    return;
+  }
+
+  request->CompleteCloseFromEngine(*this);
   tracked_requests_.erase(
       std::remove_if(
           tracked_requests_.begin(), tracked_requests_.end(),
@@ -421,13 +316,6 @@ void Engine::CloseRequest(const std::shared_ptr<Request>& request) {
             return tracked == request;
           }),
       tracked_requests_.end());
-}
-
-void Engine::ReleaseDeferredStaticCloseState() noexcept {
-  for (const auto& request : deferred_static_closes_) {
-    request->CompleteClose();
-  }
-  deferred_static_closes_.clear();
 }
 
 void Engine::DetachRequestForTeardown(
@@ -452,7 +340,7 @@ void Engine::DetachRequestForTeardown(
           }),
       staged_events_.end());
   pending_event_index_ = 0;
-  request->CompleteClose();
+  request->CompleteCloseFromEngine(*this);
 }
 
 void Engine::ReclaimAbandonedRequests() {
@@ -472,8 +360,8 @@ void Engine::ReclaimAbandonedRequests() {
           [this](const std::shared_ptr<Request>& request) {
             return request &&
                    !IsClosed(request->status_) &&
-                   request->engine_.lock().get() == this &&
-                   request->IsExternallyAbandoned();
+                   request->BelongsTo(*this) &&
+                   request->ExternalReferencesAbandoned();
           });
       if (abandoned == tracked_requests_.end()) {
         return;
@@ -482,7 +370,7 @@ void Engine::ReclaimAbandonedRequests() {
       auto request = *abandoned;
       // Recheck immediately before removal in case an external owner was reacquired before this
       // serialized boundary.
-      if (request->IsExternallyAbandoned()) {
+      if (request->ExternalReferencesAbandoned()) {
         CloseRequest(request);
       }
     }
@@ -499,18 +387,20 @@ void Engine::ReclaimAbandonedRequests() {
   }
 }
 
-bool Engine::StaticBatchNeedsRequest(
-    const std::shared_ptr<Request>& request) const {
-  if (cache_manager_->SupportsDynamicBatching() ||
-      !cache_manager_->IsResident(request)) {
-    return false;
-  }
-  const auto residents = cache_manager_->AllocatedRequests();
-  return std::any_of(
-      residents.begin(), residents.end(),
-      [&request](const std::shared_ptr<Request>& resident) {
-        return resident != request && IsExecutable(resident->status_);
-      });
+void Engine::CompleteNonresidentClosedRequests() {
+  tracked_requests_.erase(
+      std::remove_if(
+          tracked_requests_.begin(), tracked_requests_.end(),
+          [this](const std::shared_ptr<Request>& request) {
+            if (!request || !IsClosed(request->status_) ||
+                !request->BelongsTo(*this) ||
+                cache_manager_->IsResident(request)) {
+              return false;
+            }
+            request->CompleteCloseFromEngine(*this);
+            return true;
+          }),
+      tracked_requests_.end());
 }
 
 void Engine::ValidateRequestCanContinue(
@@ -519,7 +409,7 @@ void Engine::ValidateRequestCanContinue(
   if (health_ == EngineHealth::Unhealthy) {
     std::rethrow_exception(fatal_error_);
   }
-  if (request->engine_.lock().get() != this) {
+  if (!request->BelongsTo(*this)) {
     throw std::runtime_error("Cannot continue a request that does not belong to this engine.");
   }
 
@@ -550,24 +440,36 @@ void Engine::ValidateRequestCanContinue(
 
 [[noreturn]] void Engine::HandleContinuationRestoreFailure(
     const std::shared_ptr<Request>& request,
+    std::exception_ptr append_error,
     std::exception_ptr restore_error) {
-  request->finish_reason_ = GenerationFinishReason::Failed;
+  request->MarkFailedFromEngine(*this);
+  std::string message;
   try {
-    CloseRequest(request);
+    message = AddExceptionCause(
+        "Continuation append failed and its Search state could not be restored.",
+        append_error);
+    try {
+      CloseRequest(request);
+    } catch (...) {
+      message = AddExceptionCause(
+          std::move(message) + " Closing the poisoned request also failed.",
+          std::current_exception());
+      request->CompleteCloseFromEngine(*this);
+    }
   } catch (...) {
-    request->CompleteClose();
+    request->CompleteCloseFromEngine(*this);
     MarkUnhealthyAndThrow(
         StepOutcomeKind::FatalExecutionFailure,
         /*transaction_id=*/0,
         request.get(),
-        "Continuation append and restore failed, and closing the poisoned Request also failed.",
+        "Continuation append or restore failed, and constructing its diagnostic also failed.",
         std::current_exception());
   }
   MarkUnhealthyAndThrow(
       StepOutcomeKind::FatalExecutionFailure,
       /*transaction_id=*/0,
       request.get(),
-      "Continuation append failed and its Search state could not be restored.",
+      message,
       restore_error);
 }
 
@@ -579,6 +481,7 @@ size_t Engine::Run(std::span<EngineEvent> events) {
     }
     return 0;
   }
+  CompleteNonresidentClosedRequests();
   try {
     ReclaimAbandonedRequests();
   } catch (const EngineStepError&) {
@@ -622,6 +525,10 @@ void Engine::RunStatic() {
             std::current_exception());
       }
     }();
+    // Scheduling may recycle an all-terminal static batch. Closed rows retain their Search,
+    // parameters, host tokens, and length metadata only until that shared allocation is gone;
+    // finish their physical close before executing the replacement batch.
+    CompleteNonresidentClosedRequests();
 
     try {
       model_executor_->Decode(scheduled_requests);
@@ -645,13 +552,6 @@ void Engine::RunStatic() {
     }
     pending_events_.swap(staged_events_);
     pending_event_index_ = 0;
-    if (std::none_of(
-            scheduled_requests.begin(), scheduled_requests.end(),
-            [](const std::shared_ptr<Request>& request) {
-              return IsExecutable(request->status_);
-            })) {
-      ReleaseDeferredStaticCloseState();
-    }
   }
 }
 
@@ -705,7 +605,7 @@ void Engine::RunDynamic() {
           step_plan_.transaction_id,
           outcome.request_id,
           "Dynamic scheduler returned no executable work while requests remain pending.",
-          fatal_fallback_error_);
+          nullptr);
     }
 
     std::unique_ptr<CacheStepReservation> reservation;
@@ -1004,15 +904,15 @@ void Engine::AppendEventsFromStep(
     event.flags |= EngineEventFlagTurnFinished;
     event.finish_reason = result.finish_reason;
     event.usage = {
-        request->turn_prompt_tokens_,
-        request->turn_generated_tokens_,
+        request->TurnPromptTokens(),
+        request->TurnGeneratedTokens(),
         0};
   };
 
   for (size_t i = 0; i < result.visible_token_count; ++i) {
     EngineEvent event;
     event.request = request;
-    event.turn_id = request->current_turn_id_;
+    event.turn_id = request->CurrentTurnId();
     event.flags = EngineEventFlagToken;
     event.token = result.visible_tokens[i];
     if (result.done && i + 1 == result.visible_token_count) {
@@ -1024,7 +924,7 @@ void Engine::AppendEventsFromStep(
   if (result.done && result.visible_token_count == 0) {
     EngineEvent event;
     event.request = request;
-    event.turn_id = request->current_turn_id_;
+    event.turn_id = request->CurrentTurnId();
     finish_turn(event);
     staged_events_.push_back(std::move(event));
   }
@@ -1047,21 +947,20 @@ EngineEvent Engine::FailUnserviceableRequest(const void* request_id) {
         step_plan_.transaction_id,
         request_id,
         "The scheduler identified an unknown or non-executable unserviceable Request.",
-        fatal_fallback_error_);
+        nullptr);
   }
   scheduler_->RemoveRequest(request);
-  request->status_ = RequestStatus::TurnComplete;
-  request->finish_reason_ = GenerationFinishReason::Failed;
+  request->CompleteFailedTurnFromEngine(*this);
 
   EngineEvent event;
   event.request = request;
-  event.turn_id = request->current_turn_id_;
+  event.turn_id = request->CurrentTurnId();
   event.flags = EngineEventFlagTurnFinished | EngineEventFlagFailed;
   event.finish_reason = GenerationFinishReason::Failed;
   event.error_code = EngineErrorCode::RequestUnserviceable;
   event.usage = {
-      request->turn_prompt_tokens_,
-      request->turn_generated_tokens_,
+      request->TurnPromptTokens(),
+      request->TurnGeneratedTokens(),
       0};
   return event;
 }
@@ -1141,7 +1040,8 @@ EngineEvent Engine::EventFromStepError(
   fatal_events_.clear();
   for (size_t i = pending_event_index_; i < pending_events_.size(); ++i) {
     const auto& pending = pending_events_[i];
-    if (!pending.request || !pending.request->IsExternallyAbandoned()) {
+    if (!pending.request ||
+        !pending.request->ExternalReferencesAbandoned()) {
       fatal_events_.push_back(pending);
     }
   }
@@ -1151,24 +1051,27 @@ EngineEvent Engine::EventFromStepError(
           : EngineErrorCode::EngineExecutionFailure;
   bool affected_turn = false;
   for (const auto& request : tracked_requests_) {
-    if (request && IsExecutable(request->status_) &&
-        !request->IsExternallyAbandoned()) {
+    if (request && IsExecutable(request->status_)) {
+      request->CompleteFailedTurnFromEngine(*this);
+      if (request->ExternalReferencesAbandoned()) {
+        continue;
+      }
       affected_turn = true;
       EngineEvent event;
       event.request = request;
-      event.turn_id = request->current_turn_id_;
+      event.turn_id = request->CurrentTurnId();
       event.flags = EngineEventFlagTurnFinished | EngineEventFlagFailed;
       event.finish_reason = GenerationFinishReason::Failed;
       event.error_code = error_code;
       event.usage = {
-          request->turn_prompt_tokens_,
-          request->turn_generated_tokens_,
+          request->TurnPromptTokens(),
+          request->TurnGeneratedTokens(),
           0};
       const auto existing = std::find_if(
           fatal_events_.rbegin(), fatal_events_.rend(),
           [&request](const EngineEvent& pending) {
             return pending.request == request &&
-                   pending.turn_id == request->current_turn_id_;
+                   pending.turn_id == request->CurrentTurnId();
           });
       if (existing == fatal_events_.rend()) {
         fatal_events_.push_back(std::move(event));
@@ -1194,13 +1097,6 @@ EngineEvent Engine::EventFromStepError(
       outcome == StepOutcomeKind::ExecutionContractFailure) {
     ++transaction_metrics_.fatal_execution_failures;
   }
-  for (const auto& request : tracked_requests_) {
-    if (request && IsExecutable(request->status_)) {
-      request->status_ = RequestStatus::TurnComplete;
-      request->finish_reason_ = GenerationFinishReason::Failed;
-    }
-  }
-  ReleaseDeferredStaticCloseState();
   pending_events_.swap(fatal_events_);
   pending_event_index_ = 0;
   std::rethrow_exception(fatal_error_);
@@ -1208,6 +1104,7 @@ EngineEvent Engine::EventFromStepError(
 
 bool Engine::HasPendingRequests() {
   ValidateOwnerThread();
+  CompleteNonresidentClosedRequests();
   try {
     ReclaimAbandonedRequests();
   } catch (const EngineStepError&) {

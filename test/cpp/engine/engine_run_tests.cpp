@@ -10,7 +10,10 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <thread>
@@ -25,6 +28,40 @@
 namespace Generators {
 namespace test {
 namespace {
+
+class TestBarrier {
+ public:
+  explicit TestBarrier(size_t participant_count)
+      : remaining_{participant_count} {}
+
+  void ArriveAndWait() {
+    std::unique_lock lock{mutex_};
+    if (--remaining_ == 0) {
+      condition_.notify_all();
+      return;
+    }
+    condition_.wait(lock, [this] { return remaining_ == 0; });
+  }
+
+ private:
+  std::mutex mutex_;
+  std::condition_variable condition_;
+  size_t remaining_;
+};
+
+struct ExternalRequestRaceProbe
+    : std::enable_shared_from_this<ExternalRequestRaceProbe>,
+      ExternalRefCounted<ExternalRequestRaceProbe> {
+  explicit ExternalRequestRaceProbe(
+      std::shared_ptr<std::atomic<bool>> destroyed)
+      : destroyed_{std::move(destroyed)} {}
+
+  ~ExternalRequestRaceProbe() {
+    destroyed_->store(true, std::memory_order_release);
+  }
+
+  std::shared_ptr<std::atomic<bool>> destroyed_;
+};
 
 std::vector<int32_t> Prompt(int32_t seed) {
   const int32_t base = 2 + (seed % 8);
@@ -102,6 +139,8 @@ class ExternalRequestReference {
 };
 
 static_assert(noexcept(std::declval<Request&>().ExternalRelease()));
+static_assert(
+    noexcept(std::declval<ExternalRequestRaceProbe&>().ExternalRelease()));
 
 struct RequestPostProcessingControl {
   bool fail{};
@@ -202,6 +241,52 @@ class EngineRunTest : public ::testing::Test {
 
   std::shared_ptr<Model> model_;
 };
+
+TEST(ExternalRefCountedTest,
+     DistinguishesNeverHeldHeldAbandonedAndReacquiredStates) {
+  auto destroyed = std::make_shared<std::atomic<bool>>(false);
+  auto probe = std::make_shared<ExternalRequestRaceProbe>(destroyed);
+
+  EXPECT_FALSE(probe->ExternalReferencesAbandoned());
+  probe->ExternalAddRef();
+  EXPECT_FALSE(probe->ExternalReferencesAbandoned());
+  probe->ExternalRelease();
+  EXPECT_TRUE(probe->ExternalReferencesAbandoned());
+  probe->ExternalAddRef();
+  EXPECT_FALSE(probe->ExternalReferencesAbandoned());
+  probe->ExternalRelease();
+  EXPECT_TRUE(probe->ExternalReferencesAbandoned());
+}
+
+TEST(ExternalRefCountedTest,
+     ConcurrentFinalReleaseAndReacquirePreserveOwnerLifetime) {
+  auto destroyed = std::make_shared<std::atomic<bool>>(false);
+  auto engine_owner =
+      std::make_shared<ExternalRequestRaceProbe>(destroyed);
+  auto* raw = engine_owner.get();
+  raw->ExternalAddRef();
+
+  TestBarrier transition_start{3};
+  std::thread release_thread([raw, &transition_start] {
+    transition_start.ArriveAndWait();
+    raw->ExternalRelease();
+  });
+  std::thread reacquire_thread([engine_owner, &transition_start] {
+    transition_start.ArriveAndWait();
+    engine_owner->ExternalAddRef();
+  });
+  transition_start.ArriveAndWait();
+  release_thread.join();
+  reacquire_thread.join();
+
+  EXPECT_FALSE(raw->ExternalReferencesAbandoned());
+  EXPECT_FALSE(destroyed->load(std::memory_order_acquire));
+
+  engine_owner.reset();
+  EXPECT_FALSE(destroyed->load(std::memory_order_acquire));
+  raw->ExternalRelease();
+  EXPECT_TRUE(destroyed->load(std::memory_order_acquire));
+}
 
 TEST(EngineLifetimeTest, EngineRetainsModelForItsLifetime) {
   auto model = LoadSyntheticPagedModel();
@@ -592,6 +677,37 @@ TEST_F(EngineRunTest, AbandonmentInvariantFailureTerminalizesExecutableTurns) {
   EXPECT_EQ(abandoned->status_, RequestStatus::TurnComplete);
   EXPECT_EQ(survivor->status_, RequestStatus::TurnComplete);
   EXPECT_THROW(static_cast<void>(RunOne(*engine.engine)), EngineStepError);
+}
+
+TEST_F(EngineRunTest,
+       ConcurrentFinalReleaseAndReacquireCancelsRequestAbandonment) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/1, EosToken(*model_));
+  auto request = CreateEngineRequest(engine.engine, *model_);
+  request->ExternalAddRef();
+  request->BeginTurn(Prompt(10));
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
+  ASSERT_EQ(request->status_, RequestStatus::TurnComplete);
+
+  TestBarrier transition_start{3};
+  std::thread release_thread([request, &transition_start] {
+    transition_start.ArriveAndWait();
+    request->ExternalRelease();
+  });
+  std::thread reacquire_thread([request, &transition_start] {
+    transition_start.ArriveAndWait();
+    request->ExternalAddRef();
+  });
+  transition_start.ArriveAndWait();
+  release_thread.join();
+  reacquire_thread.join();
+
+  EXPECT_EQ(RunOne(*engine.engine).flags, EngineEventFlagNone);
+  EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
+  EXPECT_EQ(engine.cache->AllocatedCount(), 1u);
+  EXPECT_EQ(engine.cache->deallocate_calls, 0);
+
+  request->Close();
+  request->ExternalRelease();
 }
 
 TEST_F(EngineRunTest, BeginTurnRejectsUndrainedReadyNotificationWithoutMutation) {
@@ -1015,13 +1131,15 @@ TEST_F(EngineRunTest, StaticBatchReturnsAllRowEventsWhenCapacitySuffices) {
             EngineEventFlagToken | EngineEventFlagTurnFinished);
 }
 
-TEST_F(EngineRunTest, StaticCloseIsImmediateWhilePeerKeepsPhysicalBatchAlive) {
+TEST_F(EngineRunTest, StaticCloseLogicallyRemovesActiveRowWhilePeerContinues) {
   model_->config_->engine.dynamic_batching.reset();
-  auto cache = std::make_shared<RecordingCacheManager>(
-      model_, /*capacity=*/4, nullptr, /*supports_dynamic_batching=*/false);
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto cache = std::make_shared<StaticCacheManager>(model_);
   auto scheduler = Scheduler::Create(model_, cache);
   auto executor = std::make_unique<RecordingModelExecutor>(
-      model_, cache, /*forced_token=*/5);
+      model_, cache, filler);
+  auto* executor_observer = executor.get();
   EngineDependencies dependencies{cache, std::move(scheduler),
                                   std::move(executor)};
   auto engine = std::make_shared<Engine>(model_, std::move(dependencies));
@@ -1030,26 +1148,50 @@ TEST_F(EngineRunTest, StaticCloseIsImmediateWhilePeerKeepsPhysicalBatchAlive) {
   first->BeginTurn(Prompt(10), std::optional<size_t>{2});
   second->BeginTurn(Prompt(20), std::optional<size_t>{2});
 
-  std::array<EngineEvent, 2> storage;
-  ASSERT_EQ(engine->Run(storage), storage.size());
+  // Capacity one retains the second row's first token event inside the Engine.
+  ASSERT_EQ(RunOne(*engine).request, first);
   ASSERT_EQ(first->status_, RequestStatus::Active);
   ASSERT_EQ(second->status_, RequestStatus::Active);
+  ASSERT_EQ(executor_observer->decode_calls, 1);
+  ASSERT_EQ(cache->ResidentRequestCount(), 2u);
+  const int64_t closed_length = second->CurrentSequenceLength();
+  const int64_t closed_processed = second->ProcessedSequenceLength();
+  const size_t closed_generated = second->TurnGeneratedTokens();
+  const int searches_while_resident = LeakChecked<Search>::Count();
 
-  EXPECT_NO_THROW(first->Close());
-  EXPECT_EQ(first->status_, RequestStatus::Closed);
-  EXPECT_EQ(cache->AllocatedCount(), 2u);
-  EXPECT_EQ(cache->deallocate_calls, 0);
+  EXPECT_NO_THROW(second->Close());
+  EXPECT_EQ(second->status_, RequestStatus::Closed);
+  EXPECT_TRUE(second->BelongsTo(*engine));
+  EXPECT_EQ(cache->ResidentRequestCount(), 2u);
+  EXPECT_EQ(LeakChecked<Search>::Count(), searches_while_resident);
 
-  EXPECT_EQ(engine->Run(storage), 1u);
-  EXPECT_EQ(storage[0].request, second);
-  EXPECT_EQ(second->status_, RequestStatus::TurnComplete);
-  EXPECT_EQ(first->status_, RequestStatus::Closed);
-  EXPECT_EQ(cache->AllocatedCount(), 2u);
-  EXPECT_EQ(cache->deallocate_calls, 0);
-  EXPECT_NO_THROW(first->Close());
+  // Close purged the retained event, so Run executes the next batch step instead of returning the
+  // closed row. Only the peer samples and publishes an event.
+  const auto peer_event = RunOne(*engine);
+  EXPECT_EQ(peer_event.request, first);
+  EXPECT_EQ(peer_event.flags,
+            EngineEventFlagToken | EngineEventFlagTurnFinished);
+  EXPECT_EQ(executor_observer->decode_calls, 2);
+  EXPECT_EQ(first->status_, RequestStatus::TurnComplete);
+  EXPECT_EQ(second->status_, RequestStatus::Closed);
+  EXPECT_EQ(second->CurrentSequenceLength(), closed_length);
+  EXPECT_EQ(second->ProcessedSequenceLength(), closed_processed);
+  EXPECT_EQ(second->TurnGeneratedTokens(), closed_generated);
+  EXPECT_EQ(LeakChecked<Search>::Count(), searches_while_resident);
+
+  // New work recycles the all-terminal static batch. The Engine completes the retained close on
+  // its owner thread before executing the replacement row, leaving only a lightweight tombstone.
+  auto replacement = CreateEngineRequest(engine, *model_);
+  replacement->BeginTurn(Prompt(30), std::optional<size_t>{1});
+  const int searches_before_recycle = LeakChecked<Search>::Count();
+  EXPECT_EQ(RunOne(*engine).request, replacement);
+  EXPECT_FALSE(second->BelongsTo(*engine));
+  EXPECT_FALSE(cache->IsResident(second));
+  EXPECT_EQ(cache->ResidentRequestCount(), 1u);
+  EXPECT_EQ(LeakChecked<Search>::Count(), searches_before_recycle - 1);
 }
 
-TEST_F(EngineRunTest, ClosingQueuedRequestPreservesDeferredStaticRowState) {
+TEST_F(EngineRunTest, ClosingQueuedRequestPreservesRetainedStaticRowState) {
   model_->config_->engine.dynamic_batching.reset();
   auto cache = std::make_shared<RecordingCacheManager>(
       model_, /*capacity=*/2, nullptr, /*supports_dynamic_batching=*/false);
@@ -1066,51 +1208,73 @@ TEST_F(EngineRunTest, ClosingQueuedRequestPreservesDeferredStaticRowState) {
 
   std::array<EngineEvent, 2> storage;
   ASSERT_EQ(engine->Run(storage), storage.size());
-  ASSERT_EQ(first->status_, RequestStatus::Active);
-  ASSERT_EQ(second->status_, RequestStatus::Active);
-
   first->Close();
-  ASSERT_EQ(first->status_, RequestStatus::Closed);
   auto queued = CreateRequestWithPrompt(engine, *model_, Prompt(30));
   ASSERT_EQ(queued->status_, RequestStatus::Assigned);
   ASSERT_FALSE(cache->IsResident(queued));
   queued->Close();
-  ASSERT_EQ(queued->status_, RequestStatus::Closed);
 
   ASSERT_EQ(engine->Run(storage), 1u);
   EXPECT_EQ(storage[0].request, second);
   EXPECT_EQ(second->status_, RequestStatus::TurnComplete);
 }
 
-TEST_F(EngineRunTest, StaticAbandonmentClosesLogicallyWhilePeerContinues) {
+TEST_F(EngineRunTest, StaticAbandonmentLogicallyRemovesActiveRowAtNextBoundary) {
   model_->config_->engine.dynamic_batching.reset();
-  auto cache = std::make_shared<RecordingCacheManager>(
-      model_, /*capacity=*/4, nullptr, /*supports_dynamic_batching=*/false);
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto cache = std::make_shared<StaticCacheManager>(model_);
   auto scheduler = Scheduler::Create(model_, cache);
   auto executor = std::make_unique<RecordingModelExecutor>(
-      model_, cache, /*forced_token=*/5);
+      model_, cache, filler);
+  auto* executor_observer = executor.get();
   EngineDependencies dependencies{cache, std::move(scheduler),
                                   std::move(executor)};
   auto engine = std::make_shared<Engine>(model_, std::move(dependencies));
   auto first = CreateEngineRequest(engine, *model_);
   auto second = CreateEngineRequest(engine, *model_);
-  ExternalRequestReference first_handle{*first};
+  ExternalRequestReference second_handle{*second};
   first->BeginTurn(Prompt(10), std::optional<size_t>{2});
   second->BeginTurn(Prompt(20), std::optional<size_t>{2});
 
-  std::array<EngineEvent, 2> storage;
-  ASSERT_EQ(engine->Run(storage), storage.size());
-  first_handle.Release();
+  // Capacity one retains the second row's first token event inside the Engine.
+  ASSERT_EQ(RunOne(*engine).request, first);
+  ASSERT_EQ(first->status_, RequestStatus::Active);
+  ASSERT_EQ(second->status_, RequestStatus::Active);
+  ASSERT_EQ(executor_observer->decode_calls, 1);
+  const int64_t closed_length = second->CurrentSequenceLength();
+  const int64_t closed_processed = second->ProcessedSequenceLength();
+  const size_t closed_generated = second->TurnGeneratedTokens();
+  const int searches_while_resident = LeakChecked<Search>::Count();
 
+  second_handle.Release();
   EXPECT_TRUE(engine->HasPendingRequests());
-  EXPECT_EQ(first->status_, RequestStatus::Closed);
-  EXPECT_EQ(cache->AllocatedCount(), 2u);
-  ASSERT_EQ(engine->Run(storage), 1u);
-  EXPECT_EQ(storage[0].request, second);
+  EXPECT_EQ(second->status_, RequestStatus::Closed);
+  EXPECT_TRUE(second->BelongsTo(*engine));
+  EXPECT_EQ(cache->ResidentRequestCount(), 2u);
+  EXPECT_EQ(LeakChecked<Search>::Count(), searches_while_resident);
 
-  EXPECT_FALSE(engine->HasPendingRequests());
-  EXPECT_EQ(first->status_, RequestStatus::Closed);
-  EXPECT_EQ(second->status_, RequestStatus::TurnComplete);
+  // The abandonment boundary purged the retained event. Only the peer advances and publishes.
+  const auto peer_event = RunOne(*engine);
+  EXPECT_EQ(peer_event.request, first);
+  EXPECT_EQ(peer_event.flags,
+            EngineEventFlagToken | EngineEventFlagTurnFinished);
+  EXPECT_EQ(executor_observer->decode_calls, 2);
+  EXPECT_EQ(first->status_, RequestStatus::TurnComplete);
+  EXPECT_EQ(second->status_, RequestStatus::Closed);
+  EXPECT_EQ(second->CurrentSequenceLength(), closed_length);
+  EXPECT_EQ(second->ProcessedSequenceLength(), closed_processed);
+  EXPECT_EQ(second->TurnGeneratedTokens(), closed_generated);
+  EXPECT_EQ(LeakChecked<Search>::Count(), searches_while_resident);
+
+  auto replacement = CreateEngineRequest(engine, *model_);
+  replacement->BeginTurn(Prompt(30), std::optional<size_t>{1});
+  const int searches_before_recycle = LeakChecked<Search>::Count();
+  EXPECT_EQ(RunOne(*engine).request, replacement);
+  EXPECT_FALSE(second->BelongsTo(*engine));
+  EXPECT_FALSE(cache->IsResident(second));
+  EXPECT_EQ(cache->ResidentRequestCount(), 1u);
+  EXPECT_EQ(LeakChecked<Search>::Count(), searches_before_recycle - 1);
 }
 
 TEST_F(EngineRunTest, CancelingLastStaticPeerReleasesDeferredCloseState) {

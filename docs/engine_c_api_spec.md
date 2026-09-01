@@ -453,12 +453,12 @@ At Engine construction:
 pending_events_.reserve(cache_manager_->MaxBatchSize());
 ```
 
-`reserve` allocates capacity without constructing events. A committed step produces at most one
-combined event per affected Request, so normal retained output is bounded by the scheduled batch
-size. Request creation grows the retained-event capacity to the tracked Request count because fatal
-handling publishes a terminal event for every executable Turn, including Requests outside the
-failed batch. This keeps event publication allocation-free after model/cache commit and after the
-Engine becomes unhealthy.
+`reserve` allocates capacity without constructing events. A committed step produces at most
+`kMaxGeneratedTokensPerStep` events per affected Request, so normal retained output is bounded by
+that limit times the scheduled batch size. Request creation grows dedicated fatal-event capacity
+for that complete retained step plus every tracked Request because fatal handling may publish a
+terminal event for executable Turns outside the failed batch. This keeps event publication
+allocation-free after model/cache commit and after the Engine becomes unhealthy.
 
 Conceptual positive-capacity `Run` flow:
 
@@ -501,8 +501,8 @@ hidden behind a false result. A false result does not close or release turn-comp
 callers must close or abandon those handles explicitly. If reclamation detects an ownership
 invariant failure, the Engine becomes unhealthy, terminal events are retained, and this operation
 returns true so the host can drain them through `OgaEngineRun`. A transient allocation failure
-returns an `OgaResult` without changing Engine or Request state; the next owner-thread boundary
-retries reclamation.
+returns an `OgaResult`, re-arms reclamation, and leaves any completed cleanup intact; the next
+owner-thread boundary safely retries the remaining work.
 
 The Engine API has no public asynchronous event queue. Hosts that want uninterrupted inference copy
 events into an application-owned bounded queue and continue pumping the owner thread. If the host
@@ -517,8 +517,8 @@ undelivered events, and release its Search, guidance, sampler, and parameter run
 owner thread. On the dynamic path, committed paged-cache ownership is released immediately. On the
 static path, a resident row is part of a shared batch allocation and cannot be physically released
 per Request; the closed/abandoned tombstone is no longer sampled or returned, but its row, shared
-cache allocation, and runtime state needed to execute that row remain until no executable peer can
-reference them. The shared cache allocation itself may remain until the whole batch recycles.
+cache allocation, and row-essential runtime state remain while another row stays open. The shared
+allocation is released when its final open row closes or when the whole batch recycles.
 
 The event's `request` is borrowed. It remains valid only while the caller retains the owned Request
 handle. Internal pending events hold a `shared_ptr<Request>` until delivery, but that does not relax
