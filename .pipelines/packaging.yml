@@ -93,7 +93,7 @@ extends:
         enabled: true
         configFile: '$(Build.SourcesDirectory)/.config/tsaoptions.json'
     settings:
-      networkIsolationPolicy: CFSClean,CFSClean2,CFSClean3
+      networkIsolationPolicy: CFSClean,CFSClean2,CFSClean3,DefaultDeny
     stages:
     # ---- Version (compute the shared package version once) -----------------
     - template: stages/version-stage.yml
