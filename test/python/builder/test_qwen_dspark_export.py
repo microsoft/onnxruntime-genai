@@ -7,6 +7,7 @@ import types
 
 import onnx_ir as ir
 import pytest
+import torch
 
 from models.builders.dspark import DSparkBuilder
 from models.builders.mtp import MTPModel
@@ -169,9 +170,40 @@ def test_kv_cache_uses_configured_paged_block_size(tmp_path):
         max_position_embeddings=128,
     )
 
-    builder._declare_io()
+    builder.declare_io()
 
     assert builder.values["past_key_values.0.key"].shape[1] == 512
+
+
+def test_non_fp8_lm_head_does_not_require_a_scale(tmp_path):
+    builder = DSparkBuilder(
+        _draft_checkpoint(tmp_path),
+        str(tmp_path),
+        ir.DataType.FLOAT16,
+        paged_block_size=256,
+        max_position_embeddings=128,
+    )
+    builder.weights = {"lm_head.weight": torch.ones((builder.vocab_size, builder.hidden_size), dtype=torch.float16)}
+
+    output = builder.make_lm_head("hidden_states")
+
+    assert output == "/lm_head/MatMul/output_0"
+
+
+def test_fp8_lm_head_requires_a_scale(tmp_path):
+    builder = DSparkBuilder(
+        _draft_checkpoint(tmp_path),
+        str(tmp_path),
+        ir.DataType.FLOAT16,
+        paged_block_size=256,
+        max_position_embeddings=128,
+    )
+    builder.weights = {
+        "lm_head.weight": torch.ones((builder.vocab_size, builder.hidden_size), dtype=torch.float8_e4m3fn)
+    }
+
+    with pytest.raises(ValueError, match="FP8 LM head weight is missing 'lm_head.weight_scale'"):
+        builder.make_lm_head("hidden_states")
 
 
 def test_drafter_uses_original_context_length(tmp_path, monkeypatch):

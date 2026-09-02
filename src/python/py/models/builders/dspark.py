@@ -122,7 +122,7 @@ class DSparkBuilder:
             name="dspark_graph",
         )
         self.model = ir.Model(self.graph, ir_version=10, producer_name="onnxruntime-genai")
-        self._const_cache: dict[str, str] = {}
+        self.const_cache: dict[str, str] = {}
 
     # ---------------------------------------------------------------- plumbing
 
@@ -175,9 +175,9 @@ class DSparkBuilder:
         """
         arr = np.asarray(values)
         key = f"{dtype}:{arr.shape}:{arr.tobytes().hex()}"
-        if key in self._const_cache:
-            return self._const_cache[key]
-        name = f"dspark.const.{len(self._const_cache)}"
+        if key in self.const_cache:
+            return self.const_cache[key]
+        name = f"dspark.const.{len(self.const_cache)}"
         np_dtype = {
             ir.DataType.INT64: np.int64,
             ir.DataType.INT32: np.int32,
@@ -186,22 +186,22 @@ class DSparkBuilder:
         tensor = ir.tensor(arr.astype(np_dtype), name=name)
         self.make_node("Constant", [], [name], name=f"{name}/Constant", value=tensor)
         self.make_value(name, dtype, tensor.shape)
-        self._const_cache[key] = name
+        self.const_cache[key] = name
         return name
 
     # --------------------------------------------------------------- op sugar
 
-    def _out(self, name):
+    def out(self, name):
         return f"{name}/output_0"
 
     def unary(self, op, name, x, dtype, shape, domain="", **attrs):
-        out = self._out(name)
+        out = self.out(name)
         self.make_node(op, [x], [out], name=name, domain=domain, **attrs)
         self.make_value(out, dtype, shape)
         return out
 
     def binary(self, op, name, a, b, dtype, shape):
-        out = self._out(name)
+        out = self.out(name)
         self.make_node(op, [a, b], [out], name=name)
         self.make_value(out, dtype, shape)
         return out
@@ -214,7 +214,7 @@ class DSparkBuilder:
         wname = weight_name or (name[1:].replace("/", ".") + ".weight")
         if wname not in self.values:
             self.make_initializer(weight_tensor.T, wname, to=self.io_dtype)
-        out = self._out(name)
+        out = self.out(name)
         self.make_node("MatMul", [x, wname], [out], name=name)
         self.make_value(out, self.io_dtype, [rows, out_features])
         return out
@@ -223,7 +223,7 @@ class DSparkBuilder:
         wname = weight_name or (name[1:].replace("/", ".") + ".weight")
         if wname not in self.values:
             self.make_initializer(weight_tensor, wname, to=self.io_dtype)
-        out = self._out(name)
+        out = self.out(name)
         self.make_node(
             "SimplifiedLayerNormalization",
             [x, wname],
@@ -239,7 +239,7 @@ class DSparkBuilder:
     def skip_rms_norm(self, name, root, skip, weight_tensor, rows, want_sum=True):
         wname = name[1:].replace("/", ".") + ".weight"
         self.make_initializer(weight_tensor, wname, to=self.io_dtype)
-        out = self._out(name)
+        out = self.out(name)
         sm = f"{name}/output_3"
         self.make_node(
             "SkipSimplifiedLayerNormalization",
@@ -256,7 +256,7 @@ class DSparkBuilder:
 
     # ------------------------------------------------------------ rope caches
 
-    def _yarn_inv_freq(self):
+    def yarn_inv_freq(self):
         """HF ``_compute_yarn_parameters`` for this checkpoint's ``rope_parameters``."""
         params = self.rope_parameters
         base = float(params["rope_theta"])
@@ -288,11 +288,11 @@ class DSparkBuilder:
         inv_freq = interpolation * (1.0 - weight) + extrapolation * weight
         return inv_freq.astype(np.float64), float(attention_factor)
 
-    def _make_rope_caches(self):
+    def make_rope_caches(self):
         # PagedAttention type-constrains cos/sin to the query's element type. YaRN's attention
         # factor scales cos/sin, exactly as HF's rotary embedding does, so it is baked in here.
         if str(self.rope_parameters.get("rope_type", "default")).lower() in ("yarn", "longrope"):
-            inv_freq, attention_factor = self._yarn_inv_freq()
+            inv_freq, attention_factor = self.yarn_inv_freq()
         else:
             dim = self.head_size
             base = float(self.rope_parameters["rope_theta"])
@@ -307,9 +307,9 @@ class DSparkBuilder:
     # ------------------------------------------------------------------ graph
 
     def make_model(self):
-        w = self._load_weights()
-        self._declare_io()
-        self._make_rope_caches()
+        w = self.load_weights()
+        self.declare_io()
+        self.make_rope_caches()
 
         rows_q = "num_block"
 
@@ -371,7 +371,7 @@ class DSparkBuilder:
                     f"{p}/input_layernorm", residual, hidden, w[f"layers.{i}.input_layernorm.weight"], rows_q
                 )
 
-            attn_out = self._make_attention(i, x, ctx_kv[i], rows_q)
+            attn_out = self.make_attention(i, x, ctx_kv[i], rows_q)
             y, residual = self.skip_rms_norm(
                 f"{p}/post_attention_layernorm",
                 residual,
@@ -379,17 +379,17 @@ class DSparkBuilder:
                 w[f"layers.{i}.post_attention_layernorm.weight"],
                 rows_q,
             )
-            hidden = self._make_mlp(i, y, w, rows_q)
+            hidden = self.make_mlp(i, y, w, rows_q)
 
         final, _ = self.skip_rms_norm("/dspark/norm", residual, hidden, w["norm.weight"], rows_q, want_sum=False)
 
-        self._make_candidates_and_markov(final, w)
+        self.make_candidates_and_markov(final, w)
         self.graph.sort()
         return self.model
 
-    def _make_attention(self, i, x, ctx_kv, rows_q):
+    def make_attention(self, i, x, ctx_kv, rows_q):
         p = f"/dspark/layers.{i}"
-        w = self._weights
+        w = self.weights
         q = self.matmul(
             f"{p}/attn/q_proj/MatMul",
             x,
@@ -421,10 +421,10 @@ class DSparkBuilder:
         # `qkv_row_map` indexes concat(block, context); `q_row_map` indexes the block rows alone
         # (context rows point at row 0 and their output is dropped).
         kv_dim = self.num_kv_heads * self.head_size
-        k_cat = self._out(f"{p}/attn/k_concat")
+        k_cat = self.out(f"{p}/attn/k_concat")
         self.make_node("Concat", [k, ctx_kv[0]], [k_cat], name=f"{p}/attn/k_concat", axis=0)
         self.make_value(k_cat, self.io_dtype, ["num_rows", kv_dim])
-        v_cat = self._out(f"{p}/attn/v_concat")
+        v_cat = self.out(f"{p}/attn/v_concat")
         self.make_node("Concat", [v, ctx_kv[1]], [v_cat], name=f"{p}/attn/v_concat", axis=0)
         self.make_value(v_cat, self.io_dtype, ["num_rows", kv_dim])
 
@@ -447,7 +447,7 @@ class DSparkBuilder:
         )
 
         attn_name = f"{p}/attn/PagedAttention"
-        attn_out = self._out(attn_name)
+        attn_out = self.out(attn_name)
         self.make_node(
             "PagedAttention",
             [
@@ -505,7 +505,7 @@ class DSparkBuilder:
             rows_q,
         )
 
-    def _make_mlp(self, i, x, w, rows_q):
+    def make_mlp(self, i, x, w, rows_q):
         p = f"/dspark/layers.{i}/mlp"
         gate = self.matmul(
             f"{p}/gate_proj/MatMul",
@@ -535,11 +535,11 @@ class DSparkBuilder:
             rows_q,
         )
 
-    def _make_candidates_and_markov(self, final, w):
+    def make_candidates_and_markov(self, final, w):
         """Top-k per position plus the Markov bigram bias, packaged as a candidate lattice."""
         n_spec, top_k, rank = self.num_draft_tokens, self.top_k, self.markov_rank
 
-        logits = self._make_lm_head(final)
+        logits = self.make_lm_head(final)
         logits32 = self.unary(
             "Cast", "/dspark/topk/Cast", logits, ir.DataType.FLOAT, ["num_block", self.vocab_size], to=ir.DataType.FLOAT
         )
@@ -562,7 +562,7 @@ class DSparkBuilder:
         ids2 = self.reshape(
             "/dspark/markov/ids", "input_ids", [-1, self.block_size], ir.DataType.INT64, ["batch_size", self.block_size]
         )
-        anchor = self._out("/dspark/markov/anchor")
+        anchor = self.out("/dspark/markov/anchor")
         self.make_node(
             "Slice", [ids2, self.const([0]), self.const([1]), self.const([1])], [anchor], name="/dspark/markov/anchor"
         )
@@ -576,7 +576,7 @@ class DSparkBuilder:
             ir.DataType.INT64,
             ["batch_size", 1, top_k],
         )
-        prev_tail = self._out("/dspark/markov/prev_tail")
+        prev_tail = self.out("/dspark/markov/prev_tail")
         self.make_node(
             "Slice",
             [cand, self.const([0]), self.const([n_spec - 1]), self.const([1])],
@@ -584,7 +584,7 @@ class DSparkBuilder:
             name="/dspark/markov/prev_tail",
         )
         self.make_value(prev_tail, ir.DataType.INT64, ["batch_size", n_spec - 1, top_k])
-        prev = self._out("/dspark/markov/prev")
+        prev = self.out("/dspark/markov/prev")
         self.make_node("Concat", [anchor_tiled, prev_tail], [prev], name="/dspark/markov/prev", axis=1)
         self.make_value(prev, ir.DataType.INT64, ["batch_size", n_spec, top_k])
 
@@ -653,14 +653,17 @@ class DSparkBuilder:
             self.graph.outputs.append(self.values[f"present.{i}.key"])
             self.graph.outputs.append(self.values[f"present.{i}.value"])
 
-    def _make_lm_head(self, root):
-        w = self._weights
-        weight, scale = w["lm_head.weight"], w["lm_head.weight_scale"]
+    def make_lm_head(self, root):
+        w = self.weights
+        weight = w["lm_head.weight"]
         if weight.dtype != torch.float8_e4m3fn:
             name = "/lm_head/MatMul"
             return self.matmul(
                 name, root, weight, self.hidden_size, self.vocab_size, "num_block", weight_name="lm_head.MatMul.weight"
             )
+        scale = w.get("lm_head.weight_scale")
+        if scale is None:
+            raise ValueError("FP8 LM head weight is missing 'lm_head.weight_scale'.")
         # The quantized head is the target's and only runs in the target's dtype. Its input is the
         # drafter's final normed hidden state, which is back inside the fp16 range.
         root = self.unary(
@@ -684,7 +687,7 @@ class DSparkBuilder:
 
     # ------------------------------------------------------------------- I/O
 
-    def _declare_io(self):
+    def declare_io(self):
         decls = [
             ("aux_hidden_states", self.external_dtype, ["num_ctx", self.aux_hidden_size]),
             ("input_ids", ir.DataType.INT64, ["num_block"]),
@@ -710,7 +713,7 @@ class DSparkBuilder:
 
     # --------------------------------------------------------------- weights
 
-    def _load_weights(self):
+    def load_weights(self):
         import safetensors.torch as safetensors_torch  # noqa: PLC0415
 
         weights = {}
@@ -737,7 +740,7 @@ class DSparkBuilder:
         for required in ("embed_tokens.weight", "lm_head.weight"):
             if required not in weights:
                 raise ValueError(f"Could not find '{required}' in the target checkpoint '{self.target_dir}'.")
-        self._weights = weights
+        self.weights = weights
         return weights
 
     # ------------------------------------------------------------------ save
