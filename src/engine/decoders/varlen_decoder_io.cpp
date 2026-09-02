@@ -558,11 +558,9 @@ void VarlenDecoderIO::PrepareHiddenStates(std::shared_ptr<DecoderOnly_Model> mod
 void VarlenDecoderIO::PrepareAuxHiddenStates(std::shared_ptr<DecoderOnly_Model> model,
                                              ScheduledRequests& scheduled_requests) {
   // Only models exported with aux_hidden_state_layers expose this; it is what a DFlash 2 drafter
-  // turns into its own per-layer K/V.
-  const auto& dflash2 = model->config_->model.dflash2;
-  const auto& name = dflash2.filename.empty()
-                         ? model->config_->model.decoder.outputs.aux_hidden_states
-                         : dflash2.main_aux_hidden_states;
+  // turns into its own per-layer K/V. Engine construction points this at
+  // model.dflash2.main_aux_hidden_states when a drafter is configured.
+  const auto& name = model->config_->model.decoder.outputs.aux_hidden_states;
   if (name.empty() || !model->session_info_.HasOutput(name)) {
     return;
   }

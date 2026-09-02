@@ -1123,6 +1123,11 @@ allocated per call and therefore cannot be captured safely. If this optional pos
 run fails, the Engine discards any partial proposal, releases the drafter, and still publishes the
 already committed target events; subsequent Turns continue without automatic DFlash 2 proposals.
 
+The drafter keeps a fixed sliding-window ring per request from that request's first decode step
+until it is closed, so its pool is sized for `max_batch_size` rings. A request that first decodes
+while every ring is taken is skipped for the rest of its life and decodes without DFlash 2 drafts;
+the drafter keeps serving the requests that already hold a ring.
+
 ## Backpressure and fairness
 
 Continuous batching does not mean every pending request runs on every step.

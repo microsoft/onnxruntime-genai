@@ -243,7 +243,6 @@ TEST(Dflash2ConfigTest, ProjectsDrafterWithoutTargetState) {
 
 TEST(Dflash2ConfigTest, AccountsForWindowedPagedCache) {
   const auto config = MakeDflash2Config();
-  EXPECT_EQ(Dflash2Drafter::BytesPerBlock(config, 16), 3072u);
   EXPECT_EQ(Dflash2Drafter::PoolBlocks(config, 8, 3), 15u);
 }
 

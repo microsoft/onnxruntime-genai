@@ -261,23 +261,6 @@ std::unique_ptr<State> Dflash2Model::CreateState(DeviceSpan<int32_t>, const Gene
   throw std::logic_error("The DFlash 2 drafter is driven by the Engine and has no State.");
 }
 
-size_t Dflash2Drafter::BytesPerBlock(const Config& config, size_t paged_block_size) {
-  const auto& dflash2 = config.model.dflash2;
-  if (dflash2.filename.empty()) {
-    return 0;
-  }
-  // K and V, for every layer, for every slot in a block. The cache element width follows the
-  // drafter body, which is bfloat16.
-  size_t bytes = CheckedMultiply(size_t{2}, static_cast<size_t>(dflash2.num_hidden_layers),
-                                 "DFlash 2 cache bytes per block");
-  bytes = CheckedMultiply(bytes, paged_block_size, "DFlash 2 cache bytes per block");
-  bytes = CheckedMultiply(bytes, static_cast<size_t>(dflash2.num_key_value_heads),
-                          "DFlash 2 cache bytes per block");
-  bytes = CheckedMultiply(bytes, static_cast<size_t>(dflash2.head_size),
-                          "DFlash 2 cache bytes per block");
-  return CheckedMultiply(bytes, sizeof(uint16_t), "DFlash 2 cache bytes per block");
-}
-
 size_t Dflash2Drafter::PoolBlocks(const Config& config, size_t paged_block_size,
                                   size_t max_batch_size) {
   const auto& dflash2 = config.model.dflash2;
@@ -372,8 +355,29 @@ void Dflash2Drafter::AllocateCache() {
   }
 }
 
-Dflash2Drafter::RequestState& Dflash2Drafter::StateFor(const Request* request) {
-  return requests_[request];
+bool Dflash2Drafter::Admit(const Feed& feed) {
+  if (requests_.contains(feed.request)) {
+    return true;
+  }
+  // The drafter cannot backfill K/V for context whose auxiliary hidden states have already been
+  // consumed, so a request can only join from the start of its sequence. Requests that arrive when
+  // the ring pool is full decode without DFlash 2 drafts instead of taking the whole drafter down.
+  if (feed.first_position != 0) {
+    return false;
+  }
+  if (ring_blocks_ != 0) {
+    if (free_blocks_.size() < ring_blocks_) {
+      return false;
+    }
+    // Claim the whole ring now so a second new request in the same step sees the smaller pool.
+    EnsureBlocks(requests_[feed.request], 0);
+    return true;
+  }
+  if (free_blocks_.empty()) {
+    return false;
+  }
+  requests_.emplace(feed.request, RequestState{});
+  return true;
 }
 
 void Dflash2Drafter::EnsureBlocks(RequestState& state, size_t positions) {
@@ -408,20 +412,32 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   const size_t num_spec = static_cast<size_t>(config_.num_draft_tokens);
   const size_t top_k = static_cast<size_t>(config_.selector_top_k);
 
-  // Batch layout. Every feed contributes its context rows so the drafter cache never develops a
-  // hole; only the feeds that asked also contribute a query block.
-  std::vector<size_t> block_feed_indices;
+  // Only requests the ring pool can hold take part; the rest keep decoding without drafts.
+  std::vector<size_t> served;
+  served.reserve(feeds.size());
   for (size_t i = 0; i < feeds.size(); ++i) {
+    if (Admit(feeds[i])) {
+      served.push_back(i);
+    }
+  }
+  if (served.empty()) {
+    return;
+  }
+
+  // Batch layout. Every served feed contributes its context rows so the drafter cache never
+  // develops a hole; only the feeds that asked also contribute a query block.
+  std::vector<size_t> block_feed_indices;
+  for (const size_t i : served) {
     if (feeds[i].wants_drafts) {
       block_feed_indices.push_back(i);
     }
   }
   // The graph reshapes the query rows to [batch, block_size, hidden], so it needs at least one
-  // block. When nothing is eligible, borrow the first feed's slot and drop its lattice: the block
-  // rows only write scratch K/V at positions a later step overwrites.
+  // block. When nothing is eligible, borrow the first served feed's slot and drop its lattice: the
+  // block rows only write scratch K/V at positions a later step overwrites.
   const bool drafts_wanted = !block_feed_indices.empty();
   if (!drafts_wanted) {
-    block_feed_indices.push_back(0);
+    block_feed_indices.push_back(served.front());
   }
   std::vector<size_t> block_slot_of_feed(feeds.size(), block_feed_indices.size());
   for (size_t slot = 0; slot < block_feed_indices.size(); ++slot) {
@@ -432,8 +448,8 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
       CheckedMultiply(block_feed_indices.size(), block_size, "DFlash 2 block rows");
   CheckedMetadataValue(num_block_rows, "DFlash 2 block rows");
   size_t num_ctx_rows = 0;
-  for (const auto& feed : feeds) {
-    num_ctx_rows = CheckedAdd(num_ctx_rows, feed.aux_row_count, "DFlash 2 context rows");
+  for (const size_t i : served) {
+    num_ctx_rows = CheckedAdd(num_ctx_rows, feeds[i].aux_row_count, "DFlash 2 context rows");
   }
 
   PackedLayout layout;
@@ -443,8 +459,8 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   layout.q_row_map.reserve(reserved_rows);
   layout.qkv_row_map.reserve(reserved_rows);
   layout.block_row_index.reserve(num_block_rows);
-  layout.cumulative_sequence_lengths.reserve(feeds.size() + 1);
-  layout.past_sequence_lengths.reserve(feeds.size());
+  layout.cumulative_sequence_lengths.reserve(served.size() + 1);
+  layout.past_sequence_lengths.reserve(served.size());
 
   // Rows this step actually ingests, after a windowed drafter drops the ones its query block can
   // never read.
@@ -453,9 +469,9 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   size_t ctx_row = 0;
   size_t max_blocks = 0;
   num_ctx_rows = 0;
-  for (size_t i = 0; i < feeds.size(); ++i) {
+  for (const size_t i : served) {
     const auto& feed = feeds[i];
-    auto& state = StateFor(feed.request);
+    auto& state = requests_[feed.request];
     if (state.cached_positions != feed.first_position) {
       throw std::logic_error(
           "The DFlash 2 drafter's cached context is not contiguous with the target's step.");
@@ -473,7 +489,7 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
       CheckedAdd(num_ctx_rows, num_block_rows, "DFlash 2 packed rows"),
       "DFlash 2 packed rows");
 
-  for (size_t i = 0; i < feeds.size(); ++i) {
+  for (const size_t i : served) {
     const auto& feed = feeds[i];
     auto& state = requests_[feed.request];
     const size_t first_position = CheckedAdd(
@@ -552,7 +568,7 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   auto source_bytes = aux_hidden_states.GetByteSpan();
   auto destination_bytes = packed_aux->GetByteSpan();
   size_t destination_row = 0;
-  for (size_t i = 0; i < feeds.size(); ++i) {
+  for (const size_t i : served) {
     if (ingest_count[i] == 0) {
       continue;
     }
@@ -582,27 +598,27 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   fill_int32(*qkv_row_map, layout.qkv_row_map);
   auto block_row_index = make(Ort::TypeToTensorType<int32_t>, {static_cast<int64_t>(num_block_rows)});
   fill_int32(*block_row_index, layout.block_row_index);
-  auto cumulative = make(Ort::TypeToTensorType<int32_t>, {static_cast<int64_t>(feeds.size() + 1)});
+  auto cumulative = make(Ort::TypeToTensorType<int32_t>, {static_cast<int64_t>(served.size() + 1)});
   fill_int32(*cumulative, layout.cumulative_sequence_lengths);
-  auto past_lengths = make(Ort::TypeToTensorType<int32_t>, {static_cast<int64_t>(feeds.size())});
+  auto past_lengths = make(Ort::TypeToTensorType<int32_t>, {static_cast<int64_t>(served.size())});
   fill_int32(*past_lengths, layout.past_sequence_lengths);
 
   auto block_table = make(Ort::TypeToTensorType<int32_t>,
-                          {static_cast<int64_t>(feeds.size()), static_cast<int64_t>(max_blocks)});
+                          {static_cast<int64_t>(served.size()), static_cast<int64_t>(max_blocks)});
   {
     auto span = block_table->GetDeviceSpan<int32_t>();
     auto cpu = span.CpuSpan();
     std::fill(cpu.begin(), cpu.end(), int32_t{-1});
-    for (size_t i = 0; i < feeds.size(); ++i) {
-      const auto& blocks = requests_[feeds[i].request].blocks;
+    for (size_t row = 0; row < served.size(); ++row) {
+      const auto& blocks = requests_[feeds[served[row]].request].blocks;
       if (ring_blocks_ == 0) {
-        std::copy(blocks.begin(), blocks.end(), cpu.begin() + i * max_blocks);
+        std::copy(blocks.begin(), blocks.end(), cpu.begin() + row * max_blocks);
         continue;
       }
       // A windowed drafter repeats its ring across every column: column j holds the block that
       // owns position j * block_size, which is ring[j % ring_blocks].
       for (size_t column = 0; column < max_blocks; ++column) {
-        cpu[i * max_blocks + column] = blocks[column % blocks.size()];
+        cpu[row * max_blocks + column] = blocks[column % blocks.size()];
       }
     }
     span.CopyCpuToDevice();

@@ -369,7 +369,7 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
   }
 }
 
-void Engine::PublishDflash2Drafts(const StepPlan& plan, ScheduledRequests& scheduled_requests) {
+void Engine::PublishDflash2Drafts(ScheduledRequests& scheduled_requests) {
   if (dflash2_feeds_.empty()) {
     return;
   }
@@ -388,7 +388,7 @@ void Engine::PublishDflash2Drafts(const StepPlan& plan, ScheduledRequests& sched
     // The drafter always emits its full block; a request with a narrower budget takes the prefix
     // of the same greedy path.
     drafts.resize(std::min(drafts.size(), dflash2_draft_widths_[i]));
-    plan.requests[i].request->SetDraftTokens(drafts);
+    dflash2_feeds_[i].request->SetDraftTokens(drafts);
   }
 }
 
@@ -1779,7 +1779,7 @@ void Engine::RunDynamic() {
       }
       if (dflash2_drafter_ && MaxDraftTokensPerStep() > 0) {
         try {
-          PublishDflash2Drafts(step_plan_, scheduled_requests);
+          PublishDflash2Drafts(scheduled_requests);
         } catch (...) {
           const auto dflash2_error = std::current_exception();
           for (const auto& feed : dflash2_feeds_) {

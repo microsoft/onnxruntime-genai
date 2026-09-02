@@ -74,9 +74,6 @@ struct Dflash2Drafter {
 
   Dflash2Drafter(std::shared_ptr<Dflash2Model> model, size_t paged_block_size, size_t num_blocks);
 
-  // Bytes of drafter K/V per paged block, so the main cache pool can budget for it up front.
-  static size_t BytesPerBlock(const Config& config, size_t paged_block_size);
-
   // Blocks the pool needs for `max_batch_size` concurrent requests. The drafter is windowed, so a
   // request only needs a fixed ring however long its context grows.
   static size_t PoolBlocks(const Config& config, size_t paged_block_size, size_t max_batch_size);
@@ -84,9 +81,13 @@ struct Dflash2Drafter {
   size_t NumDraftTokens() const { return static_cast<size_t>(config_.num_draft_tokens); }
 
   /**
-   * @brief Ingests every feed's context and drafts for the feeds that asked.
+   * @brief Ingests every served feed's context and drafts for the ones that asked.
    * @param aux_hidden_states The target's packed [token_count, aux_hidden_size] output.
-   * @param drafts Resized to feeds.size(); entry i is empty unless feeds[i].wants_drafts.
+   * @param drafts Resized to feeds.size(); entry i is empty unless feeds[i] was served and asked.
+   *
+   * A request joins the drafter on its first feed, which must start at position zero, and keeps its
+   * ring until Release. Requests that arrive once the ring pool is full are skipped for good rather
+   * than failing the step, so they decode without DFlash 2 drafts.
    */
   void Propose(Tensor& aux_hidden_states, std::span<const Feed> feeds,
                std::vector<std::vector<int32_t>>& drafts);
@@ -100,7 +101,8 @@ struct Dflash2Drafter {
     size_t cached_positions{};  // Positions [0, cached_positions) hold committed context K/V.
   };
 
-  RequestState& StateFor(const Request* request);
+  // Whether the drafter can carry this feed's request, admitting it to the pool when it can.
+  bool Admit(const Feed& feed);
   // Grows a request's block list so positions [0, positions) are addressable. A windowed drafter
   // gets a fixed ring instead, which its block table repeats across every column.
   void EnsureBlocks(RequestState& state, size_t positions);

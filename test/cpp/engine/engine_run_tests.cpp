@@ -2657,7 +2657,7 @@ TEST_F(EngineRunTest, MtpCleanupFailureLeavesCancellationRetryable) {
   const uint64_t turn_id = request->CurrentTurnId();
 
   engine.mtp_cache->ThrowDeallocateFailureOnce();
-  EXPECT_THROW(request->Cancel(turn_id), std::runtime_error);
+  EXPECT_THROW(request->Cancel(turn_id), std::bad_alloc);
   EXPECT_EQ(request->Status(), RequestStatus::Active);
   EXPECT_EQ(engine.mtp_cache->AllocatedCount(), 1u);
 
