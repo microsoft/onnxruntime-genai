@@ -87,6 +87,10 @@ struct EngineDependencies {
   EngineStepErrorFactory make_step_error{};
 };
 
+void ValidateMtpModelCompatibility(const Config& config,
+                                   const ModelStateMetadata& target_metadata,
+                                   const ModelStateMetadata& head_metadata);
+
 struct EngineTransactionMetrics {
   uint64_t committed_steps{};
   uint64_t capacity_deferrals{};
@@ -250,6 +254,8 @@ struct Engine : std::enable_shared_from_this<Engine>,
   std::shared_ptr<CacheManager> mtp_cache_manager_;
   std::unique_ptr<ModelExecutor> mtp_model_executor_;
   std::unordered_map<const Request*, std::shared_ptr<Request>> mtp_requests_;
+  size_t mtp_consecutive_failures_{};
+  bool mtp_disabled_{};
   // Present only when model.dflash2 names a block drafter. Owns its own session and paged cache.
   std::unique_ptr<Dflash2Drafter> dflash2_drafter_;
   std::vector<Dflash2Drafter::Feed> dflash2_feeds_;

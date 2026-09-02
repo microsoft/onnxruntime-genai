@@ -14,6 +14,7 @@ static_assert(kMaxDraftTokensPerStep < kSpeculativeAcceptanceLengthBins);
 namespace {
 
 constexpr size_t kFatalEventOverhead = 2;
+constexpr size_t kMtpFailureDisableThreshold = 3;
 
 struct MtpRollbackError : std::runtime_error {
   using std::runtime_error::runtime_error;
@@ -209,6 +210,37 @@ Engine::~Engine() {
   }
 }
 
+void ValidateMtpModelCompatibility(const Config& config,
+                                   const ModelStateMetadata& target_metadata,
+                                   const ModelStateMetadata& head_metadata) {
+  const auto& mtp = config.model.mtp;
+  if (mtp.main_hidden_states.empty() ||
+      !target_metadata.HasOutput(mtp.main_hidden_states)) {
+    throw std::runtime_error(
+        "model.mtp.main_hidden_states must name a main-model output.");
+  }
+  if (mtp.inputs.hidden_states.empty() ||
+      !head_metadata.HasInput(mtp.inputs.hidden_states)) {
+    throw std::runtime_error(
+        "model.mtp.inputs.hidden_states must name an MTP-head input.");
+  }
+
+  const auto target_shape =
+      target_metadata.GetOutputShape(mtp.main_hidden_states);
+  const auto head_shape = head_metadata.GetInputShape(mtp.inputs.hidden_states);
+  const int64_t hidden_size = config.model.decoder.hidden_size;
+  if (target_shape.size() != 2 || target_shape[1] != hidden_size ||
+      head_shape.size() != 2 || head_shape[1] != hidden_size) {
+    throw std::runtime_error(
+        "MTP requires matching 2-D hidden-state tensors with the configured static width.");
+  }
+  if (target_metadata.GetOutputDataType(mtp.main_hidden_states) !=
+      head_metadata.GetInputDataType(mtp.inputs.hidden_states)) {
+    throw std::runtime_error(
+        "MTP requires matching main-output and head-input hidden-state tensor types.");
+  }
+}
+
 EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
   std::shared_ptr<DecoderOnly_Model> mtp_model;
   size_t mtp_bytes_per_block = 0;
@@ -216,8 +248,13 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
     if (!model->config_->engine.dynamic_batching) {
       throw std::runtime_error("An Engine-hosted MTP head requires dynamic batching.");
     }
+    auto& target_hidden_states =
+        model->config_->model.decoder.outputs.hidden_states;
+    target_hidden_states = model->config_->model.mtp.main_hidden_states;
     mtp_model = std::make_shared<DecoderOnly_Model>(
         CreateMtpDecoderConfig(*model->config_), GetOrtEnv());
+    ValidateMtpModelCompatibility(
+        *model->config_, model->session_info_, mtp_model->session_info_);
     mtp_bytes_per_block = PagedKeyValueCacheBytesPerBlock(mtp_model);
     // The head consumes the target decoder's packed hidden states, so the target must emit them.
     model->config_->engine.hidden_states_output_required = true;
@@ -313,14 +350,14 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
     const int64_t length_after_step = static_cast<int64_t>(first_position + valid_rows) +
                                       (results[i].token_appended ? 1 : 0);
     const size_t sequence_limit =
-        std::min(static_cast<size_t>(search.max_length), entry.request->max_total_tokens_);
+        std::min(static_cast<size_t>(search.max_length), entry.request->MaxTotalTokens());
     const size_t remaining_turn_tokens = entry.request->RemainingTurnTokenBudget();
     const size_t remaining_turn_tokens_after_step =
         results[i].visible_token_count < remaining_turn_tokens
             ? remaining_turn_tokens - results[i].visible_token_count
             : 0;
     const size_t width = Dflash2DraftWidth(
-        max_drafts, static_cast<size_t>(entry.request->params_->speculative.max_draft_tokens),
+        max_drafts, static_cast<size_t>(entry.request->SpeculativeOptions().max_draft_tokens),
         static_cast<size_t>(length_after_step), sequence_limit,
         remaining_turn_tokens_after_step);
     feed.wants_drafts = width > 0 && results[i].token_appended && !results[i].done && greedy &&
@@ -359,7 +396,7 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
     const StepPlan& target_plan,
     const std::vector<RequestStepResult>& target_results,
     ScheduledRequests& target_requests) {
-  if (!mtp_model_ || MaxDraftTokensPerStep() == 0) {
+  if (!mtp_model_ || mtp_disabled_ || MaxDraftTokensPerStep() == 0) {
     return nullptr;
   }
   if (target_results.size() != target_plan.requests.size()) {
@@ -1034,11 +1071,12 @@ bool Engine::CancelRequest(const std::shared_ptr<Request>& request, uint64_t tur
     pending_events_.reserve(pending_events_.size() + 1);
   }
 
+  // The canceled turn's suffix is gone, so the shadow that mirrored it must not survive into the
+  // next turn. Release it before changing request state so a cleanup failure leaves cancellation
+  // retryable.
+  CloseMtpRequest(request);
   const auto counters =
       request->CompleteCancelFromEngine(*this, turn_id);
-  // The canceled turn's suffix is gone, so the shadow that mirrored it must not survive into the
-  // next turn.
-  CloseMtpRequest(request);
   EngineEvent terminal;
   terminal.request = request;
   terminal.turn_id = turn_id;
@@ -1625,13 +1663,31 @@ void Engine::RunDynamic() {
       // commit without drafts. Contract violations and failed MTP rollback stay fatal below.
       try {
         mtp_step = PrepareMtpStep(step_plan_, step_results_, scheduled_requests);
+        mtp_consecutive_failures_ = 0;
       } catch (const MtpRollbackError&) {
         throw;
       } catch (const std::logic_error&) {
         throw;
       } catch (...) {
+        const auto mtp_error = std::current_exception();
         mtp_step.reset();
         ++speculative_stats_.standard_fallback_steps;
+        ++speculative_stats_.mtp_failures;
+        ++mtp_consecutive_failures_;
+        const bool disable_mtp =
+            mtp_consecutive_failures_ >= kMtpFailureDisableThreshold;
+        mtp_disabled_ = disable_mtp;
+        if (mtp_consecutive_failures_ == 1 || disable_mtp) {
+          try {
+            Log("warning", AddExceptionCause(
+                               disable_mtp
+                                   ? "Disabling MTP after repeated proposal failures."
+                                   : "MTP proposal failed; using target-only decoding for this step.",
+                               mtp_error));
+          } catch (...) {
+            // Diagnostics must not turn an optional drafter failure into a target failure.
+          }
+        }
       }
       for (size_t i = 0; i < step_plan_.requests.size(); ++i) {
         if (step_results_[i].visible_token_count != 0 ||
@@ -1728,7 +1784,7 @@ void Engine::RunDynamic() {
           const auto dflash2_error = std::current_exception();
           for (const auto& feed : dflash2_feeds_) {
             if (feed.request) {
-              feed.request->draft_tokens_.clear();
+              feed.request->SetDraftTokens({});
             }
           }
           dflash2_drafter_.reset();

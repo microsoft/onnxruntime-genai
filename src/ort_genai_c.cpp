@@ -906,6 +906,8 @@ OgaResult* OGA_API_CALL OgaSpeculativeStatsGetCount(
     *value = stats->cooldown_remaining;
   else if (key == "standard_fallback_steps")
     *value = stats->standard_fallback_steps;
+  else if (key == "mtp_failures")
+    *value = stats->mtp_failures;
   else if (key == "full_accept_rounds")
     *value = stats->full_accept_rounds;
   else if (key == "partial_accept_rounds")

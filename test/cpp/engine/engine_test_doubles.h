@@ -114,6 +114,7 @@ struct RecordingCacheManager : CacheManager {
   size_t ResidentRequestCount() const override { return allocated_.size(); }
 
   StepPlanningResult PlanStepResources(StepPlan& plan) const override {
+    plan_step_resources_calls++;
     if (always_throw_planning_bad_alloc_ ||
         std::exchange(throw_planning_bad_alloc_, false)) {
       throw std::bad_alloc{};
@@ -343,6 +344,7 @@ struct RecordingCacheManager : CacheManager {
 
   // Recorded call counts.
   mutable int can_allocate_calls{0};
+  mutable int plan_step_resources_calls{0};
   int allocate_calls{0};
   int deallocate_calls{0};
   int step_calls{0};

@@ -454,9 +454,10 @@ one block for each pool is rejected at Engine construction.
 **Failure isolation.** The target decode is mandatory; MTP drafting is optional acceleration. A
 recoverable head failure (cache pressure, shape mismatch, binding or session error) releases only
 MTP state, and the target step still commits — without drafts for that step — and increments
-`standard_fallback_steps` in the speculative statistics. Only a contract violation, or a failure to
-roll MTP state back, marks the Engine unhealthy. A persistent head failure therefore degrades to
-ordinary decoding instead of stalling the request.
+`standard_fallback_steps` and `mtp_failures` in the speculative statistics. The first failure is
+logged, and three consecutive failures disable automatic MTP drafting for that Engine. Only a
+contract violation, or a failure to roll MTP state back, marks the Engine unhealthy. A persistent
+head failure therefore degrades to ordinary decoding without repeatedly running a broken head.
 
 **Shadow lifecycle.** The head's shadow Request mirrors only the suffix the target committed during
 the current turn. Beginning a continuation and canceling a turn both drop the shadow and release its
@@ -471,8 +472,9 @@ verify is skipped for that step and picks drafting back up on its next decode st
 decode paths. A verified drafted step draws its target tokens from the Request's own host random
 stream because acceptance is sequential, while an ordinary batched step draws from the device
 sampler state. Whether drafts are admitted depends on batch composition and cache pressure, so a
-seeded run is only bit-reproducible against another run scheduled the same way. Disable `model.mtp`
-when exact cross-scheduling reproducibility is required.
+seeded run is only bit-reproducible against another run with the same supplied drafts and scheduling
+path. Disabling `model.mtp` does not make caller-provided drafts scheduling-independent; exact
+repeatability requires replaying the same proposals and schedule.
 
 **Telemetry thread ownership.** `Engine::GetSpeculativeStats` (`OgaEngineGetSpeculativeStats`,
 `Engine.get_speculative_stats`) reads counters that `Run()` mutates without synchronization. Like

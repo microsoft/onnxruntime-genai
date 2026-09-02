@@ -1109,6 +1109,8 @@ struct OgaRequest : OgaAbstract {
 
   /**
    * \brief Proposes speculative draft tokens for the next decode operation.
+   *
+   * Seeded sampled output is reproducible only with the same proposal and scheduling path.
    */
   void SetDraftTokens(const OgaSequences& tokens) {
     OgaCheckResult(OgaRequestSetDraftTokens(this, &tokens));

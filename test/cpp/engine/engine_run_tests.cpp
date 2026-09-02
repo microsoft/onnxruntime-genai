@@ -2560,6 +2560,7 @@ TEST_F(EngineRunTest, MtpPlanningFailureCommitsTargetStepWithoutDrafts) {
   EXPECT_EQ(request->PendingDraftTokenCount(), 0u);
   EXPECT_EQ(engine.mtp_cache->AllocatedCount(), 1u);
   EXPECT_EQ(engine.engine->GetSpeculativeStats().standard_fallback_steps, 1u);
+  EXPECT_EQ(engine.engine->GetSpeculativeStats().mtp_failures, 1u);
 
   // The next step drafts again from the restored shadow.
   ASSERT_GT(engine.engine->Run(storage), 0u);
@@ -2580,7 +2581,7 @@ TEST_F(EngineRunTest, PersistentMtpFailureKeepsTheRequestAdvancing) {
   engine.mtp_cache->ThrowPlanningBadAllocAlways();
   std::array<EngineEvent, 8> storage;
   int64_t previous_length = request->Snapshot().current_sequence_length;
-  constexpr int kSteps = 4;
+  constexpr int kSteps = 5;
   for (int step = 0; step < kSteps; ++step) {
     const size_t count = engine.engine->Run(storage);
     ASSERT_EQ(count, 1u);
@@ -2591,8 +2592,9 @@ TEST_F(EngineRunTest, PersistentMtpFailureKeepsTheRequestAdvancing) {
     previous_length = length;
     EXPECT_EQ(request->PendingDraftTokenCount(), 0u);
   }
-  EXPECT_EQ(engine.engine->GetSpeculativeStats().standard_fallback_steps,
-            static_cast<size_t>(kSteps));
+  EXPECT_EQ(engine.engine->GetSpeculativeStats().standard_fallback_steps, 3u);
+  EXPECT_EQ(engine.engine->GetSpeculativeStats().mtp_failures, 3u);
+  EXPECT_EQ(engine.mtp_cache->plan_step_resources_calls, 3);
 }
 
 TEST_F(EngineRunTest, ContinuationDropsTheMtpShadowFromThePreviousTurn) {
@@ -2639,6 +2641,27 @@ TEST_F(EngineRunTest, CancelDropsTheMtpShadow) {
   ASSERT_EQ(engine.mtp_cache->AllocatedCount(), 1u);
 
   EXPECT_TRUE(request->Cancel(request->CurrentTurnId()));
+  EXPECT_EQ(engine.mtp_cache->AllocatedCount(), 0u);
+}
+
+TEST_F(EngineRunTest, MtpCleanupFailureLeavesCancellationRetryable) {
+  model_ = LoadSyntheticPagedMtpModel();
+  const int32_t eos = EosToken(*model_);
+  auto engine = MakeMtpDoublesEngine(model_, eos == 5 ? 6 : 5);
+  auto request = CreateRequestWithPrompt(
+      engine.engine, *model_, Prompt(10));
+
+  std::array<EngineEvent, 8> storage;
+  ASSERT_GT(engine.engine->Run(storage), 0u);
+  ASSERT_EQ(engine.mtp_cache->AllocatedCount(), 1u);
+  const uint64_t turn_id = request->CurrentTurnId();
+
+  engine.mtp_cache->ThrowDeallocateFailureOnce();
+  EXPECT_THROW(request->Cancel(turn_id), std::runtime_error);
+  EXPECT_EQ(request->Status(), RequestStatus::Active);
+  EXPECT_EQ(engine.mtp_cache->AllocatedCount(), 1u);
+
+  EXPECT_TRUE(request->Cancel(turn_id));
   EXPECT_EQ(engine.mtp_cache->AllocatedCount(), 0u);
 }
 
