@@ -70,6 +70,14 @@ struct CacheManager {
 
   virtual void Deallocate(std::vector<std::shared_ptr<Request>>& requests) = 0;
 
+  // Validates and then releases all committed model state for a completed Request so its retained
+  // token prefix can be replayed after rewind. Validation must not mutate state. The release keeps
+  // scheduler ownership and Request identity intact.
+  virtual void ValidateRewind(
+      const std::shared_ptr<Request>& request) const = 0;
+  virtual void ReleaseForRewind(
+      const std::shared_ptr<Request>& request) = 0;
+
   // Engine teardown cannot use the normal Request close path because the Request's weak Engine
   // reference has already expired. This no-throw path must release any cache ownership for the
   // Request before the Engine drops its final strong Request reference.
@@ -140,6 +148,11 @@ struct StaticCacheManager : CacheManager {
 
   void Deallocate(std::vector<std::shared_ptr<Request>>& requests) override;
 
+  void ValidateRewind(
+      const std::shared_ptr<Request>& request) const override;
+  void ReleaseForRewind(
+      const std::shared_ptr<Request>& request) override;
+
   void DetachRequestForTeardown(
       const std::shared_ptr<Request>& request) noexcept override;
 
@@ -170,6 +183,11 @@ struct PagedCacheManager : CacheManager {
                    ExecutionContext& context) override;
 
   void Deallocate(std::vector<std::shared_ptr<Request>>& requests) override;
+
+  void ValidateRewind(
+      const std::shared_ptr<Request>& request) const override;
+  void ReleaseForRewind(
+      const std::shared_ptr<Request>& request) override;
 
   void DetachRequestForTeardown(
       const std::shared_ptr<Request>& request) noexcept override;

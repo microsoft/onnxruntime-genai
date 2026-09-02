@@ -24,6 +24,7 @@ The redesign must:
 - make Request and Turn limits explicit;
 - identify every Turn;
 - cancel only the intended Turn;
+- rewind a completed Request to a caller-selected token boundary;
 - return typed Engine events through reusable opaque storage;
 - deliver tokens only through events;
 - keep public Engine handles opaque and behavioral constants fixed-width;
@@ -272,6 +273,10 @@ OgaResult* OgaRequestCancelTurn(
     uint64_t turn_id,
     bool* out_cancelled);
 
+OgaResult* OgaRequestRewindTo(
+    OgaRequest* request,
+    uint64_t sequence_length);
+
 OgaResult* OgaRequestClose(OgaRequest* request);
 
 void OgaDestroyRequest(OgaRequest* request);
@@ -417,17 +422,52 @@ Assigned/Active -- Token event -------------------------------+
                                           | BeginTurn          |
                                           +-------------------+
 
+TurnComplete -- RewindTo(sequence_length) --> TurnComplete/Replaying
+                                                  |
+                                                  | BeginTurn
+                                                  v
+                                               Assigned
+
 Any state -- Close --> Closed
 ```
 
 There is no Request `Continue` operation. Initial input, tool results, and later user input all use
 `BeginTurn`.
 
-Request Rewind has not yet been implemented. Classic `Generator::RewindToLength` is a separate
-Generator API and does not provide Request Rewind. Dynamic Engine transactions may restore Search
-checkpoints and release uncommitted cache reservations after a failed step or failed continuation
-admission, but that internal rollback is not Request Rewind. Cancellation and completion do not
-rewind committed state.
+`OgaRequestRewindTo` is an owner-thread operation between Turns. It is valid only when:
+
+- the current Turn is `TurnComplete`;
+- that Turn did not finish with `Failed`;
+- every event for that Request has been delivered by `OgaEngineRun`;
+- `sequence_length` is in `[0, current_sequence_length]`; and
+- the Request either remains resident or is a canceled, never-admitted Request that still has
+  scheduler ownership.
+
+Queued and active Turns are rejected; rewind never implicitly cancels a Turn. A closed Request,
+failed Request, unknown/nonresident Request, out-of-range length, and a Request with an undelivered
+event are all rejected before mutation. Rewind emits no event. Events already delivered remain
+immutable snapshots of the completed Turn; no undelivered event can survive to contradict the
+rewound state.
+
+Rewind preserves the Request handle, the current Turn ID, the monotonic next-Turn ID, and the
+current Turn's historical finish reason. It truncates the Search sequence and host token mirror,
+adjusts current-Turn prompt/generated counters to the retained prefix, clears draft state, restores
+the per-request CPU or batched-sampler random stream to the retained token boundary, and resets
+guidance to the start state used by a later Turn. The next successful `BeginTurn` receives the next
+Turn ID as usual.
+
+The implementation releases resident model state rather than attempting an in-place crop. On the
+dynamic path it atomically releases the complete paged block table and any paired fixed
+recurrent/convolution slot. The next `BeginTurn` re-admits the same Request and prefills the retained
+prefix plus the new Turn input, reconstructing paged KV and fixed state from tokens. This makes
+arbitrary earlier token boundaries safe even for fixed state and sliding-window rings and
+immediately returns all prior capacity to the pools. On the static path the same replay strategy is
+supported only when the Request is the sole resident row; a multi-row static rewind is rejected
+because one row cannot be detached from the shared contiguous cache allocation.
+
+Classic `Generator::RewindToLength` remains a separate Generator API. Dynamic Engine transaction
+rollback also remains separate: rollback restores an in-flight step, whereas Request rewind acts
+only after a Turn and deliberately evicts committed model state for replay.
 
 ## Event production and delivery
 

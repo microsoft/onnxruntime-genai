@@ -167,6 +167,8 @@ struct Engine : std::enable_shared_from_this<Engine>,
   uint64_t BeginTurn(const std::shared_ptr<Request>& request,
                      std::span<const int32_t> tokens,
                      std::optional<size_t> max_generated_tokens);
+  void RewindRequest(const std::shared_ptr<Request>& request,
+                     size_t new_length);
   void CloseRequest(const std::shared_ptr<Request>& request);
   bool CancelRequest(const std::shared_ptr<Request>& request, uint64_t turn_id);
 

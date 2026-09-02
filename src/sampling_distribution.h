@@ -215,9 +215,33 @@ struct SampledCategorical {
   std::vector<int32_t> scratch;
 };
 
+template <typename RandomGenerator>
+class CountingRandomGenerator {
+ public:
+  using result_type = typename RandomGenerator::result_type;
+
+  explicit CountingRandomGenerator(RandomGenerator& generator)
+      : generator_{generator} {}
+
+  static constexpr result_type min() { return RandomGenerator::min(); }
+  static constexpr result_type max() { return RandomGenerator::max(); }
+
+  result_type operator()() {
+    ++draw_count_;
+    return generator_();
+  }
+
+  size_t DrawCount() const { return draw_count_; }
+
+ private:
+  RandomGenerator& generator_;
+  size_t draw_count_{};
+};
+
+template <typename RandomGenerator>
 inline int32_t SampleCategoricalToken(std::span<const int32_t> indices,
                                       std::span<const float> probs,
-                                      std::mt19937& rng) {
+                                      RandomGenerator& rng) {
   if (indices.empty() || indices.size() != probs.size())
     throw std::invalid_argument(
         "Categorical sampling requires equally sized, non-empty token and probability arrays.");

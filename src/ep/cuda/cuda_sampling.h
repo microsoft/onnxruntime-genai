@@ -41,7 +41,8 @@ void GetSample(SamplingData* sampling_data, cudaStream_t stream, int32_t* d_next
                int vocab_size, int batch_size, int k, float p, float temperature,
                curandState* external_curand_states = nullptr, const int* curand_state_indices = nullptr);
 
-void LaunchInitCurandState(unsigned long long random_seed, curandState* state, cudaStream_t stream);
+void LaunchInitCurandState(unsigned long long random_seed, unsigned long long offset,
+                           curandState* state, cudaStream_t stream);
 void LaunchGatherSamplingRows(const float* const* rows, float* packed_scores, int batch_size, int vocab_size,
                               cudaStream_t stream);
 void LaunchScatterSamplingTokens(const int32_t* packed_tokens, const int* output_indices,

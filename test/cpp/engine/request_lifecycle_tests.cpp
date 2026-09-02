@@ -524,6 +524,131 @@ TEST_F(RequestLifecycleTest, BeginTurnIsRejectedWhileActive) {
   EXPECT_EQ(request->CurrentSequenceLength(), length_before);
 }
 
+TEST_F(RequestLifecycleTest, RewindRejectsNonterminalAndOutOfRangeStates) {
+  auto request = NewRequest();
+  EXPECT_THROW(request->RewindTo(0), std::runtime_error);
+
+  const auto prompt = Prompt();
+  request->BeginTurn(prompt);
+  EXPECT_THROW(request->RewindTo(0), std::runtime_error);
+  request->Schedule();
+  EXPECT_THROW(request->RewindTo(0), std::runtime_error);
+
+  ASSERT_TRUE(request->Cancel(request->CurrentTurnId()));
+  ASSERT_EQ(RunOne(*engine_.engine).request, request);
+  const auto completed = request->Snapshot();
+  EXPECT_THROW(
+      request->RewindTo(
+          static_cast<size_t>(
+              completed.current_sequence_length + 1)),
+      std::runtime_error);
+  const auto rejected = request->Snapshot();
+  EXPECT_EQ(rejected.current_sequence_length,
+            completed.current_sequence_length);
+  EXPECT_EQ(rejected.processed_sequence_length,
+            completed.processed_sequence_length);
+
+  EXPECT_NO_THROW(request->RewindTo(0));
+  EXPECT_EQ(request->CurrentSequenceLength(), 0);
+  EXPECT_EQ(request->CurrentTurnId(), 1u);
+  EXPECT_EQ(request->FinishReason(),
+            GenerationFinishReason::Canceled);
+
+  request->Close();
+  EXPECT_THROW(request->RewindTo(0), std::runtime_error);
+}
+
+TEST_F(RequestLifecycleTest, RewindRestoresPerRequestSamplingStream) {
+  auto params = MakeGreedyParams(*model_);
+  params->search.do_sample = true;
+  params->search.top_k = 0;
+  params->search.top_p = 1.0f;
+  params->search.temperature = 1.0f;
+  params->search.random_seed = 1234;
+  auto request = CreateEngineRequest(engine_.engine, *params);
+  const auto prompt = Prompt();
+  request->BeginTurn(prompt, std::optional<size_t>{3});
+  engine_.cache->Allocate({request});
+  request->Schedule();
+
+  std::array<int32_t, 3> original_tokens{};
+  for (auto& token : original_tokens) {
+    request->GenerateNextTokens(
+        SamplingLogits(*model_));
+    const auto result = request->CompleteGeneration();
+    ASSERT_TRUE(result.token_appended);
+    token = result.token;
+  }
+  ASSERT_TRUE(request->IsTurnComplete());
+  ASSERT_EQ(request->CurrentSequenceLength(),
+            static_cast<int64_t>(prompt.size() + 3));
+  ASSERT_NE(original_tokens[0], original_tokens[1])
+      << "The sampling fixture must distinguish a reset stream from the retained draw boundary.";
+
+  request->RewindTo(prompt.size() + 1);
+
+  const std::array<int32_t, 1> continuation{9};
+  request->BeginTurn(
+      continuation, std::optional<size_t>{1});
+  engine_.cache->Allocate({request});
+  request->Schedule();
+  request->GenerateNextTokens(
+      SamplingLogits(*model_));
+  const auto continued = request->CompleteGeneration();
+
+  ASSERT_TRUE(continued.token_appended);
+  EXPECT_EQ(continued.token, original_tokens[1]);
+  EXPECT_TRUE(request->IsTurnComplete());
+}
+
+TEST_F(RequestLifecycleTest, RewindPreservesUnappendedEosSamplingDraw) {
+  auto params = MakeGreedyParams(*model_);
+  params->search.do_sample = true;
+  params->search.top_k = 0;
+  params->search.top_p = 1.0f;
+  params->search.temperature = 1.0f;
+  params->search.random_seed = 1234;
+  const auto prompt = Prompt();
+  const std::array<int32_t, 1> continuation{9};
+
+  const auto complete_on_sampled_eos = [&]() {
+    auto request = CreateEngineRequest(engine_.engine, *params);
+    request->BeginTurn(prompt);
+    engine_.cache->Allocate({request});
+    request->Schedule();
+    request->GenerateNextTokens(SamplingLogits(*model_));
+    EXPECT_TRUE(request->CompleteGeneration().token_appended);
+    request->GenerateNextTokens(
+        LogitsForToken(*model_, EosToken(*model_)));
+    const auto eos_result = request->CompleteGeneration();
+    EXPECT_TRUE(eos_result.done);
+    EXPECT_FALSE(eos_result.token_appended);
+    return request;
+  };
+
+  auto reference = complete_on_sampled_eos();
+  reference->BeginTurn(
+      continuation, std::optional<size_t>{1});
+  reference->Schedule();
+  reference->GenerateNextTokens(SamplingLogits(*model_));
+  const auto reference_continued =
+      reference->CompleteGeneration();
+  ASSERT_TRUE(reference_continued.token_appended);
+
+  auto request = complete_on_sampled_eos();
+  request->RewindTo(
+      static_cast<size_t>(request->CurrentSequenceLength()));
+  request->BeginTurn(
+      continuation, std::optional<size_t>{1});
+  engine_.cache->Allocate({request});
+  request->Schedule();
+  request->GenerateNextTokens(SamplingLogits(*model_));
+  const auto continued = request->CompleteGeneration();
+
+  ASSERT_TRUE(continued.token_appended);
+  EXPECT_EQ(continued.token, reference_continued.token);
+}
+
 // After a turn completes, BeginTurn appends another input fragment and queues the resident request.
 TEST_F(RequestLifecycleTest, BeginTurnAfterTurnCompleteQueuesNextTurn) {
   auto prompt = Prompt();

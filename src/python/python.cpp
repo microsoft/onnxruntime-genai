@@ -868,6 +868,9 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           pybind11::arg("tokens"),
           pybind11::arg("turn_options") = pybind11::none())
       .def("cancel_turn", &OgaRequest::CancelTurn)
+      .def("rewind_to", &OgaRequest::RewindTo,
+           pybind11::arg("sequence_length"),
+           "Rewind a completed Request to a retained token prefix.")
       .def("set_draft_tokens", [](OgaRequest& request, ContiguousArray<int32_t> tokens) {
         if (tokens.ndim() != 1) {
           throw pybind11::value_error(

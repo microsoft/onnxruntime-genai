@@ -20,20 +20,23 @@ namespace Generators {
 namespace cuda {
 
 // Initializes the cuRAND states for each batch item.
-__global__ void InitCurandStatesKernel(unsigned long long seed, curandState* states, int batch_size) {
+__global__ void InitCurandStatesKernel(unsigned long long seed, unsigned long long offset,
+                                       curandState* states, int batch_size) {
   int index = threadIdx.x + blockIdx.x * blockDim.x;
   if (index >= batch_size) return;
-  curand_init(seed, index, 0, &states[index]);
+  curand_init(seed, index, offset, &states[index]);
 }
 
-void LaunchInitCurandState(unsigned long long random_seed, curandState* state, cudaStream_t stream) {
-  InitCurandStatesKernel<<<1, 1, 0, stream>>>(random_seed, state, 1);
+void LaunchInitCurandState(unsigned long long random_seed, unsigned long long offset,
+                           curandState* state, cudaStream_t stream) {
+  InitCurandStatesKernel<<<1, 1, 0, stream>>>(random_seed, offset, state, 1);
   CUDA_CHECK_LAUNCH();
 }
 
 void SamplingData::ReInitCurandStates(unsigned long long random_seed, int batch_size, cudaStream_t stream) {
   random_seed_ = random_seed;
-  InitCurandStatesKernel<<<CeilDiv(batch_size, 128), 128, 0, stream>>>(random_seed, curand_states, batch_size);
+  InitCurandStatesKernel<<<CeilDiv(batch_size, 128), 128, 0, stream>>>(
+      random_seed, 0, curand_states, batch_size);
   CUDA_CHECK_LAUNCH();
 }
 

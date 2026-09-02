@@ -58,6 +58,26 @@ struct RequestTurnCounters {
   uint64_t generated_tokens{};
 };
 
+// Fully prepared Request-local state for an externally requested rewind. Engine prepares this
+// before releasing cache ownership, then publishes it through Request::CommitRewind at a no-throw
+// boundary.
+struct RequestRewindState {
+  RequestRewindState();
+  RequestRewindState(RequestRewindState&&) noexcept;
+  RequestRewindState& operator=(RequestRewindState&&) noexcept;
+  ~RequestRewindState();
+
+  std::unique_ptr<Search> search;
+  std::unique_ptr<ConstrainedLogitsProcessor> guidance_logits_processor;
+  std::unique_ptr<BatchedSamplerState> batched_sampler_state;
+  std::mt19937 rng;
+  size_t sequence_length{};
+  size_t turn_prompt_tokens{};
+  size_t turn_generated_tokens{};
+  uint64_t rng_draw_count{};
+  uint64_t batched_sampler_draw_count{};
+};
+
 /**
  * @class Request
  * @brief Manages the state and lifecycle of a user request within the engine.
@@ -90,11 +110,18 @@ struct Request : std::enable_shared_from_this<Request>,
   uint64_t BeginTurn(
       std::span<const int32_t> tokens,
       std::optional<size_t> max_generated_tokens = std::nullopt);
+  // Rewinds a completed Request to a retained sequence prefix. The operation preserves Request and
+  // Turn identity, releases resident model state, and causes the next BeginTurn to replay the
+  // retained prefix before generating.
+  void RewindTo(size_t new_length);
   void ValidateOwnerThread() const;
   void AttachToEngine(std::shared_ptr<Engine> engine) noexcept;
   bool BelongsTo(const Engine& engine) const noexcept;
   bool IsAwaitingFirstTurn() const noexcept;
   bool IsRestartableCanceledTurn() const noexcept;
+  bool NeedsReplayAfterRewind() const noexcept {
+    return needs_replay_after_rewind_;
+  }
   void ValidateTurnAdmission(
       std::span<const int32_t> tokens,
       std::optional<size_t> max_generated_tokens) const;
@@ -328,8 +355,21 @@ struct Request : std::enable_shared_from_this<Request>,
    */
   BatchedSamplerState& SamplingState(BatchedSampler& sampler);
   void CommitSamplingState(std::unique_ptr<BatchedSamplerState> state) noexcept;
+  const BatchedSamplerState* SamplingStateForRewind() const noexcept {
+    return batched_sampler_state_.get();
+  }
+  uint64_t BatchedSamplerDrawCountAt(size_t sequence_length) const;
+  RequestRewindState PrepareRewind(
+      size_t new_length,
+      std::unique_ptr<BatchedSamplerState> batched_sampler_state) const;
+  void CommitRewind(RequestRewindState&& state) noexcept;
 
  private:
+  struct RandomCheckpoint {
+    uint64_t rng_draw_count{};
+    uint64_t batched_sampler_draw_count{};
+  };
+
   // The search sequence is partitioned at processed_sequence_length_: tokens before it already
   // have KV entries, and UnprocessedTokens() returns the scheduled prefix of [processed, current).
   // Host-side mirror of the full sequence (prompt + generated tokens). Kept in step with the
@@ -349,6 +389,8 @@ struct Request : std::enable_shared_from_this<Request>,
   // Drops whatever the step in flight staged past the committed sequence, leaving the host mirror
   // exactly as long as the search after its own transaction rewind.
   void DiscardStagedDrafts() noexcept;
+  void AppendRandomCheckpoints(size_t count);
+  void RecordCurrentRandomCheckpoint() noexcept;
 
   int64_t processed_sequence_length_{};
   // Sequence length the application's tokens reach up to. Everything below it is prompt, so the
@@ -372,13 +414,20 @@ struct Request : std::enable_shared_from_this<Request>,
   bool draft_verification_completed_generation_{};
   std::shared_ptr<GeneratorParams> params_;
   std::mt19937 rng_;
+  const std::mt19937 initial_rng_;
   std::mt19937 transaction_rng_;
+  uint64_t rng_draw_count_{};
+  uint64_t batched_sampler_draw_count_{};
+  uint64_t transaction_rng_draw_count_{};
+  uint64_t transaction_batched_sampler_draw_count_{};
+  std::vector<RandomCheckpoint> random_checkpoints_;
   std::unique_ptr<Search> search_;
   std::unique_ptr<ConstrainedLogitsProcessor> guidance_logits_processor_;
   std::unique_ptr<ConstrainedLogitsProcessor> guidance_transaction_checkpoint_;
   std::unique_ptr<BatchedSamplerState> batched_sampler_state_;
   std::weak_ptr<Engine> engine_;
   const Engine* engine_identity_{};
+  bool needs_replay_after_rewind_{};
 
   void ApplyLogitsProcessors(DeviceSpan<float> logits, bool guidance_applied);
   void ResetGuidanceForNewTurn();

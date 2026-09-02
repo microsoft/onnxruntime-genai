@@ -114,9 +114,18 @@ struct Search : LeakChecked<Search> {
   // bookkeeping. Used by speculative decoding, which chooses the token itself (there is no logits
   // row to sample). Default asserts: only the greedy searches implement it.
   virtual void CommitToken(int32_t /*token*/) { assert(false); }
-  virtual void SampleTopP(float /*p*/, float /*temperature*/, std::mt19937& /*rng*/) { assert(false); }
-  virtual void SampleTopK(int /*k*/, float /*temperature*/, std::mt19937& /*rng*/) { assert(false); }
-  virtual void SampleTopKTopP(int /*k*/, float /*p*/, float /*temperature*/, std::mt19937& /*rng*/) { assert(false); }
+  virtual size_t SampleTopP(float /*p*/, float /*temperature*/, std::mt19937& /*rng*/) {
+    assert(false);
+    return 0;
+  }
+  virtual size_t SampleTopK(int /*k*/, float /*temperature*/, std::mt19937& /*rng*/) {
+    assert(false);
+    return 0;
+  }
+  virtual size_t SampleTopKTopP(int /*k*/, float /*p*/, float /*temperature*/, std::mt19937& /*rng*/) {
+    assert(false);
+    return 0;
+  }
 
   // Scoring features
   virtual void ApplyMinLength(int min_length) = 0;
@@ -207,9 +216,9 @@ struct GreedySearch_Cpu : Search_Cpu {
 
   void SelectTop() override;
   void CommitToken(int32_t token) override;
-  void SampleTopK(int k, float temperature, std::mt19937& rng) override;
-  void SampleTopP(float p, float temperature, std::mt19937& rng) override;
-  void SampleTopKTopP(int k, float p, float temperature, std::mt19937& rng) override;
+  size_t SampleTopK(int k, float temperature, std::mt19937& rng) override;
+  size_t SampleTopP(float p, float temperature, std::mt19937& rng) override;
+  size_t SampleTopKTopP(int k, float p, float temperature, std::mt19937& rng) override;
 
   // Used by continuous decoding search.
   void ResetDone();

@@ -186,6 +186,60 @@ TEST(SamplingTests, SchedulerOwnedSamplerPreservesRngAcrossBatchReorderCuda) {
   }
 }
 
+TEST(SamplingTests, SchedulerOwnedSamplerRewindRestoresDrawBoundaryCuda) {
+  constexpr int vocab_size = 8;
+  [[maybe_unused]] auto model = CreateCudaModel();
+  auto* device =
+      Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
+  auto reference_sampler =
+      device->CreateBatchedSampler(1, vocab_size);
+  auto rewind_sampler =
+      device->CreateBatchedSampler(1, vocab_size);
+  ASSERT_NE(reference_sampler, nullptr);
+  ASSERT_NE(rewind_sampler, nullptr);
+
+  const std::array<float, vocab_size> logits{{0.0f, 0.1f, 0.2f, 0.3f,
+                                              0.4f, 0.5f, 0.6f, 0.7f}};
+  const std::array<Generators::BatchedSamplingParams, 1>
+      params{{{4, 1.0f, 1.0f}}};
+  auto row = device->Allocate<float>(vocab_size);
+  std::array<Generators::DeviceSpan<float>, 1> rows{{row}};
+  const auto sample_one =
+      [&](Generators::BatchedSampler& sampler,
+          Generators::BatchedSamplerState& state) {
+        std::copy(
+            logits.begin(), logits.end(),
+            row.CpuSpan().begin());
+        row.CopyCpuToDevice();
+        std::array<Generators::BatchedSamplerState*, 1>
+            states{{&state}};
+        return sampler
+            .Sample(rows, params, states, vocab_size)
+            .CopyDeviceToCpu()[0];
+      };
+
+  auto reference_state =
+      reference_sampler->CreateState(37);
+  std::array<int32_t, 4> reference_tokens{};
+  for (auto& token : reference_tokens) {
+    token = sample_one(
+        *reference_sampler, *reference_state);
+  }
+
+  auto live_state = rewind_sampler->CreateState(37);
+  for (size_t draw = 0; draw < reference_tokens.size(); ++draw) {
+    EXPECT_EQ(
+        sample_one(*rewind_sampler, *live_state),
+        reference_tokens[draw]);
+  }
+  auto rewound_state =
+      rewind_sampler->CreateRewoundState(
+          *live_state, /*draw_count=*/2);
+  EXPECT_EQ(
+      sample_one(*rewind_sampler, *rewound_state),
+      reference_tokens[2]);
+}
+
 // A batch where every row shares the same sampling parameters and the same allocation takes the
 // contiguous fast path, which samples in place and therefore requires the packed RNG state indices
 // to stay in original row order. The batch is deliberately larger than 16 rows because that is where

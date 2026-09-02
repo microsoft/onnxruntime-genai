@@ -137,6 +137,14 @@ struct BatchedSampler {
 
   virtual std::unique_ptr<BatchedSamplerState> CreateState(int random_seed) = 0;
   virtual bool OwnsState(const BatchedSamplerState& state) const = 0;
+  // Creates an independent state for the same random stream positioned after `draw_count`
+  // samples. Request rewind prepares this replacement before releasing any committed model state,
+  // so implementations must not mutate `state`.
+  virtual std::unique_ptr<BatchedSamplerState> CreateRewoundState(
+      const BatchedSamplerState& /*state*/, uint64_t /*draw_count*/) {
+    throw std::runtime_error(
+        "The selected batched sampler does not support Request rewind.");
+  }
   virtual bool SupportsTransactions() const { return false; }
   virtual void SaveStateForTransaction(std::span<BatchedSamplerState* const> /*states*/) {
     throw std::logic_error("Batched sampler does not support transactions.");
