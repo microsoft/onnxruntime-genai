@@ -71,6 +71,12 @@ struct RecordingCacheManager : CacheManager {
   void Deallocate(std::vector<std::shared_ptr<Request>>& requests) override {
     deallocate_calls++;
     if (trace_) trace_->Record("Deallocate");
+    if (std::exchange(throw_deallocate_failure_, false)) {
+      throw std::bad_alloc{};
+    }
+    if (std::exchange(throw_deallocate_invariant_failure_, false)) {
+      throw std::logic_error("Injected cache ownership invariant failure.");
+    }
     for (const auto& request : requests) {
       allocated_.erase(std::remove(allocated_.begin(), allocated_.end(), request), allocated_.end());
     }
@@ -80,6 +86,10 @@ struct RecordingCacheManager : CacheManager {
       const std::shared_ptr<Request>& request) noexcept override {
     deallocate_calls++;
     if (trace_) trace_->Record("DetachRequestForTeardown");
+    if (!supports_dynamic_batching_ && IsResident(request)) {
+      allocated_.clear();
+      return;
+    }
     allocated_.erase(
         std::remove(allocated_.begin(), allocated_.end(), request),
         allocated_.end());
@@ -302,6 +312,10 @@ struct RecordingCacheManager : CacheManager {
     overselect_planning_once_ = true;
   }
   void ThrowPrepareFailureOnce() { throw_prepare_failure_ = true; }
+  void ThrowDeallocateFailureOnce() { throw_deallocate_failure_ = true; }
+  void ThrowDeallocateInvariantFailureOnce() {
+    throw_deallocate_invariant_failure_ = true;
+  }
   void ThrowReleaseFailureOnce() { throw_release_failure_ = true; }
   // Forces the composite plan/reservation consistency guard in Engine::StepDynamic. PlanStepResources
   // publishes `plan`, and every reservation reports slots, new-slot count, and staging bytes, so a
@@ -346,6 +360,8 @@ struct RecordingCacheManager : CacheManager {
   mutable bool throw_planning_consistency_{};
   mutable bool overselect_planning_once_{};
   bool throw_prepare_failure_{};
+  bool throw_deallocate_failure_{};
+  bool throw_deallocate_invariant_failure_{};
   bool throw_release_failure_{};
   std::shared_ptr<CallTrace> trace_;
   bool can_allocate_verdict_{true};

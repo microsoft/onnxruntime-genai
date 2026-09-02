@@ -28,11 +28,13 @@ SCHEMA = {
 
 
 def require_request_event(event: og.EngineEvent) -> og.Request:
+    # Any failed workload request invalidates this benchmark run, even if
+    # REQUEST_UNSERVICEABLE leaves the Engine itself healthy.
+    if event.flags & og.EngineEventFlags.FAILED:
+        raise RuntimeError(f"Generation failed; error_code={event.error_code}")
     if event.request is not None:
         return event.request
-    if event.flags & og.EngineEventFlags.FAILED:
-        outcome = "failed"
-    elif event.flags & og.EngineEventFlags.CAPACITY_BLOCKED:
+    if event.flags & og.EngineEventFlags.CAPACITY_BLOCKED:
         outcome = "was capacity-blocked"
     elif event.flags & og.EngineEventFlags.RETRYABLE:
         outcome = "reported a retryable failure"

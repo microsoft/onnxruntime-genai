@@ -59,6 +59,9 @@ struct EngineEvent {
   TurnUsage usage{};
 };
 
+using EngineStepErrorFactory =
+    std::exception_ptr (*)(StepOutcome outcome, std::string message);
+
 /**
  * @struct EngineDependencies
  * @brief Bundle of the collaborators the Engine drives.
@@ -78,6 +81,8 @@ struct EngineDependencies {
   std::shared_ptr<DecoderOnly_Model> mtp_model;
   std::shared_ptr<CacheManager> mtp_cache_manager;
   std::unique_ptr<ModelExecutor> mtp_model_executor;
+  // Test-only fault injection for allocation-sensitive durable error construction.
+  EngineStepErrorFactory make_step_error{};
 };
 
 struct EngineTransactionMetrics {
@@ -226,7 +231,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
   [[noreturn]] void MarkUnhealthyAndThrow(StepOutcomeKind outcome,
                                           StepTransactionId transaction_id,
                                           const void* request_id,
-                                          std::string message,
+                                          std::string_view message,
                                           std::exception_ptr error);
 
   std::shared_ptr<Model> model_;                   // The model used by the Engine.
@@ -241,9 +246,12 @@ struct Engine : std::enable_shared_from_this<Engine>,
   std::unordered_map<const Request*, std::shared_ptr<Request>> mtp_requests_;
   DeviceSpan<int32_t> mtp_device_drafts_;
   DeviceSpan<int32_t> mtp_device_chain_inputs_;
+  EngineStepErrorFactory make_step_error_;
   const std::thread::id owner_thread_{std::this_thread::get_id()};
   EngineHealth health_{EngineHealth::Healthy};
   std::exception_ptr fatal_error_;
+  std::exception_ptr fatal_contract_fallback_error_;
+  std::exception_ptr fatal_execution_fallback_error_;
   StepTransactionId next_transaction_id_{1};
   EngineTransactionMetrics transaction_metrics_;
   SpeculativeStats speculative_stats_;
@@ -253,6 +261,8 @@ struct Engine : std::enable_shared_from_this<Engine>,
   std::vector<std::shared_ptr<Request>> tracked_requests_;
   std::vector<EngineEvent> pending_events_;
   std::vector<EngineEvent> staged_events_;
+  std::vector<EngineEvent> fatal_events_;
+  size_t max_step_event_count_{};
   size_t pending_event_index_{};
   const std::shared_ptr<std::atomic<bool>> abandonment_pending_{
       std::make_shared<std::atomic<bool>>(false)};
