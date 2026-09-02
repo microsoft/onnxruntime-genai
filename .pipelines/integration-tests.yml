@@ -59,7 +59,7 @@ pr:
 # The nightly run executes the full integration matrix and the full H100
 # Engine benchmark.
 schedules:
-- cron: '1 8 * * *' # 12:01am PST
+- cron: '1 8 * * *'
   displayName: 'Nightly full Engine benchmark (12:01 AM PST)'
   branches:
     include:
