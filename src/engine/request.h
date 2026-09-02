@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <limits>
 
 #include "generator/generators.h"
 #include "request_status.h"
@@ -146,6 +147,35 @@ struct Request : std::enable_shared_from_this<Request>,
   void MarkFailedFromEngine(const Engine& engine) noexcept;
   void CompleteFailedTurnFromEngine(const Engine& engine) noexcept;
 
+  // Engine-hosted MTP head requests mirror a target request's committed tokens in a
+  // scheduler-private shadow the Engine owns outright. They never sample and never enter the
+  // public turn API, so they are admitted through this factory instead of BeginTurn.
+  static std::shared_ptr<Request> CreateAuxiliaryDecoderRequest(
+      std::shared_ptr<GeneratorParams> params,
+      size_t max_total_tokens,
+      std::shared_ptr<std::atomic<bool>> abandonment_pending,
+      const std::shared_ptr<Engine>& engine,
+      std::span<const int32_t> tokens);
+  void AppendTokensForAuxiliaryDecoder(std::span<const int32_t> tokens);
+  void AppendTokensForAuxiliaryDecoder(DeviceSpan<int32_t> tokens);
+  void RewindAuxiliaryDecoderTo(size_t sequence_length);
+  void CommitAuxiliaryDecoderStep() noexcept;
+
+  /**
+   * @brief Total tokens (prompt plus generated) this request may ever reach.
+   */
+  size_t MaxTotalTokens() const noexcept { return max_total_tokens_; }
+
+  /**
+   * @brief The speculative-decoding options this request was created with.
+   */
+  const Config::Speculative& SpeculativeOptions() const;
+
+  /**
+   * @brief Why the pending draft proposal cannot be verified, or nullptr when it can.
+   */
+  const char* DraftTokenValidationError() const noexcept;
+
   /**
    * @brief Returns a span of unprocessed tokens on the device.
    * @return DeviceSpan containing unprocessed token IDs.
@@ -182,9 +212,9 @@ struct Request : std::enable_shared_from_this<Request>,
    * @param tokens Draft continuation of the sequence, in order. An empty span clears the proposal.
    *
    * The request must be ready to decode. The next step then runs 1 + tokens.size() rows, verifies
-   * each draft against the target model's own prediction, and keeps the accepted prefix. Only
-   * greedy requests may propose drafts, because verification compares argmax tokens rather than
-   * sampling probabilities.
+   * each draft against the target model's own prediction, and keeps the accepted prefix. Greedy
+   * requests compare argmax tokens; sampled requests draw from each target row's bounded
+   * top-k/top-p distribution.
    *
    * The proposal applies to the current turn's next committed decode step. A rolled back step
    * leaves it pending, while canceling the turn discards it.
@@ -212,9 +242,15 @@ struct Request : std::enable_shared_from_this<Request>,
   bool DraftVerificationCompletedGeneration() const noexcept {
     return draft_verification_completed_generation_;
   }
+  bool IsStopToken(int32_t token) const;
+  void RewindDraftsForTransaction(size_t accepted_count);
+  void RecordSampledDraftAcceptance(
+      size_t accepted_count,
+      std::span<const uint64_t> accepted_rng_draw_counts);
 
   void ValidateEngineCompatibility() const;
   void SaveStateForTransaction();
+  void SaveStateForNewTurnTransaction();
   void SaveStateForExternalSamplingTransaction();
   RequestStepResult ApplyLogitsForTransaction(DeviceSpan<float> logits,
                                               bool guidance_applied = false);
@@ -247,6 +283,14 @@ struct Request : std::enable_shared_from_this<Request>,
   GenerationFinishReason FinishReason() const noexcept { return finish_reason_; }
   size_t TurnPromptTokens() const noexcept { return turn_prompt_tokens_; }
   size_t TurnGeneratedTokens() const noexcept { return turn_generated_tokens_; }
+  size_t RemainingTurnTokenBudget() const noexcept {
+    if (!turn_max_generated_tokens_) {
+      return std::numeric_limits<size_t>::max();
+    }
+    return turn_generated_tokens_ < *turn_max_generated_tokens_
+               ? *turn_max_generated_tokens_ - turn_generated_tokens_
+               : 0;
+  }
 
   RequestStatus Status() const noexcept { return status_; }
 
@@ -347,8 +391,11 @@ struct Request : std::enable_shared_from_this<Request>,
 
   /**
    * @brief Launches the per-sequence tail after a batched sampler has filled the bound slot.
+   * @param sampler_draw_consumed True when the scheduler-owned sampler consumed one draw. Sampled
+   *        speculative verification binds host-selected tokens through the same Search hook without
+   *        advancing the batched-sampler stream.
    */
-  void OnNextTokensSampled();
+  void OnNextTokensSampled(bool sampler_draw_consumed = true);
 
   /**
    * @brief Returns this request's persistent random state for the given batched sampler.
@@ -386,9 +433,6 @@ struct Request : std::enable_shared_from_this<Request>,
       size_t max_total_tokens,
       size_t current_sequence_length,
       size_t token_count);
-  // Drops whatever the step in flight staged past the committed sequence, leaving the host mirror
-  // exactly as long as the search after its own transaction rewind.
-  void DiscardStagedDrafts() noexcept;
   void AppendRandomCheckpoints(size_t count);
   void RecordCurrentRandomCheckpoint() noexcept;
 
@@ -421,6 +465,8 @@ struct Request : std::enable_shared_from_this<Request>,
   uint64_t transaction_rng_draw_count_{};
   uint64_t transaction_batched_sampler_draw_count_{};
   std::vector<RandomCheckpoint> random_checkpoints_;
+  int64_t transaction_processed_sequence_length_{};
+  size_t transaction_tokens_host_size_{};
   std::unique_ptr<Search> search_;
   std::unique_ptr<ConstrainedLogitsProcessor> guidance_logits_processor_;
   std::unique_ptr<ConstrainedLogitsProcessor> guidance_transaction_checkpoint_;
@@ -430,7 +476,6 @@ struct Request : std::enable_shared_from_this<Request>,
   bool needs_replay_after_rewind_{};
 
   void ApplyLogitsProcessors(DeviceSpan<float> logits, bool guidance_applied);
-  void ResetGuidanceForNewTurn();
   void SelectNextToken();
   void StageVisibleTokens(RequestStepResult& result,
                           size_t committed_count,

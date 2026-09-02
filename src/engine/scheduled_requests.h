@@ -21,6 +21,12 @@ BatchedGuidanceMaskStatus CollectBatchedGuidanceMasks(
     size_t words_per_row,
     std::vector<uint32_t>& masks);
 
+// Returns the base pointer of the packed logits block when every entry is a full vocabulary row
+// laid out back to back, or nullptr otherwise. A sampled request that verified drafts contributes
+// an empty row, which has no backing buffer at all, so every row must be proven before any pointer
+// is taken from one.
+float* PackedLogitsRowBase(std::vector<DeviceSpan<float>>& logits, size_t vocab_size);
+
 struct BatchedSamplingPlan {
   void Reserve(size_t capacity, size_t verification_capacity) {
     requests.reserve(capacity);
@@ -107,9 +113,14 @@ struct ScheduledRequests {
                                     std::vector<RequestStepResult>* results = nullptr);
   bool TryApplyBatchedGuidanceMasks(std::vector<DeviceSpan<float>>& logits);
   // Verifies each drafted request's proposal against the target model's own rows, rewinds the
-  // rejected tail, and returns the one row per request that the sampler must select from.
+  // rejected tail, and returns the one row per request that the sampler must select from. For a
+  // randomly sampled request, selected_tokens holds the accepted deterministic proposal prefix
+  // plus the target-distributed correction or bonus token to commit.
   std::vector<DeviceSpan<float>> SelectSampledRows(
-      std::vector<DeviceSpan<float>>& verify_rows);
+      std::vector<DeviceSpan<float>>& verify_rows,
+      std::vector<std::vector<int32_t>>& selected_tokens,
+      std::vector<size_t>& accepted_draft_counts,
+      std::vector<std::vector<uint64_t>>& selected_rng_draw_counts);
 
   std::vector<std::shared_ptr<Request>> requests_;
   // Drafts the transaction stages onto each request's sequence, in scheduled row order. Empty

@@ -76,6 +76,19 @@ struct OgaSpeculativeStats : OgaAbstract {
     return value;
   }
 
+  uint64_t GetAcceptanceLengthCount(size_t accepted_length) const {
+    uint64_t value{};
+    OgaCheckResult(OgaSpeculativeStatsGetAcceptanceLengthCount(
+        this, accepted_length, &value));
+    return value;
+  }
+
+  size_t GetAcceptanceLengthHistogramSize() const {
+    size_t value{};
+    OgaCheckResult(OgaSpeculativeStatsGetAcceptanceLengthHistogramSize(this, &value));
+    return value;
+  }
+
   double GetNumber(const char* name) const {
     double value;
     OgaCheckResult(OgaSpeculativeStatsGetNumber(this, name, &value));
@@ -1133,6 +1146,15 @@ struct OgaEngine : OgaAbstract {
     size_t count{};
     OgaCheckResult(OgaEngineMaxDraftTokensPerProposal(this, &count));
     return count;
+  }
+
+  /**
+   * \brief Cumulative target/head work and committed draft acceptance statistics.
+   */
+  std::unique_ptr<OgaSpeculativeStats> GetSpeculativeStats() const {
+    OgaSpeculativeStats* stats;
+    OgaCheckResult(OgaEngineGetSpeculativeStats(this, &stats));
+    return std::unique_ptr<OgaSpeculativeStats>(stats);
   }
 
   std::unique_ptr<OgaRequest> CreateRequest(

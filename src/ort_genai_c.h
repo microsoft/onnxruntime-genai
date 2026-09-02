@@ -819,6 +819,14 @@ OGA_EXPORT void OGA_API_CALL OgaDestroySpeculativeStats(OgaSpeculativeStats* sta
 OGA_EXPORT OgaResult* OGA_API_CALL OgaSpeculativeStatsGetCount(
     const OgaSpeculativeStats* stats, const char* name, uint64_t* value);
 
+/** \brief Gets the number of rounds that accepted exactly the requested number of draft tokens. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaSpeculativeStatsGetAcceptanceLengthCount(
+    const OgaSpeculativeStats* stats, size_t accepted_length, uint64_t* value);
+
+/** \brief Gets the number of bins in the acceptance-length histogram. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaSpeculativeStatsGetAcceptanceLengthHistogramSize(
+    const OgaSpeculativeStats* stats, size_t* value);
+
 /** \brief Gets a timing, rate, ratio, average, or speedup value from a statistics snapshot. */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaSpeculativeStatsGetNumber(
     const OgaSpeculativeStats* stats, const char* name, double* value);
@@ -1452,9 +1460,12 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestClose(OgaRequest* request);
  * \brief Proposes speculative draft tokens for the request's next decode operation.
  *
  * The request must be ready to decode. The operation then runs one row per draft on top of its own
- * token, verifies each draft against the model's prediction, and keeps the accepted prefix. Passing
- * an empty sequence clears the proposal. Requires a greedy request and an engine whose cache can
- * roll a rejected draft back (see OgaEngineMaxDraftTokensPerProposal).
+ * token, verifies each draft against the model's prediction, and keeps the accepted prefix. The
+ * proposal applies to the next step only:
+ * a committed step consumes it whether or not it could verify it. Passing an empty sequence clears
+ * the proposal. Random target sampling is supported for deterministic draft proposals when top_k
+ * is positive. Requires an engine whose cache can roll a rejected draft back (see
+ * OgaEngineMaxDraftTokensPerProposal).
  *
  * \param[in] request The request to propose drafts for.
  * \param[in] tokens One sequence holding the draft continuation, in order.
@@ -1473,6 +1484,20 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestSetDraftTokens(OgaRequest* request,
  * \return OgaResult containing the error message on failure, or nullptr on success.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineMaxDraftTokensPerProposal(const OgaEngine* engine, size_t* out);
+
+/**
+ * \brief Returns a cumulative snapshot of Engine speculative-decoding statistics.
+ *
+ * Target and draft forward-pass counters include successful model executions even if a later
+ * transaction phase rolls back. Proposal, acceptance, and acceptance-length counters include only
+ * committed speculative steps.
+ *
+ * \param[in] engine The engine to query.
+ * \param[out] out The newly allocated statistics snapshot. Destroy it with OgaDestroySpeculativeStats.
+ * \return OgaResult containing the error message on failure, or nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineGetSpeculativeStats(
+    const OgaEngine* engine, OgaSpeculativeStats** out);
 
 /**
  * \brief Destroys the given request.

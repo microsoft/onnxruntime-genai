@@ -59,9 +59,10 @@ For rewind, the Request also records compact per-token random-stream positions: 
 draws consumed by the fallback `std::mt19937` path and by the scheduler-owned batched sampler.
 Fallback sampling reports its exact URBG draw count, including any draws performed by
 `std::discrete_distribution`; CUDA batched sampling consumes one cuRAND value per sampled row and
-can create an independent state at that draw offset. Input and accepted deterministic draft tokens
-record the unchanged position. This restores deterministic continuation without retaining one full
-PRNG object per token.
+can create an independent state at that draw offset. Input tokens and greedily verified drafts
+record the unchanged position; sampled draft verification records the target draw at each accepted
+token boundary. This restores deterministic continuation without retaining one full PRNG object
+per token.
 
 The paged KV cache makes this practical. A request does not need one large contiguous cache allocation sized for its maximum sequence length. It owns a block table that points to smaller physical KV-cache blocks. Blocks are added as the sequence grows and returned to the pool when the request leaves the engine.
 
@@ -389,12 +390,13 @@ borrowed. A Buffer event holds the Request internally for the lifetime of that v
 returned `const OgaRequest*` is never an independently owned handle and is invalidated with the
 event.
 
-A committed step emits a token event, a terminal event, or one combined
-`Token | TurnFinished` event. EOS can emit terminal completion without a visible token. Event
-delivery does not mutate the Request's retained logical sequence. One successful committed step
-produces at most one combined event per affected Request. If speculative verification accepts a
-visible draft immediately before an accepted EOS ends the Turn, the accepted visible token and
-terminal completion share that combined event; the EOS itself is never emitted as a token.
+A committed step emits zero or more token events and may emit a terminal event. The final visible
+token can carry `Token | TurnFinished`; EOS can emit terminal completion without a visible token.
+Speculative verification emits each accepted draft and its correction or bonus as a separate token
+event in sequence order. If verification accepts a visible draft immediately before an accepted EOS
+ends the Turn, the accepted visible token and terminal completion share that combined event; the EOS
+itself is never emitted as a token. Event delivery does not mutate the Request's retained logical
+sequence.
 
 A chunked partial-prefill transaction can commit cache and Request progress without producing an
 event. `Run()` then returns count zero while `HasPendingRequests()` remains true. It does not loop
@@ -412,12 +414,13 @@ This distinction is important:
 If the engine has previously encountered a fatal transaction or execution failure, `Run()` rethrows
 the stored error instead of attempting more work.
 
-## Caller-supplied speculative drafts
+## Speculative drafts
 
-The dynamic Engine can verify a caller-supplied continuation together with a request's next decode
-token. This is separate from the `Generator` API's draft-model and n-gram strategies: the Engine
-does not create a proposer. The caller proposes tokens for one request before the next step with
-`Request::SetDraftTokens` (`OgaRequestSetDraftTokens` in C or `Request.set_draft_tokens` in Python).
+The dynamic Engine can verify a continuation together with a request's next decode token. A caller
+can propose tokens before the next step with `Request::SetDraftTokens` (`OgaRequestSetDraftTokens`
+in C or `Request.set_draft_tokens` in Python). When `model.mtp` names an auxiliary draft head, the
+Engine also maintains an internal shadow Request and automatically proposes a chained greedy
+continuation after each committed target step.
 
 Query the internal `Engine::MaxDraftTokensPerStep` capability through
 `OgaEngineMaxDraftTokensPerProposal`, `OgaEngine::MaxDraftTokensPerProposal`, or
@@ -427,16 +430,18 @@ The reported value is a capability limit, not a guarantee that every proposed to
 step's global token budget or current cache capacity.
 
 The request must already belong to the Engine, have completed prefill, and be ready to decode.
-Verification currently supports only requests whose resolved search mode is greedy (`do_sample` is
-false, `top_k` is 1, or `temperature` is zero), with no guidance, repetition penalty,
-no-repeat-ngram processing, or active minimum-length processing. Passing an empty sequence clears a
-pending proposal.
+Verification supports greedy target selection and random target sampling with a positive `top_k`;
+proposals remain deterministic. Guidance,
+repetition penalty, no-repeat-ngram processing, and active minimum-length processing are not
+supported. Passing an empty sequence clears a pending proposal.
 
 For a decode with K scheduled drafts, the packed input is the request's one unprocessed token
 followed by the K drafts. The decoder must return K+1 logits rows for that request. Row `i` predicts
 draft `i`; verification accepts the longest prefix whose tokens equal the target argmax. The first
 nonmatching row supplies the replacement token, or row K supplies a bonus token when every draft is
-accepted. Accepted drafts and the replacement or bonus are published together, so one model run can
+accepted. Under random target sampling, each target row is sampled and the deterministic draft is
+accepted when it matches that sample; the first mismatch is the correction token. Accepted drafts
+and the correction or bonus are published together, so one model run can
 publish several ordered token events. If the caller's event buffer cannot hold all of them, `Run()`
 retains the overflow and drains it on subsequent calls before executing the model again. Callers
 must process all returned events before reusing the buffer.
@@ -450,6 +455,48 @@ A committed decode consumes the complete proposal, including drafts omitted by b
 retryable rollback restores the request and leaves the proposal pending for retry. During commit,
 the cache reservation is narrowed from the scheduled K+1 slots to the accepted prefix plus the
 request's mandatory token; paged KV and fixed recurrent state publish at that same boundary.
+
+### Engine-hosted MTP head: operational contract
+
+`model.mtp` turns the head on automatically for every request the dynamic Engine decodes. Server
+authors should size capacity and handle failures against the following behaviors.
+
+**Auxiliary memory accounting.** The head is a second paged pool that always holds the same block
+count as the target pool, so both are sized from one budget. With
+`engine.dynamic_batching.gpu_utilization_factor`, the auxiliary bytes per block are folded into the
+capacity computation. With an explicit `engine.dynamic_batching.num_blocks`, that value is the
+combined budget: the target pool is scaled down so target plus head together cost what the
+configured block count would have cost without a head. A `num_blocks` too small to leave at least
+one block for each pool is rejected at Engine construction.
+
+**Failure isolation.** The target decode is mandatory; MTP drafting is optional acceleration. A
+recoverable head failure (cache pressure, shape mismatch, binding or session error) releases only
+MTP state, and the target step still commits — without drafts for that step — and increments
+`standard_fallback_steps` in the speculative statistics. Only a contract violation, or a failure to
+roll MTP state back, marks the Engine unhealthy. A persistent head failure therefore degrades to
+ordinary decoding instead of stalling the request.
+
+**Shadow lifecycle.** The head's shadow Request mirrors only the suffix the target committed during
+the current turn. Beginning a continuation and canceling a turn both drop the shadow and release its
+auxiliary blocks, so the next drafted step rebuilds it from the new turn's suffix. Rewinding also
+drops the shadow before releasing the target's model state because neither the shadow sequence nor
+its auxiliary cache remains authoritative for the retained prefix. Closing the request releases it
+as well.
+
+**Mixed prefill batches.** Drafts are proposed only for requests that committed a decode token in
+the step. A request that was prefilling, finished its turn, or has a proposal the Engine cannot
+verify is skipped for that step and picks drafting back up on its next decode step.
+
+**Seeded sampling.** `search.random_seed` reproduces output for a given decode path, not across
+decode paths. A verified drafted step draws its target tokens from the Request's own host random
+stream because acceptance is sequential, while an ordinary batched step draws from the device
+sampler state. Whether drafts are admitted depends on batch composition and cache pressure, so a
+seeded run is only bit-reproducible against another run scheduled the same way. Disable `model.mtp`
+when exact cross-scheduling reproducibility is required.
+
+**Telemetry thread ownership.** `Engine::GetSpeculativeStats` (`OgaEngineGetSpeculativeStats`,
+`Engine.get_speculative_stats`) reads counters that `Run()` mutates without synchronization. Like
+every other Engine query, it must be called from the Engine's owner thread and throws otherwise.
 
 ## One dynamic step in detail
 
@@ -570,7 +617,7 @@ The fixed sub-reservation, when present, admits the same rows in the same order.
 Physical execution ordering does not change event ordering. Each row retains its logical scheduler
 rank, and the Engine restores that order when it publishes the transaction's events after commit.
 
-The fixed `target_tokens` mirror the paged `target_cache_slots`, so both states commit at one token boundary. `StepPlan::fixed_state` records the fixed row count, new-slot count, and binding footprint; `Engine::StepDynamic()` then proves the reservation matches that plan exactly -- required flag, row count, new-slot count, bytes, and per-row request identity -- and fails fatally on any mismatch. A composite reservation wraps exactly one paged reservation and the Engine holds at most one at a time, so the paged split-commit contract (its constructor reserves its own `committed_tables_` headroom, and the pool permits a single live reservation) holds without any cross-reservation aggregate check.
+The fixed `target_tokens` mirror the paged `target_cache_slots`, so both states commit at one token boundary. `StepPlan::fixed_state` records the fixed row count, new-slot count, and binding footprint; `Engine::RunDynamic()` then proves the reservation matches that plan exactly -- required flag, row count, new-slot count, bytes, and per-row request identity -- and fails fatally on any mismatch. A composite reservation wraps exactly one paged reservation and the Engine holds at most one at a time, so the paged split-commit contract (its constructor reserves its own `committed_tables_` headroom, and the pool permits a single live reservation) holds without any cross-reservation aggregate check.
 
 While the reservation is active, decoder input preparation can view a combined block table containing:
 
@@ -585,7 +632,10 @@ request checkpointing, model execution, or cache commit.
 
 ### 6. Checkpoint request and sampler state
 
-Before model execution, `ScheduledRequests::BeginTransaction()` checkpoints every selected request's search state.
+Before model execution, `ScheduledRequests::BeginTransaction()` checkpoints every selected
+request's Search state, processed cursor, host-token length, guidance state, host RNG and draw
+count, and batched-sampler draw count. Token mutations made while staging drafts retain one random
+checkpoint per host token boundary.
 
 If the device supports transactional batched sampling, the scheduler-owned sampler state is checkpointed as well. Each request keeps its own persistent sampler state, including its random stream, even though sampling work can be batched.
 
@@ -768,6 +818,12 @@ before the step began. `Run()` translates `RetryableBatchAbort` into a `Retryabl
 `ExecutionCapacityExceeded` into a `CapacityBlocked` event; the engine remains healthy. Calling
 `Run()` again with unchanged memory availability and workload composition may produce the same
 failure.
+
+Restoring a Request truncates both `tokens_host_` and its random checkpoint history to the saved
+transaction boundary while restoring the processed cursor, Search, guidance, host RNG, and random
+draw counters together. New-Turn admission uses the same additive checkpoint, so a failed
+continuation cannot leave the host sequence, guidance cursor, or either random stream at a newer
+boundary.
 
 Planning allocation failures occur before reservation or request mutation. They propagate to the
 caller without marking the Engine unhealthy, so a later `Run()` may retry. A
@@ -1060,6 +1116,12 @@ failure constructing the owning state wrapper releases the acquired index withou
 If batched sampling or transactional sampler checkpoints are unsupported on the active device or search implementation, the code falls back to per-request sampling while preserving the same engine transaction boundary.
 
 Logits processing remains per request. Minimum length, repetition penalty, no-repeat n-gram processing, EOS handling, maximum length, and sequence ownership continue to use each request's own state.
+
+Sampled deterministic-draft verification is sequential and therefore consumes the Request's host
+RNG once per evaluated target row. The accepted draft prefix records the host RNG draw count after
+each individual token rather than copying the final count onto every retained boundary. On CUDA,
+the already selected tokens can still use Search's externally bound token slot for batched commit,
+but that staging operation does not consume or advance the scheduler-owned batched-sampler state.
 
 ## CUDA graph capture
 
