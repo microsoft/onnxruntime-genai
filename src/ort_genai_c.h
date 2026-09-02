@@ -1430,6 +1430,23 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestCancelTurn(
     OgaRequest* request, uint64_t turn_id, bool* out_cancelled);
 
 /**
+ * \brief Rewinds a completed Request to a retained sequence prefix.
+ *
+ * Rewind is synchronous and owner-thread-only. The current Turn must be complete, its events must
+ * have been drained, and its finish reason must not be Failed. sequence_length may be zero and must
+ * not exceed the current sequence length. The operation preserves the Request handle and current
+ * Turn ID, discards tokens and completion counters beyond the retained prefix, restores sampling
+ * state to that prefix, and releases all resident model state. The next OgaRequestBeginTurn creates
+ * the next Turn and replays the retained prefix together with its new input before generation.
+ *
+ * Dynamic paged Requests release their paged blocks and any fixed recurrent/convolution slot
+ * atomically. Static Requests are rewindable only when they are the sole resident row, because one
+ * row cannot be removed from a shared contiguous allocation. No event is emitted by rewind.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestRewindTo(
+    OgaRequest* request, uint64_t sequence_length);
+
+/**
  * \brief Permanently closes a Request and releases its Engine resources.
  *
  * Close is valid from every lifecycle state and is idempotent. It logically removes the Request

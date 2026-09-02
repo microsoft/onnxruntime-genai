@@ -119,7 +119,8 @@ struct ScheduledRequests {
   std::vector<DeviceSpan<float>> SelectSampledRows(
       std::vector<DeviceSpan<float>>& verify_rows,
       std::vector<std::vector<int32_t>>& selected_tokens,
-      std::vector<size_t>& accepted_draft_counts);
+      std::vector<size_t>& accepted_draft_counts,
+      std::vector<std::vector<uint64_t>>& selected_rng_draw_counts);
 
   std::vector<std::shared_ptr<Request>> requests_;
   // Drafts the transaction stages onto each request's sequence, in scheduled row order. Empty

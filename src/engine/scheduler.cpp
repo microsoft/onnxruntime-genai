@@ -35,6 +35,20 @@ ScheduledRequests Scheduler::CreateScheduledRequests(const StepPlan& plan) {
                            GetBatchedSamplingPlan()};
 }
 
+std::unique_ptr<BatchedSamplerState>
+Scheduler::PrepareSamplingStateForRewind(
+    const Request& request, uint64_t draw_count) const {
+  const auto* state = request.SamplingStateForRewind();
+  if (!state) {
+    return nullptr;
+  }
+  if (!batched_sampler_ || !batched_sampler_->OwnsState(*state)) {
+    throw std::runtime_error(
+        "Request sampling state does not belong to its Engine scheduler.");
+  }
+  return batched_sampler_->CreateRewoundState(*state, draw_count);
+}
+
 std::unique_ptr<BatchedSamplerState> Scheduler::CreateSamplingState(
     const Request& request) const {
   if (auto* sampler = GetBatchedSampler()) {

@@ -76,6 +76,25 @@ struct RecordingCacheManager : CacheManager {
     }
   }
 
+  void ValidateRewind(
+      const std::shared_ptr<Request>& request) const override {
+    if (!supports_dynamic_batching_ && IsResident(request) &&
+        allocated_.size() != 1) {
+      throw std::runtime_error(
+          "Static Engine Request rewind requires exactly one resident Request.");
+    }
+  }
+
+  void ReleaseForRewind(
+      const std::shared_ptr<Request>& request) override {
+    ValidateRewind(request);
+    if (!IsResident(request)) {
+      return;
+    }
+    std::vector<std::shared_ptr<Request>> requests{request};
+    Deallocate(requests);
+  }
+
   void DetachRequestForTeardown(
       const std::shared_ptr<Request>& request) noexcept override {
     deallocate_calls++;

@@ -1107,6 +1107,11 @@ struct OgaRequest : OgaAbstract {
     return cancelled;
   }
 
+  void RewindTo(size_t sequence_length) {
+    OgaCheckResult(OgaRequestRewindTo(
+        this, static_cast<uint64_t>(sequence_length)));
+  }
+
   /**
    * \brief Proposes speculative draft tokens for the next decode operation.
    */

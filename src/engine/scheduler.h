@@ -72,6 +72,11 @@ struct Scheduler {
 
   ScheduledRequests CreateScheduledRequests(const StepPlan& plan);
 
+  // Prepares an independent sampler state at a prior draw boundary without mutating the Request's
+  // live state. Returns null when this scheduler has no batched sampler state for the Request.
+  std::unique_ptr<BatchedSamplerState> PrepareSamplingStateForRewind(
+      const Request& request, uint64_t draw_count) const;
+
   /**
    * @brief Checks if the Scheduler has any pending requests.
    * @return True if there are pending requests, false otherwise.

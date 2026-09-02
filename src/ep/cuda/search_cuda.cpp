@@ -228,11 +228,12 @@ void BeamSearch_Cuda::SelectTop() {
   sequences_.AfterAppendNextTokens(next_tokens_device, params_->BatchBeamSize());
 }
 
-void GreedySearch_Cuda::SampleTopKTopP(int k, float p, float temperature, std::mt19937& rng) {
+size_t GreedySearch_Cuda::SampleTopKTopP(int k, float p, float temperature, std::mt19937& rng) {
   EnsureSamplingData();
   sampling_data_->ReInitCurandStates(static_cast<unsigned long long>(rng()),
                                      params_->search.batch_size, GetStream());
   SampleTopKTopPImpl(k, p, temperature);
+  return 1;
 }
 
 void GreedySearch_Cuda::SampleTopKTopPImpl(int k, float p, float temperature) {

@@ -305,6 +305,28 @@ void StaticCacheManager::Deallocate(std::vector<std::shared_ptr<Request>>& reque
   cache_allocated_requests_.clear();
 }
 
+void StaticCacheManager::ValidateRewind(
+    const std::shared_ptr<Request>& request) const {
+  if (!IsResident(request)) {
+    return;
+  }
+  if (cache_allocated_requests_.size() != 1) {
+    throw std::runtime_error(
+        "Static Engine Request rewind requires exactly one resident "
+        "Request because a row cannot be released independently from its "
+        "shared contiguous cache allocation.");
+  }
+}
+
+void StaticCacheManager::ReleaseForRewind(
+    const std::shared_ptr<Request>& request) {
+  ValidateRewind(request);
+  if (!IsResident(request)) {
+    return;
+  }
+  Deallocate(cache_allocated_requests_);
+}
+
 void StaticCacheManager::DetachRequestForTeardown(
     const std::shared_ptr<Request>& request) noexcept {
   if (!IsResident(request)) {
@@ -465,6 +487,28 @@ void PagedCacheManager::Deallocate(std::vector<std::shared_ptr<Request>>& reques
                                         request) != allocated_to_remove.end();
                      }),
       cache_allocated_requests_.end());
+}
+
+void PagedCacheManager::ValidateRewind(
+    const std::shared_ptr<Request>& request) const {
+  if (!IsResident(request)) {
+    return;
+  }
+  key_value_cache_->ValidateRemove(request.get());
+  if (fixed_state_pool_) {
+    fixed_state_pool_->ValidateRelease(
+        fixed_state_pool_->HandleFor(request.get()));
+  }
+}
+
+void PagedCacheManager::ReleaseForRewind(
+    const std::shared_ptr<Request>& request) {
+  ValidateRewind(request);
+  if (!IsResident(request)) {
+    return;
+  }
+  std::vector<std::shared_ptr<Request>> requests{request};
+  Deallocate(requests);
 }
 
 void PagedCacheManager::DetachRequestForTeardown(

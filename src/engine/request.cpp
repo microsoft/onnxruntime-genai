@@ -12,6 +12,11 @@
 
 namespace Generators {
 
+RequestRewindState::RequestRewindState() = default;
+RequestRewindState::RequestRewindState(RequestRewindState&&) noexcept = default;
+RequestRewindState& RequestRewindState::operator=(RequestRewindState&&) noexcept = default;
+RequestRewindState::~RequestRewindState() = default;
+
 DeviceSpan<int32_t> Request::AllocateOnDevice(
     GeneratorParams& params,
     std::span<const int32_t> input_ids) {
@@ -67,6 +72,7 @@ Request::Request(
       max_total_tokens_{max_total_tokens},
       params_{params},
       rng_{CreateRandomGenerator(params->search.random_seed)},
+      initial_rng_{rng_},
       search_{CreateSearch(*params)} {
   draft_tokens_.reserve(kMaxDraftTokensPerStep);
   // A request is one sequence: the engine batches requests, not rows within a request. Several
@@ -96,6 +102,8 @@ Request::Request(
   // ScheduledRequests::GenerateNextTokens().
   search_->DeferCompletion(true);
   tokens_host_.reserve(max_total_tokens_);
+  random_checkpoints_.reserve(max_total_tokens_ + 1);
+  random_checkpoints_.push_back({});
 }
 
 Request::~Request() = default;
@@ -178,6 +186,7 @@ void Request::PrepareTurnAdmission(
   admission.transaction_started = true;
   search_->AppendTokens(device_tokens);
   tokens_host_.insert(tokens_host_.end(), tokens.begin(), tokens.end());
+  AppendRandomCheckpoints(tokens.size());
   prompt_sequence_length_ = CurrentSequenceLength();
   if (first_turn) {
     processed_sequence_length_ = 0;
@@ -211,6 +220,7 @@ void Request::RollbackTurnAdmission(RequestTurnAdmission& admission) {
   }
   status_ = admission.status;
   tokens_host_.resize(admission.host_token_count);
+  random_checkpoints_.resize(admission.host_token_count + 1);
   prompt_sequence_length_ = admission.prompt_sequence_length;
   processed_sequence_length_ = admission.processed_sequence_length;
   RestoreStateForTransaction();
@@ -326,6 +336,7 @@ void Request::CompleteClose() noexcept {
   accepted_draft_count_ = 0;
   draft_verification_completed_generation_ = false;
   std::vector<int32_t>{}.swap(tokens_host_);
+  std::vector<RandomCheckpoint>{}.swap(random_checkpoints_);
 }
 
 uint64_t Request::BeginTurn(
@@ -341,6 +352,18 @@ uint64_t Request::BeginTurn(
   }
   return engine->BeginTurn(
       shared_from_this(), tokens, max_generated_tokens);
+}
+
+void Request::RewindTo(size_t new_length) {
+  if (IsClosed(status_)) {
+    throw std::runtime_error("Cannot rewind a closed request.");
+  }
+  auto engine = engine_.lock();
+  if (!engine) {
+    throw std::runtime_error(
+        "Cannot rewind after the request's engine has been destroyed.");
+  }
+  engine->RewindRequest(shared_from_this(), new_length);
 }
 
 int64_t Request::CurrentSequenceLength() const {
@@ -426,6 +449,7 @@ void Request::AppendDraftsForTransaction(size_t draft_count) {
   auto device_tokens = AllocateOnDevice(*params_, drafts);
   search_->AppendTokens(device_tokens);
   tokens_host_.insert(tokens_host_.end(), drafts.begin(), drafts.end());
+  AppendRandomCheckpoints(drafts.size());
   staged_draft_count_ = draft_count;
   accepted_draft_count_ = 0;
   draft_verification_completed_generation_ = false;
@@ -439,6 +463,7 @@ void Request::CommitAcceptedDraftsForTransaction(size_t accepted_count) {
   const size_t committed_length =
       static_cast<size_t>(CurrentSequenceLength()) - proposed_count;
   tokens_host_.resize(tokens_host_.size() - proposed_count);
+  random_checkpoints_.resize(tokens_host_.size() + 1);
   search_->RewindTo(committed_length);
   staged_draft_count_ = 0;
   accepted_draft_count_ = 0;
@@ -451,6 +476,7 @@ void Request::CommitAcceptedDraftsForTransaction(size_t accepted_count) {
     const int64_t sequence_length_after = CurrentSequenceLength();
     if (sequence_length_after == sequence_length_before + 1) {
       tokens_host_.push_back(token);
+      AppendRandomCheckpoints(1);
       ++staged_draft_count_;
       ++accepted_draft_count_;
     } else if (sequence_length_after != sequence_length_before ||
@@ -481,26 +507,42 @@ void Request::RewindDraftsForTransaction(size_t accepted_count) {
 
   staged_draft_count_ = accepted_count;
   tokens_host_.resize(tokens_host_.size() - rejected_count);
+  random_checkpoints_.resize(tokens_host_.size() + 1);
   search_->RewindTo(static_cast<size_t>(CurrentSequenceLength()) - rejected_count);
 }
 
-void Request::RecordSampledDraftAcceptance(size_t accepted_count) {
+void Request::RecordSampledDraftAcceptance(
+    size_t accepted_count,
+    std::span<const uint64_t> accepted_rng_draw_counts) {
   if (staged_draft_count_ != 0 || accepted_count > draft_tokens_.size()) {
     throw std::logic_error("Sampled verification recorded an invalid accepted draft prefix.");
   }
+  if (accepted_rng_draw_counts.size() != accepted_count) {
+    throw std::logic_error(
+        "Sampled verification did not record one random checkpoint per accepted draft.");
+  }
+  if (random_checkpoints_.size() != tokens_host_.size() + 1) {
+    throw std::logic_error(
+        "The request random-state history is out of sync before sampled draft acceptance.");
+  }
+  uint64_t previous_rng_draw_count =
+      random_checkpoints_.back().rng_draw_count;
+  for (uint64_t draw_count : accepted_rng_draw_counts) {
+    if (draw_count < previous_rng_draw_count ||
+        draw_count > rng_draw_count_) {
+      throw std::logic_error(
+          "Sampled verification recorded an invalid random draw boundary.");
+    }
+    previous_rng_draw_count = draw_count;
+  }
   tokens_host_.insert(tokens_host_.end(), draft_tokens_.begin(),
                       draft_tokens_.begin() + static_cast<ptrdiff_t>(accepted_count));
+  for (uint64_t draw_count : accepted_rng_draw_counts) {
+    random_checkpoints_.push_back(
+        RandomCheckpoint{draw_count, batched_sampler_draw_count_});
+  }
   staged_draft_count_ = accepted_count;
   accepted_draft_count_ = accepted_count;
-}
-
-void Request::DiscardStagedDrafts() noexcept {
-  if (staged_draft_count_ != 0) {
-    tokens_host_.resize(tokens_host_.size() - staged_draft_count_);
-    staged_draft_count_ = 0;
-  }
-  accepted_draft_count_ = 0;
-  draft_verification_completed_generation_ = false;
 }
 
 RequestStateSnapshot Request::Snapshot() const {
@@ -580,6 +622,7 @@ void Request::AppendTokensForAuxiliaryDecoder(std::span<const int32_t> tokens) {
   auto device_tokens = AllocateOnDevice(*params_, tokens);
   search_->AppendTokens(device_tokens);
   tokens_host_.insert(tokens_host_.end(), tokens.begin(), tokens.end());
+  AppendRandomCheckpoints(tokens.size());
 }
 
 void Request::AppendTokensForAuxiliaryDecoder(DeviceSpan<int32_t> tokens) {
@@ -592,6 +635,7 @@ void Request::AppendTokensForAuxiliaryDecoder(DeviceSpan<int32_t> tokens) {
   search_->AppendTokens(tokens);
   const int32_t non_pad = params_->config.model.pad_token_id == 0 ? 1 : 0;
   tokens_host_.insert(tokens_host_.end(), tokens.size(), non_pad);
+  AppendRandomCheckpoints(tokens.size());
 }
 
 void Request::RewindAuxiliaryDecoderTo(size_t sequence_length) {
@@ -603,6 +647,7 @@ void Request::RewindAuxiliaryDecoderTo(size_t sequence_length) {
   }
   search_->RewindTo(sequence_length);
   tokens_host_.resize(sequence_length);
+  random_checkpoints_.resize(sequence_length + 1);
   processed_sequence_length_ = static_cast<int64_t>(sequence_length);
   scheduled_token_count_ = 0;
 }
@@ -656,15 +701,7 @@ void Request::GenerateNextTokens(DeviceSpan<float> logits, bool guidance_applied
           "top_k (" + std::to_string(search_params.top_k) +
           ") must be 0 or greater.");
 
-    if (search_params.top_p > 0.0f && search_params.top_p < 1.0f && search_params.top_k > 1) {
-      search_->SampleTopKTopP(search_params.top_k, search_params.top_p, search_params.temperature,
-                              rng_);
-    } else if (search_params.top_k > 1) {
-      search_->SampleTopK(search_params.top_k, search_params.temperature, rng_);
-    } else {
-      assert(search_params.top_k == 0);
-      search_->SampleTopP(search_params.top_p, search_params.temperature, rng_);
-    }
+    SelectNextToken();
   }
 }
 
@@ -693,6 +730,9 @@ void Request::SaveStateForTransaction() {
   search_->SaveStateForTransaction();
   guidance_transaction_checkpoint_ = std::move(guidance_checkpoint);
   transaction_rng_ = rng_;
+  transaction_rng_draw_count_ = rng_draw_count_;
+  transaction_batched_sampler_draw_count_ =
+      batched_sampler_draw_count_;
   transaction_processed_sequence_length_ = processed_sequence_length_;
   transaction_tokens_host_size_ = tokens_host_.size();
 }
@@ -705,6 +745,9 @@ void Request::SaveStateForNewTurnTransaction() {
   guidance_transaction_checkpoint_ =
       std::exchange(guidance_logits_processor_, std::move(new_turn_guidance));
   transaction_rng_ = rng_;
+  transaction_rng_draw_count_ = rng_draw_count_;
+  transaction_batched_sampler_draw_count_ =
+      batched_sampler_draw_count_;
   transaction_processed_sequence_length_ = processed_sequence_length_;
   transaction_tokens_host_size_ = tokens_host_.size();
 }
@@ -716,6 +759,9 @@ void Request::SaveStateForExternalSamplingTransaction() {
   search_->SaveStateForExternalSamplingTransaction();
   guidance_transaction_checkpoint_ = std::move(guidance_checkpoint);
   transaction_rng_ = rng_;
+  transaction_rng_draw_count_ = rng_draw_count_;
+  transaction_batched_sampler_draw_count_ =
+      batched_sampler_draw_count_;
   transaction_processed_sequence_length_ = processed_sequence_length_;
   transaction_tokens_host_size_ = tokens_host_.size();
 }
@@ -775,8 +821,12 @@ RequestStepResult Request::StageDraftCompletionForTransaction() {
 void Request::RestoreStateForTransaction() {
   search_->RestoreStateForTransaction();
   rng_ = transaction_rng_;
+  rng_draw_count_ = transaction_rng_draw_count_;
+  batched_sampler_draw_count_ =
+      transaction_batched_sampler_draw_count_;
   processed_sequence_length_ = transaction_processed_sequence_length_;
   tokens_host_.resize(transaction_tokens_host_size_);
+  random_checkpoints_.resize(transaction_tokens_host_size_ + 1);
   staged_draft_count_ = 0;
   accepted_draft_count_ = 0;
   scheduled_token_count_ = 0;
@@ -789,8 +839,12 @@ void Request::RestoreStateForTransaction() {
 void Request::QueueStateRestoreForTransaction() {
   search_->QueueStateRestoreForTransaction();
   rng_ = transaction_rng_;
+  rng_draw_count_ = transaction_rng_draw_count_;
+  batched_sampler_draw_count_ =
+      transaction_batched_sampler_draw_count_;
   processed_sequence_length_ = transaction_processed_sequence_length_;
   tokens_host_.resize(transaction_tokens_host_size_);
+  random_checkpoints_.resize(transaction_tokens_host_size_ + 1);
   staged_draft_count_ = 0;
   accepted_draft_count_ = 0;
   scheduled_token_count_ = 0;
@@ -818,11 +872,14 @@ void Request::CommitStep(const RequestStepPlan& plan,
   turn_generated_tokens_ += accepted_drafts;
   if (result.token_appended) {
     tokens_host_.push_back(result.token);
+    AppendRandomCheckpoints(1);
     ++turn_generated_tokens_;
   }
+  RecordCurrentRandomCheckpoint();
   // A verify step reserved cache slots for every draft; the rejected ones were never committed.
   processed_sequence_length_ =
       static_cast<int64_t>(plan.target_cache_slots - (plan.draft_token_count - accepted_drafts));
+  needs_replay_after_rewind_ = false;
   status_ = result.done ? RequestStatus::TurnComplete : RequestStatus::Active;
   if (result.done) {
     finish_reason_ = result.finish_reason;
@@ -872,12 +929,15 @@ void Request::SelectNextToken() {
     search_->SelectTop();
   } else if (search_params.top_p > 0.0f && search_params.top_p < 1.0f &&
              search_params.top_k > 1) {
-    search_->SampleTopKTopP(search_params.top_k, search_params.top_p,
-                            search_params.temperature, rng_);
+    rng_draw_count_ += search_->SampleTopKTopP(
+        search_params.top_k, search_params.top_p,
+        search_params.temperature, rng_);
   } else if (search_params.top_k > 1) {
-    search_->SampleTopK(search_params.top_k, search_params.temperature, rng_);
+    rng_draw_count_ += search_->SampleTopK(
+        search_params.top_k, search_params.temperature, rng_);
   } else {
-    search_->SampleTopP(search_params.top_p, search_params.temperature, rng_);
+    rng_draw_count_ += search_->SampleTopP(
+        search_params.top_p, search_params.temperature, rng_);
   }
 }
 
@@ -955,8 +1015,11 @@ bool Request::SupportsBatchedSampling() const {
   return search_->SupportsBatchedSampling();
 }
 
-void Request::OnNextTokensSampled() {
+void Request::OnNextTokensSampled(bool sampler_draw_consumed) {
   search_->OnNextTokensSampled();
+  if (sampler_draw_consumed) {
+    ++batched_sampler_draw_count_;
+  }
 }
 
 BatchedSamplerState& Request::SamplingState(BatchedSampler& sampler) {
@@ -976,6 +1039,7 @@ RequestStepResult Request::CompleteGeneration() {
   const auto next_tokens = search_->GetNextTokens().CpuSpan();
 
   const size_t sequence_length = static_cast<size_t>(CurrentSequenceLength());
+  needs_replay_after_rewind_ = false;
   size_t new_token_count{};
   int32_t token{};
   if (sequence_length > tokens_host_.size()) {
@@ -985,12 +1049,14 @@ RequestStepResult Request::CompleteGeneration() {
     auto new_tokens = next_tokens.last(new_token_count);
 
     tokens_host_.insert(tokens_host_.end(), new_tokens.begin(), new_tokens.end());
+    AppendRandomCheckpoints(new_token_count);
     token = new_tokens.back();
     if (guidance_logits_processor_) {
       guidance_logits_processor_->CommitTokens(new_tokens);
     }
     turn_generated_tokens_ += new_token_count;
   }
+  RecordCurrentRandomCheckpoint();
 
   const bool turn_limit_reached =
       turn_max_generated_tokens_ &&
@@ -1019,6 +1085,113 @@ RequestStepResult Request::CompleteGeneration() {
   };
   StageVisibleTokens(result, new_token_count, std::nullopt);
   return result;
+}
+
+void Request::AppendRandomCheckpoints(size_t count) {
+  if (random_checkpoints_.size() !=
+      tokens_host_.size() + 1 - count) {
+    throw std::logic_error(
+        "The request random-state history is out of sync with its token sequence.");
+  }
+  random_checkpoints_.insert(
+      random_checkpoints_.end(), count,
+      RandomCheckpoint{rng_draw_count_, batched_sampler_draw_count_});
+}
+
+void Request::RecordCurrentRandomCheckpoint() noexcept {
+  assert(random_checkpoints_.size() == tokens_host_.size() + 1);
+  random_checkpoints_.back() =
+      RandomCheckpoint{rng_draw_count_, batched_sampler_draw_count_};
+}
+
+uint64_t Request::BatchedSamplerDrawCountAt(
+    size_t sequence_length) const {
+  if (sequence_length >= random_checkpoints_.size()) {
+    throw std::runtime_error(
+        "Cannot rewind beyond the current Request sequence length.");
+  }
+  return random_checkpoints_[sequence_length]
+      .batched_sampler_draw_count;
+}
+
+RequestRewindState Request::PrepareRewind(
+    size_t new_length,
+    std::unique_ptr<BatchedSamplerState> batched_sampler_state) const {
+  if (new_length > tokens_host_.size() ||
+      new_length >= random_checkpoints_.size()) {
+    throw std::runtime_error(
+        "Cannot rewind beyond the current Request sequence length.");
+  }
+
+  RequestRewindState state;
+  state.search = CreateSearch(*params_);
+  state.search->DeferCompletion(true);
+  if (new_length != 0) {
+    const std::span<const int32_t> retained_tokens{
+        tokens_host_.data(), new_length};
+    auto device_tokens =
+        AllocateOnDevice(*params_, retained_tokens);
+    state.search->AppendTokens(device_tokens);
+  }
+  state.guidance_logits_processor =
+      guidance_logits_processor_
+          ? guidance_logits_processor_->CloneForNewTurn()
+          : nullptr;
+  state.batched_sampler_state =
+      std::move(batched_sampler_state);
+  state.rng = initial_rng_;
+  state.sequence_length = new_length;
+  const auto& checkpoint = random_checkpoints_[new_length];
+  state.rng.discard(checkpoint.rng_draw_count);
+  state.rng_draw_count = checkpoint.rng_draw_count;
+  state.batched_sampler_draw_count =
+      checkpoint.batched_sampler_draw_count;
+
+  const size_t prompt_end =
+      static_cast<size_t>(std::max<int64_t>(
+          prompt_sequence_length_, 0));
+  const size_t prompt_start =
+      prompt_end >= turn_prompt_tokens_
+          ? prompt_end - turn_prompt_tokens_
+          : 0;
+  if (new_length > prompt_start) {
+    state.turn_prompt_tokens =
+        std::min(new_length, prompt_end) - prompt_start;
+  }
+  if (new_length > prompt_end) {
+    state.turn_generated_tokens = std::min(
+        new_length - prompt_end, turn_generated_tokens_);
+  }
+  return state;
+}
+
+void Request::CommitRewind(RequestRewindState&& state) noexcept {
+  assert(Generators::IsTurnComplete(status_));
+  assert(state.search);
+  assert(state.sequence_length <= tokens_host_.size());
+  search_ = std::move(state.search);
+  guidance_logits_processor_ =
+      std::move(state.guidance_logits_processor);
+  guidance_transaction_checkpoint_.reset();
+  batched_sampler_state_ =
+      std::move(state.batched_sampler_state);
+  rng_ = state.rng;
+  rng_draw_count_ = state.rng_draw_count;
+  batched_sampler_draw_count_ =
+      state.batched_sampler_draw_count;
+  tokens_host_.resize(state.sequence_length);
+  random_checkpoints_.resize(state.sequence_length + 1);
+  processed_sequence_length_ = 0;
+  prompt_sequence_length_ = 0;
+  scheduled_token_count_ = 0;
+  turn_prompt_tokens_ = state.turn_prompt_tokens;
+  turn_generated_tokens_ = state.turn_generated_tokens;
+  turn_max_generated_tokens_.reset();
+  draft_tokens_.clear();
+  staged_draft_count_ = 0;
+  accepted_draft_count_ = 0;
+  draft_verification_completed_generation_ = false;
+  needs_replay_after_rewind_ = true;
 }
 
 }  // namespace Generators
