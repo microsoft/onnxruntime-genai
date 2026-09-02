@@ -32,7 +32,14 @@ inline std::shared_ptr<Model> LoadSyntheticPagedModel() {
 
 inline std::shared_ptr<Model> LoadSyntheticPagedMtpModel() {
   auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged");
-  config->model.mtp.filename = "unused-mtp-head.onnx";
+  config->model.mtp.filename = "decoder.onnx";
+  config->model.mtp.num_key_value_heads = 1;
+  config->model.mtp.head_size = 1;
+  config->model.mtp.inputs.hidden_states = "past_key_values.1.key";
+  config->model.mtp.outputs.hidden_states = "hidden_states";
+  // Engine::CreateDependencies sets this on the target decoder when a head is configured. Tests
+  // that drive ModelExecutor directly have to mirror it to get the hidden-states output bound.
+  config->engine.hidden_states_output_required = true;
   return CreateModel(GetOrtEnv(), std::move(config));
 }
 
@@ -68,6 +75,7 @@ inline std::shared_ptr<Model> LoadSyntheticCompositeModel() {
 inline std::shared_ptr<Model> LoadSyntheticCompositeMtpModel() {
   auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-composite");
   config->model.mtp.filename = "unused-mtp-head.onnx";
+  config->engine.hidden_states_output_required = true;
   return CreateModel(GetOrtEnv(), std::move(config));
 }
 

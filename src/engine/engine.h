@@ -6,6 +6,7 @@
 #include "request.h"
 #include "model_executor.h"
 #include "scheduler.h"
+#include "../decoding/speculative_stats.h"
 
 #include <thread>
 
@@ -77,6 +78,9 @@ struct EngineDependencies {
   std::shared_ptr<CacheManager> cache_manager;
   std::unique_ptr<Scheduler> scheduler;
   std::unique_ptr<ModelExecutor> model_executor;
+  std::shared_ptr<DecoderOnly_Model> mtp_model;
+  std::shared_ptr<CacheManager> mtp_cache_manager;
+  std::unique_ptr<ModelExecutor> mtp_model_executor;
   // Test-only fault injection for allocation-sensitive durable error construction.
   EngineStepErrorFactory make_step_error{};
 };
@@ -169,6 +173,14 @@ struct Engine : std::enable_shared_from_this<Engine>,
    */
   size_t MaxDraftTokensPerStep() const;
 
+  /**
+   * @brief Returns cumulative speculative-decoding work and acceptance statistics.
+   *
+   * Must be called from the Engine owner thread: the counters are updated by Run() without
+   * synchronization.
+   */
+  SpeculativeStats GetSpeculativeStats() const;
+
   uint64_t BeginTurn(const std::shared_ptr<Request>& request,
                      std::span<const int32_t> tokens,
                      std::optional<size_t> max_generated_tokens);
@@ -194,6 +206,24 @@ struct Engine : std::enable_shared_from_this<Engine>,
   void ValidateRequestCanContinue(
       const std::shared_ptr<Request>& request,
       bool allow_nonresident = false) const;
+
+  struct MtpStep {
+    StepPlan plan;
+    std::vector<std::shared_ptr<Request>> target_requests;
+    std::vector<bool> newly_created;
+    std::vector<std::vector<int32_t>> drafts;
+    std::unique_ptr<CacheStepReservation> reservation;
+  };
+
+  std::unique_ptr<MtpStep> PrepareMtpStep(
+      const StepPlan& target_plan,
+      const std::vector<RequestStepResult>& target_results,
+      ScheduledRequests& target_requests);
+  void RollbackMtpStep(MtpStep& step);
+  void CommitMtpStep(MtpStep& step);
+  void PublishMtpDrafts(MtpStep& step);
+  void RecordSpeculativeCommit(const StepPlan& plan) noexcept;
+  void CloseMtpRequest(const std::shared_ptr<Request>& request);
   [[noreturn]] void HandleContinuationRestoreFailure(
       const std::shared_ptr<Request>& request,
       std::exception_ptr append_error,
@@ -208,6 +238,14 @@ struct Engine : std::enable_shared_from_this<Engine>,
   std::shared_ptr<CacheManager> cache_manager_;    // The cache manager for handling cached data.
   std::unique_ptr<Scheduler> scheduler_;           // The scheduler responsible for managing execution order.
   std::unique_ptr<ModelExecutor> model_executor_;  // The executor responsible for running the model.
+  // Present only when model.mtp names an auxiliary paged draft head. These are constructed with
+  // the Engine so both cache pools share one memory budget; draft orchestration is added separately.
+  std::shared_ptr<DecoderOnly_Model> mtp_model_;
+  std::shared_ptr<CacheManager> mtp_cache_manager_;
+  std::unique_ptr<ModelExecutor> mtp_model_executor_;
+  std::unordered_map<const Request*, std::shared_ptr<Request>> mtp_requests_;
+  DeviceSpan<int32_t> mtp_device_drafts_;
+  DeviceSpan<int32_t> mtp_device_chain_inputs_;
   EngineStepErrorFactory make_step_error_;
   const std::thread::id owner_thread_{std::this_thread::get_id()};
   EngineHealth health_{EngineHealth::Healthy};
@@ -216,6 +254,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
   std::exception_ptr fatal_execution_fallback_error_;
   StepTransactionId next_transaction_id_{1};
   EngineTransactionMetrics transaction_metrics_;
+  SpeculativeStats speculative_stats_;
   StepPlan step_plan_;
   std::vector<RequestStepResult> step_results_;
   std::vector<size_t> staged_event_order_;

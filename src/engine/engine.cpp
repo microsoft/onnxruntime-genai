@@ -2,16 +2,21 @@
 // Licensed under the MIT License.
 
 #include "engine.h"
+#include "../search.h"
 
 #include <limits>
 
-#include "../search.h"
-
 namespace Generators {
+
+static_assert(kMaxDraftTokensPerStep < kSpeculativeAcceptanceLengthBins);
 
 namespace {
 
 constexpr size_t kFatalEventOverhead = 2;
+
+struct MtpRollbackError : std::runtime_error {
+  using std::runtime_error::runtime_error;
+};
 
 std::shared_ptr<GeneratorParams> CloneRequestParams(
     const GeneratorParams& source,
@@ -80,6 +85,72 @@ std::exception_ptr MakeFatalFallbackError(StepOutcomeKind outcome) {
   return fallback;
 }
 
+std::vector<int32_t> GreedyTokens(
+    const std::shared_ptr<DecoderOnly_Model>& model,
+    std::vector<DeviceSpan<float>>& logits) {
+  std::vector<int32_t> tokens(logits.size());
+  auto device_tokens = model->p_device_->Allocate<int32_t>(logits.size());
+  (void)device_tokens.CpuSpan();
+  bool device_argmax = true;
+  for (size_t i = 0; i < logits.size(); ++i) {
+    device_argmax &= model->p_device_->ArgMaxDevice(
+        logits[i].Span().data(), Ort::TypeToTensorType<float>, 1,
+        model->config_->model.vocab_size, device_tokens.subspan(i, 1));
+  }
+  if (device_argmax) {
+    device_tokens.CopyDeviceToCpu();
+    std::copy(device_tokens.CpuSpan().begin(), device_tokens.CpuSpan().end(),
+              tokens.begin());
+    return tokens;
+  }
+
+  for (size_t i = 0; i < logits.size(); ++i) {
+    if (!model->p_device_->ArgMax(
+            logits[i].Span().data(), Ort::TypeToTensorType<float>, 1,
+            model->config_->model.vocab_size, &tokens[i])) {
+      const auto values = logits[i].CopyDeviceToCpu();
+      tokens[i] = static_cast<int32_t>(
+          std::max_element(values.begin(), values.end()) - values.begin());
+    }
+  }
+  return tokens;
+}
+
+bool TryGreedyTokensToDevice(
+    const std::shared_ptr<DecoderOnly_Model>& model,
+    std::vector<DeviceSpan<float>>& logits,
+    DeviceSpan<int32_t> tokens) {
+  if (tokens.size() != logits.size()) {
+    return false;
+  }
+
+  const size_t vocab_size = static_cast<size_t>(model->config_->model.vocab_size);
+  const bool contiguous = !logits.empty() && std::all_of(
+                                                 logits.begin(), logits.end(),
+                                                 [&](DeviceSpan<float>& row) {
+                                                   const size_t index = &row - logits.data();
+                                                   return row.size() == vocab_size &&
+                                                          row.SameBufferAs(logits.front()) &&
+                                                          row.Span().data() ==
+                                                              logits.front().Span().data() +
+                                                                  index * vocab_size;
+                                                 });
+  if (contiguous) {
+    return model->p_device_->ArgMaxDevice(
+        logits.front().Span().data(), Ort::TypeToTensorType<float>,
+        static_cast<int>(logits.size()), model->config_->model.vocab_size, tokens);
+  }
+
+  for (size_t i = 0; i < logits.size(); ++i) {
+    if (!model->p_device_->ArgMaxDevice(
+            logits[i].Span().data(), Ort::TypeToTensorType<float>, 1,
+            model->config_->model.vocab_size, tokens.subspan(i, 1))) {
+      return false;
+    }
+  }
+  return true;
+}
+
 }  // namespace
 
 Engine::Engine(std::shared_ptr<Model> model)
@@ -90,6 +161,9 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
       cache_manager_{std::move(dependencies.cache_manager)},
       scheduler_{std::move(dependencies.scheduler)},
       model_executor_{std::move(dependencies.model_executor)},
+      mtp_model_{std::move(dependencies.mtp_model)},
+      mtp_cache_manager_{std::move(dependencies.mtp_cache_manager)},
+      mtp_model_executor_{std::move(dependencies.mtp_model_executor)},
       make_step_error_{dependencies.make_step_error
                            ? dependencies.make_step_error
                            : MakeEngineStepError} {
@@ -103,7 +177,6 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
   if (!model_executor_) {
     throw std::runtime_error("Engine requires a non-null model executor.");
   }
-
   fatal_contract_fallback_error_ =
       MakeFatalFallbackError(StepOutcomeKind::ExecutionContractFailure);
   fatal_execution_fallback_error_ =
@@ -123,6 +196,7 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
   pending_events_.reserve(max_step_event_count_);
   staged_events_.reserve(max_step_event_count_);
   fatal_events_.reserve(max_step_event_count_ + 1);
+  mtp_requests_.reserve(max_batch_size);
 }
 
 Engine::~Engine() {
@@ -134,10 +208,576 @@ Engine::~Engine() {
 }
 
 EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
-  std::shared_ptr<CacheManager> cache_manager = CacheManager::Create(model);
+  std::shared_ptr<DecoderOnly_Model> mtp_model;
+  size_t mtp_bytes_per_block = 0;
+  if (!model->config_->model.mtp.filename.empty()) {
+    if (!model->config_->engine.dynamic_batching) {
+      throw std::runtime_error("An Engine-hosted MTP head requires dynamic batching.");
+    }
+    mtp_model = std::make_shared<DecoderOnly_Model>(
+        CreateMtpDecoderConfig(*model->config_), GetOrtEnv());
+    mtp_bytes_per_block = PagedKeyValueCacheBytesPerBlock(mtp_model);
+    // The head consumes the target decoder's packed hidden states, so the target must emit them.
+    model->config_->engine.hidden_states_output_required = true;
+  }
+
+  std::shared_ptr<CacheManager> cache_manager =
+      CacheManager::Create(model, mtp_bytes_per_block);
   auto scheduler = Scheduler::Create(model, cache_manager);
   auto model_executor = ModelExecutor::Create(model, cache_manager);
-  return EngineDependencies{std::move(cache_manager), std::move(scheduler), std::move(model_executor)};
+
+  std::shared_ptr<CacheManager> mtp_cache_manager;
+  std::unique_ptr<ModelExecutor> mtp_model_executor;
+  if (mtp_model) {
+    // Both decoders cover the same resident request set. Fixing the head to the main pool's block
+    // count makes the auxiliary bytes included above exact rather than letting it independently
+    // consume another gpu_utilization_factor share of currently free memory.
+    mtp_model->config_->engine.dynamic_batching->num_blocks =
+        cache_manager->Snapshot().total_blocks;
+    mtp_cache_manager = CacheManager::Create(mtp_model);
+    mtp_model_executor = ModelExecutor::Create(mtp_model, mtp_cache_manager);
+  }
+
+  return EngineDependencies{
+      std::move(cache_manager), std::move(scheduler), std::move(model_executor),
+      std::move(mtp_model), std::move(mtp_cache_manager), std::move(mtp_model_executor)};
+}
+
+std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
+    const StepPlan& target_plan,
+    const std::vector<RequestStepResult>& target_results,
+    ScheduledRequests& target_requests) {
+  if (!mtp_model_ || MaxDraftTokensPerStep() == 0) {
+    return nullptr;
+  }
+  if (target_results.size() != target_plan.requests.size()) {
+    throw std::logic_error("MTP preparation requires one target result per planned request.");
+  }
+
+  Tensor* target_hidden_states = target_requests.HiddenStates();
+  if (!target_hidden_states) {
+    throw std::logic_error("The main decoder did not expose hidden states for its MTP head.");
+  }
+  const auto target_hidden_shape = target_hidden_states->GetShape();
+  const int64_t hidden_size = model_->config_->model.decoder.hidden_size;
+  if (target_hidden_shape !=
+      std::vector<int64_t>{static_cast<int64_t>(target_plan.token_count), hidden_size}) {
+    throw std::logic_error("The main decoder hidden-state shape does not match its packed step plan.");
+  }
+  const auto hidden_type = target_hidden_states->GetType();
+  const auto& mtp_hidden_name = mtp_model_->config_->model.decoder.inputs.hidden_states;
+  if (hidden_type != mtp_model_->session_info_.GetInputDataType(mtp_hidden_name)) {
+    throw std::logic_error("The main and MTP hidden-state element types do not match.");
+  }
+
+  struct Feed {
+    std::shared_ptr<Request> target;
+    std::shared_ptr<Request> shadow;
+    std::vector<int32_t> tokens;
+    size_t target_hidden_row{};
+    size_t max_draft_tokens{};
+    bool newly_created{};
+  };
+  std::vector<Feed> feeds;
+  feeds.reserve(target_plan.requests.size());
+  std::vector<std::shared_ptr<Request>> checkpointed_shadows;
+  checkpointed_shadows.reserve(target_plan.requests.size());
+  const auto restore_checkpointed_shadows = [&]() {
+    std::exception_ptr rollback_error;
+    for (auto it = checkpointed_shadows.rbegin();
+         it != checkpointed_shadows.rend(); ++it) {
+      try {
+        (*it)->RestoreStateForTransaction();
+      } catch (...) {
+        if (!rollback_error) {
+          rollback_error = std::current_exception();
+        }
+      }
+    }
+    if (rollback_error) {
+      std::rethrow_exception(rollback_error);
+    }
+  };
+  const auto rollback_setup_and_rethrow =
+      [&](std::exception_ptr setup_error) -> void {
+    try {
+      restore_checkpointed_shadows();
+    } catch (...) {
+      auto message = AddExceptionCause(
+          "MTP shadow setup failed.", setup_error);
+      message = AddExceptionCause(
+          std::move(message) + " Shadow rollback also failed.",
+          std::current_exception());
+      throw MtpRollbackError(std::move(message));
+    }
+    std::rethrow_exception(setup_error);
+  };
+  size_t total_rows = 0;
+  try {
+    for (size_t i = 0; i < target_plan.requests.size(); ++i) {
+      const auto& entry = target_plan.requests[i];
+      const auto& result = target_results[i];
+      const auto& search = entry.request->SearchOptions();
+      const int64_t committed_length_after_step =
+          entry.request->CurrentSequenceLength();
+      const size_t sequence_limit =
+          std::min(static_cast<size_t>(search.max_length),
+                   entry.request->MaxTotalTokens());
+      const size_t remaining_turn_tokens =
+          entry.request->RemainingTurnTokenBudget();
+      const size_t remaining_turn_tokens_after_step =
+          result.visible_token_count < remaining_turn_tokens
+              ? remaining_turn_tokens - result.visible_token_count
+              : 0;
+      const size_t max_draft_tokens = std::min({MaxDraftTokensPerStep(),
+                                                static_cast<size_t>(entry.request->SpeculativeOptions().max_draft_tokens),
+                                                static_cast<size_t>(committed_length_after_step) + 1 < sequence_limit
+                                                    ? sequence_limit - static_cast<size_t>(committed_length_after_step) - 1
+                                                    : size_t{0},
+                                                remaining_turn_tokens_after_step > 1
+                                                    ? remaining_turn_tokens_after_step - 1
+                                                    : size_t{0}});
+      if (!result.token_appended || result.done ||
+          entry.request->DraftTokenValidationError() ||
+          max_draft_tokens == 0) {
+        continue;
+      }
+
+      Feed feed;
+      feed.target = entry.request;
+      const size_t accepted = entry.request->AcceptedDraftTokenCount();
+      if (accepted > entry.draft_token_count) {
+        throw std::logic_error("MTP preparation observed more accepted drafts than the target planned.");
+      }
+      const auto staged_drafts = entry.request->StagedDraftTokens();
+      feed.tokens.insert(feed.tokens.end(), staged_drafts.begin(),
+                         staged_drafts.begin() + static_cast<ptrdiff_t>(accepted));
+      feed.tokens.push_back(result.token);
+      feed.target_hidden_row = entry.packed_token_offset +
+                               (entry.draft_token_count == 0
+                                    ? entry.unprocessed_token_count - 1
+                                    : 0);
+      feed.max_draft_tokens = max_draft_tokens;
+
+      const auto existing = mtp_requests_.find(entry.request.get());
+      if (existing != mtp_requests_.end()) {
+        feed.shadow = existing->second;
+        feed.shadow->SaveStateForTransaction();
+        checkpointed_shadows.push_back(feed.shadow);
+        feed.shadow->AppendTokensForAuxiliaryDecoder(feed.tokens);
+      } else {
+        auto params = CreateGeneratorParams(*mtp_model_);
+        params->search = search;
+        feed.shadow = Request::CreateAuxiliaryDecoderRequest(
+            std::move(params), entry.request->MaxTotalTokens(),
+            abandonment_pending_, shared_from_this(), feed.tokens);
+        feed.newly_created = true;
+      }
+      total_rows += feed.tokens.size();
+      feeds.push_back(std::move(feed));
+    }
+  } catch (...) {
+    rollback_setup_and_rethrow(std::current_exception());
+  }
+  if (feeds.empty()) {
+    return nullptr;
+  }
+
+  std::unique_ptr<MtpStep> step;
+  try {
+    step = std::make_unique<MtpStep>();
+    step->plan.transaction_id = target_plan.transaction_id;
+    step->plan.scheduled_request_limit = feeds.size();
+    step->plan.token_count = total_rows;
+    step->target_requests.reserve(feeds.size());
+    step->newly_created.reserve(feeds.size());
+    step->drafts.resize(feeds.size());
+
+    size_t packed_offset = 0;
+    for (const auto& feed : feeds) {
+      const size_t token_count = feed.tokens.size();
+      const size_t processed = static_cast<size_t>(feed.shadow->ProcessedSequenceLength());
+      step->plan.requests.push_back(RequestStepPlan{
+          feed.shadow,
+          feed.shadow.get(),
+          feed.shadow->CurrentSequenceLength(),
+          token_count,
+          0,
+          packed_offset,
+          packed_offset + token_count - 1,
+          processed + token_count,
+          static_cast<size_t>(feed.shadow->CurrentSequenceLength()) +
+              feed.max_draft_tokens - 1,
+          feed.shadow->IsPrefill(),
+          feed.newly_created,
+      });
+      step->target_requests.push_back(feed.target);
+      step->newly_created.push_back(feed.newly_created);
+      packed_offset += token_count;
+    }
+    step->plan.graph_capture_eligible = std::all_of(
+        step->plan.requests.begin(), step->plan.requests.end(),
+        [](const RequestStepPlan& entry) {
+          return !entry.is_prefill && entry.unprocessed_token_count == 1;
+        });
+  } catch (...) {
+    rollback_setup_and_rethrow(std::current_exception());
+  }
+
+  try {
+    const auto planning = mtp_cache_manager_->PlanStepResources(step->plan);
+    if (!planning.executable || step->plan.requests.size() != feeds.size()) {
+      throw std::runtime_error("The MTP cache could not reserve every target-committed suffix.");
+    }
+    step->reservation = mtp_cache_manager_->ReserveStep(step->plan);
+
+    const size_t max_draft_tokens = std::max_element(
+                                        feeds.begin(), feeds.end(),
+                                        [](const Feed& left, const Feed& right) {
+                                          return left.max_draft_tokens < right.max_draft_tokens;
+                                        })
+                                        ->max_draft_tokens;
+    bool device_draft_chain =
+        max_draft_tokens > 1 && mtp_model_->p_device_->GetType() == DeviceType::CUDA;
+    DeviceSpan<int32_t> device_drafts;
+    DeviceSpan<int32_t> device_chain_inputs;
+    if (device_draft_chain) {
+      const size_t draft_capacity = feeds.size() * max_draft_tokens;
+      if (mtp_device_drafts_.size() < draft_capacity) {
+        mtp_device_drafts_ = mtp_model_->p_device_->Allocate<int32_t>(draft_capacity);
+      }
+      if (mtp_device_chain_inputs_.size() < feeds.size()) {
+        mtp_device_chain_inputs_ = mtp_model_->p_device_->Allocate<int32_t>(feeds.size());
+      }
+      device_drafts = mtp_device_drafts_.subspan(0, draft_capacity);
+      device_chain_inputs = mtp_device_chain_inputs_.subspan(0, feeds.size());
+    }
+    std::vector<std::vector<size_t>> device_stage_feed_indices;
+    device_stage_feed_indices.reserve(max_draft_tokens);
+
+    const auto materialize_device_drafts = [&]() {
+      auto draft_ids = device_drafts.CopyDeviceToCpu();
+      for (size_t stage = 0; stage < device_stage_feed_indices.size(); ++stage) {
+        const auto& feed_indices = device_stage_feed_indices[stage];
+        for (size_t row = 0; row < feed_indices.size(); ++row) {
+          step->drafts[feed_indices[row]].push_back(
+              draft_ids[stage * feeds.size() + row]);
+        }
+      }
+    };
+
+    Tensor packed_hidden_states{mtp_model_->p_device_inputs_, hidden_type};
+    const std::array<int64_t, 2> packed_hidden_shape{
+        static_cast<int64_t>(total_rows), hidden_size};
+    packed_hidden_states.CreateTensor(packed_hidden_shape);
+    const size_t row_bytes = static_cast<size_t>(hidden_size) * Ort::SizeOf(hidden_type);
+    auto source_bytes = target_hidden_states->GetByteSpan();
+    auto destination_bytes = packed_hidden_states.GetByteSpan();
+    size_t destination_row = 0;
+    for (const auto& feed : feeds) {
+      const size_t row_count = feed.tokens.size();
+      destination_bytes.subspan(destination_row * row_bytes, row_count * row_bytes)
+          .CopyFrom(source_bytes.subspan(feed.target_hidden_row * row_bytes,
+                                         row_count * row_bytes));
+      destination_row += row_count;
+    }
+
+    ScheduledRequests mtp_requests{step->plan, mtp_model_, nullptr, nullptr};
+    ExecutionContext context{&step->plan};
+    context.cache_reservation = step->reservation->PagedReservation();
+    context.hidden_states_input = packed_hidden_states.GetOrtTensor();
+    if (device_draft_chain) {
+      context.run_options->AddConfigEntry("disable_synchronize_execution_providers", "1");
+    }
+    mtp_model_executor_->Decode(mtp_requests, context);
+    ++speculative_stats_.draft_forward_passes;
+    auto logits = mtp_requests.ProcessLogits();
+    device_draft_chain =
+        device_draft_chain &&
+        TryGreedyTokensToDevice(
+            mtp_model_, logits, device_drafts.subspan(0, feeds.size()));
+    std::vector<int32_t> first_drafts;
+    if (device_draft_chain) {
+      std::vector<size_t> first_stage_feed_indices;
+      first_stage_feed_indices.reserve(feeds.size());
+      for (size_t i = 0; i < feeds.size(); ++i) {
+        first_stage_feed_indices.push_back(i);
+      }
+      device_stage_feed_indices.push_back(std::move(first_stage_feed_indices));
+    } else {
+      first_drafts = GreedyTokens(mtp_model_, logits);
+    }
+    for (size_t i = 0; i < feeds.size(); ++i) {
+      step->drafts[i].reserve(feeds[i].max_draft_tokens);
+      if (!device_draft_chain) {
+        step->drafts[i].push_back(first_drafts[i]);
+      }
+      step->plan.requests[i].request->CommitAuxiliaryDecoderStep();
+    }
+
+    const auto copy_hidden_rows = [&](Tensor& source,
+                                      std::span<const size_t> source_rows) {
+      auto destination = std::make_unique<Tensor>(mtp_model_->p_device_inputs_, hidden_type);
+      const std::array<int64_t, 2> shape{
+          static_cast<int64_t>(source_rows.size()), hidden_size};
+      destination->CreateTensor(shape);
+      const size_t row_bytes = static_cast<size_t>(hidden_size) * Ort::SizeOf(hidden_type);
+      auto source_bytes = source.GetByteSpan();
+      auto destination_bytes = destination->GetByteSpan();
+      for (size_t row = 0; row < source_rows.size(); ++row) {
+        destination_bytes.subspan(row * row_bytes, row_bytes)
+            .CopyFrom(source_bytes.subspan(source_rows[row] * row_bytes, row_bytes));
+      }
+      return destination;
+    };
+
+    std::vector<size_t> active_feed_indices;
+    std::vector<size_t> previous_stage_rows(feeds.size());
+    std::vector<size_t> feedback_rows;
+    for (size_t i = 0; i < feeds.size(); ++i) {
+      previous_stage_rows[i] = i;
+      if (feeds[i].max_draft_tokens > 1) {
+        active_feed_indices.push_back(i);
+        feedback_rows.push_back(step->plan.requests[i].logits_row_index);
+      }
+    }
+    std::unique_ptr<Tensor> feedback_hidden;
+    if (!active_feed_indices.empty()) {
+      Tensor* head_hidden = mtp_requests.HiddenStates();
+      if (!head_hidden ||
+          head_hidden->GetShape() !=
+              std::vector<int64_t>{static_cast<int64_t>(total_rows), hidden_size}) {
+        throw std::runtime_error(
+            "Chained MTP drafts require one configured head hidden-state output row per input token.");
+      }
+      feedback_hidden = copy_hidden_rows(*head_hidden, feedback_rows);
+    }
+
+    // Keep each stage's decoder I/O alive until the final device-to-host copy completes; device
+    // ArgMax can still be reading its logits after Decode returns.
+    std::vector<std::unique_ptr<ScheduledRequests>> pending_device_requests;
+    pending_device_requests.reserve(max_draft_tokens - 1);
+    std::vector<std::unique_ptr<Tensor>> pending_device_inputs;
+    pending_device_inputs.reserve(max_draft_tokens - 1);
+
+    for (size_t draft_index = 1; !active_feed_indices.empty(); ++draft_index) {
+      StepPlan chain_plan;
+      chain_plan.transaction_id = target_plan.transaction_id;
+      chain_plan.scheduled_request_limit = active_feed_indices.size();
+      chain_plan.token_count = active_feed_indices.size();
+      chain_plan.proposed_block_table_columns = step->plan.proposed_block_table_columns;
+      chain_plan.graph_capture_eligible = true;
+      chain_plan.requests.reserve(active_feed_indices.size());
+      DeviceSpan<int32_t> packed_device_inputs;
+      if (device_draft_chain) {
+        packed_device_inputs = device_chain_inputs.subspan(0, active_feed_indices.size());
+      }
+      for (size_t row = 0; row < active_feed_indices.size(); ++row) {
+        const size_t feed_index = active_feed_indices[row];
+        auto& shadow = feeds[feed_index].shadow;
+        if (device_draft_chain) {
+          auto token = packed_device_inputs.subspan(row, 1);
+          token.CopyFrom(device_drafts.subspan(
+              (draft_index - 1) * feeds.size() + previous_stage_rows[feed_index], 1));
+          shadow->AppendTokensForAuxiliaryDecoder(token);
+        } else {
+          const std::array<int32_t, 1> token{step->drafts[feed_index].back()};
+          shadow->AppendTokensForAuxiliaryDecoder(token);
+        }
+        const size_t processed = static_cast<size_t>(shadow->ProcessedSequenceLength());
+        chain_plan.requests.push_back(RequestStepPlan{
+            shadow,
+            shadow.get(),
+            shadow->CurrentSequenceLength(),
+            1,
+            0,
+            chain_plan.requests.size(),
+            chain_plan.requests.size(),
+            processed + 1,
+            step->plan.requests[feed_index].whole_sequence_cache_slots,
+            false,
+            false,
+        });
+      }
+
+      auto chain_requests = std::make_unique<ScheduledRequests>(
+          chain_plan, mtp_model_, nullptr, nullptr);
+      ExecutionContext chain_context{&chain_plan};
+      chain_context.cache_reservation = step->reservation->PagedReservation();
+      chain_context.hidden_states_input = feedback_hidden->GetOrtTensor();
+      if (device_draft_chain) {
+        chain_context.input_ids = packed_device_inputs;
+        chain_context.run_options->AddConfigEntry(
+            "disable_synchronize_execution_providers", "1");
+      }
+      mtp_model_executor_->Decode(*chain_requests, chain_context);
+      ++speculative_stats_.draft_forward_passes;
+      auto chain_logits = chain_requests->ProcessLogits();
+      bool stage_on_device = false;
+      if (device_draft_chain) {
+        stage_on_device = TryGreedyTokensToDevice(
+            mtp_model_, chain_logits,
+            device_drafts.subspan(
+                draft_index * feeds.size(), active_feed_indices.size()));
+      }
+      std::vector<int32_t> chain_drafts;
+      if (stage_on_device) {
+        device_stage_feed_indices.push_back(active_feed_indices);
+      } else {
+        if (device_draft_chain) {
+          materialize_device_drafts();
+          pending_device_requests.clear();
+          pending_device_inputs.clear();
+          device_draft_chain = false;
+        }
+        chain_drafts = GreedyTokens(mtp_model_, chain_logits);
+      }
+      for (size_t row = 0; row < active_feed_indices.size(); ++row) {
+        const size_t feed_index = active_feed_indices[row];
+        if (!device_draft_chain) {
+          step->drafts[feed_index].push_back(chain_drafts[row]);
+        }
+        feeds[feed_index].shadow->CommitAuxiliaryDecoderStep();
+        previous_stage_rows[feed_index] = row;
+      }
+
+      std::vector<size_t> next_active_feed_indices;
+      std::vector<size_t> next_feedback_rows;
+      for (size_t row = 0; row < active_feed_indices.size(); ++row) {
+        if (feeds[active_feed_indices[row]].max_draft_tokens > draft_index + 1) {
+          next_active_feed_indices.push_back(active_feed_indices[row]);
+          next_feedback_rows.push_back(row);
+        }
+      }
+      if (!next_active_feed_indices.empty()) {
+        Tensor* head_hidden = chain_requests->HiddenStates();
+        if (!head_hidden ||
+            head_hidden->GetShape() !=
+                std::vector<int64_t>{static_cast<int64_t>(active_feed_indices.size()),
+                                     hidden_size}) {
+          throw std::runtime_error(
+              "Chained MTP hidden-state output does not match the active request batch.");
+        }
+        auto next_feedback_hidden =
+            copy_hidden_rows(*head_hidden, next_feedback_rows);
+        if (device_draft_chain) {
+          pending_device_inputs.push_back(std::move(feedback_hidden));
+        }
+        feedback_hidden = std::move(next_feedback_hidden);
+      }
+      if (device_draft_chain) {
+        pending_device_requests.push_back(std::move(chain_requests));
+      }
+      active_feed_indices = std::move(next_active_feed_indices);
+    }
+
+    if (device_draft_chain) {
+      materialize_device_drafts();
+    }
+
+    for (size_t i = 0; i < feeds.size(); ++i) {
+      feeds[i].shadow->RewindAuxiliaryDecoderTo(
+          static_cast<size_t>(step->plan.requests[i].target_cache_slots));
+    }
+    for (size_t i = 0; i < step->plan.requests.size(); ++i) {
+      if (step->newly_created[i]) {
+        mtp_requests_.emplace(step->target_requests[i].get(),
+                              step->plan.requests[i].request);
+      }
+    }
+  } catch (...) {
+    const auto preparation_error = std::current_exception();
+    try {
+      RollbackMtpStep(*step);
+    } catch (...) {
+      auto message = AddExceptionCause(
+          "MTP step preparation failed.", preparation_error);
+      message = AddExceptionCause(
+          std::move(message) + " MTP rollback also failed.",
+          std::current_exception());
+      throw MtpRollbackError(std::move(message));
+    }
+    std::rethrow_exception(preparation_error);
+  }
+  return step;
+}
+
+void Engine::RollbackMtpStep(MtpStep& step) {
+  std::exception_ptr rollback_error;
+  try {
+    mtp_model_->p_device_scoring_->Synchronize();
+  } catch (...) {
+    rollback_error = std::current_exception();
+  }
+  if (step.reservation) {
+    try {
+      step.reservation->Release();
+    } catch (...) {
+      if (!rollback_error) {
+        rollback_error = std::current_exception();
+      }
+    }
+    step.reservation.reset();
+  }
+  for (size_t i = 0; i < step.plan.requests.size(); ++i) {
+    if (step.newly_created[i]) {
+      mtp_requests_.erase(step.target_requests[i].get());
+      continue;
+    }
+    try {
+      step.plan.requests[i].request->RestoreStateForTransaction();
+    } catch (...) {
+      if (!rollback_error) {
+        rollback_error = std::current_exception();
+      }
+    }
+  }
+  if (rollback_error) {
+    std::rethrow_exception(rollback_error);
+  }
+}
+
+void Engine::CommitMtpStep(MtpStep& step) {
+  for (size_t i = 0; i < step.plan.requests.size(); ++i) {
+    if (!step.newly_created[i]) {
+      step.plan.requests[i].request->CommitStateForTransaction();
+    }
+  }
+  step.reservation->Commit();
+  step.reservation.reset();
+  for (size_t i = 0; i < step.plan.requests.size(); ++i) {
+    step.plan.requests[i].request->CommitAuxiliaryDecoderStep();
+  }
+}
+
+void Engine::PublishMtpDrafts(MtpStep& step) {
+  for (size_t i = 0; i < step.plan.requests.size(); ++i) {
+    step.target_requests[i]->SetDraftTokens(step.drafts[i]);
+  }
+}
+
+void Engine::RecordSpeculativeCommit(const StepPlan& plan) noexcept {
+  for (const auto& entry : plan.requests) {
+    if (entry.draft_token_count == 0) {
+      continue;
+    }
+
+    const size_t accepted = entry.request->AcceptedDraftTokenCount();
+    ++speculative_stats_.rounds;
+    ++speculative_stats_.completed_rounds;
+    speculative_stats_.draft_tokens_proposed += entry.draft_token_count;
+    speculative_stats_.draft_tokens_evaluated +=
+        std::min(accepted + 1, entry.draft_token_count);
+    speculative_stats_.draft_tokens_accepted += accepted;
+    ++speculative_stats_.acceptance_length_histogram[accepted];
+    if (accepted == 0) {
+      ++speculative_stats_.zero_accept_rounds;
+    } else if (accepted == entry.draft_token_count) {
+      ++speculative_stats_.full_accept_rounds;
+    } else {
+      ++speculative_stats_.partial_accept_rounds;
+    }
+  }
 }
 
 void Engine::ValidateOwnerThread() const {
@@ -230,6 +870,12 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
   RequestTurnAdmission admission;
   bool added_to_scheduler = false;
 
+  // A continuation appends a prompt the MTP shadow never sees, so keeping the shadow would leave it
+  // a concatenation of generated tokens across turns with the intervening prompt missing. Drop it
+  // here so the next drafted step rebuilds a suffix-local shadow, matching fresh-turn semantics.
+  // Doing it before admission keeps a rolled back turn consistent: the shadow is simply rebuilt.
+  CloseMtpRequest(request);
+
   try {
     request->PrepareTurnAdmission(tokens, admission);
     if (first_turn) {
@@ -278,6 +924,9 @@ bool Engine::CancelRequest(const std::shared_ptr<Request>& request, uint64_t tur
 
   const auto counters =
       request->CompleteCancelFromEngine(*this, turn_id);
+  // The canceled turn's suffix is gone, so the shadow that mirrored it must not survive into the
+  // next turn.
+  CloseMtpRequest(request);
   EngineEvent terminal;
   terminal.request = request;
   terminal.turn_id = turn_id;
@@ -310,6 +959,8 @@ void Engine::CloseRequest(const std::shared_ptr<Request>& request) {
       !cache_manager_->SupportsDynamicBatching() &&
       cache_manager_->IsResident(request);
 
+  CloseMtpRequest(request);
+
   pending_events_.erase(
       pending_events_.begin(),
       pending_events_.begin() + static_cast<ptrdiff_t>(pending_event_index_));
@@ -341,6 +992,17 @@ void Engine::CloseRequest(const std::shared_ptr<Request>& request) {
       tracked_requests_.end());
 }
 
+void Engine::CloseMtpRequest(const std::shared_ptr<Request>& request) {
+  const auto mtp_it = mtp_requests_.find(request.get());
+  if (mtp_it == mtp_requests_.end()) {
+    return;
+  }
+  std::vector<std::shared_ptr<Request>> mtp_requests{mtp_it->second};
+  mtp_cache_manager_->Deallocate(mtp_requests);
+  mtp_it->second->CompleteCloseFromEngine(*this);
+  mtp_requests_.erase(mtp_it);
+}
+
 void Engine::DetachRequestForTeardown(
     const std::shared_ptr<Request>& request) noexcept {
   if (!request) {
@@ -348,6 +1010,16 @@ void Engine::DetachRequestForTeardown(
   }
 
   scheduler_->DetachRequestForTeardown(request);
+  if (const auto mtp_it = mtp_requests_.find(request.get());
+      mtp_it != mtp_requests_.end()) {
+    try {
+      std::vector<std::shared_ptr<Request>> mtp_requests{mtp_it->second};
+      mtp_cache_manager_->Deallocate(mtp_requests);
+    } catch (...) {
+    }
+    mtp_it->second->CompleteCloseFromEngine(*this);
+    mtp_requests_.erase(mtp_it);
+  }
   pending_events_.erase(
       pending_events_.begin(),
       pending_events_.begin() + static_cast<ptrdiff_t>(pending_event_index_));
@@ -564,6 +1236,7 @@ void Engine::RunStatic() {
 
     try {
       model_executor_->Decode(scheduled_requests);
+      ++speculative_stats_.target_forward_passes;
       scheduled_requests.GenerateNextTokens(step_results_);
     } catch (...) {
       MarkUnhealthyAndThrow(
@@ -713,12 +1386,21 @@ void Engine::RunDynamic() {
     context.fixed_state_staging_bytes = reservation->FixedStateStagingBytes();
 
     bool request_transaction_active = false;
+    std::unique_ptr<MtpStep> mtp_step;
     const auto rollback_transaction = [&]() {
       // Request/search state and composite cache state are checkpointed separately. Both must be
       // restored so a retry observes exactly the state that existed before this Run() call. The
       // reservation's Release() discards fixed provisional slots and staged banks as well as the
       // reserved paged blocks.
       std::exception_ptr rollback_error;
+      if (mtp_step) {
+        try {
+          RollbackMtpStep(*mtp_step);
+        } catch (...) {
+          rollback_error = std::current_exception();
+        }
+        mtp_step.reset();
+      }
       if (request_transaction_active) {
         try {
           scheduled_requests.RestoreStateForTransaction();
@@ -770,6 +1452,7 @@ void Engine::RunDynamic() {
       scheduled_requests.BeginTransaction();
       request_transaction_active = true;
       model_executor_->Decode(scheduled_requests, context);
+      ++speculative_stats_.target_forward_passes;
     } catch (const ModelExecutionError& error) {
       const auto execution_error = std::current_exception();
       rollback_transaction();
@@ -820,6 +1503,21 @@ void Engine::RunDynamic() {
             entry.unprocessed_token_count - entry.draft_token_count +
                 entry.request->AcceptedDraftTokenCount());
       }
+      // MTP drafting is optional acceleration inside a mandatory target transaction. A recoverable
+      // head failure (cache pressure, shape mismatch, binding or session error) must not roll the
+      // committed target pass back, or a persistent failure would repeat forever with no progress.
+      // PrepareMtpStep restores every piece of MTP state before it rethrows, so the target step can
+      // commit without drafts. Contract violations and failed MTP rollback stay fatal below.
+      try {
+        mtp_step = PrepareMtpStep(step_plan_, step_results_, scheduled_requests);
+      } catch (const MtpRollbackError&) {
+        throw;
+      } catch (const std::logic_error&) {
+        throw;
+      } catch (...) {
+        mtp_step.reset();
+        ++speculative_stats_.standard_fallback_steps;
+      }
       for (size_t i = 0; i < step_plan_.requests.size(); ++i) {
         if (step_results_[i].visible_token_count != 0 ||
             step_results_[i].done) {
@@ -832,6 +1530,16 @@ void Engine::RunDynamic() {
             return step_plan_.requests[left].scheduling_order <
                    step_plan_.requests[right].scheduling_order;
           });
+    } catch (const MtpRollbackError&) {
+      const auto rollback_error = std::current_exception();
+      rollback_transaction();
+      ++transaction_metrics_.post_processing_aborts;
+      MarkUnhealthyAndThrow(
+          StepOutcomeKind::FatalExecutionFailure,
+          step_plan_.transaction_id,
+          nullptr,
+          "MTP rollback failed and the Engine is no longer healthy.",
+          rollback_error);
     } catch (const std::logic_error&) {
       const auto post_processing_error = std::current_exception();
       rollback_transaction();
@@ -861,6 +1569,9 @@ void Engine::RunDynamic() {
     // work into inactive banks without publishing anything.
     try {
       reservation->PrepareCommit();
+      if (mtp_step) {
+        mtp_step->reservation->PrepareCommit();
+      }
     } catch (...) {
       const auto preparation_error = std::current_exception();
       rollback_transaction();
@@ -880,9 +1591,16 @@ void Engine::RunDynamic() {
       scheduled_requests.CommitStateForTransaction();
       request_transaction_active = false;
       reservation->Commit();
+      if (mtp_step) {
+        CommitMtpStep(*mtp_step);
+      }
+      RecordSpeculativeCommit(step_plan_);
       for (size_t i = 0; i < step_plan_.requests.size(); ++i) {
         step_plan_.requests[i].request->CommitStep(
             step_plan_.requests[i], step_results_[i]);
+      }
+      if (mtp_step) {
+        PublishMtpDrafts(*mtp_step);
       }
     } catch (...) {
       MarkUnhealthyAndThrow(
@@ -982,6 +1700,7 @@ EngineEvent Engine::FailUnserviceableRequest(const void* request_id) {
         nullptr);
   }
   scheduler_->RemoveRequest(request);
+  CloseMtpRequest(request);
   request->CompleteFailedTurnFromEngine(*this);
 
   EngineEvent event;
@@ -1042,7 +1761,7 @@ EngineEvent Engine::EventFromStepError(
       event.error_code = EngineErrorCode::EngineContractFailure;
       health_ = EngineHealth::Unhealthy;
       if (!fatal_error_) {
-        fatal_error_ = caught_error;
+        fatal_error_ = fatal_contract_fallback_error_;
       }
       break;
   }
@@ -1161,6 +1880,23 @@ size_t Engine::MaxDraftTokensPerStep() const {
                  model_executor_->SupportsDraftVerification()
              ? cache_manager_->MaxDraftTokensPerStep()
              : 0;
+}
+
+SpeculativeStats Engine::GetSpeculativeStats() const {
+  // The counters are plain members mutated by Run(), so reading them from a monitoring thread
+  // would be a data race.
+  ValidateOwnerThread();
+  auto stats = speculative_stats_;
+  if (stats.draft_tokens_evaluated != 0) {
+    stats.acceptance_rate = static_cast<float>(stats.draft_tokens_accepted) /
+                            static_cast<float>(stats.draft_tokens_evaluated);
+  }
+  if (stats.rounds != 0) {
+    stats.avg_draft_tokens_per_round =
+        static_cast<float>(stats.draft_tokens_proposed) /
+        static_cast<float>(stats.rounds);
+  }
+  return stats;
 }
 
 }  // namespace Generators

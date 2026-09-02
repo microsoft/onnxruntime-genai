@@ -140,6 +140,9 @@ std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   decoder.sliding_window.reset();
   decoder.state_groups.reset();
   decoder.pipeline.clear();
+  // A chained draft feeds every stage the previous stage's hidden states, so the head must emit its
+  // own hidden states. Record that before clearing the MTP section the demand was inferred from.
+  projected->engine.hidden_states_output_required = true;
   projected->model.mtp = {};
   return projected;
 }

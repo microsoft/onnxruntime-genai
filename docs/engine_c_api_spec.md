@@ -544,9 +544,10 @@ and remove their internal unseen-index FIFO bookkeeping.
 
 At successful step commit, the Engine already knows the Request, Turn ID, selected tokens, terminal
 state, finish reason, and usage. It captures those values in ordered `PendingEngineEvent` objects.
-A speculative step produces at most `kMaxGeneratedTokensPerStep` events per affected Request, with
-terminal state combined into the final visible token event when possible. `OgaEngineRun` moves the
-available FIFO prefix into the reusable Buffer storage and retains overflow.
+A speculative transaction emits accepted drafts followed by its correction or bonus token, up to
+`kMaxGeneratedTokensPerStep` events per affected Request. Only the final event carries terminal
+state when the Turn finishes. `OgaEngineRun` moves the available FIFO prefix into the reusable
+Buffer storage and retains overflow.
 
 `tokens_host_` and the Search sequence remain authoritative resident conversation state. Event
 delivery does not remove tokens from that state. Because token and Turn ID are captured together at

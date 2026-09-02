@@ -68,6 +68,7 @@ Request::Request(
       params_{params},
       rng_{CreateRandomGenerator(params->search.random_seed)},
       search_{CreateSearch(*params)} {
+  draft_tokens_.reserve(kMaxDraftTokensPerStep);
   // A request is one sequence: the engine batches requests, not rows within a request. Several
   // places here read row 0 only (UnprocessedTokens, CurrentSequenceLength) or take the tail of the
   // next-token span, so a wider search would silently mirror the wrong row's tokens.
@@ -173,9 +174,8 @@ void Request::PrepareTurnAdmission(
   admission.prompt_sequence_length = prompt_sequence_length_;
   admission.processed_sequence_length = processed_sequence_length_;
 
-  SaveStateForTransaction();
+  SaveStateForNewTurnTransaction();
   admission.transaction_started = true;
-  ResetGuidanceForNewTurn();
   search_->AppendTokens(device_tokens);
   tokens_host_.insert(tokens_host_.end(), tokens.begin(), tokens.end());
   prompt_sequence_length_ = CurrentSequenceLength();
@@ -351,6 +351,22 @@ int64_t Request::CommittedSequenceLength() const {
   return CurrentSequenceLength() - static_cast<int64_t>(staged_draft_count_);
 }
 
+const char* Request::DraftTokenValidationError() const noexcept {
+  if (guidance_logits_processor_) {
+    return "Speculative draft tokens are not supported with guidance.";
+  }
+  const auto& search = params_->search;
+  if (search.do_sample && search.top_k != 1 && search.temperature != 0 && search.top_k <= 0) {
+    return "Sampled speculative draft tokens require a positive top_k.";
+  }
+  if (search.repetition_penalty != 1.0f || search.no_repeat_ngram_size > 0 ||
+      search.min_length > CurrentSequenceLength()) {
+    return "Speculative draft tokens require repetition_penalty 1, no_repeat_ngram_size 0, and a "
+           "sequence already past min_length.";
+  }
+  return nullptr;
+}
+
 void Request::SetDraftTokens(std::span<const int32_t> tokens) {
   if (staged_draft_count_ != 0) {
     throw std::runtime_error("Cannot replace draft tokens while a step is in flight.");
@@ -366,23 +382,8 @@ void Request::SetDraftTokens(std::span<const int32_t> tokens) {
     throw std::runtime_error(
         "Speculative draft tokens may only be proposed when the request is ready to decode.");
   }
-  if (guidance_logits_processor_) {
-    throw std::runtime_error("Speculative draft tokens are not supported with guidance.");
-  }
-
-  const auto& search = params_->search;
-  // Verification compares the target model's argmax against each draft, which only reproduces the
-  // request's own token stream when that stream is greedy.
-  if (search.do_sample && search.top_k != 1 && search.temperature != 0) {
-    throw std::runtime_error("Speculative draft tokens require a greedy request.");
-  }
-  // The draft rows are read before any logits processor runs, so a processor that would change a
-  // row's argmax has to be inactive for every position this step verifies.
-  if (search.repetition_penalty != 1.0f || search.no_repeat_ngram_size > 0 ||
-      search.min_length > CurrentSequenceLength()) {
-    throw std::runtime_error(
-        "Speculative draft tokens require repetition_penalty 1, no_repeat_ngram_size 0, and a "
-        "sequence already past min_length.");
+  if (const char* error = DraftTokenValidationError()) {
+    throw std::runtime_error(error);
   }
   auto engine = engine_.lock();
   if (!engine) {
@@ -406,6 +407,11 @@ void Request::SetDraftTokens(std::span<const int32_t> tokens) {
 
 std::span<const int32_t> Request::StagedDraftTokens() const {
   return std::span<const int32_t>{draft_tokens_}.subspan(0, staged_draft_count_);
+}
+
+bool Request::IsStopToken(int32_t token) const {
+  const auto& stop_tokens = params_->config.model.eos_token_id;
+  return std::find(stop_tokens.begin(), stop_tokens.end(), token) != stop_tokens.end();
 }
 
 void Request::AppendDraftsForTransaction(size_t draft_count) {
@@ -461,6 +467,31 @@ void Request::CommitAcceptedDraftsForTransaction(size_t accepted_count) {
       break;
     }
   }
+}
+
+void Request::RewindDraftsForTransaction(size_t accepted_count) {
+  if (accepted_count > staged_draft_count_) {
+    throw std::logic_error("The step accepted more draft tokens than it staged.");
+  }
+  const size_t rejected_count = staged_draft_count_ - accepted_count;
+  accepted_draft_count_ = accepted_count;
+  if (rejected_count == 0) {
+    return;
+  }
+
+  staged_draft_count_ = accepted_count;
+  tokens_host_.resize(tokens_host_.size() - rejected_count);
+  search_->RewindTo(static_cast<size_t>(CurrentSequenceLength()) - rejected_count);
+}
+
+void Request::RecordSampledDraftAcceptance(size_t accepted_count) {
+  if (staged_draft_count_ != 0 || accepted_count > draft_tokens_.size()) {
+    throw std::logic_error("Sampled verification recorded an invalid accepted draft prefix.");
+  }
+  tokens_host_.insert(tokens_host_.end(), draft_tokens_.begin(),
+                      draft_tokens_.begin() + static_cast<ptrdiff_t>(accepted_count));
+  staged_draft_count_ = accepted_count;
+  accepted_draft_count_ = accepted_count;
 }
 
 void Request::DiscardStagedDrafts() noexcept {
@@ -520,6 +551,65 @@ bool Request::IsChunkComplete() const {
 
 void Request::AdvanceChunk() {
   processed_sequence_length_ += static_cast<int64_t>(ScheduledTokenCount());
+}
+
+std::shared_ptr<Request> Request::CreateAuxiliaryDecoderRequest(
+    std::shared_ptr<GeneratorParams> params,
+    size_t max_total_tokens,
+    std::shared_ptr<std::atomic<bool>> abandonment_pending,
+    const std::shared_ptr<Engine>& engine,
+    std::span<const int32_t> tokens) {
+  auto request = std::make_shared<Request>(
+      std::move(params), max_total_tokens, std::move(abandonment_pending));
+  request->AttachToEngine(engine);
+  // The shadow is never admitted through BeginTurn, so it starts decoding directly and treats the
+  // tokens it mirrors from the target as its prompt.
+  request->status_ = RequestStatus::Active;
+  request->AppendTokensForAuxiliaryDecoder(tokens);
+  request->prompt_sequence_length_ = request->CurrentSequenceLength();
+  return request;
+}
+
+void Request::AppendTokensForAuxiliaryDecoder(std::span<const int32_t> tokens) {
+  if (status_ != RequestStatus::Active || tokens.empty() ||
+      processed_sequence_length_ != CurrentSequenceLength()) {
+    throw std::logic_error(
+        "Auxiliary decoder tokens require an active request with no pending rows.");
+  }
+  ValidateAppendLength(max_total_tokens_, static_cast<size_t>(CurrentSequenceLength()), tokens.size());
+  auto device_tokens = AllocateOnDevice(*params_, tokens);
+  search_->AppendTokens(device_tokens);
+  tokens_host_.insert(tokens_host_.end(), tokens.begin(), tokens.end());
+}
+
+void Request::AppendTokensForAuxiliaryDecoder(DeviceSpan<int32_t> tokens) {
+  if (status_ != RequestStatus::Active || tokens.empty() ||
+      processed_sequence_length_ != CurrentSequenceLength()) {
+    throw std::logic_error(
+        "Auxiliary decoder tokens require an active request with no pending rows.");
+  }
+  ValidateAppendLength(max_total_tokens_, static_cast<size_t>(CurrentSequenceLength()), tokens.size());
+  search_->AppendTokens(tokens);
+  const int32_t non_pad = params_->config.model.pad_token_id == 0 ? 1 : 0;
+  tokens_host_.insert(tokens_host_.end(), tokens.size(), non_pad);
+}
+
+void Request::RewindAuxiliaryDecoderTo(size_t sequence_length) {
+  if (status_ != RequestStatus::Active ||
+      processed_sequence_length_ != CurrentSequenceLength() ||
+      sequence_length > static_cast<size_t>(processed_sequence_length_)) {
+    throw std::logic_error(
+        "Auxiliary decoder rewind requires an active request at a processed sequence boundary.");
+  }
+  search_->RewindTo(sequence_length);
+  tokens_host_.resize(sequence_length);
+  processed_sequence_length_ = static_cast<int64_t>(sequence_length);
+  scheduled_token_count_ = 0;
+}
+
+void Request::CommitAuxiliaryDecoderStep() noexcept {
+  processed_sequence_length_ += static_cast<int64_t>(ScheduledTokenCount());
+  scheduled_token_count_ = 0;
 }
 
 DeviceSpan<int32_t> Request::UnprocessedTokens() {
@@ -603,6 +693,20 @@ void Request::SaveStateForTransaction() {
   search_->SaveStateForTransaction();
   guidance_transaction_checkpoint_ = std::move(guidance_checkpoint);
   transaction_rng_ = rng_;
+  transaction_processed_sequence_length_ = processed_sequence_length_;
+  transaction_tokens_host_size_ = tokens_host_.size();
+}
+
+void Request::SaveStateForNewTurnTransaction() {
+  auto new_turn_guidance = guidance_logits_processor_
+                               ? guidance_logits_processor_->CloneForNewTurn()
+                               : nullptr;
+  search_->SaveStateForTransaction();
+  guidance_transaction_checkpoint_ =
+      std::exchange(guidance_logits_processor_, std::move(new_turn_guidance));
+  transaction_rng_ = rng_;
+  transaction_processed_sequence_length_ = processed_sequence_length_;
+  transaction_tokens_host_size_ = tokens_host_.size();
 }
 
 void Request::SaveStateForExternalSamplingTransaction() {
@@ -612,6 +716,8 @@ void Request::SaveStateForExternalSamplingTransaction() {
   search_->SaveStateForExternalSamplingTransaction();
   guidance_transaction_checkpoint_ = std::move(guidance_checkpoint);
   transaction_rng_ = rng_;
+  transaction_processed_sequence_length_ = processed_sequence_length_;
+  transaction_tokens_host_size_ = tokens_host_.size();
 }
 
 RequestStepResult Request::ApplyLogitsForTransaction(DeviceSpan<float> logits,
@@ -669,7 +775,12 @@ RequestStepResult Request::StageDraftCompletionForTransaction() {
 void Request::RestoreStateForTransaction() {
   search_->RestoreStateForTransaction();
   rng_ = transaction_rng_;
-  DiscardStagedDrafts();
+  processed_sequence_length_ = transaction_processed_sequence_length_;
+  tokens_host_.resize(transaction_tokens_host_size_);
+  staged_draft_count_ = 0;
+  accepted_draft_count_ = 0;
+  scheduled_token_count_ = 0;
+  draft_verification_completed_generation_ = false;
   if (guidance_transaction_checkpoint_) {
     guidance_logits_processor_ = std::move(guidance_transaction_checkpoint_);
   }
@@ -678,7 +789,12 @@ void Request::RestoreStateForTransaction() {
 void Request::QueueStateRestoreForTransaction() {
   search_->QueueStateRestoreForTransaction();
   rng_ = transaction_rng_;
-  DiscardStagedDrafts();
+  processed_sequence_length_ = transaction_processed_sequence_length_;
+  tokens_host_.resize(transaction_tokens_host_size_);
+  staged_draft_count_ = 0;
+  accepted_draft_count_ = 0;
+  scheduled_token_count_ = 0;
+  draft_verification_completed_generation_ = false;
 }
 
 void Request::CompleteStateRestoreForTransaction() {
@@ -748,12 +864,6 @@ void Request::ApplyLogitsProcessors(DeviceSpan<float> logits,
   search_->ApplyMinLength(search_params.min_length);
   search_->ApplyRepetitionPenalty(search_params.repetition_penalty);
   search_->ApplyNoRepeatNgram(search_params.no_repeat_ngram_size);
-}
-
-void Request::ResetGuidanceForNewTurn() {
-  if (guidance_logits_processor_) {
-    guidance_logits_processor_->Reset();
-  }
 }
 
 void Request::SelectNextToken() {
@@ -831,6 +941,10 @@ std::span<const uint32_t> Request::GetReadyGuidanceMask() {
 
 const Config::Search& Request::SearchOptions() const {
   return search_->params_->search;
+}
+
+const Config::Speculative& Request::SpeculativeOptions() const {
+  return params_->speculative;
 }
 
 bool Request::BindNextTokensSlot(DeviceSpan<int32_t> slot) {

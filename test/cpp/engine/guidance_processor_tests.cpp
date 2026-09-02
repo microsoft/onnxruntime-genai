@@ -281,6 +281,26 @@ TEST_F(GuidanceProcessorTest, BatchedMasksFallBackOnInvalidGuidedRow) {
             BatchedGuidanceMaskStatus::FallbackRequired);
 }
 
+TEST_F(GuidanceProcessorTest, PackedLogitsRejectDraftVerifiedSampledRow) {
+  constexpr size_t kVocabSize = 4;
+  auto packed = model_->p_device_->Allocate<float>(kVocabSize * 2);
+  std::vector<DeviceSpan<float>> logits{
+      packed.subspan(0, kVocabSize), packed.subspan(kVocabSize, kVocabSize)};
+  EXPECT_EQ(PackedLogitsRowBase(logits, kVocabSize),
+            logits.front().Span().data());
+
+  // A sampled request that verified drafts drew its token on the host and contributes an empty row.
+  // Row 0 must not be dereferenced to establish the packed base pointer.
+  std::vector<DeviceSpan<float>> mixed{
+      DeviceSpan<float>{}, packed.subspan(kVocabSize, kVocabSize)};
+  EXPECT_EQ(PackedLogitsRowBase(mixed, kVocabSize), nullptr);
+
+  // Rows that are not laid out back to back cannot be masked as one block either.
+  std::vector<DeviceSpan<float>> unpacked{
+      packed.subspan(kVocabSize, kVocabSize), packed.subspan(0, kVocabSize)};
+  EXPECT_EQ(PackedLogitsRowBase(unpacked, kVocabSize), nullptr);
+}
+
 TEST_F(GuidanceProcessorTest, AsyncMaskFailureRollsBackAndCanRetry) {
   auto request = NewAssignedRequest(/*max_length_beyond_prompt=*/4);
   auto& processor = InstallFake(*request);

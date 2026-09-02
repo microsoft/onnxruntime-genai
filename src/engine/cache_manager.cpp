@@ -200,11 +200,12 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
 
 }  // namespace
 
-std::unique_ptr<CacheManager> CacheManager::Create(std::shared_ptr<Model> model) {
+std::unique_ptr<CacheManager> CacheManager::Create(std::shared_ptr<Model> model,
+                                                   size_t auxiliary_bytes_per_block) {
   const ModelStateManifest manifest{model->config_->model.decoder};
   if (model->config_->engine.dynamic_batching) {
     ModelStateManifest::ValidateDynamicEngineCompatibility(model->config_->model.decoder);
-    return std::make_unique<PagedCacheManager>(model);
+    return std::make_unique<PagedCacheManager>(model, auxiliary_bytes_per_block);
   }
   if (manifest.HasFixedStateGroups()) {
     throw std::runtime_error(
@@ -327,7 +328,8 @@ bool StaticCacheManager::IsResident(const std::shared_ptr<Request>& request) con
          cache_allocated_requests_.end();
 }
 
-PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model)
+PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
+                                     size_t auxiliary_bytes_per_block)
     : CacheManager(model),
       params_(std::make_shared<GeneratorParams>(*model_)) {
   // The paged cache resolves its own paged_kv group. The fixed pool is created only when the
@@ -340,10 +342,9 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model)
         model, model_->config_->engine.dynamic_batching->max_batch_size);
     fixed_state_pool_ = std::move(fixed_state_pool);
   }
-  // Allocate fixed banks before auto-sizing paged KV. ComputeNumBlocks queries current device free
-  // memory, so the fixed pool's complete persistent footprint is already excluded without
-  // duplicating its geometry/accounting in the paged cache.
-  key_value_cache_ = std::make_unique<PagedKeyValueCache>(model);
+  // Size the primary and auxiliary paged caches from one memory budget. The fixed pool above is
+  // already reflected in the free-memory query used by the paged cache.
+  key_value_cache_ = std::make_unique<PagedKeyValueCache>(model, auxiliary_bytes_per_block);
   key_value_cache_state_ = std::make_unique<KeyValueCacheState>(*params_, *model_);
 }
 
@@ -509,6 +510,24 @@ bool PagedCacheManager::IsResident(const std::shared_ptr<Request>& request) cons
 
 StepPlanningResult PagedCacheManager::PlanStepResources(StepPlan& plan) const {
   plan.fixed_state = {};
+  if (fixed_state_pool_) {
+    const bool has_prefill = std::any_of(
+        plan.requests.begin(), plan.requests.end(),
+        [](const RequestStepPlan& entry) { return entry.is_prefill; });
+    const bool has_drafts = std::any_of(
+        plan.requests.begin(), plan.requests.end(),
+        [](const RequestStepPlan& entry) { return entry.draft_token_count != 0; });
+    if (has_prefill && has_drafts) {
+      // Packed recurrent operators cannot capture intermediate draft checkpoints while a prefill
+      // shares the step. Remove those optional rows before paged capacity planning so they cannot
+      // displace a request that the actual mixed step has room to execute.
+      for (auto& entry : plan.requests) {
+        entry.unprocessed_token_count -= entry.draft_token_count;
+        entry.target_cache_slots -= entry.draft_token_count;
+        entry.draft_token_count = 0;
+      }
+    }
+  }
   auto result = key_value_cache_->PlanStepResources(plan);
   if (!fixed_state_pool_) {
     return result;

@@ -57,6 +57,8 @@ struct VarlenGraphBuffers {
   std::unique_ptr<Tensor> cumulative_sequence_lengths;
   std::unique_ptr<Tensor> past_sequence_lengths;
   std::unique_ptr<Tensor> logits;
+  // Null unless the model consumes hidden_states (for example, an MTP head).
+  std::unique_ptr<Tensor> hidden_states_input;
   // Null unless the model was exported with include_hidden_states.
   std::unique_ptr<Tensor> hidden_states;
   size_t max_batch_size{};
@@ -101,6 +103,7 @@ struct VarlenDecoderIO : DecoderIO {
   void PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
   void PreparePositionIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
   void PrepareAttentionMetadata(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
+  void PrepareHiddenStatesInput(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
   void PrepareLogits(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
   void PrepareHiddenStates(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
 
@@ -113,6 +116,9 @@ struct VarlenDecoderIO : DecoderIO {
   VarlenGraphBuffers* graph_buffers_{};
   const StepPlan* plan_{};
   size_t block_table_columns_{};
+  // Borrowed spans/pointers whose backing storage is owned through synchronous model execution.
+  DeviceSpan<int32_t> input_ids_;
+  OrtValue* hidden_states_input_{};
   size_t position_planes_{};
   std::vector<std::unique_ptr<Tensor>> owned_inputs_;
   std::unique_ptr<Tensor> logits_;

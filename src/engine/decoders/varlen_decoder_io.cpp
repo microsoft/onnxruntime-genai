@@ -150,8 +150,18 @@ VarlenGraphBuffers::VarlenGraphBuffers(DecoderOnly_Model& model) {
                                             static_cast<int64_t>(model.config_->model.vocab_size)},
                        /*make_static=*/true);
 
+  const auto& hidden_states_input_name = model.config_->model.decoder.inputs.hidden_states;
+  if (!hidden_states_input_name.empty() && model.session_info_.HasInput(hidden_states_input_name)) {
+    hidden_states_input = std::make_unique<Tensor>(
+        model.p_device_inputs_, model.session_info_.GetInputDataType(hidden_states_input_name));
+    hidden_states_input->CreateTensor(
+        std::vector<int64_t>{static_cast<int64_t>(max_batch_size),
+                             static_cast<int64_t>(model.config_->model.decoder.hidden_size)},
+        /*make_static=*/true);
+  }
+
   const auto& hidden_states_name = model.config_->model.decoder.outputs.hidden_states;
-  if (!model.config_->model.mtp.filename.empty() &&
+  if (model.config_->engine.hidden_states_output_required &&
       !hidden_states_name.empty() && model.session_info_.HasOutput(hidden_states_name)) {
     hidden_states = std::make_unique<Tensor>(model.p_device_inputs_,
                                              model.session_info_.GetOutputDataType(hidden_states_name));
@@ -182,6 +192,9 @@ VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
       plan_{execution_context ? execution_context->plan : nullptr},
       block_table_columns_{
           execution_context ? execution_context->block_table_columns : 0},
+      input_ids_{execution_context ? execution_context->input_ids : DeviceSpan<int32_t>{}},
+      hidden_states_input_{
+          execution_context ? execution_context->hidden_states_input : nullptr},
       position_planes_{position_planes} {
   // Logits with a symbolic batch_size first dimension contain one row per request. Any other first
   // dimension is treated as one row per packed token.
@@ -194,6 +207,7 @@ VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
   PrepareInputIds(model, scheduled_requests);
   PreparePositionIds(model, scheduled_requests);
   PrepareAttentionMetadata(model, scheduled_requests);
+  PrepareHiddenStatesInput(model, scheduled_requests);
   PrepareLogits(model, scheduled_requests);
   PrepareHiddenStates(model, scheduled_requests);
 
@@ -207,6 +221,48 @@ VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
     output_names_.push_back(cache->output_names_[i]);
     outputs_.push_back(cache->outputs_[i]);
   }
+}
+
+void VarlenDecoderIO::PrepareHiddenStatesInput(
+    std::shared_ptr<DecoderOnly_Model> model,
+    ScheduledRequests& scheduled_requests) {
+  const auto& hidden_states_name = model->config_->model.decoder.inputs.hidden_states;
+  if (hidden_states_name.empty() || !model->session_info_.HasInput(hidden_states_name)) {
+    return;
+  }
+  if (!hidden_states_input_) {
+    throw std::runtime_error(
+        "The decoder requires a packed hidden_states input, but the execution context did not provide one.");
+  }
+
+  const auto info = hidden_states_input_->GetTensorTypeAndShapeInfo();
+  const auto shape = info->GetShape();
+  const std::vector<int64_t> expected_shape = {
+      static_cast<int64_t>(TokenCount(scheduled_requests)),
+      static_cast<int64_t>(model->config_->model.decoder.hidden_size)};
+  if (shape != expected_shape) {
+    throw std::runtime_error(
+        "The packed hidden_states input shape does not match the scheduled token rows.");
+  }
+  if (info->GetElementType() != model->session_info_.GetInputDataType(hidden_states_name)) {
+    throw std::runtime_error(
+        "The packed hidden_states input type does not match the decoder input type.");
+  }
+
+  OrtValue* active_hidden_states_input = hidden_states_input_;
+  if (graph_buffers_ != nullptr) {
+    if (!graph_buffers_->hidden_states_input) {
+      throw std::runtime_error(
+          "Captured decoder step has no persistent hidden_states input buffer.");
+    }
+    graph_buffers_->hidden_states_input->CreateTensor(expected_shape, /*make_static=*/true);
+    graph_buffers_->hidden_states_input->GetByteSpan().CopyFrom(
+        ByteWrapTensor(*model->p_device_inputs_, *hidden_states_input_));
+    active_hidden_states_input = graph_buffers_->hidden_states_input->GetOrtTensor();
+  }
+
+  input_names_.push_back(hidden_states_name.c_str());
+  inputs_.push_back(active_hidden_states_input);
 }
 
 void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests) {
@@ -254,16 +310,31 @@ void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, 
   auto sequence_lengths_span = sequence_lengths_tensor->GetDeviceSpan<int32_t>();
   auto sequence_lengths_cpu_span = sequence_lengths_span.CpuSpan();
 
+  DeviceSpan<int32_t> device_input_ids = input_ids_;
+  if (!device_input_ids.empty()) {
+    if (device_input_ids.size() != num_tokens) {
+      throw std::runtime_error("Packed device input IDs do not match the step token count.");
+    }
+    if (!model->p_device_inputs_->Cast(
+            device_input_ids.Span().data(), device_span.Span().data(),
+            Ort::TypeToTensorType<int32_t>, Ort::TypeToTensorType<int64_t>, num_tokens)) {
+      throw std::runtime_error("The model device cannot cast packed input IDs to int64.");
+    }
+  }
+
   for (size_t i = 0, running_length = 0; i < scheduled_requests.size(); ++i) {
     auto request = scheduled_requests[i];
-    auto input_ids = request->UnprocessedTokensCpu();
+    const size_t input_id_count = request->ScheduledTokenCount();
     const RequestStepPlan* entry = plan ? &plan->requests[i] : nullptr;
     if (entry && (entry->request != request ||
-                  entry->unprocessed_token_count != input_ids.size() ||
+                  entry->unprocessed_token_count != input_id_count ||
                   entry->packed_token_offset != running_length)) {
       throw std::runtime_error("Step plan token layout does not match the scheduled request.");
     }
-    std::copy(input_ids.begin(), input_ids.end(), cpu_span.begin() + running_length);
+    if (device_input_ids.empty()) {
+      auto input_ids = request->UnprocessedTokensCpu();
+      std::copy(input_ids.begin(), input_ids.end(), cpu_span.begin() + running_length);
+    }
 
     // The batch is represented as three coordinated arrays:
     //   input_ids                  = all pending tokens concatenated
@@ -281,11 +352,13 @@ void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, 
     }
     sequence_lengths_cpu_span[i] = static_cast<int32_t>(processed_sequence_length);
 
-    running_length += input_ids.size();
+    running_length += input_id_count;
     cumulative_sequence_lengths_cpu_span[i + 1] = static_cast<int32_t>(running_length);
   }
 
-  device_span.CopyCpuToDevice();
+  if (device_input_ids.empty()) {
+    device_span.CopyCpuToDevice();
+  }
   cumulative_sequence_lengths_span.CopyCpuToDevice();
   sequence_lengths_span.CopyCpuToDevice();
 
@@ -452,10 +525,11 @@ void VarlenDecoderIO::PrepareLogits(std::shared_ptr<DecoderOnly_Model> model, Sc
 
 void VarlenDecoderIO::PrepareHiddenStates(std::shared_ptr<DecoderOnly_Model> model,
                                           ScheduledRequests& scheduled_requests) {
-  // Bind this optional output only when an MTP head is configured to consume it. A model may
-  // expose hidden states for other clients without requiring the Engine to produce them each step.
+  // Bind this optional output only when the Engine declared that it consumes these hidden states.
+  // A model may expose hidden states for other clients without requiring the Engine to produce them
+  // each step.
   const auto& hidden_states_name = model->config_->model.decoder.outputs.hidden_states;
-  if (model->config_->model.mtp.filename.empty() ||
+  if (!model->config_->engine.hidden_states_output_required ||
       hidden_states_name.empty() || !model->session_info_.HasOutput(hidden_states_name)) {
     return;
   }

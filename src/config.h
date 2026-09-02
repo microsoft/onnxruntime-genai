@@ -598,7 +598,13 @@ struct Config {
       size_t max_batch_size{4};  // Maximum batch size for static batching
     };
     std::optional<StaticBatching> static_batching;  // Static batching settings
-  } engine;                                         // Engine settings
+
+    // Runtime-only capability flag, never parsed from genai_config.json. The Engine sets it on
+    // every decoder whose packed hidden states it consumes: the target decoder feeds the MTP head,
+    // and the head feeds the next link of a chained draft. Models that merely export hidden states
+    // leave it false so an ordinary step does not pay for the extra output.
+    bool hidden_states_output_required{};
+  } engine;  // Engine settings
 
   void AddMapping(const std::string& nominal_name, const std::string& graph_name);
   // Returns graph name and true if the nominal name is found in the mapping
