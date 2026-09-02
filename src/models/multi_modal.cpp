@@ -300,10 +300,7 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
                           total_hw > 0 && total_patches % total_hw == 0);
   int64_t hw_multiplier = temporal_padded ? (total_patches / total_hw) : 0;
 
-  if (total_patches != total_grid_tokens && padded_image_stride == 0 && !temporal_padded)
-    throw std::runtime_error("pixel_values patch count (" + std::to_string(total_patches) +
-                             ") does not match image_grid_thw patch count (" +
-                             std::to_string(total_grid_tokens) + ")");
+  ValidateQwenPatchLayout(total_patches, total_grid_tokens, padded_image_stride, temporal_padded);
 
   // Validate that the pre-allocated output buffer is large enough for all images
   int64_t expected_total_feats = total_grid_tokens / merge_sq;

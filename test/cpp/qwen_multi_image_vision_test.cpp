@@ -117,3 +117,15 @@ TEST(QwenVisionMultiImageTest, UsesPaddedStrideForDifferentImageGridSizes) {
 TEST(QwenVisionMultiImageTest, KeepsPackedLayoutWhenPatchCountsMatchGrid) {
   EXPECT_EQ(Generators::GetQwenPaddedImageStride(20004, 20004, 6880, 4), 0);
 }
+
+TEST(QwenVisionMultiImageTest, RejectsUnsupportedPatchLayout) {
+  const std::string message = CaptureRuntimeErrorMessage([] {
+    Generators::ValidateQwenPatchLayout(
+        /*total_patches=*/20005,
+        /*total_grid_tokens=*/20004,
+        /*padded_image_stride=*/0,
+        /*temporal_padded=*/false);
+  });
+
+  EXPECT_EQ(message, "pixel_values patch count (20005) does not match image_grid_thw patch count (20004)");
+}

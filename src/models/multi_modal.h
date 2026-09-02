@@ -138,6 +138,17 @@ inline int64_t GetQwenPaddedImageStride(int64_t total_patches,
   return 0;
 }
 
+inline void ValidateQwenPatchLayout(int64_t total_patches,
+                                    int64_t total_grid_tokens,
+                                    int64_t padded_image_stride,
+                                    bool temporal_padded) {
+  if (total_patches != total_grid_tokens && padded_image_stride == 0 && !temporal_padded) {
+    throw std::runtime_error("pixel_values patch count (" + std::to_string(total_patches) +
+                             ") does not match image_grid_thw patch count (" +
+                             std::to_string(total_grid_tokens) + ")");
+  }
+}
+
 // Factory: pick the right VisionState subclass based on model type.
 std::unique_ptr<VisionState> CreateVisionState(const MultiModalLanguageModel& model, const GeneratorParams& params);
 
