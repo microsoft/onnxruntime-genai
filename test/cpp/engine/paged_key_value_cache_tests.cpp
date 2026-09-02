@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include <array>
+#include <limits>
 
 #include <gtest/gtest.h>
 
@@ -389,6 +390,21 @@ TEST(PagedKeyValueCacheManifestTest, BlockCapacityUsesParticipatingLayerCount) {
           /*element_size=*/2),
       48u);
 
+  // One auxiliary layer with the same geometry adds 32 bytes to the primary model's 64 bytes per
+  // block, so both pools together fit 96 blocks in the same 90%-adjusted memory budget.
+  EXPECT_EQ(
+      ComputePagedBlockCapacity(
+          /*available_memory_bytes=*/10240,
+          /*gpu_utilization_factor=*/1.0f,
+          /*reserved_memory_bytes=*/0,
+          /*block_size=*/4,
+          /*num_key_value_heads=*/1,
+          /*head_size=*/2,
+          /*full_layer_count=*/2,
+          /*element_size=*/2,
+          /*auxiliary_bytes_per_block=*/32),
+      96u);
+
   EXPECT_EQ(
       ComputePagedBlockCapacity(
           /*available_memory_bytes=*/10240,
@@ -411,6 +427,41 @@ TEST(PagedKeyValueCacheManifestTest, BlockCapacityUsesParticipatingLayerCount) {
           /*head_size=*/2,
           /*full_layer_count=*/2,
           /*element_size=*/2),
+      std::runtime_error);
+}
+
+TEST(PagedKeyValueCacheManifestTest, ExplicitBlockCountCoversBothPools) {
+  // Without a head, an explicit num_blocks is used verbatim.
+  EXPECT_EQ(
+      ResolveConfiguredPagedBlockCount(
+          /*configured_num_blocks=*/100,
+          /*primary_bytes_per_block=*/64,
+          /*auxiliary_bytes_per_block=*/0),
+      100u);
+
+  // num_blocks is the combined budget: 100 blocks of 64 bytes is 6400 bytes, which holds 66 blocks
+  // of the 96 bytes one target block plus one head block cost together.
+  EXPECT_EQ(
+      ResolveConfiguredPagedBlockCount(
+          /*configured_num_blocks=*/100,
+          /*primary_bytes_per_block=*/64,
+          /*auxiliary_bytes_per_block=*/32),
+      66u);
+
+  // A budget too small to leave a block for each pool is rejected rather than silently allocating
+  // an extra head pool outside the configured sizing contract.
+  EXPECT_THROW(
+      ResolveConfiguredPagedBlockCount(
+          /*configured_num_blocks=*/1,
+          /*primary_bytes_per_block=*/32,
+          /*auxiliary_bytes_per_block=*/64),
+      std::runtime_error);
+
+  EXPECT_THROW(
+      ResolveConfiguredPagedBlockCount(
+          /*configured_num_blocks=*/std::numeric_limits<size_t>::max(),
+          /*primary_bytes_per_block=*/64,
+          /*auxiliary_bytes_per_block=*/32),
       std::runtime_error);
 }
 

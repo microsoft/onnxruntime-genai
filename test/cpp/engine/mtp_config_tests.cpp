@@ -93,6 +93,9 @@ TEST(MtpDecoderConfigTest, ProjectsPagedDecoderWithoutMainFixedState) {
   EXPECT_FALSE(head.state_groups.has_value());
   EXPECT_TRUE(head.pipeline.empty());
   EXPECT_TRUE(projected->model.mtp.filename.empty());
+  // The projection clears model.mtp, so the head's own demand for hidden states must be recorded
+  // explicitly. Without it a chained draft cannot feed the next stage.
+  EXPECT_TRUE(projected->engine.hidden_states_output_required);
   ASSERT_EQ(head.layer_types.size(), 1u);
   EXPECT_EQ(head.layer_types[0], "full_attention");
   EXPECT_THROW(CreateMtpDecoderConfig(*projected), std::runtime_error);

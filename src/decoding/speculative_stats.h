@@ -2,9 +2,12 @@
 // Licensed under the MIT License.
 #pragma once
 
+#include <array>
 #include <cstddef>
 
 namespace Generators {
+
+inline constexpr size_t kSpeculativeAcceptanceLengthBins = 8;
 
 // Separates draft work from output delivery and exposes the speedup formula terms.
 // Target-dependent formula fields are zero without a baseline or when guidance is active.
@@ -46,6 +49,7 @@ struct SpeculativeStats {
   size_t ngram_grammar_candidate_rejections{};
   size_t ngram_history_syncs{};
   size_t ngram_history_tokens_synced{};
+  std::array<size_t, kSpeculativeAcceptanceLengthBins> acceptance_length_histogram{};
   size_t formula_supported{};
   float total_draft_ms{};
   float total_target_ms{};

@@ -3,6 +3,7 @@
 
 #include "cache_manager.h"
 
+#include <limits>
 #include <numeric>
 #include <set>
 
@@ -106,9 +107,13 @@ size_t BytesPerBlock(const std::shared_ptr<Model>& model,
 size_t ComputeNumBlocks(std::shared_ptr<Model> model,
                         size_t full_layer_count,
                         size_t windowed_bytes,
-                        ONNXTensorElementDataType dtype) {
+                        ONNXTensorElementDataType dtype,
+                        size_t auxiliary_bytes_per_block) {
   if (model->config_->engine.dynamic_batching->num_blocks.has_value()) {
-    return *model->config_->engine.dynamic_batching->num_blocks;
+    return ResolveConfiguredPagedBlockCount(
+        *model->config_->engine.dynamic_batching->num_blocks,
+        BytesPerBlock(model, dtype) * full_layer_count,
+        auxiliary_bytes_per_block);
   }
 
   size_t free_bytes, total_bytes;
@@ -122,7 +127,8 @@ size_t ComputeNumBlocks(std::shared_ptr<Model> model,
       model->config_->model.decoder.num_key_value_heads,
       model->config_->model.decoder.head_size,
       full_layer_count,
-      Ort::SizeOf(dtype));
+      Ort::SizeOf(dtype),
+      auxiliary_bytes_per_block);
 }
 
 size_t UsedSlots(const std::vector<std::shared_ptr<Block>>& blocks) {
@@ -146,7 +152,8 @@ size_t ComputePagedBlockCapacity(size_t available_memory_bytes,
                                  size_t num_key_value_heads,
                                  size_t head_size,
                                  size_t full_layer_count,
-                                 size_t element_size) {
+                                 size_t element_size,
+                                 size_t auxiliary_bytes_per_block) {
   if (block_size == 0 || num_key_value_heads == 0 || head_size == 0 ||
       full_layer_count == 0 || element_size == 0) {
     throw std::invalid_argument(
@@ -161,16 +168,49 @@ size_t ComputePagedBlockCapacity(size_t available_memory_bytes,
   }
 
   constexpr size_t num_caches_per_layer = 2;
+  const size_t primary_bytes_per_block =
+      block_size * num_key_value_heads * head_size * full_layer_count *
+      element_size * num_caches_per_layer;
   return (budget - reserved_memory_bytes) /
-         (block_size *
-          num_key_value_heads *
-          head_size *
-          full_layer_count *
-          element_size *
-          num_caches_per_layer);
+         (primary_bytes_per_block + auxiliary_bytes_per_block);
 }
 
-PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model)
+size_t ResolveConfiguredPagedBlockCount(size_t configured_num_blocks,
+                                        size_t primary_bytes_per_block,
+                                        size_t auxiliary_bytes_per_block) {
+  if (primary_bytes_per_block == 0) {
+    throw std::invalid_argument(
+        "Paged cache primary bytes per block must be greater than zero");
+  }
+  if (auxiliary_bytes_per_block == 0) {
+    return configured_num_blocks;
+  }
+  if (configured_num_blocks >
+      std::numeric_limits<size_t>::max() / primary_bytes_per_block) {
+    throw std::runtime_error(
+        "engine.dynamic_batching.num_blocks is too large for the paged key-value cache.");
+  }
+  const size_t blocks =
+      (configured_num_blocks * primary_bytes_per_block) /
+      (primary_bytes_per_block + auxiliary_bytes_per_block);
+  if (blocks == 0) {
+    throw std::runtime_error(
+        "engine.dynamic_batching.num_blocks is too small to hold both the target and the "
+        "MTP head key-value caches.");
+  }
+  return blocks;
+}
+
+size_t PagedKeyValueCacheBytesPerBlock(const std::shared_ptr<Model>& model) {
+  const auto paged_group = ResolvePagedKeyValueGroup(model->config_->model.decoder);
+  const auto dtype = KeyValueCacheType(model, paged_group);
+  const auto windowed = WindowedLayers(model, paged_group);
+  const size_t full_layer_count = paged_group.layer_ids.size() - windowed.size();
+  return full_layer_count * BytesPerBlock(model, dtype);
+}
+
+PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
+                                       size_t auxiliary_bytes_per_block)
     : model_(model) {
   const auto& decoder = model->config_->model.decoder;
   const size_t block_size = model->config_->engine.dynamic_batching->block_size;
@@ -209,7 +249,8 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model)
   const auto num_blocks = ComputeNumBlocks(model_, num_full_layers,
                                            num_window_blocks * windowed.size() *
                                                BytesPerBlock(model, dtype),
-                                           dtype);
+                                           dtype,
+                                           auxiliary_bytes_per_block);
 
   for (const int layer_id : paged_group.layer_ids) {
     const auto blocks = windowed.count(layer_id) != 0 ? num_window_blocks : num_blocks;

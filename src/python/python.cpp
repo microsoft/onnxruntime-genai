@@ -306,6 +306,14 @@ pybind11::dict ToSpeculativeStatsDict(const OgaSpeculativeStats& stats) {
                           "target_overhead_ratio", "estimated_speedup", "observed_speedup",
                           "adaptive_k_throughput"})
     d[key] = stats.GetNumber(key);
+  pybind11::list acceptance_length_histogram;
+  for (size_t accepted_length = 0;
+       accepted_length < stats.GetAcceptanceLengthHistogramSize();
+       ++accepted_length) {
+    acceptance_length_histogram.append(
+        stats.GetAcceptanceLengthCount(accepted_length));
+  }
+  d["acceptance_length_histogram"] = std::move(acceptance_length_histogram);
   return d;
 }
 
@@ -956,7 +964,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           pybind11::arg("buffer"))
       .def("has_pending_requests", &OgaEngine::HasPendingRequests)
       .def("max_draft_tokens_per_proposal", &OgaEngine::MaxDraftTokensPerProposal,
-           "Speculative draft tokens a request may attach to one proposal; zero when unsupported.");
+           "Speculative draft tokens a request may attach to one proposal; zero when unsupported.")
+      .def("get_speculative_stats", [](const OgaEngine& engine) { return ToSpeculativeStatsDict(*engine.GetSpeculativeStats()); }, "Return cumulative speculative-decoding telemetry.");
 
   pybind11::class_<OgaStreamingProcessor>(m, "StreamingProcessor")
       .def(pybind11::init([](OgaModel& model) { return OgaStreamingProcessor::Create(model); }),
