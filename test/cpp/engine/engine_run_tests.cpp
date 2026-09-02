@@ -622,6 +622,77 @@ TEST_F(EngineRunTest, AbandonmentInvariantFailureTerminalizesExecutableTurns) {
   EXPECT_THROW(static_cast<void>(RunOne(*engine.engine)), EngineStepError);
 }
 
+TEST_F(EngineRunTest, FatalScratchReleasesDrainedRequestEvents) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/1, /*forced_token=*/5);
+  auto abandoned = CreateEngineRequest(engine.engine, *model_);
+  auto retained_event_request = CreateEngineRequest(engine.engine, *model_);
+  ExternalRequestReference abandoned_external{*abandoned};
+  abandoned->BeginTurn(Prompt(10), std::optional<size_t>{2});
+  const auto retained_turn =
+      retained_event_request->BeginTurn(
+          Prompt(20), std::optional<size_t>{2});
+
+  ASSERT_EQ(RunOne(*engine.engine).request, abandoned);
+  ASSERT_TRUE(retained_event_request->Cancel(retained_turn));
+  std::weak_ptr<Request> retained_event_weak = retained_event_request;
+
+  abandoned_external.Release();
+  engine.cache->ThrowDeallocateInvariantFailureOnce();
+  EXPECT_TRUE(engine.engine->HasPendingRequests());
+
+  std::array<EngineEvent, 2> events;
+  ASSERT_EQ(engine.engine->Run(events), events.size());
+  EXPECT_EQ(events[0].request, retained_event_request);
+  EXPECT_EQ(events[0].flags, EngineEventFlagTurnFinished);
+  EXPECT_EQ(
+      events[0].finish_reason,
+      GenerationFinishReason::Canceled);
+  EXPECT_EQ(events[1].request, nullptr);
+  EXPECT_EQ(events[1].flags, EngineEventFlagFailed);
+
+  events.fill({});
+  retained_event_request->Close();
+  retained_event_request.reset();
+  EXPECT_TRUE(retained_event_weak.expired());
+}
+
+TEST_F(EngineRunTest,
+       AbandonmentInvariantFailureFromBeginTurnRetainsFatalEvents) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/2, /*forced_token=*/5);
+  auto abandoned = CreateEngineRequest(engine.engine, *model_);
+  auto survivor = CreateEngineRequest(engine.engine, *model_);
+  auto boundary_request = CreateEngineRequest(engine.engine, *model_);
+  ExternalRequestReference abandoned_external{*abandoned};
+  abandoned->BeginTurn(Prompt(10), std::optional<size_t>{2});
+  survivor->BeginTurn(Prompt(20), std::optional<size_t>{2});
+
+  std::array<EngineEvent, 2> tokens;
+  ASSERT_EQ(engine.engine->Run(tokens), tokens.size());
+  abandoned_external.Release();
+  engine.cache->ThrowDeallocateInvariantFailureOnce();
+
+  try {
+    boundary_request->BeginTurn(Prompt(30));
+    FAIL() << "Expected abandonment cleanup to poison the Engine.";
+  } catch (const EngineStepError& error) {
+    EXPECT_EQ(
+        error.Outcome().kind,
+        StepOutcomeKind::ExecutionContractFailure);
+  }
+  EXPECT_EQ(boundary_request->status_, RequestStatus::Unassigned);
+
+  std::array<EngineEvent, 2> failures;
+  ASSERT_EQ(engine.engine->Run(failures), 1u);
+  EXPECT_EQ(failures[0].request, survivor);
+  EXPECT_EQ(
+      failures[0].flags,
+      EngineEventFlagTurnFinished | EngineEventFlagFailed);
+  EXPECT_EQ(
+      failures[0].error_code,
+      EngineErrorCode::EngineContractFailure);
+  EXPECT_THROW(static_cast<void>(RunOne(*engine.engine)), EngineStepError);
+}
+
 TEST_F(EngineRunTest,
        ConcurrentFinalReleaseAndReacquireCancelsRequestAbandonment) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/1, EosToken(*model_));

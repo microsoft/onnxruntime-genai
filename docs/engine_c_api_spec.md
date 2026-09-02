@@ -329,7 +329,7 @@ Turn-option setters are not thread-safe and must be called serially from that ow
 Destroying a Request handle only publishes an atomic abandonment marker when it is the final public
 handle; this final release may occur on another thread. The Engine strongly retains the Request and
 performs the logical close and cleanup at its next owner-thread boundary. A resident static row
-retains the runtime state needed by an executable peer until the shared physical batch becomes
+retains the runtime state needed by an executable peer until the shared physical batch is
 recycled. This deferred-release behavior does not permit concurrent Request operations.
 
 Destroying an Engine closes all bound Requests and purges events. Surviving Request handles remain
@@ -454,6 +454,7 @@ const size_t max_step_events =
     cache_manager_->MaxBatchSize() * kMaxGeneratedTokensPerStep;
 pending_events_.reserve(max_step_events);
 staged_events_.reserve(max_step_events);
+fatal_events_.reserve(max_step_events + 1);
 ```
 
 `reserve` allocates capacity without constructing events. A committed step produces at most
@@ -506,6 +507,10 @@ invariant failure, the Engine becomes unhealthy, terminal events are retained, a
 returns true so the host can drain them through `OgaEngineRun`. A transient allocation failure
 returns an `OgaResult`, re-arms reclamation, and leaves any completed cleanup intact; the next
 owner-thread boundary safely retries the remaining work.
+
+Request creation and `OgaRequestBeginTurn` are also abandonment-reclamation boundaries. If
+reclamation detects an invariant failure there, that operation returns an `OgaResult` while the
+Engine retains terminal events for the next positive-capacity `OgaEngineRun`.
 
 The Engine API has no public asynchronous event queue. Hosts that want uninterrupted inference copy
 events into an application-owned bounded queue and continue pumping the owner thread. If the host

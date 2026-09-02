@@ -779,9 +779,12 @@ The engine stores the fatal error and marks every executable Turn complete with 
 Before rethrowing the stored error on later `Run()` calls, it emits one
 `TurnFinished | Failed` event per affected Turn with the Turn's Request, ID, usage, and Engine
 failure code. A fatal failure with no affected Turn emits one request-less Engine failure event.
-An externally abandoned Request has no caller-owned handle and does not receive a request-bearing
-event; other executable Turns are still terminalized. `HasPendingRequests()` returns true while
-these retained fatal events need draining.
+At publication time, an externally abandoned Request is omitted from request-bearing events on a
+best-effort basis; final-handle release may race with that snapshot, but any event already selected
+retains the Request safely. Other executable Turns are still terminalized. `HasPendingRequests()`
+returns true while these retained fatal events need draining. Request creation and `BeginTurn()`
+also reclaim abandonment; an invariant failure from either operation throws the fatal
+`EngineStepError` while retaining terminal events for the next positive-capacity `Run()`.
 Continuing would risk using request search state and cache block tables from different logical
 steps.
 

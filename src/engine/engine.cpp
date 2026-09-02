@@ -11,6 +11,8 @@ namespace Generators {
 
 namespace {
 
+constexpr size_t kFatalEventOverhead = 2;
+
 std::shared_ptr<GeneratorParams> CloneRequestParams(
     const GeneratorParams& source,
     const Model& model) {
@@ -107,9 +109,8 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
   fatal_execution_fallback_error_ =
       MakeFatalFallbackError(StepOutcomeKind::FatalExecutionFailure);
   const size_t max_batch_size = cache_manager_->MaxBatchSize();
-  constexpr size_t fatal_event_overhead = 2;
-  if (fatal_events_.max_size() < fatal_event_overhead ||
-      max_batch_size > (fatal_events_.max_size() - fatal_event_overhead) /
+  if (fatal_events_.max_size() < kFatalEventOverhead ||
+      max_batch_size > (fatal_events_.max_size() - kFatalEventOverhead) /
                            kMaxGeneratedTokensPerStep) {
     throw std::overflow_error(
         "Engine event capacity exceeds the supported size.");
@@ -180,9 +181,12 @@ std::shared_ptr<Request> Engine::CreateRequest(const GeneratorParams& params,
   // Fatal handling preserves every token event from the current step, then needs one terminal
   // event per tracked Request plus a request-less fallback. Grow dedicated storage before
   // publishing the Request so terminalization cannot allocate.
-  if (max_step_event_count_ >= fatal_events_.max_size() ||
+  if (fatal_events_.max_size() < kFatalEventOverhead ||
+      max_step_event_count_ >
+          fatal_events_.max_size() - kFatalEventOverhead ||
       tracked_requests_.size() >
-          fatal_events_.max_size() - max_step_event_count_ - 2) {
+          fatal_events_.max_size() - kFatalEventOverhead -
+              max_step_event_count_) {
     throw std::overflow_error(
         "Engine fatal event capacity exceeds the supported size.");
   }
@@ -320,6 +324,8 @@ void Engine::CloseRequest(const std::shared_ptr<Request>& request) {
           staged_events_.begin(), staged_events_.end(),
           [&request](const EngineEvent& event) { return event.request == request; }),
       staged_events_.end());
+  // Abandonment retries rely on every potentially throwing removal step remaining before this
+  // logical-close transition. Everything below it must remain allocation-free and non-throwing.
   request->MarkClosedFromEngine(*this);
   if (retain_static_runtime_state) {
     return;
@@ -343,6 +349,10 @@ void Engine::DetachRequestForTeardown(
 
   scheduler_->DetachRequestForTeardown(request);
   pending_events_.erase(
+      pending_events_.begin(),
+      pending_events_.begin() + static_cast<ptrdiff_t>(pending_event_index_));
+  pending_event_index_ = 0;
+  pending_events_.erase(
       std::remove_if(
           pending_events_.begin(), pending_events_.end(),
           [&request](const EngineEvent& event) {
@@ -356,7 +366,6 @@ void Engine::DetachRequestForTeardown(
             return event.request == request;
           }),
       staged_events_.end());
-  pending_event_index_ = 0;
   request->CompleteCloseFromEngine(*this);
 }
 
@@ -459,21 +468,28 @@ void Engine::ValidateRequestCanContinue(
     std::exception_ptr append_error,
     std::exception_ptr restore_error) {
   request->MarkFailedFromEngine(*this);
+  std::exception_ptr close_error;
+  try {
+    CloseRequest(request);
+  } catch (...) {
+    close_error = std::current_exception();
+    DetachRequestForTeardown(request);
+    tracked_requests_.erase(
+        std::remove(tracked_requests_.begin(), tracked_requests_.end(), request),
+        tracked_requests_.end());
+  }
+
   std::string message;
   try {
     message = AddExceptionCause(
         "Continuation append failed and its Search state could not be restored.",
         append_error);
-    try {
-      CloseRequest(request);
-    } catch (...) {
+    if (close_error) {
       message = AddExceptionCause(
           std::move(message) + " Closing the poisoned request also failed.",
-          std::current_exception());
-      request->CompleteCloseFromEngine(*this);
+          close_error);
     }
   } catch (...) {
-    request->CompleteCloseFromEngine(*this);
     MarkUnhealthyAndThrow(
         StepOutcomeKind::FatalExecutionFailure,
         /*transaction_id=*/0,
@@ -1119,6 +1135,7 @@ EngineEvent Engine::EventFromStepError(
     ++transaction_metrics_.fatal_execution_failures;
   }
   pending_events_.swap(fatal_events_);
+  fatal_events_.clear();
   pending_event_index_ = 0;
   std::rethrow_exception(fatal_error_);
 }

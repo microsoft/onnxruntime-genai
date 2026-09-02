@@ -11,6 +11,8 @@ MAX_LENGTH = 1024
 
 
 def require_request_event(event: og.EngineEvent) -> og.Request:
+    # This single-request workflow cannot continue after any failed turn, even if
+    # REQUEST_UNSERVICEABLE leaves the Engine itself healthy.
     if event.flags & og.EngineEventFlags.FAILED:
         raise RuntimeError(f"Generation failed; error_code={event.error_code}")
     if event.request is not None:

@@ -77,6 +77,7 @@ struct EngineDependencies {
   std::shared_ptr<CacheManager> cache_manager;
   std::unique_ptr<Scheduler> scheduler;
   std::unique_ptr<ModelExecutor> model_executor;
+  // Test-only fault injection for allocation-sensitive durable error construction.
   EngineStepErrorFactory make_step_error{};
 };
 
