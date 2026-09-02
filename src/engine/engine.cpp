@@ -58,11 +58,17 @@ bool IsEngineStepErrorForOutcome(
   }
 }
 
+std::exception_ptr MakeEngineStepError(
+    StepOutcome outcome,
+    std::string message) {
+  return std::make_exception_ptr(
+      EngineStepError{outcome, std::move(message)});
+}
+
 std::exception_ptr MakeFatalFallbackError(StepOutcomeKind outcome) {
-  auto fallback = std::make_exception_ptr(EngineStepError{
+  auto fallback = MakeEngineStepError(
       {outcome, 0, nullptr},
-      "The Engine encountered a fatal failure, and the underlying exception could not be recorded.",
-  });
+      "The Engine encountered a fatal failure, and the underlying exception could not be recorded.");
   if (!IsEngineStepErrorForOutcome(fallback, outcome)) {
     if (!fallback) {
       throw std::bad_exception{};
@@ -81,7 +87,10 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
     : model_{std::move(model)},
       cache_manager_{std::move(dependencies.cache_manager)},
       scheduler_{std::move(dependencies.scheduler)},
-      model_executor_{std::move(dependencies.model_executor)} {
+      model_executor_{std::move(dependencies.model_executor)},
+      make_step_error_{dependencies.make_step_error
+                           ? dependencies.make_step_error
+                           : MakeEngineStepError} {
   // Fail fast on a missing collaborator rather than crashing later on first use.
   if (!cache_manager_) {
     throw std::runtime_error("Engine requires a non-null cache manager.");
@@ -1039,10 +1048,9 @@ EngineEvent Engine::EventFromStepError(
           ? fatal_contract_fallback_error_
           : fatal_execution_fallback_error_;
   try {
-    auto candidate_error = std::make_exception_ptr(EngineStepError{
+    auto candidate_error = make_step_error_(
         {outcome, transaction_id, request_id},
-        AddExceptionCause(std::string{message}, error),
-    });
+        AddExceptionCause(std::string{message}, error));
     if (IsEngineStepErrorForOutcome(candidate_error, outcome)) {
       durable_error = std::move(candidate_error);
     }

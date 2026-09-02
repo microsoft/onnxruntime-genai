@@ -14,6 +14,7 @@
 #include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <stdexcept>
 #include <thread>
@@ -230,6 +231,12 @@ class ThrowingStaticScheduler final : public Scheduler {
  private:
   std::shared_ptr<Request> request_;
 };
+
+std::exception_ptr CaptureBadAllocInsteadOfStepError(
+    StepOutcome,
+    std::string) {
+  return std::make_exception_ptr(std::bad_alloc{});
+}
 
 class EngineRunTest : public ::testing::Test {
  protected:
@@ -1593,6 +1600,46 @@ TEST_F(EngineRunTest, FatalExecutionFailureMarksEngineUnhealthy) {
   EXPECT_EQ(engine.cache->AllocatedCount(), 0u);
   request->Close();
   EXPECT_EQ(request->status_, RequestStatus::Closed);
+}
+
+TEST_F(EngineRunTest, FatalDiagnosticCaptureFailureDrainsExecutionFallback) {
+  auto cache = std::make_shared<RecordingCacheManager>(
+      model_, /*capacity=*/1);
+  auto scheduler = Scheduler::Create(model_, cache);
+  auto executor = std::make_unique<RecordingModelExecutor>(
+      model_, cache, /*forced_token=*/5);
+  auto* executor_observer = executor.get();
+  EngineDependencies dependencies{
+      cache,
+      std::move(scheduler),
+      std::move(executor),
+      CaptureBadAllocInsteadOfStepError};
+  auto engine = std::make_shared<Engine>(
+      model_, std::move(dependencies));
+  auto request = CreateRequestWithPrompt(
+      engine, *model_, Prompt(10));
+  executor_observer->SetNextFailure(ScriptedExecutionFailure::Fatal);
+
+  const auto failure = RunOne(*engine);
+  EXPECT_EQ(failure.request, request);
+  EXPECT_EQ(
+      failure.flags,
+      EngineEventFlagTurnFinished | EngineEventFlagFailed);
+  EXPECT_EQ(
+      failure.error_code,
+      EngineErrorCode::EngineExecutionFailure);
+
+  try {
+    static_cast<void>(RunOne(*engine));
+    FAIL() << "Expected the retained fatal fallback.";
+  } catch (const EngineStepError& error) {
+    EXPECT_EQ(
+        error.Outcome().kind,
+        StepOutcomeKind::FatalExecutionFailure);
+    EXPECT_STREQ(
+        error.what(),
+        "The Engine encountered a fatal failure, and the underlying exception could not be recorded.");
+  }
 }
 
 TEST_F(EngineRunTest, FatalExecutionFailurePublishesEveryAffectedTurn) {

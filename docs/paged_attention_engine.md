@@ -1159,7 +1159,8 @@ request.close()
 ```
 
 An event buffer with capacity one provides capacity-one behavior; larger buffers return the
-complete transaction output when it fits. An empty list can represent committed partial-prefill progress, so callers
+complete transaction output when it fits. A run returning no events can represent committed
+partial-prefill progress, so callers
 continue while `has_pending_requests()` remains true. Flags are a bitmask, so callers test the
 `TOKEN` bit rather than comparing flags for equality; `TOKEN | TURN_FINISHED` can be combined, and
 `event.token` is consumed only when `TOKEN` is set. `event.request` is a borrowed alias of the

@@ -58,6 +58,9 @@ struct EngineEvent {
   TurnUsage usage{};
 };
 
+using EngineStepErrorFactory =
+    std::exception_ptr (*)(StepOutcome outcome, std::string message);
+
 /**
  * @struct EngineDependencies
  * @brief Bundle of the collaborators the Engine drives.
@@ -74,6 +77,7 @@ struct EngineDependencies {
   std::shared_ptr<CacheManager> cache_manager;
   std::unique_ptr<Scheduler> scheduler;
   std::unique_ptr<ModelExecutor> model_executor;
+  EngineStepErrorFactory make_step_error{};
 };
 
 struct EngineTransactionMetrics {
@@ -203,6 +207,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
   std::shared_ptr<CacheManager> cache_manager_;    // The cache manager for handling cached data.
   std::unique_ptr<Scheduler> scheduler_;           // The scheduler responsible for managing execution order.
   std::unique_ptr<ModelExecutor> model_executor_;  // The executor responsible for running the model.
+  EngineStepErrorFactory make_step_error_;
   const std::thread::id owner_thread_{std::this_thread::get_id()};
   EngineHealth health_{EngineHealth::Healthy};
   std::exception_ptr fatal_error_;
