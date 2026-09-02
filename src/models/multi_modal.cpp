@@ -294,13 +294,8 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
     total_hw += grid_data[img * 3 + 1] * grid_data[img * 3 + 2];
     max_grid_tokens = std::max(max_grid_tokens, grid_tokens);
   }
-  int64_t padded_image_stride = 0;
-  if (total_patches != total_grid_tokens && total_patches % num_images_ == 0) {
-    int64_t candidate_stride = total_patches / num_images_;
-    if (candidate_stride >= max_grid_tokens) {
-      padded_image_stride = candidate_stride;
-    }
-  }
+  int64_t padded_image_stride =
+      GetQwenPaddedImageStride(total_patches, total_grid_tokens, max_grid_tokens, num_images_);
   bool temporal_padded = (padded_image_stride == 0 && total_patches != total_grid_tokens &&
                           total_hw > 0 && total_patches % total_hw == 0);
   int64_t hw_multiplier = temporal_padded ? (total_patches / total_hw) : 0;
@@ -348,7 +343,7 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
 
     auto sub_pv = OrtValue::CreateTensor(
         *cpu_mem,
-      static_cast<uint8_t*>(pv_raw) + static_cast<size_t>(image_patch_offset * patch_dim) * pv_element_size,
+        static_cast<uint8_t*>(pv_raw) + static_cast<size_t>(image_patch_offset * patch_dim) * pv_element_size,
         static_cast<size_t>(num_patches * patch_dim) * pv_element_size,
         std::span<const int64_t>(sub_pv_shape), pv_type);
 

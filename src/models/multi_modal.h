@@ -125,6 +125,19 @@ inline void ValidateImageGridThwLayoutAndCount(const std::vector<int64_t>& shape
   }
 }
 
+inline int64_t GetQwenPaddedImageStride(int64_t total_patches,
+                                        int64_t total_grid_tokens,
+                                        int64_t max_grid_tokens,
+                                        int64_t num_images) {
+  if (num_images > 0 && total_patches != total_grid_tokens && total_patches % num_images == 0) {
+    const int64_t candidate_stride = total_patches / num_images;
+    if (candidate_stride >= max_grid_tokens) {
+      return candidate_stride;
+    }
+  }
+  return 0;
+}
+
 // Factory: pick the right VisionState subclass based on model type.
 std::unique_ptr<VisionState> CreateVisionState(const MultiModalLanguageModel& model, const GeneratorParams& params);
 

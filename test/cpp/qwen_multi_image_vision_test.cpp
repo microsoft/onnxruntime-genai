@@ -8,6 +8,8 @@
 
 #include <gtest/gtest.h>
 
+#include "models/multi_modal.h"
+
 #define OGA_USE_SPAN 1
 #include "ort_genai.h"
 
@@ -96,4 +98,22 @@ TEST(QwenVisionMultiImageTest, AcceptsValidGridThroughPublicInputValidation) {
   auto harness = QwenVisionHarness::Create();
   harness.inputs->Delete("input_ids");
   EXPECT_NO_THROW(harness.generator->SetInputs(*harness.inputs));
+}
+
+TEST(QwenVisionMultiImageTest, UsesPaddedStrideForDifferentImageGridSizes) {
+  constexpr int64_t total_patches = 27520;
+  constexpr int64_t total_grid_tokens = 20004;
+  constexpr int64_t max_grid_tokens = 6880;
+  constexpr int64_t num_images = 4;
+
+  const int64_t stride = Generators::GetQwenPaddedImageStride(
+      total_patches, total_grid_tokens, max_grid_tokens, num_images);
+
+  EXPECT_EQ(stride, 6880);
+  EXPECT_EQ(2 * stride, 13760);
+  EXPECT_NE(2 * stride, 5624 + 6880);
+}
+
+TEST(QwenVisionMultiImageTest, KeepsPackedLayoutWhenPatchCountsMatchGrid) {
+  EXPECT_EQ(Generators::GetQwenPaddedImageStride(20004, 20004, 6880, 4), 0);
 }
