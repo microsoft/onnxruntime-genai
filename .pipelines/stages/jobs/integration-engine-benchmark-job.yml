@@ -6,6 +6,8 @@ jobs:
 - job: engine_benchmark_linux_x64
   displayName: 'Linux x64'
   pool: 'onnx-publish-Linux-GPU-H100'
+  ${{ if eq(parameters.run_full_engine_benchmark, true) }}:
+    timeoutInMinutes: 120
   workspace:
     clean: all
 
