@@ -356,7 +356,7 @@ void Dflash2Drafter::AllocateCache() {
 }
 
 bool Dflash2Drafter::Admit(const Feed& feed) {
-  if (requests_.contains(feed.request)) {
+  if (requests_.find(feed.request) != requests_.end()) {
     return true;
   }
   // The drafter cannot backfill K/V for context whose auxiliary hidden states have already been
