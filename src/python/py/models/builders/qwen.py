@@ -87,12 +87,14 @@ class Qwen3VLTextModel(Qwen25VLTextModel):
         # tensors (3 for the 4B model, from vision layers [5, 11, 17]). These are scattered to
         # full length (batch, seq, hidden) by embedding.onnx and injected into the residual
         # stream after decoder layers 0/1/2 (feature i -> layer i), matching HF's
-        # Qwen3VLTextModel._deepstack_process. We declare them as extra decoder inputs and add
-        # them in make_layer. During generation there are no image tokens, so embedding.onnx
-        # emits all-zeros and the Adds become no-ops.
+        # Qwen3VLTextModel._deepstack_process. We declare them as extra decoder inputs (in
+        # make_inputs_and_outputs) and add them in make_layer. During generation there are no
+        # image tokens, so embedding.onnx emits all-zeros and the Adds become no-ops.
         vision_config = getattr(config, "vision_config", None)
         ds_indexes = getattr(vision_config, "deepstack_visual_indexes", None) if vision_config else None
         self.num_deepstack = len(ds_indexes) if ds_indexes else 3
+
+    def make_inputs_and_outputs(self):
         # Full-length (batch, seq, hidden) scattered features produced by embedding.onnx are
         # named "deepstack_{i}" (the per-token vision->embedding tensors are named
         # "deepstack_features_{i}"). This matches genai_config decoder.inputs.deepstack.
@@ -101,6 +103,7 @@ class Qwen3VLTextModel(Qwen25VLTextModel):
             self.input_names[name] = name
             self.input_types[name] = self.io_dtype
             self.input_shapes[name] = ["batch_size", "sequence_length", self.hidden_size]
+        super().make_inputs_and_outputs()
 
     def make_layer(self, layer_id, layer):
         # Build the standard decoder layer, then inject the DeepStack feature for this layer

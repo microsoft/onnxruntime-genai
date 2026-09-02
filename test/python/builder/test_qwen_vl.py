@@ -160,12 +160,73 @@ def test_qwen_vl_uses_separate_qkv_and_mrope(monkeypatch, model_class):
 def test_qwen_vl_decoder_uses_3d_position_ids(monkeypatch, model_class):
     model = model_class.__new__(model_class)
     model.use_paged_attention = False
+    model.io_dtype = ir.DataType.FLOAT16
+    model.hidden_size = 2048
+    model.num_deepstack = 3
+    model.input_names = {}
+    model.input_types = {}
     model.input_shapes = {"position_ids": ["batch_size", "sequence_length"]}
     monkeypatch.setattr(Model, "make_inputs_and_outputs", lambda self: None)
 
     model.make_inputs_and_outputs()
 
     assert model.input_shapes["position_ids"] == [3, "batch_size", "sequence_length"]
+
+
+def test_qwen3_vl_declares_deepstack_decoder_inputs(monkeypatch):
+    model = Qwen3VLTextModel.__new__(Qwen3VLTextModel)
+    model.use_paged_attention = False
+    model.io_dtype = ir.DataType.FLOAT16
+    model.hidden_size = 2048
+    model.num_deepstack = 3
+    model.input_names = {}
+    model.input_types = {}
+    model.input_shapes = {"position_ids": ["batch_size", "sequence_length"]}
+    monkeypatch.setattr(Model, "make_inputs_and_outputs", lambda self: None)
+
+    model.make_inputs_and_outputs()
+
+    for i in range(3):
+        name = f"deepstack_{i}"
+        assert model.input_names[name] == name
+        assert model.input_types[name] == ir.DataType.FLOAT16
+        assert model.input_shapes[name] == ["batch_size", "sequence_length", 2048]
+
+
+def test_qwen3_vl_make_layer_injects_deepstack_into_skip_input(monkeypatch):
+    model = Qwen3VLTextModel.__new__(Qwen3VLTextModel)
+    model.io_dtype = ir.DataType.FLOAT16
+    model.hidden_size = 2048
+    model.num_deepstack = 3
+    nodes = []
+    values = []
+
+    def base_make_layer(self, layer_id, layer):
+        self.layernorm_attrs["skip_input"] = f"/model/layers.{layer_id}/mlp/down_proj/output_0"
+
+    monkeypatch.setattr(Qwen25VLTextModel, "make_layer", base_make_layer)
+    model.make_node = lambda op_type, inputs, outputs, name: nodes.append((op_type, inputs, outputs, name))
+    model.make_value = lambda name, dtype, shape: values.append((name, dtype, shape))
+
+    # Layer 1 is within the deepstack range -> an Add is inserted and skip_input is rewired.
+    model.layernorm_attrs = {}
+    model.make_layer(1, object())
+    assert nodes == [
+        (
+            "Add",
+            ["/model/layers.1/mlp/down_proj/output_0", "deepstack_1"],
+            ["/model/layers.1/deepstack/Add/output_0"],
+            "/model/layers.1/deepstack/Add",
+        )
+    ]
+    assert model.layernorm_attrs["skip_input"] == "/model/layers.1/deepstack/Add/output_0"
+
+    # Layer 3 is outside the deepstack range -> no Add, skip_input untouched.
+    nodes.clear()
+    model.layernorm_attrs = {}
+    model.make_layer(3, object())
+    assert nodes == []
+    assert model.layernorm_attrs["skip_input"] == "/model/layers.3/mlp/down_proj/output_0"
 
 
 def test_qwen35_paged_decoder_uses_packed_3d_position_ids(monkeypatch):

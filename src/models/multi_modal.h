@@ -206,10 +206,10 @@ struct DecoderState : State {
   std::unique_ptr<DefaultInputIDs> decoder_input_ids_;  // Optional model input (e.g., Gemma4 decoder needs input_ids)
   // Qwen3-VL DeepStack: full-length scattered features injected after decoder layers 0/1/2.
   std::vector<std::unique_ptr<Embeddings>> deepstack_in_;  // Model inputs
-  std::unique_ptr<PositionInputs> position_inputs_;     // Model input
-  std::unique_ptr<KeyValueCache> kv_cache_;             // Model input
-  std::unique_ptr<RecurrentState> recurrent_state_;     // Model input (for hybrid models)
-  Logits logits_{*this};                                // Model output
+  std::unique_ptr<PositionInputs> position_inputs_;        // Model input
+  std::unique_ptr<KeyValueCache> kv_cache_;                // Model input
+  std::unique_ptr<RecurrentState> recurrent_state_;        // Model input (for hybrid models)
+  Logits logits_{*this};                                   // Model output
 };
 
 struct MultiModalPipelineState : State {

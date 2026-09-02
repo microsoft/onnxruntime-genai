@@ -251,7 +251,7 @@ struct Config {
 
       struct Outputs {
         std::string embeddings{Defaults::InputsEmbedsName};
-        std::string per_layer_inputs;  // Gemma4: per-layer conditioning from embedding to decoder
+        std::string per_layer_inputs;        // Gemma4: per-layer conditioning from embedding to decoder
         std::vector<std::string> deepstack;  // Qwen3-VL full-length scattered DeepStack features (to decoder)
       } outputs;
     } embedding;
