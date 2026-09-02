@@ -103,7 +103,7 @@ def test_qwen35_moe_loads_moe_transformers_model(monkeypatch):
     assert calls[0][0] is FakeMoEModel
 
 
-def _initialize_qwen_model(monkeypatch, model_class):
+def _initialize_qwen_model(monkeypatch, model_class, config=None):
     def initialize_base(self, *_args, **_kwargs):
         self.layernorm_attrs = {
             "cast": {
@@ -121,7 +121,25 @@ def _initialize_qwen_model(monkeypatch, model_class):
         self.attention_attrs = {"q_norm": False, "k_norm": False}
 
     monkeypatch.setattr(Model, "__init__", initialize_base)
-    return model_class(types.SimpleNamespace(), ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cuda", "", {})
+    config = types.SimpleNamespace() if config is None else config
+    return model_class(config, ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cuda", "", {})
+
+
+@pytest.mark.parametrize(
+    "vision_config,expected_num_deepstack",
+    [
+        (None, 0),  # no vision_config -> DeepStack disabled
+        (types.SimpleNamespace(), 0),  # vision_config present but no deepstack_visual_indexes
+        (types.SimpleNamespace(deepstack_visual_indexes=None), 0),
+        (types.SimpleNamespace(deepstack_visual_indexes=[]), 0),  # empty -> disabled
+        (types.SimpleNamespace(deepstack_visual_indexes=[5, 11, 17]), 3),
+    ],
+)
+def test_qwen3_vl_deepstack_count_follows_vision_config(monkeypatch, vision_config, expected_num_deepstack):
+    config = types.SimpleNamespace() if vision_config is None else types.SimpleNamespace(vision_config=vision_config)
+    model = _initialize_qwen_model(monkeypatch, Qwen3VLTextModel, config=config)
+
+    assert model.num_deepstack == expected_num_deepstack
 
 
 @pytest.mark.parametrize(

@@ -953,6 +953,12 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
     if (vision_state_) {
       embedding_state_->image_features_->ReuseFeaturesBuffer(*vision_state_->image_features_);
       // Qwen3-VL DeepStack: hand each vision per-token output to the matching embedding input.
+      if (embedding_state_->deepstack_features_in_.size() != vision_state_->deepstack_features_.size()) {
+        throw std::runtime_error("DeepStack config mismatch: embedding.inputs.deepstack_features count (" +
+                                 std::to_string(embedding_state_->deepstack_features_in_.size()) +
+                                 ") must match vision.outputs.deepstack_features count (" +
+                                 std::to_string(vision_state_->deepstack_features_.size()) + ").");
+      }
       for (size_t k = 0; k < embedding_state_->deepstack_features_in_.size(); ++k) {
         embedding_state_->deepstack_features_in_[k]->ReuseFeaturesBuffer(*vision_state_->deepstack_features_[k]);
       }
@@ -975,6 +981,12 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
       embedding_state_->per_layer_inputs_->ReuseEmbeddingsBuffer(*decoder_state_->per_layer_inputs_);
     }
     // Qwen3-VL DeepStack: bind embedding's full-length scattered outputs to the decoder's inputs.
+    if (embedding_state_->deepstack_out_.size() != decoder_state_->deepstack_in_.size()) {
+      throw std::runtime_error("DeepStack config mismatch: embedding.outputs.deepstack count (" +
+                               std::to_string(embedding_state_->deepstack_out_.size()) +
+                               ") must match decoder.inputs.deepstack count (" +
+                               std::to_string(decoder_state_->deepstack_in_.size()) + ").");
+    }
     for (size_t k = 0; k < embedding_state_->deepstack_out_.size(); ++k) {
       embedding_state_->deepstack_out_[k]->ReuseEmbeddingsBuffer(*decoder_state_->deepstack_in_[k]);
     }
@@ -997,6 +1009,12 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
   }
   // Qwen3-VL DeepStack: rebind embedding's full-length outputs (all zeros in generation, no image
   // tokens) to the decoder's inputs so the per-layer Adds become no-ops.
+  if (embedding_state_->deepstack_out_.size() != decoder_state_->deepstack_in_.size()) {
+    throw std::runtime_error("DeepStack config mismatch: embedding.outputs.deepstack count (" +
+                             std::to_string(embedding_state_->deepstack_out_.size()) +
+                             ") must match decoder.inputs.deepstack count (" +
+                             std::to_string(decoder_state_->deepstack_in_.size()) + ").");
+  }
   for (size_t k = 0; k < embedding_state_->deepstack_out_.size(); ++k) {
     embedding_state_->deepstack_out_[k]->ReuseEmbeddingsBuffer(*decoder_state_->deepstack_in_[k]);
   }

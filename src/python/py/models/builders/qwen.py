@@ -83,16 +83,19 @@ class Qwen3VLTextModel(Qwen25VLTextModel):
         # Qwen3-VL uses the Interleaved MRotaryEmbedding layout.
         self.rope_attrs["mrope_layout"] = 1
 
-        # DeepStack: the vision encoder emits len(deepstack_visual_indexes) extra feature
-        # tensors (3 for the 4B model, from vision layers [5, 11, 17]). These are scattered to
-        # full length (batch, seq, hidden) by embedding.onnx and injected into the residual
-        # stream after decoder layers 0/1/2 (feature i -> layer i), matching HF's
-        # Qwen3VLTextModel._deepstack_process. We declare them as extra decoder inputs (in
-        # make_inputs_and_outputs) and add them in make_layer. During generation there are no
-        # image tokens, so embedding.onnx emits all-zeros and the Adds become no-ops.
+        # DeepStack: when the vision config declares deepstack_visual_indexes, the vision encoder
+        # emits one extra feature tensor per index (3 for the 4B model, from vision layers
+        # [5, 11, 17]). These are scattered to full length (batch, seq, hidden) by embedding.onnx
+        # and injected into the residual stream after decoder layers 0/1/2 (feature i -> layer i),
+        # matching HF's Qwen3VLTextModel._deepstack_process. We declare them as extra decoder
+        # inputs (in make_inputs_and_outputs) and add them in make_layer; during generation there
+        # are no image tokens so embedding.onnx emits all-zeros and the Adds become no-ops.
+        # DeepStack is opt-in from config: a vision config without deepstack_visual_indexes
+        # (missing or empty) yields num_deepstack == 0, so both hooks no-op and the graph is the
+        # plain Qwen3-VL decoder.
         vision_config = getattr(config, "vision_config", None)
         ds_indexes = getattr(vision_config, "deepstack_visual_indexes", None) if vision_config else None
-        self.num_deepstack = len(ds_indexes) if ds_indexes else 3
+        self.num_deepstack = len(ds_indexes) if ds_indexes is not None else 0
 
     def make_inputs_and_outputs(self):
         # Full-length (batch, seq, hidden) scattered features produced by embedding.onnx are
