@@ -153,12 +153,9 @@ def test_gemma4_vision_multiple_images(test_data_path, relative_image_paths):
     assert np.all(image_token_counts > 0)
     assert pixel_values.shape[1] == int(image_token_counts.max()) * 9
 
-    expected_token_counts = []
-    for image_path in image_paths:
-        single_image = og.Images.open(image_path)
-        single_inputs = processor("<|image|>Describe this image", images=single_image)
-        expected_token_counts.append(int(_to_numpy(single_inputs["num_image_tokens"])[0]))
-
+    valid_patch_counts = np.count_nonzero(np.any(pixel_position_ids != -1, axis=-1), axis=1)
+    assert np.all(valid_patch_counts % 9 == 0)
+    expected_token_counts = valid_patch_counts // 9
     np.testing.assert_array_equal(image_token_counts, expected_token_counts)
 
 

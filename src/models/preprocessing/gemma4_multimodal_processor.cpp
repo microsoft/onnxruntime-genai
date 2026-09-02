@@ -109,7 +109,8 @@ ProcessGemma4Prompt(const Generators::Tokenizer& tokenizer, const std::string& p
     }
     const auto image_pos = text.find(boi_token, search_pos);
     if (image_pos == std::string::npos) {
-      break;
+      throw std::runtime_error(
+          "Gemma4 prompt expansion expected an <|image> marker for each image");
     }
     std::string image_tokens_expanded;
     image_tokens_expanded.reserve(static_cast<size_t>(soft_token_count) * image_token_len);

@@ -13,6 +13,13 @@ namespace Generators {
 
 namespace {
 
+struct OrtValuePointerRestore {
+  OrtValue*& slot;
+  OrtValue* value;
+
+  ~OrtValuePointerRestore() { slot = value; }
+};
+
 int64_t GetNumImageTokens(const std::vector<ExtraInput>& extra_inputs) {
   for (size_t i = 0; i < extra_inputs.size(); ++i) {
     if (extra_inputs[i].name == Config::Defaults::NumImageTokens) {
@@ -386,6 +393,15 @@ void Gemma4VisionState::SetExtraInputs(const std::vector<ExtraInput>& extra_inpu
     }
   }
   VisionState::SetExtraInputs(extra_inputs, num_images, num_image_tokens);
+
+  const std::string& pixel_values_name = model_.config_->model.vision.inputs.pixel_values;
+  const std::string& position_ids_name = model_.config_->model.vision.inputs.pixel_position_ids;
+  pixel_values_index_ = SIZE_MAX;
+  position_ids_index_ = SIZE_MAX;
+  for (size_t i = 0; i < input_names_.size(); ++i) {
+    if (input_names_[i] == pixel_values_name) pixel_values_index_ = i;
+    if (input_names_[i] == position_ids_name) position_ids_index_ = i;
+  }
 }
 
 DeviceSpan<float> Gemma4VisionState::Run(int current_length, DeviceSpan<int32_t>& next_tokens,
@@ -399,25 +415,20 @@ DeviceSpan<float> Gemma4VisionState::Run(int current_length, DeviceSpan<int32_t>
     return {};
   }
 
-  const std::string& pixel_values_name = model_.config_->model.vision.inputs.pixel_values;
-  const std::string& position_ids_name = model_.config_->model.vision.inputs.pixel_position_ids;
-  size_t pixel_values_index = SIZE_MAX;
-  size_t position_ids_index = SIZE_MAX;
-  for (size_t i = 0; i < input_names_.size(); ++i) {
-    if (input_names_[i] == pixel_values_name) pixel_values_index = i;
-    if (input_names_[i] == position_ids_name) position_ids_index = i;
-  }
-  if (pixel_values_index == SIZE_MAX || position_ids_index == SIZE_MAX) {
-    State::Run(*model_.vision_session_);
-    return {};
+  if (pixel_values_index_ == SIZE_MAX || position_ids_index_ == SIZE_MAX) {
+    throw std::runtime_error(
+        "Gemma 4 multi-image vision requires pixel_values and pixel_position_ids inputs");
   }
   if (image_token_counts_.size() != static_cast<size_t>(num_images_)) {
     throw std::runtime_error("Gemma 4 multi-image vision requires one num_image_tokens value per image");
   }
 
-  OrtValue* pixel_values = inputs_[pixel_values_index];
-  OrtValue* position_ids = inputs_[position_ids_index];
+  OrtValue* pixel_values = inputs_[pixel_values_index_];
+  OrtValue* position_ids = inputs_[position_ids_index_];
   OrtValue* image_features = outputs_[0];
+  const OrtValuePointerRestore restore_pixel_values{inputs_[pixel_values_index_], pixel_values};
+  const OrtValuePointerRestore restore_position_ids{inputs_[position_ids_index_], position_ids};
+  const OrtValuePointerRestore restore_image_features{outputs_[0], image_features};
   const auto pixel_info = pixel_values->GetTensorTypeAndShapeInfo();
   const auto position_info = position_ids->GetTensorTypeAndShapeInfo();
   const auto feature_info = image_features->GetTensorTypeAndShapeInfo();
@@ -460,8 +471,10 @@ DeviceSpan<float> Gemma4VisionState::Run(int current_length, DeviceSpan<int32_t>
   const size_t feature_bytes = element_size(feature_type);
   auto* pixel_data = static_cast<uint8_t*>(pixel_values->GetTensorMutableRawData());
   auto* position_data = static_cast<uint8_t*>(position_ids->GetTensorMutableRawData());
+  auto* feature_data = static_cast<uint8_t*>(image_features->GetTensorMutableRawData());
   const auto& pixel_memory = pixel_values->GetTensorMemoryInfo();
   const auto& position_memory = position_ids->GetTensorMemoryInfo();
+  const auto& feature_memory = image_features->GetTensorMemoryInfo();
 
   const int64_t total_image_tokens =
       std::accumulate(image_token_counts_.begin(), image_token_counts_.end(), 0LL);
@@ -487,24 +500,16 @@ DeviceSpan<float> Gemma4VisionState::Run(int current_length, DeviceSpan<int32_t>
         position_memory, position_data + static_cast<size_t>(image * num_patches * position_dim) * position_bytes,
         static_cast<size_t>(num_patches * position_dim) * position_bytes, image_position_shape, position_type);
     auto image_feature_values = OrtValue::CreateTensor(
-        model_.p_device_->GetAllocator(), image_feature_shape, feature_type);
+        feature_memory, feature_data + static_cast<size_t>(feature_offset * hidden_size) * feature_bytes,
+        static_cast<size_t>(image_tokens * hidden_size) * feature_bytes, image_feature_shape, feature_type);
 
-    inputs_[pixel_values_index] = image_pixel_values.get();
-    inputs_[position_ids_index] = image_position_ids.get();
+    inputs_[pixel_values_index_] = image_pixel_values.get();
+    inputs_[position_ids_index_] = image_position_ids.get();
     outputs_[0] = image_feature_values.get();
     State::Run(*model_.vision_session_);
-
-    const size_t feature_offset_bytes = static_cast<size_t>(feature_offset * hidden_size) * feature_bytes;
-    const size_t feature_size_bytes = static_cast<size_t>(image_tokens * hidden_size) * feature_bytes;
-    ByteWrapTensor(*model_.p_device_, *image_features)
-        .subspan(feature_offset_bytes, feature_size_bytes)
-        .CopyFrom(ByteWrapTensor(*model_.p_device_, *image_feature_values));
     feature_offset += image_tokens;
   }
 
-  inputs_[pixel_values_index] = pixel_values;
-  inputs_[position_ids_index] = position_ids;
-  outputs_[0] = image_features;
   return {};
 }
 

@@ -83,6 +83,8 @@ struct Gemma4VisionState : VisionState {
 
  private:
   std::vector<int64_t> image_token_counts_;
+  size_t pixel_values_index_{SIZE_MAX};
+  size_t position_ids_index_{SIZE_MAX};
 };
 
 // PixtralVisionState: per-image vision loop for Pixtral / Mistral3.
