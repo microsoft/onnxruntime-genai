@@ -328,8 +328,9 @@ The Engine records its owner thread when it is created. Engine operations, Reque
 Turn-option setters are not thread-safe and must be called serially from that owner thread.
 Destroying a Request handle only publishes an atomic abandonment marker when it is the final public
 handle; this final release may occur on another thread. The Engine strongly retains the Request and
-performs the actual close, runtime-state release, and cleanup at its next owner-thread boundary.
-This deferred-release behavior does not permit concurrent Request operations.
+performs the logical close and cleanup at its next owner-thread boundary. A resident static row
+retains the runtime state needed by an executable peer until the shared physical batch is
+recycled. This deferred-release behavior does not permit concurrent Request operations.
 
 Destroying an Engine closes all bound Requests and purges events. Surviving Request handles remain
 valid lightweight closed tombstones that the caller must still destroy. Teardown uses a no-throw
@@ -449,14 +450,19 @@ struct PendingEngineEvent {
 At Engine construction:
 
 ```cpp
-pending_events_.reserve(cache_manager_->MaxBatchSize());
+const size_t max_step_events =
+    cache_manager_->MaxBatchSize() * kMaxGeneratedTokensPerStep;
+pending_events_.reserve(max_step_events);
+staged_events_.reserve(max_step_events);
+fatal_events_.reserve(max_step_events + 1);
 ```
 
-`reserve` allocates capacity without constructing events. A speculative transaction can produce up
-to `max_draft_tokens_per_step + 1` token events per affected Request. Request creation grows the
-retained-event capacity for the tracked Request count because fatal handling publishes a terminal
-event for every executable Turn, including Requests outside the failed batch. This keeps event
-publication allocation-free after model/cache commit and after the Engine becomes unhealthy.
+`reserve` allocates capacity without constructing events. A committed step produces at most
+`kMaxGeneratedTokensPerStep` events per affected Request, so normal retained output is bounded by
+that limit times the scheduled batch size. Request creation grows dedicated fatal-event capacity
+for that complete retained step plus every tracked Request because fatal handling may publish a
+terminal event for executable Turns outside the failed batch. This keeps event publication
+allocation-free after model/cache commit and after the Engine becomes unhealthy.
 
 Conceptual positive-capacity `Run` flow:
 
@@ -496,7 +502,15 @@ The operation is drain-or-execute:
 Before answering, it reclaims Requests whose final public handle was released. This is an
 owner-thread Engine boundary, so abandonment cannot leave stale schedulable work or retained events
 hidden behind a false result. A false result does not close or release turn-complete Requests;
-callers must close or abandon those handles explicitly.
+callers must close or abandon those handles explicitly. If reclamation detects an ownership
+invariant failure, the Engine becomes unhealthy, terminal events are retained, and this operation
+returns true so the host can drain them through `OgaEngineRun`. A transient allocation failure
+returns an `OgaResult`, re-arms reclamation, and leaves any completed cleanup intact; the next
+owner-thread boundary safely retries the remaining work.
+
+Request creation and `OgaRequestBeginTurn` are also abandonment-reclamation boundaries. If
+reclamation detects an invariant failure there, that operation returns an `OgaResult` while the
+Engine retains terminal events for the next positive-capacity `OgaEngineRun`.
 
 The Engine API has no public asynchronous event queue. Hosts that want uninterrupted inference copy
 events into an application-owned bounded queue and continue pumping the owner thread. If the host
@@ -510,8 +524,8 @@ Close and final-handle abandonment both logically remove a Request from scheduli
 undelivered events, and release its Search, guidance, sampler, and parameter runtime state on the
 owner thread. On the dynamic path, committed paged-cache ownership is released immediately. On the
 static path, a resident row is part of a shared batch allocation and cannot be physically released
-per Request; the closed/abandoned tombstone is no longer scheduled or returned, but its row and
-shared cache allocation may remain until the whole batch recycles.
+per Request; the closed/abandoned tombstone is no longer sampled or returned, but its row, shared
+cache allocation, and row-essential runtime state may remain until the whole batch recycles.
 
 The event's `request` is borrowed. It remains valid only while the caller retains the owned Request
 handle. Internal pending events hold a `shared_ptr<Request>` until delivery, but that does not relax
@@ -528,11 +542,12 @@ OgaRequestGetUnseenToken
 
 and remove their internal unseen-index FIFO bookkeeping.
 
-At successful step commit, the Engine already knows the Request, Turn ID, visible tokens, terminal
-state, finish reason, and usage. It captures those values in `PendingEngineEvent`. A speculative
-transaction emits accepted drafts followed by its correction or bonus token; only the final event
-carries terminal state when the Turn finishes. `OgaEngineRun` moves the available FIFO prefix into
-the reusable Buffer storage and retains overflow.
+At successful step commit, the Engine already knows the Request, Turn ID, selected tokens, terminal
+state, finish reason, and usage. It captures those values in ordered `PendingEngineEvent` objects.
+A speculative transaction emits accepted drafts followed by its correction or bonus token, up to
+`kMaxGeneratedTokensPerStep` events per affected Request. Only the final event carries terminal
+state when the Turn finishes. `OgaEngineRun` moves the available FIFO prefix into the reusable
+Buffer storage and retains overflow.
 
 `tokens_host_` and the Search sequence remain authoritative resident conversation state. Event
 delivery does not remove tokens from that state. Because token and Turn ID are captured together at

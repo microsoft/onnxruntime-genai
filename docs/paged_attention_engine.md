@@ -238,7 +238,8 @@ Engine-level pending flag makes the common no-abandonment boundary allocation-fr
 
 Planning skips turn-complete residents and does not release their cache. Retained requests still
 consume paged-cache blocks and a batch slot, so applications must call `Close()` when they no
-longer need continuation when deterministic immediate reclamation is required.
+longer need continuation. Dynamic resources are reclaimed immediately; static resources remain
+until the shared batch is recycled.
 
 ### `Close()`
 
@@ -269,7 +270,7 @@ surviving external handles are lightweight closed tombstones and still must be d
 `Closed` is distinct from `Unassigned` because close may already have destroyed residency and
 scheduler ownership. Returning to `Unassigned` would imply that the same logical sequence could be
 submitted as a new request. A closed static-batch row may remain physically allocated until the
-batch is recycled, but it is no longer sampled or returned.
+shared batch is recycled, but it is no longer sampled or returned.
 
 ## The request length counters
 
@@ -355,6 +356,11 @@ A positive-capacity call is strictly drain-or-execute:
 3. Otherwise execute at most one static step or one dynamic transaction.
 4. Move up to capacity produced events into the Buffer and retain overflow in `pending_events_`.
 
+A transient allocation failure while reclaiming abandoned Requests leaves completed cleanup intact,
+re-arms reclamation, and retries the remaining work at the next owner-thread boundary. An ownership
+invariant failure during reclamation is fatal: `Run()` drains the retained terminal failure events
+through the supplied Buffer before later calls rethrow the stored Engine error.
+
 When capacity covers the complete affected batch, one call returns all of that transaction's
 events. Capacity one expresses one-event-at-a-time behavior through the same implementation: the
 first call executes once and later calls drain retained overflow without more model execution.
@@ -363,13 +369,13 @@ borrowed. A Buffer event holds the Request internally for the lifetime of that v
 returned `const OgaRequest*` is never an independently owned handle and is invalidated with the
 event.
 
-A committed step emits zero or more token events and may emit a terminal event. The final visible
-token can carry `Token | TurnFinished`; EOS can emit terminal completion without a visible token.
-Speculative verification emits each accepted draft and its correction or bonus as a separate token
-event in sequence order. If verification accepts a visible draft immediately before an accepted EOS
-ends the Turn, the accepted visible token and terminal completion share that combined event; the EOS
-itself is never emitted as a token. Event delivery does not mutate the Request's retained logical
-sequence.
+A committed step emits zero or more ordered token events and may emit a terminal event or combine
+`TurnFinished` with its final visible token event. EOS can emit terminal completion without a
+visible token. Event delivery does not mutate the Request's retained logical sequence. A
+speculative step emits each accepted draft and its correction or bonus as a separate token event,
+up to `kMaxGeneratedTokensPerStep` events per affected Request. If speculative verification accepts
+a visible draft immediately before an accepted EOS ends the Turn, the accepted visible token and
+terminal completion share that combined event; the EOS itself is never emitted as a token.
 
 A chunked partial-prefill transaction can commit cache and Request progress without producing an
 event. `Run()` then returns count zero while `HasPendingRequests()` remains true. It does not loop
@@ -810,11 +816,18 @@ The engine becomes unhealthy when it cannot prove that all components still agre
 - Any part of the commit boundary fails.
 - Planning detects inconsistent committed paged and fixed state.
 - The scheduler returns an invalid planning outcome.
+- Abandoned-Request cleanup detects inconsistent cache or scheduler ownership.
 
 The engine stores the fatal error and marks every executable Turn complete with reason `Failed`.
 Before rethrowing the stored error on later `Run()` calls, it emits one
 `TurnFinished | Failed` event per affected Turn with the Turn's Request, ID, usage, and Engine
 failure code. A fatal failure with no affected Turn emits one request-less Engine failure event.
+At publication time, an externally abandoned Request is omitted from request-bearing events on a
+best-effort basis; final-handle release may race with that snapshot, but any event already selected
+retains the Request safely. Other executable Turns are still terminalized. `HasPendingRequests()`
+returns true while these retained fatal events need draining. Request creation and `BeginTurn()`
+also reclaim abandonment; an invariant failure from either operation throws the fatal
+`EngineStepError` while retaining terminal events for the next positive-capacity `Run()`.
 Continuing would risk using request search state and cache block tables from different logical
 steps.
 
@@ -1137,8 +1150,7 @@ its row and cache allocation can remain alive for the lifetime of the batch. The
 parameters, host token mirror, and length metadata remain available only to keep that physical row
 safe; sampling-only state is released at logical close. When the whole batch is recycled, the Engine
 releases the retained state on its owner thread and the closed Request becomes a lightweight
-tombstone. Static cleanup therefore must not be described or tested as either deferred logical
-close or immediate per-Request physical deallocation.
+tombstone.
 
 Changes to shared types such as `Request`, `ScheduledRequests`, `ModelExecutor`, or `SimpleDecoder` should be checked against both paths. This document should be updated only where behavior is shared or where the dynamic path changes.
 
@@ -1154,8 +1166,20 @@ turn_options = og.TurnOptions(request)
 turn_options.set_max_generated_tokens(128)
 turn_id = request.begin_turn(initial_tokens, turn_options)
 
+event_buffer = engine.create_event_buffer(8)
 while engine.has_pending_requests():
-    for event in engine.run(max_events=8):
+    for event in engine.run(event_buffer):
+        if event.flags & og.EngineEventFlags.FAILED:
+            if (
+                event.request is None
+                or event.error_code != og.EngineErrorCode.REQUEST_UNSERVICEABLE
+            ):
+                raise RuntimeError(
+                    f"Engine failure: flags={event.flags}, error_code={event.error_code}"
+                )
+            # This Request cannot make progress, but the Engine and other Requests remain healthy.
+            event.request.close()
+            continue
         if event.request is None:
             if event.flags & (
                 og.EngineEventFlags.CAPACITY_BLOCKED
@@ -1176,12 +1200,13 @@ while engine.has_pending_requests():
 turn_options.set_max_generated_tokens(64)
 turn_id = request.begin_turn(next_turn_tokens, turn_options)
 
-# Repeat engine.run(max_events=...), then close when continuation is no longer needed.
+# Repeat engine.run(event_buffer), then close when continuation is no longer needed.
 request.close()
 ```
 
-`max_events=1` provides capacity-one behavior; larger capacities return the complete transaction
-output when it fits. An empty list can represent committed partial-prefill progress, so callers
+An event buffer with capacity one provides capacity-one behavior; larger buffers return the
+complete transaction output when it fits. A run returning no events can represent committed
+partial-prefill progress, so callers
 continue while `has_pending_requests()` remains true. Flags are a bitmask, so callers test the
 `TOKEN` bit rather than comparing flags for equality; `TOKEN | TURN_FINISHED` can be combined, and
 `event.token` is consumed only when `TOKEN` is set. `event.request` is a borrowed alias of the

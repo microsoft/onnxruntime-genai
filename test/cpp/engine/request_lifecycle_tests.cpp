@@ -8,11 +8,12 @@
 // TurnComplete, and Closed.
 
 #include <array>
-#include <memory>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -616,7 +617,81 @@ TEST_F(RequestLifecycleTest, FailedContinuationRestoreClosesRequestAndPoisonsEng
   EXPECT_EQ(request->status_, RequestStatus::Closed);
   EXPECT_EQ(engine_.cache->AllocatedCount(), 0u);
   EXPECT_THROW(request->BeginTurn(std::vector<int32_t>{6}), std::runtime_error);
+  const auto failure = RunOne(*engine_.engine);
+  EXPECT_EQ(failure.request, nullptr);
+  EXPECT_EQ(failure.flags, EngineEventFlagFailed);
+  EXPECT_EQ(failure.finish_reason, GenerationFinishReason::Failed);
+  EXPECT_EQ(failure.error_code, EngineErrorCode::EngineExecutionFailure);
   EXPECT_THROW(static_cast<void>(RunOne(*engine_.engine)), EngineStepError);
+}
+
+TEST_F(RequestLifecycleTest,
+       FailedContinuationCloseDetachesBeforeFatalPublication) {
+  auto cache = std::make_shared<RecordingCacheManager>(
+      model_, /*capacity=*/1);
+  auto scheduler = Scheduler::Create(model_, cache);
+  auto executor = std::make_unique<RecordingModelExecutor>(
+      model_, cache, EosToken(*model_));
+  EngineDependencies dependencies{
+      cache,
+      std::move(scheduler),
+      std::move(executor)};
+  auto engine = std::make_shared<Engine>(
+      model_, std::move(dependencies));
+
+  auto params = MakeGreedyParams(*model_);
+  auto control = std::make_shared<FailingContinuationControl>();
+  FailingContinuationDevice device{*params->p_device, control};
+  params->p_device = &device;
+  auto request = CreateEngineRequest(engine, *params);
+  request->BeginTurn(Prompt());
+  ASSERT_EQ(RunOne(*engine).request, request);
+  ASSERT_TRUE(request->IsTurnComplete());
+  ASSERT_EQ(cache->AllocatedCount(), 1u);
+
+  auto drained_request = CreateEngineRequest(engine, *model_);
+  auto pending_request = CreateEngineRequest(engine, *model_);
+  const auto drained_turn = drained_request->BeginTurn(Prompt());
+  const auto pending_turn = pending_request->BeginTurn(Prompt());
+  ASSERT_TRUE(drained_request->Cancel(drained_turn));
+  ASSERT_TRUE(pending_request->Cancel(pending_turn));
+  ASSERT_EQ(RunOne(*engine).request, drained_request);
+
+  control->fail_append = true;
+  control->fail_restore = true;
+  cache->ThrowDeallocateInvariantFailureOnce();
+  try {
+    request->BeginTurn(std::vector<int32_t>{5});
+    FAIL() << "Expected continuation restore failure.";
+  } catch (const EngineStepError& error) {
+    EXPECT_EQ(
+        error.Outcome().kind,
+        StepOutcomeKind::FatalExecutionFailure);
+    EXPECT_NE(
+        std::string_view{error.what()}.find(
+            "Closing the poisoned request also failed."),
+        std::string_view::npos);
+  }
+
+  EXPECT_EQ(request->status_, RequestStatus::Closed);
+  EXPECT_EQ(cache->AllocatedCount(), 0u);
+  EXPECT_EQ(cache->deallocate_calls, 2);
+  EXPECT_THROW(
+      request->BeginTurn(std::vector<int32_t>{6}),
+      std::runtime_error);
+  std::array<EngineEvent, 2> failures;
+  ASSERT_EQ(engine->Run(failures), failures.size());
+  EXPECT_EQ(failures[0].request, pending_request);
+  EXPECT_EQ(failures[0].flags, EngineEventFlagTurnFinished);
+  EXPECT_EQ(
+      failures[0].finish_reason,
+      GenerationFinishReason::Canceled);
+  EXPECT_EQ(failures[1].request, nullptr);
+  EXPECT_EQ(failures[1].flags, EngineEventFlagFailed);
+  EXPECT_EQ(
+      failures[1].error_code,
+      EngineErrorCode::EngineExecutionFailure);
+  EXPECT_THROW(static_cast<void>(RunOne(*engine)), EngineStepError);
 }
 
 TEST_F(RequestLifecycleTest, ContinuationPreservesUnreadOutputAndHidesInputTokens) {
