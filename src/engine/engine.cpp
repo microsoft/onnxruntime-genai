@@ -831,7 +831,7 @@ std::shared_ptr<Request> Engine::CreateRequest(const GeneratorParams& params,
         "Engine fatal event capacity exceeds the supported size.");
   }
   fatal_events_.reserve(
-      max_step_event_count_ + tracked_requests_.size() + 2);
+      max_step_event_count_ + tracked_requests_.size() + kFatalEventOverhead);
   tracked_requests_.push_back(request);
   request->AttachToEngine(std::move(engine));
   return request;
