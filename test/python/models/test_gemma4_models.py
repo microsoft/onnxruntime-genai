@@ -125,7 +125,7 @@ def test_gemma4_vision_load_from_bytes(test_data_path, relative_image_path):
     [[Path("images") / "australia.jpg", Path("images") / "landscape.jpg"]],
 )
 def test_gemma4_vision_multiple_images(test_data_path, relative_image_paths):
-    """Test processing multiple images with Gemma4."""
+    """Test that Gemma4 preserves per-image metadata in input image order."""
     _, processor = _load_model_and_processor(test_data_path)
 
     image_paths = [os.fspath(Path(test_data_path) / p) for p in relative_image_paths]
@@ -138,12 +138,50 @@ def test_gemma4_vision_multiple_images(test_data_path, relative_image_paths):
 
     assert inputs is not None
     assert "pixel_values" in inputs
+    assert "pixel_position_ids" in inputs
+    assert "num_image_tokens" in inputs
     assert "input_ids" in inputs
 
-    ids = _to_numpy(inputs["input_ids"])
-    assert len(ids.shape) == 2, f"input_ids should be 2D, got shape {ids.shape}"
-    assert ids.shape[0] == 1, f"input_ids batch dim should be 1, got {ids.shape[0]}"
-    assert ids.shape[1] > 0, "input_ids should not be empty"
+    pixel_values = _to_numpy(inputs["pixel_values"])
+    pixel_position_ids = _to_numpy(inputs["pixel_position_ids"])
+    image_token_counts = _to_numpy(inputs["num_image_tokens"])
+
+    assert pixel_values.ndim == 3
+    assert pixel_values.shape[0] == len(image_paths)
+    assert pixel_position_ids.shape[:2] == pixel_values.shape[:2]
+    assert image_token_counts.shape == (len(image_paths),)
+    assert np.all(image_token_counts > 0)
+    assert pixel_values.shape[1] == int(image_token_counts.max()) * 9
+
+    expected_token_counts = []
+    for image_path in image_paths:
+        single_image = og.Images.open(image_path)
+        single_inputs = processor("<|image|>Describe this image", images=single_image)
+        expected_token_counts.append(int(_to_numpy(single_inputs["num_image_tokens"])[0]))
+
+    np.testing.assert_array_equal(image_token_counts, expected_token_counts)
+
+
+@pytest.mark.parametrize(
+    "relative_image_paths",
+    [[Path("images") / "australia.jpg", Path("images") / "landscape.jpg"]],
+)
+def test_gemma4_multiple_image_tokens_align_with_feature_rows(test_data_path, relative_image_paths):
+    """Test that prompt image tokens match the concatenated vision feature rows."""
+    _, processor = _load_model_and_processor(test_data_path)
+
+    image_paths = [os.fspath(Path(test_data_path) / path) for path in relative_image_paths]
+    for image_path in image_paths:
+        if not os.path.exists(image_path):
+            pytest.skip(f"Test image not found at {image_path}")
+
+    images = og.Images.open(*image_paths)
+    inputs = processor("<|image|><|image|>Compare these images", images=images)
+
+    token_type_ids = _to_numpy(inputs["token_type_ids"])
+    image_token_counts = _to_numpy(inputs["num_image_tokens"])
+
+    assert np.count_nonzero(token_type_ids == 1) == int(image_token_counts.sum())
 
 
 @pytest.mark.parametrize("relative_image_path", [Path("images") / "australia.jpg"])
