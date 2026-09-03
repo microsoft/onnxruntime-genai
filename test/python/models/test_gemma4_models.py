@@ -11,8 +11,10 @@ This file can be used in two ways:
 """
 
 import argparse
+import json
 import logging
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -59,6 +61,44 @@ def _to_numpy(tensor):
     return np.array(tensor)
 
 
+def _get_test_media_path(test_data_path, relative_path):
+    return Path(test_data_path).parent / relative_path
+
+
+def _create_static_batch_vision_model(onnx, output_path):
+    """Create a static-B=1 vision model that removes padding and pools 3x3 patches."""
+    helper = onnx.helper
+    tensor_proto = onnx.TensorProto
+    pixel_values = helper.make_tensor_value_info("pixel_values", tensor_proto.FLOAT, [1, "num_patches", 768])
+    position_ids = helper.make_tensor_value_info("pixel_position_ids", tensor_proto.INT64, [1, "num_patches", 2])
+    image_features = helper.make_tensor_value_info("image_features", tensor_proto.FLOAT, ["num_soft_tokens", 2048])
+
+    nodes = [
+        helper.make_node("Gather", ["pixel_position_ids", "x_axis"], ["x_positions"], axis=2),
+        helper.make_node("Greater", ["x_positions", "negative_one"], ["valid_mask"]),
+        helper.make_node("NonZero", ["valid_mask"], ["valid_indices_transposed"]),
+        helper.make_node("Transpose", ["valid_indices_transposed"], ["valid_indices"], perm=[1, 0]),
+        helper.make_node("GatherND", ["pixel_values", "valid_indices"], ["valid_patches"]),
+        helper.make_node(
+            "Slice", ["valid_patches", "slice_start", "slice_end", "slice_axis", "slice_step"], ["pooled_patches"]
+        ),
+        helper.make_node("Pad", ["pooled_patches", "feature_padding", "zero"], ["image_features"]),
+    ]
+    initializers = [
+        onnx.numpy_helper.from_array(np.array(0, dtype=np.int64), "x_axis"),
+        onnx.numpy_helper.from_array(np.array(-1, dtype=np.int64), "negative_one"),
+        onnx.numpy_helper.from_array(np.array([0], dtype=np.int64), "slice_start"),
+        onnx.numpy_helper.from_array(np.array([np.iinfo(np.int64).max], dtype=np.int64), "slice_end"),
+        onnx.numpy_helper.from_array(np.array([0], dtype=np.int64), "slice_axis"),
+        onnx.numpy_helper.from_array(np.array([9], dtype=np.int64), "slice_step"),
+        onnx.numpy_helper.from_array(np.array([0, 0, 0, 1280], dtype=np.int64), "feature_padding"),
+        onnx.numpy_helper.from_array(np.array(0, dtype=np.float32), "zero"),
+    ]
+    graph = helper.make_graph(nodes, "gemma4_static_batch_vision", [pixel_values, position_ids], [image_features], initializers)
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 14)], ir_version=7)
+    onnx.save(model, output_path)
+
+
 def test_gemma4_model_load(test_data_path):
     """Test that the Gemma4 model loads successfully."""
     model_path = _get_gemma4_model_path(test_data_path)
@@ -86,7 +126,7 @@ def test_gemma4_vision_basic(test_data_path, relative_image_path):
     """Test basic image processing with Gemma4."""
     _, processor = _load_model_and_processor(test_data_path)
 
-    image_path = os.fspath(Path(test_data_path) / relative_image_path)
+    image_path = os.fspath(_get_test_media_path(test_data_path, relative_image_path))
     if not os.path.exists(image_path):
         pytest.skip(f"Test image not found at {image_path}")
     images = og.Images.open(image_path)
@@ -108,7 +148,7 @@ def test_gemma4_vision_load_from_bytes(test_data_path, relative_image_path):
     """Test loading images from bytes for Gemma4."""
     _, processor = _load_model_and_processor(test_data_path)
 
-    image_path = os.fspath(Path(test_data_path) / relative_image_path)
+    image_path = os.fspath(_get_test_media_path(test_data_path, relative_image_path))
     if not os.path.exists(image_path):
         pytest.skip(f"Test image not found at {image_path}")
     with open(image_path, "rb") as f:
@@ -128,7 +168,7 @@ def test_gemma4_vision_multiple_images(test_data_path, relative_image_paths):
     """Test that Gemma4 preserves per-image metadata in input image order."""
     _, processor = _load_model_and_processor(test_data_path)
 
-    image_paths = [os.fspath(Path(test_data_path) / p) for p in relative_image_paths]
+    image_paths = [os.fspath(_get_test_media_path(test_data_path, path)) for path in relative_image_paths]
     for p in image_paths:
         if not os.path.exists(p):
             pytest.skip(f"Test image not found at {p}")
@@ -167,7 +207,7 @@ def test_gemma4_multiple_image_tokens_align_with_feature_rows(test_data_path, re
     """Test that prompt image tokens match the concatenated vision feature rows."""
     _, processor = _load_model_and_processor(test_data_path)
 
-    image_paths = [os.fspath(Path(test_data_path) / path) for path in relative_image_paths]
+    image_paths = [os.fspath(_get_test_media_path(test_data_path, path)) for path in relative_image_paths]
     for image_path in image_paths:
         if not os.path.exists(image_path):
             pytest.skip(f"Test image not found at {image_path}")
@@ -181,12 +221,43 @@ def test_gemma4_multiple_image_tokens_align_with_feature_rows(test_data_path, re
     assert np.count_nonzero(token_type_ids == 1) == int(image_token_counts.sum())
 
 
+@pytest.mark.parametrize(
+    "relative_image_paths",
+    [[Path("images") / "australia.jpg", Path("images") / "landscape.jpg"]],
+)
+def test_gemma4_static_batch_vision_executes_multiple_images(test_data_path, tmp_path, relative_image_paths):
+    """Test that the static-B=1 vision model runs once per differently sized image."""
+    onnx = pytest.importorskip("onnx")
+    source_model_path = Path(_get_gemma4_model_path(test_data_path))
+    model_path = tmp_path / "gemma4"
+    shutil.copytree(source_model_path, model_path)
+
+    config_path = model_path / "genai_config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["model"]["speech"] = {"filename": "", "config_filename": ""}
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    _create_static_batch_vision_model(onnx, model_path / "dummy_vision.onnx")
+
+    model = og.Model(os.fspath(model_path))
+    processor = model.create_multimodal_processor()
+    image_paths = [os.fspath(_get_test_media_path(test_data_path, path)) for path in relative_image_paths]
+    images = og.Images.open(*image_paths)
+    inputs = processor("<|image|><|image|>Compare these images", images=images)
+    image_token_counts = _to_numpy(inputs["num_image_tokens"])
+    assert image_token_counts[0] != image_token_counts[1]
+
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=4096)
+    generator = og.Generator(model, params)
+    generator.set_inputs(inputs)
+
+
 @pytest.mark.parametrize("relative_image_path", [Path("images") / "australia.jpg"])
 def test_gemma4_processor_creates_token_type_ids(test_data_path, relative_image_path):
     """Test that Gemma4 processor creates token_type_ids for image prompts."""
     _, processor = _load_model_and_processor(test_data_path)
 
-    image_path = os.fspath(Path(test_data_path) / relative_image_path)
+    image_path = os.fspath(_get_test_media_path(test_data_path, relative_image_path))
     if not os.path.exists(image_path):
         pytest.skip(f"Test image not found at {image_path}")
     images = og.Images.open(image_path)
