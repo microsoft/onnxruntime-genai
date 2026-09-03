@@ -543,7 +543,6 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     layout.max_query_len = std::max(layout.max_query_len, query_length);
     layout.max_kv_len = std::max(layout.max_kv_len, kv_length);
     layout.min_kv_len = std::min(layout.min_kv_len, kv_length);
-
   }
 
   const size_t num_tokens = layout.q_row_map.size();

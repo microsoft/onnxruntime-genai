@@ -1815,9 +1815,9 @@ void Engine::RunDynamic() {
           if (dflash2_consecutive_failures_ == 1 || disable_dflash2) {
             try {
               Log("warning", AddExceptionCause(
-                         contract_error
-                           ? "Disabling DFlash 2 after a proposal contract failure."
-                         : disable_dflash2
+                                 contract_error
+                                     ? "Disabling DFlash 2 after a proposal contract failure."
+                                 : disable_dflash2
                                      ? "Disabling DFlash 2 after repeated proposal failures."
                                      : "DFlash 2 proposal failed; using target-only decoding for this step.",
                                  dflash2_error));
