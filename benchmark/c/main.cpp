@@ -259,7 +259,16 @@ void RunBenchmark(const benchmark::Options& opts) {
     }
     const auto output_sequence_length = gen->TokenCount();
     const auto* output_sequence_data = gen->GetSequenceData(0);
-    prompt = std::string{tokenizer->Decode(output_sequence_data, output_sequence_length)};
+    if (output_sequence_length < num_prompt_tokens) {
+      throw std::runtime_error(
+          "Generated prompt has fewer tokens than requested by -l/--prompt_length.");
+    }
+
+    // Keep the generated token IDs instead of decoding and re-encoding them.
+    // Tokenizer round trips are not token-count preserving, so re-encoding can
+    // produce more than the exact prompt length requested with -l.
+    prompt_tokens.assign(output_sequence_data, output_sequence_data + num_prompt_tokens);
+    prompt = std::string{tokenizer->Decode(prompt_tokens.data(), prompt_tokens.size())};
   }
 
   auto prompt_sequences = OgaSequences::Create();
