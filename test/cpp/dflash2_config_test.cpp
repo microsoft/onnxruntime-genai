@@ -328,4 +328,35 @@ TEST(Dflash2ConfigTest, RejectsProposalShapesThatOverflow) {
                std::runtime_error);
 }
 
+TEST(Dflash2ConfigTest, ReplacesProposalBufferWhenTheElementTypeChanges) {
+  auto* device = GetDeviceInterface(DeviceType::CPU);
+  std::unique_ptr<Tensor> slot;
+
+  Dflash2StepTensor(slot, device, Ort::TypeToTensorType<int32_t>, {8});
+  // A static Tensor keeps the type it was constructed with, so reusing the buffer for another type
+  // would silently hand the session the wrong element type.
+  Dflash2StepTensor(slot, device, Ort::TypeToTensorType<float>, {4});
+  EXPECT_EQ(slot->GetType(), Ort::TypeToTensorType<float>);
+  EXPECT_EQ(slot->GetElementCount(), 4u);
+}
+
+TEST(Dflash2ConfigTest, DraftsOnlyForGreedyRequests) {
+  Config::Search search;
+  search.do_sample = false;
+  EXPECT_TRUE(Dflash2CanDraft(search));
+
+  search.do_sample = true;
+  search.top_k = 50;
+  search.temperature = 1.0f;
+  EXPECT_FALSE(Dflash2CanDraft(search));
+
+  // Sampling that can only ever pick the top logit is still greedy.
+  search.top_k = 1;
+  EXPECT_TRUE(Dflash2CanDraft(search));
+
+  search.top_k = 50;
+  search.temperature = 0.0f;
+  EXPECT_TRUE(Dflash2CanDraft(search));
+}
+
 }  // namespace Generators::test

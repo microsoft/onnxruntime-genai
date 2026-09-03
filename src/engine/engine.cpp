@@ -336,11 +336,10 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
   for (size_t i = 0; i < plan.requests.size(); ++i) {
     const auto& entry = plan.requests[i];
     const auto& search = entry.request->SearchOptions();
-    // DFlash 2 drafting is greedy-only. A sampled request can never take this drafter's block, so
-    // feeding it would only burn a ring that an eligible request could use. Greediness is fixed
-    // when the request is created, so a request skipped here is skipped for its whole life and
-    // never joins the drafter's contiguity contract.
-    if (search.do_sample && search.top_k != 1 && search.temperature != 0) {
+    // Feeding a request that can never take a block would only burn a ring an eligible request
+    // could use, and a request skipped here is skipped for its whole life, so it never joins the
+    // drafter's contiguity contract.
+    if (!Dflash2CanDraft(search)) {
       continue;
     }
     const size_t accepted = entry.request->AcceptedDraftTokenCount();

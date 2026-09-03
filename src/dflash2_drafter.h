@@ -24,6 +24,10 @@ size_t Dflash2DraftWidth(size_t capability_limit, size_t configured_limit,
 Tensor& Dflash2StepTensor(std::unique_ptr<Tensor>& slot, DeviceInterface* device,
                           ONNXTensorElementDataType type, const std::vector<int64_t>& shape);
 
+// Whether a request's search options can ever take a DFlash 2 block. Drafting is greedy-only, and
+// this is fixed when the request is created, so a request this rejects is never fed to the drafter.
+bool Dflash2CanDraft(const Config::Search& search);
+
 /**
  * @brief Hosts the ``dflash2.onnx`` session.
  *
