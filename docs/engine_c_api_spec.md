@@ -120,7 +120,7 @@ Initial implementation status:
 | --- | --- |
 | `max_generated_tokens` | Implemented end to end; zero uses the configured/default limit |
 | `temperature`, `top_p`, `top_k`, `seed` | Setter returns an explicit not-implemented error |
-| UTF-8 stop strings | Implemented end to end for ordinary (non-speculative) dynamic Engine turns; see "Stop strings" below. A null collection is rejected; an empty collection clears/disables stop strings |
+| UTF-8 stop strings | Implemented end to end for dynamic Engine turns, including speculative draft verification (manual `OgaRequestSetDraftTokens` and automatic in-Engine drafters such as MTP); see "Stop strings" below. A null collection is rejected; an empty collection clears/disables stop strings |
 | guidance | Setter returns an explicit not-implemented error and does not retain/dereference input |
 
 Unsupported requested behavior must never be accepted and ignored. `OgaTurnOptions` may be reused,
@@ -173,11 +173,11 @@ disturb ordinary EOS termination.
 Stop strings require an Engine configured for dynamic batching: `OgaRequestBeginTurn` rejects a
 stop-enabled turn on a static-batching Engine before any Request mutation, because static batching
 completes generation through a non-transactional path that cannot stage, roll back, or replay a
-match. Stop strings are also incompatible with speculative draft verification for the Request whose
-turn enables them: `OgaRequestSetDraftTokens` (and every automatic in-Engine drafter, e.g. MTP)
-rejects/skips that Request rather than proposing drafts, while other Requests on the same Engine
-keep using speculative decoding normally. A stop-enabled turn therefore always runs the plain
-one-token-per-step path, request-locally.
+match. A stop-enabled turn drafts and verifies with speculative decoding exactly like any other
+turn: `OgaRequestSetDraftTokens` and every automatic in-Engine drafter (e.g. MTP) accept and verify
+drafts normally, observing target-accepted tokens through the same stop-string matcher the ordinary
+one-token path uses, in exact committed order, truncating at the first completed match and
+discarding every later draft.
 
 Turn admission itself is transactional with respect to stop strings, symmetrically for both
 directions: a `BeginTurn` that would enable, change, or clear the Request's stop-string

@@ -177,9 +177,10 @@ struct Request : std::enable_shared_from_this<Request>,
    * This is the single request-local check every speculative draft producer converges on: manual
    * Request::SetDraftTokens callers get the returned reason as a thrown error, and every automatic
    * in-Engine drafter (e.g. MTP's Engine::PrepareMtpStep) uses the same check to silently skip
-   * proposing drafts for this request instead. An active decoded stop-string configuration is one
-   * such reason, so a stop-enabled turn always runs the plain one-token-per-step path -- without
-   * disabling draft verification for any other request on the same Engine.
+   * proposing drafts for this request instead. An active decoded stop-string configuration is not
+   * one of these reasons: draft verification observes target-accepted tokens through the request's
+   * StopStringController in exactly the same committed order as the ordinary one-token path, so a
+   * stop-enabled turn drafts and verifies normally.
    */
   const char* DraftTokenValidationError() const noexcept;
 
@@ -242,6 +243,15 @@ struct Request : std::enable_shared_from_this<Request>,
   size_t AcceptedDraftTokenCount() const noexcept { return accepted_draft_count_; }
 
   /**
+   * @brief Proposed draft positions logically resolved before this step's terminal boundary.
+   *
+   * This is the confirmed prefix plus, when applicable, one non-accepted proposal that ended
+   * verification through rejection or EOS. It never counts a trailing replacement/bonus token,
+   * which is not one of the proposed drafts. Always >= AcceptedDraftTokenCount().
+   */
+  size_t EvaluatedDraftTokenCount() const noexcept { return evaluated_draft_count_; }
+
+  /**
    * @brief Sequence length excluding any drafts staged by the step in flight.
    */
   int64_t CommittedSequenceLength() const;
@@ -254,7 +264,34 @@ struct Request : std::enable_shared_from_this<Request>,
   }
   bool IsStopToken(int32_t token) const;
   void RewindDraftsForTransaction(size_t accepted_count);
-  void RecordSampledDraftAcceptance(size_t accepted_count);
+  // Incrementally records one more sampled-path token that is not this round's finishing stage.
+  // Called once per stage, strictly after that stage's StageGenerationForTransaction() call, for
+  // every stage except the one that turns out to end the round (a stop match, the turn/context
+  // limit, or the request's natural last stage) -- so accepted_draft_count_ always reflects prior
+  // stages only, and the following stage's token_appended check (and any stop-string observation
+  // nested in it) sees exactly one newly appended token, regardless of which stage that turns out
+  // to be. Every stage recorded here is both accepted and evaluated (a non-finishing stage is
+  // always a genuinely confirmed draft), so this advances accepted_draft_count_ and
+  // evaluated_draft_count_ together. The finishing stage itself is never passed here, whether it is
+  // a trailing replacement/bonus token (not one of the proposed drafts) or, when the turn/context
+  // limit or a stop match lands exactly on the last proposed draft with no room left for a
+  // replacement/bonus token, a genuinely confirmed draft -- see PromoteFinalStageAsAcceptedDraft
+  // for that case.
+  void AppendAcceptedSampledToken(int32_t token);
+  // Called instead of AppendAcceptedSampledToken when the stage that turns out to end this round
+  // (a stop-string match, the turn/context limit, or ordinary exhaustion of the proposed drafts) is
+  // itself a genuinely target-confirmed draft rather than a trailing replacement/bonus token: folds
+  // it into accepted_draft_count_/evaluated_draft_count_/tokens_host_ exactly like an earlier
+  // accepted stage would, and suppresses CommitStep()'s own token_appended append of the same token
+  // so it is recorded exactly once. Never called for a trailing replacement/bonus token, which
+  // stays excluded from both counts exactly as it always has been.
+  void PromoteFinalStageAsAcceptedDraft(RequestStepResult& result);
+  // Called instead when the finishing stage is a proposed draft position that was logically
+  // resolved but not accepted, either because it was rejected (and this stage contains its
+  // replacement) or because it is EOS and ends without appending. A trailing bonus token past the
+  // proposed range is not a proposal and must not call this. Advances only evaluated_draft_count_;
+  // any appended replacement is committed normally through the ordinary token_appended path.
+  void MarkFinalStageAsEvaluatedNonAcceptedDraft() noexcept { ++evaluated_draft_count_; }
 
   void ValidateEngineCompatibility() const;
   void SaveStateForTransaction();
@@ -456,7 +493,34 @@ struct Request : std::enable_shared_from_this<Request>,
   std::vector<int32_t> draft_tokens_;
   size_t staged_draft_count_{};
   size_t accepted_draft_count_{};
+  // Proposed draft positions whose target acceptance verification has actually examined this
+  // round, independent of accept/reject outcome and always >= accepted_draft_count_. Reset and
+  // advanced at exactly the same transaction boundaries as accepted_draft_count_ (see the reset
+  // sites for that field); read by Engine::RecordSpeculativeCommit before CommitStep() resets it,
+  // the same way accepted_draft_count_ is. See EvaluatedDraftTokenCount()'s doc comment above for
+  // the exact semantics, and AppendAcceptedSampledToken/PromoteFinalStageAsAcceptedDraft/
+  // MarkFinalStageAsEvaluatedNonAcceptedDraft/CommitAcceptedDraftsForTransaction for how each path
+  // advances it.
+  size_t evaluated_draft_count_{};
   bool draft_verification_completed_generation_{};
+  // Set by CommitAcceptedDraftsForTransaction() when a stop-string match ends greedy draft
+  // verification early, giving StopString precedence over the turn/context limit for the same
+  // completing token. -1 when verification completed generation for any other reason (or has not
+  // completed yet). The sampled/batched path never sets this: it observes stop matches through
+  // the same StageGenerationForTransaction()/StageGeneration() path the ordinary one-token step
+  // uses, one stage at a time, so it needs no separate bookkeeping here.
+  //
+  // StageDraftCompletionForTransaction() only ever reads this field (and accepted_draft_count_,
+  // and Search's own state) to compute its result; it never resets or otherwise mutates it. Only
+  // CommitStep()/RestoreStateForTransaction()/QueueStateRestoreForTransaction()/
+  // DiscardStagedDrafts()/AppendDraftsForTransaction() reset it, at their own well-defined
+  // transaction boundaries -- never in response to StageDraftCompletionForTransaction() being
+  // called. This is deliberate: ScheduledRequests::GenerateNextTokensForTransaction() can call
+  // StageDraftCompletionForTransaction() for the same request twice in one step when the
+  // transaction also uses the batched sampler (once from the batched-sampling setup loop, once
+  // unconditionally from the final per-request loop), and both calls must produce the exact same
+  // result.
+  int32_t draft_verification_stop_match_index_{-1};
   std::shared_ptr<GeneratorParams> params_;
   std::mt19937 rng_;
   std::mt19937 transaction_rng_;
