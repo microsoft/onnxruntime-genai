@@ -863,17 +863,14 @@ that staged an observed token this step must independently recreate its `Tokeniz
 replay its full current-turn token history, so one retryable abort's recovery cost for the
 stop-string component alone is `O(active stop-enabled requests in the batch x each request's
 generated current-turn token count)` -- linear in the number of such requests, and, per request,
-linear in how deep into the turn it already is (see `stop_string_microbench`'s
-`controller_rollback_replay` batch-size x committed-token-depth measurements in
-`benchmark/engine/README.md` for the per-request, per-token constant this bound is measured against
-in isolation). This is a genuine, not merely theoretical, cost: a Request many thousands of tokens
-into a long turn pays a proportionally larger replay on every retryable abort that touches it, and a
-batch with several such requests pays that cost once per request, every time. No batching or
-amortization across requests exists for this replay today. Rollout qualification for stop strings at
-scale should budget for this bound explicitly -- e.g. by bounding how many stop-enabled requests with
-how much current-turn history may be concurrently scheduled, or by monitoring observed abort
-frequency alongside typical current-turn depth -- rather than assuming replay cost is negligible
-purely because a single request's replay is fast in isolation.
+linear in how deep into the turn it already is. This follows from the required per-request replay;
+this repository does not include a replay benchmark or publish a measured per-token constant. A
+Request many thousands of tokens into a long turn pays a proportionally larger replay on every
+retryable abort that touches it, and a batch with several such requests pays that cost once per
+request, every time. No batching or amortization across requests exists for this replay today.
+Rollout qualification for stop strings at scale should measure this cost with representative
+tokenizers and turn depths, and monitor observed abort frequency alongside typical current-turn
+depth rather than assuming replay cost is negligible.
 
 Stop strings require an Engine configured for dynamic batching. Static batching completes generation
 through `ScheduledRequests::GenerateNextTokens`, a non-transactional path that cannot stage, roll

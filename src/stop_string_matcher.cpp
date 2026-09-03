@@ -101,10 +101,10 @@ std::optional<StopStringMatch> StopStringMatcher::Consume(std::string_view bytes
     return std::nullopt;
   }
 
-  // Every byte already in pending_ already advanced every automaton in a previous call, so only the
-  // newly appended bytes are fed through the automatons here; pending_ itself is just kept in sync
-  // to serve PendingOutput()/Flush() and to compute absolute offsets below.
-  const size_t previously_pending = pending_.size();
+  // Every live byte already in pending_ advanced every automaton in a previous call, so only the
+  // newly appended bytes are fed through the automatons here. The live suffix is kept to serve
+  // PendingOutput()/Flush() and to compute absolute offsets below.
+  const size_t previously_pending = pending_.size() - pending_begin_;
   pending_.append(bytes);
 
   for (size_t k = 0; k < bytes.size(); ++k) {
@@ -129,8 +129,9 @@ std::optional<StopStringMatch> StopStringMatcher::Consume(std::string_view bytes
     if (best_length != 0) {
       const uint64_t end = pending_start_offset_ + previously_pending + k + 1;
       match_ = StopStringMatch{best_index, end - best_length, end};
-      safe_.append(pending_, 0, static_cast<size_t>(match_->start_offset - pending_start_offset_));
+      safe_.append(pending_, pending_begin_, static_cast<size_t>(match_->start_offset - pending_start_offset_));
       pending_.clear();
+      pending_begin_ = 0;
       pending_start_offset_ = match_->end_offset;
       return match_;
     }
@@ -141,10 +142,22 @@ std::optional<StopStringMatch> StopStringMatcher::Consume(std::string_view bytes
   size_t longest_active_prefix = 0;
   for (size_t prefix_length : current_prefix_lengths_)
     longest_active_prefix = std::max(longest_active_prefix, prefix_length);
-  const size_t release = pending_.size() - longest_active_prefix;
-  safe_.append(pending_, 0, release);
-  pending_.erase(0, release);
+  const size_t release = pending_.size() - pending_begin_ - longest_active_prefix;
+  safe_.append(pending_, pending_begin_, release);
+  pending_begin_ += release;
   pending_start_offset_ += release;
+
+  // Compact only after the discarded prefix is at least as large as the live suffix. This bounds
+  // stale backing storage while amortizing the cost of moving a long near-match suffix.
+  const size_t live_pending = pending_.size() - pending_begin_;
+  if (pending_begin_ >= live_pending) {
+    if (live_pending == 0) {
+      pending_.clear();
+    } else {
+      pending_.erase(0, pending_begin_);
+    }
+    pending_begin_ = 0;
+  }
   return std::nullopt;
 }
 
@@ -156,9 +169,10 @@ std::string StopStringMatcher::TakeSafeOutput() {
 
 std::string StopStringMatcher::Flush() {
   std::string output = TakeSafeOutput();
-  output.append(pending_);
-  pending_start_offset_ += pending_.size();
+  output.append(pending_, pending_begin_, pending_.size() - pending_begin_);
+  pending_start_offset_ += pending_.size() - pending_begin_;
   pending_.clear();
+  pending_begin_ = 0;
   flushed_ = true;
   return output;
 }
@@ -166,6 +180,7 @@ std::string StopStringMatcher::Flush() {
 void StopStringMatcher::Reset() {
   safe_.clear();
   pending_.clear();
+  pending_begin_ = 0;
   pending_start_offset_ = 0;
   consumed_bytes_ = 0;
   match_.reset();

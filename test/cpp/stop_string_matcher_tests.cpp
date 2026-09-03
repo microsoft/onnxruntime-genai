@@ -462,6 +462,43 @@ TEST(StopStringMatcherTest, LongStopStringMatchesAcrossChunks) {
   EXPECT_EQ(matcher.Flush(), "start");
 }
 
+TEST(StopStringMatcherTest, MaxLengthNearMatchWithOneByteChunksPreservesPendingSuffixAndOffsets) {
+  std::string stop;
+  stop.reserve(Generators::kMaxStopStringTotalBytes);
+  for (size_t i = 0; i < (Generators::kMaxStopStringTotalBytes - 2) / 2; ++i)
+    stop += "ab";
+  stop += "ac";
+  ASSERT_EQ(stop.size(), Generators::kMaxStopStringTotalBytes);
+
+  StopStringMatcher matcher{std::vector<std::string>{stop}};
+  std::string near_match;
+  near_match.reserve(stop.size() * 3);
+  while (near_match.size() < stop.size() * 3)
+    near_match += "ab";
+
+  // After the first pattern-length bytes, every additional "ab" releases two bytes while
+  // retaining an almost pattern-length suffix. The remaining two pattern lengths therefore force
+  // repeated compaction. Distinct alternating bytes make any wrong live-suffix offset observable.
+  std::string safe_output;
+  for (size_t i = 0; i < near_match.size(); ++i) {
+    ASSERT_FALSE(matcher.Consume(std::string_view{near_match}.substr(i, 1)).has_value()) << "byte " << i;
+    safe_output += matcher.TakeSafeOutput();
+  }
+
+  EXPECT_EQ(safe_output + std::string{matcher.PendingOutput()}, near_match);
+
+  // Break the near-match, then complete a fresh match in the same chunk. This makes the match path
+  // copy a nonempty span beginning at the logical pending-buffer head.
+  const std::string final_chunk = "z" + stop + "trailing";
+  const auto match = matcher.Consume(final_chunk);
+  ASSERT_TRUE(match.has_value());
+  safe_output += matcher.TakeSafeOutput();
+  EXPECT_EQ(match->start_offset, near_match.size() + 1);
+  EXPECT_EQ(match->end_offset, near_match.size() + 1 + stop.size());
+  EXPECT_EQ(safe_output, near_match + "z");
+  EXPECT_TRUE(matcher.PendingOutput().empty());
+}
+
 TEST(StopStringMatcherTest, IsValidUtf8AcceptsWellFormedSequences) {
   EXPECT_TRUE(IsValidUtf8(""));
   EXPECT_TRUE(IsValidUtf8("ascii"));

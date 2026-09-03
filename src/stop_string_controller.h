@@ -18,9 +18,9 @@ struct TokenizerStream;
 // Engine-internal, token-aware owner around one tokenizer stream and one StopStringMatcher.
 //
 // StopStringMatcher works on decoded bytes and knows nothing about tokens. This controller is the
-// piece that turns committed generated token IDs into those bytes: it decodes each token exactly
-// once through one TokenizerStream and feeds the resulting chunk to the matcher, so cost is linear
-// in the generated length.
+// piece that turns generated token IDs into those bytes. On the forward path, it decodes each newly
+// observed token once through one TokenizerStream and feeds the resulting chunk to the matcher.
+// Rollback recreates the stream and replays retained tokens as described below.
 //
 // The Engine never publishes decoded text, only raw tokens, so ObserveToken() immediately drains
 // and discards the matcher's safe-output buffer after every call. Without this, StopStringMatcher's
@@ -38,9 +38,10 @@ struct TokenizerStream;
 // but tokens must be observed in generation order and observation stops as soon as a match is
 // reported.
 //
-// Only tokens the caller actually committed for the current turn may be observed, in generation
-// order. Prompt and continuation tokens are never observed, so a stop string can only match text
-// generated in this turn.
+// Only newly generated tokens staged for the current turn may be observed, in generation order.
+// An observation becomes durable only when its Request transaction commits; rollback removes staged
+// observations. Prompt and continuation tokens are never observed, so a stop string can only match
+// text generated in this turn.
 class StopStringController {
  public:
   // `tokenizer` is retained for the controller's lifetime. `stop_strings` is validated by

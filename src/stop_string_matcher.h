@@ -45,8 +45,10 @@ struct StopStringMatch {
 //     TakeSafeOutput() and publishable immediately;
 //   * pending output - the withheld suffix, visible through PendingOutput(), which becomes safe
 //     only when later bytes rule out a match or the stream ends (Flush()).
-// Pending storage is bounded by (longest stop string - 1) bytes between calls, and by that plus
-// the current chunk during a call.
+// The live pending suffix is bounded by (longest stop string - 1) bytes between calls. Its backing
+// string may also contain a smaller already-released prefix, so its logical size stays below twice
+// the longest stop-string length between calls, plus the current chunk during a call. The released
+// prefix is compacted amortizedly rather than shifted on every call.
 //
 // When several stop strings could match, the matcher picks deterministically: earliest ending byte,
 // then earliest starting byte (the longest match ending there), then the lowest caller index. With
@@ -85,7 +87,9 @@ class StopStringMatcher {
 
   // The withheld suffix that is still a possible prefix of a stop string. Invalidated by Consume(),
   // Flush(), and Reset().
-  std::string_view PendingOutput() const { return pending_; }
+  std::string_view PendingOutput() const {
+    return std::string_view{pending_}.substr(pending_begin_);
+  }
 
   // Ends the stream: no more bytes will be consumed, so the withheld suffix can no longer become
   // part of a match. Returns the safe output followed by that suffix and empties both. After a
@@ -121,9 +125,12 @@ class StopStringMatcher {
   std::vector<size_t> current_prefix_lengths_;
   size_t longest_stop_string_{};
 
-  std::string safe_;                 // Bytes cleared for publication.
-  std::string pending_;              // Withheld possible-prefix suffix.
-  uint64_t pending_start_offset_{};  // Absolute offset of pending_[0].
+  std::string safe_;  // Bytes cleared for publication.
+  // Backing storage for the withheld suffix. Bytes before pending_begin_ have already been
+  // released; they are compacted only when their space is at least as large as the live suffix.
+  std::string pending_;
+  size_t pending_begin_{};
+  uint64_t pending_start_offset_{};  // Absolute offset of pending_[pending_begin_].
   uint64_t consumed_bytes_{};
   std::optional<StopStringMatch> match_;
   // Set by Flush(), cleared by Reset(). Consume() throws if this is set: the stream has already

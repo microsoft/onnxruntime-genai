@@ -323,7 +323,7 @@ TEST_F(StopStringEngineTest, ContinuationInputTokensAreNeverSeededIntoTheNextTur
 
 TEST_F(StopStringEngineTest, PreviousTurnsStopControllerStateNeverLeaksIntoTheNextTurn) {
   // Turn 1 generates "ST" (token 5) and ends on the turn limit, leaving that turn's controller
-  // mid-pattern (one byte short of "STOP") if it were ever kept alive. Turn 2's continuation input
+  // mid-pattern (two bytes short of "STOP") if it were ever kept alive. Turn 2's continuation input
   // is token 3 ("B"), unrelated to "ST", so this scenario cannot be explained by continuation-input
   // seeding (see the previous test for that, isolated separately) -- only by turn 1's controller
   // automaton state surviving into turn 2. If it did, generating "OP" alone in turn 2 would
