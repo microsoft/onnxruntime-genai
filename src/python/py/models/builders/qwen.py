@@ -114,8 +114,8 @@ class VideoChatFlashQwenModel(QwenModel):
 
 
 class Qwen35TextModel(Model):
-    def validate_gated_delta_net_options(self, use_paged_attention, linear_attn_op, state_window, ep):
-        uses_gated_delta_net = use_paged_attention or linear_attn_op == "gated_delta_net"
+    def validate_gated_delta_net_options(self, linear_attn_op, state_window, ep):
+        uses_gated_delta_net = linear_attn_op == "gated_delta_net"
         if uses_gated_delta_net and ep != "cuda":
             raise ValueError("GatedDeltaNet exports require the CUDA execution provider")
         if uses_gated_delta_net and state_window:
@@ -151,7 +151,6 @@ class Qwen35TextModel(Model):
             return
 
         self.validate_gated_delta_net_options(
-            self.use_paged_attention,
             self.linear_attn_op,
             self.context_length_attrs["state_window"],
             self.ep,
