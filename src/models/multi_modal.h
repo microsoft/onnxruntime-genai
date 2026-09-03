@@ -125,28 +125,46 @@ inline void ValidateImageGridThwLayoutAndCount(const std::vector<int64_t>& shape
   }
 }
 
-inline int64_t GetQwenPaddedImageStride(int64_t total_patches,
-                                        int64_t total_grid_tokens,
-                                        int64_t max_grid_tokens,
-                                        int64_t num_images) {
-  if (num_images > 0 && total_patches != total_grid_tokens && total_patches % num_images == 0) {
-    const int64_t candidate_stride = total_patches / num_images;
-    if (candidate_stride >= max_grid_tokens) {
-      return candidate_stride;
-    }
-  }
-  return 0;
-}
+struct QwenPatchLayout {
+  int64_t padded_image_stride{};
+  int64_t temporal_multiplier{};
 
-inline void ValidateQwenPatchLayout(int64_t total_patches,
-                                    int64_t total_grid_tokens,
-                                    int64_t padded_image_stride,
-                                    bool temporal_padded) {
-  if (total_patches != total_grid_tokens && padded_image_stride == 0 && !temporal_padded) {
-    throw std::runtime_error("pixel_values patch count (" + std::to_string(total_patches) +
-                             ") does not match image_grid_thw patch count (" +
-                             std::to_string(total_grid_tokens) + ")");
+  int64_t ImagePatchCount(int64_t grid_tokens, int64_t height, int64_t width) const {
+    return temporal_multiplier > 0 ? temporal_multiplier * height * width : grid_tokens;
   }
+
+  int64_t ImagePatchOffset(int64_t image_index, int64_t packed_offset) const {
+    return padded_image_stride > 0 ? image_index * padded_image_stride : packed_offset;
+  }
+};
+
+inline QwenPatchLayout ResolveQwenPatchLayout(int64_t total_patches,
+                                              int64_t total_grid_tokens,
+                                              int64_t total_hw,
+                                              int64_t max_grid_tokens,
+                                              int64_t num_images) {
+  if (total_patches == total_grid_tokens) {
+    return {};
+  }
+
+  const bool temporal_padded = total_patches > 0 && total_hw > 0 && total_patches % total_hw == 0;
+  const int64_t candidate_stride =
+      num_images > 0 && total_patches % num_images == 0 ? total_patches / num_images : 0;
+  const bool stride_padded = candidate_stride > 0 && candidate_stride >= max_grid_tokens;
+
+  if (stride_padded && temporal_padded) {
+    throw std::runtime_error("pixel_values patch layout is ambiguous between per-image stride padding and temporal padding");
+  }
+  if (stride_padded) {
+    return {.padded_image_stride = candidate_stride};
+  }
+  if (temporal_padded) {
+    return {.temporal_multiplier = total_patches / total_hw};
+  }
+
+  throw std::runtime_error("pixel_values patch count (" + std::to_string(total_patches) +
+                           ") does not match image_grid_thw patch count (" +
+                           std::to_string(total_grid_tokens) + ")");
 }
 
 // Factory: pick the right VisionState subclass based on model type.

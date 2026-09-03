@@ -294,13 +294,8 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
     total_hw += grid_data[img * 3 + 1] * grid_data[img * 3 + 2];
     max_grid_tokens = std::max(max_grid_tokens, grid_tokens);
   }
-  int64_t padded_image_stride =
-      GetQwenPaddedImageStride(total_patches, total_grid_tokens, max_grid_tokens, num_images_);
-  bool temporal_padded = (padded_image_stride == 0 && total_patches != total_grid_tokens &&
-                          total_hw > 0 && total_patches % total_hw == 0);
-  int64_t hw_multiplier = temporal_padded ? (total_patches / total_hw) : 0;
-
-  ValidateQwenPatchLayout(total_patches, total_grid_tokens, padded_image_stride, temporal_padded);
+  const QwenPatchLayout patch_layout =
+      ResolveQwenPatchLayout(total_patches, total_grid_tokens, total_hw, max_grid_tokens, num_images_);
 
   // Validate that the pre-allocated output buffer is large enough for all images
   int64_t expected_total_feats = total_grid_tokens / merge_sq;
@@ -316,9 +311,9 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
     int64_t h = grid_data[img * 3 + 1];
     int64_t w = grid_data[img * 3 + 2];
     int64_t grid_tokens = t * h * w;
-    int64_t num_patches = temporal_padded ? (hw_multiplier * h * w) : grid_tokens;
+    int64_t num_patches = patch_layout.ImagePatchCount(grid_tokens, h, w);
     int64_t num_feats = grid_tokens / merge_sq;
-    int64_t image_patch_offset = padded_image_stride > 0 ? img * padded_image_stride : patch_offset;
+    int64_t image_patch_offset = patch_layout.ImagePatchOffset(img, patch_offset);
 
     if (grid_tokens % merge_sq != 0)
       throw std::runtime_error("grid tokens (" + std::to_string(grid_tokens) +
