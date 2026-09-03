@@ -1085,6 +1085,21 @@ class Model:
         # where rtn* = rtn, rtn_last
         #       k_quant* = k_quant, k_quant_last, k_quant_linear, k_quant_mixed
 
+        # Pre-quantized lm_head (e.g. quant_auto): make_matmul_nbits registers weight under
+        # the MatMulNBits naming scheme rather than the to_nbits naming scheme. Return those
+        # names directly so make_embedding's GatherBlockQuantized references the right initializers.
+        # self.weights is the loaded model object (set in make_model before make_embedding runs).
+        wlm = getattr(getattr(self, "weights", None), "lm_head", None)
+        if wlm is not None and getattr(wlm, "qweight", None) is not None:
+            bits = wlm.bits
+            has_zeros = getattr(wlm, "qzeros", None) is not None
+            return (
+                bits,
+                "lm_head.MatMulNBits.qweight",
+                "lm_head.MatMulNBits.scales",
+                "lm_head.MatMulNBits.qzeros" if has_zeros else "",
+            )
+
         base_method = self.quantization_algo
         placement = self.matmul_mixed_precision
 
