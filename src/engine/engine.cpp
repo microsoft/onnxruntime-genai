@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "engine.h"
+#include "../logging.h"
 #include "../search.h"
 
 #include <limits>
@@ -13,6 +14,8 @@ static_assert(kMaxDraftTokensPerStep < kSpeculativeAcceptanceLengthBins);
 namespace {
 
 constexpr size_t kFatalEventOverhead = 2;
+constexpr size_t kMtpFailureDisableThreshold = 3;
+constexpr size_t kDflash2FailureDisableThreshold = 3;
 
 struct MtpRollbackError : std::runtime_error {
   using std::runtime_error::runtime_error;
@@ -164,6 +167,7 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
       mtp_model_{std::move(dependencies.mtp_model)},
       mtp_cache_manager_{std::move(dependencies.mtp_cache_manager)},
       mtp_model_executor_{std::move(dependencies.mtp_model_executor)},
+      dflash2_drafter_{std::move(dependencies.dflash2_drafter)},
       make_step_error_{dependencies.make_step_error
                            ? dependencies.make_step_error
                            : MakeEngineStepError} {
@@ -207,6 +211,37 @@ Engine::~Engine() {
   }
 }
 
+void ValidateMtpModelCompatibility(const Config& config,
+                                   const ModelStateMetadata& target_metadata,
+                                   const ModelStateMetadata& head_metadata) {
+  const auto& mtp = config.model.mtp;
+  if (mtp.main_hidden_states.empty() ||
+      !target_metadata.HasOutput(mtp.main_hidden_states)) {
+    throw std::runtime_error(
+        "model.mtp.main_hidden_states must name a main-model output.");
+  }
+  if (mtp.inputs.hidden_states.empty() ||
+      !head_metadata.HasInput(mtp.inputs.hidden_states)) {
+    throw std::runtime_error(
+        "model.mtp.inputs.hidden_states must name an MTP-head input.");
+  }
+
+  const auto target_shape =
+      target_metadata.GetOutputShape(mtp.main_hidden_states);
+  const auto head_shape = head_metadata.GetInputShape(mtp.inputs.hidden_states);
+  const int64_t hidden_size = config.model.decoder.hidden_size;
+  if (target_shape.size() != 2 || target_shape[1] != hidden_size ||
+      head_shape.size() != 2 || head_shape[1] != hidden_size) {
+    throw std::runtime_error(
+        "MTP requires matching 2-D hidden-state tensors with the configured static width.");
+  }
+  if (target_metadata.GetOutputDataType(mtp.main_hidden_states) !=
+      head_metadata.GetInputDataType(mtp.inputs.hidden_states)) {
+    throw std::runtime_error(
+        "MTP requires matching main-output and head-input hidden-state tensor types.");
+  }
+}
+
 EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
   std::shared_ptr<DecoderOnly_Model> mtp_model;
   size_t mtp_bytes_per_block = 0;
@@ -214,11 +249,51 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
     if (!model->config_->engine.dynamic_batching) {
       throw std::runtime_error("An Engine-hosted MTP head requires dynamic batching.");
     }
+    auto& target_hidden_states =
+        model->config_->model.decoder.outputs.hidden_states;
+    target_hidden_states = model->config_->model.mtp.main_hidden_states;
     mtp_model = std::make_shared<DecoderOnly_Model>(
         CreateMtpDecoderConfig(*model->config_), GetOrtEnv());
+    ValidateMtpModelCompatibility(
+        *model->config_, model->session_info_, mtp_model->session_info_);
     mtp_bytes_per_block = PagedKeyValueCacheBytesPerBlock(mtp_model);
     // The head consumes the target decoder's packed hidden states, so the target must emit them.
     model->config_->engine.hidden_states_output_required = true;
+  }
+
+  std::unique_ptr<Dflash2Drafter> dflash2_drafter;
+  if (!model->config_->model.dflash2.filename.empty()) {
+    if (!model->config_->engine.dynamic_batching) {
+      throw std::runtime_error("An Engine-hosted DFlash 2 drafter requires dynamic batching.");
+    }
+    auto& dflash2 = model->config_->model.dflash2;
+    auto& target_aux_output = model->config_->model.decoder.outputs.aux_hidden_states;
+    if (dflash2.main_aux_hidden_states.empty()) {
+      dflash2.main_aux_hidden_states = target_aux_output;
+    }
+    if (dflash2.main_aux_hidden_states.empty()) {
+      throw std::runtime_error(
+          "model.dflash2.main_aux_hidden_states must name a main-model output.");
+    }
+    target_aux_output = dflash2.main_aux_hidden_states;
+    if (!model->session_info_.HasOutput(target_aux_output)) {
+      throw std::runtime_error(
+          "model.dflash2.main_aux_hidden_states must name a main-model output.");
+    }
+
+    const auto& batching = *model->config_->engine.dynamic_batching;
+    const size_t paged_block_size = static_cast<size_t>(batching.block_size);
+    auto dflash2_model = std::make_shared<Dflash2Model>(
+        CreateDflash2Config(*model->config_), GetOrtEnv());
+    ValidateDflash2ModelCompatibility(
+        *model->config_, model->session_info_, dflash2_model->session_info_);
+    model->config_->engine.aux_hidden_states_output_required = true;
+    // Built before the main pool so the pool's free-memory measurement already excludes it. The
+    // drafter is windowed, so its footprint depends on the batch size, not the context length.
+    dflash2_drafter = std::make_unique<Dflash2Drafter>(
+        dflash2_model, paged_block_size,
+        Dflash2Drafter::PoolBlocks(*model->config_, paged_block_size,
+                                   static_cast<size_t>(batching.max_batch_size)));
   }
 
   std::shared_ptr<CacheManager> cache_manager =
@@ -240,14 +315,89 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
 
   return EngineDependencies{
       std::move(cache_manager), std::move(scheduler), std::move(model_executor),
-      std::move(mtp_model), std::move(mtp_cache_manager), std::move(mtp_model_executor)};
+      std::move(mtp_model), std::move(mtp_cache_manager), std::move(mtp_model_executor),
+      std::move(dflash2_drafter)};
+}
+
+void Engine::PrepareDflash2Feeds(const StepPlan& plan,
+                                 const std::vector<RequestStepResult>& results) {
+  const size_t max_drafts = std::min(MaxDraftTokensPerStep(), dflash2_drafter_->NumDraftTokens());
+  dflash2_feeds_.clear();
+  dflash2_feeds_.reserve(plan.requests.size());
+  dflash2_draft_widths_.clear();
+  dflash2_draft_widths_.reserve(plan.requests.size());
+  for (size_t i = 0; i < plan.requests.size(); ++i) {
+    const auto& entry = plan.requests[i];
+    const size_t accepted = entry.request->AcceptedDraftTokenCount();
+    if (accepted > entry.draft_token_count) {
+      throw std::logic_error("DFlash 2 observed more accepted drafts than the target planned.");
+    }
+    // Rejected draft rows carry hidden states for tokens that were never committed; drop them.
+    const size_t valid_rows =
+        entry.unprocessed_token_count - (entry.draft_token_count - accepted);
+    // The step's rows start at the processed cursor, which is also what the decoder passes as
+    // past_sequence_lengths. Deriving it from sequence_length_before instead would be wrong for a
+    // prefill chunk, whose unprocessed count is the chunk rather than the whole pending suffix.
+    const size_t first_position = static_cast<size_t>(entry.request->ProcessedSequenceLength());
+
+    Dflash2Drafter::Feed feed;
+    feed.request = entry.request.get();
+    feed.aux_row_begin = entry.packed_token_offset;
+    feed.aux_row_count = valid_rows;
+    feed.first_position = first_position;
+
+    const auto& search = entry.request->SearchOptions();
+    const bool greedy = !search.do_sample || search.top_k == 1 || search.temperature == 0;
+    // The committed length this step ends at: the accepted prefix plus the token just sampled.
+    const int64_t length_after_step = static_cast<int64_t>(first_position + valid_rows) +
+                                      (results[i].token_appended ? 1 : 0);
+    const size_t sequence_limit =
+        std::min(static_cast<size_t>(search.max_length), entry.request->MaxTotalTokens());
+    const size_t remaining_turn_tokens = entry.request->RemainingTurnTokenBudget();
+    const size_t remaining_turn_tokens_after_step =
+        results[i].visible_token_count < remaining_turn_tokens
+            ? remaining_turn_tokens - results[i].visible_token_count
+            : 0;
+    const size_t width = Dflash2DraftWidth(
+        max_drafts, static_cast<size_t>(entry.request->SpeculativeOptions().max_draft_tokens),
+        static_cast<size_t>(length_after_step), sequence_limit,
+        remaining_turn_tokens_after_step);
+    feed.wants_drafts = width > 0 && results[i].token_appended && !results[i].done &&
+                        greedy && !entry.request->DraftTokenValidationError();
+    feed.anchor_token = results[i].token;
+    dflash2_feeds_.push_back(feed);
+    dflash2_draft_widths_.push_back(width);
+  }
+}
+
+void Engine::PublishDflash2Drafts(ScheduledRequests& scheduled_requests) {
+  if (dflash2_feeds_.empty()) {
+    return;
+  }
+  Tensor* aux_hidden_states = scheduled_requests.AuxHiddenStates();
+  if (!aux_hidden_states) {
+    throw std::logic_error("The main decoder did not expose auxiliary hidden states for DFlash 2.");
+  }
+
+  dflash2_drafter_->Propose(*aux_hidden_states, dflash2_feeds_, dflash2_drafts_);
+  ++speculative_stats_.draft_forward_passes;
+  for (size_t i = 0; i < dflash2_feeds_.size(); ++i) {
+    auto& drafts = dflash2_drafts_[i];
+    if (drafts.empty()) {
+      continue;
+    }
+    // The drafter always emits its full block; a request with a narrower budget takes the prefix
+    // of the same greedy path.
+    drafts.resize(std::min(drafts.size(), dflash2_draft_widths_[i]));
+    dflash2_feeds_[i].request->SetDraftTokens(drafts);
+  }
 }
 
 std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
     const StepPlan& target_plan,
     const std::vector<RequestStepResult>& target_results,
     ScheduledRequests& target_requests) {
-  if (!mtp_model_ || MaxDraftTokensPerStep() == 0) {
+  if (!mtp_model_ || mtp_disabled_ || MaxDraftTokensPerStep() == 0) {
     return nullptr;
   }
   if (target_results.size() != target_plan.requests.size()) {
@@ -922,11 +1072,12 @@ bool Engine::CancelRequest(const std::shared_ptr<Request>& request, uint64_t tur
     pending_events_.reserve(pending_events_.size() + 1);
   }
 
+  // The canceled turn's suffix is gone, so the shadow that mirrored it must not survive into the
+  // next turn. Release it before changing request state so a cleanup failure leaves cancellation
+  // retryable.
+  CloseMtpRequest(request);
   const auto counters =
       request->CompleteCancelFromEngine(*this, turn_id);
-  // The canceled turn's suffix is gone, so the shadow that mirrored it must not survive into the
-  // next turn.
-  CloseMtpRequest(request);
   EngineEvent terminal;
   terminal.request = request;
   terminal.turn_id = turn_id;
@@ -960,6 +1111,9 @@ void Engine::CloseRequest(const std::shared_ptr<Request>& request) {
       cache_manager_->IsResident(request);
 
   CloseMtpRequest(request);
+  if (dflash2_drafter_) {
+    dflash2_drafter_->Release(request.get());
+  }
 
   pending_events_.erase(
       pending_events_.begin(),
@@ -1010,6 +1164,12 @@ void Engine::DetachRequestForTeardown(
   }
 
   scheduler_->DetachRequestForTeardown(request);
+  if (dflash2_drafter_) {
+    try {
+      dflash2_drafter_->Release(request.get());
+    } catch (...) {
+    }
+  }
   if (const auto mtp_it = mtp_requests_.find(request.get());
       mtp_it != mtp_requests_.end()) {
     try {
@@ -1510,13 +1670,31 @@ void Engine::RunDynamic() {
       // commit without drafts. Contract violations and failed MTP rollback stay fatal below.
       try {
         mtp_step = PrepareMtpStep(step_plan_, step_results_, scheduled_requests);
+        mtp_consecutive_failures_ = 0;
       } catch (const MtpRollbackError&) {
         throw;
       } catch (const std::logic_error&) {
         throw;
       } catch (...) {
+        const auto mtp_error = std::current_exception();
         mtp_step.reset();
         ++speculative_stats_.standard_fallback_steps;
+        ++speculative_stats_.mtp_failures;
+        ++mtp_consecutive_failures_;
+        const bool disable_mtp =
+            mtp_consecutive_failures_ >= kMtpFailureDisableThreshold;
+        mtp_disabled_ = disable_mtp;
+        if (mtp_consecutive_failures_ == 1 || disable_mtp) {
+          try {
+            Log("warning", AddExceptionCause(
+                               disable_mtp
+                                   ? "Disabling MTP after repeated proposal failures."
+                                   : "MTP proposal failed; using target-only decoding for this step.",
+                               mtp_error));
+          } catch (...) {
+            // Diagnostics must not turn an optional drafter failure into a target failure.
+          }
+        }
       }
       for (size_t i = 0; i < step_plan_.requests.size(); ++i) {
         if (step_results_[i].visible_token_count != 0 ||
@@ -1572,6 +1750,11 @@ void Engine::RunDynamic() {
       if (mtp_step) {
         mtp_step->reservation->PrepareCommit();
       }
+      if (dflash2_drafter_ && !dflash2_disabled_ && MaxDraftTokensPerStep() > 0) {
+        // Reads accepted-draft counts that CommitStep clears below. Keep this fallible work on the
+        // rollback side of the target transaction's commit boundary.
+        PrepareDflash2Feeds(step_plan_, step_results_);
+      }
     } catch (...) {
       const auto preparation_error = std::current_exception();
       rollback_transaction();
@@ -1601,6 +1784,48 @@ void Engine::RunDynamic() {
       }
       if (mtp_step) {
         PublishMtpDrafts(*mtp_step);
+      }
+      if (dflash2_drafter_ && !dflash2_disabled_ && MaxDraftTokensPerStep() > 0) {
+        try {
+          PublishDflash2Drafts(scheduled_requests);
+          dflash2_consecutive_failures_ = 0;
+        } catch (...) {
+          const auto dflash2_error = std::current_exception();
+          for (const auto& feed : dflash2_feeds_) {
+            if (feed.request) {
+              feed.request->SetDraftTokens({});
+            }
+          }
+          ++speculative_stats_.standard_fallback_steps;
+          ++speculative_stats_.dflash2_failures;
+          ++dflash2_consecutive_failures_;
+          bool contract_error = false;
+          try {
+            std::rethrow_exception(dflash2_error);
+          } catch (const std::logic_error&) {
+            contract_error = true;
+          } catch (...) {
+          }
+          const bool disable_dflash2 = contract_error ||
+                                       dflash2_consecutive_failures_ >= kDflash2FailureDisableThreshold;
+          dflash2_disabled_ = disable_dflash2;
+          if (disable_dflash2) {
+            ++speculative_stats_.dflash2_disables;
+          }
+          if (dflash2_consecutive_failures_ == 1 || disable_dflash2) {
+            try {
+              Log("warning", AddExceptionCause(
+                                 contract_error
+                                     ? "Disabling DFlash 2 after a proposal contract failure."
+                                 : disable_dflash2
+                                     ? "Disabling DFlash 2 after repeated proposal failures."
+                                     : "DFlash 2 proposal failed; using target-only decoding for this step.",
+                                 dflash2_error));
+            } catch (...) {
+              // Diagnostics must not turn an optional drafter failure into a target failure.
+            }
+          }
+        }
       }
     } catch (...) {
       MarkUnhealthyAndThrow(
@@ -1701,6 +1926,9 @@ EngineEvent Engine::FailUnserviceableRequest(const void* request_id) {
   }
   scheduler_->RemoveRequest(request);
   CloseMtpRequest(request);
+  if (dflash2_drafter_) {
+    dflash2_drafter_->Release(request.get());
+  }
   request->CompleteFailedTurnFromEngine(*this);
 
   EngineEvent event;
@@ -1887,6 +2115,9 @@ SpeculativeStats Engine::GetSpeculativeStats() const {
   // would be a data race.
   ValidateOwnerThread();
   auto stats = speculative_stats_;
+  if (dflash2_drafter_) {
+    stats.dflash2_admission_misses = dflash2_drafter_->AdmissionMisses();
+  }
   if (stats.draft_tokens_evaluated != 0) {
     stats.acceptance_rate = static_cast<float>(stats.draft_tokens_accepted) /
                             static_cast<float>(stats.draft_tokens_evaluated);

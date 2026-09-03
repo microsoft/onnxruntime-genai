@@ -399,14 +399,17 @@ The dynamic Engine can verify a continuation together with a request's next deco
 can propose tokens before the next step with `Request::SetDraftTokens` (`OgaRequestSetDraftTokens`
 in C or `Request.set_draft_tokens` in Python). When `model.mtp` names an auxiliary draft head, the
 Engine also maintains an internal shadow Request and automatically proposes a chained greedy
-continuation after each committed target step.
+continuation after each committed target step. Alternatively, `model.dflash2` runs a block drafter
+over the target's packed auxiliary hidden states. A model cannot configure both automatic drafters.
 
 Query the internal `Engine::MaxDraftTokensPerStep` capability through
 `OgaEngineMaxDraftTokensPerProposal`, `OgaEngine::MaxDraftTokensPerProposal`, or
 `Engine.max_draft_tokens_per_proposal` before proposing work. Zero means that the decoder does not
 return one logits row per packed token or that its cache/state cannot commit an accepted prefix.
 The reported value is a capability limit, not a guarantee that every proposed token fits the next
-step's global token budget or current cache capacity.
+step's global token budget or current cache capacity. Automatic drafters also leave room for the
+target's correction token and cap each proposal by the Request's session limit and remaining Turn
+token budget.
 
 The request must already belong to the Engine, have completed prefill, and be ready to decode.
 Verification supports greedy target selection and random target sampling with a positive `top_k`;
@@ -451,9 +454,10 @@ one block for each pool is rejected at Engine construction.
 **Failure isolation.** The target decode is mandatory; MTP drafting is optional acceleration. A
 recoverable head failure (cache pressure, shape mismatch, binding or session error) releases only
 MTP state, and the target step still commits — without drafts for that step — and increments
-`standard_fallback_steps` in the speculative statistics. Only a contract violation, or a failure to
-roll MTP state back, marks the Engine unhealthy. A persistent head failure therefore degrades to
-ordinary decoding instead of stalling the request.
+`standard_fallback_steps` and `mtp_failures` in the speculative statistics. The first failure is
+logged, and three consecutive failures disable automatic MTP drafting for that Engine. Only a
+contract violation, or a failure to roll MTP state back, marks the Engine unhealthy. A persistent
+head failure therefore degrades to ordinary decoding without repeatedly running a broken head.
 
 **Shadow lifecycle.** The head's shadow Request mirrors only the suffix the target committed during
 the current turn. Beginning a continuation and canceling a turn both drop the shadow and release its
@@ -468,8 +472,9 @@ verify is skipped for that step and picks drafting back up on its next decode st
 decode paths. A verified drafted step draws its target tokens from the Request's own host random
 stream because acceptance is sequential, while an ordinary batched step draws from the device
 sampler state. Whether drafts are admitted depends on batch composition and cache pressure, so a
-seeded run is only bit-reproducible against another run scheduled the same way. Disable `model.mtp`
-when exact cross-scheduling reproducibility is required.
+seeded run is only bit-reproducible against another run with the same supplied drafts and scheduling
+path. Disabling `model.mtp` does not make caller-provided drafts scheduling-independent; exact
+repeatability requires replaying the same proposals and schedule.
 
 **Telemetry thread ownership.** `Engine::GetSpeculativeStats` (`OgaEngineGetSpeculativeStats`,
 `Engine.get_speculative_stats`) reads counters that `Run()` mutates without synchronization. Like
@@ -1106,6 +1111,27 @@ The cache planner buckets block-table columns to powers of two, with a minimum b
 Graph buffers are allocated once at configured limits and reshaped as static views. Stable device addresses allow ONNX Runtime to replay the captured graph.
 
 Prefill and mixed-token steps use graph id `-1`, which tells the CUDA execution provider to run eagerly.
+
+An Engine-hosted DFlash 2 drafter consumes the packed auxiliary hidden-state tensor named by
+`model.dflash2.main_aux_hidden_states`. Single-token target decode steps bind that output through
+persistent graph buffers and remain eligible for CUDA graph capture; prefill and draft-verification
+steps remain eager. Engine construction validates the output's rank, element type, and static width
+against the drafter input before allocating cache resources.
+The drafter run is synchronous because its packed inputs and outputs are owned by one proposal
+call, so `model.dflash2.run_options` cannot disable execution-provider synchronization.
+The direct drafter session also uses graph id `-1`: its variable-shaped proposal tensors are
+allocated per call and therefore cannot be captured safely. If this optional post-commit drafter
+run fails, the Engine discards any partial proposal and still publishes the already committed target
+events. A transient failure is retried on the next step; three consecutive failures disable DFlash 2
+for the Engine. `dflash2_failures` and `dflash2_disables` report those events.
+
+The drafter keeps a fixed sliding-window ring per request from that request's first decode step
+until it is closed, so its pool is sized for `max_batch_size` rings. A request that first decodes
+while every ring is taken is skipped for the rest of its life and decodes without DFlash 2 drafts;
+the drafter keeps serving the requests that already hold a ring. This makes `max_batch_size` the
+DFlash 2 service-capacity limit across both active and idle long-lived requests, not merely the
+per-step scheduler limit. `dflash2_admission_misses` reports requests denied a ring because that
+capacity was occupied.
 
 ## Backpressure and fairness
 

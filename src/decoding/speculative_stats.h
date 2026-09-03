@@ -36,6 +36,10 @@ struct SpeculativeStats {
   size_t cooldown_steps{};
   size_t cooldown_remaining{};
   size_t standard_fallback_steps{};
+  size_t mtp_failures{};
+  size_t dflash2_failures{};
+  size_t dflash2_disables{};
+  size_t dflash2_admission_misses{};
   size_t full_accept_rounds{};
   size_t partial_accept_rounds{};
   size_t zero_accept_rounds{};

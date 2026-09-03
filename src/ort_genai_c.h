@@ -1449,6 +1449,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestClose(OgaRequest* request);
  * the proposal. Random target sampling is supported for deterministic draft proposals when top_k
  * is positive. Requires an engine whose cache can roll a rejected draft back (see
  * OgaEngineMaxDraftTokensPerProposal).
+ * Seeded sampled output is reproducible only when both the proposal and scheduling path are the
+ * same, because draft admission changes which random stream performs target sampling.
  *
  * \param[in] request The request to propose drafts for.
  * \param[in] tokens One sequence holding the draft continuation, in order.

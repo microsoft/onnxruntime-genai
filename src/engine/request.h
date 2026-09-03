@@ -189,6 +189,9 @@ struct Request : std::enable_shared_from_this<Request>,
    * requests compare argmax tokens; sampled requests draw from each target row's bounded
    * top-k/top-p distribution.
    *
+   * Seeded sampled output is reproducible only when both the supplied drafts and scheduling path
+   * are the same. Draft admission changes which random stream performs target sampling.
+   *
    * The proposal applies to the current turn's next committed decode step. A rolled back step
    * leaves it pending, while canceling the turn discards it.
    */

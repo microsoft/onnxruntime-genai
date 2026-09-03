@@ -543,6 +543,8 @@ struct DecoderOutputs_Element : JSON::Element {
       v_.state_update_recurrent_capsule_names = JSON::Get<std::string_view>(value);
     } else if (name == "hidden_states") {
       v_.hidden_states = JSON::Get<std::string_view>(value);
+    } else if (name == "aux_hidden_states") {
+      v_.aux_hidden_states = JSON::Get<std::string_view>(value);
     } else if (name == "outputs") {
       v_.outputs = JSON::Get<std::string_view>(value);
     } else if (name == "lstm_hidden_state") {
@@ -1122,6 +1124,137 @@ struct Mtp_Element : JSON::Element {
   SharedInitializers_Element shared_initializers_{v_.shared_initializers};
 };
 
+struct Dflash2Inputs_Element : JSON::Element {
+  explicit Dflash2Inputs_Element(Config::Model::Dflash2::Inputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "aux_hidden_states") {
+      v_.aux_hidden_states = JSON::Get<std::string_view>(value);
+    } else if (name == "input_ids") {
+      v_.input_ids = JSON::Get<std::string_view>(value);
+    } else if (name == "q_row_map") {
+      v_.q_row_map = JSON::Get<std::string_view>(value);
+    } else if (name == "qkv_row_map") {
+      v_.qkv_row_map = JSON::Get<std::string_view>(value);
+    } else if (name == "block_row_index") {
+      v_.block_row_index = JSON::Get<std::string_view>(value);
+    } else if (name == "cumulative_sequence_lengths") {
+      v_.cumulative_sequence_lengths = JSON::Get<std::string_view>(value);
+    } else if (name == "past_sequence_lengths") {
+      v_.past_sequence_lengths = JSON::Get<std::string_view>(value);
+    } else if (name == "block_table") {
+      v_.block_table = JSON::Get<std::string_view>(value);
+    } else if (name == "attention_metadata") {
+      v_.attention_metadata = JSON::Get<std::string_view>(value);
+    } else if (name == "past_key_names") {
+      v_.past_key_names = JSON::Get<std::string_view>(value);
+    } else if (name == "past_value_names") {
+      v_.past_value_names = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Dflash2::Inputs& v_;
+};
+
+struct Dflash2Outputs_Element : JSON::Element {
+  explicit Dflash2Outputs_Element(Config::Model::Dflash2::Outputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "candidate_ids") {
+      v_.candidate_ids = JSON::Get<std::string_view>(value);
+    } else if (name == "scores") {
+      v_.scores = JSON::Get<std::string_view>(value);
+    } else if (name == "present_key_names") {
+      v_.present_key_names = JSON::Get<std::string_view>(value);
+    } else if (name == "present_value_names") {
+      v_.present_value_names = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Dflash2::Outputs& v_;
+};
+
+struct Dflash2_Element : JSON::Element {
+  explicit Dflash2_Element(Config::Model::Dflash2& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "filename") {
+      v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "num_hidden_layers") {
+      v_.num_hidden_layers = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.num_hidden_layers <= 0) throw std::out_of_range("num_hidden_layers must be > 0");
+    } else if (name == "num_key_value_heads") {
+      v_.num_key_value_heads = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.num_key_value_heads <= 0) throw std::out_of_range("num_key_value_heads must be > 0");
+    } else if (name == "head_size") {
+      v_.head_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.head_size <= 0) throw std::out_of_range("head_size must be > 0");
+    } else if (name == "block_size") {
+      v_.block_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.block_size <= 1) throw std::out_of_range("block_size must be > 1");
+    } else if (name == "num_draft_tokens") {
+      v_.num_draft_tokens = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.num_draft_tokens <= 0) throw std::out_of_range("num_draft_tokens must be > 0");
+    } else if (name == "selector_top_k") {
+      v_.selector_top_k = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.selector_top_k <= 0) throw std::out_of_range("selector_top_k must be > 0");
+    } else if (name == "mask_token_id") {
+      v_.mask_token_id = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "sliding_window") {
+      v_.sliding_window = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "main_aux_hidden_states") {
+      v_.main_aux_hidden_states = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "session_options") {
+      v_.session_options = Config::SessionOptions{};
+      session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
+      return *session_options_;
+    }
+    if (name == "run_options") {
+      v_.run_options = Config::RunOptions{};
+      run_options_ = std::make_unique<RunOptions_Element>(*v_.run_options);
+      return *run_options_;
+    }
+    if (name == "inputs") {
+      return inputs_;
+    }
+    if (name == "outputs") {
+      return outputs_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+  Element& OnArray(std::string_view name) override {
+    if (name == "shared_initializers") {
+      return shared_initializers_;
+    }
+    if (name == "aux_hidden_state_layers") {
+      return aux_hidden_state_layers_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Dflash2& v_;
+  std::unique_ptr<SessionOptions_Element> session_options_;
+  std::unique_ptr<RunOptions_Element> run_options_;
+  Dflash2Inputs_Element inputs_{v_.inputs};
+  Dflash2Outputs_Element outputs_{v_.outputs};
+  SharedInitializers_Element shared_initializers_{v_.shared_initializers};
+  IntArray_Element aux_hidden_state_layers_{v_.aux_hidden_state_layers};
+};
+
 struct VisionInputs_Element : JSON::Element {
   explicit VisionInputs_Element(Config::Model::Vision::Inputs& v) : v_{v} {}
 
@@ -1681,6 +1814,9 @@ struct Model_Element : JSON::Element {
     if (name == "mtp") {
       return mtp_;
     }
+    if (name == "dflash2") {
+      return dflash2_;
+    }
     throw JSON::unknown_value_error{};
   }
 
@@ -1697,6 +1833,7 @@ struct Model_Element : JSON::Element {
   Joiner_Element joiner_{v_.joiner};
   VAD_Element vad_{v_.vad};
   Mtp_Element mtp_{v_.mtp};
+  Dflash2_Element dflash2_{v_.dflash2};
 };
 
 // Throws std::runtime_error (rather than std::overflow_error/std::invalid_argument) on failure.

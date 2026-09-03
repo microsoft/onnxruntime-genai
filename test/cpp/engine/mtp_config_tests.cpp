@@ -2,13 +2,60 @@
 // Licensed under the MIT License.
 
 #include <stdexcept>
+#include <string>
 #include <string_view>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include <gtest/gtest.h>
 
 #include "config.h"
+#include "engine/engine.h"
 
 namespace Generators::test {
+namespace {
+
+struct TensorMetadata {
+  ONNXTensorElementDataType data_type;
+  std::vector<int64_t> shape;
+};
+
+class FakeModelStateMetadata final : public ModelStateMetadata {
+ public:
+  void AddInput(std::string name, ONNXTensorElementDataType data_type,
+                std::vector<int64_t> shape) {
+    inputs_.insert_or_assign(
+        std::move(name), TensorMetadata{data_type, std::move(shape)});
+  }
+
+  void AddOutput(std::string name, ONNXTensorElementDataType data_type,
+                 std::vector<int64_t> shape) {
+    outputs_.insert_or_assign(
+        std::move(name), TensorMetadata{data_type, std::move(shape)});
+  }
+
+  bool HasInput(const std::string& name) const override { return inputs_.contains(name); }
+  bool HasOutput(const std::string& name) const override { return outputs_.contains(name); }
+  ONNXTensorElementDataType GetInputDataType(const std::string& name) const override {
+    return inputs_.at(name).data_type;
+  }
+  ONNXTensorElementDataType GetOutputDataType(const std::string& name) const override {
+    return outputs_.at(name).data_type;
+  }
+  std::vector<int64_t> GetInputShape(const std::string& name) const override {
+    return inputs_.at(name).shape;
+  }
+  std::vector<int64_t> GetOutputShape(const std::string& name) const override {
+    return outputs_.at(name).shape;
+  }
+
+ private:
+  std::unordered_map<std::string, TensorMetadata> inputs_;
+  std::unordered_map<std::string, TensorMetadata> outputs_;
+};
+
+}  // namespace
 
 TEST(MtpDecoderConfigTest, ProjectsPagedDecoderWithoutMainFixedState) {
   Config config;
@@ -139,6 +186,38 @@ TEST(MtpDecoderConfigTest, RejectsInvalidConfiguration) {
 
   config.model.decoder.hidden_size = 0;
   expect_error("model.decoder.hidden_size must be positive");
+}
+
+TEST(MtpDecoderConfigTest, ValidatesMainAndHeadHiddenStateContract) {
+  Config config;
+  config.model.decoder.hidden_size = 2048;
+  config.model.mtp.main_hidden_states = "main_hidden";
+  config.model.mtp.inputs.hidden_states = "head_hidden";
+
+  FakeModelStateMetadata target;
+  target.AddOutput("main_hidden", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16,
+                   {-1, 2048});
+  FakeModelStateMetadata head;
+  head.AddInput("head_hidden", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16,
+                {-1, 2048});
+  EXPECT_NO_THROW(ValidateMtpModelCompatibility(config, target, head));
+
+  config.model.mtp.main_hidden_states = "missing";
+  EXPECT_THROW(ValidateMtpModelCompatibility(config, target, head),
+               std::runtime_error);
+  config.model.mtp.main_hidden_states = "main_hidden";
+
+  FakeModelStateMetadata wrong_width;
+  wrong_width.AddInput("head_hidden", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16,
+                       {-1, 1024});
+  EXPECT_THROW(ValidateMtpModelCompatibility(config, target, wrong_width),
+               std::runtime_error);
+
+  FakeModelStateMetadata wrong_type;
+  wrong_type.AddInput("head_hidden", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
+                      {-1, 2048});
+  EXPECT_THROW(ValidateMtpModelCompatibility(config, target, wrong_type),
+               std::runtime_error);
 }
 
 }  // namespace Generators::test
