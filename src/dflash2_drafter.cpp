@@ -135,6 +135,13 @@ std::unique_ptr<Config> CreateDflash2Config(const Config& config) {
   if (dflash2.num_draft_tokens != dflash2.block_size - 1) {
     throw std::runtime_error("model.dflash2.num_draft_tokens must be block_size - 1.");
   }
+  // Every non-anchor query row feeds this id straight into the drafter's embedding lookup, so an
+  // out-of-range value is either a crash or silently meaningless drafts.
+  if (dflash2.mask_token_id < 0 ||
+      (config.model.vocab_size > 0 && dflash2.mask_token_id >= config.model.vocab_size)) {
+    throw std::runtime_error(
+        "model.dflash2.mask_token_id must be a valid token id in [0, model.vocab_size).");
+  }
   if (dflash2.run_options) {
     for (const auto& [name, value] : *dflash2.run_options) {
       if (name == "disable_synchronize_execution_providers" && value == "1") {
@@ -400,6 +407,13 @@ void Dflash2Drafter::Release(const Request* request) {
   }
   free_blocks_.insert(free_blocks_.end(), entry->second.blocks.begin(), entry->second.blocks.end());
   requests_.erase(entry);
+}
+
+void Dflash2Drafter::ReleaseAll() {
+  for (const auto& [request, state] : requests_) {
+    free_blocks_.insert(free_blocks_.end(), state.blocks.begin(), state.blocks.end());
+  }
+  requests_.clear();
 }
 
 void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> feeds,

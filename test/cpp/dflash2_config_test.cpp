@@ -15,6 +15,7 @@ namespace {
 
 Config MakeDflash2Config() {
   Config config;
+  config.model.vocab_size = 128;
   auto& decoder = config.model.decoder;
   decoder.filename = "target.onnx";
   decoder.sliding_window = Config::Model::Decoder::SlidingWindow{4096};
@@ -30,6 +31,7 @@ Config MakeDflash2Config() {
   dflash2.block_size = 4;
   dflash2.num_draft_tokens = 3;
   dflash2.selector_top_k = 2;
+  dflash2.mask_token_id = 31;
   dflash2.sliding_window = 17;
   return config;
 }
@@ -228,6 +230,21 @@ TEST(Dflash2ConfigTest, RequiresOneDraftPerNonAnchorBlockRow) {
   auto config = MakeDflash2Config();
   config.model.dflash2.num_draft_tokens = 2;
   EXPECT_THROW(CreateDflash2Config(config), std::runtime_error);
+}
+
+TEST(Dflash2ConfigTest, RequiresMaskTokenInsideVocabulary) {
+  auto config = MakeDflash2Config();
+  config.model.dflash2.mask_token_id = -1;
+  EXPECT_THROW(CreateDflash2Config(config), std::runtime_error);
+
+  config.model.dflash2.mask_token_id = config.model.vocab_size;
+  EXPECT_THROW(CreateDflash2Config(config), std::runtime_error);
+
+  config.model.dflash2.mask_token_id = 0;
+  EXPECT_NO_THROW(CreateDflash2Config(config));
+
+  config.model.dflash2.mask_token_id = config.model.vocab_size - 1;
+  EXPECT_NO_THROW(CreateDflash2Config(config));
 }
 
 TEST(Dflash2ConfigTest, ProjectsDrafterWithoutTargetState) {

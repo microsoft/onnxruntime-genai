@@ -96,6 +96,12 @@ struct Dflash2Drafter {
   // Returns a request's blocks to the pool. Safe for requests the drafter never saw.
   void Release(const Request* request);
 
+  // Drops every tracked request's cache state and returns its blocks. Used after a recoverable
+  // proposal failure: the drafter's cached context is no longer contiguous with the target for any
+  // in-flight request, and a request can only rejoin from position zero, so those requests finish
+  // without drafts while requests admitted later still get them.
+  void ReleaseAll();
+
  private:
   struct RequestState {
     std::vector<int32_t> blocks;
