@@ -341,9 +341,8 @@ Dflash2Drafter::Dflash2Drafter(std::shared_ptr<Dflash2Model> model, size_t paged
   run_options_->AddConfigEntry("gpu_graph_id", "-1");
 }
 
-Tensor& Dflash2Drafter::StepTensor(std::unique_ptr<Tensor>& slot, DeviceInterface* device,
-                                   ONNXTensorElementDataType type,
-                                   const std::vector<int64_t>& shape) {
+Tensor& Dflash2StepTensor(std::unique_ptr<Tensor>& slot, DeviceInterface* device,
+                          ONNXTensorElementDataType type, const std::vector<int64_t>& shape) {
   size_t elements = 1;
   for (const int64_t dimension : shape) {
     elements = CheckedMultiply(elements, static_cast<size_t>(dimension), "DFlash 2 proposal tensor");
@@ -585,7 +584,7 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     span.CopyCpuToDevice();
   };
 
-  auto& packed_aux = StepTensor(step_tensors_.packed_aux, device, aux_type_,
+  auto& packed_aux = Dflash2StepTensor(step_tensors_.packed_aux, device, aux_type_,
                                 {static_cast<int64_t>(num_ctx_rows),
                                  static_cast<int64_t>(aux_hidden_size_)});
   const size_t aux_row_bytes =
@@ -603,7 +602,7 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     destination_row += ingest_count[i];
   }
 
-  auto& input_ids = StepTensor(step_tensors_.input_ids, device, Ort::TypeToTensorType<int64_t>,
+  auto& input_ids = Dflash2StepTensor(step_tensors_.input_ids, device, Ort::TypeToTensorType<int64_t>,
                                {static_cast<int64_t>(num_block_rows)});
   {
     auto span = input_ids.GetDeviceSpan<int64_t>();
@@ -619,23 +618,23 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   }
 
   constexpr auto int32_type = Ort::TypeToTensorType<int32_t>;
-  auto& q_row_map = StepTensor(step_tensors_.q_row_map, device, int32_type,
+  auto& q_row_map = Dflash2StepTensor(step_tensors_.q_row_map, device, int32_type,
                                {static_cast<int64_t>(num_tokens)});
   fill_int32(q_row_map, layout.q_row_map);
-  auto& qkv_row_map = StepTensor(step_tensors_.qkv_row_map, device, int32_type,
+  auto& qkv_row_map = Dflash2StepTensor(step_tensors_.qkv_row_map, device, int32_type,
                                  {static_cast<int64_t>(num_tokens)});
   fill_int32(qkv_row_map, layout.qkv_row_map);
-  auto& block_row_index = StepTensor(step_tensors_.block_row_index, device, int32_type,
+  auto& block_row_index = Dflash2StepTensor(step_tensors_.block_row_index, device, int32_type,
                                      {static_cast<int64_t>(num_block_rows)});
   fill_int32(block_row_index, layout.block_row_index);
-  auto& cumulative = StepTensor(step_tensors_.cumulative_sequence_lengths, device, int32_type,
+  auto& cumulative = Dflash2StepTensor(step_tensors_.cumulative_sequence_lengths, device, int32_type,
                                 {static_cast<int64_t>(served.size() + 1)});
   fill_int32(cumulative, layout.cumulative_sequence_lengths);
-  auto& past_lengths = StepTensor(step_tensors_.past_sequence_lengths, device, int32_type,
+  auto& past_lengths = Dflash2StepTensor(step_tensors_.past_sequence_lengths, device, int32_type,
                                   {static_cast<int64_t>(served.size())});
   fill_int32(past_lengths, layout.past_sequence_lengths);
 
-  auto& block_table = StepTensor(
+  auto& block_table = Dflash2StepTensor(
       step_tensors_.block_table, device, int32_type,
       {static_cast<int64_t>(served.size()), static_cast<int64_t>(max_blocks)});
   {
@@ -660,7 +659,7 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     span.CopyCpuToDevice();
   }
 
-  auto& metadata = StepTensor(step_tensors_.attention_metadata, GetDeviceInterface(DeviceType::CPU),
+  auto& metadata = Dflash2StepTensor(step_tensors_.attention_metadata, GetDeviceInterface(DeviceType::CPU),
                               int32_type, {3});
   {
     auto span = metadata.GetDeviceSpan<int32_t>();
@@ -671,10 +670,10 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   }
 
   const size_t batch = block_feed_indices.size();
-  auto& candidate_ids = StepTensor(step_tensors_.candidate_ids, device, int32_type,
+  auto& candidate_ids = Dflash2StepTensor(step_tensors_.candidate_ids, device, int32_type,
                                    {static_cast<int64_t>(batch), static_cast<int64_t>(num_spec),
                                     static_cast<int64_t>(top_k)});
-  auto& scores = StepTensor(step_tensors_.scores, device, Ort::TypeToTensorType<float>,
+  auto& scores = Dflash2StepTensor(step_tensors_.scores, device, Ort::TypeToTensorType<float>,
                             {static_cast<int64_t>(batch), static_cast<int64_t>(num_spec),
                              static_cast<int64_t>(top_k), static_cast<int64_t>(top_k)});
 

@@ -19,6 +19,11 @@ size_t Dflash2DraftWidth(size_t capability_limit, size_t configured_limit,
                          size_t sequence_length_after_step, size_t sequence_limit,
                          size_t remaining_turn_tokens_after_step);
 
+// Reshapes a proposal tensor the drafter reuses between steps, replacing its buffer only when a
+// step needs more room than the one it kept.
+Tensor& Dflash2StepTensor(std::unique_ptr<Tensor>& slot, DeviceInterface* device,
+                          ONNXTensorElementDataType type, const std::vector<int64_t>& shape);
+
 /**
  * @brief Hosts the ``dflash2.onnx`` session.
  *
@@ -114,9 +119,6 @@ struct Dflash2Drafter {
   // gets a fixed ring instead, which its block table repeats across every column.
   void EnsureBlocks(RequestState& state, size_t positions);
   void AllocateCache();
-  // Reshapes a reused proposal tensor, replacing its buffer only when a step needs more room.
-  static Tensor& StepTensor(std::unique_ptr<Tensor>& slot, DeviceInterface* device,
-                            ONNXTensorElementDataType type, const std::vector<int64_t>& shape);
 
   std::shared_ptr<Dflash2Model> model_;
   const Config::Model::Dflash2& config_;
