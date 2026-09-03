@@ -225,7 +225,7 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
 
   // Text-only path: no images and no audio
   if (!payload.images && !payload.audios) {
-    const std::vector<int64_t> vision_soft_tokens{static_cast<int64_t>(vision_soft_tokens_per_image_)};
+    const std::vector<int64_t> vision_soft_tokens;
     auto [input_ids, token_type_ids, num_img_tokens] =
         ProcessGemma4Prompt(tokenizer, std::string(payload.prompt), nullptr, allocator, vision_soft_tokens);
     named_tensors->emplace(Config::Defaults::InputIdsName, std::make_shared<Tensor>(std::move(input_ids)));
