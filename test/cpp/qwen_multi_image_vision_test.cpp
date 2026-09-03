@@ -8,7 +8,7 @@
 
 #include <gtest/gtest.h>
 
-#include "models/multi_modal.h"
+#include "models/qwen_vl_state.h"
 
 #define OGA_USE_SPAN 1
 #include "ort_genai.h"
