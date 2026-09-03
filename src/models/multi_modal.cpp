@@ -730,7 +730,12 @@ bool DecoderState::SupportsPrefillChunking(bool has_multimodal_content) const {
   // Qwen-VL's 3D mRoPE position ids diverge from sequential positions only when vision/audio
   // content shifts the rope deltas. A text-only prompt reduces to sequential positions, so
   // chunking is safe; with multimodal content the ids must be produced in a single full pass.
-  return !has_multimodal_content;
+  if (dynamic_cast<const Qwen2VLPositionInputs*>(position_inputs_.get()) != nullptr)
+    return !has_multimodal_content;
+
+  // Any other position-input type (e.g. WindowedPositionInputs) keeps the conservative
+  // single-pass prefill behavior.
+  return false;
 }
 
 void DecoderState::PrepareEmbeddingsForPrefill(size_t new_length) {
