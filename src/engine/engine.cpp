@@ -4,6 +4,8 @@
 #include "engine.h"
 #include "../logging.h"
 #include "../search.h"
+#include "../models/preprocessing/genai_tokenizer.h"
+#include "../stop_string_controller.h"
 
 #include <limits>
 
@@ -989,7 +991,7 @@ std::shared_ptr<Request> Engine::CreateRequest(const GeneratorParams& params,
 
 uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
                            std::span<const int32_t> tokens,
-                           std::optional<size_t> max_generated_tokens) {
+                           const TurnOptions& options) {
   ValidateOwnerThread();
   CompleteNonresidentClosedRequests();
   ReclaimAbandonedRequests();
@@ -1000,7 +1002,14 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
     throw std::runtime_error(
         "Cannot begin a turn for a request that does not belong to this engine.");
   }
-  request->ValidateTurnAdmission(tokens, max_generated_tokens);
+  request->ValidateTurnAdmission(tokens, options);
+  // Static batching completes generation through a non-transactional path (RunStatic) that cannot
+  // stage, roll back, or replay a stop match. Reject before any Request mutation rather than
+  // letting a stop-enabled turn run without the guarantee its finish reason promises.
+  if (!options.stop_strings.empty() && !cache_manager_->SupportsDynamicBatching()) {
+    throw std::runtime_error(
+        "Stop strings require an Engine configured for dynamic batching.");
+  }
 
   const bool first_turn = request->IsAwaitingFirstTurn();
   if (first_turn) {
@@ -1020,6 +1029,18 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
   RequestTurnAdmission admission;
   bool added_to_scheduler = false;
 
+  // Build this turn's complete stop controller (or leave admission.pending_stop_controller null
+  // for a no-stop turn) before any Request or Engine mutation: tokenizer/stream construction can
+  // throw, and at this point nothing has been touched yet, so a failure here leaves the Request,
+  // its MTP shadow, and Engine health entirely unchanged for a caller to retry. Ownership passes
+  // into admission; Request::CommitTurnAdmission() installs it as the live stop_controller_, and
+  // Request::RollbackTurnAdmission() (or simply this function returning through the catch below)
+  // discards it without ever having touched the Request's actual stop_controller_.
+  if (!options.stop_strings.empty()) {
+    admission.pending_stop_controller = std::make_unique<StopStringController>(
+        GetOrCreateStopTokenizer(), options.stop_strings);
+  }
+
   // A continuation appends a prompt the MTP shadow never sees, so keeping the shadow would leave it
   // a concatenation of generated tokens across turns with the intervening prompt missing. Drop it
   // here so the next drafted step rebuilds a suffix-local shadow, matching fresh-turn semantics.
@@ -1032,8 +1053,7 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
       scheduler_->AddRequest(request);
       added_to_scheduler = true;
     }
-    return request->CommitTurnAdmission(
-        max_generated_tokens, admission);
+    return request->CommitTurnAdmission(options, admission);
   } catch (...) {
     const auto append_error = std::current_exception();
     try {
@@ -1083,6 +1103,7 @@ bool Engine::CancelRequest(const std::shared_ptr<Request>& request, uint64_t tur
   terminal.turn_id = turn_id;
   terminal.flags = EngineEventFlagTurnFinished;
   terminal.finish_reason = GenerationFinishReason::Canceled;
+  terminal.matched_stop_string_index = -1;
   terminal.usage = {
       counters.prompt_tokens,
       counters.generated_tokens,
@@ -1090,6 +1111,12 @@ bool Engine::CancelRequest(const std::shared_ptr<Request>& request, uint64_t tur
   if (has_existing_event) {
     existing->flags |= terminal.flags;
     existing->finish_reason = terminal.finish_reason;
+    // CanCancelFromEngine() only allows this merge while the Request is still executable, and a
+    // committed StopString match makes it TurnComplete in the very same step that stages the
+    // match's terminal event -- so `existing` here can only ever be a non-terminal (Token-only)
+    // event, whose matched index is already -1. Copy the terminal value explicitly so the merge
+    // preserves the event invariant without relying on that precondition.
+    existing->matched_stop_string_index = terminal.matched_stop_string_index;
     existing->usage = terminal.usage;
   } else {
     pending_events_.push_back(std::move(terminal));
@@ -1878,6 +1905,7 @@ void Engine::AppendEventsFromStep(
   const auto finish_turn = [&request, &result](EngineEvent& event) {
     event.flags |= EngineEventFlagTurnFinished;
     event.finish_reason = result.finish_reason;
+    event.matched_stop_string_index = result.matched_stop_string_index;
     event.usage = {
         request->TurnPromptTokens(),
         request->TurnGeneratedTokens(),
@@ -1936,6 +1964,7 @@ EngineEvent Engine::FailUnserviceableRequest(const void* request_id) {
   event.turn_id = request->CurrentTurnId();
   event.flags = EngineEventFlagTurnFinished | EngineEventFlagFailed;
   event.finish_reason = GenerationFinishReason::Failed;
+  event.matched_stop_string_index = -1;
   event.error_code = EngineErrorCode::RequestUnserviceable;
   event.usage = {
       request->TurnPromptTokens(),
@@ -2046,6 +2075,7 @@ EngineEvent Engine::EventFromStepError(
       event.turn_id = request->CurrentTurnId();
       event.flags = EngineEventFlagTurnFinished | EngineEventFlagFailed;
       event.finish_reason = GenerationFinishReason::Failed;
+      event.matched_stop_string_index = -1;
       event.error_code = error_code;
       event.usage = {
           request->TurnPromptTokens(),
@@ -2062,6 +2092,13 @@ EngineEvent Engine::EventFromStepError(
       } else {
         existing->flags |= event.flags;
         existing->finish_reason = event.finish_reason;
+        // This merge only runs for a Request this sweep just found IsExecutable(), and a committed
+        // StopString match makes a Request TurnComplete in the very same step that stages the
+        // match's terminal event -- so `existing` here can only ever be a non-terminal (Token-only)
+        // event, whose matched index is already -1 (an already-TurnComplete Request's own pending
+        // event, StopString-matched or not, is instead copied through unchanged by the sweep
+        // above). Copy the failure value explicitly so the merged event preserves the invariant.
+        existing->matched_stop_string_index = event.matched_stop_string_index;
         existing->error_code = event.error_code;
         existing->usage = event.usage;
       }
@@ -2071,6 +2108,7 @@ EngineEvent Engine::EventFromStepError(
     EngineEvent event;
     event.flags = EngineEventFlagFailed;
     event.finish_reason = GenerationFinishReason::Failed;
+    event.matched_stop_string_index = -1;
     event.error_code = error_code;
     fatal_events_.push_back(std::move(event));
   }
@@ -2108,6 +2146,13 @@ size_t Engine::MaxDraftTokensPerStep() const {
                  model_executor_->SupportsDraftVerification()
              ? cache_manager_->MaxDraftTokensPerStep()
              : 0;
+}
+
+const std::shared_ptr<Tokenizer>& Engine::GetOrCreateStopTokenizer() {
+  if (!stop_tokenizer_) {
+    stop_tokenizer_ = model_->CreateTokenizer();
+  }
+  return stop_tokenizer_;
 }
 
 SpeculativeStats Engine::GetSpeculativeStats() const {

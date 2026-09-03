@@ -57,6 +57,10 @@ struct EngineEvent {
   int32_t token{};
   GenerationFinishReason finish_reason{GenerationFinishReason::None};
   EngineErrorCode error_code{EngineErrorCode::None};
+  // Caller-facing index into the turn's stop-string list, valid only when finish_reason ==
+  // StopString. -1 for every other event, including a cancellation or fatal failure that replaces
+  // an undelivered result.
+  int32_t matched_stop_string_index{-1};
   TurnUsage usage{};
 };
 
@@ -189,7 +193,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
 
   uint64_t BeginTurn(const std::shared_ptr<Request>& request,
                      std::span<const int32_t> tokens,
-                     std::optional<size_t> max_generated_tokens);
+                     const TurnOptions& options);
   void CloseRequest(const std::shared_ptr<Request>& request);
   bool CancelRequest(const std::shared_ptr<Request>& request, uint64_t turn_id);
 
@@ -212,6 +216,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
   void ValidateRequestCanContinue(
       const std::shared_ptr<Request>& request,
       bool allow_nonresident = false) const;
+  const std::shared_ptr<Tokenizer>& GetOrCreateStopTokenizer();
 
   struct MtpStep {
     StepPlan plan;
@@ -248,6 +253,10 @@ struct Engine : std::enable_shared_from_this<Engine>,
   std::shared_ptr<CacheManager> cache_manager_;    // The cache manager for handling cached data.
   std::unique_ptr<Scheduler> scheduler_;           // The scheduler responsible for managing execution order.
   std::unique_ptr<ModelExecutor> model_executor_;  // The executor responsible for running the model.
+  // Lazily created on the first stop-enabled BeginTurn (the no-stop fast path never touches this).
+  // Shared by every Request's StopStringController so the tokenizer's underlying vocabulary/config
+  // is loaded once per Engine rather than once per Request.
+  std::shared_ptr<Tokenizer> stop_tokenizer_;
   // Present only when model.mtp names an auxiliary paged draft head. These are constructed with
   // the Engine so both cache pools share one memory budget; draft orchestration is added separately.
   std::shared_ptr<DecoderOnly_Model> mtp_model_;

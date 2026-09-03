@@ -18,6 +18,7 @@
 #include "smartptrs.h"
 #include "generator/mtp_generator.h"
 #include "engine/engine.h"
+#include "stop_string_matcher.h"
 #include "models/preprocessing/genai_tokenizer.h"
 #include "models/preprocessing/multi_modal_processor.h"
 #include "models/preprocessing/processor.h"
@@ -148,8 +149,8 @@ OgaFinishReason ToCFinishReason(
       return OgaFinishReason_None;
     case GenerationFinishReason::EosToken:
       return OgaFinishReason_Eos;
-    case GenerationFinishReason::StopToken:
-      return OgaFinishReason_StopSequence;
+    case GenerationFinishReason::StopString:
+      return OgaFinishReason_StopString;
     case GenerationFinishReason::TurnLimit:
       return OgaFinishReason_MaxGeneratedTokens;
     case GenerationFinishReason::ContextLimit:
@@ -1632,6 +1633,22 @@ OgaResult* OgaEngineEventGetFinishReason(
   OGA_CATCH
 }
 
+OgaResult* OgaEngineEventGetMatchedStopStringIndex(
+    const OgaEngineEvent* event,
+    int32_t* out) {
+  OGA_TRY
+  if (!out) {
+    throw std::runtime_error("out must not be null.");
+  }
+  *out = -1;
+  if (!event) {
+    throw std::runtime_error("event must not be null.");
+  }
+  *out = event->matched_stop_string_index;
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OgaEngineEventGetErrorCode(
     const OgaEngineEvent* event,
     OgaErrorCode* out) {
@@ -1899,21 +1916,6 @@ OGA_UNIMPLEMENTED_TURN_SETTER(
 
 #undef OGA_UNIMPLEMENTED_TURN_SETTER
 
-OgaResult* OgaTurnOptionsSetStopTokenIds(
-    OgaTurnOptions* options, const OgaSequences* stop_token_ids) {
-  OGA_TRY
-  if (!options) {
-    throw std::runtime_error("options must not be null.");
-  }
-  if (!stop_token_ids) {
-    throw std::runtime_error("stop_token_ids must not be null.");
-  }
-  options->ValidateOwnerThread();
-  throw std::runtime_error(
-      "OgaTurnOptionsSetStopTokenIds is not implemented.");
-  OGA_CATCH
-}
-
 OgaResult* OgaTurnOptionsSetStopStrings(
     OgaTurnOptions* options, const OgaStringArray* stop_strings) {
   OGA_TRY
@@ -1924,8 +1926,16 @@ OgaResult* OgaTurnOptionsSetStopStrings(
     throw std::runtime_error("stop_strings must not be null.");
   }
   options->ValidateOwnerThread();
-  throw std::runtime_error(
-      "OgaTurnOptionsSetStopStrings is not implemented.");
+  // An empty array is a valid configuration (clears/disables stop strings); a nonempty array must
+  // have every entry nonempty (an empty member string is invalid even though an empty array is
+  // fine), validated against the same bounds and UTF-8 contract StopStringMatcher enforces at
+  // Request admission time, so a caller learns about a bad configuration immediately rather than at
+  // the next BeginTurn. The matcher itself is discarded; only the validated strings are retained.
+  if (!stop_strings->empty()) {
+    static_cast<void>(Generators::StopStringMatcher(*stop_strings));
+  }
+  options->stop_strings = *stop_strings;
+  return nullptr;
   OGA_CATCH
 }
 
@@ -1944,14 +1954,16 @@ OgaResult* OgaRequestBeginTurn(
   }
   *out_turn_id = 0;
   request->ValidateOwnerThread();
-  std::optional<size_t> max_generated_tokens;
+  Generators::TurnOptions options;
   if (turn_options) {
     const auto bound_request = turn_options->request.lock();
     if (!bound_request || bound_request.get() != request) {
       throw std::runtime_error(
           "Turn options belong to a different or destroyed Request.");
     }
-    max_generated_tokens = turn_options->max_generated_tokens;
+    // Snapshot the caller-owned options by value now, so reusing or mutating turn_options after
+    // this call (or destroying it) cannot alter this already-active turn.
+    options = *turn_options;
   }
   if (!input_ids && input_ids_count != 0) {
     throw std::runtime_error(
@@ -1966,7 +1978,7 @@ OgaResult* OgaRequestBeginTurn(
   *out_turn_id = request->BeginTurn(
       std::span<const int32_t>{
           input_ids, static_cast<size_t>(input_ids_count)},
-      max_generated_tokens);
+      options);
   return nullptr;
   OGA_CATCH
 }

@@ -795,3 +795,79 @@ def test_engine_teardown_and_recreation(model):
     _create_request(second, model, _PROMPT_A, max_new, sink2, second_sinks)
     _run(second, second_sinks)
     assert sink2.tokens == expected
+
+
+# The synthetic decoder's greedy formula (see predicted_tokens) is deterministic, so this prompt is
+# chosen to make the first two generated tokens hit vocabulary entries 5 ("ST") and 6 ("OP") in the
+# checked-in tokenizer (test/models/engine/synthetic-paged/tokenizer.json), completing the stop
+# string "STOP" through real inference rather than scripted logits.
+_STOP_MATCH_PROMPT = [61, 2, 5]
+
+
+def test_stop_string_matches_across_two_tokens_via_real_inference(model):
+    engine = og.Engine(model)
+    params = og.GeneratorParams(model)
+    params.set_search_options(do_sample=False, max_length=len(_STOP_MATCH_PROMPT) + 8)
+    request = engine.create_request(params)
+    turn_options = og.TurnOptions(request)
+    turn_options.set_stop_strings(["STOP"])
+    request.begin_turn(np.asarray(_STOP_MATCH_PROMPT, dtype=np.int32), turn_options)
+
+    tokens = []
+    finish_reason = og.FinishReason.NONE
+    matched_index = None
+    finished = False
+    while not finished:
+        event = _next_event(engine)
+        if event.flags & og.EngineEventFlags.TOKEN:
+            tokens.append(event.token)
+        if event.flags & og.EngineEventFlags.TURN_FINISHED:
+            finish_reason = event.finish_reason
+            matched_index = event.matched_stop_string_index
+            finished = True
+    request.close()
+
+    assert tokens == [5, 6]
+    assert finish_reason == og.FinishReason.STOP_STRING
+    assert matched_index == 0
+
+
+def test_stop_strings_empty_list_disables_and_ordinary_generation_completes(model):
+    # Setting a real configuration and then an empty list must clear/disable it, leaving ordinary
+    # (non-stop) generation exactly as if stop strings had never been configured.
+    expected = predicted_tokens(_STOP_MATCH_PROMPT, 8)
+    engine = og.Engine(model)
+    params = og.GeneratorParams(model)
+    params.set_search_options(do_sample=False, max_length=len(_STOP_MATCH_PROMPT) + 8)
+    request = engine.create_request(params)
+    turn_options = og.TurnOptions(request)
+    turn_options.set_stop_strings(["STOP"])
+    turn_options.set_stop_strings([])
+    request.begin_turn(np.asarray(_STOP_MATCH_PROMPT, dtype=np.int32), turn_options)
+
+    sink = _Sink()
+    sinks = {request: sink}
+    _run(engine, sinks)
+
+    assert sink.tokens == expected
+    assert sink.finish_reason != og.FinishReason.STOP_STRING
+
+
+def test_stop_strings_validation_and_embedded_nul_rejection(model):
+    engine = og.Engine(model)
+    params = og.GeneratorParams(model)
+    request = engine.create_request(params)
+    turn_options = og.TurnOptions(request)
+
+    with pytest.raises(RuntimeError):
+        turn_options.set_stop_strings([""])  # empty entry is invalid
+
+    with pytest.raises(RuntimeError):
+        turn_options.set_stop_strings([f"s{i}" for i in range(17)])  # exceeds the 16-entry bound
+
+    with pytest.raises(ValueError):
+        turn_options.set_stop_strings(["a\0b"])  # embedded NUL cannot round-trip through OgaStringArray
+
+    # A valid configuration still works normally after the rejected attempts above.
+    turn_options.set_stop_strings(["STOP"])
+    request.close()

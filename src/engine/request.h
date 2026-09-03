@@ -5,6 +5,8 @@
 
 #include <array>
 #include <limits>
+#include <string>
+#include <vector>
 
 #include "generator/generators.h"
 #include "request_status.h"
@@ -21,10 +23,12 @@ namespace Generators {
 
 namespace test {
 struct RequestGuidanceTestAccess;
-}
+}  // namespace test
 
 struct Request;
 struct ScheduledRequests;
+struct Tokenizer;
+class StopStringController;
 
 struct RequestOptions {
   std::optional<size_t> max_session_tokens;
@@ -33,6 +37,10 @@ struct RequestOptions {
 struct TurnOptions {
   std::weak_ptr<Request> request;
   std::optional<size_t> max_generated_tokens;
+  // Copied UTF-8 stop strings for this turn. Empty means stop strings are disabled (or, when set on
+  // an already-configured turn, cleared). Bounds and UTF-8 validity are enforced by
+  // OgaTurnOptionsSetStopStrings (via StopStringMatcher) before this is populated.
+  std::vector<std::string> stop_strings;
 
   void ValidateOwnerThread() const;
 };
@@ -42,16 +50,32 @@ struct RequestStepResult {
   bool token_appended{};
   bool done{};
   GenerationFinishReason finish_reason{GenerationFinishReason::None};
+  // Caller-facing index into the turn's stop-string list, or -1 unless this step's committing
+  // token completed a match (finish_reason == StopString).
+  int32_t matched_stop_string_index{-1};
   std::array<int32_t, kMaxGeneratedTokensPerStep> visible_tokens{};
   size_t visible_token_count{};
 };
 
 struct RequestTurnAdmission {
+  // Declared (not defaulted) because pending_stop_controller's deleter needs the complete
+  // StopStringController type, which this header only forward-declares; defined in request.cpp,
+  // which includes stop_string_controller.h.
+  ~RequestTurnAdmission();
+
   RequestStatus status{RequestStatus::Unassigned};
   size_t host_token_count{};
   int64_t prompt_sequence_length{};
   int64_t processed_sequence_length{};
   bool transaction_started{};
+  // The complete stop controller this turn will have once committed (null when the turn has no
+  // stop strings). The caller builds this -- including any tokenizer/stream construction, which
+  // can throw -- before starting this admission attempt, so it is never itself a source of
+  // mutation-after-partial-failure. It is moved into Request's live stop_controller_ only by
+  // Request::CommitTurnAdmission(); Request::RollbackTurnAdmission() and this struct's own
+  // destructor otherwise simply discard it, leaving whatever stop_controller_ the Request had
+  // before this attempt (from a prior committed turn, or null) completely untouched.
+  std::unique_ptr<StopStringController> pending_stop_controller;
 };
 
 struct RequestTurnCounters {
@@ -91,6 +115,9 @@ struct Request : std::enable_shared_from_this<Request>,
   uint64_t BeginTurn(
       std::span<const int32_t> tokens,
       std::optional<size_t> max_generated_tokens = std::nullopt);
+  uint64_t BeginTurn(
+      std::span<const int32_t> tokens,
+      const TurnOptions& options);
   void ValidateOwnerThread() const;
   void AttachToEngine(std::shared_ptr<Engine> engine) noexcept;
   bool BelongsTo(const Engine& engine) const noexcept;
@@ -98,13 +125,13 @@ struct Request : std::enable_shared_from_this<Request>,
   bool IsRestartableCanceledTurn() const noexcept;
   void ValidateTurnAdmission(
       std::span<const int32_t> tokens,
-      std::optional<size_t> max_generated_tokens) const;
+      const TurnOptions& options) const;
   void ValidateContinuousDecodingSupport() const;
   void PrepareTurnAdmission(
       std::span<const int32_t> tokens,
       RequestTurnAdmission& admission);
   uint64_t CommitTurnAdmission(
-      std::optional<size_t> max_generated_tokens,
+      const TurnOptions& options,
       RequestTurnAdmission& admission);
   void RollbackTurnAdmission(RequestTurnAdmission& admission);
   bool CanCancelFromEngine(
@@ -146,6 +173,13 @@ struct Request : std::enable_shared_from_this<Request>,
 
   /**
    * @brief Why the pending draft proposal cannot be verified, or nullptr when it can.
+   *
+   * This is the single request-local check every speculative draft producer converges on: manual
+   * Request::SetDraftTokens callers get the returned reason as a thrown error, and every automatic
+   * in-Engine drafter (e.g. MTP's Engine::PrepareMtpStep) uses the same check to silently skip
+   * proposing drafts for this request instead. An active decoded stop-string configuration is one
+   * such reason, so a stop-enabled turn always runs the plain one-token-per-step path -- without
+   * disabling draft verification for any other request on the same Engine.
    */
   const char* DraftTokenValidationError() const noexcept;
 
@@ -255,6 +289,10 @@ struct Request : std::enable_shared_from_this<Request>,
   uint64_t CurrentTurnId() const noexcept { return current_turn_id_; }
   bool HasCurrentTurn() const noexcept { return has_current_turn_; }
   GenerationFinishReason FinishReason() const noexcept { return finish_reason_; }
+  // Caller-facing index into the turn's stop-string list, valid only when FinishReason() ==
+  // StopString. -1 otherwise, including after a cancellation or fatal failure that replaces an
+  // undelivered result.
+  int32_t MatchedStopStringIndex() const noexcept { return matched_stop_string_index_; }
   size_t TurnPromptTokens() const noexcept { return turn_prompt_tokens_; }
   size_t TurnGeneratedTokens() const noexcept { return turn_generated_tokens_; }
   size_t RemainingTurnTokenBudget() const noexcept {
@@ -409,6 +447,10 @@ struct Request : std::enable_shared_from_this<Request>,
   bool has_current_turn_{};
   bool turn_id_exhausted_{};
   GenerationFinishReason finish_reason_{GenerationFinishReason::None};
+  // Caller-facing stop-string match index committed by CommitStep(), or -1. Only ever written from
+  // CommitStep() (after the commit boundary), so unlike stop_controller_ it needs no transactional
+  // checkpoint: a rolled-back step never wrote to it.
+  int32_t matched_stop_string_index_{-1};
   // Drafts proposed for the next step, the ones the step in flight staged onto the sequence, and
   // the leading part of those the target model accepted.
   std::vector<int32_t> draft_tokens_;
@@ -423,6 +465,14 @@ struct Request : std::enable_shared_from_this<Request>,
   std::unique_ptr<Search> search_;
   std::unique_ptr<ConstrainedLogitsProcessor> guidance_logits_processor_;
   std::unique_ptr<ConstrainedLogitsProcessor> guidance_transaction_checkpoint_;
+  // Null when the active turn has no stop strings (the no-stop fast path: no tokenizer stream, no
+  // decode, no matcher work). Only ever replaced by Request::CommitTurnAdmission(), which moves in
+  // the caller-prebuilt controller for the newly committed turn (see RequestTurnAdmission); never
+  // mutated in place by admission itself, so a failed admission attempt leaves it untouched.
+  std::unique_ptr<StopStringController> stop_controller_;
+  // Checkpoint for stop_controller_'s replayable token history, saved by every SaveState*
+  // ForTransaction() and consumed by RestoreStateForTransaction()/CompleteStateRestoreForTransaction().
+  size_t stop_controller_transaction_checkpoint_{};
   std::unique_ptr<BatchedSamplerState> batched_sampler_state_;
   std::weak_ptr<Engine> engine_;
   const Engine* engine_identity_{};

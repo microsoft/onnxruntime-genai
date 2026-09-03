@@ -694,6 +694,113 @@ TEST_F(RequestLifecycleTest,
   EXPECT_THROW(static_cast<void>(RunOne(*engine)), EngineStepError);
 }
 
+// Engine::BeginTurn builds the new turn's complete stop controller before touching the Request or
+// its MTP shadow at all, and Request::CommitTurnAdmission is the only place that installs it as
+// the live stop_controller_. A failure anywhere in between (here, the continuation append inside
+// PrepareTurnAdmission, using the same FailingContinuationDevice/Control mechanism as
+// FailedContinuationAppendPreservesCompletedTurnState above) must therefore leave the Request's
+// previous turn's stop controller, its FinishReason(), and its MatchedStopStringIndex() completely
+// untouched, and a subsequent retry must behave exactly like an ordinary BeginTurn.
+TEST_F(RequestLifecycleTest, FailedBeginTurnRestoresThePriorTurnsStopController) {
+  auto model = LoadSyntheticPagedModel();
+  auto engine = MakeDoublesEngine(model, /*capacity=*/8, /*forced_token=*/5);
+
+  auto control = std::make_shared<FailingContinuationControl>();
+  auto params = MakeGreedyParams(*model);
+  FailingContinuationDevice device{*params->p_device, control};
+  params->p_device = &device;
+  auto request = CreateEngineRequest(engine.engine, *params);
+
+  TurnOptions first_turn_options;
+  first_turn_options.stop_strings = {"STOP"};
+  request->BeginTurn(Prompt(), first_turn_options);
+
+  // Step 1: "ST" (token 5), no match yet. Step 2: "OP" (token 6) completes "STOP".
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
+  engine.executor->SetForcedToken(6);
+  const auto completed = RunOne(*engine.engine);
+  EXPECT_EQ(completed.finish_reason, GenerationFinishReason::StopString);
+  EXPECT_EQ(completed.matched_stop_string_index, 0);
+  ASSERT_EQ(request->FinishReason(), GenerationFinishReason::StopString);
+  ASSERT_EQ(request->MatchedStopStringIndex(), 0);
+
+  // Force the next turn's continuation append to fail. By this point Engine::BeginTurn has
+  // already built the next turn's complete replacement stop controller (a different
+  // configuration, to make any accidental leak of the new config observable) but
+  // Request::CommitTurnAdmission -- the only place that installs it -- never runs.
+  control->fail_append = true;
+  TurnOptions second_turn_options;
+  second_turn_options.stop_strings = {"UNREACHABLE_UNUSED_STOP"};
+  try {
+    request->BeginTurn(std::array<int32_t, 1>{2}, second_turn_options);
+    FAIL() << "Expected continuation append failure";
+  } catch (const std::runtime_error& error) {
+    EXPECT_STREQ(error.what(), "Injected continuation append failure.");
+  }
+  control->fail_append = false;
+
+  // The failed admission attempt must not disturb the previous committed turn's public state.
+  EXPECT_EQ(request->FinishReason(), GenerationFinishReason::StopString);
+  EXPECT_EQ(request->MatchedStopStringIndex(), 0);
+
+  // A retried BeginTurn must behave exactly like an ordinary call: turn state resets to a clean
+  // slate and the retry's own stop configuration (not the discarded failed attempt's) takes
+  // effect.
+  TurnOptions retry_options;
+  retry_options.stop_strings = {"STOP"};
+  request->BeginTurn(std::array<int32_t, 1>{2}, retry_options);
+  EXPECT_EQ(request->FinishReason(), GenerationFinishReason::None);
+  EXPECT_EQ(request->MatchedStopStringIndex(), -1);
+
+  engine.executor->SetForcedToken(5);
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
+  engine.executor->SetForcedToken(6);
+  const auto retried_completed = RunOne(*engine.engine);
+  EXPECT_EQ(retried_completed.finish_reason, GenerationFinishReason::StopString);
+  EXPECT_EQ(retried_completed.matched_stop_string_index, 0);
+}
+
+// The no-stop case must be just as transactional as the stop-enabled case: a turn that would have
+// cleared a previous turn's stop controller must not do so when admission fails.
+TEST_F(RequestLifecycleTest, FailedNoStopBeginTurnRestoresThePriorTurnsStopController) {
+  auto model = LoadSyntheticPagedModel();
+  auto engine = MakeDoublesEngine(model, /*capacity=*/8, /*forced_token=*/5);
+
+  auto control = std::make_shared<FailingContinuationControl>();
+  auto params = MakeGreedyParams(*model);
+  FailingContinuationDevice device{*params->p_device, control};
+  params->p_device = &device;
+  auto request = CreateEngineRequest(engine.engine, *params);
+
+  TurnOptions first_turn_options;
+  first_turn_options.stop_strings = {"STOP"};
+  request->BeginTurn(Prompt(), first_turn_options);
+
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
+  engine.executor->SetForcedToken(6);
+  ASSERT_EQ(RunOne(*engine.engine).finish_reason, GenerationFinishReason::StopString);
+  ASSERT_EQ(request->MatchedStopStringIndex(), 0);
+
+  // This attempt has no stop strings at all, so it would clear stop_controller_ on success.
+  control->fail_append = true;
+  try {
+    request->BeginTurn(std::array<int32_t, 1>{2});
+    FAIL() << "Expected continuation append failure";
+  } catch (const std::runtime_error& error) {
+    EXPECT_STREQ(error.what(), "Injected continuation append failure.");
+  }
+  control->fail_append = false;
+
+  // The failed attempt must preserve the prior turn's public completion state.
+  EXPECT_EQ(request->FinishReason(), GenerationFinishReason::StopString);
+  EXPECT_EQ(request->MatchedStopStringIndex(), 0);
+
+  // A retried, corrected BeginTurn with no stop strings succeeds normally and does clear it.
+  request->BeginTurn(std::array<int32_t, 1>{2});
+  EXPECT_EQ(request->FinishReason(), GenerationFinishReason::None);
+  EXPECT_EQ(request->MatchedStopStringIndex(), -1);
+}
+
 TEST_F(RequestLifecycleTest, ContinuationPreservesUnreadOutputAndHidesInputTokens) {
   auto prompt = Prompt();
   auto request = CreateRequestWithPrompt(engine_.engine, *model_, prompt);
