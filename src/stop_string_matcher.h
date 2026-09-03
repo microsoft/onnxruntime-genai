@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -20,6 +21,11 @@ inline constexpr size_t kMaxStopStringTotalBytes = 16 * 1024;
 // Returns true when `bytes` is a well-formed UTF-8 sequence. Overlong encodings, surrogate code
 // points, values above U+10FFFF, and truncated or stray continuation bytes are all rejected.
 bool IsValidUtf8(std::string_view bytes);
+
+// Validates the shared stop-string configuration contract without constructing matcher state.
+// Throws std::runtime_error for too many entries, excessive aggregate bytes, an empty entry, or
+// malformed UTF-8. An empty collection is valid and disables matching.
+void ValidateStopStrings(std::span<const std::string> stop_strings);
 
 // A completed stop-string match. `start_offset`/`end_offset` are absolute byte offsets into the
 // stream of bytes handed to StopStringMatcher::Consume() since construction or the last Reset(),
@@ -69,10 +75,8 @@ struct StopStringMatch {
 // quadratic in the number of decoded bytes).
 class StopStringMatcher {
  public:
-  // Copies and validates `stop_strings`. Throws std::runtime_error if there are more than
-  // kMaxStopStringCount entries, if the entries total more than kMaxStopStringTotalBytes, or if any
-  // entry is empty or is not well-formed UTF-8. Duplicate entries are allowed and keep their own
-  // caller indices. An empty vector is valid and yields a matcher that never matches.
+  // Copies `stop_strings` after applying ValidateStopStrings(). Duplicate entries are allowed and
+  // keep their own caller indices. An empty vector yields a matcher that never matches.
   explicit StopStringMatcher(std::vector<std::string> stop_strings);
 
   // Consumes the next chunk of decoded bytes. The chunk itself need not be valid UTF-8 on its own,

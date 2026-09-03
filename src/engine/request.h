@@ -466,9 +466,9 @@ struct Request : std::enable_shared_from_this<Request>,
   std::unique_ptr<ConstrainedLogitsProcessor> guidance_logits_processor_;
   std::unique_ptr<ConstrainedLogitsProcessor> guidance_transaction_checkpoint_;
   // Null when the active turn has no stop strings (the no-stop fast path: no tokenizer stream, no
-  // decode, no matcher work). Only ever replaced by Request::CommitTurnAdmission(), which moves in
-  // the caller-prebuilt controller for the newly committed turn (see RequestTurnAdmission); never
-  // mutated in place by admission itself, so a failed admission attempt leaves it untouched.
+  // decode, no matcher work). Request::CommitTurnAdmission() installs the caller-prebuilt
+  // controller only after successful admission, so a failed attempt leaves the previous state
+  // untouched. Terminal completion releases it because finish metadata is stored separately.
   std::unique_ptr<StopStringController> stop_controller_;
   // Checkpoint for stop_controller_'s replayable token history, saved by every SaveState*
   // ForTransaction() and consumed by RestoreStateForTransaction()/CompleteStateRestoreForTransaction().

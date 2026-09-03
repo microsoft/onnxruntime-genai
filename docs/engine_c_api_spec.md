@@ -185,7 +185,11 @@ configuration builds that outcome completely before any mutation and installs it
 whole admission attempt (continuation append, scheduler admission, and the rest) succeeds. If any
 of that fails, `OgaRequestBeginTurn` throws and the Request's stop-string state -- whatever it was
 before the call, from a prior committed turn -- is exactly as it was; a corrected retry then behaves
-like any ordinary `BeginTurn`.
+like any ordinary `BeginTurn`. The first stop-enabled admission on an Engine lazily creates the
+shared tokenizer used by its Request-local streams. Loading tokenizer assets and initializing ORT
+Extensions happen synchronously on the Engine owner thread, so that first admission can take longer
+and briefly delay other Requests already decoding on the same Engine. Later stop-enabled admissions
+reuse the shared tokenizer.
 
 A committed stop match is staged and observed transactionally, in the same Request transaction as
 Search/guidance/cache state: it is not externally visible until the step commits, and if the step
@@ -193,7 +197,11 @@ rolls back (directly or via the Engine's queued restore-and-complete path), the 
 tokenizer stream backing the match is recreated and every previously committed current-turn
 generated token is replayed through it, since the underlying detokenizer stream cannot be cloned. A
 replay failure during rollback is treated as a fatal consistency failure, matching every other
-rollback failure in this document. `OgaEngineEventGetMatchedStopStringIndex` and
+rollback failure in this document. One rollback therefore performs work linear in each affected
+stop-enabled Request's committed current-turn token count. Repeated retryable aborts as a turn grows
+can accumulate quadratic detokenization work on the Engine owner thread, multiplied across affected
+stop-enabled Requests in the batch; hosts should monitor abort frequency and turn depth when
+qualifying this feature for long-running workloads. `OgaEngineEventGetMatchedStopStringIndex` and
 `Request::MatchedStopStringIndex()` are always -1 for a cancellation or fatal-failure terminal
 outcome: a committed StopString match makes the Request `TurnComplete` in the same step that stages
 its terminal event, and both cancellation and fatal-failure handling only ever force-terminate a

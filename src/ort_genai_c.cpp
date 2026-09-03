@@ -1926,14 +1926,8 @@ OgaResult* OgaTurnOptionsSetStopStrings(
     throw std::runtime_error("stop_strings must not be null.");
   }
   options->ValidateOwnerThread();
-  // An empty array is a valid configuration (clears/disables stop strings); a nonempty array must
-  // have every entry nonempty (an empty member string is invalid even though an empty array is
-  // fine), validated against the same bounds and UTF-8 contract StopStringMatcher enforces at
-  // Request admission time, so a caller learns about a bad configuration immediately rather than at
-  // the next BeginTurn. The matcher itself is discarded; only the validated strings are retained.
-  if (!stop_strings->empty()) {
-    static_cast<void>(Generators::StopStringMatcher(*stop_strings));
-  }
+  // Validate before assignment so an invalid update leaves the prior configuration intact.
+  Generators::ValidateStopStrings(std::span<const std::string>{*stop_strings});
   options->stop_strings = *stop_strings;
   return nullptr;
   OGA_CATCH

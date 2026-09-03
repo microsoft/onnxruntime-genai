@@ -24,6 +24,7 @@
 
 #include <gtest/gtest.h>
 
+#include "stop_string_matcher.h"
 #include "test_utils.h"
 
 namespace {
@@ -1084,6 +1085,35 @@ TEST(CAPITests, EngineTurnOptionsStopStrings) {
       too_many->Add(("s" + std::to_string(i)).c_str());
     }
     EXPECT_THROW(turn_options->SetStopStrings(*too_many), std::runtime_error);
+
+    const std::string per_entry(Generators::kMaxStopStringTotalBytes /
+                                    Generators::kMaxStopStringCount,
+                                'x');
+    auto maximum_bytes = OgaStringArray::Create();
+    for (size_t i = 0; i < Generators::kMaxStopStringCount; ++i) {
+      maximum_bytes->Add(per_entry.c_str());
+    }
+    EXPECT_NO_THROW(turn_options->SetStopStrings(*maximum_bytes));
+
+    // Validation precedes assignment: after a valid matching configuration is installed, rejecting
+    // an oversized replacement must leave that prior configuration active.
+    auto matching = OgaStringArray::Create();
+    matching->Add("CD");
+    turn_options->SetStopStrings(*matching);
+    auto excessive_bytes = OgaStringArray::Create();
+    for (size_t i = 0; i + 1 < Generators::kMaxStopStringCount; ++i) {
+      excessive_bytes->Add(per_entry.c_str());
+    }
+    const std::string final_oversized_entry(per_entry.size() + 1, 'x');
+    excessive_bytes->Add(final_oversized_entry.c_str());
+    EXPECT_THROW(turn_options->SetStopStrings(*excessive_bytes), std::runtime_error);
+
+    turn_options->SetMaxGeneratedTokens(1);
+    EXPECT_EQ(request->BeginTurn(input_tokens, turn_options.get()), 1u);
+    const auto event = RunOne(*engine);
+    EXPECT_EQ(event.token, 9);  // "CD"
+    EXPECT_EQ(event.finish_reason, OgaFinishReason_StopString);
+    EXPECT_EQ(event.matched_stop_string_index, 0);
     request->Close();
   }
 

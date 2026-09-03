@@ -248,6 +248,7 @@ TEST_F(StopStringEngineTest, TurnResetClearsMatchAndControllerForTheNextTurn) {
   ASSERT_EQ(engine.engine->Run(storage), 1u);
   ASSERT_EQ(request->FinishReason(), GenerationFinishReason::StopString);
   ASSERT_EQ(request->MatchedStopStringIndex(), 0);
+  EXPECT_EQ(request->DraftTokenValidationError(), nullptr);
 
   // The next turn resets the finish reason and matched index immediately at admission, before any
   // new generation, and starts a fresh matcher/tokenizer stream even when it reuses the exact same
@@ -766,6 +767,7 @@ TEST_F(StopStringEngineTest, CancelMergesIntoARetainedTokenEventWithoutLeakingAS
   EXPECT_EQ(drain_storage[0].finish_reason, GenerationFinishReason::Canceled);
   EXPECT_EQ(drain_storage[0].matched_stop_string_index, -1);
   EXPECT_EQ(stopping->MatchedStopStringIndex(), -1);
+  EXPECT_EQ(stopping->DraftTokenValidationError(), nullptr);
 }
 
 // A fatal engine failure only forcibly fails requests that are still executable
@@ -789,7 +791,7 @@ TEST_F(StopStringEngineTest, FatalFailurePreservesAnAlreadyCommittedStopMatchOnA
 
   // An unrelated request hits a fatal execution failure in a later, separate step.
   auto executing = CreateEngineRequest(engine.engine, *model_);
-  executing->BeginTurn(Prompt());
+  executing->BeginTurn(Prompt(), StopOptions({"UNREACHABLE"}));
   engine.executor->SetForcedToken(2);
   engine.executor->SetNextFailure(ScriptedExecutionFailure::Fatal);
   const auto failure = RunOne(*engine.engine);
@@ -797,11 +799,28 @@ TEST_F(StopStringEngineTest, FatalFailurePreservesAnAlreadyCommittedStopMatchOnA
   EXPECT_EQ(failure.flags, EngineEventFlagTurnFinished | EngineEventFlagFailed);
   EXPECT_EQ(failure.finish_reason, GenerationFinishReason::Failed);
   EXPECT_EQ(failure.matched_stop_string_index, -1);
+  EXPECT_EQ(executing->DraftTokenValidationError(), nullptr);
 
   // The Engine is now unhealthy, but `completed` was not part of the failing batch: its own
   // committed stop-match state must be completely unaffected.
   EXPECT_EQ(completed->FinishReason(), GenerationFinishReason::StopString);
   EXPECT_EQ(completed->MatchedStopStringIndex(), 0);
+}
+
+TEST_F(StopStringEngineTest, UnserviceableFailureReleasesStopControllerState) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/2);
+  auto request = CreateEngineRequest(engine.engine, *model_);
+  request->BeginTurn(Prompt(), StopOptions({"UNREACHABLE"}));
+  ASSERT_NE(request->DraftTokenValidationError(), nullptr);
+  engine.cache->SetUnserviceableRequest(request);
+
+  const auto failure = RunOne(*engine.engine);
+  EXPECT_EQ(failure.request, request);
+  EXPECT_EQ(failure.flags, EngineEventFlagTurnFinished | EngineEventFlagFailed);
+  EXPECT_EQ(failure.error_code, EngineErrorCode::RequestUnserviceable);
+  EXPECT_EQ(request->Status(), RequestStatus::TurnComplete);
+  EXPECT_EQ(request->FinishReason(), GenerationFinishReason::Failed);
+  EXPECT_EQ(request->DraftTokenValidationError(), nullptr);
 }
 
 TEST(StopStringMtpExclusionTest,

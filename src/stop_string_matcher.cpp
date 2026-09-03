@@ -47,25 +47,28 @@ bool IsValidUtf8(std::string_view bytes) {
   return true;
 }
 
-StopStringMatcher::StopStringMatcher(std::vector<std::string> stop_strings)
-    : stop_strings_{std::move(stop_strings)} {
-  if (stop_strings_.size() > kMaxStopStringCount)
-    throw std::runtime_error("Too many stop strings: " + std::to_string(stop_strings_.size()) + ", the maximum is " + std::to_string(kMaxStopStringCount) + ".");
+void ValidateStopStrings(std::span<const std::string> stop_strings) {
+  if (stop_strings.size() > kMaxStopStringCount)
+    throw std::runtime_error("Too many stop strings: " + std::to_string(stop_strings.size()) + ", the maximum is " + std::to_string(kMaxStopStringCount) + ".");
 
   size_t total_bytes = 0;
-  for (size_t i = 0; i < stop_strings_.size(); ++i) {
-    const std::string& stop_string = stop_strings_[i];
+  for (size_t i = 0; i < stop_strings.size(); ++i) {
+    const std::string& stop_string = stop_strings[i];
     if (stop_string.empty())
       throw std::runtime_error("Stop string at index " + std::to_string(i) + " is empty.");
     if (!IsValidUtf8(stop_string))
       throw std::runtime_error("Stop string at index " + std::to_string(i) + " is not valid UTF-8.");
 
     total_bytes += stop_string.size();
-    longest_stop_string_ = std::max(longest_stop_string_, stop_string.size());
   }
 
   if (total_bytes > kMaxStopStringTotalBytes)
     throw std::runtime_error("Stop strings total " + std::to_string(total_bytes) + " bytes, the maximum is " + std::to_string(kMaxStopStringTotalBytes) + ".");
+}
+
+StopStringMatcher::StopStringMatcher(std::vector<std::string> stop_strings)
+    : stop_strings_{std::move(stop_strings)} {
+  ValidateStopStrings(stop_strings_);
 
   // Standard KMP failure (partial-match) table per stop string, each computed in time linear in
   // that entry's own length: failure_table[k] is the length of the longest proper prefix of
@@ -73,6 +76,7 @@ StopStringMatcher::StopStringMatcher(std::vector<std::string> stop_strings)
   stop_string_failure_tables_.resize(stop_strings_.size());
   for (size_t i = 0; i < stop_strings_.size(); ++i) {
     const std::string& pattern = stop_strings_[i];
+    longest_stop_string_ = std::max(longest_stop_string_, pattern.size());
     std::vector<size_t>& failure_table = stop_string_failure_tables_[i];
     failure_table.assign(pattern.size(), 0);
     size_t matched = 0;
