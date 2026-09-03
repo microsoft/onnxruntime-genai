@@ -114,6 +114,9 @@ struct Dflash2Drafter {
   // gets a fixed ring instead, which its block table repeats across every column.
   void EnsureBlocks(RequestState& state, size_t positions);
   void AllocateCache();
+  // Reshapes a reused proposal tensor, replacing its buffer only when a step needs more room.
+  static Tensor& StepTensor(std::unique_ptr<Tensor>& slot, DeviceInterface* device,
+                            ONNXTensorElementDataType type, const std::vector<int64_t>& shape);
 
   std::shared_ptr<Dflash2Model> model_;
   const Config::Model::Dflash2& config_;
@@ -129,6 +132,21 @@ struct Dflash2Drafter {
 
   std::vector<std::unique_ptr<Tensor>> caches_;  // 2 * num_hidden_layers, key then value per layer
   std::vector<std::string> cache_input_names_, cache_output_names_;
+  // Proposal tensors, reused across steps and grown to the high-water mark of the batches served
+  // so far, so a steady-state decode step allocates none of them.
+  struct StepTensors {
+    std::unique_ptr<Tensor> packed_aux;
+    std::unique_ptr<Tensor> input_ids;
+    std::unique_ptr<Tensor> q_row_map;
+    std::unique_ptr<Tensor> qkv_row_map;
+    std::unique_ptr<Tensor> block_row_index;
+    std::unique_ptr<Tensor> cumulative_sequence_lengths;
+    std::unique_ptr<Tensor> past_sequence_lengths;
+    std::unique_ptr<Tensor> block_table;
+    std::unique_ptr<Tensor> attention_metadata;
+    std::unique_ptr<Tensor> candidate_ids;
+    std::unique_ptr<Tensor> scores;
+  } step_tensors_;
   std::vector<int32_t> free_blocks_;
   std::unordered_map<const Request*, RequestState> requests_;
   size_t admission_misses_{};

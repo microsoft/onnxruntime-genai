@@ -337,8 +337,25 @@ Dflash2Drafter::Dflash2Drafter(std::shared_ptr<Dflash2Model> model, size_t paged
       }
     }
   }
-  // Proposal tensors are rebuilt for every packed batch, so their addresses are not capturable.
+  // Proposal tensors keep a stable address but not a stable shape, so they are not capturable.
   run_options_->AddConfigEntry("gpu_graph_id", "-1");
+}
+
+Tensor& Dflash2Drafter::StepTensor(std::unique_ptr<Tensor>& slot, DeviceInterface* device,
+                                   ONNXTensorElementDataType type,
+                                   const std::vector<int64_t>& shape) {
+  size_t elements = 1;
+  for (const int64_t dimension : shape) {
+    elements = CheckedMultiply(elements, static_cast<size_t>(dimension), "DFlash 2 proposal tensor");
+  }
+  const size_t bytes = CheckedMultiply(elements, Ort::SizeOf(type), "DFlash 2 proposal tensor");
+  // A static Tensor rejects a shape larger than the buffer it already owns, so a step that needs
+  // more room starts a new buffer. Every other step reshapes a view over the buffer it kept.
+  if (!slot || slot->bytes_ < bytes) {
+    slot = std::make_unique<Tensor>(device, type);
+  }
+  slot->CreateTensor(shape, /*make_static=*/true, std::max<size_t>(bytes, 1));
+  return *slot;
 }
 
 void Dflash2Drafter::AllocateCache() {
@@ -562,23 +579,19 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   const size_t num_tokens = layout.q_row_map.size();
   auto device = model_->p_device_inputs_;
 
-  auto make = [&](ONNXTensorElementDataType type, std::vector<int64_t> shape) {
-    auto tensor = std::make_unique<Tensor>(device, type);
-    tensor->CreateTensor(shape);
-    return tensor;
-  };
   auto fill_int32 = [](Tensor& tensor, const std::vector<int32_t>& values) {
     auto span = tensor.GetDeviceSpan<int32_t>();
     std::copy(values.begin(), values.end(), span.CpuSpan().begin());
     span.CopyCpuToDevice();
   };
 
-  auto packed_aux = make(aux_type_, {static_cast<int64_t>(num_ctx_rows),
-                                     static_cast<int64_t>(aux_hidden_size_)});
+  auto& packed_aux = StepTensor(step_tensors_.packed_aux, device, aux_type_,
+                                {static_cast<int64_t>(num_ctx_rows),
+                                 static_cast<int64_t>(aux_hidden_size_)});
   const size_t aux_row_bytes =
       CheckedMultiply(aux_hidden_size_, Ort::SizeOf(aux_type_), "DFlash 2 auxiliary row bytes");
   auto source_bytes = aux_hidden_states.GetByteSpan();
-  auto destination_bytes = packed_aux->GetByteSpan();
+  auto destination_bytes = packed_aux.GetByteSpan();
   size_t destination_row = 0;
   for (const size_t i : served) {
     if (ingest_count[i] == 0) {
@@ -590,9 +603,10 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     destination_row += ingest_count[i];
   }
 
-  auto input_ids = make(Ort::TypeToTensorType<int64_t>, {static_cast<int64_t>(num_block_rows)});
+  auto& input_ids = StepTensor(step_tensors_.input_ids, device, Ort::TypeToTensorType<int64_t>,
+                               {static_cast<int64_t>(num_block_rows)});
   {
-    auto span = input_ids->GetDeviceSpan<int64_t>();
+    auto span = input_ids.GetDeviceSpan<int64_t>();
     auto cpu = span.CpuSpan();
     for (size_t slot = 0; slot < block_feed_indices.size(); ++slot) {
       const auto& feed = feeds[block_feed_indices[slot]];
@@ -604,43 +618,52 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     span.CopyCpuToDevice();
   }
 
-  auto q_row_map = make(Ort::TypeToTensorType<int32_t>, {static_cast<int64_t>(num_tokens)});
-  fill_int32(*q_row_map, layout.q_row_map);
-  auto qkv_row_map = make(Ort::TypeToTensorType<int32_t>, {static_cast<int64_t>(num_tokens)});
-  fill_int32(*qkv_row_map, layout.qkv_row_map);
-  auto block_row_index = make(Ort::TypeToTensorType<int32_t>, {static_cast<int64_t>(num_block_rows)});
-  fill_int32(*block_row_index, layout.block_row_index);
-  auto cumulative = make(Ort::TypeToTensorType<int32_t>, {static_cast<int64_t>(served.size() + 1)});
-  fill_int32(*cumulative, layout.cumulative_sequence_lengths);
-  auto past_lengths = make(Ort::TypeToTensorType<int32_t>, {static_cast<int64_t>(served.size())});
-  fill_int32(*past_lengths, layout.past_sequence_lengths);
+  constexpr auto int32_type = Ort::TypeToTensorType<int32_t>;
+  auto& q_row_map = StepTensor(step_tensors_.q_row_map, device, int32_type,
+                               {static_cast<int64_t>(num_tokens)});
+  fill_int32(q_row_map, layout.q_row_map);
+  auto& qkv_row_map = StepTensor(step_tensors_.qkv_row_map, device, int32_type,
+                                 {static_cast<int64_t>(num_tokens)});
+  fill_int32(qkv_row_map, layout.qkv_row_map);
+  auto& block_row_index = StepTensor(step_tensors_.block_row_index, device, int32_type,
+                                     {static_cast<int64_t>(num_block_rows)});
+  fill_int32(block_row_index, layout.block_row_index);
+  auto& cumulative = StepTensor(step_tensors_.cumulative_sequence_lengths, device, int32_type,
+                                {static_cast<int64_t>(served.size() + 1)});
+  fill_int32(cumulative, layout.cumulative_sequence_lengths);
+  auto& past_lengths = StepTensor(step_tensors_.past_sequence_lengths, device, int32_type,
+                                  {static_cast<int64_t>(served.size())});
+  fill_int32(past_lengths, layout.past_sequence_lengths);
 
-  auto block_table = make(Ort::TypeToTensorType<int32_t>,
-                          {static_cast<int64_t>(served.size()), static_cast<int64_t>(max_blocks)});
+  auto& block_table = StepTensor(
+      step_tensors_.block_table, device, int32_type,
+      {static_cast<int64_t>(served.size()), static_cast<int64_t>(max_blocks)});
   {
-    auto span = block_table->GetDeviceSpan<int32_t>();
+    auto span = block_table.GetDeviceSpan<int32_t>();
     auto cpu = span.CpuSpan();
-    std::fill(cpu.begin(), cpu.end(), int32_t{-1});
     for (size_t row = 0; row < served.size(); ++row) {
       const auto& blocks = requests_[feeds[served[row]].request].blocks;
+      auto columns = cpu.subspan(row * max_blocks, max_blocks);
       if (ring_blocks_ == 0) {
-        std::copy(blocks.begin(), blocks.end(), cpu.begin() + row * max_blocks);
+        const size_t used = std::min(blocks.size(), max_blocks);
+        std::copy_n(blocks.begin(), used, columns.begin());
+        std::fill(columns.begin() + used, columns.end(), int32_t{-1});
         continue;
       }
       // A windowed drafter repeats its ring across every column: column j holds the block that
-      // owns position j * block_size, which is ring[j % ring_blocks].
+      // owns position j * block_size, which is ring[j % ring_blocks]. Every column is written, so
+      // the reused buffer never exposes a stale id.
       for (size_t column = 0; column < max_blocks; ++column) {
-        cpu[row * max_blocks + column] = blocks[column % blocks.size()];
+        columns[column] = blocks[column % blocks.size()];
       }
     }
     span.CopyCpuToDevice();
   }
 
-  auto metadata = std::make_unique<Tensor>(GetDeviceInterface(DeviceType::CPU),
-                                           Ort::TypeToTensorType<int32_t>);
-  metadata->CreateTensor(std::vector<int64_t>{3});
+  auto& metadata = StepTensor(step_tensors_.attention_metadata, GetDeviceInterface(DeviceType::CPU),
+                              int32_type, {3});
   {
-    auto span = metadata->GetDeviceSpan<int32_t>();
+    auto span = metadata.GetDeviceSpan<int32_t>();
     auto cpu = span.CpuSpan();
     cpu[0] = layout.max_query_len;
     cpu[1] = layout.max_kv_len;
@@ -648,12 +671,12 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   }
 
   const size_t batch = block_feed_indices.size();
-  auto candidate_ids = make(Ort::TypeToTensorType<int32_t>,
+  auto& candidate_ids = StepTensor(step_tensors_.candidate_ids, device, int32_type,
+                                   {static_cast<int64_t>(batch), static_cast<int64_t>(num_spec),
+                                    static_cast<int64_t>(top_k)});
+  auto& scores = StepTensor(step_tensors_.scores, device, Ort::TypeToTensorType<float>,
                             {static_cast<int64_t>(batch), static_cast<int64_t>(num_spec),
-                             static_cast<int64_t>(top_k)});
-  auto scores = make(Ort::TypeToTensorType<float>,
-                     {static_cast<int64_t>(batch), static_cast<int64_t>(num_spec),
-                      static_cast<int64_t>(top_k), static_cast<int64_t>(top_k)});
+                             static_cast<int64_t>(top_k), static_cast<int64_t>(top_k)});
 
   std::vector<const char*> input_names{
       config_.inputs.aux_hidden_states.c_str(), config_.inputs.input_ids.c_str(),
@@ -661,14 +684,14 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
       config_.inputs.block_row_index.c_str(), config_.inputs.cumulative_sequence_lengths.c_str(),
       config_.inputs.past_sequence_lengths.c_str(), config_.inputs.block_table.c_str(),
       config_.inputs.attention_metadata.c_str()};
-  std::vector<OrtValue*> inputs{packed_aux->GetOrtTensor(), input_ids->GetOrtTensor(),
-                                q_row_map->GetOrtTensor(), qkv_row_map->GetOrtTensor(),
-                                block_row_index->GetOrtTensor(), cumulative->GetOrtTensor(),
-                                past_lengths->GetOrtTensor(), block_table->GetOrtTensor(),
-                                metadata->GetOrtTensor()};
+  std::vector<OrtValue*> inputs{packed_aux.GetOrtTensor(), input_ids.GetOrtTensor(),
+                                q_row_map.GetOrtTensor(), qkv_row_map.GetOrtTensor(),
+                                block_row_index.GetOrtTensor(), cumulative.GetOrtTensor(),
+                                past_lengths.GetOrtTensor(), block_table.GetOrtTensor(),
+                                metadata.GetOrtTensor()};
   std::vector<const char*> output_names{config_.outputs.candidate_ids.c_str(),
                                         config_.outputs.scores.c_str()};
-  std::vector<OrtValue*> outputs{candidate_ids->GetOrtTensor(), scores->GetOrtTensor()};
+  std::vector<OrtValue*> outputs{candidate_ids.GetOrtTensor(), scores.GetOrtTensor()};
   for (size_t i = 0; i < caches_.size(); ++i) {
     input_names.push_back(cache_input_names_[i].c_str());
     inputs.push_back(caches_[i]->GetOrtTensor());
@@ -690,8 +713,8 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   }
 
   // The spans own the host mirrors these point into, so they must outlive the reads below.
-  auto candidate_span = candidate_ids->GetDeviceSpan<int32_t>();
-  auto scores_span = scores->GetDeviceSpan<float>();
+  auto candidate_span = candidate_ids.GetDeviceSpan<int32_t>();
+  auto scores_span = scores.GetDeviceSpan<float>();
   auto candidate_cpu = candidate_span.CopyDeviceToCpu();
   auto scores_cpu = scores_span.CopyDeviceToCpu();
   for (size_t slot = 0; slot < block_feed_indices.size(); ++slot) {
