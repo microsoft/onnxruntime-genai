@@ -1112,21 +1112,26 @@ Graph buffers are allocated once at configured limits and reshaped as static vie
 
 Prefill and mixed-token steps use graph id `-1`, which tells the CUDA execution provider to run eagerly.
 
-An Engine-hosted DFlash 2 drafter also forces eager target execution. Its target decoder output is
-the packed auxiliary hidden-state tensor named by `model.dflash2.main_aux_hidden_states`; that
-variable-size output does not have persistent graph buffers. Engine construction validates its
-rank, element type, and static width against the drafter input before allocating cache resources.
+An Engine-hosted DFlash 2 drafter consumes the packed auxiliary hidden-state tensor named by
+`model.dflash2.main_aux_hidden_states`. Single-token target decode steps bind that output through
+persistent graph buffers and remain eligible for CUDA graph capture; prefill and draft-verification
+steps remain eager. Engine construction validates the output's rank, element type, and static width
+against the drafter input before allocating cache resources.
 The drafter run is synchronous because its packed inputs and outputs are owned by one proposal
 call, so `model.dflash2.run_options` cannot disable execution-provider synchronization.
 The direct drafter session also uses graph id `-1`: its variable-shaped proposal tensors are
 allocated per call and therefore cannot be captured safely. If this optional post-commit drafter
-run fails, the Engine discards any partial proposal, releases the drafter, and still publishes the
-already committed target events; subsequent Turns continue without automatic DFlash 2 proposals.
+run fails, the Engine discards any partial proposal and still publishes the already committed target
+events. A transient failure is retried on the next step; three consecutive failures disable DFlash 2
+for the Engine. `dflash2_failures` and `dflash2_disables` report those events.
 
 The drafter keeps a fixed sliding-window ring per request from that request's first decode step
 until it is closed, so its pool is sized for `max_batch_size` rings. A request that first decodes
 while every ring is taken is skipped for the rest of its life and decodes without DFlash 2 drafts;
-the drafter keeps serving the requests that already hold a ring.
+the drafter keeps serving the requests that already hold a ring. This makes `max_batch_size` the
+DFlash 2 service-capacity limit across both active and idle long-lived requests, not merely the
+per-step scheduler limit. `dflash2_admission_misses` reports requests denied a ring because that
+capacity was occupied.
 
 ## Backpressure and fairness
 

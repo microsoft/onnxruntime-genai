@@ -15,6 +15,7 @@ namespace {
 
 constexpr size_t kFatalEventOverhead = 2;
 constexpr size_t kMtpFailureDisableThreshold = 3;
+constexpr size_t kDflash2FailureDisableThreshold = 3;
 
 struct MtpRollbackError : std::runtime_error {
   using std::runtime_error::runtime_error;
@@ -286,6 +287,7 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
         CreateDflash2Config(*model->config_), GetOrtEnv());
     ValidateDflash2ModelCompatibility(
         *model->config_, model->session_info_, dflash2_model->session_info_);
+    model->config_->engine.aux_hidden_states_output_required = true;
     // Built before the main pool so the pool's free-memory measurement already excludes it. The
     // drafter is windowed, so its footprint depends on the batch size, not the context length.
     dflash2_drafter = std::make_unique<Dflash2Drafter>(
@@ -360,9 +362,8 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
         max_drafts, static_cast<size_t>(entry.request->SpeculativeOptions().max_draft_tokens),
         static_cast<size_t>(length_after_step), sequence_limit,
         remaining_turn_tokens_after_step);
-    feed.wants_drafts = width > 0 && results[i].token_appended && !results[i].done && greedy &&
-                        search.repetition_penalty == 1.0f && search.no_repeat_ngram_size == 0 &&
-                        search.min_length <= length_after_step;
+    feed.wants_drafts = width > 0 && results[i].token_appended && !results[i].done &&
+                        greedy && !entry.request->DraftTokenValidationError();
     feed.anchor_token = results[i].token;
     dflash2_feeds_.push_back(feed);
     dflash2_draft_widths_.push_back(width);
@@ -1163,6 +1164,12 @@ void Engine::DetachRequestForTeardown(
   }
 
   scheduler_->DetachRequestForTeardown(request);
+  if (dflash2_drafter_) {
+    try {
+      dflash2_drafter_->Release(request.get());
+    } catch (...) {
+    }
+  }
   if (const auto mtp_it = mtp_requests_.find(request.get());
       mtp_it != mtp_requests_.end()) {
     try {
@@ -1743,6 +1750,11 @@ void Engine::RunDynamic() {
       if (mtp_step) {
         mtp_step->reservation->PrepareCommit();
       }
+      if (dflash2_drafter_ && !dflash2_disabled_ && MaxDraftTokensPerStep() > 0) {
+        // Reads accepted-draft counts that CommitStep clears below. Keep this fallible work on the
+        // rollback side of the target transaction's commit boundary.
+        PrepareDflash2Feeds(step_plan_, step_results_);
+      }
     } catch (...) {
       const auto preparation_error = std::current_exception();
       rollback_transaction();
@@ -1766,10 +1778,6 @@ void Engine::RunDynamic() {
         CommitMtpStep(*mtp_step);
       }
       RecordSpeculativeCommit(step_plan_);
-      if (dflash2_drafter_ && MaxDraftTokensPerStep() > 0) {
-        // Reads the accepted-draft counts, which CommitStep clears below.
-        PrepareDflash2Feeds(step_plan_, step_results_);
-      }
       for (size_t i = 0; i < step_plan_.requests.size(); ++i) {
         step_plan_.requests[i].request->CommitStep(
             step_plan_.requests[i], step_results_[i]);
@@ -1777,9 +1785,10 @@ void Engine::RunDynamic() {
       if (mtp_step) {
         PublishMtpDrafts(*mtp_step);
       }
-      if (dflash2_drafter_ && MaxDraftTokensPerStep() > 0) {
+      if (dflash2_drafter_ && !dflash2_disabled_ && MaxDraftTokensPerStep() > 0) {
         try {
           PublishDflash2Drafts(scheduled_requests);
+          dflash2_consecutive_failures_ = 0;
         } catch (...) {
           const auto dflash2_error = std::current_exception();
           for (const auto& feed : dflash2_feeds_) {
@@ -1787,18 +1796,34 @@ void Engine::RunDynamic() {
               feed.request->SetDraftTokens({});
             }
           }
-          dflash2_drafter_.reset();
+          ++speculative_stats_.standard_fallback_steps;
+          ++speculative_stats_.dflash2_failures;
+          ++dflash2_consecutive_failures_;
+          bool contract_error = false;
           try {
-            try {
-              std::rethrow_exception(dflash2_error);
-            } catch (const std::exception& error) {
-              Log("warning", std::string{"Disabling DFlash 2 after proposal failure: "} + error.what());
-            } catch (...) {
-              Log("warning", "Disabling DFlash 2 after a non-standard proposal failure.");
-            }
+            std::rethrow_exception(dflash2_error);
+          } catch (const std::logic_error&) {
+            contract_error = true;
           } catch (...) {
-            // Warning emission must not turn an optional post-commit drafter failure into a fatal
-            // target transaction failure.
+          }
+          const bool disable_dflash2 = contract_error ||
+                                       dflash2_consecutive_failures_ >= kDflash2FailureDisableThreshold;
+          dflash2_disabled_ = disable_dflash2;
+          if (disable_dflash2) {
+            ++speculative_stats_.dflash2_disables;
+          }
+          if (dflash2_consecutive_failures_ == 1 || disable_dflash2) {
+            try {
+              Log("warning", AddExceptionCause(
+                         contract_error
+                           ? "Disabling DFlash 2 after a proposal contract failure."
+                         : disable_dflash2
+                                     ? "Disabling DFlash 2 after repeated proposal failures."
+                                     : "DFlash 2 proposal failed; using target-only decoding for this step.",
+                                 dflash2_error));
+            } catch (...) {
+              // Diagnostics must not turn an optional drafter failure into a target failure.
+            }
           }
         }
       }
@@ -2090,6 +2115,9 @@ SpeculativeStats Engine::GetSpeculativeStats() const {
   // would be a data race.
   ValidateOwnerThread();
   auto stats = speculative_stats_;
+  if (dflash2_drafter_) {
+    stats.dflash2_admission_misses = dflash2_drafter_->AdmissionMisses();
+  }
   if (stats.draft_tokens_evaluated != 0) {
     stats.acceptance_rate = static_cast<float>(stats.draft_tokens_accepted) /
                             static_cast<float>(stats.draft_tokens_evaluated);

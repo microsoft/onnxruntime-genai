@@ -289,6 +289,7 @@ pybind11::dict ToSpeculativeStatsDict(const OgaSpeculativeStats& stats) {
                           "adaptive_k_decreases", "adaptive_k_observations",
                           "adaptive_k_probes", "cooldown_entries", "cooldown_steps",
                           "cooldown_remaining", "standard_fallback_steps", "mtp_failures",
+                          "dflash2_failures", "dflash2_disables", "dflash2_admission_misses",
                           "full_accept_rounds", "partial_accept_rounds", "zero_accept_rounds",
                           "target_verify_forward_passes", "target_reanchor_forward_passes",
                           "target_reconciliation_forward_passes", "ngram_lookup_hits",

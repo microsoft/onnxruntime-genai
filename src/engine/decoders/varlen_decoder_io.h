@@ -61,6 +61,8 @@ struct VarlenGraphBuffers {
   std::unique_ptr<Tensor> hidden_states_input;
   // Null unless the model was exported with include_hidden_states.
   std::unique_ptr<Tensor> hidden_states;
+  // Null unless the model exposes auxiliary hidden states for a DFlash 2 drafter.
+  std::unique_ptr<Tensor> aux_hidden_states;
   size_t max_batch_size{};
 };
 
@@ -101,7 +103,7 @@ struct VarlenDecoderIO : DecoderIO {
 
   // The step's packed [total_num_tokens, aux_hidden_size] auxiliary hidden states, or null when
   // the model was not exported with aux_hidden_state_layers. This is what a DFlash 2 drafter reads.
-  Tensor* AuxHiddenStates() const override { return aux_hidden_states_.get(); }
+  Tensor* AuxHiddenStates() const override { return active_aux_hidden_states_; }
 
  private:
   void PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
@@ -132,6 +134,7 @@ struct VarlenDecoderIO : DecoderIO {
   std::unique_ptr<Tensor> hidden_states_;
   Tensor* active_hidden_states_{};
   std::unique_ptr<Tensor> aux_hidden_states_;
+  Tensor* active_aux_hidden_states_{};
   bool logits_are_per_token_{true};
 };
 

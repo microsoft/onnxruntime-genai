@@ -652,6 +652,8 @@ struct Config {
     // and the head feeds the next link of a chained draft. Models that merely export hidden states
     // leave it false so an ordinary step does not pay for the extra output.
     bool hidden_states_output_required{};
+    // Runtime-only counterpart for the auxiliary hidden states consumed by DFlash 2.
+    bool aux_hidden_states_output_required{};
   } engine;  // Engine settings
 
   void AddMapping(const std::string& nominal_name, const std::string& graph_name);

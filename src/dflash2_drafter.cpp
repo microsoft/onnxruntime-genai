@@ -367,6 +367,7 @@ bool Dflash2Drafter::Admit(const Feed& feed) {
   }
   if (ring_blocks_ != 0) {
     if (free_blocks_.size() < ring_blocks_) {
+      ++admission_misses_;
       return false;
     }
     // Claim the whole ring now so a second new request in the same step sees the smaller pool.
@@ -543,8 +544,6 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     layout.max_kv_len = std::max(layout.max_kv_len, kv_length);
     layout.min_kv_len = std::min(layout.min_kv_len, kv_length);
 
-    state.cached_positions = CheckedAdd(
-        feed.first_position, feed.aux_row_count, "DFlash 2 cached positions");
   }
 
   const size_t num_tokens = layout.q_row_map.size();
@@ -666,6 +665,12 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
 
   model_->session_->Run(run_options_.get(), input_names.data(), inputs.data(), input_names.size(),
                         output_names.data(), outputs.data(), output_names.size());
+
+  for (const size_t i : served) {
+    const auto& feed = feeds[i];
+    requests_[feed.request].cached_positions = CheckedAdd(
+        feed.first_position, feed.aux_row_count, "DFlash 2 cached positions");
+  }
 
   if (!drafts_wanted) {
     return;

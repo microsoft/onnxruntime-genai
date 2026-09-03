@@ -261,6 +261,8 @@ struct Engine : std::enable_shared_from_this<Engine>,
   std::vector<Dflash2Drafter::Feed> dflash2_feeds_;
   std::vector<std::vector<int32_t>> dflash2_drafts_;
   std::vector<size_t> dflash2_draft_widths_;
+  size_t dflash2_consecutive_failures_{};
+  bool dflash2_disabled_{};
   DeviceSpan<int32_t> mtp_device_drafts_;
   DeviceSpan<int32_t> mtp_device_chain_inputs_;
   EngineStepErrorFactory make_step_error_;

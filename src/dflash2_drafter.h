@@ -79,6 +79,7 @@ struct Dflash2Drafter {
   static size_t PoolBlocks(const Config& config, size_t paged_block_size, size_t max_batch_size);
 
   size_t NumDraftTokens() const { return static_cast<size_t>(config_.num_draft_tokens); }
+  size_t AdmissionMisses() const { return admission_misses_; }
 
   /**
    * @brief Ingests every served feed's context and drafts for the ones that asked.
@@ -124,6 +125,7 @@ struct Dflash2Drafter {
   std::vector<std::string> cache_input_names_, cache_output_names_;
   std::vector<int32_t> free_blocks_;
   std::unordered_map<const Request*, RequestState> requests_;
+  size_t admission_misses_{};
 
   std::unique_ptr<OrtRunOptions> run_options_;
 };
