@@ -35,7 +35,7 @@ void ReplaceAll(std::string& text, const std::string& from, const std::string& t
 std::tuple<std::unique_ptr<OrtValue>, std::unique_ptr<OrtValue>, std::unique_ptr<OrtValue>>
 ProcessGemma4Prompt(const Generators::Tokenizer& tokenizer, const std::string& prompt,
                     OrtxTensor* pixel_values, Ort::Allocator& allocator,
-                    size_t vision_soft_tokens_per_image,
+                    const std::vector<int64_t>& vision_soft_tokens_per_image,
                     int64_t num_audio_tokens = 0) {
   constexpr char boi_token[] = "<|image>";
   constexpr char image_token[] = "<|image|>";
@@ -96,15 +96,32 @@ ProcessGemma4Prompt(const Generators::Tokenizer& tokenizer, const std::string& p
     throw std::runtime_error("Prompt contained " + std::to_string(boi_count) + " image tokens but received " +
                              std::to_string(num_images) + " images.");
   }
-
-  // Build the expanded image token sequence with pre-allocated buffer
-  std::string image_tokens_expanded;
-  image_tokens_expanded.reserve(vision_soft_tokens_per_image * image_token_len);
-  for (size_t i = 0; i < vision_soft_tokens_per_image; ++i) {
-    image_tokens_expanded += image_token;
+  if (num_images > 0 && vision_soft_tokens_per_image.size() != static_cast<size_t>(num_images)) {
+    throw std::runtime_error("Gemma4 image preprocessing produced " +
+                             std::to_string(vision_soft_tokens_per_image.size()) +
+                             " image token counts for " + std::to_string(num_images) + " images.");
   }
-  const std::string full_image_sequence = "\n\n" + std::string(boi_token) + image_tokens_expanded + eoi_token + "\n\n";
-  ReplaceAll(text, boi_token, full_image_sequence);
+
+  size_t search_pos = 0;
+  for (int64_t soft_token_count : vision_soft_tokens_per_image) {
+    if (soft_token_count <= 0) {
+      throw std::runtime_error("Gemma4 image token counts must be positive.");
+    }
+    const auto image_pos = text.find(boi_token, search_pos);
+    if (image_pos == std::string::npos) {
+      throw std::runtime_error(
+          "Gemma4 prompt expansion expected an <|image> marker for each image");
+    }
+    std::string image_tokens_expanded;
+    image_tokens_expanded.reserve(static_cast<size_t>(soft_token_count) * image_token_len);
+    for (int64_t i = 0; i < soft_token_count; ++i) {
+      image_tokens_expanded += image_token;
+    }
+    const std::string full_image_sequence =
+        "\n\n" + std::string(boi_token) + image_tokens_expanded + eoi_token + "\n\n";
+    text.replace(image_pos, boi_token_len, full_image_sequence);
+    search_pos = image_pos + full_image_sequence.size();
+  }
 
   // Expand audio tokens: replace single <|audio|> from chat template with N audio soft tokens.
   // Currently only single-clip audio is supported. Multi-audio would require per-clip
@@ -159,8 +176,10 @@ ProcessGemma4Prompt(const Generators::Tokenizer& tokenizer, const std::string& p
     token_type_data[i] = (input_ids[i] == image_token_id) ? 1 : 0;
   }
 
-  auto num_img_tokens = OrtValue::CreateTensor<int64_t>(allocator, std::vector<int64_t>{1});
-  num_img_tokens->GetTensorMutableData<int64_t>()[0] = static_cast<int64_t>(vision_soft_tokens_per_image);
+  auto num_img_tokens = OrtValue::CreateTensor<int64_t>(
+      allocator, std::vector<int64_t>{static_cast<int64_t>(vision_soft_tokens_per_image.size())});
+  std::copy(vision_soft_tokens_per_image.begin(), vision_soft_tokens_per_image.end(),
+            num_img_tokens->GetTensorMutableData<int64_t>());
 
   return {std::move(input_ids_value), std::move(token_type_ids), std::move(num_img_tokens)};
 }
@@ -206,8 +225,9 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
 
   // Text-only path: no images and no audio
   if (!payload.images && !payload.audios) {
+    const std::vector<int64_t> vision_soft_tokens;
     auto [input_ids, token_type_ids, num_img_tokens] =
-        ProcessGemma4Prompt(tokenizer, std::string(payload.prompt), nullptr, allocator, vision_soft_tokens_per_image_);
+        ProcessGemma4Prompt(tokenizer, std::string(payload.prompt), nullptr, allocator, vision_soft_tokens);
     named_tensors->emplace(Config::Defaults::InputIdsName, std::make_shared<Tensor>(std::move(input_ids)));
     return named_tensors;
   }
@@ -218,7 +238,8 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
   ort_extensions::OrtxObjectPtr<OrtxTensor> pixel_values_owner, pixel_position_ids_owner, num_soft_tokens_owner;
   OrtxTensor* pixel_values = nullptr;
   OrtxTensor* pixel_position_ids = nullptr;
-  size_t actual_soft_tokens = vision_soft_tokens_per_image_;
+  std::vector<int64_t> vision_soft_tokens;
+  size_t max_soft_tokens = vision_soft_tokens_per_image_;
   if (payload.images) {
     CheckResult(OrtxImagePreProcess(image_processor_.get(), payload.images->images_.get(), image_result.ToBeAssigned()));
     CheckResult(OrtxTensorResultGetAt(image_result.get(), 0, pixel_values_owner.ToBeAssigned()));
@@ -240,10 +261,25 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
       size_t nst_dims;
       CheckResult(OrtxGetTensorData(num_soft_tokens_owner.get(), reinterpret_cast<const void**>(&nst_data),
                                     &nst_shape, &nst_dims));
-      if (nst_data && nst_data[0] > 0) {
-        actual_soft_tokens = static_cast<size_t>(nst_data[0]);
+      size_t count = 1;
+      for (size_t i = 0; i < nst_dims; ++i) {
+        count *= static_cast<size_t>(nst_shape[i]);
+      }
+      vision_soft_tokens.assign(nst_data, nst_data + count);
+      if (!vision_soft_tokens.empty()) {
+        max_soft_tokens = static_cast<size_t>(*std::max_element(vision_soft_tokens.begin(), vision_soft_tokens.end()));
       }
     }
+  }
+
+  if (payload.images && vision_soft_tokens.empty()) {
+    const float* pixel_data{};
+    const int64_t* pixel_shape{};
+    size_t pixel_dims{};
+    CheckResult(OrtxGetTensorData(pixel_values, reinterpret_cast<const void**>(&pixel_data),
+                                  &pixel_shape, &pixel_dims));
+    const size_t image_count = pixel_dims == 3 ? static_cast<size_t>(pixel_shape[0]) : 1;
+    vision_soft_tokens.assign(image_count, static_cast<int64_t>(vision_soft_tokens_per_image_));
   }
 
   // Process audio FIRST to compute num_audio_tokens (needed for prompt token expansion).
@@ -300,7 +336,7 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
 
   // Process prompt: expand image and audio tokens, then encode
   auto [input_ids, token_type_ids, num_img_tokens] =
-      ProcessGemma4Prompt(tokenizer, std::string(payload.prompt), pixel_values, allocator, actual_soft_tokens, num_audio_tokens);
+      ProcessGemma4Prompt(tokenizer, std::string(payload.prompt), pixel_values, allocator, vision_soft_tokens, num_audio_tokens);
   named_tensors->emplace(std::string(Config::Defaults::InputIdsName), std::make_shared<Tensor>(std::move(input_ids)));
   named_tensors->emplace(std::string(Config::Defaults::TokenTypeIdsName), std::make_shared<Tensor>(std::move(token_type_ids)));
 
@@ -309,7 +345,7 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
     // The vision ONNX model expects the actual (unpadded) number of patches.
     // Trim the tensors to actual_patches = actual_soft_tokens * pooling_kernel_size².
     constexpr int64_t kPoolingKernelSize = 3;
-    const int64_t actual_patches = static_cast<int64_t>(actual_soft_tokens) * kPoolingKernelSize * kPoolingKernelSize;
+    const int64_t actual_patches = static_cast<int64_t>(max_soft_tokens) * kPoolingKernelSize * kPoolingKernelSize;
 
     // Get padded pixel_values shape
     const float* pv_data{};
