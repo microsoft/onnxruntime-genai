@@ -150,15 +150,30 @@ TEST(QwenVisionMultiImageTest, PreservesUnambiguousTemporalPadding) {
   EXPECT_EQ(layout.ImagePatchCount(10, 1, 5), 15);
 }
 
-TEST(QwenVisionMultiImageTest, RejectsAmbiguousStrideAndTemporalPadding) {
-  const std::string message = CaptureRuntimeErrorMessage([] {
-    Generators::ResolveQwenPatchLayout(
-        /*total_patches=*/24,
-        /*total_grid_tokens=*/12,
-        /*total_hw=*/12,
-        /*max_grid_tokens=*/8,
-        /*num_images=*/2);
-  });
+TEST(QwenVisionMultiImageTest, UsesPaddedStrideWhenTotalIsAlsoDivisibleByTotalHw) {
+  const auto layout = Generators::ResolveQwenPatchLayout(
+      /*total_patches=*/768,
+      /*total_grid_tokens=*/384,
+      /*total_hw=*/384,
+      /*max_grid_tokens=*/256,
+      /*num_images=*/3);
 
-  EXPECT_EQ(message, "pixel_values patch layout is ambiguous between per-image stride padding and temporal padding");
+  EXPECT_EQ(layout.padded_image_stride, 256);
+  EXPECT_EQ(layout.temporal_multiplier, 0);
+  EXPECT_EQ(layout.ImagePatchOffset(2, 320), 512);
+  EXPECT_EQ(layout.ImagePatchCount(64, 8, 8), 64);
+}
+
+TEST(QwenVisionMultiImageTest, PreservesTemporalPaddingWhenStrideDoesNotMatchMaximumGrid) {
+  const auto layout = Generators::ResolveQwenPatchLayout(
+      /*total_patches=*/24,
+      /*total_grid_tokens=*/12,
+      /*total_hw=*/12,
+      /*max_grid_tokens=*/8,
+      /*num_images=*/2);
+
+  EXPECT_EQ(layout.padded_image_stride, 0);
+  EXPECT_EQ(layout.temporal_multiplier, 2);
+  EXPECT_EQ(layout.ImagePatchOffset(1, 8), 8);
+  EXPECT_EQ(layout.ImagePatchCount(8, 2, 4), 16);
 }

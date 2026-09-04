@@ -43,11 +43,8 @@ inline QwenPatchLayout ResolveQwenPatchLayout(int64_t total_patches,
   const bool temporal_padded = total_patches > 0 && total_hw > 0 && total_patches % total_hw == 0;
   const int64_t candidate_stride =
       num_images > 0 && total_patches % num_images == 0 ? total_patches / num_images : 0;
-  const bool stride_padded = candidate_stride > 0 && candidate_stride >= max_grid_tokens;
+  const bool stride_padded = candidate_stride > 0 && candidate_stride == max_grid_tokens;
 
-  if (stride_padded && temporal_padded) {
-    throw std::runtime_error("pixel_values patch layout is ambiguous between per-image stride padding and temporal padding");
-  }
   if (stride_padded) {
     return {.padded_image_stride = candidate_stride};
   }
