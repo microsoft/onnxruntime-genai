@@ -79,67 +79,80 @@ def _download_ort(use_cuda: bool, use_dml: bool, destination_dir: PathLike):
     return _lib_path()
 
 
-def _download_dml(destination_dir: PathLike):
-    def _lib_path():
-        mach = None
-        if platform.machine().lower() == "x86_64" or platform.machine().lower() == "amd64":
-            mach = "x64"
-        elif platform.machine().lower() == "aarch64" or platform.machine().lower() == "arm64":
-            mach = "arm64"
-        else:
-            raise NotImplementedError(f"Unsupported machine architecture: {platform.machine()}")
+def _restore_dml_dependencies(
+    destination_dir: PathLike,
+    nuget_config_file: PathLike | None = None,
+    nuget_package_source: str | None = None,
+):
+    mach = None
+    if platform.machine().lower() == "x86_64" or platform.machine().lower() == "amd64":
+        mach = "x64"
+    elif platform.machine().lower() == "aarch64" or platform.machine().lower() == "arm64":
+        mach = "arm64"
+    else:
+        raise NotImplementedError(f"Unsupported machine architecture: {platform.machine()}")
 
-        return destination_dir / "dml" / "bin" / (mach + "-win") / "DirectML.dll"
+    destination_dir = Path(destination_dir)
+    packages = (
+        ("Microsoft.AI.DirectML", "1.15.2"),
+        ("Microsoft.Direct3D.D3D12", "1.614.1"),
+    )
+    dml_root = destination_dir / f"{packages[0][0]}.{packages[0][1]}"
+    d3d12_root = destination_dir / f"{packages[1][0]}.{packages[1][1]}"
+    dml_lib_path = dml_root / "bin" / f"{mach}-win" / "DirectML.dll"
+    d3d12_lib_path = d3d12_root / "build" / "native" / "bin" / mach / "D3D12Core.dll"
 
-    dml_version = "1.15.2"
-    dml_package_name = "Microsoft.AI.DirectML"
-    dml_package_url = f"https://www.nuget.org/api/v2/package/{dml_package_name}/{dml_version}"
-    package_path = destination_dir / f"{dml_package_name}.zip"
-    if package_path.exists():
-        _log.info(f"Package {dml_package_name} already downloaded")
-        return _lib_path()
+    if dml_lib_path.exists() and d3d12_lib_path.exists():
+        _log.info("DirectML dependencies already restored")
+        return dml_lib_path, d3d12_lib_path
 
-    _log.info(f"Downloading {dml_package_name} version {dml_version}")
-    with open(package_path, "wb") as f:
-        f.write(requests.get(dml_package_url).content)
+    nuget_path = shutil.which("nuget") or shutil.which("nuget.exe")
+    if not nuget_path:
+        raise RuntimeError("nuget or nuget.exe must be available on PATH to restore DirectML dependencies")
 
-    unpacked_dir = destination_dir / "dml"
-    shutil.unpack_archive(package_path, unpacked_dir)
+    packages_config = destination_dir / "dml-packages.config"
+    packages_element = ElementTree.Element("packages")
+    for package_name, package_version in packages:
+        ElementTree.SubElement(
+            packages_element,
+            "package",
+            id=package_name,
+            version=package_version,
+            targetFramework="native",
+        )
+    ElementTree.ElementTree(packages_element).write(packages_config, encoding="utf-8", xml_declaration=True)
 
-    return _lib_path()
+    command = [
+        nuget_path,
+        "restore",
+        str(packages_config),
+        "-PackagesDirectory",
+        str(destination_dir),
+        "-NonInteractive",
+    ]
+    if nuget_package_source:
+        command.extend(["-Source", nuget_package_source])
+    if nuget_config_file:
+        command.extend(["-ConfigFile", str(nuget_config_file)])
 
+    _log.info("Restoring DirectML dependencies with NuGet")
+    subprocess.run(command, check=True)
 
-def _download_d3d12(destination_dir: PathLike):
-    def _lib_path():
-        mach = None
-        if platform.machine().lower() == "x86_64" or platform.machine().lower() == "amd64":
-            mach = "x64"
-        elif platform.machine().lower() == "aarch64" or platform.machine().lower() == "arm64":
-            mach = "arm64"
-        else:
-            raise NotImplementedError(f"Unsupported machine architecture: {platform.machine()}")
+    if not dml_lib_path.exists():
+        raise RuntimeError(f"NuGet restore did not produce {dml_lib_path}")
+    if not d3d12_lib_path.exists():
+        raise RuntimeError(f"NuGet restore did not produce {d3d12_lib_path}")
 
-        return destination_dir / "d3d12" / "build" / "native" / "bin" / mach / "D3D12Core.dll"
-
-    d3d12_version = "1.614.1"
-    d3d12_package_name = "Microsoft.Direct3D.D3D12"
-    d3d12_package_url = f"https://www.nuget.org/api/v2/package/{d3d12_package_name}/{d3d12_version}"
-    package_path = destination_dir / f"{d3d12_package_name}.zip"
-    if package_path.exists():
-        _log.info(f"Package {d3d12_package_name} already downloaded")
-        return _lib_path()
-
-    _log.info(f"Downloading {d3d12_package_name} version {d3d12_version}")
-    with open(package_path, "wb") as f:
-        f.write(requests.get(d3d12_package_url).content)
-
-    unpacked_dir = destination_dir / "d3d12"
-    shutil.unpack_archive(package_path, unpacked_dir)
-
-    return _lib_path()
+    return dml_lib_path, d3d12_lib_path
 
 
-def download_dependencies(use_cuda: bool, use_dml: bool, destination_dir: PathLike):
+def download_dependencies(
+    use_cuda: bool,
+    use_dml: bool,
+    destination_dir: PathLike,
+    nuget_config_file: PathLike | None = None,
+    nuget_package_source: str | None = None,
+):
     dependencies_dir = destination_dir / "dependencies"
     if not dependencies_dir.exists():
         dependencies_dir.mkdir(parents=True)
@@ -151,10 +164,12 @@ def download_dependencies(use_cuda: bool, use_dml: bool, destination_dir: PathLi
             shutil.copy(Path(ort_lib_dir) / file_name, destination_dir)
 
     if use_dml:
-        dml_lib_path = _download_dml(dependencies_dir)
+        dml_lib_path, d3d12_lib_path = _restore_dml_dependencies(
+            dependencies_dir,
+            nuget_config_file,
+            nuget_package_source,
+        )
         shutil.copy(dml_lib_path, destination_dir)
-
-        d3d12_lib_path = _download_d3d12(dependencies_dir)
         shutil.copy(d3d12_lib_path, destination_dir)
 
     return dependencies_dir

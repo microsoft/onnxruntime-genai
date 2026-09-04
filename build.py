@@ -145,6 +145,15 @@ def _parse_args():
         help="Extra definitions to pass to CMake during build system "
         "generation. These are just CMake -D options without the leading -D.",
     )
+    parser.add_argument(
+        "--nuget_config_file",
+        type=Path,
+        help="Custom NuGet.Config used for package restore operations.",
+    )
+    parser.add_argument(
+        "--nuget_package_source",
+        help="Override the NuGet package source used by the build.",
+    )
 
     parser.add_argument("--ort_home", default=None, type=Path, help="Root directory of onnxruntime.")
 
@@ -407,6 +416,9 @@ def _validate_ios_args(args: argparse.Namespace):
 
 
 def _validate_cmake_args(args: argparse.Namespace):
+    if args.nuget_config_file:
+        args.nuget_config_file = args.nuget_config_file.resolve(strict=True)
+
     args.cmake_extra_defines = [i for j in args.cmake_extra_defines for i in j] if args.cmake_extra_defines else []
     args.cmake_extra_defines = [f"-D{define}" for define in args.cmake_extra_defines]
 
@@ -645,6 +657,12 @@ def update(args: argparse.Namespace, env: dict[str, str]):
     if args.ort_home:
         command += [f"-DORT_HOME={args.ort_home}"]
 
+    if args.nuget_config_file:
+        command += [f"-DNUGET_CONFIG_FILE={args.nuget_config_file}"]
+
+    if args.nuget_package_source:
+        command += [f"-DNUGET_PACKAGE_SOURCE={args.nuget_package_source}"]
+
     if args.use_winml:
         command += [f"-DWINML_SDK_VERSION={args.winml_sdk_version}"]
 
@@ -781,7 +799,13 @@ def build(args: argparse.Namespace, env: dict[str, str]):
         lib_dir = lib_dir / args.config
 
     if not args.ort_home:
-        _ = util.download_dependencies(args.use_cuda, args.use_dml, lib_dir)
+        _ = util.download_dependencies(
+            args.use_cuda,
+            args.use_dml,
+            lib_dir,
+            args.nuget_config_file,
+            args.nuget_package_source,
+        )
     else:
         lib_dir = args.ort_home / "lib"
 
@@ -934,7 +958,13 @@ def test(args: argparse.Namespace, env: dict[str, str]):
         # Whereas on as on platforms, the executable is directly under the test directory.
         lib_dir = lib_dir / args.config
     if not args.ort_home:
-        _ = util.download_dependencies(args.use_cuda, args.use_dml, lib_dir)
+        _ = util.download_dependencies(
+            args.use_cuda,
+            args.use_dml,
+            lib_dir,
+            args.nuget_config_file,
+            args.nuget_package_source,
+        )
     else:
         lib_dir = args.ort_home / "lib"
 
