@@ -309,6 +309,17 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
       // windowed drafter's footprint depends on the batch size, not the context length.
       dflash2_drafter = std::make_unique<Dflash2Drafter>(
           dflash2_model, paged_block_size, pool_blocks, dflash2_max_batch_size);
+      // Explicit num_blocks bypasses the free-memory probe, so deduct the already allocated fixed
+      // pool from that configured target-only budget.
+      if (batching.num_blocks.has_value()) {
+        const size_t dflash2_bytes_per_pool_block =
+            Dflash2Drafter::BytesPerBlock(*model->config_, paged_block_size, dflash2_cache_type);
+        if (pool_blocks >
+            std::numeric_limits<size_t>::max() / dflash2_bytes_per_pool_block) {
+          throw std::runtime_error("DFlash 2 windowed cache bytes overflow size_t.");
+        }
+        dflash2_reserved_memory_bytes = pool_blocks * dflash2_bytes_per_pool_block;
+      }
     } else {
       // A full-attention drafter mirrors the target pool, so it is billed per target block instead
       // and built below once the target pool's block count is known.
