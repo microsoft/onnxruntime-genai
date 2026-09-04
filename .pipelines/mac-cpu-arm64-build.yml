@@ -183,7 +183,7 @@ jobs:
       python3 -m pip install -r test/python/requirements.txt
       python3 -m pip install -r test/python/macos/torch/requirements.txt
       python3 -m pip install -r test/python/macos/ort/requirements.txt
-      python3 -m pip install build/cpu/osx-arm64/Release/wheel/onnxruntime_genai*.whl --no-deps
+      python3 -m pip install build/cpu/osx-arm64/Release/wheel/onnxruntime_genai*.whl --force-reinstall --no-deps
     displayName: 'Install the Python wheel and test dependencies'
     workingDirectory: '$(Build.SourcesDirectory)'
 

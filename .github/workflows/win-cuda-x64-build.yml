@@ -187,7 +187,7 @@ jobs:
           python -m pip install -r test\python\cuda\torch\requirements.txt
           python -m pip install --index-url $env:ORT_EP_PYPI_SOURCE -r test\python\cuda\ort\requirements.txt
           python -m pip install --index-url $env:ORT_EP_PYPI_SOURCE onnxruntime-ep-cuda12==$env:ORT_EP_PYPI_VERSION
-          python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
+          python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --force-reinstall --no-deps
 
       - name: Run the synthetic Engine Python tests
         run: |
