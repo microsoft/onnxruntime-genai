@@ -917,8 +917,7 @@ void Engine::PublishMtpDrafts(MtpStep& step) {
 }
 
 void Engine::RecordSpeculativeCommit(const StepPlan& plan) noexcept {
-  for (size_t i = 0; i < plan.requests.size(); ++i) {
-    const auto& entry = plan.requests[i];
+  for (const auto& entry : plan.requests) {
     if (entry.draft_token_count == 0) {
       continue;
     }

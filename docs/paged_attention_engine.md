@@ -986,13 +986,13 @@ proposal because `token_appended` and `finish_reason` alone cannot distinguish b
 from a confirmed final draft or a rejected proposal.
 
 **CUDA batched-commit qualification gap.** The per-stage loop's `can_batch_commits` branch (used
-when every active request's `Search` supports device-side batched commit) uses the same counters,
-checkpoints, and promotion rules as the non-batched fallback branch. The two finalization blocks are
-duplicated implementations that are presently equivalent, not shared code. The CPU test doubles
+when every active request's `Search` supports device-side batched commit) and the non-batched
+fallback use different token-commit mechanisms, then call the same stage-finalization code for
+counters, checkpoints, promotion, stop truncation, and result publication. The CPU test doubles
 this document's tests run against cannot produce a `Search` that supports batched commit, so no
-automated test in this repository actually exercises the `can_batch_commits == true` branch for
-decoded stop strings. Treat that branch as requiring real CUDA qualification before relying on it
-in production; structural equivalence is not evidence that it has been tested.
+automated test in this repository actually exercises the device-side commit mechanism with decoded
+stop strings. Treat that branch as requiring real CUDA qualification before relying on it in
+production; shared finalization does not prove that the preceding device commit has been tested.
 
 ## Rollback and failure handling
 

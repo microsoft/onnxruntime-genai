@@ -775,6 +775,48 @@ void ScheduledRequests::GenerateNextTokensForTransaction(
     if (can_batch_commits)
       committed_tokens = model_->p_device_->Allocate<int32_t>(sampled_request_count);
 
+    const auto commit_sampled_stage = [&](size_t request_index, size_t stage) {
+      auto& request = requests_[request_index];
+      // The plan's original sequence_length_before, plus accepted_draft_count_ (prior stages
+      // only -- never this one), always equals CurrentSequenceLength() just before this stage's
+      // own append. Every earlier stage advanced Search and accepted_draft_count_ by exactly one,
+      // so the unmodified plan works for every stage.
+      const auto& stage_plan = plan.requests[request_index];
+      const auto stage_result = request->StageGenerationForTransaction(stage_plan);
+      const bool is_natural_last_stage =
+          stage + 1 == selected_tokens[request_index].size();
+      const bool stopped =
+          stage_result.finish_reason == GenerationFinishReason::StopString;
+      if (stopped || is_natural_last_stage) {
+        if (stopped && !is_natural_last_stage &&
+            (request_index >= rng_checkpoints.size() ||
+             stage >= rng_checkpoints[request_index].size())) {
+          throw std::logic_error(
+              "A stop-truncated sampled round is missing its RNG checkpoint.");
+        }
+        auto final_result = stage_result;
+        // A target-confirmed final draft contributes to both the accepted and evaluated counts.
+        // A final stage within the proposed range but beyond the confirmed prefix is evaluated
+        // but not accepted. A trailing bonus token was never proposed and contributes to neither.
+        if (stage < confirmed_draft_counts[request_index]) {
+          request->PromoteFinalStageAsAcceptedDraft(final_result);
+        } else if (stage < stage_plan.draft_token_count) {
+          request->MarkFinalStageAsEvaluatedNonAcceptedDraft();
+        }
+        results[request_index] = final_result;
+        if (stopped && !is_natural_last_stage) {
+          // Later selected tokens are never committed. Restore the RNG checkpoint immediately
+          // after the retained token so discarded samples do not affect future decoding.
+          selected_tokens[request_index].resize(stage + 1);
+          request->rng_ = rng_checkpoints[request_index][stage];
+        }
+      } else if (!stage_result.token_appended || stage_result.done) {
+        throw std::logic_error("An accepted sampled draft unexpectedly ended the request.");
+      } else {
+        request->AppendAcceptedSampledToken(stage_result.token);
+      }
+    };
+
     for (size_t stage = 0; stage < max_selected_tokens; ++stage) {
       std::vector<size_t> active;
       active.reserve(sampled_request_count);
@@ -803,97 +845,12 @@ void ScheduledRequests::GenerateNextTokensForTransaction(
         }
         stage_tokens.CopyDeviceToCpu();
         for (size_t row = 0; row < active.size(); ++row) {
-          const size_t request_index = active[row];
-          auto& request = requests_[request_index];
-          // The plan's original sequence_length_before, plus accepted_draft_count_ (prior stages
-          // only -- never this one), always equals CurrentSequenceLength() just before this
-          // stage's own append: every earlier stage's StageGeneration() advanced Search by exactly
-          // one token, and AppendAcceptedSampledToken() below advances accepted_draft_count_ by
-          // exactly one to match. So this same unmodified plan works for every stage, whether or
-          // not it turns out to be the request's last, and StageGeneration()'s stop-string
-          // observation -- reused unchanged from the ordinary one-token path -- always sees
-          // exactly one newly appended token.
-          const auto& stage_plan = plan.requests[request_index];
-          const auto stage_result = request->StageGenerationForTransaction(stage_plan);
-          const bool is_natural_last_stage =
-              stage + 1 == selected_tokens[request_index].size();
-          const bool stopped =
-              stage_result.finish_reason == GenerationFinishReason::StopString;
-          if (stopped || is_natural_last_stage) {
-            auto final_result = stage_result;
-            // This stage is a genuinely target-confirmed draft (not a trailing replacement/bonus
-            // token) whenever it falls within the request's own confirmed prefix -- fold it into
-            // accepted_draft_count_ so CommitStep, cache/fixed-state CommitPrefix, and speculative
-            // telemetry all count it as accepted, exactly like an earlier accepted stage. When it
-            // instead falls at or beyond the confirmed prefix but still within the proposed draft
-            // range, it is a logically resolved but non-accepted proposal (either rejected, with
-            // its replacement in this result, or EOS without an append) -- count it as evaluated
-            // but not accepted. A stage beyond the whole proposed range (a trailing bonus token
-            // after full acceptance) is neither: it was never one of the proposed drafts.
-            if (stage < confirmed_draft_counts[request_index]) {
-              request->PromoteFinalStageAsAcceptedDraft(final_result);
-            } else if (stage < stage_plan.draft_token_count) {
-              request->MarkFinalStageAsEvaluatedNonAcceptedDraft();
-            }
-            results[request_index] = final_result;
-            if (stopped && !is_natural_last_stage) {
-              // A stop match ends verification here: every later staged draft (and any trailing
-              // bonus/replacement token) is discarded by simply never being iterated again --
-              // active[] excludes this request from every subsequent stage once its
-              // selected_tokens shrink to this point. Undo every RNG draw this round made for
-              // those now-invisible tokens by restoring the state captured right after this
-              // stage's own draw (a no-op for a request with no active stop controller, which
-              // never populated a checkpoint here).
-              selected_tokens[request_index].resize(stage + 1);
-              // rng_checkpoints itself is only ever sized when at least one request in this step
-              // needed it (see SelectSampledRows); a request whose own stop match reaches here
-              // always was one of them, but this stays a bounds check rather than an implicit
-              // invariant.
-              if (request_index < rng_checkpoints.size() &&
-                  stage < rng_checkpoints[request_index].size()) {
-                request->rng_ = rng_checkpoints[request_index][stage];
-              }
-            }
-          } else if (!stage_result.token_appended || stage_result.done) {
-            throw std::logic_error("An accepted sampled draft unexpectedly ended the request.");
-          } else {
-            request->AppendAcceptedSampledToken(stage_result.token);
-          }
+          commit_sampled_stage(active[row], stage);
         }
       } else {
         for (size_t request_index : active) {
-          auto& request = requests_[request_index];
-          request->search_->CommitToken(selected_tokens[request_index][stage]);
-          const auto& stage_plan = plan.requests[request_index];
-          const auto stage_result = request->StageGenerationForTransaction(stage_plan);
-          const bool is_natural_last_stage =
-              stage + 1 == selected_tokens[request_index].size();
-          const bool stopped =
-              stage_result.finish_reason == GenerationFinishReason::StopString;
-          if (stopped || is_natural_last_stage) {
-            auto final_result = stage_result;
-            if (stage < confirmed_draft_counts[request_index]) {
-              request->PromoteFinalStageAsAcceptedDraft(final_result);
-            } else if (stage < stage_plan.draft_token_count) {
-              request->MarkFinalStageAsEvaluatedNonAcceptedDraft();
-            }
-            results[request_index] = final_result;
-            if (stopped && !is_natural_last_stage) {
-              selected_tokens[request_index].resize(stage + 1);
-              // rng_checkpoints itself is only ever sized when at least one request in this step
-              // needed it (see SelectSampledRows); a request whose own stop match reaches here
-              // always was one of them, but this stays a bounds check rather than an implicit
-              // invariant.
-              if (request_index < rng_checkpoints.size() &&
-                  stage < rng_checkpoints[request_index].size()) {
-                request->rng_ = rng_checkpoints[request_index][stage];
-              }
-            }
-          } else if (!stage_result.token_appended || stage_result.done) {
-            throw std::logic_error("An accepted sampled draft unexpectedly ended the request.");
-          } else {
-            request->AppendAcceptedSampledToken(stage_result.token);
-          }
+          requests_[request_index]->search_->CommitToken(selected_tokens[request_index][stage]);
+          commit_sampled_stage(request_index, stage);
         }
       }
     }
