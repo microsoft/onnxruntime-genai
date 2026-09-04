@@ -298,7 +298,7 @@ python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p pr
 
 This scenario is for when you want to build a model that uses the `PagedAttention` operator so it can be served by ONNX Runtime GenAI's continuous-batching engine. When enabled, the builder replaces `GroupQueryAttention` with `PagedAttention`, packs all sequences of the batch into a single flattened token axis (`input_ids` becomes 1D), stores the KV-cache in paged `[num_blocks, block_size, num_key_value_heads, head_size]` buffers, and removes the `attention_mask` input in favor of the `block_table`, `cumulative_sequence_lengths`, and `past_sequence_lengths` metadata inputs. It also removes `position_ids` when RoPE is fused into attention; architectures that require an external MRoPE op retain packed position IDs (for example, Qwen3.5/3.8 uses `[3, num_tokens]`). Set `prune_lm_head=true` to select the final packed hidden state for each sequence before the LM head and output `[batch_size, vocab_size]` logits. By default, it projects every packed hidden state and outputs `[num_tokens, vocab_size]` logits.
 
-Paged attention supports CUDA with `fp16` or `bf16` precision and WebGPU with `fp16` precision. Paged exports include the CPU `attention_metadata` input used by the runtime to provide stable query and KV bounds without downloading device sequence lengths in every attention layer. Paged attention cannot be combined with `exclude_embeds` or `exclude_lm_head`. `paged_block_size` defaults to `256` and must be a positive multiple of `256`; for models with short and long rotary caches, it must evenly divide `original_max_position_embeddings`. `gpu_utilization_factor` defaults to `0.6` and must be greater than `0` and at most `1`. `max_batch_size` defaults to `100` and must be a positive integer no greater than `256`. `paged_chunk_size` defaults to `paged_block_size`, must be a positive integer, and is written to `search.chunk_size`; it applies only to models whose sliding-window layers are served from a ring of blocks, which hold `paged_chunk_size + window_size - 1` positions and therefore require chunked prefill.
+Paged attention supports CUDA with `fp16` or `bf16` precision and WebGPU with `fp16` precision. CUDA paged exports include the CPU-resident `attention_metadata` input used by the runtime to provide stable query and KV bounds without downloading device sequence lengths in every attention layer; WebGPU exports omit it. Paged attention cannot be combined with `exclude_embeds` or `exclude_lm_head`. `paged_block_size` defaults to `256` and must be a positive multiple of `256`; for models with short and long rotary caches, it must evenly divide `original_max_position_embeddings`. `gpu_utilization_factor` defaults to `0.6` and must be greater than `0` and at most `1`. Set the positive integer `num_blocks` to use a fixed global-cache capacity instead; this is required for providers such as WebGPU that do not expose available device memory. `max_batch_size` defaults to `100` and must be a positive integer no greater than `256`. `paged_chunk_size` defaults to `paged_block_size`, must be a positive integer, and is written to `search.chunk_size`; it applies only to models whose sliding-window layers are served from a ring of blocks, which hold `paged_chunk_size + window_size - 1` positions and therefore require chunked prefill.
 
 Paged builds can describe non-legacy decoder state in `model.decoder.state_groups`. The Qwen hybrid builder emits exact logical layer IDs for sparse paged KV, fixed convolution state, and fixed recurrent state. Tensor name templates are emitted once under the decoder's `inputs` and `outputs`. Legacy models whose every decoder layer uses paged KV omit the manifest and preserve the existing implicit contract. The hybrid state manifest is experimental and its schema is not yet stable. It requires coordinated Engine runtime work beyond the current onnxruntime-genai#2454 head and is not compatible with the merged runtime on its own. In particular, the runtime must supply packed multimodal position IDs with shape `[3, num_tokens]`; the current `VarlenDecoderIO` does not create that input.
 
@@ -308,6 +308,16 @@ python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o pa
 
 # From source:
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e cuda -c cache_dir_to_store_temp_files --extra_options use_paged_attention=true prune_lm_head=true
+```
+
+WebGPU requires a fixed cache capacity:
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e webgpu -c cache_dir_to_store_temp_files --extra_options use_paged_attention=true num_blocks=1024
+
+# From source:
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e webgpu -c cache_dir_to_store_temp_files --extra_options use_paged_attention=true num_blocks=1024
 ```
 
 #### Build a DFlash 2 Block Drafter

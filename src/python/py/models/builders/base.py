@@ -593,6 +593,8 @@ class Model:
                 del self.input_names["attention_mask"]
             if not self.has_windowed_paged_layers():
                 del self.input_names["block_table_windowed"]
+            if self.ep == "webgpu":
+                del self.input_names["attention_metadata"]
         else:
             for name in [
                 "block_table",
@@ -1171,7 +1173,8 @@ class Model:
                 inputs["block_table_windowed"] = self.input_names["block_table_windowed"]
             inputs["cumulative_sequence_lengths"] = self.input_names["cumulative_sequence_lengths"]
             inputs["past_sequence_lengths"] = self.input_names["past_sequence_lengths"]
-            inputs["attention_metadata"] = self.input_names["attention_metadata"]
+            if "attention_metadata" in self.input_names:
+                inputs["attention_metadata"] = self.input_names["attention_metadata"]
         if "past_key_values.key" in self.input_names:
             inputs["past_key_names"] = "past_key_values.%d.key"
         if "past_key_values.value" in self.input_names:
@@ -1296,13 +1299,17 @@ class Model:
             genai_config["model"]["decoder"]["session_options"]["provider_options"].append(ep_options)
 
         if self.use_paged_attention:
-            genai_config["engine"] = {
-                "dynamic_batching": {
-                    "block_size": self.attention_attrs["paged_block_size"],
-                    "gpu_utilization_factor": float(self.extra_options.get("gpu_utilization_factor", 0.6)),
-                    "max_batch_size": int(self.extra_options.get("max_batch_size", 100)),
-                },
+            dynamic_batching = {
+                "block_size": self.attention_attrs["paged_block_size"],
+                "max_batch_size": int(self.extra_options.get("max_batch_size", 100)),
             }
+            if "num_blocks" in self.extra_options:
+                dynamic_batching["num_blocks"] = int(self.extra_options["num_blocks"])
+            else:
+                dynamic_batching["gpu_utilization_factor"] = float(
+                    self.extra_options.get("gpu_utilization_factor", 0.6)
+                )
+            genai_config["engine"] = {"dynamic_batching": dynamic_batching}
 
         state_groups = self.make_decoder_state_groups(inputs, outputs)
         if state_groups:
@@ -3740,7 +3747,7 @@ class Model:
                 cumulative_sequence_lengths=self.input_names["cumulative_sequence_lengths"],
                 past_sequence_lengths=self.input_names["past_sequence_lengths"],
                 block_table=block_table,
-                attention_metadata=self.input_names["attention_metadata"],
+                attention_metadata=self.input_names.get("attention_metadata", ""),
                 **kwargs,
             )
         else:

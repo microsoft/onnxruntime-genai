@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <algorithm>
 #include <cstring>  // for memcmp
 #include <iostream>
 #include <random>
@@ -20,6 +21,27 @@
 
 // External global variable from main.cpp for custom model path
 extern std::string g_custom_model_path;
+
+TEST(ConfigTests, FullProviderNameUpdatesCanonicalOptions) {
+  Generators::Config config;
+  Generators::SetProviderOption(config, "webgpu", "validationMode", "basic");
+  Generators::SetProviderOption(config, "WebGpuExecutionProvider", "adapterIndex", "3");
+
+  ASSERT_EQ(config.model.decoder.session_options.provider_options.size(), 1u);
+  const auto& provider_options = config.model.decoder.session_options.provider_options.front();
+  EXPECT_EQ(provider_options.name, "WebGPU");
+  ASSERT_EQ(provider_options.options.size(), 2u);
+  const auto find_option = [&provider_options](std::string_view name) {
+    return std::find_if(provider_options.options.begin(), provider_options.options.end(),
+                        [name](const auto& option) { return option.first == name; });
+  };
+  const auto validation_mode = find_option("validationMode");
+  ASSERT_NE(validation_mode, provider_options.options.end());
+  EXPECT_EQ(validation_mode->second, "basic");
+  const auto adapter_index = find_option("adapterIndex");
+  ASSERT_NE(adapter_index, provider_options.options.end());
+  EXPECT_EQ(adapter_index->second, "3");
+}
 
 // To generate this file:
 // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
