@@ -5,10 +5,29 @@
 #include <string>
 #include <fstream>
 #include <memory>
+#include <iomanip>
 #include "common.h"
 #include "ort_genai.h"
 
 // C++ API Example
+
+void PrintTimestampTokens(const int32_t* tokens, size_t count) {
+  constexpr int32_t timestamp_begin = 50364;
+  bool printed = false;
+  for (size_t index = 0; index < count; ++index) {
+    if (tokens[index] >= timestamp_begin) {
+      if (!printed) {
+        std::cout << "    timestamps:";
+        printed = true;
+      }
+      std::cout << " " << std::fixed << std::setprecision(2)
+                << (tokens[index] - timestamp_begin) * 0.02;
+    }
+  }
+  if (printed) {
+    std::cout << " seconds" << std::endl;
+  }
+}
 
 void CXX_API(const char* model_path, int32_t num_beams, const std::string& language, const std::string& task, bool timestamps) {
   std::cout << "Creating model..." << std::endl;
@@ -71,6 +90,9 @@ void CXX_API(const char* model_path, int32_t num_beams, const std::string& langu
       const auto num_tokens = generator->GetSequenceCount(i);
       const auto tokens = generator->GetSequenceData(i);
       std::cout << processor->Decode(tokens, num_tokens) << std::endl;
+      if (timestamps) {
+        PrintTimestampTokens(tokens, num_tokens);
+      }
     }
 
     std::cout << "\n\n\n";
@@ -166,6 +188,9 @@ void C_API(const char* model_path, int32_t num_beams, const std::string& languag
       const char* str;
       CheckResult(OgaProcessorDecode(processor, tokens, num_tokens, &str));
       std::cout << str << std::endl;
+      if (timestamps) {
+        PrintTimestampTokens(tokens, num_tokens);
+      }
     }
 
     std::cout << "\n\n"
