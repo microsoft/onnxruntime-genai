@@ -207,7 +207,7 @@ def check_extra_options(
                 "use_paged_attention cannot be combined with " + ", ".join(incompatible_options) + "."
             )
 
-        for key in ("paged_block_size", "paged_chunk_size", "max_batch_size"):
+        for key in ("paged_block_size", "paged_chunk_size", "num_blocks", "max_batch_size"):
             if key not in extra_options:
                 continue
             try:
@@ -780,8 +780,8 @@ def get_args():
                     cumulative_sequence_lengths, and past_sequence_lengths metadata inputs are added. With
                     prune_lm_head=true, selects the final packed hidden state for each sequence so the model outputs
                     [batch_size, vocab_size] logits. By default, the model outputs [num_tokens, vocab_size] logits.
-                    Currently only supported for the CUDA execution provider with fp16 or bf16 precision. Cannot be
-                    combined with exclude_embeds or exclude_lm_head.
+                    Supports CUDA with fp16 or bf16 precision and WebGPU with fp16 precision. Cannot be combined with
+                    exclude_embeds or exclude_lm_head.
                 paged_block_size = 256/512/768/...: Paged KV-cache block size used when use_paged_attention is set.
                     Must be a positive multiple of 256 (required by the ONNX Runtime PagedAttention CUDA kernel).
                     Default is 256. Also written to the `engine.dynamic_batching` section of genai_config.json.
@@ -789,6 +789,9 @@ def get_args():
                     Only used when use_paged_attention is set and the model's sliding-window layers are served
                     from a ring of blocks; those layers hold only `paged_chunk_size + window_size - 1` positions,
                     so prefill must be chunked. Must be a positive integer. Default is paged_block_size.
+                num_blocks = Fixed global paged KV-cache capacity. Must be a positive integer. When set, it replaces
+                    gpu_utilization_factor in genai_config.json. Required for providers such as WebGPU that do not
+                    expose available device memory.
                 windowed_kv_cache = Use a reduced KV cache for sliding-window layers. Default is true.
                     With paged attention, eligible local layers use a ring of blocks while at least one full-context
                     layer remains. Without paged attention, supported execution providers use their windowed-cache
