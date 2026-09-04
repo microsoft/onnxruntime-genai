@@ -201,10 +201,19 @@ the beginning of a decode step: the token sampled by the previous step.
 
 ### `TurnComplete`
 
-The current Turn reached an end condition. A `TurnFinished` event reports `Eos`, `StopSequence`,
-`MaxGeneratedTokens`, `MaxSessionTokens`, `Cancelled`, or `Failed`, plus per-Turn usage.
-`StopSequence` is reserved until stop sequences are implemented. A generated EOS token is not
-appended to the logical sequence or emitted as a token event.
+The current Turn reached an end condition. A `TurnFinished` event reports `Eos`, `StopString`,
+`MaxGeneratedTokens`, `MaxSessionTokens`, `Cancelled`, or `Failed`, plus per-Turn usage. For the
+same generated token, precedence among the reasons Request-level classification can choose between
+is `StopString`, then `MaxGeneratedTokens`, then `MaxSessionTokens`: a token that would otherwise
+end the turn on the turn or context limit still reports `StopString` when it also completes a
+match. `Eos` sits outside that ordering: Search decides whether a sampled token is EOS and never
+appends it to a single-sequence Request's history before Request-level stop-string classification
+ever runs, so an EOS token's bytes never reach the matcher. This is not a practical gap -- GenAI
+tokenizers default to `skip_special_tokens=true` and register EOS as a special added token, so a
+real EOS token always decodes to zero bytes and could never independently complete a stop match. A
+generated EOS token is not appended to the logical sequence or emitted as a token event; a
+stop-matching token is appended, emitted, and counted like any other generated token, even though
+bytes after the match inside that token's decoded text are never trimmed from it.
 The next continuation fragment is therefore responsible for any turn-boundary tokens required by
 the model's chat template.
 
@@ -779,6 +788,106 @@ Guidance fast-forward tokens are not currently supported by the Engine. Requests
 are rejected because each forced token would also need a corresponding model execution and paged
 KV-cache advancement inside the transaction.
 
+## Decoded stop strings
+
+`OgaTurnOptionsSetStopStrings` copies a Turn's decoded UTF-8 stop strings, validated and bounded by
+`StopStringMatcher` (at most 16 entries, 16 KiB total, each entry nonempty valid UTF-8). An empty
+array clears/disables stop strings; a null array is rejected. Matching is exact byte matching, with
+no normalization, trimming, or case folding, and only considers text this Request generates during
+the active turn -- prompt tokens, continuation input, and earlier-turn history never reach the
+matcher.
+
+When a turn enables stop strings, `Engine::BeginTurn` resolves the Engine-owned `Tokenizer`
+(created once, on the first stop-enabled `BeginTurn`, via `Model::CreateTokenizer()`, and shared by
+every Request) and builds this turn's complete, ready-to-use `StopStringController` before touching
+the Request, its MTP shadow, or anything else -- so a tokenizer/stream construction failure leaves
+everything completely unchanged for the caller to retry. That controller owns one `TokenizerStream`
+and one `StopStringMatcher`; it decodes each generated token exactly once and feeds the resulting
+bytes to the matcher. The `TokenizerStream` is freshly created for this turn's controller (see
+`StopStringController`'s constructor and `RebuildStream()`), so its decoding context begins at the
+first generated token of the active turn: the turn's prompt/continuation input tokens are never fed
+to it, not even solely to seed detokenizer state before the first generated token is observed. This
+is the exact generated-output decoding boundary a host must mirror if it runs its own incremental
+decoder to hide stop text from published output -- see "Stop strings" in `docs/engine_c_api_spec.md`
+for why a host that instead decodes its own copy of the whole prompt+generation as one continuous
+stream can get different bytes for the first generated token (context-sensitive first-piece
+spacing) than what the Engine's matcher actually saw. Ownership passes into
+`RequestTurnAdmission::pending_stop_controller` (null
+for a no-stop turn, which never touches the tokenizer or a controller at all -- the no-stop fast
+path is unchanged from before this feature existed): `Request::PrepareTurnAdmission` and
+`Request::SaveStateForNewTurnTransaction` never construct or otherwise touch the Request's stop
+controller, only checkpoint bookkeeping for it. Only `Request::CommitTurnAdmission` installs the
+prebuilt controller as the live `stop_controller_`, discarding whatever the Request had before
+(a prior turn's controller, or null); `Request::RollbackTurnAdmission` (and simply an admission
+attempt never reaching commit) instead just discards the not-yet-installed controller, so a failed
+attempt -- whether it would have enabled stop strings or cleared them -- never touches the
+Request's actual, already-committed stop_controller_ at all. This is what "modularity" means here:
+Engine performs the fallible construction and infrastructure lookup, Request performs only the
+plain, infallible move at the commit boundary.
+
+`Request::StageGeneration` observes a newly generated token through the controller only when the
+step actually appended one (see below for why an EOS token is not observed). Among the reasons this
+observation can preempt, precedence is `StopString`, then `TurnLimit`, then `ContextLimit`: a token
+that would otherwise end the turn on the turn or context limit still reports `StopString` when it
+also completes a match. The raw token whose decoded bytes complete the match is retained, emitted as
+a visible token, and counted toward generated usage exactly like any other token; bytes after the
+match inside that token's decoded text are not trimmed from the Engine's raw history. The match, and
+its caller-facing index into the turn's stop-string list, are not externally visible until the
+step's transaction commits. A publication layer that hides stop text must run its own incremental
+decoded-text matcher and hold back possible stop prefixes, then use the reported index to verify and
+trim its published bytes; the Engine does not expose a byte offset within the match-completing
+token.
+
+The controller's own token history participates in the same transaction as Search, RNG, and
+guidance state. Every `SaveState*ForTransaction()` variant checkpoints the controller's committed
+token count; a direct `RestoreStateForTransaction()` or the queued
+`QueueStateRestoreForTransaction()`/`CompleteStateRestoreForTransaction()` pair (the latter is where
+the actual replay happens, matching how the queued path defers other non-trivial restoration) undoes
+a speculatively observed token by recreating the `TokenizerStream` from scratch and replaying every
+retained current-turn token through it, in order -- the ORT Extensions detokenizer cache backing a
+stream cannot be cloned, so full replay is the only correctness-preserving way to undo a step. A
+replay failure is treated exactly like any other rollback failure in this document: fatal, marking
+the Engine unhealthy. `Request::CommitStep` copies the staged match's index into the Request only
+after the transaction commits. `Request::MatchedStopStringIndex()` is otherwise always -1: a
+committed StopString match makes the Request `TurnComplete` in the very same step that stages its
+terminal event, and cancellation (`CanCancelFromEngine`) and fatal-failure handling
+(`Engine::MarkUnhealthyAndThrow`) only ever force-terminate a Request that is still executable --
+neither can run on a Request whose turn already ended in a committed match, so neither ever has an
+existing match to clear; the field is simply never set on that path to begin with. The engine
+invariant validator (`ValidateRequestInvariants`) enforces the resulting contract directly: a
+Request's finish reason is `StopString` if and only if its matched index is nonnegative.
+
+**Recovery cost bound.** A retryable whole-batch abort (see "Recoverable rollback" below) rolls back
+every Request in the failing batch together, not just one. Every stop-enabled Request among them
+that staged an observed token this step must independently recreate its `TokenizerStream` and
+replay its full current-turn token history, so one retryable abort's recovery cost for the
+stop-string component alone is `O(active stop-enabled requests in the batch x each request's
+generated current-turn token count)` -- linear in the number of such requests, and, per request,
+linear in how deep into the turn it already is. This follows from the required per-request replay;
+this repository does not include a replay benchmark or publish a measured per-token constant. A
+Request many thousands of tokens into a long turn pays a proportionally larger replay on every
+retryable abort that touches it, and a batch with several such requests pays that cost once per
+request, every time. No batching or amortization across requests exists for this replay today.
+Rollout qualification for stop strings at scale should measure this cost with representative
+tokenizers and turn depths, and monitor observed abort frequency alongside typical current-turn
+depth rather than assuming replay cost is negligible.
+
+Stop strings require an Engine configured for dynamic batching. Static batching completes generation
+through `ScheduledRequests::GenerateNextTokens`, a non-transactional path that cannot stage, roll
+back, or replay a match, so `Engine::BeginTurn` rejects a stop-enabled turn on a static-batching
+Engine before any Request mutation.
+
+Stop strings are incompatible with speculative draft verification for the specific Request whose
+turn enables them, but this Engine capability is not disabled for other Requests. Every draft
+producer -- manual `Request::SetDraftTokens` callers and the automatic in-Engine MTP drafter alike
+-- converges on `Request::DraftTokenValidationError()`, which returns a rejection reason whenever
+the request has an active stop controller. A manual caller sees this as a thrown error;
+`Engine::PrepareMtpStep`'s existing per-request skip check (already used for guidance and other
+per-request draft-ineligibility reasons) uses the same function to silently exclude the request from
+receiving automatic drafts, so its target step keeps running the plain one-token-per-step path while
+every other Request on the same Engine continues to use speculative decoding normally. See
+"Speculative drafts" above for the shared verification path this reuses.
+
 ## Rollback and failure handling
 
 The dynamic path separates failures into recoverable batch failures and fatal engine failures.
@@ -791,6 +900,13 @@ Rollback performs both parts:
 
 1. Restore request search state and sampler state from their checkpoints.
 2. Release the composite reservation: discard any staged fixed outputs and provisional fixed slots (leaving resident slots untouched), and release every block held by the paged-cache reservation.
+
+Step 1 restores every request in the failing batch, not just one; for a stop-enabled request that
+staged an observed token this step, restoring its search state also replays its stop-string
+controller (see "Decoded stop strings" above), so a batch containing several stop-enabled requests
+deep into their turns pays that per-request replay cost once per request on every retryable abort --
+see that section's "Recovery cost bound" for the resulting complexity and rollout-qualification
+guidance.
 
 After a successful rollback, committed request state and committed cache state match the state
 before the step began. `Run()` translates `RetryableBatchAbort` into a `Retryable` event and

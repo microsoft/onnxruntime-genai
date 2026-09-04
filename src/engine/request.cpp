@@ -9,6 +9,7 @@
 #include "sequence_positions.h"
 #include "../constrained_logits_processor.h"
 #include "../search.h"
+#include "../stop_string_controller.h"
 
 namespace Generators {
 
@@ -120,10 +121,14 @@ bool Request::IsRestartableCanceledTurn() const noexcept {
          processed_sequence_length_ == 0;
 }
 
+// Out-of-line because pending_stop_controller's deleter needs StopStringController complete,
+// which this translation unit's #include of stop_string_controller.h provides.
+RequestTurnAdmission::~RequestTurnAdmission() = default;
+
 void Request::ValidateTurnAdmission(
     std::span<const int32_t> tokens,
-    std::optional<size_t> max_generated_tokens) const {
-  if (max_generated_tokens && *max_generated_tokens == 0) {
+    const TurnOptions& options) const {
+  if (options.max_generated_tokens && *options.max_generated_tokens == 0) {
     throw std::runtime_error(
         "max_generated_tokens (0) must be greater than zero.");
   }
@@ -186,11 +191,17 @@ void Request::PrepareTurnAdmission(
 }
 
 uint64_t Request::CommitTurnAdmission(
-    std::optional<size_t> max_generated_tokens,
+    const TurnOptions& options,
     RequestTurnAdmission& admission) {
   assert(admission.transaction_started);
   CommitStateForTransaction();
-  turn_max_generated_tokens_ = max_generated_tokens;
+  // The caller built this turn's complete stop controller (or null, for a no-stop turn) before
+  // the admission attempt began and it has been untouched ever since, so installing it here is a
+  // plain, infallible move: whatever the Request's stop_controller_ was before this call (a prior
+  // turn's controller, or null) is simply discarded now that the new turn is durable.
+  stop_controller_ = std::move(admission.pending_stop_controller);
+  stop_controller_transaction_checkpoint_ = 0;
+  turn_max_generated_tokens_ = options.max_generated_tokens;
   turn_prompt_tokens_ = tokens_host_.size() - admission.host_token_count;
   turn_generated_tokens_ = 0;
   current_turn_id_ = next_turn_id_;
@@ -201,6 +212,7 @@ uint64_t Request::CommitTurnAdmission(
     ++next_turn_id_;
   }
   finish_reason_ = GenerationFinishReason::None;
+  matched_stop_string_index_ = -1;
   admission.transaction_started = false;
   return current_turn_id_;
 }
@@ -246,6 +258,11 @@ RequestTurnCounters Request::CompleteCancelFromEngine(
   draft_tokens_.clear();
   status_ = RequestStatus::TurnComplete;
   finish_reason_ = GenerationFinishReason::Canceled;
+  // A cancellation replaces any undelivered result and becomes the sole terminal outcome, so any
+  // previously staged/committed stop match no longer applies.
+  matched_stop_string_index_ = -1;
+  stop_controller_.reset();
+  stop_controller_transaction_checkpoint_ = 0;
   return {turn_prompt_tokens_, turn_generated_tokens_};
 }
 
@@ -254,6 +271,8 @@ void Request::MarkClosedFromEngine(const Engine& engine) noexcept {
   status_ = RequestStatus::Closed;
   guidance_transaction_checkpoint_.reset();
   guidance_logits_processor_.reset();
+  stop_controller_.reset();
+  stop_controller_transaction_checkpoint_ = 0;
   batched_sampler_state_.reset();
   std::vector<int32_t>{}.swap(draft_tokens_);
   staged_draft_count_ = 0;
@@ -269,6 +288,8 @@ void Request::CompleteCloseFromEngine(const Engine& engine) noexcept {
 void Request::MarkFailedFromEngine(const Engine& engine) noexcept {
   assert(BelongsTo(engine));
   finish_reason_ = GenerationFinishReason::Failed;
+  // A fatal failure replaces any undelivered result and becomes the sole terminal outcome.
+  matched_stop_string_index_ = -1;
 }
 
 void Request::CompleteFailedTurnFromEngine(const Engine& engine) noexcept {
@@ -276,6 +297,9 @@ void Request::CompleteFailedTurnFromEngine(const Engine& engine) noexcept {
   assert(IsExecutable(status_));
   status_ = RequestStatus::TurnComplete;
   finish_reason_ = GenerationFinishReason::Failed;
+  matched_stop_string_index_ = -1;
+  stop_controller_.reset();
+  stop_controller_transaction_checkpoint_ = 0;
 }
 
 void Request::Schedule() {
@@ -318,6 +342,8 @@ void Request::CompleteClose() noexcept {
   status_ = RequestStatus::Closed;
   guidance_transaction_checkpoint_.reset();
   guidance_logits_processor_.reset();
+  stop_controller_.reset();
+  stop_controller_transaction_checkpoint_ = 0;
   batched_sampler_state_.reset();
   search_.reset();
   params_.reset();
@@ -331,6 +357,14 @@ void Request::CompleteClose() noexcept {
 uint64_t Request::BeginTurn(
     std::span<const int32_t> tokens,
     std::optional<size_t> max_generated_tokens) {
+  TurnOptions options;
+  options.max_generated_tokens = max_generated_tokens;
+  return BeginTurn(tokens, options);
+}
+
+uint64_t Request::BeginTurn(
+    std::span<const int32_t> tokens,
+    const TurnOptions& options) {
   if (IsClosed(status_)) {
     throw std::runtime_error("Cannot begin a turn for a closed request.");
   }
@@ -339,8 +373,7 @@ uint64_t Request::BeginTurn(
     throw std::runtime_error(
         "Cannot begin a turn after the request's engine has been destroyed.");
   }
-  return engine->BeginTurn(
-      shared_from_this(), tokens, max_generated_tokens);
+  return engine->BeginTurn(shared_from_this(), tokens, options);
 }
 
 int64_t Request::CurrentSequenceLength() const {
@@ -352,6 +385,15 @@ int64_t Request::CommittedSequenceLength() const {
 }
 
 const char* Request::DraftTokenValidationError() const noexcept {
+  if (stop_controller_) {
+    // The shared boundary every draft producer converges on: manual Request::SetDraftTokens
+    // callers get this as a thrown error, and Engine::PrepareMtpStep's identical check silently
+    // excludes the request from automatic MTP drafting instead (see its use there). Either way, a
+    // stop-enabled turn always runs the plain one-token-per-step path, request-locally, without
+    // disabling draft verification for any other request on this Engine.
+    return "Speculative draft tokens are not supported while stop strings are enabled for the "
+           "active turn.";
+  }
   if (guidance_logits_processor_) {
     return "Speculative draft tokens are not supported with guidance.";
   }
@@ -514,6 +556,7 @@ RequestStateSnapshot Request::Snapshot() const {
   snapshot.has_current_turn = has_current_turn_;
   snapshot.current_turn_id = current_turn_id_;
   snapshot.finish_reason = finish_reason_;
+  snapshot.matched_stop_string_index = matched_stop_string_index_;
   return snapshot;
 }
 
@@ -695,6 +738,8 @@ void Request::SaveStateForTransaction() {
   transaction_rng_ = rng_;
   transaction_processed_sequence_length_ = processed_sequence_length_;
   transaction_tokens_host_size_ = tokens_host_.size();
+  stop_controller_transaction_checkpoint_ =
+      stop_controller_ ? stop_controller_->TurnTokens().size() : 0;
 }
 
 void Request::SaveStateForNewTurnTransaction() {
@@ -707,6 +752,11 @@ void Request::SaveStateForNewTurnTransaction() {
   transaction_rng_ = rng_;
   transaction_processed_sequence_length_ = processed_sequence_length_;
   transaction_tokens_host_size_ = tokens_host_.size();
+  // Every terminal path releases the previous turn's controller. Engine::BeginTurn builds the
+  // replacement separately and installs it only after successful admission, so rollback has no
+  // stop-controller state to restore during this transaction.
+  assert(!stop_controller_);
+  stop_controller_transaction_checkpoint_ = 0;
 }
 
 void Request::SaveStateForExternalSamplingTransaction() {
@@ -718,6 +768,8 @@ void Request::SaveStateForExternalSamplingTransaction() {
   transaction_rng_ = rng_;
   transaction_processed_sequence_length_ = processed_sequence_length_;
   transaction_tokens_host_size_ = tokens_host_.size();
+  stop_controller_transaction_checkpoint_ =
+      stop_controller_ ? stop_controller_->TurnTokens().size() : 0;
 }
 
 RequestStepResult Request::ApplyLogitsForTransaction(DeviceSpan<float> logits,
@@ -784,6 +836,12 @@ void Request::RestoreStateForTransaction() {
   if (guidance_transaction_checkpoint_) {
     guidance_logits_processor_ = std::move(guidance_transaction_checkpoint_);
   }
+  // Replays the checkpointed token history through a freshly created stream. The tokenizer stream
+  // is not cloneable, so this is the only correctness-preserving way to undo a speculatively
+  // observed token; a replay failure propagates so the caller can treat rollback as having failed.
+  if (stop_controller_) {
+    stop_controller_->RollbackTo(stop_controller_transaction_checkpoint_);
+  }
 }
 
 void Request::QueueStateRestoreForTransaction() {
@@ -795,12 +853,22 @@ void Request::QueueStateRestoreForTransaction() {
   accepted_draft_count_ = 0;
   scheduled_token_count_ = 0;
   draft_verification_completed_generation_ = false;
+  // Deliberately does not replay the stop controller yet: like the guidance checkpoint swap below,
+  // that work is deferred to CompleteStateRestoreForTransaction() so this stays lightweight
+  // bookkeeping that cannot itself allocate, decode, or throw.
 }
 
 void Request::CompleteStateRestoreForTransaction() {
   search_->CompleteStateRestoreForTransaction();
   if (guidance_transaction_checkpoint_) {
     guidance_logits_processor_ = std::move(guidance_transaction_checkpoint_);
+  }
+  // See RestoreStateForTransaction(): recreates the stream and replays the checkpointed history. A
+  // replay failure here propagates through ScheduledRequests::RestoreStateForTransaction() to the
+  // Engine's existing rollback-failure handling, which marks the Engine unhealthy and publishes the
+  // fatal outcome -- exactly like any other queued-restore-completion failure.
+  if (stop_controller_) {
+    stop_controller_->RollbackTo(stop_controller_transaction_checkpoint_);
   }
 }
 
@@ -826,6 +894,9 @@ void Request::CommitStep(const RequestStepPlan& plan,
   status_ = result.done ? RequestStatus::TurnComplete : RequestStatus::Active;
   if (result.done) {
     finish_reason_ = result.finish_reason;
+    matched_stop_string_index_ = result.matched_stop_string_index;
+    stop_controller_.reset();
+    stop_controller_transaction_checkpoint_ = 0;
   }
   draft_tokens_.clear();
   staged_draft_count_ = 0;
@@ -896,13 +967,34 @@ RequestStepResult Request::StageGeneration(int64_t sequence_length_before) {
   const bool context_limit_reached =
       static_cast<size_t>(CurrentSequenceLength()) >= max_total_tokens_;
   GenerationFinishReason finish_reason = GenerationFinishReason::None;
-  if (search_done && !next_tokens.empty() &&
-      contains(params_->config.model.eos_token_id, token)) {
-    finish_reason = GenerationFinishReason::EosToken;
-  } else if (turn_limit_reached) {
-    finish_reason = GenerationFinishReason::TurnLimit;
-  } else if (context_limit_reached || search_done) {
-    finish_reason = GenerationFinishReason::ContextLimit;
+  int32_t matched_stop_string_index = -1;
+  // Stop strings take precedence over the turn/context limit for the same generated token: a token
+  // that would otherwise end the turn on one of those limits still reports StopString when it also
+  // completes a match. This check is formally ordered before EOS classification, but
+  // GreedySearch_Cpu never appends a single-sequence Request's sampled EOS token because its
+  // sampling entry points skip appending once SetNextToken marks the Search done. A real EOS
+  // token's bytes therefore never reach the matcher here -- consistent with GenAI tokenizers
+  // registering EOS as a special, zero-byte-decoding token by default. Prompt/continuation tokens
+  // also never reach this point, and stop_controller_ is null on the no-stop fast path.
+  if (token_appended && stop_controller_) {
+    if (accepted_draft_count_ != 0) {
+      throw std::logic_error(
+          "Stop-string matching cannot observe accepted draft tokens.");
+    }
+    if (const auto& match = stop_controller_->ObserveToken(token)) {
+      finish_reason = GenerationFinishReason::StopString;
+      matched_stop_string_index = static_cast<int32_t>(match->index);
+    }
+  }
+  if (finish_reason == GenerationFinishReason::None) {
+    if (search_done && !next_tokens.empty() &&
+        contains(params_->config.model.eos_token_id, token)) {
+      finish_reason = GenerationFinishReason::EosToken;
+    } else if (turn_limit_reached) {
+      finish_reason = GenerationFinishReason::TurnLimit;
+    } else if (context_limit_reached || search_done) {
+      finish_reason = GenerationFinishReason::ContextLimit;
+    }
   }
   const bool done = finish_reason != GenerationFinishReason::None;
   RequestStepResult result{
@@ -910,6 +1002,7 @@ RequestStepResult Request::StageGeneration(int64_t sequence_length_before) {
       token_appended,
       done,
       finish_reason,
+      matched_stop_string_index,
   };
   StageVisibleTokens(
       result, accepted_draft_count_,

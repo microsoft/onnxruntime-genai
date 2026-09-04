@@ -18,7 +18,7 @@ using ContiguousArray = pybind11::array_t<
 enum class PyFinishReason : uint32_t {
   None = OgaFinishReason_None,
   Eos = OgaFinishReason_Eos,
-  StopSequence = OgaFinishReason_StopSequence,
+  StopString = OgaFinishReason_StopString,
   MaxGeneratedTokens = OgaFinishReason_MaxGeneratedTokens,
   MaxSessionTokens = OgaFinishReason_MaxSessionTokens,
   Cancelled = OgaFinishReason_Cancelled,
@@ -778,7 +778,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   pybind11::enum_<PyFinishReason>(m, "FinishReason")
       .value("NONE", PyFinishReason::None)
       .value("EOS", PyFinishReason::Eos)
-      .value("STOP_SEQUENCE", PyFinishReason::StopSequence)
+      .value("STOP_STRING", PyFinishReason::StopString)
       .value("MAX_GENERATED_TOKENS", PyFinishReason::MaxGeneratedTokens)
       .value("MAX_SESSION_TOKENS", PyFinishReason::MaxSessionTokens)
       .value("CANCELLED", PyFinishReason::Cancelled)
@@ -845,16 +845,24 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
            "Reserved for future use; currently raises a not-implemented error.")
       .def("set_seed", &OgaTurnOptions::SetSeed,
            "Reserved for future use; currently raises a not-implemented error.")
-      .def("set_stop_token_ids", [](OgaTurnOptions& options, const std::vector<std::vector<int32_t>>& values) {
-        auto sequences = OgaSequences::Create();
-        for (const auto& value : values)
-          sequences->Append(value.data(), value.size());
-        options.SetStopTokenIds(*sequences); }, "Reserved for future use; currently raises a not-implemented error.")
       .def("set_stop_strings", [](OgaTurnOptions& options, const std::vector<std::string>& values) {
         auto strings = OgaStringArray::Create();
-        for (const auto& value : values)
+        for (const auto& value : values) {
+          // The C OgaStringArray surface stores plain NUL-terminated strings, so a Python str
+          // containing an embedded NUL cannot round-trip through it: bytes after the NUL would
+          // silently disappear rather than participate in matching. Reject explicitly instead.
+          if (value.find('\0') != std::string::npos) {
+            throw pybind11::value_error(
+                "Stop strings must not contain an embedded NUL byte.");
+          }
           strings->Add(value.c_str());
-        options.SetStopStrings(*strings); }, "Reserved for future use; currently raises a not-implemented error.")
+        }
+        options.SetStopStrings(*strings); },
+           "Sets decoded UTF-8 stop strings for the turn, copying them immediately. An empty "
+           "list (zero entries) clears/disables stop strings; this is distinct from a nonempty "
+           "list containing an empty string entry, which is invalid. Every entry in a nonempty "
+           "list must itself be a nonempty, valid UTF-8 string with no embedded NUL byte; the "
+           "list may contain at most 16 entries totaling at most 16 KiB.")
       .def("set_guidance", &OgaTurnOptions::SetGuidance, "Reserved for future use; currently raises a not-implemented error.");
 
   pybind11::class_<OgaRequest>(m, "Request")
@@ -915,6 +923,13 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       })
       .def_property_readonly("finish_reason", [](const OgaEngineEvent& event) {
         return static_cast<PyFinishReason>(event.FinishReason());
+      })
+      .def_property_readonly("matched_stop_string_index", [](const OgaEngineEvent& event) -> pybind11::object {
+        const auto index = event.MatchedStopStringIndex();
+        if (!index) {
+          return pybind11::none();
+        }
+        return pybind11::int_(*index);
       })
       .def_property_readonly("error_code", [](const OgaEngineEvent& event) {
         return static_cast<PyEngineErrorCode>(event.ErrorCode());
