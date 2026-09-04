@@ -39,13 +39,11 @@ import os
 import numpy as np
 import onnx_ir as ir
 import torch
-from onnx_ir.tensor_adapters import TorchTensor, to_torch_dtype
-from tqdm import tqdm
 
-from builders.base import Model
+from .block_drafter import BlockDrafterBuilder
 
 
-class DFlash2Builder:
+class DFlash2Builder(BlockDrafterBuilder):
     """Emits ``dflash2.onnx`` from a DFlash 2 draft checkpoint plus the target's
     embedding and LM head."""
 
@@ -85,7 +83,11 @@ class DFlash2Builder:
         self.vocab_size = int(cfg["vocab_size"])
         self.rms_eps = float(cfg["rms_norm_eps"])
         self.max_position = int(max_position_embeddings or cfg["max_position_embeddings"])
-        self.rope_theta = float(cfg["rope_parameters"]["rope_theta"])
+        rope_parameters = cfg["rope_parameters"]
+        rope_type = str(rope_parameters.get("rope_type", "default")).lower()
+        if rope_type != "default":
+            raise ValueError(f"DFlash 2 does not support the '{rope_type}' RoPE type; expected 'default'.")
+        self.rope_theta = float(rope_parameters["rope_theta"])
         self.sliding_window = int(cfg["sliding_window"]) if cfg.get("use_sliding_window") else -1
         # `is_causal` is explicit in a DFlash 2 config and is what makes the block bidirectional.
         self.is_causal = bool(cfg.get("is_causal", False))
@@ -96,156 +98,19 @@ class DFlash2Builder:
         self.selector_rank = int(dfl["selector_rank"])
         self.selector_top_k = int(dfl["selector_top_k"])
         self.mask_token_id = int(dfl["mask_token_id"])
+        self.validate_token_metadata(cfg, dfl)
         self.target_layer_ids = list(dfl["target_layer_ids"])
         # Query tokens per request: the anchor (bonus) token plus one mask token per draft.
-        if num_draft_tokens is not None and int(num_draft_tokens) < 1:
-            raise ValueError("num_draft_tokens must be a positive integer.")
-        self.block_size = int(num_draft_tokens) + 1 if num_draft_tokens is not None else int(dfl["block_size"])
+        checkpoint_block_size = int(dfl["block_size"])
+        if num_draft_tokens is not None and not 1 <= int(num_draft_tokens) < checkpoint_block_size:
+            raise ValueError(
+                f"num_draft_tokens must be between 1 and {checkpoint_block_size - 1}, the checkpoint draft limit."
+            )
+        self.block_size = int(num_draft_tokens) + 1 if num_draft_tokens is not None else checkpoint_block_size
         self.num_draft_tokens = self.block_size - 1
         self.input_embedding_scale = float(dfl.get("input_embedding_scale", 1.0))
         self.aux_hidden_size = self.hidden_size * len(self.target_layer_ids)
-
-        self.values: dict[str, ir.Value] = {}
-        self.node_names: set[str] = set()
-        self.graph = ir.Graph(
-            inputs=(),
-            outputs=(),
-            nodes=(),
-            opset_imports={"": 21, "com.microsoft": 1},
-            name="dflash2_graph",
-        )
-        self.model = ir.Model(self.graph, ir_version=10, producer_name="onnxruntime-genai")
-        self._const_cache: dict[str, str] = {}
-
-    # ---------------------------------------------------------------- plumbing
-
-    def make_value(self, name, dtype=None, shape=None):
-        if name == "":
-            return ir.Value(name="")
-        value = self.values.setdefault(name, ir.Value(name=name))
-        if dtype is not None:
-            value.dtype = ir.DataType(dtype)
-        if shape is not None:
-            value.shape = ir.Shape(shape)
-        return value
-
-    def make_node(self, op_type, inputs, outputs, *, name, domain="", **attrs):
-        if name in self.node_names:
-            raise ValueError(f"duplicate node name {name}")
-        node = ir.node(
-            op_type,
-            inputs=[self.make_value(n) for n in inputs],
-            attributes=attrs,
-            domain=domain,
-            outputs=[self.make_value(n) for n in outputs],
-            name=name,
-        )
-        self.graph.append(node)
-        self.node_names.add(name)
-
-    def make_initializer(self, tensor, name, to=None):
-        if to is not None:
-
-            def tensor_func(t=tensor, dtype=to):
-                return TorchTensor(t.to(to_torch_dtype(dtype)).contiguous(), name=name)
-
-            ir_tensor = ir.LazyTensor(tensor_func, dtype=to, shape=ir.Shape(tensor.shape), name=name)
-        elif isinstance(tensor, torch.Tensor):
-            ir_tensor = TorchTensor(tensor.contiguous(), name=name)
-        else:
-            ir_tensor = ir.tensor(tensor, name=name)
-        value = self.make_value(name, ir_tensor.dtype, ir_tensor.shape)
-        value.const_value = ir_tensor
-        self.graph.register_initializer(value)
-        return name
-
-    def const(self, values, dtype=ir.DataType.INT64):
-        """Emit (once) a small constant.
-
-        These are ``Constant`` nodes rather than initializers because shape inference has
-        to read the ones that feed ``Reshape`` / ``Slice`` / ``TopK``, and every initializer
-        is written to external data.
-        """
-        arr = np.asarray(values)
-        key = f"{dtype}:{arr.shape}:{arr.tobytes().hex()}"
-        if key in self._const_cache:
-            return self._const_cache[key]
-        name = f"dflash2.const.{len(self._const_cache)}"
-        np_dtype = {
-            ir.DataType.INT64: np.int64,
-            ir.DataType.INT32: np.int32,
-            ir.DataType.FLOAT: np.float32,
-        }[dtype]
-        tensor = ir.tensor(arr.astype(np_dtype), name=name)
-        self.make_node("Constant", [], [name], name=f"{name}/Constant", value=tensor)
-        self.make_value(name, dtype, tensor.shape)
-        self._const_cache[key] = name
-        return name
-
-    # --------------------------------------------------------------- op sugar
-
-    def _out(self, name):
-        return f"{name}/output_0"
-
-    def unary(self, op, name, x, dtype, shape, domain="", **attrs):
-        out = self._out(name)
-        self.make_node(op, [x], [out], name=name, domain=domain, **attrs)
-        self.make_value(out, dtype, shape)
-        return out
-
-    def binary(self, op, name, a, b, dtype, shape):
-        out = self._out(name)
-        self.make_node(op, [a, b], [out], name=name)
-        self.make_value(out, dtype, shape)
-        return out
-
-    def reshape(self, name, x, shape_const, dtype, shape):
-        return self.binary("Reshape", name, x, self.const(shape_const), dtype, shape)
-
-    def matmul(self, name, x, weight_tensor, in_features, out_features, rows, weight_name=None):
-        """``x @ weight.T`` for a torch ``[out, in]`` weight."""
-        wname = weight_name or (name[1:].replace("/", ".") + ".weight")
-        if wname not in self.values:
-            self.make_initializer(weight_tensor.T, wname, to=self.io_dtype)
-        out = self._out(name)
-        self.make_node("MatMul", [x, wname], [out], name=name)
-        self.make_value(out, self.io_dtype, [rows, out_features])
-        return out
-
-    def rms_norm(self, name, x, weight_tensor, rows, weight_name=None):
-        wname = weight_name or (name[1:].replace("/", ".") + ".weight")
-        if wname not in self.values:
-            self.make_initializer(weight_tensor, wname, to=self.io_dtype)
-        out = self._out(name)
-        self.make_node(
-            "SimplifiedLayerNormalization",
-            [x, wname],
-            [out, "", ""],
-            name=name,
-            axis=-1,
-            epsilon=self.rms_eps,
-            stash_type=1,
-        )
-        self.make_value(out, self.io_dtype, [rows, self.hidden_size])
-        return out
-
-    def skip_rms_norm(self, name, root, skip, weight_tensor, rows, want_sum=True):
-        wname = name[1:].replace("/", ".") + ".weight"
-        self.make_initializer(weight_tensor, wname, to=self.io_dtype)
-        out = self._out(name)
-        sm = f"{name}/output_3"
-        self.make_node(
-            "SkipSimplifiedLayerNormalization",
-            [root, skip, wname],
-            [out, "", "", sm] if want_sum else [out],
-            name=name,
-            domain="com.microsoft",
-            epsilon=self.rms_eps,
-        )
-        self.make_value(out, self.io_dtype, [rows, self.hidden_size])
-        if want_sum:
-            self.make_value(sm, self.io_dtype, [rows, self.hidden_size])
-        return out, (sm if want_sum else None)
+        self.make_graph("dflash2_graph", "dflash2")
 
     # ------------------------------------------------------------ rope caches
 
@@ -269,7 +134,7 @@ class DFlash2Builder:
         """
         shape = self.unary("Shape", "/dflash2/conv_mask/Shape", num_block_rows_source, ir.DataType.INT64, [2])
         rows = self.binary("Gather", "/dflash2/conv_mask/Gather", shape, self.const(0), ir.DataType.INT64, [])
-        rng = self._out("/dflash2/conv_mask/Range")
+        rng = self.out("/dflash2/conv_mask/Range")
         self.make_node(
             "Range",
             [self.const(0), rows, self.const(1)],
@@ -349,7 +214,7 @@ class DFlash2Builder:
                 # shifted[t] = x[t - tap]. Rows 0..tap-1 are masked out below, so the
                 # front is filled with x[:tap] rather than zeros -- ORT has no
                 # bfloat16 Pad kernel, and Concat needs no new constant.
-                head = self._out(f"{prefix}/shift{tap}/Head")
+                head = self.out(f"{prefix}/shift{tap}/Head")
                 self.make_node(
                     "Slice",
                     [x, self.const([0]), self.const([tap]), self.const([0])],
@@ -357,7 +222,7 @@ class DFlash2Builder:
                     name=f"{prefix}/shift{tap}/Head",
                 )
                 self.make_value(head, self.io_dtype, [tap, self.hidden_size])
-                sl = self._out(f"{prefix}/shift{tap}/Slice")
+                sl = self.out(f"{prefix}/shift{tap}/Slice")
                 self.make_node(
                     "Slice",
                     [x, self.const([0]), self.const([-tap]), self.const([0])],
@@ -367,7 +232,7 @@ class DFlash2Builder:
                 # A distinct symbolic dim: this is num_block - tap rows, and claiming
                 # "num_block" lets the memory planner reuse this buffer for the result.
                 self.make_value(sl, self.io_dtype, [f"num_block_minus_{tap}", self.hidden_size])
-                cat = self._out(f"{prefix}/shift{tap}/Concat")
+                cat = self.out(f"{prefix}/shift{tap}/Concat")
                 self.make_node("Concat", [head, sl], [cat], name=f"{prefix}/shift{tap}/Concat", axis=0)
                 self.make_value(cat, self.io_dtype, ["num_block", self.hidden_size])
                 shifted = cat
@@ -387,8 +252,8 @@ class DFlash2Builder:
     # ------------------------------------------------------------------ graph
 
     def make_model(self):
-        w = self._load_weights()
-        self._declare_io()
+        w = self.load_weights()
+        self.declare_io()
         self._make_rope_caches()
 
         rows_q = "num_block"
@@ -511,7 +376,7 @@ class DFlash2Builder:
 
     def _make_attention(self, i, x, ctx_kv, rows_q):
         p = f"/dflash2/layers.{i}"
-        w = self._weights
+        w = self.weights
         q = self.matmul(
             f"{p}/attn/q_proj/MatMul",
             x,
@@ -543,10 +408,10 @@ class DFlash2Builder:
         # `qkv_row_map` indexes concat(block, context); `q_row_map` indexes the block rows
         # alone (context rows point at row 0 and their output is dropped).
         kv_dim = self.num_kv_heads * self.head_size
-        k_cat = self._out(f"{p}/attn/k_concat")
+        k_cat = self.out(f"{p}/attn/k_concat")
         self.make_node("Concat", [k, ctx_kv[0]], [k_cat], name=f"{p}/attn/k_concat", axis=0)
         self.make_value(k_cat, self.io_dtype, ["num_rows", kv_dim])
-        v_cat = self._out(f"{p}/attn/v_concat")
+        v_cat = self.out(f"{p}/attn/v_concat")
         self.make_node("Concat", [v, ctx_kv[1]], [v_cat], name=f"{p}/attn/v_concat", axis=0)
         self.make_value(v_cat, self.io_dtype, ["num_rows", kv_dim])
 
@@ -569,7 +434,7 @@ class DFlash2Builder:
         )
 
         attn_name = f"{p}/attn/PagedAttention"
-        attn_out = self._out(attn_name)
+        attn_out = self.out(attn_name)
         self.make_node(
             "PagedAttention",
             [
@@ -668,7 +533,7 @@ class DFlash2Builder:
             self.io_dtype,
             ["batch_size", self.block_size, self.hidden_size],
         )
-        sl = self._out("/dflash2/select/Slice")
+        sl = self.out("/dflash2/select/Slice")
         self.make_node(
             "Slice",
             [h3, self.const([1]), self.const([self.block_size]), self.const([1])],
@@ -681,7 +546,7 @@ class DFlash2Builder:
         )
 
         # LM head (the target's, shared on disk) -> top-k candidates per position.
-        logits = self._make_lm_head(hsel)
+        logits = self.make_lm_head(hsel, "num_sample")
         logits32 = self.unary(
             "Cast",
             "/dflash2/topk/Cast",
@@ -730,7 +595,7 @@ class DFlash2Builder:
             ir.DataType.INT64,
             ["batch_size", self.block_size],
         )
-        anchor = self._out("/dflash2/selector/anchor")
+        anchor = self.out("/dflash2/selector/anchor")
         self.make_node(
             "Slice",
             [ids2, self.const([0]), self.const([1]), self.const([1])],
@@ -747,7 +612,7 @@ class DFlash2Builder:
             ir.DataType.INT64,
             ["batch_size", 1, top_k],
         )
-        prev_tail = self._out("/dflash2/selector/prev_tail")
+        prev_tail = self.out("/dflash2/selector/prev_tail")
         self.make_node(
             "Slice",
             [cand, self.const([0]), self.const([n_spec - 1]), self.const([1])],
@@ -755,7 +620,7 @@ class DFlash2Builder:
             name="/dflash2/selector/prev_tail",
         )
         self.make_value(prev_tail, ir.DataType.INT64, ["batch_size", n_spec - 1, top_k])
-        prev = self._out("/dflash2/selector/prev")
+        prev = self.out("/dflash2/selector/prev")
         self.make_node("Concat", [anchor_tiled, prev_tail], [prev], name="/dflash2/selector/prev", axis=1)
         self.make_value(prev, ir.DataType.INT64, ["batch_size", n_spec, top_k])
 
@@ -825,64 +690,9 @@ class DFlash2Builder:
             self.graph.outputs.append(self.values[f"present.{i}.key"])
             self.graph.outputs.append(self.values[f"present.{i}.value"])
 
-    def _make_lm_head(self, root):
-        w = self._weights
-        weight, scale = w["lm_head.weight"], w["lm_head.weight_scale"]
-        if weight.dtype != torch.float8_e4m3fn:
-            name = "/lm_head/MatMul"
-            return self.matmul(
-                name, root, weight, self.hidden_size, self.vocab_size, "num_sample", weight_name="lm_head.MatMul.weight"
-            )
-        # The quantized head is the target's and only runs in the target's dtype. Its input
-        # is the drafter's final normed hidden state, which is back inside the fp16 range.
-        root = self.unary(
-            "Cast", "/lm_head/Cast", root, self.external_dtype, ["num_sample", self.hidden_size], to=self.external_dtype
-        )
-        self.make_initializer(weight.contiguous(), "lm_head.MatMul.fp8_weight")
-        self.make_initializer(
-            scale.reshape(self.vocab_size, 1), "lm_head.MatMul.fp8_weight_scale", to=ir.DataType.FLOAT
-        )
-        out = "/lm_head/MatMul/output_0"
-        self.make_node(
-            "MatMulBlockQuantizedFp8Weight",
-            [root, "lm_head.MatMul.fp8_weight", "lm_head.MatMul.fp8_weight_scale"],
-            [out],
-            name="/lm_head/MatMul",
-            domain="com.microsoft",
-            block_size=int(weight.shape[1]),
-        )
-        self.make_value(out, self.external_dtype, ["num_sample", self.vocab_size])
-        return out
-
-    # ------------------------------------------------------------------- I/O
-
-    def _declare_io(self):
-        decls = [
-            ("aux_hidden_states", self.external_dtype, ["num_ctx", self.aux_hidden_size]),
-            ("input_ids", ir.DataType.INT64, ["num_block"]),
-            ("q_row_map", ir.DataType.INT32, ["num_tokens"]),
-            ("qkv_row_map", ir.DataType.INT32, ["num_tokens"]),
-            ("block_row_index", ir.DataType.INT32, ["num_block"]),
-            ("cumulative_sequence_lengths", ir.DataType.INT32, ["batch_size + 1"]),
-            ("past_sequence_lengths", ir.DataType.INT32, ["batch_size"]),
-            ("block_table", ir.DataType.INT32, ["batch_size", "max_num_blocks"]),
-            ("attention_metadata", ir.DataType.INT32, [3]),
-        ]
-        for name, dtype, shape in decls:
-            self.graph.inputs.append(self.make_value(name, dtype, shape))
-        for i in range(self.num_layers):
-            for suffix in ("key", "value"):
-                self.graph.inputs.append(
-                    self.make_value(
-                        f"past_key_values.{i}.{suffix}",
-                        self.io_dtype,
-                        ["num_blocks", self.paged_block_size, self.num_kv_heads, self.head_size],
-                    )
-                )
-
     # --------------------------------------------------------------- weights
 
-    def _load_weights(self):
+    def load_weights(self):
         import safetensors.torch as safetensors_torch  # noqa: PLC0415
 
         weights = {}
@@ -908,66 +718,13 @@ class DFlash2Builder:
         for required in ("embed_tokens.weight", "lm_head.weight"):
             if required not in weights:
                 raise ValueError(f"Could not find '{required}' in the target checkpoint '{self.target_dir}'.")
-        self._weights = weights
+        self.validate_weight_shapes(
+            weights,
+            {
+                "fc.weight": (self.hidden_size, self.aux_hidden_size),
+                "embed_tokens.weight": (self.vocab_size, self.hidden_size),
+                "lm_head.weight": (self.vocab_size, self.hidden_size),
+            },
+        )
+        self.weights = weights
         return weights
-
-    # ------------------------------------------------------------------ save
-
-    def save_model(self, out_dir):
-        out_path = os.path.join(out_dir, self.filename)
-        data_path = out_path + ".data"
-        for path in (out_path, data_path):
-            if os.path.exists(path):
-                os.remove(path)
-        with tqdm() as pbar:
-            total_set = False
-
-            def callback(tensor, metadata):
-                nonlocal total_set
-                if not total_set:
-                    pbar.total = metadata.total
-                    total_set = True
-                pbar.update()
-                pbar.set_description(f"Saving {tensor.name} ({tensor.dtype.short_name()}, {tensor.shape})")
-
-            Model.stamp_build_metadata(self.model)
-            ir.save(
-                self.model,
-                out_path,
-                external_data=os.path.basename(data_path),
-                size_threshold_bytes=0,
-                callback=callback,
-            )
-
-    def genai_config_section(self):
-        return {
-            "filename": self.filename,
-            "num_hidden_layers": self.num_layers,
-            "num_key_value_heads": self.num_kv_heads,
-            "head_size": self.head_size,
-            "block_size": self.block_size,
-            "num_draft_tokens": self.num_draft_tokens,
-            "selector_top_k": self.selector_top_k,
-            "mask_token_id": self.mask_token_id,
-            "sliding_window": self.sliding_window,
-            "main_aux_hidden_states": "aux_hidden_states",
-            "inputs": {
-                "aux_hidden_states": "aux_hidden_states",
-                "input_ids": "input_ids",
-                "q_row_map": "q_row_map",
-                "qkv_row_map": "qkv_row_map",
-                "block_row_index": "block_row_index",
-                "cumulative_sequence_lengths": "cumulative_sequence_lengths",
-                "past_sequence_lengths": "past_sequence_lengths",
-                "block_table": "block_table",
-                "attention_metadata": "attention_metadata",
-                "past_key_names": "past_key_values.%d.key",
-                "past_value_names": "past_key_values.%d.value",
-            },
-            "outputs": {
-                "candidate_ids": "draft_candidate_ids",
-                "scores": "draft_scores",
-                "present_key_names": "present.%d.key",
-                "present_value_names": "present.%d.value",
-            },
-        }

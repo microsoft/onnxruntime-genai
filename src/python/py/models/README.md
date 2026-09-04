@@ -315,7 +315,7 @@ python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p fp
 
 Set `dflash2_path` to a DFlash 2 checkpoint to export an auxiliary `dflash2.onnx` block drafter beside a Qwen3.5 MoE target model. The target must use paged attention, and `aux_hidden_state_layers` must exactly match the drafter checkpoint's `target_layer_ids`. The drafter reuses the target's embedding and LM-head initializers, so both checkpoints must use compatible tensors.
 
-`dflash2_num_draft_tokens` optionally overrides how many tokens the drafter proposes per step. It must be a positive integer; by default, the builder uses the draft checkpoint's block size minus the anchor token.
+`dflash2_num_draft_tokens` optionally overrides how many tokens the drafter proposes per step. It must be a positive integer no greater than the draft checkpoint's block size minus the anchor token; that checkpoint limit is also the default.
 
 ```bash
 # From wheel:
@@ -327,9 +327,11 @@ python builder.py -i path_to_target_model -o path_to_output_folder -p fp16 -e cu
 
 #### Build a DSpark Block Drafter
 
-Set `dspark_path` to a DSpark checkpoint to export an auxiliary `dspark.onnx` block drafter beside a Qwen3.5 or Qwen3.8 target model. The target must use paged attention. SpecForge identifies the target layers whose outputs are tapped, while `aux_hidden_state_layers` identifies residual streams entering layers, so each configured auxiliary layer must be one greater than the corresponding `target_layer_ids` entry in the DSpark checkpoint. The drafter reuses the target's embedding and LM-head initializers. `dspark_path` and `dflash2_path` are mutually exclusive.
+Set `dspark_path` to a DSpark checkpoint to export an auxiliary `dspark.onnx` block drafter beside a Qwen3.5 or Qwen3.8 target model. The target must use paged attention. SpecForge identifies the target layers whose outputs are tapped, while `aux_hidden_state_layers` identifies residual streams entering layers, so each configured auxiliary layer must be one greater than the corresponding `target_layer_ids` entry in the DSpark checkpoint. The drafter reuses the target's embedding and LM-head initializers. `dspark_path` and `dflash2_path` are mutually exclusive, and selecting DSpark replaces rather than accompanies the target's MTP head.
 
-`dspark_num_draft_tokens` optionally overrides how many tokens the drafter proposes per step and must be a positive integer. `dspark_top_k` controls how many candidates the lattice keeps per block slot; it defaults to `16` and must be a positive integer no greater than the drafter vocabulary size.
+`dspark_num_draft_tokens` optionally overrides how many tokens the drafter proposes per step. It must be at least `2` and no greater than the checkpoint's trained `block_size`; the default is that checkpoint block size. `dspark_top_k` controls how many candidates the lattice keeps per block slot; it defaults to `16` and must be a positive integer no greater than the drafter vocabulary size. The score tensor and its host copy grow as `dspark_top_k` squared, so keep this value near the default unless a larger lattice has been benchmarked for the intended workload.
+
+The DSpark transformer body executes in BF16 even when the target uses FP16, so the selected execution provider and hardware must support BF16. Its KV cache consumes additional GPU memory: a full-attention DSpark layer adds a key/value entry for every target cache block and therefore reduces the target's maximum resident context under a fixed memory budget. A checkpoint configured uniformly for sliding-window attention uses its positive `sliding_window` instead.
 
 ```bash
 # From wheel:

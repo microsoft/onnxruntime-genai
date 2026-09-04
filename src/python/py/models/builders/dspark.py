@@ -40,11 +40,11 @@ import os
 import numpy as np
 import onnx_ir as ir
 import torch
-from onnx_ir.tensor_adapters import TorchTensor, to_torch_dtype
-from tqdm import tqdm
+
+from .block_drafter import BlockDrafterBuilder
 
 
-class DSparkBuilder:
+class DSparkBuilder(BlockDrafterBuilder):
     """Emits ``dspark.onnx`` from a DSpark draft checkpoint plus the target's embedding and
     LM head."""
 
@@ -86,23 +86,32 @@ class DSparkBuilder:
         self.rms_eps = float(cfg["rms_norm_eps"])
         self.max_position = int(max_position_embeddings or cfg["max_position_embeddings"])
         self.rope_parameters = dict(cfg["rope_parameters"])
+        rope_type = str(self.rope_parameters.get("rope_type", "default")).lower()
+        if rope_type not in ("default", "yarn"):
+            raise ValueError(f"DSpark does not support the '{rope_type}' RoPE type; expected 'default' or 'yarn'.")
         self.sliding_window = int(cfg["sliding_window"]) if cfg.get("use_sliding_window") else -1
         # The dual-source block attends to itself bidirectionally; DFlash's attention module
         # hard-codes is_causal=False and the published configs do not override it.
         self.is_causal = bool(cfg.get("is_causal", False))
 
         self.mask_token_id = int(dfl["mask_token_id"])
+        self.validate_token_metadata(cfg, dfl)
         self.target_layer_ids = list(dfl["target_layer_ids"])
         self.markov_rank = int(cfg.get("markov_rank", dfl.get("markov_rank", 0)))
         if self.markov_rank <= 0:
             raise ValueError("A DSpark drafter needs markov_rank > 0.")
         # One query row per draft; a smaller request just takes a prefix of the same block.
+        checkpoint_block_size = int(cfg["block_size"])
         try:
-            self.block_size = int(num_draft_tokens) if num_draft_tokens is not None else int(cfg["block_size"])
+            self.block_size = int(num_draft_tokens) if num_draft_tokens is not None else checkpoint_block_size
         except (TypeError, ValueError) as error:
-            raise ValueError("num_draft_tokens must be a positive integer.") from error
-        if self.block_size < 1:
-            raise ValueError("num_draft_tokens must be a positive integer.")
+            raise ValueError(
+                f"num_draft_tokens must be an integer between 2 and the checkpoint block size ({checkpoint_block_size})."
+            ) from error
+        if not 2 <= self.block_size <= checkpoint_block_size:
+            raise ValueError(
+                f"num_draft_tokens must be between 2 and the checkpoint block size ({checkpoint_block_size})."
+            )
         self.num_draft_tokens = self.block_size
         try:
             self.top_k = int(top_k)
@@ -110,149 +119,9 @@ class DSparkBuilder:
             raise ValueError("top_k must be a positive integer.") from error
         if not 1 <= self.top_k <= self.vocab_size:
             raise ValueError(f"top_k must be between 1 and the vocabulary size ({self.vocab_size}).")
+        self.selector_top_k = self.top_k
         self.aux_hidden_size = self.hidden_size * len(self.target_layer_ids)
-
-        self.values: dict[str, ir.Value] = {}
-        self.node_names: set[str] = set()
-        self.graph = ir.Graph(
-            inputs=(),
-            outputs=(),
-            nodes=(),
-            opset_imports={"": 21, "com.microsoft": 1},
-            name="dspark_graph",
-        )
-        self.model = ir.Model(self.graph, ir_version=10, producer_name="onnxruntime-genai")
-        self.const_cache: dict[str, str] = {}
-
-    # ---------------------------------------------------------------- plumbing
-
-    def make_value(self, name, dtype=None, shape=None):
-        if name == "":
-            return ir.Value(name="")
-        value = self.values.setdefault(name, ir.Value(name=name))
-        if dtype is not None:
-            value.dtype = ir.DataType(dtype)
-        if shape is not None:
-            value.shape = ir.Shape(shape)
-        return value
-
-    def make_node(self, op_type, inputs, outputs, *, name, domain="", **attrs):
-        if name in self.node_names:
-            raise ValueError(f"duplicate node name {name}")
-        node = ir.node(
-            op_type,
-            inputs=[self.make_value(n) for n in inputs],
-            attributes=attrs,
-            domain=domain,
-            outputs=[self.make_value(n) for n in outputs],
-            name=name,
-        )
-        self.graph.append(node)
-        self.node_names.add(name)
-
-    def make_initializer(self, tensor, name, to=None):
-        if to is not None:
-
-            def tensor_func(t=tensor, dtype=to):
-                return TorchTensor(t.to(to_torch_dtype(dtype)).contiguous(), name=name)
-
-            ir_tensor = ir.LazyTensor(tensor_func, dtype=to, shape=ir.Shape(tensor.shape), name=name)
-        elif isinstance(tensor, torch.Tensor):
-            ir_tensor = TorchTensor(tensor.contiguous(), name=name)
-        else:
-            ir_tensor = ir.tensor(tensor, name=name)
-        value = self.make_value(name, ir_tensor.dtype, ir_tensor.shape)
-        value.const_value = ir_tensor
-        self.graph.register_initializer(value)
-        return name
-
-    def const(self, values, dtype=ir.DataType.INT64):
-        """Emit (once) a small constant.
-
-        These are ``Constant`` nodes rather than initializers because shape inference has to read
-        the ones that feed ``Reshape`` / ``Slice`` / ``TopK``, and every initializer is written to
-        external data.
-        """
-        arr = np.asarray(values)
-        key = f"{dtype}:{arr.shape}:{arr.tobytes().hex()}"
-        if key in self.const_cache:
-            return self.const_cache[key]
-        name = f"dspark.const.{len(self.const_cache)}"
-        np_dtype = {
-            ir.DataType.INT64: np.int64,
-            ir.DataType.INT32: np.int32,
-            ir.DataType.FLOAT: np.float32,
-        }[dtype]
-        tensor = ir.tensor(arr.astype(np_dtype), name=name)
-        self.make_node("Constant", [], [name], name=f"{name}/Constant", value=tensor)
-        self.make_value(name, dtype, tensor.shape)
-        self.const_cache[key] = name
-        return name
-
-    # --------------------------------------------------------------- op sugar
-
-    def out(self, name):
-        return f"{name}/output_0"
-
-    def unary(self, op, name, x, dtype, shape, domain="", **attrs):
-        out = self.out(name)
-        self.make_node(op, [x], [out], name=name, domain=domain, **attrs)
-        self.make_value(out, dtype, shape)
-        return out
-
-    def binary(self, op, name, a, b, dtype, shape):
-        out = self.out(name)
-        self.make_node(op, [a, b], [out], name=name)
-        self.make_value(out, dtype, shape)
-        return out
-
-    def reshape(self, name, x, shape_const, dtype, shape):
-        return self.binary("Reshape", name, x, self.const(shape_const), dtype, shape)
-
-    def matmul(self, name, x, weight_tensor, in_features, out_features, rows, weight_name=None):
-        """``x @ weight.T`` for a torch ``[out, in]`` weight."""
-        wname = weight_name or (name[1:].replace("/", ".") + ".weight")
-        if wname not in self.values:
-            self.make_initializer(weight_tensor.T, wname, to=self.io_dtype)
-        out = self.out(name)
-        self.make_node("MatMul", [x, wname], [out], name=name)
-        self.make_value(out, self.io_dtype, [rows, out_features])
-        return out
-
-    def rms_norm(self, name, x, weight_tensor, rows, weight_name=None):
-        wname = weight_name or (name[1:].replace("/", ".") + ".weight")
-        if wname not in self.values:
-            self.make_initializer(weight_tensor, wname, to=self.io_dtype)
-        out = self.out(name)
-        self.make_node(
-            "SimplifiedLayerNormalization",
-            [x, wname],
-            [out, "", ""],
-            name=name,
-            axis=-1,
-            epsilon=self.rms_eps,
-            stash_type=1,
-        )
-        self.make_value(out, self.io_dtype, [rows, self.hidden_size])
-        return out
-
-    def skip_rms_norm(self, name, root, skip, weight_tensor, rows, want_sum=True):
-        wname = name[1:].replace("/", ".") + ".weight"
-        self.make_initializer(weight_tensor, wname, to=self.io_dtype)
-        out = self.out(name)
-        sm = f"{name}/output_3"
-        self.make_node(
-            "SkipSimplifiedLayerNormalization",
-            [root, skip, wname],
-            [out, "", "", sm] if want_sum else [out],
-            name=name,
-            domain="com.microsoft",
-            epsilon=self.rms_eps,
-        )
-        self.make_value(out, self.io_dtype, [rows, self.hidden_size])
-        if want_sum:
-            self.make_value(sm, self.io_dtype, [rows, self.hidden_size])
-        return out, (sm if want_sum else None)
+        self.make_graph("dspark_graph", "dspark")
 
     # ------------------------------------------------------------ rope caches
 
@@ -291,7 +160,7 @@ class DSparkBuilder:
     def make_rope_caches(self):
         # PagedAttention type-constrains cos/sin to the query's element type. YaRN's attention
         # factor scales cos/sin, exactly as HF's rotary embedding does, so it is baked in here.
-        if str(self.rope_parameters.get("rope_type", "default")).lower() in ("yarn", "longrope"):
+        if str(self.rope_parameters.get("rope_type", "default")).lower() == "yarn":
             inv_freq, attention_factor = self.yarn_inv_freq()
         else:
             dim = self.head_size
@@ -539,7 +408,7 @@ class DSparkBuilder:
         """Top-k per position plus the Markov bigram bias, packaged as a candidate lattice."""
         n_spec, top_k, rank = self.num_draft_tokens, self.top_k, self.markov_rank
 
-        logits = self.make_lm_head(final)
+        logits = self.make_lm_head(final, "num_block")
         logits32 = self.unary(
             "Cast", "/dspark/topk/Cast", logits, ir.DataType.FLOAT, ["num_block", self.vocab_size], to=ir.DataType.FLOAT
         )
@@ -653,64 +522,6 @@ class DSparkBuilder:
             self.graph.outputs.append(self.values[f"present.{i}.key"])
             self.graph.outputs.append(self.values[f"present.{i}.value"])
 
-    def make_lm_head(self, root):
-        w = self.weights
-        weight = w["lm_head.weight"]
-        if weight.dtype != torch.float8_e4m3fn:
-            name = "/lm_head/MatMul"
-            return self.matmul(
-                name, root, weight, self.hidden_size, self.vocab_size, "num_block", weight_name="lm_head.MatMul.weight"
-            )
-        scale = w.get("lm_head.weight_scale")
-        if scale is None:
-            raise ValueError("FP8 LM head weight is missing 'lm_head.weight_scale'.")
-        # The quantized head is the target's and only runs in the target's dtype. Its input is the
-        # drafter's final normed hidden state, which is back inside the fp16 range.
-        root = self.unary(
-            "Cast", "/lm_head/Cast", root, self.external_dtype, ["num_block", self.hidden_size], to=self.external_dtype
-        )
-        self.make_initializer(weight.contiguous(), "lm_head.MatMul.fp8_weight")
-        self.make_initializer(
-            scale.reshape(self.vocab_size, 1), "lm_head.MatMul.fp8_weight_scale", to=ir.DataType.FLOAT
-        )
-        out = "/lm_head/MatMul/output_0"
-        self.make_node(
-            "MatMulBlockQuantizedFp8Weight",
-            [root, "lm_head.MatMul.fp8_weight", "lm_head.MatMul.fp8_weight_scale"],
-            [out],
-            name="/lm_head/MatMul",
-            domain="com.microsoft",
-            block_size=int(weight.shape[1]),
-        )
-        self.make_value(out, self.external_dtype, ["num_block", self.vocab_size])
-        return out
-
-    # ------------------------------------------------------------------- I/O
-
-    def declare_io(self):
-        decls = [
-            ("aux_hidden_states", self.external_dtype, ["num_ctx", self.aux_hidden_size]),
-            ("input_ids", ir.DataType.INT64, ["num_block"]),
-            ("q_row_map", ir.DataType.INT32, ["num_tokens"]),
-            ("qkv_row_map", ir.DataType.INT32, ["num_tokens"]),
-            ("block_row_index", ir.DataType.INT32, ["num_block"]),
-            ("cumulative_sequence_lengths", ir.DataType.INT32, ["batch_size + 1"]),
-            ("past_sequence_lengths", ir.DataType.INT32, ["batch_size"]),
-            ("block_table", ir.DataType.INT32, ["batch_size", "max_num_blocks"]),
-            ("attention_metadata", ir.DataType.INT32, [3]),
-        ]
-        for name, dtype, shape in decls:
-            self.graph.inputs.append(self.make_value(name, dtype, shape))
-        for i in range(self.num_layers):
-            for suffix in ("key", "value"):
-                self.graph.inputs.append(
-                    self.make_value(
-                        f"past_key_values.{i}.{suffix}",
-                        self.io_dtype,
-                        ["num_blocks", self.paged_block_size, self.num_kv_heads, self.head_size],
-                    )
-                )
-
     # --------------------------------------------------------------- weights
 
     def load_weights(self):
@@ -740,65 +551,18 @@ class DSparkBuilder:
         for required in ("embed_tokens.weight", "lm_head.weight"):
             if required not in weights:
                 raise ValueError(f"Could not find '{required}' in the target checkpoint '{self.target_dir}'.")
+        self.validate_weights(weights)
         self.weights = weights
         return weights
 
-    # ------------------------------------------------------------------ save
-
-    def save_model(self, out_dir):
-        out_path = os.path.join(out_dir, self.filename)
-        data_path = out_path + ".data"
-        for path in (out_path, data_path):
-            if os.path.exists(path):
-                os.remove(path)
-        with tqdm() as pbar:
-            total_set = False
-
-            def callback(tensor, metadata):
-                nonlocal total_set
-                if not total_set:
-                    pbar.total = metadata.total
-                    total_set = True
-                pbar.update()
-                pbar.set_description(f"Saving {tensor.name} ({tensor.dtype.short_name()}, {tensor.shape})")
-
-            ir.save(
-                self.model,
-                out_path,
-                external_data=os.path.basename(data_path),
-                size_threshold_bytes=0,
-                callback=callback,
-            )
-
-    def genai_config_section(self):
-        return {
-            "filename": self.filename,
-            "num_hidden_layers": self.num_layers,
-            "num_key_value_heads": self.num_kv_heads,
-            "head_size": self.head_size,
-            "block_size": self.block_size,
-            "num_draft_tokens": self.num_draft_tokens,
-            "selector_top_k": self.top_k,
-            "mask_token_id": self.mask_token_id,
-            "sliding_window": self.sliding_window,
-            "main_aux_hidden_states": "aux_hidden_states",
-            "inputs": {
-                "aux_hidden_states": "aux_hidden_states",
-                "input_ids": "input_ids",
-                "q_row_map": "q_row_map",
-                "qkv_row_map": "qkv_row_map",
-                "block_row_index": "block_row_index",
-                "cumulative_sequence_lengths": "cumulative_sequence_lengths",
-                "past_sequence_lengths": "past_sequence_lengths",
-                "block_table": "block_table",
-                "attention_metadata": "attention_metadata",
-                "past_key_names": "past_key_values.%d.key",
-                "past_value_names": "past_key_values.%d.value",
+    def validate_weights(self, weights):
+        self.validate_weight_shapes(
+            weights,
+            {
+                "fc.weight": (self.hidden_size, self.aux_hidden_size),
+                "embed_tokens.weight": (self.vocab_size, self.hidden_size),
+                "lm_head.weight": (self.vocab_size, self.hidden_size),
+                "markov_head.markov_w1.weight": (self.vocab_size, self.markov_rank),
+                "markov_head.markov_w2.weight": (self.vocab_size, self.markov_rank),
             },
-            "outputs": {
-                "candidate_ids": "draft_candidate_ids",
-                "scores": "draft_scores",
-                "present_key_names": "present.%d.key",
-                "present_value_names": "present.%d.value",
-            },
-        }
+        )

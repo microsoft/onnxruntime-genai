@@ -892,7 +892,10 @@ class Qwen35MoEModel(MTPModel):
     block_drafter_options = ("dflash2_path", "dspark_path")
 
     def requested_block_drafter(self, extra_options):
-        return next((name for name in self.block_drafter_options if extra_options.get(name)), None)
+        requested = [name for name in self.block_drafter_options if extra_options.get(name)]
+        if len(requested) > 1:
+            raise ValueError("Block drafter options are mutually exclusive: " + ", ".join(requested) + ".")
+        return requested[0] if requested else None
 
     def get_decoder_model_class(self):
         return Qwen35MoETextModel
@@ -1086,7 +1089,14 @@ class Qwen35MoEModel(MTPModel):
         }
 
         with open(os.path.join(self.dflash2_path, "config.json"), encoding="utf-8") as handle:
-            target_layer_ids = json.load(handle)["dflash_config"]["target_layer_ids"]
+            draft_config = json.load(handle)
+        dflash_config = draft_config["dflash_config"]
+        checkpoint_draft_limit = int(dflash_config["block_size"]) - 1
+        if num_draft_tokens is not None and num_draft_tokens > checkpoint_draft_limit:
+            raise ValueError(
+                f"dflash2_num_draft_tokens must not exceed the drafter checkpoint limit ({checkpoint_draft_limit})."
+            )
+        target_layer_ids = dflash_config["target_layer_ids"]
         expected = ",".join(str(i) for i in target_layer_ids)
         actual = ",".join(str(i) for i in self.decoder.aux_hidden_state_layers)
         if actual != expected:
@@ -1106,7 +1116,7 @@ class Qwen35MoEModel(MTPModel):
             target_dir,
             self.dflash2_attrs["io_dtype"],
             self.decoder.attention_attrs["paged_block_size"],
-            self.decoder.original_context_length or self.decoder.context_length,
+            self.decoder.context_length,
             num_draft_tokens=self.dflash2_attrs["num_draft_tokens"],
         )
         self.dflash2.make_model()
@@ -1164,9 +1174,7 @@ class Qwen35MoEModel(MTPModel):
             try:
                 num_draft_tokens = int(extra_options["dspark_num_draft_tokens"])
             except (TypeError, ValueError) as error:
-                raise ValueError("dspark_num_draft_tokens must be a positive integer.") from error
-            if num_draft_tokens < 1:
-                raise ValueError("dspark_num_draft_tokens must be a positive integer.")
+                raise ValueError("dspark_num_draft_tokens must be between 2 and the checkpoint block size.") from error
 
         try:
             top_k = int(extra_options.get("dspark_top_k", 16))
@@ -1177,6 +1185,12 @@ class Qwen35MoEModel(MTPModel):
 
         with open(os.path.join(self.dspark_path, "config.json"), encoding="utf-8") as handle:
             draft_config = json.load(handle)
+        checkpoint_block_size = int(draft_config["block_size"])
+        if num_draft_tokens is not None and not 2 <= num_draft_tokens <= checkpoint_block_size:
+            raise ValueError(
+                "dspark_num_draft_tokens must be between 2 and the drafter checkpoint block size "
+                f"({checkpoint_block_size})."
+            )
         vocab_size = int(draft_config["vocab_size"])
         if top_k > vocab_size:
             raise ValueError(f"dspark_top_k must not exceed the drafter vocabulary size ({vocab_size}).")
@@ -1207,7 +1221,7 @@ class Qwen35MoEModel(MTPModel):
             target_dir,
             self.dspark_attrs["io_dtype"],
             self.decoder.attention_attrs["paged_block_size"],
-            self.decoder.original_context_length or self.decoder.context_length,
+            self.decoder.context_length,
             num_draft_tokens=self.dspark_attrs["num_draft_tokens"],
             top_k=self.dspark_attrs["top_k"],
         )
