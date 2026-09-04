@@ -175,7 +175,7 @@ steps:
       checkLatest: true
 
   - task: NuGetAuthenticate@1
-    displayName: 'Authenticate NuGet to Lotus feed (WinML SDK)'
+    displayName: 'Authenticate NuGet to Lotus feed '
 
 # --- Audit: no public package feeds -----------------------------------------
 - template: utils/audit-core-build-feeds.yml
