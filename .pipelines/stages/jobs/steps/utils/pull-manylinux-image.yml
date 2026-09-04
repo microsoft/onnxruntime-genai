@@ -11,8 +11,13 @@ parameters:
 steps:
 - bash: |
     set -e
+
+    if [ -z "${PIP_INDEX_URL:-}" ]; then
+      echo "PIP_INDEX_URL is not configured; authenticate the Python package feed before building the ARM64 image."
+      exit 1
+    fi
     python3 -m pip install requests
-    dockerBuildArgs="--build-arg BUILD_UID=$(id -u)"
+    dockerBuildArgs="--build-arg BUILD_UID=$(id -u) --secret id=pip_index_url,env=PIP_INDEX_URL"
     if [ '${{ parameters.ep }}' = 'cuda' ]; then
       cudaDockerVer='${{ parameters.cuda_version }}'
       if [[ '${{ parameters.cuda_version }}' == 13.* ]]; then
@@ -20,12 +25,7 @@ steps:
       fi
       dockerfile="tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cuda_${cudaDockerVer}"
     elif [ '${{ parameters.arch }}' = 'arm64' ]; then
-      if [ -z "${PIP_INDEX_URL:-}" ]; then
-        echo "PIP_INDEX_URL is not configured; authenticate the Python package feed before building the ARM64 image."
-        exit 1
-      fi
       dockerfile='tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cpu_aarch64'
-      dockerBuildArgs="$dockerBuildArgs --secret id=pip_index_url,env=PIP_INDEX_URL"
     else
       dockerfile='tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cpu_x64'
     fi
