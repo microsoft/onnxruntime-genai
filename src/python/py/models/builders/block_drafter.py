@@ -16,7 +16,9 @@ from tqdm import tqdm
 from .base import Model
 
 
-class BlockDrafterBuilder(Model):
+# Deliberately not a `Model` subclass: a block drafter emits a hand-written graph, so it shares
+# only the two stateless `Model` helpers below rather than the decoder builder's contract.
+class BlockDrafterBuilder:
     """Shared graph, initializer, I/O, and file plumbing for block drafters."""
 
     def make_graph(self, graph_name, const_prefix):
@@ -179,7 +181,7 @@ class BlockDrafterBuilder(Model):
             weight_scale = self.weights.get("lm_head.weight_scale")
             if weight_scale is None:
                 raise ValueError("FP8 LM head weight is missing 'lm_head.weight_scale'.")
-            scale = self.prepare_matmul_block_quantized_scales(weight_scale, self.vocab_size, 1)
+            scale = Model.prepare_matmul_block_quantized_scales(weight_scale, self.vocab_size, 1)
             if scale is None:
                 raise ValueError(
                     f"FP8 LM head weight scale has shape {tuple(weight_scale.shape)}, "

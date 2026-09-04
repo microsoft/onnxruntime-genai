@@ -2234,7 +2234,8 @@ class Model:
         else:
             raise NotImplementedError(f"The {self.onnx_dtype} precision is not currently supported.")
 
-    def prepare_matmul_block_quantized_scales(self, weight_scale, out_features, block_count):
+    @staticmethod
+    def prepare_matmul_block_quantized_scales(weight_scale, out_features, block_count):
         scale = weight_scale.float()
         if scale.numel() == 1:
             return scale.reshape(1, 1).expand(out_features, block_count).contiguous()
