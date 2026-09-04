@@ -7,6 +7,8 @@
 
 #include "generator/generators.h"
 #include "models/preprocessing/streaming_processor.h"
+#include "models/preprocessing/nemotron_streaming_processor.h"
+#include "models/moonshine_streaming_processor.h"
 
 namespace Generators {
 
@@ -35,13 +37,16 @@ void StreamingProcessor::EnableVadFromModel() {
   consecutive_silence_chunks_ = 0;
 }
 
-bool StreamingProcessor::ShouldDropChunk(const float* chunk_data, size_t chunk_size) {
+bool StreamingProcessor::IsChunkSilent(const float* chunk_data, size_t chunk_size) {
   if (!vad_) {
     return false;
   }
+  return !vad_->ContainsSpeech(chunk_data, chunk_size);
+}
 
-  bool has_speech = vad_->ContainsSpeech(chunk_data, chunk_size);
-  if (has_speech) {
+bool StreamingProcessor::ShouldDropChunk(const float* chunk_data, size_t chunk_size) {
+  // No VAD or the chunk contains speech: keep it and reset the silence run.
+  if (!IsChunkSilent(chunk_data, chunk_size)) {
     consecutive_silence_chunks_ = 0;
     return false;
   }
@@ -119,6 +124,21 @@ std::string StreamingProcessor::GetOption(const char* key) const {
   } else {
     throw std::runtime_error("Unknown StreamingProcessor option: '" + std::string(key) + "'");
   }
+}
+
+// Factory / dispatch point: maps a model type to its concrete streaming
+// processor.
+std::unique_ptr<StreamingProcessor> CreateStreamingProcessor(Model& model) {
+  const std::string& model_type = model.config_->model.type;
+  if (ModelType::IsStreamingEncDecASR(model_type)) {
+    return std::make_unique<MoonshineStreamingProcessor>(model);
+  }
+  if (ModelType::IsRNNT(model_type)) {
+    return std::make_unique<NemotronStreamingProcessor>(model);
+  }
+  throw std::runtime_error(
+      "CreateStreamingProcessor: unsupported model type '" + model_type +
+      "'. StreamingProcessor supports 'streaming_enc_dec_asr' (Moonshine) and 'nemotron_speech' (Nemotron).");
 }
 
 }  // namespace Generators
