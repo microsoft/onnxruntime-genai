@@ -191,6 +191,9 @@ void RunBenchmark(const benchmark::Options& opts) {
   size_t num_prompt_tokens;
   bool need_generate_prompt = false;
   std::string prompt;
+  // Populated when an explicit set of prompt token IDs should be used verbatim
+  // (a text prompt from --prompt/--prompt_file, optionally truncated to -l tokens).
+  std::vector<int32_t> prompt_tokens;
 
   if (opts.use_random_tokens) {
     num_prompt_tokens = std::get<size_t>(opts.prompt_num_tokens_or_content);
@@ -202,7 +205,27 @@ void RunBenchmark(const benchmark::Options& opts) {
     prompt = std::get<std::string>(opts.prompt_num_tokens_or_content);
     auto temp_sequences = OgaSequences::Create();
     tokenizer->Encode(prompt.c_str(), *temp_sequences);
-    num_prompt_tokens = temp_sequences->SequenceCount(0);
+    const size_t encoded_count = temp_sequences->SequenceCount(0);
+    const int32_t* encoded_data = temp_sequences->SequenceData(0);
+    size_t effective_count = encoded_count;
+    if (opts.prompt_truncate_tokens.has_value()) {
+      const size_t requested = *opts.prompt_truncate_tokens;
+      if (encoded_count >= requested) {
+        effective_count = requested;
+      } else {
+        std::cerr << "Warning: prompt has " << encoded_count
+                  << " tokens, fewer than the requested " << requested
+                  << " (-l/--prompt_length); using all " << encoded_count << " tokens.\n";
+      }
+    }
+    if (effective_count > 0) {
+      prompt_tokens.assign(encoded_data, encoded_data + effective_count);
+    } else {
+      prompt_tokens.clear();
+    }
+    num_prompt_tokens = effective_count;
+    // Reflect the tokens actually used (after truncation) in the displayed prompt.
+    prompt = std::string{tokenizer->Decode(prompt_tokens.data(), prompt_tokens.size())};
   }
 
   const size_t num_tokens = num_prompt_tokens + opts.num_tokens_to_generate;
@@ -251,6 +274,11 @@ void RunBenchmark(const benchmark::Options& opts) {
       });
       prompt_sequences->Append(random_tokens.data(), random_tokens.size());
     }
+  } else if (!prompt_tokens.empty()) {
+    // Text prompt (possibly truncated to -l tokens): feed the exact token IDs.
+    for (size_t i = 0; i < opts.batch_size; ++i) {
+      prompt_sequences->Append(prompt_tokens.data(), prompt_tokens.size());
+    }
   } else {
     for (size_t i = 0; i < opts.batch_size; ++i) {
       tokenizer->Encode(prompt.c_str(), *prompt_sequences);
@@ -280,11 +308,24 @@ void RunBenchmark(const benchmark::Options& opts) {
         std::cout << "[PROMPT] random token IDs in [0, 99], batch_size=" << opts.batch_size
                   << ", tokens per sequence=" << num_prompt_tokens << "\n";
       } else {
-        std::cout << "[PROMPT BEGIN]" << prompt << "[PROMPT END]\n";
+        // Only show the tail of very large prompts to keep output readable.
+        constexpr size_t kPromptPrintLimit = 256;
+        std::string_view prompt_view{prompt};
+        std::string prefix;
+        if (prompt_view.size() > kPromptPrintLimit) {
+          prompt_view = prompt_view.substr(prompt_view.size() - kPromptPrintLimit);
+          prefix = "...";
+        }
+        std::cout << "[PROMPT BEGIN]" << prefix << prompt_view << "[PROMPT END]\n";
       }
-      const auto output_sequence_length = gen->TokenCount();
-      const auto* output_sequence_data = gen->GetSequenceData(0);
-      const auto output = tokenizer->Decode(output_sequence_data, output_sequence_length);
+      // Print only the generated tokens, not the prompt echoed back.
+      const auto total_len = gen->TokenCount();
+      const size_t gen_len = total_len > num_prompt_tokens ? total_len - num_prompt_tokens : 0;
+      std::string output;
+      if (gen_len > 0) {
+        const auto* output_sequence_data = gen->GetSequenceData(0);
+        output = std::string{tokenizer->Decode(output_sequence_data + num_prompt_tokens, gen_len)};
+      }
       std::cout << "[OUTPUT BEGIN]" << output << "[OUTPUT END]\n";
     }
   }
