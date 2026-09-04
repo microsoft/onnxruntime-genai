@@ -179,6 +179,24 @@ std::string ResolveModelPath(const std::string& model_path) {
 
 EngineResources::EngineResources(const ScenarioConfig& config) {
   const std::string resolved_model_path = ResolveModelPath(config.model_path);
+  std::ifstream config_file(fs::path(resolved_model_path) / "genai_config.json");
+  if (!config_file) {
+    throw std::runtime_error("Unable to open genai_config.json in model_path: " + resolved_model_path);
+  }
+  nlohmann::json model_config;
+  config_file >> model_config;
+  const auto context_length = model_config.at("model").at("context_length").get<int64_t>();
+  const auto search = model_config.value("search", nlohmann::json::object());
+  const auto configured_max_length = search.value("max_length", int64_t{0});
+  const auto max_length = configured_max_length == 0 ? context_length : configured_max_length;
+  if (max_length <= 0) {
+    throw std::runtime_error("The model's session token limit must be greater than zero");
+  }
+  model_max_session_tokens = static_cast<size_t>(max_length);
+  const auto engine_config = model_config.value("engine", nlohmann::json::object());
+  uses_dynamic_batching =
+      engine_config.contains("dynamic_batching") &&
+      !engine_config.contains("static_batching");
 
   oga_config = OgaConfig::Create(resolved_model_path.c_str());
   oga_config->ClearProviders();
@@ -213,6 +231,14 @@ std::unique_ptr<OgaSequences> BuildRulerPromptTokens(
   const std::string prompt = prompts.at(distribution(random)).get<std::string>();
   tokenizer.Encode(prompt.c_str(), *prompt_tokens);
   return prompt_tokens;
+}
+
+size_t FitPromptToSessionLimit(
+    size_t prompt_tokens, size_t generated_tokens, size_t max_session_tokens) {
+  if (generated_tokens >= max_session_tokens) {
+    throw std::invalid_argument("The model's session token limit leaves no room for the benchmark prompt");
+  }
+  return std::min(prompt_tokens, max_session_tokens - generated_tokens);
 }
 
 MemorySampler::MemorySampler(std::chrono::milliseconds interval) : interval_(interval) {}

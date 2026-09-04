@@ -52,14 +52,6 @@ struct ConstrainedLogitsProcessor {
   // Clone as an independent grammar cursor at the current state. Speculative decoding uses this to
   // mask a draft's proposals without disturbing the verify cursor.
   virtual std::unique_ptr<ConstrainedLogitsProcessor> Clone() const = 0;
-
-  // Create an independent cursor reset to the start of the same grammar. The default preserves compatibility for
-  // lightweight processors; implementations may avoid cloning mutable state that Reset would immediately discard.
-  virtual std::unique_ptr<ConstrainedLogitsProcessor> CloneForNewTurn() const {
-    auto clone = Clone();
-    clone->Reset();
-    return clone;
-  }
 };
 
 #if USE_GUIDANCE
@@ -79,7 +71,6 @@ struct GuidanceLogitsProcessor : public ConstrainedLogitsProcessor {
   void Reset() override;
   std::vector<int32_t> GetFFTokens(size_t index) override;
   std::unique_ptr<ConstrainedLogitsProcessor> Clone() const override;
-  std::unique_ptr<ConstrainedLogitsProcessor> CloneForNewTurn() const override;
 
   // tokenize_partial is used to tokenize the input tokens with special prefix, this will get stable
   // token ids.
@@ -163,8 +154,8 @@ std::unique_ptr<ConstrainedLogitsProcessor> CreateGuidanceLogitsProcessor(const 
 std::unique_ptr<ConstrainedLogitsProcessor> CreateGuidanceLogitsProcessor(
     const Model& model, std::shared_ptr<const GeneratorParams> params);
 
-// Engine-facing overload. Request objects can exist before they are associated with a model, so
-// this validates the guidance request first (which needs no model) and only then requires one.
+// Engine-facing overload. A turn's guidance request is validated for shape and build support
+// first -- neither of which needs a model -- and only then requires the model the params carry.
 std::unique_ptr<ConstrainedLogitsProcessor> CreateGuidanceLogitsProcessor(
     std::shared_ptr<const GeneratorParams> params);
 

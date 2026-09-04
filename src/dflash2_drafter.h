@@ -24,9 +24,10 @@ size_t Dflash2DraftWidth(size_t capability_limit, size_t configured_limit,
 Tensor& Dflash2StepTensor(std::unique_ptr<Tensor>& slot, DeviceInterface* device,
                           ONNXTensorElementDataType type, const std::vector<int64_t>& shape);
 
-// Whether a request's search options can ever take a DFlash 2 block. Drafting is greedy-only, and
-// this is fixed when the request is created, so a request this rejects is never fed to the drafter.
-bool Dflash2CanDraft(const Config::Search& search);
+// The drafter cannot backfill K/V for context whose auxiliary hidden states were already consumed,
+// so an untracked request can join only at position zero while its current turn is eligible to
+// draft. Tracked requests bypass this rule so every later turn keeps their cached context contiguous.
+bool Dflash2CanJoin(bool draft_eligible, size_t first_position) noexcept;
 
 /**
  * @brief Hosts a DFlash 2 or DSpark block-drafter session.
@@ -80,6 +81,7 @@ struct Dflash2Drafter {
     size_t aux_row_count{};
     size_t first_position{};
     int32_t anchor_token{};
+    bool draft_eligible{};
     bool wants_drafts{};
   };
 
@@ -116,11 +118,13 @@ struct Dflash2Drafter {
    * @param aux_hidden_states The target's packed [token_count, aux_hidden_size] output.
    * @param drafts Resized to feeds.size(); entry i is empty unless feeds[i] was served and asked.
    *
-   * A request joins the drafter on its first feed, which must start at position zero, and keeps its
-   * cache blocks until Release. Requests that arrive once the pool is fully subscribed are skipped
-   * for good rather than failing the step, so they decode without block drafts.
+   * A request joins the drafter on its first draft-eligible feed, which must start at position zero,
+   * and keeps its cache blocks until Release. Requests that arrive once the pool is fully subscribed
+   * are skipped for good rather than failing the step, so they decode without block drafts. A tracked
+   * request continues feeding context during sampled turns so a later greedy turn can resume drafting.
    */
-  void Propose(Tensor& aux_hidden_states, std::span<const Feed> feeds,
+  // Returns true only when the drafter session executed.
+  bool Propose(Tensor& aux_hidden_states, std::span<const Feed> feeds,
                std::vector<std::vector<int32_t>>& drafts);
 
   // Returns a request's blocks to the pool. Safe for requests the drafter never saw.

@@ -83,8 +83,8 @@ void ExpectPackedHiddenStates(const std::shared_ptr<Model>& model) {
   auto assign_target = MakeDoublesEngine(model, /*capacity=*/8, EosToken(*model)).engine;
   const std::vector<int32_t> first_prompt{5, 9, 13};
   const std::vector<int32_t> second_prompt{7, 2, 20, 4};
-  auto first = CreateRequestWithPrompt(assign_target, *model, first_prompt);
-  auto second = CreateRequestWithPrompt(assign_target, *model, second_prompt);
+  auto first = CreateRequestWithPrompt(assign_target, first_prompt);
+  auto second = CreateRequestWithPrompt(assign_target, second_prompt);
   scheduler->AddRequest(first);
   scheduler->AddRequest(second);
 
@@ -131,7 +131,7 @@ TEST(ModelExecutorHiddenStatesTest, DoesNotBindOutputWithoutMtpDemand) {
   auto cache = std::shared_ptr<CacheManager>{CacheManager::Create(model)};
   auto scheduler = Scheduler::Create(model, cache);
   auto assign_target = MakeDoublesEngine(model, /*capacity=*/8, EosToken(*model)).engine;
-  auto request = CreateRequestWithPrompt(assign_target, *model, std::array<int32_t, 1>{5});
+  auto request = CreateRequestWithPrompt(assign_target, std::array<int32_t, 1>{5});
   scheduler->AddRequest(request);
   StepPlan plan;
   ASSERT_TRUE(scheduler->PlanStep(plan).executable);

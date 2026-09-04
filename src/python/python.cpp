@@ -830,21 +830,37 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def(pybind11::init([] {
         return OgaRequestOptions::Create();
       }))
-      .def("set_max_session_tokens", &OgaRequestOptions::SetMaxSessionTokens);
+      .def("set_max_session_tokens", &OgaRequestOptions::SetMaxSessionTokens,
+           "Total tokens (prompt plus generated, across every turn) the request may reach. Zero "
+           "restores the model-configured search.max_length, which is also the ceiling for an "
+           "explicit value.");
 
   pybind11::class_<OgaTurnOptions>(m, "TurnOptions")
       .def(pybind11::init([](OgaRequest& request) {
         return OgaTurnOptions::Create(request);
       }))
-      .def("set_max_generated_tokens", &OgaTurnOptions::SetMaxGeneratedTokens)
+      .def("set_max_generated_tokens", &OgaTurnOptions::SetMaxGeneratedTokens,
+           "Caps the tokens this turn generates. Zero unsets the cap.")
+      .def("set_min_generated_tokens", &OgaTurnOptions::SetMinGeneratedTokens,
+           "Masks the end-of-sequence token until this turn has generated this many tokens. Zero "
+           "unsets the minimum.")
+      .def("set_do_sample", &OgaTurnOptions::SetDoSample,
+           "Selects random sampling (True) or the top logit (False) for this turn.")
       .def("set_temperature", &OgaTurnOptions::SetTemperature,
-           "Reserved for future use; currently raises a not-implemented error.")
+           "Sampling temperature for this turn; zero requests top-logit selection.")
       .def("set_top_p", &OgaTurnOptions::SetTopP,
-           "Reserved for future use; currently raises a not-implemented error.")
+           "Nucleus bound for this turn, between 0.0 and 1.0.")
       .def("set_top_k", &OgaTurnOptions::SetTopK,
-           "Reserved for future use; currently raises a not-implemented error.")
+           "Top-k bound for this turn; one requests top-logit selection and zero disables top-k.")
+      .def("set_repetition_penalty", &OgaTurnOptions::SetRepetitionPenalty,
+           "Repetition penalty for this turn; must be finite and greater than zero.")
+      .def("set_no_repeat_ngram_size", &OgaTurnOptions::SetNoRepeatNgramSize,
+           "Forbids repeating any n-gram of this size in the generated sequence. Zero disables it.")
       .def("set_seed", &OgaTurnOptions::SetSeed,
-           "Reserved for future use; currently raises a not-implemented error.")
+           "Reseeds the request's random streams at the start of this turn. Zero is a valid "
+           "deterministic seed; use clear_seed to remove a pending reseed.")
+      .def("clear_seed", &OgaTurnOptions::ClearSeed,
+           "Removes a pending reseed, continuing the request's existing random streams.")
       .def("set_stop_strings", [](OgaTurnOptions& options, const std::vector<std::string>& values) {
         auto strings = OgaStringArray::Create();
         for (const auto& value : values) {
@@ -863,7 +879,12 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
            "list containing an empty string entry, which is invalid. Every entry in a nonempty "
            "list must itself be a nonempty, valid UTF-8 string with no embedded NUL byte; the "
            "list may contain at most 16 entries totaling at most 16 KiB.")
-      .def("set_guidance", &OgaTurnOptions::SetGuidance, "Reserved for future use; currently raises a not-implemented error.");
+      .def("set_guidance", &OgaTurnOptions::SetGuidance,
+           "Constrains this turn's output to a grammar ('json_schema', 'regex', or "
+           "'lark_grammar'), copying both strings immediately. Guidance is strictly turn-scoped: a "
+           "following turn that sets none is unguided.")
+      .def("clear_guidance", &OgaTurnOptions::ClearGuidance, "Removes the configured grammar, so the turn is unguided.")
+      .def("reset", &OgaTurnOptions::Reset, "Restores every turn option to its unset state.");
 
   pybind11::class_<OgaRequest>(m, "Request")
       .def(
@@ -958,11 +979,12 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def(pybind11::init([](OgaModel& model) { return OgaEngine::Create(model); }))
       .def(
           "create_request",
-          [](OgaEngine& engine, PyGeneratorParams& params,
-             OgaRequestOptions* options) {
-            return engine.CreateRequest(*params.params_, options);
+          [](OgaEngine& engine, OgaRequestOptions* options) {
+            return engine.CreateRequest(options);
           },
-          pybind11::arg("params"),
+          // Keyword-only so an older positional create_request(params) call fails loudly instead of
+          // silently binding generation parameters the Engine no longer accepts.
+          pybind11::kw_only(),
           pybind11::arg("options") = pybind11::none())
       .def(
           "create_event_buffer",

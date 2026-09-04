@@ -145,11 +145,9 @@ struct Engine : std::enable_shared_from_this<Engine>,
    */
   static EngineDependencies CreateDependencies(std::shared_ptr<Model> model);
 
-  std::shared_ptr<Request> CreateRequest(const GeneratorParams& params,
-                                         size_t max_total_tokens);
-  std::shared_ptr<Request> CreateRequest(const GeneratorParams& params) {
-    return CreateRequest(
-        params, static_cast<size_t>(params.search.max_length));
+  std::shared_ptr<Request> CreateRequest(const RequestOptions& options);
+  std::shared_ptr<Request> CreateRequest() {
+    return CreateRequest(RequestOptions{});
   }
 
   /**
@@ -212,6 +210,11 @@ struct Engine : std::enable_shared_from_this<Engine>,
       const EngineStepError& error,
       std::exception_ptr caught_error) noexcept;
   std::shared_ptr<Request> FindTrackedRequest(const void* request_id) const;
+  // Builds the guidance processor a turn asked for, or null when it asked for none. Fallible by
+  // design and called before any Request mutation: grammar validation, cache acquisition, and
+  // processor construction all happen here.
+  std::unique_ptr<ConstrainedLogitsProcessor> CreateTurnGuidance(
+      const TurnOptions& options) const;
   EngineEvent FailUnserviceableRequest(const void* request_id);
   void ValidateRequestCanContinue(
       const std::shared_ptr<Request>& request,

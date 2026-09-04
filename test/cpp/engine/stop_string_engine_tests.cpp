@@ -62,11 +62,41 @@ TurnOptions StopOptions(std::vector<std::string> stop_strings,
   return options;
 }
 
+// A nearly deterministic sampled turn policy: top-k 3 at a very low temperature with a fixed seed,
+// so the sampled and speculative-sampled paths take their random branches while still selecting a
+// predictable token.
+// An omitted seed continues the request's existing streams, which is what a continuation turn of an
+// already-seeded request needs.
+TurnOptions SampledOptions(std::vector<std::string> stop_strings = {},
+                           std::optional<size_t> max_generated_tokens = std::nullopt,
+                           std::optional<uint64_t> seed = uint64_t{1234}) {
+  auto options = StopOptions(std::move(stop_strings), max_generated_tokens);
+  options.do_sample = true;
+  options.top_k = 3;
+  options.temperature = 0.01f;
+  options.seed = seed;
+  return options;
+}
+
 // A minimal ConstrainedLogitsProcessor stand-in so stop-string tests can verify the two features
 // coexist without depending on USE_GUIDANCE or a real grammar. Records every committed token; does
 // not otherwise constrain anything.
 class NoOpGuidanceProcessor final : public ConstrainedLogitsProcessor {
  public:
+  // Guidance is turn-scoped, so a completed turn releases its cursor rather than resetting it. The
+  // destructor publishes the final committed history through this shared slot so a test can observe
+  // the release without touching freed memory. Deliberately not carried by Clone(): a discarded
+  // transaction checkpoint must not publish on the live cursor's behalf.
+  explicit NoOpGuidanceProcessor(
+      std::shared_ptr<std::optional<std::vector<int32_t>>> release_observer = nullptr)
+      : release_observer_{std::move(release_observer)} {}
+
+  ~NoOpGuidanceProcessor() override {
+    if (release_observer_) {
+      *release_observer_ = committed_tokens;
+    }
+  }
+
   void CommitTokens(std::span<int32_t> tokens) override {
     committed_tokens.insert(committed_tokens.end(), tokens.begin(), tokens.end());
   }
@@ -83,8 +113,16 @@ class NoOpGuidanceProcessor final : public ConstrainedLogitsProcessor {
     return clone;
   }
 
+  void ObserveReleaseInto(
+      std::shared_ptr<std::optional<std::vector<int32_t>>> observer) {
+    release_observer_ = std::move(observer);
+  }
+
   std::vector<int32_t> committed_tokens;
   int reset_count{};
+
+ private:
+  std::shared_ptr<std::optional<std::vector<int32_t>>> release_observer_;
 };
 
 class StopStringEngineTest : public ::testing::Test {
@@ -101,7 +139,7 @@ class StopStringEngineTest : public ::testing::Test {
 TEST_F(StopStringEngineTest, NoStopStringsPreserveOrdinaryGenerationBehavior) {
   // Exercise the no-stop path entirely through the public request and event contract.
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/8 /* "AB" */);
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(Prompt(), StopOptions({}, std::optional<size_t>{2}));
 
   std::array<EngineEvent, 4> storage;
@@ -126,7 +164,7 @@ TEST_F(StopStringEngineTest, NoStopStringsPreserveOrdinaryGenerationBehavior) {
 
 TEST_F(StopStringEngineTest, MatchSpanningTwoTokensReportsEarliestCompletionAndIndex) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5 /* "ST" */);
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(Prompt(), StopOptions({"STOP"}));
 
   std::array<EngineEvent, 4> storage;
@@ -155,7 +193,7 @@ TEST_F(StopStringEngineTest, SecondOfThreePatternsReportsItsOwnNonZeroIndex) {
   // one that actually matches ("STOP", configured at index 1) must report its own index, not 0 or
   // the index of an unrelated pattern that never matches.
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5 /* "ST" */);
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(Prompt(), StopOptions({"UNREACHABLE1", "STOP", "UNREACHABLE2"}));
 
   std::array<EngineEvent, 4> storage;
@@ -175,7 +213,7 @@ TEST_F(StopStringEngineTest, MatchWithinASingleTokenRetainsTrailingBytesInHistor
   // whole token is still retained, emitted, and counted -- the Engine never trims or rewrites a
   // committed token's raw bytes.
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/7);
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(Prompt(), StopOptions({"STOP"}));
 
   std::array<EngineEvent, 4> storage;
@@ -190,7 +228,7 @@ TEST_F(StopStringEngineTest, StopStringTakesPrecedenceOverTurnLimitForTheSameTok
   // max_generated_tokens=1 and the first generated token both complete a stop match and exhaust
   // the turn's token budget. StopString must win.
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/7 /* "STOPX" */);
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(Prompt(), StopOptions({"STOP"}, std::optional<size_t>{1}));
 
   std::array<EngineEvent, 4> storage;
@@ -213,7 +251,7 @@ TEST_F(StopStringEngineTest, RealEosTokensDecodeEmptyAndStopStringsDoNotDisturbE
   // not depend on Search's append decision, which the Engine can and does resolve in the stop
   // string's favor.
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5 /* "ST" */);
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(Prompt(), StopOptions({"STOP"}));
 
   std::array<EngineEvent, 4> storage;
@@ -227,11 +265,9 @@ TEST_F(StopStringEngineTest, RealEosTokensDecodeEmptyAndStopStringsDoNotDisturbE
 }
 
 TEST_F(StopStringEngineTest, StopStringTakesPrecedenceOverContextLimitForTheSameToken) {
-  auto params = MakeGreedyParams(*model_);
-  params->search.max_length = static_cast<int32_t>(Prompt().size()) + 1;
-
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/7 /* "STOPX" */);
-  auto request = CreateEngineRequest(engine.engine, *params);
+  auto request = CreateEngineRequest(
+      engine.engine, /*max_session_tokens=*/Prompt().size() + 1);
   request->BeginTurn(Prompt(), StopOptions({"STOP"}));
 
   std::array<EngineEvent, 4> storage;
@@ -242,7 +278,7 @@ TEST_F(StopStringEngineTest, StopStringTakesPrecedenceOverContextLimitForTheSame
 
 TEST_F(StopStringEngineTest, TurnResetClearsMatchAndControllerForTheNextTurn) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/7 /* "STOPX" */);
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(Prompt(), StopOptions({"STOP"}));
 
   std::array<EngineEvent, 4> storage;
@@ -281,7 +317,7 @@ TEST_F(StopStringEngineTest, PromptTokensAreNeverSeededIntoTheStopStringMatcher)
   // used to admit the turn. A single nonmatching generated token ("A") must end the turn on the
   // turn limit, not StopString.
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/2 /* "A" */);
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(std::vector<int32_t>{5, 6} /* "ST" + "OP" = "STOP" */,
                      StopOptions({"STOP"}, std::optional<size_t>{1}));
 
@@ -301,7 +337,7 @@ TEST_F(StopStringEngineTest, ContinuationInputTokensAreNeverSeededIntoTheNextTur
   // "STOP"; since continuation input is never seeded, only "OP" reaches the fresh controller, which
   // does not complete "STOP" by itself.
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5 /* "ST" */);
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(Prompt(), StopOptions({"STOP"}, std::optional<size_t>{1}));
 
   std::array<EngineEvent, 4> storage;
@@ -331,7 +367,7 @@ TEST_F(StopStringEngineTest, PreviousTurnsStopControllerStateNeverLeaksIntoTheNe
   // wrongly complete "STOP" using the stale prefix state; since a fresh controller is built for
   // every turn, it does not.
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5 /* "ST" */);
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(Prompt(), StopOptions({"STOP"}, std::optional<size_t>{1}));
 
   std::array<EngineEvent, 4> storage;
@@ -356,8 +392,8 @@ TEST_F(StopStringEngineTest, MultiRequestIsolationKeepsIndependentControllersAnd
   // Two concurrent requests with different stop-string configurations and different per-row
   // scripted tokens must not observe each other's decoded text.
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/2);
-  auto first = CreateEngineRequest(engine.engine, *model_);
-  auto second = CreateEngineRequest(engine.engine, *model_);
+  auto first = CreateEngineRequest(engine.engine);
+  auto second = CreateEngineRequest(engine.engine);
   first->BeginTurn(Prompt(), StopOptions({"STOP"}));
   second->BeginTurn(Prompt(), StopOptions({"AB"}));  // completes within one token (token 8)
 
@@ -387,9 +423,10 @@ TEST_F(StopStringEngineTest, MultiRequestIsolationKeepsIndependentControllersAnd
 
 TEST_F(StopStringEngineTest, GuidanceAndStopStringsCoexistOnTheSameRequest) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5);
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(Prompt(), StopOptions({"STOP"}));
-  auto* guidance = new NoOpGuidanceProcessor();
+  auto released = std::make_shared<std::optional<std::vector<int32_t>>>();
+  auto* guidance = new NoOpGuidanceProcessor(released);
   RequestGuidanceTestAccess::Install(
       *request, std::unique_ptr<ConstrainedLogitsProcessor>(guidance));
 
@@ -401,23 +438,23 @@ TEST_F(StopStringEngineTest, GuidanceAndStopStringsCoexistOnTheSameRequest) {
   engine.executor->SetForcedToken(6);
   ASSERT_EQ(engine.engine->Run(storage), 1u);
   EXPECT_EQ(storage[0].finish_reason, GenerationFinishReason::StopString);
-  // Guidance still saw both committed tokens before the turn's own completion reset its cursor --
-  // exactly the same turn-completion behavior guidance already has with EOS/turn/context-limit
-  // completions, now also exercised by a StopString completion.
-  EXPECT_EQ(guidance->reset_count, 1);
-  EXPECT_TRUE(guidance->committed_tokens.empty());
+  // Guidance saw both committed tokens, and the completing step released its cursor -- exactly the
+  // same turn-completion behavior guidance has for EOS/turn/context-limit completions, now also
+  // exercised by a StopString completion.
+  EXPECT_EQ(RequestGuidanceTestAccess::Get(*request), nullptr);
+  ASSERT_TRUE(released->has_value());
+  EXPECT_EQ(released->value(), (std::vector<int32_t>{5, 6}));
 }
 
 TEST_F(StopStringEngineTest, GuidanceAndStopRollbackCoexistOnTheSameRequest) {
   // Both guidance and the stop controller are mutated during staging (Request::StageGeneration
-  // calls CommitGuidanceToken() -- and, since a StopString match finishes the turn, immediately
-  // Resets() the *active* guidance processor in the same call -- and observes the stop controller
-  // unconditionally once a token is appended, before the step commits), so a rollback must restore
-  // both together, not just one. RequestGuidanceTestAccess::Get() is used throughout (rather than
-  // holding onto the originally-installed raw pointer) because a rollback swaps the active
-  // processor back to a different object: the pre-staging Clone() checkpoint.
+  // calls CommitGuidanceToken() and observes the stop controller unconditionally once a token is
+  // appended, before the step commits), so a rollback must restore both together, not just one.
+  // RequestGuidanceTestAccess::Get() is used after the rollback (rather than holding onto the
+  // originally-installed raw pointer) because a rollback swaps the active processor back to a
+  // different object: the pre-staging Clone() checkpoint.
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5 /* "ST" */);
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(Prompt(), StopOptions({"STOP"}));
   auto* guidance = new NoOpGuidanceProcessor();
   RequestGuidanceTestAccess::Install(
@@ -435,15 +472,13 @@ TEST_F(StopStringEngineTest, GuidanceAndStopRollbackCoexistOnTheSameRequest) {
   plan.target_cache_slots = static_cast<size_t>(before.current_sequence_length);
   PrepareRequestStep(model_, plan);
 
-  // Stage a second step with "OP" (token 6), which completes "STOP". Staging both commits the
-  // token to guidance and, because the step is now done, immediately Resets() it -- exactly the
-  // same turn-completion behavior GuidanceAndStopStringsCoexistOnTheSameRequest exercises on the
-  // committed path, but here it happens speculatively, before any Search/cache commit.
+  // Stage a second step with "OP" (token 6), which completes "STOP". Staging commits the token to
+  // the live guidance cursor; releasing that cursor is deferred to the commit boundary, so nothing
+  // irreversible happens here.
   request->SaveStateForTransaction();
   const auto staged = request->ApplyLogitsForTransaction(LogitsForToken(*model_, 6));
   ASSERT_EQ(staged.finish_reason, GenerationFinishReason::StopString);
-  EXPECT_EQ(guidance->reset_count, 1);
-  EXPECT_TRUE(guidance->committed_tokens.empty());
+  EXPECT_EQ(guidance->committed_tokens, (std::vector<int32_t>{5, 6}));
 
   // Roll back without committing: both guidance and the stop controller must be restored together
   // to their pre-staging state. Guidance's checkpoint is a distinct Clone() taken before staging,
@@ -456,6 +491,8 @@ TEST_F(StopStringEngineTest, GuidanceAndStopRollbackCoexistOnTheSameRequest) {
   EXPECT_EQ(restored_guidance->committed_tokens, (std::vector<int32_t>{5}));
   EXPECT_EQ(restored_guidance->reset_count, 0);
   EXPECT_EQ(request->FinishReason(), GenerationFinishReason::None);
+  auto released = std::make_shared<std::optional<std::vector<int32_t>>>();
+  restored_guidance->ObserveReleaseInto(released);
 
   // Mutation-resistant: re-stage and commit the *same* completing token ("OP", token 6) again,
   // rather than a different, non-matching token. A rollback that only truncated turn_tokens_ and
@@ -472,16 +509,17 @@ TEST_F(StopStringEngineTest, GuidanceAndStopRollbackCoexistOnTheSameRequest) {
   EXPECT_EQ(request->TurnGeneratedTokens(), 2u);
   EXPECT_EQ(request->FinishReason(), GenerationFinishReason::StopString);
   EXPECT_EQ(request->MatchedStopStringIndex(), 0);
-  // Guidance reaches the same terminal/reset state on the replayed-and-recompleted match as it did
-  // on the original (now-discarded) completion: one more Reset() (turn completion resets guidance's
-  // cursor), and no leftover committed tokens.
-  EXPECT_EQ(restored_guidance->reset_count, 1);
-  EXPECT_TRUE(restored_guidance->committed_tokens.empty());
+  // Guidance reaches the same terminal state on the replayed-and-recompleted match as it did on
+  // the original (now-discarded) completion: it saw both tokens and was then released with the
+  // rest of the turn's scoped state.
+  EXPECT_EQ(RequestGuidanceTestAccess::Get(*request), nullptr);
+  ASSERT_TRUE(released->has_value());
+  EXPECT_EQ(released->value(), (std::vector<int32_t>{5, 6}));
 }
 
 TEST_F(StopStringEngineTest, DirectRollbackDiscardsTheStagedObservationCompletely) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5);
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(Prompt(), StopOptions({"STOP"}));
 
   std::array<EngineEvent, 4> storage;
@@ -529,7 +567,7 @@ TEST_F(StopStringEngineTest, DirectRollbackDiscardsTheStagedObservationCompletel
 
 TEST_F(StopStringEngineTest, QueuedRollbackReplaysTheControllerInTheCompletionPhase) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5);
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(Prompt(), StopOptions({"STOP"}));
 
   std::array<EngineEvent, 4> storage;
@@ -571,7 +609,7 @@ TEST_F(StopStringEngineTest, QueuedRollbackReplaysTheControllerInTheCompletionPh
 
 TEST_F(StopStringEngineTest, QueuedRollbackReplaysControllerBeforeRetry) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5);
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(Prompt(), StopOptions({"STOP"}));
 
   std::array<EngineEvent, 4> storage;
@@ -605,7 +643,7 @@ TEST_F(StopStringEngineTest, DirectRollbackReplaysMultipleCommittedTokensInOrder
   // that to two committed tokens ("A" then "ST") so RollbackTo() actually has to replay more than
   // one token, in order, to reconstruct the correct matcher/stream state.
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/2 /* "A" */);
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(Prompt(), StopOptions({"STOP"}));
 
   std::array<EngineEvent, 4> storage;
@@ -699,7 +737,7 @@ TEST_F(StopStringEngineTest, StaticBatchingEngineRejectsStopEnabledTurnBeforeMut
   EngineDependencies dependencies{cache, std::move(scheduler), std::move(executor)};
   auto engine = std::make_shared<Engine>(model_, std::move(dependencies));
 
-  auto request = CreateEngineRequest(engine, *model_);
+  auto request = CreateEngineRequest(engine);
   EXPECT_THROW(
       request->BeginTurn(Prompt(), StopOptions({"STOP"})), std::runtime_error);
   // Rejected before any mutation: the request never left its pre-turn state.
@@ -726,7 +764,7 @@ TEST_F(StopStringEngineTest, ManualDraftTokensAreAcceptedAndVerifiedForAStopEnab
   auto engine = std::make_shared<Engine>(model_, std::move(dependencies));
   ASSERT_GT(engine->MaxDraftTokensPerStep(), 0u);
 
-  auto request = CreateEngineRequest(engine, *model_);
+  auto request = CreateEngineRequest(engine);
   request->BeginTurn(Prompt(), StopOptions({"UNREACHABLE"}));
 
   std::array<EngineEvent, 4> storage;
@@ -753,7 +791,7 @@ TEST_F(StopStringEngineTest, GreedyDraftMatchAtTheFirstPositionDiscardsLaterDraf
   // very first committed draft, so verification must never even look at the later two.
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   engine.cache->SetMaxDraftTokensPerStep(3);
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(Prompt(), StopOptions({"STOP"}));
   std::array<EngineEvent, 4> storage;
   ASSERT_EQ(engine.engine->Run(storage), 1u);
@@ -778,7 +816,7 @@ TEST_F(StopStringEngineTest, GreedyDraftMatchAtTheFirstPositionDiscardsLaterDraf
 TEST_F(StopStringEngineTest, GreedyDraftMatchAtAMiddlePositionEmitsThePriorAcceptedTokenFirst) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   engine.cache->SetMaxDraftTokensPerStep(3);
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(Prompt(), StopOptions({"STOP"}));
   std::array<EngineEvent, 4> storage;
   ASSERT_EQ(engine.engine->Run(storage), 1u);
@@ -801,7 +839,7 @@ TEST_F(StopStringEngineTest, GreedyDraftMatchAtTheLastDraftPositionDiscardsTheBo
   // (the bonus/replacement row the target would otherwise have contributed) is never reached.
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   engine.cache->SetMaxDraftTokensPerStep(3);
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(Prompt(), StopOptions({"STOP"}));
   std::array<EngineEvent, 4> storage;
   ASSERT_EQ(engine.engine->Run(storage), 1u);
@@ -826,7 +864,7 @@ TEST_F(StopStringEngineTest, GreedyBonusTokenCanCompleteAMatchAfterAllDraftsAcce
   // own observation, confirming the bonus token needs no special handling.
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   engine.cache->SetMaxDraftTokensPerStep(3);
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(Prompt(), StopOptions({"STOP"}));
   std::array<EngineEvent, 4> storage;
   ASSERT_EQ(engine.engine->Run(storage), 1u);
@@ -847,7 +885,7 @@ TEST_F(StopStringEngineTest, GreedyRejectedDraftNeverReachesTheMatcherButItsRepl
   // sees the rejected draft at all; it observes only the target's own replacement, which matches.
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   engine.cache->SetMaxDraftTokensPerStep(3);
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(Prompt(), StopOptions({"STOP"}));
   std::array<EngineEvent, 4> storage;
   ASSERT_EQ(engine.engine->Run(storage), 1u);
@@ -869,7 +907,7 @@ TEST_F(StopStringEngineTest, GreedyMatchCanBeginInPriorCommittedOutputAndFinishI
   // partial state, not anything reseeded from the draft proposal itself.
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5 /* "ST" */);
   engine.cache->SetMaxDraftTokensPerStep(3);
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(Prompt(), StopOptions({"STOP"}));
   std::array<EngineEvent, 4> storage;
   ASSERT_EQ(engine.engine->Run(storage), 1u);
@@ -894,7 +932,7 @@ TEST_F(StopStringEngineTest, GreedyDraftVerificationNeverObservesAnAcceptedEosDr
   // never reached.
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11 /* filler */);
   engine.cache->SetMaxDraftTokensPerStep(3);
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(Prompt(), StopOptions({"STOP"}));
   std::array<EngineEvent, 4> storage;
   ASSERT_EQ(engine.engine->Run(storage), 1u);  // commits "t11" (token 11)
@@ -923,13 +961,8 @@ TEST_F(StopStringEngineTest, GreedyDraftVerificationNeverObservesAnAcceptedEosDr
 TEST_F(StopStringEngineTest, SampledDraftMatchAtTheFirstAcceptedPositionTruncates) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   engine.cache->SetMaxDraftTokensPerStep(3);
-  auto params = MakeGreedyParams(*model_);
-  params->search.do_sample = true;
-  params->search.top_k = 3;
-  params->search.temperature = 0.01f;
-  params->search.random_seed = 1234;
-  auto request = CreateEngineRequest(engine.engine, *params);
-  request->BeginTurn(Prompt(), StopOptions({"STOP"}));
+  auto request = CreateEngineRequest(engine.engine);
+  request->BeginTurn(Prompt(), SampledOptions({"STOP"}));
   std::array<EngineEvent, 4> storage;
   ASSERT_EQ(engine.engine->Run(storage), 1u);
 
@@ -949,13 +982,8 @@ TEST_F(StopStringEngineTest, SampledDraftMatchAtTheFirstAcceptedPositionTruncate
 TEST_F(StopStringEngineTest, SampledDraftMatchAtAMiddleAcceptedPositionEmitsThePriorTokenFirst) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   engine.cache->SetMaxDraftTokensPerStep(3);
-  auto params = MakeGreedyParams(*model_);
-  params->search.do_sample = true;
-  params->search.top_k = 3;
-  params->search.temperature = 0.01f;
-  params->search.random_seed = 1234;
-  auto request = CreateEngineRequest(engine.engine, *params);
-  request->BeginTurn(Prompt(), StopOptions({"STOP"}));
+  auto request = CreateEngineRequest(engine.engine);
+  request->BeginTurn(Prompt(), SampledOptions({"STOP"}));
   std::array<EngineEvent, 4> storage;
   ASSERT_EQ(engine.engine->Run(storage), 1u);
 
@@ -978,13 +1006,8 @@ TEST_F(StopStringEngineTest, SampledDraftMatchAtTheLastAcceptedPositionDiscardsT
   // last *draft* position -- the trailing bonus token must never be committed or emitted.
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   engine.cache->SetMaxDraftTokensPerStep(3);
-  auto params = MakeGreedyParams(*model_);
-  params->search.do_sample = true;
-  params->search.top_k = 3;
-  params->search.temperature = 0.01f;
-  params->search.random_seed = 1234;
-  auto request = CreateEngineRequest(engine.engine, *params);
-  request->BeginTurn(Prompt(), StopOptions({"STOP"}));
+  auto request = CreateEngineRequest(engine.engine);
+  request->BeginTurn(Prompt(), SampledOptions({"STOP"}));
   std::array<EngineEvent, 4> storage;
   ASSERT_EQ(engine.engine->Run(storage), 1u);
 
@@ -1005,13 +1028,8 @@ TEST_F(StopStringEngineTest, SampledDraftMatchAtTheLastAcceptedPositionDiscardsT
 TEST_F(StopStringEngineTest, SampledFullyAcceptedBonusTokenCanCompleteAMatch) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   engine.cache->SetMaxDraftTokensPerStep(3);
-  auto params = MakeGreedyParams(*model_);
-  params->search.do_sample = true;
-  params->search.top_k = 3;
-  params->search.temperature = 0.01f;
-  params->search.random_seed = 1234;
-  auto request = CreateEngineRequest(engine.engine, *params);
-  request->BeginTurn(Prompt(), StopOptions({"STOP"}));
+  auto request = CreateEngineRequest(engine.engine);
+  request->BeginTurn(Prompt(), SampledOptions({"STOP"}));
   std::array<EngineEvent, 4> storage;
   ASSERT_EQ(engine.engine->Run(storage), 1u);
 
@@ -1029,13 +1047,8 @@ TEST_F(StopStringEngineTest, SampledFullyAcceptedBonusTokenCanCompleteAMatch) {
 TEST_F(StopStringEngineTest, SampledRejectedDraftReplacementCanCompleteAMatch) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   engine.cache->SetMaxDraftTokensPerStep(3);
-  auto params = MakeGreedyParams(*model_);
-  params->search.do_sample = true;
-  params->search.top_k = 3;
-  params->search.temperature = 0.01f;
-  params->search.random_seed = 1234;
-  auto request = CreateEngineRequest(engine.engine, *params);
-  request->BeginTurn(Prompt(), StopOptions({"STOP"}));
+  auto request = CreateEngineRequest(engine.engine);
+  request->BeginTurn(Prompt(), SampledOptions({"STOP"}));
   std::array<EngineEvent, 4> storage;
   ASSERT_EQ(engine.engine->Run(storage), 1u);
 
@@ -1057,13 +1070,8 @@ TEST_F(StopStringEngineTest, SampledDraftVerificationNeverObservesAnAcceptedEosD
   // already excludes it -- both stage-loop branches reuse that same function unmodified for this.
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   engine.cache->SetMaxDraftTokensPerStep(3);
-  auto params = MakeGreedyParams(*model_);
-  params->search.do_sample = true;
-  params->search.top_k = 3;
-  params->search.temperature = 0.01f;
-  params->search.random_seed = 1234;
-  auto request = CreateEngineRequest(engine.engine, *params);
-  request->BeginTurn(Prompt(), StopOptions({"STOP"}));
+  auto request = CreateEngineRequest(engine.engine);
+  request->BeginTurn(Prompt(), SampledOptions({"STOP"}));
   std::array<EngineEvent, 4> storage;
   ASSERT_EQ(engine.engine->Run(storage), 1u);  // commits "t11"
 
@@ -1088,7 +1096,7 @@ TEST_F(StopStringEngineTest, PromoteFinalStageAsAcceptedDraftRejectsAResultThatN
   // counts and token_appended already agree -- so this exercises the guard directly rather than
   // trying to contrive a real end-to-end scenario that violates the invariant.
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(Prompt());
   std::array<EngineEvent, 4> storage;
   ASSERT_EQ(engine.engine->Run(storage), 1u);
@@ -1108,13 +1116,8 @@ TEST_F(StopStringEngineTest, PromoteFinalStageAsAcceptedDraftRejectsAResultThatN
 TEST_F(StopStringEngineTest, SampledAcceptedTelemetryCountsAMatchAtTheFirstPosition) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   engine.cache->SetMaxDraftTokensPerStep(3);
-  auto params = MakeGreedyParams(*model_);
-  params->search.do_sample = true;
-  params->search.top_k = 3;
-  params->search.temperature = 0.01f;
-  params->search.random_seed = 1234;
-  auto request = CreateEngineRequest(engine.engine, *params);
-  request->BeginTurn(Prompt(), StopOptions({"STOP"}));
+  auto request = CreateEngineRequest(engine.engine);
+  request->BeginTurn(Prompt(), SampledOptions({"STOP"}));
   std::array<EngineEvent, 4> storage;
   ASSERT_EQ(engine.engine->Run(storage), 1u);
 
@@ -1137,13 +1140,8 @@ TEST_F(StopStringEngineTest, SampledAcceptedTelemetryCountsAMatchAtTheFirstPosit
 TEST_F(StopStringEngineTest, SampledAcceptedTelemetryCountsAMatchAtAMiddlePosition) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   engine.cache->SetMaxDraftTokensPerStep(3);
-  auto params = MakeGreedyParams(*model_);
-  params->search.do_sample = true;
-  params->search.top_k = 3;
-  params->search.temperature = 0.01f;
-  params->search.random_seed = 1234;
-  auto request = CreateEngineRequest(engine.engine, *params);
-  request->BeginTurn(Prompt(), StopOptions({"STOP"}));
+  auto request = CreateEngineRequest(engine.engine);
+  request->BeginTurn(Prompt(), SampledOptions({"STOP"}));
   std::array<EngineEvent, 4> storage;
   ASSERT_EQ(engine.engine->Run(storage), 1u);
 
@@ -1165,13 +1163,8 @@ TEST_F(StopStringEngineTest, SampledAcceptedTelemetryCountsAFullyConfirmedMatchA
   // every proposed draft was confirmed -- even though the round ended via a match, not a bonus.
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   engine.cache->SetMaxDraftTokensPerStep(3);
-  auto params = MakeGreedyParams(*model_);
-  params->search.do_sample = true;
-  params->search.top_k = 3;
-  params->search.temperature = 0.01f;
-  params->search.random_seed = 1234;
-  auto request = CreateEngineRequest(engine.engine, *params);
-  request->BeginTurn(Prompt(), StopOptions({"STOP"}));
+  auto request = CreateEngineRequest(engine.engine);
+  request->BeginTurn(Prompt(), SampledOptions({"STOP"}));
   std::array<EngineEvent, 4> storage;
   ASSERT_EQ(engine.engine->Run(storage), 1u);
 
@@ -1195,13 +1188,9 @@ TEST_F(StopStringEngineTest, NoStopBudgetExhaustedNaturalLastGenuineDraftKeepsVa
   // still count that final draft as accepted -- this request has no stop controller at all.
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   engine.cache->SetMaxDraftTokensPerStep(3);
-  auto params = MakeGreedyParams(*model_);
-  params->search.do_sample = true;
-  params->search.top_k = 3;
-  params->search.temperature = 0.01f;
-  params->search.random_seed = 1234;
-  auto request = CreateEngineRequest(engine.engine, *params);
-  request->BeginTurn(Prompt(), std::optional<size_t>{3});  // no stop strings
+  auto request = CreateEngineRequest(engine.engine);
+  // no stop strings
+  request->BeginTurn(Prompt(), SampledOptions({}, std::optional<size_t>{3}));
   std::array<EngineEvent, 4> storage;
   ASSERT_EQ(engine.engine->Run(storage), 1u);
   ASSERT_EQ(request->TurnGeneratedTokens(), 1u);
@@ -1228,13 +1217,9 @@ TEST_F(StopStringEngineTest, ManualDraftCountFarExceedingTheBudgetStillCountsThe
   // PromoteFinalStageAsAcceptedDraft, never both for the same stage and never zero times.
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   engine.cache->SetMaxDraftTokensPerStep(5);
-  auto params = MakeGreedyParams(*model_);
-  params->search.do_sample = true;
-  params->search.top_k = 3;
-  params->search.temperature = 0.01f;
-  params->search.random_seed = 1234;
-  auto request = CreateEngineRequest(engine.engine, *params);
-  request->BeginTurn(Prompt(), std::optional<size_t>{3});  // no stop strings; budget for 2 more
+  auto request = CreateEngineRequest(engine.engine);
+  // no stop strings; budget for 2 more
+  request->BeginTurn(Prompt(), SampledOptions({}, std::optional<size_t>{3}));
   std::array<EngineEvent, 4> storage;
   ASSERT_EQ(engine.engine->Run(storage), 1u);
   const auto length_after_prefill = request->CurrentSequenceLength();
@@ -1290,7 +1275,7 @@ TEST_F(StopStringEngineTest, GreedyDraftCountFarExceedingTheBudgetEvaluatesOnlyT
   // the committed outcome, so evaluated is 2 rather than an inferred accepted + 1 = 3.
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   engine.cache->SetMaxDraftTokensPerStep(5);
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(Prompt(), std::optional<size_t>{3});  // no stop strings; budget for 2 more
   std::array<EngineEvent, 4> storage;
   ASSERT_EQ(engine.engine->Run(storage), 1u);
@@ -1315,13 +1300,8 @@ TEST_F(StopStringEngineTest, GreedyDraftCountFarExceedingTheBudgetEvaluatesOnlyT
 TEST_F(StopStringEngineTest, DirectRollbackDuringSampledDraftVerificationRestoresControllerAndDrafts) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   engine.cache->SetMaxDraftTokensPerStep(3);
-  auto params = MakeGreedyParams(*model_);
-  params->search.do_sample = true;
-  params->search.top_k = 3;
-  params->search.temperature = 0.01f;
-  params->search.random_seed = 1234;
-  auto request = CreateEngineRequest(engine.engine, *params);
-  request->BeginTurn(Prompt(), StopOptions({"STOP"}));
+  auto request = CreateEngineRequest(engine.engine);
+  request->BeginTurn(Prompt(), SampledOptions({"STOP"}));
   std::array<EngineEvent, 4> storage;
   ASSERT_EQ(engine.engine->Run(storage), 1u);
   const auto generated_before = request->TurnGeneratedTokens();
@@ -1351,18 +1331,12 @@ TEST_F(StopStringEngineTest, SampledStopTruncationPreservesFutureSampleSequence)
   // more drafts plus a bonus). The retained request's RNG state after rollback must exactly equal
   // a reference request's, which only ever drew the same 2 tokens (1 prefill token, 1 draft) via
   // the very same draft-verification sampling path -- not "advanced as if 4 draws happened".
-  auto params = MakeGreedyParams(*model_);
-  params->search.do_sample = true;
-  params->search.top_k = 3;
-  params->search.temperature = 0.01f;
-  params->search.random_seed = 1234;
-
   // Reference: prefill's own sampled token, then exactly one more draft draw with no bonus (the
   // turn's budget is set to end exactly there), and no stop configured at all.
   auto engine_ref = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   engine_ref.cache->SetMaxDraftTokensPerStep(3);
-  auto ref = CreateEngineRequest(engine_ref.engine, *params);
-  ref->BeginTurn(Prompt(), std::optional<size_t>{2});
+  auto ref = CreateEngineRequest(engine_ref.engine);
+  ref->BeginTurn(Prompt(), SampledOptions({}, std::optional<size_t>{2}));
   std::array<EngineEvent, 4> storage;
   ASSERT_EQ(engine_ref.engine->Run(storage), 1u);
 
@@ -1370,8 +1344,8 @@ TEST_F(StopStringEngineTest, SampledStopTruncationPreservesFutureSampleSequence)
   // completes a stop match, discarding 3 later draws made before the match was detected.
   auto engine_spec = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   engine_spec.cache->SetMaxDraftTokensPerStep(3);
-  auto spec = CreateEngineRequest(engine_spec.engine, *params);
-  spec->BeginTurn(Prompt(), StopOptions({"STOP"}));
+  auto spec = CreateEngineRequest(engine_spec.engine);
+  spec->BeginTurn(Prompt(), SampledOptions({"STOP"}));
   ASSERT_EQ(engine_spec.engine->Run(storage), 1u);
 
   ref->SetDraftTokens(std::array<int32_t, 1>{7});
@@ -1392,7 +1366,11 @@ TEST_F(StopStringEngineTest, SampledStopTruncationPreservesFutureSampleSequence)
                                        const std::shared_ptr<Request>& request) {
     engine.executor->SetVerifyRowTokens({});
     engine.executor->SetSamplingCandidateTokens({20, 21, 22});
-    request->BeginTurn(std::array<int32_t, 1>{2}, std::optional<size_t>{16});
+    // The same sampled policy again, with no seed so both requests simply continue the streams
+    // their first turns left off at.
+    request->BeginTurn(
+        std::array<int32_t, 1>{2},
+        SampledOptions({}, std::optional<size_t>{16}, std::nullopt));
     std::vector<int32_t> tokens;
     bool done = false;
     while (!done) {
@@ -1424,18 +1402,9 @@ TEST_F(StopStringEngineTest, MixedBatchBothSampledRequestsMatchAtStageZeroTermin
   // observe directly.
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   engine.cache->SetMaxDraftTokensPerStep(3);
-  auto params = MakeGreedyParams(*model_);
-  params->search.do_sample = true;
-  params->search.top_k = 3;
-  params->search.temperature = 0.01f;
-  auto make_request = [&](unsigned int seed) {
-    auto p = MakeGreedyParams(*model_);
-    p->search.do_sample = true;
-    p->search.top_k = 3;
-    p->search.temperature = 0.01f;
-    p->search.random_seed = seed;
-    auto r = CreateEngineRequest(engine.engine, *p);
-    r->BeginTurn(Prompt(), StopOptions({"STOP"}));
+  auto make_request = [&](uint64_t seed) {
+    auto r = CreateEngineRequest(engine.engine);
+    r->BeginTurn(Prompt(), SampledOptions({"STOP"}, std::nullopt, seed));
     return r;
   };
   auto first = make_request(1234);
@@ -1464,7 +1433,7 @@ TEST_F(StopStringEngineTest, StopStringPrecedesTurnLimitForTheSameCompletingDraf
   // token budget; StopString must still be reported, not TurnLimit.
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   engine.cache->SetMaxDraftTokensPerStep(3);
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(Prompt(), StopOptions({"STOP"}, std::optional<size_t>{3}));
   std::array<EngineEvent, 4> storage;
   ASSERT_EQ(engine.engine->Run(storage), 1u);  // 1 of 3 generated tokens used
@@ -1490,13 +1459,8 @@ TEST_F(StopStringEngineTest, SampledStopStringPrecedesTurnLimitForTheSameComplet
   // disturbing that ordering rather than exercising new precedence logic of its own.
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   engine.cache->SetMaxDraftTokensPerStep(3);
-  auto params = MakeGreedyParams(*model_);
-  params->search.do_sample = true;
-  params->search.top_k = 3;
-  params->search.temperature = 0.01f;
-  params->search.random_seed = 1234;
-  auto request = CreateEngineRequest(engine.engine, *params);
-  request->BeginTurn(Prompt(), StopOptions({"STOP"}, std::optional<size_t>{3}));
+  auto request = CreateEngineRequest(engine.engine);
+  request->BeginTurn(Prompt(), SampledOptions({"STOP"}, std::optional<size_t>{3}));
   std::array<EngineEvent, 4> storage;
   ASSERT_EQ(engine.engine->Run(storage), 1u);  // 1 of 3 generated tokens used
 
@@ -1517,9 +1481,9 @@ TEST_F(StopStringEngineTest, SampledStopStringPrecedesTurnLimitForTheSameComplet
 TEST_F(StopStringEngineTest, MixedBatchStopEnabledSpeculativeRequestTruncatesWhileSiblingCommitsNormally) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   engine.cache->SetMaxDraftTokensPerStep(3);
-  auto stopping = CreateEngineRequest(engine.engine, *model_);
+  auto stopping = CreateEngineRequest(engine.engine);
   stopping->BeginTurn(Prompt(), StopOptions({"STOP"}));
-  auto plain = CreateEngineRequest(engine.engine, *model_);
+  auto plain = CreateEngineRequest(engine.engine);
   plain->BeginTurn(Prompt());
 
   std::array<EngineEvent, 2> prefill;
@@ -1551,7 +1515,7 @@ TEST_F(StopStringEngineTest, MixedBatchStopEnabledSpeculativeRequestTruncatesWhi
 TEST_F(StopStringEngineTest, AcceptedDraftTokenCountAndTelemetryReflectATruncatedGreedyMatch) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   engine.cache->SetMaxDraftTokensPerStep(3);
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(Prompt(), StopOptions({"STOP"}));
   std::array<EngineEvent, 4> storage;
   ASSERT_EQ(engine.engine->Run(storage), 1u);
@@ -1584,7 +1548,7 @@ TEST_F(StopStringEngineTest, GreedyRejectedDraftReplacementStopTelemetryCountsTh
   // draft to reach it -- evaluated must be accepted + 1 (= 1), not accepted (= 0).
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   engine.cache->SetMaxDraftTokensPerStep(3);
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(Prompt(), StopOptions({"STOP"}));
   std::array<EngineEvent, 4> storage;
   ASSERT_EQ(engine.engine->Run(storage), 1u);
@@ -1609,13 +1573,8 @@ TEST_F(StopStringEngineTest, SampledRejectedDraftReplacementStopTelemetryCountsT
   // since it falls outside confirmed_draft_counts), so the same accepted + 1 rule applies.
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   engine.cache->SetMaxDraftTokensPerStep(3);
-  auto params = MakeGreedyParams(*model_);
-  params->search.do_sample = true;
-  params->search.top_k = 3;
-  params->search.temperature = 0.01f;
-  params->search.random_seed = 1234;
-  auto request = CreateEngineRequest(engine.engine, *params);
-  request->BeginTurn(Prompt(), StopOptions({"STOP"}));
+  auto request = CreateEngineRequest(engine.engine);
+  request->BeginTurn(Prompt(), SampledOptions({"STOP"}));
   std::array<EngineEvent, 4> storage;
   ASSERT_EQ(engine.engine->Run(storage), 1u);
 
@@ -1641,7 +1600,7 @@ TEST_F(StopStringEngineTest, SampledRejectedDraftReplacementStopTelemetryCountsT
 TEST_F(StopStringEngineTest, DirectRollbackDuringGreedyDraftVerificationRestoresControllerAndDrafts) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
   engine.cache->SetMaxDraftTokensPerStep(3);
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(Prompt(), StopOptions({"STOP"}));
   std::array<EngineEvent, 4> storage;
   ASSERT_EQ(engine.engine->Run(storage), 1u);
@@ -1671,7 +1630,7 @@ TEST_F(StopStringEngineTest, QueuedRollbackDuringGreedyDraftVerificationRestores
   // restore machinery while still exercising Queue*/Complete* (not Restore*) for the draft path.
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5 /* "ST" */);
   engine.cache->SetMaxDraftTokensPerStep(3);
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(Prompt(), StopOptions({"STOP"}));
   std::array<EngineEvent, 4> storage;
   ASSERT_EQ(engine.engine->Run(storage), 1u);  // commits "ST"
@@ -1720,9 +1679,9 @@ TEST(StopStringMtpSpeculativeTest, AutomaticMtpDraftsAreProposedForAStopEnabledR
   const int32_t filler = eos == 5 ? 6 : 5;  // never EOS, never matches "UNREACHABLE"
   auto engine = MakeMtpDoublesEngine(model, filler);
 
-  auto stop_request = CreateEngineRequest(engine.engine, *model);
+  auto stop_request = CreateEngineRequest(engine.engine);
   stop_request->BeginTurn(Prompt(), StopOptions({"UNREACHABLE"}));
-  auto plain_request = CreateRequestWithPrompt(engine.engine, *model, Prompt());
+  auto plain_request = CreateRequestWithPrompt(engine.engine, Prompt());
 
   std::array<EngineEvent, 8> storage;
   ASSERT_GT(engine.engine->Run(storage), 0u);
@@ -1737,7 +1696,7 @@ TEST(StopStringMtpSpeculativeTest, StopEnabledRequestThatJustMatchedIsExcludedFr
   auto model = LoadSyntheticPagedMtpModel();
   auto engine = MakeMtpDoublesEngine(model, /*forced_token=*/5 /* "ST" */);
 
-  auto stop_request = CreateEngineRequest(engine.engine, *model);
+  auto stop_request = CreateEngineRequest(engine.engine);
   stop_request->BeginTurn(Prompt(), StopOptions({"STOP"}));
   std::array<EngineEvent, 8> storage;
   ASSERT_GT(engine.engine->Run(storage), 0u);
@@ -1775,7 +1734,7 @@ TEST(StopStringMtpSpeculativeTest, AutomaticMtpProposedDraftItselfCompletesAMidD
   // Every MTP proposal from here on predicts "STOPX" (token 7).
   engine.mtp_executor->SetForcedToken(7);
 
-  auto stop_request = CreateEngineRequest(engine.engine, *model);
+  auto stop_request = CreateEngineRequest(engine.engine);
   stop_request->BeginTurn(Prompt(), StopOptions({"STOP"}));
 
   std::array<EngineEvent, 8> storage;
@@ -1826,9 +1785,9 @@ TEST(StopStringMtpSpeculativeTest, PlainSiblingContinuesAutomaticMtpDraftingAcro
   auto engine = MakeMtpDoublesEngine(model, /*forced_token=*/11);
   engine.mtp_executor->SetForcedToken(12);
 
-  auto stop_request = CreateEngineRequest(engine.engine, *model);
+  auto stop_request = CreateEngineRequest(engine.engine);
   stop_request->BeginTurn(Prompt(), StopOptions({"UNREACHABLE"}));
-  auto plain_request = CreateRequestWithPrompt(engine.engine, *model, Prompt());
+  auto plain_request = CreateRequestWithPrompt(engine.engine, Prompt());
 
   std::array<EngineEvent, 8> storage;
   ASSERT_GT(engine.engine->Run(storage), 0u);
@@ -1862,8 +1821,8 @@ TEST_F(StopStringEngineTest, CancelMergesIntoARetainedTokenEventWithoutLeakingAS
   // `plain` is created first so its event drains first (staged_event_order_ follows scheduling
   // order), leaving `stopping`'s token event retained/undrained while `stopping` is still Active.
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/2 /* "A", never matches */);
-  auto plain = CreateEngineRequest(engine.engine, *model_);
-  auto stopping = CreateEngineRequest(engine.engine, *model_);
+  auto plain = CreateEngineRequest(engine.engine);
+  auto stopping = CreateEngineRequest(engine.engine);
   plain->BeginTurn(Prompt());
   stopping->BeginTurn(Prompt(), StopOptions({"UNREACHABLE"}));
 
@@ -1893,7 +1852,7 @@ TEST_F(StopStringEngineTest, CancelMergesIntoARetainedTokenEventWithoutLeakingAS
 // clears an unset (-1) one, which is a no-op.
 TEST_F(StopStringEngineTest, FatalFailurePreservesAnAlreadyCommittedStopMatchOnAnUnrelatedRequest) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/7 /* "STOPX" */);
-  auto completed = CreateEngineRequest(engine.engine, *model_);
+  auto completed = CreateEngineRequest(engine.engine);
   completed->BeginTurn(Prompt(), StopOptions({"STOP"}));
 
   std::array<EngineEvent, 4> storage;
@@ -1905,7 +1864,7 @@ TEST_F(StopStringEngineTest, FatalFailurePreservesAnAlreadyCommittedStopMatchOnA
   ASSERT_EQ(completed->MatchedStopStringIndex(), 0);
 
   // An unrelated request hits a fatal execution failure in a later, separate step.
-  auto executing = CreateEngineRequest(engine.engine, *model_);
+  auto executing = CreateEngineRequest(engine.engine);
   executing->BeginTurn(Prompt(), StopOptions({"UNREACHABLE"}));
   engine.executor->SetForcedToken(2);
   engine.executor->SetNextFailure(ScriptedExecutionFailure::Fatal);
@@ -1923,7 +1882,7 @@ TEST_F(StopStringEngineTest, FatalFailurePreservesAnAlreadyCommittedStopMatchOnA
 
 TEST_F(StopStringEngineTest, UnserviceableStopEnabledRequestPublishesFailure) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/2);
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(Prompt(), StopOptions({"UNREACHABLE"}));
   engine.cache->SetUnserviceableRequest(request);
 

@@ -105,6 +105,20 @@ class FakeGuidanceProcessor final : public ConstrainedLogitsProcessor {
     return clone;
   }
 
+  // Lets a test observe the cursor after the Request releases it, without touching freed memory:
+  // the destructor publishes this cursor's final committed history. Deliberately not carried by
+  // Clone(), so a discarded transaction checkpoint never publishes on the live cursor's behalf.
+  ~FakeGuidanceProcessor() override {
+    if (release_observer_) {
+      *release_observer_ = committed_tokens_;
+    }
+  }
+
+  void ObserveReleaseInto(
+      std::shared_ptr<std::optional<std::vector<int32_t>>> observer) {
+    release_observer_ = std::move(observer);
+  }
+
   void ForceToken(std::optional<int32_t> token) { forced_token_ = token; }
   void SetReadyMask(std::vector<uint32_t> mask) {
     ready_mask_ = std::move(mask);
@@ -134,6 +148,7 @@ class FakeGuidanceProcessor final : public ConstrainedLogitsProcessor {
   bool fail_reset_{false};
   std::vector<uint32_t> ready_mask_;
   std::shared_ptr<PendingFailure> pending_failure_;
+  std::shared_ptr<std::optional<std::vector<int32_t>>> release_observer_;
 };
 
 FakeGuidanceProcessor& InstallFake(Request& request) {
@@ -148,12 +163,10 @@ class GuidanceProcessorTest : public ::testing::Test {
     engine_ = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
   }
 
-  std::shared_ptr<Request> NewAssignedRequest(int32_t max_length_beyond_prompt) {
-    auto params = MakeGreedyParams(*model_);
+  std::shared_ptr<Request> NewAssignedRequest(size_t max_length_beyond_prompt) {
     const auto prompt = Prompt();
-    params->search.max_length =
-        static_cast<int32_t>(prompt.size()) + max_length_beyond_prompt;
-    auto request = CreateEngineRequest(engine_.engine, *params);
+    auto request = CreateEngineRequest(
+        engine_.engine, prompt.size() + max_length_beyond_prompt);
     request->BeginTurn(prompt);
     return request;
   }
@@ -324,19 +337,21 @@ TEST_F(GuidanceProcessorTest, AsyncMaskFailureRollsBackAndCanRetry) {
   EXPECT_NE(event.flags & EngineEventFlagTurnFinished, 0u);
 }
 
-// Turn completion resets the installed cursor so a subsequent BeginTurn starts from the grammar's
-// initial state. An EOS stop signal is not appended, so the cursor sees no CommitTokens call.
-TEST_F(GuidanceProcessorTest, TurnCompletionResetsGrammarCursor) {
+// Guidance is turn-scoped, so turn completion releases the installed cursor outright: a subsequent
+// BeginTurn is unguided unless it asks for guidance again. An EOS stop signal is not appended, so
+// the released cursor saw no CommitTokens call.
+TEST_F(GuidanceProcessorTest, TurnCompletionReleasesGrammarCursor) {
   auto request = NewAssignedRequest(/*max_length_beyond_prompt=*/4);
-  auto& fake = InstallFake(*request);
+  auto released = std::make_shared<std::optional<std::vector<int32_t>>>();
+  InstallFake(*request).ObserveReleaseInto(released);
 
   request->GenerateNextTokens(LogitsForToken(*model_, EosToken(*model_)));
   request->CompleteGeneration();
 
   ASSERT_TRUE(request->IsTurnComplete());
-  EXPECT_EQ(RequestGuidanceTestAccess::Get(*request), &fake);
-  EXPECT_EQ(fake.ResetCount(), 1);
-  EXPECT_TRUE(fake.CommittedTokens().empty());
+  EXPECT_EQ(RequestGuidanceTestAccess::Get(*request), nullptr);
+  ASSERT_TRUE(released->has_value());
+  EXPECT_TRUE(released->value().empty());
 }
 
 }  // namespace

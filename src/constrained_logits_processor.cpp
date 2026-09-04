@@ -658,16 +658,6 @@ std::unique_ptr<ConstrainedLogitsProcessor> GuidanceLogitsProcessor::Clone() con
   return clone;
 }
 
-std::unique_ptr<ConstrainedLogitsProcessor> GuidanceLogitsProcessor::CloneForNewTurn() const {
-  auto clone = std::unique_ptr<GuidanceLogitsProcessor>(new GuidanceLogitsProcessor());
-  clone->params_ = params_;
-  clone->eos_token_ = eos_token_;
-  clone->grammar_asset_ = grammar_asset_;
-  clone->InitializeLlgConstraints();
-  clone->ComputeMask();
-  return clone;
-}
-
 void ScheduleGuidanceMaskComputation(
     std::span<ConstrainedLogitsProcessor* const> processors) {
   std::vector<GuidanceLogitsProcessor*> candidates;
@@ -804,9 +794,8 @@ std::unique_ptr<ConstrainedLogitsProcessor> CreateGuidanceLogitsProcessor(
 #endif
 }
 
-// Engine-facing overload: a Request exists (and must validate its guidance request) before it is
-// necessarily associated with a model, so this checks the request's shape and this build's
-// support for it first - neither of which needs a model - and only then requires one.
+// Engine-facing overload: a turn's guidance request is checked for shape and for this build's
+// support first - neither of which needs a model - and only then requires one.
 std::unique_ptr<ConstrainedLogitsProcessor> CreateGuidanceLogitsProcessor(
     std::shared_ptr<const GeneratorParams> params) {
   if (!ValidateGuidanceRequest(params->guidance_type, params->guidance_data)) {

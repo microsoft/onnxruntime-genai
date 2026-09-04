@@ -38,7 +38,7 @@ class PagedKeyValueCacheTest : public ::testing::Test {
   std::shared_ptr<Request> AddCommittedRequest(
       std::array<int32_t, 4> prompt) {
     auto request =
-        CreateRequestWithPrompt(assign_target_, *model_, prompt);
+        CreateRequestWithPrompt(assign_target_, prompt);
     cache_->Add(request);
     cache_->AppendTokens(request);
     return request;
@@ -134,7 +134,7 @@ TEST_F(PagedKeyValueCacheTest, DeferredActiveRequestsStillConsumeAdmissionCapaci
   auto unserviceable = AddCommittedRequest({2, 3, 4, 5});
   auto fitting = AddCommittedRequest({6, 7, 8, 9});
   auto pending = CreateRequestWithPrompt(
-      assign_target_, *model_, std::array<int32_t, 1>{10});
+      assign_target_, std::array<int32_t, 1>{10});
 
   StepPlan plan;
   plan.requests.push_back(PlanEntry(unserviceable, 13));
@@ -156,7 +156,7 @@ TEST_F(PagedKeyValueCacheTest, DeferredActiveRequestsStillConsumeAdmissionCapaci
 // though its first chunk would.
 TEST_F(PagedKeyValueCacheTest, PromptTooLargeForThePoolIsUnserviceableEvenWhenItsChunkFits) {
   auto pending = CreateRequestWithPrompt(
-      assign_target_, *model_, std::array<int32_t, 1>{10});
+      assign_target_, std::array<int32_t, 1>{10});
 
   StepPlan plan;
   plan.requests.push_back(PlanEntry(pending, /*target_cache_slots=*/1, /*newly_admitted=*/true,
@@ -174,7 +174,7 @@ TEST_F(PagedKeyValueCacheTest, PromptTooLargeForThePoolIsUnserviceableEvenWhenIt
 TEST_F(PagedKeyValueCacheTest, AdmissionWaitsUntilTheWholePromptFits) {
   auto committed = AddCommittedRequest({2, 3, 4, 5});
   auto pending = CreateRequestWithPrompt(
-      assign_target_, *model_, std::array<int32_t, 1>{10});
+      assign_target_, std::array<int32_t, 1>{10});
 
   StepPlan plan;
   plan.requests.push_back(PlanEntry(committed, /*target_cache_slots=*/4));
@@ -224,7 +224,7 @@ TEST_F(PagedKeyValueCacheTest, OmittedResidentsStillLimitNewAdmissions) {
   auto first = AddCommittedRequest({2, 3, 4, 5});
   auto second = AddCommittedRequest({6, 7, 8, 9});
   auto pending = CreateRequestWithPrompt(
-      assign_target_, *model_, std::array<int32_t, 1>{10});
+      assign_target_, std::array<int32_t, 1>{10});
 
   StepPlan plan;
   plan.requests.push_back(PlanEntry(pending, 1, true, 1));
@@ -240,9 +240,9 @@ TEST_F(PagedKeyValueCacheTest, OmittedResidentsStillLimitNewAdmissions) {
 TEST_F(PagedKeyValueCacheTest, BlockedPrefillDoesNotPreventLaterAdmission) {
   auto resident = AddCommittedRequest({2, 3, 4, 5});
   auto blocked = CreateRequestWithPrompt(
-      assign_target_, *model_, std::array<int32_t, 1>{10});
+      assign_target_, std::array<int32_t, 1>{10});
   auto fitting = CreateRequestWithPrompt(
-      assign_target_, *model_, std::array<int32_t, 1>{11});
+      assign_target_, std::array<int32_t, 1>{11});
 
   StepPlan plan;
   plan.requests.push_back(PlanEntry(resident, 4));
@@ -265,7 +265,7 @@ TEST_F(PagedKeyValueCacheTest, InterleavedAdmissionAndResidentSubsetAreSelectedB
   auto omitted = AddCommittedRequest({2, 3, 4, 5});
   auto resident = AddCommittedRequest({6, 7, 8, 9});
   auto pending = CreateRequestWithPrompt(
-      assign_target_, *model_, std::array<int32_t, 1>{10});
+      assign_target_, std::array<int32_t, 1>{10});
 
   StepPlan plan;
   plan.requests.push_back(PlanEntry(pending, 1, true, 1));
@@ -289,8 +289,7 @@ TEST_F(PagedKeyValueCacheTest, InterleavedAdmissionAndResidentSubsetAreSelectedB
 
 TEST_F(PagedKeyValueCacheTest, GlobalOnlyPrefillChunkReservesWholePrompt) {
   auto pending = CreateRequestWithPrompt(
-      assign_target_, *model_,
-      std::array<int32_t, 9>{2, 3, 4, 5, 6, 7, 8, 9, 10});
+      assign_target_, std::array<int32_t, 9>{2, 3, 4, 5, 6, 7, 8, 9, 10});
 
   StepPlan plan;
   plan.requests.push_back(
@@ -634,7 +633,7 @@ TEST(PagedKeyValueCacheManifestTest, LegacyCompositeEntryPointsRejectBeforeDiver
                    model, /*capacity=*/1, EosToken(*model))
                    .engine;
   const std::array<int32_t, 3> prompt{2, 3, 4};
-  auto request = CreateRequestWithPrompt(owner, *model, prompt);
+  auto request = CreateRequestWithPrompt(owner, prompt);
 
   EXPECT_THROW(manager.Allocate({request}), std::logic_error);
   EXPECT_THROW(manager.Step(), std::logic_error);

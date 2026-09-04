@@ -25,6 +25,15 @@ namespace test {
 #if USE_GUIDANCE
 namespace {
 
+// The single-sequence guidance parameters Engine::BeginTurn builds for one turn. These tests
+// exercise the model-local grammar cache directly, below the Engine's turn plumbing.
+std::shared_ptr<GeneratorParams> MakeGuidanceParams(const Model& model) {
+  auto params = CreateGeneratorParams(model);
+  params->search.batch_size = 1;
+  params->search.num_beams = 1;
+  return params;
+}
+
 std::shared_ptr<Model> LoadGuidanceModel() {
   return CreateModel(
       GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
@@ -42,11 +51,11 @@ DeviceSpan<float> LogitsForToken(Model& model, int32_t token) {
 
 TEST(GuidanceCacheTest, ReusesTokenizerAndCompiledGrammar) {
   auto model = LoadGuidanceModel();
-  auto first_params = MakeGreedyParams(*model);
+  auto first_params = MakeGuidanceParams(*model);
   first_params->SetGuidance("regex", "!", false);
   auto first = CreateGuidanceLogitsProcessor(*model, first_params);
 
-  auto second_params = MakeGreedyParams(*model);
+  auto second_params = MakeGuidanceParams(*model);
   second_params->SetGuidance("regex", "!", false);
   auto second = CreateGuidanceLogitsProcessor(*model, second_params);
 
@@ -70,7 +79,7 @@ TEST(GuidanceCacheTest, SingleFlightsConcurrentIdenticalGrammars) {
     threads.emplace_back([&, i] {
       try {
         gate.arrive_and_wait();
-        auto params = MakeGreedyParams(*model);
+        auto params = MakeGuidanceParams(*model);
         params->SetGuidance("regex", "!", false);
         auto processor = CreateGuidanceLogitsProcessor(*model, params);
         static_cast<void>(processor);
@@ -104,7 +113,7 @@ TEST(GuidanceCacheTest, IsolatesConcurrentUniqueGrammars) {
     threads.emplace_back([&, i] {
       try {
         gate.arrive_and_wait();
-        auto params = MakeGreedyParams(*model);
+        auto params = MakeGuidanceParams(*model);
         const std::string grammar(1, static_cast<char>('a' + i));
         params->SetGuidance("regex", grammar.c_str(), false);
         auto processor = CreateGuidanceLogitsProcessor(*model, params);
@@ -133,7 +142,7 @@ TEST(GuidanceCacheTest, PendingMaskOutlivesRemovedProcessor) {
   const auto expected_tokens = tokenizer->Encode("!");
   ASSERT_EQ(expected_tokens.size(), 1u);
 
-  auto params = MakeGreedyParams(*model);
+  auto params = MakeGuidanceParams(*model);
   params->SetGuidance("regex", "!!", false);
   auto processor = CreateGuidanceLogitsProcessor(*model, params);
   processor->ProcessLogits(
@@ -154,7 +163,7 @@ TEST(GuidanceCacheTest, PendingMaskOutlivesRemovedProcessor) {
 
 TEST(GuidanceCacheTest, FailedFutureReschedulesRealProcessor) {
   auto model = LoadGuidanceModel();
-  auto params = MakeGreedyParams(*model);
+  auto params = MakeGuidanceParams(*model);
   params->SetGuidance("regex", "!", false);
   auto processor = CreateGuidanceLogitsProcessor(*model, params);
   auto& guidance = dynamic_cast<GuidanceLogitsProcessor&>(*processor);
@@ -175,11 +184,12 @@ TEST(GuidanceCacheTest, FailedFutureRollsBackAndReschedulesEngineRequest) {
   const auto expected_tokens = tokenizer->Encode("!");
   ASSERT_EQ(expected_tokens.size(), 1u);
 
-  auto params = MakeGreedyParams(*model);
-  params->SetGuidance("regex", "!", false);
-  auto request = CreateEngineRequest(engine.engine, *params);
-  request->BeginTurn(std::array<int32_t, 3>{2, 3, 4},
-                     std::optional<size_t>{1});
+  auto request = CreateEngineRequest(engine.engine);
+  TurnOptions options;
+  options.guidance_type = "regex";
+  options.guidance_data = "!";
+  options.max_generated_tokens = 1;
+  request->BeginTurn(std::array<int32_t, 3>{2, 3, 4}, options);
   auto& guidance = dynamic_cast<GuidanceLogitsProcessor&>(
       *RequestGuidanceTestAccess::Get(*request));
   GuidanceProcessorTestAccess::InstallFailedMaskFuture(guidance);
@@ -196,12 +206,12 @@ TEST(GuidanceCacheTest, FailedFutureRollsBackAndReschedulesEngineRequest) {
 
 TEST(GuidanceCacheTest, EvictionKeepsLiveProcessorAssetsValid) {
   auto model = LoadGuidanceModel();
-  auto first_params = MakeGreedyParams(*model);
+  auto first_params = MakeGuidanceParams(*model);
   first_params->SetGuidance("regex", "first", false);
   auto first = CreateGuidanceLogitsProcessor(*model, first_params);
 
   for (size_t i = 0; i < 65; ++i) {
-    auto params = MakeGreedyParams(*model);
+    auto params = MakeGuidanceParams(*model);
     const auto grammar = "value" + std::to_string(i);
     params->SetGuidance("regex", grammar.c_str(), false);
     auto processor = CreateGuidanceLogitsProcessor(*model, params);
@@ -221,7 +231,7 @@ TEST(GuidanceCacheTest, EvictionKeepsLiveProcessorAssetsValid) {
 
 TEST(GuidanceCacheTest, OversizedGrammarDoesNotEvictCachedEntries) {
   auto model = LoadGuidanceModel();
-  auto cached_params = MakeGreedyParams(*model);
+  auto cached_params = MakeGuidanceParams(*model);
   cached_params->SetGuidance("regex", "!", false);
   auto cached = CreateGuidanceLogitsProcessor(*model, cached_params);
   const auto before = GetGuidanceCacheStats(*model);
@@ -229,7 +239,7 @@ TEST(GuidanceCacheTest, OversizedGrammarDoesNotEvictCachedEntries) {
 
   std::string oversized_schema(16u * 1024u * 1024u, ' ');
   oversized_schema.front() = 'x';
-  auto oversized_params = MakeGreedyParams(*model);
+  auto oversized_params = MakeGuidanceParams(*model);
   oversized_params->SetGuidance(
       "json_schema", oversized_schema.c_str(), false);
   EXPECT_THROW(
@@ -245,7 +255,7 @@ TEST(GuidanceCacheTest, OversizedGrammarDoesNotEvictCachedEntries) {
 TEST(GuidanceCacheTest, DoesNotRetainFailedCompilations) {
   auto model = LoadGuidanceModel();
   for (size_t attempt = 1; attempt <= 2; ++attempt) {
-    auto params = MakeGreedyParams(*model);
+    auto params = MakeGuidanceParams(*model);
     params->SetGuidance("regex", "[", false);
     EXPECT_THROW(
         CreateGuidanceLogitsProcessor(*model, params),

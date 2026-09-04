@@ -1354,21 +1354,18 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineHasPendingRequests(OgaEngine* engine
 /**
  * \brief Creates a Request permanently bound to an Engine.
  *
- * Generation parameters are snapshotted and remain fixed for every turn. The parameters must have
- * been created from the same OgaModel instance used to create the Engine. Creation does not queue
- * work; call OgaRequestBeginTurn.
+ * A Request owns resident-session policy only. Generation policy belongs to each Turn, so nothing
+ * about sampling, guidance, or stop strings is fixed here. Creation does not queue work; call
+ * OgaRequestBeginTurn.
  *
  * \param[in] engine The owning Engine.
- * \param[in] params The fixed request-level generation parameters.
- * \param[in] options Nullable request-scoped options. Null options or zero max_session_tokens use
- * the Request's snapshotted params.search.max_length. search.max_length normally defaults from the
- * model context length but may have been set lower by the caller.
+ * \param[in] options Nullable request-scoped options. Null options, or zero max_session_tokens, use
+ * the model-configured search.max_length, which is also the ceiling for an explicit value.
  * \param[out] out The caller-owned Request handle.
  * \return OgaResult containing the error message if the operation failed, or nullptr on success.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineCreateRequest(
-    OgaEngine* engine, const OgaGeneratorParams* params,
-    const OgaRequestOptions* options, OgaRequest** out);
+    OgaEngine* engine, const OgaRequestOptions* options, OgaRequest** out);
 
 /**
  * \brief Creates reusable Request options.
@@ -1377,29 +1374,93 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateRequestOptions(
     OgaRequestOptions** out);
 OGA_EXPORT void OGA_API_CALL OgaDestroyRequestOptions(
     OgaRequestOptions* options);
+/**
+ * \brief Sets the total tokens (prompt plus generated, across every Turn) the Request may reach.
+ *
+ * Zero restores the default, which is the model-configured search.max_length. A nonzero value may
+ * be lower than that ceiling but never higher. This is the Request's one session limit: Search
+ * completion, cache sizing, speculative bounds, and the MaxSessionTokens finish reason all use it.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestOptionsSetMaxSessionTokens(
     OgaRequestOptions* options, uint64_t max_session_tokens);
 
 /**
  * \brief Creates reusable Turn options bound to one Request.
+ *
+ * Every option below is unset by default, and an unset option means "use the model-configured
+ * default for this Turn" -- never "keep what the previous Turn used". Seed is the one exception:
+ * an unset seed continues the Request's existing random streams. A reused options object reapplies
+ * its configured fields to every Turn it is passed to; OgaTurnOptionsReset removes them all.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestCreateTurnOptions(
     OgaRequest* request, OgaTurnOptions** out);
 OGA_EXPORT void OGA_API_CALL OgaDestroyTurnOptions(OgaTurnOptions* options);
+/** \brief Caps the tokens this Turn generates. Zero unsets the cap. */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetMaxGeneratedTokens(
     OgaTurnOptions* options, uint64_t max_generated_tokens);
-/** \brief Reserved for future use; currently returns a not-implemented result. */
+/**
+ * \brief Masks the end-of-sequence token until this Turn has generated this many tokens.
+ *
+ * Zero unsets the minimum. It does not prevent stop strings, Turn or session limits, cancellation,
+ * failure, or guidance termination. Admission rejects a minimum that exceeds the Turn's maximum or
+ * does not fit inside the Request's session limit.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetMinGeneratedTokens(
+    OgaTurnOptions* options, uint64_t min_generated_tokens);
+/** \brief Selects random sampling (true) or the top logit (false) for this Turn. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetDoSample(
+    OgaTurnOptions* options, bool do_sample);
+/**
+ * \brief Sets this Turn's sampling temperature.
+ *
+ * Zero requests top-logit selection. Admission rejects an explicitly set temperature that the
+ * resolved policy would ignore because the Turn selects the top logit for another reason.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetTemperature(
     OgaTurnOptions* options, float temperature);
-/** \brief Reserved for future use; currently returns a not-implemented result. */
+/**
+ * \brief Sets this Turn's nucleus (top-p) bound, between 0.0 and 1.0.
+ *
+ * Admission rejects an explicitly set top_p that the resolved policy would ignore.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetTopP(
     OgaTurnOptions* options, float top_p);
-/** \brief Reserved for future use; currently returns a not-implemented result. */
+/**
+ * \brief Sets this Turn's top-k bound. One requests top-logit selection; zero disables top-k.
+ *
+ * Admission rejects an explicitly set top_k that the resolved policy would ignore.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetTopK(
     OgaTurnOptions* options, int32_t top_k);
-/** \brief Reserved for future use; currently returns a not-implemented result. */
+/** \brief Sets this Turn's repetition penalty. Must be finite and greater than zero. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetRepetitionPenalty(
+    OgaTurnOptions* options, float repetition_penalty);
+/**
+ * \brief Forbids repeating any n-gram of this size in the generated sequence. Zero disables it.
+ *
+ * Admission rejects a nonzero size on a scoring device whose search cannot apply it, rather than
+ * failing after the model has already run.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetNoRepeatNgramSize(
+    OgaTurnOptions* options, int32_t no_repeat_ngram_size);
+/**
+ * \brief Reseeds the Request's random streams at the start of this Turn.
+ *
+ * Zero is a valid deterministic seed, so use OgaTurnOptionsClearSeed to remove a pending reseed.
+ * Reusing a seeded options object deliberately reseeds identically at the start of every Turn it is
+ * passed to. The seed takes effect only when the Turn's first sampling step commits, so a rolled
+ * back step reseeds the retry identically. Requires an Engine configured for dynamic batching and,
+ * when a device batched sampler is present, support for checkpointing its RNG state.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetSeed(
     OgaTurnOptions* options, uint64_t seed);
+/**
+ * \brief Removes a pending reseed, continuing the Request's existing random streams.
+ *
+ * This is not "randomize again": the streams simply carry on from where the previous Turn left off.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsClearSeed(
+    OgaTurnOptions* options);
 /**
  * \brief Sets decoded UTF-8 stop strings for a Turn, copying them immediately.
  *
@@ -1417,10 +1478,23 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetSeed(
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetStopStrings(
     OgaTurnOptions* options, const OgaStringArray* stop_strings);
-/** \brief Reserved for future use; currently returns a not-implemented result. */
+/**
+ * \brief Constrains this Turn's output to a grammar, copying both strings immediately.
+ *
+ * guidance_type is one of "json_schema", "regex", or "lark_grammar". The grammar is compiled and
+ * validated before the Turn mutates the Request, so an invalid grammar leaves the Request exactly
+ * as it was. Guidance is strictly Turn-scoped: a following Turn that sets none is unguided. A
+ * guided Turn does not accept speculative drafts; the next unguided Turn does again.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetGuidance(
     OgaTurnOptions* options, const char* guidance_type,
     const char* guidance_data);
+/** \brief Removes the configured grammar, so the Turn is unguided. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsClearGuidance(
+    OgaTurnOptions* options);
+/** \brief Restores every Turn option to its unset state. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsReset(
+    OgaTurnOptions* options);
 
 /** \brief Begins a Turn, copying input and supported options before return. */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestBeginTurn(

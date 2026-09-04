@@ -691,23 +691,10 @@ TEST(Dflash2ConfigTest, ReplacesProposalBufferWhenTheElementTypeChanges) {
   EXPECT_EQ(slot->GetElementCount(), 4u);
 }
 
-TEST(Dflash2ConfigTest, DraftsOnlyForGreedyRequests) {
-  Config::Search search;
-  search.do_sample = false;
-  EXPECT_TRUE(Dflash2CanDraft(search));
-
-  search.do_sample = true;
-  search.top_k = 50;
-  search.temperature = 1.0f;
-  EXPECT_FALSE(Dflash2CanDraft(search));
-
-  // Sampling that can only ever pick the top logit is still greedy.
-  search.top_k = 1;
-  EXPECT_TRUE(Dflash2CanDraft(search));
-
-  search.top_k = 50;
-  search.temperature = 0.0f;
-  EXPECT_TRUE(Dflash2CanDraft(search));
+TEST(Dflash2ConfigTest, JoinsOnlyFromAnEligibleTurnAtSequenceStart) {
+  EXPECT_TRUE(Dflash2CanJoin(/*draft_eligible=*/true, /*first_position=*/0));
+  EXPECT_FALSE(Dflash2CanJoin(/*draft_eligible=*/false, /*first_position=*/0));
+  EXPECT_FALSE(Dflash2CanJoin(/*draft_eligible=*/true, /*first_position=*/1));
 }
 
 }  // namespace Generators::test
