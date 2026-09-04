@@ -88,7 +88,7 @@ class DFlash2Builder(BlockDrafterBuilder):
         if rope_type != "default":
             raise ValueError(f"DFlash 2 does not support the '{rope_type}' RoPE type; expected 'default'.")
         self.rope_theta = float(rope_parameters["rope_theta"])
-        self.sliding_window = int(cfg["sliding_window"]) if cfg.get("use_sliding_window") else -1
+        self.sliding_window = self.resolve_sliding_window(cfg)
         # `is_causal` is explicit in a DFlash 2 config and is what makes the block bidirectional.
         self.is_causal = bool(cfg.get("is_causal", False))
 

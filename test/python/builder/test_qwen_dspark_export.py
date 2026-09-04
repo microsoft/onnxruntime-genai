@@ -283,6 +283,45 @@ def test_incompatible_checkpoint_metadata_is_rejected(tmp_path, config_section, 
         DSparkBuilder(draft_dir, str(tmp_path), ir.DataType.FLOAT16, 256, 128)
 
 
+def _windowed_checkpoint(tmp_path, **overrides):
+    draft_dir = _draft_checkpoint(tmp_path)
+    config_path = tmp_path / "dspark_draft" / "config.json"
+    config = json.loads(config_path.read_text())
+    config.update(use_sliding_window=True, sliding_window=64, **overrides)
+    config_path.write_text(json.dumps(config))
+    return draft_dir
+
+
+# PagedAttention carries a single local_window_size, so a checkpoint that windows only part of
+# its layers would otherwise export with the window silently applied to all of them.
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"max_window_layers": 1}, "max_window_layers=0"),
+        ({"layer_types": ["full_attention"]}, "sliding attention on every layer"),
+    ],
+)
+def test_partially_windowed_checkpoints_are_rejected(tmp_path, overrides, message):
+    draft_dir = _windowed_checkpoint(tmp_path, **overrides)
+
+    with pytest.raises(ValueError, match=message):
+        DSparkBuilder(draft_dir, str(tmp_path), ir.DataType.FLOAT16, 256, 128)
+
+
+def test_a_uniformly_windowed_checkpoint_forwards_its_window(tmp_path):
+    draft_dir = _windowed_checkpoint(tmp_path, max_window_layers=0, layer_types=["sliding_attention"])
+
+    builder = DSparkBuilder(draft_dir, str(tmp_path), ir.DataType.FLOAT16, 256, 128)
+
+    assert builder.sliding_window == 64
+
+
+def test_a_full_attention_checkpoint_disables_the_window(tmp_path):
+    builder = DSparkBuilder(_draft_checkpoint(tmp_path), str(tmp_path), ir.DataType.FLOAT16, 256, 128)
+
+    assert builder.sliding_window == -1
+
+
 @pytest.mark.parametrize(
     ("name", "shape"),
     [
@@ -375,7 +414,8 @@ def test_failed_save_preserves_existing_dspark_files(tmp_path, monkeypatch):
     data_path.write_bytes(b"old data")
     builder = object.__new__(DSparkBuilder)
     builder.filename = "dspark.onnx"
-    builder.model = object()
+    # save_model stamps build metadata on the model, so the stub has to accept attributes.
+    builder.model = types.SimpleNamespace()
 
     def fail_save(_model, staged_path, **kwargs):
         with open(staged_path, "wb") as staged_model:
@@ -401,7 +441,8 @@ def test_failed_replacement_restores_existing_dspark_files(tmp_path, monkeypatch
     data_path.write_bytes(b"old data")
     builder = object.__new__(DSparkBuilder)
     builder.filename = "dspark.onnx"
-    builder.model = object()
+    # save_model stamps build metadata on the model, so the stub has to accept attributes.
+    builder.model = types.SimpleNamespace()
 
     def save_staged_files(_model, staged_path, **kwargs):
         with open(staged_path, "wb") as staged_model:

@@ -198,6 +198,26 @@ class BlockDrafterBuilder(Model):
         self.make_value(output, self.external_dtype, [rows, self.vocab_size])
         return output
 
+    def resolve_sliding_window(self, config):
+        """Return the single ``local_window_size`` every layer runs with, or -1 for full attention."""
+        if not config.get("use_sliding_window"):
+            return -1
+        window = int(config["sliding_window"])
+        # PagedAttention takes one window per model, so a checkpoint that windows only a suffix of
+        # its layers (HF's `max_window_layers`, or a mixed `layer_types`) cannot be exported as-is.
+        if int(config.get("max_window_layers", 0)) != 0:
+            raise ValueError(
+                "A windowed block drafter must set max_window_layers=0; mixed layer windows are not supported."
+            )
+        layer_types = set(config.get("layer_types") or ["sliding_attention"])
+        if layer_types != {"sliding_attention"}:
+            raise ValueError(
+                "A windowed block drafter must use sliding attention on every layer, got "
+                + ", ".join(sorted(layer_types))
+                + "."
+            )
+        return window
+
     def validate_token_metadata(self, config, drafter_config):
         if not 0 <= self.mask_token_id < self.vocab_size:
             raise ValueError(f"mask_token_id must be between 0 and vocabulary size - 1 ({self.vocab_size - 1}).")

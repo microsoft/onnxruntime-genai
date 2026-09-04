@@ -89,7 +89,7 @@ class DSparkBuilder(BlockDrafterBuilder):
         rope_type = str(self.rope_parameters.get("rope_type", "default")).lower()
         if rope_type not in ("default", "yarn"):
             raise ValueError(f"DSpark does not support the '{rope_type}' RoPE type; expected 'default' or 'yarn'.")
-        self.sliding_window = int(cfg["sliding_window"]) if cfg.get("use_sliding_window") else -1
+        self.sliding_window = self.resolve_sliding_window(cfg)
         # The dual-source block attends to itself bidirectionally; DFlash's attention module
         # hard-codes is_causal=False and the published configs do not override it.
         self.is_causal = bool(cfg.get("is_causal", False))

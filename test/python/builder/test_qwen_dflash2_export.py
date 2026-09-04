@@ -263,7 +263,8 @@ def test_failed_save_preserves_existing_dflash2_files(tmp_path, monkeypatch):
     data_path.write_bytes(b"old data")
     builder = object.__new__(DFlash2Builder)
     builder.filename = "dflash2.onnx"
-    builder.model = object()
+    # save_model stamps build metadata on the model, so the stub has to accept attributes.
+    builder.model = types.SimpleNamespace()
 
     def fail_save(_model, staged_path, **kwargs):
         with open(staged_path, "wb") as staged_model:
