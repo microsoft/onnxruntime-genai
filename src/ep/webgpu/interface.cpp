@@ -226,6 +226,12 @@ struct InterfaceImpl : DeviceInterface {
 
   void Synchronize() override {}  // Nothing to do?
 
+  void GetAvailableMemory(size_t& /*free_bytes*/, size_t& /*total_bytes*/) override {
+    throw std::runtime_error(
+        "WebGPU does not expose available device memory. Set "
+        "engine.dynamic_batching.num_blocks explicitly for PagedAttention models.");
+  }
+
   bool UpdateAttentionMask([[maybe_unused]] void* next_mask_data, void* mask_data, int batch_beam_size, [[maybe_unused]] int new_kv_length, int total_length, [[maybe_unused]] int max_length, bool update_only, ONNXTensorElementDataType type) override {
     if (batch_beam_size != 1 || !update_only) {
       return false;  // Fall back to CPU for multi-beam or non-static mask
@@ -326,8 +332,9 @@ struct InterfaceImpl : DeviceInterface {
     // excluded because they are meaningless for the trivial initialization model.
     // Keep this list in sync with ParseWebGpuContextConfig in
     // onnxruntime/core/providers/webgpu/webgpu_provider_factory.cc.
-    constexpr std::array<std::string_view, 14> kWebGpuGlobalOptions = {
+    constexpr std::array<std::string_view, 15> kWebGpuGlobalOptions = {
         "deviceId",
+        "adapterIndex",
         "webgpuInstance",
         "webgpuDevice",
         "dawnProcTable",
