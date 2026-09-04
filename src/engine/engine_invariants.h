@@ -43,6 +43,9 @@ struct RequestStateSnapshot {
   bool has_current_turn{};
   uint64_t current_turn_id{};
   GenerationFinishReason finish_reason{GenerationFinishReason::None};
+  // Caller-facing index into the turn's stop-string list, or -1. Valid (well-formed) whenever it is
+  // nonnegative exactly when finish_reason is StopString; see ValidateRequestInvariants().
+  int32_t matched_stop_string_index{-1};
 };
 
 // Immutable view of one Request's block ownership within the paged cache.

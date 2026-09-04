@@ -396,7 +396,7 @@ struct ExternalRefCounted {
  private:
   void LockExternalReferences() const noexcept {
     while (external_reference_lock_.test_and_set(std::memory_order_acquire)) {
-#if defined(USE_CXX17)
+#if defined(USE_CXX17) || defined(__APPLE__)
       std::this_thread::yield();
 #else
       external_reference_lock_.wait(true, std::memory_order_relaxed);
@@ -406,7 +406,7 @@ struct ExternalRefCounted {
 
   void UnlockExternalReferences() const noexcept {
     external_reference_lock_.clear(std::memory_order_release);
-#if !defined(USE_CXX17)
+#if !defined(USE_CXX17) && !defined(__APPLE__)
     external_reference_lock_.notify_one();
 #endif
   }

@@ -169,6 +169,20 @@ VarlenGraphBuffers::VarlenGraphBuffers(DecoderOnly_Model& model) {
                                                      static_cast<int64_t>(model.config_->model.decoder.hidden_size)},
                                 /*make_static=*/true);
   }
+
+  const auto& aux_hidden_states_name = model.config_->model.decoder.outputs.aux_hidden_states;
+  if (model.config_->engine.aux_hidden_states_output_required &&
+      !aux_hidden_states_name.empty() && model.session_info_.HasOutput(aux_hidden_states_name)) {
+    const auto shape = model.session_info_.GetOutputShape(aux_hidden_states_name);
+    if (shape.size() != 2 || shape[1] <= 0) {
+      throw std::runtime_error("aux_hidden_states must be 2-D with a static width.");
+    }
+    aux_hidden_states = std::make_unique<Tensor>(
+        model.p_device_inputs_, model.session_info_.GetOutputDataType(aux_hidden_states_name));
+    aux_hidden_states->CreateTensor(
+        std::vector<int64_t>{static_cast<int64_t>(max_batch_size), shape[1]},
+        /*make_static=*/true);
+  }
 }
 
 int VarlenGraphBuffers::GraphId(size_t batch_size, size_t block_table_columns) {
@@ -210,6 +224,7 @@ VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
   PrepareHiddenStatesInput(model, scheduled_requests);
   PrepareLogits(model, scheduled_requests);
   PrepareHiddenStates(model, scheduled_requests);
+  PrepareAuxHiddenStates(model, scheduled_requests);
 
   auto cache = cache_manager->Cache();
   for (size_t i = 0; i < cache->input_names_.size(); ++i) {
@@ -552,6 +567,36 @@ void VarlenDecoderIO::PrepareHiddenStates(std::shared_ptr<DecoderOnly_Model> mod
 
   output_names_.push_back(hidden_states_name.c_str());
   outputs_.push_back(active_hidden_states_->GetOrtTensor());
+}
+
+void VarlenDecoderIO::PrepareAuxHiddenStates(std::shared_ptr<DecoderOnly_Model> model,
+                                             ScheduledRequests& scheduled_requests) {
+  // Only models exported with aux_hidden_state_layers expose this; it is what a DFlash 2 drafter
+  // turns into its own per-layer K/V. Engine construction points this at
+  // model.dflash2.main_aux_hidden_states when a drafter is configured.
+  const auto& name = model->config_->model.decoder.outputs.aux_hidden_states;
+  if (!model->config_->engine.aux_hidden_states_output_required ||
+      name.empty() || !model->session_info_.HasOutput(name)) {
+    return;
+  }
+  const auto shape = model->session_info_.GetOutputShape(name);
+  if (shape.size() != 2 || shape[1] <= 0) {
+    throw std::runtime_error("aux_hidden_states must be 2-D with a static width.");
+  }
+  const std::vector<int64_t> output_shape{
+      static_cast<int64_t>(TokenCount(scheduled_requests)), shape[1]};
+  if (graph_buffers_ != nullptr && graph_buffers_->aux_hidden_states != nullptr) {
+    graph_buffers_->aux_hidden_states->CreateTensor(output_shape, /*make_static=*/true);
+    active_aux_hidden_states_ = graph_buffers_->aux_hidden_states.get();
+  } else {
+    aux_hidden_states_ = std::make_unique<Tensor>(model->p_device_inputs_,
+                                                  model->session_info_.GetOutputDataType(name));
+    aux_hidden_states_->CreateTensor(output_shape);
+    active_aux_hidden_states_ = aux_hidden_states_.get();
+  }
+
+  output_names_.push_back(name.c_str());
+  outputs_.push_back(active_aux_hidden_states_->GetOrtTensor());
 }
 
 std::vector<DeviceSpan<float>> VarlenDecoderIO::ProcessLogits() {

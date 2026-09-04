@@ -985,6 +985,17 @@ struct OgaEngineEvent : OgaAbstract {
     return value;
   }
 
+  /** Index into the turn's stop-string list that completed a match, or std::nullopt unless
+   *  FinishReason() == OgaFinishReason_StopString. */
+  std::optional<int32_t> MatchedStopStringIndex() const {
+    int32_t value{};
+    OgaCheckResult(OgaEngineEventGetMatchedStopStringIndex(this, &value));
+    if (value < 0) {
+      return std::nullopt;
+    }
+    return value;
+  }
+
   OgaErrorCode ErrorCode() const {
     OgaErrorCode value{};
     OgaCheckResult(OgaEngineEventGetErrorCode(this, &value));
@@ -1062,11 +1073,13 @@ struct OgaTurnOptions : OgaAbstract {
   void SetSeed(uint64_t value) {
     OgaCheckResult(OgaTurnOptionsSetSeed(this, value));
   }
-  /** Reserved for future use; currently throws a not-implemented error. */
-  void SetStopTokenIds(const OgaSequences& values) {
-    OgaCheckResult(OgaTurnOptionsSetStopTokenIds(this, &values));
-  }
-  /** Reserved for future use; currently throws a not-implemented error. */
+  /** Copies stop_strings for this turn immediately; reusing or destroying it afterward cannot
+   *  affect these options. An empty array (zero entries) clears/disables stop strings; this is
+   *  distinct from a nonempty array containing an empty string member, which is invalid. Every
+   *  entry in a nonempty array must itself be a nonempty, valid UTF-8 string, and the configuration
+   *  as a whole may contain at most 16 entries totaling at most 16 KiB. Matching is exact (no
+   *  normalization/trimming/case folding) against only the text this Engine Request generates
+   *  during the turn. */
   void SetStopStrings(const OgaStringArray& values) {
     OgaCheckResult(OgaTurnOptionsSetStopStrings(this, &values));
   }
@@ -1109,6 +1122,8 @@ struct OgaRequest : OgaAbstract {
 
   /**
    * \brief Proposes speculative draft tokens for the next decode operation.
+   *
+   * Seeded sampled output is reproducible only with the same proposal and scheduling path.
    */
   void SetDraftTokens(const OgaSequences& tokens) {
     OgaCheckResult(OgaRequestSetDraftTokens(this, &tokens));

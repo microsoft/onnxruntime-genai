@@ -93,7 +93,7 @@ typedef struct OgaStreamingProcessor OgaStreamingProcessor;
 typedef uint32_t OgaFinishReason;
 #define OgaFinishReason_None ((OgaFinishReason)0)
 #define OgaFinishReason_Eos ((OgaFinishReason)1)
-#define OgaFinishReason_StopSequence ((OgaFinishReason)2)
+#define OgaFinishReason_StopString ((OgaFinishReason)2)
 #define OgaFinishReason_MaxGeneratedTokens ((OgaFinishReason)3)
 #define OgaFinishReason_MaxSessionTokens ((OgaFinishReason)4)
 #define OgaFinishReason_Cancelled ((OgaFinishReason)5)
@@ -1316,6 +1316,14 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineEventGetToken(
     const OgaEngineEvent* event, int32_t* out);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineEventGetFinishReason(
     const OgaEngineEvent* event, OgaFinishReason* out);
+/**
+ * \brief Reads the caller-facing index into the turn's stop-string list that completed a match.
+ *
+ * Writes -1 for every event whose finish reason is not OgaFinishReason_StopString, including
+ * token-only, capacity, cancellation, failure, EOS, and length-limit terminal events.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineEventGetMatchedStopStringIndex(
+    const OgaEngineEvent* event, int32_t* out);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineEventGetErrorCode(
     const OgaEngineEvent* event, OgaErrorCode* out);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineEventGetUsage(
@@ -1393,18 +1401,19 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetTopK(
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetSeed(
     OgaTurnOptions* options, uint64_t seed);
 /**
- * \brief Sets token-ID stop sequences for a Turn.
+ * \brief Sets decoded UTF-8 stop strings for a Turn, copying them immediately.
  *
- * This operation is currently not implemented. stop_token_ids is not dereferenced or retained
- * before the not-implemented result is returned.
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetStopTokenIds(
-    OgaTurnOptions* options, const OgaSequences* stop_token_ids);
-/**
- * \brief Sets UTF-8 stop strings for a Turn.
+ * Reusing or destroying stop_strings after this call cannot affect the options. An empty
+ * stop_strings array (zero entries) clears/disables stop strings on this options object. This is
+ * distinct from a nonempty array containing an empty string member: every entry in a nonempty array
+ * must itself be a nonempty, valid UTF-8 string, or this call fails and the prior configuration is
+ * left unchanged. The configuration as a whole may contain at most 16 entries totaling at most 16
+ * KiB. Duplicate entries are preserved as distinct, independently indexed entries. Matching is exact:
+ * no normalization, trimming, or case folding, and only text this Engine Request generates during
+ * the turn (never prompt or earlier-turn tokens) is considered.
  *
- * This operation is currently not implemented. stop_strings is not dereferenced or retained
- * before the not-implemented result is returned.
+ * A subsequent OgaRequestBeginTurn snapshots these options, so reusing or mutating this
+ * OgaTurnOptions afterward cannot alter an already-active turn.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetStopStrings(
     OgaTurnOptions* options, const OgaStringArray* stop_strings);
@@ -1449,6 +1458,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestClose(OgaRequest* request);
  * the proposal. Random target sampling is supported for deterministic draft proposals when top_k
  * is positive. Requires an engine whose cache can roll a rejected draft back (see
  * OgaEngineMaxDraftTokensPerProposal).
+ * Seeded sampled output is reproducible only when both the proposal and scheduling path are the
+ * same, because draft admission changes which random stream performs target sampling.
  *
  * \param[in] request The request to propose drafts for.
  * \param[in] tokens One sequence holding the draft continuation, in order.

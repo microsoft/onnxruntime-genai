@@ -71,6 +71,12 @@ struct RecordingCacheManager : CacheManager {
   void Deallocate(std::vector<std::shared_ptr<Request>>& requests) override {
     deallocate_calls++;
     if (trace_) trace_->Record("Deallocate");
+    if (std::exchange(throw_deallocate_failure_, false)) {
+      throw std::bad_alloc{};
+    }
+    if (std::exchange(throw_deallocate_invariant_failure_, false)) {
+      throw std::logic_error("Injected cache ownership invariant failure.");
+    }
     for (const auto& request : requests) {
       allocated_.erase(std::remove(allocated_.begin(), allocated_.end(), request), allocated_.end());
     }
@@ -80,6 +86,10 @@ struct RecordingCacheManager : CacheManager {
       const std::shared_ptr<Request>& request) noexcept override {
     deallocate_calls++;
     if (trace_) trace_->Record("DetachRequestForTeardown");
+    if (!supports_dynamic_batching_ && IsResident(request)) {
+      allocated_.clear();
+      return;
+    }
     allocated_.erase(
         std::remove(allocated_.begin(), allocated_.end(), request),
         allocated_.end());
@@ -104,6 +114,7 @@ struct RecordingCacheManager : CacheManager {
   size_t ResidentRequestCount() const override { return allocated_.size(); }
 
   StepPlanningResult PlanStepResources(StepPlan& plan) const override {
+    plan_step_resources_calls++;
     if (always_throw_planning_bad_alloc_ ||
         std::exchange(throw_planning_bad_alloc_, false)) {
       throw std::bad_alloc{};
@@ -302,6 +313,10 @@ struct RecordingCacheManager : CacheManager {
     overselect_planning_once_ = true;
   }
   void ThrowPrepareFailureOnce() { throw_prepare_failure_ = true; }
+  void ThrowDeallocateFailureOnce() { throw_deallocate_failure_ = true; }
+  void ThrowDeallocateInvariantFailureOnce() {
+    throw_deallocate_invariant_failure_ = true;
+  }
   void ThrowReleaseFailureOnce() { throw_release_failure_ = true; }
   // Forces the composite plan/reservation consistency guard in Engine::StepDynamic. PlanStepResources
   // publishes `plan`, and every reservation reports slots, new-slot count, and staging bytes, so a
@@ -329,6 +344,7 @@ struct RecordingCacheManager : CacheManager {
 
   // Recorded call counts.
   mutable int can_allocate_calls{0};
+  mutable int plan_step_resources_calls{0};
   int allocate_calls{0};
   int deallocate_calls{0};
   int step_calls{0};
@@ -346,6 +362,8 @@ struct RecordingCacheManager : CacheManager {
   mutable bool throw_planning_consistency_{};
   mutable bool overselect_planning_once_{};
   bool throw_prepare_failure_{};
+  bool throw_deallocate_failure_{};
+  bool throw_deallocate_invariant_failure_{};
   bool throw_release_failure_{};
   std::shared_ptr<CallTrace> trace_;
   bool can_allocate_verdict_{true};
@@ -370,6 +388,7 @@ struct ScriptedDecoderIO : DecoderIO {
                     bool fail_process_logits = false,
                     const StepPlan* plan = nullptr,
                     std::span<const int32_t> row_tokens = {},
+                    std::span<const int32_t> sampling_candidate_tokens = {},
                     int64_t hidden_size = 0,
                     ONNXTensorElementDataType hidden_type = Ort::TypeToTensorType<float>)
       : DecoderIO(model, scheduled_requests, cache_manager),
@@ -387,6 +406,9 @@ struct ScriptedDecoderIO : DecoderIO {
     if (!row_tokens.empty() && row_tokens.size() != rows) {
       throw std::runtime_error("ScriptedDecoderIO: row token script does not cover every row.");
     }
+    if (!row_tokens.empty() && !sampling_candidate_tokens.empty()) {
+      throw std::runtime_error("ScriptedDecoderIO: row tokens and sampling candidates are mutually exclusive.");
+    }
     row_count_ = rows;
     logits_ = std::make_unique<Tensor>(model->p_device_inputs_, Ort::TypeToTensorType<float>);
     const std::array<int64_t, 2> shape{static_cast<int64_t>(rows), vocab_size_};
@@ -395,6 +417,15 @@ struct ScriptedDecoderIO : DecoderIO {
     auto cpu_span = device_span.CpuSpan();
     std::fill(cpu_span.begin(), cpu_span.end(), 0.0f);
     for (size_t row = 0; row < rows; ++row) {
+      if (!sampling_candidate_tokens.empty()) {
+        for (const int32_t token : sampling_candidate_tokens) {
+          if (token < 0 || token >= vocab_size_) {
+            throw std::runtime_error("ScriptedDecoderIO: sampling candidate out of vocabulary range");
+          }
+          cpu_span[static_cast<int64_t>(row) * vocab_size_ + token] = 100.0f;
+        }
+        continue;
+      }
       const int32_t token = row_tokens.empty() ? forced_token : row_tokens[row];
       if (token < 0 || token >= vocab_size_) {
         throw std::runtime_error("ScriptedDecoderIO: scripted row token out of vocabulary range");
@@ -499,7 +530,8 @@ struct RecordingModelExecutor : ModelExecutor {
         std::make_unique<ScriptedDecoderIO>(
             model_, scheduled_requests, cache_manager_, forced_token_,
             failure == ScriptedExecutionFailure::PostProcessing,
-            context.plan, verify_row_tokens_, hidden_size_, hidden_type_));
+            context.plan, verify_row_tokens_, sampling_candidate_tokens_,
+            hidden_size_, hidden_type_));
     static_cast<void>(context);
   }
 
@@ -510,6 +542,9 @@ struct RecordingModelExecutor : ModelExecutor {
   }
   void SetVerifyRowTokens(std::vector<int32_t> tokens) {
     verify_row_tokens_ = std::move(tokens);
+  }
+  void SetSamplingCandidateTokens(std::vector<int32_t> tokens) {
+    sampling_candidate_tokens_ = std::move(tokens);
   }
   bool SupportsDraftVerification() const override {
     return supports_draft_verification_;
@@ -539,6 +574,7 @@ struct RecordingModelExecutor : ModelExecutor {
   ScriptedExecutionFailure next_failure_{ScriptedExecutionFailure::None};
   std::function<void(ExecutionContext&)> on_execute_;
   std::vector<int32_t> verify_row_tokens_;
+  std::vector<int32_t> sampling_candidate_tokens_;
   bool supports_draft_verification_{true};
   int64_t hidden_size_{};
   ONNXTensorElementDataType hidden_type_{Ort::TypeToTensorType<float>};

@@ -9,6 +9,7 @@
 #include <fstream>
 #include <numeric>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -23,6 +24,7 @@
 
 #include <gtest/gtest.h>
 
+#include "stop_string_matcher.h"
 #include "test_utils.h"
 
 namespace {
@@ -33,6 +35,7 @@ struct EngineEventSnapshot {
   uint64_t turn_id{};
   int32_t token{};
   OgaFinishReason finish_reason{};
+  std::optional<int32_t> matched_stop_string_index{};
   OgaErrorCode error_code{};
   uint64_t prompt_tokens{};
   uint64_t generated_tokens{};
@@ -51,6 +54,7 @@ EngineEventSnapshot Snapshot(const OgaEngineEvent* event) {
       event->TurnId(),
       event->Token(),
       event->FinishReason(),
+      event->MatchedStopStringIndex(),
       event->ErrorCode(),
       usage.PromptTokens(),
       usage.GeneratedTokens(),
@@ -1018,12 +1022,6 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
   auto validation_request = engine->CreateRequest(*params);
   auto validation_options = validation_request->CreateTurnOptions();
 
-  std::unique_ptr<OgaResult> null_stop_token_ids_result{
-      OgaTurnOptionsSetStopTokenIds(validation_options.get(), nullptr)};
-  ASSERT_NE(null_stop_token_ids_result, nullptr);
-  EXPECT_NE(
-      std::string(null_stop_token_ids_result->GetError()).find("stop_token_ids must not be null"),
-      std::string::npos);
   std::unique_ptr<OgaResult> null_stop_strings_result{
       OgaTurnOptionsSetStopStrings(validation_options.get(), nullptr)};
   ASSERT_NE(null_stop_strings_result, nullptr);
@@ -1055,6 +1053,103 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
   EXPECT_EQ(engine->Run(*idle_buffer), 0u);
   EXPECT_EQ(idle_buffer->Count(), 0u);
   EXPECT_EQ(idle_buffer->Get(0), nullptr);
+}
+
+TEST(CAPITests, EngineTurnOptionsStopStrings) {
+  auto model = OgaModel::Create(MODEL_PATH "engine/synthetic-paged");
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 16);
+  auto engine = OgaEngine::Create(*model);
+  const std::array<int32_t, 3> input_tokens{2, 3, 4};
+
+  // An empty array is a valid configuration: it clears/disables stop strings rather than throwing.
+  {
+    auto request = engine->CreateRequest(*params);
+    auto turn_options = request->CreateTurnOptions();
+    auto empty = OgaStringArray::Create();
+    EXPECT_NO_THROW(turn_options->SetStopStrings(*empty));
+    request->Close();
+  }
+
+  // Bounds and UTF-8 validation happen immediately, at set time, using the same contract
+  // StopStringMatcher enforces -- not deferred to the next BeginTurn.
+  {
+    auto request = engine->CreateRequest(*params);
+    auto turn_options = request->CreateTurnOptions();
+    auto invalid_entry = OgaStringArray::Create();
+    invalid_entry->Add("");
+    EXPECT_THROW(turn_options->SetStopStrings(*invalid_entry), std::runtime_error);
+
+    auto too_many = OgaStringArray::Create();
+    for (int i = 0; i < 17; ++i) {
+      too_many->Add(("s" + std::to_string(i)).c_str());
+    }
+    EXPECT_THROW(turn_options->SetStopStrings(*too_many), std::runtime_error);
+
+    const std::string per_entry(Generators::kMaxStopStringTotalBytes /
+                                    Generators::kMaxStopStringCount,
+                                'x');
+    auto maximum_bytes = OgaStringArray::Create();
+    for (size_t i = 0; i < Generators::kMaxStopStringCount; ++i) {
+      maximum_bytes->Add(per_entry.c_str());
+    }
+    EXPECT_NO_THROW(turn_options->SetStopStrings(*maximum_bytes));
+
+    // Validation precedes assignment: after a valid matching configuration is installed, rejecting
+    // an oversized replacement must leave that prior configuration active.
+    auto matching = OgaStringArray::Create();
+    matching->Add("CD");
+    turn_options->SetStopStrings(*matching);
+    auto excessive_bytes = OgaStringArray::Create();
+    for (size_t i = 0; i + 1 < Generators::kMaxStopStringCount; ++i) {
+      excessive_bytes->Add(per_entry.c_str());
+    }
+    const std::string final_oversized_entry(per_entry.size() + 1, 'x');
+    excessive_bytes->Add(final_oversized_entry.c_str());
+    EXPECT_THROW(turn_options->SetStopStrings(*excessive_bytes), std::runtime_error);
+
+    turn_options->SetMaxGeneratedTokens(1);
+    EXPECT_EQ(request->BeginTurn(input_tokens, turn_options.get()), 1u);
+    const auto event = RunOne(*engine);
+    EXPECT_EQ(event.token, 9);  // "CD"
+    EXPECT_EQ(event.finish_reason, OgaFinishReason_StopString);
+    EXPECT_EQ(event.matched_stop_string_index, 0);
+    request->Close();
+  }
+
+  // Reusing and destroying the array after SetStopStrings returns cannot affect the options: the
+  // strings are copied immediately.
+  {
+    auto request = engine->CreateRequest(*params);
+    auto turn_options = request->CreateTurnOptions();
+    {
+      auto transient = OgaStringArray::Create();
+      transient->Add("UNREACHABLE_STOP");
+      turn_options->SetStopStrings(*transient);
+    }
+    turn_options->SetMaxGeneratedTokens(1);
+    EXPECT_EQ(request->BeginTurn(input_tokens, turn_options.get()), 1u);
+    const auto event = RunOne(*engine);
+    EXPECT_EQ(event.request, request.get());
+    // The configured stop string never appears in this model's decoded output, so the turn ends on
+    // the ordinary max-generated-tokens limit with no matched index, exactly like a request with no
+    // stop strings at all.
+    EXPECT_EQ(event.finish_reason, OgaFinishReason_MaxGeneratedTokens);
+    EXPECT_FALSE(event.matched_stop_string_index.has_value());
+    request->Close();
+  }
+
+  // A stop-enabled turn is not rejected just because this dynamic-batching Engine could support
+  // speculative draft verification: only static batching and an active draft proposal reject it.
+  {
+    auto request = engine->CreateRequest(*params);
+    auto turn_options = request->CreateTurnOptions();
+    auto stop_strings = OgaStringArray::Create();
+    stop_strings->Add("STOP");
+    turn_options->SetStopStrings(*stop_strings);
+    EXPECT_NO_THROW(request->BeginTurn(input_tokens, turn_options.get()));
+    request->Close();
+  }
 }
 
 TEST(CAPITests, EngineBulkRunAndReusableStorage) {

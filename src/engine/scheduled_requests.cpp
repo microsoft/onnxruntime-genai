@@ -288,14 +288,24 @@ std::vector<DeviceSpan<float>> ScheduledRequests::ProcessLogits() {
   return logits;
 }
 
+Tensor* ScheduledRequests::AuxHiddenStates() const {
+  return decoder_state_ ? decoder_state_->AuxHiddenStates() : nullptr;
+}
+
 std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
     std::vector<DeviceSpan<float>>& verify_rows,
     std::vector<std::vector<int32_t>>& selected_tokens,
-    std::vector<size_t>& accepted_draft_counts) {
+    std::vector<size_t>& confirmed_draft_counts,
+    std::vector<std::vector<std::mt19937>>& rng_checkpoints) {
   std::vector<DeviceSpan<float>> sampled_rows;
   sampled_rows.reserve(requests_.size());
   selected_tokens.resize(requests_.size());
-  accepted_draft_counts.assign(requests_.size(), 0);
+  confirmed_draft_counts.assign(requests_.size(), 0);
+  // Left completely empty (no allocation at all) unless the pre-scan below finds at least one
+  // random-sampled drafted request with an active stop controller; only then is it sized once, to
+  // requests_.size() so per-request indexing below stays simple. A step with no drafts, no random
+  // sampling, or no stop-enabled request among them never allocates or grows this at all.
+  rng_checkpoints.clear();
 
   // Verification only needs each draft row's argmax. Reading a whole vocabulary row back to the host
   // costs about a megabyte and a stream synchronization per draft, which on a large-vocabulary model
@@ -326,9 +336,15 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
     }
   }
   int max_sampling_top_k = 0;
+  bool any_checkpoint_needed = false;
   for (size_t i = 0; i < requests_.size(); ++i) {
-    if (draft_token_counts_[i] != 0 && UsesRandomSampling(requests_[i]->SearchOptions()))
+    if (draft_token_counts_[i] != 0 && UsesRandomSampling(requests_[i]->SearchOptions())) {
       max_sampling_top_k = std::max(max_sampling_top_k, requests_[i]->SearchOptions().top_k);
+      any_checkpoint_needed = any_checkpoint_needed || requests_[i]->stop_controller_ != nullptr;
+    }
+  }
+  if (any_checkpoint_needed) {
+    rng_checkpoints.resize(requests_.size());
   }
   const TopKScores topk = TryDeviceTopKScoresPerRow(
       *model_->p_device_inputs_, verify_rows, max_sampling_top_k);
@@ -349,6 +365,24 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
       // BatchedSamplerState. search.random_seed consequently reproduces a given decode path, not
       // output across decode paths, because whether drafts are admitted depends on batch
       // composition. See "Seeded sampling" in docs/paged_attention_engine.md.
+      //
+      // A stop-enabled request additionally checkpoints rng_ right after every draw here (a plain
+      // copy of the fixed-size std::mt19937 state, intentionally allocated/copied). The outer
+      // rng_checkpoints vector itself is left completely empty (see above) unless at least one
+      // random-sampled drafted request in this whole step needs it, and each such request's own
+      // inner vector is reserved once up front for this call's exact upper bound, draft_count + 1,
+      // so growing it below never reallocates or re-copies already-captured checkpoints. If a
+      // later stop match truncates this round before its natural end, the caller restores rng_ to
+      // the checkpoint captured after the retained match, undoing every draw made for a now-
+      // discarded, never-visible token so those candidates do not advance the host verification
+      // RNG beyond the retained prefix. A
+      // request with no active stop controller never checkpoints (no reservation, no copies, no
+      // vector growth) and a step with no such request at all never even allocates the outer
+      // vector, so this adds no cost to the existing no-stop/greedy/non-drafted paths.
+      const bool checkpoint_rng = requests_[i]->stop_controller_ != nullptr;
+      if (checkpoint_rng) {
+        rng_checkpoints[i].reserve(draft_count + 1);
+      }
       const auto drafts = requests_[i]->StagedDraftTokens();
       const size_t token_budget = requests_[i]->RemainingTurnTokenBudget();
       requests_[i]->RewindDraftsForTransaction(0);
@@ -360,6 +394,9 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
             requests_[i]->SearchOptions(), topk, sampling_scratch);
         const int32_t token = SampleTargetToken(selection, requests_[i]->rng_);
         selected_tokens[i].push_back(token);
+        if (checkpoint_rng) {
+          rng_checkpoints[i].push_back(requests_[i]->rng_);
+        }
         if (token != drafts[accepted_count] || requests_[i]->IsStopToken(token))
           break;
         ++accepted_count;
@@ -371,8 +408,11 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
             requests_[i]->SearchOptions(), topk, sampling_scratch);
         selected_tokens[i].push_back(
             SampleTargetToken(selection, requests_[i]->rng_));
+        if (checkpoint_rng) {
+          rng_checkpoints[i].push_back(requests_[i]->rng_);
+        }
       }
-      accepted_draft_counts[i] = accepted_count;
+      confirmed_draft_counts[i] = accepted_count;
       sampled_rows.push_back({});
       row += draft_count + 1;
       continue;
@@ -653,8 +693,10 @@ void ScheduledRequests::GenerateNextTokensForTransaction(
 
   auto verify_rows = ProcessLogits();
   std::vector<std::vector<int32_t>> selected_tokens;
-  std::vector<size_t> accepted_draft_counts;
-  auto logits = SelectSampledRows(verify_rows, selected_tokens, accepted_draft_counts);
+  std::vector<size_t> confirmed_draft_counts;
+  std::vector<std::vector<std::mt19937>> rng_checkpoints;
+  auto logits = SelectSampledRows(verify_rows, selected_tokens, confirmed_draft_counts,
+                                  rng_checkpoints);
   const bool guidance_applied = TryApplyBatchedGuidanceMasks(logits);
   results.assign(requests_.size(), RequestStepResult{});
   std::vector<bool> sampled_by_batched_sampler(requests_.size(), false);
@@ -733,12 +775,60 @@ void ScheduledRequests::GenerateNextTokensForTransaction(
     if (can_batch_commits)
       committed_tokens = model_->p_device_->Allocate<int32_t>(sampled_request_count);
 
+    const auto commit_sampled_stage = [&](size_t request_index, size_t stage) {
+      auto& request = requests_[request_index];
+      // The plan's original sequence_length_before, plus accepted_draft_count_ (prior stages
+      // only -- never this one), always equals CurrentSequenceLength() just before this stage's
+      // own append. Every earlier stage advanced Search and accepted_draft_count_ by exactly one,
+      // so the unmodified plan works for every stage.
+      const auto& stage_plan = plan.requests[request_index];
+      const auto stage_result = request->StageGenerationForTransaction(stage_plan);
+      const bool is_natural_last_stage =
+          stage + 1 == selected_tokens[request_index].size();
+      const bool stopped =
+          stage_result.finish_reason == GenerationFinishReason::StopString;
+      if (stopped || is_natural_last_stage) {
+        if (stopped && !is_natural_last_stage &&
+            (request_index >= rng_checkpoints.size() ||
+             stage >= rng_checkpoints[request_index].size())) {
+          throw std::logic_error(
+              "A stop-truncated sampled round is missing its RNG checkpoint.");
+        }
+        auto final_result = stage_result;
+        // A target-confirmed final draft contributes to both the accepted and evaluated counts.
+        // A final stage within the proposed range but beyond the confirmed prefix is evaluated
+        // but not accepted. A trailing bonus token was never proposed and contributes to neither.
+        if (stage < confirmed_draft_counts[request_index]) {
+          request->PromoteFinalStageAsAcceptedDraft(final_result);
+        } else if (stage < stage_plan.draft_token_count) {
+          request->MarkFinalStageAsEvaluatedNonAcceptedDraft();
+        }
+        results[request_index] = final_result;
+        if (stopped && !is_natural_last_stage) {
+          // Later selected tokens are never committed. Restore the RNG checkpoint immediately
+          // after the retained token so discarded samples do not affect future decoding.
+          selected_tokens[request_index].resize(stage + 1);
+          request->rng_ = rng_checkpoints[request_index][stage];
+        }
+      } else if (!stage_result.token_appended || stage_result.done) {
+        throw std::logic_error("An accepted sampled draft unexpectedly ended the request.");
+      } else {
+        request->AppendAcceptedSampledToken(stage_result.token);
+      }
+    };
+
     for (size_t stage = 0; stage < max_selected_tokens; ++stage) {
       std::vector<size_t> active;
       active.reserve(sampled_request_count);
       for (size_t i = 0; i < selected_tokens.size(); ++i) {
         if (stage < selected_tokens[i].size())
           active.push_back(i);
+      }
+      // Every request that had selected_tokens this round has already finalized (a stop match or
+      // its own natural end) by the time none remain active for a later stage: skip the batched
+      // buffer round-trip entirely rather than transferring and synchronizing an empty span.
+      if (active.empty()) {
+        break;
       }
 
       if (can_batch_commits) {
@@ -755,41 +845,12 @@ void ScheduledRequests::GenerateNextTokensForTransaction(
         }
         stage_tokens.CopyDeviceToCpu();
         for (size_t row = 0; row < active.size(); ++row) {
-          const size_t request_index = active[row];
-          auto stage_plan = plan.requests[request_index];
-          if (stage + 1 == selected_tokens[request_index].size()) {
-            requests_[request_index]->RecordSampledDraftAcceptance(
-                accepted_draft_counts[request_index]);
-          } else {
-            stage_plan.sequence_length_before =
-                requests_[request_index]->CurrentSequenceLength() - 1;
-          }
-          const auto stage_result =
-              requests_[request_index]->StageGenerationForTransaction(stage_plan);
-          if (stage + 1 == selected_tokens[request_index].size()) {
-            results[request_index] = stage_result;
-          } else if (!stage_result.token_appended || stage_result.done) {
-            throw std::logic_error("An accepted sampled draft unexpectedly ended the request.");
-          }
+          commit_sampled_stage(active[row], stage);
         }
       } else {
         for (size_t request_index : active) {
-          auto& request = requests_[request_index];
-          auto stage_plan = plan.requests[request_index];
-          stage_plan.sequence_length_before = request->CurrentSequenceLength();
-          request->search_->CommitToken(selected_tokens[request_index][stage]);
-          if (stage + 1 == selected_tokens[request_index].size()) {
-            request->RecordSampledDraftAcceptance(
-                accepted_draft_counts[request_index]);
-            stage_plan = plan.requests[request_index];
-          }
-          const auto stage_result =
-              request->StageGenerationForTransaction(stage_plan);
-          if (stage + 1 == selected_tokens[request_index].size()) {
-            results[request_index] = stage_result;
-          } else if (!stage_result.token_appended || stage_result.done) {
-            throw std::logic_error("An accepted sampled draft unexpectedly ended the request.");
-          }
+          requests_[request_index]->search_->CommitToken(selected_tokens[request_index][stage]);
+          commit_sampled_stage(request_index, stage);
         }
       }
     }
