@@ -10,7 +10,7 @@
 
 // C++ API Example
 
-void CXX_API(const char* model_path, int32_t num_beams) {
+void CXX_API(const char* model_path, int32_t num_beams, const std::string& language, const std::string& task, bool timestamps) {
   std::cout << "Creating model..." << std::endl;
   auto model = OgaModel::Create(model_path);
   std::cout << "Creating multimodal processor..." << std::endl;
@@ -43,8 +43,11 @@ void CXX_API(const char* model_path, int32_t num_beams) {
 
     std::cout << "Processing inputs..." << std::endl;
     const size_t batch_size = audio_paths.size();
-    const char* prompt_tokens = "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>";
-    const std::vector<const char*> prompts(batch_size, prompt_tokens);
+    std::string prompt_tokens = "<|startoftranscript|><|" + language + "|><|" + task + "|>";
+    if (!timestamps) {
+      prompt_tokens += "<|notimestamps|>";
+    }
+    const std::vector<const char*> prompts(batch_size, prompt_tokens.c_str());
     auto inputs = processor->ProcessAudios(prompts, audios.get());
 
     std::cout << "Generating response..." << std::endl;
@@ -84,7 +87,7 @@ void CheckResult(OgaResult* result) {
   }
 }
 
-void C_API(const char* model_path, int32_t num_beams) {
+void C_API(const char* model_path, int32_t num_beams, const std::string& language, const std::string& task, bool timestamps) {
   OgaModel* model;
   std::cout << "Creating model..." << std::endl;
   CheckResult(OgaCreateModel(model_path, &model));
@@ -127,8 +130,11 @@ void C_API(const char* model_path, int32_t num_beams) {
     std::cout << "Processing audio..." << std::endl;
     OgaNamedTensors* inputs;
     const size_t batch_size = audio_paths.size();
-    const char* prompt_tokens = "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>";
-    std::vector<const char*> prompts(batch_size, prompt_tokens);
+    std::string prompt_tokens = "<|startoftranscript|><|" + language + "|><|" + task + "|>";
+    if (!timestamps) {
+      prompt_tokens += "<|notimestamps|>";
+    }
+    std::vector<const char*> prompts(batch_size, prompt_tokens.c_str());
     OgaStringArray* prompts_string_array;
     CheckResult(OgaCreateStringArrayFromStrings(prompts.data(), prompts.size(), &prompts_string_array));
     CheckResult(OgaProcessorProcessAudiosAndPrompts(processor, prompts_string_array, audios, &inputs));
@@ -177,13 +183,32 @@ void C_API(const char* model_path, int32_t num_beams) {
 }
 
 static void print_usage_whisper(int /*argc*/, char** argv) {
-  std::cerr << "usage: " << argv[0] << " <model_path>"
-            << "<num_beams>" << std::endl;
+  std::cerr << "usage: " << argv[0] << " <model_path> <num_beams> [--language <language>] "
+            << "[--task <transcribe|translate>] [--timestamps]" << std::endl;
 }
 
 int main(int argc, char** argv) {
-  if (argc != 3) {
+  if (argc < 3) {
     print_usage_whisper(argc, argv);
+    return -1;
+  }
+
+  std::string language = "en";
+  std::string task = "transcribe";
+  bool timestamps = false;
+  for (int i = 3; i < argc; ++i) {
+    const std::string option = argv[i];
+    if (option == "--timestamps") {
+      timestamps = true;
+    } else if ((option == "--language" || option == "--task") && ++i < argc) {
+      (option == "--language" ? language : task) = argv[i];
+    } else {
+      print_usage_whisper(argc, argv);
+      return -1;
+    }
+  }
+  if (task != "transcribe" && task != "translate") {
+    std::cerr << "--task must be transcribe or translate." << std::endl;
     return -1;
   }
 
@@ -198,10 +223,10 @@ int main(int argc, char** argv) {
 
 #ifdef USE_CXX
   std::cout << "C++ API" << std::endl;
-  CXX_API(argv[1], std::stoi(argv[2]));
+  CXX_API(argv[1], std::stoi(argv[2]), language, task, timestamps);
 #else
   std::cout << "C API" << std::endl;
-  C_API(argv[1], std::stoi(argv[2]));
+  C_API(argv[1], std::stoi(argv[2]), language, task, timestamps);
 #endif
 
   return 0;
