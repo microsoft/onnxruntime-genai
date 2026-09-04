@@ -489,6 +489,14 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
                                                 remaining_turn_tokens_after_step > 1
                                                     ? remaining_turn_tokens_after_step - 1
                                                     : size_t{0}});
+      // A stop-enabled request is intentionally not excluded here: generic target verification
+      // (Request::CommitAcceptedDraftsForTransaction for greedy, the per-stage loop in
+      // ScheduledRequests::GenerateNextTokensForTransaction for sampled/batched) truncates it
+      // transactionally through the same StopStringController the ordinary path uses, so it can
+      // draft and verify normally. result.done still does the work of preventing a redraft after a
+      // match: it is true for any committed StopString result exactly like any other finish
+      // reason, so this check below already skips proposing a new draft block for it with no
+      // stop-specific condition needed.
       if (!result.token_appended || result.done ||
           entry.request->DraftTokenValidationError() ||
           max_draft_tokens == 0) {
@@ -915,11 +923,21 @@ void Engine::RecordSpeculativeCommit(const StepPlan& plan) noexcept {
     }
 
     const size_t accepted = entry.request->AcceptedDraftTokenCount();
+    // EvaluatedDraftTokenCount() is tracked directly at the actual verification source (the
+    // greedy loop in Request::CommitAcceptedDraftsForTransaction, and the sampled/batched stage
+    // loop's AppendAcceptedSampledToken/PromoteFinalStageAsAcceptedDraft/
+    // MarkFinalStageAsEvaluatedNonAcceptedDraft in
+    // ScheduledRequests::GenerateNextTokensForTransaction),
+    // not inferred here from accepted/finish_reason/token_appended after the fact. It counts draft
+    // positions logically resolved before the committed terminal boundary; greedy comparisons may
+    // have been precomputed for later positions. The old inference overcounted a limit-truncated
+    // round -- e.g. 5 proposed, budget for 2, both confirmed: the logical evaluated prefix is 2,
+    // not accepted + 1 = 3.
+    const size_t evaluated = entry.request->EvaluatedDraftTokenCount();
     ++speculative_stats_.rounds;
     ++speculative_stats_.completed_rounds;
     speculative_stats_.draft_tokens_proposed += entry.draft_token_count;
-    speculative_stats_.draft_tokens_evaluated +=
-        std::min(accepted + 1, entry.draft_token_count);
+    speculative_stats_.draft_tokens_evaluated += evaluated;
     speculative_stats_.draft_tokens_accepted += accepted;
     ++speculative_stats_.acceptance_length_histogram[accepted];
     if (accepted == 0) {

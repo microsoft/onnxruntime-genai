@@ -277,7 +277,9 @@ void Request::MarkClosedFromEngine(const Engine& engine) noexcept {
   std::vector<int32_t>{}.swap(draft_tokens_);
   staged_draft_count_ = 0;
   accepted_draft_count_ = 0;
+  evaluated_draft_count_ = 0;
   draft_verification_completed_generation_ = false;
+  draft_verification_stop_match_index_ = -1;
 }
 
 void Request::CompleteCloseFromEngine(const Engine& engine) noexcept {
@@ -350,7 +352,9 @@ void Request::CompleteClose() noexcept {
   std::vector<int32_t>{}.swap(draft_tokens_);
   staged_draft_count_ = 0;
   accepted_draft_count_ = 0;
+  evaluated_draft_count_ = 0;
   draft_verification_completed_generation_ = false;
+  draft_verification_stop_match_index_ = -1;
   std::vector<int32_t>{}.swap(tokens_host_);
 }
 
@@ -385,15 +389,10 @@ int64_t Request::CommittedSequenceLength() const {
 }
 
 const char* Request::DraftTokenValidationError() const noexcept {
-  if (stop_controller_) {
-    // The shared boundary every draft producer converges on: manual Request::SetDraftTokens
-    // callers get this as a thrown error, and Engine::PrepareMtpStep's identical check silently
-    // excludes the request from automatic MTP drafting instead (see its use there). Either way, a
-    // stop-enabled turn always runs the plain one-token-per-step path, request-locally, without
-    // disabling draft verification for any other request on this Engine.
-    return "Speculative draft tokens are not supported while stop strings are enabled for the "
-           "active turn.";
-  }
+  // A stop-enabled turn is not excluded here: draft verification observes target-accepted tokens
+  // through stop_controller_ in exactly the same committed order the ordinary one-token path uses
+  // (CommitAcceptedDraftsForTransaction for greedy verification, StageGenerationForTransaction for
+  // sampled/batched verification), so it drafts and verifies normally.
   if (guidance_logits_processor_) {
     return "Speculative draft tokens are not supported with guidance.";
   }
@@ -470,7 +469,9 @@ void Request::AppendDraftsForTransaction(size_t draft_count) {
   tokens_host_.insert(tokens_host_.end(), drafts.begin(), drafts.end());
   staged_draft_count_ = draft_count;
   accepted_draft_count_ = 0;
+  evaluated_draft_count_ = 0;
   draft_verification_completed_generation_ = false;
+  draft_verification_stop_match_index_ = -1;
 }
 
 void Request::CommitAcceptedDraftsForTransaction(size_t accepted_count) {
@@ -484,9 +485,16 @@ void Request::CommitAcceptedDraftsForTransaction(size_t accepted_count) {
   search_->RewindTo(committed_length);
   staged_draft_count_ = 0;
   accepted_draft_count_ = 0;
+  evaluated_draft_count_ = 0;
   draft_verification_completed_generation_ = false;
+  draft_verification_stop_match_index_ = -1;
 
   for (size_t offset = 0; offset < accepted_count; ++offset) {
+    // Every iteration examines exactly one proposed draft position's target acceptance, whether or
+    // not it turns out to append/match/end the round below -- this is what lets
+    // Engine::RecordSpeculativeCommit read an exact "rows examined" count instead of inferring one
+    // from token_appended/finish_reason after the fact.
+    ++evaluated_draft_count_;
     const int32_t token = draft_tokens_[offset];
     const int64_t sequence_length_before = CurrentSequenceLength();
     search_->CommitToken(token);
@@ -495,6 +503,17 @@ void Request::CommitAcceptedDraftsForTransaction(size_t accepted_count) {
       tokens_host_.push_back(token);
       ++staged_draft_count_;
       ++accepted_draft_count_;
+      // Only an actually-appended token reaches the matcher here, exactly mirroring the ordinary
+      // one-token path's token_appended gate in StageGeneration(): an accepted draft that turns out
+      // to be EOS commits (GreedySearch_Cpu::CommitToken marks the search done) without appending,
+      // so its bytes must never reach the controller or be able to produce a StopString result.
+      if (stop_controller_) {
+        if (const auto& match = stop_controller_->ObserveToken(token)) {
+          draft_verification_stop_match_index_ = static_cast<int32_t>(match->index);
+          draft_verification_completed_generation_ = true;
+          break;
+        }
+      }
     } else if (sequence_length_after != sequence_length_before ||
                !search_->IsDone()) {
       throw std::logic_error(
@@ -509,6 +528,16 @@ void Request::CommitAcceptedDraftsForTransaction(size_t accepted_count) {
       break;
     }
   }
+  // The loop above only ever runs offsets 0..accepted_count-1 (all already argmax-confirmed by the
+  // caller): a genuinely rejected draft at offset accepted_count, if any, is never processed by it
+  // at all -- that comparison already happened in the caller (ScheduledRequests::SelectSampledRows)
+  // before this function was even called. If the loop completed normally (no stop match, EOS, or
+  // turn/context limit interrupted it) and the caller proposed more drafts than were confirmed,
+  // that rejected position was examined (compared against the target's own argmax and found not to
+  // match) even though it is not processed here, so it counts too.
+  if (!draft_verification_completed_generation_ && accepted_count < proposed_count) {
+    ++evaluated_draft_count_;
+  }
 }
 
 void Request::RewindDraftsForTransaction(size_t accepted_count) {
@@ -517,6 +546,7 @@ void Request::RewindDraftsForTransaction(size_t accepted_count) {
   }
   const size_t rejected_count = staged_draft_count_ - accepted_count;
   accepted_draft_count_ = accepted_count;
+  evaluated_draft_count_ = accepted_count;
   if (rejected_count == 0) {
     return;
   }
@@ -526,14 +556,32 @@ void Request::RewindDraftsForTransaction(size_t accepted_count) {
   search_->RewindTo(static_cast<size_t>(CurrentSequenceLength()) - rejected_count);
 }
 
-void Request::RecordSampledDraftAcceptance(size_t accepted_count) {
-  if (staged_draft_count_ != 0 || accepted_count > draft_tokens_.size()) {
-    throw std::logic_error("Sampled verification recorded an invalid accepted draft prefix.");
+void Request::AppendAcceptedSampledToken(int32_t token) {
+  if (accepted_draft_count_ >= draft_tokens_.size()) {
+    throw std::logic_error("Sampled verification accepted more tokens than were proposed as drafts.");
   }
-  tokens_host_.insert(tokens_host_.end(), draft_tokens_.begin(),
-                      draft_tokens_.begin() + static_cast<ptrdiff_t>(accepted_count));
-  staged_draft_count_ = accepted_count;
-  accepted_draft_count_ = accepted_count;
+  tokens_host_.push_back(token);
+  ++staged_draft_count_;
+  ++accepted_draft_count_;
+  ++evaluated_draft_count_;
+}
+
+void Request::PromoteFinalStageAsAcceptedDraft(RequestStepResult& result) {
+  // Reuses the exact same push/increment AppendAcceptedSampledToken performs for an earlier stage;
+  // the only difference is that this token is the one StageGeneration() just staged as this
+  // result's own token_appended token, so CommitStep() must not also append it a second time.
+  //
+  // A confirmed draft this promotes must have actually been appended by StageGeneration() this
+  // stage (mirroring the ordinary path's own token_appended semantics): if it were not, the token
+  // this mirrors into tokens_host_ below would never have genuinely extended Search's own
+  // sequence, silently diverging Request's host mirror from Search. Enforce the
+  // confirmed_draft_counts/token_appended invariant before mutating the host mirror.
+  if (!result.token_appended) {
+    throw std::logic_error(
+        "PromoteFinalStageAsAcceptedDraft was called for a stage that never appended a token.");
+  }
+  AppendAcceptedSampledToken(result.token);
+  result.token_appended = false;
 }
 
 void Request::DiscardStagedDrafts() noexcept {
@@ -542,7 +590,9 @@ void Request::DiscardStagedDrafts() noexcept {
     staged_draft_count_ = 0;
   }
   accepted_draft_count_ = 0;
+  evaluated_draft_count_ = 0;
   draft_verification_completed_generation_ = false;
+  draft_verification_stop_match_index_ = -1;
 }
 
 RequestStateSnapshot Request::Snapshot() const {
@@ -801,17 +851,26 @@ RequestStepResult Request::StageDraftCompletionForTransaction() {
   }
 
   GenerationFinishReason finish_reason = GenerationFinishReason::ContextLimit;
-  const bool turn_limit_reached =
-      turn_max_generated_tokens_ &&
-      turn_generated_tokens_ + accepted_draft_count_ >=
-          *turn_max_generated_tokens_;
-  if (turn_limit_reached) {
-    finish_reason = GenerationFinishReason::TurnLimit;
+  int32_t matched_stop_string_index = -1;
+  // Stop-string precedence over the turn/context limit was already decided when this token was
+  // observed, immediately after it was accepted in CommitAcceptedDraftsForTransaction()'s loop --
+  // mirroring StageGeneration()'s identical precedence for the ordinary one-token path.
+  if (draft_verification_stop_match_index_ >= 0) {
+    finish_reason = GenerationFinishReason::StopString;
+    matched_stop_string_index = draft_verification_stop_match_index_;
   } else {
-    const auto next_tokens = search_->GetNextTokens().CpuSpan();
-    if (search_->IsDone() && !next_tokens.empty() &&
-        contains(params_->config.model.eos_token_id, next_tokens.back())) {
-      finish_reason = GenerationFinishReason::EosToken;
+    const bool turn_limit_reached =
+        turn_max_generated_tokens_ &&
+        turn_generated_tokens_ + accepted_draft_count_ >=
+            *turn_max_generated_tokens_;
+    if (turn_limit_reached) {
+      finish_reason = GenerationFinishReason::TurnLimit;
+    } else {
+      const auto next_tokens = search_->GetNextTokens().CpuSpan();
+      if (search_->IsDone() && !next_tokens.empty() &&
+          contains(params_->config.model.eos_token_id, next_tokens.back())) {
+        finish_reason = GenerationFinishReason::EosToken;
+      }
     }
   }
   RequestStepResult result{
@@ -819,6 +878,7 @@ RequestStepResult Request::StageDraftCompletionForTransaction() {
       false,
       true,
       finish_reason,
+      matched_stop_string_index,
   };
   StageVisibleTokens(result, accepted_draft_count_, std::nullopt);
   return result;
@@ -831,8 +891,10 @@ void Request::RestoreStateForTransaction() {
   tokens_host_.resize(transaction_tokens_host_size_);
   staged_draft_count_ = 0;
   accepted_draft_count_ = 0;
+  evaluated_draft_count_ = 0;
   scheduled_token_count_ = 0;
   draft_verification_completed_generation_ = false;
+  draft_verification_stop_match_index_ = -1;
   if (guidance_transaction_checkpoint_) {
     guidance_logits_processor_ = std::move(guidance_transaction_checkpoint_);
   }
@@ -851,8 +913,10 @@ void Request::QueueStateRestoreForTransaction() {
   tokens_host_.resize(transaction_tokens_host_size_);
   staged_draft_count_ = 0;
   accepted_draft_count_ = 0;
+  evaluated_draft_count_ = 0;
   scheduled_token_count_ = 0;
   draft_verification_completed_generation_ = false;
+  draft_verification_stop_match_index_ = -1;
   // Deliberately does not replay the stop controller yet: like the guidance checkpoint swap below,
   // that work is deferred to CompleteStateRestoreForTransaction() so this stays lightweight
   // bookkeeping that cannot itself allocate, decode, or throw.
@@ -901,7 +965,9 @@ void Request::CommitStep(const RequestStepPlan& plan,
   draft_tokens_.clear();
   staged_draft_count_ = 0;
   accepted_draft_count_ = 0;
+  evaluated_draft_count_ = 0;
   draft_verification_completed_generation_ = false;
+  draft_verification_stop_match_index_ = -1;
 }
 
 // Records the tokens this step makes externally visible, in sequence order. Accepted drafts are
@@ -977,10 +1043,6 @@ RequestStepResult Request::StageGeneration(int64_t sequence_length_before) {
   // registering EOS as a special, zero-byte-decoding token by default. Prompt/continuation tokens
   // also never reach this point, and stop_controller_ is null on the no-stop fast path.
   if (token_appended && stop_controller_) {
-    if (accepted_draft_count_ != 0) {
-      throw std::logic_error(
-          "Stop-string matching cannot observe accepted draft tokens.");
-    }
     if (const auto& match = stop_controller_->ObserveToken(token)) {
       finish_reason = GenerationFinishReason::StopString;
       matched_stop_string_index = static_cast<int32_t>(match->index);

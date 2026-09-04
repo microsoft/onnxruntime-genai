@@ -864,29 +864,135 @@ replay its full current-turn token history, so one retryable abort's recovery co
 stop-string component alone is `O(active stop-enabled requests in the batch x each request's
 generated current-turn token count)` -- linear in the number of such requests, and, per request,
 linear in how deep into the turn it already is. This follows from the required per-request replay;
-this repository does not include a replay benchmark or publish a measured per-token constant. A
-Request many thousands of tokens into a long turn pays a proportionally larger replay on every
-retryable abort that touches it, and a batch with several such requests pays that cost once per
-request, every time. No batching or amortization across requests exists for this replay today.
-Rollout qualification for stop strings at scale should measure this cost with representative
-tokenizers and turn depths, and monitor observed abort frequency alongside typical current-turn
-depth rather than assuming replay cost is negligible.
+speculative draft verification can observe up to `kMaxGeneratedTokensPerStep` tokens for one
+request in a single step rather than the ordinary path's one, but this does not change the bound
+above: it is already stated in terms of the replayed turn depth (the checkpoint the step began at),
+not the number of tokens observed within the failing step itself. This repository does not include
+a replay benchmark or publish a measured per-token constant. A Request many thousands of tokens
+into a long turn pays a proportionally larger replay on every retryable abort that touches it, and
+a batch with several such requests pays that cost once per request, every time. No batching or
+amortization across requests exists for this replay today. Rollout qualification for stop strings
+at scale should measure this cost with representative tokenizers and turn depths, and monitor
+observed abort frequency alongside typical current-turn depth rather than assuming replay cost is
+negligible.
 
 Stop strings require an Engine configured for dynamic batching. Static batching completes generation
 through `ScheduledRequests::GenerateNextTokens`, a non-transactional path that cannot stage, roll
 back, or replay a match, so `Engine::BeginTurn` rejects a stop-enabled turn on a static-batching
 Engine before any Request mutation.
 
-Stop strings are incompatible with speculative draft verification for the specific Request whose
-turn enables them, but this Engine capability is not disabled for other Requests. Every draft
-producer -- manual `Request::SetDraftTokens` callers and the automatic in-Engine MTP drafter alike
--- converges on `Request::DraftTokenValidationError()`, which returns a rejection reason whenever
-the request has an active stop controller. A manual caller sees this as a thrown error;
-`Engine::PrepareMtpStep`'s existing per-request skip check (already used for guidance and other
-per-request draft-ineligibility reasons) uses the same function to silently exclude the request from
-receiving automatic drafts, so its target step keeps running the plain one-token-per-step path while
-every other Request on the same Engine continues to use speculative decoding normally. See
-"Speculative drafts" above for the shared verification path this reuses.
+Speculative draft verification observes target-accepted tokens through the same
+`StopStringController` a stop-enabled Request already uses for its ordinary one-token path, so a
+stop-enabled turn drafts and verifies exactly like any other request; no producer needs any special
+casing for stop strings. Greedy verification
+(`Request::CommitAcceptedDraftsForTransaction`) observes each accepted draft in commit order, but
+only the ones that actually append -- an accepted draft that turns out to be EOS commits without
+appending (`GreedySearch_Cpu::CommitToken` marks the search done, leaving the sequence length
+unchanged), and that gate excludes it from the controller exactly like `StageGeneration`'s
+`token_appended` check excludes an unappended EOS on the ordinary path; a match stops verification
+(and discards every later draft, including the trailing bonus/replacement row) the instant one
+completes; `Request::StageDraftCompletionForTransaction` then reports `StopString` ahead of the
+ordinary `TurnLimit`/`ContextLimit` checks for that same round, mirroring `StageGeneration`'s own
+precedence. Because greedy's loop increments `accepted_draft_count_` before checking for a match, a
+matching draft is always included in it -- it is a genuinely target-confirmed draft, indistinguishable
+from any earlier accepted one, whatever ends the round.
+
+Sampled and batched-sampler verification (`ScheduledRequests::GenerateNextTokensForTransaction`'s
+per-stage loop) reuses `StageGenerationForTransaction`/`StageGeneration` unchanged, one stage at a
+time: `Request::AppendAcceptedSampledToken` incrementally records every stage before the one that
+completes a match (or the round's natural last stage) so `accepted_draft_count_` reflects "prior
+stages only" while that call runs, which is what lets the per-stage baseline stay a single, uniform
+formula (`plan.sequence_length_before + accepted_draft_count_`) regardless of which stage turns out
+to match. Once a stage's own `StageGenerationForTransaction()` result is in hand, though, the caller
+still needs to decide whether *that* stage's own token is itself a genuinely confirmed draft (as
+opposed to a trailing replacement/bonus token, which is never one of the proposed drafts) before
+handing the result to `CommitStep`: `SelectSampledRows`'s `confirmed_draft_counts` output (the
+sequential draw loop's own confirmed-prefix length, computed independently of any stop string) tells
+the caller which case applies. When the finishing stage is a confirmed draft, `Request::
+PromoteFinalStageAsAcceptedDraft` folds it into `accepted_draft_count_` (reusing
+`AppendAcceptedSampledToken`) and clears the result's `token_appended` so `CommitStep` does not also
+append the same token a second time. This applies whether the round ends via a stop match or, with
+no stop strings at all, the turn/context limit landing exactly on a confirmed draft with no bonus
+token ever drawn -- both cases would otherwise under-count `AcceptedDraftTokenCount()` (and, since
+`RunDynamic()`'s target-reservation `CommitPrefix` and `Engine::RecordSpeculativeCommit`'s telemetry
+read it before `CommitStep` resets it, under-retain the confirmed draft's own KV slot in the paged
+cache and under-report it in `SpeculativeStats`). A match found mid-round also
+truncates that request's `selected_tokens` to the matching stage, so later stages simply never
+iterate it again -- no separate discard step is needed. Because a committed `StopString` result
+always has `done == true`, it structurally prevents a subsequent draft block for that request
+without any stop-specific check: `Engine::PrepareMtpStep`'s existing
+`result.done` gate already skips proposing a new automatic draft, and `Request::SetDraftTokens`'s
+existing `IsExecuting(status_)` check already rejects a manual proposal once the request is
+`TurnComplete`. The controller's per-token observation, wherever it runs inside a step, is covered by
+the same whole-step transaction checkpoint/replay described above, so rollback and retry work
+identically whether the observed token came from the ordinary path or from draft verification.
+Static batching's rejection of a stop-enabled turn (above) is unrelated and unaffected.
+
+**RNG fidelity for a stop-truncated sampled round.** `SelectSampledRows`'s sequential draw loop
+samples every candidate token for a randomly-sampled request's whole proposed draft (and its
+trailing bonus/replacement, if reached) up front, before the later per-stage loop can possibly know
+that a stop match will truncate the round early. Left alone, this would permanently advance
+the host verification `rng_` for tokens beyond the match that never become visible. To avoid this,
+`SelectSampledRows` checkpoints a plain copy of `rng_` after every draw, but only for a request with
+an active stop controller (`stop_controller_ != nullptr`) -- this
+is an intentional, reserved-up-front allocation and copy for that request's checkpoints (that
+request's own inner vector is `reserve()`d to the call's exact upper bound, `draft_count + 1`,
+before any draws happen, so growing it never reallocates or re-copies an already-captured
+checkpoint). The outer checkpoint vector itself is left completely empty -- no allocation at all --
+unless a pre-scan finds at least one random-sampled drafted request in the whole step that needs it;
+only then is it sized once, to the request count. A step with no drafts, no random sampling, or no
+stop-enabled request among them never allocates either the outer vector or any inner one, so the
+no-stop, greedy, and non-drafted paths pay nothing for this. When the per-stage loop truncates a
+request's `selected_tokens` at a stop match, it also restores `rng_` to the checkpoint captured
+right after that stage's own draw, discarding the effect of every later draw the sequential loop
+made for a now-invisible token. This is unrelated to, and layered on top of, the pre-existing
+whole-step `rng_`/`transaction_rng_` checkpoint a retryable batch abort already restores
+unconditionally (see "Recoverable rollback"
+below); that mechanism alone already undoes every draw a failed attempt made, stop strings or not.
+
+**Telemetry: `draft_tokens_evaluated`.** `Request::EvaluatedDraftTokenCount()` tracks, directly in
+the verification commit path, how many of this round's *proposed* draft positions were logically
+resolved as accepted or rejected before the round's terminal boundary -- never inferred afterward
+in `Engine::RecordSpeculativeCommit` from
+`accepted`/`finish_reason`/`token_appended`, and never counting a trailing replacement/bonus token
+itself (which is not one of the proposed drafts). It is always `>= AcceptedDraftTokenCount()`, reset
+and advanced at exactly the same transaction boundaries, and read before `CommitStep()` resets it,
+the same way `AcceptedDraftTokenCount()` is. Greedy target comparisons may have been precomputed
+for later proposal rows, but rows beyond a committed stop/limit boundary are not part of this
+logical evaluated count.
+
+Greedy verification (`CommitAcceptedDraftsForTransaction`) increments it once per loop iteration,
+regardless of that iteration's append/match/turn-limit outcome; if the loop completes normally (no
+match, EOS, or turn/context limit interrupted it) and the caller proposed more drafts than were
+confirmed, the rejected position beyond the confirmed prefix is counted too, even though the loop
+itself never processes it (that comparison already happened in the caller). Sampled/batched
+verification advances it identically to `accepted_draft_count_` for every non-finishing stage
+(`AppendAcceptedSampledToken`) and for a finishing stage that is itself a confirmed draft
+(`PromoteFinalStageAsAcceptedDraft`); a finishing stage that is instead a logically resolved but
+non-accepted proposal (a rejection with a replacement, or EOS without an append) advances only
+this count, via `MarkFinalStageAsEvaluatedNonAcceptedDraft`, never `accepted_draft_count_`. A
+finishing stage beyond the whole proposed range (a trailing bonus token after full acceptance)
+advances neither.
+
+This gives exactly: an ordinary rejection after `k` accepted drafts evaluates `k + 1`; full
+acceptance (with or without a bonus token) evaluates the full proposed count; a stop match that
+completes on a genuinely confirmed draft evaluates exactly the retained confirmed prefix; a stop
+match on the ordinary replacement following a rejected draft evaluates `accepted + 1`, identically
+to a non-stop rejection; and, critically, a round the turn/context limit (not a rejection) truncates
+before any further proposal can enter the committed logical result -- e.g. 5 proposed drafts,
+budget for 2, both confirmed -- evaluates exactly 2, not `accepted + 1 = 3`: no third proposal
+position belongs to that result. The counters are advanced while verification resolves each
+proposal because `token_appended` and `finish_reason` alone cannot distinguish budget exhaustion
+from a confirmed final draft or a rejected proposal.
+
+**CUDA batched-commit qualification gap.** The per-stage loop's `can_batch_commits` branch (used
+when every active request's `Search` supports device-side batched commit) and the non-batched
+fallback use different token-commit mechanisms, then call the same stage-finalization code for
+counters, checkpoints, promotion, stop truncation, and result publication. The CPU test doubles
+this document's tests run against cannot produce a `Search` that supports batched commit, so no
+automated test in this repository actually exercises the device-side commit mechanism with decoded
+stop strings. Treat that branch as requiring real CUDA qualification before relying on it in
+production; shared finalization does not prove that the preceding device commit has been tested.
 
 ## Rollback and failure handling
 
