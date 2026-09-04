@@ -85,22 +85,6 @@ DeviceSpan<float> Gemma4VisionState::Run(int current_length, DeviceSpan<int32_t>
     throw std::runtime_error("Gemma 4 image_features must have rank 2 [num_image_tokens, hidden_size]");
   }
 
-  auto element_size = [](ONNXTensorElementDataType type) -> size_t {
-    switch (type) {
-      case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
-      case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
-        return 4;
-      case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
-      case ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16:
-        return 2;
-      case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:
-      case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
-        return 8;
-      default:
-        throw std::runtime_error("Unsupported tensor element type in Gemma 4 multi-image vision loop");
-    }
-  };
-
   const int64_t num_patches = pixel_shape[1];
   const int64_t patch_dim = pixel_shape[2];
   const int64_t position_dim = position_shape[2];
@@ -108,9 +92,9 @@ DeviceSpan<float> Gemma4VisionState::Run(int current_length, DeviceSpan<int32_t>
   const auto pixel_type = pixel_info->GetElementType();
   const auto position_type = position_info->GetElementType();
   const auto feature_type = feature_info->GetElementType();
-  const size_t pixel_bytes = element_size(pixel_type);
-  const size_t position_bytes = element_size(position_type);
-  const size_t feature_bytes = element_size(feature_type);
+  const size_t pixel_bytes = Ort::SizeOf(pixel_type);
+  const size_t position_bytes = Ort::SizeOf(position_type);
+  const size_t feature_bytes = Ort::SizeOf(feature_type);
   auto* pixel_data = static_cast<uint8_t*>(pixel_values->GetTensorMutableRawData());
   auto* position_data = static_cast<uint8_t*>(position_ids->GetTensorMutableRawData());
   auto* feature_data = static_cast<uint8_t*>(image_features->GetTensorMutableRawData());
