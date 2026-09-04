@@ -1119,8 +1119,8 @@ steps remain eager. Engine construction validates the output's rank, element typ
 against the drafter input before allocating cache resources.
 The drafter run is synchronous because its packed inputs and outputs are owned by one proposal
 call, so `model.dflash2.run_options` cannot disable execution-provider synchronization.
-The direct drafter session also uses graph id `-1`: its variable-shaped proposal tensors are
-allocated per call and therefore cannot be captured safely. If this optional post-commit drafter
+The direct drafter session also uses graph id `-1`: it reuses proposal tensor allocations but
+reshapes them for each step, so they cannot be captured safely. If this optional post-commit drafter
 run fails, the Engine discards any partial proposal and still publishes the already committed target
 events. A recoverable failure also makes the drafter forget every request it is currently tracking,
 because the step whose rows it failed to ingest leaves its cached context no longer contiguous with

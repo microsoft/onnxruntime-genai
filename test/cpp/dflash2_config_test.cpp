@@ -234,6 +234,10 @@ TEST(Dflash2ConfigTest, RequiresOneDraftPerNonAnchorBlockRow) {
 
 TEST(Dflash2ConfigTest, RequiresMaskTokenInsideVocabulary) {
   auto config = MakeDflash2Config();
+  config.model.vocab_size = 0;
+  EXPECT_THROW(CreateDflash2Config(config), std::runtime_error);
+
+  config.model.vocab_size = 128;
   config.model.dflash2.mask_token_id = -1;
   EXPECT_THROW(CreateDflash2Config(config), std::runtime_error);
 

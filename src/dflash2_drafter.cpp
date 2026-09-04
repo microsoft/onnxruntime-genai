@@ -137,8 +137,11 @@ std::unique_ptr<Config> CreateDflash2Config(const Config& config) {
   }
   // Every non-anchor query row feeds this id straight into the drafter's embedding lookup, so an
   // out-of-range value is either a crash or silently meaningless drafts.
-  if (dflash2.mask_token_id < 0 ||
-      (config.model.vocab_size > 0 && dflash2.mask_token_id >= config.model.vocab_size)) {
+  if (config.model.vocab_size <= 0) {
+    throw std::runtime_error(
+        "model.vocab_size must be positive to validate model.dflash2.mask_token_id.");
+  }
+  if (dflash2.mask_token_id < 0 || dflash2.mask_token_id >= config.model.vocab_size) {
     throw std::runtime_error(
         "model.dflash2.mask_token_id must be a valid token id in [0, model.vocab_size).");
   }
