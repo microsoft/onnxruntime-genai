@@ -1341,11 +1341,19 @@ steps remain eager. Engine construction validates the output's rank, element typ
 against the drafter input before allocating cache resources.
 The drafter run is synchronous because its packed inputs and outputs are owned by one proposal
 call, so `model.dflash2.run_options` cannot disable execution-provider synchronization.
-The direct drafter session also uses graph id `-1`: its variable-shaped proposal tensors are
-allocated per call and therefore cannot be captured safely. If this optional post-commit drafter
+The direct drafter session also uses graph id `-1`: it reuses proposal tensor allocations but
+reshapes them for each step, so they cannot be captured safely. If this optional post-commit drafter
 run fails, the Engine discards any partial proposal and still publishes the already committed target
-events. A transient failure is retried on the next step; three consecutive failures disable DFlash 2
-for the Engine. `dflash2_failures` and `dflash2_disables` report those events.
+events. A recoverable failure also makes the drafter forget every request it is currently tracking,
+because the step whose rows it failed to ingest leaves its cached context no longer contiguous with
+the target. Those in-flight requests finish without DFlash 2 drafts while requests admitted
+afterwards still get them, and the retry budget is therefore spent on real drafter failures: three
+consecutive failures disable DFlash 2 for the Engine, and a proposal contract violation disables it
+at once. `dflash2_failures` and `dflash2_disables` report those events.
+
+Automatic DFlash 2 drafting is greedy-only. A request that uses random sampling (`do_sample` with
+`top_k != 1` and a non-zero temperature) can never take a DFlash 2 block, so it is never fed to the
+drafter and never claims a ring.
 
 The drafter keeps a fixed sliding-window ring per request from that request's first decode step
 until it is closed, so its pool is sized for `max_batch_size` rings. A request that first decodes

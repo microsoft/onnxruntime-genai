@@ -15,6 +15,7 @@ namespace {
 
 Config MakeDflash2Config() {
   Config config;
+  config.model.vocab_size = 128;
   auto& decoder = config.model.decoder;
   decoder.filename = "target.onnx";
   decoder.sliding_window = Config::Model::Decoder::SlidingWindow{4096};
@@ -30,6 +31,7 @@ Config MakeDflash2Config() {
   dflash2.block_size = 4;
   dflash2.num_draft_tokens = 3;
   dflash2.selector_top_k = 2;
+  dflash2.mask_token_id = 31;
   dflash2.sliding_window = 17;
   return config;
 }
@@ -230,6 +232,25 @@ TEST(Dflash2ConfigTest, RequiresOneDraftPerNonAnchorBlockRow) {
   EXPECT_THROW(CreateDflash2Config(config), std::runtime_error);
 }
 
+TEST(Dflash2ConfigTest, RequiresMaskTokenInsideVocabulary) {
+  auto config = MakeDflash2Config();
+  config.model.vocab_size = 0;
+  EXPECT_THROW(CreateDflash2Config(config), std::runtime_error);
+
+  config.model.vocab_size = 128;
+  config.model.dflash2.mask_token_id = -1;
+  EXPECT_THROW(CreateDflash2Config(config), std::runtime_error);
+
+  config.model.dflash2.mask_token_id = config.model.vocab_size;
+  EXPECT_THROW(CreateDflash2Config(config), std::runtime_error);
+
+  config.model.dflash2.mask_token_id = 0;
+  EXPECT_NO_THROW(CreateDflash2Config(config));
+
+  config.model.dflash2.mask_token_id = config.model.vocab_size - 1;
+  EXPECT_NO_THROW(CreateDflash2Config(config));
+}
+
 TEST(Dflash2ConfigTest, ProjectsDrafterWithoutTargetState) {
   const auto projected = CreateDflash2Config(MakeDflash2Config());
   const auto& decoder = projected->model.decoder;
@@ -264,6 +285,82 @@ TEST(Dflash2ConfigTest, CapsDraftWidthBySessionAndTurnLimits) {
   EXPECT_EQ(Dflash2DraftWidth(7, 5, 8, 20, 3), 2u);
   EXPECT_EQ(Dflash2DraftWidth(7, 5, 8, 20, 1), 0u);
   EXPECT_EQ(Dflash2DraftWidth(7, 5, 9, 10, 9), 0u);
+}
+
+TEST(Dflash2ConfigTest, ReusesProposalBufferUntilAStepOutgrowsIt) {
+  auto* device = GetDeviceInterface(DeviceType::CPU);
+  constexpr auto type = Ort::TypeToTensorType<int32_t>;
+  std::unique_ptr<Tensor> slot;
+
+  Dflash2StepTensor(slot, device, type, {2, 4});
+  EXPECT_EQ(slot->GetElementCount(), 8u);
+  const void* buffer = slot->buffer_;
+  ASSERT_NE(buffer, nullptr);
+
+  // A narrower step reshapes a view over the same buffer instead of allocating.
+  Dflash2StepTensor(slot, device, type, {1, 3});
+  EXPECT_EQ(slot->GetElementCount(), 3u);
+  EXPECT_EQ(slot->GetShape(), (std::vector<int64_t>{1, 3}));
+  EXPECT_EQ(slot->buffer_, buffer);
+
+  // Tensor rejects a static shape larger than its buffer, so growth must start a new one.
+  EXPECT_NO_THROW(Dflash2StepTensor(slot, device, type, {4, 8}));
+  EXPECT_EQ(slot->GetElementCount(), 32u);
+  const void* grown = slot->buffer_;
+
+  Dflash2StepTensor(slot, device, type, {2, 4});
+  EXPECT_EQ(slot->buffer_, grown);
+}
+
+TEST(Dflash2ConfigTest, ReusesProposalBufferForAnEmptyStep) {
+  auto* device = GetDeviceInterface(DeviceType::CPU);
+  constexpr auto type = Ort::TypeToTensorType<int32_t>;
+  std::unique_ptr<Tensor> slot;
+
+  // A step can serve feeds that carry a query block but no context rows.
+  EXPECT_NO_THROW(Dflash2StepTensor(slot, device, type, {0, 64}));
+  EXPECT_EQ(slot->GetElementCount(), 0u);
+  EXPECT_NO_THROW(Dflash2StepTensor(slot, device, type, {2, 64}));
+  EXPECT_EQ(slot->GetElementCount(), 128u);
+}
+
+TEST(Dflash2ConfigTest, RejectsProposalShapesThatOverflow) {
+  auto* device = GetDeviceInterface(DeviceType::CPU);
+  std::unique_ptr<Tensor> slot;
+  const int64_t huge = std::numeric_limits<int64_t>::max();
+  EXPECT_THROW(Dflash2StepTensor(slot, device, Ort::TypeToTensorType<int32_t>, {huge, huge}),
+               std::runtime_error);
+}
+
+TEST(Dflash2ConfigTest, ReplacesProposalBufferWhenTheElementTypeChanges) {
+  auto* device = GetDeviceInterface(DeviceType::CPU);
+  std::unique_ptr<Tensor> slot;
+
+  Dflash2StepTensor(slot, device, Ort::TypeToTensorType<int32_t>, {8});
+  // A static Tensor keeps the type it was constructed with, so reusing the buffer for another type
+  // would silently hand the session the wrong element type.
+  Dflash2StepTensor(slot, device, Ort::TypeToTensorType<float>, {4});
+  EXPECT_EQ(slot->GetType(), Ort::TypeToTensorType<float>);
+  EXPECT_EQ(slot->GetElementCount(), 4u);
+}
+
+TEST(Dflash2ConfigTest, DraftsOnlyForGreedyRequests) {
+  Config::Search search;
+  search.do_sample = false;
+  EXPECT_TRUE(Dflash2CanDraft(search));
+
+  search.do_sample = true;
+  search.top_k = 50;
+  search.temperature = 1.0f;
+  EXPECT_FALSE(Dflash2CanDraft(search));
+
+  // Sampling that can only ever pick the top logit is still greedy.
+  search.top_k = 1;
+  EXPECT_TRUE(Dflash2CanDraft(search));
+
+  search.top_k = 50;
+  search.temperature = 0.0f;
+  EXPECT_TRUE(Dflash2CanDraft(search));
 }
 
 }  // namespace Generators::test

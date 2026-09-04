@@ -19,6 +19,15 @@ size_t Dflash2DraftWidth(size_t capability_limit, size_t configured_limit,
                          size_t sequence_length_after_step, size_t sequence_limit,
                          size_t remaining_turn_tokens_after_step);
 
+// Reshapes a proposal tensor the drafter reuses between steps, replacing its buffer only when a
+// step needs more room than the one it kept.
+Tensor& Dflash2StepTensor(std::unique_ptr<Tensor>& slot, DeviceInterface* device,
+                          ONNXTensorElementDataType type, const std::vector<int64_t>& shape);
+
+// Whether a request's search options can ever take a DFlash 2 block. Drafting is greedy-only, and
+// this is fixed when the request is created, so a request this rejects is never fed to the drafter.
+bool Dflash2CanDraft(const Config::Search& search);
+
 /**
  * @brief Hosts the ``dflash2.onnx`` session.
  *
@@ -96,6 +105,12 @@ struct Dflash2Drafter {
   // Returns a request's blocks to the pool. Safe for requests the drafter never saw.
   void Release(const Request* request);
 
+  // Drops every tracked request's cache state and returns its blocks. Used after a recoverable
+  // proposal failure: the drafter's cached context is no longer contiguous with the target for any
+  // in-flight request, and a request can only rejoin from position zero, so those requests finish
+  // without drafts while requests admitted later still get them.
+  void ReleaseAll();
+
  private:
   struct RequestState {
     std::vector<int32_t> blocks;
@@ -123,6 +138,21 @@ struct Dflash2Drafter {
 
   std::vector<std::unique_ptr<Tensor>> caches_;  // 2 * num_hidden_layers, key then value per layer
   std::vector<std::string> cache_input_names_, cache_output_names_;
+  // Proposal tensors, reused across steps and grown to the high-water mark of the batches served
+  // so far, so a steady-state decode step allocates none of them.
+  struct StepTensors {
+    std::unique_ptr<Tensor> packed_aux;
+    std::unique_ptr<Tensor> input_ids;
+    std::unique_ptr<Tensor> q_row_map;
+    std::unique_ptr<Tensor> qkv_row_map;
+    std::unique_ptr<Tensor> block_row_index;
+    std::unique_ptr<Tensor> cumulative_sequence_lengths;
+    std::unique_ptr<Tensor> past_sequence_lengths;
+    std::unique_ptr<Tensor> block_table;
+    std::unique_ptr<Tensor> attention_metadata;
+    std::unique_ptr<Tensor> candidate_ids;
+    std::unique_ptr<Tensor> scores;
+  } step_tensors_;
   std::vector<int32_t> free_blocks_;
   std::unordered_map<const Request*, RequestState> requests_;
   size_t admission_misses_{};

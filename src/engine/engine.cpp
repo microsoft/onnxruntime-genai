@@ -203,6 +203,13 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
   staged_events_.reserve(max_step_event_count_);
   fatal_events_.reserve(max_step_event_count_ + 1);
   mtp_requests_.reserve(max_batch_size);
+  if (dflash2_drafter_) {
+    // Sized here so a committed step never has to grow them, which would make an optional drafter
+    // able to fail the step with a bad_alloc.
+    dflash2_feeds_.reserve(max_batch_size);
+    dflash2_draft_widths_.reserve(max_batch_size);
+    dflash2_drafts_.reserve(max_batch_size);
+  }
 }
 
 Engine::~Engine() {
@@ -330,6 +337,13 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
   dflash2_draft_widths_.reserve(plan.requests.size());
   for (size_t i = 0; i < plan.requests.size(); ++i) {
     const auto& entry = plan.requests[i];
+    const auto& search = entry.request->SearchOptions();
+    // Feeding a request that can never take a block would only burn a ring an eligible request
+    // could use, and a request skipped here is skipped for its whole life, so it never joins the
+    // drafter's contiguity contract.
+    if (!Dflash2CanDraft(search)) {
+      continue;
+    }
     const size_t accepted = entry.request->AcceptedDraftTokenCount();
     if (accepted > entry.draft_token_count) {
       throw std::logic_error("DFlash 2 observed more accepted drafts than the target planned.");
@@ -348,8 +362,6 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
     feed.aux_row_count = valid_rows;
     feed.first_position = first_position;
 
-    const auto& search = entry.request->SearchOptions();
-    const bool greedy = !search.do_sample || search.top_k == 1 || search.temperature == 0;
     // The committed length this step ends at: the accepted prefix plus the token just sampled.
     const int64_t length_after_step = static_cast<int64_t>(first_position + valid_rows) +
                                       (results[i].token_appended ? 1 : 0);
@@ -365,7 +377,7 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
         static_cast<size_t>(length_after_step), sequence_limit,
         remaining_turn_tokens_after_step);
     feed.wants_drafts = width > 0 && results[i].token_appended && !results[i].done &&
-                        greedy && !entry.request->DraftTokenValidationError();
+                        !entry.request->DraftTokenValidationError();
     feed.anchor_token = results[i].token;
     dflash2_feeds_.push_back(feed);
     dflash2_draft_widths_.push_back(width);
@@ -392,6 +404,48 @@ void Engine::PublishDflash2Drafts(ScheduledRequests& scheduled_requests) {
     // of the same greedy path.
     drafts.resize(std::min(drafts.size(), dflash2_draft_widths_[i]));
     dflash2_feeds_[i].request->SetDraftTokens(drafts);
+  }
+}
+
+void Engine::RecordDflash2Failure(std::exception_ptr error, bool contract_error) {
+  for (const auto& feed : dflash2_feeds_) {
+    if (feed.request) {
+      feed.request->SetDraftTokens({});
+    }
+  }
+  dflash2_feeds_.clear();
+  // The drafter's cached context stops being contiguous with the target the moment a step's rows
+  // are not ingested, and its contiguity check is a contract violation. Forget every in-flight
+  // request instead, so the retry budget below is spent on real drafter failures rather than on
+  // the bookkeeping gap the first failure left behind.
+  dflash2_drafter_->ReleaseAll();
+  ++speculative_stats_.standard_fallback_steps;
+  ++speculative_stats_.dflash2_failures;
+  ++dflash2_consecutive_failures_;
+  const bool disable_dflash2 = contract_error ||
+                               dflash2_consecutive_failures_ >= kDflash2FailureDisableThreshold;
+  dflash2_disabled_ = disable_dflash2;
+  if (disable_dflash2) {
+    ++speculative_stats_.dflash2_disables;
+  }
+  if (dflash2_consecutive_failures_ != 1 && !disable_dflash2) {
+    return;
+  }
+  // Log() asserts that logging is enabled, and an assertion abort is not catchable, so the guard
+  // has to come before the call rather than inside the try below.
+  if (!g_log.enabled || !g_log.warning) {
+    return;
+  }
+  try {
+    Log("warning", AddExceptionCause(
+                       contract_error
+                           ? "Disabling DFlash 2 after a proposal contract failure."
+                       : disable_dflash2
+                           ? "Disabling DFlash 2 after repeated proposal failures."
+                           : "DFlash 2 proposal failed; using target-only decoding for this step.",
+                       error));
+  } catch (...) {
+    // Diagnostics must not turn an optional drafter failure into a target failure.
   }
 }
 
@@ -1729,7 +1783,10 @@ void Engine::RunDynamic() {
         const bool disable_mtp =
             mtp_consecutive_failures_ >= kMtpFailureDisableThreshold;
         mtp_disabled_ = disable_mtp;
-        if (mtp_consecutive_failures_ == 1 || disable_mtp) {
+        if ((mtp_consecutive_failures_ == 1 || disable_mtp) &&
+            // Log() asserts that logging is enabled, and an assertion abort is not catchable, so
+            // the guard has to come before the call rather than inside the try below.
+            g_log.enabled && g_log.warning) {
           try {
             Log("warning", AddExceptionCause(
                                disable_mtp
@@ -1795,11 +1852,6 @@ void Engine::RunDynamic() {
       if (mtp_step) {
         mtp_step->reservation->PrepareCommit();
       }
-      if (dflash2_drafter_ && !dflash2_disabled_ && MaxDraftTokensPerStep() > 0) {
-        // Reads accepted-draft counts that CommitStep clears below. Keep this fallible work on the
-        // rollback side of the target transaction's commit boundary.
-        PrepareDflash2Feeds(step_plan_, step_results_);
-      }
     } catch (...) {
       const auto preparation_error = std::current_exception();
       rollback_transaction();
@@ -1809,6 +1861,35 @@ void Engine::RunDynamic() {
           nullptr,
           "Transaction preparation failed and the Engine is no longer healthy.",
           preparation_error);
+    }
+
+    bool dflash2_feeds_ready = false;
+    if (dflash2_drafter_ && !dflash2_disabled_ && MaxDraftTokensPerStep() > 0) {
+      // Reads accepted-draft counts that CommitStep clears below. Keep this fallible work on the
+      // rollback side of the target transaction's commit boundary. DFlash 2 is optional, so only a
+      // contract violation is fatal here; anything else falls back to a target-only commit.
+      std::exception_ptr fatal_preparation_error;
+      try {
+        PrepareDflash2Feeds(step_plan_, step_results_);
+        dflash2_feeds_ready = true;
+      } catch (const std::logic_error&) {
+        fatal_preparation_error = std::current_exception();
+      } catch (...) {
+        try {
+          RecordDflash2Failure(std::current_exception(), false);
+        } catch (...) {
+          fatal_preparation_error = std::current_exception();
+        }
+      }
+      if (fatal_preparation_error) {
+        rollback_transaction();
+        MarkUnhealthyAndThrow(
+            StepOutcomeKind::ExecutionContractFailure,
+            step_plan_.transaction_id,
+            nullptr,
+            "Transaction preparation failed and the Engine is no longer healthy.",
+            fatal_preparation_error);
+      }
     }
 
     try {
@@ -1830,20 +1911,12 @@ void Engine::RunDynamic() {
       if (mtp_step) {
         PublishMtpDrafts(*mtp_step);
       }
-      if (dflash2_drafter_ && !dflash2_disabled_ && MaxDraftTokensPerStep() > 0) {
+      if (dflash2_feeds_ready) {
         try {
           PublishDflash2Drafts(scheduled_requests);
           dflash2_consecutive_failures_ = 0;
         } catch (...) {
           const auto dflash2_error = std::current_exception();
-          for (const auto& feed : dflash2_feeds_) {
-            if (feed.request) {
-              feed.request->SetDraftTokens({});
-            }
-          }
-          ++speculative_stats_.standard_fallback_steps;
-          ++speculative_stats_.dflash2_failures;
-          ++dflash2_consecutive_failures_;
           bool contract_error = false;
           try {
             std::rethrow_exception(dflash2_error);
@@ -1851,25 +1924,7 @@ void Engine::RunDynamic() {
             contract_error = true;
           } catch (...) {
           }
-          const bool disable_dflash2 = contract_error ||
-                                       dflash2_consecutive_failures_ >= kDflash2FailureDisableThreshold;
-          dflash2_disabled_ = disable_dflash2;
-          if (disable_dflash2) {
-            ++speculative_stats_.dflash2_disables;
-          }
-          if (dflash2_consecutive_failures_ == 1 || disable_dflash2) {
-            try {
-              Log("warning", AddExceptionCause(
-                                 contract_error
-                                     ? "Disabling DFlash 2 after a proposal contract failure."
-                                 : disable_dflash2
-                                     ? "Disabling DFlash 2 after repeated proposal failures."
-                                     : "DFlash 2 proposal failed; using target-only decoding for this step.",
-                                 dflash2_error));
-            } catch (...) {
-              // Diagnostics must not turn an optional drafter failure into a target failure.
-            }
-          }
+          RecordDflash2Failure(dflash2_error, contract_error);
         }
       }
     } catch (...) {
