@@ -384,17 +384,19 @@ size_t Dflash2Drafter::FullAttentionReservedBytes(size_t paged_block_size,
 }
 
 Dflash2Drafter::Dflash2Drafter(std::shared_ptr<Dflash2Model> model, size_t paged_block_size,
-                               size_t num_blocks)
+                               size_t num_blocks, size_t max_requests)
     : model_{std::move(model)},
       config_{model_->config_->model.dflash2},
       paged_block_size_{paged_block_size},
-      num_blocks_{num_blocks} {
-  if (paged_block_size_ == 0 || num_blocks_ == 0) {
+      num_blocks_{num_blocks},
+      max_requests_{max_requests} {
+  if (paged_block_size_ == 0 || num_blocks_ == 0 || max_requests_ == 0) {
     throw std::runtime_error("The DFlash 2 drafter needs a non-empty paged cache pool.");
   }
   if (num_blocks_ > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
     throw std::runtime_error("The DFlash 2 drafter cache exceeds the int32 block-id range.");
   }
+  query_spill_blocks_ = (static_cast<size_t>(config_.block_size) - 1) / paged_block_size_ + 1;
   if (config_.sliding_window > 0) {
     // Positions older than this are masked out of every query row, so they are never ingested and
     // the ring may alias them.
@@ -441,10 +443,18 @@ Tensor& Dflash2StepTensor(std::unique_ptr<Tensor>& slot, DeviceInterface* device
   // A static Tensor rejects a shape larger than the buffer it already owns, and it keeps the element
   // type it was constructed with, so either one changing has to start a new buffer. Every other step
   // reshapes a view over the buffer it kept.
+  size_t capacity = bytes;
   if (!slot || slot->type_ != type || slot->bytes_ < bytes) {
+    // A full-attention drafter's block table gains a column every `paged_block_size` committed
+    // tokens, so sizing a new buffer to exactly this step's shape would allocate again a few steps
+    // later, forever. Doubling amortizes that to O(log positions) allocations per request.
+    const size_t previous_bytes = slot ? slot->bytes_ : 0;
+    if (previous_bytes <= std::numeric_limits<size_t>::max() / 2) {
+      capacity = std::max(bytes, previous_bytes * 2);
+    }
     slot = std::make_unique<Tensor>(device, type);
   }
-  slot->CreateTensor(shape, /*make_static=*/true, std::max<size_t>(bytes, 1));
+  slot->CreateTensor(shape, /*make_static=*/true, std::max<size_t>(capacity, 1));
   return *slot;
 }
 
@@ -492,7 +502,12 @@ bool Dflash2Drafter::Admit(const Feed& feed) {
     EnsureBlocks(requests_[feed.request], 0);
     return true;
   }
-  if (free_blocks_.empty()) {
+  // A full-attention pool only mirrors the target's blocks plus one query-block spill per sized
+  // request, and requests that are resident but idle keep both. Admitting past that bound would
+  // let a later step exhaust the pool mid-proposal, which fails the whole drafter rather than one
+  // request, so refuse here the way the windowed drafter refuses a ring.
+  if (requests_.size() >= max_requests_ || free_blocks_.size() < query_spill_blocks_) {
+    ++admission_misses_;
     return false;
   }
   requests_.emplace(feed.request, RequestState{});

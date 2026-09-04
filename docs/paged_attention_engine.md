@@ -408,8 +408,9 @@ The dynamic Engine can verify a continuation together with a request's next deco
 can propose tokens before the next step with `Request::SetDraftTokens` (`OgaRequestSetDraftTokens`
 in C or `Request.set_draft_tokens` in Python). When `model.mtp` names an auxiliary draft head, the
 Engine also maintains an internal shadow Request and automatically proposes a chained greedy
-continuation after each committed target step. Alternatively, `model.dflash2` runs a block drafter
-over the target's packed auxiliary hidden states. A model cannot configure both automatic drafters.
+continuation after each committed target step. Alternatively, `model.dflash2` (or its `model.dspark`
+alias) runs a block drafter over the target's packed auxiliary hidden states. A model cannot
+configure more than one automatic drafter.
 
 Query the internal `Engine::MaxDraftTokensPerStep` capability through
 `OgaEngineMaxDraftTokensPerProposal`, `OgaEngine::MaxDraftTokensPerProposal`, or
@@ -1364,18 +1365,20 @@ drafter and never claims cache blocks.
 
 A windowed block drafter (DFlash 2) owns a fixed ring of cache blocks per maximum batch row, so its
 pool is sized for `max_batch_size` rings and is allocated before the target pool measures free
-memory. A full-attention block drafter (DSpark) instead mirrors the target pool: its bytes per
-target block and fixed query-spill bytes are charged against free memory before target capacity is
-selected, using the cache element type reported by the graph. Its physical pool includes enough
-checked spill capacity for every active query block, including query blocks that span multiple cache
-pages.
+memory; its footprint is independent of context length. A full-attention block drafter (DSpark)
+instead mirrors the target pool: its bytes per target block and its fixed query-spill bytes are
+charged against free memory before target capacity is selected, using the cache element type
+reported by the graph. That trade is explicit -- a DSpark drafter with the same layer geometry as
+the target roughly halves the target's paged-cache capacity for the same GPU memory budget, and it
+attends the whole resident sequence on every step rather than a window.
 
-A request joins the drafter on its first decode step and holds its blocks until it is closed. A
-request that first decodes while the drafter pool is exhausted is skipped for the rest of its life
+A request joins the drafter on its first decode step and holds its blocks until it is closed, so
+both pools are only sufficient while at most `max_batch_size` requests are tracked. A request that
+first decodes while the drafter is already carrying that many is skipped for the rest of its life
 and decodes without block drafts; the drafter keeps serving the requests that already hold blocks.
-This makes drafter capacity a service limit across both active and idle long-lived requests, not
-merely the per-step scheduler limit. `dflash2_admission_misses` reports requests denied cache blocks
-because that capacity was occupied.
+This makes `max_batch_size` the drafter's service-capacity limit across both active and idle
+long-lived requests, not merely the per-step scheduler limit. `dflash2_admission_misses` reports
+requests denied cache blocks because that capacity was occupied.
 
 ## Backpressure and fairness
 

@@ -83,7 +83,14 @@ struct Dflash2Drafter {
     bool wants_drafts{};
   };
 
-  Dflash2Drafter(std::shared_ptr<Dflash2Model> model, size_t paged_block_size, size_t num_blocks);
+  /**
+   * @brief Builds the drafter over its own paged cache pool.
+   * @param max_requests Sequences the pool was sized for. A windowed pool holds `max_requests`
+   *        rings; a full-attention pool holds the target's blocks plus one query-block spill per
+   *        request, so both are only sufficient while at most that many requests are tracked.
+   */
+  Dflash2Drafter(std::shared_ptr<Dflash2Model> model, size_t paged_block_size, size_t num_blocks,
+                 size_t max_requests);
 
   // Bytes of drafter K/V per paged block, so the main cache pool can budget for it up front.
   static size_t BytesPerBlock(const Config& config, size_t paged_block_size,
@@ -110,8 +117,8 @@ struct Dflash2Drafter {
    * @param drafts Resized to feeds.size(); entry i is empty unless feeds[i] was served and asked.
    *
    * A request joins the drafter on its first feed, which must start at position zero, and keeps its
-   * ring until Release. Requests that arrive once the ring pool is full are skipped for good rather
-   * than failing the step, so they decode without DFlash 2 drafts.
+   * cache blocks until Release. Requests that arrive once the pool is fully subscribed are skipped
+   * for good rather than failing the step, so they decode without block drafts.
    */
   void Propose(Tensor& aux_hidden_states, std::span<const Feed> feeds,
                std::vector<std::vector<int32_t>>& drafts);
@@ -146,6 +153,10 @@ struct Dflash2Drafter {
   // in which case the whole sequence stays resident.
   size_t context_window_{};
   size_t ring_blocks_{};
+  // Concurrent requests the pool was sized for, and the blocks a full-attention request's query
+  // rows can need beyond the committed context the target pool already accounts for.
+  size_t max_requests_{};
+  size_t query_spill_blocks_{};
   size_t aux_hidden_size_{};
   ONNXTensorElementDataType aux_type_{ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED};
   ONNXTensorElementDataType cache_type_{ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED};

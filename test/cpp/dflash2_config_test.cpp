@@ -543,6 +543,25 @@ TEST(Dflash2ConfigTest, ReusesProposalBufferUntilAStepOutgrowsIt) {
   EXPECT_EQ(slot->buffer_, grown);
 }
 
+TEST(Dflash2ConfigTest, AmortizesProposalBufferGrowth) {
+  auto* device = GetDeviceInterface(DeviceType::CPU);
+  constexpr auto type = Ort::TypeToTensorType<int32_t>;
+  std::unique_ptr<Tensor> slot;
+
+  Dflash2StepTensor(slot, device, type, {2, 4});
+  // A full-attention drafter's block table gains one column every `block_size` committed tokens,
+  // so growth doubles the buffer instead of tracking the shape exactly.
+  Dflash2StepTensor(slot, device, type, {2, 5});
+  const void* grown = slot->buffer_;
+  ASSERT_NE(grown, nullptr);
+
+  Dflash2StepTensor(slot, device, type, {2, 6});
+  EXPECT_EQ(slot->buffer_, grown);
+  Dflash2StepTensor(slot, device, type, {2, 8});
+  EXPECT_EQ(slot->buffer_, grown);
+  EXPECT_EQ(slot->GetElementCount(), 16u);
+}
+
 TEST(Dflash2ConfigTest, ReusesProposalBufferForAnEmptyStep) {
   auto* device = GetDeviceInterface(DeviceType::CPU);
   constexpr auto type = Ort::TypeToTensorType<int32_t>;

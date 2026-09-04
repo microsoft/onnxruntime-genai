@@ -308,7 +308,7 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
       // Built before the main pool so the pool's free-memory measurement already excludes it. A
       // windowed drafter's footprint depends on the batch size, not the context length.
       dflash2_drafter = std::make_unique<Dflash2Drafter>(
-          dflash2_model, paged_block_size, pool_blocks);
+          dflash2_model, paged_block_size, pool_blocks, dflash2_max_batch_size);
     } else {
       // A full-attention drafter mirrors the target pool, so it is billed per target block instead
       // and built below once the target pool's block count is known.
@@ -328,13 +328,14 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
                            dflash2_reserved_memory_bytes);
   if (dflash2_model && !dflash2_drafter) {
     const auto& dflash2 = model->config_->model.dflash2;
+    const size_t paged_block_size =
+        static_cast<size_t>(model->config_->engine.dynamic_batching->block_size);
     dflash2_drafter = std::make_unique<Dflash2Drafter>(
-        dflash2_model,
-        static_cast<size_t>(model->config_->engine.dynamic_batching->block_size),
+        dflash2_model, paged_block_size,
         Dflash2Drafter::FullAttentionPoolBlocks(
-            cache_manager->Snapshot().total_blocks,
-            static_cast<size_t>(model->config_->engine.dynamic_batching->block_size),
-            static_cast<size_t>(dflash2.block_size), dflash2_max_batch_size));
+            cache_manager->Snapshot().total_blocks, paged_block_size,
+            static_cast<size_t>(dflash2.block_size), dflash2_max_batch_size),
+        dflash2_max_batch_size);
   }
   auto scheduler = Scheduler::Create(model, cache_manager);
   auto model_executor = ModelExecutor::Create(model, cache_manager);
