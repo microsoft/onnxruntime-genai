@@ -235,6 +235,24 @@ def test_unsupported_rope_type_is_rejected(tmp_path):
         DFlash2Builder(draft_dir, str(tmp_path), ir.DataType.FLOAT16, 256, 128)
 
 
+def test_five_uniformly_windowed_layers_accept_total_layer_count(tmp_path):
+    draft_dir = _draft_checkpoint(tmp_path)
+    config_path = tmp_path / "dflash2_draft" / "config.json"
+    config = json.loads(config_path.read_text())
+    config.update(
+        num_hidden_layers=5,
+        use_sliding_window=True,
+        sliding_window=2048,
+        max_window_layers=5,
+        layer_types=["sliding_attention"] * 5,
+    )
+    config_path.write_text(json.dumps(config))
+
+    builder = DFlash2Builder(draft_dir, str(tmp_path), ir.DataType.FLOAT16, 256, 128)
+
+    assert builder.sliding_window == 2048
+
+
 def test_drafter_uses_target_context_length(tmp_path, monkeypatch):
     captured = {}
 

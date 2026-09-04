@@ -297,7 +297,11 @@ def _windowed_checkpoint(tmp_path, **overrides):
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
-        ({"max_window_layers": 1}, "max_window_layers=0"),
+        ({"num_hidden_layers": 2, "max_window_layers": 1}, "max_window_layers to 0 or num_hidden_layers"),
+        (
+            {"num_hidden_layers": 2, "max_window_layers": 2, "layer_types": ["sliding_attention"]},
+            "one layer type per hidden layer",
+        ),
         ({"layer_types": ["full_attention"]}, "sliding attention on every layer"),
     ],
 )
@@ -310,6 +314,14 @@ def test_partially_windowed_checkpoints_are_rejected(tmp_path, overrides, messag
 
 def test_a_uniformly_windowed_checkpoint_forwards_its_window(tmp_path):
     draft_dir = _windowed_checkpoint(tmp_path, max_window_layers=0, layer_types=["sliding_attention"])
+
+    builder = DSparkBuilder(draft_dir, str(tmp_path), ir.DataType.FLOAT16, 256, 128)
+
+    assert builder.sliding_window == 64
+
+
+def test_a_uniformly_windowed_checkpoint_accepts_total_layer_count(tmp_path):
+    draft_dir = _windowed_checkpoint(tmp_path, max_window_layers=1, layer_types=["sliding_attention"])
 
     builder = DSparkBuilder(draft_dir, str(tmp_path), ir.DataType.FLOAT16, 256, 128)
 

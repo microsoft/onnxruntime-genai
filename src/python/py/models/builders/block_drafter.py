@@ -207,11 +207,19 @@ class BlockDrafterBuilder:
         window = int(config["sliding_window"])
         # PagedAttention takes one window per model, so a checkpoint that windows only a suffix of
         # its layers (HF's `max_window_layers`, or a mixed `layer_types`) cannot be exported as-is.
-        if int(config.get("max_window_layers", 0)) != 0:
+        max_window_layers = int(config.get("max_window_layers", 0))
+        if max_window_layers not in (0, self.num_layers):
             raise ValueError(
-                "A windowed block drafter must set max_window_layers=0; mixed layer windows are not supported."
+                "A windowed block drafter must set max_window_layers to 0 or num_hidden_layers; "
+                "mixed layer windows are not supported."
             )
-        layer_types = set(config.get("layer_types") or ["sliding_attention"])
+        configured_layer_types = config.get("layer_types")
+        if configured_layer_types is not None and len(configured_layer_types) != self.num_layers:
+            raise ValueError(
+                f"A windowed block drafter must declare one layer type per hidden layer; got "
+                f"{len(configured_layer_types)} for {self.num_layers} layers."
+            )
+        layer_types = set(configured_layer_types or ["sliding_attention"])
         if layer_types != {"sliding_attention"}:
             raise ValueError(
                 "A windowed block drafter must use sliding attention on every layer, got "
