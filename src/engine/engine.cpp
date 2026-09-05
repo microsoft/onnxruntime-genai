@@ -4,6 +4,7 @@
 #include "engine.h"
 #include "../logging.h"
 #include "../search.h"
+#include "../constrained_logits_processor.h"
 #include "../models/preprocessing/genai_tokenizer.h"
 #include "../stop_string_controller.h"
 
@@ -22,23 +23,6 @@ constexpr size_t kDflash2FailureDisableThreshold = 3;
 struct MtpRollbackError : std::runtime_error {
   using std::runtime_error::runtime_error;
 };
-
-std::shared_ptr<GeneratorParams> CloneRequestParams(
-    const GeneratorParams& source,
-    const Model& model) {
-  auto copy = std::make_shared<GeneratorParams>(model);
-  copy->search = source.search;
-  copy->speculative = source.speculative;
-  copy->max_batch_size = source.max_batch_size;
-  copy->use_graph_capture = source.use_graph_capture;
-  copy->max_graph_capture_length = source.max_graph_capture_length;
-  copy->use_multi_profile = source.use_multi_profile;
-  copy->p_device = source.p_device;
-  copy->guidance_type = source.guidance_type;
-  copy->guidance_data = source.guidance_data;
-  copy->guidance_ff_tokens_enabled = source.guidance_ff_tokens_enabled;
-  return copy;
-}
 
 std::string AddExceptionCause(std::string message, std::exception_ptr error) {
   if (!error) {
@@ -252,6 +236,15 @@ void ValidateMtpModelCompatibility(const Config& config,
 }
 
 EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
+  // The static batch decoder rebuilds its contiguous cache from the whole sequence every step, so
+  // it cannot resume a half-written prompt. Reject a model that configures chunking here rather
+  // than surfacing it once a Request is already being admitted.
+  if (!model->config_->engine.dynamic_batching &&
+      model->config_->search.chunk_size.value_or(0) != 0) {
+    throw std::runtime_error(
+        "search.chunk_size requires dynamic batching; the static batch scheduler cannot chunk a "
+        "prefill.");
+  }
   std::shared_ptr<DecoderOnly_Model> mtp_model;
   size_t mtp_bytes_per_block = 0;
   if (!model->config_->model.mtp.filename.empty()) {
@@ -367,13 +360,7 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
   dflash2_draft_widths_.reserve(plan.requests.size());
   for (size_t i = 0; i < plan.requests.size(); ++i) {
     const auto& entry = plan.requests[i];
-    const auto& search = entry.request->SearchOptions();
-    // Feeding a request that can never take a block would only burn a ring an eligible request
-    // could use, and a request skipped here is skipped for its whole life, so it never joins the
-    // drafter's contiguity contract.
-    if (!Dflash2CanDraft(search)) {
-      continue;
-    }
+    const bool greedy = entry.request->TurnPolicy().IsGreedy();
     const size_t accepted = entry.request->AcceptedDraftTokenCount();
     if (accepted > entry.draft_token_count) {
       throw std::logic_error("DFlash 2 observed more accepted drafts than the target planned.");
@@ -391,12 +378,12 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
     feed.aux_row_begin = entry.packed_token_offset;
     feed.aux_row_count = valid_rows;
     feed.first_position = first_position;
+    feed.draft_eligible = greedy;
 
     // The committed length this step ends at: the accepted prefix plus the token just sampled.
     const int64_t length_after_step = static_cast<int64_t>(first_position + valid_rows) +
                                       (results[i].token_appended ? 1 : 0);
-    const size_t sequence_limit =
-        std::min(static_cast<size_t>(search.max_length), entry.request->MaxTotalTokens());
+    const size_t sequence_limit = entry.request->MaxSessionTokens();
     const size_t remaining_turn_tokens = entry.request->RemainingTurnTokenBudget();
     const size_t remaining_turn_tokens_after_step =
         results[i].visible_token_count < remaining_turn_tokens
@@ -406,7 +393,7 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
         max_drafts, static_cast<size_t>(entry.request->SpeculativeOptions().max_draft_tokens),
         static_cast<size_t>(length_after_step), sequence_limit,
         remaining_turn_tokens_after_step);
-    feed.wants_drafts = width > 0 && results[i].token_appended && !results[i].done &&
+    feed.wants_drafts = greedy && width > 0 && results[i].token_appended && !results[i].done &&
                         !entry.request->DraftTokenValidationError();
     feed.anchor_token = results[i].token;
     dflash2_feeds_.push_back(feed);
@@ -423,8 +410,9 @@ void Engine::PublishDflash2Drafts(ScheduledRequests& scheduled_requests) {
     throw std::logic_error("The main decoder did not expose auxiliary hidden states for DFlash 2.");
   }
 
-  dflash2_drafter_->Propose(*aux_hidden_states, dflash2_feeds_, dflash2_drafts_);
-  ++speculative_stats_.draft_forward_passes;
+  if (dflash2_drafter_->Propose(*aux_hidden_states, dflash2_feeds_, dflash2_drafts_)) {
+    ++speculative_stats_.draft_forward_passes;
+  }
   for (size_t i = 0; i < dflash2_feeds_.size(); ++i) {
     auto& drafts = dflash2_drafts_[i];
     if (drafts.empty()) {
@@ -553,12 +541,9 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
     for (size_t i = 0; i < target_plan.requests.size(); ++i) {
       const auto& entry = target_plan.requests[i];
       const auto& result = target_results[i];
-      const auto& search = entry.request->SearchOptions();
       const int64_t committed_length_after_step =
           entry.request->CurrentSequenceLength();
-      const size_t sequence_limit =
-          std::min(static_cast<size_t>(search.max_length),
-                   entry.request->MaxTotalTokens());
+      const size_t sequence_limit = entry.request->MaxSessionTokens();
       const size_t remaining_turn_tokens =
           entry.request->RemainingTurnTokenBudget();
       const size_t remaining_turn_tokens_after_step =
@@ -610,10 +595,8 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
         checkpointed_shadows.push_back(feed.shadow);
         feed.shadow->AppendTokensForAuxiliaryDecoder(feed.tokens);
       } else {
-        auto params = CreateGeneratorParams(*mtp_model_);
-        params->search = search;
         feed.shadow = Request::CreateAuxiliaryDecoderRequest(
-            std::move(params), entry.request->MaxTotalTokens(),
+            *mtp_model_, entry.request->MaxSessionTokens(),
             abandonment_pending_, shared_from_this(), feed.tokens);
         feed.newly_created = true;
       }
@@ -1041,35 +1024,61 @@ void Engine::ValidateOwnerThread() const {
   }
 }
 
-std::shared_ptr<Request> Engine::CreateRequest(const GeneratorParams& params,
-                                               size_t max_total_tokens) {
+std::shared_ptr<Request> Engine::CreateRequest(const RequestOptions& options) {
   ValidateOwnerThread();
   CompleteNonresidentClosedRequests();
   ReclaimAbandonedRequests();
   if (health_ == EngineHealth::Unhealthy) {
     std::rethrow_exception(fatal_error_);
   }
-  if (params.model_.get() != model_.get()) {
+  const auto& model_search = model_->config_->search;
+  // These model-fixed checks stay at Request creation because tests and embedders can construct an
+  // Engine with injected dependencies, bypassing CreateDependencies() and its model validation.
+  if (model_search.max_length <= 0) {
     throw std::runtime_error(
-        "Engine request parameters must belong to the Engine's model.");
+        "The model's search.max_length must be greater than zero; actual value is " +
+        std::to_string(model_search.max_length) + ".");
   }
-  if (params.search.max_length <= 0) {
+  // The Engine expresses a per-turn floor through TurnOptions::min_generated_tokens. A model that
+  // still carries the legacy session-absolute floor would silently mean something else here, so it
+  // is rejected rather than reinterpreted -- but the caller can clear it without editing the model
+  // directory, through the config overlay that OgaCreateConfig/OgaConfigOverlay already support.
+  if (model_search.min_length != 0) {
     throw std::runtime_error(
-        "max_length must be greater than zero; actual value is " +
-        std::to_string(params.search.max_length) + ".");
+        "The model configures a nonzero search.min_length (" +
+        std::to_string(model_search.min_length) +
+        "), which is a session-absolute floor the Engine does not support; its minimum is per "
+        "turn. Clear it on the Config before creating the model -- "
+        R"(OgaConfigOverlay(config, "{\"search\":{\"min_length\":0}}"), or in Python )"
+        R"(config.overlay('{"search": {"min_length": 0}}') -- and use )"
+        "OgaTurnOptionsSetMinGeneratedTokens for a per-turn minimum instead.");
   }
-  if (max_total_tokens == 0 ||
-      max_total_tokens > static_cast<size_t>(params.search.max_length)) {
+  // Beam search does not implement the Engine's deferred completion contract -- its next tokens are
+  // never copied back -- and a Request is one sequence, so the Engine forces num_beams to 1 in the
+  // private search parameters it derives. Silently forcing a model that asked for beams would
+  // decode something the caller never requested, so a model-configured value other than 1 is
+  // rejected here instead. The overlay clears it without editing the model directory.
+  if (model_search.num_beams != 1) {
     throw std::runtime_error(
-        "max_total_tokens (" + std::to_string(max_total_tokens) +
-        ") must be greater than zero and no greater than max_length (" +
-        std::to_string(params.search.max_length) + ").");
+        "The model configures search.num_beams = " +
+        std::to_string(model_search.num_beams) +
+        ", and beam search is not supported by the Engine; every Engine Request decodes one "
+        "sequence with one beam. Clear it on the Config before creating the model -- "
+        R"(OgaConfigOverlay(config, "{\"search\":{\"num_beams\":1}}"), or in Python )"
+        R"(config.overlay('{"search": {"num_beams": 1}}') -- )"
+        "and batch across Requests instead.");
   }
-
+  const size_t model_ceiling = static_cast<size_t>(model_search.max_length);
+  const size_t max_session_tokens =
+      options.max_session_tokens.value_or(model_ceiling);
+  if (max_session_tokens == 0 || max_session_tokens > model_ceiling) {
+    throw std::runtime_error(
+        "max_session_tokens (" + std::to_string(max_session_tokens) +
+        ") must be greater than zero and no greater than the model-configured search.max_length (" +
+        std::to_string(model_ceiling) + ").");
+  }
   auto request = std::make_shared<Request>(
-      CloneRequestParams(params, *model_), max_total_tokens,
-      abandonment_pending_);
-  request->ValidateEngineCompatibility();
+      *model_, max_session_tokens, abandonment_pending_);
   auto engine = shared_from_this();
 
   // Fatal handling preserves every token event from the current step, then needs one terminal
@@ -1105,20 +1114,40 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
         "Cannot begin a turn for a request that does not belong to this engine.");
   }
   request->ValidateTurnAdmission(tokens, options);
+
+  // Resolve and validate this turn's complete policy before any Request mutation, so an
+  // unsatisfiable combination leaves the previous completed turn entirely reusable.
+  const bool dynamic_batching = cache_manager_->SupportsDynamicBatching();
+  const auto policy = ResolveTurnPolicy(model_->config_->search, options);
+  const size_t turn_prompt_length =
+      static_cast<size_t>(request->IsAwaitingFirstTurn()
+                              ? 0
+                              : request->CurrentSequenceLength()) +
+      tokens.size();
+  ValidateTurnPolicy(policy, options, model_->p_device_scoring_->GetType(),
+                     model_->config_->model.vocab_size, turn_prompt_length,
+                     request->MaxSessionTokens());
   // Static batching completes generation through a non-transactional path (RunStatic) that cannot
-  // stage, roll back, or replay a stop match. Reject before any Request mutation rather than
-  // letting a stop-enabled turn run without the guarantee its finish reason promises.
-  if (!options.stop_strings.empty() && !cache_manager_->SupportsDynamicBatching()) {
+  // stage, roll back, or replay a stop match, and its sampler RNG state is created once when the
+  // Request joins the batch rather than inside a rollback-capable step. Reject both before any
+  // Request mutation rather than letting a turn run without the guarantee its options promise.
+  if (!dynamic_batching) {
+    if (!options.stop_strings.empty()) {
+      throw std::runtime_error(
+          "Stop strings require an Engine configured for dynamic batching.");
+    }
+    if (options.seed) {
+      throw std::runtime_error(
+          "A per-turn seed requires an Engine configured for dynamic batching.");
+    }
+  }
+  if (options.seed && !scheduler_->SupportsTransactionalSamplerState()) {
     throw std::runtime_error(
-        "Stop strings require an Engine configured for dynamic batching.");
+        "A per-turn seed requires a batched sampler that supports transaction rollback.");
   }
 
   const bool first_turn = request->IsAwaitingFirstTurn();
-  if (first_turn) {
-    if (cache_manager_->SupportsDynamicBatching()) {
-      request->ValidateEngineCompatibility();
-    }
-  } else {
+  if (!first_turn) {
     const bool restartable_canceled_turn =
         request->IsRestartableCanceledTurn() &&
         !cache_manager_->IsResident(request);
@@ -1129,19 +1158,21 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
   }
 
   RequestTurnAdmission admission;
+  admission.policy = policy;
   bool added_to_scheduler = false;
 
-  // Build this turn's complete stop controller (or leave admission.pending_stop_controller null
-  // for a no-stop turn) before any Request or Engine mutation: tokenizer/stream construction can
-  // throw, and at this point nothing has been touched yet, so a failure here leaves the Request,
-  // its MTP shadow, and Engine health entirely unchanged for a caller to retry. Ownership passes
-  // into admission; Request::CommitTurnAdmission() installs it as the live stop_controller_, and
-  // Request::RollbackTurnAdmission() (or simply this function returning through the catch below)
-  // discards it without ever having touched the Request's actual stop_controller_.
+  // Build this turn's complete stop controller and guidance processor (or leave either null for a
+  // turn that does not use them) before any Request or Engine mutation: tokenizer/stream
+  // construction and grammar compilation can throw, and at this point nothing has been touched yet,
+  // so a failure here leaves the Request, its MTP shadow, and Engine health entirely unchanged for
+  // a caller to retry. Ownership passes into admission; Request::CommitTurnAdmission() installs
+  // them, and Request::RollbackTurnAdmission() (or simply this function returning through the catch
+  // below) discards them without ever having touched the Request's live state.
   if (!options.stop_strings.empty()) {
     admission.pending_stop_controller = std::make_unique<StopStringController>(
         GetOrCreateStopTokenizer(), options.stop_strings);
   }
+  admission.pending_guidance = CreateTurnGuidance(options);
 
   // A continuation appends a prompt the MTP shadow never sees, so keeping the shadow would leave it
   // a concatenation of generated tokens across turns with the intervening prompt missing. Drop it
@@ -1716,25 +1747,6 @@ void Engine::RunDynamic() {
     };
 
     try {
-      for (const auto& entry : step_plan_.requests) {
-        entry.request->ValidateEngineCompatibility();
-      }
-    } catch (...) {
-      const auto validation_error = std::current_exception();
-      rollback_transaction();
-      ++transaction_metrics_.post_processing_aborts;
-      ++transaction_metrics_.retryable_aborts;
-      throw EngineStepError{
-          {StepOutcomeKind::RetryableBatchAbort,
-           step_plan_.transaction_id,
-           nullptr},
-          AddExceptionCause(
-              "Request validation failed; the batch was rolled back.",
-              validation_error),
-      };
-    }
-
-    try {
       // Sampling mutates each request's Search state. Checkpoint it before the model run so failures
       // in execution or post-processing can discard the whole batch rather than partially advancing
       // whichever requests happened to finish first.
@@ -2256,6 +2268,19 @@ const std::shared_ptr<Tokenizer>& Engine::GetOrCreateStopTokenizer() {
     stop_tokenizer_ = model_->CreateTokenizer();
   }
   return stop_tokenizer_;
+}
+
+std::unique_ptr<ConstrainedLogitsProcessor> Engine::CreateTurnGuidance(
+    const TurnOptions& options) const {
+  if (options.guidance_type.empty() && options.guidance_data.empty()) {
+    return nullptr;
+  }
+  // Guidance is turn-scoped, so its parameters are built here rather than read from the Request:
+  // nothing about a previous turn's grammar can leak into this one.
+  auto params = std::make_shared<GeneratorParams>(*model_);
+  params->search.batch_size = 1;
+  params->SetGuidance(options.guidance_type, options.guidance_data, false);
+  return CreateGuidanceLogitsProcessor(std::move(params));
 }
 
 SpeculativeStats Engine::GetSpeculativeStats() const {

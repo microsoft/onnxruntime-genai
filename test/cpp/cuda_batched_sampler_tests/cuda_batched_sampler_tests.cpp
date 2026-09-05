@@ -114,6 +114,59 @@ TEST(SamplingTests, SchedulerOwnedSamplerHandlesHeterogeneousRowsCuda) {
   EXPECT_EQ(tokens[2], 3);
 }
 
+TEST(SamplingTests, SchedulerOwnedSamplerGreedyRowsDoNotAdvanceRngCuda) {
+  constexpr int vocab_size = 8;
+  [[maybe_unused]] auto model = CreateCudaModel();
+  auto* device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
+  auto sampler = device->CreateBatchedSampler(2, vocab_size);
+  ASSERT_NE(sampler, nullptr);
+
+  auto logits = device->Allocate<float>(2 * vocab_size);
+  const std::array<float, vocab_size> row_logits{
+      {0.0f, 0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f}};
+  std::copy(row_logits.begin(), row_logits.end(), logits.CpuSpan().begin());
+  std::copy(row_logits.begin(), row_logits.end(),
+            logits.CpuSpan().begin() + vocab_size);
+  logits.CopyCpuToDevice();
+  std::array<Generators::DeviceSpan<float>, 2> rows{
+      {logits.subspan(0, vocab_size),
+       logits.subspan(vocab_size, vocab_size)}};
+
+  constexpr uint64_t seed = 31337;
+  auto after_greedy = sampler->CreateState(seed);
+  auto untouched = sampler->CreateState(seed);
+  std::array<Generators::BatchedSamplerState*, 2> states{
+      {after_greedy.get(), untouched.get()}};
+
+  std::array<Generators::DeviceSpan<float>, 1> greedy_row{{rows[0]}};
+  const std::array<Generators::BatchedSamplingParams, 1> greedy_params{
+      {{1, 0.0f, 1.0f}}};
+  const std::array<Generators::BatchedSamplerState*, 1> greedy_state{
+      {after_greedy.get()}};
+  for (int step = 0; step < 5; ++step) {
+    const auto token =
+        sampler->Sample(greedy_row, greedy_params, greedy_state, vocab_size)
+            .CopyDeviceToCpu();
+    EXPECT_EQ(token[0], vocab_size - 1);
+  }
+
+  const std::array<Generators::BatchedSamplingParams, 2> sampled_params{
+      {{vocab_size, 1.0f, 1.0f}, {vocab_size, 1.0f, 1.0f}}};
+  std::vector<int32_t> sampled_tokens;
+  for (int step = 0; step < 16; ++step) {
+    const auto tokens =
+        sampler->Sample(rows, sampled_params, states, vocab_size)
+            .CopyDeviceToCpu();
+    EXPECT_EQ(tokens[0], tokens[1]) << "RNG diverged at sampled step " << step;
+    sampled_tokens.push_back(tokens[0]);
+  }
+  EXPECT_TRUE(std::any_of(sampled_tokens.begin() + 1, sampled_tokens.end(),
+                          [&](int32_t token) {
+                            return token != sampled_tokens.front();
+                          }))
+      << "Sampled output was constant, so RNG-stream equivalence was not exercised.";
+}
+
 TEST(LogitsMaskTests, UsesPaddedRowStrideForNonAlignedVocabularyCuda) {
   constexpr int batch_size = 2;
   constexpr int vocab_size = 33;

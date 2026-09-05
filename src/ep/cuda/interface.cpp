@@ -151,18 +151,22 @@ struct CudaSamplerStatePool {
   }
 
   template <typename Create>
-  auto AcquireOwned(int random_seed, Create&& create) {
+  auto AcquireOwned(uint64_t random_seed, Create&& create) {
     return indices_.AcquireOwned(
         [this, random_seed](int index, int required_size) {
           EnsureCapacity(required_size);
-          const unsigned long long seed =
-              random_seed == -1
-                  ? static_cast<unsigned long long>(std::random_device{}())
-                  : static_cast<unsigned long long>(random_seed);
           cuda::LaunchInitCurandState(
-              seed, states_.Span().data() + index, GetStream());
+              static_cast<unsigned long long>(random_seed),
+              states_.Span().data() + index, GetStream());
         },
         std::forward<Create>(create));
+  }
+
+  // Restarts one already-acquired slot's stream in place, keeping its pooled index.
+  void Reseed(int index, uint64_t random_seed) {
+    cuda::LaunchInitCurandState(
+        static_cast<unsigned long long>(random_seed),
+        states_.Span().data() + index, GetStream());
   }
 
   void Release(int index) noexcept { indices_.Release(index); }
@@ -216,13 +220,20 @@ struct CudaBatchedSampler final : BatchedSampler {
     transaction_state_indices_.CpuSpan();
   }
 
-  std::unique_ptr<BatchedSamplerState> CreateState(int random_seed) override {
+  std::unique_ptr<BatchedSamplerState> CreateState(uint64_t random_seed) override {
     auto pool = state_pool_;
     return state_pool_->AcquireOwned(
         random_seed,
         [pool = std::move(pool)](int index) {
           return std::make_unique<CudaBatchedSamplerState>(pool, index);
         });
+  }
+
+  void ReseedState(BatchedSamplerState& state, uint64_t random_seed) override {
+    auto* cuda_state = dynamic_cast<CudaBatchedSamplerState*>(&state);
+    if (!cuda_state || cuda_state->pool_.get() != state_pool_.get())
+      throw std::runtime_error("BatchedSampler received an RNG state from a different sampler.");
+    state_pool_->Reseed(cuda_state->index_, random_seed);
   }
 
   bool OwnsState(const BatchedSamplerState& state) const override {

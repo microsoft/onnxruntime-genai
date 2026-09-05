@@ -456,8 +456,8 @@ TEST(Dflash2ConfigTest, RunsFullAttentionDsparkAcrossRequestLifecycles) {
   const std::array<int64_t, 2> first_aux_shape{18, 1};
   first_aux.CreateTensor(first_aux_shape);
   const std::array first_feeds{
-      Dflash2Drafter::Feed{request_a, 0, 9, 0, 11, true},
-      Dflash2Drafter::Feed{request_b, 9, 9, 0, 12, true},
+      Dflash2Drafter::Feed{.request = request_a, .aux_row_begin = 0, .aux_row_count = 9, .first_position = 0, .anchor_token = 11, .draft_eligible = true, .wants_drafts = true},
+      Dflash2Drafter::Feed{.request = request_b, .aux_row_begin = 9, .aux_row_count = 9, .first_position = 0, .anchor_token = 12, .draft_eligible = true, .wants_drafts = true},
   };
   std::vector<std::vector<int32_t>> drafts;
   drafter.Propose(first_aux, first_feeds, drafts);
@@ -469,8 +469,8 @@ TEST(Dflash2ConfigTest, RunsFullAttentionDsparkAcrossRequestLifecycles) {
   const std::array<int64_t, 2> growth_aux_shape{8, 1};
   growth_aux.CreateTensor(growth_aux_shape);
   const std::array growth_feeds{
-      Dflash2Drafter::Feed{request_a, 0, 4, 9, 13, true},
-      Dflash2Drafter::Feed{request_b, 4, 4, 9, 14, true},
+      Dflash2Drafter::Feed{.request = request_a, .aux_row_begin = 0, .aux_row_count = 4, .first_position = 9, .anchor_token = 13, .draft_eligible = true, .wants_drafts = true},
+      Dflash2Drafter::Feed{.request = request_b, .aux_row_begin = 4, .aux_row_count = 4, .first_position = 9, .anchor_token = 14, .draft_eligible = true, .wants_drafts = true},
   };
   drafter.Propose(growth_aux, growth_feeds, drafts);
   ASSERT_EQ(drafts.size(), 2u);
@@ -482,7 +482,7 @@ TEST(Dflash2ConfigTest, RunsFullAttentionDsparkAcrossRequestLifecycles) {
   const std::array<int64_t, 2> reused_aux_shape{9, 1};
   reused_aux.CreateTensor(reused_aux_shape);
   const std::array reused_feed{
-      Dflash2Drafter::Feed{request_c, 0, 9, 0, 15, true},
+      Dflash2Drafter::Feed{.request = request_c, .aux_row_begin = 0, .aux_row_count = 9, .first_position = 0, .anchor_token = 15, .draft_eligible = true, .wants_drafts = true},
   };
   drafter.Propose(reused_aux, reused_feed, drafts);
   ASSERT_EQ(drafts.size(), 1u);
@@ -492,14 +492,14 @@ TEST(Dflash2ConfigTest, RunsFullAttentionDsparkAcrossRequestLifecycles) {
   const std::array<int64_t, 2> failed_aux_shape{1, 1};
   failed_aux.CreateTensor(failed_aux_shape);
   const std::array failed_feed{
-      Dflash2Drafter::Feed{request_c, 0, 1, 10, 16, true},
+      Dflash2Drafter::Feed{.request = request_c, .aux_row_begin = 0, .aux_row_count = 1, .first_position = 10, .anchor_token = 16, .draft_eligible = true, .wants_drafts = true},
   };
   EXPECT_THROW(drafter.Propose(failed_aux, failed_feed, drafts), std::logic_error);
   drafter.ReleaseAll();
 
   const std::array recovered_feeds{
-      Dflash2Drafter::Feed{request_d, 0, 9, 0, 17, true},
-      Dflash2Drafter::Feed{request_e, 9, 9, 0, 18, true},
+      Dflash2Drafter::Feed{.request = request_d, .aux_row_begin = 0, .aux_row_count = 9, .first_position = 0, .anchor_token = 17, .draft_eligible = true, .wants_drafts = true},
+      Dflash2Drafter::Feed{.request = request_e, .aux_row_begin = 9, .aux_row_count = 9, .first_position = 0, .anchor_token = 18, .draft_eligible = true, .wants_drafts = true},
   };
   drafter.Propose(first_aux, recovered_feeds, drafts);
   ASSERT_EQ(drafts.size(), 2u);
@@ -510,6 +510,63 @@ TEST(Dflash2ConfigTest, RunsFullAttentionDsparkAcrossRequestLifecycles) {
   EXPECT_EQ(drafts[1][2], 13);
   EXPECT_EQ(drafts[1][3], 64);
   EXPECT_EQ(drafter.AdmissionMisses(), 0u);
+}
+
+TEST(Dflash2ConfigTest, TrackedDsparkIngestsSampledTurnsAndResumesDrafting) {
+  auto config = MakeDflash2Config();
+  config.config_path = fs::path{MODEL_PATH "engine/synthetic-dspark"};
+  auto& dspark = config.model.dflash2;
+  dspark.filename = "dspark.onnx";
+  dspark.is_dspark = true;
+  dspark.num_hidden_layers = 1;
+  dspark.num_key_value_heads = 1;
+  dspark.head_size = 1;
+  dspark.block_size = 4;
+  dspark.num_draft_tokens = 4;
+  dspark.sliding_window = 0;
+
+  auto model = std::make_shared<Dflash2Model>(CreateDflash2Config(config), GetOrtEnv());
+  Dflash2Drafter drafter{model, /*paged_block_size=*/4, /*num_blocks=*/6,
+                         /*max_requests=*/1};
+
+  int tracked_id = 0;
+  int untracked_id = 0;
+  auto* tracked = reinterpret_cast<Request*>(&tracked_id);
+  auto* untracked = reinterpret_cast<Request*>(&untracked_id);
+  auto* device = GetDeviceInterface(DeviceType::CPU);
+  Tensor aux{device, Ort::TypeToTensorType<float>};
+  const std::array<int64_t, 2> aux_shape{1, 1};
+  aux.CreateTensor(aux_shape);
+  std::vector<std::vector<int32_t>> drafts;
+
+  const std::array initial{
+      Dflash2Drafter::Feed{.request = tracked, .aux_row_count = 1, .anchor_token = 11, .draft_eligible = true, .wants_drafts = true},
+  };
+  EXPECT_TRUE(drafter.Propose(aux, initial, drafts));
+  ASSERT_EQ(drafts.size(), 1u);
+  EXPECT_FALSE(drafts[0].empty());
+
+  const std::array sampled{
+      Dflash2Drafter::Feed{.request = tracked, .aux_row_count = 1, .first_position = 1, .anchor_token = 12, .draft_eligible = false, .wants_drafts = false},
+  };
+  EXPECT_TRUE(drafter.Propose(aux, sampled, drafts));
+  ASSERT_EQ(drafts.size(), 1u);
+  EXPECT_TRUE(drafts[0].empty());
+
+  const std::array resumed{
+      Dflash2Drafter::Feed{.request = tracked, .aux_row_count = 1, .first_position = 2, .anchor_token = 13, .draft_eligible = true, .wants_drafts = true},
+  };
+  EXPECT_TRUE(drafter.Propose(aux, resumed, drafts));
+  ASSERT_EQ(drafts.size(), 1u);
+  EXPECT_FALSE(drafts[0].empty());
+
+  drafter.Release(tracked);
+  const std::array ineligible{
+      Dflash2Drafter::Feed{.request = untracked, .aux_row_count = 1, .anchor_token = 14, .draft_eligible = false, .wants_drafts = false},
+  };
+  EXPECT_FALSE(drafter.Propose(aux, ineligible, drafts));
+  EXPECT_EQ(drafter.AdmissionMisses(), 0u);
+  EXPECT_FALSE(drafter.Propose(aux, {}, drafts));
 }
 
 TEST(Dflash2ConfigTest, RequiresMatchingCacheTypes) {
@@ -691,23 +748,10 @@ TEST(Dflash2ConfigTest, ReplacesProposalBufferWhenTheElementTypeChanges) {
   EXPECT_EQ(slot->GetElementCount(), 4u);
 }
 
-TEST(Dflash2ConfigTest, DraftsOnlyForGreedyRequests) {
-  Config::Search search;
-  search.do_sample = false;
-  EXPECT_TRUE(Dflash2CanDraft(search));
-
-  search.do_sample = true;
-  search.top_k = 50;
-  search.temperature = 1.0f;
-  EXPECT_FALSE(Dflash2CanDraft(search));
-
-  // Sampling that can only ever pick the top logit is still greedy.
-  search.top_k = 1;
-  EXPECT_TRUE(Dflash2CanDraft(search));
-
-  search.top_k = 50;
-  search.temperature = 0.0f;
-  EXPECT_TRUE(Dflash2CanDraft(search));
+TEST(Dflash2ConfigTest, JoinsOnlyFromAnEligibleTurnAtSequenceStart) {
+  EXPECT_TRUE(Dflash2CanJoin(/*draft_eligible=*/true, /*first_position=*/0));
+  EXPECT_FALSE(Dflash2CanJoin(/*draft_eligible=*/false, /*first_position=*/0));
+  EXPECT_FALSE(Dflash2CanJoin(/*draft_eligible=*/true, /*first_position=*/1));
 }
 
 }  // namespace Generators::test

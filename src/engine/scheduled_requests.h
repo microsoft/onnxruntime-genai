@@ -138,6 +138,10 @@ struct ScheduledRequests {
   std::shared_ptr<GeneratorParams> params_;
   BatchedSampler* batched_sampler_{};
   BatchedSamplingPlan* sampling_plan_{};
+  // Every device RNG state this transaction checkpointed: the batched sampling plan's states plus
+  // the states of any request whose pending turn reseed is about to overwrite one. Only a state in
+  // here may be reseeded inside the transaction, because only these can be rolled back.
+  std::vector<BatchedSamplerState*> checkpointed_sampler_states_;
   size_t transaction_checkpoint_count_{};
   bool transaction_uses_batched_sampler_{};
   bool sampler_checkpoint_active_{};

@@ -43,6 +43,11 @@ struct ConstrainedLogitsProcessor {
   // span is invalidated by any subsequent call on the same processor.
   virtual std::span<const uint32_t> GetReadyMask() { return {}; }
 
+  // True when this row's ready mask permits at least one of the supplied tokens and no other
+  // in-vocabulary token. Used to avoid composing constraints into an empty legal-token set.
+  virtual bool AllowsOnlyTokens(
+      size_t index, std::span<const int> tokens) = 0;
+
   // Reset is used to reset the constraints of the logits processor and then recompute the mask, used after rewinding
   virtual void Reset() = 0;
 
@@ -52,14 +57,6 @@ struct ConstrainedLogitsProcessor {
   // Clone as an independent grammar cursor at the current state. Speculative decoding uses this to
   // mask a draft's proposals without disturbing the verify cursor.
   virtual std::unique_ptr<ConstrainedLogitsProcessor> Clone() const = 0;
-
-  // Create an independent cursor reset to the start of the same grammar. The default preserves compatibility for
-  // lightweight processors; implementations may avoid cloning mutable state that Reset would immediately discard.
-  virtual std::unique_ptr<ConstrainedLogitsProcessor> CloneForNewTurn() const {
-    auto clone = Clone();
-    clone->Reset();
-    return clone;
-  }
 };
 
 #if USE_GUIDANCE
@@ -75,11 +72,12 @@ struct GuidanceLogitsProcessor : public ConstrainedLogitsProcessor {
 
   void ProcessLogits(DeviceSpan<float> logits) override;
   std::span<const uint32_t> GetReadyMask() override;
+  bool AllowsOnlyTokens(
+      size_t index, std::span<const int> tokens) override;
   void CommitTokens(std::span<int32_t> tokens) override;
   void Reset() override;
   std::vector<int32_t> GetFFTokens(size_t index) override;
   std::unique_ptr<ConstrainedLogitsProcessor> Clone() const override;
-  std::unique_ptr<ConstrainedLogitsProcessor> CloneForNewTurn() const override;
 
   // tokenize_partial is used to tokenize the input tokens with special prefix, this will get stable
   // token ids.
@@ -113,6 +111,9 @@ struct GuidanceLogitsProcessor : public ConstrainedLogitsProcessor {
   static std::vector<uint32_t> ComputeMasks(
       const GeneratorParams& params, uint32_t eos_token,
       const std::vector<std::shared_ptr<LlgConstraint>>& constraints);
+  static bool MaskAllowsOnlyTokens(
+      std::span<const uint32_t> mask, size_t vocab_size,
+      std::span<const int> tokens);
 
   std::shared_ptr<const GeneratorParams> params_;
   uint32_t eos_token_;
@@ -163,8 +164,8 @@ std::unique_ptr<ConstrainedLogitsProcessor> CreateGuidanceLogitsProcessor(const 
 std::unique_ptr<ConstrainedLogitsProcessor> CreateGuidanceLogitsProcessor(
     const Model& model, std::shared_ptr<const GeneratorParams> params);
 
-// Engine-facing overload. Request objects can exist before they are associated with a model, so
-// this validates the guidance request first (which needs no model) and only then requires one.
+// Engine-facing overload. A turn's guidance request is validated for shape and build support
+// first -- neither of which needs a model -- and only then requires the model the params carry.
 std::unique_ptr<ConstrainedLogitsProcessor> CreateGuidanceLogitsProcessor(
     std::shared_ptr<const GeneratorParams> params);
 

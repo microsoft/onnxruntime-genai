@@ -461,8 +461,8 @@ Tensor& Dflash2StepTensor(std::unique_ptr<Tensor>& slot, DeviceInterface* device
   return *slot;
 }
 
-bool Dflash2CanDraft(const Config::Search& search) {
-  return !search.do_sample || search.top_k == 1 || search.temperature == 0;
+bool Dflash2CanJoin(bool draft_eligible, size_t first_position) noexcept {
+  return draft_eligible && first_position == 0;
 }
 
 void Dflash2Drafter::AllocateCache() {
@@ -490,12 +490,11 @@ bool Dflash2Drafter::Admit(const Feed& feed) {
   if (requests_.find(feed.request) != requests_.end()) {
     return true;
   }
-  // The drafter cannot backfill K/V for context whose auxiliary hidden states have already been
-  // consumed, so a request can only join from the start of its sequence. Requests that arrive when
-  // the ring pool is full decode without DFlash 2 drafts instead of taking the whole drafter down.
-  if (feed.first_position != 0) {
+  if (!Dflash2CanJoin(feed.draft_eligible, feed.first_position)) {
     return false;
   }
+  // Requests that arrive when the ring pool is full decode without DFlash 2 drafts instead of
+  // taking the whole drafter down.
   if (ring_blocks_ != 0) {
     if (free_blocks_.size() < ring_blocks_) {
       ++admission_misses_;
@@ -545,11 +544,11 @@ void Dflash2Drafter::ReleaseAll() {
   requests_.clear();
 }
 
-void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> feeds,
+bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> feeds,
                              std::vector<std::vector<int32_t>>& drafts) {
   drafts.assign(feeds.size(), {});
   if (feeds.empty()) {
-    return;
+    return false;
   }
 
   const size_t block_size = static_cast<size_t>(config_.block_size);
@@ -565,7 +564,7 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     }
   }
   if (served.empty()) {
-    return;
+    return false;
   }
 
   // Batch layout. Every served feed contributes its context rows so the drafter cache never
@@ -821,7 +820,7 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   }
 
   if (!drafts_wanted) {
-    return;
+    return true;
   }
 
   // The spans own the host mirrors these point into, so they must outlive the reads below.
@@ -842,6 +841,7 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
       previous = best;
     }
   }
+  return true;
 }
 
 }  // namespace Generators

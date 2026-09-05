@@ -74,15 +74,20 @@ It is a poor fit for a server.
 The path used by `PagedAttention` models. Requests arrive and depart independently; each step the
 scheduler picks whichever requests are runnable and forms a batch out of them.
 
-Each `Request` owns its own `GeneratorParams` and its own single-sequence `Search`:
+Each `Request` derives its own private, Model-derived search parameters and owns its own
+single-sequence `Search`:
 
 ```cpp
 // src/engine/request.cpp
-Request::Request(std::shared_ptr<GeneratorParams> params)
-    : params_{params}, search_{CreateSearch(*params.get())} {
+Request::Request(const Model& model, size_t max_session_tokens, ...)
+    : params_{CreateRequestParams(model, max_session_tokens)},
+      search_{CreateSearch(*params_)} {
   search_->DeferCompletion(true);
 }
 ```
+
+Generation policy does not live there. It is resolved per turn into an `EffectiveTurnPolicy` from
+the model defaults plus that turn's explicit overrides.
 
 The decoder IO is chosen from the cache manager, which is chosen from config:
 
@@ -244,28 +249,28 @@ existing two-phase per-request loop runs unchanged.
   per-request loops, which would otherwise leave holes in the logits rows that a single batched
   sampler call cannot express.
 - Every scheduled request resolves to the same `(k, p, temperature)` triple. `Request` funnels every
-  sampling branch into `SampleTopKTopP`, so comparing the resolved triple rather than the raw
-  options also treats equivalent spellings (`top_k == 1`, `temperature == 0`, `do_sample == false`)
-  as the same.
-- If the resolved triple is not argmax, no request pinned `random_seed`. Argmax ignores the random
-  state, so batching cannot change it; a batch-wide generator would otherwise break the
-  reproducibility a pinned seed promises.
+  sampling branch into `SampleTopKTopP`, so comparing the triple resolved from the turn policy
+  rather than the raw options also treats equivalent spellings (`top_k == 1`, `temperature == 0`,
+  `do_sample == false`) as the same.
 - The logits rows are `vocab_size` long, back to back in request order, and inside a single
   allocation. `DeviceSpan::SameBufferAs` establishes the last part, which is what makes it safe to
   widen row 0 into the `[batch, vocab]` view the sampler reads.
 - Every request's `Search` accepts a shared next-token slot. Only `GreedySearch_Cuda` does, so this
-  doubles as the device and single-row check. `num_beams == 1` and `batch_size == 1` are already
-  enforced by `Request`'s constructor.
+  doubles as the device and single-row check. `num_beams == 1` and `batch_size == 1` hold for every
+  Engine Request by construction: the Request derives its own private search parameters and forces
+  both to one (`Request::CreateRequestParams`), and `Engine::CreateRequest` rejects a model that
+  configures beam search rather than silently forcing it.
 
 Note the layout check naturally excludes mixed prefill/decode steps, which is correct: those pick
 their rows out of a larger tensor and are not the steady-state case worth optimizing.
 
 Logits processors do **not** have to be no-ops. Each request still runs `ApplyMinLength`,
 `ApplyRepetitionPenalty` and `ApplyNoRepeatNgram` over its own row of the shared tensor before the
-batched sampler runs, so `min_length` and `repetition_penalty` stay per-request.
+batched sampler runs, so the turn's minimum generated tokens and repetition penalty stay
+per-request.
 
-Per-request `max_length` and per-request EOS token sets likewise do not need to match, because those
-are handled after sampling, in the per-request tail (see 5.4).
+Per-Request session limits and EOS token sets likewise do not need to match, because those are
+handled after sampling, in the per-request tail (see 5.4).
 
 ### 5.3 Layering
 
@@ -322,7 +327,7 @@ slot and copies the shared buffer back itself, which is why a partial bind can s
 | `src/ep/cuda/search_cuda.h` / `.cpp` | `GreedySearch_Cuda` overrides both. `BindNextTokensSlot` rejects unless the search is single-row and the slot is one element, then repoints `next_tokens_buffer_` and `next_tokens_`. The post-sampling tail moves into `LaunchNextTokensTail()`, shared by `SampleTopKTopP` and `OnNextTokensSampled`. `CompleteGeneration` skips its own `CopyDeviceToCpu()` when the caller owns the copy. |
 | `src/engine/engine.h` / `.cpp` | Own the shared next-token `DeviceSpan<int32_t>`, grown as batches get larger, and hand it to `ScheduledRequests` each step. |
 | `src/engine/scheduled_requests.h` / `.cpp` | Implement the gate and the fast path in `GenerateNextTokens()`; keep the existing two-loop path as the fallback. |
-| `src/engine/request.h` / `.cpp` | Split the pre-sampling half of `GenerateNextTokens()` into `PrepareGeneration()`, and forward `SearchOptions()`, `BindNextTokensSlot()` and `OnNextTokensSampled()`. |
+| `src/engine/request.h` / `.cpp` | Split the pre-sampling half of `GenerateNextTokens()` into `PrepareGeneration()`, and forward `TurnPolicy()`, `BindNextTokensSlot()` and `OnNextTokensSampled()`. |
 | `src/engine/decoders/*_decoder_io.cpp` | Wrap the fp32 logits tensor once instead of per row. `Tensor::GetDeviceSpan()` wraps the tensor memory afresh on each call, so calling it inside the loop produced rows that were adjacent in device memory but belonged to unrelated `DeviceBuffer` objects, which the gate has to reject. This also removes N redundant wraps per step. |
 
 Nothing outside `src/engine/` and `src/ep/cuda/` changes behaviour: the new `Search` virtuals default
@@ -393,7 +398,7 @@ because of heterogeneous parameters, pinned seeds, batch size one, or ragged log
 Generator design" option in its strongest form. It was rejected because it requires reworking
 `Sequences` to carry a per-row length cursor (today: one `current_length_`, and `GetSequence(i)`
 depends on it), reworking every kernel that writes at a shared `past_length` offset, moving
-per-request `GeneratorParams` into per-row arrays, and adding row allocation/eviction to `Search`.
+per-request search parameters into per-row arrays, and adding row allocation/eviction to `Search`.
 It also collides with the Engine-owned Request lifecycle and its externally serialized
 `BeginTurn`/`Run`/`Close` contract. It is a plausible long-term direction, but it is a rewrite of the
 search layer, and Phase 2 gets most of the benefit without touching any of it.

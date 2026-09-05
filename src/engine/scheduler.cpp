@@ -38,7 +38,7 @@ ScheduledRequests Scheduler::CreateScheduledRequests(const StepPlan& plan) {
 std::unique_ptr<BatchedSamplerState> Scheduler::CreateSamplingState(
     const Request& request) const {
   if (auto* sampler = GetBatchedSampler()) {
-    return sampler->CreateState(request.SearchOptions().random_seed);
+    return sampler->CreateState(request.SamplerSeedBasis());
   }
   return nullptr;
 }
@@ -47,11 +47,14 @@ StaticBatchScheduler::StaticBatchScheduler(std::shared_ptr<Model> model, std::sh
     : Scheduler{model}, model_{model}, cache_manager_{cache_manager} {}
 
 void StaticBatchScheduler::AddRequest(std::shared_ptr<Request> request) {
-  // The static batch decoder rebuilds its contiguous cache from the whole sequence every step, so it
-  // cannot resume a half written prompt. Only the paged cache can hold one.
-  if (request->SearchOptions().chunk_size.value_or(0) != 0) {
+  // Engine::CreateDependencies already rejects a chunking model for static batching, but an Engine
+  // built with injected dependencies never runs that check. Keep this guard: the static batch
+  // decoder rebuilds its contiguous cache from the whole sequence every step, so it cannot resume a
+  // half-written prompt, and admitting one here would corrupt the batch instead of failing.
+  if (request->PrefillChunkSize().value_or(0) != 0) {
     throw std::runtime_error(
-        "search.chunk_size requires dynamic batching; the static batch scheduler cannot chunk a prefill.");
+        "search.chunk_size requires dynamic batching; the static batch scheduler cannot chunk a "
+        "prefill.");
   }
   requests_pool_.reserve(requests_pool_.size() + 1);
   auto sampling_state = CreateSamplingState(*request);
@@ -219,7 +222,7 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
         SlotsForWholeSequence(snapshot.current_sequence_length);
     candidate.entry.is_prefill = snapshot.is_prefill;
     candidate.entry.newly_admitted = newly_admitted;
-    auto prefill_token_cap = request->SearchOptions().chunk_size;
+    auto prefill_token_cap = request->PrefillChunkSize();
     if (cache_query_token_cap != 0 &&
         (prefill_token_cap.value_or(0) == 0 || *prefill_token_cap > cache_query_token_cap)) {
       prefill_token_cap = cache_query_token_cap;
