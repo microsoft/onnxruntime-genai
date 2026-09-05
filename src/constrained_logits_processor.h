@@ -43,6 +43,11 @@ struct ConstrainedLogitsProcessor {
   // span is invalidated by any subsequent call on the same processor.
   virtual std::span<const uint32_t> GetReadyMask() { return {}; }
 
+  // True when this row's ready mask permits at least one of the supplied tokens and no other
+  // in-vocabulary token. Used to avoid composing constraints into an empty legal-token set.
+  virtual bool AllowsOnlyTokens(
+      size_t index, std::span<const int> tokens) = 0;
+
   // Reset is used to reset the constraints of the logits processor and then recompute the mask, used after rewinding
   virtual void Reset() = 0;
 
@@ -67,6 +72,8 @@ struct GuidanceLogitsProcessor : public ConstrainedLogitsProcessor {
 
   void ProcessLogits(DeviceSpan<float> logits) override;
   std::span<const uint32_t> GetReadyMask() override;
+  bool AllowsOnlyTokens(
+      size_t index, std::span<const int> tokens) override;
   void CommitTokens(std::span<int32_t> tokens) override;
   void Reset() override;
   std::vector<int32_t> GetFFTokens(size_t index) override;
@@ -104,6 +111,9 @@ struct GuidanceLogitsProcessor : public ConstrainedLogitsProcessor {
   static std::vector<uint32_t> ComputeMasks(
       const GeneratorParams& params, uint32_t eos_token,
       const std::vector<std::shared_ptr<LlgConstraint>>& constraints);
+  static bool MaskAllowsOnlyTokens(
+      std::span<const uint32_t> mask, size_t vocab_size,
+      std::span<const int> tokens);
 
   std::shared_ptr<const GeneratorParams> params_;
   uint32_t eos_token_;

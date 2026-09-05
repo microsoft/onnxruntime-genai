@@ -1043,7 +1043,16 @@ void Request::ApplyLogitsProcessors(DeviceSpan<float> logits,
   if (guidance_logits_processor_ && !guidance_applied) {
     guidance_logits_processor_->ProcessLogits(logits);
   }
-  search_->ApplyMinLength(TurnEosFloor());
+  const int eos_floor = TurnEosFloor();
+  // An extendable accepting grammar still honors the minimum by suppressing its optional EOS.
+  // Once EOS is the grammar's only legal token, guidance termination takes precedence over the
+  // floor; masking it as well would leave no valid token to select.
+  if (eos_floor > CurrentSequenceLength() &&
+      !(guidance_logits_processor_ &&
+        guidance_logits_processor_->AllowsOnlyTokens(
+            0, params_->config.model.eos_token_id))) {
+    search_->ApplyMinLength(eos_floor);
+  }
   search_->ApplyRepetitionPenalty(turn_policy_.repetition_penalty);
   search_->ApplyNoRepeatNgram(turn_policy_.no_repeat_ngram_size);
 }

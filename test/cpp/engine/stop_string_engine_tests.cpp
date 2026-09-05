@@ -101,6 +101,7 @@ class NoOpGuidanceProcessor final : public ConstrainedLogitsProcessor {
     committed_tokens.insert(committed_tokens.end(), tokens.begin(), tokens.end());
   }
   void ProcessLogits(DeviceSpan<float>) override {}
+  bool AllowsOnlyTokens(size_t, std::span<const int>) override { return false; }
   void Reset() override {
     committed_tokens.clear();
     ++reset_count;

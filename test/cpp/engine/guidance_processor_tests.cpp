@@ -81,6 +81,15 @@ class FakeGuidanceProcessor final : public ConstrainedLogitsProcessor {
     }
   }
 
+  bool AllowsOnlyTokens(
+      size_t index, std::span<const int> tokens) override {
+    if (index != 0) {
+      throw std::out_of_range("Fake guidance row index is out of range.");
+    }
+    return forced_token_ &&
+           std::find(tokens.begin(), tokens.end(), *forced_token_) != tokens.end();
+  }
+
   void Reset() override {
     if (fail_reset_) {
       throw std::runtime_error("Injected guidance reset failure.");

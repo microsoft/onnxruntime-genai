@@ -1282,6 +1282,64 @@ TurnOptions GuidedOptions(std::string grammar) {
   return options;
 }
 
+TEST_F(RequestLifecycleTest, TerminalGuidanceTakesPrecedenceOverMinimumGeneratedTokens) {
+  auto guidance_model = CreateModel(
+      GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto guidance_engine = MakeDoublesEngine(guidance_model, /*capacity=*/8,
+                                           EosToken(*guidance_model));
+  auto tokenizer = guidance_model->CreateTokenizer();
+  const auto guided_tokens = tokenizer->Encode("!");
+  ASSERT_EQ(guided_tokens.size(), 1u);
+
+  auto request = CreateEngineRequest(guidance_engine.engine);
+  auto options = GuidedOptions("!");
+  options.min_generated_tokens = 4;
+  options.max_generated_tokens = 8;
+  request->BeginTurn(Prompt(), options);
+
+  const auto token = RunOne(*guidance_engine.engine);
+  ASSERT_EQ(token.request, request);
+  ASSERT_NE(token.flags & EngineEventFlagToken, 0u);
+  EXPECT_EQ(token.token, guided_tokens.front());
+  EXPECT_FALSE(request->IsTurnComplete());
+
+  const auto terminal = RunOne(*guidance_engine.engine);
+  ASSERT_EQ(terminal.request, request);
+  EXPECT_EQ(terminal.flags & EngineEventFlagToken, 0u);
+  EXPECT_NE(terminal.flags & EngineEventFlagTurnFinished, 0u);
+  EXPECT_EQ(terminal.finish_reason, GenerationFinishReason::EosToken);
+  EXPECT_EQ(terminal.usage.generated_tokens, 1u);
+  EXPECT_TRUE(request->IsTurnComplete());
+}
+
+TEST_F(RequestLifecycleTest, ExtendableGuidanceHonorsMinimumGeneratedTokens) {
+  auto guidance_model = CreateModel(
+      GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto guidance_engine = MakeDoublesEngine(guidance_model, /*capacity=*/8,
+                                           EosToken(*guidance_model));
+
+  auto request = CreateEngineRequest(guidance_engine.engine);
+  auto options = GuidedOptions("[0-9]*");
+  options.min_generated_tokens = 2;
+  options.max_generated_tokens = 8;
+  request->BeginTurn(Prompt(), options);
+
+  for (size_t generated = 1; generated <= options.min_generated_tokens; ++generated) {
+    const auto token = RunOne(*guidance_engine.engine);
+    ASSERT_EQ(token.request, request);
+    EXPECT_NE(token.flags & EngineEventFlagToken, 0u);
+    EXPECT_EQ(token.flags & EngineEventFlagTurnFinished, 0u);
+    EXPECT_EQ(request->TurnGeneratedTokens(), generated);
+  }
+
+  const auto terminal = RunOne(*guidance_engine.engine);
+  ASSERT_EQ(terminal.request, request);
+  EXPECT_EQ(terminal.flags & EngineEventFlagToken, 0u);
+  EXPECT_NE(terminal.flags & EngineEventFlagTurnFinished, 0u);
+  EXPECT_EQ(terminal.finish_reason, GenerationFinishReason::EosToken);
+  EXPECT_EQ(terminal.usage.generated_tokens, options.min_generated_tokens);
+}
+
 TEST_F(RequestLifecycleTest, RequestRejectsDraftTokensWithGuidance) {
   auto guidance_model = CreateModel(
       GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");

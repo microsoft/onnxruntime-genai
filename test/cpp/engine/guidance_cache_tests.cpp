@@ -49,6 +49,50 @@ DeviceSpan<float> LogitsForToken(Model& model, int32_t token) {
   return logits;
 }
 
+TEST(GuidanceMaskTest, RecognizesAnyConfiguredEosAndRejectsOtherTokens) {
+  const std::array<int, 2> eos_tokens{1, 34};
+  std::array<uint32_t, 2> mask{
+      uint32_t{1} << 1,
+      uint32_t{1} << 2,
+  };
+  EXPECT_TRUE(GuidanceProcessorTestAccess::MaskAllowsOnlyTokens(
+      mask, /*vocab_size=*/64, eos_tokens));
+
+  mask[1] |= uint32_t{1} << 3;
+  EXPECT_FALSE(GuidanceProcessorTestAccess::MaskAllowsOnlyTokens(
+      mask, /*vocab_size=*/64, eos_tokens));
+}
+
+TEST(GuidanceMaskTest, IgnoresPaddingBitsAndRequiresAnAllowedToken) {
+  const std::array<int, 1> eos_tokens{34};
+  const std::array<uint32_t, 2> eos_with_padding{
+      0,
+      (uint32_t{1} << 2) | (uint32_t{1} << 31),
+  };
+  EXPECT_TRUE(GuidanceProcessorTestAccess::MaskAllowsOnlyTokens(
+      eos_with_padding, /*vocab_size=*/35, eos_tokens));
+
+  const std::array<uint32_t, 2> padding_only{
+      0,
+      uint32_t{1} << 31,
+  };
+  EXPECT_FALSE(GuidanceProcessorTestAccess::MaskAllowsOnlyTokens(
+      padding_only, /*vocab_size=*/35, eos_tokens));
+
+  const std::array<uint32_t, 2> empty{};
+  EXPECT_FALSE(GuidanceProcessorTestAccess::MaskAllowsOnlyTokens(
+      empty, /*vocab_size=*/64, eos_tokens));
+}
+
+TEST(GuidanceMaskTest, RejectsDimensionsThatDoNotMatchVocabulary) {
+  const std::array<int, 1> eos_tokens{1};
+  const std::array<uint32_t, 1> mask{uint32_t{1} << 1};
+  EXPECT_THROW(
+      GuidanceProcessorTestAccess::MaskAllowsOnlyTokens(
+          mask, /*vocab_size=*/64, eos_tokens),
+      std::runtime_error);
+}
+
 TEST(GuidanceCacheTest, ReusesTokenizerAndCompiledGrammar) {
   auto model = LoadGuidanceModel();
   auto first_params = MakeGuidanceParams(*model);

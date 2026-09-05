@@ -632,6 +632,58 @@ std::span<const uint32_t> GuidanceLogitsProcessor::GetReadyMask() {
   return masks_;
 }
 
+bool GuidanceLogitsProcessor::AllowsOnlyTokens(
+    size_t index, std::span<const int> tokens) {
+  EnsureMaskScheduled();
+  EnsureMaskReady();
+  if (index >= llg_constraints_.size()) {
+    throw std::out_of_range("Guidance row index is out of range.");
+  }
+  if (mask_words_per_row_ == 0 ||
+      masks_.size() / mask_words_per_row_ != llg_constraints_.size() ||
+      masks_.size() % mask_words_per_row_ != 0) {
+    throw std::runtime_error("Guidance mask dimensions do not match its constraint rows.");
+  }
+
+  const auto row = std::span<const uint32_t>{masks_}.subspan(
+      index * mask_words_per_row_, mask_words_per_row_);
+  return MaskAllowsOnlyTokens(
+      row, static_cast<size_t>(params_->config.model.vocab_size), tokens);
+}
+
+bool GuidanceLogitsProcessor::MaskAllowsOnlyTokens(
+    std::span<const uint32_t> mask, size_t vocab_size,
+    std::span<const int> tokens) {
+  if (mask.size() != (vocab_size + 31) / 32) {
+    throw std::runtime_error("Guidance mask size does not match the model vocabulary.");
+  }
+
+  bool permits_supplied_token = false;
+  for (size_t word = 0; word < mask.size(); ++word) {
+    uint32_t supplied_bits = 0;
+    for (int token : tokens) {
+      if (token >= 0 && static_cast<size_t>(token) < vocab_size &&
+          static_cast<size_t>(token) / 32 == word) {
+        supplied_bits |= uint32_t{1} << (static_cast<size_t>(token) % 32);
+      }
+    }
+
+    uint32_t valid_bits = std::numeric_limits<uint32_t>::max();
+    if (word + 1 == mask.size() && vocab_size % 32 != 0) {
+      valid_bits = (uint32_t{1} << (vocab_size % 32)) - 1;
+    }
+    const uint32_t allowed = mask[word] & valid_bits;
+    permits_supplied_token |= (allowed & supplied_bits) != 0;
+    if ((allowed & ~supplied_bits) != 0) {
+      return false;
+    }
+  }
+  if (!permits_supplied_token) {
+    return false;
+  }
+  return true;
+}
+
 // Reset the LLGuidance constraints and then recompute the mask
 void GuidanceLogitsProcessor::Reset() {
   pending_masks_ = {};

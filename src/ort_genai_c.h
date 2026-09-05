@@ -1402,8 +1402,9 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetMaxGeneratedTokens(
  * \brief Masks the end-of-sequence token until this Turn has generated this many tokens.
  *
  * Zero unsets the minimum. It does not prevent stop strings, Turn or session limits, cancellation,
- * failure, or guidance termination. Admission rejects a minimum that exceeds the Turn's maximum or
- * does not fit inside the Request's session limit.
+ * failure, or guidance termination. If guidance permits EOS and no continuation token, its
+ * termination takes precedence rather than leaving the Turn with no legal token. Admission rejects
+ * a minimum that exceeds the Turn's maximum or does not fit inside the Request's session limit.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetMinGeneratedTokens(
     OgaTurnOptions* options, uint64_t min_generated_tokens);

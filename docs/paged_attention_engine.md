@@ -825,8 +825,9 @@ boundary, and every terminal path -- completion, stop match, cancellation, failu
 releases it again.
 
 Each guided turn owns an independent constrained-logits processor. Its mask is applied before
-minimum-length, repetition-penalty, and no-repeat-ngram processing, matching Generator ordering.
-After sampling, the selected token advances that turn's grammar cursor.
+minimum-length, repetition-penalty, and no-repeat-ngram processing. If applying the minimum would
+mask every guidance-permitted token because only configured EOS tokens remain, guidance termination
+takes precedence. After sampling, the selected token advances that turn's grammar cursor.
 
 The grammar cursor participates in the same transaction as search and paged-cache state. A step
 checkpoints it before sampling, retains the advanced cursor on commit, and restores the checkpoint
@@ -901,7 +902,9 @@ because verification rows do not reproduce those logits processors.
 tokens. Admission rejects a minimum that exceeds the turn maximum or does not fit between the
 turn's prompt length and the Request's session limit. The absolute sequence floor `ApplyMinLength`
 uses is derived from the committed turn's prompt length plus its minimum rather than stored, so it
-cannot disagree with the policy the turn actually resolved to.
+cannot disagree with the policy the turn actually resolved to. An extendable accepting grammar
+continues under the minimum, but once guidance permits EOS and no continuation token, guidance
+termination takes precedence rather than leaving the turn with no legal token.
 
 ### Per-turn seeds
 

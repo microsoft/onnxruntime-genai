@@ -168,7 +168,9 @@ Rules:
   empty grammar are meaningful values rather than "unset".
 - `min_generated_tokens` masks the end-of-sequence token until the turn has generated that many
   tokens. It does not prevent stop strings, turn or session limits, cancellation, failure, or
-  guidance termination.
+  guidance termination. An extendable accepting grammar continues under the minimum, but once
+  guidance permits EOS and no continuation token, its termination takes precedence rather than
+  leaving the turn with no legal token.
 - Admission rejects an explicitly set distribution scalar that contradicts a resolved greedy policy,
   so a caller never believes a turn sampled when it selected the top logit. A `temperature` other
   than 0 or 1, a nucleus `top_p` strictly between 0 and 1, and a `top_k` above 1 all contradict
