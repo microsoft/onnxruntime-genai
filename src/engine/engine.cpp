@@ -316,7 +316,7 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
             Dflash2Drafter::BytesPerBlock(*model->config_, paged_block_size, dflash2_cache_type);
         if (pool_blocks >
             std::numeric_limits<size_t>::max() / dflash2_bytes_per_pool_block) {
-          throw std::runtime_error("DFlash 2 windowed cache bytes overflow size_t.");
+          throw std::runtime_error("Windowed block-drafter cache bytes overflow size_t.");
         }
         dflash2_reserved_memory_bytes = pool_blocks * dflash2_bytes_per_pool_block;
       }
