@@ -691,6 +691,13 @@ inline OrtSessionOptions& OrtSessionOptions::AddConfigEntry(const char* config_k
   return *this;
 }
 
+inline OrtSessionOptions& OrtSessionOptions::AddFreeDimensionOverrideByName(
+    const char* dim_name, int64_t dim_value) {
+  Ort::ThrowOnError(
+      Ort::api->AddFreeDimensionOverrideByName(this, dim_name, dim_value));
+  return *this;
+}
+
 inline bool OrtSessionOptions::HasConfigEntry(const char* config_key) const {
   int out = 0;
   Ort::ThrowOnError(Ort::api->HasSessionConfigEntry(this, config_key, &out));
