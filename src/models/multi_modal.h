@@ -182,7 +182,7 @@ struct DecoderState : State {
   // Prefill chunking (see search.chunk_size). The embedding model still runs once over the whole
   // prompt (it is a lookup/projection), while the decoder prefill is split into several runs so the
   // peak attention workspace scales with the chunk size instead of the full prompt length.
-  bool SupportsPrefillChunking() const;
+  bool SupportsPrefillChunking(bool has_multimodal_content) const;
   void PrepareEmbeddingsForPrefill(size_t new_length);
   DeviceSpan<float> RunPrefillWithChunking(int current_length, DeviceSpan<int32_t>& next_tokens,
                                            DeviceSpan<int32_t> next_indices, size_t chunk_size);
