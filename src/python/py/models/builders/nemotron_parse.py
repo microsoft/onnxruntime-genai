@@ -6,16 +6,12 @@ from __future__ import annotations
 import json
 import os
 
-import onnx
 import onnx_ir as ir
 import torch
-from onnxruntime.quantization.matmul_nbits_quantizer import (
-    MatMulNBitsQuantizer,
-    QuantFormat,
-)
 from transformers import AutoModel, AutoProcessor
 
 from .nemotron_parse_decoder import NemotronParseDecoderComponent
+from .nemotron_parse_encoder import NemotronParseEncoderComponent
 
 
 def _resolve_image_size(config, extra_options):
@@ -31,34 +27,8 @@ def _resolve_image_size(config, extra_options):
     )
 
 
-def _save_model_with_external_data(model, onnx_path):
-    external_data_path = onnx_path + ".data"
-    if os.path.exists(external_data_path):
-        os.unlink(external_data_path)
-    onnx.save_model(
-        model,
-        onnx_path,
-        save_as_external_data=True,
-        all_tensors_to_one_file=True,
-        location=os.path.basename(external_data_path),
-        size_threshold=1024,
-        convert_attribute=False,
-    )
-
-
-class _NemotronParseEncoder(torch.nn.Module):
-    def __init__(self, model):
-        super().__init__()
-        self.encoder = model.encoder
-
-    def forward(self, pixel_values):
-        return self.encoder(
-            pixel_values, return_dict=True
-        ).last_hidden_state
-
-
 class NemotronParseModel:
-    """Build the RADIO encoder plus explicit mBART prefill/decode components."""
+    """Build the RADIO/cross-KV encoder and unified mBART decoder."""
 
     def __init__(
         self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options
@@ -118,12 +88,6 @@ class NemotronParseModel:
                 "export_components must contain only encoder and/or decoder."
             )
 
-        self.export_device = str(
-            self.extra_options.get("export_device", "cpu")
-        ).lower()
-        if self.export_device not in {"cpu", "cuda"}:
-            raise ValueError("export_device must be cpu or cuda.")
-
         patch_size = int(getattr(config.encoder, "patch_size", 16))
         encoder_grid_h = self.image_height // patch_size
         encoder_grid_w = self.image_width // patch_size
@@ -138,10 +102,6 @@ class NemotronParseModel:
 
         self.encoder_filename = "encoder.onnx"
         self.decoder_filename = "decoder.onnx"
-        self.decoder_prefill_filename = "decoder_prefill.onnx"
-        self.encoder_opset_version = int(
-            self.extra_options.get("opset_version", 20)
-        )
 
     def _provider_options(self):
         if self.ep == "cpu":
@@ -151,6 +111,23 @@ class NemotronParseModel:
             {"enable_cuda_graph": "1"} if self.ep == "trt-rtx" else {}
         )
         return [{ep_name: attrs}]
+
+    def _session_options(self):
+        options = {
+            "log_id": "onnxruntime-genai",
+            "provider_options": self._provider_options(),
+        }
+        if (
+            self.ep == "cuda"
+            and self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}
+        ):
+            # ORT's CUDA MatMulNBits kernel does not accept the optional bias
+            # that MatMulAddFusion would attach. Keep the bias as a separate Add.
+            # TRT-RTX exports QDQ and must retain this optimizer for INT4 fusion.
+            options["optimization.disable_specified_optimizers"] = (
+                "MatMulAddFusion"
+            )
+        return options
 
     def _torch_dtype(self):
         dtype = self.extra_options.get("torch_dtype")
@@ -178,13 +155,6 @@ class NemotronParseModel:
             low_cpu_mem_usage=True,
             **extra_kwargs,
         )
-        if self.export_device == "cuda" and not torch.cuda.is_available():
-            raise RuntimeError(
-                "export_device=cuda requested, but CUDA is not available."
-            )
-        model.to(
-            device=torch.device(self.export_device), dtype=torch_dtype
-        )
         model.eval()
 
         if getattr(model.config.decoder, "_attn_implementation", None) != "eager":
@@ -196,69 +166,21 @@ class NemotronParseModel:
             model.decoder.config._attn_implementation = "eager"
         return model
 
-    def _maybe_quantize_encoder_int4(self, onnx_path):
-        if self.onnx_dtype not in {
-            ir.DataType.INT4,
-            ir.DataType.UINT4,
-        }:
-            return
-
-        print(f"Quantizing encoder MatMul weights in {onnx_path}")
-        model = onnx.load(onnx_path, load_external_data=True)
-        quantizer = MatMulNBitsQuantizer(
+    def _make_encoder_component(self, model):
+        return NemotronParseEncoderComponent(
+            self.config,
             model,
-            bits=4,
-            block_size=int(self.extra_options.get("block_size", 32)),
-            is_symmetric=self.extra_options.get("is_symmetric", True),
-            accuracy_level=int(
-                self.extra_options.get("accuracy_level", 0)
-            ),
-            quant_format=(
-                QuantFormat.QDQ
-                if self.extra_options.get("use_qdq", False)
-                else QuantFormat.QOperator
-            ),
-            op_types_to_quantize=self.extra_options.get(
-                "op_types_to_quantize", ("MatMul",)
-            ),
-            nodes_to_exclude=self.extra_options.get(
-                "nodes_to_exclude", []
-            ),
-        )
-        quantizer.process()
-        _save_model_with_external_data(
-            quantizer.model.model, onnx_path
+            self.io_dtype,
+            self.onnx_dtype,
+            self.ep,
+            self.cache_dir,
+            self.extra_options,
+            image_height=self.image_height,
+            image_width=self.image_width,
+            encoder_sequence_length=self.encoder_sequence_length,
         )
 
-    def _export_encoder(self, model, output_dir):
-        out_path = os.path.join(output_dir, self.encoder_filename)
-        print(f"Exporting Nemotron Parse RADIO encoder to {out_path}")
-        external_data_path = f"{out_path}.data"
-        if os.path.exists(external_data_path):
-            os.unlink(external_data_path)
-        wrapper = _NemotronParseEncoder(model)
-        dtype = next(wrapper.parameters()).dtype
-        device = next(wrapper.parameters()).device
-        pixel_values = torch.randn(
-            (1, 3, self.image_height, self.image_width),
-            dtype=dtype,
-            device=device,
-        )
-        with torch.no_grad():
-            wrapper(pixel_values)
-        torch.onnx.export(
-            wrapper,
-            (pixel_values,),
-            out_path,
-            input_names=["pixel_values"],
-            output_names=["encoder_hidden_states"],
-            opset_version=self.encoder_opset_version,
-            external_data=True,
-            dynamo=False,
-        )
-        self._maybe_quantize_encoder_int4(out_path)
-
-    def _make_decoder_component(self, phase):
+    def _make_decoder_component(self):
         return NemotronParseDecoderComponent(
             self.config,
             self.io_dtype,
@@ -266,7 +188,6 @@ class NemotronParseModel:
             self.ep,
             self.cache_dir,
             self.extra_options,
-            phase=phase,
             encoder_sequence_length=self.encoder_sequence_length,
             prefill_sequence_length=self.prefill_sequence_length,
             cache_sequence_length=self.cache_sequence_length,
@@ -278,7 +199,11 @@ class NemotronParseModel:
     def save_model(self, output_dir):
         try:
             if "encoder" in self.export_components:
-                self._export_encoder(self._model, output_dir)
+                if self.cache_dir:
+                    os.makedirs(self.cache_dir, exist_ok=True)
+                component = self._make_encoder_component(self._model)
+                component.build()
+                component.save_model(output_dir)
 
             if "decoder" in self.export_components:
                 # The explicit graph builder serializes parameters from CPU.
@@ -286,12 +211,11 @@ class NemotronParseModel:
                 self._model.encoder = None
                 self._model.decoder.to("cpu")
                 self._model.lm_head.to("cpu")
-                for phase in ("prefill", "decode"):
-                    if self.cache_dir:
-                        os.makedirs(self.cache_dir, exist_ok=True)
-                    component = self._make_decoder_component(phase)
-                    component.build(self._model)
-                    component.save_model(output_dir)
+                if self.cache_dir:
+                    os.makedirs(self.cache_dir, exist_ok=True)
+                component = self._make_decoder_component()
+                component.build(self._model)
+                component.save_model(output_dir)
         finally:
             del self._model
 
@@ -307,6 +231,12 @@ class NemotronParseModel:
                 "pad_token_id": decoder_config.pad_token_id,
                 "context_length": self.cache_sequence_length,
                 "vocab_size": decoder_config.vocab_size,
+                "encoder": {
+                    "outputs": {
+                        "cross_present_key_names": "cross_present.%d.key",
+                        "cross_present_value_names": "cross_present.%d.value",
+                    }
+                },
                 "vision": {
                     "filename": self.encoder_filename,
                     "config_filename": "processor_config.json",
@@ -317,12 +247,8 @@ class NemotronParseModel:
                     "num_visual_tokens": self.encoder_sequence_length,
                 },
                 "decoder": {
-                    "session_options": {
-                        "log_id": "onnxruntime-genai",
-                        "provider_options": self._provider_options(),
-                    },
+                    "session_options": self._session_options(),
                     "filename": self.decoder_filename,
-                    "prefill_filename": self.decoder_prefill_filename,
                     "prefill_sequence_length": self.prefill_sequence_length,
                     "hidden_size": decoder_config.d_model,
                     "head_size": (
@@ -339,7 +265,6 @@ class NemotronParseModel:
                     "inputs": {
                         "input_ids": "decoder_input_ids",
                         "attention_mask": "decoder_attention_mask",
-                        "encoder_hidden_states": "encoder_hidden_states",
                         "past_key_names": "past_key_values.%d.key",
                         "past_value_names": "past_key_values.%d.value",
                         "cross_past_key_names": (
@@ -354,12 +279,6 @@ class NemotronParseModel:
                         "logits": "logits",
                         "present_key_names": "present.%d.key",
                         "present_value_names": "present.%d.value",
-                        "cross_present_key_names": (
-                            "cross_present.%d.key"
-                        ),
-                        "cross_present_value_names": (
-                            "cross_present.%d.value"
-                        ),
                     },
                 },
             },
