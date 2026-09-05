@@ -11,13 +11,6 @@
 namespace Generators {
 namespace {
 
-DeviceInterface& DeviceForTensor(const OrtValue& value,
-                                 DeviceInterface& model_device) {
-  const bool on_cpu =
-      value.GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_CPU;
-  return on_cpu ? *GetDeviceInterface(DeviceType::CPU) : model_device;
-}
-
 void ValidateTensorElementType(ONNXTensorElementDataType actual,
                                ONNXTensorElementDataType expected,
                                const std::string& name) {
@@ -126,12 +119,13 @@ void TensorScatterKeyValueCache::Add() {
 
 void TensorScatterKeyValueCache::Update(DeviceSpan<int32_t>,
                                         int total_length) {
-  if (total_length <= 0 || total_length > cache_sequence_length_) {
+  if (total_length <= current_length_ ||
+      total_length > cache_sequence_length_) {
     throw std::runtime_error(
         "TensorScatterKeyValueCache update exceeds the fixed cache capacity");
   }
 
-  const int write_index = total_length - 1;
+  const int write_index = current_length_;
   if (cache_write_indices_type_ == Ort::TypeToTensorType<int32_t>) {
     auto values = cache_write_indices_->GetDeviceSpan<int32_t>();
     auto cpu_values = values.CpuSpan();
@@ -144,54 +138,12 @@ void TensorScatterKeyValueCache::Update(DeviceSpan<int32_t>,
               static_cast<int64_t>(write_index));
     values.CopyCpuToDevice();
   }
+  current_length_ = total_length;
 }
 
 void TensorScatterKeyValueCache::RewindTo(size_t) {
   throw std::runtime_error(
       "TensorScatterKeyValueCache does not support rewind");
-}
-
-void TensorScatterKeyValueCache::Initialize(
-    const std::vector<std::unique_ptr<OrtValue>>& compact_values) {
-  if (compact_values.size() != values_.size()) {
-    throw std::runtime_error(
-        "TensorScatterKeyValueCache received an unexpected prefill cache count");
-  }
-
-  for (size_t i = 0; i < values_.size(); ++i) {
-    const auto source_info = compact_values[i]->GetTensorTypeAndShapeInfo();
-    const auto target_info = values_[i]->GetTensorTypeAndShapeInfo();
-    const auto source_shape = source_info->GetShape();
-    const auto target_shape = target_info->GetShape();
-    if (source_shape.size() != 4 ||
-        source_shape[0] != target_shape[0] ||
-        source_shape[1] != target_shape[1] ||
-        source_shape[3] != target_shape[3] ||
-        source_shape[2] > target_shape[2]) {
-      throw std::runtime_error(
-          "TensorScatterKeyValueCache prefill cache does not fit the decode cache");
-    }
-    ValidateTensorElementType(
-        source_info->GetElementType(), target_info->GetElementType(),
-        input_names_[i]);
-
-    const size_t row_bytes =
-        static_cast<size_t>(source_shape[2] * source_shape[3]) *
-        Ort::SizeOf(source_info->GetElementType());
-    const size_t target_stride =
-        static_cast<size_t>(target_shape[2] * target_shape[3]) *
-        Ort::SizeOf(target_info->GetElementType());
-    auto& cache_device = *state_.model_.p_device_kvcache_;
-    auto source = ByteWrapTensor(
-        DeviceForTensor(*compact_values[i], cache_device), *compact_values[i]);
-    auto target = ByteWrapTensor(cache_device, *values_[i]);
-    const size_t rows =
-        static_cast<size_t>(source_shape[0] * source_shape[1]);
-    for (size_t row = 0; row < rows; ++row) {
-      target.subspan(row * target_stride, row_bytes)
-          .CopyFrom(source.subspan(row * row_bytes, row_bytes));
-    }
-  }
 }
 
 }  // namespace Generators
