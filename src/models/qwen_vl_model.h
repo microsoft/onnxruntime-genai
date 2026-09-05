@@ -5,6 +5,30 @@
 
 namespace Generators {
 
+inline void ValidateVisionEmbeddingShapes(std::span<const int64_t> embeddings_shape,
+                                          size_t embeddings_element_count,
+                                          std::span<const int64_t> vision_shape,
+                                          size_t input_token_count) {
+  if (embeddings_shape.size() != 2 && embeddings_shape.size() != 3) {
+    throw std::runtime_error("Vision embedding injection: expected embeddings rank 2 or 3, got " +
+                             std::to_string(embeddings_shape.size()));
+  }
+  if (vision_shape.size() != 2) {
+    throw std::runtime_error("Vision embedding injection: expected vision features rank 2, got " +
+                             std::to_string(vision_shape.size()));
+  }
+
+  const int64_t embedding_dim = embeddings_shape.back();
+  const int64_t vision_dim = vision_shape[1];
+  if (embedding_dim <= 0 || vision_dim != embedding_dim) {
+    throw std::runtime_error("Vision embedding injection: dimension mismatch - vision_dim=" + std::to_string(vision_dim) +
+                             ", embedding_dim=" + std::to_string(embedding_dim));
+  }
+  if (input_token_count > embeddings_element_count / static_cast<size_t>(embedding_dim)) {
+    throw std::runtime_error("Vision embedding injection: embeddings output cannot hold all input tokens");
+  }
+}
+
 // Qwen2.5-VL pipeline model integrating vision pipeline + decoder pipeline.
 // Loads decoder pipeline sessions (handled by base) and constructs vision pipeline sessions.
 // State runs vision once (on first SetExtraInputs when pixel_values arrives) to produce image_features
