@@ -229,3 +229,35 @@ def score_case(case, text):
         and result["args_exact"]
     )
     return result
+
+
+def _normalize_for_match(text):
+    """Fold away formatting the model is free to choose: case, spacing, markdown.
+
+    A model may render the identifier UA482 as "**UA 482**" and still be quoting the
+    tool result exactly, so matching on the raw string would report a false failure.
+    """
+    return "".join(c for c in text.lower() if c not in " \t\n*_`,")
+
+
+def score_followup(case, text):
+    """Grade the answer produced after the tool result is fed back.
+
+    The expected substrings are values the caller can only know from the tool
+    result, so `answer_uses_result` distinguishes a grounded answer from one the
+    model invented or recited from memory.
+    """
+    own_turn = turn_text(text)
+    calls, _ = parse_tool_calls(strip_reasoning(own_turn))
+    answer = strip_reasoning(own_turn).strip()
+    normalized = _normalize_for_match(answer)
+    expected = case.get("expected_answer_contains") or []
+
+    missing = [needle for needle in expected if _normalize_for_match(needle) not in normalized]
+    return {
+        "answer_uses_result": not missing,
+        "missing_from_answer": missing,
+        "no_repeat_call": not calls,
+        "final_clean_stop": stopped_cleanly(text),
+        "answer": answer,
+    }

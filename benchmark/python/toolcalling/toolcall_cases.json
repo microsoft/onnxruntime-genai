@@ -9,10 +9,22 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "city": {"type": "string", "description": "City name, e.g. Paris"},
-            "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "Temperature unit"}
+            "city": {
+              "type": "string",
+              "description": "City name, e.g. Paris"
+            },
+            "unit": {
+              "type": "string",
+              "enum": [
+                "celsius",
+                "fahrenheit"
+              ],
+              "description": "Temperature unit"
+            }
           },
-          "required": ["city"]
+          "required": [
+            "city"
+          ]
         }
       }
     },
@@ -24,13 +36,32 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "origin": {"type": "string", "description": "IATA origin code"},
-            "destination": {"type": "string", "description": "IATA destination code"},
-            "date": {"type": "string", "description": "Departure date YYYY-MM-DD"},
-            "passengers": {"type": "integer", "description": "Number of passengers"},
-            "nonstop": {"type": "boolean", "description": "Only non-stop flights"}
+            "origin": {
+              "type": "string",
+              "description": "IATA origin code"
+            },
+            "destination": {
+              "type": "string",
+              "description": "IATA destination code"
+            },
+            "date": {
+              "type": "string",
+              "description": "Departure date YYYY-MM-DD"
+            },
+            "passengers": {
+              "type": "integer",
+              "description": "Number of passengers"
+            },
+            "nonstop": {
+              "type": "boolean",
+              "description": "Only non-stop flights"
+            }
           },
-          "required": ["origin", "destination", "date"]
+          "required": [
+            "origin",
+            "destination",
+            "date"
+          ]
         }
       }
     },
@@ -42,10 +73,25 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "items": {"type": "array", "items": {"type": "string"}, "description": "List of item SKUs"},
-            "priority": {"type": "string", "enum": ["standard", "express"], "description": "Shipping priority"}
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "List of item SKUs"
+            },
+            "priority": {
+              "type": "string",
+              "enum": [
+                "standard",
+                "express"
+              ],
+              "description": "Shipping priority"
+            }
           },
-          "required": ["items"]
+          "required": [
+            "items"
+          ]
         }
       }
     },
@@ -57,10 +103,23 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "ticker": {"type": "string", "description": "Ticker symbol, e.g. MSFT"},
-            "currency": {"type": "string", "enum": ["USD", "EUR", "JPY"], "description": "Quote currency"}
+            "ticker": {
+              "type": "string",
+              "description": "Ticker symbol, e.g. MSFT"
+            },
+            "currency": {
+              "type": "string",
+              "enum": [
+                "USD",
+                "EUR",
+                "JPY"
+              ],
+              "description": "Quote currency"
+            }
           },
-          "required": ["ticker"]
+          "required": [
+            "ticker"
+          ]
         }
       }
     },
@@ -72,12 +131,33 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "to": {"type": "string", "description": "Recipient email address"},
-            "subject": {"type": "string", "description": "Subject line"},
-            "body": {"type": "string", "description": "Message body"},
-            "importance": {"type": "string", "enum": ["low", "normal", "high"], "description": "Message importance"}
+            "to": {
+              "type": "string",
+              "description": "Recipient email address"
+            },
+            "subject": {
+              "type": "string",
+              "description": "Subject line"
+            },
+            "body": {
+              "type": "string",
+              "description": "Message body"
+            },
+            "importance": {
+              "type": "string",
+              "enum": [
+                "low",
+                "normal",
+                "high"
+              ],
+              "description": "Message importance"
+            }
           },
-          "required": ["to", "subject", "body"]
+          "required": [
+            "to",
+            "subject",
+            "body"
+          ]
         }
       }
     },
@@ -89,12 +169,30 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "title": {"type": "string", "description": "Event title"},
-            "start": {"type": "string", "description": "Start time ISO-8601"},
-            "duration_minutes": {"type": "integer", "description": "Length in minutes"},
-            "attendees": {"type": "array", "items": {"type": "string"}, "description": "Attendee email addresses"}
+            "title": {
+              "type": "string",
+              "description": "Event title"
+            },
+            "start": {
+              "type": "string",
+              "description": "Start time ISO-8601"
+            },
+            "duration_minutes": {
+              "type": "integer",
+              "description": "Length in minutes"
+            },
+            "attendees": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Attendee email addresses"
+            }
           },
-          "required": ["title", "start"]
+          "required": [
+            "title",
+            "start"
+          ]
         }
       }
     },
@@ -106,11 +204,33 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "text": {"type": "string", "description": "Text to translate"},
-            "target_language": {"type": "string", "enum": ["en", "fr", "de", "ja"], "description": "Target language code"},
-            "formality": {"type": "string", "enum": ["formal", "informal"], "description": "Desired formality"}
+            "text": {
+              "type": "string",
+              "description": "Text to translate"
+            },
+            "target_language": {
+              "type": "string",
+              "enum": [
+                "en",
+                "fr",
+                "de",
+                "ja"
+              ],
+              "description": "Target language code"
+            },
+            "formality": {
+              "type": "string",
+              "enum": [
+                "formal",
+                "informal"
+              ],
+              "description": "Desired formality"
+            }
           },
-          "required": ["text", "target_language"]
+          "required": [
+            "text",
+            "target_language"
+          ]
         }
       }
     },
@@ -122,11 +242,24 @@
         "parameters": {
           "type": "object",
           "properties": {
-            "value": {"type": "number", "description": "Numeric value to convert"},
-            "from_unit": {"type": "string", "description": "Source unit"},
-            "to_unit": {"type": "string", "description": "Target unit"}
+            "value": {
+              "type": "number",
+              "description": "Numeric value to convert"
+            },
+            "from_unit": {
+              "type": "string",
+              "description": "Source unit"
+            },
+            "to_unit": {
+              "type": "string",
+              "description": "Target unit"
+            }
           },
-          "required": ["value", "from_unit", "to_unit"]
+          "required": [
+            "value",
+            "from_unit",
+            "to_unit"
+          ]
         }
       }
     }
@@ -134,178 +267,501 @@
   "cases": [
     {
       "name": "weather_basic",
-      "tools": ["get_weather"],
+      "tools": [
+        "get_weather"
+      ],
       "query": "What is the weather in Paris right now?",
       "expected_function": "get_weather",
-      "expected_arguments": {"city": "Paris"}
+      "expected_arguments": {
+        "city": "Paris"
+      },
+      "tool_result": {
+        "temperature_c": 11,
+        "conditions": "light rain"
+      },
+      "expected_answer_contains": [
+        "11",
+        "rain"
+      ]
     },
     {
       "name": "weather_enum_fahrenheit",
-      "tools": ["get_weather"],
+      "tools": [
+        "get_weather"
+      ],
       "query": "Weather in Boston in fahrenheit please.",
       "expected_function": "get_weather",
-      "expected_arguments": {"city": "Boston", "unit": "fahrenheit"}
+      "expected_arguments": {
+        "city": "Boston",
+        "unit": "fahrenheit"
+      },
+      "tool_result": {
+        "temperature_f": 47,
+        "conditions": "windy"
+      },
+      "expected_answer_contains": [
+        "47",
+        "wind"
+      ]
     },
     {
       "name": "weather_enum_celsius",
-      "tools": ["get_weather"],
+      "tools": [
+        "get_weather"
+      ],
       "query": "Give me Tokyo's weather in celsius.",
       "expected_function": "get_weather",
-      "expected_arguments": {"city": "Tokyo", "unit": "celsius"}
+      "expected_arguments": {
+        "city": "Tokyo",
+        "unit": "celsius"
+      },
+      "tool_result": {
+        "temperature_c": 26,
+        "conditions": "humid"
+      },
+      "expected_answer_contains": [
+        "26",
+        "humid"
+      ]
     },
     {
       "name": "weather_multi_tool",
       "tools": "all",
       "query": "How cold is it in Oslo today?",
       "expected_function": "get_weather",
-      "expected_arguments": {"city": "Oslo"}
+      "expected_arguments": {
+        "city": "Oslo"
+      },
+      "tool_result": {
+        "temperature_c": -7,
+        "conditions": "snow"
+      },
+      "expected_answer_contains": [
+        "-7",
+        "snow"
+      ]
     },
     {
       "name": "flight_all_required",
-      "tools": ["search_flights"],
+      "tools": [
+        "search_flights"
+      ],
       "query": "Find flights from SFO to JFK on 2026-10-01.",
       "expected_function": "search_flights",
-      "expected_arguments": {"origin": "SFO", "destination": "JFK", "date": "2026-10-01"}
+      "expected_arguments": {
+        "origin": "SFO",
+        "destination": "JFK",
+        "date": "2026-10-01"
+      },
+      "tool_result": {
+        "flights": [
+          {
+            "number": "UA482",
+            "depart": "07:15",
+            "price_usd": 214
+          }
+        ]
+      },
+      "expected_answer_contains": [
+        "UA482",
+        "214"
+      ]
     },
     {
       "name": "flight_integer_and_boolean",
-      "tools": ["search_flights"],
+      "tools": [
+        "search_flights"
+      ],
       "query": "Find nonstop flights from LAX to ORD on 2026-11-15 for 2 passengers.",
       "expected_function": "search_flights",
-      "expected_arguments": {"origin": "LAX", "destination": "ORD", "date": "2026-11-15", "passengers": 2, "nonstop": true}
+      "expected_arguments": {
+        "origin": "LAX",
+        "destination": "ORD",
+        "date": "2026-11-15",
+        "passengers": 2,
+        "nonstop": true
+      },
+      "tool_result": {
+        "flights": [
+          {
+            "number": "AA1901",
+            "depart": "09:40",
+            "price_usd": 378
+          }
+        ]
+      },
+      "expected_answer_contains": [
+        "AA1901",
+        "378"
+      ]
     },
     {
       "name": "flight_multi_tool",
       "tools": "all",
       "query": "Search flights CDG to LHR on 2026-12-24.",
       "expected_function": "search_flights",
-      "expected_arguments": {"origin": "CDG", "destination": "LHR", "date": "2026-12-24"}
+      "expected_arguments": {
+        "origin": "CDG",
+        "destination": "LHR",
+        "date": "2026-12-24"
+      },
+      "tool_result": {
+        "flights": [
+          {
+            "number": "BA306",
+            "depart": "18:05",
+            "price_usd": 152
+          }
+        ]
+      },
+      "expected_answer_contains": [
+        "BA306",
+        "152"
+      ]
     },
     {
       "name": "order_array",
-      "tools": ["create_order"],
+      "tools": [
+        "create_order"
+      ],
       "query": "Order SKU-1 and SKU-2 please.",
       "expected_function": "create_order",
-      "expected_arguments": {"items": ["SKU-1", "SKU-2"]}
+      "expected_arguments": {
+        "items": [
+          "SKU-1",
+          "SKU-2"
+        ]
+      },
+      "tool_result": {
+        "order_id": "ORD-7781",
+        "status": "confirmed",
+        "eta_days": 4
+      },
+      "expected_answer_contains": [
+        "ORD-7781"
+      ]
     },
     {
       "name": "order_array_enum",
-      "tools": ["create_order"],
+      "tools": [
+        "create_order"
+      ],
       "query": "Order SKU-9 with express shipping.",
       "expected_function": "create_order",
-      "expected_arguments": {"items": ["SKU-9"], "priority": "express"}
+      "expected_arguments": {
+        "items": [
+          "SKU-9"
+        ],
+        "priority": "express"
+      },
+      "tool_result": {
+        "order_id": "ORD-9042",
+        "status": "confirmed",
+        "eta_days": 1
+      },
+      "expected_answer_contains": [
+        "ORD-9042"
+      ]
     },
     {
       "name": "order_multi_tool",
       "tools": "all",
       "query": "Place an order for SKU-42.",
       "expected_function": "create_order",
-      "expected_arguments": {"items": ["SKU-42"]}
+      "expected_arguments": {
+        "items": [
+          "SKU-42"
+        ]
+      },
+      "tool_result": {
+        "order_id": "ORD-4210",
+        "status": "confirmed",
+        "eta_days": 3
+      },
+      "expected_answer_contains": [
+        "ORD-4210"
+      ]
     },
     {
       "name": "stock_basic",
-      "tools": ["get_stock_price"],
+      "tools": [
+        "get_stock_price"
+      ],
       "query": "What is MSFT trading at?",
       "expected_function": "get_stock_price",
-      "expected_arguments": {"ticker": "MSFT"}
+      "expected_arguments": {
+        "ticker": "MSFT"
+      },
+      "tool_result": {
+        "ticker": "MSFT",
+        "price": 517.43,
+        "currency": "USD"
+      },
+      "expected_answer_contains": [
+        "517.43"
+      ]
     },
     {
       "name": "stock_enum_currency",
-      "tools": ["get_stock_price"],
+      "tools": [
+        "get_stock_price"
+      ],
       "query": "Get the NVDA price quoted in EUR.",
       "expected_function": "get_stock_price",
-      "expected_arguments": {"ticker": "NVDA", "currency": "EUR"}
+      "expected_arguments": {
+        "ticker": "NVDA",
+        "currency": "EUR"
+      },
+      "tool_result": {
+        "ticker": "NVDA",
+        "price": 142.68,
+        "currency": "EUR"
+      },
+      "expected_answer_contains": [
+        "142.68"
+      ]
     },
     {
       "name": "stock_multi_tool",
       "tools": "all",
       "query": "Look up the stock price of AAPL.",
       "expected_function": "get_stock_price",
-      "expected_arguments": {"ticker": "AAPL"}
+      "expected_arguments": {
+        "ticker": "AAPL"
+      },
+      "tool_result": {
+        "ticker": "AAPL",
+        "price": 268.19,
+        "currency": "USD"
+      },
+      "expected_answer_contains": [
+        "268.19"
+      ]
     },
     {
       "name": "email_basic",
-      "tools": ["send_email"],
+      "tools": [
+        "send_email"
+      ],
       "query": "Email bob@example.com with subject 'Lunch' and body 'See you at noon'.",
       "expected_function": "send_email",
-      "expected_arguments": {"to": "bob@example.com", "subject": "Lunch", "body": "See you at noon"}
+      "expected_arguments": {
+        "to": "bob@example.com",
+        "subject": "Lunch",
+        "body": "See you at noon"
+      },
+      "tool_result": {
+        "status": "sent",
+        "message_id": "MSG-3312"
+      },
+      "expected_answer_contains": [
+        "sent"
+      ]
     },
     {
       "name": "email_enum_importance",
-      "tools": ["send_email"],
+      "tools": [
+        "send_email"
+      ],
       "query": "Send a high importance email to sre@example.com, subject 'Outage', body 'Sev1 now'.",
       "expected_function": "send_email",
-      "expected_arguments": {"to": "sre@example.com", "subject": "Outage", "body": "Sev1 now", "importance": "high"}
+      "expected_arguments": {
+        "to": "sre@example.com",
+        "subject": "Outage",
+        "body": "Sev1 now",
+        "importance": "high"
+      },
+      "tool_result": {
+        "status": "sent",
+        "message_id": "MSG-4417"
+      },
+      "expected_answer_contains": [
+        "sent"
+      ]
     },
     {
       "name": "email_multi_tool",
       "tools": "all",
       "query": "Send an email to amy@example.com with subject 'Hi' and body 'Hello there'.",
       "expected_function": "send_email",
-      "expected_arguments": {"to": "amy@example.com", "subject": "Hi", "body": "Hello there"}
+      "expected_arguments": {
+        "to": "amy@example.com",
+        "subject": "Hi",
+        "body": "Hello there"
+      },
+      "tool_result": {
+        "status": "sent",
+        "message_id": "MSG-5528"
+      },
+      "expected_answer_contains": [
+        "sent"
+      ]
     },
     {
       "name": "calendar_basic",
-      "tools": ["create_event"],
+      "tools": [
+        "create_event"
+      ],
       "query": "Create an event titled 'Standup' starting 2026-09-10T09:00:00.",
       "expected_function": "create_event",
-      "expected_arguments": {"title": "Standup", "start": "2026-09-10T09:00:00"}
+      "expected_arguments": {
+        "title": "Standup",
+        "start": "2026-09-10T09:00:00"
+      },
+      "tool_result": {
+        "event_id": "EVT-551",
+        "status": "created"
+      },
+      "expected_answer_contains": [
+        "created"
+      ]
     },
     {
       "name": "calendar_integer_duration",
-      "tools": ["create_event"],
+      "tools": [
+        "create_event"
+      ],
       "query": "Create a 45 minute event 'Design Review' at 2026-09-11T14:00:00.",
       "expected_function": "create_event",
-      "expected_arguments": {"title": "Design Review", "start": "2026-09-11T14:00:00", "duration_minutes": 45}
+      "expected_arguments": {
+        "title": "Design Review",
+        "start": "2026-09-11T14:00:00",
+        "duration_minutes": 45
+      },
+      "tool_result": {
+        "event_id": "EVT-552",
+        "status": "created"
+      },
+      "expected_answer_contains": [
+        "created"
+      ]
     },
     {
       "name": "calendar_multi_tool",
       "tools": "all",
       "query": "Add a calendar event called 'Retro' at 2026-09-12T16:00:00.",
       "expected_function": "create_event",
-      "expected_arguments": {"title": "Retro", "start": "2026-09-12T16:00:00"}
+      "expected_arguments": {
+        "title": "Retro",
+        "start": "2026-09-12T16:00:00"
+      },
+      "tool_result": {
+        "event_id": "EVT-553",
+        "status": "created"
+      },
+      "expected_answer_contains": [
+        "created"
+      ]
     },
     {
       "name": "translate_enum_french",
-      "tools": ["translate_text"],
+      "tools": [
+        "translate_text"
+      ],
       "query": "Translate 'good morning' into French.",
       "expected_function": "translate_text",
-      "expected_arguments": {"text": "good morning", "target_language": "fr"}
+      "expected_arguments": {
+        "text": "good morning",
+        "target_language": "fr"
+      },
+      "tool_result": {
+        "translation": "bonjour"
+      },
+      "expected_answer_contains": [
+        "bonjour"
+      ]
     },
     {
       "name": "translate_enum_japanese",
-      "tools": ["translate_text"],
+      "tools": [
+        "translate_text"
+      ],
       "query": "Translate 'thank you' to Japanese.",
       "expected_function": "translate_text",
-      "expected_arguments": {"text": "thank you", "target_language": "ja"}
+      "expected_arguments": {
+        "text": "thank you",
+        "target_language": "ja"
+      },
+      "tool_result": {
+        "translation": "arigatou"
+      },
+      "expected_answer_contains": [
+        "arigatou"
+      ]
     },
     {
       "name": "translate_multi_tool",
       "tools": "all",
       "query": "Translate 'good night' into German.",
       "expected_function": "translate_text",
-      "expected_arguments": {"text": "good night", "target_language": "de"}
+      "expected_arguments": {
+        "text": "good night",
+        "target_language": "de"
+      },
+      "tool_result": {
+        "translation": "gute Nacht"
+      },
+      "expected_answer_contains": [
+        "gute Nacht"
+      ]
     },
     {
       "name": "units_integer",
-      "tools": ["convert_units"],
+      "tools": [
+        "convert_units"
+      ],
       "query": "Convert 100 kilometers to miles.",
       "expected_function": "convert_units",
-      "expected_arguments": {"value": 100, "from_unit": "kilometers", "to_unit": "miles"}
+      "expected_arguments": {
+        "value": 100,
+        "from_unit": "kilometers",
+        "to_unit": "miles"
+      },
+      "tool_result": {
+        "value": 62.1371,
+        "unit": "miles"
+      },
+      "expected_answer_contains": [
+        "62.1"
+      ]
     },
     {
       "name": "units_decimal",
-      "tools": ["convert_units"],
+      "tools": [
+        "convert_units"
+      ],
       "query": "Convert 2.5 kilograms into pounds.",
       "expected_function": "convert_units",
-      "expected_arguments": {"value": 2.5, "from_unit": "kilograms", "to_unit": "pounds"}
+      "expected_arguments": {
+        "value": 2.5,
+        "from_unit": "kilograms",
+        "to_unit": "pounds"
+      },
+      "tool_result": {
+        "value": 5.5116,
+        "unit": "pounds"
+      },
+      "expected_answer_contains": [
+        "5.5"
+      ]
     },
     {
       "name": "units_multi_tool",
       "tools": "all",
       "query": "Convert 32 fahrenheit to celsius.",
       "expected_function": "convert_units",
-      "expected_arguments": {"value": 32, "from_unit": "fahrenheit", "to_unit": "celsius"}
+      "expected_arguments": {
+        "value": 32,
+        "from_unit": "fahrenheit",
+        "to_unit": "celsius"
+      },
+      "tool_result": {
+        "value": 0.0,
+        "unit": "celsius"
+      },
+      "expected_answer_contains": [
+        "0"
+      ]
     },
     {
       "name": "no_tool_greeting",
@@ -327,7 +783,9 @@
     },
     {
       "name": "no_tool_unrelated_tool_offered",
-      "tools": ["get_weather"],
+      "tools": [
+        "get_weather"
+      ],
       "query": "What is the capital city of Italy?",
       "expected_function": null
     }

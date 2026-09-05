@@ -26,7 +26,7 @@ import numpy as np
 import onnxruntime_genai as og
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from toolcall_parsing import score_case
+from toolcall_parsing import score_case, score_followup
 
 DEFAULT_CASES = Path(__file__).resolve().parent / "toolcall_cases.json"
 
@@ -39,6 +39,9 @@ METRICS = [
     "args_exact",
     "clean_stop",
 ]
+
+# Second turn: the model has been handed the tool's result and must answer with it.
+E2E_METRICS = ["end_to_end_correct", "answer_uses_result", "no_repeat_call", "final_clean_stop"]
 
 
 def load_cases(path):
@@ -55,6 +58,8 @@ def load_cases(path):
                 "messages": [{"role": "user", "content": case["query"]}],
                 "expected_function": case.get("expected_function"),
                 "expected_arguments": case.get("expected_arguments") or {},
+                "tool_result": case.get("tool_result"),
+                "expected_answer_contains": case.get("expected_answer_contains") or [],
             }
         )
     return cases
@@ -76,15 +81,38 @@ def build_model(args):
     return model, og.Tokenizer(model)
 
 
+def render_prompt(tokenizer, messages, tools, template_str):
+    return tokenizer.apply_chat_template(
+        messages=json.dumps(messages),
+        tools=json.dumps(tools),
+        add_generation_prompt=True,
+        template_str=template_str,
+    )
+
+
 def render_prompts(tokenizer, cases, template_str):
+    return [render_prompt(tokenizer, case["messages"], case["tools"], template_str) for case in cases]
+
+
+def followup_messages(case, row):
+    """Replay the call the model just made, then hand back the tool's result.
+
+    This exercises two template paths the first turn never touches: rendering an
+    assistant turn that carries tool_calls, and rendering a tool result.
+    """
     return [
-        tokenizer.apply_chat_template(
-            messages=json.dumps(case["messages"]),
-            tools=json.dumps(case["tools"]),
-            add_generation_prompt=True,
-            template_str=template_str,
-        )
-        for case in cases
+        *case["messages"],
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "type": "function",
+                    "function": {"name": row["called_function"], "arguments": row["arguments"]},
+                }
+            ],
+        },
+        {"role": "tool", "name": row["called_function"], "content": json.dumps(case["tool_result"])},
     ]
 
 
@@ -103,7 +131,7 @@ def run_with_engine(model, tokenizer, prompts, max_new_tokens, concurrency):
     outputs = {}
 
     for start in range(0, len(prompts), concurrency):
-        wave = list(enumerate(prompts))[start : start + concurrency]
+        wave = enumerate(prompts[start : start + concurrency], start=start)
         live, by_request = {}, {}
         for index, tokens in wave:
             params = og.GeneratorParams(model)
@@ -177,18 +205,19 @@ def run(args):
         template_str = Path(args.chat_template_file).read_text(encoding="utf-8")
 
     rendered = render_prompts(tokenizer, cases, template_str)
-    prompts = [list(tokenizer.encode(text)) for text in rendered]
 
     runner = args.runner
     if runner == "auto":
         runner = "engine" if is_paged(args.model_path) else "generator"
 
+    def generate(prompt_texts):
+        encoded = [list(tokenizer.encode(text)) for text in prompt_texts]
+        if runner == "engine":
+            return run_with_engine(model, tokenizer, encoded, args.max_new_tokens, args.concurrency)
+        return run_with_generator(model, tokenizer, encoded, args.max_new_tokens)
+
     started = time.perf_counter()
-    if runner == "engine":
-        outputs = run_with_engine(model, tokenizer, prompts, args.max_new_tokens, args.concurrency)
-    else:
-        outputs = run_with_generator(model, tokenizer, prompts, args.max_new_tokens)
-    elapsed = time.perf_counter() - started
+    outputs = generate(rendered)
 
     rows = []
     for index, case in enumerate(cases):
@@ -197,15 +226,49 @@ def run(args):
         row["output"] = text
         rows.append(row)
 
+    # Second turn: hand back the tool result and grade the answer built from it.
+    # A case that never produced a usable call has nothing to feed back.
+    followups = [
+        (index, case)
+        for index, case in enumerate(cases)
+        if args.mode == "end_to_end" and case["tool_result"] is not None and rows[index]["called_function"]
+    ]
+    if followups:
+        prompts = [
+            render_prompt(tokenizer, followup_messages(case, rows[index]), case["tools"], template_str)
+            for index, case in followups
+        ]
+        followup_outputs = generate(prompts)
+        for position, (index, case) in enumerate(followups):
+            rows[index].update(score_followup(case, followup_outputs.get(position, "")))
+
+    for index, case in enumerate(cases):
+        row = rows[index]
+        if case["tool_result"] is None:
+            # Nothing to feed back, so the single-turn verdict is the whole story.
+            row.setdefault("answer_uses_result", row["correct"])
+            row.setdefault("no_repeat_call", row["correct"])
+            row.setdefault("final_clean_stop", row["clean_stop"])
+        else:
+            row.setdefault("answer_uses_result", False)
+            row.setdefault("no_repeat_call", False)
+            row.setdefault("final_clean_stop", False)
+        row["end_to_end_correct"] = bool(
+            row["correct"] and row["answer_uses_result"] and row["no_repeat_call"] and row["final_clean_stop"]
+        )
+    elapsed = time.perf_counter() - started
+
     total = len(rows)
     summary = {
         "model_path": args.model_path,
         "execution_provider": args.execution_provider,
         "runner": runner,
+        "mode": args.mode,
         "cases": total,
         "seconds": round(elapsed, 2),
     }
-    for metric in METRICS:
+    reported = METRICS + (E2E_METRICS if args.mode == "end_to_end" else [])
+    for metric in reported:
         passed = sum(bool(row[metric]) for row in rows)
         summary[metric] = passed
         summary[f"{metric}_percent"] = round(100.0 * passed / total, 2) if total else None
@@ -220,11 +283,12 @@ def run(args):
         Path(args.output).write_text(text + "\n", encoding="utf-8")
     print(json.dumps({k: v for k, v in summary.items() if k != "results"}, indent=2))
 
-    failures = [row["name"] for row in rows if not row["correct"]]
+    headline = "end_to_end_correct" if args.mode == "end_to_end" else "correct"
+    failures = [row["name"] for row in rows if not row[headline]]
     if failures:
         print(f"failed cases: {failures}")
-    if args.fail_under is not None and summary["correct_percent"] < args.fail_under:
-        print(f"FAIL: correct {summary['correct_percent']}% < required {args.fail_under}%")
+    if args.fail_under is not None and summary[f"{headline}_percent"] < args.fail_under:
+        print(f"FAIL: {headline} {summary[f'{headline}_percent']}% < required {args.fail_under}%")
         return 1
     return 0
 
@@ -235,6 +299,12 @@ if __name__ == "__main__":
     parser.add_argument("-e", "--execution_provider", required=True, choices=["cpu", "cuda", "dml", "webgpu"])
     parser.add_argument("-o", "--output", help="write the full report, including per-case output")
     parser.add_argument("--cases", default=str(DEFAULT_CASES))
+    parser.add_argument(
+        "--mode",
+        choices=["tool_call", "end_to_end"],
+        default="end_to_end",
+        help="end_to_end feeds each tool's result back and grades the answer built from it",
+    )
     parser.add_argument(
         "--runner",
         choices=["auto", "engine", "generator"],

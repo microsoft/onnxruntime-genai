@@ -1,10 +1,19 @@
 # Tool-calling benchmark
 
-Measures whether a GenAI-supported ONNX chat model emits correct tool calls.
+Measures whether a GenAI-supported ONNX chat model calls tools correctly and answers
+from their results.
 
-Tool definitions are passed to `apply_chat_template(tools=...)` as ordinary OpenAI
-function specs, so a run exercises the whole serving path: rendering the tool block
-into the prompt, generating, stopping, and the emitted call itself.
+Each case runs two turns. The first hands the model ordinary OpenAI function specs via
+`apply_chat_template(tools=...)` and grades the call it emits. The second replays that
+call back as an assistant turn, appends the tool's result as a `tool` message, and
+grades the answer built from it. The second turn matters because it is the only thing
+that exercises the template's tool-result and assistant-`tool_calls` rendering, and the
+only thing that shows whether the model actually grounds its answer in what the tool
+returned.
+
+No tools are really executed: each case ships a canned `tool_result`, which keeps the
+benchmark deterministic and offline. Use `--mode tool_call` to grade only the first
+turn.
 
 ## Running
 
@@ -18,6 +27,8 @@ while stdout carries just the summary.
 
 ## What the metrics mean
 
+First turn, the emitted call:
+
 | Metric | Meaning |
 |---|---|
 | `correct` | function, required arguments, enums, and values all right |
@@ -27,6 +38,15 @@ while stdout carries just the summary.
 | `no_unknown_params` | no arguments outside the declared schema |
 | `args_exact` | argument values match the expected ones |
 | `clean_stop` | the model ended its turn instead of writing the next one |
+
+Second turn, the answer built from the tool result (`--mode end_to_end`):
+
+| Metric | Meaning |
+|---|---|
+| `end_to_end_correct` | headline: the call was right and so was the answer |
+| `answer_uses_result` | the answer quotes values only the tool result supplied |
+| `no_repeat_call` | the model answered instead of calling the tool again |
+| `final_clean_stop` | the answer turn ended cleanly |
 
 `enum_valid`, `no_unknown_params` and `clean_stop` usually fail for configuration
 reasons rather than model quality, so check them before blaming the weights:
@@ -47,6 +67,11 @@ tools to offer (or `"all"`) and pins an expected function and arguments, so scor
 needs no judge model. Cases with `"expected_function": null` must be answered
 directly, which catches over-eager calling. Point `--cases` at your own file to
 benchmark a different tool set.
+
+A case's `tool_result` is what the tool would have returned, and
+`expected_answer_contains` lists values the model can only know from that result, so
+`answer_uses_result` separates a grounded answer from an invented one. Matching
+ignores case, spacing and markdown, so `UA482` still matches `**UA 482**`.
 
 Reasoning models can spend the whole token budget thinking. Raise
 `--max_new_tokens`, or pass `--chat_template_file` with a template that pins a lower
