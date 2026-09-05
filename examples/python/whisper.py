@@ -11,7 +11,7 @@ import numpy as np
 import onnxruntime_genai as og
 from common import register_ep
 from whisper_timestamps import word_timestamps
-from whisper_utils.output import TIMESTAMP_BEGIN, segments_from_tokens, write_result
+from whisper_utils.output import segments_from_tokens, write_result
 
 # og.set_log_options(enabled=True, model_input_values=True, model_output_values=True)
 
@@ -193,6 +193,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.temperature and args.num_beams != 1:
         parser.error("Sampling requires --num-beams 1.")
+    if not 0 < args.top_p <= 1:
+        parser.error("--top-p must be in (0, 1].")
+    if args.max_length <= 0:
+        parser.error("--max-length must be positive.")
     if args.word_timestamps and not args.alignment_heads:
         parser.error("--word-timestamps requires --alignment-heads.")
     run(args)

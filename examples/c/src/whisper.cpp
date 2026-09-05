@@ -6,6 +6,7 @@
 #include <fstream>
 #include <filesystem>
 #include <functional>
+#include <algorithm>
 #include <cmath>
 #include <memory>
 #include <iomanip>
@@ -42,6 +43,20 @@ struct WhisperSegment {
   std::string text;
 };
 
+struct WhisperOptions {
+  std::string language{"en"};
+  std::string task{"transcribe"};
+  std::string initial_prompt;
+  std::string output_dir;
+  std::vector<std::string> output_formats{"txt"};
+  int max_length{448};
+  int top_k{1};
+  double temperature{};
+  double top_p{1.0};
+  double repetition_penalty{1.0};
+  bool timestamps{};
+};
+
 std::string FormatTimestamp(double seconds, char separator) {
   auto milliseconds = static_cast<int64_t>(std::round(seconds * 1000));
   auto hours = milliseconds / 3600000;
@@ -59,7 +74,9 @@ std::string FormatTimestamp(double seconds, char separator) {
 std::vector<WhisperSegment> GetSegments(const int32_t* tokens, size_t count,
                                         const std::function<std::string(const int32_t*, size_t)>& decode) {
   std::vector<WhisperSegment> segments;
-  size_t start = 0;
+  const auto first_timestamp = std::find_if(tokens, tokens + count, [](int32_t token) { return token >= kTimestampBegin; });
+  if (first_timestamp == tokens + count) return {{0, 0, decode(tokens, count)}};
+  size_t start = static_cast<size_t>(first_timestamp - tokens);
   for (size_t index = 1; index < count; ++index) {
     if (tokens[index - 1] >= kTimestampBegin && tokens[index] >= kTimestampBegin) {
       std::vector<int32_t> text_tokens;
@@ -112,8 +129,7 @@ void WriteResults(const std::vector<WhisperSegment>& segments, const std::string
   }
 }
 
-void CXX_API(const char* model_path, int32_t num_beams, const std::string& language, const std::string& task,
-             bool timestamps, const std::string& output_dir, const std::vector<std::string>& output_formats) {
+void CXX_API(const char* model_path, int32_t num_beams, const WhisperOptions& options) {
   std::cout << "Creating model..." << std::endl;
   auto model = OgaModel::Create(model_path);
   std::cout << "Creating multimodal processor..." << std::endl;
@@ -146,8 +162,9 @@ void CXX_API(const char* model_path, int32_t num_beams, const std::string& langu
 
     std::cout << "Processing inputs..." << std::endl;
     const size_t batch_size = audio_paths.size();
-    std::string prompt_tokens = "<|startoftranscript|><|" + language + "|><|" + task + "|>";
-    if (!timestamps) {
+    std::string prompt_tokens = "<|startoftranscript|><|" + options.language + "|><|" + options.task + "|>";
+    if (!options.initial_prompt.empty()) prompt_tokens += " " + options.initial_prompt;
+    if (!options.timestamps) {
       prompt_tokens += "<|notimestamps|>";
     }
     const std::vector<const char*> prompts(batch_size, prompt_tokens.c_str());
@@ -156,10 +173,14 @@ void CXX_API(const char* model_path, int32_t num_beams, const std::string& langu
     std::cout << "Generating response..." << std::endl;
     auto params = OgaGeneratorParams::Create(*model);
     params->SetSearchOption("batch_size", static_cast<double>(batch_size));
-    params->SetSearchOption("max_length", 448);
-    params->SetSearchOptionBool("do_sample", false);
+    params->SetSearchOption("max_length", options.max_length);
+    params->SetSearchOptionBool("do_sample", options.temperature > 0);
     params->SetSearchOption("num_beams", num_beams);
     params->SetSearchOption("num_return_sequences", num_beams);
+    params->SetSearchOption("temperature", options.temperature);
+    params->SetSearchOption("top_k", options.top_k);
+    params->SetSearchOption("top_p", options.top_p);
+    params->SetSearchOption("repetition_penalty", options.repetition_penalty);
 
     auto generator = OgaGenerator::Create(*model, *params);
     generator->SetInputs(*inputs);
@@ -174,14 +195,14 @@ void CXX_API(const char* model_path, int32_t num_beams, const std::string& langu
       const auto num_tokens = generator->GetSequenceCount(i);
       const auto tokens = generator->GetSequenceData(i);
       std::cout << processor->Decode(tokens, num_tokens) << std::endl;
-      if (timestamps) {
+      if (options.timestamps) {
         PrintTimestampTokens(tokens, num_tokens);
       }
       auto segments = GetSegments(tokens, num_tokens, [&processor](const int32_t* data, size_t size) {
         return processor->Decode(data, size).p_;
       });
       auto stem = std::filesystem::path(audio_paths[i / num_beams]).stem().string();
-      WriteResults(segments, output_dir, stem + ".beam" + std::to_string(i % num_beams), output_formats);
+      WriteResults(segments, options.output_dir, stem + ".beam" + std::to_string(i % num_beams), options.output_formats);
     }
 
     std::cout << "\n\n\n";
@@ -198,8 +219,7 @@ void CheckResult(OgaResult* result) {
   }
 }
 
-void C_API(const char* model_path, int32_t num_beams, const std::string& language, const std::string& task,
-           bool timestamps, const std::string& output_dir, const std::vector<std::string>& output_formats) {
+void C_API(const char* model_path, int32_t num_beams, const WhisperOptions& options) {
   OgaModel* model;
   std::cout << "Creating model..." << std::endl;
   CheckResult(OgaCreateModel(model_path, &model));
@@ -242,8 +262,9 @@ void C_API(const char* model_path, int32_t num_beams, const std::string& languag
     std::cout << "Processing audio..." << std::endl;
     OgaNamedTensors* inputs;
     const size_t batch_size = audio_paths.size();
-    std::string prompt_tokens = "<|startoftranscript|><|" + language + "|><|" + task + "|>";
-    if (!timestamps) {
+    std::string prompt_tokens = "<|startoftranscript|><|" + options.language + "|><|" + options.task + "|>";
+    if (!options.initial_prompt.empty()) prompt_tokens += " " + options.initial_prompt;
+    if (!options.timestamps) {
       prompt_tokens += "<|notimestamps|>";
     }
     std::vector<const char*> prompts(batch_size, prompt_tokens.c_str());
@@ -256,10 +277,14 @@ void C_API(const char* model_path, int32_t num_beams, const std::string& languag
     OgaGeneratorParams* params;
     CheckResult(OgaCreateGeneratorParams(model, &params));
     CheckResult(OgaGeneratorParamsSetSearchNumber(params, "batch_size", static_cast<double>(batch_size)));
-    CheckResult(OgaGeneratorParamsSetSearchNumber(params, "max_length", 448));
-    CheckResult(OgaGeneratorParamsSetSearchBool(params, "do_sample", false));
+    CheckResult(OgaGeneratorParamsSetSearchNumber(params, "max_length", options.max_length));
+    CheckResult(OgaGeneratorParamsSetSearchBool(params, "do_sample", options.temperature > 0));
     CheckResult(OgaGeneratorParamsSetSearchNumber(params, "num_beams", num_beams));
     CheckResult(OgaGeneratorParamsSetSearchNumber(params, "num_return_sequences", num_beams));
+    CheckResult(OgaGeneratorParamsSetSearchNumber(params, "temperature", options.temperature));
+    CheckResult(OgaGeneratorParamsSetSearchNumber(params, "top_k", options.top_k));
+    CheckResult(OgaGeneratorParamsSetSearchNumber(params, "top_p", options.top_p));
+    CheckResult(OgaGeneratorParamsSetSearchNumber(params, "repetition_penalty", options.repetition_penalty));
 
     OgaGenerator* generator;
     CheckResult(OgaCreateGenerator(model, params, &generator));
@@ -278,7 +303,7 @@ void C_API(const char* model_path, int32_t num_beams, const std::string& languag
       const char* str;
       CheckResult(OgaProcessorDecode(processor, tokens, num_tokens, &str));
       std::cout << str << std::endl;
-      if (timestamps) {
+      if (options.timestamps) {
         PrintTimestampTokens(tokens, num_tokens);
       }
       auto segments = GetSegments(tokens, num_tokens, [processor](const int32_t* data, size_t size) {
@@ -287,7 +312,7 @@ void C_API(const char* model_path, int32_t num_beams, const std::string& languag
         return std::string(decoded);
       });
       auto stem = std::filesystem::path(audio_paths[i / num_beams]).stem().string();
-      WriteResults(segments, output_dir, stem + ".beam" + std::to_string(i % num_beams), output_formats);
+      WriteResults(segments, options.output_dir, stem + ".beam" + std::to_string(i % num_beams), options.output_formats);
     }
 
     std::cout << "\n\n"
@@ -307,7 +332,9 @@ void C_API(const char* model_path, int32_t num_beams, const std::string& languag
 static void print_usage_whisper(int /*argc*/, char** argv) {
   std::cerr << "usage: " << argv[0] << " <model_path> <num_beams> [--language <language>] "
             << "[--task <transcribe|translate>] [--timestamps] [--output-dir <dir>] "
-            << "[--output-format <txt|json|jsonl|srt|tsv|vtt,...>]" << std::endl;
+            << "[--output-format <txt|json|jsonl|srt|tsv|vtt,...>] [--initial-prompt <text>] "
+            << "[--temperature <float>] [--top-k <int>] [--top-p <float>] "
+            << "[--repetition-penalty <float>] [--max-length <int>]" << std::endl;
 }
 
 int main(int argc, char** argv) {
@@ -316,31 +343,43 @@ int main(int argc, char** argv) {
     return -1;
   }
 
-  std::string language = "en";
-  std::string task = "transcribe";
-  std::string output_dir;
-  std::vector<std::string> output_formats{"txt"};
-  bool timestamps = false;
+  WhisperOptions options;
   for (int i = 3; i < argc; ++i) {
     const std::string option = argv[i];
     if (option == "--timestamps") {
-      timestamps = true;
-    } else if ((option == "--language" || option == "--task" || option == "--output-dir" || option == "--output-format") && ++i < argc) {
-      if (option == "--language") language = argv[i];
-      else if (option == "--task") task = argv[i];
-      else if (option == "--output-dir") output_dir = argv[i];
+      options.timestamps = true;
+    } else if ((option == "--language" || option == "--task" || option == "--output-dir" || option == "--output-format" ||
+                option == "--initial-prompt" || option == "--temperature" || option == "--top-k" || option == "--top-p" ||
+                option == "--repetition-penalty" || option == "--max-length") && ++i < argc) {
+      if (option == "--language") options.language = argv[i];
+      else if (option == "--task") options.task = argv[i];
+      else if (option == "--output-dir") options.output_dir = argv[i];
+      else if (option == "--initial-prompt") options.initial_prompt = argv[i];
+      else if (option == "--temperature") options.temperature = std::stod(argv[i]);
+      else if (option == "--top-k") options.top_k = std::stoi(argv[i]);
+      else if (option == "--top-p") options.top_p = std::stod(argv[i]);
+      else if (option == "--repetition-penalty") options.repetition_penalty = std::stod(argv[i]);
+      else if (option == "--max-length") options.max_length = std::stoi(argv[i]);
       else {
-        output_formats.clear();
+        options.output_formats.clear();
         std::istringstream formats(argv[i]);
-        for (std::string format; std::getline(formats, format, ',');) output_formats.push_back(format);
+        for (std::string format; std::getline(formats, format, ',');) options.output_formats.push_back(format);
       }
     } else {
       print_usage_whisper(argc, argv);
       return -1;
     }
   }
-  if (task != "transcribe" && task != "translate") {
+  if (options.task != "transcribe" && options.task != "translate") {
     std::cerr << "--task must be transcribe or translate." << std::endl;
+    return -1;
+  }
+  if (options.temperature > 0 && std::stoi(argv[2]) != 1) {
+    std::cerr << "Sampling requires num_beams to be 1." << std::endl;
+    return -1;
+  }
+  if (options.top_p <= 0 || options.top_p > 1 || options.max_length <= 0) {
+    std::cerr << "--top-p must be in (0, 1] and --max-length must be positive." << std::endl;
     return -1;
   }
 
@@ -355,10 +394,10 @@ int main(int argc, char** argv) {
 
 #ifdef USE_CXX
   std::cout << "C++ API" << std::endl;
-  CXX_API(argv[1], std::stoi(argv[2]), language, task, timestamps, output_dir, output_formats);
+  CXX_API(argv[1], std::stoi(argv[2]), options);
 #else
   std::cout << "C API" << std::endl;
-  C_API(argv[1], std::stoi(argv[2]), language, task, timestamps, output_dir, output_formats);
+  C_API(argv[1], std::stoi(argv[2]), options);
 #endif
 
   return 0;
