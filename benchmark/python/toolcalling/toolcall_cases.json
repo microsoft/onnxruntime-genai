@@ -1,0 +1,335 @@
+{
+  "_comment": "Tool definitions are ordinary OpenAI function specs. A case may list tool names or use \"all\". expected_function null means the model should answer directly and call nothing.",
+  "tools": {
+    "get_weather": {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get the current weather for a city.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "city": {"type": "string", "description": "City name, e.g. Paris"},
+            "unit": {"type": "string", "enum": ["celsius", "fahrenheit"], "description": "Temperature unit"}
+          },
+          "required": ["city"]
+        }
+      }
+    },
+    "search_flights": {
+      "type": "function",
+      "function": {
+        "name": "search_flights",
+        "description": "Search available flights between two airports on a date.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "origin": {"type": "string", "description": "IATA origin code"},
+            "destination": {"type": "string", "description": "IATA destination code"},
+            "date": {"type": "string", "description": "Departure date YYYY-MM-DD"},
+            "passengers": {"type": "integer", "description": "Number of passengers"},
+            "nonstop": {"type": "boolean", "description": "Only non-stop flights"}
+          },
+          "required": ["origin", "destination", "date"]
+        }
+      }
+    },
+    "create_order": {
+      "type": "function",
+      "function": {
+        "name": "create_order",
+        "description": "Place an order for items.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "items": {"type": "array", "items": {"type": "string"}, "description": "List of item SKUs"},
+            "priority": {"type": "string", "enum": ["standard", "express"], "description": "Shipping priority"}
+          },
+          "required": ["items"]
+        }
+      }
+    },
+    "get_stock_price": {
+      "type": "function",
+      "function": {
+        "name": "get_stock_price",
+        "description": "Look up the latest price for a stock ticker.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "ticker": {"type": "string", "description": "Ticker symbol, e.g. MSFT"},
+            "currency": {"type": "string", "enum": ["USD", "EUR", "JPY"], "description": "Quote currency"}
+          },
+          "required": ["ticker"]
+        }
+      }
+    },
+    "send_email": {
+      "type": "function",
+      "function": {
+        "name": "send_email",
+        "description": "Send an email to a recipient.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "to": {"type": "string", "description": "Recipient email address"},
+            "subject": {"type": "string", "description": "Subject line"},
+            "body": {"type": "string", "description": "Message body"},
+            "importance": {"type": "string", "enum": ["low", "normal", "high"], "description": "Message importance"}
+          },
+          "required": ["to", "subject", "body"]
+        }
+      }
+    },
+    "create_event": {
+      "type": "function",
+      "function": {
+        "name": "create_event",
+        "description": "Create a calendar event.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "title": {"type": "string", "description": "Event title"},
+            "start": {"type": "string", "description": "Start time ISO-8601"},
+            "duration_minutes": {"type": "integer", "description": "Length in minutes"},
+            "attendees": {"type": "array", "items": {"type": "string"}, "description": "Attendee email addresses"}
+          },
+          "required": ["title", "start"]
+        }
+      }
+    },
+    "translate_text": {
+      "type": "function",
+      "function": {
+        "name": "translate_text",
+        "description": "Translate text into a target language.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "text": {"type": "string", "description": "Text to translate"},
+            "target_language": {"type": "string", "enum": ["en", "fr", "de", "ja"], "description": "Target language code"},
+            "formality": {"type": "string", "enum": ["formal", "informal"], "description": "Desired formality"}
+          },
+          "required": ["text", "target_language"]
+        }
+      }
+    },
+    "convert_units": {
+      "type": "function",
+      "function": {
+        "name": "convert_units",
+        "description": "Convert a value between measurement units.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "value": {"type": "number", "description": "Numeric value to convert"},
+            "from_unit": {"type": "string", "description": "Source unit"},
+            "to_unit": {"type": "string", "description": "Target unit"}
+          },
+          "required": ["value", "from_unit", "to_unit"]
+        }
+      }
+    }
+  },
+  "cases": [
+    {
+      "name": "weather_basic",
+      "tools": ["get_weather"],
+      "query": "What is the weather in Paris right now?",
+      "expected_function": "get_weather",
+      "expected_arguments": {"city": "Paris"}
+    },
+    {
+      "name": "weather_enum_fahrenheit",
+      "tools": ["get_weather"],
+      "query": "Weather in Boston in fahrenheit please.",
+      "expected_function": "get_weather",
+      "expected_arguments": {"city": "Boston", "unit": "fahrenheit"}
+    },
+    {
+      "name": "weather_enum_celsius",
+      "tools": ["get_weather"],
+      "query": "Give me Tokyo's weather in celsius.",
+      "expected_function": "get_weather",
+      "expected_arguments": {"city": "Tokyo", "unit": "celsius"}
+    },
+    {
+      "name": "weather_multi_tool",
+      "tools": "all",
+      "query": "How cold is it in Oslo today?",
+      "expected_function": "get_weather",
+      "expected_arguments": {"city": "Oslo"}
+    },
+    {
+      "name": "flight_all_required",
+      "tools": ["search_flights"],
+      "query": "Find flights from SFO to JFK on 2026-10-01.",
+      "expected_function": "search_flights",
+      "expected_arguments": {"origin": "SFO", "destination": "JFK", "date": "2026-10-01"}
+    },
+    {
+      "name": "flight_integer_and_boolean",
+      "tools": ["search_flights"],
+      "query": "Find nonstop flights from LAX to ORD on 2026-11-15 for 2 passengers.",
+      "expected_function": "search_flights",
+      "expected_arguments": {"origin": "LAX", "destination": "ORD", "date": "2026-11-15", "passengers": 2, "nonstop": true}
+    },
+    {
+      "name": "flight_multi_tool",
+      "tools": "all",
+      "query": "Search flights CDG to LHR on 2026-12-24.",
+      "expected_function": "search_flights",
+      "expected_arguments": {"origin": "CDG", "destination": "LHR", "date": "2026-12-24"}
+    },
+    {
+      "name": "order_array",
+      "tools": ["create_order"],
+      "query": "Order SKU-1 and SKU-2 please.",
+      "expected_function": "create_order",
+      "expected_arguments": {"items": ["SKU-1", "SKU-2"]}
+    },
+    {
+      "name": "order_array_enum",
+      "tools": ["create_order"],
+      "query": "Order SKU-9 with express shipping.",
+      "expected_function": "create_order",
+      "expected_arguments": {"items": ["SKU-9"], "priority": "express"}
+    },
+    {
+      "name": "order_multi_tool",
+      "tools": "all",
+      "query": "Place an order for SKU-42.",
+      "expected_function": "create_order",
+      "expected_arguments": {"items": ["SKU-42"]}
+    },
+    {
+      "name": "stock_basic",
+      "tools": ["get_stock_price"],
+      "query": "What is MSFT trading at?",
+      "expected_function": "get_stock_price",
+      "expected_arguments": {"ticker": "MSFT"}
+    },
+    {
+      "name": "stock_enum_currency",
+      "tools": ["get_stock_price"],
+      "query": "Get the NVDA price quoted in EUR.",
+      "expected_function": "get_stock_price",
+      "expected_arguments": {"ticker": "NVDA", "currency": "EUR"}
+    },
+    {
+      "name": "stock_multi_tool",
+      "tools": "all",
+      "query": "Look up the stock price of AAPL.",
+      "expected_function": "get_stock_price",
+      "expected_arguments": {"ticker": "AAPL"}
+    },
+    {
+      "name": "email_basic",
+      "tools": ["send_email"],
+      "query": "Email bob@example.com with subject 'Lunch' and body 'See you at noon'.",
+      "expected_function": "send_email",
+      "expected_arguments": {"to": "bob@example.com", "subject": "Lunch", "body": "See you at noon"}
+    },
+    {
+      "name": "email_enum_importance",
+      "tools": ["send_email"],
+      "query": "Send a high importance email to sre@example.com, subject 'Outage', body 'Sev1 now'.",
+      "expected_function": "send_email",
+      "expected_arguments": {"to": "sre@example.com", "subject": "Outage", "body": "Sev1 now", "importance": "high"}
+    },
+    {
+      "name": "email_multi_tool",
+      "tools": "all",
+      "query": "Send an email to amy@example.com with subject 'Hi' and body 'Hello there'.",
+      "expected_function": "send_email",
+      "expected_arguments": {"to": "amy@example.com", "subject": "Hi", "body": "Hello there"}
+    },
+    {
+      "name": "calendar_basic",
+      "tools": ["create_event"],
+      "query": "Create an event titled 'Standup' starting 2026-09-10T09:00:00.",
+      "expected_function": "create_event",
+      "expected_arguments": {"title": "Standup", "start": "2026-09-10T09:00:00"}
+    },
+    {
+      "name": "calendar_integer_duration",
+      "tools": ["create_event"],
+      "query": "Create a 45 minute event 'Design Review' at 2026-09-11T14:00:00.",
+      "expected_function": "create_event",
+      "expected_arguments": {"title": "Design Review", "start": "2026-09-11T14:00:00", "duration_minutes": 45}
+    },
+    {
+      "name": "calendar_multi_tool",
+      "tools": "all",
+      "query": "Add a calendar event called 'Retro' at 2026-09-12T16:00:00.",
+      "expected_function": "create_event",
+      "expected_arguments": {"title": "Retro", "start": "2026-09-12T16:00:00"}
+    },
+    {
+      "name": "translate_enum_french",
+      "tools": ["translate_text"],
+      "query": "Translate 'good morning' into French.",
+      "expected_function": "translate_text",
+      "expected_arguments": {"text": "good morning", "target_language": "fr"}
+    },
+    {
+      "name": "translate_enum_japanese",
+      "tools": ["translate_text"],
+      "query": "Translate 'thank you' to Japanese.",
+      "expected_function": "translate_text",
+      "expected_arguments": {"text": "thank you", "target_language": "ja"}
+    },
+    {
+      "name": "translate_multi_tool",
+      "tools": "all",
+      "query": "Translate 'good night' into German.",
+      "expected_function": "translate_text",
+      "expected_arguments": {"text": "good night", "target_language": "de"}
+    },
+    {
+      "name": "units_integer",
+      "tools": ["convert_units"],
+      "query": "Convert 100 kilometers to miles.",
+      "expected_function": "convert_units",
+      "expected_arguments": {"value": 100, "from_unit": "kilometers", "to_unit": "miles"}
+    },
+    {
+      "name": "units_decimal",
+      "tools": ["convert_units"],
+      "query": "Convert 2.5 kilograms into pounds.",
+      "expected_function": "convert_units",
+      "expected_arguments": {"value": 2.5, "from_unit": "kilograms", "to_unit": "pounds"}
+    },
+    {
+      "name": "units_multi_tool",
+      "tools": "all",
+      "query": "Convert 32 fahrenheit to celsius.",
+      "expected_function": "convert_units",
+      "expected_arguments": {"value": 32, "from_unit": "fahrenheit", "to_unit": "celsius"}
+    },
+    {
+      "name": "no_tool_greeting",
+      "tools": "all",
+      "query": "Hi there, how are you doing today?",
+      "expected_function": null
+    },
+    {
+      "name": "no_tool_arithmetic",
+      "tools": "all",
+      "query": "What is 17 multiplied by 3? Just answer directly.",
+      "expected_function": null
+    },
+    {
+      "name": "no_tool_trivia",
+      "tools": "all",
+      "query": "Who wrote the novel Pride and Prejudice?",
+      "expected_function": null
+    },
+    {
+      "name": "no_tool_unrelated_tool_offered",
+      "tools": ["get_weather"],
+      "query": "What is the capital city of Italy?",
+      "expected_function": null
+    }
+  ]
+}
