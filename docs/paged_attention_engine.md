@@ -887,6 +887,9 @@ A turn that spells greedy out itself is unaffected: `do_sample = true` with the 
 
 A sampled resolution requires a positive `top_k` or a positive `top_p`; both zero is rejected,
 because it selects from nothing and is not the same request as greedy selection.
+A sampled resolution also rejects a `top_k` greater than the model vocabulary size. If the resolved
+value came from the model's `search.top_k`, the error names that model default so the turn can
+override it explicitly.
 
 `no_repeat_ngram_size` is only implemented by the CPU search, so a nonzero value is rejected at
 admission by a core-owned capability predicate keyed by the scoring device type, rather than
@@ -911,6 +914,8 @@ own later turns still continue one stream rather than redrawing.
 - An omitted turn seed continues the current streams.
 - An explicit turn seed records a new pending basis. Zero is a valid deterministic seed, so
   `ClearSeed` -- not a sentinel value -- removes a pending reseed.
+- A greedy step consumes neither the host stream nor the persistent device sampler state, so a
+  greedy turn does not shift the random draws used by a later unseeded sampled turn.
 - Seeds are full-width `uint64_t`. A value below 2^32 seeds the host generator exactly as the
   classic `search.random_seed` did; a nonzero high half mixes both halves through a seed sequence.
   CUDA receives the complete 64-bit value.

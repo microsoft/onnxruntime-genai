@@ -94,12 +94,14 @@ EffectiveTurnPolicy ResolveTurnPolicy(const Config::Search& model_defaults,
  * @param policy The resolved policy.
  * @param options The turn options, read only to tell an explicit override from a model default.
  * @param scoring_device_type Device that will build this Request's Search.
+ * @param vocab_size Number of tokens in the model vocabulary.
  * @param turn_prompt_length Sequence length the turn's generated output starts at.
  * @param max_session_tokens The Request's one session limit.
  */
 void ValidateTurnPolicy(const EffectiveTurnPolicy& policy,
                         const TurnOptions& options,
                         DeviceType scoring_device_type,
+                        int vocab_size,
                         size_t turn_prompt_length,
                         size_t max_session_tokens);
 

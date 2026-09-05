@@ -7,6 +7,7 @@
 #include <cstring>  // for memcmp
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <numeric>
 #include <iostream>
 #include <optional>
@@ -1618,8 +1619,10 @@ struct Phi2Test {
     }
   }
 
-  void RunEngine() {
+  void RunEngine(const std::function<void(OgaTurnOptions&)>& configure_turn) {
     auto engine = OgaEngine::Create(*model_);
+    auto request_options = OgaRequestOptions::Create();
+    request_options->SetMaxSessionTokens(40);
 
     struct OwnedRequest {
       std::unique_ptr<OgaRequest> request;
@@ -1640,11 +1643,13 @@ struct Phi2Test {
       tokenizer_->Encode(input_strings[i], *input_sequence);
       auto input_tokens = std::span<const int32_t>{
           input_sequence->SequenceData(0), input_sequence->SequenceCount(0)};
-      requests.push_back({engine->CreateRequest(),
+      requests.push_back({engine->CreateRequest(request_options.get()),
                           std::vector<int32_t>(input_tokens.begin(), input_tokens.end())});
       auto& owned_request = requests.back();
       requests_by_handle.emplace(owned_request.request.get(), &owned_request);
-      owned_request.request->BeginTurn(input_tokens);
+      auto turn_options = owned_request.request->CreateTurnOptions();
+      configure_turn(*turn_options);
+      owned_request.request->BeginTurn(input_tokens, turn_options.get());
     }
 
     EXPECT_TRUE(engine->HasPendingRequests());
@@ -1727,7 +1732,11 @@ TEST_P(ParametrizedTopKCAPITestsTests, TopKCAPI) {
   test.params_->SetSearchOption("temperature", 0.6f);
 
   if (GetParam()) {
-    test.RunEngine();
+    test.RunEngine([](OgaTurnOptions& options) {
+      options.SetDoSample(true);
+      options.SetTopK(50);
+      options.SetTemperature(0.6f);
+    });
   } else {
     test.Run();
   }
@@ -1752,7 +1761,11 @@ TEST_P(ParametrizedTopPCAPITestsTests, TopPCAPI) {
   test.params_->SetSearchOption("temperature", 0.6f);
 
   if (GetParam()) {
-    test.RunEngine();
+    test.RunEngine([](OgaTurnOptions& options) {
+      options.SetDoSample(true);
+      options.SetTopP(0.6f);
+      options.SetTemperature(0.6f);
+    });
   } else {
     test.Run();
   }
@@ -1778,7 +1791,12 @@ TEST_P(ParametrizedTopKTopPCAPITestsTests, TopKCAPITest) {
   test.params_->SetSearchOption("temperature", 0.6f);
 
   if (GetParam()) {
-    test.RunEngine();
+    test.RunEngine([](OgaTurnOptions& options) {
+      options.SetDoSample(true);
+      options.SetTopK(50);
+      options.SetTopP(0.6f);
+      options.SetTemperature(0.6f);
+    });
   } else {
     test.Run();
   }

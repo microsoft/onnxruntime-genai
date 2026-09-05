@@ -1123,7 +1123,8 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
                               : request->CurrentSequenceLength()) +
       tokens.size();
   ValidateTurnPolicy(policy, options, model_->p_device_scoring_->GetType(),
-                     turn_prompt_length, request->MaxSessionTokens());
+                     model_->config_->model.vocab_size, turn_prompt_length,
+                     request->MaxSessionTokens());
   // Static batching completes generation through a non-transactional path (RunStatic) that cannot
   // stage, roll back, or replay a stop match, and its sampler RNG state is created once when the
   // Request joins the batch rather than inside a rollback-capable step. Reject both before any

@@ -1428,7 +1428,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetTopP(
 /**
  * \brief Sets this Turn's top-k bound. One requests top-logit selection; zero disables top-k.
  *
- * Admission rejects an explicitly set top_k that the resolved policy would ignore.
+ * Admission rejects an explicitly set top_k that the resolved policy would ignore, and a sampled
+ * Turn rejects a top_k greater than the model vocabulary size.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTurnOptionsSetTopK(
     OgaTurnOptions* options, int32_t top_k);

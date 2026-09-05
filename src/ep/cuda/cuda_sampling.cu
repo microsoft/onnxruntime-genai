@@ -95,6 +95,13 @@ __global__ void FusedSamplingKernel(int32_t* next_token_out, const float* scores
   const float* batch_scores = scores + batch_idx * stride;
   const int* batch_indices = indices + batch_idx * stride;
 
+  if (k == 1) {
+    if (threadIdx.x == 0) {
+      next_token_out[batch_idx] = batch_indices[0];
+    }
+    return;
+  }
+
   // Allocate shared memory for all intermediate data. This is the key to performance.
   extern __shared__ float smem[];
   float* temp_scaled_logits = smem;

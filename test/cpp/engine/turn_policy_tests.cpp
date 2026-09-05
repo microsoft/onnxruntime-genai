@@ -271,6 +271,53 @@ TEST_F(TurnPolicyTest, GreedyResolutionRejectsContradictoryStochasticScalars) {
   }
 }
 
+TEST_F(TurnPolicyTest, TopKCannotExceedModelVocabulary) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
+  auto request = CreateEngineRequest(engine.engine);
+  TurnOptions options;
+  options.do_sample = true;
+  options.temperature = 1.0f;
+  options.top_k = model_->config_->model.vocab_size + 1;
+
+  try {
+    request->BeginTurn(Prompt(), options);
+    FAIL() << "Expected top_k above vocab_size to be rejected.";
+  } catch (const std::runtime_error& error) {
+    const std::string message = error.what();
+    EXPECT_NE(message.find("top_k"), std::string::npos) << message;
+    EXPECT_NE(message.find("vocab_size"), std::string::npos) << message;
+  }
+  EXPECT_EQ(request->Status(), RequestStatus::Unassigned);
+  EXPECT_EQ(request->CurrentSequenceLength(), 0);
+
+  options.top_k = model_->config_->model.vocab_size;
+  EXPECT_EQ(request->BeginTurn(Prompt(), options), 1u);
+}
+
+TEST_F(TurnPolicyTest, ModelTopKAboveVocabularyNamesTheDefaultAndCanBeOverridden) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
+  config->search.do_sample = true;
+  config->search.top_k = config->model.vocab_size + 1;
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  auto engine = MakeDoublesEngine(model, /*capacity=*/8, EosToken(*model));
+  auto request = CreateEngineRequest(engine.engine);
+  TurnOptions options;
+
+  try {
+    request->BeginTurn(Prompt(), options);
+    FAIL() << "Expected a model top_k above vocab_size to be rejected.";
+  } catch (const std::runtime_error& error) {
+    const std::string message = error.what();
+    EXPECT_NE(message.find("model's search.top_k"), std::string::npos) << message;
+    EXPECT_NE(message.find("vocab_size"), std::string::npos) << message;
+  }
+  EXPECT_EQ(request->Status(), RequestStatus::Unassigned);
+  EXPECT_EQ(request->CurrentSequenceLength(), 0);
+
+  options.top_k = model->config_->model.vocab_size;
+  EXPECT_EQ(request->BeginTurn(Prompt(), options), 1u);
+}
+
 // A model whose own search defaults resolve to greedy silently overrides an explicit
 // do_sample=true. The caller cannot see those defaults through TurnOptions, so admission rejects
 // the turn and names the model-supplied cause rather than quietly selecting the top logit.
@@ -537,6 +584,67 @@ TEST_F(TurnPolicyTest, OmittedSeedContinuesTheStreamAndAnExplicitSeedRestartsIt)
   EXPECT_EQ(reseeded, seeded_first);
   EXPECT_NE(continued, seeded_first);
 }
+
+#if USE_CUDA
+TEST_F(TurnPolicyTest, CudaGreedyTurnDoesNotAdvanceLaterSampledContinuationRng) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged");
+  ClearProviders(*config);
+  SetProviderOption(*config, "cuda", {}, {});
+  config->search.random_seed = 1234;
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  auto engine = std::make_shared<Engine>(model);
+
+  const auto run_turn = [](Engine& target_engine,
+                           const std::shared_ptr<Request>& request,
+                           std::span<const int32_t> input,
+                           const TurnOptions& options) {
+    request->BeginTurn(input, options);
+    std::vector<int32_t> generated;
+    std::array<EngineEvent, 8> events;
+    for (int step = 0; step < 64 && !request->IsTurnComplete(); ++step) {
+      const size_t count = target_engine.Run(events);
+      for (size_t i = 0; i < count; ++i) {
+        if (events[i].request.get() == request.get() &&
+            (events[i].flags & EngineEventFlagToken)) {
+          generated.push_back(events[i].token);
+        }
+      }
+    }
+    EXPECT_TRUE(request->IsTurnComplete());
+    return generated;
+  };
+
+  const auto original_prompt = Prompt();
+  auto continued_request = CreateEngineRequest(engine);
+  TurnOptions greedy;
+  greedy.max_generated_tokens = 4;
+  const auto greedy_tokens =
+      run_turn(*engine, continued_request, original_prompt, greedy);
+  ASSERT_FALSE(greedy_tokens.empty());
+
+  TurnOptions sampled;
+  sampled.do_sample = true;
+  sampled.top_k = model->config_->model.vocab_size;
+  sampled.temperature = 100.0f;
+  sampled.min_generated_tokens = 12;
+  sampled.max_generated_tokens = 12;
+  constexpr std::array<int32_t, 1> continuation_input{9};
+  const auto continued =
+      run_turn(*engine, continued_request, continuation_input, sampled);
+
+  std::vector<int32_t> equivalent_prompt = original_prompt;
+  equivalent_prompt.insert(equivalent_prompt.end(), greedy_tokens.begin(),
+                           greedy_tokens.end());
+  equivalent_prompt.insert(equivalent_prompt.end(), continuation_input.begin(),
+                           continuation_input.end());
+  auto baseline_request = CreateEngineRequest(engine);
+  const auto baseline =
+      run_turn(*engine, baseline_request, equivalent_prompt, sampled);
+
+  ASSERT_FALSE(continued.empty());
+  EXPECT_EQ(continued, baseline);
+}
+#endif
 
 // A step that is rolled back after the reseed was applied must reseed its retry identically, so the
 // turn's output does not depend on how many times the batch was aborted.

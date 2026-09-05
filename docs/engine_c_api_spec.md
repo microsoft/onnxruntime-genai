@@ -184,6 +184,9 @@ Rules:
   it and is accepted alongside `do_sample = true`.
 - A sampled Turn requires a positive `top_k` or a positive `top_p`. Both zero is rejected: it
   selects from nothing, and it is not the same request as greedy selection.
+- A sampled Turn rejects a resolved `top_k` greater than the model vocabulary size. If that value
+  came from the model's `search.top_k`, the error names the model default so the Turn can override
+  it explicitly.
 - `no_repeat_ngram_size` is rejected at admission on a scoring device whose search cannot apply it,
   rather than failing after the model has already run.
 - Static batching completes generation on a non-transactional path, so it rejects stop strings and a
@@ -211,6 +214,10 @@ advances. A Request created from a model that configures `search.random_seed` us
 Request created from a model that leaves it unset (the default) draws a generated 64-bit basis once,
 at creation, so an unseeded Request is not reproducible across processes while its own later turns
 still continue one stream.
+
+A greedy step consumes neither the Request's host random stream nor its persistent device sampler
+state. Adding or lengthening a greedy Turn therefore does not shift the random draws used by a later
+unseeded sampled Turn.
 
 The reseed is applied inside the step transaction, strictly after every checkpoint and strictly
 before the first random consumer, and it becomes durable only when that sampling step commits.

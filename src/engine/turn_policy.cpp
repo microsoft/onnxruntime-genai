@@ -78,6 +78,7 @@ EffectiveTurnPolicy ResolveTurnPolicy(const Config::Search& model_defaults,
 void ValidateTurnPolicy(const EffectiveTurnPolicy& policy,
                         const TurnOptions& options,
                         DeviceType scoring_device_type,
+                        int vocab_size,
                         size_t turn_prompt_length,
                         size_t max_session_tokens) {
   if (!std::isfinite(policy.temperature) || policy.temperature < 0.0f) {
@@ -165,9 +166,23 @@ void ValidateTurnPolicy(const EffectiveTurnPolicy& policy,
     if (!contradictory.empty()) {
       RejectContradictoryScalars(cause, contradictory);
     }
-  } else if (policy.top_k == 0 && policy.top_p == 0.0f) {
-    throw std::runtime_error(
-        "A sampled turn requires a positive top_k or a positive top_p; both are 0.");
+  } else {
+    if (policy.top_k > vocab_size) {
+      if (!options.top_k) {
+        throw std::runtime_error(
+            "The model's search.top_k (" + std::to_string(policy.top_k) +
+            ") exceeds vocab_size (" + std::to_string(vocab_size) +
+            "). Set top_k explicitly to a value no greater than vocab_size.");
+      }
+      throw std::runtime_error(
+          "top_k (" + std::to_string(policy.top_k) +
+          ") must be less than or equal to vocab_size (" +
+          std::to_string(vocab_size) + ").");
+    }
+    if (policy.top_k == 0 && policy.top_p == 0.0f) {
+      throw std::runtime_error(
+          "A sampled turn requires a positive top_k or a positive top_p; both are 0.");
+    }
   }
 
   if (policy.min_generated_tokens != 0) {
