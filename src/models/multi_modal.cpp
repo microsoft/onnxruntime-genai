@@ -752,7 +752,8 @@ DeviceSpan<float> DecoderState::RunPrefillWithChunking(int current_length, Devic
 
     if (decoder_input_ids_) decoder_input_ids_->Update(chunk_tokens);
     position_inputs_->Update(chunk_tokens, length, static_cast<int>(current_chunk_size));
-    kv_cache_->Update(next_indices, length);
+    if (kv_cache_)
+      kv_cache_->Update(next_indices, length);
     if (recurrent_state_)
       recurrent_state_->Update();
     logits_.Update(chunk_tokens, current_chunk_size);
@@ -798,6 +799,15 @@ void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int tot
   logits_.Update(next_tokens, new_length);
   inputs_embeds_.UpdateSequenceLength(new_length);
   if (per_layer_inputs_) per_layer_inputs_->UpdateSequenceLength(new_length);
+}
+
+void DecoderState::RewindTo(size_t index) {
+  if (position_inputs_)
+    position_inputs_->RewindTo(index);
+  if (kv_cache_)
+    kv_cache_->RewindTo(index);
+  if (recurrent_state_)
+    recurrent_state_->RewindTo(index);
 }
 
 MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params)
@@ -928,6 +938,13 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
   }
   embedding_state_->Run(current_length, next_tokens, next_indices);
   return decoder_state_->Run(current_length, next_tokens, next_indices);
+}
+
+void MultiModalPipelineState::RewindTo(size_t index) {
+  if (decoder_state_)
+    decoder_state_->RewindTo(index);
+  if (index == 0)
+    is_prompt_ = true;
 }
 
 OrtValue* MultiModalPipelineState::GetInput(const char* name) {
