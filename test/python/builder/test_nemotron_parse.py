@@ -75,13 +75,14 @@ def _make_builder(
     *,
     io_dtype=nemotron_parse.ir.DataType.FLOAT16,
     onnx_dtype=None,
+    ep="cuda",
     **extra_options,
 ):
     return NemotronParseModel(
         _make_builder_config(),
         io_dtype=io_dtype,
         onnx_dtype=io_dtype if onnx_dtype is None else onnx_dtype,
-        ep="cuda",
+        ep=ep,
         cache_dir=None,
         extra_options=extra_options,
     )
@@ -139,9 +140,181 @@ class _TinyModel(torch.nn.Module):
         )
 
 
-def _build_component(phase):
+class _TinyPatchGenerator(torch.nn.Module):
+    def __init__(self, hidden_size):
+        super().__init__()
+        self.patch_size = 4
+        self.num_rows = 8
+        self.num_cols = 8
+        self.num_skip = 4
+        self.num_cls_tokens = 3
+        self.num_registers = 1
+        self.cpe_mode = True
+        self.embedder = torch.nn.Linear(3 * 4 * 4, hidden_size, bias=False)
+        self.pos_embed = torch.nn.Parameter(
+            torch.randn(1, self.num_rows * self.num_cols, hidden_size)
+        )
+        self.cls_token = types.SimpleNamespace(
+            token=torch.nn.Parameter(torch.randn(self.num_skip, hidden_size))
+        )
+        self.patch_normalizer = torch.nn.Identity()
+
+    def forward(self, pixel_values):
+        patches = torch.nn.functional.unfold(
+            pixel_values, kernel_size=self.patch_size, stride=self.patch_size
+        ).transpose(1, 2)
+        patch_rows = pixel_values.shape[-2] // self.patch_size
+        patch_cols = pixel_values.shape[-1] // self.patch_size
+        position = self.pos_embed.reshape(
+            1, self.num_rows, self.num_cols, -1
+        ).permute(0, 3, 1, 2)
+        max_dim = max(patch_rows, patch_cols)
+        position = torch.nn.functional.interpolate(
+            position,
+            size=(max_dim, max_dim),
+            mode="bilinear",
+            align_corners=True,
+        )
+        position = position[..., :patch_rows, :patch_cols]
+        position = position.permute(0, 2, 3, 1).reshape(
+            1, patch_rows * patch_cols, -1
+        )
+        patches = self.embedder(patches) + position
+        prefix = self.cls_token.token.unsqueeze(0).expand(
+            pixel_values.shape[0], -1, -1
+        )
+        return torch.cat((prefix, patches), dim=1)
+
+
+class _TinyRadioAttention(torch.nn.Module):
+    def __init__(self, hidden_size, num_heads):
+        super().__init__()
+        self.num_heads = num_heads
+        self.scale = (hidden_size // num_heads) ** -0.5
+        self.qkv = torch.nn.Linear(hidden_size, hidden_size * 3)
+        self.q_norm = torch.nn.Identity()
+        self.k_norm = torch.nn.Identity()
+        self.proj = torch.nn.Linear(hidden_size, hidden_size)
+
+    def forward(self, hidden_states):
+        batch, sequence_length, hidden_size = hidden_states.shape
+        query, key, value = (
+            self.qkv(hidden_states)
+            .reshape(
+                batch,
+                sequence_length,
+                3,
+                self.num_heads,
+                hidden_size // self.num_heads,
+            )
+            .permute(2, 0, 3, 1, 4)
+        )
+        context = torch.nn.functional.scaled_dot_product_attention(
+            query, key, value, scale=self.scale
+        )
+        return self.proj(
+            context.transpose(1, 2).reshape(
+                batch, sequence_length, hidden_size
+            )
+        )
+
+
+class _TinyRadioBlock(torch.nn.Module):
+    def __init__(self, hidden_size, intermediate_size, num_heads):
+        super().__init__()
+        self.norm1 = torch.nn.LayerNorm(hidden_size, eps=1e-6)
+        self.attn = _TinyRadioAttention(hidden_size, num_heads)
+        self.ls1 = torch.nn.Identity()
+        self.drop_path1 = torch.nn.Identity()
+        self.norm2 = torch.nn.LayerNorm(hidden_size, eps=1e-6)
+        self.mlp = types.SimpleNamespace(
+            fc1=torch.nn.Linear(hidden_size, intermediate_size),
+            fc2=torch.nn.Linear(intermediate_size, hidden_size),
+        )
+        self.ls2 = torch.nn.Identity()
+        self.drop_path2 = torch.nn.Identity()
+
+    def forward(self, hidden_states):
+        hidden_states = hidden_states + self.attn(self.norm1(hidden_states))
+        feed_forward = self.mlp.fc2(
+            torch.nn.functional.gelu(
+                self.mlp.fc1(self.norm2(hidden_states)), approximate="none"
+            )
+        )
+        return hidden_states + feed_forward
+
+
+class _TinyRadio(torch.nn.Module):
+    def __init__(self, hidden_size=8, intermediate_size=16, num_heads=2):
+        super().__init__()
+        self.model = types.SimpleNamespace(
+            embed_dim=hidden_size,
+            patch_generator=_TinyPatchGenerator(hidden_size),
+            blocks=torch.nn.ModuleList(
+                [
+                    _TinyRadioBlock(
+                        hidden_size, intermediate_size, num_heads
+                    )
+                ]
+            ),
+            norm=torch.nn.Identity(),
+        )
+        self.feature_normalizer = torch.nn.Identity()
+        self.adaptors = torch.nn.ModuleDict()
+        self.summary_idxs = torch.tensor([0, 1, 2])
+
+    def forward(self, pixel_values):
+        hidden_states = self.model.patch_generator(pixel_values)
+        for block in self.model.blocks:
+            hidden_states = block(hidden_states)
+        summary = hidden_states[:, self.summary_idxs].flatten(1)
+        features = hidden_states[:, self.model.patch_generator.num_skip :]
+        return summary, features
+
+
+class _TinyEncoder(torch.nn.Module):
+    def __init__(self, hidden_size=8):
+        super().__init__()
+        self.model_encoder = types.SimpleNamespace(
+            radio_model=_TinyRadio(hidden_size)
+        )
+        self.conv1 = torch.nn.Conv1d(hidden_size, hidden_size, 1)
+        self.layer_norm1 = torch.nn.LayerNorm(hidden_size, eps=1e-6)
+        self.conv2 = torch.nn.Conv2d(
+            hidden_size,
+            hidden_size,
+            kernel_size=(1, 4),
+            stride=(1, 4),
+            bias=False,
+        )
+        self.layer_norm2 = torch.nn.LayerNorm(hidden_size, eps=1e-6)
+        self.sum_proj = torch.nn.Linear(hidden_size * 3, hidden_size)
+        self.layer_norm3 = torch.nn.LayerNorm(hidden_size, eps=1e-6)
+
+    def forward(self, pixel_values):
+        summary, features = self.model_encoder.radio_model(pixel_values)
+        output = self.conv1(features.transpose(1, 2)).transpose(1, 2)
+        output = self.layer_norm1(output)
+        patch_rows = pixel_values.shape[-2] // 4
+        patch_cols = pixel_values.shape[-1] // 4
+        output = output.reshape(
+            1, patch_rows, patch_cols, output.shape[-1]
+        ).permute(0, 3, 1, 2)
+        output = self.conv2(output).permute(0, 2, 3, 1).flatten(1, 2)
+        output = self.layer_norm2(output)
+        summary = self.layer_norm3(self.sum_proj(summary)).unsqueeze(1)
+        return torch.cat((output, summary), dim=1)
+
+
+class _TinyFullModel(_TinyModel):
+    def __init__(self, config):
+        super().__init__(config)
+        self.encoder = _TinyEncoder(config.decoder.d_model)
+
+
+def _build_component():
     builder = _make_builder()
-    component = builder._make_decoder_component(phase)
+    component = builder._make_decoder_component()
     component.build(_TinyModel(builder.config))
     model = nemotron_parse.ir.to_proto(component.model)
     return builder, component, model
@@ -269,26 +442,20 @@ class NemotronParseBuilderTests(TestCase):
     def test_decoder_component_preserves_base_output_policy(self):
         builder = _make_builder(io_dtype=nemotron_parse.ir.DataType.BFLOAT16)
 
-        prefill = builder._make_decoder_component("prefill")
-        decode = builder._make_decoder_component("decode")
+        decoder = builder._make_decoder_component()
 
-        self.assertEqual(prefill.filename, "decoder_prefill.onnx")
-        self.assertEqual(decode.filename, "decoder.onnx")
+        self.assertEqual(decoder.filename, "decoder.onnx")
         self.assertEqual(
-            prefill.output_types["logits"],
+            decoder.output_types["logits"],
             nemotron_parse.ir.DataType.FLOAT,
         )
         self.assertEqual(
-            decode.output_types["logits"],
-            nemotron_parse.ir.DataType.FLOAT,
-        )
-        self.assertEqual(
-            prefill.output_shapes["logits"],
-            ["batch_size", 1, builder.config.decoder.vocab_size],
-        )
-        self.assertEqual(
-            decode.output_shapes["logits"],
-            ["batch_size", 1, builder.config.decoder.vocab_size],
+            decoder.output_shapes["logits"],
+            [
+                "batch_size",
+                1,
+                builder.config.decoder.vocab_size,
+            ],
         )
 
     def test_rejects_unknown_export_component(self):
@@ -297,8 +464,8 @@ class NemotronParseBuilderTests(TestCase):
         ):
             _make_builder(export_components="encoder,tokenizer")
 
-    def test_decode_component_emits_standard_tensor_scatter_24(self):
-        builder, _, model = _build_component("decode")
+    def test_decoder_emits_dynamic_tensor_scatter_graph(self):
+        builder, _, model = _build_component()
 
         self.assertEqual(
             next(
@@ -340,46 +507,27 @@ class NemotronParseBuilderTests(TestCase):
             _shape_dims(inputs["past_key_values.0.key"]),
             ["batch_size", 2, builder.cache_sequence_length, 4],
         )
+        self.assertEqual(
+            _shape_dims(inputs["decoder_input_ids"]),
+            ["batch_size", "sequence_length"],
+        )
+        self.assertEqual(
+            _shape_dims(inputs["decoder_attention_mask"]),
+            ["batch_size", builder.cache_sequence_length],
+        )
         output_names = {value.name for value in model.graph.output}
         self.assertIn("present.0.key", output_names)
         self.assertNotIn("cross_present.0.key", output_names)
-        onnx.checker.check_model(model)
-
-    def test_prefill_component_emits_compact_self_and_cross_cache(self):
-        builder, _, model = _build_component("prefill")
-
-        self.assertFalse(
-            any(
-                node.op_type == "TensorScatter"
-                for node in model.graph.node
-            )
+        self.assertTrue(
+            any(node.op_type == "Range" for node in model.graph.node)
         )
-        inputs = {value.name: value for value in model.graph.input}
-        self.assertIn("encoder_hidden_states", inputs)
-        self.assertNotIn("cache_write_indices", inputs)
-
-        outputs = {value.name: value for value in model.graph.output}
-        self.assertEqual(
-            _shape_dims(outputs["logits"]),
-            ["batch_size", 1, builder.config.decoder.vocab_size],
-        )
-        self.assertEqual(
-            _shape_dims(outputs["present.0.key"]),
-            [
-                "batch_size",
-                2,
-                builder.prefill_sequence_length,
-                4,
-            ],
-        )
-        self.assertEqual(
-            _shape_dims(outputs["cross_present.0.key"]),
-            ["batch_size", 2, "encoder_sequence_length", 4],
+        self.assertTrue(
+            any(node.op_type == "Greater" for node in model.graph.node)
         )
         onnx.checker.check_model(model)
 
     @skipIf(ort is None, "onnxruntime is required for numerical graph validation")
-    def test_prefill_and_decode_match_reference_decoder(self):
+    def test_unified_decoder_matches_reference_for_prefill_and_decode(self):
         torch.manual_seed(0)
         builder = _make_builder(
             io_dtype=nemotron_parse.ir.DataType.FLOAT,
@@ -405,23 +553,36 @@ class NemotronParseBuilderTests(TestCase):
                 )
             )
 
-        prefill = builder._make_decoder_component("prefill")
-        prefill.build(model)
-        prefill_session = ort.InferenceSession(
-            nemotron_parse.ir.to_proto(prefill.model).SerializeToString(),
+        decoder = builder._make_decoder_component()
+        decoder.build(model)
+        session = ort.InferenceSession(
+            nemotron_parse.ir.to_proto(decoder.model).SerializeToString(),
             providers=["CPUExecutionProvider"],
         )
+        feeds = {
+            "decoder_input_ids": input_ids.numpy(),
+            "decoder_attention_mask": np.array(
+                [[1] * input_ids.shape[1] + [0] * 4], dtype=np.int64
+            ),
+            "cache_write_indices": np.array([0], dtype=np.int64),
+        }
+        for layer_id, (_, _, cross_key, cross_value) in enumerate(
+            reference_prefill_caches
+        ):
+            cache = np.zeros((1, 2, 8, 4), dtype=np.float32)
+            feeds[f"past_key_values.{layer_id}.key"] = cache.copy()
+            feeds[f"past_key_values.{layer_id}.value"] = cache.copy()
+            feeds[f"cross_past_key_values.{layer_id}.key"] = (
+                cross_key.detach().numpy()
+            )
+            feeds[f"cross_past_key_values.{layer_id}.value"] = (
+                cross_value.detach().numpy()
+            )
+
         prefill_outputs = dict(
             zip(
-                [output.name for output in prefill_session.get_outputs()],
-                prefill_session.run(
-                    None,
-                    {
-                        "decoder_input_ids": input_ids.numpy(),
-                        "decoder_attention_mask": attention_mask.numpy(),
-                        "encoder_hidden_states": encoder_states.numpy(),
-                    },
-                ),
+                [output.name for output in session.get_outputs()],
+                session.run(None, feeds),
             )
         )
         np.testing.assert_allclose(
@@ -430,18 +591,14 @@ class NemotronParseBuilderTests(TestCase):
             rtol=1e-5,
             atol=1e-6,
         )
-        for layer_id, layer_cache in enumerate(reference_prefill_caches):
-            for slot, expected in zip(
-                ("key", "value", "cross_key", "cross_value"),
-                layer_cache,
-            ):
-                name = (
-                    f"cross_present.{layer_id}.{slot.removeprefix('cross_')}"
-                    if slot.startswith("cross_")
-                    else f"present.{layer_id}.{slot}"
-                )
+        for layer_id, (key, value, _, _) in enumerate(
+            reference_prefill_caches
+        ):
+            for slot, expected in (("key", key), ("value", value)):
                 np.testing.assert_allclose(
-                    prefill_outputs[name],
+                    prefill_outputs[f"present.{layer_id}.{slot}"][
+                        :, :, : input_ids.shape[1], :
+                    ],
                     expected.detach().numpy(),
                     rtol=1e-5,
                     atol=1e-6,
@@ -460,40 +617,26 @@ class NemotronParseBuilderTests(TestCase):
                 )
             )
 
-        decode = builder._make_decoder_component("decode")
-        decode.build(model)
-        decode_session = ort.InferenceSession(
-            nemotron_parse.ir.to_proto(decode.model).SerializeToString(),
-            providers=["CPUExecutionProvider"],
+        feeds["decoder_input_ids"] = next_token.numpy()
+        feeds["decoder_attention_mask"] = np.array(
+            [[1] * full_input_ids.shape[1] + [0] * 3],
+            dtype=np.int64,
         )
-        decode_feeds = {
-            "decoder_input_ids": next_token.numpy(),
-            "decoder_attention_mask": np.array(
-                [[1] * full_input_ids.shape[1] + [0] * 3],
-                dtype=np.int64,
-            ),
-            "cache_write_indices": np.array([input_ids.shape[1]], dtype=np.int64),
-        }
+        feeds["cache_write_indices"] = np.array(
+            [input_ids.shape[1]], dtype=np.int64
+        )
         for layer_id in range(builder.config.decoder.decoder_layers):
-            prefill_key = prefill_outputs[f"present.{layer_id}.key"]
-            prefill_value = prefill_outputs[f"present.{layer_id}.value"]
-            key = np.zeros((1, 2, 8, 4), dtype=np.float32)
-            value = np.zeros_like(key)
-            key[:, :, : input_ids.shape[1], :] = prefill_key
-            value[:, :, : input_ids.shape[1], :] = prefill_value
-            decode_feeds[f"past_key_values.{layer_id}.key"] = key
-            decode_feeds[f"past_key_values.{layer_id}.value"] = value
-            decode_feeds[f"cross_past_key_values.{layer_id}.key"] = (
-                prefill_outputs[f"cross_present.{layer_id}.key"]
-            )
-            decode_feeds[f"cross_past_key_values.{layer_id}.value"] = (
-                prefill_outputs[f"cross_present.{layer_id}.value"]
-            )
+            feeds[f"past_key_values.{layer_id}.key"] = prefill_outputs[
+                f"present.{layer_id}.key"
+            ]
+            feeds[f"past_key_values.{layer_id}.value"] = prefill_outputs[
+                f"present.{layer_id}.value"
+            ]
 
         decode_outputs = dict(
             zip(
-                [output.name for output in decode_session.get_outputs()],
-                decode_session.run(None, decode_feeds),
+                [output.name for output in session.get_outputs()],
+                session.run(None, feeds),
             )
         )
         np.testing.assert_allclose(
@@ -535,7 +678,7 @@ class NemotronParseBuilderTests(TestCase):
                 cache_dir=str(cache_dir),
                 extra_options={"use_qdq": True},
             )
-            component = builder._make_decoder_component("decode")
+            component = builder._make_decoder_component()
 
             self.assertIs(component.quant_attrs["use_qdq"], True)
             self.assertEqual(component.quant_attrs["matmul_block_size"], 32)
@@ -589,58 +732,66 @@ class NemotronParseBuilderTests(TestCase):
             self.assertEqual(matmul.input[1], dequantize.output[0])
         onnx.checker.check_model(model)
 
-    def test_encoder_export_has_fully_static_input_shape(self):
-        class Encoder(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.weight = torch.nn.Parameter(torch.ones(1))
-
-            def forward(self, pixel_values, return_dict=True):
-                del return_dict
-                return types.SimpleNamespace(
-                    last_hidden_state=pixel_values
-                )
-
-        builder = _make_builder()
-        model = types.SimpleNamespace(encoder=Encoder())
-        tmp_root = REPO_ROOT / "build" / "test_tmp"
-        tmp_root.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=tmp_root) as tmp:
-            stale_external_data = Path(tmp) / "encoder.onnx.data"
-            stale_external_data.write_bytes(b"stale")
-            with mock.patch.object(
-                nemotron_parse.torch.onnx, "export"
-            ) as export:
-                builder._export_encoder(model, tmp)
-            self.assertFalse(stale_external_data.exists())
-
-        exported_input = export.call_args.args[1][0]
-        self.assertEqual(
-            tuple(exported_input.shape),
-            (1, 3, builder.image_height, builder.image_width),
+    @skipIf(ort is None, "onnxruntime is required for numerical graph validation")
+    def test_manual_encoder_matches_radio_neck_and_cross_cache(self):
+        torch.manual_seed(1)
+        builder = _make_builder(
+            io_dtype=nemotron_parse.ir.DataType.FLOAT,
+            image_width=16,
         )
-        self.assertNotIn("dynamic_axes", export.call_args.kwargs)
+        model = _TinyFullModel(builder.config).eval()
+        pixel_values = torch.randn(
+            1, 3, builder.image_height, builder.image_width
+        )
+        with torch.no_grad():
+            encoder_hidden_states = model.encoder(pixel_values)
 
-    def test_external_data_save_removes_previous_data_file(self):
-        tmp_root = REPO_ROOT / "build" / "test_tmp"
-        tmp_root.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=tmp_root) as tmp:
-            model_path = Path(tmp) / "encoder.onnx"
-            external_data_path = Path(f"{model_path}.data")
-            external_data_path.write_bytes(b"stale")
+        component = builder._make_encoder_component(model)
+        component.build()
+        exported = nemotron_parse.ir.to_proto(component.model)
+        onnx.checker.check_model(exported)
+        session = ort.InferenceSession(
+            exported.SerializeToString(), providers=["CPUExecutionProvider"]
+        )
+        outputs = dict(
+            zip(
+                [output.name for output in session.get_outputs()],
+                session.run(None, {"pixel_values": pixel_values.numpy()}),
+            )
+        )
 
-            with mock.patch.object(
-                nemotron_parse.onnx, "save_model"
-            ) as save_model:
-                nemotron_parse._save_model_with_external_data(
-                    object(), str(model_path)
+        self.assertEqual(
+            _shape_dims(exported.graph.input[0]),
+            [1, 3, builder.image_height, builder.image_width],
+        )
+        np.testing.assert_allclose(
+            outputs["encoder_hidden_states"],
+            encoder_hidden_states.numpy(),
+            rtol=1e-4,
+            atol=1e-5,
+        )
+        for layer_id, layer in enumerate(model.decoder.layers):
+            for kind, projection in (
+                ("key", layer.encoder_attn.k_proj),
+                ("value", layer.encoder_attn.v_proj),
+            ):
+                expected = _split_heads(
+                    projection(encoder_hidden_states), 2
+                ).detach().numpy()
+                np.testing.assert_allclose(
+                    outputs[f"cross_present.{layer_id}.{kind}"],
+                    expected,
+                    rtol=1e-4,
+                    atol=1e-5,
                 )
 
-            self.assertFalse(external_data_path.exists())
-            self.assertEqual(
-                save_model.call_args.kwargs["location"],
-                "encoder.onnx.data",
+        self.assertFalse(
+            any(
+                node.op_type.startswith("ATen")
+                or node.domain.startswith("pkg.torch")
+                for node in exported.graph.node
             )
+        )
 
     def test_genai_config_describes_native_cached_pipeline(self):
         builder = _make_builder()
@@ -669,8 +820,14 @@ class NemotronParseBuilderTests(TestCase):
             vision["config_filename"], "processor_config.json"
         )
         self.assertEqual(
-            decoder["prefill_filename"], "decoder_prefill.onnx"
+            model_config["encoder"]["outputs"],
+            {
+                "cross_present_key_names": "cross_present.%d.key",
+                "cross_present_value_names": "cross_present.%d.value",
+            },
         )
+        self.assertNotIn("prefill_filename", decoder)
+        self.assertNotIn("encoder_hidden_states", decoder["inputs"])
         self.assertEqual(
             decoder["prefill_sequence_length"],
             builder.prefill_sequence_length,
@@ -681,6 +838,40 @@ class NemotronParseBuilderTests(TestCase):
         )
         self.assertIs(
             config["search"]["past_present_share_buffer"], True
+        )
+
+    def test_cuda_int4_config_keeps_matmul_bias_separate(self):
+        builder = _make_builder(onnx_dtype=nemotron_parse.ir.DataType.INT4)
+        tmp_root = REPO_ROOT / "build" / "test_tmp"
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=tmp_root) as tmp:
+            builder.make_genai_config("local", {}, tmp)
+            config = json.loads(
+                (Path(tmp) / "genai_config.json").read_text()
+            )
+
+        session_options = config["model"]["decoder"]["session_options"]
+        self.assertEqual(
+            session_options["optimization.disable_specified_optimizers"],
+            "MatMulAddFusion",
+        )
+
+    def test_trt_rtx_int4_config_allows_matmul_add_fusion(self):
+        builder = _make_builder(
+            onnx_dtype=nemotron_parse.ir.DataType.INT4,
+            ep="trt-rtx",
+        )
+        tmp_root = REPO_ROOT / "build" / "test_tmp"
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=tmp_root) as tmp:
+            builder.make_genai_config("local", {}, tmp)
+            config = json.loads(
+                (Path(tmp) / "genai_config.json").read_text()
+            )
+
+        session_options = config["model"]["decoder"]["session_options"]
+        self.assertNotIn(
+            "optimization.disable_specified_optimizers", session_options
         )
 
     def test_save_processing_writes_native_config_and_tokenizer(self):
