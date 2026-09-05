@@ -73,6 +73,10 @@ FetchContent_Declare(
   onnxruntime_extensions
   GIT_REPOSITORY ${DEP_URL_onnxruntime_extensions}
   GIT_TAG ${DEP_SHA1_onnxruntime_extensions}
+  # Keeps raw OpenAI tool schemas intact for templates that serialize tools verbatim
+  # (Qwen). Without it "required"/"enum"/"items" are stripped from the prompt.
+  PATCH_COMMAND ${CMAKE_COMMAND} -DSOURCE_DIR=<SOURCE_DIR>
+                -P "${CMAKE_CURRENT_LIST_DIR}/../patches/onnxruntime_extensions/apply_patch.cmake"
 )
 set(OCOS_BUILD_PRESET ort_genai)
 onnxruntime_fetchcontent_makeavailable(onnxruntime_extensions)
