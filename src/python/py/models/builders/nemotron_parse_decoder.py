@@ -13,7 +13,7 @@ from .base import Model
 
 
 class NemotronParseDecoderComponent(Model):
-    """Build one Nemotron Parse mBART decoder phase with the common ONNX IR infra."""
+    """Build the unified Nemotron Parse mBART prefill/decode graph."""
 
     # ORT shape inference needs static Reshape inputs in the model protobuf.
     # Keep small graph constants embedded while externalizing decoder weights.
@@ -28,21 +28,14 @@ class NemotronParseDecoderComponent(Model):
         cache_dir,
         extra_options,
         *,
-        phase,
         encoder_sequence_length,
         prefill_sequence_length,
         cache_sequence_length,
     ):
-        if phase not in {"prefill", "decode"}:
-            raise ValueError(f"Unsupported Nemotron Parse decoder phase: {phase}")
-
-        self.phase = phase
         self.encoder_sequence_length = int(encoder_sequence_length)
         self.prefill_sequence_length = int(prefill_sequence_length)
         self.cache_sequence_length = int(cache_sequence_length)
-        self.sequence_length = (
-            self.prefill_sequence_length if phase == "prefill" else 1
-        )
+        self.sequence_length = "sequence_length"
 
         decoder_config = copy.deepcopy(config.decoder)
         decoder_config._name_or_path = config._name_or_path
@@ -68,10 +61,8 @@ class NemotronParseDecoderComponent(Model):
             delattr(decoder_config, "quantization_config")
 
         component_options = copy.deepcopy(extra_options)
-        component_options["filename"] = (
-            "decoder_prefill.onnx" if phase == "prefill" else "decoder.onnx"
-        )
-        component_options["prune_lm_head"] = phase == "prefill"
+        component_options["filename"] = "decoder.onnx"
+        component_options["prune_lm_head"] = True
         component_options["shared_embeddings"] = False
         super().__init__(
             decoder_config,
@@ -82,13 +73,12 @@ class NemotronParseDecoderComponent(Model):
             component_options,
         )
 
-        self.graph.name = f"nemotron_parse_decoder_{phase}"
-        if phase == "decode":
-            self.graph.opset_imports[""] = 24
+        self.graph.name = "nemotron_parse_decoder"
+        self.graph.opset_imports[""] = 24
 
         self.output_shapes["logits"] = [
             "batch_size",
-            1 if phase == "prefill" else self.sequence_length,
+            1,
             self.vocab_size,
         ]
 
@@ -149,76 +139,44 @@ class NemotronParseDecoderComponent(Model):
                 [batch, self.sequence_length],
             )
         )
-        mask_length = (
-            self.prefill_sequence_length
-            if self.phase == "prefill"
-            else self.cache_sequence_length
-        )
         self.graph.inputs.append(
             self.make_value(
                 "decoder_attention_mask",
                 ir.DataType.INT64,
-                [batch, mask_length],
+                [batch, self.cache_sequence_length],
             )
         )
-        if self.phase == "prefill":
-            self.graph.inputs.append(
-                self.make_value(
-                    "encoder_hidden_states",
-                    self.io_dtype,
-                    [batch, encoder_sequence, self.hidden_size],
+        for layer_id in range(self.num_layers):
+            for name, shape in (
+                (f"past_key_values.{layer_id}.key", head_shape),
+                (f"past_key_values.{layer_id}.value", head_shape),
+                (f"cross_past_key_values.{layer_id}.key", cross_shape),
+                (f"cross_past_key_values.{layer_id}.value", cross_shape),
+            ):
+                self.graph.inputs.append(
+                    self.make_value(name, self.io_dtype, shape)
                 )
+        self.graph.inputs.append(
+            self.make_value(
+                "cache_write_indices",
+                ir.DataType.INT64,
+                [batch],
             )
-        else:
-            for layer_id in range(self.num_layers):
-                for name, shape in (
-                    (f"past_key_values.{layer_id}.key", head_shape),
-                    (f"past_key_values.{layer_id}.value", head_shape),
-                    (f"cross_past_key_values.{layer_id}.key", cross_shape),
-                    (f"cross_past_key_values.{layer_id}.value", cross_shape),
-                ):
-                    self.graph.inputs.append(
-                        self.make_value(name, self.io_dtype, shape)
-                    )
-            self.graph.inputs.append(
-                self.make_value(
-                    "cache_write_indices",
-                    ir.DataType.INT64,
-                    [batch],
-                )
-            )
+        )
 
         self.graph.outputs.append(
             self.make_value(
                 "logits", self.output_types["logits"], self.output_shapes["logits"]
             )
         )
-        self_cache_shape = (
-            [
-                batch,
-                self.num_attn_heads,
-                self.prefill_sequence_length,
-                self.head_size,
-            ]
-            if self.phase == "prefill"
-            else head_shape
-        )
         for layer_id in range(self.num_layers):
             for name, shape in (
-                (f"present.{layer_id}.key", self_cache_shape),
-                (f"present.{layer_id}.value", self_cache_shape),
+                (f"present.{layer_id}.key", head_shape),
+                (f"present.{layer_id}.value", head_shape),
             ):
                 self.graph.outputs.append(
                     self.make_value(name, self.io_dtype, shape)
                 )
-            if self.phase == "prefill":
-                for name in (
-                    f"cross_present.{layer_id}.key",
-                    f"cross_present.{layer_id}.value",
-                ):
-                    self.graph.outputs.append(
-                        self.make_value(name, self.io_dtype, cross_shape)
-                    )
 
     def _make_constants(self):
         prefix = "/nemotron_parse/constants"
@@ -230,6 +188,12 @@ class NemotronParseDecoderComponent(Model):
             "mask_value": f"{prefix}/mask_value",
             "float_zero": f"{prefix}/float_zero",
             "attention_scale": f"{prefix}/attention_scale",
+            "shape_index": f"{prefix}/shape_index",
+            "range_start": f"{prefix}/range_start",
+            "range_step": f"{prefix}/range_step",
+            "write_index_axes": f"{prefix}/write_index_axes",
+            "query_position_axes": f"{prefix}/query_position_axes",
+            "key_positions": f"{prefix}/key_positions",
         }
         self.make_initializer(
             torch.tensor(
@@ -277,34 +241,37 @@ class NemotronParseDecoderComponent(Model):
             self._constants["attention_scale"],
             to=self.io_dtype,
         )
-
-        if self.phase == "prefill":
-            causal = torch.zeros(
-                (
-                    1,
-                    1,
-                    self.prefill_sequence_length,
-                    self.prefill_sequence_length,
-                ),
-                dtype=torch.float32,
-            )
-            upper = torch.triu(
-                torch.ones_like(causal, dtype=torch.bool), diagonal=1
-            )
-            causal.masked_fill_(upper, mask_value)
-            self._constants["causal_mask"] = f"{prefix}/causal_mask"
-            self.make_initializer(
-                causal, self._constants["causal_mask"], to=self.io_dtype
-            )
+        self.make_initializer(
+            torch.tensor(1, dtype=torch.int64),
+            self._constants["shape_index"],
+        )
+        self.make_initializer(
+            torch.tensor(0, dtype=torch.int64),
+            self._constants["range_start"],
+        )
+        self.make_initializer(
+            torch.tensor(1, dtype=torch.int64),
+            self._constants["range_step"],
+        )
+        self.make_initializer(
+            torch.tensor([1], dtype=torch.int64),
+            self._constants["write_index_axes"],
+        )
+        self.make_initializer(
+            torch.tensor([1, 3], dtype=torch.int64),
+            self._constants["query_position_axes"],
+        )
+        self.make_initializer(
+            torch.arange(
+                self.cache_sequence_length, dtype=torch.int64
+            ).reshape(1, 1, 1, self.cache_sequence_length),
+            self._constants["key_positions"],
+        )
 
     def _make_attention_mask(self):
-        key_length = (
-            self.prefill_sequence_length
-            if self.phase == "prefill"
-            else self.cache_sequence_length
-        )
+        key_length = self.cache_sequence_length
         base = "/decoder/attention_mask"
-        equal = f"{base}/Equal"
+        equal = f"{base}/EqualPadding"
         self.make_equal(
             equal,
             ["decoder_attention_mask", self._constants["mask_zero"]],
@@ -317,33 +284,88 @@ class NemotronParseDecoderComponent(Model):
             ir.DataType.BOOL,
             ["batch_size", 1, 1, key_length],
         )
+
+        input_shape = f"{base}/InputShape"
+        self.make_shape(input_shape, "decoder_input_ids", [2])
+        sequence_length = f"{base}/SequenceLength"
+        self.make_gather(
+            sequence_length,
+            [f"{input_shape}/output_0", self._constants["shape_index"]],
+            ir.DataType.INT64,
+            [],
+            axis=0,
+        )
+        query_offsets = f"{base}/QueryOffsets"
+        self.make_range(
+            query_offsets,
+            [
+                self._constants["range_start"],
+                f"{sequence_length}/output_0",
+                self._constants["range_step"],
+            ],
+            ir.DataType.INT64,
+            [self.sequence_length],
+        )
+        write_indices = f"{base}/UnsqueezeWriteIndices"
+        self.make_unsqueeze(
+            write_indices,
+            [
+                "cache_write_indices",
+                self._constants["write_index_axes"],
+            ],
+            ir.DataType.INT64,
+            ["batch_size", 1],
+        )
+        query_positions = f"{base}/AddQueryOffsets"
+        self.make_add(
+            query_positions,
+            [f"{write_indices}/output_0", f"{query_offsets}/output_0"],
+            ir.DataType.INT64,
+            ["batch_size", self.sequence_length],
+        )
+        query_positions_4d = f"{base}/UnsqueezeQueryPositions"
+        self.make_unsqueeze(
+            query_positions_4d,
+            [
+                f"{query_positions}/output_0",
+                self._constants["query_position_axes"],
+            ],
+            ir.DataType.INT64,
+            ["batch_size", 1, self.sequence_length, 1],
+        )
+        causal = f"{base}/GreaterCausal"
+        self.make_greater(
+            causal,
+            [
+                self._constants["key_positions"],
+                f"{query_positions_4d}/output_0",
+            ],
+            ["batch_size", 1, self.sequence_length, key_length],
+        )
+        invalid = f"{base}/OrPaddingAndCausal"
+        self.make_node(
+            "Or",
+            inputs=[f"{unsqueeze}/output_0", f"{causal}/output_0"],
+            outputs=[f"{invalid}/output_0"],
+            name=invalid,
+        )
+        self.make_value(
+            f"{invalid}/output_0",
+            ir.DataType.BOOL,
+            ["batch_size", 1, self.sequence_length, key_length],
+        )
         where = f"{base}/Where"
         self.make_where(
             where,
             [
-                f"{unsqueeze}/output_0",
+                f"{invalid}/output_0",
                 self._constants["mask_value"],
                 self._constants["float_zero"],
             ],
             self.io_dtype,
-            ["batch_size", 1, 1, key_length],
+            ["batch_size", 1, self.sequence_length, key_length],
         )
-        if self.phase == "decode":
-            return f"{where}/output_0"
-
-        add = f"{base}/AddCausal"
-        self.make_add(
-            add,
-            [f"{where}/output_0", self._constants["causal_mask"]],
-            self.io_dtype,
-            [
-                "batch_size",
-                1,
-                self.prefill_sequence_length,
-                self.prefill_sequence_length,
-            ],
-        )
-        return f"{add}/output_0"
+        return f"{where}/output_0"
 
     def _make_embedding(self, decoder):
         base = "/decoder/embed_tokens"
@@ -594,11 +616,6 @@ class NemotronParseDecoderComponent(Model):
             ),
             f"{base}/k",
             self.sequence_length,
-            output=(
-                f"present.{layer_id}.key"
-                if self.phase == "prefill"
-                else None
-            ),
         )
         value_update = self._split_heads(
             self._make_linear(
@@ -609,43 +626,31 @@ class NemotronParseDecoderComponent(Model):
             ),
             f"{base}/v",
             self.sequence_length,
-            output=(
-                f"present.{layer_id}.value"
-                if self.phase == "prefill"
-                else None
-            ),
         )
-
-        if self.phase == "decode":
-            cache_shape = [
-                "batch_size",
-                self.num_attn_heads,
-                self.cache_sequence_length,
-                self.head_size,
-            ]
-            key = self.make_tensor_scatter(
-                f"{base}/key/TensorScatter",
-                f"past_key_values.{layer_id}.key",
-                key_update,
-                "cache_write_indices",
-                self.io_dtype,
-                cache_shape,
-                output=f"present.{layer_id}.key",
-            )
-            value = self.make_tensor_scatter(
-                f"{base}/value/TensorScatter",
-                f"past_key_values.{layer_id}.value",
-                value_update,
-                "cache_write_indices",
-                self.io_dtype,
-                cache_shape,
-                output=f"present.{layer_id}.value",
-            )
-            key_length = self.cache_sequence_length
-        else:
-            key = key_update
-            value = value_update
-            key_length = self.prefill_sequence_length
+        cache_shape = [
+            "batch_size",
+            self.num_attn_heads,
+            self.cache_sequence_length,
+            self.head_size,
+        ]
+        key = self.make_tensor_scatter(
+            f"{base}/key/TensorScatter",
+            f"past_key_values.{layer_id}.key",
+            key_update,
+            "cache_write_indices",
+            self.io_dtype,
+            cache_shape,
+            output=f"present.{layer_id}.key",
+        )
+        value = self.make_tensor_scatter(
+            f"{base}/value/TensorScatter",
+            f"past_key_values.{layer_id}.value",
+            value_update,
+            "cache_write_indices",
+            self.io_dtype,
+            cache_shape,
+            output=f"present.{layer_id}.value",
+        )
 
         context = self._make_scaled_dot_product_attention(
             base,
@@ -653,7 +658,7 @@ class NemotronParseDecoderComponent(Model):
             key,
             value,
             self.sequence_length,
-            key_length,
+            self.cache_sequence_length,
             attention_mask,
         )
         merged = self._merge_heads(
@@ -678,32 +683,8 @@ class NemotronParseDecoderComponent(Model):
             f"{base}/q",
             self.sequence_length,
         )
-        if self.phase == "prefill":
-            key = self._split_heads(
-                self._make_linear(
-                    attention.k_proj,
-                    f"{base}/k_proj",
-                    "encoder_hidden_states",
-                    "encoder_sequence_length",
-                ),
-                f"{base}/k",
-                "encoder_sequence_length",
-                output=f"cross_present.{layer_id}.key",
-            )
-            value = self._split_heads(
-                self._make_linear(
-                    attention.v_proj,
-                    f"{base}/v_proj",
-                    "encoder_hidden_states",
-                    "encoder_sequence_length",
-                ),
-                f"{base}/v",
-                "encoder_sequence_length",
-                output=f"cross_present.{layer_id}.value",
-            )
-        else:
-            key = f"cross_past_key_values.{layer_id}.key"
-            value = f"cross_past_key_values.{layer_id}.value"
+        key = f"cross_past_key_values.{layer_id}.key"
+        value = f"cross_past_key_values.{layer_id}.value"
 
         context = self._make_scaled_dot_product_attention(
             base,
