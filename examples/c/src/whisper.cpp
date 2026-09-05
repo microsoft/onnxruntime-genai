@@ -4,8 +4,12 @@
 #include <iostream>
 #include <string>
 #include <fstream>
+#include <filesystem>
+#include <functional>
+#include <cmath>
 #include <memory>
 #include <iomanip>
+#include <sstream>
 #include "common.h"
 #include "ort_genai.h"
 
@@ -29,7 +33,87 @@ void PrintTimestampTokens(const int32_t* tokens, size_t count) {
   }
 }
 
-void CXX_API(const char* model_path, int32_t num_beams, const std::string& language, const std::string& task, bool timestamps) {
+constexpr int32_t kTimestampBegin = 50364;
+constexpr double kTimestampPrecision = 0.02;
+
+struct WhisperSegment {
+  double start{};
+  double end{};
+  std::string text;
+};
+
+std::string FormatTimestamp(double seconds, char separator) {
+  auto milliseconds = static_cast<int64_t>(std::round(seconds * 1000));
+  auto hours = milliseconds / 3600000;
+  milliseconds %= 3600000;
+  auto minutes = milliseconds / 60000;
+  milliseconds %= 60000;
+  auto secs = milliseconds / 1000;
+  milliseconds %= 1000;
+  std::ostringstream result;
+  result << std::setfill('0') << std::setw(2) << hours << ":" << std::setw(2) << minutes << ":"
+         << std::setw(2) << secs << separator << std::setw(3) << milliseconds;
+  return result.str();
+}
+
+std::vector<WhisperSegment> GetSegments(const int32_t* tokens, size_t count,
+                                        const std::function<std::string(const int32_t*, size_t)>& decode) {
+  std::vector<WhisperSegment> segments;
+  size_t start = 0;
+  for (size_t index = 1; index < count; ++index) {
+    if (tokens[index - 1] >= kTimestampBegin && tokens[index] >= kTimestampBegin) {
+      std::vector<int32_t> text_tokens;
+      for (size_t token = start; token < index; ++token) {
+        if (tokens[token] < kTimestampBegin) text_tokens.push_back(tokens[token]);
+      }
+      const auto text = decode(text_tokens.data(), text_tokens.size());
+      if (!text.empty()) {
+        segments.push_back({(tokens[start] - kTimestampBegin) * kTimestampPrecision,
+                            (tokens[index - 1] - kTimestampBegin) * kTimestampPrecision, text});
+      }
+      start = index;
+    }
+  }
+  if (segments.empty()) segments.push_back({0, 0, decode(tokens, count)});
+  return segments;
+}
+
+void WriteResults(const std::vector<WhisperSegment>& segments, const std::string& output_dir,
+                  const std::string& stem, const std::vector<std::string>& formats) {
+  if (output_dir.empty()) return;
+  std::filesystem::create_directories(output_dir);
+  for (const auto& format : formats) {
+    std::ofstream output(std::filesystem::path(output_dir) / (stem + "." + format));
+    if (!output) throw std::runtime_error("Unable to create output file.");
+    if (format == "txt") {
+      for (const auto& segment : segments) output << segment.text << "\n";
+    } else if (format == "json" || format == "jsonl") {
+      nlohmann::ordered_json records = nlohmann::ordered_json::array();
+      for (size_t i = 0; i < segments.size(); ++i) {
+        records.push_back({{"id", i}, {"start", segments[i].start}, {"end", segments[i].end}, {"text", segments[i].text}});
+      }
+      if (format == "json") output << nlohmann::ordered_json{{"segments", records}}.dump(2) << "\n";
+      else for (const auto& record : records) output << record.dump() << "\n";
+    } else if (format == "tsv") {
+      output << "start\tend\ttext\n";
+      for (const auto& segment : segments) output << std::round(segment.start * 1000) << "\t"
+                                                  << std::round(segment.end * 1000) << "\t" << segment.text << "\n";
+    } else if (format == "srt" || format == "vtt") {
+      if (format == "vtt") output << "WEBVTT\n\n";
+      for (size_t i = 0; i < segments.size(); ++i) {
+        if (format == "srt") output << i + 1 << "\n";
+        const char separator = format == "srt" ? ',' : '.';
+        output << FormatTimestamp(segments[i].start, separator) << " --> "
+               << FormatTimestamp(segments[i].end, separator) << "\n" << segments[i].text << "\n\n";
+      }
+    } else {
+      throw std::runtime_error("Unsupported output format: " + format);
+    }
+  }
+}
+
+void CXX_API(const char* model_path, int32_t num_beams, const std::string& language, const std::string& task,
+             bool timestamps, const std::string& output_dir, const std::vector<std::string>& output_formats) {
   std::cout << "Creating model..." << std::endl;
   auto model = OgaModel::Create(model_path);
   std::cout << "Creating multimodal processor..." << std::endl;
@@ -93,6 +177,11 @@ void CXX_API(const char* model_path, int32_t num_beams, const std::string& langu
       if (timestamps) {
         PrintTimestampTokens(tokens, num_tokens);
       }
+      auto segments = GetSegments(tokens, num_tokens, [&processor](const int32_t* data, size_t size) {
+        return processor->Decode(data, size).p_;
+      });
+      auto stem = std::filesystem::path(audio_paths[i / num_beams]).stem().string();
+      WriteResults(segments, output_dir, stem + ".beam" + std::to_string(i % num_beams), output_formats);
     }
 
     std::cout << "\n\n\n";
@@ -109,7 +198,8 @@ void CheckResult(OgaResult* result) {
   }
 }
 
-void C_API(const char* model_path, int32_t num_beams, const std::string& language, const std::string& task, bool timestamps) {
+void C_API(const char* model_path, int32_t num_beams, const std::string& language, const std::string& task,
+           bool timestamps, const std::string& output_dir, const std::vector<std::string>& output_formats) {
   OgaModel* model;
   std::cout << "Creating model..." << std::endl;
   CheckResult(OgaCreateModel(model_path, &model));
@@ -191,6 +281,13 @@ void C_API(const char* model_path, int32_t num_beams, const std::string& languag
       if (timestamps) {
         PrintTimestampTokens(tokens, num_tokens);
       }
+      auto segments = GetSegments(tokens, num_tokens, [processor](const int32_t* data, size_t size) {
+        const char* decoded;
+        CheckResult(OgaProcessorDecode(processor, data, size, &decoded));
+        return std::string(decoded);
+      });
+      auto stem = std::filesystem::path(audio_paths[i / num_beams]).stem().string();
+      WriteResults(segments, output_dir, stem + ".beam" + std::to_string(i % num_beams), output_formats);
     }
 
     std::cout << "\n\n"
@@ -209,7 +306,8 @@ void C_API(const char* model_path, int32_t num_beams, const std::string& languag
 
 static void print_usage_whisper(int /*argc*/, char** argv) {
   std::cerr << "usage: " << argv[0] << " <model_path> <num_beams> [--language <language>] "
-            << "[--task <transcribe|translate>] [--timestamps]" << std::endl;
+            << "[--task <transcribe|translate>] [--timestamps] [--output-dir <dir>] "
+            << "[--output-format <txt|json|jsonl|srt|tsv|vtt,...>]" << std::endl;
 }
 
 int main(int argc, char** argv) {
@@ -220,13 +318,22 @@ int main(int argc, char** argv) {
 
   std::string language = "en";
   std::string task = "transcribe";
+  std::string output_dir;
+  std::vector<std::string> output_formats{"txt"};
   bool timestamps = false;
   for (int i = 3; i < argc; ++i) {
     const std::string option = argv[i];
     if (option == "--timestamps") {
       timestamps = true;
-    } else if ((option == "--language" || option == "--task") && ++i < argc) {
-      (option == "--language" ? language : task) = argv[i];
+    } else if ((option == "--language" || option == "--task" || option == "--output-dir" || option == "--output-format") && ++i < argc) {
+      if (option == "--language") language = argv[i];
+      else if (option == "--task") task = argv[i];
+      else if (option == "--output-dir") output_dir = argv[i];
+      else {
+        output_formats.clear();
+        std::istringstream formats(argv[i]);
+        for (std::string format; std::getline(formats, format, ',');) output_formats.push_back(format);
+      }
     } else {
       print_usage_whisper(argc, argv);
       return -1;
@@ -248,10 +355,10 @@ int main(int argc, char** argv) {
 
 #ifdef USE_CXX
   std::cout << "C++ API" << std::endl;
-  CXX_API(argv[1], std::stoi(argv[2]), language, task, timestamps);
+  CXX_API(argv[1], std::stoi(argv[2]), language, task, timestamps, output_dir, output_formats);
 #else
   std::cout << "C API" << std::endl;
-  C_API(argv[1], std::stoi(argv[2]), language, task, timestamps);
+  C_API(argv[1], std::stoi(argv[2]), language, task, timestamps, output_dir, output_formats);
 #endif
 
   return 0;

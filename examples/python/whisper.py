@@ -11,6 +11,7 @@ import numpy as np
 import onnxruntime_genai as og
 from common import register_ep
 from whisper_timestamps import word_timestamps
+from whisper_utils.output import TIMESTAMP_BEGIN, segments_from_tokens, write_result
 
 # og.set_log_options(enabled=True, model_input_values=True, model_output_values=True)
 
@@ -35,6 +36,7 @@ def run(args: argparse.Namespace):
             config.append_provider(args.execution_provider)
     model = og.Model(config)
     processor = model.create_multimodal_processor()
+    tokenizer = og.Tokenizer(model)
 
     while True:
         readline.set_completer_delims(" \t\n;")
@@ -57,18 +59,25 @@ def run(args: argparse.Namespace):
         print("Processing audio...")
         batch_size = len(audio_paths)
         decoder_prompt_tokens = ["<|startoftranscript|>", f"<|{args.language}|>", f"<|{args.task}|>"]
+        if args.initial_prompt:
+            decoder_prompt_tokens.append(" " + args.initial_prompt.strip())
         if not args.timestamps:
             decoder_prompt_tokens.append("<|notimestamps|>")
-        prompts = ["".join(decoder_prompt_tokens)] * batch_size
+        prompt = "".join(decoder_prompt_tokens)
+        prompts = [prompt] * batch_size
         inputs = processor(prompts, audios=audios)
 
         params = og.GeneratorParams(model)
         params.set_search_options(
-            do_sample=False,
+            do_sample=args.temperature > 0,
             num_beams=args.num_beams,
             num_return_sequences=args.num_beams,
-            max_length=448,
+            max_length=args.max_length,
             batch_size=batch_size,
+            temperature=args.temperature,
+            top_k=args.top_k,
+            top_p=args.top_p,
+            repetition_penalty=args.repetition_penalty,
         )
 
         generator = og.Generator(model, params)
@@ -85,6 +94,7 @@ def run(args: argparse.Namespace):
 
         print()
         transcriptions = []
+        prompt_length = len(tokenizer.encode(prompt))
         for i in range(batch_size * args.num_beams):
             tokens = generator.get_sequence(i)
             transcription = processor.decode(tokens)
@@ -94,13 +104,21 @@ def run(args: argparse.Namespace):
                 f"    {Format.underline}batch {i // args.num_beams}, beam {i % args.num_beams}{Format.end}: {transcription}"
             )
             transcriptions.append(transcription.strip())
+            generated_tokens = tokens[prompt_length:]
+            segments = segments_from_tokens(generated_tokens, processor.decode)
             if args.word_timestamps:
-                generated_tokens = [token for token in tokens[len(decoder_prompt_tokens) :] if token < args.eot_token_id]
+                generated_tokens = [token for token in generated_tokens if token < args.eot_token_id]
                 token_text = [processor.decode([token]) for token in generated_tokens]
                 cross_qk = generator.get_output("cross_qk")[0, 0]
                 print("Word timestamps:")
-                for word in word_timestamps(token_text, cross_qk):
+                words = word_timestamps(token_text, cross_qk)
+                for word in words:
                     print(f"    [{word.start:.2f} --> {word.end:.2f}] {word.word}")
+                if segments:
+                    segments[0].words = [word.__dict__ for word in words]
+            if args.output_dir:
+                source = os.path.splitext(os.path.basename(audio_paths[i // args.num_beams]))[0]
+                write_result(segments, args.output_dir, f"{source}.beam{i % args.num_beams}", args.output_format)
 
         for _ in range(3):
             print()
@@ -132,9 +150,23 @@ if __name__ == "__main__":
         help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead.",
     )
     parser.add_argument("-b", "--num_beams", type=int, default=4, help="Number of beams")
+    parser.add_argument("--max-length", type=int, default=448, help="Maximum decoder sequence length")
     parser.add_argument("--language", default="en", help="Whisper language token (for example, en or fr)")
     parser.add_argument("--task", choices=["transcribe", "translate"], default="transcribe")
     parser.add_argument("--timestamps", action="store_true", help="Enable Whisper segment timestamp tokens")
+    parser.add_argument("--initial-prompt", default="", help="Text prompt used to bias the first transcription window")
+    parser.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature; zero enables beam search")
+    parser.add_argument("--top-k", type=int, default=1, help="Top-k sampling limit")
+    parser.add_argument("--top-p", type=float, default=1.0, help="Nucleus sampling probability")
+    parser.add_argument("--repetition-penalty", type=float, default=1.0, help="Token repetition penalty")
+    parser.add_argument("--output-dir", default="", help="Directory for txt, json, jsonl, srt, tsv, and vtt results")
+    parser.add_argument(
+        "--output-format",
+        nargs="+",
+        choices=["txt", "json", "jsonl", "srt", "tsv", "vtt"],
+        default=["txt"],
+        help="One or more result formats written to --output-dir",
+    )
     parser.add_argument(
         "--word-timestamps",
         action="store_true",
@@ -159,6 +191,8 @@ if __name__ == "__main__":
         help="Non-interactive mode for CI testing purposes",
     )
     args = parser.parse_args()
+    if args.temperature and args.num_beams != 1:
+        parser.error("Sampling requires --num-beams 1.")
     if args.word_timestamps and not args.alignment_heads:
         parser.error("--word-timestamps requires --alignment-heads.")
     run(args)
