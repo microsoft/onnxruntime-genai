@@ -124,8 +124,10 @@ size_t ComputeNumBlocks(std::shared_ptr<Model> model,
   if (model->config_->engine.dynamic_batching->num_blocks.has_value()) {
     return ResolveConfiguredPagedBlockCount(
         *model->config_->engine.dynamic_batching->num_blocks,
-        BytesPerBlock(model, dtype) * full_layer_count,
-        auxiliary_bytes_per_block);
+        CheckedMultiply(BytesPerBlock(model, dtype), full_layer_count,
+                        "Full-attention paged cache bytes per block"),
+        auxiliary_bytes_per_block,
+        auxiliary_reserved_memory_bytes);
   }
 
   size_t free_bytes, total_bytes;
@@ -202,12 +204,13 @@ size_t ComputePagedBlockCapacity(size_t available_memory_bytes,
 
 size_t ResolveConfiguredPagedBlockCount(size_t configured_num_blocks,
                                         size_t primary_bytes_per_block,
-                                        size_t auxiliary_bytes_per_block) {
+                                        size_t auxiliary_bytes_per_block,
+                                        size_t auxiliary_reserved_memory_bytes) {
   if (primary_bytes_per_block == 0) {
     throw std::invalid_argument(
         "Paged cache primary bytes per block must be greater than zero");
   }
-  if (auxiliary_bytes_per_block == 0) {
+  if (auxiliary_bytes_per_block == 0 && auxiliary_reserved_memory_bytes == 0) {
     return configured_num_blocks;
   }
   if (configured_num_blocks >
@@ -215,13 +218,22 @@ size_t ResolveConfiguredPagedBlockCount(size_t configured_num_blocks,
     throw std::runtime_error(
         "engine.dynamic_batching.num_blocks is too large for the paged key-value cache.");
   }
+  const size_t budget = configured_num_blocks * primary_bytes_per_block;
+  if (budget <= auxiliary_reserved_memory_bytes) {
+    throw std::runtime_error(
+        "engine.dynamic_batching.num_blocks is too small to hold the reserved auxiliary cache.");
+  }
+  if (auxiliary_bytes_per_block >
+      std::numeric_limits<size_t>::max() - primary_bytes_per_block) {
+    throw std::runtime_error("Combined paged cache bytes per block overflow size_t.");
+  }
   const size_t blocks =
-      (configured_num_blocks * primary_bytes_per_block) /
+      (budget - auxiliary_reserved_memory_bytes) /
       (primary_bytes_per_block + auxiliary_bytes_per_block);
   if (blocks == 0) {
     throw std::runtime_error(
         "engine.dynamic_batching.num_blocks is too small to hold both the target and the "
-        "MTP head key-value caches.");
+        "auxiliary key-value caches.");
   }
   return blocks;
 }

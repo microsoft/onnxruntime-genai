@@ -473,6 +473,24 @@ TEST(PagedKeyValueCacheManifestTest, ExplicitBlockCountCoversBothPools) {
           /*auxiliary_bytes_per_block=*/32),
       66u);
 
+  // DSpark also reserves fixed spill blocks for each active query. Deduct those bytes from the
+  // configured budget before splitting the remainder between target and drafter blocks.
+  EXPECT_EQ(
+      ResolveConfiguredPagedBlockCount(
+          /*configured_num_blocks=*/100,
+          /*primary_bytes_per_block=*/64,
+          /*auxiliary_bytes_per_block=*/32,
+          /*auxiliary_reserved_memory_bytes=*/1024),
+      56u);
+
+  EXPECT_THROW(
+      ResolveConfiguredPagedBlockCount(
+          /*configured_num_blocks=*/16,
+          /*primary_bytes_per_block=*/64,
+          /*auxiliary_bytes_per_block=*/32,
+          /*auxiliary_reserved_memory_bytes=*/1024),
+      std::runtime_error);
+
   // A budget too small to leave a block for each pool is rejected rather than silently allocating
   // an extra head pool outside the configured sizing contract.
   EXPECT_THROW(

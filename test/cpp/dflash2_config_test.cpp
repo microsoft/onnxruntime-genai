@@ -340,6 +340,12 @@ TEST(Dflash2ConfigTest, RejectsDflash2GeometryForDspark) {
   EXPECT_THROW(CreateDflash2Config(config), std::runtime_error);
 }
 
+TEST(Dflash2ConfigTest, RejectsFullAttentionForDflash2) {
+  auto config = MakeDflash2Config();
+  config.model.dflash2.sliding_window = 0;
+  EXPECT_THROW(CreateDflash2Config(config), std::runtime_error);
+}
+
 TEST(Dflash2ConfigTest, ParsesDsparkAlias) {
   EXPECT_NO_THROW(OgaConfig::Create(WriteDsparkConfig("dspark").string().c_str()));
   EXPECT_THROW(OgaConfig::Create(WriteDsparkConfig("dspark2").string().c_str()), std::exception);
@@ -390,6 +396,8 @@ TEST(Dflash2ConfigTest, AccountsForWindowedPagedCache) {
 
 TEST(Dflash2ConfigTest, BillsFullAttentionCachePerTargetBlock) {
   auto config = MakeDflash2Config();
+  config.model.dflash2.is_dspark = true;
+  config.model.dflash2.num_draft_tokens = config.model.dflash2.block_size;
   config.model.dflash2.sliding_window = 0;
   EXPECT_EQ(Dflash2Drafter::PoolBlocks(config, 8, 3), 0u);
   EXPECT_EQ(Dflash2Drafter::BytesPerBlock(
@@ -413,6 +421,94 @@ TEST(Dflash2ConfigTest, RejectsFullAttentionPoolOverflow) {
       Dflash2Drafter::FullAttentionReservedBytes(
           4, 4, 2, std::numeric_limits<size_t>::max()),
       std::runtime_error);
+}
+
+TEST(Dflash2ConfigTest, RunsFullAttentionDsparkAcrossRequestLifecycles) {
+  auto config = MakeDflash2Config();
+  auto& dspark = config.model.dflash2;
+  dspark.filename = MODEL_PATH "engine/synthetic-dspark/dspark.onnx";
+  dspark.is_dspark = true;
+  dspark.num_hidden_layers = 1;
+  dspark.num_key_value_heads = 1;
+  dspark.head_size = 1;
+  dspark.block_size = 4;
+  dspark.num_draft_tokens = 4;
+  dspark.sliding_window = 0;
+
+  auto model = std::make_shared<Dflash2Model>(CreateDflash2Config(config), GetOrtEnv());
+  Dflash2Drafter drafter{model, /*paged_block_size=*/4, /*num_blocks=*/10,
+                         /*max_requests=*/2};
+
+  int request_a_id = 0;
+  int request_b_id = 0;
+  int request_c_id = 0;
+  int request_d_id = 0;
+  int request_e_id = 0;
+  auto* request_a = reinterpret_cast<Request*>(&request_a_id);
+  auto* request_b = reinterpret_cast<Request*>(&request_b_id);
+  auto* request_c = reinterpret_cast<Request*>(&request_c_id);
+  auto* request_d = reinterpret_cast<Request*>(&request_d_id);
+  auto* request_e = reinterpret_cast<Request*>(&request_e_id);
+
+  auto* device = GetDeviceInterface(DeviceType::CPU);
+  Tensor first_aux{device, Ort::TypeToTensorType<float>};
+  const std::array<int64_t, 2> first_aux_shape{18, 1};
+  first_aux.CreateTensor(first_aux_shape);
+  const std::array first_feeds{
+      Dflash2Drafter::Feed{request_a, 0, 9, 0, 11, true},
+      Dflash2Drafter::Feed{request_b, 9, 9, 0, 12, true},
+  };
+  std::vector<std::vector<int32_t>> drafts;
+  drafter.Propose(first_aux, first_feeds, drafts);
+  ASSERT_EQ(drafts.size(), 2u);
+  EXPECT_EQ(drafts[0], (std::vector<int32_t>{6, 0, 13, 64}));
+  EXPECT_EQ(drafts[1], (std::vector<int32_t>{22, 0, 13, 64}));
+
+  Tensor growth_aux{device, Ort::TypeToTensorType<float>};
+  const std::array<int64_t, 2> growth_aux_shape{8, 1};
+  growth_aux.CreateTensor(growth_aux_shape);
+  const std::array growth_feeds{
+      Dflash2Drafter::Feed{request_a, 0, 4, 9, 13, true},
+      Dflash2Drafter::Feed{request_b, 4, 4, 9, 14, true},
+  };
+  drafter.Propose(growth_aux, growth_feeds, drafts);
+  ASSERT_EQ(drafts.size(), 2u);
+  EXPECT_EQ(drafts[0], (std::vector<int32_t>{14, 9, 8, 44}));
+  EXPECT_EQ(drafts[1], (std::vector<int32_t>{31, 9, 8, 44}));
+
+  drafter.Release(request_a);
+  Tensor reused_aux{device, Ort::TypeToTensorType<float>};
+  const std::array<int64_t, 2> reused_aux_shape{9, 1};
+  reused_aux.CreateTensor(reused_aux_shape);
+  const std::array reused_feed{
+      Dflash2Drafter::Feed{request_c, 0, 9, 0, 15, true},
+  };
+  drafter.Propose(reused_aux, reused_feed, drafts);
+  ASSERT_EQ(drafts.size(), 1u);
+  EXPECT_EQ(drafts[0], (std::vector<int32_t>{14, 0, 13, 6}));
+
+  Tensor failed_aux{device, Ort::TypeToTensorType<float>};
+  const std::array<int64_t, 2> failed_aux_shape{1, 1};
+  failed_aux.CreateTensor(failed_aux_shape);
+  const std::array failed_feed{
+      Dflash2Drafter::Feed{request_c, 0, 1, 10, 16, true},
+  };
+  EXPECT_THROW(drafter.Propose(failed_aux, failed_feed, drafts), std::logic_error);
+  drafter.ReleaseAll();
+
+  const std::array recovered_feeds{
+      Dflash2Drafter::Feed{request_d, 0, 9, 0, 17, true},
+      Dflash2Drafter::Feed{request_e, 9, 9, 0, 18, true},
+  };
+  drafter.Propose(first_aux, recovered_feeds, drafts);
+  ASSERT_EQ(drafts.size(), 2u);
+  EXPECT_EQ(drafts[0][1], 0);
+  EXPECT_EQ(drafts[0][2], 13);
+  EXPECT_EQ(drafts[0][3], 64);
+  EXPECT_EQ(drafts[1][1], 0);
+  EXPECT_EQ(drafts[1][2], 13);
+  EXPECT_EQ(drafts[1][3], 64);
+  EXPECT_EQ(drafter.AdmissionMisses(), 0u);
 }
 
 TEST(Dflash2ConfigTest, RequiresMatchingCacheTypes) {

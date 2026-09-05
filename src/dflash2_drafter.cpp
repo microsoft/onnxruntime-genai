@@ -136,6 +136,9 @@ std::unique_ptr<Config> CreateDflash2Config(const Config& config) {
                                  ? "model.dspark.num_draft_tokens must be block_size."
                                  : "model.dflash2.num_draft_tokens must be block_size - 1.");
   }
+  if (!dflash2.is_dspark && dflash2.sliding_window <= 0) {
+    throw std::runtime_error("model.dflash2.sliding_window must be greater than zero.");
+  }
   // Every non-anchor query row feeds this id straight into the drafter's embedding lookup, so an
   // out-of-range value is either a crash or silently meaningless drafts.
   if (config.model.vocab_size <= 0) {
