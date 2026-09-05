@@ -1066,7 +1066,9 @@ class Qwen35MoEModel(MTPModel):
         """DFlash 2 block drafter, exported as an auxiliary ``dflash2.onnx``.
 
         ``dflash2_path`` points at the draft checkpoint. The drafter has no embedding and no
-        LM head of its own, so both come from the target and are shared on disk.
+        LM head of its own, so both come from the target and are shared on disk. SpecForge taps
+        the output of each ``target_layer_ids`` entry, which is the residual stream entering the
+        following layer.
         """
         self.dflash2_path = extra_options.get("dflash2_path")
         if not self.dflash2_path:
@@ -1097,7 +1099,7 @@ class Qwen35MoEModel(MTPModel):
                 f"dflash2_num_draft_tokens must not exceed the drafter checkpoint limit ({checkpoint_draft_limit})."
             )
         target_layer_ids = dflash_config["target_layer_ids"]
-        expected = ",".join(str(i) for i in target_layer_ids)
+        expected = ",".join(str(i + 1) for i in target_layer_ids)
         actual = ",".join(str(i) for i in self.decoder.aux_hidden_state_layers)
         if actual != expected:
             raise ValueError(
