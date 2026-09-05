@@ -13,11 +13,11 @@ struct NemotronParseModel : Model {
                                      const GeneratorParams& params) const override;
 
   std::unique_ptr<OrtSession> encoder_session_;
-  std::unique_ptr<OrtSession> prefill_session_;
   std::unique_ptr<OrtSession> decoder_session_;
+  std::unique_ptr<OrtSession> prefill_decoder_session_;
 
   std::unique_ptr<OrtSessionOptions> encoder_session_options_;
-  std::unique_ptr<OrtSessionOptions> prefill_session_options_;
+  std::unique_ptr<OrtSessionOptions> prefill_decoder_session_options_;
 };
 
 }  // namespace Generators

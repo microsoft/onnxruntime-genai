@@ -941,8 +941,6 @@ struct Decoder_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
-    } else if (name == "prefill_filename") {
-      v_.prefill_filename = JSON::Get<std::string_view>(value);
     } else if (name == "prefill_sequence_length") {
       v_.prefill_sequence_length = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "hidden_size") {

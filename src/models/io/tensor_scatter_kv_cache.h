@@ -11,10 +11,9 @@ namespace Generators {
 // with ONNX TensorScatter. The graph must expose cache_write_indices plus rank-4
 // past/present key and value pairs with matching fixed non-batch dimensions.
 //
-// Usage:
-//   1. Construct this in the decode State and call Add().
-//   2. Call Initialize() once with compact KV tensors produced by prefill.
-//   3. Before each single-token decode, call Update() with the new total length.
+// Update() derives the first write position from the previously processed
+// length, so the same graph can write a multi-token prompt and later append
+// one token at a time.
 //
 // Past and present bind to the same OrtValue, so Update() only changes
 // cache_write_indices; it does not swap or reallocate cache tensors. Beam
@@ -26,8 +25,6 @@ struct TensorScatterKeyValueCache final : KeyValueCache {
   void Update(DeviceSpan<int32_t> beam_indices, int total_length) override;
   void RewindTo(size_t index) override;
 
-  void Initialize(const std::vector<std::unique_ptr<OrtValue>>& compact_values);
-
  private:
   State& state_;
   int cache_sequence_length_{};
@@ -38,6 +35,7 @@ struct TensorScatterKeyValueCache final : KeyValueCache {
   std::vector<std::string> input_names_;
   std::vector<std::string> output_names_;
   std::vector<std::unique_ptr<OrtValue>> values_;
+  int current_length_{};
 };
 
 }  // namespace Generators
