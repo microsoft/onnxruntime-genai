@@ -428,6 +428,31 @@ TEST(PagedKeyValueCacheManifestTest, BlockCapacityUsesParticipatingLayerCount) {
           /*full_layer_count=*/2,
           /*element_size=*/2),
       std::runtime_error);
+
+  EXPECT_THROW(
+      ComputePagedBlockCapacity(
+          /*available_memory_bytes=*/10240,
+          /*gpu_utilization_factor=*/1.0f,
+          /*reserved_memory_bytes=*/0,
+          /*block_size=*/std::numeric_limits<size_t>::max(),
+          /*num_key_value_heads=*/2,
+          /*head_size=*/1,
+          /*full_layer_count=*/1,
+          /*element_size=*/1),
+      std::overflow_error);
+
+  EXPECT_THROW(
+      ComputePagedBlockCapacity(
+          /*available_memory_bytes=*/10240,
+          /*gpu_utilization_factor=*/1.0f,
+          /*reserved_memory_bytes=*/0,
+          /*block_size=*/4,
+          /*num_key_value_heads=*/1,
+          /*head_size=*/2,
+          /*full_layer_count=*/2,
+          /*element_size=*/2,
+          /*auxiliary_bytes_per_block=*/std::numeric_limits<size_t>::max()),
+      std::overflow_error);
 }
 
 TEST(PagedKeyValueCacheManifestTest, ExplicitBlockCountCoversBothPools) {
@@ -447,6 +472,24 @@ TEST(PagedKeyValueCacheManifestTest, ExplicitBlockCountCoversBothPools) {
           /*primary_bytes_per_block=*/64,
           /*auxiliary_bytes_per_block=*/32),
       66u);
+
+  // DSpark also reserves fixed spill blocks for each active query. Deduct those bytes from the
+  // configured budget before splitting the remainder between target and drafter blocks.
+  EXPECT_EQ(
+      ResolveConfiguredPagedBlockCount(
+          /*configured_num_blocks=*/100,
+          /*primary_bytes_per_block=*/64,
+          /*auxiliary_bytes_per_block=*/32,
+          /*auxiliary_reserved_memory_bytes=*/1024),
+      56u);
+
+  EXPECT_THROW(
+      ResolveConfiguredPagedBlockCount(
+          /*configured_num_blocks=*/16,
+          /*primary_bytes_per_block=*/64,
+          /*auxiliary_bytes_per_block=*/32,
+          /*auxiliary_reserved_memory_bytes=*/1024),
+      std::runtime_error);
 
   // A budget too small to leave a block for each pool is rejected rather than silently allocating
   // an extra head pool outside the configured sizing contract.

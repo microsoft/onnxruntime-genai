@@ -408,8 +408,9 @@ The dynamic Engine can verify a continuation together with a request's next deco
 can propose tokens before the next step with `Request::SetDraftTokens` (`OgaRequestSetDraftTokens`
 in C or `Request.set_draft_tokens` in Python). When `model.mtp` names an auxiliary draft head, the
 Engine also maintains an internal shadow Request and automatically proposes a chained greedy
-continuation after each committed target step. Alternatively, `model.dflash2` runs a block drafter
-over the target's packed auxiliary hidden states. A model cannot configure both automatic drafters.
+continuation after each committed target step. Alternatively, `model.dflash2` (or its `model.dspark`
+alias) runs a block drafter over the target's packed auxiliary hidden states. A model cannot
+configure more than one automatic drafter.
 
 Query the internal `Engine::MaxDraftTokensPerStep` capability through
 `OgaEngineMaxDraftTokensPerProposal`, `OgaEngine::MaxDraftTokensPerProposal`, or
@@ -1334,34 +1335,50 @@ Graph buffers are allocated once at configured limits and reshaped as static vie
 
 Prefill and mixed-token steps use graph id `-1`, which tells the CUDA execution provider to run eagerly.
 
-An Engine-hosted DFlash 2 drafter consumes the packed auxiliary hidden-state tensor named by
-`model.dflash2.main_aux_hidden_states`. Single-token target decode steps bind that output through
-persistent graph buffers and remain eligible for CUDA graph capture; prefill and draft-verification
-steps remain eager. Engine construction validates the output's rank, element type, and static width
-against the drafter input before allocating cache resources.
-The drafter run is synchronous because its packed inputs and outputs are owned by one proposal
-call, so `model.dflash2.run_options` cannot disable execution-provider synchronization.
+An Engine-hosted DFlash 2 or DSpark block drafter consumes the packed auxiliary hidden-state tensor
+named by `model.dflash2.main_aux_hidden_states` or `model.dspark.main_aux_hidden_states`.
+`model.dspark` is a configuration alias for the shared DFlash 2 runtime, and both sections cannot
+appear in one configuration. DFlash 2 uses `block_size - 1` draft rows because its first row is an
+anchor; DSpark predicts from all `block_size` rows.
+
+Single-token target decode steps bind that auxiliary output through persistent graph buffers and
+remain eligible for CUDA graph capture; prefill and draft-verification steps remain eager. Engine
+construction validates the output's rank, element type, and static width against the drafter input.
+It also validates the drafter's lattice outputs and every paged-cache input/output, including the
+page size, before allocating cache resources. The drafter run is synchronous because its packed
+inputs and outputs are owned by one proposal call, so its run options cannot disable
+execution-provider synchronization.
+
 The direct drafter session also uses graph id `-1`: it reuses proposal tensor allocations but
 reshapes them for each step, so they cannot be captured safely. If this optional post-commit drafter
 run fails, the Engine discards any partial proposal and still publishes the already committed target
 events. A recoverable failure also makes the drafter forget every request it is currently tracking,
 because the step whose rows it failed to ingest leaves its cached context no longer contiguous with
-the target. Those in-flight requests finish without DFlash 2 drafts while requests admitted
-afterwards still get them, and the retry budget is therefore spent on real drafter failures: three
-consecutive failures disable DFlash 2 for the Engine, and a proposal contract violation disables it
-at once. `dflash2_failures` and `dflash2_disables` report those events.
+the target. Those in-flight requests finish without block drafts while requests admitted afterwards
+still get them, and the retry budget is therefore spent on real drafter failures: three consecutive
+failures disable the drafter for the Engine, and a proposal contract violation disables it at once.
+`dflash2_failures` and `dflash2_disables` report those events.
 
-Automatic DFlash 2 drafting is greedy-only. A request that uses random sampling (`do_sample` with
-`top_k != 1` and a non-zero temperature) can never take a DFlash 2 block, so it is never fed to the
-drafter and never claims a ring.
+Automatic block drafting is greedy-only. A request that uses random sampling (`do_sample` with
+`top_k != 1` and a non-zero temperature) can never take a block draft, so it is never fed to the
+drafter and never claims cache blocks.
 
-The drafter keeps a fixed sliding-window ring per request from that request's first decode step
-until it is closed, so its pool is sized for `max_batch_size` rings. A request that first decodes
-while every ring is taken is skipped for the rest of its life and decodes without DFlash 2 drafts;
-the drafter keeps serving the requests that already hold a ring. This makes `max_batch_size` the
-DFlash 2 service-capacity limit across both active and idle long-lived requests, not merely the
-per-step scheduler limit. `dflash2_admission_misses` reports requests denied a ring because that
-capacity was occupied.
+A windowed block drafter (DFlash 2) owns a fixed ring of cache blocks per maximum batch row, so its
+pool is sized for `max_batch_size` rings and is allocated before the target pool measures free
+memory; its footprint is independent of context length. A full-attention block drafter (DSpark)
+instead mirrors the target pool: its bytes per target block and its fixed query-spill bytes are
+charged against free memory before target capacity is selected, using the cache element type
+reported by the graph. That trade is explicit -- a DSpark drafter with the same layer geometry as
+the target roughly halves the target's paged-cache capacity for the same GPU memory budget, and it
+attends the whole resident sequence on every step rather than a window.
+
+A request joins the drafter on its first decode step and holds its blocks until it is closed, so
+both pools are only sufficient while at most `max_batch_size` requests are tracked. A request that
+first decodes while the drafter is already carrying that many is skipped for the rest of its life
+and decodes without block drafts; the drafter keeps serving the requests that already hold blocks.
+This makes `max_batch_size` the drafter's service-capacity limit across both active and idle
+long-lived requests, not merely the per-step scheduler limit. `dflash2_admission_misses` reports
+requests denied cache blocks because that capacity was occupied.
 
 ## Backpressure and fairness
 
