@@ -6,6 +6,12 @@
     "pad_token_id": 1,
     "context_length": 1032,
     "vocab_size": 52352,
+    "encoder": {
+      "outputs": {
+        "cross_present_key_names": "cross_present.%d.key",
+        "cross_present_value_names": "cross_present.%d.value"
+      }
+    },
     "vision": {
       "filename": "encoder.onnx",
       "config_filename": "processor_config.json",
@@ -15,7 +21,6 @@
     },
     "decoder": {
       "filename": "decoder.onnx",
-      "prefill_filename": "decoder_prefill.onnx",
       "prefill_sequence_length": 8,
       "hidden_size": 1024,
       "head_size": 64,
@@ -25,7 +30,6 @@
       "inputs": {
         "input_ids": "decoder_input_ids",
         "attention_mask": "decoder_attention_mask",
-        "encoder_hidden_states": "encoder_hidden_states",
         "cache_write_indices": "cache_write_indices",
         "past_key_names": "past_key_values.%d.key",
         "past_value_names": "past_key_values.%d.value",
@@ -35,9 +39,7 @@
       "outputs": {
         "logits": "logits",
         "present_key_names": "present.%d.key",
-        "present_value_names": "present.%d.value",
-        "cross_present_key_names": "cross_present.%d.key",
-        "cross_present_value_names": "cross_present.%d.value"
+        "present_value_names": "present.%d.value"
       }
     }
   },

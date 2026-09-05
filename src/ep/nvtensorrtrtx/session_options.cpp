@@ -14,8 +14,9 @@ namespace {
 void ConfigureProfile(const Config& config,
                       OrtSessionOptions& session_options,
                       bool is_multi_profile_enabled) {
-  // Nemotron Parse uses separate static encoder, prefill, and decode graphs.
-  // Their graph-specific profiles are configured by NemotronParseModel.
+  // Nemotron Parse has a fixed-shape encoder and a decoder whose only dynamic
+  // dimension is prompt-versus-token sequence length. Its graph-specific
+  // decoder profile is configured by NemotronParseModel.
   if (config.model.type == "nemotron_parse") {
     return;
   }
