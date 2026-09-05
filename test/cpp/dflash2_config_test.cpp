@@ -425,8 +425,9 @@ TEST(Dflash2ConfigTest, RejectsFullAttentionPoolOverflow) {
 
 TEST(Dflash2ConfigTest, RunsFullAttentionDsparkAcrossRequestLifecycles) {
   auto config = MakeDflash2Config();
+  config.config_path = fs::path{MODEL_PATH "engine/synthetic-dspark"};
   auto& dspark = config.model.dflash2;
-  dspark.filename = MODEL_PATH "engine/synthetic-dspark/dspark.onnx";
+  dspark.filename = "dspark.onnx";
   dspark.is_dspark = true;
   dspark.num_hidden_layers = 1;
   dspark.num_key_value_heads = 1;
