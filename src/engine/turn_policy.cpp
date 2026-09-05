@@ -51,7 +51,8 @@ void RejectModelSuppliedGreedy(const std::vector<const char*>& model_causes) {
 
 bool SupportsNoRepeatNgram(DeviceType scoring_device_type) noexcept {
   // Only Search_Cpu implements ApplyNoRepeatNgram; the Search base class throws for every other
-  // scoring device. Keyed by device type because the scoring device is what builds the Search.
+  // scoring device. Model maps every EP except CUDA and NvTensorRtRtx to CPU scoring, so this is
+  // keyed by the device that actually builds the Search rather than the model execution device.
   return scoring_device_type == DeviceType::CPU;
 }
 

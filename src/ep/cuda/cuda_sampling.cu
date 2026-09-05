@@ -95,6 +95,9 @@ __global__ void FusedSamplingKernel(int32_t* next_token_out, const float* scores
   const float* batch_scores = scores + batch_idx * stride;
   const int* batch_indices = indices + batch_idx * stride;
 
+  // Greedy rows resolve to k=1. Candidates are sorted by descending score, so indices[0] is the
+  // top token; returning before a curand draw also prevents a greedy turn from shifting the
+  // persistent device RNG stream used by a later sampled turn.
   if (k == 1) {
     if (threadIdx.x == 0) {
       next_token_out[batch_idx] = batch_indices[0];

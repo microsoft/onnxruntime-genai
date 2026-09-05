@@ -1032,6 +1032,8 @@ std::shared_ptr<Request> Engine::CreateRequest(const RequestOptions& options) {
     std::rethrow_exception(fatal_error_);
   }
   const auto& model_search = model_->config_->search;
+  // These model-fixed checks stay at Request creation because tests and embedders can construct an
+  // Engine with injected dependencies, bypassing CreateDependencies() and its model validation.
   if (model_search.max_length <= 0) {
     throw std::runtime_error(
         "The model's search.max_length must be greater than zero; actual value is " +

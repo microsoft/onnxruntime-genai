@@ -354,6 +354,7 @@ void Request::CompleteFailedTurnFromEngine(const Engine& engine) noexcept {
 void Request::ReleaseTurnResources() noexcept {
   stop_controller_.reset();
   stop_controller_transaction_checkpoint_ = 0;
+  guidance_transaction_checkpoint_.reset();
   guidance_logits_processor_.reset();
   // A draft proposal is verified under the admitted turn's policy: the drafter produced it knowing
   // that turn's guidance, minimum, repetition penalty, and n-gram blocking. Carrying it across a
@@ -826,14 +827,17 @@ void Request::SaveStateForTransaction() {
 }
 
 void Request::SaveStateForNewTurnTransaction() {
-  search_->SaveStateForTransaction();
   // Every terminal path releases the previous turn's guidance cursor and stop controller, and this
   // turn's replacements are installed only by CommitTurnAdmission(), so a rolled back admission has
   // neither to restore. The same paths discard any reseed the previous turn left pending, so this
   // admission cannot promote a stale seed when it commits.
-  assert(!guidance_logits_processor_);
-  assert(!stop_controller_);
-  assert(!pending_reseed_ && !pending_reseed_applied_);
+  if (guidance_logits_processor_ || stop_controller_ ||
+      pending_reseed_ || pending_reseed_applied_) {
+    assert(false && "A new turn cannot inherit resources from the previous turn.");
+    throw std::logic_error(
+        "Cannot begin a new turn while resources from the previous turn remain active.");
+  }
+  search_->SaveStateForTransaction();
   guidance_transaction_checkpoint_.reset();
   transaction_rng_ = rng_;
   transaction_processed_sequence_length_ = processed_sequence_length_;
