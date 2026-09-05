@@ -1546,7 +1546,8 @@ cache blocks at its join point is skipped for the rest of its life and decodes w
 the drafter keeps serving requests that already hold blocks. This makes `max_batch_size` the
 drafter's service-capacity limit across both active and idle long-lived requests, not merely the
 per-step scheduler limit. `dflash2_admission_misses` reports requests denied cache blocks because
-that capacity was occupied.
+that capacity was occupied. A tracked request remains part of this capacity while a sampled turn is
+ingest-only, because retaining its cache is what lets a later greedy turn resume drafting.
 
 ## Backpressure and fairness
 
