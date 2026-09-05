@@ -46,6 +46,7 @@ struct Qwen2VLPositionInputs : PositionInputs {
 
   void Add() override;
   void Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) override;
+  bool SupportsContinuousDecoding() const override { return true; }
   void RewindTo(size_t index) override;
 
   void SetGridTensors(const std::shared_ptr<Tensor>& image_grid_thw,
@@ -59,7 +60,8 @@ struct Qwen2VLPositionInputs : PositionInputs {
   void AddPositionIDs();
   void AddAttentionMask();
   template <typename T>
-  void CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 3> shape);
+  void CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 3> shape,
+                                        int64_t position_offset, int64_t past_length);
   void Update3DPositionIDs(int base_pos);
   template <typename T>
   void CreateAndInitializeAttentionMask(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 2> shape);
@@ -77,6 +79,7 @@ struct Qwen2VLPositionInputs : PositionInputs {
   std::array<int64_t, 2> attention_mask_shape_{};
   std::unique_ptr<Tensor> attention_mask_;
   bool is_first_update_{true};
+  bool has_pending_grid_{false};
   std::shared_ptr<Tensor> image_grid_thw_;
   std::shared_ptr<Tensor> video_grid_thw_;
   std::shared_ptr<Tensor> second_per_grid_ts_;

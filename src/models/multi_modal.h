@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -178,6 +179,10 @@ struct DecoderState : State {
 
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int current_length, DeviceSpan<int32_t> beam_indices);
+  void ValidateTextContinuation() const;
+  void ValidateImageContinuation() const;
+  void ValidateRewindTo(size_t index) const override;
+  void RewindTo(size_t index) override;
 
   // Prefill chunking (see search.chunk_size). The embedding model still runs once over the whole
   // prompt (it is a lookup/projection), while the decoder prefill is split into several runs so the
@@ -210,9 +215,14 @@ struct MultiModalPipelineState : State {
   MultiModalPipelineState& operator=(const MultiModalPipelineState&) = delete;
 
   void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
+  void ValidateExtraInputs(const std::vector<ExtraInput>& extra_inputs, cpu_span<const int32_t> input_ids) const;
 
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices) override;
+
+  void ValidateAppendTokens() const override;
+  void ValidateRewindTo(size_t index) const override;
+  void RewindTo(size_t index) override;
 
   OrtValue* GetInput(const char* name) override;
 
@@ -226,12 +236,18 @@ struct MultiModalPipelineState : State {
   int64_t num_image_tokens_{};
   int64_t num_audio_tokens_{};
   int64_t num_images_{};
+  // ExtraInputs stores borrowed tensor/name pointers. Keep their owners until the turn finishes.
+  std::vector<ExtraInput> turn_extra_inputs_;
   std::unique_ptr<VisionState> vision_state_;
   std::unique_ptr<SpeechState> speech_state_;
   std::unique_ptr<EmbeddingState> embedding_state_;
   std::unique_ptr<DecoderState> decoder_state_;
   std::shared_ptr<Adapters> adapters_;
   bool is_prompt_{true};
+  bool prefill_completed_{false};
+  bool execution_failed_{false};
+  size_t multimodal_prompt_length_{};
+  mutable std::optional<int32_t> image_token_id_;
 
   const std::string vision_adapter_name_{"vision"};
   const std::string speech_adapter_name_{"speech"};

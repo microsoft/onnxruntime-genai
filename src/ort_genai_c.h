@@ -667,6 +667,9 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetModelInput(OgaGenerator* gene
 
 /**
  * \brief For additional model inputs that genai does not handle, this lets the user set their values.
+ * For supported vision models, a later call appends a new turn's input_ids and images to the
+ * same conversation, retaining the decoder cache. Supply only the new turn, not the full history.
+ * This operation runs synchronously; the caller may release named_tensors after it returns.
  * \param[in] generator The generator to add the inputs to.
  * \param[in] named_tensors The named tensors to set the inputs as.
  */

@@ -11,8 +11,12 @@ void SharedKeyValueCache::Update(DeviceSpan<int32_t> /*beam_indices*/, int total
   current_length_ = total_length;
 }
 
-void SharedKeyValueCache::RewindTo(size_t index) {
+void SharedKeyValueCache::ValidateRewindTo(size_t index) const {
   CheckWindowedKvCacheRewind(windowed_cache_size_, current_length_, index);
+}
+
+void SharedKeyValueCache::RewindTo(size_t index) {
+  ValidateRewindTo(index);
 }
 
 }  // namespace Generators

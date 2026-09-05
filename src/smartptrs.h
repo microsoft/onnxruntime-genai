@@ -117,6 +117,8 @@ struct PositionInputs {
   virtual ~PositionInputs() = default;
   virtual void Add() = 0;
   virtual void Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) = 0;
+  virtual bool SupportsContinuousDecoding() const { return false; }
+  virtual void ValidateRewindTo(size_t index) const { (void)index; }
   virtual void RewindTo(size_t index) = 0;
 };
 

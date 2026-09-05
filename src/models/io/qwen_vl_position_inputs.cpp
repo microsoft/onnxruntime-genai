@@ -58,10 +58,12 @@ struct InitPositionIdsFunctor {
   Qwen2VLPositionInputs* self;
   DeviceSpan<int32_t> next_tokens;
   std::array<int64_t, 3> position_ids_shape;
+  int64_t position_offset;
+  int64_t past_length;
 
   template <typename T>
   void operator()() {
-    self->CreateAndInitialize3DPositionIDs<T>(next_tokens, position_ids_shape);
+    self->CreateAndInitialize3DPositionIDs<T>(next_tokens, position_ids_shape, position_offset, past_length);
   }
 };
 
@@ -137,6 +139,7 @@ void Qwen2VLPositionInputs::SetGridTensors(const std::shared_ptr<Tensor>& image_
   image_grid_thw_ = image_grid_thw;
   video_grid_thw_ = video_grid_thw;
   second_per_grid_ts_ = second_per_grid_ts;
+  has_pending_grid_ = image_grid_thw || video_grid_thw;
 }
 
 void Qwen2VLPositionInputs::Add() {
@@ -161,7 +164,8 @@ void Qwen2VLPositionInputs::AddAttentionMask() {
 }
 
 template <typename T>
-void Qwen2VLPositionInputs::CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 3> shape) {
+void Qwen2VLPositionInputs::CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 3> shape,
+                                                             int64_t position_offset, int64_t past_length) {
   // Replicates the logic from HuggingFace's `get_rope_index`
   // `shape` is [3, batch_size, seq_len] (before beam expansion)
   // `next_tokens` is [batch_size, seq_len]
@@ -344,7 +348,15 @@ void Qwen2VLPositionInputs::CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t>
         }
       }
     }
-    rope_deltas_.push_back(max_pos_for_batch + 1 - seq_len);
+    // New image turns have local grids, but their positions follow the retained
+    // conversation. Keep the delta relative to the full physical KV length.
+    for (int64_t dim = 0; dim < 3; ++dim) {
+      for (int64_t s = 0; s < seq_len; ++s) {
+        if (input_ids[s] != model_.config_->model.pad_token_id)
+          position_data[dim * batch_size * seq_len + b * seq_len + s] += static_cast<T>(position_offset);
+      }
+    }
+    rope_deltas_.push_back(max_pos_for_batch + 1 + position_offset - seq_len - past_length);
   }
 
   // Move tensor to GPU and expand by num_beams
@@ -414,8 +426,12 @@ void Qwen2VLPositionInputs::UpdateAttentionMask() {
 void Qwen2VLPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) {
   if (has_posid_input_) {
     position_ids_shape_[2] = new_length;
-    if (is_first_update_) {
-      DispatchOnType(type_, InitPositionIdsFunctor{this, next_tokens, position_ids_shape_});
+    if (is_first_update_ || has_pending_grid_) {
+      const int64_t past_length = is_first_update_ ? 0 : total_length - new_length;
+      if (!is_first_update_ && (position_ids_shape_[1] != 1 || rope_deltas_.size() != 1))
+        throw std::runtime_error("Later Qwen image turns require batch_size == num_beams == 1.");
+      const int64_t offset = is_first_update_ ? 0 : past_length + rope_deltas_.front();
+      DispatchOnType(type_, InitPositionIdsFunctor{this, next_tokens, position_ids_shape_, offset, past_length});
     } else {
       Update3DPositionIDs(total_length - new_length);
     }
@@ -432,6 +448,10 @@ void Qwen2VLPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_le
   }
 
   is_first_update_ = false;
+  has_pending_grid_ = false;
+  image_grid_thw_.reset();
+  video_grid_thw_.reset();
+  second_per_grid_ts_.reset();
 }
 
 void Qwen2VLPositionInputs::RewindTo(size_t index) {

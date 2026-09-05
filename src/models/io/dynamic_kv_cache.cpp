@@ -45,11 +45,14 @@ void DynamicKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_le
   is_first_update_ = false;
 }
 
-void DynamicKeyValueCache::RewindTo(size_t index) {
+void DynamicKeyValueCache::ValidateRewindTo(size_t index) const {
   if (shape_[2] <= static_cast<int>(index)) {
     throw std::runtime_error("Requested length of rewind is greater than the current length.");
   }
+}
 
+void DynamicKeyValueCache::RewindTo(size_t index) {
+  ValidateRewindTo(index);
   is_first_update_ = true;
   if (index == 0) {
     for (int i = 0; i < layer_count_ * 2; i++) {

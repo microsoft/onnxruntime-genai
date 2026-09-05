@@ -16,6 +16,7 @@
 #include "models/env_utils.h"
 #include "models/model.h"
 #include "models/model_type.h"
+#include "models/multi_modal.h"
 #include "models/decoder_only.h"
 #include "models/io/kv_cache.h"
 #include "models/io/position_inputs.h"
@@ -727,9 +728,7 @@ DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> 
   return input_ids_device;
 }
 
-void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
-  DurationTrace trace{"Generator::AppendTokens"};
-
+void Generator::ValidateAppendTokens(cpu_span<const int32_t> input_ids) const {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (input_ids.size() == 0)
     throw std::runtime_error("input_ids is empty");
@@ -738,11 +737,18 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
     throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
 
-  if (search_->GetSequenceLength() != 0 &&
-      !SupportsContinuousDecoding(state_->model_.p_device_kvcache_->GetType()))
-    // Support for continuous decoding should be based on the type of device used for KV cache
-    throw std::runtime_error("Continuous decoding is not supported on the selected device type (" + to_string(state_->model_.p_device_kvcache_->GetType()) +
-                             "). Please recreate the generator instance to avoid using continuous decoding.");
+  if (search_->GetSequenceLength() != 0) {
+    if (!SupportsContinuousDecoding(state_->model_.p_device_kvcache_->GetType()))
+      // Support for continuous decoding should be based on the type of device used for KV cache
+      throw std::runtime_error("Continuous decoding is not supported on the selected device type (" + to_string(state_->model_.p_device_kvcache_->GetType()) +
+                               "). Please recreate the generator instance to avoid using continuous decoding.");
+    state_->ValidateAppendTokens();
+  }
+}
+
+void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
+  DurationTrace trace{"Generator::AppendTokens"};
+  ValidateAppendTokens(input_ids);
 
   std::string_view append_input_modality = transducer_state_ ? "audio" : "text";
   if (generation_telemetry_.BeginAppend()) {
@@ -774,6 +780,8 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   // prefill; speculative -> reconcile two inner KV caches).
   strategy_->PrepareForAppend(*this);
 
+  // Guidance fast-forward during reconciliation can consume additional capacity.
+  ValidateAppendTokens(input_ids);
   auto input_ids_device = AllocateInputIdsOnDevice(input_ids);
   search_->AppendTokens(input_ids_device);
   computed_logits_ = false;
@@ -795,6 +803,9 @@ void Generator::AppendTokens(DeviceSpan<int32_t> input_ids) {
   if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
     throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
 
+  if (search_->GetSequenceLength() != 0)
+    state_->ValidateAppendTokens();
+
   if (set_extra_inputs_) {
     state_->SetExtraInputs(extra_inputs_);
     set_extra_inputs_ = false;
@@ -808,6 +819,58 @@ void Generator::AppendTokens(DeviceSpan<int32_t> input_ids) {
 void Generator::SetInputs(const NamedTensors& named_tensors) {
   if (ModelType::IsLLM(model_->config_->model.type) || ModelType::IsPipe(model_->config_->model.type)) {
     throw std::runtime_error("Please use generator.AppendTokens for " + model_->config_->model.type + ". SetInputs is not supported for this model type.");
+  }
+
+  if (auto* multimodal_state = dynamic_cast<MultiModalPipelineState*>(state_.get())) {
+    const auto ids = named_tensors.find(std::string(Config::Defaults::InputIdsName));
+    if (ids == named_tensors.end() && search_->GetSequenceLength() != 0)
+      throw std::runtime_error("Multimodal SetInputs requires input_ids for the new turn.");
+    cpu_span<const int32_t> input_ids;
+    if (ids != named_tensors.end()) {
+      if (!ids->second || !ids->second->ort_tensor_)
+        throw std::runtime_error("Multimodal input_ids tensor is null.");
+      const auto& tensor = *ids->second->ort_tensor_;
+      auto info = tensor.GetTensorTypeAndShapeInfo();
+      const auto shape = info->GetShape();
+      if (info->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 ||
+          shape.size() != 2 || shape[0] != state_->params_->search.batch_size) {
+        throw std::runtime_error("Multimodal input_ids must be int32 [batch_size, sequence_length].");
+      }
+      input_ids = {tensor.GetTensorData<int32_t>(), info->GetElementCount()};
+      ValidateAppendTokens(input_ids);
+    }
+
+    auto turn_inputs = set_extra_inputs_ ? extra_inputs_ : std::vector<ExtraInput>{};
+    for (const auto& [name, value] : named_tensors) {
+      if (name != Config::Defaults::InputIdsName) {
+        if (!value || !value->ort_tensor_)
+          throw std::runtime_error("Multimodal input tensor is null: " + name);
+        const auto [graph_name, found] = model_->config_->GetGraphName(name);
+        turn_inputs.push_back({graph_name, value});
+      }
+    }
+    if (!turn_inputs.empty()) {
+      multimodal_state->ValidateExtraInputs(turn_inputs, input_ids);
+      strategy_->PrepareForAppend(*this);
+      if (!input_ids.empty())
+        ValidateAppendTokens(input_ids);
+      state_->SetExtraInputs(turn_inputs);
+      set_extra_inputs_ = false;
+      extra_inputs_ = std::move(turn_inputs);
+    }
+    if (!input_ids.empty())
+      AppendTokens(input_ids);
+    // The multimodal state owns any tensors needed beyond this synchronous call.
+    extra_inputs_.clear();
+    return;
+  }
+
+  if (!set_extra_inputs_ &&
+      (ModelType::IsVLM(model_->config_->model.type) || ModelType::IsMMM(model_->config_->model.type)) &&
+      std::any_of(named_tensors.begin(), named_tensors.end(), [](const auto& entry) {
+        return entry.first != Config::Defaults::InputIdsName;
+      })) {
+    throw std::runtime_error("Later image turns are not supported by this model state (split decoder pipeline or speculative model).");
   }
 
   cpu_span<int32_t> input_ids;
@@ -962,7 +1025,7 @@ SpeculativeStats Generator::GetSpeculativeStats() const {
 }
 
 void Generator::RewindToLength(size_t new_length) {
-  if (model_->config_->model.type == "whisper" || model_->config_->model.type == "phi3v" || model_->config_->model.type == "decoder-pipeline" || model_->config_->model.type == "lfm2")
+  if (model_->config_->model.type == "whisper" || model_->config_->model.type == "decoder-pipeline" || model_->config_->model.type == "lfm2")
     throw std::runtime_error("RewindTo is currently not supported for " + model_->config_->model.type + ".");
   const size_t current_length = search_->GetSequenceLength();
   if (new_length > current_length)
@@ -977,6 +1040,7 @@ void Generator::RewindToLength(size_t new_length) {
   const int64_t rewound_token_count =
       static_cast<int64_t>(current_length - new_length) *
       static_cast<int64_t>(search_->params_->BatchBeamSize());
+  state_->ValidateRewindTo(new_length);
   search_->RewindTo(new_length);
   state_->RewindTo(new_length);
   if (guidance_logits_processor_) {

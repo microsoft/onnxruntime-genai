@@ -177,6 +177,7 @@ struct Generator : LeakChecked<Generator> {
   GenerationTelemetry generation_telemetry_;
   void LogGeneratorCreate(const GeneratorParams& params);
   DeviceSpan<int32_t> AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids);
+  void ValidateAppendTokens(cpu_span<const int32_t> input_ids) const;
   void ComputeLogits(DeviceSpan<int32_t> next_tokens);
   Action last_action_{Action::standard};
 

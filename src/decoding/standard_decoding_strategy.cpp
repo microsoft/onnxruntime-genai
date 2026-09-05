@@ -75,4 +75,11 @@ void StandardDecodingStrategy::Step(Generator& g) {
   RunStandardDecodingStep(g);
 }
 
+void StandardDecodingStrategy::PrepareForAppend(Generator& g) {
+  // A sampled, committed token is one step ahead of the decoder. EOS ends Search
+  // without being appended, so it must not be flushed into the retained cache.
+  if (!g.computed_logits_ && g.last_action_ == Generator::Action::generated && !g.search_->IsDone())
+    g.ComputeLogits(g.search_->GetNextTokens());
+}
+
 }  // namespace Generators
