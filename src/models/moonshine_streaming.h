@@ -331,11 +331,6 @@ struct MoonshineStreamingState : TransducerState {
   // delta-emission so we never emit a token twice.
   size_t emitted_count_{0};
 
-  // Memory frame count of the previous chunk's cross-KV. Used to detect a
-  // new utterance (memory shrinks back to a small value after a segment
-  // break) so we can reset the commit tracking.
-  int64_t previous_memory_frames_{0};
-
   // Runs the full frontend=>encoder=>adapter=>cross_kv=>decode pipeline for the
   // cached chunk exactly once. Invoked by the first StepToken() after a new
   // chunk (gated by need_pipeline_run_).

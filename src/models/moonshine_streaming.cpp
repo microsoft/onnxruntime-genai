@@ -500,6 +500,13 @@ void MoonshineStreamingState::ResetAccumulation() {
   cached_k_cross_.reset();
   cached_v_cross_.reset();
   memory_in_cross_kv_ = 0;
+  // Token-commit bookkeeping is per-segment: reset atomically with the rest
+  // of the accumulation state so a new segment always starts decoding from BOS,
+  // even when the first chunk of the new segment happens to produce the same
+  // number of memory frames as the previous segment held (e.g. Flush() after a
+  // single chunk, then Process() of an equal-sized chunk).
+  previous_pass_tokens_.clear();
+  emitted_count_ = 0;
 }
 
 void MoonshineStreamingState::RunFrontendAndAccumulate(const float* audio, size_t num,
@@ -678,16 +685,6 @@ void MoonshineStreamingState::DecodeAndQueue(bool commit_all) {
   last_tokens_.clear();
 
   int64_t memory_frames = memory_frames_;
-
-  // Detect new segment: if memory_frames shrinks vs the previous pass, a
-  // segment was closed (hard cap / VAD silence / Flush) and accumulation was
-  // reset. Drop the per-pass commit tracking so the next pass starts from
-  // BOS.
-  if (memory_frames < previous_memory_frames_) {
-    previous_pass_tokens_.clear();
-    emitted_count_ = 0;
-  }
-  previous_memory_frames_ = memory_frames;
 
   // Per-chunk token cap (matches the official moonshine streaming impl).
   const float duration_sec =
