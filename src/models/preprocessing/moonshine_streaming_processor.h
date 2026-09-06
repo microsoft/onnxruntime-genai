@@ -16,7 +16,7 @@
 // which owns all five ONNX sub-states.
 #pragma once
 
-#include "moonshine_streaming.h"
+#include "models/moonshine_streaming.h"
 #include "models/preprocessing/streaming_processor.h"
 
 namespace Generators {

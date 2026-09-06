@@ -8,7 +8,7 @@
 #include "generator/generators.h"
 #include "models/preprocessing/streaming_processor.h"
 #include "models/preprocessing/nemotron_streaming_processor.h"
-#include "models/moonshine_streaming_processor.h"
+#include "models/preprocessing/moonshine_streaming_processor.h"
 
 namespace Generators {
 

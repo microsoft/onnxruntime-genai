@@ -8,7 +8,7 @@
 #include <string>
 
 #include "generator/generators.h"
-#include "moonshine_streaming_processor.h"
+#include "models/preprocessing/moonshine_streaming_processor.h"
 
 namespace Generators {
 

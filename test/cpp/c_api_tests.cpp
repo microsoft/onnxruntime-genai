@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+// M_PI is not part of ISO C++; MSVC only exposes it via <cmath> when this
+// macro is defined before the header is first included. Must precede <cmath>.
+#define _USE_MATH_DEFINES
 #include <array>
 #include <cmath>
 #include <cstdlib>
@@ -2115,9 +2118,10 @@ static void DecodeInputs(OgaGenerator& generator, OgaNamedTensors* mel) {
 // Helper: generate a synthetic sine wave of num_samples at the given frequency and sample rate.
 // Uses frequency and sample_rate to produce the minimum length of speech detectable by the model.
 static std::vector<float> GenerateSineWave(size_t num_samples, float frequency, float sample_rate) {
+  const float two_pi = 2.0f * static_cast<float>(M_PI);
   std::vector<float> samples(num_samples);
   for (size_t i = 0; i < num_samples; ++i)
-    samples[i] = 0.5f * std::sin(2.0f * 3.14159265f * frequency * static_cast<float>(i) / sample_rate);
+    samples[i] = 0.5f * std::sin(two_pi * frequency * static_cast<float>(i) / sample_rate);
   return samples;
 }
 

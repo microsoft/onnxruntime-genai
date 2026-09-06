@@ -3,9 +3,12 @@
 //
 // Moonshine Streaming ASR
 //
-// Device support: CPU only. All persistent buffers are allocated with
-// `model_.allocator_cpu_` and every sub-session runs on CPU. Selecting a
-// non-CPU EP is unsupported — device-aware allocation + KV concat is
+// Device support: CPU only, float32 only. All persistent buffers are
+// allocated with `model_.allocator_cpu_` and every sub-session runs on CPU.
+// Float I/O types are discovered from the ONNX sessions at model load time
+// (`ValidateMoonshineFloatType`) and rejected if not fp32 — the runtime
+// data paths (memset with `sizeof(float)`, `GetTensorMutableData<float>()`)
+// assume fp32. Device-aware allocation + KV concat and fp16 support are
 // deferred until there is an accelerator target that beats CPU here.
 //
 // Sub-states (each a State wrapping one session):
@@ -29,6 +32,8 @@
 //     once, queues the newly-committed tokens, and emits the first one;
 //     subsequent StepToken() calls drain the queue one token at a time.
 #pragma once
+
+#include <span>
 
 #include "model.h"
 #include "transducer_state.h"
@@ -158,7 +163,17 @@ struct MoonshineStreamingModel : Model {
   std::unique_ptr<OrtSessionOptions> session_options_;
 
   MoonshineConfig moonshine_config_;
+
+  // Floating-point I/O type common to every Moonshine session. Discovered
+  // from session_info_ at construction and validated to be fp32; see
+  // ValidateMoonshineFloatType below.
+  ONNXTensorElementDataType float_type_{};
 };
+
+/// Validates that every entry in `types` is `ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT`
+/// (Moonshine streaming currently only supports homogeneous fp32 I/O) and
+/// returns that type. Throws std::runtime_error otherwise.
+ONNXTensorElementDataType ValidateMoonshineFloatType(std::span<const ONNXTensorElementDataType> types);
 
 /// frontend: audio to new feature frames + updated causal state buffers.
 struct MoonshineFrontendSubState : State {

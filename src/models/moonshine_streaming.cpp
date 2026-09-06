@@ -23,6 +23,26 @@ std::unique_ptr<T> AdoptOutput(T*& slot) {
 }
 }  // namespace
 
+ONNXTensorElementDataType ValidateMoonshineFloatType(std::span<const ONNXTensorElementDataType> types) {
+  if (types.empty())
+    throw std::runtime_error("Moonshine streaming: floating-point type list must not be empty");
+
+  const auto type = types[0];
+  // fp16 is intentionally not supported yet: the runtime paths in this file
+  // (memset with sizeof(float), GetTensorMutableData<float>()) all assume
+  // fp32 layout. Lift this restriction after those paths are made
+  // type-aware.
+  if (type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
+    throw std::runtime_error(
+        "Moonshine streaming: only float32 I/O is supported (fp16 requires additional data-path work)");
+
+  for (auto candidate : types) {
+    if (candidate != type)
+      throw std::runtime_error("Moonshine streaming: requires homogeneous floating-point I/O across all sessions");
+  }
+  return type;
+}
+
 void MoonshineConfig::PopulateFromConfig(const Config& config) {
   const auto& m = config.model;
   const auto& enc = m.encoder;
@@ -140,6 +160,42 @@ MoonshineStreamingModel::MoonshineStreamingModel(std::unique_ptr<Config> config,
   session_info_.Add(*session_adapter_);
   session_info_.Add(*session_cross_kv_);
   session_info_.Add(*session_decoder_kv_);
+
+  // Discover the shared float I/O type from the ONNX sessions (rather than
+  // baking `ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT` into every CreateTensor
+  // call site). Every float tensor in the pipeline must share a type;
+  // ValidateMoonshineFloatType currently rejects anything other than fp32
+  // because the runtime data paths (memset with sizeof(float),
+  // GetTensorMutableData<float>()) assume fp32 layout. If a mismatch is
+  // detected we throw with a clear message pointing at the offending name.
+  const auto& mc = moonshine_config_;
+  auto float_types = std::array<ONNXTensorElementDataType, 24>{
+      session_info_.GetInputDataType(mc.frontend.in_audio_chunk),
+      session_info_.GetInputDataType(mc.frontend.in_sample_buffer),
+      session_info_.GetInputDataType(mc.frontend.in_conv1_buffer),
+      session_info_.GetInputDataType(mc.frontend.in_conv2_buffer),
+      session_info_.GetOutputDataType(mc.frontend.out_features),
+      session_info_.GetOutputDataType(mc.frontend.out_sample_buffer),
+      session_info_.GetOutputDataType(mc.frontend.out_conv1_buffer),
+      session_info_.GetOutputDataType(mc.frontend.out_conv2_buffer),
+      session_info_.GetInputDataType(mc.encoder.in_features),
+      session_info_.GetOutputDataType(mc.encoder.out_encoded),
+      session_info_.GetInputDataType(mc.adapter.in_encoded),
+      session_info_.GetOutputDataType(mc.adapter.out_memory),
+      session_info_.GetInputDataType(mc.cross_kv.in_memory),
+      session_info_.GetOutputDataType(mc.cross_kv.out_k_cross),
+      session_info_.GetOutputDataType(mc.cross_kv.out_v_cross),
+      session_info_.GetInputDataType(mc.decoder_kv.in_k_self),
+      session_info_.GetInputDataType(mc.decoder_kv.in_v_self),
+      session_info_.GetInputDataType(mc.decoder_kv.in_k_cross),
+      session_info_.GetInputDataType(mc.decoder_kv.in_v_cross),
+      session_info_.GetOutputDataType(mc.decoder_kv.out_logits),
+      session_info_.GetOutputDataType(mc.decoder_kv.out_k_self),
+      session_info_.GetOutputDataType(mc.decoder_kv.out_v_self),
+      session_info_.GetOutputDataType(mc.decoder_kv.out_k_cross),
+      session_info_.GetOutputDataType(mc.decoder_kv.out_v_cross),
+  };
+  float_type_ = ValidateMoonshineFloatType(float_types);
 }
 
 std::unique_ptr<State> MoonshineStreamingModel::CreateState(DeviceSpan<int32_t> /*sequence_lengths*/,
@@ -199,34 +255,37 @@ MoonshineFrontendSubState::MoonshineFrontendSubState(const MoonshineStreamingMod
 void MoonshineFrontendSubState::AllocateStateBuffers() {
   // CPU-only: see header block. All persistent buffers use allocator_cpu_.
   auto& alloc = model_.allocator_cpu_;
+  const auto& sinfo = model_.session_info_;
+  auto sample_len_type = sinfo.GetInputDataType(config_.frontend.in_sample_len);
+  auto frame_count_type = sinfo.GetInputDataType(config_.frontend.in_frame_count);
   {
     auto shape = std::array<int64_t, 2>{1, config_.sample_buffer_size};
-    sample_buffer_ = OrtValue::CreateTensor(alloc, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+    sample_buffer_ = OrtValue::CreateTensor(alloc, shape, model_.float_type_);
     std::memset(sample_buffer_->GetTensorMutableData<float>(), 0,
                 static_cast<size_t>(config_.sample_buffer_size) * sizeof(float));
   }
   {
     auto shape = std::array<int64_t, 1>{1};
-    sample_len_ = OrtValue::CreateTensor(alloc, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+    sample_len_ = OrtValue::CreateTensor(alloc, shape, sample_len_type);
     *sample_len_->GetTensorMutableData<int64_t>() = 0;
   }
   {
     auto shape = std::array<int64_t, 3>{1, config_.conv1_channels, config_.conv1_buffer_size};
-    conv1_buffer_ = OrtValue::CreateTensor(alloc, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+    conv1_buffer_ = OrtValue::CreateTensor(alloc, shape, model_.float_type_);
     std::memset(conv1_buffer_->GetTensorMutableData<float>(), 0,
                 static_cast<size_t>(config_.conv1_channels) *
                     static_cast<size_t>(config_.conv1_buffer_size) * sizeof(float));
   }
   {
     auto shape = std::array<int64_t, 3>{1, config_.conv2_channels, config_.conv2_buffer_size};
-    conv2_buffer_ = OrtValue::CreateTensor(alloc, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+    conv2_buffer_ = OrtValue::CreateTensor(alloc, shape, model_.float_type_);
     std::memset(conv2_buffer_->GetTensorMutableData<float>(), 0,
                 static_cast<size_t>(config_.conv2_channels) *
                     static_cast<size_t>(config_.conv2_buffer_size) * sizeof(float));
   }
   {
     auto shape = std::array<int64_t, 1>{1};
-    frame_count_ = OrtValue::CreateTensor(alloc, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+    frame_count_ = OrtValue::CreateTensor(alloc, shape, frame_count_type);
     *frame_count_->GetTensorMutableData<int64_t>() = 0;
   }
 }
@@ -286,9 +345,9 @@ MoonshineAdapterSubState::MoonshineAdapterSubState(const MoonshineStreamingModel
     : State{params, model},
       model_{model} {
   const auto& cfg = model_.moonshine_config_;
+  auto pos_type = model_.session_info_.GetInputDataType(cfg.adapter.in_pos_offset);
   auto pos_shape = std::array<int64_t, 1>{1};
-  pos_tensor_ = OrtValue::CreateTensor(model_.allocator_cpu_, pos_shape,
-                                       ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  pos_tensor_ = OrtValue::CreateTensor(model_.allocator_cpu_, pos_shape, pos_type);
   *pos_tensor_->GetTensorMutableData<int64_t>() = 0;
 
   encoded_input_idx_ = inputs_.size();
@@ -412,10 +471,10 @@ MoonshineStreamingState::MoonshineStreamingState(const MoonshineStreamingModel& 
   // Idle until SetExtraInputs() supplies a chunk.
   chunk_done_ = true;
 
-  // Pre-allocate single-token int64 tensor [1, 1].
+  // Pre-allocate single-token tensor [1, 1] using the decoder's declared type.
   auto tok_shape = std::array<int64_t, 2>{1, 1};
-  token_tensor_ = OrtValue::CreateTensor(model.allocator_cpu_, tok_shape,
-                                         ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  auto tok_type = model.session_info_.GetInputDataType(config_.decoder_kv.in_token);
+  token_tensor_ = OrtValue::CreateTensor(model.allocator_cpu_, tok_shape, tok_type);
 
   ResetSelfKv();
 }
@@ -427,9 +486,9 @@ void MoonshineStreamingState::ResetSelfKv() {
       config_.num_decoder_layers, 1, config_.num_decoder_heads, 0,
       config_.decoder_head_size};
   k_self_ = OrtValue::CreateTensor(moonshine_model_.allocator_cpu_, shape,
-                                   ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+                                   moonshine_model_.float_type_);
   v_self_ = OrtValue::CreateTensor(moonshine_model_.allocator_cpu_, shape,
-                                   ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+                                   moonshine_model_.float_type_);
 }
 
 DeviceSpan<float> MoonshineStreamingState::Run(int /*total_length*/,
@@ -569,7 +628,7 @@ void MoonshineStreamingState::RunFrontendAndAccumulate(const float* audio, size_
   if (num > 0) {
     auto audio_shape = std::array<int64_t, 2>{1, static_cast<int64_t>(num)};
     auto audio_tensor =
-        OrtValue::CreateTensor(alloc, audio_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+        OrtValue::CreateTensor(alloc, audio_shape, moonshine_model_.float_type_);
     std::memcpy(audio_tensor->GetTensorMutableData<float>(), audio, num * sizeof(float));
 
     frontend_state_->SetAudioInput(audio_tensor.get());
@@ -613,7 +672,7 @@ void MoonshineStreamingState::RunFrontendAndAccumulate(const float* audio, size_
 
   auto enc_in_shape = std::array<int64_t, 3>{1, window_size, encoder_dim};
   auto enc_in_tensor =
-      OrtValue::CreateTensor(alloc, enc_in_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+      OrtValue::CreateTensor(alloc, enc_in_shape, moonshine_model_.float_type_);
   std::memcpy(enc_in_tensor->GetTensorMutableData<float>(),
               accumulated_features_.data() + static_cast<size_t>(window_start) * encoder_dim,
               static_cast<size_t>(window_size) * encoder_dim * sizeof(float));
@@ -625,7 +684,7 @@ void MoonshineStreamingState::RunFrontendAndAccumulate(const float* audio, size_
   // Slice [:, start_idx : start_idx + new_frames] from encoded - remove lookahead.
   auto new_enc_shape = std::array<int64_t, 3>{1, new_frames, encoder_dim};
   auto new_enc_tensor =
-      OrtValue::CreateTensor(alloc, new_enc_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+      OrtValue::CreateTensor(alloc, new_enc_shape, moonshine_model_.float_type_);
   std::memcpy(new_enc_tensor->GetTensorMutableData<float>(),
               encoded->GetTensorData<float>() +
                   static_cast<size_t>(start_idx) * encoder_dim,
@@ -664,7 +723,7 @@ void MoonshineStreamingState::RefreshCrossKv() {
   // Run cross_kv on JUST the new memory frames (pure per-frame projection).
   auto mem_shape = std::array<int64_t, 3>{1, new_frames, decoder_dim};
   auto mem_tensor =
-      OrtValue::CreateTensor(alloc, mem_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+      OrtValue::CreateTensor(alloc, mem_shape, moonshine_model_.float_type_);
   std::memcpy(mem_tensor->GetTensorMutableData<float>(),
               accumulated_adapter_output_.data() +
                   static_cast<size_t>(memory_in_cross_kv_) * decoder_dim,
@@ -690,7 +749,7 @@ void MoonshineStreamingState::RefreshCrossKv() {
 
     auto concat_one = [&](const float* old_data, const float* new_data) {
       auto out =
-          OrtValue::CreateTensor(alloc, concat_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+          OrtValue::CreateTensor(alloc, concat_shape, moonshine_model_.float_type_);
       float* dst = out->GetTensorMutableData<float>();
       const size_t row_old = static_cast<size_t>(M_old) * D;
       const size_t row_new = static_cast<size_t>(new_frames) * D;
@@ -819,11 +878,13 @@ void MoonshineStreamingState::StepToken() {
 
 int MoonshineStreamingState::RunDecoderForward(const std::vector<int64_t>& tokens) {
   const int64_t n = static_cast<int64_t>(tokens.size());
-  // Build a [1, N] int64 token tensor. Used for the teacher-forcing pass
-  // over the committed prefix at the start of each chunk.
+  // Build a [1, N] token tensor for the teacher-forcing pass over the
+  // committed prefix at the start of each chunk. Type comes from the decoder
+  // session so it matches the graph's declared input dtype.
   auto shape = std::array<int64_t, 2>{1, n};
-  auto tok_tensor = OrtValue::CreateTensor(moonshine_model_.allocator_cpu_, shape,
-                                           ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  auto tok_type = moonshine_model_.session_info_.GetInputDataType(
+      moonshine_model_.moonshine_config_.decoder_kv.in_token);
+  auto tok_tensor = OrtValue::CreateTensor(moonshine_model_.allocator_cpu_, shape, tok_type);
   std::memcpy(tok_tensor->GetTensorMutableData<int64_t>(),
               tokens.data(), static_cast<size_t>(n) * sizeof(int64_t));
 
