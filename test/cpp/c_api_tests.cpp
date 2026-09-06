@@ -2480,6 +2480,80 @@ TEST(StreamingASRTests, MoonshineVadSegmentation) {
   SUCCEED();
 }
 
+TEST(StreamingASRTests, MoonshineSegmentResetEmitsSecondSegment) {
+  const std::string model_path = std::string(MODEL_PATH) + "moonshine-streaming-small";
+  if (!std::filesystem::exists(model_path))
+    GTEST_SKIP() << "Moonshine streaming model not found at " << model_path;
+
+  auto model = OgaModel::Create(model_path.c_str());
+  auto processor = OgaStreamingProcessor::Create(*model);
+  auto params = OgaGeneratorParams::Create(*model);
+  auto generator = OgaGenerator::Create(*model, *params);
+
+  // Same synthetic tone in both phases; VAD off so it routes through the speech
+  // accumulation path (Silero VAD would otherwise drop a sine wave as non-speech).
+  // Any deterministic input works as long as Flush() commits at least one token.
+  processor->SetOption("use_vad", "false");
+
+  const size_t chunk_samples =
+      static_cast<size_t>(ReadConfigNumber(model_path, "chunk_samples", 8000));
+  const float sample_rate =
+      static_cast<float>(ReadConfigNumber(model_path, "sample_rate", 16000));
+  const std::vector<float> speech =
+      GenerateSineWave(chunk_samples, /*frequency=*/440.0f, sample_rate);
+
+  // Phase A: one chunk + Flush(). Segment closes with previous_memory_frames_
+  // set to exactly one chunk's worth of memory frames — the pre-fix `<` heuristic
+  // in DecodeAndQueue will fail to trigger on any equal-sized second segment.
+  {
+    auto chunk = processor->Process(speech.data(), speech.size());
+    ASSERT_NE(chunk, nullptr);
+    DecodeInputs(*generator, chunk.get());
+
+    auto tail = processor->Flush();
+    ASSERT_NE(tail, nullptr);
+    DecodeInputs(*generator, tail.get());
+  }
+
+  const size_t count_after_A = generator->GetSequenceCount(0);
+  if (count_after_A == 0) {
+    GTEST_SKIP() << "Model emitted 0 tokens for the synthetic tone; cannot exercise the reset path.";
+  }
+  const std::vector<int32_t> segment_A(generator->GetSequenceData(0),
+                                       generator->GetSequenceData(0) + count_after_A);
+
+  // Phase B: identical audio, identical chunk size. Under the fix, ResetAccumulation()
+  // has already cleared previous_pass_tokens_ and emitted_count_ atomically with the
+  // rest of the segment state, so segment B decodes from BOS and — because the audio
+  // is identical — produces the same tokens as segment A. Under the pre-fix code the
+  // stale prefix teacher-forces segment A's tokens on segment B's cross-KV and either
+  // suppresses emission entirely or corrupts the token sequence.
+  {
+    auto chunk = processor->Process(speech.data(), speech.size());
+    ASSERT_NE(chunk, nullptr);
+    DecodeInputs(*generator, chunk.get());
+
+    auto tail = processor->Flush();
+    ASSERT_NE(tail, nullptr);
+    DecodeInputs(*generator, tail.get());
+  }
+
+  const size_t count_after_B = generator->GetSequenceCount(0);
+  ASSERT_GT(count_after_B, count_after_A)
+      << "Segment B produced no committed tokens — likely suppressed by stale "
+         "emitted_count_/previous_pass_tokens_ from segment A.";
+
+  const std::vector<int32_t> segment_B(generator->GetSequenceData(0) + count_after_A,
+                                       generator->GetSequenceData(0) + count_after_B);
+
+  // Same audio + same starting state (BOS) => same tokens. This is the strong
+  // assertion that catches the "polluted prefix" failure mode where segment B's
+  // decoder pass was teacher-forced by segment A's committed sequence.
+  EXPECT_EQ(segment_A, segment_B)
+      << "Segment B decoded differently from segment A on identical audio — "
+         "the segment-reset bookkeeping was not fully reset.";
+}
+
 // Run every StreamingASR* test above once per streaming ASR model. The
 // instantiation prefix "StreamingASR" combined with the StreamingASRParamTests
 // fixture yields test names like

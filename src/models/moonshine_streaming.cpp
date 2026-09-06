@@ -76,6 +76,49 @@ void MoonshineConfig::PopulateFromConfig(const Config& config) {
   adapter_filename = ms.adapter_filename;
   cross_kv_filename = ms.cross_kv_filename;
   decoder_kv_filename = ms.decoder_kv_filename;
+
+  // ORT graph I/O names: prefer whatever the config declares, fall back to the
+  // built-in Moonshine defaults so pre-existing genai_config.json files keep
+  // working unchanged. A future model that renames an input/output just has
+  // to declare the new name under the matching submodel section.
+  auto pick = [](const std::string& configured, const char* fallback) {
+    return configured.empty() ? std::string(fallback) : configured;
+  };
+
+  frontend.in_audio_chunk = pick(ms.frontend.inputs.audio_chunk, "audio_chunk");
+  frontend.in_sample_buffer = pick(ms.frontend.inputs.sample_buffer, "sample_buffer");
+  frontend.in_sample_len = pick(ms.frontend.inputs.sample_len, "sample_len");
+  frontend.in_conv1_buffer = pick(ms.frontend.inputs.conv1_buffer, "conv1_buffer");
+  frontend.in_conv2_buffer = pick(ms.frontend.inputs.conv2_buffer, "conv2_buffer");
+  frontend.in_frame_count = pick(ms.frontend.inputs.frame_count, "frame_count");
+  frontend.out_features = pick(ms.frontend.outputs.features, "features");
+  frontend.out_sample_buffer = pick(ms.frontend.outputs.sample_buffer, "sample_buffer_out");
+  frontend.out_sample_len = pick(ms.frontend.outputs.sample_len, "sample_len_out");
+  frontend.out_conv1_buffer = pick(ms.frontend.outputs.conv1_buffer, "conv1_buffer_out");
+  frontend.out_conv2_buffer = pick(ms.frontend.outputs.conv2_buffer, "conv2_buffer_out");
+  frontend.out_frame_count = pick(ms.frontend.outputs.frame_count, "frame_count_out");
+
+  encoder.in_features = pick(ms.encoder.inputs.features, "features");
+  encoder.out_encoded = pick(ms.encoder.outputs.encoded, "encoded");
+
+  adapter.in_encoded = pick(ms.adapter.inputs.encoded, "encoded");
+  adapter.in_pos_offset = pick(ms.adapter.inputs.pos_offset, "pos_offset");
+  adapter.out_memory = pick(ms.adapter.outputs.memory, "memory");
+
+  cross_kv.in_memory = pick(ms.cross_kv.inputs.memory, "memory");
+  cross_kv.out_k_cross = pick(ms.cross_kv.outputs.k_cross, "k_cross");
+  cross_kv.out_v_cross = pick(ms.cross_kv.outputs.v_cross, "v_cross");
+
+  decoder_kv.in_token = pick(ms.decoder_kv.inputs.token, "token");
+  decoder_kv.in_k_self = pick(ms.decoder_kv.inputs.k_self, "k_self");
+  decoder_kv.in_v_self = pick(ms.decoder_kv.inputs.v_self, "v_self");
+  decoder_kv.in_k_cross = pick(ms.decoder_kv.inputs.k_cross, "out_k_cross");
+  decoder_kv.in_v_cross = pick(ms.decoder_kv.inputs.v_cross, "out_v_cross");
+  decoder_kv.out_logits = pick(ms.decoder_kv.outputs.logits, "logits");
+  decoder_kv.out_k_self = pick(ms.decoder_kv.outputs.k_self, "out_k_self");
+  decoder_kv.out_v_self = pick(ms.decoder_kv.outputs.v_self, "out_v_self");
+  decoder_kv.out_k_cross = pick(ms.decoder_kv.outputs.k_cross, "out_k_cross");
+  decoder_kv.out_v_cross = pick(ms.decoder_kv.outputs.v_cross, "out_v_cross");
 }
 
 MoonshineStreamingModel::MoonshineStreamingModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
@@ -115,45 +158,46 @@ MoonshineFrontendSubState::MoonshineFrontendSubState(const MoonshineStreamingMod
 
   // Inputs: audio_chunk (set per-run) + the 5 persistent state buffers.
   audio_input_idx_ = inputs_.size();
-  input_names_.push_back("audio_chunk");
+  input_names_.push_back(config_.frontend.in_audio_chunk.c_str());
   inputs_.push_back(nullptr);
 
   sample_buffer_input_idx_ = inputs_.size();
-  input_names_.push_back("sample_buffer");
+  input_names_.push_back(config_.frontend.in_sample_buffer.c_str());
   inputs_.push_back(sample_buffer_.get());
 
   sample_len_input_idx_ = inputs_.size();
-  input_names_.push_back("sample_len");
+  input_names_.push_back(config_.frontend.in_sample_len.c_str());
   inputs_.push_back(sample_len_.get());
 
   conv1_buffer_input_idx_ = inputs_.size();
-  input_names_.push_back("conv1_buffer");
+  input_names_.push_back(config_.frontend.in_conv1_buffer.c_str());
   inputs_.push_back(conv1_buffer_.get());
 
   conv2_buffer_input_idx_ = inputs_.size();
-  input_names_.push_back("conv2_buffer");
+  input_names_.push_back(config_.frontend.in_conv2_buffer.c_str());
   inputs_.push_back(conv2_buffer_.get());
 
   frame_count_input_idx_ = inputs_.size();
-  input_names_.push_back("frame_count");
+  input_names_.push_back(config_.frontend.in_frame_count.c_str());
   inputs_.push_back(frame_count_.get());
 
   // Outputs: features + the 5 updated state buffers.
-  output_names_.push_back("features");
+  output_names_.push_back(config_.frontend.out_features.c_str());
   outputs_.push_back(nullptr);
-  output_names_.push_back("sample_buffer_out");
+  output_names_.push_back(config_.frontend.out_sample_buffer.c_str());
   outputs_.push_back(nullptr);
-  output_names_.push_back("sample_len_out");
+  output_names_.push_back(config_.frontend.out_sample_len.c_str());
   outputs_.push_back(nullptr);
-  output_names_.push_back("conv1_buffer_out");
+  output_names_.push_back(config_.frontend.out_conv1_buffer.c_str());
   outputs_.push_back(nullptr);
-  output_names_.push_back("conv2_buffer_out");
+  output_names_.push_back(config_.frontend.out_conv2_buffer.c_str());
   outputs_.push_back(nullptr);
-  output_names_.push_back("frame_count_out");
+  output_names_.push_back(config_.frontend.out_frame_count.c_str());
   outputs_.push_back(nullptr);
 }
 
 void MoonshineFrontendSubState::AllocateStateBuffers() {
+  // CPU-only: see header block. All persistent buffers use allocator_cpu_.
   auto& alloc = model_.allocator_cpu_;
   {
     auto shape = std::array<int64_t, 2>{1, config_.sample_buffer_size};
@@ -217,9 +261,10 @@ MoonshineEncoderSubState::MoonshineEncoderSubState(const MoonshineStreamingModel
                                                    const GeneratorParams& params)
     : State{params, model},
       model_{model} {
-  input_names_.push_back("features");
+  const auto& cfg = model_.moonshine_config_;
+  input_names_.push_back(cfg.encoder.in_features.c_str());
   inputs_.push_back(nullptr);
-  output_names_.push_back("encoded");
+  output_names_.push_back(cfg.encoder.out_encoded.c_str());
   outputs_.push_back(nullptr);
 }
 
@@ -240,20 +285,21 @@ MoonshineAdapterSubState::MoonshineAdapterSubState(const MoonshineStreamingModel
                                                    const GeneratorParams& params)
     : State{params, model},
       model_{model} {
+  const auto& cfg = model_.moonshine_config_;
   auto pos_shape = std::array<int64_t, 1>{1};
   pos_tensor_ = OrtValue::CreateTensor(model_.allocator_cpu_, pos_shape,
                                        ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
   *pos_tensor_->GetTensorMutableData<int64_t>() = 0;
 
   encoded_input_idx_ = inputs_.size();
-  input_names_.push_back("encoded");
+  input_names_.push_back(cfg.adapter.in_encoded.c_str());
   inputs_.push_back(nullptr);
 
   pos_input_idx_ = inputs_.size();
-  input_names_.push_back("pos_offset");
+  input_names_.push_back(cfg.adapter.in_pos_offset.c_str());
   inputs_.push_back(pos_tensor_.get());
 
-  output_names_.push_back("memory");
+  output_names_.push_back(cfg.adapter.out_memory.c_str());
   outputs_.push_back(nullptr);
 }
 
@@ -276,11 +322,12 @@ MoonshineCrossKvSubState::MoonshineCrossKvSubState(const MoonshineStreamingModel
                                                    const GeneratorParams& params)
     : State{params, model},
       model_{model} {
-  input_names_.push_back("memory");
+  const auto& cfg = model_.moonshine_config_;
+  input_names_.push_back(cfg.cross_kv.in_memory.c_str());
   inputs_.push_back(nullptr);
-  output_names_.push_back("k_cross");
+  output_names_.push_back(cfg.cross_kv.out_k_cross.c_str());
   outputs_.push_back(nullptr);
-  output_names_.push_back("v_cross");
+  output_names_.push_back(cfg.cross_kv.out_v_cross.c_str());
   outputs_.push_back(nullptr);
 }
 
@@ -301,35 +348,36 @@ MoonshineDecoderKvSubState::MoonshineDecoderKvSubState(const MoonshineStreamingM
                                                        const GeneratorParams& params)
     : State{params, model},
       model_{model} {
+  const auto& cfg = model_.moonshine_config_;
   token_input_idx_ = inputs_.size();
-  input_names_.push_back("token");
+  input_names_.push_back(cfg.decoder_kv.in_token.c_str());
   inputs_.push_back(nullptr);
 
   k_self_input_idx_ = inputs_.size();
-  input_names_.push_back("k_self");
+  input_names_.push_back(cfg.decoder_kv.in_k_self.c_str());
   inputs_.push_back(nullptr);
 
   v_self_input_idx_ = inputs_.size();
-  input_names_.push_back("v_self");
+  input_names_.push_back(cfg.decoder_kv.in_v_self.c_str());
   inputs_.push_back(nullptr);
 
   k_cross_input_idx_ = inputs_.size();
-  input_names_.push_back("out_k_cross");
+  input_names_.push_back(cfg.decoder_kv.in_k_cross.c_str());
   inputs_.push_back(nullptr);
 
   v_cross_input_idx_ = inputs_.size();
-  input_names_.push_back("out_v_cross");
+  input_names_.push_back(cfg.decoder_kv.in_v_cross.c_str());
   inputs_.push_back(nullptr);
 
-  output_names_.push_back("logits");
+  output_names_.push_back(cfg.decoder_kv.out_logits.c_str());
   outputs_.push_back(nullptr);
-  output_names_.push_back("out_k_self");
+  output_names_.push_back(cfg.decoder_kv.out_k_self.c_str());
   outputs_.push_back(nullptr);
-  output_names_.push_back("out_v_self");
+  output_names_.push_back(cfg.decoder_kv.out_v_self.c_str());
   outputs_.push_back(nullptr);
-  output_names_.push_back("out_k_cross");
+  output_names_.push_back(cfg.decoder_kv.out_k_cross.c_str());
   outputs_.push_back(nullptr);
-  output_names_.push_back("out_v_cross");
+  output_names_.push_back(cfg.decoder_kv.out_v_cross.c_str());
   outputs_.push_back(nullptr);
 }
 

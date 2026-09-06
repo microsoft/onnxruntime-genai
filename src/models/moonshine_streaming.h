@@ -3,6 +3,11 @@
 //
 // Moonshine Streaming ASR
 //
+// Device support: CPU only. All persistent buffers are allocated with
+// `model_.allocator_cpu_` and every sub-session runs on CPU. Selecting a
+// non-CPU EP is unsupported — device-aware allocation + KV concat is
+// deferred until there is an accelerator target that beats CPU here.
+//
 // Sub-states (each a State wrapping one session):
 //   frontend  : causal audio frontend with explicit sample / conv-cache
 //               state buffers that persist across chunks.
@@ -82,6 +87,54 @@ struct MoonshineConfig {
   std::string adapter_filename;
   std::string cross_kv_filename;
   std::string decoder_kv_filename;
+
+  // Resolved ORT graph I/O names per submodel. Filled in by PopulateFromConfig
+  // from genai_config.json when present, otherwise from the built-in
+  // Moonshine defaults so existing model directories keep working unchanged.
+  struct FrontendIO {
+    std::string in_audio_chunk;
+    std::string in_sample_buffer;
+    std::string in_sample_len;
+    std::string in_conv1_buffer;
+    std::string in_conv2_buffer;
+    std::string in_frame_count;
+    std::string out_features;
+    std::string out_sample_buffer;
+    std::string out_sample_len;
+    std::string out_conv1_buffer;
+    std::string out_conv2_buffer;
+    std::string out_frame_count;
+  } frontend;
+
+  struct EncoderIO {
+    std::string in_features;
+    std::string out_encoded;
+  } encoder;
+
+  struct AdapterIO {
+    std::string in_encoded;
+    std::string in_pos_offset;
+    std::string out_memory;
+  } adapter;
+
+  struct CrossKvIO {
+    std::string in_memory;
+    std::string out_k_cross;
+    std::string out_v_cross;
+  } cross_kv;
+
+  struct DecoderKvIO {
+    std::string in_token;
+    std::string in_k_self;
+    std::string in_v_self;
+    std::string in_k_cross;
+    std::string in_v_cross;
+    std::string out_logits;
+    std::string out_k_self;
+    std::string out_v_self;
+    std::string out_k_cross;
+    std::string out_v_cross;
+  } decoder_kv;
 
   void PopulateFromConfig(const Config& config);
 };
