@@ -294,12 +294,14 @@ void RunBenchmark(const benchmark::Options& opts) {
     }
     auto* gen = opts.reuse_generator ? generator.get() : new_gen.get();
 
-    const auto append_tokens_start = Clock::now();
-    gen->AppendTokenSequences(*prompt_sequences);
     if (i == 0) {
       // This is the C API-visible AppendTokenSequences call, not an isolated or
       // explicitly synchronized Ort::Run invocation.
+      const auto append_tokens_start = Clock::now();
+      gen->AppendTokenSequences(*prompt_sequences);
       first_warmup_append_tokens_latency = Clock::now() - append_tokens_start;
+    } else {
+      gen->AppendTokenSequences(*prompt_sequences);
     }
     const size_t target_token_count = gen->TokenCount() + opts.num_tokens_to_generate;
     while (!gen->IsDone() && gen->TokenCount() < target_token_count) {
