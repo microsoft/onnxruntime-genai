@@ -117,6 +117,10 @@ def save_results(args, results, filename, print_memory_usage=False):
         "Prompt Length",
         "Tokens Generated",
         "Max Length",
+        "Model Creation Latency (ms)",
+        "Tokenizer Creation Latency (ms)",
+        "Generator Creation Latency (ms)",
+        "First Warmup AppendTokens Latency (ms)",
         "Tokenization Throughput (tps)",
         "Tokenization Latency (ms)",
         "Prompt Processing Throughput (tps)",
@@ -162,6 +166,12 @@ def save_results(args, results, filename, print_memory_usage=False):
         record.config.customized["tokens_generated"] = row["Tokens Generated"]
         record.config.customized["max_length"] = row["Max Length"]
         record.config.customized["aggregation"] = args.aggregation
+        record.metrics.customized["model_creation_latency_ms"] = row["Model Creation Latency (ms)"]
+        record.metrics.customized["tokenizer_creation_latency_ms"] = row["Tokenizer Creation Latency (ms)"]
+        record.metrics.customized["generator_creation_latency_ms"] = row["Generator Creation Latency (ms)"]
+        first_warmup_append_tokens_latency_ms = row["First Warmup AppendTokens Latency (ms)"]
+        if pd.notna(first_warmup_append_tokens_latency_ms):
+            record.metrics.customized["first_warmup_append_tokens_latency_ms"] = first_warmup_append_tokens_latency_ms
         record.metrics.customized["tokenization_throughput_tps"] = row["Tokenization Throughput (tps)"]
         record.metrics.customized["tokenization_latency_ms"] = row["Tokenization Latency (ms)"]
         record.metrics.customized["prompt_processing_throughput_tps"] = row["Prompt Processing Throughput (tps)"]
@@ -240,10 +250,14 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
             config.append_provider(provider_to_append)
     if args.verbose:
         print("Loading model... ")
+    model_creation_start_time = time.perf_counter()
     model = og.Model(config)
+    model_creation_latency_s = time.perf_counter() - model_creation_start_time
     if args.verbose:
         print("Model loaded")
+    tokenizer_creation_start_time = time.perf_counter()
     tokenizer = og.Tokenizer(model)
+    tokenizer_creation_latency_s = time.perf_counter() - tokenizer_creation_start_time
 
     # Get model type
     model_type = None
@@ -317,15 +331,27 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         batch_size=batch_size,
     )
 
+    # Time the first generator without changing where generators are created.
+    generator_creation_latency_s = None
+
+    def create_generator():
+        nonlocal generator_creation_latency_s
+        if generator_creation_latency_s is not None:
+            return og.Generator(model, params)
+        generator_creation_start_time = time.perf_counter()
+        gen = og.Generator(model, params)
+        generator_creation_latency_s = time.perf_counter() - generator_creation_start_time
+        return gen
+
     # When reuse_generator is enabled, create a single generator and reuse it via
     # rewind_to(0). This avoids recreating the generator (and reallocating
     # KV cache) each iteration. Otherwise, create a fresh generator per iteration.
-    generator = og.Generator(model, params) if args.reuse_generator else None
+    generator = create_generator() if args.reuse_generator else None
 
     if need_generate_prompt:
         # Use a generator to produce the prompt.  When reusing, use the single
         # generator; otherwise create a temporary one that is destroyed after.
-        gen = generator if args.reuse_generator else og.Generator(model, params)
+        gen = generator if args.reuse_generator else create_generator()
 
         text_seed = "a"
         seed_prompt = f"{args.chat_template.format(input=text_seed)}"
@@ -347,13 +373,26 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
 
     if args.verbose:
         print("Running warmup runs...")
-    for _ in tqdm(range(args.warmup)):
+    if need_generate_prompt and args.warmup > 0:
+        print(
+            "WARNING: The prompt was generated with the model before warmup, so the first warmup append_tokens "
+            "call is not a cold-start measurement. Use --use_random_tokens or --use_prompt_set to prepare the "
+            "prompt without an earlier model run."
+        )
+    first_warmup_append_tokens_latency_s = None
+    for warmup_index in tqdm(range(args.warmup)):
         if args.reuse_generator:
             generator.rewind_to(0)
             gen = generator
         else:
-            gen = og.Generator(model, params)
+            gen = create_generator()
+        if warmup_index == 0:
+            # Measure the Python-visible append_tokens call, not an isolated or
+            # explicitly synchronized Ort::Run invocation.
+            first_warmup_start_time = time.perf_counter()
         gen.append_tokens(tokens)
+        if warmup_index == 0:
+            first_warmup_append_tokens_latency_s = time.perf_counter() - first_warmup_start_time
         target_token_count = gen.token_count() + generation_length
         while not gen.is_done() and gen.token_count() < target_token_count:
             gen.generate_next_token()
@@ -385,7 +424,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
             generator.rewind_to(0)
             gen = generator
         else:
-            gen = og.Generator(model, params)
+            gen = create_generator()
 
         # Measure prompt processing
         prompt_start_time = time.perf_counter()
@@ -422,6 +461,27 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         del generator
 
     aggregation_label = "Average" if args.aggregation == "mean" else "Median"
+
+    model_creation_latency_ms = model_creation_latency_s * 1000
+    tokenizer_creation_latency_ms = tokenizer_creation_latency_s * 1000
+    generator_creation_latency_ms = (
+        generator_creation_latency_s * 1000 if generator_creation_latency_s is not None else None
+    )
+    first_warmup_append_tokens_latency_ms = (
+        first_warmup_append_tokens_latency_s * 1000
+        if first_warmup_append_tokens_latency_s is not None
+        else None
+    )
+    print(f"Model Creation Latency: {model_creation_latency_ms} ms")
+    print(f"Tokenizer Creation Latency: {tokenizer_creation_latency_ms} ms")
+    if generator_creation_latency_ms is None:
+        print("Generator Creation Latency: N/A (no generator was created)")
+    else:
+        print(f"Generator Creation Latency: {generator_creation_latency_ms} ms")
+    if first_warmup_append_tokens_latency_ms is None:
+        print("First Warmup AppendTokens Latency: N/A (--warmup=0)")
+    else:
+        print(f"First Warmup AppendTokens Latency: {first_warmup_append_tokens_latency_ms} ms")
 
     # Calculate tokenization metrics
     tokenization_latency_s = aggregate_measurements(tokenize_times, args.aggregation)
@@ -477,6 +537,10 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         prompt_length,
         generation_length,
         max_length,
+        model_creation_latency_ms,
+        tokenizer_creation_latency_ms,
+        generator_creation_latency_ms,
+        first_warmup_append_tokens_latency_ms,
         tokenization_thrpt,
         tokenization_latency_ms,
         per_token_prompt_thrpt,
