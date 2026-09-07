@@ -168,7 +168,9 @@ def save_results(args, results, filename, print_memory_usage=False):
         record.config.customized["aggregation"] = args.aggregation
         record.metrics.customized["model_creation_latency_ms"] = row["Model Creation Latency (ms)"]
         record.metrics.customized["tokenizer_creation_latency_ms"] = row["Tokenizer Creation Latency (ms)"]
-        record.metrics.customized["generator_creation_latency_ms"] = row["Generator Creation Latency (ms)"]
+        generator_creation_latency_ms = row["Generator Creation Latency (ms)"]
+        if pd.notna(generator_creation_latency_ms):
+            record.metrics.customized["generator_creation_latency_ms"] = generator_creation_latency_ms
         first_warmup_append_tokens_latency_ms = row["First Warmup AppendTokens Latency (ms)"]
         if pd.notna(first_warmup_append_tokens_latency_ms):
             record.metrics.customized["first_warmup_append_tokens_latency_ms"] = first_warmup_append_tokens_latency_ms
