@@ -9,6 +9,7 @@
 #include <random>
 #include <iostream>
 #include <numeric>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -160,6 +161,7 @@ static std::unique_ptr<OgaGeneratorParams> MakeGeneratorParams(const benchmark::
 
 void RunBenchmark(const benchmark::Options& opts) {
   std::unique_ptr<OgaModel> model;
+  Duration model_creation_latency;
 
   if (opts.batch_size > 1 && opts.execution_provider == "NvTensorRtRtx") {
     // Use OgaConfig::Overlay instead of RuntimeSettings for cleaner implementation
@@ -174,12 +176,18 @@ void RunBenchmark(const benchmark::Options& opts) {
 })";
 
     config->Overlay(batch_size_overlay.c_str());
+    const auto model_creation_start = Clock::now();
     model = OgaModel::Create(*config);
+    model_creation_latency = Clock::now() - model_creation_start;
   } else {
+    const auto model_creation_start = Clock::now();
     model = OgaModel::Create(opts.model_path.c_str());
+    model_creation_latency = Clock::now() - model_creation_start;
   }
 
+  const auto tokenizer_creation_start = Clock::now();
   auto tokenizer = OgaTokenizer::Create(*model);
+  const auto tokenizer_creation_latency = Clock::now() - tokenizer_creation_start;
 
   if (opts.batch_size < 1) {
     throw std::runtime_error("Batch size must be at least 1.");
@@ -208,20 +216,32 @@ void RunBenchmark(const benchmark::Options& opts) {
   const size_t num_tokens = num_prompt_tokens + opts.num_tokens_to_generate;
   const auto generator_params = MakeGeneratorParams(opts, *model, num_tokens);
 
+  std::optional<Duration> generator_creation_latency;
+  auto create_generator = [&]() {
+    if (generator_creation_latency.has_value()) {
+      return OgaGenerator::Create(*model, *generator_params);
+    }
+
+    const auto generator_creation_start = Clock::now();
+    auto result = OgaGenerator::Create(*model, *generator_params);
+    generator_creation_latency = Clock::now() - generator_creation_start;
+    return result;
+  };
+
   // When reuse_generator is enabled, create a single generator and reuse it for
   // prompt generation, warmup, and benchmark iterations via RewindTo(0).
   // This avoids recreating the generator (and reallocating KV cache) each iteration.
   // Otherwise, create a fresh generator for each iteration.
   std::unique_ptr<OgaGenerator> generator;
   if (opts.reuse_generator) {
-    generator = OgaGenerator::Create(*model, *generator_params);
+    generator = create_generator();
   }
 
   if (need_generate_prompt) {
     // Use a generator to produce the prompt
     std::unique_ptr<OgaGenerator> temp_gen;
     if (!opts.reuse_generator) {
-      temp_gen = OgaGenerator::Create(*model, *generator_params);
+      temp_gen = create_generator();
     }
     auto* gen = opts.reuse_generator ? generator.get() : temp_gen.get();
 
@@ -259,16 +279,30 @@ void RunBenchmark(const benchmark::Options& opts) {
 
   // warmup
   if (opts.verbose) std::cout << "Running warmup iterations (" << opts.num_warmup_iterations << ")...\n";
+  if (need_generate_prompt && opts.num_warmup_iterations > 0) {
+    std::cout << "WARNING: The prompt was generated with the model before warmup, so the first warmup "
+                 "AppendTokenSequences call is not a cold-start measurement. Use --use_random_tokens, "
+                 "--prompt, or --prompt_file to prepare the prompt without an earlier model run.\n";
+  }
+  std::optional<Duration> first_warmup_append_tokens_latency;
   for (size_t i = 0; i < opts.num_warmup_iterations; ++i) {
     std::unique_ptr<OgaGenerator> new_gen;
     if (opts.reuse_generator) {
       generator->RewindTo(0);
     } else {
-      new_gen = OgaGenerator::Create(*model, *generator_params);
+      new_gen = create_generator();
     }
     auto* gen = opts.reuse_generator ? generator.get() : new_gen.get();
 
-    gen->AppendTokenSequences(*prompt_sequences);
+    if (i == 0) {
+      // This is the C API-visible AppendTokenSequences call, not an isolated or
+      // explicitly synchronized Ort::Run invocation.
+      const auto append_tokens_start = Clock::now();
+      gen->AppendTokenSequences(*prompt_sequences);
+      first_warmup_append_tokens_latency = Clock::now() - append_tokens_start;
+    } else {
+      gen->AppendTokenSequences(*prompt_sequences);
+    }
     const size_t target_token_count = gen->TokenCount() + opts.num_tokens_to_generate;
     while (!gen->IsDone() && gen->TokenCount() < target_token_count) {
       gen->GenerateNextToken();
@@ -324,7 +358,7 @@ void RunBenchmark(const benchmark::Options& opts) {
     if (opts.reuse_generator) {
       generator->RewindTo(0);
     } else {
-      new_gen = OgaGenerator::Create(*model, *generator_params);
+      new_gen = create_generator();
     }
     auto* gen = opts.reuse_generator ? generator.get() : new_gen.get();
 
@@ -382,6 +416,21 @@ void RunBenchmark(const benchmark::Options& opts) {
               << ", prompt tokens: " << num_prompt_tokens
               << ", tokens to generate: " << opts.num_tokens_to_generate
               << "\n";
+
+    using MillisecondsFp = std::chrono::duration<float, std::chrono::milliseconds::period>;
+    std::cout << "Model Creation Latency: " << MillisecondsFp{model_creation_latency}.count() << " ms\n";
+    std::cout << "Tokenizer Creation Latency: " << MillisecondsFp{tokenizer_creation_latency}.count() << " ms\n";
+    if (generator_creation_latency.has_value()) {
+      std::cout << "Generator Creation Latency: " << MillisecondsFp{*generator_creation_latency}.count() << " ms\n";
+    } else {
+      std::cout << "Generator Creation Latency: N/A (no generator was created)\n";
+    }
+    if (first_warmup_append_tokens_latency.has_value()) {
+      std::cout << "First Warmup AppendTokenSequences Latency: "
+                << MillisecondsFp{*first_warmup_append_tokens_latency}.count() << " ms\n";
+    } else {
+      std::cout << "First Warmup AppendTokenSequences Latency: N/A (--warmup=0)\n";
+    }
 
     const auto e2e_gen_stats = ComputeStats(e2e_gen_times);
     const auto prompt_processing_stats = ComputeStats(prompt_processing_times);
