@@ -5,11 +5,14 @@
 
 #include <array>
 #include <limits>
+#include <string>
+#include <vector>
 
 #include "generator/generators.h"
 #include "request_status.h"
 #include "engine_invariants.h"
 #include "step_plan.h"
+#include "turn_policy.h"
 
 /**
  * @file request.h
@@ -21,20 +24,50 @@ namespace Generators {
 
 namespace test {
 struct RequestGuidanceTestAccess;
-}
+}  // namespace test
 
 struct Request;
 struct ScheduledRequests;
+struct Tokenizer;
+class StopStringController;
 
+// Resident-session policy. Everything here outlives a single turn.
 struct RequestOptions {
+  // Total tokens (prompt plus generated, across every turn) the Request may ever reach. Defaults to
+  // the model-configured search.max_length, which is also its ceiling.
   std::optional<size_t> max_session_tokens;
 };
 
+// Per-turn generation policy. Every field is unset by default, and an unset field means "use the
+// model-configured default for this turn" -- never "keep whatever the previous turn used". A
+// caller may reuse one options object across turns; the Request itself never makes these sticky.
 struct TurnOptions {
   std::weak_ptr<Request> request;
   std::optional<size_t> max_generated_tokens;
+  std::optional<size_t> min_generated_tokens;
+  std::optional<bool> do_sample;
+  std::optional<float> temperature;
+  std::optional<float> top_p;
+  std::optional<int> top_k;
+  std::optional<float> repetition_penalty;
+  std::optional<int> no_repeat_ngram_size;
+  // Seed is the one deliberate exception to non-sticky resolution. Unset means "continue the
+  // Request's existing host and device RNG streams"; set means "reseed both streams for this turn".
+  // Zero is a valid deterministic seed, which is why clearing is a distinct operation rather than a
+  // sentinel value.
+  std::optional<uint64_t> seed;
+  // Copied UTF-8 stop strings for this turn. Empty means stop strings are disabled (or, when set on
+  // an already-configured turn, cleared). Bounds and UTF-8 validity are enforced by
+  // OgaTurnOptionsSetStopStrings (via StopStringMatcher) before this is populated.
+  std::vector<std::string> stop_strings;
+  // Copied grammar for this turn. Both empty means the turn is unguided; guidance is never
+  // inherited from a previous turn or from model/Request state.
+  std::string guidance_type;
+  std::string guidance_data;
 
   void ValidateOwnerThread() const;
+  // Restores every option to its unset state, leaving the bound Request alone.
+  void Reset();
 };
 
 struct RequestStepResult {
@@ -42,16 +75,41 @@ struct RequestStepResult {
   bool token_appended{};
   bool done{};
   GenerationFinishReason finish_reason{GenerationFinishReason::None};
+  // Caller-facing index into the turn's stop-string list, or -1 unless this step's committing
+  // token completed a match (finish_reason == StopString).
+  int32_t matched_stop_string_index{-1};
   std::array<int32_t, kMaxGeneratedTokensPerStep> visible_tokens{};
   size_t visible_token_count{};
 };
 
 struct RequestTurnAdmission {
+  // Declared (not defaulted) because pending_stop_controller's deleter needs the complete
+  // StopStringController type, which this header only forward-declares; defined in request.cpp,
+  // which includes stop_string_controller.h.
+  ~RequestTurnAdmission();
+
   RequestStatus status{RequestStatus::Unassigned};
   size_t host_token_count{};
   int64_t prompt_sequence_length{};
   int64_t processed_sequence_length{};
   bool transaction_started{};
+  // This turn's fully resolved generation policy. Built and validated before the attempt starts and
+  // installed by Request::CommitTurnAdmission(). Value-initialized (an inert greedy policy) so it
+  // is never indeterminate between constructing the admission and assigning the resolved policy.
+  EffectiveTurnPolicy policy{};
+  // The complete stop controller this turn will have once committed (null when the turn has no
+  // stop strings). The caller builds this -- including any tokenizer/stream construction, which
+  // can throw -- before starting this admission attempt, so it is never itself a source of
+  // mutation-after-partial-failure. It is moved into Request's live stop_controller_ only by
+  // Request::CommitTurnAdmission(); Request::RollbackTurnAdmission() and this struct's own
+  // destructor otherwise simply discard it, leaving whatever stop_controller_ the Request had
+  // before this attempt (from a prior committed turn, or null) completely untouched.
+  std::unique_ptr<StopStringController> pending_stop_controller;
+  // This turn's guidance processor, or null for an unguided turn. Built by the caller under exactly
+  // the same pre-mutation rules as pending_stop_controller: grammar validation, cache acquisition,
+  // and processor construction all happen before the attempt begins, so an invalid grammar leaves
+  // the previous completed turn's Request entirely reusable.
+  std::unique_ptr<ConstrainedLogitsProcessor> pending_guidance;
 };
 
 struct RequestTurnCounters {
@@ -73,12 +131,19 @@ struct Request : std::enable_shared_from_this<Request>,
                  LeakChecked<Request>,
                  ExternalRefCounted<Request> {
   /**
-   * @brief Constructs a Request object with the given generator parameters.
-   * @param params Shared pointer to GeneratorParams containing generation configuration.
+   * @brief Constructs a Request bound to a model and a session token limit.
+   * @param model The model this Request decodes with. Its configuration supplies the generation
+   *              defaults every turn resolves from.
+   * @param max_session_tokens Total tokens (prompt plus generated, across every turn) this Request
+   *              may ever reach.
+   *
+   * The Request derives its own private search parameters from the model: batch size and beam count
+   * are forced to one, the search length limit is the session limit, and no caller-supplied
+   * generation policy is retained. Per-turn policy arrives through TurnOptions instead.
    */
   Request(
-      std::shared_ptr<GeneratorParams> params,
-      size_t max_total_tokens,
+      const Model& model,
+      size_t max_session_tokens,
       std::shared_ptr<std::atomic<bool>> abandonment_pending =
           std::make_shared<std::atomic<bool>>(false));
   ~Request();
@@ -91,6 +156,9 @@ struct Request : std::enable_shared_from_this<Request>,
   uint64_t BeginTurn(
       std::span<const int32_t> tokens,
       std::optional<size_t> max_generated_tokens = std::nullopt);
+  uint64_t BeginTurn(
+      std::span<const int32_t> tokens,
+      const TurnOptions& options);
   void ValidateOwnerThread() const;
   void AttachToEngine(std::shared_ptr<Engine> engine) noexcept;
   bool BelongsTo(const Engine& engine) const noexcept;
@@ -98,13 +166,13 @@ struct Request : std::enable_shared_from_this<Request>,
   bool IsRestartableCanceledTurn() const noexcept;
   void ValidateTurnAdmission(
       std::span<const int32_t> tokens,
-      std::optional<size_t> max_generated_tokens) const;
+      const TurnOptions& options) const;
   void ValidateContinuousDecodingSupport() const;
   void PrepareTurnAdmission(
       std::span<const int32_t> tokens,
       RequestTurnAdmission& admission);
   uint64_t CommitTurnAdmission(
-      std::optional<size_t> max_generated_tokens,
+      const TurnOptions& options,
       RequestTurnAdmission& admission);
   void RollbackTurnAdmission(RequestTurnAdmission& admission);
   bool CanCancelFromEngine(
@@ -124,8 +192,8 @@ struct Request : std::enable_shared_from_this<Request>,
   // scheduler-private shadow the Engine owns outright. They never sample and never enter the
   // public turn API, so they are admitted through this factory instead of BeginTurn.
   static std::shared_ptr<Request> CreateAuxiliaryDecoderRequest(
-      std::shared_ptr<GeneratorParams> params,
-      size_t max_total_tokens,
+      const Model& model,
+      size_t max_session_tokens,
       std::shared_ptr<std::atomic<bool>> abandonment_pending,
       const std::shared_ptr<Engine>& engine,
       std::span<const int32_t> tokens);
@@ -136,8 +204,23 @@ struct Request : std::enable_shared_from_this<Request>,
 
   /**
    * @brief Total tokens (prompt plus generated) this request may ever reach.
+   *
+   * This is the Request's one session limit: Search completion, static cache sizing, speculative
+   * bounds, and the MaxSessionTokens finish reason all use it.
    */
-  size_t MaxTotalTokens() const noexcept { return max_total_tokens_; }
+  size_t MaxSessionTokens() const noexcept { return max_session_tokens_; }
+
+  /**
+   * @brief The generation policy the currently admitted turn resolved to.
+   */
+  const EffectiveTurnPolicy& TurnPolicy() const noexcept { return turn_policy_; }
+
+  /**
+   * @brief Model/Engine-configured prefill chunk size, or nothing when chunking is disabled.
+   *
+   * Scheduler policy, deliberately kept out of the per-turn generation policy.
+   */
+  const std::optional<size_t>& PrefillChunkSize() const noexcept;
 
   /**
    * @brief The speculative-decoding options this request was created with.
@@ -146,6 +229,14 @@ struct Request : std::enable_shared_from_this<Request>,
 
   /**
    * @brief Why the pending draft proposal cannot be verified, or nullptr when it can.
+   *
+   * This is the single request-local check every speculative draft producer converges on: manual
+   * Request::SetDraftTokens callers get the returned reason as a thrown error, and every automatic
+   * in-Engine drafter (e.g. MTP's Engine::PrepareMtpStep) uses the same check to silently skip
+   * proposing drafts for this request instead. An active decoded stop-string configuration is not
+   * one of these reasons: draft verification observes target-accepted tokens through the request's
+   * StopStringController in exactly the same committed order as the ordinary one-token path, so a
+   * stop-enabled turn drafts and verifies normally.
    */
   const char* DraftTokenValidationError() const noexcept;
 
@@ -208,6 +299,15 @@ struct Request : std::enable_shared_from_this<Request>,
   size_t AcceptedDraftTokenCount() const noexcept { return accepted_draft_count_; }
 
   /**
+   * @brief Proposed draft positions logically resolved before this step's terminal boundary.
+   *
+   * This is the confirmed prefix plus, when applicable, one non-accepted proposal that ended
+   * verification through rejection or EOS. It never counts a trailing replacement/bonus token,
+   * which is not one of the proposed drafts. Always >= AcceptedDraftTokenCount().
+   */
+  size_t EvaluatedDraftTokenCount() const noexcept { return evaluated_draft_count_; }
+
+  /**
    * @brief Sequence length excluding any drafts staged by the step in flight.
    */
   int64_t CommittedSequenceLength() const;
@@ -220,9 +320,35 @@ struct Request : std::enable_shared_from_this<Request>,
   }
   bool IsStopToken(int32_t token) const;
   void RewindDraftsForTransaction(size_t accepted_count);
-  void RecordSampledDraftAcceptance(size_t accepted_count);
+  // Incrementally records one more sampled-path token that is not this round's finishing stage.
+  // Called once per stage, strictly after that stage's StageGenerationForTransaction() call, for
+  // every stage except the one that turns out to end the round (a stop match, the turn/context
+  // limit, or the request's natural last stage) -- so accepted_draft_count_ always reflects prior
+  // stages only, and the following stage's token_appended check (and any stop-string observation
+  // nested in it) sees exactly one newly appended token, regardless of which stage that turns out
+  // to be. Every stage recorded here is both accepted and evaluated (a non-finishing stage is
+  // always a genuinely confirmed draft), so this advances accepted_draft_count_ and
+  // evaluated_draft_count_ together. The finishing stage itself is never passed here, whether it is
+  // a trailing replacement/bonus token (not one of the proposed drafts) or, when the turn/context
+  // limit or a stop match lands exactly on the last proposed draft with no room left for a
+  // replacement/bonus token, a genuinely confirmed draft -- see PromoteFinalStageAsAcceptedDraft
+  // for that case.
+  void AppendAcceptedSampledToken(int32_t token);
+  // Called instead of AppendAcceptedSampledToken when the stage that turns out to end this round
+  // (a stop-string match, the turn/context limit, or ordinary exhaustion of the proposed drafts) is
+  // itself a genuinely target-confirmed draft rather than a trailing replacement/bonus token: folds
+  // it into accepted_draft_count_/evaluated_draft_count_/tokens_host_ exactly like an earlier
+  // accepted stage would, and suppresses CommitStep()'s own token_appended append of the same token
+  // so it is recorded exactly once. Never called for a trailing replacement/bonus token, which
+  // stays excluded from both counts exactly as it always has been.
+  void PromoteFinalStageAsAcceptedDraft(RequestStepResult& result);
+  // Called instead when the finishing stage is a proposed draft position that was logically
+  // resolved but not accepted, either because it was rejected (and this stage contains its
+  // replacement) or because it is EOS and ends without appending. A trailing bonus token past the
+  // proposed range is not a proposal and must not call this. Advances only evaluated_draft_count_;
+  // any appended replacement is committed normally through the ordinary token_appended path.
+  void MarkFinalStageAsEvaluatedNonAcceptedDraft() noexcept { ++evaluated_draft_count_; }
 
-  void ValidateEngineCompatibility() const;
   void SaveStateForTransaction();
   void SaveStateForNewTurnTransaction();
   void SaveStateForExternalSamplingTransaction();
@@ -255,15 +381,18 @@ struct Request : std::enable_shared_from_this<Request>,
   uint64_t CurrentTurnId() const noexcept { return current_turn_id_; }
   bool HasCurrentTurn() const noexcept { return has_current_turn_; }
   GenerationFinishReason FinishReason() const noexcept { return finish_reason_; }
+  // Caller-facing index into the turn's stop-string list, valid only when FinishReason() ==
+  // StopString. -1 otherwise, including after a cancellation or fatal failure that replaces an
+  // undelivered result.
+  int32_t MatchedStopStringIndex() const noexcept { return matched_stop_string_index_; }
   size_t TurnPromptTokens() const noexcept { return turn_prompt_tokens_; }
   size_t TurnGeneratedTokens() const noexcept { return turn_generated_tokens_; }
   size_t RemainingTurnTokenBudget() const noexcept {
-    if (!turn_max_generated_tokens_) {
+    const auto& limit = turn_policy_.max_generated_tokens;
+    if (!limit) {
       return std::numeric_limits<size_t>::max();
     }
-    return turn_generated_tokens_ < *turn_max_generated_tokens_
-               ? *turn_max_generated_tokens_ - turn_generated_tokens_
-               : 0;
+    return turn_generated_tokens_ < *limit ? *limit - turn_generated_tokens_ : 0;
   }
 
   RequestStatus Status() const noexcept { return status_; }
@@ -340,11 +469,6 @@ struct Request : std::enable_shared_from_this<Request>,
   RequestStatus status_{RequestStatus::Unassigned};
 
   /**
-   * @brief The search options this request was created with.
-   */
-  const Config::Search& SearchOptions() const;
-
-  /**
    * @brief Binds this request's search to a one-element slot of a caller-owned next-token buffer.
    * @return True if the search accepted the slot, false if it must be sampled on its own.
    *
@@ -370,9 +494,49 @@ struct Request : std::enable_shared_from_this<Request>,
 
   /**
    * @brief Returns this request's persistent random state for the given batched sampler.
+   *
+   * Always created from the durable seed basis. A turn's reseed is never folded into creation,
+   * because only a reseed applied inside the step transaction can be rolled back with it.
    */
   BatchedSamplerState& SamplingState(BatchedSampler& sampler);
   void CommitSamplingState(std::unique_ptr<BatchedSamplerState> state) noexcept;
+
+  /**
+   * @brief The durable seed basis a newly created sampler state starts from.
+   */
+  uint64_t SamplerSeedBasis() const noexcept { return current_seed_basis_; }
+
+  /**
+   * @brief True while an admitted turn's reseed is still waiting to be applied or committed.
+   */
+  bool HasPendingTurnSeed() const noexcept { return pending_reseed_.has_value(); }
+
+  /**
+   * @brief This request's existing sampler-owned device RNG state, or null when it has none.
+   *
+   * Never creates one. The step transaction uses it to checkpoint exactly the states a pending
+   * reseed is about to overwrite.
+   */
+  BatchedSamplerState* ExistingSamplingState(BatchedSampler& sampler) const noexcept;
+
+  /**
+   * @brief Applies this turn's pending reseed to the host and device RNG streams.
+   *
+   * Called inside the step transaction, strictly after every Request and sampler checkpoint and
+   * strictly before the first RNG consumer, so a rolled back step restores both streams and leaves
+   * the reseed pending for the retry. The pending marker is promoted to the durable basis only by
+   * CommitStateForTransaction().
+   *
+   * @param sampler The batched sampler owning this request's device state, or null when the step
+   *                has none.
+   * @param device_state_checkpointed Whether this step checkpointed that device state. The caller
+   *                guarantees this is true whenever the Request has one, because a reseed the step
+   *                could not roll back must not be applied and must not be promoted either; a
+   *                violation throws instead of leaving the host and device streams on different
+   *                seeds.
+   */
+  void ApplyPendingSeedForTransaction(BatchedSampler* sampler,
+                                      bool device_state_checkpointed);
 
  private:
   // The search sequence is partitioned at processed_sequence_length_: tokens before it already
@@ -384,13 +548,27 @@ struct Request : std::enable_shared_from_this<Request>,
   friend struct test::RequestGuidanceTestAccess;
 
   void CompleteClose() noexcept;
+  // Builds the Request's private, Model-derived search parameters. Not caller-created and not
+  // publicly visible: it exists only because Search and sequence storage are still constructed from
+  // a GeneratorParams.
+  static std::shared_ptr<GeneratorParams> CreateRequestParams(
+      const Model& model,
+      size_t max_session_tokens);
   static DeviceSpan<int32_t> AllocateOnDevice(
       GeneratorParams& params,
       std::span<const int32_t> input_ids);
   static void ValidateAppendLength(
-      size_t max_total_tokens,
+      size_t max_session_tokens,
       size_t current_sequence_length,
       size_t token_count);
+  // Releases everything scoped to the turn that just ended: its stop matcher and its guidance
+  // cursor. Finish metadata is stored separately, so a completed turn stays fully queryable.
+  void ReleaseTurnResources() noexcept;
+  // Absolute sequence position below which EOS stays masked, or 0 when the turn set no minimum.
+  // Derived rather than stored so it can never disagree with the committed turn's policy or prompt
+  // length. The sum fits an int because admission proved the turn's prompt length plus its minimum
+  // does not exceed the session limit, which is itself within the internal search length type.
+  int TurnEosFloor() const noexcept;
   // Drops whatever the step in flight staged past the committed sequence, leaving the host mirror
   // exactly as long as the search after its own transaction rewind.
   void DiscardStagedDrafts() noexcept;
@@ -400,22 +578,64 @@ struct Request : std::enable_shared_from_this<Request>,
   // request is still prefilling while processed_sequence_length_ has not caught up with it.
   int64_t prompt_sequence_length_{};
   size_t scheduled_token_count_{};
-  std::optional<size_t> turn_max_generated_tokens_;
+  // The committed turn's resolved policy. The constructor resolves it from the model's own search
+  // defaults so an unadmitted Request already has a complete one.
+  EffectiveTurnPolicy turn_policy_;
   size_t turn_prompt_tokens_{};
   size_t turn_generated_tokens_{};
-  const size_t max_total_tokens_;
+  const size_t max_session_tokens_;
   uint64_t current_turn_id_{};
   uint64_t next_turn_id_{1};
   bool has_current_turn_{};
   bool turn_id_exhausted_{};
   GenerationFinishReason finish_reason_{GenerationFinishReason::None};
+  // Caller-facing stop-string match index committed by CommitStep(), or -1. Only ever written from
+  // CommitStep() (after the commit boundary), so unlike stop_controller_ it needs no transactional
+  // checkpoint: a rolled-back step never wrote to it.
+  int32_t matched_stop_string_index_{-1};
   // Drafts proposed for the next step, the ones the step in flight staged onto the sequence, and
   // the leading part of those the target model accepted.
   std::vector<int32_t> draft_tokens_;
   size_t staged_draft_count_{};
   size_t accepted_draft_count_{};
+  // Proposed draft positions whose target acceptance verification has actually examined this
+  // round, independent of accept/reject outcome and always >= accepted_draft_count_. Reset and
+  // advanced at exactly the same transaction boundaries as accepted_draft_count_ (see the reset
+  // sites for that field); read by Engine::RecordSpeculativeCommit before CommitStep() resets it,
+  // the same way accepted_draft_count_ is. See EvaluatedDraftTokenCount()'s doc comment above for
+  // the exact semantics, and AppendAcceptedSampledToken/PromoteFinalStageAsAcceptedDraft/
+  // MarkFinalStageAsEvaluatedNonAcceptedDraft/CommitAcceptedDraftsForTransaction for how each path
+  // advances it.
+  size_t evaluated_draft_count_{};
   bool draft_verification_completed_generation_{};
+  // Set by CommitAcceptedDraftsForTransaction() when a stop-string match ends greedy draft
+  // verification early, giving StopString precedence over the turn/context limit for the same
+  // completing token. -1 when verification completed generation for any other reason (or has not
+  // completed yet). The sampled/batched path never sets this: it observes stop matches through
+  // the same StageGenerationForTransaction()/StageGeneration() path the ordinary one-token step
+  // uses, one stage at a time, so it needs no separate bookkeeping here.
+  //
+  // StageDraftCompletionForTransaction() only ever reads this field (and accepted_draft_count_,
+  // and Search's own state) to compute its result; it never resets or otherwise mutates it. Only
+  // CommitStep()/RestoreStateForTransaction()/QueueStateRestoreForTransaction()/
+  // DiscardStagedDrafts()/AppendDraftsForTransaction() reset it, at their own well-defined
+  // transaction boundaries -- never in response to StageDraftCompletionForTransaction() being
+  // called. This is deliberate: ScheduledRequests::GenerateNextTokensForTransaction() can call
+  // StageDraftCompletionForTransaction() for the same request twice in one step when the
+  // transaction also uses the batched sampler (once from the batched-sampling setup loop, once
+  // unconditionally from the final per-request loop), and both calls must produce the exact same
+  // result.
+  int32_t draft_verification_stop_match_index_{-1};
   std::shared_ptr<GeneratorParams> params_;
+  // Durable seed basis every RNG stream of this Request starts from. Initialized once from the
+  // model-configured seed (a generated 64-bit value when the model leaves it unset) and advanced
+  // only when a turn's explicit reseed actually commits.
+  uint64_t current_seed_basis_{};
+  // The reseed the admitted turn asked for, still waiting to be applied (or, once applied, waiting
+  // for its step to commit). Survives rollback so the retry reseeds identically, and is discarded
+  // by ReleaseTurnResources() if the turn ends before a sampling step commits it.
+  std::optional<uint64_t> pending_reseed_;
+  bool pending_reseed_applied_{};
   std::mt19937 rng_;
   std::mt19937 transaction_rng_;
   int64_t transaction_processed_sequence_length_{};
@@ -423,6 +643,14 @@ struct Request : std::enable_shared_from_this<Request>,
   std::unique_ptr<Search> search_;
   std::unique_ptr<ConstrainedLogitsProcessor> guidance_logits_processor_;
   std::unique_ptr<ConstrainedLogitsProcessor> guidance_transaction_checkpoint_;
+  // Null when the active turn has no stop strings (the no-stop fast path: no tokenizer stream, no
+  // decode, no matcher work). Request::CommitTurnAdmission() installs the caller-prebuilt
+  // controller only after successful admission, so a failed attempt leaves the previous state
+  // untouched. Terminal completion releases it because finish metadata is stored separately.
+  std::unique_ptr<StopStringController> stop_controller_;
+  // Checkpoint for stop_controller_'s replayable token history, saved by every SaveState*
+  // ForTransaction() and consumed by RestoreStateForTransaction()/CompleteStateRestoreForTransaction().
+  size_t stop_controller_transaction_checkpoint_{};
   std::unique_ptr<BatchedSamplerState> batched_sampler_state_;
   std::weak_ptr<Engine> engine_;
   const Engine* engine_identity_{};

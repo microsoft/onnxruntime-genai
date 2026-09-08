@@ -224,6 +224,19 @@ std::vector<InvariantViolation> ValidateRequestInvariants(const RequestStateSnap
     add("Request " + id + " uses reserved turn id zero.");
   }
 
+  // The matched stop-string index is meaningful exactly when the finish reason is StopString: a
+  // nonnegative index without that reason would mean some other terminal outcome silently carried
+  // a stale match, and StopString without one would mean a committed match lost its index.
+  if (request.finish_reason == GenerationFinishReason::StopString) {
+    if (request.matched_stop_string_index < 0) {
+      add("Request " + id + " has finish reason StopString but no matched stop-string index.");
+    }
+  } else if (request.matched_stop_string_index >= 0) {
+    add("Request " + id + " has a matched stop-string index (" +
+        std::to_string(request.matched_stop_string_index) +
+        ") without finish reason StopString.");
+  }
+
   if (IsExecutable(request.status)) {
     if (!request.has_current_turn) {
       add("Executable Request " + id + " has no assigned turn id.");

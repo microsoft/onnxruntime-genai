@@ -4,6 +4,9 @@
 #include "engine.h"
 #include "../logging.h"
 #include "../search.h"
+#include "../constrained_logits_processor.h"
+#include "../models/preprocessing/genai_tokenizer.h"
+#include "../stop_string_controller.h"
 
 #include <limits>
 
@@ -20,23 +23,6 @@ constexpr size_t kDflash2FailureDisableThreshold = 3;
 struct MtpRollbackError : std::runtime_error {
   using std::runtime_error::runtime_error;
 };
-
-std::shared_ptr<GeneratorParams> CloneRequestParams(
-    const GeneratorParams& source,
-    const Model& model) {
-  auto copy = std::make_shared<GeneratorParams>(model);
-  copy->search = source.search;
-  copy->speculative = source.speculative;
-  copy->max_batch_size = source.max_batch_size;
-  copy->use_graph_capture = source.use_graph_capture;
-  copy->max_graph_capture_length = source.max_graph_capture_length;
-  copy->use_multi_profile = source.use_multi_profile;
-  copy->p_device = source.p_device;
-  copy->guidance_type = source.guidance_type;
-  copy->guidance_data = source.guidance_data;
-  copy->guidance_ff_tokens_enabled = source.guidance_ff_tokens_enabled;
-  return copy;
-}
 
 std::string AddExceptionCause(std::string message, std::exception_ptr error) {
   if (!error) {
@@ -201,6 +187,13 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
   staged_events_.reserve(max_step_event_count_);
   fatal_events_.reserve(max_step_event_count_ + 1);
   mtp_requests_.reserve(max_batch_size);
+  if (dflash2_drafter_) {
+    // Sized here so a committed step never has to grow them, which would make an optional drafter
+    // able to fail the step with a bad_alloc.
+    dflash2_feeds_.reserve(max_batch_size);
+    dflash2_draft_widths_.reserve(max_batch_size);
+    dflash2_drafts_.reserve(max_batch_size);
+  }
 }
 
 Engine::~Engine() {
@@ -243,6 +236,15 @@ void ValidateMtpModelCompatibility(const Config& config,
 }
 
 EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
+  // The static batch decoder rebuilds its contiguous cache from the whole sequence every step, so
+  // it cannot resume a half-written prompt. Reject a model that configures chunking here rather
+  // than surfacing it once a Request is already being admitted.
+  if (!model->config_->engine.dynamic_batching &&
+      model->config_->search.chunk_size.value_or(0) != 0) {
+    throw std::runtime_error(
+        "search.chunk_size requires dynamic batching; the static batch scheduler cannot chunk a "
+        "prefill.");
+  }
   std::shared_ptr<DecoderOnly_Model> mtp_model;
   size_t mtp_bytes_per_block = 0;
   if (!model->config_->model.mtp.filename.empty()) {
@@ -262,6 +264,10 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
   }
 
   std::unique_ptr<Dflash2Drafter> dflash2_drafter;
+  std::shared_ptr<Dflash2Model> dflash2_model;
+  size_t dflash2_bytes_per_block = 0;
+  size_t dflash2_reserved_memory_bytes = 0;
+  size_t dflash2_max_batch_size = 0;
   if (!model->config_->model.dflash2.filename.empty()) {
     if (!model->config_->engine.dynamic_batching) {
       throw std::runtime_error("An Engine-hosted DFlash 2 drafter requires dynamic batching.");
@@ -283,21 +289,47 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
 
     const auto& batching = *model->config_->engine.dynamic_batching;
     const size_t paged_block_size = static_cast<size_t>(batching.block_size);
-    auto dflash2_model = std::make_shared<Dflash2Model>(
+    dflash2_max_batch_size = static_cast<size_t>(batching.max_batch_size);
+    dflash2_model = std::make_shared<Dflash2Model>(
         CreateDflash2Config(*model->config_), GetOrtEnv());
-    ValidateDflash2ModelCompatibility(
-        *model->config_, model->session_info_, dflash2_model->session_info_);
+    const auto dflash2_cache_type = ValidateDflash2ModelCompatibility(
+        *model->config_, model->session_info_, dflash2_model->session_info_, paged_block_size);
     model->config_->engine.aux_hidden_states_output_required = true;
-    // Built before the main pool so the pool's free-memory measurement already excludes it. The
-    // drafter is windowed, so its footprint depends on the batch size, not the context length.
-    dflash2_drafter = std::make_unique<Dflash2Drafter>(
-        dflash2_model, paged_block_size,
-        Dflash2Drafter::PoolBlocks(*model->config_, paged_block_size,
-                                   static_cast<size_t>(batching.max_batch_size)));
+    const size_t pool_blocks = Dflash2Drafter::PoolBlocks(
+        *model->config_, paged_block_size, dflash2_max_batch_size);
+    if (pool_blocks != 0) {
+      // Built before the main pool so the pool's free-memory measurement already excludes it. A
+      // windowed drafter's footprint depends on the batch size, not the context length.
+      dflash2_drafter = std::make_unique<Dflash2Drafter>(
+          dflash2_model, paged_block_size, pool_blocks, dflash2_max_batch_size);
+    } else {
+      // A full-attention drafter mirrors the target pool, so it is billed per target block instead
+      // and built below once the target pool's block count is known.
+      dflash2_bytes_per_block =
+          Dflash2Drafter::BytesPerBlock(*model->config_, paged_block_size, dflash2_cache_type);
+      dflash2_reserved_memory_bytes = Dflash2Drafter::FullAttentionReservedBytes(
+          paged_block_size, static_cast<size_t>(dflash2.block_size),
+          dflash2_max_batch_size, dflash2_bytes_per_block);
+    }
   }
 
+  if (dflash2_bytes_per_block > std::numeric_limits<size_t>::max() - mtp_bytes_per_block) {
+    throw std::runtime_error("Engine auxiliary cache bytes per block overflow size_t.");
+  }
   std::shared_ptr<CacheManager> cache_manager =
-      CacheManager::Create(model, mtp_bytes_per_block);
+      CacheManager::Create(model, mtp_bytes_per_block + dflash2_bytes_per_block,
+                           dflash2_reserved_memory_bytes);
+  if (dflash2_model && !dflash2_drafter) {
+    const auto& dflash2 = model->config_->model.dflash2;
+    const size_t paged_block_size =
+        static_cast<size_t>(model->config_->engine.dynamic_batching->block_size);
+    dflash2_drafter = std::make_unique<Dflash2Drafter>(
+        dflash2_model, paged_block_size,
+        Dflash2Drafter::FullAttentionPoolBlocks(
+            cache_manager->Snapshot().total_blocks, paged_block_size,
+            static_cast<size_t>(dflash2.block_size), dflash2_max_batch_size),
+        dflash2_max_batch_size);
+  }
   auto scheduler = Scheduler::Create(model, cache_manager);
   auto model_executor = ModelExecutor::Create(model, cache_manager);
 
@@ -328,6 +360,7 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
   dflash2_draft_widths_.reserve(plan.requests.size());
   for (size_t i = 0; i < plan.requests.size(); ++i) {
     const auto& entry = plan.requests[i];
+    const bool greedy = entry.request->TurnPolicy().IsGreedy();
     const size_t accepted = entry.request->AcceptedDraftTokenCount();
     if (accepted > entry.draft_token_count) {
       throw std::logic_error("DFlash 2 observed more accepted drafts than the target planned.");
@@ -345,14 +378,12 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
     feed.aux_row_begin = entry.packed_token_offset;
     feed.aux_row_count = valid_rows;
     feed.first_position = first_position;
+    feed.draft_eligible = greedy;
 
-    const auto& search = entry.request->SearchOptions();
-    const bool greedy = !search.do_sample || search.top_k == 1 || search.temperature == 0;
     // The committed length this step ends at: the accepted prefix plus the token just sampled.
     const int64_t length_after_step = static_cast<int64_t>(first_position + valid_rows) +
                                       (results[i].token_appended ? 1 : 0);
-    const size_t sequence_limit =
-        std::min(static_cast<size_t>(search.max_length), entry.request->MaxTotalTokens());
+    const size_t sequence_limit = entry.request->MaxSessionTokens();
     const size_t remaining_turn_tokens = entry.request->RemainingTurnTokenBudget();
     const size_t remaining_turn_tokens_after_step =
         results[i].visible_token_count < remaining_turn_tokens
@@ -362,8 +393,8 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
         max_drafts, static_cast<size_t>(entry.request->SpeculativeOptions().max_draft_tokens),
         static_cast<size_t>(length_after_step), sequence_limit,
         remaining_turn_tokens_after_step);
-    feed.wants_drafts = width > 0 && results[i].token_appended && !results[i].done &&
-                        greedy && !entry.request->DraftTokenValidationError();
+    feed.wants_drafts = greedy && width > 0 && results[i].token_appended && !results[i].done &&
+                        !entry.request->DraftTokenValidationError();
     feed.anchor_token = results[i].token;
     dflash2_feeds_.push_back(feed);
     dflash2_draft_widths_.push_back(width);
@@ -379,8 +410,9 @@ void Engine::PublishDflash2Drafts(ScheduledRequests& scheduled_requests) {
     throw std::logic_error("The main decoder did not expose auxiliary hidden states for DFlash 2.");
   }
 
-  dflash2_drafter_->Propose(*aux_hidden_states, dflash2_feeds_, dflash2_drafts_);
-  ++speculative_stats_.draft_forward_passes;
+  if (dflash2_drafter_->Propose(*aux_hidden_states, dflash2_feeds_, dflash2_drafts_)) {
+    ++speculative_stats_.draft_forward_passes;
+  }
   for (size_t i = 0; i < dflash2_feeds_.size(); ++i) {
     auto& drafts = dflash2_drafts_[i];
     if (drafts.empty()) {
@@ -390,6 +422,48 @@ void Engine::PublishDflash2Drafts(ScheduledRequests& scheduled_requests) {
     // of the same greedy path.
     drafts.resize(std::min(drafts.size(), dflash2_draft_widths_[i]));
     dflash2_feeds_[i].request->SetDraftTokens(drafts);
+  }
+}
+
+void Engine::RecordDflash2Failure(std::exception_ptr error, bool contract_error) {
+  for (const auto& feed : dflash2_feeds_) {
+    if (feed.request) {
+      feed.request->SetDraftTokens({});
+    }
+  }
+  dflash2_feeds_.clear();
+  // The drafter's cached context stops being contiguous with the target the moment a step's rows
+  // are not ingested, and its contiguity check is a contract violation. Forget every in-flight
+  // request instead, so the retry budget below is spent on real drafter failures rather than on
+  // the bookkeeping gap the first failure left behind.
+  dflash2_drafter_->ReleaseAll();
+  ++speculative_stats_.standard_fallback_steps;
+  ++speculative_stats_.dflash2_failures;
+  ++dflash2_consecutive_failures_;
+  const bool disable_dflash2 = contract_error ||
+                               dflash2_consecutive_failures_ >= kDflash2FailureDisableThreshold;
+  dflash2_disabled_ = disable_dflash2;
+  if (disable_dflash2) {
+    ++speculative_stats_.dflash2_disables;
+  }
+  if (dflash2_consecutive_failures_ != 1 && !disable_dflash2) {
+    return;
+  }
+  // Log() asserts that logging is enabled, and an assertion abort is not catchable, so the guard
+  // has to come before the call rather than inside the try below.
+  if (!g_log.enabled || !g_log.warning) {
+    return;
+  }
+  try {
+    Log("warning", AddExceptionCause(
+                       contract_error
+                           ? "Disabling DFlash 2 after a proposal contract failure."
+                       : disable_dflash2
+                           ? "Disabling DFlash 2 after repeated proposal failures."
+                           : "DFlash 2 proposal failed; using target-only decoding for this step.",
+                       error));
+  } catch (...) {
+    // Diagnostics must not turn an optional drafter failure into a target failure.
   }
 }
 
@@ -467,12 +541,9 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
     for (size_t i = 0; i < target_plan.requests.size(); ++i) {
       const auto& entry = target_plan.requests[i];
       const auto& result = target_results[i];
-      const auto& search = entry.request->SearchOptions();
       const int64_t committed_length_after_step =
           entry.request->CurrentSequenceLength();
-      const size_t sequence_limit =
-          std::min(static_cast<size_t>(search.max_length),
-                   entry.request->MaxTotalTokens());
+      const size_t sequence_limit = entry.request->MaxSessionTokens();
       const size_t remaining_turn_tokens =
           entry.request->RemainingTurnTokenBudget();
       const size_t remaining_turn_tokens_after_step =
@@ -487,6 +558,14 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
                                                 remaining_turn_tokens_after_step > 1
                                                     ? remaining_turn_tokens_after_step - 1
                                                     : size_t{0}});
+      // A stop-enabled request is intentionally not excluded here: generic target verification
+      // (Request::CommitAcceptedDraftsForTransaction for greedy, the per-stage loop in
+      // ScheduledRequests::GenerateNextTokensForTransaction for sampled/batched) truncates it
+      // transactionally through the same StopStringController the ordinary path uses, so it can
+      // draft and verify normally. result.done still does the work of preventing a redraft after a
+      // match: it is true for any committed StopString result exactly like any other finish
+      // reason, so this check below already skips proposing a new draft block for it with no
+      // stop-specific condition needed.
       if (!result.token_appended || result.done ||
           entry.request->DraftTokenValidationError() ||
           max_draft_tokens == 0) {
@@ -516,10 +595,8 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
         checkpointed_shadows.push_back(feed.shadow);
         feed.shadow->AppendTokensForAuxiliaryDecoder(feed.tokens);
       } else {
-        auto params = CreateGeneratorParams(*mtp_model_);
-        params->search = search;
         feed.shadow = Request::CreateAuxiliaryDecoderRequest(
-            std::move(params), entry.request->MaxTotalTokens(),
+            *mtp_model_, entry.request->MaxSessionTokens(),
             abandonment_pending_, shared_from_this(), feed.tokens);
         feed.newly_created = true;
       }
@@ -913,11 +990,21 @@ void Engine::RecordSpeculativeCommit(const StepPlan& plan) noexcept {
     }
 
     const size_t accepted = entry.request->AcceptedDraftTokenCount();
+    // EvaluatedDraftTokenCount() is tracked directly at the actual verification source (the
+    // greedy loop in Request::CommitAcceptedDraftsForTransaction, and the sampled/batched stage
+    // loop's AppendAcceptedSampledToken/PromoteFinalStageAsAcceptedDraft/
+    // MarkFinalStageAsEvaluatedNonAcceptedDraft in
+    // ScheduledRequests::GenerateNextTokensForTransaction),
+    // not inferred here from accepted/finish_reason/token_appended after the fact. It counts draft
+    // positions logically resolved before the committed terminal boundary; greedy comparisons may
+    // have been precomputed for later positions. The old inference overcounted a limit-truncated
+    // round -- e.g. 5 proposed, budget for 2, both confirmed: the logical evaluated prefix is 2,
+    // not accepted + 1 = 3.
+    const size_t evaluated = entry.request->EvaluatedDraftTokenCount();
     ++speculative_stats_.rounds;
     ++speculative_stats_.completed_rounds;
     speculative_stats_.draft_tokens_proposed += entry.draft_token_count;
-    speculative_stats_.draft_tokens_evaluated +=
-        std::min(accepted + 1, entry.draft_token_count);
+    speculative_stats_.draft_tokens_evaluated += evaluated;
     speculative_stats_.draft_tokens_accepted += accepted;
     ++speculative_stats_.acceptance_length_histogram[accepted];
     if (accepted == 0) {
@@ -937,35 +1024,61 @@ void Engine::ValidateOwnerThread() const {
   }
 }
 
-std::shared_ptr<Request> Engine::CreateRequest(const GeneratorParams& params,
-                                               size_t max_total_tokens) {
+std::shared_ptr<Request> Engine::CreateRequest(const RequestOptions& options) {
   ValidateOwnerThread();
   CompleteNonresidentClosedRequests();
   ReclaimAbandonedRequests();
   if (health_ == EngineHealth::Unhealthy) {
     std::rethrow_exception(fatal_error_);
   }
-  if (params.model_.get() != model_.get()) {
+  const auto& model_search = model_->config_->search;
+  // These model-fixed checks stay at Request creation because tests and embedders can construct an
+  // Engine with injected dependencies, bypassing CreateDependencies() and its model validation.
+  if (model_search.max_length <= 0) {
     throw std::runtime_error(
-        "Engine request parameters must belong to the Engine's model.");
+        "The model's search.max_length must be greater than zero; actual value is " +
+        std::to_string(model_search.max_length) + ".");
   }
-  if (params.search.max_length <= 0) {
+  // The Engine expresses a per-turn floor through TurnOptions::min_generated_tokens. A model that
+  // still carries the legacy session-absolute floor would silently mean something else here, so it
+  // is rejected rather than reinterpreted -- but the caller can clear it without editing the model
+  // directory, through the config overlay that OgaCreateConfig/OgaConfigOverlay already support.
+  if (model_search.min_length != 0) {
     throw std::runtime_error(
-        "max_length must be greater than zero; actual value is " +
-        std::to_string(params.search.max_length) + ".");
+        "The model configures a nonzero search.min_length (" +
+        std::to_string(model_search.min_length) +
+        "), which is a session-absolute floor the Engine does not support; its minimum is per "
+        "turn. Clear it on the Config before creating the model -- "
+        R"(OgaConfigOverlay(config, "{\"search\":{\"min_length\":0}}"), or in Python )"
+        R"(config.overlay('{"search": {"min_length": 0}}') -- and use )"
+        "OgaTurnOptionsSetMinGeneratedTokens for a per-turn minimum instead.");
   }
-  if (max_total_tokens == 0 ||
-      max_total_tokens > static_cast<size_t>(params.search.max_length)) {
+  // Beam search does not implement the Engine's deferred completion contract -- its next tokens are
+  // never copied back -- and a Request is one sequence, so the Engine forces num_beams to 1 in the
+  // private search parameters it derives. Silently forcing a model that asked for beams would
+  // decode something the caller never requested, so a model-configured value other than 1 is
+  // rejected here instead. The overlay clears it without editing the model directory.
+  if (model_search.num_beams != 1) {
     throw std::runtime_error(
-        "max_total_tokens (" + std::to_string(max_total_tokens) +
-        ") must be greater than zero and no greater than max_length (" +
-        std::to_string(params.search.max_length) + ").");
+        "The model configures search.num_beams = " +
+        std::to_string(model_search.num_beams) +
+        ", and beam search is not supported by the Engine; every Engine Request decodes one "
+        "sequence with one beam. Clear it on the Config before creating the model -- "
+        R"(OgaConfigOverlay(config, "{\"search\":{\"num_beams\":1}}"), or in Python )"
+        R"(config.overlay('{"search": {"num_beams": 1}}') -- )"
+        "and batch across Requests instead.");
   }
-
+  const size_t model_ceiling = static_cast<size_t>(model_search.max_length);
+  const size_t max_session_tokens =
+      options.max_session_tokens.value_or(model_ceiling);
+  if (max_session_tokens == 0 || max_session_tokens > model_ceiling) {
+    throw std::runtime_error(
+        "max_session_tokens (" + std::to_string(max_session_tokens) +
+        ") must be greater than zero and no greater than the model-configured search.max_length (" +
+        std::to_string(model_ceiling) + ").");
+  }
   auto request = std::make_shared<Request>(
-      CloneRequestParams(params, *model_), max_total_tokens,
-      abandonment_pending_);
-  request->ValidateEngineCompatibility();
+      *model_, max_session_tokens, abandonment_pending_);
   auto engine = shared_from_this();
 
   // Fatal handling preserves every token event from the current step, then needs one terminal
@@ -989,7 +1102,7 @@ std::shared_ptr<Request> Engine::CreateRequest(const GeneratorParams& params,
 
 uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
                            std::span<const int32_t> tokens,
-                           std::optional<size_t> max_generated_tokens) {
+                           const TurnOptions& options) {
   ValidateOwnerThread();
   CompleteNonresidentClosedRequests();
   ReclaimAbandonedRequests();
@@ -1000,14 +1113,41 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
     throw std::runtime_error(
         "Cannot begin a turn for a request that does not belong to this engine.");
   }
-  request->ValidateTurnAdmission(tokens, max_generated_tokens);
+  request->ValidateTurnAdmission(tokens, options);
+
+  // Resolve and validate this turn's complete policy before any Request mutation, so an
+  // unsatisfiable combination leaves the previous completed turn entirely reusable.
+  const bool dynamic_batching = cache_manager_->SupportsDynamicBatching();
+  const auto policy = ResolveTurnPolicy(model_->config_->search, options);
+  const size_t turn_prompt_length =
+      static_cast<size_t>(request->IsAwaitingFirstTurn()
+                              ? 0
+                              : request->CurrentSequenceLength()) +
+      tokens.size();
+  ValidateTurnPolicy(policy, options, model_->p_device_scoring_->GetType(),
+                     model_->config_->model.vocab_size, turn_prompt_length,
+                     request->MaxSessionTokens());
+  // Static batching completes generation through a non-transactional path (RunStatic) that cannot
+  // stage, roll back, or replay a stop match, and its sampler RNG state is created once when the
+  // Request joins the batch rather than inside a rollback-capable step. Reject both before any
+  // Request mutation rather than letting a turn run without the guarantee its options promise.
+  if (!dynamic_batching) {
+    if (!options.stop_strings.empty()) {
+      throw std::runtime_error(
+          "Stop strings require an Engine configured for dynamic batching.");
+    }
+    if (options.seed) {
+      throw std::runtime_error(
+          "A per-turn seed requires an Engine configured for dynamic batching.");
+    }
+  }
+  if (options.seed && !scheduler_->SupportsTransactionalSamplerState()) {
+    throw std::runtime_error(
+        "A per-turn seed requires a batched sampler that supports transaction rollback.");
+  }
 
   const bool first_turn = request->IsAwaitingFirstTurn();
-  if (first_turn) {
-    if (cache_manager_->SupportsDynamicBatching()) {
-      request->ValidateEngineCompatibility();
-    }
-  } else {
+  if (!first_turn) {
     const bool restartable_canceled_turn =
         request->IsRestartableCanceledTurn() &&
         !cache_manager_->IsResident(request);
@@ -1018,7 +1158,21 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
   }
 
   RequestTurnAdmission admission;
+  admission.policy = policy;
   bool added_to_scheduler = false;
+
+  // Build this turn's complete stop controller and guidance processor (or leave either null for a
+  // turn that does not use them) before any Request or Engine mutation: tokenizer/stream
+  // construction and grammar compilation can throw, and at this point nothing has been touched yet,
+  // so a failure here leaves the Request, its MTP shadow, and Engine health entirely unchanged for
+  // a caller to retry. Ownership passes into admission; Request::CommitTurnAdmission() installs
+  // them, and Request::RollbackTurnAdmission() (or simply this function returning through the catch
+  // below) discards them without ever having touched the Request's live state.
+  if (!options.stop_strings.empty()) {
+    admission.pending_stop_controller = std::make_unique<StopStringController>(
+        GetOrCreateStopTokenizer(), options.stop_strings);
+  }
+  admission.pending_guidance = CreateTurnGuidance(options);
 
   // A continuation appends a prompt the MTP shadow never sees, so keeping the shadow would leave it
   // a concatenation of generated tokens across turns with the intervening prompt missing. Drop it
@@ -1032,8 +1186,7 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
       scheduler_->AddRequest(request);
       added_to_scheduler = true;
     }
-    return request->CommitTurnAdmission(
-        max_generated_tokens, admission);
+    return request->CommitTurnAdmission(options, admission);
   } catch (...) {
     const auto append_error = std::current_exception();
     try {
@@ -1083,6 +1236,7 @@ bool Engine::CancelRequest(const std::shared_ptr<Request>& request, uint64_t tur
   terminal.turn_id = turn_id;
   terminal.flags = EngineEventFlagTurnFinished;
   terminal.finish_reason = GenerationFinishReason::Canceled;
+  terminal.matched_stop_string_index = -1;
   terminal.usage = {
       counters.prompt_tokens,
       counters.generated_tokens,
@@ -1090,6 +1244,12 @@ bool Engine::CancelRequest(const std::shared_ptr<Request>& request, uint64_t tur
   if (has_existing_event) {
     existing->flags |= terminal.flags;
     existing->finish_reason = terminal.finish_reason;
+    // CanCancelFromEngine() only allows this merge while the Request is still executable, and a
+    // committed StopString match makes it TurnComplete in the very same step that stages the
+    // match's terminal event -- so `existing` here can only ever be a non-terminal (Token-only)
+    // event, whose matched index is already -1. Copy the terminal value explicitly so the merge
+    // preserves the event invariant without relying on that precondition.
+    existing->matched_stop_string_index = terminal.matched_stop_string_index;
     existing->usage = terminal.usage;
   } else {
     pending_events_.push_back(std::move(terminal));
@@ -1587,25 +1747,6 @@ void Engine::RunDynamic() {
     };
 
     try {
-      for (const auto& entry : step_plan_.requests) {
-        entry.request->ValidateEngineCompatibility();
-      }
-    } catch (...) {
-      const auto validation_error = std::current_exception();
-      rollback_transaction();
-      ++transaction_metrics_.post_processing_aborts;
-      ++transaction_metrics_.retryable_aborts;
-      throw EngineStepError{
-          {StepOutcomeKind::RetryableBatchAbort,
-           step_plan_.transaction_id,
-           nullptr},
-          AddExceptionCause(
-              "Request validation failed; the batch was rolled back.",
-              validation_error),
-      };
-    }
-
-    try {
       // Sampling mutates each request's Search state. Checkpoint it before the model run so failures
       // in execution or post-processing can discard the whole batch rather than partially advancing
       // whichever requests happened to finish first.
@@ -1684,7 +1825,10 @@ void Engine::RunDynamic() {
         const bool disable_mtp =
             mtp_consecutive_failures_ >= kMtpFailureDisableThreshold;
         mtp_disabled_ = disable_mtp;
-        if (mtp_consecutive_failures_ == 1 || disable_mtp) {
+        if ((mtp_consecutive_failures_ == 1 || disable_mtp) &&
+            // Log() asserts that logging is enabled, and an assertion abort is not catchable, so
+            // the guard has to come before the call rather than inside the try below.
+            g_log.enabled && g_log.warning) {
           try {
             Log("warning", AddExceptionCause(
                                disable_mtp
@@ -1750,11 +1894,6 @@ void Engine::RunDynamic() {
       if (mtp_step) {
         mtp_step->reservation->PrepareCommit();
       }
-      if (dflash2_drafter_ && !dflash2_disabled_ && MaxDraftTokensPerStep() > 0) {
-        // Reads accepted-draft counts that CommitStep clears below. Keep this fallible work on the
-        // rollback side of the target transaction's commit boundary.
-        PrepareDflash2Feeds(step_plan_, step_results_);
-      }
     } catch (...) {
       const auto preparation_error = std::current_exception();
       rollback_transaction();
@@ -1764,6 +1903,35 @@ void Engine::RunDynamic() {
           nullptr,
           "Transaction preparation failed and the Engine is no longer healthy.",
           preparation_error);
+    }
+
+    bool dflash2_feeds_ready = false;
+    if (dflash2_drafter_ && !dflash2_disabled_ && MaxDraftTokensPerStep() > 0) {
+      // Reads accepted-draft counts that CommitStep clears below. Keep this fallible work on the
+      // rollback side of the target transaction's commit boundary. DFlash 2 is optional, so only a
+      // contract violation is fatal here; anything else falls back to a target-only commit.
+      std::exception_ptr fatal_preparation_error;
+      try {
+        PrepareDflash2Feeds(step_plan_, step_results_);
+        dflash2_feeds_ready = true;
+      } catch (const std::logic_error&) {
+        fatal_preparation_error = std::current_exception();
+      } catch (...) {
+        try {
+          RecordDflash2Failure(std::current_exception(), false);
+        } catch (...) {
+          fatal_preparation_error = std::current_exception();
+        }
+      }
+      if (fatal_preparation_error) {
+        rollback_transaction();
+        MarkUnhealthyAndThrow(
+            StepOutcomeKind::ExecutionContractFailure,
+            step_plan_.transaction_id,
+            nullptr,
+            "Transaction preparation failed and the Engine is no longer healthy.",
+            fatal_preparation_error);
+      }
     }
 
     try {
@@ -1785,20 +1953,12 @@ void Engine::RunDynamic() {
       if (mtp_step) {
         PublishMtpDrafts(*mtp_step);
       }
-      if (dflash2_drafter_ && !dflash2_disabled_ && MaxDraftTokensPerStep() > 0) {
+      if (dflash2_feeds_ready) {
         try {
           PublishDflash2Drafts(scheduled_requests);
           dflash2_consecutive_failures_ = 0;
         } catch (...) {
           const auto dflash2_error = std::current_exception();
-          for (const auto& feed : dflash2_feeds_) {
-            if (feed.request) {
-              feed.request->SetDraftTokens({});
-            }
-          }
-          ++speculative_stats_.standard_fallback_steps;
-          ++speculative_stats_.dflash2_failures;
-          ++dflash2_consecutive_failures_;
           bool contract_error = false;
           try {
             std::rethrow_exception(dflash2_error);
@@ -1806,25 +1966,7 @@ void Engine::RunDynamic() {
             contract_error = true;
           } catch (...) {
           }
-          const bool disable_dflash2 = contract_error ||
-                                       dflash2_consecutive_failures_ >= kDflash2FailureDisableThreshold;
-          dflash2_disabled_ = disable_dflash2;
-          if (disable_dflash2) {
-            ++speculative_stats_.dflash2_disables;
-          }
-          if (dflash2_consecutive_failures_ == 1 || disable_dflash2) {
-            try {
-              Log("warning", AddExceptionCause(
-                                 contract_error
-                                     ? "Disabling DFlash 2 after a proposal contract failure."
-                                 : disable_dflash2
-                                     ? "Disabling DFlash 2 after repeated proposal failures."
-                                     : "DFlash 2 proposal failed; using target-only decoding for this step.",
-                                 dflash2_error));
-            } catch (...) {
-              // Diagnostics must not turn an optional drafter failure into a target failure.
-            }
-          }
+          RecordDflash2Failure(dflash2_error, contract_error);
         }
       }
     } catch (...) {
@@ -1878,6 +2020,7 @@ void Engine::AppendEventsFromStep(
   const auto finish_turn = [&request, &result](EngineEvent& event) {
     event.flags |= EngineEventFlagTurnFinished;
     event.finish_reason = result.finish_reason;
+    event.matched_stop_string_index = result.matched_stop_string_index;
     event.usage = {
         request->TurnPromptTokens(),
         request->TurnGeneratedTokens(),
@@ -1936,6 +2079,7 @@ EngineEvent Engine::FailUnserviceableRequest(const void* request_id) {
   event.turn_id = request->CurrentTurnId();
   event.flags = EngineEventFlagTurnFinished | EngineEventFlagFailed;
   event.finish_reason = GenerationFinishReason::Failed;
+  event.matched_stop_string_index = -1;
   event.error_code = EngineErrorCode::RequestUnserviceable;
   event.usage = {
       request->TurnPromptTokens(),
@@ -2046,6 +2190,7 @@ EngineEvent Engine::EventFromStepError(
       event.turn_id = request->CurrentTurnId();
       event.flags = EngineEventFlagTurnFinished | EngineEventFlagFailed;
       event.finish_reason = GenerationFinishReason::Failed;
+      event.matched_stop_string_index = -1;
       event.error_code = error_code;
       event.usage = {
           request->TurnPromptTokens(),
@@ -2062,6 +2207,13 @@ EngineEvent Engine::EventFromStepError(
       } else {
         existing->flags |= event.flags;
         existing->finish_reason = event.finish_reason;
+        // This merge only runs for a Request this sweep just found IsExecutable(), and a committed
+        // StopString match makes a Request TurnComplete in the very same step that stages the
+        // match's terminal event -- so `existing` here can only ever be a non-terminal (Token-only)
+        // event, whose matched index is already -1 (an already-TurnComplete Request's own pending
+        // event, StopString-matched or not, is instead copied through unchanged by the sweep
+        // above). Copy the failure value explicitly so the merged event preserves the invariant.
+        existing->matched_stop_string_index = event.matched_stop_string_index;
         existing->error_code = event.error_code;
         existing->usage = event.usage;
       }
@@ -2071,6 +2223,7 @@ EngineEvent Engine::EventFromStepError(
     EngineEvent event;
     event.flags = EngineEventFlagFailed;
     event.finish_reason = GenerationFinishReason::Failed;
+    event.matched_stop_string_index = -1;
     event.error_code = error_code;
     fatal_events_.push_back(std::move(event));
   }
@@ -2108,6 +2261,26 @@ size_t Engine::MaxDraftTokensPerStep() const {
                  model_executor_->SupportsDraftVerification()
              ? cache_manager_->MaxDraftTokensPerStep()
              : 0;
+}
+
+const std::shared_ptr<Tokenizer>& Engine::GetOrCreateStopTokenizer() {
+  if (!stop_tokenizer_) {
+    stop_tokenizer_ = model_->CreateTokenizer();
+  }
+  return stop_tokenizer_;
+}
+
+std::unique_ptr<ConstrainedLogitsProcessor> Engine::CreateTurnGuidance(
+    const TurnOptions& options) const {
+  if (options.guidance_type.empty() && options.guidance_data.empty()) {
+    return nullptr;
+  }
+  // Guidance is turn-scoped, so its parameters are built here rather than read from the Request:
+  // nothing about a previous turn's grammar can leak into this one.
+  auto params = std::make_shared<GeneratorParams>(*model_);
+  params->search.batch_size = 1;
+  params->SetGuidance(options.guidance_type, options.guidance_data, false);
+  return CreateGuidanceLogitsProcessor(std::move(params));
 }
 
 SpeculativeStats Engine::GetSpeculativeStats() const {

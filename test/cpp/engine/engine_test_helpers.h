@@ -26,6 +26,14 @@ inline std::shared_ptr<Model> LoadDummyDecoderModel() {
   return CreateModel(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
 }
 
+// Prefill chunking is model/Engine configuration rather than per-Request policy, so a test that
+// needs a chunked prefill loads the model with the chunk size already set.
+inline std::shared_ptr<Model> LoadDummyDecoderModelWithChunking(size_t chunk_size) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
+  config->search.chunk_size = chunk_size;
+  return CreateModel(GetOrtEnv(), std::move(config));
+}
+
 inline std::shared_ptr<Model> LoadSyntheticPagedModel() {
   return CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged");
 }
@@ -72,22 +80,17 @@ inline std::shared_ptr<Model> LoadSyntheticCompositeModel() {
   return CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-composite");
 }
 
+inline std::shared_ptr<Model> LoadSyntheticCompositeModelWithChunking(size_t chunk_size) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-composite");
+  config->search.chunk_size = chunk_size;
+  return CreateModel(GetOrtEnv(), std::move(config));
+}
+
 inline std::shared_ptr<Model> LoadSyntheticCompositeMtpModel() {
   auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-composite");
   config->model.mtp.filename = "unused-mtp-head.onnx";
   config->engine.hidden_states_output_required = true;
   return CreateModel(GetOrtEnv(), std::move(config));
-}
-
-// Builds GeneratorParams for the dummy model with greedy, single-sequence search so a minted Request
-// advances deterministically (SelectTop) when fed scripted logits.
-inline std::shared_ptr<GeneratorParams> MakeGreedyParams(const Model& model) {
-  auto params = CreateGeneratorParams(model);
-  params->search.max_length = model.config_->model.context_length;
-  params->search.num_beams = 1;
-  params->search.batch_size = 1;
-  params->search.do_sample = false;
-  return params;
 }
 
 inline void PrepareRequestStep(const std::shared_ptr<Model>& model,
@@ -102,38 +105,56 @@ inline void PrepareRequestStep(const std::shared_ptr<Model>& model,
   static_cast<void>(ScheduledRequests{plan, model, nullptr, nullptr});
 }
 
-// Creates an Engine-owned Request from a frozen snapshot of `params`. Configuration changes must be
-// made before this call.
+// Swaps in an alternative scoring device for the lifetime of the guard. Requests derive their
+// search from the model, so this is how a test injects a failing or recording Search without any
+// production seam. Every Request minted while the guard is live shares the substitute device.
+class ScopedScoringDevice {
+ public:
+  ScopedScoringDevice(Model& model, DeviceInterface& device)
+      : model_{model}, original_{model.p_device_scoring_} {
+    model_.p_device_scoring_ = &device;
+  }
+  ScopedScoringDevice(const ScopedScoringDevice&) = delete;
+  ScopedScoringDevice& operator=(const ScopedScoringDevice&) = delete;
+  ~ScopedScoringDevice() { model_.p_device_scoring_ = original_; }
+
+ private:
+  Model& model_;
+  DeviceInterface* original_;
+};
+
+// Creates an Engine-owned Request. The Engine derives its search from the model, so the only
+// resident-session knob is the session token limit.
 inline std::shared_ptr<Request> CreateEngineRequest(
-    const std::shared_ptr<Engine>& engine,
-    const GeneratorParams& params) {
-  return engine->CreateRequest(params);
+    const std::shared_ptr<Engine>& engine) {
+  return engine->CreateRequest();
 }
 
 inline std::shared_ptr<Request> CreateEngineRequest(
     const std::shared_ptr<Engine>& engine,
-    const Model& model) {
-  auto params = MakeGreedyParams(model);
-  return CreateEngineRequest(engine, *params);
+    size_t max_session_tokens) {
+  RequestOptions options;
+  options.max_session_tokens = max_session_tokens;
+  return engine->CreateRequest(options);
 }
 
 // Creates an Engine-owned Request and begins its first turn, leaving it Assigned and queued.
 inline std::shared_ptr<Request> CreateRequestWithPrompt(
     const std::shared_ptr<Engine>& engine,
-    const GeneratorParams& params,
     std::span<const int32_t> prompt_tokens) {
-  auto request = CreateEngineRequest(engine, params);
+  auto request = CreateEngineRequest(engine);
   request->BeginTurn(prompt_tokens);
   return request;
 }
 
 inline std::shared_ptr<Request> CreateRequestWithPrompt(
     const std::shared_ptr<Engine>& engine,
-    const Model& model,
-    std::span<const int32_t> prompt_tokens) {
-  auto params = MakeGreedyParams(model);
-  auto request = CreateEngineRequest(engine, *params);
-  request->BeginTurn(prompt_tokens);
+    std::span<const int32_t> prompt_tokens,
+    const TurnOptions& turn_options) {
+  auto request = CreateEngineRequest(engine);
+  TurnOptions options = turn_options;
+  options.request = request;
+  request->BeginTurn(prompt_tokens, options);
   return request;
 }
 

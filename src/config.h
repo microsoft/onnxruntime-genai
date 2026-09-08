@@ -550,12 +550,14 @@ struct Config {
       } outputs;
     } mtp;
 
-    // DFlash 2 block-drafter metadata. Unlike MTP the drafter is not decoder-shaped: it reads the
-    // main model's auxiliary hidden states, predicts a whole block of tokens at once, and returns
-    // a candidate lattice (top-k ids per slot plus the pairwise edge scores) that the engine walks
-    // greedily. The Engine drives its session directly rather than through a Model.
+    // DFlash 2/DSpark block-drafter metadata. Unlike MTP the drafter is not decoder-shaped: it
+    // reads the main model's auxiliary hidden states, predicts a whole block of tokens at once,
+    // and returns a candidate lattice that the Engine walks greedily. model.dspark is a config
+    // alias for this shared runtime.
     struct Dflash2 {
       std::string filename;  // e.g. "dflash2.onnx"
+      bool is_dspark{};      // True when parsed from the model.dspark alias.
+      std::optional<bool> configured_alias_is_dspark;
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
       std::vector<SharedInitializer> shared_initializers;
@@ -563,8 +565,8 @@ struct Config {
       int num_hidden_layers{};
       int num_key_value_heads{};
       int head_size{};
-      int block_size{};        // Query rows per request: the anchor token plus one mask per draft.
-      int num_draft_tokens{};  // block_size - 1
+      int block_size{};        // Query rows per request.
+      int num_draft_tokens{};  // DFlash 2: block_size - 1; DSpark: block_size.
       int selector_top_k{};
       int mask_token_id{};
       int sliding_window{-1};

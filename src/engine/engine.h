@@ -57,6 +57,10 @@ struct EngineEvent {
   int32_t token{};
   GenerationFinishReason finish_reason{GenerationFinishReason::None};
   EngineErrorCode error_code{EngineErrorCode::None};
+  // Caller-facing index into the turn's stop-string list, valid only when finish_reason ==
+  // StopString. -1 for every other event, including a cancellation or fatal failure that replaces
+  // an undelivered result.
+  int32_t matched_stop_string_index{-1};
   TurnUsage usage{};
 };
 
@@ -141,11 +145,9 @@ struct Engine : std::enable_shared_from_this<Engine>,
    */
   static EngineDependencies CreateDependencies(std::shared_ptr<Model> model);
 
-  std::shared_ptr<Request> CreateRequest(const GeneratorParams& params,
-                                         size_t max_total_tokens);
-  std::shared_ptr<Request> CreateRequest(const GeneratorParams& params) {
-    return CreateRequest(
-        params, static_cast<size_t>(params.search.max_length));
+  std::shared_ptr<Request> CreateRequest(const RequestOptions& options);
+  std::shared_ptr<Request> CreateRequest() {
+    return CreateRequest(RequestOptions{});
   }
 
   /**
@@ -189,7 +191,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
 
   uint64_t BeginTurn(const std::shared_ptr<Request>& request,
                      std::span<const int32_t> tokens,
-                     std::optional<size_t> max_generated_tokens);
+                     const TurnOptions& options);
   void CloseRequest(const std::shared_ptr<Request>& request);
   bool CancelRequest(const std::shared_ptr<Request>& request, uint64_t turn_id);
 
@@ -208,10 +210,16 @@ struct Engine : std::enable_shared_from_this<Engine>,
       const EngineStepError& error,
       std::exception_ptr caught_error) noexcept;
   std::shared_ptr<Request> FindTrackedRequest(const void* request_id) const;
+  // Builds the guidance processor a turn asked for, or null when it asked for none. Fallible by
+  // design and called before any Request mutation: grammar validation, cache acquisition, and
+  // processor construction all happen here.
+  std::unique_ptr<ConstrainedLogitsProcessor> CreateTurnGuidance(
+      const TurnOptions& options) const;
   EngineEvent FailUnserviceableRequest(const void* request_id);
   void ValidateRequestCanContinue(
       const std::shared_ptr<Request>& request,
       bool allow_nonresident = false) const;
+  const std::shared_ptr<Tokenizer>& GetOrCreateStopTokenizer();
 
   struct MtpStep {
     StepPlan plan;
@@ -232,6 +240,8 @@ struct Engine : std::enable_shared_from_this<Engine>,
   // feeds are captured before Request::CommitStep clears the accepted-draft counts they depend on.
   void PrepareDflash2Feeds(const StepPlan& plan, const std::vector<RequestStepResult>& results);
   void PublishDflash2Drafts(ScheduledRequests& scheduled_requests);
+  // Accounts for a recoverable DFlash 2 failure and decides whether the drafter stays enabled.
+  void RecordDflash2Failure(std::exception_ptr error, bool contract_error);
   void RecordSpeculativeCommit(const StepPlan& plan) noexcept;
   void CloseMtpRequest(const std::shared_ptr<Request>& request);
   [[noreturn]] void HandleContinuationRestoreFailure(
@@ -248,6 +258,10 @@ struct Engine : std::enable_shared_from_this<Engine>,
   std::shared_ptr<CacheManager> cache_manager_;    // The cache manager for handling cached data.
   std::unique_ptr<Scheduler> scheduler_;           // The scheduler responsible for managing execution order.
   std::unique_ptr<ModelExecutor> model_executor_;  // The executor responsible for running the model.
+  // Lazily created on the first stop-enabled BeginTurn (the no-stop fast path never touches this).
+  // Shared by every Request's StopStringController so the tokenizer's underlying vocabulary/config
+  // is loaded once per Engine rather than once per Request.
+  std::shared_ptr<Tokenizer> stop_tokenizer_;
   // Present only when model.mtp names an auxiliary paged draft head. These are constructed with
   // the Engine so both cache pools share one memory budget; draft orchestration is added separately.
   std::shared_ptr<DecoderOnly_Model> mtp_model_;

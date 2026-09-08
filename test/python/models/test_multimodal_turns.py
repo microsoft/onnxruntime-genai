@@ -331,9 +331,10 @@ def test_image_response_text_response_image_response(model_factory, family):
 
 
 @pytest.mark.parametrize("family", FAMILIES)
-def test_initial_text_response_then_image(model_factory, family):
+@pytest.mark.parametrize("chunk_size", [0, 2], ids=["unchunked", "chunked"])
+def test_initial_text_response_then_image(model_factory, family, chunk_size):
     model = model_factory(family)
-    generator, history = _generator(model), _History(family)
+    generator, history = _generator(model, chunk_size=chunk_size), _History(family)
     history.text([2, 4, 6])
     generator.append_tokens(np.array([history.tokens], dtype=np.int32))
     _assert_prefill(generator, history, model)
@@ -364,9 +365,10 @@ def test_initial_image_inputs_can_be_staged_before_append_tokens(model_factory, 
 
 
 @pytest.mark.parametrize("family", (*FAMILIES, "llama"))
-def test_text_only_multitoken_turns_preserve_history(model_factory, family):
+@pytest.mark.parametrize("chunk_size", [0, 2], ids=["unchunked", "chunked"])
+def test_text_only_multitoken_turns_preserve_history(model_factory, family, chunk_size):
     model = model_factory(family)
-    generator, history = _generator(model), _History(family)
+    generator, history = _generator(model, chunk_size=chunk_size), _History(family)
     for text in ([2, 3, 4], [5, 6, 7, 8], [9, 10]):
         history.text(text)
         generator.append_tokens(np.array([text], dtype=np.int32))
@@ -485,8 +487,8 @@ def test_earlier_pixels_remain_observable_after_later_image(model_factory, famil
     assert not np.array_equal(*results)
 
 
-@pytest.mark.parametrize("family", ("phi3v", "mistral3"))
-def test_chunked_later_image_prefill_matches_full_prefix(model_factory, family):
+@pytest.mark.parametrize("family", FAMILIES)
+def test_later_image_prefill_with_chunk_size_matches_full_prefix(model_factory, family):
     model = model_factory(family)
     generator, history = _generator(model, chunk_size=2), _History(family)
     for value in (2, 8, 14):

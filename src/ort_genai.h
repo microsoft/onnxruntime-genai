@@ -985,6 +985,17 @@ struct OgaEngineEvent : OgaAbstract {
     return value;
   }
 
+  /** Index into the turn's stop-string list that completed a match, or std::nullopt unless
+   *  FinishReason() == OgaFinishReason_StopString. */
+  std::optional<int32_t> MatchedStopStringIndex() const {
+    int32_t value{};
+    OgaCheckResult(OgaEngineEventGetMatchedStopStringIndex(this, &value));
+    if (value < 0) {
+      return std::nullopt;
+    }
+    return value;
+  }
+
   OgaErrorCode ErrorCode() const {
     OgaErrorCode value{};
     OgaCheckResult(OgaEngineEventGetErrorCode(this, &value));
@@ -1027,6 +1038,8 @@ struct OgaRequestOptions : OgaAbstract {
     return std::unique_ptr<OgaRequestOptions>(options);
   }
 
+  /** Total tokens (prompt plus generated, across every Turn) the Request may reach. Zero restores
+   *  the model-configured search.max_length, which is also the ceiling for any explicit value. */
   void SetMaxSessionTokens(uint64_t value) {
     OgaCheckResult(OgaRequestOptionsSetMaxSessionTokens(this, value));
   }
@@ -1043,36 +1056,68 @@ struct OgaTurnOptions : OgaAbstract {
     return std::unique_ptr<OgaTurnOptions>(options);
   }
 
+  /** Caps the tokens this Turn generates. Zero unsets the cap. */
   void SetMaxGeneratedTokens(uint64_t value) {
     OgaCheckResult(OgaTurnOptionsSetMaxGeneratedTokens(this, value));
   }
-  /** Reserved for future use; currently throws a not-implemented error. */
+  /** Masks end-of-sequence until this Turn has generated `value` tokens. Zero unsets it. */
+  void SetMinGeneratedTokens(uint64_t value) {
+    OgaCheckResult(OgaTurnOptionsSetMinGeneratedTokens(this, value));
+  }
+  /** Selects random sampling (true) or the top logit (false) for this Turn. */
+  void SetDoSample(bool value) {
+    OgaCheckResult(OgaTurnOptionsSetDoSample(this, value));
+  }
+  /** Sampling temperature; zero requests top-logit selection. */
   void SetTemperature(float value) {
     OgaCheckResult(OgaTurnOptionsSetTemperature(this, value));
   }
-  /** Reserved for future use; currently throws a not-implemented error. */
+  /** Nucleus bound between 0.0 and 1.0. */
   void SetTopP(float value) {
     OgaCheckResult(OgaTurnOptionsSetTopP(this, value));
   }
-  /** Reserved for future use; currently throws a not-implemented error. */
+  /** Top-k bound; one requests top-logit selection and zero disables top-k. */
   void SetTopK(int32_t value) {
     OgaCheckResult(OgaTurnOptionsSetTopK(this, value));
   }
-  /** Reserved for future use; currently throws a not-implemented error. */
+  /** Repetition penalty; must be finite and greater than zero. */
+  void SetRepetitionPenalty(float value) {
+    OgaCheckResult(OgaTurnOptionsSetRepetitionPenalty(this, value));
+  }
+  /** Forbids repeating any n-gram of this size. Zero disables it. */
+  void SetNoRepeatNgramSize(int32_t value) {
+    OgaCheckResult(OgaTurnOptionsSetNoRepeatNgramSize(this, value));
+  }
+  /** Reseeds the Request's random streams at the start of this Turn. Zero is a valid seed. */
   void SetSeed(uint64_t value) {
     OgaCheckResult(OgaTurnOptionsSetSeed(this, value));
   }
-  /** Reserved for future use; currently throws a not-implemented error. */
-  void SetStopTokenIds(const OgaSequences& values) {
-    OgaCheckResult(OgaTurnOptionsSetStopTokenIds(this, &values));
+  /** Removes a pending reseed, continuing the Request's existing random streams. */
+  void ClearSeed() {
+    OgaCheckResult(OgaTurnOptionsClearSeed(this));
   }
-  /** Reserved for future use; currently throws a not-implemented error. */
+  /** Copies stop_strings for this turn immediately; reusing or destroying it afterward cannot
+   *  affect these options. An empty array (zero entries) clears/disables stop strings; this is
+   *  distinct from a nonempty array containing an empty string member, which is invalid. Every
+   *  entry in a nonempty array must itself be a nonempty, valid UTF-8 string, and the configuration
+   *  as a whole may contain at most 16 entries totaling at most 16 KiB. Matching is exact (no
+   *  normalization/trimming/case folding) against only the text this Engine Request generates
+   *  during the turn. */
   void SetStopStrings(const OgaStringArray& values) {
     OgaCheckResult(OgaTurnOptionsSetStopStrings(this, &values));
   }
-  /** Reserved for future use; currently throws a not-implemented error. */
+  /** Constrains this Turn's output to a grammar ("json_schema", "regex", or "lark_grammar"),
+   *  copying both strings immediately. Guidance is strictly Turn-scoped. */
   void SetGuidance(const char* type, const char* data) {
     OgaCheckResult(OgaTurnOptionsSetGuidance(this, type, data));
+  }
+  /** Removes the configured grammar, so the Turn is unguided. */
+  void ClearGuidance() {
+    OgaCheckResult(OgaTurnOptionsClearGuidance(this));
+  }
+  /** Restores every Turn option to its unset state. */
+  void Reset() {
+    OgaCheckResult(OgaTurnOptionsReset(this));
   }
 
   static void operator delete(void* p) {
@@ -1155,10 +1200,9 @@ struct OgaEngine : OgaAbstract {
   }
 
   std::unique_ptr<OgaRequest> CreateRequest(
-      const OgaGeneratorParams& params,
       const OgaRequestOptions* options = nullptr) {
     OgaRequest* request{};
-    OgaCheckResult(OgaEngineCreateRequest(this, &params, options, &request));
+    OgaCheckResult(OgaEngineCreateRequest(this, options, &request));
     return std::unique_ptr<OgaRequest>(request);
   }
 

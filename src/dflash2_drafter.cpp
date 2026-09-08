@@ -7,10 +7,12 @@
 #include "models/io/kv_cache.h"
 
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <numeric>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <utility>
 
 namespace Generators {
@@ -100,10 +102,6 @@ void RequireTensor(const ModelStateMetadata& metadata, const std::string& name,
   }
 }
 
-bool DimensionMatches(int64_t actual, int expected) {
-  return actual < 0 || actual == expected;
-}
-
 }  // namespace
 
 size_t Dflash2DraftWidth(size_t capability_limit, size_t configured_limit,
@@ -132,8 +130,24 @@ std::unique_ptr<Config> CreateDflash2Config(const Config& config) {
       dflash2.block_size <= 1 || dflash2.num_draft_tokens <= 0 || dflash2.selector_top_k <= 0) {
     throw std::runtime_error("model.dflash2 geometry must be positive and describe a block of >1 token.");
   }
-  if (dflash2.num_draft_tokens != dflash2.block_size - 1) {
-    throw std::runtime_error("model.dflash2.num_draft_tokens must be block_size - 1.");
+  const int expected_draft_tokens = dflash2.block_size - (dflash2.is_dspark ? 0 : 1);
+  if (dflash2.num_draft_tokens != expected_draft_tokens) {
+    throw std::runtime_error(dflash2.is_dspark
+                                 ? "model.dspark.num_draft_tokens must be block_size."
+                                 : "model.dflash2.num_draft_tokens must be block_size - 1.");
+  }
+  if (!dflash2.is_dspark && dflash2.sliding_window <= 0) {
+    throw std::runtime_error("model.dflash2.sliding_window must be greater than zero.");
+  }
+  // Every non-anchor query row feeds this id straight into the drafter's embedding lookup, so an
+  // out-of-range value is either a crash or silently meaningless drafts.
+  if (config.model.vocab_size <= 0) {
+    throw std::runtime_error(
+        "model.vocab_size must be positive to validate model.dflash2.mask_token_id.");
+  }
+  if (dflash2.mask_token_id < 0 || dflash2.mask_token_id >= config.model.vocab_size) {
+    throw std::runtime_error(
+        "model.dflash2.mask_token_id must be a valid token id in [0, model.vocab_size).");
   }
   if (dflash2.run_options) {
     for (const auto& [name, value] : *dflash2.run_options) {
@@ -162,9 +176,11 @@ std::unique_ptr<Config> CreateDflash2Config(const Config& config) {
   return projected;
 }
 
-void ValidateDflash2ModelCompatibility(const Config& config,
-                                       const ModelStateMetadata& target_metadata,
-                                       const ModelStateMetadata& drafter_metadata) {
+ONNXTensorElementDataType ValidateDflash2ModelCompatibility(
+    const Config& config,
+    const ModelStateMetadata& target_metadata,
+    const ModelStateMetadata& drafter_metadata,
+    size_t paged_block_size) {
   const auto& dflash2 = config.model.dflash2;
   const auto& target_aux_output = dflash2.main_aux_hidden_states;
   if (target_aux_output.empty() || !target_metadata.HasOutput(target_aux_output)) {
@@ -180,11 +196,12 @@ void ValidateDflash2ModelCompatibility(const Config& config,
 
   const auto target_aux_shape = target_metadata.GetOutputShape(target_aux_output);
   const auto drafter_aux_shape = drafter_metadata.GetInputShape(drafter_aux_input);
-  if (target_aux_shape.size() != 2 || target_aux_shape[1] <= 0 ||
-      drafter_aux_shape.size() != 2 || drafter_aux_shape[1] <= 0 ||
+  if (target_aux_shape.size() != 2 || target_aux_shape[0] >= 0 || target_aux_shape[1] <= 0 ||
+      drafter_aux_shape.size() != 2 || drafter_aux_shape[0] >= 0 || drafter_aux_shape[1] <= 0 ||
       target_aux_shape[1] != drafter_aux_shape[1]) {
     throw std::runtime_error(
-        "DFlash 2 requires matching 2-D auxiliary hidden-state tensors with a static width.");
+        "DFlash 2 requires matching 2-D auxiliary hidden-state tensors with dynamic rows and a "
+        "static width.");
   }
   if (target_metadata.GetOutputDataType(target_aux_output) !=
       drafter_metadata.GetInputDataType(drafter_aux_input)) {
@@ -193,62 +210,107 @@ void ValidateDflash2ModelCompatibility(const Config& config,
   }
 
   const auto& inputs = dflash2.inputs;
+  std::unordered_set<std::string> input_names;
   for (const auto* name : {&inputs.q_row_map, &inputs.qkv_row_map,
                            &inputs.block_row_index, &inputs.cumulative_sequence_lengths,
                            &inputs.past_sequence_lengths}) {
     RequireTensor(drafter_metadata, *name, true, Ort::TypeToTensorType<int32_t>, 1);
+    if (drafter_metadata.GetInputShape(*name)[0] >= 0 || !input_names.insert(*name).second) {
+      throw std::runtime_error(
+          "model.dflash2 packed vector inputs must have dynamic lengths and unique names.");
+    }
   }
   RequireTensor(drafter_metadata, inputs.input_ids, true,
                 Ort::TypeToTensorType<int64_t>, 1);
+  if (drafter_metadata.GetInputShape(inputs.input_ids)[0] >= 0 ||
+      !input_names.insert(inputs.input_ids).second) {
+    throw std::runtime_error(
+        "model.dflash2 input_ids must have a dynamic length and a unique name.");
+  }
   RequireTensor(drafter_metadata, inputs.block_table, true,
                 Ort::TypeToTensorType<int32_t>, 2);
+  const auto block_table_shape = drafter_metadata.GetInputShape(inputs.block_table);
+  if (block_table_shape[0] >= 0 || block_table_shape[1] >= 0 ||
+      !input_names.insert(inputs.block_table).second) {
+    throw std::runtime_error(
+        "model.dflash2 block_table must have two dynamic dimensions and a unique name.");
+  }
   RequireTensor(drafter_metadata, inputs.attention_metadata, true,
                 Ort::TypeToTensorType<int32_t>, 1);
   const auto metadata_shape = drafter_metadata.GetInputShape(inputs.attention_metadata);
-  if (!DimensionMatches(metadata_shape[0], 3)) {
-    throw std::runtime_error("model.dflash2 attention_metadata must contain three values.");
+  if (metadata_shape[0] != 3 || !input_names.insert(inputs.attention_metadata).second) {
+    throw std::runtime_error(
+        "model.dflash2 attention_metadata must contain three values and have a unique name.");
   }
-
-  RequireTensor(drafter_metadata, dflash2.outputs.candidate_ids, false,
-                Ort::TypeToTensorType<int32_t>, 3);
-  RequireTensor(drafter_metadata, dflash2.outputs.scores, false,
-                Ort::TypeToTensorType<float>, 4);
-  const auto candidate_shape = drafter_metadata.GetOutputShape(dflash2.outputs.candidate_ids);
-  const auto scores_shape = drafter_metadata.GetOutputShape(dflash2.outputs.scores);
-  if (!DimensionMatches(candidate_shape[1], dflash2.num_draft_tokens) ||
-      !DimensionMatches(candidate_shape[2], dflash2.selector_top_k) ||
-      !DimensionMatches(scores_shape[1], dflash2.num_draft_tokens) ||
-      !DimensionMatches(scores_shape[2], dflash2.selector_top_k) ||
-      !DimensionMatches(scores_shape[3], dflash2.selector_top_k)) {
-    throw std::runtime_error("model.dflash2 selector outputs do not match the configured geometry.");
+  if (!input_names.insert(inputs.aux_hidden_states).second) {
+    throw std::runtime_error("model.dflash2 input names must be unique.");
   }
 
   ONNXTensorElementDataType cache_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
+  std::unordered_set<std::string> cache_output_names;
   for (int layer = 0; layer < dflash2.num_hidden_layers; ++layer) {
-    for (const auto [input_pattern, output_pattern] : {
-             std::pair{&inputs.past_key_names, &dflash2.outputs.present_key_names},
-             std::pair{&inputs.past_value_names, &dflash2.outputs.present_value_names}}) {
-      const auto input_name = ComposeKeyValueName(*input_pattern, layer);
-      const auto output_name = ComposeKeyValueName(*output_pattern, layer);
-      if (input_name.empty() || !drafter_metadata.HasInput(input_name) ||
-          output_name.empty() || !drafter_metadata.HasOutput(output_name)) {
-        throw std::runtime_error("model.dflash2 cache input or output is missing.");
+    const std::array<std::pair<std::string, std::string>, 2> cache_names{
+        std::pair{ComposeKeyValueName(dflash2.inputs.past_key_names, layer),
+                  ComposeKeyValueName(dflash2.outputs.present_key_names, layer)},
+        std::pair{ComposeKeyValueName(dflash2.inputs.past_value_names, layer),
+                  ComposeKeyValueName(dflash2.outputs.present_value_names, layer)}};
+    for (const auto& [input_name, output_name] : cache_names) {
+      if (!input_names.insert(input_name).second ||
+          !cache_output_names.insert(output_name).second) {
+        throw std::runtime_error("DFlash 2 cache input and output names must be unique.");
+      }
+      if (!drafter_metadata.HasInput(input_name) || !drafter_metadata.HasOutput(output_name)) {
+        throw std::runtime_error("DFlash 2 requires every configured cache input and output.");
+      }
+      const auto input_shape = drafter_metadata.GetInputShape(input_name);
+      const auto output_shape = drafter_metadata.GetOutputShape(output_name);
+      const auto valid_shape = [&](const std::vector<int64_t>& shape) {
+        return shape.size() == 4 && shape[0] < 0 &&
+               shape[1] == static_cast<int64_t>(paged_block_size) &&
+               shape[2] == dflash2.num_key_value_heads && shape[3] == dflash2.head_size;
+      };
+      if (!valid_shape(input_shape) || !valid_shape(output_shape) || input_shape != output_shape) {
+        throw std::runtime_error(
+            "DFlash 2 cache tensors must have matching 4-D paged-cache geometry.");
       }
       const auto input_type = drafter_metadata.GetInputDataType(input_name);
       const auto output_type = drafter_metadata.GetOutputDataType(output_name);
-      const auto input_shape = drafter_metadata.GetInputShape(input_name);
-      const auto output_shape = drafter_metadata.GetOutputShape(output_name);
-      if (input_shape.size() != 4 || output_shape.size() != 4 || input_type != output_type ||
+      const bool supported_type = input_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
+                                  input_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16 ||
+                                  input_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16;
+      if (input_type != output_type ||
           (cache_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED && input_type != cache_type) ||
-          !DimensionMatches(input_shape[2], dflash2.num_key_value_heads) ||
-          !DimensionMatches(input_shape[3], dflash2.head_size) ||
-          !DimensionMatches(output_shape[2], dflash2.num_key_value_heads) ||
-          !DimensionMatches(output_shape[3], dflash2.head_size)) {
-        throw std::runtime_error("model.dflash2 cache tensors do not match the configured geometry.");
+          !supported_type) {
+        throw std::runtime_error(
+            "DFlash 2 cache tensors must have one supported floating-point element type.");
       }
       cache_type = input_type;
     }
   }
+
+  const auto& candidate_ids = dflash2.outputs.candidate_ids;
+  const auto& scores = dflash2.outputs.scores;
+  if (!cache_output_names.insert(candidate_ids).second ||
+      !cache_output_names.insert(scores).second ||
+      !drafter_metadata.HasOutput(candidate_ids) || !drafter_metadata.HasOutput(scores)) {
+    throw std::runtime_error(
+        "DFlash 2 requires unique configured candidate, score, and cache outputs.");
+  }
+  const auto candidate_shape = drafter_metadata.GetOutputShape(candidate_ids);
+  const auto score_shape = drafter_metadata.GetOutputShape(scores);
+  if (drafter_metadata.GetOutputDataType(candidate_ids) != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 ||
+      candidate_shape.size() != 3 || candidate_shape[0] >= 0 ||
+      candidate_shape[1] != dflash2.num_draft_tokens ||
+      candidate_shape[2] != dflash2.selector_top_k ||
+      drafter_metadata.GetOutputDataType(scores) != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
+      score_shape.size() != 4 || score_shape[0] >= 0 ||
+      candidate_shape[0] != score_shape[0] ||
+      score_shape[1] != dflash2.num_draft_tokens ||
+      score_shape[2] != dflash2.selector_top_k || score_shape[3] != dflash2.selector_top_k) {
+    throw std::runtime_error(
+        "DFlash 2 candidate and score outputs do not match the configured lattice geometry.");
+  }
+  return cache_type;
 }
 
 Dflash2Model::Dflash2Model(std::unique_ptr<Config> config, OrtEnv& ort_env)
@@ -261,16 +323,28 @@ std::unique_ptr<State> Dflash2Model::CreateState(DeviceSpan<int32_t>, const Gene
   throw std::logic_error("The DFlash 2 drafter is driven by the Engine and has no State.");
 }
 
-size_t Dflash2Drafter::PoolBlocks(const Config& config, size_t paged_block_size,
-                                  size_t max_batch_size) {
+size_t Dflash2Drafter::BytesPerBlock(const Config& config, size_t paged_block_size,
+                                     ONNXTensorElementDataType cache_type) {
   const auto& dflash2 = config.model.dflash2;
   if (dflash2.filename.empty()) {
     return 0;
   }
-  if (dflash2.sliding_window <= 0) {
-    throw std::runtime_error(
-        "The Engine-hosted DFlash 2 drafter requires a sliding window; a full-attention drafter "
-        "would need a cache as large as the target's.");
+  size_t elements = CheckedMultiply(size_t{2}, static_cast<size_t>(dflash2.num_hidden_layers),
+                                    "DFlash 2 cache elements");
+  elements = CheckedMultiply(elements, paged_block_size, "DFlash 2 cache elements");
+  elements = CheckedMultiply(elements, static_cast<size_t>(dflash2.num_key_value_heads),
+                             "DFlash 2 cache elements");
+  elements = CheckedMultiply(elements, static_cast<size_t>(dflash2.head_size),
+                             "DFlash 2 cache elements");
+  return CheckedMultiply(elements, Ort::SizeOf(cache_type), "DFlash 2 cache bytes");
+}
+
+size_t Dflash2Drafter::PoolBlocks(const Config& config, size_t paged_block_size,
+                                  size_t max_batch_size) {
+  const auto& dflash2 = config.model.dflash2;
+  if (dflash2.filename.empty() || dflash2.sliding_window <= 0) {
+    // Full attention is sized against the target's block count through BytesPerBlock().
+    return 0;
   }
   if (paged_block_size == 0) {
     throw std::runtime_error("The DFlash 2 paged cache block size must be positive.");
@@ -289,15 +363,43 @@ size_t Dflash2Drafter::PoolBlocks(const Config& config, size_t paged_block_size,
                          "DFlash 2 cache block count");
 }
 
+size_t Dflash2Drafter::FullAttentionPoolBlocks(size_t target_blocks, size_t paged_block_size,
+                                               size_t query_block_size,
+                                               size_t max_batch_size) {
+  if (paged_block_size == 0 || query_block_size == 0) {
+    throw std::runtime_error("DFlash 2 block sizes must be positive.");
+  }
+  const size_t spill_blocks = (query_block_size - 1) / paged_block_size + 1;
+  return CheckedAdd(
+      target_blocks,
+      CheckedMultiply(max_batch_size, spill_blocks, "DFlash 2 query spill blocks"),
+      "DFlash 2 full-attention cache pool blocks");
+}
+
+size_t Dflash2Drafter::FullAttentionReservedBytes(size_t paged_block_size,
+                                                  size_t query_block_size,
+                                                  size_t max_batch_size,
+                                                  size_t bytes_per_block) {
+  const size_t spill_blocks = FullAttentionPoolBlocks(
+      0, paged_block_size, query_block_size, max_batch_size);
+  return CheckedMultiply(spill_blocks, bytes_per_block,
+                         "DFlash 2 query spill bytes");
+}
+
 Dflash2Drafter::Dflash2Drafter(std::shared_ptr<Dflash2Model> model, size_t paged_block_size,
-                               size_t num_blocks)
+                               size_t num_blocks, size_t max_requests)
     : model_{std::move(model)},
       config_{model_->config_->model.dflash2},
       paged_block_size_{paged_block_size},
-      num_blocks_{num_blocks} {
-  if (paged_block_size_ == 0 || num_blocks_ == 0) {
+      num_blocks_{num_blocks},
+      max_requests_{max_requests} {
+  if (paged_block_size_ == 0 || num_blocks_ == 0 || max_requests_ == 0) {
     throw std::runtime_error("The DFlash 2 drafter needs a non-empty paged cache pool.");
   }
+  if (num_blocks_ > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+    throw std::runtime_error("The DFlash 2 drafter cache exceeds the int32 block-id range.");
+  }
+  query_spill_blocks_ = (static_cast<size_t>(config_.block_size) - 1) / paged_block_size_ + 1;
   if (config_.sliding_window > 0) {
     // Positions older than this are masked out of every query row, so they are never ingested and
     // the ring may alias them.
@@ -330,8 +432,37 @@ Dflash2Drafter::Dflash2Drafter(std::shared_ptr<Dflash2Model> model, size_t paged
       }
     }
   }
-  // Proposal tensors are rebuilt for every packed batch, so their addresses are not capturable.
+  // Proposal tensors keep a stable address but not a stable shape, so they are not capturable.
   run_options_->AddConfigEntry("gpu_graph_id", "-1");
+}
+
+Tensor& Dflash2StepTensor(std::unique_ptr<Tensor>& slot, DeviceInterface* device,
+                          ONNXTensorElementDataType type, const std::vector<int64_t>& shape) {
+  size_t elements = 1;
+  for (const int64_t dimension : shape) {
+    elements = CheckedMultiply(elements, static_cast<size_t>(dimension), "DFlash 2 proposal tensor");
+  }
+  const size_t bytes = CheckedMultiply(elements, Ort::SizeOf(type), "DFlash 2 proposal tensor");
+  // A static Tensor rejects a shape larger than the buffer it already owns, and it keeps the element
+  // type it was constructed with, so either one changing has to start a new buffer. Every other step
+  // reshapes a view over the buffer it kept.
+  size_t capacity = bytes;
+  if (!slot || slot->type_ != type || slot->bytes_ < bytes) {
+    // A full-attention drafter's block table gains a column every `paged_block_size` committed
+    // tokens, so sizing a new buffer to exactly this step's shape would allocate again a few steps
+    // later, forever. Doubling amortizes that to O(log positions) allocations per request.
+    const size_t previous_bytes = slot ? slot->bytes_ : 0;
+    if (previous_bytes <= std::numeric_limits<size_t>::max() / 2) {
+      capacity = std::max(bytes, previous_bytes * 2);
+    }
+    slot = std::make_unique<Tensor>(device, type);
+  }
+  slot->CreateTensor(shape, /*make_static=*/true, std::max<size_t>(capacity, 1));
+  return *slot;
+}
+
+bool Dflash2CanJoin(bool draft_eligible, size_t first_position) noexcept {
+  return draft_eligible && first_position == 0;
 }
 
 void Dflash2Drafter::AllocateCache() {
@@ -359,12 +490,11 @@ bool Dflash2Drafter::Admit(const Feed& feed) {
   if (requests_.find(feed.request) != requests_.end()) {
     return true;
   }
-  // The drafter cannot backfill K/V for context whose auxiliary hidden states have already been
-  // consumed, so a request can only join from the start of its sequence. Requests that arrive when
-  // the ring pool is full decode without DFlash 2 drafts instead of taking the whole drafter down.
-  if (feed.first_position != 0) {
+  if (!Dflash2CanJoin(feed.draft_eligible, feed.first_position)) {
     return false;
   }
+  // Requests that arrive when the ring pool is full decode without DFlash 2 drafts instead of
+  // taking the whole drafter down.
   if (ring_blocks_ != 0) {
     if (free_blocks_.size() < ring_blocks_) {
       ++admission_misses_;
@@ -374,7 +504,12 @@ bool Dflash2Drafter::Admit(const Feed& feed) {
     EnsureBlocks(requests_[feed.request], 0);
     return true;
   }
-  if (free_blocks_.empty()) {
+  // A full-attention pool only mirrors the target's blocks plus one query-block spill per sized
+  // request, and requests that are resident but idle keep both. Admitting past that bound would
+  // let a later step exhaust the pool mid-proposal, which fails the whole drafter rather than one
+  // request, so refuse here the way the windowed drafter refuses a ring.
+  if (requests_.size() >= max_requests_ || free_blocks_.size() < query_spill_blocks_) {
+    ++admission_misses_;
     return false;
   }
   requests_.emplace(feed.request, RequestState{});
@@ -402,11 +537,18 @@ void Dflash2Drafter::Release(const Request* request) {
   requests_.erase(entry);
 }
 
-void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> feeds,
+void Dflash2Drafter::ReleaseAll() {
+  for (const auto& [request, state] : requests_) {
+    free_blocks_.insert(free_blocks_.end(), state.blocks.begin(), state.blocks.end());
+  }
+  requests_.clear();
+}
+
+bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> feeds,
                              std::vector<std::vector<int32_t>>& drafts) {
   drafts.assign(feeds.size(), {});
   if (feeds.empty()) {
-    return;
+    return false;
   }
 
   const size_t block_size = static_cast<size_t>(config_.block_size);
@@ -422,7 +564,7 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     }
   }
   if (served.empty()) {
-    return;
+    return false;
   }
 
   // Batch layout. Every served feed contributes its context rows so the drafter cache never
@@ -548,23 +690,19 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   const size_t num_tokens = layout.q_row_map.size();
   auto device = model_->p_device_inputs_;
 
-  auto make = [&](ONNXTensorElementDataType type, std::vector<int64_t> shape) {
-    auto tensor = std::make_unique<Tensor>(device, type);
-    tensor->CreateTensor(shape);
-    return tensor;
-  };
   auto fill_int32 = [](Tensor& tensor, const std::vector<int32_t>& values) {
     auto span = tensor.GetDeviceSpan<int32_t>();
     std::copy(values.begin(), values.end(), span.CpuSpan().begin());
     span.CopyCpuToDevice();
   };
 
-  auto packed_aux = make(aux_type_, {static_cast<int64_t>(num_ctx_rows),
-                                     static_cast<int64_t>(aux_hidden_size_)});
+  auto& packed_aux = Dflash2StepTensor(step_tensors_.packed_aux, device, aux_type_,
+                                       {static_cast<int64_t>(num_ctx_rows),
+                                        static_cast<int64_t>(aux_hidden_size_)});
   const size_t aux_row_bytes =
       CheckedMultiply(aux_hidden_size_, Ort::SizeOf(aux_type_), "DFlash 2 auxiliary row bytes");
   auto source_bytes = aux_hidden_states.GetByteSpan();
-  auto destination_bytes = packed_aux->GetByteSpan();
+  auto destination_bytes = packed_aux.GetByteSpan();
   size_t destination_row = 0;
   for (const size_t i : served) {
     if (ingest_count[i] == 0) {
@@ -576,9 +714,10 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     destination_row += ingest_count[i];
   }
 
-  auto input_ids = make(Ort::TypeToTensorType<int64_t>, {static_cast<int64_t>(num_block_rows)});
+  auto& input_ids = Dflash2StepTensor(step_tensors_.input_ids, device, Ort::TypeToTensorType<int64_t>,
+                                      {static_cast<int64_t>(num_block_rows)});
   {
-    auto span = input_ids->GetDeviceSpan<int64_t>();
+    auto span = input_ids.GetDeviceSpan<int64_t>();
     auto cpu = span.CpuSpan();
     for (size_t slot = 0; slot < block_feed_indices.size(); ++slot) {
       const auto& feed = feeds[block_feed_indices[slot]];
@@ -590,43 +729,52 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     span.CopyCpuToDevice();
   }
 
-  auto q_row_map = make(Ort::TypeToTensorType<int32_t>, {static_cast<int64_t>(num_tokens)});
-  fill_int32(*q_row_map, layout.q_row_map);
-  auto qkv_row_map = make(Ort::TypeToTensorType<int32_t>, {static_cast<int64_t>(num_tokens)});
-  fill_int32(*qkv_row_map, layout.qkv_row_map);
-  auto block_row_index = make(Ort::TypeToTensorType<int32_t>, {static_cast<int64_t>(num_block_rows)});
-  fill_int32(*block_row_index, layout.block_row_index);
-  auto cumulative = make(Ort::TypeToTensorType<int32_t>, {static_cast<int64_t>(served.size() + 1)});
-  fill_int32(*cumulative, layout.cumulative_sequence_lengths);
-  auto past_lengths = make(Ort::TypeToTensorType<int32_t>, {static_cast<int64_t>(served.size())});
-  fill_int32(*past_lengths, layout.past_sequence_lengths);
+  constexpr auto int32_type = Ort::TypeToTensorType<int32_t>;
+  auto& q_row_map = Dflash2StepTensor(step_tensors_.q_row_map, device, int32_type,
+                                      {static_cast<int64_t>(num_tokens)});
+  fill_int32(q_row_map, layout.q_row_map);
+  auto& qkv_row_map = Dflash2StepTensor(step_tensors_.qkv_row_map, device, int32_type,
+                                        {static_cast<int64_t>(num_tokens)});
+  fill_int32(qkv_row_map, layout.qkv_row_map);
+  auto& block_row_index = Dflash2StepTensor(step_tensors_.block_row_index, device, int32_type,
+                                            {static_cast<int64_t>(num_block_rows)});
+  fill_int32(block_row_index, layout.block_row_index);
+  auto& cumulative = Dflash2StepTensor(step_tensors_.cumulative_sequence_lengths, device, int32_type,
+                                       {static_cast<int64_t>(served.size() + 1)});
+  fill_int32(cumulative, layout.cumulative_sequence_lengths);
+  auto& past_lengths = Dflash2StepTensor(step_tensors_.past_sequence_lengths, device, int32_type,
+                                         {static_cast<int64_t>(served.size())});
+  fill_int32(past_lengths, layout.past_sequence_lengths);
 
-  auto block_table = make(Ort::TypeToTensorType<int32_t>,
-                          {static_cast<int64_t>(served.size()), static_cast<int64_t>(max_blocks)});
+  auto& block_table = Dflash2StepTensor(
+      step_tensors_.block_table, device, int32_type,
+      {static_cast<int64_t>(served.size()), static_cast<int64_t>(max_blocks)});
   {
-    auto span = block_table->GetDeviceSpan<int32_t>();
+    auto span = block_table.GetDeviceSpan<int32_t>();
     auto cpu = span.CpuSpan();
-    std::fill(cpu.begin(), cpu.end(), int32_t{-1});
     for (size_t row = 0; row < served.size(); ++row) {
       const auto& blocks = requests_[feeds[served[row]].request].blocks;
+      auto columns = cpu.subspan(row * max_blocks, max_blocks);
       if (ring_blocks_ == 0) {
-        std::copy(blocks.begin(), blocks.end(), cpu.begin() + row * max_blocks);
+        const size_t used = std::min(blocks.size(), max_blocks);
+        std::copy_n(blocks.begin(), used, columns.begin());
+        std::fill(columns.begin() + used, columns.end(), int32_t{-1});
         continue;
       }
       // A windowed drafter repeats its ring across every column: column j holds the block that
-      // owns position j * block_size, which is ring[j % ring_blocks].
+      // owns position j * block_size, which is ring[j % ring_blocks]. Every column is written, so
+      // the reused buffer never exposes a stale id.
       for (size_t column = 0; column < max_blocks; ++column) {
-        cpu[row * max_blocks + column] = blocks[column % blocks.size()];
+        columns[column] = blocks[column % blocks.size()];
       }
     }
     span.CopyCpuToDevice();
   }
 
-  auto metadata = std::make_unique<Tensor>(GetDeviceInterface(DeviceType::CPU),
-                                           Ort::TypeToTensorType<int32_t>);
-  metadata->CreateTensor(std::vector<int64_t>{3});
+  auto& metadata = Dflash2StepTensor(step_tensors_.attention_metadata, GetDeviceInterface(DeviceType::CPU),
+                                     int32_type, {3});
   {
-    auto span = metadata->GetDeviceSpan<int32_t>();
+    auto span = metadata.GetDeviceSpan<int32_t>();
     auto cpu = span.CpuSpan();
     cpu[0] = layout.max_query_len;
     cpu[1] = layout.max_kv_len;
@@ -634,12 +782,12 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   }
 
   const size_t batch = block_feed_indices.size();
-  auto candidate_ids = make(Ort::TypeToTensorType<int32_t>,
-                            {static_cast<int64_t>(batch), static_cast<int64_t>(num_spec),
-                             static_cast<int64_t>(top_k)});
-  auto scores = make(Ort::TypeToTensorType<float>,
-                     {static_cast<int64_t>(batch), static_cast<int64_t>(num_spec),
-                      static_cast<int64_t>(top_k), static_cast<int64_t>(top_k)});
+  auto& candidate_ids = Dflash2StepTensor(step_tensors_.candidate_ids, device, int32_type,
+                                          {static_cast<int64_t>(batch), static_cast<int64_t>(num_spec),
+                                           static_cast<int64_t>(top_k)});
+  auto& scores = Dflash2StepTensor(step_tensors_.scores, device, Ort::TypeToTensorType<float>,
+                                   {static_cast<int64_t>(batch), static_cast<int64_t>(num_spec),
+                                    static_cast<int64_t>(top_k), static_cast<int64_t>(top_k)});
 
   std::vector<const char*> input_names{
       config_.inputs.aux_hidden_states.c_str(), config_.inputs.input_ids.c_str(),
@@ -647,14 +795,14 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
       config_.inputs.block_row_index.c_str(), config_.inputs.cumulative_sequence_lengths.c_str(),
       config_.inputs.past_sequence_lengths.c_str(), config_.inputs.block_table.c_str(),
       config_.inputs.attention_metadata.c_str()};
-  std::vector<OrtValue*> inputs{packed_aux->GetOrtTensor(), input_ids->GetOrtTensor(),
-                                q_row_map->GetOrtTensor(), qkv_row_map->GetOrtTensor(),
-                                block_row_index->GetOrtTensor(), cumulative->GetOrtTensor(),
-                                past_lengths->GetOrtTensor(), block_table->GetOrtTensor(),
-                                metadata->GetOrtTensor()};
+  std::vector<OrtValue*> inputs{packed_aux.GetOrtTensor(), input_ids.GetOrtTensor(),
+                                q_row_map.GetOrtTensor(), qkv_row_map.GetOrtTensor(),
+                                block_row_index.GetOrtTensor(), cumulative.GetOrtTensor(),
+                                past_lengths.GetOrtTensor(), block_table.GetOrtTensor(),
+                                metadata.GetOrtTensor()};
   std::vector<const char*> output_names{config_.outputs.candidate_ids.c_str(),
                                         config_.outputs.scores.c_str()};
-  std::vector<OrtValue*> outputs{candidate_ids->GetOrtTensor(), scores->GetOrtTensor()};
+  std::vector<OrtValue*> outputs{candidate_ids.GetOrtTensor(), scores.GetOrtTensor()};
   for (size_t i = 0; i < caches_.size(); ++i) {
     input_names.push_back(cache_input_names_[i].c_str());
     inputs.push_back(caches_[i]->GetOrtTensor());
@@ -672,12 +820,12 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   }
 
   if (!drafts_wanted) {
-    return;
+    return true;
   }
 
   // The spans own the host mirrors these point into, so they must outlive the reads below.
-  auto candidate_span = candidate_ids->GetDeviceSpan<int32_t>();
-  auto scores_span = scores->GetDeviceSpan<float>();
+  auto candidate_span = candidate_ids.GetDeviceSpan<int32_t>();
+  auto scores_span = scores.GetDeviceSpan<float>();
   auto candidate_cpu = candidate_span.CopyDeviceToCpu();
   auto scores_cpu = scores_span.CopyDeviceToCpu();
   for (size_t slot = 0; slot < block_feed_indices.size(); ++slot) {
@@ -693,6 +841,7 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
       previous = best;
     }
   }
+  return true;
 }
 
 }  // namespace Generators

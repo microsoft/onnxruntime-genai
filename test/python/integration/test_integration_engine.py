@@ -72,20 +72,18 @@ def bundle(device, paged_model_path) -> _Bundle:
     return _Bundle(model=model, tokenizer=tokenizer, config=cfg, device=device)
 
 
-def _greedy_params(model: og.Model, prompt_len: int, max_new_tokens: int, min_new_tokens: int) -> og.GeneratorParams:
-    params = og.GeneratorParams(model)
-    options = {"do_sample": False, "max_length": prompt_len + max_new_tokens}
-    if min_new_tokens:
-        options["min_length"] = prompt_len + min_new_tokens
-    params.set_search_options(**options)
-    return params
-
-
-def _create_request(engine, model, prompt_tokens, max_new_tokens, sink, sinks, *, min_new_tokens=0):
-    params = _greedy_params(model, len(prompt_tokens), max_new_tokens, min_new_tokens)
-    request = engine.create_request(params)
+def _create_request(engine, prompt_tokens, max_new_tokens, sink, sinks, *, min_new_tokens=0):
+    # The session limit is resident-Request policy; the generation floor is per turn.
+    request_options = og.RequestOptions()
+    request_options.set_max_session_tokens(len(prompt_tokens) + max_new_tokens)
+    request = engine.create_request(options=request_options)
     sinks[request] = sink
-    request.begin_turn(np.asarray(prompt_tokens, dtype=np.int32))
+    turn_options = og.TurnOptions(request)
+    turn_options.set_do_sample(False)
+    turn_options.set_max_generated_tokens(max_new_tokens)
+    if min_new_tokens:
+        turn_options.set_min_generated_tokens(min_new_tokens)
+    request.begin_turn(np.asarray(prompt_tokens, dtype=np.int32), turn_options)
     return request
 
 
@@ -124,7 +122,7 @@ def _generate_isolated(model, prompt_tokens, max_new_tokens, *, min_new_tokens=0
     sink = _Sink()
     engine = og.Engine(model)
     sinks = {}
-    _create_request(engine, model, prompt_tokens, max_new_tokens, sink, sinks, min_new_tokens=min_new_tokens)
+    _create_request(engine, prompt_tokens, max_new_tokens, sink, sinks, min_new_tokens=min_new_tokens)
     _run(engine, sinks)
     del engine
     gc.collect()
@@ -183,7 +181,7 @@ def test_simultaneous_requests(bundle):
     sinks = [_Sink() for _ in _PROMPTS]
     sinks_by_request = {}
     requests = [
-        _create_request(engine, bundle.model, bundle.tokenizer.encode(p), max_new, sink, sinks_by_request)
+        _create_request(engine, bundle.tokenizer.encode(p), max_new, sink, sinks_by_request)
         for p, sink in zip(_PROMPTS, sinks, strict=True)
     ]
     assert engine.has_pending_requests()
@@ -206,7 +204,7 @@ def test_staggered_admission(bundle):
 
     sink_a = _Sink()
     sinks = {}
-    _create_request(engine, bundle.model, prompt_a, max_new, sink_a, sinks)
+    _create_request(engine, prompt_a, max_new, sink_a, sinks)
 
     for _ in range(3):
         if not engine.has_pending_requests():
@@ -217,7 +215,7 @@ def test_staggered_admission(bundle):
     assert len(sink_a.tokens) > 0, "first request produced nothing before staggered admission"
 
     sink_b = _Sink()
-    _create_request(engine, bundle.model, prompt_b, max_new, sink_b, sinks)
+    _create_request(engine, prompt_b, max_new, sink_b, sinks)
 
     _run(engine, sinks)
 
@@ -236,7 +234,7 @@ def test_isolated_matches_batched(bundle):
     sinks = {p: _Sink() for p in _PROMPTS}
     sinks_by_request = {}
     for p, sink in sinks.items():
-        _create_request(engine, bundle.model, bundle.tokenizer.encode(p), max_new, sink, sinks_by_request)
+        _create_request(engine, bundle.tokenizer.encode(p), max_new, sink, sinks_by_request)
     _run(engine, sinks_by_request)
 
     assert sinks[prompt].tokens == isolated, "batched output diverged from the isolated run"
@@ -253,8 +251,8 @@ def test_output_isolation(bundle):
     engine = og.Engine(bundle.model)
     s0, s1 = _Sink(), _Sink()
     sinks = {}
-    _create_request(engine, bundle.model, bundle.tokenizer.encode(p0), max_new, s0, sinks)
-    _create_request(engine, bundle.model, bundle.tokenizer.encode(p1), max_new, s1, sinks)
+    _create_request(engine, bundle.tokenizer.encode(p0), max_new, s0, sinks)
+    _create_request(engine, bundle.tokenizer.encode(p1), max_new, s1, sinks)
     _run(engine, sinks)
 
     assert s0.tokens == isolated0
@@ -272,14 +270,13 @@ def test_completion_isolation(bundle):
     sinks = {}
     _create_request(
         engine,
-        bundle.model,
         bundle.tokenizer.encode(short_prompt),
         short_new,
         short_sink,
         sinks,
         min_new_tokens=short_new,
     )
-    _create_request(engine, bundle.model, bundle.tokenizer.encode(long_prompt), long_new, long_sink, sinks)
+    _create_request(engine, bundle.tokenizer.encode(long_prompt), long_new, long_sink, sinks)
     _run(engine, sinks)
 
     assert len(short_sink.tokens) == short_new, "forced-length request did not stop at its bound"
@@ -329,8 +326,8 @@ def test_close_request_stops_output(bundle):
 
     sink_a, sink_b = _Sink(), _Sink()
     sinks = {}
-    request_a = _create_request(engine, bundle.model, bundle.tokenizer.encode(_PROMPTS[0]), max_new, sink_a, sinks)
-    _create_request(engine, bundle.model, sibling_prompt, max_new, sink_b, sinks)
+    request_a = _create_request(engine, bundle.tokenizer.encode(_PROMPTS[0]), max_new, sink_a, sinks)
+    _create_request(engine, sibling_prompt, max_new, sink_b, sinks)
 
     for _ in range(4):
         if not engine.has_pending_requests():
@@ -357,7 +354,7 @@ def test_engine_teardown_and_recreation(bundle):
     first = og.Engine(bundle.model)
     sink1 = _Sink()
     first_sinks = {}
-    _create_request(first, bundle.model, prompt_tokens, max_new, sink1, first_sinks)
+    _create_request(first, prompt_tokens, max_new, sink1, first_sinks)
     _run(first, first_sinks)
     assert sink1.tokens == expected
     del first
@@ -367,6 +364,6 @@ def test_engine_teardown_and_recreation(bundle):
     assert not second.has_pending_requests()
     sink2 = _Sink()
     second_sinks = {}
-    _create_request(second, bundle.model, prompt_tokens, max_new, sink2, second_sinks)
+    _create_request(second, prompt_tokens, max_new, sink2, second_sinks)
     _run(second, second_sinks)
     assert sink2.tokens == expected

@@ -130,11 +130,15 @@ Fixed state currently requires `engine.dynamic_batching`; static batching is rej
 
 ## Request lifecycle
 
-A `Request` is one sequence. Engine requests currently require:
+A `Request` is one sequence. It derives its own private search parameters from the model, so the
+single-sequence invariants are properties of the Engine rather than of a caller-supplied
+configuration:
 
-- `search.batch_size == 1`
-- `search.num_beams == 1`
-- At least one input token in every `BeginTurn()`
+- `search.batch_size` is forced to 1, because the Engine batches Requests, not rows within one.
+- `search.num_beams` is forced to 1, and a model that configures anything else is rejected at
+  Request creation instead of silently decoding one beam (see "Model configuration the Engine
+  rejects" below).
+- Every `BeginTurn()` needs at least one input token.
 
 The engine creates throughput by batching several independent requests, not by placing several sequence rows inside one request.
 
@@ -161,8 +165,10 @@ between `Run()` calls, not a cross-thread interrupt. Stale, unknown, and complet
 
 The request is already bound to its creating Engine but has no scheduler or cache membership.
 `BeginTurn()` copies the initial input, snapshots the turn options, and establishes submission
-order. Request-level generation parameters were snapshotted at creation and cannot change between
-turns. The caller does not need to keep either the input or options storage alive after the call.
+order. Resident-session policy -- the session token limit -- is fixed at creation; generation policy
+is not fixed at all, and is resolved anew for every turn from the model's search defaults plus that
+turn's explicit overrides. The caller does not need to keep either the input or options storage
+alive after the call.
 
 First-turn admission is transactional. Device input allocation, Search append, scheduler storage,
 and per-request sampler acquisition must all succeed before the new Turn is committed. The
@@ -174,13 +180,15 @@ duplicating the prompt.
 ### `Assigned`
 
 This is the queued state. A successful first or later `BeginTurn()` moves a Request here while its
-copied input waits for execution. `BeginTurn()` is rejected while already queued or active. Input must leave room for at least one generated token below the request's internal
-`max_total_tokens`.
+copied input waits for execution. `BeginTurn()` is rejected while already queued or active. Input must leave room for at least one
+generated token below the Request's `max_session_tokens`.
 
-Public `max_session_tokens` (stored internally as `max_total_tokens`) is the cumulative total
+`max_session_tokens` is the cumulative total
 sequence limit for the entire Request: the initial
 prompt, generated output, and every continuation input all count against the same limit. It defaults
-to `max_length`, cannot exceed `max_length`, and is not reset by `BeginTurn()`.
+to the model-configured `search.max_length`, cannot exceed it, and is not reset by `BeginTurn()`.
+It is the Request's one session limit: Search completion, static cache sizing, speculative bounds,
+and the `MaxSessionTokens` finish reason all read the same value.
 
 Opaque nullable `TurnOptions` are separate. Null, or setting `max_generated_tokens` to zero, means
 that no per-Turn limit applies beyond the cumulative Request limit. The current Turn counts only
@@ -189,10 +197,43 @@ input, continuation input, and the previously generated token replayed during co
 do not count. A later turn may begin whenever its input still leaves room for at least one generated
 token under the cumulative limit, and it may choose a different per-Turn limit.
 
-`OgaRequestOptions` is an opaque, reusable handle. Null options and zero
-`max_session_tokens` use the Request's snapshotted `OgaGeneratorParams.search.max_length`. That
-search value normally defaults from the model context length, but a caller may set it lower before
-Request creation. `OgaTurnOptions` is opaque and reusable; `BeginTurn()` snapshots supported values.
+`OgaRequestOptions` is an opaque, reusable handle carrying resident-session policy only. Null
+options and zero `max_session_tokens` use the model-configured `search.max_length`, which normally
+defaults from the model context length. Request creation takes no generation parameters at all: the
+Engine builds each Request's private, Model-derived search configuration itself, forcing one
+sequence and one beam.
+
+`OgaTurnOptions` is opaque and reusable and carries the whole generation policy of one turn;
+`BeginTurn()` snapshots it. See "Per-turn generation policy" below.
+
+#### Model configuration the Engine rejects
+
+Request creation validates the model configuration it is about to derive from, and rejects what it
+would otherwise have to reinterpret or silently override. Each rejection names a route the caller
+can take without editing the model directory -- overlaying the value on the `Config` before creating
+the Model:
+
+- A nonzero `search.min_length`, because it is a session-absolute floor while the Engine's minimum
+  is per turn: `OgaConfigOverlay(config, "{\"search\":{\"min_length\":0}}")`, or
+  `config.overlay('{"search": {"min_length": 0}}')` in Python, and then `min_generated_tokens` per
+  turn.
+- A `search.num_beams` other than 1, because beam search never overrides the deferred-completion
+  contract and its next tokens would never be copied back. Forcing it to one would decode something
+  the caller never asked for, so it is rejected instead:
+  `config.overlay('{"search": {"num_beams": 1}}')`, and batch across Requests.
+- A `search.max_length` of zero or less, since it is the Request's session ceiling.
+- A nonzero `search.chunk_size` when static batching is selected. Chunking is an Engine/model
+  scheduler policy, so this is rejected at Engine creation; disable it with
+  `config.overlay('{"search": {"chunk_size": 0}}')`.
+
+`search.batch_size` is deliberately not rejected. The Engine batches Requests rather than rows, so a
+wider configured batch simply means "configured for the classic Generator"; the Request derives its
+own single-row search and decodes exactly one sequence either way.
+
+The same overlay route raises the session ceiling where that is what the caller wants: because
+`max_session_tokens` cannot exceed the model-configured `search.max_length`, a model whose
+`search.max_length` is lower than the context length its cache can serve is raised with
+`config.overlay('{"search": {"max_length": <tokens>}}')` before the Model is created.
 
 ### `Active`
 
@@ -201,10 +242,19 @@ the beginning of a decode step: the token sampled by the previous step.
 
 ### `TurnComplete`
 
-The current Turn reached an end condition. A `TurnFinished` event reports `Eos`, `StopSequence`,
-`MaxGeneratedTokens`, `MaxSessionTokens`, `Cancelled`, or `Failed`, plus per-Turn usage.
-`StopSequence` is reserved until stop sequences are implemented. A generated EOS token is not
-appended to the logical sequence or emitted as a token event.
+The current Turn reached an end condition. A `TurnFinished` event reports `Eos`, `StopString`,
+`MaxGeneratedTokens`, `MaxSessionTokens`, `Cancelled`, or `Failed`, plus per-Turn usage. For the
+same generated token, precedence among the reasons Request-level classification can choose between
+is `StopString`, then `MaxGeneratedTokens`, then `MaxSessionTokens`: a token that would otherwise
+end the turn on the turn or context limit still reports `StopString` when it also completes a
+match. `Eos` sits outside that ordering: Search decides whether a sampled token is EOS and never
+appends it to a single-sequence Request's history before Request-level stop-string classification
+ever runs, so an EOS token's bytes never reach the matcher. This is not a practical gap -- GenAI
+tokenizers default to `skip_special_tokens=true` and register EOS as a special added token, so a
+real EOS token always decodes to zero bytes and could never independently complete a stop match. A
+generated EOS token is not appended to the logical sequence or emitted as a token event; a
+stop-matching token is appended, emitted, and counted like any other generated token, even though
+bytes after the match inside that token's decoded text are never trimmed from it.
 The next continuation fragment is therefore responsible for any turn-boundary tokens required by
 the model's chat template.
 
@@ -399,8 +449,9 @@ The dynamic Engine can verify a continuation together with a request's next deco
 can propose tokens before the next step with `Request::SetDraftTokens` (`OgaRequestSetDraftTokens`
 in C or `Request.set_draft_tokens` in Python). When `model.mtp` names an auxiliary draft head, the
 Engine also maintains an internal shadow Request and automatically proposes a chained greedy
-continuation after each committed target step. Alternatively, `model.dflash2` runs a block drafter
-over the target's packed auxiliary hidden states. A model cannot configure both automatic drafters.
+continuation after each committed target step. Alternatively, `model.dflash2` (or its `model.dspark`
+alias) runs a block drafter over the target's packed auxiliary hidden states. A model cannot
+configure more than one automatic drafter.
 
 Query the internal `Engine::MaxDraftTokensPerStep` capability through
 `OgaEngineMaxDraftTokensPerProposal`, `OgaEngine::MaxDraftTokensPerProposal`, or
@@ -409,13 +460,16 @@ return one logits row per packed token or that its cache/state cannot commit an 
 The reported value is a capability limit, not a guarantee that every proposed token fits the next
 step's global token budget or current cache capacity. Automatic drafters also leave room for the
 target's correction token and cap each proposal by the Request's session limit and remaining Turn
-token budget.
+token budget. The proposal width an automatic drafter aims for is model/Engine configuration
+(`model.speculative.max_draft_tokens`); it is not a public Request or Turn option.
 
 The request must already belong to the Engine, have completed prefill, and be ready to decode.
 Verification supports greedy target selection and random target sampling with a positive `top_k`;
-proposals remain deterministic. Guidance,
-repetition penalty, no-repeat-ngram processing, and active minimum-length processing are not
-supported. Passing an empty sequence clears a pending proposal.
+proposals remain deterministic. A turn that enables guidance, a `repetition_penalty` other than 1,
+no-repeat-ngram processing, or a not-yet-met minimum generated token count is not draft-eligible,
+because the verification rows do not reproduce those logits processors. Eligibility is per turn: the
+next turn that drops those options can draft again. Passing an empty sequence clears a pending
+proposal.
 
 For a decode with K scheduled drafts, the packed input is the request's one unprocessed token
 followed by the K drafts. The decoder must return K+1 logits rows for that request. Row `i` predicts
@@ -437,6 +491,12 @@ A committed decode consumes the complete proposal, including drafts omitted by b
 retryable rollback restores the request and leaves the proposal pending for retry. During commit,
 the cache reservation is narrowed from the scheduled K+1 slots to the accepted prefix plus the
 request's mandatory token; paged KV and fixed recurrent state publish at that same boundary.
+
+A proposal never outlives the turn it was made under. `Request::ReleaseTurnResources()` discards it
+at every terminal boundary -- normal completion, stop match, cancellation, and a failed turn --
+alongside that turn's stop controller, guidance cursor, and pending reseed. Eligibility is per turn,
+so a proposal produced under one turn's guidance, minimum, repetition penalty, and n-gram blocking
+can never be verified under a later turn that resolved a different policy.
 
 ### Engine-hosted MTP head: operational contract
 
@@ -468,7 +528,7 @@ request releases it as well.
 the step. A request that was prefilling, finished its turn, or has a proposal the Engine cannot
 verify is skipped for that step and picks drafting back up on its next decode step.
 
-**Seeded sampling.** `search.random_seed` reproduces output for a given decode path, not across
+**Seeded sampling.** A turn seed reproduces output for a given decode path, not across
 decode paths. A verified drafted step draws its target tokens from the Request's own host random
 stream because acceptance is sequential, while an ordinary batched step draws from the device
 sampler state. Whether drafts are admitted depends on batch composition and cache pressure, so a
@@ -556,7 +616,7 @@ If at least one request fits, the step is executable even when other requests we
 After cache planning selects the batch, each decode keeps its one-token
 contribution. Every selected prefill also keeps its provisional token, then
 prefills expand in stable order while tokens remain. A prefill contribution is
-bounded by its remaining prompt, `search.chunk_size` when configured, and
+bounded by its remaining prompt, the model-configured `search.chunk_size` when present, and
 `max_scheduled_tokens`.
 
 The scheduler recomputes cache targets and assigns each request:
@@ -751,16 +811,23 @@ Finally, the engine swaps `staged_events_` into `pending_events_`. The first eve
 
 ## Constrained decoding and tool calling
 
-Engine requests use the guidance configuration carried by their `GeneratorParams`. This allows
-concurrent requests to use different JSON schemas, regular expressions, or Lark grammars. Tool
-definitions and chat-template rendering remain application concerns; the Engine constrains the
-generated token stream but does not parse tool calls from the decoded output.
+Guidance is turn-scoped. `OgaTurnOptionsSetGuidance` supplies one grammar for the next admitted
+turn; `OgaTurnOptionsClearGuidance` and an omitted grammar both mean an unguided turn, and guidance
+is never inherited from a previous turn or from model state. Concurrent requests, and successive
+turns of one request, can therefore use different JSON schemas, regular expressions, or Lark
+grammars. Tool definitions and chat-template rendering remain application concerns; the Engine
+constrains the generated token stream but does not parse tool calls from the decoded output.
 
-Each guided request owns an independent constrained-logits processor. Its mask is applied before
-minimum-length, repetition-penalty, and no-repeat-ngram processing, matching Generator ordering.
-The processor snapshots its guidance and search configuration when the request is created, so later
-mutation of the caller-owned `GeneratorParams` cannot change an active grammar. After sampling, the
-selected token advances that request's grammar cursor.
+`Engine::BeginTurn` validates the grammar, acquires the cached compiled assets, and constructs the
+turn's processor before it mutates anything, so a malformed or unusable grammar leaves the previous
+completed turn entirely reusable. The processor is installed only at the turn-admission commit
+boundary, and every terminal path -- completion, stop match, cancellation, failure, and close --
+releases it again.
+
+Each guided turn owns an independent constrained-logits processor. Its mask is applied before
+minimum-length, repetition-penalty, and no-repeat-ngram processing. If applying the minimum would
+mask every guidance-permitted token because only configured EOS tokens remain, guidance termination
+takes precedence. After sampling, the selected token advances that turn's grammar cursor.
 
 The grammar cursor participates in the same transaction as search and paged-cache state. A step
 checkpoints it before sampling, retains the advanced cursor on commit, and restores the checkpoint
@@ -775,9 +842,319 @@ dirty cursor retries mask construction when the next step needs it. Transient su
 future-delivery failures can recover this way; an error reported by llguidance permanently poisons
 that cursor and continues to fail rather than allowing generation with a stale mask.
 
-Guidance fast-forward tokens are not currently supported by the Engine. Requests that enable them
-are rejected because each forced token would also need a corresponding model execution and paged
-KV-cache advancement inside the transaction.
+A guided turn does not accept speculative drafts, because a draft's proposals are not produced under
+the grammar; the next unguided turn is draft-eligible again. Guidance and stop strings can be
+enabled together.
+
+Guidance fast-forward tokens are not supported by the Engine: each forced token would also need a
+corresponding model execution and paged KV-cache advancement inside the transaction. The Engine
+never enables them for a Request.
+
+## Per-turn generation policy
+
+Every generation-policy value is resolved anew for each `BeginTurn()`. Nothing carries over
+implicitly: a turn that overrides nothing decodes with the model's configured defaults again, even
+directly after a turn that overrode everything.
+
+`Engine::BeginTurn` resolves the turn's `EffectiveTurnPolicy` from the model `search` defaults plus
+the fields the caller explicitly set on `TurnOptions`, forces the Engine's single-sequence
+invariants, validates the complete result, and builds the turn's fallible resources -- its stop
+controller and guidance processor -- all before it mutates the Request. Only the turn-admission
+commit boundary installs them.
+
+The per-field unset behavior is normative in "Turn options" in `docs/engine_c_api_spec.md`; it is
+not repeated here.
+
+`EffectiveTurnPolicy::IsGreedy()` is the one classification every execution path shares, so a policy
+can never be greedy for ordinary sampling and sampled for batched sampling, draft verification, or
+drafting eligibility.
+
+Under any greedy resolution, admission rejects an explicitly set scalar that contradicts it instead
+of silently selecting the top logit: a `temperature` other than 0 or 1, a nucleus `top_p` strictly
+between 0 and 1, or a `top_k` above 1. A scalar that itself requests greedy selection
+(`temperature == 0`, `top_k == 1`) or that restricts nothing (`top_k == 0`, `top_p` of 0 or 1,
+`temperature` of 1) is honored exactly as written, in any combination: `do_sample = false` with
+`top_k = 1` is accepted, while `do_sample = false` with `temperature = 0.7`, or `top_k = 1` with
+`top_p = 0.9`, is not. The error names every condition that made the policy greedy and every scalar
+that contradicted it.
+
+An explicit `do_sample = true` that a model default silently overrides is rejected separately,
+because it is the one greedy resolution the caller cannot have meant. A model whose
+`search.top_k` is 1 or whose `search.temperature` is 0 keeps every turn greedy, and the caller
+cannot see those defaults through `TurnOptions`, so the error names the model-supplied cause and the
+turn must override that exact field -- a `top_k` above 1, or a nonzero `temperature` -- to sample.
+A turn that spells greedy out itself is unaffected: `do_sample = true` with the turn's own
+`top_k = 1` or `temperature = 0` is the caller's own choice and is accepted.
+
+A sampled resolution requires a positive `top_k` or a positive `top_p`; both zero is rejected,
+because it selects from nothing and is not the same request as greedy selection.
+A sampled resolution also rejects a `top_k` greater than the model vocabulary size. If the resolved
+value came from the model's `search.top_k`, the error names that model default so the turn can
+override it explicitly.
+
+`no_repeat_ngram_size` is only implemented by the CPU search, so a nonzero value is rejected at
+admission by a core-owned capability predicate keyed by the scoring device type, rather than
+throwing after the model has already run. A `repetition_penalty` other than 1, a nonzero
+`no_repeat_ngram_size`, or an unmet minimum also disables speculative drafting for that turn,
+because verification rows do not reproduce those logits processors.
+
+`min_generated_tokens` masks the end-of-sequence token until the turn has generated that many
+tokens. Admission rejects a minimum that exceeds the turn maximum or does not fit between the
+turn's prompt length and the Request's session limit. The absolute sequence floor `ApplyMinLength`
+uses is derived from the committed turn's prompt length plus its minimum rather than stored, so it
+cannot disagree with the policy the turn actually resolved to. An extendable accepting grammar
+continues under the minimum, but once guidance permits EOS and no continuation token, guidance
+termination takes precedence rather than leaving the turn with no legal token.
+
+### Per-turn seeds
+
+The Request carries a durable seed basis, initialized once at construction, plus an optional pending
+reseed for the admitted turn. A model that configures `search.random_seed` supplies the basis
+directly; the default unset (negative) configuration draws a generated 64-bit basis from
+`std::random_device` instead, so an unseeded Request is not reproducible across processes but its
+own later turns still continue one stream rather than redrawing.
+
+- An omitted turn seed continues the current streams.
+- An explicit turn seed records a new pending basis. Zero is a valid deterministic seed, so
+  `ClearSeed` -- not a sentinel value -- removes a pending reseed.
+- A greedy step consumes neither the host stream nor the persistent device sampler state, so a
+  greedy turn does not shift the random draws used by a later unseeded sampled turn.
+- Seeds are full-width `uint64_t`. A value below 2^32 seeds the host generator exactly as the
+  classic `search.random_seed` did; a nonzero high half mixes both halves through a seed sequence.
+  CUDA receives the complete 64-bit value.
+
+A sampler state is always created from the durable basis, never from the pending reseed, because
+only a reseed applied inside the step transaction can be rolled back with it.
+
+`ScheduledRequests::GenerateNextTokensForTransaction` applies the pending reseed strictly after
+every Request and sampler checkpoint and strictly before the first host or device random consumer.
+The host generator is checkpointed by every `SaveState*ForTransaction` variant, so it is always safe
+to reseed. A device sampler state is reseeded in place -- keeping its pooled index -- and
+`BeginTransaction` therefore extends its sampler checkpoint beyond the batched sampling plan to
+cover every state a pending reseed targets, including requests that sample their draft verification
+on the host or whose plan was abandoned. That is an invariant, not a preference:
+`Request::ApplyPendingSeedForTransaction` fails the step if it is ever handed an existing device
+state the step did not checkpoint, because reseeding it could not be rolled back and skipping it
+would promote the seed to the durable basis while that stream still ran the old one.
+
+The pending marker is promoted to the durable basis only when the sampling step commits. Rollback
+restores both random streams and leaves the marker pending, so the retry reseeds identically.
+A turn that is canceled, fails, or otherwise reaches a terminal boundary before a sampling step
+commits discards the marker in `Request::ReleaseTurnResources()` without promoting it; because the
+rolled back step also restored both streams, the Request continues from exactly the position it held
+before the turn. Determinism is still scoped to the same scheduling path, because which drafts are
+admitted -- and therefore how many draws a turn makes -- depends on batch composition.
+
+Because `BatchedSampler` and `BatchedSamplerState` objects are constructed by the dynamically loaded
+CUDA add-on and called through by core, widening their seed interface required a
+`kDeviceInterfaceVersion` bump. That constant must be incremented whenever the virtual layout of
+`DeviceInterface`, or the virtual or data layout of any type crossing the add-on boundary, changes.
+
+## Decoded stop strings
+
+`OgaTurnOptionsSetStopStrings` copies a Turn's decoded UTF-8 stop strings, validated and bounded by
+`StopStringMatcher` (at most 16 entries, 16 KiB total, each entry nonempty valid UTF-8). An empty
+array clears/disables stop strings; a null array is rejected. Matching is exact byte matching, with
+no normalization, trimming, or case folding, and only considers text this Request generates during
+the active turn -- prompt tokens, continuation input, and earlier-turn history never reach the
+matcher.
+
+When a turn enables stop strings, `Engine::BeginTurn` resolves the Engine-owned `Tokenizer`
+(created once, on the first stop-enabled `BeginTurn`, via `Model::CreateTokenizer()`, and shared by
+every Request) and builds this turn's complete, ready-to-use `StopStringController` before touching
+the Request, its MTP shadow, or anything else -- so a tokenizer/stream construction failure leaves
+everything completely unchanged for the caller to retry. That controller owns one `TokenizerStream`
+and one `StopStringMatcher`; it decodes each generated token exactly once and feeds the resulting
+bytes to the matcher. The `TokenizerStream` is freshly created for this turn's controller (see
+`StopStringController`'s constructor and `RebuildStream()`), so its decoding context begins at the
+first generated token of the active turn: the turn's prompt/continuation input tokens are never fed
+to it, not even solely to seed detokenizer state before the first generated token is observed. This
+is the exact generated-output decoding boundary a host must mirror if it runs its own incremental
+decoder to hide stop text from published output -- see "Stop strings" in `docs/engine_c_api_spec.md`
+for why a host that instead decodes its own copy of the whole prompt+generation as one continuous
+stream can get different bytes for the first generated token (context-sensitive first-piece
+spacing) than what the Engine's matcher actually saw. Ownership passes into
+`RequestTurnAdmission::pending_stop_controller` (null
+for a no-stop turn, which never touches the tokenizer or a controller at all -- the no-stop fast
+path is unchanged from before this feature existed): `Request::PrepareTurnAdmission` and
+`Request::SaveStateForNewTurnTransaction` never construct or otherwise touch the Request's stop
+controller, only checkpoint bookkeeping for it. Only `Request::CommitTurnAdmission` installs the
+prebuilt controller as the live `stop_controller_`, discarding whatever the Request had before
+(a prior turn's controller, or null); `Request::RollbackTurnAdmission` (and simply an admission
+attempt never reaching commit) instead just discards the not-yet-installed controller, so a failed
+attempt -- whether it would have enabled stop strings or cleared them -- never touches the
+Request's actual, already-committed stop_controller_ at all. This is what "modularity" means here:
+Engine performs the fallible construction and infrastructure lookup, Request performs only the
+plain, infallible move at the commit boundary.
+
+`Request::StageGeneration` observes a newly generated token through the controller only when the
+step actually appended one (see below for why an EOS token is not observed). Among the reasons this
+observation can preempt, precedence is `StopString`, then `TurnLimit`, then `ContextLimit`: a token
+that would otherwise end the turn on the turn or context limit still reports `StopString` when it
+also completes a match. The raw token whose decoded bytes complete the match is retained, emitted as
+a visible token, and counted toward generated usage exactly like any other token; bytes after the
+match inside that token's decoded text are not trimmed from the Engine's raw history. The match, and
+its caller-facing index into the turn's stop-string list, are not externally visible until the
+step's transaction commits. A publication layer that hides stop text must run its own incremental
+decoded-text matcher and hold back possible stop prefixes, then use the reported index to verify and
+trim its published bytes; the Engine does not expose a byte offset within the match-completing
+token.
+
+The controller's own token history participates in the same transaction as Search, RNG, and
+guidance state. Every `SaveState*ForTransaction()` variant checkpoints the controller's committed
+token count; a direct `RestoreStateForTransaction()` or the queued
+`QueueStateRestoreForTransaction()`/`CompleteStateRestoreForTransaction()` pair (the latter is where
+the actual replay happens, matching how the queued path defers other non-trivial restoration) undoes
+a speculatively observed token by recreating the `TokenizerStream` from scratch and replaying every
+retained current-turn token through it, in order -- the ORT Extensions detokenizer cache backing a
+stream cannot be cloned, so full replay is the only correctness-preserving way to undo a step. A
+replay failure is treated exactly like any other rollback failure in this document: fatal, marking
+the Engine unhealthy. `Request::CommitStep` copies the staged match's index into the Request only
+after the transaction commits. `Request::MatchedStopStringIndex()` is otherwise always -1: a
+committed StopString match makes the Request `TurnComplete` in the very same step that stages its
+terminal event, and cancellation (`CanCancelFromEngine`) and fatal-failure handling
+(`Engine::MarkUnhealthyAndThrow`) only ever force-terminate a Request that is still executable --
+neither can run on a Request whose turn already ended in a committed match, so neither ever has an
+existing match to clear; the field is simply never set on that path to begin with. The engine
+invariant validator (`ValidateRequestInvariants`) enforces the resulting contract directly: a
+Request's finish reason is `StopString` if and only if its matched index is nonnegative.
+
+**Recovery cost bound.** A retryable whole-batch abort (see "Recoverable rollback" below) rolls back
+every Request in the failing batch together, not just one. Every stop-enabled Request among them
+that staged an observed token this step must independently recreate its `TokenizerStream` and
+replay its full current-turn token history, so one retryable abort's recovery cost for the
+stop-string component alone is `O(active stop-enabled requests in the batch x each request's
+generated current-turn token count)` -- linear in the number of such requests, and, per request,
+linear in how deep into the turn it already is. This follows from the required per-request replay;
+speculative draft verification can observe up to `kMaxGeneratedTokensPerStep` tokens for one
+request in a single step rather than the ordinary path's one, but this does not change the bound
+above: it is already stated in terms of the replayed turn depth (the checkpoint the step began at),
+not the number of tokens observed within the failing step itself. This repository does not include
+a replay benchmark or publish a measured per-token constant. A Request many thousands of tokens
+into a long turn pays a proportionally larger replay on every retryable abort that touches it, and
+a batch with several such requests pays that cost once per request, every time. No batching or
+amortization across requests exists for this replay today. Rollout qualification for stop strings
+at scale should measure this cost with representative tokenizers and turn depths, and monitor
+observed abort frequency alongside typical current-turn depth rather than assuming replay cost is
+negligible.
+
+Stop strings require an Engine configured for dynamic batching. Static batching completes generation
+through `ScheduledRequests::GenerateNextTokens`, a non-transactional path that cannot stage, roll
+back, or replay a match, so `Engine::BeginTurn` rejects a stop-enabled turn on a static-batching
+Engine before any Request mutation.
+
+Speculative draft verification observes target-accepted tokens through the same
+`StopStringController` a stop-enabled Request already uses for its ordinary one-token path, so a
+stop-enabled turn drafts and verifies exactly like any other request; no producer needs any special
+casing for stop strings. Greedy verification
+(`Request::CommitAcceptedDraftsForTransaction`) observes each accepted draft in commit order, but
+only the ones that actually append -- an accepted draft that turns out to be EOS commits without
+appending (`GreedySearch_Cpu::CommitToken` marks the search done, leaving the sequence length
+unchanged), and that gate excludes it from the controller exactly like `StageGeneration`'s
+`token_appended` check excludes an unappended EOS on the ordinary path; a match stops verification
+(and discards every later draft, including the trailing bonus/replacement row) the instant one
+completes; `Request::StageDraftCompletionForTransaction` then reports `StopString` ahead of the
+ordinary `TurnLimit`/`ContextLimit` checks for that same round, mirroring `StageGeneration`'s own
+precedence. Because greedy's loop increments `accepted_draft_count_` before checking for a match, a
+matching draft is always included in it -- it is a genuinely target-confirmed draft, indistinguishable
+from any earlier accepted one, whatever ends the round.
+
+Sampled and batched-sampler verification (`ScheduledRequests::GenerateNextTokensForTransaction`'s
+per-stage loop) reuses `StageGenerationForTransaction`/`StageGeneration` unchanged, one stage at a
+time: `Request::AppendAcceptedSampledToken` incrementally records every stage before the one that
+completes a match (or the round's natural last stage) so `accepted_draft_count_` reflects "prior
+stages only" while that call runs, which is what lets the per-stage baseline stay a single, uniform
+formula (`plan.sequence_length_before + accepted_draft_count_`) regardless of which stage turns out
+to match. Once a stage's own `StageGenerationForTransaction()` result is in hand, though, the caller
+still needs to decide whether *that* stage's own token is itself a genuinely confirmed draft (as
+opposed to a trailing replacement/bonus token, which is never one of the proposed drafts) before
+handing the result to `CommitStep`: `SelectSampledRows`'s `confirmed_draft_counts` output (the
+sequential draw loop's own confirmed-prefix length, computed independently of any stop string) tells
+the caller which case applies. When the finishing stage is a confirmed draft, `Request::
+PromoteFinalStageAsAcceptedDraft` folds it into `accepted_draft_count_` (reusing
+`AppendAcceptedSampledToken`) and clears the result's `token_appended` so `CommitStep` does not also
+append the same token a second time. This applies whether the round ends via a stop match or, with
+no stop strings at all, the turn/context limit landing exactly on a confirmed draft with no bonus
+token ever drawn -- both cases would otherwise under-count `AcceptedDraftTokenCount()` (and, since
+`RunDynamic()`'s target-reservation `CommitPrefix` and `Engine::RecordSpeculativeCommit`'s telemetry
+read it before `CommitStep` resets it, under-retain the confirmed draft's own KV slot in the paged
+cache and under-report it in `SpeculativeStats`). A match found mid-round also
+truncates that request's `selected_tokens` to the matching stage, so later stages simply never
+iterate it again -- no separate discard step is needed. Because a committed `StopString` result
+always has `done == true`, it structurally prevents a subsequent draft block for that request
+without any stop-specific check: `Engine::PrepareMtpStep`'s existing
+`result.done` gate already skips proposing a new automatic draft, and `Request::SetDraftTokens`'s
+existing `IsExecuting(status_)` check already rejects a manual proposal once the request is
+`TurnComplete`. The controller's per-token observation, wherever it runs inside a step, is covered by
+the same whole-step transaction checkpoint/replay described above, so rollback and retry work
+identically whether the observed token came from the ordinary path or from draft verification.
+Static batching's rejection of a stop-enabled turn (above) is unrelated and unaffected.
+
+**RNG fidelity for a stop-truncated sampled round.** `SelectSampledRows`'s sequential draw loop
+samples every candidate token for a randomly-sampled request's whole proposed draft (and its
+trailing bonus/replacement, if reached) up front, before the later per-stage loop can possibly know
+that a stop match will truncate the round early. Left alone, this would permanently advance
+the host verification `rng_` for tokens beyond the match that never become visible. To avoid this,
+`SelectSampledRows` checkpoints a plain copy of `rng_` after every draw, but only for a request with
+an active stop controller (`stop_controller_ != nullptr`) -- this
+is an intentional, reserved-up-front allocation and copy for that request's checkpoints (that
+request's own inner vector is `reserve()`d to the call's exact upper bound, `draft_count + 1`,
+before any draws happen, so growing it never reallocates or re-copies an already-captured
+checkpoint). The outer checkpoint vector itself is left completely empty -- no allocation at all --
+unless a pre-scan finds at least one random-sampled drafted request in the whole step that needs it;
+only then is it sized once, to the request count. A step with no drafts, no random sampling, or no
+stop-enabled request among them never allocates either the outer vector or any inner one, so the
+no-stop, greedy, and non-drafted paths pay nothing for this. When the per-stage loop truncates a
+request's `selected_tokens` at a stop match, it also restores `rng_` to the checkpoint captured
+right after that stage's own draw, discarding the effect of every later draw the sequential loop
+made for a now-invisible token. This is unrelated to, and layered on top of, the pre-existing
+whole-step `rng_`/`transaction_rng_` checkpoint a retryable batch abort already restores
+unconditionally (see "Recoverable rollback"
+below); that mechanism alone already undoes every draw a failed attempt made, stop strings or not.
+
+**Telemetry: `draft_tokens_evaluated`.** `Request::EvaluatedDraftTokenCount()` tracks, directly in
+the verification commit path, how many of this round's *proposed* draft positions were logically
+resolved as accepted or rejected before the round's terminal boundary -- never inferred afterward
+in `Engine::RecordSpeculativeCommit` from
+`accepted`/`finish_reason`/`token_appended`, and never counting a trailing replacement/bonus token
+itself (which is not one of the proposed drafts). It is always `>= AcceptedDraftTokenCount()`, reset
+and advanced at exactly the same transaction boundaries, and read before `CommitStep()` resets it,
+the same way `AcceptedDraftTokenCount()` is. Greedy target comparisons may have been precomputed
+for later proposal rows, but rows beyond a committed stop/limit boundary are not part of this
+logical evaluated count.
+
+Greedy verification (`CommitAcceptedDraftsForTransaction`) increments it once per loop iteration,
+regardless of that iteration's append/match/turn-limit outcome; if the loop completes normally (no
+match, EOS, or turn/context limit interrupted it) and the caller proposed more drafts than were
+confirmed, the rejected position beyond the confirmed prefix is counted too, even though the loop
+itself never processes it (that comparison already happened in the caller). Sampled/batched
+verification advances it identically to `accepted_draft_count_` for every non-finishing stage
+(`AppendAcceptedSampledToken`) and for a finishing stage that is itself a confirmed draft
+(`PromoteFinalStageAsAcceptedDraft`); a finishing stage that is instead a logically resolved but
+non-accepted proposal (a rejection with a replacement, or EOS without an append) advances only
+this count, via `MarkFinalStageAsEvaluatedNonAcceptedDraft`, never `accepted_draft_count_`. A
+finishing stage beyond the whole proposed range (a trailing bonus token after full acceptance)
+advances neither.
+
+This gives exactly: an ordinary rejection after `k` accepted drafts evaluates `k + 1`; full
+acceptance (with or without a bonus token) evaluates the full proposed count; a stop match that
+completes on a genuinely confirmed draft evaluates exactly the retained confirmed prefix; a stop
+match on the ordinary replacement following a rejected draft evaluates `accepted + 1`, identically
+to a non-stop rejection; and, critically, a round the turn/context limit (not a rejection) truncates
+before any further proposal can enter the committed logical result -- e.g. 5 proposed drafts,
+budget for 2, both confirmed -- evaluates exactly 2, not `accepted + 1 = 3`: no third proposal
+position belongs to that result. The counters are advanced while verification resolves each
+proposal because `token_appended` and `finish_reason` alone cannot distinguish budget exhaustion
+from a confirmed final draft or a rejected proposal.
+
+**CUDA batched-commit qualification gap.** The per-stage loop's `can_batch_commits` branch (used
+when every active request's `Search` supports device-side batched commit) and the non-batched
+fallback use different token-commit mechanisms, then call the same stage-finalization code for
+counters, checkpoints, promotion, stop truncation, and result publication. The CPU test doubles
+this document's tests run against cannot produce a `Search` that supports batched commit, so no
+automated test in this repository actually exercises the device-side commit mechanism with decoded
+stop strings. Treat that branch as requiring real CUDA qualification before relying on it in
+production; shared finalization does not prove that the preceding device commit has been tested.
 
 ## Rollback and failure handling
 
@@ -791,6 +1168,13 @@ Rollback performs both parts:
 
 1. Restore request search state and sampler state from their checkpoints.
 2. Release the composite reservation: discard any staged fixed outputs and provisional fixed slots (leaving resident slots untouched), and release every block held by the paged-cache reservation.
+
+Step 1 restores every request in the failing batch, not just one; for a stop-enabled request that
+staged an observed token this step, restoring its search state also replays its stop-string
+controller (see "Decoded stop strings" above), so a batch containing several stop-enabled requests
+deep into their turns pays that per-request replay cost once per request on every retryable abort --
+see that section's "Recovery cost bound" for the resulting complexity and rollout-qualification
+guidance.
 
 After a successful rollback, committed request state and committed cache state match the state
 before the step began. `Run()` translates `RetryableBatchAbort` into a `Retryable` event and
@@ -930,9 +1314,9 @@ the request. The window block table repeats those $R$ block IDs: column $j$ uses
 $j \bmod R$, so position $p$ resolves to slot $p \bmod (R B)$. Positions outside the live window
 are overwritten in place.
 
-The dynamic scheduler treats $C$ as a physical per-request query limit. A request-level
-`chunk_size` that is absent, zero, or larger than $C$ is capped to $C$; a smaller positive override
-is preserved. This prevents a transactional step from wrapping the ring while older positions are
+The dynamic scheduler treats $C$ as a physical per-request query limit. A configured
+`search.chunk_size` that is absent, zero, or larger than $C$ is capped to $C$; a smaller positive
+value is preserved. This prevents a transactional step from wrapping the ring while older positions are
 still live.
 
 Window blocks participate in the same reservation, rollback, commit, removal, and invariant checks
@@ -1063,8 +1447,13 @@ The engine uses the same transaction flow for prefill and decoding.
 ### Prefill
 
 A prefill contributes as many pending prompt tokens as the remaining global
-budget allows, bounded by `search.chunk_size` when configured. A prompt can
-therefore span several committed steps even when `search.chunk_size` is absent.
+budget allows, bounded by the model-configured `search.chunk_size` when present. A prompt can
+therefore span several committed steps even when `search.chunk_size` is absent. Chunking is
+model/Engine configuration, not per-Request policy: a static-batching Engine cannot resume a
+half-written prompt, so `Engine::CreateDependencies` rejects a chunking model when it builds the
+static dependencies, and `StaticBatchScheduler::AddRequest` independently rejects a chunking Request
+at admission. The second check is what protects an Engine assembled from injected dependencies,
+which never runs the first.
 
 Admitting a new prefill still reserves blocks for its whole prompt. Only the
 executed contribution advances committed slots. This prevents another request
@@ -1093,7 +1482,7 @@ failure constructing the owning state wrapper releases the acquired index withou
 
 `ScheduledRequests` resolves each request's sampling configuration, groups compatible work inside the sampler, and submits the logits rows together. The implementation can handle heterogeneous request parameters without turning the requests into one shared `Search`.
 
-If batched sampling or transactional sampler checkpoints are unsupported on the active device or search implementation, the code falls back to per-request sampling while preserving the same engine transaction boundary.
+If batched sampling or transactional sampler checkpoints are unsupported on the active device or search implementation, the code falls back to per-request sampling while preserving the same engine transaction boundary. A per-turn seed is rejected at admission when a device batched sampler exists but cannot checkpoint and restore its RNG state; a host-only path with no batched sampler remains supported.
 
 Logits processing remains per request. Minimum length, repetition penalty, no-repeat n-gram processing, EOS handling, maximum length, and sequence ownership continue to use each request's own state.
 
@@ -1112,26 +1501,53 @@ Graph buffers are allocated once at configured limits and reshaped as static vie
 
 Prefill and mixed-token steps use graph id `-1`, which tells the CUDA execution provider to run eagerly.
 
-An Engine-hosted DFlash 2 drafter consumes the packed auxiliary hidden-state tensor named by
-`model.dflash2.main_aux_hidden_states`. Single-token target decode steps bind that output through
-persistent graph buffers and remain eligible for CUDA graph capture; prefill and draft-verification
-steps remain eager. Engine construction validates the output's rank, element type, and static width
-against the drafter input before allocating cache resources.
-The drafter run is synchronous because its packed inputs and outputs are owned by one proposal
-call, so `model.dflash2.run_options` cannot disable execution-provider synchronization.
-The direct drafter session also uses graph id `-1`: its variable-shaped proposal tensors are
-allocated per call and therefore cannot be captured safely. If this optional post-commit drafter
-run fails, the Engine discards any partial proposal and still publishes the already committed target
-events. A transient failure is retried on the next step; three consecutive failures disable DFlash 2
-for the Engine. `dflash2_failures` and `dflash2_disables` report those events.
+An Engine-hosted DFlash 2 or DSpark block drafter consumes the packed auxiliary hidden-state tensor
+named by `model.dflash2.main_aux_hidden_states` or `model.dspark.main_aux_hidden_states`.
+`model.dspark` is a configuration alias for the shared DFlash 2 runtime, and both sections cannot
+appear in one configuration. DFlash 2 uses `block_size - 1` draft rows because its first row is an
+anchor; DSpark predicts from all `block_size` rows.
 
-The drafter keeps a fixed sliding-window ring per request from that request's first decode step
-until it is closed, so its pool is sized for `max_batch_size` rings. A request that first decodes
-while every ring is taken is skipped for the rest of its life and decodes without DFlash 2 drafts;
-the drafter keeps serving the requests that already hold a ring. This makes `max_batch_size` the
-DFlash 2 service-capacity limit across both active and idle long-lived requests, not merely the
-per-step scheduler limit. `dflash2_admission_misses` reports requests denied a ring because that
-capacity was occupied.
+Single-token target decode steps bind that auxiliary output through persistent graph buffers and
+remain eligible for CUDA graph capture; prefill and draft-verification steps remain eager. Engine
+construction validates the output's rank, element type, and static width against the drafter input.
+It also validates the drafter's lattice outputs and every paged-cache input/output, including the
+page size, before allocating cache resources. The drafter run is synchronous because its packed
+inputs and outputs are owned by one proposal call, so its run options cannot disable
+execution-provider synchronization.
+
+The direct drafter session also uses graph id `-1`: it reuses proposal tensor allocations but
+reshapes them for each step, so they cannot be captured safely. If this optional post-commit drafter
+run fails, the Engine discards any partial proposal and still publishes the already committed target
+events. A recoverable failure also makes the drafter forget every request it is currently tracking,
+because the step whose rows it failed to ingest leaves its cached context no longer contiguous with
+the target. Those in-flight requests finish without block drafts while requests admitted afterwards
+still get them, and the retry budget is therefore spent on real drafter failures: three consecutive
+failures disable the drafter for the Engine, and a proposal contract violation disables it at once.
+`dflash2_failures` and `dflash2_disables` report those events.
+
+Automatic block drafting is greedy-only. A request joins on its position-zero step only when the
+current turn is greedy. If a sampled first turn executes that step, eligibility is not reconsidered
+and the request decodes without block drafts for the rest of its life. Once a request has joined,
+later sampled turns continue feeding their committed context into its cache without requesting
+drafts, so a subsequent greedy turn can resume drafting without a cache hole. These ingest-only
+steps still execute the drafter session to preserve that continuity.
+
+A windowed block drafter (DFlash 2) owns a fixed ring of cache blocks per maximum batch row, so its
+pool is sized for `max_batch_size` rings and is allocated before the target pool measures free
+memory; its footprint is independent of context length. A full-attention block drafter (DSpark)
+instead mirrors the target pool: its bytes per target block and its fixed query-spill bytes are
+charged against free memory before target capacity is selected, using the cache element type
+reported by the graph. That trade is explicit -- a DSpark drafter with the same layer geometry as
+the target roughly halves the target's paged-cache capacity for the same GPU memory budget, and it
+attends the whole resident sequence on every step rather than a window.
+
+Both pools are only sufficient while at most `max_batch_size` requests are tracked. A request denied
+cache blocks at its join point is skipped for the rest of its life and decodes without block drafts;
+the drafter keeps serving requests that already hold blocks. This makes `max_batch_size` the
+drafter's service-capacity limit across both active and idle long-lived requests, not merely the
+per-step scheduler limit. `dflash2_admission_misses` reports requests denied cache blocks because
+that capacity was occupied. A tracked request remains part of this capacity while a sampled turn is
+ingest-only, because retaining its cache is what lets a later greedy turn resume drafting.
 
 ## Backpressure and fairness
 
@@ -1166,8 +1582,10 @@ The static engine path is intentionally separate.
 A resident static request queued by `BeginTurn()` returns to `Active` without reallocating the
 batch. Static cache rows still cannot be released independently, and an all-turn-complete batch may
 be recycled for new work. Static continuation is therefore valid only while the original
-single-request batch remains resident. The per-turn generated-token budget applies on this path
-too, although static execution does not use the dynamic reservation/checkpoint transaction.
+single-request batch remains resident. The per-turn generated-token budget and the resolved scalar
+turn policy both apply on this path, although static execution does not use the dynamic
+reservation/checkpoint transaction. Because it cannot stage, roll back, or replay, static admission
+rejects stop strings and a per-turn seed before mutating the Request.
 
 Close or abandonment logically removes a Request from scheduling and purges its undelivered events.
 A closed Request that is already resident in a static batch nevertheless remains part of that
@@ -1187,9 +1605,12 @@ The language bindings currently expose the same basic low-level loop. Production
 ```python
 request_options = og.RequestOptions()
 request_options.set_max_session_tokens(4096)
-request = engine.create_request(generation_params, request_options)
+request = engine.create_request(options=request_options)
 turn_options = og.TurnOptions(request)
 turn_options.set_max_generated_tokens(128)
+turn_options.set_do_sample(True)
+turn_options.set_top_k(40)
+turn_options.set_seed(1234)
 turn_id = request.begin_turn(initial_tokens, turn_options)
 
 event_buffer = engine.create_event_buffer(8)

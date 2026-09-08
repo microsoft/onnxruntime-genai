@@ -23,4 +23,5 @@ generation.
 
 Builds created without guidance support reject a request that supplies guidance instead of silently
 generating unconstrained output. Configure the build with `USE_GUIDANCE=ON` (or the corresponding
-build-script option) before enabling guidance in `GeneratorParams`.
+build-script option) before enabling guidance in `GeneratorParams` (classic Generator) or in
+`OgaTurnOptions` (Engine, where guidance is scoped to one turn).

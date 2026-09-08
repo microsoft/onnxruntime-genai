@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <random>
+
 #include "execution_context.h"
 #include "request.h"
 
@@ -116,11 +118,15 @@ struct ScheduledRequests {
   // Verifies each drafted request's proposal against the target model's own rows, rewinds the
   // rejected tail, and returns the one row per request that the sampler must select from. For a
   // randomly sampled request, selected_tokens holds the accepted deterministic proposal prefix
-  // plus the target-distributed correction or bonus token to commit.
+  // plus the target-distributed correction or bonus token to commit; confirmed_draft_counts[i] is
+  // that same request's confirmed prefix length alone (excluding the trailing correction/bonus),
+  // used by the caller to tell a confirmed final draft apart from a replacement/bonus token when a
+  // stop match or the turn/context limit ends verification on the request's last staged token.
   std::vector<DeviceSpan<float>> SelectSampledRows(
       std::vector<DeviceSpan<float>>& verify_rows,
       std::vector<std::vector<int32_t>>& selected_tokens,
-      std::vector<size_t>& accepted_draft_counts);
+      std::vector<size_t>& confirmed_draft_counts,
+      std::vector<std::vector<std::mt19937>>& rng_checkpoints);
 
   std::vector<std::shared_ptr<Request>> requests_;
   // Drafts the transaction stages onto each request's sequence, in scheduled row order. Empty
@@ -132,6 +138,10 @@ struct ScheduledRequests {
   std::shared_ptr<GeneratorParams> params_;
   BatchedSampler* batched_sampler_{};
   BatchedSamplingPlan* sampling_plan_{};
+  // Every device RNG state this transaction checkpointed: the batched sampling plan's states plus
+  // the states of any request whose pending turn reseed is about to overwrite one. Only a state in
+  // here may be reseeded inside the transaction, because only these can be rolled back.
+  std::vector<BatchedSamplerState*> checkpointed_sampler_states_;
   size_t transaction_checkpoint_count_{};
   bool transaction_uses_batched_sampler_{};
   bool sampler_checkpoint_active_{};

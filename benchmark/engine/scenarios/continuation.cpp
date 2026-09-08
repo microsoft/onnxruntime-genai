@@ -74,12 +74,12 @@ ScenarioExecutionOutput ContinuationScenario::Execute(const ScenarioConfig& conf
   for (int run = 0; run < total_runs; ++run) {
     const bool is_warmup = run < config.warmup_runs;
 
-    std::vector<std::unique_ptr<OgaGeneratorParams>> params;
+    std::vector<std::unique_ptr<OgaRequestOptions>> request_options;
     std::vector<std::unique_ptr<OgaRequest>> requests;
     std::vector<std::unique_ptr<OgaTurnOptions>> turn_options;
     std::vector<std::vector<int32_t>> request_tokens(static_cast<size_t>(config.concurrency));
     std::unordered_map<const OgaRequest*, size_t> request_indices;
-    params.reserve(static_cast<size_t>(config.concurrency));
+    request_options.reserve(static_cast<size_t>(config.concurrency));
     requests.reserve(static_cast<size_t>(config.concurrency));
     turn_options.reserve(static_cast<size_t>(config.concurrency));
 
@@ -88,15 +88,19 @@ ScenarioExecutionOutput ContinuationScenario::Execute(const ScenarioConfig& conf
     for (int i = 0; i < config.concurrency; ++i) {
       const size_t request_index = static_cast<size_t>(i);
       request_tokens[request_index].assign(base_prompt->SequenceData(0), base_prompt->SequenceData(0) + base_prompt_count);
-      params.emplace_back(OgaGeneratorParams::Create(*engineResources.model));
-      params.back()->SetSearchOption("max_length", static_cast<double>(max_session_tokens));
-      params.back()->SetSearchOption("random_seed", kRandomSeed + i);
+      request_options.emplace_back(OgaRequestOptions::Create());
+      request_options.back()->SetMaxSessionTokens(max_session_tokens);
       requests.emplace_back(
-          engineResources.engine->CreateRequest(*params.back()));
+          engineResources.engine->CreateRequest(request_options.back().get()));
       request_indices.emplace(requests.back().get(), request_index);
       turn_options.push_back(requests.back()->CreateTurnOptions());
       turn_options.back()->SetMaxGeneratedTokens(
           static_cast<uint64_t>(config.generation_tokens));
+      if (engineResources.uses_dynamic_batching) {
+        // Seed only the first turn; continuation turns reuse the same options object, so the seed
+        // is cleared below to keep the request on one continuous random stream.
+        turn_options.back()->SetSeed(static_cast<uint64_t>(kRandomSeed + i));
+      }
       requests.back()->BeginTurn(
           base_prompt->SequenceData(0), base_prompt_count,
           turn_options.back().get());
@@ -187,6 +191,7 @@ ScenarioExecutionOutput ContinuationScenario::Execute(const ScenarioConfig& conf
       if (turn + 1 < kContinuationTurns) {
         for (int i = 0; i < config.concurrency; ++i) {
           const size_t request_index = static_cast<size_t>(i);
+          turn_options[request_index]->ClearSeed();
           if (generated_segments[request_index].empty()) {
             throw std::runtime_error(Name() + ": no generated tokens available for continuation");
           }

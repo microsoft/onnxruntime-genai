@@ -114,21 +114,26 @@ def run(args):
         add_generation_prompt=True,
     )
 
-    params = og.GeneratorParams(model)
-    params.set_search_options(do_sample=False, max_length=args.max_length)
-    if args.guidance:
-        grammar = get_lark_grammar(
-            tools=to_tool(tools),
-            text_output=False,
-            tool_output=True,
-            tool_call_start=TOOL_CALL_START,
-            tool_call_end=TOOL_CALL_END,
-        )
-        params.set_guidance("lark_grammar", grammar)
+    request_options = og.RequestOptions()
+    request_options.set_max_session_tokens(args.max_length)
     prompt_tokens = list(tokenizer.encode(prompt))
-    request = engine.create_request(params)
+    request = engine.create_request(options=request_options)
     try:
-        request.begin_turn(np.asarray(prompt_tokens, dtype=np.int32))
+        # Guidance is per turn: the tool-call turn is constrained to the grammar, and the
+        # tool-result continuation below simply clears it. Both turns select the top logit, which
+        # every turn must ask for explicitly because policy never carries over.
+        tool_call_turn = og.TurnOptions(request)
+        tool_call_turn.set_do_sample(False)
+        if args.guidance:
+            grammar = get_lark_grammar(
+                tools=to_tool(tools),
+                text_output=False,
+                tool_output=True,
+                tool_call_start=TOOL_CALL_START,
+                tool_call_end=TOOL_CALL_END,
+            )
+            tool_call_turn.set_guidance("lark_grammar", grammar)
+        request.begin_turn(np.asarray(prompt_tokens, dtype=np.int32), tool_call_turn)
 
         tool_call_output, tool_call_tokens = generate(engine, request, tokenizer)
         tool_call_start_tokens = list(tokenizer.encode(TOOL_CALL_START))
@@ -143,15 +148,10 @@ def run(args):
         print(f"Tool result: {json.dumps(tool_result)}")
 
         continuation_tokens = list(tokenizer.encode(tool_result_fragment(tool_result)))
-        if args.guidance:
-            request.close()
-            final_params = og.GeneratorParams(model)
-            final_params.set_search_options(do_sample=False, max_length=args.max_length)
-            request = engine.create_request(final_params)
-            final_context = prompt_tokens + tool_call_tokens + continuation_tokens
-            request.begin_turn(np.asarray(final_context, dtype=np.int32))
-        else:
-            request.begin_turn(np.asarray(continuation_tokens, dtype=np.int32))
+        # The same options object drives the continuation turn: clearing the grammar is all it takes
+        # to make this turn unguided, and do_sample stays false for it.
+        tool_call_turn.clear_guidance()
+        request.begin_turn(np.asarray(continuation_tokens, dtype=np.int32), tool_call_turn)
 
         final_output, _ = generate(engine, request, tokenizer)
         final_output = final_output.strip()
