@@ -716,16 +716,26 @@ DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& nex
   return logits_.Get();
 }
 
-bool DecoderState::SupportsPrefillChunking() const {
+bool DecoderState::SupportsPrefillChunking(bool has_multimodal_content) const {
   // Chunking slices the pre-computed embeddings along the sequence dimension, which is only
   // contiguous for a single sequence. Continuous decoding of position ids/attention mask in
   // DefaultPositionInputs is likewise restricted to a batch-beam size of one.
   if (params_->BatchBeamSize() != 1)
     return false;
 
-  // Qwen-VL's 3D mRoPE position ids are computed from the full prompt in a single pass, so they
-  // cannot be produced chunk by chunk. Fall back to a single prefill run for those models.
-  return dynamic_cast<const DefaultPositionInputs*>(position_inputs_.get()) != nullptr;
+  // DefaultPositionInputs produces position ids sequentially, so chunking is always safe.
+  if (dynamic_cast<const DefaultPositionInputs*>(position_inputs_.get()) != nullptr)
+    return true;
+
+  // Qwen-VL's 3D mRoPE position ids diverge from sequential positions only when vision/audio
+  // content shifts the rope deltas. A text-only prompt reduces to sequential positions, so
+  // chunking is safe; with multimodal content the ids must be produced in a single full pass.
+  if (dynamic_cast<const Qwen2VLPositionInputs*>(position_inputs_.get()) != nullptr)
+    return !has_multimodal_content;
+
+  // Any other position-input type (e.g. WindowedPositionInputs) keeps the conservative
+  // single-pass prefill behavior.
+  return false;
 }
 
 void DecoderState::PrepareEmbeddingsForPrefill(size_t new_length) {
@@ -873,8 +883,9 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
   // prompt embeddings in several smaller runs to bound peak memory usage.
   const auto& chunk_size_opt = params_->search.chunk_size;
   const size_t num_tokens = next_tokens.size();
+  const bool has_multimodal_content = num_image_tokens_ != 0 || num_audio_tokens_ != 0;
   const bool chunk_prefill = is_prompt_ && chunk_size_opt.has_value() && chunk_size_opt.value() > 0 &&
-                             num_tokens > chunk_size_opt.value() && decoder_state_->SupportsPrefillChunking();
+                             num_tokens > chunk_size_opt.value() && decoder_state_->SupportsPrefillChunking(has_multimodal_content);
 
   if (chunk_prefill) {
     decoder_state_->PrepareEmbeddingsForPrefill(num_tokens);
