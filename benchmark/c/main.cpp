@@ -267,7 +267,11 @@ void RunBenchmark(const benchmark::Options& opts) {
     // Keep the generated token IDs instead of decoding and re-encoding them.
     // Tokenizer round trips are not token-count preserving, so re-encoding can
     // produce more than the exact prompt length requested with -l.
-    prompt_tokens.assign(output_sequence_data, output_sequence_data + num_prompt_tokens);
+    if (num_prompt_tokens > 0) {
+      prompt_tokens.assign(output_sequence_data, output_sequence_data + num_prompt_tokens);
+    } else {
+      prompt_tokens.clear();
+    }
     prompt = std::string{tokenizer->Decode(prompt_tokens.data(), prompt_tokens.size())};
   }
 
