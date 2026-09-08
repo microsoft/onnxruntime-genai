@@ -8,7 +8,7 @@ if(USE_CUDA OR USE_TRT_RTX)
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -allow-unsupported-compiler")
   endif()
 
-  # For TRT_RTX, apply the CUDA flags from preset
+  # For TRT_RTX, apply the configured CUDA flags
   if(USE_TRT_RTX AND WIN32 AND CMAKE_CUDA_FLAGS_INIT)
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS_INIT}")
   endif()
@@ -51,10 +51,10 @@ if((USE_CUDA OR USE_TRT_RTX) AND CMAKE_CUDA_COMPILER)
   endif()
 
   file(GLOB generator_cudalib_srcs CONFIGURE_DEPENDS
-    "${GENERATORS_ROOT}/cuda/*.cpp"
-    "${GENERATORS_ROOT}/cuda/*.h"
-    "${GENERATORS_ROOT}/cuda/*.cu"
-    "${GENERATORS_ROOT}/cuda/*.cuh"
+    "${GENERATORS_ROOT}/ep/cuda/*.cpp"
+    "${GENERATORS_ROOT}/ep/cuda/*.h"
+    "${GENERATORS_ROOT}/ep/cuda/*.cu"
+    "${GENERATORS_ROOT}/ep/cuda/*.cuh"
   )
 
   # session_options.{h,cpp} are plain C++ (no CUDA kernels) and belong in the

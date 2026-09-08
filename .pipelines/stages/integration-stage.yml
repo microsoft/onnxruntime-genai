@@ -25,6 +25,10 @@ parameters:
   type: boolean
 - name: linux_x64_cuda
   type: boolean
+- name: linux_x64_engine
+  type: boolean
+- name: run_full_engine_benchmark
+  type: boolean
 - name: build_macos_arm64
   type: boolean
 - name: macos_arm64_cpu
@@ -55,6 +59,14 @@ stages:
           --all "${{ join(',', parameters.all_models) }}"
       displayName: 'Check pr_models / all_models match models.py'
 
+- stage: integration_engine_benchmark_linux_x64
+  displayName: 'Engine Benchmark'
+  dependsOn: []
+  jobs:
+  - template: jobs/integration-engine-benchmark-job.yml
+    parameters:
+      run_full_engine_benchmark: ${{ parameters.run_full_engine_benchmark }}
+
 - ${{ if eq(parameters.build_windows_x64, true) }}:
   - stage: build_win_x64
     displayName: 'Build · Windows x64'
@@ -65,6 +77,7 @@ stages:
         os: 'win'
         arch: 'x64'
 
+- ${{ if or(eq(parameters.windows_x64_cpu, true), eq(parameters.windows_x64_cuda, true), eq(parameters.windows_x64_webgpu, true)) }}:
   - stage: integration_test_win_x64
     displayName: 'Test · Windows x64'
     dependsOn: build_win_x64
@@ -104,6 +117,7 @@ stages:
         os: 'linux'
         arch: 'x64'
 
+- ${{ if or(eq(parameters.linux_x64_cpu, true), eq(parameters.linux_x64_cuda, true)) }}:
   - stage: integration_test_linux_x64
     displayName: 'Test · Linux x64'
     dependsOn: build_linux_x64
@@ -124,6 +138,19 @@ stages:
             arch: 'x64'
             ep: 'cuda'
             model: ${{ model }}
+
+- ${{ if and(eq(parameters.build_linux_x64, true), eq(parameters.linux_x64_engine, true)) }}:
+  - stage: integration_engine_test_linux_x64
+    displayName: 'Test · Continuous Batching · Linux x64'
+    dependsOn: build_linux_x64
+    jobs:
+    - template: jobs/integration-engine-test-job.yml
+      parameters:
+        os: 'linux'
+        arch: 'x64'
+        ep: 'cuda'
+        model: 'qwen2.5-0.5b-instruct-paged'
+        storage_model: 'qwen2.5-0.5b-instruct'
 
 - ${{ if eq(parameters.build_macos_arm64, true) }}:
   - stage: build_osx_arm64

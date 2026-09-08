@@ -32,10 +32,10 @@ void StaticBatchDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> mo
       std::max_element(
           scheduled_requests.begin(), scheduled_requests.end(),
           [](const std::shared_ptr<Request>& a, const std::shared_ptr<Request>& b) {
-            return a->UnprocessedTokens().size() < b->UnprocessedTokens().size();
+            return a->ScheduledTokenCount() < b->ScheduledTokenCount();
           });
 
-  const size_t max_sequence_length = (*request_with_max_sequence_length)->UnprocessedTokens().size();
+  const size_t max_sequence_length = (*request_with_max_sequence_length)->ScheduledTokenCount();
   const size_t batch_size = scheduled_requests.size();
   const std::vector<int64_t> input_ids_shape = {static_cast<int64_t>(batch_size), static_cast<int64_t>(max_sequence_length)};
   auto input_ids_tensor = std::make_unique<Tensor>(model->p_device_inputs_, Ort::TypeToTensorType<int64_t>);
@@ -99,10 +99,10 @@ void StaticBatchDecoderIO::PreparePositionIds(std::shared_ptr<DecoderOnly_Model>
       std::max_element(
           scheduled_requests.begin(), scheduled_requests.end(),
           [](const std::shared_ptr<Request>& a, const std::shared_ptr<Request>& b) {
-            return a->UnprocessedTokens().size() < b->UnprocessedTokens().size();
+            return a->ScheduledTokenCount() < b->ScheduledTokenCount();
           });
 
-  const size_t max_sequence_length = (*request_with_max_sequence_length)->UnprocessedTokens().size();
+  const size_t max_sequence_length = (*request_with_max_sequence_length)->ScheduledTokenCount();
   const size_t batch_size = scheduled_requests.size();
   const std::vector<int64_t> position_ids_shape = {static_cast<int64_t>(batch_size), static_cast<int64_t>(max_sequence_length)};
   auto position_ids_tensor = std::make_unique<Tensor>(model->p_device_inputs_, Ort::TypeToTensorType<int64_t>);
@@ -113,10 +113,12 @@ void StaticBatchDecoderIO::PreparePositionIds(std::shared_ptr<DecoderOnly_Model>
   for (size_t i = 0; i < batch_size; ++i) {
     auto request = scheduled_requests[i];
     auto input_ids = request->UnprocessedTokensCpu();
-    auto current_sequence_length = request->IsPrefill() ? 1 : request->CurrentSequenceLength();
+    // A continued request resumes at the sequence length it has already committed to the cache, so
+    // positions must be offset by it. Only a first prefill starts at zero.
+    const int64_t base_position = request->ProcessedSequenceLength();
 
     for (size_t j = 0; j < max_sequence_length; ++j) {
-      cpu_span[i * max_sequence_length + j] = (j < input_ids.size() && input_ids[j] != model->config_->model.pad_token_id) ? current_sequence_length - 1 + j : 0;
+      cpu_span[i * max_sequence_length + j] = (j < input_ids.size() && input_ids[j] != model->config_->model.pad_token_id) ? base_position + j : 0;
     }
   }
 
@@ -132,10 +134,10 @@ void StaticBatchDecoderIO::PrepareLogits(std::shared_ptr<DecoderOnly_Model> mode
       std::max_element(
           scheduled_requests.begin(), scheduled_requests.end(),
           [](const std::shared_ptr<Request>& a, const std::shared_ptr<Request>& b) {
-            return a->UnprocessedTokens().size() < b->UnprocessedTokens().size();
+            return a->ScheduledTokenCount() < b->ScheduledTokenCount();
           });
 
-  const int64_t max_sequence_length = (*request_with_max_sequence_length)->UnprocessedTokens().size();
+  const int64_t max_sequence_length = (*request_with_max_sequence_length)->ScheduledTokenCount();
   const int64_t batch_size = scheduled_requests.size();
   const std::vector<int64_t> logits_shape = {batch_size, max_sequence_length, model->config_->model.vocab_size};
   logits_ = std::make_unique<Tensor>(model->p_device_inputs_, model->session_info_.GetOutputDataType(model->config_->model.decoder.outputs.logits));
@@ -148,7 +150,12 @@ void StaticBatchDecoderIO::PrepareLogits(std::shared_ptr<DecoderOnly_Model> mode
 std::vector<DeviceSpan<float>> StaticBatchDecoderIO::ProcessLogits() {
   std::vector<int64_t> valid_token_indices;
   for (auto& request : scheduled_requests_) {
-    valid_token_indices.push_back(request->UnprocessedTokens().size() - 1);
+    // A TurnComplete or Closed row retained in the static batch can contribute zero
+    // unprocessed tokens. Selecting index 0 keeps the subspan in bounds; its logits are discarded
+    // because ScheduledRequests samples only Active rows.
+    const auto unprocessed_token_count = request->ScheduledTokenCount();
+    valid_token_indices.push_back(
+        unprocessed_token_count == 0 ? 0 : static_cast<int64_t>(unprocessed_token_count - 1));
   }
 
   // [batch_size, max_sequence_length, vocab_size]

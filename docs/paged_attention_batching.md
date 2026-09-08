@@ -1,5 +1,9 @@
 # Engine Batching Design
 
+> This document records the design and performance history of engine batching work. For the authoritative description of the current continuous-batching implementation, including paged-cache transactions, rollback, and commit ordering, see [Paged Attention Engine](paged_attention_engine.md).
+> Caller-supplied speculative drafts were added after the batching phases described here; their
+> scheduling and commit behavior is documented in [Caller-supplied speculative drafts](paged_attention_engine.md#caller-supplied-speculative-drafts).
+
 Status: "Phase 1" is [PR #2343](https://github.com/microsoft/onnxruntime-genai/pull/2343);
 "Phase 2" is [PR #2345](https://github.com/microsoft/onnxruntime-genai/pull/2345), stacked on it.
 "Phase 3" is [PR #2361](https://github.com/microsoft/onnxruntime-genai/pull/2361), stacked on Phase 2.
@@ -23,7 +27,7 @@ One `Generator` owns exactly **one** `Search` object that covers the whole batch
 (`src/generators.h`, `std::unique_ptr<Search> search_`). Everything is sized once at construction:
 
 ```cpp
-// src/cuda/search_cuda.cpp — GreedySearch_Cuda constructor
+// src/ep/cuda/search_cuda.cpp — GreedySearch_Cuda constructor
 next_tokens_buffer_ = params.p_device->Allocate<int32_t>(params.search.batch_size);
 ...
 samplingdata_ = std::make_unique<cuda::SamplingData>(random_seed, params.search.batch_size,
@@ -33,7 +37,7 @@ samplingdata_ = std::make_unique<cuda::SamplingData>(random_seed, params.search.
 Token selection is one call over the whole batch:
 
 ```cpp
-// src/cuda/search_cuda.cpp — GreedySearch_Cuda::SampleTopKTopP
+// src/ep/cuda/search_cuda.cpp — GreedySearch_Cuda::SampleTopKTopP
 cuda::GetSample(samplingdata_.get(), GetStream(), next_tokens_.data(), scores.data(),
                 int(scores.size() / params_->search.batch_size),
                 params_->search.batch_size, k, p, temperature);
@@ -70,15 +74,20 @@ It is a poor fit for a server.
 The path used by `PagedAttention` models. Requests arrive and depart independently; each step the
 scheduler picks whichever requests are runnable and forms a batch out of them.
 
-Each `Request` owns its own `GeneratorParams` and its own single-sequence `Search`:
+Each `Request` derives its own private, Model-derived search parameters and owns its own
+single-sequence `Search`:
 
 ```cpp
 // src/engine/request.cpp
-Request::Request(std::shared_ptr<GeneratorParams> params)
-    : params_{params}, search_{CreateSearch(*params.get())} {
+Request::Request(const Model& model, size_t max_session_tokens, ...)
+    : params_{CreateRequestParams(model, max_session_tokens)},
+      search_{CreateSearch(*params_)} {
   search_->DeferCompletion(true);
 }
 ```
+
+Generation policy does not live there. It is resolved per turn into an `EffectiveTurnPolicy` from
+the model defaults plus that turn's explicit overrides.
 
 The decoder IO is chosen from the cache manager, which is chosen from config:
 
@@ -142,7 +151,7 @@ would mean giving up:
    batching wins.
 
 Also, mechanically, `PagedAttention` models cannot run under `Generator` at all: they need 1-D
-`input_ids` plus `cu_seqlens`, and `DefaultInputIDs` (`src/models/input_ids.cpp`) always produces
+`input_ids` plus `cu_seqlens`, and `DefaultInputIDs` (`src/models/io/input_ids.cpp`) always produces
 `{BatchBeamSize(), sequence_length}`. This is why `determinism_test.py`, which uses `og.Generator`,
 fails on the paged model with `Invalid rank for input: input_ids Got: 2 Expected: 1`.
 
@@ -236,36 +245,36 @@ inheriting any of the constraints that make it unusable for a server.
 The fast path is taken only when all of the following hold for the current step. Otherwise the
 existing two-phase per-request loop runs unchanged.
 
-- At least two scheduled requests, none of them already `Completed`. A completed request is skipped
-  by the per-request loops, which would leave a hole in the logits rows that a single batched
+- At least two executable scheduled requests. `TurnComplete` and `Closed` rows are skipped by the
+  per-request loops, which would otherwise leave holes in the logits rows that a single batched
   sampler call cannot express.
 - Every scheduled request resolves to the same `(k, p, temperature)` triple. `Request` funnels every
-  sampling branch into `SampleTopKTopP`, so comparing the resolved triple rather than the raw
-  options also treats equivalent spellings (`top_k == 1`, `temperature == 0`, `do_sample == false`)
-  as the same.
-- If the resolved triple is not argmax, no request pinned `random_seed`. Argmax ignores the random
-  state, so batching cannot change it; a batch-wide generator would otherwise break the
-  reproducibility a pinned seed promises.
+  sampling branch into `SampleTopKTopP`, so comparing the triple resolved from the turn policy
+  rather than the raw options also treats equivalent spellings (`top_k == 1`, `temperature == 0`,
+  `do_sample == false`) as the same.
 - The logits rows are `vocab_size` long, back to back in request order, and inside a single
   allocation. `DeviceSpan::SameBufferAs` establishes the last part, which is what makes it safe to
   widen row 0 into the `[batch, vocab]` view the sampler reads.
 - Every request's `Search` accepts a shared next-token slot. Only `GreedySearch_Cuda` does, so this
-  doubles as the device and single-row check. `num_beams == 1` and `batch_size == 1` are already
-  enforced by `Request`'s constructor.
+  doubles as the device and single-row check. `num_beams == 1` and `batch_size == 1` hold for every
+  Engine Request by construction: the Request derives its own private search parameters and forces
+  both to one (`Request::CreateRequestParams`), and `Engine::CreateRequest` rejects a model that
+  configures beam search rather than silently forcing it.
 
 Note the layout check naturally excludes mixed prefill/decode steps, which is correct: those pick
 their rows out of a larger tensor and are not the steady-state case worth optimizing.
 
 Logits processors do **not** have to be no-ops. Each request still runs `ApplyMinLength`,
 `ApplyRepetitionPenalty` and `ApplyNoRepeatNgram` over its own row of the shared tensor before the
-batched sampler runs, so `min_length` and `repetition_penalty` stay per-request.
+batched sampler runs, so the turn's minimum generated tokens and repetition penalty stay
+per-request.
 
-Per-request `max_length` and per-request EOS token sets likewise do not need to match, because those
-are handled after sampling, in the per-request tail (see 5.4).
+Per-Request session limits and EOS token sets likewise do not need to match, because those are
+handled after sampling, in the per-request tail (see 5.4).
 
 ### 5.3 Layering
 
-`cuda::SamplingData` and `cuda::GetSample` live in `src/cuda/` and cannot be referenced from
+`cuda::SamplingData` and `cuda::GetSample` live in `src/ep/cuda/` and cannot be referenced from
 device-agnostic code under `src/engine/`. The batched entry point therefore goes behind
 `DeviceInterface` (`src/smartptrs.h`), alongside the existing `Cast`, `UpdatePositionIds` and
 `LaunchAddLogitsMask` hooks, with a default implementation that reports "unsupported" so non-CUDA
@@ -313,15 +322,15 @@ slot and copies the shared buffer back itself, which is why a partial bind can s
 | File | Change |
 |---|---|
 | `src/smartptrs.h` | Add `DeviceInterface::SampleTopKTopP(...)` returning `false` by default, and `DeviceSpan::SameBufferAs` so the engine can tell whether pointer arithmetic between two spans is meaningful. |
-| `src/cuda/interface.cpp` | Override `SampleTopKTopP`: lazily create/reuse a batch-sized `cuda::SamplingData`, call `cuda::GetSample` once, return `true`. Re-create the workspace only when the requested batch exceeds the cached capacity. |
+| `src/ep/cuda/interface.cpp` | Override `SampleTopKTopP`: lazily create/reuse a batch-sized `cuda::SamplingData`, call `cuda::GetSample` once, return `true`. Re-create the workspace only when the requested batch exceeds the cached capacity. |
 | `src/search.h` | Add `virtual bool BindNextTokensSlot(DeviceSpan<int32_t> /*slot*/) { return false; }` and `virtual void OnNextTokensSampled() {}`, both no-ops so CPU/beam/`Generator` paths are unaffected. |
-| `src/cuda/search_cuda.h` / `.cpp` | `GreedySearch_Cuda` overrides both. `BindNextTokensSlot` rejects unless the search is single-row and the slot is one element, then repoints `next_tokens_buffer_` and `next_tokens_`. The post-sampling tail moves into `LaunchNextTokensTail()`, shared by `SampleTopKTopP` and `OnNextTokensSampled`. `CompleteGeneration` skips its own `CopyDeviceToCpu()` when the caller owns the copy. |
+| `src/ep/cuda/search_cuda.h` / `.cpp` | `GreedySearch_Cuda` overrides both. `BindNextTokensSlot` rejects unless the search is single-row and the slot is one element, then repoints `next_tokens_buffer_` and `next_tokens_`. The post-sampling tail moves into `LaunchNextTokensTail()`, shared by `SampleTopKTopP` and `OnNextTokensSampled`. `CompleteGeneration` skips its own `CopyDeviceToCpu()` when the caller owns the copy. |
 | `src/engine/engine.h` / `.cpp` | Own the shared next-token `DeviceSpan<int32_t>`, grown as batches get larger, and hand it to `ScheduledRequests` each step. |
 | `src/engine/scheduled_requests.h` / `.cpp` | Implement the gate and the fast path in `GenerateNextTokens()`; keep the existing two-loop path as the fallback. |
-| `src/engine/request.h` / `.cpp` | Split the pre-sampling half of `GenerateNextTokens()` into `PrepareGeneration()`, and forward `SearchOptions()`, `BindNextTokensSlot()` and `OnNextTokensSampled()`. |
+| `src/engine/request.h` / `.cpp` | Split the pre-sampling half of `GenerateNextTokens()` into `PrepareGeneration()`, and forward `TurnPolicy()`, `BindNextTokensSlot()` and `OnNextTokensSampled()`. |
 | `src/engine/decoders/*_decoder_io.cpp` | Wrap the fp32 logits tensor once instead of per row. `Tensor::GetDeviceSpan()` wraps the tensor memory afresh on each call, so calling it inside the loop produced rows that were adjacent in device memory but belonged to unrelated `DeviceBuffer` objects, which the gate has to reject. This also removes N redundant wraps per step. |
 
-Nothing outside `src/engine/` and `src/cuda/` changes behaviour: the new `Search` virtuals default
+Nothing outside `src/engine/` and `src/ep/cuda/` changes behaviour: the new `Search` virtuals default
 to no-ops, and `DeviceInterface::SampleTopKTopP` defaults to "unsupported".
 
 ### 5.6 Secondary benefit: memory
@@ -389,10 +398,10 @@ because of heterogeneous parameters, pinned seeds, batch size one, or ragged log
 Generator design" option in its strongest form. It was rejected because it requires reworking
 `Sequences` to carry a per-row length cursor (today: one `current_length_`, and `GetSequence(i)`
 depends on it), reworking every kernel that writes at a shared `past_length` offset, moving
-per-request `GeneratorParams` into per-row arrays, and adding row allocation/eviction to `Search`.
-It also collides with `Request`'s public lifecycle — `Assign`, `Remove`, `AddTokens` can all be
-called outside the engine. It is a plausible long-term direction, but it is a rewrite of the search
-layer, and Phase 2 gets most of the benefit without touching any of it.
+per-request search parameters into per-row arrays, and adding row allocation/eviction to `Search`.
+It also collides with the Engine-owned Request lifecycle and its externally serialized
+`BeginTurn`/`Run`/`Close` contract. It is a plausible long-term direction, but it is a rewrite of the
+search layer, and Phase 2 gets most of the benefit without touching any of it.
 
 **Batch `CheckForEOSAndPad` and `AppendNextTokensToSequences` too.** Worth roughly 0.16 ms. Needs
 per-row done flags, per-row EOS token sets and pointer-array kernels because each request's

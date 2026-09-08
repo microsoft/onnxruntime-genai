@@ -4,6 +4,8 @@ This guide explains how to build, test, and lint **ONNX Runtime GenAI** from sou
 
 For end-user install instructions (pip / NuGet), see the [README](../README.md) and the [official docs](https://onnxruntime.ai/docs/genai).
 
+For the current continuous-batching architecture and transactional paged KV-cache flow, see [Paged Attention Engine](paged_attention_engine.md). The performance and design history behind the batching implementation is documented separately in [Engine Batching Design](paged_attention_batching.md).
+
 ---
 
 ## 1. Prerequisites

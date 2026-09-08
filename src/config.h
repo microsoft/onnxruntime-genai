@@ -7,6 +7,7 @@
 #include "provider_options.h"
 
 #include <functional>
+#include <memory>
 
 namespace Generators {
 
@@ -23,15 +24,25 @@ struct Config {
     static constexpr std::string_view PositionIdsName = "position_ids";
     static constexpr std::string_view PastKeyName = "past_key_values.%d.key";
     static constexpr std::string_view PastValueName = "past_key_values.%d.value";
+    static constexpr std::string_view PastConvName = "past_key_values.%d.conv_state";
+    static constexpr std::string_view PastRecurrentName = "past_key_values.%d.recurrent_state";
     static constexpr std::string_view LogitsName = "logits";
     static constexpr std::string_view PresentKeyName = "present.%d.key";
     static constexpr std::string_view PresentValueName = "present.%d.value";
+    static constexpr std::string_view PresentConvName = "present.%d.conv_state";
+    static constexpr std::string_view PresentRecurrentName = "present.%d.recurrent_state";
+    static constexpr std::string_view StateUpdateCaptureCountName = "state_update_capture_count";
+    static constexpr std::string_view StateUpdateActiveName = "state_update_active";
+    static constexpr std::string_view StateUpdateConvValueName = "state_update.%d.conv_value";
+    static constexpr std::string_view StateUpdateRecurrentCapsuleName = "state_update.%d.recurrent_capsule";
+    static constexpr std::string_view HiddenStatesName = "hidden_states";
     static constexpr std::string_view RnnStatesName = "rnn_states";
     static constexpr std::string_view RnnStatesPrevName = "rnn_states_prev";
     static constexpr std::string_view CumulativeSequenceLengthsName = "cumulative_sequence_lengths";
     static constexpr std::string_view SequenceLengthsName = "sequence_lengths";
     static constexpr std::string_view PastSequenceLengthsName = "past_sequence_lengths";
     static constexpr std::string_view BlockTableName = "block_table";
+    static constexpr std::string_view BlockTableWindowedName = "block_table_windowed";
     static constexpr std::string_view AttentionMetadataName = "attention_metadata";
 
     // Speech encoder names
@@ -40,6 +51,7 @@ struct Config {
     static constexpr std::string_view AudioProjectionModeName = "audio_projection_mode";
     static constexpr std::string_view AudioFeaturesName = "audio_features";
     static constexpr std::string_view NumAudioTokens = "num_audio_tokens";
+    static constexpr std::string_view OutputCrossQKName = "output_cross_qk_%d";
 
     // Vision encoder names
     static constexpr std::string_view PixelValuesName = "pixel_values";
@@ -333,16 +345,29 @@ struct Config {
       std::optional<RunOptions> run_options;
     } vad;
 
+    struct SharedInitializer {
+      std::string name;
+      std::string data_file;
+      std::string offset;
+      std::string length;
+      int data_type{};
+      std::vector<int64_t> shape;
+    };
+
     struct Decoder {
       std::string filename;
       SessionOptions session_options;
       std::optional<RunOptions> run_options;
+      std::vector<SharedInitializer> shared_initializers;
 
       int hidden_size{};          // Not currently used, potentially useful for embeddings in the future
       int num_attention_heads{};  // Not currently used, potentially useful if num_key_value_heads isn't set
       int num_key_value_heads{};
       int num_hidden_layers{};
       int head_size{};
+      // Compact per-token state transitions a forward captures so a partial accept can be replayed
+      // without rerunning the model. 0 means the model does not export the state-update bindings.
+      int state_update_capacity{};
 
       // Hybrid SSM+Attention (LFM2) parameters
       std::vector<std::string> layer_types;  // Per-layer type: "conv" or "full_attention"
@@ -364,6 +389,36 @@ struct Config {
       };
       std::optional<SlidingWindow> sliding_window;
 
+      enum class StateGroupKind {
+        Invalid,
+        PagedKeyValue,
+        FixedConv,
+        FixedRecurrent,
+      };
+
+      enum class StateUpdateKind {
+        Invalid,
+        CausalConv,
+        GatedDeltaNet,
+      };
+
+      static constexpr int MaxStateUpdateCapacity = 8;
+
+      struct StateUpdate {
+        int capacity{};
+        bool enabled{true};
+        int key_head_count{};
+      };
+
+      struct StateGroup {
+        StateGroupKind kind{StateGroupKind::Invalid};
+        std::vector<int> layer_ids;
+        std::optional<StateUpdate> state_update;
+      };
+
+      // Absence preserves the legacy dense, sequential paged-KV contract.
+      std::optional<std::vector<StateGroup>> state_groups;
+
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};
         std::string embeddings{Defaults::InputsEmbedsName};
@@ -384,8 +439,19 @@ struct Config {
         std::string cumulative_sequence_lengths{Defaults::CumulativeSequenceLengthsName};
         std::string past_sequence_lengths{Defaults::PastSequenceLengthsName};
         std::string block_table{Defaults::BlockTableName};
+        // Second block table read by the sliding-window layers. Their cache is a ring of blocks, so
+        // this table repeats a request's few blocks across the columns instead of listing distinct
+        // ones. Empty when the model has no windowed paged layers.
+        std::string block_table_windowed{Defaults::BlockTableWindowedName};
         std::string attention_metadata{Defaults::AttentionMetadataName};
-        std::string past_conv_names{"past_conv.%d"};  // Conv cache input name template (LFM2)
+        std::string past_conv_names{Defaults::PastConvName};  // Conv cache input name template (LFM2)
+        std::string past_recurrent_names{Defaults::PastRecurrentName};
+        std::string state_update_capture_count{Defaults::StateUpdateCaptureCountName};  // Per-sequence capture count
+        std::string state_update_active{Defaults::StateUpdateActiveName};               // Capture enable flag
+
+        // Last hidden-state input (e.g. the MTP head consumes the main model's hidden state).
+        // Empty unless the model graph takes a hidden_states input.
+        std::string hidden_states;
 
         // RNNT decoder inputs
         std::string targets;
@@ -404,9 +470,16 @@ struct Config {
         std::string present_key_names{Defaults::PresentKeyName};
         std::string present_value_names{Defaults::PresentValueName};
         std::string present_names;  // When key/value pairs are combined
-        std::string output_cross_qk_names{"output_cross_qk_%d"};
+        std::string output_cross_qk_names{Defaults::OutputCrossQKName};
         std::string rnn_states{Defaults::RnnStatesName};
-        std::string present_conv_names{"present_conv.%d"};  // Conv cache output name template (LFM2)
+        std::string present_conv_names{Defaults::PresentConvName};  // Conv cache output name template (LFM2)
+        std::string present_recurrent_names{Defaults::PresentRecurrentName};
+        std::string state_update_conv_value_names{Defaults::StateUpdateConvValueName};
+        std::string state_update_recurrent_capsule_names{Defaults::StateUpdateRecurrentCapsuleName};
+        std::string hidden_states;  // Last hidden state output (when exported with include_hidden_states; e.g. fed to the MTP head)
+        // Residual streams tapped at model.dflash2.aux_hidden_state_layers, concatenated on the
+        // last axis. Empty unless the model was exported with aux_hidden_state_layers.
+        std::string aux_hidden_states;
 
         // RNNT decoder outputs
         std::string outputs;
@@ -429,15 +502,102 @@ struct Config {
         bool run_on_prompt{true};
         bool run_on_token_gen{true};
         bool is_lm_head{false};
-        int reset_session_idx{-1};  // Some models cannot keep all the ort sessions in memory at once due to memory constraints.
-                                    // This is the index of the session that needs to be reset during the execution of the current session.
-                                    // This is a temporary solution until the QNN driver updates are available.
-                                    // Once the driver updates are available, this option will be deprecated.
+        bool inherit_session_options{false};  // If true, the top level (decoder) session options are used as the
+                                              // base for this component's session options, which are then overlaid
+                                              // on top of them.
+        int reset_session_idx{-1};            // Some models cannot keep all the ort sessions in memory at once due to memory constraints.
+                                              // This is the index of the session that needs to be reset during the execution of the current session.
+                                              // This is a temporary solution until the QNN driver updates are available.
+                                              // Once the driver updates are available, this option will be deprecated.
       };
 
       std::vector<PipelineModel> pipeline;
 
     } decoder;
+
+    // Multi-token-prediction (MTP) self-speculative head metadata (e.g. Qwen3.6). The caller
+    // loads the head as a separate Model; MtpGenerator uses this block to map the main model's
+    // hidden-state output and the head's feedback output.
+    struct Mtp {
+      std::string filename;  // e.g. "mtp.onnx"; used by model packaging/building tools
+      std::optional<SessionOptions> session_options;
+      std::optional<RunOptions> run_options;
+      // Empty intentionally means the head does not share the main decoder's initializers.
+      std::vector<SharedInitializer> shared_initializers;
+
+      int num_hidden_layers{1};  // The MTP head has a single decoder layer.
+      int num_key_value_heads{};
+      int head_size{};
+
+      // Name of the main decoder's hidden-states output that feeds the MTP head.
+      // The main model must be exported with this output exposed (include_hidden_states).
+      std::string main_hidden_states{Defaults::HiddenStatesName};
+
+      struct Inputs {
+        std::string input_ids{Defaults::InputIdsName};
+        std::string hidden_states{Defaults::HiddenStatesName};
+        std::string attention_mask{Defaults::AttentionMaskName};
+        std::string position_ids{Defaults::PositionIdsName};
+        std::string past_key_names{Defaults::PastKeyName};
+        std::string past_value_names{Defaults::PastValueName};
+      } inputs;
+
+      struct Outputs {
+        std::string logits{Defaults::LogitsName};
+        std::string hidden_states{"hidden_states_out"};
+        std::string present_key_names{Defaults::PresentKeyName};
+        std::string present_value_names{Defaults::PresentValueName};
+      } outputs;
+    } mtp;
+
+    // DFlash 2/DSpark block-drafter metadata. Unlike MTP the drafter is not decoder-shaped: it
+    // reads the main model's auxiliary hidden states, predicts a whole block of tokens at once,
+    // and returns a candidate lattice that the Engine walks greedily. model.dspark is a config
+    // alias for this shared runtime.
+    struct Dflash2 {
+      std::string filename;  // e.g. "dflash2.onnx"
+      bool is_dspark{};      // True when parsed from the model.dspark alias.
+      std::optional<bool> configured_alias_is_dspark;
+      std::optional<SessionOptions> session_options;
+      std::optional<RunOptions> run_options;
+      std::vector<SharedInitializer> shared_initializers;
+
+      int num_hidden_layers{};
+      int num_key_value_heads{};
+      int head_size{};
+      int block_size{};        // Query rows per request.
+      int num_draft_tokens{};  // DFlash 2: block_size - 1; DSpark: block_size.
+      int selector_top_k{};
+      int mask_token_id{};
+      int sliding_window{-1};
+      std::vector<int> aux_hidden_state_layers;
+
+      // Name of the main decoder's auxiliary hidden-states output that feeds the drafter.
+      std::string main_aux_hidden_states{"aux_hidden_states"};
+
+      struct Inputs {
+        std::string aux_hidden_states{"aux_hidden_states"};
+        std::string input_ids{Defaults::InputIdsName};
+        std::string q_row_map{"q_row_map"};
+        std::string qkv_row_map{"qkv_row_map"};
+        std::string block_row_index{"block_row_index"};
+        std::string cumulative_sequence_lengths{Defaults::CumulativeSequenceLengthsName};
+        std::string past_sequence_lengths{Defaults::PastSequenceLengthsName};
+        std::string block_table{Defaults::BlockTableName};
+        std::string attention_metadata{Defaults::AttentionMetadataName};
+        std::string past_key_names{Defaults::PastKeyName};
+        std::string past_value_names{Defaults::PastValueName};
+      } inputs;
+
+      struct Outputs {
+        std::string candidate_ids{"draft_candidate_ids"};
+        std::string scores{"draft_scores"};
+        std::string present_key_names{Defaults::PresentKeyName};
+        std::string present_value_names{Defaults::PresentValueName};
+      } outputs;
+    } dflash2;
+
+    std::optional<Decoder> draft;
 
   } model;
 
@@ -462,12 +622,25 @@ struct Config {
     float blank_penalty{};             // Penalty applied to blank token logits in CTC/RNNT decoding. Default 0 means no penalty.
   } search;
 
+  struct Speculative {
+    // Fixed proposal width when min_adaptive_k is 0. Four conservatively amortizes target
+    // verification without excessive draft work; the best value depends on acceptance and EP cost.
+    int max_draft_tokens{4};
+    int ngram_size{};             // 0 disables n-gram decoding; 2-16 matches the last N-1 tokens.
+    bool ngram_chained_lookup{};  // Refill the proposal by repeatedly looking up synthetic context.
+    // 0 disables adaptation. Values 1-16 enable it and set the starting width and floor;
+    // adjacent-width probes may grow the effective width up to the hard limit of 16.
+    int min_adaptive_k{};
+    bool cooldown{};  // Skip one speculative attempt after three zero-accept rounds.
+  } speculative;
+
   struct Engine {
     struct DynamicBatching {
       size_t block_size{256};                       // Total number of slots per block.
       std::optional<size_t> num_blocks;             // Total number of blocks per layer.
       std::optional<float> gpu_utilization_factor;  // Fraction of free GPU memory to use for key-value cache.
       size_t max_batch_size{16};                    // Maximum batch size for dynamically batching requests.
+      size_t max_scheduled_tokens{2048};            // Maximum tokens in one dynamically batched model run.
     };
     std::optional<DynamicBatching> dynamic_batching;  // Dynamic batching settings
 
@@ -475,7 +648,15 @@ struct Config {
       size_t max_batch_size{4};  // Maximum batch size for static batching
     };
     std::optional<StaticBatching> static_batching;  // Static batching settings
-  } engine;                                         // Engine settings
+
+    // Runtime-only capability flag, never parsed from genai_config.json. The Engine sets it on
+    // every decoder whose packed hidden states it consumes: the target decoder feeds the MTP head,
+    // and the head feeds the next link of a chained draft. Models that merely export hidden states
+    // leave it false so an ordinary step does not pay for the extra output.
+    bool hidden_states_output_required{};
+    // Runtime-only counterpart for the auxiliary hidden states consumed by DFlash 2.
+    bool aux_hidden_states_output_required{};
+  } engine;  // Engine settings
 
   void AddMapping(const std::string& nominal_name, const std::string& graph_name);
   // Returns graph name and true if the nominal name is found in the mapping
@@ -488,6 +669,12 @@ struct Config {
 
 void SetSearchNumber(Config::Search& search, std::string_view name, double value);
 void SetSearchBool(Config::Search& search, std::string_view name, bool value);
+void SetSpeculativeNumber(Config::Speculative& speculative, std::string_view name, double value);
+void SetSpeculativeBool(Config::Speculative& speculative, std::string_view name, bool value);
+// Build the decoder-model view used to run model.mtp as an internal session. The projection keeps
+// the main model's device, batching and paged-attention contract, but replaces model-specific
+// decoder state with the single MTP attention layer.
+std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);

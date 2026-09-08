@@ -9,7 +9,6 @@ import logging
 import os
 import re
 import shutil
-import sysconfig
 import tempfile
 from pathlib import Path
 
@@ -55,6 +54,17 @@ def test_config(test_data_path):
     config.set_provider_option("cuda", "infinite_clock", "1")
     config.set_provider_option("quantum", "break_universe", "true")
     config.append_provider("slide rule")
+
+
+def test_tokenizer_create_from_config_and_path(test_data_path):
+    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    text = "She sells sea shells by the sea shore."
+
+    config = og.Config(model_path)
+    tokenizer_from_config = og.Tokenizer(config)
+    tokenizer_from_path = og.Tokenizer(model_path)
+
+    assert tokenizer_from_path.decode(tokenizer_from_config.encode(text)) == text
 
 
 def test_telemetry_control():
@@ -187,6 +197,23 @@ def test_greedy_search(test_data_path, relative_model_path):
     for i in range(batch_size):
         assert np.array_equal(expected_sequence[i], generator.get_sequence(i))
     assert int(generator.token_count()) == len(generator.get_sequence(0))
+
+
+def test_marian_batch_sequence_values(test_data_path):
+    model_path = os.fspath(Path(test_data_path) / "models" / "marian-batch-values")
+    model = og.Model(model_path)
+
+    params = og.GeneratorParams(model)
+    params.set_search_options(batch_size=2)
+
+    generator = og.Generator(model, params)
+    generator.append_tokens(np.array([[5, 32000], [7, 8]], dtype=np.int32))
+    generated_start = generator.token_count()
+    generator.generate_next_token()
+
+    assert generated_start == 2
+    assert generator.get_sequence(0)[generated_start] == 2
+    assert generator.get_sequence(1)[generated_start] == 3
 
 
 @pytest.mark.parametrize(
@@ -869,6 +896,8 @@ def test_preset_extra_inputs(test_data_path, device, phi2_for, extra_inputs):
 
     if device == "dml":
         pytest.skip("EP DML does not support preset extra inputs")
+    if device == "cuda" and not extra_inputs[1]:
+        pytest.skip("Missing-input error handling is covered by non-CUDA EPs")
 
     model_path, valid_model = _prepare_model(test_data_path)
     model = og.Model(model_path)
@@ -1191,6 +1220,7 @@ def test_streaming_asr_transcription_quality(nemotron_speech_model_path, test_da
 #
 # Graph capture requires expensive recompilation and model generation, so we only
 # build and test it on supported EPs (CUDA, DML, WebGPU). CPU does not support it.
+
 
 @pytest.mark.graph_capture
 @pytest.mark.parametrize("device", devices)

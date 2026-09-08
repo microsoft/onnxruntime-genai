@@ -258,6 +258,12 @@ def _parse_args():
         help="Skip building the sample executables. Builds only on Linux and Windows otherwise.",
     )
 
+    parser.add_argument(
+        "--build_engine_benchmark",
+        action="store_true",
+        help="Build the GenAI engine benchmark and stage its runtime dependencies. Linux only.",
+    )
+
     return parser.parse_args()
 
 
@@ -631,6 +637,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         f"-DENABLE_JAVA={'ON' if args.build_java else 'OFF'}",
         f"-DBUILD_WHEEL={build_wheel}",
         f"-DUSE_GUIDANCE={'ON' if args.use_guidance else 'OFF'}",
+        f"-DENABLE_ENGINE_BENCHMARK={'ON' if args.build_engine_benchmark else 'OFF'}",
         f"-DPUBLISH_JAVA_MAVEN_LOCAL={'ON' if args.publish_java_maven_local else 'OFF'}",
         f"-DENABLE_TELEMETRY={'OFF' if args.no_telemetry or util.is_aix() or args.macos == 'Catalyst' else 'ON'}",
     ]
@@ -790,6 +797,10 @@ def build(args: argparse.Namespace, env: dict[str, str]):
         csharp_build_command += _get_csharp_properties(args)
         util.run(csharp_build_command, cwd=REPO_ROOT / "src" / "csharp")
         util.run(csharp_build_command, cwd=REPO_ROOT / "test" / "csharp")
+
+    engine_benchmark_dir = args.build_dir / "benchmark" / "engine"
+    if args.build_engine_benchmark and util.is_linux() and engine_benchmark_dir.is_dir():
+        util.setup_engine_benchmark_dependencies(args.build_dir, engine_benchmark_dir)
 
 
 def install_core(args: argparse.Namespace, env: dict[str, str]):

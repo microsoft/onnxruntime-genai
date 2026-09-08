@@ -21,6 +21,7 @@ option(TEST_QWEN_2_5 "Enable tests for Qwen-2.5 0.5B" OFF)
 
 # performance
 option(ENABLE_MODEL_BENCHMARK "Build model benchmark program" ON)
+option(ENABLE_ENGINE_BENCHMARK "Build the GenAI engine benchmark program" OFF)
 
 # diagnostics
 option(ENABLE_TRACING "Enable recording of tracing data" OFF)

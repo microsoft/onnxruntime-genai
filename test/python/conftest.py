@@ -2,9 +2,13 @@
 # Licensed under the MIT License
 
 import functools
+import logging
 import os
 
 import pytest
+from _test_utils import register_plugin_providers
+
+register_plugin_providers(logging.getLogger(__name__))
 
 
 def pytest_addoption(parser):

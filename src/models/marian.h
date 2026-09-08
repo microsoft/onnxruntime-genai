@@ -1,8 +1,8 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #include "model.h"
-#include "input_ids.h"
-#include "position_inputs.h"
+#include "models/io/input_ids.h"
+#include "models/io/default_position_inputs.h"
 
 namespace Generators {
 
@@ -70,6 +70,7 @@ struct MarianState : State {
 
  private:
   const MarianModel& model_;
+  void UpdateRnnStates(DeviceSpan<int32_t> next_indices);
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices, int current_length, bool search_buffers);
 
   // Encoder IOs

@@ -21,6 +21,35 @@
   OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
 }
 
+- (nullable instancetype)initWithConfig:(OGAConfig*)config error:(NSError**)error {
+  if ((self = [super init]) == nil) {
+    return nil;
+  }
+
+  if (!config) {
+    OGASaveCodeAndDescriptionToError(0x0A, @"config must not be nil.", error);
+    return nil;
+  }
+
+  try {
+    _tokenizer = OgaTokenizer::Create([config CXXAPIOgaConfig]);
+    return self;
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
+}
+
+- (nullable instancetype)initWithPath:(NSString*)path error:(NSError**)error {
+  if ((self = [super init]) == nil) {
+    return nil;
+  }
+
+  try {
+    _tokenizer = OgaTokenizer::Create([path UTF8String]);
+    return self;
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
+}
+
 - (int32_t)getBosTokenId:(NSError**)error {
   try {
     return _tokenizer->GetBosTokenId();

@@ -19,20 +19,21 @@ from pathlib import Path
 
 import pytest
 
-BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
+QUANTIZATION_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "quantization"
 
 
 def _load_builder_module(module_name):
-    spec = importlib.util.spec_from_file_location(f"models.builders.{module_name}", BUILDERS_DIR / f"{module_name}.py")
+    spec = importlib.util.spec_from_file_location(
+        f"models.quantization.{module_name}", QUANTIZATION_DIR / f"{module_name}.py"
+    )
     module = importlib.util.module_from_spec(spec)
-    sys.modules[f"models.builders.{module_name}"] = module
+    sys.modules[f"models.quantization.{module_name}"] = module
     spec.loader.exec_module(module)
     return module
 
 
 sys.modules.setdefault("models", types.ModuleType("models"))
-_builders_package = sys.modules.setdefault("models.builders", types.ModuleType("models.builders"))
-_builders_package.__path__ = [str(BUILDERS_DIR)]
+sys.modules.setdefault("models.quantization", types.ModuleType("models.quantization"))
 
 qc = _load_builder_module("quant_config")
 QuantConfig = qc.QuantConfig
@@ -228,6 +229,7 @@ def test_extra_options_precision_float_disables_weight_quant():
     cfg = QuantConfig.from_extra_options({}, precision="bf16", execution_provider="cuda")
     assert cfg.io_dtype == "bf16"
     assert cfg.weights.type == "none"
+    assert cfg.moe.type == "none"
 
 
 def test_extra_options_cpu_default_block_size_and_accuracy_level():

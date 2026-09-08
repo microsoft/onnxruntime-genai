@@ -131,6 +131,7 @@ endif()
 
 target_include_directories(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} ${ORT_HEADER_DIR})
 target_include_directories(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} ${onnxruntime_extensions_SOURCE_DIR}/shared/api)
+target_include_directories(${ORTGENAI_COMPILE_TARGET} PRIVATE ${GENERATORS_ROOT})
 target_link_libraries(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} onnxruntime_extensions)
 target_link_directories(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} ${ORT_LIB_DIR})
 target_link_libraries(${ORTGENAI_COMPILE_TARGET} ${ORTGENAI_USAGE_SCOPE} Threads::Threads)
@@ -252,19 +253,21 @@ if((USE_CUDA OR USE_TRT_RTX) AND CMAKE_CUDA_COMPILER)
     add_library(onnxruntime-genai-cuda SHARED ${generator_cudalib_srcs})
   endif()
   target_include_directories(onnxruntime-genai-cuda PRIVATE ${ORT_HEADER_DIR})
+  target_include_directories(onnxruntime-genai-cuda PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/include)
+  target_include_directories(onnxruntime-genai-cuda PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/shared/api)
   target_include_directories(onnxruntime-genai-cuda PRIVATE ${GENERATORS_ROOT})
   target_link_libraries(onnxruntime-genai-cuda PRIVATE cublasLt cublas curand cufft cudart)
   set_target_properties(onnxruntime-genai-cuda PROPERTIES LINKER_LANGUAGE CUDA)
   set_target_properties(onnxruntime-genai-cuda PROPERTIES FOLDER "GenAI")
   add_dependencies(onnxruntime-genai onnxruntime-genai-cuda)
-  source_group(TREE ${GENERATORS_ROOT}/cuda FILES ${generator_cudalib_srcs})
+  source_group(TREE ${GENERATORS_ROOT}/ep/cuda FILES ${generator_cudalib_srcs})
   list(APPEND ortgenai_embed_libs "$<TARGET_FILE:onnxruntime-genai-cuda>")
   if(APPLE)
-    set_property(TARGET onnxruntime-genai-cuda APPEND_STRING PROPERTY LINK_FLAGS "-Xlinker -exported_symbols_list ${GENERATORS_ROOT}/cuda/exported_symbols.lst")
+    set_property(TARGET onnxruntime-genai-cuda APPEND_STRING PROPERTY LINK_FLAGS "-Xlinker -exported_symbols_list ${GENERATORS_ROOT}/ep/cuda/exported_symbols.lst")
   elseif(UNIX)
-    set_property(TARGET onnxruntime-genai-cuda APPEND_STRING PROPERTY LINK_FLAGS "-Xlinker --version-script=${GENERATORS_ROOT}/cuda/version_script.lds -Xlinker --gc-sections")
+    set_property(TARGET onnxruntime-genai-cuda APPEND_STRING PROPERTY LINK_FLAGS "-Xlinker --version-script=${GENERATORS_ROOT}/ep/cuda/version_script.lds -Xlinker --gc-sections")
   elseif(WIN32)
-    set_property(TARGET onnxruntime-genai-cuda APPEND_STRING PROPERTY LINK_FLAGS "-DEF:\"${GENERATORS_ROOT}/cuda/symbols.def\"")
+    set_property(TARGET onnxruntime-genai-cuda APPEND_STRING PROPERTY LINK_FLAGS "-DEF:\"${GENERATORS_ROOT}/ep/cuda/symbols.def\"")
   else()
     message(FATAL_ERROR "${target} unknown platform, need to specify shared library exports for it")
   endif()
@@ -330,13 +333,14 @@ if(USE_DML)
   get_filename_component(PACKAGES_DIR ${CMAKE_CURRENT_BINARY_DIR}/_deps ABSOLUTE)
   set(DXC_PACKAGE_DIR ${PACKAGES_DIR}/Microsoft.Direct3D.DXC.1.7.2308.12)
   set(PACKAGES_CONFIG ${PROJECT_SOURCE_DIR}/packages.config)
+  find_program(NUGET_PATH NAMES nuget nuget.exe REQUIRED)
   set(NUGET_RESTORE_COMMAND
-    ${CMAKE_CURRENT_BINARY_DIR}/nuget/src/nuget restore
-    ${PACKAGES_CONFIG}
-    -PackagesDirectory ${PACKAGES_DIR}
+    "${NUGET_PATH}" restore
+    "${PACKAGES_CONFIG}"
+    -PackagesDirectory "${PACKAGES_DIR}"
   )
   if(NUGET_PACKAGE_SOURCE)
-    list(APPEND NUGET_RESTORE_COMMAND -Source ${NUGET_PACKAGE_SOURCE})
+    list(APPEND NUGET_RESTORE_COMMAND -Source "${NUGET_PACKAGE_SOURCE}")
   endif()
 
   add_custom_command(
@@ -354,7 +358,6 @@ if(USE_DML)
     ${DXC_PACKAGE_DIR}/build/native/bin/x64/dxc.exe
   )
 
-  add_dependencies(RESTORE_PACKAGES nuget)
   add_dependencies(${ORTGENAI_COMPILE_TARGET} RESTORE_PACKAGES)
 endif()
 
@@ -387,6 +390,11 @@ endif()
 if(ENABLE_MODEL_BENCHMARK)
   message("------------------Enabling model benchmark------------------")
   add_subdirectory("${REPO_ROOT}/benchmark/c")
+endif()
+
+if(ENABLE_ENGINE_BENCHMARK)
+  message("------------------Enabling engine benchmark------------------")
+  add_subdirectory("${REPO_ROOT}/benchmark/engine")
 endif()
 
 # Have visual studio put all files into one single folder vs the default split of header files into a separate folder

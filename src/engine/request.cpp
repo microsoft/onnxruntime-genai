@@ -4,14 +4,67 @@
 #include "request.h"
 
 #include "engine.h"
+#include "sequence_positions.h"
+#include "../constrained_logits_processor.h"
 #include "../search.h"
+#include "../stop_string_controller.h"
 
 namespace Generators {
 
 namespace {
 
-DeviceSpan<int32_t> AllocateOnDevice(GeneratorParams& params,
-                                     std::span<const int32_t> input_ids) {
+// Preserves the existing host output for every seed that fits in 32 bits, so an Engine turn seeded
+// with a value the classic Generator could also express reproduces exactly the same token stream.
+// A seed with a nonzero high half -- which the classic int seed could never express -- mixes both
+// halves through a seed sequence.
+std::mt19937 MakeHostRandomGenerator(uint64_t seed) {
+  if (seed <= std::numeric_limits<uint32_t>::max()) {
+    return std::mt19937{static_cast<uint32_t>(seed)};
+  }
+  std::seed_seq seed_sequence{static_cast<uint32_t>(seed & 0xffffffffu),
+                              static_cast<uint32_t>(seed >> 32)};
+  return std::mt19937{seed_sequence};
+}
+
+// The model-configured seed initializes the Request's durable basis exactly once. A negative
+// configured seed means "pick one", and the drawn value becomes the basis so later turns that omit
+// a seed continue that same stream instead of redrawing.
+uint64_t InitialSeedBasis(int configured_seed) {
+  if (configured_seed >= 0) {
+    return static_cast<uint64_t>(configured_seed);
+  }
+  static thread_local std::random_device random_device;
+  const uint64_t high = random_device();
+  const uint64_t low = random_device();
+  return (high << 32) | low;
+}
+
+}  // namespace
+
+std::shared_ptr<GeneratorParams> Request::CreateRequestParams(
+    const Model& model,
+    size_t max_session_tokens) {
+  auto params = std::make_shared<GeneratorParams>(model);
+  // A Request is one sequence and the Engine batches Requests, not rows within a Request. These are
+  // internal invariants every Request holds, including the scheduler-private MTP shadows built from
+  // a second model: several places here read row 0 only, and beam search never overrides the
+  // deferred-completion contract. Engine::CreateRequest() separately rejects a public Request whose
+  // model configures num_beams != 1, so forcing it here never silently changes what a caller asked
+  // for.
+  params->search.batch_size = 1;
+  params->search.num_beams = 1;
+  // The Request's session limit is the only length limit the Search may complete on.
+  params->search.max_length = static_cast<int>(max_session_tokens);
+  // Generation policy fields such as sampling, penalties, minimum length, and seed are inert
+  // constructor storage. Engine generation reads Request::TurnPolicy(); search.chunk_size remains
+  // live model-owned scheduler policy and is exposed through Request::PrefillChunkSize().
+  // Guidance is turn-scoped and installed at turn admission; the Request itself is never guided.
+  return params;
+}
+
+DeviceSpan<int32_t> Request::AllocateOnDevice(
+    GeneratorParams& params,
+    std::span<const int32_t> input_ids) {
   auto device_tokens = params.p_device->Allocate<int32_t>(input_ids.size());
   auto cpu_tokens = device_tokens.CpuSpan();
   std::copy(input_ids.begin(), input_ids.end(), cpu_tokens.begin());
@@ -19,40 +72,310 @@ DeviceSpan<int32_t> AllocateOnDevice(GeneratorParams& params,
   return device_tokens;
 }
 
-}  // namespace
+void Request::ValidateAppendLength(
+    size_t max_session_tokens,
+    size_t current_sequence_length,
+    size_t token_count) {
+  if (current_sequence_length >= max_session_tokens ||
+      token_count >= max_session_tokens - current_sequence_length) {
+    throw std::runtime_error(
+        "Appending input_tokens_count (" + std::to_string(token_count) +
+        ") to current_sequence_length (" +
+        std::to_string(current_sequence_length) +
+        ") must leave room for at least one generated token before "
+        "max_session_tokens (" +
+        std::to_string(max_session_tokens) + ").");
+  }
+}
 
-Request::Request(std::shared_ptr<GeneratorParams> params)
-    : params_{params}, search_{CreateSearch(*params.get())} {
-  // A request is one sequence: the engine batches requests, not rows within a request. Several
-  // places here read row 0 only (UnprocessedTokens, CurrentSequenceLength) or take the tail of the
-  // next-token span, so a wider search would silently mirror the wrong row's tokens.
-  if (params->search.batch_size != 1) {
-    throw std::runtime_error("A request must have search.batch_size == 1; batch across requests instead.");
+void TurnOptions::ValidateOwnerThread() const {
+  auto bound_request = request.lock();
+  if (!bound_request) {
+    throw std::runtime_error(
+        "Cannot use Turn options after their Request has been destroyed.");
   }
-  // Beam search does not implement the deferred completion contract below, so its next tokens would
-  // never be copied back from the device.
-  if (params->search.num_beams != 1) {
-    throw std::runtime_error("A request must have search.num_beams == 1; beam search is not supported by the engine.");
+  bound_request->ValidateOwnerThread();
+}
+
+void TurnOptions::Reset() {
+  auto bound_request = std::move(request);
+  *this = TurnOptions{};
+  request = std::move(bound_request);
+}
+
+void Request::ValidateOwnerThread() const {
+  auto engine = engine_.lock();
+  if (!engine) {
+    if (IsClosed(status_)) {
+      throw std::runtime_error("Cannot use a closed request.");
+    }
+    throw std::runtime_error(
+        "Cannot use a Request after its Engine has been destroyed.");
   }
+  engine->ValidateOwnerThread();
+}
+
+Request::Request(
+    const Model& model,
+    size_t max_session_tokens,
+    std::shared_ptr<std::atomic<bool>> abandonment_pending)
+    : ExternalRefCounted<Request>{std::move(abandonment_pending)},
+      // Until a turn is admitted the Request decodes under the model's own defaults. Every
+      // BeginTurn resolves this again from those defaults plus that turn's explicit overrides.
+      turn_policy_{ResolveTurnPolicy(model.config_->search, TurnOptions{})},
+      max_session_tokens_{max_session_tokens},
+      params_{CreateRequestParams(model, max_session_tokens)},
+      current_seed_basis_{InitialSeedBasis(model.config_->search.random_seed)},
+      rng_{MakeHostRandomGenerator(current_seed_basis_)},
+      search_{CreateSearch(*params_)} {
+  draft_tokens_.reserve(kMaxDraftTokensPerStep);
 
   // The engine drives one independent search per request, so completion is batched: see
   // ScheduledRequests::GenerateNextTokens().
   search_->DeferCompletion(true);
+  tokens_host_.reserve(max_session_tokens_);
 }
 
-void Request::Assign(std::shared_ptr<Engine> engine) {
-  if (status_ != RequestStatus::Unassigned) {
-    throw std::runtime_error("Cannot add the request to the engine since it is already assigned.");
-  }
-  engine_ = engine;
-  status_ = RequestStatus::Assigned;
+Request::~Request() = default;
 
-  auto device_tokens = AllocateOnDevice(*params_, prefill_input_ids_);
-  processed_sequence_length_ = CurrentSequenceLength();
+void Request::AttachToEngine(std::shared_ptr<Engine> engine) noexcept {
+  assert(engine);
+  assert(!engine_identity_);
+  engine_identity_ = engine.get();
+  engine_ = std::move(engine);
+}
+
+bool Request::BelongsTo(const Engine& engine) const noexcept {
+  return engine_identity_ == &engine;
+}
+
+bool Request::IsAwaitingFirstTurn() const noexcept {
+  return status_ == RequestStatus::Unassigned;
+}
+
+bool Request::IsRestartableCanceledTurn() const noexcept {
+  return finish_reason_ == GenerationFinishReason::Canceled &&
+         processed_sequence_length_ == 0;
+}
+
+// Out-of-line because pending_stop_controller's deleter needs StopStringController complete,
+// which this translation unit's #include of stop_string_controller.h provides.
+RequestTurnAdmission::~RequestTurnAdmission() = default;
+
+void Request::ValidateTurnAdmission(
+    std::span<const int32_t> tokens,
+    const TurnOptions& options) const {
+  // The single place a zero turn maximum is rejected. The C API's setter treats zero as "unset",
+  // so this only fires for a direct in-process TurnOptions that asked for a turn generating
+  // nothing; ValidateTurnPolicy() deliberately does not repeat the check.
+  if (options.max_generated_tokens && *options.max_generated_tokens == 0) {
+    throw std::runtime_error(
+        "max_generated_tokens (0) must be greater than zero.");
+  }
+  if (tokens.empty()) {
+    throw std::runtime_error(
+        "Expected at least one input token for generation. Received 0.");
+  }
+  if (turn_id_exhausted_) {
+    throw std::overflow_error(
+        "The request cannot admit another turn because its uint64 turn id space is exhausted.");
+  }
+
+  const bool first_turn = IsAwaitingFirstTurn();
+  if (!first_turn && !Generators::IsTurnComplete(status_)) {
+    if (IsClosed(status_)) {
+      throw std::runtime_error("Cannot begin a turn for a closed request.");
+    }
+    throw std::runtime_error(
+        "BeginTurn is only valid for a new request or after the current turn is complete.");
+  }
+
+  const size_t sequence_length =
+      first_turn ? 0 : static_cast<size_t>(CurrentSequenceLength());
+  ValidateAppendLength(max_session_tokens_, sequence_length, tokens.size());
+  if (tokens_host_.capacity() < tokens_host_.size() + tokens.size()) {
+    throw std::logic_error(
+        "The request host token mirror does not have reserved turn capacity.");
+  }
+}
+
+void Request::ValidateContinuousDecodingSupport() const {
+  const DeviceType cache_device =
+      params_->model_->p_device_kvcache_->GetType();
+  if (!SupportsContinuousDecoding(cache_device)) {
+    throw std::runtime_error(
+        "Continuous decoding is not supported on the selected KV-cache device type (" +
+        to_string(cache_device) + ").");
+  }
+}
+
+void Request::PrepareTurnAdmission(
+    std::span<const int32_t> tokens,
+    RequestTurnAdmission& admission) {
+  auto device_tokens = AllocateOnDevice(*params_, tokens);
+  const bool first_turn = IsAwaitingFirstTurn();
+  admission.status = status_;
+  admission.host_token_count = tokens_host_.size();
+  admission.prompt_sequence_length = prompt_sequence_length_;
+  admission.processed_sequence_length = processed_sequence_length_;
+
+  SaveStateForNewTurnTransaction();
+  admission.transaction_started = true;
   search_->AppendTokens(device_tokens);
-  seen_sequence_length_ = CurrentSequenceLength();
-  tokens_host_.insert(tokens_host_.end(), prefill_input_ids_.begin(), prefill_input_ids_.end());
-  prefill_input_ids_.clear();
+  tokens_host_.insert(tokens_host_.end(), tokens.begin(), tokens.end());
+  prompt_sequence_length_ = CurrentSequenceLength();
+  if (first_turn) {
+    processed_sequence_length_ = 0;
+  }
+  status_ = RequestStatus::Assigned;
+}
+
+uint64_t Request::CommitTurnAdmission(
+    const TurnOptions& options,
+    RequestTurnAdmission& admission) {
+  assert(admission.transaction_started);
+  CommitStateForTransaction();
+  // The caller built this turn's complete stop controller (or null, for a no-stop turn) and its
+  // guidance processor (or null, for an unguided turn) before the admission attempt began and both
+  // have been untouched ever since, so installing them here is a plain, infallible move: whatever
+  // the Request held before this call is simply discarded now that the new turn is durable.
+  stop_controller_ = std::move(admission.pending_stop_controller);
+  stop_controller_transaction_checkpoint_ = 0;
+  guidance_logits_processor_ = std::move(admission.pending_guidance);
+  guidance_transaction_checkpoint_.reset();
+  turn_policy_ = admission.policy;
+  // Every terminal path already discarded the previous turn's pending reseed, so this simply
+  // records what this turn asked for: nothing when the seed is omitted, or a new basis that becomes
+  // durable only once a sampling step commits.
+  pending_reseed_ = options.seed;
+  pending_reseed_applied_ = false;
+  turn_prompt_tokens_ = tokens_host_.size() - admission.host_token_count;
+  turn_generated_tokens_ = 0;
+  current_turn_id_ = next_turn_id_;
+  has_current_turn_ = true;
+  if (next_turn_id_ == std::numeric_limits<uint64_t>::max()) {
+    turn_id_exhausted_ = true;
+  } else {
+    ++next_turn_id_;
+  }
+  finish_reason_ = GenerationFinishReason::None;
+  matched_stop_string_index_ = -1;
+  admission.transaction_started = false;
+  return current_turn_id_;
+}
+
+void Request::RollbackTurnAdmission(RequestTurnAdmission& admission) {
+  if (!admission.transaction_started) {
+    return;
+  }
+  status_ = admission.status;
+  tokens_host_.resize(admission.host_token_count);
+  prompt_sequence_length_ = admission.prompt_sequence_length;
+  processed_sequence_length_ = admission.processed_sequence_length;
+  RestoreStateForTransaction();
+  admission.transaction_started = false;
+}
+
+bool Request::CanCancelFromEngine(
+    const Engine& engine,
+    uint64_t turn_id) const {
+  if (!BelongsTo(engine)) {
+    throw std::runtime_error(
+        "Cannot cancel a request that does not belong to this engine.");
+  }
+  if (IsClosed(status_)) {
+    throw std::runtime_error("Cannot cancel a closed request.");
+  }
+  if (!has_current_turn_) {
+    throw std::runtime_error("Cannot cancel a request before a turn has begun.");
+  }
+  return turn_id == current_turn_id_ &&
+         !Generators::IsTurnComplete(status_) &&
+         IsExecutable(status_);
+}
+
+RequestTurnCounters Request::CompleteCancelFromEngine(
+    const Engine& engine,
+    uint64_t turn_id) noexcept {
+  assert(BelongsTo(engine));
+  assert(has_current_turn_);
+  assert(turn_id == current_turn_id_);
+  assert(!Generators::IsTurnComplete(status_));
+  assert(IsExecutable(status_));
+  status_ = RequestStatus::TurnComplete;
+  finish_reason_ = GenerationFinishReason::Canceled;
+  // A cancellation replaces any undelivered result and becomes the sole terminal outcome, so any
+  // previously staged/committed stop match no longer applies.
+  matched_stop_string_index_ = -1;
+  ReleaseTurnResources();
+  return {turn_prompt_tokens_, turn_generated_tokens_};
+}
+
+void Request::MarkClosedFromEngine(const Engine& engine) noexcept {
+  assert(BelongsTo(engine));
+  status_ = RequestStatus::Closed;
+  guidance_transaction_checkpoint_.reset();
+  guidance_logits_processor_.reset();
+  stop_controller_.reset();
+  stop_controller_transaction_checkpoint_ = 0;
+  batched_sampler_state_.reset();
+  std::vector<int32_t>{}.swap(draft_tokens_);
+  staged_draft_count_ = 0;
+  accepted_draft_count_ = 0;
+  evaluated_draft_count_ = 0;
+  draft_verification_completed_generation_ = false;
+  draft_verification_stop_match_index_ = -1;
+}
+
+void Request::CompleteCloseFromEngine(const Engine& engine) noexcept {
+  MarkClosedFromEngine(engine);
+  CompleteClose();
+}
+
+void Request::MarkFailedFromEngine(const Engine& engine) noexcept {
+  assert(BelongsTo(engine));
+  finish_reason_ = GenerationFinishReason::Failed;
+  // A fatal failure replaces any undelivered result and becomes the sole terminal outcome.
+  matched_stop_string_index_ = -1;
+}
+
+void Request::CompleteFailedTurnFromEngine(const Engine& engine) noexcept {
+  assert(BelongsTo(engine));
+  assert(IsExecutable(status_));
+  status_ = RequestStatus::TurnComplete;
+  finish_reason_ = GenerationFinishReason::Failed;
+  matched_stop_string_index_ = -1;
+  ReleaseTurnResources();
+}
+
+// Everything scoped to one turn goes away together at every terminal boundary, so the next turn
+// starts from the documented defaults: no stop strings, no guidance, and no draft proposal unless
+// it asks for them.
+void Request::ReleaseTurnResources() noexcept {
+  stop_controller_.reset();
+  stop_controller_transaction_checkpoint_ = 0;
+  guidance_transaction_checkpoint_.reset();
+  guidance_logits_processor_.reset();
+  // A draft proposal is verified under the admitted turn's policy: the drafter produced it knowing
+  // that turn's guidance, minimum, repetition penalty, and n-gram blocking. Carrying it across a
+  // terminal boundary would let a completed, canceled, or failed turn's proposal be verified under
+  // the next turn's different policy, which never validated it. Resetting the staged counters here
+  // cannot orphan tokens the sequence still owns: CommitStep() has already folded its accepted
+  // prefix into tokens_host_ and repeats these same resets immediately afterwards, cancellation and
+  // unserviceable failure happen between steps with nothing staged, and a fatal failure leaves the
+  // Request unable to execute again at all.
+  draft_tokens_.clear();
+  staged_draft_count_ = 0;
+  accepted_draft_count_ = 0;
+  evaluated_draft_count_ = 0;
+  draft_verification_completed_generation_ = false;
+  draft_verification_stop_match_index_ = -1;
+  // The turn's reseed dies with the turn. A reseed that a sampling step already committed was
+  // promoted to current_seed_basis_ by CommitStateForTransaction(), which runs before any terminal
+  // boundary; anything still pending here belongs to a turn that ended before it sampled (or whose
+  // reseeded step was rolled back), so it is discarded without touching the durable basis.
+  pending_reseed_.reset();
+  pending_reseed_applied_ = false;
 }
 
 void Request::Schedule() {
@@ -64,129 +387,769 @@ void Request::Schedule() {
     throw std::runtime_error("Cannot schedule a request with no tokens.");
   }
 
-  status_ = RequestStatus::InProgress;
+  status_ = RequestStatus::Active;
 }
 
-void Request::Remove() {
+void Request::Close() {
+  if (IsClosed(status_)) {
+    return;
+  }
+
   auto engine = engine_.lock();
-  if (engine) {
-    engine->RemoveRequest(shared_from_this());
+  if (!engine) {
+    CompleteClose();
+    return;
   }
-  status_ = RequestStatus::Unassigned;
+  engine->CloseRequest(shared_from_this());
 }
 
-void Request::AddTokens(std::span<const int32_t> tokens) {
-  if (tokens.size() == 0)
-    throw std::runtime_error("Expected at least one token for generation. Received 0.");
-
-  if (tokens.size() + CurrentSequenceLength() > params_->search.max_length)
-    throw std::runtime_error("Input tokens size (" +
-                             std::to_string(tokens.size()) +
-                             ") exceeds the max length (" +
-                             std::to_string(params_->search.max_length) + ")");
-
-  if (status_ == RequestStatus::Unassigned) {
-    std::copy(tokens.begin(), tokens.end(), std::back_inserter(prefill_input_ids_));
-  } else if (status_ == RequestStatus::InProgress) {
-    throw std::runtime_error("Cannot add tokens to a request that is in progress.");
-  } else if (status_ == RequestStatus::Completed) {
-    auto device_tokens = AllocateOnDevice(*params_, tokens);
-    search_->AppendTokens(device_tokens);
-    tokens_host_.insert(tokens_host_.end(), tokens.begin(), tokens.end());
+bool Request::Cancel(uint64_t turn_id) {
+  auto engine = engine_.lock();
+  if (!engine) {
+    throw std::runtime_error(
+        "Cannot cancel after the request's engine has been destroyed.");
   }
+  return engine->CancelRequest(shared_from_this(), turn_id);
+}
+
+void Request::CompleteClose() noexcept {
+  engine_.reset();
+  engine_identity_ = nullptr;
+  status_ = RequestStatus::Closed;
+  guidance_transaction_checkpoint_.reset();
+  guidance_logits_processor_.reset();
+  stop_controller_.reset();
+  stop_controller_transaction_checkpoint_ = 0;
+  batched_sampler_state_.reset();
+  search_.reset();
+  params_.reset();
+  std::vector<int32_t>{}.swap(draft_tokens_);
+  staged_draft_count_ = 0;
+  accepted_draft_count_ = 0;
+  evaluated_draft_count_ = 0;
+  draft_verification_completed_generation_ = false;
+  draft_verification_stop_match_index_ = -1;
+  std::vector<int32_t>{}.swap(tokens_host_);
+}
+
+uint64_t Request::BeginTurn(
+    std::span<const int32_t> tokens,
+    std::optional<size_t> max_generated_tokens) {
+  TurnOptions options;
+  options.max_generated_tokens = max_generated_tokens;
+  return BeginTurn(tokens, options);
+}
+
+uint64_t Request::BeginTurn(
+    std::span<const int32_t> tokens,
+    const TurnOptions& options) {
+  if (IsClosed(status_)) {
+    throw std::runtime_error("Cannot begin a turn for a closed request.");
+  }
+  auto engine = engine_.lock();
+  if (!engine) {
+    throw std::runtime_error(
+        "Cannot begin a turn after the request's engine has been destroyed.");
+  }
+  return engine->BeginTurn(shared_from_this(), tokens, options);
 }
 
 int64_t Request::CurrentSequenceLength() const {
   return search_->GetSequenceLength();
 }
 
+int64_t Request::CommittedSequenceLength() const {
+  return CurrentSequenceLength() - static_cast<int64_t>(staged_draft_count_);
+}
+
+int Request::TurnEosFloor() const noexcept {
+  if (turn_policy_.min_generated_tokens == 0) {
+    return 0;
+  }
+  return static_cast<int>(static_cast<size_t>(prompt_sequence_length_) +
+                          turn_policy_.min_generated_tokens);
+}
+
+const char* Request::DraftTokenValidationError() const noexcept {
+  // A stop-enabled turn is not excluded here: draft verification observes target-accepted tokens
+  // through stop_controller_ in exactly the same committed order the ordinary one-token path uses
+  // (CommitAcceptedDraftsForTransaction for greedy verification, StageGenerationForTransaction for
+  // sampled/batched verification), so it drafts and verifies normally.
+  if (guidance_logits_processor_) {
+    return "Speculative draft tokens are not supported with guidance.";
+  }
+  if (!turn_policy_.IsGreedy() && turn_policy_.top_k <= 0) {
+    return "Sampled speculative draft tokens require a positive top_k.";
+  }
+  if (turn_policy_.repetition_penalty != 1.0f || turn_policy_.no_repeat_ngram_size > 0 ||
+      TurnEosFloor() > CurrentSequenceLength()) {
+    return "Speculative draft tokens require repetition_penalty 1, no_repeat_ngram_size 0, and a "
+           "turn already past its minimum generated token count.";
+  }
+  return nullptr;
+}
+
+void Request::SetDraftTokens(std::span<const int32_t> tokens) {
+  if (staged_draft_count_ != 0) {
+    throw std::runtime_error("Cannot replace draft tokens while a step is in flight.");
+  }
+  if (IsClosed(status_)) {
+    throw std::runtime_error("Cannot propose draft tokens for a closed request.");
+  }
+  if (tokens.empty()) {
+    draft_tokens_.clear();
+    return;
+  }
+  if (!IsExecuting(status_) || IsPrefill()) {
+    throw std::runtime_error(
+        "Speculative draft tokens may only be proposed when the request is ready to decode.");
+  }
+  if (const char* error = DraftTokenValidationError()) {
+    throw std::runtime_error(error);
+  }
+  auto engine = engine_.lock();
+  if (!engine) {
+    throw std::runtime_error("Cannot propose draft tokens before the request is added to an engine.");
+  }
+  const size_t max_drafts = engine->MaxDraftTokensPerStep();
+  if (max_drafts == 0) {
+    throw std::runtime_error("This engine does not support speculative draft verification.");
+  }
+  if (tokens.size() > max_drafts) {
+    throw std::runtime_error(
+        "A step accepts at most " + std::to_string(max_drafts) + " draft tokens.");
+  }
+  ValidateAppendLength(
+      max_session_tokens_, static_cast<size_t>(CurrentSequenceLength()), tokens.size());
+  if (tokens_host_.capacity() < tokens_host_.size() + tokens.size()) {
+    throw std::logic_error("The request host token mirror does not have reserved draft capacity.");
+  }
+  draft_tokens_.assign(tokens.begin(), tokens.end());
+}
+
+std::span<const int32_t> Request::StagedDraftTokens() const {
+  return std::span<const int32_t>{draft_tokens_}.subspan(0, staged_draft_count_);
+}
+
+bool Request::IsStopToken(int32_t token) const {
+  const auto& stop_tokens = params_->config.model.eos_token_id;
+  return std::find(stop_tokens.begin(), stop_tokens.end(), token) != stop_tokens.end();
+}
+
+void Request::AppendDraftsForTransaction(size_t draft_count) {
+  if (draft_count == 0) {
+    return;
+  }
+  if (staged_draft_count_ != 0 || draft_count > draft_tokens_.size()) {
+    throw std::logic_error("The step staged more draft tokens than the request proposed.");
+  }
+
+  const std::span<const int32_t> drafts{draft_tokens_.data(), draft_count};
+  auto device_tokens = AllocateOnDevice(*params_, drafts);
+  search_->AppendTokens(device_tokens);
+  tokens_host_.insert(tokens_host_.end(), drafts.begin(), drafts.end());
+  staged_draft_count_ = draft_count;
+  accepted_draft_count_ = 0;
+  evaluated_draft_count_ = 0;
+  draft_verification_completed_generation_ = false;
+  draft_verification_stop_match_index_ = -1;
+}
+
+void Request::CommitAcceptedDraftsForTransaction(size_t accepted_count) {
+  if (accepted_count > staged_draft_count_) {
+    throw std::logic_error("The step accepted more draft tokens than it staged.");
+  }
+  const size_t proposed_count = staged_draft_count_;
+  const size_t committed_length =
+      static_cast<size_t>(CurrentSequenceLength()) - proposed_count;
+  tokens_host_.resize(tokens_host_.size() - proposed_count);
+  search_->RewindTo(committed_length);
+  staged_draft_count_ = 0;
+  accepted_draft_count_ = 0;
+  evaluated_draft_count_ = 0;
+  draft_verification_completed_generation_ = false;
+  draft_verification_stop_match_index_ = -1;
+
+  for (size_t offset = 0; offset < accepted_count; ++offset) {
+    // Every iteration examines exactly one proposed draft position's target acceptance, whether or
+    // not it turns out to append/match/end the round below -- this is what lets
+    // Engine::RecordSpeculativeCommit read an exact "rows examined" count instead of inferring one
+    // from token_appended/finish_reason after the fact.
+    ++evaluated_draft_count_;
+    const int32_t token = draft_tokens_[offset];
+    const int64_t sequence_length_before = CurrentSequenceLength();
+    search_->CommitToken(token);
+    const int64_t sequence_length_after = CurrentSequenceLength();
+    if (sequence_length_after == sequence_length_before + 1) {
+      tokens_host_.push_back(token);
+      ++staged_draft_count_;
+      ++accepted_draft_count_;
+      // Only an actually-appended token reaches the matcher here, exactly mirroring the ordinary
+      // one-token path's token_appended gate in StageGeneration(): an accepted draft that turns out
+      // to be EOS commits (GreedySearch_Cpu::CommitToken marks the search done) without appending,
+      // so its bytes must never reach the controller or be able to produce a StopString result.
+      if (stop_controller_) {
+        if (const auto& match = stop_controller_->ObserveToken(token)) {
+          draft_verification_stop_match_index_ = static_cast<int32_t>(match->index);
+          draft_verification_completed_generation_ = true;
+          break;
+        }
+      }
+    } else if (sequence_length_after != sequence_length_before ||
+               !search_->IsDone()) {
+      throw std::logic_error(
+          "Committing an accepted draft produced an invalid sequence transition.");
+    }
+    const bool turn_limit_reached =
+        turn_policy_.max_generated_tokens &&
+        turn_generated_tokens_ + accepted_draft_count_ >=
+            *turn_policy_.max_generated_tokens;
+    if (search_->IsDone() || turn_limit_reached) {
+      draft_verification_completed_generation_ = true;
+      break;
+    }
+  }
+  // The loop above only ever runs offsets 0..accepted_count-1 (all already argmax-confirmed by the
+  // caller): a genuinely rejected draft at offset accepted_count, if any, is never processed by it
+  // at all -- that comparison already happened in the caller (ScheduledRequests::SelectSampledRows)
+  // before this function was even called. If the loop completed normally (no stop match, EOS, or
+  // turn/context limit interrupted it) and the caller proposed more drafts than were confirmed,
+  // that rejected position was examined (compared against the target's own argmax and found not to
+  // match) even though it is not processed here, so it counts too.
+  if (!draft_verification_completed_generation_ && accepted_count < proposed_count) {
+    ++evaluated_draft_count_;
+  }
+}
+
+void Request::RewindDraftsForTransaction(size_t accepted_count) {
+  if (accepted_count > staged_draft_count_) {
+    throw std::logic_error("The step accepted more draft tokens than it staged.");
+  }
+  const size_t rejected_count = staged_draft_count_ - accepted_count;
+  accepted_draft_count_ = accepted_count;
+  evaluated_draft_count_ = accepted_count;
+  if (rejected_count == 0) {
+    return;
+  }
+
+  staged_draft_count_ = accepted_count;
+  tokens_host_.resize(tokens_host_.size() - rejected_count);
+  search_->RewindTo(static_cast<size_t>(CurrentSequenceLength()) - rejected_count);
+}
+
+void Request::AppendAcceptedSampledToken(int32_t token) {
+  if (accepted_draft_count_ >= draft_tokens_.size()) {
+    throw std::logic_error("Sampled verification accepted more tokens than were proposed as drafts.");
+  }
+  tokens_host_.push_back(token);
+  ++staged_draft_count_;
+  ++accepted_draft_count_;
+  ++evaluated_draft_count_;
+}
+
+void Request::PromoteFinalStageAsAcceptedDraft(RequestStepResult& result) {
+  // Reuses the exact same push/increment AppendAcceptedSampledToken performs for an earlier stage;
+  // the only difference is that this token is the one StageGeneration() just staged as this
+  // result's own token_appended token, so CommitStep() must not also append it a second time.
+  //
+  // A confirmed draft this promotes must have actually been appended by StageGeneration() this
+  // stage (mirroring the ordinary path's own token_appended semantics): if it were not, the token
+  // this mirrors into tokens_host_ below would never have genuinely extended Search's own
+  // sequence, silently diverging Request's host mirror from Search. Enforce the
+  // confirmed_draft_counts/token_appended invariant before mutating the host mirror.
+  if (!result.token_appended) {
+    throw std::logic_error(
+        "PromoteFinalStageAsAcceptedDraft was called for a stage that never appended a token.");
+  }
+  AppendAcceptedSampledToken(result.token);
+  result.token_appended = false;
+}
+
+void Request::DiscardStagedDrafts() noexcept {
+  if (staged_draft_count_ != 0) {
+    tokens_host_.resize(tokens_host_.size() - staged_draft_count_);
+    staged_draft_count_ = 0;
+  }
+  accepted_draft_count_ = 0;
+  evaluated_draft_count_ = 0;
+  draft_verification_completed_generation_ = false;
+  draft_verification_stop_match_index_ = -1;
+}
+
 RequestStateSnapshot Request::Snapshot() const {
-  const int64_t current = CurrentSequenceLength();
+  const int64_t current = CommittedSequenceLength();
   RequestStateSnapshot snapshot;
   snapshot.request_id = this;
   snapshot.status = status_;
   snapshot.current_sequence_length = current;
   snapshot.processed_sequence_length = processed_sequence_length_;
-  snapshot.seen_sequence_length = seen_sequence_length_;
-  snapshot.is_prefill = is_prefill_;
+  snapshot.is_prefill = IsPrefill();
+  snapshot.has_current_turn = has_current_turn_;
+  snapshot.current_turn_id = current_turn_id_;
+  snapshot.finish_reason = finish_reason_;
+  snapshot.matched_stop_string_index = matched_stop_string_index_;
   return snapshot;
 }
 
-int32_t Request::UnseenToken() {
-  if (static_cast<size_t>(seen_sequence_length_) >= tokens_host_.size())
-    throw std::runtime_error("All tokens have been seen.");
-
-  return tokens_host_[seen_sequence_length_++];
+int64_t Request::ProcessedSequenceLength() const {
+  return processed_sequence_length_;
 }
 
-bool Request::HasUnseenTokens() const {
-  return seen_sequence_length_ < CurrentSequenceLength();
+size_t Request::ScheduledTokenCount() const {
+  const size_t unprocessed = static_cast<size_t>(CurrentSequenceLength() - processed_sequence_length_);
+  return std::min(scheduled_token_count_, unprocessed);
+}
+
+void Request::ScheduleTokens() {
+  const size_t unprocessed = static_cast<size_t>(CurrentSequenceLength() - processed_sequence_length_);
+  scheduled_token_count_ = Generators::ScheduledTokenCount(unprocessed, PrefillChunkSize());
+}
+
+void Request::BindScheduledTokenCount(size_t token_count) {
+  // A speculative step also sends the drafts the transaction is about to stage onto the sequence.
+  const int64_t remaining = CurrentSequenceLength() - processed_sequence_length_ +
+                            static_cast<int64_t>(draft_tokens_.size() - staged_draft_count_);
+  if (remaining <= 0 || token_count == 0 ||
+      token_count > static_cast<size_t>(remaining)) {
+    throw std::runtime_error(
+        "The dynamic step token count (" + std::to_string(token_count) +
+        ") must be positive and no greater than the remaining token count (" +
+        std::to_string(remaining) + ").");
+  }
+  scheduled_token_count_ = token_count;
+}
+
+bool Request::IsChunkComplete() const {
+  return processed_sequence_length_ + static_cast<int64_t>(ScheduledTokenCount()) >= CurrentSequenceLength();
+}
+
+void Request::AdvanceChunk() {
+  processed_sequence_length_ += static_cast<int64_t>(ScheduledTokenCount());
+}
+
+std::shared_ptr<Request> Request::CreateAuxiliaryDecoderRequest(
+    const Model& model,
+    size_t max_session_tokens,
+    std::shared_ptr<std::atomic<bool>> abandonment_pending,
+    const std::shared_ptr<Engine>& engine,
+    std::span<const int32_t> tokens) {
+  auto request = std::make_shared<Request>(
+      model, max_session_tokens, std::move(abandonment_pending));
+  request->AttachToEngine(engine);
+  // The shadow is never admitted through BeginTurn, so it starts decoding directly and treats the
+  // tokens it mirrors from the target as its prompt.
+  request->status_ = RequestStatus::Active;
+  request->AppendTokensForAuxiliaryDecoder(tokens);
+  request->prompt_sequence_length_ = request->CurrentSequenceLength();
+  return request;
+}
+
+void Request::AppendTokensForAuxiliaryDecoder(std::span<const int32_t> tokens) {
+  if (status_ != RequestStatus::Active || tokens.empty() ||
+      processed_sequence_length_ != CurrentSequenceLength()) {
+    throw std::logic_error(
+        "Auxiliary decoder tokens require an active request with no pending rows.");
+  }
+  ValidateAppendLength(max_session_tokens_, static_cast<size_t>(CurrentSequenceLength()), tokens.size());
+  auto device_tokens = AllocateOnDevice(*params_, tokens);
+  search_->AppendTokens(device_tokens);
+  tokens_host_.insert(tokens_host_.end(), tokens.begin(), tokens.end());
+}
+
+void Request::AppendTokensForAuxiliaryDecoder(DeviceSpan<int32_t> tokens) {
+  if (status_ != RequestStatus::Active || tokens.empty() ||
+      processed_sequence_length_ != CurrentSequenceLength()) {
+    throw std::logic_error(
+        "Auxiliary decoder tokens require an active request with no pending rows.");
+  }
+  ValidateAppendLength(max_session_tokens_, static_cast<size_t>(CurrentSequenceLength()), tokens.size());
+  search_->AppendTokens(tokens);
+  const int32_t non_pad = params_->config.model.pad_token_id == 0 ? 1 : 0;
+  tokens_host_.insert(tokens_host_.end(), tokens.size(), non_pad);
+}
+
+void Request::RewindAuxiliaryDecoderTo(size_t sequence_length) {
+  if (status_ != RequestStatus::Active ||
+      processed_sequence_length_ != CurrentSequenceLength() ||
+      sequence_length > static_cast<size_t>(processed_sequence_length_)) {
+    throw std::logic_error(
+        "Auxiliary decoder rewind requires an active request at a processed sequence boundary.");
+  }
+  search_->RewindTo(sequence_length);
+  tokens_host_.resize(sequence_length);
+  processed_sequence_length_ = static_cast<int64_t>(sequence_length);
+  scheduled_token_count_ = 0;
+}
+
+void Request::CommitAuxiliaryDecoderStep() noexcept {
+  processed_sequence_length_ += static_cast<int64_t>(ScheduledTokenCount());
+  scheduled_token_count_ = 0;
 }
 
 DeviceSpan<int32_t> Request::UnprocessedTokens() {
   auto sequence = search_->GetSequence(0);
-  auto unprocessed_tokens = sequence.subspan(processed_sequence_length_, CurrentSequenceLength() - processed_sequence_length_);
-  return unprocessed_tokens;
+  return sequence.subspan(processed_sequence_length_, ScheduledTokenCount());
 }
 
 std::span<const int32_t> Request::UnprocessedTokensCpu() const {
   const size_t begin = static_cast<size_t>(processed_sequence_length_);
-  const size_t end = static_cast<size_t>(CurrentSequenceLength());
+  const size_t end = begin + ScheduledTokenCount();
   if (end > tokens_host_.size())
     throw std::runtime_error("The host token mirror is out of sync with the search sequence.");
 
   return std::span<const int32_t>{tokens_host_}.subspan(begin, end - begin);
 }
 
-bool Request::IsDone() const {
-  return status_ == RequestStatus::Completed;
+bool Request::IsTurnComplete() const {
+  return status_ == RequestStatus::TurnComplete;
 }
 
 bool Request::IsPrefill() const {
-  return is_prefill_;
+  return processed_sequence_length_ < prompt_sequence_length_;
 }
 
-void Request::GenerateNextTokens(DeviceSpan<float> logits) {
-  PrepareGeneration(logits);
+void Request::GenerateNextTokens(DeviceSpan<float> logits, bool guidance_applied) {
+  PrepareGeneration(logits, guidance_applied);
+  SelectNextToken();
+}
 
-  auto& search_params = search_->params_->search;
-  if (!search_params.do_sample || search_params.top_k == 1 || search_params.temperature == 0) {
-    search_->SelectTop();
+void Request::SaveStateForTransaction() {
+  auto guidance_checkpoint = guidance_logits_processor_
+                                 ? guidance_logits_processor_->Clone()
+                                 : nullptr;
+  search_->SaveStateForTransaction();
+  guidance_transaction_checkpoint_ = std::move(guidance_checkpoint);
+  transaction_rng_ = rng_;
+  transaction_processed_sequence_length_ = processed_sequence_length_;
+  transaction_tokens_host_size_ = tokens_host_.size();
+  stop_controller_transaction_checkpoint_ =
+      stop_controller_ ? stop_controller_->TurnTokens().size() : 0;
+}
+
+void Request::SaveStateForNewTurnTransaction() {
+  // Every terminal path releases the previous turn's guidance cursor and stop controller, and this
+  // turn's replacements are installed only by CommitTurnAdmission(), so a rolled back admission has
+  // neither to restore. The same paths discard any reseed the previous turn left pending, so this
+  // admission cannot promote a stale seed when it commits.
+  if (guidance_logits_processor_ || stop_controller_ ||
+      pending_reseed_ || pending_reseed_applied_) {
+    assert(false && "A new turn cannot inherit resources from the previous turn.");
+    throw std::logic_error(
+        "Cannot begin a new turn while resources from the previous turn remain active.");
+  }
+  search_->SaveStateForTransaction();
+  guidance_transaction_checkpoint_.reset();
+  transaction_rng_ = rng_;
+  transaction_processed_sequence_length_ = processed_sequence_length_;
+  transaction_tokens_host_size_ = tokens_host_.size();
+  stop_controller_transaction_checkpoint_ = 0;
+}
+
+void Request::SaveStateForExternalSamplingTransaction() {
+  auto guidance_checkpoint = guidance_logits_processor_
+                                 ? guidance_logits_processor_->Clone()
+                                 : nullptr;
+  search_->SaveStateForExternalSamplingTransaction();
+  guidance_transaction_checkpoint_ = std::move(guidance_checkpoint);
+  transaction_rng_ = rng_;
+  transaction_processed_sequence_length_ = processed_sequence_length_;
+  transaction_tokens_host_size_ = tokens_host_.size();
+  stop_controller_transaction_checkpoint_ =
+      stop_controller_ ? stop_controller_->TurnTokens().size() : 0;
+}
+
+RequestStepResult Request::ApplyLogitsForTransaction(DeviceSpan<float> logits,
+                                                     bool guidance_applied) {
+  const auto sequence_length_before = CurrentSequenceLength();
+  PrepareGenerationForTransaction(logits, guidance_applied);
+  SelectNextToken();
+  return StageGeneration(sequence_length_before);
+}
+
+void Request::PrepareGenerationForTransaction(DeviceSpan<float> logits,
+                                              bool guidance_applied) {
+  ApplyLogitsProcessors(logits, guidance_applied);
+}
+
+RequestStepResult Request::StageGenerationForTransaction(
+    const RequestStepPlan& plan) {
+  // Accepted drafts have already extended the sequence, so the baseline has to match the one
+  // ApplyLogitsForTransaction reads after they commit. Without the offset a step that ends on an
+  // unappended EOS would look like it appended a token.
+  return StageGeneration(
+      plan.sequence_length_before + static_cast<int64_t>(accepted_draft_count_));
+}
+
+RequestStepResult Request::StageDraftCompletionForTransaction() {
+  if (!draft_verification_completed_generation_) {
+    throw std::logic_error(
+        "Draft completion was staged before verification completed generation.");
+  }
+
+  GenerationFinishReason finish_reason = GenerationFinishReason::ContextLimit;
+  int32_t matched_stop_string_index = -1;
+  // Stop-string precedence over the turn/context limit was already decided when this token was
+  // observed, immediately after it was accepted in CommitAcceptedDraftsForTransaction()'s loop --
+  // mirroring StageGeneration()'s identical precedence for the ordinary one-token path.
+  if (draft_verification_stop_match_index_ >= 0) {
+    finish_reason = GenerationFinishReason::StopString;
+    matched_stop_string_index = draft_verification_stop_match_index_;
   } else {
-    // The user explicitly called TopKTopP on a beam search
-    if (search_params.num_beams != 1)
-      throw std::runtime_error("TopK and TopP cannot be used with a beam search");
-
-    // Sanity checks
-    if (search_params.top_p < 0.0f || search_params.top_p > 1.0f)
-      throw std::runtime_error("top_p must be between 0.0 and 1.0");
-    if (search_params.top_k < 0)
-      throw std::runtime_error("top_k must be 0 or greater");
-
-    if (search_params.top_p > 0.0f && search_params.top_p < 1.0f && search_params.top_k > 1) {
-      search_->SampleTopKTopP(search_params.top_k, search_params.top_p, search_params.temperature);
-    } else if (search_params.top_k > 1) {
-      search_->SampleTopK(search_params.top_k, search_params.temperature);
+    const bool turn_limit_reached =
+        turn_policy_.max_generated_tokens &&
+        turn_generated_tokens_ + accepted_draft_count_ >=
+            *turn_policy_.max_generated_tokens;
+    if (turn_limit_reached) {
+      finish_reason = GenerationFinishReason::TurnLimit;
     } else {
-      assert(search_params.top_k == 0);
-      search_->SampleTopP(search_params.top_p, search_params.temperature);
+      const auto next_tokens = search_->GetNextTokens().CpuSpan();
+      if (search_->IsDone() && !next_tokens.empty() &&
+          contains(params_->config.model.eos_token_id, next_tokens.back())) {
+        finish_reason = GenerationFinishReason::EosToken;
+      }
     }
+  }
+  RequestStepResult result{
+      0,
+      false,
+      true,
+      finish_reason,
+      matched_stop_string_index,
+  };
+  StageVisibleTokens(result, accepted_draft_count_, std::nullopt);
+  return result;
+}
+
+void Request::RestoreStateForTransaction() {
+  search_->RestoreStateForTransaction();
+  rng_ = transaction_rng_;
+  processed_sequence_length_ = transaction_processed_sequence_length_;
+  tokens_host_.resize(transaction_tokens_host_size_);
+  staged_draft_count_ = 0;
+  accepted_draft_count_ = 0;
+  evaluated_draft_count_ = 0;
+  scheduled_token_count_ = 0;
+  draft_verification_completed_generation_ = false;
+  draft_verification_stop_match_index_ = -1;
+  // The pending reseed itself is deliberately kept so the retry reseeds identically; only its
+  // "already applied to the live streams" marker is undone, because rng_ was just rolled back.
+  pending_reseed_applied_ = false;
+  if (guidance_transaction_checkpoint_) {
+    guidance_logits_processor_ = std::move(guidance_transaction_checkpoint_);
+  }
+  // Replays the checkpointed token history through a freshly created stream. The tokenizer stream
+  // is not cloneable, so this is the only correctness-preserving way to undo a speculatively
+  // observed token; a replay failure propagates so the caller can treat rollback as having failed.
+  if (stop_controller_) {
+    stop_controller_->RollbackTo(stop_controller_transaction_checkpoint_);
   }
 }
 
-void Request::PrepareGeneration(DeviceSpan<float> logits) {
-  processed_sequence_length_ = search_->GetSequence(0).size();
-  is_prefill_ = false;
-
-  search_->SetLogits(logits);
-  auto& search_params = search_->params_->search;
-  search_->ApplyMinLength(search_params.min_length);
-  search_->ApplyRepetitionPenalty(search_params.repetition_penalty);
-  search_->ApplyNoRepeatNgram(search_params.no_repeat_ngram_size);
+void Request::QueueStateRestoreForTransaction() {
+  search_->QueueStateRestoreForTransaction();
+  rng_ = transaction_rng_;
+  processed_sequence_length_ = transaction_processed_sequence_length_;
+  tokens_host_.resize(transaction_tokens_host_size_);
+  staged_draft_count_ = 0;
+  accepted_draft_count_ = 0;
+  evaluated_draft_count_ = 0;
+  scheduled_token_count_ = 0;
+  draft_verification_completed_generation_ = false;
+  draft_verification_stop_match_index_ = -1;
+  pending_reseed_applied_ = false;
+  // Deliberately does not replay the stop controller yet: like the guidance checkpoint swap below,
+  // that work is deferred to CompleteStateRestoreForTransaction() so this stays lightweight
+  // bookkeeping that cannot itself allocate, decode, or throw.
 }
 
-const Config::Search& Request::SearchOptions() const {
-  return search_->params_->search;
+void Request::CompleteStateRestoreForTransaction() {
+  search_->CompleteStateRestoreForTransaction();
+  if (guidance_transaction_checkpoint_) {
+    guidance_logits_processor_ = std::move(guidance_transaction_checkpoint_);
+  }
+  // See RestoreStateForTransaction(): recreates the stream and replays the checkpointed history. A
+  // replay failure here propagates through ScheduledRequests::RestoreStateForTransaction() to the
+  // Engine's existing rollback-failure handling, which marks the Engine unhealthy and publishes the
+  // fatal outcome -- exactly like any other queued-restore-completion failure.
+  if (stop_controller_) {
+    stop_controller_->RollbackTo(stop_controller_transaction_checkpoint_);
+  }
+}
+
+void Request::CommitStateForTransaction() {
+  search_->CommitStateForTransaction();
+  guidance_transaction_checkpoint_.reset();
+  // A reseed becomes durable only once the step that consumed it commits, so a rolled back or
+  // never-sampled step leaves both the pending marker and the durable basis exactly as they were.
+  if (pending_reseed_applied_) {
+    current_seed_basis_ = *pending_reseed_;
+    pending_reseed_.reset();
+    pending_reseed_applied_ = false;
+  }
+}
+
+void Request::CommitStep(const RequestStepPlan& plan,
+                         const RequestStepResult& result) noexcept {
+  // Draft verification has already retained the accepted prefix in the host mirror and Search.
+  // tokens_host_ retains its existing max-length reservation, so the final append cannot allocate
+  // at this commit boundary.
+  const size_t accepted_drafts = accepted_draft_count_;
+  turn_generated_tokens_ += accepted_drafts;
+  if (result.token_appended) {
+    tokens_host_.push_back(result.token);
+    ++turn_generated_tokens_;
+  }
+  // A verify step reserved cache slots for every draft; the rejected ones were never committed.
+  processed_sequence_length_ =
+      static_cast<int64_t>(plan.target_cache_slots - (plan.draft_token_count - accepted_drafts));
+  status_ = result.done ? RequestStatus::TurnComplete : RequestStatus::Active;
+  if (result.done) {
+    finish_reason_ = result.finish_reason;
+    matched_stop_string_index_ = result.matched_stop_string_index;
+    ReleaseTurnResources();
+  }
+  draft_tokens_.clear();
+  staged_draft_count_ = 0;
+  accepted_draft_count_ = 0;
+  evaluated_draft_count_ = 0;
+  draft_verification_completed_generation_ = false;
+  draft_verification_stop_match_index_ = -1;
+}
+
+// Records the tokens this step makes externally visible, in sequence order. Accepted drafts are
+// already in tokens_host_; a freshly sampled token is only appended by CommitStep.
+void Request::StageVisibleTokens(RequestStepResult& result,
+                                 size_t committed_count,
+                                 std::optional<int32_t> sampled_token) const {
+  if (committed_count + (sampled_token ? 1u : 0u) > result.visible_tokens.size()) {
+    throw std::logic_error(
+        "A single engine step produced more visible tokens than it can report.");
+  }
+  if (committed_count > tokens_host_.size()) {
+    throw std::logic_error(
+        "The host token mirror is missing tokens this step committed.");
+  }
+  const auto committed = std::span<const int32_t>{tokens_host_}.last(committed_count);
+  std::copy(committed.begin(), committed.end(), result.visible_tokens.begin());
+  result.visible_token_count = committed.size();
+  if (sampled_token) {
+    result.visible_tokens[result.visible_token_count++] = *sampled_token;
+  }
+}
+
+void Request::ApplyLogitsProcessors(DeviceSpan<float> logits,
+                                    bool guidance_applied) {
+  search_->SetLogits(logits);
+  if (guidance_logits_processor_ && !guidance_applied) {
+    guidance_logits_processor_->ProcessLogits(logits);
+  }
+  const int eos_floor = TurnEosFloor();
+  // An extendable accepting grammar still honors the minimum by suppressing its optional EOS.
+  // Once EOS is the grammar's only legal token, guidance termination takes precedence over the
+  // floor; masking it as well would leave no valid token to select.
+  if (eos_floor > CurrentSequenceLength() &&
+      !(guidance_logits_processor_ &&
+        guidance_logits_processor_->AllowsOnlyTokens(
+            0, params_->config.model.eos_token_id))) {
+    search_->ApplyMinLength(eos_floor);
+  }
+  search_->ApplyRepetitionPenalty(turn_policy_.repetition_penalty);
+  search_->ApplyNoRepeatNgram(turn_policy_.no_repeat_ngram_size);
+}
+
+void Request::SelectNextToken() {
+  if (turn_policy_.IsGreedy()) {
+    search_->SelectTop();
+  } else if (turn_policy_.top_p > 0.0f && turn_policy_.top_p < 1.0f &&
+             turn_policy_.top_k > 1) {
+    search_->SampleTopKTopP(turn_policy_.top_k, turn_policy_.top_p,
+                            turn_policy_.temperature, rng_);
+  } else if (turn_policy_.top_k > 1) {
+    search_->SampleTopK(turn_policy_.top_k, turn_policy_.temperature, rng_);
+  } else {
+    search_->SampleTopP(turn_policy_.top_p, turn_policy_.temperature, rng_);
+  }
+}
+
+RequestStepResult Request::StageGeneration(int64_t sequence_length_before) {
+  search_->CompleteGeneration();
+  const bool search_done = search_->IsDone();
+  const bool token_appended = CurrentSequenceLength() > sequence_length_before;
+  const auto next_tokens = search_->GetNextTokens().CpuSpan();
+  const int32_t token = next_tokens.empty() ? 0 : next_tokens.back();
+  const size_t generated_tokens_after_step =
+      turn_generated_tokens_ + accepted_draft_count_ +
+      static_cast<size_t>(token_appended);
+  const bool turn_limit_reached =
+      turn_policy_.max_generated_tokens &&
+      generated_tokens_after_step >= *turn_policy_.max_generated_tokens;
+  const bool context_limit_reached =
+      static_cast<size_t>(CurrentSequenceLength()) >= max_session_tokens_;
+  GenerationFinishReason finish_reason = GenerationFinishReason::None;
+  int32_t matched_stop_string_index = -1;
+  // Stop strings take precedence over the turn/context limit for the same generated token: a token
+  // that would otherwise end the turn on one of those limits still reports StopString when it also
+  // completes a match. This check is formally ordered before EOS classification, but
+  // GreedySearch_Cpu never appends a single-sequence Request's sampled EOS token because its
+  // sampling entry points skip appending once SetNextToken marks the Search done. A real EOS
+  // token's bytes therefore never reach the matcher here -- consistent with GenAI tokenizers
+  // registering EOS as a special, zero-byte-decoding token by default. Prompt/continuation tokens
+  // also never reach this point, and stop_controller_ is null on the no-stop fast path.
+  if (token_appended && stop_controller_) {
+    if (const auto& match = stop_controller_->ObserveToken(token)) {
+      finish_reason = GenerationFinishReason::StopString;
+      matched_stop_string_index = static_cast<int32_t>(match->index);
+    }
+  }
+  if (finish_reason == GenerationFinishReason::None) {
+    if (search_done && !next_tokens.empty() &&
+        contains(params_->config.model.eos_token_id, token)) {
+      finish_reason = GenerationFinishReason::EosToken;
+    } else if (turn_limit_reached) {
+      finish_reason = GenerationFinishReason::TurnLimit;
+    } else if (context_limit_reached || search_done) {
+      finish_reason = GenerationFinishReason::ContextLimit;
+    }
+  }
+  const bool done = finish_reason != GenerationFinishReason::None;
+  RequestStepResult result{
+      token,
+      token_appended,
+      done,
+      finish_reason,
+      matched_stop_string_index,
+  };
+  StageVisibleTokens(
+      result, accepted_draft_count_,
+      token_appended ? std::optional<int32_t>{token} : std::nullopt);
+  CommitGuidanceToken(result);
+  return result;
+}
+
+void Request::CommitGuidanceToken(const RequestStepResult& result) {
+  if (guidance_logits_processor_ && result.token_appended) {
+    int32_t token = result.token;
+    guidance_logits_processor_->CommitTokens(std::span<int32_t>{&token, 1});
+  }
+}
+
+void Request::PrepareGeneration(DeviceSpan<float> logits,
+                                bool guidance_applied) {
+  processed_sequence_length_ = search_->GetSequence(0).size();
+  ApplyLogitsProcessors(logits, guidance_applied);
+}
+
+std::span<const uint32_t> Request::GetReadyGuidanceMask() {
+  return guidance_logits_processor_ ? guidance_logits_processor_->GetReadyMask()
+                                    : std::span<const uint32_t>{};
+}
+
+const std::optional<size_t>& Request::PrefillChunkSize() const noexcept {
+  return params_->search.chunk_size;
+}
+
+const Config::Speculative& Request::SpeculativeOptions() const {
+  return params_->speculative;
 }
 
 bool Request::BindNextTokensSlot(DeviceSpan<int32_t> slot) {
@@ -203,38 +1166,100 @@ void Request::OnNextTokensSampled() {
 
 BatchedSamplerState& Request::SamplingState(BatchedSampler& sampler) {
   if (!batched_sampler_state_ || !sampler.OwnsState(*batched_sampler_state_))
-    batched_sampler_state_ = sampler.CreateState(search_->params_->search.random_seed);
+    batched_sampler_state_ = sampler.CreateState(current_seed_basis_);
   return *batched_sampler_state_;
 }
 
-void Request::CompleteGeneration() {
+BatchedSamplerState* Request::ExistingSamplingState(
+    BatchedSampler& sampler) const noexcept {
+  if (batched_sampler_state_ && sampler.OwnsState(*batched_sampler_state_)) {
+    return batched_sampler_state_.get();
+  }
+  return nullptr;
+}
+
+void Request::ApplyPendingSeedForTransaction(BatchedSampler* sampler,
+                                             bool device_state_checkpointed) {
+  if (!pending_reseed_) {
+    return;
+  }
+  auto* device_state = sampler ? ExistingSamplingState(*sampler) : nullptr;
+  // A device stream this step did not checkpoint can neither be reseeded (rollback could not undo
+  // it) nor be left behind (CommitStateForTransaction() would promote the seed to the durable basis
+  // while that stream still runs the old one, so a later turn that omits a seed would silently
+  // continue the wrong stream). ScheduledRequests::BeginTransaction() checkpoints every state a
+  // pending reseed targets, and Engine admission rejects samplers that cannot checkpoint, so
+  // reaching this is an internal contract violation: fail the step instead of promoting a seed
+  // only half of the Request honors.
+  if (device_state && !device_state_checkpointed) {
+    assert(false &&
+           "A pending turn seed targeted a device sampler state this step did not checkpoint.");
+    throw std::logic_error(
+        "A pending turn seed targeted a device sampler state this step did not checkpoint.");
+  }
+  // rng_ is checkpointed by every SaveState*ForTransaction() variant, so the host stream can always
+  // be reseeded here and rewound by the same rollback that rewinds the tokens it produced.
+  rng_ = MakeHostRandomGenerator(*pending_reseed_);
+  if (device_state) {
+    // Reseeding in place keeps the pooled index, so a reseeded turn neither leaks nor churns
+    // sampler-pool slots.
+    sampler->ReseedState(*device_state, *pending_reseed_);
+  }
+  pending_reseed_applied_ = true;
+}
+
+void Request::CommitSamplingState(std::unique_ptr<BatchedSamplerState> state) noexcept {
+  if (state) {
+    batched_sampler_state_ = std::move(state);
+  }
+}
+
+RequestStepResult Request::CompleteGeneration() {
   search_->CompleteGeneration();
+  const auto next_tokens = search_->GetNextTokens().CpuSpan();
 
   const size_t sequence_length = static_cast<size_t>(CurrentSequenceLength());
+  size_t new_token_count{};
+  int32_t token{};
   if (sequence_length > tokens_host_.size()) {
-    const size_t new_token_count = sequence_length - tokens_host_.size();
-    auto next_tokens = search_->GetNextTokens().CpuSpan();
+    new_token_count = sequence_length - tokens_host_.size();
     if (new_token_count > next_tokens.size())
       throw std::runtime_error("The search produced fewer tokens than it appended to the sequence.");
+    auto new_tokens = next_tokens.last(new_token_count);
 
-    tokens_host_.insert(tokens_host_.end(), next_tokens.end() - new_token_count, next_tokens.end());
+    tokens_host_.insert(tokens_host_.end(), new_tokens.begin(), new_tokens.end());
+    token = new_tokens.back();
+    if (guidance_logits_processor_) {
+      guidance_logits_processor_->CommitTokens(new_tokens);
+    }
+    turn_generated_tokens_ += new_token_count;
   }
 
-  if (search_->IsDone()) {
-    status_ = RequestStatus::Completed;
+  const bool turn_limit_reached =
+      turn_policy_.max_generated_tokens &&
+      turn_generated_tokens_ >= *turn_policy_.max_generated_tokens;
+  const bool context_limit_reached =
+      static_cast<size_t>(CurrentSequenceLength()) >= max_session_tokens_;
+  if (search_->IsDone() || turn_limit_reached || context_limit_reached) {
+    status_ = RequestStatus::TurnComplete;
+    if (search_->IsDone() && !next_tokens.empty() &&
+        contains(params_->config.model.eos_token_id, next_tokens.back())) {
+      finish_reason_ = GenerationFinishReason::EosToken;
+    } else if (turn_limit_reached) {
+      finish_reason_ = GenerationFinishReason::TurnLimit;
+    } else {
+      finish_reason_ = GenerationFinishReason::ContextLimit;
+    }
+    ReleaseTurnResources();
   }
-}
-
-std::shared_ptr<GeneratorParams> Request::Params() {
-  return params_;
-}
-
-void Request::SetOpaqueData(void* data) {
-  opaque_data_ = data;
-}
-
-void* Request::GetOpaqueData() {
-  return opaque_data_;
+  RequestStepResult result{
+      token,
+      new_token_count != 0,
+      Generators::IsTurnComplete(status_),
+      finish_reason_,
+  };
+  StageVisibleTokens(result, new_token_count, std::nullopt);
+  return result;
 }
 
 }  // namespace Generators

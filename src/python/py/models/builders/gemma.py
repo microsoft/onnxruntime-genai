@@ -15,6 +15,7 @@ class GemmaModel(MistralModel):
         self.layernorm_attrs["add_offset"] = 1
 
 
+# TODO: integrate extra LayerNorms into make_layer in base class
 class Gemma2Model(GemmaModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
@@ -24,9 +25,6 @@ class Gemma2Model(GemmaModel):
         self.layernorm_attrs["cast"]["output_0"] = True
         self.layernorm_attrs["cast"]["output_3"] = False
         self.attention_attrs["scale"] = config.query_pre_attn_scalar**-0.5
-
-    def is_local(self, layer_id):
-        return layer_id % 2 == 1
 
     def make_layernorm(self, layer_id, layernorm, skip, simple, location):
         if "final_norm" in location:
@@ -111,24 +109,12 @@ class Gemma2Model(GemmaModel):
             # Norm after last decoder layer of model (last layer --> norm)
             self.layernorm_attrs["last_layernorm"] = True
 
-    def make_attention(self, layer_id, attention, root_input, **kwargs):
-        original_window_size = self.window_size
-        self.window_size = (
-            original_window_size if self.is_local(layer_id) else -1
-        )  # default is -1 in GroupQueryAttention kernel
-        super().make_attention(layer_id, attention, root_input, **kwargs)
-        self.window_size = original_window_size
-
-
 class Gemma3Model(Gemma2Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
         self.rope_local_theta = config.rope_local_base_freq
         self.make_rotary_embedding_multi_cache()
-
-    def is_local(self, layer_id):
-        return bool((layer_id + 1) % 6)
 
     def make_attention_init(self, config):
         self.attention_attrs["q_norm"] = True

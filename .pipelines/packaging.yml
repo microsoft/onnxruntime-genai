@@ -39,7 +39,7 @@ parameters:
 - name: ort_runtime_version
   displayName: 'ONNX Runtime version (runtime dependency)'
   type: string
-  default: '1.27.0'
+  default: '1.28.0'
 
 # ---- WinML SDK version (Microsoft.Windows.AI.MachineLearning) --------------
 - name: winml_sdk_version

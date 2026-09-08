@@ -3,7 +3,11 @@
 
 #pragma once
 
+#include <cstdint>
+#include <functional>
+#include <limits>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <vector>
 
@@ -64,6 +68,43 @@ inline void OgaCheckResult(OgaResult* result) {
     throw std::runtime_error(p_result->GetError());
   }
 }
+
+struct OgaSpeculativeStats : OgaAbstract {
+  uint64_t GetCount(const char* name) const {
+    uint64_t value;
+    OgaCheckResult(OgaSpeculativeStatsGetCount(this, name, &value));
+    return value;
+  }
+
+  uint64_t GetAcceptanceLengthCount(size_t accepted_length) const {
+    uint64_t value{};
+    OgaCheckResult(OgaSpeculativeStatsGetAcceptanceLengthCount(
+        this, accepted_length, &value));
+    return value;
+  }
+
+  size_t GetAcceptanceLengthHistogramSize() const {
+    size_t value{};
+    OgaCheckResult(OgaSpeculativeStatsGetAcceptanceLengthHistogramSize(this, &value));
+    return value;
+  }
+
+  double GetNumber(const char* name) const {
+    double value;
+    OgaCheckResult(OgaSpeculativeStatsGetNumber(this, name, &value));
+    return value;
+  }
+
+  bool GetBool(const char* name) const {
+    bool value;
+    OgaCheckResult(OgaSpeculativeStatsGetBool(this, name, &value));
+    return value;
+  }
+
+  static void operator delete(void* p) {
+    OgaDestroySpeculativeStats(reinterpret_cast<OgaSpeculativeStats*>(p));
+  }
+};
 
 struct OgaFloat16_t;
 struct OgaBFloat16_t;
@@ -310,6 +351,18 @@ struct OgaTokenizer : OgaAbstract {
     return std::unique_ptr<OgaTokenizer>(p);
   }
 
+  static std::unique_ptr<OgaTokenizer> Create(const OgaConfig& config) {
+    OgaTokenizer* p;
+    OgaCheckResult(OgaCreateTokenizerFromConfig(&config, &p));
+    return std::unique_ptr<OgaTokenizer>(p);
+  }
+
+  static std::unique_ptr<OgaTokenizer> Create(const char* config_path) {
+    OgaTokenizer* p;
+    OgaCheckResult(OgaCreateTokenizerFromPath(config_path, &p));
+    return std::unique_ptr<OgaTokenizer>(p);
+  }
+
   void UpdateOptions(const char* const* keys, const char* const* values, size_t num_options) {
     OgaCheckResult(OgaUpdateTokenizerOptions(this, keys, values, num_options));
   }
@@ -471,6 +524,26 @@ struct OgaGeneratorParams : OgaAbstract {
     return value;
   }
 
+  void SetSpeculativeNumber(const char* name, double value) {
+    OgaCheckResult(OgaGeneratorParamsSetSpeculativeNumber(this, name, value));
+  }
+
+  double GetSpeculativeNumber(const char* name) const {
+    double value;
+    OgaCheckResult(OgaGeneratorParamsGetSpeculativeNumber(this, name, &value));
+    return value;
+  }
+
+  void SetSpeculativeBool(const char* name, bool value) {
+    OgaCheckResult(OgaGeneratorParamsSetSpeculativeBool(this, name, value));
+  }
+
+  bool GetSpeculativeBool(const char* name) const {
+    bool value;
+    OgaCheckResult(OgaGeneratorParamsGetSpeculativeBool(this, name, &value));
+    return value;
+  }
+
   static void operator delete(void* p) { OgaDestroyGeneratorParams(reinterpret_cast<OgaGeneratorParams*>(p)); }
 };
 
@@ -539,6 +612,14 @@ struct OgaGenerator : OgaAbstract {
     OgaCheckResult(OgaGenerator_RewindTo(this, new_length));
   }
 
+  void SnapshotState() {
+    OgaCheckResult(OgaGenerator_SnapshotState(this));
+  }
+
+  void SetHiddenStates(OgaTensor& hidden_states) {
+    OgaCheckResult(OgaGenerator_SetHiddenStates(this, &hidden_states));
+  }
+
   void SetRuntimeOption(const char* key, const char* value) {
     OgaCheckResult(OgaGenerator_SetRuntimeOption(this, key, value));
   }
@@ -549,6 +630,12 @@ struct OgaGenerator : OgaAbstract {
 
   const int32_t* GetSequenceData(size_t index) const {
     return OgaGenerator_GetSequenceData(this, index);
+  }
+
+  std::unique_ptr<OgaSpeculativeStats> GetSpeculativeStats() const {
+    OgaSpeculativeStats* stats;
+    OgaCheckResult(OgaGenerator_GetSpeculativeStats(this, &stats));
+    return std::unique_ptr<OgaSpeculativeStats>(stats);
   }
 
   std::unique_ptr<OgaTensor> GetInput(const char* name) {
@@ -584,6 +671,49 @@ struct OgaGenerator : OgaAbstract {
   }
 
   static void operator delete(void* p) { OgaDestroyGenerator(reinterpret_cast<OgaGenerator*>(p)); }
+};
+
+struct OgaMtpGenerator : OgaAbstract {
+  static std::unique_ptr<OgaMtpGenerator> Create(const OgaModel& main_model, const OgaModel& mtp_model, OgaGeneratorParams& params) {
+    OgaMtpGenerator* p;
+    OgaCheckResult(OgaCreateMtpGenerator(&main_model, &mtp_model, &params, &p));
+    return std::unique_ptr<OgaMtpGenerator>(p);
+  }
+
+  void AppendTokens(const int32_t* input_ids, size_t input_ids_count) {
+    OgaCheckResult(OgaMtpGenerator_AppendTokens(this, input_ids, input_ids_count));
+  }
+
+  void GenerateNextToken() {
+    OgaCheckResult(OgaMtpGenerator_GenerateNextToken(this));
+  }
+
+  void Reset() {
+    OgaCheckResult(OgaMtpGenerator_Reset(this));
+  }
+
+  bool IsDone() const {
+    return OgaMtpGenerator_IsDone(this);
+  }
+
+  size_t GetSequenceCount() const {
+    return OgaMtpGenerator_GetSequenceCount(this);
+  }
+
+  const int32_t* GetSequenceData() const {
+    return OgaMtpGenerator_GetSequenceData(this);
+  }
+
+  size_t GetForwardCount() const { return OgaMtpGenerator_GetForwardCount(this); }
+  size_t GetAcceptCount() const { return OgaMtpGenerator_GetAcceptCount(this); }
+  size_t GetTrialCount() const { return OgaMtpGenerator_GetTrialCount(this); }
+  std::unique_ptr<OgaSpeculativeStats> GetSpeculativeStats() const {
+    OgaSpeculativeStats* stats;
+    OgaCheckResult(OgaMtpGenerator_GetSpeculativeStats(this, &stats));
+    return std::unique_ptr<OgaSpeculativeStats>(stats);
+  }
+
+  static void operator delete(void* p) { OgaDestroyMtpGenerator(reinterpret_cast<OgaMtpGenerator*>(p)); }
 };
 
 struct OgaTensor : OgaAbstract {
@@ -801,43 +931,238 @@ struct OgaAdapters : OgaAbstract {
   static void operator delete(void* p) { OgaDestroyAdapters(reinterpret_cast<OgaAdapters*>(p)); }
 };
 
+struct OgaTurnUsage : OgaAbstract {
+  uint64_t PromptTokens() const {
+    uint64_t value{};
+    OgaCheckResult(OgaTurnUsageGetPromptTokens(this, &value));
+    return value;
+  }
+
+  uint64_t GeneratedTokens() const {
+    uint64_t value{};
+    OgaCheckResult(OgaTurnUsageGetGeneratedTokens(this, &value));
+    return value;
+  }
+
+  uint64_t CachedPromptTokens() const {
+    uint64_t value{};
+    OgaCheckResult(OgaTurnUsageGetCachedPromptTokens(this, &value));
+    return value;
+  }
+};
+
+struct OgaEngineEvent : OgaAbstract {
+  OgaEngineEventFlags Flags() const {
+    OgaEngineEventFlags value{};
+    OgaCheckResult(OgaEngineEventGetFlags(this, &value));
+    return value;
+  }
+
+  std::optional<std::reference_wrapper<const OgaRequest>> Request() const {
+    const OgaRequest* value{};
+    OgaCheckResult(OgaEngineEventGetRequest(this, &value));
+    if (!value) {
+      return std::nullopt;
+    }
+    return *value;
+  }
+
+  uint64_t TurnId() const {
+    uint64_t value{};
+    OgaCheckResult(OgaEngineEventGetTurnId(this, &value));
+    return value;
+  }
+
+  int32_t Token() const {
+    int32_t value{};
+    OgaCheckResult(OgaEngineEventGetToken(this, &value));
+    return value;
+  }
+
+  OgaFinishReason FinishReason() const {
+    OgaFinishReason value{};
+    OgaCheckResult(OgaEngineEventGetFinishReason(this, &value));
+    return value;
+  }
+
+  /** Index into the turn's stop-string list that completed a match, or std::nullopt unless
+   *  FinishReason() == OgaFinishReason_StopString. */
+  std::optional<int32_t> MatchedStopStringIndex() const {
+    int32_t value{};
+    OgaCheckResult(OgaEngineEventGetMatchedStopStringIndex(this, &value));
+    if (value < 0) {
+      return std::nullopt;
+    }
+    return value;
+  }
+
+  OgaErrorCode ErrorCode() const {
+    OgaErrorCode value{};
+    OgaCheckResult(OgaEngineEventGetErrorCode(this, &value));
+    return value;
+  }
+
+  const OgaTurnUsage& Usage() const {
+    const OgaTurnUsage* value{};
+    OgaCheckResult(OgaEngineEventGetUsage(this, &value));
+    return *value;
+  }
+};
+
+struct OgaEngineEventBuffer : OgaAbstract {
+  static std::unique_ptr<OgaEngineEventBuffer> Create(
+      OgaEngine& engine, size_t capacity) {
+    OgaEngineEventBuffer* buffer{};
+    OgaCheckResult(OgaCreateEngineEventBuffer(&engine, capacity, &buffer));
+    return std::unique_ptr<OgaEngineEventBuffer>(buffer);
+  }
+
+  size_t Count() const {
+    return OgaEngineEventBufferGetCount(this);
+  }
+
+  const OgaEngineEvent* Get(size_t index) const {
+    return OgaEngineEventBufferGet(this, index);
+  }
+
+  static void operator delete(void* p) {
+    OgaDestroyEngineEventBuffer(
+        reinterpret_cast<OgaEngineEventBuffer*>(p));
+  }
+};
+
+struct OgaRequestOptions : OgaAbstract {
+  static std::unique_ptr<OgaRequestOptions> Create() {
+    OgaRequestOptions* options{};
+    OgaCheckResult(OgaCreateRequestOptions(&options));
+    return std::unique_ptr<OgaRequestOptions>(options);
+  }
+
+  /** Total tokens (prompt plus generated, across every Turn) the Request may reach. Zero restores
+   *  the model-configured search.max_length, which is also the ceiling for any explicit value. */
+  void SetMaxSessionTokens(uint64_t value) {
+    OgaCheckResult(OgaRequestOptionsSetMaxSessionTokens(this, value));
+  }
+
+  static void operator delete(void* p) {
+    OgaDestroyRequestOptions(reinterpret_cast<OgaRequestOptions*>(p));
+  }
+};
+
+struct OgaTurnOptions : OgaAbstract {
+  static std::unique_ptr<OgaTurnOptions> Create(OgaRequest& request) {
+    OgaTurnOptions* options{};
+    OgaCheckResult(OgaRequestCreateTurnOptions(&request, &options));
+    return std::unique_ptr<OgaTurnOptions>(options);
+  }
+
+  /** Caps the tokens this Turn generates. Zero unsets the cap. */
+  void SetMaxGeneratedTokens(uint64_t value) {
+    OgaCheckResult(OgaTurnOptionsSetMaxGeneratedTokens(this, value));
+  }
+  /** Masks end-of-sequence until this Turn has generated `value` tokens. Zero unsets it. */
+  void SetMinGeneratedTokens(uint64_t value) {
+    OgaCheckResult(OgaTurnOptionsSetMinGeneratedTokens(this, value));
+  }
+  /** Selects random sampling (true) or the top logit (false) for this Turn. */
+  void SetDoSample(bool value) {
+    OgaCheckResult(OgaTurnOptionsSetDoSample(this, value));
+  }
+  /** Sampling temperature; zero requests top-logit selection. */
+  void SetTemperature(float value) {
+    OgaCheckResult(OgaTurnOptionsSetTemperature(this, value));
+  }
+  /** Nucleus bound between 0.0 and 1.0. */
+  void SetTopP(float value) {
+    OgaCheckResult(OgaTurnOptionsSetTopP(this, value));
+  }
+  /** Top-k bound; one requests top-logit selection and zero disables top-k. */
+  void SetTopK(int32_t value) {
+    OgaCheckResult(OgaTurnOptionsSetTopK(this, value));
+  }
+  /** Repetition penalty; must be finite and greater than zero. */
+  void SetRepetitionPenalty(float value) {
+    OgaCheckResult(OgaTurnOptionsSetRepetitionPenalty(this, value));
+  }
+  /** Forbids repeating any n-gram of this size. Zero disables it. */
+  void SetNoRepeatNgramSize(int32_t value) {
+    OgaCheckResult(OgaTurnOptionsSetNoRepeatNgramSize(this, value));
+  }
+  /** Reseeds the Request's random streams at the start of this Turn. Zero is a valid seed. */
+  void SetSeed(uint64_t value) {
+    OgaCheckResult(OgaTurnOptionsSetSeed(this, value));
+  }
+  /** Removes a pending reseed, continuing the Request's existing random streams. */
+  void ClearSeed() {
+    OgaCheckResult(OgaTurnOptionsClearSeed(this));
+  }
+  /** Copies stop_strings for this turn immediately; reusing or destroying it afterward cannot
+   *  affect these options. An empty array (zero entries) clears/disables stop strings; this is
+   *  distinct from a nonempty array containing an empty string member, which is invalid. Every
+   *  entry in a nonempty array must itself be a nonempty, valid UTF-8 string, and the configuration
+   *  as a whole may contain at most 16 entries totaling at most 16 KiB. Matching is exact (no
+   *  normalization/trimming/case folding) against only the text this Engine Request generates
+   *  during the turn. */
+  void SetStopStrings(const OgaStringArray& values) {
+    OgaCheckResult(OgaTurnOptionsSetStopStrings(this, &values));
+  }
+  /** Constrains this Turn's output to a grammar ("json_schema", "regex", or "lark_grammar"),
+   *  copying both strings immediately. Guidance is strictly Turn-scoped. */
+  void SetGuidance(const char* type, const char* data) {
+    OgaCheckResult(OgaTurnOptionsSetGuidance(this, type, data));
+  }
+  /** Removes the configured grammar, so the Turn is unguided. */
+  void ClearGuidance() {
+    OgaCheckResult(OgaTurnOptionsClearGuidance(this));
+  }
+  /** Restores every Turn option to its unset state. */
+  void Reset() {
+    OgaCheckResult(OgaTurnOptionsReset(this));
+  }
+
+  static void operator delete(void* p) {
+    OgaDestroyTurnOptions(reinterpret_cast<OgaTurnOptions*>(p));
+  }
+};
+
 struct OgaRequest : OgaAbstract {
-  static std::unique_ptr<OgaRequest> Create(OgaGeneratorParams& params) {
-    OgaRequest* p;
-    OgaCheckResult(OgaCreateRequest(&params, &p));
-    return std::unique_ptr<OgaRequest>(p);
+  uint64_t BeginTurn(const int32_t* input_ids, size_t input_ids_count,
+                     const OgaTurnOptions* options = nullptr) {
+    uint64_t turn_id{};
+    OgaCheckResult(OgaRequestBeginTurn(
+        this, options, input_ids, static_cast<uint64_t>(input_ids_count),
+        &turn_id));
+    return turn_id;
   }
 
-  void AddTokens(const OgaSequences& tokens) {
-    OgaCheckResult(OgaRequestAddTokens(this, &tokens));
+#if OGA_USE_SPAN
+  uint64_t BeginTurn(std::span<const int32_t> input_ids,
+                     const OgaTurnOptions* options = nullptr) {
+    return BeginTurn(input_ids.data(), input_ids.size(), options);
+  }
+#endif
+
+  std::unique_ptr<OgaTurnOptions> CreateTurnOptions() {
+    return OgaTurnOptions::Create(*this);
   }
 
-  bool IsDone() const {
-    bool is_done{};
-    OgaCheckResult(OgaRequestIsDone(this, &is_done));
-    return is_done;
+  bool CancelTurn(uint64_t turn_id) {
+    bool cancelled{};
+    OgaCheckResult(OgaRequestCancelTurn(this, turn_id, &cancelled));
+    return cancelled;
   }
 
-  bool HasUnseenTokens() const {
-    bool has_unseen_tokens{};
-    OgaCheckResult(OgaRequestHasUnseenTokens(this, &has_unseen_tokens));
-    return has_unseen_tokens;
+  /**
+   * \brief Proposes speculative draft tokens for the next decode operation.
+   *
+   * Seeded sampled output is reproducible only with the same proposal and scheduling path.
+   */
+  void SetDraftTokens(const OgaSequences& tokens) {
+    OgaCheckResult(OgaRequestSetDraftTokens(this, &tokens));
   }
 
-  int32_t GetUnseenToken() {
-    int32_t token;
-    OgaCheckResult(OgaRequestGetUnseenToken(this, &token));
-    return token;
-  }
-
-  void SetOpaqueData(void* data) {
-    OgaCheckResult(OgaRequestSetOpaqueData(this, data));
-  }
-
-  void* GetOpaqueData() {
-    void* data;
-    OgaCheckResult(OgaRequestGetOpaqueData(this, &data));
-    return data;
+  void Close() {
+    OgaCheckResult(OgaRequestClose(this));
   }
 
   static void operator delete(void* p) { OgaDestroyRequest(reinterpret_cast<OgaRequest*>(p)); }
@@ -856,18 +1181,39 @@ struct OgaEngine : OgaAbstract {
     return f;
   }
 
-  void Add(OgaRequest& request) {
-    OgaCheckResult(OgaEngineAddRequest(this, &request));
+  /**
+   * \brief Speculative draft tokens a request may attach to one proposal; zero when unsupported.
+   */
+  size_t MaxDraftTokensPerProposal() const {
+    size_t count{};
+    OgaCheckResult(OgaEngineMaxDraftTokensPerProposal(this, &count));
+    return count;
   }
 
-  void Remove(OgaRequest& request) {
-    OgaCheckResult(OgaEngineRemoveRequest(this, &request));
+  /**
+   * \brief Cumulative target/head work and committed draft acceptance statistics.
+   */
+  std::unique_ptr<OgaSpeculativeStats> GetSpeculativeStats() const {
+    OgaSpeculativeStats* stats;
+    OgaCheckResult(OgaEngineGetSpeculativeStats(this, &stats));
+    return std::unique_ptr<OgaSpeculativeStats>(stats);
   }
 
-  std::unique_ptr<OgaRequest> Step() {
-    OgaRequest* request;
-    OgaCheckResult(OgaEngineStep(this, &request));
-    return request ? std::unique_ptr<OgaRequest>(request) : nullptr;
+  std::unique_ptr<OgaRequest> CreateRequest(
+      const OgaRequestOptions* options = nullptr) {
+    OgaRequest* request{};
+    OgaCheckResult(OgaEngineCreateRequest(this, options, &request));
+    return std::unique_ptr<OgaRequest>(request);
+  }
+
+  std::unique_ptr<OgaEngineEventBuffer> CreateEventBuffer(
+      size_t capacity) {
+    return OgaEngineEventBuffer::Create(*this, capacity);
+  }
+
+  size_t Run(OgaEngineEventBuffer& buffer) {
+    OgaCheckResult(OgaEngineRun(this, &buffer));
+    return buffer.Count();
   }
 
   static void operator delete(void* p) { OgaDestroyEngine(reinterpret_cast<OgaEngine*>(p)); }

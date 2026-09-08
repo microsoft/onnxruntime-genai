@@ -9,7 +9,7 @@
 #include <string>
 #include <system_error>
 
-#include "../generators.h"
+#include "generator/generators.h"
 #include "session_options.h"
 
 namespace Generators {

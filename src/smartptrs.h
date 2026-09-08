@@ -6,8 +6,13 @@
 #include <algorithm>  // for std::copy
 #include <assert.h>
 #include <atomic>
+#include <cstring>
 #include <memory>
+#include <string>
+#include <thread>
 #include <type_traits>  // for std::remove_const_t
+#include <utility>
+#include "config.h"
 #include "span.h"
 #include "models/onnxruntime_api.h"  // for ONNXTensorElementDataType
 #include "provider_options.h"        // for ProviderOptions
@@ -20,6 +25,10 @@ struct Search;
 struct Sequences;
 struct GeneratorParams;
 struct Config;
+struct State;
+struct KeyValueCache;
+struct PositionInputs;
+struct DeviceInterface;
 
 // A DeviceBuffer is an abstract interface to a block of device memory (can be cuda/dml/cpu memory)
 // Note: For a CPU DeviceBuffer, there's only one block of memory on CPU, the copy methods are no-ops
@@ -33,6 +42,12 @@ struct DeviceBuffer : std::enable_shared_from_this<DeviceBuffer> {
   virtual void CopyCpuToDevice() = 0;
   virtual void CopyFrom(size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes) = 0;
   virtual void Zero() = 0;  // Zero out the device memory
+  virtual void CopyFromCpu(const void* source, size_t size_in_bytes) {
+    assert(size_in_bytes == size_in_bytes_);
+    AllocateCpu();
+    std::memcpy(p_cpu_, source, size_in_bytes);
+    CopyCpuToDevice();
+  }
 
   uint8_t* p_device_{};
   uint8_t* p_cpu_{};
@@ -75,6 +90,11 @@ struct DeviceSpan {
   // Copy CPU memory to device memory, typically used after calling CpuSpan or CopyDeviceToCpu to update the device memory with the modifications made
   void CopyCpuToDevice() { p_device_memory_->CopyCpuToDevice(); }
 
+  void CopyFromCpu(std::span<const T> source) {
+    assert(source.size() == size());
+    p_device_memory_->CopyFromCpu(source.data(), source.size_bytes());
+  }
+
   // Zero out the device memory
   void Zero() { p_device_memory_->Zero(); }
 
@@ -93,6 +113,13 @@ struct DeviceSpan {
   friend struct DeviceSpan;  // All DeviceSpans are friends
 };
 
+struct PositionInputs {
+  virtual ~PositionInputs() = default;
+  virtual void Add() = 0;
+  virtual void Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) = 0;
+  virtual void RewindTo(size_t index) = 0;
+};
+
 struct BatchedSamplerState {
   virtual ~BatchedSamplerState() = default;
 };
@@ -108,8 +135,19 @@ struct BatchedSamplingParams {
 struct BatchedSampler {
   virtual ~BatchedSampler() = default;
 
-  virtual std::unique_ptr<BatchedSamplerState> CreateState(int random_seed) = 0;
+  virtual std::unique_ptr<BatchedSamplerState> CreateState(uint64_t random_seed) = 0;
+  // Restarts an existing state's stream from `random_seed` without releasing or reacquiring any
+  // pooled resource the state holds, so a per-turn reseed neither leaks nor churns sampler slots.
+  virtual void ReseedState(BatchedSamplerState& state, uint64_t random_seed) = 0;
   virtual bool OwnsState(const BatchedSamplerState& state) const = 0;
+  virtual bool SupportsTransactions() const { return false; }
+  virtual void SaveStateForTransaction(std::span<BatchedSamplerState* const> /*states*/) {
+    throw std::logic_error("Batched sampler does not support transactions.");
+  }
+  virtual void RestoreStateForTransaction() {
+    throw std::logic_error("Batched sampler does not support transactions.");
+  }
+  virtual void CommitStateForTransaction() noexcept {}
   virtual DeviceSpan<int32_t> Sample(std::span<DeviceSpan<float>> scores,
                                      std::span<const BatchedSamplingParams> params,
                                      std::span<BatchedSamplerState* const> states,
@@ -126,8 +164,60 @@ enum struct DeviceType {
   OpenVINO,
   NvTensorRtRtx,
   RyzenAI,
+  AMDGPU,
   MAX
 };
+
+DeviceInterface* GetDeviceInterface(DeviceType type);
+std::unique_ptr<PositionInputs> CreateStandardPositionInputs(State& state,
+                                                             DeviceSpan<int32_t> sequence_lengths,
+                                                             const std::string& attention_mask_name);
+
+// One windowed state tensor for DeviceInterface::CopyStateSlots: `base` is the start of the whole
+// [W, ...] buffer and `slot_bytes` is the size of one window slot.
+struct StateSlotDesc {
+  uint8_t* base;
+  uint64_t slot_bytes;
+
+  bool operator==(const StateSlotDesc& other) const {
+    return base == other.base && slot_bytes == other.slot_bytes;
+  }
+
+  bool operator!=(const StateSlotDesc& other) const {
+    return !(*this == other);
+  }
+};
+
+enum class StateUpdateReplayKind : uint32_t {
+  CausalConv = 1,
+  GatedDeltaNet = 2,
+};
+
+struct StateUpdateReplayDesc {
+  const void* source_state;
+  void* destination_state;
+  const void* value;
+  const float* decay;
+  const float* key;
+  const float* delta;
+  uint64_t channel_count;
+  uint64_t state_width;
+  uint64_t key_width;
+  uint64_t key_head_count;
+  uint32_t capacity;
+  uint32_t kept_count;
+  uint32_t element_size;
+  StateUpdateReplayKind kind;
+};
+
+static_assert(std::is_trivially_copyable_v<StateUpdateReplayDesc>);
+
+// Increment whenever a layout the add-on boundary depends on changes: DeviceInterface's virtual
+// layout, or the virtual or data layout of any type constructed by, passed to, or returned across
+// that boundary (Search, BatchedSampler, BatchedSamplerState, GeneratorParams, or Config).
+// Dynamically loaded add-ons must report this exact version before the host can safely call through
+// the C++ interface.
+inline constexpr uint32_t kDeviceInterfaceVersion = 5;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}
@@ -136,6 +226,27 @@ struct DeviceInterface {
   virtual void InitOrt(const OrtApi& api, Ort::Allocator& allocator) = 0;
   virtual Ort::Allocator& GetAllocator() = 0;
   virtual std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const = 0;
+
+  // The execution provider name used when configuring session options for the trivial init
+  // session (see 'SetProviderSessionOptions'), e.g. "cuda", "DML", "QNN".
+  virtual std::string GetExecutionProviderName() const = 0;
+
+  // Host-accessible (CPU-writable, GPU-readable) allocator for decode inputs, if the device
+  // supports it. Null default -> callers keep the current device-memory path.
+  virtual Ort::Allocator* GetHostAccessibleAllocator() { return nullptr; }
+
+  // Inputs-only interface backed by that allocator, so the decode inputs are updated in place.
+  // Null default -> callers keep the current device-memory path.
+  virtual DeviceInterface* GetHostAccessibleDevice() { return nullptr; }
+
+  // Called once after the device allocator is created, so a device that offers additional
+  // allocators (e.g. host-accessible memory) can set them up. The default sets up nothing.
+  // `device_id` is the id the device allocator was created on.
+  virtual void InitDeviceAllocators(const ProviderOptions* /*user_options*/, int /*device_id*/) {}
+
+  // Id of the EP device this interface's allocators should bind to. 0 unless the device resolves a
+  // specific one from EP metadata.
+  virtual int GetDeviceId(const ProviderOptions* /*user_options*/) { return 0; }
 
   template <typename T>
   DeviceSpan<T> Allocate(size_t count) { return DeviceSpan<T>(AllocateBase(sizeof(T) * count)); }
@@ -181,25 +292,148 @@ struct DeviceInterface {
     assert(false);
     return nullptr;
   }  // Temporary until we fully factor out providers
+
+  // On-device greedy argmax (top-1) over each of `num_rows` consecutive `vocab_size`-element rows of
+  // device `logits` (fp16 or fp32). Writes the resulting token ids to the host buffer `out_tokens`
+  // (length `num_rows`). Uses the device's high-performance Top-K kernel so the full logits never
+  // leave the GPU -- only the small token ids are copied back. Returns false on devices without an
+  // implementation, in which case the caller falls back to a host-side argmax.
+  // NOTE: keep this at the end of the struct to avoid shifting the vtable layout (ABI stability).
+  virtual bool ArgMax(const void* /*logits*/, ONNXTensorElementDataType /*logits_type*/, int /*num_rows*/, int /*vocab_size*/, int32_t* /*out_tokens*/) { return false; }
+  // Compute the per-row top-`k` token ids and their RAW fp32 logit scores (sorted descending),
+  // copying only the small k*num_rows results to the host. Used by speculative sampling to build a
+  // truncated categorical without a full-vocab device->host copy. Returns false on unsupported
+  // devices (caller falls back to a host-side path). Keep last for vtable/ABI stability.
+  virtual bool TopKScores(const void* /*logits*/, ONNXTensorElementDataType /*logits_type*/, int /*num_rows*/,
+                          int /*vocab_size*/, int /*k*/, int32_t* /*out_tokens*/, float* /*out_scores*/) { return false; }
+  // Device-output variant used when a greedy token feeds another device-resident forward before
+  // the host needs to inspect it. Keep last for vtable/ABI stability.
+  virtual bool ArgMaxDevice(const void* /*logits*/, ONNXTensorElementDataType /*logits_type*/, int /*num_rows*/,
+                            int /*vocab_size*/, DeviceSpan<int32_t> /*out_tokens*/) { return false; }
+  // Promote one window slot to another for every descriptor in `descs_device` (device memory,
+  // `count` entries). A hybrid model has 2 state tensors per layer, so the per-tensor memcpy loop
+  // this replaces issues 60+ cudaMemcpyAsync calls on every partial-accept MTP step; each costs a
+  // few microseconds of *host* time, which shows up directly as GPU idle. One kernel launch does
+  // the same work. Returns false on devices without an implementation.
+  // Keep last for vtable/ABI stability.
+  virtual bool CopyStateSlots(const void* /*descs_device*/, int /*count*/, int /*src_slot*/,
+                              int /*dst_slot*/) { return false; }
+  // Creates the conventional (non-paged) model state cache. The selected EP owns cache policy so
+  // providers can replace the standard exposed past/present tensor implementation. Keep last for
+  // vtable/ABI stability.
+  virtual std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) = 0;
+  virtual bool ShouldClampZeroLengthKeyValueCacheOutputPlaceholders() const { return false; }
+  virtual bool ShouldZeroKeyValueCacheTensors() const { return true; }
+  virtual int GetWindowedKeyValueCacheSize(const Config::Model::Decoder& /*decoder*/,
+                                           const Config::Search& /*search*/,
+                                           int /*max_length*/) const { return 0; }
+  virtual bool UsesNonRewindableWindowedKeyValueCache(const Config::Model::Decoder& decoder) const {
+    return decoder.sliding_window &&
+           decoder.sliding_window->slide_key_value_cache;
+  }
+  virtual int GetKeyValueCacheQuantizationBits(const Config::SessionOptions& /*session_options*/) const { return 0; }
+  virtual bool ShouldUseStaticPositionInputsForSharedBuffers(const Config::Model& /*model*/) const { return false; }
+#if defined(onnxruntime_genai_cuda_EXPORTS) || defined(ORTGENAI_CUDA_ADDON_COMPILATION)
+  virtual DeviceInterface& GetCpuFallbackDevice() = 0;
+  virtual std::unique_ptr<PositionInputs> CreatePositionInputs(State& state,
+                                                               DeviceSpan<int32_t> sequence_lengths,
+                                                               const std::string& attention_mask_name) = 0;
+#else
+  virtual DeviceInterface& GetCpuFallbackDevice() {
+    return *GetDeviceInterface(DeviceType::CPU);
+  }
+  virtual std::unique_ptr<PositionInputs> CreatePositionInputs(State& state,
+                                                               DeviceSpan<int32_t> sequence_lengths,
+                                                               const std::string& attention_mask_name) {
+    return CreateStandardPositionInputs(state, sequence_lengths, attention_mask_name);
+  }
+#endif
+  virtual void ReplayStateUpdates(const StateUpdateReplayDesc* /*descs*/, size_t /*count*/) {
+    throw std::logic_error("Device does not support compact fixed-state replay.");
+  }
 };
 
 // A shared_ptr based type that we expose through our C API should inherit from this type.
 // ExternalAddRef must be called when returning an object through the C API
-// ExternalRelease must be called on the C API destroy method
 template <typename T>
 struct ExternalRefCounted {
+  ExternalRefCounted() = default;
+  explicit ExternalRefCounted(
+      std::shared_ptr<std::atomic<bool>> final_release_pending) noexcept
+      : final_release_pending_{std::move(final_release_pending)} {}
+
   void ExternalAddRef() {
-    if (++ref_count_ == 1)  // First reference?
-      external_owner_ = static_cast<T*>(this)->shared_from_this();
+    ExternalReferenceLock lock{*this};
+    if (ref_count_ == 0) {
+      // Acquire the self-owner before publishing the first reference. If shared_from_this throws,
+      // the never-acquired/zero-reference state remains unchanged.
+      auto owner = static_cast<T*>(this)->shared_from_this();
+      external_owner_ = std::move(owner);
+      ref_count_ = 1;
+      external_lifecycle_started_ = true;
+    } else {
+      ++ref_count_;
+    }
   }
-  void ExternalRelease() {
-    if (--ref_count_ == 0)
-      external_owner_ = nullptr;
+
+  void ExternalRelease() noexcept {
+    std::shared_ptr<T> released_owner;
+    {
+      ExternalReferenceLock lock{*this};
+      assert(ref_count_ > 0);
+      if (--ref_count_ == 0) {
+        if (final_release_pending_) {
+          final_release_pending_->store(true, std::memory_order_release);
+        }
+        released_owner = std::move(external_owner_);
+      }
+    }
+    // The self-owner may be the last strong reference. Destroy it only after releasing the member
+    // lock so object destruction never runs while code still accesses this object's synchronization.
+  }
+
+  // True only after an external lifecycle has started and its final handle has been released.
+  // A never-exposed object therefore remains distinct from an abandoned external object.
+  bool ExternalReferencesAbandoned() const noexcept {
+    ExternalReferenceLock lock{*this};
+    return external_lifecycle_started_ && ref_count_ == 0;
   }
 
  private:
+  void LockExternalReferences() const noexcept {
+    while (external_reference_lock_.test_and_set(std::memory_order_acquire)) {
+#if defined(USE_CXX17) || defined(__APPLE__)
+      std::this_thread::yield();
+#else
+      external_reference_lock_.wait(true, std::memory_order_relaxed);
+#endif
+    }
+  }
+
+  void UnlockExternalReferences() const noexcept {
+    external_reference_lock_.clear(std::memory_order_release);
+#if !defined(USE_CXX17) && !defined(__APPLE__)
+    external_reference_lock_.notify_one();
+#endif
+  }
+
+  struct ExternalReferenceLock {
+    explicit ExternalReferenceLock(const ExternalRefCounted& owner) noexcept
+        : owner_{owner} {
+      owner_.LockExternalReferences();
+    }
+    ~ExternalReferenceLock() noexcept {
+      owner_.UnlockExternalReferences();
+    }
+
+    const ExternalRefCounted& owner_;
+  };
+
   std::shared_ptr<T> external_owner_;  // shared_ptr to ourselves to keep us alive
-  std::atomic<int> ref_count_{};       // C API refcount (can't use only the shared_ptr)
+  std::shared_ptr<std::atomic<bool>> final_release_pending_;
+  int ref_count_{};                    // Guarded with external_owner_ and lifecycle state.
+  bool external_lifecycle_started_{};  // Distinguishes never exposed from finally released.
+  mutable std::atomic_flag external_reference_lock_ = ATOMIC_FLAG_INIT;
 };
 
 namespace Location {

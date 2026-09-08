@@ -104,6 +104,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         private static readonly KeyValuePair<string, string>[] _knownEpLibraries = new[]
         {
             new KeyValuePair<string, string>("WebGpuExecutionProvider", "onnxruntime_providers_webgpu"),
+            new KeyValuePair<string, string>("CUDA.GenAI", "onnxruntime_providers_cuda"),
         };
 
         // Resolves the directory containing the execution provider plugin libraries to register.
@@ -221,6 +222,8 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 
                         generatorParams.SetSearchOption("max_length", maxLength);
                         generatorParams.SetSearchOption("batch_size", batchSize);
+                        generatorParams.SetSpeculativeNumber("max_draft_tokens", 4);
+                        generatorParams.SetSpeculativeNumber("min_adaptive_k", 2);
 
                         using (var generator = new Generator(model, generatorParams))
                         {
@@ -230,6 +233,14 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                             Assert.False(generator.IsDone());
                             Assert.Equal(maxLength, generatorParams.GetSearchNumber("max_length"));
                             Assert.True(generatorParams.GetSearchBool("early_stopping"));
+                            Assert.Equal(4.0, generatorParams.GetSpeculativeNumber("max_draft_tokens"));
+                            Assert.Equal(2.0, generatorParams.GetSpeculativeNumber("min_adaptive_k"));
+                            using (SpeculativeStats stats = generator.GetSpeculativeStats())
+                            {
+                                Assert.Equal(0UL, stats.GetCount("rounds"));
+                                Assert.False(stats.GetBool("formula_supported"));
+                                Assert.Equal(0.0, stats.GetNumber("acceptance_rate"));
+                            }
                             Assert.Equal(generator.GetSequence(0).Length, (int)generator.TokenCount());
 
                             while (!generator.IsDone())
@@ -555,6 +566,20 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                     Assert.Equal(strings, decodedStrings);
                 }
             }
+        }
+
+        [IgnoreOnModelAbsenceFact(DisplayName = "TestTokenizerCreateFromConfigAndPath")]
+        public void TestTokenizerCreateFromConfigAndPath()
+        {
+            string modelPath = _phi2Path;
+            string str = "She sells sea shells by the sea shore.";
+
+            using var config = new Config(modelPath);
+            using var tokenizerFromConfig = new Tokenizer(config);
+            using var tokenizerFromPath = new Tokenizer(modelPath);
+
+            using var sequences = tokenizerFromConfig.Encode(str);
+            Assert.Equal(str, tokenizerFromPath.Decode(sequences[0]));
         }
 
         [IgnoreOnModelAbsenceFact(DisplayName = "TestTokenizerBatchEncodeSingleDecode")]

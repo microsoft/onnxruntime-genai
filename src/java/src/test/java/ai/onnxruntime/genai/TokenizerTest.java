@@ -37,6 +37,17 @@ public class TokenizerTest {
   }
 
   @Test
+  public void testCreateFromConfigAndPath() throws GenAIException {
+    String input = "She sells sea shells by the sea shore.";
+    try (Config config = new Config(TestUtils.tinyGpt2ModelPath());
+        Tokenizer tokenizerFromConfig = new Tokenizer(config);
+        Tokenizer tokenizerFromPath = new Tokenizer(TestUtils.tinyGpt2ModelPath());
+        Sequences encoded = tokenizerFromConfig.encode(input)) {
+      assertEquals(input, tokenizerFromPath.decode(encoded.getSequence(0)));
+    }
+  }
+
+  @Test
   @EnabledIf("havePhi2")
   public void testGetBosTokenId() throws GenAIException {
     try (Model model = new Model(TestUtils.phi2ModelPath());

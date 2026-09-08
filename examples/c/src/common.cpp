@@ -284,6 +284,10 @@ void SetSearchOptions(OgaGeneratorParams& generatorParams, GeneratorParamsArgs& 
     generatorParams.SetSearchOption("batch_size", args.batch_size);
     opts.push_back("batch_size: " + std::to_string(args.batch_size));
   }
+  if (args.chunk_size) {
+    generatorParams.SetSearchOption("chunk_size", args.chunk_size);
+    opts.push_back("chunk_size: " + std::to_string(args.chunk_size));
+  }
   if (args.do_sample) {
     generatorParams.SetSearchOptionBool("do_sample", args.do_sample.value());
     opts.push_back("do_sample: " + std::to_string(args.do_sample.value()));

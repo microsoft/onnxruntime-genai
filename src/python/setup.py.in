@@ -59,6 +59,8 @@ setup(
     packages=[
         'onnxruntime_genai',
         'onnxruntime_genai.models',
+        'onnxruntime_genai.models.loaders',
+        'onnxruntime_genai.models.quantization',
         'onnxruntime_genai.models.builders',
         'onnxruntime_genai.models.builders.expansions',
     ],

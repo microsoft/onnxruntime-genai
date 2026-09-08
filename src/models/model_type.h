@@ -17,7 +17,7 @@ namespace Generators {
 struct ModelType {
   inline static bool IsLLM(const std::string& model_type) {
     // Large-language model (LLM)
-    static constexpr std::array<std::string_view, 27> LLM = {"chatglm", "decoder", "ernie4_5", "gemma", "gemma2", "gemma3_text", "gemma4_text", "gpt2", "gptoss", "granite", "granitemoehybrid", "hunyuandensev1", "internlm2", "lfm2", "llama", "mistral", "nemotron", "olmo", "phi", "phimoe", "phi3", "phi3small", "qwen2", "qwen3", "qwen3_5_moe_text", "qwen3_5_text", "smollm3"};
+    static constexpr std::array<std::string_view, 31> LLM = {"chatglm", "decoder", "ernie4_5", "gemma", "gemma2", "gemma3_text", "gemma3_vl_text", "gemma4_text", "gpt2", "gptoss", "granite", "granitemoehybrid", "hunyuandensev1", "internlm2", "lfm2", "llama", "mistral", "mistral3_text", "nemotron", "olmo", "phi", "phimoe", "phi3", "phi3small", "qwen2", "qwen2_5_vl_text", "qwen3", "qwen3_vl_text", "qwen3_5_moe_text", "qwen3_5_text", "smollm3"};
     return std::find(LLM.begin(), LLM.end(), model_type) != LLM.end();
   }
 
@@ -27,21 +27,22 @@ struct ModelType {
     return std::find(VLM.begin(), VLM.end(), model_type) != VLM.end();
   }
 
-  inline static bool IsQwenVLFamily(const std::string& model_type) {
-    // Qwen-VL family: models requiring 3D mRoPE position IDs
-    static constexpr std::array<std::string_view, 5> QwenVL = {"fara", "qwen2_5_vl", "qwen3_vl", "qwen3_5", "qwen3_5_moe"};
-    return std::find(QwenVL.begin(), QwenVL.end(), model_type) != QwenVL.end();
-  }
-
-  inline static bool IsPixtralFamily(const std::string& model_type) {
-    // Pixtral family: per-image vision loop with variable resolution
-    return model_type == "mistral3";
-  }
-
   inline static bool IsALM(const std::string& model_type) {
     // Audio-language model (ALM)
     static constexpr std::array<std::string_view, 1> ALM = {"whisper"};
     return std::find(ALM.begin(), ALM.end(), model_type) != ALM.end();
+  }
+
+  inline static bool IsMMM(const std::string& model_type) {
+    // Multi-modal model (MMM)
+    static constexpr std::array<std::string_view, 2> MMM = {"gemma4", "phi4mm"};
+    return std::find(MMM.begin(), MMM.end(), model_type) != MMM.end();
+  }
+
+  inline static bool IsPipe(const std::string& model_type) {
+    // Pipeline (Pipe)
+    static constexpr std::array<std::string_view, 1> Pipe = {"decoder-pipeline"};
+    return std::find(Pipe.begin(), Pipe.end(), model_type) != Pipe.end();
   }
 
   inline static bool IsRNNT(const std::string& model_type) {
@@ -61,16 +62,15 @@ struct ModelType {
     return IsRNNT(model_type) || IsTDT(model_type);
   }
 
-  inline static bool IsMMM(const std::string& model_type) {
-    // Multi-modal model (MMM)
-    static constexpr std::array<std::string_view, 2> MMM = {"gemma4", "phi4mm"};
-    return std::find(MMM.begin(), MMM.end(), model_type) != MMM.end();
+  inline static bool IsQwenVLFamily(const std::string& model_type) {
+    // Qwen-VL family: models requiring 3D mRoPE position IDs
+    static constexpr std::array<std::string_view, 10> QwenVL = {"fara", "qwen2_5_vl_text", "qwen2_5_vl", "qwen3_vl", "qwen3_vl_text", "qwen3_5", "qwen3_5_moe", "qwen3_5_moe_text", "qwen3_5_text", "videochat_flash_qwen"};
+    return std::find(QwenVL.begin(), QwenVL.end(), model_type) != QwenVL.end();
   }
 
-  inline static bool IsPipe(const std::string& model_type) {
-    // Pipeline (Pipe)
-    static constexpr std::array<std::string_view, 1> Pipe = {"decoder-pipeline"};
-    return std::find(Pipe.begin(), Pipe.end(), model_type) != Pipe.end();
+  inline static bool IsPixtralFamily(const std::string& model_type) {
+    // Pixtral family: per-image vision loop with variable resolution
+    return model_type == "mistral3";
   }
 
   inline static bool IsLFM2(const std::string& model_type) {

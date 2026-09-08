@@ -16,6 +16,16 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             Result.VerifySuccess(NativeMethods.OgaCreateTokenizer(model.Handle, out _tokenizerHandle));
         }
 
+        public Tokenizer(Config config)
+        {
+            Result.VerifySuccess(NativeMethods.OgaCreateTokenizerFromConfig(config.Handle, out _tokenizerHandle));
+        }
+
+        public Tokenizer(string modelPath)
+        {
+            Result.VerifySuccess(NativeMethods.OgaCreateTokenizerFromPath(StringUtils.ToUtf8(modelPath), out _tokenizerHandle));
+        }
+
         public Sequences EncodeBatch(string[] strings)
         {
             Result.VerifySuccess(NativeMethods.OgaCreateSequences(out IntPtr nativeSequences));

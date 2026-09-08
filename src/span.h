@@ -32,6 +32,9 @@ struct span {
 
   constexpr T& back() const noexcept { return p_[length_ - 1]; }
 
+  span first(size_t count) const { return subspan(0, count); }
+  span last(size_t count) const { return subspan(length_ - count, count); }
+
   constexpr T* begin() const noexcept { return p_; }
   constexpr T* end() const noexcept { return p_ + length_; }
 
@@ -69,6 +72,9 @@ struct span<const T> {
   constexpr const T& operator[](size_t index) const noexcept { return p_[index]; }
 
   constexpr const T& back() const noexcept { return p_[length_ - 1]; }
+
+  span first(size_t count) const { return subspan(0, count); }
+  span last(size_t count) const { return subspan(length_ - count, count); }
 
   constexpr const T* begin() const noexcept { return p_; }
   constexpr const T* end() const noexcept { return p_ + length_; }
