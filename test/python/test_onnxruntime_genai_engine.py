@@ -89,10 +89,10 @@ def draft_model(device):
     return og.Model(config)
 
 
-def _create_request(engine, model, prompt, max_new_tokens, sink, sinks):
-    params = og.GeneratorParams(model)
-    params.set_search_options(do_sample=False, max_length=len(prompt) + max_new_tokens)
-    request = engine.create_request(params)
+def _create_request(engine, prompt, max_new_tokens, sink, sinks):
+    request_options = og.RequestOptions()
+    request_options.set_max_session_tokens(len(prompt) + max_new_tokens)
+    request = engine.create_request(options=request_options)
     sinks[request] = sink
     request.begin_turn(np.asarray(prompt, dtype=np.int32))
     return request
@@ -154,7 +154,7 @@ def _generate_isolated(model, prompt, max_new_tokens):
     sink = _Sink()
     engine = og.Engine(model)
     sinks = {}
-    _create_request(engine, model, prompt, max_new_tokens, sink, sinks)
+    _create_request(engine, prompt, max_new_tokens, sink, sinks)
     _run(engine, sinks)
     del engine
     gc.collect()
@@ -163,12 +163,9 @@ def _generate_isolated(model, prompt, max_new_tokens):
 
 def test_engine_run_releases_gil(model):
     engine = og.Engine(model)
-    params = og.GeneratorParams(model)
-    params.set_search_options(
-        do_sample=False,
-        max_length=len(_PROMPT_LONG) + 4,
-    )
-    request = engine.create_request(params)
+    request_options = og.RequestOptions()
+    request_options.set_max_session_tokens(len(_PROMPT_LONG) + 4)
+    request = engine.create_request(options=request_options)
     request.begin_turn(np.asarray(_PROMPT_LONG, dtype=np.int32))
     event_buffer = engine.create_event_buffer(1)
 
@@ -231,13 +228,10 @@ def test_strided_request_tokens_are_copied_contiguously(model):
     prompt = prompt_storage[::2]
     assert not prompt.flags.c_contiguous
     max_new_tokens = 4
-    params = og.GeneratorParams(model)
-    params.set_search_options(
-        do_sample=False,
-        max_length=len(prompt) + max_new_tokens,
-    )
     engine = og.Engine(model)
-    request = engine.create_request(params)
+    request_options = og.RequestOptions()
+    request_options.set_max_session_tokens(len(prompt) + max_new_tokens)
+    request = engine.create_request(options=request_options)
     request.begin_turn(prompt)
     sink = _Sink()
     sinks = {request: sink}
@@ -261,8 +255,8 @@ def test_model_declares_per_request_fp16_logits():
 def test_run_reuses_buffer_for_zero_one_and_bulk_capacity(model):
     engine = og.Engine(model)
     sinks = {}
-    first = _create_request(engine, model, _PROMPT_A, 1, _Sink(), sinks)
-    second = _create_request(engine, model, _PROMPT_B, 1, _Sink(), sinks)
+    first = _create_request(engine, _PROMPT_A, 1, _Sink(), sinks)
+    second = _create_request(engine, _PROMPT_B, 1, _Sink(), sinks)
 
     zero_buffer = engine.create_event_buffer(0)
     assert engine.run(zero_buffer) is zero_buffer
@@ -291,8 +285,8 @@ def test_run_reuses_buffer_for_zero_one_and_bulk_capacity(model):
     assert len(retained_events) == 1
     assert retained_events[0].request is second
 
-    third = _create_request(engine, model, _PROMPT_A, 1, _Sink(), sinks)
-    fourth = _create_request(engine, model, _PROMPT_B, 1, _Sink(), sinks)
+    third = _create_request(engine, _PROMPT_A, 1, _Sink(), sinks)
+    fourth = _create_request(engine, _PROMPT_B, 1, _Sink(), sinks)
     bulk_buffer = engine.create_event_buffer(8)
     bulk_events = engine.run(bulk_buffer)
     assert len(bulk_events) == 2
@@ -359,12 +353,9 @@ def test_draft_proposal_public_api(draft_model):
     prompt = np.asarray(_PROMPT_A, dtype=np.int32)
     expected = predicted_tokens(_PROMPT_A, 4)
     engine = og.Engine(draft_model)
-    params = og.GeneratorParams(draft_model)
-    params.set_search_options(
-        do_sample=False,
-        max_length=len(prompt) + len(expected),
-    )
-    request = engine.create_request(params)
+    request_options = og.RequestOptions()
+    request_options.set_max_session_tokens(len(prompt) + len(expected))
+    request = engine.create_request(options=request_options)
     turn_options = og.TurnOptions(request)
     turn_options.set_max_generated_tokens(len(expected))
     request.begin_turn(prompt, turn_options)
@@ -398,8 +389,8 @@ def test_isolated_matches_simultaneous(model):
     engine = og.Engine(model)
     sink_a, sink_b = _Sink(), _Sink()
     sinks = {}
-    _create_request(engine, model, _PROMPT_A, max_new, sink_a, sinks)
-    _create_request(engine, model, _PROMPT_B, max_new, sink_b, sinks)
+    _create_request(engine, _PROMPT_A, max_new, sink_a, sinks)
+    _create_request(engine, _PROMPT_B, max_new, sink_b, sinks)
     assert engine.has_pending_requests()
     _run(engine, sinks)
 
@@ -415,7 +406,7 @@ def test_staggered_admission(model):
     engine = og.Engine(model)
     sink_a = _Sink()
     sinks = {}
-    _create_request(engine, model, _PROMPT_A, max_new, sink_a, sinks)
+    _create_request(engine, _PROMPT_A, max_new, sink_a, sinks)
 
     for _ in range(3):
         if not engine.has_pending_requests():
@@ -424,7 +415,7 @@ def test_staggered_admission(model):
     assert len(sink_a.tokens) > 0, "first request produced nothing before staggered admission"
 
     sink_b = _Sink()
-    _create_request(engine, model, _PROMPT_B, max_new, sink_b, sinks)
+    _create_request(engine, _PROMPT_B, max_new, sink_b, sinks)
     _run(engine, sinks)
 
     assert sink_a.tokens == expected_a
@@ -457,9 +448,9 @@ def test_eos_terminates_before_max_length(model):
 
 def test_per_turn_budget_is_independent_and_snapshotted(model):
     engine = og.Engine(model)
-    params = og.GeneratorParams(model)
-    params.set_search_options(do_sample=False, max_length=32)
-    request = engine.create_request(params)
+    request_options = og.RequestOptions()
+    request_options.set_max_session_tokens(32)
+    request = engine.create_request(options=request_options)
     sink = _Sink()
     sinks = {request: sink}
     prompt = np.asarray(_PROMPT_LONG, dtype=np.int32)
@@ -485,11 +476,9 @@ def test_per_turn_budget_is_independent_and_snapshotted(model):
 
 def test_request_total_limit_and_cancel_metadata(model):
     engine = og.Engine(model)
-    params = og.GeneratorParams(model)
-    params.set_search_options(do_sample=False, max_length=32)
     request_options = og.RequestOptions()
     request_options.set_max_session_tokens(len(_PROMPT_LONG) + 2)
-    request = engine.create_request(params, request_options)
+    request = engine.create_request(options=request_options)
     sink = _Sink()
     sinks = {request: sink}
 
@@ -500,7 +489,7 @@ def test_request_total_limit_and_cancel_metadata(model):
 
     request.close()
 
-    canceled = engine.create_request(params)
+    canceled = engine.create_request(options=request_options)
     turn_id = canceled.begin_turn(np.asarray(_PROMPT_A, dtype=np.int32))
     assert canceled.cancel_turn(turn_id)
     assert not canceled.cancel_turn(turn_id)
@@ -512,9 +501,9 @@ def test_request_total_limit_and_cancel_metadata(model):
 
 def test_zero_turn_budget_uses_default_limit(model):
     engine = og.Engine(model)
-    params = og.GeneratorParams(model)
-    params.set_search_options(do_sample=False, max_length=16)
-    request = engine.create_request(params)
+    request_options = og.RequestOptions()
+    request_options.set_max_session_tokens(16)
+    request = engine.create_request(options=request_options)
     sink = _Sink()
     sinks = {request: sink}
     prompt = np.asarray(_PROMPT_A, dtype=np.int32)
@@ -538,8 +527,8 @@ def test_completion_isolation(model):
     engine = og.Engine(model)
     short_sink, long_sink = _Sink(), _Sink()
     sinks = {}
-    _create_request(engine, model, _PROMPT_A, short_new, short_sink, sinks)
-    _create_request(engine, model, _PROMPT_LONG, long_new, long_sink, sinks)
+    _create_request(engine, _PROMPT_A, short_new, short_sink, sinks)
+    _create_request(engine, _PROMPT_LONG, long_new, long_sink, sinks)
     _run(engine, sinks)
 
     assert short_sink.tokens == predicted_tokens(_PROMPT_A, short_new)
@@ -555,7 +544,7 @@ def test_continuation_while_peer_remains_active(model):
     reference_engine = og.Engine(model)
     reference_sink = _Sink()
     reference_sinks = {}
-    reference = _create_request(reference_engine, model, _PROMPT_A, short_max_new, reference_sink, reference_sinks)
+    reference = _create_request(reference_engine, _PROMPT_A, short_max_new, reference_sink, reference_sinks)
     reference_finished = False
     while not reference_finished:
         event = _next_event(reference_engine)
@@ -567,8 +556,8 @@ def test_continuation_while_peer_remains_active(model):
     engine = og.Engine(model)
     short_sink, long_sink = _Sink(), _Sink()
     sinks = {}
-    short = _create_request(engine, model, _PROMPT_A, short_max_new, short_sink, sinks)
-    _create_request(engine, model, _PROMPT_LONG, long_max_new, long_sink, sinks)
+    short = _create_request(engine, _PROMPT_A, short_max_new, short_sink, sinks)
+    _create_request(engine, _PROMPT_LONG, long_max_new, long_sink, sinks)
 
     short_finished = False
     while not short_finished:
@@ -592,8 +581,8 @@ def test_continuation_while_peer_remains_active(model):
 def test_continuation_waits_for_ready_notification(model):
     engine = og.Engine(model)
     sinks = {}
-    first = _create_request(engine, model, [5, 8, 57], 40, _Sink(), sinks)
-    second = _create_request(engine, model, [6, 8, 56], 40, _Sink(), sinks)
+    first = _create_request(engine, [5, 8, 57], 40, _Sink(), sinks)
+    second = _create_request(engine, [6, 8, 56], 40, _Sink(), sinks)
 
     event = _next_event(engine)
     assert event.request is first
@@ -614,7 +603,7 @@ def test_continuation_waits_for_ready_notification(model):
 def test_request_rejects_second_turn_while_active(model):
     engine = og.Engine(model)
     sinks = {}
-    request = _create_request(engine, model, _PROMPT_A, 8, _Sink(), sinks)
+    request = _create_request(engine, _PROMPT_A, 8, _Sink(), sinks)
 
     with pytest.raises(RuntimeError, match="new request or after the current turn is complete"):
         request.begin_turn(np.asarray([12], dtype=np.int32))
@@ -633,9 +622,9 @@ def test_request_rejects_second_turn_while_active(model):
 def test_begin_turn_copies_non_contiguous_token_views(model, tokens):
     logical_tokens = tokens.tolist()
     engine = og.Engine(model)
-    params = og.GeneratorParams(model)
-    params.set_search_options(do_sample=False, max_length=len(logical_tokens) + 3)
-    request = engine.create_request(params)
+    request_options = og.RequestOptions()
+    request_options.set_max_session_tokens(len(logical_tokens) + 3)
+    request = engine.create_request(options=request_options)
     sink = _Sink()
     sinks = {request: sink}
 
@@ -647,17 +636,17 @@ def test_begin_turn_copies_non_contiguous_token_views(model, tokens):
 
 def test_begin_turn_accepts_read_only_tokens_and_rejects_multiple_dimensions(model):
     engine = og.Engine(model)
-    params = og.GeneratorParams(model)
-    params.set_search_options(do_sample=False, max_length=len(_PROMPT_A) + 1)
+    request_options = og.RequestOptions()
+    request_options.set_max_session_tokens(len(_PROMPT_A) + 1)
 
     read_only_tokens = np.asarray(_PROMPT_A, dtype=np.int32)
     read_only_tokens.setflags(write=False)
-    request = engine.create_request(params)
+    request = engine.create_request(options=request_options)
     request.begin_turn(read_only_tokens)
     assert _next_event(engine).request is request
     request.close()
 
-    invalid_request = engine.create_request(params)
+    invalid_request = engine.create_request(options=request_options)
     with pytest.raises(ValueError, match="one-dimensional"):
         invalid_request.begin_turn(np.asarray([_PROMPT_A, _PROMPT_A], dtype=np.int32))
     invalid_request.close()
@@ -667,7 +656,7 @@ def test_request_lifecycle_operations(model):
     engine = og.Engine(model)
     sink = _Sink()
     sinks = {}
-    request = _create_request(engine, model, _PROMPT_A, 61, sink, sinks)
+    request = _create_request(engine, _PROMPT_A, 61, sink, sinks)
 
     event = _next_event(engine)
     assert event.request is request
@@ -685,15 +674,15 @@ def test_request_lifecycle_operations(model):
     request.close()
 
 
-def test_request_parameters_are_snapshotted(model):
+def test_request_options_are_snapshotted(model):
     engine = og.Engine(model)
-    params = og.GeneratorParams(model)
-    params.set_search_options(do_sample=False, max_length=len(_PROMPT_LONG) + 4)
-    request = engine.create_request(params)
+    request_options = og.RequestOptions()
+    request_options.set_max_session_tokens(len(_PROMPT_LONG) + 4)
+    request = engine.create_request(options=request_options)
     sink = _Sink()
     sinks = {request: sink}
 
-    params.set_search_options(max_length=len(_PROMPT_LONG) + 12)
+    request_options.set_max_session_tokens(len(_PROMPT_LONG) + 12)
     request.begin_turn(np.asarray(_PROMPT_LONG, dtype=np.int32))
     _run(engine, sinks)
 
@@ -703,9 +692,9 @@ def test_request_parameters_are_snapshotted(model):
 @pytest.mark.parametrize("state", ["created", "active", "turn-complete"])
 def test_close_is_valid_and_idempotent_from_every_state(model, state):
     engine = og.Engine(model)
-    params = og.GeneratorParams(model)
-    params.set_search_options(do_sample=False, max_length=len(_PROMPT_LONG) + 8)
-    request = engine.create_request(params)
+    request_options = og.RequestOptions()
+    request_options.set_max_session_tokens(len(_PROMPT_LONG) + 8)
+    request = engine.create_request(options=request_options)
     sinks = {request: _Sink()}
 
     if state != "created":
@@ -732,9 +721,9 @@ def test_close_is_valid_and_idempotent_from_every_state(model, state):
 def test_events_deliver_tokens_across_turns(model):
     follow_up = np.asarray([_EOS_TOKEN_ID, 12], dtype=np.int32)
     engine = og.Engine(model)
-    params = og.GeneratorParams(model)
-    params.set_search_options(do_sample=False, max_length=64)
-    request = engine.create_request(params)
+    request_options = og.RequestOptions()
+    request_options.set_max_session_tokens(64)
+    request = engine.create_request(options=request_options)
 
     def run_turn(input_tokens, expected_turn_id):
         assert request.begin_turn(input_tokens) == expected_turn_id
@@ -761,9 +750,7 @@ def test_last_handle_release_reclaims_retained_capacity(model):
     engine = og.Engine(model)
     sinks = [_Sink() for _ in range(8)]
     sinks_by_request = {}
-    requests = [
-        _create_request(engine, model, [5 + index, 9, 13], 1, sinks[index], sinks_by_request) for index in range(8)
-    ]
+    requests = [_create_request(engine, [5 + index, 9, 13], 1, sinks[index], sinks_by_request) for index in range(8)]
 
     completed = set()
     while len(completed) != len(requests):
@@ -781,7 +768,7 @@ def test_last_handle_release_reclaims_retained_capacity(model):
 
     replacement_sink = _Sink()
     replacement_sinks = {}
-    _create_request(engine, model, _PROMPT_A, 4, replacement_sink, replacement_sinks)
+    _create_request(engine, _PROMPT_A, 4, replacement_sink, replacement_sinks)
     _run(engine, replacement_sinks)
 
     assert replacement_sink.tokens == predicted_tokens(_PROMPT_A, 4)
@@ -795,8 +782,8 @@ def test_close_request_freezes_output(model):
     engine = og.Engine(model)
     sink_a, sink_b = _Sink(), _Sink()
     sinks = {}
-    request_a = _create_request(engine, model, _PROMPT_A, max_new, sink_a, sinks)
-    _create_request(engine, model, _PROMPT_B, sibling_new, sink_b, sinks)
+    request_a = _create_request(engine, _PROMPT_A, max_new, sink_a, sinks)
+    _create_request(engine, _PROMPT_B, sibling_new, sink_b, sinks)
 
     for _ in range(4):
         if not engine.has_pending_requests():
@@ -820,7 +807,7 @@ def test_engine_teardown_and_recreation(model):
     first = og.Engine(model)
     sink1 = _Sink()
     first_sinks = {}
-    _create_request(first, model, _PROMPT_A, max_new, sink1, first_sinks)
+    _create_request(first, _PROMPT_A, max_new, sink1, first_sinks)
     _run(first, first_sinks)
     assert sink1.tokens == expected
     del first
@@ -830,6 +817,217 @@ def test_engine_teardown_and_recreation(model):
     assert not second.has_pending_requests()
     sink2 = _Sink()
     second_sinks = {}
-    _create_request(second, model, _PROMPT_A, max_new, sink2, second_sinks)
+    _create_request(second, _PROMPT_A, max_new, sink2, second_sinks)
     _run(second, second_sinks)
     assert sink2.tokens == expected
+
+
+# The synthetic decoder's greedy formula (see predicted_tokens) is deterministic, so this prompt is
+# chosen to make the first two generated tokens hit vocabulary entries 5 ("ST") and 6 ("OP") in the
+# checked-in tokenizer (test/models/engine/synthetic-paged/tokenizer.json), completing the stop
+# string "STOP" through real inference rather than scripted logits.
+_STOP_MATCH_PROMPT = [61, 2, 5]
+
+
+def test_stop_string_matches_across_two_tokens_via_real_inference(model):
+    engine = og.Engine(model)
+    request_options = og.RequestOptions()
+    request_options.set_max_session_tokens(len(_STOP_MATCH_PROMPT) + 8)
+    request = engine.create_request(options=request_options)
+    turn_options = og.TurnOptions(request)
+    turn_options.set_stop_strings(["STOP"])
+    request.begin_turn(np.asarray(_STOP_MATCH_PROMPT, dtype=np.int32), turn_options)
+
+    tokens = []
+    finish_reason = og.FinishReason.NONE
+    matched_index = None
+    finished = False
+    while not finished:
+        event = _next_event(engine)
+        if event.flags & og.EngineEventFlags.TOKEN:
+            tokens.append(event.token)
+        if event.flags & og.EngineEventFlags.TURN_FINISHED:
+            finish_reason = event.finish_reason
+            matched_index = event.matched_stop_string_index
+            finished = True
+    request.close()
+
+    assert tokens == [5, 6]
+    assert finish_reason == og.FinishReason.STOP_STRING
+    assert matched_index == 0
+
+
+def test_stop_strings_empty_list_disables_and_ordinary_generation_completes(model):
+    # Setting a real configuration and then an empty list must clear/disable it, leaving ordinary
+    # (non-stop) generation exactly as if stop strings had never been configured.
+    expected = predicted_tokens(_STOP_MATCH_PROMPT, 8)
+    engine = og.Engine(model)
+    request_options = og.RequestOptions()
+    request_options.set_max_session_tokens(len(_STOP_MATCH_PROMPT) + 8)
+    request = engine.create_request(options=request_options)
+    turn_options = og.TurnOptions(request)
+    turn_options.set_stop_strings(["STOP"])
+    turn_options.set_stop_strings([])
+    request.begin_turn(np.asarray(_STOP_MATCH_PROMPT, dtype=np.int32), turn_options)
+
+    sink = _Sink()
+    sinks = {request: sink}
+    _run(engine, sinks)
+
+    assert sink.tokens == expected
+    assert sink.finish_reason != og.FinishReason.STOP_STRING
+
+
+def test_stop_strings_validation_and_embedded_nul_rejection(model):
+    engine = og.Engine(model)
+    request = engine.create_request()
+    turn_options = og.TurnOptions(request)
+
+    with pytest.raises(RuntimeError):
+        turn_options.set_stop_strings([""])  # empty entry is invalid
+
+    with pytest.raises(RuntimeError):
+        turn_options.set_stop_strings([f"s{i}" for i in range(17)])  # exceeds the 16-entry bound
+
+    with pytest.raises(ValueError):
+        turn_options.set_stop_strings(["a\0b"])  # embedded NUL cannot round-trip through OgaStringArray
+
+    # A valid configuration still works normally after the rejected attempts above.
+    turn_options.set_stop_strings(["STOP"])
+    request.close()
+
+
+def _run_turn(engine, request, tokens, turn_options):
+    request.begin_turn(np.asarray(tokens, dtype=np.int32), turn_options)
+    generated = []
+    event_buffer = engine.create_event_buffer(8)
+    for _ in range(64):
+        finished = False
+        for event in engine.run(event_buffer):
+            if event.flags & og.EngineEventFlags.TOKEN:
+                generated.append(event.token)
+            finished = finished or bool(event.flags & og.EngineEventFlags.TURN_FINISHED)
+        if finished:
+            break
+    return generated
+
+
+def test_turn_options_resolve_policy_per_turn(model):
+    engine = og.Engine(model)
+
+    def sampled_request(seed):
+        request_options = og.RequestOptions()
+        request_options.set_max_session_tokens(64)
+        request = engine.create_request(options=request_options)
+        turn_options = og.TurnOptions(request)
+        turn_options.set_do_sample(True)
+        turn_options.set_temperature(0.8)
+        turn_options.set_top_p(0.9)
+        turn_options.set_top_k(4)
+        turn_options.set_repetition_penalty(1.1)
+        turn_options.set_no_repeat_ngram_size(0)
+        turn_options.set_min_generated_tokens(2)
+        turn_options.set_max_generated_tokens(4)
+        turn_options.set_seed(seed)
+        return request, turn_options
+
+    # Zero is a valid deterministic seed, and the same seed on the same prompt reproduces exactly.
+    first, first_options = sampled_request(0)
+    reference = _run_turn(engine, first, _PROMPT_A, first_options)
+    assert 2 <= len(reference) <= 4
+
+    second, second_options = sampled_request(0)
+    assert _run_turn(engine, second, _PROMPT_A, second_options) == reference
+
+    # reset() removes every option, so the following turn is plain model-default generation.
+    third, third_options = sampled_request(0)
+    third_options.reset()
+    third_options.set_max_generated_tokens(4)
+    assert _run_turn(engine, third, _PROMPT_A, third_options) == predicted_tokens(_PROMPT_A, 4)
+
+    for request in (first, second, third):
+        request.close()
+
+
+def test_turn_options_reject_contradictory_sampling_scalars_before_mutation(model):
+    engine = og.Engine(model)
+    request = engine.create_request()
+    turn_options = og.TurnOptions(request)
+    turn_options.set_do_sample(False)
+    turn_options.set_top_k(40)
+
+    # A 40-candidate distribution contradicts top-logit selection.
+    with pytest.raises(RuntimeError, match="contradict it: top_k"):
+        request.begin_turn(np.asarray(_PROMPT_A, dtype=np.int32), turn_options)
+
+    # The rejected attempt left the request untouched, so a corrected policy still admits.
+    turn_options.reset()
+    turn_options.set_max_generated_tokens(1)
+    assert request.begin_turn(np.asarray(_PROMPT_A, dtype=np.int32), turn_options) == 1
+    request.close()
+
+
+def test_turn_options_accept_scalars_consistent_with_greedy_selection(model):
+    """top_k == 1, temperature == 0, and unrestrictive bounds all agree with the top logit."""
+    engine = og.Engine(model)
+    consistent_policies = (
+        {"set_top_k": 1},
+        {"set_temperature": 0.0},
+        {"set_do_sample": False, "set_top_k": 1},
+        {"set_do_sample": False, "set_temperature": 0.0},
+        {"set_do_sample": False, "set_top_p": 1.0, "set_top_k": 0},
+        # Temperature 1 rescales nothing, so it is neutral rather than a request to sample.
+        {"set_do_sample": False, "set_temperature": 1.0},
+        {"set_do_sample": True, "set_top_k": 1, "set_temperature": 0.0},
+    )
+
+    for policy in consistent_policies:
+        request = engine.create_request()
+        turn_options = og.TurnOptions(request)
+        for setter, value in policy.items():
+            getattr(turn_options, setter)(value)
+        turn_options.set_max_generated_tokens(4)
+
+        assert _run_turn(engine, request, _PROMPT_A, turn_options) == predicted_tokens(_PROMPT_A, 4)
+        request.close()
+
+
+@pytest.mark.parametrize(
+    ("search_overlay", "named_default"),
+    (
+        ('{"search": {"top_k": 1}}', "search.top_k = 1"),
+        ('{"search": {"temperature": 0.0}}', "search.temperature = 0"),
+    ),
+)
+def test_turn_options_reject_do_sample_under_model_greedy_defaults(device, search_overlay, named_default):
+    """A model default the caller cannot see must not silently override an explicit do_sample."""
+    config = og.Config(str(_MODEL_DIR))
+    config.clear_providers()
+    if device != "cpu":
+        config.append_provider(device)
+    config.overlay(search_overlay)
+    engine = og.Engine(og.Model(config))
+
+    request = engine.create_request()
+    turn_options = og.TurnOptions(request)
+    turn_options.set_do_sample(True)
+    turn_options.set_max_generated_tokens(2)
+
+    with pytest.raises(RuntimeError, match=named_default):
+        request.begin_turn(np.asarray(_PROMPT_A, dtype=np.int32), turn_options)
+
+    # The rejection mutated nothing, and overriding the named field is what actually asks to sample.
+    turn_options.set_top_k(4)
+    turn_options.set_temperature(0.8)
+    assert request.begin_turn(np.asarray(_PROMPT_A, dtype=np.int32), turn_options) == 1
+    request.close()
+
+
+def test_create_request_rejects_positional_generator_params(model):
+    engine = og.Engine(model)
+    params = og.GeneratorParams(model)
+
+    # The Engine no longer accepts caller generation parameters; the old positional call must fail
+    # loudly rather than silently ignoring them.
+    with pytest.raises(TypeError):
+        engine.create_request(params)

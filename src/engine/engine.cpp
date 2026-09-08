@@ -2,7 +2,11 @@
 // Licensed under the MIT License.
 
 #include "engine.h"
+#include "../logging.h"
 #include "../search.h"
+#include "../constrained_logits_processor.h"
+#include "../models/preprocessing/genai_tokenizer.h"
+#include "../stop_string_controller.h"
 
 #include <limits>
 
@@ -12,28 +16,18 @@ static_assert(kMaxDraftTokensPerStep < kSpeculativeAcceptanceLengthBins);
 
 namespace {
 
+constexpr size_t kFatalEventOverhead = 2;
+constexpr size_t kMtpFailureDisableThreshold = 3;
+constexpr size_t kDflash2FailureDisableThreshold = 3;
+
 struct MtpRollbackError : std::runtime_error {
   using std::runtime_error::runtime_error;
 };
 
-std::shared_ptr<GeneratorParams> CloneRequestParams(
-    const GeneratorParams& source,
-    const Model& model) {
-  auto copy = std::make_shared<GeneratorParams>(model);
-  copy->search = source.search;
-  copy->speculative = source.speculative;
-  copy->max_batch_size = source.max_batch_size;
-  copy->use_graph_capture = source.use_graph_capture;
-  copy->max_graph_capture_length = source.max_graph_capture_length;
-  copy->use_multi_profile = source.use_multi_profile;
-  copy->p_device = source.p_device;
-  copy->guidance_type = source.guidance_type;
-  copy->guidance_data = source.guidance_data;
-  copy->guidance_ff_tokens_enabled = source.guidance_ff_tokens_enabled;
-  return copy;
-}
-
 std::string AddExceptionCause(std::string message, std::exception_ptr error) {
+  if (!error) {
+    return message;
+  }
   try {
     std::rethrow_exception(error);
   } catch (const std::exception& cause) {
@@ -43,6 +37,41 @@ std::string AddExceptionCause(std::string message, std::exception_ptr error) {
     message += " Cause: non-standard exception.";
   }
   return message;
+}
+
+bool IsEngineStepErrorForOutcome(
+    const std::exception_ptr& error,
+    StepOutcomeKind outcome) noexcept {
+  if (!error) {
+    return false;
+  }
+  try {
+    std::rethrow_exception(error);
+  } catch (const EngineStepError& step_error) {
+    return step_error.Outcome().kind == outcome;
+  } catch (...) {
+    return false;
+  }
+}
+
+std::exception_ptr MakeEngineStepError(
+    StepOutcome outcome,
+    std::string message) {
+  return std::make_exception_ptr(
+      EngineStepError{outcome, std::move(message)});
+}
+
+std::exception_ptr MakeFatalFallbackError(StepOutcomeKind outcome) {
+  auto fallback = MakeEngineStepError(
+      {outcome, 0, nullptr},
+      "The Engine encountered a fatal failure, and the underlying exception could not be recorded.");
+  if (!IsEngineStepErrorForOutcome(fallback, outcome)) {
+    if (!fallback) {
+      throw std::bad_exception{};
+    }
+    std::rethrow_exception(fallback);
+  }
+  return fallback;
 }
 
 std::vector<int32_t> GreedyTokens(
@@ -123,7 +152,11 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
       model_executor_{std::move(dependencies.model_executor)},
       mtp_model_{std::move(dependencies.mtp_model)},
       mtp_cache_manager_{std::move(dependencies.mtp_cache_manager)},
-      mtp_model_executor_{std::move(dependencies.mtp_model_executor)} {
+      mtp_model_executor_{std::move(dependencies.mtp_model_executor)},
+      dflash2_drafter_{std::move(dependencies.dflash2_drafter)},
+      make_step_error_{dependencies.make_step_error
+                           ? dependencies.make_step_error
+                           : MakeEngineStepError} {
   // Fail fast on a missing collaborator rather than crashing later on first use.
   if (!cache_manager_) {
     throw std::runtime_error("Engine requires a non-null cache manager.");
@@ -134,21 +167,33 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
   if (!model_executor_) {
     throw std::runtime_error("Engine requires a non-null model executor.");
   }
-
+  fatal_contract_fallback_error_ =
+      MakeFatalFallbackError(StepOutcomeKind::ExecutionContractFailure);
+  fatal_execution_fallback_error_ =
+      MakeFatalFallbackError(StepOutcomeKind::FatalExecutionFailure);
   const size_t max_batch_size = cache_manager_->MaxBatchSize();
-  if (max_batch_size > staged_events_.max_size() /
+  if (fatal_events_.max_size() < kFatalEventOverhead ||
+      max_batch_size > (fatal_events_.max_size() - kFatalEventOverhead) /
                            kMaxGeneratedTokensPerStep) {
     throw std::overflow_error(
         "Engine event capacity exceeds the supported size.");
   }
-  const size_t max_step_events =
+  max_step_event_count_ =
       max_batch_size * kMaxGeneratedTokensPerStep;
   step_plan_.requests.reserve(max_batch_size);
   step_results_.reserve(max_batch_size);
   staged_event_order_.reserve(max_batch_size);
-  pending_events_.reserve(max_step_events);
-  staged_events_.reserve(max_step_events);
+  pending_events_.reserve(max_step_event_count_);
+  staged_events_.reserve(max_step_event_count_);
+  fatal_events_.reserve(max_step_event_count_ + 1);
   mtp_requests_.reserve(max_batch_size);
+  if (dflash2_drafter_) {
+    // Sized here so a committed step never has to grow them, which would make an optional drafter
+    // able to fail the step with a bad_alloc.
+    dflash2_feeds_.reserve(max_batch_size);
+    dflash2_draft_widths_.reserve(max_batch_size);
+    dflash2_drafts_.reserve(max_batch_size);
+  }
 }
 
 Engine::~Engine() {
@@ -159,22 +204,132 @@ Engine::~Engine() {
   }
 }
 
+void ValidateMtpModelCompatibility(const Config& config,
+                                   const ModelStateMetadata& target_metadata,
+                                   const ModelStateMetadata& head_metadata) {
+  const auto& mtp = config.model.mtp;
+  if (mtp.main_hidden_states.empty() ||
+      !target_metadata.HasOutput(mtp.main_hidden_states)) {
+    throw std::runtime_error(
+        "model.mtp.main_hidden_states must name a main-model output.");
+  }
+  if (mtp.inputs.hidden_states.empty() ||
+      !head_metadata.HasInput(mtp.inputs.hidden_states)) {
+    throw std::runtime_error(
+        "model.mtp.inputs.hidden_states must name an MTP-head input.");
+  }
+
+  const auto target_shape =
+      target_metadata.GetOutputShape(mtp.main_hidden_states);
+  const auto head_shape = head_metadata.GetInputShape(mtp.inputs.hidden_states);
+  const int64_t hidden_size = config.model.decoder.hidden_size;
+  if (target_shape.size() != 2 || target_shape[1] != hidden_size ||
+      head_shape.size() != 2 || head_shape[1] != hidden_size) {
+    throw std::runtime_error(
+        "MTP requires matching 2-D hidden-state tensors with the configured static width.");
+  }
+  if (target_metadata.GetOutputDataType(mtp.main_hidden_states) !=
+      head_metadata.GetInputDataType(mtp.inputs.hidden_states)) {
+    throw std::runtime_error(
+        "MTP requires matching main-output and head-input hidden-state tensor types.");
+  }
+}
+
 EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
+  // The static batch decoder rebuilds its contiguous cache from the whole sequence every step, so
+  // it cannot resume a half-written prompt. Reject a model that configures chunking here rather
+  // than surfacing it once a Request is already being admitted.
+  if (!model->config_->engine.dynamic_batching &&
+      model->config_->search.chunk_size.value_or(0) != 0) {
+    throw std::runtime_error(
+        "search.chunk_size requires dynamic batching; the static batch scheduler cannot chunk a "
+        "prefill.");
+  }
   std::shared_ptr<DecoderOnly_Model> mtp_model;
   size_t mtp_bytes_per_block = 0;
   if (!model->config_->model.mtp.filename.empty()) {
     if (!model->config_->engine.dynamic_batching) {
       throw std::runtime_error("An Engine-hosted MTP head requires dynamic batching.");
     }
+    auto& target_hidden_states =
+        model->config_->model.decoder.outputs.hidden_states;
+    target_hidden_states = model->config_->model.mtp.main_hidden_states;
     mtp_model = std::make_shared<DecoderOnly_Model>(
         CreateMtpDecoderConfig(*model->config_), GetOrtEnv());
+    ValidateMtpModelCompatibility(
+        *model->config_, model->session_info_, mtp_model->session_info_);
     mtp_bytes_per_block = PagedKeyValueCacheBytesPerBlock(mtp_model);
     // The head consumes the target decoder's packed hidden states, so the target must emit them.
     model->config_->engine.hidden_states_output_required = true;
   }
 
+  std::unique_ptr<Dflash2Drafter> dflash2_drafter;
+  std::shared_ptr<Dflash2Model> dflash2_model;
+  size_t dflash2_bytes_per_block = 0;
+  size_t dflash2_reserved_memory_bytes = 0;
+  size_t dflash2_max_batch_size = 0;
+  if (!model->config_->model.dflash2.filename.empty()) {
+    if (!model->config_->engine.dynamic_batching) {
+      throw std::runtime_error("An Engine-hosted DFlash 2 drafter requires dynamic batching.");
+    }
+    auto& dflash2 = model->config_->model.dflash2;
+    auto& target_aux_output = model->config_->model.decoder.outputs.aux_hidden_states;
+    if (dflash2.main_aux_hidden_states.empty()) {
+      dflash2.main_aux_hidden_states = target_aux_output;
+    }
+    if (dflash2.main_aux_hidden_states.empty()) {
+      throw std::runtime_error(
+          "model.dflash2.main_aux_hidden_states must name a main-model output.");
+    }
+    target_aux_output = dflash2.main_aux_hidden_states;
+    if (!model->session_info_.HasOutput(target_aux_output)) {
+      throw std::runtime_error(
+          "model.dflash2.main_aux_hidden_states must name a main-model output.");
+    }
+
+    const auto& batching = *model->config_->engine.dynamic_batching;
+    const size_t paged_block_size = static_cast<size_t>(batching.block_size);
+    dflash2_max_batch_size = static_cast<size_t>(batching.max_batch_size);
+    dflash2_model = std::make_shared<Dflash2Model>(
+        CreateDflash2Config(*model->config_), GetOrtEnv());
+    const auto dflash2_cache_type = ValidateDflash2ModelCompatibility(
+        *model->config_, model->session_info_, dflash2_model->session_info_, paged_block_size);
+    model->config_->engine.aux_hidden_states_output_required = true;
+    const size_t pool_blocks = Dflash2Drafter::PoolBlocks(
+        *model->config_, paged_block_size, dflash2_max_batch_size);
+    if (pool_blocks != 0) {
+      // Built before the main pool so the pool's free-memory measurement already excludes it. A
+      // windowed drafter's footprint depends on the batch size, not the context length.
+      dflash2_drafter = std::make_unique<Dflash2Drafter>(
+          dflash2_model, paged_block_size, pool_blocks, dflash2_max_batch_size);
+    } else {
+      // A full-attention drafter mirrors the target pool, so it is billed per target block instead
+      // and built below once the target pool's block count is known.
+      dflash2_bytes_per_block =
+          Dflash2Drafter::BytesPerBlock(*model->config_, paged_block_size, dflash2_cache_type);
+      dflash2_reserved_memory_bytes = Dflash2Drafter::FullAttentionReservedBytes(
+          paged_block_size, static_cast<size_t>(dflash2.block_size),
+          dflash2_max_batch_size, dflash2_bytes_per_block);
+    }
+  }
+
+  if (dflash2_bytes_per_block > std::numeric_limits<size_t>::max() - mtp_bytes_per_block) {
+    throw std::runtime_error("Engine auxiliary cache bytes per block overflow size_t.");
+  }
   std::shared_ptr<CacheManager> cache_manager =
-      CacheManager::Create(model, mtp_bytes_per_block);
+      CacheManager::Create(model, mtp_bytes_per_block + dflash2_bytes_per_block,
+                           dflash2_reserved_memory_bytes);
+  if (dflash2_model && !dflash2_drafter) {
+    const auto& dflash2 = model->config_->model.dflash2;
+    const size_t paged_block_size =
+        static_cast<size_t>(model->config_->engine.dynamic_batching->block_size);
+    dflash2_drafter = std::make_unique<Dflash2Drafter>(
+        dflash2_model, paged_block_size,
+        Dflash2Drafter::FullAttentionPoolBlocks(
+            cache_manager->Snapshot().total_blocks, paged_block_size,
+            static_cast<size_t>(dflash2.block_size), dflash2_max_batch_size),
+        dflash2_max_batch_size);
+  }
   auto scheduler = Scheduler::Create(model, cache_manager);
   auto model_executor = ModelExecutor::Create(model, cache_manager);
 
@@ -192,14 +347,131 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
 
   return EngineDependencies{
       std::move(cache_manager), std::move(scheduler), std::move(model_executor),
-      std::move(mtp_model), std::move(mtp_cache_manager), std::move(mtp_model_executor)};
+      std::move(mtp_model), std::move(mtp_cache_manager), std::move(mtp_model_executor),
+      std::move(dflash2_drafter)};
+}
+
+void Engine::PrepareDflash2Feeds(const StepPlan& plan,
+                                 const std::vector<RequestStepResult>& results) {
+  const size_t max_drafts = std::min(MaxDraftTokensPerStep(), dflash2_drafter_->NumDraftTokens());
+  dflash2_feeds_.clear();
+  dflash2_feeds_.reserve(plan.requests.size());
+  dflash2_draft_widths_.clear();
+  dflash2_draft_widths_.reserve(plan.requests.size());
+  for (size_t i = 0; i < plan.requests.size(); ++i) {
+    const auto& entry = plan.requests[i];
+    const bool greedy = entry.request->TurnPolicy().IsGreedy();
+    const size_t accepted = entry.request->AcceptedDraftTokenCount();
+    if (accepted > entry.draft_token_count) {
+      throw std::logic_error("DFlash 2 observed more accepted drafts than the target planned.");
+    }
+    // Rejected draft rows carry hidden states for tokens that were never committed; drop them.
+    const size_t valid_rows =
+        entry.unprocessed_token_count - (entry.draft_token_count - accepted);
+    // The step's rows start at the processed cursor, which is also what the decoder passes as
+    // past_sequence_lengths. Deriving it from sequence_length_before instead would be wrong for a
+    // prefill chunk, whose unprocessed count is the chunk rather than the whole pending suffix.
+    const size_t first_position = static_cast<size_t>(entry.request->ProcessedSequenceLength());
+
+    Dflash2Drafter::Feed feed;
+    feed.request = entry.request.get();
+    feed.aux_row_begin = entry.packed_token_offset;
+    feed.aux_row_count = valid_rows;
+    feed.first_position = first_position;
+    feed.draft_eligible = greedy;
+
+    // The committed length this step ends at: the accepted prefix plus the token just sampled.
+    const int64_t length_after_step = static_cast<int64_t>(first_position + valid_rows) +
+                                      (results[i].token_appended ? 1 : 0);
+    const size_t sequence_limit = entry.request->MaxSessionTokens();
+    const size_t remaining_turn_tokens = entry.request->RemainingTurnTokenBudget();
+    const size_t remaining_turn_tokens_after_step =
+        results[i].visible_token_count < remaining_turn_tokens
+            ? remaining_turn_tokens - results[i].visible_token_count
+            : 0;
+    const size_t width = Dflash2DraftWidth(
+        max_drafts, static_cast<size_t>(entry.request->SpeculativeOptions().max_draft_tokens),
+        static_cast<size_t>(length_after_step), sequence_limit,
+        remaining_turn_tokens_after_step);
+    feed.wants_drafts = greedy && width > 0 && results[i].token_appended && !results[i].done &&
+                        !entry.request->DraftTokenValidationError();
+    feed.anchor_token = results[i].token;
+    dflash2_feeds_.push_back(feed);
+    dflash2_draft_widths_.push_back(width);
+  }
+}
+
+void Engine::PublishDflash2Drafts(ScheduledRequests& scheduled_requests) {
+  if (dflash2_feeds_.empty()) {
+    return;
+  }
+  Tensor* aux_hidden_states = scheduled_requests.AuxHiddenStates();
+  if (!aux_hidden_states) {
+    throw std::logic_error("The main decoder did not expose auxiliary hidden states for DFlash 2.");
+  }
+
+  if (dflash2_drafter_->Propose(*aux_hidden_states, dflash2_feeds_, dflash2_drafts_)) {
+    ++speculative_stats_.draft_forward_passes;
+  }
+  for (size_t i = 0; i < dflash2_feeds_.size(); ++i) {
+    auto& drafts = dflash2_drafts_[i];
+    if (drafts.empty()) {
+      continue;
+    }
+    // The drafter always emits its full block; a request with a narrower budget takes the prefix
+    // of the same greedy path.
+    drafts.resize(std::min(drafts.size(), dflash2_draft_widths_[i]));
+    dflash2_feeds_[i].request->SetDraftTokens(drafts);
+  }
+}
+
+void Engine::RecordDflash2Failure(std::exception_ptr error, bool contract_error) {
+  for (const auto& feed : dflash2_feeds_) {
+    if (feed.request) {
+      feed.request->SetDraftTokens({});
+    }
+  }
+  dflash2_feeds_.clear();
+  // The drafter's cached context stops being contiguous with the target the moment a step's rows
+  // are not ingested, and its contiguity check is a contract violation. Forget every in-flight
+  // request instead, so the retry budget below is spent on real drafter failures rather than on
+  // the bookkeeping gap the first failure left behind.
+  dflash2_drafter_->ReleaseAll();
+  ++speculative_stats_.standard_fallback_steps;
+  ++speculative_stats_.dflash2_failures;
+  ++dflash2_consecutive_failures_;
+  const bool disable_dflash2 = contract_error ||
+                               dflash2_consecutive_failures_ >= kDflash2FailureDisableThreshold;
+  dflash2_disabled_ = disable_dflash2;
+  if (disable_dflash2) {
+    ++speculative_stats_.dflash2_disables;
+  }
+  if (dflash2_consecutive_failures_ != 1 && !disable_dflash2) {
+    return;
+  }
+  // Log() asserts that logging is enabled, and an assertion abort is not catchable, so the guard
+  // has to come before the call rather than inside the try below.
+  if (!g_log.enabled || !g_log.warning) {
+    return;
+  }
+  try {
+    Log("warning", AddExceptionCause(
+                       contract_error
+                           ? "Disabling DFlash 2 after a proposal contract failure."
+                       : disable_dflash2
+                           ? "Disabling DFlash 2 after repeated proposal failures."
+                           : "DFlash 2 proposal failed; using target-only decoding for this step.",
+                       error));
+  } catch (...) {
+    // Diagnostics must not turn an optional drafter failure into a target failure.
+  }
 }
 
 std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
     const StepPlan& target_plan,
     const std::vector<RequestStepResult>& target_results,
     ScheduledRequests& target_requests) {
-  if (!mtp_model_ || MaxDraftTokensPerStep() == 0) {
+  if (!mtp_model_ || mtp_disabled_ || MaxDraftTokensPerStep() == 0) {
     return nullptr;
   }
   if (target_results.size() != target_plan.requests.size()) {
@@ -269,12 +541,9 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
     for (size_t i = 0; i < target_plan.requests.size(); ++i) {
       const auto& entry = target_plan.requests[i];
       const auto& result = target_results[i];
-      const auto& search = entry.request->SearchOptions();
       const int64_t committed_length_after_step =
           entry.request->CurrentSequenceLength();
-      const size_t sequence_limit =
-          std::min(static_cast<size_t>(search.max_length),
-                   entry.request->MaxTotalTokens());
+      const size_t sequence_limit = entry.request->MaxSessionTokens();
       const size_t remaining_turn_tokens =
           entry.request->RemainingTurnTokenBudget();
       const size_t remaining_turn_tokens_after_step =
@@ -289,6 +558,14 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
                                                 remaining_turn_tokens_after_step > 1
                                                     ? remaining_turn_tokens_after_step - 1
                                                     : size_t{0}});
+      // A stop-enabled request is intentionally not excluded here: generic target verification
+      // (Request::CommitAcceptedDraftsForTransaction for greedy, the per-stage loop in
+      // ScheduledRequests::GenerateNextTokensForTransaction for sampled/batched) truncates it
+      // transactionally through the same StopStringController the ordinary path uses, so it can
+      // draft and verify normally. result.done still does the work of preventing a redraft after a
+      // match: it is true for any committed StopString result exactly like any other finish
+      // reason, so this check below already skips proposing a new draft block for it with no
+      // stop-specific condition needed.
       if (!result.token_appended || result.done ||
           entry.request->DraftTokenValidationError() ||
           max_draft_tokens == 0) {
@@ -318,10 +595,8 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
         checkpointed_shadows.push_back(feed.shadow);
         feed.shadow->AppendTokensForAuxiliaryDecoder(feed.tokens);
       } else {
-        auto params = CreateGeneratorParams(*mtp_model_);
-        params->search = search;
         feed.shadow = Request::CreateAuxiliaryDecoderRequest(
-            std::move(params), entry.request->MaxTotalTokens(),
+            *mtp_model_, entry.request->MaxSessionTokens(),
             abandonment_pending_, shared_from_this(), feed.tokens);
         feed.newly_created = true;
       }
@@ -715,11 +990,21 @@ void Engine::RecordSpeculativeCommit(const StepPlan& plan) noexcept {
     }
 
     const size_t accepted = entry.request->AcceptedDraftTokenCount();
+    // EvaluatedDraftTokenCount() is tracked directly at the actual verification source (the
+    // greedy loop in Request::CommitAcceptedDraftsForTransaction, and the sampled/batched stage
+    // loop's AppendAcceptedSampledToken/PromoteFinalStageAsAcceptedDraft/
+    // MarkFinalStageAsEvaluatedNonAcceptedDraft in
+    // ScheduledRequests::GenerateNextTokensForTransaction),
+    // not inferred here from accepted/finish_reason/token_appended after the fact. It counts draft
+    // positions logically resolved before the committed terminal boundary; greedy comparisons may
+    // have been precomputed for later positions. The old inference overcounted a limit-truncated
+    // round -- e.g. 5 proposed, budget for 2, both confirmed: the logical evaluated prefix is 2,
+    // not accepted + 1 = 3.
+    const size_t evaluated = entry.request->EvaluatedDraftTokenCount();
     ++speculative_stats_.rounds;
     ++speculative_stats_.completed_rounds;
     speculative_stats_.draft_tokens_proposed += entry.draft_token_count;
-    speculative_stats_.draft_tokens_evaluated +=
-        std::min(accepted + 1, entry.draft_token_count);
+    speculative_stats_.draft_tokens_evaluated += evaluated;
     speculative_stats_.draft_tokens_accepted += accepted;
     ++speculative_stats_.acceptance_length_histogram[accepted];
     if (accepted == 0) {
@@ -739,40 +1024,77 @@ void Engine::ValidateOwnerThread() const {
   }
 }
 
-std::shared_ptr<Request> Engine::CreateRequest(const GeneratorParams& params,
-                                               size_t max_total_tokens) {
+std::shared_ptr<Request> Engine::CreateRequest(const RequestOptions& options) {
   ValidateOwnerThread();
   CompleteNonresidentClosedRequests();
   ReclaimAbandonedRequests();
   if (health_ == EngineHealth::Unhealthy) {
     std::rethrow_exception(fatal_error_);
   }
-  if (params.model_.get() != model_.get()) {
+  const auto& model_search = model_->config_->search;
+  // These model-fixed checks stay at Request creation because tests and embedders can construct an
+  // Engine with injected dependencies, bypassing CreateDependencies() and its model validation.
+  if (model_search.max_length <= 0) {
     throw std::runtime_error(
-        "Engine request parameters must belong to the Engine's model.");
+        "The model's search.max_length must be greater than zero; actual value is " +
+        std::to_string(model_search.max_length) + ".");
   }
-  if (params.search.max_length <= 0) {
+  // The Engine expresses a per-turn floor through TurnOptions::min_generated_tokens. A model that
+  // still carries the legacy session-absolute floor would silently mean something else here, so it
+  // is rejected rather than reinterpreted -- but the caller can clear it without editing the model
+  // directory, through the config overlay that OgaCreateConfig/OgaConfigOverlay already support.
+  if (model_search.min_length != 0) {
     throw std::runtime_error(
-        "max_length must be greater than zero; actual value is " +
-        std::to_string(params.search.max_length) + ".");
+        "The model configures a nonzero search.min_length (" +
+        std::to_string(model_search.min_length) +
+        "), which is a session-absolute floor the Engine does not support; its minimum is per "
+        "turn. Clear it on the Config before creating the model -- "
+        R"(OgaConfigOverlay(config, "{\"search\":{\"min_length\":0}}"), or in Python )"
+        R"(config.overlay('{"search": {"min_length": 0}}') -- and use )"
+        "OgaTurnOptionsSetMinGeneratedTokens for a per-turn minimum instead.");
   }
-  if (max_total_tokens == 0 ||
-      max_total_tokens > static_cast<size_t>(params.search.max_length)) {
+  // Beam search does not implement the Engine's deferred completion contract -- its next tokens are
+  // never copied back -- and a Request is one sequence, so the Engine forces num_beams to 1 in the
+  // private search parameters it derives. Silently forcing a model that asked for beams would
+  // decode something the caller never requested, so a model-configured value other than 1 is
+  // rejected here instead. The overlay clears it without editing the model directory.
+  if (model_search.num_beams != 1) {
     throw std::runtime_error(
-        "max_total_tokens (" + std::to_string(max_total_tokens) +
-        ") must be greater than zero and no greater than max_length (" +
-        std::to_string(params.search.max_length) + ").");
+        "The model configures search.num_beams = " +
+        std::to_string(model_search.num_beams) +
+        ", and beam search is not supported by the Engine; every Engine Request decodes one "
+        "sequence with one beam. Clear it on the Config before creating the model -- "
+        R"(OgaConfigOverlay(config, "{\"search\":{\"num_beams\":1}}"), or in Python )"
+        R"(config.overlay('{"search": {"num_beams": 1}}') -- )"
+        "and batch across Requests instead.");
   }
-
+  const size_t model_ceiling = static_cast<size_t>(model_search.max_length);
+  const size_t max_session_tokens =
+      options.max_session_tokens.value_or(model_ceiling);
+  if (max_session_tokens == 0 || max_session_tokens > model_ceiling) {
+    throw std::runtime_error(
+        "max_session_tokens (" + std::to_string(max_session_tokens) +
+        ") must be greater than zero and no greater than the model-configured search.max_length (" +
+        std::to_string(model_ceiling) + ").");
+  }
   auto request = std::make_shared<Request>(
-      CloneRequestParams(params, *model_), max_total_tokens,
-      abandonment_pending_);
-  request->ValidateEngineCompatibility();
+      *model_, max_session_tokens, abandonment_pending_);
   auto engine = shared_from_this();
 
-  // Fatal handling may need one terminal event for every tracked Request. Grow that storage before
-  // publishing the Request so failure reporting never allocates after the Engine becomes unhealthy.
-  pending_events_.reserve(tracked_requests_.size() + 1);
+  // Fatal handling preserves every token event from the current step, then needs one terminal
+  // event per tracked Request plus a request-less fallback. Grow dedicated storage before
+  // publishing the Request so terminalization cannot allocate.
+  if (fatal_events_.max_size() < kFatalEventOverhead ||
+      max_step_event_count_ >
+          fatal_events_.max_size() - kFatalEventOverhead ||
+      tracked_requests_.size() >
+          fatal_events_.max_size() - kFatalEventOverhead -
+              max_step_event_count_) {
+    throw std::overflow_error(
+        "Engine fatal event capacity exceeds the supported size.");
+  }
+  fatal_events_.reserve(
+      max_step_event_count_ + tracked_requests_.size() + kFatalEventOverhead);
   tracked_requests_.push_back(request);
   request->AttachToEngine(std::move(engine));
   return request;
@@ -780,7 +1102,7 @@ std::shared_ptr<Request> Engine::CreateRequest(const GeneratorParams& params,
 
 uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
                            std::span<const int32_t> tokens,
-                           std::optional<size_t> max_generated_tokens) {
+                           const TurnOptions& options) {
   ValidateOwnerThread();
   CompleteNonresidentClosedRequests();
   ReclaimAbandonedRequests();
@@ -791,14 +1113,41 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
     throw std::runtime_error(
         "Cannot begin a turn for a request that does not belong to this engine.");
   }
-  request->ValidateTurnAdmission(tokens, max_generated_tokens);
+  request->ValidateTurnAdmission(tokens, options);
+
+  // Resolve and validate this turn's complete policy before any Request mutation, so an
+  // unsatisfiable combination leaves the previous completed turn entirely reusable.
+  const bool dynamic_batching = cache_manager_->SupportsDynamicBatching();
+  const auto policy = ResolveTurnPolicy(model_->config_->search, options);
+  const size_t turn_prompt_length =
+      static_cast<size_t>(request->IsAwaitingFirstTurn()
+                              ? 0
+                              : request->CurrentSequenceLength()) +
+      tokens.size();
+  ValidateTurnPolicy(policy, options, model_->p_device_scoring_->GetType(),
+                     model_->config_->model.vocab_size, turn_prompt_length,
+                     request->MaxSessionTokens());
+  // Static batching completes generation through a non-transactional path (RunStatic) that cannot
+  // stage, roll back, or replay a stop match, and its sampler RNG state is created once when the
+  // Request joins the batch rather than inside a rollback-capable step. Reject both before any
+  // Request mutation rather than letting a turn run without the guarantee its options promise.
+  if (!dynamic_batching) {
+    if (!options.stop_strings.empty()) {
+      throw std::runtime_error(
+          "Stop strings require an Engine configured for dynamic batching.");
+    }
+    if (options.seed) {
+      throw std::runtime_error(
+          "A per-turn seed requires an Engine configured for dynamic batching.");
+    }
+  }
+  if (options.seed && !scheduler_->SupportsTransactionalSamplerState()) {
+    throw std::runtime_error(
+        "A per-turn seed requires a batched sampler that supports transaction rollback.");
+  }
 
   const bool first_turn = request->IsAwaitingFirstTurn();
-  if (first_turn) {
-    if (cache_manager_->SupportsDynamicBatching()) {
-      request->ValidateEngineCompatibility();
-    }
-  } else {
+  if (!first_turn) {
     const bool restartable_canceled_turn =
         request->IsRestartableCanceledTurn() &&
         !cache_manager_->IsResident(request);
@@ -814,7 +1163,21 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
   }
 
   RequestTurnAdmission admission;
+  admission.policy = policy;
   bool added_to_scheduler = false;
+
+  // Build this turn's complete stop controller and guidance processor (or leave either null for a
+  // turn that does not use them) before any Request or Engine mutation: tokenizer/stream
+  // construction and grammar compilation can throw, and at this point nothing has been touched yet,
+  // so a failure here leaves the Request, its MTP shadow, and Engine health entirely unchanged for
+  // a caller to retry. Ownership passes into admission; Request::CommitTurnAdmission() installs
+  // them, and Request::RollbackTurnAdmission() (or simply this function returning through the catch
+  // below) discards them without ever having touched the Request's live state.
+  if (!options.stop_strings.empty()) {
+    admission.pending_stop_controller = std::make_unique<StopStringController>(
+        GetOrCreateStopTokenizer(), options.stop_strings);
+  }
+  admission.pending_guidance = CreateTurnGuidance(options);
 
   // A continuation appends a prompt the MTP shadow never sees, so keeping the shadow would leave it
   // a concatenation of generated tokens across turns with the intervening prompt missing. Drop it
@@ -828,8 +1191,7 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
       scheduler_->AddRequest(request);
       added_to_scheduler = true;
     }
-    return request->CommitTurnAdmission(
-        max_generated_tokens, admission);
+    return request->CommitTurnAdmission(options, admission);
   } catch (...) {
     const auto append_error = std::current_exception();
     try {
@@ -854,7 +1216,6 @@ bool Engine::CancelRequest(const std::shared_ptr<Request>& request, uint64_t tur
   if (!request->CanCancelFromEngine(*this, turn_id)) {
     return false;
   }
-
   pending_events_.erase(
       pending_events_.begin(),
       pending_events_.begin() + static_cast<ptrdiff_t>(pending_event_index_));
@@ -869,16 +1230,18 @@ bool Engine::CancelRequest(const std::shared_ptr<Request>& request, uint64_t tur
     pending_events_.reserve(pending_events_.size() + 1);
   }
 
+  // The canceled turn's suffix is gone, so the shadow that mirrored it must not survive into the
+  // next turn. Release it before changing request state so a cleanup failure leaves cancellation
+  // retryable.
+  CloseMtpRequest(request);
   const auto counters =
       request->CompleteCancelFromEngine(*this, turn_id);
-  // The canceled turn's suffix is gone, so the shadow that mirrored it must not survive into the
-  // next turn.
-  CloseMtpRequest(request);
   EngineEvent terminal;
   terminal.request = request;
   terminal.turn_id = turn_id;
   terminal.flags = EngineEventFlagTurnFinished;
   terminal.finish_reason = GenerationFinishReason::Canceled;
+  terminal.matched_stop_string_index = -1;
   terminal.usage = {
       counters.prompt_tokens,
       counters.generated_tokens,
@@ -886,6 +1249,12 @@ bool Engine::CancelRequest(const std::shared_ptr<Request>& request, uint64_t tur
   if (has_existing_event) {
     existing->flags |= terminal.flags;
     existing->finish_reason = terminal.finish_reason;
+    // CanCancelFromEngine() only allows this merge while the Request is still executable, and a
+    // committed StopString match makes it TurnComplete in the very same step that stages the
+    // match's terminal event -- so `existing` here can only ever be a non-terminal (Token-only)
+    // event, whose matched index is already -1. Copy the terminal value explicitly so the merge
+    // preserves the event invariant without relying on that precondition.
+    existing->matched_stop_string_index = terminal.matched_stop_string_index;
     existing->usage = terminal.usage;
   } else {
     pending_events_.push_back(std::move(terminal));
@@ -957,13 +1326,15 @@ void Engine::CloseRequest(const std::shared_ptr<Request>& request) {
   if (!request || !request->BelongsTo(*this)) {
     throw std::runtime_error("Cannot close a request that does not belong to this engine.");
   }
-
   scheduler_->RemoveRequest(request);
   const bool retain_static_runtime_state =
       !cache_manager_->SupportsDynamicBatching() &&
       cache_manager_->IsResident(request);
 
   CloseMtpRequest(request);
+  if (dflash2_drafter_) {
+    dflash2_drafter_->Release(request.get());
+  }
 
   pending_events_.erase(
       pending_events_.begin(),
@@ -979,6 +1350,8 @@ void Engine::CloseRequest(const std::shared_ptr<Request>& request) {
           staged_events_.begin(), staged_events_.end(),
           [&request](const EngineEvent& event) { return event.request == request; }),
       staged_events_.end());
+  // Abandonment retries rely on every potentially throwing removal step remaining before this
+  // logical-close transition. Everything below it must remain allocation-free and non-throwing.
   request->MarkClosedFromEngine(*this);
   if (retain_static_runtime_state) {
     return;
@@ -1012,6 +1385,12 @@ void Engine::DetachRequestForTeardown(
   }
 
   scheduler_->DetachRequestForTeardown(request);
+  if (dflash2_drafter_) {
+    try {
+      dflash2_drafter_->Release(request.get());
+    } catch (...) {
+    }
+  }
   if (const auto mtp_it = mtp_requests_.find(request.get());
       mtp_it != mtp_requests_.end()) {
     try {
@@ -1022,6 +1401,10 @@ void Engine::DetachRequestForTeardown(
     mtp_it->second->CompleteCloseFromEngine(*this);
     mtp_requests_.erase(mtp_it);
   }
+  pending_events_.erase(
+      pending_events_.begin(),
+      pending_events_.begin() + static_cast<ptrdiff_t>(pending_event_index_));
+  pending_event_index_ = 0;
   pending_events_.erase(
       std::remove_if(
           pending_events_.begin(), pending_events_.end(),
@@ -1036,7 +1419,6 @@ void Engine::DetachRequestForTeardown(
             return event.request == request;
           }),
       staged_events_.end());
-  pending_event_index_ = 0;
   request->CompleteCloseFromEngine(*this);
 }
 
@@ -1044,30 +1426,42 @@ void Engine::ReclaimAbandonedRequests() {
   // ExternalRelease only publishes an atomic abandonment marker. The host's owner-thread boundary
   // can safely perform the normal removal sequence: logical scheduler removal, ready-notification
   // purge, and terminal close. Dynamic cache ownership is released immediately; a resident static
-  // batch row can remain physically retained until its shared batch is recycled.
+  // batch row can remain physically retained until the batch is recycled.
   if (!abandonment_pending_->exchange(false, std::memory_order_acq_rel)) {
     return;
   }
 
-  while (true) {
-    const auto abandoned = std::find_if(
-        tracked_requests_.begin(), tracked_requests_.end(),
-        [this](const std::shared_ptr<Request>& request) {
-          return request &&
-                 !IsClosed(request->status_) &&
-                 request->BelongsTo(*this) &&
-                 request->ExternalReferencesAbandoned();
-        });
-    if (abandoned == tracked_requests_.end()) {
-      return;
-    }
+  try {
+    while (true) {
+      const auto abandoned = std::find_if(
+          tracked_requests_.begin(), tracked_requests_.end(),
+          [this](const std::shared_ptr<Request>& request) {
+            return request &&
+                   !IsClosed(request->status_) &&
+                   request->BelongsTo(*this) &&
+                   request->ExternalReferencesAbandoned();
+          });
+      if (abandoned == tracked_requests_.end()) {
+        return;
+      }
 
-    auto request = *abandoned;
-    // Recheck immediately before removal in case an external owner was reacquired before this
-    // serialized boundary.
-    if (request->ExternalReferencesAbandoned()) {
-      CloseRequest(request);
+      auto request = *abandoned;
+      // Recheck immediately before removal in case an external owner was reacquired before this
+      // serialized boundary.
+      if (request->ExternalReferencesAbandoned()) {
+        CloseRequest(request);
+      }
     }
+  } catch (const std::bad_alloc&) {
+    abandonment_pending_->store(true, std::memory_order_release);
+    throw;
+  } catch (...) {
+    MarkUnhealthyAndThrow(
+        StepOutcomeKind::ExecutionContractFailure,
+        /*transaction_id=*/0,
+        nullptr,
+        "Abandoned Request cleanup violated Engine ownership invariants.",
+        std::current_exception());
   }
 }
 
@@ -1127,22 +1521,40 @@ void Engine::ValidateRequestCanContinue(
     std::exception_ptr append_error,
     std::exception_ptr restore_error) {
   request->MarkFailedFromEngine(*this);
-  std::string message = AddExceptionCause(
-      "Continuation append failed and its Search state could not be restored.",
-      append_error);
+  std::exception_ptr close_error;
   try {
     CloseRequest(request);
   } catch (...) {
+    close_error = std::current_exception();
+    DetachRequestForTeardown(request);
+    tracked_requests_.erase(
+        std::remove(tracked_requests_.begin(), tracked_requests_.end(), request),
+        tracked_requests_.end());
+  }
+
+  std::string message;
+  try {
     message = AddExceptionCause(
-        std::move(message) + " Closing the poisoned request also failed.",
+        "Continuation append failed and its Search state could not be restored.",
+        append_error);
+    if (close_error) {
+      message = AddExceptionCause(
+          std::move(message) + " Closing the poisoned request also failed.",
+          close_error);
+    }
+  } catch (...) {
+    MarkUnhealthyAndThrow(
+        StepOutcomeKind::FatalExecutionFailure,
+        /*transaction_id=*/0,
+        request.get(),
+        "Continuation append or restore failed, and constructing its diagnostic also failed.",
         std::current_exception());
-    request->CompleteCloseFromEngine(*this);
   }
   MarkUnhealthyAndThrow(
       StepOutcomeKind::FatalExecutionFailure,
       /*transaction_id=*/0,
       request.get(),
-      std::move(message),
+      message,
       restore_error);
 }
 
@@ -1155,7 +1567,14 @@ size_t Engine::Run(std::span<EngineEvent> events) {
     return 0;
   }
   CompleteNonresidentClosedRequests();
-  ReclaimAbandonedRequests();
+  try {
+    ReclaimAbandonedRequests();
+  } catch (const EngineStepError&) {
+    if (pending_event_index_ < pending_events_.size()) {
+      return DrainPendingEvents(events);
+    }
+    throw;
+  }
   if (pending_event_index_ < pending_events_.size()) {
     return DrainPendingEvents(events);
   }
@@ -1272,8 +1691,7 @@ void Engine::RunDynamic() {
           step_plan_.transaction_id,
           outcome.request_id,
           "Dynamic scheduler returned no executable work while requests remain pending.",
-          std::make_exception_ptr(std::logic_error{
-              "Invalid dynamic scheduler planning outcome."}));
+          nullptr);
     }
 
     std::unique_ptr<CacheStepReservation> reservation;
@@ -1390,25 +1808,6 @@ void Engine::RunDynamic() {
     };
 
     try {
-      for (const auto& entry : step_plan_.requests) {
-        entry.request->ValidateEngineCompatibility();
-      }
-    } catch (...) {
-      const auto validation_error = std::current_exception();
-      rollback_transaction();
-      ++transaction_metrics_.post_processing_aborts;
-      ++transaction_metrics_.retryable_aborts;
-      throw EngineStepError{
-          {StepOutcomeKind::RetryableBatchAbort,
-           step_plan_.transaction_id,
-           nullptr},
-          AddExceptionCause(
-              "Request validation failed; the batch was rolled back.",
-              validation_error),
-      };
-    }
-
-    try {
       // Sampling mutates each request's Search state. Checkpoint it before the model run so failures
       // in execution or post-processing can discard the whole batch rather than partially advancing
       // whichever requests happened to finish first.
@@ -1473,13 +1872,34 @@ void Engine::RunDynamic() {
       // commit without drafts. Contract violations and failed MTP rollback stay fatal below.
       try {
         mtp_step = PrepareMtpStep(step_plan_, step_results_, scheduled_requests);
+        mtp_consecutive_failures_ = 0;
       } catch (const MtpRollbackError&) {
         throw;
       } catch (const std::logic_error&) {
         throw;
       } catch (...) {
+        const auto mtp_error = std::current_exception();
         mtp_step.reset();
         ++speculative_stats_.standard_fallback_steps;
+        ++speculative_stats_.mtp_failures;
+        ++mtp_consecutive_failures_;
+        const bool disable_mtp =
+            mtp_consecutive_failures_ >= kMtpFailureDisableThreshold;
+        mtp_disabled_ = disable_mtp;
+        if ((mtp_consecutive_failures_ == 1 || disable_mtp) &&
+            // Log() asserts that logging is enabled, and an assertion abort is not catchable, so
+            // the guard has to come before the call rather than inside the try below.
+            g_log.enabled && g_log.warning) {
+          try {
+            Log("warning", AddExceptionCause(
+                               disable_mtp
+                                   ? "Disabling MTP after repeated proposal failures."
+                                   : "MTP proposal failed; using target-only decoding for this step.",
+                               mtp_error));
+          } catch (...) {
+            // Diagnostics must not turn an optional drafter failure into a target failure.
+          }
+        }
       }
       for (size_t i = 0; i < step_plan_.requests.size(); ++i) {
         if (step_results_[i].visible_token_count != 0 ||
@@ -1546,6 +1966,35 @@ void Engine::RunDynamic() {
           preparation_error);
     }
 
+    bool dflash2_feeds_ready = false;
+    if (dflash2_drafter_ && !dflash2_disabled_ && MaxDraftTokensPerStep() > 0) {
+      // Reads accepted-draft counts that CommitStep clears below. Keep this fallible work on the
+      // rollback side of the target transaction's commit boundary. DFlash 2 is optional, so only a
+      // contract violation is fatal here; anything else falls back to a target-only commit.
+      std::exception_ptr fatal_preparation_error;
+      try {
+        PrepareDflash2Feeds(step_plan_, step_results_);
+        dflash2_feeds_ready = true;
+      } catch (const std::logic_error&) {
+        fatal_preparation_error = std::current_exception();
+      } catch (...) {
+        try {
+          RecordDflash2Failure(std::current_exception(), false);
+        } catch (...) {
+          fatal_preparation_error = std::current_exception();
+        }
+      }
+      if (fatal_preparation_error) {
+        rollback_transaction();
+        MarkUnhealthyAndThrow(
+            StepOutcomeKind::ExecutionContractFailure,
+            step_plan_.transaction_id,
+            nullptr,
+            "Transaction preparation failed and the Engine is no longer healthy.",
+            fatal_preparation_error);
+      }
+    }
+
     try {
       // Everything below crosses the commit boundary and is never retried. Make staged search state
       // durable, publish paged occupancy and the fixed bank flip, then advance the lightweight
@@ -1564,6 +2013,22 @@ void Engine::RunDynamic() {
       }
       if (mtp_step) {
         PublishMtpDrafts(*mtp_step);
+      }
+      if (dflash2_feeds_ready) {
+        try {
+          PublishDflash2Drafts(scheduled_requests);
+          dflash2_consecutive_failures_ = 0;
+        } catch (...) {
+          const auto dflash2_error = std::current_exception();
+          bool contract_error = false;
+          try {
+            std::rethrow_exception(dflash2_error);
+          } catch (const std::logic_error&) {
+            contract_error = true;
+          } catch (...) {
+          }
+          RecordDflash2Failure(dflash2_error, contract_error);
+        }
       }
     } catch (...) {
       MarkUnhealthyAndThrow(
@@ -1616,6 +2081,7 @@ void Engine::AppendEventsFromStep(
   const auto finish_turn = [&request, &result](EngineEvent& event) {
     event.flags |= EngineEventFlagTurnFinished;
     event.finish_reason = result.finish_reason;
+    event.matched_stop_string_index = result.matched_stop_string_index;
     event.usage = {
         request->TurnPromptTokens(),
         request->TurnGeneratedTokens(),
@@ -1660,11 +2126,13 @@ EngineEvent Engine::FailUnserviceableRequest(const void* request_id) {
         step_plan_.transaction_id,
         request_id,
         "The scheduler identified an unknown or non-executable unserviceable Request.",
-        std::make_exception_ptr(std::logic_error{
-            "Invalid unserviceable Request identity."}));
+        nullptr);
   }
   scheduler_->RemoveRequest(request);
   CloseMtpRequest(request);
+  if (dflash2_drafter_) {
+    dflash2_drafter_->Release(request.get());
+  }
   request->CompleteFailedTurnFromEngine(*this);
 
   EngineEvent event;
@@ -1672,6 +2140,7 @@ EngineEvent Engine::FailUnserviceableRequest(const void* request_id) {
   event.turn_id = request->CurrentTurnId();
   event.flags = EngineEventFlagTurnFinished | EngineEventFlagFailed;
   event.finish_reason = GenerationFinishReason::Failed;
+  event.matched_stop_string_index = -1;
   event.error_code = EngineErrorCode::RequestUnserviceable;
   event.usage = {
       request->TurnPromptTokens(),
@@ -1725,7 +2194,7 @@ EngineEvent Engine::EventFromStepError(
       event.error_code = EngineErrorCode::EngineContractFailure;
       health_ = EngineHealth::Unhealthy;
       if (!fatal_error_) {
-        fatal_error_ = caught_error;
+        fatal_error_ = fatal_contract_fallback_error_;
       }
       break;
   }
@@ -1736,61 +2205,113 @@ EngineEvent Engine::EventFromStepError(
     StepOutcomeKind outcome,
     StepTransactionId transaction_id,
     const void* request_id,
-    std::string message,
+    std::string_view message,
     std::exception_ptr error) {
-  health_ = EngineHealth::Unhealthy;
-  if (outcome == StepOutcomeKind::FatalExecutionFailure ||
-      outcome == StepOutcomeKind::ExecutionContractFailure) {
-    ++transaction_metrics_.fatal_execution_failures;
+  if (health_ == EngineHealth::Unhealthy) {
+    std::rethrow_exception(fatal_error_);
   }
-  pending_events_.erase(
-      pending_events_.begin(),
-      pending_events_.begin() + static_cast<ptrdiff_t>(pending_event_index_));
-  pending_event_index_ = 0;
+
+  std::exception_ptr durable_error =
+      outcome == StepOutcomeKind::ExecutionContractFailure
+          ? fatal_contract_fallback_error_
+          : fatal_execution_fallback_error_;
+  try {
+    auto candidate_error = make_step_error_(
+        {outcome, transaction_id, request_id},
+        AddExceptionCause(std::string{message}, error));
+    if (IsEngineStepErrorForOutcome(candidate_error, outcome)) {
+      durable_error = std::move(candidate_error);
+    }
+  } catch (...) {
+    // The fallback was constructed with the Engine, before any Request could be published.
+  }
+
+  fatal_events_.clear();
+  for (size_t i = pending_event_index_; i < pending_events_.size(); ++i) {
+    const auto& pending = pending_events_[i];
+    if (!pending.request ||
+        !pending.request->ExternalReferencesAbandoned()) {
+      fatal_events_.push_back(pending);
+    }
+  }
   const auto error_code =
       outcome == StepOutcomeKind::ExecutionContractFailure
           ? EngineErrorCode::EngineContractFailure
           : EngineErrorCode::EngineExecutionFailure;
+  bool affected_turn = false;
   for (const auto& request : tracked_requests_) {
     if (request && IsExecutable(request->status_)) {
       request->CompleteFailedTurnFromEngine(*this);
+      if (request->ExternalReferencesAbandoned()) {
+        continue;
+      }
+      affected_turn = true;
       EngineEvent event;
       event.request = request;
       event.turn_id = request->CurrentTurnId();
       event.flags = EngineEventFlagTurnFinished | EngineEventFlagFailed;
       event.finish_reason = GenerationFinishReason::Failed;
+      event.matched_stop_string_index = -1;
       event.error_code = error_code;
       event.usage = {
           request->TurnPromptTokens(),
           request->TurnGeneratedTokens(),
           0};
       const auto existing = std::find_if(
-          pending_events_.rbegin(), pending_events_.rend(),
+          fatal_events_.rbegin(), fatal_events_.rend(),
           [&request](const EngineEvent& pending) {
             return pending.request == request &&
                    pending.turn_id == request->CurrentTurnId();
           });
-      if (existing == pending_events_.rend()) {
-        pending_events_.push_back(std::move(event));
+      if (existing == fatal_events_.rend()) {
+        fatal_events_.push_back(std::move(event));
       } else {
         existing->flags |= event.flags;
         existing->finish_reason = event.finish_reason;
+        // This merge only runs for a Request this sweep just found IsExecutable(), and a committed
+        // StopString match makes a Request TurnComplete in the very same step that stages the
+        // match's terminal event -- so `existing` here can only ever be a non-terminal (Token-only)
+        // event, whose matched index is already -1 (an already-TurnComplete Request's own pending
+        // event, StopString-matched or not, is instead copied through unchanged by the sweep
+        // above). Copy the failure value explicitly so the merged event preserves the invariant.
+        existing->matched_stop_string_index = event.matched_stop_string_index;
         existing->error_code = event.error_code;
         existing->usage = event.usage;
       }
     }
   }
-  fatal_error_ = std::make_exception_ptr(EngineStepError{
-      {outcome, transaction_id, request_id},
-      AddExceptionCause(std::move(message), error),
-  });
+  if (!affected_turn) {
+    EngineEvent event;
+    event.flags = EngineEventFlagFailed;
+    event.finish_reason = GenerationFinishReason::Failed;
+    event.matched_stop_string_index = -1;
+    event.error_code = error_code;
+    fatal_events_.push_back(std::move(event));
+  }
+
+  fatal_error_ = durable_error;
+  health_ = EngineHealth::Unhealthy;
+  if (outcome == StepOutcomeKind::FatalExecutionFailure ||
+      outcome == StepOutcomeKind::ExecutionContractFailure) {
+    ++transaction_metrics_.fatal_execution_failures;
+  }
+  pending_events_.swap(fatal_events_);
+  fatal_events_.clear();
+  pending_event_index_ = 0;
   std::rethrow_exception(fatal_error_);
 }
 
 bool Engine::HasPendingRequests() {
   ValidateOwnerThread();
   CompleteNonresidentClosedRequests();
-  ReclaimAbandonedRequests();
+  try {
+    ReclaimAbandonedRequests();
+  } catch (const EngineStepError&) {
+    if (pending_event_index_ < pending_events_.size()) {
+      return true;
+    }
+    throw;
+  }
   return pending_event_index_ < pending_events_.size() ||
          scheduler_->HasPendingRequests();
 }
@@ -1803,11 +2324,34 @@ size_t Engine::MaxDraftTokensPerStep() const {
              : 0;
 }
 
+const std::shared_ptr<Tokenizer>& Engine::GetOrCreateStopTokenizer() {
+  if (!stop_tokenizer_) {
+    stop_tokenizer_ = model_->CreateTokenizer();
+  }
+  return stop_tokenizer_;
+}
+
+std::unique_ptr<ConstrainedLogitsProcessor> Engine::CreateTurnGuidance(
+    const TurnOptions& options) const {
+  if (options.guidance_type.empty() && options.guidance_data.empty()) {
+    return nullptr;
+  }
+  // Guidance is turn-scoped, so its parameters are built here rather than read from the Request:
+  // nothing about a previous turn's grammar can leak into this one.
+  auto params = std::make_shared<GeneratorParams>(*model_);
+  params->search.batch_size = 1;
+  params->SetGuidance(options.guidance_type, options.guidance_data, false);
+  return CreateGuidanceLogitsProcessor(std::move(params));
+}
+
 SpeculativeStats Engine::GetSpeculativeStats() const {
   // The counters are plain members mutated by Run(), so reading them from a monitoring thread
   // would be a data race.
   ValidateOwnerThread();
   auto stats = speculative_stats_;
+  if (dflash2_drafter_) {
+    stats.dflash2_admission_misses = dflash2_drafter_->AdmissionMisses();
+  }
   if (stats.draft_tokens_evaluated != 0) {
     stats.acceptance_rate = static_cast<float>(stats.draft_tokens_accepted) /
                             static_cast<float>(stats.draft_tokens_evaluated);

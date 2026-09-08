@@ -14,6 +14,7 @@
 #include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <stdexcept>
 #include <thread>
@@ -66,6 +67,18 @@ struct ExternalRequestRaceProbe
 std::vector<int32_t> Prompt(int32_t seed) {
   const int32_t base = 2 + (seed % 8);
   return {base, base + 1, base + 2};
+}
+
+// A nearly deterministic sampled turn policy: top-k 3 at a very low temperature with a fixed seed,
+// so the sampled and speculative-sampled paths take their random branches while still selecting a
+// predictable token.
+TurnOptions SampledTurnOptions(uint64_t seed = 1234) {
+  TurnOptions options;
+  options.do_sample = true;
+  options.top_k = 3;
+  options.temperature = 0.01f;
+  options.seed = seed;
+  return options;
 }
 
 // Index of the first occurrence of `entry` in the trace, or -1 if absent.
@@ -142,8 +155,12 @@ static_assert(noexcept(std::declval<Request&>().ExternalRelease()));
 static_assert(
     noexcept(std::declval<ExternalRequestRaceProbe&>().ExternalRelease()));
 
+// Row-selective post-processing failure. The scoring device is shared by every Request in the
+// Engine, so each Search records the ordinal it was created with and only the selected one throws.
 struct RequestPostProcessingControl {
   bool fail{};
+  size_t target_search_index{};
+  size_t next_search_index{};
 };
 
 class FailingPostProcessingSearch final : public GreedySearch_Cpu {
@@ -151,10 +168,12 @@ class FailingPostProcessingSearch final : public GreedySearch_Cpu {
   FailingPostProcessingSearch(
       const GeneratorParams& params,
       std::shared_ptr<RequestPostProcessingControl> control)
-      : GreedySearch_Cpu(params), control_{std::move(control)} {}
+      : GreedySearch_Cpu(params),
+        control_{std::move(control)},
+        search_index_{control_->next_search_index++} {}
 
   void ApplyRepetitionPenalty(float penalty) override {
-    if (control_->fail) {
+    if (control_->fail && search_index_ == control_->target_search_index) {
       throw std::runtime_error("Injected request post-processing failure.");
     }
     GreedySearch_Cpu::ApplyRepetitionPenalty(penalty);
@@ -162,6 +181,7 @@ class FailingPostProcessingSearch final : public GreedySearch_Cpu {
 
  private:
   std::shared_ptr<RequestPostProcessingControl> control_;
+  size_t search_index_;
 };
 
 class FailingPostProcessingDevice final : public DeviceInterface {
@@ -230,6 +250,12 @@ class ThrowingStaticScheduler final : public Scheduler {
  private:
   std::shared_ptr<Request> request_;
 };
+
+std::exception_ptr CaptureBadAllocInsteadOfStepError(
+    StepOutcome,
+    std::string) {
+  return std::make_exception_ptr(std::bad_alloc{});
+}
 
 class EngineRunTest : public ::testing::Test {
  protected:
@@ -309,8 +335,8 @@ TEST(EngineLifetimeTest, DestroyingEngineReleasesCompositeCacheStorage) {
   EngineDependencies dependencies{
       cache, std::move(scheduler), std::move(executor)};
   auto engine = std::make_shared<Engine>(model, std::move(dependencies));
-  auto first = CreateRequestWithPrompt(engine, *model, Prompt(10));
-  auto second = CreateRequestWithPrompt(engine, *model, Prompt(20));
+  auto first = CreateRequestWithPrompt(engine, Prompt(10));
+  auto second = CreateRequestWithPrompt(engine, Prompt(20));
 
   EXPECT_EQ(RunOne(*engine).request, first);
   EXPECT_EQ(RunOne(*engine).request, second);
@@ -331,7 +357,7 @@ TEST_F(EngineRunTest, SingleRequestSchedulesThenDecodesThenReturns) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
 
   auto prompt = Prompt(10);
-  auto request = CreateRequestWithPrompt(engine.engine, *model_, prompt);
+  auto request = CreateRequestWithPrompt(engine.engine, prompt);
   ASSERT_TRUE(engine.engine->HasPendingRequests());
 
   auto ready = RunOne(*engine.engine);
@@ -362,7 +388,7 @@ TEST_F(EngineRunTest, FittingRequestsShareOneDecodeAndReturnAllEvents) {
   std::vector<std::shared_ptr<Request>> requests;
   for (int32_t seed : {10, 20, 30}) {
     auto prompt = Prompt(seed);
-    auto request = CreateRequestWithPrompt(engine.engine, *model_, prompt);
+    auto request = CreateRequestWithPrompt(engine.engine, prompt);
     requests.push_back(request);
   }
 
@@ -393,7 +419,7 @@ TEST_F(EngineRunTest, CapacityOneExecutesOnceThenDrainsOverflow) {
   for (int32_t seed : {10, 20, 30}) {
     auto prompt = Prompt(seed);
     requests.push_back(
-        CreateRequestWithPrompt(engine.engine, *model_, prompt));
+        CreateRequestWithPrompt(engine.engine, prompt));
   }
 
   std::array<EngineEvent, 1> storage;
@@ -416,7 +442,7 @@ TEST_F(EngineRunTest, RetainedEventsDrainWithoutExecutingIntoSpareCapacity) {
   for (int32_t seed : {10, 20, 30}) {
     auto prompt = Prompt(seed);
     requests.push_back(
-        CreateRequestWithPrompt(engine.engine, *model_, prompt));
+        CreateRequestWithPrompt(engine.engine, prompt));
   }
 
   std::array<EngineEvent, 1> first_storage;
@@ -442,7 +468,7 @@ TEST_F(EngineRunTest, RetainedEventsDrainWithoutExecutingIntoSpareCapacity) {
 TEST_F(EngineRunTest, CreateRequestReclaimsAbandonedTurnCompleteAtCapacity) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/1, EosToken(*model_));
   auto first_prompt = Prompt(10);
-  auto first = CreateEngineRequest(engine.engine, *model_);
+  auto first = CreateEngineRequest(engine.engine);
   ExternalRequestReference first_external{*first};
   first->BeginTurn(first_prompt);
 
@@ -453,7 +479,7 @@ TEST_F(EngineRunTest, CreateRequestReclaimsAbandonedTurnCompleteAtCapacity) {
   first_external.Release();
 
   auto second_prompt = Prompt(20);
-  auto second = CreateEngineRequest(engine.engine, *model_);
+  auto second = CreateEngineRequest(engine.engine);
   ExternalRequestReference second_external{*second};
   second->BeginTurn(second_prompt);
 
@@ -473,8 +499,8 @@ TEST_F(EngineRunTest, RunReclaimsAbandonedTurnCompleteBeforePlanningAtCapacity) 
   auto engine = MakeDoublesEngine(model_, /*capacity=*/1, EosToken(*model_));
   auto first_prompt = Prompt(10);
   auto second_prompt = Prompt(20);
-  auto first = CreateEngineRequest(engine.engine, *model_);
-  auto second = CreateEngineRequest(engine.engine, *model_);
+  auto first = CreateEngineRequest(engine.engine);
+  auto second = CreateEngineRequest(engine.engine);
   ExternalRequestReference first_external{*first};
   ExternalRequestReference second_external{*second};
   first->BeginTurn(first_prompt);
@@ -502,9 +528,9 @@ TEST_F(EngineRunTest, RunPurgesAbandonedReadyAndQueuedRequestsExactlyOnce) {
   auto survivor_prompt = Prompt(10);
   auto ready_orphan_prompt = Prompt(20);
   auto queued_orphan_prompt = Prompt(30);
-  auto survivor = CreateEngineRequest(engine.engine, *model_);
-  auto ready_orphan = CreateEngineRequest(engine.engine, *model_);
-  auto queued_orphan = CreateEngineRequest(engine.engine, *model_);
+  auto survivor = CreateEngineRequest(engine.engine);
+  auto ready_orphan = CreateEngineRequest(engine.engine);
+  auto queued_orphan = CreateEngineRequest(engine.engine);
   ExternalRequestReference survivor_external{*survivor};
   ExternalRequestReference ready_orphan_external{*ready_orphan};
   ExternalRequestReference queued_orphan_external{*queued_orphan};
@@ -542,7 +568,7 @@ TEST_F(EngineRunTest, RunPurgesAbandonedReadyAndQueuedRequestsExactlyOnce) {
 TEST_F(EngineRunTest, ReacquiringExternalReferenceCancelsDeferredAbandonment) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/1, EosToken(*model_));
   auto prompt = Prompt(10);
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   ExternalRequestReference initial_external{*request};
   request->BeginTurn(prompt);
   ASSERT_EQ(RunOne(*engine.engine).request, request);
@@ -560,10 +586,136 @@ TEST_F(EngineRunTest, ReacquiringExternalReferenceCancelsDeferredAbandonment) {
   reacquired_external.Release();
 }
 
+TEST_F(EngineRunTest, AbandonmentCleanupRetriesAfterDeallocationFailure) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/1, EosToken(*model_));
+  auto request = CreateEngineRequest(engine.engine);
+  ExternalRequestReference external{*request};
+  request->BeginTurn(Prompt(10));
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
+  ASSERT_EQ(request->status_, RequestStatus::TurnComplete);
+  ASSERT_EQ(engine.cache->AllocatedCount(), 1u);
+
+  external.Release();
+  engine.cache->ThrowDeallocateFailureOnce();
+
+  EXPECT_THROW(
+      static_cast<void>(engine.engine->HasPendingRequests()),
+      std::bad_alloc);
+  EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
+  EXPECT_EQ(engine.cache->AllocatedCount(), 1u);
+
+  EXPECT_FALSE(engine.engine->HasPendingRequests());
+  EXPECT_EQ(request->status_, RequestStatus::Closed);
+  EXPECT_EQ(engine.cache->AllocatedCount(), 0u);
+  EXPECT_EQ(engine.cache->deallocate_calls, 2);
+}
+
+TEST_F(EngineRunTest, AbandonmentInvariantFailureTerminalizesExecutableTurns) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/2, /*forced_token=*/5);
+  auto abandoned = CreateEngineRequest(engine.engine);
+  auto survivor = CreateEngineRequest(engine.engine);
+  ExternalRequestReference abandoned_external{*abandoned};
+  abandoned->BeginTurn(Prompt(10), std::optional<size_t>{2});
+  survivor->BeginTurn(Prompt(20), std::optional<size_t>{2});
+
+  std::array<EngineEvent, 2> tokens;
+  ASSERT_EQ(engine.engine->Run(tokens), tokens.size());
+  ASSERT_EQ(abandoned->status_, RequestStatus::Active);
+  ASSERT_EQ(survivor->status_, RequestStatus::Active);
+
+  abandoned_external.Release();
+  engine.cache->ThrowDeallocateInvariantFailureOnce();
+  EXPECT_TRUE(engine.engine->HasPendingRequests());
+
+  std::array<EngineEvent, 2> failures;
+  ASSERT_EQ(engine.engine->Run(failures), 1u);
+  EXPECT_EQ(failures[0].request, survivor);
+  EXPECT_EQ(
+      failures[0].flags,
+      EngineEventFlagTurnFinished | EngineEventFlagFailed);
+  EXPECT_EQ(
+      failures[0].error_code,
+      EngineErrorCode::EngineContractFailure);
+  EXPECT_EQ(abandoned->status_, RequestStatus::TurnComplete);
+  EXPECT_EQ(survivor->status_, RequestStatus::TurnComplete);
+  EXPECT_THROW(static_cast<void>(RunOne(*engine.engine)), EngineStepError);
+}
+
+TEST_F(EngineRunTest, FatalScratchReleasesDrainedRequestEvents) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/1, /*forced_token=*/5);
+  auto abandoned = CreateEngineRequest(engine.engine);
+  auto retained_event_request = CreateEngineRequest(engine.engine);
+  ExternalRequestReference abandoned_external{*abandoned};
+  abandoned->BeginTurn(Prompt(10), std::optional<size_t>{2});
+  const auto retained_turn =
+      retained_event_request->BeginTurn(
+          Prompt(20), std::optional<size_t>{2});
+
+  ASSERT_EQ(RunOne(*engine.engine).request, abandoned);
+  ASSERT_TRUE(retained_event_request->Cancel(retained_turn));
+  std::weak_ptr<Request> retained_event_weak = retained_event_request;
+
+  abandoned_external.Release();
+  engine.cache->ThrowDeallocateInvariantFailureOnce();
+  EXPECT_TRUE(engine.engine->HasPendingRequests());
+
+  std::array<EngineEvent, 2> events;
+  ASSERT_EQ(engine.engine->Run(events), events.size());
+  EXPECT_EQ(events[0].request, retained_event_request);
+  EXPECT_EQ(events[0].flags, EngineEventFlagTurnFinished);
+  EXPECT_EQ(
+      events[0].finish_reason,
+      GenerationFinishReason::Canceled);
+  EXPECT_EQ(events[1].request, nullptr);
+  EXPECT_EQ(events[1].flags, EngineEventFlagFailed);
+
+  events.fill({});
+  retained_event_request->Close();
+  retained_event_request.reset();
+  EXPECT_TRUE(retained_event_weak.expired());
+}
+
+TEST_F(EngineRunTest,
+       AbandonmentInvariantFailureFromBeginTurnRetainsFatalEvents) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/2, /*forced_token=*/5);
+  auto abandoned = CreateEngineRequest(engine.engine);
+  auto survivor = CreateEngineRequest(engine.engine);
+  auto boundary_request = CreateEngineRequest(engine.engine);
+  ExternalRequestReference abandoned_external{*abandoned};
+  abandoned->BeginTurn(Prompt(10), std::optional<size_t>{2});
+  survivor->BeginTurn(Prompt(20), std::optional<size_t>{2});
+
+  std::array<EngineEvent, 2> tokens;
+  ASSERT_EQ(engine.engine->Run(tokens), tokens.size());
+  abandoned_external.Release();
+  engine.cache->ThrowDeallocateInvariantFailureOnce();
+
+  try {
+    boundary_request->BeginTurn(Prompt(30));
+    FAIL() << "Expected abandonment cleanup to poison the Engine.";
+  } catch (const EngineStepError& error) {
+    EXPECT_EQ(
+        error.Outcome().kind,
+        StepOutcomeKind::ExecutionContractFailure);
+  }
+  EXPECT_EQ(boundary_request->status_, RequestStatus::Unassigned);
+
+  std::array<EngineEvent, 2> failures;
+  ASSERT_EQ(engine.engine->Run(failures), 1u);
+  EXPECT_EQ(failures[0].request, survivor);
+  EXPECT_EQ(
+      failures[0].flags,
+      EngineEventFlagTurnFinished | EngineEventFlagFailed);
+  EXPECT_EQ(
+      failures[0].error_code,
+      EngineErrorCode::EngineContractFailure);
+  EXPECT_THROW(static_cast<void>(RunOne(*engine.engine)), EngineStepError);
+}
+
 TEST_F(EngineRunTest,
        ConcurrentFinalReleaseAndReacquireCancelsRequestAbandonment) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/1, EosToken(*model_));
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   request->ExternalAddRef();
   request->BeginTurn(Prompt(10));
   ASSERT_EQ(RunOne(*engine.engine).request, request);
@@ -595,8 +747,8 @@ TEST_F(EngineRunTest, BeginTurnRejectsUndrainedReadyNotificationWithoutMutation)
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
   auto first_prompt = Prompt(10);
   auto second_prompt = Prompt(20);
-  auto first = CreateRequestWithPrompt(engine.engine, *model_, first_prompt);
-  auto second = CreateRequestWithPrompt(engine.engine, *model_, second_prompt);
+  auto first = CreateRequestWithPrompt(engine.engine, first_prompt);
+  auto second = CreateRequestWithPrompt(engine.engine, second_prompt);
 
   ASSERT_EQ(RunOne(*engine.engine).request, first);
   ASSERT_EQ(engine.executor->decode_calls, 1);
@@ -630,7 +782,7 @@ TEST_F(EngineRunTest, BeginTurnRejectsUndrainedReadyNotificationWithoutMutation)
 TEST_F(EngineRunTest, ContinuedUnreadOutputPreservesOrder) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5);
   auto prompt = Prompt(10);
-  auto request = CreateRequestWithPrompt(engine.engine, *model_, prompt);
+  auto request = CreateRequestWithPrompt(engine.engine, prompt);
 
   auto event = RunOne(*engine.engine);
   ASSERT_EQ(event.request, request);
@@ -665,10 +817,8 @@ TEST_F(EngineRunTest, ContinuedUnreadOutputPreservesOrder) {
 TEST_F(EngineRunTest, PerTurnBudgetsPublishOneTerminalNotificationAcrossContinuations) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/1, /*forced_token=*/5);
   const auto prompt = Prompt(10);
-  auto params = MakeGreedyParams(*model_);
-  params->search.max_length =
-      static_cast<int>(prompt.size() + 9);
-  auto request = CreateEngineRequest(engine.engine, *params);
+  auto request = CreateEngineRequest(
+      engine.engine, /*max_session_tokens=*/prompt.size() + 9);
 
   const auto run_turn = [&](std::span<const int32_t> input,
                             size_t max_generated_tokens) {
@@ -713,7 +863,7 @@ TEST_F(EngineRunTest, BackpressureFormsAFreshBatchAcrossRuns) {
   std::vector<std::shared_ptr<Request>> requests;
   for (int32_t seed : {10, 20, 30}) {
     auto prompt = Prompt(seed);
-    auto request = CreateRequestWithPrompt(engine.engine, *model_, prompt);
+    auto request = CreateRequestWithPrompt(engine.engine, prompt);
     requests.push_back(request);
   }
 
@@ -760,7 +910,7 @@ TEST_F(EngineRunTest, RunWithNoRequestsReturnsNull) {
 TEST_F(EngineRunTest, ZeroCapacityValidatesOwnerThreadWithoutReclaimingOrProgressing) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
   auto request = CreateRequestWithPrompt(
-      engine.engine, *model_, Prompt(10));
+      engine.engine, Prompt(10));
   ExternalRequestReference public_handle{*request};
   public_handle.Release();
 
@@ -790,7 +940,7 @@ TEST_F(EngineRunTest, ZeroCapacityValidatesOwnerThreadWithoutReclaimingOrProgres
 
 TEST_F(EngineRunTest, HasPendingRequestsReclaimsPubliclyDestroyedUnassignedRequest) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   ExternalRequestReference public_handle{*request};
 
   public_handle.Release();
@@ -803,7 +953,7 @@ TEST_F(EngineRunTest, HasPendingRequestsReclaimsPubliclyDestroyedUnassignedReque
 
 TEST_F(EngineRunTest, OffThreadFinalReleaseBeforeBeginTurnDefersDestructionToOwnerThread) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   ExternalRequestReference public_handle{*request};
   std::weak_ptr<Request> request_lifetime = request;
   request.reset();
@@ -823,7 +973,7 @@ TEST_F(EngineRunTest, OffThreadFinalReleaseBeforeBeginTurnDefersDestructionToOwn
 
 TEST_F(EngineRunTest, OffThreadFinalReleaseDoesNotKeepDestroyedEngineAlive) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   ExternalRequestReference public_handle{*request};
   std::weak_ptr<Engine> engine_lifetime = engine.engine;
 
@@ -839,7 +989,7 @@ TEST_F(EngineRunTest, OffThreadFinalReleaseDoesNotKeepDestroyedEngineAlive) {
 TEST_F(EngineRunTest, HasPendingRequestsReclaimsPubliclyDestroyedQueuedRequest) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
   auto request = CreateRequestWithPrompt(
-      engine.engine, *model_, Prompt(10));
+      engine.engine, Prompt(10));
   ExternalRequestReference public_handle{*request};
 
   public_handle.Release();
@@ -853,7 +1003,7 @@ TEST_F(EngineRunTest, HasPendingRequestsReclaimsPubliclyDestroyedQueuedRequest) 
 TEST_F(EngineRunTest, HasPendingRequestsValidatesOwnerThreadBeforeReclamation) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
   auto request = CreateRequestWithPrompt(
-      engine.engine, *model_, Prompt(10));
+      engine.engine, Prompt(10));
   ExternalRequestReference public_handle{*request};
   public_handle.Release();
 
@@ -879,7 +1029,7 @@ TEST_F(EngineRunTest, HasPendingRequestsValidatesOwnerThreadBeforeReclamation) {
 TEST_F(EngineRunTest, HasPendingRequestsReclaimsPubliclyDestroyedActiveResidentRequest) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
   auto request = CreateRequestWithPrompt(
-      engine.engine, *model_, Prompt(10));
+      engine.engine, Prompt(10));
   ExternalRequestReference public_handle{*request};
   engine.cache->Allocate({request});
   request->Schedule();
@@ -898,9 +1048,9 @@ TEST_F(EngineRunTest, HasPendingRequestsReclaimsPubliclyDestroyedActiveResidentR
 TEST_F(EngineRunTest, HasPendingRequestsPurgesDestroyedTurnCompleteEventWithoutAffectingPeer) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/2, EosToken(*model_));
   auto survivor = CreateRequestWithPrompt(
-      engine.engine, *model_, Prompt(10));
+      engine.engine, Prompt(10));
   auto abandoned = CreateRequestWithPrompt(
-      engine.engine, *model_, Prompt(20));
+      engine.engine, Prompt(20));
   ExternalRequestReference survivor_handle{*survivor};
   ExternalRequestReference abandoned_handle{*abandoned};
 
@@ -939,7 +1089,7 @@ TEST_F(EngineRunTest, DestroyingEngineClosesRequestWhosePublicHandleSurvives) {
   auto engine = std::make_shared<Engine>(
       model_, std::move(dependencies));
   auto request = CreateRequestWithPrompt(
-      engine, *model_, Prompt(10));
+      engine, Prompt(10));
   ExternalRequestReference public_request{*request};
   ASSERT_EQ(RunOne(*engine).request, request);
   ASSERT_EQ(cache->AllocatedCount(), 1u);
@@ -967,7 +1117,7 @@ TEST_F(EngineRunTest, StaticBatchingPreservesOrderingAndReusesResidentContinuati
                                   std::move(executor)};
   auto engine = std::make_shared<Engine>(model_, std::move(dependencies));
   auto prompt = Prompt(10);
-  auto request = CreateEngineRequest(engine, *model_);
+  auto request = CreateEngineRequest(engine);
   request->BeginTurn(prompt, std::optional<size_t>{1});
 
   EXPECT_EQ(RunOne(*engine).request, request);
@@ -998,7 +1148,7 @@ TEST_F(EngineRunTest, StaticSingleRowRewindReleasesAndReplaysContiguousCache) {
   auto engine =
       std::make_shared<Engine>(model_, std::move(dependencies));
   const auto prompt = Prompt(10);
-  auto request = CreateEngineRequest(engine, *model_);
+  auto request = CreateEngineRequest(engine);
   request->BeginTurn(prompt, std::optional<size_t>{2});
 
   while (!request->IsTurnComplete()) {
@@ -1054,8 +1204,8 @@ TEST_F(EngineRunTest, StaticMultiRowRewindIsRejectedWithoutMutation) {
       cache, std::move(scheduler), std::move(executor)};
   auto engine =
       std::make_shared<Engine>(model_, std::move(dependencies));
-  auto first = CreateEngineRequest(engine, *model_);
-  auto second = CreateEngineRequest(engine, *model_);
+  auto first = CreateEngineRequest(engine);
+  auto second = CreateEngineRequest(engine);
   first->BeginTurn(Prompt(10), std::optional<size_t>{1});
   second->BeginTurn(Prompt(20), std::optional<size_t>{1});
 
@@ -1087,8 +1237,8 @@ TEST_F(EngineRunTest, StaticBatchReturnsAllRowEventsWhenCapacitySuffices) {
   EngineDependencies dependencies{cache, std::move(scheduler),
                                   std::move(executor)};
   auto engine = std::make_shared<Engine>(model_, std::move(dependencies));
-  auto first = CreateEngineRequest(engine, *model_);
-  auto second = CreateEngineRequest(engine, *model_);
+  auto first = CreateEngineRequest(engine);
+  auto second = CreateEngineRequest(engine);
   first->BeginTurn(Prompt(10), std::optional<size_t>{1});
   second->BeginTurn(Prompt(20), std::optional<size_t>{1});
 
@@ -1115,8 +1265,8 @@ TEST_F(EngineRunTest, StaticCloseLogicallyRemovesActiveRowWhilePeerContinues) {
   EngineDependencies dependencies{cache, std::move(scheduler),
                                   std::move(executor)};
   auto engine = std::make_shared<Engine>(model_, std::move(dependencies));
-  auto first = CreateEngineRequest(engine, *model_);
-  auto second = CreateEngineRequest(engine, *model_);
+  auto first = CreateEngineRequest(engine);
+  auto second = CreateEngineRequest(engine);
   first->BeginTurn(Prompt(10), std::optional<size_t>{2});
   second->BeginTurn(Prompt(20), std::optional<size_t>{2});
 
@@ -1153,7 +1303,7 @@ TEST_F(EngineRunTest, StaticCloseLogicallyRemovesActiveRowWhilePeerContinues) {
 
   // New work recycles the all-terminal static batch. The Engine completes the retained close on
   // its owner thread before executing the replacement row, leaving only a lightweight tombstone.
-  auto replacement = CreateEngineRequest(engine, *model_);
+  auto replacement = CreateEngineRequest(engine);
   replacement->BeginTurn(Prompt(30), std::optional<size_t>{1});
   const int searches_before_recycle = LeakChecked<Search>::Count();
   EXPECT_EQ(RunOne(*engine).request, replacement);
@@ -1175,8 +1325,8 @@ TEST_F(EngineRunTest, StaticAbandonmentLogicallyRemovesActiveRowAtNextBoundary) 
   EngineDependencies dependencies{cache, std::move(scheduler),
                                   std::move(executor)};
   auto engine = std::make_shared<Engine>(model_, std::move(dependencies));
-  auto first = CreateEngineRequest(engine, *model_);
-  auto second = CreateEngineRequest(engine, *model_);
+  auto first = CreateEngineRequest(engine);
+  auto second = CreateEngineRequest(engine);
   ExternalRequestReference second_handle{*second};
   first->BeginTurn(Prompt(10), std::optional<size_t>{2});
   second->BeginTurn(Prompt(20), std::optional<size_t>{2});
@@ -1211,7 +1361,7 @@ TEST_F(EngineRunTest, StaticAbandonmentLogicallyRemovesActiveRowAtNextBoundary) 
   EXPECT_EQ(second->TurnGeneratedTokens(), closed_generated);
   EXPECT_EQ(LeakChecked<Search>::Count(), searches_while_resident);
 
-  auto replacement = CreateEngineRequest(engine, *model_);
+  auto replacement = CreateEngineRequest(engine);
   replacement->BeginTurn(Prompt(30), std::optional<size_t>{1});
   const int searches_before_recycle = LeakChecked<Search>::Count();
   EXPECT_EQ(RunOne(*engine).request, replacement);
@@ -1232,7 +1382,7 @@ TEST_F(EngineRunTest, StaticExecutionFailureTerminatesRequestsAndMarksEngineUnhe
   EngineDependencies dependencies{cache, std::move(scheduler),
                                   std::move(executor)};
   auto engine = std::make_shared<Engine>(model_, std::move(dependencies));
-  auto request = CreateRequestWithPrompt(engine, *model_, Prompt(10));
+  auto request = CreateRequestWithPrompt(engine, Prompt(10));
   executor_observer->SetNextFailure(ScriptedExecutionFailure::Fatal);
 
   const auto failure = RunOne(*engine);
@@ -1262,7 +1412,7 @@ TEST_F(EngineRunTest, StaticHasPendingClosesAbandonedResidentWithoutIndividualDe
                                   std::move(executor)};
   auto engine = std::make_shared<Engine>(model_, std::move(dependencies));
   auto prompt = Prompt(10);
-  auto request = CreateEngineRequest(engine, *model_);
+  auto request = CreateEngineRequest(engine);
   ExternalRequestReference external{*request};
   request->BeginTurn(prompt);
 
@@ -1293,12 +1443,12 @@ TEST_F(EngineRunTest, StaticContinuationFailsAfterBatchRecycling) {
   auto engine = std::make_shared<Engine>(model_, std::move(dependencies));
 
   auto first_prompt = Prompt(10);
-  auto first = CreateRequestWithPrompt(engine, *model_, first_prompt);
+  auto first = CreateRequestWithPrompt(engine, first_prompt);
   ASSERT_EQ(RunOne(*engine).request, first);
   ASSERT_EQ(first->status_, RequestStatus::TurnComplete);
 
   auto second_prompt = Prompt(20);
-  auto second = CreateRequestWithPrompt(engine, *model_, second_prompt);
+  auto second = CreateRequestWithPrompt(engine, second_prompt);
   for (int run = 0; run < 2 && cache->IsResident(first); ++run) {
     ASSERT_NE(RunOne(*engine).flags, EngineEventFlagNone);
   }
@@ -1322,8 +1472,8 @@ TEST_F(EngineRunTest, StaticContinuationRejectsMultiRowBatchAfterPeerCloses) {
 
   auto first_prompt = Prompt(10);
   auto second_prompt = Prompt(20);
-  auto first = CreateRequestWithPrompt(engine, *model_, first_prompt);
-  auto second = CreateRequestWithPrompt(engine, *model_, second_prompt);
+  auto first = CreateRequestWithPrompt(engine, first_prompt);
+  auto second = CreateRequestWithPrompt(engine, second_prompt);
   ASSERT_EQ(RunOne(*engine).request, first);
   ASSERT_EQ(first->status_, RequestStatus::TurnComplete);
   ASSERT_EQ(second->status_, RequestStatus::TurnComplete);
@@ -1339,7 +1489,7 @@ TEST_F(EngineRunTest, RunDoesNotReturnNullWhenCapacityDefersPendingWork) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5);
   engine.cache->SetCanAllocate(false);
   auto prompt = Prompt(10);
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(prompt, std::optional<size_t>{1});
 
   const auto deferred = RunOne(*engine.engine);
@@ -1356,7 +1506,7 @@ TEST_F(EngineRunTest, RunDoesNotReturnNullWhenCapacityDefersPendingWork) {
 TEST_F(EngineRunTest, RetryableExecutionFailureRollsBackAndCanRetry) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5);
   auto prompt = Prompt(10);
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
   request->BeginTurn(prompt, std::optional<size_t>{1});
   const auto before = request->Snapshot();
   engine.executor->SetNextFailure(
@@ -1382,7 +1532,7 @@ TEST_F(EngineRunTest, RetryableExecutionFailureRollsBackAndCanRetry) {
 TEST_F(EngineRunTest, ContinuedResidentRollsBackToQueuedAndCanRetry) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
   auto prompt = Prompt(10);
-  auto request = CreateRequestWithPrompt(engine.engine, *model_, prompt);
+  auto request = CreateRequestWithPrompt(engine.engine, prompt);
   ASSERT_EQ(RunOne(*engine.engine).request, request);
   ASSERT_EQ(request->status_, RequestStatus::TurnComplete);
   ASSERT_EQ(engine.cache->AllocatedCount(), 1u);
@@ -1409,11 +1559,10 @@ TEST_F(EngineRunTest, ContinuedResidentRollsBackToQueuedAndCanRetry) {
 }
 
 TEST_F(EngineRunTest, PartialPrefillCommitsOneTransactionAndReturnsNoEvents) {
+  model_ = LoadDummyDecoderModelWithChunking(/*chunk_size=*/2);
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
   auto prompt = Prompt(10);
-  auto params = MakeGreedyParams(*model_);
-  params->search.chunk_size = 2;
-  auto request = CreateRequestWithPrompt(engine.engine, *params, prompt);
+  auto request = CreateRequestWithPrompt(engine.engine, prompt);
 
   std::array<EngineEvent, 1> storage;
   EXPECT_EQ(engine.engine->Run(storage), 0u);
@@ -1449,7 +1598,7 @@ TEST_F(EngineRunTest, PartialPrefillCommitsOneTransactionAndReturnsNoEvents) {
 TEST_F(EngineRunTest, UnserviceableContinuationPublishesTerminalFailure) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
   auto prompt = Prompt(10);
-  auto request = CreateRequestWithPrompt(engine.engine, *model_, prompt);
+  auto request = CreateRequestWithPrompt(engine.engine, prompt);
   ASSERT_EQ(RunOne(*engine.engine).request, request);
   ASSERT_EQ(request->status_, RequestStatus::TurnComplete);
 
@@ -1471,7 +1620,7 @@ TEST_F(EngineRunTest, UnserviceableContinuationPublishesTerminalFailure) {
 TEST_F(EngineRunTest, ExecutionCapacityFailureRollsBackWithoutPoisoningEngine) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
   auto prompt = Prompt(10);
-  auto request = CreateRequestWithPrompt(engine.engine, *model_, prompt);
+  auto request = CreateRequestWithPrompt(engine.engine, prompt);
   const auto before = request->Snapshot();
   engine.executor->SetNextFailure(ScriptedExecutionFailure::CapacityExceeded);
 
@@ -1497,7 +1646,7 @@ TEST_F(EngineRunTest, ExecutionCapacityFailureRollsBackWithoutPoisoningEngine) {
 TEST_F(EngineRunTest, PostProcessingFailureRestoresSearchAndCanRetry) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
   auto prompt = Prompt(10);
-  auto request = CreateRequestWithPrompt(engine.engine, *model_, prompt);
+  auto request = CreateRequestWithPrompt(engine.engine, prompt);
   const auto before = request->Snapshot();
   engine.executor->SetNextFailure(ScriptedExecutionFailure::PostProcessing);
 
@@ -1519,13 +1668,14 @@ TEST_F(EngineRunTest, LaterRequestFailureRestoresEarlierSample) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5);
   auto first_prompt = Prompt(10);
   auto second_prompt = Prompt(20);
-  auto first = CreateRequestWithPrompt(engine.engine, *model_, first_prompt);
   auto control = std::make_shared<RequestPostProcessingControl>();
-  auto second_params = MakeGreedyParams(*model_);
-  FailingPostProcessingDevice device{*second_params->p_device, control};
-  second_params->p_device = &device;
-  auto second =
-      CreateRequestWithPrompt(engine.engine, *second_params, second_prompt);
+  // Only the second Request's own post-processing fails: the shared scoring device hands every
+  // Request the same failing Search, and the control selects which one actually throws.
+  FailingPostProcessingDevice device{*model_->p_device_scoring_, control};
+  ScopedScoringDevice scoped_device{*model_, device};
+  auto first = CreateRequestWithPrompt(engine.engine, first_prompt);
+  control->target_search_index = 1;
+  auto second = CreateRequestWithPrompt(engine.engine, second_prompt);
   const auto first_before = first->Snapshot();
   const auto second_before = second->Snapshot();
 
@@ -1554,8 +1704,8 @@ TEST_F(EngineRunTest, ClosingUndrainedReadyRequestPurgesItFromQueue) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5);
   auto first_prompt = Prompt(10);
   auto second_prompt = Prompt(20);
-  auto first = CreateRequestWithPrompt(engine.engine, *model_, first_prompt);
-  auto second = CreateRequestWithPrompt(engine.engine, *model_, second_prompt);
+  auto first = CreateRequestWithPrompt(engine.engine, first_prompt);
+  auto second = CreateRequestWithPrompt(engine.engine, second_prompt);
 
   ASSERT_EQ(RunOne(*engine.engine).request, first);
   second->Close();
@@ -1567,7 +1717,7 @@ TEST_F(EngineRunTest, ClosingUndrainedReadyRequestPurgesItFromQueue) {
 TEST_F(EngineRunTest, ClosingOnlyDrainedReadyRequestClearsQueue) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5);
   auto prompt = Prompt(10);
-  auto request = CreateRequestWithPrompt(engine.engine, *model_, prompt);
+  auto request = CreateRequestWithPrompt(engine.engine, prompt);
 
   ASSERT_EQ(RunOne(*engine.engine).request, request);
   request->Close();
@@ -1590,14 +1740,14 @@ TEST_F(EngineRunTest, StaticTurnCompleteRowIsNotRepublishedWhilePeerRuns) {
 
   auto first_prompt = Prompt(10);
   auto second_prompt = Prompt(20);
-  auto first_params = MakeGreedyParams(*model_);
-  first_params->search.max_length =
-      static_cast<int>(first_prompt.size() + 1);
-  auto second_params = MakeGreedyParams(*model_);
-  second_params->search.max_length =
-      static_cast<int>(second_prompt.size() + 3);
-  auto first = CreateRequestWithPrompt(engine, *first_params, first_prompt);
-  auto second = CreateRequestWithPrompt(engine, *second_params, second_prompt);
+  RequestOptions first_options;
+  first_options.max_session_tokens = first_prompt.size() + 1;
+  RequestOptions second_options;
+  second_options.max_session_tokens = second_prompt.size() + 3;
+  auto first = engine->CreateRequest(first_options);
+  first->BeginTurn(first_prompt);
+  auto second = engine->CreateRequest(second_options);
+  second->BeginTurn(second_prompt);
 
   ASSERT_EQ(RunOne(*engine).request, first);
   ASSERT_EQ(first->status_, RequestStatus::TurnComplete);
@@ -1611,7 +1761,7 @@ TEST_F(EngineRunTest, StaticTurnCompleteRowIsNotRepublishedWhilePeerRuns) {
 TEST_F(EngineRunTest, FatalExecutionFailureMarksEngineUnhealthy) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
   auto prompt = Prompt(10);
-  auto request = CreateRequestWithPrompt(engine.engine, *model_, prompt);
+  auto request = CreateRequestWithPrompt(engine.engine, prompt);
   engine.executor->SetNextFailure(ScriptedExecutionFailure::Fatal);
 
   const auto failure = RunOne(*engine.engine);
@@ -1631,12 +1781,52 @@ TEST_F(EngineRunTest, FatalExecutionFailureMarksEngineUnhealthy) {
   EXPECT_EQ(request->status_, RequestStatus::Closed);
 }
 
+TEST_F(EngineRunTest, FatalDiagnosticCaptureFailureDrainsExecutionFallback) {
+  auto cache = std::make_shared<RecordingCacheManager>(
+      model_, /*capacity=*/1);
+  auto scheduler = Scheduler::Create(model_, cache);
+  auto executor = std::make_unique<RecordingModelExecutor>(
+      model_, cache, /*forced_token=*/5);
+  auto* executor_observer = executor.get();
+  EngineDependencies dependencies{
+      cache,
+      std::move(scheduler),
+      std::move(executor)};
+  dependencies.make_step_error = CaptureBadAllocInsteadOfStepError;
+  auto engine = std::make_shared<Engine>(
+      model_, std::move(dependencies));
+  auto request = CreateRequestWithPrompt(
+      engine, Prompt(10));
+  executor_observer->SetNextFailure(ScriptedExecutionFailure::Fatal);
+
+  const auto failure = RunOne(*engine);
+  EXPECT_EQ(failure.request, request);
+  EXPECT_EQ(
+      failure.flags,
+      EngineEventFlagTurnFinished | EngineEventFlagFailed);
+  EXPECT_EQ(
+      failure.error_code,
+      EngineErrorCode::EngineExecutionFailure);
+
+  try {
+    static_cast<void>(RunOne(*engine));
+    FAIL() << "Expected the retained fatal fallback.";
+  } catch (const EngineStepError& error) {
+    EXPECT_EQ(
+        error.Outcome().kind,
+        StepOutcomeKind::FatalExecutionFailure);
+    EXPECT_STREQ(
+        error.what(),
+        "The Engine encountered a fatal failure, and the underlying exception could not be recorded.");
+  }
+}
+
 TEST_F(EngineRunTest, FatalExecutionFailurePublishesEveryAffectedTurn) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
   auto first = CreateRequestWithPrompt(
-      engine.engine, *model_, Prompt(10));
+      engine.engine, Prompt(10));
   auto second = CreateRequestWithPrompt(
-      engine.engine, *model_, Prompt(20));
+      engine.engine, Prompt(20));
   engine.executor->SetNextFailure(ScriptedExecutionFailure::Fatal);
 
   std::array<EngineEvent, 2> events;
@@ -1660,6 +1850,102 @@ TEST_F(EngineRunTest, FatalExecutionFailurePublishesEveryAffectedTurn) {
   EXPECT_THROW(static_cast<void>(RunOne(*engine.engine)), EngineStepError);
 }
 
+TEST_F(EngineRunTest, FatalFailurePublishesQueuedTurnsAfterEventCapacitySwap) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/1, /*forced_token=*/5);
+  std::vector<std::shared_ptr<Request>> requests;
+  for (int32_t seed : {10, 20, 30}) {
+    auto request = CreateEngineRequest(engine.engine);
+    request->BeginTurn(Prompt(seed), std::optional<size_t>{2});
+    requests.push_back(std::move(request));
+  }
+
+  const auto first_token = RunOne(*engine.engine);
+  ASSERT_EQ(first_token.request, requests[0]);
+  ASSERT_EQ(first_token.flags, EngineEventFlagToken);
+  ASSERT_EQ(requests[0]->status_, RequestStatus::Active);
+  ASSERT_EQ(requests[1]->status_, RequestStatus::Assigned);
+  ASSERT_EQ(requests[2]->status_, RequestStatus::Assigned);
+
+  engine.executor->SetNextFailure(ScriptedExecutionFailure::Fatal);
+  std::array<EngineEvent, 3> failures;
+  ASSERT_EQ(engine.engine->Run(failures), failures.size());
+  for (size_t i = 0; i < failures.size(); ++i) {
+    EXPECT_EQ(failures[i].request, requests[i]);
+    EXPECT_EQ(
+        failures[i].flags,
+        EngineEventFlagTurnFinished | EngineEventFlagFailed);
+    EXPECT_EQ(
+        failures[i].error_code,
+        EngineErrorCode::EngineExecutionFailure);
+    EXPECT_EQ(requests[i]->status_, RequestStatus::TurnComplete);
+  }
+  EXPECT_THROW(static_cast<void>(RunOne(*engine.engine)), EngineStepError);
+}
+
+TEST_F(EngineRunTest, FatalFailureFinishesLastPendingSpeculativeToken) {
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/2, filler);
+  engine.cache->SetMaxDraftTokensPerStep(kMaxDraftTokensPerStep);
+  auto abandoned = CreateEngineRequest(engine.engine);
+  auto survivor = CreateEngineRequest(engine.engine);
+  ExternalRequestReference abandoned_external{*abandoned};
+  abandoned->BeginTurn(Prompt(10), std::optional<size_t>{1});
+  survivor->BeginTurn(Prompt(20), std::optional<size_t>{16});
+
+  std::array<EngineEvent, 2> prefill_events;
+  ASSERT_EQ(engine.engine->Run(prefill_events), prefill_events.size());
+  ASSERT_EQ(abandoned->status_, RequestStatus::TurnComplete);
+  ASSERT_EQ(survivor->status_, RequestStatus::Active);
+  survivor->SetDraftTokens(
+      std::vector<int32_t>{11, 12, 13, 14, 15, 16, 17});
+  engine.executor->SetVerifyRowTokens(
+      std::vector<int32_t>{11, 12, 13, 14, 15, 16, 17, 25});
+
+  const auto first_speculative_token = RunOne(*engine.engine);
+  ASSERT_EQ(first_speculative_token.request, survivor);
+  ASSERT_EQ(first_speculative_token.token, 11);
+  auto queued_first = CreateRequestWithPrompt(
+      engine.engine, Prompt(30));
+  auto queued_second = CreateRequestWithPrompt(
+      engine.engine, Prompt(40));
+  abandoned_external.Release();
+  engine.cache->ThrowDeallocateInvariantFailureOnce();
+  EXPECT_TRUE(engine.engine->HasPendingRequests());
+
+  std::array<EngineEvent, kMaxGeneratedTokensPerStep + 1> events;
+  ASSERT_EQ(engine.engine->Run(events), events.size());
+  constexpr std::array<int32_t, kMaxGeneratedTokensPerStep - 1>
+      expected_tokens{12, 13, 14, 15, 16, 17, 25};
+  for (size_t i = 0; i < expected_tokens.size(); ++i) {
+    EXPECT_EQ(events[i].request, survivor);
+    EXPECT_EQ(events[i].token, expected_tokens[i]);
+    if (i + 1 == expected_tokens.size()) {
+      EXPECT_EQ(
+          events[i].flags,
+          EngineEventFlagToken | EngineEventFlagTurnFinished |
+              EngineEventFlagFailed);
+      EXPECT_EQ(
+          events[i].error_code,
+          EngineErrorCode::EngineContractFailure);
+    } else {
+      EXPECT_EQ(events[i].flags, EngineEventFlagToken);
+    }
+  }
+  for (size_t i = expected_tokens.size(); i < events.size(); ++i) {
+    EXPECT_EQ(
+        events[i].request,
+        i == expected_tokens.size() ? queued_first : queued_second);
+    EXPECT_EQ(
+        events[i].flags,
+        EngineEventFlagTurnFinished | EngineEventFlagFailed);
+    EXPECT_EQ(
+        events[i].error_code,
+        EngineErrorCode::EngineContractFailure);
+  }
+  EXPECT_THROW(static_cast<void>(RunOne(*engine.engine)), EngineStepError);
+}
+
 TEST_F(EngineRunTest, StaticSchedulerFailureMarksEngineUnhealthy) {
   model_->config_->engine.dynamic_batching.reset();
   auto cache = std::make_shared<RecordingCacheManager>(
@@ -1673,7 +1959,7 @@ TEST_F(EngineRunTest, StaticSchedulerFailureMarksEngineUnhealthy) {
   auto engine = std::make_shared<Engine>(
       model_, std::move(dependencies));
 
-  auto request = CreateRequestWithPrompt(engine, *model_, Prompt(10));
+  auto request = CreateRequestWithPrompt(engine, Prompt(10));
 
   const auto failure = RunOne(*engine);
   EXPECT_EQ(failure.request, request);
@@ -1691,15 +1977,41 @@ TEST_F(EngineRunTest, StaticSchedulerFailureMarksEngineUnhealthy) {
   EXPECT_THROW(static_cast<void>(RunOne(*engine)), EngineStepError);
 }
 
+TEST_F(EngineRunTest, FatalWithoutExecutableTurnAppendsRequestlessFailure) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/1, EosToken(*model_));
+  auto request = CreateEngineRequest(engine.engine);
+  ExternalRequestReference external{*request};
+  request->BeginTurn(Prompt(10));
+
+  std::array<EngineEvent, 0> no_output;
+  ASSERT_EQ(engine.engine->Run(no_output), 0u);
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
+  ASSERT_EQ(request->status_, RequestStatus::TurnComplete);
+
+  request->BeginTurn(std::array<int32_t, 1>{5});
+  EXPECT_TRUE(request->Cancel(request->CurrentTurnId()));
+  external.Release();
+  engine.cache->ThrowDeallocateInvariantFailureOnce();
+
+  EXPECT_TRUE(engine.engine->HasPendingRequests());
+  std::array<EngineEvent, 2> events;
+  ASSERT_EQ(engine.engine->Run(events), 1u);
+  EXPECT_EQ(events[0].request, nullptr);
+  EXPECT_EQ(events[0].flags, EngineEventFlagFailed);
+  EXPECT_EQ(
+      events[0].error_code,
+      EngineErrorCode::EngineContractFailure);
+}
+
 TEST_F(EngineRunTest, BeginTurnIsRejectedAfterEngineBecomesUnhealthy) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
   auto first_prompt = Prompt(10);
-  auto first = CreateRequestWithPrompt(engine.engine, *model_, first_prompt);
+  auto first = CreateRequestWithPrompt(engine.engine, first_prompt);
   ASSERT_EQ(RunOne(*engine.engine).request, first);
   ASSERT_EQ(first->status_, RequestStatus::TurnComplete);
 
   auto second_prompt = Prompt(20);
-  auto second = CreateRequestWithPrompt(engine.engine, *model_, second_prompt);
+  auto second = CreateRequestWithPrompt(engine.engine, second_prompt);
   engine.executor->SetNextFailure(ScriptedExecutionFailure::Fatal);
   EXPECT_EQ(
       RunOne(*engine.engine).flags,
@@ -1718,9 +2030,9 @@ TEST_F(EngineRunTest, UnserviceableRequestDoesNotBlockFittingRequest) {
   auto large_prompt = Prompt(10);
   auto fitting_prompt = Prompt(20);
   auto too_large =
-      CreateRequestWithPrompt(engine.engine, *model_, large_prompt);
+      CreateRequestWithPrompt(engine.engine, large_prompt);
   auto fitting =
-      CreateRequestWithPrompt(engine.engine, *model_, fitting_prompt);
+      CreateRequestWithPrompt(engine.engine, fitting_prompt);
   engine.cache->SetUnserviceableRequest(too_large);
 
   const auto failed = RunOne(*engine.engine);
@@ -1733,8 +2045,8 @@ TEST_F(EngineRunTest, LaterFailurePreservesEarlierCommittedCycle) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/1, /*forced_token=*/5);
   auto first_prompt = Prompt(10);
   auto second_prompt = Prompt(20);
-  auto first = CreateRequestWithPrompt(engine.engine, *model_, first_prompt);
-  auto second = CreateRequestWithPrompt(engine.engine, *model_, second_prompt);
+  auto first = CreateRequestWithPrompt(engine.engine, first_prompt);
+  auto second = CreateRequestWithPrompt(engine.engine, second_prompt);
 
   EXPECT_EQ(RunOne(*engine.engine).request, first);
   const auto committed = first->Snapshot();
@@ -1757,13 +2069,13 @@ TEST_F(EngineRunTest, MixedDecodeAndPrefillCommitPlanOwnedTokenCounts) {
   model_->config_->engine.dynamic_batching->max_scheduled_tokens = 3;
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5);
   auto first_prompt = Prompt(10);
-  auto decode = CreateRequestWithPrompt(engine.engine, *model_, first_prompt);
+  auto decode = CreateRequestWithPrompt(engine.engine, first_prompt);
   ASSERT_EQ(RunOne(*engine.engine).request, decode);
   const auto decode_before_mixed = decode->Snapshot();
 
   const std::vector<int32_t> long_prompt{2, 3, 4, 5, 6};
   auto prefill =
-      CreateRequestWithPrompt(engine.engine, *model_, long_prompt);
+      CreateRequestWithPrompt(engine.engine, long_prompt);
 
   EXPECT_EQ(RunOne(*engine.engine).request, decode);
 
@@ -1784,12 +2096,12 @@ TEST_F(EngineRunTest, MixedRunRollbackPreservesProgressAndCacheResidents) {
   model_->config_->engine.dynamic_batching->max_scheduled_tokens = 3;
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5);
   auto first_prompt = Prompt(10);
-  auto decode = CreateRequestWithPrompt(engine.engine, *model_, first_prompt);
+  auto decode = CreateRequestWithPrompt(engine.engine, first_prompt);
   ASSERT_EQ(RunOne(*engine.engine).request, decode);
 
   const std::vector<int32_t> long_prompt{2, 3, 4, 5, 6};
   auto prefill =
-      CreateRequestWithPrompt(engine.engine, *model_, long_prompt);
+      CreateRequestWithPrompt(engine.engine, long_prompt);
   const auto decode_before = decode->Snapshot();
   const auto prefill_before = prefill->Snapshot();
   ASSERT_EQ(engine.cache->AllocatedCount(), 1u);
@@ -1823,7 +2135,7 @@ TEST_F(EngineRunTest, SpeculativeRunKeepsAcceptedPrefixAndEmitsAllTokens) {
   engine.cache->SetMaxDraftTokensPerStep(3);
 
   auto request =
-      CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+      CreateRequestWithPrompt(engine.engine, Prompt(10));
   ASSERT_EQ(RunOne(*engine.engine).request, request);
   ASSERT_EQ(request->status_, RequestStatus::Active);
   const int64_t length_after_prefill = request->CurrentSequenceLength();
@@ -1857,18 +2169,100 @@ TEST_F(EngineRunTest, SpeculativeRunKeepsAcceptedPrefixAndEmitsAllTokens) {
   EXPECT_EQ(request->PendingDraftTokenCount(), 0u);
 }
 
+// A draft proposal belongs to the turn it was proposed under: the drafter produced it knowing that
+// turn's guidance, minimum, repetition penalty, and n-gram blocking. Every terminal boundary must
+// take the proposal with it, or a later turn -- whose different policy never validated those
+// drafts, and which may forbid drafting entirely -- would verify them anyway.
+TEST_F(EngineRunTest, FailedTurnDiscardsPendingDraftsAndTheNextTurnPolicyGoverns) {
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, filler);
+  engine.cache->SetMaxDraftTokensPerStep(3);
+
+  auto failing = CreateRequestWithPrompt(engine.engine, Prompt(10));
+  ASSERT_EQ(RunOne(*engine.engine).request, failing);
+  ASSERT_EQ(failing->status_, RequestStatus::Active);
+  failing->SetDraftTokens(std::vector<int32_t>{11, 12, 13});
+  ASSERT_EQ(failing->PendingDraftTokenCount(), 3u);
+
+  // A recoverable per-request failure: the scheduler reports this Request unserviceable, its turn
+  // is failed, and the Engine itself stays healthy.
+  engine.cache->SetUnserviceableRequest(failing);
+  const auto failure = RunOne(*engine.engine);
+  ASSERT_EQ(failure.request, failing);
+  ASSERT_EQ(failure.error_code, EngineErrorCode::RequestUnserviceable);
+  ASSERT_EQ(failing->FinishReason(), GenerationFinishReason::Failed);
+  ASSERT_EQ(failing->status_, RequestStatus::TurnComplete);
+
+  // The proposal died with the turn instead of waiting for whatever runs next.
+  EXPECT_EQ(failing->PendingDraftTokenCount(), 0u);
+  // The failed turn also released this Request's model state, so it cannot continue at all, and it
+  // no longer accepts a proposal either.
+  EXPECT_THROW(failing->SetDraftTokens(std::vector<int32_t>{11, 12, 13}),
+               std::runtime_error);
+  EXPECT_THROW(failing->BeginTurn(std::vector<int32_t>{7}), std::runtime_error);
+  engine.cache->SetUnserviceableRequest({});
+
+  // The other half of the boundary, on the same healthy Engine: a Request that ends a drafted turn
+  // starts its next turn with no proposal and under that turn's own policy.
+  auto reused = CreateEngineRequest(engine.engine);
+  TurnOptions drafted_turn;
+  drafted_turn.request = reused;
+  drafted_turn.max_generated_tokens = 2;
+  reused->BeginTurn(Prompt(20), drafted_turn);
+  ASSERT_EQ(RunOne(*engine.engine).request, reused);
+  ASSERT_EQ(reused->status_, RequestStatus::Active);
+  reused->SetDraftTokens(std::vector<int32_t>{21, 22, 23});
+  engine.executor->SetVerifyRowTokens({21, 22, 23, 24});
+  while (!reused->IsTurnComplete()) {
+    static_cast<void>(RunOne(*engine.engine));
+  }
+  EXPECT_EQ(reused->PendingDraftTokenCount(), 0u);
+
+  // The next turn masks end-of-stream until it has generated three tokens, one of the policies that
+  // makes a turn ineligible for drafting at all.
+  engine.executor->SetVerifyRowTokens({});
+  engine.executor->SetForcedToken(eos);
+  const size_t prefix_commits_before = engine.cache->prefix_commits.size();
+  TurnOptions floored_turn;
+  floored_turn.request = reused;
+  floored_turn.min_generated_tokens = 3;
+  floored_turn.max_generated_tokens = 3;
+  reused->BeginTurn(std::vector<int32_t>{7}, floored_turn);
+  EXPECT_EQ(reused->PendingDraftTokenCount(), 0u);
+  EXPECT_NE(reused->DraftTokenValidationError(), nullptr);
+  EXPECT_THROW(reused->SetDraftTokens(std::vector<int32_t>{21, 22, 23}),
+               std::runtime_error);
+
+  std::vector<int32_t> generated;
+  std::array<EngineEvent, 8> storage;
+  for (int step = 0; step < 32 && !reused->IsTurnComplete(); ++step) {
+    const size_t count = engine.engine->Run(storage);
+    for (size_t i = 0; i < count; ++i) {
+      if (storage[i].flags & EngineEventFlagToken) {
+        generated.push_back(storage[i].token);
+      }
+    }
+  }
+
+  // The floor held for every one of this turn's tokens, and no step verified a draft: a proposal
+  // carried across the boundary would have produced verification rows and a partial prefix commit.
+  ASSERT_TRUE(reused->IsTurnComplete());
+  EXPECT_EQ(generated.size(), 3u);
+  for (const int32_t token : generated) {
+    EXPECT_NE(token, eos);
+  }
+  EXPECT_EQ(reused->FinishReason(), GenerationFinishReason::TurnLimit);
+  EXPECT_EQ(engine.cache->prefix_commits.size(), prefix_commits_before);
+}
+
 TEST_F(EngineRunTest, SampledSpeculativeRunKeepsAcceptedPrefixAndCorrection) {
   const int32_t eos = EosToken(*model_);
   const int32_t filler = eos == 5 ? 6 : 5;
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, filler);
   engine.cache->SetMaxDraftTokensPerStep(3);
-  auto params = MakeGreedyParams(*model_);
-  params->search.do_sample = true;
-  params->search.top_k = 3;
-  params->search.temperature = 0.01f;
-  params->search.random_seed = 1234;
-
-  auto request = CreateRequestWithPrompt(engine.engine, *params, Prompt(10));
+  auto request =
+      CreateRequestWithPrompt(engine.engine, Prompt(10), SampledTurnOptions());
   ASSERT_EQ(RunOne(*engine.engine).request, request);
   const int64_t length_after_prefill = request->CurrentSequenceLength();
   const size_t generated_after_prefill = request->TurnGeneratedTokens();
@@ -1903,13 +2297,9 @@ TEST_F(EngineRunTest, SampledSpeculativeBatchHandlesMixedDraftLengths) {
   engine.cache->SetMaxDraftTokensPerStep(3);
   std::vector<std::shared_ptr<Request>> requests;
   for (int32_t prompt_seed : {20, 30}) {
-    auto params = MakeGreedyParams(*model_);
-    params->search.do_sample = true;
-    params->search.top_k = 3;
-    params->search.temperature = 0.01f;
-    params->search.random_seed = static_cast<unsigned int>(1234 + prompt_seed);
-    requests.push_back(
-        CreateRequestWithPrompt(engine.engine, *params, Prompt(prompt_seed)));
+    requests.push_back(CreateRequestWithPrompt(
+        engine.engine, Prompt(prompt_seed),
+        SampledTurnOptions(static_cast<uint64_t>(1234 + prompt_seed))));
   }
 
   std::array<EngineEvent, 2> prefill_events;
@@ -1943,13 +2333,10 @@ TEST_F(EngineRunTest, SampledSpeculativeRunRespectsTurnTokenLimit) {
   const int32_t filler = eos == 5 ? 6 : 5;
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, filler);
   engine.cache->SetMaxDraftTokensPerStep(3);
-  auto params = MakeGreedyParams(*model_);
-  params->search.do_sample = true;
-  params->search.top_k = 3;
-  params->search.temperature = 0.01f;
-  params->search.random_seed = 1234;
-  auto request = CreateEngineRequest(engine.engine, *params);
-  request->BeginTurn(Prompt(10), std::optional<size_t>{3});
+  auto request = CreateEngineRequest(engine.engine);
+  auto turn_options = SampledTurnOptions();
+  turn_options.max_generated_tokens = 3;
+  request->BeginTurn(Prompt(10), turn_options);
 
   ASSERT_EQ(RunOne(*engine.engine).request, request);
   ASSERT_EQ(request->TurnGeneratedTokens(), 1u);
@@ -1980,7 +2367,7 @@ TEST_F(EngineRunTest, SpeculativeRunWithEosBonusTokenEmitsOnlyAcceptedDrafts) {
   engine.cache->SetMaxDraftTokensPerStep(3);
 
   auto request =
-      CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+      CreateRequestWithPrompt(engine.engine, Prompt(10));
   ASSERT_EQ(RunOne(*engine.engine).request, request);
   const int64_t length_after_prefill = request->CurrentSequenceLength();
   const size_t generated_after_prefill = request->TurnGeneratedTokens();
@@ -2012,7 +2399,7 @@ TEST_F(EngineRunTest, SpeculativeRunAcceptingEveryDraftEmitsBonusToken) {
   engine.cache->SetMaxDraftTokensPerStep(3);
 
   auto request =
-      CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+      CreateRequestWithPrompt(engine.engine, Prompt(10));
   ASSERT_EQ(RunOne(*engine.engine).request, request);
   const int64_t length_after_prefill = request->CurrentSequenceLength();
   const size_t generated_after_prefill = request->TurnGeneratedTokens();
@@ -2045,7 +2432,7 @@ TEST_F(EngineRunTest, SpeculativeTelemetryAggregatesAcceptanceLengths) {
   engine.cache->SetMaxDraftTokensPerStep(3);
 
   auto request =
-      CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+      CreateRequestWithPrompt(engine.engine, Prompt(10));
   ASSERT_EQ(RunOne(*engine.engine).request, request);
 
   request->SetDraftTokens(std::vector<int32_t>{11, 12, 13});
@@ -2085,7 +2472,7 @@ TEST_F(EngineRunTest, SpeculativeOverflowCancellationFinishesLastTokenEvent) {
   engine.cache->SetMaxDraftTokensPerStep(3);
 
   auto request =
-      CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+      CreateRequestWithPrompt(engine.engine, Prompt(10));
   ASSERT_EQ(RunOne(*engine.engine).request, request);
 
   request->SetDraftTokens(std::vector<int32_t>{11, 12, 13});
@@ -2119,7 +2506,7 @@ TEST_F(EngineRunTest, CancelClearsPendingDraftsBeforeContinuation) {
   engine.cache->SetMaxDraftTokensPerStep(3);
 
   auto request =
-      CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+      CreateRequestWithPrompt(engine.engine, Prompt(10));
   ASSERT_EQ(RunOne(*engine.engine).request, request);
   request->SetDraftTokens(std::vector<int32_t>{11, 12});
   ASSERT_EQ(request->PendingDraftTokenCount(), 2u);
@@ -2156,7 +2543,7 @@ TEST_F(EngineRunTest, SpeculativeRunStopsAtAcceptedEos) {
   engine.cache->SetMaxDraftTokensPerStep(3);
 
   auto request =
-      CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+      CreateRequestWithPrompt(engine.engine, Prompt(10));
   ASSERT_EQ(RunOne(*engine.engine).request, request);
   const int64_t length_after_prefill = request->CurrentSequenceLength();
   const size_t generated_after_prefill = request->TurnGeneratedTokens();
@@ -2188,7 +2575,7 @@ TEST_F(EngineRunTest, RolledBackSpeculativeRunLeavesProposalPendingAndRetryable)
   engine.cache->SetMaxDraftTokensPerStep(3);
 
   auto request =
-      CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+      CreateRequestWithPrompt(engine.engine, Prompt(10));
   ASSERT_EQ(RunOne(*engine.engine).request, request);
   const auto committed = request->Snapshot();
   const size_t generated_after_prefill = request->TurnGeneratedTokens();
@@ -2226,20 +2613,19 @@ TEST_F(EngineRunTest, RolledBackSampledSpeculativeRunRestoresRequestState) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, filler);
   engine.cache->SetMaxDraftTokensPerStep(3);
 
-  auto sampled_params = MakeGreedyParams(*model_);
-  sampled_params->search.do_sample = true;
-  sampled_params->search.top_k = 3;
-  sampled_params->search.temperature = 0.01f;
-  sampled_params->search.random_seed = 1234;
-  auto sampled = CreateEngineRequest(engine.engine, *sampled_params);
-  sampled->BeginTurn(Prompt(10), std::optional<size_t>{4});
-
   auto control = std::make_shared<RequestPostProcessingControl>();
-  auto failing_params = MakeGreedyParams(*model_);
-  FailingPostProcessingDevice device{*failing_params->p_device, control};
-  failing_params->p_device = &device;
-  auto failing =
-      CreateRequestWithPrompt(engine.engine, *failing_params, Prompt(20));
+  FailingPostProcessingDevice device{*model_->p_device_scoring_, control};
+  ScopedScoringDevice scoped_device{*model_, device};
+  TurnOptions sampled_options;
+  sampled_options.max_generated_tokens = 4;
+  sampled_options.do_sample = true;
+  sampled_options.top_k = 3;
+  sampled_options.temperature = 0.01f;
+  sampled_options.seed = 1234;
+  auto sampled =
+      CreateRequestWithPrompt(engine.engine, Prompt(10), sampled_options);
+  control->target_search_index = 1;
+  auto failing = CreateRequestWithPrompt(engine.engine, Prompt(20));
 
   std::array<EngineEvent, 4> events;
   ASSERT_EQ(engine.engine->Run(events), 2u);
@@ -2269,14 +2655,13 @@ TEST_F(EngineRunTest, RolledBackTerminalDraftCanRetryWithoutProposal) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, filler);
   engine.cache->SetMaxDraftTokensPerStep(3);
 
-  auto first_params = MakeGreedyParams(*model_);
-  auto first = CreateEngineRequest(engine.engine, *first_params);
-  first->BeginTurn(Prompt(10), std::optional<size_t>{2});
   auto control = std::make_shared<RequestPostProcessingControl>();
-  auto second_params = MakeGreedyParams(*model_);
-  FailingPostProcessingDevice device{*second_params->p_device, control};
-  second_params->p_device = &device;
-  auto second = CreateEngineRequest(engine.engine, *second_params);
+  FailingPostProcessingDevice device{*model_->p_device_scoring_, control};
+  ScopedScoringDevice scoped_device{*model_, device};
+  auto first = CreateEngineRequest(engine.engine);
+  first->BeginTurn(Prompt(10), std::optional<size_t>{2});
+  control->target_search_index = 1;
+  auto second = CreateEngineRequest(engine.engine);
   second->BeginTurn(Prompt(20));
 
   std::array<EngineEvent, 2> initial;
@@ -2306,7 +2691,7 @@ TEST_F(EngineRunTest, RolledBackTerminalDraftCanRetryWithoutProposal) {
 TEST_F(EngineRunTest, DraftsRequireRollbackAndPerTokenLogitsCapabilities) {
   auto engine =
       MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
-  auto request = CreateEngineRequest(engine.engine, *model_);
+  auto request = CreateEngineRequest(engine.engine);
 
   EXPECT_EQ(engine.engine->MaxDraftTokensPerStep(), 0u);
   EXPECT_THROW(
@@ -2322,15 +2707,16 @@ TEST_F(EngineRunTest, DraftsRequireRollbackAndPerTokenLogitsCapabilities) {
 }
 
 TEST_F(EngineRunTest, DraftProposalRequiresDecodeReadyRequest) {
+  // A model-configured chunk size leaves the prompt half-prefilled after the first step, which is
+  // exactly the state a draft proposal must be rejected in.
+  model_ = LoadDummyDecoderModelWithChunking(/*chunk_size=*/2);
   const int32_t eos = EosToken(*model_);
   const int32_t filler = eos == 5 ? 6 : 5;
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, filler);
   engine.cache->SetMaxDraftTokensPerStep(3);
 
-  auto params = MakeGreedyParams(*model_);
-  params->search.chunk_size = 2;
   auto request =
-      CreateRequestWithPrompt(engine.engine, *params, Prompt(10));
+      CreateRequestWithPrompt(engine.engine, Prompt(10));
   EXPECT_THROW(
       request->SetDraftTokens(std::vector<int32_t>{11, 12}),
       std::runtime_error);
@@ -2355,7 +2741,7 @@ TEST_F(EngineRunTest, InvalidDraftReplacementPreservesPendingProposal) {
   engine.cache->SetMaxDraftTokensPerStep(3);
 
   auto request =
-      CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+      CreateRequestWithPrompt(engine.engine, Prompt(10));
   ASSERT_EQ(RunOne(*engine.engine).request, request);
   request->SetDraftTokens(std::vector<int32_t>{11, 12});
 
@@ -2378,7 +2764,7 @@ TEST_F(EngineRunTest, MtpPlanningFailureCommitsTargetStepWithoutDrafts) {
   const int32_t filler = eos == 5 ? 6 : 5;
   auto engine = MakeMtpDoublesEngine(model_, filler);
   auto request = CreateRequestWithPrompt(
-      engine.engine, *model_, Prompt(10));
+      engine.engine, Prompt(10));
 
   std::array<EngineEvent, 8> storage;
   ASSERT_GT(engine.engine->Run(storage), 0u);
@@ -2399,6 +2785,7 @@ TEST_F(EngineRunTest, MtpPlanningFailureCommitsTargetStepWithoutDrafts) {
   EXPECT_EQ(request->PendingDraftTokenCount(), 0u);
   EXPECT_EQ(engine.mtp_cache->AllocatedCount(), 1u);
   EXPECT_EQ(engine.engine->GetSpeculativeStats().standard_fallback_steps, 1u);
+  EXPECT_EQ(engine.engine->GetSpeculativeStats().mtp_failures, 1u);
 
   // The next step drafts again from the restored shadow.
   ASSERT_GT(engine.engine->Run(storage), 0u);
@@ -2412,14 +2799,14 @@ TEST_F(EngineRunTest, PersistentMtpFailureKeepsTheRequestAdvancing) {
   const int32_t eos = EosToken(*model_);
   auto engine = MakeMtpDoublesEngine(model_, eos == 5 ? 6 : 5);
   auto request = CreateRequestWithPrompt(
-      engine.engine, *model_, Prompt(10));
+      engine.engine, Prompt(10));
 
   // A head failure that never clears must degrade to ordinary decoding instead of livelocking on
   // a rolled back target step that commits no progress.
   engine.mtp_cache->ThrowPlanningBadAllocAlways();
   std::array<EngineEvent, 8> storage;
   int64_t previous_length = request->Snapshot().current_sequence_length;
-  constexpr int kSteps = 4;
+  constexpr int kSteps = 5;
   for (int step = 0; step < kSteps; ++step) {
     const size_t count = engine.engine->Run(storage);
     ASSERT_EQ(count, 1u);
@@ -2430,8 +2817,9 @@ TEST_F(EngineRunTest, PersistentMtpFailureKeepsTheRequestAdvancing) {
     previous_length = length;
     EXPECT_EQ(request->PendingDraftTokenCount(), 0u);
   }
-  EXPECT_EQ(engine.engine->GetSpeculativeStats().standard_fallback_steps,
-            static_cast<size_t>(kSteps));
+  EXPECT_EQ(engine.engine->GetSpeculativeStats().standard_fallback_steps, 3u);
+  EXPECT_EQ(engine.engine->GetSpeculativeStats().mtp_failures, 3u);
+  EXPECT_EQ(engine.mtp_cache->plan_step_resources_calls, 3);
 }
 
 TEST_F(EngineRunTest, ContinuationDropsTheMtpShadowFromThePreviousTurn) {
@@ -2439,7 +2827,7 @@ TEST_F(EngineRunTest, ContinuationDropsTheMtpShadowFromThePreviousTurn) {
   const int32_t eos = EosToken(*model_);
   auto engine = MakeMtpDoublesEngine(model_, eos == 5 ? 6 : 5);
   auto request = CreateRequestWithPrompt(
-      engine.engine, *model_, Prompt(10));
+      engine.engine, Prompt(10));
 
   std::array<EngineEvent, 8> storage;
   ASSERT_GT(engine.engine->Run(storage), 0u);
@@ -2471,7 +2859,7 @@ TEST_F(EngineRunTest, CancelDropsTheMtpShadow) {
   const int32_t eos = EosToken(*model_);
   auto engine = MakeMtpDoublesEngine(model_, eos == 5 ? 6 : 5);
   auto request = CreateRequestWithPrompt(
-      engine.engine, *model_, Prompt(10));
+      engine.engine, Prompt(10));
 
   std::array<EngineEvent, 8> storage;
   ASSERT_GT(engine.engine->Run(storage), 0u);
@@ -2487,7 +2875,7 @@ TEST_F(EngineRunTest, RewindDropsTheMtpShadowAndRebuildsAfterReplay) {
   const int32_t filler = eos == 5 ? 6 : 5;
   auto engine = MakeMtpDoublesEngine(model_, filler);
   auto request = CreateRequestWithPrompt(
-      engine.engine, *model_, Prompt(10));
+      engine.engine, Prompt(10));
 
   std::array<EngineEvent, 8> storage;
   ASSERT_GT(engine.engine->Run(storage), 0u);
@@ -2519,6 +2907,27 @@ TEST_F(EngineRunTest, RewindDropsTheMtpShadowAndRebuildsAfterReplay) {
   EXPECT_EQ(engine.mtp_cache->AllocatedCount(), 1u);
 }
 
+TEST_F(EngineRunTest, MtpCleanupFailureLeavesCancellationRetryable) {
+  model_ = LoadSyntheticPagedMtpModel();
+  const int32_t eos = EosToken(*model_);
+  auto engine = MakeMtpDoublesEngine(model_, eos == 5 ? 6 : 5);
+  auto request = CreateRequestWithPrompt(
+      engine.engine, Prompt(10));
+
+  std::array<EngineEvent, 8> storage;
+  ASSERT_GT(engine.engine->Run(storage), 0u);
+  ASSERT_EQ(engine.mtp_cache->AllocatedCount(), 1u);
+  const uint64_t turn_id = request->CurrentTurnId();
+
+  engine.mtp_cache->ThrowDeallocateFailureOnce();
+  EXPECT_THROW(request->Cancel(turn_id), std::bad_alloc);
+  EXPECT_EQ(request->Status(), RequestStatus::Active);
+  EXPECT_EQ(engine.mtp_cache->AllocatedCount(), 1u);
+
+  EXPECT_TRUE(request->Cancel(turn_id));
+  EXPECT_EQ(engine.mtp_cache->AllocatedCount(), 0u);
+}
+
 TEST_F(EngineRunTest, SpeculativeStatsRejectOffOwnerThreadReads) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
 
@@ -2542,7 +2951,7 @@ TEST_F(EngineRunTest, MtpRollbackFailureMarksEngineUnhealthy) {
   auto engine = MakeMtpDoublesEngine(
       model_, eos == 5 ? 6 : 5);
   auto request = CreateRequestWithPrompt(
-      engine.engine, *model_, Prompt(10));
+      engine.engine, Prompt(10));
 
   ASSERT_EQ(RunOne(*engine.engine).request, request);
   ASSERT_GT(request->PendingDraftTokenCount(), 0u);
@@ -2570,9 +2979,9 @@ TEST_F(EngineRunTest, RewindRejectsUndrainedEventsForOnlyThatRequest) {
   auto engine =
       MakeDoublesEngine(model_, /*capacity=*/2, EosToken(*model_));
   auto first = CreateRequestWithPrompt(
-      engine.engine, *model_, Prompt(10));
+      engine.engine, Prompt(10));
   auto second = CreateRequestWithPrompt(
-      engine.engine, *model_, Prompt(20));
+      engine.engine, Prompt(20));
 
   const auto first_event = RunOne(*engine.engine);
   ASSERT_EQ(first_event.request, first);
@@ -2604,7 +3013,7 @@ TEST_F(EngineRunTest, RewindRejectsFailedRequestWithoutMutation) {
   auto engine =
       MakeDoublesEngine(model_, /*capacity=*/1, /*forced_token=*/5);
   auto request = CreateRequestWithPrompt(
-      engine.engine, *model_, Prompt(10));
+      engine.engine, Prompt(10));
   engine.cache->SetUnserviceableRequest(request);
   const auto failure = RunOne(*engine.engine);
   ASSERT_EQ(failure.request, request);
@@ -2636,7 +3045,7 @@ TEST_F(EngineRunTest, DynamicCompositeRewindReleasesAndRebuildsAllState) {
       });
   const auto prompt = Prompt(10);
   auto request = CreateEngineRequest(
-      engine.engine, *model_);
+      engine.engine);
   request->BeginTurn(prompt, std::optional<size_t>{1});
 
   EngineEvent first_event;
@@ -2705,7 +3114,7 @@ TEST_F(EngineRunTest, DynamicCompositeRewindReleasesAndRebuildsAllState) {
 TEST_F(EngineRunTest, DensePagedModelHasNoFixedStateReservation) {
   model_ = LoadSyntheticPagedModel();
   auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
-  auto request = CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+  auto request = CreateRequestWithPrompt(engine.engine, Prompt(10));
   engine.executor->SetExecutionCallback([](ExecutionContext& context) {
     ASSERT_NE(context.plan, nullptr);
     EXPECT_FALSE(context.plan->fixed_state.required);
@@ -2727,14 +3136,14 @@ TEST_F(EngineRunTest, CompositeMixedPrefillDefersResidentDraft) {
   const int32_t eos = EosToken(*model_);
   auto engine = MakeCompositeDoublesEngine(
       model_, eos == 5 ? 6 : 5);
-  auto decode = CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+  auto decode = CreateRequestWithPrompt(engine.engine, Prompt(10));
 
   ASSERT_EQ(RunOne(*engine.engine).request, decode);
   const auto decode_before_mixed = decode->Snapshot();
   decode->SetDraftTokens(std::array<int32_t, 1>{11});
   const std::array<int32_t, 5> long_prompt{2, 3, 4, 5, 6};
   auto prefill = CreateRequestWithPrompt(
-      engine.engine, *model_, long_prompt);
+      engine.engine, long_prompt);
 
   engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
     ASSERT_NE(context.plan, nullptr);
@@ -2766,8 +3175,8 @@ TEST_F(EngineRunTest, CompositeMixedPrefillDefersResidentDraft) {
 TEST_F(EngineRunTest, CompositeReservationExposesRowsAndCommitsBothStates) {
   model_ = LoadSyntheticCompositeModel();
   auto engine = MakeCompositeDoublesEngine(model_, /*forced_token=*/5);
-  auto first = CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
-  auto second = CreateRequestWithPrompt(engine.engine, *model_, Prompt(20));
+  auto first = CreateRequestWithPrompt(engine.engine, Prompt(10));
+  auto second = CreateRequestWithPrompt(engine.engine, Prompt(20));
 
   engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
     ASSERT_NE(context.plan, nullptr);
@@ -2815,7 +3224,7 @@ TEST_F(EngineRunTest, CompositeReservationExposesRowsAndCommitsBothStates) {
 TEST_F(EngineRunTest, CompositeExecutionFailureDiscardsBothAndRetryMatches) {
   model_ = LoadSyntheticCompositeModel();
   auto engine = MakeCompositeDoublesEngine(model_, /*forced_token=*/5);
-  auto request = CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+  auto request = CreateRequestWithPrompt(engine.engine, Prompt(10));
   int callback_calls = 0;
   engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
     ++callback_calls;
@@ -2852,7 +3261,7 @@ TEST_F(EngineRunTest, CompositeExecutionFailureDiscardsBothAndRetryMatches) {
 TEST_F(EngineRunTest, CompositePostProcessingFailurePreservesResidentState) {
   model_ = LoadSyntheticCompositeModel();
   auto engine = MakeCompositeDoublesEngine(model_, /*forced_token=*/5);
-  auto request = CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+  auto request = CreateRequestWithPrompt(engine.engine, Prompt(10));
   float expected_input = 0.0f;
   float staged_output = 5.0f;
   engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
@@ -2884,12 +3293,10 @@ TEST_F(EngineRunTest, CompositePostProcessingFailurePreservesResidentState) {
 }
 
 TEST_F(EngineRunTest, CompositeChunkFailureRetriesAndContinuesResidentState) {
-  model_ = LoadSyntheticCompositeModel();
+  model_ = LoadSyntheticCompositeModelWithChunking(/*chunk_size=*/2);
   auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
   const std::vector<int32_t> prompt{2, 3, 4, 5, 6};
-  auto params = MakeGreedyParams(*model_);
-  params->search.chunk_size = 2;
-  auto request = CreateRequestWithPrompt(engine.engine, *params, prompt);
+  auto request = CreateRequestWithPrompt(engine.engine, prompt);
 
   size_t execution_count = 0;
   engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
@@ -2950,7 +3357,7 @@ TEST_F(EngineRunTest, CompositeReservationRequiredMismatchIsFatal) {
   engine.cache->ScriptFixedStateMismatch(
       FixedStateResourcePlan{true, 1, 1, 256}, /*slots=*/{},
       /*staging_bytes=*/0);
-  auto request = CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+  auto request = CreateRequestWithPrompt(engine.engine, Prompt(10));
 
   const auto failure = RunOne(*engine.engine);
   EXPECT_EQ(failure.request, request);
@@ -2962,7 +3369,7 @@ TEST_F(EngineRunTest, CompositeReservationRequiredMismatchIsFatal) {
 
 TEST_F(EngineRunTest, PlanningAllocationFailureDoesNotPoisonEngine) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/4, EosToken(*model_));
-  auto request = CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+  auto request = CreateRequestWithPrompt(engine.engine, Prompt(10));
   engine.cache->ThrowPlanningBadAllocOnce();
 
   EXPECT_THROW(static_cast<void>(RunOne(*engine.engine)), std::bad_alloc);
@@ -2973,7 +3380,7 @@ TEST_F(EngineRunTest, PlanningAllocationFailureDoesNotPoisonEngine) {
 
 TEST_F(EngineRunTest, PlanningConsistencyFailurePoisonsEngine) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/4, EosToken(*model_));
-  auto request = CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+  auto request = CreateRequestWithPrompt(engine.engine, Prompt(10));
   engine.cache->ThrowPlanningConsistencyOnce();
 
   const auto failure = RunOne(*engine.engine);
@@ -2987,8 +3394,8 @@ TEST_F(EngineRunTest, PlanningConsistencyFailurePoisonsEngine) {
 TEST_F(EngineRunTest, OverselectedTokenBudgetPoisonsEngine) {
   model_->config_->engine.dynamic_batching->max_scheduled_tokens = 1;
   auto engine = MakeDoublesEngine(model_, /*capacity=*/4, EosToken(*model_));
-  auto first = CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
-  auto second = CreateRequestWithPrompt(engine.engine, *model_, Prompt(11));
+  auto first = CreateRequestWithPrompt(engine.engine, Prompt(10));
+  auto second = CreateRequestWithPrompt(engine.engine, Prompt(11));
   engine.cache->OverselectPlanningOnce();
 
   std::array<EngineEvent, 2> failures;
@@ -3005,7 +3412,7 @@ TEST_F(EngineRunTest, OverselectedTokenBudgetPoisonsEngine) {
 
 TEST_F(EngineRunTest, CommitPreparationFailureRestoresRequestStateBeforeFatal) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/4, /*forced_token=*/7);
-  auto request = CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+  auto request = CreateRequestWithPrompt(engine.engine, Prompt(10));
   const auto sequence_length = request->CurrentSequenceLength();
   engine.cache->ThrowPrepareFailureOnce();
 
@@ -3022,7 +3429,7 @@ TEST_F(EngineRunTest, CommitPreparationFailureRestoresRequestStateBeforeFatal) {
 
 TEST_F(EngineRunTest, CompositeReservationOverreportedRowsAreFatal) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/4, EosToken(*model_));
-  auto request = CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+  auto request = CreateRequestWithPrompt(engine.engine, Prompt(10));
   static const char extra_request_storage{};
   engine.cache->ScriptFixedStateMismatch(
       FixedStateResourcePlan{true, 2, 1, 0},
@@ -3041,7 +3448,7 @@ TEST_F(EngineRunTest, CompositeReservationOverreportedRowsAreFatal) {
 
 TEST_F(EngineRunTest, CompositeReservationRowOrderMismatchIsFatal) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/4, EosToken(*model_));
-  auto request = CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+  auto request = CreateRequestWithPrompt(engine.engine, Prompt(10));
   static const char other_storage{};
   engine.cache->ScriptFixedStateMismatch(
       FixedStateResourcePlan{true, 1, 1, 0},
@@ -3057,7 +3464,7 @@ TEST_F(EngineRunTest, CompositeReservationRowOrderMismatchIsFatal) {
 
 TEST_F(EngineRunTest, CompositeReservationNewSlotCountMismatchIsFatal) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/4, EosToken(*model_));
-  auto request = CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+  auto request = CreateRequestWithPrompt(engine.engine, Prompt(10));
   engine.cache->ScriptFixedStateMismatch(
       FixedStateResourcePlan{true, 1, 1, 0},
       {FixedStateSlotHandle{nullptr, request.get(), 0, 0}},
@@ -3075,8 +3482,8 @@ TEST_F(EngineRunTest, CompositeCapacityBackpressureDefersNewAdmission) {
   model_ = LoadSyntheticCompositeModel();
   model_->config_->engine.dynamic_batching->max_batch_size = 2;
   auto engine = MakeCompositeDoublesEngine(model_, /*forced_token=*/5);
-  auto first = CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
-  auto second = CreateRequestWithPrompt(engine.engine, *model_, Prompt(20));
+  auto first = CreateRequestWithPrompt(engine.engine, Prompt(10));
+  auto second = CreateRequestWithPrompt(engine.engine, Prompt(20));
   engine.executor->SetExecutionCallback([](ExecutionContext& context) {
     for (size_t row = 0; row < context.fixed_state_slots.size(); ++row) {
       for (const auto& binding : context.fixed_state_bindings) {
@@ -3093,7 +3500,7 @@ TEST_F(EngineRunTest, CompositeCapacityBackpressureDefersNewAdmission) {
   EXPECT_EQ(fixed->committed_slots, 2u);
   EXPECT_EQ(fixed->free_slots, 0u);
 
-  auto third = CreateRequestWithPrompt(engine.engine, *model_, Prompt(30));
+  auto third = CreateRequestWithPrompt(engine.engine, Prompt(30));
   size_t observed_new_slots = 999;
   engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
     observed_new_slots = context.plan->fixed_state.new_slot_count;
@@ -3116,8 +3523,8 @@ TEST_F(EngineRunTest, CompositeCapacityBackpressureDefersNewAdmission) {
 TEST_F(EngineRunTest, CompositeRemovalReleasesBothAndIsolatesSibling) {
   model_ = LoadSyntheticCompositeModel();
   auto engine = MakeCompositeDoublesEngine(model_, /*forced_token=*/5);
-  auto first = CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
-  auto second = CreateRequestWithPrompt(engine.engine, *model_, Prompt(20));
+  auto first = CreateRequestWithPrompt(engine.engine, Prompt(10));
+  auto second = CreateRequestWithPrompt(engine.engine, Prompt(20));
   engine.executor->SetExecutionCallback([](ExecutionContext& context) {
     for (size_t row = 0; row < context.fixed_state_slots.size(); ++row) {
       for (const auto& binding : context.fixed_state_bindings) {
@@ -3152,7 +3559,7 @@ TEST_F(EngineRunTest, CompositeRemovalReleasesBothAndIsolatesSibling) {
 TEST_F(EngineRunTest, CompositeStagedOutputInvisibleUntilPublish) {
   model_ = LoadSyntheticCompositeModel();
   auto engine = MakeCompositeDoublesEngine(model_, /*forced_token=*/5);
-  auto request = CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+  auto request = CreateRequestWithPrompt(engine.engine, Prompt(10));
   float committed_value = 0.0f;
   engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
     for (const auto& binding : context.fixed_state_bindings) {
@@ -3178,7 +3585,7 @@ TEST_F(EngineRunTest, CompositeAggregateAdmissionCommitsEveryNewTable) {
   std::vector<std::shared_ptr<Request>> requests;
   for (int i = 0; i < 3; ++i) {
     requests.push_back(CreateRequestWithPrompt(
-        engine.engine, *model_, Prompt(10 * (i + 1))));
+        engine.engine, Prompt(10 * (i + 1))));
   }
   size_t observed_rows = 0;
   size_t observed_new = 0;
@@ -3214,7 +3621,7 @@ TEST_F(EngineRunTest, CompositeAggregateAdmissionCommitsEveryNewTable) {
 TEST_F(EngineRunTest, CompositeCompletionRemovalFreesSlotForReadmission) {
   model_ = LoadSyntheticCompositeModel();
   auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
-  auto first = CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
+  auto first = CreateRequestWithPrompt(engine.engine, Prompt(10));
   engine.executor->SetExecutionCallback([](ExecutionContext& context) {
     for (const auto& binding : context.fixed_state_bindings) {
       FillFixedOutputRow(binding, 0, 31.0f);
@@ -3234,7 +3641,7 @@ TEST_F(EngineRunTest, CompositeCompletionRemovalFreesSlotForReadmission) {
   ASSERT_TRUE(after_removal.has_value());
   EXPECT_EQ(after_removal->committed_slots, 0u);
 
-  auto second = CreateRequestWithPrompt(engine.engine, *model_, Prompt(20));
+  auto second = CreateRequestWithPrompt(engine.engine, Prompt(20));
   engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
     ASSERT_EQ(context.fixed_state_slots.size(), 1u);
     EXPECT_EQ(context.fixed_state_slots[0].slot, released_slot);
@@ -3257,8 +3664,8 @@ TEST_F(EngineRunTest, CompositeCompletionRemovalFreesSlotForReadmission) {
 TEST_F(EngineRunTest, CompositeOrdersResidentRowsByFixedSlotButEventsBySchedulerRank) {
   model_ = LoadSyntheticCompositeModel();
   auto engine = MakeCompositeDoublesEngine(model_, /*forced_token=*/5);
-  auto first = CreateRequestWithPrompt(engine.engine, *model_, Prompt(10));
-  auto second = CreateRequestWithPrompt(engine.engine, *model_, Prompt(20));
+  auto first = CreateRequestWithPrompt(engine.engine, Prompt(10));
+  auto second = CreateRequestWithPrompt(engine.engine, Prompt(20));
   engine.executor->SetExecutionCallback([](ExecutionContext& context) {
     for (size_t row = 0; row < context.fixed_state_slots.size(); ++row) {
       for (const auto& binding : context.fixed_state_bindings) {
@@ -3276,7 +3683,7 @@ TEST_F(EngineRunTest, CompositeOrdersResidentRowsByFixedSlotButEventsByScheduler
   first->Close();
 
   auto replacement =
-      CreateRequestWithPrompt(engine.engine, *model_, Prompt(30));
+      CreateRequestWithPrompt(engine.engine, Prompt(30));
   engine.executor->SetExecutionCallback([](ExecutionContext& context) {
     for (size_t row = 0; row < context.fixed_state_slots.size(); ++row) {
       for (const auto& binding : context.fixed_state_bindings) {

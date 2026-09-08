@@ -2,9 +2,9 @@
 
 > **Status:** Implemented experimental contract.
 >
-> This specification describes the experimental Engine C API. It is
-> deliberately independent of the classic Generator API except where retaining
-> `OgaGeneratorParams` avoids an unnecessary runtime refactor.
+> This specification describes the experimental Engine C API. It is independent of the classic
+> Generator API: Engine Request creation does not accept `OgaGeneratorParams`, and the classic
+> Generator surface is unchanged.
 
 ## Goals
 
@@ -19,8 +19,9 @@ Model
 
 The redesign must:
 
-- preserve the supported request-level `OgaGeneratorParams` configuration for one-sequence,
-  one-beam Engine Requests; unsupported modes remain rejected;
+- keep ownership of configuration at the level that owns the state: model/Engine configuration for
+  the runtime, `OgaRequestOptions` for resident-session policy, and `OgaTurnOptions` for one turn's
+  generation policy;
 - make Request and Turn limits explicit;
 - identify every Turn;
 - cancel only the intended Turn;
@@ -49,9 +50,9 @@ setters without public field-presence rules. `OgaEngineEvent` and `OgaTurnUsage`
 through getters, so the API publishes no layout, size, alignment, version, or stride contract.
 `OgaEngineEventBuffer` owns the event objects and exposes borrowed views.
 
-`OgaGeneratorParams` remains in Request creation initially. Internally, `Search`, RNG, sampling,
-guidance, allocation limits, and model execution currently consume `GeneratorParams`. Replacing it
-with an Engine-bound opaque `OgaRequestParams` is deferred until that ownership is refactored.
+Request creation takes no generation parameters. The Engine derives each Request's private search
+configuration from its own model, forcing a single sequence and a single beam, so no caller-supplied
+`GeneratorParams` field can reach the Engine and be silently ignored.
 
 ### Request options
 
@@ -69,10 +70,11 @@ Rules:
 
 - `OgaRequestOptions` is an opaque, reusable, caller-owned handle.
 - Conversion from `uint64_t` to internal sizes is checked before mutation.
-- Null options or zero `max_session_tokens` use the Request's snapshotted
-  `OgaGeneratorParams.search.max_length`. That search value normally defaults from the model context
-  length, but the caller may set it lower before Request creation.
-- A nonzero `max_session_tokens` may not exceed that snapshotted `search.max_length`.
+- Null options or zero `max_session_tokens` use the model-configured `search.max_length`, which
+  normally defaults from the model context length.
+- A nonzero `max_session_tokens` may not exceed that model-configured ceiling.
+- This is the Request's one session limit: Search completion, cache sizing, speculative bounds, and
+  the `MaxSessionTokens` finish reason all use it.
 - The value counts the initial input, generated tokens, and continuation input over the complete
   resident Request.
 
@@ -89,6 +91,14 @@ OgaResult* OgaTurnOptionsSetMaxGeneratedTokens(
     OgaTurnOptions* options,
     uint64_t max_generated_tokens);
 
+OgaResult* OgaTurnOptionsSetMinGeneratedTokens(
+    OgaTurnOptions* options,
+    uint64_t min_generated_tokens);
+
+OgaResult* OgaTurnOptionsSetDoSample(
+    OgaTurnOptions* options,
+    bool do_sample);
+
 OgaResult* OgaTurnOptionsSetTemperature(
     OgaTurnOptions* options,
     float temperature);
@@ -101,13 +111,19 @@ OgaResult* OgaTurnOptionsSetTopK(
     OgaTurnOptions* options,
     int32_t top_k);
 
+OgaResult* OgaTurnOptionsSetRepetitionPenalty(
+    OgaTurnOptions* options,
+    float repetition_penalty);
+
+OgaResult* OgaTurnOptionsSetNoRepeatNgramSize(
+    OgaTurnOptions* options,
+    int32_t no_repeat_ngram_size);
+
 OgaResult* OgaTurnOptionsSetSeed(
     OgaTurnOptions* options,
     uint64_t seed);
 
-OgaResult* OgaTurnOptionsSetStopTokenIds(
-    OgaTurnOptions* options,
-    const OgaSequences* stop_token_ids);
+OgaResult* OgaTurnOptionsClearSeed(OgaTurnOptions* options);
 
 OgaResult* OgaTurnOptionsSetStopStrings(
     OgaTurnOptions* options,
@@ -117,21 +133,200 @@ OgaResult* OgaTurnOptionsSetGuidance(
     OgaTurnOptions* options,
     const char* guidance_type,
     const char* guidance_data);
+
+OgaResult* OgaTurnOptionsClearGuidance(OgaTurnOptions* options);
+
+OgaResult* OgaTurnOptionsReset(OgaTurnOptions* options);
 ```
 
-Initial implementation status:
+Every option is unset by default, and an unset option means "use the model-configured default for
+this turn" -- never "keep what the previous turn used". Policy is resolved anew for every
+`OgaRequestBeginTurn`:
 
-| Setting | Initial behavior |
+| Setting | Unset behavior |
 | --- | --- |
-| `max_generated_tokens` | Implemented end to end; zero uses the configured/default limit |
-| `temperature`, `top_p`, `top_k`, `seed` | Setter returns an explicit not-implemented error |
-| token-ID stop sequences and UTF-8 stop strings | Each has a distinct setter. A null collection is rejected; a non-null collection is not dereferenced or retained and returns an explicit not-implemented error |
-| guidance | Setter returns an explicit not-implemented error and does not retain/dereference input |
+| `do_sample`, `temperature`, `top_p`, `top_k` | Model `search` defaults |
+| `repetition_penalty`, `no_repeat_ngram_size` | Model `search` defaults, subject to scoring-device capability |
+| `min_generated_tokens` | Zero; the model's session-absolute `search.min_length` is never reinterpreted as a per-turn value |
+| `max_generated_tokens` | Unlimited except for the Request's session limit |
+| `seed` | Continue the Request's existing host and device random streams |
+| stop strings | Disabled |
+| guidance | Disabled |
 
-Unsupported requested behavior must never be accepted and ignored. `OgaTurnOptions` may be reused,
-but `OgaRequestBeginTurn` snapshots all supported values before returning. An options object is
-bound to the Request that created it; passing it to another Request is rejected. The options object does not
-keep the Request alive. Using it after the bound Request is closed or destroyed returns an error.
+Rules:
+
+- Zero unsets `max_generated_tokens` and `min_generated_tokens`: a turn cannot generate zero tokens,
+  and a zero floor is the same thing as no floor.
+- Zero `no_repeat_ngram_size` does *not* unset the option. It explicitly disables n-gram blocking
+  for the turn, which is also what an unset value resolves to whenever the model's
+  `search.no_repeat_ngram_size` is zero. On a model that configures a nonzero size, setting zero is
+  how a turn opts out of it.
+- Zero is a valid deterministic *seed*, so `OgaTurnOptionsClearSeed` is the only way to remove a
+  pending reseed; it means "continue the existing stream", not "randomize again".
+- `OgaTurnOptionsReset` is the whole-object unset mechanism: it restores every option, including
+  `no_repeat_ngram_size`, to unset. There are deliberately no per-scalar clear entry points beyond
+  `OgaTurnOptionsClearSeed` and `OgaTurnOptionsClearGuidance`, which exist only because zero and the
+  empty grammar are meaningful values rather than "unset".
+- `min_generated_tokens` masks the end-of-sequence token until the turn has generated that many
+  tokens. It does not prevent stop strings, turn or session limits, cancellation, failure, or
+  guidance termination. An extendable accepting grammar continues under the minimum, but once
+  guidance permits EOS and no continuation token, its termination takes precedence rather than
+  leaving the turn with no legal token.
+- Admission rejects an explicitly set distribution scalar that contradicts a resolved greedy policy,
+  so a caller never believes a turn sampled when it selected the top logit. A `temperature` other
+  than 0 or 1, a nucleus `top_p` strictly between 0 and 1, and a `top_k` above 1 all contradict
+  greedy selection. Values that request greedy selection themselves (`temperature == 0`,
+  `top_k == 1`) or restrict nothing (`top_k == 0`, `top_p` of 0 or 1, `temperature` of 1) are
+  accepted in any combination, so `do_sample = false` together with `top_k = 1` is valid while
+  `do_sample = false` together with `temperature = 0.7` is not.
+- Admission also rejects an explicit `do_sample = true` that a model search default silently
+  overrides, because the model supplies `top_k == 1` or `temperature == 0`. The caller cannot see
+  those defaults through the options object, so the error names the model-supplied cause and the
+  Turn must override that exact field -- a `top_k` above 1, or a nonzero `temperature` -- to sample.
+  A Turn that spells greedy out itself (`top_k = 1` or `temperature = 0` set on the Turn) has chosen
+  it and is accepted alongside `do_sample = true`.
+- A sampled Turn requires a positive `top_k` or a positive `top_p`. Both zero is rejected: it
+  selects from nothing, and it is not the same request as greedy selection.
+- A sampled Turn rejects a resolved `top_k` greater than the model vocabulary size. If that value
+  came from the model's `search.top_k`, the error names the model default so the Turn can override
+  it explicitly.
+- `no_repeat_ngram_size` is rejected at admission on a scoring device whose search cannot apply it,
+  rather than failing after the model has already run.
+- Static batching completes generation on a non-transactional path, so it rejects stop strings and a
+  per-turn seed at admission, before the Request is mutated.
+- Dynamic batching also rejects a per-turn seed when the active batched sampler cannot checkpoint
+  and restore its device RNG state.
+- The complete resolved policy is validated before any Request or Engine mutation, so a rejected
+  turn leaves the previous completed turn entirely reusable.
+
+Unsupported requested behavior must never be accepted and ignored. `OgaTurnOptions` may be reused
+and reapplies its configured fields to every turn it is passed to; `OgaTurnOptionsReset` restores
+every option to unset. `OgaRequestBeginTurn` snapshots all values before returning. An options object
+is bound to the Request that created it; passing it to another Request is rejected. The options
+object does not keep the Request alive. Using it after the bound Request is closed or destroyed
+returns an error.
+
+### Seeds
+
+A turn seed reseeds both the Request's host random stream and its device sampler state at the start
+of the turn. The seed is full-width `uint64_t`; a value below 2^32 reproduces exactly what the
+classic `search.random_seed` produced for the same value.
+
+Every Request has a durable seed basis that its streams start from and that only a committed reseed
+advances. A Request created from a model that configures `search.random_seed` uses that value; a
+Request created from a model that leaves it unset (the default) draws a generated 64-bit basis once,
+at creation, so an unseeded Request is not reproducible across processes while its own later turns
+still continue one stream.
+
+A greedy step consumes neither the Request's host random stream nor its persistent device sampler
+state. Adding or lengthening a greedy Turn therefore does not shift the random draws used by a later
+unseeded sampled Turn.
+
+The reseed is applied inside the step transaction, strictly after every checkpoint and strictly
+before the first random consumer, and it becomes durable only when that sampling step commits.
+A rolled-back step restores both streams and leaves the reseed pending, so the retry reseeds
+identically. A turn that is canceled, fails, or otherwise ends before a sampling step commits
+discards its pending reseed without changing the durable basis, leaving the Request on exactly the
+stream position it had before the turn.
+
+Determinism is scoped to the same model, package, provider, platform toolchain, effective turn
+policy, scheduling path, and speculative draft path.
+
+### Guidance
+
+Guidance is strictly turn-scoped. `OgaTurnOptionsSetGuidance` supplies one grammar
+(`json_schema`, `regex`, or `lark_grammar`) for the next admitted turn; `OgaTurnOptionsClearGuidance`
+and an omitted grammar both mean an unguided turn. Guidance is never inherited from a previous turn
+or implicitly enabled from model or Request state.
+
+Both strings are copied immediately. The setter validates the request shape and guidance type.
+Build support and the grammar itself are validated at turn admission, before the Request is mutated,
+so an unsupported or invalid grammar leaves the previous completed turn reusable. Every terminal path --
+completion, stop match, cancellation, failure, and close -- releases the turn's grammar cursor, and a
+rolled-back step restores it.
+
+A guided turn does not accept speculative drafts; the next unguided turn is draft-eligible again.
+Guidance and stop strings can be enabled together.
+
+### Stop strings
+
+`OgaTurnOptionsSetStopStrings` copies the given decoded UTF-8 stop strings immediately; the array
+may be reused or destroyed afterward without affecting the options. An empty array (zero entries)
+is a valid configuration that clears/disables stop strings; this is distinct from a nonempty array
+containing an empty string member, which is invalid. Every entry in a nonempty array must itself be
+a nonempty, valid UTF-8 string; the whole configuration may contain at most 16 entries totaling at
+most 16 KiB (the same bounds `StopStringMatcher` enforces). Duplicate entries are preserved as
+distinct, independently indexed entries. `OgaStringArray` stores NUL-terminated C strings and
+therefore cannot preserve bytes after an embedded NUL; callers must reject or escape such input
+before adding it to the array.
+
+Matching is exact: no normalization, trimming, or case folding, and only text generated by this
+Engine Request during the active turn is considered (never prompt tokens, continuation input, or
+earlier-turn history). Concretely, matching decodes through a fresh detokenizer stream whose
+decoding context begins at the first generated token of the active turn: prompt and continuation
+input tokens for that turn are never fed to it, not even solely to seed detokenizer state before the
+first generated token. This is the exact generated-output decoding boundary a host must mirror if it
+runs its own incremental decoder to hide stop text from published output: some tokenizers apply
+context-sensitive spacing to the first decoded piece of a stream (for example a leading-space
+convention that a mid-stream piece would not get), so decoding a host's own copy of the whole
+prompt+generation as one continuous stream can produce different bytes for the first generated token
+than decoding a stream that starts fresh at that token the way the Engine's matcher does. When
+several stop strings could match, the earliest-ending match wins, then
+the earliest-starting/longest match, then the lowest original index. The raw token whose decoded
+bytes complete the match is retained and counted as generated output; bytes after the match in that
+token remain in the Request's raw history (the Engine never trims or rewrites committed tokens).
+Callers that hide stop text from published output must incrementally decode and hold back possible
+stop prefixes, then trim through the configured string identified by the matched index. The Engine
+does not expose a byte offset within the match-completing token.
+
+For the same generated token, precedence among reasons that reach Request-level classification is
+`StopString`, then `MaxGeneratedTokens` (turn limit), then `MaxSessionTokens` (context/session
+limit): a token that would otherwise end the turn on the turn or context limit still reports
+`StopString` when it also completes a match. `Eos` is different: the search layer decides whether a
+sampled token is EOS, and never appends an EOS token to a single-sequence Request's history, before
+Request-level stop-string classification ever sees it, so an EOS token's bytes never reach the
+matcher. In practice this is not a gap -- GenAI tokenizers default to `skip_special_tokens=true` and
+register EOS as a special added token, so a real EOS token always decodes to zero bytes and could
+never independently complete a stop match anyway. An active stop-string configuration does not
+disturb ordinary EOS termination.
+
+Stop strings require an Engine configured for dynamic batching: `OgaRequestBeginTurn` rejects a
+stop-enabled turn on a static-batching Engine before any Request mutation, because static batching
+completes generation through a non-transactional path that cannot stage, roll back, or replay a
+match. A stop-enabled turn drafts and verifies with speculative decoding exactly like any other
+turn: `OgaRequestSetDraftTokens` and every automatic in-Engine drafter (e.g. MTP) accept and verify
+drafts normally, observing target-accepted tokens through the same stop-string matcher the ordinary
+one-token path uses, in exact committed order, truncating at the first completed match and
+discarding every later draft.
+
+Turn admission itself is transactional with respect to stop strings, symmetrically for both
+directions: a `BeginTurn` that would enable, change, or clear the Request's stop-string
+configuration builds that outcome completely before any mutation and installs it only once the
+whole admission attempt (continuation append, scheduler admission, and the rest) succeeds. If any
+of that fails, `OgaRequestBeginTurn` throws and the Request's stop-string state -- whatever it was
+before the call, from a prior committed turn -- is exactly as it was; a corrected retry then behaves
+like any ordinary `BeginTurn`. The first stop-enabled admission on an Engine lazily creates the
+shared tokenizer used by its Request-local streams. Loading tokenizer assets and initializing ORT
+Extensions happen synchronously on the Engine owner thread, so that first admission can take longer
+and briefly delay other Requests already decoding on the same Engine. Later stop-enabled admissions
+reuse the shared tokenizer.
+
+A committed stop match is staged and observed transactionally, in the same Request transaction as
+Search/guidance/cache state: it is not externally visible until the step commits, and if the step
+rolls back (directly or via the Engine's queued restore-and-complete path), the incremental
+tokenizer stream backing the match is recreated and every previously committed current-turn
+generated token is replayed through it, since the underlying detokenizer stream cannot be cloned. A
+replay failure during rollback is treated as a fatal consistency failure, matching every other
+rollback failure in this document. One rollback therefore performs work linear in each affected
+stop-enabled Request's committed current-turn token count. Repeated retryable aborts as a turn grows
+can accumulate quadratic detokenization work on the Engine owner thread, multiplied across affected
+stop-enabled Requests in the batch; hosts should monitor abort frequency and turn depth when
+qualifying this feature for long-running workloads. `OgaEngineEventGetMatchedStopStringIndex` and
+`Request::MatchedStopStringIndex()` are always -1 for a cancellation or fatal-failure terminal
+outcome: a committed StopString match makes the Request `TurnComplete` in the same step that stages
+its terminal event, and both cancellation and fatal-failure handling only ever force-terminate a
+Request that is still executable (not yet `TurnComplete`), so neither can observe, let alone
+overwrite, an already-committed match -- the index is simply never set to begin with on that path.
 
 ### Finish reasons and event flags
 
@@ -139,7 +334,7 @@ keep the Request alive. Using it after the bound Request is closed or destroyed 
 typedef uint32_t OgaFinishReason;
 #define OgaFinishReason_None ((OgaFinishReason)0)
 #define OgaFinishReason_Eos ((OgaFinishReason)1)
-#define OgaFinishReason_StopSequence ((OgaFinishReason)2)
+#define OgaFinishReason_StopString ((OgaFinishReason)2)
 #define OgaFinishReason_MaxGeneratedTokens ((OgaFinishReason)3)
 #define OgaFinishReason_MaxSessionTokens ((OgaFinishReason)4)
 #define OgaFinishReason_Cancelled ((OgaFinishReason)5)
@@ -165,8 +360,9 @@ bit rather than comparing flags for equality, treats the Request getter result a
 identity alias for the caller's owned Request handle, uses the Turn ID getter as the Request-local
 Turn identity, and consumes the token getter only when `Token` is set.
 
-`OgaFinishReason_StopSequence` reserves the intended vocabulary but is not emitted until stop
-sequences are implemented end to end.
+`OgaFinishReason_StopString` is emitted when a Turn's decoded stop strings complete a match; see
+"Stop strings" above. `OgaEngineEventGetMatchedStopStringIndex` reads the matched entry's index and
+writes -1 for every other terminal event.
 
 ### Usage and events
 
@@ -194,6 +390,8 @@ OgaResult* OgaEngineEventGetToken(
     const OgaEngineEvent* event, int32_t* out);
 OgaResult* OgaEngineEventGetFinishReason(
     const OgaEngineEvent* event, OgaFinishReason* out);
+OgaResult* OgaEngineEventGetMatchedStopStringIndex(
+    const OgaEngineEvent* event, int32_t* out);
 OgaResult* OgaEngineEventGetErrorCode(
     const OgaEngineEvent* event, OgaErrorCode* out);
 OgaResult* OgaEngineEventGetUsage(
@@ -216,7 +414,7 @@ Payload validity is determined by flags:
 | --- | --- |
 | `None` | Reserved zero value; no-work is represented by Buffer count zero |
 | `Token` | `request`, `turn_id`, and `token` |
-| `TurnFinished` | `request`, `turn_id`, `finish_reason`, and `usage` |
+| `TurnFinished` | `request`, `turn_id`, `finish_reason`, `usage`, and `matched_stop_string_index` (-1 unless `finish_reason` is `StopString`) |
 | `Token \| TurnFinished` | Final visible token and terminal payload from the same committed step |
 | `CapacityBlocked` | `error_code` is `CapacityDeferred` or `ExecutionCapacityExceeded`; Engine and Request remain reusable |
 | `Retryable` | `error_code` is `RetryableExecution`; no progress committed and the Engine remains reusable |
@@ -257,7 +455,6 @@ void OgaDestroyEngine(OgaEngine* engine);
 
 OgaResult* OgaEngineCreateRequest(
     OgaEngine* engine,
-    const OgaGeneratorParams* generation_params,
     const OgaRequestOptions* request_options,
     OgaRequest** out);
 
@@ -333,8 +530,9 @@ The Engine records its owner thread when it is created. Engine operations, Reque
 Turn-option setters are not thread-safe and must be called serially from that owner thread.
 Destroying a Request handle only publishes an atomic abandonment marker when it is the final public
 handle; this final release may occur on another thread. The Engine strongly retains the Request and
-performs the actual close, runtime-state release, and cleanup at its next owner-thread boundary.
-This deferred-release behavior does not permit concurrent Request operations.
+performs the logical close and cleanup at its next owner-thread boundary. A resident static row
+retains the runtime state needed by an executable peer until the shared physical batch is
+recycled. This deferred-release behavior does not permit concurrent Request operations.
 
 Destroying an Engine closes all bound Requests and purges events. Surviving Request handles remain
 valid lightweight closed tombstones that the caller must still destroy. Teardown uses a no-throw
@@ -347,11 +545,30 @@ after Engine destruction, the Buffer remains owned by the caller and must still 
 being passed to Run. Buffer creation and Run honor the Engine owner thread. Buffer access, Run, and
 destruction are serialized; getters may read immutable views but must not race a Run or destruction.
 
-Request creation snapshots the supplied generation parameters. Engine Requests require
-`search.batch_size == 1` and `search.num_beams == 1`; `top_p` must be in `[0, 1]`, and `top_k`
-must be nonnegative. Guidance fast-forward tokens are unsupported, and guidance type and data
-must either both be present or both be absent. The parameters must belong to the same `OgaModel`
-instance used to create the Engine. Creation itself does not queue work.
+Request creation takes no generation parameters. The Engine derives each Request's private search
+configuration from its own model and forces the single-sequence invariants the Engine depends on:
+`batch_size` and `num_beams` are one, the search length limit is the Request's `max_session_tokens`,
+and guidance is off (guidance is per Turn, and fast-forward tokens are never enabled). Nothing about
+sampling, guidance, or stop strings is fixed at creation.
+
+Creation validates the model configuration it is about to derive from, before minting a Request:
+
+- `search.max_length` must be greater than zero. It is the ceiling for `max_session_tokens`, which
+  defaults to it and may be lower but never higher.
+- `search.num_beams` must be one. Beam search is rejected rather than silently forced, because the
+  Request would otherwise decode something the caller never asked for. `search.batch_size` is not
+  rejected: the Engine batches Requests rather than rows, so it simply derives its own single-row
+  search.
+- `search.min_length` must be zero. It is a session-absolute floor, while the Engine's minimum is
+  per Turn (`OgaTurnOptionsSetMinGeneratedTokens`).
+
+The rejections name a route the caller can take without editing the model directory: overlay the
+value on the `Config` before creating the Model, for example
+`OgaConfigOverlay(config, "{\"search\":{\"num_beams\":1}}")`. Raising the session ceiling of a model
+whose `search.max_length` is lower than its context length uses the same overlay route.
+
+Per-Turn generation policy is validated separately, at each `OgaRequestBeginTurn`, before the Turn
+mutates the Request. Creation itself does not queue work.
 
 Input IDs are copied before `BeginTurn` returns. The public count is fixed-width and is converted to
 `size_t` only after range validation. A pointer/count pair is canonical because an Engine Request is
@@ -485,6 +702,7 @@ struct PendingEngineEvent {
   uint32_t flags{};
   int32_t token{};
   GenerationFinishReason finish_reason{};
+  int32_t matched_stop_string_index{-1};
   TurnUsage usage{};
   EngineErrorCode error_code{};
 };
@@ -493,14 +711,19 @@ struct PendingEngineEvent {
 At Engine construction:
 
 ```cpp
-pending_events_.reserve(cache_manager_->MaxBatchSize());
+const size_t max_step_events =
+    cache_manager_->MaxBatchSize() * kMaxGeneratedTokensPerStep;
+pending_events_.reserve(max_step_events);
+staged_events_.reserve(max_step_events);
+fatal_events_.reserve(max_step_events + 1);
 ```
 
-`reserve` allocates capacity without constructing events. A speculative transaction can produce up
-to `max_draft_tokens_per_step + 1` token events per affected Request. Request creation grows the
-retained-event capacity for the tracked Request count because fatal handling publishes a terminal
-event for every executable Turn, including Requests outside the failed batch. This keeps event
-publication allocation-free after model/cache commit and after the Engine becomes unhealthy.
+`reserve` allocates capacity without constructing events. A committed step produces at most
+`kMaxGeneratedTokensPerStep` events per affected Request, so normal retained output is bounded by
+that limit times the scheduled batch size. Request creation grows dedicated fatal-event capacity
+for that complete retained step plus every tracked Request because fatal handling may publish a
+terminal event for executable Turns outside the failed batch. This keeps event publication
+allocation-free after model/cache commit and after the Engine becomes unhealthy.
 
 Conceptual positive-capacity `Run` flow:
 
@@ -540,7 +763,15 @@ The operation is drain-or-execute:
 Before answering, it reclaims Requests whose final public handle was released. This is an
 owner-thread Engine boundary, so abandonment cannot leave stale schedulable work or retained events
 hidden behind a false result. A false result does not close or release turn-complete Requests;
-callers must close or abandon those handles explicitly.
+callers must close or abandon those handles explicitly. If reclamation detects an ownership
+invariant failure, the Engine becomes unhealthy, terminal events are retained, and this operation
+returns true so the host can drain them through `OgaEngineRun`. A transient allocation failure
+returns an `OgaResult`, re-arms reclamation, and leaves any completed cleanup intact; the next
+owner-thread boundary safely retries the remaining work.
+
+Request creation and `OgaRequestBeginTurn` are also abandonment-reclamation boundaries. If
+reclamation detects an invariant failure there, that operation returns an `OgaResult` while the
+Engine retains terminal events for the next positive-capacity `OgaEngineRun`.
 
 The Engine API has no public asynchronous event queue. Hosts that want uninterrupted inference copy
 events into an application-owned bounded queue and continue pumping the owner thread. If the host
@@ -554,8 +785,8 @@ Close and final-handle abandonment both logically remove a Request from scheduli
 undelivered events, and release its Search, guidance, sampler, and parameter runtime state on the
 owner thread. On the dynamic path, committed paged-cache ownership is released immediately. On the
 static path, a resident row is part of a shared batch allocation and cannot be physically released
-per Request; the closed/abandoned tombstone is no longer scheduled or returned, but its row and
-shared cache allocation may remain until the whole batch recycles.
+per Request; the closed/abandoned tombstone is no longer sampled or returned, but its row, shared
+cache allocation, and row-essential runtime state may remain until the whole batch recycles.
 
 The event's `request` is borrowed. It remains valid only while the caller retains the owned Request
 handle. Internal pending events hold a `shared_ptr<Request>` until delivery, but that does not relax
@@ -572,11 +803,12 @@ OgaRequestGetUnseenToken
 
 and remove their internal unseen-index FIFO bookkeeping.
 
-At successful step commit, the Engine already knows the Request, Turn ID, visible tokens, terminal
-state, finish reason, and usage. It captures those values in `PendingEngineEvent`. A speculative
-transaction emits accepted drafts followed by its correction or bonus token; only the final event
-carries terminal state when the Turn finishes. `OgaEngineRun` moves the available FIFO prefix into
-the reusable Buffer storage and retains overflow.
+At successful step commit, the Engine already knows the Request, Turn ID, selected tokens, terminal
+state, finish reason, and usage. It captures those values in ordered `PendingEngineEvent` objects.
+A speculative transaction emits accepted drafts followed by its correction or bonus token, up to
+`kMaxGeneratedTokensPerStep` events per affected Request. Only the final event carries terminal
+state when the Turn finishes. `OgaEngineRun` moves the available FIFO prefix into the reusable
+Buffer storage and retains overflow.
 
 `tokens_host_` and the Search sequence remain authoritative resident conversation state. Event
 delivery does not remove tokens from that state. Because token and Turn ID are captured together at
@@ -639,18 +871,12 @@ than parsing diagnostic strings.
 Initial events use borrowed pointer identity. Pointer comparison is a constant-time machine-word
 comparison. No separate Request ID or lookup API is planned.
 
-### Engine-bound Request parameters
-
-A future `OgaRequestParams` may be created from an Engine and replace `OgaGeneratorParams` in
-Request creation. It should preserve search setters while hiding internal `GeneratorParams`.
-This is deferred until Search, RNG, sampling, guidance, and execution ownership are separated from
-the classic Generator parameter type.
-
 ## Language surfaces
 
 ### C++
 
-- RAII `OgaRequestOptions` and `OgaTurnOptions`.
+- RAII `OgaRequestOptions` and `OgaTurnOptions`, the latter created from its Request.
+- `OgaEngine::CreateRequest(const OgaRequestOptions* = nullptr)`.
 - RAII `OgaEngineEventBuffer`, created once with `OgaEngine::CreateEventBuffer(capacity)`.
 - `OgaRequest::BeginTurn` returns `uint64_t`.
 - `OgaRequest::CancelTurn(uint64_t) -> bool`.
@@ -665,22 +891,29 @@ the classic Generator parameter type.
 ### Python
 
 - `RequestOptions.set_max_session_tokens(value)` configures the cumulative Request limit.
-- `Engine.create_request(params, options=None) -> Request`.
+- `Engine.create_request(*, options=None) -> Request`. `options` is keyword-only, so an older
+  positional `create_request(params)` call fails loudly instead of binding generation parameters the
+  Engine no longer accepts.
 - `Request.begin_turn(tokens, turn_options=None) -> int`.
 - `Request.cancel_turn(turn_id) -> bool`.
 - `Request.rewind_to_start_of_turn(turn_id)`.
-- `TurnOptions.set_stop_token_ids(token_id_sequences)` converts the ragged collection to a temporary
-  `OgaSequences`; `TurnOptions.set_stop_strings(strings)` converts strings to a temporary
-  `OgaStringArray`. The current C API returns the explicit not-implemented error for either
-  non-null collection.
+- `TurnOptions` mirrors the C setters: `set_max_generated_tokens`, `set_min_generated_tokens`,
+  `set_do_sample`, `set_temperature`, `set_top_p`, `set_top_k`, `set_repetition_penalty`,
+  `set_no_repeat_ngram_size`, `set_seed`, `clear_seed`, `set_stop_strings`, `set_guidance`,
+  `clear_guidance`, and `reset`.
+- `TurnOptions.set_stop_strings(strings)` converts a Python list of `str` to a temporary
+  `OgaStringArray` and rejects (raises `ValueError`) any entry containing an embedded NUL byte
+  before conversion, since the C string-array surface cannot represent bytes after one. An empty
+  list clears/disables stop strings.
 - `Engine.create_event_buffer(capacity) -> EngineEventBuffer`.
 - `Engine.run(buffer) -> EngineEventBuffer`; the returned object is the same reusable Buffer and is
   a Python sequence over its populated borrowed event views. The binding releases the GIL for the
   complete native Run and reacquires it before returning or translating an exception.
 - A zero-capacity Buffer is the capacity-zero no-op. Negative or unrepresentable capacities are
   rejected during Buffer creation.
-- `EngineEvent` exposes flags, borrowed Request, Turn ID, optional token, finish reason, error code,
-  and borrowed usage. Indexed event views keep their Buffer object alive. Both event and usage data
+- `EngineEvent` exposes flags, borrowed Request, Turn ID, optional token, finish reason,
+  `matched_stop_string_index` (`None` unless the finish reason is `STOP_STRING`), error code, and
+  borrowed usage. Indexed event views keep their Buffer object alive. Both event and usage data
   are invalidated by the next Run using that Buffer, so applications copy any values that must
   persist.
 - `Request.begin_turn` requires one logical dimension and converts input to a C-contiguous `int32`
@@ -694,7 +927,8 @@ is part of the current source surface.
 
 ### Benchmarks and examples
 
-- Keep existing `OgaGeneratorParams` setup for Request creation.
+- Configure the session limit through `OgaRequestOptions` and generation policy through
+  `OgaTurnOptions`; Request creation takes no generation parameters.
 - Replace ready-Request lookup and FIFO draining with event handling.
 - Preserve application-owned maps when additional metadata is needed.
 
@@ -702,8 +936,8 @@ is part of the current source surface.
 
 1. Added opaque Engine option, event, usage, and reusable Buffer handles; kept finish reasons,
    event flags, and error codes fixed-width.
-2. Implemented Turn option creation, supported limit snapshotting, explicit unsupported setters,
-   nonzero Turn IDs, and named cancellation.
+2. Implemented Turn option creation, per-turn policy snapshotting, nonzero Turn IDs, and named
+   cancellation.
 3. Replaced internal ready-Request retention with pre-reserved pending event storage.
 4. Captured token and terminal payload atomically at transaction commit on dynamic and static paths.
 5. Replaced `OgaEngineRun` and removed unseen-token delivery.
@@ -725,11 +959,15 @@ commit buildable; the completed change exposes events only.
 - A Buffer remains safely destructible after its Engine is destroyed and is not passed to Run.
 - Capacity zero validates the owner thread and otherwise does no work.
 - `uint64_t` counts that do not fit internal types are rejected.
-- Unsupported Turn setters return explicit not-implemented errors.
+- Every declared Turn setter is wired end to end; none returns success before the Engine honors it.
 
 ### Request and Turn lifecycle
 
-- Request settings are snapshotted at creation.
+- Request settings are snapshotted at creation, and a model configuration the Engine cannot honor --
+  a nonzero `search.min_length`, a `search.num_beams` other than one, or a nonpositive
+  `search.max_length` -- is rejected there rather than forced.
+- Turn policy is resolved anew for every Turn from model defaults plus that Turn's explicit
+  overrides, and is validated before any Request mutation.
 - Turn IDs begin at one, zero means no Turn, and failed admission does not consume an ID.
 - IDs increase across continuation Turns and exhaustion is rejected before mutation.
 - Named stale cancellation cannot cancel a successor Turn.
@@ -760,7 +998,7 @@ commit buildable; the completed change exposes events only.
 - Prompt and generated counts are correct for initial, continuation, EOS, limit, and cancelled Turns.
 - Cached prompt tokens are zero.
 - EOS, max-generated, max-session, cancelled, and failed reasons are distinguished.
-- StopSequence is never emitted until implemented.
+- StopString reports the matched entry's index; every other reason reports -1.
 
 ### Failure and capacity
 

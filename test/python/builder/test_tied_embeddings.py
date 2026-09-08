@@ -297,6 +297,48 @@ def test_tied_quantized_embedding_weight_names_raise_for_unknown_algorithm():
         model.make_tied_quantized_embedding_input_names()
 
 
+def test_prequantized_lm_head_returns_matmul_nbits_names_with_zeros():
+    """Pre-quantized lm_head (e.g. quant_auto) returns MatMulNBits initializer names."""
+    lm_head = types.SimpleNamespace(qweight=object(), qzeros=object(), bits=4)
+    model = Model.__new__(Model)
+    model.weights = types.SimpleNamespace(lm_head=lm_head)
+
+    bits, weight_name, scale_name, zp_name = model.make_tied_quantized_embedding_input_names()
+
+    assert bits == 4
+    assert weight_name == "lm_head.MatMulNBits.qweight"
+    assert scale_name == "lm_head.MatMulNBits.scales"
+    assert zp_name == "lm_head.MatMulNBits.qzeros"
+
+
+def test_prequantized_lm_head_returns_matmul_nbits_names_without_zeros():
+    """Pre-quantized lm_head without zero-points returns empty zp name."""
+    lm_head = types.SimpleNamespace(qweight=object(), qzeros=None, bits=4)
+    model = Model.__new__(Model)
+    model.weights = types.SimpleNamespace(lm_head=lm_head)
+
+    bits, weight_name, scale_name, zp_name = model.make_tied_quantized_embedding_input_names()
+
+    assert bits == 4
+    assert weight_name == "lm_head.MatMulNBits.qweight"
+    assert scale_name == "lm_head.MatMulNBits.scales"
+    assert zp_name == ""
+
+
+def test_prequantized_lm_head_check_is_skipped_when_weights_not_loaded():
+    """make_tied_quantized_embedding_input_names falls through to algo-based names when
+    self.weights hasn't been set yet (unit-test context without make_model)."""
+    model = Model.__new__(Model)
+    model.extra_options = {"algo_config": "rtn"}
+    model.quantization_algo, model.matmul_mixed_precision = desugar_algo_config(model.extra_options)
+    model.quant_attrs = {"is_symmetric": True, "matmul_block_size": 32}
+    # No model.weights set — simulates unit-test call without make_model
+
+    bits, weight_name, _, _ = model.make_tied_quantized_embedding_input_names()
+
+    assert weight_name == "lm_head.MatMul.weight_Q4G32"
+
+
 def _make_minimal_model_for_quantized_tied_embedding(*, algo_config, is_symmetric=True, quant_type=None):
     model = Model.__new__(Model)
     model.use_paged_attention = False

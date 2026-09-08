@@ -32,19 +32,23 @@ TEST(AudioSpeechValidationTests, WhisperAudioFeaturesRankValidation) {
 }
 
 TEST(AudioSpeechValidationTests, NemotronMelTensorRankValidation) {
-  EXPECT_NO_THROW(Generators::ValidateNemotronMelInputShape({1, 80, 1234}, 80));
-
   const std::string rank_error = GetExceptionMessage([] {
-    Generators::ValidateNemotronMelInputShape({80, 1234}, 80);
+    Generators::GetValidatedNemotronMelFrameCount({304, 128}, 128);
   });
   EXPECT_NE(rank_error.find("rank 3"), std::string::npos);
 }
 
+TEST(AudioSpeechValidationTests, NemotronMelShapeValidationReturnsFrameCountFromMiddleDimension) {
+  EXPECT_EQ(Generators::GetValidatedNemotronMelFrameCount({1, 304, 128}, 128), 304);
+}
+
 TEST(AudioSpeechValidationTests, NemotronMelDimensionValidation) {
   const std::string mels_error = GetExceptionMessage([] {
-    Generators::ValidateNemotronMelInputShape({1, 79, 1234}, 80);
+    Generators::GetValidatedNemotronMelFrameCount({1, 128, 304}, 128);
   });
   EXPECT_NE(mels_error.find("expected num_mels"), std::string::npos);
+  EXPECT_NE(mels_error.find("304"), std::string::npos);
+  EXPECT_NE(mels_error.find("128"), std::string::npos);
 }
 
 TEST(AudioSpeechValidationTests, NemotronEncoderOutputRankValidation) {
@@ -76,14 +80,14 @@ TEST(AudioSpeechValidationTests, ParakeetDecoderDimensionValidation) {
 
 TEST(AudioSpeechValidationTests, Rank1TensorsRejected) {
   EXPECT_THROW(Generators::ValidateWhisperAudioFeaturesShape({3000}, 3000), std::runtime_error);
-  EXPECT_THROW(Generators::ValidateNemotronMelInputShape({3000}, 80), std::runtime_error);
+  EXPECT_THROW(Generators::GetValidatedNemotronMelFrameCount({3000}, 80), std::runtime_error);
   EXPECT_THROW(Generators::ValidateParakeetEncoderOutputShape({512}, 512), std::runtime_error);
   EXPECT_THROW(Generators::ValidateParakeetDecoderOutputShape({1024}, 1024), std::runtime_error);
 }
 
 TEST(AudioSpeechValidationTests, DimensionMismatchesCaught) {
   EXPECT_THROW(Generators::ValidateWhisperAudioFeaturesShape({1, 80, 2999}, 3000), std::runtime_error);
-  EXPECT_THROW(Generators::ValidateNemotronMelInputShape({2, 80, 3000}, 80), std::runtime_error);
+  EXPECT_THROW(Generators::GetValidatedNemotronMelFrameCount({2, 304, 128}, 128), std::runtime_error);
   EXPECT_THROW(Generators::ValidateParakeetEncoderOutputShape({1, 256, 64}, 512), std::runtime_error);
   EXPECT_THROW(Generators::ValidateParakeetDecoderOutputShape({2, 1024, 1}, 1024), std::runtime_error);
 }

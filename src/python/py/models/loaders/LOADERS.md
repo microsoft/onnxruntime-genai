@@ -24,9 +24,10 @@ on the source format's naming, layout, or quantization scheme.
 - `gguf.py` maps GGUF tensors and metadata to the common model structure.
 - `base.py` defines the shared quantized-model IR and base loading,
 	unpacking, and repacking behavior.
-- `awq.py`, `gptq.py`, `quark.py`, `olive.py`, and `modelopt.py` implement the
-	source-format-specific quantized
-	checkpoint loaders.
+- `awq.py`, `gptq.py`, `quark.py`, `olive.py`, `modelopt.py`, and `quant_auto.py`
+	implement the source-format-specific quantized checkpoint loaders.
+	See [`quant-auto.md`](quant-auto.md) for the `quant_auto` tensor layout and
+	tied-embedding design.
 - `quant_model.py` selects the concrete quantized loader for the requested
 	quantization format.
 

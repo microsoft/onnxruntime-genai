@@ -201,11 +201,13 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
 }  // namespace
 
 std::unique_ptr<CacheManager> CacheManager::Create(std::shared_ptr<Model> model,
-                                                   size_t auxiliary_bytes_per_block) {
+                                                   size_t auxiliary_bytes_per_block,
+                                                   size_t auxiliary_reserved_memory_bytes) {
   const ModelStateManifest manifest{model->config_->model.decoder};
   if (model->config_->engine.dynamic_batching) {
     ModelStateManifest::ValidateDynamicEngineCompatibility(model->config_->model.decoder);
-    return std::make_unique<PagedCacheManager>(model, auxiliary_bytes_per_block);
+    return std::make_unique<PagedCacheManager>(
+        model, auxiliary_bytes_per_block, auxiliary_reserved_memory_bytes);
   }
   if (manifest.HasFixedStateGroups()) {
     throw std::runtime_error(
@@ -256,12 +258,12 @@ void StaticCacheManager::Allocate(const std::vector<std::shared_ptr<Request>>& r
         std::max_element(
             requests.begin(), requests.end(),
             [](const std::shared_ptr<Request>& a, const std::shared_ptr<Request>& b) {
-              return a->SearchOptions().max_length < b->SearchOptions().max_length;
+              return a->MaxSessionTokens() < b->MaxSessionTokens();
             });
 
     params_ = std::make_shared<GeneratorParams>(*model_);
-    params_->search.max_length =
-        (*request_with_max_max_sequence_length)->SearchOptions().max_length;
+    params_->search.max_length = static_cast<int>(
+        (*request_with_max_max_sequence_length)->MaxSessionTokens());
     params_->search.batch_size = static_cast<int>(cache_allocated_requests_.size());
 
     key_value_cache_state_ = std::make_unique<KeyValueCacheState>(*params_, *model_);
@@ -351,7 +353,8 @@ bool StaticCacheManager::IsResident(const std::shared_ptr<Request>& request) con
 }
 
 PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
-                                     size_t auxiliary_bytes_per_block)
+                                     size_t auxiliary_bytes_per_block,
+                                     size_t auxiliary_reserved_memory_bytes)
     : CacheManager(model),
       params_(std::make_shared<GeneratorParams>(*model_)) {
   // The paged cache resolves its own paged_kv group. The fixed pool is created only when the
@@ -366,7 +369,8 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
   }
   // Size the primary and auxiliary paged caches from one memory budget. The fixed pool above is
   // already reflected in the free-memory query used by the paged cache.
-  key_value_cache_ = std::make_unique<PagedKeyValueCache>(model, auxiliary_bytes_per_block);
+  key_value_cache_ = std::make_unique<PagedKeyValueCache>(
+      model, auxiliary_bytes_per_block, auxiliary_reserved_memory_bytes);
   key_value_cache_state_ = std::make_unique<KeyValueCacheState>(*params_, *model_);
 }
 

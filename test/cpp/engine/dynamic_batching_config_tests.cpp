@@ -89,6 +89,15 @@ TEST(DecoderStateGroupsConfigTest, UsesDefaultStateUpdateBindings) {
             Config::Defaults::StateUpdateRecurrentCapsuleName);
 }
 
+TEST(DecoderStateGroupsConfigTest, UsesLegacyRecurrentStateBindingDefaults) {
+  const auto config = LoadDecoderConfig("{}");
+
+  EXPECT_EQ(config.model.decoder.inputs.past_conv_names, "past_key_values.%d.conv_state");
+  EXPECT_EQ(config.model.decoder.inputs.past_recurrent_names, "past_key_values.%d.recurrent_state");
+  EXPECT_EQ(config.model.decoder.outputs.present_conv_names, "present.%d.conv_state");
+  EXPECT_EQ(config.model.decoder.outputs.present_recurrent_names, "present.%d.recurrent_state");
+}
+
 TEST(DecoderStateGroupsConfigTest, ParsesSparseHybridManifest) {
   const auto config = LoadDecoderConfig(R"({
     "num_hidden_layers": 4,

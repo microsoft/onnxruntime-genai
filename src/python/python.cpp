@@ -18,7 +18,7 @@ using ContiguousArray = pybind11::array_t<
 enum class PyFinishReason : uint32_t {
   None = OgaFinishReason_None,
   Eos = OgaFinishReason_Eos,
-  StopSequence = OgaFinishReason_StopSequence,
+  StopString = OgaFinishReason_StopString,
   MaxGeneratedTokens = OgaFinishReason_MaxGeneratedTokens,
   MaxSessionTokens = OgaFinishReason_MaxSessionTokens,
   Cancelled = OgaFinishReason_Cancelled,
@@ -288,7 +288,8 @@ pybind11::dict ToSpeculativeStatsDict(const OgaSpeculativeStats& stats) {
                           "target_forward_passes", "effective_k", "adaptive_k_increases",
                           "adaptive_k_decreases", "adaptive_k_observations",
                           "adaptive_k_probes", "cooldown_entries", "cooldown_steps",
-                          "cooldown_remaining", "standard_fallback_steps",
+                          "cooldown_remaining", "standard_fallback_steps", "mtp_failures",
+                          "dflash2_failures", "dflash2_disables", "dflash2_admission_misses",
                           "full_accept_rounds", "partial_accept_rounds", "zero_accept_rounds",
                           "target_verify_forward_passes", "target_reanchor_forward_passes",
                           "target_reconciliation_forward_passes", "ngram_lookup_hits",
@@ -777,7 +778,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   pybind11::enum_<PyFinishReason>(m, "FinishReason")
       .value("NONE", PyFinishReason::None)
       .value("EOS", PyFinishReason::Eos)
-      .value("STOP_SEQUENCE", PyFinishReason::StopSequence)
+      .value("STOP_STRING", PyFinishReason::StopString)
       .value("MAX_GENERATED_TOKENS", PyFinishReason::MaxGeneratedTokens)
       .value("MAX_SESSION_TOKENS", PyFinishReason::MaxSessionTokens)
       .value("CANCELLED", PyFinishReason::Cancelled)
@@ -829,32 +830,61 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def(pybind11::init([] {
         return OgaRequestOptions::Create();
       }))
-      .def("set_max_session_tokens", &OgaRequestOptions::SetMaxSessionTokens);
+      .def("set_max_session_tokens", &OgaRequestOptions::SetMaxSessionTokens,
+           "Total tokens (prompt plus generated, across every turn) the request may reach. Zero "
+           "restores the model-configured search.max_length, which is also the ceiling for an "
+           "explicit value.");
 
   pybind11::class_<OgaTurnOptions>(m, "TurnOptions")
       .def(pybind11::init([](OgaRequest& request) {
         return OgaTurnOptions::Create(request);
       }))
-      .def("set_max_generated_tokens", &OgaTurnOptions::SetMaxGeneratedTokens)
+      .def("set_max_generated_tokens", &OgaTurnOptions::SetMaxGeneratedTokens,
+           "Caps the tokens this turn generates. Zero unsets the cap.")
+      .def("set_min_generated_tokens", &OgaTurnOptions::SetMinGeneratedTokens,
+           "Masks the end-of-sequence token until this turn has generated this many tokens. Zero "
+           "unsets the minimum.")
+      .def("set_do_sample", &OgaTurnOptions::SetDoSample,
+           "Selects random sampling (True) or the top logit (False) for this turn.")
       .def("set_temperature", &OgaTurnOptions::SetTemperature,
-           "Reserved for future use; currently raises a not-implemented error.")
+           "Sampling temperature for this turn; zero requests top-logit selection.")
       .def("set_top_p", &OgaTurnOptions::SetTopP,
-           "Reserved for future use; currently raises a not-implemented error.")
+           "Nucleus bound for this turn, between 0.0 and 1.0.")
       .def("set_top_k", &OgaTurnOptions::SetTopK,
-           "Reserved for future use; currently raises a not-implemented error.")
+           "Top-k bound for this turn; one requests top-logit selection and zero disables top-k.")
+      .def("set_repetition_penalty", &OgaTurnOptions::SetRepetitionPenalty,
+           "Repetition penalty for this turn; must be finite and greater than zero.")
+      .def("set_no_repeat_ngram_size", &OgaTurnOptions::SetNoRepeatNgramSize,
+           "Forbids repeating any n-gram of this size in the generated sequence. Zero disables it.")
       .def("set_seed", &OgaTurnOptions::SetSeed,
-           "Reserved for future use; currently raises a not-implemented error.")
-      .def("set_stop_token_ids", [](OgaTurnOptions& options, const std::vector<std::vector<int32_t>>& values) {
-        auto sequences = OgaSequences::Create();
-        for (const auto& value : values)
-          sequences->Append(value.data(), value.size());
-        options.SetStopTokenIds(*sequences); }, "Reserved for future use; currently raises a not-implemented error.")
+           "Reseeds the request's random streams at the start of this turn. Zero is a valid "
+           "deterministic seed; use clear_seed to remove a pending reseed.")
+      .def("clear_seed", &OgaTurnOptions::ClearSeed,
+           "Removes a pending reseed, continuing the request's existing random streams.")
       .def("set_stop_strings", [](OgaTurnOptions& options, const std::vector<std::string>& values) {
         auto strings = OgaStringArray::Create();
-        for (const auto& value : values)
+        for (const auto& value : values) {
+          // The C OgaStringArray surface stores plain NUL-terminated strings, so a Python str
+          // containing an embedded NUL cannot round-trip through it: bytes after the NUL would
+          // silently disappear rather than participate in matching. Reject explicitly instead.
+          if (value.find('\0') != std::string::npos) {
+            throw pybind11::value_error(
+                "Stop strings must not contain an embedded NUL byte.");
+          }
           strings->Add(value.c_str());
-        options.SetStopStrings(*strings); }, "Reserved for future use; currently raises a not-implemented error.")
-      .def("set_guidance", &OgaTurnOptions::SetGuidance, "Reserved for future use; currently raises a not-implemented error.");
+        }
+        options.SetStopStrings(*strings); },
+           "Sets decoded UTF-8 stop strings for the turn, copying them immediately. An empty "
+           "list (zero entries) clears/disables stop strings; this is distinct from a nonempty "
+           "list containing an empty string entry, which is invalid. Every entry in a nonempty "
+           "list must itself be a nonempty, valid UTF-8 string with no embedded NUL byte; the "
+           "list may contain at most 16 entries totaling at most 16 KiB.")
+      .def("set_guidance", &OgaTurnOptions::SetGuidance,
+           "Constrains this turn's output to a grammar ('json_schema', 'regex', or "
+           "'lark_grammar'), copying both strings immediately. Guidance is strictly turn-scoped: a "
+           "following turn that sets none is unguided.")
+      .def("clear_guidance", &OgaTurnOptions::ClearGuidance, "Removes the configured grammar, so the turn is unguided.")
+      .def("reset", &OgaTurnOptions::Reset, "Restores every turn option to its unset state.");
 
   pybind11::class_<OgaRequest>(m, "Request")
       .def(
@@ -887,7 +917,9 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         auto sequences = OgaSequences::Create();
         auto tokens_span = ToSpan(tokens);
         sequences->Append(tokens_span.data(), tokens_span.size());
-        request.SetDraftTokens(*sequences); }, "Propose speculative draft tokens for the next decode operation.")
+        request.SetDraftTokens(*sequences); },
+           "Propose speculative draft tokens for the next decode operation. Sampled output is "
+           "reproducible only with the same proposal and scheduling path.")
       .def("close", &OgaRequest::Close);
 
   pybind11::class_<
@@ -916,6 +948,13 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def_property_readonly("finish_reason", [](const OgaEngineEvent& event) {
         return static_cast<PyFinishReason>(event.FinishReason());
       })
+      .def_property_readonly("matched_stop_string_index", [](const OgaEngineEvent& event) -> pybind11::object {
+        const auto index = event.MatchedStopStringIndex();
+        if (!index) {
+          return pybind11::none();
+        }
+        return pybind11::int_(*index);
+      })
       .def_property_readonly("error_code", [](const OgaEngineEvent& event) {
         return static_cast<PyEngineErrorCode>(event.ErrorCode());
       })
@@ -943,11 +982,12 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def(pybind11::init([](OgaModel& model) { return OgaEngine::Create(model); }))
       .def(
           "create_request",
-          [](OgaEngine& engine, PyGeneratorParams& params,
-             OgaRequestOptions* options) {
-            return engine.CreateRequest(*params.params_, options);
+          [](OgaEngine& engine, OgaRequestOptions* options) {
+            return engine.CreateRequest(options);
           },
-          pybind11::arg("params"),
+          // Keyword-only so an older positional create_request(params) call fails loudly instead of
+          // silently binding generation parameters the Engine no longer accepts.
+          pybind11::kw_only(),
           pybind11::arg("options") = pybind11::none())
       .def(
           "create_event_buffer",
