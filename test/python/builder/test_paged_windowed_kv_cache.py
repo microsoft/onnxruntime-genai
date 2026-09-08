@@ -207,6 +207,7 @@ def test_all_local_layers_keep_the_shared_block_count():
 
 def _make_inputs_model(use_paged_attention, use_ring):
     model = _new_model()
+    model.ep = "cuda"
     model.extra_options = {}
     model.use_paged_attention = use_paged_attention
     model.context_length_attrs["window_kv_cache"] = use_ring
@@ -252,13 +253,15 @@ def test_paged_model_without_a_ring_drops_the_windowed_block_table():
     assert "block_table" in model.input_names
 
 
-def test_webgpu_paged_model_keeps_attention_metadata():
-    model = _make_inputs_model(use_paged_attention=True, use_ring=False)
+def test_webgpu_paged_model_drops_attention_metadata():
+    model = _make_inputs_model(use_paged_attention=True, use_ring=True)
     model.ep = "webgpu"
 
     model.make_inputs_init()
 
-    assert "attention_metadata" in model.input_names
+    assert "attention_metadata" not in model.input_names
+    assert "block_table" in model.input_names
+    assert "block_table_windowed" in model.input_names
 
 
 def test_non_paged_model_drops_every_paged_input():
@@ -469,6 +472,14 @@ def test_genai_config_honours_paged_chunk_size(monkeypatch, tmp_path):
     config = _write_genai_config(monkeypatch, tmp_path, window_size=128, extra_options={"paged_chunk_size": "64"})
 
     assert config["search"]["chunk_size"] == 64
+
+
+def test_genai_config_honours_explicit_block_capacity(monkeypatch, tmp_path):
+    config = _write_genai_config(monkeypatch, tmp_path, window_size=128, extra_options={"num_blocks": "1024"})
+
+    dynamic_batching = config["engine"]["dynamic_batching"]
+    assert dynamic_batching["num_blocks"] == 1024
+    assert "gpu_utilization_factor" not in dynamic_batching
 
 
 def test_genai_config_omits_the_ring_when_it_is_off(monkeypatch, tmp_path):
