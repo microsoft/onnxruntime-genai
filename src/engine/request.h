@@ -509,9 +509,6 @@ struct Request : std::enable_shared_from_this<Request>,
 
   /**
    * @brief Launches the per-sequence tail after a batched sampler has filled the bound slot.
-   * @param sampler_draw_consumed True when the scheduler-owned sampler consumed one draw. Sampled
-   *        speculative verification binds host-selected tokens through the same Search hook without
-   *        advancing the batched-sampler stream.
    */
   void OnNextTokensSampled();
 

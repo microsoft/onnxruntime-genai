@@ -684,7 +684,9 @@ Request and prefills the retained prefix together with the new Turn input, recon
 fixed state, and sliding-window rings from tokens. This immediately returns all prior physical
 capacity to the pools. On the static path the same replay strategy is supported only when the
 Request is the sole resident row; a multi-row static rewind is rejected because one row cannot be
-detached from the shared contiguous cache allocation.
+detached from the shared contiguous cache allocation. Closed peers still count as resident until
+the static batch recycles, so they can temporarily prevent an otherwise completed Request from
+rewinding.
 
 Classic `Generator::RewindToLength` remains a separate Generator API. Dynamic Engine transaction
 rollback also remains separate: rollback restores an in-flight step, whereas Request rewind acts

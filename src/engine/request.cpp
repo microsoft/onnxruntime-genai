@@ -224,7 +224,15 @@ void Request::PrepareTurnAdmission(
   admission.prompt_sequence_length = prompt_sequence_length_;
   admission.processed_sequence_length = processed_sequence_length_;
 
-  turn_boundaries_.reserve(turn_boundaries_.size() + 1);
+  if (turn_boundaries_.size() == turn_boundaries_.capacity()) {
+    const size_t available = turn_boundaries_.max_size() - turn_boundaries_.size();
+    if (available == 0) {
+      throw std::length_error("The request cannot record another turn boundary.");
+    }
+    const size_t growth =
+        std::min(std::max<size_t>(turn_boundaries_.size(), 4), available);
+    turn_boundaries_.reserve(turn_boundaries_.size() + growth);
+  }
   SaveStateForNewTurnTransaction();
   admission.transaction_started = true;
   search_->AppendTokens(device_tokens);
@@ -322,6 +330,7 @@ RequestTurnCounters Request::CompleteCancelFromEngine(
 void Request::MarkClosedFromEngine(const Engine& engine) noexcept {
   assert(BelongsTo(engine));
   status_ = RequestStatus::Closed;
+  needs_replay_after_rewind_ = false;
   guidance_transaction_checkpoint_.reset();
   guidance_logits_processor_.reset();
   stop_controller_.reset();
@@ -343,6 +352,7 @@ void Request::CompleteCloseFromEngine(const Engine& engine) noexcept {
 void Request::MarkFailedFromEngine(const Engine& engine) noexcept {
   assert(BelongsTo(engine));
   finish_reason_ = GenerationFinishReason::Failed;
+  needs_replay_after_rewind_ = false;
   // A fatal failure replaces any undelivered result and becomes the sole terminal outcome.
   matched_stop_string_index_ = -1;
 }
@@ -352,6 +362,7 @@ void Request::CompleteFailedTurnFromEngine(const Engine& engine) noexcept {
   assert(IsExecutable(status_));
   status_ = RequestStatus::TurnComplete;
   finish_reason_ = GenerationFinishReason::Failed;
+  needs_replay_after_rewind_ = false;
   matched_stop_string_index_ = -1;
   ReleaseTurnResources();
 }

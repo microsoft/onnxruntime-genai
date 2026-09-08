@@ -313,9 +313,9 @@ def test_deterministic_tokens(model):
 
 def test_request_rewind_replays_retained_prefix(model):
     engine = og.Engine(model)
-    params = og.GeneratorParams(model)
-    params.set_search_options(do_sample=False, max_length=24)
-    request = engine.create_request(params)
+    request_options = og.RequestOptions()
+    request_options.set_max_session_tokens(24)
+    request = engine.create_request(options=request_options)
     first_sink = _Sink()
     sinks = {request: first_sink}
     turn_options = og.TurnOptions(request)

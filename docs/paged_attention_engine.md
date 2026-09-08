@@ -1634,7 +1634,8 @@ rejects stop strings and a per-turn seed before mutating the Request.
 contiguous cache allocation, retains the prefix before the named Turn, and lets the next
 `BeginTurn()` allocate a fresh static batch and replay that prefix with the new input. Rewind is
 rejected when two or more rows remain resident because releasing the shared allocation would also
-destroy peers' continuation state.
+destroy peers' continuation state. A logically closed peer remains resident until the static batch
+recycles and therefore can temporarily keep another completed Request from rewinding.
 
 Close or abandonment logically removes a Request from scheduling and purges its undelivered events.
 A closed Request that is already resident in a static batch nevertheless remains part of that

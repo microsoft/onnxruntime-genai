@@ -1305,15 +1305,18 @@ void Engine::RewindRequestToStartOfTurn(
         "Cannot rewind a request whose model state is no longer resident.");
   }
 
-  // Every fallible preparation completes before committed cache ownership is released. The cache
-  // managers validate their complete release up front; their publication paths are no-throw.
+  // Every fallible preparation and temporary allocation completes before committed target-cache
+  // ownership changes. The cache managers validate their complete release up front, prepare any
+  // temporary containers, and then publish the ownership change through no-throw operations.
   cache_manager_->ValidateRewind(request);
   auto rewind_state =
       request->PrepareRewindToStartOfTurn(turn_id);
-  // The auxiliary decoder mirrors a generated suffix that is no longer authoritative after
-  // rewind. Release it before the target cache; its manager validates the complete deallocation
-  // before publishing, while the already-validated target release below is allocation-free.
+  // Auxiliary decoders mirror a generated suffix that is no longer authoritative after rewind.
+  // Release them before the target cache so any fallible cleanup leaves target ownership intact.
   CloseMtpRequest(request);
+  if (dflash2_drafter_) {
+    dflash2_drafter_->Release(request.get());
+  }
   cache_manager_->ReleaseForRewind(request);
   request->CommitRewind(std::move(rewind_state));
 }
@@ -1489,6 +1492,9 @@ void Engine::ValidateRequestCanContinue(
   }
   if (!request->BelongsTo(*this)) {
     throw std::runtime_error("Cannot continue a request that does not belong to this engine.");
+  }
+  if (request->FinishReason() == GenerationFinishReason::Failed) {
+    throw std::runtime_error("Cannot continue a Request whose current turn failed.");
   }
 
   if (!allow_nonresident && !cache_manager_->IsResident(request)) {

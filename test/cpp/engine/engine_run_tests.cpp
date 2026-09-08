@@ -3032,6 +3032,27 @@ TEST_F(EngineRunTest, RewindRejectsFailedRequestWithoutMutation) {
             before.processed_sequence_length);
 }
 
+TEST_F(EngineRunTest, FailedReplayCannotBeginAnotherTurn) {
+  auto engine =
+      MakeDoublesEngine(model_, /*capacity=*/1, EosToken(*model_));
+  auto request = CreateRequestWithPrompt(
+      engine.engine, Prompt(10));
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
+  ASSERT_TRUE(request->IsTurnComplete());
+
+  request->RewindToStartOfTurn(1);
+  request->BeginTurn(Prompt(20));
+  engine.cache->SetUnserviceableRequest(request);
+  const auto failure = RunOne(*engine.engine);
+  ASSERT_EQ(failure.request, request);
+  ASSERT_EQ(failure.error_code, EngineErrorCode::RequestUnserviceable);
+  ASSERT_EQ(request->FinishReason(), GenerationFinishReason::Failed);
+
+  engine.cache->SetUnserviceableRequest({});
+  EXPECT_THROW(request->BeginTurn(Prompt(30)), std::runtime_error);
+  EXPECT_FALSE(engine.engine->HasPendingRequests());
+}
+
 TEST_F(EngineRunTest, DynamicCompositeRewindReleasesAndRebuildsAllState) {
   model_ = LoadSyntheticCompositeModel();
   auto engine =
