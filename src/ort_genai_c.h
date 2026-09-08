@@ -777,7 +777,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* ge
 
 /**
  * \brief Returns a copy of the logits from the model as an OgaTensor on CPU. The buffer is owned by returned OgaTensor
- *        and will be released when the OgaTensor is destroyed
+ *        and will be released when the OgaTensor is destroyed. After greedy decoding ends at EOS,
+ *        returns the retained logits without running the uncommitted EOS through the model.
  * \param[in] generator The generator get the logits from
  * \param[out] out The OgaTensor containing the logits, it only contains the last token logits even in prompt processing
  * \return OgaResult containing the error message if the computation failed.

@@ -198,7 +198,12 @@ jobs:
           ctest --test-dir $env:binaryDir\src\java --build-config Release --verbose --timeout 10800
 
       - name: Run the Python Tests
+        env:
+          ORTGENAI_MULTIMODAL_TEST_EPS: cpu,cuda
         run: |
+          $env:PYTHONPATH = "$env:GITHUB_WORKSPACE\test\python"
+          python -m create.create_multimodal_gqa_model --suite --output_dir "$env:binaryDir\test\multimodal_gqa" --devices cpu,cuda
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\models" --e2e
 
       - name: Verify Build Artifacts
@@ -235,4 +240,6 @@ jobs:
           & .\$env:binaryDir\Release\reinit_tests.exe --ep_dir "$env:GITHUB_WORKSPACE\ort\ep"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & .\$env:binaryDir\Release\engine_unit_tests.exe --ep_dir "$env:GITHUB_WORKSPACE\ort\ep"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\$env:binaryDir\Release\multimodal_device_tests.exe --devices cpu,cuda --ep_dir "$env:GITHUB_WORKSPACE\ort\ep"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

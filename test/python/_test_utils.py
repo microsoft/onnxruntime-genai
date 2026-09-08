@@ -22,6 +22,53 @@ PLUGIN_EP_PACKAGES = {
 # this helper and register at import time.
 _registered_plugin_eps: set[str] = set()
 
+MULTIMODAL_EP_NAMES = {
+    "cpu": ("CPU", "CPUExecutionProvider"),
+    "cuda": ("CUDA", "CUDAExecutionProvider"),
+    "webgpu": ("WebGPU", "WebGpuExecutionProvider"),
+    "openvino": ("OpenVINO", "OpenVINOExecutionProvider"),
+    "nvtensorrtrtx": ("NvTensorRtRtx", "NvTensorRTRTXExecutionProvider"),
+    "ryzenai": ("RyzenAI", "RyzenAILightExecutionProvider"),
+}
+
+
+def multimodal_test_devices() -> tuple[str, ...]:
+    """Keep CPU coverage and require every explicitly requested accelerator."""
+    requested = os.environ.get("ORTGENAI_MULTIMODAL_TEST_EPS")
+    if requested is not None:
+        devices = tuple(device.strip().lower() for device in requested.split(","))
+        unknown = set(devices) - MULTIMODAL_EP_NAMES.keys()
+        if unknown:
+            raise ValueError(f"Unknown multimodal test execution providers: {sorted(unknown)}")
+        return tuple(dict.fromkeys(("cpu", *devices)))
+
+    import onnxruntime as ort  # noqa: PLC0415
+
+    available = ort.get_available_providers()
+    devices = ["cpu"]
+    for device, (_, provider) in MULTIMODAL_EP_NAMES.items():
+        if device != "cpu" and (provider in available or is_ep_plugin_available(device)):
+            devices.append(device)
+    return tuple(devices)
+
+
+def require_execution_provider(device: str) -> None:
+    """Fail on a missing requested EP; successful model execution is still required."""
+    import onnxruntime as ort  # noqa: PLC0415
+    import onnxruntime_genai as og  # noqa: PLC0415
+
+    device = device.lower()
+    if device not in MULTIMODAL_EP_NAMES:
+        raise ValueError(f"Unknown multimodal test execution provider: {device!r}")
+    registered = device in PLUGIN_EP_PACKAGES and register_plugin_ep(device)
+    provider = MULTIMODAL_EP_NAMES[device][1]
+    if not registered and provider not in ort.get_available_providers() and device != "ryzenai":
+        raise RuntimeError(f"Required execution provider {device!r} is unavailable; CPU fallback is forbidden")
+    # RyzenAI discovers/registers its library when the model creates its DeviceInterface.
+    # Compiled availability alone must never admit a missing CUDA add-on or WebGPU plugin.
+    if device == "cuda" and not og.is_cuda_available():
+        raise RuntimeError("Required CUDA GenAI device library is unavailable")
+
 
 @cache
 def is_next_token_argmax_batch_dependent(model_path: str, context: tuple[int, ...]) -> bool:

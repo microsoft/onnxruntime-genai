@@ -11,6 +11,10 @@ parameters:
   type: object
 - name: all_models
   type: object
+- name: multimodal_models
+  type: object
+- name: run_multimodal_tests
+  type: boolean
 - name: build_windows_x64
   type: boolean
 - name: build_linux_x64
@@ -56,8 +60,9 @@ stages:
     - script: |
         python test/python/integration/check_models_in_sync.py \
           --pr  "${{ join(',', parameters.pr_models) }}" \
-          --all "${{ join(',', parameters.all_models) }}"
-      displayName: 'Check pr_models / all_models match models.py'
+          --all "${{ join(',', parameters.all_models) }}" \
+          --multimodal "${{ join(',', parameters.multimodal_models) }}"
+      displayName: 'Check text and multimodal model lists match models.py'
 
 - stage: integration_engine_benchmark_linux_x64
   displayName: 'Engine Benchmark'
@@ -139,6 +144,37 @@ stages:
             ep: 'cuda'
             model: ${{ model }}
 
+- ${{ if and(eq(parameters.run_multimodal_tests, true), or(eq(parameters.linux_x64_cpu, true), eq(parameters.linux_x64_cuda, true))) }}:
+  - stage: integration_multimodal_test_linux_x64
+    displayName: 'Test · Real Phi Vision · Linux x64'
+    dependsOn: build_linux_x64
+    jobs:
+    - ${{ each model in parameters.multimodal_models }}:
+      - ${{ if eq(parameters.linux_x64_cpu, true) }}:
+        - template: jobs/integration-test-job.yml
+          parameters:
+            os: 'linux'
+            arch: 'x64'
+            ep: 'cpu'
+            model: ${{ model }}
+            artifactSource: 'public'
+            testPath: 'test/python/integration/test_integration_multimodal.py'
+            extraPytestArgs: '--run-multimodal-tests'
+            resultPrefix: 'integration-multimodal'
+      - ${{ if eq(parameters.linux_x64_cuda, true) }}:
+        - template: jobs/integration-test-job.yml
+          parameters:
+            os: 'linux'
+            arch: 'x64'
+            ep: 'cuda'
+            model: ${{ model }}
+            artifactSource: 'public'
+            testPath: 'test/python/integration/test_integration_multimodal.py'
+            extraPytestArgs: '--run-multimodal-tests'
+            resultPrefix: 'integration-multimodal'
+
+# No WebGPU real-model lane until a compatible pinned export and its actual
+# numerical partitions are verified. The GPU artifact name is not evidence.
 - ${{ if and(eq(parameters.build_linux_x64, true), eq(parameters.linux_x64_engine, true)) }}:
   - stage: integration_engine_test_linux_x64
     displayName: 'Test · Continuous Batching · Linux x64'

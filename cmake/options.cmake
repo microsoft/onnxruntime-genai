@@ -16,6 +16,7 @@ cmake_dependent_option(BUILD_WHEEL "Build the python wheel" ON "ENABLE_PYTHON" O
 
 # testing
 option(ENABLE_TESTS "Enable tests" ON)
+option(ENABLE_MULTIMODAL_DEVICE_TESTS "Register multimodal device tests requiring generated Python fixtures" OFF)
 option(TEST_PHI2 "Enable tests for Phi-2" OFF)
 option(TEST_QWEN_2_5 "Enable tests for Qwen-2.5 0.5B" OFF)
 

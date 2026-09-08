@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License
 
-"""Synthetic CPU coverage of retained image, token, KV, and mRoPE history.
+"""EP-parametrized coverage of retained image, token, KV, and mRoPE history.
 
 No tokenizer, downloaded weights, or tracked ONNX assets are needed. The fixture
 graphs and independent arithmetic oracle intentionally make dropped/replayed
@@ -11,11 +11,13 @@ tokens, stale images, cache resets, and wrong positions observable in logits.
 from __future__ import annotations
 
 import gc
+import json
 from dataclasses import dataclass, field
 
 import numpy as np
 import onnxruntime_genai as og
 import pytest
+from _test_utils import MULTIMODAL_EP_NAMES, multimodal_test_devices, require_execution_provider
 from create.create_multimodal_turn_test_model import (
     EOS_TOKEN_ID,
     IMAGE_TOKEN_ID,
@@ -143,17 +145,39 @@ class _History:
         return (-((np.arange(VOCAB_SIZE) - target) ** 2) + history / 1024).astype(np.float32)
 
 
+@pytest.fixture(params=multimodal_test_devices())
+def turn_device(request):
+    require_execution_provider(request.param)
+    return request.param
+
+
 @pytest.fixture
-def model_factory(tmp_path):
+def model_factory(tmp_path, turn_device):
     models = {}
 
-    def make(family, *, fail_on_negative_pixels=False):
-        key = (family, fail_on_negative_pixels)
+    def make(family, *, fail_on_negative_pixels=False, asynchronous=False):
+        key = (family, fail_on_negative_pixels, asynchronous)
         if key not in models:
-            directory = tmp_path / (f"{family}-failing-vision" if fail_on_negative_pixels else family)
-            models[key] = og.Model(
-                str(create_model(directory, family, fail_on_negative_pixels=fail_on_negative_pixels))
-            )
+            suffix = "-failing-vision" if fail_on_negative_pixels else "-async" if asynchronous else ""
+            directory = tmp_path / (family + suffix)
+            create_model(directory, family, fail_on_negative_pixels=fail_on_negative_pixels)
+            config_path = directory / "genai_config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            for name in ("decoder", "embedding", "vision"):
+                if name not in config["model"]:
+                    continue
+                provider_options = {}
+                if turn_device in ("cuda", "webgpu"):
+                    provider_options["device_filtering_options"] = {"hardware_device_type": "gpu"}
+                config["model"][name]["session_options"] = {
+                    "provider_options": [] if turn_device == "cpu" else [{turn_device: provider_options}],
+                    "session.disable_cpu_ep_fallback": "0" if turn_device == "cpu" else "1",
+                }
+                if asynchronous:
+                    config["model"][name]["run_options"] = {"disable_synchronize_execution_providers": "1"}
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            models[key] = og.Model(str(directory))
+            assert models[key].device_type == MULTIMODAL_EP_NAMES[turn_device][0]
         return models[key]
 
     return make
@@ -224,6 +248,70 @@ def test_qwen_later_images_with_different_grids_match_full_prefix(model_factory)
             reference.generate_next_token()
             np.testing.assert_array_equal(generator.get_sequence(0), reference.get_sequence(0))
         tokens = generator.get_sequence(0).tolist()
+
+
+@pytest.mark.parametrize("family", QWEN_FAMILIES)
+def test_unequal_grid_images_within_later_turns(model_factory, family):
+    model = model_factory(family)
+    generator = _generator(model)
+    tokens, images, grids = [], [], []
+    for turn_grids in (((2, 2),), ((1, 3), (3, 1)), ((2, 1), (1, 2))):
+        turn_ids, turn_images, grid_rows = [], [], []
+        for h, w in turn_grids:
+            pixels = np.arange(h * w * 3, dtype=np.float32).reshape(-1, 3) + 7 * (len(images) + 1)
+            turn_ids.extend([2, VISION_START_TOKEN_ID, *([IMAGE_TOKEN_ID] * (h * w)), VISION_END_TOKEN_ID, 3])
+            turn_images.append(pixels)
+            grid_rows.append([1, h, w])
+        arrays = _arrays(family, turn_ids, turn_images)
+        arrays["image_grid_thw"] = np.asarray(grid_rows, dtype=np.int64)
+        inputs = _named(arrays)
+        generator.set_inputs(inputs)
+        del inputs, arrays
+        gc.collect()
+        tokens.extend(turn_ids)
+        images.extend(turn_images)
+        grids.extend(grid_rows)
+        reference_arrays = _arrays(family, tokens, images)
+        reference_arrays["image_grid_thw"] = np.asarray(grids, dtype=np.int64)
+        reference = _generator(model)
+        reference.set_inputs(_named(reference_arrays))
+        np.testing.assert_array_equal(_last_logits(generator), _last_logits(reference))
+        for _ in range(4):
+            generator.generate_next_token()
+            reference.generate_next_token()
+        np.testing.assert_array_equal(generator.get_sequence(0), reference.get_sequence(0))
+        tokens = generator.get_sequence(0).tolist()
+
+
+@pytest.mark.parametrize("family", FAMILIES)
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["default-run", "async-run"])
+def test_turn_lifetimes_without_intermediate_readbacks(model_factory, family, turn_device, asynchronous):
+    if asynchronous and turn_device not in ("cuda", "nvtensorrtrtx"):
+        pytest.skip("Unsynchronized CUDA-stream execution requires CUDA or TensorRT-RTX")
+    model = model_factory(family, asynchronous=asynchronous)
+    generator, history = _generator(model), _History(family)
+    for turn in range(10):
+        inputs = _named(history.image(turn + 1))
+        generator.set_inputs(inputs)
+        del inputs
+        gc.collect()
+        for _ in range(3):
+            # Only the independent CPU oracle is inspected; the live Generator is not read back.
+            expected_token = int(np.argmax(history.logits()))
+            generator.generate_next_token()
+            history.text([expected_token])
+        text = [4, 5, 6] if turn % 2 else [7, 8]
+        generator.append_tokens(np.array([text], dtype=np.int32))
+        history.text(text)
+        # Exercise allocation/reuse while the conversation's cache remains live.
+        scratch = [_named(_arrays(family, *_scratch_turn(family, turn + i))) for i in range(4)]
+        del scratch
+    _assert_prefill(generator, history, model)
+
+
+def _scratch_turn(family, value):
+    ids, pixels = _image_turn(family, value)
+    return ids, [pixels]
 
 
 @pytest.mark.parametrize("family", FAMILIES)
@@ -344,6 +432,43 @@ def test_eos_resume_preserves_committed_history(model_factory, family, resume_wi
     _respond(generator, history)
 
 
+@pytest.mark.parametrize("family", (*FAMILIES, "llama"))
+def test_reading_logits_after_eos_does_not_execute_uncommitted_token(model_factory, family):
+    model = model_factory(family)
+    generator, history = _generator(model), _History(family)
+    history.text([2, 4, 6])
+    generator.append_tokens(np.asarray([history.tokens], dtype=np.int32))
+    _respond(generator, history, count=2)
+    forced = np.full_like(generator.get_logits(), -10000)
+    forced[..., EOS_TOKEN_ID] = 10000
+    generator.set_logits(forced)
+    generator.generate_next_token()
+    assert generator.is_done()
+    last_output = generator.get_output("logits").copy()
+    for _ in range(2):
+        np.testing.assert_array_equal(generator.get_logits(), forced)
+        np.testing.assert_array_equal(generator.get_output("logits"), last_output)
+        np.testing.assert_array_equal(generator.get_sequence(0), history.tokens)
+    if family == "llama":
+        history.text([7, 8, 9])
+        generator.append_tokens(np.asarray([[7, 8, 9]], dtype=np.int32))
+    else:
+        generator.set_inputs(_named(history.image(9)))
+    _assert_prefill(generator, history, model)
+    _respond(generator, history)
+
+
+@pytest.mark.parametrize("family", ("phi3v", "llama"))
+def test_reading_logits_at_length_limit_executes_committed_token(model_factory, family):
+    model = model_factory(family)
+    generator, history = _generator(model, max_length=7), _History(family)
+    history.text([2, 4, 6])
+    generator.append_tokens(np.asarray([history.tokens], dtype=np.int32))
+    _respond(generator, history, count=4)
+    assert generator.is_done()
+    np.testing.assert_array_equal(_last_logits(generator), history.logits())
+
+
 @pytest.mark.parametrize("family", FAMILIES)
 def test_earlier_pixels_remain_observable_after_later_image(model_factory, family):
     model = model_factory(family)
@@ -371,7 +496,9 @@ def test_chunked_later_image_prefill_matches_full_prefix(model_factory, family):
 
 
 @pytest.mark.parametrize("family", FAMILIES)
-def test_later_image_execution_failure_permanently_blocks_generator(model_factory, family):
+def test_later_image_execution_failure_permanently_blocks_generator(model_factory, family, turn_device):
+    if turn_device != "cpu":
+        pytest.skip("Out-of-range Gather is a CPU error injector, not a portable GPU kernel failure")
     model = model_factory(family, fail_on_negative_pixels=True)
     generator, history = _generator(model), _History(family)
     generator.set_inputs(_named(history.image(2)))

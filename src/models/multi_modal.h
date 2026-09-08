@@ -58,6 +58,8 @@ struct VisionState : State {
   int64_t num_images_{};
   ExtraInputs extra_inputs_{*this};  // Model inputs
   std::unique_ptr<MultiModalFeatures> image_features_;
+  // Per-image runs/copies can be asynchronous; retain their tensors until prefill completes.
+  std::vector<std::unique_ptr<OrtValue>> per_image_tensors_;
 };
 
 // QwenVisionState: per-image slicing loop for Qwen2.5-VL / Qwen3-VL.
@@ -65,9 +67,8 @@ struct VisionState : State {
 // vision.onnx is exported for exactly one image (Dynamo unrolls Python
 // for-loops at trace time, so an N-image dummy produces a graph that only
 // works for that exact N).  This subclass iterates over images in C++,
-// creating zero-copy sub-tensor views of pixel_values / image_grid_thw and
-// writing each result into the correct offset of the pre-allocated
-// image_features output buffer.
+// creating host views of pixel_values / image_grid_thw and copying device
+// outputs into the combined image_features buffer through the device interface.
 struct QwenVisionState : VisionState {
   using VisionState::VisionState;  // inherit constructor
 

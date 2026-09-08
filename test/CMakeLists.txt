@@ -16,6 +16,7 @@ file(GLOB test_srcs CONFIGURE_DEPENDS
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/dflash2_config_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/reinit_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/search_checkpoint_tests.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/multimodal_device_tests.cpp")
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)
   message(STATUS "Including CUDA kernel tests in the build.")
@@ -129,6 +130,31 @@ if (NOT MSVC)
 endif()
 
 add_test(NAME ReInitTests COMMAND reinit_tests)
+
+# Synthetic multimodal residency/ownership checks need internal state, not public ABI additions.
+# With PYTHONPATH=test/python, generate fixtures using
+# python -m create.create_multimodal_gqa_model --suite --output_dir <build>/test/multimodal_gqa.
+add_executable(multimodal_device_tests "${CMAKE_CURRENT_SOURCE_DIR}/cpp/multimodal_device_tests.cpp")
+target_include_directories(multimodal_device_tests PRIVATE
+  ${ORT_HEADER_DIR}
+  ${onnxruntime_extensions_SOURCE_DIR}/shared/api
+  ${CMAKE_SOURCE_DIR}/src
+)
+target_link_libraries(multimodal_device_tests PRIVATE onnxruntime-genai-obj GTest::gtest)
+add_dependencies(multimodal_device_tests onnxruntime-genai)
+target_compile_definitions(multimodal_device_tests PRIVATE
+  MULTIMODAL_GQA_MODEL_PATH="${CMAKE_CURRENT_BINARY_DIR}/multimodal_gqa")
+set_target_properties(multimodal_device_tests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
+  FOLDER "Tests"
+)
+if(NOT MSVC)
+  target_compile_options(multimodal_device_tests PRIVATE "-fvisibility=hidden")
+endif()
+if(ENABLE_MULTIMODAL_DEVICE_TESTS)
+  add_test(NAME MultimodalDeviceTests COMMAND multimodal_device_tests)
+  set_tests_properties(MultimodalDeviceTests PROPERTIES LABELS "multimodal;device")
+endif()
 
 if (ENABLE_TELEMETRY AND NOT WIN32 AND NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
   add_executable(telemetry_device_info_tests

@@ -1058,7 +1058,14 @@ DeviceSpan<float> Generator::GetLogits() {
     return strategy_logits;
   }
   if (!computed_logits_) {
-    ComputeLogits(search_->GetNextTokens());
+    // Greedy EOS terminates without committing a token. Inspect the existing
+    // logits rather than executing that EOS at an unchanged cache length.
+    // At the length limit, the last token was committed and still needs a run.
+    const bool uncommitted_eos = search_->params_->search.num_beams == 1 &&
+                                 search_->IsDone() &&
+                                 search_->GetSequenceLength() < search_->params_->search.max_length;
+    if (!uncommitted_eos)
+      ComputeLogits(search_->GetNextTokens());
   }
   return search_->GetLogits();
 }

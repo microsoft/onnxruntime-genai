@@ -64,6 +64,8 @@ device. The decoder and its cache persist; only the new images run through visio
 prefill. Image numbering is local to each processor call (for Phi, restart at `<|image_1|>`).
 Reserve enough `max_length` for the entire conversation, including image placeholders and
 responses; reaching EOS can be resumed, but appending beyond that total limit is rejected.
+After greedy EOS, `get_logits()` inspects the retained scores without inserting the
+uncommitted EOS into the conversation's cache.
 
 Later images are not supported for Gemma3/4, Phi-4MM, Qwen3.5/hybrid recurrent models,
 VideoChat, audio/modality-adapter changes, beam/speculative/constrained decoding, graph capture,
@@ -77,6 +79,18 @@ Rewind is restricted to the text suffix strictly after the **latest** multimodal
 it cannot reach or cross that boundary. Invalid later-turn inputs are rejected before the
 sequence is appended. A failure during model execution is not transactional: discard the
 failed Generator rather than retrying on partially updated decoder state.
+
+Provider eligibility is not a guarantee that every exported graph/cache configuration works
+on every device. CPU, CUDA, and WebGPU have dedicated turn-test selections; other eligible
+providers require compatible exports and an available runtime. Ordinary WebGPU intentionally
+stages decoder inputs/embeddings on the host while retaining vision features and KV buffers
+on its device. This is distinct from falling back to CPU model execution.
+
+Later images remain rejected with graph capture because changing prompt lengths can replace
+embedding allocations referenced by captured decoder graphs. This is a current implementation
+restriction, not a fundamental limitation of image conversations. Media prefill completes
+queued device work before releasing its processor inputs and temporary per-image buffers;
+ordinary token decoding does not add this media-lifetime fence.
 
 ```bash
 # The `qwen-3.6-mtp` script runs Qwen3.6 with its multi-token-prediction (MTP) head for

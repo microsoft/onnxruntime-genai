@@ -40,6 +40,8 @@ def _info(name, dtype, shape):
 
 
 def _model(name, nodes, inputs, outputs, initializers):
+    for node in nodes:
+        node.name = f"{name}.{node.output[0]}"
     model = helper.make_model(
         helper.make_graph(nodes, name, inputs, outputs, initializers),
         opset_imports=[helper.make_opsetid("", 17)],
@@ -67,7 +69,7 @@ def make_embedding_model(family):
                 ["input_ids", "placeholder"],
                 ["is_image"],
             ),
-            helper.make_node("Cast", ["is_image"], ["image_mask"], to=T.INT64),
+            helper.make_node("Cast", ["is_image"], ["image_mask"], to=T.INT32),
             helper.make_node("CumSum", ["image_mask", "sequence_axis"], ["image_indices"]),
             helper.make_node("Where", ["is_image", "image_indices", "zero_int"], ["safe_indices"]),
             # Index zero also makes empty image_features safe during text-only decode.
@@ -88,7 +90,7 @@ def make_embedding_model(family):
             _tensor("axis_2", [2]),
             _tensor("sequence_axis", 1),
             _tensor("placeholder", 0 if family == "phi3v" else IMAGE_TOKEN_ID, np.int32),
-            _tensor("zero_int", 0),
+            _tensor("zero_int", 0, np.int32),
             _tensor("empty_feature", [[0]], np.float32),
         ],
     )
@@ -175,7 +177,7 @@ def make_decoder_model(family):
     nodes.extend(
         [
             helper.make_node("Add", ["total_key", "total_value"], ["history"]),
-            helper.make_node("Cast", ["history"], ["integer_history"], to=T.INT64),
+            helper.make_node("Cast", ["history"], ["integer_history"], to=T.INT32),
             helper.make_node("Mod", ["integer_history", "sixteen"], ["target_mod"]),
             helper.make_node("Cast", ["target_mod"], ["float_target"], to=T.FLOAT),
             helper.make_node("Add", ["float_target", "two"], ["target"]),
@@ -202,7 +204,7 @@ def make_decoder_model(family):
         _tensor("one", 1, np.float32),
         _tensor("two", 2, np.float32),
         _tensor("three", 3, np.float32),
-        _tensor("sixteen", 16),
+        _tensor("sixteen", 16, np.int32),
         _tensor("vocabulary", np.arange(VOCAB_SIZE), np.float32),
         _tensor("history_scale", 1 / 1024, np.float32),
     ]

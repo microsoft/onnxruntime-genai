@@ -287,7 +287,6 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
   size_t feat_element_size = element_size(feat_type);
 
   void* pv_raw = pv_full->GetTensorMutableRawData();
-  void* feat_raw = feat_full->GetTensorMutableRawData();
   int64_t spatial_merge_size = model_.config_->model.vision.spatial_merge_size;
 
   auto cpu_mem = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
@@ -336,7 +335,7 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
                                std::to_string(num_feats) + ") exceeds image_features dim 0 (" +
                                std::to_string(total_feats) + ")");
 
-    // Create non-owning sub-tensors (zero-copy views into the original buffers).
+    // Processor inputs are host views; output storage must use the actual device allocator.
     std::vector<int64_t> sub_pv_shape = {num_patches, patch_dim};
     std::vector<int64_t> sub_grid_shape = {1LL, 3LL};  // vision.onnx expects [1, 3] per image
     std::vector<int64_t> sub_feat_shape = {num_feats, hidden_size};
@@ -354,11 +353,7 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
         std::span<const int64_t>(sub_grid_shape),
         ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
 
-    auto sub_feat = OrtValue::CreateTensor(
-        *cpu_mem,
-        static_cast<uint8_t*>(feat_raw) + static_cast<size_t>(feat_offset * hidden_size) * feat_element_size,
-        static_cast<size_t>(num_feats * hidden_size) * feat_element_size,
-        std::span<const int64_t>(sub_feat_shape), feat_type);
+    auto sub_feat = OrtValue::CreateTensor(model_.p_device_->GetAllocator(), sub_feat_shape, feat_type);
 
     // Temporarily point the State's inputs/output to the per-image slices,
     // run the session, then advance offsets.
@@ -366,7 +361,16 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
     inputs_[grid_idx] = sub_grid.get();
     outputs_[0] = sub_feat.get();
 
+    per_image_tensors_.push_back(std::move(sub_pv));
+    per_image_tensors_.push_back(std::move(sub_grid));
+    per_image_tensors_.push_back(std::move(sub_feat));
     State::Run(*model_.vision_session_);
+
+    const size_t feature_offset_bytes = static_cast<size_t>(feat_offset * hidden_size) * feat_element_size;
+    const size_t feature_size_bytes = static_cast<size_t>(num_feats * hidden_size) * feat_element_size;
+    ByteWrapTensor(*model_.p_device_, *feat_full)
+        .subspan(feature_offset_bytes, feature_size_bytes)
+        .CopyFrom(ByteWrapTensor(*model_.p_device_, *outputs_[0]));
 
     patch_offset += num_patches;
     feat_offset += num_feats;
@@ -559,13 +563,15 @@ DeviceSpan<float> PixtralVisionState::Run(int current_length, DeviceSpan<int32_t
     inputs_[pv_idx] = sub_pv.get();
     outputs_[0] = sub_feat.get();
 
+    per_image_tensors_.push_back(std::move(sub_pv));
+    per_image_tensors_.push_back(std::move(sub_feat));
     State::Run(*model_.vision_session_);
 
     size_t feature_offset_bytes = static_cast<size_t>(feat_offset * hidden_size) * feat_elem_size;
     size_t feature_size_bytes = static_cast<size_t>(num_feats * hidden_size) * feat_elem_size;
     ByteWrapTensor(*model_.p_device_, *feat_full)
         .subspan(feature_offset_bytes, feature_size_bytes)
-        .CopyFrom(ByteWrapTensor(*model_.p_device_, *sub_feat));
+        .CopyFrom(ByteWrapTensor(*model_.p_device_, *outputs_[0]));
 
     feat_offset += num_feats;
   }
@@ -1159,6 +1165,11 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
     auto logits = chunk_prefill
                       ? decoder_state_->RunPrefillWithChunking(current_length, next_tokens, next_indices, chunk_size_opt.value())
                       : decoder_state_->Run(current_length, next_tokens, next_indices);
+
+    // Run may return with queued work (for example, TRT-RTX). Fence this ownership
+    // boundary before releasing processor inputs and per-image run/copy buffers.
+    if (num_image_tokens_ > 0 || num_audio_tokens_ > 0)
+      model_.p_device_->Synchronize();
 
     if (num_image_tokens_ > 0 || num_audio_tokens_ > 0)
       multimodal_prompt_length_ = static_cast<size_t>(current_length);
