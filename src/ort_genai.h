@@ -1107,9 +1107,8 @@ struct OgaRequest : OgaAbstract {
     return cancelled;
   }
 
-  void RewindTo(size_t sequence_length) {
-    OgaCheckResult(OgaRequestRewindTo(
-        this, static_cast<uint64_t>(sequence_length)));
+  void RewindToStartOfTurn(uint64_t turn_id) {
+    OgaCheckResult(OgaRequestRewindToStartOfTurn(this, turn_id));
   }
 
   /**

@@ -331,15 +331,21 @@ def test_request_rewind_replays_retained_prefix(model):
     _run(engine, sinks, close_completed=False)
     assert first_sink.tokens == predicted_tokens(_PROMPT_A, 3)
 
-    retained = _PROMPT_A + first_sink.tokens[:1]
-    request.rewind_to(len(retained))
+    retained = _PROMPT_A + first_sink.tokens
+    discarded_sink = _Sink()
+    sinks[request] = discarded_sink
+    discarded_turn = request.begin_turn(np.asarray([12], dtype=np.int32), turn_options)
+    assert discarded_turn == 2
+    _run(engine, sinks, close_completed=False)
+
+    request.rewind_to_start_of_turn(discarded_turn)
     assert not engine.has_pending_requests()
 
-    continuation = [12]
+    continuation = [13]
     second_sink = _Sink()
     sinks[request] = second_sink
     turn_options.set_max_generated_tokens(1)
-    assert request.begin_turn(np.asarray(continuation, dtype=np.int32), turn_options) == 2
+    assert request.begin_turn(np.asarray(continuation, dtype=np.int32), turn_options) == 3
     _run(engine, sinks, close_completed=False)
 
     assert second_sink.tokens == predicted_tokens(retained + continuation, 1)

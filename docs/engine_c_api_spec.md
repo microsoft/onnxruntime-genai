@@ -24,7 +24,7 @@ The redesign must:
 - make Request and Turn limits explicit;
 - identify every Turn;
 - cancel only the intended Turn;
-- rewind a completed Request to a caller-selected token boundary;
+- rewind a completed Request to the boundary before a named Turn;
 - return typed Engine events through reusable opaque storage;
 - deliver tokens only through events;
 - keep public Engine handles opaque and behavioral constants fixed-width;
@@ -273,9 +273,9 @@ OgaResult* OgaRequestCancelTurn(
     uint64_t turn_id,
     bool* out_cancelled);
 
-OgaResult* OgaRequestRewindTo(
+OgaResult* OgaRequestRewindToStartOfTurn(
     OgaRequest* request,
-    uint64_t sequence_length);
+    uint64_t turn_id);
 
 OgaResult* OgaRequestClose(OgaRequest* request);
 
@@ -422,11 +422,11 @@ Assigned/Active -- Token event -------------------------------+
                                           | BeginTurn          |
                                           +-------------------+
 
-TurnComplete -- RewindTo(sequence_length) --> TurnComplete/Replaying
-                                                  |
-                                                  | BeginTurn
-                                                  v
-                                               Assigned
+TurnComplete -- RewindToStartOfTurn(turn_id) --> TurnComplete/Replaying
+                                                       |
+                                                       | BeginTurn
+                                                       v
+                                                    Assigned
 
 Any state -- Close --> Closed
 ```
@@ -434,36 +434,40 @@ Any state -- Close --> Closed
 There is no Request `Continue` operation. Initial input, tool results, and later user input all use
 `BeginTurn`.
 
-`OgaRequestRewindTo` is an owner-thread operation between Turns. It is valid only when:
+`OgaRequestRewindToStartOfTurn` is an owner-thread operation between Turns. It is valid only when:
 
 - the current Turn is `TurnComplete`;
 - that Turn did not finish with `Failed`;
 - every event for that Request has been delivered by `OgaEngineRun`;
-- `sequence_length` is in `[0, current_sequence_length]`; and
+- `turn_id` identifies a previously begun Turn that remains in the Request's active branch; and
 - the Request either remains resident or is a canceled, never-admitted Request that still has
   scheduler ownership.
 
 Queued and active Turns are rejected; rewind never implicitly cancels a Turn. A closed Request,
-failed Request, unknown/nonresident Request, out-of-range length, and a Request with an undelivered
+failed Request, unknown Turn ID, unexpected nonresident Request, and a Request with an undelivered
 event are all rejected before mutation. Rewind emits no event. Events already delivered remain
-immutable snapshots of the completed Turn; no undelivered event can survive to contradict the
+immutable snapshots of the completed attempt; no undelivered event can survive to contradict the
 rewound state.
 
-Rewind preserves the Request handle, the current Turn ID, the monotonic next-Turn ID, and the
-current Turn's historical finish reason. It truncates the Search sequence and host token mirror,
-adjusts current-Turn prompt/generated counters to the retained prefix, clears draft state, restores
-the per-request CPU or batched-sampler random stream to the retained token boundary, and resets
-guidance to the start state used by a later Turn. The next successful `BeginTurn` receives the next
-Turn ID as usual.
+Rewind retains the token prefix that existed immediately before the named Turn's successful
+`BeginTurn`. It discards that Turn and all later Turn boundaries from the active branch. The
+Request handle, the current completed attempt's historical Turn ID, and its finish reason remain
+observable until the next `BeginTurn`. Turn IDs are never reused: the next successful `BeginTurn`
+receives the monotonic next-Turn ID as usual. The implementation records one compact boundary per
+successful `BeginTurn`, not per-token random-state checkpoints.
 
-The implementation releases resident model state rather than attempting an in-place crop. On the
-dynamic path it atomically releases the complete paged block table and any paired fixed
-recurrent/convolution slot. The next `BeginTurn` re-admits the same Request and prefills the retained
-prefix plus the new Turn input, reconstructing paged KV and fixed state from tokens. This makes
-arbitrary earlier token boundaries safe even for fixed state and sliding-window rings and
-immediately returns all prior capacity to the pools. On the static path the same replay strategy is
-supported only when the Request is the sole resident row; a multi-row static rewind is rejected
-because one row cannot be detached from the shared contiguous cache allocation.
+Rewind clears speculative draft state and resets guidance to the start state used by a later Turn.
+It does not rewind sampling state. CPU and device stochastic sampling continue from their current
+random streams.
+
+The implementation releases all resident physical model state rather than attempting an in-place
+crop. On the dynamic path it atomically releases the complete paged KV block table, any paired fixed
+recurrent/convolution slot, and any auxiliary MTP state. The next `BeginTurn` re-admits the same
+Request and prefills the retained prefix together with the new Turn input, reconstructing paged KV,
+fixed state, and sliding-window rings from tokens. This immediately returns all prior physical
+capacity to the pools. On the static path the same replay strategy is supported only when the
+Request is the sole resident row; a multi-row static rewind is rejected because one row cannot be
+detached from the shared contiguous cache allocation.
 
 Classic `Generator::RewindToLength` remains a separate Generator API. Dynamic Engine transaction
 rollback also remains separate: rollback restores an in-flight step, whereas Request rewind acts
@@ -650,6 +654,7 @@ the classic Generator parameter type.
 - RAII `OgaEngineEventBuffer`, created once with `OgaEngine::CreateEventBuffer(capacity)`.
 - `OgaRequest::BeginTurn` returns `uint64_t`.
 - `OgaRequest::CancelTurn(uint64_t) -> bool`.
+- `OgaRequest::RewindToStartOfTurn(uint64_t)`.
 - `OgaEngine::Run(OgaEngineEventBuffer&)` returns the populated count.
 - `OgaEngineEventBuffer::Get(index)` returns a borrowed event pointer.
 - Event and usage wrappers expose getters only. `OgaEngineEvent::Request()` returns an optional
@@ -663,6 +668,7 @@ the classic Generator parameter type.
 - `Engine.create_request(params, options=None) -> Request`.
 - `Request.begin_turn(tokens, turn_options=None) -> int`.
 - `Request.cancel_turn(turn_id) -> bool`.
+- `Request.rewind_to_start_of_turn(turn_id)`.
 - `TurnOptions.set_stop_token_ids(token_id_sequences)` converts the ragged collection to a temporary
   `OgaSequences`; `TurnOptions.set_stop_strings(strings)` converts strings to a temporary
   `OgaStringArray`. The current C API returns the explicit not-implemented error for either

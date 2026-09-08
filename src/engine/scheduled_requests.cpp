@@ -291,13 +291,11 @@ std::vector<DeviceSpan<float>> ScheduledRequests::ProcessLogits() {
 std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
     std::vector<DeviceSpan<float>>& verify_rows,
     std::vector<std::vector<int32_t>>& selected_tokens,
-    std::vector<size_t>& accepted_draft_counts,
-    std::vector<std::vector<uint64_t>>& selected_rng_draw_counts) {
+    std::vector<size_t>& accepted_draft_counts) {
   std::vector<DeviceSpan<float>> sampled_rows;
   sampled_rows.reserve(requests_.size());
   selected_tokens.resize(requests_.size());
   accepted_draft_counts.assign(requests_.size(), 0);
-  selected_rng_draw_counts.resize(requests_.size());
 
   // Verification only needs each draft row's argmax. Reading a whole vocabulary row back to the host
   // costs about a megabyte and a stream synchronization per draft, which on a large-vocabulary model
@@ -356,15 +354,8 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
       requests_[i]->RewindDraftsForTransaction(0);
       const auto sample_target =
           [&](const TargetTokenSelection& selection) {
-            CountingRandomGenerator counted_rng{requests_[i]->rng_};
-            const int32_t token =
-                SampleCategoricalToken(
-                    selection.indices, selection.probs, counted_rng);
-            requests_[i]->rng_draw_count_ +=
-                counted_rng.DrawCount();
-            selected_rng_draw_counts[i].push_back(
-                requests_[i]->rng_draw_count_);
-            return token;
+            return SampleCategoricalToken(
+                selection.indices, selection.probs, requests_[i]->rng_);
           };
       size_t accepted_count = 0;
       while (accepted_count < draft_count &&
@@ -667,17 +658,8 @@ void ScheduledRequests::GenerateNextTokensForTransaction(
   auto verify_rows = ProcessLogits();
   std::vector<std::vector<int32_t>> selected_tokens;
   std::vector<size_t> accepted_draft_counts;
-  std::vector<std::vector<uint64_t>> selected_rng_draw_counts;
   auto logits = SelectSampledRows(
-      verify_rows, selected_tokens, accepted_draft_counts,
-      selected_rng_draw_counts);
-  for (size_t i = 0; i < selected_tokens.size(); ++i) {
-    if (selected_rng_draw_counts[i].size() !=
-        selected_tokens[i].size()) {
-      throw std::logic_error(
-          "Sampled draft verification lost a random draw boundary.");
-    }
-  }
+      verify_rows, selected_tokens, accepted_draft_counts);
   const bool guidance_applied = TryApplyBatchedGuidanceMasks(logits);
   results.assign(requests_.size(), RequestStepResult{});
   std::vector<bool> sampled_by_batched_sampler(requests_.size(), false);
@@ -774,9 +756,7 @@ void ScheduledRequests::GenerateNextTokensForTransaction(
           auto& request = requests_[active[row]];
           if (!request->BindNextTokensSlot(stage_tokens.subspan(row, 1)))
             throw std::logic_error("Sampled draft commit lost batched-search support.");
-          // The token was already selected from the Request's host RNG during sequential draft
-          // verification. This hook advances Search only; no scheduler-owned sampler draw occurred.
-          request->OnNextTokensSampled(false);
+          request->OnNextTokensSampled();
         }
         stage_tokens.CopyDeviceToCpu();
         for (size_t row = 0; row < active.size(); ++row) {
@@ -784,10 +764,7 @@ void ScheduledRequests::GenerateNextTokensForTransaction(
           auto stage_plan = plan.requests[request_index];
           if (stage + 1 == selected_tokens[request_index].size()) {
             requests_[request_index]->RecordSampledDraftAcceptance(
-                accepted_draft_counts[request_index],
-                std::span<const uint64_t>{
-                    selected_rng_draw_counts[request_index]}
-                    .first(accepted_draft_counts[request_index]));
+                accepted_draft_counts[request_index]);
           } else {
             stage_plan.sequence_length_before =
                 requests_[request_index]->CurrentSequenceLength() - 1;
@@ -808,10 +785,7 @@ void ScheduledRequests::GenerateNextTokensForTransaction(
           request->search_->CommitToken(selected_tokens[request_index][stage]);
           if (stage + 1 == selected_tokens[request_index].size()) {
             request->RecordSampledDraftAcceptance(
-                accepted_draft_counts[request_index],
-                std::span<const uint64_t>{
-                    selected_rng_draw_counts[request_index]}
-                    .first(accepted_draft_counts[request_index]));
+                accepted_draft_counts[request_index]);
             stage_plan = plan.requests[request_index];
           }
           const auto stage_result =

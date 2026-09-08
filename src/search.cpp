@@ -200,10 +200,9 @@ void GreedySearch_Cpu::CommitToken(int32_t token) {
     AppendNextTokensToSequences();
 }
 
-size_t GreedySearch_Cpu::SampleTopK(int k, float temperature, std::mt19937& rng) {
+void GreedySearch_Cpu::SampleTopK(int k, float temperature, std::mt19937& rng) {
   const int vocab_size = params_->config.model.vocab_size;
   SampledCategorical dist;  // reused across the batch loop
-  CountingRandomGenerator counted_rng{rng};
 
   for (size_t batch_id = 0; batch_id < params_->search.batch_size; batch_id++) {
     if (PadIfAlreadyEOS(batch_id)) {
@@ -211,18 +210,16 @@ size_t GreedySearch_Cpu::SampleTopK(int k, float temperature, std::mt19937& rng)
     }
     std::span<float> const scores = next_token_scores_.CpuSpan().subspan(batch_id * vocab_size, vocab_size);
     ComputeSampledCategorical({scores.data(), scores.size()}, k, /*top_p=*/0.0f, temperature, dist);
-    SetNextToken(batch_id, SampleCategoricalToken(dist.indices, dist.probs, counted_rng));
+    SetNextToken(batch_id, SampleCategoricalToken(dist.indices, dist.probs, rng));
   }
   if (!done_)
     AppendNextTokensToSequences();
-  return counted_rng.DrawCount();
 }
 
 // Top-P (nucleus) sampling; nucleus selection shared with speculative decoding via ComputeSampledCategorical.
-size_t GreedySearch_Cpu::SampleTopP(float p, float temperature, std::mt19937& rng) {
+void GreedySearch_Cpu::SampleTopP(float p, float temperature, std::mt19937& rng) {
   const int vocab_size = params_->config.model.vocab_size;
   SampledCategorical dist;  // reused across the batch loop
-  CountingRandomGenerator counted_rng{rng};
 
   for (size_t batch_id = 0; batch_id < params_->search.batch_size; batch_id++) {
     if (PadIfAlreadyEOS(batch_id)) {
@@ -232,18 +229,16 @@ size_t GreedySearch_Cpu::SampleTopP(float p, float temperature, std::mt19937& rn
     std::span<float> scores = next_token_scores_.CpuSpan().subspan(batch_id * vocab_size, vocab_size);
     // top_k=0 -> pure nucleus path.
     ComputeSampledCategorical({scores.data(), scores.size()}, /*top_k=*/0, p, temperature, dist);
-    SetNextToken(batch_id, SampleCategoricalToken(dist.indices, dist.probs, counted_rng));
+    SetNextToken(batch_id, SampleCategoricalToken(dist.indices, dist.probs, rng));
   }
   if (!done_)
     AppendNextTokensToSequences();
-  return counted_rng.DrawCount();
 }
 
-size_t GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature, std::mt19937& rng) {
+void GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature, std::mt19937& rng) {
   assert(temperature > 0.0f);
   const int vocab_size = params_->config.model.vocab_size;
   SampledCategorical dist;  // reused across the batch loop
-  CountingRandomGenerator counted_rng{rng};
 
   for (size_t batch_id = 0; batch_id < params_->search.batch_size; batch_id++) {
     if (PadIfAlreadyEOS(batch_id)) {
@@ -252,11 +247,10 @@ size_t GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature, std::
 
     std::span<float> scores = next_token_scores_.CpuSpan().subspan(batch_id * vocab_size, vocab_size);
     ComputeSampledCategorical({scores.data(), scores.size()}, k, p, temperature, dist);
-    SetNextToken(batch_id, SampleCategoricalToken(dist.indices, dist.probs, counted_rng));
+    SetNextToken(batch_id, SampleCategoricalToken(dist.indices, dist.probs, rng));
   }
   if (!done_)
     AppendNextTokensToSequences();
-  return counted_rng.DrawCount();
 }
 
 bool GreedySearch_Cpu::PadIfAlreadyEOS(size_t batch_id) {

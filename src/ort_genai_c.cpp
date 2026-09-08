@@ -1977,19 +1977,13 @@ OgaResult* OgaRequestCancelTurn(
   OGA_CATCH
 }
 
-OgaResult* OgaRequestRewindTo(
-    OgaRequest* request, uint64_t sequence_length) {
+OgaResult* OgaRequestRewindToStartOfTurn(
+    OgaRequest* request, uint64_t turn_id) {
   OGA_TRY
   if (!request) {
     throw std::runtime_error("request must not be null.");
   }
-  if (sequence_length > std::numeric_limits<size_t>::max()) {
-    throw std::overflow_error(
-        "sequence_length (" + std::to_string(sequence_length) +
-        ") exceeds the maximum internal size (" +
-        std::to_string(std::numeric_limits<size_t>::max()) + ").");
-  }
-  request->RewindTo(static_cast<size_t>(sequence_length));
+  request->RewindToStartOfTurn(turn_id);
   return nullptr;
   OGA_CATCH
 }

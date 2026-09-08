@@ -893,9 +893,9 @@ bool Engine::CancelRequest(const std::shared_ptr<Request>& request, uint64_t tur
   return true;
 }
 
-void Engine::RewindRequest(
+void Engine::RewindRequestToStartOfTurn(
     const std::shared_ptr<Request>& request,
-    size_t new_length) {
+    uint64_t turn_id) {
   ValidateOwnerThread();
   CompleteNonresidentClosedRequests();
   ReclaimAbandonedRequests();
@@ -917,15 +917,6 @@ void Engine::RewindRequest(
     throw std::runtime_error(
         "Cannot rewind a Request whose current turn failed.");
   }
-  const auto current_length = request->CurrentSequenceLength();
-  if (current_length < 0 ||
-      new_length > static_cast<size_t>(current_length)) {
-    throw std::runtime_error(
-        "Request rewind length (" + std::to_string(new_length) +
-        ") must be no greater than the current sequence length (" +
-        std::to_string(current_length) + ").");
-  }
-
   if (std::find_if(
           pending_events_.begin() +
               static_cast<ptrdiff_t>(pending_event_index_),
@@ -948,13 +939,8 @@ void Engine::RewindRequest(
   // Every fallible preparation completes before committed cache ownership is released. The cache
   // managers validate their complete release up front; their publication paths are no-throw.
   cache_manager_->ValidateRewind(request);
-  const uint64_t sampler_draw_count =
-      request->BatchedSamplerDrawCountAt(new_length);
-  auto sampler_state =
-      scheduler_->PrepareSamplingStateForRewind(
-          *request, sampler_draw_count);
   auto rewind_state =
-      request->PrepareRewind(new_length, std::move(sampler_state));
+      request->PrepareRewindToStartOfTurn(turn_id);
   // The auxiliary decoder mirrors a generated suffix that is no longer authoritative after
   // rewind. Release it before the target cache; its manager validates the complete deallocation
   // before publishing, while the already-validated target release below is allocation-free.

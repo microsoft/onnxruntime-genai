@@ -70,13 +70,8 @@ struct RequestRewindState {
 
   std::unique_ptr<Search> search;
   std::unique_ptr<ConstrainedLogitsProcessor> guidance_logits_processor;
-  std::unique_ptr<BatchedSamplerState> batched_sampler_state;
-  std::mt19937 rng;
   size_t sequence_length{};
-  size_t turn_prompt_tokens{};
-  size_t turn_generated_tokens{};
-  uint64_t rng_draw_count{};
-  uint64_t batched_sampler_draw_count{};
+  size_t retained_turn_count{};
 };
 
 /**
@@ -111,10 +106,9 @@ struct Request : std::enable_shared_from_this<Request>,
   uint64_t BeginTurn(
       std::span<const int32_t> tokens,
       std::optional<size_t> max_generated_tokens = std::nullopt);
-  // Rewinds a completed Request to a retained sequence prefix. The operation preserves Request and
-  // Turn identity, releases resident model state, and causes the next BeginTurn to replay the
-  // retained prefix before generating.
-  void RewindTo(size_t new_length);
+  // Rewinds a completed Request to the sequence boundary before the identified Turn began.
+  // Turn IDs are never reused; the next BeginTurn replays the retained prefix.
+  void RewindToStartOfTurn(uint64_t turn_id);
   void ValidateOwnerThread() const;
   void AttachToEngine(std::shared_ptr<Engine> engine) noexcept;
   bool BelongsTo(const Engine& engine) const noexcept;
@@ -244,9 +238,7 @@ struct Request : std::enable_shared_from_this<Request>,
   }
   bool IsStopToken(int32_t token) const;
   void RewindDraftsForTransaction(size_t accepted_count);
-  void RecordSampledDraftAcceptance(
-      size_t accepted_count,
-      std::span<const uint64_t> accepted_rng_draw_counts);
+  void RecordSampledDraftAcceptance(size_t accepted_count);
 
   void ValidateEngineCompatibility() const;
   void SaveStateForTransaction();
@@ -395,26 +387,20 @@ struct Request : std::enable_shared_from_this<Request>,
    *        speculative verification binds host-selected tokens through the same Search hook without
    *        advancing the batched-sampler stream.
    */
-  void OnNextTokensSampled(bool sampler_draw_consumed = true);
+  void OnNextTokensSampled();
 
   /**
    * @brief Returns this request's persistent random state for the given batched sampler.
    */
   BatchedSamplerState& SamplingState(BatchedSampler& sampler);
   void CommitSamplingState(std::unique_ptr<BatchedSamplerState> state) noexcept;
-  const BatchedSamplerState* SamplingStateForRewind() const noexcept {
-    return batched_sampler_state_.get();
-  }
-  uint64_t BatchedSamplerDrawCountAt(size_t sequence_length) const;
-  RequestRewindState PrepareRewind(
-      size_t new_length,
-      std::unique_ptr<BatchedSamplerState> batched_sampler_state) const;
+  RequestRewindState PrepareRewindToStartOfTurn(uint64_t turn_id) const;
   void CommitRewind(RequestRewindState&& state) noexcept;
 
  private:
-  struct RandomCheckpoint {
-    uint64_t rng_draw_count{};
-    uint64_t batched_sampler_draw_count{};
+  struct TurnBoundary {
+    uint64_t turn_id{};
+    size_t sequence_length{};
   };
 
   // The search sequence is partitioned at processed_sequence_length_: tokens before it already
@@ -433,9 +419,6 @@ struct Request : std::enable_shared_from_this<Request>,
       size_t max_total_tokens,
       size_t current_sequence_length,
       size_t token_count);
-  void AppendRandomCheckpoints(size_t count);
-  void RecordCurrentRandomCheckpoint() noexcept;
-
   int64_t processed_sequence_length_{};
   // Sequence length the application's tokens reach up to. Everything below it is prompt, so the
   // request is still prefilling while processed_sequence_length_ has not caught up with it.
@@ -449,6 +432,7 @@ struct Request : std::enable_shared_from_this<Request>,
   uint64_t next_turn_id_{1};
   bool has_current_turn_{};
   bool turn_id_exhausted_{};
+  std::vector<TurnBoundary> turn_boundaries_;
   GenerationFinishReason finish_reason_{GenerationFinishReason::None};
   // Drafts proposed for the next step, the ones the step in flight staged onto the sequence, and
   // the leading part of those the target model accepted.
@@ -458,13 +442,7 @@ struct Request : std::enable_shared_from_this<Request>,
   bool draft_verification_completed_generation_{};
   std::shared_ptr<GeneratorParams> params_;
   std::mt19937 rng_;
-  const std::mt19937 initial_rng_;
   std::mt19937 transaction_rng_;
-  uint64_t rng_draw_count_{};
-  uint64_t batched_sampler_draw_count_{};
-  uint64_t transaction_rng_draw_count_{};
-  uint64_t transaction_batched_sampler_draw_count_{};
-  std::vector<RandomCheckpoint> random_checkpoints_;
   int64_t transaction_processed_sequence_length_{};
   size_t transaction_tokens_host_size_{};
   std::unique_ptr<Search> search_;

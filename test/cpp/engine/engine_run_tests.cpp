@@ -1008,12 +1008,18 @@ TEST_F(EngineRunTest, StaticSingleRowRewindReleasesAndReplaysContiguousCache) {
   ASSERT_EQ(request->CurrentSequenceLength(),
             static_cast<int64_t>(prompt.size() + 2));
 
-  request->RewindTo(prompt.size());
+  const int64_t retained_length = request->CurrentSequenceLength();
+  const uint64_t discarded_turn =
+      request->BeginTurn(
+          std::array<int32_t, 1>{7}, std::optional<size_t>{1});
+  ASSERT_EQ(RunOne(*engine).request, request);
+  ASSERT_TRUE(request->IsTurnComplete());
 
-  EXPECT_EQ(request->CurrentSequenceLength(),
-            static_cast<int64_t>(prompt.size()));
+  request->RewindToStartOfTurn(discarded_turn);
+
+  EXPECT_EQ(request->CurrentSequenceLength(), retained_length);
   EXPECT_EQ(request->ProcessedSequenceLength(), 0);
-  EXPECT_EQ(request->CurrentTurnId(), 1u);
+  EXPECT_EQ(request->CurrentTurnId(), discarded_turn);
   EXPECT_EQ(cache_observer->ResidentRequestCount(), 0u);
   EXPECT_FALSE(engine->HasPendingRequests());
 
@@ -1022,17 +1028,17 @@ TEST_F(EngineRunTest, StaticSingleRowRewindReleasesAndReplaysContiguousCache) {
   EXPECT_EQ(
       request->BeginTurn(
           continuation, std::optional<size_t>{1}),
-      2u);
+      3u);
   const auto continued = RunOne(*engine);
   EXPECT_EQ(continued.request, request);
   EXPECT_EQ(continued.token, 6);
   EXPECT_NE(continued.flags & EngineEventFlagTurnFinished, 0u);
   EXPECT_EQ(request->CurrentSequenceLength(),
             static_cast<int64_t>(
-                prompt.size() + continuation.size() + 1));
+                retained_length + continuation.size() + 1));
   EXPECT_EQ(request->ProcessedSequenceLength(),
             static_cast<int64_t>(
-                prompt.size() + continuation.size()));
+                retained_length + continuation.size()));
   EXPECT_EQ(cache_observer->ResidentRequestCount(), 1u);
 }
 
@@ -1060,7 +1066,7 @@ TEST_F(EngineRunTest, StaticMultiRowRewindIsRejectedWithoutMutation) {
   ASSERT_EQ(cache->ResidentRequestCount(), 2u);
   const auto before = first->Snapshot();
 
-  EXPECT_THROW(first->RewindTo(2), std::runtime_error);
+  EXPECT_THROW(first->RewindToStartOfTurn(1), std::runtime_error);
 
   const auto after = first->Snapshot();
   EXPECT_EQ(after.current_sequence_length,
@@ -1890,71 +1896,6 @@ TEST_F(EngineRunTest, SampledSpeculativeRunKeepsAcceptedPrefixAndCorrection) {
   EXPECT_EQ(stats.draft_tokens_accepted, 2u);
 }
 
-TEST_F(EngineRunTest, SampledSpeculativeRewindRestoresEachAcceptedTokenBoundary) {
-  const int32_t eos = EosToken(*model_);
-  const int32_t filler = eos == 5 ? 6 : 5;
-  const auto prompt = Prompt(10);
-  const auto make_sampled_params = [&]() {
-    auto params = MakeGreedyParams(*model_);
-    params->search.do_sample = true;
-    params->search.top_k = 3;
-    params->search.temperature = 0.01f;
-    params->search.random_seed = 1234;
-    return params;
-  };
-
-  // This request stops after the same two sampling operations that reach the retained prefix:
-  // one ordinary prefill result, then the first token that the speculative request accepts.
-  auto reference_engine =
-      MakeDoublesEngine(model_, /*capacity=*/8, filler);
-  auto reference_params = make_sampled_params();
-  auto reference =
-      CreateEngineRequest(reference_engine.engine, *reference_params);
-  reference->BeginTurn(prompt, std::optional<size_t>{2});
-  ASSERT_EQ(RunOne(*reference_engine.engine).request, reference);
-  reference_engine.executor->SetForcedToken(11);
-  const auto reference_terminal = RunOne(*reference_engine.engine);
-  ASSERT_EQ(reference_terminal.request, reference);
-  ASSERT_NE(reference_terminal.flags & EngineEventFlagTurnFinished, 0u);
-  const size_t retained_length = prompt.size() + 2;
-  ASSERT_EQ(reference->CurrentSequenceLength(),
-            static_cast<int64_t>(retained_length));
-  auto reference_state =
-      reference->PrepareRewind(retained_length, nullptr);
-
-  auto speculative_engine =
-      MakeDoublesEngine(model_, /*capacity=*/8, filler);
-  speculative_engine.cache->SetMaxDraftTokensPerStep(3);
-  auto speculative_params = make_sampled_params();
-  auto request =
-      CreateEngineRequest(speculative_engine.engine, *speculative_params);
-  request->BeginTurn(prompt, std::optional<size_t>{4});
-  ASSERT_EQ(RunOne(*speculative_engine.engine).request, request);
-  request->SetDraftTokens(std::array<int32_t, 2>{11, 12});
-  speculative_engine.executor->SetVerifyRowTokens({11, 12, 21});
-
-  std::array<EngineEvent, 3> events;
-  ASSERT_EQ(speculative_engine.engine->Run(events), 3u);
-  ASSERT_TRUE(request->IsTurnComplete());
-  ASSERT_EQ(request->CurrentSequenceLength(),
-            static_cast<int64_t>(prompt.size() + 4));
-
-  auto retained_state =
-      request->PrepareRewind(retained_length, nullptr);
-  auto final_state = request->PrepareRewind(
-      static_cast<size_t>(request->CurrentSequenceLength()), nullptr);
-  EXPECT_EQ(retained_state.rng_draw_count,
-            reference_state.rng_draw_count);
-  EXPECT_EQ(retained_state.rng, reference_state.rng);
-  EXPECT_GT(final_state.rng_draw_count,
-            retained_state.rng_draw_count);
-  EXPECT_EQ(retained_state.batched_sampler_draw_count, 0u);
-
-  EXPECT_NO_THROW(request->RewindTo(retained_length));
-  EXPECT_EQ(request->CurrentSequenceLength(),
-            static_cast<int64_t>(retained_length));
-}
-
 TEST_F(EngineRunTest, SampledSpeculativeBatchHandlesMixedDraftLengths) {
   const int32_t eos = EosToken(*model_);
   const int32_t filler = eos == 5 ? 6 : 5;
@@ -2279,7 +2220,7 @@ TEST_F(EngineRunTest, RolledBackSpeculativeRunLeavesProposalPendingAndRetryable)
   EXPECT_EQ(request->TurnGeneratedTokens(), generated_after_prefill + 3);
 }
 
-TEST_F(EngineRunTest, RolledBackSampledSpeculativeRunRestoresRewindCheckpoints) {
+TEST_F(EngineRunTest, RolledBackSampledSpeculativeRunRestoresRequestState) {
   const int32_t eos = EosToken(*model_);
   const int32_t filler = eos == 5 ? 6 : 5;
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, filler);
@@ -2303,8 +2244,6 @@ TEST_F(EngineRunTest, RolledBackSampledSpeculativeRunRestoresRewindCheckpoints) 
   std::array<EngineEvent, 4> events;
   ASSERT_EQ(engine.engine->Run(events), 2u);
   const auto before = sampled->Snapshot();
-  auto before_random = sampled->PrepareRewind(
-      static_cast<size_t>(before.current_sequence_length), nullptr);
 
   sampled->SetDraftTokens(std::array<int32_t, 2>{11, 12});
   engine.executor->SetVerifyRowTokens({11, 12, 21, filler});
@@ -2318,22 +2257,10 @@ TEST_F(EngineRunTest, RolledBackSampledSpeculativeRunRestoresRewindCheckpoints) 
   EXPECT_EQ(restored.processed_sequence_length,
             before.processed_sequence_length);
   EXPECT_EQ(sampled->PendingDraftTokenCount(), 2u);
-  auto restored_random = sampled->PrepareRewind(
-      static_cast<size_t>(restored.current_sequence_length), nullptr);
-  EXPECT_EQ(restored_random.rng_draw_count,
-            before_random.rng_draw_count);
-  EXPECT_EQ(restored_random.rng, before_random.rng);
-  EXPECT_EQ(restored_random.batched_sampler_draw_count,
-            before_random.batched_sampler_draw_count);
 
   control->fail = false;
   ASSERT_EQ(engine.engine->Run(events), 4u);
   ASSERT_TRUE(sampled->IsTurnComplete());
-  const size_t retained_length =
-      static_cast<size_t>(before.current_sequence_length) + 1;
-  EXPECT_NO_THROW(sampled->RewindTo(retained_length));
-  EXPECT_EQ(sampled->CurrentSequenceLength(),
-            static_cast<int64_t>(retained_length));
 }
 
 TEST_F(EngineRunTest, RolledBackTerminalDraftCanRetryWithoutProposal) {
@@ -2579,8 +2506,8 @@ TEST_F(EngineRunTest, RewindDropsTheMtpShadowAndRebuildsAfterReplay) {
   ASSERT_TRUE(turn_finished);
   ASSERT_EQ(engine.mtp_cache->AllocatedCount(), 1u);
 
-  request->RewindTo(2);
-  EXPECT_EQ(request->CurrentSequenceLength(), 2);
+  request->RewindToStartOfTurn(1);
+  EXPECT_EQ(request->CurrentSequenceLength(), 0);
   EXPECT_EQ(request->ProcessedSequenceLength(), 0);
   EXPECT_EQ(engine.cache->AllocatedCount(), 0u);
   EXPECT_EQ(engine.mtp_cache->AllocatedCount(), 0u);
@@ -2653,7 +2580,7 @@ TEST_F(EngineRunTest, RewindRejectsUndrainedEventsForOnlyThatRequest) {
   ASSERT_TRUE(second->IsTurnComplete());
   const auto second_before = second->Snapshot();
 
-  EXPECT_THROW(second->RewindTo(2), std::runtime_error);
+  EXPECT_THROW(second->RewindToStartOfTurn(1), std::runtime_error);
   const auto second_rejected = second->Snapshot();
   EXPECT_EQ(second_rejected.current_sequence_length,
             second_before.current_sequence_length);
@@ -2662,12 +2589,12 @@ TEST_F(EngineRunTest, RewindRejectsUndrainedEventsForOnlyThatRequest) {
 
   // The retained event belongs only to the second Request, so it does not prevent rewinding the
   // first Request whose terminal event was already delivered.
-  EXPECT_NO_THROW(first->RewindTo(2));
-  EXPECT_EQ(first->CurrentSequenceLength(), 2);
+  EXPECT_NO_THROW(first->RewindToStartOfTurn(1));
+  EXPECT_EQ(first->CurrentSequenceLength(), 0);
   EXPECT_EQ(RunOne(*engine.engine).request, second);
 
-  EXPECT_NO_THROW(second->RewindTo(2));
-  EXPECT_EQ(second->CurrentSequenceLength(), 2);
+  EXPECT_NO_THROW(second->RewindToStartOfTurn(1));
+  EXPECT_EQ(second->CurrentSequenceLength(), 0);
   EXPECT_FALSE(engine.engine->HasPendingRequests());
   EXPECT_EQ(RunOne(*engine.engine).flags,
             EngineEventFlagNone);
@@ -2686,7 +2613,7 @@ TEST_F(EngineRunTest, RewindRejectsFailedRequestWithoutMutation) {
             GenerationFinishReason::Failed);
   const auto before = request->Snapshot();
 
-  EXPECT_THROW(request->RewindTo(0), std::runtime_error);
+  EXPECT_THROW(request->RewindToStartOfTurn(1), std::runtime_error);
 
   const auto after = request->Snapshot();
   EXPECT_EQ(after.status, before.status);
@@ -2726,7 +2653,7 @@ TEST_F(EngineRunTest, DynamicCompositeRewindReleasesAndRebuildsAllState) {
   ASSERT_TRUE(before_fixed.has_value());
   EXPECT_EQ(before_fixed->committed_slots, 1u);
 
-  request->RewindTo(2);
+  request->RewindToStartOfTurn(1);
 
   const auto released_cache = engine.cache->Snapshot();
   const auto released_fixed =
@@ -2738,7 +2665,7 @@ TEST_F(EngineRunTest, DynamicCompositeRewindReleasesAndRebuildsAllState) {
   EXPECT_EQ(released_fixed->committed_slots, 0u);
   EXPECT_EQ(released_fixed->free_slots,
             released_fixed->capacity);
-  EXPECT_EQ(request->CurrentSequenceLength(), 2);
+  EXPECT_EQ(request->CurrentSequenceLength(), 0);
   EXPECT_EQ(request->ProcessedSequenceLength(), 0);
   EXPECT_EQ(request->CurrentTurnId(), 1u);
   EXPECT_FALSE(engine.engine->HasPendingRequests());
@@ -2758,8 +2685,8 @@ TEST_F(EngineRunTest, DynamicCompositeRewindReleasesAndRebuildsAllState) {
   EXPECT_EQ(continued.token, 6);
   EXPECT_NE(continued.flags & EngineEventFlagTurnFinished,
             0u);
-  EXPECT_EQ(request->CurrentSequenceLength(), 4);
-  EXPECT_EQ(request->ProcessedSequenceLength(), 3);
+  EXPECT_EQ(request->CurrentSequenceLength(), 2);
+  EXPECT_EQ(request->ProcessedSequenceLength(), 1);
 
   const auto rebuilt_cache = engine.cache->Snapshot();
   const auto rebuilt_fixed =
@@ -2767,12 +2694,12 @@ TEST_F(EngineRunTest, DynamicCompositeRewindReleasesAndRebuildsAllState) {
   ASSERT_EQ(rebuilt_cache.requests.size(), 1u);
   EXPECT_EQ(rebuilt_cache.requests[0].request_id,
             request.get());
-  EXPECT_EQ(rebuilt_cache.requests[0].used_slots, 3u);
+  EXPECT_EQ(rebuilt_cache.requests[0].used_slots, 1u);
   ASSERT_TRUE(rebuilt_fixed.has_value());
   EXPECT_EQ(rebuilt_fixed->committed_slots, 1u);
   const auto& rebuilt_slot =
       FixedSlotFor(*rebuilt_fixed, request.get());
-  EXPECT_EQ(rebuilt_slot.committed_tokens, 3u);
+  EXPECT_EQ(rebuilt_slot.committed_tokens, 1u);
 }
 
 TEST_F(EngineRunTest, DensePagedModelHasNoFixedStateReservation) {
