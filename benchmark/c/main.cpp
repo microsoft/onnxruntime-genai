@@ -220,12 +220,13 @@ void RunBenchmark(const benchmark::Options& opts) {
     }
     if (effective_count > 0) {
       prompt_tokens.assign(encoded_data, encoded_data + effective_count);
+      // Reflect the tokens actually used (after truncation) in the displayed prompt.
+      prompt = std::string{tokenizer->Decode(prompt_tokens.data(), prompt_tokens.size())};
     } else {
       prompt_tokens.clear();
+      prompt.clear();
     }
     num_prompt_tokens = effective_count;
-    // Reflect the tokens actually used (after truncation) in the displayed prompt.
-    prompt = std::string{tokenizer->Decode(prompt_tokens.data(), prompt_tokens.size())};
   }
 
   const size_t num_tokens = num_prompt_tokens + opts.num_tokens_to_generate;
@@ -269,10 +270,11 @@ void RunBenchmark(const benchmark::Options& opts) {
     // produce more than the exact prompt length requested with -l.
     if (num_prompt_tokens > 0) {
       prompt_tokens.assign(output_sequence_data, output_sequence_data + num_prompt_tokens);
+      prompt = std::string{tokenizer->Decode(prompt_tokens.data(), prompt_tokens.size())};
     } else {
       prompt_tokens.clear();
+      prompt.clear();
     }
-    prompt = std::string{tokenizer->Decode(prompt_tokens.data(), prompt_tokens.size())};
   }
 
   auto prompt_sequences = OgaSequences::Create();
