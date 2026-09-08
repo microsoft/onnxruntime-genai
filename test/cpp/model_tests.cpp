@@ -1,17 +1,18 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <array>
 #include <cstring>  // for memcmp
+#include <filesystem>
 #include <iostream>
 #include <random>
-#include <filesystem>
 #include <string>
+
 #include <gtest/gtest.h>
 
 #include "span.h"
 #define OGA_USE_SPAN 1
 #include <ort_genai.h>
-#include <gtest/gtest.h>
 
 #include "models/model.h"
 #include "models/qwen_vl_model.h"
@@ -30,10 +31,16 @@ TEST(ModelTests, QwenVisionEmbeddingShapeValidation) {
       std::array<int64_t, 2>{1437, 4096}, 1437 * 4096,
       std::array<int64_t, 2>{1426, 4096}, 1437));
 
-  EXPECT_THROW(Generators::ValidateVisionEmbeddingShapes(
-                   std::array<int64_t, 3>{1, 1, 4096}, 4096,
-                   std::array<int64_t, 2>{1426, 4096}, 1437),
-               std::runtime_error);
+  try {
+    Generators::ValidateVisionEmbeddingShapes(
+        std::array<int64_t, 3>{1, 1, 4096}, 4096,
+        std::array<int64_t, 2>{1426, 4096}, 1437);
+    FAIL() << "Expected insufficient embedding capacity to be rejected";
+  } catch (const std::runtime_error& error) {
+    EXPECT_STREQ(error.what(),
+                 "Vision embedding injection: embeddings output cannot hold all input tokens "
+                 "(input_token_count=1437, capacity=1)");
+  }
   EXPECT_THROW(Generators::ValidateVisionEmbeddingShapes(
                    std::array<int64_t, 1>{4096}, 4096,
                    std::array<int64_t, 2>{1, 4096}, 1),

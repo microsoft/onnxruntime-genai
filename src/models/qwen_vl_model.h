@@ -1,5 +1,7 @@
 #pragma once
 
+#include "span.h"
+
 #include "decoder_only_pipeline.h"
 #include "qwen_vl_vision.h"
 
@@ -24,8 +26,12 @@ inline void ValidateVisionEmbeddingShapes(std::span<const int64_t> embeddings_sh
     throw std::runtime_error("Vision embedding injection: dimension mismatch - vision_dim=" + std::to_string(vision_dim) +
                              ", embedding_dim=" + std::to_string(embedding_dim));
   }
-  if (input_token_count > embeddings_element_count / static_cast<size_t>(embedding_dim)) {
-    throw std::runtime_error("Vision embedding injection: embeddings output cannot hold all input tokens");
+  const size_t token_capacity = embeddings_element_count / static_cast<size_t>(embedding_dim);
+  if (input_token_count > token_capacity) {
+    throw std::runtime_error(
+        "Vision embedding injection: embeddings output cannot hold all input tokens "
+        "(input_token_count=" +
+        std::to_string(input_token_count) + ", capacity=" + std::to_string(token_capacity) + ")");
   }
 }
 
