@@ -55,6 +55,7 @@ def _composite(aux_layers=AUX_LAYERS, use_paged_attention=True):
         aux_hidden_state_layers=list(aux_layers),
         num_kv_heads=2,
         head_size=128,
+        num_layers=32,
         filename="model.onnx",
         attention_attrs={"paged_block_size": 256},
         context_length=32768,
@@ -95,6 +96,26 @@ def test_matching_tap_layers_are_accepted(tmp_path):
     model.make_dflash2_init(io_dtype=None, extra_options={"dflash2_path": _draft_checkpoint(tmp_path)})
 
     assert model.dflash2_attrs["num_draft_tokens"] is None
+
+
+def test_checkpoint_must_define_target_layers(tmp_path):
+    model = _composite(aux_layers=[])
+
+    with pytest.raises(ValueError, match="at least one target_layer_ids entry"):
+        model.make_dflash2_init(
+            io_dtype=None,
+            extra_options={"dflash2_path": _draft_checkpoint(tmp_path, target_layer_ids=[])},
+        )
+
+
+def test_checkpoint_cannot_target_an_unexposable_layer(tmp_path):
+    model = _composite(aux_layers=[32])
+
+    with pytest.raises(ValueError, match=r"target_layer_ids must lie in \[0, 31\)"):
+        model.make_dflash2_init(
+            io_dtype=None,
+            extra_options={"dflash2_path": _draft_checkpoint(tmp_path, target_layer_ids=[31])},
+        )
 
 
 def test_draft_token_count_can_be_overridden(tmp_path):

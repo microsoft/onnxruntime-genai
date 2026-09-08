@@ -1062,6 +1062,26 @@ class Qwen35MoEModel(MTPModel):
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
         self.decoder.save_processing(model_name_or_path, extra_kwargs, out_dir)
 
+    def require_specforge_aux_taps(self, target_layer_ids, drafter_name):
+        if not target_layer_ids:
+            raise ValueError(f"The {drafter_name} checkpoint must define at least one target_layer_ids entry.")
+
+        aux_layers = [layer_id + 1 for layer_id in target_layer_ids]
+        untappable = [layer_id - 1 for layer_id in aux_layers if not 1 <= layer_id < self.decoder.num_layers]
+        if untappable:
+            raise ValueError(
+                f"The {drafter_name} checkpoint targets decoder layers {untappable}, whose outputs the exporter "
+                f"cannot expose; target_layer_ids must lie in [0, {self.decoder.num_layers - 1})."
+            )
+
+        expected = ",".join(str(layer_id) for layer_id in aux_layers)
+        actual = ",".join(str(layer_id) for layer_id in self.decoder.aux_hidden_state_layers)
+        if actual != expected:
+            raise ValueError(
+                f"The {drafter_name} drafter needs aux_hidden_state_layers={expected} on the main model, "
+                f"got '{actual}'."
+            )
+
     def make_dflash2_init(self, io_dtype, extra_options):
         """DFlash 2 block drafter, exported as an auxiliary ``dflash2.onnx``.
 
@@ -1099,12 +1119,7 @@ class Qwen35MoEModel(MTPModel):
                 f"dflash2_num_draft_tokens must not exceed the drafter checkpoint limit ({checkpoint_draft_limit})."
             )
         target_layer_ids = dflash_config["target_layer_ids"]
-        expected = ",".join(str(i + 1) for i in target_layer_ids)
-        actual = ",".join(str(i) for i in self.decoder.aux_hidden_state_layers)
-        if actual != expected:
-            raise ValueError(
-                f"The DFlash 2 drafter needs aux_hidden_state_layers={expected} on the main model, got '{actual}'."
-            )
+        self.require_specforge_aux_taps(target_layer_ids, "DFlash 2")
 
     def make_dflash2_model(self, input_path):
         if not self.dflash2_path:
@@ -1204,12 +1219,7 @@ class Qwen35MoEModel(MTPModel):
         }
 
         target_layer_ids = draft_config["dflash_config"]["target_layer_ids"]
-        expected = ",".join(str(i + 1) for i in target_layer_ids)
-        actual = ",".join(str(i) for i in self.decoder.aux_hidden_state_layers)
-        if actual != expected:
-            raise ValueError(
-                f"The DSpark drafter needs aux_hidden_state_layers={expected} on the main model, got '{actual}'."
-            )
+        self.require_specforge_aux_taps(target_layer_ids, "DSpark")
 
     def make_dspark_model(self, input_path):
         if not self.dspark_path:
