@@ -19,6 +19,9 @@ struct Options {
   // When a text prompt (--prompt/--prompt_file) is combined with -l/--prompt_length,
   // holds the number of tokens to truncate the encoded prompt to.
   std::optional<size_t> prompt_truncate_tokens{};
+  // When set, verbose mode prints only the last min(prompt_size, value) characters
+  // of the input prompt; unset prints the entire prompt.
+  std::optional<size_t> prompt_print_chars{};
   size_t num_tokens_to_generate{128};
   size_t batch_size{1};
   size_t num_iterations{5};

@@ -48,6 +48,9 @@ namespace {
     << "        --prompt_file).\n"
     << "      Note: --prompt, --prompt_file, and --use_random_tokens are mutually exclusive;\n"
     << "        --use_random_tokens requires --prompt_length.\n"
+    << "      --prompt_print_chars <number>\n"
+    << "        In verbose mode, print only the last min(prompt_size, number) characters of\n"
+    << "        the input prompt. Default: print the entire prompt.\n"
     << "    -g,--generation_length <number>\n"
     << "      Number of tokens to generate. Default: " << defaults.num_tokens_to_generate << "\n"
     << "    -r,--repetitions <number>\n"
@@ -153,6 +156,8 @@ Options ParseOptionsFromCommandLine(int argc, const char* const* argv) {
         if (prompt_content.has_value())
           throw std::runtime_error("--prompt and --prompt_file are mutually exclusive.");
         prompt_content = ReadFileContent(next_arg(i));
+      } else if (arg == "--prompt_print_chars") {
+        opts.prompt_print_chars = ParseNumber<size_t>(next_arg(i));
       } else if (arg == "-g" || arg == "--generation_length") {
         opts.num_tokens_to_generate = ParseNumber<size_t>(next_arg(i));
       } else if (arg == "-r" || arg == "--repetitions") {

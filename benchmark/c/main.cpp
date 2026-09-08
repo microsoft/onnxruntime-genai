@@ -321,12 +321,12 @@ void RunBenchmark(const benchmark::Options& opts) {
         std::cout << "[PROMPT] random token IDs in [0, 99], batch_size=" << opts.batch_size
                   << ", tokens per sequence=" << num_prompt_tokens << "\n";
       } else {
-        // Only show the tail of very large prompts to keep output readable.
-        constexpr size_t kPromptPrintLimit = 256;
+        // Print the whole prompt by default; --prompt_print_chars N limits output
+        // to the last min(prompt_size, N) characters.
         std::string_view prompt_view{prompt};
         std::string prefix;
-        if (prompt_view.size() > kPromptPrintLimit) {
-          prompt_view = prompt_view.substr(prompt_view.size() - kPromptPrintLimit);
+        if (opts.prompt_print_chars.has_value() && prompt_view.size() > *opts.prompt_print_chars) {
+          prompt_view = prompt_view.substr(prompt_view.size() - *opts.prompt_print_chars);
           prefix = "...";
         }
         std::cout << "[PROMPT BEGIN]" << prefix << prompt_view << "[PROMPT END]\n";
