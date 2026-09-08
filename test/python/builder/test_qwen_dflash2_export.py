@@ -15,6 +15,7 @@ from models.builders.mtp import MTPModel
 from models.builders.qwen import Qwen35MoEModel
 
 TARGET_LAYER_IDS = [1, 11, 21]
+AUX_LAYERS = [layer_id + 1 for layer_id in TARGET_LAYER_IDS]
 
 
 def _draft_checkpoint(tmp_path, target_layer_ids=TARGET_LAYER_IDS):
@@ -45,7 +46,7 @@ def _draft_checkpoint(tmp_path, target_layer_ids=TARGET_LAYER_IDS):
     return str(draft_dir)
 
 
-def _composite(aux_layers=TARGET_LAYER_IDS, use_paged_attention=True):
+def _composite(aux_layers=AUX_LAYERS, use_paged_attention=True):
     model = object.__new__(Qwen35MoEModel)
     model.dflash2 = None
     model.dflash2_shared_initializers = []
@@ -54,6 +55,7 @@ def _composite(aux_layers=TARGET_LAYER_IDS, use_paged_attention=True):
         aux_hidden_state_layers=list(aux_layers),
         num_kv_heads=2,
         head_size=128,
+        num_layers=32,
         filename="model.onnx",
         attention_attrs={"paged_block_size": 256},
         context_length=32768,
@@ -78,9 +80,9 @@ def test_drafter_requires_paged_attention(tmp_path):
         model.make_dflash2_init(io_dtype=None, extra_options={"dflash2_path": _draft_checkpoint(tmp_path)})
 
 
-# The drafter reads the target's residual streams by position, so a tap set that does not match
-# the checkpoint's target_layer_ids silently feeds it the wrong tensors.
-@pytest.mark.parametrize("aux_layers", [[1, 11], [1, 11, 22], [21, 11, 1], []])
+# SpecForge target_layer_ids name layer outputs, while aux_hidden_state_layers names the residual
+# entering a layer. Passing the checkpoint IDs through unchanged silently selects the prior outputs.
+@pytest.mark.parametrize("aux_layers", [TARGET_LAYER_IDS, [2, 12], [2, 12, 23], [22, 12, 2], []])
 def test_mismatched_tap_layers_are_rejected(tmp_path, aux_layers):
     model = _composite(aux_layers=aux_layers)
 
@@ -94,6 +96,26 @@ def test_matching_tap_layers_are_accepted(tmp_path):
     model.make_dflash2_init(io_dtype=None, extra_options={"dflash2_path": _draft_checkpoint(tmp_path)})
 
     assert model.dflash2_attrs["num_draft_tokens"] is None
+
+
+def test_checkpoint_must_define_target_layers(tmp_path):
+    model = _composite(aux_layers=[])
+
+    with pytest.raises(ValueError, match="at least one target_layer_ids entry"):
+        model.make_dflash2_init(
+            io_dtype=None,
+            extra_options={"dflash2_path": _draft_checkpoint(tmp_path, target_layer_ids=[])},
+        )
+
+
+def test_checkpoint_cannot_target_an_unexposable_layer(tmp_path):
+    model = _composite(aux_layers=[32])
+
+    with pytest.raises(ValueError, match=r"target_layer_ids must lie in \[0, 31\)"):
+        model.make_dflash2_init(
+            io_dtype=None,
+            extra_options={"dflash2_path": _draft_checkpoint(tmp_path, target_layer_ids=[31])},
+        )
 
 
 def test_draft_token_count_can_be_overridden(tmp_path):
@@ -142,7 +164,7 @@ def test_genai_config_gains_the_drafter_and_the_target_tap(tmp_path):
     config = json.loads(config_path.read_text())
     assert config["model"]["decoder"]["outputs"]["aux_hidden_states"] == "aux_hidden_states"
     assert config["model"]["dflash2"]["filename"] == "dflash2.onnx"
-    assert config["model"]["dflash2"]["aux_hidden_state_layers"] == TARGET_LAYER_IDS
+    assert config["model"]["dflash2"]["aux_hidden_state_layers"] == AUX_LAYERS
 
 
 def test_shared_initializers_are_recorded_once_on_both_sides(tmp_path):
