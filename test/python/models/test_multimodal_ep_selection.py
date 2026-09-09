@@ -12,6 +12,17 @@ def test_explicit_multimodal_providers_keep_cpu(monkeypatch):
     assert utils.multimodal_test_devices() == ("cpu", "cuda", "webgpu")
 
 
+def test_webgpu_fixture_options_enable_gpu_position_casts():
+    assert utils.multimodal_provider_options("webgpu") == {
+        "device_filtering_options": {"hardware_device_type": "gpu"},
+        "enableInt64": "1",
+    }
+    assert utils.multimodal_provider_options("cuda") == {
+        "device_filtering_options": {"hardware_device_type": "gpu"},
+    }
+    assert utils.multimodal_provider_options("cpu") == {}
+
+
 @pytest.mark.parametrize("value", ["", "cpu,", "unknown", "dml"])
 def test_unknown_or_unsupported_multimodal_provider_fails(monkeypatch, value):
     monkeypatch.setenv("ORTGENAI_MULTIMODAL_TEST_EPS", value)

@@ -60,7 +60,7 @@ def _text_embedding_nodes():
     ]
 
 
-def make_embedding_model(family):
+def make_embedding_model(family, *, device="cpu"):
     nodes = _text_embedding_nodes()
     nodes.extend(
         [
@@ -69,8 +69,20 @@ def make_embedding_model(family):
                 ["input_ids", "placeholder"],
                 ["is_image"],
             ),
-            helper.make_node("Cast", ["is_image"], ["image_mask"], to=T.INT32),
-            helper.make_node("CumSum", ["image_mask", "sequence_axis"], ["image_indices"]),
+            helper.make_node("Cast", ["is_image"], ["image_mask"], to=T.FLOAT if device == "webgpu" else T.INT32),
+            helper.make_node(
+                "CumSum",
+                ["image_mask", "sequence_axis"],
+                ["float_image_indices" if device == "webgpu" else "image_indices"],
+            ),
+        ]
+    )
+    if device == "webgpu":
+        # The CI WebGPU plugin registers only floating-point CumSum. Counts up to
+        # the 256-token context limit are exact even after GQA's FP16 conversion.
+        nodes.append(helper.make_node("Cast", ["float_image_indices"], ["image_indices"], to=T.INT32))
+    nodes.extend(
+        [
             helper.make_node("Where", ["is_image", "image_indices", "zero_int"], ["safe_indices"]),
             # Index zero also makes empty image_features safe during text-only decode.
             helper.make_node("Concat", ["empty_feature", "image_features"], ["padded_features"], axis=0),
@@ -135,7 +147,7 @@ def make_vision_model(family, *, fail_on_negative_pixels=False):
     )
 
 
-def make_decoder_model(family):
+def make_decoder_model(family, *, device="cpu"):
     qwen = family in QWEN_FAMILIES
     text_only = family == "llama"
     nodes = _text_embedding_nodes() if text_only else []
@@ -178,8 +190,29 @@ def make_decoder_model(family):
         [
             helper.make_node("Add", ["total_key", "total_value"], ["history"]),
             helper.make_node("Cast", ["history"], ["integer_history"], to=T.INT32),
-            helper.make_node("Mod", ["integer_history", "sixteen"], ["target_mod"]),
-            helper.make_node("Cast", ["target_mod"], ["float_target"], to=T.FLOAT),
+        ]
+    )
+    if device == "webgpu":
+        # WebGPU has floating-point CumSum, but no Mod kernel. Preserve the
+        # truncating cast and signed modulo using exact power-of-two arithmetic.
+        nodes.extend(
+            [
+                helper.make_node("Cast", ["integer_history"], ["truncated_history"], to=T.FLOAT),
+                helper.make_node("Div", ["truncated_history", "sixteen"], ["target_quotient"]),
+                helper.make_node("Floor", ["target_quotient"], ["target_floor"]),
+                helper.make_node("Mul", ["target_floor", "sixteen"], ["target_multiple"]),
+                helper.make_node("Sub", ["truncated_history", "target_multiple"], ["float_target"]),
+            ]
+        )
+    else:
+        nodes.extend(
+            [
+                helper.make_node("Mod", ["integer_history", "sixteen"], ["target_mod"]),
+                helper.make_node("Cast", ["target_mod"], ["float_target"], to=T.FLOAT),
+            ]
+        )
+    nodes.extend(
+        [
             helper.make_node("Add", ["float_target", "two"], ["target"]),
             helper.make_node("Sub", ["vocabulary", "target"], ["distance"]),
             helper.make_node("Mul", ["distance", "distance"], ["square_distance"]),
@@ -204,7 +237,7 @@ def make_decoder_model(family):
         _tensor("one", 1, np.float32),
         _tensor("two", 2, np.float32),
         _tensor("three", 3, np.float32),
-        _tensor("sixteen", 16, np.int32),
+        _tensor("sixteen", 16, np.float32 if device == "webgpu" else np.int32),
         _tensor("vocabulary", np.arange(VOCAB_SIZE), np.float32),
         _tensor("history_scale", 1 / 1024, np.float32),
     ]
@@ -282,13 +315,15 @@ def make_config(family):
     }
 
 
-def create_model(output_dir: Path, family: str = "phi3v", *, fail_on_negative_pixels: bool = False) -> Path:
+def create_model(
+    output_dir: Path, family: str = "phi3v", *, fail_on_negative_pixels: bool = False, device: str = "cpu"
+) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
-    graphs = {"decoder.onnx": make_decoder_model(family)}
+    graphs = {"decoder.onnx": make_decoder_model(family, device=device)}
     if family != "llama":
         graphs.update(
             {
-                "embedding.onnx": make_embedding_model(family),
+                "embedding.onnx": make_embedding_model(family, device=device),
                 "vision.onnx": make_vision_model(family, fail_on_negative_pixels=fail_on_negative_pixels),
             }
         )

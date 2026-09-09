@@ -64,7 +64,7 @@ def _convert_float_model(model, dtype):
     return model
 
 
-def _media_models(family, dtype):
+def _media_models(family, dtype, *, device="cpu"):
     vision = make_vision_model(family)
     if family == "mistral3":
         vision.graph.input[0].type.tensor_type.shape.dim[2].dim_param = "height"
@@ -91,7 +91,7 @@ def _media_models(family, dtype):
         _init("feature_projection", np.linspace(-0.01, 0.02, HIDDEN_SIZE).reshape(1, -1), np.float32)
     )
     vision.graph.output[0].type.tensor_type.shape.dim[1].dim_value = HIDDEN_SIZE
-    embedding = make_embedding_model(family)
+    embedding = make_embedding_model(family, device=device)
     for index, value in enumerate(embedding.graph.initializer):
         if value.name == "empty_feature":
             embedding.graph.initializer[index].CopyFrom(_init("empty_feature", np.zeros((1, HIDDEN_SIZE)), np.float32))
@@ -198,7 +198,7 @@ def create_model(output_dir, family="phi3v", *, device="cpu", dtype=None, shared
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     np_dtype = np.float16 if dtype == "fp16" else np.float32
-    vision, embedding = _media_models(family, np_dtype)
+    vision, embedding = _media_models(family, np_dtype, device=device)
     for name, graph in (
         ("vision", vision),
         ("embedding", embedding),
@@ -219,6 +219,9 @@ def create_model(output_dir, family="phi3v", *, device="cpu", dtype=None, shared
             options["enable_cuda_graph" if device == "cuda" else "enableGraphCapture"] = (
                 "1" if capture and role == "decoder" else "0"
             )
+        if device == "webgpu":
+            # INT64 position IDs require opt-in support for the numerical Cast.
+            options["enableInt64"] = "1"
         session = {
             "provider_options": [] if device == "cpu" else [{device: options}],
             # GQA has host-only length inputs. Python audits the exact named metadata

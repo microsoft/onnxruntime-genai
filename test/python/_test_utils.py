@@ -32,6 +32,17 @@ MULTIMODAL_EP_NAMES = {
 }
 
 
+def multimodal_provider_options(device: str) -> dict:
+    options = {}
+    if device in ("cuda", "webgpu"):
+        options["device_filtering_options"] = {"hardware_device_type": "gpu"}
+    if device == "webgpu":
+        # Position IDs are INT64; WebGPU's numerical Cast input support is opt-in.
+        # Fixture positions fit in INT32, as required by that shader implementation.
+        options["enableInt64"] = "1"
+    return options
+
+
 def multimodal_test_devices() -> tuple[str, ...]:
     """Keep CPU coverage and require every explicitly requested accelerator."""
     requested = os.environ.get("ORTGENAI_MULTIMODAL_TEST_EPS")

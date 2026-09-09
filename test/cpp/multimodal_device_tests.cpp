@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <sstream>
 
 #include <gtest/gtest.h>
@@ -48,15 +49,21 @@ INSPECT_FIELD(ImageTemporaries, VisionState, per_image_tensors_, std::vector<std
 INSPECT_FIELD(EmbeddingFeatures, EmbeddingState, image_features_, std::unique_ptr<MultiModalFeatures>);
 #undef INSPECT_FIELD
 
+// GCC 11 cannot instantiate these locals inside the dependent injected friend.
+template <typename T>
+std::map<int, int> CopyCaptureIds(const T& captures) {
+  std::map<int, int> result;
+  for (const auto& [shape, id] : captures) result.emplace(shape, id.value);
+  return result;
+}
+
 struct GraphIds {
   friend std::map<int, int> Captures(State&, GraphIds);
 };
 template <auto Member>
 struct InspectCaptures {
   friend std::map<int, int> Captures(State& state, GraphIds) {
-    std::map<int, int> result;
-    for (const auto& [shape, id] : state.*Member) result.emplace(shape, id.value);
-    return result;
+    return CopyCaptureIds(state.*Member);
   }
 };
 template struct InspectCaptures<&State::graph_ids_>;
@@ -112,7 +119,7 @@ std::unique_ptr<Generator> MakeGenerator(const Model& model, bool shared) {
 template <typename T>
 std::shared_ptr<Tensor> CpuTensor(const std::vector<int64_t>& shape, const std::vector<T>& values) {
   auto value = OrtValue::CreateTensor<T>(GetDeviceInterface(DeviceType::CPU)->GetAllocator(), shape);
-  std::copy(values.begin(), values.end(), value->GetTensorMutableData<T>());
+  std::copy(values.begin(), values.end(), value->template GetTensorMutableData<T>());
   return std::make_shared<Tensor>(std::move(value));
 }
 

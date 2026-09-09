@@ -17,7 +17,12 @@ from dataclasses import dataclass, field
 import numpy as np
 import onnxruntime_genai as og
 import pytest
-from _test_utils import MULTIMODAL_EP_NAMES, multimodal_test_devices, require_execution_provider
+from _test_utils import (
+    MULTIMODAL_EP_NAMES,
+    multimodal_provider_options,
+    multimodal_test_devices,
+    require_execution_provider,
+)
 from create.create_multimodal_turn_test_model import (
     EOS_TOKEN_ID,
     IMAGE_TOKEN_ID,
@@ -155,12 +160,10 @@ def turn_device(request):
 def model_factory(tmp_path, turn_device):
     def make(family, *, fail_on_negative_pixels=False, asynchronous=False):
         directory = tmp_path / family
-        create_model(directory, family, fail_on_negative_pixels=fail_on_negative_pixels)
+        create_model(directory, family, fail_on_negative_pixels=fail_on_negative_pixels, device=turn_device)
         config_path = directory / "genai_config.json"
         config = json.loads(config_path.read_text(encoding="utf-8"))
-        provider_options = {}
-        if turn_device in ("cuda", "webgpu"):
-            provider_options["device_filtering_options"] = {"hardware_device_type": "gpu"}
+        provider_options = multimodal_provider_options(turn_device)
         for name in ("decoder", "embedding", "vision"):
             if name not in config["model"]:
                 continue

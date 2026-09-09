@@ -26,6 +26,7 @@ from create.create_multimodal_turn_test_model import (
     QWEN_FAMILIES,
     VISION_END_TOKEN_ID,
     VISION_START_TOKEN_ID,
+    VOCAB_SIZE,
 )
 from onnx import numpy_helper
 from test_multimodal_turns import _arrays, _generator, _History, _image_turn, _last_logits, _named
@@ -130,8 +131,7 @@ def test_partition_audit_rejects_numerical_cpu_fallback(tmp_path):
         assert_profile_partitions(tmp_path, "cuda")
 
 
-def _numpy_last_logits(directory, history):
-    """Independent single-query causal GQA oracle (no ORT/reference replay)."""
+def _numpy_qkv(directory, history):
     weights = {
         value.name: numpy_helper.to_array(value).astype(np.float32)
         for value in onnx.load(directory / "decoder.onnx").graph.initializer
@@ -150,6 +150,12 @@ def _numpy_last_logits(directory, history):
     query = (hidden[-1:] @ weights["q.weight"]).reshape(4, 16)
     key = (hidden @ weights["k.weight"]).reshape(-1, 2, 16)
     value = (hidden @ weights["v.weight"]).reshape(-1, 2, 16)
+    return weights, query, key, value
+
+
+def _numpy_last_logits(directory, history):
+    """Independent single-query causal GQA oracle (no ORT/reference replay)."""
+    weights, query, key, value = _numpy_qkv(directory, history)
     heads = []
     for head in range(4):
         scores = key[:, head // 2] @ query[head] / 4
@@ -159,10 +165,42 @@ def _numpy_last_logits(directory, history):
     return np.concatenate(heads) @ weights["lm_head.weight"] + weights["lm_head.bias"]
 
 
+def _assert_gqa_decode_state(directory, generator, dtype, *, capture, phase):
+    """Inspect the last executed decode, without forwarding its pending sample."""
+    sequence = generator.get_sequence(0).copy()
+    history = _History("phi3v")
+    history.image(1)
+    history.text(sequence[3:-1].tolist())
+    length = len(history.tokens)
+    context = f"{phase}: {'captured' if capture else 'eager'}, cached length {length}"
+    mask = generator.get_input("attention_mask")
+    expected_mask = np.zeros((1, 192 if capture else length), dtype=np.int64)
+    expected_mask[:, :length] = 1
+    np.testing.assert_array_equal(mask, expected_mask, err_msg=context)
+    np.testing.assert_array_equal(generator.get_input("position_ids"), [[length - 1]], err_msg=context)
+    _, _, key, value = _numpy_qkv(directory, history)
+    for kind, expected in (("key", key), ("value", value)):
+        cache = generator.get_output(f"present.0.{kind}")
+        assert cache.shape == (1, 2, 192, 16), f"{context}: {kind} shape {cache.shape}"
+        active = cache[:, :, :length]
+        assert np.isfinite(active).all(), f"{context}: nonfinite active {kind} cache"
+        np.testing.assert_allclose(
+            active, expected.transpose(1, 0, 2)[None], **_tolerance(dtype), err_msg=f"{context}: {kind} cache"
+        )
+    # get_logits() would execute the pending sample and obscure the failing step.
+    logits = generator.get_output("logits").reshape(-1, VOCAB_SIZE)[-1]
+    assert np.isfinite(logits).all(), f"{context}: nonfinite decoder logits: {logits}"
+    np.testing.assert_allclose(
+        logits, _numpy_last_logits(directory, history), **_tolerance(dtype), err_msg=f"{context}: decoder logits"
+    )
+    assert int(sequence[-1]) == int(np.argmax(logits)), f"{context}: sample disagrees with decoder logits"
+
+
 @pytest.mark.parametrize("device", GPU_DEVICES)
-def test_gqa_fixture_is_deterministic_nonrecurrent_and_disables_child_capture(tmp_path, device):
+@pytest.mark.parametrize("capture", (False, True), ids=("eager", "captured"))
+def test_gqa_fixture_is_deterministic_nonrecurrent_and_disables_child_capture(tmp_path, device, capture):
     directories = [
-        create_model(tmp_path / name, device=device, dtype="fp16", shared=True, capture=True)
+        create_model(tmp_path / name, device=device, dtype="fp16", shared=True, capture=capture)
         for name in ("first", "second")
     ]
     for role in ("vision", "embedding", "decoder"):
@@ -175,12 +213,20 @@ def test_gqa_fixture_is_deterministic_nonrecurrent_and_disables_child_capture(tm
     assert all(node.op_type != "Concat" for node in decoder.node)
     assert not any("state" in value.name for value in (*decoder.input, *decoder.output))
     mask = next(value for value in decoder.input if value.name == "attention_mask")
-    assert mask.type.tensor_type.shape.dim[1].dim_value == 192
+    mask_length = mask.type.tensor_type.shape.dim[1]
+    if capture:
+        assert mask_length.dim_value == 192
+    else:
+        assert mask_length.dim_param == "total_seq"
     config = json.loads((directories[0] / "genai_config.json").read_text(encoding="utf-8"))
     capture_key = "enable_cuda_graph" if device == "cuda" else "enableGraphCapture"
     for role in ("vision", "embedding", "decoder"):
         options = config["model"][role]["session_options"]["provider_options"][0][device]
-        assert options[capture_key] == ("1" if role == "decoder" else "0")
+        assert options[capture_key] == ("1" if capture and role == "decoder" else "0")
+        if device == "webgpu":
+            assert options["enableInt64"] == "1"
+        else:
+            assert "enableInt64" not in options
 
 
 @pytest.mark.parametrize("device,dtype", CASES)
@@ -377,11 +423,36 @@ def test_gqa_no_readback_unequal_grid_lifetime_stress(gqa_model_factory, dtype, 
 
 
 @pytest.mark.parametrize("device,dtype", CASES)
+def test_gqa_logits_inspection_preserves_eager_continuation(gqa_model_factory, dtype):
+    directory, model = gqa_model_factory(shared=True)
+    _, other_model = gqa_model_factory(shared=True)
+    generator, reference = _generator(model), _generator(other_model)
+    history = _History("phi3v")
+    inputs = _named(_pixels_dtype(history.image(1), dtype))
+    for current in (generator, reference):
+        current.set_inputs(inputs)
+        for _ in range(8):
+            current.generate_next_token()
+    np.testing.assert_array_equal(generator.get_sequence(0), reference.get_sequence(0))
+    inspected = _last_logits(generator)
+    assert np.isfinite(inspected).all()
+    for kind in ("key", "value"):
+        generator.get_output(f"present.0.{kind}").copy()
+    for _ in range(4):
+        generator.generate_next_token()
+        reference.generate_next_token()
+    for current in (generator, reference):
+        _assert_gqa_decode_state(directory, current, dtype, capture=False, phase="inspection-only continuation")
+    np.testing.assert_array_equal(generator.get_sequence(0), reference.get_sequence(0))
+    np.testing.assert_allclose(_last_logits(generator), _last_logits(reference), **_tolerance(dtype))
+
+
+@pytest.mark.parametrize("device,dtype", CASES)
 def test_gqa_actual_capture_rejects_image_atomically_and_resumes(gqa_model_factory, device, dtype):
     if device not in GPU_DEVICES:
         pytest.skip("CPU has no actual GPU graph capture; not capture execution coverage")
-    _, model = gqa_model_factory(shared=True, capture=True)
-    _, eager_model = gqa_model_factory(shared=True)
+    directory, model = gqa_model_factory(shared=True, capture=True)
+    eager_directory, eager_model = gqa_model_factory(shared=True)
     generator, reference = _generator(model), _generator(eager_model)
     ids, pixels = _image_turn("phi3v", 1)
     for current in (generator, reference):
@@ -395,6 +466,9 @@ def test_gqa_actual_capture_rejects_image_atomically_and_resumes(gqa_model_facto
         "logits": _last_logits(generator),
         **{kind: generator.get_output(f"present.0.{kind}").copy() for kind in ("key", "value")},
     }
+    assert np.isfinite(before["logits"]).all(), "Captured logits were nonfinite before image rejection"
+    for kind in ("key", "value"):
+        assert np.isfinite(before[kind][:, :, : len(before["sequence"])]).all(), kind
     ids, pixels = _image_turn("phi3v", 7)
     with pytest.raises(RuntimeError, match="graph capture"):
         generator.set_inputs(_named(_pixels_dtype(_arrays("phi3v", ids, [pixels]), dtype)))
@@ -405,5 +479,9 @@ def test_gqa_actual_capture_rejects_image_atomically_and_resumes(gqa_model_facto
     for _ in range(4):
         generator.generate_next_token()
         reference.generate_next_token()
+    # Keep the asymmetric readback schedule above: inspect both paths only after
+    # all samples are committed, so diagnostics cannot synchronize away divergence.
+    _assert_gqa_decode_state(directory, generator, dtype, capture=True, phase="after image rejection")
+    _assert_gqa_decode_state(eager_directory, reference, dtype, capture=False, phase="without image rejection")
     np.testing.assert_array_equal(generator.get_sequence(0), reference.get_sequence(0))
     np.testing.assert_allclose(_last_logits(generator), _last_logits(reference), **_tolerance(dtype))
