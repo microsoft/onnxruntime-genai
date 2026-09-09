@@ -71,7 +71,7 @@ IO_DTYPES = ("fp16", "bf16", "fp32")
 # granularity. The KV cache is not part of `QuantConfig` yet (see the scope note above), so
 # this stays a standalone vocabulary that both `check_extra_options()` and the builder read.
 KV_CACHE_QUANT_SCHEMES = frozenset(
-    {"none"}
+    {"none", "int4_per_token", "int8_per_token"}
     | {
         f"{bit_width}_{granularity}"
         for bit_width in ("int8", "int4", "fp8")

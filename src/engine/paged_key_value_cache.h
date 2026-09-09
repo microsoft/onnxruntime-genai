@@ -44,6 +44,12 @@ size_t ComputePagedBlockCapacity(size_t available_memory_bytes,
                                  size_t element_size,
                                  size_t auxiliary_bytes_per_block = 0);
 
+size_t ComputePagedBlockCapacityFromBytes(size_t available_memory_bytes,
+                                          float gpu_utilization_factor,
+                                          size_t reserved_memory_bytes,
+                                          size_t primary_bytes_per_block,
+                                          size_t auxiliary_bytes_per_block = 0);
+
 // Resolves an explicitly configured engine.dynamic_batching.num_blocks into the target pool's
 // block count. num_blocks is the whole paged budget: an Engine-hosted MTP head is given the same
 // block count as the target, so the target pool shrinks until both pools together cost what the
@@ -171,6 +177,13 @@ struct PagedKeyValueCache {
     std::string value_cache_output_name;
   };
 
+  struct ScaleCache {
+    std::unique_ptr<void, Ort::AllocatorDeleter> storage;
+    std::unique_ptr<OrtValue> value;
+    std::string input_name;
+    std::string output_name;
+  };
+
   void BindCache(State& state);
 
   //   The key and the value cache is represented as an array of blocks. Each block contains
@@ -202,6 +215,7 @@ struct PagedKeyValueCache {
   void RebuildBlockTableIndex() noexcept;
   std::shared_ptr<Model> model_;
   std::vector<LayerCache> cache_;                   // Pair of key and value caches for all layers
+  std::vector<ScaleCache> scale_cache_;
   std::unique_ptr<BlockPool> block_pool_;           // Allocator for blocks
   std::vector<PagedCacheBlockTable> block_tables_;  // Block table for all requests in the cache
   std::unique_ptr<RequestIndex> block_table_index_;

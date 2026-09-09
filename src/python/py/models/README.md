@@ -696,10 +696,12 @@ This scenario is for when you want to quantize the KV cache via the `kv_cache_qu
 - `int8_per_tensor` / `int8_per_channel`: 8-bit integer KV cache.
 - `int4_per_tensor` / `int4_per_channel`: 4-bit integer KV cache.
 - `fp8_per_tensor` / `fp8_per_channel`: FP8 (float8e4m3fn) KV cache.
+- `int4_per_token` / `int8_per_token`: dynamic per-token, per-head scales with CUDA paged attention.
 
 The `int8`/`int4`/`fp8` prefix selects the KV cache bit width and the `per_tensor`/`per_channel` suffix selects the scale granularity.
 
-The scales applied to the KV cache are supplied through a required calibration file:
+Static per-tensor and per-channel scales are supplied through a required calibration file.
+Per-token schemes instead allocate FP16 scale caches, compute their values on device, and reject `kv_cache_scale_file`:
 
 - `kv_cache_scale_file`: path to a JSON file with calibrated per-layer scales in the form `{"scales": {"k_scales": [...per layer...], "v_scales": [...per layer...]}, "layer_ids": [...model layer IDs...]}`. Each per-layer entry is a scalar (`per_tensor`) or a length-`(num_kv_heads * head_size)` vector (`per_channel`). `layer_ids` maps each scale entry to its model layer; it is contiguous for dense models and sparse for hybrid models where only full-attention layers own a KV cache. This option is required when `kv_cache_quant_scheme` is enabled.
 
@@ -730,9 +732,25 @@ python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p pr
 `PagedAttention` op receives the `k_scale`/`v_scale` initializers plus the matching `k_quant_type`/`v_quant_type`
 attributes.
 
-Only `int8_*` and `fp8_*` are supported on the paged path; `int4_*` is rejected because `PagedAttention` has no
-sub-byte cache backend. Per-channel scales are emitted with the `(num_kv_heads, 1, head_size)` shape that
-`PagedAttention` requires.
+The CUDA paged path supports INT4, INT8, and FP8. INT4 requires an ORT build with
+`onnxruntime_USE_INT4_KV_CACHE=ON` and stores two signed values per UINT8 byte, with physical
+cache width `(head_size + 1) // 2`. Per-channel scales retain shape `(num_kv_heads, 1, head_size)`.
+The `int4_per_token` and `int8_per_token` schemes use separate FP16 scale caches of shape
+`[num_blocks, block_size, num_kv_heads]`, with input/output aliases emitted in `genai_config.json`.
+They require a GenAI runtime that supports the scale-cache bindings.
+
+`kv_cache_rotation=hadamard` rotates Q/K after normalization and RoPE, rotates V before caching,
+and applies the inverse transform to the attention output. The default is `none`. Rotation is
+CUDA-paged-only, requires head size 16, 32, 64, 128, or 256, and rejects per-channel scales.
+This is an opt-in quantization mode; application quality must be evaluated on representative inputs.
+
+```bash
+# From wheel (no calibration file):
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e cuda --extra_options use_paged_attention=true kv_cache_quant_scheme=int4_per_token kv_cache_rotation=hadamard
+
+# From source:
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e cuda --extra_options use_paged_attention=true kv_cache_quant_scheme=int4_per_token kv_cache_rotation=hadamard
+```
 
 ```bash
 # From wheel (paged attention + int8 per-channel KV cache):

@@ -30,4 +30,24 @@ TEST(ConfigTest, RejectsNonPositiveStaticBatchSize) {
   }
 }
 
+TEST(ConfigTest, ParsesPagedScaleBindings) {
+  Config config;
+  EXPECT_TRUE(config.model.decoder.inputs.past_key_scale_names.empty());
+  EXPECT_TRUE(config.model.dflash2.inputs.past_key_scale_names.empty());
+  OverlayConfig(config, R"({"model":{
+    "decoder":{"inputs":{"past_key_scale_names":"past.%d.ks","past_value_scale_names":"past.%d.vs"},
+               "outputs":{"present_key_scale_names":"present.%d.ks","present_value_scale_names":"present.%d.vs"}},
+    "dflash2":{"inputs":{"past_key_scale_names":"draft.%d.ks","past_value_scale_names":"draft.%d.vs"},
+               "outputs":{"present_key_scale_names":"out.%d.ks","present_value_scale_names":"out.%d.vs"}}
+  }})");
+  EXPECT_EQ(config.model.decoder.inputs.past_key_scale_names, "past.%d.ks");
+  EXPECT_EQ(config.model.decoder.inputs.past_value_scale_names, "past.%d.vs");
+  EXPECT_EQ(config.model.decoder.outputs.present_key_scale_names, "present.%d.ks");
+  EXPECT_EQ(config.model.decoder.outputs.present_value_scale_names, "present.%d.vs");
+  EXPECT_EQ(config.model.dflash2.inputs.past_key_scale_names, "draft.%d.ks");
+  EXPECT_EQ(config.model.dflash2.inputs.past_value_scale_names, "draft.%d.vs");
+  EXPECT_EQ(config.model.dflash2.outputs.present_key_scale_names, "out.%d.ks");
+  EXPECT_EQ(config.model.dflash2.outputs.present_value_scale_names, "out.%d.vs");
+}
+
 }  // namespace Generators::test

@@ -365,6 +365,98 @@ TEST(PagedKeyValueCacheManifestTest, CacheManagerConstructsFromSparseManifest) {
   EXPECT_EQ(manager->Snapshot().total_blocks, 128u);
 }
 
+TEST(PagedKeyValueCacheManifestTest, AllocationUsesPhysicalHeadWidth) {
+  auto model = LoadSyntheticPagedModel();
+  model->config_->model.decoder.head_size = 2;
+  auto cache = MakePagedCache(model);
+  EXPECT_EQ(PagedKeyValueCacheBytesPerBlock(model), 64u);
+  for (const auto& values : cache->Cache()) {
+    EXPECT_EQ(values.first->GetTensorTypeAndShapeInfo()->GetShape().back(), 1);
+    EXPECT_EQ(values.second->GetTensorTypeAndShapeInfo()->GetShape().back(), 1);
+  }
+}
+
+TEST(PagedKeyValueCacheManifestTest, PackedScaleCapacityUsesExactBytes) {
+  constexpr size_t payload = 16 * 2 * 256 * 4 * 128;
+  constexpr size_t scales = 16 * 2 * 256 * 4 * 2;
+  EXPECT_EQ(payload + scales, 4259840u);
+  EXPECT_EQ(ComputePagedBlockCapacityFromBytes(1024 * (payload + scales), 1.0f, 0,
+                                               payload + scales),
+            921u);
+  EXPECT_THROW(ComputePagedBlockCapacityFromBytes(1024, 1.0f, 0, 0), std::invalid_argument);
+  EXPECT_THROW(ComputePagedBlockCapacityFromBytes(1024, 1.0f, 0, 1,
+                                                  std::numeric_limits<size_t>::max()),
+               std::overflow_error);
+}
+
+TEST(PagedKeyValueCacheManifestTest, ScaleCachesBindAliasesAndPreserveBlockTableOffset) {
+  auto model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged-scales");
+  auto cache = MakePagedCache(model);
+  auto params = CreateGeneratorParams(*model);
+  ModelIO state(*params, *model);
+  EXPECT_EQ(PagedKeyValueCacheBytesPerBlock(model), 96u);
+  cache->UpdateState(state, {});
+  ASSERT_EQ(state.inputs_.size(), 9u);
+  ASSERT_EQ(state.outputs_.size(), 8u);
+  EXPECT_STREQ(state.input_names_[8], "block_table");
+  for (size_t index = 4; index < 8; ++index) {
+    EXPECT_EQ(state.inputs_[index], state.outputs_[index]);
+    EXPECT_EQ(state.inputs_[index]->GetTensorTypeAndShapeInfo()->GetShape(),
+              std::vector<int64_t>({128, 4, 1}));
+    EXPECT_EQ(state.inputs_[index]->GetTensorTypeAndShapeInfo()->GetElementType(),
+              ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16);
+    const auto* scale_bytes = static_cast<const uint8_t*>(state.inputs_[index]->GetTensorRawData());
+    for (size_t offset = 0; offset < 128 * 4 * sizeof(Ort::Float16_t); ++offset) {
+      EXPECT_EQ(scale_bytes[offset], 0u);
+    }
+  }
+  EXPECT_STREQ(state.input_names_[4], "past_key_values.1.key_scale");
+  EXPECT_STREQ(state.output_names_[7], "present.4.value_scale");
+  auto* first_scale = state.inputs_[4];
+  cache->UpdateState(state, {});
+  EXPECT_EQ(state.inputs_[4], first_scale);
+  EXPECT_STREQ(state.input_names_[8], "block_table");
+}
+
+TEST(PagedKeyValueCacheManifestTest, ScaleOutputsAreOptional) {
+  auto model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged-scales");
+  model->config_->model.decoder.outputs.present_key_scale_names.clear();
+  model->config_->model.decoder.outputs.present_value_scale_names.clear();
+  auto cache = MakePagedCache(model);
+  auto params = CreateGeneratorParams(*model);
+  ModelIO state(*params, *model);
+  cache->UpdateState(state, {});
+  EXPECT_EQ(state.inputs_.size(), 9u);
+  EXPECT_EQ(state.outputs_.size(), 4u);
+}
+
+TEST(PagedKeyValueCacheManifestTest, RejectsScaleBlockCountMismatch) {
+  auto model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged-scales");
+  model->config_->engine.dynamic_batching->num_blocks = 64;
+  EXPECT_THROW(MakePagedCache(model), std::runtime_error);
+}
+
+TEST(PagedKeyValueCacheManifestTest, RejectsScaleOutputWithoutInput) {
+  auto model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged-scales");
+  model->config_->model.decoder.inputs.past_key_scale_names.clear();
+  EXPECT_THROW(MakePagedCache(model), std::runtime_error);
+}
+
+TEST(PagedKeyValueCacheManifestTest, RejectsMalformedAndDuplicateScaleTemplates) {
+  auto model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged-scales");
+  model->config_->model.decoder.inputs.past_key_scale_names = "scale.%s";
+  EXPECT_THROW(MakePagedCache(model), std::runtime_error);
+  model->config_->model.decoder.inputs.past_key_scale_names =
+      model->config_->model.decoder.inputs.past_value_scale_names;
+  EXPECT_THROW(MakePagedCache(model), std::runtime_error);
+}
+
+TEST(PagedKeyValueCacheManifestTest, RejectsRankFourTensorAsScaleCache) {
+  auto model = LoadSyntheticPagedModel();
+  model->config_->model.decoder.inputs.past_key_scale_names = "past_key_values.%d.key";
+  EXPECT_THROW(MakePagedCache(model), std::runtime_error);
+}
+
 TEST(PagedKeyValueCacheManifestTest, BlockCapacityUsesParticipatingLayerCount) {
   EXPECT_EQ(
       ComputePagedBlockCapacity(

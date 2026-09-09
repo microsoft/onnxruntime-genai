@@ -45,6 +45,12 @@ examples/csharp/ModelChat/models
 !test/models/qwen3-vl/*
 !test/models/whisper/*
 
+!/test/models/engine/
+/test/models/engine/*
+!/test/models/engine/synthetic-paged-scales/
+!/test/models/engine/synthetic-paged-scales/decoder.onnx
+!/test/models/engine/synthetic-paged-scales/genai_config.json
+
 .ipynb_checkpoints/
 /src/java/.gradle
 /src/java/local.properties

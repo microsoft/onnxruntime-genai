@@ -171,7 +171,11 @@ def _make_kv_model(
             else None
         ),
         "bit_width": 4 if kv_cache_quant_type.startswith("int4") else 8,
-        "quant_mode": "PER_CHANNEL" if kv_cache_quant_type.endswith("per_channel") else "PER_TENSOR",
+        "quant_mode": "PER_TOKEN"
+        if kv_cache_quant_type.endswith("per_token")
+        else "PER_CHANNEL"
+        if kv_cache_quant_type.endswith("per_channel")
+        else "PER_TENSOR",
         "scales_path": model.extra_options.get("kv_cache_scale_file", ""),
     }
     model.attention_attrs = {"op_type": op_type}
@@ -224,16 +228,16 @@ def test_paged_attention_accepts_int8_and_fp8_kv_cache(quant_type):
 
 
 @pytest.mark.parametrize("quant_type", ["int4_per_tensor", "int4_per_channel"])
-def test_paged_attention_rejects_int4_kv_cache(quant_type):
-    # PagedAttention's T_CACHE constraint has no sub-byte member, so int4 caches are not exportable.
+def test_paged_attention_accepts_int4_kv_cache(quant_type):
     model = _make_kv_model(
         kv_cache_quant_type=quant_type,
         ep="cuda",
         op_type="PagedAttention",
         use_paged_attention=True,
     )
-    with pytest.raises(ValueError, match="only supports int8 and fp8"):
-        _initialize_kv_cache(model)
+    _initialize_kv_cache(model)
+    assert model.input_types["past_key_values.key"] == ir.DataType.UINT8
+    assert model.input_shapes["past_key_values.key"][-1] == 8
 
 
 @pytest.mark.parametrize("ep", ["webgpu", "dml", "trt-rtx"])
@@ -250,6 +254,8 @@ def test_kv_cache_quant_schemes_constant_matches_builder_validation():
     # reads this constant from `quantization`, which is the source of truth.
     assert set(builder_module.KV_CACHE_QUANT_SCHEMES) == {
         "none",
+        "int4_per_token",
+        "int8_per_token",
         "int8_per_tensor",
         "int8_per_channel",
         "int4_per_tensor",
@@ -270,9 +276,7 @@ def test_kv_cache_quant_schemes_constant_matches_builder_validation():
         ("fp8_per_channel", ir.DataType.FLOAT8E4M3FN, 8, "PER_CHANNEL"),
     ],
 )
-def test_make_kv_cache_init_sets_dtype_and_metadata(
-    quant_type, expected_dtype, expected_bits, expected_quant
-):
+def test_make_kv_cache_init_sets_dtype_and_metadata(quant_type, expected_dtype, expected_bits, expected_quant):
     model = _make_kv_model(kv_cache_quant_type=quant_type)
     _initialize_kv_cache(model)
 
@@ -293,6 +297,46 @@ def test_int4_kv_cache_packs_two_elements_per_byte():
     assert model.input_shapes["past_key_values.value"][-1] == 8
     assert model.output_shapes["present.key"][-1] == 8
     assert model.output_shapes["present.value"][-1] == 8
+
+
+@pytest.mark.parametrize("scheme", ["int4_per_token", "int8_per_token"])
+def test_dynamic_paged_scales_need_no_calibration(scheme):
+    model = _make_kv_model(
+        scheme,
+        ep="cuda",
+        op_type="PagedAttention",
+        use_paged_attention=True,
+        extra_options={"kv_cache_rotation": "hadamard"},
+    )
+    model.input_names = {key: dict(enumerate(names)) for key, names in model.input_names.items()}
+    model.output_names = {
+        f"present.{side}": {layer: f"present.{layer}.{side}" for layer in range(model.num_layers)}
+        for side in ("key", "value")
+    }
+    model.make_kv_cache_init()
+    assert model.kv_cache_attrs["rotation"] == "HADAMARD"
+    assert model.input_types["past_key_values.key_scale"] == ir.DataType.FLOAT16
+    assert model.input_shapes["past_key_values.key_scale"] == ["num_blocks", "block_size", 2]
+    assert model.output_names["present.value_scale"][2] == "present.2.value_scale"
+    assert model.get_kv_cache_scale_inputs(layer_id=0) == ("", "")
+
+
+def test_per_token_scales_reject_nonpaged_export():
+    model = _make_kv_model("int4_per_token", ep="cuda")
+    with pytest.raises(ValueError, match="requires CUDA PagedAttention"):
+        model.make_kv_cache_init()
+
+
+def test_hadamard_rejects_per_channel_scales():
+    model = _make_kv_model(
+        "int4_per_channel",
+        ep="cuda",
+        op_type="PagedAttention",
+        use_paged_attention=True,
+        extra_options={"kv_cache_rotation": "hadamard"},
+    )
+    with pytest.raises(ValueError, match="per-channel"):
+        model.make_kv_cache_init()
 
 
 def test_int4_kv_cache_packs_odd_head_size_with_ceiling():
@@ -705,7 +749,7 @@ def _make_gqa_model(kv_cache_quant_type="none", kv_quant_type="PER_TENSOR", kv_c
     model.nodes = []
 
     def make_node(op_type, inputs, outputs, name, domain="", **attributes):
-        model.nodes.append({"op_type": op_type, "inputs": inputs, "attributes": attributes})
+        model.nodes.append({"op_type": op_type, "inputs": inputs, "outputs": outputs, "attributes": attributes})
 
     model.make_node = make_node
     model.make_value = lambda *args, **kwargs: None
@@ -714,6 +758,37 @@ def _make_gqa_model(kv_cache_quant_type="none", kv_quant_type="PER_TENSOR", kv_c
 
 # The 12 fixed GQA inputs preceding the optional k/v scales and q/k norm weights.
 _GQA_BASE_INPUT_COUNT = 12
+
+
+def test_paged_dynamic_int4_node_wires_scale_aliases():
+    model = _make_gqa_model("int4_per_token", "PER_TOKEN", 4)
+    model.kv_cache_attrs["rotation"] = "HADAMARD"
+    model.input_names = {
+        f"past_key_values.{side}_scale": {3: f"past_key_values.3.{side}_scale"} for side in ("key", "value")
+    }
+    model.output_names = {f"present.{side}_scale": {3: f"present.3.{side}_scale"} for side in ("key", "value")}
+    model.make_paged_attention(
+        "/paged",
+        layer_id=3,
+        q_path="q",
+        k_path="k",
+        v_path="v",
+        past_k="past_key_values.3.key",
+        past_v="past_key_values.3.value",
+        present_k="present.3.key",
+        present_v="present.3.value",
+        cumulative_sequence_lengths="cu",
+        past_sequence_lengths="past",
+        block_table="blocks",
+        attention_metadata="metadata",
+    )
+    node = model.nodes[-1]
+    assert node["inputs"][14:19] == ["", "", "metadata", "past_key_values.3.key_scale", "past_key_values.3.value_scale"]
+    assert node["outputs"][3:] == ["present.3.key_scale", "present.3.value_scale"]
+    assert node["attributes"]["k_cache_dtype"] == "int4"
+    assert node["attributes"]["v_cache_dtype"] == "int4"
+    assert node["attributes"]["qk_rotation"] == "HADAMARD"
+    assert node["attributes"]["v_rotation"] == "HADAMARD"
 
 
 def test_plain_gqa_has_no_scale_inputs_or_quant_attributes():

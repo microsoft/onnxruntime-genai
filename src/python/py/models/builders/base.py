@@ -380,7 +380,7 @@ class Model:
             else None
         )
         bit_width = 4 if quant_type == ir.DataType.INT4 else 8 if quant_type is not None else 0
-        quant_mode = "PER_CHANNEL" if quant_scheme.endswith("per_channel") else "PER_TENSOR"
+        quant_mode = "PER_TOKEN" if quant_scheme.endswith("per_token") else "PER_CHANNEL" if quant_scheme.endswith("per_channel") else "PER_TENSOR"
         self.kv_cache_attrs = {
             "quant_scheme": quant_scheme,                                 # Quantization scheme for key-value caches
             "quant_type": quant_type,                                     # Quantization type for key-value caches
@@ -815,6 +815,22 @@ class Model:
         self.past_present_share_buffer = self.attention_attrs["op_type"] in ("GroupQueryAttention", "PagedAttention")
 
     def make_kv_cache_init(self):
+        rotation = self.extra_options.get("kv_cache_rotation", "none").lower()
+        if rotation not in {"none", "hadamard"}:
+            raise ValueError("kv_cache_rotation must be none or hadamard.")
+        self.kv_cache_attrs["rotation"] = rotation.upper()
+        if rotation != "none":
+            if self.ep != "cuda" or not self.use_paged_attention:
+                raise ValueError("kv_cache_rotation requires CUDA PagedAttention.")
+            if self.head_size not in {16, 32, 64, 128, 256}:
+                raise ValueError("Hadamard KV rotation requires head_size in {16, 32, 64, 128, 256}.")
+            if self.kv_cache_attrs["quant_mode"] == "PER_CHANNEL":
+                raise ValueError("Hadamard KV rotation does not support per-channel scales.")
+        if self.kv_cache_attrs["quant_mode"] == "PER_TOKEN":
+            if self.ep != "cuda" or not self.use_paged_attention:
+                raise ValueError("Per-token KV quantization requires CUDA PagedAttention.")
+            if self.kv_cache_attrs["scales_path"]:
+                raise ValueError("Per-token KV quantization does not use kv_cache_scale_file.")
         if self.kv_cache_attrs["quant_scheme"] == "none":
             # Return early if quantized KV caches aren't used
             return
@@ -828,14 +844,6 @@ class Model:
             raise ValueError(
                 "Quantized KV cache is only supported for the CPU and CUDA execution providers. "
                 f"Got execution_provider='{self.ep}'."
-            )
-
-        if self.use_paged_attention and self.kv_cache_attrs["bit_width"] == 4:
-            # PagedAttention's T_CACHE type constraint is {float16, bfloat16, int8, float8e4m3fn};
-            # there is no sub-byte paged cache backend, so int4 caches cannot be exported.
-            raise ValueError(
-                "PagedAttention only supports int8 and fp8 quantized KV caches, "
-                f"got kv_cache_quant_scheme='{self.kv_cache_attrs['quant_scheme']}'."
             )
 
         cache_dtype = (
@@ -866,7 +874,25 @@ class Model:
         self.past_present_share_buffer = self.ep == "cuda"
 
         # Save calibrated scales for quantized KV caches
-        self.make_kv_cache_scale_initializers()
+        if self.kv_cache_attrs["quant_mode"] == "PER_TOKEN":
+            self.make_kv_cache_scale_io()
+        else:
+            self.make_kv_cache_scale_initializers()
+
+    def make_kv_cache_scale_io(self):
+        for side in ("key", "value"):
+            input_key = f"past_key_values.{side}_scale"
+            output_key = f"present.{side}_scale"
+            self.input_names[input_key] = {
+                layer_id: name + "_scale" for layer_id, name in self.input_names[f"past_key_values.{side}"].items()
+            }
+            self.output_names[output_key] = {
+                layer_id: name + "_scale" for layer_id, name in self.output_names[f"present.{side}"].items()
+            }
+            self.input_types[input_key] = ir.DataType.FLOAT16
+            self.output_types[output_key] = ir.DataType.FLOAT16
+            self.input_shapes[input_key] = ["num_blocks", "block_size", self.num_kv_heads]
+            self.output_shapes[output_key] = ["num_blocks", "block_size", self.num_kv_heads]
 
     def get_kv_cache_scale_names(self, layer_id):
         # Convention-based initializer names for the per-layer KV cache quantization scales,
@@ -1180,6 +1206,9 @@ class Model:
             inputs["past_key_names"] = "past_key_values.%d.key"
         if "past_key_values.value" in self.input_names:
             inputs["past_value_names"] = "past_key_values.%d.value"
+        if "past_key_values.key_scale" in self.input_names:
+            inputs["past_key_scale_names"] = "past_key_values.%d.key_scale"
+            inputs["past_value_scale_names"] = "past_key_values.%d.value_scale"
         if "past.conv" in self.input_names:
             inputs["past_conv_names"] = "past.%d.conv"
         if "past.recurrent" in self.input_names:
@@ -1197,6 +1226,9 @@ class Model:
             outputs["present_key_names"] = "present.%d.key"
         if "present.value" in self.output_names:
             outputs["present_value_names"] = "present.%d.value"
+        if "present.key_scale" in self.output_names:
+            outputs["present_key_scale_names"] = "present.%d.key_scale"
+            outputs["present_value_scale_names"] = "present.%d.value_scale"
         if "present.conv" in self.output_names:
             outputs["present_conv_names"] = "present.%d.conv"
         if "present.recurrent" in self.output_names:
@@ -1898,7 +1930,9 @@ class Model:
             if type(name) == dict:
                 # Cache inputs
                 for i, cache_name in name.items():
-                    if key in {"past_key_values.key", "past_key_values.value"}:
+                    if key in {"past_key_values.key_scale", "past_key_values.value_scale"}:
+                        cache_shape = ["num_blocks_windowed", *shape[1:]] if self.is_windowed_paged_layer(i) else shape
+                    elif key in {"past_key_values.key", "past_key_values.value"}:
                         cache_shape = self.make_key_value_cache_shape(i, shape)
                     else:
                         cache_shape = shape
@@ -1916,7 +1950,9 @@ class Model:
             if type(name) == dict:
                 # Cache outputs
                 for i, cache_name in name.items():
-                    if key in {"present.key", "present.value"}:
+                    if key in {"present.key_scale", "present.value_scale"}:
+                        cache_shape = ["num_blocks_windowed", *shape[1:]] if self.is_windowed_paged_layer(i) else shape
+                    elif key in {"present.key", "present.value"}:
                         cache_shape = self.make_key_value_cache_shape(i, shape)
                     else:
                         cache_shape = shape
@@ -3860,7 +3896,7 @@ class Model:
     def get_kv_cache_scale_inputs(self, **kwargs):
         # Shared by GroupQueryAttention and PagedAttention: returns the per-layer k/v scale
         # initializer names, or empty placeholders when the KV cache is not quantized.
-        if self.kv_cache_attrs["quant_scheme"] == "none":
+        if self.kv_cache_attrs["quant_scheme"] == "none" or self.kv_cache_attrs["quant_mode"] == "PER_TOKEN":
             return "", ""
         layer_id = kwargs.get("layer_id")
         if layer_id is None:
@@ -4167,6 +4203,16 @@ class Model:
         # PagedAttention derives the cache element type from the tensor itself, so unlike
         # GroupQueryAttention it has no `kv_cache_bit_width` attribute.
         attributes = self.get_attention_op_attributes(**kwargs)
+        if self.kv_cache_attrs["bit_width"] == 4:
+            attributes.update(k_cache_dtype="int4", v_cache_dtype="int4")
+        rotation = self.kv_cache_attrs.get("rotation", "NONE")
+        if rotation != "NONE":
+            attributes.update(qk_rotation=rotation, v_rotation=rotation)
+        if self.kv_cache_attrs["quant_mode"] == "PER_TOKEN":
+            layer_id = kwargs["layer_id"]
+            inputs.extend([""] * (17 - len(inputs)))
+            inputs.extend(self.input_names[f"past_key_values.{side}_scale"][layer_id] for side in ("key", "value"))
+            outputs.extend(self.output_names[f"present.{side}_scale"][layer_id] for side in ("key", "value"))
         self.make_node(
             "PagedAttention",
             inputs=inputs,

@@ -313,6 +313,12 @@ def check_extra_options(
             )
         extra_options["kv_cache_quant_scheme"] = quant_scheme
 
+    if "kv_cache_rotation" in extra_options:
+        rotation = extra_options["kv_cache_rotation"].lower()
+        if rotation not in {"none", "hadamard"}:
+            raise ValueError("kv_cache_rotation must be none or hadamard.")
+        extra_options["kv_cache_rotation"] = rotation
+
     # Get Hugging Face details and temporarily set in extra options for use in `create_model`
     hf_details = get_hf_details(model_name, input_path, cache_dir, extra_options)
     config = hf_details["hf_config"]
@@ -841,12 +847,14 @@ def get_args():
                 use_8bits_moe = [DEPRECATED] Use 'moe_quant_type=int8' instead. Use 8-bit quantization for MoE layers. Default is false.
                     If true, the QMoE op will use 8-bit quantization. If false, the QMoE op will use 4-bit quantization.
                 kv_cache_quant_scheme = Quantization scheme for the KV cache. Default is 'none' (no quantization).
-                    Supported values: none, int8_per_tensor, int8_per_channel, int4_per_tensor, int4_per_channel, fp8_per_tensor, fp8_per_channel.
+                    Supported values: none, int8_per_tensor, int8_per_channel, int8_per_token, int4_per_tensor, int4_per_channel, int4_per_token, fp8_per_tensor, fp8_per_channel.
                     The `int8`/`int4`/`fp8` prefix selects the KV cache bit width and the `per_tensor`/`per_channel` suffix selects the scale granularity.
                     Quantized KV cache is only supported for the CPU and CUDA execution providers.
-                    When combined with use_paged_attention=true, only the int8_* and fp8_* schemes are supported
-                    (PagedAttention has no sub-byte cache backend, so int4_* is rejected).
-                kv_cache_scale_file = Path to a JSON file with calibrated per-layer KV cache scales. Required when kv_cache_quant_scheme is enabled.
+                    Per-token schemes require CUDA PagedAttention and use dynamic FP16 scale caches, without calibration.
+                    Paged INT4 requires an ORT build with onnxruntime_USE_INT4_KV_CACHE=ON.
+                kv_cache_rotation = none (default) or hadamard. CUDA PagedAttention only, with head size 16, 32, 64, 128, or 256.
+                    Rotates Q/K after norm and RoPE, rotates V, and inversely rotates the output. Not compatible with per-channel scales.
+                kv_cache_scale_file = Path to calibrated per-layer KV cache scales. Required for static quantized schemes; forbidden for per-token schemes.
                     Format: {"scales": {"k_scales": [...per layer...], "v_scales": [...per layer...]}, "layer_ids": [...optional model layer IDs...]}.
                     Each per-layer entry is a scalar (per_tensor) or a length-(num_kv_heads * head_size) vector (per_channel).
                 disable_qkv_fusion = Disable QKV fusion in the model. Default is false.
