@@ -191,6 +191,12 @@ std::vector<uint8_t> Bytes(OrtValue& value, DeviceInterface& device) {
   return Read(ByteWrapTensor(device, value));
 }
 
+void CheckLogits(const std::vector<float>& actual, const std::vector<float>& expected, const Case& test) {
+  ASSERT_EQ(actual.size(), expected.size());
+  for (size_t index = 0; index < actual.size(); ++index)
+    EXPECT_NEAR(actual[index], expected[index], test.dtype == "fp16" ? 0.004f : 0.00002f);
+}
+
 std::vector<uint8_t> CachePrefix(Generator& generator, const char* name, size_t length) {
   auto* value = generator.state_->GetOutput(name);
   const auto shape = value->GetTensorTypeAndShapeInfo()->GetShape();
@@ -425,11 +431,7 @@ TEST(MultimodalDevice, PortableValidationRejectsBeforeMutation) {
         for (int token = 0; token < 3; ++token) current->GenerateNextToken();
       }
       EXPECT_EQ(Read(generator->GetSequence(0)), Read(reference->GetSequence(0)));
-      const auto actual = Read(generator->GetLogits());
-      const auto expected = Read(reference->GetLogits());
-      ASSERT_EQ(actual.size(), expected.size());
-      for (size_t index = 0; index < actual.size(); ++index)
-        EXPECT_NEAR(actual[index], expected[index], test.dtype == "fp16" ? 0.004f : 0.00002f);
+      CheckLogits(Read(generator->GetLogits()), Read(reference->GetLogits()), test);
       generator.reset();
       reference.reset();
       invalid_params.reset();
@@ -598,10 +600,7 @@ TEST(MultimodalDevice, UnequalGridNoReadbackAllocationStress) {
         offset += 4;
       }
       EXPECT_EQ(Read(reference->GetSequence(0)), sequence);
-      const auto expected = Read(reference->GetLogits());
-      ASSERT_EQ(actual.size(), expected.size());
-      for (size_t index = 0; index < actual.size(); ++index)
-        EXPECT_NEAR(actual[index], expected[index], test.dtype == "fp16" ? 0.004f : 0.00002f);
+      CheckLogits(actual, Read(reference->GetLogits()), test);
       generator.reset();
       reference.reset();
       CheckProfiles(*model, test);
@@ -661,11 +660,7 @@ TEST(MultimodalDevice, ActualCapturedDecodeRejectsImageBeforeMutation) {
       reference->GenerateNextToken();
     }
     EXPECT_EQ(Read(generator->GetSequence(0)), Read(reference->GetSequence(0)));
-    const auto actual = Read(generator->GetLogits());
-    const auto expected = Read(reference->GetLogits());
-    ASSERT_EQ(actual.size(), expected.size());
-    for (size_t index = 0; index < actual.size(); ++index)
-      EXPECT_NEAR(actual[index], expected[index], test.dtype == "fp16" ? 0.004f : 0.00002f);
+    CheckLogits(Read(generator->GetLogits()), Read(reference->GetLogits()), test);
     generator.reset();
     reference.reset();
     CheckProfiles(*model, test);

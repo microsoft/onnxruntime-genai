@@ -131,15 +131,9 @@ endif()
 
 add_test(NAME ReInitTests COMMAND reinit_tests)
 
-# Synthetic multimodal residency/ownership checks need internal state, not public ABI additions.
-# With PYTHONPATH=test/python, generate fixtures using
-# python -m create.create_multimodal_gqa_model --suite --output_dir <build>/test/multimodal_gqa.
+# White-box device tests; generate fixtures with create.create_multimodal_gqa_model.
 add_executable(multimodal_device_tests "${CMAKE_CURRENT_SOURCE_DIR}/cpp/multimodal_device_tests.cpp")
-target_include_directories(multimodal_device_tests PRIVATE
-  ${ORT_HEADER_DIR}
-  ${onnxruntime_extensions_SOURCE_DIR}/shared/api
-  ${CMAKE_SOURCE_DIR}/src
-)
+target_include_directories(multimodal_device_tests PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(multimodal_device_tests PRIVATE onnxruntime-genai-obj GTest::gtest)
 add_dependencies(multimodal_device_tests onnxruntime-genai)
 target_compile_definitions(multimodal_device_tests PRIVATE

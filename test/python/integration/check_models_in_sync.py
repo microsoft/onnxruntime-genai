@@ -4,12 +4,9 @@
 
 """Verify the integration pipeline's model lists stay in sync with models.py.
 
-The pipeline file ``.pipelines/integration-tests.yml`` declares ``pr_models``
-and ``all_models`` parameter defaults so each ADO job can fan out per model.
-Those lists must match the ``pr`` and ``all_`` suites in ``models.py``;
-``--multimodal`` also validates the opt-in public VLM list.
-otherwise PRs and main merges silently test a different set of models from
-what the catalog claims.
+The ``pr_models`` and ``all_models`` defaults in
+``.pipelines/integration-tests.yml`` must match the catalog's ``pr`` and
+``all_`` suites. ``--multimodal`` also checks the opt-in public VLM list.
 
 The pipeline passes its own lists in as arguments, so this script doesn't
 need to know where the YAML lives or how to parse it:

@@ -158,9 +158,6 @@ stages:
             ep: 'cpu'
             model: ${{ model }}
             artifactSource: 'public'
-            testPath: 'test/python/integration/test_integration_multimodal.py'
-            extraPytestArgs: '--run-multimodal-tests'
-            resultPrefix: 'integration-multimodal'
       - ${{ if eq(parameters.linux_x64_cuda, true) }}:
         - template: jobs/integration-test-job.yml
           parameters:
@@ -169,12 +166,8 @@ stages:
             ep: 'cuda'
             model: ${{ model }}
             artifactSource: 'public'
-            testPath: 'test/python/integration/test_integration_multimodal.py'
-            extraPytestArgs: '--run-multimodal-tests'
-            resultPrefix: 'integration-multimodal'
 
-# No WebGPU real-model lane until a compatible pinned export and its actual
-# numerical partitions are verified. The GPU artifact name is not evidence.
+# Real WebGPU coverage needs a verified compatible export and partition audit.
 - ${{ if and(eq(parameters.build_linux_x64, true), eq(parameters.linux_x64_engine, true)) }}:
   - stage: integration_engine_test_linux_x64
     displayName: 'Test · Continuous Batching · Linux x64'

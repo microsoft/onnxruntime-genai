@@ -41,7 +41,7 @@ def zeros_init(name, shape, dtype=np.float16):
     return numpy_helper.from_array(np.zeros(shape, dtype=dtype), name=name)
 
 
-def gqa_node(prefix, layer, seqlens="seqlens_k", total_length="total_sl"):
+def gqa_node(prefix, layer):
     """The exposed-cache attention node shared by the recurrent and multimodal fixtures."""
     return helper.make_node(
         "GroupQueryAttention",
@@ -51,8 +51,8 @@ def gqa_node(prefix, layer, seqlens="seqlens_k", total_length="total_sl"):
             f"{prefix}.v",
             f"past_key_values.{layer}.key",
             f"past_key_values.{layer}.value",
-            seqlens,
-            total_length,
+            "seqlens_k",
+            "total_sl",
             "",
             "",
         ],

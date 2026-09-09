@@ -18,7 +18,7 @@ test/python/integration/
   models.py                  # MODELS catalog + suite lists + PINNED_VERSIONS
   resolver.py                # get_path_for(model, device) -> Path
   suite_paths.py             # blob prefix for one (model, device) pair
-  fetch_public_models.py    # revision/hash-pinned public artifacts, normalized locally
+  fetch_public_models.py     # revision/hash-pinned public artifacts, normalized locally
   conftest.py                # shared CLI and independent Engine/multimodal opt-ins
   test_integration_text.py   # text-generation test (text pipeline)
   test_integration_engine.py # paged-attention Engine test (Engine stage)
@@ -153,9 +153,9 @@ If the staged files are intentionally regenerated, refresh the three hashes in
 
 ## Real Phi Vision continuation suite
 
-The `multimodal` suite is independent of the text `pr`/`all` and Engine suites.
-It is skipped unless `--run-multimodal-tests` is passed. Text tests do not
-parametrize over the VLM, even when collecting this whole directory.
+The `multimodal` suite requires `--run-multimodal-tests`. It is independent of
+text `pr`/`all` and Engine tests; collecting this directory does not add VLMs
+to those suites.
 
 ### Immutable public artifacts
 
@@ -168,17 +168,15 @@ revision `672d73375fa86f3d7787e40ac593e33a4f04a055`:
 | CPU | `cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4` | 3.2 GB |
 | CUDA | `gpu/gpu-int4-rtn-block-32` | 2.6 GB |
 
-`models.PUBLIC_IDENTITY` pins SHA-256 for **all eleven files** in each variant:
-three ONNX graphs, all three external weight files, configuration, processor,
-and tokenizer data. The fetcher uses the existing Hugging Face dependency,
-requests the immutable revision without credentials, verifies each file, and
-copies it to `<root>/Phi-3.5-vision-instruct/onnx/<device_dir>/v1`.
-The model fixture independently verifies the entire artifact before loading.
-These are public artifacts, **not** invented Foundry blob prefixes.
+`models.PUBLIC_IDENTITY` pins SHA-256 for all eleven files per variant:
+three graphs, three external weight files, configuration, processor, and
+tokenizer data. The fetcher requests this revision with `token=False`, verifies
+each file, and copies it to `<root>/Phi-3.5-vision-instruct/onnx/<device_dir>/v1`.
+The fixture verifies all files again before loading. These are public exports,
+not Foundry blob prefixes.
 
-The Hugging Face download cache lives under `<root>/.huggingface`; allow roughly
-twice the artifact size on disk. Ordinary copies are intentional: ORT rejects
-external-data files with multiple hard links.
+Allow twice the artifact size for the `<root>/.huggingface` cache and ordinary
+copies: ORT rejects external-data files with multiple hard links.
 
 ```powershell
 # Run from the repository root with a source-built wheel installed.
@@ -190,104 +188,78 @@ python -m pytest test\python\integration\test_integration_multimodal.py -sv `
   --execution-provider cpu --model-root build\models\multimodal-integration
 ```
 
-Use `--device cuda` when fetching and `--execution-provider cuda` when testing
-on a CUDA host. Both provider availability and missing/unsupported required
-artifacts are errors, never successful skips. Weights and generated evidence
-stay in ignored `build` directories.
+For CUDA, fetch with `--device cuda` and test with `--execution-provider cuda`.
+Unavailable EPs and missing/unsupported required artifacts fail rather than
+skip. Weights and evidence stay in ignored `build` directories.
 
 ### Scenarios and numerical contract
 
-The subject retains one Generator throughout image → response → image,
-image → multi-token text → image, initial text → image → text, EOS resume,
-latest-image suffix rewind, and deferred-readback payload-lifetime scenarios.
-The image pair uses distinct RGB patterns and opposite aspect ratios. The
-caller releases image and processed input objects and creates allocation
-pressure after each image turn. The stress case teacher-forces response tokens
-without intermediate `get_logits`/`get_sequence` inspection.
+Each subject keeps one Generator through image → response → image, image →
+multi-token text → image, initial text → image → text, EOS resume, latest-image
+suffix rewind, and deferred-readback lifetime scenarios. Distinct RGB images
+have opposite aspect ratios. Each image turn releases media and processed
+inputs before allocation pressure; the lifetime scenario teacher-forces
+responses without intermediate logits/sequence readback.
 
-A new reference Generator replays the same exact full-prefix token history
-**only in tests**. The real processor constructs the complete image payload;
-the reference correctly numbers later images `image_2`/`-2` while each new
-subject turn uses `image_1`/`-1`. Reference response tokens are teacher-forced
-from the subject rather than allowing divergent argmax tie handling.
-Comparisons begin at a committed prefix before sampling EOS. Terminal
-`get_logits()` returns retained scores, which may include caller overrides or
-sampling processors, and is not an
-equivalent readback of that prefix.
+A test-only reference replays the exact full-prefix token history on the same
+EP. Its processor receives all images, numbered `image_2`/`-2` for the second
+image rather than the subject's turn-local `image_1`/`-1`. Responses are
+teacher-forced from the subject to avoid argmax tie divergence. Comparisons
+start before EOS: terminal logits may contain caller overrides or sampling
+processors, not live prefix scores.
 
-All vocabulary logits must satisfy fixed NumPy `assert_allclose` bounds:
-CPU FP32 uses `atol=0.002, rtol=0.0002`; CUDA FP16 uses
-`atol=0.06, rtol=0.002`. The INT4 variants are never compared across EPs.
-There is no adaptive tolerance or argmax-based fallback.
+All vocabulary logits use fixed `assert_allclose` bounds: CPU FP32
+`atol=0.002, rtol=0.0002`; CUDA FP16 `atol=0.06, rtol=0.002`. There are no
+cross-EP comparisons, adaptive tolerances, or argmax exceptions.
 
-CPU explicitly sets the documented decoder session option
-`session.disable_prepacking=1`. The export's accuracy-level-4 packed kernel
-quantizes activations to INT8 and is chunk-dependent even on text-only
-continuations. The unpacked path retains the pinned INT4 weights and selected
-CPU EP but accumulates in FP32, making the fixed replay oracle meaningful.
-This is **not** validation of the default packed INT8 numerical path.
-CUDA retains its normal FP16 execution path; no CPU numerical substitute is
-permitted there.
+The CPU full-prefix oracle sets decoder `session.disable_prepacking=1`:
+accuracy-level-4 packed INT8 activations are chunk-dependent. Unpacking retains
+the INT4 weights and CPU EP with FP32 accumulation. CUDA keeps normal FP16
+execution, with no CPU numerical substitute.
 
-`test_default_kernel_retained_turns` separately exercises **unmodified default
-numerical kernels**, with both dynamic and shared GQA caches. It retains one
-Generator through image → generated response → multi-token text → generated
-response → image → generated response, releases caller payloads, checks exact
-sequence retention, and compares all vocabulary logits against teacher-forced
-replay with **identical chunk widths** using the same fixed tolerances. It also
-requires the continued second-image logits to differ from a fresh Generator
-given only that second image. These are deterministic retained-runtime and
-context-influence checks, not a claim that packed INT8 full-prefix evaluation
-is numerically equivalent. CPU default-kernel sessions never disable prepacking
-and are cached/profiled separately from the unpacked full-prefix oracle.
+`test_default_kernel_retained_turns` independently uses unmodified kernels and
+both dynamic/shared GQA caches through image → response → multi-token text →
+response → image → response. It checks exact sequence retention and logits
+against teacher-forced replay with **identical chunk widths**, using the same
+tolerances. Second-image logits must differ from a fresh, second-image-only
+Generator. CPU default sessions keep prepacking and are cached/profiled
+separately; this is not a packed INT8 full-prefix equivalence claim.
 
-The pinned decoder has 32 real GroupQueryAttention nodes. The image-pair
-scenario runs with both dynamic and shared cache settings; the other cases
-use the export's shared cache mode. Public tests establish numerical cache
-continuity, **not native pointer alias/residency**; those assertions belong
-in the white-box device tests.
+The decoder must contain 32 GroupQueryAttention nodes. The image-pair oracle
+also tests dynamic/shared caches; remaining cases use shared caches. These
+checks establish numerical continuity, not pointer aliasing/residency, which
+is covered by white-box device tests.
 
-Tests remain below **4096 tokens**. The export changes LongRoPE tables above
-4096; full-prefix replay beyond that point is not equivalent to retaining
-keys rotated before the transition. The current ORT Extensions processor
-uses up to sixteen crops even for small source images, so the chosen aspect
-ratios bound the two-image history within the short-context regime. No graph
-capture is enabled, and no later-image capture support is claimed.
+Histories stay below **4096 tokens**, where LongRoPE changes would invalidate
+the retained-key oracle. The chosen aspect ratios bound two-image histories
+even with ORT Extensions' sixteen crops. Graph capture is not enabled or claimed.
 
 ### Actual provider evidence and CI
 
-Provider selection explicitly replaces vision, embedding, and decoder session
-options and filters accelerator selection to GPU hardware. Every session writes an ORT profile to
-`build/multimodal-integration-results` (override with
-`--multimodal-output-dir`). After successful scenarios the fixture requires
-real numerical nodes on the selected EP in **all three sessions**.
-For CUDA, CPU execution is permitted only for Shape/Size, the explicit
-integer/bool-only index/shape operator list in `_METADATA_OPS`, and exact
-If/Loop dispatch nodes found in the hash-pinned graphs. Their body kernels
-are individually audited. `SequenceConstruct` and `SplitToSequence` also
-require exclusively integer/bool inputs: their output element types are
-preserved, although ORT omits sequence outputs from profile shape metadata.
-Memory-copy events are not numerical work.
-Floating-point CPU embedding/vision/attention fallback fails the suite.
-Neither `model.device_type` nor NumPy host copies establish GPU execution.
+Vision, embedding, and decoder session overrides select the EP and filter
+accelerators to GPU hardware. After successful scenarios and model destruction,
+all three finalized ORT profiles must show numerical work on that EP. Profiles
+go to `build/multimodal-integration-results` (`--multimodal-output-dir` overrides).
 
-`.pipelines/integration-tests.yml` enables the suite with
-`run_multimodal_tests: true` or its existing nightly schedule. The dedicated
-`integration_multimodal_test_linux_x64` stage reuses the source-built Linux
-wheel and `integration-test-job.yml`:
+CUDA allows CPU Shape/Size, integer/bool-only `_METADATA_OPS`, and exact If/Loop
+dispatch nodes from the pinned graphs; body kernels are audited individually.
+`SequenceConstruct`/`SplitToSequence` require integer/bool inputs because their
+type-preserving outputs are omitted from ORT profile metadata. Copies do not
+count as numerical work. Floating-point CPU fallback fails; `model.device_type`
+and NumPy output placement are not GPU execution evidence.
 
-- `integration_cpu_Phi_3_5_vision_instruct`: existing Linux CPU pool.
-- `integration_cuda_Phi_3_5_vision_instruct`: Linux A10 NV32 pool (24 GB GPU).
+`.pipelines/integration-tests.yml` enables the separate
+`integration_multimodal_test_linux_x64` stage nightly or with
+`run_multimodal_tests: true`. It reuses the source-built Linux wheel and existing
+CPU/A10 NV32 (24 GB) pools, controlled by `linux_x64_cpu`/`linux_x64_cuda`.
+The public fetch route leaves Foundry text/Engine jobs unchanged. JUnit and
+profiles are published separately; `check_models_in_sync.py --multimodal ...`
+checks the pipeline catalog.
 
-The existing `linux_x64_cpu`/`linux_x64_cuda` switches control these lanes.
-The public fetch route is explicit; the default Foundry route and text/Engine
-jobs are unchanged. JUnit and per-session profiles are published separately.
-`check_models_in_sync.py --multimodal ...` checks the mirrored pipeline list.
-
-Real **WebGPU and Qwen-VL coverage remain NOT RUN**: no compatible pinned
-export has been verified. The GPU artifact directory name does not imply
-WebGPU compatibility. No unverified WebGPU lane or internal storage path is
-created; synthetic device tests cover their separately supported scenarios.
+Real **WebGPU and Qwen-VL coverage remain NOT RUN**: no compatible pinned export
+has been verified. A GPU directory name is not WebGPU compatibility evidence.
+No unverified lane or storage path is created; synthetic tests cover their
+separately supported scenarios.
 
 ## Adding a new model
 

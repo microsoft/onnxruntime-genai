@@ -46,7 +46,7 @@ void DynamicKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_le
 }
 
 void DynamicKeyValueCache::ValidateRewindTo(size_t index) const {
-  if (shape_[2] <= static_cast<int>(index)) {
+  if (index > static_cast<size_t>(shape_[2])) {
     throw std::runtime_error("Requested length of rewind is greater than the current length.");
   }
 }
@@ -117,11 +117,13 @@ void DefaultKeyValueCacheBase::RewindPastTensorsTo(size_t index) {
     new_shape[2] = static_cast<int>(index);
     auto batch_x_num_heads = new_shape[0] * new_shape[1];
     auto new_length_x_head_size = new_shape[2] * new_shape[3];
-    auto old_length_x_head_size = shape_[2] * new_shape[3];
     shape_[2] = new_shape[2];
 
     for (int i = 0; i < layer_count_ * 2; i++) {
       OrtValue& present = *presents_[i];
+      // Earlier rewinds shorten shape_ but leave the source presents unchanged.
+      const auto present_shape = present.GetTensorTypeAndShapeInfo()->GetShape();
+      const auto old_length_x_head_size = present_shape[2] * new_shape[3];
       std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(Allocator(), shape_, type_);
 
       auto past_span = KeyValueCacheDetail::WrapKvCacheTensor<T>(Device(), *past, type_);

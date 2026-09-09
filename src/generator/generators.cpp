@@ -829,14 +829,13 @@ void Generator::SetInputs(const NamedTensors& named_tensors) {
     if (ids != named_tensors.end()) {
       if (!ids->second || !ids->second->ort_tensor_)
         throw std::runtime_error("Multimodal input_ids tensor is null.");
-      const auto& tensor = *ids->second->ort_tensor_;
-      auto info = tensor.GetTensorTypeAndShapeInfo();
-      const auto shape = info->GetShape();
-      if (info->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 ||
+      const auto& tensor = *ids->second;
+      const auto shape = tensor.GetShape();
+      if (tensor.GetType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 ||
           shape.size() != 2 || shape[0] != state_->params_->search.batch_size) {
         throw std::runtime_error("Multimodal input_ids must be int32 [batch_size, sequence_length].");
       }
-      input_ids = {tensor.GetTensorData<int32_t>(), info->GetElementCount()};
+      input_ids = {tensor.GetData<int32_t>(), tensor.GetElementCount()};
       ValidateAppendTokens(input_ids);
     }
 

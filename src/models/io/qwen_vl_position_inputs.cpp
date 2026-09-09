@@ -139,7 +139,6 @@ void Qwen2VLPositionInputs::SetGridTensors(const std::shared_ptr<Tensor>& image_
   image_grid_thw_ = image_grid_thw;
   video_grid_thw_ = video_grid_thw;
   second_per_grid_ts_ = second_per_grid_ts;
-  has_pending_grid_ = image_grid_thw || video_grid_thw;
 }
 
 void Qwen2VLPositionInputs::Add() {
@@ -426,7 +425,7 @@ void Qwen2VLPositionInputs::UpdateAttentionMask() {
 void Qwen2VLPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) {
   if (has_posid_input_) {
     position_ids_shape_[2] = new_length;
-    if (is_first_update_ || has_pending_grid_) {
+    if (is_first_update_ || image_grid_thw_ || video_grid_thw_) {
       const int64_t past_length = is_first_update_ ? 0 : total_length - new_length;
       if (!is_first_update_ && (position_ids_shape_[1] != 1 || rope_deltas_.size() != 1))
         throw std::runtime_error("Later Qwen image turns require batch_size == num_beams == 1.");
@@ -448,7 +447,6 @@ void Qwen2VLPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_le
   }
 
   is_first_update_ = false;
-  has_pending_grid_ = false;
   image_grid_thw_.reset();
   video_grid_thw_.reset();
   second_per_grid_ts_.reset();

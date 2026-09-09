@@ -153,32 +153,27 @@ def turn_device(request):
 
 @pytest.fixture
 def model_factory(tmp_path, turn_device):
-    models = {}
-
     def make(family, *, fail_on_negative_pixels=False, asynchronous=False):
-        key = (family, fail_on_negative_pixels, asynchronous)
-        if key not in models:
-            suffix = "-failing-vision" if fail_on_negative_pixels else "-async" if asynchronous else ""
-            directory = tmp_path / (family + suffix)
-            create_model(directory, family, fail_on_negative_pixels=fail_on_negative_pixels)
-            config_path = directory / "genai_config.json"
-            config = json.loads(config_path.read_text(encoding="utf-8"))
-            for name in ("decoder", "embedding", "vision"):
-                if name not in config["model"]:
-                    continue
-                provider_options = {}
-                if turn_device in ("cuda", "webgpu"):
-                    provider_options["device_filtering_options"] = {"hardware_device_type": "gpu"}
-                config["model"][name]["session_options"] = {
-                    "provider_options": [] if turn_device == "cpu" else [{turn_device: provider_options}],
-                    "session.disable_cpu_ep_fallback": "0" if turn_device == "cpu" else "1",
-                }
-                if asynchronous:
-                    config["model"][name]["run_options"] = {"disable_synchronize_execution_providers": "1"}
-            config_path.write_text(json.dumps(config), encoding="utf-8")
-            models[key] = og.Model(str(directory))
-            assert models[key].device_type == MULTIMODAL_EP_NAMES[turn_device][0]
-        return models[key]
+        directory = tmp_path / family
+        create_model(directory, family, fail_on_negative_pixels=fail_on_negative_pixels)
+        config_path = directory / "genai_config.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        provider_options = {}
+        if turn_device in ("cuda", "webgpu"):
+            provider_options["device_filtering_options"] = {"hardware_device_type": "gpu"}
+        for name in ("decoder", "embedding", "vision"):
+            if name not in config["model"]:
+                continue
+            config["model"][name]["session_options"] = {
+                "provider_options": [] if turn_device == "cpu" else [{turn_device: provider_options}],
+                "session.disable_cpu_ep_fallback": "0" if turn_device == "cpu" else "1",
+            }
+            if asynchronous:
+                config["model"][name]["run_options"] = {"disable_synchronize_execution_providers": "1"}
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        model = og.Model(str(directory))
+        assert model.device_type == MULTIMODAL_EP_NAMES[turn_device][0]
+        return model
 
     return make
 
@@ -304,14 +299,9 @@ def test_turn_lifetimes_without_intermediate_readbacks(model_factory, family, tu
         generator.append_tokens(np.array([text], dtype=np.int32))
         history.text(text)
         # Exercise allocation/reuse while the conversation's cache remains live.
-        scratch = [_named(_arrays(family, *_scratch_turn(family, turn + i))) for i in range(4)]
+        scratch = [_named(_History(family).image(turn + i)) for i in range(4)]
         del scratch
     _assert_prefill(generator, history, model)
-
-
-def _scratch_turn(family, value):
-    ids, pixels = _image_turn(family, value)
-    return ids, [pixels]
 
 
 @pytest.mark.parametrize("family", FAMILIES)
@@ -513,15 +503,14 @@ def test_later_image_execution_failure_permanently_blocks_generator(model_factor
     with pytest.raises(RuntimeError, match="Gather|indices"):
         generator.set_inputs(_named(failing_arrays))
 
-    operations = {
-        "run": generator.generate_next_token,
-        "append": lambda: generator.append_tokens(np.array([[4, 5]], dtype=np.int32)),
-        "set_inputs": lambda: generator.set_inputs(_named(valid_arrays)),
-        "rewind": lambda: generator.rewind_to(len(history.tokens) - 1),
-        "logits": generator.get_logits,
-        "output": lambda: generator.get_output("logits"),
-    }
-    for operation in operations.values():
+    for operation in (
+        generator.generate_next_token,
+        lambda: generator.append_tokens(np.array([[4, 5]], dtype=np.int32)),
+        lambda: generator.set_inputs(_named(valid_arrays)),
+        lambda: generator.rewind_to(len(history.tokens) - 1),
+        generator.get_logits,
+        lambda: generator.get_output("logits"),
+    ):
         with pytest.raises(RuntimeError, match="Multimodal execution failed; this Generator cannot be reused"):
             operation()
 
@@ -532,67 +521,51 @@ def test_later_image_execution_failure_permanently_blocks_generator(model_factor
     _respond(fresh, fresh_history)
 
 
-@pytest.mark.parametrize(
-    "case,match",
-    [
-        ("missing_ids", "input_ids"),
-        ("wrong_ids_dtype", "input_ids"),
-        ("empty_ids", "input_ids"),
-        ("missing_pixels", "pixel_values"),
-        ("empty_pixels", "pixel_values"),
-        ("wrong_pixels_dtype", "pixel_values"),
-        ("wrong_pixels_rank", "pixel_values"),
-        ("missing_sizes", "image_sizes"),
-        ("wrong_count_dtype", "num_image_tokens"),
-        ("negative_count", "num_image_tokens"),
-        ("zero_count", "num_image_tokens"),
-        ("missing_count", "num_image_tokens"),
-        ("wrong_count", "num_image_tokens"),
-        ("missing_placeholder", "input_ids"),
-        ("nonlocal_placeholder", "input_ids"),
-    ],
-)
-def test_invalid_later_image_is_rejected_without_mutation(model_factory, case, match):
-    model = model_factory("phi3v")
-    generator, history = _generator(model), _History("phi3v")
-    generator.set_inputs(_named(history.image(1)))
-    _respond(generator, history)
-    ids, pixels = _image_turn("phi3v", 9)
-    arrays = _arrays("phi3v", ids, [pixels])
-    if case == "missing_ids":
-        arrays.pop("input_ids")
-    elif case == "wrong_ids_dtype":
-        arrays["input_ids"] = arrays["input_ids"].astype(np.int64)
-    elif case == "empty_ids":
-        arrays["input_ids"] = np.empty((1, 0), dtype=np.int32)
-    elif case == "missing_pixels":
-        arrays.pop("pixel_values")
-    elif case == "empty_pixels":
-        arrays["pixel_values"] = np.empty((0, 1, 3, 1, 1), dtype=np.float32)
-    elif case == "wrong_pixels_dtype":
-        arrays["pixel_values"] = arrays["pixel_values"].astype(np.int32)
-    elif case == "wrong_pixels_rank":
-        arrays["pixel_values"] = pixels
-    elif case == "missing_sizes":
-        arrays.pop("image_sizes")
-    elif case == "wrong_count_dtype":
-        arrays["num_image_tokens"] = np.array([1], dtype=np.int32)
-    elif case in ("negative_count", "zero_count", "wrong_count"):
-        arrays["num_image_tokens"] = np.array(
-            [{"negative_count": -1, "zero_count": 0, "wrong_count": 2}[case]], dtype=np.int64
-        )
-    elif case == "missing_count":
-        arrays.pop("num_image_tokens")
-    elif case == "missing_placeholder":
-        arrays["input_ids"] = np.array([[2, 4, 3]], dtype=np.int32)
-    elif case == "nonlocal_placeholder":
-        arrays["input_ids"] = np.array([[2, -2, 3]], dtype=np.int32)
+def _assert_input_rejected(generator, arrays, match):
     # GetLogits would consume the pending sampled token; inspect the last model output instead.
     sequence, logits = generator.get_sequence(0).copy(), generator.get_output("logits").copy()
     with pytest.raises(Exception, match=match):
         generator.set_inputs(_named(arrays))
     np.testing.assert_array_equal(generator.get_sequence(0), sequence)
     np.testing.assert_array_equal(generator.get_output("logits"), logits)
+
+
+@pytest.mark.parametrize(
+    "name,value",
+    [
+        pytest.param("input_ids", None, id="missing_ids-input_ids"),
+        pytest.param("input_ids", np.array([[2, -1, 3]], dtype=np.int64), id="wrong_ids_dtype-input_ids"),
+        pytest.param("input_ids", np.empty((1, 0), dtype=np.int32), id="empty_ids-input_ids"),
+        pytest.param("pixel_values", None, id="missing_pixels-pixel_values"),
+        pytest.param("pixel_values", np.empty((0, 1, 3, 1, 1), dtype=np.float32), id="empty_pixels-pixel_values"),
+        pytest.param(
+            "pixel_values",
+            np.array([9, 10, 11], dtype=np.int32).reshape(1, 1, 3, 1, 1),
+            id="wrong_pixels_dtype-pixel_values",
+        ),
+        pytest.param("pixel_values", np.array([[9, 10, 11]], dtype=np.float32), id="wrong_pixels_rank-pixel_values"),
+        pytest.param("image_sizes", None, id="missing_sizes-image_sizes"),
+        pytest.param("num_image_tokens", np.array([1], dtype=np.int32), id="wrong_count_dtype-num_image_tokens"),
+        pytest.param("num_image_tokens", np.array([-1], dtype=np.int64), id="negative_count-num_image_tokens"),
+        pytest.param("num_image_tokens", np.array([0], dtype=np.int64), id="zero_count-num_image_tokens"),
+        pytest.param("num_image_tokens", None, id="missing_count-num_image_tokens"),
+        pytest.param("num_image_tokens", np.array([2], dtype=np.int64), id="wrong_count-num_image_tokens"),
+        pytest.param("input_ids", np.array([[2, 4, 3]], dtype=np.int32), id="missing_placeholder-input_ids"),
+        pytest.param("input_ids", np.array([[2, -2, 3]], dtype=np.int32), id="nonlocal_placeholder-input_ids"),
+    ],
+)
+def test_invalid_later_image_is_rejected_without_mutation(model_factory, name, value):
+    model = model_factory("phi3v")
+    generator, history = _generator(model), _History("phi3v")
+    generator.set_inputs(_named(history.image(1)))
+    _respond(generator, history)
+    ids, pixels = _image_turn("phi3v", 9)
+    arrays = _arrays("phi3v", ids, [pixels])
+    if value is None:
+        arrays.pop(name)
+    else:
+        arrays[name] = value
+    _assert_input_rejected(generator, arrays, name)
     generator.set_inputs(_named(history.image(9)))
     _assert_prefill(generator, history, model)
     _respond(generator, history)
@@ -634,11 +607,7 @@ def test_invalid_qwen_image_metadata_preserves_previous_turn(model_factory, case
         arrays["input_ids"][0, 1] = 4
     elif case == "broken_image_block":
         arrays["input_ids"][0, 3] = 4
-    sequence, logits = generator.get_sequence(0).copy(), generator.get_output("logits").copy()
-    with pytest.raises(Exception, match=match):
-        generator.set_inputs(_named(arrays))
-    np.testing.assert_array_equal(generator.get_sequence(0), sequence)
-    np.testing.assert_array_equal(generator.get_output("logits"), logits)
+    _assert_input_rejected(generator, arrays, match)
     generator.set_inputs(_named(history.image(9)))
     _assert_prefill(generator, history, model)
     _respond(generator, history)
@@ -658,11 +627,7 @@ def test_invalid_mistral_image_metadata_preserves_previous_turn(model_factory, c
         arrays["image_sizes"] = np.array([[2, 1]], dtype=np.int64)
     else:
         arrays["num_image_tokens"] = np.array([2], dtype=np.int64)
-    sequence, logits = generator.get_sequence(0).copy(), generator.get_output("logits").copy()
-    with pytest.raises(Exception, match="input_ids|image_sizes|num_image_tokens"):
-        generator.set_inputs(_named(arrays))
-    np.testing.assert_array_equal(generator.get_sequence(0), sequence)
-    np.testing.assert_array_equal(generator.get_output("logits"), logits)
+    _assert_input_rejected(generator, arrays, "input_ids|image_sizes|num_image_tokens")
     generator.set_inputs(_named(history.image(9)))
     _assert_prefill(generator, history, model)
 
@@ -676,11 +641,7 @@ def test_later_image_max_length_rejection_preserves_pending_token(model_factory,
     generator.set_inputs(_named(arrays))
     _respond(generator, history, count=2)
     ids, pixels = _image_turn(family, 7)
-    sequence, logits = generator.get_sequence(0).copy(), generator.get_output("logits").copy()
-    with pytest.raises(Exception, match="max length"):
-        generator.set_inputs(_named(_arrays(family, ids, [pixels])))
-    np.testing.assert_array_equal(generator.get_sequence(0), sequence)
-    np.testing.assert_array_equal(generator.get_output("logits"), logits)
+    _assert_input_rejected(generator, _arrays(family, ids, [pixels]), "max length")
     _respond(generator, history, count=1)
 
 

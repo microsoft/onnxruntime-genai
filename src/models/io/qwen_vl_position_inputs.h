@@ -79,7 +79,6 @@ struct Qwen2VLPositionInputs : PositionInputs {
   std::array<int64_t, 2> attention_mask_shape_{};
   std::unique_ptr<Tensor> attention_mask_;
   bool is_first_update_{true};
-  bool has_pending_grid_{false};
   std::shared_ptr<Tensor> image_grid_thw_;
   std::shared_ptr<Tensor> video_grid_thw_;
   std::shared_ptr<Tensor> second_per_grid_ts_;

@@ -23,7 +23,7 @@ def pytest_addoption(parser):
         action="append",
         default=[],
         choices=list(models.MODELS),
-        help="Logical model id to test (repeatable). Defaults to every entry in MODELS.",
+        help="Logical model id to test (repeatable). Defaults to the models eligible for each suite.",
     )
     group.addoption(
         "--execution-provider",
@@ -84,8 +84,7 @@ def pytest_generate_tests(metafunc):
         is_multimodal = metafunc.definition.get_closest_marker("multimodal") is not None
         eligible = models.multimodal if is_multimodal else [m for m in models.MODELS if m not in models.multimodal]
         chosen = metafunc.config.getoption("--model") or eligible
-        chosen = [m for m in chosen if m in eligible]
-        metafunc.parametrize("model", chosen)
+        metafunc.parametrize("model", [m for m in chosen if m in eligible])
 
 
 @pytest.fixture

@@ -1,12 +1,7 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
-"""Pinned Phi Vision: retained-cache continuation versus same-EP reference replay.
-
-Replay is an oracle only; the subject keeps one Generator through every turn.
-GPU session profiles, not model.device_type or NumPy output placement, establish
-that all three model sessions actually execute numerical work on the selected EP.
-"""
+"""Pinned Phi Vision retained-cache continuation, full-prefix oracles, and EP audits."""
 
 from __future__ import annotations
 
@@ -30,12 +25,9 @@ from .fetch_public_models import verify_artifact
 pytestmark = pytest.mark.multimodal
 
 _ROLES = ("vision", "embedding", "decoder")
-# The export switches LongRoPE tables above 4096. Crossing that threshold
-# changes previously cached rotations, so full-prefix replay is not an
-# equivalent oracle there. Both paths deliberately remain in the short regime.
+# LongRoPE switches above 4096; replay would then rotate cached keys differently.
 _MAX_LENGTH = 4096
 # Fixed before running either EP: FP32 CPU and FP16 CUDA, both with INT4 weights.
-# Compare the entire vocabulary, without adaptive bounds or argmax exceptions.
 _TOLERANCES = {"cpu": {"atol": 2e-3, "rtol": 2e-4}, "cuda": {"atol": 6e-2, "rtol": 2e-3}}
 _METADATA_OPS = {
     "Gather",
@@ -70,17 +62,16 @@ def _audit_profile(path: Path, role: str, device: str, control_nodes=None) -> No
     nodes = [event for event in events if event.get("cat") == "Node" and event.get("args", {}).get("provider")]
     assert nodes, f"No actual partition evidence for {role}: {path}"
     expected = MULTIMODAL_EP_NAMES[device][1]
-    numerical = []
+    numerical = set()
     for event in nodes:
         args = event["args"]
         op = args.get("op_name")
         if op in {"MemcpyFromHost", "MemcpyToHost"}:
             continue
         if args["provider"] == expected:
-            numerical.append(op)
+            numerical.add(op)
             continue
-        # ORT may stage shape/index arithmetic on the CPU. Do not admit any
-        # floating-point numerical fallback, including embedding Gather.
+        # Allow CPU shape/index work, but not floating-point fallback (including Gather).
         inputs = args.get("input_type_shape", [])
         outputs = args.get("output_type_shape", [])
         metadata = op in {"Shape", "Size"} or (
@@ -89,16 +80,13 @@ def _audit_profile(path: Path, role: str, device: str, control_nodes=None) -> No
             and bool(outputs)
             and all(value and set(value) <= _INTEGER_TYPES for value in [*inputs, *outputs])
         )
-        # ORT omits sequence outputs from output_type_shape. These two ops
-        # preserve their input element types, so integer inputs prove that the
-        # unreported sequence is integer metadata, not floating-point features.
+        # ORT omits sequence outputs; these ops preserve their input element types.
         metadata |= (
             op in _INTEGER_SEQUENCE_OPS
             and bool(inputs)
             and all(value and set(value) <= _INTEGER_TYPES for value in inputs)
         )
-        # The pinned graphs contain host If/Loop dispatch. Their body kernels
-        # are individually profiled and audited by this same loop.
+        # Allow pinned host dispatch; its body kernels are audited individually.
         control = op in {"If", "Loop"} and (control_nodes or {}).get(event["name"].removesuffix("_kernel_time")) == op
         assert args["provider"] == "CPUExecutionProvider" and (metadata or control), (
             f"{role}: unapproved fallback node {event['name']}: {args}"
@@ -108,7 +96,7 @@ def _audit_profile(path: Path, role: str, device: str, control_nodes=None) -> No
         "embedding": {"Gather"},
         "decoder": {"GroupQueryAttention"},
     }
-    assert set(numerical) & required_ops[role], f"{role} did not execute its numerical workload on {expected}"
+    assert numerical & required_ops[role], f"{role} did not execute its numerical workload on {expected}"
 
 
 def _write_image(path: Path, height: int, width: int, index: int) -> None:
@@ -167,12 +155,10 @@ def _session_overrides(device, directory, *, default_kernels=False):
                 "intra_op_num_threads": 8,
             }
         }
-    # This older export predates the explicit processor filename field.
-    # Current ORT Extensions still uses up to sixteen crops.
+    # This export predates the explicit processor filename field.
     roles["vision"]["config_filename"] = "processor_config.json"
     if device == "cpu" and not default_kernels:
-        # The accuracy-level-4 packed INT8 path is chunk-dependent. The
-        # full-prefix oracle retains INT4 weights but accumulates in FP32.
+        # Packed INT8 is chunk-dependent; the oracle keeps INT4 weights with FP32 accumulation.
         roles["decoder"]["session_options"]["session.disable_prepacking"] = "1"
     return roles
 
@@ -189,8 +175,7 @@ def bundles(pytestconfig, request):
         bundle.processor = bundle.tokenizer = bundle.model = None
         gc.collect()
         if request.session.testsfailed != failures:
-            # Failure tracebacks can retain Generators and delay model/profile
-            # destruction. Do not obscure the original failed scenario.
+            # Failure tracebacks may retain Generators and prevent profile finalization.
             continue
         for role in _ROLES:
             profiles = list(directory.glob(f"{role}_*.json"))
@@ -211,15 +196,14 @@ def bundle(device, model, pytestconfig, bundles, request):
         cfg = json.loads((model_path / "genai_config.json").read_text(encoding="utf-8"))
         assert cfg["model"]["type"] == "phi3v"
         assert cfg["search"]["past_present_share_buffer"] is True
-        decoder = onnx.load(model_path / cfg["model"]["decoder"]["filename"], load_external_data=False)
-        assert sum(node.op_type == "GroupQueryAttention" for node in decoder.graph.node) == 32
-        del decoder
         variant = "fp32-reference" if unpacked_reference else "default-kernels"
         directory = root / f"{model}-{device}-{variant}"
         directory.mkdir()
         control_nodes = {}
         for role in _ROLES:
             graph = onnx.load(model_path / cfg["model"][role]["filename"], load_external_data=False)
+            if role == "decoder":
+                assert sum(node.op_type == "GroupQueryAttention" for node in graph.graph.node) == 32
             control_nodes[role] = _control_nodes(graph.graph)
             del graph
         roles = _session_overrides(device, directory, default_kernels=default_kernels)
@@ -279,7 +263,6 @@ def _image_turn(bundle, generator, history, image_index):
     history.reference_tokens.extend(-len(history.images) if token < 0 else token for token in tokens)
     history.fragments.append(prompt.replace("<|image_1|>", f"<|image_{len(history.images)}|>"))
     generator.set_inputs(inputs)
-    # The caller relinquishes both the original media and processed payload.
     del inputs, images
     gc.collect()
     pressure = [np.full((512, 512), value, dtype=np.float32) for value in range(8)]
@@ -295,6 +278,7 @@ def _text_turn(bundle, generator, history, text="Name another color."):
 
 
 def _respond(bundle, generator, history, count=3):
+    start = len(history.tokens)
     for _ in range(count):
         if generator.is_done():
             break
@@ -308,6 +292,7 @@ def _respond(bundle, generator, history, count=3):
         token = sequence[-1]
         history.text([token], bundle.tokenizer.decode([token]))
     np.testing.assert_array_equal(generator.get_sequence(0), history.tokens)
+    return history.tokens[start:]
 
 
 def _reference(bundle, history, shared):
@@ -327,8 +312,7 @@ def _reference(bundle, history, shared):
 
 
 def _assert_reference(bundle, generator, history, shared, *, response_steps=2):
-    # Compare live model scores before sampling EOS. Terminal retained scores
-    # may instead reflect caller-supplied logits or sampling processors.
+    # Terminal scores may contain caller overrides or sampling processors.
     assert not generator.is_done(), "Compare a committed prefix before sampling EOS"
     np.testing.assert_array_equal(generator.get_sequence(0), history.tokens)
     reference = _reference(bundle, history, shared)
@@ -341,11 +325,10 @@ def _assert_reference(bundle, generator, history, shared, *, response_steps=2):
         )
         if step == response_steps:
             break
-        old_length = len(history.tokens)
-        _respond(bundle, generator, history, count=1)
-        if len(history.tokens) == old_length:
+        response = _respond(bundle, generator, history, count=1)
+        if not response:
             break
-        reference.append_tokens(np.asarray([history.tokens[-1]], dtype=np.int32))
+        reference.append_tokens(np.asarray(response, dtype=np.int32))
     del reference
 
 
@@ -393,8 +376,7 @@ def test_eos_image_resume_and_latest_suffix_rewind(bundle):
     boundary = len(history.tokens)
     assert not generator.is_done()
     _assert_reference(bundle, generator, history, True, response_steps=4)
-    # A real EP may sample EOS sooner than another. Resume with a known text
-    # suffix so valid rewind coverage does not depend on the sampled length.
+    # A known suffix makes rewind coverage independent of when the EP samples EOS.
     _text_turn(bundle, generator, history, text="Compare the two images.")
     sequence, logits = generator.get_sequence(0).copy(), _last_logits(generator)
     for invalid in (0, boundary - 1, boundary):
@@ -411,8 +393,7 @@ def test_eos_image_resume_and_latest_suffix_rewind(bundle):
 
 
 def test_two_turn_lifetime_with_deferred_readback(bundle):
-    generator = _generator(bundle, True)
-    history = _History()
+    generator, history = _generator(bundle, True), _History()
     # Avoid extra get_logits/get_sequence calls in the repeated-turn workload.
     # Fixed response tokens make an exact teacher-forced reference possible.
     response = bundle.tokenizer.encode("The colors are red and blue.")
@@ -429,22 +410,16 @@ def test_default_kernel_retained_turns(bundle, shared):
     assert "session.disable_prepacking" not in bundle.overrides["decoder"]["session_options"]
     generator, history = _generator(bundle, shared), _History()
     _image_turn(bundle, generator, history, 0)
-    start = len(history.tokens)
-    _respond(bundle, generator, history)
-    first_response = history.tokens[start:]
+    first_response = _respond(bundle, generator, history)
     assert first_response
     _text_turn(bundle, generator, history)
-    start = len(history.tokens)
-    _respond(bundle, generator, history)
-    text_response = history.tokens[start:]
+    text_response = _respond(bundle, generator, history)
     assert text_response
     _image_turn(bundle, generator, history, 1)
     np.testing.assert_array_equal(generator.get_sequence(0), history.tokens)
     continued_logits = _last_logits(generator)
 
-    # Packed INT8 kernels are batch-width dependent. This separate runtime
-    # check replays identical chunk widths, never substitutes a relaxed
-    # full-prefix comparison for the FP32 oracle above.
+    # Packed INT8 depends on batch width: replay identical chunks, not the full prefix.
     reference, replay = _generator(bundle, shared), _History()
     _image_turn(bundle, reference, replay, 0)
     for token in first_response:
@@ -458,7 +433,6 @@ def test_default_kernel_retained_turns(bundle, shared):
     np.testing.assert_array_equal(reference.get_sequence(0), history.tokens)
     np.testing.assert_allclose(continued_logits, _last_logits(reference), **_TOLERANCES[bundle.device])
 
-    # The same second image without retained history must not be equivalent.
     fresh = _generator(bundle, shared)
     _image_turn(bundle, fresh, _History(), 1)
     assert not np.allclose(continued_logits, _last_logits(fresh), **_TOLERANCES[bundle.device]), (
@@ -468,11 +442,10 @@ def test_default_kernel_retained_turns(bundle, shared):
 
     start = len(history.tokens)
     for _ in range(2):
-        old_length = len(history.tokens)
-        _respond(bundle, generator, history, count=1)
-        if len(history.tokens) == old_length:
+        response = _respond(bundle, generator, history, count=1)
+        if not response:
             break
-        reference.append_tokens(np.asarray([history.tokens[-1]], dtype=np.int32))
+        reference.append_tokens(np.asarray(response, dtype=np.int32))
         np.testing.assert_array_equal(reference.get_sequence(0), history.tokens)
         np.testing.assert_allclose(_last_logits(generator), _last_logits(reference), **_TOLERANCES[bundle.device])
     assert len(history.tokens) > start, "The second image produced no response"

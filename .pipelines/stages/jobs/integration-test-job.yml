@@ -18,15 +18,6 @@ parameters:
 - name: artifactSource
   type: string
   default: 'foundry'
-- name: testPath
-  type: string
-  default: 'test/python/integration'
-- name: extraPytestArgs
-  type: string
-  default: ''
-- name: resultPrefix
-  type: string
-  default: 'integration'
 - name: py_dot_ver
   type: string
   default: '3.12'
@@ -113,10 +104,11 @@ jobs:
       modelRoot: $(modelRoot)
       cudaDockerImage: $(cuda_docker_image)
       wheelDir: '$(Build.BinariesDirectory)/wheel'
-      testPath: ${{ parameters.testPath }}
-      extraPytestArgs: ${{ parameters.extraPytestArgs }}
-      resultPrefix: ${{ parameters.resultPrefix }}
-      testRunTitlePrefix: ${{ parameters.resultPrefix }}
+      ${{ if eq(parameters.artifactSource, 'public') }}:
+        testPath: 'test/python/integration/test_integration_multimodal.py'
+        extraPytestArgs: '--run-multimodal-tests'
+        resultPrefix: 'integration-multimodal'
+        testRunTitlePrefix: 'integration-multimodal'
 
   - ${{ if eq(parameters.artifactSource, 'public') }}:
     - task: PublishPipelineArtifact@1

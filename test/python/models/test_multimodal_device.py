@@ -41,10 +41,41 @@ def _tolerance(dtype):
     return {"rtol": 0.004, "atol": 0.004} if dtype == "fp16" else {"rtol": 2e-5, "atol": 2e-5}
 
 
-def _require_gqa(device):
+@pytest.fixture
+def gqa_model_factory(tmp_path, device, dtype, request):
     require_execution_provider(device)
     if device not in ("cpu", *GPU_DEVICES):
         pytest.skip(f"GQA multimodal fixture kernel compatibility is not established for {device}")
+    models = {}
+
+    def make(family="phi3v", *, shared=False, capture=False, asynchronous=False):
+        directory = create_model(
+            tmp_path / str(len(models)),
+            family,
+            device=device,
+            dtype=dtype,
+            shared=shared,
+            capture=capture,
+            profile=True,
+        )
+        if asynchronous:
+            config_path = directory / "genai_config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            for role in ("vision", "embedding", "decoder"):
+                config["model"][role]["run_options"] = {"disable_synchronize_execution_providers": "1"}
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+        models[directory] = og.Model(str(directory))
+        return directory, models[directory]
+
+    failures = request.session.testsfailed
+    yield make
+    directories = list(models)
+    models.clear()
+    gc.collect()
+    # Failed-test tracebacks can retain models and delay profile finalization.
+    if request.session.testsfailed == failures:
+        for directory in directories:
+            assert_profile_partitions(directory, device)
 
 
 def _pixels_dtype(arrays, dtype):
@@ -155,10 +186,8 @@ def test_gqa_fixture_is_deterministic_nonrecurrent_and_disables_child_capture(tm
 @pytest.mark.parametrize("device,dtype", CASES)
 @pytest.mark.parametrize("family", ("phi3v", "qwen2_5_vl", "mistral3"))
 @pytest.mark.parametrize("shared", (False, True), ids=("dynamic", "shared"))
-def test_gqa_retained_turns_match_numpy_and_full_prefix(tmp_path, device, dtype, family, shared):
-    _require_gqa(device)
-    directory = create_model(tmp_path / "gqa", family, device=device, dtype=dtype, shared=shared, profile=True)
-    model = og.Model(str(directory))
+def test_gqa_retained_turns_match_numpy_and_full_prefix(gqa_model_factory, dtype, family, shared):
+    directory, model = gqa_model_factory(family, shared=shared)
     generator = _generator(model)
     history = _History(family)
     for value in (1, 7, 13):
@@ -175,11 +204,6 @@ def test_gqa_retained_turns_match_numpy_and_full_prefix(tmp_path, device, dtype,
         history.text([5, 9])
         np.testing.assert_array_equal(generator.get_sequence(0), history.tokens)
         np.testing.assert_allclose(_last_logits(generator), _numpy_last_logits(directory, history), **_tolerance(dtype))
-    del generator
-    # Explicitly release the last model owner before reading session profiles.
-    del model
-    gc.collect()
-    assert_profile_partitions(directory, device)
 
 
 def _unequal_grid_turn(value, dtype, family="qwen2_5_vl"):
@@ -215,10 +239,8 @@ def _unequal_grid_turn(value, dtype, family="qwen2_5_vl"):
 
 @pytest.mark.parametrize("device,dtype", CASES)
 @pytest.mark.parametrize("family", ("phi3v", "qwen2_5_vl", "mistral3"))
-def test_shared_gqa_eos_image_resume_and_suffix_rewind(tmp_path, device, dtype, family):
-    _require_gqa(device)
-    directory = create_model(tmp_path / "resume", family, device=device, dtype=dtype, shared=True, profile=True)
-    model = og.Model(str(directory))
+def test_shared_gqa_eos_image_resume_and_suffix_rewind(gqa_model_factory, dtype, family):
+    directory, model = gqa_model_factory(family, shared=True)
     generator, history = _generator(model), _History(family)
     generator.set_inputs(_named(_pixels_dtype(history.image(2), dtype)))
     for _ in range(3):
@@ -248,29 +270,84 @@ def test_shared_gqa_eos_image_resume_and_suffix_rewind(tmp_path, device, dtype, 
     np.testing.assert_array_equal(generator.get_sequence(0), history.tokens)
     np.testing.assert_allclose(_last_logits(generator), expected, **_tolerance(dtype))
     np.testing.assert_allclose(_last_logits(generator), _numpy_last_logits(directory, history), **_tolerance(dtype))
-    del generator, model
-    gc.collect()
-    assert_profile_partitions(directory, device)
+
+
+@pytest.mark.parametrize("device,dtype", CASES)
+@pytest.mark.parametrize("family", ("phi3v", "qwen2_5_vl", "mistral3"))
+@pytest.mark.parametrize("shared", (False, True), ids=("dynamic", "shared"))
+def test_gqa_consecutive_suffix_rewinds_match_direct_rewind(gqa_model_factory, dtype, family, shared):
+    directory, model = gqa_model_factory(family, shared=shared)
+    generator, reference = _generator(model), _generator(model)
+    history = _History(family)
+    inputs = _named(_pixels_dtype(history.image(2), dtype))
+    boundary = len(history.tokens)
+    for current in (generator, reference):
+        current.set_inputs(inputs)
+        current.append_tokens(np.asarray([[4, 5, 6, 7, 8, 9, 10]], dtype=np.int32))
+
+    generator.rewind_to(boundary + 5)
+    generator.rewind_to(boundary + 3)
+    reference.rewind_to(boundary + 3)
+    history.text([4, 5, 6, 11, 12, 13])
+    for current in (generator, reference):
+        current.append_tokens(np.asarray([[11, 12, 13]], dtype=np.int32))
+        np.testing.assert_array_equal(current.get_sequence(0), history.tokens)
+    for kind in ("key", "value"):
+        actual = generator.get_output(f"present.0.{kind}")
+        expected = reference.get_output(f"present.0.{kind}")
+        np.testing.assert_allclose(
+            actual[:, :, : len(history.tokens)], expected[:, :, : len(history.tokens)], **_tolerance(dtype)
+        )
+    np.testing.assert_allclose(_last_logits(generator), _last_logits(reference), **_tolerance(dtype))
+    np.testing.assert_allclose(_last_logits(generator), _numpy_last_logits(directory, history), **_tolerance(dtype))
+
+    generator.set_inputs(_named(_pixels_dtype(history.image(9), dtype)))
+    np.testing.assert_allclose(_last_logits(generator), _numpy_last_logits(directory, history), **_tolerance(dtype))
+
+
+@pytest.mark.parametrize("device,dtype", CASES)
+@pytest.mark.parametrize("family", ("phi3v", "qwen2_5_vl", "mistral3"))
+@pytest.mark.parametrize("shared", (False, True), ids=("dynamic", "shared"))
+def test_gqa_rewind_discards_unforwarded_response_token(gqa_model_factory, dtype, family, shared):
+    directory, model = gqa_model_factory(family, shared=shared)
+    generator, history = _generator(model), _History(family)
+    generator.set_inputs(_named(_pixels_dtype(history.image(2), dtype)))
+    history.text([4, 5, 6])
+    generator.append_tokens(np.asarray([[4, 5, 6]], dtype=np.int32))
+    cached_length = len(history.tokens)
+    prefix = {kind: generator.get_output(f"present.0.{kind}")[:, :, :cached_length].copy() for kind in ("key", "value")}
+    generator.generate_next_token()
+    assert len(generator.get_sequence(0)) == cached_length + 1
+    # Reading logits here would forward the sampled token and hide the equality case.
+    generator.rewind_to(cached_length)
+    np.testing.assert_array_equal(generator.get_sequence(0), history.tokens)
+    history.text([7, 8, 9])
+    generator.append_tokens(np.asarray([[7, 8, 9]], dtype=np.int32))
+    for kind, expected in prefix.items():
+        np.testing.assert_allclose(
+            generator.get_output(f"present.0.{kind}")[:, :, :cached_length], expected, **_tolerance(dtype)
+        )
+    np.testing.assert_array_equal(generator.get_sequence(0), history.tokens)
+    np.testing.assert_allclose(_last_logits(generator), _numpy_last_logits(directory, history), **_tolerance(dtype))
+
+    generator.set_inputs(_named(_pixels_dtype(history.image(9), dtype)))
+    np.testing.assert_allclose(_last_logits(generator), _numpy_last_logits(directory, history), **_tolerance(dtype))
 
 
 @pytest.mark.parametrize("device,dtype", CASES)
 @pytest.mark.parametrize("shared", (False, True), ids=("dynamic", "shared"))
 @pytest.mark.parametrize("family", ("qwen2_5_vl", "mistral3"))
-def test_gqa_no_readback_unequal_grid_lifetime_stress(tmp_path, device, dtype, shared, family):
-    _require_gqa(device)
-    directory = create_model(tmp_path / "stress", family, device=device, dtype=dtype, shared=shared, profile=True)
-    config_path = directory / "genai_config.json"
-    config = json.loads(config_path.read_text(encoding="utf-8"))
-    for role in ("vision", "embedding", "decoder"):
-        config["model"][role]["run_options"] = {"disable_synchronize_execution_providers": "1"}
-    config_path.write_text(json.dumps(config), encoding="utf-8")
-    model = og.Model(str(directory))
+def test_gqa_no_readback_unequal_grid_lifetime_stress(gqa_model_factory, dtype, shared, family):
+    _, model = gqa_model_factory(family, shared=shared, asynchronous=True)
+
+    def turn_arrays(turn):
+        if turn % 2 == 0:
+            return _unequal_grid_turn(turn + 1, dtype, family)
+        return _pixels_dtype(_History(family).image(turn + 1), dtype)
+
     generator = _generator(model)
     for turn in range(8):
-        arrays = _unequal_grid_turn(turn + 1, dtype, family)
-        if turn % 2:
-            ids, pixels = _image_turn(family, turn + 1)
-            arrays = _pixels_dtype(_arrays(family, ids, [pixels]), dtype)
+        arrays = turn_arrays(turn)
         inputs = _named(arrays)
         generator.set_inputs(inputs)
         del inputs, arrays
@@ -290,31 +367,21 @@ def test_gqa_no_readback_unequal_grid_lifetime_stress(tmp_path, device, dtype, s
     reference = _generator(model, past_present_share_buffer=not shared)
     offset = 0
     for turn in range(8):
-        arrays = _unequal_grid_turn(turn + 1, dtype, family)
-        if turn % 2:
-            ids, pixels = _image_turn(family, turn + 1)
-            arrays = _pixels_dtype(_arrays(family, ids, [pixels]), dtype)
+        arrays = turn_arrays(turn)
         reference.set_inputs(_named(arrays))
         offset += arrays["input_ids"].size
         reference.append_tokens(sequence[offset : offset + 4].reshape(1, -1))
         offset += 4
     np.testing.assert_array_equal(reference.get_sequence(0), sequence)
     np.testing.assert_allclose(actual, _last_logits(reference), **_tolerance(dtype))
-    del generator, reference, model
-    gc.collect()
-    assert_profile_partitions(directory, device)
 
 
 @pytest.mark.parametrize("device,dtype", CASES)
-def test_gqa_actual_capture_rejects_image_atomically_and_resumes(tmp_path, device, dtype):
-    _require_gqa(device)
+def test_gqa_actual_capture_rejects_image_atomically_and_resumes(gqa_model_factory, device, dtype):
     if device not in GPU_DEVICES:
         pytest.skip("CPU has no actual GPU graph capture; not capture execution coverage")
-    captured_dir = create_model(
-        tmp_path / "captured", device=device, dtype=dtype, shared=True, capture=True, profile=True
-    )
-    eager_dir = create_model(tmp_path / "eager", device=device, dtype=dtype, shared=True, profile=True)
-    model, eager_model = og.Model(str(captured_dir)), og.Model(str(eager_dir))
+    _, model = gqa_model_factory(shared=True, capture=True)
+    _, eager_model = gqa_model_factory(shared=True)
     generator, reference = _generator(model), _generator(eager_model)
     ids, pixels = _image_turn("phi3v", 1)
     for current in (generator, reference):
@@ -322,7 +389,6 @@ def test_gqa_actual_capture_rejects_image_atomically_and_resumes(tmp_path, devic
         # First sample uses prefill; following steps capture and then replay decode.
         for _ in range(8):
             current.generate_next_token()
-    del current
     np.testing.assert_array_equal(generator.get_sequence(0), reference.get_sequence(0))
     before = {
         "sequence": generator.get_sequence(0).copy(),
@@ -341,7 +407,3 @@ def test_gqa_actual_capture_rejects_image_atomically_and_resumes(tmp_path, devic
         reference.generate_next_token()
     np.testing.assert_array_equal(generator.get_sequence(0), reference.get_sequence(0))
     np.testing.assert_allclose(_last_logits(generator), _last_logits(reference), **_tolerance(dtype))
-    del generator, reference, model, eager_model
-    gc.collect()
-    assert_profile_partitions(captured_dir, device)
-    assert_profile_partitions(eager_dir, device)

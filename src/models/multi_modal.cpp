@@ -18,21 +18,19 @@ namespace Generators {
 namespace {
 
 int64_t GetNumImageTokens(const std::vector<ExtraInput>& extra_inputs) {
-  for (size_t i = 0; i < extra_inputs.size(); ++i) {
-    if (extra_inputs[i].name == Config::Defaults::NumImageTokens) {
-      assert(extra_inputs[i].tensor->ort_tensor_);
-      auto info = extra_inputs[i].tensor->ort_tensor_->GetTensorTypeAndShapeInfo();
-      if (info->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64)
-        throw std::runtime_error("num_image_tokens must be int64.");
-      const auto* data = extra_inputs[i].tensor->ort_tensor_->GetTensorData<int64_t>();
-      int64_t total = 0;
-      for (size_t j = 0; j < info->GetElementCount(); ++j) {
-        if (data[j] < 0 || data[j] > std::numeric_limits<int64_t>::max() - total)
-          throw std::runtime_error("num_image_tokens must contain non-negative counts without overflow.");
-        total += data[j];
-      }
-      return total;
+  for (const auto& input : extra_inputs) {
+    if (input.name != Config::Defaults::NumImageTokens)
+      continue;
+    const auto& tensor = *input.tensor;
+    if (tensor.GetType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64)
+      throw std::runtime_error("num_image_tokens must be int64.");
+    int64_t total = 0;
+    for (auto count : std::span(tensor.GetData<int64_t>(), tensor.GetElementCount())) {
+      if (count < 0 || count > std::numeric_limits<int64_t>::max() - total)
+        throw std::runtime_error("num_image_tokens must contain non-negative counts without overflow.");
+      total += count;
     }
+    return total;
   }
 
   return 0;
@@ -978,7 +976,7 @@ void MultiModalPipelineState::ValidateExtraInputs(const std::vector<ExtraInput>&
       throw std::runtime_error("Missing vision input for the new turn: " + name);
     if (tensor->GetType() != model_.session_info_.GetInputDataType(name))
       throw std::runtime_error("Incorrect tensor type for vision input: " + name);
-    const auto actual = tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape();
+    const auto actual = tensor->GetShape();
     const auto expected = model_.session_info_.GetInputShape(name);
     if (actual.size() != expected.size())
       throw std::runtime_error("Incorrect tensor rank for vision input: " + name);
@@ -1000,14 +998,14 @@ void MultiModalPipelineState::ValidateExtraInputs(const std::vector<ExtraInput>&
   if (images <= 0)
     throw std::runtime_error("pixel_values/image_grid_thw must describe at least one image.");
   if (const auto* sizes = find_input(config.vision.inputs.image_sizes)) {
-    const auto shape = sizes->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape();
+    const auto shape = sizes->GetShape();
     if (sizes->GetType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 ||
         shape != std::vector<int64_t>{images, 2})
       throw std::runtime_error("image_sizes must be int64 [num_images, 2].");
   }
   if (type == "mistral3") {
     const auto* sizes = find_input(config.vision.inputs.image_sizes);
-    const auto shape = pixels->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape();
+    const auto shape = pixels->GetShape();
     const auto patch = config.vision.patch_size;
     const auto merge = config.vision.spatial_merge_size;
     if (!sizes || shape.size() != 4 || patch <= 0 || merge <= 0)
@@ -1050,7 +1048,7 @@ void MultiModalPipelineState::ValidateExtraInputs(const std::vector<ExtraInput>&
     const auto* grid = find_input(config.vision.inputs.image_grid_thw);
     if (!grid || grid->GetType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64)
       throw std::runtime_error("image_grid_thw must be int64 for later Qwen image turns.");
-    const auto shape = grid->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape();
+    const auto shape = grid->GetShape();
     ValidateImageGridThwLayoutAndCount(shape, grid->GetElementCount(), images, "image_grid_thw");
     const auto* data = grid->GetData<int64_t>();
     ValidateQwen2VLGridTensorValues(data, grid->GetElementCount(), "image_grid_thw");
@@ -1078,7 +1076,7 @@ void MultiModalPipelineState::ValidateExtraInputs(const std::vector<ExtraInput>&
     }
     if (image != images || tokens != num_tokens)
       throw std::runtime_error("num_image_tokens/input_ids do not match image_grid_thw.");
-    const auto pixel_shape = pixels->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape();
+    const auto pixel_shape = pixels->GetShape();
     if (pixel_shape.size() != 2 || pixel_shape[0] != patches)
       throw std::runtime_error("pixel_values must have one row per image_grid_thw patch for later Qwen image turns.");
   }
@@ -1167,31 +1165,6 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
       // No audio: provide empty 2D tensor [0, hidden_size] for the embedding model
       embedding_state_->audio_features_->AllocateEmptyFeatures();
     }
-    embedding_state_->inputs_embeds_.ReuseEmbeddingsBuffer(decoder_state_->inputs_embeds_);
-    if (embedding_state_->per_layer_inputs_ && decoder_state_->per_layer_inputs_) {
-      embedding_state_->per_layer_inputs_->ReuseEmbeddingsBuffer(*decoder_state_->per_layer_inputs_);
-    }
-    embedding_state_->Run(current_length, next_tokens, next_indices);
-
-    auto logits = chunk_prefill
-                      ? decoder_state_->RunPrefillWithChunking(current_length, next_tokens, next_indices, chunk_size_opt.value())
-                      : decoder_state_->Run(current_length, next_tokens, next_indices);
-
-    // Run may return with queued work (for example, TRT-RTX). Fence this ownership
-    // boundary before releasing processor inputs and per-image run/copy buffers.
-    if (num_image_tokens_ > 0 || num_audio_tokens_ > 0)
-      model_.p_device_->Synchronize();
-
-    if (num_image_tokens_ > 0 || num_audio_tokens_ > 0)
-      multimodal_prompt_length_ = static_cast<size_t>(current_length);
-    prefill_completed_ = true;
-    is_prompt_ = false;
-    if (vision_state_) vision_state_.reset();  // The vision state is no longer needed in generation stage
-    if (speech_state_) speech_state_.reset();  // The speech state is no longer needed in generation stage
-    turn_extra_inputs_.clear();
-    execution_failed_ = false;
-
-    return logits;
   }
 
   embedding_state_->inputs_embeds_.ReuseEmbeddingsBuffer(decoder_state_->inputs_embeds_);
@@ -1199,7 +1172,23 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
     embedding_state_->per_layer_inputs_->ReuseEmbeddingsBuffer(*decoder_state_->per_layer_inputs_);
   }
   embedding_state_->Run(current_length, next_tokens, next_indices);
-  auto logits = decoder_state_->Run(current_length, next_tokens, next_indices);
+  auto logits = chunk_prefill
+                    ? decoder_state_->RunPrefillWithChunking(current_length, next_tokens, next_indices, chunk_size_opt.value())
+                    : decoder_state_->Run(current_length, next_tokens, next_indices);
+
+  if (is_prompt_) {
+    // Run may return with queued work (for example, TRT-RTX). Fence this ownership
+    // boundary before releasing processor inputs and per-image run/copy buffers.
+    if (num_image_tokens_ > 0 || num_audio_tokens_ > 0) {
+      model_.p_device_->Synchronize();
+      multimodal_prompt_length_ = static_cast<size_t>(current_length);
+    }
+    prefill_completed_ = true;
+    is_prompt_ = false;
+    vision_state_.reset();
+    speech_state_.reset();
+    turn_extra_inputs_.clear();
+  }
   execution_failed_ = false;
   return logits;
 }

@@ -225,9 +225,7 @@ def make_decoder_model(family):
     )
 
 
-def create_model(output_dir: Path, family: str = "phi3v", *, fail_on_negative_pixels: bool = False) -> Path:
-    """Write test-time ONNX graphs and configuration beneath a pytest tmp_path."""
-    output_dir.mkdir(parents=True, exist_ok=True)
+def make_config(family):
     model = {
         "type": family,
         "bos_token_id": 1,
@@ -261,7 +259,6 @@ def create_model(output_dir: Path, family: str = "phi3v", *, fail_on_negative_pi
             "session_options": {"provider_options": []},
         },
     }
-    graphs = {"decoder.onnx": make_decoder_model(family)}
     if family != "llama":
         model["embedding"] = {
             "filename": "embedding.onnx",
@@ -279,6 +276,16 @@ def create_model(output_dir: Path, family: str = "phi3v", *, fail_on_negative_pi
             },
             "outputs": {"image_features": "image_features"},
         }
+    return {
+        "model": model,
+        "search": {"max_length": 192, "do_sample": False, "past_present_share_buffer": False},
+    }
+
+
+def create_model(output_dir: Path, family: str = "phi3v", *, fail_on_negative_pixels: bool = False) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    graphs = {"decoder.onnx": make_decoder_model(family)}
+    if family != "llama":
         graphs.update(
             {
                 "embedding.onnx": make_embedding_model(family),
@@ -287,9 +294,5 @@ def create_model(output_dir: Path, family: str = "phi3v", *, fail_on_negative_pi
         )
     for filename, graph in graphs.items():
         onnx.save(graph, output_dir / filename)
-    config = {
-        "model": model,
-        "search": {"max_length": 192, "do_sample": False, "past_present_share_buffer": False},
-    }
-    (output_dir / "genai_config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
+    (output_dir / "genai_config.json").write_text(json.dumps(make_config(family), indent=2), encoding="utf-8")
     return output_dir

@@ -20,11 +20,13 @@ from create.create_gqa_model import HEAD_SIZE, HIDDEN_SIZE, NUM_HEADS, NUM_KV_HE
 from create.create_multimodal_turn_test_model import (
     QWEN_FAMILIES,
     VOCAB_SIZE,
+    _info,
+    make_config,
     make_embedding_model,
     make_vision_model,
 )
 from create.create_multimodal_turn_test_model import (
-    create_model as create_arithmetic_model,
+    _tensor as _init,
 )
 from onnx import TensorProto as T
 from onnx import helper, numpy_helper
@@ -45,14 +47,6 @@ GPU_DEVICES = ("cuda", "webgpu")
 def supported_dtypes(device):
     # CUDA GQA registers MLFloat16/BFloat16, not FP32; media tensors use FP16.
     return ("fp16",) if device == "cuda" else ("fp32", "fp16") if device == "webgpu" else ("fp32",)
-
-
-def _init(name, value, dtype):
-    return numpy_helper.from_array(np.asarray(value, dtype=dtype), name)
-
-
-def _info(name, dtype, shape):
-    return helper.make_tensor_value_info(name, dtype, shape)
 
 
 def _convert_float_model(model, dtype):
@@ -196,14 +190,13 @@ def make_decoder(family, dtype, *, capture=False):
 
 
 def create_model(output_dir, family="phi3v", *, device="cpu", dtype=None, shared=False, capture=False, profile=False):
-    """Write the fixture used by the strict numerical/partition test harnesses."""
     dtype = dtype or supported_dtypes(device)[0]
     if dtype not in supported_dtypes(device):
         raise ValueError(f"GQA fixture does not support {dtype} on {device}")
     if capture and (not shared or device not in GPU_DEVICES):
         raise ValueError("Actual capture requires CUDA/WebGPU and shared GQA")
     output_dir = Path(output_dir)
-    create_arithmetic_model(output_dir, family)
+    output_dir.mkdir(parents=True, exist_ok=True)
     np_dtype = np.float16 if dtype == "fp16" else np.float32
     vision, embedding = _media_models(family, np_dtype)
     for name, graph in (
@@ -214,7 +207,7 @@ def create_model(output_dir, family="phi3v", *, device="cpu", dtype=None, shared
         onnx.checker.check_model(graph)
         onnx.save(graph, output_dir / f"{name}.onnx")
     path = output_dir / "genai_config.json"
-    config = json.loads(path.read_text(encoding="utf-8"))
+    config = make_config(family)
     decoder = config["model"]["decoder"]
     decoder.update(
         hidden_size=HIDDEN_SIZE, head_size=HEAD_SIZE, num_attention_heads=NUM_HEADS, num_key_value_heads=NUM_KV_HEADS

@@ -7,8 +7,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
-import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,14 +17,6 @@ from .check_models_in_sync import main as check_catalog
 from .test_integration_multimodal import _assert_reference, _audit_profile, _session_overrides
 
 _MODEL = "Phi-3.5-vision-instruct"
-
-
-@pytest.fixture
-def artifact_directory():
-    directory = Path("build") / "integration-infrastructure-tests" / uuid.uuid4().hex
-    directory.mkdir(parents=True)
-    yield directory
-    shutil.rmtree(directory)
 
 
 def test_multimodal_catalog_is_separate_and_pinned():
@@ -63,7 +53,7 @@ def test_catalog_checker_detects_multimodal_drift(capsys):
     assert check_catalog([*base, "--multimodal", ",".join(models.multimodal)]) == 0
     assert check_catalog([*base, "--multimodal", "unverified-model"]) == 1
     assert "multimodal_models" in capsys.readouterr().err
-    assert check_catalog(base) == 0  # Existing text-only callers remain valid.
+    assert check_catalog(base) == 0
 
 
 @pytest.mark.parametrize("multimodal", [False, True])
@@ -102,18 +92,18 @@ def test_required_resolver_rejects_unconfigured_and_unverified(monkeypatch):
         resolver.get_path_for("qwen3-0.6b", "cpu")
 
 
-def test_resolver_pins_normalized_public_layout(artifact_directory):
-    base = artifact_directory / models.storage_subpath(_MODEL, "cpu")
+def test_resolver_pins_normalized_public_layout(tmp_path):
+    base = tmp_path / models.storage_subpath(_MODEL, "cpu")
     for version in (1, 99):
         directory = base / f"v{version}"
         directory.mkdir(parents=True)
         (directory / "genai_config.json").write_text("{}", encoding="utf-8")
-    assert resolver.get_path_for(_MODEL, "cpu", model_root=str(artifact_directory), required=True) == base / "v1"
+    assert resolver.get_path_for(_MODEL, "cpu", model_root=str(tmp_path), required=True) == base / "v1"
 
 
-def test_public_fetch_pins_revision_and_checks_all_content(artifact_directory, monkeypatch):
+def test_public_fetch_pins_revision_and_checks_all_content(tmp_path, monkeypatch):
     payload = b"public pinned fixture"
-    source = artifact_directory / "source"
+    source = tmp_path / "source"
     source.write_bytes(payload)
     identity = {"genai_config.json": hashlib.sha256(payload).hexdigest()}
     monkeypatch.setitem(models.PUBLIC_IDENTITY, _MODEL, {"cpu": identity})
@@ -124,22 +114,22 @@ def test_public_fetch_pins_revision_and_checks_all_content(artifact_directory, m
         return str(source)
 
     monkeypatch.setattr(fetch_public_models, "hf_hub_download", download)
-    destination = fetch_public_models.fetch(_MODEL, "cpu", artifact_directory)
+    destination = fetch_public_models.fetch(_MODEL, "cpu", tmp_path)
     assert calls[0]["revision"] == models.PUBLIC_ARTIFACTS[_MODEL]["revision"]
     assert calls[0]["token"] is False
     assert calls[0]["subfolder"] == models.PUBLIC_ARTIFACTS[_MODEL]["subdirs"]["cpu"]
-    assert destination == artifact_directory / models.storage_subpath(_MODEL, "cpu") / "v1"
+    assert destination == tmp_path / models.storage_subpath(_MODEL, "cpu") / "v1"
     assert (destination / "genai_config.json").stat().st_nlink == 1
     fetch_public_models.verify_artifact(destination, _MODEL, "cpu")
     (destination / "genai_config.json").write_bytes(b"changed")
     with pytest.raises(RuntimeError, match="SHA-256 mismatch"):
-        fetch_public_models.fetch(_MODEL, "cpu", artifact_directory)
+        fetch_public_models.fetch(_MODEL, "cpu", tmp_path)
     assert len(calls) == 1
 
 
 @pytest.mark.parametrize("fallback_type", ["float", "float16"])
-def test_partition_audit_rejects_numerical_cpu_fallback(artifact_directory, fallback_type):
-    profile = artifact_directory / "profile.json"
+def test_partition_audit_rejects_numerical_cpu_fallback(tmp_path, fallback_type):
+    profile = tmp_path / "profile.json"
     gpu = {
         "cat": "Node",
         "name": "gpu_embedding_kernel_time",
@@ -158,8 +148,8 @@ def test_partition_audit_rejects_numerical_cpu_fallback(artifact_directory, fall
         _audit_profile(profile, "embedding", "cuda")
 
 
-def test_partition_audit_requires_actual_session_work(artifact_directory):
-    profile = artifact_directory / "profile.json"
+def test_partition_audit_requires_actual_session_work(tmp_path):
+    profile = tmp_path / "profile.json"
     profile.write_text("[]", encoding="utf-8")
     with pytest.raises(AssertionError, match="No actual partition evidence"):
         _audit_profile(profile, "vision", "cuda")
@@ -172,8 +162,8 @@ def test_reference_oracle_does_not_advance_uncommitted_eos():
 
 
 @pytest.mark.parametrize("op", ["SequenceConstruct", "SplitToSequence"])
-def test_partition_audit_allows_only_integer_sequence_metadata(artifact_directory, op):
-    profile = artifact_directory / "profile.json"
+def test_partition_audit_allows_only_integer_sequence_metadata(tmp_path, op):
+    profile = tmp_path / "profile.json"
     events = [
         {
             "cat": "Node",
@@ -199,8 +189,8 @@ def test_partition_audit_allows_only_integer_sequence_metadata(artifact_director
         _audit_profile(profile, "embedding", "cuda")
 
 
-def test_partition_audit_inspects_control_flow_body(artifact_directory):
-    profile = artifact_directory / "profile.json"
+def test_partition_audit_inspects_control_flow_body(tmp_path):
+    profile = tmp_path / "profile.json"
     events = [
         {
             "cat": "Node",
