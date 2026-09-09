@@ -857,6 +857,8 @@ def get_args():
                 kv_cache_scale_file = Path to calibrated per-layer KV cache scales. Required for static quantized schemes; forbidden for per-token schemes.
                     Format: {"scales": {"k_scales": [...per layer...], "v_scales": [...per layer...]}, "layer_ids": [...optional model layer IDs...]}.
                     Each per-layer entry is a scalar (per_tensor) or a length-(num_kv_heads * head_size) vector (per_channel).
+                    An optional "qmax" records the divisor the file was calibrated with (128 for int8, 8 for int4, 448 for fp8);
+                    the builder then rescales to the requested scheme, so one file can serve several bit widths.
                 disable_qkv_fusion = Disable QKV fusion in the model. Default is false.
                     If true, the model will not fuse the Q, K, and V projections. Automatically assumed for certain EPs.
                 fuse_qk_norm_gqa = Enable QK Norm GQA fusion for CUDA and WebGPU. Default is true.

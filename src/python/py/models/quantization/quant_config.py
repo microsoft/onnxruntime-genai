@@ -79,6 +79,12 @@ KV_CACHE_QUANT_SCHEMES = frozenset(
     }
 )
 
+# Divisor used to turn a calibrated threshold into a stored scale: scale = threshold / qmax.
+# Signed integers use the full 2^(bits-1) range; fp8 e4m3 uses its largest finite magnitude.
+# A calibration file that declares its own `qmax` can therefore be retargeted to another bit
+# width by the ratio of the two values.
+KV_CACHE_CALIBRATION_QMAX = {"int8": 128.0, "int4": 8.0, "fp8": 448.0}
+
 
 def resolve_dtype(name: str) -> DtypeDescriptor:
     """Resolve a dtype string to its descriptor. Raises ``ValueError`` if unknown."""

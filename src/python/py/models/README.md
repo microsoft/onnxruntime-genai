@@ -705,6 +705,8 @@ Per-token schemes instead allocate FP16 scale caches, compute their values on de
 
 - `kv_cache_scale_file`: path to a JSON file with calibrated per-layer scales in the form `{"scales": {"k_scales": [...per layer...], "v_scales": [...per layer...]}, "layer_ids": [...model layer IDs...]}`. Each per-layer entry is a scalar (`per_tensor`) or a length-`(num_kv_heads * head_size)` vector (`per_channel`). `layer_ids` maps each scale entry to its model layer; it is contiguous for dense models and sparse for hybrid models where only full-attention layers own a KV cache. This option is required when `kv_cache_quant_scheme` is enabled.
 
+A calibrated scale is `threshold / qmax`, so it depends on the bit width it was calibrated for. The file may record that divisor as a top-level `"qmax"` (128 for int8, 8 for int4, 448 for fp8 e4m3); the builder then rescales the entries to the requested scheme, so a single calibration file can serve several bit widths. Without `"qmax"` the scales are used as-is and must already match the requested scheme — reusing an int8 file for `int4_*` without it silently under-scales by 16x and clips the cache.
+
 The scale file is produced by the `kv_cache_calibration` module, which runs a baseline (non-quantized) build of the same model over a calibration corpus and captures the `present.*.key`/`present.*.value` tensors:
 
 ```bash

@@ -38,7 +38,7 @@ from transformers import (
     Qwen3VLForConditionalGeneration,
 )
 
-from quantization import CudaQuantizer, QuantConfig, resolve_dtype
+from quantization import KV_CACHE_CALIBRATION_QMAX, CudaQuantizer, QuantConfig, resolve_dtype
 
 
 class Model:
@@ -903,6 +903,21 @@ class Model:
             f"model.layers.{layer_id}.attn.v_scale",
         )
 
+    def get_kv_cache_calibration_factor(self, file_qmax):
+        # A calibrated scale is threshold / qmax, so a file that records the qmax it was
+        # calibrated against can be retargeted to this model's bit width by the ratio of the
+        # two divisors (an int8 file reused for int4 scales up by 128/8). Files that omit
+        # `qmax` are taken as already matching the requested scheme.
+        if file_qmax is None:
+            return 1.0
+        if not isinstance(file_qmax, (int, float)) or isinstance(file_qmax, bool):
+            raise ValueError("kv_cache_scale_file qmax must be a number.")
+        if not np.isfinite(file_qmax) or file_qmax <= 0:
+            raise ValueError("kv_cache_scale_file qmax must be finite and positive.")
+        bit_width_name = self.kv_cache_attrs["quant_scheme"].split("_", 1)[0]
+        target_qmax = KV_CACHE_CALIBRATION_QMAX[bit_width_name]
+        return float(file_qmax) / target_qmax
+
     def make_kv_cache_scale_initializers(self):
         per_channel = self.kv_cache_attrs["quant_mode"] == "PER_CHANNEL"
         scale_size = self.num_kv_heads * self.head_size if per_channel else 1
@@ -930,6 +945,7 @@ class Model:
             raise ValueError("Scales file must contain scales.k_scales and scales.v_scales.")
 
         layer_ids = scale_data.get("layer_ids", None)
+        scale_factor = self.get_kv_cache_calibration_factor(scale_data.get("qmax", None))
         if layer_ids is None:
             layer_ids = list(range(self.num_layers))
             expected_scale_count = self.num_layers
@@ -979,7 +995,7 @@ class Model:
                 )
             if not np.all(np.isfinite(scale)) or np.any(scale <= 0):
                 raise ValueError(f"kv_cache scale for layer {layer_id} must contain finite positive values")
-            return scale.reshape(scale_shape)
+            return (scale * scale_factor).reshape(scale_shape)
 
         # Make initializers for each scale tensor
         for scale_index, layer_id in enumerate(layer_ids):
@@ -4203,12 +4219,12 @@ class Model:
         # PagedAttention derives the cache element type from the tensor itself, so unlike
         # GroupQueryAttention it has no `kv_cache_bit_width` attribute.
         attributes = self.get_attention_op_attributes(**kwargs)
-        if self.kv_cache_attrs["bit_width"] == 4:
+        if self.kv_cache_attrs.get("bit_width", 0) == 4:
             attributes.update(k_cache_dtype="int4", v_cache_dtype="int4")
         rotation = self.kv_cache_attrs.get("rotation", "NONE")
         if rotation != "NONE":
             attributes.update(qk_rotation=rotation, v_rotation=rotation)
-        if self.kv_cache_attrs["quant_mode"] == "PER_TOKEN":
+        if self.kv_cache_attrs.get("quant_mode") == "PER_TOKEN":
             layer_id = kwargs["layer_id"]
             inputs.extend([""] * (17 - len(inputs)))
             inputs.extend(self.input_names[f"past_key_values.{side}_scale"][layer_id] for side in ("key", "value"))

@@ -569,6 +569,55 @@ def test_calibrated_per_layer_scales_are_loaded_from_file(tmp_path):
     np.testing.assert_allclose(captured["model.layers.1.attn.v_scale"], 0.4)
 
 
+def test_calibration_qmax_retargets_scales_to_the_requested_bit_width(tmp_path):
+    # A scale is threshold / qmax, so an int8-calibrated file (qmax 128) reused for an int4
+    # cache (qmax 8) must scale up by 16x. Without this the cache clips hard.
+    scale_file = tmp_path / "kv_scales.json"
+    scale_file.write_text(json.dumps({"qmax": 128, "scales": {"k_scales": [0.1], "v_scales": [0.2]}}))
+    model = _make_kv_model(
+        kv_cache_quant_type="int4_per_tensor",
+        num_layers=1,
+        extra_options={"kv_cache_scale_file": str(scale_file)},
+    )
+    captured = _capture_initializers(model)
+
+    model.make_kv_cache_scale_initializers()
+
+    np.testing.assert_allclose(captured["model.layers.0.attn.k_scale"], 1.6)
+    np.testing.assert_allclose(captured["model.layers.0.attn.v_scale"], 3.2)
+
+
+def test_calibration_qmax_matching_the_scheme_leaves_scales_unchanged(tmp_path):
+    scale_file = tmp_path / "kv_scales.json"
+    scale_file.write_text(json.dumps({"qmax": 128, "scales": {"k_scales": [0.1], "v_scales": [0.2]}}))
+    model = _make_kv_model(
+        kv_cache_quant_type="int8_per_tensor",
+        num_layers=1,
+        extra_options={"kv_cache_scale_file": str(scale_file)},
+    )
+    captured = _capture_initializers(model)
+
+    model.make_kv_cache_scale_initializers()
+
+    np.testing.assert_allclose(captured["model.layers.0.attn.k_scale"], 0.1)
+    np.testing.assert_allclose(captured["model.layers.0.attn.v_scale"], 0.2)
+
+
+@pytest.mark.parametrize("qmax", [0, -8, "128", True, float("inf")])
+def test_invalid_calibration_qmax_is_rejected(tmp_path, qmax):
+    scale_file = tmp_path / "kv_scales.json"
+    scale_file.write_text(json.dumps({"qmax": qmax, "scales": {"k_scales": [0.1], "v_scales": [0.2]}}))
+    model = _make_kv_model(
+        kv_cache_quant_type="int4_per_tensor",
+        num_layers=1,
+        extra_options={"kv_cache_scale_file": str(scale_file)},
+    )
+    _capture_initializers(model)
+
+    with pytest.raises(ValueError, match="qmax must be"):
+        model.make_kv_cache_scale_initializers()
+
+
 def test_sparse_layer_ids_map_scales_to_model_layers(tmp_path):
     scale_file = tmp_path / "kv_scales.json"
     scale_file.write_text(
