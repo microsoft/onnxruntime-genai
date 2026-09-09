@@ -15,6 +15,9 @@ parameters:
   - 'osx'
 - name: model
   type: string
+- name: artifactSource
+  type: string
+  default: 'foundry'
 - name: py_dot_ver
   type: string
   default: '3.12'
@@ -90,6 +93,7 @@ jobs:
       os: ${{ parameters.os }}
       ep: ${{ parameters.ep }}
       model: ${{ parameters.model }}
+      artifactSource: ${{ parameters.artifactSource }}
       targetDir: $(modelRoot)
 
   - template: steps/integration-pytest-step.yml
@@ -100,3 +104,16 @@ jobs:
       modelRoot: $(modelRoot)
       cudaDockerImage: $(cuda_docker_image)
       wheelDir: '$(Build.BinariesDirectory)/wheel'
+      ${{ if eq(parameters.artifactSource, 'public') }}:
+        testPath: 'test/python/integration/test_integration_multimodal.py'
+        extraPytestArgs: '--run-multimodal-tests'
+        resultPrefix: 'integration-multimodal'
+        testRunTitlePrefix: 'integration-multimodal'
+
+  - ${{ if eq(parameters.artifactSource, 'public') }}:
+    - task: PublishPipelineArtifact@1
+      condition: succeededOrFailed()
+      displayName: 'Publish multimodal session partition evidence'
+      inputs:
+        targetPath: '$(Build.Repository.LocalPath)/build/multimodal-integration-results'
+        artifact: 'multimodal-profiles-${{ parameters.os }}-${{ parameters.ep }}-${{ parameters.model }}'

@@ -15,6 +15,7 @@ struct ConvKeyValueCache : KeyValueCache {
 
   void Add() override;
   void Update(DeviceSpan<int32_t> beam_indices, int total_length) override;
+  void ValidateRewindTo(size_t index) const override;
   void RewindTo(size_t index) override;
 
  private:

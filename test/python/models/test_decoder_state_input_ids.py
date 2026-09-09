@@ -55,6 +55,23 @@ def _run_text_generation(
     return [generator.get_sequence(i).copy() for i in range(prompt.shape[0])]
 
 
+def _make_image_inputs(input_ids: list[int]) -> og.NamedTensors:
+    """Build the minimal Phi-style image inputs accepted by the synthetic pipeline models."""
+    inputs = og.NamedTensors()
+    inputs["input_ids"] = og.Tensor(np.array([input_ids], dtype=np.int32))
+    inputs["pixel_values"] = og.Tensor(np.zeros((1, 1, 3, 1, 1), dtype=np.float32))
+    inputs["image_sizes"] = og.Tensor(np.array([[1, 1]], dtype=np.int64))
+    inputs["num_image_tokens"] = og.Tensor(np.array([1], dtype=np.int64))
+    return inputs
+
+
+def _make_generator(model_path: str, max_length: int = 10) -> og.Generator:
+    model = og.Model(model_path)
+    params = og.GeneratorParams(model)
+    params.set_search_options(do_sample=False, max_length=max_length)
+    return og.Generator(model, params)
+
+
 @pytest.mark.parametrize("relative_model_path", [Path("multimodal-decoder-no-input-ids")])
 def test_decoder_no_input_ids_does_not_inject_input_ids(test_data_path, relative_model_path):
     """Mistral3-like model: decoder declares no input_ids input.
@@ -127,3 +144,72 @@ def test_multimodal_prefill_chunking_falls_back_for_batched_prompts(test_data_pa
     assert len(with_chunk_size) == len(unchunked)
     for actual, expected in zip(with_chunk_size, unchunked, strict=True):
         np.testing.assert_array_equal(actual, expected)
+
+
+@pytest.mark.parametrize(
+    "relative_model_path",
+    [
+        Path("multimodal-decoder-no-input-ids"),
+        Path("multimodal-decoder-with-input-ids"),
+    ],
+)
+def test_multimodal_image_prefill_then_text_append_matches_single_prefill(test_data_path, relative_model_path):
+    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+
+    continued = _make_generator(model_path)
+    continued.set_inputs(_make_image_inputs([-1, 2]))
+    continued.append_tokens(np.array([[3, 4]], dtype=np.int32))
+    continued.append_tokens(np.array([[5]], dtype=np.int32))
+
+    reference = _make_generator(model_path)
+    reference.set_inputs(_make_image_inputs([-1, 2, 3, 4, 5]))
+
+    np.testing.assert_array_equal(continued.get_sequence(0), reference.get_sequence(0))
+    np.testing.assert_allclose(continued.get_logits(), reference.get_logits(), rtol=0, atol=0)
+
+
+def test_multimodal_input_ids_only_set_inputs_continues_text(test_data_path):
+    model_path = os.fspath(Path(test_data_path) / "multimodal-decoder-no-input-ids")
+    generator = _make_generator(model_path)
+    generator.set_inputs(_make_image_inputs([-1, 2]))
+
+    text_inputs = og.NamedTensors()
+    text_inputs["input_ids"] = og.Tensor(np.array([[3, 4]], dtype=np.int32))
+    generator.set_inputs(text_inputs)
+
+    np.testing.assert_array_equal(generator.get_sequence(0), np.array([-1, 2, 3, 4], dtype=np.int32))
+
+
+def test_multimodal_second_image_is_supported(test_data_path):
+    model_path = os.fspath(Path(test_data_path) / "multimodal-decoder-no-input-ids")
+    generator = _make_generator(model_path)
+    generator.set_inputs(_make_image_inputs([-1, 2]))
+    generator.generate_next_token()
+    previous_sequence = generator.get_sequence(0).copy()
+    generator.set_inputs(_make_image_inputs([-1, 3]))
+    np.testing.assert_array_equal(generator.get_sequence(0), np.concatenate([previous_sequence, [-1, 3]]))
+    generator.generate_next_token()
+
+
+def test_multimodal_suffix_rewind_and_boundary_guard(test_data_path):
+    model_path = os.fspath(Path(test_data_path) / "multimodal-decoder-no-input-ids")
+    generator = _make_generator(model_path)
+    generator.set_inputs(_make_image_inputs([-1, 2]))
+    generator.append_tokens(np.array([[3, 4]], dtype=np.int32))
+    generator.generate_next_token()
+
+    generator.rewind_to(3)
+    generator.append_tokens(np.array([[4]], dtype=np.int32))
+
+    reference = _make_generator(model_path)
+    reference.set_inputs(_make_image_inputs([-1, 2, 3, 4]))
+    np.testing.assert_array_equal(generator.get_sequence(0), reference.get_sequence(0))
+    np.testing.assert_allclose(generator.get_logits(), reference.get_logits(), rtol=0, atol=0)
+
+    sequence_before = generator.get_sequence(0).copy()
+    logits_before = generator.get_logits().copy()
+    with pytest.raises(Exception, match="multimodal prompt boundary"):
+        generator.rewind_to(2)
+
+    np.testing.assert_array_equal(generator.get_sequence(0), sequence_before)
+    np.testing.assert_array_equal(generator.get_logits(), logits_before)

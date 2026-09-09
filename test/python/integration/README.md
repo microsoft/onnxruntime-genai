@@ -18,9 +18,12 @@ test/python/integration/
   models.py                  # MODELS catalog + suite lists + PINNED_VERSIONS
   resolver.py                # get_path_for(model, device) -> Path
   suite_paths.py             # blob prefix for one (model, device) pair
-  conftest.py                # --model, --execution-provider, --model-root, --run-engine-tests
+  fetch_public_models.py     # revision/hash-pinned public artifacts, normalized locally
+  conftest.py                # shared CLI and independent Engine/multimodal opt-ins
   test_integration_text.py   # text-generation test (text pipeline)
   test_integration_engine.py # paged-attention Engine test (Engine stage)
+  test_integration_multimodal.py # retained-cache Phi Vision turns (opt-in)
+  test_integration_infrastructure.py # small offline catalog/resolver/partition checks
 ```
 
 ## Running locally
@@ -148,6 +151,116 @@ python src/python/py/models/builder.py -m Qwen/Qwen2.5-0.5B-Instruct \
 If the staged files are intentionally regenerated, refresh the three hashes in
 `PINNED_IDENTITY` in the same change.
 
+## Real Phi Vision continuation suite
+
+The `multimodal` suite requires `--run-multimodal-tests`. It is independent of
+text `pr`/`all` and Engine tests; collecting this directory does not add VLMs
+to those suites.
+
+### Immutable public artifacts
+
+Both variants come from
+[`microsoft/Phi-3.5-vision-instruct-onnx`](https://huggingface.co/microsoft/Phi-3.5-vision-instruct-onnx/tree/672d73375fa86f3d7787e40ac593e33a4f04a055),
+revision `672d73375fa86f3d7787e40ac593e33a4f04a055`:
+
+| EP | Upstream subdirectory | Approximate artifact size |
+|---|---|---|
+| CPU | `cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4` | 3.2 GB |
+| CUDA | `gpu/gpu-int4-rtn-block-32` | 2.6 GB |
+
+`models.PUBLIC_IDENTITY` pins SHA-256 for all eleven files per variant:
+three graphs, three external weight files, configuration, processor, and
+tokenizer data. The fetcher requests this revision with `token=False`, verifies
+each file, and copies it to `<root>/Phi-3.5-vision-instruct/onnx/<device_dir>/v1`.
+The fixture verifies all files again before loading. These are public exports,
+not Foundry blob prefixes.
+
+Allow twice the artifact size for the `<root>/.huggingface` cache and ordinary
+copies: ORT rejects external-data files with multiple hard links.
+
+```powershell
+# Run from the repository root with a source-built wheel installed.
+python test\python\integration\fetch_public_models.py `
+  --model Phi-3.5-vision-instruct --device cpu `
+  --model-root build\models\multimodal-integration
+python -m pytest test\python\integration\test_integration_multimodal.py -sv `
+  --run-multimodal-tests --model Phi-3.5-vision-instruct `
+  --execution-provider cpu --model-root build\models\multimodal-integration
+```
+
+For CUDA, fetch with `--device cuda` and test with `--execution-provider cuda`.
+Unavailable EPs and missing/unsupported required artifacts fail rather than
+skip. Weights and evidence stay in ignored `build` directories.
+
+### Scenarios and numerical contract
+
+Each subject keeps one Generator through image → response → image, image →
+multi-token text → image, initial text → image → text, EOS resume, latest-image
+suffix rewind, and deferred-readback lifetime scenarios. Distinct RGB images
+have opposite aspect ratios. Each image turn releases media and processed
+inputs before allocation pressure; the lifetime scenario teacher-forces
+responses without intermediate logits/sequence readback.
+
+A test-only reference replays the exact full-prefix token history on the same
+EP. Its processor receives all images, numbered `image_2`/`-2` for the second
+image rather than the subject's turn-local `image_1`/`-1`. Responses are
+teacher-forced from the subject to avoid argmax tie divergence. Comparisons
+start before EOS: terminal logits may contain caller overrides or sampling
+processors, not live prefix scores.
+
+All vocabulary logits use fixed `assert_allclose` bounds: CPU FP32
+`atol=0.002, rtol=0.0002`; CUDA FP16 `atol=0.06, rtol=0.002`. There are no
+cross-EP comparisons, adaptive tolerances, or argmax exceptions.
+
+The CPU full-prefix oracle sets decoder `session.disable_prepacking=1`:
+accuracy-level-4 packed INT8 activations are chunk-dependent. Unpacking retains
+the INT4 weights and CPU EP with FP32 accumulation. CUDA keeps normal FP16
+execution, with no CPU numerical substitute.
+
+`test_default_kernel_retained_turns` independently uses unmodified kernels and
+both dynamic/shared GQA caches through image → response → multi-token text →
+response → image → response. It checks exact sequence retention and logits
+against teacher-forced replay with **identical chunk widths**, using the same
+tolerances. Second-image logits must differ from a fresh, second-image-only
+Generator. CPU default sessions keep prepacking and are cached/profiled
+separately; this is not a packed INT8 full-prefix equivalence claim.
+
+The decoder must contain 32 GroupQueryAttention nodes. The image-pair oracle
+also tests dynamic/shared caches; remaining cases use shared caches. These
+checks establish numerical continuity, not pointer aliasing/residency, which
+is covered by white-box device tests.
+
+Histories stay below **4096 tokens**, where LongRoPE changes would invalidate
+the retained-key oracle. The chosen aspect ratios bound two-image histories
+even with ORT Extensions' sixteen crops. Graph capture is not enabled or claimed.
+
+### Actual provider evidence and CI
+
+Vision, embedding, and decoder session overrides select the EP and filter
+accelerators to GPU hardware. After successful scenarios and model destruction,
+all three finalized ORT profiles must show numerical work on that EP. Profiles
+go to `build/multimodal-integration-results` (`--multimodal-output-dir` overrides).
+
+CUDA allows CPU Shape/Size, integer/bool-only `_METADATA_OPS`, and exact If/Loop
+dispatch nodes from the pinned graphs; body kernels are audited individually.
+`SequenceConstruct`/`SplitToSequence` require integer/bool inputs because their
+type-preserving outputs are omitted from ORT profile metadata. Copies do not
+count as numerical work. Floating-point CPU fallback fails; `model.device_type`
+and NumPy output placement are not GPU execution evidence.
+
+`.pipelines/integration-tests.yml` enables the separate
+`integration_multimodal_test_linux_x64` stage nightly or with
+`run_multimodal_tests: true`. It reuses the source-built Linux wheel and existing
+CPU/A10 NV32 (24 GB) pools, controlled by `linux_x64_cpu`/`linux_x64_cuda`.
+The public fetch route leaves Foundry text/Engine jobs unchanged. JUnit and
+profiles are published separately; `check_models_in_sync.py --multimodal ...`
+checks the pipeline catalog.
+
+Real **WebGPU and Qwen-VL coverage remain NOT RUN**: no compatible pinned export
+has been verified. A GPU directory name is not WebGPU compatibility evidence.
+No unverified lane or storage path is created; synthetic tests cover their
+separately supported scenarios.
+
 ## Adding a new model
 
 The blob container is populated by the Foundry team. The integration
@@ -161,7 +274,8 @@ architectures**, not coverage of every checkpoint Foundry ships.
 | New architecture family arrives (e.g. first time `mamba`/`falcon`/`glm`) | yes | **yes** - pick the smallest size with a real release | yes |
 | New size/version of a family we already cover (e.g. `qwen3-32b` when we already test `qwen3-0.6b`) | yes | no | yes |
 | Finetune/specialized variant of a model we already cover (e.g. `qwen3-0.6b-pp-finetuned`) | yes | no | no - run manually if you need it |
-| Model isn't text-to-text (VLM, MMM, ASR, embeddings) | no - out of scope today | no | no |
+| Verified VLM export with a supported scenario adapter | yes, in a separate multimodal suite | no | no |
+| MMM, ASR, embeddings without a supported adapter | no | no | no |
 
 The `pr` suite gates every PR, so its size directly affects developer
 wait time. Add to `pr` only when a genuinely new architecture lands; one
@@ -187,6 +301,6 @@ representative model per family is enough.
 
 ### Scope
 
-Today: text-to-text only. Vision-language, multimodal, and ASR models
-are deliberately out of scope and will be enabled in a separate effort
-with a different scenario adapter.
+Text-to-text, separately opted-in paged Engine, and the pinned Phi Vision
+continuation adapter. Other multimodal families and ASR require verified
+artifacts and their own compatible scenario adapters.

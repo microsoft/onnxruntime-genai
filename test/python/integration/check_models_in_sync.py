@@ -4,11 +4,9 @@
 
 """Verify the integration pipeline's model lists stay in sync with models.py.
 
-The pipeline file ``.pipelines/integration-tests.yml`` declares ``pr_models``
-and ``all_models`` parameter defaults so each ADO job can fan out per model.
-Those lists must match the ``pr`` and ``all_`` suites in ``models.py``;
-otherwise PRs and main merges silently test a different set of models from
-what the catalog claims.
+The ``pr_models`` and ``all_models`` defaults in
+``.pipelines/integration-tests.yml`` must match the catalog's ``pr`` and
+``all_`` suites. ``--multimodal`` also checks the opt-in public VLM list.
 
 The pipeline passes its own lists in as arguments, so this script doesn't
 need to know where the YAML lives or how to parse it:
@@ -25,7 +23,10 @@ from __future__ import annotations
 import argparse
 import sys
 
-import models
+if __package__:
+    from . import models
+else:
+    import models
 
 
 def _split(value: str) -> list[str]:
@@ -49,6 +50,10 @@ def _diff(expected: list[str], actual: list[str]) -> list[str]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--multimodal",
+        help="Comma-separated multimodal_models list (required by the integration pipeline).",
+    )
+    parser.add_argument(
         "--pr",
         required=True,
         help="Comma-separated pr_models list from the pipeline yaml.",
@@ -65,6 +70,8 @@ def main(argv: list[str] | None = None) -> int:
         ("pr", "pr_models", list(models.pr), _split(args.pr)),
         ("all", "all_models", list(models.all_), _split(args.all_models)),
     )
+    if args.multimodal is not None:
+        suites += (("multimodal", "multimodal_models", list(models.multimodal), _split(args.multimodal)),)
 
     problems: list[str] = []
     for suite_name, yaml_key, expected, actual in suites:
@@ -81,13 +88,13 @@ def main(argv: list[str] | None = None) -> int:
             print(p, file=sys.stderr)
         print(
             "\nFix: edit .pipelines/integration-tests.yml so 'pr_models' and "
-            "'all_models' defaults match the 'pr' and 'all_' lists in "
+            "'all_models' / 'multimodal_models' defaults match the suite lists in "
             "test/python/integration/models.py.",
             file=sys.stderr,
         )
         return 1
 
-    print("OK: pipeline model lists match models.py (pr and all suites).")
+    print(f"OK: pipeline model lists match models.py ({', '.join(s[0] for s in suites)} suites).")
     return 0
 
 
