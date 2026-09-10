@@ -33,6 +33,7 @@ from builders import (
     Mistral3TextModel,
     MistralModel,
     Model,
+    MuseGlimmerModel,
     NemotronModel,
     OLMoModel,
     Phi3MiniLongRoPEModel,
@@ -525,6 +526,21 @@ def create_model(
         onnx_model = Mistral3TextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         if not onnx_model.exclude_embeds:
             onnx_model.model_type = "mistral3_text"
+    elif config.architectures[0] == "MuseGlimmerForConditionalGeneration":
+        # Public Meta Muse Glimmer (Apache-2.0). Multimodal wrapper -> hoist the text sub-config so
+        # the text builder reads it flat (same pattern as other *ForConditionalGeneration entries).
+        text_config = config.text_config
+        for key in text_config:
+            if not hasattr(config, key):
+                setattr(config, key, getattr(text_config, key))
+        # RoPE theta lives under rope_parameters in the public schema; surface it for the base builder.
+        rope_params = getattr(config, "rope_parameters", None)
+        if isinstance(rope_params, dict) and "rope_theta" in rope_params:
+            config.rope_theta = rope_params["rope_theta"]
+        onnx_model = MuseGlimmerModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        # OGA runtime dispatch: emit type "llama" (the arch is Llama-compatible at the OGA level); the
+        # underlying ONNX graph is the full Muse Glimmer arch. Avoids "Unsupported model_type: muse_glimmer".
+        onnx_model.model_type = "llama"
     elif config.architectures[0] == "NemotronForCausalLM":
         onnx_model = NemotronModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "OlmoForCausalLM":
