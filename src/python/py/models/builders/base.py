@@ -544,6 +544,11 @@ class Model:
             self.make_skip_simplified_layer_norm = TRT_RTX.make_skip_simplified_layer_norm.__get__(self, self.__class__)
             self.make_skip_layer_norm = TRT_RTX.make_skip_layer_norm.__get__(self, self.__class__)
             self.make_simplified_layer_norm = TRT_RTX.make_simplified_layer_norm.__get__(self, self.__class__)
+            self.make_causal_conv_with_state = TRT_RTX.make_causal_conv_with_state.__get__(self, self.__class__)
+            self.make_gated_rms_norm = TRT_RTX.make_gated_rms_norm.__get__(self, self.__class__)
+            self.make_mrotary_embedding = TRT_RTX.make_mrotary_embedding.__get__(self, self.__class__)
+            self.make_linear_attention = TRT_RTX.make_linear_attention.__get__(self, self.__class__)
+            self.make_linear_attention_gate = TRT_RTX.make_linear_attention_gate.__get__(self, self.__class__)
 
         elif self.ep == "dml":
             from .expansions import DML
@@ -3088,48 +3093,27 @@ class Model:
         # Applies MRoPE (multi-modal rotary position embeddings) to `root_input` using the
         # MRotaryEmbedding (com.microsoft) contrib op.
         #
-        # MRotaryEmbedding accepts one position stream per T/H/W dimension. Packed model inputs
-        # retain their flattened ABI, but are promoted to the operator's required rank-3 ABI.
+        # Unlike the standard RotaryEmbedding op, MRotaryEmbedding natively accepts a 3D
+        # `position_ids` tensor of shape (3, batch_size, sequence_length) (one position stream
+        # per T/H/W dimension) together with static cos/sin caches indexed by position, and
+        # internally combines the three streams per-column according to the `mrope_section`
+        # and `mrope_layout` attributes. This removes the need to manually compute dynamic
+        # cos/sin caches per token or to flatten/interleave them before calling RotaryEmbedding.
         #
         #      q_or_k (B, S, N*H)     position_ids (3, B, S)     cos_cache, sin_cache (M, H/2)
         #                  \                    |                    /
         #                   +-------------------+-------------------+
         #                                        |
-        #                    [Unsqueeze] --> MRotaryEmbedding --> [Squeeze]
+        #                          MRotaryEmbedding (com.microsoft)
         #                                        |
         #                                 output (B, S, N*H)
         num_heads = kwargs.pop("num_heads")
-        position_ids = kwargs.pop("position_ids")
-        dtype = kwargs.pop("dtype")
-        mrope_input = root_input
-        mrope_position_ids = position_ids
-        mrope_output = output
-
-        if self.use_paged_attention:
-            input_unsqueeze_name = f"{name}/input/Unsqueeze"
-            self.make_unsqueeze(
-                input_unsqueeze_name,
-                [root_input, "/model/constants/INT64/[0]"],
-                dtype,
-                [1, "num_tokens", self.head_size * num_heads],
-            )
-            position_ids_unsqueeze_name = f"{name}/position_ids/Unsqueeze"
-            self.make_unsqueeze(
-                position_ids_unsqueeze_name,
-                [position_ids, "/model/constants/INT64/[1]"],
-                ir.DataType.INT64,
-                [3, 1, "num_tokens"],
-            )
-            mrope_input = f"{input_unsqueeze_name}/output_0"
-            mrope_position_ids = f"{position_ids_unsqueeze_name}/output_0"
-            mrope_output = f"{name}/rank3_output_0"
-
-        inputs = [mrope_input, mrope_position_ids, kwargs.pop("cos_cache_name"), kwargs.pop("sin_cache_name")]
+        inputs = [root_input, kwargs.pop("position_ids"), kwargs.pop("cos_cache_name"), kwargs.pop("sin_cache_name")]
 
         self.make_node(
             "MRotaryEmbedding",
             inputs=inputs,
-            outputs=[mrope_output],
+            outputs=[output],
             name=name,
             domain="com.microsoft",
             interleaved=self.rope_attrs["interleaved"],
@@ -3137,24 +3121,8 @@ class Model:
             num_heads=num_heads,
             mrope_section=self.rope_attrs["mrope_section"],
             mrope_layout=self.rope_attrs["mrope_layout"],
-            is_packed_batching=int(self.use_paged_attention),
         )
-        self.make_value(
-            mrope_output,
-            dtype,
-            shape=[1, "num_tokens", self.head_size * num_heads]
-            if self.use_paged_attention
-            else self.make_hidden_state_shape(last_dim=self.head_size * num_heads),
-        )
-
-        if self.use_paged_attention:
-            self.make_node(
-                "Squeeze",
-                inputs=[mrope_output, "/model/constants/INT64/[0]"],
-                outputs=[output],
-                name=f"{name}/output/Squeeze",
-            )
-            self.make_value(output, dtype, shape=["num_tokens", self.head_size * num_heads])
+        self.make_value(output, kwargs.pop("dtype"), shape=["batch_size", "sequence_length", self.head_size * num_heads])
 
     def make_rotary_embedding_multi_cache(self, **kwargs):
         cos_cache_name = kwargs.get("cos_cache_name", "cos_cache")
