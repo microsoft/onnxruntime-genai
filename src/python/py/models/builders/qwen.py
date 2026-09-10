@@ -938,8 +938,9 @@ class Qwen35MoEModel(MTPModel):
             print(f"Skipping the MTP head: {block_drafter} supersedes it.")
             self.mtp_attrs["build"] = False
 
-        if self.mtp_attrs["build"] and hasattr(config, "quantization_config"):
-            print("Skipping the MTP head: pre-quantized checkpoints do not include MTP weights.")
+        quant_method = getattr(config, "quantization_config", {}).get("quant_method", "")
+        if self.mtp_attrs["build"] and quant_method == "quark":
+            print("Skipping the MTP head: Quark pre-quantized checkpoints do not include MTP weights.")
             self.mtp_attrs["build"] = False
 
         if not self.mtp_attrs["build"]:
