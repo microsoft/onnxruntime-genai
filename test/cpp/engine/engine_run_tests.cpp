@@ -2504,6 +2504,36 @@ TEST_F(EngineRunTest, SpeculativeRunStopsAtAcceptedEos) {
   EXPECT_EQ(engine.cache->prefix_commits[0].kept_tokens, 2u);
 }
 
+TEST_F(EngineRunTest, SpeculativeRunReportsEosThatReplacesRejectedDraft) {
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, filler);
+  engine.cache->SetMaxDraftTokensPerStep(3);
+
+  auto request =
+      CreateRequestWithPrompt(engine.engine, Prompt(10));
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
+  const int64_t length_after_prefill = request->CurrentSequenceLength();
+  const size_t generated_after_prefill = request->TurnGeneratedTokens();
+
+  request->SetDraftTokens(std::vector<int32_t>{11, 12, 13});
+  engine.executor->SetVerifyRowTokens({11, eos, 21, 22});
+
+  const auto visible = RunOne(*engine.engine);
+  EXPECT_EQ(visible.request, request);
+  EXPECT_EQ(visible.flags, EngineEventFlagToken);
+  EXPECT_EQ(visible.token, 11);
+
+  const auto terminal = RunOne(*engine.engine);
+  EXPECT_EQ(terminal.request, request);
+  EXPECT_EQ(terminal.flags,
+            EngineEventFlagTerminalToken | EngineEventFlagTurnFinished);
+  EXPECT_EQ(terminal.token, eos);
+  EXPECT_EQ(terminal.finish_reason, GenerationFinishReason::EosToken);
+  EXPECT_EQ(request->CurrentSequenceLength(), length_after_prefill + 1);
+  EXPECT_EQ(request->TurnGeneratedTokens(), generated_after_prefill + 1);
+}
+
 TEST_F(EngineRunTest, RolledBackSpeculativeRunLeavesProposalPendingAndRetryable) {
   const int32_t eos = EosToken(*model_);
   const int32_t filler = eos == 5 ? 6 : 5;
@@ -2729,13 +2759,18 @@ TEST_F(EngineRunTest, ContinuationDropsTheMtpShadowFromThePreviousTurn) {
 
   engine.executor->SetForcedToken(eos);
   bool turn_finished = false;
+  std::optional<int32_t> terminal_token;
   for (int attempt = 0; attempt < 8 && !turn_finished; ++attempt) {
     const size_t count = engine.engine->Run(storage);
     for (size_t i = 0; i < count; ++i) {
+      if ((storage[i].flags & EngineEventFlagTerminalToken) != 0) {
+        terminal_token = storage[i].token;
+      }
       turn_finished |= (storage[i].flags & EngineEventFlagTurnFinished) != 0;
     }
   }
   ASSERT_TRUE(turn_finished);
+  EXPECT_EQ(terminal_token, eos);
   ASSERT_EQ(engine.mtp_cache->AllocatedCount(), 1u);
 
   // The new turn appends a prompt the shadow never sees, so keeping it would leave the shadow a
