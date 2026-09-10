@@ -210,6 +210,19 @@ class QuantizedMLP:
         self.router = TensorModule()
 
 
+class QuantizedLinearAttention:
+    def __init__(self):
+        self.in_proj_qkv = QuantizedTensorModule()
+        self.in_proj_z   = QuantizedTensorModule()
+        self.in_proj_a   = QuantizedTensorModule()
+        self.in_proj_b   = QuantizedTensorModule()
+        self.out_proj    = QuantizedTensorModule()
+        self.conv1d      = TensorModule()
+        self.norm        = TensorModule()
+        self.A_log       = None
+        self.dt_bias     = None
+
+
 class QuantizedDecoderLayer:
     def __init__(self, layer_id):
         self.layer_id = layer_id
@@ -219,6 +232,7 @@ class QuantizedDecoderLayer:
         self.pre_feedforward_layernorm = TensorModule()
         self.post_feedforward_layernorm = TensorModule()
         self.mlp = QuantizedMLP()
+        self.linear_attn = QuantizedLinearAttention()
 
     def is_empty(self):
         return self.input_layernorm.weight is None
@@ -424,6 +438,55 @@ class QuantizedModel:
                             # model.layers.layer_id.self_attn.o_proj.bias
                             # model.layers.layer_id.self_attention.dense.bias
                             tensor_map["self_attn.o_proj.bias"] = tensor
+                        # linear_attn (GatedDeltaNet) projections
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.in_proj_qkv\.q?weight$", name)):
+                            tensor_map["linear_attn.in_proj_qkv.qweight"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.in_proj_qkv\.(scales|weight_scale)$", name)):
+                            tensor_map["linear_attn.in_proj_qkv.scales"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.in_proj_qkv\.(qzeros|weight_zero_point)$", name)):
+                            tensor_map["linear_attn.in_proj_qkv.qzeros"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.in_proj_qkv\.g_idx$", name)):
+                            tensor_map["linear_attn.in_proj_qkv.g_idx"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.in_proj_z\.q?weight$", name)):
+                            tensor_map["linear_attn.in_proj_z.qweight"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.in_proj_z\.(scales|weight_scale)$", name)):
+                            tensor_map["linear_attn.in_proj_z.scales"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.in_proj_z\.(qzeros|weight_zero_point)$", name)):
+                            tensor_map["linear_attn.in_proj_z.qzeros"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.in_proj_z\.g_idx$", name)):
+                            tensor_map["linear_attn.in_proj_z.g_idx"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.in_proj_a\.q?weight$", name)):
+                            tensor_map["linear_attn.in_proj_a.qweight"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.in_proj_a\.(scales|weight_scale)$", name)):
+                            tensor_map["linear_attn.in_proj_a.scales"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.in_proj_a\.(qzeros|weight_zero_point)$", name)):
+                            tensor_map["linear_attn.in_proj_a.qzeros"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.in_proj_a\.g_idx$", name)):
+                            tensor_map["linear_attn.in_proj_a.g_idx"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.in_proj_b\.q?weight$", name)):
+                            tensor_map["linear_attn.in_proj_b.qweight"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.in_proj_b\.(scales|weight_scale)$", name)):
+                            tensor_map["linear_attn.in_proj_b.scales"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.in_proj_b\.(qzeros|weight_zero_point)$", name)):
+                            tensor_map["linear_attn.in_proj_b.qzeros"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.in_proj_b\.g_idx$", name)):
+                            tensor_map["linear_attn.in_proj_b.g_idx"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.out_proj\.q?weight$", name)):
+                            tensor_map["linear_attn.out_proj.qweight"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.out_proj\.(scales|weight_scale)$", name)):
+                            tensor_map["linear_attn.out_proj.scales"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.out_proj\.(qzeros|weight_zero_point)$", name)):
+                            tensor_map["linear_attn.out_proj.qzeros"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.out_proj\.g_idx$", name)):
+                            tensor_map["linear_attn.out_proj.g_idx"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.A_log$", name)):
+                            tensor_map["linear_attn.A_log"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.dt_bias$", name)):
+                            tensor_map["linear_attn.dt_bias"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.conv1d\.weight$", name)):
+                            tensor_map["linear_attn.conv1d.weight"] = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.linear_attn\.norm\.weight$", name)):
+                            tensor_map["linear_attn.norm.weight"] = tensor
                         elif bool(re.match(r"^model.layers\.\d+\.post_attention_layernorm\.weight$", name)):
                             # model.layers.layer_id.post_attention_layernorm.weight
                             tensor_map["post_attention_layernorm.weight"] = tensor
@@ -853,6 +916,9 @@ class QuantizedModel:
             for module in layer.self_attn.__dict__.values():
                 if isinstance(module, QuantizedTensorModule):
                     yield module
+            for module in layer.linear_attn.__dict__.values():
+                if isinstance(module, QuantizedTensorModule):
+                    yield module
             for module in layer.mlp.__dict__.values():
                 if isinstance(module, QuantizedTensorModule):
                     yield module
@@ -893,6 +959,10 @@ class QuantizedModel:
             print(f"Unpacking and repacking layer {layer_id}")
 
             for module in layer.self_attn.__dict__.values():
+                if isinstance(module, QuantizedTensorModule):
+                    self.repack_quantized_tensor(module, clear_g_idx)
+
+            for module in layer.linear_attn.__dict__.values():
                 if isinstance(module, QuantizedTensorModule):
                     self.repack_quantized_tensor(module, clear_g_idx)
 
