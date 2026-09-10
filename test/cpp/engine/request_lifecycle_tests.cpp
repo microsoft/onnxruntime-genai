@@ -1306,7 +1306,9 @@ TEST_F(RequestLifecycleTest, TerminalGuidanceTakesPrecedenceOverMinimumGenerated
   const auto terminal = RunOne(*guidance_engine.engine);
   ASSERT_EQ(terminal.request, request);
   EXPECT_EQ(terminal.flags & EngineEventFlagToken, 0u);
+  EXPECT_NE(terminal.flags & EngineEventFlagTerminalToken, 0u);
   EXPECT_NE(terminal.flags & EngineEventFlagTurnFinished, 0u);
+  EXPECT_EQ(terminal.token, EosToken(*guidance_model));
   EXPECT_EQ(terminal.finish_reason, GenerationFinishReason::EosToken);
   EXPECT_EQ(terminal.usage.generated_tokens, 1u);
   EXPECT_TRUE(request->IsTurnComplete());
@@ -1335,7 +1337,9 @@ TEST_F(RequestLifecycleTest, ExtendableGuidanceHonorsMinimumGeneratedTokens) {
   const auto terminal = RunOne(*guidance_engine.engine);
   ASSERT_EQ(terminal.request, request);
   EXPECT_EQ(terminal.flags & EngineEventFlagToken, 0u);
+  EXPECT_NE(terminal.flags & EngineEventFlagTerminalToken, 0u);
   EXPECT_NE(terminal.flags & EngineEventFlagTurnFinished, 0u);
+  EXPECT_EQ(terminal.token, EosToken(*guidance_model));
   EXPECT_EQ(terminal.finish_reason, GenerationFinishReason::EosToken);
   EXPECT_EQ(terminal.usage.generated_tokens, options.min_generated_tokens);
 }

@@ -105,6 +105,10 @@ def _drain(event, sinks):
     sink = sinks[ready]
     if event.flags & og.EngineEventFlags.TOKEN:
         sink.tokens.append(event.token)
+        assert event.terminal_token is None
+    if event.flags & og.EngineEventFlags.TERMINAL_TOKEN:
+        assert event.token is None
+        assert event.terminal_token == _EOS_TOKEN_ID
     if event.flags & og.EngineEventFlags.TURN_FINISHED:
         sink.finish_reason = event.finish_reason
         sink.usage = _UsageSnapshot(
@@ -690,6 +694,7 @@ def test_events_deliver_tokens_across_turns(model):
     def run_turn(input_tokens, expected_turn_id):
         assert request.begin_turn(input_tokens) == expected_turn_id
         tokens = []
+        terminal_token = None
         finished = False
         while not finished:
             event = _next_event(engine)
@@ -697,14 +702,18 @@ def test_events_deliver_tokens_across_turns(model):
             assert event.turn_id == expected_turn_id
             if event.token is not None:
                 tokens.append(event.token)
+            if event.terminal_token is not None:
+                terminal_token = event.terminal_token
             finished = bool(event.flags & og.EngineEventFlags.TURN_FINISHED)
-        return tokens
+        return tokens, terminal_token
 
-    first_turn_tokens = run_turn(np.asarray(_PROMPT_A, dtype=np.int32), 1)
-    second_turn_tokens = run_turn(follow_up, 2)
+    first_turn_tokens, first_terminal_token = run_turn(np.asarray(_PROMPT_A, dtype=np.int32), 1)
+    second_turn_tokens, second_terminal_token = run_turn(follow_up, 2)
 
     assert first_turn_tokens
     assert second_turn_tokens
+    assert first_terminal_token == _EOS_TOKEN_ID
+    assert second_terminal_token == _EOS_TOKEN_ID
     request.close()
 
 

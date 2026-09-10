@@ -942,11 +942,14 @@ TEST_F(StopStringEngineTest, GreedyDraftVerificationNeverObservesAnAcceptedEosDr
   request->SetDraftTokens(std::array<int32_t, 3>{11, eos, 12});
   engine.executor->SetVerifyRowTokens({11, eos, 12, 13});  // argmax accepts all three positions
 
-  ASSERT_EQ(engine.engine->Run(storage), 1u);
+  ASSERT_EQ(engine.engine->Run(storage), 2u);
   EXPECT_EQ(storage[0].token, 11);
-  EXPECT_EQ(storage[0].flags, EngineEventFlagToken | EngineEventFlagTurnFinished);
-  EXPECT_EQ(storage[0].finish_reason, GenerationFinishReason::EosToken);
-  EXPECT_EQ(storage[0].matched_stop_string_index, -1);
+  EXPECT_EQ(storage[0].flags, EngineEventFlagToken);
+  EXPECT_EQ(storage[1].token, eos);
+  EXPECT_EQ(storage[1].flags,
+            EngineEventFlagTerminalToken | EngineEventFlagTurnFinished);
+  EXPECT_EQ(storage[1].finish_reason, GenerationFinishReason::EosToken);
+  EXPECT_EQ(storage[1].matched_stop_string_index, -1);
   EXPECT_EQ(request->FinishReason(), GenerationFinishReason::EosToken);
   EXPECT_EQ(request->MatchedStopStringIndex(), -1);
 
@@ -1080,11 +1083,14 @@ TEST_F(StopStringEngineTest, SampledDraftVerificationNeverObservesAnAcceptedEosD
   request->SetDraftTokens(std::array<int32_t, 3>{11, eos, 12});
   engine.executor->SetVerifyRowTokens({11, eos, 12, 13});
 
-  ASSERT_EQ(engine.engine->Run(storage), 1u);
+  ASSERT_EQ(engine.engine->Run(storage), 2u);
   EXPECT_EQ(storage[0].token, 11);
-  EXPECT_EQ(storage[0].flags, EngineEventFlagToken | EngineEventFlagTurnFinished);
-  EXPECT_EQ(storage[0].finish_reason, GenerationFinishReason::EosToken);
-  EXPECT_EQ(storage[0].matched_stop_string_index, -1);
+  EXPECT_EQ(storage[0].flags, EngineEventFlagToken);
+  EXPECT_EQ(storage[1].token, eos);
+  EXPECT_EQ(storage[1].flags,
+            EngineEventFlagTerminalToken | EngineEventFlagTurnFinished);
+  EXPECT_EQ(storage[1].finish_reason, GenerationFinishReason::EosToken);
+  EXPECT_EQ(storage[1].matched_stop_string_index, -1);
   ASSERT_EQ(engine.cache->prefix_commits.size(), 1u);
   EXPECT_EQ(engine.cache->prefix_commits[0].kept_tokens, 2u);  // 1 base + 1 appended draft
 }

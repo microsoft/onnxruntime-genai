@@ -107,6 +107,14 @@ typedef uint32_t OgaEngineEventFlags;
 #define OgaEngineEventFlag_CapacityBlocked ((OgaEngineEventFlags)(1u << 2))
 #define OgaEngineEventFlag_Failed ((OgaEngineEventFlags)(1u << 3))
 #define OgaEngineEventFlag_Retryable ((OgaEngineEventFlags)(1u << 4))
+/**
+ * \brief The event's token is the EOS token selected to finish the Turn.
+ *
+ * Unlike OgaEngineEventFlag_Token, this token was not appended to the retained sequence and is not
+ * included in generated-token usage. A host may pass it before the next Turn's continuation tokens
+ * when required by the model's chat template, but should not display it as assistant output.
+ */
+#define OgaEngineEventFlag_TerminalToken ((OgaEngineEventFlags)(1u << 5))
 
 /** \brief Stable behavioral classification for an Engine event. */
 typedef uint32_t OgaErrorCode;
@@ -1301,7 +1309,8 @@ OGA_EXPORT const OgaEngineEvent* OGA_API_CALL OgaEngineEventBufferGet(
  *
  * Each getter below returns an owned OgaResult on a null event or output pointer and null on
  * success. Scalar outputs are initialized to zero and pointer outputs to null before a null event
- * is rejected. Payload meaning is selected by OgaEngineEventFlags.
+ * is rejected. Payload meaning is selected by OgaEngineEventFlags. OgaEngineEventGetToken is valid
+ * when either OgaEngineEventFlag_Token or OgaEngineEventFlag_TerminalToken is present.
  *
  * OgaEngineEventGetRequest returns a const borrowed Request alias that must not be destroyed.
  * OgaEngineEventGetUsage returns a borrowed usage view. Both have the event view's lifetime.

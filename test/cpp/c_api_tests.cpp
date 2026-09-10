@@ -30,6 +30,8 @@
 
 namespace {
 
+static_assert(OgaEngineEventFlag_TerminalToken == (1u << 5));
+
 struct EngineEventSnapshot {
   OgaEngineEventFlags flags{};
   const OgaRequest* request{};

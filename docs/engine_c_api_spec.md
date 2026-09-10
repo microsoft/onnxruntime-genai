@@ -346,10 +346,13 @@ typedef uint32_t OgaEngineEventFlags;
 #define OgaEngineEventFlag_CapacityBlocked ((OgaEngineEventFlags)(1u << 2))
 #define OgaEngineEventFlag_Failed ((OgaEngineEventFlags)(1u << 3))
 #define OgaEngineEventFlag_Retryable ((OgaEngineEventFlags)(1u << 4))
+#define OgaEngineEventFlag_TerminalToken ((OgaEngineEventFlags)(1u << 5))
 ```
 
 `OgaEngineEventFlags` is a bitmask, not a mutually exclusive type. In particular, a final model step
-may emit one event with both `Token` and `TurnFinished`.
+may emit one event with both `Token` and `TurnFinished`. EOS completion instead emits a distinct
+`TerminalToken | TurnFinished` event because a speculative step can also make visible tokens
+available before selecting EOS.
 
 The public types are fixed-width integer typedefs rather than C enums. Adding a constant therefore
 cannot change a field or parameter's ABI width under compiler enum-size options.
@@ -413,8 +416,10 @@ Payload validity is determined by flags:
 | --- | --- |
 | `None` | Reserved zero value; no-work is represented by Buffer count zero |
 | `Token` | `request`, `turn_id`, and `token` |
+| `TerminalToken` | `request`, `turn_id`, and the selected EOS `token`; always combined with `TurnFinished` |
 | `TurnFinished` | `request`, `turn_id`, `finish_reason`, `usage`, and `matched_stop_string_index` (-1 unless `finish_reason` is `StopString`) |
 | `Token \| TurnFinished` | Final visible token and terminal payload from the same committed step |
+| `TerminalToken \| TurnFinished` | EOS selected without appending it to the retained sequence or generated-token usage |
 | `CapacityBlocked` | `error_code` is `CapacityDeferred` or `ExecutionCapacityExceeded`; Engine and Request remain reusable |
 | `Retryable` | `error_code` is `RetryableExecution`; no progress committed and the Engine remains reusable |
 | `TurnFinished \| Failed` | Request/Turn failure; finish reason is `Failed` |
@@ -771,8 +776,10 @@ delivery does not remove tokens from that state. Because token and Turn ID are c
 commit, no `GeneratedTokenRecord` or per-Turn token range is required.
 
 Callers must never consume the token getter merely because an event was returned. They check
-`flags & OgaEngineEventFlag_Token`; the same event can also carry
-`OgaEngineEventFlag_TurnFinished`.
+`flags & OgaEngineEventFlag_Token` for visible output or
+`flags & OgaEngineEventFlag_TerminalToken` for an unappended EOS boundary. A host may pass the
+terminal token before the next Turn's continuation tokens when required by the model's chat
+template, but must not display or count it as assistant output.
 
 ## Failure and capacity behavior
 

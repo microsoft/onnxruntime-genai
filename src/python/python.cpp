@@ -32,6 +32,7 @@ enum class PyEngineEventFlags : uint32_t {
   CapacityBlocked = OgaEngineEventFlag_CapacityBlocked,
   Failed = OgaEngineEventFlag_Failed,
   Retryable = OgaEngineEventFlag_Retryable,
+  TerminalToken = OgaEngineEventFlag_TerminalToken,
 };
 
 enum class PyEngineErrorCode : uint32_t {
@@ -800,6 +801,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .value("CAPACITY_BLOCKED", PyEngineEventFlags::CapacityBlocked)
       .value("FAILED", PyEngineEventFlags::Failed)
       .value("RETRYABLE", PyEngineEventFlags::Retryable)
+      .value("TERMINAL_TOKEN", PyEngineEventFlags::TerminalToken)
       .def(
           "__and__",
           [](PyEngineEventFlags lhs, PyEngineEventFlags rhs) {
@@ -938,9 +940,16 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       })
       .def_property_readonly("turn_id", &OgaEngineEvent::TurnId)
       .def_property_readonly("token", [](const OgaEngineEvent& event) -> pybind11::object {
-        if ((event.Flags() & OgaEngineEventFlag_Token) == 0)
+        const auto token = event.VisibleToken();
+        if (!token)
           return pybind11::none();
-        return pybind11::int_(event.Token());
+        return pybind11::int_(*token);
+      })
+      .def_property_readonly("terminal_token", [](const OgaEngineEvent& event) -> pybind11::object {
+        const auto token = event.TerminalToken();
+        if (!token)
+          return pybind11::none();
+        return pybind11::int_(*token);
       })
       .def_property_readonly("finish_reason", [](const OgaEngineEvent& event) {
         return static_cast<PyFinishReason>(event.FinishReason());

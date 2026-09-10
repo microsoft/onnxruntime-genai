@@ -979,6 +979,20 @@ struct OgaEngineEvent : OgaAbstract {
     return value;
   }
 
+  std::optional<int32_t> VisibleToken() const {
+    if ((Flags() & OgaEngineEventFlag_Token) == 0) {
+      return std::nullopt;
+    }
+    return Token();
+  }
+
+  std::optional<int32_t> TerminalToken() const {
+    if ((Flags() & OgaEngineEventFlag_TerminalToken) == 0) {
+      return std::nullopt;
+    }
+    return Token();
+  }
+
   OgaFinishReason FinishReason() const {
     OgaFinishReason value{};
     OgaCheckResult(OgaEngineEventGetFinishReason(this, &value));

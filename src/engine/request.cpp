@@ -910,7 +910,9 @@ RequestStepResult Request::StageDraftCompletionForTransaction() {
     }
   }
   RequestStepResult result{
-      0,
+      finish_reason == GenerationFinishReason::EosToken
+          ? search_->GetNextTokens().CpuSpan().back()
+          : 0,
       false,
       true,
       finish_reason,
@@ -1245,6 +1247,7 @@ RequestStepResult Request::CompleteGeneration() {
     if (search_->IsDone() && !next_tokens.empty() &&
         contains(params_->config.model.eos_token_id, next_tokens.back())) {
       finish_reason_ = GenerationFinishReason::EosToken;
+      token = next_tokens.back();
     } else if (turn_limit_reached) {
       finish_reason_ = GenerationFinishReason::TurnLimit;
     } else {

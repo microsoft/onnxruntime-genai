@@ -71,6 +71,8 @@ struct TurnOptions {
 };
 
 struct RequestStepResult {
+  // The sampled token for this step. For EOS completion this is the selected terminal token even
+  // though Search does not append it to the retained sequence or include it in visible_tokens.
   int32_t token{};
   bool token_appended{};
   bool done{};

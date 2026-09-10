@@ -42,6 +42,7 @@ enum EngineEventFlag : uint32_t {
   EngineEventFlagCapacityBlocked = 1u << 2,
   EngineEventFlagFailed = 1u << 3,
   EngineEventFlagRetryable = 1u << 4,
+  EngineEventFlagTerminalToken = 1u << 5,
 };
 
 struct TurnUsage {

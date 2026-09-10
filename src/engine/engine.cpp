@@ -17,6 +17,7 @@ static_assert(kMaxDraftTokensPerStep < kSpeculativeAcceptanceLengthBins);
 namespace {
 
 constexpr size_t kFatalEventOverhead = 2;
+constexpr size_t kMaxEventsPerRequestStep = kMaxGeneratedTokensPerStep + 1;
 constexpr size_t kMtpFailureDisableThreshold = 3;
 constexpr size_t kDflash2FailureDisableThreshold = 3;
 
@@ -174,12 +175,12 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
   const size_t max_batch_size = cache_manager_->MaxBatchSize();
   if (fatal_events_.max_size() < kFatalEventOverhead ||
       max_batch_size > (fatal_events_.max_size() - kFatalEventOverhead) /
-                           kMaxGeneratedTokensPerStep) {
+                           kMaxEventsPerRequestStep) {
     throw std::overflow_error(
         "Engine event capacity exceeds the supported size.");
   }
   max_step_event_count_ =
-      max_batch_size * kMaxGeneratedTokensPerStep;
+      max_batch_size * kMaxEventsPerRequestStep;
   step_plan_.requests.reserve(max_batch_size);
   step_results_.reserve(max_batch_size);
   staged_event_order_.reserve(max_batch_size);
@@ -2027,22 +2028,32 @@ void Engine::AppendEventsFromStep(
         0};
   };
 
+  const bool has_terminal_token =
+      result.done &&
+      !result.token_appended &&
+      result.finish_reason == GenerationFinishReason::EosToken;
   for (size_t i = 0; i < result.visible_token_count; ++i) {
     EngineEvent event;
     event.request = request;
     event.turn_id = request->CurrentTurnId();
     event.flags = EngineEventFlagToken;
     event.token = result.visible_tokens[i];
-    if (result.done && i + 1 == result.visible_token_count) {
+    if (result.done && !has_terminal_token &&
+        i + 1 == result.visible_token_count) {
       finish_turn(event);
     }
     staged_events_.push_back(std::move(event));
   }
 
-  if (result.done && result.visible_token_count == 0) {
+  if (result.done &&
+      (result.visible_token_count == 0 || has_terminal_token)) {
     EngineEvent event;
     event.request = request;
     event.turn_id = request->CurrentTurnId();
+    if (has_terminal_token) {
+      event.flags |= EngineEventFlagTerminalToken;
+      event.token = result.token;
+    }
     finish_turn(event);
     staged_events_.push_back(std::move(event));
   }

@@ -1135,6 +1135,29 @@ TEST_F(EngineRunTest, StaticBatchingPreservesOrderingAndReusesResidentContinuati
   EXPECT_EQ(cache_observer->allocate_calls, allocations_before);
 }
 
+TEST_F(EngineRunTest, StaticBatchingEmitsSelectedEosAsTerminalToken) {
+  model_->config_->engine.dynamic_batching.reset();
+  const int32_t eos = EosToken(*model_);
+  auto cache = std::make_shared<RecordingCacheManager>(
+      model_, /*capacity=*/4, nullptr, /*supports_dynamic_batching=*/false);
+  auto scheduler = Scheduler::Create(model_, cache);
+  auto executor = std::make_unique<RecordingModelExecutor>(model_, cache, eos);
+  EngineDependencies dependencies{cache, std::move(scheduler), std::move(executor)};
+  auto engine = std::make_shared<Engine>(model_, std::move(dependencies));
+  const auto prompt = Prompt(10);
+  auto request = CreateEngineRequest(engine);
+  request->BeginTurn(prompt);
+
+  const auto event = RunOne(*engine);
+
+  EXPECT_EQ(event.request, request);
+  EXPECT_EQ(event.flags, EngineEventFlagTerminalToken | EngineEventFlagTurnFinished);
+  EXPECT_EQ(event.token, eos);
+  EXPECT_EQ(event.finish_reason, GenerationFinishReason::EosToken);
+  EXPECT_EQ(event.usage.generated_tokens, 0u);
+  EXPECT_EQ(request->CurrentSequenceLength(), static_cast<int64_t>(prompt.size()));
+}
+
 TEST_F(EngineRunTest, StaticBatchReturnsAllRowEventsWhenCapacitySuffices) {
   model_->config_->engine.dynamic_batching.reset();
   auto cache = std::make_shared<RecordingCacheManager>(
@@ -2267,9 +2290,9 @@ TEST_F(EngineRunTest, SampledSpeculativeRunRespectsTurnTokenLimit) {
   EXPECT_EQ(request->TurnGeneratedTokens(), 3u);
 }
 
-// The bonus row predicting EOS ends the turn without appending it, so the step's only visible
-// tokens are the accepted drafts.
-TEST_F(EngineRunTest, SpeculativeRunWithEosBonusTokenEmitsOnlyAcceptedDrafts) {
+// The bonus row predicting EOS ends the turn without appending it. Accepted drafts remain visible
+// token events, followed by a distinct terminal-token event carrying the selected EOS.
+TEST_F(EngineRunTest, SpeculativeRunWithEosBonusTokenEmitsAcceptedDraftsThenTerminalToken) {
   const int32_t eos = EosToken(*model_);
   const int32_t filler = eos == 5 ? 6 : 5;
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, filler);
@@ -2285,17 +2308,18 @@ TEST_F(EngineRunTest, SpeculativeRunWithEosBonusTokenEmitsOnlyAcceptedDrafts) {
   engine.executor->SetVerifyRowTokens({11, 12, 13, eos});
 
   std::array<EngineEvent, 4> events;
-  ASSERT_EQ(engine.engine->Run(events), 3u);
+  ASSERT_EQ(engine.engine->Run(events), 4u);
 
   EXPECT_EQ(events[0].token, 11);
   EXPECT_EQ(events[1].token, 12);
   EXPECT_EQ(events[2].token, 13);
+  EXPECT_EQ(events[3].token, eos);
   EXPECT_EQ(events[0].flags, EngineEventFlagToken);
   EXPECT_EQ(events[1].flags, EngineEventFlagToken);
-  EXPECT_EQ(
-      events[2].flags,
-      EngineEventFlagToken | EngineEventFlagTurnFinished);
-  EXPECT_EQ(events[2].finish_reason, GenerationFinishReason::EosToken);
+  EXPECT_EQ(events[2].flags, EngineEventFlagToken);
+  EXPECT_EQ(events[3].flags,
+            EngineEventFlagTerminalToken | EngineEventFlagTurnFinished);
+  EXPECT_EQ(events[3].finish_reason, GenerationFinishReason::EosToken);
   EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
   EXPECT_EQ(request->CurrentSequenceLength(), length_after_prefill + 3);
   EXPECT_EQ(request->TurnGeneratedTokens(), generated_after_prefill + 3);
@@ -2460,14 +2484,17 @@ TEST_F(EngineRunTest, SpeculativeRunStopsAtAcceptedEos) {
   request->SetDraftTokens(std::vector<int32_t>{11, eos, 13});
   engine.executor->SetVerifyRowTokens({11, eos, 13, 25});
 
-  const auto event = RunOne(*engine.engine);
+  const auto visible = RunOne(*engine.engine);
+  EXPECT_EQ(visible.request, request);
+  EXPECT_EQ(visible.flags, EngineEventFlagToken);
+  EXPECT_EQ(visible.token, 11);
 
-  EXPECT_EQ(event.request, request);
-  EXPECT_EQ(
-      event.flags,
-      EngineEventFlagToken | EngineEventFlagTurnFinished);
-  EXPECT_EQ(event.token, 11);
-  EXPECT_EQ(event.finish_reason, GenerationFinishReason::EosToken);
+  const auto terminal = RunOne(*engine.engine);
+  EXPECT_EQ(terminal.request, request);
+  EXPECT_EQ(terminal.flags,
+            EngineEventFlagTerminalToken | EngineEventFlagTurnFinished);
+  EXPECT_EQ(terminal.token, eos);
+  EXPECT_EQ(terminal.finish_reason, GenerationFinishReason::EosToken);
   EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
   EXPECT_EQ(request->FinishReason(), GenerationFinishReason::EosToken);
   EXPECT_EQ(request->CurrentSequenceLength(), length_after_prefill + 1);
