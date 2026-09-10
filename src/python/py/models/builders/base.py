@@ -365,6 +365,7 @@ class Model:
             "use_matmul_in_attn": False,                     # Use MatMuls with attention (instead of separate MatMul ops)
             # Attributes for PagedAttention op:
             "paged_block_size": None,                        # KV cache block size (set when use_paged_attention is enabled)
+            "emit_attention_metadata": True,                  # Emit the optional CPU attention_metadata input for PagedAttention
         }
         self.make_attention_init(config)
 
@@ -593,7 +594,7 @@ class Model:
                 del self.input_names["attention_mask"]
             if not self.has_windowed_paged_layers():
                 del self.input_names["block_table_windowed"]
-            if self.ep == "webgpu":
+            if not self.attention_attrs["emit_attention_metadata"]:
                 del self.input_names["attention_metadata"]
         else:
             for name in [
@@ -773,6 +774,7 @@ class Model:
                 )
             block_size = int(self.extra_options.get("paged_block_size", 256))
             self.attention_attrs["paged_block_size"] = block_size
+            self.attention_attrs["emit_attention_metadata"] = self.ep != "webgpu"
             if "multi_cache" in self.rope_attrs and self.original_context_length % block_size != 0:
                 raise ValueError(
                     "paged_block_size must evenly divide original_max_position_embeddings "
@@ -3748,6 +3750,7 @@ class Model:
                 cumulative_sequence_lengths=self.input_names["cumulative_sequence_lengths"],
                 past_sequence_lengths=self.input_names["past_sequence_lengths"],
                 block_table=block_table,
+                # Empty name skips the optional CPU-only metadata input for EPs like WebGPU.
                 attention_metadata=self.input_names.get("attention_metadata", ""),
                 **kwargs,
             )
