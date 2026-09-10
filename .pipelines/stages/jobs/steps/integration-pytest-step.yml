@@ -49,7 +49,7 @@ steps:
       } else {
         python -m pip install onnxruntime==1.28.0
       }
-      python -m pip install $wheel.FullName
+      python -m pip install $wheel.FullName --force-reinstall --no-deps
       if ("${{ parameters.ep }}" -eq "webgpu") {
         python -m pip install onnxruntime-ep-webgpu==0.2.1
       }
@@ -99,7 +99,7 @@ steps:
             --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ \
             -r test/python/cuda/ort/requirements.txt \
             onnxruntime-ep-cuda12==0.2.0.dev20260819
-          \$PYTHON_EXE -m pip install /wheel/*.whl
+          \$PYTHON_EXE -m pip install /wheel/*.whl --force-reinstall
           nvidia-smi --query-gpu=name,compute_cap,driver_version,memory.total,memory.used,memory.free --format=csv
           \$PYTHON_EXE -m pytest ${{ parameters.testPath }} -sv ${{ parameters.extraPytestArgs }} \
             --execution-provider ${{ parameters.ep }} \
@@ -114,7 +114,7 @@ steps:
       python3 -m pip install --upgrade pip
       python3 -m pip install -r test/python/requirements.txt
       python3 -m pip install pytest
-      python3 -m pip install ${{ parameters.wheelDir }}/*.whl
+      python3 -m pip install ${{ parameters.wheelDir }}/*.whl --force-reinstall
     displayName: 'Install source-built wheel and test deps'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
@@ -137,7 +137,7 @@ steps:
       python -m pip install -r test/python/requirements.txt
       python -m pip install pytest
       python -m pip install onnxruntime==1.28.0
-      python -m pip install ${{ parameters.wheelDir }}/*.whl
+      python -m pip install ${{ parameters.wheelDir }}/*.whl --force-reinstall
       if [ "${{ parameters.ep }}" = "webgpu" ]; then
         python -m pip install onnxruntime-ep-webgpu==0.2.1
       fi
