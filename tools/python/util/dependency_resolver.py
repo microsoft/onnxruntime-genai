@@ -110,7 +110,8 @@ def _restore_dml_dependencies(
     if not nuget_path:
         raise RuntimeError("nuget or nuget.exe must be available on PATH to restore DirectML dependencies")
 
-    packages_config = destination_dir / "dml-packages.config"
+    # NuGet recognizes packages.config restore inputs by their canonical filename.
+    packages_config = destination_dir / "packages.config"
     packages_element = ElementTree.Element("packages")
     for package_name, package_version in packages:
         ElementTree.SubElement(
