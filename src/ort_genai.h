@@ -1152,6 +1152,10 @@ struct OgaRequest : OgaAbstract {
     return cancelled;
   }
 
+  void RewindToStartOfTurn(uint64_t turn_id) {
+    OgaCheckResult(OgaRequestRewindToStartOfTurn(this, turn_id));
+  }
+
   /**
    * \brief Proposes speculative draft tokens for the next decode operation.
    *

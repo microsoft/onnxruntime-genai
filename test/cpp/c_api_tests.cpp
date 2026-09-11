@@ -967,9 +967,18 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
   EXPECT_EQ(event.generated_tokens, 1u);
   EXPECT_EQ(event.cached_prompt_tokens, 0u);
 
-  const std::array<int32_t, 1> continuation{5};
+  const std::array<int32_t, 1> discarded_continuation{5};
+  const auto discarded_turn =
+      request->BeginTurn(discarded_continuation, turn_options.get());
+  EXPECT_EQ(discarded_turn, 2u);
+  EXPECT_EQ(RunOne(*engine).turn_id, discarded_turn);
+
+  request->RewindToStartOfTurn(discarded_turn);
+  EXPECT_FALSE(engine->HasPendingRequests());
+
+  const std::array<int32_t, 1> continuation{6};
   const auto second_turn = request->BeginTurn(continuation);
-  EXPECT_EQ(second_turn, 2u);
+  EXPECT_EQ(second_turn, 3u);
   EXPECT_TRUE(request->CancelTurn(second_turn));
   EXPECT_FALSE(request->CancelTurn(second_turn));
   const auto cancelled = RunOne(*engine);
@@ -977,6 +986,13 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
   EXPECT_EQ(cancelled.turn_id, second_turn);
   EXPECT_EQ(cancelled.flags, OgaEngineEventFlag_TurnFinished);
   EXPECT_EQ(cancelled.finish_reason, OgaFinishReason_Cancelled);
+
+  std::unique_ptr<OgaResult> null_rewind_result{
+      OgaRequestRewindToStartOfTurn(nullptr, 1)};
+  ASSERT_NE(null_rewind_result, nullptr);
+  EXPECT_NE(
+      std::string(null_rewind_result->GetError()).find("request must not be null"),
+      std::string::npos);
 
   auto request_options = OgaRequestOptions::Create();
   request_options->SetMaxSessionTokens(8);

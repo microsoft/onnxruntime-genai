@@ -17,13 +17,17 @@ The dynamic path manages paged KV decoder state together with per-request search
 > synchronous progress and writes zero or more typed `EngineEvent` records into caller-provided
 > storage; capacity one preserves one-event pacing. Token and completion payloads are selected by
 > event flags.
-> `CancelTurn(turn_id)` stops only the named Turn, and `Close()` releases Engine resources.
+> `CancelTurn(turn_id)` stops only the named Turn.
+> `RewindToStartOfTurn(turn_id)` retains the prefix before a named Turn after the current completed
+> attempt's events are drained. The next Turn replays that prefix with its new input.
+> The operation is `OgaRequestRewindToStartOfTurn` in C and `rewind_to_start_of_turn` in Python.
+> `Close()` releases Engine resources.
 > `OgaCreateEngine` retains shared ownership of the underlying Model, so the caller may release its
 > `OgaModel` handle after successful Engine creation. The Model remains alive until Engine teardown
 > and the release of any other retaining objects.
 >
 > **Single-owner requirement:** One host-owned thread must perform all Engine and Request operations,
-> including request creation, `BeginTurn()`, `Run()`, `CancelTurn()`,
+> including request creation, `BeginTurn()`, `Run()`, `CancelTurn()`, `RewindToStartOfTurn()`,
 > and `Close()`. Other host threads marshal commands and copied inputs to that owner. The
 > Engine enforces its owner thread and has no worker thread. Final
 > Request-handle release may occur on another thread because it only publishes abandonment work.
@@ -52,6 +56,11 @@ The main implementation is under `src/engine/`:
 Continuous batching allows requests to enter and leave the active batch independently. The engine does not create one fixed batch and run it until every sequence is finished. Instead, every engine step builds a new batch from the requests that can make progress at that moment.
 
 Each request keeps its own sequence, search options, random state, completion state, and sequence-length counters. The engine combines only the work needed for the current model invocation.
+
+For rewind, the Request records one compact boundary for each successful `BeginTurn()`. Each
+boundary stores the Turn ID and the token-prefix length that existed before that Turn. Rewind does
+not record per-token random-stream checkpoints and does not restore sampling state. Stochastic
+sampling continues from the Request's current CPU or device stream.
 
 The paged KV cache makes this practical. A request does not need one large contiguous cache allocation sized for its maximum sequence length. It owns a block table that points to smaller physical KV-cache blocks. Blocks are added as the sequence grows and returned to the pool when the request leaves the engine.
 
@@ -264,14 +273,33 @@ while any event for the Request is pending fails without mutation. Turn-scoped
 generated count and limit reset only after all validation, input allocation, Search append, and
 scheduler preparation succeeds.
 
-Request Rewind has not yet been implemented. Cancellation does not rewind the Search sequence or
-committed cache, so accepted continuation input and generated output remain part of the logical
-request. A canceled resident request can begin a later turn after its terminal notification is
-drained. A first turn canceled before admission has no cache state, but it can likewise begin a
-later turn: the retained initial input and new continuation input are prefetched together. If
-retained model state has otherwise ceased to be resident, continuation still fails. Until Request
-Rewind is implemented, callers that need to discard canceled input or release capacity must
-`Close()` and create a new Request.
+`RewindToStartOfTurn(turn_id)` is valid only in `TurnComplete`, after every event for that Request
+has been drained. The current Turn must not have failed. The named Turn must have been successfully
+begun and must remain in the active branch. The operation also rejects queued or active Turns,
+closed Requests, and model state that is unexpectedly nonresident. A first Turn canceled before
+admission is the one supported nonresident case because it still has scheduler ownership and has
+processed no model tokens. Rewind does not cancel or replace an active Turn and emits no event.
+
+The operation retains the token prefix that existed immediately before the named Turn's
+`BeginTurn()`, then discards that Turn and all later Turn boundaries. It preserves Request identity
+and leaves the current completed attempt's historical Turn ID and finish reason observable until
+the next `BeginTurn()`. Turn IDs are never reused, so that call receives the monotonic next ID.
+Rewind clears speculative drafts and resets the guidance cursor for the next Turn.
+
+Sampling state is not rewound. CPU and device stochastic sampling continue from their current
+random streams rather than returning to the retained token boundary.
+
+Rewind deliberately releases all resident physical model state instead of cropping it in place.
+Dynamic Requests return their complete paged KV block table, paired fixed-state slot, and auxiliary
+MTP state, if present. A later `BeginTurn()` re-admits the same Request and prefills the retained
+prefix together with new input, rebuilding paged KV, sliding-window rings, fixed convolution state,
+and fixed recurrent state from the token sequence. The MTP shadow state is recreated when drafting
+resumes. This returns physical capacity immediately without persistent rewind checkpoints. Static
+Requests use the same strategy only when they are the sole resident row; multi-row static rewind
+fails before mutation because a row cannot be removed from the shared contiguous cache allocation.
+
+Cancellation itself still does not rewind Search or cache state. A canceled Request can either
+continue from retained state after draining its terminal event or explicitly rewind first.
 
 Every completed Turn publishes exactly one terminal event. A final visible token and completion may
 be combined in one event. An unserviceable Request receives `TurnFinished | Failed`; fatal Engine
@@ -290,6 +318,8 @@ Planning skips turn-complete residents and does not release their cache. Retaine
 consume paged-cache blocks and a batch slot, so applications must call `Close()` when they no
 longer need continuation. Dynamic resources are reclaimed immediately; static resources remain
 until the shared batch is recycled.
+Call `RewindToStartOfTurn()` instead when retaining the prefix before an active-branch Turn while
+releasing capacity for replay.
 
 ### `Close()`
 
@@ -521,8 +551,10 @@ head failure therefore degrades to ordinary decoding without repeatedly running 
 
 **Shadow lifecycle.** The head's shadow Request mirrors only the suffix the target committed during
 the current turn. Beginning a continuation and canceling a turn both drop the shadow and release its
-auxiliary blocks, so the next drafted step rebuilds it from the new turn's suffix. Closing the
-request releases it as well.
+auxiliary blocks, so the next drafted step rebuilds it from the new turn's suffix. Rewinding also
+drops the shadow before releasing the target's model state because neither the shadow sequence nor
+its auxiliary cache remains authoritative for the retained prefix. Closing the request releases it
+as well.
 
 **Mixed prefill batches.** Drafts are proposed only for requests that committed a decode token in
 the step. A request that was prefilling, finished its turn, or has a proposal the Engine cannot
@@ -674,7 +706,8 @@ request checkpointing, model execution, or cache commit.
 
 ### 6. Checkpoint request and sampler state
 
-Before model execution, `ScheduledRequests::BeginTransaction()` checkpoints every selected request's search state.
+Before model execution, `ScheduledRequests::BeginTransaction()` checkpoints every selected
+request's Search state, processed cursor, host-token length, guidance state, and host RNG.
 
 If the device supports transactional batched sampling, the scheduler-owned sampler state is checkpointed as well. Each request keeps its own persistent sampler state, including its random stream, even though sampling work can be batched.
 
@@ -1182,6 +1215,11 @@ before the step began. `Run()` translates `RetryableBatchAbort` into a `Retryabl
 `Run()` again with unchanged memory availability and workload composition may produce the same
 failure.
 
+Restoring a Request truncates `tokens_host_` to the saved transaction boundary while restoring the
+processed cursor, Search, guidance, host RNG, and transactional sampler state together. New-Turn
+admission uses the same additive checkpoint, so a failed continuation cannot leave the host
+sequence, guidance cursor, or either random stream at a newer transaction boundary.
+
 Planning allocation failures occur before reservation or request mutation. They propagate to the
 caller without marking the Engine unhealthy, so a later `Run()` may retry. A
 `StepPlanningConsistencyError`, by contrast, proves that committed paged and fixed ownership
@@ -1486,6 +1524,11 @@ If batched sampling or transactional sampler checkpoints are unsupported on the 
 
 Logits processing remains per request. Minimum length, repetition penalty, no-repeat n-gram processing, EOS handling, maximum length, and sequence ownership continue to use each request's own state.
 
+Sampled deterministic-draft verification is sequential and therefore consumes the Request's host
+RNG once per evaluated target row. On CUDA, the already selected tokens can still use Search's
+externally bound token slot for batched commit, but that staging operation does not consume or
+advance the scheduler-owned batched-sampler state.
+
 ## CUDA graph capture
 
 CUDA graph capture is an optimization for stable decode shapes.
@@ -1588,6 +1631,13 @@ single-request batch remains resident. The per-turn generated-token budget and t
 turn policy both apply on this path, although static execution does not use the dynamic
 reservation/checkpoint transaction. Because it cannot stage, roll back, or replay, static admission
 rejects stop strings and a per-turn seed before mutating the Request.
+
+`RewindToStartOfTurn()` is supported for a sole resident static Request. It destroys that one-row
+contiguous cache allocation, retains the prefix before the named Turn, and lets the next
+`BeginTurn()` allocate a fresh static batch and replay that prefix with the new input. Rewind is
+rejected when two or more rows remain resident because releasing the shared allocation would also
+destroy peers' continuation state. A logically closed peer remains resident until the static batch
+recycles and therefore can temporarily keep another completed Request from rewinding.
 
 Close or abandonment logically removes a Request from scheduling and purges its undelivered events.
 A closed Request that is already resident in a static batch nevertheless remains part of that

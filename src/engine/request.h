@@ -117,6 +117,20 @@ struct RequestTurnCounters {
   uint64_t generated_tokens{};
 };
 
+// Fully prepared Request-local state for an externally requested rewind. Engine prepares this
+// before releasing cache ownership, then publishes it through Request::CommitRewind at a no-throw
+// boundary.
+struct RequestRewindState {
+  RequestRewindState();
+  RequestRewindState(RequestRewindState&&) noexcept;
+  RequestRewindState& operator=(RequestRewindState&&) noexcept;
+  ~RequestRewindState();
+
+  std::unique_ptr<Search> search;
+  size_t sequence_length{};
+  size_t retained_turn_count{};
+};
+
 /**
  * @class Request
  * @brief Manages the state and lifecycle of a user request within the engine.
@@ -159,11 +173,17 @@ struct Request : std::enable_shared_from_this<Request>,
   uint64_t BeginTurn(
       std::span<const int32_t> tokens,
       const TurnOptions& options);
+  // Rewinds a completed Request to the sequence boundary before the identified Turn began.
+  // Turn IDs are never reused; the next BeginTurn replays the retained prefix.
+  void RewindToStartOfTurn(uint64_t turn_id);
   void ValidateOwnerThread() const;
   void AttachToEngine(std::shared_ptr<Engine> engine) noexcept;
   bool BelongsTo(const Engine& engine) const noexcept;
   bool IsAwaitingFirstTurn() const noexcept;
   bool IsRestartableCanceledTurn() const noexcept;
+  bool NeedsReplayAfterRewind() const noexcept {
+    return needs_replay_after_rewind_;
+  }
   void ValidateTurnAdmission(
       std::span<const int32_t> tokens,
       const TurnOptions& options) const;
@@ -500,6 +520,8 @@ struct Request : std::enable_shared_from_this<Request>,
    */
   BatchedSamplerState& SamplingState(BatchedSampler& sampler);
   void CommitSamplingState(std::unique_ptr<BatchedSamplerState> state) noexcept;
+  RequestRewindState PrepareRewindToStartOfTurn(uint64_t turn_id) const;
+  void CommitRewind(RequestRewindState&& state) noexcept;
 
   /**
    * @brief The durable seed basis a newly created sampler state starts from.
@@ -539,6 +561,11 @@ struct Request : std::enable_shared_from_this<Request>,
                                       bool device_state_checkpointed);
 
  private:
+  struct TurnBoundary {
+    uint64_t turn_id{};
+    size_t sequence_length{};
+  };
+
   // The search sequence is partitioned at processed_sequence_length_: tokens before it already
   // have KV entries, and UnprocessedTokens() returns the scheduled prefix of [processed, current).
   // Host-side mirror of the full sequence (prompt + generated tokens). Kept in step with the
@@ -588,6 +615,7 @@ struct Request : std::enable_shared_from_this<Request>,
   uint64_t next_turn_id_{1};
   bool has_current_turn_{};
   bool turn_id_exhausted_{};
+  std::vector<TurnBoundary> turn_boundaries_;
   GenerationFinishReason finish_reason_{GenerationFinishReason::None};
   // Caller-facing stop-string match index committed by CommitStep(), or -1. Only ever written from
   // CommitStep() (after the commit boundary), so unlike stop_controller_ it needs no transactional
@@ -654,6 +682,7 @@ struct Request : std::enable_shared_from_this<Request>,
   std::unique_ptr<BatchedSamplerState> batched_sampler_state_;
   std::weak_ptr<Engine> engine_;
   const Engine* engine_identity_{};
+  bool needs_replay_after_rewind_{};
 
   void ApplyLogitsProcessors(DeviceSpan<float> logits, bool guidance_applied);
   void SelectNextToken();
