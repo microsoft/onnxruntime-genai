@@ -69,6 +69,7 @@ steps:
         allprojects {
           buildscript {
             repositories {
+              clear()
               maven {
                 name "Lotus Feed"
                 url uri("https://aiinfra.pkgs.visualstudio.com/_packaging/${env:central_maven_feed_name}/maven/v1")
@@ -81,6 +82,7 @@ steps:
           }
 
           repositories {
+            clear()
             maven {
               name "Lotus Feed"
               url uri("https://aiinfra.pkgs.visualstudio.com/_packaging/${env:central_maven_feed_name}/maven/v1")
