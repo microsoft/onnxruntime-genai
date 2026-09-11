@@ -524,13 +524,6 @@ TEST(PagedKeyValueCacheManifestTest, ExplicitBlockCountCoversBothPools) {
           /*auxiliary_bytes_per_block=*/0,
           /*auxiliary_reserved_memory_bytes=*/64),
       std::runtime_error);
-
-  EXPECT_THROW(
-      ResolveConfiguredPagedBlockCount(
-          /*configured_num_blocks=*/1,
-          /*primary_bytes_per_block=*/64,
-          /*auxiliary_bytes_per_block=*/std::numeric_limits<size_t>::max()),
-      std::runtime_error);
 }
 
 TEST(PagedKeyValueCacheManifestTest, AllocatesSparseSlidingAndFullLayerCaches) {

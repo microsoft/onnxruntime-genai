@@ -636,8 +636,9 @@ struct Config {
 
   struct Engine {
     struct DynamicBatching {
-      size_t block_size{256};                       // Total number of slots per block.
-      std::optional<size_t> num_blocks;             // Total number of blocks per layer.
+      size_t block_size{256};  // Total number of slots per block.
+      // Baseline target blocks; Engine auxiliary caches share the equivalent byte budget.
+      std::optional<size_t> num_blocks;
       std::optional<float> gpu_utilization_factor;  // Fraction of free GPU memory to use for key-value cache.
       size_t max_batch_size{16};                    // Maximum batch size for dynamically batching requests.
       size_t max_scheduled_tokens{2048};            // Maximum tokens in one dynamically batched model run.

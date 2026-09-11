@@ -1364,13 +1364,15 @@ Automatic block drafting is greedy-only. A request that uses random sampling (`d
 drafter and never claims cache blocks.
 
 A windowed block drafter (DFlash 2) owns a fixed ring of cache blocks per maximum batch row, so its
-pool is sized for `max_batch_size` rings and is allocated before the target pool measures free
-memory; its footprint is independent of context length. A full-attention block drafter (DSpark)
-instead mirrors the target pool: its bytes per target block and its fixed query-spill bytes are
-charged against free memory before target capacity is selected, using the cache element type
-reported by the graph. That trade is explicit -- a DSpark drafter with the same layer geometry as
-the target roughly halves the target's paged-cache capacity for the same GPU memory budget, and it
-attends the whole resident sequence on every step rather than a window.
+pool is sized for `max_batch_size` rings and its footprint is independent of context length. With
+automatic sizing, that pool is allocated before the target measures free memory. When `num_blocks`
+is explicit, its fixed footprint is instead validated and deducted from the byte budget represented
+by that baseline target block count before either cache pool is allocated. A full-attention block
+drafter (DSpark) instead mirrors the target pool: its bytes per target block and its fixed
+query-spill bytes are charged against the same budget before target capacity is selected, using the
+cache element type reported by the graph. That trade is explicit -- a DSpark drafter with the same
+layer geometry as the target roughly halves the target's paged-cache capacity for the same GPU
+memory budget, and it attends the whole resident sequence on every step rather than a window.
 
 A request joins the drafter on its first decode step and holds its blocks until it is closed, so
 both pools are only sufficient while at most `max_batch_size` requests are tracked. A request that

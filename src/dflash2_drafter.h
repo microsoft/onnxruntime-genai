@@ -100,6 +100,10 @@ struct Dflash2Drafter {
   // be sized against the target pool. A windowed drafter only needs a fixed ring per request.
   static size_t PoolBlocks(const Config& config, size_t paged_block_size, size_t max_batch_size);
 
+  // Total K/V bytes occupied by a pool of `pool_blocks`.
+  static size_t PoolBytes(const Config& config, size_t paged_block_size, size_t pool_blocks,
+                          ONNXTensorElementDataType cache_type);
+
   // A full-attention drafter mirrors the target's committed blocks and reserves enough extra
   // blocks for every active request's query rows.
   static size_t FullAttentionPoolBlocks(size_t target_blocks, size_t paged_block_size,

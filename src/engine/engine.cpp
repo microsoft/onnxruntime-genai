@@ -275,6 +275,7 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
   size_t dflash2_bytes_per_block = 0;
   size_t dflash2_reserved_memory_bytes = 0;
   size_t dflash2_max_batch_size = 0;
+  size_t dflash2_pool_blocks = 0;
   if (!model->config_->model.dflash2.filename.empty()) {
     if (!model->config_->engine.dynamic_batching) {
       throw std::runtime_error("An Engine-hosted DFlash 2 drafter requires dynamic batching.");
@@ -302,23 +303,18 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
     const auto dflash2_cache_type = ValidateDflash2ModelCompatibility(
         *model->config_, model->session_info_, dflash2_model->session_info_, paged_block_size);
     model->config_->engine.aux_hidden_states_output_required = true;
-    const size_t pool_blocks = Dflash2Drafter::PoolBlocks(
+    dflash2_pool_blocks = Dflash2Drafter::PoolBlocks(
         *model->config_, paged_block_size, dflash2_max_batch_size);
-    if (pool_blocks != 0) {
-      // Built before the main pool so the pool's free-memory measurement already excludes it. A
-      // windowed drafter's footprint depends on the batch size, not the context length.
-      dflash2_drafter = std::make_unique<Dflash2Drafter>(
-          dflash2_model, paged_block_size, pool_blocks, dflash2_max_batch_size);
-      // Explicit num_blocks bypasses the free-memory probe, so deduct the already allocated fixed
-      // pool from that configured target-only budget.
+    if (dflash2_pool_blocks != 0) {
       if (batching.num_blocks.has_value()) {
-        const size_t dflash2_bytes_per_pool_block =
-            Dflash2Drafter::BytesPerBlock(*model->config_, paged_block_size, dflash2_cache_type);
-        if (pool_blocks >
-            std::numeric_limits<size_t>::max() / dflash2_bytes_per_pool_block) {
-          throw std::runtime_error("Windowed block-drafter cache bytes overflow size_t.");
-        }
-        dflash2_reserved_memory_bytes = pool_blocks * dflash2_bytes_per_pool_block;
+        // Explicit num_blocks bypasses the free-memory probe. CacheManager validates and deducts
+        // this fixed pool before either cache pool is allocated.
+        dflash2_reserved_memory_bytes = Dflash2Drafter::PoolBytes(
+            *model->config_, paged_block_size, dflash2_pool_blocks, dflash2_cache_type);
+      } else {
+        // Automatic sizing measures free memory after allocating the fixed drafter pool.
+        dflash2_drafter = std::make_unique<Dflash2Drafter>(
+            dflash2_model, paged_block_size, dflash2_pool_blocks, dflash2_max_batch_size);
       }
     } else {
       // A full-attention drafter mirrors the target pool, so it is billed per target block instead
@@ -338,15 +334,20 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
       CacheManager::Create(model, mtp_bytes_per_block + dflash2_bytes_per_block,
                            dflash2_reserved_memory_bytes);
   if (dflash2_model && !dflash2_drafter) {
-    const auto& dflash2 = model->config_->model.dflash2;
     const size_t paged_block_size =
         static_cast<size_t>(model->config_->engine.dynamic_batching->block_size);
-    dflash2_drafter = std::make_unique<Dflash2Drafter>(
-        dflash2_model, paged_block_size,
-        Dflash2Drafter::FullAttentionPoolBlocks(
-            cache_manager->Snapshot().total_blocks, paged_block_size,
-            static_cast<size_t>(dflash2.block_size), dflash2_max_batch_size),
-        dflash2_max_batch_size);
+    if (dflash2_pool_blocks != 0) {
+      dflash2_drafter = std::make_unique<Dflash2Drafter>(
+          dflash2_model, paged_block_size, dflash2_pool_blocks, dflash2_max_batch_size);
+    } else {
+      const auto& dflash2 = model->config_->model.dflash2;
+      dflash2_drafter = std::make_unique<Dflash2Drafter>(
+          dflash2_model, paged_block_size,
+          Dflash2Drafter::FullAttentionPoolBlocks(
+              cache_manager->Snapshot().total_blocks, paged_block_size,
+              static_cast<size_t>(dflash2.block_size), dflash2_max_batch_size),
+          dflash2_max_batch_size);
+    }
   }
   auto scheduler = Scheduler::Create(model, cache_manager);
   auto model_executor = ModelExecutor::Create(model, cache_manager);

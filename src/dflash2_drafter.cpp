@@ -363,6 +363,12 @@ size_t Dflash2Drafter::PoolBlocks(const Config& config, size_t paged_block_size,
                          "DFlash 2 cache block count");
 }
 
+size_t Dflash2Drafter::PoolBytes(const Config& config, size_t paged_block_size,
+                                 size_t pool_blocks, ONNXTensorElementDataType cache_type) {
+  return CheckedMultiply(pool_blocks, BytesPerBlock(config, paged_block_size, cache_type),
+                         "Block-drafter cache bytes");
+}
+
 size_t Dflash2Drafter::FullAttentionPoolBlocks(size_t target_blocks, size_t paged_block_size,
                                                size_t query_block_size,
                                                size_t max_batch_size) {
