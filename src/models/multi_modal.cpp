@@ -142,6 +142,14 @@ void VisionState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, co
                                                          model_.config_->model.vision.outputs.image_features,
                                                          num_images_, num_image_tokens_);
   image_features_->Add();
+  // Qwen3-VL DeepStack: additional per-token vision outputs (outputs_[1..N]); the multi-image
+  // slicing loop in QwenVisionState::Run relies on these following image_features (outputs_[0]).
+  for (const auto& ds_name : model_.config_->model.vision.outputs.deepstack_features) {
+    auto ds = std::make_unique<MultiModalFeatures>(*this, MultiModalFeatures::Mode::Output,
+                                                   ds_name, num_images_, num_image_tokens_);
+    ds->Add();
+    deepstack_features_.push_back(std::move(ds));
+  }
   extra_inputs_.Add(extra_inputs, model_.vision_session_->GetInputNames());
 }
 
@@ -246,6 +254,16 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
   OrtValue* pv_full = inputs_[pv_idx];
   OrtValue* feat_full = outputs_[0];  // pre-allocated image_features output
 
+  // Qwen3-VL DeepStack outputs (outputs_[1..N]) share image_features' shape/type and are sliced
+  // identically per image. Capture their full buffers so we can restore them after the loop.
+  const size_t num_deepstack = deepstack_features_.size();
+  std::vector<OrtValue*> ds_full(num_deepstack);
+  std::vector<void*> ds_raw(num_deepstack);
+  for (size_t k = 0; k < num_deepstack; ++k) {
+    ds_full[k] = outputs_[1 + k];
+    ds_raw[k] = ds_full[k]->GetTensorMutableRawData();
+  }
+
   // Shapes: pixel_values[total_patches, patch_dim], image_features[total_logical_patches, hidden_size]
   auto pv_info = pv_full->GetTensorTypeAndShapeInfo();
   auto feat_info = feat_full->GetTensorTypeAndShapeInfo();
@@ -348,11 +366,24 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
         static_cast<size_t>(num_feats * hidden_size) * feat_element_size,
         std::span<const int64_t>(sub_feat_shape), feat_type);
 
+    // DeepStack outputs: same shape/type as image_features, sliced at the same feat_offset.
+    std::vector<std::unique_ptr<OrtValue>> sub_ds(num_deepstack);
+    for (size_t k = 0; k < num_deepstack; ++k) {
+      sub_ds[k] = OrtValue::CreateTensor(
+          *cpu_mem,
+          static_cast<uint8_t*>(ds_raw[k]) + static_cast<size_t>(feat_offset * hidden_size) * feat_element_size,
+          static_cast<size_t>(num_feats * hidden_size) * feat_element_size,
+          std::span<const int64_t>(sub_feat_shape), feat_type);
+    }
+
     // Temporarily point the State's inputs/output to the per-image slices,
     // run the session, then advance offsets.
     inputs_[pv_idx] = sub_pv.get();
     inputs_[grid_idx] = sub_grid.get();
     outputs_[0] = sub_feat.get();
+    for (size_t k = 0; k < num_deepstack; ++k) {
+      outputs_[1 + k] = sub_ds[k].get();
+    }
 
     State::Run(*model_.vision_session_);
 
@@ -364,6 +395,9 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
   inputs_[pv_idx] = pv_full;
   inputs_[grid_idx] = grid_full;
   outputs_[0] = feat_full;
+  for (size_t k = 0; k < num_deepstack; ++k) {
+    outputs_[1 + k] = ds_full[k];
+  }
 
   return {};
 }
@@ -609,13 +643,22 @@ EmbeddingState::EmbeddingState(const MultiModalLanguageModel& model, const Gener
   input_ids_.Add();
   inputs_embeds_.Add();
 
-  // Gemma4: embedding model produces per_layer_inputs alongside inputs_embeds
+  // Auxiliary per-token feature outputs injected into the decoder, paired by construction order
+  // with DecoderState::aux_feature_inputs_. Build per_layer_inputs first (Gemma4, if present),
+  // then one DeepStack output per deepstack_visual_index (Qwen3-VL). A model has at most one of
+  // these families, so the ordering is unambiguous.
   if (!model_.config_->model.embedding.outputs.per_layer_inputs.empty()) {
     auto shape = model_.session_info_.GetOutputShape(model_.config_->model.embedding.outputs.per_layer_inputs);
     int64_t per_layer_dim = shape.size() >= 3 ? shape.back() : 0;
-    per_layer_inputs_ = std::make_unique<Embeddings>(*this, Embeddings::Mode::Output,
-                                                     model_.config_->model.embedding.outputs.per_layer_inputs, per_layer_dim);
-    per_layer_inputs_->Add();
+    auto per_layer_inputs = std::make_unique<Embeddings>(*this, Embeddings::Mode::Output,
+                                                         model_.config_->model.embedding.outputs.per_layer_inputs, per_layer_dim);
+    per_layer_inputs->Add();
+    aux_feature_outputs_.push_back(std::move(per_layer_inputs));
+  }
+  for (const auto& ds_name : model_.config_->model.embedding.outputs.deepstack) {
+    auto ds = std::make_unique<Embeddings>(*this, Embeddings::Mode::Output, ds_name);
+    ds->Add();
+    aux_feature_outputs_.push_back(std::move(ds));
   }
 }
 
@@ -628,6 +671,14 @@ void EmbeddingState::SetExtraInputs(const int64_t num_images, const int64_t num_
                                                            model_.config_->model.embedding.inputs.image_features,
                                                            num_images, num_image_tokens_);
     image_features_->Add();
+  }
+  // Qwen3-VL DeepStack: per-token feature inputs from the vision model (mirror image_features_).
+  // The scattered full-length outputs to the decoder are aux_feature_outputs_ (built in the ctor).
+  for (const auto& ds_name : model_.config_->model.embedding.inputs.deepstack_features) {
+    auto ds = std::make_unique<MultiModalFeatures>(*this, MultiModalFeatures::Mode::Input,
+                                                   ds_name, num_images, num_image_tokens_);
+    ds->Add();
+    deepstack_features_in_.push_back(std::move(ds));
   }
   if (model_.speech_session_) {
     audio_features_ = std::make_unique<MultiModalFeatures>(*this, MultiModalFeatures::Mode::Input,  // Optional model input
@@ -648,6 +699,7 @@ void EmbeddingState::SetExtraInputs(const int64_t num_images, const int64_t num_
 void EmbeddingState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, bool is_prompt) {
   input_ids_.Update(next_tokens);
   if (model_.vision_session_) image_features_->Update(is_prompt);
+  for (auto& ds : deepstack_features_in_) ds->Update(is_prompt);
   if (audio_features_) audio_features_->Update(is_prompt);
 }
 
@@ -667,13 +719,23 @@ DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int3
       recurrent_state_{CreateRecurrentState(*this)} {
   inputs_embeds_.Add();
 
-  // Gemma4: decoder accepts per_layer_inputs from the embedding model
+  // Auxiliary per-token feature inputs injected into the decoder, paired by construction order
+  // with EmbeddingState::aux_feature_outputs_. Build per_layer_inputs first (Gemma4, if present),
+  // then one DeepStack input per deepstack_visual_index (Qwen3-VL, added after layers 0/1/2). These
+  // are allocated here (owning buffers); the embedding model's matching outputs reuse them each
+  // step. A model has at most one of these families, so the ordering is unambiguous.
   if (!model_.config_->model.decoder.inputs.per_layer_inputs.empty()) {
     auto shape = model_.session_info_.GetInputShape(model_.config_->model.decoder.inputs.per_layer_inputs);
     int64_t per_layer_dim = shape.size() >= 3 ? shape.back() : 0;
-    per_layer_inputs_ = std::make_unique<Embeddings>(*this, Embeddings::Mode::Input,
-                                                     model_.config_->model.decoder.inputs.per_layer_inputs, per_layer_dim);
-    per_layer_inputs_->Add();
+    auto per_layer_inputs = std::make_unique<Embeddings>(*this, Embeddings::Mode::Input,
+                                                         model_.config_->model.decoder.inputs.per_layer_inputs, per_layer_dim);
+    per_layer_inputs->Add();
+    aux_feature_inputs_.push_back(std::move(per_layer_inputs));
+  }
+  for (const auto& ds_name : model_.config_->model.decoder.inputs.deepstack) {
+    auto ds = std::make_unique<Embeddings>(*this, Embeddings::Mode::Input, ds_name);
+    ds->Add();
+    aux_feature_inputs_.push_back(std::move(ds));
   }
 
   // Some multimodal decoders (e.g., Gemma4) require input_ids alongside inputs_embeds.
@@ -742,7 +804,7 @@ void DecoderState::PrepareEmbeddingsForPrefill(size_t new_length) {
   // Allocate the embeddings buffers for the whole prompt. The embedding model writes into these
   // buffers in one run; the decoder then consumes them chunk by chunk.
   inputs_embeds_.UpdateSequenceLength(new_length);
-  if (per_layer_inputs_) per_layer_inputs_->UpdateSequenceLength(new_length);
+  for (auto& f : aux_feature_inputs_) f->UpdateSequenceLength(new_length);
 }
 
 DeviceSpan<float> DecoderState::RunPrefillWithChunking(int current_length, DeviceSpan<int32_t>& next_tokens,
@@ -769,7 +831,7 @@ DeviceSpan<float> DecoderState::RunPrefillWithChunking(int current_length, Devic
 
     // Feed only this chunk's slice of the pre-computed embeddings to the decoder.
     inputs_embeds_.UseChunkView(processed_tokens, current_chunk_size);
-    if (per_layer_inputs_) per_layer_inputs_->UseChunkView(processed_tokens, current_chunk_size);
+    for (auto& f : aux_feature_inputs_) f->UseChunkView(processed_tokens, current_chunk_size);
 
     // Graph capture is disabled during prefill chunking.
     State::Run(*model_.decoder_session_, /*graph_capture_this_run=*/false);
@@ -778,7 +840,7 @@ DeviceSpan<float> DecoderState::RunPrefillWithChunking(int current_length, Devic
   }
 
   inputs_embeds_.RestoreFullView();
-  if (per_layer_inputs_) per_layer_inputs_->RestoreFullView();
+  for (auto& f : aux_feature_inputs_) f->RestoreFullView();
 
   // Logits of the last chunk contain the logits for the last prompt token.
   return logits_.Get();
@@ -795,7 +857,7 @@ void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int tot
     recurrent_state_->Update();
   logits_.Update(next_tokens, new_length);
   inputs_embeds_.UpdateSequenceLength(new_length);
-  if (per_layer_inputs_) per_layer_inputs_->UpdateSequenceLength(new_length);
+  for (auto& f : aux_feature_inputs_) f->UpdateSequenceLength(new_length);
 }
 
 // Overload for pipeline to call
@@ -807,7 +869,7 @@ void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int tot
     recurrent_state_->Update();
   logits_.Update(next_tokens, new_length);
   inputs_embeds_.UpdateSequenceLength(new_length);
-  if (per_layer_inputs_) per_layer_inputs_->UpdateSequenceLength(new_length);
+  for (auto& f : aux_feature_inputs_) f->UpdateSequenceLength(new_length);
 }
 
 MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params)
@@ -866,6 +928,22 @@ void MultiModalPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extr
   }
 }
 
+void MultiModalPipelineState::BindAuxFeatureBuffers() {
+  // Gemma4 per_layer_inputs and Qwen3-VL DeepStack both flow embedding-output -> decoder-input as
+  // per-token feature tensors; they are built in the same order on both sides, so pair by index.
+  auto& outputs = embedding_state_->aux_feature_outputs_;
+  auto& inputs = decoder_state_->aux_feature_inputs_;
+  if (outputs.size() != inputs.size()) {
+    throw std::runtime_error("Auxiliary decoder feature mismatch: embedding produces " +
+                             std::to_string(outputs.size()) + " feature output(s) but the decoder expects " +
+                             std::to_string(inputs.size()) +
+                             " (check per_layer_inputs / deepstack entries in genai_config).");
+  }
+  for (size_t k = 0; k < outputs.size(); ++k) {
+    outputs[k]->ReuseEmbeddingsBuffer(*inputs[k]);
+  }
+}
+
 DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
   // Pipeline state defines the pipeline of the execution of the models
   // Prompt stage:
@@ -902,6 +980,16 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
     }
     if (vision_state_) {
       embedding_state_->image_features_->ReuseFeaturesBuffer(*vision_state_->image_features_);
+      // Qwen3-VL DeepStack: hand each vision per-token output to the matching embedding input.
+      if (embedding_state_->deepstack_features_in_.size() != vision_state_->deepstack_features_.size()) {
+        throw std::runtime_error("DeepStack config mismatch: embedding.inputs.deepstack_features count (" +
+                                 std::to_string(embedding_state_->deepstack_features_in_.size()) +
+                                 ") must match vision.outputs.deepstack_features count (" +
+                                 std::to_string(vision_state_->deepstack_features_.size()) + ").");
+      }
+      for (size_t k = 0; k < embedding_state_->deepstack_features_in_.size(); ++k) {
+        embedding_state_->deepstack_features_in_[k]->ReuseFeaturesBuffer(*vision_state_->deepstack_features_[k]);
+      }
     }
     if (speech_state_ && num_audio_tokens_ > 0) {
       // Reshape speech output from 3D [B, T, hidden] to 2D [B*T, hidden]
@@ -917,9 +1005,7 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
       embedding_state_->audio_features_->AllocateEmptyFeatures();
     }
     embedding_state_->inputs_embeds_.ReuseEmbeddingsBuffer(decoder_state_->inputs_embeds_);
-    if (embedding_state_->per_layer_inputs_ && decoder_state_->per_layer_inputs_) {
-      embedding_state_->per_layer_inputs_->ReuseEmbeddingsBuffer(*decoder_state_->per_layer_inputs_);
-    }
+    BindAuxFeatureBuffers();
     embedding_state_->Run(current_length, next_tokens, next_indices);
 
     auto logits = chunk_prefill
@@ -934,9 +1020,9 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
   }
 
   embedding_state_->inputs_embeds_.ReuseEmbeddingsBuffer(decoder_state_->inputs_embeds_);
-  if (embedding_state_->per_layer_inputs_ && decoder_state_->per_layer_inputs_) {
-    embedding_state_->per_layer_inputs_->ReuseEmbeddingsBuffer(*decoder_state_->per_layer_inputs_);
-  }
+  // In generation there are no image tokens, so embedding.onnx emits all-zeros for any DeepStack
+  // outputs and the decoder's per-layer Adds become no-ops.
+  BindAuxFeatureBuffers();
   embedding_state_->Run(current_length, next_tokens, next_indices);
   return decoder_state_->Run(current_length, next_tokens, next_indices);
 }

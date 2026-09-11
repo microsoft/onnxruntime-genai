@@ -57,6 +57,9 @@ struct VisionState : State {
   int64_t num_images_{};
   ExtraInputs extra_inputs_{*this};  // Model inputs
   std::unique_ptr<MultiModalFeatures> image_features_;
+  // Qwen3-VL DeepStack: extra per-token vision outputs (one per deepstack_visual_index).
+  // Same shape/type as image_features; consumed by the embedding model.
+  std::vector<std::unique_ptr<MultiModalFeatures>> deepstack_features_;
 };
 
 // QwenVisionState: per-image slicing loop for Qwen2.5-VL / Qwen3-VL.
@@ -167,7 +170,13 @@ struct EmbeddingState : State {
   std::unique_ptr<MultiModalFeatures> audio_features_;        // Optional model input
   Embeddings inputs_embeds_{*this, Embeddings::Mode::Output,  // Model output
                             model_.config_->model.embedding.outputs.embeddings};
-  std::unique_ptr<Embeddings> per_layer_inputs_;  // Optional model output (Gemma4)
+  // Auxiliary per-token feature outputs produced alongside inputs_embeds and injected into the
+  // decoder: Gemma4 per_layer_inputs (1) and Qwen3-VL DeepStack (one per deepstack_visual_index).
+  // Paired by construction order with DecoderState::aux_feature_inputs_.
+  std::vector<std::unique_ptr<Embeddings>> aux_feature_outputs_;  // Optional model outputs
+  // Qwen3-VL DeepStack per-token feature inputs (from vision); mirror image_features_. The scatter
+  // to full length (input_ids==image_token) happens inside embedding.onnx.
+  std::vector<std::unique_ptr<MultiModalFeatures>> deepstack_features_in_;  // Optional model inputs
 };
 
 struct DecoderState : State {
@@ -195,12 +204,15 @@ struct DecoderState : State {
   const MultiModalLanguageModel& model_;
   Embeddings inputs_embeds_{*this, Embeddings::Mode::Input,  // Model input
                             model_.config_->model.decoder.inputs.embeddings};
-  std::unique_ptr<Embeddings> per_layer_inputs_;        // Optional model input (Gemma4: per-layer conditioning)
-  std::unique_ptr<DefaultInputIDs> decoder_input_ids_;  // Optional model input (e.g., Gemma4 decoder needs input_ids)
-  std::unique_ptr<PositionInputs> position_inputs_;     // Model input
-  std::unique_ptr<KeyValueCache> kv_cache_;             // Model input
-  std::unique_ptr<RecurrentState> recurrent_state_;     // Model input (for hybrid models)
-  Logits logits_{*this};                                // Model output
+  // Auxiliary per-token feature inputs produced by the embedding model and injected into the
+  // decoder: Gemma4 per_layer_inputs (1) and Qwen3-VL DeepStack (one per deepstack_visual_index,
+  // added after layers 0/1/2). Paired by construction order with EmbeddingState::aux_feature_outputs_.
+  std::vector<std::unique_ptr<Embeddings>> aux_feature_inputs_;  // Optional model inputs
+  std::unique_ptr<DefaultInputIDs> decoder_input_ids_;           // Optional model input (e.g., Gemma4 decoder needs input_ids)
+  std::unique_ptr<PositionInputs> position_inputs_;              // Model input
+  std::unique_ptr<KeyValueCache> kv_cache_;                      // Model input
+  std::unique_ptr<RecurrentState> recurrent_state_;              // Model input (for hybrid models)
+  Logits logits_{*this};                                         // Model output
 };
 
 struct MultiModalPipelineState : State {
@@ -221,6 +233,10 @@ struct MultiModalPipelineState : State {
  private:
   void UpdateInputsOutputs(const DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices,
                            int current_length);
+
+  // Bind each embedding auxiliary feature output to the matching decoder input, paired by index
+  // (Gemma4 per_layer_inputs and/or Qwen3-VL DeepStack). Throws on a count mismatch.
+  void BindAuxFeatureBuffers();
 
   const MultiModalLanguageModel& model_;
   int64_t num_image_tokens_{};
