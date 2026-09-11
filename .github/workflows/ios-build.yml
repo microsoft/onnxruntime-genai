@@ -14,11 +14,11 @@ jobs:
     runs-on: macos-latest # arm64
     steps:
       - name: Checkout OnnxRuntime GenAI repo
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: true
 
-      - uses: microsoft/onnxruntime-github-actions/setup-build-tools@47a55233e7a9e40e8ade1a71d1b6141be5044924 # v0.0.8
+      - uses: microsoft/onnxruntime-github-actions/setup-build-tools@176d1fa31b3e7293920e0ba6a105a156274560eb # v0.0.13
         with:
           vcpkg-version: '2025.06.13'
           vcpkg-hash: '735923258c5187966698f98ce0f1393b8adc6f84d44fd8829dda7db52828639331764ecf41f50c8e881e497b569f463dbd02dcb027ee9d9ede0711102de256cc'
@@ -27,7 +27,7 @@ jobs:
           add-cmake-to-path: 'true'
           disable-terrapin: 'true'
 
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12.x'
 

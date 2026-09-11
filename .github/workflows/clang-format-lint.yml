@@ -23,12 +23,12 @@ jobs:
       - "JobId=lint-cpp-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}"
     steps:
       - name: Checkout code
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: 'false'
 
       - name: Check format
-        uses: microsoft/onnxruntime-github-actions/format-lint-check@9e3f6d0517cad4c4055d8ddd8b8bbadcc08e4e9a # v0.0.6
+        uses: microsoft/onnxruntime-github-actions/format-lint-check@176d1fa31b3e7293920e0ba6a105a156274560eb # v0.0.13
         with:
           llvm-version: '20.1.0'
           llvm-sha256-hash: '954ac51498519f6ed9540714fb04bc401f70039b296a8160dd1559be380788d7'
