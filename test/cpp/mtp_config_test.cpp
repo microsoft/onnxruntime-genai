@@ -15,8 +15,11 @@ namespace {
 
 namespace fs_std = std::filesystem;
 
-fs_std::path WriteMtpConfig(const std::string& output_name) {
-  const auto root = fs_std::temp_directory_path() / ("ortgenai_mtp_config_" + output_name);
+fs_std::path WriteMtpConfig(const std::string& output_name,
+                            const std::string& enabled_field = {},
+                            const std::string& suffix = {}) {
+  const auto root = fs_std::temp_directory_path() /
+                    ("ortgenai_mtp_config_" + output_name + suffix);
   std::error_code ec;
   fs_std::remove_all(root, ec);
   fs_std::create_directories(root);
@@ -25,7 +28,7 @@ fs_std::path WriteMtpConfig(const std::string& output_name) {
       "{ \"model\": { \"type\": \"tiny-test-model\","
       " \"vocab_size\": 16, \"context_length\": 32,"
       " \"decoder\": { \"filename\": \"model.onnx\" },"
-      " \"mtp\": { \"filename\": \"mtp.onnx\","
+      " \"mtp\": { " + enabled_field + "\"filename\": \"mtp.onnx\","
       " \"main_hidden_states\": \"main_hidden\","
       " \"outputs\": { \"" +
       output_name +
@@ -61,6 +64,26 @@ fs_std::path WriteSharedInitializerConfig(const std::string& suffix, const std::
 TEST(MtpConfigTest, AcceptsConfigurableFeedbackOutput) {
   const auto root = WriteMtpConfig("hidden_states");
   EXPECT_NO_THROW(OgaConfig::Create(root.string().c_str()));
+}
+
+TEST(MtpConfigTest, EnablesMtpByDefault) {
+  Config config;
+  config.model.mtp.filename = "mtp.onnx";
+  EXPECT_TRUE(config.model.mtp.enabled);
+  EXPECT_TRUE(config.model.mtp.IsEnabled());
+}
+
+TEST(MtpConfigTest, CanDisableMtpAtRuntime) {
+  const auto root =
+      WriteMtpConfig("hidden_states", "\"enabled\": false, ", "_disabled");
+  EXPECT_NO_THROW(OgaConfig::Create(root.string().c_str()));
+
+  Config config;
+  config.model.mtp.filename = "mtp.onnx";
+  config.model.mtp.enabled = false;
+  EXPECT_FALSE(config.model.mtp.enabled);
+  EXPECT_FALSE(config.model.mtp.IsEnabled());
+  EXPECT_EQ(config.model.mtp.filename, "mtp.onnx");
 }
 
 TEST(MtpConfigTest, RejectsMisspelledFeedbackOutput) {

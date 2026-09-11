@@ -278,6 +278,57 @@ def test_compressed_tensors_mtp_loader_consumes_parsed_modules():
     assert mtp.layers == [layer]
 
 
+def test_remote_mtp_loader_resolves_hugging_face_snapshot(monkeypatch, tmp_path):
+    snapshot_dir = tmp_path / "snapshot"
+    snapshot_dir.mkdir()
+    calls = {}
+
+    huggingface_hub = types.ModuleType("huggingface_hub")
+
+    def snapshot_download(repo_id, cache_dir, token):
+        calls.update(repo_id=repo_id, cache_dir=cache_dir, token=token)
+        return str(snapshot_dir)
+
+    huggingface_hub.snapshot_download = snapshot_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", huggingface_hub)
+
+    def capture_from_safetensors(cls, model_dir, layer_config, is_moe):
+        calls.update(model_dir=model_dir, layer_config=layer_config, is_moe=is_moe)
+        return "mtp-weights"
+
+    monkeypatch.setattr(QwenMTPModel, "from_safetensors", classmethod(capture_from_safetensors))
+
+    result = QwenMTPModel.from_pretrained(
+        None,
+        "Qwen/Qwen3.5-2B",
+        "Qwen/Qwen3.5-2B",
+        layer_config="config",
+        is_moe=False,
+        cache_dir="model-cache",
+        token="hf-token",
+    )
+
+    assert result == "mtp-weights"
+    assert calls == {
+        "repo_id": "Qwen/Qwen3.5-2B",
+        "cache_dir": "model-cache",
+        "token": "hf-token",
+        "model_dir": str(snapshot_dir),
+        "layer_config": "config",
+        "is_moe": False,
+    }
+
+
+def test_local_mtp_loader_does_not_resolve_hugging_face_snapshot(monkeypatch, tmp_path):
+    huggingface_hub = types.ModuleType("huggingface_hub")
+    huggingface_hub.snapshot_download = lambda *args, **kwargs: pytest.fail(
+        "snapshot_download must not be called for a local model"
+    )
+    monkeypatch.setitem(sys.modules, "huggingface_hub", huggingface_hub)
+
+    assert QwenMTPModel.resolve_model_dir(tmp_path, cache_dir="unused", token="unused") == tmp_path
+
+
 def test_safetensors_mtp_loader_uses_keys_api(monkeypatch, tmp_path):
     import safetensors.torch as safetensors_torch
 

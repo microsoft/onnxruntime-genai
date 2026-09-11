@@ -22,13 +22,30 @@ class QwenMTPModel:
         preserve_quantization=False,
         load_quantized_model=None,
         is_moe=True,
+        cache_dir=None,
+        token=None,
     ):
         if quant_type in {"modelopt", "compressed-tensors"}:
             if load_quantized_model is None:
                 raise ValueError("A quantized model loader is required for ModelOpt/compressed-tensors MTP weights.")
             model = load_quantized_model(input_path)
             return cls.from_modelopt(model, layer_config, preserve_quantization, is_moe)
+        model_dir = cls.resolve_model_dir(model_dir, cache_dir=cache_dir, token=token)
         return cls.from_safetensors(model_dir, layer_config, is_moe)
+
+    @staticmethod
+    def resolve_model_dir(model_dir, cache_dir=None, token=None):
+        if os.path.isdir(model_dir):
+            return model_dir
+
+        try:
+            from huggingface_hub import snapshot_download  # noqa: PLC0415
+        except ImportError as exc:
+            raise RuntimeError(
+                "huggingface_hub is required to resolve a Hugging Face repository ID for MTP weight loading."
+            ) from exc
+
+        return snapshot_download(model_dir, cache_dir=cache_dir, token=token)
 
     @classmethod
     def from_modelopt(cls, model, layer_config, preserve_quantization, is_moe=True):

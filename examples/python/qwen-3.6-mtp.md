@@ -76,8 +76,9 @@ This produces, in `<output-dir>`:
   RMSNorms, and a copy of the embedding + `lm_head`);
 * `genai_config.json` — carrying an `mtp` section and the decoder's `hidden_states` output.
 
-To run without MTP, remove the `model.mtp` section from `genai_config.json`. The exported ONNX
-files do not need to be rebuilt.
+To run without MTP, set `model.mtp.enabled` to `false` in `genai_config.json`. Set it back to
+`true` to use MTP again. The exported ONNX files do not need to be rebuilt. Older configurations
+that omit `enabled` continue to enable MTP by default.
 
 `Qwen35MTPHead` (in `src/python/py/models/builders/qwen.py`) builds the head by reusing the
 parent `Qwen35MoeTextModel` machinery (`_make_full_attention`, `make_moe`, mRoPE, the residual

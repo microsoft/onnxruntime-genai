@@ -186,6 +186,13 @@ TEST(Dflash2ConfigTest, RejectsSimultaneousMtpDrafter) {
   EXPECT_THROW(CreateDflash2Config(config), std::runtime_error);
 }
 
+TEST(Dflash2ConfigTest, AllowsDisabledMtpMetadata) {
+  auto config = MakeDflash2Config();
+  config.model.mtp.filename = "mtp.onnx";
+  config.model.mtp.enabled = false;
+  EXPECT_NO_THROW(CreateDflash2Config(config));
+}
+
 TEST(Dflash2ConfigTest, PreservesTargetProviderOptions) {
   auto config = MakeDflash2Config();
   config.model.decoder.session_options.providers = {"cuda"};

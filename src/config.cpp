@@ -89,6 +89,9 @@ void InheritSessionOptions(const Config::SessionOptions& parent,
 
 std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   const auto& mtp = config.model.mtp;
+  if (!mtp.enabled) {
+    throw std::runtime_error("model.mtp is disabled by model.mtp.enabled.");
+  }
   if (mtp.filename.empty()) {
     throw std::runtime_error("model.mtp.filename is required to create an MTP decoder.");
   }
@@ -1070,7 +1073,9 @@ struct Mtp_Element : JSON::Element {
   explicit Mtp_Element(Config::Model::Mtp& v) : v_{v} {}
 
   void OnValue(std::string_view name, JSON::Value value) override {
-    if (name == "filename") {
+    if (name == "enabled") {
+      v_.enabled = JSON::Get<bool>(value);
+    } else if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
     } else if (name == "num_hidden_layers") {
       v_.num_hidden_layers = SafeDoubleToInt(JSON::Get<double>(value), name);
