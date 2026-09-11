@@ -214,7 +214,7 @@ struct PagedKeyValueCache {
                        int32_t* data, size_t columns);
   void RebuildBlockTableIndex() noexcept;
   std::shared_ptr<Model> model_;
-  std::vector<LayerCache> cache_;                   // Pair of key and value caches for all layers
+  std::vector<LayerCache> cache_;  // Pair of key and value caches for all layers
   std::vector<ScaleCache> scale_cache_;
   std::unique_ptr<BlockPool> block_pool_;           // Allocator for blocks
   std::vector<PagedCacheBlockTable> block_tables_;  // Block table for all requests in the cache

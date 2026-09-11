@@ -405,8 +405,8 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
     auto value_shape_per_layer = key_shape_per_layer;
     value_shape_per_layer.back() = static_cast<int64_t>(CacheHeadSize(model, value_name));
     cache_.push_back(LayerCache{
-      OrtValue::CreateTensor(model->p_device_kvcache_->GetAllocator(), key_shape_per_layer, dtype),
-      OrtValue::CreateTensor(model->p_device_kvcache_->GetAllocator(), value_shape_per_layer, dtype),
+        OrtValue::CreateTensor(model->p_device_kvcache_->GetAllocator(), key_shape_per_layer, dtype),
+        OrtValue::CreateTensor(model->p_device_kvcache_->GetAllocator(), value_shape_per_layer, dtype),
         key_name,
         value_name,
         ComposeKeyValueName(decoder.outputs.present_key_names, layer_id),
