@@ -326,7 +326,7 @@ struct InterfaceImpl : DeviceInterface {
     // excluded because they are meaningless for the trivial initialization model.
     // Keep this list in sync with ParseWebGpuContextConfig in
     // onnxruntime/core/providers/webgpu/webgpu_provider_factory.cc.
-    constexpr std::array<std::string_view, 14> kWebGpuGlobalOptions = {
+    constexpr std::array<std::string_view, 15> kWebGpuGlobalOptions = {
         "deviceId",
         "webgpuInstance",
         "webgpuDevice",
@@ -334,6 +334,7 @@ struct InterfaceImpl : DeviceInterface {
         "dawnBackendType",
         "powerPreference",
         "validationMode",
+        "enableRobustness",
         "preserveDevice",
         "maxStorageBufferBindingSize",
         "maxNumPendingDispatches",
