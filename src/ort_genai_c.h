@@ -149,6 +149,16 @@ typedef uint32_t OgaErrorCode;
 OGA_EXPORT void OGA_API_CALL OgaShutdown();
 
 /**
+ * \brief Releases unused memory retained by GenAI device allocators.
+ *
+ * Only completely unused allocator regions are released.
+ * Active model/device allocations remain valid.
+ *
+ * \return OgaResult containing an error message on failure, else nullptr.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaShrinkDeviceMemory();
+
+/**
  * \brief Enable or disable non-essential telemetry event collection.
  *
  * Telemetry can be fully disabled at compile time (ENABLE_TELEMETRY=OFF) or by setting

@@ -1267,6 +1267,10 @@ inline void SetTelemetryEnabled(bool enabled) {
   OgaSetTelemetryEnabled(enabled);
 }
 
+inline void ShrinkDeviceMemory() {
+  OgaCheckResult(OgaShrinkDeviceMemory());
+}
+
 }  // namespace Oga
 
 struct OgaStreamingProcessor : OgaAbstract {

@@ -260,6 +260,7 @@ struct OrtGlobals {
 
 std::unique_ptr<OrtGlobals>& GetOrtGlobals();
 void Shutdown();  // Do this once at exit, Ort code will fail after this call
+void ShrinkDeviceMemory();
 OrtEnv& GetOrtEnv();
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const RuntimeSettings* settings = nullptr);

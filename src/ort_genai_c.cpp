@@ -185,6 +185,13 @@ void OGA_API_CALL OgaShutdown() {
   Generators::Shutdown();
 }
 
+OgaResult* OGA_API_CALL OgaShrinkDeviceMemory() {
+  OGA_TRY
+  Generators::ShrinkDeviceMemory();
+  return nullptr;
+  OGA_CATCH
+}
+
 void OGA_API_CALL OgaSetTelemetryEnabled(bool enabled) {
   if (!Generators::GenAiTelemetry::IsDestroyed()) {
     Generators::GenAiTelemetry::Instance().SetEnabled(enabled);

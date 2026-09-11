@@ -202,6 +202,30 @@ void Shutdown() {
   g_ort_globals.reset();
 }
 
+void ShrinkDeviceMemory() {
+  std::scoped_lock lock{g_ort_globals_mutex};
+
+  if (!g_ort_globals) {
+    return;
+  }
+
+  for (auto& entry : g_ort_globals->device_allocators_) {
+    auto* allocator = entry.allocator_.get();
+
+    if (!allocator) {
+      continue;
+    }
+
+    if (allocator->version >= 25 && allocator->Shrink) {
+      auto* status = allocator->Shrink(allocator);
+
+      if (status) {
+        throw std::runtime_error("Failed to shrink device memory.");
+      }
+    }
+  }
+}
+
 OrtEnv& GetOrtEnv() {
   return *GetOrtGlobals()->env_;
 }
