@@ -181,8 +181,8 @@ def _make_kv_model(
     model.attention_attrs = {"op_type": op_type}
     model.use_paged_attention = use_paged_attention
     model.input_names = {
-        "past_key_values.key": [f"past_key_values.{layer_id}.key" for layer_id in range(num_layers)],
-        "past_key_values.value": [f"past_key_values.{layer_id}.value" for layer_id in range(num_layers)],
+        "past_key_values.key": {layer_id: f"past_key_values.{layer_id}.key" for layer_id in range(num_layers)},
+        "past_key_values.value": {layer_id: f"past_key_values.{layer_id}.value" for layer_id in range(num_layers)},
     }
     model.input_types = {}
     model.output_types = {}
@@ -308,7 +308,6 @@ def test_dynamic_paged_scales_need_no_calibration(scheme):
         use_paged_attention=True,
         extra_options={"kv_cache_rotation": "hadamard"},
     )
-    model.input_names = {key: dict(enumerate(names)) for key, names in model.input_names.items()}
     model.output_names = {
         f"present.{side}": {layer: f"present.{layer}.{side}" for layer in range(model.num_layers)}
         for side in ("key", "value")
@@ -637,8 +636,8 @@ def test_sparse_layer_ids_map_scales_to_model_layers(tmp_path):
         extra_options={"kv_cache_scale_file": str(scale_file)},
     )
     model.kv_quant_type = "PER_TENSOR"
-    model.input_names["past_key_values.key"] = ["past_key_values.1.key", "past_key_values.3.key"]
-    model.input_names["past_key_values.value"] = ["past_key_values.1.value", "past_key_values.3.value"]
+    model.input_names["past_key_values.key"] = {1: "past_key_values.1.key", 3: "past_key_values.3.key"}
+    model.input_names["past_key_values.value"] = {1: "past_key_values.1.value", 3: "past_key_values.3.value"}
     captured = _capture_initializers(model)
 
     model.make_kv_cache_scale_initializers()
@@ -674,8 +673,8 @@ def test_sparse_layer_ids_must_match_model_kv_layers(tmp_path):
         extra_options={"kv_cache_scale_file": str(scale_file)},
     )
     model.kv_quant_type = "PER_TENSOR"
-    model.input_names["past_key_values.key"] = ["past_key_values.1.key", "past_key_values.3.key"]
-    model.input_names["past_key_values.value"] = ["past_key_values.1.value", "past_key_values.3.value"]
+    model.input_names["past_key_values.key"] = {1: "past_key_values.1.key", 3: "past_key_values.3.key"}
+    model.input_names["past_key_values.value"] = {1: "past_key_values.1.value", 3: "past_key_values.3.value"}
     _capture_initializers(model)
 
     with pytest.raises(ValueError, match="must match the model's KV-cache layers"):

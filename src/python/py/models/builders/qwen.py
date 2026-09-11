@@ -542,10 +542,14 @@ class Qwen35TextModel(Model):
         z_name = f"{basename}/z_proj/MatMul"
         self.make_matmul(attention.in_proj_z, z_name, root_input)
 
+        # The decay and beta gates drive the GatedDeltaNet recurrence, and their weights are
+        # ~0.1% of the model, so they stay in fp16 regardless of which loader supplied them.
         b_name = f"{basename}/b_proj/MatMul"
+        self.exclude_node_from_quantization(b_name)
         self.make_matmul(attention.in_proj_b, b_name, root_input)
 
         a_name = f"{basename}/a_proj/MatMul"
+        self.exclude_node_from_quantization(a_name)
         self.make_matmul(attention.in_proj_a, a_name, root_input)
 
         conv_input = f"{qkv_name}/output_0"
@@ -943,6 +947,10 @@ class Qwen35MoEModel(MTPModel):
             print(f"Skipping the MTP head: {block_drafter} supersedes it.")
             self.mtp_attrs["build"] = False
 
+        if self.mtp_attrs["build"] and extra_options.get("exclude_mtp", False):
+            print("Skipping the MTP head: exclude_mtp is set.")
+            self.mtp_attrs["build"] = False
+
         if not self.mtp_attrs["build"]:
             return decoder_options
 
@@ -1024,6 +1032,27 @@ class Qwen35MoEModel(MTPModel):
             self.add_dflash2_to_genai_config(out_dir)
         if self.dspark is not None:
             self.add_dspark_to_genai_config(out_dir)
+        if self.dflash2 is not None or self.dspark is not None:
+            self.make_block_drafter_search_defaults(out_dir)
+
+    def make_block_drafter_search_defaults(self, out_dir):
+        """Ship greedy search defaults alongside a block drafter.
+
+        ``Engine::PrepareDflash2Feeds`` sets ``wants_drafts = greedy && ...``, so a checkpoint
+        whose ``generation_config.json`` asks for sampling would decode with zero drafts and no
+        error. Only ``do_sample`` is cleared; ``top_k``/``top_p``/``temperature`` stay as the
+        checkpoint declared them, so a caller who opts back into sampling per turn still gets them.
+        """
+        config_path = os.path.join(out_dir, "genai_config.json")
+        with open(config_path) as config_file:
+            genai_config = json.load(config_file)
+
+        if not genai_config["search"].get("do_sample", False):
+            return
+        genai_config["search"]["do_sample"] = False
+        with open(config_path, "w") as config_file:
+            json.dump(genai_config, config_file, indent=4)
+        print("Set search.do_sample to false: a block drafter only proposes drafts for greedy turns.")
 
     def add_mtp_to_genai_config(self, out_dir):
         config_path = os.path.join(out_dir, "genai_config.json")

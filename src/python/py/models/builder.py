@@ -154,6 +154,8 @@ def check_extra_options(
         "prune_lm_head",
         "use_paged_attention",
         "windowed_kv_cache",
+        "use_device_allocator_for_initializers",
+        "exclude_mtp",
     ]
 
     for key in bools:
@@ -207,7 +209,7 @@ def check_extra_options(
                 "use_paged_attention cannot be combined with " + ", ".join(incompatible_options) + "."
             )
 
-        for key in ("paged_block_size", "paged_chunk_size", "max_batch_size"):
+        for key in ("paged_block_size", "paged_chunk_size", "max_batch_size", "max_scheduled_tokens", "num_blocks"):
             if key not in extra_options:
                 continue
             try:
@@ -231,6 +233,19 @@ def check_extra_options(
             if not 0 < gpu_utilization_factor <= 1:
                 raise ValueError("gpu_utilization_factor must be greater than 0 and at most 1.")
             extra_options["gpu_utilization_factor"] = gpu_utilization_factor
+
+        # `num_blocks` pins the cache instead of deriving it from free memory, so a
+        # utilization factor would be silently ignored.
+        if "num_blocks" in extra_options and "gpu_utilization_factor" in extra_options:
+            raise ValueError("num_blocks and gpu_utilization_factor are mutually exclusive.")
+    else:
+        engine_only_options = [
+            key for key in ("max_scheduled_tokens", "num_blocks") if key in extra_options
+        ]
+        if engine_only_options:
+            raise ValueError(
+                ", ".join(engine_only_options) + " require use_paged_attention=true."
+            )
 
     if "hf_token" in extra_options:
         extra_options["hf_token"] = parse_hf_token(extra_options["hf_token"])
@@ -745,6 +760,11 @@ def get_args():
                 exclude_lm_head = Remove language modeling head from your ONNX model.
                     Use this option when you want to remove the language modeling head from within your ONNX model.
                     Instead of `logits`, you will have `hidden_states` as the output to your ONNX model.
+                exclude_mtp = Skip the MTP head for a checkpoint that declares one. Default is false.
+                    The exported MTP workflow requires per-token logits from the main LM head, so this is
+                    how a checkpoint with `mtp_num_hidden_layers > 0` is built with prune_lm_head or
+                    exclude_lm_head. A block drafter (dflash2_path/dspark_path) already supersedes the head
+                    and does not need this option.
                 prune_lm_head = Prune the LM head to only compute last-token logits during prefill. Default is false.
                     When enabled for standard models, inserts Gather+Unsqueeze so the MatMul input is [B,1,H] instead
                     of [B,S,H]. For paged-attention models, gathers the final packed hidden state for each sequence so
@@ -826,6 +846,16 @@ def get_args():
                     Must be greater than 0 and at most 1.
                 max_batch_size = Maximum number of requests in a dynamic batch. Default is 100.
                     Must be a positive integer no greater than 256.
+                max_scheduled_tokens = Maximum number of tokens the engine schedules into one forward pass.
+                    Must be a positive integer and requires use_paged_attention=true. Written to the
+                    `engine.dynamic_batching` section of genai_config.json. Bounds the peak prefill
+                    activation, which is the largest transient in a long-context deployment.
+                    Default is unset, which lets the runtime pick.
+                num_blocks = Pin the paged KV-cache to an exact number of blocks instead of deriving it from
+                    free GPU memory. Must be a positive integer, requires use_paged_attention=true, and is
+                    mutually exclusive with gpu_utilization_factor. Written to the `engine.dynamic_batching`
+                    section of genai_config.json. The reachable context is num_blocks * paged_block_size
+                    tokens. Default is unset.
                 shared_embeddings = Enable weight sharing between embedding and LM head layers. Default is false.
                     Use this option to share weights and reduce model size by eliminating duplicate weights.
                     Shares quantized weights using GatherBlockQuantized and shares unquantized weights using Gather.
@@ -840,6 +870,10 @@ def get_args():
                 enable_webgpu_graph = Enable WebGPU graph capture during inference. Default is false.
                     If enabled, the model structure will be optimized for WebGPU graph execution.
                     This affects attention mask reformatting and position IDs handling.
+                use_device_allocator_for_initializers = Write `session.use_device_allocator_for_initializers=1` into
+                    the decoder's session options. Default is false. Initializers then bypass the arena, so the
+                    originals a kernel replaces during PrePack (notably the fpA_intB MatMulNBits layout conversion)
+                    are returned to the driver instead of being retained as free arena blocks.
                 use_qdq = Use the QDQ decomposition for ops.
                     Use this option when you want to use quantize-dequantize ops. For example, you will have a quantized MatMul op instead of the MatMulNBits op.
                 moe_quant_type = int4/int8/mxfp4/nvfp4: Quantization scheme for MoE (QMoE) layers. Default is int4.

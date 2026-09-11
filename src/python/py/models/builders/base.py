@@ -963,12 +963,9 @@ class Model:
                 )
 
 
-            kv_input_names = self.input_names.get("past_key_values.key", [])
-            kv_layer_ids = {
-                int(parts[1])
-                for input_name in kv_input_names
-                if len(parts := input_name.split(".")) == 3 and parts[1].isdigit()
-            }
+            # `make_cache_names` keys the cache names by model layer id, so the layers that
+            # actually carry a KV cache are the keys.
+            kv_layer_ids = set(self.input_names.get("past_key_values.key", {}))
             if set(layer_ids) != kv_layer_ids:
                 raise ValueError(
                     f"kv_cache_scale_file layer_ids must match the model's KV-cache layers; "
@@ -1347,14 +1344,28 @@ class Model:
             ep_options = {ep_name: self.ep_attrs[self.ep]}
             genai_config["model"]["decoder"]["session_options"]["provider_options"].append(ep_options)
 
+        session_options = genai_config["model"]["decoder"]["session_options"]
+        if self.ep == "cuda" and self.matmul_attrs["weights_prepacked"] > 0:
+            # Prepacked nodes take the fpA_intB path unconditionally; setting the flag keeps the
+            # nodes that were skipped (unsupported N/K/block_size) on the same kernel family.
+            session_options["ep.cuda.fpa_intb_gemm"] = "1"
+        if self.extra_options.get("use_device_allocator_for_initializers", False):
+            session_options["session.use_device_allocator_for_initializers"] = "1"
+
         if self.use_paged_attention:
-            genai_config["engine"] = {
-                "dynamic_batching": {
-                    "block_size": self.attention_attrs["paged_block_size"],
-                    "gpu_utilization_factor": float(self.extra_options.get("gpu_utilization_factor", 0.6)),
-                    "max_batch_size": int(self.extra_options.get("max_batch_size", 100)),
-                },
+            dynamic_batching = {
+                "block_size": self.attention_attrs["paged_block_size"],
+                "max_batch_size": int(self.extra_options.get("max_batch_size", 100)),
             }
+            if "num_blocks" in self.extra_options:
+                dynamic_batching["num_blocks"] = int(self.extra_options["num_blocks"])
+            else:
+                dynamic_batching["gpu_utilization_factor"] = float(
+                    self.extra_options.get("gpu_utilization_factor", 0.6)
+                )
+            if "max_scheduled_tokens" in self.extra_options:
+                dynamic_batching["max_scheduled_tokens"] = int(self.extra_options["max_scheduled_tokens"])
+            genai_config["engine"] = {"dynamic_batching": dynamic_batching}
 
         state_groups = self.make_decoder_state_groups(inputs, outputs)
         if state_groups:
@@ -1562,10 +1573,11 @@ class Model:
             bits = resolve_dtype(linear_attn).bits
             # Promote linear attention projections and their MLPs.
             # Linear attention recurrence accumulates quantization errors across
-            # the full sequence (no softmax normalization).
+            # the full sequence (no softmax normalization). The decay/beta gates
+            # (a_proj/b_proj) are excluded from quantization entirely, so they are absent here.
             for i, lt in enumerate(self.layer_types):
                 if lt == "linear_attention":
-                    for proj in ("in_proj_a", "in_proj_b", "in_proj_qkv", "in_proj_z", "out_proj"):
+                    for proj in ("qkv_proj", "z_proj", "out_proj"):
                         customized_weight_config[f"/model/layers.{i}/linear_attn/{proj}/MatMul"] = {"bits": bits}
                     for proj in ("gate_proj", "up_proj", "down_proj"):
                         customized_weight_config[f"/model/layers.{i}/mlp/{proj}/MatMul"] = {"bits": bits}
@@ -1700,6 +1712,10 @@ class Model:
         allowed_block_sizes = (32, 64, 128) if prepack_mode == 1 else (64, 128)
         initializers = {init.name: init for init in model_proto.graph.initializer}
 
+        candidates = 0
+        prepacked = 0
+        skipped_block_sizes = set()
+
         for node in model_proto.graph.node:
             if node.op_type != "MatMulNBits" or node.domain != "com.microsoft":
                 continue
@@ -1713,6 +1729,7 @@ class Model:
             if not all(key in attrs for key in ("bits", "block_size", "K", "N")):
                 continue
 
+            candidates += 1
             bits = attrs["bits"].i
             block_size = attrs["block_size"].i
             k = attrs["K"].i
@@ -1724,6 +1741,8 @@ class Model:
                 and n % (32 if bits == 8 else 64) == 0
             )
             if not fpa_intb_eligible:
+                if block_size not in allowed_block_sizes:
+                    skipped_block_sizes.add(block_size)
                 continue
 
             init = initializers.get(node.input[1])
@@ -1733,6 +1752,23 @@ class Model:
             packed = CudaQuantizer.prepack_matmulnbits_weight(numpy_helper.to_array(init), n, k, bits, force_arch)
             init.CopyFrom(numpy_helper.from_array(np.ascontiguousarray(packed), init.name))
             node.attribute.append(onnx_helper.make_attribute("weight_prepacked", prepack_mode))
+            prepacked += 1
+
+        if candidates and not prepacked:
+            reason = (
+                f"block_size {sorted(skipped_block_sizes)} is not one of {list(allowed_block_sizes)} "
+                f"for the SM{force_arch} layout"
+                if skipped_block_sizes
+                else "no node met the fpA_intB K/N alignment"
+            )
+            raise ValueError(
+                f"matmulnbits_weights_prepacked={prepack_mode} prepacked 0 of {candidates} MatMulNBits "
+                f"nodes: {reason}. Choose a compatible block_size, use "
+                "matmulnbits_weights_prepacked=1 (SM80 layout, accepts block_size 32), or 0 to "
+                "prepack at session creation instead."
+            )
+        if candidates:
+            print(f"Prepacked {prepacked}/{candidates} MatMulNBits weights into the SM{force_arch} fpA_intB layout.")
 
     @classmethod
     def get_genai_version(cls) -> str | None:
@@ -2275,11 +2311,14 @@ class Model:
         )
         self.make_value(output, self.io_dtype, shape=shape)
 
+    def exclude_node_from_quantization(self, basename):
+        nodes_to_exclude = self.quant_attrs["nodes_to_exclude"]
+        if basename not in nodes_to_exclude:
+            nodes_to_exclude.append(basename)
+
     def make_matmul(self, matmul, basename, root_input, **kwargs):
         if getattr(matmul, "exclude_from_quantization", False):
-            nodes_to_exclude = self.quant_attrs["nodes_to_exclude"]
-            if basename not in nodes_to_exclude:
-                nodes_to_exclude.append(basename)
+            self.exclude_node_from_quantization(basename)
         if hasattr(matmul, "base_layer"):
             # For LoRA `MatMul`
             return self.make_matmul_lora(matmul, basename, root_input, **kwargs)

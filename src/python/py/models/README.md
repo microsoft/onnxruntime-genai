@@ -301,6 +301,8 @@ This scenario is for when you want to build a model that uses the `PagedAttentio
 
 Paged attention supports CUDA with `fp16` or `bf16` precision and WebGPU with `fp16` precision. Paged exports include the CPU `attention_metadata` input used by the runtime to provide stable query and KV bounds without downloading device sequence lengths in every attention layer. Paged attention cannot be combined with `exclude_embeds` or `exclude_lm_head`. `paged_block_size` defaults to `256` and must be a positive multiple of `256`; for models with short and long rotary caches, it must evenly divide `original_max_position_embeddings`. `gpu_utilization_factor` defaults to `0.6` and must be greater than `0` and at most `1`. `max_batch_size` defaults to `100` and must be a positive integer no greater than `256`. `paged_chunk_size` defaults to `paged_block_size`, must be a positive integer, and is written to `search.chunk_size`; it applies only to models whose sliding-window layers are served from a ring of blocks, which hold `paged_chunk_size + window_size - 1` positions and therefore require chunked prefill.
 
+`max_scheduled_tokens` and `num_blocks` are the two remaining `engine.dynamic_batching` knobs and are written only when passed. `max_scheduled_tokens` caps the tokens in one dynamically batched forward pass and therefore caps the peak prefill activation, which is the largest transient in a long-context deployment. `num_blocks` pins the cache to an exact block count, so the reachable context is `num_blocks * paged_block_size` tokens; it is mutually exclusive with `gpu_utilization_factor`, which is omitted from the config when `num_blocks` is set.
+
 Paged builds can describe non-legacy decoder state in `model.decoder.state_groups`. The Qwen hybrid builder emits exact logical layer IDs for sparse paged KV, fixed convolution state, and fixed recurrent state. Tensor name templates are emitted once under the decoder's `inputs` and `outputs`. Legacy models whose every decoder layer uses paged KV omit the manifest and preserve the existing implicit contract. The hybrid state manifest is experimental and its schema is not yet stable. It requires coordinated Engine runtime work beyond the current onnxruntime-genai#2454 head and is not compatible with the merged runtime on its own. In particular, the runtime must supply packed multimodal position IDs with shape `[3, num_tokens]`; the current `VarlenDecoderIO` does not create that input.
 
 ```bash
@@ -434,7 +436,9 @@ python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o pa
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files
 ```
 
-Qwen3.5 MoE checkpoints (`Qwen3_5MoeForConditionalGeneration`) that declare MTP layers must ship `mtp.*` weights in their safetensors. For those models, the builder rejects `exclude_lm_head=true` and `prune_lm_head=true` because the exported MTP workflow requires the main LM head. The MTP weights are read directly from the source safetensors because Hugging Face `transformers` discards them on load. To disable MTP during inference, remove the `model.mtp` section from `genai_config.json`; rebuilding the ONNX models is not required.
+Qwen3.5 MoE checkpoints (`Qwen3_5MoeForConditionalGeneration`) that declare MTP layers must ship `mtp.*` weights in their safetensors. For those models, the builder rejects `exclude_lm_head=true` and `prune_lm_head=true` because the exported MTP workflow requires the main LM head. The MTP weights are read directly from the source safetensors because Hugging Face `transformers` discards them on load.
+
+Set `exclude_mtp=true` to skip the head entirely, which is how such a checkpoint is built with `prune_lm_head=true` for a deployment that does not speculate. A block drafter (`dflash2_path` / `dspark_path`) already supersedes the head and needs no extra option. MTP can also be disabled after the fact by removing the `model.mtp` section from `genai_config.json`, without rebuilding the ONNX models, but that leaves the head's weights in the artifact.
 
 By default the MTP head inherits the main model's settings. For a ModelOpt or compressed-tensors checkpoint, the builder preserves each original MTP tensor format: native NVFP4 linears and experts remain NVFP4, FP8 attention projections remain FP8, and unquantized tensors follow the requested graph precision.
 
@@ -568,12 +572,26 @@ python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra
 
 This scenario is for when you want to control the CUDA MatMulNBits (int4/int8) weight layout. The default value is `0`, which exports raw blockwise weights. Use `1` to export the SM80/Ampere `fpA_intB` prepacked layout, or `2` to export the SM90/Hopper `fpA_intB` prepacked layout. This only applies to the CUDA EP, and an offline-prepacked model must be run with `ORT_FPA_INTB_GEMM` enabling the relevant nbits.
 
+A prepacked export therefore also writes `ep.cuda.fpa_intb_gemm=1` into the decoder's session options, which is the per-session equivalent of that environment variable, so the model is self-describing. A prepacked node takes the `fpA_intB` path regardless of the flag; the flag matters for the nodes the prepack pass skipped because their `N`, `K`, or `block_size` is not supported by the layout, keeping the whole model on one kernel family.
+
 ```bash
 # From wheel:
 python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options matmulnbits_weights_prepacked=1
 
 # From source:
 python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options matmulnbits_weights_prepacked=1
+```
+
+##### Device Allocator for Initializers
+
+Set `use_device_allocator_for_initializers=true` to write `session.use_device_allocator_for_initializers=1` into the decoder's session options. Initializers then bypass the ONNX Runtime arena. This matters whenever a kernel replaces an initializer during `PrePack`, as the `fpA_intB` MatMulNBits conversion does: with the arena, the original weight stays resident as a free block that the arena never returns, so a large int4 model can hold roughly twice its weights.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options use_device_allocator_for_initializers=true
+
+# From source:
+python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options use_device_allocator_for_initializers=true
 ```
 
 ##### Is Symmetric

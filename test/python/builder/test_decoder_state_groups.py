@@ -68,6 +68,7 @@ def _make_config_model(model_type, layer_types=None, use_paged_attention=True):
     model.vocab_size = 248320
     model.window_size = None
     model.eps_with_windowed_kv_cache = {"cuda"}
+    model.matmul_attrs = {"weights_prepacked": 0}
     model.attention_attrs = {"paged_block_size": 256}
     model.input_names = {
         "input_ids": "input_ids",

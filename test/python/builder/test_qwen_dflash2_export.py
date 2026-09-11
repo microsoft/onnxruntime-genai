@@ -309,6 +309,25 @@ def test_quantized_body_emits_matmulnbits_without_transposing(tmp_path):
     assert tuple(builder.graph.initializers["probe.MatMul.weight_Q4"].const_value.shape) == (16, 1, 4)
 
 
+# The prepacked fpA_intB kernel takes FP16 activations only, so the bf16 body must ship the
+# plain blockwise layout even though the target it drafts for is prepacked.
+def test_bf16_body_never_prepacks_even_when_the_target_does(tmp_path):
+    builder = DFlash2Builder(
+        _draft_checkpoint(tmp_path),
+        str(tmp_path),
+        ir.DataType.FLOAT16,
+        paged_block_size=256,
+        max_position_embeddings=128,
+        quant={"bits": 4, "block_size": 8, "prepack": 1, "lm_head": None},
+    )
+
+    builder.matmul("/probe/MatMul", "hidden_states", torch.ones((16, 8)), 8, 16, "num_block")
+
+    node = next(node for node in builder.graph if node.name == "/probe/MatMul")
+    assert builder.io_dtype == ir.DataType.BFLOAT16
+    assert "weight_prepacked" not in node.attributes
+
+
 def test_quantized_lm_head_matches_the_targets_initializer_names(tmp_path):
     builder = DFlash2Builder(
         _draft_checkpoint(tmp_path),
@@ -465,3 +484,24 @@ def test_a_checkpoint_without_an_mtp_head_is_unaffected(tmp_path, mtp_init):
     build, _ = mtp_init({"dflash2_path": _draft_checkpoint(tmp_path)}, num_mtp_layers=0)
 
     assert build is False
+
+
+# The MTP workflow needs per-token logits from the main LM head, so a deployment that
+# prunes the head has to be able to drop the MTP head at build time rather than by
+# editing genai_config.json afterwards.
+def test_exclude_mtp_suppresses_the_head(mtp_init):
+    build, decoder_options = mtp_init({"exclude_mtp": True})
+
+    assert build is False
+    assert "include_hidden_states" not in decoder_options
+
+
+def test_exclude_mtp_admits_a_pruned_lm_head(mtp_init):
+    build, _ = mtp_init({"exclude_mtp": True, "prune_lm_head": True})
+
+    assert build is False
+
+
+def test_a_pruned_lm_head_is_still_rejected_while_the_mtp_head_is_built(mtp_init):
+    with pytest.raises(ValueError, match="prune_lm_head"):
+        mtp_init({"prune_lm_head": True})

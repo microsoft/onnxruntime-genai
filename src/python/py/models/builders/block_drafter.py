@@ -143,15 +143,18 @@ class BlockDrafterBuilder:
         ``MatMulNBits`` consumes ``[N, K]`` directly, so unlike the dense path the weight is
         not transposed. Repeat call sites reuse the initializer the first one registered.
         """
+        # The prepacked fpA_intB kernel takes FP16 activations only, so a bf16 body has to ship
+        # the plain blockwise layout even when the target it drafts for is prepacked.
+        prepack = self.quant_prepack if self.io_dtype == ir.DataType.FLOAT16 else 0
         qweight_name = f"{initializer_name}_Q{self.quant_bits}"
         scales_name = f"{initializer_name}_scales"
         if qweight_name not in self.values:
-            if self.quant_prepack:
+            if prepack:
                 qweight, scales = CudaQuantizer.matmulnbits_prepacked_blockwise_quantize(
                     weight_tensor,
                     self.quant_bits,
                     self.quant_block_size,
-                    force_arch=90 if self.quant_prepack == 2 else 80,
+                    force_arch=90 if prepack == 2 else 80,
                 )
             else:
                 qweight, scales = CudaQuantizer.matmulnbits_blockwise_quantize(
@@ -165,8 +168,8 @@ class BlockDrafterBuilder:
             "K": in_features,
             "N": out_features,
         }
-        if self.quant_prepack:
-            attributes["weight_prepacked"] = self.quant_prepack
+        if prepack:
+            attributes["weight_prepacked"] = prepack
         output = self.out(name)
         self.make_node(
             "MatMulNBits",
