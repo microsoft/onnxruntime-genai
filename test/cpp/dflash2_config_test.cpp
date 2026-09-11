@@ -392,6 +392,18 @@ TEST(Dflash2ConfigTest, AccountsForWindowedPagedCache) {
                 config, 16, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16),
             3072u);
   EXPECT_EQ(Dflash2Drafter::PoolBlocks(config, 8, 3), 15u);
+  EXPECT_EQ(Dflash2Drafter::PoolBytes(
+                config, 8, 15, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16),
+            23040u);
+}
+
+TEST(Dflash2ConfigTest, RejectsWindowedPoolByteOverflow) {
+  const auto config = MakeDflash2Config();
+  EXPECT_THROW(
+      Dflash2Drafter::PoolBytes(
+          config, 8, std::numeric_limits<size_t>::max(),
+          ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16),
+      std::runtime_error);
 }
 
 TEST(Dflash2ConfigTest, BillsFullAttentionCachePerTargetBlock) {
