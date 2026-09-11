@@ -38,9 +38,9 @@ jobs:
       artifactsFeeds: Lotus
 
   - task: PowerShell@2
-    displayName: 'Maven/Gradle - mirror / feed via `${{ parameters.artifactFeeds }}`'
+    displayName: 'Maven/Gradle - mirror / feed via Lotus'
     env:
-      central_maven_feed_name: ${{ parameters.artifactFeeds }}
+      central_maven_feed_name: Lotus
     inputs:
       targetType: 'inline'
       script: |
@@ -55,7 +55,7 @@ jobs:
           exit 1
         }
 
-        echo "Injecting Maven mirrors section for 1ES feed"
+        echo "Injecting Maven mirrors section for Lotus feed"
         $( $m2SettingsContent -replace '</settings>', "<mirrors><mirror><id>${env:central_maven_feed_name}</id><name>1ES Feed Override</name><url>https://aiinfra.pkgs.visualstudio.com/_packaging/${env:central_maven_feed_name}/maven/v1</url><mirrorOf>*</mirrorOf></mirror></mirrors></settings>" ) | `
           Set-Content $m2SettingsXmlPath
 
@@ -68,7 +68,7 @@ jobs:
           New-Item -ItemType Directory -Path "${gradleInitDir}/init.d"
         }
         Set-Content -Path "${gradleInitDir}/init.d/1es-feed-inject.init.gradle" -Value @"
-        // Use official 1ES feed. Network isolation prevents us from reaching out directly to other feeds.
+        // Use official Lotus feed. Network isolation prevents us from reaching out directly to other feeds.
 
         def mavenSettingsServers = {
           File mavenSettings = new File(System.getProperty("user.home"), ".m2/settings.xml")
@@ -88,7 +88,7 @@ jobs:
             repositories {
               clear()
               maven {
-                name "1ES Feed"
+                name "Lotus Feed"
                 url uri("https://aiinfra.pkgs.visualstudio.com/_packaging/${env:central_maven_feed_name}/maven/v1")
                 credentials(PasswordCredentials) {
                   username oneEsFeedCredentials().username
@@ -103,7 +103,7 @@ jobs:
           buildscript {
             repositories {
               maven {
-                name "1ES Feed"
+                name "Lotus Feed"
                 url uri("https://aiinfra.pkgs.visualstudio.com/_packaging/${env:central_maven_feed_name}/maven/v1")
                 credentials(PasswordCredentials) {
                   username oneEsFeedCredentials().username
@@ -115,7 +115,7 @@ jobs:
 
           repositories {
             maven {
-              name "1ES Feed"
+              name "Lotus Feed"
               url uri("https://aiinfra.pkgs.visualstudio.com/_packaging/${env:central_maven_feed_name}/maven/v1")
               credentials(PasswordCredentials) {
                 username oneEsFeedCredentials().username
