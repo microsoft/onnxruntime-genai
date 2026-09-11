@@ -13,7 +13,7 @@ steps:
     set -e
 
     if [ -z "${PIP_INDEX_URL:-}" ]; then
-      echo "PIP_INDEX_URL is not configured; authenticate the Python package feed before building the ARM64 image."
+      echo "PIP_INDEX_URL is not configured; authenticate the Python package feed before building the manylinux image."
       exit 1
     fi
     python3 -m pip install requests
