@@ -115,7 +115,7 @@ same process-global allocator each cycle, so the previous
 DML is a deliberate exception to the ownership model above, for two reasons:
 
 1. Its interface is built from the model's `luid` / `device_index` provider
-   options (parsed in `src/dml/session_options.cpp` and passed to
+   options (parsed in `src/ep/dml/session_options.cpp` and passed to
    `InitDmlInterface`), which the generic `GetDeviceInterface(DeviceType::DML)`
    cannot supply.
 2. DML objects launch background threads that must be released promptly, so

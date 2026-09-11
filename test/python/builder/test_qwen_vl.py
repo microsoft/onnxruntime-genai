@@ -9,7 +9,9 @@ import sys
 import types
 from pathlib import Path
 
+import numpy as np
 import onnx_ir as ir
+import onnxruntime as ort
 import pytest
 import torch
 
@@ -157,12 +159,24 @@ def test_qwen_vl_uses_separate_qkv_and_mrope(monkeypatch, model_class):
 @pytest.mark.parametrize("model_class", [Qwen25VLTextModel, Qwen3VLTextModel])
 def test_qwen_vl_decoder_uses_3d_position_ids(monkeypatch, model_class):
     model = model_class.__new__(model_class)
+    model.use_paged_attention = False
     model.input_shapes = {"position_ids": ["batch_size", "sequence_length"]}
     monkeypatch.setattr(Model, "make_inputs_and_outputs", lambda self: None)
 
     model.make_inputs_and_outputs()
 
     assert model.input_shapes["position_ids"] == [3, "batch_size", "sequence_length"]
+
+
+def test_qwen35_paged_decoder_uses_packed_3d_position_ids(monkeypatch):
+    model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.use_paged_attention = True
+    model.input_shapes = {"position_ids": ["batch_size", "sequence_length"]}
+    monkeypatch.setattr(Model, "make_inputs_and_outputs", lambda self: None)
+
+    model.make_inputs_and_outputs()
+
+    assert model.input_shapes["position_ids"] == [3, "num_tokens"]
 
 
 @pytest.mark.parametrize(
@@ -174,6 +188,8 @@ def test_qwen_vl_decoder_uses_3d_position_ids(monkeypatch, model_class):
 )
 def test_qwen_vl_emits_layout_specific_mrotary_embedding(layout, sections):
     model = Model.__new__(Model)
+    model.use_paged_attention = False
+    model.hidden_size = 2048
     model.head_size = 128
     model.rope_attrs = {
         "interleaved": 0,
@@ -220,6 +236,80 @@ def test_qwen_vl_emits_layout_specific_mrotary_embedding(layout, sections):
     assert model.values == [("q_rotated", ir.DataType.FLOAT, ["batch_size", "sequence_length", 2048])]
 
 
+def test_qwen35_paged_mrotary_embedding_runs_with_merged_ort_abi(tmp_path):
+    model = Model.__new__(Model)
+    model.use_paged_attention = True
+    model.hidden_size = 16
+    model.head_size = 8
+    model.rope_attrs = {
+        "interleaved": 0,
+        "rotary_embedding_dim": 8,
+        "mrope_section": [1, 1, 2],
+        "mrope_layout": 1,
+    }
+    model.values = {}
+    model.node_names = set()
+    graph = ir.Graph(
+        inputs=(),
+        outputs=(),
+        nodes=(),
+        opset_imports={"": 21, "com.microsoft": 1},
+        name="packed_mrope_test",
+    )
+    model.model = ir.Model(graph, ir_version=10)
+    graph.inputs.append(model.make_value("q", ir.DataType.FLOAT, ["num_tokens", model.hidden_size]))
+    graph.inputs.append(model.make_value("position_ids", ir.DataType.INT64, [3, "num_tokens"]))
+    graph.inputs.append(model.make_value("cos_cache", ir.DataType.FLOAT, [4, 4]))
+    graph.inputs.append(model.make_value("sin_cache", ir.DataType.FLOAT, [4, 4]))
+
+    model.make_mrotary_embedding(
+        "/model/layers.0/attn/q_rotary/MRotaryEmbedding",
+        "q",
+        "q_rotated",
+        position_ids="position_ids",
+        cos_cache_name="cos_cache",
+        sin_cache_name="sin_cache",
+        num_heads=2,
+        dtype=ir.DataType.FLOAT,
+    )
+    graph.outputs.append(model.make_value("q_rotated"))
+
+    model_path = tmp_path / "packed_mrope.onnx"
+    ir.save(model.model, model_path)
+    try:
+        session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+    except Exception as error:
+        if "MRotaryEmbedding(-1) is not a registered function/op" in str(error):
+            pytest.skip("Installed ONNX Runtime does not include MRotaryEmbedding")
+        raise
+
+    q = np.arange(96, dtype=np.float32).reshape(6, model.hidden_size)
+    position_ids = np.array(
+        [
+            [0, 1, 2, 0, 1, 2],
+            [1, 2, 3, 1, 2, 3],
+            [2, 3, 0, 2, 3, 0],
+        ],
+        dtype=np.int64,
+    )
+    cos_cache = np.ones((4, 4), dtype=np.float32)
+    sin_cache = np.zeros((4, 4), dtype=np.float32)
+    (q_rotated,) = session.run(
+        None,
+        {
+            "q": q,
+            "position_ids": position_ids,
+            "cos_cache": cos_cache,
+            "sin_cache": sin_cache,
+        },
+    )
+
+    np.testing.assert_array_equal(q_rotated, q)
+    assert session.get_inputs()[0].shape == ["num_tokens", model.hidden_size]
+    assert session.get_inputs()[1].shape == [3, "num_tokens"]
+    assert session.get_outputs()[0].shape == ["num_tokens", model.hidden_size]
+
+
 def test_qwen3_vl_keeps_qk_norm_outputs_in_fp32(monkeypatch):
     model = Qwen3VLTextModel.__new__(Qwen3VLTextModel)
     model.layernorm_attrs = {"cast": {"output_0": True}}
@@ -248,6 +338,8 @@ def test_qwen35_configures_interleaved_partial_mrope(monkeypatch):
         self.make_config_init(config)
         self.head_size = 128
         self.q_size = 2048
+        self.layer_types = ["full_attention"]
+        self.context_length_attrs = {"state_window": 0, "state_update_capacity": 0}
         self.input_shapes = {"position_ids": ["batch_size", "sequence_length"]}
         self.layernorm_attrs = {"cast": {}, "add_offset": 0}
         self.attention_attrs = {"q_norm": False, "k_norm": False}
@@ -281,6 +373,7 @@ def test_qwen35_configures_interleaved_partial_mrope(monkeypatch):
     assert model.rope_attrs["mrope_layout"] == 1
     assert model.rope_attrs["rotary_embedding_dim"] == 32
     assert model.rope_attrs["cast"] == {"use_fp32": True, "root_input": True, "output_0": True}
+    assert model.linear_attn_op == "linear_attention"
     assert not model.is_fused_rope_supported()
 
 
@@ -386,8 +479,95 @@ def test_qwen35_applies_mrope_to_q_and_k(monkeypatch):
     assert model.attention_attrs["k_path"] == "/model/layers.2/attn/k_rotary/MRotaryEmbedding/output_0"
 
 
-def test_qwen35_attention_input_proj_splits_per_head_gate(monkeypatch):
+def test_qwen35_paged_attention_keeps_external_mrope(monkeypatch):
     model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.num_attn_heads = 16
+    model.num_kv_heads = 4
+    model.head_size = 128
+    model.use_paged_attention = True
+    model.ep = "cuda"
+    model.io_dtype = ir.DataType.FLOAT16
+    model.extra_options = {}
+    model.input_names = {"position_ids": "position_ids"}
+    model.matmul_attrs = {"use_lora": False}
+    model.rope_attrs = {"op_type": "MRotaryEmbedding", "interleaved": 0}
+    model.attention_attrs = {
+        "q_norm": False,
+        "k_norm": False,
+        "rope": True,
+        "scale": 0.0,
+        "softcap": 0.0,
+    }
+    model.kv_cache_attrs = {"quant_scheme": "none"}
+    model.window_size = None
+    calls = []
+    nodes = []
+
+    monkeypatch.setattr(
+        model,
+        "make_rotary_embedding_op",
+        lambda name, root_input, position_ids: calls.append((name, root_input, position_ids)),
+    )
+    model.make_node = lambda op_type, **kwargs: nodes.append((op_type, kwargs))
+    model.make_value = lambda *_args, **_kwargs: None
+
+    model.make_attention_init(types.SimpleNamespace())
+    model.attention_attrs["q_path"] = "q"
+    model.attention_attrs["k_path"] = "k"
+    model.make_attention_qk_rope(2)
+    model.make_paged_attention(
+        "/model/layers.2/attn/PagedAttention",
+        q_path=model.attention_attrs["q_path"],
+        k_path=model.attention_attrs["k_path"],
+        v_path="v",
+        cumulative_sequence_lengths="cumulative_sequence_lengths",
+        past_sequence_lengths="past_sequence_lengths",
+        block_table="block_table",
+    )
+
+    assert model.input_names["position_ids"] == "position_ids"
+    assert calls == [
+        ("/model/layers.2/attn/q_rotary/MRotaryEmbedding", "q", "position_ids"),
+        ("/model/layers.2/attn/k_rotary/MRotaryEmbedding", "k", "position_ids"),
+    ]
+    assert nodes[0][0] == "PagedAttention"
+    assert nodes[0][1]["inputs"][:3] == [
+        "/model/layers.2/attn/q_rotary/MRotaryEmbedding/output_0",
+        "/model/layers.2/attn/k_rotary/MRotaryEmbedding/output_0",
+        "v",
+    ]
+    assert nodes[0][1]["do_rotary"] is False
+
+
+@pytest.mark.parametrize(
+    ("use_paged_attention", "q_gate_reshape", "q_gate_shape", "q_reshape", "q_shape"),
+    [
+        (
+            False,
+            "/model/constants/INT64/[0, 0, 16, 256]",
+            ["batch_size", "sequence_length", 16, 128],
+            "/model/constants/INT64/[0, 0, 2048]",
+            ["batch_size", "sequence_length", 2048],
+        ),
+        (
+            True,
+            "/model/constants/INT64/[0, 16, 256]",
+            ["num_tokens", 16, 128],
+            "/model/constants/INT64/[0, 2048]",
+            ["num_tokens", 2048],
+        ),
+    ],
+)
+def test_qwen35_attention_input_proj_splits_per_head_gate(
+    monkeypatch,
+    use_paged_attention,
+    q_gate_reshape,
+    q_gate_shape,
+    q_reshape,
+    q_shape,
+):
+    model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.use_paged_attention = use_paged_attention
     model.num_attn_heads = 16
     model.head_size = 128
     model.io_dtype = ir.DataType.FLOAT16
@@ -407,7 +587,9 @@ def test_qwen35_attention_input_proj_splits_per_head_gate(monkeypatch):
     monkeypatch.setattr(
         model,
         "make_split",
-        lambda name, inputs, outputs, dtypes, shapes, axis: calls.append(("split", name, inputs, outputs, shapes, axis)),
+        lambda name, inputs, outputs, dtypes, shapes, axis: calls.append(
+            ("split", name, inputs, outputs, shapes, axis)
+        ),
     )
 
     model.make_attention_input_proj(3, object(), "hidden_states")
@@ -416,15 +598,33 @@ def test_qwen35_attention_input_proj_splits_per_head_gate(monkeypatch):
     assert calls[1][0:3] == (
         "reshape",
         "/model/layers.3/attn/q_gate/Reshape",
-        ["q_gate", "/model/constants/INT64/[0, 0, 16, 256]"],
+        ["q_gate", q_gate_reshape],
     )
+    assert calls[1][3] == [*q_gate_shape[:-1], 256]
     assert calls[2][0:2] == ("split", "/model/layers.3/attn/q_gate/Split")
+    assert calls[2][4] == [q_gate_shape, q_gate_shape]
+    assert calls[3][2][1] == q_reshape
+    assert calls[3][3] == q_shape
+    assert calls[4][2][1] == q_reshape
+    assert calls[4][3] == q_shape
     assert model.attention_attrs["q_path"] == "/model/layers.3/attn/q_proj/Reshape/output_0"
     assert model.attention_attrs["gate_path"] == "/model/layers.3/attn/gate/Reshape/output_0"
 
 
-def test_qwen35_attention_output_proj_gates_before_base_projection(monkeypatch):
+@pytest.mark.parametrize(
+    ("use_paged_attention", "output_shape"),
+    [
+        (False, ["batch_size", "sequence_length", 2048]),
+        (True, ["num_tokens", 2048]),
+    ],
+)
+def test_qwen35_attention_output_proj_gates_before_base_projection(
+    monkeypatch,
+    use_paged_attention,
+    output_shape,
+):
     model = Qwen35TextModel.__new__(Qwen35TextModel)
+    model.use_paged_attention = use_paged_attention
     model.num_attn_heads = 16
     model.head_size = 128
     model.io_dtype = ir.DataType.FLOAT16
@@ -453,7 +653,7 @@ def test_qwen35_attention_output_proj_gates_before_base_projection(monkeypatch):
     model.make_attention_output_proj(3, object(), "hidden_states")
 
     assert calls == [
-        ("sigmoid", "/model/layers.3/attn/gate/Sigmoid", "gate", ["batch_size", "sequence_length", 2048]),
+        ("sigmoid", "/model/layers.3/attn/gate/Sigmoid", "gate", output_shape),
         (
             "mul",
             "/model/layers.3/attn/gate/Mul",
@@ -461,7 +661,7 @@ def test_qwen35_attention_output_proj_gates_before_base_projection(monkeypatch):
                 "/model/layers.3/attn/GroupQueryAttention/output_0",
                 "/model/layers.3/attn/gate/Sigmoid/output_0",
             ],
-            ["batch_size", "sequence_length", 2048],
+            output_shape,
         ),
         ("base_output", 3, "hidden_states", "/model/layers.3/attn/gate/Mul/output_0"),
     ]
@@ -616,6 +816,7 @@ def test_qwen35_linear_attention_uses_fused_gate(monkeypatch):
 def test_qwen35_linear_attention_uses_gated_rms_norm(monkeypatch):
     model = Qwen35TextModel.__new__(Qwen35TextModel)
     model.io_dtype = ir.DataType.FLOAT16
+    model.use_paged_attention = False
     model.linear_value_dim = 2048
     model.layernorm_attrs = {"epsilon": 1e-6}
     model.layernorm_attrs["skip_input"] = ""
@@ -688,9 +889,7 @@ def test_qwen35_moe_combines_shared_expert_with_gated_add(monkeypatch):
     monkeypatch.setattr(
         model,
         "make_gated_add",
-        lambda name, root_input, scaled_input, gate, shape: calls.append(
-            (name, root_input, scaled_input, gate, shape)
-        ),
+        lambda name, root_input, scaled_input, gate, shape: calls.append((name, root_input, scaled_input, gate, shape)),
     )
 
     model.make_moe(1, mlp, "hidden_states")

@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 from types import MethodType
 
+import pytest
 import torch
 
 sys.path.insert(0, str(Path(__file__).parents[3] / "src" / "python" / "py" / "models"))
@@ -12,10 +13,11 @@ sys.path.insert(0, str(Path(__file__).parents[3] / "src" / "python" / "py" / "mo
 from loaders.modelopt import ModeloptModel
 
 
-def _make_model(tensors):
+def _make_model(tensors, quant_type="modelopt"):
     model = object.__new__(ModeloptModel)
     model.weight_map = tensors
     model.get_tensor = MethodType(lambda self, key: tensors.get(key), model)
+    model.quant_type = quant_type
     return model
 
 
@@ -46,6 +48,62 @@ def test_self_attention_fp8_keeps_calibrated_input_scale():
     module = _make_model(tensors).make_linear_module(ATTENTION)
 
     assert module.input_scale.item() == 0.25
+
+
+def test_modelopt_fp8_rejects_per_channel_weight_scale():
+    tensors = {
+        f"{ATTENTION}.weight": torch.ones((4, 4), dtype=torch.float8_e4m3fn),
+        f"{ATTENTION}.weight_scale": torch.ones(4),
+    }
+
+    with pytest.raises(ValueError, match="must be a scalar"):
+        _make_model(tensors).make_linear_module(ATTENTION)
+
+
+def test_compressed_tensors_fp8_accepts_per_channel_weight_scale():
+    tensors = {
+        f"{ATTENTION}.weight": torch.ones((4, 4), dtype=torch.float8_e4m3fn),
+        f"{ATTENTION}.weight_scale": torch.ones(4),
+    }
+
+    module = _make_model(tensors, quant_type="compressed-tensors").make_linear_module(ATTENTION)
+
+    assert module.weight_scale.shape == (4,)
+
+
+def test_compressed_tensors_nvfp4_normalizes_packed_weight_and_global_scale():
+    tensors = {
+        f"{ATTENTION}.weight_packed": torch.zeros((4, 8), dtype=torch.uint8),
+        f"{ATTENTION}.weight_scale": torch.ones((4, 1), dtype=torch.float8_e4m3fn),
+        f"{ATTENTION}.weight_global_scale": torch.tensor(2.0),
+    }
+
+    module = _make_model(tensors, quant_type="compressed-tensors").make_linear_module(ATTENTION)
+
+    assert module.quant_type == "nvfp4"
+    assert module.weight is tensors[f"{ATTENTION}.weight_packed"]
+    assert module.weight_scale_2.item() == 0.5
+
+
+def test_compressed_tensors_dense_mlp_uses_packed_weights():
+    layer = "model.language_model.layers.0"
+    tensors = {
+        f"{layer}.self_attn.q_proj.weight": torch.ones((4, 4), dtype=torch.bfloat16),
+    }
+    for projection in ("gate_proj", "up_proj", "down_proj"):
+        base = f"{layer}.mlp.{projection}"
+        tensors[f"{base}.weight_packed"] = torch.zeros((4, 8), dtype=torch.uint8)
+        tensors[f"{base}.weight_scale"] = torch.ones((4, 1), dtype=torch.float8_e4m3fn)
+        tensors[f"{base}.weight_global_scale"] = torch.tensor(2.0)
+
+    model = _make_model(tensors, quant_type="compressed-tensors")
+    model.num_experts = None
+
+    mlp = model.make_layer(0).mlp
+
+    assert mlp.gate_proj.quant_type == "nvfp4"
+    assert mlp.up_proj.weight_scale_2.item() == 0.5
+    assert mlp.down_proj.weight is tensors[f"{layer}.mlp.down_proj.weight_packed"]
 
 
 def test_bf16_linear_attention_projection_stays_unquantized():

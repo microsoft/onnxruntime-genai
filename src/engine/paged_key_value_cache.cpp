@@ -3,8 +3,10 @@
 
 #include "cache_manager.h"
 
+#include <limits>
 #include <numeric>
 #include <set>
+#include <string_view>
 
 #include "sequence_positions.h"
 #include "window_ring.h"
@@ -15,6 +17,13 @@ namespace {
 
 using StateGroup = Config::Model::Decoder::StateGroup;
 using StateGroupKind = Config::Model::Decoder::StateGroupKind;
+
+size_t CheckedMultiply(size_t left, size_t right, std::string_view description) {
+  if (left != 0 && right > std::numeric_limits<size_t>::max() / left) {
+    throw std::overflow_error(std::string{description} + " overflows size_t");
+  }
+  return left * right;
+}
 
 StateGroup ResolvePagedKeyValueGroup(const Config::Model::Decoder& decoder) {
   if (!decoder.state_groups) {
@@ -93,11 +102,14 @@ std::set<int> WindowedLayers(const std::shared_ptr<Model>& model,
 size_t BytesPerBlock(const std::shared_ptr<Model>& model,
                      ONNXTensorElementDataType dtype) {
   constexpr size_t num_caches_per_layer = 2;  // key and value
-  return model->config_->engine.dynamic_batching->block_size *
-         model->config_->model.decoder.num_key_value_heads *
-         model->config_->model.decoder.head_size *
-         Ort::SizeOf(dtype) *
-         num_caches_per_layer;
+  size_t bytes = static_cast<size_t>(model->config_->engine.dynamic_batching->block_size);
+  for (const size_t factor : {
+           static_cast<size_t>(model->config_->model.decoder.num_key_value_heads),
+           static_cast<size_t>(model->config_->model.decoder.head_size), Ort::SizeOf(dtype),
+           num_caches_per_layer}) {
+    bytes = CheckedMultiply(bytes, factor, "Paged cache bytes per block");
+  }
+  return bytes;
 }
 
 // Blocks per layer for the layers that keep the whole sequence. The windowed layers are budgeted
@@ -106,23 +118,35 @@ size_t BytesPerBlock(const std::shared_ptr<Model>& model,
 size_t ComputeNumBlocks(std::shared_ptr<Model> model,
                         size_t full_layer_count,
                         size_t windowed_bytes,
-                        ONNXTensorElementDataType dtype) {
+                        ONNXTensorElementDataType dtype,
+                        size_t auxiliary_bytes_per_block,
+                        size_t auxiliary_reserved_memory_bytes) {
   if (model->config_->engine.dynamic_batching->num_blocks.has_value()) {
-    return *model->config_->engine.dynamic_batching->num_blocks;
+    return ResolveConfiguredPagedBlockCount(
+        *model->config_->engine.dynamic_batching->num_blocks,
+        CheckedMultiply(BytesPerBlock(model, dtype), full_layer_count,
+                        "Full-attention paged cache bytes per block"),
+        auxiliary_bytes_per_block,
+        auxiliary_reserved_memory_bytes);
   }
 
   size_t free_bytes, total_bytes;
   model->p_device_kvcache_->GetAvailableMemory(free_bytes, total_bytes);
 
+  if (auxiliary_reserved_memory_bytes > std::numeric_limits<size_t>::max() - windowed_bytes) {
+    throw std::overflow_error("Combined paged cache reserved memory overflows size_t");
+  }
+
   return ComputePagedBlockCapacity(
       free_bytes,
       *model->config_->engine.dynamic_batching->gpu_utilization_factor,
-      windowed_bytes,
+      windowed_bytes + auxiliary_reserved_memory_bytes,
       model->config_->engine.dynamic_batching->block_size,
       model->config_->model.decoder.num_key_value_heads,
       model->config_->model.decoder.head_size,
       full_layer_count,
-      Ort::SizeOf(dtype));
+      Ort::SizeOf(dtype),
+      auxiliary_bytes_per_block);
 }
 
 size_t UsedSlots(const std::vector<std::shared_ptr<Block>>& blocks) {
@@ -146,7 +170,8 @@ size_t ComputePagedBlockCapacity(size_t available_memory_bytes,
                                  size_t num_key_value_heads,
                                  size_t head_size,
                                  size_t full_layer_count,
-                                 size_t element_size) {
+                                 size_t element_size,
+                                 size_t auxiliary_bytes_per_block) {
   if (block_size == 0 || num_key_value_heads == 0 || head_size == 0 ||
       full_layer_count == 0 || element_size == 0) {
     throw std::invalid_argument(
@@ -161,16 +186,70 @@ size_t ComputePagedBlockCapacity(size_t available_memory_bytes,
   }
 
   constexpr size_t num_caches_per_layer = 2;
+  size_t primary_bytes_per_block = block_size;
+  for (const size_t factor : {num_key_value_heads, head_size, full_layer_count,
+                              element_size, num_caches_per_layer}) {
+    if (primary_bytes_per_block > std::numeric_limits<size_t>::max() / factor) {
+      throw std::overflow_error("Paged cache bytes per block overflow size_t");
+    }
+    primary_bytes_per_block *= factor;
+  }
+  if (auxiliary_bytes_per_block >
+      std::numeric_limits<size_t>::max() - primary_bytes_per_block) {
+    throw std::overflow_error("Combined paged cache bytes per block overflow size_t");
+  }
   return (budget - reserved_memory_bytes) /
-         (block_size *
-          num_key_value_heads *
-          head_size *
-          full_layer_count *
-          element_size *
-          num_caches_per_layer);
+         (primary_bytes_per_block + auxiliary_bytes_per_block);
 }
 
-PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model)
+size_t ResolveConfiguredPagedBlockCount(size_t configured_num_blocks,
+                                        size_t primary_bytes_per_block,
+                                        size_t auxiliary_bytes_per_block,
+                                        size_t auxiliary_reserved_memory_bytes) {
+  if (primary_bytes_per_block == 0) {
+    throw std::invalid_argument(
+        "Paged cache primary bytes per block must be greater than zero");
+  }
+  if (auxiliary_bytes_per_block == 0 && auxiliary_reserved_memory_bytes == 0) {
+    return configured_num_blocks;
+  }
+  if (configured_num_blocks >
+      std::numeric_limits<size_t>::max() / primary_bytes_per_block) {
+    throw std::runtime_error(
+        "engine.dynamic_batching.num_blocks is too large for the paged key-value cache.");
+  }
+  const size_t budget = configured_num_blocks * primary_bytes_per_block;
+  if (budget <= auxiliary_reserved_memory_bytes) {
+    throw std::runtime_error(
+        "engine.dynamic_batching.num_blocks is too small to hold the reserved auxiliary cache.");
+  }
+  if (auxiliary_bytes_per_block >
+      std::numeric_limits<size_t>::max() - primary_bytes_per_block) {
+    throw std::runtime_error("Combined paged cache bytes per block overflow size_t.");
+  }
+  const size_t blocks =
+      (budget - auxiliary_reserved_memory_bytes) /
+      (primary_bytes_per_block + auxiliary_bytes_per_block);
+  if (blocks == 0) {
+    throw std::runtime_error(
+        "engine.dynamic_batching.num_blocks is too small to hold both the target and the "
+        "auxiliary key-value caches.");
+  }
+  return blocks;
+}
+
+size_t PagedKeyValueCacheBytesPerBlock(const std::shared_ptr<Model>& model) {
+  const auto paged_group = ResolvePagedKeyValueGroup(model->config_->model.decoder);
+  const auto dtype = KeyValueCacheType(model, paged_group);
+  const auto windowed = WindowedLayers(model, paged_group);
+  const size_t full_layer_count = paged_group.layer_ids.size() - windowed.size();
+  return CheckedMultiply(full_layer_count, BytesPerBlock(model, dtype),
+                         "Full-attention paged cache bytes per block");
+}
+
+PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
+                                       size_t auxiliary_bytes_per_block,
+                                       size_t auxiliary_reserved_memory_bytes)
     : model_(model) {
   const auto& decoder = model->config_->model.decoder;
   const size_t block_size = model->config_->engine.dynamic_batching->block_size;
@@ -199,17 +278,23 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model)
 
     window_live_span_ = WindowLiveSpan(*chunk_size, window_size_);
     window_ring_blocks_ = WindowRingBlocks(*chunk_size, window_size_, block_size);
-    num_window_blocks = window_ring_blocks_ * max_batch_size;
+    num_window_blocks = CheckedMultiply(window_ring_blocks_, max_batch_size,
+                                        "Windowed paged cache block count");
   }
 
   const size_t num_full_layers = paged_group.layer_ids.size() - windowed.size();
   if (num_full_layers == 0) {
     throw std::runtime_error("A paged model needs at least one layer that keeps the whole sequence.");
   }
+  const size_t windowed_bytes = CheckedMultiply(
+      CheckedMultiply(num_window_blocks, windowed.size(),
+                      "Windowed paged cache allocation"),
+      BytesPerBlock(model, dtype), "Windowed paged cache allocation");
   const auto num_blocks = ComputeNumBlocks(model_, num_full_layers,
-                                           num_window_blocks * windowed.size() *
-                                               BytesPerBlock(model, dtype),
-                                           dtype);
+                                           windowed_bytes,
+                                           dtype,
+                                           auxiliary_bytes_per_block,
+                                           auxiliary_reserved_memory_bytes);
 
   for (const int layer_id : paged_group.layer_ids) {
     const auto blocks = windowed.count(layer_id) != 0 ? num_window_blocks : num_blocks;
@@ -231,6 +316,7 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model)
   }
 
   max_batch_size_ = max_batch_size;
+  block_table_index_ = std::make_unique<RequestIndex>(max_batch_size_);
   graph_capture_ = IsGraphCaptureEnabled(decoder.session_options);
   if (graph_capture_) {
     max_block_table_rows_ = max_batch_size_;
@@ -270,6 +356,11 @@ void PagedKeyValueCache::Add(std::shared_ptr<Request> request) {
   if (!CanAdd(request)) {
     throw std::runtime_error("Not enough free blocks available to serve the request.");
   }
+  if (block_table_index_->Find(request.get()) ||
+      block_table_index_->Size() >= block_table_index_->Capacity()) {
+    throw std::logic_error(
+        "Paged cache request index cannot admit this request.");
+  }
 
   // Reserve the blocks the prompt will need, but leave their slots empty. The slots are marked
   // used in AppendTokens() once the tokens are actually written to the cache. Marking them here
@@ -286,25 +377,29 @@ void PagedKeyValueCache::Add(std::shared_ptr<Request> request) {
 
   block_tables_.emplace_back(
       PagedCacheBlockTable{request.get(), 0, std::move(reserved_blocks), std::move(window_blocks)});
+  if (!block_table_index_->Insert(
+          request.get(), block_tables_.size() - 1)) {
+    std::terminate();
+  }
 }
 
 bool PagedKeyValueCache::CanAppendTokens(std::shared_ptr<Request> request) const {
   const auto block_table_it = std::find_if(block_tables_.begin(), block_tables_.end(),
                                            [&request](const PagedCacheBlockTable& block_table) {
-                                             return block_table.request_id == request.get();
+                                             return block_table.request_id_ == request.get();
                                            });
   if (block_table_it == block_tables_.end()) {
     throw std::runtime_error("Given request is not found in the cache.");
   }
 
   const size_t required_slots = RequiredSlots(request);
-  const size_t used_slots = block_table_it->committed_slots;
+  const size_t used_slots = block_table_it->committed_slots_;
   if (required_slots <= used_slots) {
     return true;
   }
 
   const size_t num_slots_available =
-      block_table_it->blocks.size() * block_pool_->BlockSize() - used_slots +
+      block_table_it->blocks_.size() * block_pool_->BlockSize() - used_slots +
       block_pool_->AvailableBlocks() * block_pool_->BlockSize();
 
   return num_slots_available >= required_slots - used_slots;
@@ -325,56 +420,108 @@ void PagedKeyValueCache::AppendTokens(std::shared_ptr<Request> request) {
 
   const auto block_table_it = std::find_if(block_tables_.begin(), block_tables_.end(),
                                            [&request](const PagedCacheBlockTable& block_table) {
-                                             return block_table.request_id == request.get();
+                                             return block_table.request_id_ == request.get();
                                            });
   assert(block_table_it != block_tables_.end());
 
   const size_t required_slots = RequiredSlots(request);
-  const size_t used_slots = block_table_it->committed_slots;
-  assert(UsedSlots(block_table_it->blocks) == used_slots);
+  const size_t used_slots = block_table_it->committed_slots_;
+  assert(UsedSlots(block_table_it->blocks_) == used_slots);
   assert(used_slots == static_cast<size_t>(request->ProcessedSequenceLength()));
   if (required_slots <= used_slots) {
     return;
   }
-  size_t num_slots = required_slots - used_slots;
+  const size_t growth = required_slots - used_slots;
+  const size_t committed_capacity =
+      block_table_it->blocks_.size() * block_pool_->BlockSize();
+  const size_t tail_capacity = committed_capacity - used_slots;
+  const size_t new_slots = growth > tail_capacity ? growth - tail_capacity : 0;
+  const size_t new_block_count = block_pool_->BlocksNeeded(new_slots);
 
+  // Complete every fallible allocation before changing existing block occupancy.
+  block_table_it->blocks_.reserve(
+      block_table_it->blocks_.size() + new_block_count);
+  auto allocated_blocks = block_pool_->AllocateBlocks(new_slots);
+
+  size_t num_slots = growth - new_slots;
   size_t block_index = used_slots / block_pool_->BlockSize();
-  while (num_slots > 0 && block_index < block_table_it->blocks.size()) {
-    auto& block = block_table_it->blocks[block_index++];
+  while (num_slots > 0 && block_index < block_table_it->blocks_.size()) {
+    auto& block = block_table_it->blocks_[block_index++];
     const size_t slots = std::min(num_slots, block->EmptySlots());
     block->AddSlots(slots);
     num_slots -= slots;
   }
-
-  if (num_slots > 0) {
-    auto allocated_blocks = block_pool_->AllocateBlocks(num_slots);
-    std::move(allocated_blocks.begin(), allocated_blocks.end(),
-              std::back_inserter(block_table_it->blocks));
-  }
-  block_table_it->committed_slots = required_slots;
+  std::move(allocated_blocks.begin(), allocated_blocks.end(),
+            std::back_inserter(block_table_it->blocks_));
+  block_table_it->committed_slots_ = required_slots;
+  ++block_table_it->mutation_generation_;
+  block_pool_->RecordOccupancyMutation();
 }
 
 void PagedKeyValueCache::Remove(std::shared_ptr<Request> request) {
   RemovePagedCacheBlockTable(*block_pool_, window_block_pool_.get(),
                              block_tables_, request.get());
+  RebuildBlockTableIndex();
+}
+
+void PagedKeyValueCache::ValidateRemove(const void* request_id) const {
+  ValidateRemovePagedCacheBlockTable(
+      *block_pool_, window_block_pool_.get(), block_tables_, request_id);
+}
+
+void PagedKeyValueCache::RemoveValidated(const void* request_id) noexcept {
+  RemoveValidatedPagedCacheBlockTable(
+      *block_pool_, window_block_pool_.get(), block_tables_, request_id);
+  RebuildBlockTableIndex();
+}
+
+bool PagedKeyValueCache::OwnsRequest(
+    const void* request_id) const noexcept {
+  const auto index = block_table_index_->Find(request_id);
+  return index && *index < block_tables_.size() &&
+         block_tables_[*index].request_id_ == request_id;
+}
+
+size_t PagedKeyValueCache::CommittedSlots(
+    const void* request_id) const {
+  const auto index = block_table_index_->Find(request_id);
+  if (!index || *index >= block_tables_.size() ||
+      block_tables_[*index].request_id_ != request_id) {
+    throw StepPlanningConsistencyError(
+        "A cache resident has no committed paged cache table.");
+  }
+  return block_tables_[*index].committed_slots_;
 }
 
 PagedCacheReservation PagedKeyValueCache::Reserve(std::span<const PagedCacheReservationRequest> requests) {
   return PagedCacheReservation{*block_pool_, block_tables_, requests,
-                               window_block_pool_.get(), window_ring_blocks_};
+                               window_block_pool_.get(), window_ring_blocks_,
+                               block_table_index_.get()};
+}
+
+void PagedKeyValueCache::RebuildBlockTableIndex() noexcept {
+  block_table_index_->Clear();
+  for (size_t index = 0; index < block_tables_.size(); ++index) {
+    if (!block_table_index_->Insert(
+            block_tables_[index].request_id_, index)) {
+      std::terminate();
+    }
+  }
 }
 
 StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
   const size_t committed_request_count = block_tables_.size();
   if (committed_request_count > max_batch_size_) {
-    throw std::runtime_error("Committed paged cache requests exceed the configured batch size.");
+    throw StepPlanningConsistencyError(
+        "Committed paged cache requests exceed the configured batch size.");
   }
   const size_t scheduled_request_limit =
       plan.scheduled_request_limit == 0
           ? max_batch_size_
           : plan.scheduled_request_limit;
   if (scheduled_request_limit > max_batch_size_) {
-    throw std::runtime_error("Step plan request limit exceeds the configured batch size.");
+    throw StepPlanningConsistencyError(
+        "Step plan request limit exceeds the configured batch size.");
   }
 
   const size_t available_blocks = block_pool_->AvailableBlocks();
@@ -397,14 +544,15 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
   // through, holding the blocks it already took. PagedCacheReservation reserves the same blocks.
   const auto calculate_growth = [&](const RequestStepPlan& entry,
                                     const PagedCacheBlockTable* table) {
-    const size_t committed_slots = table ? table->committed_slots : 0;
+    const size_t committed_slots = table ? table->committed_slots_ : 0;
     if (entry.target_cache_slots < committed_slots) {
-      throw std::runtime_error("Step plan target precedes the committed cache boundary.");
+      throw StepPlanningConsistencyError(
+          "Step plan target precedes the committed cache boundary.");
     }
 
     const size_t reserved_slots =
         std::max(entry.whole_sequence_cache_slots, entry.target_cache_slots);
-    const size_t committed_blocks = table ? table->blocks.size() : 0;
+    const size_t committed_blocks = table ? table->blocks_.size() : 0;
     const size_t committed_capacity = committed_blocks * block_pool_->BlockSize();
     const size_t additional_slots =
         reserved_slots > committed_capacity ? reserved_slots - committed_capacity : 0;
@@ -419,7 +567,7 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
   const auto select = [&](size_t request_index,
                           const CacheGrowth& growth) {
     // Compact selected entries in place. Requests skipped for temporary capacity pressure remain
-    // pending with their committed block tables untouched and can be reconsidered next Step().
+    // pending with their committed block tables untouched and can be reconsidered next Run().
     planned_blocks += growth.new_blocks;
     max_blocks_per_request =
         std::max(max_blocks_per_request, growth.proposed_blocks);
@@ -430,28 +578,25 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
     ++selected_requests;
   };
   const auto find_table = [this](const void* request_id) {
-    const auto it = std::find_if(block_tables_.begin(), block_tables_.end(),
-                                 [request_id](const PagedCacheBlockTable& table) {
-                                   return table.request_id == request_id;
-                                 });
-    return it == block_tables_.end() ? nullptr : &*it;
+    const auto index = block_table_index_->Find(request_id);
+    return index ? &block_tables_[*index] : nullptr;
   };
-  std::vector<const void*> request_ids;
-  request_ids.reserve(plan.requests.size());
+  RequestIndex request_ids{plan.requests.size()};
   for (size_t i = 0; i < plan.requests.size(); ++i) {
     const auto& candidate = plan.requests[i];
-    if (std::find(request_ids.begin(), request_ids.end(),
-                  candidate.request_id) != request_ids.end()) {
-      throw std::runtime_error("Step plan contains a duplicate request.");
+    if (!request_ids.Insert(candidate.request_id, i)) {
+      throw StepPlanningConsistencyError(
+          "Step plan contains a duplicate request.");
     }
-    request_ids.push_back(candidate.request_id);
 
     const auto* table = find_table(candidate.request_id);
     if (candidate.newly_admitted && table) {
-      throw std::runtime_error("New step plan request already belongs to the paged cache.");
+      throw StepPlanningConsistencyError(
+          "New step plan request already belongs to the paged cache.");
     }
     if (!candidate.newly_admitted && !table) {
-      throw std::runtime_error("Step plan resident membership does not match the committed cache.");
+      throw StepPlanningConsistencyError(
+          "Step plan resident membership does not match the committed cache.");
     }
 
     const auto growth = calculate_growth(candidate, table);
@@ -529,9 +674,9 @@ PagedCacheSnapshot PagedKeyValueCache::Snapshot() const {
   snapshot.requests.reserve(block_tables_.size());
   for (const auto& block_table : block_tables_) {
     RequestBlockSnapshot request_snapshot;
-    request_snapshot.request_id = block_table.request_id;
-    request_snapshot.block_ids.reserve(block_table.blocks.size());
-    for (const auto& block : block_table.blocks) {
+    request_snapshot.request_id = block_table.request_id_;
+    request_snapshot.block_ids.reserve(block_table.blocks_.size());
+    for (const auto& block : block_table.blocks_) {
       request_snapshot.block_ids.push_back(block->Id());
       request_snapshot.used_slots += block->Size();
       request_snapshot.empty_slots += block->EmptySlots();
@@ -545,9 +690,9 @@ PagedCacheSnapshot PagedKeyValueCache::Snapshot() const {
     snapshot.window_blocks.requests.reserve(block_tables_.size());
     for (const auto& block_table : block_tables_) {
       RequestBlockSnapshot request_snapshot;
-      request_snapshot.request_id = block_table.request_id;
-      request_snapshot.block_ids.reserve(block_table.window_blocks.size());
-      for (const auto& block : block_table.window_blocks) {
+      request_snapshot.request_id = block_table.request_id_;
+      request_snapshot.block_ids.reserve(block_table.window_blocks_.size());
+      for (const auto& block : block_table.window_blocks_) {
         request_snapshot.block_ids.push_back(block->Id());
       }
       snapshot.window_blocks.requests.push_back(std::move(request_snapshot));
@@ -575,7 +720,6 @@ PagedCacheSnapshot PagedKeyValueCache::Snapshot(
     request_reservation.request_id = delta.request_id;
     request_reservation.committed_slots = delta.committed_slots;
     request_reservation.target_slots = delta.target_slots;
-    request_reservation.tail_slots_to_consume = delta.tail_slots_to_consume;
     request_reservation.reserved_block_ids.reserve(
         delta.reserved_block_count);
     for (size_t i = 0; i < delta.reserved_block_count; ++i) {
@@ -618,7 +762,7 @@ void PagedKeyValueCache::FillBlockTables(const std::vector<std::shared_ptr<Reque
   for (auto& block_table : block_tables_) {
     auto it = std::find_if(requests.begin(), requests.end(),
                            [&block_table](const std::shared_ptr<Request>& request) {
-                             return request.get() == block_table.request_id;
+                             return request.get() == block_table.request_id_;
                            });
     if (it == requests.end()) {
       throw std::runtime_error("Given request is not found in the cache. Please add it before requesting block tables.");
@@ -629,16 +773,16 @@ void PagedKeyValueCache::FillBlockTables(const std::vector<std::shared_ptr<Reque
       // Repeat the ring across every column. There is nothing to pad: whichever column the
       // operator reaches for, the ring block it names is the one holding that position.
       for (size_t j = 0; j < columns; ++j) {
-        const auto& block = block_table.window_blocks[WindowRingColumn(j, window_ring_blocks_)];
+        const auto& block = block_table.window_blocks_[WindowRingColumn(j, window_ring_blocks_)];
         data[index * columns + j] = static_cast<int32_t>(block->Id());
       }
       continue;
     }
 
-    for (size_t j = 0; j < block_table.blocks.size(); ++j) {
-      data[index * columns + j] = static_cast<int32_t>(block_table.blocks[j]->Id());
+    for (size_t j = 0; j < block_table.blocks_.size(); ++j) {
+      data[index * columns + j] = static_cast<int32_t>(block_table.blocks_[j]->Id());
     }
-    for (size_t j = block_table.blocks.size(); j < columns; ++j) {
+    for (size_t j = block_table.blocks_.size(); j < columns; ++j) {
       data[index * columns + j] = block_tables_pad_value;
     }
   }
@@ -649,9 +793,9 @@ std::pair<OrtValue*, const char*> PagedKeyValueCache::BlockTables(const std::vec
   for (auto& block_table : block_tables_) {
     if (std::find_if(requests.begin(), requests.end(),
                      [&block_table](const std::shared_ptr<Request>& request) {
-                       return request.get() == block_table.request_id;
+                       return request.get() == block_table.request_id_;
                      }) != requests.end()) {
-      max_blocks = std::max(max_blocks, block_table.blocks.size());
+      max_blocks = std::max(max_blocks, block_table.blocks_.size());
     } else {
       throw std::runtime_error("Given request is not found in the cache. Please add it before requesting block tables.");
     }

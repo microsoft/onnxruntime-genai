@@ -22,6 +22,9 @@ import warnings
 
 import onnxruntime_genai as og
 import pytest
+from _test_utils import register_plugin_ep, register_plugin_providers
+
+register_plugin_providers()
 
 _PROMPT = "The capital of France is"
 _EXPECTED_SUBSTRING = "paris"
@@ -38,32 +41,13 @@ _VRAM_CONSTRAINED_SKIPS: set[tuple[str, str, str]] = {
 }
 
 
-def _register_webgpu_plugin_once() -> bool:
-    """Register the onnxruntime-ep-webgpu plugin once per process.
-
-    The base onnxruntime package doesn't ship a WebGPU EP; the plugin
-    package provides it as a separate shared library that must be
-    registered with ORT GenAI before ``append_provider("webgpu")`` works.
-    Returns True if registration succeeded (or had already happened).
-    """
-    if getattr(_register_webgpu_plugin_once, "_done", False):
-        return True
-    try:
-        import onnxruntime_ep_webgpu as webgpu_ep  # noqa: PLC0415
-    except ImportError:
-        return False
-    og.register_execution_provider_library("webgpu", webgpu_ep.get_library_path())
-    _register_webgpu_plugin_once._done = True
-    return True
-
-
 def _ep_available(device: str) -> bool:
     if device == "cpu":
         return True
     if device == "cuda":
         return og.is_cuda_available()
     if device == "webgpu":
-        return _register_webgpu_plugin_once()
+        return register_plugin_ep("webgpu")
     return False
 
 

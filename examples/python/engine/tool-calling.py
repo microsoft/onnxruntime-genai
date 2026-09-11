@@ -10,11 +10,26 @@ import numpy as np
 import onnxruntime_genai as og
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from common import get_lark_grammar, to_tool  # noqa: E402
-
+from common import get_lark_grammar, to_tool
 
 TOOL_CALL_START = "<tool_call>"
 TOOL_CALL_END = "</tool_call>"
+
+
+def require_request_event(event: og.EngineEvent) -> og.Request:
+    # This single-request workflow cannot continue after any failed turn, even if
+    # REQUEST_UNSERVICEABLE leaves the Engine itself healthy.
+    if event.flags & og.EngineEventFlags.FAILED:
+        raise RuntimeError(f"Generation failed; error_code={event.error_code}")
+    if event.request is not None:
+        return event.request
+    if event.flags & og.EngineEventFlags.CAPACITY_BLOCKED:
+        outcome = "was capacity-blocked"
+    elif event.flags & og.EngineEventFlags.RETRYABLE:
+        outcome = "reported a retryable failure"
+    else:
+        outcome = "returned an invalid request-less event"
+    raise RuntimeError(f"Engine {outcome}; error_code={event.error_code}")
 
 
 def tool_result_fragment(tool_result):
@@ -29,14 +44,15 @@ def generate(engine, request, tokenizer):
     stream = tokenizer.create_stream()
     fragments = []
     token_ids = []
-    while not request.is_turn_complete():
-        ready_request = engine.step()
-        if ready_request is None:
-            raise RuntimeError("Engine stopped before the request completed")
-        while ready_request.has_unseen_tokens():
-            token_id = ready_request.get_unseen_token()
-            token_ids.append(token_id)
-            fragments.append(stream.decode(token_id))
+    event_buffer = engine.create_event_buffer(8)
+    while engine.has_pending_requests():
+        for event in engine.run(event_buffer):
+            if require_request_event(event) is not request:
+                raise RuntimeError("Engine returned an unknown request")
+            if event.flags & og.EngineEventFlags.TOKEN:
+                token_id = event.token
+                token_ids.append(token_id)
+                fragments.append(stream.decode(token_id))
     return "".join(fragments), token_ids
 
 
@@ -98,43 +114,52 @@ def run(args):
         add_generation_prompt=True,
     )
 
-    params = og.GeneratorParams(model)
-    params.set_search_options(do_sample=False, max_length=args.max_length)
-    if args.guidance:
-        grammar = get_lark_grammar(
-            tools=to_tool(tools),
-            text_output=False,
-            tool_output=True,
-            tool_call_start=TOOL_CALL_START,
-            tool_call_end=TOOL_CALL_END,
-        )
-        params.set_guidance("lark_grammar", grammar)
+    request_options = og.RequestOptions()
+    request_options.set_max_session_tokens(args.max_length)
     prompt_tokens = list(tokenizer.encode(prompt))
-    request = og.Request(params)
-    request.add_tokens(np.asarray(prompt_tokens, dtype=np.int32))
-    engine.add_request(request)
+    request = engine.create_request(options=request_options)
+    try:
+        # Guidance is per turn: the tool-call turn is constrained to the grammar, and the
+        # tool-result continuation below simply clears it. Both turns select the top logit, which
+        # every turn must ask for explicitly because policy never carries over.
+        tool_call_turn = og.TurnOptions(request)
+        tool_call_turn.set_do_sample(False)
+        if args.guidance:
+            grammar = get_lark_grammar(
+                tools=to_tool(tools),
+                text_output=False,
+                tool_output=True,
+                tool_call_start=TOOL_CALL_START,
+                tool_call_end=TOOL_CALL_END,
+            )
+            tool_call_turn.set_guidance("lark_grammar", grammar)
+        request.begin_turn(np.asarray(prompt_tokens, dtype=np.int32), tool_call_turn)
 
-    tool_call_output, tool_call_tokens = generate(engine, request, tokenizer)
-    tool_call_start_tokens = list(tokenizer.encode(TOOL_CALL_START))
-    tool_call_end_tokens = list(tokenizer.encode(TOOL_CALL_END))
-    if not contains_token_sequence(tool_call_tokens, tool_call_start_tokens) or not contains_token_sequence(
-        tool_call_tokens, tool_call_end_tokens
-    ):
-        raise RuntimeError(f"Assistant did not produce tool-call delimiters: {tool_call_output!r}")
-    tool_call = parse_tool_call(tool_call_output)
-    tool_result = call_weather_tool(tool_call)
-    print(f"Tool call: {tool_call_output}")
-    print(f"Tool result: {json.dumps(tool_result)}")
+        tool_call_output, tool_call_tokens = generate(engine, request, tokenizer)
+        tool_call_start_tokens = list(tokenizer.encode(TOOL_CALL_START))
+        tool_call_end_tokens = list(tokenizer.encode(TOOL_CALL_END))
+        if not contains_token_sequence(tool_call_tokens, tool_call_start_tokens) or not contains_token_sequence(
+            tool_call_tokens, tool_call_end_tokens
+        ):
+            raise RuntimeError(f"Assistant did not produce tool-call delimiters: {tool_call_output!r}")
+        tool_call = parse_tool_call(tool_call_output)
+        tool_result = call_weather_tool(tool_call)
+        print(f"Tool call: {tool_call_output}")
+        print(f"Tool result: {json.dumps(tool_result)}")
 
-    continuation_tokens = tokenizer.encode(tool_result_fragment(tool_result))
-    request.continue_with(np.asarray(continuation_tokens, dtype=np.int32))
+        continuation_tokens = list(tokenizer.encode(tool_result_fragment(tool_result)))
+        # The same options object drives the continuation turn: clearing the grammar is all it takes
+        # to make this turn unguided, and do_sample stays false for it.
+        tool_call_turn.clear_guidance()
+        request.begin_turn(np.asarray(continuation_tokens, dtype=np.int32), tool_call_turn)
 
-    final_output, _ = generate(engine, request, tokenizer)
-    final_output = final_output.strip()
-    engine.remove_request(request)
-    if not final_output or TOOL_CALL_START in final_output:
-        raise RuntimeError(f"Expected a final assistant answer, received: {final_output!r}")
-    print(f"Final answer: {final_output}")
+        final_output, _ = generate(engine, request, tokenizer)
+        final_output = final_output.strip()
+        if not final_output or TOOL_CALL_START in final_output:
+            raise RuntimeError(f"Expected a final assistant answer, received: {final_output!r}")
+        print(f"Final answer: {final_output}")
+    finally:
+        request.close()
 
 
 if __name__ == "__main__":

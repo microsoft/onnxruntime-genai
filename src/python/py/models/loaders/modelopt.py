@@ -16,7 +16,7 @@ from .base import QuantizedDecoderLayer, QuantizedExperts, QuantizedModel, Tenso
 
 
 class ModeloptModel(QuantizedModel):
-    """Loader for NVIDIA Model Optimizer NVFP4 + FP8 mixed-precision checkpoints.
+    """Loader for ModelOpt and compressed-tensors NVFP4 + FP8 checkpoints.
 
     The base initializes the module surface the builder walks without running its
     eager integer-checkpoint loading path. This loader instead streams tensors on
@@ -107,6 +107,20 @@ class ModeloptModel(QuantizedModel):
         if not torch.isfinite(value).item() or value.item() <= 0:
             raise ValueError(f"ModelOpt tensor '{name}' must be finite and positive, got {value.item()}.")
 
+    def validate_positive_weight_scale(self, tensor, name, out_features):
+        if tensor is None:
+            raise ValueError(f"ModelOpt tensor '{name}' is missing.")
+        if self.quant_type == "modelopt" and tensor.numel() != 1:
+            raise ValueError(f"ModelOpt tensor '{name}' must be a scalar, got shape {tuple(tensor.shape)}.")
+        if tensor.numel() not in {1, out_features}:
+            raise ValueError(
+                f"ModelOpt tensor '{name}' must be a scalar or hold {out_features} per-channel values, "
+                f"got shape {tuple(tensor.shape)}."
+            )
+        value = tensor.float()
+        if not torch.isfinite(value).all().item() or (value <= 0).any().item():
+            raise ValueError(f"ModelOpt tensor '{name}' must be finite and positive.")
+
     def validate_linear(self, module, base):
         if module.weight_scale_2 is not None:
             if module.weight.dtype != torch.uint8 or module.weight.ndim != 2 or module.weight.shape[1] % 8 != 0:
@@ -133,7 +147,9 @@ class ModeloptModel(QuantizedModel):
             module.quant_type = "nvfp4"
             module.weight_scale = module.weight_scale.view(torch.uint8).contiguous()
         elif module.weight.dtype == torch.float8_e4m3fn:
-            self.validate_positive_scalar(module.weight_scale, f"{base}.weight_scale")
+            self.validate_positive_weight_scale(
+                module.weight_scale, f"{base}.weight_scale", int(module.weight.shape[0])
+            )
             if module.input_scale is not None:
                 self.validate_positive_scalar(module.input_scale, f"{base}.input_scale")
             module.quant_type = "fp8"
@@ -141,11 +157,17 @@ class ModeloptModel(QuantizedModel):
     def make_linear_module(self, base, module=None):
         weight = self.get_tensor(f"{base}.weight")
         if weight is None:
+            weight = self.get_tensor(f"{base}.weight_packed")
+        if weight is None:
             return None
         module = module if module is not None else TensorModule()
         module.weight = weight
         module.weight_scale = self.get_tensor(f"{base}.weight_scale")
         module.weight_scale_2 = self.get_tensor(f"{base}.weight_scale_2")
+        if module.weight_scale_2 is None:
+            weight_global_scale = self.get_tensor(f"{base}.weight_global_scale")
+            if weight_global_scale is not None:
+                module.weight_scale_2 = torch.reciprocal(weight_global_scale)
         if ".self_attn." in base:
             module.input_scale = self.get_tensor(f"{base}.input_scale")
         self.validate_linear(module, base)
@@ -259,34 +281,40 @@ class ModeloptModel(QuantizedModel):
             )
 
         mlp = SimpleNamespace()
-        mlp.gate = self.make_tensor_module(f"{prefix}.mlp.gate.weight")
-        mlp.gate.exclude_from_quantization = True
-        shared = SimpleNamespace()
-        shared.gate_proj = self.make_linear_module(f"{prefix}.mlp.shared_expert.gate_proj")
-        shared.up_proj = self.make_linear_module(f"{prefix}.mlp.shared_expert.up_proj")
-        shared.down_proj = self.make_linear_module(f"{prefix}.mlp.shared_expert.down_proj")
-        mlp.shared_expert = shared
-        mlp.shared_expert_gate = self.make_tensor_module(f"{prefix}.mlp.shared_expert_gate.weight")
-        mlp.shared_expert_gate.exclude_from_quantization = True
-        mlp.experts = []
-        for expert_id in range(self.num_experts):
-            expert_prefix = f"{prefix}.mlp.experts.{expert_id}"
-            expert = SimpleNamespace()
-            expert.gate_proj = self.make_linear_module(f"{expert_prefix}.gate_proj")
-            expert.up_proj = self.make_linear_module(f"{expert_prefix}.up_proj")
-            expert.down_proj = self.make_linear_module(f"{expert_prefix}.down_proj")
-            mlp.experts.append(expert)
-        mlp.experts = self.prepare_qmoe_experts(mlp.experts)
+        if self.get_tensor(f"{prefix}.mlp.gate.weight") is not None:
+            mlp.gate = self.make_tensor_module(f"{prefix}.mlp.gate.weight")
+            mlp.gate.exclude_from_quantization = True
+            shared = SimpleNamespace()
+            shared.gate_proj = self.make_linear_module(f"{prefix}.mlp.shared_expert.gate_proj")
+            shared.up_proj = self.make_linear_module(f"{prefix}.mlp.shared_expert.up_proj")
+            shared.down_proj = self.make_linear_module(f"{prefix}.mlp.shared_expert.down_proj")
+            mlp.shared_expert = shared
+            mlp.shared_expert_gate = self.make_tensor_module(f"{prefix}.mlp.shared_expert_gate.weight")
+            mlp.shared_expert_gate.exclude_from_quantization = True
+            mlp.experts = []
+            for expert_id in range(self.num_experts):
+                expert_prefix = f"{prefix}.mlp.experts.{expert_id}"
+                expert = SimpleNamespace()
+                expert.gate_proj = self.make_linear_module(f"{expert_prefix}.gate_proj")
+                expert.up_proj = self.make_linear_module(f"{expert_prefix}.up_proj")
+                expert.down_proj = self.make_linear_module(f"{expert_prefix}.down_proj")
+                mlp.experts.append(expert)
+            mlp.experts = self.prepare_qmoe_experts(mlp.experts)
+        else:
+            mlp.gate_proj = self.make_linear_module(f"{prefix}.mlp.gate_proj")
+            mlp.up_proj = self.make_linear_module(f"{prefix}.mlp.up_proj")
+            mlp.down_proj = self.make_linear_module(f"{prefix}.mlp.down_proj")
         layer.mlp = mlp
         return layer
 
     def make_mtp(self):
-        if self.get_tensor("mtp.fc.weight") is None:
+        fc = self.make_linear_module("mtp.fc")
+        if fc is None:
             return None
         tensor_names = self.weight_map if self.weight_map is not None else self.handle_keys[self.single_file]
         state = {name: self.get_tensor(name) for name in tensor_names if name.startswith("mtp.")}
         return SimpleNamespace(
-            fc=self.make_linear_module("mtp.fc"),
+            fc=fc,
             pre_fc_norm_embedding=self.make_tensor_module("mtp.pre_fc_norm_embedding.weight"),
             pre_fc_norm_hidden=self.make_tensor_module("mtp.pre_fc_norm_hidden.weight"),
             norm=self.make_tensor_module("mtp.norm.weight"),
@@ -329,25 +357,39 @@ class ModeloptModel(QuantizedModel):
             block_scales = block_scales.repeat_interleave(values.shape[1] // block_scales.shape[1], dim=1)
             return (values * block_scales * float(weight_scale_2.float().item())).to(torch.bfloat16)
         if weight.dtype == torch.float8_e4m3fn:
-            if weight_scale is None or weight_scale.numel() != 1:
-                raise ValueError(f"ModelOpt FP8 tensor '{name}' must have a scalar weight_scale.")
-            return (weight.float() * float(weight_scale.float().item())).to(torch.bfloat16)
+            self.validate_positive_weight_scale(
+                weight_scale, f"{name.removesuffix('.weight')}.weight_scale", weight.shape[0]
+            )
+            scale = weight_scale.float()
+            if scale.numel() != 1:
+                scale = scale.reshape(-1, 1)
+            return (weight.float() * scale).to(torch.bfloat16)
         return weight
 
     def dequantize_state(self, state):
         result = {}
-        metadata_suffixes = (".weight_scale", ".weight_scale_2", ".input_scale")
+        metadata_suffixes = (".weight_scale", ".weight_scale_2", ".weight_global_scale", ".input_scale")
         for name, tensor in state.items():
             if name.endswith(metadata_suffixes):
                 continue
-            if not name.endswith(".weight"):
+            if name.endswith(".weight_packed"):
+                prefix = name.removesuffix(".weight_packed")
+                output_name = f"{prefix}.weight"
+            elif name.endswith(".weight"):
+                prefix = name.removesuffix(".weight")
+                output_name = name
+            else:
                 result[name] = tensor
                 continue
-            prefix = name.removesuffix(".weight")
-            result[name] = self.dequantize_tensor(
+            weight_scale_2 = state.get(f"{prefix}.weight_scale_2")
+            if weight_scale_2 is None:
+                weight_global_scale = state.get(f"{prefix}.weight_global_scale")
+                if weight_global_scale is not None:
+                    weight_scale_2 = torch.reciprocal(weight_global_scale)
+            result[output_name] = self.dequantize_tensor(
                 tensor,
                 state.get(f"{prefix}.weight_scale"),
-                state.get(f"{prefix}.weight_scale_2"),
-                name,
+                weight_scale_2,
+                output_name,
             )
         return result

@@ -70,4 +70,13 @@ void DecoderModelExecutor::Decode(ScheduledRequests& scheduled_requests,
   }
 }
 
+bool DecoderModelExecutor::SupportsDraftVerification() const {
+  const auto logits_symbolic_shape =
+      model_->session_info_.GetOutputSymbolicShape(
+          model_->config_->model.decoder.outputs.logits);
+  return logits_symbolic_shape.empty() ||
+         logits_symbolic_shape[0] == nullptr ||
+         std::string_view(logits_symbolic_shape[0]) != "batch_size";
+}
+
 }  // namespace Generators

@@ -3,8 +3,11 @@
 
 #pragma once
 
+#include <optional>
+
 #include "request.h"
-#include "../models/kv_cache.h"
+#include "../models/io/kv_cache.h"
+#include "fixed_state_pool.h"
 #include "paged_key_value_cache.h"
 #include "execution_context.h"
 #include "step_plan.h"
@@ -13,6 +16,25 @@ namespace Generators {
 
 struct CacheStepReservation {
   virtual PagedCacheReservation* PagedReservation() { return nullptr; }
+  // Fixed decoder-state resources this reservation owns, in scheduled request row order. Empty for
+  // a paged-only reservation.
+  virtual FixedStateReservation* FixedReservation() { return nullptr; }
+  virtual std::span<const FixedStateSlotHandle> FixedStateSlots() const { return {}; }
+  virtual std::span<const FixedStateBinding> FixedStateBindings() const { return {}; }
+  virtual size_t FixedStateStagingBytes() const { return 0; }
+  virtual size_t FixedStateNewSlotCount() const { return 0; }
+  // Validate every ownership and capacity precondition of the whole reservation without publishing
+  // or performing device work. PrepareCommit additionally performs all fallible device work (fixed
+  // staging into inactive banks) so the subsequent Commit() crosses the boundary without retry.
+  // Narrows one scheduled row's step to the accepted prefix of a speculative verify, moving the
+  // paged KV boundary and the fixed decoder state to the same token together. Must be called
+  // before PrepareCommit.
+  virtual void CommitPrefix(size_t /*row*/, const void* /*request_id*/,
+                            size_t /*step_tokens*/, size_t /*kept_tokens*/) {
+    throw std::logic_error("Cache step reservation cannot commit a partial step.");
+  }
+  virtual void ValidateCommit() const {}
+  virtual void PrepareCommit() { ValidateCommit(); }
   virtual void Commit() = 0;
   virtual void Release() = 0;
   virtual ~CacheStepReservation() = default;
@@ -31,7 +53,9 @@ struct KeyValueCacheState : State {
 struct CacheManager {
   CacheManager(std::shared_ptr<Model> model) : model_{model} {}
 
-  static std::unique_ptr<CacheManager> Create(std::shared_ptr<Model> model);
+  static std::unique_ptr<CacheManager> Create(std::shared_ptr<Model> model,
+                                              size_t auxiliary_bytes_per_block = 0,
+                                              size_t auxiliary_reserved_memory_bytes = 0);
 
   virtual bool CanAllocate(const std::vector<std::shared_ptr<Request>>& requests) const = 0;
 
@@ -47,6 +71,12 @@ struct CacheManager {
   KeyValueCacheState* Cache() { return key_value_cache_state_.get(); };
 
   virtual void Deallocate(std::vector<std::shared_ptr<Request>>& requests) = 0;
+
+  // Engine teardown cannot use the normal Request close path because the Request's weak Engine
+  // reference has already expired. This no-throw path must release any cache ownership for the
+  // Request before the Engine drops its final strong Request reference.
+  virtual void DetachRequestForTeardown(
+      const std::shared_ptr<Request>& request) noexcept = 0;
 
   virtual bool SupportsDynamicBatching() const = 0;
 
@@ -67,13 +97,28 @@ struct CacheManager {
   // per-request limit. Sliding-window rings use this to prevent a step from overwriting live KV.
   virtual size_t MaxQueryTokensPerRequest() const { return 0; }
 
+  // Speculative draft tokens one request may attach to a decode step, or 0 when this cache cannot
+  // roll a rejected draft back. A verify step runs 1 + drafts tokens, so a model with recurrent
+  // state is capped by its checkpoint window.
+  virtual size_t MaxDraftTokensPerStep() const { return 0; }
+
   // Immutable snapshot of the cache's block accounting for invariant validation and state
   // inspection. Caches that do not use paged blocks return an empty snapshot.
   virtual PagedCacheSnapshot Snapshot() const { return {}; }
+  // Snapshot that also reflects an in-flight reservation's proposed deltas, for validating the
+  // combined committed-plus-reserved state mid-transaction. Defaults to the committed snapshot.
+  virtual PagedCacheSnapshot Snapshot(const PagedCacheReservation*) const { return Snapshot(); }
+  // Immutable snapshot of the fixed decoder-state pool, or nullopt when the model has no fixed
+  // groups (so the composite manager owns no pool).
+  virtual std::optional<FixedStatePoolSnapshot> FixedStateSnapshot() const { return std::nullopt; }
 
   virtual StepPlanningResult PlanStepResources(StepPlan&) const {
     throw std::logic_error("Cache manager does not support transactional step planning.");
   }
+
+  // Reorders already-selected and budgeted rows for execution without changing request
+  // admission or per-request token budgets.
+  virtual void OrderStepForExecution(StepPlan&) const {}
 
   virtual std::unique_ptr<CacheStepReservation> ReserveStep(const StepPlan&) {
     throw std::logic_error("Cache manager does not support transactional reservation.");
@@ -97,6 +142,9 @@ struct StaticCacheManager : CacheManager {
 
   void Deallocate(std::vector<std::shared_ptr<Request>>& requests) override;
 
+  void DetachRequestForTeardown(
+      const std::shared_ptr<Request>& request) noexcept override;
+
   bool SupportsDynamicBatching() const override;
 
   std::vector<std::shared_ptr<Request>> AllocatedRequests() const override;
@@ -112,7 +160,9 @@ struct StaticCacheManager : CacheManager {
 };
 
 struct PagedCacheManager : CacheManager {
-  PagedCacheManager(std::shared_ptr<Model> model);
+  PagedCacheManager(std::shared_ptr<Model> model,
+                    size_t auxiliary_bytes_per_block = 0,
+                    size_t auxiliary_reserved_memory_bytes = 0);
 
   bool CanAllocate(const std::vector<std::shared_ptr<Request>>& requests) const override;
 
@@ -124,6 +174,9 @@ struct PagedCacheManager : CacheManager {
                    ExecutionContext& context) override;
 
   void Deallocate(std::vector<std::shared_ptr<Request>>& requests) override;
+
+  void DetachRequestForTeardown(
+      const std::shared_ptr<Request>& request) noexcept override;
 
   bool SupportsDynamicBatching() const override;
 
@@ -143,17 +196,31 @@ struct PagedCacheManager : CacheManager {
     return key_value_cache_->MaxQueryTokensPerRequest();
   }
 
+  size_t MaxDraftTokensPerStep() const override;
+
   PagedCacheSnapshot Snapshot() const override { return key_value_cache_->Snapshot(); }
 
-  StepPlanningResult PlanStepResources(StepPlan& plan) const override {
-    return key_value_cache_->PlanStepResources(plan);
+  PagedCacheSnapshot Snapshot(const PagedCacheReservation* reservation) const override {
+    return reservation ? key_value_cache_->Snapshot(*reservation)
+                       : key_value_cache_->Snapshot();
   }
+
+  std::optional<FixedStatePoolSnapshot> FixedStateSnapshot() const override {
+    return fixed_state_pool_
+               ? std::optional<FixedStatePoolSnapshot>{fixed_state_pool_->Snapshot()}
+               : std::nullopt;
+  }
+
+  StepPlanningResult PlanStepResources(StepPlan& plan) const override;
+
+  void OrderStepForExecution(StepPlan& plan) const override;
 
   std::unique_ptr<CacheStepReservation> ReserveStep(const StepPlan& plan) override;
 
  private:
   std::shared_ptr<GeneratorParams> params_;
   std::unique_ptr<PagedKeyValueCache> key_value_cache_;
+  std::unique_ptr<FixedStatePool> fixed_state_pool_;
   std::vector<std::shared_ptr<Request>> cache_allocated_requests_;
 };
 

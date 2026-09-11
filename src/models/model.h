@@ -6,22 +6,18 @@
 #pragma once
 #include "model_state_manifest.h"
 #include "model_type.h"
-#include "ortx_tokenizer.h"
-#include "../generators.h"
+#include "generator/generators.h"
 #include "utils.h"
+#include <map>
+#include <mutex>
 #include <optional>
-#include "phi_image_processor.h"
-#include "whisper_processor.h"
-#include "parakeet_processor.h"
-#include "phi_multimodal_processor.h"
-#include "gemma_image_processor.h"
-#include "gemma4_multimodal_processor.h"
-#include "adapters.h"
-#include "extra_outputs.h"
+#include "models/io/adapters.h"
+#include "models/io/extra_outputs.h"
 
 namespace Generators {
 
 struct Tokenizer;
+struct MultiModalProcessor;
 
 void Cast(OrtValue& input, std::unique_ptr<OrtValue>& output, DeviceInterface& device, ONNXTensorElementDataType type);
 void CheckResult(extError_t error);
@@ -109,77 +105,6 @@ struct State {
   ExtraOutputs extra_outputs_;
 };
 
-struct TokenizerStream : LeakChecked<TokenizerStream> {
-  TokenizerStream(const Tokenizer& tokenizer);
-
-  const std::string& Decode(int32_t token);
-
- private:
-  std::shared_ptr<const Tokenizer> tokenizer_;
-  OrtxPtr<OrtxObject> cache_;
-  std::string chunk_;
-};
-
-// Turn an array of ragged token sequences into a 2D input suitable for batching. Handles padding for the model
-// Sequence length is vector.size()/count
-std::vector<int32_t> PadInputs(std::span<std::span<const int32_t>> sequences, int32_t pad_token_id);
-
-struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenizer>, ExternalRefCounted<Tokenizer> {
-  Tokenizer(Config& config);
-
-  std::unique_ptr<TokenizerStream> CreateStream() const;
-
-  void UpdateOptions(const char* const* keys, const char* const* values, size_t num_options);
-  std::vector<int32_t> Encode(const char* text) const;
-  std::string Decode(std::span<const int32_t> tokens) const;
-  std::string ApplyChatTemplate(const char* template_str, const char* messages, const char* tools, bool add_generation_prompt) const;
-  std::string ApplyChatTemplateWithOptions(const char* template_str, const char* messages, const char* tools,
-                                           const char* template_kwargs, bool add_generation_prompt) const;
-
-  std::vector<int32_t> EncodeBatch(std::span<const std::string> strings) const;
-  std::shared_ptr<Tensor> EncodeBatch(std::span<const char*> strings) const;
-  std::vector<std::string> DecodeBatch(std::span<const int32_t> sequences, size_t count) const;
-
-  int32_t TokenToTokenId(const char* token) const;
-  int32_t GetBosTokenId() const { return bos_token_id_; }
-  const std::vector<int32_t>& GetEosTokenIds() const { return eos_token_id_; }
-  int32_t GetPadTokenId() const { return pad_token_id_; }
-
-  // Tool-calling and reasoning token IDs.
-  // Naming follows the bos/eos/pad convention:
-  //   bot = beginning of tool (call), eot = end of tool (call)
-  //   bor = beginning of reasoning,   eor = end of reasoning
-  // Throws if the model does not define the requested token.
-  int32_t GetBotTokenId() const;
-  int32_t GetEotTokenId() const;
-  int32_t GetBorTokenId() const;
-  int32_t GetEorTokenId() const;
-
-  OrtxPtr<OrtxTokenizer> tokenizer_;
-
- private:
-  int32_t bos_token_id_;
-  std::vector<int32_t> eos_token_id_;
-  int32_t pad_token_id_;
-  std::optional<int32_t> bot_token_id_;
-  std::optional<int32_t> eot_token_id_;
-  std::optional<int32_t> bor_token_id_;
-  std::optional<int32_t> eor_token_id_;
-};
-
-struct MultiModalProcessor : std::enable_shared_from_this<MultiModalProcessor>, ExternalRefCounted<MultiModalProcessor> {
-  MultiModalProcessor(Config& config, const SessionInfo& session_info);
-
-  std::unique_ptr<NamedTensors> Process(const std::string& prompt, const Images* images, const Audios* audios) const;
-  std::unique_ptr<NamedTensors> Process(std::span<const char*> prompts, const Images* images, const Audios* audios) const;
-
-  std::shared_ptr<Tokenizer> tokenizer_;
-  std::shared_ptr<Processor> processor_;
-
- private:
-  std::unordered_map<std::string, std::function<std::shared_ptr<Processor>(Config&, const SessionInfo&)>> processor_factory_;
-};
-
 struct SessionInfo : ModelStateMetadata {
   SessionInfo() = default;
 
@@ -236,6 +161,11 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
   Ort::Allocator& allocator_cpu_{GetDeviceInterface(DeviceType::CPU)->GetAllocator()};
 
   SessionInfo session_info_;
+
+  // Lazily initialized, model-local constrained-decoding assets. The concrete state lives in
+  // constrained_logits_processor.cpp so builds without llguidance do not depend on its types.
+  mutable std::mutex guidance_cache_mutex_;
+  mutable std::shared_ptr<GuidanceCacheState> guidance_cache_;
 
   /// Create session options from config. Public so components like VAD can create
   /// properly configured sessions using the GenAI infrastructure.
