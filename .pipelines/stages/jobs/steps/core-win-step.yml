@@ -222,7 +222,7 @@ steps:
     # ort_version parameter for the WinML EP).
     if ('${{ parameters.ep }}' -eq 'winml') {
       $args += '--use_winml', '--use_dml', '--winml_sdk_version', '${{ parameters.ort_version }}'
-      $args += '--cmake_extra_defines', 'NUGET_PACKAGE_SOURCE=$(lotusNuGetFeed)'
+      $args += '--nuget_package_source', '$(lotusNuGetFeed)'
     }
     Write-Host "Running: python $($args -join ' ')"
     & python @args
