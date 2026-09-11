@@ -28,7 +28,9 @@ import onnxruntime_genai as og
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from toolcall_parsing import score_case, score_followup
 
+REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CASES = Path(__file__).resolve().parent / "toolcall_cases.json"
+DEFAULT_TOOLS = REPO_ROOT / "test" / "tool-definitions" / "toolcalling.json"
 
 METRICS = [
     "correct",
@@ -44,10 +46,11 @@ METRICS = [
 E2E_METRICS = ["end_to_end_correct", "answer_uses_result", "no_repeat_call", "final_clean_stop"]
 
 
-def load_cases(path):
-    """Expand each case's tool name list into full OpenAI tool definitions."""
+def load_cases(path, tools_path):
+    """Expand each case's tool names from the shared OpenAI tool definitions."""
     data = json.loads(Path(path).read_text(encoding="utf-8"))
-    library = data["tools"]
+    tools = json.loads(Path(tools_path).read_text(encoding="utf-8"))
+    library = {tool["function"]["name"]: tool for tool in tools}
     cases = []
     for case in data["cases"]:
         names = list(library) if case["tools"] == "all" else case["tools"]
@@ -197,7 +200,7 @@ def compare_with_reference(model_path, cases, template_str, rendered):
 
 
 def run(args):
-    cases = load_cases(args.cases)
+    cases = load_cases(args.cases, args.tools)
     model, tokenizer = build_model(args)
 
     template_str = None
@@ -299,6 +302,7 @@ if __name__ == "__main__":
     parser.add_argument("-e", "--execution_provider", required=True, choices=["cpu", "cuda", "dml", "webgpu"])
     parser.add_argument("-o", "--output", help="write the full report, including per-case output")
     parser.add_argument("--cases", default=str(DEFAULT_CASES))
+    parser.add_argument("--tools", default=str(DEFAULT_TOOLS), help="OpenAI tool definitions JSON file")
     parser.add_argument(
         "--mode",
         choices=["tool_call", "end_to_end"],

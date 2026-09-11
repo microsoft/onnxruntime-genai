@@ -62,10 +62,12 @@ reasons rather than model quality, so check them before blaming the weights:
 
 ## Cases
 
-`toolcall_cases.json` holds the tool library and the cases. Each case names the
-tools to offer (or `"all"`) and pins an expected function and arguments, so scoring
-needs no judge model. Cases with `"expected_function": null` must be answered
-directly, which catches over-eager calling. Point `--cases` at your own file to
+`test/tool-definitions/toolcalling.json` holds the OpenAI tool definitions alongside
+the fixtures used by the tool-calling CI tests. `toolcall_cases.json` holds the
+benchmark prompts and expected results. Each case names the tools to offer (or
+`"all"`) and pins an expected function and arguments, so scoring needs no judge
+model. Cases with `"expected_function": null` must be answered directly, which
+catches over-eager calling. Point `--cases` and `--tools` at your own files to
 benchmark a different tool set.
 
 A case's `tool_result` is what the tool would have returned, and
