@@ -178,6 +178,7 @@ struct DecoderState : State {
 
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int current_length, DeviceSpan<int32_t> beam_indices);
+  void RewindTo(size_t index) override;
 
   // Prefill chunking (see search.chunk_size). The embedding model still runs once over the whole
   // prompt (it is a lookup/projection), while the decoder prefill is split into several runs so the
@@ -198,7 +199,7 @@ struct DecoderState : State {
   std::unique_ptr<Embeddings> per_layer_inputs_;        // Optional model input (Gemma4: per-layer conditioning)
   std::unique_ptr<DefaultInputIDs> decoder_input_ids_;  // Optional model input (e.g., Gemma4 decoder needs input_ids)
   std::unique_ptr<PositionInputs> position_inputs_;     // Model input
-  std::unique_ptr<KeyValueCache> kv_cache_;             // Model input
+  std::unique_ptr<KeyValueCache> kv_cache_;             // Model input (ModelManaged for stateful models)
   std::unique_ptr<RecurrentState> recurrent_state_;     // Model input (for hybrid models)
   Logits logits_{*this};                                // Model output
 };
@@ -217,6 +218,8 @@ struct MultiModalPipelineState : State {
   OrtValue* GetInput(const char* name) override;
 
   OrtValue* GetOutput(const char* name) override;
+
+  void RewindTo(size_t index) override;
 
  private:
   void UpdateInputsOutputs(const DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices,
