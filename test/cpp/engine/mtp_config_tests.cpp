@@ -166,6 +166,10 @@ TEST(MtpDecoderConfigTest, RejectsInvalidConfiguration) {
     }
   };
 
+  mtp.enabled = false;
+  expect_error("model.mtp.enabled");
+  mtp.enabled = true;
+
   mtp.filename.clear();
   expect_error("filename");
   mtp.filename = "mtp.onnx";

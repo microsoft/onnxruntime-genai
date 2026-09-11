@@ -1033,6 +1033,7 @@ class Qwen35MoEModel(MTPModel):
         decoder_outputs = genai_config["model"]["decoder"].setdefault("outputs", {})
         decoder_outputs.setdefault("hidden_states", "hidden_states")
         genai_config["model"]["mtp"] = {
+            "enabled": True,
             "filename": "mtp.onnx",
             "num_hidden_layers": 1,
             "num_key_value_heads": self.decoder.num_kv_heads,
@@ -1347,6 +1348,8 @@ class Qwen35MTPModel(Qwen35MoETextModel):
             preserve_quantization=self.preserve_mtp_quantization,
             load_quantized_model=self.load_weights,
             is_moe=self.is_moe_mtp,
+            cache_dir=self.cache_dir,
+            token=self.hf_token,
         )
 
     def make_offset_rmsnorm(self, name, root_input, weight_tensor):
