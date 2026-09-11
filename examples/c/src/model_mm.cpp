@@ -16,6 +16,10 @@
 
 OgaGenerator* g_generator = nullptr;
 
+// Conversational-model fallback only. An omitted Nemotron Parse prompt uses
+// the native task controls: </s><s><predict_bbox><predict_classes><output_markdown>.
+constexpr const char* kDefaultUserPrompt = "What color is the sky?";
+
 void TerminateGeneration(int signum) {
   if (g_generator == nullptr) {
     return;
@@ -45,6 +49,10 @@ void CXX_API(
 
   if (verbose) std::cout << "Creating model..." << std::endl;
   auto model = OgaModel::Create(*config);
+  const bool is_nemotron_parse =
+      std::string(model->GetType()) == "nemotron_parse";
+  const std::string effective_user_prompt =
+      user_prompt.empty() ? kDefaultUserPrompt : user_prompt;
 
   if (verbose) std::cout << "Creating tokenizer..." << std::endl;
   auto tokenizer = OgaTokenizer::Create(*model);
@@ -88,10 +96,24 @@ void CXX_API(
     std::tie(audios, num_audios) = GetUserAudios(audio_paths, interactive);
 
     // Get user prompt
-    std::string text = GetUserPrompt(user_prompt, interactive);
+    std::string text;
+    if (is_nemotron_parse && !interactive && user_prompt.empty()) {
+      // An empty prompt asks the native processor to use its default task.
+      text.clear();
+    } else {
+      text = GetUserPrompt(effective_user_prompt, interactive);
+    }
     signal(SIGINT, TerminateGeneration);
     if (text == "quit()") {
       break;  // Exit the loop
+    }
+    if (is_nemotron_parse) {
+      if (num_images != 1) {
+        throw std::runtime_error("Nemotron Parse requires exactly one image");
+      }
+      if (num_audios != 0) {
+        throw std::runtime_error("Nemotron Parse does not accept audio input");
+      }
     }
 
     // Construct user content based on inputs
@@ -132,11 +154,16 @@ void CXX_API(
 
     // Apply chat template
     std::string prompt;
-    try {
-      bool add_generation_prompt = true;
-      prompt = ApplyChatTemplate(model_path, *tokenizer, messages, add_generation_prompt, tools);
-    } catch (...) {
+    if (is_nemotron_parse) {
       prompt = text;
+    } else {
+      try {
+        bool add_generation_prompt = true;
+        prompt = ApplyChatTemplate(model_path, *tokenizer, messages,
+                                   add_generation_prompt, tools);
+      } catch (...) {
+        prompt = text;
+      }
     }
     if (verbose) std::cout << "Prompt: " << prompt << "\n"
                            << std::endl;
@@ -186,7 +213,7 @@ int main(int argc, char** argv) {
   // Get command-line args
   GeneratorParamsArgs generator_params_args;
   GuidanceArgs guidance_args;
-  std::string model_path, ep = "follow_config", ep_path = "", system_prompt = "You are a helpful AI assistant.", user_prompt = "What color is the sky?";
+  std::string model_path, ep = "follow_config", ep_path = "", system_prompt = "You are a helpful AI assistant.", user_prompt;
   bool verbose = false, debug = false, interactive = true, rewind = true;
   std::vector<std::string> image_paths;
   std::vector<std::string> audio_paths;
@@ -205,7 +232,11 @@ int main(int argc, char** argv) {
   std::cout << "Execution provider: " << ep << std::endl;
   if (!ep_path.empty()) std::cout << "Execution provider path: " << ep_path << std::endl;
   std::cout << "System prompt: " << system_prompt << std::endl;
-  if (!interactive) std::cout << "User prompt: " << user_prompt << std::endl;
+  if (!interactive) {
+    std::cout << "User prompt: "
+              << (user_prompt.empty() ? "<model default>" : user_prompt)
+              << std::endl;
+  }
   std::cout << "Verbose: " << verbose << std::endl;
   std::cout << "Interactive: " << interactive << std::endl;
   std::cout << "--------------------------" << std::endl;
