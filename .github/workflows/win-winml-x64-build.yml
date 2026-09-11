@@ -21,7 +21,6 @@ env:
   binaryDir: 'build/winml/win-x64/RelWithDebInfo'
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime.Gpu.Windows&api-version=6.0-preview.1"
   ORT_NIGHTLY_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
-  NUGET_ORG_SOURCE: "https://api.nuget.org/v3/index.json"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime.Gpu.Windows"
 
 jobs:
@@ -83,7 +82,6 @@ jobs:
             --skip_examples `
             --cmake_extra_defines `
               "NUGET_PACKAGE_SOURCE=${{ env.ORT_NIGHTLY_SOURCE }}" `
-              "DML_NUGET_PACKAGE_SOURCE=${{ env.NUGET_ORG_SOURCE }}" `
               CMAKE_CUDA_ARCHITECTURES=86-real `
               'CMAKE_EXE_LINKER_FLAGS_INIT=/profile /DYNAMICBASE' `
               'CMAKE_MODULE_LINKER_FLAGS_INIT=/profile /DYNAMICBASE' `
