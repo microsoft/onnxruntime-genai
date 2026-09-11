@@ -32,6 +32,11 @@ jobs:
     parameters:
       build_config: ${{parameters.build_config}}
 
+  # Creates/touches ~/.m2/settings.xml
+  - task: MavenAuthenticate@0
+    inputs:
+      artifactsFeeds: Lotus
+
   # --- Feed isolation: download ORT (Android AAR) from the Lotus feed ---------
   - bash: |
       set -e
