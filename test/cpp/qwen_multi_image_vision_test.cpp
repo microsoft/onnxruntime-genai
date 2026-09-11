@@ -8,6 +8,8 @@
 
 #include <gtest/gtest.h>
 
+#include "models/qwen_vl_state.h"
+
 #define OGA_USE_SPAN 1
 #include "ort_genai.h"
 
@@ -96,4 +98,82 @@ TEST(QwenVisionMultiImageTest, AcceptsValidGridThroughPublicInputValidation) {
   auto harness = QwenVisionHarness::Create();
   harness.inputs->Delete("input_ids");
   EXPECT_NO_THROW(harness.generator->SetInputs(*harness.inputs));
+}
+
+TEST(QwenVisionMultiImageTest, UsesPaddedStrideForDifferentImageGridSizes) {
+  constexpr int64_t total_patches = 27520;
+  constexpr int64_t total_grid_tokens = 20004;
+  constexpr int64_t total_hw = 20004;
+  constexpr int64_t max_grid_tokens = 6880;
+  constexpr int64_t num_images = 4;
+
+  const auto layout = Generators::ResolveQwenPatchLayout(
+      total_patches, total_grid_tokens, total_hw, max_grid_tokens, num_images);
+
+  EXPECT_EQ(layout.padded_image_stride, 6880);
+  EXPECT_EQ(layout.temporal_multiplier, 0);
+  EXPECT_EQ(layout.ImagePatchOffset(2, 5624 + 6880), 13760);
+  EXPECT_EQ(layout.ImagePatchCount(1900, 38, 50), 1900);
+}
+
+TEST(QwenVisionMultiImageTest, KeepsPackedLayoutWhenPatchCountsMatchGrid) {
+  const auto layout = Generators::ResolveQwenPatchLayout(20004, 20004, 20004, 6880, 4);
+  EXPECT_EQ(layout.padded_image_stride, 0);
+  EXPECT_EQ(layout.temporal_multiplier, 0);
+  EXPECT_EQ(layout.ImagePatchOffset(2, 12504), 12504);
+}
+
+TEST(QwenVisionMultiImageTest, RejectsUnsupportedPatchLayout) {
+  const std::string message = CaptureRuntimeErrorMessage([] {
+    Generators::ResolveQwenPatchLayout(
+        /*total_patches=*/20005,
+        /*total_grid_tokens=*/20004,
+        /*total_hw=*/20004,
+        /*max_grid_tokens=*/6880,
+        /*num_images=*/4);
+  });
+
+  EXPECT_EQ(message, "pixel_values patch count (20005) does not match image_grid_thw patch count (20004)");
+}
+
+TEST(QwenVisionMultiImageTest, PreservesUnambiguousTemporalPadding) {
+  const auto layout = Generators::ResolveQwenPatchLayout(
+      /*total_patches=*/27,
+      /*total_grid_tokens=*/18,
+      /*total_hw=*/9,
+      /*max_grid_tokens=*/10,
+      /*num_images=*/2);
+
+  EXPECT_EQ(layout.padded_image_stride, 0);
+  EXPECT_EQ(layout.temporal_multiplier, 3);
+  EXPECT_EQ(layout.ImagePatchOffset(1, 12), 12);
+  EXPECT_EQ(layout.ImagePatchCount(10, 1, 5), 15);
+}
+
+TEST(QwenVisionMultiImageTest, UsesPaddedStrideWhenTotalIsAlsoDivisibleByTotalHw) {
+  const auto layout = Generators::ResolveQwenPatchLayout(
+      /*total_patches=*/768,
+      /*total_grid_tokens=*/384,
+      /*total_hw=*/384,
+      /*max_grid_tokens=*/256,
+      /*num_images=*/3);
+
+  EXPECT_EQ(layout.padded_image_stride, 256);
+  EXPECT_EQ(layout.temporal_multiplier, 0);
+  EXPECT_EQ(layout.ImagePatchOffset(2, 320), 512);
+  EXPECT_EQ(layout.ImagePatchCount(64, 8, 8), 64);
+}
+
+TEST(QwenVisionMultiImageTest, PreservesTemporalPaddingWhenStrideDoesNotMatchMaximumGrid) {
+  const auto layout = Generators::ResolveQwenPatchLayout(
+      /*total_patches=*/24,
+      /*total_grid_tokens=*/12,
+      /*total_hw=*/12,
+      /*max_grid_tokens=*/8,
+      /*num_images=*/2);
+
+  EXPECT_EQ(layout.padded_image_stride, 0);
+  EXPECT_EQ(layout.temporal_multiplier, 2);
+  EXPECT_EQ(layout.ImagePatchOffset(1, 8), 8);
+  EXPECT_EQ(layout.ImagePatchCount(8, 2, 4), 16);
 }

@@ -13,6 +13,7 @@
 #include <type_traits>
 
 #include "models/multi_modal.h"
+#include "models/qwen_vl_state.h"
 
 namespace Generators::test {
 
