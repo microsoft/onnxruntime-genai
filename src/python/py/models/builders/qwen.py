@@ -1082,6 +1082,45 @@ class Qwen35MoEModel(MTPModel):
                 f"got '{actual}'."
             )
 
+    def block_drafter_precision(self, extra_options, option_name):
+        precision = str(extra_options.get(option_name, "bf16")).lower()
+        allowed = {"bf16", "int4", "int8"}
+        if precision not in allowed:
+            raise ValueError(f"{option_name} must be one of {sorted(allowed)}, got '{precision}'.")
+        return precision
+
+    def block_drafter_quant(self, precision):
+        """Resolve weight-only quantization for a block drafter, or ``None`` to keep it dense.
+
+        The drafter's LM head *is* the target's, so quantizing it the same way lets
+        ``share_initializers`` fold the two into one copy. Only the symmetric/``default``
+        naming convention is reproducible here, so any other algorithm leaves the head dense
+        rather than writing a second copy under a name that could never match.
+        """
+        if precision == "bf16":
+            return None
+        bits = 4 if precision == "int4" else 8
+        block_size = int(self.decoder.quant_attrs["matmul_block_size"])
+        prepack = int(self.decoder.matmul_attrs["weights_prepacked"])
+        quant = {"bits": bits, "block_size": block_size, "prepack": prepack, "lm_head": None}
+
+        if self.decoder.exclude_lm_head:
+            return quant
+        head_bits, weight_name, scales_name, zero_point_name = self.decoder.make_tied_quantized_embedding_input_names()
+        shareable = (
+            weight_name == f"lm_head.MatMul.weight_Q{head_bits}"
+            and scales_name == "lm_head.MatMul.weight_scales"
+            and not zero_point_name
+        )
+        if not shareable:
+            print(
+                f"Leaving the block drafter's LM head dense: the target writes '{weight_name}', "
+                "which this exporter cannot reproduce byte-for-byte to share."
+            )
+            return quant
+        quant["lm_head"] = {"bits": head_bits, "block_size": block_size, "prepack": prepack}
+        return quant
+
     def make_dflash2_init(self, io_dtype, extra_options):
         """DFlash 2 block drafter, exported as an auxiliary ``dflash2.onnx``.
 
@@ -1108,6 +1147,7 @@ class Qwen35MoEModel(MTPModel):
         self.dflash2_attrs = {
             "io_dtype": io_dtype,
             "num_draft_tokens": num_draft_tokens,
+            "precision": self.block_drafter_precision(extra_options, "dflash2_precision"),
         }
 
         with open(os.path.join(self.dflash2_path, "config.json"), encoding="utf-8") as handle:
@@ -1135,6 +1175,7 @@ class Qwen35MoEModel(MTPModel):
             self.decoder.attention_attrs["paged_block_size"],
             self.decoder.context_length,
             num_draft_tokens=self.dflash2_attrs["num_draft_tokens"],
+            quant=self.block_drafter_quant(self.dflash2_attrs["precision"]),
         )
         self.dflash2.make_model()
 
@@ -1144,6 +1185,26 @@ class Qwen35MoEModel(MTPModel):
         self.dflash2.save_model(output_dir)
         self.dflash2_shared_initializers = self.share_initializers(
             output_dir, self.decoder.filename, self.dflash2.filename
+        )
+        self.warn_unshared_lm_head(self.dflash2, self.dflash2_shared_initializers, "DFlash 2")
+
+    def warn_unshared_lm_head(self, drafter, shared, drafter_name):
+        """Report a drafter head that stayed a separate copy instead of folding onto the target's.
+
+        The drafter head is already much smaller than the dense one it replaces, so this is a
+        missed saving rather than a failure. It happens when this exporter's blockwise
+        quantizer and the target's MLAS pass round a block differently, which leaves the
+        bytes unequal even though both encode the same tensor the same way.
+        """
+        head = getattr(drafter, "lm_head_quant", None)
+        if head is None:
+            return
+        weight_name = f"lm_head.MatMul.weight_Q{head['bits']}"
+        if any(entry["name"] == weight_name for entry in shared):
+            return
+        print(
+            f"Note: the {drafter_name} LM head is quantized but did not match the target's "
+            f"'{weight_name}' byte-for-byte, so it remains a separate (still quantized) copy."
         )
 
     def add_dflash2_to_genai_config(self, out_dir):

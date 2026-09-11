@@ -226,6 +226,113 @@ def test_non_fp8_lm_head_preserves_target_layout_and_dtype(tmp_path):
     assert builder.values[output].dtype == ir.DataType.FLOAT16
 
 
+def _quant_composite(
+    weight_name="lm_head.MatMul.weight_Q4",
+    scales_name="lm_head.MatMul.weight_scales",
+    zero_point_name="",
+    exclude_lm_head=False,
+):
+    model = _composite()
+    model.decoder.exclude_lm_head = exclude_lm_head
+    model.decoder.quant_attrs = {"matmul_block_size": 32}
+    model.decoder.matmul_attrs = {"weights_prepacked": 1}
+    model.decoder.make_tied_quantized_embedding_input_names = lambda: (4, weight_name, scales_name, zero_point_name)
+    return model
+
+
+@pytest.mark.parametrize("precision", ["fp16", "int3", "INT4BIT", ""])
+def test_precision_option_is_rejected_when_unknown(tmp_path, precision):
+    model = _composite()
+
+    with pytest.raises(ValueError, match="dflash2_precision"):
+        model.make_dflash2_init(
+            io_dtype=None,
+            extra_options={"dflash2_path": _draft_checkpoint(tmp_path), "dflash2_precision": precision},
+        )
+
+
+def test_precision_defaults_to_dense_bf16(tmp_path):
+    model = _composite()
+
+    model.make_dflash2_init(io_dtype=None, extra_options={"dflash2_path": _draft_checkpoint(tmp_path)})
+
+    assert model.dflash2_attrs["precision"] == "bf16"
+    assert model.block_drafter_quant("bf16") is None
+
+
+def test_quantized_drafter_reuses_the_targets_lm_head_names():
+    quant = _quant_composite().block_drafter_quant("int4")
+
+    assert quant["bits"] == 4
+    assert quant["block_size"] == 32
+    assert quant["prepack"] == 1
+    # Folding onto the target's copy only works if the drafter quantizes its head identically.
+    assert quant["lm_head"] == {"bits": 4, "block_size": 32, "prepack": 1}
+
+
+# Only the symmetric `default` naming is reproducible here; anything else would write a second
+# copy under a name that can never match the target's.
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"weight_name": "lm_head.MatMul.weight_Q4G32", "scales_name": "lm_head.MatMul.weight_scale"},
+        {"zero_point_name": "lm_head.MatMul.weight_zp"},
+        {"weight_name": "lm_head.MatMul.weight", "scales_name": ""},
+        {"exclude_lm_head": True},
+    ],
+)
+def test_unshareable_target_head_leaves_the_drafter_head_dense(kwargs):
+    quant = _quant_composite(**kwargs).block_drafter_quant("int4")
+
+    assert quant["bits"] == 4
+    assert quant["lm_head"] is None
+
+
+def test_quantized_body_emits_matmulnbits_without_transposing(tmp_path):
+    builder = DFlash2Builder(
+        _draft_checkpoint(tmp_path),
+        str(tmp_path),
+        ir.DataType.FLOAT16,
+        paged_block_size=256,
+        max_position_embeddings=128,
+        quant={"bits": 4, "block_size": 8, "prepack": 0, "lm_head": None},
+    )
+
+    builder.matmul("/probe/MatMul", "hidden_states", torch.ones((16, 8)), 8, 16, "num_block")
+
+    node = next(node for node in builder.graph if node.name == "/probe/MatMul")
+    assert node.op_type == "MatMulNBits"
+    assert node.domain == "com.microsoft"
+    assert node.attributes["K"].value == 8
+    assert node.attributes["N"].value == 16
+    # MatMulNBits takes [N, K], so the dense path's transpose must not be applied.
+    assert tuple(builder.graph.initializers["probe.MatMul.weight_Q4"].const_value.shape) == (16, 1, 4)
+
+
+def test_quantized_lm_head_matches_the_targets_initializer_names(tmp_path):
+    builder = DFlash2Builder(
+        _draft_checkpoint(tmp_path),
+        str(tmp_path),
+        ir.DataType.FLOAT16,
+        paged_block_size=256,
+        max_position_embeddings=128,
+        quant={"bits": 4, "block_size": 8, "prepack": 0, "lm_head": {"bits": 4, "block_size": 8, "prepack": 0}},
+    )
+    builder.weights = {"lm_head.weight": torch.ones((builder.vocab_size, builder.hidden_size))}
+
+    output = builder.make_lm_head("hidden_states", "num_sample")
+
+    node = next(node for node in builder.graph if node.name == "/lm_head/MatMul")
+    assert node.op_type == "MatMulNBits"
+    assert [value.name for value in node.inputs][1:] == [
+        "lm_head.MatMul.weight_Q4",
+        "lm_head.MatMul.weight_scales",
+    ]
+    # Scales ride at the target's dtype, not the drafter's bf16 body dtype, or they cannot fold.
+    assert builder.graph.initializers["lm_head.MatMul.weight_scales"].const_value.dtype == ir.DataType.FLOAT16
+    assert builder.values[output].dtype == ir.DataType.FLOAT16
+
+
 @pytest.mark.parametrize("scale_shape", [(), (1,), (1, 32), (32, 1)])
 def test_fp8_lm_head_normalizes_supported_scale_layouts(tmp_path, scale_shape):
     builder = DFlash2Builder(
@@ -289,7 +396,7 @@ def test_drafter_uses_target_context_length(tmp_path, monkeypatch):
     monkeypatch.setattr(dflash2_module, "DFlash2Builder", StubDFlash2Builder)
     model = _composite()
     model.dflash2_path = _draft_checkpoint(tmp_path)
-    model.dflash2_attrs = {"io_dtype": None, "num_draft_tokens": None}
+    model.dflash2_attrs = {"io_dtype": None, "num_draft_tokens": None, "precision": "bf16"}
 
     model.make_dflash2_model(str(tmp_path))
 

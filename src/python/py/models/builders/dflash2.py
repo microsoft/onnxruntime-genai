@@ -56,6 +56,7 @@ class DFlash2Builder(BlockDrafterBuilder):
         max_position_embeddings,
         filename="dflash2.onnx",
         num_draft_tokens=None,
+        quant=None,
     ):
         self.draft_dir = draft_dir
         self.target_dir = target_dir
@@ -65,6 +66,11 @@ class DFlash2Builder(BlockDrafterBuilder):
         # states, the embedding table and the FP8 LM head -- stay at the target's dtype.
         self.io_dtype = ir.DataType.BFLOAT16
         self.external_dtype = io_dtype
+        if quant is not None:
+            self.quant_bits = quant["bits"]
+            self.quant_block_size = quant["block_size"]
+            self.quant_prepack = quant["prepack"]
+            self.lm_head_quant = quant["lm_head"]
         self.filename = filename
         self.paged_block_size = paged_block_size
 
@@ -151,6 +157,7 @@ class DFlash2Builder(BlockDrafterBuilder):
 
     def _conv_coefficients(self, prefix, x, kernel_weight, rows):
         """``kernel_projection(x)`` split into ``[side][tap]`` per-group deltas."""
+        # Left dense: 5120x64 saves nothing, and these coefficients steer every dynamic conv.
         proj = self.matmul(
             f"{prefix}/kernel_projection/MatMul",
             x,
@@ -158,6 +165,7 @@ class DFlash2Builder(BlockDrafterBuilder):
             self.hidden_size,
             2 * self.taps * self.num_groups,
             rows,
+            quantize=False,
         )
         flat = self.reshape(
             f"{prefix}/kernel_projection/Reshape",
@@ -576,6 +584,7 @@ class DFlash2Builder(BlockDrafterBuilder):
         )
 
         # Low-rank edge scores between position l-1 and l.
+        # Left dense: rank is small and this projection decides which draft path is kept.
         hp = self.matmul(
             "/dflash2/selector/hidden_projection/MatMul",
             hsel,
@@ -583,6 +592,7 @@ class DFlash2Builder(BlockDrafterBuilder):
             self.hidden_size,
             rank,
             "num_sample",
+            quantize=False,
         )
         hp3 = self.reshape(
             "/dflash2/selector/hp", hp, [-1, n_spec, 1, rank], self.io_dtype, ["batch_size", n_spec, 1, rank]

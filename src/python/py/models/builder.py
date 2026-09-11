@@ -765,6 +765,16 @@ def get_args():
                 dflash2_num_draft_tokens = Override the number of draft tokens the DFlash 2 block
                     drafter proposes per step. Must be positive and no greater than the draft checkpoint's
                     block size minus its anchor token. That checkpoint limit is the default.
+                dflash2_precision = Weight precision for the DFlash 2 drafter body: bf16 (default),
+                    int4, or int8. bf16 keeps every projection dense. int4/int8 emit `MatMulNBits`
+                    at the target's block size and prepack layout for the attention and MLP
+                    projections, leaving the small dynamic-convolution and candidate-selector
+                    projections dense. The drafter's LM head is the target's, so it is quantized to
+                    the target's format and initializer names; when the bytes also match,
+                    `share_initializers` folds it onto the target's copy. That last step currently
+                    misses on some models because this exporter and the target's MLAS pass round a
+                    few blocks differently, which costs the fold but not the quantization saving.
+                    Activations stay bf16 either way.
                 dspark_path = Path to a DSpark draft checkpoint. Exports an auxiliary `dspark.onnx`
                     block drafter beside the target model and adds a `dspark` section to
                     genai_config.json. Mutually exclusive with dflash2_path. Requires
