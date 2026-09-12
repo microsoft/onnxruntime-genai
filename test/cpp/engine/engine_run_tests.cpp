@@ -2337,6 +2337,67 @@ TEST_F(EngineRunTest, SpeculativeMinLengthUsesAbsoluteLengthAcrossContinuationTu
   EXPECT_EQ(stats.draft_tokens_accepted, 1u);
 }
 
+TEST_F(EngineRunTest, GreedySpeculativeVerificationAppliesRepetitionPenalty) {
+  constexpr int32_t repeated = 4;
+  constexpr int32_t draft = 8;
+  constexpr int32_t bonus = 9;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/7);
+  engine.cache->SetMaxDraftTokensPerStep(3);
+  auto params = MakeGreedyParams(*model_);
+  params->search.repetition_penalty = 2.0f;
+
+  auto request = CreateRequestWithPrompt(engine.engine, *params, Prompt(10));
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
+  ASSERT_EQ(request->DraftTokenValidationError(), nullptr);
+
+  request->SetDraftTokens(std::vector<int32_t>{draft});
+  engine.executor->SetVerifyRowTokenScores({
+      {{repeated, 100.0f}, {draft, 90.0f}},
+      {{bonus, 100.0f}},
+  });
+
+  std::array<EngineEvent, 2> events;
+  ASSERT_EQ(engine.engine->Run(events), 2u);
+  EXPECT_EQ(events[0].token, draft);
+  EXPECT_EQ(events[1].token, bonus);
+
+  const auto stats = engine.engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.draft_tokens_evaluated, 1u);
+  EXPECT_EQ(stats.draft_tokens_accepted, 1u);
+}
+
+TEST_F(EngineRunTest, GreedySpeculativeVerificationAppliesNoRepeatNgram) {
+  constexpr int32_t banned = 4;
+  constexpr int32_t repeated_prefix = 7;
+  constexpr int32_t draft = 8;
+  constexpr int32_t bonus = 9;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8,
+                                  /*forced_token=*/repeated_prefix);
+  engine.cache->SetMaxDraftTokensPerStep(3);
+  auto params = MakeGreedyParams(*model_);
+  params->search.no_repeat_ngram_size = 2;
+  const std::array<int32_t, 2> prompt{repeated_prefix, banned};
+
+  auto request = CreateRequestWithPrompt(engine.engine, *params, prompt);
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
+  ASSERT_EQ(request->DraftTokenValidationError(), nullptr);
+
+  request->SetDraftTokens(std::vector<int32_t>{draft});
+  engine.executor->SetVerifyRowTokenScores({
+      {{banned, 100.0f}, {draft, 90.0f}},
+      {{bonus, 100.0f}},
+  });
+
+  std::array<EngineEvent, 2> events;
+  ASSERT_EQ(engine.engine->Run(events), 2u);
+  EXPECT_EQ(events[0].token, draft);
+  EXPECT_EQ(events[1].token, bonus);
+
+  const auto stats = engine.engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.draft_tokens_evaluated, 1u);
+  EXPECT_EQ(stats.draft_tokens_accepted, 1u);
+}
+
 TEST_F(EngineRunTest, SampledSpeculativeBatchHandlesMixedDraftLengths) {
   const int32_t eos = EosToken(*model_);
   const int32_t filler = eos == 5 ? 6 : 5;

@@ -393,11 +393,16 @@ void Engine::PublishDflash2Drafts(ScheduledRequests& scheduled_requests) {
     throw std::logic_error("The main decoder did not expose auxiliary hidden states for DFlash 2.");
   }
 
-  const bool context_only = Dflash2FeedsAreContextOnly(dflash2_feeds_);
-  dflash2_drafter_->Propose(*aux_hidden_states, dflash2_feeds_, dflash2_drafts_);
-  ++speculative_stats_.draft_forward_passes;
-  if (context_only) {
-    ++speculative_stats_.dflash2_context_only_forward_passes;
+  const auto outcome =
+      dflash2_drafter_->Propose(*aux_hidden_states, dflash2_feeds_, dflash2_drafts_);
+  if (outcome.model_ran) {
+    ++speculative_stats_.draft_forward_passes;
+    ++speculative_stats_.dflash2_model_executions;
+    if (outcome.proposal_feed_count == 0) {
+      ++speculative_stats_.dflash2_context_sync_executions;
+    } else {
+      ++speculative_stats_.dflash2_proposal_executions;
+    }
   }
   for (size_t i = 0; i < dflash2_feeds_.size(); ++i) {
     auto& drafts = dflash2_drafts_[i];

@@ -388,6 +388,11 @@ int64_t Request::CommittedSequenceLength() const {
   return CurrentSequenceLength() - static_cast<int64_t>(staged_draft_count_);
 }
 
+std::span<const int32_t> Request::CommittedTokens() const {
+  return std::span<const int32_t>{tokens_host_}.first(
+      tokens_host_.size() - staged_draft_count_);
+}
+
 const char* Request::DraftTokenValidationError() const noexcept {
   // A stop-enabled turn is not excluded here: draft verification observes target-accepted tokens
   // through stop_controller_ in exactly the same committed order the ordinary one-token path uses
@@ -399,9 +404,6 @@ const char* Request::DraftTokenValidationError() const noexcept {
   const auto& search = params_->search;
   if (search.do_sample && search.top_k != 1 && search.temperature != 0 && search.top_k <= 0) {
     return "Sampled speculative draft tokens require a positive top_k.";
-  }
-  if (search.repetition_penalty != 1.0f || search.no_repeat_ngram_size > 0) {
-    return "Speculative draft tokens require repetition_penalty 1 and no_repeat_ngram_size 0.";
   }
   return nullptr;
 }

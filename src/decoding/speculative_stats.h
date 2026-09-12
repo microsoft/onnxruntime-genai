@@ -40,6 +40,9 @@ struct SpeculativeStats {
   size_t dflash2_failures{};
   size_t dflash2_disables{};
   size_t dflash2_admission_misses{};
+  size_t dflash2_model_executions{};
+  size_t dflash2_proposal_executions{};
+  size_t dflash2_context_sync_executions{};
   size_t full_accept_rounds{};
   size_t partial_accept_rounds{};
   size_t zero_accept_rounds{};
@@ -73,7 +76,6 @@ struct SpeculativeStats {
   float estimated_speedup{};
   float observed_speedup{};
   float adaptive_k_throughput{};
-  size_t dflash2_context_only_forward_passes{};
 };
 
 }  // namespace Generators

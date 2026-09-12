@@ -81,6 +81,13 @@ struct Dflash2Drafter {
     bool wants_drafts{};
   };
 
+  struct ProposalOutcome {
+    bool model_ran{};
+    size_t served_feed_count{};
+    size_t proposal_feed_count{};
+    size_t context_sync_feed_count{};
+  };
+
   Dflash2Drafter(std::shared_ptr<Dflash2Model> model, size_t paged_block_size, size_t num_blocks);
 
   // Blocks the pool needs for `max_batch_size` concurrent requests. The drafter is windowed, so a
@@ -99,8 +106,8 @@ struct Dflash2Drafter {
    * ring until Release. Requests that arrive once the ring pool is full are skipped for good rather
    * than failing the step, so they decode without DFlash 2 drafts.
    */
-  void Propose(Tensor& aux_hidden_states, std::span<const Feed> feeds,
-               std::vector<std::vector<int32_t>>& drafts);
+  ProposalOutcome Propose(Tensor& aux_hidden_states, std::span<const Feed> feeds,
+                          std::vector<std::vector<int32_t>>& drafts);
 
   // Returns a request's blocks to the pool. Safe for requests the drafter never saw.
   void Release(const Request* request);
@@ -159,9 +166,5 @@ struct Dflash2Drafter {
 
   std::unique_ptr<OrtRunOptions> run_options_;
 };
-
-// True only for a real DFlash 2 proposal call whose served feeds keep the drafter context
-// contiguous but none ask for a candidate block.
-bool Dflash2FeedsAreContextOnly(std::span<const Dflash2Drafter::Feed> feeds);
 
 }  // namespace Generators

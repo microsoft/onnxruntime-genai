@@ -367,31 +367,28 @@ TEST(Dflash2ConfigTest, DraftsOnlyForGreedyRequests) {
   EXPECT_TRUE(Dflash2CanDraft(search));
 }
 
-TEST(Dflash2ConfigTest, ClassifiesContextOnlyProposalFeeds) {
-  Dflash2Drafter::Feed context_only;
-  context_only.wants_drafts = false;
-  const std::array context_only_feeds{context_only};
-  EXPECT_TRUE(Dflash2FeedsAreContextOnly(context_only_feeds));
-
-  Dflash2Drafter::Feed proposal = context_only;
-  proposal.wants_drafts = true;
-  const std::array proposal_feeds{proposal};
-  const std::array mixed_feeds{context_only, proposal};
-  EXPECT_FALSE(Dflash2FeedsAreContextOnly(proposal_feeds));
-  EXPECT_FALSE(Dflash2FeedsAreContextOnly(mixed_feeds));
-  EXPECT_FALSE(Dflash2FeedsAreContextOnly(std::span<const Dflash2Drafter::Feed>{}));
-}
-
-TEST(Dflash2ConfigTest, ExposesContextOnlyProposalCounterByName) {
+TEST(Dflash2ConfigTest, ExposesExecutionCountersByName) {
   SpeculativeStats stats;
-  stats.dflash2_context_only_forward_passes = 42;
+  stats.dflash2_model_executions = 42;
+  stats.dflash2_proposal_executions = 31;
+  stats.dflash2_context_sync_executions = 11;
   uint64_t value{};
 
   EXPECT_EQ(::OgaSpeculativeStatsGetCount(
                 reinterpret_cast<const ::OgaSpeculativeStats*>(&stats),
-                "dflash2_context_only_forward_passes", &value),
+                "dflash2_model_executions", &value),
             nullptr);
   EXPECT_EQ(value, 42u);
+  EXPECT_EQ(::OgaSpeculativeStatsGetCount(
+                reinterpret_cast<const ::OgaSpeculativeStats*>(&stats),
+                "dflash2_proposal_executions", &value),
+            nullptr);
+  EXPECT_EQ(value, 31u);
+  EXPECT_EQ(::OgaSpeculativeStatsGetCount(
+                reinterpret_cast<const ::OgaSpeculativeStats*>(&stats),
+                "dflash2_context_sync_executions", &value),
+            nullptr);
+  EXPECT_EQ(value, 11u);
 }
 
 }  // namespace Generators::test

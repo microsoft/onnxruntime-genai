@@ -365,14 +365,6 @@ bool Dflash2CanDraft(const Config::Search& search) {
   return !search.do_sample || search.top_k == 1 || search.temperature == 0;
 }
 
-bool Dflash2FeedsAreContextOnly(std::span<const Dflash2Drafter::Feed> feeds) {
-  return !feeds.empty() &&
-         std::none_of(feeds.begin(), feeds.end(),
-                      [](const Dflash2Drafter::Feed& feed) {
-                        return feed.wants_drafts;
-                      });
-}
-
 void Dflash2Drafter::AllocateCache() {
   const size_t layers = static_cast<size_t>(config_.num_hidden_layers);
   const std::vector<int64_t> shape{static_cast<int64_t>(num_blocks_),
@@ -448,11 +440,12 @@ void Dflash2Drafter::ReleaseAll() {
   requests_.clear();
 }
 
-void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> feeds,
-                             std::vector<std::vector<int32_t>>& drafts) {
+Dflash2Drafter::ProposalOutcome Dflash2Drafter::Propose(
+    Tensor& aux_hidden_states, std::span<const Feed> feeds,
+    std::vector<std::vector<int32_t>>& drafts) {
   drafts.assign(feeds.size(), {});
   if (feeds.empty()) {
-    return;
+    return {};
   }
 
   const size_t block_size = static_cast<size_t>(config_.block_size);
@@ -468,7 +461,7 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     }
   }
   if (served.empty()) {
-    return;
+    return {};
   }
 
   // Batch layout. Every served feed contributes its context rows so the drafter cache never
@@ -479,6 +472,7 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
       block_feed_indices.push_back(i);
     }
   }
+  const size_t proposal_feed_count = block_feed_indices.size();
   // The graph reshapes the query rows to [batch, block_size, hidden], so it needs at least one
   // block. When nothing is eligible, borrow the first served feed's slot and drop its lattice: the
   // block rows only write scratch K/V at positions a later step overwrites.
@@ -717,6 +711,9 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   model_->session_->Run(run_options_.get(), input_names.data(), inputs.data(), input_names.size(),
                         output_names.data(), outputs.data(), output_names.size());
 
+  const ProposalOutcome outcome{
+      true, served.size(), proposal_feed_count,
+      served.size() - proposal_feed_count};
   for (const size_t i : served) {
     const auto& feed = feeds[i];
     requests_[feed.request].cached_positions = CheckedAdd(
@@ -724,7 +721,7 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   }
 
   if (!drafts_wanted) {
-    return;
+    return outcome;
   }
 
   // The spans own the host mirrors these point into, so they must outlive the reads below.
@@ -745,6 +742,7 @@ void Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
       previous = best;
     }
   }
+  return outcome;
 }
 
 }  // namespace Generators

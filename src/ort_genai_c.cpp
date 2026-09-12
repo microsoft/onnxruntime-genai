@@ -915,8 +915,12 @@ OgaResult* OGA_API_CALL OgaSpeculativeStatsGetCount(
     *value = stats->dflash2_disables;
   else if (key == "dflash2_admission_misses")
     *value = stats->dflash2_admission_misses;
-  else if (key == "dflash2_context_only_forward_passes")
-    *value = stats->dflash2_context_only_forward_passes;
+  else if (key == "dflash2_model_executions")
+    *value = stats->dflash2_model_executions;
+  else if (key == "dflash2_proposal_executions")
+    *value = stats->dflash2_proposal_executions;
+  else if (key == "dflash2_context_sync_executions")
+    *value = stats->dflash2_context_sync_executions;
   else if (key == "full_accept_rounds")
     *value = stats->full_accept_rounds;
   else if (key == "partial_accept_rounds")

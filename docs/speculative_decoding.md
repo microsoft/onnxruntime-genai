@@ -411,17 +411,18 @@ Both runtimes report the same `SpeculativeStats` schema
 | Rounds | `rounds`, `completed_rounds`, `interrupted_rounds`, `active_rounds` |
 | Draft tokens | `draft_tokens_proposed`, `draft_tokens_evaluated`, `draft_tokens_accepted` |
 | Emitted tokens | `correction_tokens`, `bonus_tokens`, `tokens_queued`, `tokens_emitted`, `tokens_discarded`, `tokens_buffered` |
-| Forwards | `draft_forward_passes`, `target_forward_passes`, `dflash2_context_only_forward_passes` |
+| Forwards | `draft_forward_passes`, `target_forward_passes`, `dflash2_model_executions`, `dflash2_proposal_executions`, `dflash2_context_sync_executions` |
 | Timings | `total_draft_ms`, `total_target_ms`, `total_reconciliation_ms`, `avg_draft_ms_per_token`, `avg_target_ms_per_round` |
 | Derived | `acceptance_rate`, `avg_draft_tokens_per_round`, `mean_emitted_tokens_per_round`, `expected_tokens_per_round`, `target_baseline_ms_per_token`, `target_overhead_ratio`, `estimated_speedup`, `observed_speedup`, `formula_supported` |
 
 `MtpGenerator` populates the counters plus `acceptance_rate`, `avg_draft_tokens_per_round` and
 `mean_emitted_tokens_per_round`; timing fields are left zero. `MtpGenerator.get_stats()` in Python
 additionally aliases `forwards`, `accepts` and `trials` for convenience.
-For Engine-hosted DFlash 2, `draft_forward_passes` counts every successful drafter model
-execution, including context-only executions that keep the drafter cache contiguous. Those
-context-only executions additionally increment `dflash2_context_only_forward_passes`; a
-proposal-capable execution that asked for drafts but returned an empty proposal does not.
+For Engine-hosted DFlash 2, `draft_forward_passes` and `dflash2_model_executions` count successful
+drafter model executions after request admission. Every model execution increments either
+`dflash2_proposal_executions` when an admitted feed requested drafts or
+`dflash2_context_sync_executions` when admitted feeds only maintained cache continuity. A
+proposal-capable execution remains a proposal execution even when it returns no draft tokens.
 
 The single most useful number is `acceptance_rate`. With `N` drafts per round and a per-token
 acceptance probability `α`, the expected tokens per round is

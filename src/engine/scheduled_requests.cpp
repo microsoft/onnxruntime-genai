@@ -3,11 +3,11 @@
 
 #include "request.h"
 
+#include "draft_verification.h"
 #include "engine.h"
 #include "request_index.h"
 #include "../constrained_logits_processor.h"
 #include "../decoding/speculative_sampling.h"
-#include "../sampling_distribution.h"
 #include "../search.h"
 #include <cmath>
 #include <cstdint>
@@ -63,39 +63,6 @@ bool UsesRandomSampling(const Config::Search& search) {
   return search.do_sample && search.top_k != 1 && search.temperature != 0;
 }
 
-bool MinLengthMasksEosAt(const Config::Search& search, size_t current_length) {
-  return search.min_length > 0 &&
-         current_length < static_cast<size_t>(search.min_length);
-}
-
-std::vector<float> CopyLogitsWithMinLengthApplied(DeviceSpan<float> logits,
-                                                  const Config::Search& search,
-                                                  size_t current_length,
-                                                  std::span<const int32_t> eos_token_ids) {
-  auto cpu_logits = logits.CopyDeviceToCpu();
-  std::vector<float> masked_logits(cpu_logits.begin(), cpu_logits.end());
-  ApplyMinLengthToLogits(std::span<float>{masked_logits}, static_cast<int>(current_length),
-                         search.min_length, eos_token_ids);
-  return masked_logits;
-}
-
-int32_t SelectGreedyDraftRowToken(DeviceSpan<float> logits, int32_t raw_argmax,
-                                  const Config::Search& search,
-                                  size_t current_length,
-                                  std::span<const int32_t> eos_token_ids) {
-  if (!MinLengthMasksEosAt(search, current_length) ||
-      std::find(eos_token_ids.begin(), eos_token_ids.end(), raw_argmax) ==
-          eos_token_ids.end()) {
-    return raw_argmax;
-  }
-
-  const auto masked_logits =
-      CopyLogitsWithMinLengthApplied(logits, search, current_length, eos_token_ids);
-  return static_cast<int32_t>(
-      std::max_element(masked_logits.begin(), masked_logits.end()) -
-      masked_logits.begin());
-}
-
 struct TopKScores {
   int k{};
   std::vector<int32_t> tokens;
@@ -126,82 +93,6 @@ TopKScores TryDeviceTopKScoresPerRow(DeviceInterface& device,
     return {};
   }
   return result;
-}
-
-bool TopKRowContainsEos(const TopKScores& topk, size_t row,
-                        std::span<const int32_t> eos_token_ids) {
-  if (topk.k == 0) {
-    return false;
-  }
-  const auto begin = topk.tokens.begin() + static_cast<ptrdiff_t>(row * topk.k);
-  const auto end = begin + topk.k;
-  return std::any_of(begin, end, [eos_token_ids](int32_t token) {
-    return std::find(eos_token_ids.begin(), eos_token_ids.end(), token) !=
-           eos_token_ids.end();
-  });
-}
-
-TargetTokenSelection BuildTargetSelection(
-    size_t row, DeviceSpan<float> logits, const Config::Search& search,
-    const TopKScores& topk, SampledCategorical& scratch,
-    size_t current_length, std::span<const int32_t> eos_token_ids) {
-  TargetTokenSelection selection;
-  if (MinLengthMasksEosAt(search, current_length) &&
-      (topk.k == 0 || TopKRowContainsEos(topk, row, eos_token_ids))) {
-    const auto masked_logits =
-        CopyLogitsWithMinLengthApplied(logits, search, current_length, eos_token_ids);
-    ComputeSampledCategorical(std::span<const float>{masked_logits}, search.top_k, search.top_p,
-                              search.temperature, scratch);
-    selection.indices = scratch.indices;
-    selection.probs = scratch.probs;
-    return selection;
-  }
-
-  if (topk.k == 0) {
-    const auto cpu_logits = logits.CopyDeviceToCpu();
-    ComputeSampledCategorical(cpu_logits, search.top_k, search.top_p,
-                              search.temperature, scratch);
-    selection.indices = scratch.indices;
-    selection.probs = scratch.probs;
-    return selection;
-  }
-
-  const int k = std::min(search.top_k, topk.k);
-  const size_t offset = row * static_cast<size_t>(topk.k);
-  const float max_score = topk.scores[offset];
-  const float inverse_temperature = 1.0f / search.temperature;
-  std::vector<float> probabilities(static_cast<size_t>(k));
-  float sum = 0.0f;
-  for (int i = 0; i < k; ++i) {
-    probabilities[static_cast<size_t>(i)] =
-        std::exp((topk.scores[offset + static_cast<size_t>(i)] - max_score) *
-                 inverse_temperature);
-    sum += probabilities[static_cast<size_t>(i)];
-  }
-  for (float& probability : probabilities)
-    probability /= sum;
-
-  int keep = k;
-  if (search.top_p > 0.0f && search.top_p < 1.0f) {
-    float cumulative = 0.0f;
-    for (int i = 0; i < k; ++i) {
-      cumulative += probabilities[static_cast<size_t>(i)];
-      if (cumulative >= search.top_p) {
-        keep = i + 1;
-        break;
-      }
-    }
-  }
-  float kept_sum = 0.0f;
-  for (int i = 0; i < keep; ++i)
-    kept_sum += probabilities[static_cast<size_t>(i)];
-  selection.indices.assign(
-      topk.tokens.begin() + static_cast<ptrdiff_t>(offset),
-      topk.tokens.begin() + static_cast<ptrdiff_t>(offset + static_cast<size_t>(keep)));
-  selection.probs.assign(probabilities.begin(), probabilities.begin() + keep);
-  for (float& probability : selection.probs)
-    probability /= kept_sum;
-  return selection;
 }
 
 }  // namespace
@@ -407,7 +298,6 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
   }
   const TopKScores topk = TryDeviceTopKScoresPerRow(
       *model_->p_device_inputs_, verify_rows, max_sampling_top_k);
-  SampledCategorical sampling_scratch;
   size_t row = 0;
   for (size_t i = 0; i < requests_.size(); ++i) {
     const size_t draft_count =
@@ -442,19 +332,37 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
       if (checkpoint_rng) {
         rng_checkpoints[i].reserve(draft_count + 1);
       }
-      const auto drafts = requests_[i]->StagedDraftTokens();
+      const std::vector<int32_t> drafts{
+          requests_[i]->StagedDraftTokens().begin(),
+          requests_[i]->StagedDraftTokens().end()};
       const size_t committed_length =
-          static_cast<size_t>(requests_[i]->CurrentSequenceLength()) - draft_count;
+          static_cast<size_t>(requests_[i]->CommittedSequenceLength());
+      std::vector<int32_t> verification_prefix{
+          requests_[i]->CommittedTokens().begin(),
+          requests_[i]->CommittedTokens().end()};
+      DraftVerificationTokenSelector selector{
+          verify_rows[row].size(), requests_[i]->SearchOptions(),
+          model_->config_->model.eos_token_id};
       const size_t token_budget = requests_[i]->RemainingTurnTokenBudget();
       requests_[i]->RewindDraftsForTransaction(0);
       size_t accepted_count = 0;
       while (accepted_count < draft_count &&
              selected_tokens[i].size() < token_budget) {
         const size_t current_length = committed_length + accepted_count;
-        const auto selection = BuildTargetSelection(
-            row + accepted_count, verify_rows[row + accepted_count],
-            requests_[i]->SearchOptions(), topk, sampling_scratch,
-            current_length, model_->config_->model.eos_token_id);
+        const size_t topk_offset =
+            (row + accepted_count) * static_cast<size_t>(topk.k);
+        const DraftVerificationTopKRow topk_row{
+            topk.k == 0
+                ? std::span<const int32_t>{}
+                : std::span<const int32_t>{topk.tokens}.subspan(
+                      topk_offset, static_cast<size_t>(topk.k)),
+            topk.k == 0
+                ? std::span<const float>{}
+                : std::span<const float>{topk.scores}.subspan(
+                      topk_offset, static_cast<size_t>(topk.k))};
+        const auto selection = selector.BuildSampled(
+            verify_rows[row + accepted_count], topk_row, current_length,
+            verification_prefix);
         const int32_t token = SampleTargetToken(selection, requests_[i]->rng_);
         selected_tokens[i].push_back(token);
         if (checkpoint_rng) {
@@ -462,15 +370,26 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
         }
         if (token != drafts[accepted_count] || requests_[i]->IsStopToken(token))
           break;
+        verification_prefix.push_back(token);
         ++accepted_count;
       }
       if (accepted_count == draft_count &&
           selected_tokens[i].size() < token_budget) {
         const size_t current_length = committed_length + draft_count;
-        const auto selection = BuildTargetSelection(
-            row + draft_count, verify_rows[row + draft_count],
-            requests_[i]->SearchOptions(), topk, sampling_scratch,
-            current_length, model_->config_->model.eos_token_id);
+        const size_t topk_offset =
+            (row + draft_count) * static_cast<size_t>(topk.k);
+        const DraftVerificationTopKRow topk_row{
+            topk.k == 0
+                ? std::span<const int32_t>{}
+                : std::span<const int32_t>{topk.tokens}.subspan(
+                      topk_offset, static_cast<size_t>(topk.k)),
+            topk.k == 0
+                ? std::span<const float>{}
+                : std::span<const float>{topk.scores}.subspan(
+                      topk_offset, static_cast<size_t>(topk.k))};
+        const auto selection = selector.BuildSampled(
+            verify_rows[row + draft_count], topk_row, current_length,
+            verification_prefix);
         selected_tokens[i].push_back(
             SampleTargetToken(selection, requests_[i]->rng_));
         if (checkpoint_rng) {
@@ -488,16 +407,22 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
     // after it holds the token that replaces the first rejected draft, or the bonus token.
     const auto drafts = requests_[i]->StagedDraftTokens();
     const size_t committed_length =
-        static_cast<size_t>(requests_[i]->CurrentSequenceLength()) - draft_count;
+        static_cast<size_t>(requests_[i]->CommittedSequenceLength());
+    std::vector<int32_t> verification_prefix{
+        requests_[i]->CommittedTokens().begin(),
+        requests_[i]->CommittedTokens().end()};
+    DraftVerificationTokenSelector selector{
+        verify_rows[row].size(), requests_[i]->SearchOptions(),
+        model_->config_->model.eos_token_id};
     size_t accepted_count = 0;
     while (accepted_count < draft_count) {
-      const int32_t target_token = SelectGreedyDraftRowToken(
+      const int32_t target_token = selector.SelectGreedy(
           verify_rows[row + accepted_count], row_argmax[row + accepted_count],
-          requests_[i]->SearchOptions(), committed_length + accepted_count,
-          model_->config_->model.eos_token_id);
+          committed_length + accepted_count, verification_prefix);
       if (target_token != drafts[accepted_count]) {
         break;
       }
+      verification_prefix.push_back(drafts[accepted_count]);
       ++accepted_count;
     }
     requests_[i]->CommitAcceptedDraftsForTransaction(accepted_count);

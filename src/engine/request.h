@@ -256,6 +256,13 @@ struct Request : std::enable_shared_from_this<Request>,
    */
   int64_t CommittedSequenceLength() const;
 
+  /**
+   * @brief Host-side sequence prefix excluding drafts staged by the step in flight.
+   *
+   * The returned view remains valid only until this request is mutated.
+   */
+  std::span<const int32_t> CommittedTokens() const;
+
   void AppendDraftsForTransaction(size_t draft_count);
   std::span<const int32_t> StagedDraftTokens() const;
   void CommitAcceptedDraftsForTransaction(size_t accepted_count);

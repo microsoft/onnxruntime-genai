@@ -19,7 +19,9 @@ SPECULATIVE_COUNT_KEYS = (
     "dflash2_failures",
     "dflash2_disables",
     "dflash2_admission_misses",
-    "dflash2_context_only_forward_passes",
+    "dflash2_model_executions",
+    "dflash2_proposal_executions",
+    "dflash2_context_sync_executions",
 )
 
 
@@ -120,6 +122,8 @@ def run(args: argparse.Namespace):
             stats_after = dict(engine.get_speculative_stats())
             stats_delta = speculative_count_delta(stats_before, stats_after)
             if args.require_draft_activity:
+                if stats_delta["dflash2_proposal_executions"] == 0:
+                    raise RuntimeError(f"Turn {turn_id} ran no DFlash2 proposal execution")
                 if stats_delta["draft_tokens_proposed"] == 0 or stats_delta["draft_tokens_evaluated"] == 0:
                     raise RuntimeError(f"Turn {turn_id} produced no speculative draft activity")
                 if stats_delta["dflash2_failures"] or stats_delta["dflash2_disables"]:
