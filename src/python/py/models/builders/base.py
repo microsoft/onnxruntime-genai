@@ -1086,18 +1086,12 @@ class Model:
 
         # Determine if embeddings and lm_head will be quantized or not.
         # Embeddings use Gather/GatherBlockQuantized, which only supports 4-bit (INT4/UINT4).
-        # The lm_head MatMul is quantized for INT4/UINT4 (4-bit) or INT8/UINT8 (8-bit).
-        matmul_is_quantized = self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4, ir.DataType.INT8, ir.DataType.UINT8}
         quantized_embeds = (
-            matmul_is_quantized
+            self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}
             and "Gather" in self.quant_attrs["op_types_to_quantize"]
             and "/model/embed_tokens/Gather" not in self.quant_attrs["nodes_to_exclude"]
         )
-        quantized_lm_head = (
-            matmul_is_quantized
-            and "MatMul" in self.quant_attrs["op_types_to_quantize"]
-            and "/lm_head/MatMul" not in self.quant_attrs["nodes_to_exclude"]
-        )
+        quantized_lm_head = self.is_lm_head_quantized()
 
         if shared_embeddings:
             self.tied_quantized_embeddings = quantized_embeds and quantized_lm_head
@@ -1105,6 +1099,13 @@ class Model:
         else:
             self.tied_quantized_embeddings = False
             self.tied_unquantized_embeddings = False
+
+    def is_lm_head_quantized(self):
+        return (
+            self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4, ir.DataType.INT8, ir.DataType.UINT8}
+            and "MatMul" in self.quant_attrs["op_types_to_quantize"]
+            and "/lm_head/MatMul" not in self.quant_attrs["nodes_to_exclude"]
+        )
 
     def make_tied_quantized_embedding_input_names(self):
         # Quantized tied embeddings in make_embedding() consume lm_head weights using
@@ -1143,7 +1144,13 @@ class Model:
         placement = self.matmul_mixed_precision
 
         last_matmul_type = placement.get("last_matmul")
-        bits = resolve_dtype(last_matmul_type).bits if last_matmul_type else 4
+        default_bits = {
+            ir.DataType.INT4: 4,
+            ir.DataType.UINT4: 4,
+            ir.DataType.INT8: 8,
+            ir.DataType.UINT8: 8,
+        }.get(getattr(self, "onnx_dtype", ir.DataType.INT4), 4)
+        bits = resolve_dtype(last_matmul_type).bits if last_matmul_type else default_bits
         is_symmetric = self.quant_attrs["is_symmetric"]
 
         if base_method == "rtn" or (base_method == "default" and bits != 4):
@@ -1699,8 +1706,8 @@ class Model:
         by the target layout (SM80 -> {32, 64, 128}, SM90 -> {64, 128}), K % block_size == 0,
         and N aligned to the kernel tile (N % 32 for int8, N % 64 for int4). Only symmetric
         weights are prepacked; nodes already carrying `weight_prepacked` are left untouched.
-        An offline-prepacked model must be run with ORT_FPA_INTB_GEMM enabling the relevant
-        nbits (use ORT_FPA_INTB_GEMM=1 for int4 and int8).
+        Eligible prepacked nodes select fpA-intB automatically. The emitted session option
+        enables the same kernel family for nodes that remain in raw blockwise layout.
         """
         prepack_mode = self.matmul_attrs["weights_prepacked"]
         if self.ep != "cuda" or prepack_mode <= 0 or not self.quant_attrs["is_symmetric"]:

@@ -10,6 +10,7 @@ import onnx_ir as ir
 import pytest
 import torch
 
+from models.builders.base import Model
 from models.builders.dflash2 import DFlash2Builder
 from models.builders.mtp import MTPModel
 from models.builders.qwen import Qwen35MoEModel
@@ -231,12 +232,39 @@ def _quant_composite(
     scales_name="lm_head.MatMul.weight_scales",
     zero_point_name="",
     exclude_lm_head=False,
+    quantized_lm_head=None,
+    onnx_dtype=ir.DataType.INT4,
+    last_matmul_type=None,
 ):
     model = _composite()
     model.decoder.exclude_lm_head = exclude_lm_head
-    model.decoder.quant_attrs = {"matmul_block_size": 32}
+    model.decoder.onnx_dtype = onnx_dtype
+    model.decoder.quantization_algo = "default"
+    model.decoder.matmul_mixed_precision = (
+        {"last_matmul": last_matmul_type} if last_matmul_type is not None else {}
+    )
+    model.decoder.quant_attrs = {
+        "matmul_block_size": 32,
+        "is_symmetric": True,
+        "op_types_to_quantize": ["MatMul"],
+        "nodes_to_exclude": [],
+    }
     model.decoder.matmul_attrs = {"weights_prepacked": 1}
-    model.decoder.make_tied_quantized_embedding_input_names = lambda: (4, weight_name, scales_name, zero_point_name)
+    if quantized_lm_head is None:
+        model.decoder.is_lm_head_quantized = types.MethodType(Model.is_lm_head_quantized, model.decoder)
+    else:
+        model.decoder.is_lm_head_quantized = lambda: quantized_lm_head
+    if weight_name is None:
+        model.decoder.make_tied_quantized_embedding_input_names = types.MethodType(
+            Model.make_tied_quantized_embedding_input_names, model.decoder
+        )
+    else:
+        model.decoder.make_tied_quantized_embedding_input_names = lambda: (
+            4,
+            weight_name,
+            scales_name,
+            zero_point_name,
+        )
     return model
 
 
@@ -270,6 +298,38 @@ def test_quantized_drafter_reuses_the_targets_lm_head_names():
     assert quant["lm_head"] == {"bits": 4, "block_size": 32, "prepack": 1}
 
 
+@pytest.mark.parametrize(
+    "onnx_dtype,last_matmul_type,expected_bits",
+    [
+        (ir.DataType.INT4, None, 4),
+        (ir.DataType.INT4, "int8", 8),
+        (ir.DataType.INT8, None, 8),
+    ],
+)
+def test_drafter_resolves_the_actual_target_lm_head_bit_width(onnx_dtype, last_matmul_type, expected_bits):
+    model = _quant_composite(
+        weight_name=None,
+        onnx_dtype=onnx_dtype,
+        last_matmul_type=last_matmul_type,
+    )
+
+    head_bits, *_ = model.decoder.make_tied_quantized_embedding_input_names()
+    quant = model.block_drafter_quant("int4")
+
+    assert head_bits == expected_bits
+    if expected_bits == 4:
+        assert quant["lm_head"]["bits"] == expected_bits
+    else:
+        # The block-drafter quantizer cannot reproduce the target's Q8G initializer layout.
+        assert quant["lm_head"] is None
+
+
+def test_dense_target_keeps_the_drafter_lm_head_dense():
+    model = _quant_composite(weight_name=None, onnx_dtype=ir.DataType.FLOAT16)
+
+    assert model.block_drafter_quant("int4")["lm_head"] is None
+
+
 # Only the symmetric `default` naming is reproducible here; anything else would write a second
 # copy under a name that can never match the target's.
 @pytest.mark.parametrize(
@@ -279,6 +339,7 @@ def test_quantized_drafter_reuses_the_targets_lm_head_names():
         {"zero_point_name": "lm_head.MatMul.weight_zp"},
         {"weight_name": "lm_head.MatMul.weight", "scales_name": ""},
         {"exclude_lm_head": True},
+        {"quantized_lm_head": False},
     ],
 )
 def test_unshareable_target_head_leaves_the_drafter_head_dense(kwargs):

@@ -8,6 +8,7 @@
 #include <set>
 #include <string_view>
 
+#include "../models/model_state_manifest.h"
 #include "sequence_positions.h"
 #include "window_ring.h"
 
@@ -62,12 +63,54 @@ StateGroup ResolvePagedKeyValueGroup(const Config::Model::Decoder& decoder) {
   return *paged_group;
 }
 
+// One element type for every key/value binding of one layer. Byte accounting reads the type per
+// layer while allocation commits to a single type for the whole pool, so the two agree only if all
+// four bindings of every layer agree. Check it here instead of relying on the state manifest: a
+// model that reaches the cache without manifest validation would otherwise be sized for one
+// element width and allocated at another, and the pool would silently over- or under-commit.
+ONNXTensorElementDataType LayerCacheType(const std::shared_ptr<Model>& model, int layer_id) {
+  const auto& decoder = model->config_->model.decoder;
+  const auto& metadata = model->session_info_;
+  const auto key_name = ComposeKeyValueName(decoder.inputs.past_key_names, layer_id);
+  const auto dtype = metadata.GetInputDataType(key_name);
+  const std::pair<std::string, bool> bindings[] = {
+      {ComposeKeyValueName(decoder.inputs.past_value_names, layer_id), true},
+      {ComposeKeyValueName(decoder.outputs.present_key_names, layer_id), false},
+      {ComposeKeyValueName(decoder.outputs.present_value_names, layer_id), false}};
+  for (const auto& [name, is_input] : bindings) {
+    if (!is_input && !metadata.HasOutput(name)) {
+      // BindCache aliases every present output onto its past buffer, so a missing one is a broken
+      // model that would fail at session run with a far less specific message.
+      throw std::runtime_error("Paged cache present binding was not found: " + name);
+    }
+    const auto other = is_input ? metadata.GetInputDataType(name) : metadata.GetOutputDataType(name);
+    if (other != dtype) {
+      throw std::runtime_error(
+          "Paged cache bindings must share one element type: '" + key_name + "' and '" + name +
+          "' disagree");
+    }
+  }
+  return dtype;
+}
+
 ONNXTensorElementDataType KeyValueCacheType(const std::shared_ptr<Model>& model,
                                             const StateGroup& paged_group) {
-  const auto key_name = ComposeKeyValueName(
-      model->config_->model.decoder.inputs.past_key_names,
-      paged_group.layer_ids.front());
-  return model->session_info_.GetInputDataType(key_name);
+  std::optional<ONNXTensorElementDataType> common;
+  std::string reference_layer;
+  for (const int layer_id : paged_group.layer_ids) {
+    const auto layer_type = LayerCacheType(model, layer_id);
+    if (!common) {
+      common = layer_type;
+      reference_layer = std::to_string(layer_id);
+      continue;
+    }
+    if (layer_type != *common) {
+      throw std::runtime_error(
+          "Paged cache layers must share one element type: layer " + reference_layer +
+          " and layer " + std::to_string(layer_id) + " disagree");
+    }
+  }
+  return *common;
 }
 
 // Layers whose KV cache is a ring sized to the sliding window instead of to the context length.
@@ -107,7 +150,29 @@ size_t CacheHeadSize(const std::shared_ptr<Model>& model, const std::string& nam
   return static_cast<size_t>(shape.back());
 }
 
+// Scale caches are Engine-owned persistent buffers. The model reads the block's existing scales
+// through the past binding and writes the scales for the tokens this step produced back through the
+// present binding, both aliased to the same allocation. Declaring only the past binding would leave
+// ORT free to hand the graph a fresh buffer for the writes, so every scale the step produced would
+// be dropped and the next step would dequantize against stale data. Declare both or neither.
+void ValidateScalePairing(const std::string& input_template, const std::string& output_template,
+                          std::string_view side) {
+  if (input_template.empty() == output_template.empty()) {
+    return;
+  }
+  throw std::runtime_error(
+      "A paged " + std::string{side} +
+      " scale cache needs both a past and a present name template, or neither. Got past='" +
+      input_template + "' present='" + output_template + "'");
+}
+
+constexpr std::string_view kScaleSideLabels[] = {"key", "value"};
+
 void ValidateScaleBindings(const Config::Model::Decoder& decoder, const StateGroup& group) {
+  ValidateScalePairing(decoder.inputs.past_key_scale_names, decoder.outputs.present_key_scale_names,
+                       kScaleSideLabels[0]);
+  ValidateScalePairing(decoder.inputs.past_value_scale_names,
+                       decoder.outputs.present_value_scale_names, kScaleSideLabels[1]);
   std::set<std::string> names;
   for (const int layer : group.layer_ids) {
     names.insert(ComposeKeyValueName(decoder.inputs.past_key_names, layer));
@@ -138,15 +203,45 @@ ONNXTensorElementDataType ScaleCacheType(const std::shared_ptr<Model>& model,
   const auto shape = metadata.GetInputShape(input_name);
   const auto dtype = metadata.GetInputDataType(input_name);
   const auto block_size = model->config_->engine.dynamic_batching->block_size;
-  if (shape.size() != 3 || (shape[1] > 0 && shape[1] != static_cast<int64_t>(block_size)) ||
-      shape[2] != model->config_->model.decoder.num_key_value_heads ||
-      (dtype != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16 && dtype != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)) {
-    throw std::runtime_error("Paged scale cache must be float16 or float32 [num_blocks, block_size, kv_heads]: " + input_name);
+  const auto kv_heads = static_cast<int64_t>(model->config_->model.decoder.num_key_value_heads);
+  // One scale per (block, slot, kv head), so the block table addresses this tensor exactly the way
+  // it addresses the key and value caches and only the trailing head-width dimension is dropped. A
+  // negative dimension is symbolic; the allocation resolves it from the configured geometry.
+  if (shape.size() != 3) {
+    throw std::runtime_error(
+        "Paged scale cache must have rank three [num_blocks, block_size, kv_heads], got rank " +
+        std::to_string(shape.size()) + ": " + input_name);
   }
-  if (!output_name.empty() &&
-      (!metadata.HasOutput(output_name) || metadata.GetOutputDataType(output_name) != dtype ||
-       metadata.GetOutputShape(output_name) != shape)) {
-    throw std::runtime_error("Paged scale cache output must match its input: " + output_name);
+  if (shape[1] >= 0 && shape[1] != static_cast<int64_t>(block_size)) {
+    throw std::runtime_error(
+        "Paged scale cache block-size dimension must be " + std::to_string(block_size) + ", got " +
+        std::to_string(shape[1]) + ": " + input_name);
+  }
+  if (shape[2] >= 0 && shape[2] != kv_heads) {
+    throw std::runtime_error(
+        "Paged scale cache head dimension must be " + std::to_string(kv_heads) + ", got " +
+        std::to_string(shape[2]) + ": " + input_name);
+  }
+  if (dtype != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16 &&
+      dtype != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+    throw std::runtime_error("Paged scale cache must be float16 or float32: " + input_name);
+  }
+  if (output_name.empty()) {
+    throw std::runtime_error(
+        "Paged scale cache requires a present binding aliased to its past buffer: " + input_name);
+  }
+  if (!metadata.HasOutput(output_name)) {
+    throw std::runtime_error("Paged scale cache output was not found: " + output_name);
+  }
+  if (metadata.GetOutputDataType(output_name) != dtype) {
+    throw std::runtime_error(
+        "Paged scale cache output type must match its input: " + output_name);
+  }
+  // The pair shares one buffer, so compare shapes the way every other shared model-state binding
+  // does: a symbolic dimension on either side matches a resolved one.
+  if (!StateShapesCompatible(metadata.GetOutputShape(output_name), shape)) {
+    throw std::runtime_error(
+        "Paged scale cache output shape must match its input: " + output_name);
   }
   return dtype;
 }
@@ -154,7 +249,7 @@ ONNXTensorElementDataType ScaleCacheType(const std::shared_ptr<Model>& model,
 size_t BytesPerBlock(const std::shared_ptr<Model>& model, int layer_id) {
   const auto& decoder = model->config_->model.decoder;
   const auto key_name = ComposeKeyValueName(decoder.inputs.past_key_names, layer_id);
-  const auto dtype = model->session_info_.GetInputDataType(key_name);
+  const auto dtype = LayerCacheType(model, layer_id);
   const size_t key_width = CacheHeadSize(model, key_name);
   const size_t value_width = CacheHeadSize(model, ComposeKeyValueName(decoder.inputs.past_value_names, layer_id));
   if (value_width > std::numeric_limits<size_t>::max() - key_width) {
@@ -169,15 +264,14 @@ size_t BytesPerBlock(const std::shared_ptr<Model>& model, int layer_id) {
   const std::pair<std::string, std::string> scale_names[] = {
       {decoder.inputs.past_key_scale_names, decoder.outputs.present_key_scale_names},
       {decoder.inputs.past_value_scale_names, decoder.outputs.present_value_scale_names}};
-  for (const auto& [input_template, output_template] : scale_names) {
+  for (size_t side = 0; side < std::size(scale_names); ++side) {
+    const auto& [input_template, output_template] = scale_names[side];
+    ValidateScalePairing(input_template, output_template, kScaleSideLabels[side]);
     if (input_template.empty()) {
-      if (!output_template.empty()) {
-        throw std::runtime_error("Paged scale cache output requires an input name template");
-      }
       continue;
     }
     const auto input_name = ComposeKeyValueName(input_template, layer_id);
-    const auto output_name = output_template.empty() ? std::string{} : ComposeKeyValueName(output_template, layer_id);
+    const auto output_name = ComposeKeyValueName(output_template, layer_id);
     const auto scale_type = ScaleCacheType(model, input_name, output_name);
     const auto scale_bytes = CheckedMultiply(
         CheckedMultiply(model->config_->engine.dynamic_batching->block_size,
@@ -235,34 +329,6 @@ size_t RequiredSlots(const std::shared_ptr<Request>& request) {
 }
 
 }  // namespace
-
-size_t ComputePagedBlockCapacity(size_t available_memory_bytes,
-                                 float gpu_utilization_factor,
-                                 size_t reserved_memory_bytes,
-                                 size_t block_size,
-                                 size_t num_key_value_heads,
-                                 size_t head_size,
-                                 size_t full_layer_count,
-                                 size_t element_size,
-                                 size_t auxiliary_bytes_per_block) {
-  if (block_size == 0 || num_key_value_heads == 0 || head_size == 0 ||
-      full_layer_count == 0 || element_size == 0) {
-    throw std::invalid_argument(
-        "Paged cache capacity dimensions must be greater than zero");
-  }
-  constexpr size_t num_caches_per_layer = 2;
-  size_t primary_bytes_per_block = block_size;
-  for (const size_t factor : {num_key_value_heads, head_size, full_layer_count,
-                              element_size, num_caches_per_layer}) {
-    if (primary_bytes_per_block > std::numeric_limits<size_t>::max() / factor) {
-      throw std::overflow_error("Paged cache bytes per block overflow size_t");
-    }
-    primary_bytes_per_block *= factor;
-  }
-  return ComputePagedBlockCapacityFromBytes(available_memory_bytes, gpu_utilization_factor,
-                                            reserved_memory_bytes, primary_bytes_per_block,
-                                            auxiliary_bytes_per_block);
-}
 
 size_t ComputePagedBlockCapacityFromBytes(size_t available_memory_bytes,
                                           float gpu_utilization_factor,
@@ -419,12 +485,12 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
         continue;
       }
       const auto input_name = ComposeKeyValueName(input_template, layer_id);
-      const auto output_name = output_template.empty() ? std::string{} : ComposeKeyValueName(output_template, layer_id);
+      const auto output_name = ComposeKeyValueName(output_template, layer_id);
       const auto scale_type = ScaleCacheType(model, input_name, output_name);
       auto scale_shape = key_shape_per_layer;
       scale_shape.pop_back();
       const auto declared_shape = model->session_info_.GetInputShape(input_name);
-      if (declared_shape[0] > 0 && declared_shape[0] != static_cast<int64_t>(blocks)) {
+      if (declared_shape[0] >= 0 && declared_shape[0] != static_cast<int64_t>(blocks)) {
         throw std::runtime_error("Paged scale cache block count does not match allocation: " + input_name);
       }
       size_t scale_bytes = Ort::SizeOf(scale_type);
@@ -1087,12 +1153,16 @@ void PagedKeyValueCache::BindCache(State& state) {
   auto cache_output_names = OutputNames();
 
   const size_t num_block_tables = Windowed() ? 2 : 1;
+  // Every scale cache is bound on both sides, so the output layout mirrors the input layout minus
+  // the block tables. Sizing both up front keeps the indices below stable across steps.
+  const size_t num_state_outputs = cache.size() * 2 + scale_cache_.size();
   if (state.inputs_.empty()) {
-    // Number of layers * 2 for key and value caches + one entry per block table
-    state.inputs_.resize(cache.size() * 2 + scale_cache_.size() + num_block_tables);
+    // Number of layers * 2 for key and value caches + one entry per scale cache + one entry per
+    // block table
+    state.inputs_.resize(num_state_outputs + num_block_tables);
     state.input_names_.resize(state.inputs_.size());
-    state.outputs_.resize(cache.size() * 2);
-    state.output_names_.resize(cache.size() * 2);
+    state.outputs_.resize(num_state_outputs);
+    state.output_names_.resize(num_state_outputs);
   }
 
   for (size_t layer_idx = 0; layer_idx < cache.size(); ++layer_idx) {
@@ -1112,16 +1182,17 @@ void PagedKeyValueCache::BindCache(State& state) {
     state.input_names_[layer_idx * 2 + 1] = cache_names[layer_idx].second;
     state.output_names_[layer_idx * 2 + 1] = cache_output_names[layer_idx].second;
   }
-  state.outputs_.resize(cache.size() * 2);
-  state.output_names_.resize(cache.size() * 2);
+  state.outputs_.resize(num_state_outputs);
+  state.output_names_.resize(num_state_outputs);
   for (size_t scale_index = 0; scale_index < scale_cache_.size(); ++scale_index) {
     auto& scale = scale_cache_[scale_index];
-    state.inputs_[cache.size() * 2 + scale_index] = scale.value.get();
-    state.input_names_[cache.size() * 2 + scale_index] = scale.input_name.c_str();
-    if (!scale.output_name.empty()) {
-      state.outputs_.push_back(scale.value.get());
-      state.output_names_.push_back(scale.output_name.c_str());
-    }
+    const size_t slot = cache.size() * 2 + scale_index;
+    // The same OrtValue on both sides: the model updates the scales of the tokens this step
+    // produced in place, exactly as it does for the key and value caches.
+    state.inputs_[slot] = scale.value.get();
+    state.input_names_[slot] = scale.input_name.c_str();
+    state.outputs_[slot] = scale.value.get();
+    state.output_names_[slot] = scale.output_name.c_str();
   }
 }
 

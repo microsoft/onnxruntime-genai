@@ -148,6 +148,41 @@ TEST(MtpDecoderConfigTest, ProjectsPagedDecoderWithoutMainFixedState) {
   EXPECT_THROW(CreateMtpDecoderConfig(*projected), std::runtime_error);
 }
 
+// A per-token quantized target declares scale name templates on its decoder. The MTP projection
+// copies the target config wholesale, and the head is always an unquantized full-attention layer,
+// so those templates must be cleared. If they survived, the engine would size and bind the head's
+// cache against scale tensor names that exist only in the target session.
+TEST(MtpDecoderConfigTest, ClearsInheritedScaleTemplatesForTheUnquantizedHead) {
+  Config config;
+  auto& decoder = config.model.decoder;
+  decoder.filename = "text.onnx";
+  decoder.num_hidden_layers = 64;
+  decoder.num_key_value_heads = 8;
+  decoder.head_size = 128;
+  decoder.hidden_size = 2048;
+  decoder.inputs.past_key_scale_names = "past_key_values.%d.key_scale";
+  decoder.inputs.past_value_scale_names = "past_key_values.%d.value_scale";
+  decoder.outputs.present_key_scale_names = "present.%d.key_scale";
+  decoder.outputs.present_value_scale_names = "present.%d.value_scale";
+
+  auto& mtp = config.model.mtp;
+  mtp.filename = "mtp.onnx";
+  mtp.num_hidden_layers = 1;
+  mtp.num_key_value_heads = 2;
+  mtp.head_size = 64;
+
+  const auto projected = CreateMtpDecoderConfig(config);
+  const auto& head = projected->model.decoder;
+  EXPECT_TRUE(head.inputs.past_key_scale_names.empty());
+  EXPECT_TRUE(head.inputs.past_value_scale_names.empty());
+  EXPECT_TRUE(head.outputs.present_key_scale_names.empty());
+  EXPECT_TRUE(head.outputs.present_value_scale_names.empty());
+
+  // The target's own configuration is untouched: only the projected copy is unquantized.
+  EXPECT_EQ(config.model.decoder.inputs.past_key_scale_names, "past_key_values.%d.key_scale");
+  EXPECT_EQ(config.model.decoder.outputs.present_value_scale_names, "present.%d.value_scale");
+}
+
 TEST(MtpDecoderConfigTest, RejectsInvalidConfiguration) {
   Config config;
   auto& mtp = config.model.mtp;

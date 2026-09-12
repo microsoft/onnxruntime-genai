@@ -543,12 +543,14 @@ class Qwen35TextModel(Model):
         self.make_matmul(attention.in_proj_z, z_name, root_input)
 
         # The decay and beta gates drive the GatedDeltaNet recurrence, and their weights are
-        # ~0.1% of the model, so they stay in fp16 regardless of which loader supplied them.
+        # ~0.1% of the model, so they stay dense regardless of which loader supplied them.
         b_name = f"{basename}/b_proj/MatMul"
+        self.require_dense_linear_attention_gate(attention.in_proj_b, b_name)
         self.exclude_node_from_quantization(b_name)
         self.make_matmul(attention.in_proj_b, b_name, root_input)
 
         a_name = f"{basename}/a_proj/MatMul"
+        self.require_dense_linear_attention_gate(attention.in_proj_a, a_name)
         self.exclude_node_from_quantization(a_name)
         self.make_matmul(attention.in_proj_a, a_name, root_input)
 
@@ -568,6 +570,13 @@ class Qwen35TextModel(Model):
         self.make_initializer(attention.conv1d.weight, conv_weight_name, to=self.io_dtype)
 
         return z_name, b_name, a_name, conv_input, conv_weight_name
+
+    def require_dense_linear_attention_gate(self, projection, name):
+        if hasattr(projection, "qweight") or getattr(projection, "quant_type", "none") != "none":
+            raise ValueError(
+                f"Linear-attention gate '{name}' must remain dense, but the checkpoint supplies "
+                "pre-quantized weights that its loader did not dequantize."
+            )
 
     def make_linear_attention_normalize_and_gate(self, layer_id, attention, conv_out_3d, b_name, a_name):
         """Split QKV, per-head L2 norm, Q scale, and compute decay/beta gates.
@@ -1133,7 +1142,7 @@ class Qwen35MoEModel(MTPModel):
         prepack = int(self.decoder.matmul_attrs["weights_prepacked"])
         quant = {"bits": bits, "block_size": block_size, "prepack": prepack, "lm_head": None}
 
-        if self.decoder.exclude_lm_head:
+        if self.decoder.exclude_lm_head or not self.decoder.is_lm_head_quantized():
             return quant
         head_bits, weight_name, scales_name, zero_point_name = self.decoder.make_tied_quantized_embedding_input_names()
         shareable = (

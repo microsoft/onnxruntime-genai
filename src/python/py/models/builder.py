@@ -704,7 +704,7 @@ def get_args():
                     Default is -1.
                 matmulnbits_weights_prepacked = 0/1/2: Specify the CUDA MatMulNBits (int4/int8) weight layout.
                     0 exports raw blockwise weights, 1 exports the SM80/Ampere fpA_intB prepacked layout, and 2 exports the SM90/Hopper fpA_intB prepacked layout.
-                    Only applies to the CUDA EP. An offline-prepacked model must be run with ORT_FPA_INTB_GEMM enabling the relevant nbits.
+                    Only applies to the CUDA EP. Eligible prepacked nodes select fpA_intB automatically; the builder enables it for any ineligible nodes left in raw layout.
                     Default is 0.
                 is_symmetric = Quantize the weights symmetrically. Default is true.
                     If true, quantization is done to int4/int8. If false, quantization is done to uint4/uint8.
@@ -787,13 +787,13 @@ def get_args():
                     block size minus its anchor token. That checkpoint limit is the default.
                 dflash2_precision = Weight precision for the DFlash 2 drafter body: bf16 (default),
                     int4, or int8. bf16 keeps every projection dense. int4/int8 emit `MatMulNBits`
-                    at the target's block size and prepack layout for the attention and MLP
-                    projections, leaving the small dynamic-convolution and candidate-selector
-                    projections dense. The drafter's LM head is the target's, so it is quantized to
-                    the target's format and initializer names; when the bytes also match,
-                    `share_initializers` folds it onto the target's copy. That last step currently
-                    misses on some models because this exporter and the target's MLAS pass round a
-                    few blocks differently, which costs the fold but not the quantization saving.
+                    at the target's block size for the attention and MLP projections, leaving the
+                    small dynamic-convolution and candidate-selector projections dense. The BF16
+                    body uses plain blockwise weights because fpA-intB requires FP16 activations.
+                    When the target LM head uses a reproducible symmetric default
+                    layout, the drafter head uses its actual bit width, block size, initializer names,
+                    and prepack mode so `share_initializers` can fold it onto the target's copy.
+                    Dense or unsupported target LM-head layouts keep the drafter head dense.
                     Activations stay bf16 either way.
                 dspark_path = Path to a DSpark draft checkpoint. Exports an auxiliary `dspark.onnx`
                     block drafter beside the target model and adds a `dspark` section to

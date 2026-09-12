@@ -34,6 +34,13 @@ Model = base_module.Model
 Qwen35TextModel = qwen_module.Qwen35TextModel
 
 
+def test_prequantized_linear_attention_gate_is_rejected():
+    model = Qwen35TextModel.__new__(Qwen35TextModel)
+
+    with pytest.raises(ValueError, match="must remain dense"):
+        model.require_dense_linear_attention_gate(SimpleNamespace(qweight=object()), "/linear_attn/a_proj/MatMul")
+
+
 class _NoGenerationConfig:
     @staticmethod
     def from_pretrained(*args, **kwargs):

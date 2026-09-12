@@ -50,4 +50,16 @@ TEST(ConfigTest, ParsesPagedScaleBindings) {
   EXPECT_EQ(config.model.dflash2.outputs.present_value_scale_names, "out.%d.vs");
 }
 
+// The MTP head is always an unquantized full-attention layer, so it has no scale-name configuration
+// surface at all. A config that tries to declare one is rejected rather than silently ignored.
+TEST(ConfigTest, RejectsMtpScaleBindings) {
+  for (const char* json : {R"({"model":{"mtp":{"inputs":{"past_key_scale_names":"mtp.%d.ks"}}}})",
+                           R"({"model":{"mtp":{"inputs":{"past_value_scale_names":"mtp.%d.vs"}}}})",
+                           R"({"model":{"mtp":{"outputs":{"present_key_scale_names":"mtp.%d.ks"}}}})",
+                           R"({"model":{"mtp":{"outputs":{"present_value_scale_names":"mtp.%d.vs"}}}})"}) {
+    Config config;
+    EXPECT_THROW(OverlayConfig(config, json), std::runtime_error) << json;
+  }
+}
+
 }  // namespace Generators::test

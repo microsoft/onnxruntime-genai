@@ -171,6 +171,12 @@ std::unique_ptr<Config> CreateDflash2Config(const Config& config) {
   decoder.num_hidden_layers = dflash2.num_hidden_layers;
   decoder.num_key_value_heads = dflash2.num_key_value_heads;
   decoder.head_size = dflash2.head_size;
+  // The drafter owns its own K/V pool and never builds a PagedKeyValueCache, so the target's paged
+  // scale templates must not survive into the projected decoder config.
+  decoder.inputs.past_key_scale_names.clear();
+  decoder.inputs.past_value_scale_names.clear();
+  decoder.outputs.present_key_scale_names.clear();
+  decoder.outputs.present_value_scale_names.clear();
   decoder.state_groups.reset();
   decoder.sliding_window.reset();
   return projected;
@@ -182,6 +188,19 @@ ONNXTensorElementDataType ValidateDflash2ModelCompatibility(
     const ModelStateMetadata& drafter_metadata,
     size_t paged_block_size) {
   const auto& dflash2 = config.model.dflash2;
+  // Dflash2Drafter::AllocateCache() builds one unquantized K/V tensor pair per layer and binds only
+  // past_key_names/past_value_names, so a configured scale template would silently leave a drafter
+  // graph input unbound. Reject it here rather than at session run time.
+  for (const auto* scale_template : {&dflash2.inputs.past_key_scale_names,
+                                     &dflash2.inputs.past_value_scale_names,
+                                     &dflash2.outputs.present_key_scale_names,
+                                     &dflash2.outputs.present_value_scale_names}) {
+    if (!scale_template->empty()) {
+      throw std::runtime_error(
+          "A per-token quantized block-drafter cache is not supported: remove the "
+          "model.dflash2 scale name templates.");
+    }
+  }
   const auto& target_aux_output = dflash2.main_aux_hidden_states;
   if (target_aux_output.empty() || !target_metadata.HasOutput(target_aux_output)) {
     throw std::runtime_error(
