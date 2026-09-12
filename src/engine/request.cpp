@@ -324,6 +324,7 @@ void Request::MarkClosedFromEngine(const Engine& engine) noexcept {
   accepted_draft_count_ = 0;
   evaluated_draft_count_ = 0;
   draft_verification_completed_generation_ = false;
+  draft_verification_eos_ = false;
   draft_verification_stop_match_index_ = -1;
 }
 
@@ -369,6 +370,7 @@ void Request::ReleaseTurnResources() noexcept {
   accepted_draft_count_ = 0;
   evaluated_draft_count_ = 0;
   draft_verification_completed_generation_ = false;
+  draft_verification_eos_ = false;
   draft_verification_stop_match_index_ = -1;
   // The turn's reseed dies with the turn. A reseed that a sampling step already committed was
   // promoted to current_seed_basis_ by CommitStateForTransaction(), which runs before any terminal
@@ -428,6 +430,7 @@ void Request::CompleteClose() noexcept {
   accepted_draft_count_ = 0;
   evaluated_draft_count_ = 0;
   draft_verification_completed_generation_ = false;
+  draft_verification_eos_ = false;
   draft_verification_stop_match_index_ = -1;
   std::vector<int32_t>{}.swap(tokens_host_);
 }
@@ -552,6 +555,7 @@ void Request::AppendDraftsForTransaction(size_t draft_count) {
   accepted_draft_count_ = 0;
   evaluated_draft_count_ = 0;
   draft_verification_completed_generation_ = false;
+  draft_verification_eos_ = false;
   draft_verification_stop_match_index_ = -1;
 }
 
@@ -568,6 +572,7 @@ void Request::CommitAcceptedDraftsForTransaction(size_t accepted_count) {
   accepted_draft_count_ = 0;
   evaluated_draft_count_ = 0;
   draft_verification_completed_generation_ = false;
+  draft_verification_eos_ = false;
   draft_verification_stop_match_index_ = -1;
 
   for (size_t offset = 0; offset < accepted_count; ++offset) {
@@ -606,6 +611,8 @@ void Request::CommitAcceptedDraftsForTransaction(size_t accepted_count) {
             *turn_policy_.max_generated_tokens;
     if (search_->IsDone() || turn_limit_reached) {
       draft_verification_completed_generation_ = true;
+      draft_verification_eos_ =
+          search_->IsDone() && contains(params_->config.model.eos_token_id, token);
       break;
     }
   }
@@ -673,6 +680,7 @@ void Request::DiscardStagedDrafts() noexcept {
   accepted_draft_count_ = 0;
   evaluated_draft_count_ = 0;
   draft_verification_completed_generation_ = false;
+  draft_verification_eos_ = false;
   draft_verification_stop_match_index_ = -1;
 }
 
@@ -901,12 +909,8 @@ RequestStepResult Request::StageDraftCompletionForTransaction() {
             *turn_policy_.max_generated_tokens;
     if (turn_limit_reached) {
       finish_reason = GenerationFinishReason::TurnLimit;
-    } else {
-      const auto next_tokens = search_->GetNextTokens().CpuSpan();
-      if (search_->IsDone() && !next_tokens.empty() &&
-          contains(params_->config.model.eos_token_id, next_tokens.back())) {
-        finish_reason = GenerationFinishReason::EosToken;
-      }
+    } else if (draft_verification_eos_) {
+      finish_reason = GenerationFinishReason::EosToken;
     }
   }
   RequestStepResult result{
@@ -930,6 +934,7 @@ void Request::RestoreStateForTransaction() {
   evaluated_draft_count_ = 0;
   scheduled_token_count_ = 0;
   draft_verification_completed_generation_ = false;
+  draft_verification_eos_ = false;
   draft_verification_stop_match_index_ = -1;
   // The pending reseed itself is deliberately kept so the retry reseeds identically; only its
   // "already applied to the live streams" marker is undone, because rng_ was just rolled back.
@@ -955,6 +960,7 @@ void Request::QueueStateRestoreForTransaction() {
   evaluated_draft_count_ = 0;
   scheduled_token_count_ = 0;
   draft_verification_completed_generation_ = false;
+  draft_verification_eos_ = false;
   draft_verification_stop_match_index_ = -1;
   pending_reseed_applied_ = false;
   // Deliberately does not replay the stop controller yet: like the guidance checkpoint swap below,
@@ -1013,6 +1019,7 @@ void Request::CommitStep(const RequestStepPlan& plan,
   accepted_draft_count_ = 0;
   evaluated_draft_count_ = 0;
   draft_verification_completed_generation_ = false;
+  draft_verification_eos_ = false;
   draft_verification_stop_match_index_ = -1;
 }
 

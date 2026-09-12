@@ -608,6 +608,9 @@ struct Request : std::enable_shared_from_this<Request>,
   // advances it.
   size_t evaluated_draft_count_{};
   bool draft_verification_completed_generation_{};
+  // Capture terminal EOS before another request can reuse the batched sampler's next-token slot.
+  // Like the stop match below, this is immutable until the transaction is committed or reset.
+  bool draft_verification_eos_{};
   // Set by CommitAcceptedDraftsForTransaction() when a stop-string match ends greedy draft
   // verification early, giving StopString precedence over the turn/context limit for the same
   // completing token. -1 when verification completed generation for any other reason (or has not
@@ -615,8 +618,8 @@ struct Request : std::enable_shared_from_this<Request>,
   // the same StageGenerationForTransaction()/StageGeneration() path the ordinary one-token step
   // uses, one stage at a time, so it needs no separate bookkeeping here.
   //
-  // StageDraftCompletionForTransaction() only ever reads this field (and accepted_draft_count_,
-  // and Search's own state) to compute its result; it never resets or otherwise mutates it. Only
+  // StageDraftCompletionForTransaction() only ever reads these fields (and accepted_draft_count_)
+  // to compute its result; it never resets or otherwise mutates them. Only
   // CommitStep()/RestoreStateForTransaction()/QueueStateRestoreForTransaction()/
   // DiscardStagedDrafts()/AppendDraftsForTransaction() reset it, at their own well-defined
   // transaction boundaries -- never in response to StageDraftCompletionForTransaction() being
