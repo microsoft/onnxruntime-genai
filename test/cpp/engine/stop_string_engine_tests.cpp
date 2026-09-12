@@ -185,7 +185,7 @@ TEST_F(StopStringEngineTest, AcceptedDraftEosSurvivesCompactedSharedSlotAndRollb
   for (const size_t eos_position : {size_t{0}, size_t{1}}) {
     for (const bool queued_restore : {false, true}) {
       SCOPED_TRACE(::testing::Message() << "EOS position " << eos_position
-                                      << ", queued restore " << queued_restore);
+                                        << ", queued restore " << queued_restore);
       auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
       engine.cache->SetMaxDraftTokensPerStep(3);
       auto request = CreateEngineRequest(engine.engine);
