@@ -133,12 +133,16 @@ class StopStringEngineTest : public ::testing::Test {
   std::shared_ptr<Model> model_;
 };
 
+// ---------------------------------------------------------------------------------------------
+// Request-level transactional behavior (direct Search/logits driving, no Engine::Run involved).
+// ---------------------------------------------------------------------------------------------
+
 // Exercise CUDA's shared next-token-slot lifetime with real CPU EOS/search semantics.
 class SharedSlotSearch final : public GreedySearch_Cpu {
  public:
   using GreedySearch_Cpu::GreedySearch_Cpu;
   bool BindNextTokensSlot(DeviceSpan<int32_t> slot) override {
-    if (slot.size() != 1)
+    if (params_->BatchBeamSize() != 1 || slot.size() != 1)
       return false;
     next_tokens_ptr_ = slot;
     next_tokens_ = cpu_span<int32_t>(slot.Span());
@@ -269,10 +273,6 @@ TEST_F(StopStringEngineTest, AcceptedDraftEosSurvivesCompactedSharedSlotAndRollb
     }
   }
 }
-
-// ---------------------------------------------------------------------------------------------
-// Request-level transactional behavior (direct Search/logits driving, no Engine::Run involved).
-// ---------------------------------------------------------------------------------------------
 
 TEST_F(StopStringEngineTest, NoStopStringsPreserveOrdinaryGenerationBehavior) {
   // Exercise the no-stop path entirely through the public request and event contract.
