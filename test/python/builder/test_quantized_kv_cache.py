@@ -617,6 +617,21 @@ def test_invalid_calibration_qmax_is_rejected(tmp_path, qmax):
         model.make_kv_cache_scale_initializers()
 
 
+@pytest.mark.parametrize("scale,qmax", [(3e38, 128), (1e-44, 0.01), (1.0, 1e308)])
+def test_rescaled_calibration_scales_must_remain_finite_and_positive(tmp_path, scale, qmax):
+    scale_file = tmp_path / "kv_scales.json"
+    scale_file.write_text(json.dumps({"qmax": qmax, "scales": {"k_scales": [scale], "v_scales": [scale]}}))
+    model = _make_kv_model(
+        kv_cache_quant_type="int4_per_tensor",
+        num_layers=1,
+        extra_options={"kv_cache_scale_file": str(scale_file)},
+    )
+    _capture_initializers(model)
+
+    with pytest.raises(ValueError, match="Rescaled kv_cache scale.*finite positive"):
+        model.make_kv_cache_scale_initializers()
+
+
 def test_sparse_layer_ids_map_scales_to_model_layers(tmp_path):
     scale_file = tmp_path / "kv_scales.json"
     scale_file.write_text(

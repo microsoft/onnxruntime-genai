@@ -330,8 +330,6 @@ def test_dense_target_keeps_the_drafter_lm_head_dense():
     assert model.block_drafter_quant("int4")["lm_head"] is None
 
 
-# Only the symmetric `default` naming is reproducible here; anything else would write a second
-# copy under a name that can never match the target's.
 @pytest.mark.parametrize(
     "kwargs",
     [
@@ -411,6 +409,43 @@ def test_quantized_lm_head_matches_the_targets_initializer_names(tmp_path):
     # Scales ride at the target's dtype, not the drafter's bf16 body dtype, or they cannot fold.
     assert builder.graph.initializers["lm_head.MatMul.weight_scales"].const_value.dtype == ir.DataType.FLOAT16
     assert builder.values[output].dtype == ir.DataType.FLOAT16
+
+
+@pytest.mark.parametrize(
+    "bits,hidden_size,vocab_size,prepack,external_dtype",
+    [
+        (4, 32, 32, 1, ir.DataType.FLOAT16),
+        (8, 32, 33, 1, ir.DataType.FLOAT16),
+        (4, 33, 64, 1, ir.DataType.FLOAT16),
+        (4, 32, 64, 2, ir.DataType.FLOAT16),
+        (4, 32, 64, 1, ir.DataType.BFLOAT16),
+    ],
+)
+def test_ineligible_lm_head_keeps_blockwise_layout(tmp_path, bits, hidden_size, vocab_size, prepack, external_dtype):
+    builder = DFlash2Builder(
+        _draft_checkpoint(tmp_path),
+        str(tmp_path),
+        external_dtype,
+        paged_block_size=256,
+        max_position_embeddings=128,
+        quant={
+            "bits": bits,
+            "block_size": 32,
+            "prepack": prepack,
+            "lm_head": {"bits": bits, "block_size": 32, "prepack": prepack},
+        },
+    )
+    builder.hidden_size = hidden_size
+    builder.vocab_size = vocab_size
+    builder.weights = {"lm_head.weight": torch.ones((vocab_size, hidden_size))}
+
+    builder.make_lm_head("hidden_states", "num_sample")
+
+    node = next(node for node in builder.graph if node.name == "/lm_head/MatMul")
+    assert node.op_type == "MatMulNBits"
+    assert "weight_prepacked" not in node.attributes
+    weight = builder.graph.initializers[f"lm_head.MatMul.weight_Q{bits}"].const_value
+    assert tuple(weight.shape) == (vocab_size, (hidden_size + 31) // 32, 32 * bits // 8)
 
 
 @pytest.mark.parametrize("scale_shape", [(), (1,), (1, 32), (32, 1)])

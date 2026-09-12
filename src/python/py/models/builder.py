@@ -790,11 +790,11 @@ def get_args():
                     at the target's block size for the attention and MLP projections, leaving the
                     small dynamic-convolution and candidate-selector projections dense. The BF16
                     body uses plain blockwise weights because fpA-intB requires FP16 activations.
-                    When the target LM head uses a reproducible symmetric default
+                    Body activations and KV caches remain bf16; this option does not quantize the
+                    drafter's KV cache. When the target LM head uses a reproducible symmetric default
                     layout, the drafter head uses its actual bit width, block size, initializer names,
-                    and prepack mode so `share_initializers` can fold it onto the target's copy.
-                    Dense or unsupported target LM-head layouts keep the drafter head dense.
-                    Activations stay bf16 either way.
+                    and prepack mode when eligible so `share_initializers` can fold it onto the target's
+                    copy. Dense or unsupported target LM-head layouts keep the drafter head dense.
                 dspark_path = Path to a DSpark draft checkpoint. Exports an auxiliary `dspark.onnx`
                     block drafter beside the target model and adds a `dspark` section to
                     genai_config.json. Mutually exclusive with dflash2_path. Requires

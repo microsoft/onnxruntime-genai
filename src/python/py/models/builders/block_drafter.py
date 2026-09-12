@@ -271,6 +271,14 @@ class BlockDrafterBuilder:
         bits = self.lm_head_quant["bits"]
         block_size = self.lm_head_quant["block_size"]
         prepack = self.lm_head_quant["prepack"]
+        allowed_block_sizes = (32, 64, 128) if prepack == 1 else (64, 128)
+        if (
+            self.external_dtype != ir.DataType.FLOAT16
+            or block_size not in allowed_block_sizes
+            or self.hidden_size % block_size != 0
+            or self.vocab_size % (32 if bits == 8 else 64) != 0
+        ):
+            prepack = 0
         if prepack:
             qweight, scales = CudaQuantizer.matmulnbits_prepacked_blockwise_quantize(
                 weight, bits, block_size, force_arch=90 if prepack == 2 else 80
