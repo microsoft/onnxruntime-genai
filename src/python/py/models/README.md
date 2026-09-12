@@ -339,6 +339,21 @@ python -m onnxruntime_genai.models.builder -i path_to_target_model -o path_to_ou
 python builder.py -i path_to_target_model -o path_to_output_folder -p fp16 -e cuda -c cache_dir_for_hf_files --extra_options use_paged_attention=true aux_hidden_state_layers=2,12,22 dflash2_path=path_to_dflash2_checkpoint dflash2_num_draft_tokens=4 dflash2_precision=int4
 ```
 
+Set `dflash2_fuse_gate_up=true` to experimentally combine each DFlash 2 MLP's gate and up
+projections into one `MatMul` or `MatMulNBits`, followed by `Split`. The default is `false`.
+This export-time option requires `dflash2_path` and supports all three `dflash2_precision`
+values. It preserves BF16 body activations and the existing quantization scheme; the target,
+attention projections, and LM head are unchanged. Re-export the drafter to apply it and
+validate latency and quality on the deployment workload before enabling it in production.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -i path_to_target_model -o path_to_output_folder -p bf16 -e cuda --extra_options use_paged_attention=true aux_hidden_state_layers=6,20,34,48,62 dflash2_path=path_to_dflash2_checkpoint dflash2_precision=int4 dflash2_fuse_gate_up=true
+
+# From source:
+python builder.py -i path_to_target_model -o path_to_output_folder -p bf16 -e cuda --extra_options use_paged_attention=true aux_hidden_state_layers=6,20,34,48,62 dflash2_path=path_to_dflash2_checkpoint dflash2_precision=int4 dflash2_fuse_gate_up=true
+```
+
 #### Build a DSpark Block Drafter
 
 Set `dspark_path` to a DSpark checkpoint to export an auxiliary `dspark.onnx` block drafter beside a Qwen3.5 or Qwen3.8 target model. The target must use paged attention. SpecForge identifies the target layers whose outputs are tapped, while `aux_hidden_state_layers` identifies residual streams entering layers, so each configured auxiliary layer must be one greater than the corresponding `target_layer_ids` entry in the DSpark checkpoint. The drafter reuses the target's embedding and LM-head initializers. `dspark_path` and `dflash2_path` are mutually exclusive, and selecting DSpark replaces rather than accompanies the target's MTP head.

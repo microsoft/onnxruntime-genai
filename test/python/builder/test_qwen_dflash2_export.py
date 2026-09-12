@@ -6,7 +6,10 @@ import json
 import os
 import types
 
+import numpy as np
+import onnx
 import onnx_ir as ir
+import onnxruntime as ort
 import pytest
 import torch
 
@@ -240,9 +243,7 @@ def _quant_composite(
     model.decoder.exclude_lm_head = exclude_lm_head
     model.decoder.onnx_dtype = onnx_dtype
     model.decoder.quantization_algo = "default"
-    model.decoder.matmul_mixed_precision = (
-        {"last_matmul": last_matmul_type} if last_matmul_type is not None else {}
-    )
+    model.decoder.matmul_mixed_precision = {"last_matmul": last_matmul_type} if last_matmul_type is not None else {}
     model.decoder.quant_attrs = {
         "matmul_block_size": 32,
         "is_symmetric": True,
@@ -387,6 +388,105 @@ def test_bf16_body_never_prepacks_even_when_the_target_does(tmp_path):
     assert "weight_prepacked" not in node.attributes
 
 
+@pytest.mark.parametrize("bits", [None, 4, 8])
+@pytest.mark.parametrize("fuse_gate_up", [False, True])
+def test_mlp_gate_up_fusion_preserves_weight_rows(tmp_path, bits, fuse_gate_up):
+    quant = {"bits": bits, "block_size": 8, "prepack": 0, "lm_head": None} if bits else None
+    builder = DFlash2Builder(
+        _draft_checkpoint(tmp_path),
+        str(tmp_path),
+        ir.DataType.BFLOAT16,
+        paged_block_size=256,
+        max_position_embeddings=128,
+        quant=quant,
+        fuse_gate_up=fuse_gate_up,
+    )
+    generator = torch.Generator().manual_seed(42)
+    weights = {
+        f"layers.0.mlp.{projection}.weight": torch.randn(shape, generator=generator).to(torch.bfloat16)
+        for projection, shape in (
+            ("gate_proj", (16, 8)),
+            ("up_proj", (16, 8)),
+            ("down_proj", (8, 16)),
+        )
+    }
+
+    builder._make_mlp(0, "hidden_states", weights, "num_block")
+
+    projections = [node for node in builder.graph if node.op_type in ("MatMul", "MatMulNBits")]
+    assert len(projections) == (2 if fuse_gate_up else 3)
+    if not fuse_gate_up:
+        assert not any(node.op_type == "Split" for node in builder.graph)
+        assert projections[0].name == "/dflash2/layers.0/mlp/gate_proj/MatMul"
+        assert projections[1].name == "/dflash2/layers.0/mlp/up_proj/MatMul"
+        return
+
+    projection = next(node for node in builder.graph if node.name == "/dflash2/layers.0/mlp/gate_up_proj/MatMul")
+    assert projection.op_type == ("MatMulNBits" if bits else "MatMul")
+    assert "weight_prepacked" not in projection.attributes
+    split = next(node for node in builder.graph if node.op_type == "Split")
+    assert split.inputs[0] is projection.outputs[0]
+    assert split.attributes["axis"].value == -1
+    assert all(output.shape == ir.Shape(["num_block", 16]) for output in split.outputs)
+
+    reference = DFlash2Builder(
+        builder.draft_dir,
+        str(tmp_path),
+        ir.DataType.BFLOAT16,
+        paged_block_size=256,
+        max_position_embeddings=128,
+        quant=quant,
+    )
+    for name in ("gate_proj", "up_proj"):
+        reference.matmul(f"/{name}/MatMul", "hidden_states", weights[f"layers.0.mlp.{name}.weight"], 8, 16, "num_block")
+    reference_nodes = list(reference.graph)
+    for input_index in range(1, len(projection.inputs)):
+        combined = projection.inputs[input_index].const_value.numpy()
+        separate = [node.inputs[input_index].const_value.numpy() for node in reference_nodes]
+        axis = 0 if bits else 1
+        np.testing.assert_array_equal(combined, np.concatenate(separate, axis=axis))
+
+
+@pytest.mark.parametrize("bits", [None, 4, 8])
+def test_mlp_gate_up_fusion_execution_matches_unfused(tmp_path, bits):
+    draft_dir = _draft_checkpoint(tmp_path)
+    generator = torch.Generator().manual_seed(123)
+    weights = {
+        f"layers.0.mlp.{projection}.weight": torch.randn(shape, generator=generator) / shape[1] ** 0.5
+        for projection, shape in (
+            ("gate_proj", (64, 32)),
+            ("up_proj", (64, 32)),
+            ("down_proj", (32, 64)),
+        )
+    }
+    sessions = []
+    for fused in (False, True):
+        builder = DFlash2Builder(
+            draft_dir,
+            str(tmp_path),
+            ir.DataType.FLOAT,
+            paged_block_size=256,
+            max_position_embeddings=128,
+            quant={"bits": bits, "block_size": 32, "prepack": 0, "lm_head": None} if bits else None,
+            fuse_gate_up=fused,
+        )
+        builder.io_dtype = ir.DataType.FLOAT
+        builder.hidden_size = 32
+        builder.intermediate_size = 64
+        builder.graph.inputs.append(builder.make_value("hidden_states", ir.DataType.FLOAT, ["num_block", 32]))
+        output = builder._make_mlp(0, "hidden_states", weights, "num_block")
+        builder.graph.outputs.append(builder.values[output])
+        model = ir.serde.serialize_model(builder.model)
+        onnx.checker.check_model(model)
+        sessions.append(ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"]))
+
+    for rows in (1, 8, 16, 32):
+        inputs = {"hidden_states": torch.randn((rows, 32), generator=generator).numpy()}
+        expected = sessions[0].run(None, inputs)[0]
+        actual = sessions[1].run(None, inputs)[0]
+        np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-6)
+
+
 def test_quantized_lm_head_matches_the_targets_initializer_names(tmp_path):
     builder = DFlash2Builder(
         _draft_checkpoint(tmp_path),
@@ -497,12 +597,14 @@ def test_five_uniformly_windowed_layers_accept_total_layer_count(tmp_path):
     assert builder.sliding_window == 2048
 
 
-def test_drafter_uses_target_context_length(tmp_path, monkeypatch):
+@pytest.mark.parametrize("fuse_gate_up", [False, True, "true", "false"])
+def test_drafter_uses_target_context_length(tmp_path, monkeypatch, fuse_gate_up):
     captured = {}
 
     class StubDFlash2Builder:
         def __init__(self, _draft_dir, _target_dir, _io_dtype, _paged_block_size, max_position, **_kwargs):
             captured["max_position"] = max_position
+            captured["fuse_gate_up"] = _kwargs["fuse_gate_up"]
 
         def make_model(self):
             pass
@@ -510,12 +612,34 @@ def test_drafter_uses_target_context_length(tmp_path, monkeypatch):
     dflash2_module = importlib.import_module("models.builders.dflash2")
     monkeypatch.setattr(dflash2_module, "DFlash2Builder", StubDFlash2Builder)
     model = _composite()
-    model.dflash2_path = _draft_checkpoint(tmp_path)
-    model.dflash2_attrs = {"io_dtype": None, "num_draft_tokens": None, "precision": "bf16"}
+    model.make_dflash2_init(
+        io_dtype=None,
+        extra_options={"dflash2_path": _draft_checkpoint(tmp_path), "dflash2_fuse_gate_up": fuse_gate_up},
+    )
 
     model.make_dflash2_model(str(tmp_path))
 
     assert captured["max_position"] == model.decoder.context_length
+    assert captured["fuse_gate_up"] is (str(fuse_gate_up).lower() == "true")
+
+
+def test_gate_up_fusion_defaults_off(tmp_path):
+    model = _composite()
+    model.make_dflash2_init(io_dtype=None, extra_options={"dflash2_path": _draft_checkpoint(tmp_path)})
+
+    assert model.dflash2_attrs["fuse_gate_up"] is False
+    builder = DFlash2Builder(model.dflash2_path, str(tmp_path), ir.DataType.BFLOAT16, 256, 128)
+    assert builder.mlp_attrs["fuse_gate_up"] is False
+
+
+@pytest.mark.parametrize("value", ["yes", "", 1, None])
+def test_gate_up_fusion_rejects_invalid_option(tmp_path, value):
+    model = _composite()
+    with pytest.raises(ValueError, match="dflash2_fuse_gate_up must be true or false"):
+        model.make_dflash2_init(
+            io_dtype=None,
+            extra_options={"dflash2_path": _draft_checkpoint(tmp_path), "dflash2_fuse_gate_up": value},
+        )
 
 
 def test_failed_save_preserves_existing_dflash2_files(tmp_path, monkeypatch):

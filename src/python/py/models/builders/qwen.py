@@ -1182,10 +1182,14 @@ class Qwen35MoEModel(MTPModel):
             if num_draft_tokens < 1:
                 raise ValueError("dflash2_num_draft_tokens must be a positive integer.")
 
+        fuse_gate_up = str(extra_options.get("dflash2_fuse_gate_up", False)).lower()
+        if fuse_gate_up not in ("true", "false"):
+            raise ValueError("dflash2_fuse_gate_up must be true or false.")
         self.dflash2_attrs = {
             "io_dtype": io_dtype,
             "num_draft_tokens": num_draft_tokens,
             "precision": self.block_drafter_precision(extra_options, "dflash2_precision"),
+            "fuse_gate_up": fuse_gate_up == "true",
         }
 
         with open(os.path.join(self.dflash2_path, "config.json"), encoding="utf-8") as handle:
@@ -1214,6 +1218,7 @@ class Qwen35MoEModel(MTPModel):
             self.decoder.context_length,
             num_draft_tokens=self.dflash2_attrs["num_draft_tokens"],
             quant=self.block_drafter_quant(self.dflash2_attrs["precision"]),
+            fuse_gate_up=self.dflash2_attrs["fuse_gate_up"],
         )
         self.dflash2.make_model()
 
