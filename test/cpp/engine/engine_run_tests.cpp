@@ -2100,6 +2100,243 @@ TEST_F(EngineRunTest, SampledSpeculativeRunKeepsAcceptedPrefixAndCorrection) {
   EXPECT_EQ(stats.draft_tokens_accepted, 2u);
 }
 
+TEST_F(EngineRunTest, GreedySpeculativeMinLengthMasksEosAndAcceptsNonEosDraft) {
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, filler);
+  engine.cache->SetMaxDraftTokensPerStep(3);
+  auto params = MakeGreedyParams(*model_);
+  params->search.min_length = static_cast<int>(Prompt(10).size() + 2);
+
+  auto request = CreateRequestWithPrompt(engine.engine, *params, Prompt(10));
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
+  ASSERT_FALSE(request->IsPrefill());
+  ASSERT_EQ(request->DraftTokenValidationError(), nullptr);
+
+  request->SetDraftTokens(std::vector<int32_t>{0});
+  engine.executor->SetVerifyRowTokens({eos, filler});
+
+  std::array<EngineEvent, 2> events;
+  ASSERT_EQ(engine.engine->Run(events), 2u);
+  EXPECT_EQ(events[0].token, 0);
+  EXPECT_EQ(events[1].token, filler);
+  EXPECT_EQ(request->status_, RequestStatus::Active);
+
+  const auto stats = engine.engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.rounds, 1u);
+  EXPECT_EQ(stats.draft_tokens_proposed, 1u);
+  EXPECT_EQ(stats.draft_tokens_evaluated, 1u);
+  EXPECT_EQ(stats.draft_tokens_accepted, 1u);
+}
+
+TEST_F(EngineRunTest, GreedySpeculativeMinLengthKeepsRawArgmaxWhenItIsNotEos) {
+  const int32_t eos = EosToken(*model_);
+  const int32_t draft = eos == 11 ? 12 : 11;
+  const int32_t bonus = eos == 13 ? 14 : 13;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5);
+  engine.cache->SetMaxDraftTokensPerStep(3);
+  auto params = MakeGreedyParams(*model_);
+  params->search.min_length = static_cast<int>(Prompt(10).size() + 2);
+
+  auto request = CreateRequestWithPrompt(engine.engine, *params, Prompt(10));
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
+
+  request->SetDraftTokens(std::vector<int32_t>{draft});
+  engine.executor->SetVerifyRowTokens({draft, bonus});
+
+  std::array<EngineEvent, 2> events;
+  ASSERT_EQ(engine.engine->Run(events), 2u);
+  EXPECT_EQ(events[0].token, draft);
+  EXPECT_EQ(events[1].token, bonus);
+
+  const auto stats = engine.engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.draft_tokens_proposed, 1u);
+  EXPECT_EQ(stats.draft_tokens_evaluated, 1u);
+  EXPECT_EQ(stats.draft_tokens_accepted, 1u);
+}
+
+TEST_F(EngineRunTest, GreedySpeculativeMinLengthRejectsEosDraftBeforeThreshold) {
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, filler);
+  engine.cache->SetMaxDraftTokensPerStep(3);
+  auto params = MakeGreedyParams(*model_);
+  params->search.min_length = static_cast<int>(Prompt(10).size() + 2);
+
+  auto request = CreateRequestWithPrompt(engine.engine, *params, Prompt(10));
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
+  const int64_t length_before = request->CurrentSequenceLength();
+
+  request->SetDraftTokens(std::vector<int32_t>{eos});
+  engine.executor->SetVerifyRowTokens({eos, filler});
+
+  std::array<EngineEvent, 2> events;
+  ASSERT_EQ(engine.engine->Run(events), 1u);
+  EXPECT_EQ(events[0].token, 0);
+  EXPECT_EQ(events[0].flags, EngineEventFlagToken);
+  EXPECT_EQ(request->status_, RequestStatus::Active);
+  EXPECT_EQ(request->CurrentSequenceLength(), length_before + 1);
+
+  const auto stats = engine.engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.rounds, 1u);
+  EXPECT_EQ(stats.draft_tokens_proposed, 1u);
+  EXPECT_EQ(stats.draft_tokens_evaluated, 1u);
+  EXPECT_EQ(stats.draft_tokens_accepted, 0u);
+}
+
+TEST_F(EngineRunTest, GreedySpeculativeMinLengthAllowsEosAtThreshold) {
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, filler);
+  engine.cache->SetMaxDraftTokensPerStep(3);
+  auto params = MakeGreedyParams(*model_);
+  params->search.min_length = static_cast<int>(Prompt(10).size() + 1);
+
+  auto request = CreateRequestWithPrompt(engine.engine, *params, Prompt(10));
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
+  const int64_t length_before = request->CurrentSequenceLength();
+
+  request->SetDraftTokens(std::vector<int32_t>{eos});
+  engine.executor->SetVerifyRowTokens({eos, filler});
+
+  std::array<EngineEvent, 2> events;
+  ASSERT_EQ(engine.engine->Run(events), 1u);
+  EXPECT_EQ(events[0].flags, EngineEventFlagTurnFinished);
+  EXPECT_EQ(events[0].finish_reason, GenerationFinishReason::EosToken);
+  EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
+  EXPECT_EQ(request->CurrentSequenceLength(), length_before);
+
+  const auto stats = engine.engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.rounds, 1u);
+  EXPECT_EQ(stats.draft_tokens_proposed, 1u);
+  EXPECT_EQ(stats.draft_tokens_evaluated, 1u);
+  EXPECT_EQ(stats.draft_tokens_accepted, 0u);
+}
+
+TEST_F(EngineRunTest, GreedySpeculativeMinLengthMasksEveryConfiguredEosToken) {
+  model_->config_->model.eos_token_id = {1, 2};
+  constexpr int32_t second_eos = 2;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5);
+  engine.cache->SetMaxDraftTokensPerStep(3);
+  auto params = MakeGreedyParams(*model_);
+  params->search.min_length = static_cast<int>(Prompt(10).size() + 2);
+
+  auto request = CreateRequestWithPrompt(engine.engine, *params, Prompt(10));
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
+
+  request->SetDraftTokens(std::vector<int32_t>{second_eos});
+  engine.executor->SetVerifyRowTokens({second_eos, 5});
+
+  std::array<EngineEvent, 2> events;
+  ASSERT_EQ(engine.engine->Run(events), 1u);
+  EXPECT_EQ(events[0].token, 0);
+  EXPECT_EQ(request->status_, RequestStatus::Active);
+
+  const auto stats = engine.engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.draft_tokens_proposed, 1u);
+  EXPECT_EQ(stats.draft_tokens_evaluated, 1u);
+  EXPECT_EQ(stats.draft_tokens_accepted, 0u);
+}
+
+TEST_F(EngineRunTest, SampledSpeculativeMinLengthMasksEosBeforeSelection) {
+  const int32_t eos = EosToken(*model_);
+  const int32_t draft = eos == 7 ? 8 : 7;
+  const int32_t bonus = eos == 9 ? 10 : 9;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5);
+  engine.cache->SetMaxDraftTokensPerStep(3);
+  auto params = MakeGreedyParams(*model_);
+  params->search.do_sample = true;
+  params->search.top_k = 2;
+  params->search.temperature = 0.01f;
+  params->search.random_seed = 1234;
+  params->search.min_length = static_cast<int>(Prompt(10).size() + 2);
+
+  auto request = CreateRequestWithPrompt(engine.engine, *params, Prompt(10));
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
+  ASSERT_EQ(request->DraftTokenValidationError(), nullptr);
+
+  request->SetDraftTokens(std::vector<int32_t>{draft});
+  engine.executor->SetVerifyRowTokenScores({
+      {{eos, 100.0f}, {draft, 90.0f}},
+      {{bonus, 100.0f}},
+  });
+
+  std::array<EngineEvent, 2> events;
+  ASSERT_EQ(engine.engine->Run(events), 2u);
+  EXPECT_EQ(events[0].token, draft);
+  EXPECT_EQ(events[1].token, bonus);
+  EXPECT_EQ(request->status_, RequestStatus::Active);
+
+  const auto stats = engine.engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.rounds, 1u);
+  EXPECT_EQ(stats.draft_tokens_proposed, 1u);
+  EXPECT_EQ(stats.draft_tokens_evaluated, 1u);
+  EXPECT_EQ(stats.draft_tokens_accepted, 1u);
+}
+
+TEST_F(EngineRunTest, SampledSpeculativeMinLengthReusesDeviceTopKWithoutEos) {
+  const int32_t eos = EosToken(*model_);
+  const int32_t draft = eos == 7 ? 8 : 7;
+  const int32_t bonus = eos == 9 ? 10 : 9;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/5);
+  engine.cache->SetMaxDraftTokensPerStep(3);
+  auto params = MakeGreedyParams(*model_);
+  params->search.do_sample = true;
+  params->search.top_k = 2;
+  params->search.temperature = 0.01f;
+  params->search.random_seed = 1234;
+  params->search.min_length = static_cast<int>(Prompt(10).size() + 2);
+
+  auto request = CreateRequestWithPrompt(engine.engine, *params, Prompt(10));
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
+
+  request->SetDraftTokens(std::vector<int32_t>{draft});
+  engine.executor->SetVerifyRowTokenScores({
+      {{draft, 100.0f}, {bonus, 90.0f}},
+      {{bonus, 100.0f}},
+  });
+
+  std::array<EngineEvent, 2> events;
+  ASSERT_EQ(engine.engine->Run(events), 2u);
+  EXPECT_EQ(events[0].token, draft);
+  EXPECT_EQ(events[1].token, bonus);
+
+  const auto stats = engine.engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.draft_tokens_proposed, 1u);
+  EXPECT_EQ(stats.draft_tokens_evaluated, 1u);
+  EXPECT_EQ(stats.draft_tokens_accepted, 1u);
+}
+
+TEST_F(EngineRunTest, SpeculativeMinLengthUsesAbsoluteLengthAcrossContinuationTurns) {
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, filler);
+  engine.cache->SetMaxDraftTokensPerStep(3);
+  auto params = MakeGreedyParams(*model_);
+  params->search.min_length = static_cast<int>(Prompt(10).size() + 4);
+
+  auto request = CreateEngineRequest(engine.engine, *params);
+  request->BeginTurn(Prompt(10), std::optional<size_t>{1});
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
+  ASSERT_EQ(request->status_, RequestStatus::TurnComplete);
+
+  request->BeginTurn(std::array<int32_t, 1>{9});
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
+  ASSERT_EQ(request->status_, RequestStatus::Active);
+
+  request->SetDraftTokens(std::vector<int32_t>{0});
+  engine.executor->SetVerifyRowTokens({eos, filler});
+
+  std::array<EngineEvent, 2> events;
+  ASSERT_EQ(engine.engine->Run(events), 2u);
+  EXPECT_EQ(events[0].token, 0);
+  EXPECT_EQ(events[1].token, filler);
+
+  const auto stats = engine.engine->GetSpeculativeStats();
+  EXPECT_EQ(stats.draft_tokens_proposed, 1u);
+  EXPECT_EQ(stats.draft_tokens_accepted, 1u);
+}
+
 TEST_F(EngineRunTest, SampledSpeculativeBatchHandlesMixedDraftLengths) {
   const int32_t eos = EosToken(*model_);
   const int32_t filler = eos == 5 ? 6 : 5;

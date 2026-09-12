@@ -365,6 +365,14 @@ bool Dflash2CanDraft(const Config::Search& search) {
   return !search.do_sample || search.top_k == 1 || search.temperature == 0;
 }
 
+bool Dflash2FeedsAreContextOnly(std::span<const Dflash2Drafter::Feed> feeds) {
+  return !feeds.empty() &&
+         std::none_of(feeds.begin(), feeds.end(),
+                      [](const Dflash2Drafter::Feed& feed) {
+                        return feed.wants_drafts;
+                      });
+}
+
 void Dflash2Drafter::AllocateCache() {
   const size_t layers = static_cast<size_t>(config_.num_hidden_layers);
   const std::vector<int64_t> shape{static_cast<int64_t>(num_blocks_),

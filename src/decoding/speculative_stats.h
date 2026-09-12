@@ -73,6 +73,7 @@ struct SpeculativeStats {
   float estimated_speedup{};
   float observed_speedup{};
   float adaptive_k_throughput{};
+  size_t dflash2_context_only_forward_passes{};
 };
 
 }  // namespace Generators

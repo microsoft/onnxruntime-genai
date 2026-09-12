@@ -389,6 +389,7 @@ struct ScriptedDecoderIO : DecoderIO {
                     const StepPlan* plan = nullptr,
                     std::span<const int32_t> row_tokens = {},
                     std::span<const int32_t> sampling_candidate_tokens = {},
+                    std::span<const std::vector<std::pair<int32_t, float>>> row_token_scores = {},
                     int64_t hidden_size = 0,
                     ONNXTensorElementDataType hidden_type = Ort::TypeToTensorType<float>)
       : DecoderIO(model, scheduled_requests, cache_manager),
@@ -406,8 +407,13 @@ struct ScriptedDecoderIO : DecoderIO {
     if (!row_tokens.empty() && row_tokens.size() != rows) {
       throw std::runtime_error("ScriptedDecoderIO: row token script does not cover every row.");
     }
-    if (!row_tokens.empty() && !sampling_candidate_tokens.empty()) {
-      throw std::runtime_error("ScriptedDecoderIO: row tokens and sampling candidates are mutually exclusive.");
+    if (!row_token_scores.empty() && row_token_scores.size() != rows) {
+      throw std::runtime_error("ScriptedDecoderIO: row token score script does not cover every row.");
+    }
+    if ((!row_tokens.empty() && !sampling_candidate_tokens.empty()) ||
+        (!row_tokens.empty() && !row_token_scores.empty()) ||
+        (!sampling_candidate_tokens.empty() && !row_token_scores.empty())) {
+      throw std::runtime_error("ScriptedDecoderIO: row token scripts and sampling candidates are mutually exclusive.");
     }
     row_count_ = rows;
     logits_ = std::make_unique<Tensor>(model->p_device_inputs_, Ort::TypeToTensorType<float>);
@@ -423,6 +429,15 @@ struct ScriptedDecoderIO : DecoderIO {
             throw std::runtime_error("ScriptedDecoderIO: sampling candidate out of vocabulary range");
           }
           cpu_span[static_cast<int64_t>(row) * vocab_size_ + token] = 100.0f;
+        }
+        continue;
+      }
+      if (!row_token_scores.empty()) {
+        for (const auto& [token, score] : row_token_scores[row]) {
+          if (token < 0 || token >= vocab_size_) {
+            throw std::runtime_error("ScriptedDecoderIO: scripted row token score out of vocabulary range");
+          }
+          cpu_span[static_cast<int64_t>(row) * vocab_size_ + token] = score;
         }
         continue;
       }
@@ -531,6 +546,7 @@ struct RecordingModelExecutor : ModelExecutor {
             model_, scheduled_requests, cache_manager_, forced_token_,
             failure == ScriptedExecutionFailure::PostProcessing,
             context.plan, verify_row_tokens_, sampling_candidate_tokens_,
+            verify_row_token_scores_,
             hidden_size_, hidden_type_));
     static_cast<void>(context);
   }
@@ -545,6 +561,9 @@ struct RecordingModelExecutor : ModelExecutor {
   }
   void SetSamplingCandidateTokens(std::vector<int32_t> tokens) {
     sampling_candidate_tokens_ = std::move(tokens);
+  }
+  void SetVerifyRowTokenScores(std::vector<std::vector<std::pair<int32_t, float>>> scores) {
+    verify_row_token_scores_ = std::move(scores);
   }
   bool SupportsDraftVerification() const override {
     return supports_draft_verification_;
@@ -575,6 +594,7 @@ struct RecordingModelExecutor : ModelExecutor {
   std::function<void(ExecutionContext&)> on_execute_;
   std::vector<int32_t> verify_row_tokens_;
   std::vector<int32_t> sampling_candidate_tokens_;
+  std::vector<std::vector<std::pair<int32_t, float>>> verify_row_token_scores_;
   bool supports_draft_verification_{true};
   int64_t hidden_size_{};
   ONNXTensorElementDataType hidden_type_{Ort::TypeToTensorType<float>};

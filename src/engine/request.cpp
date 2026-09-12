@@ -400,10 +400,8 @@ const char* Request::DraftTokenValidationError() const noexcept {
   if (search.do_sample && search.top_k != 1 && search.temperature != 0 && search.top_k <= 0) {
     return "Sampled speculative draft tokens require a positive top_k.";
   }
-  if (search.repetition_penalty != 1.0f || search.no_repeat_ngram_size > 0 ||
-      search.min_length > CurrentSequenceLength()) {
-    return "Speculative draft tokens require repetition_penalty 1, no_repeat_ngram_size 0, and a "
-           "sequence already past min_length.";
+  if (search.repetition_penalty != 1.0f || search.no_repeat_ngram_size > 0) {
+    return "Speculative draft tokens require repetition_penalty 1 and no_repeat_ngram_size 0.";
   }
   return nullptr;
 }

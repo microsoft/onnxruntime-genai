@@ -160,4 +160,8 @@ struct Dflash2Drafter {
   std::unique_ptr<OrtRunOptions> run_options_;
 };
 
+// True only for a real DFlash 2 proposal call whose served feeds keep the drafter context
+// contiguous but none ask for a candidate block.
+bool Dflash2FeedsAreContextOnly(std::span<const Dflash2Drafter::Feed> feeds);
+
 }  // namespace Generators

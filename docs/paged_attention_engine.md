@@ -422,9 +422,11 @@ token budget.
 
 The request must already belong to the Engine, have completed prefill, and be ready to decode.
 Verification supports greedy target selection and random target sampling with a positive `top_k`;
-proposals remain deterministic. Guidance,
-repetition penalty, no-repeat-ngram processing, and active minimum-length processing are not
-supported. Passing an empty sequence clears a pending proposal.
+proposals remain deterministic. Minimum length is enforced per draft verification row using the
+request's absolute sequence position: row `i` is evaluated at committed length `L + i`, and every
+configured EOS token is masked exactly when `L + i < min_length`, matching ordinary decoding.
+Guidance, repetition penalty, and no-repeat-ngram processing are not supported. Passing an empty
+sequence clears a pending proposal.
 
 For a decode with K scheduled drafts, the packed input is the request's one unprocessed token
 followed by the K drafts. The decoder must return K+1 logits rows for that request. Row `i` predicts
@@ -1350,6 +1352,13 @@ the target. Those in-flight requests finish without DFlash 2 drafts while reques
 afterwards still get them, and the retry budget is therefore spent on real drafter failures: three
 consecutive failures disable DFlash 2 for the Engine, and a proposal contract violation disables it
 at once. `dflash2_failures` and `dflash2_disables` report those events.
+
+`draft_forward_passes` counts DFlash 2 drafter model executions, including executions that only
+ingest newly committed target context to keep the drafter cache contiguous. A context-only execution
+has feeds but no feed with `wants_drafts=true`; it increments
+`dflash2_context_only_forward_passes` exactly once in addition to `draft_forward_passes`. A
+proposal-capable execution that asked for drafts but happened to return an empty proposal is not
+context-only.
 
 Automatic DFlash 2 drafting is greedy-only. A request that uses random sampling (`do_sample` with
 `top_k != 1` and a non-zero temperature) can never take a DFlash 2 block, so it is never fed to the

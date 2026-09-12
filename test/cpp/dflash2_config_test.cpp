@@ -3,12 +3,16 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <limits>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
+#include "decoding/speculative_stats.h"
 #include "dflash2_drafter.h"
+#include "ort_genai_c.h"
 
 namespace Generators::test {
 namespace {
@@ -361,6 +365,33 @@ TEST(Dflash2ConfigTest, DraftsOnlyForGreedyRequests) {
   search.top_k = 50;
   search.temperature = 0.0f;
   EXPECT_TRUE(Dflash2CanDraft(search));
+}
+
+TEST(Dflash2ConfigTest, ClassifiesContextOnlyProposalFeeds) {
+  Dflash2Drafter::Feed context_only;
+  context_only.wants_drafts = false;
+  const std::array context_only_feeds{context_only};
+  EXPECT_TRUE(Dflash2FeedsAreContextOnly(context_only_feeds));
+
+  Dflash2Drafter::Feed proposal = context_only;
+  proposal.wants_drafts = true;
+  const std::array proposal_feeds{proposal};
+  const std::array mixed_feeds{context_only, proposal};
+  EXPECT_FALSE(Dflash2FeedsAreContextOnly(proposal_feeds));
+  EXPECT_FALSE(Dflash2FeedsAreContextOnly(mixed_feeds));
+  EXPECT_FALSE(Dflash2FeedsAreContextOnly(std::span<const Dflash2Drafter::Feed>{}));
+}
+
+TEST(Dflash2ConfigTest, ExposesContextOnlyProposalCounterByName) {
+  SpeculativeStats stats;
+  stats.dflash2_context_only_forward_passes = 42;
+  uint64_t value{};
+
+  EXPECT_EQ(::OgaSpeculativeStatsGetCount(
+                reinterpret_cast<const ::OgaSpeculativeStats*>(&stats),
+                "dflash2_context_only_forward_passes", &value),
+            nullptr);
+  EXPECT_EQ(value, 42u);
 }
 
 }  // namespace Generators::test
