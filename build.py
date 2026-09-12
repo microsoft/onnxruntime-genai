@@ -1007,7 +1007,7 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
 
     build_dir.mkdir()
 
-    samples_to_build = ["-DMODEL_QA=ON", "-DMODEL_CHAT=ON", "-DMODEL_MM=ON", "-DWHISPER=ON", "-DNEMOTRON_SPEECH=ON"]
+    samples_to_build = ["-DMODEL_QA=ON", "-DMODEL_CHAT=ON", "-DMODEL_MM=ON", "-DWHISPER=ON", "-DMODEL_ASR=ON"]
 
     ort_include_dir = REPO_ROOT / "ort" / "include"
     ort_lib_dir = REPO_ROOT / "ort" / "lib"

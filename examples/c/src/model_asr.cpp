@@ -1,10 +1,20 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 //
-// nemotron_speech.cpp — Streaming ASR example using StreamingProcessor + Generator API.
+// model_asr.cpp — Streaming ASR example using the onnxruntime-genai
+// StreamingProcessor + Generator API.
+//
+// Drives any streaming encoder/decoder ASR model exposed through
+// onnxruntime-genai:
+//   * NVIDIA Nemotron streaming RNN-T (`nemotron_speech`, multilingual)
+//   * Moonshine streaming encoder-decoder (`streaming_enc_dec_asr`, English only)
+//
+// The runtime pipeline is identical for both: the StreamingProcessor factory
+// dispatches per `model.type`, and the Generator routes both through the
+// TransducerState path under the hood.
 //
 // Usage:
-//   ./nemotron_speech --model_path /path/to/nemotron-model --audio_file /path/to/audio.wav
+//   ./model_asr --model_path /path/to/model --audio_file /path/to/audio.wav
 
 #include <chrono>
 #include <cstring>

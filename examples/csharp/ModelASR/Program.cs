@@ -1,5 +1,17 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+//
+// Streaming ASR example using the onnxruntime-genai StreamingProcessor API.
+//
+// Drives any streaming encoder/decoder ASR model exposed through onnxruntime-genai:
+//   * NVIDIA Nemotron streaming RNN-T (`nemotron_speech`, multilingual)
+//   * Moonshine streaming encoder-decoder (`streaming_enc_dec_asr`, English only)
+//
+// The runtime pipeline is identical for both: the StreamingProcessor factory
+// dispatches per `model.type`, and the Generator routes both through the
+// TransducerState path under the hood.
+//
+// The `--use_vad` flag is Nemotron-specific; Moonshine has no VAD runtime knob.
 
 using CommonUtils;
 using Microsoft.ML.OnnxRuntimeGenAI;
@@ -8,7 +20,7 @@ using NAudio.Wave.SampleProviders;
 using System.Text.Json;
 
 if (args.Length < 2) {
-  Console.WriteLine("Usage: NemotronSpeech <model_path> <audio_file.wav> [execution_provider]");
+  Console.WriteLine("Usage: ModelASR <model_path> <audio_file.wav> [execution_provider]");
   return;
 }
 
