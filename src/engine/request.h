@@ -607,12 +607,6 @@ struct Request : std::enable_shared_from_this<Request>,
   // MarkFinalStageAsEvaluatedNonAcceptedDraft/CommitAcceptedDraftsForTransaction for how each path
   // advances it.
   size_t evaluated_draft_count_{};
-  // Capture terminal EOS before another request can reuse the batched sampler's next-token slot.
-  // CommitAcceptedDraftsForTransaction() also records a stop-string match when one ends greedy
-  // draft verification early, giving StopString precedence over the turn/context limit for the
-  // same completing token. The sampled/batched path observes stop matches through the same
-  // StageGenerationForTransaction()/StageGeneration() path the ordinary one-token step uses, one
-  // stage at a time, so it needs no separate bookkeeping here.
   struct DraftVerificationState {
     bool completed_generation{};
     bool eos{};
@@ -620,6 +614,12 @@ struct Request : std::enable_shared_from_this<Request>,
 
     void Reset() noexcept { *this = DraftVerificationState{}; }
   };
+  // Capture terminal EOS before another request can reuse the batched sampler's next-token slot.
+  // CommitAcceptedDraftsForTransaction() also records a stop-string match when one ends greedy
+  // draft verification early, giving StopString precedence over the turn/context limit for the
+  // same completing token. The sampled/batched path observes stop matches through the same
+  // StageGenerationForTransaction()/StageGeneration() path the ordinary one-token step uses, one
+  // stage at a time, so it needs no separate bookkeeping here.
   //
   // StageDraftCompletionForTransaction() only ever reads this state (and accepted_draft_count_)
   // to compute its result; it never resets or otherwise mutates it. Only transaction/turn-lifecycle
@@ -629,7 +629,7 @@ struct Request : std::enable_shared_from_this<Request>,
   // transaction also uses the batched sampler (once from the batched-sampling setup loop, once
   // unconditionally from the final per-request loop), and both calls must produce the exact same
   // result.
-  DraftVerificationState draft_verification_;
+  DraftVerificationState draft_verification_{};
   std::shared_ptr<GeneratorParams> params_;
   // Durable seed basis every RNG stream of this Request starts from. Initialized once from the
   // model-configured seed (a generated 64-bit value when the model leaves it unset) and advanced
