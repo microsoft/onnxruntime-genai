@@ -137,6 +137,143 @@ class StopStringEngineTest : public ::testing::Test {
 // Request-level transactional behavior (direct Search/logits driving, no Engine::Run involved).
 // ---------------------------------------------------------------------------------------------
 
+// Exercise CUDA's shared next-token-slot lifetime with real CPU EOS/search semantics.
+class SharedSlotSearch final : public GreedySearch_Cpu {
+ public:
+  using GreedySearch_Cpu::GreedySearch_Cpu;
+  bool BindNextTokensSlot(DeviceSpan<int32_t> slot) override {
+    if (params_->BatchBeamSize() != 1 || slot.size() != 1)
+      return false;
+    next_tokens_ptr_ = slot;
+    next_tokens_ = cpu_span<int32_t>(slot.Span());
+    return true;
+  }
+};
+
+class SharedSlotDevice final : public DeviceInterface {
+ public:
+  explicit SharedSlotDevice(DeviceInterface& inner) : inner_{inner} {}
+  DeviceType GetType() const override { return inner_.GetType(); }
+  void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
+    inner_.InitOrt(api, allocator);
+  }
+  Ort::Allocator& GetAllocator() override { return inner_.GetAllocator(); }
+  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
+    return inner_.GetMemoryInfo();
+  }
+  std::string GetExecutionProviderName() const override {
+    return inner_.GetExecutionProviderName();
+  }
+  std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
+    return inner_.AllocateBase(size);
+  }
+  std::shared_ptr<DeviceBuffer> WrapMemoryBase(void* memory, size_t size) override {
+    return inner_.WrapMemoryBase(memory, size);
+  }
+  std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override {
+    return std::make_unique<SharedSlotSearch>(params);
+  }
+  std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override {
+    return inner_.CreateBeam(params);
+  }
+  std::unique_ptr<KeyValueCache> CreateKeyValueCache(State&) override { return {}; }
+  void Synchronize() override { inner_.Synchronize(); }
+
+ private:
+  DeviceInterface& inner_;
+};
+
+TEST_F(StopStringEngineTest, AcceptedDraftEosSurvivesCompactedSharedSlotAndRollback) {
+  SharedSlotDevice device{*model_->p_device_scoring_};
+  ScopedScoringDevice scoring{*model_, device};
+  for (const size_t eos_position : {size_t{0}, size_t{1}}) {
+    for (const bool queued_restore : {false, true}) {
+      SCOPED_TRACE(::testing::Message() << "EOS position " << eos_position
+                                        << ", queued restore " << queued_restore);
+      auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/11);
+      engine.cache->SetMaxDraftTokensPerStep(3);
+      auto request = CreateEngineRequest(engine.engine);
+      auto survivor = CreateEngineRequest(engine.engine);
+      request->BeginTurn(Prompt(), StopOptions({"STOP"}));
+      survivor->BeginTurn(Prompt());
+      std::array<EngineEvent, 8> storage;
+      ASSERT_EQ(engine.engine->Run(storage), 2u);
+
+      auto slots = model_->p_device_scoring_->Allocate<int32_t>(2);
+      ASSERT_TRUE(request->BindNextTokensSlot(slots.subspan(0, 1)));
+      ASSERT_TRUE(survivor->BindNextTokensSlot(slots.subspan(1, 1)));
+      std::array<int32_t, 3> drafts{11, 12, 13};
+      drafts[eos_position] = EosToken(*model_);
+      request->SetDraftTokens(drafts);
+      RequestStepPlan plan;
+      plan.request = request;
+      plan.request_id = request.get();
+      plan.sequence_length_before = request->CurrentSequenceLength();
+      plan.target_cache_slots = static_cast<size_t>(plan.sequence_length_before) + drafts.size();
+      plan.draft_token_count = drafts.size();
+      PrepareRequestStep(model_, plan);
+
+      for (int attempt = 0; attempt < 2; ++attempt) {
+        request->SaveStateForTransaction();
+        request->AppendDraftsForTransaction(drafts.size());
+        request->CommitAcceptedDraftsForTransaction(drafts.size());
+        ASSERT_TRUE(request->DraftVerificationCompletedGeneration());
+        EXPECT_EQ(request->AcceptedDraftTokenCount(), eos_position);
+        EXPECT_EQ(request->StageDraftCompletionForTransaction().finish_reason,
+                  GenerationFinishReason::EosToken);
+        EXPECT_EQ(slots.CpuSpan()[0], EosToken(*model_));
+
+        // The finished first row is removed; the surviving second row reuses its slot before
+        // ScheduledRequests stages the finished request a second time.
+        survivor->SaveStateForTransaction();
+        ASSERT_TRUE(survivor->BindNextTokensSlot(slots.subspan(0, 1)));
+        const auto surviving = survivor->ApplyLogitsForTransaction(LogitsForToken(*model_, 12));
+        EXPECT_TRUE(surviving.token_appended);
+        EXPECT_FALSE(surviving.done);
+        ASSERT_EQ(slots.CpuSpan()[0], 12);
+        const auto completed = request->StageDraftCompletionForTransaction();
+        EXPECT_EQ(completed.finish_reason, GenerationFinishReason::EosToken);
+        EXPECT_FALSE(completed.token_appended);
+        EXPECT_EQ(completed.matched_stop_string_index, -1);
+        survivor->RestoreStateForTransaction();
+
+        if (attempt == 0) {
+          if (queued_restore) {
+            request->QueueStateRestoreForTransaction();
+            request->CompleteStateRestoreForTransaction();
+          } else {
+            request->RestoreStateForTransaction();
+          }
+          EXPECT_FALSE(request->DraftVerificationCompletedGeneration());
+          EXPECT_EQ(request->AcceptedDraftTokenCount(), 0u);
+          EXPECT_EQ(request->PendingDraftTokenCount(), drafts.size());
+        } else {
+          request->CommitStateForTransaction();
+          request->CommitStep(plan, completed);
+        }
+      }
+      EXPECT_EQ(request->FinishReason(), GenerationFinishReason::EosToken);
+      EXPECT_FALSE(request->DraftVerificationCompletedGeneration());
+
+      // A new non-EOS turn must not inherit the previous transaction's terminal EOS.
+      request->BeginTurn(std::array<int32_t, 1>{11}, StopOptions({"UNREACHABLE"}, 2));
+      ASSERT_GT(engine.engine->Run(storage), 0u);
+      request->SetDraftTokens(std::array<int32_t, 1>{12});
+      plan.sequence_length_before = request->CurrentSequenceLength();
+      plan.target_cache_slots = static_cast<size_t>(plan.sequence_length_before) + 1;
+      plan.draft_token_count = 1;
+      PrepareRequestStep(model_, plan);
+      request->SaveStateForTransaction();
+      request->AppendDraftsForTransaction(1);
+      request->CommitAcceptedDraftsForTransaction(1);
+      ASSERT_TRUE(request->DraftVerificationCompletedGeneration());
+      EXPECT_EQ(request->StageDraftCompletionForTransaction().finish_reason,
+                GenerationFinishReason::TurnLimit);
+      request->RestoreStateForTransaction();
+    }
+  }
+}
+
 TEST_F(StopStringEngineTest, NoStopStringsPreserveOrdinaryGenerationBehavior) {
   // Exercise the no-stop path entirely through the public request and event contract.
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, /*forced_token=*/8 /* "AB" */);
