@@ -145,6 +145,18 @@ python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o pa
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p int4 -e execution_provider -c cache_dir_to_store_temp_files
 ```
 
+#### 2-bit (INT2) pre-quantized MoE
+
+For a model whose MoE experts have already been quantized to 2-bit with [AMD Quark](https://quark.docs.amd.com/) (group-wise `uint2`), pass `-p int2`. The builder consumes the pre-quantized expert weights, scales, and zero-points directly (no float re-quantization) and emits a fused `QMoE` op with `expert_weight_bits=2`. This path is currently exercised by the Gemma 4 MoE (`gemma-4-26B-A4B-it`) text model on the CPU execution provider.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p int2 -e cpu -c cache_dir_to_store_temp_files
+
+# From source:
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p int2 -e cpu -c cache_dir_to_store_temp_files
+```
+
 ### GGUF Model
 
 This scenario is where your float16/float32 GGUF model is already on disk.
