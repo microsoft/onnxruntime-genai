@@ -243,10 +243,23 @@ def test_rewind_cuda(test_data_path, relative_model_path):
     while not generator.is_done():
         generator.generate_next_token()
 
-    assert generator.get_sequence(0) is not None
+    expected_sequence = np.copy(generator.get_sequence(0))
+    rewind_length = 3
+    boundary_prefix = expected_sequence[: rewind_length + 1]
+    control = og.Generator(model, search_params)
+    control.append_tokens(boundary_prefix[np.newaxis, :])
+    control_logits = np.copy(control.get_logits())
 
-    generator.rewind_to(3)
+    generator.rewind_to(rewind_length)
+    actual_logits = np.copy(generator.get_logits())
+    assert np.allclose(control_logits, actual_logits, rtol=0, atol=1e-6)
+    assert np.array_equal(boundary_prefix, generator.get_sequence(0))
 
+    control.generate_next_token()
+    generator.generate_next_token()
+    assert np.array_equal(control.get_sequence(0), generator.get_sequence(0))
+
+    generator.rewind_to(rewind_length)
     generator.append_tokens(np.array([[731, 731]], dtype=np.int32))
     while not generator.is_done():
         generator.generate_next_token()
