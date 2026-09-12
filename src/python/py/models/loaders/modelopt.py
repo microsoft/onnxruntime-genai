@@ -176,6 +176,13 @@ class ModeloptModel(QuantizedModel):
             module.bias = bias
         return module
 
+    def make_dense_linear_module(self, base):
+        module = self.make_linear_module(base)
+        if module.quant_type == "none":
+            return module
+        weight = self.dequantize_tensor(module.weight, module.weight_scale, module.weight_scale_2, f"{base}.weight")
+        return TensorModule(weight=weight, bias=module.bias)
+
     def make_tensor_module(self, name):
         module = TensorModule()
         module.weight = self.get_tensor(name)
@@ -254,8 +261,8 @@ class ModeloptModel(QuantizedModel):
             la = SimpleNamespace()
             la.in_proj_qkv = self.make_linear_module(f"{prefix}.linear_attn.in_proj_qkv")
             la.in_proj_z = self.make_linear_module(f"{prefix}.linear_attn.in_proj_z")
-            la.in_proj_a = self.make_linear_module(f"{prefix}.linear_attn.in_proj_a")
-            la.in_proj_b = self.make_linear_module(f"{prefix}.linear_attn.in_proj_b")
+            la.in_proj_a = self.make_dense_linear_module(f"{prefix}.linear_attn.in_proj_a")
+            la.in_proj_b = self.make_dense_linear_module(f"{prefix}.linear_attn.in_proj_b")
             la.in_proj_a.exclude_from_quantization = True
             la.in_proj_b.exclude_from_quantization = True
             la.out_proj = self.make_linear_module(f"{prefix}.linear_attn.out_proj")

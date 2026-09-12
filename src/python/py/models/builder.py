@@ -154,6 +154,8 @@ def check_extra_options(
         "prune_lm_head",
         "use_paged_attention",
         "windowed_kv_cache",
+        "use_device_allocator_for_initializers",
+        "exclude_mtp",
     ]
 
     for key in bools:
@@ -207,7 +209,7 @@ def check_extra_options(
                 "use_paged_attention cannot be combined with " + ", ".join(incompatible_options) + "."
             )
 
-        for key in ("paged_block_size", "paged_chunk_size", "max_batch_size"):
+        for key in ("paged_block_size", "paged_chunk_size", "max_batch_size", "max_scheduled_tokens", "num_blocks"):
             if key not in extra_options:
                 continue
             try:
@@ -231,6 +233,19 @@ def check_extra_options(
             if not 0 < gpu_utilization_factor <= 1:
                 raise ValueError("gpu_utilization_factor must be greater than 0 and at most 1.")
             extra_options["gpu_utilization_factor"] = gpu_utilization_factor
+
+        # `num_blocks` pins the cache instead of deriving it from free memory, so a
+        # utilization factor would be silently ignored.
+        if "num_blocks" in extra_options and "gpu_utilization_factor" in extra_options:
+            raise ValueError("num_blocks and gpu_utilization_factor are mutually exclusive.")
+    else:
+        engine_only_options = [
+            key for key in ("max_scheduled_tokens", "num_blocks") if key in extra_options
+        ]
+        if engine_only_options:
+            raise ValueError(
+                ", ".join(engine_only_options) + " require use_paged_attention=true."
+            )
 
     if "hf_token" in extra_options:
         extra_options["hf_token"] = parse_hf_token(extra_options["hf_token"])
@@ -312,6 +327,12 @@ def check_extra_options(
                 f"Got execution_provider='{execution_provider}'."
             )
         extra_options["kv_cache_quant_scheme"] = quant_scheme
+
+    if "kv_cache_rotation" in extra_options:
+        rotation = extra_options["kv_cache_rotation"].lower()
+        if rotation not in {"none", "hadamard"}:
+            raise ValueError("kv_cache_rotation must be none or hadamard.")
+        extra_options["kv_cache_rotation"] = rotation
 
     # Get Hugging Face details and temporarily set in extra options for use in `create_model`
     hf_details = get_hf_details(model_name, input_path, cache_dir, extra_options)
@@ -683,7 +704,7 @@ def get_args():
                     Default is -1.
                 matmulnbits_weights_prepacked = 0/1/2: Specify the CUDA MatMulNBits (int4/int8) weight layout.
                     0 exports raw blockwise weights, 1 exports the SM80/Ampere fpA_intB prepacked layout, and 2 exports the SM90/Hopper fpA_intB prepacked layout.
-                    Only applies to the CUDA EP. An offline-prepacked model must be run with ORT_FPA_INTB_GEMM enabling the relevant nbits.
+                    Only applies to the CUDA EP. Eligible prepacked nodes select fpA_intB automatically; the builder enables it for any ineligible nodes left in raw layout.
                     Default is 0.
                 is_symmetric = Quantize the weights symmetrically. Default is true.
                     If true, quantization is done to int4/int8. If false, quantization is done to uint4/uint8.
@@ -739,6 +760,11 @@ def get_args():
                 exclude_lm_head = Remove language modeling head from your ONNX model.
                     Use this option when you want to remove the language modeling head from within your ONNX model.
                     Instead of `logits`, you will have `hidden_states` as the output to your ONNX model.
+                exclude_mtp = Skip the MTP head for a checkpoint that declares one. Default is false.
+                    The exported MTP workflow requires per-token logits from the main LM head, so this is
+                    how a checkpoint with `mtp_num_hidden_layers > 0` is built with prune_lm_head or
+                    exclude_lm_head. A block drafter (dflash2_path/dspark_path) already supersedes the head
+                    and does not need this option.
                 prune_lm_head = Prune the LM head to only compute last-token logits during prefill. Default is false.
                     When enabled for standard models, inserts Gather+Unsqueeze so the MatMul input is [B,1,H] instead
                     of [B,S,H]. For paged-attention models, gathers the final packed hidden state for each sequence so
@@ -759,6 +785,16 @@ def get_args():
                 dflash2_num_draft_tokens = Override the number of draft tokens the DFlash 2 block
                     drafter proposes per step. Must be positive and no greater than the draft checkpoint's
                     block size minus its anchor token. That checkpoint limit is the default.
+                dflash2_precision = Weight precision for the DFlash 2 drafter body: bf16 (default),
+                    int4, or int8. bf16 keeps every projection dense. int4/int8 emit `MatMulNBits`
+                    at the target's block size for the attention and MLP projections, leaving the
+                    small dynamic-convolution and candidate-selector projections dense. The BF16
+                    body uses plain blockwise weights because fpA-intB requires FP16 activations.
+                    Body activations and KV caches remain bf16; this option does not quantize the
+                    drafter's KV cache. When the target LM head uses a reproducible symmetric default
+                    layout, the drafter head uses its actual bit width, block size, initializer names,
+                    and prepack mode when eligible so `share_initializers` can fold it onto the target's
+                    copy. Dense or unsupported target LM-head layouts keep the drafter head dense.
                 dspark_path = Path to a DSpark draft checkpoint. Exports an auxiliary `dspark.onnx`
                     block drafter beside the target model and adds a `dspark` section to
                     genai_config.json. Mutually exclusive with dflash2_path. Requires
@@ -810,6 +846,16 @@ def get_args():
                     Must be greater than 0 and at most 1.
                 max_batch_size = Maximum number of requests in a dynamic batch. Default is 100.
                     Must be a positive integer no greater than 256.
+                max_scheduled_tokens = Maximum number of tokens the engine schedules into one forward pass.
+                    Must be a positive integer and requires use_paged_attention=true. Written to the
+                    `engine.dynamic_batching` section of genai_config.json. Bounds the peak prefill
+                    activation, which is the largest transient in a long-context deployment.
+                    Default is unset, which lets the runtime pick.
+                num_blocks = Pin the paged KV-cache to an exact number of blocks instead of deriving it from
+                    free GPU memory. Must be a positive integer, requires use_paged_attention=true, and is
+                    mutually exclusive with gpu_utilization_factor. Written to the `engine.dynamic_batching`
+                    section of genai_config.json. The reachable context is num_blocks * paged_block_size
+                    tokens. Default is unset.
                 shared_embeddings = Enable weight sharing between embedding and LM head layers. Default is false.
                     Use this option to share weights and reduce model size by eliminating duplicate weights.
                     Shares quantized weights using GatherBlockQuantized and shares unquantized weights using Gather.
@@ -824,6 +870,10 @@ def get_args():
                 enable_webgpu_graph = Enable WebGPU graph capture during inference. Default is false.
                     If enabled, the model structure will be optimized for WebGPU graph execution.
                     This affects attention mask reformatting and position IDs handling.
+                use_device_allocator_for_initializers = Write `session.use_device_allocator_for_initializers=1` into
+                    the decoder's session options. Default is false. Initializers then bypass the arena, so the
+                    originals a kernel replaces during PrePack (notably the fpA_intB MatMulNBits layout conversion)
+                    are returned to the driver instead of being retained as free arena blocks.
                 use_qdq = Use the QDQ decomposition for ops.
                     Use this option when you want to use quantize-dequantize ops. For example, you will have a quantized MatMul op instead of the MatMulNBits op.
                 moe_quant_type = int4/int8/mxfp4/nvfp4: Quantization scheme for MoE (QMoE) layers. Default is int4.
@@ -841,14 +891,18 @@ def get_args():
                 use_8bits_moe = [DEPRECATED] Use 'moe_quant_type=int8' instead. Use 8-bit quantization for MoE layers. Default is false.
                     If true, the QMoE op will use 8-bit quantization. If false, the QMoE op will use 4-bit quantization.
                 kv_cache_quant_scheme = Quantization scheme for the KV cache. Default is 'none' (no quantization).
-                    Supported values: none, int8_per_tensor, int8_per_channel, int4_per_tensor, int4_per_channel, fp8_per_tensor, fp8_per_channel.
+                    Supported values: none, int8_per_tensor, int8_per_channel, int8_per_token, int4_per_tensor, int4_per_channel, int4_per_token, fp8_per_tensor, fp8_per_channel.
                     The `int8`/`int4`/`fp8` prefix selects the KV cache bit width and the `per_tensor`/`per_channel` suffix selects the scale granularity.
                     Quantized KV cache is only supported for the CPU and CUDA execution providers.
-                    When combined with use_paged_attention=true, only the int8_* and fp8_* schemes are supported
-                    (PagedAttention has no sub-byte cache backend, so int4_* is rejected).
-                kv_cache_scale_file = Path to a JSON file with calibrated per-layer KV cache scales. Required when kv_cache_quant_scheme is enabled.
+                    Per-token schemes require CUDA PagedAttention and use dynamic FP16 scale caches, without calibration.
+                    Paged INT4 requires an ORT build with onnxruntime_USE_INT4_KV_CACHE=ON.
+                kv_cache_rotation = none (default) or hadamard. CUDA PagedAttention only, with head size 16, 32, 64, 128, or 256.
+                    Rotates Q/K after norm and RoPE, rotates V, and inversely rotates the output. Not compatible with per-channel scales.
+                kv_cache_scale_file = Path to calibrated per-layer KV cache scales. Required for static quantized schemes; forbidden for per-token schemes.
                     Format: {"scales": {"k_scales": [...per layer...], "v_scales": [...per layer...]}, "layer_ids": [...optional model layer IDs...]}.
                     Each per-layer entry is a scalar (per_tensor) or a length-(num_kv_heads * head_size) vector (per_channel).
+                    An optional "qmax" records the divisor the file was calibrated with (128 for int8, 8 for int4, 448 for fp8);
+                    the builder then rescales to the requested scheme, so one file can serve several bit widths.
                 disable_qkv_fusion = Disable QKV fusion in the model. Default is false.
                     If true, the model will not fuse the Q, K, and V projections. Automatically assumed for certain EPs.
                 fuse_qk_norm_gqa = Enable QK Norm GQA fusion for CUDA and WebGPU. Default is true.

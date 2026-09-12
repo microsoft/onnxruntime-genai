@@ -121,7 +121,7 @@ Configuration loading rejects unknown kinds, malformed decoder templates, duplic
 
 When an explicit manifest is present, model loading resolves each group's decoder templates, expands every name, and verifies that its decoder input and output exist with compatible dtype and shape. Paged tensors must also have compatible rank-four geometry throughout their group.
 
-The dynamic Engine requires exactly one `paged_kv` group. It allocates cache tensors only for that group's logical layer IDs, expands their exact binding names without renumbering, derives the cache dtype from the first validated key input, and sizes an automatic block pool using the number of participating full-attention layers after reserving storage for participating sliding-window layers. Every configured sliding-window layer must belong to the paged group. Multiple paged groups are rejected because the Engine currently owns one shared paged pool. The synthesized legacy group preserves dense sequential behavior when no explicit manifest exists.
+The dynamic Engine requires exactly one `paged_kv` group. It allocates cache tensors only for that group's logical layer IDs, expands their exact binding names without renumbering, and sizes an automatic block pool using the number of participating full-attention layers after reserving storage for participating sliding-window layers. The cache element type is resolved by requiring every key/value binding of every participating layer — past input and present output alike — to report the same type; a disagreement is rejected at construction. This is checked in the cache itself rather than delegated to manifest validation, because byte accounting reads the type per layer while allocation commits to one type for the whole pool, and a mismatch would silently size the pool for one element width and allocate another. Every configured sliding-window layer must belong to the paged group. Multiple paged groups are rejected because the Engine currently owns one shared paged pool. The synthesized legacy group preserves dense sequential behavior when no explicit manifest exists.
 
 `fixed_conv` and `fixed_recurrent` groups may accompany the required `paged_kv` group. `ValidateDynamicEngineCompatibility` accepts them (it still rejects any configuration without exactly one `paged_kv` group), and `PagedCacheManager` constructs a `FixedStatePool` with `max_batch_size` slots when at least one fixed group is present. The composite manager reserves and commits fixed slots together with the paged blocks (see "Fixed request-state pools" below), while `HybridDecoderIO` binds either direct bank views or gathered/staged fallback tensors alongside the packed variable-length inputs. Expanded fixed bindings must resolve to real session inputs and outputs; the pool rejects absent or incompatible bindings.
 
@@ -1287,6 +1287,74 @@ generations reject overlapping reservations that allocate, free, or advance bloc
 and reservation mutation paths can advance occupancy, and each records the change in the pool
 generation.
 
+## Per-token quantized scale caches
+
+A model whose paged KV cache is quantized per token stores one scale per (block, slot, KV head) alongside the packed key and value payload. The Engine owns these scale buffers exactly as it owns the key and value caches.
+
+### Configuration surface
+
+Four decoder templates declare them, each containing exactly one `%d` for the logical layer ID:
+
+- `model.decoder.inputs.past_key_scale_names`, `model.decoder.outputs.present_key_scale_names`
+- `model.decoder.inputs.past_value_scale_names`, `model.decoder.outputs.present_value_scale_names`
+
+The past and present template of a side are required as a pair: declare both or neither. A side with only one of the two is rejected at construction. Binding only the past name would let ORT allocate a separate buffer for the graph's present output, so the scales a step produced would be discarded and the next step would dequantize the block it had just written against stale data. The two sides are independent — a model may bind key scales and leave value scales unbound.
+
+Each scale template must also expand to names distinct from every key, value, and other scale name bound for the group; a collision is rejected.
+
+An Engine-hosted MTP head does not support per-token quantized caches. The head is always an unquantized full-attention layer, there is no `model.mtp` scale-name configuration surface, and a config that tries to declare one is rejected as an unknown key. Because `CreateMtpDecoderConfig()` projects a copy of the target configuration, it clears all four scale templates on the projected decoder; otherwise a quantized target would make the head's sizing and binding look up scale tensor names that exist only in the target session. A block drafter is likewise unsupported: `ValidateDflash2ModelCompatibility()` rejects a non-empty `model.dflash2` scale template, because `Dflash2Drafter::AllocateCache()` builds only key and value buffers from the drafter's logical head size and would leave a declared scale input unbound.
+
+### Shape, addressing, and type
+
+A scale tensor has rank three, `[num_blocks, block_size, num_kv_heads]` — the key/value shape with the trailing head-width dimension dropped. Block and slot addressing is therefore identical, and the block table the model already receives indexes the payload and its scales the same way. The scale tensors are additional model inputs and outputs, but they require no additional indexing input.
+
+Validation of each declared scale binding checks, with a distinct message per failure:
+
+- Rank three.
+- Dimension 1 equal to `engine.dynamic_batching.block_size` and dimension 2 equal to `model.decoder.num_key_value_heads`, when the graph resolves them. A negative dimension is symbolic and is accepted; allocation resolves it from the configured geometry. The model builder emits `["num_blocks", "block_size", num_kv_heads]`, so the leading two dimensions are normally symbolic.
+- Element type `float16` or `float32`.
+- The present output exists, has the same element type as the past input, and has a wildcard-compatible shape. Shape comparison uses `StateShapesCompatible()`, the same rule every other shared model-state binding uses: a symbolic dimension on either side matches a resolved one.
+- Dimension 0, when resolved, equal to the block count actually allocated for that layer.
+
+The scale type is resolved per layer and per side and may differ from the key/value type — a `uint8` packed cache with `float16` scales is the expected combination. The key/value type must be uniform across the whole group; scale types need not be.
+
+Scale bindings are validated by the paged cache, not by `ModelStateManifest`. `StateBindingsFor(PagedKeyValue)` still returns only the key and value templates, so scale tensors do not participate in manifest rank and geometry validation.
+
+### Ownership, aliasing, and initialization
+
+The Engine allocates one buffer per (layer, declared side) from the KV-cache allocator, wraps it in an `OrtValue`, and holds it for the lifetime of the cache. Every step binds that one `OrtValue` as both the past input and the present output, exactly as it does for key and value caches, so the model updates scales in place. The buffer is never reallocated between steps and its device pointer is stable for the life of the cache.
+
+Each buffer is zeroed once at allocation. Blocks are not re-zeroed when they are freed and handed to another request: a slot's scale is only read after the model has written that slot, which is the same rule the key and value payload already follows.
+
+Binding layout, in `BindCache()`:
+
+| Range | Contents |
+| --- | --- |
+| `[0, 2L)` | Key and value caches, key before value, in layer order, for `L` participating layers |
+| `[2L, 2L + S)` | Scale caches, key before value, in layer order, skipping undeclared sides, for `S` scale buffers |
+| `[2L + S, ...)` | Block table, then the windowed block table when the model has one |
+
+Model inputs and outputs share the first two ranges; only the block tables are input-only. The block table index is therefore `cache_.size() * 2 + scale_cache_.size()`.
+
+### Sizing
+
+`PagedKeyValueCacheBytesPerBlock()` returns what one block costs across every full-attention layer of the paged group. Per layer:
+
+```
+block_size * num_kv_heads * (key_head_width + value_head_width) * sizeof(kv_type)
+  + block_size * num_kv_heads * sizeof(scale_type)   for each declared scale side
+```
+
+`key_head_width` and `value_head_width` are the trailing dimensions the graph declares, not `model.decoder.head_size`. A 4-bit cache packs two elements per byte, so its physical width is half the logical head size, and reading the graph is what keeps sizing correct for both packed and unpacked caches. Every multiplication is overflow-checked.
+
+The resulting per-block cost feeds `ComputePagedBlockCapacityFromBytes()`, which divides the memory budget after the fragmentation allowance, the utilization factor, reserved fixed-state bytes, and any auxiliary per-block cost from an MTP head or block drafter. Scales therefore reduce the block count directly: with `block_size 4`, one KV head, unpacked `float32` key and value of width 1, and two `float16` scale sides, a layer costs 32 bytes per block without scales and 48 with them, so the same budget holds two-thirds as many blocks.
+
+### Sliding-window layers
+
+Scale caches follow their layer's mapping. A windowed layer's scale tensor is allocated with `num_window_blocks` leading entries and a full-attention layer's with `num_blocks`, matching that layer's key and value tensors, and each is indexed by the block table that layer already uses — the windowed block table for ring layers, the primary block table for the rest.
+
+The two budgets stay separate in the same way. `PagedKeyValueCacheBytesPerBlock()` skips windowed layers entirely, and the windowed reservation is computed as `num_window_blocks * BytesPerBlock(layer)` per windowed layer, which includes that layer's scale bytes. Windowed storage is taken off the top before the full-attention block count is derived, so a quantized windowed layer shrinks the ring's budget rather than the full-attention pool's per-block cost.
+
 ## Sliding-window paged layers
 
 The runtime can store selected sliding-window layers in a fixed ring instead of growing their KV
@@ -1673,6 +1741,7 @@ The document needs review when a change affects any of the following:
 - Admission order, fairness, preemption, or prefill chunking.
 - Batch planning or packed token layout.
 - Cache block accounting, reservation, commit, release, or eviction.
+- Paged cache buffer ownership, per-block byte accounting, or input/output aliasing, including the per-token quantized scale caches.
 - Model inputs required by paged attention.
 - Sampling, logits processing, or random-state ownership.
 - Transaction checkpoints, rollback, failure classification, or commit ordering.
@@ -1681,4 +1750,4 @@ The document needs review when a change affects any of the following:
 
 Prefer describing current behavior directly. If a design is proposed but not implemented, label it clearly as future work or keep it in a separate design document. Remove or revise statements that stop matching the code.
 
-Tests under `test/cpp/engine/` provide focused coverage for scheduler planning, paged-cache resources, request and cache invariants, transaction rollback, fatal failures, and Engine-event draining. When behavior changes, update both the tests and this document so they continue to describe the same contract.
+Tests under `test/cpp/engine/` provide focused coverage for scheduler planning, paged-cache resources, per-token scale-cache validation, sizing, and input/output aliasing, request and cache invariants, transaction rollback, fatal failures, and Engine-event draining. When behavior changes, update both the tests and this document so they continue to describe the same contract.

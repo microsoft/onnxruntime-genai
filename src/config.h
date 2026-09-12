@@ -426,6 +426,8 @@ struct Config {
         std::string position_ids{Defaults::PositionIdsName};
         std::string past_key_names{Defaults::PastKeyName};
         std::string past_value_names{Defaults::PastValueName};
+        std::string past_key_scale_names;
+        std::string past_value_scale_names;
         std::string past_names;  // When key/value pairs are combined
         std::string cross_past_key_names, cross_past_value_names;
         std::string past_key_values_length{Defaults::PastKeyValuesLengthName};
@@ -469,6 +471,8 @@ struct Config {
         std::string logits{Defaults::LogitsName};
         std::string present_key_names{Defaults::PresentKeyName};
         std::string present_value_names{Defaults::PresentValueName};
+        std::string present_key_scale_names;
+        std::string present_value_scale_names;
         std::string present_names;  // When key/value pairs are combined
         std::string output_cross_qk_names{Defaults::OutputCrossQKName};
         std::string rnn_states{Defaults::RnnStatesName};
@@ -533,6 +537,9 @@ struct Config {
       // The main model must be exported with this output exposed (include_hidden_states).
       std::string main_hidden_states{Defaults::HiddenStatesName};
 
+      // The head's paged cache is built from a projection of model.decoder. The head is always an
+      // unquantized full-attention layer: it owns no per-token scale caches, and the projection
+      // clears the target's scale name templates rather than letting the head inherit them.
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};
         std::string hidden_states{Defaults::HiddenStatesName};
@@ -587,6 +594,10 @@ struct Config {
         std::string attention_metadata{Defaults::AttentionMetadataName};
         std::string past_key_names{Defaults::PastKeyName};
         std::string past_value_names{Defaults::PastValueName};
+        // Parsed but not yet implemented: the block drafter owns its own unquantized K/V pool, so a
+        // non-empty value is rejected by ValidateDflash2ModelCompatibility rather than ignored.
+        std::string past_key_scale_names;
+        std::string past_value_scale_names;
       } inputs;
 
       struct Outputs {
@@ -594,6 +605,8 @@ struct Config {
         std::string scores{"draft_scores"};
         std::string present_key_names{Defaults::PresentKeyName};
         std::string present_value_names{Defaults::PresentValueName};
+        std::string present_key_scale_names;
+        std::string present_value_scale_names;
       } outputs;
     } dflash2;
 

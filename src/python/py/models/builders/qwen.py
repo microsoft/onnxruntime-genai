@@ -542,10 +542,16 @@ class Qwen35TextModel(Model):
         z_name = f"{basename}/z_proj/MatMul"
         self.make_matmul(attention.in_proj_z, z_name, root_input)
 
+        # The decay and beta gates drive the GatedDeltaNet recurrence, and their weights are
+        # ~0.1% of the model, so they stay dense regardless of which loader supplied them.
         b_name = f"{basename}/b_proj/MatMul"
+        self.require_dense_linear_attention_gate(attention.in_proj_b, b_name)
+        self.exclude_node_from_quantization(b_name)
         self.make_matmul(attention.in_proj_b, b_name, root_input)
 
         a_name = f"{basename}/a_proj/MatMul"
+        self.require_dense_linear_attention_gate(attention.in_proj_a, a_name)
+        self.exclude_node_from_quantization(a_name)
         self.make_matmul(attention.in_proj_a, a_name, root_input)
 
         conv_input = f"{qkv_name}/output_0"
@@ -564,6 +570,13 @@ class Qwen35TextModel(Model):
         self.make_initializer(attention.conv1d.weight, conv_weight_name, to=self.io_dtype)
 
         return z_name, b_name, a_name, conv_input, conv_weight_name
+
+    def require_dense_linear_attention_gate(self, projection, name):
+        if hasattr(projection, "qweight") or getattr(projection, "quant_type", "none") != "none":
+            raise ValueError(
+                f"Linear-attention gate '{name}' must remain dense, but the checkpoint supplies "
+                "pre-quantized weights that its loader did not dequantize."
+            )
 
     def make_linear_attention_normalize_and_gate(self, layer_id, attention, conv_out_3d, b_name, a_name):
         """Split QKV, per-head L2 norm, Q scale, and compute decay/beta gates.
@@ -943,6 +956,10 @@ class Qwen35MoEModel(MTPModel):
             print(f"Skipping the MTP head: {block_drafter} supersedes it.")
             self.mtp_attrs["build"] = False
 
+        if self.mtp_attrs["build"] and extra_options.get("exclude_mtp", False):
+            print("Skipping the MTP head: exclude_mtp is set.")
+            self.mtp_attrs["build"] = False
+
         if not self.mtp_attrs["build"]:
             return decoder_options
 
@@ -1024,6 +1041,27 @@ class Qwen35MoEModel(MTPModel):
             self.add_dflash2_to_genai_config(out_dir)
         if self.dspark is not None:
             self.add_dspark_to_genai_config(out_dir)
+        if self.dflash2 is not None or self.dspark is not None:
+            self.make_block_drafter_search_defaults(out_dir)
+
+    def make_block_drafter_search_defaults(self, out_dir):
+        """Ship greedy search defaults alongside a block drafter.
+
+        ``Engine::PrepareDflash2Feeds`` sets ``wants_drafts = greedy && ...``, so a checkpoint
+        whose ``generation_config.json`` asks for sampling would decode with zero drafts and no
+        error. Only ``do_sample`` is cleared; ``top_k``/``top_p``/``temperature`` stay as the
+        checkpoint declared them, so a caller who opts back into sampling per turn still gets them.
+        """
+        config_path = os.path.join(out_dir, "genai_config.json")
+        with open(config_path) as config_file:
+            genai_config = json.load(config_file)
+
+        if not genai_config["search"].get("do_sample", False):
+            return
+        genai_config["search"]["do_sample"] = False
+        with open(config_path, "w") as config_file:
+            json.dump(genai_config, config_file, indent=4)
+        print("Set search.do_sample to false: a block drafter only proposes drafts for greedy turns.")
 
     def add_mtp_to_genai_config(self, out_dir):
         config_path = os.path.join(out_dir, "genai_config.json")
@@ -1082,6 +1120,45 @@ class Qwen35MoEModel(MTPModel):
                 f"got '{actual}'."
             )
 
+    def block_drafter_precision(self, extra_options, option_name):
+        precision = str(extra_options.get(option_name, "bf16")).lower()
+        allowed = {"bf16", "int4", "int8"}
+        if precision not in allowed:
+            raise ValueError(f"{option_name} must be one of {sorted(allowed)}, got '{precision}'.")
+        return precision
+
+    def block_drafter_quant(self, precision):
+        """Resolve weight-only quantization for a block drafter, or ``None`` to keep it dense.
+
+        The drafter's LM head *is* the target's, so quantizing it the same way lets
+        ``share_initializers`` fold the two into one copy. Only the symmetric/``default``
+        naming convention is reproducible here, so any other algorithm leaves the head dense
+        rather than writing a second copy under a name that could never match.
+        """
+        if precision == "bf16":
+            return None
+        bits = 4 if precision == "int4" else 8
+        block_size = int(self.decoder.quant_attrs["matmul_block_size"])
+        prepack = int(self.decoder.matmul_attrs["weights_prepacked"])
+        quant = {"bits": bits, "block_size": block_size, "prepack": prepack, "lm_head": None}
+
+        if self.decoder.exclude_lm_head or not self.decoder.is_lm_head_quantized():
+            return quant
+        head_bits, weight_name, scales_name, zero_point_name = self.decoder.make_tied_quantized_embedding_input_names()
+        shareable = (
+            weight_name == f"lm_head.MatMul.weight_Q{head_bits}"
+            and scales_name == "lm_head.MatMul.weight_scales"
+            and not zero_point_name
+        )
+        if not shareable:
+            print(
+                f"Leaving the block drafter's LM head dense: the target writes '{weight_name}', "
+                "which this exporter cannot reproduce byte-for-byte to share."
+            )
+            return quant
+        quant["lm_head"] = {"bits": head_bits, "block_size": block_size, "prepack": prepack}
+        return quant
+
     def make_dflash2_init(self, io_dtype, extra_options):
         """DFlash 2 block drafter, exported as an auxiliary ``dflash2.onnx``.
 
@@ -1108,6 +1185,7 @@ class Qwen35MoEModel(MTPModel):
         self.dflash2_attrs = {
             "io_dtype": io_dtype,
             "num_draft_tokens": num_draft_tokens,
+            "precision": self.block_drafter_precision(extra_options, "dflash2_precision"),
         }
 
         with open(os.path.join(self.dflash2_path, "config.json"), encoding="utf-8") as handle:
@@ -1135,6 +1213,7 @@ class Qwen35MoEModel(MTPModel):
             self.decoder.attention_attrs["paged_block_size"],
             self.decoder.context_length,
             num_draft_tokens=self.dflash2_attrs["num_draft_tokens"],
+            quant=self.block_drafter_quant(self.dflash2_attrs["precision"]),
         )
         self.dflash2.make_model()
 
@@ -1144,6 +1223,26 @@ class Qwen35MoEModel(MTPModel):
         self.dflash2.save_model(output_dir)
         self.dflash2_shared_initializers = self.share_initializers(
             output_dir, self.decoder.filename, self.dflash2.filename
+        )
+        self.warn_unshared_lm_head(self.dflash2, self.dflash2_shared_initializers, "DFlash 2")
+
+    def warn_unshared_lm_head(self, drafter, shared, drafter_name):
+        """Report a drafter head that stayed a separate copy instead of folding onto the target's.
+
+        The drafter head is already much smaller than the dense one it replaces, so this is a
+        missed saving rather than a failure. It happens when this exporter's blockwise
+        quantizer and the target's MLAS pass round a block differently, which leaves the
+        bytes unequal even though both encode the same tensor the same way.
+        """
+        head = getattr(drafter, "lm_head_quant", None)
+        if head is None:
+            return
+        weight_name = f"lm_head.MatMul.weight_Q{head['bits']}"
+        if any(entry["name"] == weight_name for entry in shared):
+            return
+        print(
+            f"Note: the {drafter_name} LM head is quantized but did not match the target's "
+            f"'{weight_name}' byte-for-byte, so it remains a separate (still quantized) copy."
         )
 
     def add_dflash2_to_genai_config(self, out_dir):

@@ -465,7 +465,7 @@ def calibrate_kv_scales(
     # Full-range signed int: the quantizer clamps to [-qmax, qmax-1] (kInt8 [-128,127], kInt4 [-8,7]).
     qneg, qpos = (-qmax, qmax) if is_fp8 else (-qmax, qmax - 1.0)
 
-    # Prepacked MatMulNBits baselines require the fpA_intB path to load; harmless otherwise.
+    # Keep non-prepacked MatMulNBits nodes on the same fpA_intB kernel family as prepacked nodes.
     os.environ.setdefault("ORT_FPA_INTB_GEMM", "1")
 
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
@@ -643,6 +643,7 @@ def calibrate_kv_scales(
         json.dump(
             {
                 "scales": {"k_scales": k_scales.tolist(), "v_scales": v_scales.tolist()},
+                "qmax": qmax,
                 # Which model layers the scales belong to, in the same order as the arrays above.
                 # Contiguous for dense models; sparse for hybrid attention models.
                 "layer_ids": layer_ids,

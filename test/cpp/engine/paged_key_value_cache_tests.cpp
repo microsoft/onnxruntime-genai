@@ -11,6 +11,7 @@
 #include "engine/paged_key_value_cache.h"
 #include "engine_test_doubles.h"
 #include "engine_test_helpers.h"
+#include "models/io/kv_cache.h"
 #include "models/model_state_manifest.h"
 
 namespace Generators {
@@ -365,93 +366,336 @@ TEST(PagedKeyValueCacheManifestTest, CacheManagerConstructsFromSparseManifest) {
   EXPECT_EQ(manager->Snapshot().total_blocks, 128u);
 }
 
+TEST(PagedKeyValueCacheManifestTest, AllocationUsesPhysicalHeadWidth) {
+  auto model = LoadSyntheticPagedModel();
+  model->config_->model.decoder.head_size = 2;
+  auto cache = MakePagedCache(model);
+  EXPECT_EQ(PagedKeyValueCacheBytesPerBlock(model), 64u);
+  for (const auto& values : cache->Cache()) {
+    EXPECT_EQ(values.first->GetTensorTypeAndShapeInfo()->GetShape().back(), 1);
+    EXPECT_EQ(values.second->GetTensorTypeAndShapeInfo()->GetShape().back(), 1);
+  }
+}
+
+TEST(PagedKeyValueCacheManifestTest, PackedScaleCapacityUsesExactBytes) {
+  constexpr size_t payload = 16 * 2 * 256 * 4 * 128;
+  constexpr size_t scales = 16 * 2 * 256 * 4 * 2;
+  EXPECT_EQ(payload + scales, 4259840u);
+  EXPECT_EQ(ComputePagedBlockCapacityFromBytes(1024 * (payload + scales), 1.0f, 0,
+                                               payload + scales),
+            921u);
+  EXPECT_THROW(ComputePagedBlockCapacityFromBytes(1024, 1.0f, 0, 0), std::invalid_argument);
+  EXPECT_THROW(ComputePagedBlockCapacityFromBytes(1024, 1.0f, 0, 1,
+                                                  std::numeric_limits<size_t>::max()),
+               std::overflow_error);
+}
+
+TEST(PagedKeyValueCacheManifestTest, ScaleCachesBindAliasesAndPreserveBlockTableOffset) {
+  auto model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged-scales");
+  auto cache = MakePagedCache(model);
+  auto params = CreateGeneratorParams(*model);
+  ModelIO state(*params, *model);
+  EXPECT_EQ(PagedKeyValueCacheBytesPerBlock(model), 96u);
+  cache->UpdateState(state, {});
+  ASSERT_EQ(state.inputs_.size(), 9u);
+  ASSERT_EQ(state.outputs_.size(), 8u);
+  EXPECT_STREQ(state.input_names_[8], "block_table");
+  for (size_t index = 4; index < 8; ++index) {
+    EXPECT_EQ(state.inputs_[index], state.outputs_[index]);
+    EXPECT_EQ(state.inputs_[index]->GetTensorTypeAndShapeInfo()->GetShape(),
+              std::vector<int64_t>({128, 4, 1}));
+    EXPECT_EQ(state.inputs_[index]->GetTensorTypeAndShapeInfo()->GetElementType(),
+              ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16);
+    const auto* scale_bytes = static_cast<const uint8_t*>(state.inputs_[index]->GetTensorRawData());
+    for (size_t offset = 0; offset < 128 * 4 * sizeof(Ort::Float16_t); ++offset) {
+      EXPECT_EQ(scale_bytes[offset], 0u);
+    }
+  }
+  EXPECT_STREQ(state.input_names_[4], "past_key_values.1.key_scale");
+  EXPECT_STREQ(state.output_names_[7], "present.4.value_scale");
+  auto* first_scale = state.inputs_[4];
+  cache->UpdateState(state, {});
+  EXPECT_EQ(state.inputs_[4], first_scale);
+  EXPECT_STREQ(state.input_names_[8], "block_table");
+}
+
+// Executable coverage for the aliasing contract: the ONNX graph actually runs with every scale
+// buffer bound as both a past input and a present output, across a prefill step and several decode
+// steps. The bind-level test above can only show that the pointers match; this one shows ORT
+// accepts the aliased binding for a real session run and that the Engine keeps stepping with it.
+TEST(PagedKeyValueCacheManifestTest, RunsPrefillAndDecodeStepsWithAliasedScaleBuffers) {
+  auto model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged-scales");
+  auto engine = std::make_shared<Engine>(model);
+  auto request = CreateEngineRequest(engine);
+  TurnOptions options;
+  options.max_generated_tokens = 4;
+  options.min_generated_tokens = 4;
+  const std::array<int32_t, 3> prompt{2, 3, 4};
+  request->BeginTurn(prompt, options);
+
+  std::array<EngineEvent, 8> events;
+  std::vector<int32_t> generated;
+  for (int step = 0; step < 32 && !request->IsTurnComplete(); ++step) {
+    const size_t count = engine->Run(events);
+    for (size_t i = 0; i < count; ++i) {
+      if (events[i].request.get() == request.get() && (events[i].flags & EngineEventFlagToken)) {
+        generated.push_back(events[i].token);
+      }
+    }
+  }
+  EXPECT_TRUE(request->IsTurnComplete());
+  EXPECT_EQ(generated.size(), 4u);
+  EXPECT_TRUE(ValidateRequestInvariants(request->Snapshot()).empty());
+}
+
+// The scale buffers are Engine-owned and updated in place, so both sides of the binding must point
+// at one allocation and that allocation must survive the step boundary. If a step ever bound a
+// fresh buffer for the present side, the scales it produced would be discarded and the next step
+// would dequantize the block it had just written against stale data.
+TEST(PagedKeyValueCacheManifestTest, ScaleBuffersStayAliasedAndPersistAcrossSteps) {
+  auto model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged-scales");
+  auto cache = MakePagedCache(model);
+  auto params = CreateGeneratorParams(*model);
+  ModelIO state(*params, *model);
+
+  cache->UpdateState(state, {});
+  ASSERT_EQ(state.inputs_.size(), 9u);
+  ASSERT_EQ(state.outputs_.size(), 8u);
+  std::array<const void*, 4> first_step_data{};
+  for (size_t index = 4; index < 8; ++index) {
+    ASSERT_EQ(state.inputs_[index], state.outputs_[index]);
+    // One buffer, two distinct graph names: the model reads `past` and writes `present`.
+    ASSERT_STRNE(state.input_names_[index], state.output_names_[index]);
+    first_step_data[index - 4] = state.inputs_[index]->GetTensorRawData();
+    ASSERT_NE(first_step_data[index - 4], nullptr);
+  }
+
+  // Stands in for the model's in-place scale update: the synthetic graph does not quantize, so the
+  // observable contract here is buffer identity and persistence, not the scale values themselves.
+  static_cast<uint8_t*>(state.outputs_[4]->GetTensorMutableRawData())[0] = 0xAB;
+
+  cache->UpdateState(state, {});
+  ASSERT_EQ(state.inputs_.size(), 9u);
+  ASSERT_EQ(state.outputs_.size(), 8u);
+  for (size_t index = 4; index < 8; ++index) {
+    EXPECT_EQ(state.inputs_[index], state.outputs_[index]);
+    EXPECT_EQ(state.inputs_[index]->GetTensorRawData(), first_step_data[index - 4]);
+  }
+  EXPECT_EQ(static_cast<const uint8_t*>(state.inputs_[4]->GetTensorRawData())[0], 0xABu);
+  EXPECT_STREQ(state.input_names_[8], "block_table");
+}
+
+TEST(PagedKeyValueCacheManifestTest, RequiresScaleTemplatesAsAPair) {
+  for (int field = 0; field < 4; ++field) {
+    auto model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged-scales");
+    auto& inputs = model->config_->model.decoder.inputs;
+    auto& outputs = model->config_->model.decoder.outputs;
+    switch (field) {
+      case 0:
+        inputs.past_key_scale_names.clear();
+        break;
+      case 1:
+        inputs.past_value_scale_names.clear();
+        break;
+      case 2:
+        outputs.present_key_scale_names.clear();
+        break;
+      default:
+        outputs.present_value_scale_names.clear();
+        break;
+    }
+    try {
+      static_cast<void>(MakePagedCache(model));
+      FAIL() << "Expected an unpaired scale template to be rejected, field " << field;
+    } catch (const std::runtime_error& error) {
+      EXPECT_NE(std::string{error.what()}.find("both a past and a present"), std::string::npos)
+          << "field " << field << ": " << error.what();
+    }
+  }
+  // Clearing both sides of one side-of-cache is the supported way to bind fewer scale caches.
+  auto model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged-scales");
+  model->config_->model.decoder.inputs.past_value_scale_names.clear();
+  model->config_->model.decoder.outputs.present_value_scale_names.clear();
+  auto cache = MakePagedCache(model);
+  auto params = CreateGeneratorParams(*model);
+  ModelIO state(*params, *model);
+  cache->UpdateState(state, {});
+  // Two layers of key/value, one key scale per layer, then the block table.
+  EXPECT_EQ(state.inputs_.size(), 7u);
+  EXPECT_EQ(state.outputs_.size(), 6u);
+  EXPECT_STREQ(state.input_names_[6], "block_table");
+  EXPECT_EQ(PagedKeyValueCacheBytesPerBlock(model), 80u);
+}
+
+// Byte accounting reads the element type per layer while allocation commits to one type for the
+// whole pool, so the two agree only if every binding shares a type. Tie them together directly:
+// the bytes the pool actually holds must equal bytes-per-block times the block count that sizing
+// produced, for both the plain and the per-token quantized fixture.
+TEST(PagedKeyValueCacheManifestTest, AccountingMatchesAllocatedBytesAndTypes) {
+  for (const char* path : {MODEL_PATH "engine/synthetic-paged",
+                           MODEL_PATH "engine/synthetic-paged-scales"}) {
+    auto model = CreateModel(GetOrtEnv(), path);
+    auto cache = MakePagedCache(model);
+    auto params = CreateGeneratorParams(*model);
+    ModelIO state(*params, *model);
+    cache->UpdateState(state, {});
+
+    const auto kv = cache->Cache();
+    ASSERT_FALSE(kv.empty()) << path;
+    const auto kv_type = kv.front().first->GetTensorTypeAndShapeInfo()->GetElementType();
+    const int64_t blocks = kv.front().first->GetTensorTypeAndShapeInfo()->GetShape()[0];
+
+    const auto& decoder = model->config_->model.decoder;
+    for (const int layer : {1, 4}) {
+      EXPECT_EQ(model->session_info_.GetInputDataType(
+                    ComposeKeyValueName(decoder.inputs.past_key_names, layer)),
+                kv_type)
+          << path;
+      EXPECT_EQ(model->session_info_.GetInputDataType(
+                    ComposeKeyValueName(decoder.inputs.past_value_names, layer)),
+                kv_type)
+          << path;
+      EXPECT_EQ(model->session_info_.GetOutputDataType(
+                    ComposeKeyValueName(decoder.outputs.present_key_names, layer)),
+                kv_type)
+          << path;
+      EXPECT_EQ(model->session_info_.GetOutputDataType(
+                    ComposeKeyValueName(decoder.outputs.present_value_names, layer)),
+                kv_type)
+          << path;
+    }
+
+    // Every cache and scale tensor is bound on both sides, so outputs_ counts exactly the buffers
+    // the pool owns. Neither fixture is windowed, so all of them are billed per full-attention
+    // block by PagedKeyValueCacheBytesPerBlock.
+    size_t allocated_bytes = 0;
+    for (size_t index = 0; index < state.outputs_.size(); ++index) {
+      const auto info = state.inputs_[index]->GetTensorTypeAndShapeInfo();
+      size_t elements = 1;
+      for (const auto dimension : info->GetShape()) {
+        elements *= static_cast<size_t>(dimension);
+      }
+      allocated_bytes += elements * Ort::SizeOf(info->GetElementType());
+    }
+    EXPECT_EQ(allocated_bytes,
+              PagedKeyValueCacheBytesPerBlock(model) * static_cast<size_t>(blocks))
+        << path;
+  }
+}
+
+TEST(PagedKeyValueCacheManifestTest, RejectsScaleBlockCountMismatch) {
+  auto model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged-scales");
+  model->config_->engine.dynamic_batching->num_blocks = 64;
+  EXPECT_THROW(MakePagedCache(model), std::runtime_error);
+}
+
+TEST(PagedKeyValueCacheManifestTest, RejectsMalformedAndDuplicateScaleTemplates) {
+  auto model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged-scales");
+  model->config_->model.decoder.inputs.past_key_scale_names = "scale.%s";
+  EXPECT_THROW(MakePagedCache(model), std::runtime_error);
+  model->config_->model.decoder.inputs.past_key_scale_names =
+      model->config_->model.decoder.inputs.past_value_scale_names;
+  EXPECT_THROW(MakePagedCache(model), std::runtime_error);
+}
+
+TEST(PagedKeyValueCacheManifestTest, RejectsRankFourTensorAsScaleCache) {
+  auto model = LoadSyntheticPagedModel();
+  auto& inputs = model->config_->model.decoder.inputs;
+  auto& outputs = model->config_->model.decoder.outputs;
+  // ValidateScaleBindings seeds its uniqueness set from the key/value templates and rejects a
+  // colliding scale name before ScaleCacheType ever inspects the tensor, and the past/present
+  // templates are required as a pair. Aliasing both key bindings onto their value counterparts
+  // frees "past_key_values.%d.key" and "present.%d.key" to stand in for a wrongly shaped scale
+  // pair, so the rank check is the guard that actually fires.
+  inputs.past_key_names = inputs.past_value_names;
+  outputs.present_key_names = outputs.present_value_names;
+  inputs.past_key_scale_names = "past_key_values.%d.key";
+  outputs.present_key_scale_names = "present.%d.key";
+  try {
+    static_cast<void>(MakePagedCache(model));
+    FAIL() << "Expected a rank-four tensor to be rejected as a scale cache";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string{error.what()}.find("rank three"), std::string::npos) << error.what();
+  }
+}
+
+TEST(PagedKeyValueCacheManifestTest, ReportsScaleGeometryMismatchPerDimension) {
+  {
+    auto model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged-scales");
+    model->config_->engine.dynamic_batching->block_size = 8;
+    try {
+      static_cast<void>(MakePagedCache(model));
+      FAIL() << "Expected a block-size mismatch to be rejected";
+    } catch (const std::runtime_error& error) {
+      EXPECT_NE(std::string{error.what()}.find("block-size dimension"), std::string::npos)
+          << error.what();
+    }
+  }
+  {
+    auto model = CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged-scales");
+    model->config_->model.decoder.num_key_value_heads = 2;
+    try {
+      static_cast<void>(MakePagedCache(model));
+      FAIL() << "Expected a head-count mismatch to be rejected";
+    } catch (const std::runtime_error& error) {
+      EXPECT_NE(std::string{error.what()}.find("head dimension"), std::string::npos)
+          << error.what();
+    }
+  }
+}
+
+// The scale shape check must use the same wildcard-tolerant comparison the state manifest applies
+// to key/value bindings: the model builder emits symbolic num_blocks and block_size dims, so an
+// exact vector comparison would reject a present/past pair that differs only in which dims the
+// exporter happened to resolve.
+TEST(PagedKeyValueCacheManifestTest, ScaleShapeComparisonTreatsSymbolicDimsAsWildcards) {
+  EXPECT_TRUE(StateShapesCompatible({-1, 4, 1}, {128, 4, 1}));
+  EXPECT_TRUE(StateShapesCompatible({128, -1, 1}, {-1, 4, 1}));
+  EXPECT_FALSE(StateShapesCompatible({128, 4, 1}, {128, 4, 2}));
+  EXPECT_FALSE(StateShapesCompatible({128, 4, 1}, {128, 4}));
+}
+
 TEST(PagedKeyValueCacheManifestTest, BlockCapacityUsesParticipatingLayerCount) {
-  EXPECT_EQ(
-      ComputePagedBlockCapacity(
-          /*available_memory_bytes=*/10240,
-          /*gpu_utilization_factor=*/1.0f,
-          /*reserved_memory_bytes=*/0,
-          /*block_size=*/4,
-          /*num_key_value_heads=*/1,
-          /*head_size=*/2,
-          /*full_layer_count=*/2,
-          /*element_size=*/2),
-      144u);
-  EXPECT_EQ(
-      ComputePagedBlockCapacity(
-          /*available_memory_bytes=*/10240,
-          /*gpu_utilization_factor=*/1.0f,
-          /*reserved_memory_bytes=*/0,
-          /*block_size=*/4,
-          /*num_key_value_heads=*/1,
-          /*head_size=*/2,
-          /*full_layer_count=*/6,
-          /*element_size=*/2),
-      48u);
+  // Bytes one block costs across `layers` full-attention layers of the geometry used below:
+  // block_size 4 * one KV head * head width 2 * 2-byte elements * two caches (key and value).
+  const auto primary_bytes = [](size_t layers) { return size_t{4} * 1 * 2 * 2 * 2 * layers; };
+  ASSERT_EQ(primary_bytes(2), 64u);
+  ASSERT_EQ(primary_bytes(6), 192u);
+
+  // 10240 bytes at the default 90% utilization leaves a 9216-byte budget.
+  EXPECT_EQ(ComputePagedBlockCapacityFromBytes(10240, 1.0f, 0, primary_bytes(2)), 144u);
+  EXPECT_EQ(ComputePagedBlockCapacityFromBytes(10240, 1.0f, 0, primary_bytes(6)), 48u);
 
   // One auxiliary layer with the same geometry adds 32 bytes to the primary model's 64 bytes per
   // block, so both pools together fit 96 blocks in the same 90%-adjusted memory budget.
-  EXPECT_EQ(
-      ComputePagedBlockCapacity(
-          /*available_memory_bytes=*/10240,
-          /*gpu_utilization_factor=*/1.0f,
-          /*reserved_memory_bytes=*/0,
-          /*block_size=*/4,
-          /*num_key_value_heads=*/1,
-          /*head_size=*/2,
-          /*full_layer_count=*/2,
-          /*element_size=*/2,
-          /*auxiliary_bytes_per_block=*/32),
-      96u);
+  EXPECT_EQ(ComputePagedBlockCapacityFromBytes(10240, 1.0f, 0, primary_bytes(2), 32), 96u);
 
-  EXPECT_EQ(
-      ComputePagedBlockCapacity(
-          /*available_memory_bytes=*/10240,
-          /*gpu_utilization_factor=*/1.0f,
-          /*reserved_memory_bytes=*/1024,
-          /*block_size=*/4,
-          /*num_key_value_heads=*/1,
-          /*head_size=*/2,
-          /*full_layer_count=*/2,
-          /*element_size=*/2),
-      128u);
+  EXPECT_EQ(ComputePagedBlockCapacityFromBytes(10240, 1.0f, 1024, primary_bytes(2)), 128u);
 
-  EXPECT_THROW(
-      ComputePagedBlockCapacity(
-          /*available_memory_bytes=*/10240,
-          /*gpu_utilization_factor=*/1.0f,
-          /*reserved_memory_bytes=*/9216,
-          /*block_size=*/4,
-          /*num_key_value_heads=*/1,
-          /*head_size=*/2,
-          /*full_layer_count=*/2,
-          /*element_size=*/2),
-      std::runtime_error);
+  EXPECT_THROW(ComputePagedBlockCapacityFromBytes(10240, 1.0f, 9216, primary_bytes(2)),
+               std::runtime_error);
+  EXPECT_THROW(ComputePagedBlockCapacityFromBytes(10240, 1.0f, 0, primary_bytes(2),
+                                                  std::numeric_limits<size_t>::max()),
+               std::overflow_error);
+}
 
-  EXPECT_THROW(
-      ComputePagedBlockCapacity(
-          /*available_memory_bytes=*/10240,
-          /*gpu_utilization_factor=*/1.0f,
-          /*reserved_memory_bytes=*/0,
-          /*block_size=*/std::numeric_limits<size_t>::max(),
-          /*num_key_value_heads=*/2,
-          /*head_size=*/1,
-          /*full_layer_count=*/1,
-          /*element_size=*/1),
-      std::overflow_error);
+// The production path: per-block bytes come from the graph, and capacity divides the budget by
+// them. The quantized fixture pays 96 bytes per block against the plain fixture's 64 because each
+// layer adds two float16 scales per slot, so the same budget holds fewer blocks.
+TEST(PagedKeyValueCacheManifestTest, CapacityUsesBytesPerBlockFromTheGraph) {
+  const size_t plain_bytes = PagedKeyValueCacheBytesPerBlock(LoadSyntheticPagedModel());
+  const size_t scaled_bytes = PagedKeyValueCacheBytesPerBlock(
+      CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged-scales"));
+  EXPECT_EQ(plain_bytes, 64u);
+  EXPECT_EQ(scaled_bytes, 96u);
+  EXPECT_EQ(ComputePagedBlockCapacityFromBytes(10240, 1.0f, 0, plain_bytes), 144u);
+  EXPECT_EQ(ComputePagedBlockCapacityFromBytes(10240, 1.0f, 0, scaled_bytes), 96u);
+}
 
-  EXPECT_THROW(
-      ComputePagedBlockCapacity(
-          /*available_memory_bytes=*/10240,
-          /*gpu_utilization_factor=*/1.0f,
-          /*reserved_memory_bytes=*/0,
-          /*block_size=*/4,
-          /*num_key_value_heads=*/1,
-          /*head_size=*/2,
-          /*full_layer_count=*/2,
-          /*element_size=*/2,
-          /*auxiliary_bytes_per_block=*/std::numeric_limits<size_t>::max()),
-      std::overflow_error);
+TEST(PagedKeyValueCacheManifestTest, RejectsPerBlockByteOverflow) {
+  auto model = LoadSyntheticPagedModel();
+  model->config_->engine.dynamic_batching->block_size = std::numeric_limits<size_t>::max();
+  EXPECT_THROW(PagedKeyValueCacheBytesPerBlock(model), std::overflow_error);
 }
 
 TEST(PagedKeyValueCacheManifestTest, ExplicitBlockCountCoversBothPools) {

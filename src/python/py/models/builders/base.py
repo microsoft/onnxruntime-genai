@@ -38,7 +38,7 @@ from transformers import (
     Qwen3VLForConditionalGeneration,
 )
 
-from quantization import CudaQuantizer, QuantConfig, resolve_dtype
+from quantization import KV_CACHE_CALIBRATION_QMAX, CudaQuantizer, QuantConfig, resolve_dtype
 
 
 class Model:
@@ -380,7 +380,7 @@ class Model:
             else None
         )
         bit_width = 4 if quant_type == ir.DataType.INT4 else 8 if quant_type is not None else 0
-        quant_mode = "PER_CHANNEL" if quant_scheme.endswith("per_channel") else "PER_TENSOR"
+        quant_mode = "PER_TOKEN" if quant_scheme.endswith("per_token") else "PER_CHANNEL" if quant_scheme.endswith("per_channel") else "PER_TENSOR"
         self.kv_cache_attrs = {
             "quant_scheme": quant_scheme,                                 # Quantization scheme for key-value caches
             "quant_type": quant_type,                                     # Quantization type for key-value caches
@@ -815,6 +815,22 @@ class Model:
         self.past_present_share_buffer = self.attention_attrs["op_type"] in ("GroupQueryAttention", "PagedAttention")
 
     def make_kv_cache_init(self):
+        rotation = self.extra_options.get("kv_cache_rotation", "none").lower()
+        if rotation not in {"none", "hadamard"}:
+            raise ValueError("kv_cache_rotation must be none or hadamard.")
+        self.kv_cache_attrs["rotation"] = rotation.upper()
+        if rotation != "none":
+            if self.ep != "cuda" or not self.use_paged_attention:
+                raise ValueError("kv_cache_rotation requires CUDA PagedAttention.")
+            if self.head_size not in {16, 32, 64, 128, 256}:
+                raise ValueError("Hadamard KV rotation requires head_size in {16, 32, 64, 128, 256}.")
+            if self.kv_cache_attrs["quant_mode"] == "PER_CHANNEL":
+                raise ValueError("Hadamard KV rotation does not support per-channel scales.")
+        if self.kv_cache_attrs["quant_mode"] == "PER_TOKEN":
+            if self.ep != "cuda" or not self.use_paged_attention:
+                raise ValueError("Per-token KV quantization requires CUDA PagedAttention.")
+            if self.kv_cache_attrs["scales_path"]:
+                raise ValueError("Per-token KV quantization does not use kv_cache_scale_file.")
         if self.kv_cache_attrs["quant_scheme"] == "none":
             # Return early if quantized KV caches aren't used
             return
@@ -828,14 +844,6 @@ class Model:
             raise ValueError(
                 "Quantized KV cache is only supported for the CPU and CUDA execution providers. "
                 f"Got execution_provider='{self.ep}'."
-            )
-
-        if self.use_paged_attention and self.kv_cache_attrs["bit_width"] == 4:
-            # PagedAttention's T_CACHE type constraint is {float16, bfloat16, int8, float8e4m3fn};
-            # there is no sub-byte paged cache backend, so int4 caches cannot be exported.
-            raise ValueError(
-                "PagedAttention only supports int8 and fp8 quantized KV caches, "
-                f"got kv_cache_quant_scheme='{self.kv_cache_attrs['quant_scheme']}'."
             )
 
         cache_dtype = (
@@ -866,7 +874,25 @@ class Model:
         self.past_present_share_buffer = self.ep == "cuda"
 
         # Save calibrated scales for quantized KV caches
-        self.make_kv_cache_scale_initializers()
+        if self.kv_cache_attrs["quant_mode"] == "PER_TOKEN":
+            self.make_kv_cache_scale_io()
+        else:
+            self.make_kv_cache_scale_initializers()
+
+    def make_kv_cache_scale_io(self):
+        for side in ("key", "value"):
+            input_key = f"past_key_values.{side}_scale"
+            output_key = f"present.{side}_scale"
+            self.input_names[input_key] = {
+                layer_id: name + "_scale" for layer_id, name in self.input_names[f"past_key_values.{side}"].items()
+            }
+            self.output_names[output_key] = {
+                layer_id: name + "_scale" for layer_id, name in self.output_names[f"present.{side}"].items()
+            }
+            self.input_types[input_key] = ir.DataType.FLOAT16
+            self.output_types[output_key] = ir.DataType.FLOAT16
+            self.input_shapes[input_key] = ["num_blocks", "block_size", self.num_kv_heads]
+            self.output_shapes[output_key] = ["num_blocks", "block_size", self.num_kv_heads]
 
     def get_kv_cache_scale_names(self, layer_id):
         # Convention-based initializer names for the per-layer KV cache quantization scales,
@@ -876,6 +902,21 @@ class Model:
             f"model.layers.{layer_id}.attn.k_scale",
             f"model.layers.{layer_id}.attn.v_scale",
         )
+
+    def get_kv_cache_calibration_factor(self, file_qmax):
+        # A calibrated scale is threshold / qmax, so a file that records the qmax it was
+        # calibrated against can be retargeted to this model's bit width by the ratio of the
+        # two divisors (an int8 file reused for int4 scales up by 128/8). Files that omit
+        # `qmax` are taken as already matching the requested scheme.
+        if file_qmax is None:
+            return 1.0
+        if not isinstance(file_qmax, (int, float)) or isinstance(file_qmax, bool):
+            raise ValueError("kv_cache_scale_file qmax must be a number.")
+        if not np.isfinite(file_qmax) or file_qmax <= 0:
+            raise ValueError("kv_cache_scale_file qmax must be finite and positive.")
+        bit_width_name = self.kv_cache_attrs["quant_scheme"].split("_", 1)[0]
+        target_qmax = KV_CACHE_CALIBRATION_QMAX[bit_width_name]
+        return float(file_qmax) / target_qmax
 
     def make_kv_cache_scale_initializers(self):
         per_channel = self.kv_cache_attrs["quant_mode"] == "PER_CHANNEL"
@@ -904,6 +945,7 @@ class Model:
             raise ValueError("Scales file must contain scales.k_scales and scales.v_scales.")
 
         layer_ids = scale_data.get("layer_ids", None)
+        scale_factor = self.get_kv_cache_calibration_factor(scale_data.get("qmax", None))
         if layer_ids is None:
             layer_ids = list(range(self.num_layers))
             expected_scale_count = self.num_layers
@@ -921,12 +963,9 @@ class Model:
                 )
 
 
-            kv_input_names = self.input_names.get("past_key_values.key", [])
-            kv_layer_ids = {
-                int(parts[1])
-                for input_name in kv_input_names
-                if len(parts := input_name.split(".")) == 3 and parts[1].isdigit()
-            }
+            # `make_cache_names` keys the cache names by model layer id, so the layers that
+            # actually carry a KV cache are the keys.
+            kv_layer_ids = set(self.input_names.get("past_key_values.key", {}))
             if set(layer_ids) != kv_layer_ids:
                 raise ValueError(
                     f"kv_cache_scale_file layer_ids must match the model's KV-cache layers; "
@@ -953,6 +992,10 @@ class Model:
                 )
             if not np.all(np.isfinite(scale)) or np.any(scale <= 0):
                 raise ValueError(f"kv_cache scale for layer {layer_id} must contain finite positive values")
+            with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+                scale = (scale.astype(np.float64) * scale_factor).astype(np.float32)
+            if not np.all(np.isfinite(scale)) or np.any(scale <= 0):
+                raise ValueError(f"Rescaled kv_cache scale for layer {layer_id} must contain finite positive values")
             return scale.reshape(scale_shape)
 
         # Make initializers for each scale tensor
@@ -1047,18 +1090,12 @@ class Model:
 
         # Determine if embeddings and lm_head will be quantized or not.
         # Embeddings use Gather/GatherBlockQuantized, which only supports 4-bit (INT4/UINT4).
-        # The lm_head MatMul is quantized for INT4/UINT4 (4-bit) or INT8/UINT8 (8-bit).
-        matmul_is_quantized = self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4, ir.DataType.INT8, ir.DataType.UINT8}
         quantized_embeds = (
-            matmul_is_quantized
+            self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}
             and "Gather" in self.quant_attrs["op_types_to_quantize"]
             and "/model/embed_tokens/Gather" not in self.quant_attrs["nodes_to_exclude"]
         )
-        quantized_lm_head = (
-            matmul_is_quantized
-            and "MatMul" in self.quant_attrs["op_types_to_quantize"]
-            and "/lm_head/MatMul" not in self.quant_attrs["nodes_to_exclude"]
-        )
+        quantized_lm_head = self.is_lm_head_quantized()
 
         if shared_embeddings:
             self.tied_quantized_embeddings = quantized_embeds and quantized_lm_head
@@ -1066,6 +1103,13 @@ class Model:
         else:
             self.tied_quantized_embeddings = False
             self.tied_unquantized_embeddings = False
+
+    def is_lm_head_quantized(self):
+        return (
+            self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4, ir.DataType.INT8, ir.DataType.UINT8}
+            and "MatMul" in self.quant_attrs["op_types_to_quantize"]
+            and "/lm_head/MatMul" not in self.quant_attrs["nodes_to_exclude"]
+        )
 
     def make_tied_quantized_embedding_input_names(self):
         # Quantized tied embeddings in make_embedding() consume lm_head weights using
@@ -1104,7 +1148,13 @@ class Model:
         placement = self.matmul_mixed_precision
 
         last_matmul_type = placement.get("last_matmul")
-        bits = resolve_dtype(last_matmul_type).bits if last_matmul_type else 4
+        default_bits = {
+            ir.DataType.INT4: 4,
+            ir.DataType.UINT4: 4,
+            ir.DataType.INT8: 8,
+            ir.DataType.UINT8: 8,
+        }.get(getattr(self, "onnx_dtype", ir.DataType.INT4), 4)
+        bits = resolve_dtype(last_matmul_type).bits if last_matmul_type else default_bits
         is_symmetric = self.quant_attrs["is_symmetric"]
 
         if base_method == "rtn" or (base_method == "default" and bits != 4):
@@ -1180,6 +1230,9 @@ class Model:
             inputs["past_key_names"] = "past_key_values.%d.key"
         if "past_key_values.value" in self.input_names:
             inputs["past_value_names"] = "past_key_values.%d.value"
+        if "past_key_values.key_scale" in self.input_names:
+            inputs["past_key_scale_names"] = "past_key_values.%d.key_scale"
+            inputs["past_value_scale_names"] = "past_key_values.%d.value_scale"
         if "past.conv" in self.input_names:
             inputs["past_conv_names"] = "past.%d.conv"
         if "past.recurrent" in self.input_names:
@@ -1197,6 +1250,9 @@ class Model:
             outputs["present_key_names"] = "present.%d.key"
         if "present.value" in self.output_names:
             outputs["present_value_names"] = "present.%d.value"
+        if "present.key_scale" in self.output_names:
+            outputs["present_key_scale_names"] = "present.%d.key_scale"
+            outputs["present_value_scale_names"] = "present.%d.value_scale"
         if "present.conv" in self.output_names:
             outputs["present_conv_names"] = "present.%d.conv"
         if "present.recurrent" in self.output_names:
@@ -1299,14 +1355,28 @@ class Model:
             ep_options = {ep_name: self.ep_attrs[self.ep]}
             genai_config["model"]["decoder"]["session_options"]["provider_options"].append(ep_options)
 
+        session_options = genai_config["model"]["decoder"]["session_options"]
+        if self.ep == "cuda" and self.matmul_attrs["weights_prepacked"] > 0:
+            # Prepacked nodes take the fpA_intB path unconditionally; setting the flag keeps the
+            # nodes that were skipped (unsupported N/K/block_size) on the same kernel family.
+            session_options["ep.cuda.fpa_intb_gemm"] = "1"
+        if self.extra_options.get("use_device_allocator_for_initializers", False):
+            session_options["session.use_device_allocator_for_initializers"] = "1"
+
         if self.use_paged_attention:
-            genai_config["engine"] = {
-                "dynamic_batching": {
-                    "block_size": self.attention_attrs["paged_block_size"],
-                    "gpu_utilization_factor": float(self.extra_options.get("gpu_utilization_factor", 0.6)),
-                    "max_batch_size": int(self.extra_options.get("max_batch_size", 100)),
-                },
+            dynamic_batching = {
+                "block_size": self.attention_attrs["paged_block_size"],
+                "max_batch_size": int(self.extra_options.get("max_batch_size", 100)),
             }
+            if "num_blocks" in self.extra_options:
+                dynamic_batching["num_blocks"] = int(self.extra_options["num_blocks"])
+            else:
+                dynamic_batching["gpu_utilization_factor"] = float(
+                    self.extra_options.get("gpu_utilization_factor", 0.6)
+                )
+            if "max_scheduled_tokens" in self.extra_options:
+                dynamic_batching["max_scheduled_tokens"] = int(self.extra_options["max_scheduled_tokens"])
+            genai_config["engine"] = {"dynamic_batching": dynamic_batching}
 
         state_groups = self.make_decoder_state_groups(inputs, outputs)
         if state_groups:
@@ -1514,10 +1584,11 @@ class Model:
             bits = resolve_dtype(linear_attn).bits
             # Promote linear attention projections and their MLPs.
             # Linear attention recurrence accumulates quantization errors across
-            # the full sequence (no softmax normalization).
+            # the full sequence (no softmax normalization). The decay/beta gates
+            # (a_proj/b_proj) are excluded from quantization entirely, so they are absent here.
             for i, lt in enumerate(self.layer_types):
                 if lt == "linear_attention":
-                    for proj in ("in_proj_a", "in_proj_b", "in_proj_qkv", "in_proj_z", "out_proj"):
+                    for proj in ("qkv_proj", "z_proj", "out_proj"):
                         customized_weight_config[f"/model/layers.{i}/linear_attn/{proj}/MatMul"] = {"bits": bits}
                     for proj in ("gate_proj", "up_proj", "down_proj"):
                         customized_weight_config[f"/model/layers.{i}/mlp/{proj}/MatMul"] = {"bits": bits}
@@ -1639,8 +1710,8 @@ class Model:
         by the target layout (SM80 -> {32, 64, 128}, SM90 -> {64, 128}), K % block_size == 0,
         and N aligned to the kernel tile (N % 32 for int8, N % 64 for int4). Only symmetric
         weights are prepacked; nodes already carrying `weight_prepacked` are left untouched.
-        An offline-prepacked model must be run with ORT_FPA_INTB_GEMM enabling the relevant
-        nbits (use ORT_FPA_INTB_GEMM=1 for int4 and int8).
+        Eligible prepacked nodes select fpA-intB automatically. The emitted session option
+        enables the same kernel family for nodes that remain in raw blockwise layout.
         """
         prepack_mode = self.matmul_attrs["weights_prepacked"]
         if self.ep != "cuda" or prepack_mode <= 0 or not self.quant_attrs["is_symmetric"]:
@@ -1651,6 +1722,10 @@ class Model:
         force_arch = 90 if prepack_mode == 2 else 80
         allowed_block_sizes = (32, 64, 128) if prepack_mode == 1 else (64, 128)
         initializers = {init.name: init for init in model_proto.graph.initializer}
+
+        candidates = 0
+        prepacked = 0
+        skipped_block_sizes = set()
 
         for node in model_proto.graph.node:
             if node.op_type != "MatMulNBits" or node.domain != "com.microsoft":
@@ -1665,6 +1740,7 @@ class Model:
             if not all(key in attrs for key in ("bits", "block_size", "K", "N")):
                 continue
 
+            candidates += 1
             bits = attrs["bits"].i
             block_size = attrs["block_size"].i
             k = attrs["K"].i
@@ -1676,6 +1752,8 @@ class Model:
                 and n % (32 if bits == 8 else 64) == 0
             )
             if not fpa_intb_eligible:
+                if block_size not in allowed_block_sizes:
+                    skipped_block_sizes.add(block_size)
                 continue
 
             init = initializers.get(node.input[1])
@@ -1685,6 +1763,23 @@ class Model:
             packed = CudaQuantizer.prepack_matmulnbits_weight(numpy_helper.to_array(init), n, k, bits, force_arch)
             init.CopyFrom(numpy_helper.from_array(np.ascontiguousarray(packed), init.name))
             node.attribute.append(onnx_helper.make_attribute("weight_prepacked", prepack_mode))
+            prepacked += 1
+
+        if candidates and not prepacked:
+            reason = (
+                f"block_size {sorted(skipped_block_sizes)} is not one of {list(allowed_block_sizes)} "
+                f"for the SM{force_arch} layout"
+                if skipped_block_sizes
+                else "no node met the fpA_intB K/N alignment"
+            )
+            raise ValueError(
+                f"matmulnbits_weights_prepacked={prepack_mode} prepacked 0 of {candidates} MatMulNBits "
+                f"nodes: {reason}. Choose a compatible block_size, use "
+                "matmulnbits_weights_prepacked=1 (SM80 layout, accepts block_size 32), or 0 to "
+                "prepack at session creation instead."
+            )
+        if candidates:
+            print(f"Prepacked {prepacked}/{candidates} MatMulNBits weights into the SM{force_arch} fpA_intB layout.")
 
     @classmethod
     def get_genai_version(cls) -> str | None:
@@ -1898,7 +1993,9 @@ class Model:
             if type(name) == dict:
                 # Cache inputs
                 for i, cache_name in name.items():
-                    if key in {"past_key_values.key", "past_key_values.value"}:
+                    if key in {"past_key_values.key_scale", "past_key_values.value_scale"}:
+                        cache_shape = ["num_blocks_windowed", *shape[1:]] if self.is_windowed_paged_layer(i) else shape
+                    elif key in {"past_key_values.key", "past_key_values.value"}:
                         cache_shape = self.make_key_value_cache_shape(i, shape)
                     else:
                         cache_shape = shape
@@ -1916,7 +2013,9 @@ class Model:
             if type(name) == dict:
                 # Cache outputs
                 for i, cache_name in name.items():
-                    if key in {"present.key", "present.value"}:
+                    if key in {"present.key_scale", "present.value_scale"}:
+                        cache_shape = ["num_blocks_windowed", *shape[1:]] if self.is_windowed_paged_layer(i) else shape
+                    elif key in {"present.key", "present.value"}:
                         cache_shape = self.make_key_value_cache_shape(i, shape)
                     else:
                         cache_shape = shape
@@ -2223,11 +2322,14 @@ class Model:
         )
         self.make_value(output, self.io_dtype, shape=shape)
 
+    def exclude_node_from_quantization(self, basename):
+        nodes_to_exclude = self.quant_attrs["nodes_to_exclude"]
+        if basename not in nodes_to_exclude:
+            nodes_to_exclude.append(basename)
+
     def make_matmul(self, matmul, basename, root_input, **kwargs):
         if getattr(matmul, "exclude_from_quantization", False):
-            nodes_to_exclude = self.quant_attrs["nodes_to_exclude"]
-            if basename not in nodes_to_exclude:
-                nodes_to_exclude.append(basename)
+            self.exclude_node_from_quantization(basename)
         if hasattr(matmul, "base_layer"):
             # For LoRA `MatMul`
             return self.make_matmul_lora(matmul, basename, root_input, **kwargs)
@@ -3860,7 +3962,7 @@ class Model:
     def get_kv_cache_scale_inputs(self, **kwargs):
         # Shared by GroupQueryAttention and PagedAttention: returns the per-layer k/v scale
         # initializer names, or empty placeholders when the KV cache is not quantized.
-        if self.kv_cache_attrs["quant_scheme"] == "none":
+        if self.kv_cache_attrs["quant_scheme"] == "none" or self.kv_cache_attrs["quant_mode"] == "PER_TOKEN":
             return "", ""
         layer_id = kwargs.get("layer_id")
         if layer_id is None:
@@ -4167,6 +4269,16 @@ class Model:
         # PagedAttention derives the cache element type from the tensor itself, so unlike
         # GroupQueryAttention it has no `kv_cache_bit_width` attribute.
         attributes = self.get_attention_op_attributes(**kwargs)
+        if self.kv_cache_attrs.get("bit_width", 0) == 4:
+            attributes.update(k_cache_dtype="int4", v_cache_dtype="int4")
+        rotation = self.kv_cache_attrs.get("rotation", "NONE")
+        if rotation != "NONE":
+            attributes.update(qk_rotation=rotation, v_rotation=rotation)
+        if self.kv_cache_attrs.get("quant_mode") == "PER_TOKEN":
+            layer_id = kwargs["layer_id"]
+            inputs.extend([""] * (17 - len(inputs)))
+            inputs.extend(self.input_names[f"past_key_values.{side}_scale"][layer_id] for side in ("key", "value"))
+            outputs.extend(self.output_names[f"present.{side}_scale"][layer_id] for side in ("key", "value"))
         self.make_node(
             "PagedAttention",
             inputs=inputs,
