@@ -2,8 +2,12 @@ ARG BASEIMAGE=onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/buil
 
 FROM $BASEIMAGE
 ADD scripts /tmp/scripts
-
-RUN cd /tmp/scripts && /tmp/scripts/install_centos.sh && /tmp/scripts/install_deps.sh && rm -rf /tmp/scripts
+RUN --mount=type=secret,id=pip_index_url,required=true \
+    export PIP_INDEX_URL="$(cat /run/secrets/pip_index_url)" && \
+    cd /tmp/scripts && \
+    /tmp/scripts/install_centos.sh && \
+    /tmp/scripts/install_deps.sh && \
+    rm -rf /tmp/scripts
 ENV PATH="/usr/.cargo/bin:$PATH"
 ENV RUSTUP_HOME="/usr/.rustup"
 ENV CARGO_HOME="/usr/.cargo"
