@@ -444,8 +444,6 @@ void VarlenDecoderIO::PreparePositionIds(
                  [](size_t sum, const std::shared_ptr<Request>& request) {
                    return sum + request->ScheduledTokenCount();
                  });
-  auto position_ids = std::make_unique<Tensor>(
-      model->p_device_inputs_, Ort::TypeToTensorType<int64_t>);
   const std::vector<int64_t> position_shape =
       position_planes_ == 1
           ? std::vector<int64_t>{static_cast<int64_t>(num_tokens)}
