@@ -140,6 +140,12 @@ class FixedStateReservation {
   // True when model inputs and outputs view the active and inactive persistent banks directly.
   bool UsesDirectBindings() const;
 
+  // Identifies the device addresses this reservation binds. Direct bindings view a persistent bank
+  // at a slot offset, and which bank is active flips on every commit, so a captured CUDA graph may
+  // only be replayed against a reservation reporting the same key. Staged bindings always view the
+  // pool's pool-lifetime staging buffers and share key 0.
+  size_t BindingLayoutKey() const;
+
   // Commits only the first `kept_tokens` of the `step_tokens` this row's request contributed,
   // by replaying the captured compact updates through the accepted transition and lowering the
   // row's committed token boundary by the rejected tokens. Must be called before PrepareCommit.
