@@ -785,6 +785,11 @@ def get_args():
                 dflash2_num_draft_tokens = Override the number of draft tokens the DFlash 2 block
                     drafter proposes per step. Must be positive and no greater than the draft checkpoint's
                     block size minus its anchor token. That checkpoint limit is the default.
+                max_draft_tokens = Write `speculative.max_draft_tokens` into genai_config.json, capping how
+                    many drafted tokens the engine verifies per step. Must be between 1 and 16. Unlike
+                    dflash2_num_draft_tokens this does not change the exported drafter, so a model built
+                    once can be re-tuned by editing the config. Default is unset, which leaves the runtime
+                    default of 4 in effect.
                 dflash2_fuse_gate_up = Experimental DFlash 2 MLP gate/up projection fusion.
                     Accepts true or false (default). Requires dflash2_path. Combines gate/up
                     weights into one MatMul or MatMulNBits followed by Split. Preserves BF16

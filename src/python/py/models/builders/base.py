@@ -1378,6 +1378,15 @@ class Model:
                 dynamic_batching["max_scheduled_tokens"] = int(self.extra_options["max_scheduled_tokens"])
             genai_config["engine"] = {"dynamic_batching": dynamic_batching}
 
+        if "max_draft_tokens" in self.extra_options:
+            # Caps how many drafted tokens the engine verifies per step. This is independent of
+            # the drafter's exported geometry, which costs the same no matter how many of its
+            # tokens are used, so the best value is workload-specific and must be measured.
+            max_draft_tokens = int(self.extra_options["max_draft_tokens"])
+            if not 1 <= max_draft_tokens <= 16:
+                raise ValueError(f"max_draft_tokens must be between 1 and 16. Got: {max_draft_tokens}.")
+            genai_config["speculative"] = {"max_draft_tokens": max_draft_tokens}
+
         state_groups = self.make_decoder_state_groups(inputs, outputs)
         if state_groups:
             genai_config["model"]["decoder"]["state_groups"] = state_groups
