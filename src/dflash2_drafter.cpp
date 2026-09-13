@@ -4,6 +4,8 @@
 #include "generator/generators.h"
 #include "dflash2_drafter.h"
 #include "engine/request.h"
+#include "engine/decoders/varlen_decoder_io.h"
+#include "engine/paged_key_value_cache.h"
 #include "models/io/kv_cache.h"
 
 #include <algorithm>
@@ -425,6 +427,13 @@ Dflash2Drafter::Dflash2Drafter(std::shared_ptr<Dflash2Model> model, size_t paged
     throw std::runtime_error("The DFlash 2 drafter cache exceeds the int32 block-id range.");
   }
   query_spill_blocks_ = (static_cast<size_t>(config_.block_size) - 1) / paged_block_size_ + 1;
+  // Widths are bucketed up to the longest sequence the model can hold, so the bucket ladder is
+  // logarithmic in the context length rather than one width per block boundary.
+  const size_t context_length =
+      static_cast<size_t>(std::max(model_->config_->model.context_length, 1));
+  max_block_table_columns_ = (context_length - 1) / paged_block_size_ + 1;
+  graph_capture_enabled_ =
+      IsGraphCaptureEnabled(model_->config_->model.decoder.session_options);
   if (config_.sliding_window > 0) {
     // Positions older than this are masked out of every query row, so they are never ingested and
     // the ring may alias them.
@@ -457,12 +466,13 @@ Dflash2Drafter::Dflash2Drafter(std::shared_ptr<Dflash2Model> model, size_t paged
       }
     }
   }
-  // Proposal tensors keep a stable address but not a stable shape, so they are not capturable.
-  run_options_->AddConfigEntry("gpu_graph_id", "-1");
+  // The annotation id is chosen per step: proposal tensors keep stable addresses between growth
+  // events, but their shapes track the accepted-token count and the context length.
 }
 
 Tensor& Dflash2StepTensor(std::unique_ptr<Tensor>& slot, DeviceInterface* device,
-                          ONNXTensorElementDataType type, const std::vector<int64_t>& shape) {
+                          ONNXTensorElementDataType type, const std::vector<int64_t>& shape,
+                          bool* reallocated) {
   size_t elements = 1;
   for (const int64_t dimension : shape) {
     elements = CheckedMultiply(elements, static_cast<size_t>(dimension), "DFlash 2 proposal tensor");
@@ -481,6 +491,9 @@ Tensor& Dflash2StepTensor(std::unique_ptr<Tensor>& slot, DeviceInterface* device
       capacity = std::max(bytes, previous_bytes * 2);
     }
     slot = std::make_unique<Tensor>(device, type);
+    if (reallocated) {
+      *reallocated = true;
+    }
   }
   slot->CreateTensor(shape, /*make_static=*/true, std::max<size_t>(capacity, 1));
   return *slot;
@@ -653,6 +666,18 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     ingest_count[i] = feed.aux_row_count - dropped;
     num_ctx_rows = CheckedAdd(num_ctx_rows, ingest_count[i], "DFlash 2 context rows");
   }
+  // Only the total row count reaches the captured shape, so a step whose requests ingest differing
+  // counts shares a shape with every other split that sums the same way. Under concurrency those
+  // sums walk over a range far wider than the graph budget and almost none of them recur, so each
+  // capture costs more than it ever returns. Restricting capture to uniform steps keeps the shape
+  // ladder proportional to the per-request row count instead of the sum over requests.
+  bool uniform_ingest = true;
+  for (const size_t i : served) {
+    if (ingest_count[i] != ingest_count[served.front()]) {
+      uniform_ingest = false;
+      break;
+    }
+  }
   CheckedMetadataValue(
       CheckedAdd(num_ctx_rows, num_block_rows, "DFlash 2 packed rows"),
       "DFlash 2 packed rows");
@@ -714,6 +739,16 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
 
   const size_t num_tokens = layout.q_row_map.size();
   auto device = model_->p_device_inputs_;
+  // Bucketing the width lets a growing context keep replaying one captured graph instead of
+  // retiring one at every block boundary; columns past the live KV length are never read. Steps
+  // that cannot be captured keep the exact width so their bound inputs are unchanged.
+  const bool graph_eligible = graph_capture_enabled_ && uniform_ingest;
+  const size_t block_table_columns =
+      graph_eligible ? GetGraphBlockTableColumns(max_blocks, max_block_table_columns_)
+                     : max_blocks;
+  // Any proposal tensor that outgrows its buffer moves, which retires every graph captured against
+  // its old addresses.
+  bool buffers_moved = false;
 
   auto fill_int32 = [](Tensor& tensor, const std::vector<int32_t>& values) {
     auto span = tensor.GetDeviceSpan<int32_t>();
@@ -723,7 +758,8 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
 
   auto& packed_aux = Dflash2StepTensor(step_tensors_.packed_aux, device, aux_type_,
                                        {static_cast<int64_t>(num_ctx_rows),
-                                        static_cast<int64_t>(aux_hidden_size_)});
+                                        static_cast<int64_t>(aux_hidden_size_)},
+                                       &buffers_moved);
   const size_t aux_row_bytes =
       CheckedMultiply(aux_hidden_size_, Ort::SizeOf(aux_type_), "DFlash 2 auxiliary row bytes");
   auto source_bytes = aux_hidden_states.GetByteSpan();
@@ -740,7 +776,7 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   }
 
   auto& input_ids = Dflash2StepTensor(step_tensors_.input_ids, device, Ort::TypeToTensorType<int64_t>,
-                                      {static_cast<int64_t>(num_block_rows)});
+                                      {static_cast<int64_t>(num_block_rows)}, &buffers_moved);
   {
     auto span = input_ids.GetDeviceSpan<int64_t>();
     auto cpu = span.CpuSpan();
@@ -756,32 +792,33 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
 
   constexpr auto int32_type = Ort::TypeToTensorType<int32_t>;
   auto& q_row_map = Dflash2StepTensor(step_tensors_.q_row_map, device, int32_type,
-                                      {static_cast<int64_t>(num_tokens)});
+                                      {static_cast<int64_t>(num_tokens)}, &buffers_moved);
   fill_int32(q_row_map, layout.q_row_map);
   auto& qkv_row_map = Dflash2StepTensor(step_tensors_.qkv_row_map, device, int32_type,
-                                        {static_cast<int64_t>(num_tokens)});
+                                        {static_cast<int64_t>(num_tokens)}, &buffers_moved);
   fill_int32(qkv_row_map, layout.qkv_row_map);
   auto& block_row_index = Dflash2StepTensor(step_tensors_.block_row_index, device, int32_type,
-                                            {static_cast<int64_t>(num_block_rows)});
+                                            {static_cast<int64_t>(num_block_rows)}, &buffers_moved);
   fill_int32(block_row_index, layout.block_row_index);
   auto& cumulative = Dflash2StepTensor(step_tensors_.cumulative_sequence_lengths, device, int32_type,
-                                       {static_cast<int64_t>(served.size() + 1)});
+                                       {static_cast<int64_t>(served.size() + 1)}, &buffers_moved);
   fill_int32(cumulative, layout.cumulative_sequence_lengths);
   auto& past_lengths = Dflash2StepTensor(step_tensors_.past_sequence_lengths, device, int32_type,
-                                         {static_cast<int64_t>(served.size())});
+                                         {static_cast<int64_t>(served.size())}, &buffers_moved);
   fill_int32(past_lengths, layout.past_sequence_lengths);
 
   auto& block_table = Dflash2StepTensor(
       step_tensors_.block_table, device, int32_type,
-      {static_cast<int64_t>(served.size()), static_cast<int64_t>(max_blocks)});
+      {static_cast<int64_t>(served.size()), static_cast<int64_t>(block_table_columns)},
+      &buffers_moved);
   {
     auto span = block_table.GetDeviceSpan<int32_t>();
     auto cpu = span.CpuSpan();
     for (size_t row = 0; row < served.size(); ++row) {
       const auto& blocks = requests_[feeds[served[row]].request].blocks;
-      auto columns = cpu.subspan(row * max_blocks, max_blocks);
+      auto columns = cpu.subspan(row * block_table_columns, block_table_columns);
       if (ring_blocks_ == 0) {
-        const size_t used = std::min(blocks.size(), max_blocks);
+        const size_t used = std::min(blocks.size(), block_table_columns);
         std::copy_n(blocks.begin(), used, columns.begin());
         std::fill(columns.begin() + used, columns.end(), int32_t{-1});
         continue;
@@ -789,7 +826,7 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
       // A windowed drafter repeats its ring across every column: column j holds the block that
       // owns position j * block_size, which is ring[j % ring_blocks]. Every column is written, so
       // the reused buffer never exposes a stale id.
-      for (size_t column = 0; column < max_blocks; ++column) {
+      for (size_t column = 0; column < block_table_columns; ++column) {
         columns[column] = blocks[column % blocks.size()];
       }
     }
@@ -797,22 +834,49 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   }
 
   auto& metadata = Dflash2StepTensor(step_tensors_.attention_metadata, GetDeviceInterface(DeviceType::CPU),
-                                     int32_type, {3});
-  {
-    auto span = metadata.GetDeviceSpan<int32_t>();
-    auto cpu = span.CpuSpan();
-    cpu[0] = layout.max_query_len;
-    cpu[1] = layout.max_kv_len;
-    cpu[2] = layout.min_kv_len;
-  }
+                                     int32_type, {3}, &buffers_moved);
 
   const size_t batch = block_feed_indices.size();
   auto& candidate_ids = Dflash2StepTensor(step_tensors_.candidate_ids, device, int32_type,
                                           {static_cast<int64_t>(batch), static_cast<int64_t>(num_spec),
-                                           static_cast<int64_t>(top_k)});
+                                           static_cast<int64_t>(top_k)},
+                                          &buffers_moved);
   auto& scores = Dflash2StepTensor(step_tensors_.scores, device, Ort::TypeToTensorType<float>,
                                    {static_cast<int64_t>(batch), static_cast<int64_t>(num_spec),
-                                    static_cast<int64_t>(top_k), static_cast<int64_t>(top_k)});
+                                    static_cast<int64_t>(top_k), static_cast<int64_t>(top_k)},
+                                   &buffers_moved);
+
+  if (buffers_moved) {
+    ++buffer_generation_;
+  }
+  // Everything the captured launches bake in: the packed row counts, the block-table width, and the
+  // generation of the buffers those launches recorded addresses for.
+  const int annotation_id =
+      graph_eligible
+          ? graph_ids_.Id(GraphAnnotationIds::Key{
+                served.size(), batch, num_ctx_rows, block_table_columns,
+                static_cast<size_t>(layout.max_query_len), buffer_generation_})
+          : -1;
+  const bool capture = annotation_id > 0;
+  if (graph_capture_enabled_) {
+    run_options_->AddConfigEntry("gpu_graph_id", std::to_string(annotation_id).c_str());
+  }
+
+  {
+    // A captured step bakes these bounds into its launch dimensions and never re-runs the host code
+    // that read them, so they must bound the whole bucket rather than this step. The kernel re-reads
+    // the exact per-sequence lengths from device memory, which is what keeps replay correct as the
+    // sequences grow.
+    const AttentionMetadataValues values =
+        capture ? GetAttentionMetadataForGraph(static_cast<size_t>(layout.max_query_len),
+                                               block_table_columns, paged_block_size_)
+                : AttentionMetadataValues{layout.max_query_len, layout.max_kv_len, layout.min_kv_len};
+    auto span = metadata.GetDeviceSpan<int32_t>();
+    auto cpu = span.CpuSpan();
+    cpu[0] = values.max_query_len_bound;
+    cpu[1] = values.max_kv_len_bound;
+    cpu[2] = values.max_kv_len_lower_bound;
+  }
 
   std::vector<const char*> input_names{
       config_.inputs.aux_hidden_states.c_str(), config_.inputs.input_ids.c_str(),
