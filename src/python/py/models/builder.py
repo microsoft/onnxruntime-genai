@@ -785,6 +785,11 @@ def get_args():
                 dflash2_num_draft_tokens = Override the number of draft tokens the DFlash 2 block
                     drafter proposes per step. Must be positive and no greater than the draft checkpoint's
                     block size minus its anchor token. That checkpoint limit is the default.
+                dflash2_fuse_gate_up = Experimental DFlash 2 MLP gate/up projection fusion.
+                    Accepts true or false (default). Requires dflash2_path. Combines gate/up
+                    weights into one MatMul or MatMulNBits followed by Split. Preserves BF16
+                    activations and body quantization; does not change the target or LM head.
+                    Requires re-export and workload-specific performance/quality validation.
                 dflash2_precision = Weight precision for the DFlash 2 drafter body: bf16 (default),
                     int4, or int8. bf16 keeps every projection dense. int4/int8 emit `MatMulNBits`
                     at the target's block size for the attention and MLP projections, leaving the

@@ -57,6 +57,7 @@ class DFlash2Builder(BlockDrafterBuilder):
         filename="dflash2.onnx",
         num_draft_tokens=None,
         quant=None,
+        fuse_gate_up=False,
     ):
         self.draft_dir = draft_dir
         self.target_dir = target_dir
@@ -73,6 +74,7 @@ class DFlash2Builder(BlockDrafterBuilder):
             self.lm_head_quant = quant["lm_head"]
         self.filename = filename
         self.paged_block_size = paged_block_size
+        self.mlp_attrs = {"fuse_gate_up": fuse_gate_up}
 
         with open(os.path.join(draft_dir, "config.json")) as f:
             cfg = json.load(f)
@@ -502,22 +504,42 @@ class DFlash2Builder(BlockDrafterBuilder):
 
     def _make_mlp(self, i, x, w, rows_q):
         p = f"/dflash2/layers.{i}/mlp"
-        gate = self.matmul(
-            f"{p}/gate_proj/MatMul",
-            x,
-            w[f"layers.{i}.mlp.gate_proj.weight"],
-            self.hidden_size,
-            self.intermediate_size,
-            rows_q,
-        )
-        up = self.matmul(
-            f"{p}/up_proj/MatMul",
-            x,
-            w[f"layers.{i}.mlp.up_proj.weight"],
-            self.hidden_size,
-            self.intermediate_size,
-            rows_q,
-        )
+        if self.mlp_attrs["fuse_gate_up"]:
+            gate_up = self.matmul(
+                f"{p}/gate_up_proj/MatMul",
+                x,
+                torch.cat((w[f"layers.{i}.mlp.gate_proj.weight"], w[f"layers.{i}.mlp.up_proj.weight"]), dim=0),
+                self.hidden_size,
+                2 * self.intermediate_size,
+                rows_q,
+            )
+            gate, up = self.out(f"{p}/gate_proj/MatMul"), self.out(f"{p}/up_proj/MatMul")
+            self.make_node(
+                "Split",
+                [gate_up, self.const([self.intermediate_size, self.intermediate_size])],
+                [gate, up],
+                name=f"{p}/gate_up_proj/Split",
+                axis=-1,
+            )
+            self.make_value(gate, self.io_dtype, [rows_q, self.intermediate_size])
+            self.make_value(up, self.io_dtype, [rows_q, self.intermediate_size])
+        else:
+            gate = self.matmul(
+                f"{p}/gate_proj/MatMul",
+                x,
+                w[f"layers.{i}.mlp.gate_proj.weight"],
+                self.hidden_size,
+                self.intermediate_size,
+                rows_q,
+            )
+            up = self.matmul(
+                f"{p}/up_proj/MatMul",
+                x,
+                w[f"layers.{i}.mlp.up_proj.weight"],
+                self.hidden_size,
+                self.intermediate_size,
+                rows_q,
+            )
         sig = self.unary("Sigmoid", f"{p}/act/Sigmoid", gate, self.io_dtype, [rows_q, self.intermediate_size])
         silu = self.binary("Mul", f"{p}/act/Mul", gate, sig, self.io_dtype, [rows_q, self.intermediate_size])
         prod = self.binary("Mul", f"{p}/act/MulUp", silu, up, self.io_dtype, [rows_q, self.intermediate_size])
