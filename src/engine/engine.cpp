@@ -654,11 +654,17 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
       step->newly_created.push_back(feed.newly_created);
       packed_offset += token_count;
     }
-    step->plan.graph_capture_eligible = std::all_of(
-        step->plan.requests.begin(), step->plan.requests.end(),
-        [](const RequestStepPlan& entry) {
-          return !entry.is_prefill && entry.unprocessed_token_count == 1;
-        });
+    // One captured graph bakes in every tensor shape it was recorded with, so a step qualifies only
+    // when each request contributes the same number of tokens.
+    const size_t uniform_token_count =
+        step->plan.requests.empty() ? 0 : step->plan.requests.front().unprocessed_token_count;
+    step->plan.graph_capture_eligible =
+        !step->plan.requests.empty() && uniform_token_count != 0 &&
+        std::all_of(
+            step->plan.requests.begin(), step->plan.requests.end(),
+            [uniform_token_count](const RequestStepPlan& entry) {
+              return !entry.is_prefill && entry.unprocessed_token_count == uniform_token_count;
+            });
   } catch (...) {
     rollback_setup_and_rethrow(std::current_exception());
   }
@@ -1716,6 +1722,9 @@ void Engine::RunDynamic() {
     context.fixed_state_slots = reservation->FixedStateSlots();
     context.fixed_state_bindings = reservation->FixedStateBindings();
     context.fixed_state_staging_bytes = reservation->FixedStateStagingBytes();
+    if (auto* fixed_reservation = reservation->FixedReservation()) {
+      context.fixed_state_binding_key = fixed_reservation->BindingLayoutKey();
+    }
 
     bool request_transaction_active = false;
     std::unique_ptr<MtpStep> mtp_step;

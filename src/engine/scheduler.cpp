@@ -382,7 +382,8 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
   // describe that packed layout and identify the last logits row for each request, which is the row
   // used to sample its next token.
   size_t packed_token_offset = 0;
-  plan.graph_capture_eligible = true;
+  plan.graph_capture_eligible = !plan.requests.empty();
+  size_t uniform_token_count = 0;
   for (size_t i = 0; i < plan.requests.size(); ++i) {
     auto& entry = plan.requests[i];
     const size_t scheduling_index = entry.scheduling_order;
@@ -395,8 +396,14 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
         packed_token_offset + entry.unprocessed_token_count - 1;
     packed_token_offset += entry.unprocessed_token_count;
     plan.token_count += entry.unprocessed_token_count;
+    if (i == 0) {
+      uniform_token_count = entry.unprocessed_token_count;
+    }
+    // One captured graph bakes in every tensor shape it was recorded with, so a step qualifies only
+    // when each request contributes the same number of tokens.
     plan.graph_capture_eligible &=
-        !entry.is_prefill && entry.unprocessed_token_count == 1;
+        !entry.is_prefill && entry.unprocessed_token_count == uniform_token_count &&
+        entry.unprocessed_token_count != 0;
   }
   return result;
 }
