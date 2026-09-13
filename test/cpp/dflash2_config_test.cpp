@@ -742,6 +742,29 @@ TEST(Dflash2ConfigTest, ReusesProposalBufferUntilAStepOutgrowsIt) {
   EXPECT_EQ(slot->buffer_, grown);
 }
 
+TEST(Dflash2ConfigTest, ReportsWhenAProposalBufferMoves) {
+  auto* device = GetDeviceInterface(DeviceType::CPU);
+  constexpr auto type = Ort::TypeToTensorType<int32_t>;
+  std::unique_ptr<Tensor> slot;
+
+  // A CUDA graph records the address it was captured against, so the caller has to learn about
+  // every move to stop replaying a graph that now points at a freed buffer.
+  bool reallocated = false;
+  Dflash2StepTensor(slot, device, type, {2, 4}, &reallocated);
+  EXPECT_TRUE(reallocated);
+
+  reallocated = false;
+  Dflash2StepTensor(slot, device, type, {1, 3}, &reallocated);
+  EXPECT_FALSE(reallocated);
+
+  Dflash2StepTensor(slot, device, type, {4, 8}, &reallocated);
+  EXPECT_TRUE(reallocated);
+
+  reallocated = false;
+  Dflash2StepTensor(slot, device, type, {2, 4}, &reallocated);
+  EXPECT_FALSE(reallocated);
+}
+
 TEST(Dflash2ConfigTest, AmortizesProposalBufferGrowth) {
   auto* device = GetDeviceInterface(DeviceType::CPU);
   constexpr auto type = Ort::TypeToTensorType<int32_t>;

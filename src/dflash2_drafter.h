@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "models/model.h"
+#include "engine/graph_annotation_ids.h"
 
 namespace Generators {
 
@@ -20,9 +21,11 @@ size_t Dflash2DraftWidth(size_t capability_limit, size_t configured_limit,
                          size_t remaining_turn_tokens_after_step);
 
 // Reshapes a proposal tensor the drafter reuses between steps, replacing its buffer only when a
-// step needs more room than the one it kept.
+// step needs more room than the one it kept. `reallocated` is set when the buffer moved, which
+// invalidates any CUDA graph captured against its old address.
 Tensor& Dflash2StepTensor(std::unique_ptr<Tensor>& slot, DeviceInterface* device,
-                          ONNXTensorElementDataType type, const std::vector<int64_t>& shape);
+                          ONNXTensorElementDataType type, const std::vector<int64_t>& shape,
+                          bool* reallocated = nullptr);
 
 // The drafter cannot backfill K/V for context whose auxiliary hidden states were already consumed,
 // so an untracked request can join only at position zero while its current turn is eligible to
@@ -186,6 +189,14 @@ struct Dflash2Drafter {
     std::unique_ptr<Tensor> candidate_ids;
     std::unique_ptr<Tensor> scores;
   } step_tensors_;
+  // Block-table widths are bucketed to powers of two up to this cap so that a growing context
+  // reuses a captured graph instead of retiring one per block boundary.
+  size_t max_block_table_columns_{};
+  bool graph_capture_enabled_{};
+  GraphAnnotationIds graph_ids_;
+  // Bumped whenever a proposal tensor outgrows its buffer and moves. A captured graph records the
+  // old addresses, so anything captured before a move must never be replayed after it.
+  size_t buffer_generation_{};
   std::vector<int32_t> free_blocks_;
   std::unordered_map<const Request*, RequestState> requests_;
   size_t admission_misses_{};
