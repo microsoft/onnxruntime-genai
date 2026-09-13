@@ -171,13 +171,7 @@ TEST(VarlenDecoderIOTest, GraphIdSeparatesEveryCapturedShape) {
   GraphAnnotationIds ids;
   const auto id = [&](size_t batch, size_t tokens, size_t columns, size_t binding) {
     const auto key = DecodeGraphKey(batch, tokens, columns, binding);
-    if (!key) return -1;
-    int last = -1;
-    // A shape only earns an id once it has proved it recurs.
-    for (size_t sighting = 0; sighting < GraphAnnotationIds::kSightingsBeforeCapture; ++sighting) {
-      last = ids.Id(*key);
-    }
-    return last;
+    return key ? ids.Id(*key) : -1;
   };
 
   const int single = id(1, 1, 8, 0);
@@ -206,47 +200,13 @@ TEST(VarlenDecoderIOTest, GraphIdIsStableForARepeatedShape) {
                                   /*block_table_columns=*/16, /*state_binding_key=*/3);
   ASSERT_TRUE(key.has_value());
 
-  int assigned = -1;
-  for (size_t sighting = 0; sighting < GraphAnnotationIds::kSightingsBeforeCapture; ++sighting) {
-    assigned = ids.Id(*key);
-  }
+  int assigned = ids.Id(*key);
 
   // The EP only captures on the second occurrence of an id, so a shape must map to one id forever.
   ASSERT_GT(assigned, 0);
   EXPECT_EQ(ids.Id(*key), assigned);
   EXPECT_EQ(ids.Id(*key), assigned);
   EXPECT_EQ(ids.size(), 1u);
-}
-
-TEST(VarlenDecoderIOTest, GraphIdWithholdsAnIdUntilAShapeRecurs) {
-  GraphAnnotationIds ids;
-  const auto key = DecodeGraphKey(1, 1, 8, 0);
-  ASSERT_TRUE(key.has_value());
-
-  // Capturing costs a stalled step and permanent memory, so a shape seen once must not claim either.
-  for (size_t sighting = 1; sighting < GraphAnnotationIds::kSightingsBeforeCapture; ++sighting) {
-    EXPECT_EQ(ids.Id(*key), -1);
-  }
-  EXPECT_GT(ids.Id(*key), 0);
-  EXPECT_EQ(ids.size(), 1u);
-}
-
-TEST(VarlenDecoderIOTest, GraphIdDoesNotSpendItsBudgetOnOneOffShapes) {
-  GraphAnnotationIds ids;
-
-  // A workload that walks through many distinct shapes once each must leave the budget intact for
-  // the steady-state shape that follows it.
-  for (size_t shape = 1; shape <= 4 * GraphAnnotationIds::kMaxCapturedShapes; ++shape) {
-    EXPECT_EQ(ids.Id(*DecodeGraphKey(1, 1, 8, shape)), -1);
-  }
-  EXPECT_EQ(ids.size(), 0u);
-
-  const auto steady = DecodeGraphKey(1, 8, 8, 0);
-  int assigned = -1;
-  for (size_t sighting = 0; sighting < GraphAnnotationIds::kSightingsBeforeCapture; ++sighting) {
-    assigned = ids.Id(*steady);
-  }
-  EXPECT_GT(assigned, 0);
 }
 
 TEST(VarlenDecoderIOTest, GraphKeyBucketsNeighbouringBlockTableWidths) {
@@ -267,20 +227,13 @@ TEST(VarlenDecoderIOTest, GraphKeyRejectsShapesItCannotCapture) {
 
 TEST(VarlenDecoderIOTest, GraphIdStopsHandingOutIdsPastItsBudget) {
   GraphAnnotationIds ids;
-  const auto claim = [&](const GraphAnnotationIds::Key& key) {
-    int assigned = -1;
-    for (size_t sighting = 0; sighting < GraphAnnotationIds::kSightingsBeforeCapture; ++sighting) {
-      assigned = ids.Id(key);
-    }
-    return assigned;
-  };
 
   for (size_t shape = 1; shape <= GraphAnnotationIds::kMaxCapturedShapes; ++shape) {
-    EXPECT_GT(claim(*DecodeGraphKey(shape, 1, 8, 0)), 0);
+    EXPECT_GT(ids.Id(*DecodeGraphKey(shape, 1, 8, 0)), 0);
   }
 
   // Past the budget a new shape runs eagerly instead of growing capture memory without bound.
-  EXPECT_EQ(claim(*DecodeGraphKey(GraphAnnotationIds::kMaxCapturedShapes + 1, 1, 8, 0)), -1);
+  EXPECT_EQ(ids.Id(*DecodeGraphKey(GraphAnnotationIds::kMaxCapturedShapes + 1, 1, 8, 0)), -1);
   EXPECT_EQ(ids.size(), GraphAnnotationIds::kMaxCapturedShapes);
 }
 
