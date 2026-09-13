@@ -666,6 +666,18 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     ingest_count[i] = feed.aux_row_count - dropped;
     num_ctx_rows = CheckedAdd(num_ctx_rows, ingest_count[i], "DFlash 2 context rows");
   }
+  // Only the total row count reaches the captured shape, so a step whose requests ingest differing
+  // counts shares a shape with every other split that sums the same way. Under concurrency those
+  // sums walk over a range far wider than the graph budget and almost none of them recur, so each
+  // capture costs more than it ever returns. Restricting capture to uniform steps keeps the shape
+  // ladder proportional to the per-request row count instead of the sum over requests.
+  bool uniform_ingest = true;
+  for (const size_t i : served) {
+    if (ingest_count[i] != ingest_count[served.front()]) {
+      uniform_ingest = false;
+      break;
+    }
+  }
   CheckedMetadataValue(
       CheckedAdd(num_ctx_rows, num_block_rows, "DFlash 2 packed rows"),
       "DFlash 2 packed rows");
@@ -730,9 +742,10 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   // Bucketing the width lets a growing context keep replaying one captured graph instead of
   // retiring one at every block boundary; columns past the live KV length are never read. Steps
   // that cannot be captured keep the exact width so their bound inputs are unchanged.
+  const bool graph_eligible = graph_capture_enabled_ && uniform_ingest;
   const size_t block_table_columns =
-      graph_capture_enabled_ ? GetGraphBlockTableColumns(max_blocks, max_block_table_columns_)
-                             : max_blocks;
+      graph_eligible ? GetGraphBlockTableColumns(max_blocks, max_block_table_columns_)
+                     : max_blocks;
   // Any proposal tensor that outgrows its buffer moves, which retires every graph captured against
   // its old addresses.
   bool buffers_moved = false;
@@ -839,7 +852,7 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   // Everything the captured launches bake in: the packed row counts, the block-table width, and the
   // generation of the buffers those launches recorded addresses for.
   const int annotation_id =
-      graph_capture_enabled_
+      graph_eligible
           ? graph_ids_.Id(GraphAnnotationIds::Key{
                 served.size(), batch, num_ctx_rows, block_table_columns,
                 static_cast<size_t>(layout.max_query_len), buffer_generation_})
