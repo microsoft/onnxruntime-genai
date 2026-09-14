@@ -538,9 +538,11 @@ def create_model(
         if isinstance(rope_params, dict) and "rope_theta" in rope_params:
             config.rope_theta = rope_params["rope_theta"]
         onnx_model = MuseGlimmerModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-        # OGA runtime dispatch: emit type "llama" (the arch is Llama-compatible at the OGA level); the
-        # underlying ONNX graph is the full Muse Glimmer arch. Avoids "Unsupported model_type: muse_glimmer".
-        onnx_model.model_type = "llama"
+        # OGA runtime dispatch: emit the distinct type "muse_glimmer" (now registered in ModelType::IsLLM,
+        # so it dispatches to the generic DecoderOnly_Model exactly like "llama"). A distinct type is what
+        # lets the AMDGPU umbrella EP route Muse specifically to the MIGraphX backend on gfx1151 (via a
+        # kArchModelBackend override) instead of the default HIP path, without catching all "llama" models.
+        onnx_model.model_type = "muse_glimmer"
     elif config.architectures[0] == "NemotronForCausalLM":
         onnx_model = NemotronModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "OlmoForCausalLM":
