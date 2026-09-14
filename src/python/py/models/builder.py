@@ -46,6 +46,7 @@ from builders import (
     Qwen3Model,
     Qwen3VLTextModel,
     Qwen4ExpModel,
+    Qwen4ExpTextModel,
     Qwen25VLTextModel,
     QwenModel,
     SmolLM3Model,
@@ -155,6 +156,7 @@ def check_extra_options(
         "prune_lm_head",
         "use_paged_attention",
         "windowed_kv_cache",
+        "text_only",
     ]
 
     for key in bools:
@@ -577,7 +579,11 @@ def create_model(
         else:
             onnx_model.model_type = "qwen3_5_moe"
     elif config.architectures[0] == "Qwen4ExpForConditionalGeneration":
-        onnx_model = Qwen4ExpModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        if extra_options.get("text_only", False):
+            onnx_model = Qwen4ExpTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+            onnx_model.model_type = "qwen4_exp_text"
+        else:
+            onnx_model = Qwen4ExpModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "SmolLM3ForCausalLM":
         onnx_model = SmolLM3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "VideoChatFlashQwenForCausalLM":
@@ -724,6 +730,8 @@ def get_args():
                     For models with multiple components, each component is exported to its own ONNX model.
                 config_only = Generate config and pre/post processing files only.
                     Use this option when you already have your optimized and/or quantized ONNX model.
+                text_only = Export only the standalone text model for Qwen4-Exp conditional-generation checkpoints.
+                    Includes token embeddings in model.onnx and omits the vision and multimodal embedding graphs.
                 hf_token = false/token: Use this to manage authentication with Hugging Face.
                     Default behavior is to use the authentication token stored by `huggingface-cli login`.
                     If false, authentication with Hugging Face will be disabled.

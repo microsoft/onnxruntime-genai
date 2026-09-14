@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 import json
 import os
 import subprocess
@@ -43,6 +44,11 @@ from transformers import (
 class Model:
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         self.extra_options = extra_options
+        self.hf_load_config = (
+            copy.deepcopy(config)
+            if "num_hidden_layers" in extra_options and hasattr(config, "text_config")
+            else None
+        )
         self.make_config_init(config)
 
         # Context length attributes from config
@@ -5492,7 +5498,19 @@ class Model:
             )
 
         else:
-            extra_kwargs = {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {}
+            extra_kwargs = {}
+            if "num_hidden_layers" in self.extra_options:
+                hf_config = self.hf_load_config
+                if hasattr(hf_config, "text_config"):
+                    hf_config.num_hidden_layers = self.num_layers
+                    hf_config.text_config.num_hidden_layers = self.num_layers
+                    if getattr(hf_config, "layer_types", None) is not None:
+                        hf_config.layer_types = hf_config.layer_types[: self.num_layers]
+                    if getattr(hf_config.text_config, "layer_types", None) is not None:
+                        hf_config.text_config.layer_types = hf_config.text_config.layer_types[: self.num_layers]
+                    extra_kwargs["config"] = hf_config
+                else:
+                    extra_kwargs["num_hidden_layers"] = self.num_layers
 
             # Get auto class to load PyTorch model based on model type
             auto_class_map = {

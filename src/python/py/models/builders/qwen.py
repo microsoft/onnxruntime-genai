@@ -16,6 +16,7 @@ import torch
 from transformers import Qwen2ForCausalLM
 
 from .base import Model
+from .expansions import Qwen38
 from .mtp import MTPModel
 
 
@@ -884,15 +885,15 @@ class Qwen35MoETextModel(Qwen35TextModel):
         return shared_output, f"{gate_sigmoid_name}/output_0"
 
 
-class Qwen4ExpTextModel(Qwen35MoETextModel):
+class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
     """Qwen4-Exp decoder builder using external token/vision embeddings."""
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         extra_options = copy.deepcopy(extra_options)
-        extra_options["exclude_embeds"] = True
-        extra_options.setdefault("filename", "text.onnx")
+        text_only = extra_options.get("text_only", False)
+        extra_options["exclude_embeds"] = not text_only
+        extra_options.setdefault("filename", "model.onnx" if text_only else "text.onnx")
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        self.graph.opset_imports["com.microsoft"] = 2
         self.model.metadata_props["qwen4_exp.past_indexer_names"] = "past_key_values.%d.indexer_key"
         self.model.metadata_props["qwen4_exp.present_indexer_names"] = "present.%d.indexer_key"
         self.model.metadata_props["qwen4_exp.past_ple_token_names"] = "past.%d.ple_tokens"
@@ -939,6 +940,25 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
         self.output_names["present.indexer"] = qsa_outputs
         self.output_types["present.indexer"] = self.io_dtype
         self.output_shapes["present.indexer"] = ["batch_size", "total_sequence_length", self.indexer_head_dim]
+        if self.use_paged_attention:
+            capacity = self.indexer_budget + self.indexer_compress_ratio - 1
+            self.model.metadata_props["qwen4_exp.selected_index_names"] = "sparse_attention.%d.selected_indices"
+            self.model.metadata_props["qwen4_exp.selected_count_names"] = "sparse_attention.%d.selected_counts"
+            self.input_names["sparse_attention.selected_indices"] = {
+                layer_id: f"sparse_attention.{layer_id}.selected_indices" for layer_id in qsa_layers
+            }
+            self.input_types["sparse_attention.selected_indices"] = ir.DataType.INT32
+            self.input_shapes["sparse_attention.selected_indices"] = ["num_tokens", capacity]
+            self.input_names["sparse_attention.selected_counts"] = {
+                layer_id: f"sparse_attention.{layer_id}.selected_counts" for layer_id in qsa_layers
+            }
+            self.input_types["sparse_attention.selected_counts"] = ir.DataType.INT32
+            self.input_shapes["sparse_attention.selected_counts"] = ["num_tokens"]
+            del self.input_names["past.indexer"]
+            del self.output_names["present.indexer"]
+            del self.model.metadata_props["qwen4_exp.past_indexer_names"]
+            del self.model.metadata_props["qwen4_exp.present_indexer_names"]
+            self.input_shapes["attention_metadata"] = [5]
 
         ple_token_state = {layer_id: f"past.{layer_id}.ple_tokens" for layer_id in self.ple_layer_ids}
         ple_conv_state = {layer_id: f"past.{layer_id}.ple_conv" for layer_id in self.ple_layer_ids}
@@ -951,8 +971,8 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
         self.input_types["past.ple_conv"] = self.io_dtype
         self.input_shapes["past.ple_conv"] = [
             "batch_size",
-            self.hc_hidden_size,
             self.ple_conv_dilation * (self.ple_conv_kernel_size - 1),
+            self.hc_hidden_size,
         ]
         self.output_names["present.ple_tokens"] = present_ple_tokens
         self.output_types["present.ple_tokens"] = ir.DataType.INT64
@@ -963,7 +983,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
 
         self.input_names["input_ids"] = "input_ids"
         self.input_types["input_ids"] = ir.DataType.INT64
-        self.input_shapes["input_ids"] = ["batch_size", "sequence_length"]
+        self.input_shapes["input_ids"] = ["num_tokens"] if self.use_paged_attention else ["batch_size", "sequence_length"]
 
     def make_gated_rms_norm(self, name, root_input, scale, gate, shape, epsilon=1e-5):
         output = f"{name}/output_0"
@@ -978,50 +998,9 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
         )
         self.make_value(output, self.io_dtype, shape=shape)
 
-    def make_branchwise_rms_norm(self, name, root_input, norm, hidden_size):
-        grouped_shape = ["batch_size", "sequence_length", self.hc_count, hidden_size]
-        reshape_name = f"{name}/Reshape"
-        self.make_reshape(
-            reshape_name,
-            [root_input, f"/model/constants/INT64/[0, 0, {self.hc_count}, {hidden_size}]"],
-            self.io_dtype,
-            grouped_shape,
-        )
-        grouped = f"{reshape_name}/output_0"
-        square_name = f"{name}/Square"
-        self.make_mul(square_name, [grouped, grouped], self.io_dtype, grouped_shape)
-        mean_name = f"{name}/Mean"
-        mean_shape = ["batch_size", "sequence_length", self.hc_count, 1]
-        self.make_reduce_mean(
-            mean_name,
-            [f"{square_name}/output_0", "/model/constants/INT64/[-1]"],
-            self.io_dtype,
-            mean_shape,
-            keepdims=True,
-        )
-        epsilon_name = f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.layernorm_attrs['epsilon']}"
-        variance_name = f"{name}/Variance"
-        self.make_add(variance_name, [f"{mean_name}/output_0", epsilon_name], self.io_dtype, mean_shape)
-        rsqrt_name = f"{name}/Rsqrt"
-        self.make_rsqrt(rsqrt_name, [f"{variance_name}/output_0"], self.io_dtype, mean_shape)
-        normalized_name = f"{name}/Normalize"
-        self.make_mul(normalized_name, [grouped, f"{rsqrt_name}/output_0"], self.io_dtype, grouped_shape)
-        flatten_name = f"{name}/Flatten"
-        flat_shape = ["batch_size", "sequence_length", self.hc_count * hidden_size]
-        self.make_reshape(
-            flatten_name,
-            [f"{normalized_name}/output_0", f"/model/constants/INT64/[0, 0, {self.hc_count * hidden_size}]"],
-            self.io_dtype,
-            flat_shape,
-        )
-        scale_name = f"{name[1:].replace('/', '.')}.weight"
-        self.make_initializer(norm.weight + 1, scale_name, to=self.io_dtype)
-        scale_mul_name = f"{name}/Scale"
-        self.make_mul(scale_mul_name, [f"{flatten_name}/output_0", scale_name], self.io_dtype, flat_shape)
-        return f"{scale_mul_name}/output_0"
-
     def make_hyper_connection_mix(self, layer_id, hyper_connection, root_input, location, combine=True):
         basename = f"/model/layers.{layer_id}/{location}_hyper_connection"
+        token_shape = ["num_tokens"] if self.use_paged_attention else ["batch_size", "sequence_length"]
         normalized = self.make_branchwise_rms_norm(
             f"{basename}/hc_norm", root_input, hyper_connection.hc_norm, self.hidden_size
         )
@@ -1033,46 +1012,61 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
             divide_name,
             [f"{down_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.hc_count}"],
             self.io_dtype,
-            ["batch_size", "sequence_length", hyper_connection.input_mix_weight_down.out_features],
+            [*token_shape, hyper_connection.input_mix_weight_down.out_features],
         )
+        silu_shape = [*token_shape, hyper_connection.input_mix_weight_down.out_features]
+        silu_cast_input = f"{basename}/input_mix_weight_down/SiLU/CastInput"
+        self.make_cast(silu_cast_input, f"{divide_name}/output_0", ir.DataType.FLOAT, silu_shape)
         silu_sigmoid = f"{basename}/input_mix_weight_down/Sigmoid"
         self.make_sigmoid(
             silu_sigmoid,
-            f"{divide_name}/output_0",
-            self.io_dtype,
-            ["batch_size", "sequence_length", hyper_connection.input_mix_weight_down.out_features],
+            f"{silu_cast_input}/output_0",
+            ir.DataType.FLOAT,
+            silu_shape,
         )
         silu_name = f"{basename}/input_mix_weight_down/SiLU"
         self.make_mul(
             silu_name,
-            [f"{divide_name}/output_0", f"{silu_sigmoid}/output_0"],
-            self.io_dtype,
-            ["batch_size", "sequence_length", hyper_connection.input_mix_weight_down.out_features],
+            [f"{silu_cast_input}/output_0", f"{silu_sigmoid}/output_0"],
+            ir.DataType.FLOAT,
+            silu_shape,
         )
+        silu_cast_output = f"{basename}/input_mix_weight_down/SiLU/CastOutput"
+        self.make_cast(silu_cast_output, f"{silu_name}/output_0", self.io_dtype, silu_shape)
         up_name = self.make_matmul(
             hyper_connection.input_mix_weight_up,
             f"{basename}/input_mix_weight_up/MatMul",
-            f"{silu_name}/output_0",
+            f"{silu_cast_output}/output_0",
         )
+        mix_sigmoid_shape = [*token_shape, self.hc_hidden_size]
+        mix_sigmoid_cast_input = f"{basename}/input_mix_weight_up/Sigmoid/CastInput"
+        self.make_cast(mix_sigmoid_cast_input, f"{up_name}/output_0", ir.DataType.FLOAT, mix_sigmoid_shape)
         mix_sigmoid = f"{basename}/input_mix_weight_up/Sigmoid"
         self.make_sigmoid(
             mix_sigmoid,
-            f"{up_name}/output_0",
-            self.io_dtype,
-            ["batch_size", "sequence_length", self.hc_hidden_size],
+            f"{mix_sigmoid_cast_input}/output_0",
+            ir.DataType.FLOAT,
+            mix_sigmoid_shape,
         )
+        mix_sigmoid_cast_output = f"{basename}/input_mix_weight_up/Sigmoid/CastOutput"
+        self.make_cast(mix_sigmoid_cast_output, f"{mix_sigmoid}/output_0", self.io_dtype, mix_sigmoid_shape)
         mix_reshape = f"{basename}/input_mix_weight/Reshape"
-        grouped_shape = ["batch_size", "sequence_length", self.hc_count, self.hidden_size]
+        grouped_shape = [*token_shape, self.hc_count, self.hidden_size]
+        grouped_dims = (
+            [-1, self.hc_count, self.hidden_size]
+            if self.use_paged_attention
+            else [0, 0, self.hc_count, self.hidden_size]
+        )
         self.make_reshape(
             mix_reshape,
-            [f"{mix_sigmoid}/output_0", f"/model/constants/INT64/[0, 0, {self.hc_count}, {self.hidden_size}]"],
+            [f"{mix_sigmoid_cast_output}/output_0", f"/model/constants/INT64/{grouped_dims}"],
             self.io_dtype,
             grouped_shape,
         )
         norm_reshape = f"{basename}/normalized/Reshape"
         self.make_reshape(
             norm_reshape,
-            [normalized, f"/model/constants/INT64/[0, 0, {self.hc_count}, {self.hidden_size}]"],
+            [normalized, f"/model/constants/INT64/{grouped_dims}"],
             self.io_dtype,
             grouped_shape,
         )
@@ -1088,7 +1082,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
             mixed_name,
             [f"{weighted_name}/output_0", "/model/constants/INT64/[-2]"],
             self.io_dtype,
-            ["batch_size", "sequence_length", self.hidden_size],
+            [*token_shape, self.hidden_size],
         )
         if not combine:
             return f"{mixed_name}/output_0"
@@ -1097,7 +1091,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
             hyper_connection.block_inject_weight, f"{basename}/block_inject_weight/MatMul", normalized
         )
         inject_div = f"{basename}/block_inject_weight/Div"
-        inject_shape = ["batch_size", "sequence_length", self.hc_count]
+        inject_shape = [*token_shape, self.hc_count]
         self.make_div(
             inject_div,
             [f"{inject_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.hc_count}"],
@@ -1105,11 +1099,15 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
             inject_shape,
         )
         inject_sigmoid = f"{basename}/block_inject_weight/Sigmoid"
-        self.make_sigmoid(inject_sigmoid, f"{inject_div}/output_0", self.io_dtype, inject_shape)
+        inject_sigmoid_cast_input = f"{inject_sigmoid}/CastInput"
+        self.make_cast(inject_sigmoid_cast_input, f"{inject_div}/output_0", ir.DataType.FLOAT, inject_shape)
+        self.make_sigmoid(inject_sigmoid, f"{inject_sigmoid_cast_input}/output_0", ir.DataType.FLOAT, inject_shape)
+        inject_sigmoid_cast_output = f"{inject_sigmoid}/CastOutput"
+        self.make_cast(inject_sigmoid_cast_output, f"{inject_sigmoid}/output_0", self.io_dtype, inject_shape)
         inject_scale = f"{basename}/block_inject_weight/Mul"
         self.make_mul(
             inject_scale,
-            [f"{inject_sigmoid}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/2"],
+            [f"{inject_sigmoid_cast_output}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/2"],
             self.io_dtype,
             inject_shape,
         )
@@ -1117,40 +1115,42 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
 
     def make_hyper_connection_injection(self, layer_id, block_output, hyper_input, injection_weights, location):
         basename = f"/model/layers.{layer_id}/{location}_hyper_connection/injection"
+        token_shape = ["num_tokens"] if self.use_paged_attention else ["batch_size", "sequence_length"]
         output_unsqueeze = f"{basename}/output/Unsqueeze"
         self.make_unsqueeze(
             output_unsqueeze,
             [block_output, "/model/constants/INT64/[-2]"],
             self.io_dtype,
-            ["batch_size", "sequence_length", 1, self.hidden_size],
+            [*token_shape, 1, self.hidden_size],
         )
         weight_unsqueeze = f"{basename}/weight/Unsqueeze"
         self.make_unsqueeze(
             weight_unsqueeze,
             [injection_weights, "/model/constants/INT64/[-1]"],
             self.io_dtype,
-            ["batch_size", "sequence_length", self.hc_count, 1],
+            [*token_shape, self.hc_count, 1],
         )
         weighted_name = f"{basename}/Mul"
         self.make_mul(
             weighted_name,
             [f"{output_unsqueeze}/output_0", f"{weight_unsqueeze}/output_0"],
             self.io_dtype,
-            ["batch_size", "sequence_length", self.hc_count, self.hidden_size],
+            [*token_shape, self.hc_count, self.hidden_size],
         )
         flatten_name = f"{basename}/Reshape"
+        flat_dims = [-1, self.hc_hidden_size] if self.use_paged_attention else [0, 0, self.hc_hidden_size]
         self.make_reshape(
             flatten_name,
-            [f"{weighted_name}/output_0", f"/model/constants/INT64/[0, 0, {self.hc_hidden_size}]"],
+            [f"{weighted_name}/output_0", f"/model/constants/INT64/{flat_dims}"],
             self.io_dtype,
-            ["batch_size", "sequence_length", self.hc_hidden_size],
+            [*token_shape, self.hc_hidden_size],
         )
         add_name = f"{basename}/Add"
         self.make_add(
             add_name,
             [hyper_input, f"{flatten_name}/output_0"],
             self.io_dtype,
-            ["batch_size", "sequence_length", self.hc_hidden_size],
+            [*token_shape, self.hc_hidden_size],
         )
         return f"{add_name}/output_0"
 
@@ -1165,74 +1165,113 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
         self.make_initializer(embedding.ngram_heads_vocab_sizes, vocab_sizes)
         self.make_initializer(embedding.ngram_heads_offsets, offsets)
         self.make_initializer(torch.tensor(embedding.eos_token_id, dtype=torch.int64), eos)
-        ngram_name = f"{basename}/NGramHashMapping"
+        ngram_op_type = "VarlenNGramHashMapping" if self.use_paged_attention else "NGramHashMapping"
+        ngram_name = f"{basename}/{ngram_op_type}"
         ngram_ids = f"{ngram_name}/output_0"
-        self.make_node(
-            "NGramHashMapping",
-            inputs=[
-                self.input_names["input_ids"],
+        ngram_inputs = [
+            self.input_names["input_ids"],
+            multipliers,
+            vocab_sizes,
+        ]
+        if self.use_paged_attention:
+            ngram_inputs.append(self.input_names["cumulative_sequence_lengths"])
+        ngram_inputs.extend(
+            [
                 self.input_names["past.ple_tokens"][layer_id],
-                multipliers,
-                vocab_sizes,
                 offsets,
                 eos,
-            ],
+            ]
+        )
+        self.make_node(
+            ngram_op_type,
+            inputs=ngram_inputs,
             outputs=[ngram_ids, self.output_names["present.ple_tokens"][layer_id]],
             name=ngram_name,
             domain="com.microsoft",
-            ngram_size=self.ngram_size,
-            heads_per_ngram=self.heads_per_ngram,
+            max_ngram_size=self.ngram_size,
+            n_head_per_ngram=self.heads_per_ngram,
+            pad_id=embedding.eos_token_id,
             reset_on_eos=1,
         )
         ngram_heads = (self.ngram_size - 1) * self.heads_per_ngram
         self.make_value(
             ngram_ids,
             ir.DataType.INT64,
-            ["batch_size", "sequence_length", ngram_heads],
+            ["num_tokens", ngram_heads]
+            if self.use_paged_attention
+            else ["batch_size", "sequence_length", ngram_heads],
         )
         table_name = f"model.layers.{layer_id}.ple.ngram_embedding.weight"
-        self.make_initializer(embedding.ngram_embedding.weight, table_name, to=self.io_dtype)
-        gather_name = f"{basename}/ngram_embedding/Gather"
+        table = embedding.ngram_embedding
+        quantized_table = hasattr(table, "weight_scale")
+        gather_op_type = "GatherBlockQuantized" if quantized_table else "Gather"
+        self.make_initializer(table.weight, table_name, to=None if quantized_table else self.io_dtype)
+        gather_name = f"{basename}/ngram_embedding/{gather_op_type}"
         head_dim = self.ple_embed_dim // ngram_heads
-        self.make_gather(
-            gather_name,
-            [table_name, ngram_ids],
-            self.io_dtype,
-            ["batch_size", "sequence_length", ngram_heads, head_dim],
-            axis=0,
+        gather_shape = (
+            ["num_tokens", ngram_heads, head_dim]
+            if self.use_paged_attention
+            else ["batch_size", "sequence_length", ngram_heads, head_dim]
         )
+        if quantized_table:
+            scale_name = f"model.layers.{layer_id}.ple.ngram_embedding.weight_scale"
+            self.make_initializer(table.weight_scale.reshape(1, 1), scale_name, to=self.io_dtype)
+            self.make_node(
+                gather_op_type,
+                inputs=[table_name, ngram_ids, scale_name],
+                outputs=[f"{gather_name}/output_0"],
+                name=gather_name,
+                domain="com.microsoft",
+                gather_axis=0,
+                quantize_axis=1,
+                block_size=0,
+            )
+            self.make_value(f"{gather_name}/output_0", self.io_dtype, gather_shape)
+        else:
+            self.make_gather(gather_name, [table_name, ngram_ids], self.io_dtype, gather_shape, axis=0)
         flatten_name = f"{basename}/ngram_embedding/Reshape"
+        token_shape = ["num_tokens"] if self.use_paged_attention else ["batch_size", "sequence_length"]
+        flatten_dims = [-1, self.ple_embed_dim] if self.use_paged_attention else [0, 0, self.ple_embed_dim]
         self.make_reshape(
             flatten_name,
-            [f"{gather_name}/output_0", f"/model/constants/INT64/[0, 0, {self.ple_embed_dim}]"],
+            [f"{gather_name}/output_0", f"/model/constants/INT64/{flatten_dims}"],
             self.io_dtype,
-            ["batch_size", "sequence_length", self.ple_embed_dim],
+            [*token_shape, self.ple_embed_dim],
         )
 
-        key_weight = f"model.layers.{layer_id}.ple.key_weight"
-        value_weight = f"model.layers.{layer_id}.ple.value_weight"
         key_scale = f"model.layers.{layer_id}.ple.key_norm_scale"
         query_scale = f"model.layers.{layer_id}.ple.query_norm_scale"
         conv_scale = f"model.layers.{layer_id}.ple.conv_norm_scale"
-        self.make_initializer(
-            ple.key_proj.weight.T.reshape(self.hc_count, self.ple_embed_dim, self.hidden_size),
-            key_weight,
-            to=self.io_dtype,
+        self.make_initializer((ple.norm_key.weight + 1).reshape(self.hc_count, self.hidden_size), key_scale, to=self.io_dtype)
+        self.make_initializer((ple.norm_query.weight + 1).reshape(self.hc_count, self.hidden_size), query_scale, to=self.io_dtype)
+        self.make_initializer((ple.norm_conv.weight + 1).reshape(self.hc_count, self.hidden_size), conv_scale, to=self.io_dtype)
+        key_matmul = self.make_matmul(ple.key_proj, f"{basename}/key_proj/MatMul", f"{flatten_name}/output_0")
+        value_matmul = self.make_matmul(ple.value_proj, f"{basename}/value_proj/MatMul", f"{flatten_name}/output_0")
+        grouped_shape = [*token_shape, self.hc_count, self.hidden_size]
+        key_reshape = f"{basename}/key_proj/Reshape"
+        query_reshape = f"{basename}/query/Reshape"
+        grouped_dims = [-1, self.hc_count, self.hidden_size] if self.use_paged_attention else [0, 0, self.hc_count, self.hidden_size]
+        self.make_reshape(
+            key_reshape,
+            [f"{key_matmul}/output_0", f"/model/constants/INT64/{grouped_dims}"],
+            self.io_dtype,
+            grouped_shape,
         )
-        self.make_initializer(ple.value_proj.weight.T, value_weight, to=self.io_dtype)
-        self.make_initializer(ple.norm_key.weight + 1, key_scale, to=self.io_dtype)
-        self.make_initializer(ple.norm_query.weight + 1, query_scale, to=self.io_dtype)
-        self.make_initializer(ple.norm_conv.weight + 1, conv_scale, to=self.io_dtype)
+        self.make_reshape(
+            query_reshape,
+            [root_input, f"/model/constants/INT64/{grouped_dims}"],
+            self.io_dtype,
+            grouped_shape,
+        )
         gate_name = f"{basename}/EngramGate"
         gated_value = f"{gate_name}/output_0"
         gated_value_normed = f"{gate_name}/output_1"
         self.make_node(
             "EngramGate",
             inputs=[
-                root_input,
-                f"{flatten_name}/output_0",
-                key_weight,
-                value_weight,
+                f"{key_reshape}/output_0",
+                f"{query_reshape}/output_0",
+                f"{value_matmul}/output_0",
                 key_scale,
                 query_scale,
                 conv_scale,
@@ -1241,35 +1280,48 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
             name=gate_name,
             domain="com.microsoft",
             epsilon=self.layernorm_attrs["epsilon"],
-            hc_count=self.hc_count,
         )
-        ple_shape = ["batch_size", "sequence_length", self.hc_hidden_size]
-        self.make_value(gated_value, self.io_dtype, ple_shape)
-        self.make_value(gated_value_normed, self.io_dtype, ple_shape)
+        self.make_value(gated_value, self.io_dtype, grouped_shape)
+        self.make_value(gated_value_normed, self.io_dtype, grouped_shape)
+        ple_shape = [*token_shape, self.hc_hidden_size]
+        gated_value_flat = f"{gate_name}/Flatten"
+        gated_value_normed_flat = f"{gate_name}/FlattenNormed"
+        self.make_reshape(
+            gated_value_flat,
+            [gated_value, f"/model/constants/INT64/{flatten_dims[:-1] + [self.hc_hidden_size]}"],
+            self.io_dtype,
+            ple_shape,
+        )
+        self.make_reshape(
+            gated_value_normed_flat,
+            [gated_value_normed, f"/model/constants/INT64/{flatten_dims[:-1] + [self.hc_hidden_size]}"],
+            self.io_dtype,
+            ple_shape,
+        )
 
         conv_weight = f"model.layers.{layer_id}.ple.conv1d.weight"
         self.make_initializer(ple.conv1d.weight, conv_weight, to=self.io_dtype)
-        conv_name = f"{basename}/ShortConvWithState"
+        conv_name = f"{basename}/CausalConvWithState"
         conv_output = f"{conv_name}/output_0"
         self.make_node(
-            "ShortConvWithState",
+            "CausalConvWithState",
             inputs=[
-                gated_value_normed,
-                self.input_names["past.ple_conv"][layer_id],
-                conv_scale,
+                f"{gated_value_normed_flat}/output_0",
                 conv_weight,
+                "",
+                self.input_names["past.ple_conv"][layer_id],
             ],
             outputs=[conv_output, self.output_names["present.ple_conv"][layer_id]],
             name=conv_name,
             domain="com.microsoft",
-            kernel_size=self.ple_conv_kernel_size,
+            ndim=1,
             dilation=self.ple_conv_dilation,
+            channels_last=1,
             activation="silu",
-            epsilon=self.layernorm_attrs["epsilon"],
         )
         self.make_value(conv_output, self.io_dtype, ple_shape)
         add_name = f"{basename}/Add"
-        self.make_add(add_name, [gated_value, conv_output], self.io_dtype, ple_shape)
+        self.make_add(add_name, [f"{gated_value_flat}/output_0", conv_output], self.io_dtype, ple_shape)
         return f"{add_name}/output_0"
 
     def make_qwen_sparse_attention(self, layer_id, attention, root_input):
@@ -1277,86 +1329,186 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
         q_norm_weight, k_norm_weight = self.get_qk_norm_weight_names(layer_id)
         self.make_initializer(attention.q_norm.weight + 1, q_norm_weight, to=self.io_dtype)
         self.make_initializer(attention.k_norm.weight + 1, k_norm_weight, to=self.io_dtype)
-        index_weight = f"model.layers.{layer_id}.attn.indexer.index_qk_weight"
-        index_q_scale = f"model.layers.{layer_id}.attn.indexer.q_norm.weight"
-        index_k_scale = f"model.layers.{layer_id}.attn.indexer.k_norm.weight"
-        self.make_initializer(attention.indexer.index_qk_proj.weight.T, index_weight, to=self.io_dtype)
-        self.make_initializer(attention.indexer.q_layernorm.weight + 1, index_q_scale, to=self.io_dtype)
-        self.make_initializer(attention.indexer.k_layernorm.weight + 1, index_k_scale, to=self.io_dtype)
         cos_cache, sin_cache = self.make_rotary_embedding_caches()
         past_k, past_v, present_k, present_v = self.make_key_value_cache_names(layer_id)
-        op_type = "SparsePagedAttention" if self.use_paged_attention else "QwenSparseAttention"
-        name = f"/model/layers.{layer_id}/attn/{op_type}"
-        inputs = [
-            root_input,
-            self.attention_attrs["q_path"],
-            self.attention_attrs["k_path"],
-            self.attention_attrs["v_path"],
-            past_k,
-            past_v,
-            self.input_names["past.indexer"][layer_id],
-            index_weight,
-            index_q_scale,
-            index_k_scale,
-            cos_cache,
-            sin_cache,
-            q_norm_weight,
-            k_norm_weight,
-        ]
+        capacity = self.indexer_budget + self.indexer_compress_ratio - 1
+
         if self.use_paged_attention:
-            inputs.extend(
-                [
-                    self.input_names["cumulative_sequence_lengths"],
-                    self.input_names["past_sequence_lengths"],
-                    self.input_names["block_table"],
-                    "",
-                    self.input_names["attention_metadata"],
-                ]
-            )
+            selected_indices = self.input_names["sparse_attention.selected_indices"][layer_id]
+            selected_counts = self.input_names["sparse_attention.selected_counts"][layer_id]
         else:
-            inputs.extend(
-                [
-                    "",
-                    "",
-                    f"{self.mask_attrs['seqlens_k']}/output_0",
-                    f"{self.mask_attrs['total_seq_len']}/output_0",
-                ]
+            index_q_size = self.indexer_num_heads * self.indexer_head_dim
+            index_k_size = self.indexer_kv_heads * self.indexer_head_dim
+            index_matmul = self.make_matmul(
+                attention.indexer.index_qk_proj,
+                f"/model/layers.{layer_id}/attn/indexer/index_qk_proj/MatMul",
+                root_input,
             )
+            index_q = f"/model/layers.{layer_id}/attn/indexer/query"
+            index_k = f"/model/layers.{layer_id}/attn/indexer/key"
+            self.make_split(
+                f"/model/layers.{layer_id}/attn/indexer/Split",
+                [f"{index_matmul}/output_0", f"/model/constants/INT64/[{index_q_size}, {index_k_size}]"],
+                [index_q, index_k],
+                [self.io_dtype, self.io_dtype],
+                [
+                    ["batch_size", "sequence_length", index_q_size],
+                    ["batch_size", "sequence_length", index_k_size],
+                ],
+            )
+            index_q_4d = f"/model/layers.{layer_id}/attn/indexer/query/Reshape"
+            self.make_reshape(
+                index_q_4d,
+                [index_q, f"/model/constants/INT64/[0, 0, {self.indexer_num_heads}, {self.indexer_head_dim}]"],
+                self.io_dtype,
+                ["batch_size", "sequence_length", self.indexer_num_heads, self.indexer_head_dim],
+            )
+            index_q_scale = f"model.layers.{layer_id}.attn.indexer.q_norm.weight"
+            index_k_scale = f"model.layers.{layer_id}.attn.indexer.k_norm.weight"
+            self.make_initializer(attention.indexer.q_layernorm.weight + 1, index_q_scale, to=self.io_dtype)
+            self.make_initializer(attention.indexer.k_layernorm.weight + 1, index_k_scale, to=self.io_dtype)
+            index_q_norm = f"/model/layers.{layer_id}/attn/indexer/query/SimplifiedLayerNormalization"
+            self.make_node(
+                "SimplifiedLayerNormalization",
+                inputs=[f"{index_q_4d}/output_0", index_q_scale],
+                outputs=[f"{index_q_norm}/output_0"],
+                name=index_q_norm,
+                domain="com.microsoft",
+                axis=-1,
+                epsilon=self.layernorm_attrs["epsilon"],
+                stash_type=1,
+            )
+            self.make_value(
+                f"{index_q_norm}/output_0",
+                self.io_dtype,
+                ["batch_size", "sequence_length", self.indexer_num_heads, self.indexer_head_dim],
+            )
+            index_cos, index_sin = self.make_qsa_rotary_caches(
+                layer_id, root_input, cos_cache, sin_cache
+            )
+            visibility_mask = self.make_qsa_visibility_mask(layer_id, root_input)
+            indexer_name = f"/model/layers.{layer_id}/attn/SparseAttentionIndexer"
+            selected_indices = f"{indexer_name}/output_0"
+            self.make_node(
+                "SparseAttentionIndexer",
+                inputs=[
+                    f"{index_q_norm}/output_0",
+                    index_k,
+                    index_k_scale,
+                    index_cos,
+                    index_sin,
+                    visibility_mask,
+                    self.input_names["past.indexer"][layer_id],
+                ],
+                outputs=[selected_indices, self.output_names["present.indexer"][layer_id]],
+                name=indexer_name,
+                domain="com.microsoft",
+                policy_mode="qsa",
+                compress_ratio=self.indexer_compress_ratio,
+                token_budget=self.indexer_budget,
+                epsilon=self.layernorm_attrs["epsilon"],
+                scale=self.indexer_head_dim**-0.5,
+            )
+            self.make_value(
+                selected_indices,
+                ir.DataType.INT32,
+                ["batch_size", "sequence_length", capacity],
+            )
+            selected_counts = self.make_selected_counts(layer_id, selected_indices, capacity, packed=False)
+            selected_indices_flat = f"{indexer_name}/Flatten"
+            selected_counts_flat = f"{indexer_name}/CountsFlatten"
+            self.make_reshape(
+                selected_indices_flat,
+                [selected_indices, f"/model/constants/INT64/[-1, {capacity}]"],
+                ir.DataType.INT32,
+                ["batch_size * sequence_length", capacity],
+            )
+            self.make_reshape(
+                selected_counts_flat,
+                [selected_counts, "/model/constants/INT64/[-1]"],
+                ir.DataType.INT32,
+                ["batch_size * sequence_length"],
+            )
+            selected_indices = f"{selected_indices_flat}/output_0"
+            selected_counts = f"{selected_counts_flat}/output_0"
+
+        op_type = "SparsePagedAttention" if self.use_paged_attention else "DynamicSparseAttention"
+        name = f"/model/layers.{layer_id}/attn/{op_type}"
+        if self.use_paged_attention:
+            inputs = [
+                self.attention_attrs["q_path"],
+                self.attention_attrs["k_path"],
+                self.attention_attrs["v_path"],
+                past_k,
+                past_v,
+                self.input_names["cumulative_sequence_lengths"],
+                self.input_names["past_sequence_lengths"],
+                self.input_names["block_table"],
+                "",
+                selected_indices,
+                selected_counts,
+                "",
+                "",
+                "",
+                cos_cache,
+                sin_cache,
+                "",
+                q_norm_weight,
+                k_norm_weight,
+                "",
+                "",
+                self.input_names["attention_metadata"],
+            ]
+        else:
+            inputs = [
+                self.attention_attrs["q_path"],
+                self.attention_attrs["k_path"],
+                self.attention_attrs["v_path"],
+                past_k,
+                past_v,
+                "",
+                "",
+                selected_indices,
+                selected_counts,
+                f"{self.mask_attrs['seqlens_k']}/output_0",
+                f"{self.mask_attrs['total_seq_len']}/output_0",
+                cos_cache,
+                sin_cache,
+                self.input_names["position_ids"],
+                q_norm_weight,
+                k_norm_weight,
+                "",
+            ]
         outputs = [
             f"{name}/output_0",
             present_k,
             present_v,
-            self.output_names["present.indexer"][layer_id],
         ]
+        attributes = dict(
+            num_heads=self.num_attn_heads,
+            kv_num_heads=self.num_kv_heads,
+            scale=self.attention_attrs["scale"],
+            is_causal=1,
+            attention_mode="selected_only",
+            selected_kv_source="main",
+            do_rotary=1,
+            rotary_interleaved=self.rope_attrs["interleaved"],
+            qk_norm_epsilon=self.attention_attrs["qk_norm_epsilon"],
+        )
+        if self.use_paged_attention and self.attention_attrs["softcap"] is not None:
+            attributes["softcap"] = self.attention_attrs["softcap"]
         self.make_node(
             op_type,
             inputs=inputs,
             outputs=outputs,
             name=name,
             domain="com.microsoft",
-            num_heads=self.num_attn_heads,
-            kv_num_heads=self.num_kv_heads,
-            scale=self.attention_attrs["scale"],
-            softcap=self.attention_attrs["softcap"],
-            causal=1,
-            do_rotary=1,
-            rotary_interleaved=self.rope_attrs["interleaved"],
-            qk_norm_epsilon=self.attention_attrs["qk_norm_epsilon"],
-            indexer_num_heads=self.indexer_num_heads,
-            indexer_kv_heads=self.indexer_kv_heads,
-            indexer_head_dim=self.indexer_head_dim,
-            indexer_budget=self.indexer_budget,
-            indexer_compress_ratio=self.indexer_compress_ratio,
-            indexer_qk_norm_epsilon=self.layernorm_attrs["epsilon"],
-            indexer_score_activation="relu",
-            indexer_block_pooling="mean",
-            indexer_tail_policy="include_visible_tail",
-            score_mode="learned_dot",
+            **attributes,
         )
         self.make_value(
             f"{name}/output_0",
             self.io_dtype,
-            ["batch_size", "sequence_length", self.num_attn_heads * self.head_size],
+            self.make_hidden_state_shape(last_dim=self.num_attn_heads * self.head_size),
         )
         self.attention_attrs["o_path"] = f"{name}/output_0"
         self.make_attention_output_proj(layer_id, attention, root_input)
@@ -1364,11 +1516,12 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
     def make_layer(self, layer_id, layer):
         if layer_id == 0:
             tile_name = "/model/hyper_connection/Tile"
+            tile_repeats = [1, self.hc_count] if self.use_paged_attention else [1, 1, self.hc_count]
             self.make_tile(
                 tile_name,
-                [self.input_names["inputs_embeds"], f"/model/constants/INT64/[1, 1, {self.hc_count}]"],
+                [self.layernorm_attrs["root_input"], f"/model/constants/INT64/{tile_repeats}"],
                 self.io_dtype,
-                ["batch_size", "sequence_length", self.hc_hidden_size],
+                self.make_hidden_state_shape(last_dim=self.hc_hidden_size),
             )
             self.layernorm_attrs["root_input"] = f"{tile_name}/output_0"
 
@@ -1380,7 +1533,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
                 ple_add,
                 [hyper_states, ple_output],
                 self.io_dtype,
-                ["batch_size", "sequence_length", self.hc_hidden_size],
+                self.make_hidden_state_shape(last_dim=self.hc_hidden_size),
             )
             hyper_states = f"{ple_add}/output_0"
 
@@ -1389,7 +1542,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
         )
         attention = self.get_attn_module(layer_id, layer)
         if self.layer_types[layer_id] == "linear_attention":
-            self.make_gated_delta_net(layer_id, attention, mixed)
+            self.make_qwen_gated_delta_net(layer_id, attention, mixed)
         else:
             self.make_qwen_sparse_attention(layer_id, attention, mixed)
         hyper_states = self.make_hyper_connection_injection(
@@ -1417,6 +1570,14 @@ class Qwen4ExpTextModel(Qwen35MoETextModel):
                 "final",
                 combine=False,
             )
+            if self.include_hidden_states or self.exclude_lm_head:
+                self.make_node(
+                    "Identity",
+                    inputs=[final_output],
+                    outputs=[self.output_names["hidden_states"]],
+                    name="/model/final_hidden_states/Identity",
+                )
+                final_output = self.output_names["hidden_states"]
             self.layernorm_attrs["output_0"] = final_output
 
 
