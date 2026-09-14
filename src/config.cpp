@@ -727,7 +727,7 @@ struct StateGroup_Element : JSON::Element {
       if (v_.state_update) {
         throw std::runtime_error("Duplicate decoder state_update declaration");
       }
-      v_.state_update.emplace();
+      v_.state_update.emplace(DecoderStateUpdate{});
       state_update_ = std::make_unique<StateUpdate_Element>(*v_.state_update);
       return *state_update_;
     }
