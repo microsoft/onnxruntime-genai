@@ -14,6 +14,7 @@ struct RecurrentState {
 
   void Add();
   void Update();
+  void ValidateRewindTo(size_t index) const;
   void RewindTo(size_t index);
 
   // Snapshot/restore the recurrent (conv + recurrent) state buffers. Required for

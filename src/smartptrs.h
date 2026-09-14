@@ -117,6 +117,8 @@ struct PositionInputs {
   virtual ~PositionInputs() = default;
   virtual void Add() = 0;
   virtual void Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) = 0;
+  virtual bool SupportsContinuousDecoding() const { return false; }
+  virtual void ValidateRewindTo(size_t index) const { (void)index; }
   virtual void RewindTo(size_t index) = 0;
 };
 
@@ -214,10 +216,10 @@ static_assert(std::is_trivially_copyable_v<StateUpdateReplayDesc>);
 
 // Increment whenever a layout the add-on boundary depends on changes: DeviceInterface's virtual
 // layout, or the virtual or data layout of any type constructed by, passed to, or returned across
-// that boundary (Search, BatchedSampler, BatchedSamplerState, GeneratorParams, or Config).
+// that boundary (Search, PositionInputs, BatchedSampler, BatchedSamplerState, GeneratorParams, or Config).
 // Dynamically loaded add-ons must report this exact version before the host can safely call through
 // the C++ interface.
-inline constexpr uint32_t kDeviceInterfaceVersion = 5;
+inline constexpr uint32_t kDeviceInterfaceVersion = 6;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}

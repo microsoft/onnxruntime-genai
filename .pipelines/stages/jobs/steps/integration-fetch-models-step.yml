@@ -9,6 +9,12 @@ parameters:
   type: string
 - name: model
   type: string
+- name: artifactSource
+  type: string
+  default: 'foundry'
+  values:
+  - 'foundry'
+  - 'public'
 - name: serviceConnection
   type: string
   default: 'ortcibuild_readonly_mi2-ONNX Runtime'
@@ -29,7 +35,28 @@ parameters:
   type: string
 
 steps:
-- ${{ if eq(parameters.os, 'win') }}:
+- ${{ if and(eq(parameters.artifactSource, 'public'), eq(parameters.os, 'win')) }}:
+  - powershell: |
+      python -m pip install huggingface_hub
+      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      python test\python\integration\fetch_public_models.py `
+        --model "${{ parameters.model }}" --device ${{ parameters.ep }} `
+        --model-root "${{ parameters.targetDir }}"
+      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    displayName: 'Fetch and verify pinned public multimodal export'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+
+- ${{ if and(eq(parameters.artifactSource, 'public'), ne(parameters.os, 'win')) }}:
+  - bash: |
+      set -e
+      python3 -m pip install huggingface_hub
+      python3 test/python/integration/fetch_public_models.py \
+        --model "${{ parameters.model }}" --device ${{ parameters.ep }} \
+        --model-root "${{ parameters.targetDir }}"
+    displayName: 'Fetch and verify pinned public multimodal export'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+
+- ${{ if and(eq(parameters.artifactSource, 'foundry'), eq(parameters.os, 'win')) }}:
   - task: AzureCLI@2
     displayName: 'azcopy ${{ parameters.model }} (${{ parameters.ep }})'
     inputs:
@@ -53,7 +80,7 @@ steps:
           --include-path "$subpath" `
           --recursive
 
-- ${{ if eq(parameters.os, 'osx') }}:
+- ${{ if and(eq(parameters.artifactSource, 'foundry'), eq(parameters.os, 'osx')) }}:
   - bash: |
       set -e -x
       if ! command -v azcopy >/dev/null 2>&1; then
@@ -63,7 +90,7 @@ steps:
       azcopy --version
     displayName: 'Install azcopy (macOS)'
 
-- ${{ if or(eq(parameters.os, 'linux'), eq(parameters.os, 'osx')) }}:
+- ${{ if and(eq(parameters.artifactSource, 'foundry'), ne(parameters.os, 'win')) }}:
   - task: AzureCLI@2
     displayName: 'azcopy ${{ parameters.model }} (${{ parameters.ep }})'
     inputs:

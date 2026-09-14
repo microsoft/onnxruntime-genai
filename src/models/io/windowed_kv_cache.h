@@ -32,8 +32,13 @@ struct WindowedKeyValueCache : KeyValueCache {
   void PartialUpdate(DeviceSpan<int32_t> beam_indices, int total_length,
                      std::span<const size_t> layer_indices_to_update) override;
 
-  void RewindTo(size_t index) override {
+  void ValidateRewindTo(size_t index) const override {
+    (void)index;
     throw std::runtime_error("WindowedKeyValueCache does not support RewindTo.");
+  }
+
+  void RewindTo(size_t index) override {
+    ValidateRewindTo(index);
   }
 
  private:

@@ -16,6 +16,7 @@ void RunStandardDecodingStep(Generator& g);
 // Commits exactly one token per Step.
 struct StandardDecodingStrategy final : DecodingStrategy {
   void Step(Generator& g) override;
+  void PrepareForAppend(Generator& g) override;
 };
 
 }  // namespace Generators

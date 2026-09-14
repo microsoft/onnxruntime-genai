@@ -200,12 +200,14 @@ jobs:
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
             -w /ort_genai_src onnxruntimecudabuildx64 bash -c " \
               export LD_LIBRARY_PATH=/ort_genai_src/ort/lib:/ort_genai_src/ort/ep:\${LD_LIBRARY_PATH} && \
+              export ORTGENAI_MULTIMODAL_TEST_EPS=cpu,cuda && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/requirements.txt --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/cuda/torch/requirements.txt --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip uninstall -y onnxruntime-gpu && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install --index-url ${{ env.ORT_EP_PYPI_SOURCE }} -r test/python/cuda/ort/requirements.txt --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install --index-url ${{ env.ORT_EP_PYPI_SOURCE }} onnxruntime-ep-cuda12==${{ env.ORT_EP_PYPI_VERSION }} --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install /ort_genai_src/build/cuda/Release/wheel/onnxruntime_genai*manylinux*.whl --no-deps --user && \
+              PYTHONPATH=test/python ${{ env.PYTHON_EXECUTABLE }} -m create.create_multimodal_gqa_model --suite --output_dir build/cuda/Release/test/multimodal_gqa --devices cpu,cuda && \
               ${{ env.PYTHON_EXECUTABLE }} -m pytest -sv test/python/test_onnxruntime_genai_engine.py && \
               ${{ env.PYTHON_EXECUTABLE }} test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/models --e2e"
 
@@ -235,4 +237,5 @@ jobs:
               export LD_LIBRARY_PATH=/ort_genai_src/ort/lib:/ort_genai_src/ort/ep:/ort_genai_src/build/cuda/Release/:\${LD_LIBRARY_PATH} && \
               /ort_genai_src/build/cuda/Release/unit_tests --ep_dir /ort_genai_src/ort/ep && \
               /ort_genai_src/build/cuda/Release/reinit_tests --ep_dir /ort_genai_src/ort/ep && \
-              /ort_genai_src/build/cuda/Release/engine_unit_tests --ep_dir /ort_genai_src/ort/ep"
+              /ort_genai_src/build/cuda/Release/engine_unit_tests --ep_dir /ort_genai_src/ort/ep && \
+              /ort_genai_src/build/cuda/Release/multimodal_device_tests --devices cpu,cuda --ep_dir /ort_genai_src/ort/ep"

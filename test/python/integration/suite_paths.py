@@ -26,6 +26,8 @@ def main():
 
     if not models.supports(args.model, args.device):
         return
+    if args.model in models.PUBLIC_ARTIFACTS:
+        parser.error("Public artifacts have no Foundry blob prefix; use fetch_public_models.py.")
     print(models.storage_subpath(args.model, args.device))
 
 

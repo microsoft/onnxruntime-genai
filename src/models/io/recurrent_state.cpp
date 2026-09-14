@@ -249,7 +249,7 @@ void RecurrentState::Update() {
   if (graph_double_buffer_) graph_buffer_variant_ ^= 1;
 }
 
-void RecurrentState::RewindTo(size_t index) {
+void RecurrentState::ValidateRewindTo(size_t index) const {
   if (layer_indices_.empty()) return;
 
   if (index != 0) {
@@ -264,7 +264,6 @@ void RecurrentState::RewindTo(size_t index) {
             "RecurrentState::RewindTo(" + std::to_string(index) + ") cannot restore snapshot at length " +
             std::to_string(snapshot_position_));
       }
-      RestoreSnapshot();
       return;
     }
     throw std::runtime_error(
@@ -272,6 +271,17 @@ void RecurrentState::RewindTo(size_t index) {
         ") is not supported without a snapshot. Recurrent states cannot be partially rewound; "
         "call Snapshot() at the target length first (e.g. for speculative decoding).");
   }
+}
+
+void RecurrentState::RewindTo(size_t index) {
+  ValidateRewindTo(index);
+  if (layer_indices_.empty()) return;
+
+  if (index != 0) {
+    RestoreSnapshot();
+    return;
+  }
+
   // Full reset to length 0.
   snapshot_valid_ = false;
   if (share_buffers_) {

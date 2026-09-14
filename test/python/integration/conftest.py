@@ -23,7 +23,7 @@ def pytest_addoption(parser):
         action="append",
         default=[],
         choices=list(models.MODELS),
-        help="Logical model id to test (repeatable). Defaults to every entry in MODELS.",
+        help="Logical model id to test (repeatable). Defaults to the models eligible for each suite.",
     )
     group.addoption(
         "--execution-provider",
@@ -31,6 +31,17 @@ def pytest_addoption(parser):
         default=[],
         choices=list(models.DEVICE_DIRNAMES),
         help="Execution providers to test (repeatable). Defaults to cpu only.",
+    )
+    group.addoption(
+        "--run-multimodal-tests",
+        action="store_true",
+        default=False,
+        help="Run pinned real vision-model continuation tests (not part of the text/Engine suites).",
+    )
+    group.addoption(
+        "--multimodal-output-dir",
+        default="build/multimodal-integration-results",
+        help="Directory for real-model images and per-session ORT partition profiles.",
     )
     group.addoption(
         "--run-engine-tests",
@@ -48,17 +59,21 @@ def pytest_addoption(parser):
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",
+        "multimodal: real vision-model integration test; opt in with --run-multimodal-tests.",
+    )
+    config.addinivalue_line(
+        "markers",
         "engine: paged-attention Engine integration test; opt in with --run-engine-tests.",
     )
 
 
 def pytest_collection_modifyitems(config, items):
-    if config.getoption("--run-engine-tests"):
-        return
-    skip_engine = pytest.mark.skip(reason="Engine integration tests are opt-in; pass --run-engine-tests.")
-    for item in items:
-        if "engine" in item.keywords:
-            item.add_marker(skip_engine)
+    for marker, option in (("engine", "--run-engine-tests"), ("multimodal", "--run-multimodal-tests")):
+        if not config.getoption(option):
+            skip = pytest.mark.skip(reason=f"{marker} integration tests are opt-in; pass {option}.")
+            for item in items:
+                if marker in item.keywords:
+                    item.add_marker(skip)
 
 
 def pytest_generate_tests(metafunc):
@@ -66,8 +81,10 @@ def pytest_generate_tests(metafunc):
         devices = metafunc.config.getoption("--execution-provider") or ["cpu"]
         metafunc.parametrize("device", devices)
     if "model" in metafunc.fixturenames:
-        chosen = metafunc.config.getoption("--model") or list(models.MODELS)
-        metafunc.parametrize("model", chosen)
+        is_multimodal = metafunc.definition.get_closest_marker("multimodal") is not None
+        eligible = models.multimodal if is_multimodal else [m for m in models.MODELS if m not in models.multimodal]
+        chosen = metafunc.config.getoption("--model") or eligible
+        metafunc.parametrize("model", [m for m in chosen if m in eligible])
 
 
 @pytest.fixture

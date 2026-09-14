@@ -209,11 +209,16 @@ void ConvKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_lengt
   conv_is_first_update_ = false;
 }
 
-void ConvKeyValueCache::RewindTo(size_t index) {
+void ConvKeyValueCache::ValidateRewindTo(size_t index) const {
+  (void)index;
   // ConvKeyValueCache uses conv layers with fixed-size rolling state buffers that depend on all prior tokens.
   // Rewinding the KV cache without replaying tokens through the conv layers would produce
   // incorrect results, so rewind is not supported for this cache type.
   throw std::runtime_error("ConvKeyValueCache does not support RewindTo.");
+}
+
+void ConvKeyValueCache::RewindTo(size_t index) {
+  ValidateRewindTo(index);
 }
 
 template <typename ScoreType>
