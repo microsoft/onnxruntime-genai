@@ -324,7 +324,10 @@ acceptance must be considered together.
 | `tokens_emitted` | Queued tokens made externally visible |
 | `tokens_discarded` | Buffered tokens invalidated before delivery |
 | `tokens_buffered` | Tokens currently waiting for delivery |
-| `draft_forward_passes` | Draft-model executions; always zero for n-gram decoding |
+| `draft_forward_passes` | Draft-model executions; always zero for n-gram decoding. For Engine-hosted DFlash 2 this includes context-only drafter executions. |
+| `dflash2_model_executions` | Successful DFlash 2 model executions after request admission. |
+| `dflash2_proposal_executions` | DFlash 2 model executions with at least one admitted proposal feed. |
+| `dflash2_context_sync_executions` | DFlash 2 model executions whose admitted feeds only maintained cache continuity. |
 | `target_forward_passes` | All target verification, re-anchor, and lifecycle reconciliation executions |
 
 `acceptance_rate` is `draft_tokens_accepted / draft_tokens_evaluated`. It is zero until at least

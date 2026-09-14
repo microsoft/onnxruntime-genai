@@ -465,11 +465,13 @@ token budget. The proposal width an automatic drafter aims for is model/Engine c
 
 The request must already belong to the Engine, have completed prefill, and be ready to decode.
 Verification supports greedy target selection and random target sampling with a positive `top_k`;
-proposals remain deterministic. A turn that enables guidance, a `repetition_penalty` other than 1,
-no-repeat-ngram processing, or a not-yet-met minimum generated token count is not draft-eligible,
-because the verification rows do not reproduce those logits processors. Eligibility is per turn: the
-next turn that drops those options can draft again. Passing an empty sequence clears a pending
-proposal.
+proposals remain deterministic. Verification applies minimum length, repetition penalty, and
+no-repeat-ngram processing to every row using the same policy as ordinary decoding. Row `i` is
+evaluated at committed length `L + i` against the committed prefix plus accepted drafts before
+`i`; every configured EOS token is masked exactly when `L + i < min_length`. Guidance is not
+supported. Eligibility is resolved per turn, so a sampled turn can ingest block-drafter context
+without requesting drafts and a later greedy turn can resume drafting. Passing an empty sequence
+clears a pending proposal.
 
 For a decode with K scheduled drafts, the packed input is the request's one unprocessed token
 followed by the K drafts. The decoder must return K+1 logits rows for that request. Row `i` predicts
@@ -1592,6 +1594,13 @@ the target. Those in-flight requests finish without block drafts while requests 
 still get them, and the retry budget is therefore spent on real drafter failures: three consecutive
 failures disable the drafter for the Engine, and a proposal contract violation disables it at once.
 `dflash2_failures` and `dflash2_disables` report those events.
+
+`draft_forward_passes` and `dflash2_model_executions` count successful DFlash 2 model executions
+after request admission. Each such execution increments exactly one breakdown counter:
+`dflash2_proposal_executions` when at least one admitted request contributes a proposal block, or
+`dflash2_context_sync_executions` when admitted requests only ingest newly committed target context
+to keep the drafter cache contiguous. Calls in which no request is admitted do not count as model
+executions.
 
 Automatic block drafting is greedy-only. A request joins on its position-zero step only when the
 current turn is greedy. If a sampled first turn executes that step, eligibility is not reconsidered

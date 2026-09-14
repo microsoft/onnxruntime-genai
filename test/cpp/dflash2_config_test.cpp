@@ -1,17 +1,21 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
-#include <gtest/gtest.h>
-
+#include "decoding/speculative_stats.h"
 #include "dflash2_drafter.h"
+#include "ort_genai_c.h"
 #include "ort_genai.h"
+
+#include <gtest/gtest.h>
 
 namespace Generators::test {
 namespace {
@@ -797,6 +801,30 @@ TEST(Dflash2ConfigTest, JoinsOnlyFromAnEligibleTurnAtSequenceStart) {
   EXPECT_TRUE(Dflash2CanJoin(/*draft_eligible=*/true, /*first_position=*/0));
   EXPECT_FALSE(Dflash2CanJoin(/*draft_eligible=*/false, /*first_position=*/0));
   EXPECT_FALSE(Dflash2CanJoin(/*draft_eligible=*/true, /*first_position=*/1));
+}
+
+TEST(Dflash2ConfigTest, ExposesExecutionCountersByName) {
+  SpeculativeStats stats;
+  stats.dflash2_model_executions = 42;
+  stats.dflash2_proposal_executions = 31;
+  stats.dflash2_context_sync_executions = 11;
+  uint64_t value{};
+
+  EXPECT_EQ(::OgaSpeculativeStatsGetCount(
+                reinterpret_cast<const ::OgaSpeculativeStats*>(&stats),
+                "dflash2_model_executions", &value),
+            nullptr);
+  EXPECT_EQ(value, 42u);
+  EXPECT_EQ(::OgaSpeculativeStatsGetCount(
+                reinterpret_cast<const ::OgaSpeculativeStats*>(&stats),
+                "dflash2_proposal_executions", &value),
+            nullptr);
+  EXPECT_EQ(value, 31u);
+  EXPECT_EQ(::OgaSpeculativeStatsGetCount(
+                reinterpret_cast<const ::OgaSpeculativeStats*>(&stats),
+                "dflash2_context_sync_executions", &value),
+            nullptr);
+  EXPECT_EQ(value, 11u);
 }
 
 }  // namespace Generators::test

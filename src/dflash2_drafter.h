@@ -85,6 +85,15 @@ struct Dflash2Drafter {
     bool wants_drafts{};
   };
 
+  struct ProposalOutcome {
+    bool model_ran{};
+    size_t served_feed_count{};
+    size_t proposal_feed_count{};
+    size_t context_sync_feed_count{};
+
+    explicit operator bool() const noexcept { return model_ran; }
+  };
+
   /**
    * @brief Builds the drafter over its own paged cache pool.
    * @param max_requests Sequences the pool was sized for. A windowed pool holds `max_requests`
@@ -127,9 +136,8 @@ struct Dflash2Drafter {
    * are skipped for good rather than failing the step, so they decode without block drafts. A tracked
    * request continues feeding context during sampled turns so a later greedy turn can resume drafting.
    */
-  // Returns true only when the drafter session executed.
-  bool Propose(Tensor& aux_hidden_states, std::span<const Feed> feeds,
-               std::vector<std::vector<int32_t>>& drafts);
+  ProposalOutcome Propose(Tensor& aux_hidden_states, std::span<const Feed> feeds,
+                          std::vector<std::vector<int32_t>>& drafts);
 
   // Returns a request's blocks to the pool. Safe for requests the drafter never saw.
   void Release(const Request* request);
