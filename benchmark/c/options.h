@@ -5,6 +5,7 @@
 
 #include <string>
 #include <variant>
+#include <vector>
 
 namespace benchmark {
 
@@ -23,6 +24,14 @@ struct Options {
   bool verbose{};
   bool reuse_generator{};
   bool use_random_tokens{};
+
+  // Multimodal (VLM/ALM) options. When either is non-empty, the benchmark runs in
+  // multimodal mode: inputs are built with OgaMultiModalProcessor and fed to the
+  // generator via SetInputs() instead of AppendTokenSequences().
+  std::vector<std::string> image_paths;
+  std::vector<std::string> audio_paths;
+
+  bool IsMultiModal() const { return !image_paths.empty() || !audio_paths.empty(); }
 
   // Optional ORT profiling for the "middle" benchmark iteration only.
   // Selected iteration index (0-based) = num_iterations / 2
