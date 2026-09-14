@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 #include "generator/generators.h"
-#include "multi_modal.h"
+#include "pixtral_vision_state.h"
 
 #include <cstring>
 
