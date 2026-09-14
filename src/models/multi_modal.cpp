@@ -937,8 +937,6 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
                       : decoder_state_->Run(current_length, next_tokens, next_indices);
 
     is_prompt_ = false;
-    if (vision_state_) vision_state_.reset();  // The vision state is no longer needed in generation stage
-    if (speech_state_) speech_state_.reset();  // The speech state is no longer needed in generation stage
 
     return logits;
   }
