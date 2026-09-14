@@ -121,7 +121,7 @@ Configuration loading rejects unknown kinds, malformed decoder templates, duplic
 
 When an explicit manifest is present, model loading resolves each group's decoder templates, expands every name, and verifies that its decoder input and output exist with compatible dtype and shape. Paged tensors must also have compatible rank-four geometry throughout their group.
 
-The dynamic Engine requires exactly one `paged_kv` group. It allocates cache tensors only for that group's logical layer IDs, expands their exact binding names without renumbering, derives the cache dtype from the first validated key input, and sizes an automatic block pool using the number of participating full-attention layers after reserving storage for participating sliding-window layers. Every configured sliding-window layer must belong to the paged group. Multiple paged groups are rejected because the Engine currently owns one shared paged pool. The synthesized legacy group preserves dense sequential behavior when no explicit manifest exists.
+The dynamic Engine requires exactly one `paged_kv` group. It allocates cache tensors only for that group's logical layer IDs, expands their exact binding names without renumbering, and sizes an automatic block pool using the number of participating full-attention layers after reserving storage for participating sliding-window layers. The cache element type is resolved by requiring every key/value binding of every participating layer — past input and present output alike — to report the same type; a disagreement is rejected at construction. This is checked in the cache itself rather than delegated to manifest validation, because byte accounting reads the type per layer while allocation commits to one type for the whole pool, and a mismatch would silently size the pool for one element width and allocate another. Every configured sliding-window layer must belong to the paged group. Multiple paged groups are rejected because the Engine currently owns one shared paged pool. The synthesized legacy group preserves dense sequential behavior when no explicit manifest exists.
 
 `fixed_conv` and `fixed_recurrent` groups may accompany the required `paged_kv` group. `ValidateDynamicEngineCompatibility` accepts them (it still rejects any configuration without exactly one `paged_kv` group), and `PagedCacheManager` constructs a `FixedStatePool` with `max_batch_size` slots when at least one fixed group is present. The composite manager reserves and commits fixed slots together with the paged blocks (see "Fixed request-state pools" below), while `HybridDecoderIO` binds either direct bank views or gathered/staged fallback tensors alongside the packed variable-length inputs. Expanded fixed bindings must resolve to real session inputs and outputs; the pool rejects absent or incompatible bindings.
 
@@ -130,11 +130,15 @@ Fixed state currently requires `engine.dynamic_batching`; static batching is rej
 
 ## Request lifecycle
 
-A `Request` is one sequence. Engine requests currently require:
+A `Request` is one sequence. It derives its own private search parameters from the model, so the
+single-sequence invariants are properties of the Engine rather than of a caller-supplied
+configuration:
 
-- `search.batch_size == 1`
-- `search.num_beams == 1`
-- At least one input token in every `BeginTurn()`
+- `search.batch_size` is forced to 1, because the Engine batches Requests, not rows within one.
+- `search.num_beams` is forced to 1, and a model that configures anything else is rejected at
+  Request creation instead of silently decoding one beam (see "Model configuration the Engine
+  rejects" below).
+- Every `BeginTurn()` needs at least one input token.
 
 The engine creates throughput by batching several independent requests, not by placing several sequence rows inside one request.
 
@@ -161,8 +165,10 @@ between `Run()` calls, not a cross-thread interrupt. Stale, unknown, and complet
 
 The request is already bound to its creating Engine but has no scheduler or cache membership.
 `BeginTurn()` copies the initial input, snapshots the turn options, and establishes submission
-order. Request-level generation parameters were snapshotted at creation and cannot change between
-turns. The caller does not need to keep either the input or options storage alive after the call.
+order. Resident-session policy -- the session token limit -- is fixed at creation; generation policy
+is not fixed at all, and is resolved anew for every turn from the model's search defaults plus that
+turn's explicit overrides. The caller does not need to keep either the input or options storage
+alive after the call.
 
 First-turn admission is transactional. Device input allocation, Search append, scheduler storage,
 and per-request sampler acquisition must all succeed before the new Turn is committed. The
@@ -174,13 +180,15 @@ duplicating the prompt.
 ### `Assigned`
 
 This is the queued state. A successful first or later `BeginTurn()` moves a Request here while its
-copied input waits for execution. `BeginTurn()` is rejected while already queued or active. Input must leave room for at least one generated token below the request's internal
-`max_total_tokens`.
+copied input waits for execution. `BeginTurn()` is rejected while already queued or active. Input must leave room for at least one
+generated token below the Request's `max_session_tokens`.
 
-Public `max_session_tokens` (stored internally as `max_total_tokens`) is the cumulative total
+`max_session_tokens` is the cumulative total
 sequence limit for the entire Request: the initial
 prompt, generated output, and every continuation input all count against the same limit. It defaults
-to `max_length`, cannot exceed `max_length`, and is not reset by `BeginTurn()`.
+to the model-configured `search.max_length`, cannot exceed it, and is not reset by `BeginTurn()`.
+It is the Request's one session limit: Search completion, static cache sizing, speculative bounds,
+and the `MaxSessionTokens` finish reason all read the same value.
 
 Opaque nullable `TurnOptions` are separate. Null, or setting `max_generated_tokens` to zero, means
 that no per-Turn limit applies beyond the cumulative Request limit. The current Turn counts only
@@ -189,10 +197,43 @@ input, continuation input, and the previously generated token replayed during co
 do not count. A later turn may begin whenever its input still leaves room for at least one generated
 token under the cumulative limit, and it may choose a different per-Turn limit.
 
-`OgaRequestOptions` is an opaque, reusable handle. Null options and zero
-`max_session_tokens` use the Request's snapshotted `OgaGeneratorParams.search.max_length`. That
-search value normally defaults from the model context length, but a caller may set it lower before
-Request creation. `OgaTurnOptions` is opaque and reusable; `BeginTurn()` snapshots supported values.
+`OgaRequestOptions` is an opaque, reusable handle carrying resident-session policy only. Null
+options and zero `max_session_tokens` use the model-configured `search.max_length`, which normally
+defaults from the model context length. Request creation takes no generation parameters at all: the
+Engine builds each Request's private, Model-derived search configuration itself, forcing one
+sequence and one beam.
+
+`OgaTurnOptions` is opaque and reusable and carries the whole generation policy of one turn;
+`BeginTurn()` snapshots it. See "Per-turn generation policy" below.
+
+#### Model configuration the Engine rejects
+
+Request creation validates the model configuration it is about to derive from, and rejects what it
+would otherwise have to reinterpret or silently override. Each rejection names a route the caller
+can take without editing the model directory -- overlaying the value on the `Config` before creating
+the Model:
+
+- A nonzero `search.min_length`, because it is a session-absolute floor while the Engine's minimum
+  is per turn: `OgaConfigOverlay(config, "{\"search\":{\"min_length\":0}}")`, or
+  `config.overlay('{"search": {"min_length": 0}}')` in Python, and then `min_generated_tokens` per
+  turn.
+- A `search.num_beams` other than 1, because beam search never overrides the deferred-completion
+  contract and its next tokens would never be copied back. Forcing it to one would decode something
+  the caller never asked for, so it is rejected instead:
+  `config.overlay('{"search": {"num_beams": 1}}')`, and batch across Requests.
+- A `search.max_length` of zero or less, since it is the Request's session ceiling.
+- A nonzero `search.chunk_size` when static batching is selected. Chunking is an Engine/model
+  scheduler policy, so this is rejected at Engine creation; disable it with
+  `config.overlay('{"search": {"chunk_size": 0}}')`.
+
+`search.batch_size` is deliberately not rejected. The Engine batches Requests rather than rows, so a
+wider configured batch simply means "configured for the classic Generator"; the Request derives its
+own single-row search and decodes exactly one sequence either way.
+
+The same overlay route raises the session ceiling where that is what the caller wants: because
+`max_session_tokens` cannot exceed the model-configured `search.max_length`, a model whose
+`search.max_length` is lower than the context length its cache can serve is raised with
+`config.overlay('{"search": {"max_length": <tokens>}}')` before the Model is created.
 
 ### `Active`
 
@@ -408,8 +449,9 @@ The dynamic Engine can verify a continuation together with a request's next deco
 can propose tokens before the next step with `Request::SetDraftTokens` (`OgaRequestSetDraftTokens`
 in C or `Request.set_draft_tokens` in Python). When `model.mtp` names an auxiliary draft head, the
 Engine also maintains an internal shadow Request and automatically proposes a chained greedy
-continuation after each committed target step. Alternatively, `model.dflash2` runs a block drafter
-over the target's packed auxiliary hidden states. A model cannot configure both automatic drafters.
+continuation after each committed target step. Alternatively, `model.dflash2` (or its `model.dspark`
+alias) runs a block drafter over the target's packed auxiliary hidden states. A model cannot
+configure more than one automatic drafter.
 
 Query the internal `Engine::MaxDraftTokensPerStep` capability through
 `OgaEngineMaxDraftTokensPerProposal`, `OgaEngine::MaxDraftTokensPerProposal`, or
@@ -418,13 +460,16 @@ return one logits row per packed token or that its cache/state cannot commit an 
 The reported value is a capability limit, not a guarantee that every proposed token fits the next
 step's global token budget or current cache capacity. Automatic drafters also leave room for the
 target's correction token and cap each proposal by the Request's session limit and remaining Turn
-token budget.
+token budget. The proposal width an automatic drafter aims for is model/Engine configuration
+(`model.speculative.max_draft_tokens`); it is not a public Request or Turn option.
 
 The request must already belong to the Engine, have completed prefill, and be ready to decode.
 Verification supports greedy target selection and random target sampling with a positive `top_k`;
-proposals remain deterministic. Guidance,
-repetition penalty, no-repeat-ngram processing, and active minimum-length processing are not
-supported. Passing an empty sequence clears a pending proposal.
+proposals remain deterministic. A turn that enables guidance, a `repetition_penalty` other than 1,
+no-repeat-ngram processing, or a not-yet-met minimum generated token count is not draft-eligible,
+because the verification rows do not reproduce those logits processors. Eligibility is per turn: the
+next turn that drops those options can draft again. Passing an empty sequence clears a pending
+proposal.
 
 For a decode with K scheduled drafts, the packed input is the request's one unprocessed token
 followed by the K drafts. The decoder must return K+1 logits rows for that request. Row `i` predicts
@@ -446,6 +491,12 @@ A committed decode consumes the complete proposal, including drafts omitted by b
 retryable rollback restores the request and leaves the proposal pending for retry. During commit,
 the cache reservation is narrowed from the scheduled K+1 slots to the accepted prefix plus the
 request's mandatory token; paged KV and fixed recurrent state publish at that same boundary.
+
+A proposal never outlives the turn it was made under. `Request::ReleaseTurnResources()` discards it
+at every terminal boundary -- normal completion, stop match, cancellation, and a failed turn --
+alongside that turn's stop controller, guidance cursor, and pending reseed. Eligibility is per turn,
+so a proposal produced under one turn's guidance, minimum, repetition penalty, and n-gram blocking
+can never be verified under a later turn that resolved a different policy.
 
 ### Engine-hosted MTP head: operational contract
 
@@ -477,7 +528,7 @@ request releases it as well.
 the step. A request that was prefilling, finished its turn, or has a proposal the Engine cannot
 verify is skipped for that step and picks drafting back up on its next decode step.
 
-**Seeded sampling.** `search.random_seed` reproduces output for a given decode path, not across
+**Seeded sampling.** A turn seed reproduces output for a given decode path, not across
 decode paths. A verified drafted step draws its target tokens from the Request's own host random
 stream because acceptance is sequential, while an ordinary batched step draws from the device
 sampler state. Whether drafts are admitted depends on batch composition and cache pressure, so a
@@ -565,7 +616,7 @@ If at least one request fits, the step is executable even when other requests we
 After cache planning selects the batch, each decode keeps its one-token
 contribution. Every selected prefill also keeps its provisional token, then
 prefills expand in stable order while tokens remain. A prefill contribution is
-bounded by its remaining prompt, `search.chunk_size` when configured, and
+bounded by its remaining prompt, the model-configured `search.chunk_size` when present, and
 `max_scheduled_tokens`.
 
 The scheduler recomputes cache targets and assigns each request:
@@ -760,16 +811,23 @@ Finally, the engine swaps `staged_events_` into `pending_events_`. The first eve
 
 ## Constrained decoding and tool calling
 
-Engine requests use the guidance configuration carried by their `GeneratorParams`. This allows
-concurrent requests to use different JSON schemas, regular expressions, or Lark grammars. Tool
-definitions and chat-template rendering remain application concerns; the Engine constrains the
-generated token stream but does not parse tool calls from the decoded output.
+Guidance is turn-scoped. `OgaTurnOptionsSetGuidance` supplies one grammar for the next admitted
+turn; `OgaTurnOptionsClearGuidance` and an omitted grammar both mean an unguided turn, and guidance
+is never inherited from a previous turn or from model state. Concurrent requests, and successive
+turns of one request, can therefore use different JSON schemas, regular expressions, or Lark
+grammars. Tool definitions and chat-template rendering remain application concerns; the Engine
+constrains the generated token stream but does not parse tool calls from the decoded output.
 
-Each guided request owns an independent constrained-logits processor. Its mask is applied before
-minimum-length, repetition-penalty, and no-repeat-ngram processing, matching Generator ordering.
-The processor snapshots its guidance and search configuration when the request is created, so later
-mutation of the caller-owned `GeneratorParams` cannot change an active grammar. After sampling, the
-selected token advances that request's grammar cursor.
+`Engine::BeginTurn` validates the grammar, acquires the cached compiled assets, and constructs the
+turn's processor before it mutates anything, so a malformed or unusable grammar leaves the previous
+completed turn entirely reusable. The processor is installed only at the turn-admission commit
+boundary, and every terminal path -- completion, stop match, cancellation, failure, and close --
+releases it again.
+
+Each guided turn owns an independent constrained-logits processor. Its mask is applied before
+minimum-length, repetition-penalty, and no-repeat-ngram processing. If applying the minimum would
+mask every guidance-permitted token because only configured EOS tokens remain, guidance termination
+takes precedence. After sampling, the selected token advances that turn's grammar cursor.
 
 The grammar cursor participates in the same transaction as search and paged-cache state. A step
 checkpoints it before sampling, retains the advanced cursor on commit, and restores the checkpoint
@@ -784,9 +842,113 @@ dirty cursor retries mask construction when the next step needs it. Transient su
 future-delivery failures can recover this way; an error reported by llguidance permanently poisons
 that cursor and continues to fail rather than allowing generation with a stale mask.
 
-Guidance fast-forward tokens are not currently supported by the Engine. Requests that enable them
-are rejected because each forced token would also need a corresponding model execution and paged
-KV-cache advancement inside the transaction.
+A guided turn does not accept speculative drafts, because a draft's proposals are not produced under
+the grammar; the next unguided turn is draft-eligible again. Guidance and stop strings can be
+enabled together.
+
+Guidance fast-forward tokens are not supported by the Engine: each forced token would also need a
+corresponding model execution and paged KV-cache advancement inside the transaction. The Engine
+never enables them for a Request.
+
+## Per-turn generation policy
+
+Every generation-policy value is resolved anew for each `BeginTurn()`. Nothing carries over
+implicitly: a turn that overrides nothing decodes with the model's configured defaults again, even
+directly after a turn that overrode everything.
+
+`Engine::BeginTurn` resolves the turn's `EffectiveTurnPolicy` from the model `search` defaults plus
+the fields the caller explicitly set on `TurnOptions`, forces the Engine's single-sequence
+invariants, validates the complete result, and builds the turn's fallible resources -- its stop
+controller and guidance processor -- all before it mutates the Request. Only the turn-admission
+commit boundary installs them.
+
+The per-field unset behavior is normative in "Turn options" in `docs/engine_c_api_spec.md`; it is
+not repeated here.
+
+`EffectiveTurnPolicy::IsGreedy()` is the one classification every execution path shares, so a policy
+can never be greedy for ordinary sampling and sampled for batched sampling, draft verification, or
+drafting eligibility.
+
+Under any greedy resolution, admission rejects an explicitly set scalar that contradicts it instead
+of silently selecting the top logit: a `temperature` other than 0 or 1, a nucleus `top_p` strictly
+between 0 and 1, or a `top_k` above 1. A scalar that itself requests greedy selection
+(`temperature == 0`, `top_k == 1`) or that restricts nothing (`top_k == 0`, `top_p` of 0 or 1,
+`temperature` of 1) is honored exactly as written, in any combination: `do_sample = false` with
+`top_k = 1` is accepted, while `do_sample = false` with `temperature = 0.7`, or `top_k = 1` with
+`top_p = 0.9`, is not. The error names every condition that made the policy greedy and every scalar
+that contradicted it.
+
+An explicit `do_sample = true` that a model default silently overrides is rejected separately,
+because it is the one greedy resolution the caller cannot have meant. A model whose
+`search.top_k` is 1 or whose `search.temperature` is 0 keeps every turn greedy, and the caller
+cannot see those defaults through `TurnOptions`, so the error names the model-supplied cause and the
+turn must override that exact field -- a `top_k` above 1, or a nonzero `temperature` -- to sample.
+A turn that spells greedy out itself is unaffected: `do_sample = true` with the turn's own
+`top_k = 1` or `temperature = 0` is the caller's own choice and is accepted.
+
+A sampled resolution requires a positive `top_k` or a positive `top_p`; both zero is rejected,
+because it selects from nothing and is not the same request as greedy selection.
+A sampled resolution also rejects a `top_k` greater than the model vocabulary size. If the resolved
+value came from the model's `search.top_k`, the error names that model default so the turn can
+override it explicitly.
+
+`no_repeat_ngram_size` is only implemented by the CPU search, so a nonzero value is rejected at
+admission by a core-owned capability predicate keyed by the scoring device type, rather than
+throwing after the model has already run. A `repetition_penalty` other than 1, a nonzero
+`no_repeat_ngram_size`, or an unmet minimum also disables speculative drafting for that turn,
+because verification rows do not reproduce those logits processors.
+
+`min_generated_tokens` masks the end-of-sequence token until the turn has generated that many
+tokens. Admission rejects a minimum that exceeds the turn maximum or does not fit between the
+turn's prompt length and the Request's session limit. The absolute sequence floor `ApplyMinLength`
+uses is derived from the committed turn's prompt length plus its minimum rather than stored, so it
+cannot disagree with the policy the turn actually resolved to. An extendable accepting grammar
+continues under the minimum, but once guidance permits EOS and no continuation token, guidance
+termination takes precedence rather than leaving the turn with no legal token.
+
+### Per-turn seeds
+
+The Request carries a durable seed basis, initialized once at construction, plus an optional pending
+reseed for the admitted turn. A model that configures `search.random_seed` supplies the basis
+directly; the default unset (negative) configuration draws a generated 64-bit basis from
+`std::random_device` instead, so an unseeded Request is not reproducible across processes but its
+own later turns still continue one stream rather than redrawing.
+
+- An omitted turn seed continues the current streams.
+- An explicit turn seed records a new pending basis. Zero is a valid deterministic seed, so
+  `ClearSeed` -- not a sentinel value -- removes a pending reseed.
+- A greedy step consumes neither the host stream nor the persistent device sampler state, so a
+  greedy turn does not shift the random draws used by a later unseeded sampled turn.
+- Seeds are full-width `uint64_t`. A value below 2^32 seeds the host generator exactly as the
+  classic `search.random_seed` did; a nonzero high half mixes both halves through a seed sequence.
+  CUDA receives the complete 64-bit value.
+
+A sampler state is always created from the durable basis, never from the pending reseed, because
+only a reseed applied inside the step transaction can be rolled back with it.
+
+`ScheduledRequests::GenerateNextTokensForTransaction` applies the pending reseed strictly after
+every Request and sampler checkpoint and strictly before the first host or device random consumer.
+The host generator is checkpointed by every `SaveState*ForTransaction` variant, so it is always safe
+to reseed. A device sampler state is reseeded in place -- keeping its pooled index -- and
+`BeginTransaction` therefore extends its sampler checkpoint beyond the batched sampling plan to
+cover every state a pending reseed targets, including requests that sample their draft verification
+on the host or whose plan was abandoned. That is an invariant, not a preference:
+`Request::ApplyPendingSeedForTransaction` fails the step if it is ever handed an existing device
+state the step did not checkpoint, because reseeding it could not be rolled back and skipping it
+would promote the seed to the durable basis while that stream still ran the old one.
+
+The pending marker is promoted to the durable basis only when the sampling step commits. Rollback
+restores both random streams and leaves the marker pending, so the retry reseeds identically.
+A turn that is canceled, fails, or otherwise reaches a terminal boundary before a sampling step
+commits discards the marker in `Request::ReleaseTurnResources()` without promoting it; because the
+rolled back step also restored both streams, the Request continues from exactly the position it held
+before the turn. Determinism is still scoped to the same scheduling path, because which drafts are
+admitted -- and therefore how many draws a turn makes -- depends on batch composition.
+
+Because `BatchedSampler` and `BatchedSamplerState` objects are constructed by the dynamically loaded
+CUDA add-on and called through by core, widening their seed interface required a
+`kDeviceInterfaceVersion` bump. That constant must be incremented whenever the virtual layout of
+`DeviceInterface`, or the virtual or data layout of any type crossing the add-on boundary, changes.
 
 ## Decoded stop strings
 
@@ -1125,6 +1287,74 @@ generations reject overlapping reservations that allocate, free, or advance bloc
 and reservation mutation paths can advance occupancy, and each records the change in the pool
 generation.
 
+## Per-token quantized scale caches
+
+A model whose paged KV cache is quantized per token stores one scale per (block, slot, KV head) alongside the packed key and value payload. The Engine owns these scale buffers exactly as it owns the key and value caches.
+
+### Configuration surface
+
+Four decoder templates declare them, each containing exactly one `%d` for the logical layer ID:
+
+- `model.decoder.inputs.past_key_scale_names`, `model.decoder.outputs.present_key_scale_names`
+- `model.decoder.inputs.past_value_scale_names`, `model.decoder.outputs.present_value_scale_names`
+
+The past and present template of a side are required as a pair: declare both or neither. A side with only one of the two is rejected at construction. Binding only the past name would let ORT allocate a separate buffer for the graph's present output, so the scales a step produced would be discarded and the next step would dequantize the block it had just written against stale data. The two sides are independent — a model may bind key scales and leave value scales unbound.
+
+Each scale template must also expand to names distinct from every key, value, and other scale name bound for the group; a collision is rejected.
+
+An Engine-hosted MTP head does not support per-token quantized caches. The head is always an unquantized full-attention layer, there is no `model.mtp` scale-name configuration surface, and a config that tries to declare one is rejected as an unknown key. Because `CreateMtpDecoderConfig()` projects a copy of the target configuration, it clears all four scale templates on the projected decoder; otherwise a quantized target would make the head's sizing and binding look up scale tensor names that exist only in the target session. A block drafter is likewise unsupported: `ValidateDflash2ModelCompatibility()` rejects a non-empty `model.dflash2` scale template, because `Dflash2Drafter::AllocateCache()` builds only key and value buffers from the drafter's logical head size and would leave a declared scale input unbound.
+
+### Shape, addressing, and type
+
+A scale tensor has rank three, `[num_blocks, block_size, num_kv_heads]` — the key/value shape with the trailing head-width dimension dropped. Block and slot addressing is therefore identical, and the block table the model already receives indexes the payload and its scales the same way. The scale tensors are additional model inputs and outputs, but they require no additional indexing input.
+
+Validation of each declared scale binding checks, with a distinct message per failure:
+
+- Rank three.
+- Dimension 1 equal to `engine.dynamic_batching.block_size` and dimension 2 equal to `model.decoder.num_key_value_heads`, when the graph resolves them. A negative dimension is symbolic and is accepted; allocation resolves it from the configured geometry. The model builder emits `["num_blocks", "block_size", num_kv_heads]`, so the leading two dimensions are normally symbolic.
+- Element type `float16` or `float32`.
+- The present output exists, has the same element type as the past input, and has a wildcard-compatible shape. Shape comparison uses `StateShapesCompatible()`, the same rule every other shared model-state binding uses: a symbolic dimension on either side matches a resolved one.
+- Dimension 0, when resolved, equal to the block count actually allocated for that layer.
+
+The scale type is resolved per layer and per side and may differ from the key/value type — a `uint8` packed cache with `float16` scales is the expected combination. The key/value type must be uniform across the whole group; scale types need not be.
+
+Scale bindings are validated by the paged cache, not by `ModelStateManifest`. `StateBindingsFor(PagedKeyValue)` still returns only the key and value templates, so scale tensors do not participate in manifest rank and geometry validation.
+
+### Ownership, aliasing, and initialization
+
+The Engine allocates one buffer per (layer, declared side) from the KV-cache allocator, wraps it in an `OrtValue`, and holds it for the lifetime of the cache. Every step binds that one `OrtValue` as both the past input and the present output, exactly as it does for key and value caches, so the model updates scales in place. The buffer is never reallocated between steps and its device pointer is stable for the life of the cache.
+
+Each buffer is zeroed once at allocation. Blocks are not re-zeroed when they are freed and handed to another request: a slot's scale is only read after the model has written that slot, which is the same rule the key and value payload already follows.
+
+Binding layout, in `BindCache()`:
+
+| Range | Contents |
+| --- | --- |
+| `[0, 2L)` | Key and value caches, key before value, in layer order, for `L` participating layers |
+| `[2L, 2L + S)` | Scale caches, key before value, in layer order, skipping undeclared sides, for `S` scale buffers |
+| `[2L + S, ...)` | Block table, then the windowed block table when the model has one |
+
+Model inputs and outputs share the first two ranges; only the block tables are input-only. The block table index is therefore `cache_.size() * 2 + scale_cache_.size()`.
+
+### Sizing
+
+`PagedKeyValueCacheBytesPerBlock()` returns what one block costs across every full-attention layer of the paged group. Per layer:
+
+```
+block_size * num_kv_heads * (key_head_width + value_head_width) * sizeof(kv_type)
+  + block_size * num_kv_heads * sizeof(scale_type)   for each declared scale side
+```
+
+`key_head_width` and `value_head_width` are the trailing dimensions the graph declares, not `model.decoder.head_size`. A 4-bit cache packs two elements per byte, so its physical width is half the logical head size, and reading the graph is what keeps sizing correct for both packed and unpacked caches. Every multiplication is overflow-checked.
+
+The resulting per-block cost feeds `ComputePagedBlockCapacityFromBytes()`, which divides the memory budget after the fragmentation allowance, the utilization factor, reserved fixed-state bytes, and any auxiliary per-block cost from an MTP head or block drafter. Scales therefore reduce the block count directly: with `block_size 4`, one KV head, unpacked `float32` key and value of width 1, and two `float16` scale sides, a layer costs 32 bytes per block without scales and 48 with them, so the same budget holds two-thirds as many blocks.
+
+### Sliding-window layers
+
+Scale caches follow their layer's mapping. A windowed layer's scale tensor is allocated with `num_window_blocks` leading entries and a full-attention layer's with `num_blocks`, matching that layer's key and value tensors, and each is indexed by the block table that layer already uses — the windowed block table for ring layers, the primary block table for the rest.
+
+The two budgets stay separate in the same way. `PagedKeyValueCacheBytesPerBlock()` skips windowed layers entirely, and the windowed reservation is computed as `num_window_blocks * BytesPerBlock(layer)` per windowed layer, which includes that layer's scale bytes. Windowed storage is taken off the top before the full-attention block count is derived, so a quantized windowed layer shrinks the ring's budget rather than the full-attention pool's per-block cost.
+
 ## Sliding-window paged layers
 
 The runtime can store selected sliding-window layers in a fixed ring instead of growing their KV
@@ -1152,9 +1382,9 @@ the request. The window block table repeats those $R$ block IDs: column $j$ uses
 $j \bmod R$, so position $p$ resolves to slot $p \bmod (R B)$. Positions outside the live window
 are overwritten in place.
 
-The dynamic scheduler treats $C$ as a physical per-request query limit. A request-level
-`chunk_size` that is absent, zero, or larger than $C$ is capped to $C$; a smaller positive override
-is preserved. This prevents a transactional step from wrapping the ring while older positions are
+The dynamic scheduler treats $C$ as a physical per-request query limit. A configured
+`search.chunk_size` that is absent, zero, or larger than $C$ is capped to $C$; a smaller positive
+value is preserved. This prevents a transactional step from wrapping the ring while older positions are
 still live.
 
 Window blocks participate in the same reservation, rollback, commit, removal, and invariant checks
@@ -1285,8 +1515,13 @@ The engine uses the same transaction flow for prefill and decoding.
 ### Prefill
 
 A prefill contributes as many pending prompt tokens as the remaining global
-budget allows, bounded by `search.chunk_size` when configured. A prompt can
-therefore span several committed steps even when `search.chunk_size` is absent.
+budget allows, bounded by the model-configured `search.chunk_size` when present. A prompt can
+therefore span several committed steps even when `search.chunk_size` is absent. Chunking is
+model/Engine configuration, not per-Request policy: a static-batching Engine cannot resume a
+half-written prompt, so `Engine::CreateDependencies` rejects a chunking model when it builds the
+static dependencies, and `StaticBatchScheduler::AddRequest` independently rejects a chunking Request
+at admission. The second check is what protects an Engine assembled from injected dependencies,
+which never runs the first.
 
 Admitting a new prefill still reserves blocks for its whole prompt. Only the
 executed contribution advances committed slots. This prevents another request
@@ -1315,7 +1550,7 @@ failure constructing the owning state wrapper releases the acquired index withou
 
 `ScheduledRequests` resolves each request's sampling configuration, groups compatible work inside the sampler, and submits the logits rows together. The implementation can handle heterogeneous request parameters without turning the requests into one shared `Search`.
 
-If batched sampling or transactional sampler checkpoints are unsupported on the active device or search implementation, the code falls back to per-request sampling while preserving the same engine transaction boundary.
+If batched sampling or transactional sampler checkpoints are unsupported on the active device or search implementation, the code falls back to per-request sampling while preserving the same engine transaction boundary. A per-turn seed is rejected at admission when a device batched sampler exists but cannot checkpoint and restore its RNG state; a host-only path with no batched sampler remains supported.
 
 Logits processing remains per request. Minimum length, repetition penalty, no-repeat n-gram processing, EOS handling, maximum length, and sequence ownership continue to use each request's own state.
 
@@ -1334,34 +1569,55 @@ Graph buffers are allocated once at configured limits and reshaped as static vie
 
 Prefill and mixed-token steps use graph id `-1`, which tells the CUDA execution provider to run eagerly.
 
-An Engine-hosted DFlash 2 drafter consumes the packed auxiliary hidden-state tensor named by
-`model.dflash2.main_aux_hidden_states`. Single-token target decode steps bind that output through
-persistent graph buffers and remain eligible for CUDA graph capture; prefill and draft-verification
-steps remain eager. Engine construction validates the output's rank, element type, and static width
-against the drafter input before allocating cache resources.
-The drafter run is synchronous because its packed inputs and outputs are owned by one proposal
-call, so `model.dflash2.run_options` cannot disable execution-provider synchronization.
+An Engine-hosted DFlash 2 or DSpark block drafter consumes the packed auxiliary hidden-state tensor
+named by `model.dflash2.main_aux_hidden_states` or `model.dspark.main_aux_hidden_states`.
+`model.dspark` is a configuration alias for the shared DFlash 2 runtime, and both sections cannot
+appear in one configuration. DFlash 2 uses `block_size - 1` draft rows because its first row is an
+anchor; DSpark predicts from all `block_size` rows.
+
+Single-token target decode steps bind that auxiliary output through persistent graph buffers and
+remain eligible for CUDA graph capture; prefill and draft-verification steps remain eager. Engine
+construction validates the output's rank, element type, and static width against the drafter input.
+It also validates the drafter's lattice outputs and every paged-cache input/output, including the
+page size, before allocating cache resources. The drafter run is synchronous because its packed
+inputs and outputs are owned by one proposal call, so its run options cannot disable
+execution-provider synchronization.
+
 The direct drafter session also uses graph id `-1`: it reuses proposal tensor allocations but
 reshapes them for each step, so they cannot be captured safely. If this optional post-commit drafter
 run fails, the Engine discards any partial proposal and still publishes the already committed target
 events. A recoverable failure also makes the drafter forget every request it is currently tracking,
 because the step whose rows it failed to ingest leaves its cached context no longer contiguous with
-the target. Those in-flight requests finish without DFlash 2 drafts while requests admitted
-afterwards still get them, and the retry budget is therefore spent on real drafter failures: three
-consecutive failures disable DFlash 2 for the Engine, and a proposal contract violation disables it
-at once. `dflash2_failures` and `dflash2_disables` report those events.
+the target. Those in-flight requests finish without block drafts while requests admitted afterwards
+still get them, and the retry budget is therefore spent on real drafter failures: three consecutive
+failures disable the drafter for the Engine, and a proposal contract violation disables it at once.
+`dflash2_failures` and `dflash2_disables` report those events.
 
-Automatic DFlash 2 drafting is greedy-only. A request that uses random sampling (`do_sample` with
-`top_k != 1` and a non-zero temperature) can never take a DFlash 2 block, so it is never fed to the
-drafter and never claims a ring.
+Automatic block drafting is greedy-only. A request joins on its position-zero step only when the
+current turn is greedy. If a sampled first turn executes that step, eligibility is not reconsidered
+and the request decodes without block drafts for the rest of its life. Once a request has joined,
+later sampled turns continue feeding their committed context into its cache without requesting
+drafts, so a subsequent greedy turn can resume drafting without a cache hole. These ingest-only
+steps still execute the drafter session to preserve that continuity.
 
-The drafter keeps a fixed sliding-window ring per request from that request's first decode step
-until it is closed, so its pool is sized for `max_batch_size` rings. A request that first decodes
-while every ring is taken is skipped for the rest of its life and decodes without DFlash 2 drafts;
-the drafter keeps serving the requests that already hold a ring. This makes `max_batch_size` the
-DFlash 2 service-capacity limit across both active and idle long-lived requests, not merely the
-per-step scheduler limit. `dflash2_admission_misses` reports requests denied a ring because that
-capacity was occupied.
+A windowed block drafter (DFlash 2) owns a fixed ring of cache blocks per maximum batch row, so its
+pool is sized for `max_batch_size` rings and its footprint is independent of context length. With
+automatic sizing, that pool is allocated before the target measures free memory. When `num_blocks`
+is explicit, its fixed footprint is instead validated and deducted from the byte budget represented
+by that baseline target block count before either cache pool is allocated. A full-attention block
+drafter (DSpark) instead mirrors the target pool: its bytes per target block and its fixed
+query-spill bytes are charged against the same budget before target capacity is selected, using the
+cache element type reported by the graph. That trade is explicit -- a DSpark drafter with the same
+layer geometry as the target roughly halves the target's paged-cache capacity for the same GPU
+memory budget, and it attends the whole resident sequence on every step rather than a window.
+
+Both pools are only sufficient while at most `max_batch_size` requests are tracked. A request denied
+cache blocks at its join point is skipped for the rest of its life and decodes without block drafts;
+the drafter keeps serving requests that already hold blocks. This makes `max_batch_size` the
+drafter's service-capacity limit across both active and idle long-lived requests, not merely the
+per-step scheduler limit. `dflash2_admission_misses` reports requests denied cache blocks because
+that capacity was occupied. A tracked request remains part of this capacity while a sampled turn is
+ingest-only, because retaining its cache is what lets a later greedy turn resume drafting.
 
 ## Backpressure and fairness
 
@@ -1396,8 +1652,10 @@ The static engine path is intentionally separate.
 A resident static request queued by `BeginTurn()` returns to `Active` without reallocating the
 batch. Static cache rows still cannot be released independently, and an all-turn-complete batch may
 be recycled for new work. Static continuation is therefore valid only while the original
-single-request batch remains resident. The per-turn generated-token budget applies on this path
-too, although static execution does not use the dynamic reservation/checkpoint transaction.
+single-request batch remains resident. The per-turn generated-token budget and the resolved scalar
+turn policy both apply on this path, although static execution does not use the dynamic
+reservation/checkpoint transaction. Because it cannot stage, roll back, or replay, static admission
+rejects stop strings and a per-turn seed before mutating the Request.
 
 Close or abandonment logically removes a Request from scheduling and purges its undelivered events.
 A closed Request that is already resident in a static batch nevertheless remains part of that
@@ -1417,9 +1675,12 @@ The language bindings currently expose the same basic low-level loop. Production
 ```python
 request_options = og.RequestOptions()
 request_options.set_max_session_tokens(4096)
-request = engine.create_request(generation_params, request_options)
+request = engine.create_request(options=request_options)
 turn_options = og.TurnOptions(request)
 turn_options.set_max_generated_tokens(128)
+turn_options.set_do_sample(True)
+turn_options.set_top_k(40)
+turn_options.set_seed(1234)
 turn_id = request.begin_turn(initial_tokens, turn_options)
 
 event_buffer = engine.create_event_buffer(8)
@@ -1480,6 +1741,7 @@ The document needs review when a change affects any of the following:
 - Admission order, fairness, preemption, or prefill chunking.
 - Batch planning or packed token layout.
 - Cache block accounting, reservation, commit, release, or eviction.
+- Paged cache buffer ownership, per-block byte accounting, or input/output aliasing, including the per-token quantized scale caches.
 - Model inputs required by paged attention.
 - Sampling, logits processing, or random-state ownership.
 - Transaction checkpoints, rollback, failure classification, or commit ordering.
@@ -1488,4 +1750,4 @@ The document needs review when a change affects any of the following:
 
 Prefer describing current behavior directly. If a design is proposed but not implemented, label it clearly as future work or keep it in a separate design document. Remove or revise statements that stop matching the code.
 
-Tests under `test/cpp/engine/` provide focused coverage for scheduler planning, paged-cache resources, request and cache invariants, transaction rollback, fatal failures, and Engine-event draining. When behavior changes, update both the tests and this document so they continue to describe the same contract.
+Tests under `test/cpp/engine/` provide focused coverage for scheduler planning, paged-cache resources, per-token scale-cache validation, sizing, and input/output aliasing, request and cache invariants, transaction rollback, fatal failures, and Engine-event draining. When behavior changes, update both the tests and this document so they continue to describe the same contract.

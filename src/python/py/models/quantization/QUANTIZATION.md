@@ -126,8 +126,10 @@ A node is prepacked only when the fpA_intB kernel supports it: symmetric weights
 in {4, 8}, `block_size` supported by the target layout (SM80 → {32, 64, 128}, SM90 →
 {64, 128}), `K % block_size == 0`, and `N` aligned to the kernel tile (`N % 32` for
 int8, `N % 64` for int4). Ineligible nodes (e.g. an `N = 32` MoE router) keep the raw
-blockwise layout. An offline-prepacked model must be run with `ORT_FPA_INTB_GEMM`
-enabling the relevant nbits (use `ORT_FPA_INTB_GEMM=1` for int4 and int8).
+blockwise layout. Eligible prepacked nodes select the fpA-intB path automatically.
+`ORT_FPA_INTB_GEMM=1` or the equivalent `ep.cuda.fpa_intb_gemm=1` session option is
+only needed to select that kernel family for nodes left in raw layout; the builder
+emits the session option automatically for prepacked exports.
 
 ## QMoE expert-weight quantization
 

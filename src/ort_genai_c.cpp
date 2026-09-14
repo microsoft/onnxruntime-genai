@@ -1772,7 +1772,6 @@ OgaResult* OgaEngineGetSpeculativeStats(
 
 OgaResult* OgaEngineCreateRequest(
     OgaEngine* engine,
-    const OgaGeneratorParams* params,
     const OgaRequestOptions* options,
     OgaRequest** out) {
   OGA_TRY
@@ -1783,14 +1782,9 @@ OgaResult* OgaEngineCreateRequest(
   if (!engine) {
     throw std::runtime_error("engine must not be null.");
   }
-  if (!params) {
-    throw std::runtime_error("params must not be null.");
-  }
-  const size_t max_total_tokens =
-      options && options->max_session_tokens
-          ? *options->max_session_tokens
-          : static_cast<size_t>(params->search.max_length);
-  auto request = engine->CreateRequest(*params, max_total_tokens);
+  auto request = engine->CreateRequest(
+      options ? static_cast<const Generators::RequestOptions&>(*options)
+              : Generators::RequestOptions{});
   *out = ReturnShared<OgaRequest>(request);
   return nullptr;
   OGA_CATCH
@@ -1891,30 +1885,115 @@ OgaResult* OgaTurnOptionsSetMaxGeneratedTokens(
   OGA_CATCH
 }
 
-#define OGA_UNIMPLEMENTED_TURN_SETTER(name, signature)       \
-  OgaResult* name signature {                                \
+OgaResult* OgaTurnOptionsSetMinGeneratedTokens(
+    OgaTurnOptions* options, uint64_t min_generated_tokens) {
+  OGA_TRY
+  if (!options) {
+    throw std::runtime_error("options must not be null.");
+  }
+  options->ValidateOwnerThread();
+  if (min_generated_tokens > std::numeric_limits<size_t>::max()) {
+    throw std::overflow_error(
+        "min_generated_tokens (" +
+        std::to_string(min_generated_tokens) +
+        ") exceeds the maximum internal size (" +
+        std::to_string(std::numeric_limits<size_t>::max()) + ").");
+  }
+  if (min_generated_tokens == 0) {
+    options->min_generated_tokens.reset();
+  } else {
+    options->min_generated_tokens =
+        static_cast<size_t>(min_generated_tokens);
+  }
+  return nullptr;
+  OGA_CATCH
+}
+
+// Every scalar setter below only records the caller's value. The complete resolved policy is
+// validated at turn admission, before any Request mutation, so an inconsistent combination is
+// rejected as a whole rather than one setter at a time.
+#define OGA_TURN_SCALAR_SETTER(name, type, field)            \
+  OgaResult* name(OgaTurnOptions* options, type value) {     \
     OGA_TRY                                                  \
     if (!options) {                                          \
       throw std::runtime_error("options must not be null."); \
     }                                                        \
     options->ValidateOwnerThread();                          \
-    throw std::runtime_error(#name " is not implemented.");  \
+    options->field = value;                                  \
+    return nullptr;                                          \
     OGA_CATCH                                                \
   }
 
-OGA_UNIMPLEMENTED_TURN_SETTER(
-    OgaTurnOptionsSetTemperature, (OgaTurnOptions * options, float))
-OGA_UNIMPLEMENTED_TURN_SETTER(
-    OgaTurnOptionsSetTopP, (OgaTurnOptions * options, float))
-OGA_UNIMPLEMENTED_TURN_SETTER(
-    OgaTurnOptionsSetTopK, (OgaTurnOptions * options, int32_t))
-OGA_UNIMPLEMENTED_TURN_SETTER(
-    OgaTurnOptionsSetSeed, (OgaTurnOptions * options, uint64_t))
-OGA_UNIMPLEMENTED_TURN_SETTER(
-    OgaTurnOptionsSetGuidance,
-    (OgaTurnOptions * options, const char*, const char*))
+OGA_TURN_SCALAR_SETTER(OgaTurnOptionsSetDoSample, bool, do_sample)
+OGA_TURN_SCALAR_SETTER(OgaTurnOptionsSetTemperature, float, temperature)
+OGA_TURN_SCALAR_SETTER(OgaTurnOptionsSetTopP, float, top_p)
+OGA_TURN_SCALAR_SETTER(OgaTurnOptionsSetTopK, int32_t, top_k)
+OGA_TURN_SCALAR_SETTER(
+    OgaTurnOptionsSetRepetitionPenalty, float, repetition_penalty)
+OGA_TURN_SCALAR_SETTER(
+    OgaTurnOptionsSetNoRepeatNgramSize, int32_t, no_repeat_ngram_size)
+OGA_TURN_SCALAR_SETTER(OgaTurnOptionsSetSeed, uint64_t, seed)
 
-#undef OGA_UNIMPLEMENTED_TURN_SETTER
+#undef OGA_TURN_SCALAR_SETTER
+
+OgaResult* OgaTurnOptionsClearSeed(OgaTurnOptions* options) {
+  OGA_TRY
+  if (!options) {
+    throw std::runtime_error("options must not be null.");
+  }
+  options->ValidateOwnerThread();
+  options->seed.reset();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaTurnOptionsSetGuidance(
+    OgaTurnOptions* options, const char* guidance_type,
+    const char* guidance_data) {
+  OGA_TRY
+  if (!options) {
+    throw std::runtime_error("options must not be null.");
+  }
+  if (!guidance_type || !guidance_data) {
+    throw std::runtime_error(
+        "guidance_type and guidance_data must not be null.");
+  }
+  options->ValidateOwnerThread();
+  // Validate before assignment so a malformed or unsupported request leaves the prior
+  // configuration intact. The grammar itself is compiled at turn admission.
+  if (!Generators::ValidateGuidanceRequest(guidance_type, guidance_data)) {
+    throw std::runtime_error(
+        "guidance_type and guidance_data must both be non-empty. Use "
+        "OgaTurnOptionsClearGuidance for an unguided turn.");
+  }
+  options->guidance_type = guidance_type;
+  options->guidance_data = guidance_data;
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaTurnOptionsClearGuidance(OgaTurnOptions* options) {
+  OGA_TRY
+  if (!options) {
+    throw std::runtime_error("options must not be null.");
+  }
+  options->ValidateOwnerThread();
+  options->guidance_type.clear();
+  options->guidance_data.clear();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaTurnOptionsReset(OgaTurnOptions* options) {
+  OGA_TRY
+  if (!options) {
+    throw std::runtime_error("options must not be null.");
+  }
+  options->ValidateOwnerThread();
+  options->Reset();
+  return nullptr;
+  OGA_CATCH
+}
 
 OgaResult* OgaTurnOptionsSetStopStrings(
     OgaTurnOptions* options, const OgaStringArray* stop_strings) {

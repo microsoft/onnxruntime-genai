@@ -17,22 +17,18 @@ namespace Generators {
 
 namespace {
 
-// Collapses Request::GenerateNextTokens' dispatch into the single (k, p, temperature) triple that
+// Collapses Request::SelectNextToken's dispatch into the single (k, p, temperature) triple that
 // each branch ends up handing to the sampler on CUDA, where SelectTop() is SampleTopKTopP(1, 0, 1),
 // SampleTopK(k, t) is SampleTopKTopP(k, 1, t) and SampleTopP(p, t) is SampleTopKTopP(-1, p, t).
-// Returns nothing for options the per-request path rejects, so that it keeps raising the error.
-std::optional<BatchedSamplingParams> ResolveSampleArgs(const Config::Search& search) {
-  if (!search.do_sample || search.top_k == 1 || search.temperature == 0)
+BatchedSamplingParams ResolveSampleArgs(const EffectiveTurnPolicy& policy) {
+  if (policy.IsGreedy())
     return BatchedSamplingParams{1, 0.0f, 1.0f};
 
-  if (search.num_beams != 1 || search.top_p < 0.0f || search.top_p > 1.0f || search.top_k < 0)
-    return std::nullopt;
-
-  if (search.top_p > 0.0f && search.top_p < 1.0f && search.top_k > 1)
-    return BatchedSamplingParams{search.top_k, search.top_p, search.temperature};
-  if (search.top_k > 1)
-    return BatchedSamplingParams{search.top_k, 1.0f, search.temperature};
-  return BatchedSamplingParams{-1, search.top_p, search.temperature};
+  if (policy.top_p > 0.0f && policy.top_p < 1.0f && policy.top_k > 1)
+    return BatchedSamplingParams{policy.top_k, policy.top_p, policy.temperature};
+  if (policy.top_k > 1)
+    return BatchedSamplingParams{policy.top_k, 1.0f, policy.temperature};
+  return BatchedSamplingParams{-1, policy.top_p, policy.temperature};
 }
 
 // Greedy token for every row, computed on the device so that the full vocabulary never crosses the
@@ -56,10 +52,6 @@ std::vector<int32_t> TryDeviceArgmaxPerRow(DeviceInterface& device,
                      static_cast<int>(vocab_size), tokens.data()))
     return {};
   return tokens;
-}
-
-bool UsesRandomSampling(const Config::Search& search) {
-  return search.do_sample && search.top_k != 1 && search.temperature != 0;
 }
 
 struct TopKScores {
@@ -95,22 +87,22 @@ TopKScores TryDeviceTopKScoresPerRow(DeviceInterface& device,
 }
 
 TargetTokenSelection BuildTargetSelection(
-    size_t row, DeviceSpan<float> logits, const Config::Search& search,
+    size_t row, DeviceSpan<float> logits, const EffectiveTurnPolicy& policy,
     const TopKScores& topk, SampledCategorical& scratch) {
   TargetTokenSelection selection;
   if (topk.k == 0) {
     const auto cpu_logits = logits.CopyDeviceToCpu();
-    ComputeSampledCategorical(cpu_logits, search.top_k, search.top_p,
-                              search.temperature, scratch);
+    ComputeSampledCategorical(cpu_logits, policy.top_k, policy.top_p,
+                              policy.temperature, scratch);
     selection.indices = scratch.indices;
     selection.probs = scratch.probs;
     return selection;
   }
 
-  const int k = std::min(search.top_k, topk.k);
+  const int k = std::min(policy.top_k, topk.k);
   const size_t offset = row * static_cast<size_t>(topk.k);
   const float max_score = topk.scores[offset];
-  const float inverse_temperature = 1.0f / search.temperature;
+  const float inverse_temperature = 1.0f / policy.temperature;
   std::vector<float> probabilities(static_cast<size_t>(k));
   float sum = 0.0f;
   for (int i = 0; i < k; ++i) {
@@ -123,11 +115,11 @@ TargetTokenSelection BuildTargetSelection(
     probability /= sum;
 
   int keep = k;
-  if (search.top_p > 0.0f && search.top_p < 1.0f) {
+  if (policy.top_p > 0.0f && policy.top_p < 1.0f) {
     float cumulative = 0.0f;
     for (int i = 0; i < k; ++i) {
       cumulative += probabilities[static_cast<size_t>(i)];
-      if (cumulative >= search.top_p) {
+      if (cumulative >= policy.top_p) {
         keep = i + 1;
         break;
       }
@@ -338,8 +330,8 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
   int max_sampling_top_k = 0;
   bool any_checkpoint_needed = false;
   for (size_t i = 0; i < requests_.size(); ++i) {
-    if (draft_token_counts_[i] != 0 && UsesRandomSampling(requests_[i]->SearchOptions())) {
-      max_sampling_top_k = std::max(max_sampling_top_k, requests_[i]->SearchOptions().top_k);
+    if (draft_token_counts_[i] != 0 && !requests_[i]->TurnPolicy().IsGreedy()) {
+      max_sampling_top_k = std::max(max_sampling_top_k, requests_[i]->TurnPolicy().top_k);
       any_checkpoint_needed = any_checkpoint_needed || requests_[i]->stop_controller_ != nullptr;
     }
   }
@@ -358,11 +350,11 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
       continue;
     }
 
-    if (UsesRandomSampling(requests_[i]->SearchOptions())) {
+    if (!requests_[i]->TurnPolicy().IsGreedy()) {
       // Draft acceptance is sequential: each row is drawn only if the previous draw matched its
       // draft, which the batched device sampler cannot express. These draws therefore come from
       // the Request's own host stream (checkpointed with the transaction) rather than its device
-      // BatchedSamplerState. search.random_seed consequently reproduces a given decode path, not
+      // BatchedSamplerState. The turn seed consequently reproduces a given decode path, not
       // output across decode paths, because whether drafts are admitted depends on batch
       // composition. See "Seeded sampling" in docs/paged_attention_engine.md.
       //
@@ -391,7 +383,7 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
              selected_tokens[i].size() < token_budget) {
         const auto selection = BuildTargetSelection(
             row + accepted_count, verify_rows[row + accepted_count],
-            requests_[i]->SearchOptions(), topk, sampling_scratch);
+            requests_[i]->TurnPolicy(), topk, sampling_scratch);
         const int32_t token = SampleTargetToken(selection, requests_[i]->rng_);
         selected_tokens[i].push_back(token);
         if (checkpoint_rng) {
@@ -405,7 +397,7 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
           selected_tokens[i].size() < token_budget) {
         const auto selection = BuildTargetSelection(
             row + draft_count, verify_rows[row + draft_count],
-            requests_[i]->SearchOptions(), topk, sampling_scratch);
+            requests_[i]->TurnPolicy(), topk, sampling_scratch);
         selected_tokens[i].push_back(
             SampleTargetToken(selection, requests_[i]->rng_));
         if (checkpoint_rng) {
@@ -630,18 +622,17 @@ bool ScheduledRequests::PrepareBatchedSamplingPlan(
         !request->IsChunkComplete())
       continue;
     if (require_transaction_support && draft_token_counts_[request_index] != 0 &&
-        UsesRandomSampling(request->SearchOptions())) {
+        !request->TurnPolicy().IsGreedy()) {
       continue;
     }
 
-    const auto args = ResolveSampleArgs(request->SearchOptions());
-    if (!args || !request->SupportsBatchedSampling()) {
+    if (!request->SupportsBatchedSampling()) {
       sampling_plan_->Clear();
       return false;
     }
     sampling_plan_->requests.push_back(request.get());
     sampling_plan_->result_indices.push_back(request_index);
-    sampling_plan_->params.push_back(*args);
+    sampling_plan_->params.push_back(ResolveSampleArgs(request->TurnPolicy()));
     sampling_plan_->states.push_back(&request->SamplingState(*batched_sampler_));
   }
   return !sampling_plan_->requests.empty();
@@ -652,6 +643,7 @@ void ScheduledRequests::BeginTransaction() {
     throw std::logic_error("Scheduled request transaction is already active.");
 
   transaction_uses_batched_sampler_ = PrepareBatchedSamplingPlan(true);
+  checkpointed_sampler_states_.clear();
   try {
     for (const auto& request : requests_) {
       const bool uses_batched_sampler =
@@ -669,9 +661,30 @@ void ScheduledRequests::BeginTransaction() {
     for (size_t i = 0; i < draft_token_counts_.size(); ++i) {
       requests_[i]->AppendDraftsForTransaction(draft_token_counts_[i]);
     }
-    if (transaction_uses_batched_sampler_) {
-      batched_sampler_->SaveStateForTransaction(sampling_plan_->states);
-      sampler_checkpoint_active_ = true;
+    if (batched_sampler_ && batched_sampler_->SupportsTransactions()) {
+      if (transaction_uses_batched_sampler_) {
+        checkpointed_sampler_states_ = sampling_plan_->states;
+      }
+      // A pending turn reseed overwrites a device stream in place, so its state has to be
+      // checkpointed even when this step does not sample that request through the batched sampler
+      // (a sampled draft verification draws on the host, and a plan can be abandoned entirely).
+      // Without this the reseed would be an unrecoverable mutation inside the transaction.
+      for (const auto& request : requests_) {
+        if (!request->HasPendingTurnSeed() || !request->IsChunkComplete())
+          continue;
+        auto* state = request->ExistingSamplingState(*batched_sampler_);
+        if (!state)
+          continue;
+        if (std::find(checkpointed_sampler_states_.begin(),
+                      checkpointed_sampler_states_.end(),
+                      state) == checkpointed_sampler_states_.end()) {
+          checkpointed_sampler_states_.push_back(state);
+        }
+      }
+      if (!checkpointed_sampler_states_.empty()) {
+        batched_sampler_->SaveStateForTransaction(checkpointed_sampler_states_);
+        sampler_checkpoint_active_ = true;
+      }
     }
   } catch (...) {
     const auto error = std::current_exception();
@@ -689,6 +702,24 @@ void ScheduledRequests::GenerateNextTokensForTransaction(
   if (plan.requests.size() != requests_.size() ||
       transaction_checkpoint_count_ != requests_.size()) {
     throw std::logic_error("Scheduled request transaction does not match the step plan.");
+  }
+
+  // Strictly after every Request and sampler checkpoint taken in BeginTransaction() and strictly
+  // before the first host or device RNG consumer below, so a rolled back step restores both streams
+  // and leaves the reseed pending for the retry. A device state is reseeded only when this step
+  // checkpointed it; BeginTransaction() checkpoints every state a pending reseed targets.
+  for (const auto& request : requests_) {
+    if (!request->HasPendingTurnSeed() || !request->IsChunkComplete()) {
+      continue;
+    }
+    const bool device_state_checkpointed =
+        sampler_checkpoint_active_ && batched_sampler_ &&
+        std::find(checkpointed_sampler_states_.begin(),
+                  checkpointed_sampler_states_.end(),
+                  request->ExistingSamplingState(*batched_sampler_)) !=
+            checkpointed_sampler_states_.end();
+    request->ApplyPendingSeedForTransaction(batched_sampler_,
+                                            device_state_checkpointed);
   }
 
   auto verify_rows = ProcessLogits();
@@ -883,6 +914,7 @@ void ScheduledRequests::RestoreStateForTransaction() {
     }
     sampler_checkpoint_active_ = false;
   }
+  checkpointed_sampler_states_.clear();
 
   std::vector<Request*> pending_restore_completion;
   pending_restore_completion.reserve(transaction_checkpoint_count_);
@@ -928,6 +960,7 @@ void ScheduledRequests::CommitStateForTransaction() {
     batched_sampler_->CommitStateForTransaction();
     sampler_checkpoint_active_ = false;
   }
+  checkpointed_sampler_states_.clear();
   transaction_uses_batched_sampler_ = false;
 }
 

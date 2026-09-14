@@ -127,10 +127,19 @@ std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   decoder.inputs.position_ids = mtp.inputs.position_ids;
   decoder.inputs.past_key_names = mtp.inputs.past_key_names;
   decoder.inputs.past_value_names = mtp.inputs.past_value_names;
+  // The projection starts from a copy of the target config, so a per-token quantized target would
+  // otherwise leak its scale name templates into the head. The head is always an unquantized
+  // full-attention layer and declares no scale tensors, so clear them: leaving them in place would
+  // make PagedKeyValueCacheBytesPerBlock() and CacheManager::Create() look up the target's scale
+  // tensor names in the head's own session.
+  decoder.inputs.past_key_scale_names.clear();
+  decoder.inputs.past_value_scale_names.clear();
   decoder.outputs.logits = mtp.outputs.logits;
   decoder.outputs.hidden_states = mtp.outputs.hidden_states;
   decoder.outputs.present_key_names = mtp.outputs.present_key_names;
   decoder.outputs.present_value_names = mtp.outputs.present_value_names;
+  decoder.outputs.present_key_scale_names.clear();
+  decoder.outputs.present_value_scale_names.clear();
 
   // The MTP graph is one full-attention layer. Paged-attention metadata and block-table names are
   // deliberately inherited above; fixed recurrent state and a main-model sliding window are not.
@@ -456,6 +465,10 @@ struct DecoderInputs_Element : JSON::Element {
       v_.past_key_names = JSON::Get<std::string_view>(value);
     } else if (name == "past_value_names") {
       v_.past_value_names = JSON::Get<std::string_view>(value);
+    } else if (name == "past_key_scale_names") {
+      v_.past_key_scale_names = JSON::Get<std::string_view>(value);
+    } else if (name == "past_value_scale_names") {
+      v_.past_value_scale_names = JSON::Get<std::string_view>(value);
     } else if (name == "past_names") {
       v_.past_names = JSON::Get<std::string_view>(value);
     } else if (name == "cross_past_key_names") {
@@ -527,6 +540,10 @@ struct DecoderOutputs_Element : JSON::Element {
       v_.present_key_names = JSON::Get<std::string_view>(value);
     } else if (name == "present_value_names") {
       v_.present_value_names = JSON::Get<std::string_view>(value);
+    } else if (name == "present_key_scale_names") {
+      v_.present_key_scale_names = JSON::Get<std::string_view>(value);
+    } else if (name == "present_value_scale_names") {
+      v_.present_value_scale_names = JSON::Get<std::string_view>(value);
     } else if (name == "present_names") {
       v_.present_names = JSON::Get<std::string_view>(value);
     } else if (name == "output_cross_qk_names") {
@@ -710,7 +727,7 @@ struct StateGroup_Element : JSON::Element {
       if (v_.state_update) {
         throw std::runtime_error("Duplicate decoder state_update declaration");
       }
-      v_.state_update.emplace();
+      v_.state_update.emplace(DecoderStateUpdate{});
       state_update_ = std::make_unique<StateUpdate_Element>(*v_.state_update);
       return *state_update_;
     }
@@ -1138,6 +1155,10 @@ struct Dflash2Inputs_Element : JSON::Element {
       v_.qkv_row_map = JSON::Get<std::string_view>(value);
     } else if (name == "block_row_index") {
       v_.block_row_index = JSON::Get<std::string_view>(value);
+    } else if (name == "past_key_scale_names") {
+      v_.past_key_scale_names = JSON::Get<std::string_view>(value);
+    } else if (name == "past_value_scale_names") {
+      v_.past_value_scale_names = JSON::Get<std::string_view>(value);
     } else if (name == "cumulative_sequence_lengths") {
       v_.cumulative_sequence_lengths = JSON::Get<std::string_view>(value);
     } else if (name == "past_sequence_lengths") {
@@ -1167,6 +1188,10 @@ struct Dflash2Outputs_Element : JSON::Element {
       v_.candidate_ids = JSON::Get<std::string_view>(value);
     } else if (name == "scores") {
       v_.scores = JSON::Get<std::string_view>(value);
+    } else if (name == "present_key_scale_names") {
+      v_.present_key_scale_names = JSON::Get<std::string_view>(value);
+    } else if (name == "present_value_scale_names") {
+      v_.present_value_scale_names = JSON::Get<std::string_view>(value);
     } else if (name == "present_key_names") {
       v_.present_key_names = JSON::Get<std::string_view>(value);
     } else if (name == "present_value_names") {
@@ -1694,7 +1719,8 @@ struct Embedding_Element : JSON::Element {
 };
 
 struct Model_Element : JSON::Element {
-  explicit Model_Element(Config::Model& v) : v_{v} {}
+  explicit Model_Element(Config::Model& v)
+      : v_{v}, block_drafter_alias_{v_.dflash2.configured_alias_is_dspark} {}
 
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "type") {
@@ -1814,7 +1840,15 @@ struct Model_Element : JSON::Element {
     if (name == "mtp") {
       return mtp_;
     }
-    if (name == "dflash2") {
+    if (name == "dflash2" || name == "dspark") {
+      // DSpark replaces DFlash's candidate selector with a Markov head but emits the same lattice.
+      const bool is_dspark = name == "dspark";
+      if (block_drafter_alias_.has_value() && *block_drafter_alias_ != is_dspark) {
+        throw std::runtime_error("Only one of model.dflash2 and model.dspark may be configured");
+      }
+      block_drafter_alias_ = is_dspark;
+      v_.dflash2.is_dspark = is_dspark;
+      v_.dflash2.configured_alias_is_dspark = is_dspark;
       return dflash2_;
     }
     throw JSON::unknown_value_error{};
@@ -1834,6 +1868,7 @@ struct Model_Element : JSON::Element {
   VAD_Element vad_{v_.vad};
   Mtp_Element mtp_{v_.mtp};
   Dflash2_Element dflash2_{v_.dflash2};
+  std::optional<bool> block_drafter_alias_;
 };
 
 // Throws std::runtime_error (rather than std::overflow_error/std::invalid_argument) on failure.

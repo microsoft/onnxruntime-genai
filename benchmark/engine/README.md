@@ -125,12 +125,17 @@ Each config is a list of scenario entries:
 | `execution_provider_library` | Path to the provider plugin. Required for `cuda`, registered once per process. |
 | `generation_tokens` | Tokens generated per request. |
 
+`long_prefill` and `mixed_workload` truncate a RULER prompt that would leave no room for generation
+within the model-configured session limit, reporting both requested and actual token counts.
+`capacity_pressure` does not truncate; over-ceiling prompts are reported as rejected admissions.
+
 `mixed_workload` runs one long-prefill request alongside active decode requests. The full and
-focused matrices use a hardcoded 128K prefill at concurrency 4 and 8; the smoke test uses the
-smallest 0.5B, concurrency-4 entry. In this scenario, the long-prefill request is intentionally
-capped to one generated token while decode requests keep `generation_tokens`; this keeps the
-prefill request from pushing max-length/context usage into unstable CUDA/KV-pressure territory
-while still measuring prefill-vs-decode interference.
+focused matrices request a 128K prefill at concurrency 4 and 8; the prompt is capped to leave room
+for generation within the model's configured session limit. The smoke test uses the smallest 0.5B,
+concurrency-4 entry. In this scenario, the long-prefill request is intentionally capped to one
+generated token while decode requests keep `generation_tokens`; this keeps the prefill request from
+pushing max-length/context usage into unstable CUDA/KV-pressure territory while still measuring
+prefill-vs-decode interference.
 
 `continuation` runs three appended turns for each logical request. Each turn submits the previous
 turn's generated tokens as part of the next prompt, so the benchmark measures session-cache reuse

@@ -34,10 +34,10 @@ def model(request):
     return og.Model(config)
 
 
-def _request(engine, model, prompt, max_new_tokens, sinks):
-    params = og.GeneratorParams(model)
-    params.set_search_options(do_sample=False, max_length=len(prompt) + max_new_tokens)
-    request = engine.create_request(params)
+def _request(engine, prompt, max_new_tokens, sinks):
+    request_options = og.RequestOptions()
+    request_options.set_max_session_tokens(len(prompt) + max_new_tokens)
+    request = engine.create_request(options=request_options)
     sink = _Sink()
     sinks[request] = sink
     request.begin_turn(np.asarray(prompt, dtype=np.int32))
@@ -74,7 +74,7 @@ def test_mixed_unequal_requests_match_isolated_execution(model):
     for prompt in prompts:
         engine = og.Engine(model)
         sinks = {}
-        _, sink = _request(engine, model, prompt, max_new_tokens, sinks)
+        _, sink = _request(engine, prompt, max_new_tokens, sinks)
         _run(engine, sinks)
         expected.append(sink.tokens)
     # The first request's fixed convolution state contributes 0, 6, then 12 to successive scores.
@@ -83,6 +83,6 @@ def test_mixed_unequal_requests_match_isolated_execution(model):
 
     engine = og.Engine(model)
     sinks = {}
-    requests = [_request(engine, model, prompt, max_new_tokens, sinks) for prompt in prompts]
+    requests = [_request(engine, prompt, max_new_tokens, sinks) for prompt in prompts]
     _run(engine, sinks)
     assert [sink.tokens for _, sink in requests] == expected
