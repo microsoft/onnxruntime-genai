@@ -143,6 +143,7 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
 
   void* pv_raw = pv_full->GetTensorMutableRawData();
   void* feat_raw = feat_full->GetTensorMutableRawData();
+  const auto& feat_memory = feat_full->GetTensorMemoryInfo();
   int64_t spatial_merge_size = model_.config_->model.vision.spatial_merge_size;
 
   auto cpu_mem = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
@@ -213,7 +214,7 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
         ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
 
     auto sub_feat = OrtValue::CreateTensor(
-        *cpu_mem,
+        feat_memory,
         static_cast<uint8_t*>(feat_raw) + static_cast<size_t>(feat_offset * hidden_size) * feat_element_size,
         static_cast<size_t>(num_feats * hidden_size) * feat_element_size,
         std::span<const int64_t>(sub_feat_shape), feat_type);
