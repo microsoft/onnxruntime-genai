@@ -10,18 +10,19 @@
 namespace Generators {
 
 DraftVerificationTokenSelector::DraftVerificationTokenSelector(
-    size_t vocab_size, const Config::Search& search,
+    size_t vocab_size, const EffectiveTurnPolicy& policy, int eos_floor,
     std::span<const int32_t> eos_token_ids)
-    : search_{search},
+    : policy_{policy},
+      eos_floor_{eos_floor},
       eos_token_ids_{eos_token_ids},
-      penalty_processor_{static_cast<int>(vocab_size), search.repetition_penalty,
-                         search.min_length, search.no_repeat_ngram_size,
+      penalty_processor_{static_cast<int>(vocab_size), policy.repetition_penalty,
+                         eos_floor, policy.no_repeat_ngram_size,
                          eos_token_ids} {}
 
 bool DraftVerificationTokenSelector::MinLengthMasksEosAt(
     size_t current_length) const {
-  return search_.min_length > 0 &&
-         current_length < static_cast<size_t>(search_.min_length);
+  return eos_floor_ > 0 &&
+         current_length < static_cast<size_t>(eos_floor_);
 }
 
 bool DraftVerificationTokenSelector::ContainsEos(
@@ -34,8 +35,8 @@ bool DraftVerificationTokenSelector::ContainsEos(
 
 bool DraftVerificationTokenSelector::RequiresProcessedRow(
     size_t current_length, std::span<const int32_t> raw_candidates) const {
-  if (search_.repetition_penalty != 1.0f ||
-      search_.no_repeat_ngram_size > 0) {
+  if (policy_.repetition_penalty != 1.0f ||
+      policy_.no_repeat_ngram_size > 0) {
     return true;
   }
   return MinLengthMasksEosAt(current_length) &&
@@ -70,17 +71,17 @@ TargetTokenSelection DraftVerificationTokenSelector::BuildSampled(
   if (raw_topk.tokens.empty() ||
       RequiresProcessedRow(current_length, raw_topk.tokens)) {
     const auto processed = ProcessRow(logits, current_length, prefix);
-    ComputeSampledCategorical(processed, search_.top_k, search_.top_p,
-                              search_.temperature, sampling_scratch_);
+    ComputeSampledCategorical(processed, policy_.top_k, policy_.top_p,
+                              policy_.temperature, sampling_scratch_);
     selection.indices = sampling_scratch_.indices;
     selection.probs = sampling_scratch_.probs;
     return selection;
   }
 
-  const int k = std::min(search_.top_k,
+  const int k = std::min(policy_.top_k,
                          static_cast<int>(raw_topk.tokens.size()));
   const float max_score = raw_topk.scores.front();
-  const float inverse_temperature = 1.0f / search_.temperature;
+  const float inverse_temperature = 1.0f / policy_.temperature;
   std::vector<float> probabilities(static_cast<size_t>(k));
   float sum = 0.0f;
   for (int i = 0; i < k; ++i) {
@@ -94,11 +95,11 @@ TargetTokenSelection DraftVerificationTokenSelector::BuildSampled(
   }
 
   int keep = k;
-  if (search_.top_p > 0.0f && search_.top_p < 1.0f) {
+  if (policy_.top_p > 0.0f && policy_.top_p < 1.0f) {
     float cumulative = 0.0f;
     for (int i = 0; i < k; ++i) {
       cumulative += probabilities[static_cast<size_t>(i)];
-      if (cumulative >= search_.top_p) {
+      if (cumulative >= policy_.top_p) {
         keep = i + 1;
         break;
       }

@@ -116,6 +116,21 @@ def test_bf16_linear_attention_projection_stays_unquantized():
     assert module.weight_scale is None
 
 
+def test_prequantized_linear_attention_gate_is_dequantized():
+    base = "model.language_model.layers.3.linear_attn.in_proj_a"
+    tensors = {
+        f"{base}.weight": torch.ones((4, 4), dtype=torch.float8_e4m3fn),
+        f"{base}.weight_scale": torch.tensor(0.125),
+    }
+
+    module = _make_model(tensors).make_dense_linear_module(base)
+
+    assert module.quant_type == "none"
+    assert module.weight.dtype == torch.bfloat16
+    torch.testing.assert_close(module.weight, torch.full((4, 4), 0.125, dtype=torch.bfloat16))
+    assert module.weight_scale is None
+
+
 def test_optional_mtp_tensors_are_parsed_into_generic_modules():
     tensors = {
         "mtp.fc.weight": torch.ones((2, 2), dtype=torch.bfloat16),

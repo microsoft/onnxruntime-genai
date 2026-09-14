@@ -68,23 +68,28 @@ def run(args: argparse.Namespace):
     if args.require_draft_activity and engine.max_draft_tokens_per_proposal() == 0:
         raise RuntimeError("The model does not support speculative draft proposals")
 
-    params = og.GeneratorParams(model)
-    params.set_search_options(
-        do_sample=False,
-        max_length=MAX_LENGTH,
-    )
+    request_options = og.RequestOptions()
+    request_options.set_max_session_tokens(MAX_LENGTH)
 
-    session_token_count = 0
+    system_message = json.dumps([{"role": "system", "content": ""}])
+    system_tokens = tokenizer.encode(
+        tokenizer.apply_chat_template(messages=system_message, add_generation_prompt=False),
+    )
+    session_token_count = len(system_tokens)
     streaming_tokenizer = tokenizer.create_stream()
-    request = engine.create_request(params)
+    request = engine.create_request(options=request_options)
+    # Per-turn policy is resolved anew for every turn and never carries over, so the same options
+    # object is reused to ask for top-logit selection on each one.
+    turn_options = og.TurnOptions(request)
+    turn_options.set_do_sample(False)
+    if args.max_new_tokens is not None:
+        turn_options.set_max_generated_tokens(args.max_new_tokens)
     first_turn = True
     try:
         for prompt in prompts(args):
             if args.prompt:
                 print(f"🫵  : {prompt}")
             messages = [{"role": "user", "content": prompt}]
-            if first_turn:
-                messages.insert(0, {"role": "system", "content": ""})
             turn_tokens = tokenizer.encode(
                 tokenizer.apply_chat_template(messages=json.dumps(messages), add_generation_prompt=True),
             )
@@ -94,12 +99,16 @@ def run(args: argparse.Namespace):
                 break
 
             session_token_count += len(turn_tokens)
-            input_tokens = np.asarray(turn_tokens, dtype=np.int32)
-            first_turn = False
-            turn_options = None
-            if args.max_new_tokens is not None:
-                turn_options = og.TurnOptions(request)
-                turn_options.set_max_generated_tokens(args.max_new_tokens)
+            if first_turn:
+                input_tokens = np.concatenate(
+                    (
+                        np.asarray(system_tokens, dtype=np.int32),
+                        np.asarray(turn_tokens, dtype=np.int32),
+                    )
+                )
+                first_turn = False
+            else:
+                input_tokens = np.asarray(turn_tokens, dtype=np.int32)
             stats_before = dict(engine.get_speculative_stats())
             turn_id = request.begin_turn(input_tokens, turn_options)
 

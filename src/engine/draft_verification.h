@@ -4,10 +4,10 @@
 
 #include <span>
 
-#include "../config.h"
 #include "../decoding/speculative_sampling.h"
 #include "../sampling_distribution.h"
 #include "../smartptrs.h"
+#include "turn_policy.h"
 
 namespace Generators {
 
@@ -20,7 +20,8 @@ struct DraftVerificationTopKRow {
 // Transaction state, RNG draws, and draft acceptance remain owned by ScheduledRequests.
 class DraftVerificationTokenSelector {
  public:
-  DraftVerificationTokenSelector(size_t vocab_size, const Config::Search& search,
+  DraftVerificationTokenSelector(size_t vocab_size, const EffectiveTurnPolicy& policy,
+                                 int eos_floor,
                                  std::span<const int32_t> eos_token_ids);
 
   int32_t SelectGreedy(DeviceSpan<float> logits, int32_t raw_argmax,
@@ -39,7 +40,8 @@ class DraftVerificationTokenSelector {
   std::span<const float> ProcessRow(DeviceSpan<float> logits, size_t current_length,
                                     std::span<const int32_t> prefix);
 
-  const Config::Search& search_;
+  const EffectiveTurnPolicy& policy_;
+  int eos_floor_;
   std::span<const int32_t> eos_token_ids_;
   LogitsPenaltyProcessor penalty_processor_;
   SampledCategorical sampling_scratch_;

@@ -65,11 +65,8 @@ class RequestPool:
 
     def admit(self, prompt: str):
         client_request = ClientRequest(prompt, self.tokenizer)
-        params = og.GeneratorParams(self.model)
-        params.set_search_options(
-            do_sample=False,
-            max_length=256,
-        )
+        request_options = og.RequestOptions()
+        request_options.set_max_session_tokens(256)
         messages = json.dumps(
             [
                 {"role": "system", "content": ""},
@@ -79,9 +76,11 @@ class RequestPool:
         tokens = self.tokenizer.encode(
             self.tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)
         )
-        request = self.engine.create_request(params)
+        request = self.engine.create_request(options=request_options)
         self.requests[request] = client_request
         turn_options = og.TurnOptions(request)
+        # Per-turn policy never carries over, so a turn that wants the top logit says so every time.
+        turn_options.set_do_sample(False)
         turn_options.set_max_generated_tokens(128)
         request.begin_turn(
             np.asarray(tokens, dtype=np.int32),

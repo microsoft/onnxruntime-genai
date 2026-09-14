@@ -426,6 +426,8 @@ struct Config {
         std::string position_ids{Defaults::PositionIdsName};
         std::string past_key_names{Defaults::PastKeyName};
         std::string past_value_names{Defaults::PastValueName};
+        std::string past_key_scale_names;
+        std::string past_value_scale_names;
         std::string past_names;  // When key/value pairs are combined
         std::string cross_past_key_names, cross_past_value_names;
         std::string past_key_values_length{Defaults::PastKeyValuesLengthName};
@@ -469,6 +471,8 @@ struct Config {
         std::string logits{Defaults::LogitsName};
         std::string present_key_names{Defaults::PresentKeyName};
         std::string present_value_names{Defaults::PresentValueName};
+        std::string present_key_scale_names;
+        std::string present_value_scale_names;
         std::string present_names;  // When key/value pairs are combined
         std::string output_cross_qk_names{Defaults::OutputCrossQKName};
         std::string rnn_states{Defaults::RnnStatesName};
@@ -533,6 +537,9 @@ struct Config {
       // The main model must be exported with this output exposed (include_hidden_states).
       std::string main_hidden_states{Defaults::HiddenStatesName};
 
+      // The head's paged cache is built from a projection of model.decoder. The head is always an
+      // unquantized full-attention layer: it owns no per-token scale caches, and the projection
+      // clears the target's scale name templates rather than letting the head inherit them.
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};
         std::string hidden_states{Defaults::HiddenStatesName};
@@ -550,12 +557,14 @@ struct Config {
       } outputs;
     } mtp;
 
-    // DFlash 2 block-drafter metadata. Unlike MTP the drafter is not decoder-shaped: it reads the
-    // main model's auxiliary hidden states, predicts a whole block of tokens at once, and returns
-    // a candidate lattice (top-k ids per slot plus the pairwise edge scores) that the engine walks
-    // greedily. The Engine drives its session directly rather than through a Model.
+    // DFlash 2/DSpark block-drafter metadata. Unlike MTP the drafter is not decoder-shaped: it
+    // reads the main model's auxiliary hidden states, predicts a whole block of tokens at once,
+    // and returns a candidate lattice that the Engine walks greedily. model.dspark is a config
+    // alias for this shared runtime.
     struct Dflash2 {
       std::string filename;  // e.g. "dflash2.onnx"
+      bool is_dspark{};      // True when parsed from the model.dspark alias.
+      std::optional<bool> configured_alias_is_dspark;
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
       std::vector<SharedInitializer> shared_initializers;
@@ -563,8 +572,8 @@ struct Config {
       int num_hidden_layers{};
       int num_key_value_heads{};
       int head_size{};
-      int block_size{};        // Query rows per request: the anchor token plus one mask per draft.
-      int num_draft_tokens{};  // block_size - 1
+      int block_size{};        // Query rows per request.
+      int num_draft_tokens{};  // DFlash 2: block_size - 1; DSpark: block_size.
       int selector_top_k{};
       int mask_token_id{};
       int sliding_window{-1};
@@ -585,6 +594,10 @@ struct Config {
         std::string attention_metadata{Defaults::AttentionMetadataName};
         std::string past_key_names{Defaults::PastKeyName};
         std::string past_value_names{Defaults::PastValueName};
+        // Parsed but not yet implemented: the block drafter owns its own unquantized K/V pool, so a
+        // non-empty value is rejected by ValidateDflash2ModelCompatibility rather than ignored.
+        std::string past_key_scale_names;
+        std::string past_value_scale_names;
       } inputs;
 
       struct Outputs {
@@ -592,6 +605,8 @@ struct Config {
         std::string scores{"draft_scores"};
         std::string present_key_names{Defaults::PresentKeyName};
         std::string present_value_names{Defaults::PresentValueName};
+        std::string present_key_scale_names;
+        std::string present_value_scale_names;
       } outputs;
     } dflash2;
 
@@ -634,8 +649,9 @@ struct Config {
 
   struct Engine {
     struct DynamicBatching {
-      size_t block_size{256};                       // Total number of slots per block.
-      std::optional<size_t> num_blocks;             // Total number of blocks per layer.
+      size_t block_size{256};  // Total number of slots per block.
+      // Baseline target blocks; Engine auxiliary caches share the equivalent byte budget.
+      std::optional<size_t> num_blocks;
       std::optional<float> gpu_utilization_factor;  // Fraction of free GPU memory to use for key-value cache.
       size_t max_batch_size{16};                    // Maximum batch size for dynamically batching requests.
       size_t max_scheduled_tokens{2048};            // Maximum tokens in one dynamically batched model run.

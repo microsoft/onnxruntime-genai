@@ -118,16 +118,20 @@ def validate_output(output):
 
 def run_once(engine, model, tokenizer, prompt_tokens, max_length, guided):
     setup_started = time.perf_counter()
-    params = og.GeneratorParams(model)
-    params.set_search_options(do_sample=False, max_length=max_length)
+    request_options = og.RequestOptions()
+    request_options.set_max_session_tokens(max_length)
+    request = engine.create_request(options=request_options)
+    turn_options = og.TurnOptions(request)
+    # Benchmark output must be deterministic, so every turn selects the top logit explicitly rather
+    # than inheriting whatever the model's search defaults are.
+    turn_options.set_do_sample(False)
     if guided:
-        params.set_guidance("lark_grammar", f"start: %json {json.dumps(SCHEMA)}\n")
-    request = engine.create_request(params)
+        turn_options.set_guidance("lark_grammar", f"start: %json {json.dumps(SCHEMA)}\n")
     setup_ms = (time.perf_counter() - setup_started) * 1000
 
     try:
         admission_started = time.perf_counter()
-        request.begin_turn(np.asarray(prompt_tokens, dtype=np.int32))
+        request.begin_turn(np.asarray(prompt_tokens, dtype=np.int32), turn_options)
         admission_ms = (time.perf_counter() - admission_started) * 1000
         output, metrics = generate(engine, request, tokenizer, setup_started)
     finally:
