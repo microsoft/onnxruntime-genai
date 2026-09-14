@@ -345,6 +345,100 @@ struct Config {
       std::optional<RunOptions> run_options;
     } vad;
 
+    struct Moonshine {
+      std::string frontend_filename;
+      std::string encoder_filename;
+      std::string adapter_filename;
+      std::string cross_kv_filename;
+      std::string decoder_kv_filename;
+
+      int sample_buffer_size{};
+      int conv1_buffer_size{};
+      int conv2_buffer_size{};
+
+      // Encoder sliding-window geometry.
+      int total_lookahead{};
+      int left_context_frames{};
+
+      // Decoder token-emission cap & frame rate.
+      int max_seq_len{};
+      float tokens_per_second{};
+      float seconds_per_memory_frame{};
+
+      // Segmentation limits (hard cap + VAD-silence min duration), in memory frames.
+      int max_segment_memory_frames{};
+      int min_segment_memory_frames{};
+
+      // Optional per-submodel ORT graph I/O name overrides. If a field is left
+      // empty in genai_config.json, the runtime falls back to the built-in
+      // Moonshine default (see MoonshineConfig::PopulateFromConfig). This
+      // lets a future model rename an input/output without a rebuild.
+      struct Frontend {
+        struct Inputs {
+          std::string audio_chunk;
+          std::string sample_buffer;
+          std::string sample_len;
+          std::string conv1_buffer;
+          std::string conv2_buffer;
+          std::string frame_count;
+        } inputs;
+        struct Outputs {
+          std::string features;
+          std::string sample_buffer;
+          std::string sample_len;
+          std::string conv1_buffer;
+          std::string conv2_buffer;
+          std::string frame_count;
+        } outputs;
+      } frontend;
+
+      struct Encoder {
+        struct Inputs {
+          std::string features;
+        } inputs;
+        struct Outputs {
+          std::string encoded;
+        } outputs;
+      } encoder;
+
+      struct Adapter {
+        struct Inputs {
+          std::string encoded;
+          std::string pos_offset;
+        } inputs;
+        struct Outputs {
+          std::string memory;
+        } outputs;
+      } adapter;
+
+      struct CrossKv {
+        struct Inputs {
+          std::string memory;
+        } inputs;
+        struct Outputs {
+          std::string k_cross;
+          std::string v_cross;
+        } outputs;
+      } cross_kv;
+
+      struct DecoderKv {
+        struct Inputs {
+          std::string token;
+          std::string k_self;
+          std::string v_self;
+          std::string k_cross;
+          std::string v_cross;
+        } inputs;
+        struct Outputs {
+          std::string logits;
+          std::string k_self;
+          std::string v_self;
+          std::string k_cross;
+          std::string v_cross;
+        } outputs;
+      } decoder_kv;
+    } moonshine;
+
     struct SharedInitializer {
       std::string name;
       std::string data_file;
