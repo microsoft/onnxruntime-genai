@@ -1163,8 +1163,13 @@ uint64_t Engine::BeginTurn(const std::shared_ptr<Request>& request,
     const bool restartable_canceled_turn =
         request->IsRestartableCanceledTurn() &&
         !cache_manager_->IsResident(request);
-    ValidateRequestCanContinue(request, restartable_canceled_turn);
-    if (!restartable_canceled_turn) {
+    const bool replay_rewound_request =
+        request->NeedsReplayAfterRewind() &&
+        !cache_manager_->IsResident(request);
+    const bool allow_nonresident =
+        restartable_canceled_turn || replay_rewound_request;
+    ValidateRequestCanContinue(request, allow_nonresident);
+    if (!allow_nonresident) {
       request->ValidateContinuousDecodingSupport();
     }
   }
@@ -1267,6 +1272,65 @@ bool Engine::CancelRequest(const std::shared_ptr<Request>& request, uint64_t tur
     pending_events_.push_back(std::move(terminal));
   }
   return true;
+}
+
+void Engine::RewindRequestToStartOfTurn(
+    const std::shared_ptr<Request>& request,
+    uint64_t turn_id) {
+  ValidateOwnerThread();
+  CompleteNonresidentClosedRequests();
+  ReclaimAbandonedRequests();
+  if (health_ == EngineHealth::Unhealthy) {
+    std::rethrow_exception(fatal_error_);
+  }
+  if (!request || !request->BelongsTo(*this)) {
+    throw std::runtime_error(
+        "Cannot rewind a request that does not belong to this engine.");
+  }
+  if (!IsTurnComplete(request->Status())) {
+    if (IsClosed(request->Status())) {
+      throw std::runtime_error("Cannot rewind a closed request.");
+    }
+    throw std::runtime_error(
+        "Request rewind is only valid after the current turn is complete.");
+  }
+  if (request->FinishReason() == GenerationFinishReason::Failed) {
+    throw std::runtime_error(
+        "Cannot rewind a Request whose current turn failed.");
+  }
+  if (std::find_if(
+          pending_events_.begin() +
+              static_cast<ptrdiff_t>(pending_event_index_),
+          pending_events_.end(),
+          [&request](const EngineEvent& event) {
+            return event.request == request;
+          }) != pending_events_.end()) {
+    throw std::runtime_error(
+        "Cannot rewind a request while an Engine event is pending; "
+        "call Engine::Run() to drain the event before rewinding.");
+  }
+
+  const bool resident = cache_manager_->IsResident(request);
+  if (!resident && !request->IsRestartableCanceledTurn() &&
+      !request->NeedsReplayAfterRewind()) {
+    throw std::runtime_error(
+        "Cannot rewind a request whose model state is no longer resident.");
+  }
+
+  // Every fallible preparation and temporary allocation completes before committed target-cache
+  // ownership changes. The cache managers validate their complete release up front, prepare any
+  // temporary containers, and then publish the ownership change through no-throw operations.
+  cache_manager_->ValidateRewind(request);
+  auto rewind_state =
+      request->PrepareRewindToStartOfTurn(turn_id);
+  // Auxiliary decoders mirror a generated suffix that is no longer authoritative after rewind.
+  // Release them before the target cache so any fallible cleanup leaves target ownership intact.
+  CloseMtpRequest(request);
+  if (dflash2_drafter_) {
+    dflash2_drafter_->Release(request.get());
+  }
+  cache_manager_->ReleaseForRewind(request);
+  request->CommitRewind(std::move(rewind_state));
 }
 
 void Engine::CloseRequest(const std::shared_ptr<Request>& request) {
@@ -1440,6 +1504,9 @@ void Engine::ValidateRequestCanContinue(
   }
   if (!request->BelongsTo(*this)) {
     throw std::runtime_error("Cannot continue a request that does not belong to this engine.");
+  }
+  if (request->FinishReason() == GenerationFinishReason::Failed) {
+    throw std::runtime_error("Cannot continue a Request whose current turn failed.");
   }
 
   if (!allow_nonresident && !cache_manager_->IsResident(request)) {
