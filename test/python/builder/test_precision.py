@@ -749,16 +749,21 @@ def test_paged_attention_normalizes_engine_options(monkeypatch):
         "use_paged_attention": "true",
         "paged_block_size": "512",
         "paged_chunk_size": "64",
-        "num_blocks": "1024",
         "gpu_utilization_factor": "0.75",
         "max_batch_size": "32",
     }
     _run_check_extra_options(monkeypatch, extra_options, precision="bf16", execution_provider="cuda")
     assert extra_options["paged_block_size"] == 512
     assert extra_options["paged_chunk_size"] == 64
-    assert extra_options["num_blocks"] == 1024
     assert extra_options["gpu_utilization_factor"] == 0.75
     assert extra_options["max_batch_size"] == 32
+
+    fixed_cache_options = {
+        "use_paged_attention": "true",
+        "num_blocks": "1024",
+    }
+    _run_check_extra_options(monkeypatch, fixed_cache_options, precision="bf16", execution_provider="cuda")
+    assert fixed_cache_options["num_blocks"] == 1024
 
 
 @pytest.mark.parametrize(
