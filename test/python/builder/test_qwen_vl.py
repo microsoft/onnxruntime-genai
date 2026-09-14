@@ -267,7 +267,8 @@ def test_qwen35_paged_mrotary_embedding_runs_with_merged_ort_abi(tmp_path):
     graph.inputs.append(model.make_value("cos_cache", ir.DataType.FLOAT, [4, 4]))
     graph.inputs.append(model.make_value("sin_cache", ir.DataType.FLOAT, [4, 4]))
 
-    model.make_mrotary_embedding(
+    TRT_RTX.make_mrotary_embedding(
+        model,
         "/model/layers.0/attn/q_rotary/MRotaryEmbedding",
         "q",
         "q_rotated",
@@ -284,8 +285,8 @@ def test_qwen35_paged_mrotary_embedding_runs_with_merged_ort_abi(tmp_path):
     try:
         session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
     except Exception as error:
-        if "MRotaryEmbedding(-1) is not a registered function/op" in str(error):
-            pytest.skip("Installed ONNX Runtime does not include MRotaryEmbedding")
+        if "RotaryEmbedding(-1) is not a registered function/op" in str(error):
+            pytest.skip("Installed ONNX Runtime does not include RotaryEmbedding")
         raise
 
     q = np.arange(96, dtype=np.float32).reshape(6, model.hidden_size)

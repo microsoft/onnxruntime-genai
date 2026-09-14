@@ -262,7 +262,10 @@ class TRT_RTX:
         rotary_embedding_dim = self.rope_attrs["rotary_embedding_dim"]
         rotary_dim = rotary_embedding_dim or self.head_size
         rotary_half_dim = rotary_dim // 2
-        cache_shape = ["batch_size", "sequence_length", rotary_half_dim]
+        hidden_size = self.head_size * num_heads
+        is_paged = self.use_paged_attention
+        position_shape = ["num_tokens"] if is_paged else ["batch_size", "sequence_length"]
+        cache_shape = [*position_shape, rotary_half_dim]
 
         def make_axis_cache(cache_name, cache_kind, axis):
             gather_position_name = f"{name}/{cache_kind}/position_ids_dim{axis}/Gather"
@@ -270,7 +273,7 @@ class TRT_RTX:
                 gather_position_name,
                 [position_ids, f"/model/constants/INT64/[{axis}]"],
                 ir.DataType.INT64,
-                [1, "batch_size", "sequence_length"],
+                [1, *position_shape],
                 axis=0,
             )
             squeeze_position_name = f"{name}/{cache_kind}/position_ids_dim{axis}/Squeeze"
@@ -278,7 +281,7 @@ class TRT_RTX:
                 squeeze_position_name,
                 [f"{gather_position_name}/output_0", "/model/constants/INT64/[0]"],
                 ir.DataType.INT64,
-                ["batch_size", "sequence_length"],
+                position_shape,
             )
 
             gather_cache_name = f"{name}/{cache_kind}/dim{axis}/Gather"
@@ -310,7 +313,7 @@ class TRT_RTX:
                             "/model/constants/INT64/[-1]",
                         ],
                         dtype,
-                        ["batch_size", "sequence_length", section],
+                        [*position_shape, section],
                     )
                     chunks.append(f"{slice_name}/output_0")
                     start += section
@@ -353,31 +356,99 @@ class TRT_RTX:
         flat_sin = make_mixed_cache(sin_cache_name, "sin")
 
         shape_name = f"{name}/position_ids/Shape"
-        self.make_shape(shape_name, position_ids, [3])
-        batch_seq_shape_name = f"{name}/position_ids/batch_seq/Slice"
-        self.make_slice(
-            batch_seq_shape_name,
-            [f"{shape_name}/output_0", "/model/constants/INT64/[1]", "/model/constants/INT64/[3]", "/model/constants/INT64/[0]"],
-            ir.DataType.INT64,
-            [2],
-        )
-        batch_name = f"{name}/position_ids/batch/Gather"
-        self.make_gather(batch_name, [f"{shape_name}/output_0", "/model/constants/INT64/1"], ir.DataType.INT64, [], axis=0)
-        sequence_name = f"{name}/position_ids/sequence/Gather"
-        self.make_gather(sequence_name, [f"{shape_name}/output_0", "/model/constants/INT64/2"], ir.DataType.INT64, [], axis=0)
-        total_name = f"{name}/position_ids/total/Mul"
-        self.make_mul(total_name, [f"{batch_name}/output_0", f"{sequence_name}/output_0"], ir.DataType.INT64, [])
-        range_name = f"{name}/position_ids/Range"
-        self.make_range(range_name, ["/model/constants/INT64/0", f"{total_name}/output_0", "/model/constants/INT64/1"], ir.DataType.INT64, ["total_token_count"])
-        flat_position_name = f"{name}/position_ids/Reshape"
-        self.make_reshape(flat_position_name, [f"{range_name}/output_0", f"{batch_seq_shape_name}/output_0"], ir.DataType.INT64, ["batch_size", "sequence_length"])
+        self.make_shape(shape_name, position_ids, [2] if is_paged else [3])
+        if is_paged:
+            token_count_name = f"{name}/position_ids/token_count/Gather"
+            self.make_gather(
+                token_count_name,
+                [f"{shape_name}/output_0", "/model/constants/INT64/1"],
+                ir.DataType.INT64,
+                [],
+                axis=0,
+            )
+            token_shape_name = f"{name}/position_ids/token_count/Slice"
+            self.make_slice(
+                token_shape_name,
+                [
+                    f"{shape_name}/output_0",
+                    "/model/constants/INT64/[1]",
+                    "/model/constants/INT64/[2]",
+                    "/model/constants/INT64/[0]",
+                ],
+                ir.DataType.INT64,
+                [1],
+            )
+            batch_seq_shape_name = f"{name}/position_ids/batch_seq/Concat"
+            self.make_concat(
+                batch_seq_shape_name,
+                ["/model/constants/INT64/[1]", f"{token_shape_name}/output_0"],
+                ir.DataType.INT64,
+                [2],
+            )
+            total_name = token_count_name
+            rotary_position_shape = [1, "num_tokens"]
+            input_shape = [1, "num_tokens", num_heads, self.head_size]
+            rotary_shape = [1, num_heads, "num_tokens", self.head_size]
+            output_shape = ["num_tokens", hidden_size]
+            input_reshape_shape = f"/model/constants/INT64/[1, -1, {num_heads}, {self.head_size}]"
+            output_reshape_shape = f"/model/constants/INT64/[-1, {hidden_size}]"
+        else:
+            batch_seq_shape_name = f"{name}/position_ids/batch_seq/Slice"
+            self.make_slice(
+                batch_seq_shape_name,
+                [
+                    f"{shape_name}/output_0",
+                    "/model/constants/INT64/[1]",
+                    "/model/constants/INT64/[3]",
+                    "/model/constants/INT64/[0]",
+                ],
+                ir.DataType.INT64,
+                [2],
+            )
+            batch_name = f"{name}/position_ids/batch/Gather"
+            self.make_gather(
+                batch_name,
+                [f"{shape_name}/output_0", "/model/constants/INT64/1"],
+                ir.DataType.INT64,
+                [],
+                axis=0,
+            )
+            sequence_name = f"{name}/position_ids/sequence/Gather"
+            self.make_gather(
+                sequence_name,
+                [f"{shape_name}/output_0", "/model/constants/INT64/2"],
+                ir.DataType.INT64,
+                [],
+                axis=0,
+            )
+            total_name = f"{name}/position_ids/total/Mul"
+            self.make_mul(total_name, [f"{batch_name}/output_0", f"{sequence_name}/output_0"], ir.DataType.INT64, [])
+            rotary_position_shape = ["batch_size", "sequence_length"]
+            input_shape = ["batch_size", "sequence_length", num_heads, self.head_size]
+            rotary_shape = ["batch_size", num_heads, "sequence_length", self.head_size]
+            output_shape = ["batch_size", "sequence_length", hidden_size]
+            input_reshape_shape = f"/model/constants/INT64/[0, 0, {num_heads}, {self.head_size}]"
+            output_reshape_shape = f"/model/constants/INT64/[0, 0, {hidden_size}]"
 
-        input_shape = ["batch_size", "sequence_length", num_heads, self.head_size]
-        rotary_shape = ["batch_size", num_heads, "sequence_length", self.head_size]
+        range_name = f"{name}/position_ids/Range"
+        self.make_range(
+            range_name,
+            ["/model/constants/INT64/0", f"{total_name}/output_0", "/model/constants/INT64/1"],
+            ir.DataType.INT64,
+            ["total_token_count"],
+        )
+        flat_position_name = f"{name}/position_ids/Reshape"
+        self.make_reshape(
+            flat_position_name,
+            [f"{range_name}/output_0", f"{batch_seq_shape_name}/output_0"],
+            ir.DataType.INT64,
+            rotary_position_shape,
+        )
+
         input_reshape_name = f"{name}/input/Reshape"
         self.make_reshape(
             input_reshape_name,
-            [root_input, f"/model/constants/INT64/[0, 0, {num_heads}, {self.head_size}]"],
+            [root_input, input_reshape_shape],
             dtype,
             input_shape,
         )
@@ -400,15 +471,13 @@ class TRT_RTX:
 
         output_transpose_name = f"{name}/output/Transpose"
         self.make_transpose(output_transpose_name, rotary_output, dtype, input_shape, perm=[0, 2, 1, 3])
-        output_shape = ["batch_size", "sequence_length", self.head_size * num_heads]
         self.make_node(
             "Reshape",
-            inputs=[f"{output_transpose_name}/output_0", f"/model/constants/INT64/[0, 0, {self.head_size * num_heads}]"],
+            inputs=[f"{output_transpose_name}/output_0", output_reshape_shape],
             outputs=[output],
             name=f"{name}/output/Reshape",
         )
         self.make_value(output, dtype, shape=output_shape)
-
     def make_linear_attention(self, name, **kwargs):
         inputs = [
             kwargs["q_path"],
