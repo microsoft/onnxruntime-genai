@@ -34,6 +34,13 @@ Model = base_module.Model
 Qwen35TextModel = qwen_module.Qwen35TextModel
 
 
+def test_prequantized_linear_attention_gate_is_rejected():
+    model = Qwen35TextModel.__new__(Qwen35TextModel)
+
+    with pytest.raises(ValueError, match="must remain dense"):
+        model.require_dense_linear_attention_gate(SimpleNamespace(qweight=object()), "/linear_attn/a_proj/MatMul")
+
+
 class _NoGenerationConfig:
     @staticmethod
     def from_pretrained(*args, **kwargs):
@@ -68,6 +75,7 @@ def _make_config_model(model_type, layer_types=None, use_paged_attention=True):
     model.vocab_size = 248320
     model.window_size = None
     model.eps_with_windowed_kv_cache = {"cuda"}
+    model.matmul_attrs = {"weights_prepacked": 0}
     model.attention_attrs = {"paged_block_size": 256}
     model.input_names = {
         "input_ids": "input_ids",

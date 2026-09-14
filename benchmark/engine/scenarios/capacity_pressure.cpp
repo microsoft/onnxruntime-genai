@@ -79,7 +79,8 @@ ScenarioExecutionOutput CapacityPressureScenario::Execute(const ScenarioConfig& 
 
   for (int run = 0; run < total_runs; ++run) {
     const bool is_warmup = run < config.warmup_runs;
-    std::vector<std::unique_ptr<OgaGeneratorParams>> params;
+    std::vector<std::unique_ptr<OgaRequestOptions>> request_options;
+    std::vector<std::unique_ptr<OgaTurnOptions>> turn_options;
     std::vector<std::unique_ptr<OgaRequest>> requests(
         static_cast<size_t>(config.concurrency));
     std::vector<std::vector<int32_t>> request_tokens(static_cast<size_t>(config.concurrency));
@@ -88,7 +89,8 @@ ScenarioExecutionOutput CapacityPressureScenario::Execute(const ScenarioConfig& 
     std::vector<bool> admitted(static_cast<size_t>(config.concurrency), false);
     std::vector<bool> rejected(static_cast<size_t>(config.concurrency), false);
     std::unordered_map<const OgaRequest*, size_t> request_indices;
-    params.reserve(static_cast<size_t>(config.concurrency));
+    request_options.reserve(static_cast<size_t>(config.concurrency));
+    turn_options.reserve(static_cast<size_t>(config.concurrency));
 
     const auto run_start = std::chrono::steady_clock::now();
     int admitted_count = 0;
@@ -103,14 +105,19 @@ ScenarioExecutionOutput CapacityPressureScenario::Execute(const ScenarioConfig& 
       const auto& prompt = pressure_prompts[request_index];
       const size_t prompt_count = prompt->SequenceCount(0);
       prompt_counts[request_index] = prompt_count;
-      params.emplace_back(OgaGeneratorParams::Create(*engineResources.model));
-      params.back()->SetSearchOption("max_length", static_cast<double>(prompt_count + config.generation_tokens));
-      params.back()->SetSearchOption("random_seed", kRandomSeed);
+      request_options.emplace_back(OgaRequestOptions::Create());
+      request_options.back()->SetMaxSessionTokens(prompt_count + config.generation_tokens);
       request_tokens[request_index].assign(prompt->SequenceData(0), prompt->SequenceData(0) + prompt_count);
 
       try {
-        auto request = engineResources.engine->CreateRequest(*params.back());
-        request->BeginTurn(prompt->SequenceData(0), prompt_count);
+        auto request =
+            engineResources.engine->CreateRequest(request_options.back().get());
+        turn_options.push_back(request->CreateTurnOptions());
+        if (engineResources.uses_dynamic_batching) {
+          turn_options.back()->SetSeed(kRandomSeed);
+        }
+        request->BeginTurn(prompt->SequenceData(0), prompt_count,
+                           turn_options.back().get());
         request_indices.emplace(request.get(), request_index);
         requests[request_index] = std::move(request);
       } catch (const std::exception& ex) {

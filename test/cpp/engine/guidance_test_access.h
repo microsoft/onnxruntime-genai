@@ -27,6 +27,13 @@ struct GuidanceProcessorTestAccess {
   static bool MaskDirty(const GuidanceLogitsProcessor& processor) {
     return processor.mask_dirty_;
   }
+
+  static bool MaskAllowsOnlyTokens(
+      std::span<const uint32_t> mask, size_t vocab_size,
+      std::span<const int> tokens) {
+    return GuidanceLogitsProcessor::MaskAllowsOnlyTokens(
+        mask, vocab_size, tokens);
+  }
 };
 #endif
 

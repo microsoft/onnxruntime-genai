@@ -7,6 +7,7 @@
 #include <cstring>  // for memcmp
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <numeric>
 #include <iostream>
 #include <optional>
@@ -947,10 +948,10 @@ TEST(CAPITests, SetTerminate) {
 
 TEST(CAPITests, EngineRequestTurnAndEventContracts) {
   auto model = OgaModel::Create(MODEL_PATH "engine/synthetic-paged");
-  auto params = OgaGeneratorParams::Create(*model);
-  params->SetSearchOption("max_length", 16);
   auto engine = OgaEngine::Create(*model);
-  auto request = engine->CreateRequest(*params);
+  auto session_options = OgaRequestOptions::Create();
+  session_options->SetMaxSessionTokens(16);
+  auto request = engine->CreateRequest(session_options.get());
   const std::array<int32_t, 3> input_tokens{2, 3, 4};
 
   auto turn_options = request->CreateTurnOptions();
@@ -979,25 +980,30 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
 
   auto request_options = OgaRequestOptions::Create();
   request_options->SetMaxSessionTokens(8);
-  auto options_request = engine->CreateRequest(*params, request_options.get());
+  auto options_request = engine->CreateRequest(request_options.get());
   options_request->Close();
 
+  // Omitting the option (or clearing it with zero) uses the model-configured ceiling.
+  request_options->SetMaxSessionTokens(0);
+  auto default_limit_request = engine->CreateRequest(request_options.get());
+  default_limit_request->Close();
+
   auto excessive_request_options = OgaRequestOptions::Create();
-  excessive_request_options->SetMaxSessionTokens(17);
+  excessive_request_options->SetMaxSessionTokens(129);
   try {
     static_cast<void>(
-        engine->CreateRequest(*params, excessive_request_options.get()));
-    FAIL() << "Expected max_session_tokens above max_length to fail.";
+        engine->CreateRequest(excessive_request_options.get()));
+    FAIL() << "Expected max_session_tokens above the model ceiling to fail.";
   } catch (const std::runtime_error& error) {
     EXPECT_NE(
-        std::string(error.what()).find("max_total_tokens (17)"),
+        std::string(error.what()).find("max_session_tokens (129)"),
         std::string::npos);
     EXPECT_NE(
-        std::string(error.what()).find("max_length (16)"),
+        std::string(error.what()).find("search.max_length (128)"),
         std::string::npos);
   }
 
-  auto owner_thread_request = engine->CreateRequest(*params);
+  auto owner_thread_request = engine->CreateRequest();
   auto owner_thread_options = owner_thread_request->CreateTurnOptions();
   OgaResult* create_options_result{};
   OgaResult* set_options_result{};
@@ -1019,7 +1025,7 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
             std::string::npos);
   owner_thread_request->Close();
 
-  auto validation_request = engine->CreateRequest(*params);
+  auto validation_request = engine->CreateRequest();
   auto validation_options = validation_request->CreateTurnOptions();
 
   std::unique_ptr<OgaResult> null_stop_strings_result{
@@ -1032,14 +1038,14 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
 
   OgaRequest* abandoned_created{};
   OgaCheckResult(OgaEngineCreateRequest(
-      engine.get(), params.get(), nullptr, &abandoned_created));
+      engine.get(), nullptr, &abandoned_created));
   ASSERT_NE(abandoned_created, nullptr);
   OgaDestroyRequest(abandoned_created);
   EXPECT_FALSE(engine->HasPendingRequests());
 
   OgaRequest* abandoned_queued{};
   OgaCheckResult(OgaEngineCreateRequest(
-      engine.get(), params.get(), nullptr, &abandoned_queued));
+      engine.get(), nullptr, &abandoned_queued));
   ASSERT_NE(abandoned_queued, nullptr);
   uint64_t abandoned_turn_id{};
   OgaCheckResult(OgaRequestBeginTurn(
@@ -1055,16 +1061,193 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
   EXPECT_EQ(idle_buffer->Get(0), nullptr);
 }
 
+TEST(CAPITests, EngineTurnOptionsGenerationPolicy) {
+  auto model = OgaModel::Create(MODEL_PATH "engine/synthetic-paged");
+  auto engine = OgaEngine::Create(*model);
+  const std::array<int32_t, 3> input_tokens{2, 3, 4};
+
+  const auto run_turn = [&](OgaRequest& request, const OgaTurnOptions* options,
+                            std::span<const int32_t> tokens) {
+    request.BeginTurn(tokens, options);
+    std::vector<int32_t> generated;
+    auto buffer = engine->CreateEventBuffer(8);
+    for (int step = 0; step < 64; ++step) {
+      const size_t count = engine->Run(*buffer);
+      bool finished = false;
+      for (size_t i = 0; i < count; ++i) {
+        const auto* event = buffer->Get(i);
+        if (event->Flags() & OgaEngineEventFlag_Token) {
+          generated.push_back(event->Token());
+        }
+        finished = finished || (event->Flags() & OgaEngineEventFlag_TurnFinished) != 0;
+      }
+      if (finished) {
+        break;
+      }
+    }
+    return generated;
+  };
+
+  // Every scalar is accepted, and the same seed on the same prompt reproduces exactly.
+  struct SampledRequest {
+    std::unique_ptr<OgaRequest> request;
+    std::unique_ptr<OgaTurnOptions> options;
+  };
+  const auto sampled_request = [&](uint64_t seed) {
+    SampledRequest sampled{engine->CreateRequest(), nullptr};
+    sampled.options = sampled.request->CreateTurnOptions();
+    sampled.options->SetDoSample(true);
+    sampled.options->SetTemperature(0.8f);
+    sampled.options->SetTopP(0.9f);
+    sampled.options->SetTopK(4);
+    sampled.options->SetRepetitionPenalty(1.1f);
+    sampled.options->SetNoRepeatNgramSize(0);
+    sampled.options->SetMinGeneratedTokens(2);
+    sampled.options->SetMaxGeneratedTokens(4);
+    sampled.options->SetSeed(seed);
+    return sampled;
+  };
+
+  {
+    // Zero is an ordinary deterministic seed.
+    auto first = sampled_request(0);
+    const auto reference =
+        run_turn(*first.request, first.options.get(), input_tokens);
+    EXPECT_GE(reference.size(), 2u);
+    EXPECT_LE(reference.size(), 4u);
+
+    auto second = sampled_request(0);
+    EXPECT_EQ(run_turn(*second.request, second.options.get(), input_tokens),
+              reference);
+
+    // Reset removes every option, so the next turn is plain model-default generation.
+    auto third = sampled_request(0);
+    third.options->Reset();
+    third.options->SetMaxGeneratedTokens(4);
+    const auto defaults =
+        run_turn(*third.request, third.options.get(), input_tokens);
+    EXPECT_EQ(defaults.size(), 4u);
+
+    // ClearSeed is always valid and simply removes the pending reseed.
+    EXPECT_NO_THROW(first.options->ClearSeed());
+
+    first.request->Close();
+    second.request->Close();
+    third.request->Close();
+  }
+
+  // An explicitly set scalar that contradicts the resolved greedy policy is rejected at admission,
+  // before the Request is mutated, rather than silently taking the top logit.
+  {
+    auto request = engine->CreateRequest();
+    auto turn_options = request->CreateTurnOptions();
+    turn_options->SetDoSample(false);
+    turn_options->SetTopK(40);
+    try {
+      request->BeginTurn(input_tokens, turn_options.get());
+      FAIL() << "Expected a contradictory sampling scalar to be rejected.";
+    } catch (const std::runtime_error& error) {
+      EXPECT_NE(std::string(error.what()).find("contradict it: top_k"), std::string::npos);
+    }
+
+    // top_k == 1 alongside do_sample == false says the same thing twice, so it is accepted and the
+    // turn selects the top logit.
+    turn_options->SetTopK(1);
+    turn_options->SetMaxGeneratedTokens(1);
+    EXPECT_EQ(request->BeginTurn(input_tokens, turn_options.get()), 1u);
+    request->Close();
+  }
+
+  // Guidance setters validate the request shape immediately and leave the prior configuration
+  // untouched when they reject it.
+  {
+    auto request = engine->CreateRequest();
+    auto turn_options = request->CreateTurnOptions();
+    std::unique_ptr<OgaResult> incomplete{
+        OgaTurnOptionsSetGuidance(turn_options.get(), "regex", "")};
+    ASSERT_NE(incomplete, nullptr);
+    std::unique_ptr<OgaResult> unsupported{
+        OgaTurnOptionsSetGuidance(turn_options.get(), "xml_schema", "<x/>")};
+    ASSERT_NE(unsupported, nullptr);
+    EXPECT_NE(std::string(unsupported->GetError()).find("Unsupported guidance type"),
+              std::string::npos);
+    // Clearing guidance is always valid and makes the turn unguided.
+    EXPECT_NO_THROW(turn_options->ClearGuidance());
+    turn_options->SetMaxGeneratedTokens(1);
+    EXPECT_EQ(request->BeginTurn(input_tokens, turn_options.get()), 1u);
+    request->Close();
+  }
+}
+
+// A model whose own search defaults keep every turn greedy silently overrides an explicit
+// do_sample. The caller cannot see those defaults through the options handle, so admission rejects
+// the turn and names the model-supplied cause instead of quietly selecting the top logit. One
+// representative model default is enough here; the full matrix of greedy-keeping defaults is
+// covered by the core turn-policy tests and by the Python surface.
+TEST(CAPITests, EngineTurnOptionsRejectDoSampleUnderModelGreedyDefaults) {
+  const std::array<int32_t, 3> input_tokens{2, 3, 4};
+
+  auto config = OgaConfig::Create(MODEL_PATH "engine/synthetic-paged");
+  config->Overlay(R"({"search": {"top_k": 1}})");
+  auto model = OgaModel::Create(*config);
+  auto engine = OgaEngine::Create(*model);
+  auto request = engine->CreateRequest();
+  auto turn_options = request->CreateTurnOptions();
+  turn_options->SetDoSample(true);
+  turn_options->SetMaxGeneratedTokens(2);
+  try {
+    request->BeginTurn(input_tokens, turn_options.get());
+    FAIL() << "Expected an explicit do_sample to be rejected.";
+  } catch (const std::runtime_error& error) {
+    const std::string message = error.what();
+    EXPECT_NE(message.find("do_sample=true"), std::string::npos) << message;
+    EXPECT_NE(message.find("search.top_k = 1"), std::string::npos) << message;
+  }
+
+  // Nothing was mutated, so overriding the field the message names admits the same Request.
+  turn_options->SetTopK(4);
+  turn_options->SetTemperature(0.8f);
+  EXPECT_EQ(request->BeginTurn(input_tokens, turn_options.get()), 1u);
+  request->Close();
+}
+
+// A model configured for beam search is rejected when the Request is created, rather than silently
+// decoding a single beam. The message names the overlay route, so this test takes it.
+TEST(CAPITests, EngineCreateRequestRejectsModelBeamSearch) {
+  auto config = OgaConfig::Create(MODEL_PATH "engine/synthetic-paged");
+  config->Overlay(R"({"search": {"num_beams": 4}})");
+  auto model = OgaModel::Create(*config);
+  auto engine = OgaEngine::Create(*model);
+
+  try {
+    static_cast<void>(engine->CreateRequest());
+    FAIL() << "Expected a model-configured num_beams != 1 to be rejected.";
+  } catch (const std::runtime_error& error) {
+    const std::string message = error.what();
+    EXPECT_NE(message.find("search.num_beams"), std::string::npos) << message;
+    EXPECT_NE(message.find("overlay"), std::string::npos) << message;
+  }
+
+  auto cleared_config = OgaConfig::Create(MODEL_PATH "engine/synthetic-paged");
+  cleared_config->Overlay(R"({"search": {"num_beams": 4}})");
+  cleared_config->Overlay(R"({"search": {"num_beams": 1}})");
+  auto cleared_model = OgaModel::Create(*cleared_config);
+  auto cleared_engine = OgaEngine::Create(*cleared_model);
+  auto request = cleared_engine->CreateRequest();
+  auto turn_options = request->CreateTurnOptions();
+  turn_options->SetMaxGeneratedTokens(1);
+  EXPECT_EQ(request->BeginTurn(std::array<int32_t, 3>{2, 3, 4}, turn_options.get()), 1u);
+  request->Close();
+}
+
 TEST(CAPITests, EngineTurnOptionsStopStrings) {
   auto model = OgaModel::Create(MODEL_PATH "engine/synthetic-paged");
-  auto params = OgaGeneratorParams::Create(*model);
-  params->SetSearchOption("max_length", 16);
   auto engine = OgaEngine::Create(*model);
   const std::array<int32_t, 3> input_tokens{2, 3, 4};
 
   // An empty array is a valid configuration: it clears/disables stop strings rather than throwing.
   {
-    auto request = engine->CreateRequest(*params);
+    auto request = engine->CreateRequest();
     auto turn_options = request->CreateTurnOptions();
     auto empty = OgaStringArray::Create();
     EXPECT_NO_THROW(turn_options->SetStopStrings(*empty));
@@ -1074,7 +1257,7 @@ TEST(CAPITests, EngineTurnOptionsStopStrings) {
   // Bounds and UTF-8 validation happen immediately, at set time, using the same contract
   // StopStringMatcher enforces -- not deferred to the next BeginTurn.
   {
-    auto request = engine->CreateRequest(*params);
+    auto request = engine->CreateRequest();
     auto turn_options = request->CreateTurnOptions();
     auto invalid_entry = OgaStringArray::Create();
     invalid_entry->Add("");
@@ -1120,7 +1303,7 @@ TEST(CAPITests, EngineTurnOptionsStopStrings) {
   // Reusing and destroying the array after SetStopStrings returns cannot affect the options: the
   // strings are copied immediately.
   {
-    auto request = engine->CreateRequest(*params);
+    auto request = engine->CreateRequest();
     auto turn_options = request->CreateTurnOptions();
     {
       auto transient = OgaStringArray::Create();
@@ -1142,7 +1325,7 @@ TEST(CAPITests, EngineTurnOptionsStopStrings) {
   // A stop-enabled turn is not rejected just because this dynamic-batching Engine could support
   // speculative draft verification: only static batching and an active draft proposal reject it.
   {
-    auto request = engine->CreateRequest(*params);
+    auto request = engine->CreateRequest();
     auto turn_options = request->CreateTurnOptions();
     auto stop_strings = OgaStringArray::Create();
     stop_strings->Add("STOP");
@@ -1154,13 +1337,11 @@ TEST(CAPITests, EngineTurnOptionsStopStrings) {
 
 TEST(CAPITests, EngineBulkRunAndReusableStorage) {
   auto model = OgaModel::Create(MODEL_PATH "engine/synthetic-paged");
-  auto params = OgaGeneratorParams::Create(*model);
-  params->SetSearchOption("max_length", 16);
   auto engine = OgaEngine::Create(*model);
   const std::array<int32_t, 3> input_tokens{2, 3, 4};
 
   const auto create_one_token_request = [&] {
-    auto request = engine->CreateRequest(*params);
+    auto request = engine->CreateRequest();
     auto turn_options = request->CreateTurnOptions();
     turn_options->SetMaxGeneratedTokens(1);
     request->BeginTurn(input_tokens, turn_options.get());
@@ -1316,7 +1497,7 @@ TEST(CAPITests, EngineBulkRunAndReusableStorage) {
   first->Close();
   second->Close();
 
-  auto reusable_request = engine->CreateRequest(*params);
+  auto reusable_request = engine->CreateRequest();
   auto reusable_turn_options = reusable_request->CreateTurnOptions();
   reusable_turn_options->SetMaxGeneratedTokens(2);
   reusable_request->BeginTurn(input_tokens, reusable_turn_options.get());
@@ -1337,13 +1518,11 @@ TEST(CAPITests, EngineBulkRunAndReusableStorage) {
 
 TEST(CAPITests, EngineCppRunReturnsBorrowedBufferViews) {
   auto model = OgaModel::Create(MODEL_PATH "engine/synthetic-paged");
-  auto params = OgaGeneratorParams::Create(*model);
-  params->SetSearchOption("max_length", 16);
   auto engine = OgaEngine::Create(*model);
   const std::array<int32_t, 3> input_tokens{2, 3, 4};
 
   const auto create_request = [&] {
-    auto request = engine->CreateRequest(*params);
+    auto request = engine->CreateRequest();
     auto turn_options = request->CreateTurnOptions();
     turn_options->SetMaxGeneratedTokens(1);
     request->BeginTurn(input_tokens, turn_options.get());
@@ -1440,10 +1619,10 @@ struct Phi2Test {
     }
   }
 
-  void RunEngine() {
+  void RunEngine(const std::function<void(OgaTurnOptions&)>& configure_turn) {
     auto engine = OgaEngine::Create(*model_);
-    constexpr size_t per_request_batch_size = 1;
-    params_->SetSearchOption("batch_size", static_cast<int>(per_request_batch_size));
+    auto request_options = OgaRequestOptions::Create();
+    request_options->SetMaxSessionTokens(40);
 
     struct OwnedRequest {
       std::unique_ptr<OgaRequest> request;
@@ -1464,11 +1643,13 @@ struct Phi2Test {
       tokenizer_->Encode(input_strings[i], *input_sequence);
       auto input_tokens = std::span<const int32_t>{
           input_sequence->SequenceData(0), input_sequence->SequenceCount(0)};
-      requests.push_back({engine->CreateRequest(*params_),
+      requests.push_back({engine->CreateRequest(request_options.get()),
                           std::vector<int32_t>(input_tokens.begin(), input_tokens.end())});
       auto& owned_request = requests.back();
       requests_by_handle.emplace(owned_request.request.get(), &owned_request);
-      owned_request.request->BeginTurn(input_tokens);
+      auto turn_options = owned_request.request->CreateTurnOptions();
+      configure_turn(*turn_options);
+      owned_request.request->BeginTurn(input_tokens, turn_options.get());
     }
 
     EXPECT_TRUE(engine->HasPendingRequests());
@@ -1509,16 +1690,15 @@ TEST(CAPITests, EngineRequestCAbiAndRaiiContracts) {
 
   auto model = OgaModel::Create(PHI2_PATH);
   auto tokenizer = OgaTokenizer::Create(*model);
-  auto params = OgaGeneratorParams::Create(*model);
   auto engine = OgaEngine::Create(*model);
   auto input_sequences = OgaSequences::Create();
   tokenizer->Encode("This is a test.", *input_sequences);
   auto input_tokens = std::span<const int32_t>{
       input_sequences->SequenceData(0), input_sequences->SequenceCount(0)};
-  params->SetSearchOption(
-      "max_length", static_cast<int>(input_tokens.size() + 4));
+  auto session_options = OgaRequestOptions::Create();
+  session_options->SetMaxSessionTokens(input_tokens.size() + 4);
 
-  auto owned_request = engine->CreateRequest(*params);
+  auto owned_request = engine->CreateRequest(session_options.get());
   auto one_token_turn = owned_request->CreateTurnOptions();
   one_token_turn->SetMaxGeneratedTokens(1);
   EXPECT_EQ(owned_request->BeginTurn(input_tokens, one_token_turn.get()), 1u);
@@ -1552,7 +1732,11 @@ TEST_P(ParametrizedTopKCAPITestsTests, TopKCAPI) {
   test.params_->SetSearchOption("temperature", 0.6f);
 
   if (GetParam()) {
-    test.RunEngine();
+    test.RunEngine([](OgaTurnOptions& options) {
+      options.SetDoSample(true);
+      options.SetTopK(50);
+      options.SetTemperature(0.6f);
+    });
   } else {
     test.Run();
   }
@@ -1577,7 +1761,11 @@ TEST_P(ParametrizedTopPCAPITestsTests, TopPCAPI) {
   test.params_->SetSearchOption("temperature", 0.6f);
 
   if (GetParam()) {
-    test.RunEngine();
+    test.RunEngine([](OgaTurnOptions& options) {
+      options.SetDoSample(true);
+      options.SetTopP(0.6f);
+      options.SetTemperature(0.6f);
+    });
   } else {
     test.Run();
   }
@@ -1603,7 +1791,12 @@ TEST_P(ParametrizedTopKTopPCAPITestsTests, TopKCAPITest) {
   test.params_->SetSearchOption("temperature", 0.6f);
 
   if (GetParam()) {
-    test.RunEngine();
+    test.RunEngine([](OgaTurnOptions& options) {
+      options.SetDoSample(true);
+      options.SetTopK(50);
+      options.SetTopP(0.6f);
+      options.SetTemperature(0.6f);
+    });
   } else {
     test.Run();
   }
@@ -2568,8 +2761,6 @@ TEST(CAPITests, RequestSetDraftTokensRejectsNullArguments) {
 TEST(CAPITests, RequestSetDraftTokensRunsProposal) {
   auto model = OgaModel::Create(
       MODEL_PATH "engine/synthetic-paged-per-token");
-  auto params = OgaGeneratorParams::Create(*model);
-  params->SetSearchOption("max_length", 16);
   auto engine = OgaEngine::Create(*model);
 
   size_t max_drafts{};
@@ -2590,7 +2781,7 @@ TEST(CAPITests, RequestSetDraftTokensRunsProposal) {
       std::string(owned_off_thread_result->GetError()).find("owner thread"),
       std::string::npos);
 
-  auto request = engine->CreateRequest(*params);
+  auto request = engine->CreateRequest();
   auto turn_options = request->CreateTurnOptions();
   turn_options->SetMaxGeneratedTokens(4);
   const std::array<int32_t, 3> prompt{2, 3, 4};
