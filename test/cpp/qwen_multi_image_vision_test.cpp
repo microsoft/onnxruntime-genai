@@ -177,3 +177,20 @@ TEST(QwenVisionMultiImageTest, PreservesTemporalPaddingWhenStrideDoesNotMatchMax
   EXPECT_EQ(layout.ImagePatchOffset(1, 8), 8);
   EXPECT_EQ(layout.ImagePatchCount(8, 2, 4), 16);
 }
+
+TEST(QwenVisionMultiImageTest, PreservesTemporalPaddingWhenStrideMatchesMaximumGrid) {
+  const auto layout = Generators::ResolveQwenPatchLayout(
+      /*total_patches=*/16,
+      /*total_grid_tokens=*/12,
+      /*total_hw=*/8,
+      /*max_grid_tokens=*/8,
+      /*num_images=*/2,
+      /*all_temporal_dims_one=*/false);
+
+  EXPECT_EQ(layout.padded_image_stride, 0);
+  EXPECT_EQ(layout.temporal_multiplier, 2);
+  EXPECT_EQ(layout.ImagePatchOffset(0, 0), 0);
+  EXPECT_EQ(layout.ImagePatchCount(4, 2, 2), 8);
+  EXPECT_EQ(layout.ImagePatchOffset(1, 8), 8);
+  EXPECT_EQ(layout.ImagePatchCount(8, 2, 2), 8);
+}

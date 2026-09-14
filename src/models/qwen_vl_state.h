@@ -35,7 +35,8 @@ inline QwenPatchLayout ResolveQwenPatchLayout(int64_t total_patches,
                                               int64_t total_grid_tokens,
                                               int64_t total_hw,
                                               int64_t max_grid_tokens,
-                                              int64_t num_images) {
+                                              int64_t num_images,
+                                              bool all_temporal_dims_one = true) {
   if (total_patches == total_grid_tokens) {
     return {};
   }
@@ -43,7 +44,8 @@ inline QwenPatchLayout ResolveQwenPatchLayout(int64_t total_patches,
   const bool temporal_padded = total_patches > 0 && total_hw > 0 && total_patches % total_hw == 0;
   const int64_t candidate_stride =
       num_images > 0 && total_patches % num_images == 0 ? total_patches / num_images : 0;
-  const bool stride_padded = candidate_stride > 0 && candidate_stride == max_grid_tokens;
+  const bool stride_padded = all_temporal_dims_one && candidate_stride > 0 &&
+                             candidate_stride == max_grid_tokens;
 
   if (stride_padded) {
     return {.padded_image_stride = candidate_stride};

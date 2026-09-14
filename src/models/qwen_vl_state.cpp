@@ -138,21 +138,8 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
   int64_t patch_dim = pv_shape[1];
   int64_t hidden_size = feat_shape[1];
 
-  auto element_size = [](ONNXTensorElementDataType type) -> size_t {
-    switch (type) {
-      case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
-        return 4;
-      case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
-      case ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16:
-        return 2;
-      case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:
-        return 8;
-      default:
-        throw std::runtime_error("Unsupported pixel_values element type in multi-image vision loop");
-    }
-  };
-  size_t pv_element_size = element_size(pv_type);
-  size_t feat_element_size = element_size(feat_type);
+  size_t pv_element_size = Ort::SizeOf(pv_type);
+  size_t feat_element_size = Ort::SizeOf(feat_type);
 
   void* pv_raw = pv_full->GetTensorMutableRawData();
   void* feat_raw = feat_full->GetTensorMutableRawData();
@@ -167,14 +154,16 @@ DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& 
   int64_t total_grid_tokens = 0;
   int64_t total_hw = 0;
   int64_t max_grid_tokens = 0;
+  bool all_temporal_dims_one = true;
   for (int64_t img = 0; img < num_images_; ++img) {
     int64_t grid_tokens = grid_data[img * 3] * grid_data[img * 3 + 1] * grid_data[img * 3 + 2];
     total_grid_tokens += grid_tokens;
     total_hw += grid_data[img * 3 + 1] * grid_data[img * 3 + 2];
     max_grid_tokens = std::max(max_grid_tokens, grid_tokens);
+    all_temporal_dims_one = all_temporal_dims_one && grid_data[img * 3] == 1;
   }
-  const QwenPatchLayout patch_layout =
-      ResolveQwenPatchLayout(total_patches, total_grid_tokens, total_hw, max_grid_tokens, num_images_);
+  const QwenPatchLayout patch_layout = ResolveQwenPatchLayout(
+      total_patches, total_grid_tokens, total_hw, max_grid_tokens, num_images_, all_temporal_dims_one);
 
   int64_t expected_total_feats = total_grid_tokens / merge_sq;
   if (total_feats < expected_total_feats)
