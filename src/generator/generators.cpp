@@ -994,7 +994,15 @@ DeviceSpan<float> Generator::GetLogits() {
     return strategy_logits;
   }
   if (!computed_logits_) {
-    ComputeLogits(search_->GetNextTokens());
+    auto next_tokens = search_->GetNextTokens();
+    if (last_action_ == Action::rewound) {
+      if (search_->GetSequenceLength() == 0)
+        throw std::runtime_error(
+            "GetLogits called with no prior state. Please call AppendTokens, SetLogits, or SetInputs "
+            "before calling GetLogits.");
+      search_->AppendTokens(next_tokens);
+    }
+    ComputeLogits(next_tokens);
   }
   return search_->GetLogits();
 }
