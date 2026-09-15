@@ -107,10 +107,17 @@ jobs:
         scriptLocation: 'inlineScript'
         workingDirectory: '$(Build.Repository.LocalPath)'
         inlineScript: |
+          $cudaHome = "$(Build.Repository.LocalPath)\cuda_sdk\v12.8"
+          New-Item -ItemType Directory -Force -Path $cudaHome | Out-Null
           azcopy login --identity
           azcopy copy --recursive `
-            "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v12.8" `
-            "cuda_sdk"
+            "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v12.8/*" `
+            $cudaHome
+
+          if (-not (Test-Path "$cudaHome\include") -or -not (Test-Path "$cudaHome\bin")) {
+            Get-ChildItem -Path $cudaHome -Force
+            throw "CUDA SDK download did not produce the expected layout under '$cudaHome'."
+          }
 
     - task: PythonScript@0
       displayName: 'Install python build deps'
