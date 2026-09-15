@@ -85,7 +85,7 @@ OrtSession* GetOrCreateSession(
 
   auto it = cache.sessions_.find(key);
   if (it != cache.sessions_.end()) {
-    return it->second.get();
+    return it->second.session.get();
   }
 
   // Build model using Model Editor API
@@ -95,7 +95,7 @@ OrtSession* GetOrCreateSession(
   auto session = CreateSession(model.get(), device_type, ep_name, session_config_keys, session_config_values);
 
   OrtSession* session_ptr = session.get();
-  cache.sessions_[key] = std::move(session);
+  cache.sessions_.insert_or_assign(key, OrtGlobals::SessionCache::Entry{device_type, std::move(session)});
 
   return session_ptr;
 }
