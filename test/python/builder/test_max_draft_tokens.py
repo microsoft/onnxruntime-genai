@@ -107,3 +107,11 @@ def test_genai_config_accepts_max_draft_tokens_as_a_string(monkeypatch, tmp_path
 def test_genai_config_rejects_out_of_range_max_draft_tokens(monkeypatch, tmp_path, value):
     with pytest.raises(ValueError, match="max_draft_tokens must be between 1 and 16"):
         _write_genai_config(monkeypatch, tmp_path, {"max_draft_tokens": value})
+
+
+@pytest.mark.parametrize("value", [6.5, "6.5", 0.5, "1e1", "", "six"])
+def test_genai_config_rejects_non_integer_max_draft_tokens(monkeypatch, tmp_path, value):
+    # The runtime parses this field as an integer, so truncating 6.5 to 6 would silently
+    # export a width the caller never asked for.
+    with pytest.raises(ValueError, match="max_draft_tokens must be an integer between 1 and 16"):
+        _write_genai_config(monkeypatch, tmp_path, {"max_draft_tokens": value})

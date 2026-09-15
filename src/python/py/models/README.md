@@ -330,15 +330,15 @@ Set `dflash2_path` to a DFlash 2 checkpoint to export an auxiliary `dflash2.onnx
 `dflash2_precision` accepts `bf16` (default), `int4`, or `int8`. Integer modes quantize the attention and MLP weights at the target's block size while keeping the small dynamic-convolution and selector projections dense. Body activations and KV caches remain BF16; this option does not quantize the drafter's KV cache. The body uses plain blockwise weights because CUDA fpA-intB prepacking requires FP16 activations. The LM head follows the target's symmetric DEFAULT integer quantization, including mixed-precision bit overrides, and uses prepacking only when its dtype and dimensions are eligible. Other target head formats remain dense in the drafter. Shared initializers are deduplicated only when their bytes match.
 
 ```bash
-python -m onnxruntime_genai.models.builder -i path_to_target_model -o path_to_output_folder -p int4 -e cuda --extra_options use_paged_attention=true aux_hidden_state_layers=2,12,22 dflash2_path=path_to_dflash2_checkpoint dflash2_precision=int4
+python -m onnxruntime_genai.models.builder -i path_to_target_model -o path_to_output_folder -p int4 -e cuda --extra_options use_paged_attention=true aux_hidden_state_layers=2,12,22 dflash2_path=path_to_dflash2_checkpoint dflash2_precision=int4 max_draft_tokens=7
 ```
 
 ```bash
 # From wheel:
-python -m onnxruntime_genai.models.builder -i path_to_target_model -o path_to_output_folder -p fp16 -e cuda -c cache_dir_for_hf_files --extra_options use_paged_attention=true aux_hidden_state_layers=2,12,22 dflash2_path=path_to_dflash2_checkpoint dflash2_num_draft_tokens=4 dflash2_precision=int4
+python -m onnxruntime_genai.models.builder -i path_to_target_model -o path_to_output_folder -p fp16 -e cuda -c cache_dir_for_hf_files --extra_options use_paged_attention=true aux_hidden_state_layers=2,12,22 dflash2_path=path_to_dflash2_checkpoint dflash2_num_draft_tokens=4 dflash2_precision=int4 max_draft_tokens=4
 
 # From source:
-python builder.py -i path_to_target_model -o path_to_output_folder -p fp16 -e cuda -c cache_dir_for_hf_files --extra_options use_paged_attention=true aux_hidden_state_layers=2,12,22 dflash2_path=path_to_dflash2_checkpoint dflash2_num_draft_tokens=4 dflash2_precision=int4
+python builder.py -i path_to_target_model -o path_to_output_folder -p fp16 -e cuda -c cache_dir_for_hf_files --extra_options use_paged_attention=true aux_hidden_state_layers=2,12,22 dflash2_path=path_to_dflash2_checkpoint dflash2_num_draft_tokens=4 dflash2_precision=int4 max_draft_tokens=4
 ```
 
 Set `dflash2_fuse_gate_up=true` to experimentally combine each DFlash 2 MLP's gate and up

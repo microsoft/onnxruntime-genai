@@ -1382,7 +1382,15 @@ class Model:
             # Caps how many drafted tokens the engine verifies per step. This is independent of
             # the drafter's exported geometry, which costs the same no matter how many of its
             # tokens are used, so the best value is workload-specific and must be measured.
-            max_draft_tokens = int(self.extra_options["max_draft_tokens"])
+            raw_max_draft_tokens = self.extra_options["max_draft_tokens"]
+            try:
+                # Parsed from text so a fractional value is rejected instead of truncated; the
+                # runtime treats speculative.max_draft_tokens as integral.
+                max_draft_tokens = int(str(raw_max_draft_tokens).strip())
+            except (TypeError, ValueError) as e:
+                raise ValueError(
+                    f"max_draft_tokens must be an integer between 1 and 16. Got: {raw_max_draft_tokens}."
+                ) from e
             if not 1 <= max_draft_tokens <= 16:
                 raise ValueError(f"max_draft_tokens must be between 1 and 16. Got: {max_draft_tokens}.")
             genai_config["speculative"] = {"max_draft_tokens": max_draft_tokens}
