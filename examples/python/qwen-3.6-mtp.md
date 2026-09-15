@@ -73,8 +73,10 @@ This produces, in `<output-dir>`:
 
 * `model.onnx` (+ `.data`) — the main decoder, now with a `hidden_states` graph output;
 * `mtp.onnx` (+ `.data`) — the MTP head (one full-attention + MoE layer, `fc`, the pre/post
-  RMSNorms, embedding lookup, and `lm_head`); with shared embeddings, the lookup reuses the
-  `lm_head` weights instead of storing a separate embedding;
+  RMSNorms, embedding lookup, and `lm_head`); with shared embeddings and a compatible non-native
+  LM-head format, the lookup reuses the `lm_head` weights instead of storing a separate embedding.
+  Native NVFP4 and FP8 LM-head storage cannot be consumed by the generic embedding lookup, so
+  those formats retain a separate embedding initializer;
 * `genai_config.json` — carrying an `mtp` section and the decoder's `hidden_states` output.
 
 To prevent the dynamic Engine from loading and running the exported MTP head automatically, set

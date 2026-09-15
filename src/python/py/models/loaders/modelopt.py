@@ -70,7 +70,7 @@ class ModeloptModel(QuantizedModel):
             ):
                 # Keep a distinct module so the builder visits both the embedding and LM head,
                 # while reusing the checkpoint's single tied weight tensor.
-                self.lm_head = TensorModule(weight=self.embedding.weight)
+                self.lm_head.weight = self.embedding.weight
             self.mtp = self.make_mtp()
         finally:
             # Every tensor is materialized above; do not hold file descriptors open for
