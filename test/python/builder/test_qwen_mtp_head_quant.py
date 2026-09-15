@@ -200,6 +200,17 @@ def test_mtp_quant_config_json_configures_targets_independently():
     assert quant_config.moe.type == "none"
 
 
+def test_mtp_quant_config_preserves_shared_embeddings_option():
+    model = _resolve(
+        {
+            "shared_embeddings": True,
+            "mtp_quant_config": '{"weights": {"type": "int4"}, "moe": {"type": "none"}}',
+        }
+    )
+
+    assert model.mtp_attrs["extra_options"]["shared_embeddings"] is True
+
+
 def test_mtp_quant_config_can_keep_the_entire_head_fp16():
     model = _resolve(
         {
@@ -229,7 +240,7 @@ def test_modelopt_mtp_loader_consumes_parsed_modules():
     layer = SimpleNamespace()
     embedding = torch.ones((2, 2), dtype=torch.bfloat16)
     embedding_module = SimpleNamespace(weight=embedding)
-    lm_head = SimpleNamespace(weight_scale_2=torch.tensor(0.5))
+    lm_head = SimpleNamespace(weight=torch.ones((2, 2)), weight_scale_2=torch.tensor(0.5))
     fc = SimpleNamespace(weight_scale_2=torch.tensor(0.25))
     parsed = SimpleNamespace(
         embedding=embedding_module,
@@ -254,7 +265,7 @@ def test_compressed_tensors_mtp_loader_consumes_parsed_modules():
     layer = SimpleNamespace()
     parsed = SimpleNamespace(
         embedding=SimpleNamespace(weight=torch.ones((2, 2), dtype=torch.bfloat16)),
-        lm_head=SimpleNamespace(),
+        lm_head=SimpleNamespace(weight=torch.ones((2, 2))),
         mtp=SimpleNamespace(
             fc=SimpleNamespace(),
             pre_fc_norm_embedding=SimpleNamespace(),
@@ -276,6 +287,63 @@ def test_compressed_tensors_mtp_loader_consumes_parsed_modules():
 
     assert mtp.embedding is parsed.embedding
     assert mtp.layers == [layer]
+
+
+@pytest.mark.parametrize("preserve_quantization", [False, True])
+def test_modelopt_mtp_loader_uses_tied_embedding_when_lm_head_is_absent(
+    monkeypatch, preserve_quantization
+):
+    embedding = SimpleNamespace(weight=torch.ones((4, 2), dtype=torch.bfloat16))
+    parsed = SimpleNamespace(
+        embedding=embedding,
+        lm_head=SimpleNamespace(weight=None),
+        mtp=SimpleNamespace(
+            state={},
+            fc=SimpleNamespace(),
+            pre_fc_norm_embedding=SimpleNamespace(),
+            pre_fc_norm_hidden=SimpleNamespace(),
+            norm=SimpleNamespace(),
+            layers=[SimpleNamespace()],
+        ),
+        dequantize_state=lambda state: state,
+        dequantize_tensor=lambda *args: pytest.fail("A missing tied LM head must not be dequantized"),
+    )
+    captured = {}
+
+    def capture_from_state(cls, mtp_state, embed_weight, lm_head_weight, layer_config, is_moe):
+        captured["embed_weight"] = embed_weight
+        captured["lm_head_weight"] = lm_head_weight
+        return SimpleNamespace()
+
+    monkeypatch.setattr(QwenMTPModel, "from_state", classmethod(capture_from_state))
+    mtp = QwenMTPModel.from_modelopt(
+        parsed,
+        layer_config=SimpleNamespace(tie_word_embeddings=True),
+        preserve_quantization=preserve_quantization,
+        is_moe=False,
+    )
+
+    if preserve_quantization:
+        assert mtp.lm_head is embedding
+    else:
+        assert captured["embed_weight"] is embedding.weight
+        assert captured["lm_head_weight"] is embedding.weight
+
+
+def test_modelopt_mtp_loader_rejects_missing_untied_lm_head():
+    parsed = SimpleNamespace(
+        embedding=SimpleNamespace(weight=torch.ones((4, 2))),
+        lm_head=SimpleNamespace(weight=None),
+        mtp=SimpleNamespace(),
+    )
+
+    with pytest.raises(ValueError, match="does not tie word embeddings"):
+        QwenMTPModel.from_modelopt(
+            parsed,
+            layer_config=SimpleNamespace(tie_word_embeddings=False),
+            preserve_quantization=True,
+            is_moe=False,
+        )
 
 
 def test_remote_mtp_loader_resolves_hugging_face_snapshot(monkeypatch, tmp_path):
@@ -421,7 +489,7 @@ def test_safetensors_mtp_loader_uses_tied_embedding_when_lm_head_is_absent(monke
     assert captured["lm_head_weight"] is tensors["model.embed_tokens.weight"]
 
 
-def _make_minimal_mtp_embedding_model(*, tied_quantized=False, tied_unquantized=False):
+def _make_minimal_mtp_embedding_model(*, tied_quantized=False, tied_unquantized=False, lm_head_quant_type="none"):
     model = Qwen35DenseMTPModel.__new__(Qwen35DenseMTPModel)
     model.tied_quantized_embeddings = tied_quantized
     model.tied_unquantized_embeddings = tied_unquantized
@@ -430,7 +498,10 @@ def _make_minimal_mtp_embedding_model(*, tied_quantized=False, tied_unquantized=
     model.io_dtype = ir.DataType.FLOAT16
     model.input_names = {"input_ids": "input_ids"}
     model.quant_attrs = {"matmul_block_size": 32}
-    model.mtp_weights = SimpleNamespace(embedding=SimpleNamespace(weight=object()))
+    model.mtp_weights = SimpleNamespace(
+        embedding=SimpleNamespace(weight=object()),
+        lm_head=SimpleNamespace(quant_type=lm_head_quant_type),
+    )
     model._initializer_calls = []
     model._reshape_calls = []
     model._transpose_calls = []
@@ -492,6 +563,22 @@ def test_mtp_unquantized_shared_embedding_reuses_lm_head_initializer():
 
 def test_mtp_unshared_embedding_keeps_separate_initializer():
     model = _make_minimal_mtp_embedding_model()
+
+    output = model.make_mtp_embedding("/model/mtp")
+
+    assert output == "/model/mtp/embed_tokens/Gather/output_0"
+    assert len(model._initializer_calls) == 1
+    assert model._initializer_calls[0][1] == "model.embed_tokens.weight"
+    assert model._reshape_calls == []
+    assert model._transpose_calls == []
+
+
+@pytest.mark.parametrize("lm_head_quant_type", ["nvfp4", "fp8"])
+def test_mtp_native_quantized_lm_head_keeps_separate_embedding(lm_head_quant_type):
+    model = _make_minimal_mtp_embedding_model(
+        tied_quantized=True,
+        lm_head_quant_type=lm_head_quant_type,
+    )
 
     output = model.make_mtp_embedding("/model/mtp")
 

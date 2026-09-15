@@ -2770,9 +2770,16 @@ class Model:
 
     def make_embedding(self, embedding):
         basename = "/model/embed_tokens"
+        # Native NVFP4/FP8 LM-head storage has format-specific scales and cannot be consumed by
+        # GatherBlockQuantized. Keep the checkpoint embedding for those formats instead of
+        # emitting references to generic tied-weight initializer names that do not exist.
+        native_lm_head = (
+            getattr(getattr(getattr(self, "weights", None), "lm_head", None), "quant_type", "none")
+            in {"nvfp4", "fp8"}
+        )
 
         # Use GatherBlockQuantized if and only if tied embeddings are enabled and export model is quantized. quantized d_type in set_onnx_dtype is INT4/UINT4
-        if self.tied_quantized_embeddings:
+        if self.tied_quantized_embeddings and not native_lm_head:
             bits, tied_weight_name, tied_weight_scale_name, tied_weight_zp_name = self.make_tied_quantized_embedding_input_names()
 
             gather_name = f"{basename}/GatherBlockQuantized"
@@ -2808,7 +2815,7 @@ class Model:
             )
 
         # Use Transpose + Gather for tied embeddings for float embedding layers
-        elif self.tied_unquantized_embeddings:
+        elif self.tied_unquantized_embeddings and not native_lm_head:
             transpose_name = f"{basename}/Transpose"
             transpose_output = f"{transpose_name}/output_0"
             self.make_transpose(

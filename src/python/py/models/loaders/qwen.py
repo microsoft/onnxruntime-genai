@@ -51,10 +51,15 @@ class QwenMTPModel:
     def from_modelopt(cls, model, layer_config, preserve_quantization, is_moe=True):
         if model.mtp is None:
             raise ValueError("The ModelOpt checkpoint has no MTP head.")
+        lm_head = model.lm_head
+        if getattr(lm_head, "weight", None) is None:
+            if not getattr(layer_config, "tie_word_embeddings", False):
+                raise ValueError("The ModelOpt checkpoint has no LM-head weight and does not tie word embeddings.")
+            lm_head = model.embedding
         if preserve_quantization:
             return SimpleNamespace(
                 embedding=model.embedding,
-                lm_head=model.lm_head,
+                lm_head=lm_head,
                 fc=model.mtp.fc,
                 pre_fc_norm_embedding=model.mtp.pre_fc_norm_embedding,
                 pre_fc_norm_hidden=model.mtp.pre_fc_norm_hidden,
@@ -63,12 +68,15 @@ class QwenMTPModel:
             )
 
         mtp_state = model.dequantize_state(model.mtp.state)
-        lm_head_weight = model.dequantize_tensor(
-            model.lm_head.weight,
-            model.lm_head.weight_scale,
-            model.lm_head.weight_scale_2,
-            "lm_head.weight",
-        )
+        if lm_head is model.embedding:
+            lm_head_weight = model.embedding.weight
+        else:
+            lm_head_weight = model.dequantize_tensor(
+                lm_head.weight,
+                lm_head.weight_scale,
+                lm_head.weight_scale_2,
+                "lm_head.weight",
+            )
         return cls.from_state(mtp_state, model.embedding.weight, lm_head_weight, layer_config, is_moe)
 
     @classmethod

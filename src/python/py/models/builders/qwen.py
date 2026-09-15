@@ -1501,8 +1501,12 @@ class Qwen35MTPModel(Qwen35MoETextModel):
 
     def make_mtp_embedding(self, basename):
         embed_basename = f"{basename}/embed_tokens"
+        # Native NVFP4/FP8 LM-head storage cannot be consumed by GatherBlockQuantized. Keep the
+        # checkpoint's embedding in that case; save_model() can still share this initializer with
+        # the decoder's embedding when both graphs contain the same tensor.
+        native_lm_head = getattr(self.mtp_weights.lm_head, "quant_type", "none") in {"nvfp4", "fp8"}
 
-        if self.tied_quantized_embeddings:
+        if self.tied_quantized_embeddings and not native_lm_head:
             bits, weight_name, scale_name, zero_point_name = self.make_tied_quantized_embedding_input_names()
             flat_dim = self.hidden_size * bits // 8
             reshape_name = f"{embed_basename}/Reshape"
@@ -1531,7 +1535,7 @@ class Qwen35MTPModel(Qwen35MoETextModel):
                 gather_axis=0,
                 quantize_axis=1,
             )
-        elif self.tied_unquantized_embeddings:
+        elif self.tied_unquantized_embeddings and not native_lm_head:
             transpose_name = f"{embed_basename}/Transpose"
             transpose_output = f"{transpose_name}/output_0"
             self.make_transpose(
