@@ -73,9 +73,15 @@ void MultiModalFeatures::ReuseFeaturesBuffer(MultiModalFeatures& other) {
     throw std::runtime_error("Incorrect usage of the MultiModalFeatures inputs and outputs.");
   }
 
-  // Share the output MultiModalFeatures OrtValue* from other with the input MultiModalFeatures for this.
+  // Take ownership of other's computed tensor as this input.
   features_ = std::move(other.features_);
-  state_.inputs_[index_] = other.state_.outputs_[other.index_];
+  state_.inputs_[index_] = features_.get();
+
+  // Give other a real copy so its output binding has valid data before its next Run() overwrites it.
+  other.features_ = OrtValue::CreateTensor(other.model_.p_device_->GetAllocator(), other.shape_, other.type_);
+  ByteWrapTensor(*other.model_.p_device_, *other.features_)
+      .CopyFrom(ByteWrapTensor(*other.model_.p_device_, *features_));
+  other.state_.outputs_[other.index_] = other.features_.get();
 }
 
 void MultiModalFeatures::AllocateEmptyFeatures() {
