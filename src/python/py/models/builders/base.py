@@ -1349,6 +1349,11 @@ class Model:
             genai_config["search"]["chunk_size"] = int(
                 self.extra_options.get("paged_chunk_size", self.attention_attrs["paged_block_size"])
             )
+        elif self.use_paged_attention and "paged_chunk_size" in self.extra_options:
+            # Nothing forces chunking without a ring, but this caps one request where
+            # max_scheduled_tokens only caps the step, so concurrent prefills interleave
+            # instead of running one at a time.
+            genai_config["search"]["chunk_size"] = int(self.extra_options["paged_chunk_size"])
 
         if self.ep != "cpu":
             ep_name = self.ep.replace("trt-rtx", "NvTensorRtRtx")
