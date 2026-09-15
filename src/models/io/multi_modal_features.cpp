@@ -82,9 +82,15 @@ void MultiModalFeatures::ReuseFeaturesBuffer(MultiModalFeatures& other) {
   auto& consumer_device = *state_.p_session_device_inputs_;
 
   if (SessionCanAccess(*state_.p_session_device_, producer_device)) {
-    // Share the output MultiModalFeatures OrtValue* from other with the input MultiModalFeatures for this.
+    // Take ownership of other's computed tensor as this input.
     features_ = std::move(other.features_);
-    state_.inputs_[index_] = other.state_.outputs_[other.index_];
+    state_.inputs_[index_] = features_.get();
+
+    // Give other a real copy so its output binding has valid data before its next Run() overwrites it.
+    other.features_ = OrtValue::CreateTensor(producer_device.GetAllocator(), other.shape_, other.type_);
+    ByteWrapTensor(producer_device, *other.features_)
+        .CopyFrom(ByteWrapTensor(producer_device, *features_));
+    other.state_.outputs_[other.index_] = other.features_.get();
     return;
   }
 
