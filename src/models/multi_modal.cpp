@@ -1,8 +1,10 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include "../generators.h"
+#include "generator/generators.h"
 #include "multi_modal.h"
+#include "models/io/default_position_inputs.h"
+#include "models/io/qwen_vl_position_inputs.h"
 #include <cstring>
 #include <algorithm>
 #include <numeric>
@@ -480,10 +482,6 @@ DeviceSpan<float> PixtralVisionState::Run(int current_length, DeviceSpan<int32_t
   size_t pv_elem_size = element_size(pv_type);
   size_t feat_elem_size = element_size(feat_type);
 
-  // Use the output tensor's actual memory info for sub-tensor views, so views
-  // match the underlying buffer's allocation (CPU or GPU).
-  const auto& feat_mem_info = feat_full->GetTensorMemoryInfo();
-  uint8_t* feat_raw = static_cast<uint8_t*>(feat_full->GetTensorMutableRawData());
   uint8_t* pv_raw = static_cast<uint8_t*>(pv_full->GetTensorMutableRawData());
 
   int64_t feat_offset = 0;
@@ -541,18 +539,21 @@ DeviceSpan<float> PixtralVisionState::Run(int current_length, DeviceSpan<int32_t
           ") + num_feats (" + std::to_string(num_feats) +
           ") exceeds pre-allocated feature buffer (" + std::to_string(total_feats) + ")");
 
-    // Create output sub-tensor view into the pre-allocated feature buffer.
+    // Run into a separate output tensor, then copy into the combined feature buffer.
     std::vector<int64_t> sub_feat_shape = {num_feats, hidden_size};
     auto sub_feat = OrtValue::CreateTensor(
-        feat_mem_info,
-        feat_raw + static_cast<size_t>(feat_offset * hidden_size) * feat_elem_size,
-        static_cast<size_t>(num_feats * hidden_size) * feat_elem_size,
-        std::span<const int64_t>(sub_feat_shape), feat_type);
+        model_.p_device_->GetAllocator(), sub_feat_shape, feat_type);
 
     inputs_[pv_idx] = sub_pv.get();
     outputs_[0] = sub_feat.get();
 
     State::Run(*model_.vision_session_);
+
+    size_t feature_offset_bytes = static_cast<size_t>(feat_offset * hidden_size) * feat_elem_size;
+    size_t feature_size_bytes = static_cast<size_t>(num_feats * hidden_size) * feat_elem_size;
+    ByteWrapTensor(*model_.p_device_, *feat_full)
+        .subspan(feature_offset_bytes, feature_size_bytes)
+        .CopyFrom(ByteWrapTensor(*model_.p_device_, *sub_feat));
 
     feat_offset += num_feats;
   }
@@ -661,7 +662,8 @@ DeviceSpan<float> EmbeddingState::Run(int current_length, DeviceSpan<int32_t>& n
 DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params)
     : State{params, model},
       model_{model},
-      position_inputs_{CreatePositionInputs(*this, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask)},
+      position_inputs_{model_.p_device_inputs_->CreatePositionInputs(*this, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask)},
+      kv_cache_{model_.p_device_kvcache_->CreateKeyValueCache(*this)},
       recurrent_state_{CreateRecurrentState(*this)} {
   inputs_embeds_.Add();
 
@@ -689,7 +691,8 @@ DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int3
 
   position_inputs_->Add();
   logits_.Add();
-  kv_cache_.Add();
+  if (kv_cache_)
+    kv_cache_->Add();
   if (recurrent_state_)
     recurrent_state_->Add();
 }
@@ -713,16 +716,26 @@ DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& nex
   return logits_.Get();
 }
 
-bool DecoderState::SupportsPrefillChunking() const {
+bool DecoderState::SupportsPrefillChunking(bool has_multimodal_content) const {
   // Chunking slices the pre-computed embeddings along the sequence dimension, which is only
   // contiguous for a single sequence. Continuous decoding of position ids/attention mask in
   // DefaultPositionInputs is likewise restricted to a batch-beam size of one.
   if (params_->BatchBeamSize() != 1)
     return false;
 
-  // Qwen-VL's 3D mRoPE position ids are computed from the full prompt in a single pass, so they
-  // cannot be produced chunk by chunk. Fall back to a single prefill run for those models.
-  return dynamic_cast<const DefaultPositionInputs*>(position_inputs_.get()) != nullptr;
+  // DefaultPositionInputs produces position ids sequentially, so chunking is always safe.
+  if (dynamic_cast<const DefaultPositionInputs*>(position_inputs_.get()) != nullptr)
+    return true;
+
+  // Qwen-VL's 3D mRoPE position ids diverge from sequential positions only when vision/audio
+  // content shifts the rope deltas. A text-only prompt reduces to sequential positions, so
+  // chunking is safe; with multimodal content the ids must be produced in a single full pass.
+  if (dynamic_cast<const Qwen2VLPositionInputs*>(position_inputs_.get()) != nullptr)
+    return !has_multimodal_content;
+
+  // Any other position-input type (e.g. WindowedPositionInputs) keeps the conservative
+  // single-pass prefill behavior.
+  return false;
 }
 
 void DecoderState::PrepareEmbeddingsForPrefill(size_t new_length) {
@@ -749,7 +762,7 @@ DeviceSpan<float> DecoderState::RunPrefillWithChunking(int current_length, Devic
 
     if (decoder_input_ids_) decoder_input_ids_->Update(chunk_tokens);
     position_inputs_->Update(chunk_tokens, length, static_cast<int>(current_chunk_size));
-    kv_cache_.Update(next_indices, length);
+    kv_cache_->Update(next_indices, length);
     if (recurrent_state_)
       recurrent_state_->Update();
     logits_.Update(chunk_tokens, current_chunk_size);
@@ -776,7 +789,8 @@ void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int tot
   size_t new_length = next_tokens.size() / batch_size;
   if (decoder_input_ids_) decoder_input_ids_->Update(next_tokens);
   position_inputs_->Update(next_tokens, total_length, static_cast<int>(new_length));
-  kv_cache_.Update(beam_indices, total_length);
+  if (kv_cache_)
+    kv_cache_->Update(beam_indices, total_length);
   if (recurrent_state_)
     recurrent_state_->Update();
   logits_.Update(next_tokens, new_length);
@@ -787,7 +801,8 @@ void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int tot
 // Overload for pipeline to call
 void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int total_length, DeviceSpan<int32_t> beam_indices, size_t new_length) {
   if (decoder_input_ids_) decoder_input_ids_->Update(next_tokens);
-  kv_cache_.Update(beam_indices, total_length);
+  if (kv_cache_)
+    kv_cache_->Update(beam_indices, total_length);
   if (recurrent_state_)
     recurrent_state_->Update();
   logits_.Update(next_tokens, new_length);
@@ -868,8 +883,9 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
   // prompt embeddings in several smaller runs to bound peak memory usage.
   const auto& chunk_size_opt = params_->search.chunk_size;
   const size_t num_tokens = next_tokens.size();
+  const bool has_multimodal_content = num_image_tokens_ != 0 || num_audio_tokens_ != 0;
   const bool chunk_prefill = is_prompt_ && chunk_size_opt.has_value() && chunk_size_opt.value() > 0 &&
-                             num_tokens > chunk_size_opt.value() && decoder_state_->SupportsPrefillChunking();
+                             num_tokens > chunk_size_opt.value() && decoder_state_->SupportsPrefillChunking(has_multimodal_content);
 
   if (chunk_prefill) {
     decoder_state_->PrepareEmbeddingsForPrefill(num_tokens);

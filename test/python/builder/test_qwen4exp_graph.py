@@ -601,7 +601,7 @@ def test_already_canonical_layer_types_survive_normalization():
 
 
 def test_packed_experts_are_wrapped_so_the_nvfp4_probe_can_iterate():
-    """`Qwen35MoeTextModel.make_moe` probes `next(iter(mlp.experts), None)` for NVFP4 weights.
+    """`Qwen35MoETextModel.make_moe` probes `next(iter(mlp.experts), None)` for NVFP4 weights.
     Qwen4Exp stores experts as packed 3-D tensors on a non-iterable module, so the view has to
     make iteration empty rather than raising."""
     packed = SimpleNamespace(gate_up_proj=object(), down_proj=object())

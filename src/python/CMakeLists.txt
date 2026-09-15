@@ -130,6 +130,16 @@ source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${python_srcs})
 if(BUILD_WHEEL)
   set(WHEEL_FILES_DIR "${CMAKE_BINARY_DIR}/wheel")
   message("Setting up wheel files in : ${WHEEL_FILES_DIR}")
+  execute_process(
+    COMMAND git rev-parse HEAD
+    WORKING_DIRECTORY "${REPO_ROOT}"
+    RESULT_VARIABLE GENAI_COMMIT_RESULT
+    OUTPUT_VARIABLE GENAI_COMMIT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+  if(NOT GENAI_COMMIT_RESULT EQUAL 0)
+    set(GENAI_COMMIT "")
+  endif()
   if(USE_TRT_RTX)
     set(TARGET_NAME "onnxruntime-genai-trt-rtx")
   elseif(USE_WINML)

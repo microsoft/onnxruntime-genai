@@ -111,5 +111,8 @@ if(USE_GUIDANCE)
     )
     file(TOUCH "${llguidance_SOURCE_DIR}/.onnx-rt-applied-remove-ring-ref-in-cargo-lock")
   endif()
-  corrosion_import_crate(MANIFEST_PATH ${llguidance_SOURCE_DIR}/parser/Cargo.toml)
+  corrosion_import_crate(
+    MANIFEST_PATH ${llguidance_SOURCE_DIR}/parser/Cargo.toml
+    FEATURES rayon
+  )
 endif()

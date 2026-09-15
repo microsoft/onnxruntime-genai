@@ -6,11 +6,11 @@ from types import MethodType
 import onnx_ir as ir
 import pytest
 
-from models.builders.qwen import Qwen35MoeTextModel
+from models.builders.qwen import Qwen35MoETextModel
 
 
 def _make_model(ep):
-    model = object.__new__(Qwen35MoeTextModel)
+    model = object.__new__(Qwen35MoETextModel)
     model.ep = ep
     model.hidden_size = 2048
     model.io_dtype = ir.DataType.FLOAT16
@@ -30,32 +30,33 @@ def _make_model(ep):
 
 
 @pytest.mark.parametrize("ep", ["cpu", "cuda", "webgpu"])
-def test_supported_ep_fusion_emits_one_gated_add(ep):
+def test_moe_model_emits_one_gated_add(ep):
     model = _make_model(ep)
+    name = "/model/layers.3/moe/GatedAdd"
+    shape = ["batch_size", "sequence_length", model.hidden_size]
 
-    output = model._combine_routed_and_shared_experts(3, "routed", "shared", "gate")
+    model.make_gated_add(name, "routed", "shared", "gate", shape)
 
-    assert output == "/model/layers.3/moe/GatedAdd/output_0"
     assert [call[0] for call in model.calls] == ["make_node", "make_value"]
     _, args, kwargs = model.calls[0]
     assert args == ("GatedAdd",)
     assert kwargs["inputs"] == ["routed", "shared", "gate"]
-    assert kwargs["outputs"] == [output]
+    assert kwargs["outputs"] == [f"{name}/output_0"]
     assert kwargs["domain"] == "com.microsoft"
 
 
-def test_unsupported_ep_preserves_mul_add_graph():
+def test_moe_model_emits_portable_gated_add_for_dml():
     model = _make_model("dml")
+    name = "/model/layers.3/moe/GatedAdd"
+    shape = ["batch_size", "sequence_length", model.hidden_size]
 
-    output = model._combine_routed_and_shared_experts(3, "routed", "shared", "gate")
+    model.make_ep_expansions_init()
+    model.make_gated_add(name, "routed", "shared", "gate", shape)
 
-    assert output == "/model/layers.3/moe/Add/output_0"
     assert [call[0] for call in model.calls] == ["make_mul", "make_add"]
-    assert model.calls[0][1] == (
-        "/model/layers.3/shared_expert/gate/Mul",
-        ["shared", "gate"],
-    )
-    assert model.calls[1][1] == (
-        "/model/layers.3/moe/Add",
-        ["routed", "/model/layers.3/shared_expert/gate/Mul/output_0"],
-    )
+    _, args, kwargs = model.calls[0]
+    assert args == (f"{name}/Mul", ["shared", "gate"], model.io_dtype)
+    assert kwargs["shape"] == shape
+    _, args, kwargs = model.calls[1]
+    assert args == (name, ["routed", f"{name}/Mul/output_0"], model.io_dtype)
+    assert kwargs["shape"] == shape

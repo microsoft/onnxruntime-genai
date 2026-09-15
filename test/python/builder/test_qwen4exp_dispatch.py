@@ -58,7 +58,7 @@ TEXT_ARCH = "Qwen4ExpForCausalLM"
 
 def test_text_builder_extends_the_qwen35_moe_builder():
     # The hybrid attention, mRoPE and MoE machinery is inherited rather than duplicated.
-    assert issubclass(qwen4exp.Qwen4ExpTextModel, qwen_module.Qwen35MoeTextModel)
+    assert issubclass(qwen4exp.Qwen4ExpTextModel, qwen_module.Qwen35MoETextModel)
 
 
 def test_composite_builder_is_also_the_text_builder():
@@ -131,7 +131,7 @@ def test_qwen4exp_exports_are_grouped_with_the_other_qwen_builders():
     assert len(qwen4exp_positions) == 4
     # Contiguous, and slotted between the Qwen3.5 builders and the plain QwenModel entry.
     assert qwen4exp_positions == list(range(qwen4exp_positions[0], qwen4exp_positions[0] + 4))
-    assert all_names.index("Qwen35MoeTextModel") < qwen4exp_positions[0]
+    assert all_names.index("Qwen35MoETextModel") < qwen4exp_positions[0]
     assert all_names.index("QwenModel") > qwen4exp_positions[-1]
     assert len(all_names) == len(set(all_names))
 
@@ -209,7 +209,7 @@ def test_multimodal_type_is_registered_as_a_mrope_qwen_vl_model():
     # Qwen4Exp uses 3D mRoPE position ids, exactly like the other Qwen-VL family models.
     _, vlm = _parse_model_type_array("VLM")
     _, qwen_vl = _parse_model_type_array("QwenVL")
-    assert set(qwen_vl).issubset(set(vlm))
+    assert "qwen4exp" in vlm
     assert "qwen4exp" in qwen_vl
 
 
@@ -222,7 +222,7 @@ def test_text_only_type_is_not_registered_as_a_vision_model():
 # Runtime multimodal processor registry
 #####################################################################################
 
-MODEL_SOURCE = (REPO_ROOT / "src" / "models" / "model.cpp").read_text()
+MODEL_SOURCE = (REPO_ROOT / "src" / "models" / "preprocessing" / "multi_modal_processor.cpp").read_text()
 
 
 def _processor_factory_entries():

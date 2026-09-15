@@ -25,14 +25,17 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-MODELS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models"
+QUANTIZATION_DIR = (
+    Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "quantization"
+)
 
 
 def _load_calibration_module():
     sys.modules.setdefault("models", types.ModuleType("models"))
-    spec = importlib.util.spec_from_file_location("models.kv_cache_calibration", MODELS_DIR / "kv_cache_calibration.py")
+    module_name = "models.quantization.kv_cache_calibration"
+    spec = importlib.util.spec_from_file_location(module_name, QUANTIZATION_DIR / "kv_cache_calibration.py")
     module = importlib.util.module_from_spec(spec)
-    sys.modules["models.kv_cache_calibration"] = module
+    sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -488,6 +491,7 @@ def test_calibrate_kv_scales_feeds_model_metadata_and_writes_scales(tmp_path, mo
     assert requested_providers == ["CPUExecutionProvider"]
     scale_data = json.loads(output_path.read_text())
     assert scale_data["layer_ids"] == [3]
+    assert scale_data["qmax"] == 128.0
     scales = scale_data["scales"]
     np.testing.assert_allclose(scales["k_scales"], [[2.0 / 128.0] * 4])
     np.testing.assert_allclose(scales["v_scales"], [[4.0 / 128.0] * 4])

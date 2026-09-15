@@ -1,12 +1,13 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License
 
+import json
 import os
 
 import onnx
 from onnx import external_data_helper, helper
 
-from models.builders.qwen import Qwen35MoeTextModel
+from models.builders.qwen import Qwen35MoEModel
 
 
 def _make_external_model(path, data_name, tensors):
@@ -36,6 +37,30 @@ def _external_info(tensor):
     return values["location"], int(values["offset"]), int(values["length"])
 
 
+def _make_qwen_mtp_model():
+    model = object.__new__(Qwen35MoEModel)
+    model.mtp_attrs = {
+        "shared_initializers": [],
+        "shared_initializer_names": {"model.embed_tokens.weight"},
+        "shared_initializer_prefixes": ("lm_head.MatMul.",),
+    }
+    return model
+
+
+def test_add_mtp_to_genai_config(tmp_path):
+    config_path = tmp_path / "genai_config.json"
+    config_path.write_text(json.dumps({"model": {"decoder": {}}}))
+    model = object.__new__(Qwen35MoEModel)
+    model.decoder = type("Decoder", (), {"num_kv_heads": 2, "head_size": 128})()
+    model.mtp_attrs = {"shared_initializers": []}
+
+    model.add_mtp_to_genai_config(tmp_path)
+
+    config = json.loads(config_path.read_text())
+    assert config["model"]["decoder"]["outputs"]["hidden_states"] == "hidden_states"
+    assert config["model"]["mtp"]["filename"] == "mtp.onnx"
+
+
 def test_share_mtp_weights_repacks_data_after_staging_metadata(tmp_path):
     main_data = b"samecodescalglob"
     mtp_data = b"samecodescalglobkeep"
@@ -63,7 +88,8 @@ def test_share_mtp_weights_repacks_data_after_staging_metadata(tmp_path):
         ],
     )
 
-    shared_initializers = Qwen35MoeTextModel._share_mtp_embedding_lm_head(tmp_path, "model.onnx")
+    model_builder = _make_qwen_mtp_model()
+    shared_initializers = model_builder.share_initializers(tmp_path, "model.onnx", "mtp.onnx")
 
     assert (tmp_path / "mtp.onnx.data").read_bytes() == b"keep"
     model = onnx.load(tmp_path / "mtp.onnx", load_external_data=False)
@@ -124,7 +150,8 @@ def test_share_mtp_weights_leaves_originals_on_truncated_data(tmp_path):
     )
     original_model = (tmp_path / "mtp.onnx").read_bytes()
 
-    shared_initializers = Qwen35MoeTextModel._share_mtp_embedding_lm_head(tmp_path, "model.onnx")
+    model_builder = _make_qwen_mtp_model()
+    shared_initializers = model_builder.share_initializers(tmp_path, "model.onnx", "mtp.onnx")
 
     assert (tmp_path / "mtp.onnx.data").read_bytes() == b"samexx"
     assert (tmp_path / "mtp.onnx").read_bytes() == original_model
@@ -157,7 +184,8 @@ def test_share_mtp_weights_restores_originals_when_metadata_replace_fails(tmp_pa
 
     monkeypatch.setattr(os, "replace", fail_metadata_replace)
 
-    shared_initializers = Qwen35MoeTextModel._share_mtp_embedding_lm_head(tmp_path, "model.onnx")
+    model_builder = _make_qwen_mtp_model()
+    shared_initializers = model_builder.share_initializers(tmp_path, "model.onnx", "mtp.onnx")
 
     assert (tmp_path / "mtp.onnx.data").read_bytes() == original_data
     assert (tmp_path / "mtp.onnx").read_bytes() == original_model

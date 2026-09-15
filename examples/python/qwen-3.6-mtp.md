@@ -58,16 +58,15 @@ offset RMSNorm convention.
 
 ## Exporting the model
 
-The model builder emits the MTP head as a separate `mtp.onnx` when `enable_mtp=true`. The main
-model must also expose its hidden state (`include_hidden_states=true`) so the head has an input
-to consume:
+When the model configuration declares MTP layers with `mtp_num_hidden_layers`, the model builder
+emits the MTP head as a separate `mtp.onnx`. The main model also exposes its hidden state
+automatically so the head has an input to consume. Models without MTP layers omit this file:
 
 ```bash
 python -m onnxruntime_genai.models.builder \
     -i <path-to-qwen3.6-hf-checkpoint> \
     -o <output-dir> \
-    -p fp16 -e cuda \
-    --extra_options enable_mtp=true include_hidden_states=true exclude_embeds=false
+    -p fp16 -e cuda
 ```
 
 This produces, in `<output-dir>`:
@@ -77,7 +76,10 @@ This produces, in `<output-dir>`:
   RMSNorms, and a copy of the embedding + `lm_head`);
 * `genai_config.json` — carrying an `mtp` section and the decoder's `hidden_states` output.
 
-`Qwen35MtpHead` (in `src/python/py/models/builders/qwen_mtp.py`) builds the head by reusing the
+To run without MTP, remove the `model.mtp` section from `genai_config.json`. The exported ONNX
+files do not need to be rebuilt.
+
+`Qwen35MTPHead` (in `src/python/py/models/builders/qwen.py`) builds the head by reusing the
 parent `Qwen35MoeTextModel` machinery (`_make_full_attention`, `make_moe`, mRoPE, the residual
 chain) for the single layer, and loads the `mtp.*` + shared embedding/`lm_head` weights directly
 from the source safetensors — HF `transformers` discards the `mtp.*` weights on load, so they

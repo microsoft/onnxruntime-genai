@@ -5,20 +5,24 @@ decoding. It is intended for maintainers changing proposal, verification, buffer
 guidance, sampling, continuation, or statistics behavior. For setup and public configuration, see
 [Speculative decoding](SpeculativeDecoding.md).
 
+This document's state machine belongs to the single-sequence `Generator` API. The dynamic Engine's
+caller-supplied greedy proposals use the Engine transaction and cache-reservation machinery instead;
+see [Paged Attention Engine](paged_attention_engine.md#caller-supplied-speculative-drafts).
+
 ## Source map
 
 | Area | Primary files |
 | --- | --- |
-| Strategy selection | [`src/decoding_strategy.cpp`](../src/decoding_strategy.cpp) |
-| Shared speculative lifecycle | [`src/speculative_decoding_strategy.h`](../src/speculative_decoding_strategy.h), [`src/speculative_decoding_strategy.cpp`](../src/speculative_decoding_strategy.cpp) |
-| Draft-model proposer | [`src/base_speculative_strategy.h`](../src/base_speculative_strategy.h), [`src/base_speculative_strategy.cpp`](../src/base_speculative_strategy.cpp) |
-| N-gram proposer | [`src/n_gram_decoding_strategy.h`](../src/n_gram_decoding_strategy.h), [`src/n_gram_decoding_strategy.cpp`](../src/n_gram_decoding_strategy.cpp) |
-| N-gram history index | [`src/n_gram_lookup.h`](../src/n_gram_lookup.h) |
+| Strategy selection | [`src/decoding/decoding_strategy.cpp`](../src/decoding/decoding_strategy.cpp) |
+| Shared speculative lifecycle | [`src/decoding/speculative_decoding_strategy.h`](../src/decoding/speculative_decoding_strategy.h), [`src/decoding/speculative_decoding_strategy.cpp`](../src/decoding/speculative_decoding_strategy.cpp) |
+| Draft-model proposer | [`src/decoding/base_speculative_strategy.h`](../src/decoding/base_speculative_strategy.h), [`src/decoding/base_speculative_strategy.cpp`](../src/decoding/base_speculative_strategy.cpp) |
+| N-gram proposer | [`src/decoding/n_gram_decoding_strategy.h`](../src/decoding/n_gram_decoding_strategy.h), [`src/decoding/n_gram_decoding_strategy.cpp`](../src/decoding/n_gram_decoding_strategy.cpp) |
+| N-gram history index | [`src/decoding/n_gram_lookup.h`](../src/decoding/n_gram_lookup.h) |
 | Composite target/draft model | [`src/models/speculative_decoding.h`](../src/models/speculative_decoding.h), [`src/models/speculative_decoding.cpp`](../src/models/speculative_decoding.cpp) |
-| Acceptance and correction math | [`src/speculative_sampling.h`](../src/speculative_sampling.h) |
-| Statistics contract | [`src/speculative_stats.h`](../src/speculative_stats.h), [`src/ort_genai_c.cpp`](../src/ort_genai_c.cpp) |
+| Acceptance and correction math | [`src/decoding/speculative_sampling.h`](../src/decoding/speculative_sampling.h) |
+| Statistics contract | [`src/decoding/speculative_stats.h`](../src/decoding/speculative_stats.h), [`src/ort_genai_c.cpp`](../src/ort_genai_c.cpp) |
 | Shared search/logits processing | [`src/sampling_distribution.h`](../src/sampling_distribution.h), [`src/search.cpp`](../src/search.cpp) |
-| Core tests | [`test/speculative_sampling_tests.cpp`](../test/speculative_sampling_tests.cpp), [`test/n_gram_lookup_tests.cpp`](../test/n_gram_lookup_tests.cpp), [`test/n_gram_decoding_strategy_tests.cpp`](../test/n_gram_decoding_strategy_tests.cpp) |
+| Core tests | [`test/cpp/speculative_sampling_tests.cpp`](../test/cpp/speculative_sampling_tests.cpp), [`test/cpp/n_gram_lookup_tests.cpp`](../test/cpp/n_gram_lookup_tests.cpp), [`test/cpp/n_gram_decoding_strategy_tests.cpp`](../test/cpp/n_gram_decoding_strategy_tests.cpp) |
 | Model-backed tests | [`test/python/models/test_speculative_decoding.py`](../test/python/models/test_speculative_decoding.py), [`test/python/models/test_n_gram_decoding.py`](../test/python/models/test_n_gram_decoding.py) |
 
 ## Component topology
@@ -393,7 +397,7 @@ External logits are intentionally restricted while a guided round has buffered t
 single externally meaningful grammar/logits position cannot be reconstructed from an arbitrary
 lookahead row without committing or discarding state.
 
-## External operations
+## Generator external operations
 
 | Operation | Idle | Draining or folded state | Result |
 | --- | --- | --- | --- |

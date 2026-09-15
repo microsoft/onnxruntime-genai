@@ -36,7 +36,7 @@ The primary benchmark matrix is:
 | Long prefill | 1 | 32K, 64K, 128K | TTFT, peak memory, chunk scaling |
 | Mixed workload | 4, 8 | One 128K prefill plus active decodes | Responsiveness and fairness |
 | Shared coding context | 4, 8 | 32K-128K shared prefix | Prefix-cache value |
-| Capacity pressure | 8 | Growing toward 128K each | Admission and preemption |
+| Capacity pressure | 8 | Growing toward 128K each | Admission now; preemption later |
 | Cancellation | 4, 8 | Cancel during long prefill | 500 ms cancellation target |
 | Continuation | 4, 8 | Repeated appended turns | Session-cache reuse |
 
@@ -65,3 +65,7 @@ do not derive core scheduler/cache measurements from Python wall-clock timing al
 > reflect the original design intent. We still detect and report **incomplete requests**
 > (a request generating fewer tokens than requested) via a `completed` flag per request in
 > `raw_requests`, which now fails the run's `status` instead of silently reporting `success`.
+
+> **Note (capacity pressure scope):** The current `capacity_pressure` scenario implements admission
+> coverage only. It submits memory-pressure prompts, records admitted requests and rejected
+> admissions, and leaves preemption/resume behavior for a later benchmark iteration.

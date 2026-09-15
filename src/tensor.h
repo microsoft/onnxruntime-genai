@@ -1,5 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+#pragma once
+
 namespace Generators {
 
 struct Tensor : std::enable_shared_from_this<Tensor>, LeakChecked<Tensor>, ExternalRefCounted<Tensor> {

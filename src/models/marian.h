@@ -1,8 +1,8 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #include "model.h"
-#include "input_ids.h"
-#include "position_inputs.h"
+#include "models/io/input_ids.h"
+#include "models/io/default_position_inputs.h"
 
 namespace Generators {
 

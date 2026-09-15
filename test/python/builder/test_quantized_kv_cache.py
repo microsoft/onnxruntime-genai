@@ -5,12 +5,12 @@
 
 The quantized KV cache stores the past/present key and value tensors in a
 compressed integer/FP8 encoding instead of the model's floating-point I/O dtype.
-It is selected via the ``kv_cache_quant_type`` extra option and is only valid
+It is selected via the ``kv_cache_quant_scheme`` extra option and is only valid
 with ``GroupQueryAttention``. These tests exercise the builder plumbing
 standalone (no model download):
 
-* ``check_extra_options`` validation of ``kv_cache_quant_type``.
-* ``make_quantized_kv_cache_init`` (cache dtype, bit width, quant granularity,
+* ``check_extra_options`` validation of ``kv_cache_quant_scheme``.
+* ``make_kv_cache_init`` (cache dtype, bit width, quant granularity,
   int4 head-size packing, past/present buffer sharing).
 * ``make_kv_cache_scale_initializers`` (per-tensor vs per-channel scale sizes,
   calibrated per-layer scales from a JSON file, and their validation).
@@ -32,7 +32,7 @@ import pytest
 
 MODELS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models"
 BUILDERS_DIR = MODELS_DIR / "builders"
-sys.path.insert(0, str(BUILDERS_DIR.parents[1]))
+sys.path.insert(0, str(MODELS_DIR))
 
 
 def _load_base_module():
@@ -57,7 +57,7 @@ def _load_builder_entrypoint_module():
         return type(name, (), {})
 
     builders_stub.__getattr__ = _stub_getattr
-    # Submodule imports (e.g. `from builders.quant_config import ...`) must resolve to the
+    # Submodule imports (e.g. `from quantization import ...`) must resolve to the
     # real, dependency-free modules rather than the catch-all above.
     builders_stub.__path__ = [str(BUILDERS_DIR)]
     sys.modules["builders"] = builders_stub
@@ -84,7 +84,7 @@ def _check_extra_options(extra_options, precision, execution_provider):
 
 
 # ===========================================================================
-# check_extra_options: kv_cache_quant_type validation
+# check_extra_options: kv_cache_quant_scheme validation
 # ===========================================================================
 
 
@@ -100,46 +100,46 @@ def _check_extra_options(extra_options, precision, execution_provider):
         "fp8_per_channel",
     ],
 )
-def test_valid_kv_cache_quant_types_are_accepted(quant_type):
-    kv = {"kv_cache_quant_type": quant_type}
+def test_valid_kv_cache_quant_schemes_are_accepted(quant_type):
+    kv = {"kv_cache_quant_scheme": quant_type}
     _check_extra_options(kv, "fp16", "cuda")
-    assert kv["kv_cache_quant_type"] == quant_type
+    assert kv["kv_cache_quant_scheme"] == quant_type
 
 
-def test_invalid_kv_cache_quant_type_is_rejected():
-    with pytest.raises(ValueError, match="kv_cache_quant_type must be one of"):
-        _check_extra_options({"kv_cache_quant_type": "int3_per_tensor"}, "fp16", "cuda")
+def test_invalid_kv_cache_quant_scheme_is_rejected():
+    with pytest.raises(ValueError, match="kv_cache_quant_scheme must be one of"):
+        _check_extra_options({"kv_cache_quant_scheme": "int3_per_tensor"}, "fp16", "cuda")
 
 
-def test_kv_cache_quant_type_is_lowercased():
-    kv = {"kv_cache_quant_type": "INT8_Per_Tensor"}
+def test_kv_cache_quant_scheme_is_lowercased():
+    kv = {"kv_cache_quant_scheme": "INT8_Per_Tensor"}
     _check_extra_options(kv, "fp16", "cuda")
-    assert kv["kv_cache_quant_type"] == "int8_per_tensor"
+    assert kv["kv_cache_quant_scheme"] == "int8_per_tensor"
 
 
 @pytest.mark.parametrize("execution_provider", ["cpu", "cuda"])
 def test_quantized_kv_cache_allowed_on_cpu_and_cuda(execution_provider):
-    kv = {"kv_cache_quant_type": "fp8_per_tensor"}
+    kv = {"kv_cache_quant_scheme": "fp8_per_tensor"}
     _check_extra_options(kv, "fp16", execution_provider)
-    assert kv["kv_cache_quant_type"] == "fp8_per_tensor"
+    assert kv["kv_cache_quant_scheme"] == "fp8_per_tensor"
 
 
 @pytest.mark.parametrize("execution_provider", ["webgpu", "dml", "rocm"])
 def test_quantized_kv_cache_rejected_on_unsupported_ep(execution_provider):
     with pytest.raises(ValueError, match="only supported for the CPU and CUDA"):
-        _check_extra_options({"kv_cache_quant_type": "int8_per_tensor"}, "fp16", execution_provider)
+        _check_extra_options({"kv_cache_quant_scheme": "int8_per_tensor"}, "fp16", execution_provider)
 
 
 @pytest.mark.parametrize("execution_provider", ["webgpu", "dml", "cpu", "cuda"])
-def test_none_kv_cache_quant_type_allowed_on_any_ep(execution_provider):
+def test_none_kv_cache_quant_scheme_allowed_on_any_ep(execution_provider):
     # `none` is a no-op and must not be restricted to the CPU/CUDA EPs.
-    kv = {"kv_cache_quant_type": "none"}
+    kv = {"kv_cache_quant_scheme": "none"}
     _check_extra_options(kv, "fp16", execution_provider)
-    assert kv["kv_cache_quant_type"] == "none"
+    assert kv["kv_cache_quant_scheme"] == "none"
 
 
 # ===========================================================================
-# make_quantized_kv_cache_init: cache dtype / bit width / packing
+# make_kv_cache_init: cache dtype / bit width / packing
 # ===========================================================================
 
 
@@ -158,13 +158,31 @@ def _make_kv_model(
     model.head_size = head_size
     model.num_kv_heads = num_kv_heads
     model.num_layers = num_layers
-    model.kv_cache_quant_type = kv_cache_quant_type
     model.extra_options = extra_options if extra_options is not None else {}
+    model.kv_cache_attrs = {
+        "quant_scheme": kv_cache_quant_type,
+        "quant_type": (
+            ir.DataType.INT8
+            if kv_cache_quant_type.startswith("int8")
+            else ir.DataType.INT4
+            if kv_cache_quant_type.startswith("int4")
+            else ir.DataType.FLOAT8E4M3FN
+            if kv_cache_quant_type.startswith("fp8")
+            else None
+        ),
+        "bit_width": 4 if kv_cache_quant_type.startswith("int4") else 8,
+        "quant_mode": "PER_TOKEN"
+        if kv_cache_quant_type.endswith("per_token")
+        else "PER_CHANNEL"
+        if kv_cache_quant_type.endswith("per_channel")
+        else "PER_TENSOR",
+        "scales_path": model.extra_options.get("kv_cache_scale_file", ""),
+    }
     model.attention_attrs = {"op_type": op_type}
     model.use_paged_attention = use_paged_attention
     model.input_names = {
-        "past_key_values.key": [f"past_key_values.{layer_id}.key" for layer_id in range(num_layers)],
-        "past_key_values.value": [f"past_key_values.{layer_id}.value" for layer_id in range(num_layers)],
+        "past_key_values.key": {layer_id: f"past_key_values.{layer_id}.key" for layer_id in range(num_layers)},
+        "past_key_values.value": {layer_id: f"past_key_values.{layer_id}.value" for layer_id in range(num_layers)},
     }
     model.input_types = {}
     model.output_types = {}
@@ -179,10 +197,19 @@ def _make_kv_model(
     return model
 
 
+def _initialize_kv_cache(model):
+    make_scale_initializers = model.make_kv_cache_scale_initializers
+    model.make_kv_cache_scale_initializers = lambda: None
+    try:
+        model.make_kv_cache_init()
+    finally:
+        model.make_kv_cache_scale_initializers = make_scale_initializers
+
+
 def test_quantized_kv_cache_requires_group_query_or_paged_attention():
     model = _make_kv_model(kv_cache_quant_type="int8_per_tensor", op_type="MultiHeadAttention")
     with pytest.raises(ValueError, match="requires GroupQueryAttention or PagedAttention"):
-        model.make_quantized_kv_cache_init()
+        _initialize_kv_cache(model)
 
 
 @pytest.mark.parametrize("quant_type", ["int8_per_tensor", "int8_per_channel", "fp8_per_tensor", "fp8_per_channel"])
@@ -193,7 +220,7 @@ def test_paged_attention_accepts_int8_and_fp8_kv_cache(quant_type):
         op_type="PagedAttention",
         use_paged_attention=True,
     )
-    model.make_quantized_kv_cache_init()
+    _initialize_kv_cache(model)
 
     expected_dtype = ir.DataType.FLOAT8E4M3FN if quant_type.startswith("fp8") else ir.DataType.INT8
     assert model.input_types["past_key_values.key"] == expected_dtype
@@ -201,16 +228,16 @@ def test_paged_attention_accepts_int8_and_fp8_kv_cache(quant_type):
 
 
 @pytest.mark.parametrize("quant_type", ["int4_per_tensor", "int4_per_channel"])
-def test_paged_attention_rejects_int4_kv_cache(quant_type):
-    # PagedAttention's T_CACHE constraint has no sub-byte member, so int4 caches are not exportable.
+def test_paged_attention_accepts_int4_kv_cache(quant_type):
     model = _make_kv_model(
         kv_cache_quant_type=quant_type,
         ep="cuda",
         op_type="PagedAttention",
         use_paged_attention=True,
     )
-    with pytest.raises(ValueError, match="only supports int8 and fp8"):
-        model.make_quantized_kv_cache_init()
+    _initialize_kv_cache(model)
+    assert model.input_types["past_key_values.key"] == ir.DataType.UINT8
+    assert model.input_shapes["past_key_values.key"][-1] == 8
 
 
 @pytest.mark.parametrize("ep", ["webgpu", "dml", "trt-rtx"])
@@ -219,14 +246,16 @@ def test_quantized_kv_cache_init_rejects_unsupported_ep(ep):
     # unsupported EPs for direct `create_model()` callers.
     model = _make_kv_model(kv_cache_quant_type="int8_per_tensor", ep=ep)
     with pytest.raises(ValueError, match="only supported for the CPU and CUDA"):
-        model.make_quantized_kv_cache_init()
+        _initialize_kv_cache(model)
 
 
-def test_kv_cache_quant_types_constant_matches_builder_validation():
+def test_kv_cache_quant_schemes_constant_matches_builder_validation():
     # `check_extra_options` in builder.py is the single place that validates the option and
-    # reads this constant from `builders.quant_config`, which is the source of truth.
-    assert set(builder_module.KV_CACHE_QUANT_TYPES) == {
+    # reads this constant from `quantization`, which is the source of truth.
+    assert set(builder_module.KV_CACHE_QUANT_SCHEMES) == {
         "none",
+        "int4_per_token",
+        "int8_per_token",
         "int8_per_tensor",
         "int8_per_channel",
         "int4_per_tensor",
@@ -247,14 +276,12 @@ def test_kv_cache_quant_types_constant_matches_builder_validation():
         ("fp8_per_channel", ir.DataType.FLOAT8E4M3FN, 8, "PER_CHANNEL"),
     ],
 )
-def test_make_quantized_kv_cache_init_sets_dtype_and_metadata(
-    quant_type, expected_dtype, expected_bits, expected_quant
-):
+def test_make_kv_cache_init_sets_dtype_and_metadata(quant_type, expected_dtype, expected_bits, expected_quant):
     model = _make_kv_model(kv_cache_quant_type=quant_type)
-    model.make_quantized_kv_cache_init()
+    _initialize_kv_cache(model)
 
-    assert model.kv_cache_bit_width == expected_bits
-    assert model.kv_quant_type == expected_quant
+    assert model.kv_cache_attrs["bit_width"] == expected_bits
+    assert model.kv_cache_attrs["quant_mode"] == expected_quant
     for io in ("past_key_values.key", "past_key_values.value"):
         assert model.input_types[io] == expected_dtype
     for io in ("present.key", "present.value"):
@@ -263,7 +290,7 @@ def test_make_quantized_kv_cache_init_sets_dtype_and_metadata(
 
 def test_int4_kv_cache_packs_two_elements_per_byte():
     model = _make_kv_model(kv_cache_quant_type="int4_per_tensor", head_size=16)
-    model.make_quantized_kv_cache_init()
+    _initialize_kv_cache(model)
 
     # int4 stores two elements per byte -> last dim is ceil(head_size / 2).
     assert model.input_shapes["past_key_values.key"][-1] == 8
@@ -272,9 +299,48 @@ def test_int4_kv_cache_packs_two_elements_per_byte():
     assert model.output_shapes["present.value"][-1] == 8
 
 
+@pytest.mark.parametrize("scheme", ["int4_per_token", "int8_per_token"])
+def test_dynamic_paged_scales_need_no_calibration(scheme):
+    model = _make_kv_model(
+        scheme,
+        ep="cuda",
+        op_type="PagedAttention",
+        use_paged_attention=True,
+        extra_options={"kv_cache_rotation": "hadamard"},
+    )
+    model.output_names = {
+        f"present.{side}": {layer: f"present.{layer}.{side}" for layer in range(model.num_layers)}
+        for side in ("key", "value")
+    }
+    model.make_kv_cache_init()
+    assert model.kv_cache_attrs["rotation"] == "HADAMARD"
+    assert model.input_types["past_key_values.key_scale"] == ir.DataType.FLOAT16
+    assert model.input_shapes["past_key_values.key_scale"] == ["num_blocks", "block_size", 2]
+    assert model.output_names["present.value_scale"][2] == "present.2.value_scale"
+    assert model.get_kv_cache_scale_inputs(layer_id=0) == ("", "")
+
+
+def test_per_token_scales_reject_nonpaged_export():
+    model = _make_kv_model("int4_per_token", ep="cuda")
+    with pytest.raises(ValueError, match="requires CUDA PagedAttention"):
+        model.make_kv_cache_init()
+
+
+def test_hadamard_rejects_per_channel_scales():
+    model = _make_kv_model(
+        "int4_per_channel",
+        ep="cuda",
+        op_type="PagedAttention",
+        use_paged_attention=True,
+        extra_options={"kv_cache_rotation": "hadamard"},
+    )
+    with pytest.raises(ValueError, match="per-channel"):
+        model.make_kv_cache_init()
+
+
 def test_int4_kv_cache_packs_odd_head_size_with_ceiling():
     model = _make_kv_model(kv_cache_quant_type="int4_per_channel", head_size=15)
-    model.make_quantized_kv_cache_init()
+    _initialize_kv_cache(model)
 
     # ceil(15 / 2) == 8
     assert model.input_shapes["past_key_values.key"][-1] == 8
@@ -284,7 +350,7 @@ def test_int4_kv_cache_packs_odd_head_size_with_ceiling():
 @pytest.mark.parametrize("quant_type", ["int8_per_tensor", "fp8_per_tensor"])
 def test_non_int4_kv_cache_does_not_pack_head_size(quant_type):
     model = _make_kv_model(kv_cache_quant_type=quant_type, head_size=16)
-    model.make_quantized_kv_cache_init()
+    _initialize_kv_cache(model)
 
     # int8/fp8 store one byte per element, so the head-size dim is unchanged.
     assert model.input_shapes["past_key_values.key"][-1] == 16
@@ -300,7 +366,7 @@ def test_non_int4_kv_cache_does_not_pack_head_size(quant_type):
 )
 def test_quantized_kv_cache_past_present_share_buffer(ep, expected_share):
     model = _make_kv_model(kv_cache_quant_type="int8_per_tensor", ep=ep)
-    model.make_quantized_kv_cache_init()
+    _initialize_kv_cache(model)
     assert model.past_present_share_buffer is expected_share
 
 
@@ -327,7 +393,6 @@ def test_per_tensor_scale_initializers_are_scalar_per_layer(tmp_path):
         num_layers=2,
         extra_options={"kv_cache_scale_file": str(scale_file)},
     )
-    model.kv_quant_type = "PER_TENSOR"
     captured = _capture_initializers(model)
 
     model.make_kv_cache_scale_initializers()
@@ -363,7 +428,6 @@ def test_per_channel_scale_initializers_span_num_kv_heads_times_head_size(tmp_pa
         num_layers=1,
         extra_options={"kv_cache_scale_file": str(scale_file)},
     )
-    model.kv_quant_type = "PER_CHANNEL"
     captured = _capture_initializers(model)
 
     model.make_kv_cache_scale_initializers()
@@ -399,7 +463,6 @@ def test_paged_per_channel_scale_initializers_use_canonical_shape(tmp_path):
         extra_options={"kv_cache_scale_file": str(scale_file)},
         use_paged_attention=True,
     )
-    model.kv_quant_type = "PER_CHANNEL"
     captured = _capture_initializers(model)
 
     model.make_kv_cache_scale_initializers()
@@ -409,33 +472,38 @@ def test_paged_per_channel_scale_initializers_use_canonical_shape(tmp_path):
         assert arr.shape == (2, 1, 16)
 
 
-def test_hybrid_qwen_paged_per_channel_scales_use_canonical_shape(tmp_path):
+def test_graph_named_scale_section_is_selected(tmp_path):
     scale_size = 2 * 16
     scale_file = tmp_path / "kv_scales.json"
     scale_file.write_text(
         json.dumps(
             {
-                "scales": {
-                    "k_scales": [[0.1] * scale_size],
-                    "v_scales": [[0.2] * scale_size],
+                "mtp": {
+                    "scales": {
+                        "k_scales": [[0.1] * scale_size],
+                        "v_scales": [[0.2] * scale_size],
+                    }
                 }
             }
         )
     )
-    model = Qwen35TextModel.__new__(Qwen35TextModel)
-    model.kv_quant_type = "PER_CHANNEL"
+    model = Model.__new__(Model)
+    model.kv_cache_attrs = {
+        "quant_scheme": "int8_per_channel",
+        "quant_mode": "PER_CHANNEL",
+        "scales_path": str(scale_file),
+    }
     model.use_paged_attention = True
+    model.filename = "mtp.onnx"
     model.num_kv_heads = 2
     model.head_size = 16
-    model.num_layers = 2
-    model.layer_types = ["linear_attention", "full_attention"]
-    model.extra_options = {"kv_cache_scale_file": str(scale_file)}
-    model._legacy_fp8_kv_cache = False
+    model.num_layers = 1
+    model.input_names = {"past_key_values.key": ["past_key_values.0.key"]}
     captured = _capture_initializers(model)
 
     model.make_kv_cache_scale_initializers()
 
-    assert set(captured) == {"model.layers.1.attn.k_scale", "model.layers.1.attn.v_scale"}
+    assert set(captured) == {"model.layers.0.attn.k_scale", "model.layers.0.attn.v_scale"}
     for arr in captured.values():
         assert arr.shape == (2, 1, 16)
 
@@ -454,7 +522,6 @@ def test_paged_per_tensor_scale_initializers_stay_scalar(tmp_path):
         extra_options={"kv_cache_scale_file": str(scale_file)},
         use_paged_attention=True,
     )
-    model.kv_quant_type = "PER_TENSOR"
     captured = _capture_initializers(model)
 
     model.make_kv_cache_scale_initializers()
@@ -468,7 +535,6 @@ def test_missing_scale_file_is_rejected():
         kv_cache_quant_type="int8_per_tensor",
         num_layers=1,
     )
-    model.kv_quant_type = "PER_TENSOR"
     _capture_initializers(model)
 
     with pytest.raises(ValueError, match="kv_cache_scale_file"):
@@ -492,7 +558,6 @@ def test_calibrated_per_layer_scales_are_loaded_from_file(tmp_path):
         num_layers=2,
         extra_options={"kv_cache_scale_file": str(scale_file)},
     )
-    model.kv_quant_type = "PER_TENSOR"
     captured = _capture_initializers(model)
 
     model.make_kv_cache_scale_initializers()
@@ -501,6 +566,70 @@ def test_calibrated_per_layer_scales_are_loaded_from_file(tmp_path):
     np.testing.assert_allclose(captured["model.layers.1.attn.k_scale"], 0.2)
     np.testing.assert_allclose(captured["model.layers.0.attn.v_scale"], 0.3)
     np.testing.assert_allclose(captured["model.layers.1.attn.v_scale"], 0.4)
+
+
+def test_calibration_qmax_retargets_scales_to_the_requested_bit_width(tmp_path):
+    # A scale is threshold / qmax, so an int8-calibrated file (qmax 128) reused for an int4
+    # cache (qmax 8) must scale up by 16x. Without this the cache clips hard.
+    scale_file = tmp_path / "kv_scales.json"
+    scale_file.write_text(json.dumps({"qmax": 128, "scales": {"k_scales": [0.1], "v_scales": [0.2]}}))
+    model = _make_kv_model(
+        kv_cache_quant_type="int4_per_tensor",
+        num_layers=1,
+        extra_options={"kv_cache_scale_file": str(scale_file)},
+    )
+    captured = _capture_initializers(model)
+
+    model.make_kv_cache_scale_initializers()
+
+    np.testing.assert_allclose(captured["model.layers.0.attn.k_scale"], 1.6)
+    np.testing.assert_allclose(captured["model.layers.0.attn.v_scale"], 3.2)
+
+
+def test_calibration_qmax_matching_the_scheme_leaves_scales_unchanged(tmp_path):
+    scale_file = tmp_path / "kv_scales.json"
+    scale_file.write_text(json.dumps({"qmax": 128, "scales": {"k_scales": [0.1], "v_scales": [0.2]}}))
+    model = _make_kv_model(
+        kv_cache_quant_type="int8_per_tensor",
+        num_layers=1,
+        extra_options={"kv_cache_scale_file": str(scale_file)},
+    )
+    captured = _capture_initializers(model)
+
+    model.make_kv_cache_scale_initializers()
+
+    np.testing.assert_allclose(captured["model.layers.0.attn.k_scale"], 0.1)
+    np.testing.assert_allclose(captured["model.layers.0.attn.v_scale"], 0.2)
+
+
+@pytest.mark.parametrize("qmax", [0, -8, "128", True, float("inf")])
+def test_invalid_calibration_qmax_is_rejected(tmp_path, qmax):
+    scale_file = tmp_path / "kv_scales.json"
+    scale_file.write_text(json.dumps({"qmax": qmax, "scales": {"k_scales": [0.1], "v_scales": [0.2]}}))
+    model = _make_kv_model(
+        kv_cache_quant_type="int4_per_tensor",
+        num_layers=1,
+        extra_options={"kv_cache_scale_file": str(scale_file)},
+    )
+    _capture_initializers(model)
+
+    with pytest.raises(ValueError, match="qmax must be"):
+        model.make_kv_cache_scale_initializers()
+
+
+@pytest.mark.parametrize("scale,qmax", [(3e38, 128), (1e-44, 0.01), (1.0, 1e308)])
+def test_rescaled_calibration_scales_must_remain_finite_and_positive(tmp_path, scale, qmax):
+    scale_file = tmp_path / "kv_scales.json"
+    scale_file.write_text(json.dumps({"qmax": qmax, "scales": {"k_scales": [scale], "v_scales": [scale]}}))
+    model = _make_kv_model(
+        kv_cache_quant_type="int4_per_tensor",
+        num_layers=1,
+        extra_options={"kv_cache_scale_file": str(scale_file)},
+    )
+    _capture_initializers(model)
+
+    with pytest.raises(ValueError, match="Rescaled kv_cache scale.*finite positive"):
+        model.make_kv_cache_scale_initializers()
 
 
 def test_sparse_layer_ids_map_scales_to_model_layers(tmp_path):
@@ -522,8 +651,8 @@ def test_sparse_layer_ids_map_scales_to_model_layers(tmp_path):
         extra_options={"kv_cache_scale_file": str(scale_file)},
     )
     model.kv_quant_type = "PER_TENSOR"
-    model.input_names["past_key_values.key"] = ["past_key_values.1.key", "past_key_values.3.key"]
-    model.input_names["past_key_values.value"] = ["past_key_values.1.value", "past_key_values.3.value"]
+    model.input_names["past_key_values.key"] = {1: "past_key_values.1.key", 3: "past_key_values.3.key"}
+    model.input_names["past_key_values.value"] = {1: "past_key_values.1.value", 3: "past_key_values.3.value"}
     captured = _capture_initializers(model)
 
     model.make_kv_cache_scale_initializers()
@@ -559,8 +688,8 @@ def test_sparse_layer_ids_must_match_model_kv_layers(tmp_path):
         extra_options={"kv_cache_scale_file": str(scale_file)},
     )
     model.kv_quant_type = "PER_TENSOR"
-    model.input_names["past_key_values.key"] = ["past_key_values.1.key", "past_key_values.3.key"]
-    model.input_names["past_key_values.value"] = ["past_key_values.1.value", "past_key_values.3.value"]
+    model.input_names["past_key_values.key"] = {1: "past_key_values.1.key", 3: "past_key_values.3.key"}
+    model.input_names["past_key_values.value"] = {1: "past_key_values.1.value", 3: "past_key_values.3.value"}
     _capture_initializers(model)
 
     with pytest.raises(ValueError, match="must match the model's KV-cache layers"):
@@ -614,7 +743,6 @@ def test_calibrated_per_channel_scales_are_loaded_from_file(tmp_path):
         num_layers=1,
         extra_options={"kv_cache_scale_file": str(scale_file)},
     )
-    model.kv_quant_type = "PER_CHANNEL"
     captured = _capture_initializers(model)
 
     model.make_kv_cache_scale_initializers()
@@ -632,7 +760,6 @@ def test_scale_file_with_wrong_number_of_layers_is_rejected(tmp_path):
         num_layers=3,
         extra_options={"kv_cache_scale_file": str(scale_file)},
     )
-    model.kv_quant_type = "PER_TENSOR"
     _capture_initializers(model)
 
     with pytest.raises(ValueError, match="must provide 3 per-layer scales"):
@@ -651,7 +778,6 @@ def test_scale_file_with_wrong_per_channel_size_is_rejected(tmp_path):
         num_layers=1,
         extra_options={"kv_cache_scale_file": str(scale_file)},
     )
-    model.kv_quant_type = "PER_CHANNEL"
     _capture_initializers(model)
 
     with pytest.raises(ValueError, match="expected 4"):
@@ -678,13 +804,15 @@ def _make_gqa_model(kv_cache_quant_type="none", kv_quant_type="PER_TENSOR", kv_c
     }
     model.rope_attrs = {"interleaved": 0}
     model.io_dtype = ir.DataType.FLOAT16
-    model.kv_cache_quant_type = kv_cache_quant_type
-    model.kv_quant_type = kv_quant_type
-    model.kv_cache_bit_width = kv_cache_bit_width
+    model.kv_cache_attrs = {
+        "quant_scheme": kv_cache_quant_type,
+        "quant_mode": kv_quant_type,
+        "bit_width": kv_cache_bit_width,
+    }
     model.nodes = []
 
     def make_node(op_type, inputs, outputs, name, domain="", **attributes):
-        model.nodes.append({"op_type": op_type, "inputs": inputs, "attributes": attributes})
+        model.nodes.append({"op_type": op_type, "inputs": inputs, "outputs": outputs, "attributes": attributes})
 
     model.make_node = make_node
     model.make_value = lambda *args, **kwargs: None
@@ -693,6 +821,37 @@ def _make_gqa_model(kv_cache_quant_type="none", kv_quant_type="PER_TENSOR", kv_c
 
 # The 12 fixed GQA inputs preceding the optional k/v scales and q/k norm weights.
 _GQA_BASE_INPUT_COUNT = 12
+
+
+def test_paged_dynamic_int4_node_wires_scale_aliases():
+    model = _make_gqa_model("int4_per_token", "PER_TOKEN", 4)
+    model.kv_cache_attrs["rotation"] = "HADAMARD"
+    model.input_names = {
+        f"past_key_values.{side}_scale": {3: f"past_key_values.3.{side}_scale"} for side in ("key", "value")
+    }
+    model.output_names = {f"present.{side}_scale": {3: f"present.3.{side}_scale"} for side in ("key", "value")}
+    model.make_paged_attention(
+        "/paged",
+        layer_id=3,
+        q_path="q",
+        k_path="k",
+        v_path="v",
+        past_k="past_key_values.3.key",
+        past_v="past_key_values.3.value",
+        present_k="present.3.key",
+        present_v="present.3.value",
+        cumulative_sequence_lengths="cu",
+        past_sequence_lengths="past",
+        block_table="blocks",
+        attention_metadata="metadata",
+    )
+    node = model.nodes[-1]
+    assert node["inputs"][14:19] == ["", "", "metadata", "past_key_values.3.key_scale", "past_key_values.3.value_scale"]
+    assert node["outputs"][3:] == ["present.3.key_scale", "present.3.value_scale"]
+    assert node["attributes"]["k_cache_dtype"] == "int4"
+    assert node["attributes"]["v_cache_dtype"] == "int4"
+    assert node["attributes"]["qk_rotation"] == "HADAMARD"
+    assert node["attributes"]["v_rotation"] == "HADAMARD"
 
 
 def test_plain_gqa_has_no_scale_inputs_or_quant_attributes():

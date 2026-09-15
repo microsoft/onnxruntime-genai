@@ -12,8 +12,13 @@
 #
 # Format (VERSION_INFO's trailing '-dev' is stripped to form the base):
 #   stable : X.Y.Z                    (from VERSION_INFO)
-#   dev    : X.Y.Z-dev<yyyymmdd><BuildId>
-#            e.g. 0.15.0-dev20260720123456  (PEP 440 -> 0.15.0.dev20260720123456)
+#   dev    : X.Y.Z-dev<1000000000 + BuildId>
+#            e.g. 0.15.0-dev1001393122  (PEP 440 -> 0.15.0.dev1001393122)
+#
+# Azure Artifacts parses the PEP 440 dev suffix as a 32-bit integer. Do not
+# concatenate the date and BuildId: values such as 202609011393122 are rejected.
+# The offset keeps new versions above legacy date-only versions (dev20260819),
+# while BuildId provides monotonic ordering and uniqueness.
 #
 # Consume downstream via (stage must dependsOn 'version'):
 #   variables:
@@ -54,14 +59,18 @@ stages:
         script: |
           $ErrorActionPreference = 'Stop'
           $version_info = (Get-Content -Path ./VERSION_INFO).Trim()
-          # Strip a single trailing '-dev' to form the base X.Y.Z; the dev suffix
-          # (date + BuildId) is re-appended below so the string stays valid for
-          # PEP 440 / SemVer / Maven.
+          # Strip a single trailing '-dev' to form the base X.Y.Z.
           $base = $version_info -replace '-dev$', ''
           $build_id = $env:BUILD_BUILDID
-          $date = (Get-Date).ToString('yyyyMMdd')
+          if ($build_id -notmatch '^\d+$') {
+            throw "BUILD_BUILDID must be a non-negative integer, got '$build_id'"
+          }
+          $dev_number = 1000000000L + [long]$build_id
+          if ($dev_number -gt [int]::MaxValue) {
+            throw "Generated dev version integer $dev_number exceeds the Azure Artifacts limit $([int]::MaxValue)"
+          }
           $version = switch ('${{ parameters.version_type }}') {
-            'dev'    { "$base-dev$date$build_id" }
+            'dev'    { "$base-dev$dev_number" }
             'stable' { "$base" }
             default  { throw "unknown version_type: ${{ parameters.version_type }}" }
           }

@@ -5,7 +5,7 @@
 # -------------------------------------------------------------------------
 """ONNX model builders for Qwen-3.8 Flash Next (Hugging Face architecture family ``Qwen4Exp``).
 
-Qwen4Exp is a hybrid multimodal MoE decoder.  Relative to Qwen3.5 (``Qwen35MoeTextModel``)
+Qwen4Exp is a hybrid multimodal MoE decoder.  Relative to Qwen3.5 (``Qwen35MoETextModel``)
 it adds four structural features that have no counterpart anywhere else in this repository:
 
 1. **Hyper-connections.**  The residual stream is widened to ``hc_count`` parallel streams
@@ -27,7 +27,7 @@ it adds four structural features that have no counterpart anywhere else in this 
    scored to select a token budget for the main attention.
 
 4. **MoE + always-on shared expert**, identical in layout to Qwen3.5-MoE, so
-   :meth:`Qwen35MoeTextModel.make_moe` is reused unchanged.
+   :meth:`Qwen35MoETextModel.make_moe` is reused unchanged.
 
 Contrib operator contracts
 --------------------------
@@ -102,7 +102,7 @@ import onnx_ir as ir
 import torch
 
 from .base import Model
-from .qwen import Qwen35MoeTextModel
+from .qwen import Qwen35MoETextModel
 
 #####################################################################################
 # Deterministic n-gram hashing (mirrors modeling_qwen4_exp.py)
@@ -184,7 +184,7 @@ def padded_ngram_vocab_size(total_vocab_size: int, divisor: int) -> int:
 
 
 class _PackedExpertsView:
-    """Adapter that makes ``Qwen4ExpTextExperts`` usable by ``Qwen35MoeTextModel.make_moe``.
+    """Adapter that makes ``Qwen4ExpTextExperts`` usable by ``Qwen35MoETextModel.make_moe``.
 
     Qwen3.5's MoE builder probes ``next(iter(mlp.experts), None)`` to detect a ModelOpt NVFP4
     checkpoint whose experts are stored as a per-expert module list.  Qwen4Exp only ever stores
@@ -218,11 +218,11 @@ class _PackedMoeView:
 #####################################################################################
 
 
-class Qwen4ExpTextModel(Qwen35MoeTextModel):
+class Qwen4ExpTextModel(Qwen35MoETextModel):
     """Qwen-3.8 Flash Next text decoder.
 
     Inherits the hybrid (GatedDeltaNet linear attention + gated full attention) machinery and
-    the MoE + shared-expert MLP from :class:`Qwen35MoeTextModel`, and replaces:
+    the MoE + shared-expert MLP from :class:`Qwen35MoETextModel`, and replaces:
 
     * the residual/layernorm chaining with hyper-connections,
     * ``GroupQueryAttention`` with ``QwenSparseAttention``/``SparsePagedAttention``,
@@ -242,7 +242,7 @@ class Qwen4ExpTextModel(Qwen35MoeTextModel):
         """Normalize ``qwen_sparse_attention`` to the ``full_attention`` name the base uses.
 
         Every Qwen4Exp attention layer is a QSA layer, so it maps 1:1 onto the Qwen3.5
-        full-attention path; only the attention op itself differs.  ``_make_full_attention``
+        full-attention path; only the attention op itself differs.  ``make_attention``
         swaps in ``QwenSparseAttention``/``SparsePagedAttention`` when the module actually
         carries an indexer.
         """
@@ -254,12 +254,40 @@ class Qwen4ExpTextModel(Qwen35MoeTextModel):
             text_config.layer_types = normalized
             if text_config is not config:
                 config.layer_types = list(normalized)
-        return super()._resolve_layer_types(config, num_layers)
+            configured = normalized
+        if configured is not None:
+            if len(configured) < num_layers:
+                raise ValueError(
+                    f"Qwen4Exp layer_types has {len(configured)} entries, "
+                    f"but {num_layers} layers were requested"
+                )
+            layer_types = list(configured[:num_layers])
+        else:
+            interval = getattr(config, "full_attention_interval", None)
+            if interval is None:
+                interval = getattr(text_config, "full_attention_interval", None)
+            layer_types = (
+                ["full_attention" if (i + 1) % interval == 0 else "linear_attention" for i in range(num_layers)]
+                if interval is not None
+                else ["full_attention"] * num_layers
+            )
+
+        unknown_layer_types = sorted(set(layer_types) - {"full_attention", "linear_attention"})
+        if unknown_layer_types:
+            raise ValueError(f"Unsupported Qwen4Exp layer_types: {unknown_layer_types}")
+        return layer_types
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         text_config = getattr(config, "text_config", config)
 
-        # `Qwen35MoeTextModel` reads num_local_experts / intermediate_size off the *text* config.
+        self.is_text_only = extra_options.get("exclude_embeds", None) is False
+        if "exclude_embeds" not in extra_options:
+            extra_options["exclude_embeds"] = True
+
+        num_layers = int(extra_options.get("num_hidden_layers", getattr(text_config, "num_hidden_layers", 0)))
+        config.layer_types = self._resolve_layer_types(config, num_layers)
+
+        # `Qwen35MoETextModel` reads num_local_experts / intermediate_size off the *text* config.
         if getattr(text_config, "num_experts", None) is not None and not hasattr(text_config, "num_local_experts"):
             text_config.num_local_experts = text_config.num_experts
         if not hasattr(text_config, "intermediate_size") and hasattr(text_config, "moe_intermediate_size"):
@@ -293,10 +321,11 @@ class Qwen4ExpTextModel(Qwen35MoeTextModel):
         self.indexer_compress_ratio = int(getattr(text_config, "indexer_compress_ratio", 1))
 
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.model_type = self._get_model_type(config)
 
         self.hc_hidden_size = self.hc_count * self.hidden_size
 
-        # Set by `_make_full_attention` so the `make_attention_op` callback can pick the QSA op.
+        # Set by `make_attention` so the `make_attention_op` callback can pick the QSA op.
         self._pending_indexer = None
 
         eos_token_id = getattr(text_config, "eos_token_id", 0)
@@ -918,7 +947,7 @@ class Qwen4ExpTextModel(Qwen35MoeTextModel):
     def make_attention_op(self, name, **kwargs):
         """Route Qwen4Exp full attention through the sparse (QSA) attention op.
 
-        ``_make_full_attention`` stashes the indexer query/key tensor names in
+        ``make_attention`` stashes the indexer query/key tensor names in
         ``self._pending_indexer`` before delegating to the Qwen3.5 gated-attention body, which
         eventually calls back into this method.
         """
@@ -940,17 +969,21 @@ class Qwen4ExpTextModel(Qwen35MoeTextModel):
             present_v=kwargs.get("present_v", ""),
         )
 
-    def _make_full_attention(self, layer_id, attn, root_input):
+    def make_attention(self, layer_id, attention, root_input, **kwargs):
         """Same gated attention as Qwen3.5 plus the QSA indexer side-projection."""
-        indexer = getattr(attn, "indexer", None)
+        if self.layer_types[layer_id] == "linear_attention":
+            super().make_attention(layer_id, attention, root_input, **kwargs)
+            return
+
+        indexer = getattr(attention, "indexer", None)
         if indexer is None or not self.indexer_head_dim:
-            super()._make_full_attention(layer_id, attn, root_input)
+            super().make_attention(layer_id, attention, root_input, **kwargs)
             return
 
         indexer_q, indexer_k = self._make_qsa_indexer(layer_id, indexer, root_input)
         self._pending_indexer = (indexer_q, indexer_k)
         try:
-            super()._make_full_attention(layer_id, attn, root_input)
+            super().make_attention(layer_id, attention, root_input, **kwargs)
         finally:
             self._pending_indexer = None
 
@@ -1033,7 +1066,9 @@ class Qwen4ExpTextModel(Qwen35MoeTextModel):
         """
         if not isinstance(getattr(mlp, "experts", None), torch.nn.ModuleList):
             mlp = _PackedMoeView(mlp)
-        super().make_moe(layer_id, mlp, root_input)
+        self.make_moe_preprocessing(layer_id, mlp, root_input)
+        self.make_moe_router(layer_id, mlp, root_input)
+        self.layernorm_attrs["skip_input"] = self.make_moe_subgraph(layer_id, mlp, root_input)
 
     def make_mlp(self, layer_id, mlp, root_input):
         # Every Qwen4Exp layer is MoE; keep the base dispatch honest.
