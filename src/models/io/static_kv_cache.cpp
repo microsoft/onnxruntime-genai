@@ -42,18 +42,19 @@ namespace Generators {
 // layer_shapes_[i][2] instead of a single scalar, and let the share-buffer
 // branch's per-layer loop do the rest. Deferred until a model in the wild
 // actually needs it.
-int64_t DetectAndConfigureFixedKvShape(const SessionInfo& session_info,
+int64_t DetectAndConfigureFixedKvShape(const Model& model,
                                        const std::vector<std::string>& input_name_strings,
                                        int layer_count,
                                        const Config::Search& search,
                                        bool& past_present_share_buffer,
                                        const char* cache_name) {
-  if (layer_count <= 0) return 0;
+  if (!ShouldInferKeyValueCacheShape(model.config_->model.decoder) || layer_count <= 0)
+    return 0;
 
   // input_name_strings stores [past_key.0, past_value.0, past_key.1, past_value.1, ...].
   int64_t common_seq_len = 0;
   for (int i = 0; i < layer_count; ++i) {
-    auto input_shape = session_info.GetInputShape(input_name_strings[i * 2]);
+    auto input_shape = model.session_info_.GetInputShape(input_name_strings[i * 2]);
     if (input_shape.size() < 2) return 0;
     const int64_t seq_dim = input_shape[input_shape.size() - 2];
     if (seq_dim <= 0) return 0;  // symbolic/dynamic dim (typically -1)
@@ -85,6 +86,13 @@ int64_t DetectAndConfigureFixedKvShape(const SessionInfo& session_info,
                        "; cache is sized to the model's limit, so generation beyond it will fail.");
   }
   return common_seq_len;
+}
+
+int GetWindowedKeyValueCacheSize(const Model& model, const Config::Search& search, int max_length) {
+  if (!ShouldInferKeyValueCacheShape(model.config_->model.decoder))
+    return 0;
+  return model.p_device_kvcache_->GetWindowedKeyValueCacheSize(
+      model.config_->model.decoder, search, max_length);
 }
 
 namespace {
@@ -130,7 +138,7 @@ bool ShouldUseSharedPastPresentKeyValueCache(State& state) {
   const auto input_name_strings = MakePastKeyValueInputNames(state.model_);
   if (!input_name_strings.empty()) {
     DetectAndConfigureFixedKvShape(
-        state.model_.session_info_, input_name_strings,
+        state.model_, input_name_strings,
         static_cast<int>(input_name_strings.size() / 2),
         state.params_->search, past_present_share_buffer, "DefaultKeyValueCache");
   }
@@ -275,7 +283,7 @@ DefaultKeyValueCacheBase::DefaultKeyValueCacheBase(State& state)
   }
 
   const int64_t fixed_kv_seq_len = DetectAndConfigureFixedKvShape(
-      model_.session_info_, input_name_strings_, layer_count_,
+      model_, input_name_strings_, layer_count_,
       state_.params_->search, past_present_share_buffer_, "DefaultKeyValueCache");
 
   if (state_.params_->use_graph_capture && !past_present_share_buffer_) {
@@ -286,8 +294,8 @@ DefaultKeyValueCacheBase::DefaultKeyValueCacheBase(State& state)
   // Compute the capacity for sliding-window layers and apply it to the cache shapes.
   // ComputeWindowedKvCacheSize() returns 0 when the config does not call for a windowed cache.
   const int max_length = state_.params_->search.max_length;
-  const int windowed_cache_size = Device().GetWindowedKeyValueCacheSize(
-      model_.config_->model.decoder, state_.params_->search, max_length);
+  const int windowed_cache_size =
+      GetWindowedKeyValueCacheSize(model_, state_.params_->search, max_length);
 
   if (windowed_cache_size > 0 &&
       // Beam reordering across a compacted cache is correct in principle but untested.

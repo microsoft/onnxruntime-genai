@@ -64,7 +64,7 @@ ConvKeyValueCache::ConvKeyValueCache(State& state)
     // present, otherwise to search.max_length for symbolic graphs.
     kv_share_buffer_ = state_.params_->IsPastPresentShareBufferEnabled(model_.config_->model.type);
     const int64_t fixed_kv_seq_len = DetectAndConfigureFixedKvShape(
-        model_.session_info_, kv_input_name_strings_, kv_layer_count_,
+        model_, kv_input_name_strings_, kv_layer_count_,
         state_.params_->search, kv_share_buffer_, "ConvKeyValueCache");
     if (g_log.enabled && g_log.warning && state_.params_->search.past_present_share_buffer && !kv_share_buffer_) {
       Log("warning", "past_present_share_buffer search option set to true, but has been disabled due to the current configuration. See https://aka.ms/generate_config for details");
