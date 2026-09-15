@@ -11,9 +11,27 @@
 #include "nemo_mel_spectrogram.h"
 #include "nemotron_speech.h"
 
+#include "models/preprocessing/genai_tokenizer.h"
+
 namespace Generators {
 
 namespace {
+
+bool StartsWithWordPieceContinuation(std::string_view token_piece) {
+  return token_piece.starts_with("##");
+}
+
+bool StartsWithSentencePieceBoundary(std::string_view token_piece) {
+  return token_piece.starts_with("\xE2\x96\x81");
+}
+
+bool StartsWithWhitespace(std::string_view text) {
+  return !text.empty() && std::isspace(static_cast<unsigned char>(text.front()));
+}
+
+bool IsAsciiPunctuation(std::string_view text) {
+  return text.size() == 1 && std::ispunct(static_cast<unsigned char>(text.front()));
+}
 // Picks the DeviceInterface that matches the OrtValue's actual memory location.
 // Required because ORT may place outputs on CPU even when the EP is on a device
 // (e.g. CUDA, DML, QNN). For non-CPU placements we fall back to the model's
@@ -33,6 +51,43 @@ int NemotronArgMaxImpl(const OrtValue& logits_value, int blank_id, float blank_p
   });
 }
 }  // namespace
+
+void NemotronWordTimestampBuilder::AddToken(int32_t token_id, std::string_view token_piece,
+                                            std::string_view decoded_piece, int64_t start_sample,
+                                            int64_t end_sample, const DecodeTokens& decode_tokens) {
+  const bool is_punctuation = IsAsciiPunctuation(decoded_piece);
+  const bool starts_word = !pending_token_ids_.empty() && !is_punctuation &&
+                           !StartsWithWordPieceContinuation(token_piece) &&
+                           (StartsWithSentencePieceBoundary(token_piece) || StartsWithWhitespace(decoded_piece));
+  if (starts_word) CompletePendingWord(decode_tokens);
+
+  if (pending_token_ids_.empty()) pending_start_sample_ = start_sample;
+  pending_token_ids_.push_back(token_id);
+  pending_end_sample_ = std::max(pending_end_sample_, end_sample);
+}
+
+void NemotronWordTimestampBuilder::Flush(const DecodeTokens& decode_tokens) {
+  CompletePendingWord(decode_tokens);
+}
+
+void NemotronWordTimestampBuilder::CompletePendingWord(const DecodeTokens& decode_tokens) {
+  if (pending_token_ids_.empty()) return;
+
+  std::string word = decode_tokens(pending_token_ids_);
+  const auto first = word.find_first_not_of(" \t\n\r\f\v");
+  if (first == std::string::npos) {
+    pending_token_ids_.clear();
+    pending_start_sample_ = 0;
+    pending_end_sample_ = 0;
+    return;
+  }
+  const auto last = word.find_last_not_of(" \t\n\r\f\v");
+  word = word.substr(first, last - first + 1);
+  completed_words_.push_back({std::move(word), pending_start_sample_, pending_end_sample_});
+  pending_token_ids_.clear();
+  pending_start_sample_ = 0;
+  pending_end_sample_ = 0;
+}
 
 int NemotronArgMax(const OrtValue& logits, int blank_id, float blank_penalty) {
   const auto type = logits.GetTensorTypeAndShapeInfo()->GetElementType();
@@ -93,6 +148,7 @@ void NemotronConfig::PopulateFromConfig(const Config& config) {
   chunk_samples = config.model.chunk_samples;
   blank_id = config.model.blank_id;
   max_symbols_per_step = config.model.max_symbols_per_step;
+  enable_word_timestamps = config.model.enable_word_timestamps;
   blank_penalty = config.search.blank_penalty;
 
   // Vocab size from top-level config
@@ -449,6 +505,11 @@ NemotronSpeechState::NemotronSpeechState(const NemotronSpeechModel& model,
 
   auto frame_shape = std::array<int64_t, 3>{1, 1, nemotron_config_.hidden_dim};
   encoder_frame_ = OrtValue::CreateTensor(model_.allocator_cpu_, frame_shape, nemotron_model_.float_type_);
+
+  if (nemotron_config_.enable_word_timestamps) {
+    timestamp_tokenizer_ = model.CreateTokenizer();
+    timestamp_tokenizer_stream_ = timestamp_tokenizer_->CreateStream();
+  }
 }
 
 NemotronSpeechState::~NemotronSpeechState() = default;
@@ -462,12 +523,33 @@ DeviceSpan<float> NemotronSpeechState::Run(int /*total_length*/,
 }
 
 void NemotronSpeechState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
+  bool received_audio = false;
+  bool received_chunk_start = false;
+  bool received_valid_samples = false;
+  bool received_final_chunk = false;
   for (const auto& input : extra_inputs) {
     if (input.name == Config::Defaults::AudioFeaturesName || input.name == nemotron_config_.enc_in_audio) {
       current_mel_ = input.tensor;
       need_encoder_run_ = true;
       chunk_done_ = false;
+      received_audio = true;
+    } else if (input.name == NemotronChunkStartSampleName) {
+      current_chunk_start_sample_ = *input.tensor->GetData<int64_t>();
+      received_chunk_start = true;
+    } else if (input.name == NemotronChunkValidSamplesName) {
+      current_chunk_valid_samples_ = *input.tensor->GetData<int64_t>();
+      received_valid_samples = true;
+    } else if (input.name == NemotronFinalChunkName) {
+      current_chunk_is_final_ = *input.tensor->GetData<bool>();
+      received_final_chunk = true;
     }
+  }
+
+  if (nemotron_config_.enable_word_timestamps && received_audio) {
+    if (!received_chunk_start) current_chunk_start_sample_ = next_chunk_start_sample_;
+    if (!received_valid_samples) current_chunk_valid_samples_ = nemotron_config_.chunk_samples;
+    if (!received_final_chunk) current_chunk_is_final_ = false;
+    next_chunk_start_sample_ = current_chunk_start_sample_ + current_chunk_valid_samples_;
   }
 }
 
@@ -518,6 +600,23 @@ void NemotronSpeechState::ResetStreamingState() {
   need_encoder_run_ = false;
   chunk_done_ = true;
   last_tokens_.clear();
+  token_alignments_.clear();
+  word_timestamp_builder_.Reset();
+  current_chunk_start_sample_ = 0;
+  current_chunk_valid_samples_ = 0;
+  next_chunk_start_sample_ = 0;
+  current_chunk_is_final_ = false;
+  if (timestamp_tokenizer_) timestamp_tokenizer_stream_ = timestamp_tokenizer_->CreateStream();
+}
+
+std::span<const NemotronWordTimestamp> NemotronSpeechState::GetWordTimestamps() const {
+  return word_timestamp_builder_.GetCompletedWords();
+}
+
+void NemotronSpeechState::FlushWordTimestamps() {
+  word_timestamp_builder_.Flush([this](std::span<const int32_t> tokens) {
+    return timestamp_tokenizer_->Decode(tokens);
+  });
 }
 
 void NemotronSpeechState::RunEncoder() {
@@ -643,6 +742,7 @@ void NemotronSpeechState::StepToken() {
     }
 
     // Non-blank: emit token, update LSTM state from prediction outputs
+    const int64_t emission_frame = time_step_;
     prediction_state_->lstm_state_.last_token = best_token;
     prediction_state_->lstm_state_.lstm_hidden_state.reset(prediction_state_->outputs_[1]);
     prediction_state_->outputs_[1] = nullptr;
@@ -655,13 +755,31 @@ void NemotronSpeechState::StepToken() {
       symbol_step_ = 0;
     }
 
-    last_tokens_.push_back(static_cast<int32_t>(best_token));
-    all_tokens_.push_back(static_cast<int32_t>(best_token));
+    const auto emitted_token = static_cast<int32_t>(best_token);
+    last_tokens_.push_back(emitted_token);
+    all_tokens_.push_back(emitted_token);
+    if (nemotron_config_.enable_word_timestamps) {
+      const int64_t frame_samples =
+          static_cast<int64_t>(nemotron_config_.hop_length) * nemotron_config_.subsampling_factor;
+      const int64_t chunk_end_sample = current_chunk_start_sample_ + current_chunk_valid_samples_;
+      const int64_t start_sample = std::min(current_chunk_start_sample_ + emission_frame * frame_samples,
+                                            chunk_end_sample);
+      const int64_t end_sample = std::min(start_sample + frame_samples, chunk_end_sample);
+      token_alignments_.push_back({emitted_token, emission_frame, start_sample, end_sample});
+      word_timestamp_builder_.AddToken(emitted_token, timestamp_tokenizer_->TokenIdToPiece(emitted_token),
+                                       timestamp_tokenizer_stream_->Decode(emitted_token), start_sample,
+                                       end_sample, [this](std::span<const int32_t> tokens) {
+                                         return timestamp_tokenizer_->Decode(tokens);
+                                       });
+    }
     return;
   }
 
   // Exhausted all time steps
   chunk_done_ = true;
+  if (nemotron_config_.enable_word_timestamps && current_chunk_is_final_) {
+    FlushWordTimestamps();
+  }
 }
 
 }  // namespace Generators

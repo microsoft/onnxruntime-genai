@@ -195,6 +195,8 @@ struct Config {
     int chunk_samples{};
     int blank_id{};
     int max_symbols_per_step{};
+    // Retain Nemotron RNNT token alignments and internally derived word spans.
+    bool enable_word_timestamps{};
 
     // Parakeet TDT (Token-and-Duration Transducer) parameters
     int left_context_samples{};

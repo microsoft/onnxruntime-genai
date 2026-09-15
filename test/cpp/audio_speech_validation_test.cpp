@@ -91,3 +91,67 @@ TEST(AudioSpeechValidationTests, DimensionMismatchesCaught) {
   EXPECT_THROW(Generators::ValidateParakeetEncoderOutputShape({1, 256, 64}, 512), std::runtime_error);
   EXPECT_THROW(Generators::ValidateParakeetDecoderOutputShape({2, 1024, 1}, 1024), std::runtime_error);
 }
+
+TEST(AudioSpeechValidationTests, NemotronWordTimestampsGroupDecodedTokenPieces) {
+  Generators::NemotronWordTimestampBuilder builder;
+  const std::map<int32_t, std::string> decoded{{1, " hello"}, {2, "world"}, {3, " again"}};
+  const auto decode = [&decoded](std::span<const int32_t> tokens) {
+    std::string text;
+    for (const auto token : tokens) text += decoded.at(token);
+    return text;
+  };
+  builder.AddToken(1, "▁hello", " hello", 1600, 2880, decode);
+  builder.AddToken(2, "world", "world", 2880, 4160, decode);
+  builder.AddToken(3, "▁again", " again", 5440, 6720, decode);
+
+  auto words = builder.GetCompletedWords();
+  ASSERT_EQ(words.size(), 1U);
+  EXPECT_EQ(words[0].word, "helloworld");
+  EXPECT_EQ(words[0].start_sample, 1600);
+  EXPECT_EQ(words[0].end_sample, 4160);
+
+  builder.Flush(decode);
+  words = builder.GetCompletedWords();
+  ASSERT_EQ(words.size(), 2U);
+  EXPECT_EQ(words[1].word, "again");
+  EXPECT_EQ(words[1].start_sample, 5440);
+  EXPECT_EQ(words[1].end_sample, 6720);
+}
+
+TEST(AudioSpeechValidationTests, NemotronWordTimestampsAllowTokensOnSameFrame) {
+  Generators::NemotronWordTimestampBuilder builder;
+  const std::map<int32_t, std::string> decoded{{1, " multi"}, {2, "piece"}, {3, " next"}};
+  const auto decode = [&decoded](std::span<const int32_t> tokens) {
+    std::string text;
+    for (const auto token : tokens) text += decoded.at(token);
+    return text;
+  };
+  builder.AddToken(1, "▁multi", " multi", 8000, 9280, decode);
+  builder.AddToken(2, "piece", "piece", 8000, 9280, decode);
+  builder.AddToken(3, "▁next", " next", 10560, 11840, decode);
+
+  auto words = builder.GetCompletedWords();
+  ASSERT_EQ(words.size(), 1U);
+  EXPECT_EQ(words[0].word, "multipiece");
+  EXPECT_EQ(words[0].start_sample, 8000);
+  EXPECT_EQ(words[0].end_sample, 9280);
+}
+
+TEST(AudioSpeechValidationTests, NemotronWordTimestampsAttachPunctuation) {
+  Generators::NemotronWordTimestampBuilder builder;
+  const std::map<int32_t, std::string> decoded{{1, " hello"}, {2, "."}, {3, " next"}};
+  const auto decode = [&decoded](std::span<const int32_t> tokens) {
+    std::string text;
+    for (const auto token : tokens) text += decoded.at(token);
+    return text;
+  };
+  builder.AddToken(1, "▁hello", " hello", 1600, 2880, decode);
+  builder.AddToken(2, ".", ".", 2880, 4160, decode);
+  builder.AddToken(3, "▁next", " next", 5440, 6720, decode);
+
+  const auto words = builder.GetCompletedWords();
+  ASSERT_EQ(words.size(), 1U);
+  EXPECT_EQ(words[0].word, "hello.");
+  EXPECT_EQ(words[0].start_sample, 1600);
+  EXPECT_EQ(words[0].end_sample, 4160);
+}

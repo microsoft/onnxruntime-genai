@@ -62,4 +62,18 @@ TEST(ConfigTest, RejectsMtpScaleBindings) {
   }
 }
 
+TEST(ConfigTest, ParsesNemotronWordTimestamps) {
+  Config config;
+
+  OverlayConfig(config, R"({"model":{"enable_word_timestamps":true}})");
+
+  EXPECT_TRUE(config.model.enable_word_timestamps);
+}
+
+TEST(ConfigTest, RejectsNonBooleanNemotronWordTimestamps) {
+  Config config;
+
+  EXPECT_THROW(OverlayConfig(config, R"({"model":{"enable_word_timestamps":1}})"), std::runtime_error);
+}
+
 }  // namespace Generators::test

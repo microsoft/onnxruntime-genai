@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -14,6 +15,52 @@
 #include "transducer_state.h"
 
 namespace Generators {
+
+struct Tokenizer;
+struct TokenizerStream;
+
+inline constexpr std::string_view NemotronChunkStartSampleName = "_nemotron_chunk_start_sample";
+inline constexpr std::string_view NemotronChunkValidSamplesName = "_nemotron_chunk_valid_samples";
+inline constexpr std::string_view NemotronFinalChunkName = "_nemotron_final_chunk";
+
+struct NemotronTokenAlignment {
+  int32_t token_id{};
+  int64_t chunk_frame_index{};
+  int64_t start_sample{};
+  int64_t end_sample{};
+};
+
+struct NemotronWordTimestamp {
+  std::string word;
+  int64_t start_sample{};
+  int64_t end_sample{};
+};
+
+struct NemotronWordTimestampBuilder {
+  using DecodeTokens = std::function<std::string(std::span<const int32_t>)>;
+
+  void AddToken(int32_t token_id, std::string_view token_piece, std::string_view decoded_piece,
+                int64_t start_sample, int64_t end_sample, const DecodeTokens& decode_tokens);
+
+  void Flush(const DecodeTokens& decode_tokens);
+
+  void Reset() {
+    completed_words_.clear();
+    pending_token_ids_.clear();
+    pending_start_sample_ = 0;
+    pending_end_sample_ = 0;
+  }
+
+  std::span<const NemotronWordTimestamp> GetCompletedWords() const { return completed_words_; }
+
+ private:
+  void CompletePendingWord(const DecodeTokens& decode_tokens);
+
+  std::vector<NemotronWordTimestamp> completed_words_;
+  std::vector<int32_t> pending_token_ids_;
+  int64_t pending_start_sample_{};
+  int64_t pending_end_sample_{};
+};
 
 inline int64_t GetValidatedNemotronMelFrameCount(const std::vector<int64_t>& mel_shape, int64_t expected_num_mels) {
   if (mel_shape.size() != 3) {
@@ -61,6 +108,7 @@ struct NemotronConfig {
   int chunk_samples{};
   int subsampling_factor{};
   int max_symbols_per_step{};
+  bool enable_word_timestamps{};
 
   // Mel spectrogram parameters
   int num_mels{};
@@ -242,6 +290,10 @@ struct NemotronSpeechState : TransducerState {
   OrtValue* GetInput(const char* name) override;
   OrtValue* GetOutput(const char* name) override;
 
+  std::span<const NemotronTokenAlignment> GetTokenAlignments() const { return token_alignments_; }
+  std::span<const NemotronWordTimestamp> GetWordTimestamps() const;
+  void FlushWordTimestamps();
+
  private:
   const NemotronSpeechModel& nemotron_model_;
   NemotronConfig nemotron_config_;
@@ -264,6 +316,15 @@ struct NemotronSpeechState : TransducerState {
   int64_t time_step_{0};
   int symbol_step_{0};
   bool need_encoder_run_{false};
+
+  std::shared_ptr<Tokenizer> timestamp_tokenizer_;
+  std::unique_ptr<TokenizerStream> timestamp_tokenizer_stream_;
+  std::vector<NemotronTokenAlignment> token_alignments_;
+  NemotronWordTimestampBuilder word_timestamp_builder_;
+  int64_t current_chunk_start_sample_{0};
+  int64_t current_chunk_valid_samples_{0};
+  int64_t next_chunk_start_sample_{0};
+  bool current_chunk_is_final_{false};
 
   void RunEncoder();
 };

@@ -1783,6 +1783,8 @@ struct Model_Element : JSON::Element {
       v_.blank_id = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "max_symbols_per_step") {
       v_.max_symbols_per_step = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "enable_word_timestamps") {
+      v_.enable_word_timestamps = JSON::Get<bool>(value);
     } else if (name == "left_context_samples") {
       v_.left_context_samples = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "right_context_samples") {

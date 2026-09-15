@@ -125,14 +125,18 @@ std::unique_ptr<NamedTensors> NemotronStreamingProcessor::Process(const float* a
     if (ShouldDropChunk(chunk_data, chunk_size)) {
       audio_buffer_.erase(audio_buffer_.begin(),
                           audio_buffer_.begin() + static_cast<ptrdiff_t>(chunk_size));
+      audio_buffer_start_sample_ += static_cast<int64_t>(chunk_size);
       return nullptr;
     }
 
+    const int64_t chunk_start_sample = audio_buffer_start_sample_;
     auto mel = BuildMelTensor(chunk_data, chunk_size);
     audio_buffer_.erase(audio_buffer_.begin(),
                         audio_buffer_.begin() + static_cast<ptrdiff_t>(chunk_size));
+    audio_buffer_start_sample_ += static_cast<int64_t>(chunk_size);
     auto result = std::make_unique<NamedTensors>();
     result->emplace(Config::Defaults::AudioFeaturesName, std::make_shared<Tensor>(std::move(mel)));
+    AddTimestampMetadata(*result, chunk_start_sample, static_cast<int64_t>(chunk_size), false);
     return result;
   }
 
@@ -145,13 +149,36 @@ std::unique_ptr<NamedTensors> NemotronStreamingProcessor::Flush() {
   }
 
   const size_t chunk_size = static_cast<size_t>(nemotron_config_.chunk_samples);
+  const int64_t chunk_start_sample = audio_buffer_start_sample_;
+  const int64_t valid_samples = static_cast<int64_t>(audio_buffer_.size());
   audio_buffer_.resize(chunk_size, 0.0f);  // Pad with silence
 
   auto mel = BuildMelTensor(audio_buffer_.data(), chunk_size);
   audio_buffer_.clear();
   auto result = std::make_unique<NamedTensors>();
   result->emplace(Config::Defaults::AudioFeaturesName, std::make_shared<Tensor>(std::move(mel)));
+  AddTimestampMetadata(*result, chunk_start_sample, valid_samples, true);
+  audio_buffer_start_sample_ += valid_samples;
   return result;
+}
+
+void NemotronStreamingProcessor::AddTimestampMetadata(NamedTensors& tensors, int64_t chunk_start_sample,
+                                                      int64_t valid_samples, bool is_final_chunk) {
+  if (!nemotron_config_.enable_word_timestamps) return;
+
+  auto& allocator = GetDeviceInterface(DeviceType::CPU)->GetAllocator();
+  const auto scalar_shape = std::array<int64_t, 1>{1};
+  auto start_tensor = OrtValue::CreateTensor(allocator, scalar_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  *start_tensor->GetTensorMutableData<int64_t>() = chunk_start_sample;
+  tensors.emplace(NemotronChunkStartSampleName, std::make_shared<Tensor>(std::move(start_tensor)));
+
+  auto valid_tensor = OrtValue::CreateTensor(allocator, scalar_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  *valid_tensor->GetTensorMutableData<int64_t>() = valid_samples;
+  tensors.emplace(NemotronChunkValidSamplesName, std::make_shared<Tensor>(std::move(valid_tensor)));
+
+  auto final_tensor = OrtValue::CreateTensor(allocator, scalar_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL);
+  *final_tensor->GetTensorMutableData<bool>() = is_final_chunk;
+  tensors.emplace(NemotronFinalChunkName, std::make_shared<Tensor>(std::move(final_tensor)));
 }
 
 std::unique_ptr<OrtValue> NemotronStreamingProcessor::BuildMelTensor(const float* audio_chunk, size_t chunk_samples) {

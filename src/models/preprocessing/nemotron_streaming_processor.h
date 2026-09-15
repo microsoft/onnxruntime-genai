@@ -42,8 +42,11 @@ struct NemotronStreamingProcessor : StreamingProcessor {
 
   // Audio accumulation buffer for incoming PCM samples
   std::vector<float> audio_buffer_;
+  int64_t audio_buffer_start_sample_{0};
 
   std::unique_ptr<OrtValue> BuildMelTensor(const float* audio_chunk, size_t chunk_samples);
+  void AddTimestampMetadata(NamedTensors& tensors, int64_t chunk_start_sample, int64_t valid_samples,
+                            bool is_final_chunk);
 };
 
 }  // namespace Generators

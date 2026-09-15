@@ -205,6 +205,14 @@ int32_t Tokenizer::TokenToTokenId(const char* token) const {
   return token_id;
 }
 
+std::string Tokenizer::TokenIdToPiece(int32_t token) const {
+  OrtxPtr<OrtxString> piece;
+  CheckResult(OrtxTokenIdToPiece(tokenizer_, token, piece.Address()));
+  const char* text;
+  CheckResult(OrtxStringGetCstr(piece, &text));
+  return text;
+}
+
 std::shared_ptr<Tokenizer> Model::CreateTokenizer() const {
   return std::make_shared<Tokenizer>(*config_);
 }
