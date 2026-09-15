@@ -28,7 +28,9 @@ fs_std::path WriteMtpConfig(const std::string& output_name,
       "{ \"model\": { \"type\": \"tiny-test-model\","
       " \"vocab_size\": 16, \"context_length\": 32,"
       " \"decoder\": { \"filename\": \"model.onnx\" },"
-      " \"mtp\": { " + enabled_field + "\"filename\": \"mtp.onnx\","
+      " \"mtp\": { " +
+      enabled_field +
+      "\"filename\": \"mtp.onnx\","
       " \"main_hidden_states\": \"main_hidden\","
       " \"outputs\": { \"" +
       output_name +
