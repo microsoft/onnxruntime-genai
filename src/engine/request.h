@@ -316,7 +316,7 @@ struct Request : std::enable_shared_from_this<Request>,
   std::span<const int32_t> StagedDraftTokens() const;
   void CommitAcceptedDraftsForTransaction(size_t accepted_count);
   bool DraftVerificationCompletedGeneration() const noexcept {
-    return draft_verification_completed_generation_;
+    return draft_verification_.completed_generation;
   }
   bool IsStopToken(int32_t token) const;
   void RewindDraftsForTransaction(size_t accepted_count);
@@ -607,25 +607,29 @@ struct Request : std::enable_shared_from_this<Request>,
   // MarkFinalStageAsEvaluatedNonAcceptedDraft/CommitAcceptedDraftsForTransaction for how each path
   // advances it.
   size_t evaluated_draft_count_{};
-  bool draft_verification_completed_generation_{};
-  // Set by CommitAcceptedDraftsForTransaction() when a stop-string match ends greedy draft
-  // verification early, giving StopString precedence over the turn/context limit for the same
-  // completing token. -1 when verification completed generation for any other reason (or has not
-  // completed yet). The sampled/batched path never sets this: it observes stop matches through
-  // the same StageGenerationForTransaction()/StageGeneration() path the ordinary one-token step
-  // uses, one stage at a time, so it needs no separate bookkeeping here.
+  struct DraftVerificationState {
+    bool completed_generation{};
+    bool eos{};
+    int32_t stop_match_index{-1};
+
+    void Reset() noexcept { *this = DraftVerificationState{}; }
+  };
+  // Capture terminal EOS before another request can reuse the batched sampler's next-token slot.
+  // CommitAcceptedDraftsForTransaction() also records a stop-string match when one ends greedy
+  // draft verification early, giving StopString precedence over the turn/context limit for the
+  // same completing token. The sampled/batched path observes stop matches through the same
+  // StageGenerationForTransaction()/StageGeneration() path the ordinary one-token step uses, one
+  // stage at a time, so it needs no separate bookkeeping here.
   //
-  // StageDraftCompletionForTransaction() only ever reads this field (and accepted_draft_count_,
-  // and Search's own state) to compute its result; it never resets or otherwise mutates it. Only
-  // CommitStep()/RestoreStateForTransaction()/QueueStateRestoreForTransaction()/
-  // DiscardStagedDrafts()/AppendDraftsForTransaction() reset it, at their own well-defined
-  // transaction boundaries -- never in response to StageDraftCompletionForTransaction() being
-  // called. This is deliberate: ScheduledRequests::GenerateNextTokensForTransaction() can call
+  // StageDraftCompletionForTransaction() only ever reads this state (and accepted_draft_count_)
+  // to compute its result; it never resets or otherwise mutates it. Only transaction/turn-lifecycle
+  // boundaries reset it -- never StageDraftCompletionForTransaction() itself. This is deliberate:
+  // ScheduledRequests::GenerateNextTokensForTransaction() can call
   // StageDraftCompletionForTransaction() for the same request twice in one step when the
   // transaction also uses the batched sampler (once from the batched-sampling setup loop, once
   // unconditionally from the final per-request loop), and both calls must produce the exact same
   // result.
-  int32_t draft_verification_stop_match_index_{-1};
+  DraftVerificationState draft_verification_{};
   std::shared_ptr<GeneratorParams> params_;
   // Durable seed basis every RNG stream of this Request starts from. Initialized once from the
   // model-configured seed (a generated 64-bit value when the model leaves it unset) and advanced

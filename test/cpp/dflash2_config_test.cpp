@@ -220,6 +220,39 @@ TEST(Dflash2ConfigTest, AcceptsCompatibleAuxiliaryHiddenStates) {
   EXPECT_NO_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8));
 }
 
+// Dflash2Drafter::AllocateCache() allocates only key and value buffers from the logical head size
+// and binds only past_key_names/past_value_names, so a declared scale template would be silently
+// dropped and the drafter session would run against unbound, uninitialized scales. Reject it.
+TEST(Dflash2ConfigTest, RejectsScaleNameTemplates) {
+  const auto metadata = MakeCompatibleMetadata();
+  for (int field = 0; field < 4; ++field) {
+    auto config = MakeDflash2Config();
+    auto& inputs = config.model.dflash2.inputs;
+    auto& outputs = config.model.dflash2.outputs;
+    switch (field) {
+      case 0:
+        inputs.past_key_scale_names = "draft_past.%d.key_scale";
+        break;
+      case 1:
+        inputs.past_value_scale_names = "draft_past.%d.value_scale";
+        break;
+      case 2:
+        outputs.present_key_scale_names = "draft_present.%d.key_scale";
+        break;
+      default:
+        outputs.present_value_scale_names = "draft_present.%d.value_scale";
+        break;
+    }
+    try {
+      static_cast<void>(ValidateDflash2ModelCompatibility(config, metadata.first, metadata.second, 8));
+      FAIL() << "Expected a quantized block-drafter cache to be rejected for field " << field;
+    } catch (const std::runtime_error& error) {
+      EXPECT_NE(std::string{error.what()}.find("not supported"), std::string::npos)
+          << "field " << field << ": " << error.what();
+    }
+  }
+}
+
 TEST(Dflash2ConfigTest, UsesConfiguredTargetOutput) {
   auto config = MakeDflash2Config();
   config.model.dflash2.main_aux_hidden_states = "custom_aux_hidden_states";
@@ -399,6 +432,18 @@ TEST(Dflash2ConfigTest, AccountsForWindowedPagedCache) {
                 config, 16, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16),
             3072u);
   EXPECT_EQ(Dflash2Drafter::PoolBlocks(config, 8, 3), 15u);
+  EXPECT_EQ(Dflash2Drafter::PoolBytes(
+                config, 8, 15, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16),
+            23040u);
+}
+
+TEST(Dflash2ConfigTest, RejectsWindowedPoolByteOverflow) {
+  const auto config = MakeDflash2Config();
+  EXPECT_THROW(
+      Dflash2Drafter::PoolBytes(
+          config, 8, std::numeric_limits<size_t>::max(),
+          ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16),
+      std::runtime_error);
 }
 
 TEST(Dflash2ConfigTest, BillsFullAttentionCachePerTargetBlock) {
