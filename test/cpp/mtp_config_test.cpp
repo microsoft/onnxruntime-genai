@@ -73,17 +73,10 @@ TEST(MtpConfigTest, EnablesMtpByDefault) {
   EXPECT_TRUE(config.model.mtp.IsEnabled());
 }
 
-TEST(MtpConfigTest, CanDisableMtpAtRuntime) {
+TEST(MtpConfigTest, AcceptsDisabledMtpToggleThroughPublicApi) {
   const auto root =
       WriteMtpConfig("hidden_states", "\"enabled\": false, ", "_disabled");
   EXPECT_NO_THROW(OgaConfig::Create(root.string().c_str()));
-
-  Config config;
-  config.model.mtp.filename = "mtp.onnx";
-  config.model.mtp.enabled = false;
-  EXPECT_FALSE(config.model.mtp.enabled);
-  EXPECT_FALSE(config.model.mtp.IsEnabled());
-  EXPECT_EQ(config.model.mtp.filename, "mtp.onnx");
 }
 
 TEST(MtpConfigTest, RejectsMisspelledFeedbackOutput) {

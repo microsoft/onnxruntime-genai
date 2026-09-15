@@ -11,7 +11,9 @@ from types import SimpleNamespace
 import onnx_ir as ir
 import pytest
 import torch
+from loaders.modelopt import ModeloptModel
 from loaders.qwen import QwenMTPModel
+from safetensors.torch import save_file
 
 from models.builders.qwen import Qwen35DenseMTPModel, Qwen35Model, Qwen35MoEModel
 
@@ -200,15 +202,16 @@ def test_mtp_quant_config_json_configures_targets_independently():
     assert quant_config.moe.type == "none"
 
 
-def test_mtp_quant_config_preserves_shared_embeddings_option():
+@pytest.mark.parametrize("shared_embeddings", [False, True])
+def test_mtp_quant_config_preserves_shared_embeddings_option(shared_embeddings):
     model = _resolve(
         {
-            "shared_embeddings": True,
+            "shared_embeddings": shared_embeddings,
             "mtp_quant_config": '{"weights": {"type": "int4"}, "moe": {"type": "none"}}',
         }
     )
 
-    assert model.mtp_attrs["extra_options"]["shared_embeddings"] is True
+    assert model.mtp_attrs["extra_options"]["shared_embeddings"] is shared_embeddings
 
 
 def test_mtp_quant_config_can_keep_the_entire_head_fp16():
@@ -344,6 +347,42 @@ def test_modelopt_mtp_loader_rejects_missing_untied_lm_head():
             preserve_quantization=True,
             is_moe=False,
         )
+
+
+def test_modelopt_loader_materializes_tied_lm_head_for_main_decoder(tmp_path):
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "text_config": {
+                    "num_hidden_layers": 0,
+                    "num_experts": 0,
+                    "tie_word_embeddings": True,
+                }
+            }
+        )
+    )
+    save_file(
+        {
+            "model.language_model.embed_tokens.weight": torch.ones((4, 2), dtype=torch.bfloat16),
+            "model.language_model.norm.weight": torch.ones(2, dtype=torch.bfloat16),
+        },
+        tmp_path / "model.safetensors",
+    )
+
+    model = ModeloptModel(
+        "compressed-tensors",
+        str(tmp_path),
+        quant_attrs={},
+        q_size=2,
+        kv_size=2,
+        intermediate_size=4,
+        num_layers=0,
+    )
+
+    assert model.lm_head is not model.embedding
+    assert model.lm_head.weight is model.embedding.weight
+    assert model.modules()[0] is model.embedding
+    assert model.modules()[-1] is model.lm_head
 
 
 def test_remote_mtp_loader_resolves_hugging_face_snapshot(monkeypatch, tmp_path):
@@ -574,9 +613,13 @@ def test_mtp_unshared_embedding_keeps_separate_initializer():
 
 
 @pytest.mark.parametrize("lm_head_quant_type", ["nvfp4", "fp8"])
-def test_mtp_native_quantized_lm_head_keeps_separate_embedding(lm_head_quant_type):
+@pytest.mark.parametrize("tied_quantized, tied_unquantized", [(True, False), (False, True)])
+def test_mtp_native_quantized_lm_head_keeps_separate_embedding(
+    lm_head_quant_type, tied_quantized, tied_unquantized
+):
     model = _make_minimal_mtp_embedding_model(
-        tied_quantized=True,
+        tied_quantized=tied_quantized,
+        tied_unquantized=tied_unquantized,
         lm_head_quant_type=lm_head_quant_type,
     )
 

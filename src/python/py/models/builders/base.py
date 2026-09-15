@@ -1111,6 +1111,9 @@ class Model:
             and "/lm_head/MatMul" not in self.quant_attrs["nodes_to_exclude"]
         )
 
+    def is_native_lm_head(self, lm_head):
+        return getattr(lm_head, "quant_type", "none") in {"nvfp4", "fp8"}
+
     def make_tied_quantized_embedding_input_names(self):
         # Quantized tied embeddings in make_embedding() consume lm_head weights using
         # algorithm-specific naming.
@@ -2773,10 +2776,7 @@ class Model:
         # Native NVFP4/FP8 LM-head storage has format-specific scales and cannot be consumed by
         # GatherBlockQuantized. Keep the checkpoint embedding for those formats instead of
         # emitting references to generic tied-weight initializer names that do not exist.
-        native_lm_head = (
-            getattr(getattr(getattr(self, "weights", None), "lm_head", None), "quant_type", "none")
-            in {"nvfp4", "fp8"}
-        )
+        native_lm_head = self.is_native_lm_head(getattr(getattr(self, "weights", None), "lm_head", None))
 
         # Use GatherBlockQuantized if and only if tied embeddings are enabled and export model is quantized. quantized d_type in set_onnx_dtype is INT4/UINT4
         if self.tied_quantized_embeddings and not native_lm_head:

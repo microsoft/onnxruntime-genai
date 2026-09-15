@@ -534,9 +534,13 @@ def test_make_embedding_non_tied_path_uses_embed_tokens_initializer_and_gather()
 
 
 @pytest.mark.parametrize("lm_head_quant_type", ["nvfp4", "fp8"])
-def test_make_embedding_native_quantized_lm_head_keeps_checkpoint_embedding(lm_head_quant_type):
+@pytest.mark.parametrize("tied_quantized, tied_unquantized", [(True, False), (False, True)])
+def test_make_embedding_native_quantized_lm_head_keeps_checkpoint_embedding(
+    lm_head_quant_type, tied_quantized, tied_unquantized
+):
     model = _make_minimal_model_for_embedding_branches(
-        tied_quantized_embeddings=True,
+        tied_quantized_embeddings=tied_quantized,
+        tied_unquantized_embeddings=tied_unquantized,
         lm_head_quant_type=lm_head_quant_type,
     )
     embedding = object()
