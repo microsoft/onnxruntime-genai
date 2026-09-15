@@ -2127,27 +2127,6 @@ void ClearProviders(Config::SessionOptions& session_options) {
 
 void ClearProviders(Config& config) {
   ClearProviders(config.model.decoder.session_options);
-  if (config.model.draft) {
-    ClearProviders(config.model.draft->session_options);
-  }
-  if (config.model.encoder.session_options) {
-    ClearProviders(*config.model.encoder.session_options);
-  }
-  if (config.model.vision.session_options) {
-    ClearProviders(*config.model.vision.session_options);
-  }
-  if (config.model.speech.session_options) {
-    ClearProviders(*config.model.speech.session_options);
-  }
-  if (config.model.embedding.session_options) {
-    ClearProviders(*config.model.embedding.session_options);
-  }
-  if (config.model.joiner.session_options) {
-    ClearProviders(*config.model.joiner.session_options);
-  }
-  if (config.model.vad.session_options) {
-    ClearProviders(*config.model.vad.session_options);
-  }
 }
 
 void PopulateProvidersFromProviderOptions(Config::SessionOptions& session_options) {
