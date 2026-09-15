@@ -66,43 +66,29 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   include(${PROJECT_SOURCE_DIR}/cmake/telemetry/linux-http.cmake)
 endif()
 
-# The 1DS SDK reads these generic option() names from its own CMakeLists. Disable its tests and the
-# optional modules whose source may be absent from the release archive; genai uses the C++ API directly.
-set(BUILD_UNIT_TESTS OFF CACHE BOOL "Disable 1DS SDK unit tests" FORCE)
-set(BUILD_FUNC_TESTS OFF CACHE BOOL "Disable 1DS SDK functional tests" FORCE)
-set(BUILD_PRIVACYGUARD OFF CACHE BOOL "Disable 1DS privacy guard module" FORCE)
-set(BUILD_SANITIZER OFF CACHE BOOL "Disable 1DS sanitizer module" FORCE)
-set(BUILD_OBJC_WRAPPER OFF CACHE BOOL "Disable 1DS ObjC wrapper" FORCE)
-set(BUILD_SWIFT_WRAPPER OFF CACHE BOOL "Disable 1DS Swift wrapper" FORCE)
-
-# The SDK uses MAC_ARCH instead of CMAKE_OSX_ARCHITECTURES and otherwise forces every macOS object
-# to be universal. When the caller requests one architecture, map it into the SDK variable so its
-# static archives contain matching thin objects, then remove the temporary mapping afterward.
-set(_ortgenai_mac_arch_inferred OFF)
-if(APPLE
-   AND NOT (IOS OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
-   AND NOT MAC_ARCH
-   AND CMAKE_OSX_ARCHITECTURES)
-  list(LENGTH CMAKE_OSX_ARCHITECTURES _ortgenai_macos_arch_count)
-  if(_ortgenai_macos_arch_count EQUAL 1)
-    set(MAC_ARCH "${CMAKE_OSX_ARCHITECTURES}")
-    set(_ortgenai_mac_arch_inferred ON)
-  endif()
-  unset(_ortgenai_macos_arch_count)
-endif()
-
-# The 1DS project does not infer its iOS source selection on the normal FetchContent path.
-if(IOS OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
-  if(NOT PLATFORM_NAME OR NOT IPHONEOS_DEPLOYMENT_TARGET OR NOT IOS_ARCH)
-    message(FATAL_ERROR
-      "iOS telemetry requires PLATFORM_NAME (iphoneos/iphonesimulator), IOS_ARCH, and "
-      "IPHONEOS_DEPLOYMENT_TARGET to configure the 1DS SDK.")
-  endif()
-  set(BUILD_IOS ON CACHE BOOL "Build the 1DS SDK for iOS" FORCE)
-  set(IOS_PLAT "${PLATFORM_NAME}" CACHE STRING "1DS iOS platform" FORCE)
-  set(IOS_DEPLOYMENT_TARGET "${IPHONEOS_DEPLOYMENT_TARGET}" CACHE STRING "1DS iOS deployment target" FORCE)
-  set(FORCE_RESET_OSX_DEPLOYMENT_TARGET OFF CACHE BOOL "Preserve the caller's iOS deployment target" FORCE)
-endif()
+# Use the SDK's canonical build options. GenAI consumes only the C++ library and supplies all
+# dependencies needed by its packaged static/shared target.
+set(MATSDK_BUILD_HEADERS ON CACHE BOOL "Build 1DS SDK headers" FORCE)
+set(MATSDK_BUILD_LIBRARY ON CACHE BOOL "Build 1DS SDK library" FORCE)
+set(MATSDK_BUILD_TEST_TOOL OFF CACHE BOOL "Disable 1DS SDK test tool" FORCE)
+set(MATSDK_BUILD_UNIT_TESTS OFF CACHE BOOL "Disable 1DS SDK unit tests" FORCE)
+set(MATSDK_BUILD_FUNC_TESTS OFF CACHE BOOL "Disable 1DS SDK functional tests" FORCE)
+set(MATSDK_BUILD_PRIVACYGUARD OFF CACHE BOOL "Disable 1DS privacy guard module" FORCE)
+set(MATSDK_BUILD_CDS OFF CACHE BOOL "Disable 1DS CDS module" FORCE)
+set(MATSDK_BUILD_LIVEEVENTINSPECTOR OFF CACHE BOOL "Disable 1DS live event inspector" FORCE)
+set(MATSDK_BUILD_SIGNALS OFF CACHE BOOL "Disable 1DS signals module" FORCE)
+set(MATSDK_BUILD_SANITIZER OFF CACHE BOOL "Disable 1DS sanitizer module" FORCE)
+set(MATSDK_BUILD_AZMON OFF CACHE BOOL "Disable 1DS Azure Monitor module" FORCE)
+set(MATSDK_BUILD_OBJC_WRAPPER OFF CACHE BOOL "Disable 1DS ObjC wrapper" FORCE)
+set(MATSDK_BUILD_SWIFT_WRAPPER OFF CACHE BOOL "Disable 1DS Swift wrapper" FORCE)
+set(MATSDK_BUILD_JNI_WRAPPER OFF CACHE BOOL "Disable 1DS JNI wrapper" FORCE)
+set(MATSDK_BUILD_PACKAGE OFF CACHE BOOL "Disable 1DS package generation" FORCE)
+set(MATSDK_BUILD_APPLE_HTTP ${APPLE} CACHE BOOL "Build the 1DS Apple HTTP client" FORCE)
+set(MATSDK_ANDROID_HTTP_CLIENT JAVA CACHE STRING "Use the 1DS Java HTTP bridge on Android" FORCE)
+set(MATSDK_CURL_PROVIDER SYSTEM CACHE STRING "Use GenAI's selected 1DS curl target" FORCE)
+set(MATSDK_CURL_TLS_BACKEND MBEDTLS CACHE STRING "Use mbedTLS for 1DS curl" FORCE)
+set(MATSDK_SQLITE_PROVIDER VENDORED CACHE STRING "Use bundled 1DS SQLite" FORCE)
+set(MATSDK_ZLIB_PROVIDER VENDORED CACHE STRING "Use bundled 1DS zlib" FORCE)
 
 # BUILD_SHARED_LIBS is a global that onnxruntime-genai's own targets read after this module, and the SDK
 # selects mat's library type from it. Save it and restore it after the SDK is configured. Desktop and
@@ -115,14 +101,6 @@ if(ANDROID AND ENABLE_JAVA)
 else()
   set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build the 1DS SDK as a static library" FORCE)
 endif()
-
-# Build sqlite3 and zlib from the SDK's vendored sources (MATSDK_BUNDLE_VENDORED_DEPS) on every
-# platform so the build is self-contained and the resulting static `mat` is complete: it references
-# sqlite3 and the SDK's symbol-prefixed zlib (act_z_*), which the bundled targets provide. This avoids
-# depending on system libsqlite3/zlib dev packages (Linux) or absolute Homebrew archive paths (macOS),
-# and on Windows it supplies the sqlite3/zlib object code that mat would otherwise leave unresolved
-# (ONNX Runtime never needed this because it uses ETW, not the 1DS SDK, on Windows).
-set(MATSDK_BUNDLE_VENDORED_DEPS ON CACHE BOOL "Build 1DS SDK vendored sqlite3/zlib dependencies" FORCE)
 
 set(_ortgenai_telemetry_patch
   "${CMAKE_COMMAND}"
@@ -138,10 +116,10 @@ FetchContent_Declare(
   EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(cpp_client_telemetry)
-if(_ortgenai_mac_arch_inferred)
-  unset(MAC_ARCH)
+target_compile_definitions(mat PRIVATE MATSDK_DISABLE_LOGGING)
+if(ANDROID)
+  target_compile_definitions(mat PRIVATE ANDROID_SUPPRESS_LOGCAT)
 endif()
-unset(_ortgenai_mac_arch_inferred)
 
 if(ANDROID)
   set(ORTGENAI_TELEMETRY_ANDROID_JAVA_SOURCE_DIR
@@ -151,58 +129,32 @@ if(ANDROID)
     "${PROJECT_SOURCE_DIR}/cmake/telemetry/android_telemetry_bridge.cpp")
 endif()
 foreach(_ortgenai_1ds_cache_var
-    BUILD_UNIT_TESTS
-    BUILD_FUNC_TESTS
-    BUILD_PRIVACYGUARD
-    BUILD_SANITIZER
-    BUILD_OBJC_WRAPPER
-    BUILD_SWIFT_WRAPPER
-    MATSDK_BUNDLE_VENDORED_DEPS)
+    MATSDK_BUILD_HEADERS
+    MATSDK_BUILD_LIBRARY
+    MATSDK_BUILD_TEST_TOOL
+    MATSDK_BUILD_UNIT_TESTS
+    MATSDK_BUILD_FUNC_TESTS
+    MATSDK_BUILD_PRIVACYGUARD
+    MATSDK_BUILD_CDS
+    MATSDK_BUILD_LIVEEVENTINSPECTOR
+    MATSDK_BUILD_SIGNALS
+    MATSDK_BUILD_SANITIZER
+    MATSDK_BUILD_AZMON
+    MATSDK_BUILD_OBJC_WRAPPER
+    MATSDK_BUILD_SWIFT_WRAPPER
+    MATSDK_BUILD_JNI_WRAPPER
+    MATSDK_BUILD_PACKAGE
+    MATSDK_BUILD_APPLE_HTTP
+    MATSDK_ANDROID_HTTP_CLIENT
+    MATSDK_CURL_PROVIDER
+    MATSDK_CURL_TLS_BACKEND
+    MATSDK_SQLITE_PROVIDER
+    MATSDK_ZLIB_PROVIDER)
   unset(${_ortgenai_1ds_cache_var} CACHE)
 endforeach()
 
 if(NOT TARGET mat)
   message(FATAL_ERROR "Telemetry: the 1DS SDK 'mat' target was not created by FetchContent.")
-endif()
-
-# The SDK's CMakeLists uses include_directories(${CMAKE_CURRENT_SOURCE_DIR}) (patched from
-# ${CMAKE_SOURCE_DIR}) to locate its bundled nlohmann/, sqlite/, and zlib/ headers. Under FetchContent
-# that variable points at genai's root, so add the SDK's real source dir as an include path.
-target_include_directories(mat PRIVATE ${cpp_client_telemetry_SOURCE_DIR})
-
-# The bundled sqlite3_bundled/zlib_bundled targets expose their vendored header dirs as PUBLIC includes
-# with build-tree paths. install(EXPORT) rejects a build/source-tree include path on an exported target,
-# so scope them to the build tree only.
-foreach(_ortgenai_bundled_dep sqlite3_bundled zlib_bundled)
-  if(TARGET ${_ortgenai_bundled_dep})
-    get_target_property(_ortgenai_bundled_inc ${_ortgenai_bundled_dep} INTERFACE_INCLUDE_DIRECTORIES)
-    if(_ortgenai_bundled_inc)
-      set_target_properties(${_ortgenai_bundled_dep} PROPERTIES
-        INTERFACE_INCLUDE_DIRECTORIES "$<BUILD_INTERFACE:${_ortgenai_bundled_inc}>")
-    endif()
-  endif()
-endforeach()
-
-# The SDK's bundled sqlite3/zlib targets carry GCC/Clang-only flags that MSVC either warns on or rejects
-# outright: zlib is compiled with Z_HAVE_UNISTD_H (MSVC has no <unistd.h>, so zconf.h fails to include
-# it), and sqlite3 with -fno-finite-math-only / -Wno-unused-function (MSVC reads the latter as /Wno-...
-# and errors D8021). Strip these on Windows -- none are needed there. This keeps genai's copy of the
-# patch identical to ONNX Runtime's, whose FetchContent path is non-Windows only and so never hit this.
-if(WIN32)
-  if(TARGET zlib_bundled)
-    get_target_property(_ortgenai_zlib_defs zlib_bundled COMPILE_DEFINITIONS)
-    if(_ortgenai_zlib_defs)
-      list(REMOVE_ITEM _ortgenai_zlib_defs Z_HAVE_UNISTD_H)
-      set_target_properties(zlib_bundled PROPERTIES COMPILE_DEFINITIONS "${_ortgenai_zlib_defs}")
-    endif()
-  endif()
-  if(TARGET sqlite3_bundled)
-    get_target_property(_ortgenai_sqlite_opts sqlite3_bundled COMPILE_OPTIONS)
-    if(_ortgenai_sqlite_opts)
-      list(REMOVE_ITEM _ortgenai_sqlite_opts -fno-finite-math-only -Wno-unused-function)
-      set_target_properties(sqlite3_bundled PROPERTIES COMPILE_OPTIONS "${_ortgenai_sqlite_opts}")
-    endif()
-  endif()
 endif()
 
 # Vendored 1DS dependencies emit unavoidable narrowing warnings under the Apple warning policy.
