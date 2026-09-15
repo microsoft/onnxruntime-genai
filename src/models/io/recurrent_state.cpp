@@ -21,7 +21,7 @@ std::string ComposeCacheName(const std::string& template_string, int index) {
   return std::string(cache_name);
 }
 
-RecurrentState::RecurrentState(State& state)
+RecurrentState::RecurrentState(State& state, bool graph_capture_variants_supported)
     : state_{state} {
   // Discover recurrent layer indices by scanning all session input names
   const auto& past_recurrent_template = model_.config_->model.decoder.inputs.past_recurrent_names;
@@ -128,7 +128,7 @@ RecurrentState::RecurrentState(State& state)
   const bool graph_capture_enabled = state_.params_->use_graph_capture;
   share_buffers_ = !is_webgpu &&
                    (graph_capture_enabled ? share_under_graph_capture : share_buffers_configured);
-  graph_double_buffer_ = graph_capture_enabled && !share_buffers_;
+  graph_double_buffer_ = graph_capture_variants_supported && graph_capture_enabled && !share_buffers_;
 
   if (!share_buffers_) {
     pasts_.resize(num_layers * 2);
@@ -360,8 +360,8 @@ void RecurrentState::RestoreAfterGraphCapture(int graph_id) {
   graph_capture_fixed_up_.push_back(graph_id);
 }
 
-std::unique_ptr<RecurrentState> CreateRecurrentState(State& state) {
-  auto recurrent_state = std::make_unique<RecurrentState>(state);
+std::unique_ptr<RecurrentState> CreateRecurrentState(State& state, bool graph_capture_variants_supported) {
+  auto recurrent_state = std::make_unique<RecurrentState>(state, graph_capture_variants_supported);
   if (recurrent_state->IsEmpty()) {
     return nullptr;
   }

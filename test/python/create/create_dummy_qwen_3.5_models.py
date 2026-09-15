@@ -255,8 +255,8 @@ def create_dummy_decoder_model(
     # rebinds both directions of WebGPU's separate past/present buffers instead of replaying stale
     # state. Keep a fallback for an all-KV model even though this fixture is hybrid by default.
     recurrent_layers = [layer_idx for layer_idx in range(num_layers) if layer_idx not in kv_layers]
-    if recurrent_layers:
-        observed_layer = recurrent_layers[0]
+    observed_layer = recurrent_layers[0] if recurrent_layers else None
+    if observed_layer is not None:
         flatten_shape_const = helper.make_node(
             "Constant",
             [],
