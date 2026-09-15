@@ -148,6 +148,35 @@ The execution provider name accepts the short form used in `genai_config.json`
 (`"cuda"`, `"dml"`, `"openvino"`, ...) or the full ONNX Runtime name
 (`"CUDAExecutionProvider"`, `"DmlExecutionProvider"`, ...).
 
+### DML graph capture
+
+DirectML decoder sessions use graph capture by default. On devices or drivers where
+captured-command-list replay produces incorrect results, it can be disabled per model
+through the DML provider options:
+
+```json
+{
+  "model": {
+    "decoder": {
+      "session_options": {
+        "provider_options": [
+          { "dml": { "enable_graph_capture": "0" } }
+        ]
+      }
+    }
+  }
+}
+```
+
+The values `"0"` and `"false"` disable graph capture; the value comparison is
+case-insensitive. Any other value preserves the default enabled behavior. When the
+decoder uses the non-shared-buffer KV-cache path, DirectML allocates its initial
+zero-length placeholders with one position; the placeholders are replaced with the
+actual sequence length before inference. Other execution providers are unaffected.
+This setting is a GenAI-side workaround for device/driver-specific DML accuracy issues;
+the corresponding ONNX Runtime investigation is tracked in
+[microsoft/onnxruntime#29739](https://github.com/microsoft/onnxruntime/issues/29739).
+
 ### C API
 
 ```c
