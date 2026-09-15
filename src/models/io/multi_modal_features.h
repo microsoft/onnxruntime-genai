@@ -35,6 +35,7 @@ struct MultiModalFeatures {
   const Model& model_{state_.model_};
 
   std::vector<int64_t> shape_;  // [num_feature_tokens, hidden_size]
+  std::vector<int64_t> native_shape_;  // Encoder's own output shape, unaffected by ReshapeFeatures
   ONNXTensorElementDataType type_;
 
   const Mode mode_{};

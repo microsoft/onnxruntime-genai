@@ -46,6 +46,8 @@ MultiModalFeatures::MultiModalFeatures(State& state, MultiModalFeatures::Mode mo
     // (see SessionCanAccess).
     features_ = OrtValue::CreateTensor(state_.p_session_device_->GetAllocator(), shape_, type_);
   }
+
+  native_shape_ = shape_;
 }
 
 void MultiModalFeatures::Add() {
@@ -88,6 +90,9 @@ void MultiModalFeatures::ReuseFeaturesBuffer(MultiModalFeatures& other) {
     state_.inputs_[index_] = features_.get();
 
     // Give other a real copy so its output binding has valid data before its next Run() overwrites it.
+    // Reset to native_shape_ first: shape_ may still hold an in-place ReshapeFeatures() result (e.g.
+    // speech's 3D->2D reshape), which is not the shape other's own model output actually binds to.
+    other.shape_ = other.native_shape_;
     other.features_ = OrtValue::CreateTensor(producer_device.GetAllocator(), other.shape_, other.type_);
     ByteWrapTensor(producer_device, *other.features_)
         .CopyFrom(ByteWrapTensor(producer_device, *features_));
