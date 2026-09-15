@@ -840,7 +840,8 @@ def get_args():
                     Must be a positive multiple of 256 (required by the ONNX Runtime PagedAttention CUDA kernel).
                     Default is 256. Also written to the `engine.dynamic_batching` section of genai_config.json.
                 paged_chunk_size = Prefill chunk size written to `search.chunk_size` in genai_config.json.
-                    Requires use_paged_attention. Caps the prompt tokens ONE request contributes to a
+                    Applies only when use_paged_attention is set; it is ignored otherwise. Caps the
+                    prompt tokens ONE request contributes to a
                     step, where max_scheduled_tokens caps the whole step, so a value at or above
                     max_scheduled_tokens has no effect and a smaller one lets concurrent prefills
                     interleave instead of running one request at a time. Models whose sliding-window
