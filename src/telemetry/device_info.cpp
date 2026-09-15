@@ -2,13 +2,14 @@
 // Licensed under the MIT License.
 
 #include "device_info.h"
-#include "telemetry_environment.h"
 
 // The platform device-info implementation is only needed when telemetry is
 // compiled in. Guarding the whole translation unit keeps default (OFF) builds
 // from pulling in platform headers such as <sys/sysinfo.h>, which are not
 // portable to every target (e.g. some non-Linux Unix platforms).
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
+
+#include "telemetry_environment.h"
 
 #include <algorithm>
 #include <array>
@@ -224,6 +225,8 @@ std::string GetCpuModel() {
 #endif
 }
 
+#if defined(__linux__) || defined(__ANDROID__)
+
 constexpr size_t kMaxHostEvidenceBytes = 16 * 1024;
 
 std::string ReadBoundedFile(const char* path) {
@@ -240,6 +243,8 @@ bool FileExists(const char* path) {
   std::error_code error;
   return std::filesystem::exists(path, error);
 }
+
+#endif
 
 TelemetryInternal::HostEnvironmentInfo GetHostEnvironmentInfo() {
   TelemetryInternal::HostEnvironmentEvidence evidence;

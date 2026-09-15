@@ -66,18 +66,20 @@ def add_github_dep(name, parsed_url, revision):
         print("unrecognized github url path:" + parsed_url.path)
         return
 
-    # For example, the path might be like '/myorg/myrepo/archive/5a5f8a5935762397aa68429b5493084ff970f774.zip'
-    # The last segment, segments[4], is '5a5f8a5935762397aa68429b5493084ff970f774.zip'
-    if tag is None and len(segments) == 5 and re.fullmatch(r"[0-9a-f]{40}", PurePosixPath(segments[4]).stem):
-        commit = PurePosixPath(segments[4]).stem
+    archive_revision = None
+    if tag is None and len(segments) == 5:
+        archive_revision = PurePosixPath(segments[4]).stem
+        if archive_revision.endswith(".tar"):
+            archive_revision = PurePosixPath(archive_revision).stem
+
+    if archive_revision is not None and re.fullmatch(r"[0-9a-f]{40}", archive_revision):
+        commit = archive_revision
         dep = GitDep(commit, git_repo_url)
         if dep not in git_deps:
             git_deps[dep] = name
     else:
-        if tag is None and len(segments) == 5:
-            tag = PurePosixPath(segments[4]).stem
-            if tag.endswith(".tar"):
-                tag = PurePosixPath(tag).stem
+        if archive_revision is not None:
+            tag = archive_revision
         elif tag is None and segments[4] == "refs" and segments[5] == "tags":
             tag = PurePosixPath(segments[6]).stem
             if tag.endswith(".tar"):
