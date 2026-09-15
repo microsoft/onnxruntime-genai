@@ -1371,16 +1371,7 @@ class Qwen35MTPModel(Qwen35MoETextModel):
     def make_mtp_input_projection(self):
         basename = "/model/mtp"
 
-        embed_weight = "model.embed_tokens.weight"
-        self.make_initializer(self.mtp_weights.embedding.weight, embed_weight, to=self.io_dtype)
-        embed_gather = f"{basename}/embed_tokens/Gather"
-        embed_output = f"{embed_gather}/output_0"
-        self.make_node(
-            "Gather",
-            inputs=[embed_weight, self.input_names["input_ids"]],
-            outputs=[embed_output],
-            name=embed_gather,
-        )
+        embed_output = self.make_mtp_embedding(basename)
         self.make_value(embed_output, self.io_dtype, shape=self.make_hidden_state_shape())
 
         embedding_norm = self.make_offset_rmsnorm(
@@ -1403,6 +1394,69 @@ class Qwen35MTPModel(Qwen35MoETextModel):
 
         fc_name = self.make_matmul(self.mtp_weights.fc, f"{basename}/fc/MatMul", f"{concat_name}/output_0")
         return f"{fc_name}/output_0"
+
+    def make_mtp_embedding(self, basename):
+        embed_basename = f"{basename}/embed_tokens"
+
+        if self.tied_quantized_embeddings:
+            bits, weight_name, scale_name, zero_point_name = self.make_tied_quantized_embedding_input_names()
+            flat_dim = self.hidden_size * bits // 8
+            reshape_name = f"{embed_basename}/Reshape"
+            reshape_output = f"{reshape_name}/output_0"
+            self.make_reshape(
+                reshape_name,
+                [weight_name, f"/model/constants/INT64/[{self.vocab_size}, {flat_dim}]"],
+                dtype=ir.DataType.UINT8,
+                shape=[self.vocab_size, flat_dim],
+            )
+
+            gather_name = f"{embed_basename}/GatherBlockQuantized"
+            gather_inputs = [reshape_output, self.input_names["input_ids"]]
+            if scale_name:
+                gather_inputs.append(scale_name)
+            if zero_point_name:
+                gather_inputs.append(zero_point_name)
+            self.make_node(
+                "GatherBlockQuantized",
+                inputs=gather_inputs,
+                outputs=[f"{gather_name}/output_0"],
+                name=gather_name,
+                domain="com.microsoft",
+                bits=bits,
+                block_size=int(self.quant_attrs["matmul_block_size"]),
+                gather_axis=0,
+                quantize_axis=1,
+            )
+        elif self.tied_unquantized_embeddings:
+            transpose_name = f"{embed_basename}/Transpose"
+            transpose_output = f"{transpose_name}/output_0"
+            self.make_transpose(
+                transpose_name,
+                "lm_head.MatMul.weight",
+                self.io_dtype,
+                shape=[self.vocab_size, self.hidden_size],
+                perm=[1, 0],
+            )
+
+            gather_name = f"{embed_basename}/Gather"
+            self.make_node(
+                "Gather",
+                inputs=[transpose_output, self.input_names["input_ids"]],
+                outputs=[f"{gather_name}/output_0"],
+                name=gather_name,
+            )
+        else:
+            embed_weight = "model.embed_tokens.weight"
+            self.make_initializer(self.mtp_weights.embedding.weight, embed_weight, to=self.io_dtype)
+            gather_name = f"{embed_basename}/Gather"
+            self.make_node(
+                "Gather",
+                inputs=[embed_weight, self.input_names["input_ids"]],
+                outputs=[f"{gather_name}/output_0"],
+                name=gather_name,
+            )
+
+        return f"{gather_name}/output_0"
 
 
 class Qwen35DenseMTPModel(Qwen35MTPModel):

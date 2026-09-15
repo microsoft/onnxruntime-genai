@@ -13,7 +13,7 @@ import pytest
 import torch
 from loaders.qwen import QwenMTPModel
 
-from models.builders.qwen import Qwen35Model, Qwen35MoEModel
+from models.builders.qwen import Qwen35DenseMTPModel, Qwen35Model, Qwen35MoEModel
 
 
 def _resolve(extra_options, main_onnx_dtype=ir.DataType.INT4):
@@ -330,7 +330,7 @@ def test_local_mtp_loader_does_not_resolve_hugging_face_snapshot(monkeypatch, tm
 
 
 def test_safetensors_mtp_loader_uses_keys_api(monkeypatch, tmp_path):
-    import safetensors.torch as safetensors_torch
+    import safetensors.torch as safetensors_torch  # noqa: PLC0415
 
     tensors = {
         "model.embed_tokens.weight": torch.ones((4, 2)),
@@ -377,6 +377,129 @@ def test_safetensors_mtp_loader_uses_keys_api(monkeypatch, tmp_path):
     assert captured["lm_head_weight"] is tensors["lm_head.weight"]
     assert captured["layer_config"] == "config"
     assert captured["is_moe"] is False
+
+
+def test_safetensors_mtp_loader_uses_tied_embedding_when_lm_head_is_absent(monkeypatch, tmp_path):
+    import safetensors.torch as safetensors_torch  # noqa: PLC0415
+
+    tensors = {
+        "model.embed_tokens.weight": torch.ones((4, 2)),
+        "mtp.fc.weight": torch.ones((2, 4)),
+    }
+
+    class FakeSafeOpen:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exception_type, exception, traceback):
+            return False
+
+        def keys(self):
+            return tensors.keys()
+
+        def get_tensor(self, key):
+            return tensors[key]
+
+    captured = {}
+
+    def capture_from_state(cls, mtp_state, embed_weight, lm_head_weight, layer_config, is_moe):
+        captured["embed_weight"] = embed_weight
+        captured["lm_head_weight"] = lm_head_weight
+        return SimpleNamespace()
+
+    (tmp_path / "model.safetensors").touch()
+    monkeypatch.setattr(safetensors_torch, "safe_open", lambda *args, **kwargs: FakeSafeOpen())
+    monkeypatch.setattr(QwenMTPModel, "from_state", classmethod(capture_from_state))
+
+    QwenMTPModel.from_safetensors(
+        tmp_path,
+        layer_config=SimpleNamespace(tie_word_embeddings=True),
+        is_moe=False,
+    )
+
+    assert captured["embed_weight"] is tensors["model.embed_tokens.weight"]
+    assert captured["lm_head_weight"] is tensors["model.embed_tokens.weight"]
+
+
+def _make_minimal_mtp_embedding_model(*, tied_quantized=False, tied_unquantized=False):
+    model = Qwen35DenseMTPModel.__new__(Qwen35DenseMTPModel)
+    model.tied_quantized_embeddings = tied_quantized
+    model.tied_unquantized_embeddings = tied_unquantized
+    model.hidden_size = 64
+    model.vocab_size = 32000
+    model.io_dtype = ir.DataType.FLOAT16
+    model.input_names = {"input_ids": "input_ids"}
+    model.quant_attrs = {"matmul_block_size": 32}
+    model.mtp_weights = SimpleNamespace(embedding=SimpleNamespace(weight=object()))
+    model._initializer_calls = []
+    model._reshape_calls = []
+    model._transpose_calls = []
+    model._node_calls = []
+
+    def make_initializer(tensor, name, to=None):
+        model._initializer_calls.append((tensor, name, to))
+
+    def make_reshape(name, inputs, dtype, shape):
+        model._reshape_calls.append((name, inputs, dtype, shape))
+
+    def make_transpose(name, root_input, dtype, shape, perm):
+        model._transpose_calls.append((name, root_input, dtype, shape, perm))
+
+    def make_node(op_type, inputs, outputs, name, **kwargs):
+        model._node_calls.append((op_type, inputs, outputs, name, kwargs))
+
+    model.make_initializer = make_initializer
+    model.make_reshape = make_reshape
+    model.make_transpose = make_transpose
+    model.make_node = make_node
+    model.make_tied_quantized_embedding_input_names = lambda: (
+        8,
+        "lm_head.MatMul.weight_Q8G32",
+        "lm_head.MatMul.weight_scale",
+        None,
+    )
+    return model
+
+
+def test_mtp_quantized_shared_embedding_reuses_lm_head_initializers():
+    model = _make_minimal_mtp_embedding_model(tied_quantized=True)
+
+    output = model.make_mtp_embedding("/model/mtp")
+
+    assert output == "/model/mtp/embed_tokens/GatherBlockQuantized/output_0"
+    assert model._initializer_calls == []
+    assert model._reshape_calls[0][1][0] == "lm_head.MatMul.weight_Q8G32"
+    op_type, inputs, _, _, attributes = model._node_calls[0]
+    assert op_type == "GatherBlockQuantized"
+    assert inputs == [
+        "/model/mtp/embed_tokens/Reshape/output_0",
+        "input_ids",
+        "lm_head.MatMul.weight_scale",
+    ]
+    assert attributes["bits"] == 8
+
+
+def test_mtp_unquantized_shared_embedding_reuses_lm_head_initializer():
+    model = _make_minimal_mtp_embedding_model(tied_unquantized=True)
+
+    output = model.make_mtp_embedding("/model/mtp")
+
+    assert output == "/model/mtp/embed_tokens/Gather/output_0"
+    assert model._initializer_calls == []
+    assert model._transpose_calls[0][1] == "lm_head.MatMul.weight"
+    assert model._node_calls[0][1][0] == "/model/mtp/embed_tokens/Transpose/output_0"
+
+
+def test_mtp_unshared_embedding_keeps_separate_initializer():
+    model = _make_minimal_mtp_embedding_model()
+
+    output = model.make_mtp_embedding("/model/mtp")
+
+    assert output == "/model/mtp/embed_tokens/Gather/output_0"
+    assert len(model._initializer_calls) == 1
+    assert model._initializer_calls[0][1] == "model.embed_tokens.weight"
+    assert model._reshape_calls == []
+    assert model._transpose_calls == []
 
 
 def test_dense_mtp_state_uses_dense_decoder_layer(monkeypatch):

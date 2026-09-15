@@ -500,8 +500,11 @@ can never be verified under a later turn that resolved a different policy.
 
 ### Engine-hosted MTP head: operational contract
 
-`model.mtp` turns the head on automatically for every request the dynamic Engine decodes. Server
-authors should size capacity and handle failures against the following behaviors.
+`model.mtp` turns the head on automatically for every request the dynamic Engine decodes when
+`enabled` is `true` or omitted. Setting `model.mtp.enabled` to `false` prevents the Engine from
+loading or running that head. The flag does not affect an `MtpGenerator` constructed explicitly by
+the application. Server authors should size capacity and handle failures against the following
+behaviors.
 
 **Auxiliary memory accounting.** The head is a second paged pool that always holds the same block
 count as the target pool, so both are sized from one budget. With

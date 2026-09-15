@@ -73,12 +73,16 @@ This produces, in `<output-dir>`:
 
 * `model.onnx` (+ `.data`) — the main decoder, now with a `hidden_states` graph output;
 * `mtp.onnx` (+ `.data`) — the MTP head (one full-attention + MoE layer, `fc`, the pre/post
-  RMSNorms, and a copy of the embedding + `lm_head`);
+  RMSNorms, embedding lookup, and `lm_head`); with shared embeddings, the lookup reuses the
+  `lm_head` weights instead of storing a separate embedding;
 * `genai_config.json` — carrying an `mtp` section and the decoder's `hidden_states` output.
 
-To run without MTP, set `model.mtp.enabled` to `false` in `genai_config.json`. Set it back to
-`true` to use MTP again. The exported ONNX files do not need to be rebuilt. Older configurations
-that omit `enabled` continue to enable MTP by default.
+To prevent the dynamic Engine from loading and running the exported MTP head automatically, set
+`model.mtp.enabled` to `false` in `genai_config.json`. Set it back to `true` to enable automatic MTP
+again. The exported ONNX files do not need to be rebuilt, and older configurations that omit
+`enabled` continue to enable MTP by default. This flag does not control an `og.MtpGenerator` that an
+application constructs explicitly; the application enables or disables that path by deciding
+whether to create the generator.
 
 `Qwen35MTPHead` (in `src/python/py/models/builders/qwen.py`) builds the head by reusing the
 parent `Qwen35MoeTextModel` machinery (`_make_full_attention`, `make_moe`, mRoPE, the residual

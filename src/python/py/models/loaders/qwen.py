@@ -33,8 +33,8 @@ class QwenMTPModel:
         model_dir = cls.resolve_model_dir(model_dir, cache_dir=cache_dir, token=token)
         return cls.from_safetensors(model_dir, layer_config, is_moe)
 
-    @staticmethod
-    def resolve_model_dir(model_dir, cache_dir=None, token=None):
+    @classmethod
+    def resolve_model_dir(cls, model_dir, cache_dir=None, token=None):
         if os.path.isdir(model_dir):
             return model_dir
 
@@ -85,7 +85,7 @@ class QwenMTPModel:
         embed_keys = {"model.embed_tokens.weight", "model.language_model.embed_tokens.weight"}
         for shard in shards:
             with safetensors_torch.safe_open(shard, framework="pt") as safetensors_file:
-                for key in safetensors_file.keys():
+                for key in safetensors_file.keys():  # noqa: SIM118 - safe_open exposes keys(), not Mapping iteration
                     if key.startswith("mtp."):
                         mtp_state[key] = safetensors_file.get_tensor(key)
                     elif key in embed_keys:
@@ -101,6 +101,8 @@ class QwenMTPModel:
                 "('model.embed_tokens.weight' or 'model.language_model.embed_tokens.weight') "
                 "for the MTP head embedding."
             )
+        if lm_head_weight is None and getattr(layer_config, "tie_word_embeddings", False):
+            lm_head_weight = embed_weight
         if lm_head_weight is None:
             raise ValueError("Could not find 'lm_head.weight' for the MTP head LM head.")
         return cls.from_state(mtp_state, embed_weight, lm_head_weight, layer_config, is_moe)
