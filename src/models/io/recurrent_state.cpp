@@ -118,15 +118,14 @@ RecurrentState::RecurrentState(State& state)
   // LinearAttention kernel with native past/present buffer sharing support.
   const bool is_webgpu = model_.p_device_kvcache_->GetType() == DeviceType::WEBGPU;
 
-  // Under CUDA-graph capture the recurrent (conv + linear-attention) state is updated in
-  // place (present_state aliased onto past_state), and ORT re-runs the model several times
-  // inside the first Run() of each captured shape to warm up and capture. Save/restore around
-  // that first capture (see ShouldFixUpGraphCapture) keeps the update correct while using half
-  // the recurrent-state memory and one graph variant. The environment override can disable
-  // sharing to retain double buffering as a diagnostic fallback.
+  // With graph capture, each graph must keep stable recurrent-state buffer addresses. CUDA
+  // normally aliases past and present, using one graph variant; save/restore around its first
+  // capture prevents ORT's capture-time replay from advancing the state more than once. When
+  // separate past/present buffers are required (always on WebGPU, or by the CUDA diagnostic
+  // override), capture one graph for each direction of the per-step buffer swap.
   bool share_under_graph_capture = true;
   GetEnv("ORTGENAI_SHARE_RECURRENT_STATE_UNDER_GRAPH_CAPTURE", share_under_graph_capture);
-  const bool graph_capture_enabled = !is_webgpu && state_.params_->use_graph_capture;
+  const bool graph_capture_enabled = state_.params_->use_graph_capture;
   share_buffers_ = !is_webgpu &&
                    (graph_capture_enabled ? share_under_graph_capture : share_buffers_configured);
   graph_double_buffer_ = graph_capture_enabled && !share_buffers_;
