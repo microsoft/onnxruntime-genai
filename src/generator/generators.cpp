@@ -359,8 +359,14 @@ OrtGlobals::~OrtGlobals() {
 void OrtGlobals::ReleaseDeviceResources(DeviceType type) {
   {
     std::scoped_lock lock{graph_session_cache_.mutex_};
-    std::erase_if(graph_session_cache_.sessions_,
-                  [type](const auto& item) { return item.second.device_type == type; });
+    auto& sessions = graph_session_cache_.sessions_;
+    for (auto it = sessions.begin(); it != sessions.end();) {
+      if (it->second.device_type == type) {
+        it = sessions.erase(it);
+      } else {
+        ++it;
+      }
+    }
   }
 
   std::scoped_lock lock{device_interfaces_mutex_};
@@ -375,7 +381,7 @@ void OrtGlobals::ReleaseDeviceResources(DeviceType type) {
     release_interface_resources(to_string(type).c_str());
   }
 
-  device_allocators_[static_cast<int>(type)] = {};
+  device_allocators_[static_cast<int>(type)].Reset();
 }
 
 DeviceInterface* OrtGlobals::LoadCudaInterface(DeviceType type) {

@@ -231,6 +231,13 @@ struct OrtGlobals {
     // Null if unavailable, in which case inputs stay on the default device allocator.
     Ort::Allocator* host_accessible_allocator_{};
     int device_id_{};  // Device this allocator is bound to (0 unless a specific device was selected).
+  
+    void Reset() {
+      host_accessible_allocator_ = nullptr;
+      allocator_.reset();
+      session_.reset();
+      device_id_ = 0;
+    }
   };
   Allocator device_allocators_[static_cast<int>(DeviceType::MAX)];
 
