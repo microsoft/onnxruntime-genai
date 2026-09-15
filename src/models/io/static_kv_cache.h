@@ -8,13 +8,7 @@
 
 namespace Generators {
 
-// Pipeline metadata combines multiple sessions whose cache profiles need not describe the
-// runtime output capacity, and the top-level device need not execute every pipeline stage.
-inline bool ShouldInferKeyValueCacheShape(const Config::Model::Decoder& decoder) {
-  return decoder.pipeline.empty();
-}
-
-int64_t DetectAndConfigureFixedKvShape(const Model& model,
+int64_t DetectAndConfigureFixedKvShape(const SessionInfo& session_info,
                                        const std::vector<std::string>& input_name_strings,
                                        int layer_count,
                                        const Config::Search& search,
