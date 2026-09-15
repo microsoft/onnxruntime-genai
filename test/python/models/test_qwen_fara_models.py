@@ -769,6 +769,41 @@ def test_qwen3_5_hybrid_text_generation_webgpu(test_data_path):
     assert generator is not None
 
 
+@pytest.mark.graph_capture
+@pytest.mark.skipif(not _webgpu_plugin_registered, reason="onnxruntime-ep-webgpu plugin not installed")
+def test_qwen3_5_hybrid_graph_capture_advances_recurrent_state_webgpu(test_data_path):
+    """Graph capture must preserve both directions of WebGPU recurrent-state double buffering."""
+    model_path = os.fspath(Path(test_data_path) / "qwen3-5")
+    if not os.path.exists(model_path):
+        pytest.skip("qwen3-5 test model not found")
+
+    def run(enable_graph_capture):
+        config = og.Config(model_path)
+        config.clear_providers()
+        config.append_provider("webgpu")
+        config.set_provider_option("webgpu", "enableGraphCapture", "1" if enable_graph_capture else "0")
+        config.set_provider_option("webgpu", "validationMode", "disabled" if enable_graph_capture else "basic")
+        model = og.Model(config)
+        params = og.GeneratorParams(model)
+        params.set_search_options(do_sample=False, max_length=8)
+        generator = og.Generator(model, params)
+        generator.append_tokens([10, 20, 30, 40])
+
+        state_values = [float(np.asarray(generator.get_logits()).reshape(-1)[0])]
+        for _ in range(3):
+            generator.generate_next_token()
+            state_values.append(float(np.asarray(generator.get_logits()).reshape(-1)[0]))
+        return state_values
+
+    eager_state_values = run(enable_graph_capture=False)
+    captured_state_values = run(enable_graph_capture=True)
+
+    # The fixture increments its recurrent state once per forward and exposes the previous value
+    # through logits. Values 2 and 3 require both graph-buffer variants to be rebound and replayed.
+    assert eager_state_values == [0.0, 1.0, 2.0, 3.0]
+    assert captured_state_values == eager_state_values
+
+
 # Standalone runner functionality
 def run_qwen_fara_vision_tests(
     cwd: str | bytes | os.PathLike,

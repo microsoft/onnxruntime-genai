@@ -242,12 +242,45 @@ def create_dummy_decoder_model(
         "Constant", [], ["one_shape"], value=helper.make_tensor("one_shape", TensorProto.INT64, [1], [1])
     )
     concat_logits_shape = helper.make_node("Concat", ["batch_1d", "seq_1d", "vocab_dim"], ["logits_shape"], axis=0)
-    logits_node = helper.make_node(
-        "ConstantOfShape", ["logits_shape"], ["logits"], value=helper.make_tensor("val", TensorProto.FLOAT, [1], [0.0])
+    zero_logits_node = helper.make_node(
+        "ConstantOfShape",
+        ["logits_shape"],
+        ["zero_logits"],
+        value=helper.make_tensor("val", TensorProto.FLOAT, [1], [0.0]),
     )
-    nodes.extend([one_shape_const, reshape_batch, reshape_seq, concat_logits_shape, logits_node])
+    nodes.extend([one_shape_const, reshape_batch, reshape_seq, concat_logits_shape, zero_logits_node])
 
-    # Identity for all state tensors
+    # Make logits observe the first recurrent-state value. The state starts at zero and is
+    # incremented below after every forward, so an integration test can verify that graph capture
+    # rebinds both directions of WebGPU's separate past/present buffers instead of replaying stale
+    # state. Keep a fallback for an all-KV model even though this fixture is hybrid by default.
+    recurrent_layers = [layer_idx for layer_idx in range(num_layers) if layer_idx not in kv_layers]
+    observed_layer = recurrent_layers[0] if recurrent_layers else None
+    if observed_layer is not None:
+        flatten_shape_const = helper.make_node(
+            "Constant",
+            [],
+            ["flatten_shape"],
+            value=helper.make_tensor("flatten_shape", TensorProto.INT64, [1], [-1]),
+        )
+        flatten_state = helper.make_node(
+            "Reshape",
+            [f"past_key_values.{observed_layer}.recurrent_state", "flatten_shape"],
+            ["flat_recurrent_state"],
+        )
+        state_value = helper.make_node("Gather", ["flat_recurrent_state", "idx_0"], ["recurrent_state_value"], axis=0)
+        logits_node = helper.make_node("Add", ["zero_logits", "recurrent_state_value"], ["logits"])
+        nodes.extend([flatten_shape_const, flatten_state, state_value, logits_node])
+    else:
+        nodes.append(helper.make_node("Identity", ["zero_logits"], ["logits"]))
+
+    # Identity for all state tensors except the observed recurrent state, which advances by one
+    # per forward so stale graph-capture bindings are visible in the next step's logits.
+    if recurrent_layers:
+        one_float_const = helper.make_node(
+            "Constant", [], ["one_float"], value=helper.make_tensor("one_float", TensorProto.FLOAT, [], [1.0])
+        )
+        nodes.append(one_float_const)
     for layer_idx in range(num_layers):
         if layer_idx in kv_layers:
             nodes.append(
@@ -262,10 +295,14 @@ def create_dummy_decoder_model(
                     "Identity", [f"past_key_values.{layer_idx}.conv_state"], [f"present.{layer_idx}.conv_state"]
                 )
             )
+            recurrent_op = "Add" if layer_idx == observed_layer else "Identity"
+            recurrent_inputs = [f"past_key_values.{layer_idx}.recurrent_state"]
+            if recurrent_op == "Add":
+                recurrent_inputs.append("one_float")
             nodes.append(
                 helper.make_node(
-                    "Identity",
-                    [f"past_key_values.{layer_idx}.recurrent_state"],
+                    recurrent_op,
+                    recurrent_inputs,
                     [f"present.{layer_idx}.recurrent_state"],
                 )
             )
