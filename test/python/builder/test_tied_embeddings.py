@@ -445,7 +445,7 @@ def test_make_embedding_uses_algo_specific_lm_head_initializer_names_for_tied_qu
 
 
 def _make_minimal_model_for_embedding_branches(
-    *, tied_quantized_embeddings=False, tied_unquantized_embeddings=False, lm_head_quant_type="none"
+    *, tied_quantized_embeddings=False, tied_unquantized_embeddings=False, can_reuse_lm_head=True
 ):
     model = Model.__new__(Model)
     model.use_paged_attention = False
@@ -461,7 +461,7 @@ def _make_minimal_model_for_embedding_branches(
     }
     model.tied_quantized_embeddings = tied_quantized_embeddings
     model.tied_unquantized_embeddings = tied_unquantized_embeddings
-    model.weights = types.SimpleNamespace(lm_head=types.SimpleNamespace(quant_type=lm_head_quant_type))
+    model.weights = types.SimpleNamespace(lm_head=types.SimpleNamespace(can_reuse_as_embedding=can_reuse_lm_head))
 
     model._transpose_calls = []
     model._initializer_calls = []
@@ -533,15 +533,12 @@ def test_make_embedding_non_tied_path_uses_embed_tokens_initializer_and_gather()
     assert model._transpose_calls == []
 
 
-@pytest.mark.parametrize("lm_head_quant_type", ["nvfp4", "fp8"])
 @pytest.mark.parametrize("tied_quantized, tied_unquantized", [(True, False), (False, True)])
-def test_make_embedding_native_quantized_lm_head_keeps_checkpoint_embedding(
-    lm_head_quant_type, tied_quantized, tied_unquantized
-):
+def test_make_embedding_incompatible_lm_head_keeps_checkpoint_embedding(tied_quantized, tied_unquantized):
     model = _make_minimal_model_for_embedding_branches(
         tied_quantized_embeddings=tied_quantized,
         tied_unquantized_embeddings=tied_unquantized,
-        lm_head_quant_type=lm_head_quant_type,
+        can_reuse_lm_head=False,
     )
     embedding = object()
 

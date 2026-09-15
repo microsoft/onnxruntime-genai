@@ -79,6 +79,11 @@ This produces, in `<output-dir>`:
   those formats retain a separate embedding initializer;
 * `genai_config.json` — carrying an `mtp` section and the decoder's `hidden_states` output.
 
+After saving both graphs, the builder records byte-identical decoder/MTP embedding and LM-head
+initializers as shared initializers and removes their duplicate MTP data. At runtime, both sessions
+reuse the same device allocation. For untied checkpoints, the embedding and LM head remain distinct
+from each other; sharing only removes copies of the same tensor across the two sessions.
+
 To prevent the dynamic Engine from loading and running the exported MTP head automatically, set
 `model.mtp.enabled` to `false` in `genai_config.json` while preserving the rest of the section.
 Alternatively, remove the entire `model.mtp` section. Both methods avoid rebuilding the ONNX files;
@@ -319,20 +324,6 @@ Two CUDA-graph caveats matter for MTP:
   steps; capturing the 2-token verify shape under its own `gpu_graph_id` is what turns the
   proven ~1.5–1.7 tokens/forward and the current break-even into an actual speedup. This is the
   single most impactful remaining change (see the CUDA-graph note above).
-* **Memory saving — share the embedding and `lm_head` between the main model and the MTP head.**
-  The MTP head reuses the main model's token embedding and `lm_head`; in the exported `mtp.onnx`
-  these two tensors are **bit-identical** to the main model's and together account for ~2 GB of
-  the head's ~3.8 GB (fp16). They can be shared instead of duplicated:
-    * *Runtime sharing:* inject the main session's already-loaded weight `OrtValue`s into the MTP
-      session via `OrtSessionOptions::AddInitializer(name, ort_value)` so the head does not
-      allocate its own copies. (Needs a model-load hook, since `og.Model` binds initializers at
-      session creation.)
-    * *Export sharing:* emit `mtp.onnx` without the `embed_tokens` / `lm_head` initializers
-      (referenced by name) when sharing is enabled, shrinking the file too.
-  Note `embed_tokens` and `lm_head` are **not** tied to each other for Qwen3.6
-  (`tie_word_embeddings = False`; they are independently trained, max abs diff ~0.3), so they
-  cannot be collapsed into a single transposed tensor — the saving is cross-model duplication,
-  not an embed/lm_head tie.
 * **INT4.** This example uses fp16 for fast iteration. The same export/runtime path works for the
   INT4 (QMoE) model; only the build precision changes. INT4 also raises the per-token baseline
   that speculation amortizes against.
