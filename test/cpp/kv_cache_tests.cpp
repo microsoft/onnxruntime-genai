@@ -29,12 +29,16 @@ struct CacheTestModel : Generators::Model {
 TEST(KvCacheTests, UsesDeviceWindowSizeForSingleSessionModel) {
   CacheTestModel model{false};
   Generators::Config::Search search;
+  EXPECT_TRUE(Generators::UsesNonRewindableWindowedKeyValueCache(
+      model, model.config_->model.decoder));
   EXPECT_EQ(Generators::GetWindowedKeyValueCacheSize(model, search, 4096), 80);
 }
 
 TEST(KvCacheTests, IgnoresTopLevelDeviceWindowSizeForPipelineModel) {
   CacheTestModel model{true};
   Generators::Config::Search search;
+  EXPECT_FALSE(Generators::UsesNonRewindableWindowedKeyValueCache(
+      model, model.config_->model.decoder));
   EXPECT_EQ(Generators::GetWindowedKeyValueCacheSize(model, search, 4096), 0);
 }
 

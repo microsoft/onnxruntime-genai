@@ -50,9 +50,14 @@ bool IsAttentionCacheNeeded(const Model& model) {
 
 }  // namespace
 
+bool CanUseTopLevelDeviceKeyValueCachePolicy(const Model& model) {
+  return model.config_->model.decoder.pipeline.empty();
+}
+
 bool UsesNonRewindableWindowedKeyValueCache(
     const Model& model, const Config::Model::Decoder& decoder) {
-  return model.p_device_kvcache_->UsesNonRewindableWindowedKeyValueCache(decoder);
+  return CanUseTopLevelDeviceKeyValueCachePolicy(model) &&
+         model.p_device_kvcache_->UsesNonRewindableWindowedKeyValueCache(decoder);
 }
 
 std::unique_ptr<KeyValueCache> CreateStandardKeyValueCache(State& state) {

@@ -88,8 +88,7 @@ int64_t DetectAndConfigureFixedKvShape(const SessionInfo& session_info,
 }
 
 int GetWindowedKeyValueCacheSize(const Model& model, const Config::Search& search, int max_length) {
-  // Pipeline stages may use different EPs, so the top-level device cannot define their cache window.
-  if (!model.config_->model.decoder.pipeline.empty())
+  if (!CanUseTopLevelDeviceKeyValueCachePolicy(model))
     return 0;
   return model.p_device_kvcache_->GetWindowedKeyValueCacheSize(
       model.config_->model.decoder, search, max_length);
