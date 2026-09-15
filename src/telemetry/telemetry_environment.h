@@ -3,7 +3,6 @@
 
 #pragma once
 
-#include <algorithm>
 #include <array>
 #include <cctype>
 #include <cstdlib>
@@ -215,7 +214,8 @@ inline HostEnvironmentInfo ClassifyHostEnvironment(const HostEnvironmentEvidence
   }
 
   const int confidence =
-      std::max(container_confidence, virtualization_confidence);
+      container_confidence > virtualization_confidence ? container_confidence
+                                                       : virtualization_confidence;
   return {is_container,
           is_virtual_machine,
           is_emulator,

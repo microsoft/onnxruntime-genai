@@ -43,32 +43,46 @@ class GitDep:
 git_deps = {}
 
 
-def add_github_dep(name, parsed_url):
+def add_github_dep(name, parsed_url, revision):
     segments = parsed_url.path.split("/")
     org_name = segments[1]
-    repo_name = segments[2]
-    if segments[3] != "archive":
+    repo_name = segments[2].removesuffix(".git")
+    git_repo_url = f"https://github.com/{org_name}/{repo_name}.git"
+
+    if len(segments) == 3 and parsed_url.path.endswith(".git"):
+        if not re.fullmatch(r"[0-9a-f]{40}", revision):
+            print("unrecognized github git revision:" + revision)
+            return
+        dep = GitDep(revision, git_repo_url)
+        if dep not in git_deps:
+            git_deps[dep] = name
+        return
+
+    if len(segments) > 5 and segments[3] == "releases" and segments[4] == "download":
+        tag = segments[5]
+    elif len(segments) > 3 and segments[3] == "archive":
+        tag = None
+    else:
         print("unrecognized github url path:" + parsed_url.path)
         return
-    git_repo_url = f"https://github.com/{org_name}/{repo_name}.git"
+
     # For example, the path might be like '/myorg/myrepo/archive/5a5f8a5935762397aa68429b5493084ff970f774.zip'
     # The last segment, segments[4], is '5a5f8a5935762397aa68429b5493084ff970f774.zip'
-    if len(segments) == 5 and re.match(r"[0-9a-f]{40}", PurePosixPath(segments[4]).stem):
+    if tag is None and len(segments) == 5 and re.fullmatch(r"[0-9a-f]{40}", PurePosixPath(segments[4]).stem):
         commit = PurePosixPath(segments[4]).stem
         dep = GitDep(commit, git_repo_url)
         if dep not in git_deps:
             git_deps[dep] = name
     else:
-        # TODO: support urls like: https://github.com/onnx/onnx-tensorrt/archive/refs/tags/release/7.1.zip
-        if len(segments) == 5:
+        if tag is None and len(segments) == 5:
             tag = PurePosixPath(segments[4]).stem
             if tag.endswith(".tar"):
                 tag = PurePosixPath(tag).stem
-        elif segments[4] == "refs" and segments[5] == "tags":
+        elif tag is None and segments[4] == "refs" and segments[5] == "tags":
             tag = PurePosixPath(segments[6]).stem
             if tag.endswith(".tar"):
                 tag = PurePosixPath(tag).stem
-        else:
+        elif tag is None:
             print("unrecognized github url path:" + parsed_url.path)
             return
         # Make a REST call to convert to tag to a git commit
@@ -132,7 +146,7 @@ with open(os.path.join(SCRIPT_DIR, "..", "cmake", "deps.txt")) as f:
         parsed_url = urlparse(url)
         # TODO: add support for gitlab
         if parsed_url.hostname == "github.com":
-            add_github_dep(name, parsed_url)
+            add_github_dep(name, parsed_url, row[2])
         else:
             print("unrecognized url:" + url)
 
@@ -155,5 +169,7 @@ cgmanifest = {
     "Registrations": registrations,
 }
 
-with open(os.path.join(SCRIPT_DIR, "generated", "cgmanifest.json"), mode="w") as generated_cgmanifest_file:
+with open(
+    os.path.join(SCRIPT_DIR, "generated", "cgmanifest.json"), mode="w", newline="\n"
+) as generated_cgmanifest_file:
     print(json.dumps(cgmanifest, indent=2), file=generated_cgmanifest_file)
