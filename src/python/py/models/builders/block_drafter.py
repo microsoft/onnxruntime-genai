@@ -370,10 +370,10 @@ class BlockDrafterBuilder:
         ]
         for name, dtype, shape in declarations:
             self.graph.inputs.append(self.make_value(name, dtype, shape))
-        # TODO: this is the target's block size. The drafter attends non-causally, which ORT only
-        # serves from FlashAttention, so it needs a block that is a multiple of its own tile (128
-        # at head_size 128) and dies at load below it while the target would happily fall back.
-        # Giving the drafter an independent block size would decouple the two.
+        # TODO: this is the target's block size. The drafter attends non-causally, and ORT's
+        # PagedAttention has no non-FlashAttention path for that, so it needs a block that is a
+        # multiple of its own tile (128 at head_size 128) and errors out below it where the target
+        # would simply fall back. Giving the drafter an independent block size would decouple them.
         for layer_id in range(self.num_layers):
             for suffix in ("key", "value"):
                 self.graph.inputs.append(

@@ -727,8 +727,8 @@ def test_paged_attention_lm_head_pruning(monkeypatch, tmp_path, prune_lm_head, l
     "extra_options, error",
     [
         ({"use_paged_attention": "true", "paged_block_size": "0"}, "paged_block_size"),
-        # 768 is a multiple of 256, so the old rule let it through and PagedAttention
-        # then rejected the built model at load.
+        # 768 is a multiple of 256, so the old rule let it through and PagedAttention's
+        # CheckInputs then failed the first forward pass of the built model.
         ({"use_paged_attention": "true", "paged_block_size": "768"}, "paged_block_size"),
         ({"use_paged_attention": "true", "paged_chunk_size": "0"}, "paged_chunk_size"),
         ({"use_paged_attention": "true", "paged_chunk_size": "-1"}, "paged_chunk_size"),

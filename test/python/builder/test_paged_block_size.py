@@ -5,8 +5,10 @@
 
 The builder used to demand a multiple of 256. The ONNX Runtime PagedAttention op only
 requires a power of two of at least 16 (``CheckInputs`` in ``paged_attention_helper.h``);
-the multiple-of-256 rule belongs to one FlashAttention tile size, and a block below that
-tile makes ORT pick a different backend rather than reject the model.
+the multiple-of-256 rule belongs to one FlashAttention tile size. A block below that tile
+makes ORT pick a different backend for a causal model, though a non-causal query -- a block
+drafter -- has no such alternative and is rejected at run time, so the builder leaves the
+tile choice to the caller and enforces only the op-level rule.
 """
 
 from __future__ import annotations
