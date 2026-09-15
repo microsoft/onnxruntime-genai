@@ -41,6 +41,8 @@ MultiModalFeatures::MultiModalFeatures(State& state, MultiModalFeatures::Mode mo
   if (mode == MultiModalFeatures::Mode::Output) {
     features_ = OrtValue::CreateTensor(model_.p_device_->GetAllocator(), shape_, type_);
   }
+
+  native_shape_ = shape_;
 }
 
 void MultiModalFeatures::Add() {
@@ -79,6 +81,7 @@ void MultiModalFeatures::ReuseFeaturesBuffer(MultiModalFeatures& other) {
   state_.inputs_[index_] = features_.get();
 
   // Give other a real copy so its output binding has valid data before its next Run() overwrites it.
+  other.shape_ = other.native_shape_;
   other.features_ = OrtValue::CreateTensor(other.model_.p_device_->GetAllocator(), other.shape_, other.type_);
   ByteWrapTensor(*other.model_.p_device_, *other.features_)
       .CopyFrom(ByteWrapTensor(*other.model_.p_device_, *features_));
