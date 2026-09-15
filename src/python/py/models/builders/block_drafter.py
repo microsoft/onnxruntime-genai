@@ -366,8 +366,9 @@ class BlockDrafterBuilder:
             ("cumulative_sequence_lengths", ir.DataType.INT32, ["batch_size + 1"]),
             ("past_sequence_lengths", ir.DataType.INT32, ["batch_size"]),
             ("block_table", ir.DataType.INT32, ["batch_size", "max_num_blocks"]),
-            ("attention_metadata", ir.DataType.INT32, [3]),
         ]
+        if self.include_attention_metadata:
+            declarations.append(("attention_metadata", ir.DataType.INT32, [3]))
         for name, dtype, shape in declarations:
             self.graph.inputs.append(self.make_value(name, dtype, shape))
         for layer_id in range(self.num_layers):
@@ -449,7 +450,7 @@ class BlockDrafterBuilder:
                 "cumulative_sequence_lengths": "cumulative_sequence_lengths",
                 "past_sequence_lengths": "past_sequence_lengths",
                 "block_table": "block_table",
-                "attention_metadata": "attention_metadata",
+                "attention_metadata": "attention_metadata" if self.include_attention_metadata else "",
                 "past_key_names": "past_key_values.%d.key",
                 "past_value_names": "past_key_values.%d.value",
             },

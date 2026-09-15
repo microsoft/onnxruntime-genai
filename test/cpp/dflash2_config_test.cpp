@@ -85,6 +85,8 @@ class FakeModelStateMetadata final : public ModelStateMetadata {
   bool HasInput(const std::string& name) const override { return inputs_.contains(name); }
   bool HasOutput(const std::string& name) const override { return outputs_.contains(name); }
 
+  void RemoveInput(const std::string& name) { inputs_.erase(name); }
+
   ONNXTensorElementDataType GetInputDataType(const std::string& name) const override {
     return inputs_.at(name).data_type;
   }
@@ -232,6 +234,14 @@ TEST(Dflash2ConfigTest, PreservesTargetProviderOptions) {
 TEST(Dflash2ConfigTest, AcceptsCompatibleAuxiliaryHiddenStates) {
   const auto config = MakeDflash2Config();
   const auto [target, drafter] = MakeCompatibleMetadata();
+  EXPECT_NO_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8));
+}
+
+TEST(Dflash2ConfigTest, AcceptsOmittedAttentionMetadata) {
+  auto config = MakeDflash2Config();
+  config.model.dflash2.inputs.attention_metadata.clear();
+  auto [target, drafter] = MakeCompatibleMetadata();
+  drafter.RemoveInput("attention_metadata");
   EXPECT_NO_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8));
 }
 

@@ -843,9 +843,6 @@ def get_args():
                     Only used when use_paged_attention is set and the model's sliding-window layers are served
                     from a ring of blocks; those layers hold only `paged_chunk_size + window_size - 1` positions,
                     so prefill must be chunked. Must be a positive integer. Default is paged_block_size.
-                num_blocks = Fixed global paged KV-cache capacity. Must be a positive integer. When set, it replaces
-                    gpu_utilization_factor in genai_config.json. Required for providers such as WebGPU that do not
-                    expose available device memory.
                 windowed_kv_cache = Use a reduced KV cache for sliding-window layers. Default is true.
                     With paged attention, eligible local layers use a ring of blocks while at least one full-context
                     layer remains. Without paged attention, supported execution providers use their windowed-cache

@@ -394,6 +394,7 @@ def _write_genai_config(
     use_ring=True,
     has_local_layers=True,
     all_local_layers=False,
+    ep="cuda",
 ):
     hf_config = SimpleNamespace(eos_token_id=[2])
     monkeypatch.setattr(base_module, "GenerationConfig", _NoGenerationConfig)
@@ -401,8 +402,8 @@ def _write_genai_config(
     model = _new_model()
     model.hf_token = None
     model.hf_remote = False
-    model.ep = "cuda"
-    model.ep_attrs = {"cuda": {}}
+    model.ep = ep
+    model.ep_attrs = {ep: {}}
     model.extra_options = dict(extra_options or {})
     model.matmul_attrs = {"weights_prepacked": 0}
     model.attention_attrs = {"paged_block_size": 256}
@@ -434,6 +435,8 @@ def _write_genai_config(
         "past_key_values.key": [],
         "past_key_values.value": [],
     }
+    if ep == "webgpu":
+        del model.input_names["attention_metadata"]
     model.output_names = {"logits": "logits", "present.key": [], "present.value": []}
 
     model.make_genai_config(hf_config, {}, str(out_dir))
@@ -459,6 +462,14 @@ def test_genai_config_names_the_windowed_block_table(monkeypatch, tmp_path):
     inputs = config["model"]["decoder"]["inputs"]
     assert inputs["block_table_windowed"] == "block_table_windowed"
     assert inputs["block_table"] == "block_table"
+
+
+@pytest.mark.parametrize("ep, expected", [("cuda", True), ("webgpu", False)])
+def test_genai_config_uses_provider_specific_attention_metadata(monkeypatch, tmp_path, ep, expected):
+    config = _write_genai_config(monkeypatch, tmp_path, window_size=128, ep=ep)
+
+    inputs = config["model"]["decoder"]["inputs"]
+    assert ("attention_metadata" in inputs) is expected
 
 
 def test_genai_config_defaults_chunk_size_to_the_block_size(monkeypatch, tmp_path):
