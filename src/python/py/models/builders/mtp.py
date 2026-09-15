@@ -32,7 +32,9 @@ class MTPModel:
             return
 
         inherited_options = {
-            key: copy.deepcopy(extra_options[key]) for key in ("hf_token", "hf_remote") if key in extra_options
+            key: copy.deepcopy(extra_options[key])
+            for key in ("hf_token", "hf_remote", "shared_embeddings")
+            if key in extra_options
         }
         quant_config = (
             copy.deepcopy(mtp_quant_config_value)

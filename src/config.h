@@ -523,6 +523,7 @@ struct Config {
     // loads the head as a separate Model; MtpGenerator uses this block to map the main model's
     // hidden-state output and the head's feedback output.
     struct Mtp {
+      bool enabled{true};
       std::string filename;  // e.g. "mtp.onnx"; used by model packaging/building tools
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
@@ -555,6 +556,8 @@ struct Config {
         std::string present_key_names{Defaults::PresentKeyName};
         std::string present_value_names{Defaults::PresentValueName};
       } outputs;
+
+      bool IsEnabled() const noexcept { return enabled && !filename.empty(); }
     } mtp;
 
     // DFlash 2/DSpark block-drafter metadata. Unlike MTP the drafter is not decoder-shaped: it

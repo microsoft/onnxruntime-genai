@@ -444,7 +444,9 @@ def test_make_embedding_uses_algo_specific_lm_head_initializer_names_for_tied_qu
         assert "lm_head.MatMul.weight_zero_points" not in gather_inputs
 
 
-def _make_minimal_model_for_embedding_branches(*, tied_quantized_embeddings=False, tied_unquantized_embeddings=False):
+def _make_minimal_model_for_embedding_branches(
+    *, tied_quantized_embeddings=False, tied_unquantized_embeddings=False, can_reuse_lm_head=True
+):
     model = Model.__new__(Model)
     model.use_paged_attention = False
     model.hidden_size = 64
@@ -459,6 +461,7 @@ def _make_minimal_model_for_embedding_branches(*, tied_quantized_embeddings=Fals
     }
     model.tied_quantized_embeddings = tied_quantized_embeddings
     model.tied_unquantized_embeddings = tied_unquantized_embeddings
+    model.weights = types.SimpleNamespace(lm_head=types.SimpleNamespace(can_reuse_as_embedding=can_reuse_lm_head))
 
     model._transpose_calls = []
     model._initializer_calls = []
@@ -527,6 +530,24 @@ def test_make_embedding_non_tied_path_uses_embed_tokens_initializer_and_gather()
     assert gather_inputs[0] == "model.embed_tokens.weight"
     assert gather_inputs[1] == "input_ids"
 
+    assert model._transpose_calls == []
+
+
+@pytest.mark.parametrize("tied_quantized, tied_unquantized", [(True, False), (False, True)])
+def test_make_embedding_incompatible_lm_head_keeps_checkpoint_embedding(tied_quantized, tied_unquantized):
+    model = _make_minimal_model_for_embedding_branches(
+        tied_quantized_embeddings=tied_quantized,
+        tied_unquantized_embeddings=tied_unquantized,
+        can_reuse_lm_head=False,
+    )
+    embedding = object()
+
+    model.make_embedding(embedding=embedding)
+
+    assert model._initializer_calls == [(embedding, "model.embed_tokens.weight", ir.DataType.FLOAT16)]
+    gather_calls = [call for call in model._node_calls if call[0] == "Gather"]
+    assert len(gather_calls) == 1
+    assert gather_calls[0][1]["inputs"] == ["model.embed_tokens.weight", "input_ids"]
     assert model._transpose_calls == []
 
 

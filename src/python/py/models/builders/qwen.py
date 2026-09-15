@@ -1071,6 +1071,7 @@ class Qwen35MoEModel(MTPModel):
         decoder_outputs = genai_config["model"]["decoder"].setdefault("outputs", {})
         decoder_outputs.setdefault("hidden_states", "hidden_states")
         genai_config["model"]["mtp"] = {
+            "enabled": True,
             "filename": "mtp.onnx",
             "num_hidden_layers": 1,
             "num_key_value_heads": self.decoder.num_kv_heads,
@@ -1451,6 +1452,8 @@ class Qwen35MTPModel(Qwen35MoETextModel):
             preserve_quantization=self.preserve_mtp_quantization,
             load_quantized_model=self.load_weights,
             is_moe=self.is_moe_mtp,
+            cache_dir=self.cache_dir,
+            token=self.hf_token,
         )
 
     def make_offset_rmsnorm(self, name, root_input, weight_tensor):
@@ -1472,16 +1475,7 @@ class Qwen35MTPModel(Qwen35MoETextModel):
     def make_mtp_input_projection(self):
         basename = "/model/mtp"
 
-        embed_weight = "model.embed_tokens.weight"
-        self.make_initializer(self.mtp_weights.embedding.weight, embed_weight, to=self.io_dtype)
-        embed_gather = f"{basename}/embed_tokens/Gather"
-        embed_output = f"{embed_gather}/output_0"
-        self.make_node(
-            "Gather",
-            inputs=[embed_weight, self.input_names["input_ids"]],
-            outputs=[embed_output],
-            name=embed_gather,
-        )
+        embed_output = self.make_mtp_embedding(basename)
         self.make_value(embed_output, self.io_dtype, shape=self.make_hidden_state_shape())
 
         embedding_norm = self.make_offset_rmsnorm(
@@ -1504,6 +1498,13 @@ class Qwen35MTPModel(Qwen35MoETextModel):
 
         fc_name = self.make_matmul(self.mtp_weights.fc, f"{basename}/fc/MatMul", f"{concat_name}/output_0")
         return f"{fc_name}/output_0"
+
+    def make_mtp_embedding(self, basename):
+        return self.make_embedding_lookup(
+            self.mtp_weights.embedding.weight,
+            f"{basename}/embed_tokens",
+            self.mtp_weights.lm_head,
+        )
 
 
 class Qwen35DenseMTPModel(Qwen35MTPModel):

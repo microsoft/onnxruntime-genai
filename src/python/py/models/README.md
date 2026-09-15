@@ -384,7 +384,7 @@ python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p fp
 
 #### Enable Shared Embeddings
 
-This scenario is for when you want to enable weight sharing between the embedding layer and the language modeling head. This reduces model size and can improve memory efficiency, especially useful for models with tied embeddings (where `tie_word_embeddings=true` in config.json). Shared embeddings are only valid for models with tied embeddings; setting `shared_embeddings=true` for a model with `tie_word_embeddings=false` will raise a `ValueError`. Shared embeddings are automatically enabled if `tie_word_embeddings=true` in the model's config.json (can be overridden with `shared_embeddings=false`), but cannot be used with `exclude_embeds=true` or `exclude_lm_head=true`.
+This scenario is for when you want to enable weight sharing between the embedding layer and the language modeling head. This reduces model size and can improve memory efficiency, especially useful for models with tied embeddings (where `tie_word_embeddings=true` in config.json). For Qwen models with an exported MTP head, compatible non-native LM-head formats also let the MTP embedding lookup reuse the head's LM-head initializer, allowing the shared initializers to be deduplicated across the main and MTP graphs. Native NVFP4 and FP8 LM-head storage cannot be consumed by the generic embedding gather, so those formats retain a separate embedding initializer. Shared embeddings are only valid for models with tied embeddings; setting `shared_embeddings=true` for a model with `tie_word_embeddings=false` will raise a `ValueError`. Shared embeddings are automatically enabled if `tie_word_embeddings=true` in the model's config.json (can be overridden with `shared_embeddings=false`), but cannot be used with `exclude_embeds=true` or `exclude_lm_head=true`.
 
 ##### Example 1: INT4 weights + INT4 embeddings (for RTN and K-Quant)
 
@@ -463,9 +463,9 @@ python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o pa
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files
 ```
 
-Qwen3.5 MoE checkpoints (`Qwen3_5MoeForConditionalGeneration`) that declare MTP layers must ship `mtp.*` weights in their safetensors. For those models, the builder rejects `exclude_lm_head=true` and `prune_lm_head=true` because the exported MTP workflow requires the main LM head. The MTP weights are read directly from the source safetensors because Hugging Face `transformers` discards them on load.
+Qwen3.5 MoE checkpoints (`Qwen3_5MoeForConditionalGeneration`) that declare MTP layers must ship `mtp.*` weights in their safetensors. For those models, the builder rejects `exclude_lm_head=true` and `prune_lm_head=true` because the exported MTP workflow requires the main LM head. The MTP weights are read directly from the source safetensors because Hugging Face `transformers` discards them on load. Hugging Face repository IDs are resolved to their downloaded snapshot before the safetensors are scanned.
 
-Set `exclude_mtp=true` to skip the head entirely, which is how such a checkpoint is built with `prune_lm_head=true` for a deployment that does not speculate. A block drafter (`dflash2_path` / `dspark_path`) already supersedes the head and needs no extra option. MTP can also be disabled after the fact by removing the `model.mtp` section from `genai_config.json`, without rebuilding the ONNX models, but that leaves the head's weights in the artifact.
+Set `exclude_mtp=true` to skip the head entirely, which is how such a checkpoint is built with `prune_lm_head=true` for a deployment that does not speculate. A block drafter (`dflash2_path` / `dspark_path`) already supersedes the head and needs no extra option.
 
 ```bash
 # From wheel:
@@ -474,6 +474,8 @@ python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o pa
 # From source:
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options exclude_mtp=true prune_lm_head=true
 ```
+
+To keep the exported head available but prevent the dynamic Engine from loading and running it automatically, set `model.mtp.enabled` to `false` in `genai_config.json` while preserving the rest of the section. Alternatively, remove the entire `model.mtp` section. Both methods avoid rebuilding the ONNX files; recreate the Model and Engine after changing the configuration. The flag defaults to `true` and does not affect an `MtpGenerator` constructed explicitly by the application.
 
 By default the MTP head inherits the main model's settings. For a ModelOpt or compressed-tensors checkpoint, the builder preserves each original MTP tensor format: native NVFP4 linears and experts remain NVFP4, FP8 attention projections remain FP8, and unquantized tensors follow the requested graph precision.
 

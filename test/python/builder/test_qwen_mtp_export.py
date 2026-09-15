@@ -58,6 +58,7 @@ def test_add_mtp_to_genai_config(tmp_path):
 
     config = json.loads(config_path.read_text())
     assert config["model"]["decoder"]["outputs"]["hidden_states"] == "hidden_states"
+    assert config["model"]["mtp"]["enabled"] is True
     assert config["model"]["mtp"]["filename"] == "mtp.onnx"
 
 

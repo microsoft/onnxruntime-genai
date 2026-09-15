@@ -247,7 +247,7 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
   }
   std::shared_ptr<DecoderOnly_Model> mtp_model;
   size_t mtp_bytes_per_block = 0;
-  if (!model->config_->model.mtp.filename.empty()) {
+  if (model->config_->model.mtp.IsEnabled()) {
     if (!model->config_->engine.dynamic_batching) {
       throw std::runtime_error("An Engine-hosted MTP head requires dynamic batching.");
     }
