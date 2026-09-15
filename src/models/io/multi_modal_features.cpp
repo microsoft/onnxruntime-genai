@@ -74,6 +74,7 @@ void MultiModalFeatures::ReuseFeaturesBuffer(MultiModalFeatures& other) {
   }
 
   // Take ownership of other's computed tensor as this input.
+  shape_ = other.shape_;
   features_ = std::move(other.features_);
   state_.inputs_[index_] = features_.get();
 
