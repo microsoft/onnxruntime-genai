@@ -202,28 +202,22 @@ void Shutdown() {
   g_ort_globals.reset();
 }
 
-void ShrinkDeviceMemory() {
-  std::scoped_lock lock{g_ort_globals_mutex};
+void ReleaseDeviceResources(std::string_view device_type) {
+  DeviceType type;
+  if (device_type == "CUDA") {
+    type = DeviceType::CUDA;
+  } else if (device_type == "NvTensorRtRtx") {
+    type = DeviceType::NvTensorRtRtx;
+  } else {
+    throw std::invalid_argument("ReleaseDeviceResources currently supports CUDA and NvTensorRtRtx devices.");
+  }
 
+  std::scoped_lock lock{g_ort_globals_mutex};
   if (!g_ort_globals) {
     return;
   }
 
-  for (auto& entry : g_ort_globals->device_allocators_) {
-    auto* allocator = entry.allocator_.get();
-
-    if (!allocator) {
-      continue;
-    }
-
-    if (allocator->version >= 25 && allocator->Shrink) {
-      auto* status = allocator->Shrink(allocator);
-
-      if (status) {
-        throw std::runtime_error("Failed to shrink device memory.");
-      }
-    }
-  }
+  g_ort_globals->ReleaseDeviceResources(type);
 }
 
 OrtEnv& GetOrtEnv() {
@@ -360,6 +354,28 @@ OrtGlobals::~OrtGlobals() {
   // 4. Finally the env. If genai held the last reference, ORT destroys the environment here,
   //    unregistering / unloading any still-registered EP libraries — by now nothing references them.
   env_.reset();
+}
+
+void OrtGlobals::ReleaseDeviceResources(DeviceType type) {
+  {
+    std::scoped_lock lock{graph_session_cache_.mutex_};
+    std::erase_if(graph_session_cache_.sessions_,
+                  [type](const auto& item) { return item.second.device_type == type; });
+  }
+
+  std::scoped_lock lock{device_interfaces_mutex_};
+  auto interface = device_interfaces_.find(type);
+  if (interface != device_interfaces_.end()) {
+    using ReleaseInterfaceResourcesFn = void (*)(const char*);
+    auto release_interface_resources = reinterpret_cast<ReleaseInterfaceResourcesFn>(
+        cuda_library_->GetSymbol("ReleaseInterfaceResources"));
+    if (!release_interface_resources) {
+      throw std::runtime_error("CUDA add-on library does not export ReleaseInterfaceResources.");
+    }
+    release_interface_resources(to_string(type).c_str());
+  }
+
+  device_allocators_[static_cast<int>(type)] = {};
 }
 
 DeviceInterface* OrtGlobals::LoadCudaInterface(DeviceType type) {

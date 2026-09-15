@@ -1267,8 +1267,8 @@ inline void SetTelemetryEnabled(bool enabled) {
   OgaSetTelemetryEnabled(enabled);
 }
 
-inline void ShrinkDeviceMemory() {
-  OgaCheckResult(OgaShrinkDeviceMemory());
+inline void ReleaseDeviceResources(const char* device_type) {
+  OgaCheckResult(OgaReleaseDeviceResources(device_type));
 }
 
 }  // namespace Oga

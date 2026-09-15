@@ -215,6 +215,8 @@ struct OrtGlobals {
   // OrtGlobals instance (in-process EPs) or by a genai add-on library it holds (CUDA), so every
   // interface is rebuilt on re-initialization after a shutdown. Thread-safe.
   DeviceInterface* GetDeviceInterface(DeviceType type);
+  void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config);
+  void ReleaseDeviceResources(DeviceType type);
 
   struct Allocator {
     // Field order matters here. The OrtAllocator returned by OrtApi::CreateAllocator (called via
@@ -235,7 +237,11 @@ struct OrtGlobals {
   // Cache for dynamically built graph sessions (e.g., Cast, TopK operations)
   // Destroyed before env_ to ensure proper cleanup order
   struct SessionCache {
-    std::unordered_map<uint64_t, std::unique_ptr<OrtSession>> sessions_;
+    struct Entry {
+      DeviceType device_type;
+      std::unique_ptr<OrtSession> session;
+    };
+    std::unordered_map<uint64_t, Entry> sessions_;
     std::mutex mutex_;
   };
   SessionCache graph_session_cache_;
@@ -246,7 +252,9 @@ struct OrtGlobals {
 
   DeviceInterface* LoadCudaInterface(DeviceType type);
 
-  std::mutex device_interfaces_mutex_;
+  // Recursive because EnsureDeviceOrtInit holds this lock while provider setup re-enters
+  // GetDeviceInterface for the same device.
+  std::recursive_mutex device_interfaces_mutex_;
   // Non-owning cache: values point into owned_interfaces_, the CUDA add-on library, or a
   // module-owned interface (DML). Rebuilt each env cycle.
   std::unordered_map<DeviceType, DeviceInterface*> device_interfaces_;
@@ -260,7 +268,7 @@ struct OrtGlobals {
 
 std::unique_ptr<OrtGlobals>& GetOrtGlobals();
 void Shutdown();  // Do this once at exit, Ort code will fail after this call
-void ShrinkDeviceMemory();
+void ReleaseDeviceResources(std::string_view device_type);
 OrtEnv& GetOrtEnv();
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const RuntimeSettings* settings = nullptr);
