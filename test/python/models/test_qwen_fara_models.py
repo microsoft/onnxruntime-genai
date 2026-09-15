@@ -774,15 +774,14 @@ def test_qwen3_5_hybrid_text_generation_webgpu(test_data_path):
 def test_qwen3_5_hybrid_graph_capture_advances_recurrent_state_webgpu(test_data_path):
     """Graph capture must preserve both directions of WebGPU recurrent-state double buffering."""
     model_path = os.fspath(Path(test_data_path) / "qwen3-5")
-    if not os.path.exists(model_path):
-        pytest.skip("qwen3-5 test model not found")
 
     def run(enable_graph_capture):
         config = og.Config(model_path)
         config.clear_providers()
         config.append_provider("webgpu")
         config.set_provider_option("webgpu", "enableGraphCapture", "1" if enable_graph_capture else "0")
-        config.set_provider_option("webgpu", "validationMode", "disabled" if enable_graph_capture else "basic")
+        # WebGPU context options are process-wide, so both model instances must use the same mode.
+        config.set_provider_option("webgpu", "validationMode", "disabled")
         model = og.Model(config)
         params = og.GeneratorParams(model)
         params.set_search_options(do_sample=False, max_length=8)

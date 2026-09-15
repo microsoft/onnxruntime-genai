@@ -281,6 +281,15 @@ void RecurrentState::RewindTo(size_t index) {
     ZeroStates(pasts_);
     ZeroStates(presents_);
     const int num_layers = static_cast<int>(layer_indices_.size());
+    // Restore the canonical allocation direction together with its graph variant. Update() swaps
+    // the owning pointers, so resetting only graph_buffer_variant_ after an odd number of forwards
+    // would select a graph captured with the opposite input/output bindings.
+    if (graph_double_buffer_ && graph_buffer_variant_ != 0) {
+      for (int i = 0; i < num_layers * 2; ++i) {
+        std::swap(pasts_[i], presents_[i]);
+      }
+    }
+    graph_buffer_variant_ = 0;
     for (int i = 0; i < num_layers * 2; ++i) {
       state_.inputs_[input_index_ + i] = pasts_[i].get();
       state_.outputs_[output_index_ + i] = presents_[i].get();
