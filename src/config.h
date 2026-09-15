@@ -694,6 +694,11 @@ void SetProviderOption(Config& config, std::string_view provider_name, std::stri
 void OverlayConfig(Config& config, std::string_view json);
 int SafeDoubleToInt(double x, std::string_view name);
 
+// Logs a warning for each draft-width bound that is below speculative.max_draft_tokens. The
+// engine clamps to the smallest bound at dispatch rather than failing, so this is the only
+// signal that a configured width will not be used.
+void WarnOnClampedDraftWidth(const Config& config);
+
 // Normalizes historical casings, short aliases, and full ORT names (e.g.
 // "CUDAExecutionProvider") to the canonical dispatch-table name; unknown names pass through.
 std::string_view NormalizeProviderName(std::string_view name);
