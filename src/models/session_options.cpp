@@ -7,14 +7,15 @@
 #include <functional>
 #include <unordered_map>
 
-#include "../cuda/session_options.h"
-#include "../dml/session_options.h"
-#include "../nvtensorrtrtx/session_options.h"
-#include "../openvino/session_options.h"
-#include "../qnn/session_options.h"
-#include "../ryzenai/session_options.h"
-#include "../vitisai/session_options.h"
-#include "../webgpu/session_options.h"
+#include "ep/cuda/session_options.h"
+#include "ep/dml/session_options.h"
+#include "ep/nvtensorrtrtx/session_options.h"
+#include "ep/openvino/session_options.h"
+#include "ep/qnn/session_options.h"
+#include "ep/ryzenai/session_options.h"
+#include "ep/amdgpu/session_options.h"
+#include "ep/vitisai/session_options.h"
+#include "ep/webgpu/session_options.h"
 
 namespace Generators {
 
@@ -164,6 +165,7 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
   // Dispatch table: maps provider name (as it appears in genai_config.json) to
   // the corresponding provider-specific AppendExecutionProvider function.
   static const std::unordered_map<std::string, AppendExecutionProviderFn> append_execution_provider{
+      {"AMDGPU", AMDGPUExecutionProvider::AppendExecutionProvider},
       {"CPU", CPUAppendExecutionProvider},
       {"cuda", CUDAExecutionProvider::AppendExecutionProvider},
       {"DML", DMLExecutionProvider::AppendExecutionProvider},

@@ -5,6 +5,7 @@
 # --------------------------------------------------------------------------
 import onnx_ir as ir
 import torch
+from collections.abc import Mapping
 
 from .base import Model
 from .mistral import MistralModel
@@ -71,14 +72,14 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
             self.position_ids_name = None
 
     def make_rope_init(self, config):
-        if "short_factor" in config.rope_scaling:
+        if config.rope_parameters["rope_type"] == "longrope":
             # For models with multiple rotary embedding caches (e.g. Phi-3 mini 128K)
-            self.rope_attrs["mscale_policy"] = config.rope_scaling["type"]
-            short_factor = torch.tensor(config.rope_scaling["short_factor"], dtype=torch.float32)
-            long_factor = torch.tensor(config.rope_scaling["long_factor"], dtype=torch.float32)
+            self.rope_attrs["mscale_policy"] = config.rope_parameters["type"]
+            short_factor = torch.tensor(config.rope_parameters["short_factor"], dtype=torch.float32)
+            long_factor = torch.tensor(config.rope_parameters["long_factor"], dtype=torch.float32)
 
-            short_mscale = config.rope_scaling["short_mscale"] if "short_mscale" in config.rope_scaling else 0
-            long_mscale = config.rope_scaling["long_mscale"] if "long_mscale" in config.rope_scaling else 0
+            short_mscale = config.rope_parameters["short_mscale"] if "short_mscale" in config.rope_parameters else 0
+            long_mscale = config.rope_parameters["long_mscale"] if "long_mscale" in config.rope_parameters else 0
             short_mscale = short_mscale if short_mscale > 0 else self.make_mscale(self.context_length / self.original_context_length)
             long_mscale = long_mscale if long_mscale > 0 else self.make_mscale(self.context_length / self.original_context_length)
 
@@ -520,8 +521,7 @@ class Phi3SmallModel(Model):
         down_add_name = f"/model/layers.{layer_id}/mlp/down_proj/Add"
         self.make_add_bias(mlp.down_proj.bias, down_add_name, f"{down_matmul_name}/output_0")
 
-        # Assign output 0 of previous MatMul as skip input to next SkipLayerNorm
-        self.layernorm_attrs["skip_input"] = f"{down_add_name}/output_0"
+        self.mlp_attrs["output_0"] = f"{down_add_name}/output_0"
 
 
 class Phi3SmallLongRoPEModel(Phi3SmallModel):
@@ -538,35 +538,116 @@ class Phi3VModel(Phi3MiniLongRoPEModel):
 class Phi3MoELongRoPEModel(MistralModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        assert io_dtype == ir.DataType.FLOAT16, "This model only supports float16 io type."
         self.layernorm_attrs["simple"] = False
         self.moe_attrs["use_sparse_mixer"] = True
         self.make_rotary_embedding_multi_cache()
 
-    def make_layer(self, layer_id, layer):
-        # Each LLM decoder layer is typically defined as:
-        # input_layernorm --> attention --> output_layernorm --> MoE
-        self.make_layernorm(
-            layer_id,
-            layer.input_layernorm,
-            skip=not self.layernorm_attrs["first_layernorm"],
-            simple=self.layernorm_attrs["simple"],
-            location="input",
-        )
-        self.make_attention(layer_id, layer.self_attn, root_input=self.layernorm_attrs["output_0"])
-        self.make_layernorm(
-            layer_id,
-            layer.post_attention_layernorm,
-            skip=True,
-            simple=self.layernorm_attrs["simple"],
-            location="post_attention",
-        )
-        self.make_block_sparse_moe(layer_id, layer.block_sparse_moe, root_input=self.layernorm_attrs["output_0"])
+    def get_moe_module(self, layer_id, layer):
+        return layer.block_sparse_moe
 
-        self.layernorm_attrs["first_layernorm"] = False
-        if layer_id == self.num_layers - 1:
-            # Norm after last decoder layer of model (last layer --> norm)
-            self.layernorm_attrs["last_layernorm"] = True
+    def make_moe_router(self, layer_id, moe, root_input):
+        # Make nodes for the QMoE block-sparse subgraph
+        #
+        #                  root_input
+        #                 /       \
+        #         router_MatMul    |
+        #             /     \      |
+        #         Shape      |     |
+        #           |        |     |
+        #         Gather     |     |
+        #           |        |     |
+        #       Unsqueeze    |     |
+        #           |        |    /
+        #        Concat     /    /
+        #             \    /    /
+        #             Reshape  /
+        #                 \   /
+        #                  QMoE
+        #                   |
+        #                 output
+        moe_name = f"/model/layers.{layer_id}/moe"
+        gate_ops_base = f"{moe_name}/gate"
+
+        # Make MoE nodes
+        gate_name = f"{gate_ops_base}/MatMul"
+        self.make_matmul(moe.gate, gate_name, root_input)
+        shape_name = f"{gate_ops_base}/Shape"
+        self.make_shape(shape_name, f"{gate_name}/output_0", shape=[3])
+        gather_name = f"{gate_ops_base}/Gather"
+        self.make_gather(gather_name, [f"{shape_name}/output_0", "/model/constants/INT64/2"], dtype=ir.DataType.INT64, shape=[], axis=0)
+        unsqueeze_name = f"{gate_ops_base}/Unsqueeze"
+        self.make_unsqueeze(unsqueeze_name, [f"{gather_name}/output_0", "/model/constants/INT64/[0]"], dtype=ir.DataType.INT64, shape=[1])
+        concat_name = f"{gate_ops_base}/Concat"
+        self.make_concat(concat_name, ["/model/constants/INT64/[-1]", f"{unsqueeze_name}/output_0"], dtype=ir.DataType.INT64, shape=[2], axis=0)
+        gate_reshape_name = f"{gate_ops_base}/Reshape"
+        self.make_reshape(gate_reshape_name, [f"{gate_name}/output_0", f"{concat_name}/output_0"], dtype=self.io_dtype, shape=["num_rows", self.moe_attrs["num_experts"]])
+
+    def make_moe_preprocessing(self, layer_id, moe, root_input):
+        w1_list = []
+        w2_list = []
+        w3_list = []
+        w1_scale_list = []
+        w2_scale_list = []
+        w3_scale_list = []
+
+        for i in range(self.moe_attrs["num_experts"]):
+            # Quantize the weights with uint8
+            pre_qweight1, w1_scale = self.make_qmoe_weights(moe.experts[i].w1.weight.T)
+            pre_qweight2, w2_scale = self.make_qmoe_weights(moe.experts[i].w2.weight.T)
+            pre_qweight3, w3_scale = self.make_qmoe_weights(moe.experts[i].w3.weight.T)
+
+            w1_list.append(pre_qweight1)
+            w2_list.append(pre_qweight2)
+            w3_list.append(pre_qweight3)
+
+            w1_scale_list.append(w1_scale)
+            w2_scale_list.append(w2_scale)
+            w3_scale_list.append(w3_scale)
+
+        moe_expert_weight_1_name = f"model.layers.{layer_id}.moe.weight_1"
+        moe_expert_weight_2_name = f"model.layers.{layer_id}.moe.weight_2"
+        moe_expert_weight_3_name = f"model.layers.{layer_id}.moe.weight_3"
+
+        moe_expert_scales_1_name = f"model.layers.{layer_id}.moe.scales_1"
+        moe_expert_scales_2_name = f"model.layers.{layer_id}.moe.scales_2"
+        moe_expert_scales_3_name = f"model.layers.{layer_id}.moe.scales_3"
+
+        def make_moe_initializer(w_list, moe_expert_name, dtype):
+            moe_experts_weight = torch.stack(w_list, dim=0)
+            self.make_initializer(moe_experts_weight, moe_expert_name, to=dtype)
+
+        make_moe_initializer(w1_list, moe_expert_weight_1_name, ir.DataType.UINT8)
+        make_moe_initializer(w2_list, moe_expert_weight_2_name, ir.DataType.UINT8)
+        make_moe_initializer(w3_list, moe_expert_weight_3_name, ir.DataType.UINT8)
+
+        # Currently we don't expect QMoE to be used with distributed inference
+        make_moe_initializer(w1_scale_list, moe_expert_scales_1_name, self.io_dtype)
+        make_moe_initializer(w2_scale_list, moe_expert_scales_2_name, self.io_dtype)
+        make_moe_initializer(w3_scale_list, moe_expert_scales_3_name, self.io_dtype)
+
+    def make_moe_subgraph(self, layer_id, moe, root_input):
+        moe_name = f"/model/layers.{layer_id}/moe"
+        moe_expert_weight_1_name = f"model.layers.{layer_id}.moe.weight_1"
+        moe_expert_weight_2_name = f"model.layers.{layer_id}.moe.weight_2"
+        moe_expert_weight_3_name = f"model.layers.{layer_id}.moe.weight_3"
+        moe_expert_scales_1_name = f"model.layers.{layer_id}.moe.scales_1"
+        moe_expert_scales_2_name = f"model.layers.{layer_id}.moe.scales_2"
+        moe_expert_scales_3_name = f"model.layers.{layer_id}.moe.scales_3"
+
+        self.make_moe_op(
+            moe_name,
+            root_input=root_input,
+            router_probs=f"{moe_name}/gate/Reshape/output_0",
+            weight1=moe_expert_weight_1_name,
+            scales1=moe_expert_scales_1_name,
+            weight2=moe_expert_weight_2_name,
+            scales2=moe_expert_scales_2_name,
+            weight3=moe_expert_weight_3_name,
+            scales3=moe_expert_scales_3_name,
+        )
+
+        # Assign output 0 of previous MoE as root input to next SkipLayerNorm
+        self.layernorm_attrs["skip_input"] = f"{moe_name}/output_0"
 
 
 class Phi4MMModel(Phi3VModel):

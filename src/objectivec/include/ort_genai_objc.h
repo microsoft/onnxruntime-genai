@@ -47,6 +47,16 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
   OGAElementTypeUint64,   // maps to c type uint64_t
 };
 
+/** An immutable snapshot of speculative decoding statistics. */
+@interface OGASpeculativeStats : NSObject
+
+- (instancetype)init NS_UNAVAILABLE;
+- (uint64_t)getCount:(NSString*)name error:(NSError**)error;
+- (double)getNumber:(NSString*)name error:(NSError**)error;
+- (BOOL)getBool:(NSString*)name error:(NSError**)error;
+
+@end
+
 /**
  * An ORT GenAI config.
  */
@@ -147,6 +157,26 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
                                  error:(NSError**)error NS_DESIGNATED_INITIALIZER;
 
 /**
+ * Creates a tokenizer.
+ *
+ * @param config The config to use.
+ * @param error Optional error information set if an error occurs.
+ * @return The instance, or nil if an error occurs.
+ */
+- (nullable instancetype)initWithConfig:(OGAConfig*)config
+                                  error:(NSError**)error NS_DESIGNATED_INITIALIZER;
+
+/**
+ * Creates a tokenizer.
+ *
+ * @param path The path to the ONNX GenAI model folder.
+ * @param error Optional error information set if an error occurs.
+ * @return The instance, or nil if an error occurs.
+ */
+- (nullable instancetype)initWithPath:(NSString*)path
+                                error:(NSError**)error NS_DESIGNATED_INITIALIZER;
+
+/**
  * Return the int representation of the BOS token.
  *
  * @return The BOS token id
@@ -166,6 +196,26 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  * @return The PAD token id
  */
 - (int32_t)getPadTokenId:(NSError**)error;
+
+/**
+ * Return the BOT (beginning of tool call) token ID. Returns an error if not defined.
+ */
+- (int32_t)getBotTokenId:(NSError**)error;
+
+/**
+ * Return the EOT (end of tool call) token ID. Returns an error if not defined.
+ */
+- (int32_t)getEotTokenId:(NSError**)error;
+
+/**
+ * Return the BOR (beginning of reasoning) token ID. Returns an error if not defined.
+ */
+- (int32_t)getBorTokenId:(NSError**)error;
+
+/**
+ * Return the EOR (end of reasoning) token ID. Returns an error if not defined.
+ */
+- (int32_t)getEorTokenId:(NSError**)error;
 
 /**
  * Encode text to sequences
@@ -311,6 +361,44 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  */
 - (BOOL)getSearchBool:(NSString*)key
                 error:(NSError**)error;
+
+/**
+ * Set a numerical speculative decoding option.
+ * @param key The option key.
+ * @param value The option value.
+ * @param error Optional error information set if an error occurs.
+ */
+- (BOOL)setSpeculativeNumber:(NSString*)key
+                 doubleValue:(double)value
+                       error:(NSError**)error;
+
+/**
+ * Get a numerical speculative decoding option.
+ * @param key The option key.
+ * @param error Optional error information set if an error occurs.
+ * @return The option value.
+ */
+- (double)getSpeculativeNumber:(NSString*)key
+                         error:(NSError**)error;
+
+/**
+ * Set a boolean speculative decoding option.
+ * @param key The option key.
+ * @param value The option value.
+ * @param error Optional error information set if an error occurs.
+ */
+- (BOOL)setSpeculativeBool:(NSString*)key
+                 boolValue:(BOOL)value
+                     error:(NSError**)error;
+
+/**
+ * Get a boolean speculative decoding option.
+ * @param key The option key.
+ * @param error Optional error information set if an error occurs.
+ * @return The option value.
+ */
+- (BOOL)getSpeculativeBool:(NSString*)key
+                     error:(NSError**)error;
 @end
 
 /**
@@ -423,10 +511,20 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 - (size_t)sequenceCountAtIndex:(size_t)index
                          error:(NSError**)error;
 
+/** Get an immutable snapshot of the accumulated speculative decoding statistics. */
+- (nullable OGASpeculativeStats*)getSpeculativeStatsWithError:(NSError**)error;
+
 /**
  * Clean up the resource before process exits.
  */
 + (void)shutdown;
+
+/**
+ * Enable or disable non-essential ONNX Runtime GenAI telemetry events.
+ *
+ * @param enabled Whether telemetry events are enabled.
+ */
++ (void)setTelemetryEnabled:(BOOL)enabled;
 
 @end
 

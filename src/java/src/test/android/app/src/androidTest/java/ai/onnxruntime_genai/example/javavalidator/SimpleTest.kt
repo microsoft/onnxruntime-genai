@@ -21,9 +21,20 @@ class SimpleTest {
     @get:Rule
     val activityTestRule = ActivityScenarioRule(MainActivity::class.java)
 
+    private var telemetryIncluded = false
+
     @Before
     fun start() {
         Log.i(TAG, "SystemABI=" + Build.SUPPORTED_ABIS[0])
+        try {
+            val initializer = Class.forName("ai.onnxruntime.genai.TelemetryInitializer")
+            val isInitialized = initializer.getDeclaredMethod("isInitialized")
+            isInitialized.isAccessible = true
+            Assert.assertEquals(true, isInitialized.invoke(null))
+            telemetryIncluded = true
+        } catch (_: ClassNotFoundException) {
+            // Telemetry was compiled out of this AAR.
+        }
     }
 
     @Throws(IOException::class)
@@ -118,6 +129,14 @@ class SimpleTest {
             for (j in 0 until maxLength) {
                 Assert.assertEquals(outputIds[j], expectedOutput[i * maxLength + j])
             }
+        }
+
+        if (telemetryIncluded) {
+            val cacheDir = InstrumentationRegistry.getInstrumentation().targetContext.cacheDir
+            Assert.assertTrue(
+                "Native 1DS telemetry cache was not created",
+                cacheDir.listFiles()?.any { it.name.endsWith(".db") } == true
+            )
         }
 
         Log.i("runBasicTest", "GenAI output matched expected data.")

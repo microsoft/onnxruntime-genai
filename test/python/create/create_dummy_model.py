@@ -109,9 +109,9 @@ def get_input_or_output_value_infos(input_or_outputs):
 def get_dummy_tensor_shape(shape):
     np_shape = ()
     for dim in shape:
-        if type(dim) == str:
+        if isinstance(dim, str):
             np_shape += (2,)
-        elif type(dim) == int:
+        elif isinstance(dim, int):
             np_shape += (dim,)
         else:
             raise NotImplementedError(f"Unknown dim type: {type(dim)}")

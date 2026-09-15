@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #include "sequences.h"
+#include <stdexcept>
 #pragma once
 // The implementation is based on huggingface transformers generation_beam_search.py
 namespace Generators {
@@ -20,7 +21,11 @@ struct BeamHypotheses {
   // Return true if this beats the worst score in the hypothesis
   bool CanImprove(float best_sum_logprobs, int current_length) const;
 
-  std::span<int32_t> GetHypothesis(size_t index) const { return beams_[index].hypothesis; }
+  std::span<int32_t> GetHypothesis(size_t index) const {
+    if (index >= beams_.size())
+      throw std::out_of_range("GetHypothesis index out of bounds");
+    return beams_[index].hypothesis;
+  }
 
   // TODO(aciddelgado): Methods to get all hypotheses and scores
 

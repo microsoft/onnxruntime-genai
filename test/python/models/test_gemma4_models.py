@@ -175,12 +175,10 @@ def test_gemma4_vision_model_io(test_data_path):
     assert "image_features" in output_names
 
     pv_input = next(i for i in model.graph.input if i.name == "pixel_values")
-    assert pv_input.type.tensor_type.elem_type == onnx.TensorProto.FLOAT, \
-        "pixel_values must be float32"
+    assert pv_input.type.tensor_type.elem_type == onnx.TensorProto.FLOAT, "pixel_values must be float32"
 
     dim0 = pv_input.type.tensor_type.shape.dim[0]
-    assert dim0.dim_param != "", \
-        f"pixel_values dim-0 should be dynamic, got static dim_value={dim0.dim_value}"
+    assert dim0.dim_param != "", f"pixel_values dim-0 should be dynamic, got static dim_value={dim0.dim_value}"
 
 
 def test_gemma4_embedding_model_io(test_data_path):
@@ -229,15 +227,12 @@ def test_gemma4_speech_model_io(test_data_path):
 
     # audio_embeds should be float32 with shape (batch, num_frames, 128)
     ae_input = next(i for i in model.graph.input if i.name == "audio_embeds")
-    assert ae_input.type.tensor_type.elem_type == onnx.TensorProto.FLOAT, \
-        "audio_embeds must be float32"
-    assert ae_input.type.tensor_type.shape.dim[2].dim_value == 128, \
-        "audio_embeds feature dim should be 128"
+    assert ae_input.type.tensor_type.elem_type == onnx.TensorProto.FLOAT, "audio_embeds must be float32"
+    assert ae_input.type.tensor_type.shape.dim[2].dim_value == 128, "audio_embeds feature dim should be 128"
 
     # audio_sizes should be int64
     as_input = next(i for i in model.graph.input if i.name == "audio_sizes")
-    assert as_input.type.tensor_type.elem_type == onnx.TensorProto.INT64, \
-        "audio_sizes must be int64"
+    assert as_input.type.tensor_type.elem_type == onnx.TensorProto.INT64, "audio_sizes must be int64"
 
 
 @pytest.mark.parametrize("relative_audio_path", [Path("audios") / "jfk.flac"])

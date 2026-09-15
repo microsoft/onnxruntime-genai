@@ -40,50 +40,87 @@ _TOKENIZER_FILES = [
 ]
 
 
-def _set_input_last_dim(model_path: Path, out_path: Path, input_name: str, last_dim: int) -> None:
-    """Rewrite the last dimension of a named graph input to a fixed value."""
+def _set_shape(value_info, shape) -> None:
+    dims = value_info.type.tensor_type.shape.dim
+    dims.clear()
+    for value in shape:
+        dim = dims.add()
+        if isinstance(value, str):
+            dim.dim_param = value
+        else:
+            dim.dim_value = value
+
+
+def _rewrite_model_inputs(model_path: Path, out_path: Path, replacements, extra_inputs=()) -> None:
+    """Rewrite names and shapes for inputs on a dummy constant-output graph."""
     model = onnx.load(str(model_path))
-    for inp in model.graph.input:
-        if inp.name == input_name:
-            dims = inp.type.tensor_type.shape.dim
-            dims[-1].ClearField("dim_param")
-            dims[-1].dim_value = last_dim
-            break
-    else:
-        raise ValueError(f"input {input_name!r} not found in {model_path}")
+    pending = dict(replacements)
+    for graph_input in model.graph.input:
+        replacement = pending.pop(graph_input.name, None)
+        if replacement is None:
+            continue
+        new_name, shape = replacement
+        old_name = graph_input.name
+        graph_input.name = new_name
+        _set_shape(graph_input, shape)
+        for node in model.graph.node:
+            for index, node_input in enumerate(node.input):
+                if node_input == old_name:
+                    node.input[index] = new_name
+    if pending:
+        raise ValueError(f"inputs {sorted(pending)} not found in {model_path}")
+    model.graph.input.extend(extra_inputs)
+    onnx.checker.check_model(model)
     onnx.save(model, str(out_path))
 
 
-def main() -> None:
-    if not _SRC_DIR.exists():
+def create_model(src_dir: Path, dst_dir: Path) -> None:
+    """Create a unified fixture from the standard Gemma4 fixture."""
+    if not src_dir.exists():
         raise SystemExit(
-            f"Source gemma4 fixtures not found at {_SRC_DIR}. Generate/download the "
+            f"Source gemma4 fixtures not found at {src_dir}. Generate/download the "
             "gemma4 test model directory first; gemma4_unified is derived from it."
         )
-    _DST_DIR.mkdir(parents=True, exist_ok=True)
+    dst_dir.mkdir(parents=True, exist_ok=True)
 
     # Decoder + embedding are identical to gemma4.
     for name in ("dummy_text.onnx", "dummy_embedding.onnx"):
-        shutil.copyfile(_SRC_DIR / name, _DST_DIR / name)
+        shutil.copyfile(src_dir / name, dst_dir / name)
 
     # Vision / speech dummies: same trivial constant-output graphs, but declare
     # the unified input dims so the fixtures document the real contract.
-    _set_input_last_dim(
-        _SRC_DIR / "dummy_vision.onnx", _DST_DIR / "dummy_vision.onnx", "pixel_values", _UNIFIED_PIXEL_DIM
+    _rewrite_model_inputs(
+        src_dir / "dummy_vision.onnx",
+        dst_dir / "dummy_vision.onnx",
+        {
+            "pixel_values": ("pixel_values", ["batch_size", 280, _UNIFIED_PIXEL_DIM]),
+            "pixel_position_ids": ("pixel_position_ids", ["batch_size", 280, 2]),
+        },
     )
-    _set_input_last_dim(
-        _SRC_DIR / "dummy_speech.onnx", _DST_DIR / "dummy_speech.onnx", "audio_embeds", _UNIFIED_AUDIO_DIM
+    _rewrite_model_inputs(
+        src_dir / "dummy_speech.onnx",
+        dst_dir / "dummy_speech.onnx",
+        {
+            "audio_embeds": ("input_features", ["batch_size", "num_frames", _UNIFIED_AUDIO_DIM]),
+            "audio_sizes": ("audio_sizes", ["batch_size"]),
+        },
+        [
+            onnx.helper.make_tensor_value_info(
+                "input_features_mask", onnx.TensorProto.BOOL, ["batch_size", "num_frames"]
+            )
+        ],
     )
 
     for name in _TOKENIZER_FILES:
-        shutil.copyfile(_SRC_DIR / name, _DST_DIR / name)
+        shutil.copyfile(src_dir / name, dst_dir / name)
 
     # genai_config.json: switch the model type and vision processor config file.
-    with open(_SRC_DIR / "genai_config.json") as f:
+    with open(src_dir / "genai_config.json") as f:
         genai_config = json.load(f)
     genai_config["model"]["type"] = "gemma4_unified"
     genai_config["model"]["vision"]["config_filename"] = "image_processor.json"
-    with open(_DST_DIR / "genai_config.json", "w") as f:
+    genai_config["model"]["speech"]["inputs"]["audio_embeds"] = "input_features"
+    with open(dst_dir / "genai_config.json", "w") as f:
         json.dump(genai_config, f, indent=4)
 
     # image_processor.json: reuse Gemma4ImageTransform with the merged geometry
@@ -103,7 +140,7 @@ def main() -> None:
             ],
         }
     }
-    with open(_DST_DIR / "image_processor.json", "w") as f:
+    with open(dst_dir / "image_processor.json", "w") as f:
         json.dump(image_processor, f, indent=4)
 
     # audio_feature_extraction.json: raw 640-sample waveform framing.
@@ -126,9 +163,12 @@ def main() -> None:
             ]
         }
     }
-    with open(_DST_DIR / "audio_feature_extraction.json", "w") as f:
+    with open(dst_dir / "audio_feature_extraction.json", "w") as f:
         json.dump(audio_config, f, indent=4)
 
+
+def main() -> None:
+    create_model(_SRC_DIR, _DST_DIR)
     print(f"Wrote gemma4_unified dummy model to {_DST_DIR}")
 
 

@@ -1,0 +1,6 @@
+{
+  "bos_token": "<bos>",
+  "eos_token": "<eos>",
+  "model_max_length": 128,
+  "tokenizer_class": "PreTrainedTokenizerFast"
+}

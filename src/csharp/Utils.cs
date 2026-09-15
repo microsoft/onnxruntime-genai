@@ -50,6 +50,22 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             return (int)device_id.ToInt64();
         }
 
+        /// <summary>
+        /// Enables non-essential ONNX Runtime GenAI telemetry events.
+        /// </summary>
+        public static void EnableTelemetryEvents()
+        {
+            NativeMethods.OgaSetTelemetryEnabled(true);
+        }
+
+        /// <summary>
+        /// Disables non-essential ONNX Runtime GenAI telemetry events.
+        /// </summary>
+        public static void DisableTelemetryEvents()
+        {
+            NativeMethods.OgaSetTelemetryEnabled(false);
+        }
+
         public static void SetLogBool(string name, bool value)
         {
             Result.VerifySuccess(NativeMethods.OgaSetLogBool(StringUtils.ToUtf8(name), value));

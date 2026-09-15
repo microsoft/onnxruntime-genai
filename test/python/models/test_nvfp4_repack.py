@@ -1,0 +1,107 @@
+# -------------------------------------------------------------------------
+# Copyright (c) Microsoft Corporation.  All rights reserved.
+# Licensed under the MIT License.  See License.txt in the project root for
+# license information.
+# --------------------------------------------------------------------------
+"""Numerical guard for the Model Optimizer NVFP4 repack helpers.
+
+Model Optimizer stores each NVFP4 expert projection as:
+  weight        uint8   [N, K/2]  (E2M1, 2 codes/byte, packed along K; low nibble = even K)
+  weight_scale  e4m3    [N, K/16] (one FP8 block scale per 16 K-elements)
+  weight_scale_2 f32    scalar    (per-tensor global scale)
+and the value is reconstructed as
+  w[n, k] = e2m1(code) * e4m3(weight_scale[n, k // 16]) * weight_scale_2.
+
+The ORT CUDA QMoE ``nvfp4`` kernel reads weights as ``[E, K, N/2]`` (N-packed,
+even N = low nibble), block scales as ``[E, N, K/16]`` e4m3, and per-expert
+float32 global scales, dequantizing as
+  w[n, k] = e2m1(code) * e4m3(block_scale[n, k // 16]) * global[e].
+
+This test proves the builder's repack (K-unpack -> N-pack) preserves the exact
+code<->(N, K) mapping, so the kernel reconstructs Model Optimizer's weights
+bit-for-bit (no re-quantization).
+"""
+
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
+import torch
+
+sys.path.insert(0, str(Path(__file__).parents[3] / "src" / "python" / "py" / "models"))
+
+from loaders.modelopt import ModeloptModel
+
+_FP4_E2M1 = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=np.float32)
+
+
+def _decode_e2m1(codes):
+    """Decode an array of e2m1 nibbles (0-15) to float32."""
+    codes = np.asarray(codes) & 0xF
+    mag = _FP4_E2M1[codes & 0x7]
+    return np.where((codes & 0x8) > 0, -mag, mag)
+
+
+def _e4m3_bytes_to_float(byte_array):
+    """Reinterpret raw e4m3 bytes as float32 (torch has the only FP8 decoder here)."""
+    return torch.from_numpy(np.ascontiguousarray(byte_array)).view(torch.float8_e4m3fn).float().numpy()
+
+
+def _make_modelopt_nvfp4_projection(n, k, seed):
+    """Build a random Model-Optimizer-form NVFP4 projection and its reconstruction."""
+    rng = np.random.default_rng(seed)
+    block = 16
+    codes_nk = rng.integers(0, 16, size=(n, k), dtype=np.uint8)  # e2m1 codes [N, K]
+    # Random e4m3 block scales (avoid NaN encodings 0x7F / 0xFF).
+    scale_bytes = rng.integers(0, 0x7F, size=(n, k // block), dtype=np.uint8)  # [N, K/16]
+    global_scale = np.float32(rng.uniform(0.05, 0.5))
+
+    # Model Optimizer weight layout: [N, K/2], low nibble = even K, high = odd K.
+    low = codes_nk[:, 0::2]
+    high = codes_nk[:, 1::2]
+    packed_nk2 = ((high << 4) | low).astype(np.uint8)  # [N, K/2]
+
+    # Reference reconstruction from the modelopt-form tensors.
+    scales = _e4m3_bytes_to_float(scale_bytes).repeat(block, axis=1)  # [N, K]
+    ref = (_decode_e2m1(codes_nk) * scales * float(global_scale)).astype(np.float32)
+    return packed_nk2, scale_bytes, global_scale, ref
+
+
+def _kernel_dequant_from_qmoe_layout(packed_kn2, scale_nk16, global_scale, n, k):
+    """Mirror the ORT QMoE nvfp4 dequant kernel over a [K, N/2]-packed weight."""
+    block = 16
+    packed_kn2 = packed_kn2.numpy() if isinstance(packed_kn2, torch.Tensor) else packed_kn2
+    # Even N is the low nibble, odd N is the high nibble, of byte [K, N/2].
+    codes_kn = np.stack([packed_kn2 & 0x0F, packed_kn2 >> 4], axis=-1).reshape(k, n)
+    scales = _e4m3_bytes_to_float(scale_nk16).repeat(block, axis=1)  # [N, K]
+    return (_decode_e2m1(codes_kn.T) * scales * float(global_scale)).astype(np.float32)
+
+
+def test_nvfp4_repack_roundtrip_matches_modelopt():
+    model = object.__new__(ModeloptModel)
+    for seed, (n, k) in enumerate([(8, 64), (16, 128), (32, 512), (2048, 512)]):
+        packed_nk2, scale_bytes, global_scale, ref = _make_modelopt_nvfp4_projection(n, k, seed)
+
+        projection = SimpleNamespace(
+            weight=torch.from_numpy(packed_nk2),
+            weight_scale=torch.from_numpy(scale_bytes),
+            weight_scale_2=torch.tensor(global_scale),
+        )
+        expert = SimpleNamespace(gate_proj=projection, up_proj=projection, down_proj=projection)
+
+        # The loader repacks Model Optimizer's K-packed weights into QMoE's N-packed layout.
+        prepared = model.prepare_qmoe_experts([expert])
+        qweight_kn2 = prepared.down_qweight[0]
+        assert tuple(qweight_kn2.shape) == (k, n // 2)
+
+        # Block scales are unchanged ([N, K/16]); global scale passed through.
+        got = _kernel_dequant_from_qmoe_layout(qweight_kn2, scale_bytes, global_scale, n, k)
+
+        max_abs = float(np.max(np.abs(got - ref)))
+        assert max_abs == 0.0, f"shape ({n},{k}): repacked dequant differs from modelopt ref (max_abs={max_abs})"
+
+
+if __name__ == "__main__":
+    test_nvfp4_repack_roundtrip_matches_modelopt()
+    print("OK: NVFP4 repack round-trip is bit-exact against the Model Optimizer reconstruction.")

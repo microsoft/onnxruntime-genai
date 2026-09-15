@@ -111,6 +111,16 @@ Java_ai_onnxruntime_genai_Generator_getSequenceNative(JNIEnv* env, jobject thiz,
   return java_int_array;
 }
 
+JNIEXPORT jlong JNICALL
+Java_ai_onnxruntime_genai_Generator_getSpeculativeStatsNative(JNIEnv* env, jobject thiz, jlong native_handle) {
+  OgaSpeculativeStats* stats = nullptr;
+  if (ThrowIfError(env, OgaGenerator_GetSpeculativeStats(
+                            reinterpret_cast<const OgaGenerator*>(native_handle), &stats))) {
+    return 0;
+  }
+  return reinterpret_cast<jlong>(stats);
+}
+
 JNIEXPORT jint JNICALL
 Java_ai_onnxruntime_genai_Generator_getSequenceLastToken(JNIEnv* env, jobject thiz, jlong generator, jlong index) {
   const OgaGenerator* oga_generator = reinterpret_cast<const OgaGenerator*>(generator);

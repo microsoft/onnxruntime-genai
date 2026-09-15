@@ -37,7 +37,7 @@
   OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)
 }
 
-- (BOOL)setProviderOption:(NSString*)provider key:(NSString*)key value:(NSString*)value error:(NSError**)error {  
+- (BOOL)setProviderOption:(NSString*)provider key:(NSString*)key value:(NSString*)value error:(NSError**)error {
   try {
     _config->SetProviderOption([provider UTF8String], [key UTF8String], [value UTF8String]);
     return YES;

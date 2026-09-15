@@ -18,13 +18,16 @@ Usage:
     pytest test_gemma4_unified_models.py --test_models=/path/to/models
 """
 
+import json
 import logging
 import os
 from pathlib import Path
 
 import numpy as np
+import onnx
 import onnxruntime_genai as og
 import pytest
+from create.create_dummy_gemma4_unified_models import create_model
 
 logging.basicConfig(format="%(asctime)s %(name)s [%(levelname)s] - %(message)s", level=logging.DEBUG)
 log = logging.getLogger("gemma4-unified-tests")
@@ -36,16 +39,21 @@ _UNIFIED_PIXEL_DIM = 48 * 48 * 3  # 6912
 _UNIFIED_AUDIO_DIM = 640
 
 
-def _get_model_path(test_data_path):
-    """Return the gemma4_unified model path, skipping if it doesn't exist."""
-    model_path = os.path.join(test_data_path, GEMMA4_UNIFIED_MODEL_NAME)
-    if not os.path.exists(model_path):
-        pytest.skip(f"gemma4_unified test model not found at {model_path}")
-    return model_path
+@pytest.fixture(scope="module")
+def gemma4_unified_model_path(request, tmp_path_factory):
+    """Derive the unified fixture from the tracked standard Gemma4 model."""
+    test_data_path = request.config.getoption("--test_models")
+    if not test_data_path:
+        pytest.skip("--test_models not provided")
+    source_path = Path(test_data_path) / "gemma4"
+    if not source_path.exists():
+        pytest.skip(f"Gemma4 test model not found at {source_path}")
+    model_path = tmp_path_factory.mktemp(GEMMA4_UNIFIED_MODEL_NAME)
+    create_model(source_path, model_path)
+    return os.fspath(model_path)
 
 
-def _load_model_and_processor(test_data_path):
-    model_path = _get_model_path(test_data_path)
+def _load_model_and_processor(model_path):
     model = og.Model(model_path)
     return model, model.create_multimodal_processor()
 
@@ -58,27 +66,75 @@ def _to_numpy(tensor):
     return np.array(tensor)
 
 
-def test_gemma4_unified_model_load(test_data_path):
+def _get_asset_path(test_data_path, relative_path):
+    candidate = Path(test_data_path) / relative_path
+    if candidate.exists():
+        return candidate
+    bundled_asset = Path(__file__).resolve().parents[2] / relative_path
+    assert bundled_asset.exists(), f"Test asset not found at {candidate} or {bundled_asset}"
+    return bundled_asset
+
+
+def test_gemma4_unified_model_load(gemma4_unified_model_path):
     """The gemma4_unified model (model.type == 'gemma4_unified') loads."""
-    model_path = _get_model_path(test_data_path)
-    model = og.Model(model_path)
+    model = og.Model(gemma4_unified_model_path)
     assert model is not None
 
 
-def test_gemma4_unified_processor_creation(test_data_path):
+def test_gemma4_unified_processor_creation(gemma4_unified_model_path):
     """create_multimodal_processor() succeeds for the gemma4_unified type.
 
     This exercises the processor-factory registration and the unified image /
     audio ort-extensions configs (Gemma4ImageTransform at patch_size=48 and
-    Gemma4UnifiedAudioFrames).
+    Gemma4Audio with type="raw_frames").
     """
-    _, processor = _load_model_and_processor(test_data_path)
+    _, processor = _load_model_and_processor(gemma4_unified_model_path)
     assert processor is not None
 
 
-def test_gemma4_unified_text_only(test_data_path):
+def test_gemma4_unified_model_io_contract(gemma4_unified_model_path):
+    """The dummy graph inputs use the encoder-free unified names and shapes."""
+    model_path = Path(gemma4_unified_model_path)
+    with open(model_path / "genai_config.json") as config_file:
+        config = json.load(config_file)
+    speech_inputs = config["model"]["speech"]["inputs"]
+    assert speech_inputs == {
+        "audio_embeds": "input_features",
+        "attention_mask": "input_features_mask",
+        "audio_sizes": "audio_sizes",
+    }
+
+    vision = onnx.load(model_path / "dummy_vision.onnx")
+    vision_inputs = {
+        value.name: (
+            value.type.tensor_type.elem_type,
+            [dim.dim_value or dim.dim_param for dim in value.type.tensor_type.shape.dim],
+        )
+        for value in vision.graph.input
+    }
+    assert vision_inputs == {
+        "pixel_values": (onnx.TensorProto.FLOAT, ["batch_size", 280, _UNIFIED_PIXEL_DIM]),
+        "pixel_position_ids": (onnx.TensorProto.INT64, ["batch_size", 280, 2]),
+    }
+
+    speech = onnx.load(model_path / "dummy_speech.onnx")
+    speech_inputs = {
+        value.name: (
+            value.type.tensor_type.elem_type,
+            [dim.dim_value or dim.dim_param for dim in value.type.tensor_type.shape.dim],
+        )
+        for value in speech.graph.input
+    }
+    assert speech_inputs == {
+        "input_features": (onnx.TensorProto.FLOAT, ["batch_size", "num_frames", _UNIFIED_AUDIO_DIM]),
+        "audio_sizes": (onnx.TensorProto.INT64, ["batch_size"]),
+        "input_features_mask": (onnx.TensorProto.BOOL, ["batch_size", "num_frames"]),
+    }
+
+
+def test_gemma4_unified_text_only(gemma4_unified_model_path):
     """Text-only processing (no images/audio)."""
-    _, processor = _load_model_and_processor(test_data_path)
+    _, processor = _load_model_and_processor(gemma4_unified_model_path)
     inputs = processor("What is the capital of France?", images=None)
     assert inputs is not None
     assert "input_ids" in inputs
@@ -87,13 +143,11 @@ def test_gemma4_unified_text_only(test_data_path):
 
 
 @pytest.mark.parametrize("relative_image_path", [Path("images") / "australia.jpg"])
-def test_gemma4_unified_vision_contract(test_data_path, relative_image_path):
+def test_gemma4_unified_vision_contract(test_data_path, gemma4_unified_model_path, relative_image_path):
     """Unified vision preprocessing produces 6912-dim merged patches (no trim)."""
-    _, processor = _load_model_and_processor(test_data_path)
+    _, processor = _load_model_and_processor(gemma4_unified_model_path)
 
-    image_path = os.fspath(Path(test_data_path) / relative_image_path)
-    if not os.path.exists(image_path):
-        pytest.skip(f"Test image not found at {image_path}")
+    image_path = os.fspath(_get_asset_path(test_data_path, relative_image_path))
     images = og.Images.open(image_path)
 
     inputs = processor("<|image|>Describe this image", images=images)
@@ -102,31 +156,27 @@ def test_gemma4_unified_vision_contract(test_data_path, relative_image_path):
     assert "pixel_position_ids" in inputs
 
     pixel_values = _to_numpy(inputs["pixel_values"])
-    assert pixel_values.shape[-1] == _UNIFIED_PIXEL_DIM, (
-        f"unified pixel_values feature dim should be {_UNIFIED_PIXEL_DIM}, got {pixel_values.shape[-1]}"
-    )
+    assert pixel_values.shape == (1, 280, _UNIFIED_PIXEL_DIM)
+    assert pixel_values.dtype == np.float32
     # Unified feeds the full padded patch grid (no trim); the graph strips
     # padding via position_ids. pixel_position_ids rows must match pixel_values.
     pos = _to_numpy(inputs["pixel_position_ids"])
-    assert pos.shape[-2] == pixel_values.shape[-2], (
-        f"position_ids ({pos.shape}) and pixel_values ({pixel_values.shape}) patch counts must match"
-    )
-    assert pos.shape[-1] == 2
+    assert pos.shape == (1, 280, 2)
+    assert np.array_equal(pos[0, 259], [19, 12])
+    assert np.all(pos[0, 260:] == -1)
 
 
 @pytest.mark.parametrize("relative_audio_path", [Path("audios") / "jfk.flac"])
-def test_gemma4_unified_audio_contract(test_data_path, relative_audio_path):
+def test_gemma4_unified_audio_contract(test_data_path, gemma4_unified_model_path, relative_audio_path):
     """Unified audio preprocessing produces raw 640-sample frames; audio_sizes = frame count."""
-    _, processor = _load_model_and_processor(test_data_path)
+    _, processor = _load_model_and_processor(gemma4_unified_model_path)
 
-    audio_path = os.fspath(Path(test_data_path) / relative_audio_path)
-    if not os.path.exists(audio_path):
-        pytest.skip(f"Test audio file not found at {audio_path}")
-
+    audio_path = os.fspath(_get_asset_path(test_data_path, relative_audio_path))
     audios = og.Audios.open(audio_path)
     inputs = processor("<|audio|>Transcribe this audio", audios=audios)
     assert inputs is not None
     assert "audio_embeds" in inputs
+    assert "audio_attention_mask" in inputs
     assert "audio_sizes" in inputs
 
     audio_embeds = _to_numpy(inputs["audio_embeds"])
@@ -134,10 +184,15 @@ def test_gemma4_unified_audio_contract(test_data_path, relative_audio_path):
         f"unified audio_embeds feature dim should be {_UNIFIED_AUDIO_DIM}, got {audio_embeds.shape[-1]}"
     )
     assert audio_embeds.dtype == np.float32
+    assert audio_embeds.ndim == 3 and audio_embeds.shape[0] == 1
 
     # Unified: each 640-sample frame is exactly one audio token, so audio_sizes
     # equals the number of frames (no stride-2 subsampling).
     num_frames = audio_embeds.shape[-2]
+    audio_attention_mask = _to_numpy(inputs["audio_attention_mask"])
+    assert audio_attention_mask.shape == (1, num_frames)
+    assert audio_attention_mask.dtype == np.bool_
+    assert np.all(audio_attention_mask)
     audio_sizes = _to_numpy(inputs["audio_sizes"])
     assert audio_sizes[0] == num_frames, (
         f"unified audio_sizes should equal frame count {num_frames}, got {audio_sizes[0]}"

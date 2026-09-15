@@ -30,6 +30,7 @@ list(GET VERSION_LIST 2 VERSION_PATCH)
 set(REPO_ROOT ${PROJECT_SOURCE_DIR})
 set(SRC_ROOT ${REPO_ROOT}/src)
 set(GENERATORS_ROOT ${SRC_ROOT})
+set(GENERATOR_ROOT ${SRC_ROOT}/generator)
 set(MODELS_ROOT ${SRC_ROOT}/models)
 set(ENGINE_ROOT ${SRC_ROOT}/engine)
 
@@ -67,26 +68,38 @@ endif()
 file(GLOB generator_srcs CONFIGURE_DEPENDS
   "${GENERATORS_ROOT}/*.h"
   "${GENERATORS_ROOT}/*.cpp"
-  "${GENERATORS_ROOT}/cpu/*.h"
-  "${GENERATORS_ROOT}/cpu/*.cpp"
-  "${GENERATORS_ROOT}/qnn/*.h"
-  "${GENERATORS_ROOT}/qnn/*.cpp"
-  "${GENERATORS_ROOT}/webgpu/*.h"
-  "${GENERATORS_ROOT}/webgpu/*.cpp"
-  "${GENERATORS_ROOT}/openvino/*.h"
-  "${GENERATORS_ROOT}/openvino/*.cpp"
-  "${GENERATORS_ROOT}/ryzenai/*.h"
-  "${GENERATORS_ROOT}/ryzenai/*.cpp"
-  "${GENERATORS_ROOT}/cuda/session_options.h"
-  "${GENERATORS_ROOT}/cuda/session_options.cpp"
-  "${GENERATORS_ROOT}/nvtensorrtrtx/*.h"
-  "${GENERATORS_ROOT}/nvtensorrtrtx/*.cpp"
-  "${GENERATORS_ROOT}/vitisai/*.h"
-  "${GENERATORS_ROOT}/vitisai/*.cpp"
-  "${GENERATORS_ROOT}/dml/session_options.h"
-  "${GENERATORS_ROOT}/dml/session_options.cpp"
+  "${GENERATOR_ROOT}/*.h"
+  "${GENERATOR_ROOT}/*.cpp"
+  "${GENERATORS_ROOT}/decoding/*.h"
+  "${GENERATORS_ROOT}/decoding/*.cpp"
+  "${GENERATORS_ROOT}/ep/cpu/*.h"
+  "${GENERATORS_ROOT}/ep/cpu/*.cpp"
+  "${GENERATORS_ROOT}/ep/qnn/*.h"
+  "${GENERATORS_ROOT}/ep/qnn/*.cpp"
+  "${GENERATORS_ROOT}/ep/webgpu/*.h"
+  "${GENERATORS_ROOT}/ep/webgpu/*.cpp"
+  "${GENERATORS_ROOT}/ep/openvino/*.h"
+  "${GENERATORS_ROOT}/ep/openvino/*.cpp"
+  "${GENERATORS_ROOT}/ep/ryzenai/*.h"
+  "${GENERATORS_ROOT}/ep/ryzenai/*.cpp"
+  "${GENERATORS_ROOT}/ep/cuda/session_options.h"
+  "${GENERATORS_ROOT}/ep/cuda/session_options.cpp"
+  "${GENERATORS_ROOT}/ep/nvtensorrtrtx/*.h"
+  "${GENERATORS_ROOT}/ep/nvtensorrtrtx/*.cpp"
+  "${GENERATORS_ROOT}/ep/amdgpu/*.h"
+  "${GENERATORS_ROOT}/ep/amdgpu/*.cpp"
+  "${GENERATORS_ROOT}/ep/vitisai/*.h"
+  "${GENERATORS_ROOT}/ep/vitisai/*.cpp"
+  "${GENERATORS_ROOT}/ep/dml/session_options.h"
+  "${GENERATORS_ROOT}/ep/dml/session_options.cpp"
+  "${GENERATORS_ROOT}/telemetry/*.h"
+  "${GENERATORS_ROOT}/telemetry/*.cpp"
   "${MODELS_ROOT}/*.h"
   "${MODELS_ROOT}/*.cpp"
+  "${MODELS_ROOT}/io/*.h"
+  "${MODELS_ROOT}/io/*.cpp"
+  "${MODELS_ROOT}/preprocessing/*.h"
+  "${MODELS_ROOT}/preprocessing/*.cpp"
   "${ENGINE_ROOT}/*.h"
   "${ENGINE_ROOT}/*.cpp"
   "${ENGINE_ROOT}/decoders/*.h"
@@ -113,59 +126,5 @@ endif()
 
 
 # normalize the target platform to x64 or arm64. additional architectures can be added as needed.
-if (MSVC)
-  if (CMAKE_VS_PLATFORM_NAME)
-    # cross-platform generator
-    set(genai_target_platform ${CMAKE_VS_PLATFORM_NAME})
-  else()
-    set(genai_target_platform ${CMAKE_SYSTEM_PROCESSOR})
-  endif()
-
-  if (genai_target_platform STREQUAL "arm64")
-    # pass
-  elseif (genai_target_platform STREQUAL "ARM64" OR
-          genai_target_platform STREQUAL "ARM64EC")
-    set(genai_target_platform "arm64")
-  elseif (genai_target_platform STREQUAL "x64" OR
-          genai_target_platform STREQUAL "x86_64" OR
-          genai_target_platform STREQUAL "AMD64" OR
-          CMAKE_GENERATOR MATCHES "Win64")
-    set(genai_target_platform "x64")
-  else()
-    message(FATAL_ERROR "Unsupported architecture. CMAKE_SYSTEM_PROCESSOR: ${CMAKE_SYSTEM_PROCESSOR}")
-  endif()
-elseif(APPLE)
-  # TODO: do we need to support CMAKE_OSX_ARCHITECTURES having multiple values?
-  set(_apple_target_arch ${CMAKE_OSX_ARCHITECTURES})
-  if (NOT _apple_target_arch)
-    set(_apple_target_arch ${CMAKE_HOST_SYSTEM_PROCESSOR})
-  endif()
-
-  if (_apple_target_arch STREQUAL "arm64")
-    set(genai_target_platform "arm64")
-  elseif (_apple_target_arch STREQUAL "x86_64")
-    set(genai_target_platform "x64")
-  else()
-    message(FATAL_ERROR "Unsupported architecture. ${_apple_target_arch}")
-  endif()
-elseif(ANDROID)
-  if (CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a")
-    set(genai_target_platform "arm64")
-  elseif (CMAKE_ANDROID_ARCH_ABI STREQUAL "x86_64")
-    set(genai_target_platform "x64")
-  else()
-    message(FATAL_ERROR "Unsupported architecture. CMAKE_ANDROID_ARCH_ABI: ${CMAKE_ANDROID_ARCH_ABI}")
-  endif()
-else()
-  if(CMAKE_SYSTEM_PROCESSOR MATCHES "^arm64.*")
-    set(genai_target_platform "arm64")
-  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^aarch64.*")
-    set(genai_target_platform "arm64")
-  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64)$")
-    set(genai_target_platform "x64")
-  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "powerpc")
-    set(genai_target_platform "powerpc")
-  else()
-    message(FATAL_ERROR "Unsupported architecture. CMAKE_SYSTEM_PROCESSOR: ${CMAKE_SYSTEM_PROCESSOR}")
-  endif()
-endif()
+# Extracted into a standalone module so standalone SDK projects can reuse it (sets genai_target_platform).
+include(${CMAKE_CURRENT_LIST_DIR}/target_platform.cmake)

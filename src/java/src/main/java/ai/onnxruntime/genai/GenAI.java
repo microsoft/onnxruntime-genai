@@ -16,7 +16,8 @@ import java.util.Optional;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
-final class GenAI {
+/** Process-wide ONNX Runtime GenAI controls. */
+public final class GenAI {
   private static final Logger logger = Logger.getLogger(GenAI.class.getName());
 
   /**
@@ -49,6 +50,8 @@ final class GenAI {
   /** The temp directory where native libraries are extracted */
   private static Path tempDirectory;
 
+  private GenAI() {}
+
   static synchronized void init() throws IOException {
     if (loaded) {
       return;
@@ -71,6 +74,22 @@ final class GenAI {
   }
 
   static native void shutdown();
+
+  /**
+   * Turns ONNX Runtime GenAI telemetry events on or off.
+   *
+   * @param sendTelemetry Whether to enable non-essential telemetry events.
+   */
+  public static void setTelemetry(boolean sendTelemetry) {
+    try {
+      init();
+    } catch (IOException e) {
+      throw new RuntimeException("Failed to load onnxruntime-genai native libraries", e);
+    }
+    setTelemetryNative(sendTelemetry);
+  }
+
+  private static native void setTelemetryNative(boolean sendTelemetry);
 
   /* Computes and initializes OS_ARCH_STR (such as linux-x64) */
   private static String initOsArch() {

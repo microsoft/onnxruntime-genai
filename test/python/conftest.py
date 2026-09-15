@@ -2,9 +2,13 @@
 # Licensed under the MIT License
 
 import functools
+import logging
 import os
 
 import pytest
+from _test_utils import register_plugin_providers
+
+register_plugin_providers(logging.getLogger(__name__))
 
 
 def pytest_addoption(parser):
@@ -81,6 +85,26 @@ def qwen_for(request):
         get_path_for_model,
         request.config.getoption("--test_models"),
         "qwen-2.5-0.5b",
+        "int4",
+    )
+
+
+@pytest.fixture
+def qwen_graph_for(request):
+    return functools.partial(
+        get_path_for_model,
+        request.config.getoption("--test_models"),
+        "qwen-2.5-0.5b-graph",
+        "int4",
+    )
+
+
+@pytest.fixture
+def phi4_graph_for(request):
+    return functools.partial(
+        get_path_for_model,
+        request.config.getoption("--test_models"),
+        "phi-4-mini-graph",
         "int4",
     )
 

@@ -4,11 +4,21 @@
 #include "model_executor.h"
 #include "decoders/simple_decoder.h"
 
+#include <string_view>
 #include <typeinfo>
 
 namespace Generators {
 
 namespace {
+
+ExecutionFailureKind ClassifyOrtExecutionFailure(std::string_view message) {
+  // ORT has no resource-exhaustion status code, so this is coupled to its BFC arena diagnostic.
+  if (message.find("Failed to allocate memory for requested buffer") !=
+      std::string_view::npos) {
+    return ExecutionFailureKind::CapacityExceeded;
+  }
+  return ExecutionFailureKind::Unknown;
+}
 
 std::unique_ptr<Decoder> CreateDecoder(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager) {
   if (auto decoder_only_model = std::dynamic_pointer_cast<DecoderOnly_Model>(model)) {
@@ -20,12 +30,53 @@ std::unique_ptr<Decoder> CreateDecoder(std::shared_ptr<Model> model, std::shared
 
 }  // namespace
 
-ModelExecutor::ModelExecutor(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager)
-    : model_{model},
-      decoder_{CreateDecoder(model, cache_manager)} {}
+std::unique_ptr<ModelExecutor> ModelExecutor::Create(std::shared_ptr<Model> model,
+                                                     std::shared_ptr<CacheManager> cache_manager) {
+  return std::make_unique<DecoderModelExecutor>(model, cache_manager);
+}
 
-void ModelExecutor::Decode(ScheduledRequests& scheduled_requests) {
-  decoder_->Decode(scheduled_requests);
+DecoderModelExecutor::DecoderModelExecutor(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager)
+    : DecoderModelExecutor{model, cache_manager,
+                           CreateDecoder(model, cache_manager)} {}
+
+DecoderModelExecutor::DecoderModelExecutor(
+    std::shared_ptr<Model> model,
+    std::shared_ptr<CacheManager> cache_manager,
+    std::unique_ptr<Decoder> decoder)
+    : model_{std::move(model)},
+      cache_manager_{std::move(cache_manager)},
+      decoder_{std::move(decoder)} {
+  if (!decoder_) {
+    throw std::invalid_argument("DecoderModelExecutor requires a decoder.");
+  }
+}
+
+void DecoderModelExecutor::Decode(ScheduledRequests& scheduled_requests,
+                                  ExecutionContext& context) {
+  try {
+    cache_manager_->PrepareStep(scheduled_requests.Requests(), context);
+    context.block_table_columns = cache_manager_->BlockTableColumns();
+    decoder_->Decode(scheduled_requests, context);
+  } catch (const Ort::Exception& error) {
+    const auto failure_kind = ClassifyOrtExecutionFailure(error.what());
+    if (failure_kind == ExecutionFailureKind::CapacityExceeded) {
+      throw ModelExecutionError{
+          failure_kind,
+          std::string{"Model execution exceeded available memory. Cause: "} +
+              error.what(),
+      };
+    }
+    throw;
+  }
+}
+
+bool DecoderModelExecutor::SupportsDraftVerification() const {
+  const auto logits_symbolic_shape =
+      model_->session_info_.GetOutputSymbolicShape(
+          model_->config_->model.decoder.outputs.logits);
+  return logits_symbolic_shape.empty() ||
+         logits_symbolic_shape[0] == nullptr ||
+         std::string_view(logits_symbolic_shape[0]) != "batch_size";
 }
 
 }  // namespace Generators

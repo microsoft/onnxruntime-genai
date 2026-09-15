@@ -18,7 +18,9 @@ BUILD_PY = os.path.join(REPO_DIR, "build.py")
 # We by default will build below 3 archs
 DEFAULT_BUILD_OSX_ARCHS = {
     "iphoneos": ["arm64"],
-    "iphonesimulator": ["arm64",],
+    "iphonesimulator": [
+        "arm64",
+    ],
 }
 
 

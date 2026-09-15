@@ -33,6 +33,7 @@
         ],
         "macabi": [
             "--macos=Catalyst",
+            "--no_telemetry",
             "--apple_deploy_target=14.0"
         ]
     }

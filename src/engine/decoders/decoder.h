@@ -6,6 +6,7 @@
 #include "../scheduled_requests.h"
 #include "../../models/model.h"
 #include "../cache_manager.h"
+#include "../execution_context.h"
 
 namespace Generators {
 
@@ -53,6 +54,12 @@ struct DecoderIO : ModelIO {
    */
   virtual std::vector<DeviceSpan<float>> ProcessLogits() = 0;
 
+  virtual Tensor* HiddenStates() const { return nullptr; }
+
+  // The step's packed [total_num_tokens, aux_hidden_size] auxiliary hidden states, or null when
+  // the model was not exported with aux_hidden_state_layers. Row order matches HiddenStates().
+  virtual Tensor* AuxHiddenStates() const { return nullptr; }
+
  protected:
   ScheduledRequests& scheduled_requests_;
   std::shared_ptr<CacheManager> cache_manager_;
@@ -62,7 +69,8 @@ struct DecoderIO : ModelIO {
 struct Decoder {
   Decoder() = default;
 
-  virtual void Decode(ScheduledRequests& scheduled_requests) = 0;
+  virtual void Decode(ScheduledRequests& scheduled_requests,
+                      ExecutionContext& context) = 0;
 
   virtual ~Decoder() = default;
 };

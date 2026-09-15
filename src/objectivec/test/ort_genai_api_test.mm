@@ -21,6 +21,11 @@ NS_ASSUME_NONNULL_BEGIN
   self.continueAfterFailure = NO;
 }
 
+- (void)testTelemetryControl {
+  [OGAGenerator setTelemetryEnabled:NO];
+  [OGAGenerator setTelemetryEnabled:YES];
+}
+
 + (void)tearDown {
   [OGAGenerator shutdown];
 }
@@ -29,6 +34,31 @@ NS_ASSUME_NONNULL_BEGIN
   NSBundle* bundle = [NSBundle bundleForClass:[ORTGenAIAPITest class]];
   NSString* path = [[bundle resourcePath] stringByAppendingString:@"/tiny-random-gpt2-fp32"];
   return path;
+}
+
+- (void)testTokenizerCreateFromConfigAndPath {
+  NSError* error = nil;
+  NSString* input = @"She sells sea shells by the sea shore.";
+
+  OGAConfig* config = [[OGAConfig alloc] initWithPath:[ORTGenAIAPITest getModelPath] error:&error];
+  ORTAssertNullableResultSuccessful(config, error);
+
+  OGATokenizer* tokenizerFromConfig = [[OGATokenizer alloc] initWithConfig:config error:&error];
+  ORTAssertNullableResultSuccessful(tokenizerFromConfig, error);
+
+  OGATokenizer* tokenizerFromPath = [[OGATokenizer alloc] initWithPath:[ORTGenAIAPITest getModelPath] error:&error];
+  ORTAssertNullableResultSuccessful(tokenizerFromPath, error);
+
+  OGASequences* sequences = [tokenizerFromConfig encode:input error:&error];
+  ORTAssertNullableResultSuccessful(sequences, error);
+
+  const int32_t* sequenceData = [sequences sequenceDataAtIndex:0 error:&error];
+  XCTAssertNil(error);
+  size_t sequenceLength = [sequences sequenceCountAtIndex:0 error:&error];
+  XCTAssertNil(error);
+  NSString* decoded = [tokenizerFromPath decode:sequenceData length:sequenceLength error:&error];
+  ORTAssertNullableResultSuccessful(decoded, error);
+  XCTAssertEqualObjects(input, decoded);
 }
 
 - (void)testTensor_And_AddExtraInput {
@@ -40,7 +70,7 @@ NS_ASSUME_NONNULL_BEGIN
 
   NSError* error = nil;
   BOOL ret = NO;
-  
+
   OGAConfig* config = [[OGAConfig alloc] initWithPath:[ORTGenAIAPITest getModelPath] error:&error];
   ORTAssertNullableResultSuccessful(config, error);
 
@@ -78,7 +108,7 @@ NS_ASSUME_NONNULL_BEGIN
 
   NSError* error = nil;
   BOOL ret = NO;
-  
+
   OGAModel* model = [[OGAModel alloc] initWithPath:[ORTGenAIAPITest getModelPath] error:&error];
   ORTAssertNullableResultSuccessful(model, error);
 
@@ -145,6 +175,34 @@ NS_ASSUME_NONNULL_BEGIN
   }
   [generator generateNextTokenWithError:&error];
   ORTAssertBoolResultSuccessful(ret, error);
+}
+
+- (void)testSpeculativeAPIs {
+  NSError* error = nil;
+  OGAModel* model = [[OGAModel alloc] initWithPath:[ORTGenAIAPITest getModelPath] error:&error];
+  ORTAssertNullableResultSuccessful(model, error);
+
+  OGAGeneratorParams* params = [[OGAGeneratorParams alloc] initWithModel:model error:&error];
+  ORTAssertNullableResultSuccessful(params, error);
+  BOOL ret = [params setSpeculativeNumber:@"max_draft_tokens" doubleValue:4 error:&error];
+  ORTAssertBoolResultSuccessful(ret, error);
+  XCTAssertEqual([params getSpeculativeNumber:@"max_draft_tokens" error:&error], 4);
+  XCTAssertNil(error);
+  ret = [params setSpeculativeNumber:@"min_adaptive_k" doubleValue:2 error:&error];
+  ORTAssertBoolResultSuccessful(ret, error);
+  XCTAssertEqual([params getSpeculativeNumber:@"min_adaptive_k" error:&error], 2);
+  XCTAssertNil(error);
+
+  OGAGenerator* generator = [[OGAGenerator alloc] initWithModel:model params:params error:&error];
+  ORTAssertNullableResultSuccessful(generator, error);
+  OGASpeculativeStats* stats = [generator getSpeculativeStatsWithError:&error];
+  ORTAssertNullableResultSuccessful(stats, error);
+  XCTAssertEqual([stats getCount:@"rounds" error:&error], 0);
+  XCTAssertNil(error);
+  XCTAssertFalse([stats getBool:@"formula_supported" error:&error]);
+  XCTAssertNil(error);
+  XCTAssertEqual([stats getNumber:@"acceptance_rate" error:&error], 0);
+  XCTAssertNil(error);
 }
 
 @end

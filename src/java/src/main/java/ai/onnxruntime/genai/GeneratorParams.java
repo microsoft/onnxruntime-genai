@@ -88,6 +88,66 @@ public final class GeneratorParams implements AutoCloseable {
     return getSearchBool(nativeHandle, optionName);
   }
 
+  /**
+   * Sets a numerical speculative decoding option.
+   *
+   * @param optionName The option name.
+   * @param value The option value.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public void setSpeculativeNumber(String optionName, double value) throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    setSpeculativeNumber(nativeHandle, optionName, value);
+  }
+
+  /**
+   * Gets a numerical speculative decoding option.
+   *
+   * @param optionName The option name.
+   * @return The option value.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public double getSpeculativeNumber(String optionName) throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    return getSpeculativeNumber(nativeHandle, optionName);
+  }
+
+  /**
+   * Sets a boolean speculative decoding option.
+   *
+   * @param optionName The option name.
+   * @param value The option value.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public void setSpeculativeBool(String optionName, boolean value) throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    setSpeculativeBool(nativeHandle, optionName, value);
+  }
+
+  /**
+   * Gets a boolean speculative decoding option.
+   *
+   * @param optionName The option name.
+   * @return The option value.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public boolean getSpeculativeBool(String optionName) throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    return getSpeculativeBool(nativeHandle, optionName);
+  }
+
   @Override
   public void close() {
     if (nativeHandle != 0) {
@@ -121,4 +181,16 @@ public final class GeneratorParams implements AutoCloseable {
   private native double getSearchNumber(long nativeHandle, String optionName) throws GenAIException;
 
   private native boolean getSearchBool(long nativeHandle, String optionName) throws GenAIException;
+
+  private native void setSpeculativeNumber(long nativeHandle, String optionName, double value)
+      throws GenAIException;
+
+  private native double getSpeculativeNumber(long nativeHandle, String optionName)
+      throws GenAIException;
+
+  private native void setSpeculativeBool(long nativeHandle, String optionName, boolean value)
+      throws GenAIException;
+
+  private native boolean getSpeculativeBool(long nativeHandle, String optionName)
+      throws GenAIException;
 }

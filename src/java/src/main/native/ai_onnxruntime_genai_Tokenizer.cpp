@@ -23,6 +23,35 @@ Java_ai_onnxruntime_genai_Tokenizer_createTokenizer(JNIEnv* env, jobject thiz, j
   return reinterpret_cast<jlong>(tokenizer);
 }
 
+JNIEXPORT jlong JNICALL
+Java_ai_onnxruntime_genai_Tokenizer_createTokenizerFromConfig(JNIEnv* env, jobject thiz, jlong config_handle) {
+  const OgaConfig* config = reinterpret_cast<const OgaConfig*>(config_handle);
+  OgaTokenizer* tokenizer = nullptr;
+
+  if (ThrowIfError(env, OgaCreateTokenizerFromConfig(config, &tokenizer))) {
+    return 0;
+  }
+
+  return reinterpret_cast<jlong>(tokenizer);
+}
+
+JNIEXPORT jlong JNICALL
+Java_ai_onnxruntime_genai_Tokenizer_createTokenizerFromPath(JNIEnv* env, jobject thiz, jstring model_path) {
+  if (model_path == nullptr) {
+    ThrowException(env, "modelPath must not be null");
+    return 0;
+  }
+
+  CString path{env, model_path};
+  OgaTokenizer* tokenizer = nullptr;
+
+  if (ThrowIfError(env, OgaCreateTokenizerFromPath(path, &tokenizer))) {
+    return 0;
+  }
+
+  return reinterpret_cast<jlong>(tokenizer);
+}
+
 JNIEXPORT void JNICALL
 Java_ai_onnxruntime_genai_Tokenizer_destroyTokenizer(JNIEnv* env, jobject thiz, jlong tokenizer_handle) {
   OgaTokenizer* tokenizer = reinterpret_cast<OgaTokenizer*>(tokenizer_handle);
@@ -104,6 +133,54 @@ Java_ai_onnxruntime_genai_Tokenizer_tokenizerGetPadTokenId(JNIEnv* env, jobject 
   int32_t token_id = 0;
 
   if (ThrowIfError(env, OgaTokenizerGetPadTokenId(tokenizer, &token_id))) {
+    return 0;
+  }
+
+  return static_cast<jint>(token_id);
+}
+
+JNIEXPORT jint JNICALL
+Java_ai_onnxruntime_genai_Tokenizer_tokenizerGetBotTokenId(JNIEnv* env, jobject thiz, jlong tokenizer_handle) {
+  const OgaTokenizer* tokenizer = reinterpret_cast<const OgaTokenizer*>(tokenizer_handle);
+  int32_t token_id = 0;
+
+  if (ThrowIfError(env, OgaTokenizerGetBotTokenId(tokenizer, &token_id))) {
+    return 0;
+  }
+
+  return static_cast<jint>(token_id);
+}
+
+JNIEXPORT jint JNICALL
+Java_ai_onnxruntime_genai_Tokenizer_tokenizerGetEotTokenId(JNIEnv* env, jobject thiz, jlong tokenizer_handle) {
+  const OgaTokenizer* tokenizer = reinterpret_cast<const OgaTokenizer*>(tokenizer_handle);
+  int32_t token_id = 0;
+
+  if (ThrowIfError(env, OgaTokenizerGetEotTokenId(tokenizer, &token_id))) {
+    return 0;
+  }
+
+  return static_cast<jint>(token_id);
+}
+
+JNIEXPORT jint JNICALL
+Java_ai_onnxruntime_genai_Tokenizer_tokenizerGetBorTokenId(JNIEnv* env, jobject thiz, jlong tokenizer_handle) {
+  const OgaTokenizer* tokenizer = reinterpret_cast<const OgaTokenizer*>(tokenizer_handle);
+  int32_t token_id = 0;
+
+  if (ThrowIfError(env, OgaTokenizerGetBorTokenId(tokenizer, &token_id))) {
+    return 0;
+  }
+
+  return static_cast<jint>(token_id);
+}
+
+JNIEXPORT jint JNICALL
+Java_ai_onnxruntime_genai_Tokenizer_tokenizerGetEorTokenId(JNIEnv* env, jobject thiz, jlong tokenizer_handle) {
+  const OgaTokenizer* tokenizer = reinterpret_cast<const OgaTokenizer*>(tokenizer_handle);
+  int32_t token_id = 0;
+
+  if (ThrowIfError(env, OgaTokenizerGetEorTokenId(tokenizer, &token_id))) {
     return 0;
   }
 

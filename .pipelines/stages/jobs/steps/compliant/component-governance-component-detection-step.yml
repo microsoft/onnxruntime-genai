@@ -2,7 +2,6 @@
 parameters:
 - name: condition
   type: string
-  default: 'succeeded' # could be 'ci_only', 'always', 'succeeded'
 
 steps:
 - ${{ if eq(variables['System.TeamProject'], 'Lotus') }}:

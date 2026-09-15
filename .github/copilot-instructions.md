@@ -38,7 +38,7 @@ build.sh          # Linux/Mac shell
 
 ### Key Build Options (cmake/options.cmake)
 
-- `USE_CUDA/USE_DML/USE_ROCM` - Hardware acceleration backends
+- `USE_CUDA/USE_DML` - Hardware acceleration backends
 - `USE_WINML` - Windows ML integration requiring `WINML_SDK_VERSION` parameter
 - `ENABLE_JAVA/ENABLE_PYTHON` - Language binding compilation
 - `USE_GUIDANCE` - Constrained generation support
@@ -117,7 +117,7 @@ ADO pipelines obtain ORT lib/headers via three methods:
 1. **Config parsing** (`src/config.cpp`) - Reads `genai_config.json` model metadata
 2. **ONNX session creation** via `onnxruntime_api.h` wrappers
 3. **Device interface selection** based on provider availability
-4. **KV cache initialization** (`src/models/kv_cache.cpp`) for transformer models
+4. **KV cache initialization** (`src/models/io/kv_cache.cpp`) for transformer models
 
 ### Multi-Modal Support
 
@@ -151,7 +151,7 @@ The repo supports specific model architectures - check `src/models/model_type.h`
 
 - **KV caching** is automatically managed but can be configured via `src/runtime_settings.cpp`
 - **Continuous decoding** (session continuation) requires careful state management
-- **Multi-LoRA** adapters use separate weight loading in `src/models/adapters.cpp`
+- **Multi-LoRA** adapters use separate weight loading in `src/models/io/adapters.cpp`
 
 ## Testing Strategy
 
@@ -161,3 +161,16 @@ Tests are organized by language binding:
 - **Platform tests**: Android/iOS tests run via emulator/simulator
 
 Always test with actual model files from `test/models/` directory rather than mock data.
+
+## Model Builder Review Rules
+
+For any pull request that modifies files under `src/python/py/models/**`, reviewers and Copilot must apply:
+
+- `.github/instructions/python-model-builder.instructions.md`
+- `src/python/py/models/README.md`
+- `src/python/py/models/DESIGN.md`
+- `src/python/py/models/loaders/LOADERS.md`
+- `src/python/py/models/quantization/QUANTIZATION.md`
+
+When reviewing those files, prioritize these model-builder rules over generic guidance and flag violations explicitly.
+

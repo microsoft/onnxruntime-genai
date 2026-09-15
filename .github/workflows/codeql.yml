@@ -35,11 +35,11 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       # Initializes the CodeQL tools for scanning.
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@e60ea984bd3baa95954f2856bcf24f9eaba46637 # v3.37.5
         with:
           languages: ${{ matrix.language }}
           # If you wish to specify custom queries, you can do so here or in a config file.
@@ -53,7 +53,7 @@ jobs:
       # If this step fails, then you should remove it and run the build manually (see below)
       - if: ${{ matrix.language != 'cpp' }}
         name: Autobuild
-        uses: github/codeql-action/autobuild@v3
+        uses: github/codeql-action/autobuild@e60ea984bd3baa95954f2856bcf24f9eaba46637 # v3.37.5
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@e60ea984bd3baa95954f2856bcf24f9eaba46637 # v3.37.5

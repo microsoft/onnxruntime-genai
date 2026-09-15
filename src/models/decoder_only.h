@@ -1,11 +1,12 @@
 #pragma once
 #include "model.h"
-#include "input_ids.h"
-#include "logits.h"
-#include "kv_cache.h"
-#include "position_inputs.h"
-#include "extra_inputs.h"
-#include "recurrent_state.h"
+#include "models/io/input_ids.h"
+#include "models/io/logits.h"
+#include "io/kv_cache.h"
+#include "models/io/position_inputs.h"
+#include "models/io/extra_inputs.h"
+#include "models/io/hidden_states.h"
+#include "models/io/recurrent_state.h"
 
 namespace Generators {
 
@@ -26,6 +27,16 @@ struct DecoderOnly_State : State {
 
   void RewindTo(size_t index) override;
 
+  void SnapshotState(size_t position) override;
+
+  bool HasCroppableRecurrentState() const override;
+  int64_t RecurrentStateWindow() const override;
+  void CropToAccepted(size_t new_length, size_t recurrent_position) override;
+
+  // Stage the hidden_states values for the next Run (for models with a hidden_states input,
+  // e.g. the MTP self-speculative head). No-op if the model has no hidden_states input.
+  void SetHiddenStates(OrtValue* hidden_states) override;
+
  private:
   DeviceSpan<float> RunWithChunking(int total_length, DeviceSpan<int32_t>& next_tokens,
                                     DeviceSpan<int32_t> next_indices, size_t chunk_size);
@@ -39,6 +50,8 @@ struct DecoderOnly_State : State {
   std::unique_ptr<KeyValueCache> kv_cache_;
   std::unique_ptr<RecurrentState> recurrent_state_;
   std::unique_ptr<PositionInputs> position_inputs_;
+  std::unique_ptr<HiddenStatesInputs> hidden_states_;          // Only for models with a hidden_states input (MTP head).
+  std::unique_ptr<HiddenStatesOutputs> hidden_states_output_;  // Only for models that emit a hidden_states output (CUDA-graph-safe).
   ExtraInputs extra_inputs_{*this};
 };
 

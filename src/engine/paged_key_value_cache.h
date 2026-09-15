@@ -2,15 +2,65 @@
 // Licensed under the MIT License.
 #pragma once
 
+#include <algorithm>
 #include <stdint.h>
 #include <memory>
+#include <stdexcept>
 #include <vector>
 #include <list>
 
 #include "block.h"
+#include "engine_invariants.h"
+#include "paged_cache_reservation.h"
 #include "request.h"
+#include "step_plan.h"
 
 namespace Generators {
+
+inline constexpr size_t kMinGraphBlockTableColumns = 8;
+
+inline size_t GetGraphBlockTableColumns(size_t max_blocks, size_t max_columns) {
+  if (max_columns == 0) {
+    throw std::runtime_error("Graph block-table capacity must be non-zero.");
+  }
+
+  size_t columns = std::min(kMinGraphBlockTableColumns, max_columns);
+  while (columns < max_blocks) {
+    if (columns > max_columns / 2) {
+      return max_columns;
+    }
+    columns *= 2;
+  }
+  return columns;
+}
+
+// Blocks the target pool can hold in `available_memory_bytes`, after a fragmentation allowance and
+// the caller's utilization factor. `primary_bytes_per_block` is the target's own cost for one block
+// across all full-attention layers -- use PagedKeyValueCacheBytesPerBlock() to obtain it, so that
+// physical head widths and per-token scale caches are both accounted for. `auxiliary_bytes_per_block`
+// is what a second pool sized per target block (an MTP head, a full-attention block drafter) adds,
+// and `reserved_memory_bytes` is fixed state that is taken off the top before the division.
+size_t ComputePagedBlockCapacityFromBytes(size_t available_memory_bytes,
+                                          float gpu_utilization_factor,
+                                          size_t reserved_memory_bytes,
+                                          size_t primary_bytes_per_block,
+                                          size_t auxiliary_bytes_per_block = 0);
+
+// Resolves an explicitly configured engine.dynamic_batching.num_blocks into the target pool's
+// block count. num_blocks is the whole paged budget: an Engine-hosted MTP head is given the same
+// block count as the target, so the target pool shrinks until both pools together cost what the
+// configured count would have cost on its own. A fixed auxiliary reserve is also deducted before
+// the remaining budget is divided among the per-block allocations.
+size_t ResolveConfiguredPagedBlockCount(size_t configured_num_blocks,
+                                        size_t primary_bytes_per_block,
+                                        size_t auxiliary_bytes_per_block,
+                                        size_t auxiliary_reserved_memory_bytes = 0);
+
+// Bytes one block costs across every full-attention layer of the target's paged group: the key and
+// value caches at the physical trailing width the graph declares (which is head_size/2 for a
+// 4-bit packed cache, not head_size), plus the per-token scale caches when the model binds them.
+// Windowed layers are excluded because their ring is sized separately.
+size_t PagedKeyValueCacheBytesPerBlock(const std::shared_ptr<Model>& model);
 
 /*
  * PagedKeyValueCache manages a paged key-value cache for models that use the PagedAttention operator.
@@ -24,7 +74,9 @@ namespace Generators {
  */
 struct PagedKeyValueCache {
  public:
-  PagedKeyValueCache(std::shared_ptr<Model> model);
+  explicit PagedKeyValueCache(std::shared_ptr<Model> model,
+                              size_t auxiliary_bytes_per_block = 0,
+                              size_t auxiliary_reserved_memory_bytes = 0);
 
   bool CanAdd(std::shared_ptr<Request> request) const;
 
@@ -35,6 +87,15 @@ struct PagedKeyValueCache {
   void AppendTokens(std::shared_ptr<Request> request);
 
   void Remove(std::shared_ptr<Request> request);
+  void ValidateRemove(const void* request_id) const;
+  void RemoveValidated(const void* request_id) noexcept;
+  bool OwnsRequest(const void* request_id) const noexcept;
+  size_t CommittedSlots(const void* request_id) const;
+
+  PagedCacheReservation Reserve(std::span<const PagedCacheReservationRequest> requests);
+
+  // Selects the active and pending requests whose immediate cache growth fits this step.
+  StepPlanningResult PlanStepResources(StepPlan& plan) const;
 
   // Returns the K, V cache.
   std::vector<std::pair<OrtValue*, OrtValue*>> Cache();
@@ -62,28 +123,91 @@ struct PagedKeyValueCache {
   // -1 is used to pad the block tables to the max blocks per sequence from the given sequences.
   // The order of the block tables is based on the order the provided requests.
   std::pair<OrtValue*, const char*> BlockTables(const std::vector<std::shared_ptr<Request>>& requests);
+  std::pair<OrtValue*, const char*> BlockTables(
+      const std::vector<std::shared_ptr<Request>>& requests,
+      const PagedCacheReservation& reservation,
+      size_t columns);
+
+  // Block table for the sliding-window layers, same shape as BlockTables() but filled by repeating
+  // each request's ring of blocks: column j holds ring[j % ring_blocks]. The operator indexes it
+  // with the token's true position, so position p resolves to slot p % (ring_blocks * block_size)
+  // and positions that have fallen out of the window are overwritten in place.
+  //
+  //   ring = [5, 9], block_size = 4, so the table is
+  //   [5, 9, 5, 9, 5, 9, ...]
+  //
+  // Only valid when WindowedLayers() is non-empty.
+  std::pair<OrtValue*, const char*> WindowBlockTables(const std::vector<std::shared_ptr<Request>>& requests);
+  std::pair<OrtValue*, const char*> WindowBlockTables(
+      const std::vector<std::shared_ptr<Request>>& requests,
+      const PagedCacheReservation& reservation,
+      size_t columns);
+
+  // Number of columns in the block table handed to the model on the most recent BlockTables() call.
+  // With graph capture this is a bucketed capacity rather than the exact longest table, so the shape
+  // is stable across steps; it also bounds the KV length any sequence in the batch can reach, which
+  // is what `attention_metadata` has to report for a captured step.
+  size_t BlockTableColumns() const { return block_table_columns_; }
+  size_t MaxBlockTableColumns() const { return max_block_table_columns_; }
+  size_t MaxBlockTableRows() const { return max_block_table_rows_; }
+  bool GraphCaptureEnabled() const { return graph_capture_; }
+  size_t MaxQueryTokensPerRequest() const {
+    return Windowed() ? window_live_span_ - window_size_ + 1 : 0;
+  }
 
   void UpdateState(State& state, const std::vector<std::shared_ptr<Request>>& requests);
+  void UpdateState(State& state,
+                   const std::vector<std::shared_ptr<Request>>& requests,
+                   const PagedCacheReservation& reservation,
+                   size_t columns);
+
+  // Captures an immutable snapshot of the cache's block accounting (free/allocated blocks, and per
+  // request block ids and used/empty slots) for invariant validation and state inspection. The
+  // snapshot copies out the state and holds no reference into the cache.
+  PagedCacheSnapshot Snapshot() const;
+  PagedCacheSnapshot Snapshot(const PagedCacheReservation& reservation) const;
 
  private:
   struct LayerCache {
-    std::unique_ptr<OrtValue> key_cache;    // Shape: [num_blocks, block_size, num_kv_heads, head_size]
-    std::unique_ptr<OrtValue> value_cache;  // Shape: [num_blocks, block_size, num_kv_heads, head_size]
+    // Shape: [num_blocks, block_size, num_kv_heads, head_width], where head_width is the trailing
+    // dimension the graph declares for this layer's cache input, not config head_size. They differ
+    // whenever the cache is packed: a 4-bit cache stores two elements per uint8, so head_width is
+    // (head_size + 1) / 2. Sizing and allocation both read the graph, never head_size.
+    std::unique_ptr<OrtValue> key_cache;
+    std::unique_ptr<OrtValue> value_cache;
     std::string key_cache_name;
     std::string value_cache_name;
     std::string key_cache_output_name;
     std::string value_cache_output_name;
   };
 
+  // Per-token quantization scales for one side (key or value) of one layer, present only when the
+  // model declares scale name templates. Shape: [num_blocks, block_size, num_kv_heads] -- the same
+  // block and slot addressing as LayerCache with the head-width dimension dropped, so the block
+  // table the model already receives indexes both tensors identically. The past and present name
+  // templates are required as a pair, and this one buffer is bound on both sides so the model
+  // updates it in place. `storage` owns the device memory and must outlive `value`, which only
+  // wraps it.
+  struct ScaleCache {
+    std::unique_ptr<void, Ort::AllocatorDeleter> storage;
+    std::unique_ptr<OrtValue> value;
+    std::string input_name;
+    std::string output_name;
+  };
+
+  void BindCache(State& state);
+
   //   The key and the value cache is represented as an array of blocks. Each block contains
-  //   a number of slots equal to the block size. Each slot contains num_kv_heads * head_size
-  //   elements. Here the slot represents data generated by the model for a single token.
-  //   This key-value cache is allocated for each layer in the model.
+  //   a number of slots equal to the block size. Each slot contains num_kv_heads * head_width
+  //   elements, where head_width is the graph's physical trailing dimension. Here the slot
+  //   represents data generated by the model for a single token.
+  //   This key-value cache is allocated for each layer in the model. A quantized model adds a
+  //   companion scale cache per layer and side, holding one scale per (block, slot, kv head).
   //   Although the cache is preallocated, the actual memory is alloted to a request only as needed.
   //   View of the cache for each layer (LayerCache):
   //         -->|size of each block = block_size(M) * size of each slot|<--
   //            |______________________________________________________|
-  //            |       -->|          |<-- size of each slot = num_kv_heads * head_size
+  //            |       -->|          |<-- size of each slot = num_kv_heads * head_width
   //            |          |          |                                |
   //            |__________|__________|________________________________|
   //   block 0  |  slot 0  |  slot 1  |  slot 2  |     .    |  slot M  |
@@ -98,16 +222,43 @@ struct PagedKeyValueCache {
   //   N = num_blocks per layer
   //   M = block_size per block
 
-  struct BlockTable {
-    std::shared_ptr<Request> request;
-    std::vector<std::shared_ptr<Block>> blocks;
-  };
-
+  // Fills `data` with `columns` block ids per request, in the order the requests were given.
+  void FillBlockTables(const std::vector<std::shared_ptr<Request>>& requests, bool windowed,
+                       int32_t* data, size_t columns);
+  void RebuildBlockTableIndex() noexcept;
   std::shared_ptr<Model> model_;
-  std::vector<LayerCache> cache_;                 // Pair of key and value caches for all layers
-  std::unique_ptr<BlockPool> block_pool_;         // Allocator for blocks
-  std::vector<BlockTable> block_tables_;          // Block table for all requests in the cache
+  std::vector<LayerCache> cache_;  // Pair of key and value caches for all layers
+  // Scale caches in binding order: for each layer of cache_, the key scale then the value scale,
+  // skipping a side whose input template is empty. BindCache() lays them out immediately after the
+  // key/value inputs, so the block table inputs start at cache_.size() * 2 + scale_cache_.size().
+  std::vector<ScaleCache> scale_cache_;
+  std::unique_ptr<BlockPool> block_pool_;           // Allocator for blocks
+  std::vector<PagedCacheBlockTable> block_tables_;  // Block table for all requests in the cache
+  std::unique_ptr<RequestIndex> block_table_index_;
   std::unique_ptr<OrtValue> block_tables_value_;  // Block tables for all requests in the cache
+
+  // Sliding-window layers hold their KV in a ring of `window_ring_blocks_` blocks rather than one
+  // block per position, so they get their own much smaller pool and their own block table. The
+  // ring has to span the whole live set of a step: the queries reach back `window_size` positions
+  // and a chunked prefill advances by up to `chunk_size` at once, so it must cover
+  // `chunk_size + window_size - 1` positions. Zero when the model has no windowed layers.
+  size_t window_size_{};
+  size_t window_ring_blocks_{};
+  size_t window_live_span_{};  // chunk_size + window_size - 1, checked against each step
+  std::unique_ptr<BlockPool> window_block_pool_;
+  std::unique_ptr<OrtValue> window_block_tables_value_;
+  std::unique_ptr<Tensor> window_block_tables_tensor_;
+
+  bool Windowed() const { return window_ring_blocks_ > 0; }
+
+  // Graph capture needs the block table at a device address that never moves and at a shape that
+  // repeats across steps, so it gets a dedicated persistent tensor instead of the per-step CPU one.
+  bool graph_capture_{};
+  size_t max_batch_size_{};
+  size_t block_table_columns_{};
+  size_t max_block_table_columns_{};
+  size_t max_block_table_rows_{};
+  std::unique_ptr<Tensor> block_tables_tensor_;
 };
 
 }  // namespace Generators

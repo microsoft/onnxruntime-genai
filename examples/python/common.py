@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 
 import argparse
+import importlib
 import json
 import os
 from dataclasses import asdict, dataclass
@@ -25,7 +26,7 @@ def set_logger(inputs: bool = True, outputs: bool = True) -> None:
 
 def register_ep(ep: str, ep_path: str, use_winml: bool) -> None:
     """
-    Register execution provider if path is provided or via Windows ML
+    Register an execution provider from an explicit path, Windows ML, or an installed plugin package.
 
     Args:
         ep (str): Name of execution provider
@@ -39,7 +40,8 @@ def register_ep(ep: str, ep_path: str, use_winml: bool) -> None:
         # If use_winml is true, all winml execution providers will be queried and registered.
         # Please refer to https://pypi.org/project/windowsml/
         try:
-            import winml
+            winml = importlib.import_module("winml")
+
             for ep_name in winml.register_execution_providers():
                 print(f"Registered WinML execution provider: {ep_name}")
         except Exception as e:
@@ -48,14 +50,35 @@ def register_ep(ep: str, ep_path: str, use_winml: bool) -> None:
         og.register_execution_provider_library(ep, ep_path)
 
         print(f"Registered {ep} from {ep_path} successfully!")
+    else:
+        plugin_ep_packages = {
+            "cuda": "onnxruntime_ep_cuda",
+            "CUDAExecutionProvider": "onnxruntime_ep_cuda",
+            "webgpu": "onnxruntime_ep_webgpu",
+            "WebGPU": "onnxruntime_ep_webgpu",
+            "WebGpuExecutionProvider": "onnxruntime_ep_webgpu",
+        }
+        package_name = plugin_ep_packages.get(ep)
+        package_names = tuple(dict.fromkeys(plugin_ep_packages.values())) if ep == "follow_config" else (package_name,)
+        for package_name in package_names:
+            if package_name is None:
+                continue
+            try:
+                ep_module = importlib.import_module(package_name)
+            except ImportError:
+                continue
+            plugin_name = ep_module.get_ep_name()
+            plugin_path = ep_module.get_library_path()
+            og.register_execution_provider_library(plugin_name, plugin_path)
+            print(f"Registered {plugin_name} from installed package {package_name} successfully!")
 
 
 def get_config(
     path: str,
     ep: str,
     ep_path: str | None,
-    ep_options: dict[str, str] = {},
-    search_options: dict[str, int] = {},
+    ep_options: dict[str, str] | None = None,
+    search_options: dict[str, int] | None = None,
 ) -> og.Config:
     """
     Get og.Config object and set EP-specific and search-specific options inside it
@@ -73,6 +96,10 @@ def get_config(
     # Create config with EP
     # - If follow_config, then use the default EP stored inside the GenAI config.
     # - Otherwise, override the stored EP by clearing all providers and appending the desired one.
+    if search_options is None:
+        search_options = {}
+    if ep_options is None:
+        ep_options = {}
     config = og.Config(path)
     if not ep_path and ep != "follow_config":
         config.clear_providers()
@@ -111,6 +138,7 @@ def get_search_options(args: argparse.Namespace):
     search_options = {}
     names = [
         "batch_size",
+        "chunk_size",
         "do_sample",
         "max_length",
         "min_length",
@@ -312,7 +340,7 @@ class ToolSchema:
     type: str
     properties: dict[str, Any]
     required: list[str]
-    additionalProperties: bool
+    additionalProperties: bool  # noqa: N815
 
 
 @dataclass
@@ -324,7 +352,7 @@ class JsonSchema:
     x_guidance: dict[str, Any]
     type: str
     items: dict[str, list[ToolSchema]]
-    minItems: int
+    minItems: int  # noqa: N815
 
 
 @dataclass
@@ -472,7 +500,7 @@ def get_guidance(
     response_format: str = "",
     filepath: str = "",
     tools_str: str = "",
-    tools: list[dict[str, Any] | Tool] = [],
+    tools: list[dict[str, Any] | Tool] | None = None,
     text_output: bool = True,
     tool_output: bool = False,
     tool_call_start: str = "",
@@ -493,6 +521,8 @@ def get_guidance(
     Returns:
         (str, str, str): (grammar type, grammar data, tools) as a tuple of strings
     """
+    if tools is None:
+        tools = []
     guidance_type, guidance_data = "", ""
 
     # Get list of tools from a range of sources (filepath, JSON-serialized string, in-memory)
@@ -507,10 +537,12 @@ def get_guidance(
             try:
                 tool_defs = json.loads(tools_str)
                 tools = to_tool(tool_defs)
-            except json.JSONDecodeError:
-                raise ValueError("Invalid JSON format for tools list. Format must be a JSON-serialized string.")
+            except json.JSONDecodeError as err:
+                raise ValueError(
+                    "Invalid JSON format for tools list. Format must be a JSON-serialized string."
+                ) from err
         elif len(tools) > 0:
-            if type(tools[0]) != Tool:
+            if not isinstance(tools[0], Tool):
                 tools = to_tool(tools)
         else:
             raise ValueError(
@@ -561,15 +593,15 @@ def get_ep_args(parser: argparse.ArgumentParser) -> None:
     # is registered with ONNX Runtime. It must match the name ONNX Runtime is expecting,
     # not the genai canonical ep name.
     all_eps = [
-        "follow_config",                   # Follow whatever EP is specified in the GenAI config
-        "cpu",                             # CPU EP
-        "cuda",                            # GenAI canonical name for CUDA EP
-        "CUDAExecutionProvider",           # CUDA EP
+        "follow_config",  # Follow whatever EP is specified in the GenAI config
+        "cpu",  # CPU EP
+        "cuda",  # GenAI canonical name for CUDA EP
+        "CUDAExecutionProvider",  # CUDA EP
         "NvTensorRTRTXExecutionProvider",  # Nvidia IHV EP
-        "OpenVINOExecutionProvider",       # Intel IHV EP
-        "QNNExecutionProvider",            # Qualcomm IHV EP
-        "VitisAIExecutionProvider",        # AMD IHV EP
-        "WebGpuExecutionProvider",         # WebGPU EP
+        "OpenVINOExecutionProvider",  # Intel IHV EP
+        "QNNExecutionProvider",  # Qualcomm IHV EP
+        "VitisAIExecutionProvider",  # AMD IHV EP
+        "WebGpuExecutionProvider",  # WebGPU EP
     ]
 
     ep_group = parser.add_argument_group("Execution Providers")
