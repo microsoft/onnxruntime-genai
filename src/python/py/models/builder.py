@@ -222,13 +222,12 @@ def check_extra_options(
 
         # Mirrors CheckInputs in onnxruntime paged_attention_helper.h, which is the only hard
         # bound. ORT's FlashAttention path wants block_size % tile == 0 on top of it, where tile
-        # is 256 for head_size <= 64, 128 for head_size <= 128 and 64 above that. Missing the tile
-        # costs a causal model only a fallback to PagedDecode/MemoryEfficientAttention, but a
-        # non-causal query has no fallback -- PagedAttention errors out when FlashAttention is not
-        # eligible -- so a block drafter (DFlash 2 / DSpark) floors the block size of the whole
-        # export. The drafter's head size is not known here, so this enforces only the op-level rule.
-        # TODO: let the drafter keep its own block size so a target can use a small vLLM-style
-        # page (16 tokens) without dragging the drafter below its FlashAttention tile.
+        # is 256 for head_size <= 64, 128 for head_size <= 128 and 64 above that, and falls back
+        # to another backend otherwise. That is a throughput choice per head size, not a validity
+        # rule, and the head sizes involved are not known here, so only the op-level rule is
+        # enforced.
+        # TODO: give a block drafter its own block size, so a target can take a small vLLM-style
+        # page (16 tokens) without moving the drafter off its own FlashAttention tile.
         block_size = extra_options.get("paged_block_size")
         if block_size is not None and (block_size < 16 or block_size & (block_size - 1) != 0):
             raise ValueError("paged_block_size must be a power of two and at least 16.")
@@ -850,13 +849,12 @@ def get_args():
                     Must be a power of two and at least 16, which is what the ONNX Runtime PagedAttention op
                     accepts. Default is 256. Also written to the `engine.dynamic_batching` section of
                     genai_config.json. The vendored FlashAttention paged kernel additionally needs the block
-                    to be a multiple of its tile (256 for head_size <= 64, 128 for head_size <= 128, else 64).
-                    Missing that tile is not fatal for a causal model, which falls back to PagedDecode or
-                    MemoryEfficientAttention, but PagedAttention rejects a non-causal query at run time
-                    when FlashAttention is unavailable, so a block drafter (dflash2_path/dspark_path),
-                    which shares this block size and attends non-causally, must meet its own tile. A
-                    quantized KV cache is exempt from the tile requirement only: FlashAttention still
-                    serves it, through a dense dequantized path that has no page alignment to satisfy.
+                    to be a multiple of its tile (256 for head_size <= 64, 128 for head_size <= 128, else 64);
+                    a smaller block is still valid but makes ORT fall back to another attention backend. A
+                    quantized KV cache is exempt from the tile requirement alone: FlashAttention still serves
+                    it, through a dense dequantized path that has no page alignment to satisfy. A block
+                    drafter (dflash2_path/dspark_path) shares this block size and usually has a smaller head
+                    size, so it reaches its tile at a larger block than the target does.
                 paged_chunk_size = Prefill chunk size written to `search.chunk_size` in genai_config.json.
                     Only used when use_paged_attention is set and the model's sliding-window layers are served
                     from a ring of blocks; those layers hold only `paged_chunk_size + window_size - 1` positions,
