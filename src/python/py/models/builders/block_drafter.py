@@ -370,6 +370,10 @@ class BlockDrafterBuilder:
         ]
         for name, dtype, shape in declarations:
             self.graph.inputs.append(self.make_value(name, dtype, shape))
+        # TODO: this is the target's block size. A drafter usually has the smaller head size and
+        # so the larger FlashAttention tile, which means the block that is fastest for the target
+        # is not the one that is fastest here. Giving the drafter its own block size would
+        # decouple them.
         for layer_id in range(self.num_layers):
             for suffix in ("key", "value"):
                 self.graph.inputs.append(

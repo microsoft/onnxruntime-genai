@@ -220,8 +220,17 @@ def check_extra_options(
                 raise ValueError(f"{key} must be a positive integer.")
             extra_options[key] = value
 
-        if "paged_block_size" in extra_options and extra_options["paged_block_size"] % 256 != 0:
-            raise ValueError("paged_block_size must be a multiple of 256.")
+        # Mirrors CheckInputs in onnxruntime paged_attention_helper.h, which is the only hard
+        # bound. ORT's FlashAttention path wants block_size % tile == 0 on top of it, where tile
+        # is 256 for head_size <= 64, 128 for head_size <= 128 and 64 above that, and falls back
+        # to another backend otherwise. That is a throughput choice per head size, not a validity
+        # rule, and the head sizes involved are not known here, so only the op-level rule is
+        # enforced.
+        # TODO: give a block drafter its own block size, so a target can take a small vLLM-style
+        # page (16 tokens) without moving the drafter off its own FlashAttention tile.
+        block_size = extra_options.get("paged_block_size")
+        if block_size is not None and (block_size < 16 or block_size & (block_size - 1) != 0):
+            raise ValueError("paged_block_size must be a power of two and at least 16.")
         if extra_options.get("max_batch_size", 1) > 256:
             raise ValueError("max_batch_size must be at most 256.")
 
@@ -836,9 +845,16 @@ def get_args():
                     [batch_size, vocab_size] logits. By default, the model outputs [num_tokens, vocab_size] logits.
                     Currently only supported for the CUDA execution provider with fp16 or bf16 precision. Cannot be
                     combined with exclude_embeds or exclude_lm_head.
-                paged_block_size = 256/512/768/...: Paged KV-cache block size used when use_paged_attention is set.
-                    Must be a positive multiple of 256 (required by the ONNX Runtime PagedAttention CUDA kernel).
-                    Default is 256. Also written to the `engine.dynamic_batching` section of genai_config.json.
+                paged_block_size = 16/32/64/128/256/...: Paged KV-cache block size used when use_paged_attention is set.
+                    Must be a power of two and at least 16, which is what the ONNX Runtime PagedAttention op
+                    accepts. Default is 256. Also written to the `engine.dynamic_batching` section of
+                    genai_config.json. The vendored FlashAttention paged kernel additionally needs the block
+                    to be a multiple of its tile (256 for head_size <= 64, 128 for head_size <= 128, else 64);
+                    a smaller block is still valid but makes ORT fall back to another attention backend. A
+                    quantized KV cache is exempt from the tile requirement alone: FlashAttention still serves
+                    it, through a dense dequantized path that has no page alignment to satisfy. A block
+                    drafter (dflash2_path/dspark_path) shares this block size and usually has a smaller head
+                    size, so it reaches its tile at a larger block than the target does.
                 paged_chunk_size = Prefill chunk size written to `search.chunk_size` in genai_config.json.
                     Only used when use_paged_attention is set and the model's sliding-window layers are served
                     from a ring of blocks; those layers hold only `paged_chunk_size + window_size - 1` positions,
