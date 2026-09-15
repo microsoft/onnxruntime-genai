@@ -121,9 +121,7 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
       model_{model},
       key_value_cache_{model_.p_device_kvcache_->CreateKeyValueCache(*this)},
       do_key_value_cache_partial_update_{key_value_cache_ && key_value_cache_->IsPartialUpdateSupported()},
-      // Pipeline stages currently run without graph capture, so do not alternate recurrent-state
-      // graph variants that the stage runner never selects.
-      recurrent_state_{CreateRecurrentState(*this, /*graph_capture_variants_supported=*/false)},
+      recurrent_state_{CreateRecurrentState(*this)},
       position_inputs_{model_.p_device_inputs_->CreatePositionInputs(*this, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask)} {
   input_ids_->Add();
   position_inputs_->Add();
