@@ -12,6 +12,7 @@
 #include <string_view>
 
 #include "../../models/decoder_only.h"
+#include "../../models/utils.h"
 #include "../paged_key_value_cache.h"
 #include "../sequence_positions.h"
 
@@ -135,66 +136,97 @@ std::array<int32_t, kAttentionMetadataElementCount> PackAttentionMetadata(
   };
 }
 
-VarlenGraphBuffers::VarlenGraphBuffers(DecoderOnly_Model& model, size_t position_planes) {
-  max_batch_size = model.config_->engine.dynamic_batching->max_batch_size;
-  // A speculative step submits the drafted tokens plus the token the target always advances, so the
-  // packed row count is a multiple of the batch rather than equal to it.
-  max_query_tokens = static_cast<size_t>(std::max(model.config_->speculative.max_draft_tokens, 0)) + 1;
-  max_token_rows = max_batch_size * max_query_tokens;
-  const size_t scheduled_token_cap = model.config_->engine.dynamic_batching->max_scheduled_tokens;
-  if (scheduled_token_cap != 0) {
-    max_token_rows = std::max(max_batch_size, std::min(max_token_rows, scheduled_token_cap));
-  }
-
-  auto make = [&](DeviceInterface* device, ONNXTensorElementDataType type, int64_t elements) {
-    auto tensor = std::make_unique<Tensor>(device, type);
-    tensor->CreateTensor(std::vector<int64_t>{elements}, /*make_static=*/true);
-    return tensor;
-  };
-
-  input_ids = make(model.p_device_inputs_, Ort::TypeToTensorType<int64_t>, static_cast<int64_t>(max_token_rows));
-  cumulative_sequence_lengths =
-      make(model.p_device_inputs_, Ort::TypeToTensorType<int32_t>, static_cast<int64_t>(max_batch_size + 1));
-  past_sequence_lengths =
-      make(model.p_device_inputs_, Ort::TypeToTensorType<int32_t>, static_cast<int64_t>(max_batch_size));
-
-  if (position_planes != 0) {
-    position_ids = make(model.p_device_inputs_, Ort::TypeToTensorType<int64_t>,
-                        static_cast<int64_t>(position_planes * max_token_rows));
-  }
-
+bool DecoderLogitsArePerToken(const Model& model) {
   // Logits with a symbolic batch_size first dimension hold one row per request; any other first
-  // dimension holds one row per packed token. This mirrors VarlenDecoderIO's own determination.
+  // dimension holds one row per packed token.
   const auto logits_symbolic_shape =
       model.session_info_.GetOutputSymbolicShape(model.config_->model.decoder.outputs.logits);
-  const bool logits_are_per_token = logits_symbolic_shape.empty() ||
-                                    logits_symbolic_shape[0] == nullptr ||
-                                    std::string_view(logits_symbolic_shape[0]) != "batch_size";
+  return logits_symbolic_shape.empty() ||
+         logits_symbolic_shape[0] == nullptr ||
+         std::string_view(logits_symbolic_shape[0]) != "batch_size";
+}
 
-  logits = std::make_unique<Tensor>(model.p_device_inputs_,
-                                    model.session_info_.GetOutputDataType(model.config_->model.decoder.outputs.logits));
-  logits->CreateTensor(std::vector<int64_t>{static_cast<int64_t>(logits_are_per_token ? max_token_rows : max_batch_size),
-                                            static_cast<int64_t>(model.config_->model.vocab_size)},
-                       /*make_static=*/true);
+size_t PackedPositionIdPlanes(const Model& model) {
+  const auto& position_ids = model.config_->model.decoder.inputs.position_ids;
+  if (!model.session_info_.HasInput(position_ids)) {
+    return 0;
+  }
+  return model.session_info_.GetInputShape(position_ids).size() == 2 ? 3 : 1;
+}
+
+namespace {
+
+// Every persistent buffer a capturable decode step needs, as a type and a shape. The constructor
+// allocates from this list and the engine's memory budget prices it, so the two cannot disagree.
+// A buffer the model does not use carries an empty shape.
+struct GraphBufferPlan {
+  enum Slot {
+    kInputIds,
+    kCumulativeSequenceLengths,
+    kPastSequenceLengths,
+    kPositionIds,
+    kLogits,
+    kHiddenStatesInput,
+    kHiddenStates,
+    kAuxHiddenStates,
+    kSlotCount,
+  };
+
+  struct Buffer {
+    ONNXTensorElementDataType type{};
+    std::vector<int64_t> shape;
+  };
+
+  size_t max_batch_size{};
+  size_t max_query_tokens{};
+  size_t max_token_rows{};
+  std::array<Buffer, kSlotCount> buffers;
+};
+
+GraphBufferPlan PlanGraphBuffers(const Model& model, size_t position_planes,
+                                 size_t max_query_tokens_per_request) {
+  GraphBufferPlan plan;
+  plan.max_batch_size = model.config_->engine.dynamic_batching->max_batch_size;
+  const bool logits_are_per_token = DecoderLogitsArePerToken(model);
+  // A speculative step submits the drafted tokens plus the token the target always advances, so the
+  // packed row count is a multiple of the batch rather than equal to it. A model whose logits carry
+  // one row per request cannot verify drafts at all, so its steps are always one token wide.
+  plan.max_query_tokens =
+      logits_are_per_token ? std::max<size_t>(max_query_tokens_per_request, 1) : 1;
+  plan.max_token_rows = plan.max_batch_size * plan.max_query_tokens;
+  const size_t scheduled_token_cap = model.config_->engine.dynamic_batching->max_scheduled_tokens;
+  if (scheduled_token_cap != 0) {
+    plan.max_token_rows =
+        std::max(plan.max_batch_size, std::min(plan.max_token_rows, scheduled_token_cap));
+  }
+
+  const auto rows = static_cast<int64_t>(plan.max_token_rows);
+  const auto batch = static_cast<int64_t>(plan.max_batch_size);
+  const int64_t hidden_size = model.config_->model.decoder.hidden_size;
+
+  plan.buffers[GraphBufferPlan::kInputIds] = {Ort::TypeToTensorType<int64_t>, {rows}};
+  plan.buffers[GraphBufferPlan::kCumulativeSequenceLengths] = {Ort::TypeToTensorType<int32_t>,
+                                                               {batch + 1}};
+  plan.buffers[GraphBufferPlan::kPastSequenceLengths] = {Ort::TypeToTensorType<int32_t>, {batch}};
+  if (position_planes != 0) {
+    plan.buffers[GraphBufferPlan::kPositionIds] = {
+        Ort::TypeToTensorType<int64_t>, {static_cast<int64_t>(position_planes) * rows}};
+  }
+  plan.buffers[GraphBufferPlan::kLogits] = {
+      model.session_info_.GetOutputDataType(model.config_->model.decoder.outputs.logits),
+      {logits_are_per_token ? rows : batch, static_cast<int64_t>(model.config_->model.vocab_size)}};
 
   const auto& hidden_states_input_name = model.config_->model.decoder.inputs.hidden_states;
   if (!hidden_states_input_name.empty() && model.session_info_.HasInput(hidden_states_input_name)) {
-    hidden_states_input = std::make_unique<Tensor>(
-        model.p_device_inputs_, model.session_info_.GetInputDataType(hidden_states_input_name));
-    hidden_states_input->CreateTensor(
-        std::vector<int64_t>{static_cast<int64_t>(max_token_rows),
-                             static_cast<int64_t>(model.config_->model.decoder.hidden_size)},
-        /*make_static=*/true);
+    plan.buffers[GraphBufferPlan::kHiddenStatesInput] = {
+        model.session_info_.GetInputDataType(hidden_states_input_name), {rows, hidden_size}};
   }
 
   const auto& hidden_states_name = model.config_->model.decoder.outputs.hidden_states;
   if (model.config_->engine.hidden_states_output_required &&
       !hidden_states_name.empty() && model.session_info_.HasOutput(hidden_states_name)) {
-    hidden_states = std::make_unique<Tensor>(model.p_device_inputs_,
-                                             model.session_info_.GetOutputDataType(hidden_states_name));
-    hidden_states->CreateTensor(std::vector<int64_t>{static_cast<int64_t>(max_token_rows),
-                                                     static_cast<int64_t>(model.config_->model.decoder.hidden_size)},
-                                /*make_static=*/true);
+    plan.buffers[GraphBufferPlan::kHiddenStates] = {
+        model.session_info_.GetOutputDataType(hidden_states_name), {rows, hidden_size}};
   }
 
   const auto& aux_hidden_states_name = model.config_->model.decoder.outputs.aux_hidden_states;
@@ -204,12 +236,57 @@ VarlenGraphBuffers::VarlenGraphBuffers(DecoderOnly_Model& model, size_t position
     if (shape.size() != 2 || shape[1] <= 0) {
       throw std::runtime_error("aux_hidden_states must be 2-D with a static width.");
     }
-    aux_hidden_states = std::make_unique<Tensor>(
-        model.p_device_inputs_, model.session_info_.GetOutputDataType(aux_hidden_states_name));
-    aux_hidden_states->CreateTensor(
-        std::vector<int64_t>{static_cast<int64_t>(max_token_rows), shape[1]},
-        /*make_static=*/true);
+    plan.buffers[GraphBufferPlan::kAuxHiddenStates] = {
+        model.session_info_.GetOutputDataType(aux_hidden_states_name), {rows, shape[1]}};
   }
+  return plan;
+}
+
+}  // namespace
+
+size_t VarlenGraphBufferBytes(const Model& model, size_t position_planes,
+                              size_t max_query_tokens_per_request) {
+  const auto plan = PlanGraphBuffers(model, position_planes, max_query_tokens_per_request);
+  size_t bytes = 0;
+  for (const auto& buffer : plan.buffers) {
+    if (buffer.shape.empty()) {
+      continue;
+    }
+    const auto elements = static_cast<size_t>(ElementCountFromShape(buffer.shape));
+    const size_t element_size = Ort::SizeOf(buffer.type);
+    if (element_size != 0 && elements > (std::numeric_limits<size_t>::max() - bytes) / element_size) {
+      throw std::runtime_error("CUDA graph buffer bytes overflow size_t.");
+    }
+    bytes += elements * element_size;
+  }
+  return bytes;
+}
+
+VarlenGraphBuffers::VarlenGraphBuffers(DecoderOnly_Model& model, size_t position_planes,
+                                       size_t max_query_tokens_per_request) {
+  const auto plan = PlanGraphBuffers(model, position_planes, max_query_tokens_per_request);
+  max_batch_size = plan.max_batch_size;
+  max_query_tokens = plan.max_query_tokens;
+  max_token_rows = plan.max_token_rows;
+
+  auto make = [&](GraphBufferPlan::Slot slot) -> std::unique_ptr<Tensor> {
+    const auto& buffer = plan.buffers[slot];
+    if (buffer.shape.empty()) {
+      return nullptr;
+    }
+    auto tensor = std::make_unique<Tensor>(model.p_device_inputs_, buffer.type);
+    tensor->CreateTensor(buffer.shape, /*make_static=*/true);
+    return tensor;
+  };
+
+  input_ids = make(GraphBufferPlan::kInputIds);
+  cumulative_sequence_lengths = make(GraphBufferPlan::kCumulativeSequenceLengths);
+  past_sequence_lengths = make(GraphBufferPlan::kPastSequenceLengths);
+  position_ids = make(GraphBufferPlan::kPositionIds);
+  logits = make(GraphBufferPlan::kLogits);
+  hidden_states_input = make(GraphBufferPlan::kHiddenStatesInput);
+  hidden_states = make(GraphBufferPlan::kHiddenStates);
+  aux_hidden_states = make(GraphBufferPlan::kAuxHiddenStates);
 }
 
 std::optional<GraphAnnotationIds::Key> DecodeGraphKey(size_t batch_size, size_t tokens_per_request,
@@ -219,7 +296,9 @@ std::optional<GraphAnnotationIds::Key> DecodeGraphKey(size_t batch_size, size_t 
     return std::nullopt;
   }
   // Block table columns are bucketed to powers of two by the cache, so the exponent identifies the
-  // bucket and neighbouring widths share one graph.
+  // bucket. This is only injective because GetGraphBlockTableColumns can hand out nothing but
+  // {8, 16, 32, ...} below the configured maximum plus the maximum itself; two genuinely different
+  // widths sharing an id would replay launches recorded against the wrong block-table shape.
   size_t columns_bucket = 0;
   while ((size_t{1} << columns_bucket) < block_table_columns) {
     ++columns_bucket;
@@ -242,13 +321,7 @@ VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
       hidden_states_input_{
           execution_context ? execution_context->hidden_states_input : nullptr},
       position_planes_{position_planes} {
-  // Logits with a symbolic batch_size first dimension contain one row per request. Any other first
-  // dimension is treated as one row per packed token.
-  const auto logits_symbolic_shape =
-      model->session_info_.GetOutputSymbolicShape(model->config_->model.decoder.outputs.logits);
-  logits_are_per_token_ = logits_symbolic_shape.empty() ||
-                          logits_symbolic_shape[0] == nullptr ||
-                          std::string_view(logits_symbolic_shape[0]) != "batch_size";
+  logits_are_per_token_ = DecoderLogitsArePerToken(*model);
 
   PrepareInputIds(model, scheduled_requests);
   PreparePositionIds(model, scheduled_requests);

@@ -1,13 +1,17 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <algorithm>
 #include <array>
 #include <limits>
+#include <vector>
 
 #include <gtest/gtest.h>
 
 #include "engine/decoders/varlen_decoder_io.h"
 #include "engine/paged_key_value_cache.h"
+#include "engine/step_plan.h"
+#include "engine_test_helpers.h"
 
 namespace Generators {
 namespace test {
@@ -167,6 +171,40 @@ TEST(VarlenDecoderIOTest, GraphStepTakesItsQueryBoundFromTheStep) {
   EXPECT_EQ(metadata.max_kv_len_bound, 2048);
 }
 
+TEST(VarlenDecoderIOTest, GraphBufferBytesIgnoreAWidthTheModelCannotUse) {
+  // A model whose logits carry one row per request can never verify drafts, so a wider capture
+  // window must not enlarge the buffers the engine has to reserve for it.
+  auto model = LoadSyntheticPagedModel();
+  const size_t planes = PackedPositionIdPlanes(*model);
+
+  EXPECT_EQ(VarlenGraphBufferBytes(*model, planes, /*max_query_tokens_per_request=*/1),
+            VarlenGraphBufferBytes(*model, planes, kMaxDraftTokensPerStep + 1));
+}
+
+TEST(VarlenDecoderIOTest, GraphBufferBytesGrowWithTheVerifiedBlock) {
+  auto model = LoadSyntheticPagedPerTokenModel();
+  const size_t planes = PackedPositionIdPlanes(*model);
+
+  const size_t single_token = VarlenGraphBufferBytes(*model, planes, 1);
+  const size_t verified_block = VarlenGraphBufferBytes(*model, planes, kMaxDraftTokensPerStep + 1);
+
+  // The packed rows a verify step needs are what the engine has to take off the cache budget.
+  EXPECT_GT(verified_block, single_token);
+}
+
+TEST(VarlenDecoderIOTest, GraphBuffersRejectStepsWiderThanTheyWereSizedFor) {
+  auto model = std::dynamic_pointer_cast<DecoderOnly_Model>(LoadSyntheticPagedPerTokenModel());
+  ASSERT_TRUE(model);
+  const size_t max_batch_size = model->config_->engine.dynamic_batching->max_batch_size;
+  VarlenGraphBuffers buffers{*model, PackedPositionIdPlanes(*model), kMaxDraftTokensPerStep + 1};
+
+  EXPECT_TRUE(buffers.Fits(max_batch_size, 1));
+  EXPECT_TRUE(buffers.Fits(1, kMaxDraftTokensPerStep + 1));
+  // A step the buffers cannot hold runs eagerly rather than overflowing a static view mid-step.
+  EXPECT_FALSE(buffers.Fits(max_batch_size + 1, 1));
+  EXPECT_FALSE(buffers.Fits(1, kMaxDraftTokensPerStep + 2));
+}
+
 TEST(VarlenDecoderIOTest, GraphIdSeparatesEveryCapturedShape) {
   GraphAnnotationIds ids;
   const auto id = [&](size_t batch, size_t tokens, size_t columns, size_t binding) {
@@ -210,6 +248,8 @@ TEST(VarlenDecoderIOTest, GraphIdIsStableForARepeatedShape) {
 }
 
 TEST(VarlenDecoderIOTest, GraphKeyBucketsNeighbouringBlockTableWidths) {
+  // Widths inside one power-of-two bucket map to one key. A single cache never offers both 9 and 16
+  // columns, so this only ever merges a truncated final bucket with the boundary above it.
   const auto narrow = DecodeGraphKey(1, 1, /*block_table_columns=*/9, 0);
   const auto wide = DecodeGraphKey(1, 1, /*block_table_columns=*/16, 0);
   const auto next_bucket = DecodeGraphKey(1, 1, /*block_table_columns=*/17, 0);
@@ -235,6 +275,48 @@ TEST(VarlenDecoderIOTest, GraphIdStopsHandingOutIdsPastItsBudget) {
   // Past the budget a new shape runs eagerly instead of growing capture memory without bound.
   EXPECT_EQ(ids.Id(*DecodeGraphKey(GraphAnnotationIds::kMaxCapturedShapes + 1, 1, 8, 0)), -1);
   EXPECT_EQ(ids.size(), GraphAnnotationIds::kMaxCapturedShapes);
+}
+
+TEST(VarlenDecoderIOTest, GraphIdsNeverCollideAcrossLiveAllocators) {
+  // Two Engines may share one Model and therefore one session, and the session is what stores the
+  // captured graphs. A shared id would replay one decoder's graph against the other's buffers.
+  GraphAnnotationIds first;
+  GraphAnnotationIds second;
+  const auto key = DecodeGraphKey(/*batch_size=*/1, 1, 8, 0);
+  ASSERT_TRUE(key.has_value());
+
+  EXPECT_NE(first.Id(*key), second.Id(*key));
+}
+
+TEST(VarlenDecoderIOTest, GraphIdsAreNotReusedAfterAnAllocatorIsDestroyed) {
+  // Destroying an Engine and building another over the same Model must not hand the new decoder an
+  // id whose graph the session may still hold.
+  const auto key = DecodeGraphKey(/*batch_size=*/2, 1, 8, 0);
+  ASSERT_TRUE(key.has_value());
+  int retired = 0;
+  {
+    GraphAnnotationIds ids;
+    retired = ids.Id(*key);
+  }
+  ASSERT_GT(retired, 0);
+
+  GraphAnnotationIds fresh;
+  EXPECT_NE(fresh.Id(*key), retired);
+}
+
+TEST(VarlenDecoderIOTest, GraphIdsReportEveryAssignedIdForRelease) {
+  GraphAnnotationIds ids;
+  std::vector<int> handed_out;
+  for (size_t batch = 1; batch <= 3; ++batch) {
+    handed_out.push_back(ids.Id(*DecodeGraphKey(batch, 1, 8, 0)));
+  }
+
+  // The decoder releases these before freeing the buffers the graphs recorded, so missing one would
+  // leave the session replaying against freed memory.
+  auto assigned = ids.AssignedIds();
+  std::sort(assigned.begin(), assigned.end());
+  std::sort(handed_out.begin(), handed_out.end());
+  EXPECT_EQ(assigned, handed_out);
 }
 
 TEST(VarlenDecoderIOTest, PacksMetadataInOperatorContractOrder) {

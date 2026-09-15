@@ -427,10 +427,19 @@ bool FixedStateReservation::UsesDirectBindings() const {
 }
 
 size_t FixedStateReservation::BindingLayoutKey() const {
-  if (!storage_ || !storage_->uses_direct_bindings) {
+  if (!storage_) {
     return 0;
   }
-  return 1 + storage_->first_direct_slot * 2 + storage_->direct_active_bank;
+  // The compact state_update outputs are present in the bindings only on steps that capture them,
+  // so the two binding sets must never share a graph.
+  const size_t state_updates = storage_->captures_state_updates ? 1 : 0;
+  // Staged bindings always view the same pool-lifetime buffers, so only the direct case contributes
+  // an address. Interleaving keeps both halves distinct.
+  const size_t addresses =
+      storage_->uses_direct_bindings
+          ? 1 + storage_->first_direct_slot * 2 + storage_->direct_active_bank
+          : 0;
+  return 1 + state_updates + addresses * 2;
 }
 
 void FixedStateReservation::CommitPrefix(size_t row, size_t step_tokens, size_t kept_tokens) {

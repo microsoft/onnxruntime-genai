@@ -4,7 +4,6 @@
 #pragma once
 
 #include <array>
-#include <map>
 #include <optional>
 
 #include "decoder.h"
@@ -37,6 +36,29 @@ AttentionMetadataValues GetAttentionMetadataForGraphStep(
 std::array<int32_t, kAttentionMetadataElementCount> PackAttentionMetadata(
     const AttentionMetadataValues& metadata);
 
+// True when the decoder emits one logits row per packed token rather than one per request. Only
+// such a model can verify draft tokens, because a rejected draft is checked against the logits of
+// the row that precedes it.
+bool DecoderLogitsArePerToken(const Model& model);
+
+// 0 when the model takes no packed position_ids, 1 for [num_tokens], and 3 for the [3, num_tokens]
+// multimodal-rope layout.
+size_t PackedPositionIdPlanes(const Model& model);
+
+// Bytes VarlenGraphBuffers will hold for this model. The engine prices these buffers before the
+// paged cache probes free memory, because they are allocated afterwards out of the same pool.
+size_t VarlenGraphBufferBytes(const Model& model, size_t position_planes,
+                              size_t max_query_tokens_per_request);
+
+// Returns the annotation key for a captured decode step, or nullopt when the shape cannot be
+// captured. Every component changes something the captured launches bake in: tensor shapes come
+// from the batch and the per-request token count, grid dimensions from the block-table width, and
+// the device addresses of the fixed decoder state from its binding layout. `state_binding_key` is
+// zero for models without fixed decoder state.
+std::optional<GraphAnnotationIds::Key> DecodeGraphKey(size_t batch_size, size_t tokens_per_request,
+                                                      size_t block_table_columns,
+                                                      size_t state_binding_key);
+
 /**
  * @struct VarlenGraphBuffers
  * @brief Fixed-address input and output buffers for capturable decode steps.
@@ -50,26 +72,12 @@ std::array<int32_t, kAttentionMetadataElementCount> PackAttentionMetadata(
  * The buffers are sized once for the largest batch the engine will schedule; a given step views a
  * smaller prefix of them. Steps that differ in shape are captured under different annotation ids.
  */
-/**
- * @class GraphAnnotationIds
- * @brief Hands out one CUDA graph annotation id per distinct decode shape.
- *
- * Every component of the key changes something the captured launches bake in: tensor shapes come
- * from the batch and the per-request token count, grid dimensions from the block-table width, and
- * the device addresses of the fixed decoder state from its binding layout. Replaying a graph under
- * any other combination would use the wrong pointers or launch dimensions, so each combination gets
- * its own id.
- */
-// Returns the annotation key for a captured decode step, or nullopt when the shape cannot be
-// captured. `state_binding_key` is zero for models without fixed decoder state.
-std::optional<GraphAnnotationIds::Key> DecodeGraphKey(size_t batch_size, size_t tokens_per_request,
-                                                      size_t block_table_columns,
-                                                      size_t state_binding_key);
-
 struct VarlenGraphBuffers {
   // `position_planes` is 0 when the model takes no packed position_ids, 1 for [num_tokens], and 3
-  // for the [3, num_tokens] multimodal-rope layout.
-  VarlenGraphBuffers(DecoderOnly_Model& model, size_t position_planes);
+  // for the [3, num_tokens] multimodal-rope layout. `max_query_tokens` is the largest number of
+  // tokens one request may contribute to a step, which the engine caps at one plus the draft width
+  // its cache can roll back.
+  VarlenGraphBuffers(DecoderOnly_Model& model, size_t position_planes, size_t max_query_tokens);
 
   // Annotation id for a decode step of this shape, or -1 when it cannot be captured.
   int GraphId(size_t batch_size, size_t tokens_per_request, size_t block_table_columns,
