@@ -43,6 +43,9 @@ steps:
 # --- Feed isolation: pip → Lotus (authenticated) ----------------------------
 - template: utils/authenticate-pip-lotus.yml
 
+# --- Authenticate to the Lotus Maven feed -----------------------------------
+- template: utils/authenticate-maven.yml
+
 - script: python3 -m pip install --user --break-system-packages requests wheel
   displayName: 'Install build-time Python deps'
 

@@ -41,6 +41,9 @@ steps:
 
 - template: utils/authenticate-pip-lotus.yml
 
+# --- Authenticate to the Lotus Maven feed -----------------------------------
+- template: utils/authenticate-maven.yml
+
 - script: python -m pip install requests
   displayName: 'Install build-time Python deps'
 
