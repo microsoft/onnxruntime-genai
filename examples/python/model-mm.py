@@ -22,6 +22,10 @@ from common import (
     set_logger,
 )
 
+# Conversational-model fallback only. An omitted Nemotron Parse prompt uses
+# the native task controls: </s><s><predict_bbox><predict_classes><output_markdown>.
+DEFAULT_USER_PROMPT = "What color is the sky?"
+
 
 def main(args):
     if args.debug:
@@ -34,6 +38,15 @@ def main(args):
     # Create model
     config = get_config(args.model_path, args.execution_provider, args.ep_path)
     model = og.Model(config)
+    is_nemotron_parse = model.type == "nemotron_parse"
+    user_prompt = (
+        args.user_prompt
+        if args.user_prompt is not None
+        else DEFAULT_USER_PROMPT
+    )
+    # Nemotron Parse uses the fixed context length from its model package.
+    if not hasattr(args, "max_length") and not is_nemotron_parse:
+        args.max_length = 7680
     if args.verbose:
         print("Model loaded")
 
@@ -84,9 +97,18 @@ def main(args):
         audios, num_audios = get_user_audios(args.audio_paths, args.non_interactive)
 
         # Get user prompt
-        text = get_user_prompt(args.user_prompt, args.non_interactive)
+        if is_nemotron_parse and args.non_interactive and args.user_prompt is None:
+            # An empty prompt asks the native processor to use its default task.
+            text = ""
+        else:
+            text = get_user_prompt(user_prompt, args.non_interactive)
         if text == "quit()":
             break
+        if is_nemotron_parse:
+            if num_images != 1:
+                raise ValueError("Nemotron Parse requires exactly one image")
+            if num_audios:
+                raise ValueError("Nemotron Parse does not accept audio input")
 
         # Construct user content based on inputs
         user_content = get_user_content(model.type, num_images, num_audios, text)
@@ -119,18 +141,21 @@ def main(args):
             print("Generator created")
 
         # Apply chat template
-        try:
-            prompt = apply_chat_template(
-                model_path=args.model_path,
-                tokenizer=tokenizer,
-                messages=messages,
-                tools=tools,
-                add_generation_prompt=True,
-            )
-        except Exception as e:
-            if args.verbose:
-                print(f"Exception in apply_chat_template: {e}")
+        if is_nemotron_parse:
             prompt = text
+        else:
+            try:
+                prompt = apply_chat_template(
+                    model_path=args.model_path,
+                    tokenizer=tokenizer,
+                    messages=messages,
+                    tools=tools,
+                    add_generation_prompt=True,
+                )
+            except Exception as e:
+                if args.verbose:
+                    print(f"Exception in apply_chat_template: {e}")
+                prompt = text
         if args.verbose:
             print(f"Prompt: {prompt}")
 
@@ -226,8 +251,13 @@ if __name__ == "__main__":
         default="You are a helpful AI assistant.",
         help="System prompt to use for the model.",
     )
+    # None preserves omission so Nemotron Parse can select its native control-token task.
     parser.add_argument(
-        "-up", "--user_prompt", type=str, default="What color is the sky?", help="User prompt to use for the model."
+        "-up",
+        "--user_prompt",
+        type=str,
+        default=None,
+        help="User prompt to use for the model.",
     )
     parser.add_argument(
         "--image_paths",
@@ -258,5 +288,4 @@ if __name__ == "__main__":
     get_guidance_args(parser)
 
     args = parser.parse_args()
-    args.max_length = args.max_length if hasattr(args, "max_length") else 7680
     main(args)

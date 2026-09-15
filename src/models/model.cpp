@@ -34,6 +34,7 @@
 #include "whisper.h"
 #include "parakeet.h"
 #include "nemotron_speech.h"
+#include "nemotron_parse.h"
 #include "multi_modal.h"
 #include "lfm2.h"
 #include "marian.h"
@@ -129,7 +130,7 @@ void State::DumpOutputs() {
 }
 
 void State::Run(OrtSession& session, bool graph_capture_this_run, int graph_capture_length,
-                int graph_capture_variant) {
+                int graph_capture_variant, OrtIoBinding* io_binding) {
   DurationTrace trace{"State::Run"};
 
   if (params_->use_graph_capture) {
@@ -172,8 +173,12 @@ void State::Run(OrtSession& session, bool graph_capture_this_run, int graph_capt
     run_options_->AddConfigEntry("disable_synchronize_execution_providers", "1");
   }
 
-  session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
-              output_names_.data(), outputs_.data(), output_names_.size());
+  if (io_binding) {
+    session.Run(run_options_.get(), *io_binding);
+  } else {
+    session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
+                output_names_.data(), outputs_.data(), output_names_.size());
+  }
 
   extra_outputs_.RegisterOutputs();
 
@@ -948,8 +953,11 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<ParakeetTdtModel>(std::move(config), ort_env);
   if (ModelType::IsALM(config->model.type))
     return std::make_shared<WhisperModel>(std::move(config), ort_env);
-  if (ModelType::IsVLM(config->model.type))
+  if (ModelType::IsVLM(config->model.type)) {
+    if (config->model.type == "nemotron_parse")
+      return std::make_shared<NemotronParseModel>(std::move(config), ort_env);
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
+  }
   if (ModelType::IsPipe(config->model.type))
     return std::make_shared<DecoderOnlyPipelineModel>(std::move(config), ort_env);
   if (ModelType::IsMMM(config->model.type)) {
