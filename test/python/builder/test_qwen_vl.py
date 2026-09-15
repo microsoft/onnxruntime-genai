@@ -631,6 +631,7 @@ def test_qwen35_attention_output_proj_gates_before_base_projection(
     model.attention_attrs = {
         "op_type": "GroupQueryAttention",
         "gate_path": "gate",
+        "o_path": "/model/layers.3/attn/GroupQueryAttention/output_0",
     }
     calls = []
 

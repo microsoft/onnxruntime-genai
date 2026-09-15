@@ -272,6 +272,23 @@ def test_moe_quant_type_mxfp4_is_accepted(monkeypatch):
     assert options["moe_quant_type"] == "mxfp4"
 
 
+@pytest.mark.parametrize(
+    ("moe_quant_type", "expected_op_type", "expected_bits"),
+    [("none", "MoE", 0), ("int4", "QMoE", 4), ("int8", "QMoE", 8)],
+)
+def test_make_moe_init_selects_operator(moe_quant_type, expected_op_type, expected_bits):
+    model = Model.__new__(Model)
+    model.quant_config = types.SimpleNamespace(
+        moe=types.SimpleNamespace(type=moe_quant_type, weights_prepacked=-1)
+    )
+    model.moe_attrs = {}
+
+    model.make_moe_init()
+
+    assert model.moe_attrs["op_type"] == expected_op_type
+    assert model.moe_attrs["expert_weight_bits"] == expected_bits
+
+
 def test_moe_quant_type_rejects_invalid_value(monkeypatch):
     builder = _load_builder_cli_module(monkeypatch)
     with pytest.raises(ValueError, match="moe_quant_type must be one of"):

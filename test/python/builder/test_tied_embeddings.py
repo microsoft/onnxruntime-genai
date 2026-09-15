@@ -342,6 +342,7 @@ def test_prequantized_lm_head_check_is_skipped_when_weights_not_loaded():
 def _make_minimal_model_for_quantized_tied_embedding(*, algo_config, is_symmetric=True, quant_type=None):
     model = Model.__new__(Model)
     model.use_paged_attention = False
+    model.use_cpu_embedding_gather = True
     model.extra_options = {"algo_config": algo_config}
     model.quantization_algo, model.matmul_mixed_precision = desugar_algo_config(model.extra_options)
     model.hidden_size = 64
@@ -411,6 +412,15 @@ def _make_minimal_model_for_quantized_tied_embedding(*, algo_config, is_symmetri
             "lm_head.MatMul.weight_zp",
             True,
         ),
+        (
+            "k_quant_linear",
+            False,
+            None,
+            "lm_head.MatMul.weight_Q8G32",
+            "lm_head.MatMul.weight_scale",
+            "lm_head.MatMul.weight_zp",
+            True,
+        ),
     ],
 )
 def test_make_embedding_uses_algo_specific_lm_head_initializer_names_for_tied_quantized_embeddings(
@@ -442,6 +452,10 @@ def test_make_embedding_uses_algo_specific_lm_head_initializer_names_for_tied_qu
     else:
         assert "lm_head.MatMul.weight_zp" not in gather_inputs
         assert "lm_head.MatMul.weight_zero_points" not in gather_inputs
+    gather_kwargs = gather_calls[0][4]
+    if algo_config == "k_quant_linear":
+        assert gather_kwargs["bits"] == 8
+    assert gather_kwargs["metadata_props"] == {"layer_ann": "cpu_embedding"}
 
 
 def _make_minimal_model_for_embedding_branches(*, tied_quantized_embeddings=False, tied_unquantized_embeddings=False):
@@ -528,6 +542,45 @@ def test_make_embedding_non_tied_path_uses_embed_tokens_initializer_and_gather()
     assert gather_inputs[1] == "input_ids"
 
     assert model._transpose_calls == []
+
+
+def test_make_embedding_non_tied_int8_path_emits_cpu_gather_block_quantized():
+    model = _make_minimal_model_for_embedding_branches(
+        tied_quantized_embeddings=False,
+        tied_unquantized_embeddings=False,
+    )
+    model.use_cpu_embedding_gather = True
+    model.quant_attrs = {
+        "bits": 4,
+        "embedding_bits": 8,
+        "is_symmetric": True,
+        "matmul_block_size": 32,
+        "nodes_to_exclude": [],
+        "op_types_to_quantize": ("MatMul", "Gather"),
+    }
+    embedding = torch.tensor([[-1.0, 0.0, 0.5, 1.0] * 8], dtype=torch.float16)
+
+    model.make_embedding(embedding)
+
+    assert len(model._initializer_calls) == 2
+    quantized_weight, weight_name, weight_type = model._initializer_calls[0]
+    scales, scales_name, scales_type = model._initializer_calls[1]
+    assert weight_name == "model.embed_tokens.weight_Q8"
+    assert weight_type is None
+    assert quantized_weight.dtype == torch.uint8
+    assert quantized_weight.shape == embedding.shape
+    assert scales_name == "model.embed_tokens.weight_scales"
+    assert scales_type == ir.DataType.FLOAT16
+    assert scales.shape == (1, 1)
+
+    gather_calls = [call for call in model._node_calls if call[0] == "GatherBlockQuantized"]
+    assert len(gather_calls) == 1
+    gather = gather_calls[0][1]
+    assert gather["inputs"] == [weight_name, "input_ids", scales_name]
+    assert gather["bits"] == 8
+    assert gather["block_size"] == 32
+    assert gather["metadata_props"] == {"layer_ann": "cpu_embedding"}
+    assert not [call for call in model._node_calls if call[0] == "Gather"]
 
 
 def _make_minimal_model_for_int4_matmul():

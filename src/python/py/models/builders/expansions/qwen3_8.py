@@ -84,10 +84,17 @@ class Qwen38:
 
         outputs = []
         for label, cache in (("cos", cos_cache), ("sin", sin_cache)):
+            cast = f"{basename}/{label}/Cast"
+            self.make_cast(
+                cast,
+                cache,
+                self.io_dtype,
+                ["max_sequence_length", "rotary_width"],
+            )
             unsqueeze = f"{basename}/{label}/Unsqueeze"
             self.make_unsqueeze(
                 unsqueeze,
-                [cache, "/model/constants/INT64/[0]"],
+                [f"{cast}/output_0", "/model/constants/INT64/[0]"],
                 self.io_dtype,
                 [1, "max_sequence_length", "rotary_width"],
             )

@@ -261,6 +261,9 @@ class Model:
         # Store names of nodes already created
         self.node_names = set()
 
+        # Initializers that should be saved outside the model's default external data file.
+        self.external_data_files = {}
+
         # Mask-specific variables
         # TODO: Reconcile differences between `seqlens_k` and `key_total_seq_lens` in the GroupQueryAttention and SparseAttention implementations. Ideally the same subgraph can be shared for both.
         self.mask_attrs = {
@@ -459,6 +462,9 @@ class Model:
             "bits": 8 if self.onnx_dtype in {ir.DataType.INT8, ir.DataType.UINT8} else 4,  # Dense MatMulNBits weight bit-width (int4 vs int8 precision)
             "is_symmetric": self.quant_config.weights.symmetric,                           # Use symmetric zero-centered weight quantization
             "op_types_to_quantize": self.quant_config.weights.op_types,                    # Operator types eligible for weight quantization
+            "embedding_bits": resolve_dtype(self.extra_options["embedding_quant_type"]).bits
+            if self.extra_options.get("embedding_quant_type")
+            else (8 if self.onnx_dtype in {ir.DataType.INT8, ir.DataType.UINT8} else 4),
             "nodes_to_exclude": nodes_to_exclude,                                          # Node names excluded from weight quantization
             "algo_config": None,                                                           # Resolved in `make_quant_init` from the int4 method + int8 bit placement.
             "use_qdq": self.quant_config.runtime.use_qdq,                                  # Create QuantizeLinear/DequantizeLinear nodes for quantized weights instead of using MatMulNBits.
@@ -1035,7 +1041,7 @@ class Model:
 
         # MXFP4 and NVFP4 both resolve to the "mx" kind; the QMoE op tells them apart by dtype name
         # ("mxfp4" -> op "fp4", "nvfp4" -> op "nvfp4"). Integer dtypes use the plain "int" QMoE path.
-        self.moe_attrs["moe_op_type"] = "QMoE" if moe_descriptor.is_quantized else "MoE"
+        self.moe_attrs["op_type"] = "QMoE" if moe_descriptor.is_quantized else "MoE"
         if moe_descriptor.kind == "mx":
             self.moe_attrs["qmoe_quant_type"] = "nvfp4" if moe_descriptor.name == "nvfp4" else "fp4"
         else:
@@ -1850,15 +1856,21 @@ class Model:
         # Make sure all nodes are topologically sorted
         model.graph.sort()
 
-        # Save ONNX model with only one external data file and delete any existing duplicate copies
+        # Save ONNX model and delete any existing duplicate copies.
         out_path = os.path.join(out_dir, self.filename)
         data_path = os.path.join(out_dir, os.path.basename(out_path) + ".data")
+        separate_external_data = getattr(self, "external_data_files", {})
+        external_data_paths = {
+            os.path.join(out_dir, relative_path)
+            for relative_path in separate_external_data.values()
+        }
         if os.path.exists(out_path):
             print(f"Overwriting {out_path}")
             os.remove(out_path)
-        if os.path.exists(data_path):
-            print(f"Overwriting {data_path}")
-            os.remove(data_path)
+        for external_data_path in [data_path, *sorted(external_data_paths)]:
+            if os.path.exists(external_data_path):
+                print(f"Overwriting {external_data_path}")
+                os.remove(external_data_path)
 
         with tqdm() as pbar:
             total_set = False
@@ -1873,13 +1885,55 @@ class Model:
                 pbar.set_description(f"Saving {tensor.name} ({tensor.dtype.short_name()}, {tensor.shape})")
 
             Model.stamp_build_metadata(model)
-            ir.save(
-                model,
-                out_path,
-                external_data=os.path.basename(data_path),
-                size_threshold_bytes=0,
-                callback=callback,
-            )
+            if not separate_external_data:
+                ir.save(
+                    model,
+                    out_path,
+                    external_data=os.path.basename(data_path),
+                    size_threshold_bytes=0,
+                    callback=callback,
+                )
+            else:
+                initializers = [
+                    initializer
+                    for graph in model.graphs()
+                    for initializer in graph.initializers.values()
+                    if initializer.const_value is not None
+                ]
+                initializers_by_name = {initializer.name: initializer for initializer in initializers}
+                missing_initializers = separate_external_data.keys() - initializers_by_name.keys()
+                if missing_initializers:
+                    raise ValueError(
+                        f"Initializers configured for separate external data were not found: {sorted(missing_initializers)}"
+                    )
+
+                original_tensors = [initializer.const_value for initializer in initializers]
+                try:
+                    grouped_initializers = {}
+                    for initializer_name, relative_path in separate_external_data.items():
+                        grouped_initializers.setdefault(relative_path, []).append(initializers_by_name[initializer_name])
+
+                    separately_saved_names = set(separate_external_data)
+                    grouped_initializers[os.path.basename(data_path)] = [
+                        initializer
+                        for initializer in initializers
+                        if initializer.name not in separately_saved_names
+                    ]
+                    pbar.total = len(initializers)
+                    total_set = True
+                    for relative_path, initializer_group in grouped_initializers.items():
+                        external_tensors = ir.external_data.convert_tensors_to_external(
+                            [initializer.const_value for initializer in initializer_group],
+                            base_dir=out_dir,
+                            relative_path=relative_path,
+                            callback=callback,
+                        )
+                        for initializer, external_tensor in zip(initializer_group, external_tensors, strict=True):
+                            initializer.const_value = external_tensor
+                    ir.save(model, out_path)
+                finally:
+                    for initializer, tensor in zip(initializers, original_tensors, strict=True):
+                        initializer.const_value = tensor
 
         # Delete temporary cache dir if empty. The MTP head shares the main model's
         # cache dir and saves afterwards, so it may already be gone.
@@ -1941,7 +1995,17 @@ class Model:
         value.const_value = ir_tensor
         self.model.graph.register_initializer(value)
 
-    def make_node(self, op_type, inputs: Sequence[str], outputs: Sequence[str], *, name: str, domain="", **kwargs):
+    def make_node(
+        self,
+        op_type,
+        inputs: Sequence[str],
+        outputs: Sequence[str],
+        *,
+        name: str,
+        domain="",
+        metadata_props: dict[str, str] | None = None,
+        **kwargs,
+    ):
         assert name, "Node name must be provided"
         if name in self.node_names:
             # Note:
@@ -1963,7 +2027,15 @@ class Model:
         # Resolve values from names
         input_values = [self.make_value(name) for name in inputs]
         output_values = [self.make_value(name) for name in outputs]
-        node = ir.node(op_type, inputs=input_values, attributes=kwargs, domain=domain, outputs=output_values, name=name)
+        node = ir.node(
+            op_type,
+            inputs=input_values,
+            attributes=kwargs,
+            domain=domain,
+            outputs=output_values,
+            name=name,
+            metadata_props=metadata_props,
+        )
         self.model.graph.append(node)
         self.node_names.add(name)
 
@@ -2806,6 +2878,11 @@ class Model:
                 outputs=[gather_output],
                 name=gather_name,
                 domain="com.microsoft",
+                metadata_props=(
+                    {"layer_ann": "cpu_embedding"}
+                    if getattr(self, "use_cpu_embedding_gather", False)
+                    else None
+                ),
                 bits=bits,
                 block_size=int(self.quant_attrs["matmul_block_size"]),
                 gather_axis=0,
@@ -2828,13 +2905,63 @@ class Model:
             gather_output = f"{gather_name}/output_0"
             self.make_node("Gather", inputs=[transpose_output, self.input_names["input_ids"]], outputs=[gather_output], name=gather_name)
 
+        elif (
+            getattr(self, "quant_attrs", {}).get("embedding_bits") == 8
+            and "Gather" in self.quant_attrs["op_types_to_quantize"]
+            and f"{basename}/Gather" not in self.quant_attrs["nodes_to_exclude"]
+        ):
+            if not self.quant_attrs["is_symmetric"]:
+                raise NotImplementedError("Direct INT8 embedding quantization currently requires is_symmetric=true.")
+
+            block_size = int(self.quant_attrs["matmul_block_size"])
+            signed_weight, scales = CudaQuantizer.symmetric_blockwise_quantize(
+                embedding,
+                bits=8,
+                block_size=block_size,
+            )
+            quantized_weight = (signed_weight.to(torch.int16) + 128).to(torch.uint8)
+            weight_name = "model.embed_tokens.weight_Q8"
+            scales_name = "model.embed_tokens.weight_scales"
+            self.make_initializer(quantized_weight, weight_name)
+            self.make_initializer(scales, scales_name, to=self.io_dtype)
+
+            gather_name = f"{basename}/GatherBlockQuantized"
+            gather_output = f"{gather_name}/output_0"
+            self.make_node(
+                "GatherBlockQuantized",
+                inputs=[weight_name, self.input_names["input_ids"], scales_name],
+                outputs=[gather_output],
+                name=gather_name,
+                domain="com.microsoft",
+                metadata_props=(
+                    {"layer_ann": "cpu_embedding"}
+                    if getattr(self, "use_cpu_embedding_gather", False)
+                    else None
+                ),
+                bits=8,
+                block_size=block_size,
+                gather_axis=0,
+                quantize_axis=1,
+            )
+
         else:
             weight = "model.embed_tokens.weight"
             self.make_initializer(embedding, weight, to=self.io_dtype)
 
             gather_name = f"{basename}/Gather"
             gather_output = f"{gather_name}/output_0"
-            self.make_node("Gather", inputs=[weight, self.input_names["input_ids"]], outputs=[gather_output], name=gather_name)
+            metadata_props = (
+                {"layer_ann": "cpu_embedding"}
+                if getattr(self, "use_cpu_embedding_gather", False)
+                else None
+            )
+            self.make_node(
+                "Gather",
+                inputs=[weight, self.input_names["input_ids"]],
+                outputs=[gather_output],
+                name=gather_name,
+                metadata_props=metadata_props,
+            )
 
         self.make_value(gather_output, self.io_dtype, shape=self.make_hidden_state_shape())
 

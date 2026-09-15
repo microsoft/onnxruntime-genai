@@ -295,7 +295,6 @@ class Qwen35TextModel(Model):
         """Apply Qwen3.5's attention output gate before the shared output projection."""
         q_size = self.num_attn_heads * self.head_size
         output_shape = self.make_hidden_state_shape(last_dim=q_size)
-        attn_name = f"/model/layers.{layer_id}/attn/{self.attention_attrs['op_type']}"
         sigmoid_name = f"/model/layers.{layer_id}/attn/gate/Sigmoid"
         self.make_sigmoid(
             sigmoid_name,
@@ -307,7 +306,7 @@ class Qwen35TextModel(Model):
         gated_name = f"/model/layers.{layer_id}/attn/gate/Mul"
         self.make_mul(
             gated_name,
-            [f"{attn_name}/output_0", f"{sigmoid_name}/output_0"],
+            [self.attention_attrs["o_path"], f"{sigmoid_name}/output_0"],
             self.io_dtype,
             output_shape,
         )
@@ -901,12 +900,15 @@ class Qwen35MoETextModel(Qwen35TextModel):
 class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
     """Qwen4-Exp decoder builder using external token/vision embeddings."""
 
+    CPU_EMBEDDING_ANNOTATION = "cpu_embedding"
+
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         extra_options = copy.deepcopy(extra_options)
         text_only = extra_options.get("text_only", False)
         extra_options["exclude_embeds"] = not text_only
         extra_options.setdefault("filename", "model.onnx" if text_only else "text.onnx")
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.use_cpu_embedding_gather = text_only
         self.model.metadata_props["qwen4_exp.past_indexer_names"] = "past_key_values.%d.indexer_key"
         self.model.metadata_props["qwen4_exp.present_indexer_names"] = "present.%d.indexer_key"
         self.model.metadata_props["qwen4_exp.past_ple_token_names"] = "past.%d.ple_tokens"
@@ -997,6 +999,37 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         self.input_names["input_ids"] = "input_ids"
         self.input_types["input_ids"] = ir.DataType.INT64
         self.input_shapes["input_ids"] = ["num_tokens"] if self.use_paged_attention else ["batch_size", "sequence_length"]
+
+    @staticmethod
+    def prepare_engram_embedding(table):
+        weight = table.weight.detach().cpu()
+        scale = getattr(table, "weight_scale", None)
+        if weight.dtype == torch.float8_e4m3fn:
+            if scale is None:
+                scale = torch.ones(1, dtype=torch.float32)
+            else:
+                scale = torch.as_tensor(scale).detach().cpu()
+            if scale.numel() != 1:
+                raise ValueError(f"Engram FP8 weight scale must be scalar, got shape {tuple(scale.shape)}.")
+            return weight, scale
+
+        if not weight.is_floating_point():
+            raise ValueError(f"Engram embedding weight must be floating point, got {weight.dtype}.")
+        max_abs = weight.abs().max().float()
+        if not torch.isfinite(max_abs):
+            raise ValueError("Engram embedding weight contains non-finite values.")
+        fp8_max = torch.finfo(torch.float8_e4m3fn).max
+        scale = max_abs / fp8_max if max_abs > 0 else torch.ones((), dtype=torch.float32)
+        quantized_weight = (weight / scale).clamp(min=-fp8_max, max=fp8_max).to(torch.float8_e4m3fn)
+        return quantized_weight, scale.reshape(1)
+
+    def update_genai_config(self, genai_config):
+        super().update_genai_config(genai_config)
+        if self.ep != "cpu":
+            session_options = genai_config["model"]["decoder"]["session_options"]
+            session_options["session.layer_assignment_settings"] = (
+                f"cpu(={self.CPU_EMBEDDING_ANNOTATION})"
+            )
 
     def make_gated_rms_norm(self, name, root_input, scale, gate, shape, epsilon=1e-5):
         output = f"{name}/output_0"
@@ -1214,34 +1247,38 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
             if self.use_paged_attention
             else ["batch_size", "sequence_length", ngram_heads],
         )
-        table_name = f"model.layers.{layer_id}.ple.ngram_embedding.weight"
+        table_name = "model.ple.ngram_embedding.weight"
         table = embedding.ngram_embedding
-        quantized_table = hasattr(table, "weight_scale")
-        gather_op_type = "GatherBlockQuantized" if quantized_table else "Gather"
-        self.make_initializer(table.weight, table_name, to=None if quantized_table else self.io_dtype)
-        gather_name = f"{basename}/ngram_embedding/{gather_op_type}"
+        if table_name not in self.values:
+            quantized_weight, weight_scale = self.prepare_engram_embedding(table)
+            self.make_initializer(quantized_weight, table_name)
+            self.make_initializer(
+                weight_scale.reshape(1, 1),
+                "model.ple.ngram_embedding.weight_scale",
+                to=self.io_dtype,
+            )
+        if not hasattr(self, "external_data_files"):
+            self.external_data_files = {}
+        self.external_data_files[table_name] = "engram.data"
+        gather_name = f"{basename}/ngram_embedding/GatherBlockQuantized"
         head_dim = self.ple_embed_dim // ngram_heads
         gather_shape = (
             ["num_tokens", ngram_heads, head_dim]
             if self.use_paged_attention
             else ["batch_size", "sequence_length", ngram_heads, head_dim]
         )
-        if quantized_table:
-            scale_name = f"model.layers.{layer_id}.ple.ngram_embedding.weight_scale"
-            self.make_initializer(table.weight_scale.reshape(1, 1), scale_name, to=self.io_dtype)
-            self.make_node(
-                gather_op_type,
-                inputs=[table_name, ngram_ids, scale_name],
-                outputs=[f"{gather_name}/output_0"],
-                name=gather_name,
-                domain="com.microsoft",
-                gather_axis=0,
-                quantize_axis=1,
-                block_size=0,
-            )
-            self.make_value(f"{gather_name}/output_0", self.io_dtype, gather_shape)
-        else:
-            self.make_gather(gather_name, [table_name, ngram_ids], self.io_dtype, gather_shape, axis=0)
+        self.make_node(
+            "GatherBlockQuantized",
+            inputs=[table_name, ngram_ids, "model.ple.ngram_embedding.weight_scale"],
+            outputs=[f"{gather_name}/output_0"],
+            name=gather_name,
+            domain="com.microsoft",
+            metadata_props={"layer_ann": self.CPU_EMBEDDING_ANNOTATION},
+            gather_axis=0,
+            quantize_axis=1,
+            block_size=0,
+        )
+        self.make_value(f"{gather_name}/output_0", self.io_dtype, gather_shape)
         flatten_name = f"{basename}/ngram_embedding/Reshape"
         token_shape = ["num_tokens"] if self.use_paged_attention else ["batch_size", "sequence_length"]
         flatten_dims = [-1, self.ple_embed_dim] if self.use_paged_attention else [0, 0, self.ple_embed_dim]
@@ -1386,7 +1423,6 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
                 inputs=[f"{index_q_4d}/output_0", index_q_scale],
                 outputs=[f"{index_q_norm}/output_0"],
                 name=index_q_norm,
-                domain="com.microsoft",
                 axis=-1,
                 epsilon=self.layernorm_attrs["epsilon"],
                 stash_type=1,
@@ -1473,6 +1509,31 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
                 self.input_names["attention_metadata"],
             ]
         else:
+            attention_cos_cache = cos_cache
+            attention_sin_cache = sin_cache
+            if self.rope_attrs["cast"]["use_fp32"] and self.io_dtype != ir.DataType.FLOAT:
+                attention_cos_cache = f"{name}/cos_cache/Cast"
+                attention_sin_cache = f"{name}/sin_cache/Cast"
+                self.make_cast(
+                    attention_cos_cache,
+                    cos_cache,
+                    self.io_dtype,
+                    ["max_sequence_length", "rotary_width"],
+                )
+                self.make_cast(
+                    attention_sin_cache,
+                    sin_cache,
+                    self.io_dtype,
+                    ["max_sequence_length", "rotary_width"],
+                )
+            attention_position_ids = f"{name}/position_ids/Gather"
+            self.make_gather(
+                attention_position_ids,
+                [self.input_names["position_ids"], "/model/constants/INT64/0"],
+                ir.DataType.INT64,
+                ["batch_size", "sequence_length"],
+                axis=0,
+            )
             inputs = [
                 self.attention_attrs["q_path"],
                 self.attention_attrs["k_path"],
@@ -1485,9 +1546,9 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
                 selected_counts,
                 f"{self.mask_attrs['seqlens_k']}/output_0",
                 f"{self.mask_attrs['total_seq_len']}/output_0",
-                cos_cache,
-                sin_cache,
-                self.input_names["position_ids"],
+                f"{attention_cos_cache}/output_0",
+                f"{attention_sin_cache}/output_0",
+                f"{attention_position_ids}/output_0",
                 q_norm_weight,
                 k_norm_weight,
                 "",

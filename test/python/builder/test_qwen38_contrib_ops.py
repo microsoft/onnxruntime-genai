@@ -37,7 +37,7 @@ def make_sparse_model(paged):
     model.indexer_budget = 32
     model.indexer_compress_ratio = 4
     model.layernorm_attrs = {"epsilon": 1e-6}
-    model.rope_attrs = {"interleaved": 0}
+    model.rope_attrs = {"interleaved": 0, "cast": {"use_fp32": True}}
     model.attention_attrs = {
         "q_path": "query",
         "k_path": "key",
@@ -65,6 +65,8 @@ def make_sparse_model(paged):
             "make_matmul",
             "make_split",
             "make_reshape",
+            "make_cast",
+            "make_gather",
             "make_node",
             "make_value",
         ],
@@ -217,14 +219,28 @@ def test_dense_qwen_sparse_attention_emits_indexer_and_dynamic_executor():
     assert indexer["policy_mode"] == "qsa"
     assert indexer["token_budget"] == 32
     assert indexer["compress_ratio"] == 4
+    index_norm = next(kwargs for op_type, kwargs in nodes if op_type == "SimplifiedLayerNormalization")
+    assert "domain" not in index_norm
 
     attention = nodes[-1][1]
+    casts = [call for call in model.calls if call[0] == "make_cast"]
+    assert [call[1][1] for call in casts] == ["cos_cache", "sin_cache"]
+    assert all(call[1][2] == ir.DataType.FLOAT16 for call in casts)
     assert attention["inputs"][7:11] == [
         "/model/layers.3/attn/SparseAttentionIndexer/Flatten/output_0",
         "/model/layers.3/attn/SparseAttentionIndexer/CountsFlatten/output_0",
         "seqlens/output_0",
         "total_length/output_0",
     ]
+    assert attention["inputs"][11:13] == [
+        "/model/layers.3/attn/DynamicSparseAttention/cos_cache/Cast/output_0",
+        "/model/layers.3/attn/DynamicSparseAttention/sin_cache/Cast/output_0",
+    ]
+    assert attention["inputs"][13] == "/model/layers.3/attn/DynamicSparseAttention/position_ids/Gather/output_0"
+    position_gather = next(call for call in model.calls if call[0] == "make_gather")
+    assert position_gather[1][1] == ["position_ids", "/model/constants/INT64/0"]
+    assert position_gather[1][3] == ["batch_size", "sequence_length"]
+    assert position_gather[2]["axis"] == 0
     assert attention["outputs"] == [
         "/model/layers.3/attn/DynamicSparseAttention/output_0",
         "present_key",
@@ -258,8 +274,50 @@ def test_paged_qwen_sparse_attention_emits_shared_webgpu_schema():
     assert "causal" not in attention
 
 
+def test_qwen_attention_gate_uses_resolved_attention_output():
+    model = object.__new__(Qwen4ExpTextModel)
+    model.io_dtype = ir.DataType.FLOAT16
+    model.num_attn_heads = 8
+    model.head_size = 16
+    model.attention_attrs = {
+        "gate_path": "/model/layers.3/attn/gate/Reshape/output_0",
+        "o_path": "/model/layers.3/attn/DynamicSparseAttention/output_0",
+    }
+    model.layernorm_attrs = {"skip_input": ""}
+    model.make_hidden_state_shape = MethodType(
+        lambda self, last_dim: ["batch_size", "sequence_length", last_dim], model
+    )
+    record_calls(model, ["make_sigmoid", "make_mul", "make_matmul"])
+    attention = SimpleNamespace(o_proj=SimpleNamespace(bias=None))
+
+    model.make_attention_output_proj(3, attention, "hidden_states")
+
+    gate = next(call for call in model.calls if call[0] == "make_mul")
+    assert gate[1][1][0] == "/model/layers.3/attn/DynamicSparseAttention/output_0"
+
+
+def test_qsa_rotary_caches_cast_to_indexer_dtype():
+    model = object.__new__(Qwen4ExpTextModel)
+    model.io_dtype = ir.DataType.BFLOAT16
+    record_calls(model, ["make_shape", "make_gather", "make_concat", "make_cast", "make_unsqueeze", "make_tile"])
+
+    model.make_qsa_rotary_caches(3, "hidden_states", "cos_cache", "sin_cache")
+
+    casts = [call for call in model.calls if call[0] == "make_cast"]
+    assert [call[1][1] for call in casts] == ["cos_cache", "sin_cache"]
+    assert all(call[1][2] == ir.DataType.BFLOAT16 for call in casts)
+    cache_calls = [
+        call for call in model.calls
+        if call[0] in {"make_unsqueeze", "make_tile"}
+        and ("/rotary_cache/cos/" in call[1][0] or "/rotary_cache/sin/" in call[1][0])
+    ]
+    assert cache_calls
+    assert all(call[1][2] == ir.DataType.BFLOAT16 for call in cache_calls)
+
+
 def make_ple_model(paged, fp8_embedding=False):
     model = object.__new__(Qwen4ExpTextModel)
+    model.filename = "model.onnx"
     model.use_paged_attention = paged
     model.io_dtype = ir.DataType.FLOAT16
     model.hidden_size = 8
@@ -271,6 +329,7 @@ def make_ple_model(paged, fp8_embedding=False):
     model.ple_conv_kernel_size = 4
     model.ple_conv_dilation = 3
     model.layernorm_attrs = {"epsilon": 1e-5}
+    model.values = {}
     model.input_names = {
         "input_ids": "input_ids",
         "past.ple_tokens": {1: "past.1.ple_tokens"},
@@ -288,6 +347,7 @@ def make_ple_model(paged, fp8_embedding=False):
             "make_node",
             "make_value",
             "make_gather",
+            "make_unsqueeze",
             "make_reshape",
             "make_matmul",
             "make_add",
@@ -322,6 +382,10 @@ def test_dense_ple_emits_verified_contrib_schemas():
 
     model.make_ple(1, ple, "hidden_states")
 
+    assert model.external_data_files == {
+        "model.ple.ngram_embedding.weight": "engram.data"
+    }
+
     nodes = emitted_nodes(model)
     ngram = next(kwargs for op_type, kwargs in nodes if op_type == "NGramHashMapping")
     assert ngram["inputs"] == [
@@ -335,6 +399,22 @@ def test_dense_ple_emits_verified_contrib_schemas():
     assert ngram["max_ngram_size"] == 3
     assert ngram["n_head_per_ngram"] == 2
     assert ngram["pad_id"] == 1
+
+    gather = next(kwargs for op_type, kwargs in nodes if op_type == "GatherBlockQuantized")
+    assert gather["inputs"] == [
+        "model.ple.ngram_embedding.weight",
+        "/model/layers.1/ple/NGramHashMapping/output_0",
+        "model.ple.ngram_embedding.weight_scale",
+    ]
+    assert gather["domain"] == "com.microsoft"
+    assert gather["metadata_props"] == {"layer_ann": "cpu_embedding"}
+    assert not any(op_type == "GatherND" for op_type, _ in nodes)
+
+    embedding_initializers = {
+        args[1]: args[0] for method, args, _ in model.calls if method == "make_initializer"
+    }
+    assert embedding_initializers["model.ple.ngram_embedding.weight"].dtype == torch.float8_e4m3fn
+    assert embedding_initializers["model.ple.ngram_embedding.weight_scale"].shape == (1, 1)
 
     gate = next(kwargs for op_type, kwargs in nodes if op_type == "EngramGate")
     assert len(gate["inputs"]) == 6
@@ -372,3 +452,49 @@ def test_paged_fp8_ple_uses_varlen_hash_and_quantized_gather():
     assert gather["domain"] == "com.microsoft"
     assert gather["quantize_axis"] == 1
     assert gather["block_size"] == 0
+    assert gather["inputs"][:3] == [
+        "model.ple.ngram_embedding.weight",
+        "/model/layers.1/ple/VarlenNGramHashMapping/output_0",
+        "model.ple.ngram_embedding.weight_scale",
+    ]
+    assert gather["metadata_props"] == {"layer_ann": "cpu_embedding"}
+    assert model.external_data_files == {
+        "model.ple.ngram_embedding.weight": "engram.data"
+    }
+
+
+def test_ple_reuses_model_level_embedding_initializers():
+    model, ple = make_ple_model(paged=True, fp8_embedding=True)
+
+    model.make_ple(1, ple, "hidden_states")
+    model.values.update({
+        "model.ple.ngram_embedding.weight": object(),
+        "model.ple.ngram_embedding.weight_scale": object(),
+    })
+    model.input_names["past.ple_tokens"][2] = "past.2.ple_tokens"
+    model.input_names["past.ple_conv"][2] = "past.2.ple_conv"
+    model.output_names["present.ple_tokens"][2] = "present.2.ple_tokens"
+    model.output_names["present.ple_conv"][2] = "present.2.ple_conv"
+    model.make_ple(2, ple, "hidden_states")
+
+    shared_initializers = [
+        call[1][1]
+        for call in model.calls
+        if call[0] == "make_initializer" and call[1][1].startswith("model.ple.ngram_embedding")
+    ]
+    assert shared_initializers == [
+        "model.ple.ngram_embedding.weight",
+        "model.ple.ngram_embedding.weight_scale",
+    ]
+
+
+def test_qwen38_config_assigns_embedding_annotation_to_cpu():
+    model = object.__new__(Qwen4ExpTextModel)
+    model.ep = "cuda"
+    genai_config = {"model": {"decoder": {"session_options": {}}}}
+
+    model.update_genai_config(genai_config)
+
+    assert genai_config["model"]["decoder"]["session_options"]["session.layer_assignment_settings"] == (
+        "cpu(=cpu_embedding)"
+    )

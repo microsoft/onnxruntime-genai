@@ -386,6 +386,10 @@ def check_extra_options(
                 "shared_embeddings=true from --extra_options for this model."
             )
 
+    embedding_quant_type = extra_options.get("embedding_quant_type")
+    if embedding_quant_type is not None and embedding_quant_type not in {"int4", "int8"}:
+        raise ValueError("embedding_quant_type must be one of: int4, int8")
+
         op_types_to_quantize = extra_options.get("op_types_to_quantize", ())
 
         if "MatMul" not in op_types_to_quantize:
@@ -877,6 +881,8 @@ def get_args():
                     Shares quantized weights using GatherBlockQuantized and shares unquantized weights using Gather.
                     Only valid for models that tie their input and output embeddings (tie_word_embeddings=true in
                     config.json). Setting shared_embeddings=true for a model with tie_word_embeddings=false raises a ValueError.
+                embedding_quant_type = Quantization type for an independent token embedding: int4 or int8.
+                    This does not tie the token embedding to the LM head. Defaults to the model precision.
                 enable_cuda_graph = Enable CUDA graph capture during inference. Default is false.
                     If enabled, all nodes being placed on the CUDA EP is the prerequisite for the CUDA graph to be used correctly.
                     It is not guaranteed that CUDA graph be enabled as it depends on the model and the graph structure.
