@@ -24,7 +24,6 @@ Run with:
 import math
 import os
 
-import numpy as np
 import pytest
 
 # Defaults from LiquidAI/LFM2.5-VL-1.6B's config.json and processor_config.json.
