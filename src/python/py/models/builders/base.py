@@ -423,6 +423,9 @@ class Model:
             "swiglu_limit": swiglu_limit,                    # Value used to clamp results into a certain range in SwiGLU activation function
             "use_sparse_mixer": False,                       # Use SparseMixer in MoE layer (used in Phi-3.5 MoE)
             "router_sentinel": None,                         # Router score given to unselected experts when the model selects them in-graph (e.g. LFM2-MoE)
+            "num_dense_layers": 0,                           # Leading decoder layers that keep a dense MLP instead of a MoE layer (e.g. LFM2-MoE)
+            "use_expert_bias": False,                        # Select experts on scores + a load-balancing bias but mix with the unbiased scores (e.g. LFM2-MoE)
+            "routed_scaling_factor": 1.0,                    # Multiplier applied to the routed experts' output (e.g. LFM2-MoE)
             "weights_prepacked": 0,                          # CUDA QMoE layout: -1=auto/omit, 0=raw, 1=CUTLASS-prepacked
             "quant_type": "int",                             # QMoE quantization type: "int" (INT4/INT8), "fp4" (MXFP4), or "nvfp4" (NVFP4).
             "global_scale_names": {},                        # Per-layer QMoE global-scale initializer names, when required.
@@ -2241,6 +2244,21 @@ class Model:
     def make_log(self, name, root_input, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Log", inputs=[root_input], outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+
+    def make_exp(self, name, root_input, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("Exp", inputs=[root_input], outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+
+    def make_neg(self, name, root_input, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("Neg", inputs=[root_input], outputs=[output], name=name)
+        self.make_value(output, dtype, shape=shape)
+
+    def make_reciprocal(self, name, root_input, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("Reciprocal", inputs=[root_input], outputs=[output], name=name)
         self.make_value(output, dtype, shape=shape)
 
     def make_cos(self, name, root_input, dtype, shape):
@@ -5078,9 +5096,13 @@ class Model:
     def make_moe_router(self, layer_id, moe, root_input):
         raise NotImplementedError("MoE router construction must be implemented by the model class.")
 
-    def make_moe_subgraph(self, layer_id, moe, root_input, router_probs=None):
-        # `router_probs` is whatever the model's `make_moe_router` returned; models whose router output
-        # is addressed by name (e.g. `.../router/Reshape/output_0`) leave it as None.
+    def make_moe_router_shape(self, last_dim=None):
+        """Shape of a per-token router tensor: one row per token, `num_experts` (or `last_dim`) columns."""
+        return ["batch_size * sequence_length", self.moe_attrs["num_experts"] if last_dim is None else last_dim]
+
+    def make_moe_subgraph(self, layer_id, moe, root_input, router_probs=None, output_scale=None):
+        # `router_probs` and `output_scale` are whatever the model's `make_moe_router` returned; models
+        # whose router output is addressed by name (e.g. `.../router/Reshape/output_0`) leave them as None.
         raise NotImplementedError("MoE subgraph construction must be implemented by the model class.")
 
     def make_moe_op(self, name, **kwargs):

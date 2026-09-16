@@ -4,9 +4,10 @@
 """Unit tests for the LFM2-MoE model builder.
 
 The LFM2-MoE router selects experts by top-k of ``sigmoid(logits) + expert_bias`` but mixes them
-with the unbiased ``sigmoid(logits)`` (renormalized). The fused MoE/QMoE op only knows
-softmax-over-top-k routing, so the builder performs the selection in the graph and feeds the op
-``log(sigmoid)`` at the selected experts and a sentinel elsewhere. These tests pin that graph.
+with ``sigmoid_i / (sum_selected + 1e-6)``. The fused MoE/QMoE op only knows softmax-over-top-k
+routing, so the builder performs the selection in the graph, feeds the op ``log(sigmoid)`` at the
+selected experts and a sentinel elsewhere, and scales the op output by
+``sum_selected / (sum_selected + 1e-6)``. These tests pin that graph and execute it.
 """
 
 from __future__ import annotations
@@ -16,6 +17,8 @@ import sys
 import types
 from pathlib import Path
 
+import numpy as np
+import onnxruntime as ort
 import pytest
 import torch
 
@@ -43,6 +46,27 @@ LFM2Model = lfm2_module.LFM2Model
 LFM2MoEModel = lfm2_module.LFM2MoEModel
 
 
+def _moe_attrs(num_experts, top_k, use_expert_bias, routed_scaling_factor):
+    return {
+        "op_type": "MoE",
+        "num_experts": num_experts,
+        "top_k": top_k,
+        "activation_alpha": 1.0,
+        "activation_beta": 0.0,
+        "activation_type": "swiglu",
+        "normalize_routing_weights": True,
+        "swiglu_fusion": 1,
+        "swiglu_limit": None,
+        "use_sparse_mixer": False,
+        "router_sentinel": -10000.0,
+        "num_dense_layers": 0,
+        "use_expert_bias": use_expert_bias,
+        "routed_scaling_factor": routed_scaling_factor,
+        "zero_point_names": {},
+        "global_scale_names": {},
+    }
+
+
 def _recording_model(io_dtype, *, num_experts=8, top_k=2, use_expert_bias=True, routed_scaling_factor=1.0):
     """LFM2MoEModel whose graph emitters record instead of building an onnx_ir graph."""
     model = LFM2MoEModel.__new__(LFM2MoEModel)
@@ -50,14 +74,8 @@ def _recording_model(io_dtype, *, num_experts=8, top_k=2, use_expert_bias=True, 
     model.ep = "cpu"
     model.hidden_size = 64
     model.moe_intermediate_size = 32
-    model.use_expert_bias = use_expert_bias
-    model.routed_scaling_factor = routed_scaling_factor
-    model.moe_attrs = {
-        "op_type": "MoE",
-        "num_experts": num_experts,
-        "top_k": top_k,
-        "router_sentinel": -10000.0,
-    }
+    model.use_paged_attention = False
+    model.moe_attrs = _moe_attrs(num_experts, top_k, use_expert_bias, routed_scaling_factor)
     model.layernorm_attrs = {}
     model.quant_attrs = {"nodes_to_exclude": []}
     model.nodes = []
@@ -85,7 +103,7 @@ def _moe_module(num_experts=8, hidden=64, inter=32):
 
 def test_lfm2_moe_routes_dense_and_moe_layers(monkeypatch):
     model = LFM2MoEModel.__new__(LFM2MoEModel)
-    model.num_dense_layers = 2
+    model.moe_attrs = {"num_dense_layers": 2}
     calls = []
     monkeypatch.setattr(model, "make_mlp", lambda layer_id, mlp, root_input: calls.append(("mlp", layer_id, mlp)))
     monkeypatch.setattr(model, "make_moe", lambda layer_id, moe, root_input: calls.append(("moe", layer_id, moe)))
@@ -119,7 +137,7 @@ def test_lfm2_feed_forward_accepts_both_loader_layouts(monkeypatch):
 
 def test_lfm2_moe_feed_forward_accepts_quantized_layer_layout(monkeypatch):
     model = LFM2MoEModel.__new__(LFM2MoEModel)
-    model.num_dense_layers = 0
+    model.moe_attrs = {"num_dense_layers": 0}
     moe = object()
     seen = []
     monkeypatch.setattr(model, "make_moe", lambda layer_id, module, root_input: seen.append(module))
@@ -137,21 +155,38 @@ def test_lfm2_dense_model_still_owns_the_mlp(monkeypatch):
 
 
 @pytest.mark.parametrize("io_dtype", [ir.DataType.FLOAT, ir.DataType.FLOAT16])
-def test_lfm2_moe_router_selects_with_bias_and_mixes_without(io_dtype):
-    model = _recording_model(io_dtype)
+@pytest.mark.parametrize("routed_scaling_factor", [1.0, 2.5])
+def test_lfm2_moe_router_selects_with_bias_and_mixes_without(io_dtype, routed_scaling_factor):
+    model = _recording_model(io_dtype, routed_scaling_factor=routed_scaling_factor)
     moe = _moe_module()
-    router_probs = model.make_moe_router(3, moe, "hidden")
+    router_probs, output_scale = model.make_moe_router(3, moe, "hidden")
 
     ops = [n.op_type for n in model.nodes]
     casts = ["Cast"] if io_dtype != ir.DataType.FLOAT else []
+    scaling = ["Mul"] if routed_scaling_factor != 1.0 else []
     assert ops == [
         "MatMul",
         "Reshape",
         *casts,
-        "Sigmoid",
+        # sigmoid spelled out: ORT's Sigmoid kernel loses all relative precision below ~1e-6
+        "Neg",
+        "Exp",
+        "Add",
+        "Reciprocal",
         "Add",
         "TopK",
         "GatherElements",
+        # output scale: sum_selected / (sum_selected + 1e-6) [* routed_scaling_factor], reshaped to 3D
+        "ReduceSum",
+        "Add",
+        "Div",
+        *scaling,
+        "Shape",
+        "Slice",
+        "Concat",
+        "Reshape",
+        *casts,
+        # masked router scores
         "Clip",
         "Log",
         "Shape",
@@ -159,56 +194,82 @@ def test_lfm2_moe_router_selects_with_bias_and_mixes_without(io_dtype):
         "ScatterElements",
         *casts,
     ]
-    by_name = {n.name.rsplit("/", 1)[-1]: n for n in model.nodes}
     r = "/model/layers.3/moe/router"
+    by_name = {n.name[len(r) + 1 :]: n for n in model.nodes}
+
+    # Scores: 1 / (1 + exp(-logits)) in fp32.
+    logits = f"{r}/Cast/output_0" if casts else f"{r}/Reshape/output_0"
+    assert by_name["sigmoid/Neg"].inputs == [logits]
+    assert by_name["sigmoid/Exp"].inputs == [f"{r}/sigmoid/Neg/output_0"]
+    assert by_name["sigmoid/Add"].inputs == [f"{r}/sigmoid/Exp/output_0", "/model/constants/FLOAT/1.0"]
+    assert by_name["sigmoid/Reciprocal"].inputs == [f"{r}/sigmoid/Add/output_0"]
+    scores = f"{r}/sigmoid/Reciprocal/output_0"
 
     # Selection: TopK over sigmoid + expert_bias (fp32).
-    assert by_name["Add"].inputs == [f"{r}/Sigmoid/output_0", "model.layers.3.moe.expert_bias"]
+    assert by_name["Add"].inputs == [scores, "model.layers.3.moe.expert_bias"]
     assert model.initializers["model.layers.3.moe.expert_bias"][1] == ir.DataType.FLOAT
     assert by_name["TopK"].inputs == [f"{r}/Add/output_0", "/model/constants/INT64/[2]"]
     assert by_name["TopK"].attrs == {"axis": -1, "largest": True}
     indices = f"{r}/TopK/output_1"
 
-    # Mixing: sigmoid (no bias) gathered at the selected experts, clamped, logged, scattered over a
-    # sentinel row. Gather runs before Log so Log only touches top_k entries, and the clamp keeps a
-    # flushed-to-zero sigmoid from producing -inf below the sentinel.
-    assert by_name["GatherElements"].inputs == [f"{r}/Sigmoid/output_0", indices]
+    # The unbiased selected scores feed both the mass factor and the mask.
+    assert by_name["GatherElements"].inputs == [scores, indices]
     assert by_name["GatherElements"].attrs == {"axis": 1}
-    assert by_name["Clip"].inputs == [f"{r}/GatherElements/output_0", "/model/constants/FLOAT/1e-30", ""]
+    selected = f"{r}/GatherElements/output_0"
+
+    # Mass factor: the sum is taken before the clamp so flushed-to-zero scores give a zero factor.
+    assert by_name["scale/ReduceSum"].inputs == [selected, "/model/constants/INT64/[-1]"]
+    assert by_name["scale/ReduceSum"].attrs == {"keepdims": True}
+    assert by_name["scale/Add"].inputs == [f"{r}/scale/ReduceSum/output_0", "/model/constants/FLOAT/1e-06"]
+    assert by_name["scale/Div"].inputs == [f"{r}/scale/ReduceSum/output_0", f"{r}/scale/Add/output_0"]
+    scale = f"{r}/scale/Div/output_0"
+    if scaling:
+        assert by_name["scale/Mul"].inputs == [scale, f"/model/constants/FLOAT/{routed_scaling_factor}"]
+        scale = f"{r}/scale/Mul/output_0"
+    assert by_name["scale/Shape"].inputs == ["hidden"]
+    assert by_name["scale/Slice"].inputs == [
+        f"{r}/scale/Shape/output_0",
+        "/model/constants/INT64/[0]",
+        "/model/constants/INT64/[-1]",
+    ]
+    assert by_name["scale/Concat"].inputs == [f"{r}/scale/Slice/output_0", "/model/constants/INT64/[1]"]
+    assert by_name["scale/Reshape"].inputs == [scale, f"{r}/scale/Concat/output_0"]
+    expected_scale = f"{r}/scale/Cast/output_0" if casts else f"{r}/scale/Reshape/output_0"
+    assert output_scale == expected_scale
+
+    # Mask: clamp, log, scatter over a sentinel row. The clamp keeps a flushed-to-zero sigmoid from
+    # producing -inf below the sentinel, which would let the op's own top-k pick another expert.
+    assert by_name["Clip"].inputs == [selected, "/model/constants/FLOAT/1e-30", ""]
     assert by_name["Log"].inputs == [f"{r}/Clip/output_0"]
     sentinel = by_name["ConstantOfShape"].attrs["value"]
     assert sentinel.dtype == ir.DataType.FLOAT
     router_sentinel = model.moe_attrs["router_sentinel"]
     assert sentinel.numpy().tolist() == [router_sentinel]
     assert router_sentinel < -1000 and torch.finfo(torch.float16).min < router_sentinel
-    assert by_name["ScatterElements"].inputs == [
-        f"{r}/ConstantOfShape/output_0",
-        indices,
-        f"{r}/Log/output_0",
-    ]
+    assert torch.log(torch.tensor(1e-30)).item() > router_sentinel
+    assert by_name["ScatterElements"].inputs == [f"{r}/ConstantOfShape/output_0", indices, f"{r}/Log/output_0"]
     assert by_name["ScatterElements"].attrs == {"axis": 1}
 
     expected_probs = f"{r}/Cast_1/output_0" if casts else f"{r}/ScatterElements/output_0"
     assert router_probs == expected_probs
     if casts:
         assert by_name["Cast"].attrs == {"to": ir.DataType.FLOAT}
+        assert by_name["scale/Cast"].attrs == {"to": io_dtype}
         assert by_name["Cast_1"].attrs == {"to": io_dtype}
-    # The clamp floor is well above the sentinel, so a clamped score can never lose the op's own top-k.
-    assert torch.log(torch.tensor(1e-30)).item() > model.moe_attrs["router_sentinel"]
 
 
-def test_lfm2_moe_threads_router_probs_from_router_to_subgraph(monkeypatch):
+def test_lfm2_moe_threads_router_outputs_to_subgraph(monkeypatch):
     model = LFM2MoEModel.__new__(LFM2MoEModel)
     calls = []
     monkeypatch.setattr(model, "make_moe_preprocessing", lambda *args: calls.append(("pre", args)))
-    monkeypatch.setattr(model, "make_moe_router", lambda *args: (calls.append(("router", args)), "probs")[1])
+    monkeypatch.setattr(model, "make_moe_router", lambda *args: (calls.append(("router", args)), ("probs", "scale"))[1])
     monkeypatch.setattr(model, "make_moe_subgraph", lambda *args: calls.append(("subgraph", args)))
     moe = object()
     model.make_moe(5, moe, "hidden")
     assert calls == [
         ("pre", (5, moe, "hidden")),
         ("router", (5, moe, "hidden")),
-        ("subgraph", (5, moe, "hidden", "probs")),
+        ("subgraph", (5, moe, "hidden", "probs", "scale")),
     ]
 
 
@@ -217,9 +278,9 @@ def test_lfm2_moe_router_without_expert_bias_selects_on_sigmoid():
     model.make_moe_router(3, _moe_module(), "hidden")
 
     ops = [n.op_type for n in model.nodes]
-    assert "Add" not in ops
+    assert ops.count("Add") == 2  # the sigmoid's 1 + exp(-x) and the mass factor's epsilon, no bias add
     topk = next(n for n in model.nodes if n.op_type == "TopK")
-    assert topk.inputs[0] == "/model/layers.3/moe/router/Sigmoid/output_0"
+    assert topk.inputs[0] == "/model/layers.3/moe/router/sigmoid/Reciprocal/output_0"
     assert "model.layers.3.moe.expert_bias" not in model.initializers
 
 
@@ -268,14 +329,21 @@ def test_make_moe_expert_names_follows_op_type(op_type):
     }
 
 
+def test_make_moe_router_shape_is_per_token():
+    model = Model.__new__(Model)
+    model.moe_attrs = {"num_experts": 8}
+    assert model.make_moe_router_shape() == ["batch_size * sequence_length", 8]
+    assert model.make_moe_router_shape(last_dim=2) == ["batch_size * sequence_length", 2]
+
+
 @pytest.mark.parametrize("op_type", ["MoE", "QMoE"])
-def test_lfm2_moe_subgraph_feeds_masked_router_probs(monkeypatch, op_type):
+def test_lfm2_moe_subgraph_feeds_masked_router_probs_and_scales_the_output(monkeypatch, op_type):
     model = _recording_model(ir.DataType.FLOAT16)
     model.moe_attrs["op_type"] = op_type
     captured = {}
     monkeypatch.setattr(model, "make_moe_op", lambda name, **kwargs: captured.update(name=name, **kwargs))
 
-    model.make_moe_subgraph(4, _moe_module(), "hidden", "masked_probs")
+    model.make_moe_subgraph(4, _moe_module(), "hidden", "masked_probs", "output_scale")
 
     weight = "qweight" if op_type == "QMoE" else "weight"
     scales = ".scales" if op_type == "QMoE" else ""
@@ -288,28 +356,101 @@ def test_lfm2_moe_subgraph_feeds_masked_router_probs(monkeypatch, op_type):
     assert captured["scales2"] == (f"model.layers.4.moe.experts.down_proj{scales}" if scales else "")
     assert captured["bias1"] == "model.layers.4.moe.experts.gate_up_proj.bias"
     assert captured["bias2"] == "model.layers.4.moe.experts.down_proj.bias"
-    assert model.nodes == []
-    assert model.layernorm_attrs["skip_input"] == f"/model/layers.4/moe/{op_type}/output_0"
+
+    (mul,) = model.nodes
+    assert mul.op_type == "Mul"
+    assert mul.inputs == [f"/model/layers.4/moe/{op_type}/output_0", "output_scale"]
+    assert model.layernorm_attrs["skip_input"] == "/model/layers.4/moe/Mul/output_0"
 
 
-def test_lfm2_moe_subgraph_requires_router_probs(monkeypatch):
+def test_lfm2_moe_subgraph_requires_router_outputs(monkeypatch):
     model = _recording_model(ir.DataType.FLOAT16)
     monkeypatch.setattr(model, "make_moe_op", lambda name, **kwargs: None)
     with pytest.raises(ValueError, match="make_moe_router"):
         model.make_moe_subgraph(4, _moe_module(), "hidden")
+    with pytest.raises(ValueError, match="make_moe_router"):
+        model.make_moe_subgraph(4, _moe_module(), "hidden", "masked_probs")
 
 
-def test_lfm2_moe_subgraph_applies_routed_scaling_factor(monkeypatch):
-    model = _recording_model(ir.DataType.FLOAT16, routed_scaling_factor=2.5)
-    monkeypatch.setattr(model, "make_moe_op", lambda name, **kwargs: None)
-    monkeypatch.setattr(model, "make_hidden_state_shape", lambda **kwargs: ["batch_size", "sequence_length", 64])
+def _executable_model(num_experts, top_k, hidden, inter, routed_scaling_factor=1.0):
+    """LFM2MoEModel with the real emitters, writing into an onnx_ir graph that ORT can execute."""
+    model = LFM2MoEModel.__new__(LFM2MoEModel)
+    model.io_dtype = ir.DataType.FLOAT
+    model.onnx_dtype = ir.DataType.FLOAT
+    model.ep = "cpu"
+    model.hidden_size = hidden
+    model.moe_intermediate_size = inter
+    model.use_paged_attention = False
+    model.moe_attrs = _moe_attrs(num_experts, top_k, True, routed_scaling_factor)
+    model.layernorm_attrs = {}
+    model.quant_attrs = {"nodes_to_exclude": []}
+    model.values = {}
+    model.node_names = set()
+    graph = ir.Graph(inputs=(), outputs=(), nodes=(), opset_imports={"": 21, "com.microsoft": 1}, name="lfm2_moe")
+    model.model = ir.Model(graph, ir_version=10)
+    graph.inputs.append(model.make_value("hidden", ir.DataType.FLOAT, ["batch_size", "sequence_length", hidden]))
+    return model, graph
 
-    model.make_moe_subgraph(4, _moe_module(), "hidden", "masked_probs")
 
-    (mul,) = model.nodes
-    assert mul.op_type == "Mul"
-    assert mul.inputs == ["/model/layers.4/moe/MoE/output_0", "/model/constants/FLOAT16/2.5"]
-    assert model.layernorm_attrs["skip_input"] == "/model/layers.4/moe/Mul/output_0"
+def _hf_reference(hidden_states, moe, top_k, routed_scaling_factor):
+    """Mirror of transformers' Lfm2MoeSparseMoeBlock (route_tokens_to_experts + experts)."""
+    x = hidden_states.reshape(-1, hidden_states.shape[-1])
+    logits = x @ moe.gate.weight.T
+    scores = torch.sigmoid(logits)
+    _, selected = torch.topk(scores + moe.expert_bias, k=top_k, dim=-1)
+    weights = torch.gather(scores, 1, selected)
+    weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-6)
+    out = torch.zeros_like(x)
+    inter = moe.experts.down_proj.shape[-1]
+    for token in range(x.shape[0]):
+        for slot in range(top_k):
+            expert = selected[token, slot]
+            gate_up = moe.experts.gate_up_proj[expert] @ x[token]
+            act = torch.nn.functional.silu(gate_up[:inter]) * gate_up[inter:]
+            out[token] += weights[token, slot] * (moe.experts.down_proj[expert] @ act)
+    return (out * routed_scaling_factor).reshape(hidden_states.shape)
+
+
+@pytest.mark.parametrize("routed_scaling_factor", [1.0, 2.5])
+def test_lfm2_moe_executed_graph_matches_hf_routing(tmp_path, routed_scaling_factor):
+    """Run the emitted MoE layer in ORT and compare with HF's routing math, including the cases where
+    the fused op's forced sum-to-one normalization differs from HF's `sum + 1e-6`."""
+    num_experts, top_k, hidden, inter = 8, 4, 32, 64
+    generator = torch.Generator().manual_seed(7)
+    model, graph = _executable_model(num_experts, top_k, hidden, inter, routed_scaling_factor)
+
+    # Token t reads router logits from column t of the gate weight (one-hot hidden states below).
+    gate_weight = torch.zeros(num_experts, hidden)
+    gate_weight[:, 0] = torch.tensor([1.5, -0.5, 0.3, 2.0, -1.0, 0.8, -2.0, 0.1])  # ordinary scores
+    gate_weight[:, 1] = torch.tensor([-16.0, -16.0, -16.0, -16.0, -10.0, -11.0, -12.0, -13.0])  # tiny selected
+    gate_weight[:, 2] = torch.tensor([-110.0, -111.0, -112.0, -113.0, -10.0, -11.0, -12.0, -13.0])  # flushed
+    expert_bias = torch.tensor([2.0, 2.0, 2.0, 2.0, 0.0, 0.0, 0.0, 0.0])
+    moe = types.SimpleNamespace(
+        gate=types.SimpleNamespace(weight=gate_weight),
+        experts=types.SimpleNamespace(
+            gate_up_proj=torch.randn(num_experts, 2 * inter, hidden, generator=generator) / hidden**0.5,
+            down_proj=torch.randn(num_experts, hidden, inter, generator=generator) / inter**0.5,
+        ),
+        expert_bias=expert_bias,
+    )
+    model.make_moe(0, moe, "hidden")
+    graph.outputs.append(model.values[model.layernorm_attrs["skip_input"]])
+    model_path = tmp_path / "lfm2_moe.onnx"
+    ir.save(model.model, model_path)
+    session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+
+    hidden_states = torch.zeros(1, 3, hidden)
+    for token in range(3):
+        hidden_states[0, token, token] = 1.0
+    (actual,) = session.run(None, {"hidden": hidden_states.numpy()})
+    expected = _hf_reference(hidden_states, moe, top_k, routed_scaling_factor).numpy()
+
+    # Token 1: the selected sigmoids sum to ~4.5e-7, so HF's weights sum to ~0.31 and not 1.
+    # Token 2: the selected sigmoids flush to 0 in fp32, so HF returns exactly zero.
+    assert 0.2 < np.linalg.norm(expected[0, 1]) / np.linalg.norm(actual[0, 1] / 0.31) < 1.6
+    assert np.all(expected[0, 2] == 0)
+    np.testing.assert_allclose(actual, expected, rtol=1e-4, atol=1e-6)
+    assert np.all(actual[0, 2] == 0)
 
 
 def _stub_base_init(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
@@ -361,7 +502,10 @@ def test_lfm2_moe_init_configures_fused_swiglu(monkeypatch):
     assert model.moe_attrs["swiglu_fusion"] == 1
     assert model.moe_attrs["normalize_routing_weights"] is True
     assert model.moe_attrs["router_sentinel"] == -10000.0
-    assert (model.num_dense_layers, model.moe_intermediate_size) == (2, 1792)
+    assert model.moe_attrs["num_dense_layers"] == 2
+    assert model.moe_attrs["use_expert_bias"] is True
+    assert model.moe_attrs["routed_scaling_factor"] == 1.0
+    assert model.moe_intermediate_size == 1792
 
 
 @pytest.mark.parametrize(

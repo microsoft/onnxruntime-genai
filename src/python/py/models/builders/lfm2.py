@@ -197,13 +197,16 @@ class LFM2MoEModel(LFM2Model):
     SwiGLU MLP; every later layer routes each token to ``num_experts_per_tok`` of ``num_experts``
     experts. The router (``Lfm2MoeSparseMoeBlock.route_tokens_to_experts`` in transformers) is
     sigmoid based with an auxiliary-loss-free load-balancing bias: experts are *selected* by the
-    top-k of ``sigmoid(logits) + expert_bias`` but *mixed* with the unbiased ``sigmoid(logits)``,
-    renormalized over the selected experts.
+    top-k of ``sigmoid(logits) + expert_bias`` but *mixed* with
+    ``sigmoid_i / (sum_selected(sigmoid_j) + 1e-6)``.
 
     The fused MoE/QMoE op only knows softmax-over-top-k routing, so the selection is done in the
     graph and the op is fed ``log(sigmoid(logits))`` at the selected experts and a large negative
     sentinel everywhere else. Its softmax over the surviving top-k entries then equals
-    ``sigmoid_i / sum_selected(sigmoid_j)``, which is the HF routing weight.
+    ``sigmoid_i / sum_selected(sigmoid_j)``. The remaining per-token factor
+    ``sum_selected / (sum_selected + 1e-6)`` is applied to the op output, together with
+    ``routed_scaling_factor``, so tokens whose selected scores are all tiny (or flushed to zero)
+    keep the HF output magnitude.
     """
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
@@ -215,10 +218,10 @@ class LFM2MoEModel(LFM2Model):
                 "routing weights over the selected experts."
             )
 
-        self.num_dense_layers = config.num_dense_layers
         self.moe_intermediate_size = config.moe_intermediate_size
-        self.use_expert_bias = config.use_expert_bias
-        self.routed_scaling_factor = config.routed_scaling_factor
+        self.moe_attrs["num_dense_layers"] = config.num_dense_layers
+        self.moe_attrs["use_expert_bias"] = config.use_expert_bias
+        self.moe_attrs["routed_scaling_factor"] = config.routed_scaling_factor
 
         # Router score for the experts that were not selected. Any finite value far below every
         # plausible log-sigmoid works: it must fit in fp16 and exp(sentinel - max) must underflow to 0.
@@ -232,15 +235,15 @@ class LFM2MoEModel(LFM2Model):
         self.intermediate_size = config.intermediate_size
 
     def make_feed_forward(self, layer_id, layer, root_input):
-        if layer_id < self.num_dense_layers:
+        if layer_id < self.moe_attrs["num_dense_layers"]:
             super().make_feed_forward(layer_id, layer, root_input)
         else:
             self.make_moe(layer_id, self.get_feed_forward_module(layer), root_input)
 
     def make_moe(self, layer_id, moe, root_input):
         self.make_moe_preprocessing(layer_id, moe, root_input)
-        router_probs = self.make_moe_router(layer_id, moe, root_input)
-        self.make_moe_subgraph(layer_id, moe, root_input, router_probs)
+        router_probs, output_scale = self.make_moe_router(layer_id, moe, root_input)
+        self.make_moe_subgraph(layer_id, moe, root_input, router_probs, output_scale)
 
     def make_moe_preprocessing(self, layer_id, moe, root_input):
         # Keep the router in floating point so int4 rounding cannot flip an expert choice.
@@ -248,21 +251,29 @@ class LFM2MoEModel(LFM2Model):
         self.make_interleaved_swiglu_moe_preprocessing(layer_id, moe)
 
     def make_moe_router(self, layer_id, moe, root_input):
-        """Emit the in-graph expert selection and return the name of the masked router scores.
+        """Emit the in-graph expert selection.
 
-        root_input --> MatMul --> Reshape --> Cast(fp32) --> Sigmoid --+--> Add(expert_bias) --> TopK
+        Returns ``(router_probs, output_scale)``: the masked router scores fed to the MoE/QMoE op and
+        the per-token factor that the op output is multiplied by.
+
+        root_input --> MatMul --> Reshape --> Cast(fp32) --> sigmoid --+--> Add(expert_bias) --> TopK
                                                                        |                          |
                                                                        +--> GatherElements <------+
-                                                                       |          |               |
-                                                                       |     Clip --> Log         |
-                                                                       |               |          |
+                                                                       |     |        |           |
+                                                                       |     |   ReduceSum --> ... --> output_scale
+                                                                       |     |
+                                                                       |     Clip --> Log
+                                                                       |               |
                                                                        +--> Shape --> ConstantOfShape(sentinel)
                                                                                             |
                                                      Cast(io_dtype) <-- ScatterElements <---+
         """
         scores_name = self.make_moe_router_scores(layer_id, moe, root_input)
         indices_name = self.make_moe_router_selection(layer_id, moe, scores_name)
-        return self.make_moe_router_mask(layer_id, scores_name, indices_name)
+        selected_name = self.make_moe_router_selected_scores(layer_id, scores_name, indices_name)
+        output_scale = self.make_moe_router_output_scale(layer_id, root_input, selected_name)
+        router_probs = self.make_moe_router_mask(layer_id, scores_name, indices_name, selected_name)
+        return router_probs, output_scale
 
     def make_moe_router_scores(self, layer_id, moe, root_input):
         """Emit the per-expert router scores (`sigmoid(logits)`) in fp32 and return their name."""
@@ -284,9 +295,24 @@ class LFM2MoEModel(LFM2Model):
             self.make_cast(cast_name, logits_name, ir.DataType.FLOAT, shape=logits_shape)
             logits_name = f"{cast_name}/output_0"
 
-        sigmoid_name = f"{basename}/Sigmoid"
-        self.make_sigmoid(sigmoid_name, logits_name, ir.DataType.FLOAT, shape=logits_shape)
-        return f"{sigmoid_name}/output_0"
+        # sigmoid(x) = 1 / (1 + exp(-x)), spelled out. ONNX Runtime's CPU Sigmoid kernel carries an absolute
+        # error of about 6e-8 (it is evaluated as 1 - sigmoid(-x)), so it returns 5.96e-8 for x = -16
+        # instead of 1.125e-7 and 0 below x = -17. The scores are logged and summed below, where that
+        # is a large relative error; this form matches torch.sigmoid to fp32 rounding.
+        sigmoid_basename = f"{basename}/sigmoid"
+        self.make_neg(f"{sigmoid_basename}/Neg", logits_name, ir.DataType.FLOAT, shape=logits_shape)
+        self.make_exp(
+            f"{sigmoid_basename}/Exp", f"{sigmoid_basename}/Neg/output_0", ir.DataType.FLOAT, shape=logits_shape
+        )
+        self.make_add(
+            f"{sigmoid_basename}/Add",
+            [f"{sigmoid_basename}/Exp/output_0", f"/model/constants/FLOAT/{1.0}"],
+            dtype=ir.DataType.FLOAT,
+            shape=logits_shape,
+        )
+        reciprocal_name = f"{sigmoid_basename}/Reciprocal"
+        self.make_reciprocal(reciprocal_name, f"{sigmoid_basename}/Add/output_0", ir.DataType.FLOAT, shape=logits_shape)
+        return f"{reciprocal_name}/output_0"
 
     def make_moe_router_selection(self, layer_id, moe, scores_name):
         """Emit the top-k over the bias-corrected scores and return the selected expert indices."""
@@ -295,7 +321,7 @@ class LFM2MoEModel(LFM2Model):
         logits_shape = self.make_moe_router_shape()
 
         selection_name = scores_name
-        if self.use_expert_bias:
+        if self.moe_attrs["use_expert_bias"]:
             expert_bias_name = f"model.layers.{layer_id}.moe.expert_bias"
             self.make_initializer(moe.expert_bias, expert_bias_name, to=ir.DataType.FLOAT)
             add_name = f"{basename}/Add"
@@ -311,29 +337,108 @@ class LFM2MoEModel(LFM2Model):
         )
         return f"{topk_name}/output_1"
 
-    def make_moe_router_mask(self, layer_id, scores_name, indices_name):
-        """Emit `log(scores)` at the selected experts and a sentinel elsewhere, in `io_dtype`.
+    def make_moe_router_selected_scores(self, layer_id, scores_name, indices_name):
+        """Emit the unbiased scores of the selected experts (`[rows, top_k]`) and return their name."""
+        gather_name = f"/model/layers.{layer_id}/moe/router/GatherElements"
+        self.make_gather_elements(
+            gather_name,
+            [scores_name, indices_name],
+            dtype=ir.DataType.FLOAT,
+            shape=self.make_moe_router_shape(last_dim=self.moe_attrs["top_k"]),
+            axis=1,
+        )
+        return f"{gather_name}/output_0"
 
-        The MoE/QMoE op takes the softmax of the top-k of this tensor, which then equals the
-        model's `sigmoid_i / sum_selected(sigmoid_j)` mixing weights. Hugging Face divides by
-        `sum + 1e-6` instead; the op normalizes without that epsilon, a known parity gap that is
-        far below the io_dtype rounding of the scores themselves.
+    def make_moe_router_output_scale(self, layer_id, root_input, selected_name):
+        """Emit the per-token factor applied to the MoE op output and return its name.
+
+        HF mixes the selected experts with `sigmoid_i / (sum_selected + 1e-6)` while the op normalizes
+        to `sigmoid_i / sum_selected`, so the op output is scaled by `sum_selected / (sum_selected + 1e-6)`.
+        The sum is taken before the clamp in `make_moe_router_mask`, so scores that flushed to zero give
+        a zero factor, matching HF exactly. `routed_scaling_factor` is folded in here as well.
+        """
+        basename = f"/model/layers.{layer_id}/moe/router/scale"
+        rows_shape = self.make_moe_router_shape(last_dim=1)
+
+        sum_name = f"{basename}/ReduceSum"
+        self.make_reduce_sum(
+            sum_name,
+            [selected_name, "/model/constants/INT64/[-1]"],
+            dtype=ir.DataType.FLOAT,
+            shape=rows_shape,
+            keepdims=True,
+        )
+        add_name = f"{basename}/Add"
+        self.make_add(
+            add_name,
+            [f"{sum_name}/output_0", f"/model/constants/FLOAT/{1e-6}"],
+            dtype=ir.DataType.FLOAT,
+            shape=rows_shape,
+        )
+        div_name = f"{basename}/Div"
+        self.make_div(
+            div_name, [f"{sum_name}/output_0", f"{add_name}/output_0"], dtype=ir.DataType.FLOAT, shape=rows_shape
+        )
+        scale_name = f"{div_name}/output_0"
+        routed_scaling_factor = self.moe_attrs["routed_scaling_factor"]
+        if routed_scaling_factor != 1.0:
+            mul_name = f"{basename}/Mul"
+            self.make_mul(
+                mul_name,
+                [scale_name, f"/model/constants/FLOAT/{routed_scaling_factor}"],
+                dtype=ir.DataType.FLOAT,
+                shape=rows_shape,
+            )
+            scale_name = f"{mul_name}/output_0"
+
+        # Reshape [rows, 1] to the MoE output's leading dims + [1] so it broadcasts over hidden_size.
+        output_shape = self.make_hidden_state_shape(last_dim=1)
+        shape_name = f"{basename}/Shape"
+        self.make_shape(shape_name, root_input, shape=[len(output_shape)])
+        slice_name = f"{basename}/Slice"
+        self.make_slice(
+            slice_name,
+            [f"{shape_name}/output_0", "/model/constants/INT64/[0]", "/model/constants/INT64/[-1]"],
+            dtype=ir.DataType.INT64,
+            shape=[len(output_shape) - 1],
+        )
+        concat_name = f"{basename}/Concat"
+        self.make_concat(
+            concat_name,
+            [f"{slice_name}/output_0", "/model/constants/INT64/[1]"],
+            dtype=ir.DataType.INT64,
+            shape=[len(output_shape)],
+            axis=0,
+        )
+        reshape_name = f"{basename}/Reshape"
+        self.make_reshape(
+            reshape_name, [scale_name, f"{concat_name}/output_0"], dtype=ir.DataType.FLOAT, shape=output_shape
+        )
+        scale_name = f"{reshape_name}/output_0"
+
+        if self.io_dtype != ir.DataType.FLOAT:
+            cast_name = f"{basename}/Cast"
+            self.make_cast(cast_name, scale_name, self.io_dtype, shape=output_shape)
+            scale_name = f"{cast_name}/output_0"
+        return scale_name
+
+    def make_moe_router_mask(self, layer_id, scores_name, indices_name, selected_name):
+        """Emit `log(selected scores)` at the selected experts and a sentinel elsewhere, in `io_dtype`.
+
+        The MoE/QMoE op takes the softmax of the top-k of this tensor, which equals
+        `sigmoid_i / sum_selected(sigmoid_j)`; `make_moe_router_output_scale` supplies the rest of HF's
+        `sigmoid_i / (sum_selected + 1e-6)` mixing weight.
         """
         basename = f"/model/layers.{layer_id}/moe/router"
         logits_shape = self.make_moe_router_shape()
         selected_shape = self.make_moe_router_shape(last_dim=self.moe_attrs["top_k"])
 
-        # Gather the selected scores first so Log runs over top_k entries instead of num_experts.
-        gather_name = f"{basename}/GatherElements"
-        self.make_gather_elements(
-            gather_name, [scores_name, indices_name], dtype=ir.DataType.FLOAT, shape=selected_shape, axis=1
-        )
         # A sigmoid that flushed to 0 would give log = -inf, below the sentinel, and let the op's own
         # top-k pick a different expert than the graph selected. Clamp so log stays far above it.
         clip_name = f"{basename}/Clip"
         self.make_clip(
             clip_name,
-            [f"{gather_name}/output_0", f"/model/constants/FLOAT/{1e-30}", ""],
+            [selected_name, f"/model/constants/FLOAT/{1e-30}", ""],
             dtype=ir.DataType.FLOAT,
             shape=selected_shape,
         )
@@ -366,12 +471,9 @@ class LFM2MoEModel(LFM2Model):
             router_probs_name = f"{cast_name}/output_0"
         return router_probs_name
 
-    def make_moe_router_shape(self, last_dim=None):
-        return ["batch_size * sequence_length", self.moe_attrs["num_experts"] if last_dim is None else last_dim]
-
-    def make_moe_subgraph(self, layer_id, moe, root_input, router_probs=None):
-        if router_probs is None:
-            raise ValueError("LFM2-MoE needs the masked router scores returned by make_moe_router.")
+    def make_moe_subgraph(self, layer_id, moe, root_input, router_probs=None, output_scale=None):
+        if router_probs is None or output_scale is None:
+            raise ValueError("LFM2-MoE needs the masked router scores and output scale returned by make_moe_router.")
         basename = f"/model/layers.{layer_id}/moe"
         op_type = self.moe_attrs["op_type"]
         names = self.make_moe_expert_names(layer_id)
@@ -399,17 +501,12 @@ class LFM2MoEModel(LFM2Model):
             global_scales1=gate_up_proj_global_scales,
             global_scales2=down_proj_global_scales,
         )
-        output_name = f"{moe_name}/output_0"
 
-        if self.routed_scaling_factor != 1.0:
-            mul_name = f"{basename}/Mul"
-            self.make_mul(
-                mul_name,
-                [output_name, f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.routed_scaling_factor}"],
-                dtype=self.io_dtype,
-                shape=self.make_hidden_state_shape(),
-            )
-            output_name = f"{mul_name}/output_0"
+        # Apply the routing-mass correction (and routed_scaling_factor) from the router.
+        mul_name = f"{basename}/Mul"
+        self.make_mul(
+            mul_name, [f"{moe_name}/output_0", output_scale], dtype=self.io_dtype, shape=self.make_hidden_state_shape()
+        )
 
         # Assign the MoE output as the residual input of the next SkipLayerNorm
-        self.layernorm_attrs["skip_input"] = output_name
+        self.layernorm_attrs["skip_input"] = f"{mul_name}/output_0"
