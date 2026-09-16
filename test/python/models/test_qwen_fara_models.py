@@ -775,26 +775,21 @@ def test_qwen3_5_hybrid_text_generation_webgpu(test_data_path):
 
 @pytest.mark.graph_capture
 @pytest.mark.skipif(not _webgpu_plugin_registered, reason="onnxruntime-ep-webgpu plugin not installed")
-def test_qwen3_5_hybrid_graph_capture_advances_recurrent_state_webgpu(test_data_path, tmp_path):
+def test_qwen3_5_hybrid_graph_capture_advances_recurrent_state_webgpu(tmp_path):
     """Graph capture must preserve both directions of WebGPU recurrent-state double buffering."""
     tracked_model_root = Path(__file__).parents[2] / "models"
-    model_root = Path(test_data_path) if test_data_path else tracked_model_root
     if os.environ.get(_QWEN35_WEBGPU_GRAPH_CAPTURE_CHILD) != "1":
         # validationMode is a process-wide WebGPU setting. Isolate this regression from earlier
         # WebGPU tests that may already have initialized the context with the default mode.
         test_node = f"{Path(__file__).resolve()}::{test_qwen3_5_hybrid_graph_capture_advances_recurrent_state_webgpu.__name__}"
         run_subprocess(
-            [sys.executable, "-m", "pytest", "-sv", test_node, "--test_models", os.fspath(model_root)],
+            [sys.executable, "-m", "pytest", "-sv", test_node],
             env={_QWEN35_WEBGPU_GRAPH_CAPTURE_CHILD: "1"},
             log=log,
         )
         return
 
-    model_path = model_root / "qwen3-5"
-    if not model_path.is_dir():
-        # The deterministic fixture is tracked in the repository, so retain coverage when a
-        # standalone caller supplies a different model root instead of silently skipping.
-        model_path = tracked_model_root / "qwen3-5"
+    model_path = tracked_model_root / "qwen3-5"
     assert model_path.is_dir(), f"qwen3-5 test model not found at {model_path}"
 
     text_config_path = tmp_path / "qwen3-5-text-only"
@@ -848,7 +843,7 @@ def test_qwen3_5_hybrid_graph_capture_advances_recurrent_state_webgpu(test_data_
         params = og.GeneratorParams(model)
         params.set_search_options(do_sample=False, max_length=8)
         generator = og.Generator(model, params)
-        prompt = [151652, 151655, 10, 20]
+        prompt = [151652, 151655, 10, 20] if multimodal else [10, 20, 30, 40]
         if multimodal:
             inputs = og.NamedTensors()
             inputs["input_ids"] = np.asarray([prompt], dtype=np.int32)
@@ -861,20 +856,20 @@ def test_qwen3_5_hybrid_graph_capture_advances_recurrent_state_webgpu(test_data_
 
         # Exercise each direction of the recurrent-state double buffers. For the standard decoder,
         # stop in the noncanonical direction and also verify its existing full-rewind support.
-        state_values_before_rewind = [float(np.asarray(generator.get_logits()).reshape(-1)[0])]
+        state_values_before_rewind = [float(generator.get_logits().reshape(-1)[0])]
         for _ in range(2 if test_rewind else 3):
             generator.generate_next_token()
-            state_values_before_rewind.append(float(np.asarray(generator.get_logits()).reshape(-1)[0]))
+            state_values_before_rewind.append(float(generator.get_logits().reshape(-1)[0]))
 
         if not test_rewind:
             return state_values_before_rewind, None
 
         generator.rewind_to(0)
         generator.append_tokens(prompt)
-        state_values_after_rewind = [float(np.asarray(generator.get_logits()).reshape(-1)[0])]
+        state_values_after_rewind = [float(generator.get_logits().reshape(-1)[0])]
         for _ in range(3):
             generator.generate_next_token()
-            state_values_after_rewind.append(float(np.asarray(generator.get_logits()).reshape(-1)[0]))
+            state_values_after_rewind.append(float(generator.get_logits().reshape(-1)[0]))
 
         return state_values_before_rewind, state_values_after_rewind
 
