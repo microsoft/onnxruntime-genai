@@ -33,6 +33,14 @@ struct Lfm2VlImageGeometry {
 Lfm2VlImageGeometry ComputeLfm2VlImageGeometry(int64_t image_height, int64_t image_width,
                                                int64_t encoder_patch_size, int64_t downsample_factor);
 
+// Flattens one image into its patch sequence, the layout `convert_image_to_patches` produces:
+// patch (row, col) holds the encoder_patch_size square at that grid position, ordered [y][x][channel].
+// `image` points at this image inside the zero-padded [N, C, padded_height, padded_width] batch, so
+// rows are padded_width apart; `destination` receives num_patches * patch_size^2 * channels floats.
+void WriteLfm2VlImagePatches(const float* image, int64_t channels, int64_t padded_height, int64_t padded_width,
+                             const Lfm2VlImageGeometry& geometry, int64_t encoder_patch_size,
+                             float* destination);
+
 // "<|image_start|>" + "<image>" * num_tokens + "<|image_end|>"
 std::string BuildLfm2VlImagePlaceholder(int64_t num_tokens);
 

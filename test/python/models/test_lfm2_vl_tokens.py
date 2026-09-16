@@ -98,6 +98,24 @@ IMAGE_SIZES = [
 class TestImageGeometry:
     """The patch grid and token count the C++ processor derives from a resized image."""
 
+    @pytest.mark.parametrize(
+        ("size", "resized", "tokens"),
+        [
+            # (height, width) -> smart-resized (height, width), tokens = (H / 32) * (W / 32)
+            ((1, 1), (256, 256), 64),
+            ((64, 64), (256, 256), 64),
+            ((224, 224), (256, 256), 64),
+            ((640, 480), (576, 416), 234),
+            ((1920, 1080), (672, 384), 252),
+            # 2000 / 32 = 62.5 and Python's round() is half-to-even, so this snaps down, not up.
+            ((100, 2000), (96, 1984), 186),
+        ],
+    )
+    def test_known_resolutions(self, size, resized, tokens):
+        """Literal expectations, so a wrong constant is caught rather than reproduced on both sides."""
+        assert hf_smart_resize(*size) == resized
+        assert genai_image_geometry(*resized)[3] == tokens
+
     def test_tile_sized_image_is_worth_max_tokens(self):
         assert genai_image_geometry(512, 512) == (32, 32, 1024, MAX_IMAGE_TOKENS)
 

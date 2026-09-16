@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "models/preprocessing/lfm2_vl_image_processor.h"
@@ -54,8 +55,8 @@ TEST(Lfm2VlImageGeometryTest, NonSquareImageKeepsPerAxisGrid) {
 }
 
 TEST(Lfm2VlImageGeometryTest, OddPatchGridRoundsTokensUp) {
-  // Smart resize normally snaps to a multiple of patch_size * downsample_factor, but the token
-  // count still has to round up the way `_compute_tokens_for_image` does when it does not.
+  // Smart resize normally yields an even patch grid; for an odd one the token count must round up,
+  // as `_compute_tokens_for_image` does.
   const auto geometry = Geometry(16 * 5, 16 * 3);
   EXPECT_EQ(geometry.patch_rows, 5);
   EXPECT_EQ(geometry.patch_cols, 3);
@@ -74,8 +75,38 @@ TEST(Lfm2VlImageGeometryTest, RejectsSizeThatIsNotAWholeNumberOfPatches) {
 }
 
 TEST(Lfm2VlImageGeometryTest, RejectsNonPositiveDimensions) {
-  EXPECT_FALSE(CaptureThrowMessage([] { Geometry(0, 512); }).empty());
-  EXPECT_FALSE(CaptureThrowMessage([] { Geometry(512, -16); }).empty());
+  for (const auto [height, width] : {std::pair{0, 512}, std::pair{512, -16}}) {
+    const std::string message = CaptureThrowMessage([=] { Geometry(height, width); });
+    EXPECT_NE(message.find("must be positive"), std::string::npos) << message;
+  }
+}
+
+// The vision encoder's patch embedding is a plain linear layer over the flattened patch, so the
+// element order inside each patch is the whole contract. Pin it to `convert_image_to_patches`:
+// patch (row, col), element (y, x, c) <- image[c][row * p + y][col * p + x].
+TEST(Lfm2VlImagePatchesTest, FlattensPatchesInYXChannelOrderFromPaddedBatch) {
+  constexpr int64_t channels = 3, padded_height = 8, padded_width = 12, patch = 2;
+  const Lfm2VlImageGeometry geometry = ComputeLfm2VlImageGeometry(4, 8, patch, kDownsampleFactor);
+
+  std::vector<float> image(channels * padded_height * padded_width);
+  for (size_t i = 0; i < image.size(); ++i) image[i] = static_cast<float>(i);
+
+  std::vector<float> patches(geometry.num_patches * patch * patch * channels, -1.0f);
+  WriteLfm2VlImagePatches(image.data(), channels, padded_height, padded_width, geometry, patch, patches.data());
+
+  for (int64_t row = 0; row < geometry.patch_rows; ++row) {
+    for (int64_t col = 0; col < geometry.patch_cols; ++col) {
+      for (int64_t y = 0; y < patch; ++y) {
+        for (int64_t x = 0; x < patch; ++x) {
+          for (int64_t c = 0; c < channels; ++c) {
+            const int64_t index = ((row * geometry.patch_cols + col) * patch * patch + y * patch + x) * channels + c;
+            const int64_t source = c * padded_height * padded_width + (row * patch + y) * padded_width + col * patch + x;
+            EXPECT_EQ(patches[index], static_cast<float>(source)) << "row " << row << " col " << col << " y " << y << " x " << x << " c " << c;
+          }
+        }
+      }
+    }
+  }
 }
 
 TEST(Lfm2VlImageTokensTest, PlaceholderWrapsImageTokensInStartAndEndMarkers) {

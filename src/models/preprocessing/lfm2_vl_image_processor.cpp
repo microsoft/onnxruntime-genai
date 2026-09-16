@@ -47,15 +47,46 @@ std::vector<std::pair<int64_t, int64_t>> ReadImageSizes(OrtxTensor* image_sizes_
   return image_sizes;
 }
 
-// Flattens one image into its patch sequence, the layout `convert_image_to_patches` produces:
-// patch p = (row, col) holds the pixels of the encoder_patch_size square at that grid position,
-// ordered as [y][x][channel].
-//
-// `image` points at the start of this image inside the padded [N, C, padded_height, padded_width]
-// batch, so the row stride is the padded width rather than the image width.
-void WriteImagePatches(const float* image, int64_t channels, int64_t padded_height, int64_t padded_width,
-                       const Lfm2VlImageGeometry& geometry, int64_t encoder_patch_size,
-                       float* destination) {
+std::unique_ptr<OrtValue> MakeInt64Tensor(const std::vector<int64_t>& values, std::vector<int64_t> shape,
+                                          Ort::Allocator& allocator) {
+  auto tensor = OrtValue::CreateTensor<int64_t>(allocator, shape);
+  std::copy(values.begin(), values.end(), tensor->GetTensorMutableData<int64_t>());
+  return tensor;
+}
+
+std::unique_ptr<OrtValue> MakeInputIds(const std::vector<int32_t>& input_ids, Ort::Allocator& allocator) {
+  auto tensor = OrtValue::CreateTensor<int32_t>(allocator, std::vector<int64_t>{1, static_cast<int64_t>(input_ids.size())});
+  std::copy(input_ids.begin(), input_ids.end(), tensor->GetTensorMutableData<int32_t>());
+  return tensor;
+}
+
+// The vision graph's input names come from genai_config.json; a wrong name would otherwise be
+// dropped silently by ExtraInputs and only surface as ORT's "Missing Input" at run time.
+ONNXTensorElementDataType VisionInputType(const SessionInfo& session_info, const std::string& name,
+                                          const char* config_field) {
+  if (!session_info.HasInput(name)) {
+    throw std::runtime_error("Lfm2VlImageProcessor: the vision model has no input named \"" + name +
+                             "\". Point model.vision.inputs." + config_field +
+                             " in genai_config.json at the name the vision model uses.");
+  }
+  return session_info.GetInputDataType(name);
+}
+
+// pixel_attention_mask and spatial_shapes are always emitted as int64, so fail at load rather than
+// at the first image if the graph was exported with another integer type.
+void RequireInt64VisionInput(const SessionInfo& session_info, const std::string& name, const char* config_field) {
+  const auto type = VisionInputType(session_info, name, config_field);
+  if (type != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
+    throw std::runtime_error("Lfm2VlImageProcessor: vision input \"" + name + "\" must be int64, got " +
+                             TypeToString(type) + ".");
+  }
+}
+
+}  // namespace
+
+void WriteLfm2VlImagePatches(const float* image, int64_t channels, int64_t padded_height, int64_t padded_width,
+                             const Lfm2VlImageGeometry& geometry, int64_t encoder_patch_size,
+                             float* destination) {
   const int64_t channel_stride = padded_height * padded_width;
   const int64_t patch_dim = encoder_patch_size * encoder_patch_size * channels;
 
@@ -75,37 +106,6 @@ void WriteImagePatches(const float* image, int64_t channels, int64_t padded_heig
     }
   }
 }
-
-std::unique_ptr<OrtValue> MakeInt64Tensor(const std::vector<int64_t>& values, std::vector<int64_t> shape,
-                                          Ort::Allocator& allocator) {
-  auto tensor = OrtValue::CreateTensor<int64_t>(allocator, shape);
-  std::copy(values.begin(), values.end(), tensor->GetTensorMutableData<int64_t>());
-  return tensor;
-}
-
-std::unique_ptr<OrtValue> MakeInputIds(const std::vector<int32_t>& input_ids, Ort::Allocator& allocator) {
-  auto tensor = OrtValue::CreateTensor<int32_t>(allocator, std::vector<int64_t>{1, static_cast<int64_t>(input_ids.size())});
-  std::copy(input_ids.begin(), input_ids.end(), tensor->GetTensorMutableData<int32_t>());
-  return tensor;
-}
-
-std::unique_ptr<OrtValue> MakeNumImageTokens(int64_t num_image_tokens, Ort::Allocator& allocator) {
-  auto tensor = OrtValue::CreateTensor<int64_t>(allocator, std::vector<int64_t>{1});
-  tensor->GetTensorMutableData<int64_t>()[0] = num_image_tokens;
-  return tensor;
-}
-
-ONNXTensorElementDataType VisionInputType(const SessionInfo& session_info, const std::string& name,
-                                          const char* config_field) {
-  if (!session_info.HasInput(name)) {
-    throw std::runtime_error("Lfm2VlImageProcessor: the vision model has no input named \"" + name +
-                             "\". Point model.vision.inputs." + config_field +
-                             " in genai_config.json at the name the vision model uses.");
-  }
-  return session_info.GetInputDataType(name);
-}
-
-}  // namespace
 
 Lfm2VlImageGeometry ComputeLfm2VlImageGeometry(int64_t image_height, int64_t image_width,
                                                int64_t encoder_patch_size, int64_t downsample_factor) {
@@ -187,6 +187,9 @@ Lfm2VlImageProcessor::Lfm2VlImageProcessor(Config& config, const SessionInfo& se
       encoder_patch_size_{config.model.vision.patch_size},
       downsample_factor_{config.model.vision.spatial_merge_size},
       max_num_patches_{config.model.vision.max_num_patches} {
+  RequireInt64VisionInput(session_info, config.model.vision.inputs.attention_mask, "attention_mask");
+  RequireInt64VisionInput(session_info, config.model.vision.inputs.image_sizes, "image_sizes");
+
   const auto processor_config = (config.config_path / fs::path(config.model.vision.config_filename)).string();
   CheckResult(OrtxCreateProcessor(processor_.ToBeAssigned(), processor_config.c_str()));
 
@@ -207,7 +210,7 @@ std::unique_ptr<NamedTensors> Lfm2VlImageProcessor::Process(const Tokenizer& tok
                            std::make_shared<Tensor>(MakeInputIds(tokenizer.Encode(prompt.c_str()), allocator)));
     // The pipeline reads num_image_tokens to skip the vision run.
     named_tensors->emplace(std::string(Config::Defaults::NumImageTokens),
-                           std::make_shared<Tensor>(MakeNumImageTokens(0, allocator)));
+                           std::make_shared<Tensor>(MakeInt64Tensor({0}, {1}, allocator)));
     return named_tensors;
   }
 
@@ -278,8 +281,8 @@ std::unique_ptr<NamedTensors> Lfm2VlImageProcessor::Process(const Tokenizer& tok
 
   for (int64_t i = 0; i < num_images; ++i) {
     const auto& geometry = geometries[static_cast<size_t>(i)];
-    WriteImagePatches(pixels + i * channels * padded_height * padded_width, channels, padded_height, padded_width,
-                      geometry, encoder_patch_size_, patched_data + i * padded_patch_count * patch_dim);
+    WriteLfm2VlImagePatches(pixels + i * channels * padded_height * padded_width, channels, padded_height,
+                            padded_width, geometry, encoder_patch_size_, patched_data + i * padded_patch_count * patch_dim);
     std::fill_n(attention_mask.begin() + static_cast<size_t>(i * padded_patch_count),
                 static_cast<size_t>(geometry.num_patches), 1);
     spatial_shapes[static_cast<size_t>(i * 2)] = geometry.patch_rows;
@@ -307,7 +310,7 @@ std::unique_ptr<NamedTensors> Lfm2VlImageProcessor::Process(const Tokenizer& tok
       std::string(Config::Defaults::ImageSizesName),
       std::make_shared<Tensor>(MakeInt64Tensor(spatial_shapes, {num_images, 2}, allocator)));
   named_tensors->emplace(std::string(Config::Defaults::NumImageTokens),
-                         std::make_shared<Tensor>(MakeNumImageTokens(total_image_tokens, allocator)));
+                         std::make_shared<Tensor>(MakeInt64Tensor({total_image_tokens}, {1}, allocator)));
 
   return named_tensors;
 }

@@ -188,5 +188,7 @@ once.
 **Small images may be resized one step differently.** For images below `min_image_tokens` worth of
 pixels, the smart resize in onnxruntime-extensions truncates an intermediate product before rounding
 up to a multiple of `encoder_patch_size * downsample_factor`, so the result can be one 32-pixel step
-smaller on one axis than the Hugging Face processor's. The token accounting stays consistent because
-the runtime counts tokens from the size the image actually arrived at.
+smaller on one axis than the Hugging Face processor's. The same one-step difference occurs when a side
+divided by 32 lands exactly on .5 (for example a width of 2000): Python's `round` goes to the even
+neighbour, `std::round` goes away from zero. The token accounting stays consistent in both cases
+because the runtime counts tokens from the size the image actually arrived at.

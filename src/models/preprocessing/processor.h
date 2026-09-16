@@ -5,8 +5,8 @@
 #include "image_processor.h"
 #include "ortx_cpp_helper.h"
 #include "speech_extractor.h"
-#include "generator/generators.h"
 #include "models/utils.h"
+#include "generator/generators.h"
 #include "models/model.h"
 
 namespace Generators {
