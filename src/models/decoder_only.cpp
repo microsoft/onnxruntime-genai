@@ -17,6 +17,8 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<
       model_{model},
       kv_cache_(model_.p_device_kvcache_->CreateKeyValueCache(*this)),
       recurrent_state_(CreateRecurrentState(*this)),
+      ple_state_(CreatePleState(*this)),
+      indexer_cache_(CreateIndexerCache(*this)),
       position_inputs_{model_.p_device_inputs_->CreatePositionInputs(*this, sequence_lengths_unk, model_.config_->model.decoder.inputs.attention_mask)} {
   input_ids_.Add();
   position_inputs_->Add();
@@ -25,6 +27,10 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<
     kv_cache_->Add();
   if (recurrent_state_)
     recurrent_state_->Add();
+  if (ple_state_)
+    ple_state_->Add();
+  if (indexer_cache_)
+    indexer_cache_->Add();
   // Models with a hidden_states input (e.g. the MTP self-speculative head) feed the main
   // model's last hidden state. Only created when the config declares the input.
   if (!model_.config_->model.decoder.inputs.hidden_states.empty()) {
@@ -119,6 +125,10 @@ void DecoderOnly_State::RewindTo(size_t index) {
     kv_cache_->RewindTo(index);
   if (recurrent_state_)
     recurrent_state_->RewindTo(index);
+  if (ple_state_)
+    ple_state_->RewindTo(index);
+  if (indexer_cache_)
+    indexer_cache_->RewindTo(index);
 }
 
 void DecoderOnly_State::SnapshotState(size_t position) {
@@ -173,6 +183,10 @@ void DecoderOnly_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, De
     kv_cache_->Update(beam_indices, kv_cache_length);
   if (recurrent_state_)
     recurrent_state_->Update();
+  if (ple_state_)
+    ple_state_->Update();
+  if (indexer_cache_)
+    indexer_cache_->Update(beam_indices, total_length);
   if (hidden_states_)
     hidden_states_->Update(static_cast<int>(new_length));
   if (hidden_states_output_)

@@ -378,6 +378,7 @@ struct Config {
       // Hybrid SSM+Attention (LFM2) parameters
       std::vector<std::string> layer_types;  // Per-layer type: "conv" or "full_attention"
       int conv_cache_size{};                 // Convolution cache width (conv_L_cache from HF config)
+      int64_t ple_token_pad_id{};
 
       struct SlidingWindow {               // Sliding window parameters for models that process input prompt in chunks
         int window_size{};                 // The size of the window to slide over the input prompt
@@ -454,6 +455,9 @@ struct Config {
         std::string attention_metadata{Defaults::AttentionMetadataName};
         std::string past_conv_names{Defaults::PastConvName};  // Conv cache input name template (LFM2)
         std::string past_recurrent_names{Defaults::PastRecurrentName};
+        std::string past_ple_token_names;
+        std::string past_ple_conv_names;
+        std::string past_indexer_names;
         std::string state_update_capture_count{Defaults::StateUpdateCaptureCountName};  // Per-sequence capture count
         std::string state_update_active{Defaults::StateUpdateActiveName};               // Capture enable flag
 
@@ -484,6 +488,9 @@ struct Config {
         std::string rnn_states{Defaults::RnnStatesName};
         std::string present_conv_names{Defaults::PresentConvName};  // Conv cache output name template (LFM2)
         std::string present_recurrent_names{Defaults::PresentRecurrentName};
+        std::string present_ple_token_names;
+        std::string present_ple_conv_names;
+        std::string present_indexer_names;
         std::string state_update_conv_value_names{Defaults::StateUpdateConvValueName};
         std::string state_update_recurrent_capsule_names{Defaults::StateUpdateRecurrentCapsuleName};
         std::string hidden_states;  // Last hidden state output (when exported with include_hidden_states; e.g. fed to the MTP head)

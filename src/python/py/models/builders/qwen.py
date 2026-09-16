@@ -923,6 +923,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         self.ple_conv_kernel_size = config.ple_conv_kernel_size
         self.ple_conv_dilation = config.ngram_size
         self.ngram_size = config.ngram_size
+        self.ple_token_pad_id = config.eos_token_id
         self.heads_per_ngram = config.heads_per_ngram
         self.indexer_num_heads = config.indexer_n_heads
         self.indexer_kv_heads = config.indexer_kv_heads
@@ -1025,8 +1026,16 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
 
     def update_genai_config(self, genai_config):
         super().update_genai_config(genai_config)
+        decoder = genai_config["model"]["decoder"]
+        decoder["inputs"]["past_ple_token_names"] = "past.%d.ple_tokens"
+        decoder["inputs"]["past_ple_conv_names"] = "past.%d.ple_conv"
+        decoder["inputs"]["past_indexer_names"] = "past_key_values.%d.indexer_key"
+        decoder["outputs"]["present_ple_token_names"] = "present.%d.ple_tokens"
+        decoder["outputs"]["present_ple_conv_names"] = "present.%d.ple_conv"
+        decoder["outputs"]["present_indexer_names"] = "present.%d.indexer_key"
+        decoder["ple_token_pad_id"] = self.ple_token_pad_id
         if self.ep != "cpu":
-            session_options = genai_config["model"]["decoder"]["session_options"]
+            session_options = decoder["session_options"]
             session_options["session.layer_assignment_settings"] = (
                 f"cpu(={self.CPU_EMBEDDING_ANNOTATION})"
             )

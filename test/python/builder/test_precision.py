@@ -16,6 +16,7 @@ import types
 from pathlib import Path
 
 import numpy as np
+import onnx
 import onnx_ir as ir
 import onnxruntime as ort
 import pytest
@@ -367,6 +368,52 @@ def test_to_nbits_forwards_requested_bits(monkeypatch, bits):
     assert _FakeQuantizer.captured is not None
     assert _FakeQuantizer.captured["bits"] == bits
     assert result == "quantized-proto"
+
+
+def test_prepack_matmulnbits_accepts_symmetric_zero_point_input(monkeypatch):
+    model = Model.__new__(Model)
+    model.ep = "cuda"
+    model.matmul_attrs = {"weights_prepacked": 1}
+    model.quant_attrs = {"is_symmetric": True}
+
+    weight = np.zeros((64, 1, 16), dtype=np.uint8)
+    node = onnx.helper.make_node(
+        "MatMulNBits",
+        ["input", "weight", "scale", "zero_point"],
+        ["output"],
+        domain="com.microsoft",
+        bits=4,
+        block_size=32,
+        K=32,
+        N=64,
+    )
+    graph = onnx.helper.make_graph(
+        [node],
+        "test",
+        [],
+        [],
+        [
+            onnx.numpy_helper.from_array(weight, "weight"),
+            onnx.numpy_helper.from_array(np.full((64, 1), 8, dtype=np.uint8), "zero_point"),
+        ],
+    )
+    model_proto = onnx.helper.make_model(graph)
+    monkeypatch.setattr(
+        base_module.CudaQuantizer,
+        "prepack_matmulnbits_weight",
+        lambda value, n, k, bits, force_arch: value,
+    )
+
+    model.prepack_matmulnbits_weights(model_proto)
+
+    attrs = {
+        attr.name: onnx.helper.get_attribute_value(attr)
+        for attr in model_proto.graph.node[0].attribute
+    }
+    assert attrs["weight_prepacked"] == 1
+    assert model_proto.graph.node[0].input[3] == ""
+    assert "zero_point" not in {initializer.name for initializer in model_proto.graph.initializer}
+    model_proto.SerializeToString()
 
 
 def _run_check_extra_options(

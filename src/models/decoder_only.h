@@ -7,6 +7,8 @@
 #include "models/io/extra_inputs.h"
 #include "models/io/hidden_states.h"
 #include "models/io/recurrent_state.h"
+#include "models/io/ple_state.h"
+#include "models/io/indexer_cache.h"
 
 namespace Generators {
 
@@ -49,6 +51,8 @@ struct DecoderOnly_State : State {
   Logits logits_{*this};
   std::unique_ptr<KeyValueCache> kv_cache_;
   std::unique_ptr<RecurrentState> recurrent_state_;
+  std::unique_ptr<PleState> ple_state_;
+  std::unique_ptr<IndexerCache> indexer_cache_;
   std::unique_ptr<PositionInputs> position_inputs_;
   std::unique_ptr<HiddenStatesInputs> hidden_states_;          // Only for models with a hidden_states input (MTP head).
   std::unique_ptr<HiddenStatesOutputs> hidden_states_output_;  // Only for models that emit a hidden_states output (CUDA-graph-safe).

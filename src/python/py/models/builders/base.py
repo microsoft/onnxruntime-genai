@@ -1737,16 +1737,13 @@ class Model:
         candidates = 0
         prepacked = 0
         skipped_block_sizes = set()
+        redundant_zero_points = set()
 
         for node in model_proto.graph.node:
             if node.op_type != "MatMulNBits" or node.domain != "com.microsoft":
                 continue
             attrs = {a.name: a for a in node.attribute}
             if "weight_prepacked" in attrs:
-                continue
-            # Skip asymmetric weights: a non-empty zero-point input (4th input) means the
-            # weights are not symmetric, which the fpA_intB prepacked path does not target.
-            if len(node.input) > 3 and node.input[3]:
                 continue
             if not all(key in attrs for key in ("bits", "block_size", "K", "N")):
                 continue
@@ -1774,7 +1771,17 @@ class Model:
             packed = CudaQuantizer.prepack_matmulnbits_weight(numpy_helper.to_array(init), n, k, bits, force_arch)
             init.CopyFrom(numpy_helper.from_array(np.ascontiguousarray(packed), init.name))
             node.attribute.append(onnx_helper.make_attribute("weight_prepacked", prepack_mode))
+            if len(node.input) > 3 and node.input[3]:
+                redundant_zero_points.add(node.input[3])
+                node.input[3] = ""
             prepacked += 1
+
+        if redundant_zero_points:
+            referenced_initializers = {name for node in model_proto.graph.node for name in node.input if name}
+            for index in reversed(range(len(model_proto.graph.initializer))):
+                initializer = model_proto.graph.initializer[index]
+                if initializer.name in redundant_zero_points and initializer.name not in referenced_initializers:
+                    del model_proto.graph.initializer[index]
 
         if candidates and not prepacked:
             reason = (

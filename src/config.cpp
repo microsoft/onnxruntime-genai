@@ -505,6 +505,12 @@ struct DecoderInputs_Element : JSON::Element {
       v_.past_conv_names = JSON::Get<std::string_view>(value);
     } else if (name == "past_recurrent_names") {
       v_.past_recurrent_names = JSON::Get<std::string_view>(value);
+    } else if (name == "past_ple_token_names") {
+      v_.past_ple_token_names = JSON::Get<std::string_view>(value);
+    } else if (name == "past_ple_conv_names") {
+      v_.past_ple_conv_names = JSON::Get<std::string_view>(value);
+    } else if (name == "past_indexer_names") {
+      v_.past_indexer_names = JSON::Get<std::string_view>(value);
     } else if (name == "state_update_capture_count") {
       v_.state_update_capture_count = JSON::Get<std::string_view>(value);
     } else if (name == "state_update_active") {
@@ -554,6 +560,12 @@ struct DecoderOutputs_Element : JSON::Element {
       v_.present_conv_names = JSON::Get<std::string_view>(value);
     } else if (name == "present_recurrent_names") {
       v_.present_recurrent_names = JSON::Get<std::string_view>(value);
+    } else if (name == "present_ple_token_names") {
+      v_.present_ple_token_names = JSON::Get<std::string_view>(value);
+    } else if (name == "present_ple_conv_names") {
+      v_.present_ple_conv_names = JSON::Get<std::string_view>(value);
+    } else if (name == "present_indexer_names") {
+      v_.present_indexer_names = JSON::Get<std::string_view>(value);
     } else if (name == "state_update_conv_value_names") {
       v_.state_update_conv_value_names = JSON::Get<std::string_view>(value);
     } else if (name == "state_update_recurrent_capsule_names") {
@@ -972,6 +984,8 @@ struct Decoder_Element : JSON::Element {
                                  std::to_string(Config::Model::Decoder::MaxStateUpdateCapacity));
     } else if (name == "conv_cache_size") {
       v_.conv_cache_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "ple_token_pad_id") {
+      v_.ple_token_pad_id = static_cast<int64_t>(JSON::Get<double>(value));
     } else {
       throw JSON::unknown_value_error{};
     }
