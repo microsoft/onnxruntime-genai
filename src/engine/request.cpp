@@ -796,6 +796,29 @@ std::span<const int32_t> Request::UnprocessedTokensCpu() const {
   return std::span<const int32_t>{tokens_host_}.subspan(begin, end - begin);
 }
 
+void Request::StagePrefixAdoption(size_t adopted_tokens) {
+  if (!IsQueued(status_) || prefix_adoption_staged_ ||
+      processed_sequence_length_ != 0 || adopted_tokens == 0 ||
+      adopted_tokens >= static_cast<size_t>(CurrentSequenceLength()) ||
+      adopted_tokens > tokens_host_.size()) {
+    throw std::runtime_error(
+        "A cached prefix can only be staged for an unprocessed queued request.");
+  }
+  processed_sequence_length_ = static_cast<int64_t>(adopted_tokens);
+  adopted_prefix_length_ = adopted_tokens;
+  prefix_adoption_staged_ = true;
+}
+
+void Request::RollbackPrefixAdoption() noexcept {
+  if (!prefix_adoption_staged_) {
+    return;
+  }
+  processed_sequence_length_ = 0;
+  adopted_prefix_length_ = 0;
+  prefix_adoption_staged_ = false;
+  scheduled_token_count_ = 0;
+}
+
 bool Request::IsTurnComplete() const {
   return status_ == RequestStatus::TurnComplete;
 }

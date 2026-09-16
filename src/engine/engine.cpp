@@ -24,6 +24,31 @@ struct MtpRollbackError : std::runtime_error {
   using std::runtime_error::runtime_error;
 };
 
+class PrefixAdoptionGuard {
+ public:
+  explicit PrefixAdoptionGuard(StepPlan& plan) : plan_{plan} {}
+  PrefixAdoptionGuard(const PrefixAdoptionGuard&) = delete;
+  PrefixAdoptionGuard& operator=(const PrefixAdoptionGuard&) = delete;
+  ~PrefixAdoptionGuard() {
+    if (!committed_) {
+      for (const auto& entry : plan_.requests) {
+        entry.request->RollbackPrefixAdoption();
+      }
+    }
+  }
+
+  void Commit() noexcept {
+    for (const auto& entry : plan_.requests) {
+      entry.request->CommitPrefixAdoption();
+    }
+    committed_ = true;
+  }
+
+ private:
+  StepPlan& plan_;
+  bool committed_{};
+};
+
 std::string AddExceptionCause(std::string message, std::exception_ptr error) {
   if (!error) {
     return message;
@@ -1644,6 +1669,7 @@ void Engine::RunDynamic() {
           "Dynamic scheduler returned no executable work while requests remain pending.",
           nullptr);
     }
+    PrefixAdoptionGuard prefix_adoption_guard{step_plan_};
 
     std::unique_ptr<CacheStepReservation> reservation;
     try {
@@ -1954,6 +1980,7 @@ void Engine::RunDynamic() {
       scheduled_requests.CommitStateForTransaction();
       request_transaction_active = false;
       reservation->Commit();
+      prefix_adoption_guard.Commit();
       if (mtp_step) {
         CommitMtpStep(*mtp_step);
       }
@@ -1962,6 +1989,7 @@ void Engine::RunDynamic() {
         step_plan_.requests[i].request->CommitStep(
             step_plan_.requests[i], step_results_[i]);
       }
+      cache_manager_->SealCommittedBlocks(step_plan_);
       if (mtp_step) {
         PublishMtpDrafts(*mtp_step);
       }

@@ -2823,6 +2823,94 @@ TEST_F(EngineRunTest, DensePagedModelHasNoFixedStateReservation) {
   EXPECT_FALSE(engine.cache->FixedStateSnapshot().has_value());
 }
 
+TEST_F(EngineRunTest, DensePagedPrefixCacheSkipsCommittedFullBlocks) {
+  model_ = LoadSyntheticPagedModel();
+  auto& batching = *model_->config_->engine.dynamic_batching;
+  batching.block_size = 4;
+  batching.num_blocks = 16;
+  batching.prefix_caching = true;
+  batching.prefix_cache_max_blocks = 8;
+  auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
+  const std::array<int32_t, 9> prompt{2, 3, 4, 5, 6, 7, 8, 9, 10};
+
+  auto cold = CreateRequestWithPrompt(engine.engine, prompt);
+  EXPECT_EQ(RunOne(*engine.engine).request, cold);
+  ASSERT_TRUE(cold->IsTurnComplete());
+  ASSERT_EQ(engine.executor->decoded_token_counts.size(), 1u);
+  EXPECT_EQ(engine.executor->decoded_token_counts[0], prompt.size());
+  cold->Close();
+
+  auto warm = CreateRequestWithPrompt(engine.engine, prompt);
+  size_t observed_adopted_prefix = 0;
+  int64_t observed_processed_length = 0;
+  engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
+    ASSERT_NE(context.plan, nullptr);
+    ASSERT_EQ(context.plan->requests.size(), 1u);
+    ASSERT_NE(context.plan->requests[0].prefix_match, nullptr);
+    EXPECT_EQ(context.plan->requests[0].prefix_match->token_count, 8u);
+    EXPECT_EQ(context.plan->requests[0].unprocessed_token_count, 1u);
+    EXPECT_EQ(context.plan->requests[0].logits_row_index, 0u);
+    observed_adopted_prefix = warm->AdoptedPrefixLength();
+    observed_processed_length = warm->ProcessedSequenceLength();
+  });
+  EXPECT_EQ(RunOne(*engine.engine).request, warm);
+
+  ASSERT_TRUE(warm->IsTurnComplete());
+  ASSERT_EQ(engine.executor->decoded_token_counts.size(), 2u);
+  EXPECT_EQ(engine.executor->decoded_token_counts[1], 1u);
+  EXPECT_EQ(observed_adopted_prefix, 8u);
+  EXPECT_EQ(observed_processed_length, 8);
+  const auto* metrics = engine.engine->PrefixCacheStats();
+  ASSERT_NE(metrics, nullptr);
+  EXPECT_EQ(metrics->hits, 1u);
+  EXPECT_EQ(metrics->matched_tokens, 8u);
+  EXPECT_TRUE(ValidateCacheInvariants(engine.cache->Snapshot()).empty());
+}
+
+TEST_F(EngineRunTest, DensePagedPrefixAdoptionRollsBackAfterExecutionFailure) {
+  model_ = LoadSyntheticPagedModel();
+  auto& batching = *model_->config_->engine.dynamic_batching;
+  batching.block_size = 4;
+  batching.num_blocks = 16;
+  batching.prefix_caching = true;
+  batching.prefix_cache_max_blocks = 8;
+  auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
+  const std::array<int32_t, 9> prompt{2, 3, 4, 5, 6, 7, 8, 9, 10};
+
+  auto source = CreateRequestWithPrompt(engine.engine, prompt);
+  EXPECT_EQ(RunOne(*engine.engine).request, source);
+  source->Close();
+  const auto before = engine.cache->Snapshot();
+
+  auto warm = CreateRequestWithPrompt(engine.engine, prompt);
+  engine.executor->SetNextFailure(
+      ScriptedExecutionFailure::RetryableBeforeExecution);
+  const auto retryable = RunOne(*engine.engine);
+
+  EXPECT_EQ(retryable.request, nullptr);
+  EXPECT_EQ(retryable.error_code, EngineErrorCode::RetryableExecution);
+  EXPECT_NE(retryable.flags & EngineEventFlagRetryable, 0u);
+  EXPECT_EQ(warm->ProcessedSequenceLength(), 0);
+  EXPECT_EQ(warm->AdoptedPrefixLength(), 0u);
+  const auto after = engine.cache->Snapshot();
+  EXPECT_TRUE(ValidateCacheInvariants(after).empty());
+  EXPECT_EQ(after.free_blocks, before.free_blocks);
+  ASSERT_EQ(after.blocks.size(), before.blocks.size());
+  for (size_t index = 0; index < after.blocks.size(); ++index) {
+    EXPECT_EQ(after.blocks[index].block_id, before.blocks[index].block_id);
+    EXPECT_EQ(after.blocks[index].ref_count, before.blocks[index].ref_count);
+    EXPECT_EQ(after.blocks[index].indexed, before.blocks[index].indexed);
+  }
+
+  size_t observed_adopted_prefix = 0;
+  engine.executor->SetExecutionCallback([&](ExecutionContext&) {
+    observed_adopted_prefix = warm->AdoptedPrefixLength();
+  });
+  EXPECT_EQ(RunOne(*engine.engine).request, warm);
+  EXPECT_EQ(observed_adopted_prefix, 8u);
+  EXPECT_TRUE(warm->IsTurnComplete());
+}
+
 TEST_F(EngineRunTest, CompositeMixedPrefillDefersResidentDraft) {
   model_ = LoadSyntheticCompositeModel();
   model_->config_->engine.dynamic_batching->max_scheduled_tokens = 3;

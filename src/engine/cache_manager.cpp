@@ -46,6 +46,7 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
           entry.target_cache_slots,
           entry.newly_admitted,
           entry.whole_sequence_cache_slots,
+          entry.prefix_match.get(),
       });
       if (fixed_state_pool) {
         // Fixed and paged track the same per-request cache-slot boundary: the fixed target_tokens
@@ -340,6 +341,11 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
   // the composite path degrades to paged-only. Its capacity matches the paged batch limit so paged
   // admission (bounded by max_batch_size) can never outrun fixed slots.
   ModelStateManifest manifest{model->config_->model.decoder};
+  if (model->config_->engine.dynamic_batching->prefix_caching &&
+      manifest.HasFixedStateGroups()) {
+    throw std::runtime_error(
+        "Prefix caching does not yet support fixed or recurrent decoder state.");
+  }
   if (manifest.HasFixedStateGroups()) {
     auto fixed_state_pool = std::make_unique<FixedStatePool>(
         model, model_->config_->engine.dynamic_batching->max_batch_size);
@@ -350,6 +356,31 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
   key_value_cache_ = std::make_unique<PagedKeyValueCache>(
       model, auxiliary_bytes_per_block, auxiliary_reserved_memory_bytes);
   key_value_cache_state_ = std::make_unique<KeyValueCacheState>(*params_, *model_);
+}
+
+std::shared_ptr<const PrefixCacheMatch> PagedCacheManager::MatchPrefix(
+    const Request& request) {
+  if (!key_value_cache_->PrefixCachingEnabled()) {
+    return nullptr;
+  }
+  const auto tokens = request.TokensCpu();
+  if (tokens.size() <= 1) {
+    return nullptr;
+  }
+  auto match = key_value_cache_->MatchPrefix(tokens, tokens.size() - 1);
+  return match.Empty()
+             ? nullptr
+             : std::make_shared<const PrefixCacheMatch>(std::move(match));
+}
+
+void PagedCacheManager::SealCommittedBlocks(const StepPlan& plan) {
+  if (!key_value_cache_->PrefixCachingEnabled()) {
+    return;
+  }
+  for (const auto& entry : plan.requests) {
+    key_value_cache_->SealCommittedBlocks(
+        entry.request_id, entry.request->TokensCpu());
+  }
 }
 
 bool PagedCacheManager::CanAllocate(const std::vector<std::shared_ptr<Request>>& requests) const {

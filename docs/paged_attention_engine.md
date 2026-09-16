@@ -106,6 +106,35 @@ Dynamic batching limits scheduled rows with `max_batch_size` and limits the tota
 query tokens in one model run with `max_scheduled_tokens`. The token limit defaults
 to 2048. Both limits are positive and independent.
 
+### Prefix caching
+
+Dynamic batching can reuse complete prompt blocks from earlier requests by setting
+`engine.dynamic_batching.prefix_caching` to `true`. It is disabled by default. A
+lookup compares both the token contents and the complete parent-block identity;
+hash equality alone is never accepted as a match. The final prompt token always
+runs through the model, and partial blocks are never shared.
+
+The cache retains indexed blocks after their producing request releases them.
+`prefix_cache_max_blocks` sets an explicit retention limit. When it is omitted,
+`prefix_cache_pool_fraction` selects the fraction of the paged block pool that may
+be retained (default `0.5`, range `0` through `1`). `prefix_cache_min_blocks`
+sets the minimum number of matching full blocks required to adopt a prefix
+(default `1`). Retained blocks are reclaimable under admission pressure; blocks
+being adopted by an in-flight reservation are protected by reservation-owned
+references.
+
+Prefix adoption participates in the normal Engine transaction. Planning stages
+the request's processed-token cursor at the matched block boundary, reservation
+takes references to the shared blocks, rollback restores the cursor and releases
+those references, and commit transfers them to the request's block table. Newly
+completed full blocks are indexed only after the cache and request transaction
+commits.
+
+The initial implementation applies only to newly admitted requests using dense,
+full-attention paged KV. It does not splice a prefix into resident continuation
+turns and rejects prefix caching for sliding-window KV rings, fixed or recurrent
+decoder state, and Engine-hosted auxiliary decoder state.
+
 Without dynamic batching, the engine uses the older static batching path. Static batching allocates and advances a batch as a unit. It does not use the transaction flow described below.
 
 ## Decoder state manifest

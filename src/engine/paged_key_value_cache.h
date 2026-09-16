@@ -12,10 +12,21 @@
 #include "block.h"
 #include "engine_invariants.h"
 #include "paged_cache_reservation.h"
+#include "prefix_cache.h"
 #include "request.h"
 #include "step_plan.h"
 
 namespace Generators {
+
+struct BlockCopier {
+  virtual void CopyBlock(size_t source_block_id, size_t destination_block_id) = 0;
+  virtual ~BlockCopier() = default;
+};
+
+bool MakeTailBlockExclusive(PagedCacheBlockTable& table,
+                            size_t target_slots,
+                            BlockPool& pool,
+                            BlockCopier& copier);
 
 inline constexpr size_t kMinGraphBlockTableColumns = 8;
 
@@ -93,6 +104,13 @@ struct PagedKeyValueCache {
   size_t CommittedSlots(const void* request_id) const;
 
   PagedCacheReservation Reserve(std::span<const PagedCacheReservationRequest> requests);
+
+  PrefixCacheMatch MatchPrefix(std::span<const int32_t> tokens,
+                               size_t max_adoptable_tokens);
+  void SealCommittedBlocks(const void* request_id,
+                           std::span<const int32_t> tokens);
+  bool PrefixCachingEnabled() const;
+  const PrefixCacheMetrics& PrefixMetrics() const;
 
   // Selects the active and pending requests whose immediate cache growth fits this step.
   StepPlanningResult PlanStepResources(StepPlan& plan) const;
@@ -251,6 +269,18 @@ struct PagedKeyValueCache {
 
   bool Windowed() const { return window_ring_blocks_ > 0; }
 
+  class RetainedBlockReclaimer final : public BlockReclaimer {
+   public:
+    explicit RetainedBlockReclaimer(PrefixCache& prefix_cache)
+        : prefix_cache_{prefix_cache} {}
+    size_t Reclaim(size_t blocks_needed) override {
+      return prefix_cache_.Reclaim(blocks_needed);
+    }
+
+   private:
+    PrefixCache& prefix_cache_;
+  };
+
   // Graph capture needs the block table at a device address that never moves and at a shape that
   // repeats across steps, so it gets a dedicated persistent tensor instead of the per-step CPU one.
   bool graph_capture_{};
@@ -259,6 +289,7 @@ struct PagedKeyValueCache {
   size_t max_block_table_columns_{};
   size_t max_block_table_rows_{};
   std::unique_ptr<Tensor> block_tables_tensor_;
+  std::unique_ptr<PrefixCache> prefix_cache_;
 };
 
 }  // namespace Generators

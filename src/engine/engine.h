@@ -188,6 +188,9 @@ struct Engine : std::enable_shared_from_this<Engine>,
    * synchronization.
    */
   SpeculativeStats GetSpeculativeStats() const;
+  const PrefixCacheMetrics* PrefixCacheStats() const {
+    return cache_manager_->PrefixMetrics();
+  }
 
   uint64_t BeginTurn(const std::shared_ptr<Request>& request,
                      std::span<const int32_t> tokens,

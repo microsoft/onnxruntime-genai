@@ -790,6 +790,45 @@ TEST(PagedKeyValueCacheManifestTest, AllocatesSparseSlidingAndFullLayerCaches) {
       std::vector<int64_t>({128, 4, 1, 1}));
 }
 
+TEST(PagedKeyValueCacheManifestTest, PrefixCachingRejectsSlidingWindowCache) {
+  auto model = LoadSyntheticPagedModel();
+  auto& decoder = model->config_->model.decoder;
+  decoder.sliding_window = Config::Model::Decoder::SlidingWindow{};
+  decoder.sliding_window->window_size = 4;
+  decoder.sliding_window->layers = {1};
+  decoder.inputs.block_table_windowed = decoder.inputs.block_table;
+  model->config_->engine.dynamic_batching->prefix_caching = true;
+
+  EXPECT_THROW(MakePagedCache(model), std::runtime_error);
+}
+
+TEST(PagedKeyValueCacheManifestTest, PrefixCachingRejectsAuxiliaryDecoderState) {
+  auto model = LoadSyntheticPagedModel();
+  model->config_->engine.dynamic_batching->prefix_caching = true;
+
+  EXPECT_THROW(
+      PagedKeyValueCache(
+          model, /*auxiliary_bytes_per_block=*/1,
+          /*auxiliary_reserved_memory_bytes=*/0),
+      std::runtime_error);
+  EXPECT_THROW(
+      PagedKeyValueCache(
+          model, /*auxiliary_bytes_per_block=*/0,
+          /*auxiliary_reserved_memory_bytes=*/1),
+      std::runtime_error);
+}
+
+TEST(PagedKeyValueCacheManifestTest, PrefixCachingRejectsFixedState) {
+  auto model = LoadSyntheticCompositeModel();
+  model->config_->engine.dynamic_batching->prefix_caching = true;
+
+  EXPECT_THROW(
+      {
+        PagedCacheManager manager{model};
+      },
+      std::runtime_error);
+}
+
 TEST(PagedKeyValueCacheManifestTest, RejectsSlidingWindowLayersOutsidePagedGroup) {
   auto model = LoadSyntheticPagedModel();
   auto& decoder = model->config_->model.decoder;

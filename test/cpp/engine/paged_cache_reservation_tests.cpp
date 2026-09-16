@@ -10,6 +10,7 @@
 #include <gtest/gtest.h>
 
 #include "engine/paged_cache_reservation.h"
+#include "engine/prefix_cache.h"
 
 namespace Generators {
 namespace {
@@ -19,6 +20,18 @@ const char kRequestStorageA{};
 const char kRequestStorageB{};
 const void* const kRequestA = &kRequestStorageA;
 const void* const kRequestB = &kRequestStorageB;
+
+PrefixCacheMatch MakeRetainedPrefix(
+    BlockPool& pool,
+    PrefixCache& cache,
+    std::span<const int32_t> block_tokens,
+    std::span<const int32_t> prompt_tokens) {
+  auto blocks = pool.AllocateBlocks(kBlockSize);
+  std::shared_ptr<const BlockIdentity> parent;
+  EXPECT_NE(cache.Register(blocks.front(), block_tokens, parent), nullptr);
+  pool.Free(blocks);
+  return cache.Match(prompt_tokens, prompt_tokens.size() - 1);
+}
 
 void ReplaceTable(
     PagedCacheBlockTable& table,
@@ -214,6 +227,103 @@ TEST(PagedCacheReservationTest, ReleaseIsIdempotentAndBlocksCanBeReused) {
   const std::array request_b_id{kRequestB};
   second.FillBlockTable(request_b_id, 1, second_table);
   EXPECT_EQ(second_table[0], first_table[0]);
+}
+
+TEST(PagedCacheReservationTest, AdoptedBlocksLeadNewTableAndReleaseEveryReference) {
+  BlockPool pool{kBlockSize, 3};
+  PrefixCacheOptions options;
+  options.enabled = true;
+  options.max_blocks = 3;
+  PrefixCache cache{pool, options};
+  const std::array<int32_t, 4> block_tokens{1, 2, 3, 4};
+  const std::array<int32_t, 5> prompt_tokens{1, 2, 3, 4, 5};
+  const auto match =
+      MakeRetainedPrefix(pool, cache, block_tokens, prompt_tokens);
+  ASSERT_EQ(match.blocks.size(), 1u);
+  ASSERT_EQ(match.blocks.front()->RefCount(), 1u);
+  const size_t adopted_id = match.blocks.front()->Id();
+
+  std::vector<PagedCacheBlockTable> tables;
+  const std::array requests{
+      PagedCacheReservationRequest{
+          kRequestA, prompt_tokens.size(), true, prompt_tokens.size(), &match},
+  };
+  PagedCacheReservation reservation{pool, tables, requests};
+
+  ASSERT_EQ(reservation.AdoptedBlocks().size(), 1u);
+  EXPECT_EQ(match.blocks.front()->RefCount(), 2u);
+  std::array<int32_t, 2> block_table;
+  const std::array request_ids{kRequestA};
+  reservation.FillBlockTable(request_ids, 2, block_table);
+  EXPECT_EQ(block_table[0], static_cast<int32_t>(adopted_id));
+  EXPECT_NE(block_table[1], static_cast<int32_t>(adopted_id));
+
+  reservation.Release();
+
+  EXPECT_EQ(match.blocks.front()->RefCount(), 1u);
+  EXPECT_TRUE(tables.empty());
+  EXPECT_EQ(pool.AvailableBlocks(), 2u);
+}
+
+TEST(PagedCacheReservationTest, CommitTransfersAdoptedReferenceToNewTable) {
+  BlockPool pool{kBlockSize, 3};
+  PrefixCacheOptions options;
+  options.enabled = true;
+  options.max_blocks = 3;
+  PrefixCache cache{pool, options};
+  const std::array<int32_t, 4> block_tokens{1, 2, 3, 4};
+  const std::array<int32_t, 5> prompt_tokens{1, 2, 3, 4, 5};
+  const auto match =
+      MakeRetainedPrefix(pool, cache, block_tokens, prompt_tokens);
+  std::vector<PagedCacheBlockTable> tables;
+  const std::array requests{
+      PagedCacheReservationRequest{
+          kRequestA, prompt_tokens.size(), true, prompt_tokens.size(), &match},
+  };
+
+  PagedCacheReservation reservation{pool, tables, requests};
+  reservation.Commit();
+
+  ASSERT_EQ(tables.size(), 1u);
+  ASSERT_EQ(tables.front().Blocks().size(), 2u);
+  EXPECT_EQ(tables.front().Blocks().front(), match.blocks.front());
+  EXPECT_EQ(match.blocks.front()->RefCount(), 2u);
+  EXPECT_EQ(tables.front().CommittedSlots(), prompt_tokens.size());
+
+  RemovePagedCacheBlockTable(pool, nullptr, tables, kRequestA);
+  EXPECT_EQ(match.blocks.front()->RefCount(), 1u);
+  EXPECT_EQ(pool.AvailableBlocks(), 2u);
+}
+
+TEST(PagedCacheReservationTest, DuplicateAdoptersHoldAndReleaseOneReferenceEach) {
+  BlockPool pool{kBlockSize, 4};
+  PrefixCacheOptions options;
+  options.enabled = true;
+  options.max_blocks = 4;
+  PrefixCache cache{pool, options};
+  const std::array<int32_t, 4> block_tokens{1, 2, 3, 4};
+  const std::array<int32_t, 5> prompt_tokens{1, 2, 3, 4, 5};
+  const auto match =
+      MakeRetainedPrefix(pool, cache, block_tokens, prompt_tokens);
+  std::vector<PagedCacheBlockTable> tables;
+  const std::array requests{
+      PagedCacheReservationRequest{
+          kRequestA, prompt_tokens.size(), true, prompt_tokens.size(), &match},
+      PagedCacheReservationRequest{
+          kRequestB, prompt_tokens.size(), true, prompt_tokens.size(), &match},
+  };
+
+  PagedCacheReservation reservation{pool, tables, requests};
+
+  EXPECT_EQ(match.blocks.front()->RefCount(), 3u);
+  ASSERT_EQ(reservation.AdoptedBlocks().size(), 2u);
+  EXPECT_EQ(reservation.AdoptedBlocks()[0], match.blocks.front());
+  EXPECT_EQ(reservation.AdoptedBlocks()[1], match.blocks.front());
+
+  reservation.Release();
+  EXPECT_EQ(match.blocks.front()->RefCount(), 1u);
+  EXPECT_TRUE(tables.empty());
+  EXPECT_EQ(pool.AvailableBlocks(), 3u);
 }
 
 TEST(PagedCacheReservationTest, DestructorDoesNotReleaseReissuedBlocks) {

@@ -11,11 +11,13 @@
 
 #include "../span.h"
 #include "block.h"
+#include "prefix_cache.h"
 #include "request_index.h"
 
 namespace Generators {
 
 struct PagedKeyValueCache;
+struct BlockCopier;
 
 class PagedCacheBlockTable {
  public:
@@ -38,17 +40,29 @@ class PagedCacheBlockTable {
   size_t CommittedSlots() const { return committed_slots_; }
   const std::vector<std::shared_ptr<Block>>& Blocks() const { return blocks_; }
   const std::vector<std::shared_ptr<Block>>& WindowBlocks() const { return window_blocks_; }
+  size_t SealedBlocks() const { return sealed_blocks_; }
+  const std::shared_ptr<const BlockIdentity>& SealedIdentity() const {
+    return sealed_identity_;
+  }
   uint64_t MutationGeneration() const { return mutation_generation_; }
 
  private:
   friend class PagedCacheReservation;
   friend struct PagedKeyValueCache;
+  friend bool MakeTailBlockExclusive(PagedCacheBlockTable&, size_t, BlockPool&, BlockCopier&);
 
   const void* request_id_{};
   size_t committed_slots_{};
   std::vector<std::shared_ptr<Block>> blocks_;
   std::vector<std::shared_ptr<Block>> window_blocks_;
+  size_t sealed_blocks_{};
+  std::shared_ptr<const BlockIdentity> sealed_identity_;
   uint64_t mutation_generation_{};
+};
+
+struct BlockReclaimer {
+  virtual size_t Reclaim(size_t blocks_needed) = 0;
+  virtual ~BlockReclaimer() = default;
 };
 
 struct PagedCacheReservationRequest {
@@ -58,6 +72,7 @@ struct PagedCacheReservationRequest {
   // Slots the reservation has to own blocks for, which is the whole sequence rather than this
   // step's target when a prefill is chunked. Clamped up to target_slots when left unset.
   size_t reserved_slots{};
+  const PrefixCacheMatch* prefix_match{};
 };
 
 struct PagedCacheReservationDelta {
@@ -71,6 +86,8 @@ struct PagedCacheReservationDelta {
   size_t reserved_window_block_count{};
   size_t advance_block_offset{};
   size_t advance_block_count{};
+  size_t adopted_block_offset{};
+  size_t adopted_block_count{};
   bool newly_admitted{};
 };
 
@@ -105,7 +122,8 @@ class PagedCacheReservation {
                         std::span<const PagedCacheReservationRequest> requests,
                         BlockPool* window_block_pool = nullptr,
                         size_t window_ring_blocks = 0,
-                        RequestIndex* table_index = nullptr);
+                        RequestIndex* table_index = nullptr,
+                        BlockReclaimer* reclaimer = nullptr);
   PagedCacheReservation(PagedCacheReservation&& other) noexcept;
   PagedCacheReservation& operator=(PagedCacheReservation&&) = delete;
   PagedCacheReservation(const PagedCacheReservation&) = delete;
@@ -119,6 +137,9 @@ class PagedCacheReservation {
   }
   const std::vector<std::shared_ptr<Block>>& ReservedWindowBlocks() const {
     return reserved_window_blocks_;
+  }
+  const std::vector<std::shared_ptr<Block>>& AdoptedBlocks() const {
+    return adopted_blocks_;
   }
   size_t RequiredBlockTableColumns() const;
   const std::vector<PagedCacheReservationDelta>& Deltas() const { return deltas_; }
@@ -178,6 +199,7 @@ class PagedCacheReservation {
   RequestIndex resident_table_index_;
   std::vector<std::shared_ptr<Block>> reserved_blocks_;
   std::vector<std::shared_ptr<Block>> reserved_window_blocks_;
+  std::vector<std::shared_ptr<Block>> adopted_blocks_;
   std::vector<PagedCacheReservationDelta> deltas_;
   RequestIndex delta_index_;
   mutable std::vector<uint64_t> delta_visit_generations_;
