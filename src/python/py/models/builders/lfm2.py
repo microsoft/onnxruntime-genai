@@ -18,9 +18,14 @@ class LFM2Model(Model):
         # LFM2-specific attributes
         self.layernorm_attrs["epsilon"] = config.norm_eps
 
+        self.make_intermediate_size_init(config)
+
+        self.conv_L_cache = config.conv_L_cache
+
+    def make_intermediate_size_init(self, config):
         # Calculate the dynamic intermediate_size for the MLP.
         intermediate_size = config.intermediate_size
-        if getattr(config, "block_auto_adjust_ff_dim", False):
+        if config.block_auto_adjust_ff_dim:
             intermediate_size = int(2 * intermediate_size / 3)
             if config.block_ffn_dim_multiplier is not None:
                 intermediate_size = int(config.block_ffn_dim_multiplier * intermediate_size)
@@ -28,8 +33,6 @@ class LFM2Model(Model):
                     (intermediate_size + config.block_multiple_of - 1) // config.block_multiple_of
                 )
         self.intermediate_size = intermediate_size
-
-        self.conv_L_cache = config.conv_L_cache
 
     def make_attention_init(self, config):
         self.attention_attrs["q_norm"] = True
@@ -227,6 +230,10 @@ class LFM2MoEModel(LFM2Model):
             # TRT-RTX EP builds currently require QMoE swiglu_limit to be present;
             # use +inf to preserve the "no clamp" behavior when the model omits it.
             self.moe_attrs["swiglu_limit"] = float("inf")
+
+    def make_intermediate_size_init(self, config):
+        # Lfm2MoeConfig has no block_auto_adjust_ff_dim: the dense layers use intermediate_size as is.
+        self.intermediate_size = config.intermediate_size
 
     def make_feed_forward(self, layer_id, layer, root_input):
         if layer_id < self.num_dense_layers:

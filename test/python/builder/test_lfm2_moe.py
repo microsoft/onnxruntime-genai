@@ -317,6 +317,29 @@ def test_lfm2_moe_rejects_unnormalized_topk(monkeypatch):
         LFM2MoEModel(config, ir.DataType.FLOAT, ir.DataType.FLOAT, "cpu", None, {})
 
 
+def test_lfm2_dense_intermediate_size_honors_block_auto_adjust():
+    # Dense LFM2 keeps transformers' FFN width adjustment and does not default the flag away.
+    model = LFM2Model.__new__(LFM2Model)
+    config = types.SimpleNamespace(
+        intermediate_size=12288,
+        block_auto_adjust_ff_dim=True,
+        block_ffn_dim_multiplier=1.0,
+        block_multiple_of=256,
+    )
+    model.make_intermediate_size_init(config)
+    assert model.intermediate_size == 8192
+
+    with pytest.raises(AttributeError, match="block_auto_adjust_ff_dim"):
+        model.make_intermediate_size_init(types.SimpleNamespace(intermediate_size=12288))
+
+
+def test_lfm2_moe_intermediate_size_uses_config_value():
+    # Lfm2MoeConfig has no block_auto_adjust_ff_dim; the dense layers use intermediate_size as is.
+    model = LFM2MoEModel.__new__(LFM2MoEModel)
+    model.make_intermediate_size_init(types.SimpleNamespace(intermediate_size=7168))
+    assert model.intermediate_size == 7168
+
+
 @pytest.mark.parametrize("ep", ["cpu", "trt-rtx"])
 def test_lfm2_moe_init_configures_fused_swiglu(monkeypatch, ep):
     monkeypatch.setattr(LFM2Model, "__init__", _stub_base_init)
