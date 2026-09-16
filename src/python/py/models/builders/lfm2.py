@@ -269,8 +269,7 @@ class LFM2MoEModel(LFM2Model):
         logits_shape = ["batch_size * sequence_length", num_experts]
         selected_shape = ["batch_size * sequence_length", top_k]
 
-        # The router is a [E, H] matrix; keep it in floating point so int4 rounding cannot flip
-        # the discrete expert choice.
+        # Keep the router in floating point so int4 rounding cannot flip an expert choice.
         moe.gate.exclude_from_quantization = True
         matmul_name = self.make_matmul(moe.gate, f"{basename}/MatMul", root_input)
         reshape_name = f"{basename}/Reshape"
@@ -290,7 +289,6 @@ class LFM2MoEModel(LFM2Model):
         self.make_sigmoid(sigmoid_name, logits_name, ir.DataType.FLOAT, shape=logits_shape)
         scores_name = f"{sigmoid_name}/output_0"
 
-        # Expert selection: top-k of the bias-corrected scores.
         selection_name = scores_name
         if self.use_expert_bias:
             expert_bias_name = f"model.layers.{layer_id}.moe.expert_bias"
@@ -307,7 +305,6 @@ class LFM2MoEModel(LFM2Model):
             name=topk_name,
             axis=-1,
             largest=True,
-            sorted=True,
         )
         self.make_value(topk_outputs[0], ir.DataType.FLOAT, shape=selected_shape)
         self.make_value(topk_outputs[1], ir.DataType.INT64, shape=selected_shape)

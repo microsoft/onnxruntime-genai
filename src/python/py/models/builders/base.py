@@ -5236,11 +5236,9 @@ class Model:
         use_blockwise_quant = self.ep in supported_blockwise_eps and self.quant_attrs["qmoe_block_size"] > 0
 
         if use_blockwise_quant:
-            # Non-CUDA QMoE ships raw [N, K/pack] weights quantized with ONNX Runtime's MatMulNBits
-            # blockwise quantizer (signed block scales, the MLAS "default" convention): each block's
-            # max-magnitude element maps exactly to qmin, so no extreme is clipped. This is also the
-            # grid the CPU QMoE kernel's MLAS Q4 fast path (ORT_USE_MLAS_Q4_GEMM_MOE=1) re-quantizes
-            # to, which makes that path lossless instead of a "known accuracy-loss" case.
+            # Non-CUDA QMoE ships raw [N, K/pack] weights on ONNX Runtime's MatMulNBits grid (signed block
+            # scales, so no extreme is clipped). The CPU kernel's MLAS Q4 fast path (ORT_USE_MLAS_Q4_GEMM_MOE=1)
+            # re-quantizes to this same grid, which makes it lossless.
             block_size = self.quant_attrs["qmoe_block_size"]
             try:
                 qweight, scales = self._matmulnbits_blockwise_quantize(weights)

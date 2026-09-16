@@ -133,7 +133,7 @@ def test_lfm2_moe_router_selects_with_bias_and_mixes_without(io_dtype):
     assert by_name["Add"].inputs == [f"{r}/Sigmoid/output_0", "model.layers.3.moe.expert_bias"]
     assert model.initializers["model.layers.3.moe.expert_bias"][1] == ir.DataType.FLOAT
     assert by_name["TopK"].inputs == [f"{r}/Add/output_0", "/model/constants/INT64/[2]"]
-    assert by_name["TopK"].attrs == {"axis": -1, "largest": True, "sorted": True}
+    assert by_name["TopK"].attrs == {"axis": -1, "largest": True}
     indices = f"{r}/TopK/output_1"
 
     # Mixing: log(sigmoid) (no bias) gathered at the selected experts, scattered over a sentinel row.
