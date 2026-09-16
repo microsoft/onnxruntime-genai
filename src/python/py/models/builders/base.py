@@ -1031,8 +1031,7 @@ class Model:
 
         # MXFP4 and NVFP4 both resolve to the "mx" kind; the QMoE op tells them apart by dtype name
         # ("mxfp4" -> op "fp4", "nvfp4" -> op "nvfp4"). Integer dtypes use the plain "int" QMoE path.
-        # These are the exact keys read by make_moe_op / make_qmoe_op / make_moe_expert_initializers;
-        # writing any other name here is a silent no-op that leaves the `moe_attrs` defaults in place.
+        # Key names must match what make_moe_op / make_qmoe_op / make_moe_expert_initializers read; a typo here is a silent no-op.
         self.moe_attrs["op_type"] = "QMoE" if moe_descriptor.is_quantized else "MoE"
         if moe_descriptor.kind == "mx":
             self.moe_attrs["quant_type"] = "nvfp4" if moe_descriptor.name == "nvfp4" else "fp4"
