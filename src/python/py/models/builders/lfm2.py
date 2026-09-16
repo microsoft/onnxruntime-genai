@@ -369,7 +369,9 @@ class LFM2MoEModel(LFM2Model):
     def make_moe_router_shape(self, last_dim=None):
         return ["batch_size * sequence_length", self.moe_attrs["num_experts"] if last_dim is None else last_dim]
 
-    def make_moe_subgraph(self, layer_id, moe, root_input, router_probs):
+    def make_moe_subgraph(self, layer_id, moe, root_input, router_probs=None):
+        if router_probs is None:
+            raise ValueError("LFM2-MoE needs the masked router scores returned by make_moe_router.")
         basename = f"/model/layers.{layer_id}/moe"
         op_type = self.moe_attrs["op_type"]
         names = self.make_moe_expert_names(layer_id)

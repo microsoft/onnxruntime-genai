@@ -5078,7 +5078,9 @@ class Model:
     def make_moe_router(self, layer_id, moe, root_input):
         raise NotImplementedError("MoE router construction must be implemented by the model class.")
 
-    def make_moe_subgraph(self, layer_id, moe, root_input):
+    def make_moe_subgraph(self, layer_id, moe, root_input, router_probs=None):
+        # `router_probs` is whatever the model's `make_moe_router` returned; models whose router output
+        # is addressed by name (e.g. `.../router/Reshape/output_0`) leave it as None.
         raise NotImplementedError("MoE subgraph construction must be implemented by the model class.")
 
     def make_moe_op(self, name, **kwargs):

@@ -292,6 +292,13 @@ def test_lfm2_moe_subgraph_feeds_masked_router_probs(monkeypatch, op_type):
     assert model.layernorm_attrs["skip_input"] == f"/model/layers.4/moe/{op_type}/output_0"
 
 
+def test_lfm2_moe_subgraph_requires_router_probs(monkeypatch):
+    model = _recording_model(ir.DataType.FLOAT16)
+    monkeypatch.setattr(model, "make_moe_op", lambda name, **kwargs: None)
+    with pytest.raises(ValueError, match="make_moe_router"):
+        model.make_moe_subgraph(4, _moe_module(), "hidden")
+
+
 def test_lfm2_moe_subgraph_applies_routed_scaling_factor(monkeypatch):
     model = _recording_model(ir.DataType.FLOAT16, routed_scaling_factor=2.5)
     monkeypatch.setattr(model, "make_moe_op", lambda name, **kwargs: None)
