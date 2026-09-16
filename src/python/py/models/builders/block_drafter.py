@@ -34,6 +34,11 @@ class BlockDrafterBuilder:
     # Records the quantized LM head `make_lm_head_nbits` left unpopulated for
     # `adopt_target_lm_head` to fill from the saved target.
     lm_head_adoption = None
+    # Set only when the target quantizes its embedding table into `GatherBlockQuantized`.
+    embed_quant = None
+    # Records the quantized embedding `make_embedding` left unpopulated for
+    # `adopt_target_embedding` to fill from the saved target.
+    embed_adoption = None
 
     def make_graph(self, graph_name, const_prefix):
         self.values: dict[str, ir.Value] = {}
@@ -220,6 +225,71 @@ class BlockDrafterBuilder:
         if want_sum:
             self.make_value(summed_output, self.io_dtype, [rows, self.hidden_size])
         return output, (summed_output if want_sum else None)
+
+    def make_embedding(self, name, rows):
+        """Emit the embedding lookup over the *target's* table and return its output value name.
+
+        A quantized target writes `GatherBlockQuantized` over `model.embed_tokens.weight_Q{bits}`
+        instead of a dense `Gather`. The drafter has to match it, or `share_initializers` finds
+        no common name and the drafter keeps a full dense copy of the largest tensor in the model.
+        No weights are produced for the quantized form: `adopt_target_embedding` copies the
+        target's once it has been saved.
+        """
+        output = self.out(name)
+        if self.embed_quant is None:
+            self.make_initializer(self.weights["embed_tokens.weight"], "model.embed_tokens.weight", to=self.external_dtype)
+            self.make_node("Gather", ["model.embed_tokens.weight", "input_ids"], [output], name=name)
+        else:
+            bits = self.embed_quant["bits"]
+            qweight_name = f"model.embed_tokens.weight_Q{bits}"
+            scales_name = "model.embed_tokens.weight_scales"
+            node = self.make_node(
+                "GatherBlockQuantized",
+                [qweight_name, "input_ids", scales_name],
+                [output],
+                name=name,
+                domain="com.microsoft",
+                block_size=self.embed_quant["block_size"],
+                gather_axis=0,
+                quantize_axis=1,
+            )
+            self.embed_adoption = {"node": node, "initializers": (qweight_name, scales_name)}
+        self.make_value(output, self.external_dtype, [rows, self.hidden_size])
+        return output
+
+    def adopt_target_embedding(self, target_model_path):
+        """Take the embedding table's quantized bytes and attributes from the saved target model."""
+        adoption = self.embed_adoption
+        if adoption is None:
+            return
+        qweight_name, scales_name = adoption["initializers"]
+        target = ir.load(target_model_path)
+        target_node = next(
+            (
+                node
+                for node in target.graph
+                if node.op_type == "GatherBlockQuantized"
+                and [value.name for value in node.inputs if value is not None][:1] == [qweight_name]
+            ),
+            None,
+        )
+        if target_node is None:
+            raise ValueError(
+                f"The block drafter quantized its embedding, but '{os.path.basename(target_model_path)}' has no "
+                f"GatherBlockQuantized over '{qweight_name}'. Both models embed with the same table, so a "
+                "mismatch here means the drafter would propose from a different input space than the target."
+            )
+        for initializer_name in adoption["initializers"]:
+            tensor = target.graph.initializers[initializer_name].const_value
+            value = self.make_value(initializer_name, tensor.dtype, tensor.shape)
+            value.const_value = tensor
+            self.graph.register_initializer(value)
+        node = adoption["node"]
+        for attribute_name in list(node.attributes):
+            del node.attributes[attribute_name]
+        for attribute_name, attribute in target_node.attributes.items():
+            node.attributes[attribute_name] = attribute
+        self.embed_adoption = None
 
     def make_lm_head(self, root, rows="num_block"):
         weight = self.weights["lm_head.weight"]
@@ -417,6 +487,8 @@ class BlockDrafterBuilder:
     def save_model(self, out_dir):
         if self.lm_head_adoption is not None:
             raise ValueError("adopt_target_lm_head must run before saving a drafter with a quantized LM head.")
+        if self.embed_adoption is not None:
+            raise ValueError("adopt_target_embedding must run before saving a drafter with a quantized embedding.")
         out_path = os.path.join(out_dir, self.filename)
         data_path = out_path + ".data"
         with tempfile.TemporaryDirectory(dir=out_dir, prefix=f".{self.filename}.") as staging_dir:

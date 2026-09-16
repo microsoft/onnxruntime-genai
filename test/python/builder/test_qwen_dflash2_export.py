@@ -61,6 +61,15 @@ def _composite(aux_layers=AUX_LAYERS, use_paged_attention=True):
         head_size=128,
         num_layers=32,
         filename="model.onnx",
+        exclude_embeds=False,
+        onnx_dtype=ir.DataType.FLOAT16,
+        quantization_algo="default",
+        quant_attrs={
+            "op_types_to_quantize": ("MatMul",),
+            "nodes_to_exclude": [],
+            "is_symmetric": True,
+            "matmul_block_size": 32,
+        },
         attention_attrs={"paged_block_size": 256},
         context_length=32768,
         original_context_length=131072,
@@ -605,6 +614,121 @@ def test_saving_before_adoption_is_rejected(tmp_path):
 
     with pytest.raises(ValueError, match="adopt_target_lm_head"):
         builder.save_model(str(tmp_path))
+
+
+def _quantized_embedding_target(out_dir, builder, bits=4, block_size=64):
+    columns = builder.hidden_size // block_size
+    qweight = ir.tensor(
+        np.arange(builder.vocab_size * builder.hidden_size, dtype=np.uint8).reshape(
+            builder.vocab_size, builder.hidden_size
+        )
+        % 16,
+        dtype=ir.DataType.INT4,
+        name=f"model.embed_tokens.weight_Q{bits}",
+    )
+    scales = np.arange(builder.vocab_size * columns, dtype=np.float16).reshape(builder.vocab_size, columns)
+    node = onnx.helper.make_node(
+        "GatherBlockQuantized",
+        [f"model.embed_tokens.weight_Q{bits}", "input_ids", "model.embed_tokens.weight_scales"],
+        ["embeddings"],
+        # The quantizer renames the target's node, so the drafter cannot find it by name.
+        name="/model/embed_tokens/Gather_Q4",
+        domain="com.microsoft",
+        block_size=block_size,
+        gather_axis=0,
+        quantize_axis=1,
+    )
+    graph = onnx.helper.make_graph(
+        [node],
+        "target",
+        [onnx.helper.make_tensor_value_info("input_ids", onnx.TensorProto.INT64, ["rows"])],
+        [onnx.helper.make_tensor_value_info("embeddings", onnx.TensorProto.FLOAT16, ["rows", builder.hidden_size])],
+        [
+            ir.to_proto(qweight),
+            onnx.numpy_helper.from_array(scales, "model.embed_tokens.weight_scales"),
+        ],
+    )
+    model = onnx.helper.make_model(
+        graph,
+        opset_imports=[onnx.helper.make_opsetid("", 21), onnx.helper.make_opsetid("com.microsoft", 1)],
+    )
+    path = os.path.join(out_dir, "model.onnx")
+    onnx.save_model(model, path, save_as_external_data=True, location="model.onnx.data", size_threshold=0)
+    return path, qweight.numpy(), scales
+
+
+def _quantized_embedding_builder(tmp_path, block_size=64):
+    builder = _quantized_head_builder(tmp_path)
+    builder.embed_quant = {"bits": 4, "block_size": block_size}
+    builder.weights["embed_tokens.weight"] = torch.ones((builder.vocab_size, builder.hidden_size))
+    return builder
+
+
+def test_a_dense_target_leaves_the_drafter_embedding_dense(tmp_path):
+    builder = _quantized_head_builder(tmp_path)
+    builder.weights["embed_tokens.weight"] = torch.ones((builder.vocab_size, builder.hidden_size))
+
+    builder.make_embedding("/dflash2/embed_tokens/Gather", "num_sample")
+
+    node = next(node for node in builder.graph if node.name == "/dflash2/embed_tokens/Gather")
+    assert node.op_type == "Gather"
+    assert "model.embed_tokens.weight" in builder.graph.initializers
+    assert builder.embed_adoption is None
+
+
+def test_quantized_embedding_matches_the_targets_initializer_names(tmp_path):
+    builder = _quantized_embedding_builder(tmp_path)
+
+    output = builder.make_embedding("/dflash2/embed_tokens/Gather", "num_sample")
+
+    node = next(node for node in builder.graph if node.name == "/dflash2/embed_tokens/Gather")
+    assert node.op_type == "GatherBlockQuantized"
+    assert [value.name for value in node.inputs] == [
+        "model.embed_tokens.weight_Q4",
+        "input_ids",
+        "model.embed_tokens.weight_scales",
+    ]
+    # The table is the target's, so nothing is quantized or registered until adoption.
+    assert "model.embed_tokens.weight_Q4" not in builder.graph.initializers
+    assert builder.values[output].dtype == ir.DataType.FLOAT16
+
+
+def test_quantized_embedding_adopts_the_targets_bytes_and_attributes(tmp_path):
+    builder = _quantized_embedding_builder(tmp_path, block_size=8)
+    builder.make_embedding("/dflash2/embed_tokens/Gather", "num_sample")
+    target_path, qweight, scales = _quantized_embedding_target(tmp_path, builder, block_size=64)
+
+    builder.adopt_target_embedding(target_path)
+
+    initializers = builder.graph.initializers
+    np.testing.assert_array_equal(initializers["model.embed_tokens.weight_Q4"].const_value.numpy(), qweight)
+    np.testing.assert_array_equal(initializers["model.embed_tokens.weight_scales"].const_value.numpy(), scales)
+    node = next(node for node in builder.graph if node.name == "/dflash2/embed_tokens/Gather")
+    # The target's block size comes across with its bytes rather than being recomputed.
+    assert node.attributes["block_size"].value == 64
+    assert node.attributes["gather_axis"].value == 0
+    assert builder.embed_adoption is None
+
+
+def test_saving_before_embedding_adoption_is_rejected(tmp_path):
+    builder = _quantized_embedding_builder(tmp_path)
+    builder.make_embedding("/dflash2/embed_tokens/Gather", "num_sample")
+
+    with pytest.raises(ValueError, match="adopt_target_embedding"):
+        builder.save_model(str(tmp_path))
+
+
+def test_a_target_embedding_the_drafter_cannot_adopt_is_rejected(tmp_path):
+    builder = _quantized_embedding_builder(tmp_path)
+    builder.make_embedding("/dflash2/embed_tokens/Gather", "num_sample")
+    initializers = {"model.embed_tokens.weight": np.ones((builder.vocab_size, builder.hidden_size), dtype=np.float16)}
+    node = onnx.helper.make_node(
+        "Gather", ["model.embed_tokens.weight", "hidden_states"], ["logits"], name="/model/embed_tokens/Gather"
+    )
+    target_path = _save_target(tmp_path, node, initializers, builder.hidden_size, builder.vocab_size)
+
+    with pytest.raises(ValueError, match="different input space"):
+        builder.adopt_target_embedding(target_path)
 
 
 def test_a_target_head_the_drafter_cannot_adopt_is_rejected(tmp_path):

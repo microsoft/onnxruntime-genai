@@ -57,6 +57,7 @@ class DFlash2Builder(BlockDrafterBuilder):
         filename="dflash2.onnx",
         num_draft_tokens=None,
         quant=None,
+        embed_quant=None,
         fuse_gate_up=False,
     ):
         self.draft_dir = draft_dir
@@ -72,6 +73,7 @@ class DFlash2Builder(BlockDrafterBuilder):
             self.quant_block_size = quant["block_size"]
             self.quant_prepack = quant["prepack"]
             self.lm_head_quant = quant["lm_head"]
+        self.embed_quant = embed_quant
         self.filename = filename
         self.paged_block_size = paged_block_size
         self.mlp_attrs = {"fuse_gate_up": fuse_gate_up}
@@ -302,15 +304,7 @@ class DFlash2Builder(BlockDrafterBuilder):
             ctx_kv.append((k, v))
 
         # --- query path ---
-        self.make_initializer(w["embed_tokens.weight"], "model.embed_tokens.weight", to=self.external_dtype)
-        emb_ext = self.binary(
-            "Gather",
-            "/dflash2/embed_tokens/Gather",
-            "model.embed_tokens.weight",
-            "input_ids",
-            self.external_dtype,
-            [rows_q, self.hidden_size],
-        )
+        emb_ext = self.make_embedding("/dflash2/embed_tokens/Gather", rows_q)
         emb = self.unary(
             "Cast", "/dflash2/embed_tokens/Cast", emb_ext, self.io_dtype, [rows_q, self.hidden_size], to=self.io_dtype
         )

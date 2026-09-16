@@ -949,7 +949,8 @@ class Qwen35MoEModel(MTPModel):
             num_mtp_layers = getattr(config, "mtp_num_hidden_layers", 0)
         self.mtp_attrs["build"] = (num_mtp_layers or 0) > 0
         self.mtp_attrs["shared_initializer_names"] = {"model.embed_tokens.weight"}
-        self.mtp_attrs["shared_initializer_prefixes"] = ("lm_head.MatMul.",)
+        # `_` catches the quantized table's `weight_Q4` / `weight_scales` pair.
+        self.mtp_attrs["shared_initializer_prefixes"] = ("lm_head.MatMul.", "model.embed_tokens.weight_")
 
         block_drafter = self.requested_block_drafter(extra_options)
         if self.mtp_attrs["build"] and block_drafter:
@@ -1159,6 +1160,29 @@ class Qwen35MoEModel(MTPModel):
         quant["lm_head"] = {"bits": head_bits, "block_size": block_size}
         return quant
 
+    def block_drafter_embed_quant(self):
+        """Resolve the target's quantized embedding table, or ``None`` if the drafter keeps a dense one.
+
+        The drafter embeds with the target's table, so when the target quantizes it the drafter has
+        to emit the same ``GatherBlockQuantized`` over the same initializers. Emitting a dense
+        ``Gather`` instead costs a second, unshareable copy of the largest tensor in either graph.
+        """
+        decoder = self.decoder
+        if decoder.exclude_embeds or decoder.onnx_dtype not in {ir.DataType.INT4, ir.DataType.UINT4}:
+            return None
+        if "Gather" not in decoder.quant_attrs["op_types_to_quantize"]:
+            return None
+        if "/model/embed_tokens/Gather" in decoder.quant_attrs["nodes_to_exclude"]:
+            return None
+        # Only the symmetric/`default` convention names the table `*.weight_Q4` / `*.weight_scales`.
+        if decoder.quantization_algo != "default" or not decoder.quant_attrs["is_symmetric"]:
+            print(
+                f"Leaving the block drafter's embedding dense: the target quantizes it with "
+                f"'{decoder.quantization_algo}', whose initializer names this exporter does not know how to reuse."
+            )
+            return None
+        return {"bits": 4, "block_size": int(decoder.quant_attrs["matmul_block_size"])}
+
     def make_dflash2_init(self, io_dtype, extra_options):
         """DFlash 2 block drafter, exported as an auxiliary ``dflash2.onnx``.
 
@@ -1218,6 +1242,7 @@ class Qwen35MoEModel(MTPModel):
             self.decoder.context_length,
             num_draft_tokens=self.dflash2_attrs["num_draft_tokens"],
             quant=self.block_drafter_quant(self.dflash2_attrs["precision"]),
+            embed_quant=self.block_drafter_embed_quant(),
             fuse_gate_up=self.dflash2_attrs["fuse_gate_up"],
         )
         self.dflash2.make_model()
@@ -1225,7 +1250,9 @@ class Qwen35MoEModel(MTPModel):
     def save_dflash2_model(self, output_dir):
         if self.dflash2 is None:
             return
-        self.dflash2.adopt_target_lm_head(os.path.join(output_dir, self.decoder.filename))
+        target_model_path = os.path.join(output_dir, self.decoder.filename)
+        self.dflash2.adopt_target_lm_head(target_model_path)
+        self.dflash2.adopt_target_embedding(target_model_path)
         self.dflash2.save_model(output_dir)
         self.dflash2_shared_initializers = self.share_initializers(
             output_dir, self.decoder.filename, self.dflash2.filename
@@ -1341,13 +1368,16 @@ class Qwen35MoEModel(MTPModel):
             self.decoder.context_length,
             num_draft_tokens=self.dspark_attrs["num_draft_tokens"],
             top_k=self.dspark_attrs["top_k"],
+            embed_quant=self.block_drafter_embed_quant(),
         )
         self.dspark.make_model()
 
     def save_dspark_model(self, output_dir):
         if self.dspark is None:
             return
-        self.dspark.adopt_target_lm_head(os.path.join(output_dir, self.decoder.filename))
+        target_model_path = os.path.join(output_dir, self.decoder.filename)
+        self.dspark.adopt_target_lm_head(target_model_path)
+        self.dspark.adopt_target_embedding(target_model_path)
         self.dspark.save_model(output_dir)
         self.dspark_shared_initializers = self.share_initializers(
             output_dir, self.decoder.filename, self.dspark.filename
