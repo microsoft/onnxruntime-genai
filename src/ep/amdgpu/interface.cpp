@@ -193,6 +193,24 @@ struct InterfaceImpl : DeviceInterface {
     ort_memory_info_ = &ort_allocator_->GetInfo();
   }
 
+  // Forward the umbrella "profile" option into the trivial init session created by
+  // EnsureDeviceOrtInit. The AMDGPU umbrella EP resolves its backend (DirectX/MIGraphX/HIP) — and
+  // therefore which allocator it hands out — from this profile. Without it the init session routes
+  // via the Auto heuristic (defaulting to MIGraphX on gfx11/gfx12), so the cached device allocator
+  // is a HIP allocator while the real model runs on DirectX. The resulting HIP pointer then faults
+  // when the DirectX data-transfer tries to decode it. Copying profile makes the init session pick
+  // the same backend as the model, so the cached allocator matches.
+  void ShapeInitSessionProviderOptions(Config::ProviderOptions& init_options,
+                                       const Config::ProviderOptions* user_options) const override {
+    if (user_options) {
+      for (const auto& opt : user_options->options) {
+        if (opt.first == "profile") {
+          init_options.options.emplace_back(opt);
+        }
+      }
+    }
+  }
+
   Ort::Allocator& GetAllocator() override {
     return *ort_allocator_;
   }
@@ -296,6 +314,10 @@ struct PinnedInputsImpl : DeviceInterface {
   Ort::Allocator* GetHostAccessibleAllocator() override { return base_.PinnedAllocator(); }
   std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override { return base_.GetMemoryInfo(); }
   std::string GetExecutionProviderName() const override { return base_.GetExecutionProviderName(); }
+  void ShapeInitSessionProviderOptions(Config::ProviderOptions& init_options,
+                                       const Config::ProviderOptions* user_options) const override {
+    base_.ShapeInitSessionProviderOptions(init_options, user_options);
+  }
 
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
     return std::make_shared<PinnedMemory>(size, base_.PinnedAllocator());
