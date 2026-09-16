@@ -837,7 +837,7 @@ def test_qwen3_5_hybrid_graph_capture_advances_recurrent_state_webgpu(test_data_
     }
     (text_config_path / "genai_config.json").write_text(json.dumps(text_config), encoding="utf-8")
 
-    def run(run_model_path, enable_graph_capture, multimodal):
+    def run(run_model_path, enable_graph_capture, multimodal, test_rewind):
         config = og.Config(os.fspath(run_model_path))
         config.clear_providers()
         config.append_provider("webgpu")
@@ -848,10 +848,10 @@ def test_qwen3_5_hybrid_graph_capture_advances_recurrent_state_webgpu(test_data_
         params = og.GeneratorParams(model)
         params.set_search_options(do_sample=False, max_length=8)
         generator = og.Generator(model, params)
-        prompt = [10, 20, 30, 40]
+        prompt = [151652, 151655, 10, 20]
         if multimodal:
             inputs = og.NamedTensors()
-            inputs["input_ids"] = np.asarray([prompt], dtype=np.int64)
+            inputs["input_ids"] = np.asarray([prompt], dtype=np.int32)
             inputs["pixel_values"] = np.zeros((4, 1536), dtype=np.float32)
             inputs["image_grid_thw"] = np.asarray([[1, 2, 2]], dtype=np.int64)
             inputs["num_image_tokens"] = np.asarray([1], dtype=np.int64)
@@ -859,18 +859,18 @@ def test_qwen3_5_hybrid_graph_capture_advances_recurrent_state_webgpu(test_data_
         else:
             generator.append_tokens(prompt)
 
-        # Stop after an odd number of forwards so the double buffers are in their noncanonical
-        # direction, then exercise full rewind and reuse of the same generator.
+        # Exercise each direction of the recurrent-state double buffers. For the standard decoder,
+        # stop in the noncanonical direction and also verify its existing full-rewind support.
         state_values_before_rewind = [float(np.asarray(generator.get_logits()).reshape(-1)[0])]
-        for _ in range(2):
+        for _ in range(2 if test_rewind else 3):
             generator.generate_next_token()
             state_values_before_rewind.append(float(np.asarray(generator.get_logits()).reshape(-1)[0]))
 
+        if not test_rewind:
+            return state_values_before_rewind, None
+
         generator.rewind_to(0)
-        if multimodal:
-            generator.set_inputs(inputs)
-        else:
-            generator.append_tokens(prompt)
+        generator.append_tokens(prompt)
         state_values_after_rewind = [float(np.asarray(generator.get_logits()).reshape(-1)[0])]
         for _ in range(3):
             generator.generate_next_token()
@@ -880,12 +880,16 @@ def test_qwen3_5_hybrid_graph_capture_advances_recurrent_state_webgpu(test_data_
 
     # The fixture increments its recurrent state once per forward and exposes the previous value
     # through logits. Values 2 and 3 require both graph-buffer variants to be rebound and replayed;
-    # the second sequence also verifies that rewind restored the prompt pipeline and canonical
-    # buffer direction. Exercise both state implementations enabled by this change.
-    expected = ([0.0, 1.0, 2.0], [0.0, 1.0, 2.0, 3.0])
-    for run_model_path, multimodal in ((model_path, True), (text_config_path, False)):
-        eager_state_values = run(run_model_path, enable_graph_capture=False, multimodal=multimodal)
-        captured_state_values = run(run_model_path, enable_graph_capture=True, multimodal=multimodal)
+    # the second text-only sequence also verifies that rewind restored the canonical buffer
+    # direction. Exercise both state implementations enabled by this change without adding new
+    # rewind behavior to multimodal generators.
+    for run_model_path, multimodal, test_rewind in (
+        (model_path, True, False),
+        (text_config_path, False, True),
+    ):
+        eager_state_values = run(run_model_path, False, multimodal, test_rewind)
+        captured_state_values = run(run_model_path, True, multimodal, test_rewind)
+        expected = ([0.0, 1.0, 2.0], [0.0, 1.0, 2.0, 3.0]) if test_rewind else ([0.0, 1.0, 2.0, 3.0], None)
         assert eager_state_values == expected
         assert captured_state_values == eager_state_values
 

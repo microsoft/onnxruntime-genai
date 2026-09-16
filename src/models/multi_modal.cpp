@@ -716,14 +716,6 @@ DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& nex
   return logits_.Get();
 }
 
-void DecoderState::RewindTo(size_t index) {
-  position_inputs_->RewindTo(index);
-  if (kv_cache_)
-    kv_cache_->RewindTo(index);
-  if (recurrent_state_)
-    recurrent_state_->RewindTo(index);
-}
-
 bool DecoderState::SupportsPrefillChunking(bool has_multimodal_content) const {
   // Chunking slices the pre-computed embeddings along the sequence dimension, which is only
   // contiguous for a single sequence. Continuous decoding of position ids/attention mask in
@@ -843,23 +835,22 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& 
 }
 
 void MultiModalPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
-  extra_inputs_ = extra_inputs;
-  num_image_tokens_ = GetNumImageTokens(extra_inputs_);
-  num_audio_tokens_ = GetNumAudioTokens(extra_inputs_, model_.config_->model.speech.inputs.audio_sizes);
-  num_images_ = GetImageFeatureBatchSize(extra_inputs_);
+  num_image_tokens_ = GetNumImageTokens(extra_inputs);
+  num_audio_tokens_ = GetNumAudioTokens(extra_inputs, model_.config_->model.speech.inputs.audio_sizes);
+  num_images_ = GetImageFeatureBatchSize(extra_inputs);
 
   if (model_.vision_session_) {
-    vision_state_->SetExtraInputs(extra_inputs_, num_images_, num_image_tokens_);
+    vision_state_->SetExtraInputs(extra_inputs, num_images_, num_image_tokens_);
   }
   if (model_.speech_session_) {
-    speech_state_->SetExtraInputs(extra_inputs_, num_audio_tokens_);
+    speech_state_->SetExtraInputs(extra_inputs, num_audio_tokens_);
   }
   embedding_state_->SetExtraInputs(num_images_, num_image_tokens_, num_audio_tokens_);
   // Set the grid tensors for Qwen2-VL if present
   if (auto* qwen_pos_inputs = dynamic_cast<Qwen2VLPositionInputs*>(decoder_state_->position_inputs_.get())) {
     std::shared_ptr<Tensor> img_grid, vid_grid, sec_grid;
 
-    for (const auto& input : extra_inputs_) {
+    for (const auto& input : extra_inputs) {
       if (input.name == Config::Defaults::ImageGridThwName) {
         img_grid = input.tensor;
       } else if (input.name == "video_grid_thw") {
@@ -948,23 +939,6 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
   }
   embedding_state_->Run(current_length, next_tokens, next_indices);
   return decoder_state_->Run(current_length, next_tokens, next_indices);
-}
-
-void MultiModalPipelineState::RewindTo(size_t index) {
-  decoder_state_->RewindTo(index);
-  if (index != 0) {
-    return;
-  }
-
-  // Prompt execution consumes and releases the modality states. A full rewind makes the same
-  // generator reusable, so restore the prompt pipeline and rebind the inputs retained by the
-  // generator rather than continuing with the empty generation-stage feature tensors.
-  const auto extra_inputs = extra_inputs_;
-  is_prompt_ = true;
-  vision_state_ = model_.vision_session_ ? CreateVisionState(model_, *params_) : nullptr;
-  speech_state_ = model_.speech_session_ ? std::make_unique<SpeechState>(model_, *params_) : nullptr;
-  embedding_state_ = std::make_unique<EmbeddingState>(model_, *params_);
-  SetExtraInputs(extra_inputs);
 }
 
 OrtValue* MultiModalPipelineState::GetInput(const char* name) {

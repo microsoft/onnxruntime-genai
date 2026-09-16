@@ -177,7 +177,6 @@ struct DecoderState : State {
   DecoderState& operator=(const DecoderState&) = delete;
 
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
-  void RewindTo(size_t index) override;
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int current_length, DeviceSpan<int32_t> beam_indices);
 
   // Prefill chunking (see search.chunk_size). The embedding model still runs once over the whole
@@ -215,8 +214,6 @@ struct MultiModalPipelineState : State {
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices) override;
 
-  void RewindTo(size_t index) override;
-
   OrtValue* GetInput(const char* name) override;
 
   OrtValue* GetOutput(const char* name) override;
@@ -234,7 +231,6 @@ struct MultiModalPipelineState : State {
   std::unique_ptr<EmbeddingState> embedding_state_;
   std::unique_ptr<DecoderState> decoder_state_;
   std::shared_ptr<Adapters> adapters_;
-  std::vector<ExtraInput> extra_inputs_;
   bool is_prompt_{true};
 
   const std::string vision_adapter_name_{"vision"};
