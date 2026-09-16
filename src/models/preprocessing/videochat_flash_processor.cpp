@@ -10,9 +10,35 @@
 #include "models/model.h"
 #include "models/preprocessing/genai_tokenizer.h"
 #include "models/preprocessing/videochat_flash_processor.h"
+#include "models/threadpool.h"
 #include <regex>
 
 namespace Generators {
+
+void TransposeVideoChatFlashHwcToChw(ThreadPool* thread_pool, const float* source,
+                                     float* destination, int64_t num_images,
+                                     int64_t channels, int64_t height, int64_t width) {
+  if (num_images > 0 && channels > std::numeric_limits<std::ptrdiff_t>::max() / num_images) {
+    throw std::overflow_error("VideoChatFlash channel-plane count exceeds ptrdiff_t range");
+  }
+  const auto total_planes = static_cast<std::ptrdiff_t>(num_images * channels);
+  const int64_t plane_size = height * width;
+  ThreadPool::TryParallelFor(
+      thread_pool, total_planes, static_cast<double>(plane_size),
+      [&](std::ptrdiff_t first, std::ptrdiff_t last) {
+        for (auto plane = first; plane < last; ++plane) {
+          const int64_t image = static_cast<int64_t>(plane) / channels;
+          const int64_t channel = static_cast<int64_t>(plane) % channels;
+          const float* src_image = source + image * plane_size * channels;
+          float* dst_plane = destination + static_cast<int64_t>(plane) * plane_size;
+          for (int64_t h = 0; h < height; ++h) {
+            for (int64_t w = 0; w < width; ++w) {
+              dst_plane[h * width + w] = src_image[(h * width + w) * channels + channel];
+            }
+          }
+        }
+      });
+}
 
 namespace {
 
@@ -174,14 +200,8 @@ std::unique_ptr<NamedTensors> VideoChatFlashProcessor::Process(const Tokenizer& 
     float* dst = float_tensor->GetTensorMutableData<float>();
 
     if (is_hwc) {
-      for (int64_t n = 0; n < num_imgs; ++n) {
-        const float* src_img = pv_data + n * height * width * channels;
-        float* dst_img = dst + n * channels * height * width;
-        for (int64_t c = 0; c < channels; ++c)
-          for (int64_t h = 0; h < height; ++h)
-            for (int64_t w = 0; w < width; ++w)
-              dst_img[c * height * width + h * width + w] = src_img[h * width * channels + w * channels + c];
-      }
+      TransposeVideoChatFlashHwcToChw(thread_pool_, pv_data, dst, num_imgs, channels,
+                                      height, width);
     } else {
       std::copy(pv_data, pv_data + count, dst);
     }

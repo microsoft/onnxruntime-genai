@@ -20,11 +20,13 @@
 namespace Generators {
 
 std::shared_ptr<MultiModalProcessor> Model::CreateMultiModalProcessor() const {
-  return std::make_shared<MultiModalProcessor>(*config_, session_info_);
+  return std::make_shared<MultiModalProcessor>(*config_, session_info_, preprocessing_thread_pool_);
 }
 
-MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& session_info)
+MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& session_info,
+                                         std::shared_ptr<ThreadPool> thread_pool)
     : tokenizer_{std::make_shared<Tokenizer>(config)},
+      thread_pool_{std::move(thread_pool)},
       processor_factory_{
           {"phi3v", Processor::Create<PhiImageProcessor>},
           {"whisper", Processor::Create<WhisperProcessor>},
@@ -41,7 +43,7 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
           {"videochat_flash_qwen", Processor::Create<VideoChatFlashProcessor>}} {
   auto processor = processor_factory_.find(config.model.type);
   if (processor != processor_factory_.end()) {
-    processor_ = processor->second(config, session_info);
+    processor_ = processor->second(config, session_info, thread_pool_.get());
   } else {
     throw std::runtime_error("MultiModalProcessor cannot be created. " + config.model.type + " is not a registered multi-modal model type.");
   }

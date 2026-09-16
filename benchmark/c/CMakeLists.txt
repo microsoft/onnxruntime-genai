@@ -31,3 +31,16 @@ target_link_libraries(model_benchmark PRIVATE onnxruntime-genai ${ONNXRUNTIME_LI
 target_link_directories(model_benchmark PRIVATE ${ORT_LIB_DIR})
 
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${model_benchmark_srcs})
+
+add_executable(parallel_preprocessing_benchmark
+  ${CMAKE_CURRENT_SOURCE_DIR}/parallel_preprocessing_benchmark.cpp)
+target_include_directories(parallel_preprocessing_benchmark PRIVATE
+  ${ORT_HEADER_DIR}
+  ${onnxruntime_extensions_SOURCE_DIR}/shared/api
+  ${CMAKE_SOURCE_DIR}/src
+)
+target_link_libraries(parallel_preprocessing_benchmark PRIVATE onnxruntime-genai-obj)
+add_dependencies(parallel_preprocessing_benchmark onnxruntime-genai)
+set_target_properties(parallel_preprocessing_benchmark PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
+)

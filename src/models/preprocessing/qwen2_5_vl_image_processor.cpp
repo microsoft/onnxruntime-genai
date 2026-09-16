@@ -5,11 +5,52 @@
 #include "models/model.h"
 #include "models/preprocessing/genai_tokenizer.h"
 #include "models/preprocessing/qwen2_5_vl_image_processor.h"
+#include "models/threadpool.h"
 #include <limits>
 #include <numeric>
 #include <regex>
 
 namespace Generators {
+
+void ExtractQwenImagePatches(ThreadPool* thread_pool, const float* source, float* destination,
+                             int64_t height, int64_t width, int64_t channels,
+                             int64_t patch_size, int64_t temporal_patch_size) {
+  const int64_t height_patches = height / patch_size;
+  const int64_t width_patches = width / patch_size;
+  const int64_t total_patches = height_patches * width_patches;
+  const int64_t spatial_patch_dim = channels * patch_size * patch_size;
+  const int64_t patch_dim = temporal_patch_size * spatial_patch_dim;
+  if (total_patches > std::numeric_limits<std::ptrdiff_t>::max()) {
+    throw std::overflow_error("Image patch count exceeds ptrdiff_t range");
+  }
+
+  ThreadPool::TryParallelFor(
+      thread_pool, static_cast<std::ptrdiff_t>(total_patches), static_cast<double>(patch_dim),
+      [&](std::ptrdiff_t first, std::ptrdiff_t last) {
+        for (auto patch_idx = first; patch_idx < last; ++patch_idx) {
+          const int64_t ph = static_cast<int64_t>(patch_idx) / width_patches;
+          const int64_t pw = static_cast<int64_t>(patch_idx) % width_patches;
+          const int64_t h_start = ph * patch_size;
+          const int64_t w_start = pw * patch_size;
+          float* patch_output = destination + static_cast<int64_t>(patch_idx) * patch_dim;
+
+          int64_t write_idx = 0;
+          for (int64_t c = 0; c < channels; ++c) {
+            for (int64_t h = 0; h < patch_size; ++h) {
+              for (int64_t w = 0; w < patch_size; ++w) {
+                const int64_t src_idx =
+                    (h_start + h) * width * channels + (w_start + w) * channels + c;
+                patch_output[write_idx++] = source[src_idx];
+              }
+            }
+          }
+          for (int64_t t = 1; t < temporal_patch_size; ++t) {
+            std::memcpy(patch_output + t * spatial_patch_dim, patch_output,
+                        static_cast<size_t>(spatial_patch_dim) * sizeof(float));
+          }
+        }
+      });
+}
 
 namespace {
 
@@ -288,32 +329,8 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
           allocator, std::vector<int64_t>{1, total_patches, patch_dim});
       auto* patched_data = patched_pixel_values->GetTensorMutableData<float>();
 
-      // Extract patches from single image in HWC format
-      // Each spatial patch is replicated kTemporalPatchSize times
-      int64_t patch_idx = 0;
-      for (int64_t ph = 0; ph < height_patches; ++ph) {
-        for (int64_t pw = 0; pw < width_patches; ++pw) {
-          int64_t h_start = ph * kPatchSize;
-          int64_t w_start = pw * kPatchSize;
-
-          int64_t write_idx = patch_idx * patch_dim;
-
-          // Repeat the same spatial patch kTemporalPatchSize times
-          // Output: [temporal, channels, patch_h, patch_w]
-          for (int64_t t = 0; t < kTemporalPatchSize; ++t) {
-            for (int64_t c = 0; c < channels; ++c) {
-              for (int64_t h = 0; h < kPatchSize; ++h) {
-                for (int64_t w = 0; w < kPatchSize; ++w) {
-                  // HWC format: pixel_values[height][width][channels]
-                  int64_t src_idx = (h_start + h) * width * channels + (w_start + w) * channels + c;
-                  patched_data[write_idx++] = pixel_values_data[src_idx];
-                }
-              }
-            }
-          }
-          patch_idx++;
-        }
-      }
+      ExtractQwenImagePatches(thread_pool_, pixel_values_data, patched_data, height, width,
+                              channels, kPatchSize, kTemporalPatchSize);
 
       // Create image_grid_thw: [1, 3] for single image
       if (status != kOrtxOK || !image_grid_thw) {

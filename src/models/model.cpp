@@ -27,6 +27,7 @@
 #include "../search.h"
 #include "../tracing.h"
 #include "model.h"
+#include "threadpool.h"
 #include "model_package.h"
 #include "gpt.h"
 #include "decoder_only.h"
@@ -485,6 +486,10 @@ std::vector<const char*> SessionInfo::GetOutputSymbolicShape(const std::string& 
 }
 
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
+  const size_t hardware_threads = std::thread::hardware_concurrency();
+  const size_t preprocessing_workers =
+      hardware_threads > 1 ? std::min<size_t>(3, hardware_threads / 2) : 0;
+  preprocessing_thread_pool_ = std::make_shared<ThreadPool>(preprocessing_workers);
   CreateSessionOptions();
   EnsureDeviceOrtInit(*p_device_, *config_);
   AddSharedInitializers();

@@ -47,6 +47,7 @@ struct Payload {
 
 struct Config;
 struct SessionInfo;
+class ThreadPool;
 
 template <typename T>
 std::unique_ptr<OrtValue> ProcessTensor(OrtxTensor* tensor, Ort::Allocator& allocator);
@@ -60,16 +61,22 @@ void EmplaceProcessedTensor(NamedTensors& tensors, std::string_view name,
                             Ort::Allocator& allocator);
 
 struct Processor {
-  Processor() = default;
+  explicit Processor(ThreadPool* thread_pool = nullptr) : thread_pool_{thread_pool} {}
   Processor(const Processor&) = delete;
   Processor& operator=(const Processor&) = delete;
 
   template <typename ProcessorType>
-  static std::shared_ptr<Processor> Create(Config& config, const SessionInfo& session_info) {
-    return std::make_shared<ProcessorType>(config, session_info);
+  static std::shared_ptr<Processor> Create(Config& config, const SessionInfo& session_info,
+                                           ThreadPool* thread_pool) {
+    auto processor = std::make_shared<ProcessorType>(config, session_info);
+    processor->thread_pool_ = thread_pool;
+    return processor;
   }
 
   virtual std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const Payload& payload) const = 0;
+
+ protected:
+  ThreadPool* thread_pool_{};
 };
 
 }  // namespace Generators

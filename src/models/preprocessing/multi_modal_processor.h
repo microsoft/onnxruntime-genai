@@ -19,9 +19,11 @@ struct Images;
 struct Processor;
 struct SessionInfo;
 struct Tokenizer;
+class ThreadPool;
 
 struct MultiModalProcessor : std::enable_shared_from_this<MultiModalProcessor>, ExternalRefCounted<MultiModalProcessor> {
-  MultiModalProcessor(Config& config, const SessionInfo& session_info);
+  MultiModalProcessor(Config& config, const SessionInfo& session_info,
+                      std::shared_ptr<ThreadPool> thread_pool);
 
   std::unique_ptr<NamedTensors> Process(const std::string& prompt, const Images* images, const Audios* audios) const;
   std::unique_ptr<NamedTensors> Process(std::span<const char*> prompts, const Images* images, const Audios* audios) const;
@@ -30,7 +32,10 @@ struct MultiModalProcessor : std::enable_shared_from_this<MultiModalProcessor>, 
   std::shared_ptr<Processor> processor_;
 
  private:
-  std::unordered_map<std::string, std::function<std::shared_ptr<Processor>(Config&, const SessionInfo&)>> processor_factory_;
+  std::shared_ptr<ThreadPool> thread_pool_;
+  std::unordered_map<std::string, std::function<std::shared_ptr<Processor>(
+                                      Config&, const SessionInfo&, ThreadPool*)>>
+      processor_factory_;
 };
 
 }  // namespace Generators
