@@ -1207,7 +1207,7 @@ class Model:
             # each turn with a different token, so make the fallback visible rather than silent.
             print(f"Warning: could not read generation_config.json ({e}). Falling back to config.json.")
 
-        config.eos_token_id = self.union_chat_eos_token_ids(config, extra_kwargs)
+        bos_token_id, eos_token_id, pad_token_id = self.resolve_special_token_ids(config, extra_kwargs)
 
         # Create inputs dict
         inputs = {}
@@ -1262,15 +1262,6 @@ class Model:
         if "state_update.recurrent_capsule" in self.output_names:
             outputs["state_update_recurrent_capsule_names"] = "state_update.%d.recurrent_capsule"
 
-        bos_token_id = config.bos_token_id if getattr(config, "bos_token_id", None) is not None else 1
-        eos_token_id = config.eos_token_id
-        pad_token_id = (
-            config.pad_token_id
-            if getattr(config, "pad_token_id", None) is not None
-            else config.eos_token_id[0]
-            if isinstance(config.eos_token_id, list)
-            else config.eos_token_id
-        )
         genai_config = {
             "model": {
                 "bos_token_id": bos_token_id,
@@ -1508,8 +1499,8 @@ class Model:
             return [shape[0], shape[1], shape[2].replace("sequence", "sliding"), shape[3]]
         return shape
 
-    def union_chat_eos_token_ids(self, config, extra_kwargs):
-        """Return the EOS ids plus the tokenizer's end-of-turn token.
+    def resolve_special_token_ids(self, config, extra_kwargs):
+        """Resolve special-token IDs and include the tokenizer's end-of-turn token in EOS.
 
         A chat model ends every assistant turn with the tokenizer's ``eos_token`` (for
         Qwen that is ``<|im_end|>``), but ``config.json`` frequently records only
@@ -1518,26 +1509,50 @@ class Model:
         writing the following turns itself, which is especially visible with tool calls:
         it invents the tool's result instead of yielding to the caller.
         """
-        eos_token_id = config.eos_token_id
-        ids = list(eos_token_id) if isinstance(eos_token_id, list) else [eos_token_id]
-
         try:
             tokenizer = AutoTokenizer.from_pretrained(
                 self.model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs
             )
-            turn_end_id = tokenizer.convert_tokens_to_ids(tokenizer.eos_token)
         except Exception as e:
-            print(f"Warning: could not resolve the tokenizer's EOS token ({e}).")
-            return eos_token_id
+            print(f"Warning: could not resolve tokenizer special tokens ({e}).")
+            tokenizer = None
+
+        text_config = getattr(config, "text_config", None)
+
+        def resolve(attribute):
+            for source in (config, text_config, tokenizer):
+                value = getattr(source, attribute, None) if source is not None else None
+                if value is not None:
+                    return value
+            return None
+
+        bos_token_id = resolve("bos_token_id")
+        eos_token_id = resolve("eos_token_id")
+        pad_token_id = resolve("pad_token_id")
+
+        if bos_token_id is None:
+            bos_token_id = 1
+        if eos_token_id is None:
+            raise ValueError("Could not resolve eos_token_id from the model config, text config, or tokenizer")
+
+        ids = list(eos_token_id) if isinstance(eos_token_id, list) else [eos_token_id]
+        turn_end_id = tokenizer.convert_tokens_to_ids(tokenizer.eos_token) if tokenizer is not None else None
 
         if turn_end_id is None or turn_end_id in ids:
-            return eos_token_id
+            resolved_eos_token_id = eos_token_id
+        else:
+            print(
+                f"Adding the tokenizer's end-of-turn token {tokenizer.eos_token} (id {turn_end_id}) "
+                f"to eos_token_id, which config.json reported as {eos_token_id}."
+            )
+            resolved_eos_token_id = [turn_end_id, *ids]
 
-        print(
-            f"Adding the tokenizer's end-of-turn token {tokenizer.eos_token} (id {turn_end_id}) "
-            f"to eos_token_id, which config.json reported as {eos_token_id}."
-        )
-        return [turn_end_id] + ids
+        if pad_token_id is None:
+            pad_token_id = (
+                resolved_eos_token_id[0] if isinstance(resolved_eos_token_id, list) else resolved_eos_token_id
+            )
+
+        return bos_token_id, resolved_eos_token_id, pad_token_id
 
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
         tokenizer = AutoTokenizer.from_pretrained(

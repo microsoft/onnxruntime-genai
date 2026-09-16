@@ -107,6 +107,31 @@ def _write_config(monkeypatch, tmp_path, model):
     return json.loads((tmp_path / "genai_config.json").read_text())
 
 
+def test_composite_config_resolves_nested_and_tokenizer_special_token_ids(monkeypatch, tmp_path):
+    hf_config = SimpleNamespace(
+        text_config=SimpleNamespace(bos_token_id=None, eos_token_id=248044, pad_token_id=None)
+    )
+    tokenizer = SimpleNamespace(
+        bos_token_id=None,
+        eos_token="<|im_end|>",
+        eos_token_id=248046,
+        pad_token_id=248044,
+        convert_tokens_to_ids=lambda _token: 248046,
+    )
+    monkeypatch.setattr(base_module, "GenerationConfig", _NoGenerationConfig)
+    monkeypatch.setattr(base_module.AutoTokenizer, "from_pretrained", lambda *_args, **_kwargs: tokenizer)
+
+    model = _make_config_model(Qwen35TextModel)
+    model.model_name_or_path = "Qwen/Qwen3.5-2B"
+    config = Model.make_genai_config.__get__(model)
+    config(hf_config, {}, str(tmp_path))
+
+    output = json.loads((tmp_path / "genai_config.json").read_text())["model"]
+    assert output["bos_token_id"] == 1
+    assert output["eos_token_id"] == [248046, 248044]
+    assert output["pad_token_id"] == 248044
+
+
 def _recording_model():
     model = Model.__new__(Model)
     model.io_dtype = base_module.ir.DataType.FLOAT16
