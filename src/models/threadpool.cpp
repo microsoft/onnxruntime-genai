@@ -10,7 +10,7 @@
 namespace Generators {
 namespace {
 
-constexpr double kMinimumParallelCost = 16384.0;
+constexpr double kMinimumParallelCost = 65536.0;
 thread_local bool is_thread_pool_callback = false;
 
 struct CallbackScope {

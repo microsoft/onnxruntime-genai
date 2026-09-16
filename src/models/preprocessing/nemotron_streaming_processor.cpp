@@ -185,8 +185,7 @@ std::unique_ptr<OrtValue> NemotronStreamingProcessor::BuildMelTensor(const float
   }
   auto signal_shape = std::array<int64_t, 3>{1, total_mel_frames, num_mels};
   auto processed_signal = OrtValue::CreateTensor(allocator, signal_shape, signal_type);
-  PopulateMelTensor(model_.GetPreprocessingThreadPool(), *processed_signal,
-                     mel_pre_encode_cache_, cache_pos_,
+  PopulateMelTensor(nullptr, *processed_signal, mel_pre_encode_cache_, cache_pos_,
                     mel_data, num_frames, num_mels);
 
   UpdateMelCache(mel_pre_encode_cache_, cache_pos_, mel_data, num_frames, num_mels);
