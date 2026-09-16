@@ -81,7 +81,12 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         public ReadOnlySpan<TokenTiming> GetNextTokensWithTimings()
         {
-            throw new NotImplementedException("Timed token retrieval is not implemented in this declaration scaffold.");
+            Result.VerifySuccess(NativeMethods.OgaGenerator_GetNextTokensWithTimings(
+                _generatorHandle, out IntPtr tokens, out UIntPtr tokenCount));
+            unsafe
+            {
+                return new ReadOnlySpan<TokenTiming>(tokens.ToPointer(), (int)tokenCount.ToUInt64());
+            }
         }
 
         public ReadOnlySpan<int> GetSequence(ulong index)

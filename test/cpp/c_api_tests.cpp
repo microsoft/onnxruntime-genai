@@ -183,7 +183,6 @@ TEST(CAPITests, TokenizerCAPI) {
 TEST(CAPITests, TokenizerCreateFromConfigAndPath) {
 #if TEST_PHI2
   const char* input_string = "She sells sea shells by the sea shore.";
-
   auto config = OgaConfig::Create(PHI2_PATH);
   auto tokenizer_from_config = OgaTokenizer::Create(*config);
   auto tokenizer_from_path = OgaTokenizer::Create(PHI2_PATH);
@@ -197,6 +196,75 @@ TEST(CAPITests, TokenizerCreateFromConfigAndPath) {
   auto out_string = tokenizer_from_path->Decode(input_sequences->SequenceData(0), input_sequences->SequenceCount(0));
   ASSERT_STREQ(input_string, out_string);
 #endif
+}
+
+TEST(CAPITests, TokenizerStreamTimestampDecode) {
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->Overlay(R"({"model":{
+    "type":"nemotron_speech",
+    "timestamp_level":"all",
+    "segment_separators":["."],
+    "sample_rate":100,
+    "hop_length":10,
+    "subsampling_factor":1
+  }})");
+  auto tokenizer = OgaTokenizer::Create(*config);
+  auto plain_stream = OgaTokenizerStream::Create(*tokenizer);
+  auto timestamp_stream = OgaTokenizerStream::Create(*tokenizer);
+
+  auto sequences = OgaSequences::Create();
+  constexpr std::string_view input{"Hello world."};
+  tokenizer->Encode(input.data(), *sequences);
+
+  std::string plain_text;
+  std::string timestamp_text;
+  std::vector<std::string> words;
+  std::vector<std::string> segments;
+  const auto collect = [&words, &segments](const OgaTimestampDecodeResult& result) {
+    for (size_t index = 0; index < result.GetWordCount(); ++index) {
+      const char* text;
+      int64_t start_frame;
+      int64_t stop_frame;
+      double start_time;
+      double stop_time;
+      OgaCheckResult(OgaTimestampDecodeResultGetWord(&result, index, &text, &start_frame, &stop_frame,
+                                                      &start_time, &stop_time));
+      words.emplace_back(text);
+      EXPECT_LT(start_frame, stop_frame);
+      EXPECT_LE(start_time, stop_time);
+    }
+    for (size_t index = 0; index < result.GetSegmentCount(); ++index) {
+      const char* text;
+      int64_t start_frame;
+      int64_t stop_frame;
+      double start_time;
+      double stop_time;
+      OgaCheckResult(OgaTimestampDecodeResultGetSegment(&result, index, &text, &start_frame, &stop_frame,
+                                                         &start_time, &stop_time));
+      segments.emplace_back(text);
+    }
+  };
+
+  const auto token_ids = sequences->Get(0);
+  for (size_t index = 0; index < token_ids.size(); ++index) {
+    plain_text += plain_stream->Decode(token_ids[index]);
+    const OgaTokenTiming timing{token_ids[index], static_cast<int64_t>(index), static_cast<int64_t>(index + 1)};
+    const auto& result = timestamp_stream->DecodeWithTimestamps(timing);
+    timestamp_text += result.GetText();
+    collect(result);
+  }
+  collect(timestamp_stream->FinalizeTimestamps());
+
+  EXPECT_EQ(plain_text, input);
+  EXPECT_EQ(timestamp_text, plain_text);
+  EXPECT_EQ(words, (std::vector<std::string>{"Hello", " world."}));
+  EXPECT_EQ(segments, (std::vector<std::string>{"Hello world."}));
+  EXPECT_EQ(std::accumulate(words.begin(), words.end(), std::string{}), plain_text);
+  EXPECT_EQ(std::accumulate(segments.begin(), segments.end(), std::string{}), plain_text);
+  EXPECT_THROW(timestamp_stream->Decode(token_ids[0]), std::runtime_error);
+
+  timestamp_stream->Reset();
+  EXPECT_NO_THROW(timestamp_stream->Decode(token_ids[0]));
 }
 
 TEST(CAPITests, EncodeBatchEmptyInputThrows) {
@@ -563,6 +631,7 @@ TEST(CAPITests, MarianBatchWithBeamsIOContract) {
   ASSERT_EQ(next_tokens.size(), expected_tokens.size());
   for (size_t beam = 0; beam < expected_tokens.size(); ++beam)
     EXPECT_EQ(next_tokens[beam], expected_tokens[beam]) << "beam " << beam;
+  EXPECT_TRUE(generator->GetNextTokensWithTimings().empty());
 }
 
 TEST(CAPITests, EndToEndPhi) {

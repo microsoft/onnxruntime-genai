@@ -901,6 +901,10 @@ size_t Generator::TokenCount() const {
   return static_cast<size_t>(search_->GetSequenceLength());
 }
 
+std::span<const TokenTiming> Generator::GetNextTokensWithTimings() const {
+  return transducer_state_ ? transducer_state_->GetStepTokenTimings() : std::span<const TokenTiming>{};
+}
+
 bool Generator::IsDone() {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
 

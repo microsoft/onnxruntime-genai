@@ -30,6 +30,8 @@ var configJson = JsonDocument.Parse(File.ReadAllText(Path.Combine(modelPath, "ge
 var modelConfig = configJson.RootElement.GetProperty("model");
 int sampleRate = modelConfig.GetProperty("sample_rate").GetInt32();
 int chunkSize = modelConfig.GetProperty("chunk_samples").GetInt32();
+bool timestampsEnabled = modelConfig.TryGetProperty("timestamp_level", out var timestampLevel) &&
+                         timestampLevel.GetString() != "off";
 
 // Load audio, convert to mono, and resample to match the model's expected sample rate
 float[] audio = LoadAudio(audioFile, sampleRate);
@@ -60,6 +62,8 @@ using var genParams = new GeneratorParams(model);
 using var generator = new Generator(model, genParams);
 Console.WriteLine(new string('-', 60));
 string fullTranscript = "";
+var words = new List<TimestampRecord>();
+var segments = new List<TimestampRecord>();
 int chunksTotal = 0;
 int chunksProcessed = 0;
 int chunksSkipped = 0;
@@ -74,7 +78,7 @@ for (int i = 0; i < audio.Length; i += chunkSize) {
   if (inputs != null) {
     chunksProcessed++;
     generator.SetInputs(inputs);
-    fullTranscript += DecodeTokens(generator, tokenizerStream);
+    fullTranscript += DecodeTokens(generator, tokenizerStream, timestampsEnabled, words, segments);
   } else {
     chunksSkipped++;
   }
@@ -84,24 +88,49 @@ for (int i = 0; i < audio.Length; i += chunkSize) {
 using var flushInputs = processor.Flush();
 if (flushInputs != null) {
   generator.SetInputs(flushInputs);
-  fullTranscript += DecodeTokens(generator, tokenizerStream);
+  fullTranscript += DecodeTokens(generator, tokenizerStream, timestampsEnabled, words, segments);
+}
+
+if (timestampsEnabled) {
+  var result = tokenizerStream.FinalizeTimestamps();
+  words.AddRange(result.Words);
+  segments.AddRange(result.Segments);
 }
 
 Console.WriteLine($"\n{new string('=', 60)}");
 Console.WriteLine($"  {fullTranscript.Trim()}");
 Console.WriteLine(new string('=', 60));
+if (timestampsEnabled) {
+  foreach (var record in words)
+    Console.WriteLine($"  word [{record.StartTime:F2}, {record.StopTime:F2}): {record.Text}");
+  foreach (var record in segments)
+    Console.WriteLine($"  segment [{record.StartTime:F2}, {record.StopTime:F2}): {record.Text}");
+}
 if (useVad == "true") {
   double pctSaved = chunksTotal > 0 ? (double)chunksSkipped / chunksTotal * 100.0 : 0.0;
   Console.WriteLine($"  VAD Metrics: {chunksTotal} total chunks, {chunksProcessed} processed, " +
                     $"{chunksSkipped} skipped ({pctSaved:F1}% compute saved)");
 }
 
-static string DecodeTokens(Generator generator, TokenizerStream tokenizerStream) {
+static string DecodeTokens(Generator generator, TokenizerStream tokenizerStream, bool timestampsEnabled,
+                           List<TimestampRecord> words, List<TimestampRecord> segments) {
   string text = "";
   while (!generator.IsDone()) {
     generator.GenerateNextToken();
-    var tokens = generator.GetNextTokens();
-    if (tokens.Length > 0) {
+    if (timestampsEnabled) {
+      foreach (var token in generator.GetNextTokensWithTimings()) {
+        var result = tokenizerStream.DecodeWithTimestamps(token);
+        words.AddRange(result.Words);
+        segments.AddRange(result.Segments);
+        if (!string.IsNullOrEmpty(result.Text)) {
+          Console.Write(result.Text);
+          text += result.Text;
+        }
+      }
+    } else {
+      var tokens = generator.GetNextTokens();
+      if (tokens.Length == 0)
+        continue;
       string tokenText = tokenizerStream.Decode(tokens[0]);
       if (!string.IsNullOrEmpty(tokenText)) {
         Console.Write(tokenText);

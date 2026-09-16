@@ -23,6 +23,16 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         public double StopTime { get; }
     }
 
+    /// <summary>
+    /// Contains text decoded by one stream operation and the word and segment
+    /// records completed by that operation.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="Words"/> and <see cref="Segments"/> are event lists, not
+    /// cumulative history. Either list may be empty or may contain multiple
+    /// records when one decoded token spans multiple boundaries. Callers must
+    /// retain records when they need transcription history.
+    /// </remarks>
     public sealed class TimestampDecodeResult
     {
         internal TimestampDecodeResult(string text, IReadOnlyList<TimestampRecord> words, IReadOnlyList<TimestampRecord> segments)

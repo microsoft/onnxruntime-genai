@@ -4,12 +4,121 @@
 #include "genai_tokenizer.h"
 
 #include "models/model.h"
+#include "models/model_type.h"
+#include "models/transducer_state.h"
 #include "models/preprocessing/tokenizer_tag_utils.h"
 #include "tensor.h"
 
 #include <algorithm>
+#include <cmath>
+#include <cctype>
 
 namespace Generators {
+
+namespace {
+double RoundTimestamp(double value) {
+  return std::round(value * 100.0) / 100.0;
+}
+
+bool EndsWithSeparator(std::string_view text, std::string_view separator) {
+  while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back()))) {
+    text.remove_suffix(1);
+  }
+  return !separator.empty() && text.ends_with(separator);
+}
+}  // namespace
+
+TimestampDecodeState::TimestampDecodeState(const TimestampTokenizerConfig& config)
+    : level_{config.level},
+      segment_separators_{config.segment_separators},
+      segment_gap_threshold_frames_{config.segment_gap_threshold_frames} {
+  if (config.sample_rate <= 0 || config.hop_length <= 0 || config.subsampling_factor <= 0) {
+    throw std::runtime_error("Timestamp decoding requires positive sample_rate, hop_length, and subsampling_factor");
+  }
+  seconds_per_frame_ = static_cast<double>(config.hop_length) * config.subsampling_factor / config.sample_rate;
+}
+
+void TimestampDecodeState::ClearResult() {
+  result_.text.clear();
+  result_.words.clear();
+  result_.segments.clear();
+}
+
+void TimestampDecodeState::CompleteSegment() {
+  if (!pending_segment_.active) return;
+
+  if (level_ == Config::TimestampLevel::Segment || level_ == Config::TimestampLevel::All) {
+    result_.segments.push_back({pending_segment_.text,
+                                pending_segment_.start_frame,
+                                pending_segment_.stop_frame,
+                                RoundTimestamp(pending_segment_.start_frame * seconds_per_frame_),
+                                RoundTimestamp(pending_segment_.stop_frame * seconds_per_frame_)});
+  }
+  pending_segment_ = {};
+}
+
+void TimestampDecodeState::PublishWord(std::string_view word_text, int64_t start_frame, int64_t stop_frame) {
+  if (level_ == Config::TimestampLevel::Word || level_ == Config::TimestampLevel::All) {
+    result_.words.push_back({std::string{word_text},
+                             start_frame,
+                             stop_frame,
+                             RoundTimestamp(start_frame * seconds_per_frame_),
+                             RoundTimestamp(stop_frame * seconds_per_frame_)});
+  }
+
+  if (level_ == Config::TimestampLevel::Segment || level_ == Config::TimestampLevel::All) {
+    if (pending_segment_.active && segment_gap_threshold_frames_ &&
+        start_frame - pending_segment_.stop_frame >= *segment_gap_threshold_frames_) {
+      CompleteSegment();
+    }
+
+    if (!pending_segment_.active) {
+      pending_segment_ = {std::string{word_text}, start_frame, stop_frame, true};
+    } else {
+      pending_segment_.text.append(word_text);
+      pending_segment_.stop_frame = stop_frame;
+    }
+
+    const bool ends_segment = std::any_of(segment_separators_.begin(), segment_separators_.end(),
+                                          [&word_text](const std::string& separator) {
+                                            return EndsWithSeparator(word_text, separator);
+                                          });
+    if (ends_segment) CompleteSegment();
+  }
+}
+
+void TimestampDecodeState::ConsumeCompletedWords(const OrtxDetokenizeMetadata& metadata) {
+  for (size_t index = 0; index < metadata.word_count; ++index) {
+    const auto& word = metadata.words[index];
+    if (word.text == nullptr || word.start_token_index < first_pending_token_index_ ||
+        word.stop_token_index <= word.start_token_index ||
+        word.stop_token_index > first_pending_token_index_ + pending_token_timings_.size()) {
+      throw std::runtime_error("Tokenizer returned an invalid completed-word token span");
+    }
+    const auto& first_timing = pending_token_timings_[word.start_token_index - first_pending_token_index_];
+    const auto& last_timing = pending_token_timings_[word.stop_token_index - first_pending_token_index_ - 1];
+    PublishWord(word.text, first_timing.start_frame, last_timing.stop_frame);
+  }
+
+  if (metadata.first_pending_token_index < first_pending_token_index_ ||
+      metadata.first_pending_token_index > first_pending_token_index_ + pending_token_timings_.size()) {
+    throw std::runtime_error("Tokenizer returned an invalid pending-token watermark");
+  }
+  while (first_pending_token_index_ < metadata.first_pending_token_index) {
+    pending_token_timings_.pop_front();
+    ++first_pending_token_index_;
+  }
+}
+
+void TimestampDecodeState::Consume(const TokenTiming& token, const OrtxDetokenizeMetadata& metadata) {
+  pending_token_timings_.push_back({token.start_frame, token.stop_frame});
+  ConsumeCompletedWords(metadata);
+}
+
+void TimestampDecodeState::Finalize(const OrtxDetokenizeMetadata& metadata) {
+  ConsumeCompletedWords(metadata);
+  CompleteSegment();
+}
 
 std::vector<int32_t> PadInputs(std::span<std::span<const int32_t>> sequences, int32_t pad_token_id) {
   bool pad_right_{true};
@@ -45,10 +154,67 @@ TokenizerStream::TokenizerStream(const Tokenizer& tokenizer)
 }
 
 const std::string& TokenizerStream::Decode(int32_t token) {
+  if (tokenizer_->timestamp_config_) {
+    if (decode_mode_ == DecodeMode::Timestamps) {
+      throw std::runtime_error("Cannot mix Decode and DecodeWithTimestamps before Reset");
+    }
+    decode_mode_ = DecodeMode::Text;
+  }
   const char* string;
   CheckResult(OrtxDetokenizeCached(tokenizer_->tokenizer_, cache_, token, &string));
   chunk_ = string;
   return chunk_;
+}
+
+const TimestampDecodeResult& TokenizerStream::DecodeWithTimestamps(const TokenTiming& token) {
+  if (decode_mode_ == DecodeMode::Text) {
+    throw std::runtime_error("Cannot mix Decode and DecodeWithTimestamps before Reset");
+  }
+  if (!tokenizer_->timestamp_config_) {
+    throw std::runtime_error("Timestamp decoding is not enabled for this tokenizer");
+  }
+  if (token.start_frame < 0 || token.stop_frame <= token.start_frame) {
+    throw std::runtime_error("Token timestamp interval must satisfy 0 <= start_frame < stop_frame");
+  }
+
+  decode_mode_ = DecodeMode::Timestamps;
+  if (!timestamp_state_) {
+    timestamp_state_ = std::make_unique<TimestampDecodeState>(*tokenizer_->timestamp_config_);
+  }
+  timestamp_state_->ClearResult();
+
+  const char* text;
+  OrtxDetokenizeMetadata metadata{};
+  CheckResult(OrtxDetokenizeCachedWithMetadata(tokenizer_->tokenizer_, cache_, token.token_id, &text, &metadata));
+  timestamp_state_->result_.text = text;
+  timestamp_state_->Consume(token, metadata);
+  return timestamp_state_->result_;
+}
+
+const TimestampDecodeResult& TokenizerStream::FinalizeTimestamps() {
+  if (decode_mode_ == DecodeMode::Text) {
+    throw std::runtime_error("Cannot finalize timestamps after ordinary Decode before Reset");
+  }
+  if (!tokenizer_->timestamp_config_) {
+    throw std::runtime_error("Timestamp decoding is not enabled for this tokenizer");
+  }
+  decode_mode_ = DecodeMode::Timestamps;
+  if (!timestamp_state_) {
+    timestamp_state_ = std::make_unique<TimestampDecodeState>(*tokenizer_->timestamp_config_);
+  }
+  timestamp_state_->ClearResult();
+  OrtxDetokenizeMetadata metadata{};
+  CheckResult(OrtxFinalizeDetokenizeCachedWithMetadata(cache_, &metadata));
+  timestamp_state_->Finalize(metadata);
+  return timestamp_state_->result_;
+}
+
+void TokenizerStream::Reset() {
+  OrtxDispose(&cache_.p_);
+  CheckResult(OrtxCreate(kOrtxKindDetokenizerCache, cache_.Address()));
+  chunk_.clear();
+  decode_mode_ = DecodeMode::Unset;
+  timestamp_state_.reset();
 }
 
 Tokenizer::Tokenizer(const Config& config) : bos_token_id_{config.model.bos_token_id},
@@ -65,6 +231,15 @@ Tokenizer::Tokenizer(const Config& config) : bos_token_id_{config.model.bos_toke
   // Resolve tokenizer_dir (may be empty, relative, absolute, or a "sha256:" shared-asset reference).
   const fs::path tokenizer_dir = config.ResolvePath(config.model.tokenizer_dir);
   CheckResult(OrtxCreateTokenizerWithOptions(tokenizer_.Address(), tokenizer_dir.string().c_str(), keys, values, 2));
+
+  if (ModelType::IsRNNT(config.model.type) && config.model.timestamp_level != Config::TimestampLevel::Off) {
+    timestamp_config_ = TimestampTokenizerConfig{config.model.timestamp_level,
+                                                  config.model.segment_separators,
+                                                  config.model.segment_gap_threshold_frames,
+                                                  config.model.sample_rate,
+                                                  config.model.hop_length,
+                                                  config.model.subsampling_factor};
+  }
 
   // Resolve any unset bot/eot/bor/eor IDs via model-type fallback strings.
   // Resolve any unset bot/eot/bor/eor IDs via model-type fallback.

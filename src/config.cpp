@@ -1828,8 +1828,10 @@ struct Model_Element : JSON::Element {
       return eos_token_id_;
     if (name == "tdt_durations")
       return tdt_durations_;
-    if (name == "segment_separators")
+    if (name == "segment_separators") {
+      v_.segment_separators.clear();
       return segment_separators_;
+    }
     throw JSON::unknown_value_error{};
   }
 
