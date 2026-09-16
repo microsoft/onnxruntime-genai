@@ -1409,6 +1409,8 @@ struct Vision_Element : JSON::Element {
       v_.num_visual_tokens = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "window_size") {
       v_.window_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "max_num_patches") {
+      v_.max_num_patches = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else {
       throw JSON::unknown_value_error{};
     }
