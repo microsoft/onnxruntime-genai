@@ -7,6 +7,7 @@
 #include "models/utils.h"
 #include "ortx_tokenizer.h"
 
+#include <deque>
 #include <memory>
 #include <optional>
 #include <span>
@@ -29,6 +30,9 @@ struct TimestampRecord {
   double stop_time{};
 };
 
+// words and segments contain only records completed by the current decode or
+// finalize call. A list may be empty or contain multiple records when one
+// decoded token spans multiple boundaries; callers retain any desired history.
 struct TimestampDecodeResult {
   std::string text;
   std::vector<TimestampRecord> words;
@@ -40,6 +44,11 @@ struct PendingTimestampSpan {
   int64_t start_frame{};
   int64_t stop_frame{};
   bool active{false};
+};
+
+struct BufferedTokenTiming {
+  int64_t start_frame{};
+  int64_t stop_frame{};
 };
 
 struct TimestampTokenizerConfig {
@@ -54,13 +63,23 @@ struct TimestampTokenizerConfig {
 struct TimestampDecodeState {
   explicit TimestampDecodeState(const TimestampTokenizerConfig& config);
 
+  void ClearResult();
+  void Consume(const TokenTiming& token, const OrtxDetokenizeMetadata& metadata);
+  void Finalize(const OrtxDetokenizeMetadata& metadata);
+
   Config::TimestampLevel level_{Config::TimestampLevel::Off};
   std::vector<std::string> segment_separators_;
   std::optional<int> segment_gap_threshold_frames_;
   double seconds_per_frame_{};
-  PendingTimestampSpan pending_word_;
+  std::deque<BufferedTokenTiming> pending_token_timings_;
+  size_t first_pending_token_index_{};
   PendingTimestampSpan pending_segment_;
   TimestampDecodeResult result_;
+
+ private:
+  void ConsumeCompletedWords(const OrtxDetokenizeMetadata& metadata);
+  void PublishWord(std::string_view text, int64_t start_frame, int64_t stop_frame);
+  void CompleteSegment();
 };
 
 struct TokenizerStream : LeakChecked<TokenizerStream> {

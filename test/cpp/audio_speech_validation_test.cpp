@@ -8,6 +8,7 @@
 
 #include "models/nemotron_speech.h"
 #include "models/parakeet.h"
+#include "models/preprocessing/genai_tokenizer.h"
 #include "models/whisper.h"
 
 namespace {
@@ -58,6 +59,84 @@ TEST(AudioSpeechValidationTests, NemotronEncoderOutputRankValidation) {
     Generators::ValidateNemotronEncoderOutputRank({1, 64});
   });
   EXPECT_NE(rank_error.find("rank 3"), std::string::npos);
+}
+
+TEST(AudioSpeechValidationTests, NemotronTimestampConfiguration) {
+  Generators::Config config;
+  config.model.timestamp_level = Generators::Config::TimestampLevel::All;
+  config.model.sample_rate = 16000;
+  config.model.hop_length = 160;
+  config.model.subsampling_factor = 8;
+  config.model.segment_separators = {".", "!"};
+  config.model.segment_gap_threshold_frames = 12;
+
+  Generators::NemotronConfig nemotron_config;
+  EXPECT_NO_THROW(nemotron_config.PopulateFromConfig(config));
+  EXPECT_EQ(nemotron_config.timestamp_level, Generators::Config::TimestampLevel::All);
+  EXPECT_EQ(nemotron_config.segment_separators, (std::vector<std::string>{".", "!"}));
+  EXPECT_EQ(nemotron_config.segment_gap_threshold_frames, 12);
+}
+
+TEST(AudioSpeechValidationTests, NemotronGlobalFrameUsesAbsoluteSampleOrigin) {
+  EXPECT_EQ(Generators::GetNemotronGlobalFrame(0, 3, 160, 8), 3);
+  EXPECT_EQ(Generators::GetNemotronGlobalFrame(25600, 3, 160, 8), 23);
+  EXPECT_EQ(Generators::GetNemotronGlobalFrame(16000, 3, 160, 8), 15);
+  EXPECT_THROW(Generators::GetNemotronGlobalFrame(-1, 0, 160, 8), std::runtime_error);
+}
+
+TEST(AudioSpeechValidationTests, NemotronTimestampsRequireFrameDurationParameters) {
+  Generators::Config config;
+  config.model.timestamp_level = Generators::Config::TimestampLevel::Word;
+
+  Generators::NemotronConfig nemotron_config;
+  EXPECT_THROW(nemotron_config.PopulateFromConfig(config), std::runtime_error);
+}
+
+TEST(AudioSpeechValidationTests, TimestampAccumulatorAttachesPunctuationAndCompletesSegment) {
+  Generators::TimestampTokenizerConfig config{
+      Generators::Config::TimestampLevel::All, {"."}, std::nullopt, 100, 10, 1};
+  Generators::TimestampDecodeState state{config};
+
+  state.Consume({10, 0, 1}, {nullptr, 0, 0});
+  state.ClearResult();
+  state.Consume({11, 1, 2}, {nullptr, 0, 0});
+  state.ClearResult();
+  const OrtxDetokenizedWord completed_word{" Hello.", 0, 2};
+  state.Consume({12, 3, 4}, {&completed_word, 1, 2});
+
+  ASSERT_EQ(state.result_.words.size(), 1u);
+  EXPECT_EQ(state.result_.words[0].text, " Hello.");
+  EXPECT_EQ(state.result_.words[0].start_frame, 0);
+  EXPECT_EQ(state.result_.words[0].stop_frame, 2);
+  EXPECT_DOUBLE_EQ(state.result_.words[0].stop_time, 0.2);
+  ASSERT_EQ(state.result_.segments.size(), 1u);
+  EXPECT_EQ(state.result_.segments[0].text, " Hello.");
+}
+
+TEST(AudioSpeechValidationTests, TimestampAccumulatorCompletesSegmentAtFrameGap) {
+  Generators::TimestampTokenizerConfig config{
+      Generators::Config::TimestampLevel::Segment, {}, 3, 100, 10, 1};
+  Generators::TimestampDecodeState state{config};
+
+  state.Consume({1, 0, 1}, {nullptr, 0, 0});
+  state.ClearResult();
+  const OrtxDetokenizedWord first_word{" one", 0, 1};
+  state.Consume({2, 1, 2}, {&first_word, 1, 1});
+  state.ClearResult();
+  const OrtxDetokenizedWord second_word{" two", 1, 2};
+  state.Consume({3, 8, 9}, {&second_word, 1, 2});
+  state.ClearResult();
+  const OrtxDetokenizedWord trailing_word{" three", 2, 3};
+  state.Finalize({&trailing_word, 1, 3});
+
+  EXPECT_TRUE(state.result_.words.empty());
+  ASSERT_EQ(state.result_.segments.size(), 2u);
+  EXPECT_EQ(state.result_.segments[0].text, " one two");
+  EXPECT_EQ(state.result_.segments[1].text, " three");
+
+  state.ClearResult();
+  state.Finalize({nullptr, 0, 3});
+  EXPECT_TRUE(state.result_.segments.empty());
 }
 
 TEST(AudioSpeechValidationTests, ParakeetEncoderChannelDimensionValidation) {
