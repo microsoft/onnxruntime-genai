@@ -102,6 +102,7 @@ void PleState::Update() {
     state_.inputs_[input_index_ + index] = pasts_[index].get();
     state_.outputs_[output_index_ + index] = presents_[index].get();
   }
+  if (!pasts_.empty()) graph_buffer_variant_ ^= 1;
 }
 
 void PleState::RewindTo(size_t index) {

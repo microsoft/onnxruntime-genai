@@ -924,6 +924,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         self.ple_conv_dilation = config.ngram_size
         self.ngram_size = config.ngram_size
         self.ple_token_pad_id = config.eos_token_id
+        self.rope_attrs["cast"]["use_fp32"] = False
         self.heads_per_ngram = config.heads_per_ngram
         self.indexer_num_heads = config.indexer_n_heads
         self.indexer_kv_heads = config.indexer_kv_heads
@@ -1070,41 +1071,33 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
             [*token_shape, hyper_connection.input_mix_weight_down.out_features],
         )
         silu_shape = [*token_shape, hyper_connection.input_mix_weight_down.out_features]
-        silu_cast_input = f"{basename}/input_mix_weight_down/SiLU/CastInput"
-        self.make_cast(silu_cast_input, f"{divide_name}/output_0", ir.DataType.FLOAT, silu_shape)
         silu_sigmoid = f"{basename}/input_mix_weight_down/Sigmoid"
         self.make_sigmoid(
             silu_sigmoid,
-            f"{silu_cast_input}/output_0",
-            ir.DataType.FLOAT,
+            f"{divide_name}/output_0",
+            self.io_dtype,
             silu_shape,
         )
         silu_name = f"{basename}/input_mix_weight_down/SiLU"
         self.make_mul(
             silu_name,
-            [f"{silu_cast_input}/output_0", f"{silu_sigmoid}/output_0"],
-            ir.DataType.FLOAT,
+            [f"{divide_name}/output_0", f"{silu_sigmoid}/output_0"],
+            self.io_dtype,
             silu_shape,
         )
-        silu_cast_output = f"{basename}/input_mix_weight_down/SiLU/CastOutput"
-        self.make_cast(silu_cast_output, f"{silu_name}/output_0", self.io_dtype, silu_shape)
         up_name = self.make_matmul(
             hyper_connection.input_mix_weight_up,
             f"{basename}/input_mix_weight_up/MatMul",
-            f"{silu_cast_output}/output_0",
+            f"{silu_name}/output_0",
         )
         mix_sigmoid_shape = [*token_shape, self.hc_hidden_size]
-        mix_sigmoid_cast_input = f"{basename}/input_mix_weight_up/Sigmoid/CastInput"
-        self.make_cast(mix_sigmoid_cast_input, f"{up_name}/output_0", ir.DataType.FLOAT, mix_sigmoid_shape)
         mix_sigmoid = f"{basename}/input_mix_weight_up/Sigmoid"
         self.make_sigmoid(
             mix_sigmoid,
-            f"{mix_sigmoid_cast_input}/output_0",
-            ir.DataType.FLOAT,
+            f"{up_name}/output_0",
+            self.io_dtype,
             mix_sigmoid_shape,
         )
-        mix_sigmoid_cast_output = f"{basename}/input_mix_weight_up/Sigmoid/CastOutput"
-        self.make_cast(mix_sigmoid_cast_output, f"{mix_sigmoid}/output_0", self.io_dtype, mix_sigmoid_shape)
         mix_reshape = f"{basename}/input_mix_weight/Reshape"
         grouped_shape = [*token_shape, self.hc_count, self.hidden_size]
         grouped_dims = (
@@ -1114,7 +1107,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         )
         self.make_reshape(
             mix_reshape,
-            [f"{mix_sigmoid_cast_output}/output_0", f"/model/constants/INT64/{grouped_dims}"],
+            [f"{mix_sigmoid}/output_0", f"/model/constants/INT64/{grouped_dims}"],
             self.io_dtype,
             grouped_shape,
         )
@@ -1154,15 +1147,11 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
             inject_shape,
         )
         inject_sigmoid = f"{basename}/block_inject_weight/Sigmoid"
-        inject_sigmoid_cast_input = f"{inject_sigmoid}/CastInput"
-        self.make_cast(inject_sigmoid_cast_input, f"{inject_div}/output_0", ir.DataType.FLOAT, inject_shape)
-        self.make_sigmoid(inject_sigmoid, f"{inject_sigmoid_cast_input}/output_0", ir.DataType.FLOAT, inject_shape)
-        inject_sigmoid_cast_output = f"{inject_sigmoid}/CastOutput"
-        self.make_cast(inject_sigmoid_cast_output, f"{inject_sigmoid}/output_0", self.io_dtype, inject_shape)
+        self.make_sigmoid(inject_sigmoid, f"{inject_div}/output_0", self.io_dtype, inject_shape)
         inject_scale = f"{basename}/block_inject_weight/Mul"
         self.make_mul(
             inject_scale,
-            [f"{inject_sigmoid_cast_output}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/2"],
+            [f"{inject_sigmoid}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/2"],
             self.io_dtype,
             inject_shape,
         )
@@ -1518,23 +1507,6 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
                 self.input_names["attention_metadata"],
             ]
         else:
-            attention_cos_cache = cos_cache
-            attention_sin_cache = sin_cache
-            if self.rope_attrs["cast"]["use_fp32"] and self.io_dtype != ir.DataType.FLOAT:
-                attention_cos_cache = f"{name}/cos_cache/Cast"
-                attention_sin_cache = f"{name}/sin_cache/Cast"
-                self.make_cast(
-                    attention_cos_cache,
-                    cos_cache,
-                    self.io_dtype,
-                    ["max_sequence_length", "rotary_width"],
-                )
-                self.make_cast(
-                    attention_sin_cache,
-                    sin_cache,
-                    self.io_dtype,
-                    ["max_sequence_length", "rotary_width"],
-                )
             attention_position_ids = f"{name}/position_ids/Gather"
             self.make_gather(
                 attention_position_ids,
@@ -1555,8 +1527,8 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
                 selected_counts,
                 f"{self.mask_attrs['seqlens_k']}/output_0",
                 f"{self.mask_attrs['total_seq_len']}/output_0",
-                f"{attention_cos_cache}/output_0",
-                f"{attention_sin_cache}/output_0",
+                cos_cache,
+                sin_cache,
                 f"{attention_position_ids}/output_0",
                 q_norm_weight,
                 k_norm_weight,

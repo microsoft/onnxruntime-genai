@@ -38,6 +38,7 @@ struct RecurrentState {
 
   bool IsEmpty() const { return layer_indices_.empty(); }
   int GraphCaptureVariant() const { return graph_buffer_variant_; }
+  bool UsesGraphCaptureDoubleBuffer() const { return graph_double_buffer_; }
 
   // ORT captures a CUDA graph by re-running the model inside a single user-visible Run()
   // until the EP reports capture complete (InferenceSession::RunImpl recursion, driven by

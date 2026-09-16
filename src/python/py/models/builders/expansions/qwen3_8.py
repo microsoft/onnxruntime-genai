@@ -20,38 +20,34 @@ class Qwen38:
             self.io_dtype,
             grouped_shape,
         )
-        cast_input_name = f"{name}/CastInput"
-        self.make_cast(cast_input_name, f"{reshape_name}/output_0", ir.DataType.FLOAT, grouped_shape)
         norm_scale_name = f"{name[1:].replace('/', '.')}.norm_scale"
-        self.make_initializer(norm.weight.new_ones(hidden_size), norm_scale_name, to=ir.DataType.FLOAT)
+        self.make_initializer(norm.weight.new_ones(hidden_size), norm_scale_name, to=self.io_dtype)
         normalized_name = f"{name}/SimplifiedLayerNormalization"
         normalized = f"{normalized_name}/output_0"
         self.make_node(
             "SimplifiedLayerNormalization",
-            inputs=[f"{cast_input_name}/output_0", norm_scale_name],
+            inputs=[f"{reshape_name}/output_0", norm_scale_name],
             outputs=[normalized],
             name=normalized_name,
             axis=-1,
             epsilon=self.layernorm_attrs["epsilon"],
             stash_type=1,
         )
-        self.make_value(normalized, ir.DataType.FLOAT, grouped_shape)
+        self.make_value(normalized, self.io_dtype, grouped_shape)
         flatten_name = f"{name}/Flatten"
         flat_shape = [*token_shape, self.hc_count * hidden_size]
         flat_dims = [-1, self.hc_count * hidden_size] if self.use_paged_attention else [0, 0, self.hc_count * hidden_size]
         self.make_reshape(
             flatten_name,
             [normalized, f"/model/constants/INT64/{flat_dims}"],
-            ir.DataType.FLOAT,
+            self.io_dtype,
             flat_shape,
         )
         scale_name = f"{name[1:].replace('/', '.')}.weight"
-        self.make_initializer(norm.weight.float() + 1.0, scale_name, to=ir.DataType.FLOAT)
+        self.make_initializer(norm.weight + 1.0, scale_name, to=self.io_dtype)
         scale_mul_name = f"{name}/Scale"
-        self.make_mul(scale_mul_name, [f"{flatten_name}/output_0", scale_name], ir.DataType.FLOAT, flat_shape)
-        cast_output_name = f"{name}/CastOutput"
-        self.make_cast(cast_output_name, f"{scale_mul_name}/output_0", self.io_dtype, flat_shape)
-        return f"{cast_output_name}/output_0"
+        self.make_mul(scale_mul_name, [f"{flatten_name}/output_0", scale_name], self.io_dtype, flat_shape)
+        return f"{scale_mul_name}/output_0"
 
     def make_qsa_rotary_caches(self, layer_id, root_input, cos_cache, sin_cache):
         """Promote shared rotary tables to the indexer's batched rank-3 layout."""
@@ -84,17 +80,10 @@ class Qwen38:
 
         outputs = []
         for label, cache in (("cos", cos_cache), ("sin", sin_cache)):
-            cast = f"{basename}/{label}/Cast"
-            self.make_cast(
-                cast,
-                cache,
-                self.io_dtype,
-                ["max_sequence_length", "rotary_width"],
-            )
             unsqueeze = f"{basename}/{label}/Unsqueeze"
             self.make_unsqueeze(
                 unsqueeze,
-                [f"{cast}/output_0", "/model/constants/INT64/[0]"],
+                [cache, "/model/constants/INT64/[0]"],
                 self.io_dtype,
                 [1, "max_sequence_length", "rotary_width"],
             )
@@ -185,11 +174,10 @@ class Qwen38:
             [1, 1, "sequence_length", "total_sequence_length"],
         )
 
-        padding = f"{basename}/padding/Cast"
-        self.make_cast(
+        padding = f"{basename}/padding/Greater"
+        self.make_greater(
             padding,
-            self.input_names["attention_mask"],
-            ir.DataType.BOOL,
+            [self.input_names["attention_mask"], "/model/constants/INT64/0"],
             ["batch_size", "total_sequence_length"],
         )
         padding_4d = f"{basename}/padding/Unsqueeze"
@@ -217,8 +205,13 @@ class Qwen38:
             [selected_indices, "/model/constants/INT32/0"],
             selected_shape,
         )
-        valid_int = f"{basename}/Cast"
-        self.make_cast(valid_int, f"{valid}/output_0", ir.DataType.INT32, selected_shape)
+        valid_int = f"{basename}/Where"
+        self.make_where(
+            valid_int,
+            [f"{valid}/output_0", "/model/constants/INT32/1", "/model/constants/INT32/0"],
+            ir.DataType.INT32,
+            selected_shape,
+        )
         counts = f"{basename}/ReduceSum"
         count_shape = ["num_tokens"] if packed else ["batch_size", "sequence_length"]
         self.make_reduce_sum(

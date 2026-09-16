@@ -15,6 +15,7 @@ struct PleState {
   void RewindTo(size_t index);
 
   bool IsEmpty() const { return layer_indices_.empty(); }
+  int GraphCaptureVariant() const { return graph_buffer_variant_; }
 
  private:
   void InitializeStates(std::vector<std::unique_ptr<OrtValue>>& states);
@@ -29,6 +30,7 @@ struct PleState {
   std::vector<int64_t> token_shape_;
   std::vector<int64_t> conv_shape_;
   ONNXTensorElementDataType conv_type_{};
+  int graph_buffer_variant_{};
   size_t input_index_{~0U};
   size_t output_index_{~0U};
 };

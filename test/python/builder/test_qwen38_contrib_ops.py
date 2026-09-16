@@ -120,6 +120,7 @@ def test_paged_branchwise_norm_uses_packed_shapes():
             "make_node",
             "make_value",
             "make_mul",
+            "make_cast",
         ],
     )
 
@@ -141,10 +142,11 @@ def test_paged_branchwise_norm_uses_packed_shapes():
         call for call in model.calls if call[0] == "make_node" and call[1][0] == "SimplifiedLayerNormalization"
     )
     assert layer_norm[1][0] == "SimplifiedLayerNormalization"
-    assert layer_norm[2]["inputs"] == ["/norm/CastInput/output_0", "norm.norm_scale"]
+    assert layer_norm[2]["inputs"] == ["/norm/Reshape/output_0", "norm.norm_scale"]
     assert "domain" not in layer_norm[2]
     assert layer_norm[2]["axis"] == -1
     assert layer_norm[2]["epsilon"] == 1e-6
+    assert not [call for call in model.calls if call[0] == "make_cast"]
 
 
 def test_dense_branchwise_norm_preserves_batch_and_sequence_shapes():
@@ -155,7 +157,7 @@ def test_dense_branchwise_norm_preserves_batch_and_sequence_shapes():
     model.layernorm_attrs = {"epsilon": 1e-6}
     record_calls(
         model,
-        ["make_reshape", "make_initializer", "make_node", "make_value", "make_mul"],
+        ["make_reshape", "make_initializer", "make_node", "make_value", "make_mul", "make_cast"],
     )
 
     output = model.make_branchwise_rms_norm(
@@ -167,7 +169,44 @@ def test_dense_branchwise_norm_preserves_batch_and_sequence_shapes():
     assert reshapes[0][3] == ["batch_size", "sequence_length", 4, 8]
     assert reshapes[1][1][1] == "/model/constants/INT64/[0, 0, 32]"
     assert reshapes[1][3] == ["batch_size", "sequence_length", 32]
-    assert output == "/norm/CastOutput/output_0"
+    assert output == "/norm/Scale/output_0"
+    assert not [call for call in model.calls if call[0] == "make_cast"]
+
+
+def test_hyper_connection_mix_stays_in_model_dtype_without_casts():
+    model = object.__new__(Qwen4ExpTextModel)
+    model.use_paged_attention = False
+    model.io_dtype = ir.DataType.FLOAT16
+    model.hc_count = 4
+    model.hidden_size = 8
+    model.hc_hidden_size = 32
+    record_calls(
+        model,
+        [
+            "make_matmul",
+            "make_div",
+            "make_sigmoid",
+            "make_mul",
+            "make_reshape",
+            "make_reduce_mean",
+            "make_cast",
+        ],
+    )
+    model.make_branchwise_rms_norm = MethodType(lambda self, *args: "normalized", model)
+    weights = SimpleNamespace(
+        input_mix_weight_down=SimpleNamespace(out_features=4),
+        input_mix_weight_up=SimpleNamespace(),
+        block_inject_weight=SimpleNamespace(),
+        hc_norm=SimpleNamespace(),
+    )
+
+    model.make_hyper_connection_mix(0, weights, "hidden_states", "attn")
+
+    assert not [call for call in model.calls if call[0] == "make_cast"]
+    sigmoids = [call for call in model.calls if call[0] == "make_sigmoid"]
+    assert all(call[1][2] == ir.DataType.FLOAT16 for call in sigmoids)
+    matmuls = [call for call in model.calls if call[0] == "make_matmul"]
+    assert matmuls[1][1][2] == "/model/layers.0/attn_hyper_connection/input_mix_weight_down/SiLU/output_0"
 
 
 def test_gated_rms_norm_emits_configured_activation():
@@ -224,18 +263,14 @@ def test_dense_qwen_sparse_attention_emits_indexer_and_dynamic_executor():
 
     attention = nodes[-1][1]
     casts = [call for call in model.calls if call[0] == "make_cast"]
-    assert [call[1][1] for call in casts] == ["cos_cache", "sin_cache"]
-    assert all(call[1][2] == ir.DataType.FLOAT16 for call in casts)
+    assert not casts
     assert attention["inputs"][7:11] == [
         "/model/layers.3/attn/SparseAttentionIndexer/Flatten/output_0",
         "/model/layers.3/attn/SparseAttentionIndexer/CountsFlatten/output_0",
         "seqlens/output_0",
         "total_length/output_0",
     ]
-    assert attention["inputs"][11:13] == [
-        "/model/layers.3/attn/DynamicSparseAttention/cos_cache/Cast/output_0",
-        "/model/layers.3/attn/DynamicSparseAttention/sin_cache/Cast/output_0",
-    ]
+    assert attention["inputs"][11:13] == ["cos_cache", "sin_cache"]
     assert attention["inputs"][13] == "/model/layers.3/attn/DynamicSparseAttention/position_ids/Gather/output_0"
     position_gather = next(call for call in model.calls if call[0] == "make_gather")
     assert position_gather[1][1] == ["position_ids", "/model/constants/INT64/0"]
@@ -296,16 +331,18 @@ def test_qwen_attention_gate_uses_resolved_attention_output():
     assert gate[1][1][0] == "/model/layers.3/attn/DynamicSparseAttention/output_0"
 
 
-def test_qsa_rotary_caches_cast_to_indexer_dtype():
+def test_qsa_rotary_caches_use_model_dtype_without_casts():
     model = object.__new__(Qwen4ExpTextModel)
     model.io_dtype = ir.DataType.BFLOAT16
     record_calls(model, ["make_shape", "make_gather", "make_concat", "make_cast", "make_unsqueeze", "make_tile"])
 
     model.make_qsa_rotary_caches(3, "hidden_states", "cos_cache", "sin_cache")
 
-    casts = [call for call in model.calls if call[0] == "make_cast"]
-    assert [call[1][1] for call in casts] == ["cos_cache", "sin_cache"]
-    assert all(call[1][2] == ir.DataType.BFLOAT16 for call in casts)
+    assert not [call for call in model.calls if call[0] == "make_cast"]
+    unsqueezes = [
+        call for call in model.calls if call[0] == "make_unsqueeze" and call[1][1][0] in {"cos_cache", "sin_cache"}
+    ]
+    assert [call[1][1][0] for call in unsqueezes] == ["cos_cache", "sin_cache"]
     cache_calls = [
         call for call in model.calls
         if call[0] in {"make_unsqueeze", "make_tile"}
@@ -491,7 +528,8 @@ def test_ple_reuses_model_level_embedding_initializers():
 def test_qwen38_config_assigns_embedding_annotation_to_cpu():
     model = object.__new__(Qwen4ExpTextModel)
     model.ep = "cuda"
-    genai_config = {"model": {"decoder": {"session_options": {}}}}
+    model.ple_token_pad_id = 248044
+    genai_config = {"model": {"decoder": {"inputs": {}, "outputs": {}, "session_options": {}}}}
 
     model.update_genai_config(genai_config)
 
