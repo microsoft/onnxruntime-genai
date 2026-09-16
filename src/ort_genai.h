@@ -466,6 +466,12 @@ struct OgaTokenizer : OgaAbstract {
   static void operator delete(void* p) { OgaDestroyTokenizer(reinterpret_cast<OgaTokenizer*>(p)); }
 };
 
+struct OgaTimestampDecodeResult : OgaAbstract {
+  const char* GetText() const;
+  size_t GetWordCount() const;
+  size_t GetSegmentCount() const;
+};
+
 struct OgaTokenizerStream : OgaAbstract {
   static std::unique_ptr<OgaTokenizerStream> Create(const OgaTokenizer& tokenizer) {
     OgaTokenizerStream* p;
@@ -489,6 +495,10 @@ struct OgaTokenizerStream : OgaAbstract {
     OgaCheckResult(OgaTokenizerStreamDecode(this, token, &out));
     return out;
   }
+
+  const OgaTimestampDecodeResult& DecodeWithTimestamps(const OgaTokenTiming& token);
+  const OgaTimestampDecodeResult& FinalizeTimestamps();
+  void Reset();
 
   static void operator delete(void* p) { OgaDestroyTokenizerStream(reinterpret_cast<OgaTokenizerStream*>(p)); }
 };
@@ -606,6 +616,12 @@ struct OgaGenerator : OgaAbstract {
     OgaCheckResult(OgaGenerator_GetNextTokens(this, &out, &out_count));
     return std::vector<int32_t>(out, out + out_count);
   }
+#endif
+
+#if OGA_USE_SPAN
+  std::span<const OgaTokenTiming> GetNextTokensWithTimings();
+#else
+  std::vector<OgaTokenTiming> GetNextTokensWithTimings();
 #endif
 
   void RewindTo(size_t new_length) {

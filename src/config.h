@@ -149,6 +149,13 @@ struct Config {
 
   using RunOptions = std::vector<NamedString>;  // Entries go into OrtRunOptions::AddConfigEntry
 
+  enum class TimestampLevel {
+    Off,      // Do not collect or return timestamp metadata.
+    Word,     // Return completed word records.
+    Segment,  // Return completed segment records while constructing words internally.
+    All,      // Return completed word and segment records; character records are out of scope.
+  };
+
   struct Model {
     std::string type;
 
@@ -195,6 +202,13 @@ struct Config {
     int chunk_samples{};
     int blank_id{};
     int max_symbols_per_step{};
+
+    // Controls timestamp output: off, completed words, completed segments, or words and segments.
+    TimestampLevel timestamp_level{TimestampLevel::Off};
+    // Punctuation strings that complete a segment. An empty list disables punctuation segmentation.
+    std::vector<std::string> segment_separators{".", "?", "!"};
+    // Optional minimum inter-word gap in encoder frames that starts a new segment.
+    std::optional<int> segment_gap_threshold_frames;
 
     // Parakeet TDT (Token-and-Duration Transducer) parameters
     int left_context_samples{};

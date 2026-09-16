@@ -46,6 +46,7 @@ namespace Generators {
 struct Model;
 struct State;
 struct TransducerState;
+struct TokenTiming;
 struct Search;
 struct Tokenizer;
 struct ConstrainedLogitsProcessor;
@@ -132,6 +133,7 @@ struct Generator : LeakChecked<Generator> {
   // Internal continuous-decoding path for tokens already resident on the model device.
   void AppendTokens(DeviceSpan<int32_t> input_ids);
   void GenerateNextToken();
+  std::span<const TokenTiming> GetNextTokensWithTimings() const;
   void RewindToLength(size_t new_length);  // Rewind state to new_length
   void SnapshotState();                    // Snapshot recurrent state for speculative rollback (e.g. MTP)
   // Lossless multi-token MTP: commit the accepted prefix without a replay forward by cropping the

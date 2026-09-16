@@ -9,6 +9,39 @@
 
 namespace Generators::test {
 
+TEST(ConfigTest, ParsesTimestampConfiguration) {
+  Config config;
+
+  OverlayConfig(config, R"({"model":{
+    "timestamp_level":"all",
+    "segment_separators":[".","!?"] ,
+    "segment_gap_threshold_frames":12
+  }})");
+
+  EXPECT_EQ(config.model.timestamp_level, Config::TimestampLevel::All);
+  EXPECT_EQ(config.model.segment_separators, (std::vector<std::string>{".", "!?"}));
+  EXPECT_EQ(config.model.segment_gap_threshold_frames, 12);
+}
+
+TEST(ConfigTest, ParsesDisabledTimestampGap) {
+  Config config;
+  config.model.segment_gap_threshold_frames = 10;
+
+  OverlayConfig(config, R"({"model":{"segment_gap_threshold_frames":null}})");
+
+  EXPECT_FALSE(config.model.segment_gap_threshold_frames.has_value());
+}
+
+TEST(ConfigTest, RejectsInvalidTimestampConfiguration) {
+  for (const char* json : {
+           R"({"model":{"timestamp_level":"token"}})",
+           R"({"model":{"segment_gap_threshold_frames":0}})",
+           R"({"model":{"segment_gap_threshold_frames":-1}})"}) {
+    Config config;
+    EXPECT_THROW(OverlayConfig(config, json), std::runtime_error);
+  }
+}
+
 TEST(ConfigTest, ParsesStaticBatching) {
   Config config;
 

@@ -1783,6 +1783,29 @@ struct Model_Element : JSON::Element {
       v_.blank_id = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "max_symbols_per_step") {
       v_.max_symbols_per_step = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "timestamp_level") {
+      const auto level = JSON::Get<std::string_view>(value);
+      if (level == "off") {
+        v_.timestamp_level = Config::TimestampLevel::Off;
+      } else if (level == "word") {
+        v_.timestamp_level = Config::TimestampLevel::Word;
+      } else if (level == "segment") {
+        v_.timestamp_level = Config::TimestampLevel::Segment;
+      } else if (level == "all") {
+        v_.timestamp_level = Config::TimestampLevel::All;
+      } else {
+        throw std::runtime_error("timestamp_level must be one of: off, word, segment, all");
+      }
+    } else if (name == "segment_gap_threshold_frames") {
+      if (std::holds_alternative<std::nullptr_t>(value)) {
+        v_.segment_gap_threshold_frames.reset();
+      } else {
+        const int threshold = SafeDoubleToInt(JSON::Get<double>(value), name);
+        if (threshold <= 0) {
+          throw std::runtime_error("segment_gap_threshold_frames must be > 0");
+        }
+        v_.segment_gap_threshold_frames = threshold;
+      }
     } else if (name == "left_context_samples") {
       v_.left_context_samples = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "right_context_samples") {
@@ -1805,6 +1828,8 @@ struct Model_Element : JSON::Element {
       return eos_token_id_;
     if (name == "tdt_durations")
       return tdt_durations_;
+    if (name == "segment_separators")
+      return segment_separators_;
     throw JSON::unknown_value_error{};
   }
 
@@ -1861,6 +1886,7 @@ struct Model_Element : JSON::Element {
   std::unique_ptr<Decoder_Element> draft_;
   Int_Array_Element eos_token_id_{v_.eos_token_id};
   Int_Array_Element tdt_durations_{v_.tdt_durations};
+  StringArray_Element segment_separators_{v_.segment_separators};
   Vision_Element vision_{v_.vision};
   Embedding_Element embedding_{v_.embedding};
   Speech_Element speech_{v_.speech};

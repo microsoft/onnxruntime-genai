@@ -167,6 +167,11 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                                 out IntPtr /* const int32_t** */ outTokenIds,
                                                                                 out UIntPtr /* size_t* */ outTokenCount);
 
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaGenerator_GetNextTokensWithTimings(IntPtr /* const OgaGenerator* */ generator,
+                                                   out IntPtr /* const OgaTokenTiming** */ outTokens,
+                                                   out UIntPtr /* size_t* */ outCount);
+
         // This function is used to generate the next token in the sequence using the greedy search algorithm.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaGenerator_GenerateNextToken(IntPtr /* OgaGenerator* */ generator);
@@ -376,6 +381,46 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         public static extern IntPtr /* OgaResult* */ OgaTokenizerStreamDecode(IntPtr /* const OgaTokenizerStream* */ tokenizerStream,
                                                                               int /* int32_t */ token,
                                                                               out IntPtr /* const char** */ outStr);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaTokenizerStreamDecodeWithTimestamps(IntPtr /* OgaTokenizerStream* */ tokenizerStream,
+                                                    in TokenTiming token,
+                                                    out IntPtr /* const OgaTimestampDecodeResult** */ result);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaTokenizerStreamFinalizeTimestamps(IntPtr /* OgaTokenizerStream* */ tokenizerStream,
+                                                  out IntPtr /* const OgaTimestampDecodeResult** */ result);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaTokenizerStreamReset(IntPtr /* OgaTokenizerStream* */ tokenizerStream);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaTimestampDecodeResultGetText(IntPtr /* const OgaTimestampDecodeResult* */ result,
+                                                out IntPtr /* const char** */ text);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern UIntPtr OgaTimestampDecodeResultGetWordCount(IntPtr /* const OgaTimestampDecodeResult* */ result);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern UIntPtr OgaTimestampDecodeResultGetSegmentCount(IntPtr /* const OgaTimestampDecodeResult* */ result);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaTimestampDecodeResultGetWord(IntPtr /* const OgaTimestampDecodeResult* */ result,
+                                                UIntPtr /* size_t */ index,
+                                                out IntPtr /* const char** */ text,
+                                                out long /* int64_t* */ startFrame,
+                                                out long /* int64_t* */ stopFrame,
+                                                out double /* double* */ startTime,
+                                                out double /* double* */ stopTime);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaTimestampDecodeResultGetSegment(IntPtr /* const OgaTimestampDecodeResult* */ result,
+                                                   UIntPtr /* size_t */ index,
+                                                   out IntPtr /* const char** */ text,
+                                                   out long /* int64_t* */ startFrame,
+                                                   out long /* int64_t* */ stopFrame,
+                                                   out double /* double* */ startTime,
+                                                   out double /* double* */ stopTime);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaCreateTensorFromBuffer(IntPtr /* data* */ data,

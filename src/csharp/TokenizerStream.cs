@@ -24,6 +24,21 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             return StringUtils.FromUtf8(decodedStr);
         }
 
+        public TimestampDecodeResult DecodeWithTimestamps(TokenTiming token)
+        {
+            throw new NotImplementedException("Timestamp decoding is not implemented in this declaration scaffold.");
+        }
+
+        public TimestampDecodeResult FinalizeTimestamps()
+        {
+            throw new NotImplementedException("Timestamp finalization is not implemented in this declaration scaffold.");
+        }
+
+        public void Reset()
+        {
+            throw new NotImplementedException("Tokenizer stream reset is not implemented in this declaration scaffold.");
+        }
+
         ~TokenizerStream()
         {
             Dispose(false);
