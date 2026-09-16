@@ -234,6 +234,7 @@ struct MultiModalPipelineState : State {
   std::unique_ptr<EmbeddingState> embedding_state_;
   std::unique_ptr<DecoderState> decoder_state_;
   std::shared_ptr<Adapters> adapters_;
+  std::vector<ExtraInput> extra_inputs_;
   bool is_prompt_{true};
 
   const std::string vision_adapter_name_{"vision"};

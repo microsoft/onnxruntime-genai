@@ -843,22 +843,23 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& 
 }
 
 void MultiModalPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
-  num_image_tokens_ = GetNumImageTokens(extra_inputs);
-  num_audio_tokens_ = GetNumAudioTokens(extra_inputs, model_.config_->model.speech.inputs.audio_sizes);
-  num_images_ = GetImageFeatureBatchSize(extra_inputs);
+  extra_inputs_ = extra_inputs;
+  num_image_tokens_ = GetNumImageTokens(extra_inputs_);
+  num_audio_tokens_ = GetNumAudioTokens(extra_inputs_, model_.config_->model.speech.inputs.audio_sizes);
+  num_images_ = GetImageFeatureBatchSize(extra_inputs_);
 
   if (model_.vision_session_) {
-    vision_state_->SetExtraInputs(extra_inputs, num_images_, num_image_tokens_);
+    vision_state_->SetExtraInputs(extra_inputs_, num_images_, num_image_tokens_);
   }
   if (model_.speech_session_) {
-    speech_state_->SetExtraInputs(extra_inputs, num_audio_tokens_);
+    speech_state_->SetExtraInputs(extra_inputs_, num_audio_tokens_);
   }
   embedding_state_->SetExtraInputs(num_images_, num_image_tokens_, num_audio_tokens_);
   // Set the grid tensors for Qwen2-VL if present
   if (auto* qwen_pos_inputs = dynamic_cast<Qwen2VLPositionInputs*>(decoder_state_->position_inputs_.get())) {
     std::shared_ptr<Tensor> img_grid, vid_grid, sec_grid;
 
-    for (const auto& input : extra_inputs) {
+    for (const auto& input : extra_inputs_) {
       if (input.name == Config::Defaults::ImageGridThwName) {
         img_grid = input.tensor;
       } else if (input.name == "video_grid_thw") {
@@ -951,6 +952,19 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
 
 void MultiModalPipelineState::RewindTo(size_t index) {
   decoder_state_->RewindTo(index);
+  if (index != 0) {
+    return;
+  }
+
+  // Prompt execution consumes and releases the modality states. A full rewind makes the same
+  // generator reusable, so restore the prompt pipeline and rebind the inputs retained by the
+  // generator rather than continuing with the empty generation-stage feature tensors.
+  const auto extra_inputs = extra_inputs_;
+  is_prompt_ = true;
+  vision_state_ = model_.vision_session_ ? CreateVisionState(model_, *params_) : nullptr;
+  speech_state_ = model_.speech_session_ ? std::make_unique<SpeechState>(model_, *params_) : nullptr;
+  embedding_state_ = std::make_unique<EmbeddingState>(model_, *params_);
+  SetExtraInputs(extra_inputs);
 }
 
 OrtValue* MultiModalPipelineState::GetInput(const char* name) {

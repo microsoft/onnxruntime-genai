@@ -5,10 +5,11 @@
 """
 Generate dummy ONNX models for Qwen3.5 hybrid model testing.
 
-Creates minimal ONNX models (decoder, embedding, vision) with the correct
-input/output signatures for a hybrid model with both KV cache and recurrent
-state tensors. These models produce dummy outputs but have the correct
-shapes for testing the ort-genai runtime's auto-discovery and state management.
+Creates minimal ONNX models (multimodal decoder, text-only decoder, embedding,
+and vision) with the correct input/output signatures for a hybrid model with
+both KV cache and recurrent state tensors. These models produce dummy outputs
+but have the correct shapes for testing the ort-genai runtime's auto-discovery
+and state management.
 
 Usage:
     python create_dummy_qwen_3.5_models.py --output test/models/qwen3-5
@@ -130,6 +131,7 @@ def create_dummy_decoder_model(
     conv_dim: int = 6144,
     conv_kernel: int = 3,
     vocab_size: int = 248320,
+    use_input_ids: bool = False,
 ):
     """
     Create dummy decoder model with hybrid KV cache + recurrent state inputs.
@@ -144,14 +146,17 @@ def create_dummy_decoder_model(
     outputs = []
 
     # Standard inputs
-    inputs_embeds = helper.make_tensor_value_info(
-        "inputs_embeds", TensorProto.FLOAT, ["batch", "sequence_len", hidden_size]
+    decoder_input_name = "input_ids" if use_input_ids else "inputs_embeds"
+    decoder_input_type = TensorProto.INT32 if use_input_ids else TensorProto.FLOAT
+    decoder_input_shape = (
+        ["batch", "sequence_len"] if use_input_ids else ["batch", "sequence_len", hidden_size]
     )
+    decoder_input = helper.make_tensor_value_info(decoder_input_name, decoder_input_type, decoder_input_shape)
     attention_mask = helper.make_tensor_value_info(
         "attention_mask", TensorProto.INT64, ["batch", "past_seq_len_plus_seq_len"]
     )
     position_ids = helper.make_tensor_value_info("position_ids", TensorProto.INT64, [3, "batch", "sequence_len"])
-    inputs.extend([inputs_embeds, attention_mask, position_ids])
+    inputs.extend([decoder_input, attention_mask, position_ids])
 
     # Per-layer inputs/outputs
     for layer_idx in range(num_layers):
@@ -219,8 +224,8 @@ def create_dummy_decoder_model(
     # Create a minimal graph: Identity pass-through for state tensors, zeros for logits
     nodes = []
 
-    # Logits: zeros from inputs_embeds shape
-    shape_node = helper.make_node("Shape", ["inputs_embeds"], ["embed_shape"])
+    # Logits: zeros from the decoder input's batch and sequence dimensions.
+    shape_node = helper.make_node("Shape", [decoder_input_name], ["embed_shape"])
     nodes.append(shape_node)
 
     gather_batch = helper.make_node("Gather", ["embed_shape", "idx_0"], ["batch_dim"], axis=0)
@@ -418,6 +423,14 @@ def main():
         kv_layers=kv_layers,
     )
     print("  Created dummy_text.onnx")
+
+    create_dummy_decoder_model(
+        os.path.join(output_dir, "dummy_text_only.onnx"),
+        num_layers=num_layers,
+        kv_layers=kv_layers,
+        use_input_ids=True,
+    )
+    print("  Created dummy_text_only.onnx")
 
     create_genai_config(os.path.join(output_dir, "genai_config.json"), num_kv_layers, kv_layers)
     print("  Created genai_config.json")
