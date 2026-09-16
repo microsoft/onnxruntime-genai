@@ -1536,21 +1536,24 @@ class Model:
             raise ValueError("Could not resolve eos_token_id from the model config, text config, or tokenizer")
 
         ids = list(eos_token_id) if isinstance(eos_token_id, list) else [eos_token_id]
-        turn_end_id = tokenizer.convert_tokens_to_ids(tokenizer.eos_token) if tokenizer is not None else None
+        turn_end_token = getattr(tokenizer, "eos_token", None) if tokenizer is not None else None
+        try:
+            turn_end_id = tokenizer.convert_tokens_to_ids(turn_end_token) if turn_end_token is not None else None
+        except Exception as e:
+            print(f"Warning: could not resolve the tokenizer's end-of-turn token ({e}).")
+            turn_end_id = None
 
         if turn_end_id is None or turn_end_id in ids:
             resolved_eos_token_id = eos_token_id
         else:
             print(
-                f"Adding the tokenizer's end-of-turn token {tokenizer.eos_token} (id {turn_end_id}) "
-                f"to eos_token_id, which config.json reported as {eos_token_id}."
+                f"Adding the tokenizer's end-of-turn token {turn_end_token} (id {turn_end_id}) "
+                f"to eos_token_id from the model configuration: {eos_token_id}."
             )
             resolved_eos_token_id = [turn_end_id, *ids]
 
         if pad_token_id is None:
-            pad_token_id = (
-                resolved_eos_token_id[0] if isinstance(resolved_eos_token_id, list) else resolved_eos_token_id
-            )
+            pad_token_id = ids[0]
 
         return bos_token_id, resolved_eos_token_id, pad_token_id
 
