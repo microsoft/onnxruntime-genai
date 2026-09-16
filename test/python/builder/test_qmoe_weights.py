@@ -264,6 +264,34 @@ def _parse_extra_options(builder, extra_options, precision="int4", execution_pro
     )
 
 
+@pytest.mark.parametrize(
+    "moe_type,expected",
+    [
+        ("int4", ("QMoE", "int", 4)),
+        ("int8", ("QMoE", "int", 8)),
+        ("mxfp4", ("QMoE", "fp4", 4)),
+        ("nvfp4", ("QMoE", "nvfp4", 4)),
+        ("none", ("MoE", "int", 0)),
+    ],
+)
+def test_make_moe_init_writes_the_keys_the_moe_emitters_read(moe_type, expected):
+    """Regression: make_moe_init once wrote "moe_op_type"/"qmoe_quant_type", which
+    nothing reads. Every quantized export silently kept the "op_type": "MoE" /
+    "quant_type": "int" defaults, emitting the float MoE op for int4/int8 and
+    dropping quant_type plus the fc1/fc2 global scales for MXFP4/NVFP4."""
+    model = Model.__new__(Model)
+    model.moe_attrs = {}
+    model.quant_config = types.SimpleNamespace(moe=types.SimpleNamespace(type=moe_type, weights_prepacked=-1))
+
+    model.make_moe_init()
+
+    assert (
+        model.moe_attrs["op_type"],
+        model.moe_attrs["quant_type"],
+        model.moe_attrs["expert_weight_bits"],
+    ) == expected
+
+
 def test_moe_quant_type_mxfp4_is_accepted(monkeypatch):
     builder = _load_builder_cli_module(monkeypatch)
     options = _parse_extra_options(builder, ["moe_quant_type=mxfp4"], "int4", "cuda")
@@ -471,6 +499,16 @@ def test_cuda_raw_path_for_zero():
     model = _FakeMoEModel("cuda", 128, 0)
     model.make_qmoe_weights(_W)
     assert model.calls == [("matmulnbits", 128)]
+
+
+def test_unsupported_ep_reports_that_quantized_moe_is_unavailable():
+    """Now that op_type resolves to QMoE for int4/int8, this path is reachable from
+    the CLI (e.g. --execution_provider dml), so the error has to name the EP and the
+    way out rather than only listing block sizes."""
+    model = _FakeMoEModel("dml", 32, -1)
+    with pytest.raises(RuntimeError, match="not supported on ep=dml"):
+        model.make_qmoe_weights(_W)
+    assert model.calls == []
 
 
 def test_non_cuda_does_not_use_cuda_only_paths():

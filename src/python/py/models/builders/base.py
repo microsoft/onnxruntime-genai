@@ -1031,11 +1031,13 @@ class Model:
 
         # MXFP4 and NVFP4 both resolve to the "mx" kind; the QMoE op tells them apart by dtype name
         # ("mxfp4" -> op "fp4", "nvfp4" -> op "nvfp4"). Integer dtypes use the plain "int" QMoE path.
-        self.moe_attrs["moe_op_type"] = "QMoE" if moe_descriptor.is_quantized else "MoE"
+        # These are the exact keys read by make_moe_op / make_qmoe_op / make_moe_expert_initializers;
+        # writing any other name here is a silent no-op that leaves the `moe_attrs` defaults in place.
+        self.moe_attrs["op_type"] = "QMoE" if moe_descriptor.is_quantized else "MoE"
         if moe_descriptor.kind == "mx":
-            self.moe_attrs["qmoe_quant_type"] = "nvfp4" if moe_descriptor.name == "nvfp4" else "fp4"
+            self.moe_attrs["quant_type"] = "nvfp4" if moe_descriptor.name == "nvfp4" else "fp4"
         else:
-            self.moe_attrs["qmoe_quant_type"] = "int"
+            self.moe_attrs["quant_type"] = "int"
 
         # weights_prepacked is a CUDA-only QMoE layout contract. Non-CUDA EPs omit the attribute and use
         # their normal blockwise QMoE encoding, so CUDA-prepacked exports are not intended to be shared
@@ -5245,9 +5247,11 @@ class Model:
             except Exception as e:
                 raise RuntimeError(f"Block-wise quantization failed with block_size={block_size}: {e}") from e
 
-        raise RuntimeError(f"Please use a supported EP ({', '.join(supported_blockwise_eps)}) "
-                           "for QMoE expert weights quantization. "
-                           f"Got qmoe_block_size={self.quant_attrs['qmoe_block_size']} and ep={self.ep}.")
+        raise RuntimeError(
+            f"Quantized MoE experts are not supported on ep={self.ep}. Block-wise QMoE expert weights are only "
+            f"produced for {', '.join(supported_blockwise_eps)} (got qmoe_block_size={self.quant_attrs['qmoe_block_size']}). "
+            "Either export with one of those EPs, or keep the experts unquantized with --precision fp16/bf16/fp32."
+        )
 
     # TODO: replace all five CudaQuantizer methods with calls to native ORT APIs
     def _symmetric_per_channel_quantize(self, weights):
