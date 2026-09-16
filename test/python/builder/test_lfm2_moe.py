@@ -52,7 +52,12 @@ def _recording_model(io_dtype, *, num_experts=8, top_k=2, use_expert_bias=True, 
     model.moe_intermediate_size = 32
     model.use_expert_bias = use_expert_bias
     model.routed_scaling_factor = routed_scaling_factor
-    model.moe_attrs = {"op_type": "MoE", "num_experts": num_experts, "top_k": top_k}
+    model.moe_attrs = {
+        "op_type": "MoE",
+        "num_experts": num_experts,
+        "top_k": top_k,
+        "router_sentinel": -10000.0,
+    }
     model.layernorm_attrs = {}
     model.quant_attrs = {"nodes_to_exclude": []}
     model.nodes = []
@@ -93,6 +98,33 @@ def test_lfm2_moe_routes_dense_and_moe_layers(monkeypatch):
     assert calls == [("mlp", 1, dense_ffn), ("moe", 2, moe_ffn)]
     # The dense path aliases the HF w1/w3/w2 names onto the base-class gate/up/down names.
     assert (dense_ffn.gate_proj, dense_ffn.up_proj, dense_ffn.down_proj) == ("w1", "w3", "w2")
+
+
+def test_lfm2_feed_forward_accepts_both_loader_layouts(monkeypatch):
+    """Hugging Face layers expose `feed_forward`; the quantized-checkpoint IR exposes `mlp`."""
+    model = LFM2Model.__new__(LFM2Model)
+    seen = []
+    monkeypatch.setattr(model, "make_mlp", lambda layer_id, mlp, root_input: seen.append(mlp))
+
+    hf_ffn = types.SimpleNamespace(w1="w1", w2="w2", w3="w3")
+    model.make_feed_forward(0, types.SimpleNamespace(feed_forward=hf_ffn), "x")
+    assert (hf_ffn.gate_proj, hf_ffn.up_proj, hf_ffn.down_proj) == ("w1", "w3", "w2")
+
+    # The quantized IR already carries gate/up/down names and has no w1/w3/w2 to alias.
+    quantized_ffn = types.SimpleNamespace(gate_proj="g", up_proj="u", down_proj="d")
+    model.make_feed_forward(1, types.SimpleNamespace(mlp=quantized_ffn), "x")
+
+    assert seen == [hf_ffn, quantized_ffn]
+
+
+def test_lfm2_moe_feed_forward_accepts_quantized_layer_layout(monkeypatch):
+    model = LFM2MoEModel.__new__(LFM2MoEModel)
+    model.num_dense_layers = 0
+    moe = object()
+    seen = []
+    monkeypatch.setattr(model, "make_moe", lambda layer_id, module, root_input: seen.append(module))
+    model.make_feed_forward(3, types.SimpleNamespace(mlp=moe), "x")
+    assert seen == [moe]
 
 
 def test_lfm2_dense_model_still_owns_the_mlp(monkeypatch):
@@ -142,8 +174,9 @@ def test_lfm2_moe_router_selects_with_bias_and_mixes_without(io_dtype):
     assert by_name["GatherElements"].attrs == {"axis": 1}
     sentinel = by_name["ConstantOfShape"].attrs["value"]
     assert sentinel.dtype == ir.DataType.FLOAT
-    assert sentinel.numpy().tolist() == [LFM2MoEModel.ROUTER_SENTINEL]
-    assert LFM2MoEModel.ROUTER_SENTINEL < -1000 and torch.finfo(torch.float16).min < LFM2MoEModel.ROUTER_SENTINEL
+    router_sentinel = model.moe_attrs["router_sentinel"]
+    assert sentinel.numpy().tolist() == [router_sentinel]
+    assert router_sentinel < -1000 and torch.finfo(torch.float16).min < router_sentinel
     assert by_name["ScatterElements"].inputs == [
         f"{r}/ConstantOfShape/output_0",
         indices,
@@ -213,6 +246,24 @@ def test_lfm2_moe_preprocessing_passes_prequantized_experts_through(monkeypatch)
     )
     model.make_moe_preprocessing(2, moe, "hidden")
     assert captured == [(2, experts, None, None)]
+
+
+def test_lfm2_moe_preprocessing_keeps_packed_expert_biases(monkeypatch):
+    """LFM2-MoE experts have no bias, so zeros are emitted unless the checkpoint carries them."""
+    model = _recording_model(ir.DataType.FLOAT16, num_experts=2)
+    experts = types.SimpleNamespace(
+        quant_type="int",
+        gate_up_bias=torch.full((2, 2 * model.moe_intermediate_size), 0.25),
+        down_bias=torch.full((2, model.hidden_size), -0.5),
+    )
+    monkeypatch.setattr(model, "make_moe_expert_initializers", lambda *args, **kwargs: None)
+
+    model.make_moe_preprocessing(2, types.SimpleNamespace(experts=experts), "hidden")
+
+    gate_up_bias, _ = model.initializers["model.layers.2.moe.experts.gate_up_proj.bias"]
+    down_bias, _ = model.initializers["model.layers.2.moe.experts.down_proj.bias"]
+    assert gate_up_bias is experts.gate_up_bias
+    assert down_bias is experts.down_bias
 
 
 @pytest.mark.parametrize("op_type", ["MoE", "QMoE"])
