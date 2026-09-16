@@ -49,6 +49,7 @@ struct CpuInterface : DeviceInterface {
   }
 
   DeviceType GetType() const override { return DeviceType::CPU; }
+  bool SupportsOffsetTensorViews() const override { return true; }
 
   void InitOrt(const OrtApi& /*api*/, Ort::Allocator& allocator) override {
     // Idempotent: on re-initialization this is called again with the same process-global default

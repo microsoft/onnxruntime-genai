@@ -993,7 +993,7 @@ FixedStateReservation FixedStatePool::Reserve(
   // Normalize only minority rows by copying their visible state to the cohort's canonical bank.
   // The copy does not advance request state: both banks contain the same committed value, and the
   // host bank selector changes only after every copy completes successfully.
-  bool direct_layout = true;
+  bool direct_layout = impl_->device->SupportsOffsetTensorViews();
   const size_t first_direct_slot = plan.front().slot_index;
   size_t bank_one_count = 0;
   for (size_t row = 0; row < plan.size(); ++row) {
