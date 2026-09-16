@@ -73,6 +73,8 @@ The tool currently supports the following model architectures.
 - Granite MoE Hybrid
 - HunYuan Dense V1
 - InternLM2
+- LFM2
+- LFM2 MoE
 - Llama
 - Mistral
 - Nemotron
@@ -590,6 +592,8 @@ python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folde
 # From source:
 python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options qmoe_block_size=128
 ```
+
+On CPU, WebGPU, and TRT-RTX the block-wise expert weights use ONNX Runtime's MatMulNBits encoding with signed block scales (each block's max-magnitude element maps exactly to the lowest quantized value, so no extreme is clipped). ONNX Runtime builds that include [microsoft/onnxruntime#32644](https://github.com/microsoft/onnxruntime/pull/32644) run these experts on the MLAS QNBit GEMM (`MatMulNBits`) kernels directly, which is what makes CPU decode of MoE models such as LFM2.5-8B-A1B usable (roughly 20x faster per token than dequantize-then-GEMM). On older builds the CPU `QMoE` kernel dequantizes to fp32 on every call unless the environment variable `ORT_USE_MLAS_Q4_GEMM_MOE=1` is set at runtime to enable its AVX-512 MLAS Q4 fast path; that fast path re-quantizes to the same grid as this encoding, so enabling it only changes results at fp32 rounding level.
 
 ##### QMoE Weights Prepacked
 

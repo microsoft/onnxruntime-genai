@@ -29,6 +29,7 @@ from builders import (
     HunyuanDenseV1Model,
     InternLM2Model,
     LFM2Model,
+    LFM2MoEModel,
     LlamaModel,
     Mistral3TextModel,
     MistralModel,
@@ -536,6 +537,9 @@ def create_model(
         onnx_model = InternLM2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Lfm2ForCausalLM":
         onnx_model = LFM2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Lfm2MoeForCausalLM":
+        onnx_model = LFM2MoEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        onnx_model.model_type = "lfm2_moe"
     elif config.architectures[0] == "LlamaForCausalLM":
         onnx_model = LlamaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "MistralForCausalLM":

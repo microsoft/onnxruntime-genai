@@ -6,6 +6,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -135,4 +136,30 @@ TEST(LFM2CacheLayerTypesValidationTest, ValidMatchingLayers) {
   EXPECT_NO_THROW({
     CreateGeneratorForModel(model_dir);
   });
+}
+
+// The MoE variant (LFM2-8B-A1B, LFM2.5-8B-A1B, ...) is exported with model type "lfm2_moe" and
+// must run through the same LFM2 runtime (conv state cache, no rewind) as the dense models.
+TEST(LFM2CacheLayerTypesValidationTest, Lfm2MoeTypeUsesLfm2Runtime) {
+  SkipIfModelUnavailable();
+
+  const auto src_dir = GetLfm2ModelPath();
+  const auto model_dir = MakeTempDir("moe_type");
+  fs_std::copy(src_dir, model_dir, fs_std::copy_options::recursive | fs_std::copy_options::overwrite_existing);
+  std::string config = ReadFile(model_dir / "genai_config.json");
+  ReplaceFirst(config, "\"type\": \"lfm2\"", "\"type\": \"lfm2_moe\"");
+  WriteFile(model_dir / "genai_config.json", config);
+
+  auto model = OgaModel::Create(model_dir.string().c_str());
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 8);
+  auto generator = OgaGenerator::Create(*model, *params);
+
+  const std::vector<int32_t> input_ids{0, 0, 195, 731};
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  generator->GenerateNextToken();
+  EXPECT_GT(generator->GetSequenceCount(0), input_ids.size());
+
+  // Conv state cannot be rewound, exactly like the dense LFM2 models.
+  EXPECT_THROW(generator->RewindTo(0), std::runtime_error);
 }

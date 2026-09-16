@@ -1031,11 +1031,11 @@ class Model:
 
         # MXFP4 and NVFP4 both resolve to the "mx" kind; the QMoE op tells them apart by dtype name
         # ("mxfp4" -> op "fp4", "nvfp4" -> op "nvfp4"). Integer dtypes use the plain "int" QMoE path.
-        self.moe_attrs["moe_op_type"] = "QMoE" if moe_descriptor.is_quantized else "MoE"
+        self.moe_attrs["op_type"] = "QMoE" if moe_descriptor.is_quantized else "MoE"
         if moe_descriptor.kind == "mx":
-            self.moe_attrs["qmoe_quant_type"] = "nvfp4" if moe_descriptor.name == "nvfp4" else "fp4"
+            self.moe_attrs["quant_type"] = "nvfp4" if moe_descriptor.name == "nvfp4" else "fp4"
         else:
-            self.moe_attrs["qmoe_quant_type"] = "int"
+            self.moe_attrs["quant_type"] = "int"
 
         # weights_prepacked is a CUDA-only QMoE layout contract. Non-CUDA EPs omit the attribute and use
         # their normal blockwise QMoE encoding, so CUDA-prepacked exports are not intended to be shared
@@ -5209,8 +5209,7 @@ class Model:
             # layout). For weights_prepacked=-1 (auto) or 1, produce them offline so the QMoE op reads
             # them directly: quantize with ONNX Runtime's blockwise quantizer, keep the signed scales,
             # then run pack_weights_for_cuda_mixed_gemm. This is the encoding validated by the
-            # com.microsoft QMoE CUDA parity tests. The builder's own _symmetric_blockwise_quantize uses
-            # a different scale/packing convention the kernel cannot consume.
+            # com.microsoft QMoE CUDA parity tests.
             #
             # weights_prepacked=0 ships raw [N, K/pack] weights with ONNX Runtime's MatMulNBits-compatible
             # blockwise quantizer. This is the exact encoding the CUDA QMoE PrePack hook expects: raw
@@ -5237,9 +5236,14 @@ class Model:
         use_blockwise_quant = self.ep in supported_blockwise_eps and self.quant_attrs["qmoe_block_size"] > 0
 
         if use_blockwise_quant:
+            # Non-CUDA QMoE ships raw [N, K/pack] weights quantized with ONNX Runtime's MatMulNBits
+            # blockwise quantizer (signed block scales, the MLAS "default" convention): each block's
+            # max-magnitude element maps exactly to qmin, so no extreme is clipped. This is also the
+            # grid the CPU QMoE kernel's MLAS Q4 fast path (ORT_USE_MLAS_Q4_GEMM_MOE=1) re-quantizes
+            # to, which makes that path lossless instead of a "known accuracy-loss" case.
             block_size = self.quant_attrs["qmoe_block_size"]
             try:
-                qweight, scales = self._symmetric_blockwise_quantize(weights, block_size)
+                qweight, scales = self._matmulnbits_blockwise_quantize(weights)
                 self.moe_attrs["block_size"] = block_size
                 return qweight, scales.to(torch.float16)
             except Exception as e:
@@ -5326,15 +5330,6 @@ class Model:
             block_size,
             unsigned_full_range=True,
             signed_scale=True,
-        )
-
-    def _symmetric_blockwise_quantize(self, weights, block_size):
-        bits = self.moe_attrs["expert_weight_bits"]
-        return CudaQuantizer.symmetric_blockwise_quantize(
-            weights,
-            bits,
-            block_size,
-            unsigned_full_range=True,
         )
 
     def make_activation_with_mul(self, layer_id, root_input, activation, domain):

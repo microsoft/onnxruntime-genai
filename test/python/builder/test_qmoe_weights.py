@@ -207,6 +207,7 @@ def _load_builder_cli_module(monkeypatch):
         "HunyuanDenseV1Model",
         "InternLM2Model",
         "LFM2Model",
+        "LFM2MoEModel",
         "LlamaModel",
         "Mistral3TextModel",
         "MistralModel",
@@ -428,10 +429,6 @@ class _FakeMoEModel:
         self.calls.append(("matmulnbits", self.qmoe_block_size))
         return torch.zeros(1, dtype=torch.uint8), torch.zeros(1, dtype=torch.float32)
 
-    def _symmetric_blockwise_quantize(self, weights, block_size):
-        self.calls.append(("symmetric", block_size))
-        return torch.zeros(1, dtype=torch.uint8), torch.zeros(1, dtype=torch.float32)
-
     def _cuda_per_channel_quantize(self, weights, prepack):
         self.calls.append(("cuda_per_channel", prepack))
         return torch.zeros(1, dtype=torch.uint8), torch.zeros(1, dtype=torch.float32)
@@ -473,14 +470,33 @@ def test_cuda_raw_path_for_zero():
     assert model.calls == [("matmulnbits", 128)]
 
 
-def test_non_cuda_does_not_use_cuda_only_paths():
-    """The CUDA-only encodings must not be used on other EPs, even when
-    weights_prepacked is set."""
-    model = _FakeMoEModel("cpu", 128, 0)
+@pytest.mark.parametrize("ep", ["cpu", "webgpu", "trt-rtx"])
+@pytest.mark.parametrize("weights_prepacked", [-1, 0, 1])
+def test_non_cuda_uses_signed_scale_blockwise_quantizer(ep, weights_prepacked):
+    """Non-CUDA EPs ship raw MatMulNBits-convention blockwise weights (signed
+    block scales) regardless of the CUDA-only weights_prepacked knob, and never
+    the CUTLASS-prepacked encoding."""
+    model = _FakeMoEModel(ep, 128, weights_prepacked)
     model.make_qmoe_weights(_W)
-    assert ("cutlass", 128) not in model.calls
-    assert ("matmulnbits", 128) not in model.calls
-    assert model.calls == [("symmetric", 128)]
+    assert model.calls == [("matmulnbits", 128)]
+    assert model.moe_attrs["block_size"] == 128
+
+
+def test_non_cuda_blockwise_scales_are_signed_and_do_not_clip_the_extreme():
+    """The signed-scale grid maps each block's max-magnitude element exactly to
+    qmin, so a positive extreme is no longer clipped to 7/8 of its value. This is
+    also the grid the CPU QMoE MLAS Q4 fast path re-quantizes to, keeping that path
+    lossless."""
+    model = _RealMoEModel("cpu", 32, -1, bits=4)
+    model._matmulnbits_blockwise_quantize = Model._matmulnbits_blockwise_quantize.__get__(model)
+    weights = torch.zeros(1, 32)
+    weights[0, 0] = 8.0  # positive extreme of block 0
+    weights[0, 1] = -4.0
+    qweight, scales = model.make_qmoe_weights(weights)
+    assert scales.shape == (1, 1) and scales[0, 0] == -1.0  # signed: 8.0 / qmin(-8)
+    q = qweight[0, 0].item()
+    assert (q & 0xF) == 0  # 8.0 -> qmin (-8) + 8 == 0, exact
+    assert (q >> 4) == 12  # -4.0 / -1.0 = 4 -> 4 + 8
 
 
 @pytest.mark.parametrize(
