@@ -44,16 +44,3 @@ add_dependencies(parallel_preprocessing_benchmark onnxruntime-genai)
 set_target_properties(parallel_preprocessing_benchmark PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
 )
-
-add_executable(parallel_utils_benchmark
-  ${CMAKE_CURRENT_SOURCE_DIR}/parallel_utils_benchmark.cpp)
-target_include_directories(parallel_utils_benchmark PRIVATE
-  ${ORT_HEADER_DIR}
-  ${onnxruntime_extensions_SOURCE_DIR}/shared/api
-  ${CMAKE_SOURCE_DIR}/src
-)
-target_link_libraries(parallel_utils_benchmark PRIVATE onnxruntime-genai-obj)
-add_dependencies(parallel_utils_benchmark onnxruntime-genai)
-set_target_properties(parallel_utils_benchmark PROPERTIES
-  RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
-)

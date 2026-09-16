@@ -17,7 +17,6 @@ list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/dflash2_config_test.
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/reinit_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/search_checkpoint_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_preprocessing_tests.cpp")
-list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_utils_tests.cpp")
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)
   message(STATUS "Including CUDA kernel tests in the build.")
@@ -133,8 +132,7 @@ endif()
 add_test(NAME ReInitTests COMMAND reinit_tests)
 
 add_executable(parallel_preprocessing_tests
-  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_preprocessing_tests.cpp"
-  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_utils_tests.cpp")
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_preprocessing_tests.cpp")
 target_include_directories(parallel_preprocessing_tests PRIVATE
   ${ORT_HEADER_DIR}
   ${onnxruntime_extensions_SOURCE_DIR}/shared/api

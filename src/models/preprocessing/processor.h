@@ -50,16 +50,13 @@ struct SessionInfo;
 class ThreadPool;
 
 template <typename T>
-std::unique_ptr<OrtValue> ProcessTensor(ThreadPool* thread_pool, OrtxTensor* tensor,
-                                        Ort::Allocator& allocator);
+std::unique_ptr<OrtValue> ProcessTensor(OrtxTensor* tensor, Ort::Allocator& allocator);
 
 template <typename SrcT, typename DstT>
-std::unique_ptr<OrtValue> ProcessTensor(ThreadPool* thread_pool, OrtxTensor* tensor,
-                                        Ort::Allocator& allocator);
+std::unique_ptr<OrtValue> ProcessTensor(OrtxTensor* tensor, Ort::Allocator& allocator);
 
 // Helper to emplace a processed tensor with correct type dispatch (float, bf16, fp16)
-void EmplaceProcessedTensor(ThreadPool* thread_pool, NamedTensors& tensors,
-                            std::string_view name,
+void EmplaceProcessedTensor(NamedTensors& tensors, std::string_view name,
                             OrtxTensor* tensor, ONNXTensorElementDataType type,
                             Ort::Allocator& allocator);
 
