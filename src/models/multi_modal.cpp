@@ -716,6 +716,14 @@ DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& nex
   return logits_.Get();
 }
 
+void DecoderState::RewindTo(size_t index) {
+  position_inputs_->RewindTo(index);
+  if (kv_cache_)
+    kv_cache_->RewindTo(index);
+  if (recurrent_state_)
+    recurrent_state_->RewindTo(index);
+}
+
 bool DecoderState::SupportsPrefillChunking(bool has_multimodal_content) const {
   // Chunking slices the pre-computed embeddings along the sequence dimension, which is only
   // contiguous for a single sequence. Continuous decoding of position ids/attention mask in
@@ -939,6 +947,10 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
   }
   embedding_state_->Run(current_length, next_tokens, next_indices);
   return decoder_state_->Run(current_length, next_tokens, next_indices);
+}
+
+void MultiModalPipelineState::RewindTo(size_t index) {
+  decoder_state_->RewindTo(index);
 }
 
 OrtValue* MultiModalPipelineState::GetInput(const char* name) {

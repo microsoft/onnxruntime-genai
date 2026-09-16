@@ -786,20 +786,32 @@ def test_qwen3_5_hybrid_graph_capture_advances_recurrent_state_webgpu(test_data_
         params = og.GeneratorParams(model)
         params.set_search_options(do_sample=False, max_length=8)
         generator = og.Generator(model, params)
-        generator.append_tokens([10, 20, 30, 40])
+        prompt = [10, 20, 30, 40]
+        generator.append_tokens(prompt)
 
-        state_values = [float(np.asarray(generator.get_logits()).reshape(-1)[0])]
+        # Stop after an odd number of forwards so the double buffers are in their noncanonical
+        # direction, then exercise full rewind and reuse of the same generator.
+        state_values_before_rewind = [float(np.asarray(generator.get_logits()).reshape(-1)[0])]
+        for _ in range(2):
+            generator.generate_next_token()
+            state_values_before_rewind.append(float(np.asarray(generator.get_logits()).reshape(-1)[0]))
+
+        generator.rewind_to(0)
+        generator.append_tokens(prompt)
+        state_values_after_rewind = [float(np.asarray(generator.get_logits()).reshape(-1)[0])]
         for _ in range(3):
             generator.generate_next_token()
-            state_values.append(float(np.asarray(generator.get_logits()).reshape(-1)[0]))
-        return state_values
+            state_values_after_rewind.append(float(np.asarray(generator.get_logits()).reshape(-1)[0]))
+
+        return state_values_before_rewind, state_values_after_rewind
 
     eager_state_values = run(enable_graph_capture=False)
     captured_state_values = run(enable_graph_capture=True)
 
     # The fixture increments its recurrent state once per forward and exposes the previous value
-    # through logits. Values 2 and 3 require both graph-buffer variants to be rebound and replayed.
-    assert eager_state_values == [0.0, 1.0, 2.0, 3.0]
+    # through logits. Values 2 and 3 require both graph-buffer variants to be rebound and replayed;
+    # the second sequence also verifies that rewind restored the canonical buffer direction.
+    assert eager_state_values == ([0.0, 1.0, 2.0], [0.0, 1.0, 2.0, 3.0])
     assert captured_state_values == eager_state_values
 
 

@@ -177,6 +177,7 @@ struct DecoderState : State {
   DecoderState& operator=(const DecoderState&) = delete;
 
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
+  void RewindTo(size_t index) override;
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int current_length, DeviceSpan<int32_t> beam_indices);
 
   // Prefill chunking (see search.chunk_size). The embedding model still runs once over the whole
@@ -213,6 +214,8 @@ struct MultiModalPipelineState : State {
 
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices) override;
+
+  void RewindTo(size_t index) override;
 
   OrtValue* GetInput(const char* name) override;
 
