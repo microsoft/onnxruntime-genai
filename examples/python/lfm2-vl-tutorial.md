@@ -45,14 +45,17 @@ through the normal `AppendTokens` path with no vision or embedding model.
 
 ## 2. Get the vision and embedding models
 
-LiquidAI publishes ONNX exports of the vision tower and projector for the LFM2.5-VL models. The
-vision graph is `onnx/embed_images.onnx` in
+ONNX exports of the vision tower and projector exist for every model in the line. The vision graph
+is `onnx/embed_images.onnx` in
 [LiquidAI/LFM2.5-VL-1.6B-ONNX](https://huggingface.co/LiquidAI/LFM2.5-VL-1.6B-ONNX) and
-`onnx/vision_encoder.onnx` in the
-[450M](https://huggingface.co/LiquidAI/LFM2.5-VL-450M-ONNX) and
-[3B](https://huggingface.co/LiquidAI/LFM2.5-VL-3B-ONNX) repositories. Download the graph together
-with every `*.onnx_data*` file next to it (the 3B export is split into four). All three have the
-signature ONNX Runtime GenAI expects:
+`onnx/vision_encoder.onnx` everywhere else: the LiquidAI
+[LFM2.5-VL-450M-ONNX](https://huggingface.co/LiquidAI/LFM2.5-VL-450M-ONNX) and
+[LFM2.5-VL-3B-ONNX](https://huggingface.co/LiquidAI/LFM2.5-VL-3B-ONNX) repositories, and the
+onnx-community [LFM2-VL-450M-ONNX](https://huggingface.co/onnx-community/LFM2-VL-450M-ONNX),
+[LFM2-VL-1.6B-ONNX](https://huggingface.co/onnx-community/LFM2-VL-1.6B-ONNX) and
+[LFM2-VL-3B-ONNX](https://huggingface.co/onnx-community/LFM2-VL-3B-ONNX) repositories for the first
+generation. Download the graph together with every `*.onnx_data*` file next to it (the LFM2.5-VL-3B
+export is split into four). All of them have the signature ONNX Runtime GenAI expects:
 
 | Name | Shape | Type |
 | --- | --- | --- |
@@ -173,8 +176,6 @@ models use, `(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?
 before loading the model. It selects the same contractions and produces the same tokens on chat
 prompts.
 
-**The LFM2-VL (non-2.5) models have no published vision export.** The runtime handles them the same
-way, but you have to export the vision tower and projector yourself with the signature above.
 
 **Image splitting (tiling) is not supported.** The Hugging Face processor cuts a large image into up
 to `max_tiles` 512×512 tiles plus a thumbnail, which lets it spend thousands of tokens on a
