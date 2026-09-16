@@ -167,12 +167,12 @@ def test_genai_processor_token_counts():
     images = og.Images.open(image_path)
     inputs = processor(prompt="<image>describe this", images=images)
 
-    pixel_values = np.array(inputs["pixel_values"])
+    pixel_values = inputs["pixel_values"].as_numpy()
     # The processor keys its outputs by the nominal names; they are mapped to the vision graph's
     # input names (spatial_shapes, pixel_attention_mask) only when handed to the generator.
-    spatial_shapes = np.array(inputs["image_sizes"])
-    pixel_attention_mask = np.array(inputs["image_attention_mask"])
-    num_image_tokens = int(np.array(inputs["num_image_tokens"]).sum())
+    spatial_shapes = inputs["image_sizes"].as_numpy()
+    pixel_attention_mask = inputs["image_attention_mask"].as_numpy()
+    num_image_tokens = int(inputs["num_image_tokens"].as_numpy().sum())
 
     assert pixel_values.ndim == 3
     assert pixel_values.shape[2] == ENCODER_PATCH_SIZE * ENCODER_PATCH_SIZE * 3
