@@ -29,9 +29,11 @@ using Request = FixedStateReservationRequest;
 
 class OffsetTensorViewsUnsupportedDevice final : public DeviceInterface {
  public:
-  explicit OffsetTensorViewsUnsupportedDevice(DeviceInterface& inner) : inner_{inner} {}
+  explicit OffsetTensorViewsUnsupportedDevice(
+      DeviceInterface& inner, DeviceType type = DeviceType::CPU)
+      : inner_{inner}, type_{type} {}
 
-  DeviceType GetType() const override { return inner_.GetType(); }
+  DeviceType GetType() const override { return type_; }
   void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
     inner_.InitOrt(api, allocator);
   }
@@ -62,6 +64,7 @@ class OffsetTensorViewsUnsupportedDevice final : public DeviceInterface {
 
  private:
   DeviceInterface& inner_;
+  DeviceType type_;
 };
 
 class ScopedKeyValueCacheDevice {
@@ -533,6 +536,54 @@ TEST_F(FixedStatePoolTest, UnsupportedOffsetViewsUseEquivalentStagingBindings) {
   ScopedKeyValueCacheDevice scoped_device{*fallback_model, fallback_device};
   FixedStatePool fallback_pool{fallback_model, 3};
   run_scenario(fallback_pool, false);
+}
+
+TEST_F(FixedStatePoolTest, GenericDeviceSupportsOrdinaryStagingWithoutStateUpdates) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-hybrid");
+  ASSERT_TRUE(config->model.decoder.state_groups.has_value());
+  for (auto& group : *config->model.decoder.state_groups) {
+    group.state_update.reset();
+  }
+  auto generic_model = CreateModel(GetOrtEnv(), std::move(config));
+  OffsetTensorViewsUnsupportedDevice generic_device{
+      *generic_model->p_device_kvcache_, DeviceType::DML};
+  ScopedKeyValueCacheDevice scoped_device{*generic_model, generic_device};
+  FixedStatePool pool{generic_model, 2};
+
+  EXPECT_FALSE(pool.SupportsStateUpdates());
+  EXPECT_EQ(pool.StateUpdateCapacity(), 0u);
+  const std::array<Request, 2> requests{
+      Request{kRequestA, 1}, Request{kRequestB, 1}};
+  {
+    auto reservation = pool.Reserve(requests);
+    EXPECT_FALSE(reservation.UsesDirectBindings());
+    ExpectInputRows(reservation, 0, 0.0f);
+    ExpectInputRows(reservation, 1, 0.0f);
+    FillStagedRows(reservation, 0, 44.0f);
+    FillStagedRows(reservation, 1, 55.0f);
+    reservation.Commit();
+  }
+
+  auto reservation = pool.Reserve(requests);
+  EXPECT_FALSE(reservation.UsesDirectBindings());
+  ExpectInputRows(reservation, 0, 44.0f);
+  ExpectInputRows(reservation, 1, 55.0f);
+}
+
+TEST_F(FixedStatePoolTest, GenericDeviceRejectsCompactStateReplay) {
+  auto replay_model = LoadSyntheticHybridModel();
+  OffsetTensorViewsUnsupportedDevice generic_device{
+      *replay_model->p_device_kvcache_, DeviceType::DML};
+  ScopedKeyValueCacheDevice scoped_device{*replay_model, generic_device};
+
+  try {
+    FixedStatePool pool{replay_model, 2};
+    FAIL() << "Expected compact replay configuration to be rejected.";
+  } catch (const std::runtime_error& error) {
+    EXPECT_STREQ(
+        error.what(),
+        "Compact fixed state replay currently supports only CPU and CUDA devices.");
+  }
 }
 
 TEST_F(FixedStatePoolTest, AdmissionAlignsReusedSlotWithResidentBank) {

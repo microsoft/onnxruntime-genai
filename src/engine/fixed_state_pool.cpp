@@ -530,12 +530,6 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity)
     throw std::runtime_error(
         "Fixed state pool requires a model state device.");
   }
-  if (impl_->device->GetType() != DeviceType::CPU &&
-      impl_->device->GetType() != DeviceType::CUDA) {
-    throw std::runtime_error(
-        "Fixed state pools currently support only CPU and CUDA devices.");
-  }
-
   impl_->owner = this;
   const ModelStateManifest manifest{impl_->model->config_->model.decoder};
   manifest.ValidateSession(impl_->model->session_info_);
@@ -678,6 +672,12 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity)
   impl_->state_update_capacity = state_update_capacity;
   impl_->state_update_capture_count_name = state_update_capture_count_name;
   impl_->state_update_active_name = state_update_active_name;
+  if (SupportsStateUpdates() &&
+      impl_->device->GetType() != DeviceType::CPU &&
+      impl_->device->GetType() != DeviceType::CUDA) {
+    throw std::runtime_error(
+        "Compact fixed state replay currently supports only CPU and CUDA devices.");
+  }
   if (impl_->state_update_capacity != 0) {
     impl_->persistent_bytes = CheckedAdd(
         impl_->persistent_bytes,
