@@ -30,8 +30,20 @@ struct CallbackScope {
 
 ThreadPool::ThreadPool(size_t num_threads) : num_threads_{num_threads} {
   threads_.reserve(num_threads_);
-  for (size_t i = 0; i < num_threads_; ++i) {
-    threads_.emplace_back([this] { WorkerLoop(); });
+  try {
+    for (size_t i = 0; i < num_threads_; ++i) {
+      threads_.emplace_back([this] { WorkerLoop(); });
+    }
+  } catch (...) {
+    {
+      std::lock_guard state_lock{state_mutex_};
+      shutdown_ = true;
+    }
+    work_ready_.notify_all();
+    for (auto& thread : threads_) {
+      thread.join();
+    }
+    throw;
   }
 }
 
@@ -79,14 +91,16 @@ void ThreadPool::Run(std::ptrdiff_t total, double cost_per_unit, const RangeFunc
   // one reusable worker set while nested submissions remain synchronous.
   std::unique_lock submission_lock{submission_mutex_};
   const auto desired_chunks = static_cast<std::ptrdiff_t>((threads_.size() + 1) * 4);
-  const auto chunk_size = std::max<std::ptrdiff_t>(1, (total + desired_chunks - 1) / desired_chunks);
+  const auto chunk_size =
+      std::max<std::ptrdiff_t>(1, total / desired_chunks + (total % desired_chunks != 0));
 
   {
     std::lock_guard state_lock{state_mutex_};
     function_ = &function;
     total_ = total;
     chunk_size_ = chunk_size;
-    next_.store(0, std::memory_order_relaxed);
+    total_chunks_ = total / chunk_size + (total % chunk_size != 0);
+    next_chunk_.store(0, std::memory_order_relaxed);
     cancelled_.store(false, std::memory_order_relaxed);
     exception_ = nullptr;
     workers_remaining_ = threads_.size();
@@ -110,11 +124,13 @@ void ThreadPool::Run(std::ptrdiff_t total, double cost_per_unit, const RangeFunc
 void ThreadPool::ExecuteJob() {
   CallbackScope callback_scope;
   while (!cancelled_.load(std::memory_order_acquire)) {
-    const auto first = next_.fetch_add(chunk_size_, std::memory_order_relaxed);
-    if (first >= total_ || cancelled_.load(std::memory_order_acquire)) {
+    const auto chunk = next_chunk_.fetch_add(1, std::memory_order_relaxed);
+    if (chunk >= total_chunks_ || cancelled_.load(std::memory_order_acquire)) {
       break;
     }
-    const auto last = std::min(total_, first + chunk_size_);
+    const auto first = chunk * chunk_size_;
+    const auto remaining = total_ - first;
+    const auto last = remaining < chunk_size_ ? total_ : first + chunk_size_;
     try {
       (*function_)(first, last);
     } catch (...) {

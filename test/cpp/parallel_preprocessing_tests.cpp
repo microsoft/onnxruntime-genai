@@ -4,11 +4,14 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <mutex>
 #include <numeric>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 #include "models/preprocessing/nemotron_streaming_processor.h"
@@ -40,7 +43,7 @@ TEST(ThreadPoolTests, RejectsNegativeAndAcceptsEmptyRanges) {
 }
 
 TEST(ThreadPoolTests, CoversEveryItemExactlyOnce) {
-  for (size_t workers : {0U, 1U, 3U}) {
+  for (size_t workers : {0U, 1U, 2U, 3U}) {
     ThreadPool pool{workers};
     std::vector<std::atomic<int>> visits(1000);
     for (auto& visit : visits)
@@ -109,9 +112,25 @@ TEST(ThreadPoolTests, PropagatesExceptionsAndRemainsReusable) {
   }
 }
 
+TEST(ThreadPoolTests, StopsAssigningChunksAfterException) {
+  ThreadPool pool{3};
+  std::atomic<int> processed{};
+  EXPECT_THROW(
+      ThreadPool::TryParallelFor(&pool, 1000, 100.0, [&](auto first, auto last) {
+        if (first == 0)
+          throw std::runtime_error("stop");
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        processed += static_cast<int>(last - first);
+      }),
+      std::runtime_error);
+  EXPECT_LT(processed.load(), 1000);
+}
+
 TEST(ThreadPoolTests, ComputeCompatibility) {
   ThreadPool pool{4};
   std::vector<std::atomic<int>> visits(4);
+  for (auto& visit : visits)
+    visit.store(0);
   pool.Compute([&](size_t i) { ++visits[i]; });
   for (const auto& visit : visits)
     EXPECT_EQ(visit.load(), 1);
@@ -147,7 +166,7 @@ TEST(ParallelPreprocessingTests, QwenPatchExtractionMatchesScalarReference) {
       std::iota(source.begin(), source.end(), 0.0f);
       const auto expected =
           ScalarQwenPatches(source, height, width, channels, patch_size, 2);
-      for (size_t workers : {0U, 1U, 3U}) {
+      for (size_t workers : {0U, 1U, 2U, 3U}) {
         ThreadPool pool{workers};
         std::vector<float> actual(expected.size());
         ExtractQwenImagePatches(&pool, source.data(), actual.data(), height, width,
@@ -174,6 +193,21 @@ TEST(ParallelPreprocessingTests, QwenSinglePatchAndEmptyPatchInputs) {
       ExtractQwenImagePatches(&pool, source.data(), actual.data(), 13, 14, 3, 14, 2));
 }
 
+TEST(ParallelPreprocessingTests, QwenLargeParallelExtractionMatchesScalarReference) {
+  constexpr int64_t patch = 14;
+  constexpr int64_t height = 448;
+  constexpr int64_t width = 448;
+  constexpr int64_t channels = 3;
+  std::vector<float> source(height * width * channels);
+  std::iota(source.begin(), source.end(), 0.0f);
+  const auto expected = ScalarQwenPatches(source, height, width, channels, patch, 2);
+  std::vector<float> actual(expected.size());
+  ThreadPool pool{3};
+  ExtractQwenImagePatches(&pool, source.data(), actual.data(), height, width,
+                          channels, patch, 2);
+  EXPECT_EQ(actual, expected);
+}
+
 std::vector<float> ScalarHwcToChw(const std::vector<float>& source, int64_t images,
                                   int64_t channels, int64_t height, int64_t width) {
   std::vector<float> output(source.size());
@@ -188,12 +222,12 @@ std::vector<float> ScalarHwcToChw(const std::vector<float>& source, int64_t imag
 
 TEST(ParallelPreprocessingTests, VideoTransposeMatchesScalarReference) {
   for (int64_t images : {1, 5}) {
-    for (int64_t side : {4, 64}) {
+    for (int64_t side : {4, 64, 448}) {
       constexpr int64_t channels = 3;
       std::vector<float> source(static_cast<size_t>(images * side * side * channels));
       std::iota(source.begin(), source.end(), 0.0f);
       const auto expected = ScalarHwcToChw(source, images, channels, side, side);
-      for (size_t workers : {0U, 1U, 3U}) {
+      for (size_t workers : {0U, 1U, 2U, 3U}) {
         ThreadPool pool{workers};
         std::vector<float> actual(source.size());
         TransposeVideoChatFlashHwcToChw(&pool, source.data(), actual.data(), images,
@@ -225,7 +259,7 @@ std::vector<T> ScalarMel(const std::vector<float>& cache, int cache_pos,
 }
 
 TEST(ParallelPreprocessingTests, NemotronFloatAndFloat16MatchScalarReference) {
-  constexpr int frames = 40;
+  constexpr int frames = 600;
   constexpr int mels = 128;
   std::vector<float> cache(7 * mels);
   std::vector<float> mel(frames * mels);
@@ -233,16 +267,18 @@ TEST(ParallelPreprocessingTests, NemotronFloatAndFloat16MatchScalarReference) {
   std::iota(mel.begin(), mel.end(), 1.0f);
   auto& allocator = Ort::Allocator::GetWithDefaultOptions();
 
-  for (size_t workers : {0U, 1U, 3U}) {
+  for (size_t workers : {0U, 1U, 2U, 3U}) {
     ThreadPool pool{workers};
-    auto fp32 = OrtValue::CreateTensor<float>(allocator, {1, 47, mels});
+    auto fp32 = OrtValue::CreateTensor<float>(
+        allocator, std::array<int64_t, 3>{1, 607, mels});
     PopulateMelTensor(&pool, *fp32, cache, 5, mel, frames, mels);
     const auto expected_fp32 =
         ScalarMel<float>(cache, 5, mel, frames, mels, [](float value) { return value; });
     EXPECT_TRUE(std::equal(expected_fp32.begin(), expected_fp32.end(),
                            fp32->GetTensorData<float>()));
 
-    auto fp16 = OrtValue::CreateTensor<Ort::Float16_t>(allocator, {1, 47, mels});
+    auto fp16 = OrtValue::CreateTensor<Ort::Float16_t>(
+        allocator, std::array<int64_t, 3>{1, 607, mels});
     PopulateMelTensor(&pool, *fp16, cache, 5, mel, frames, mels);
     const auto expected_fp16 = ScalarMel<Ort::Float16_t>(
         cache, 5, mel, frames, mels,
@@ -264,7 +300,8 @@ TEST(ParallelPreprocessingTests, NemotronCacheUpdateWrapsAcrossChunks) {
   EXPECT_EQ(cache_pos, 2);
 
   auto& allocator = Ort::Allocator::GetWithDefaultOptions();
-  auto output = OrtValue::CreateTensor<float>(allocator, {1, 6, mels});
+  auto output = OrtValue::CreateTensor<float>(
+      allocator, std::array<int64_t, 3>{1, 6, mels});
   PopulateMelTensor(nullptr, *output, cache, cache_pos, second, 2, mels);
   const auto expected =
       ScalarMel<float>(cache, cache_pos, second, 2, mels, [](float value) { return value; });

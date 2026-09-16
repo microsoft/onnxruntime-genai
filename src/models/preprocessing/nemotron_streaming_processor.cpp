@@ -69,7 +69,7 @@ void PopulateMelTensor(ThreadPool* thread_pool, OrtValue& output, std::span<cons
   } else if (output_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
     PopulateMelTensorImpl(thread_pool, output.GetTensorMutableData<Ort::Float16_t>(), cache,
                           cache_pos, mel, num_frames, num_mels, [](float value) {
-                           return Ort::Float16_t{FastFloat32ToFloat16(value)};
+                            return Ort::Float16_t{FastFloat32ToFloat16(value)};
                           });
   } else {
     throw std::runtime_error("PopulateMelTensor: output must be float32 or float16");

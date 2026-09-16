@@ -49,7 +49,8 @@ class ThreadPool {
   const RangeFunction* function_{};
   std::ptrdiff_t total_{};
   std::ptrdiff_t chunk_size_{};
-  std::atomic<std::ptrdiff_t> next_{};
+  std::ptrdiff_t total_chunks_{};
+  std::atomic<std::ptrdiff_t> next_chunk_{};
   std::atomic<bool> cancelled_{};
   std::mutex exception_mutex_;
   std::exception_ptr exception_;

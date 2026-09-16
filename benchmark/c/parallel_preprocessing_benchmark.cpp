@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -9,6 +10,7 @@
 #include <iostream>
 #include <numeric>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "models/preprocessing/nemotron_streaming_processor.h"
@@ -19,6 +21,11 @@
 namespace {
 
 using Clock = std::chrono::steady_clock;
+volatile float benchmark_sink;
+
+void Consume(const void* output) {
+  benchmark_sink = static_cast<const unsigned char*>(output)[0];
+}
 
 double Measure(const std::function<void()>& function) {
   for (int i = 0; i < 5; ++i)
@@ -59,6 +66,23 @@ void ScalarTranspose(const float* source, float* destination, int64_t images,
               source[((n * height + h) * width + w) * channels + c];
 }
 
+void PlaneParallelTranspose(Generators::ThreadPool* thread_pool, const float* source,
+                            float* destination, int64_t images, int64_t channels,
+                            int64_t height, int64_t width) {
+  const int64_t plane_size = height * width;
+  Generators::ThreadPool::TryParallelFor(
+      thread_pool, images * channels, static_cast<double>(plane_size),
+      [&](std::ptrdiff_t first, std::ptrdiff_t last) {
+        for (auto plane = first; plane < last; ++plane) {
+          const int64_t image = plane / channels;
+          const int64_t channel = plane % channels;
+          for (int64_t i = 0; i < plane_size; ++i)
+            destination[plane * plane_size + i] =
+                source[(image * plane_size + i) * channels + channel];
+        }
+      });
+}
+
 void PrintResult(const std::string& operation, const std::string& dimensions,
                  size_t workers, double scalar_us, double parallel_us) {
   std::cout << std::left << std::setw(14) << operation << std::setw(22) << dimensions
@@ -77,13 +101,14 @@ void BenchmarkQwen(size_t workers, int64_t patch, int64_t height, int64_t width)
   Generators::ThreadPool pool{workers};
   const double scalar = Measure([&] {
     ScalarQwen(source.data(), output.data(), height, width, channels, patch, temporal);
+    Consume(output.data());
   });
   const double parallel = Measure([&] {
     Generators::ExtractQwenImagePatches(&pool, source.data(), output.data(), height,
                                         width, channels, patch, temporal);
+    Consume(output.data());
   });
-  PrintResult("qwen", std::to_string(height) + "x" + std::to_string(width) +
-                                " p" + std::to_string(patch),
+  PrintResult("qwen", std::to_string(height) + "x" + std::to_string(width) + " p" + std::to_string(patch),
               workers, scalar, parallel);
 }
 
@@ -93,14 +118,24 @@ void BenchmarkVideo(size_t workers, int64_t images, int64_t height, int64_t widt
   std::vector<float> output(source.size());
   Generators::ThreadPool pool{workers};
   const double scalar = Measure(
-      [&] { ScalarTranspose(source.data(), output.data(), images, channels, height, width); });
-  const double parallel = Measure([&] {
+      [&] {
+        ScalarTranspose(source.data(), output.data(), images, channels, height, width);
+        Consume(output.data());
+      });
+  const double plane = Measure([&] {
+    PlaneParallelTranspose(&pool, source.data(), output.data(), images, channels,
+                           height, width);
+    Consume(output.data());
+  });
+  const double row = Measure([&] {
     Generators::TransposeVideoChatFlashHwcToChw(
         &pool, source.data(), output.data(), images, channels, height, width);
+    Consume(output.data());
   });
-  PrintResult("video", std::to_string(images) + "x" + std::to_string(height) + "x" +
-                                 std::to_string(width),
-              workers, scalar, parallel);
+  const auto dimensions = std::to_string(images) + "x" + std::to_string(height) +
+                          "x" + std::to_string(width);
+  PrintResult("video-plane", dimensions, workers, scalar, plane);
+  PrintResult("video-row", dimensions, workers, scalar, row);
 }
 
 void BenchmarkMel(size_t workers, int frames, int mels,
@@ -114,9 +149,11 @@ void BenchmarkMel(size_t workers, int frames, int mels,
   Generators::ThreadPool pool{workers};
   const double sequential = Measure([&] {
     Generators::PopulateMelTensor(nullptr, *output, cache, 13, mel, frames, mels);
+    Consume(output->GetTensorRawData());
   });
   const double parallel = Measure([&] {
     Generators::PopulateMelTensor(&pool, *output, cache, 13, mel, frames, mels);
+    Consume(output->GetTensorRawData());
   });
   PrintResult(type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ? "mel-fp32" : "mel-fp16",
               std::to_string(frames) + "x" + std::to_string(mels), workers,
@@ -148,7 +185,7 @@ int main() {
 #endif
   std::cout << std::fixed << std::setprecision(2)
             << "operation     dimensions             workers     scalar_us   parallel_us     speedup\n";
-  for (size_t workers : {0U, 1U, 3U}) {
+  for (size_t workers : {0U, 1U, 2U, 3U}) {
     BenchmarkQwen(workers, 14, 56, 56);
     BenchmarkQwen(workers, 14, 448, 448);
     BenchmarkQwen(workers, 14, 896, 896);

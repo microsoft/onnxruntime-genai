@@ -11,6 +11,7 @@
 #include "models/preprocessing/genai_tokenizer.h"
 #include "models/preprocessing/videochat_flash_processor.h"
 #include "models/threadpool.h"
+#include <limits>
 #include <regex>
 
 namespace Generators {
@@ -23,18 +24,22 @@ void TransposeVideoChatFlashHwcToChw(ThreadPool* thread_pool, const float* sourc
   }
   const auto total_planes = static_cast<std::ptrdiff_t>(num_images * channels);
   const int64_t plane_size = height * width;
+  if (height > 0 && total_planes > std::numeric_limits<std::ptrdiff_t>::max() / height) {
+    throw std::overflow_error("VideoChatFlash channel-row count exceeds ptrdiff_t range");
+  }
+  const auto total_rows = total_planes * height;
   ThreadPool::TryParallelFor(
-      thread_pool, total_planes, static_cast<double>(plane_size),
+      thread_pool, total_rows, static_cast<double>(width),
       [&](std::ptrdiff_t first, std::ptrdiff_t last) {
-        for (auto plane = first; plane < last; ++plane) {
-          const int64_t image = static_cast<int64_t>(plane) / channels;
-          const int64_t channel = static_cast<int64_t>(plane) % channels;
+        for (auto row = first; row < last; ++row) {
+          const int64_t plane = static_cast<int64_t>(row) / height;
+          const int64_t h = static_cast<int64_t>(row) % height;
+          const int64_t image = plane / channels;
+          const int64_t channel = plane % channels;
           const float* src_image = source + image * plane_size * channels;
-          float* dst_plane = destination + static_cast<int64_t>(plane) * plane_size;
-          for (int64_t h = 0; h < height; ++h) {
-            for (int64_t w = 0; w < width; ++w) {
-              dst_plane[h * width + w] = src_image[(h * width + w) * channels + channel];
-            }
+          float* dst_row = destination + plane * plane_size + h * width;
+          for (int64_t w = 0; w < width; ++w) {
+            dst_row[w] = src_image[(h * width + w) * channels + channel];
           }
         }
       });
