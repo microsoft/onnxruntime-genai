@@ -45,9 +45,14 @@ through the normal `AppendTokens` path with no vision or embedding model.
 
 ## 2. Get the vision and embedding models
 
-LiquidAI publishes an ONNX export of the vision tower and projector at
-[LiquidAI/LFM2.5-VL-1.6B-ONNX](https://huggingface.co/LiquidAI/LFM2.5-VL-1.6B-ONNX). Its
-`onnx/embed_images.onnx` already has the signature ONNX Runtime GenAI expects:
+LiquidAI publishes ONNX exports of the vision tower and projector for the LFM2.5-VL models. The
+vision graph is `onnx/embed_images.onnx` in
+[LiquidAI/LFM2.5-VL-1.6B-ONNX](https://huggingface.co/LiquidAI/LFM2.5-VL-1.6B-ONNX) and
+`onnx/vision_encoder.onnx` in the
+[450M](https://huggingface.co/LiquidAI/LFM2.5-VL-450M-ONNX) and
+[3B](https://huggingface.co/LiquidAI/LFM2.5-VL-3B-ONNX) repositories. Download the graph together
+with every `*.onnx_data*` file next to it (the 3B export is split into four). All three have the
+signature ONNX Runtime GenAI expects:
 
 | Name | Shape | Type |
 | --- | --- | --- |
@@ -59,12 +64,14 @@ LiquidAI publishes an ONNX export of the vision tower and projector at
 `768` is `encoder_patch_size * encoder_patch_size * 3`, `spatial_shapes` holds each image's patch
 grid as `(rows, cols)`, and the graph drops the masked padding positions itself, so
 `image_features` is the concatenation of every image's projected tokens with nothing in between.
+`hidden_size` is the decoder's hidden size (1024 for 450M, 2048 for 1.6B and 3B).
 
 The embedding model is a small graph that looks up `input_ids` in the decoder's embedding table and
-scatters `image_features` into the positions holding the image token (`396` for the shipped
-models). Export it from the checkpoint the same way as for
-[Gemma-3](gemma-3-vision-tutorial.md), or reuse `onnx/embed_tokens.onnx` from the repository above
-and add the scatter.
+scatters `image_features` into the positions holding the image token (`image_token_id` in
+`config.json`: 396 for the 450M and 1.6B models, 124907 for the 3B model). A Gather followed by a
+ScatterND over the flattened sequence is enough; build it from
+`model.language_model.embed_tokens.weight` in the checkpoint, or reuse `onnx/embed_tokens.onnx` from
+the repository above and add the scatter.
 
 ## 3. Write `genai_config.json` and `processor_config.json`
 
@@ -121,11 +128,17 @@ Add `embedding` and `vision` sections to the `genai_config.json` the builder pro
 
 The three vision fields drive the image processor and must match the model's `config.json`:
 
-| `genai_config.json` | `config.json` | LFM2.5-VL value |
+| `genai_config.json` | `config.json` | LFM2-VL / LFM2.5-VL value |
 | --- | --- | --- |
 | `vision.patch_size` | `encoder_patch_size` | 16 |
 | `vision.spatial_merge_size` | `downsample_factor` | 2 |
 | `vision.max_num_patches` | `max_image_tokens * downsample_factor²` | 1024 |
+
+Every LFM2-VL and LFM2.5-VL model published so far shares these values, so the same
+`processor_config.json` serves the whole line, with one exception: set the `Resize` step's
+`interpolation` to match `resample` in the model's `processor_config.json`. `2` (bilinear) is
+`LINEAR`, which the shipped file uses and which LFM2.5-VL-450M and LFM2.5-VL-1.6B need; `3` (bicubic)
+is `CUBIC`, which LFM2.5-VL-3B and the LFM2-VL models need.
 
 `max_num_patches` is the sequence length every image is padded to so that several images can share
 one vision run; set it to `0` to pad each batch to its own longest image instead, which is cheaper
@@ -152,6 +165,16 @@ feature, and `<|image_end|>`, so the number of placeholders always matches the n
 the vision model produced. Images the prompt never referenced are prepended rather than dropped.
 
 ## 5. Known limitations
+
+**LFM2.5-VL-3B needs a tokenizer regex substitution.** Its `tokenizer.json` pre-tokenizes with the
+`'(?i:[sdmt]|ll|ve|re)|...` pattern, which the tokenizer in onnxruntime-extensions does not parse
+("Invalid '(?...)' zero-width assertion"). Replace that pattern with the equivalent one the other
+models use, `(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+`,
+before loading the model. It selects the same contractions and produces the same tokens on chat
+prompts.
+
+**The LFM2-VL (non-2.5) models have no published vision export.** The runtime handles them the same
+way, but you have to export the vision tower and projector yourself with the signature above.
 
 **Image splitting (tiling) is not supported.** The Hugging Face processor cuts a large image into up
 to `max_tiles` 512×512 tiles plus a thumbnail, which lets it spend thousands of tokens on a
