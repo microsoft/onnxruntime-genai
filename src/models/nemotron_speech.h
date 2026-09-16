@@ -15,6 +15,11 @@
 
 namespace Generators {
 
+// Internal metadata carrying a chunk's absolute input-sample origin so timestamp calculations
+// preserve elapsed silence when VAD discards complete chunks before model inference.
+inline constexpr std::string_view AbsoluteTimestampChunkStartSampleName =
+  "_genai_absolute_timestamp_chunk_start_sample";
+
 inline int64_t GetValidatedNemotronMelFrameCount(const std::vector<int64_t>& mel_shape, int64_t expected_num_mels) {
   if (mel_shape.size() != 3) {
     throw std::runtime_error("mel input must have rank 3 [batch, frames, mels], got rank " + std::to_string(mel_shape.size()));
@@ -61,6 +66,13 @@ struct NemotronConfig {
   int chunk_samples{};
   int subsampling_factor{};
   int max_symbols_per_step{};
+
+  // Timestamp output and segment-completion policy copied from the model configuration.
+  Config::TimestampLevel timestamp_level{Config::TimestampLevel::Off};
+  std::vector<std::string> segment_separators;
+  std::optional<int> segment_gap_threshold_frames;
+
+  bool TimestampsEnabled() const { return timestamp_level != Config::TimestampLevel::Off; }
 
   // Mel spectrogram parameters
   int num_mels{};
