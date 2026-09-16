@@ -351,7 +351,7 @@ struct DeviceInterface {
   virtual void ReplayStateUpdates(const StateUpdateReplayDesc* /*descs*/, size_t /*count*/) {
     throw std::logic_error("Device does not support compact fixed-state replay.");
   }
-  // True for EP's where an OrtValue can bind a tensor view formed by adding a byte offset to the base
+  // True for EPs where an OrtValue can bind a tensor view formed by adding a byte offset to the base
   // address returned for persistent device storage. Keep last for vtable ABI stability.
   virtual bool SupportsOffsetTensorViews() const { return false; }
 };
