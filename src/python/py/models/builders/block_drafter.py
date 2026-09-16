@@ -29,8 +29,11 @@ class BlockDrafterBuilder:
     quant_block_size = 32
     quant_prepack = 0
     # Set only when the target's own LM head is symmetric/`default` quantized, which is the one
-    # convention whose initializer names and bytes the drafter can reproduce and share.
+    # convention whose initializer names the drafter can reuse.
     lm_head_quant = None
+    # Records the quantized LM head `make_lm_head_nbits` left unpopulated for
+    # `adopt_target_lm_head` to fill from the saved target.
+    lm_head_adoption = None
 
     def make_graph(self, graph_name, const_prefix):
         self.values: dict[str, ir.Value] = {}
@@ -69,6 +72,7 @@ class BlockDrafterBuilder:
         )
         self.graph.append(node)
         self.node_names.add(name)
+        return node
 
     def make_initializer(self, tensor, name, to=None):
         if to is not None:
@@ -232,12 +236,16 @@ class BlockDrafterBuilder:
 
         name = "/lm_head/MatMul"
         output = self.out(name)
-        if self.lm_head_quant is not None:
-            self.make_lm_head_nbits(name, root, output, weight)
-        elif weight.dtype != torch.float8_e4m3fn:
-            self.make_initializer(weight.T, "lm_head.MatMul.weight", to=self.external_dtype)
-            self.make_node("MatMul", [root, "lm_head.MatMul.weight"], [output], name=name)
-        else:
+        if weight.dtype == torch.float8_e4m3fn:
+            # A prequantized head wins over any requested weight precision, for the target as
+            # well as here. Quantizing this one to `--precision` instead would leave the drafter
+            # proposing tokens scored by a head the target never verifies with.
+            if self.lm_head_quant is not None:
+                print(
+                    "The target's LM head is prequantized FP8, which overrides the requested weight "
+                    "precision, so the block drafter shares that head instead of quantizing its own."
+                )
+                self.lm_head_quant = None
             weight_scale = self.weights.get("lm_head.weight_scale")
             if weight_scale is None:
                 raise ValueError("FP8 LM head weight is missing 'lm_head.weight_scale'.")
@@ -257,51 +265,77 @@ class BlockDrafterBuilder:
                 domain="com.microsoft",
                 block_size=int(weight.shape[1]),
             )
+        elif self.lm_head_quant is not None:
+            self.make_lm_head_nbits(name, root, output)
+        else:
+            self.make_initializer(weight.T, "lm_head.MatMul.weight", to=self.external_dtype)
+            self.make_node("MatMul", [root, "lm_head.MatMul.weight"], [output], name=name)
         self.make_value(output, self.external_dtype, [rows, self.vocab_size])
         return output
 
-    def make_lm_head_nbits(self, name, root, output, weight):
-        """Emit the LM head under the *target's* initializer names so the two fold into one copy.
+    def make_lm_head_nbits(self, name, root, output):
+        """Emit the LM head as `MatMulNBits` under the *target's* initializer names.
 
-        The drafter's head is the target's `lm_head.weight`, so quantizing it the same way
-        reproduces the target's bytes and `share_initializers` collapses them. Scales stay at
-        `external_dtype` (the target's IO dtype), not the drafter's bf16 body dtype, because a
-        byte difference there would silently cost a duplicated copy instead of failing.
+        No weights are produced here: `adopt_target_lm_head` copies the target's once it has
+        been saved. Quantizing the same tensor a second time would round it through a second
+        implementation (`CudaQuantizer` here, ORT's `MatMulNBitsQuantizer` there), which both
+        defeats `share_initializers` and leaves the drafter scoring drafts with a head the
+        target does not verify with.
         """
         bits = self.lm_head_quant["bits"]
-        block_size = self.lm_head_quant["block_size"]
-        prepack = self.lm_head_quant["prepack"]
-        allowed_block_sizes = (32, 64, 128) if prepack == 1 else (64, 128)
-        if (
-            self.external_dtype != ir.DataType.FLOAT16
-            or block_size not in allowed_block_sizes
-            or self.hidden_size % block_size != 0
-            or self.vocab_size % (32 if bits == 8 else 64) != 0
-        ):
-            prepack = 0
-        if prepack:
-            qweight, scales = CudaQuantizer.matmulnbits_prepacked_blockwise_quantize(
-                weight, bits, block_size, force_arch=90 if prepack == 2 else 80
-            )
-        else:
-            qweight, scales = CudaQuantizer.matmulnbits_blockwise_quantize(
-                weight, bits, block_size, flatten_qweight=False
-            )
         qweight_name = f"lm_head.MatMul.weight_Q{bits}"
         scales_name = "lm_head.MatMul.weight_scales"
-        self.make_initializer(qweight, qweight_name)
-        self.make_initializer(scales, scales_name, to=self.external_dtype)
-        attributes = {"bits": bits, "block_size": block_size, "K": self.hidden_size, "N": self.vocab_size}
-        if prepack:
-            attributes["weight_prepacked"] = prepack
-        self.make_node(
+        node = self.make_node(
             "MatMulNBits",
             [root, qweight_name, scales_name],
             [output],
             name=name,
             domain="com.microsoft",
-            **attributes,
+            bits=bits,
+            block_size=self.lm_head_quant["block_size"],
+            K=self.hidden_size,
+            N=self.vocab_size,
         )
+        self.lm_head_adoption = {"node": node, "initializers": (qweight_name, scales_name)}
+
+    def adopt_target_lm_head(self, target_model_path):
+        """Take the LM head's quantized bytes and attributes from the saved target model.
+
+        Called between the target's save and the drafter's, so `target_model_path` exists and
+        still holds its weights in external data that `ir` reads lazily. The target's node is
+        found by the initializers it consumes because the quantizer renames it (`..._Q4`).
+        """
+        adoption = self.lm_head_adoption
+        if adoption is None:
+            return
+        qweight_name, scales_name = adoption["initializers"]
+        target = ir.load(target_model_path)
+        target_node = next(
+            (
+                node
+                for node in target.graph
+                if (node.domain, node.op_type) == ("com.microsoft", "MatMulNBits")
+                and [value.name for value in node.inputs[1:]] == [qweight_name, scales_name]
+            ),
+            None,
+        )
+        if target_node is None:
+            raise ValueError(
+                f"The block drafter quantized its LM head, but '{os.path.basename(target_model_path)}' has no "
+                f"symmetric MatMulNBits over '{qweight_name}'. Both models run the same head, so a mismatch "
+                "here means the target would reject nearly every draft."
+            )
+        for initializer_name in adoption["initializers"]:
+            tensor = target.graph.initializers[initializer_name].const_value
+            value = self.make_value(initializer_name, tensor.dtype, tensor.shape)
+            value.const_value = tensor
+            self.graph.register_initializer(value)
+        node = adoption["node"]
+        for attribute_name in list(node.attributes):
+            del node.attributes[attribute_name]
+        for attribute_name, attribute in target_node.attributes.items():
+            node.attributes[attribute_name] = attribute
+        self.lm_head_adoption = None
 
     def resolve_sliding_window(self, config):
         """Return the single ``local_window_size`` every layer runs with, or -1 for full attention."""
@@ -381,6 +415,8 @@ class BlockDrafterBuilder:
                 )
 
     def save_model(self, out_dir):
+        if self.lm_head_adoption is not None:
+            raise ValueError("adopt_target_lm_head must run before saving a drafter with a quantized LM head.")
         out_path = os.path.join(out_dir, self.filename)
         data_path = out_path + ".data"
         with tempfile.TemporaryDirectory(dir=out_dir, prefix=f".{self.filename}.") as staging_dir:

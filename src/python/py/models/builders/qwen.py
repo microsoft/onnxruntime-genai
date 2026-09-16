@@ -1130,10 +1130,10 @@ class Qwen35MoEModel(MTPModel):
     def block_drafter_quant(self, precision):
         """Resolve weight-only quantization for a block drafter, or ``None`` to keep it dense.
 
-        The drafter's LM head *is* the target's, so quantizing it the same way lets
-        ``share_initializers`` fold the two into one copy. Only the symmetric/``default``
-        naming convention is reproducible here, so any other algorithm leaves the head dense
-        rather than writing a second copy under a name that could never match.
+        The drafter's LM head *is* the target's, so it reuses the target's initializers rather
+        than quantizing a second copy (see ``adopt_target_lm_head``). Only the
+        symmetric/``default`` naming convention is wired up here; any other algorithm leaves
+        the head dense instead of guessing at initializer names.
         """
         if precision == "bf16":
             return None
@@ -1153,10 +1153,10 @@ class Qwen35MoEModel(MTPModel):
         if not shareable:
             print(
                 f"Leaving the block drafter's LM head dense: the target writes '{weight_name}', "
-                "which this exporter cannot reproduce byte-for-byte to share."
+                "which this exporter does not know how to reuse."
             )
             return quant
-        quant["lm_head"] = {"bits": head_bits, "block_size": block_size, "prepack": prepack}
+        quant["lm_head"] = {"bits": head_bits, "block_size": block_size}
         return quant
 
     def make_dflash2_init(self, io_dtype, extra_options):
@@ -1225,6 +1225,7 @@ class Qwen35MoEModel(MTPModel):
     def save_dflash2_model(self, output_dir):
         if self.dflash2 is None:
             return
+        self.dflash2.adopt_target_lm_head(os.path.join(output_dir, self.decoder.filename))
         self.dflash2.save_model(output_dir)
         self.dflash2_shared_initializers = self.share_initializers(
             output_dir, self.decoder.filename, self.dflash2.filename
@@ -1234,10 +1235,10 @@ class Qwen35MoEModel(MTPModel):
     def warn_unshared_lm_head(self, drafter, shared, drafter_name):
         """Report a drafter head that stayed a separate copy instead of folding onto the target's.
 
-        The drafter head is already much smaller than the dense one it replaces, so this is a
-        missed saving rather than a failure. It happens when this exporter's blockwise
-        quantizer and the target's MLAS pass round a block differently, which leaves the
-        bytes unequal even though both encode the same tensor the same way.
+        The drafter adopts the target's own initializers, so the two are identical by
+        construction and this should never fire. If it does, the bytes on disk diverged
+        somewhere after ``adopt_target_lm_head``, which costs both a duplicated copy and the
+        guarantee that the drafter scores with the head the target verifies with.
         """
         head = getattr(drafter, "lm_head_quant", None)
         if head is None:
@@ -1246,8 +1247,8 @@ class Qwen35MoEModel(MTPModel):
         if any(entry["name"] == weight_name for entry in shared):
             return
         print(
-            f"Note: the {drafter_name} LM head is quantized but did not match the target's "
-            f"'{weight_name}' byte-for-byte, so it remains a separate (still quantized) copy."
+            f"WARNING: the {drafter_name} LM head adopted the target's '{weight_name}' but did not "
+            "share it. The two copies may no longer agree."
         )
 
     def add_dflash2_to_genai_config(self, out_dir):
@@ -1346,6 +1347,7 @@ class Qwen35MoEModel(MTPModel):
     def save_dspark_model(self, output_dir):
         if self.dspark is None:
             return
+        self.dspark.adopt_target_lm_head(os.path.join(output_dir, self.decoder.filename))
         self.dspark.save_model(output_dir)
         self.dspark_shared_initializers = self.share_initializers(
             output_dir, self.decoder.filename, self.dspark.filename

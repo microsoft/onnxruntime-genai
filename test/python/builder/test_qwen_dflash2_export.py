@@ -295,8 +295,8 @@ def test_quantized_drafter_reuses_the_targets_lm_head_names():
     assert quant["bits"] == 4
     assert quant["block_size"] == 32
     assert quant["prepack"] == 1
-    # Folding onto the target's copy only works if the drafter quantizes its head identically.
-    assert quant["lm_head"] == {"bits": 4, "block_size": 32, "prepack": 1}
+    # The head is not quantized here at all; it is adopted from the target under these names.
+    assert quant["lm_head"] == {"bits": 4, "block_size": 32}
 
 
 @pytest.mark.parametrize(
@@ -487,16 +487,67 @@ def test_mlp_gate_up_fusion_execution_matches_unfused(tmp_path, bits):
         np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-6)
 
 
-def test_quantized_lm_head_matches_the_targets_initializer_names(tmp_path):
+def _quantized_head_builder(tmp_path, bits=4, block_size=8):
     builder = DFlash2Builder(
         _draft_checkpoint(tmp_path),
         str(tmp_path),
         ir.DataType.FLOAT16,
         paged_block_size=256,
         max_position_embeddings=128,
-        quant={"bits": 4, "block_size": 8, "prepack": 0, "lm_head": {"bits": 4, "block_size": 8, "prepack": 0}},
+        quant={
+            "bits": bits,
+            "block_size": block_size,
+            "prepack": 0,
+            "lm_head": {"bits": bits, "block_size": block_size},
+        },
     )
     builder.weights = {"lm_head.weight": torch.ones((builder.vocab_size, builder.hidden_size))}
+    return builder
+
+
+def _save_target(out_dir, node, initializers, hidden_size, vocab_size):
+    graph = onnx.helper.make_graph(
+        [node],
+        "target",
+        [onnx.helper.make_tensor_value_info("hidden_states", onnx.TensorProto.FLOAT16, ["rows", hidden_size])],
+        [onnx.helper.make_tensor_value_info("logits", onnx.TensorProto.FLOAT16, ["rows", vocab_size])],
+        [onnx.numpy_helper.from_array(array, name) for name, array in initializers.items()],
+    )
+    model = onnx.helper.make_model(
+        graph,
+        opset_imports=[onnx.helper.make_opsetid("", 21), onnx.helper.make_opsetid("com.microsoft", 1)],
+    )
+    path = os.path.join(out_dir, "model.onnx")
+    onnx.save_model(model, path, save_as_external_data=True, location="model.onnx.data", size_threshold=0)
+    return path
+
+
+def _save_quantized_target(out_dir, builder, bits=4, block_size=8, weight_prepacked=2):
+    columns = builder.hidden_size // block_size
+    qweight = np.arange(builder.vocab_size * columns * block_size * bits // 8, dtype=np.uint8).reshape(
+        builder.vocab_size, columns, block_size * bits // 8
+    )
+    scales = np.arange(builder.vocab_size * columns, dtype=np.float16).reshape(builder.vocab_size, columns)
+    initializers = {f"lm_head.MatMul.weight_Q{bits}": qweight, "lm_head.MatMul.weight_scales": scales}
+    node = onnx.helper.make_node(
+        "MatMulNBits",
+        ["hidden_states", *initializers],
+        ["logits"],
+        # The quantizer renames the target's node, so the drafter cannot find it by name.
+        name="/lm_head/MatMul_Q4",
+        domain="com.microsoft",
+        bits=bits,
+        block_size=block_size,
+        K=builder.hidden_size,
+        N=builder.vocab_size,
+        weight_prepacked=weight_prepacked,
+    )
+    path = _save_target(out_dir, node, initializers, builder.hidden_size, builder.vocab_size)
+    return path, qweight, scales
+
+
+def test_quantized_lm_head_matches_the_targets_initializer_names(tmp_path):
+    builder = _quantized_head_builder(tmp_path)
 
     output = builder.make_lm_head("hidden_states", "num_sample")
 
@@ -506,46 +557,92 @@ def test_quantized_lm_head_matches_the_targets_initializer_names(tmp_path):
         "lm_head.MatMul.weight_Q4",
         "lm_head.MatMul.weight_scales",
     ]
-    # Scales ride at the target's dtype, not the drafter's bf16 body dtype, or they cannot fold.
-    assert builder.graph.initializers["lm_head.MatMul.weight_scales"].const_value.dtype == ir.DataType.FLOAT16
+    # The weights are the target's, so nothing is quantized or registered until adoption.
+    assert "lm_head.MatMul.weight_Q4" not in builder.graph.initializers
     assert builder.values[output].dtype == ir.DataType.FLOAT16
 
 
-@pytest.mark.parametrize(
-    "bits,hidden_size,vocab_size,prepack,external_dtype",
-    [
-        (4, 32, 32, 1, ir.DataType.FLOAT16),
-        (8, 32, 33, 1, ir.DataType.FLOAT16),
-        (4, 33, 64, 1, ir.DataType.FLOAT16),
-        (4, 32, 64, 2, ir.DataType.FLOAT16),
-        (4, 32, 64, 1, ir.DataType.BFLOAT16),
-    ],
-)
-def test_ineligible_lm_head_keeps_blockwise_layout(tmp_path, bits, hidden_size, vocab_size, prepack, external_dtype):
-    builder = DFlash2Builder(
-        _draft_checkpoint(tmp_path),
-        str(tmp_path),
-        external_dtype,
-        paged_block_size=256,
-        max_position_embeddings=128,
-        quant={
-            "bits": bits,
-            "block_size": 32,
-            "prepack": prepack,
-            "lm_head": {"bits": bits, "block_size": 32, "prepack": prepack},
-        },
+def test_quantized_lm_head_adopts_the_targets_bytes_and_attributes(tmp_path):
+    builder = _quantized_head_builder(tmp_path)
+    builder.make_lm_head("hidden_states", "num_sample")
+    target_path, qweight, scales = _save_quantized_target(tmp_path, builder)
+
+    builder.adopt_target_lm_head(target_path)
+
+    initializers = builder.graph.initializers
+    np.testing.assert_array_equal(initializers["lm_head.MatMul.weight_Q4"].const_value.numpy(), qweight)
+    np.testing.assert_array_equal(initializers["lm_head.MatMul.weight_scales"].const_value.numpy(), scales)
+    node = next(node for node in builder.graph if node.name == "/lm_head/MatMul")
+    # The target's layout decision comes across with its bytes rather than being recomputed.
+    assert node.attributes["weight_prepacked"].value == 2
+    assert node.attributes["K"].value == builder.hidden_size
+    assert node.attributes["N"].value == builder.vocab_size
+    assert builder.lm_head_adoption is None
+
+
+def test_adopted_lm_head_survives_a_round_trip_to_disk(tmp_path):
+    builder = _quantized_head_builder(tmp_path)
+    builder.make_lm_head("hidden_states", "num_sample")
+    builder.graph.outputs.append(builder.values[builder.out("/lm_head/MatMul")])
+    builder.graph.inputs.append(builder.make_value("hidden_states", ir.DataType.FLOAT16, ["rows", builder.hidden_size]))
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    target_path, qweight, _ = _save_quantized_target(target_dir, builder)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    builder.adopt_target_lm_head(target_path)
+    builder.save_model(str(out_dir))
+
+    saved = onnx.load(str(out_dir / builder.filename))
+    initializer = next(init for init in saved.graph.initializer if init.name == "lm_head.MatMul.weight_Q4")
+    np.testing.assert_array_equal(onnx.numpy_helper.to_array(initializer, base_dir=str(out_dir)), qweight)
+
+
+def test_saving_before_adoption_is_rejected(tmp_path):
+    builder = _quantized_head_builder(tmp_path)
+    builder.make_lm_head("hidden_states", "num_sample")
+
+    with pytest.raises(ValueError, match="adopt_target_lm_head"):
+        builder.save_model(str(tmp_path))
+
+
+def test_a_target_head_the_drafter_cannot_adopt_is_rejected(tmp_path):
+    builder = _quantized_head_builder(tmp_path)
+    builder.make_lm_head("hidden_states", "num_sample")
+    initializers = {
+        "lm_head.MatMul.fp8_weight": np.zeros((builder.vocab_size, builder.hidden_size), dtype=np.uint8),
+        "lm_head.MatMul.fp8_weight_scale": np.ones((builder.vocab_size, 1), dtype=np.float32),
+    }
+    node = onnx.helper.make_node(
+        "MatMulBlockQuantizedFp8Weight",
+        ["hidden_states", *initializers],
+        ["logits"],
+        name="/lm_head/MatMul",
+        domain="com.microsoft",
+        block_size=builder.hidden_size,
     )
-    builder.hidden_size = hidden_size
-    builder.vocab_size = vocab_size
-    builder.weights = {"lm_head.weight": torch.ones((vocab_size, hidden_size))}
+    target_path = _save_target(tmp_path, node, initializers, builder.hidden_size, builder.vocab_size)
+
+    with pytest.raises(ValueError, match="reject nearly every draft"):
+        builder.adopt_target_lm_head(target_path)
+
+
+# A prequantized head overrides `--precision`, and the drafter has to follow the target there:
+# scoring drafts with a head the target does not verify with collapses acceptance.
+def test_prequantized_fp8_target_head_overrides_the_requested_precision(tmp_path):
+    builder = _quantized_head_builder(tmp_path)
+    builder.weights = {
+        "lm_head.weight": torch.ones((builder.vocab_size, builder.hidden_size), dtype=torch.float8_e4m3fn),
+        "lm_head.weight_scale": torch.ones(()),
+    }
 
     builder.make_lm_head("hidden_states", "num_sample")
 
     node = next(node for node in builder.graph if node.name == "/lm_head/MatMul")
-    assert node.op_type == "MatMulNBits"
-    assert "weight_prepacked" not in node.attributes
-    weight = builder.graph.initializers[f"lm_head.MatMul.weight_Q{bits}"].const_value
-    assert tuple(weight.shape) == (vocab_size, (hidden_size + 31) // 32, 32 * bits // 8)
+    assert node.op_type == "MatMulBlockQuantizedFp8Weight"
+    assert builder.lm_head_quant is None
+    assert builder.lm_head_adoption is None
 
 
 @pytest.mark.parametrize("scale_shape", [(), (1,), (1, 32), (32, 1)])
