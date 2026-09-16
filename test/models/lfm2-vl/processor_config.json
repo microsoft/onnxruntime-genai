@@ -13,12 +13,6 @@
       },
       {
         "operation": {
-          "name": "convert_to_rgb",
-          "type": "ConvertRGB"
-        }
-      },
-      {
-        "operation": {
           "name": "resize",
           "type": "Resize",
           "attrs": {
@@ -47,8 +41,16 @@
           "name": "normalize",
           "type": "Normalize",
           "attrs": {
-            "mean": [0.5, 0.5, 0.5],
-            "std": [0.5, 0.5, 0.5]
+            "mean": [
+              0.5,
+              0.5,
+              0.5
+            ],
+            "std": [
+              0.5,
+              0.5,
+              0.5
+            ]
           }
         }
       },
@@ -57,7 +59,11 @@
           "name": "to_channel_first",
           "type": "Permute3D",
           "attrs": {
-            "dims": [2, 0, 1]
+            "dims": [
+              2,
+              0,
+              1
+            ]
           }
         }
       },
