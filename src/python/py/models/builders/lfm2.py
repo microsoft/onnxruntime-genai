@@ -5,7 +5,6 @@
 # Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # --------------------------------------------------------------------------
 import onnx_ir as ir
-import torch
 
 from .base import Model
 
@@ -196,9 +195,10 @@ class LFM2MoEModel(LFM2Model):
 
     Same hybrid conv/attention stack as LFM2. The first ``num_dense_layers`` layers keep the dense
     SwiGLU MLP; every later layer routes each token to ``num_experts_per_tok`` of ``num_experts``
-    experts. The router (``Lfm2MoeTopKRouter``) is sigmoid based with an auxiliary-loss-free
-    load-balancing bias: experts are *selected* by the top-k of ``sigmoid(logits) + expert_bias``
-    but *mixed* with the unbiased ``sigmoid(logits)``, renormalized over the selected experts.
+    experts. The router (``Lfm2MoeSparseMoeBlock.route_tokens_to_experts`` in transformers) is
+    sigmoid based with an auxiliary-loss-free load-balancing bias: experts are *selected* by the
+    top-k of ``sigmoid(logits) + expert_bias`` but *mixed* with the unbiased ``sigmoid(logits)``,
+    renormalized over the selected experts.
 
     The fused MoE/QMoE op only knows softmax-over-top-k routing, so the selection is done in the
     graph and the op is fed ``log(sigmoid(logits))`` at the selected experts and a large negative
@@ -226,10 +226,6 @@ class LFM2MoEModel(LFM2Model):
         self.moe_attrs["activation_type"] = "swiglu"
         self.moe_attrs["swiglu_fusion"] = 1
         self.moe_attrs["normalize_routing_weights"] = True
-        if self.moe_attrs.get("swiglu_limit") is None and self.ep == "trt-rtx":
-            # TRT-RTX EP builds currently require QMoE swiglu_limit to be present;
-            # use +inf to preserve the "no clamp" behavior when the model omits it.
-            self.moe_attrs["swiglu_limit"] = float("inf")
 
     def make_intermediate_size_init(self, config):
         # Lfm2MoeConfig has no block_auto_adjust_ff_dim: the dense layers use intermediate_size as is.
@@ -241,55 +237,38 @@ class LFM2MoEModel(LFM2Model):
         else:
             self.make_moe(layer_id, self.get_feed_forward_module(layer), root_input)
 
-    def make_moe_preprocessing(self, layer_id, moe, root_input):
-        if getattr(moe.experts, "quant_type", None) is not None:
-            # Pre-quantized experts (e.g. AMD Quark checkpoints) already carry QMoE-packed tensors.
-            self.make_moe_expert_initializers(layer_id, moe.experts)
-        else:
-            # HF stores [gate | up] concatenated along the output axis of gate_up_proj [E, 2I, H].
-            # The fused SwiGLU (swiglu_fusion=1) wants the rows interleaved [g0, u0, g1, u1, ...].
-            raw_gate_up = moe.experts.gate_up_proj
-            half = raw_gate_up.shape[1] // 2
-            gate_up_weight = torch.stack([raw_gate_up[:, :half, :], raw_gate_up[:, half:, :]], dim=2).reshape_as(
-                raw_gate_up
-            )
-            self.make_moe_expert_initializers(layer_id, moe.experts, gate_up_weight, moe.experts.down_proj)
+    def make_moe(self, layer_id, moe, root_input):
+        self.make_moe_preprocessing(layer_id, moe, root_input)
+        router_probs = self.make_moe_router(layer_id, moe, root_input)
+        self.make_moe_subgraph(layer_id, moe, root_input, router_probs)
 
-        # The MoE/QMoE op takes the expert biases as separate inputs. LFM2-MoE experts have no bias,
-        # so zeros are emitted unless a checkpoint (e.g. packed experts) carries them.
-        num_experts = self.moe_attrs["num_experts"]
-        gate_up_bias = getattr(moe.experts, "gate_up_bias", None)
-        down_bias = getattr(moe.experts, "down_bias", None)
-        self.make_initializer(
-            torch.zeros(num_experts, 2 * self.moe_intermediate_size) if gate_up_bias is None else gate_up_bias,
-            f"model.layers.{layer_id}.moe.experts.gate_up_proj.bias",
-            to=self.io_dtype,
-        )
-        self.make_initializer(
-            torch.zeros(num_experts, self.hidden_size) if down_bias is None else down_bias,
-            f"model.layers.{layer_id}.moe.experts.down_proj.bias",
-            to=self.io_dtype,
-        )
+    def make_moe_preprocessing(self, layer_id, moe, root_input):
+        # Keep the router in floating point so int4 rounding cannot flip an expert choice.
+        moe.gate.exclude_from_quantization = True
+        self.make_interleaved_swiglu_moe_preprocessing(layer_id, moe)
 
     def make_moe_router(self, layer_id, moe, root_input):
-        # root_input --> MatMul --> Reshape --> Cast(fp32) --> Sigmoid --+--> Add(expert_bias) --> TopK
-        #                                                                |                          |
-        #                                                                +--> Log --> GatherElements <-+
-        #                                                                |                    |
-        #                                                                +--> Shape --> ConstantOfShape(sentinel)
-        #                                                                                     |
-        #                                              Cast(io_dtype) <-- ScatterElements <---+
+        """Emit the in-graph expert selection and return the name of the masked router scores.
+
+        root_input --> MatMul --> Reshape --> Cast(fp32) --> Sigmoid --+--> Add(expert_bias) --> TopK
+                                                                       |                          |
+                                                                       +--> GatherElements <------+
+                                                                       |          |               |
+                                                                       |     Clip --> Log         |
+                                                                       |               |          |
+                                                                       +--> Shape --> ConstantOfShape(sentinel)
+                                                                                            |
+                                                     Cast(io_dtype) <-- ScatterElements <---+
+        """
         scores_name = self.make_moe_router_scores(layer_id, moe, root_input)
         indices_name = self.make_moe_router_selection(layer_id, moe, scores_name)
-        self.moe_attrs["router_probs"] = self.make_moe_router_mask(layer_id, scores_name, indices_name)
+        return self.make_moe_router_mask(layer_id, scores_name, indices_name)
 
     def make_moe_router_scores(self, layer_id, moe, root_input):
         """Emit the per-expert router scores (`sigmoid(logits)`) in fp32 and return their name."""
         basename = f"/model/layers.{layer_id}/moe/router"
         logits_shape = self.make_moe_router_shape()
 
-        # Keep the router in floating point so int4 rounding cannot flip an expert choice.
-        moe.gate.exclude_from_quantization = True
         matmul_name = self.make_matmul(moe.gate, f"{basename}/MatMul", root_input)
         reshape_name = f"{basename}/Reshape"
         self.make_reshape(
@@ -324,41 +303,42 @@ class LFM2MoEModel(LFM2Model):
             selection_name = f"{add_name}/output_0"
 
         topk_name = f"{basename}/TopK"
-        topk_outputs = [f"{topk_name}/output_0", f"{topk_name}/output_1"]
-        self.make_node(
-            "TopK",
-            inputs=[selection_name, f"/model/constants/INT64/[{top_k}]"],
-            outputs=topk_outputs,
-            name=topk_name,
-            axis=-1,
-            largest=True,
+        self.make_topk(
+            topk_name,
+            [selection_name, f"/model/constants/INT64/[{top_k}]"],
+            dtype=ir.DataType.FLOAT,
+            shape=self.make_moe_router_shape(last_dim=top_k),
         )
-        self.make_value(topk_outputs[0], ir.DataType.FLOAT, shape=self.make_moe_router_shape(last_dim=top_k))
-        self.make_value(topk_outputs[1], ir.DataType.INT64, shape=self.make_moe_router_shape(last_dim=top_k))
-        return topk_outputs[1]
+        return f"{topk_name}/output_1"
 
     def make_moe_router_mask(self, layer_id, scores_name, indices_name):
         """Emit `log(scores)` at the selected experts and a sentinel elsewhere, in `io_dtype`.
 
         The MoE/QMoE op takes the softmax of the top-k of this tensor, which then equals the
-        model's `sigmoid_i / sum_selected(sigmoid_j)` mixing weights.
+        model's `sigmoid_i / sum_selected(sigmoid_j)` mixing weights. Hugging Face divides by
+        `sum + 1e-6` instead; the op normalizes without that epsilon, a known parity gap that is
+        far below the io_dtype rounding of the scores themselves.
         """
         basename = f"/model/layers.{layer_id}/moe/router"
         logits_shape = self.make_moe_router_shape()
         selected_shape = self.make_moe_router_shape(last_dim=self.moe_attrs["top_k"])
 
-        log_name = f"{basename}/Log"
-        self.make_node("Log", inputs=[scores_name], outputs=[f"{log_name}/output_0"], name=log_name)
-        self.make_value(f"{log_name}/output_0", ir.DataType.FLOAT, shape=logits_shape)
+        # Gather the selected scores first so Log runs over top_k entries instead of num_experts.
         gather_name = f"{basename}/GatherElements"
-        self.make_node(
-            "GatherElements",
-            inputs=[f"{log_name}/output_0", indices_name],
-            outputs=[f"{gather_name}/output_0"],
-            name=gather_name,
-            axis=1,
+        self.make_gather_elements(
+            gather_name, [scores_name, indices_name], dtype=ir.DataType.FLOAT, shape=selected_shape, axis=1
         )
-        self.make_value(f"{gather_name}/output_0", ir.DataType.FLOAT, shape=selected_shape)
+        # A sigmoid that flushed to 0 would give log = -inf, below the sentinel, and let the op's own
+        # top-k pick a different expert than the graph selected. Clamp so log stays far above it.
+        clip_name = f"{basename}/Clip"
+        self.make_clip(
+            clip_name,
+            [f"{gather_name}/output_0", f"/model/constants/FLOAT/{1e-30}", ""],
+            dtype=ir.DataType.FLOAT,
+            shape=selected_shape,
+        )
+        log_name = f"{basename}/Log"
+        self.make_log(log_name, f"{clip_name}/output_0", ir.DataType.FLOAT, shape=selected_shape)
 
         shape_name = f"{basename}/Shape"
         self.make_shape(shape_name, scores_name, shape=[2])
@@ -371,14 +351,13 @@ class LFM2MoEModel(LFM2Model):
             shape=logits_shape,
         )
         scatter_name = f"{basename}/ScatterElements"
-        self.make_node(
-            "ScatterElements",
-            inputs=[f"{sentinel_name}/output_0", indices_name, f"{gather_name}/output_0"],
-            outputs=[f"{scatter_name}/output_0"],
-            name=scatter_name,
+        self.make_scatter_elements(
+            scatter_name,
+            [f"{sentinel_name}/output_0", indices_name, f"{log_name}/output_0"],
+            dtype=ir.DataType.FLOAT,
+            shape=logits_shape,
             axis=1,
         )
-        self.make_value(f"{scatter_name}/output_0", ir.DataType.FLOAT, shape=logits_shape)
         router_probs_name = f"{scatter_name}/output_0"
 
         if self.io_dtype != ir.DataType.FLOAT:
@@ -390,12 +369,10 @@ class LFM2MoEModel(LFM2Model):
     def make_moe_router_shape(self, last_dim=None):
         return ["batch_size * sequence_length", self.moe_attrs["num_experts"] if last_dim is None else last_dim]
 
-    def make_moe_subgraph(self, layer_id, moe, root_input):
+    def make_moe_subgraph(self, layer_id, moe, root_input, router_probs):
         basename = f"/model/layers.{layer_id}/moe"
         op_type = self.moe_attrs["op_type"]
-        weight_type = f"{'q' if op_type == 'QMoE' else ''}weight"
-        gate_up_proj = f"model.layers.{layer_id}.moe.experts.gate_up_proj"
-        down_proj = f"model.layers.{layer_id}.moe.experts.down_proj"
+        names = self.make_moe_expert_names(layer_id)
         gate_up_proj_zero_points, down_proj_zero_points = self.moe_attrs.get("zero_point_names", {}).get(
             layer_id, ("", "")
         )
@@ -408,13 +385,13 @@ class LFM2MoEModel(LFM2Model):
         self.make_moe_op(
             moe_name,
             root_input=root_input,
-            router_probs=self.moe_attrs["router_probs"],
-            weight1=f"{gate_up_proj}.{weight_type}",
-            scales1=f"{gate_up_proj}.scales" if op_type == "QMoE" else "",
-            bias1=f"{gate_up_proj}.bias",
-            weight2=f"{down_proj}.{weight_type}",
-            scales2=f"{down_proj}.scales" if op_type == "QMoE" else "",
-            bias2=f"{down_proj}.bias",
+            router_probs=router_probs,
+            weight1=names["gate_up_weight"],
+            scales1=names["gate_up_scales"] if op_type == "QMoE" else "",
+            bias1=names["gate_up_bias"],
+            weight2=names["down_weight"],
+            scales2=names["down_scales"] if op_type == "QMoE" else "",
+            bias2=names["down_bias"],
             zero_points1=gate_up_proj_zero_points if use_zero_points else "",
             zero_points2=down_proj_zero_points if use_zero_points else "",
             global_scales1=gate_up_proj_global_scales,

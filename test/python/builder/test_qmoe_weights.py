@@ -429,6 +429,10 @@ class _FakeMoEModel:
         self.calls.append(("matmulnbits", self.qmoe_block_size))
         return torch.zeros(1, dtype=torch.uint8), torch.zeros(1, dtype=torch.float32)
 
+    def _symmetric_blockwise_quantize(self, weights, block_size):
+        self.calls.append(("symmetric", block_size))
+        return torch.zeros(1, dtype=torch.uint8), torch.zeros(1, dtype=torch.float32)
+
     def _cuda_per_channel_quantize(self, weights, prepack):
         self.calls.append(("cuda_per_channel", prepack))
         return torch.zeros(1, dtype=torch.uint8), torch.zeros(1, dtype=torch.float32)
@@ -470,16 +474,35 @@ def test_cuda_raw_path_for_zero():
     assert model.calls == [("matmulnbits", 128)]
 
 
-@pytest.mark.parametrize("ep", ["cpu", "webgpu", "trt-rtx"])
+@pytest.mark.parametrize("ep", ["cpu", "webgpu"])
 @pytest.mark.parametrize("weights_prepacked", [-1, 0, 1])
-def test_non_cuda_uses_signed_scale_blockwise_quantizer(ep, weights_prepacked):
-    """Non-CUDA EPs ship raw MatMulNBits-convention blockwise weights (signed
+def test_cpu_and_webgpu_use_signed_scale_blockwise_quantizer(ep, weights_prepacked):
+    """CPU and WebGPU ship raw MatMulNBits-convention blockwise weights (signed
     block scales) regardless of the CUDA-only weights_prepacked knob, and never
     the CUTLASS-prepacked encoding."""
     model = _FakeMoEModel(ep, 128, weights_prepacked)
     model.make_qmoe_weights(_W)
     assert model.calls == [("matmulnbits", 128)]
     assert model.moe_attrs["block_size"] == 128
+
+
+@pytest.mark.parametrize("weights_prepacked", [-1, 0, 1])
+def test_trt_rtx_keeps_the_original_symmetric_blockwise_encoding(weights_prepacked):
+    """The signed-scale grid has not been measured on the TRT-RTX kernel, so that
+    EP stays on the encoding it shipped with."""
+    model = _FakeMoEModel("trt-rtx", 128, weights_prepacked)
+    model.make_qmoe_weights(_W)
+    assert model.calls == [("symmetric", 128)]
+    assert model.moe_attrs["block_size"] == 128
+
+
+@pytest.mark.parametrize("ep", ["cpu", "webgpu", "cuda"])
+def test_matmulnbits_blockwise_paths_validate_block_size(ep):
+    """Every EP on the MatMulNBits grid shares the CUDA block-size constraint."""
+    model = _FakeMoEModel(ep, 16, -1)
+    with pytest.raises(ValueError, match="block_size 32, 64, or 128"):
+        model.make_qmoe_weights(_W)
+    assert model.calls == []
 
 
 def test_non_cuda_blockwise_scales_are_signed_and_do_not_clip_the_extreme():

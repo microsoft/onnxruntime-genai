@@ -140,7 +140,7 @@ def test_lfm2_dense_model_still_owns_the_mlp(monkeypatch):
 def test_lfm2_moe_router_selects_with_bias_and_mixes_without(io_dtype):
     model = _recording_model(io_dtype)
     moe = _moe_module()
-    model.make_moe_router(3, moe, "hidden")
+    router_probs = model.make_moe_router(3, moe, "hidden")
 
     ops = [n.op_type for n in model.nodes]
     casts = ["Cast"] if io_dtype != ir.DataType.FLOAT else []
@@ -151,8 +151,9 @@ def test_lfm2_moe_router_selects_with_bias_and_mixes_without(io_dtype):
         "Sigmoid",
         "Add",
         "TopK",
-        "Log",
         "GatherElements",
+        "Clip",
+        "Log",
         "Shape",
         "ConstantOfShape",
         "ScatterElements",
@@ -168,10 +169,13 @@ def test_lfm2_moe_router_selects_with_bias_and_mixes_without(io_dtype):
     assert by_name["TopK"].attrs == {"axis": -1, "largest": True}
     indices = f"{r}/TopK/output_1"
 
-    # Mixing: log(sigmoid) (no bias) gathered at the selected experts, scattered over a sentinel row.
-    assert by_name["Log"].inputs == [f"{r}/Sigmoid/output_0"]
-    assert by_name["GatherElements"].inputs == [f"{r}/Log/output_0", indices]
+    # Mixing: sigmoid (no bias) gathered at the selected experts, clamped, logged, scattered over a
+    # sentinel row. Gather runs before Log so Log only touches top_k entries, and the clamp keeps a
+    # flushed-to-zero sigmoid from producing -inf below the sentinel.
+    assert by_name["GatherElements"].inputs == [f"{r}/Sigmoid/output_0", indices]
     assert by_name["GatherElements"].attrs == {"axis": 1}
+    assert by_name["Clip"].inputs == [f"{r}/GatherElements/output_0", "/model/constants/FLOAT/1e-30", ""]
+    assert by_name["Log"].inputs == [f"{r}/Clip/output_0"]
     sentinel = by_name["ConstantOfShape"].attrs["value"]
     assert sentinel.dtype == ir.DataType.FLOAT
     router_sentinel = model.moe_attrs["router_sentinel"]
@@ -180,18 +184,32 @@ def test_lfm2_moe_router_selects_with_bias_and_mixes_without(io_dtype):
     assert by_name["ScatterElements"].inputs == [
         f"{r}/ConstantOfShape/output_0",
         indices,
-        f"{r}/GatherElements/output_0",
+        f"{r}/Log/output_0",
     ]
     assert by_name["ScatterElements"].attrs == {"axis": 1}
 
     expected_probs = f"{r}/Cast_1/output_0" if casts else f"{r}/ScatterElements/output_0"
-    assert model.moe_attrs["router_probs"] == expected_probs
+    assert router_probs == expected_probs
     if casts:
         assert by_name["Cast"].attrs == {"to": ir.DataType.FLOAT}
         assert by_name["Cast_1"].attrs == {"to": io_dtype}
+    # The clamp floor is well above the sentinel, so a clamped score can never lose the op's own top-k.
+    assert torch.log(torch.tensor(1e-30)).item() > model.moe_attrs["router_sentinel"]
 
-    # The router MatMul is excluded from int4 quantization so rounding cannot flip an expert choice.
-    assert moe.gate.exclude_from_quantization is True
+
+def test_lfm2_moe_threads_router_probs_from_router_to_subgraph(monkeypatch):
+    model = LFM2MoEModel.__new__(LFM2MoEModel)
+    calls = []
+    monkeypatch.setattr(model, "make_moe_preprocessing", lambda *args: calls.append(("pre", args)))
+    monkeypatch.setattr(model, "make_moe_router", lambda *args: (calls.append(("router", args)), "probs")[1])
+    monkeypatch.setattr(model, "make_moe_subgraph", lambda *args: calls.append(("subgraph", args)))
+    moe = object()
+    model.make_moe(5, moe, "hidden")
+    assert calls == [
+        ("pre", (5, moe, "hidden")),
+        ("router", (5, moe, "hidden")),
+        ("subgraph", (5, moe, "hidden", "probs")),
+    ]
 
 
 def test_lfm2_moe_router_without_expert_bias_selects_on_sigmoid():
@@ -231,50 +249,33 @@ def test_lfm2_moe_preprocessing_interleaves_gate_and_up(monkeypatch):
     assert gate_up_bias.shape == (2, 2 * model.moe_intermediate_size) and not gate_up_bias.any()
     assert down_bias.shape == (2, model.hidden_size) and not down_bias.any()
 
-
-def test_lfm2_moe_preprocessing_passes_prequantized_experts_through(monkeypatch):
-    model = _recording_model(ir.DataType.FLOAT16, num_experts=2)
-    experts = types.SimpleNamespace(quant_type="int", gate_up_proj=None, down_proj=None)
-    moe = types.SimpleNamespace(experts=experts)
-    captured = []
-    monkeypatch.setattr(
-        model,
-        "make_moe_expert_initializers",
-        lambda layer_id, experts, gate_up_weight=None, down_weight=None: captured.append(
-            (layer_id, experts, gate_up_weight, down_weight)
-        ),
-    )
-    model.make_moe_preprocessing(2, moe, "hidden")
-    assert captured == [(2, experts, None, None)]
+    # The router MatMul is excluded from int4 quantization so rounding cannot flip an expert choice.
+    assert moe.gate.exclude_from_quantization is True
 
 
-def test_lfm2_moe_preprocessing_keeps_packed_expert_biases(monkeypatch):
-    """LFM2-MoE experts have no bias, so zeros are emitted unless the checkpoint carries them."""
-    model = _recording_model(ir.DataType.FLOAT16, num_experts=2)
-    experts = types.SimpleNamespace(
-        quant_type="int",
-        gate_up_bias=torch.full((2, 2 * model.moe_intermediate_size), 0.25),
-        down_bias=torch.full((2, model.hidden_size), -0.5),
-    )
-    monkeypatch.setattr(model, "make_moe_expert_initializers", lambda *args, **kwargs: None)
-
-    model.make_moe_preprocessing(2, types.SimpleNamespace(experts=experts), "hidden")
-
-    gate_up_bias, _ = model.initializers["model.layers.2.moe.experts.gate_up_proj.bias"]
-    down_bias, _ = model.initializers["model.layers.2.moe.experts.down_proj.bias"]
-    assert gate_up_bias is experts.gate_up_bias
-    assert down_bias is experts.down_bias
+@pytest.mark.parametrize("op_type", ["MoE", "QMoE"])
+def test_make_moe_expert_names_follows_op_type(op_type):
+    model = Model.__new__(Model)
+    model.moe_attrs = {"op_type": op_type}
+    weight = "qweight" if op_type == "QMoE" else "weight"
+    assert model.make_moe_expert_names(7) == {
+        "gate_up_weight": f"model.layers.7.moe.experts.gate_up_proj.{weight}",
+        "gate_up_scales": "model.layers.7.moe.experts.gate_up_proj.scales",
+        "gate_up_bias": "model.layers.7.moe.experts.gate_up_proj.bias",
+        "down_weight": f"model.layers.7.moe.experts.down_proj.{weight}",
+        "down_scales": "model.layers.7.moe.experts.down_proj.scales",
+        "down_bias": "model.layers.7.moe.experts.down_proj.bias",
+    }
 
 
 @pytest.mark.parametrize("op_type", ["MoE", "QMoE"])
 def test_lfm2_moe_subgraph_feeds_masked_router_probs(monkeypatch, op_type):
     model = _recording_model(ir.DataType.FLOAT16)
     model.moe_attrs["op_type"] = op_type
-    model.moe_attrs["router_probs"] = "masked_probs"
     captured = {}
     monkeypatch.setattr(model, "make_moe_op", lambda name, **kwargs: captured.update(name=name, **kwargs))
 
-    model.make_moe_subgraph(4, _moe_module(), "hidden")
+    model.make_moe_subgraph(4, _moe_module(), "hidden", "masked_probs")
 
     weight = "qweight" if op_type == "QMoE" else "weight"
     scales = ".scales" if op_type == "QMoE" else ""
@@ -293,11 +294,10 @@ def test_lfm2_moe_subgraph_feeds_masked_router_probs(monkeypatch, op_type):
 
 def test_lfm2_moe_subgraph_applies_routed_scaling_factor(monkeypatch):
     model = _recording_model(ir.DataType.FLOAT16, routed_scaling_factor=2.5)
-    model.moe_attrs["router_probs"] = "masked_probs"
     monkeypatch.setattr(model, "make_moe_op", lambda name, **kwargs: None)
     monkeypatch.setattr(model, "make_hidden_state_shape", lambda **kwargs: ["batch_size", "sequence_length", 64])
 
-    model.make_moe_subgraph(4, _moe_module(), "hidden")
+    model.make_moe_subgraph(4, _moe_module(), "hidden", "masked_probs")
 
     (mul,) = model.nodes
     assert mul.op_type == "Mul"
@@ -340,8 +340,7 @@ def test_lfm2_moe_intermediate_size_uses_config_value():
     assert model.intermediate_size == 7168
 
 
-@pytest.mark.parametrize("ep", ["cpu", "trt-rtx"])
-def test_lfm2_moe_init_configures_fused_swiglu(monkeypatch, ep):
+def test_lfm2_moe_init_configures_fused_swiglu(monkeypatch):
     monkeypatch.setattr(LFM2Model, "__init__", _stub_base_init)
     config = types.SimpleNamespace(
         norm_topk_prob=True,
@@ -350,12 +349,30 @@ def test_lfm2_moe_init_configures_fused_swiglu(monkeypatch, ep):
         use_expert_bias=True,
         routed_scaling_factor=1.0,
     )
-    model = LFM2MoEModel(config, ir.DataType.FLOAT, ir.DataType.FLOAT, ep, None, {})
+    model = LFM2MoEModel(config, ir.DataType.FLOAT, ir.DataType.FLOAT, "cpu", None, {})
     assert model.moe_attrs["activation_type"] == "swiglu"
     assert model.moe_attrs["swiglu_fusion"] == 1
     assert model.moe_attrs["normalize_routing_weights"] is True
-    assert model.moe_attrs.get("swiglu_limit") == (float("inf") if ep == "trt-rtx" else None)
+    assert model.moe_attrs["router_sentinel"] == -10000.0
     assert (model.num_dense_layers, model.moe_intermediate_size) == (2, 1792)
+
+
+@pytest.mark.parametrize(
+    "ep,swiglu_limit,expected",
+    [
+        ("cpu", None, None),
+        ("trt-rtx", None, float("inf")),
+        ("trt-rtx", 7.0, 7.0),
+    ],
+)
+def test_make_moe_init_fills_swiglu_limit_for_trt_rtx(ep, swiglu_limit, expected):
+    # TRT-RTX requires swiglu_limit on QMoE for every MoE model, so the base init supplies +inf.
+    model = Model.__new__(Model)
+    model.ep = ep
+    model.moe_attrs = {"swiglu_limit": swiglu_limit}
+    model.quant_config = types.SimpleNamespace(moe=types.SimpleNamespace(type="int4", weights_prepacked=-1))
+    model.make_moe_init()
+    assert model.moe_attrs["swiglu_limit"] == expected
 
 
 @pytest.mark.parametrize(
@@ -371,7 +388,8 @@ def test_lfm2_moe_init_configures_fused_swiglu(monkeypatch, ep):
 def test_make_moe_init_selects_qmoe_for_quantized_experts(moe_type, expected):
     # Regression: these keys are what make_moe_op / make_moe_expert_initializers read.
     model = Model.__new__(Model)
-    model.moe_attrs = {}
+    model.ep = "cpu"
+    model.moe_attrs = {"swiglu_limit": None}
     model.quant_config = types.SimpleNamespace(moe=types.SimpleNamespace(type=moe_type, weights_prepacked=-1))
     model.make_moe_init()
     assert (
