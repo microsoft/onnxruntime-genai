@@ -38,6 +38,12 @@ inline std::shared_ptr<Model> LoadSyntheticPagedModel() {
   return CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged");
 }
 
+// Same graph but with one logits row per packed token, which is what lets the Engine verify draft
+// tokens and therefore schedule uniform multi-token decode steps.
+inline std::shared_ptr<Model> LoadSyntheticPagedPerTokenModel() {
+  return CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged-per-token");
+}
+
 inline std::shared_ptr<Model> LoadSyntheticPagedMtpModel() {
   auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged");
   config->model.mtp.filename = "decoder.onnx";
