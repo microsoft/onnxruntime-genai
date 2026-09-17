@@ -141,6 +141,7 @@ std::unique_ptr<NamedTensors> Gemma3nMultiModalProcessor::Process(const Tokenize
   ort_extensions::OrtxObjectPtr<OrtxTensorResult> image_result;
   ort_extensions::OrtxObjectPtr<OrtxTensor> pixel_values_owner;
   int64_t num_images = 0;
+  bool pixel_values_is_unbatched = false;
   if (payload.images) {
     CheckResult(OrtxImagePreProcess(image_processor_.get(), payload.images->images_.get(), image_result.ToBeAssigned()));
     CheckResult(OrtxTensorResultGetAt(image_result.get(), 0, pixel_values_owner.ToBeAssigned()));
@@ -155,7 +156,8 @@ std::unique_ptr<NamedTensors> Gemma3nMultiModalProcessor::Process(const Tokenize
       throw std::runtime_error("Expected the image processor to return a rank-3 or rank-4 pixel_values tensor, got rank " +
                                std::to_string(pixel_values_num_dims) + ".");
     }
-    num_images = (pixel_values_num_dims == 4) ? pixel_values_shape[0] : 1;
+    pixel_values_is_unbatched = (pixel_values_num_dims == 3);
+    num_images = pixel_values_is_unbatched ? 1 : pixel_values_shape[0];
 
     const std::string placeholder =
         ResolvePlaceholder(text, kImageToken, kBoiToken, num_images, "image");
@@ -185,6 +187,11 @@ std::unique_ptr<NamedTensors> Gemma3nMultiModalProcessor::Process(const Tokenize
                                std::to_string(audio_dims) + ".");
     }
     const int64_t batch_dim = (audio_dims == 3) ? audio_shape[0] : 1;
+    if (batch_dim > 1) {
+      throw std::runtime_error(
+          "Gemma3n audio processing currently supports only 1 audio clip per prompt, but received " +
+          std::to_string(batch_dim) + " clips.");
+    }
     const int64_t time_dim = (audio_dims == 3) ? audio_shape[1] : audio_shape[0];
 
     EmplaceProcessedTensor(*named_tensors, Config::Defaults::AudioEmbedsName, audio_features,
@@ -252,8 +259,36 @@ std::unique_ptr<NamedTensors> Gemma3nMultiModalProcessor::Process(const Tokenize
                          std::make_shared<Tensor>(std::move(token_type_ids)));
 
   if (payload.images) {
-    EmplaceProcessedTensor(*named_tensors, Config::Defaults::PixelValuesName, pixel_values_owner.get(),
-                           pixel_values_type_, allocator);
+    if (pixel_values_is_unbatched) {
+      // GetImageFeatureBatchSize (multi_modal.cpp) infers the image count from
+      // pixel_values' leading dimension for any tensor of rank >= 3. Emplacing the
+      // rank-3 [3, H, W] shape as-is would make it read the channel count (3) as
+      // the image count instead of num_images (1), so add the batch dim here.
+      const float* pv_data{};
+      const int64_t* pv_shape{};
+      size_t pv_dims;
+      CheckResult(OrtxGetTensorData(pixel_values_owner.get(), reinterpret_cast<const void**>(&pv_data),
+                                    &pv_shape, &pv_dims));
+      const std::vector<int64_t> batched_shape{1, pv_shape[0], pv_shape[1], pv_shape[2]};
+      const int64_t num_elements = pv_shape[0] * pv_shape[1] * pv_shape[2];
+
+      auto batched_fp32 = OrtValue::CreateTensor<float>(allocator, batched_shape);
+      std::copy(pv_data, pv_data + num_elements, batched_fp32->GetTensorMutableData<float>());
+
+      if (pixel_values_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+        named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
+                               std::make_shared<Tensor>(std::move(batched_fp32)));
+      } else {
+        auto batched_target = OrtValue::CreateTensor(allocator, batched_shape, pixel_values_type_);
+        auto p_device = GetDeviceInterface(DeviceType::CPU);
+        Cast(*batched_fp32, batched_target, *p_device, pixel_values_type_);
+        named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
+                               std::make_shared<Tensor>(std::move(batched_target)));
+      }
+    } else {
+      EmplaceProcessedTensor(*named_tensors, Config::Defaults::PixelValuesName, pixel_values_owner.get(),
+                             pixel_values_type_, allocator);
+    }
 
     // One row per image, not one row total: GetNumImageTokens sums this tensor to
     // size the pre-allocated image_features buffer, so a single element would
