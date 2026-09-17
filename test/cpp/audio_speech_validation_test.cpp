@@ -68,13 +68,29 @@ TEST(AudioSpeechValidationTests, NemotronTimestampConfiguration) {
   config.model.hop_length = 160;
   config.model.subsampling_factor = 8;
   config.model.segment_separators = {".", "!"};
-  config.model.segment_gap_threshold_frames = 12;
+  config.model.segment_gap_threshold_seconds = 1.0;
 
   Generators::NemotronConfig nemotron_config;
   EXPECT_NO_THROW(nemotron_config.PopulateFromConfig(config));
   EXPECT_EQ(nemotron_config.timestamp_level, Generators::Config::TimestampLevel::All);
   EXPECT_EQ(nemotron_config.segment_separators, (std::vector<std::string>{".", "!"}));
+  EXPECT_EQ(nemotron_config.segment_gap_threshold_frames, 13);
+}
+
+TEST(AudioSpeechValidationTests, NemotronTimestampGapRoundsToNearestFrame) {
+  Generators::Config config;
+  config.model.sample_rate = 16000;
+  config.model.hop_length = 160;
+  config.model.subsampling_factor = 8;
+  Generators::NemotronConfig nemotron_config;
+
+  config.model.segment_gap_threshold_seconds = 0.99;
+  nemotron_config.PopulateFromConfig(config);
   EXPECT_EQ(nemotron_config.segment_gap_threshold_frames, 12);
+
+  config.model.segment_gap_threshold_seconds = 1.0;
+  nemotron_config.PopulateFromConfig(config);
+  EXPECT_EQ(nemotron_config.segment_gap_threshold_frames, 13);
 }
 
 TEST(AudioSpeechValidationTests, NemotronGlobalFrameUsesAbsoluteSampleOrigin) {
