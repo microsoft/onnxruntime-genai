@@ -14,15 +14,14 @@ the `<image>` placeholders in the prompt will not line up:
   * the smart resize in onnxruntime-extensions, which decides what resolution the image arrives at,
   * `Lfm2VlImageProcessor` in C++, which counts tokens from that resolution.
 
-These tests are pure arithmetic reimplementations of all three, so they run without a model. The
-integration test at the bottom exercises the real C++ processor when an LFM2-VL model is available.
+These tests are pure arithmetic reimplementations of all three, so they run without a model. The real
+C++ processor is exercised against the tiny test model in test_lfm2_vl_models.py.
 
 Run with:
     python -m pytest test/python/models/test_lfm2_vl_tokens.py -v
 """
 
 import math
-import os
 
 import pytest
 
@@ -164,38 +163,3 @@ class TestImagePlaceholder:
     def test_placeholder_token_count_matches_the_image(self):
         tokens = genai_image_geometry(*hf_smart_resize(640, 480))[3]
         assert build_image_placeholder(tokens).count("<image>") == tokens
-
-
-def test_genai_processor_token_counts():
-    """End-to-end check against the C++ processor when an LFM2-VL model is available."""
-    og = pytest.importorskip("onnxruntime_genai")
-
-    model_path = os.environ.get("LFM2_VL_MODEL_PATH")
-    if not model_path or not os.path.exists(os.path.join(model_path, "genai_config.json")):
-        pytest.skip("Set LFM2_VL_MODEL_PATH to an LFM2-VL ONNX model directory to run this test")
-    image_path = os.environ.get("LFM2_VL_IMAGE_PATH")
-    if not image_path or not os.path.exists(image_path):
-        pytest.skip("Set LFM2_VL_IMAGE_PATH to an image file to run this test")
-
-    config = og.Config(model_path)
-    model = og.Model(config)
-    processor = model.create_multimodal_processor()
-
-    images = og.Images.open(image_path)
-    inputs = processor(prompt="<image>describe this", images=images)
-
-    pixel_values = inputs["pixel_values"].as_numpy()
-    # The processor keys its outputs by the nominal names; they are mapped to the vision graph's
-    # input names (spatial_shapes, pixel_attention_mask) only when handed to the generator.
-    spatial_shapes = inputs["image_sizes"].as_numpy()
-    pixel_attention_mask = inputs["image_attention_mask"].as_numpy()
-    num_image_tokens = int(inputs["num_image_tokens"].as_numpy().sum())
-
-    assert pixel_values.ndim == 3
-    assert pixel_values.shape[2] == ENCODER_PATCH_SIZE * ENCODER_PATCH_SIZE * 3
-    assert pixel_attention_mask.shape == pixel_values.shape[:2]
-
-    patch_rows, patch_cols = int(spatial_shapes[0][0]), int(spatial_shapes[0][1])
-    # Only the real patches are unmasked, and the token count follows the same grid.
-    assert int(pixel_attention_mask[0].sum()) == patch_rows * patch_cols
-    assert num_image_tokens == math.ceil(patch_rows / DOWNSAMPLE_FACTOR) * math.ceil(patch_cols / DOWNSAMPLE_FACTOR)
