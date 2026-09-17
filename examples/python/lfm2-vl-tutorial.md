@@ -138,21 +138,50 @@ The three vision fields drive the image processor and must match the model's `co
 | `vision.max_num_patches` | `max_image_tokens * downsample_factor²` | 1024 |
 
 Every LFM2-VL and LFM2.5-VL model published so far shares these values, so the same
-`processor_config.json` serves the whole line, with one exception: set the `Resize` step's
-`interpolation` to match `resample` in the model's `processor_config.json`. `2` (bilinear) is
-`LINEAR`, which the shipped file uses and which LFM2.5-VL-450M and LFM2.5-VL-1.6B need; `3` (bicubic)
-is `CUBIC`, which LFM2.5-VL-3B and the LFM2-VL models need.
+`processor_config.json` serves the whole line, with one exception: the `Resize` step's
+`interpolation` must follow the upstream model's `resample`, which is not the same across the line:
+
+| Model | Upstream `resample` | `interpolation` |
+| --- | --- | --- |
+| LFM2-VL-450M, LFM2-VL-1.6B, LFM2-VL-3B | `3` (bicubic), in `preprocessor_config.json` | `CUBIC` |
+| LFM2.5-VL-3B | `3` (bicubic), in `processor_config.json` | `CUBIC` |
+| LFM2.5-VL-450M, LFM2.5-VL-1.6B | `2` (bilinear), in `processor_config.json` | `LINEAR` |
 
 `max_num_patches` is the sequence length every image is padded to so that several images can share
 one vision run; set it to `0` to pad each batch to its own longest image instead, which is cheaper
 but only valid if the vision graph accepts a dynamic patch count.
 
-Copy [`test/models/lfm2-vl/processor_config.json`](../../test/models/lfm2-vl/processor_config.json)
-next to `genai_config.json`. It decodes each image, smart-resizes it so the patch count lands
-between `min_image_tokens` and `max_image_tokens` after the projector's 2× pixel unshuffle, then
-rescales and normalizes with mean/std `0.5`. If you change `min_image_tokens` or `max_image_tokens`,
-update the `min_pixels` / `max_pixels` attributes of the `Resize` step to
-`tokens * encoder_patch_size² * downsample_factor²`.
+Start from [`test/models/lfm2-vl/processor_config.json`](../../test/models/lfm2-vl/processor_config.json).
+It decodes each image, smart-resizes it so the patch count lands between `min_image_tokens` and
+`max_image_tokens` after the projector's 2× pixel unshuffle, then rescales and normalizes with
+mean/std `0.5`. The shipped file uses `LINEAR`, so write it next to `genai_config.json` with the
+interpolation taken from the upstream model rather than copying it as is:
+
+```python
+import json
+from pathlib import Path
+
+pytorch_dir = Path("./lfm2.5-vl-1.6b/pytorch")
+output_dir = Path("./lfm2.5-vl-1.6b/cpu")
+
+# LFM2.5-VL keeps the image processor settings in processor_config.json, LFM2-VL in preprocessor_config.json.
+upstream = json.loads((pytorch_dir / "processor_config.json").read_text())
+upstream = upstream.get("image_processor", upstream)
+if "resample" not in upstream:
+    upstream = json.loads((pytorch_dir / "preprocessor_config.json").read_text())
+interpolation = {2: "LINEAR", 3: "CUBIC"}[upstream["resample"]]
+
+config = json.loads(Path("test/models/lfm2-vl/processor_config.json").read_text())
+for transform in config["processor"]["transforms"]:
+    if transform["operation"]["type"] == "Resize":
+        transform["operation"]["attrs"]["interpolation"] = interpolation
+(output_dir / "processor_config.json").write_text(json.dumps(config, indent=2))
+```
+
+Using `LINEAR` on a bicubic model still runs, but the pixels drift from the reference: on
+LFM2-VL-450M the largest per-pixel difference from the Hugging Face processor grows from 1 to 33
+levels out of 255. If you change `min_image_tokens` or `max_image_tokens`, update the `min_pixels` /
+`max_pixels` attributes of the `Resize` step to `tokens * encoder_patch_size² * downsample_factor²`.
 
 ## 4. Run the model
 
