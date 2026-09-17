@@ -8,6 +8,7 @@
 
 #include "generator/generators.h"
 #include "models/model.h"
+#include "models/parallel_utils.h"
 #include "models/preprocessing/genai_tokenizer.h"
 #include "models/preprocessing/videochat_flash_processor.h"
 #include "models/threadpool.h"
@@ -208,7 +209,7 @@ std::unique_ptr<NamedTensors> VideoChatFlashProcessor::Process(const Tokenizer& 
       TransposeVideoChatFlashHwcToChw(thread_pool_, pv_data, dst, num_imgs, channels,
                                       height, width);
     } else {
-      std::copy(pv_data, pv_data + count, dst);
+      ParallelCopy(thread_pool_, pv_data, dst, count);
     }
 
     std::unique_ptr<OrtValue> pv_ortvalue;

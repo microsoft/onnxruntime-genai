@@ -3,6 +3,7 @@
 
 #include "generator/generators.h"
 #include "models/model.h"
+#include "models/parallel_utils.h"
 #include "models/preprocessing/genai_tokenizer.h"
 #include "models/preprocessing/qwen2_5_vl_image_processor.h"
 #include "models/threadpool.h"
@@ -56,7 +57,8 @@ void ExtractQwenImagePatches(ThreadPool* thread_pool, const float* source, float
 namespace {
 
 // Helper to convert float32 tensor to target type (float16 or bfloat16)
-std::unique_ptr<OrtValue> ConvertPixelValues(const OrtValue& float_tensor,
+std::unique_ptr<OrtValue> ConvertPixelValues(ThreadPool* thread_pool,
+                                             const OrtValue& float_tensor,
                                              ONNXTensorElementDataType target_type,
                                              Ort::Allocator& allocator) {
   if (target_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
@@ -66,7 +68,7 @@ std::unique_ptr<OrtValue> ConvertPixelValues(const OrtValue& float_tensor,
     const float* src = float_tensor.GetTensorData<float>();
     float* dst = result->GetTensorMutableData<float>();
     size_t count = float_tensor.GetTensorTypeAndShapeInfo()->GetElementCount();
-    std::copy(src, src + count, dst);
+    ParallelCopy(thread_pool, src, dst, count);
     return result;
   }
 
@@ -357,7 +359,8 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
 
   // Use patched pixel_values if we computed it, otherwise use processor output
   if (patched_pixel_values) {
-    auto converted_tensor = ConvertPixelValues(*patched_pixel_values, pixel_values_type_, allocator);
+    auto converted_tensor =
+        ConvertPixelValues(thread_pool_, *patched_pixel_values, pixel_values_type_, allocator);
     named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
                            std::make_shared<Tensor>(std::move(converted_tensor)));
   } else {
@@ -390,12 +393,13 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
 
     // Create temporary float tensor from processor output
     auto float_tensor = OrtValue::CreateTensor<float>(allocator, pixel_target_shape);
-    std::copy(static_cast<const float*>(pixel_data),
-              static_cast<const float*>(pixel_data) + num_pixel_elements,
-              float_tensor->GetTensorMutableData<float>());
+    ParallelCopy(thread_pool_, static_cast<const float*>(pixel_data),
+                 float_tensor->GetTensorMutableData<float>(),
+                 static_cast<size_t>(num_pixel_elements));
 
     // Convert to target type
-    auto converted_tensor = ConvertPixelValues(*float_tensor, pixel_values_type_, allocator);
+    auto converted_tensor =
+        ConvertPixelValues(thread_pool_, *float_tensor, pixel_values_type_, allocator);
     named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
                            std::make_shared<Tensor>(std::move(converted_tensor)));
   }
