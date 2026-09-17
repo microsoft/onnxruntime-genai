@@ -207,8 +207,8 @@ struct Config {
     TimestampLevel timestamp_level{TimestampLevel::Off};
     // Punctuation strings that complete a segment. An empty list disables punctuation segmentation.
     std::vector<std::string> segment_separators{".", "?", "!"};
-    // Optional minimum inter-word gap in encoder frames that starts a new segment.
-    std::optional<int> segment_gap_threshold_frames;
+    // Optional minimum inter-word gap in seconds that starts a new segment.
+    std::optional<double> segment_gap_threshold_seconds;
 
     // Parakeet TDT (Token-and-Duration Transducer) parameters
     int left_context_samples{};
@@ -707,6 +707,7 @@ void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);
 int SafeDoubleToInt(double x, std::string_view name);
+std::optional<int> GetSegmentGapThresholdFrames(const Config::Model& model);
 
 // Normalizes historical casings, short aliases, and full ORT names (e.g.
 // "CUDAExecutionProvider") to the canonical dispatch-table name; unknown names pass through.

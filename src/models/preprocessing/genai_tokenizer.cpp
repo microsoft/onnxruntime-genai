@@ -235,7 +235,7 @@ Tokenizer::Tokenizer(const Config& config) : bos_token_id_{config.model.bos_toke
   if (ModelType::IsRNNT(config.model.type) && config.model.timestamp_level != Config::TimestampLevel::Off) {
     timestamp_config_ = TimestampTokenizerConfig{config.model.timestamp_level,
                                                   config.model.segment_separators,
-                                                  config.model.segment_gap_threshold_frames,
+                                                  GetSegmentGapThresholdFrames(config.model),
                                                   config.model.sample_rate,
                                                   config.model.hop_length,
                                                   config.model.subsampling_factor};

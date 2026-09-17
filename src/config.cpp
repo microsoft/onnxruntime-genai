@@ -1796,15 +1796,15 @@ struct Model_Element : JSON::Element {
       } else {
         throw std::runtime_error("timestamp_level must be one of: off, word, segment, all");
       }
-    } else if (name == "segment_gap_threshold_frames") {
+    } else if (name == "segment_gap_threshold_seconds") {
       if (std::holds_alternative<std::nullptr_t>(value)) {
-        v_.segment_gap_threshold_frames.reset();
+        v_.segment_gap_threshold_seconds.reset();
       } else {
-        const int threshold = SafeDoubleToInt(JSON::Get<double>(value), name);
-        if (threshold <= 0) {
-          throw std::runtime_error("segment_gap_threshold_frames must be > 0");
+        const double threshold = JSON::Get<double>(value);
+        if (!std::isfinite(threshold) || threshold <= 0.0) {
+          throw std::runtime_error("segment_gap_threshold_seconds must be finite and > 0");
         }
-        v_.segment_gap_threshold_frames = threshold;
+        v_.segment_gap_threshold_seconds = threshold;
       }
     } else if (name == "left_context_samples") {
       v_.left_context_samples = SafeDoubleToInt(JSON::Get<double>(value), name);
@@ -1931,6 +1931,26 @@ int SafeDoubleToInt(double x, std::string_view name) {
 
   // 4. Perform the cast.
   return static_cast<int>(x);
+}
+
+std::optional<int> GetSegmentGapThresholdFrames(const Config::Model& model) {
+  if (!model.segment_gap_threshold_seconds) return std::nullopt;
+  if (!std::isfinite(*model.segment_gap_threshold_seconds) ||
+      *model.segment_gap_threshold_seconds <= 0.0) {
+    throw std::runtime_error("segment_gap_threshold_seconds must be finite and > 0");
+  }
+  if (model.sample_rate <= 0 || model.hop_length <= 0 || model.subsampling_factor <= 0) {
+    throw std::runtime_error(
+        "segment_gap_threshold_seconds requires positive sample_rate, hop_length, and subsampling_factor");
+  }
+
+  const int64_t samples_per_frame = static_cast<int64_t>(model.hop_length) * model.subsampling_factor;
+  const double rounded_frames = std::round(
+      *model.segment_gap_threshold_seconds * model.sample_rate / samples_per_frame);
+  if (rounded_frames > std::numeric_limits<int>::max()) {
+    throw std::runtime_error("segment_gap_threshold_seconds is too large");
+  }
+  return static_cast<int>(rounded_frames);
 }
 
 int64_t SafeDoubleToInt64(double x, std::string_view name) {
