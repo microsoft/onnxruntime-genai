@@ -312,6 +312,8 @@ struct Config {
 
       std::string config_filename{"audio_processor_config.json"};
       std::optional<std::string> adapter_filename{};
+      // True only when genai_config.json has a "speech" section
+      bool has_speech_section{false};
 
       struct Inputs {
         std::string audio_embeds{Defaults::AudioEmbedsName};
