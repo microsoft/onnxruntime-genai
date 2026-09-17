@@ -59,20 +59,6 @@ struct VisionState : State {
   std::unique_ptr<MultiModalFeatures> image_features_;
 };
 
-// QwenVisionState: per-image slicing loop for Qwen2.5-VL / Qwen3-VL.
-//
-// vision.onnx is exported for exactly one image (Dynamo unrolls Python
-// for-loops at trace time, so an N-image dummy produces a graph that only
-// works for that exact N).  This subclass iterates over images in C++,
-// creating zero-copy sub-tensor views of pixel_values / image_grid_thw and
-// writing each result into the correct offset of the pre-allocated
-// image_features output buffer.
-struct QwenVisionState : VisionState {
-  using VisionState::VisionState;  // inherit constructor
-
-  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {}) override;
-};
-
 // PixtralVisionState: per-image vision loop for Pixtral / Mistral3.
 //
 // Each image is independently smart_resize'd to a different resolution.
@@ -90,40 +76,6 @@ struct PixtralVisionState : VisionState {
   std::vector<int64_t> image_heights_;
   std::vector<int64_t> image_widths_;
 };
-
-inline void ValidateImageGridThwLayoutAndCount(const std::vector<int64_t>& shape,
-                                               size_t elem_count,
-                                               int64_t num_images,
-                                               const char* tensor_name) {
-  if (num_images < 0) {
-    throw std::runtime_error(std::string(tensor_name) + " num_images must be non-negative");
-  }
-
-  if (shape.size() != 2) {
-    throw std::runtime_error(std::string(tensor_name) + " must have rank 2 [num_images, 3]");
-  }
-
-  if (shape[0] < 0 || shape[1] < 0) {
-    throw std::runtime_error(std::string(tensor_name) + " dimensions must be non-negative");
-  }
-
-  if (shape[1] != 3) {
-    throw std::runtime_error(std::string(tensor_name) + " second dimension must be 3");
-  }
-
-  const size_t shape_image_count = static_cast<size_t>(shape[0]);
-  const size_t expected_image_count = static_cast<size_t>(num_images);
-  if (shape_image_count < expected_image_count) {
-    throw std::runtime_error(std::string(tensor_name) + " shape[0] (" + std::to_string(shape_image_count) +
-                             ") is less than required image count (" + std::to_string(expected_image_count) + ")");
-  }
-
-  if (elem_count % 3 != 0 || elem_count / 3 < expected_image_count) {
-    throw std::runtime_error(std::string(tensor_name) + " element count (" + std::to_string(elem_count) +
-                             ") is less than required for " + std::to_string(num_images) +
-                             " images (need at least 3 values per image)");
-  }
-}
 
 // Factory: pick the right VisionState subclass based on model type.
 std::unique_ptr<VisionState> CreateVisionState(const MultiModalLanguageModel& model, const GeneratorParams& params);
