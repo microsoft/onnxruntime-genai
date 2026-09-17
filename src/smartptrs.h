@@ -354,6 +354,10 @@ struct DeviceInterface {
   // True for EPs where an OrtValue can bind a tensor view formed by adding a byte offset to the base
   // address returned for persistent device storage. Keep last for vtable ABI stability.
   virtual bool SupportsOffsetTensorViews() const { return false; }
+  // True when allocation, zeroing, ranged copies, tensor binding, and synchronization are qualified
+  // to complete fixed-state device work before FixedStatePool publishes a bank flip.
+  // Keep last for vtable ABI stability.
+  virtual bool SupportsTransactionalFixedState() const { return false; }
 };
 
 // A shared_ptr based type that we expose through our C API should inherit from this type.

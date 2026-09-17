@@ -729,6 +729,7 @@ struct CudaInterfaceImplBase : DeviceInterface {
 struct CudaInterfaceImpl final : CudaInterfaceImplBase {
   DeviceType GetType() const override { return DeviceType::CUDA; }
   bool SupportsOffsetTensorViews() const override { return true; }
+  bool SupportsTransactionalFixedState() const override { return true; }
   int GetWindowedKeyValueCacheSize(const Config::Model::Decoder& decoder,
                                    const Config::Search& search,
                                    int max_length) const override {

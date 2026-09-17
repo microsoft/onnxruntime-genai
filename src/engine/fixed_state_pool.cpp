@@ -672,6 +672,10 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity)
   impl_->state_update_capacity = state_update_capacity;
   impl_->state_update_capture_count_name = state_update_capture_count_name;
   impl_->state_update_active_name = state_update_active_name;
+  if (!impl_->device->SupportsTransactionalFixedState()) {
+    throw std::runtime_error(
+        "Fixed state pools require qualified transactional device semantics.");
+  }
   if (SupportsStateUpdates() &&
       impl_->device->GetType() != DeviceType::CPU &&
       impl_->device->GetType() != DeviceType::CUDA) {

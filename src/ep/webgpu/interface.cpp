@@ -220,6 +220,7 @@ struct InterfaceImpl : DeviceInterface {
 
   bool ShouldZeroKeyValueCacheTensors() const override { return false; }
   bool SupportsOffsetTensorViews() const override { return false; }
+  bool SupportsTransactionalFixedState() const override { return true; }
 
   int GetKeyValueCacheQuantizationBits(const Config::SessionOptions& session_options) const override {
     return GetKvCacheQuantizationBits(session_options, to_string(GetType()));
