@@ -584,6 +584,7 @@ python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_pr
 
 This scenario is for when you want to set the block size for QMoE expert weights.
 Set `qmoe_block_size` to `0` or a negative value for per-channel quantization. Block-wise QMoE on CPU, CUDA, and WebGPU supports only `32`, `64`, or `128`; TRT-RTX also accepts `16` and `256`. The default is `32` except for TRT-RTX, which defaults to `128`.
+WebGPU block-wise QMoE requires both `hidden_size` and `moe_intermediate_size` to be divisible by `qmoe_block_size`. Raw block-wise INT4 QMoE requires both dimensions to be even.
 
 ```bash
 # From wheel:

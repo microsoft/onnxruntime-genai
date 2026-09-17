@@ -702,6 +702,8 @@ def get_args():
                 qmoe_block_size = <=0/16/32/64/128/256: Specify the block size for QMoE expert weights quantization.
                     Set <= 0 for per-channel quantization. Default is 128 for TRT-RTX, 32 for others.
                     CPU, CUDA, and WebGPU block-wise QMoE support 32/64/128 only; TRT-RTX also accepts 16/256.
+                    WebGPU requires hidden_size and moe_intermediate_size to be divisible by qmoe_block_size.
+                    Raw block-wise INT4 QMoE requires both dimensions to be even.
                     Supported EPs: CPU, CUDA, WebGPU, TRT-RTX.
                 qmoe_weights_prepacked = -1/0/1: Specify the CUDA QMoE expert weight layout.
                     -1 lets the builder choose automatically, 0 exports raw weights for runtime prepacking, and 1 exports CUTLASS-prepacked weights.

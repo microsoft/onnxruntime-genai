@@ -5427,13 +5427,23 @@ class Model:
 
         ``weights`` is a single expert's weight of logical shape ``[N, K]``
         (quantized along the last/``K`` axis). Returns ``(qweight, scales)`` where
-        ``qweight`` is ``[N, ceil(K/pack)]`` uint8 (2 INT4 elements per byte; INT8
+        ``qweight`` is ``[N, K/pack]`` uint8 (2 INT4 elements per byte; INT8
         is one element per byte) and ``scales`` is ``[N, ceil(K/block_size)]``
         float scales (SIGNED by default on this blockwise path — the MLAS
         ``default`` convention). Layout matches ``quantize_matmul_{4,8}bits``.
         """
         bits = int(self.moe_attrs["expert_weight_bits"])
         block_size = self.quant_attrs["qmoe_block_size"]
+        pack = 8 // bits
+        k = weights.shape[-1]
+        if k % pack != 0:
+            raise ValueError(f"INT{bits} QMoE requires expert input dimension K ({k}) to be divisible by {pack}.")
+        if self.ep == "webgpu" and k % block_size != 0:
+            # WebGPU indexes raw weights with a whole-block stride, while QMoE requires unpadded storage.
+            raise ValueError(
+                f"WebGPU QMoE requires expert input dimension K ({k}) to be divisible by "
+                f"qmoe_block_size ({block_size}); partial blocks are unsupported."
+            )
         qweight, scales = CudaQuantizer.matmulnbits_blockwise_quantize(
             weights,
             bits,
@@ -5441,11 +5451,9 @@ class Model:
             unsigned_full_range=True,
             signed_scale=True,
         )
-        # The quantizer pads K up to whole blocks. The QMoE op validates raw storage as [E, N, ceil(K/pack)]
-        # and its kernels handle a partial trailing block, so drop the padding bytes; the scales already
-        # have ceil(K/block_size) columns.
-        pack = 8 // bits
-        return qweight[:, : (weights.shape[-1] + pack - 1) // pack], scales
+        # QMoE validates raw storage as [E, N, K/pack]. Drop the quantizer's whole-block padding;
+        # the scales retain ceil(K/block_size) columns. WebGPU partial blocks are rejected above.
+        return qweight[:, : k // pack], scales
 
     def _symmetric_blockwise_quantize(self, weights, block_size):
         """Original symmetric blockwise encoding with positive scales; kept for the TRT-RTX EP."""

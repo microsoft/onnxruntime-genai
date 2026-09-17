@@ -447,6 +447,37 @@ def test_lfm2_moe_executed_graph_matches_hf_routing(tmp_path, routed_scaling_fac
     assert np.isclose(np.linalg.norm(without_eps[0, 4]) / np.linalg.norm(expected[0, 4]), 2.0, rtol=1e-3)
 
 
+@pytest.mark.parametrize("bits", [4, 8])
+@pytest.mark.parametrize("hidden,inter", [(40, 64), (64, 40)])
+def test_lfm2_qmoe_cpu_executes_partial_blocks(tmp_path, bits, hidden, inter):
+    model, graph = _executable_model(2, 1, hidden, inter)
+    model.moe_attrs.update(op_type="QMoE", expert_weight_bits=bits)
+    model.quant_attrs["qmoe_block_size"] = 32
+    moe = _moe_module(2, hidden, inter)
+    # Constant rows with exactly representable scales isolate the storage layout from quantization error.
+    for weight in (moe.experts.gate_up_proj, moe.experts.down_proj):
+        rows = torch.arange(weight.shape[0] * weight.shape[1]).reshape(*weight.shape[:2], 1)
+        weight.copy_(((rows % 7) + 1) / 128.0)
+    model.make_moe(0, moe, "hidden")
+    graph.outputs.append(model.values[model.layernorm_attrs["skip_input"]])
+    model_path = tmp_path / "lfm2_qmoe.onnx"
+    ir.save(model.model, model_path)
+    session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+    hidden_states = torch.linspace(-0.1, 0.2, 2 * hidden).reshape(1, 2, hidden)
+    (actual,) = session.run(None, {"hidden": hidden_states.numpy()})
+    expected = _hf_reference(hidden_states, moe, 1, 1.0).numpy()
+    np.testing.assert_allclose(actual, expected, rtol=1e-4, atol=1e-6)
+
+
+@pytest.mark.parametrize("hidden,inter", [(33, 64), (64, 33)])
+def test_lfm2_qmoe_export_rejects_odd_int4_dimensions(hidden, inter):
+    model, _ = _executable_model(2, 1, hidden, inter)
+    model.moe_attrs.update(op_type="QMoE", expert_weight_bits=4)
+    model.quant_attrs["qmoe_block_size"] = 32
+    with pytest.raises(RuntimeError, match=r"K \(33\) to be divisible by 2"):
+        model.make_moe(0, _moe_module(2, hidden, inter), "hidden")
+
+
 def test_lfm2_moe_rejects_unnormalized_topk(monkeypatch):
     monkeypatch.setattr(LFM2Model, "__init__", _stub_base_init)
     config = types.SimpleNamespace(norm_topk_prob=False)

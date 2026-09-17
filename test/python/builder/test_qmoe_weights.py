@@ -16,7 +16,8 @@ must:
      garbage-output bug).
 
 The CPU and WebGPU paths share the raw MatMulNBits encoding and must keep the
-``[N, ceil(K/pack)]`` storage contract the QMoE op validates, for INT4 and INT8.
+``[N, K/pack]`` storage contract the QMoE op validates, for INT4 and INT8.
+WebGPU additionally requires whole blocks; INT4 requires even K.
 """
 
 from __future__ import annotations
@@ -429,11 +430,11 @@ def test_matmulnbits_blockwise_paths_validate_block_size(ep):
     assert model.calls == []
 
 
-@pytest.mark.parametrize("ep,weights_prepacked", [("cpu", -1), ("webgpu", -1), ("cuda", 0)])
-@pytest.mark.parametrize("bits,k,expected_columns", [(4, 40, 20), (4, 33, 17), (8, 40, 40)])
+@pytest.mark.parametrize("ep,weights_prepacked", [("cpu", -1), ("cuda", 0)])
+@pytest.mark.parametrize("bits,k,expected_columns", [(4, 40, 20), (8, 40, 40), (8, 33, 33)])
 def test_raw_blockwise_storage_drops_the_block_padding(ep, weights_prepacked, bits, k, expected_columns):
     """The MatMulNBits quantizer pads K up to whole blocks; the QMoE op validates raw storage as
-    [E, N, ceil(K/pack)], so the padding must not reach the initializer."""
+    [E, N, K/pack], so the padding must not reach the initializer."""
     model = _RealMoEModel(ep, 32, weights_prepacked, bits=bits)
     model._matmulnbits_blockwise_quantize = Model._matmulnbits_blockwise_quantize.__get__(model)
     torch.manual_seed(0)
@@ -446,6 +447,23 @@ def test_raw_blockwise_storage_drops_the_block_padding(ep, weights_prepacked, bi
     )
     assert tuple(padded.shape) == (3, 2 * (32 // (8 // bits)))
     assert torch.equal(qweight, padded[:, :expected_columns])
+
+
+@pytest.mark.parametrize("ep,weights_prepacked", [("cpu", -1), ("webgpu", -1), ("cuda", 0)])
+def test_raw_blockwise_int4_rejects_odd_input_dimension(ep, weights_prepacked):
+    model = _RealMoEModel(ep, 32, weights_prepacked)
+    model._matmulnbits_blockwise_quantize = Model._matmulnbits_blockwise_quantize.__get__(model)
+    with pytest.raises(RuntimeError, match=r"INT4 QMoE requires expert input dimension K \(33\) to be divisible by 2"):
+        model.make_qmoe_weights(torch.zeros(4, 33))
+
+
+@pytest.mark.parametrize("bits", [4, 8])
+@pytest.mark.parametrize("block_size", [32, 64, 128])
+def test_webgpu_blockwise_rejects_partial_blocks(bits, block_size):
+    model = _RealMoEModel("webgpu", block_size, -1, bits=bits)
+    model._matmulnbits_blockwise_quantize = Model._matmulnbits_blockwise_quantize.__get__(model)
+    with pytest.raises(RuntimeError, match=rf"WebGPU QMoE.*K \(40\).*qmoe_block_size \({block_size}\)"):
+        model.make_qmoe_weights(torch.zeros(4, 40))
 
 
 @pytest.mark.parametrize("ep,weights_prepacked", [("cpu", -1), ("webgpu", -1)])
@@ -469,12 +487,13 @@ def test_non_cuda_blockwise_int8_uses_offset_128_storage(ep, weights_prepacked):
     assert torch.equal(dequantized, weights[0])
 
 
-def test_non_cuda_blockwise_scales_are_signed_and_do_not_clip_the_extreme():
+@pytest.mark.parametrize("ep", ["cpu", "webgpu"])
+def test_non_cuda_blockwise_scales_are_signed_and_do_not_clip_the_extreme(ep):
     """The signed-scale grid maps each block's max-magnitude element exactly to
     qmin, so a positive extreme is no longer clipped to 7/8 of its value. This is
     also the grid the CPU QMoE MLAS Q4 fast path re-quantizes to, keeping that path
     lossless."""
-    model = _RealMoEModel("cpu", 32, -1, bits=4)
+    model = _RealMoEModel(ep, 32, -1, bits=4)
     model._matmulnbits_blockwise_quantize = Model._matmulnbits_blockwise_quantize.__get__(model)
     weights = torch.zeros(1, 32)
     weights[0, 0] = 8.0  # positive extreme of block 0
