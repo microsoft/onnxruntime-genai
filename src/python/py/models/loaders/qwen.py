@@ -22,22 +22,37 @@ class QwenMTPModel:
         preserve_quantization=False,
         load_quantized_model=None,
         is_moe=True,
+        cache_dir=None,
+        token=None,
     ):
         if quant_type in {"modelopt", "compressed-tensors"}:
             if load_quantized_model is None:
                 raise ValueError("A quantized model loader is required for ModelOpt/compressed-tensors MTP weights.")
             model = load_quantized_model(input_path)
             return cls.from_modelopt(model, layer_config, preserve_quantization, is_moe)
+        if not os.path.isdir(model_dir):
+            try:
+                from huggingface_hub import snapshot_download  # noqa: PLC0415
+            except ImportError as exc:
+                raise RuntimeError(
+                    "huggingface_hub is required to resolve a Hugging Face repository ID for MTP weight loading."
+                ) from exc
+            model_dir = snapshot_download(model_dir, cache_dir=cache_dir, token=token)
         return cls.from_safetensors(model_dir, layer_config, is_moe)
 
     @classmethod
     def from_modelopt(cls, model, layer_config, preserve_quantization, is_moe=True):
         if model.mtp is None:
             raise ValueError("The ModelOpt checkpoint has no MTP head.")
+        lm_head = model.lm_head
+        if getattr(lm_head, "weight", None) is None:
+            if not getattr(layer_config, "tie_word_embeddings", False):
+                raise ValueError("The ModelOpt checkpoint has no LM-head weight and does not tie word embeddings.")
+            lm_head = model.embedding
         if preserve_quantization:
             return SimpleNamespace(
                 embedding=model.embedding,
-                lm_head=model.lm_head,
+                lm_head=lm_head,
                 fc=model.mtp.fc,
                 pre_fc_norm_embedding=model.mtp.pre_fc_norm_embedding,
                 pre_fc_norm_hidden=model.mtp.pre_fc_norm_hidden,
@@ -46,12 +61,15 @@ class QwenMTPModel:
             )
 
         mtp_state = model.dequantize_state(model.mtp.state)
-        lm_head_weight = model.dequantize_tensor(
-            model.lm_head.weight,
-            model.lm_head.weight_scale,
-            model.lm_head.weight_scale_2,
-            "lm_head.weight",
-        )
+        if lm_head is model.embedding:
+            lm_head_weight = model.embedding.weight
+        else:
+            lm_head_weight = model.dequantize_tensor(
+                lm_head.weight,
+                lm_head.weight_scale,
+                lm_head.weight_scale_2,
+                "lm_head.weight",
+            )
         return cls.from_state(mtp_state, model.embedding.weight, lm_head_weight, layer_config, is_moe)
 
     @classmethod
@@ -68,7 +86,7 @@ class QwenMTPModel:
         embed_keys = {"model.embed_tokens.weight", "model.language_model.embed_tokens.weight"}
         for shard in shards:
             with safetensors_torch.safe_open(shard, framework="pt") as safetensors_file:
-                for key in safetensors_file.keys():
+                for key in safetensors_file.keys():  # noqa: SIM118 - safe_open exposes keys(), not Mapping iteration
                     if key.startswith("mtp."):
                         mtp_state[key] = safetensors_file.get_tensor(key)
                     elif key in embed_keys:
@@ -84,6 +102,8 @@ class QwenMTPModel:
                 "('model.embed_tokens.weight' or 'model.language_model.embed_tokens.weight') "
                 "for the MTP head embedding."
             )
+        if lm_head_weight is None and getattr(layer_config, "tie_word_embeddings", False):
+            lm_head_weight = embed_weight
         if lm_head_weight is None:
             raise ValueError("Could not find 'lm_head.weight' for the MTP head LM head.")
         return cls.from_state(mtp_state, embed_weight, lm_head_weight, layer_config, is_moe)

@@ -268,6 +268,7 @@ def _write_genai_config(monkeypatch, out_dir, ep, window_size, num_layers=4, win
     model.ep = ep
     model.ep_attrs = {ep: {}}
     model.extra_options = {}
+    model.matmul_attrs = {"weights_prepacked": 0}
     model.use_paged_attention = False
     model.context_length_attrs["window_kv_cache"] = window_kv_cache
     model.past_present_share_buffer = True

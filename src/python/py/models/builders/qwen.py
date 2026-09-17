@@ -542,10 +542,16 @@ class Qwen35TextModel(Model):
         z_name = f"{basename}/z_proj/MatMul"
         self.make_matmul(attention.in_proj_z, z_name, root_input)
 
+        # The decay and beta gates drive the GatedDeltaNet recurrence, and their weights are
+        # ~0.1% of the model, so they stay dense regardless of which loader supplied them.
         b_name = f"{basename}/b_proj/MatMul"
+        self.require_dense_linear_attention_gate(attention.in_proj_b, b_name)
+        self.exclude_node_from_quantization(b_name)
         self.make_matmul(attention.in_proj_b, b_name, root_input)
 
         a_name = f"{basename}/a_proj/MatMul"
+        self.require_dense_linear_attention_gate(attention.in_proj_a, a_name)
+        self.exclude_node_from_quantization(a_name)
         self.make_matmul(attention.in_proj_a, a_name, root_input)
 
         conv_input = f"{qkv_name}/output_0"
@@ -564,6 +570,13 @@ class Qwen35TextModel(Model):
         self.make_initializer(attention.conv1d.weight, conv_weight_name, to=self.io_dtype)
 
         return z_name, b_name, a_name, conv_input, conv_weight_name
+
+    def require_dense_linear_attention_gate(self, projection, name):
+        if hasattr(projection, "qweight") or getattr(projection, "quant_type", "none") != "none":
+            raise ValueError(
+                f"Linear-attention gate '{name}' must remain dense, but the checkpoint supplies "
+                "pre-quantized weights that its loader did not dequantize."
+            )
 
     def make_linear_attention_normalize_and_gate(self, layer_id, attention, conv_out_3d, b_name, a_name):
         """Split QKV, per-head L2 norm, Q scale, and compute decay/beta gates.
@@ -870,9 +883,14 @@ class Qwen35MoETextModel(Qwen35TextModel):
 
         # Temporarily set new intermediate size from shared experts
         intermediate_size = self.intermediate_size
-        self.intermediate_size = self.shared_expert_intermediate_size
-        self.make_mlp_proj(layer_id, shared_expert, root_input)
-        self.intermediate_size = intermediate_size
+        try:
+            self.intermediate_size = self.shared_expert_intermediate_size
+            if self.mlp_attrs.get("fuse_gate_up", False):
+                self.make_mlp_proj_fused(layer_id, shared_expert, root_input)
+            else:
+                self.make_mlp_proj(layer_id, shared_expert, root_input)
+        finally:
+            self.intermediate_size = intermediate_size
         shared_output = self.mlp_attrs["output_0"]
 
         gate_matmul_name = self.make_matmul(shared_expert_gate, f"{basename}_gate/MatMul", root_input)
@@ -941,6 +959,10 @@ class Qwen35MoEModel(MTPModel):
         block_drafter = self.requested_block_drafter(extra_options)
         if self.mtp_attrs["build"] and block_drafter:
             print(f"Skipping the MTP head: {block_drafter} supersedes it.")
+            self.mtp_attrs["build"] = False
+
+        if self.mtp_attrs["build"] and extra_options.get("exclude_mtp", False):
+            print("Skipping the MTP head: exclude_mtp is set.")
             self.mtp_attrs["build"] = False
 
         if not self.mtp_attrs["build"]:
@@ -1024,6 +1046,27 @@ class Qwen35MoEModel(MTPModel):
             self.add_dflash2_to_genai_config(out_dir)
         if self.dspark is not None:
             self.add_dspark_to_genai_config(out_dir)
+        if self.dflash2 is not None or self.dspark is not None:
+            self.make_block_drafter_search_defaults(out_dir)
+
+    def make_block_drafter_search_defaults(self, out_dir):
+        """Ship greedy search defaults alongside a block drafter.
+
+        ``Engine::PrepareDflash2Feeds`` sets ``wants_drafts = greedy && ...``, so a checkpoint
+        whose ``generation_config.json`` asks for sampling would decode with zero drafts and no
+        error. Only ``do_sample`` is cleared; ``top_k``/``top_p``/``temperature`` stay as the
+        checkpoint declared them, so a caller who opts back into sampling per turn still gets them.
+        """
+        config_path = os.path.join(out_dir, "genai_config.json")
+        with open(config_path) as config_file:
+            genai_config = json.load(config_file)
+
+        if not genai_config["search"].get("do_sample", False):
+            return
+        genai_config["search"]["do_sample"] = False
+        with open(config_path, "w") as config_file:
+            json.dump(genai_config, config_file, indent=4)
+        print("Set search.do_sample to false: a block drafter only proposes drafts for greedy turns.")
 
     def add_mtp_to_genai_config(self, out_dir):
         config_path = os.path.join(out_dir, "genai_config.json")
@@ -1033,6 +1076,7 @@ class Qwen35MoEModel(MTPModel):
         decoder_outputs = genai_config["model"]["decoder"].setdefault("outputs", {})
         decoder_outputs.setdefault("hidden_states", "hidden_states")
         genai_config["model"]["mtp"] = {
+            "enabled": True,
             "filename": "mtp.onnx",
             "num_hidden_layers": 1,
             "num_key_value_heads": self.decoder.num_kv_heads,
@@ -1062,11 +1106,85 @@ class Qwen35MoEModel(MTPModel):
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
         self.decoder.save_processing(model_name_or_path, extra_kwargs, out_dir)
 
+    def require_specforge_aux_taps(self, target_layer_ids, drafter_name):
+        if not target_layer_ids:
+            raise ValueError(f"The {drafter_name} checkpoint must define at least one target_layer_ids entry.")
+
+        aux_layers = [layer_id + 1 for layer_id in target_layer_ids]
+        untappable = [layer_id - 1 for layer_id in aux_layers if not 1 <= layer_id < self.decoder.num_layers]
+        if untappable:
+            raise ValueError(
+                f"The {drafter_name} checkpoint targets decoder layers {untappable}, whose outputs the exporter "
+                f"cannot expose; target_layer_ids must lie in [0, {self.decoder.num_layers - 1})."
+            )
+
+        expected = ",".join(str(layer_id) for layer_id in aux_layers)
+        actual = ",".join(str(layer_id) for layer_id in self.decoder.aux_hidden_state_layers)
+        if actual != expected:
+            raise ValueError(
+                f"The {drafter_name} drafter needs aux_hidden_state_layers={expected} on the main model, "
+                f"got '{actual}'."
+            )
+
+    def block_drafter_precision(self, extra_options, option_name):
+        precision = str(extra_options.get(option_name, "bf16")).lower()
+        allowed = {"bf16", "int4", "int8"}
+        if precision not in allowed:
+            raise ValueError(f"{option_name} must be one of {sorted(allowed)}, got '{precision}'.")
+        return precision
+
+    def block_drafter_quant(self, precision):
+        """Resolve weight-only quantization for a block drafter, or ``None`` to keep it dense.
+
+        The drafter's LM head *is* the target's, so its graph reproduces the target's initializer
+        names and metadata before adopting the target's exact tensors during serialization. Only
+        the symmetric/``default`` convention is reproducible here; other algorithms leave the
+        head dense rather than writing a second copy under a name that could never be shared.
+        """
+        if precision == "bf16":
+            return None
+        bits = 4 if precision == "int4" else 8
+        block_size = int(self.decoder.quant_attrs["matmul_block_size"])
+        requested_prepack = int(self.decoder.matmul_attrs["weights_prepacked"])
+        prepack = requested_prepack if self.decoder.ep == "cuda" else 0
+        quant = {"bits": bits, "block_size": block_size, "prepack": prepack, "lm_head": None}
+
+        if self.decoder.exclude_lm_head or not self.decoder.is_lm_head_quantized():
+            return quant
+        head_bits, weight_name, scales_name, zero_point_name = self.decoder.make_tied_quantized_embedding_input_names()
+        shareable = (
+            weight_name == f"lm_head.MatMul.weight_Q{head_bits}"
+            and scales_name == "lm_head.MatMul.weight_scales"
+            and not zero_point_name
+        )
+        if not shareable:
+            print(
+                f"Leaving the block drafter's LM head dense: the target writes '{weight_name}', "
+                "which this exporter cannot reproduce byte-for-byte to share."
+            )
+            return quant
+        adopt_target = not (prepack and self.decoder.io_dtype != ir.DataType.FLOAT16)
+        if not adopt_target:
+            print(
+                "Keeping a private raw quantized block-drafter LM head because its BF16 layout "
+                "cannot adopt the target's prepacked quantized weight."
+            )
+            prepack = 0
+        quant["lm_head"] = {
+            "bits": head_bits,
+            "block_size": block_size,
+            "prepack": prepack,
+            "adopt_target": adopt_target,
+        }
+        return quant
+
     def make_dflash2_init(self, io_dtype, extra_options):
         """DFlash 2 block drafter, exported as an auxiliary ``dflash2.onnx``.
 
         ``dflash2_path`` points at the draft checkpoint. The drafter has no embedding and no
-        LM head of its own, so both come from the target and are shared on disk.
+        LM head of its own, so both come from the target and are shared on disk. SpecForge taps
+        the output of each ``target_layer_ids`` entry, which is the residual stream entering the
+        following layer.
         """
         self.dflash2_path = extra_options.get("dflash2_path")
         if not self.dflash2_path:
@@ -1083,9 +1201,14 @@ class Qwen35MoEModel(MTPModel):
             if num_draft_tokens < 1:
                 raise ValueError("dflash2_num_draft_tokens must be a positive integer.")
 
+        fuse_gate_up = str(extra_options.get("dflash2_fuse_gate_up", False)).lower()
+        if fuse_gate_up not in ("true", "false"):
+            raise ValueError("dflash2_fuse_gate_up must be true or false.")
         self.dflash2_attrs = {
             "io_dtype": io_dtype,
             "num_draft_tokens": num_draft_tokens,
+            "precision": self.block_drafter_precision(extra_options, "dflash2_precision"),
+            "fuse_gate_up": fuse_gate_up == "true",
         }
 
         with open(os.path.join(self.dflash2_path, "config.json"), encoding="utf-8") as handle:
@@ -1097,12 +1220,7 @@ class Qwen35MoEModel(MTPModel):
                 f"dflash2_num_draft_tokens must not exceed the drafter checkpoint limit ({checkpoint_draft_limit})."
             )
         target_layer_ids = dflash_config["target_layer_ids"]
-        expected = ",".join(str(i) for i in target_layer_ids)
-        actual = ",".join(str(i) for i in self.decoder.aux_hidden_state_layers)
-        if actual != expected:
-            raise ValueError(
-                f"The DFlash 2 drafter needs aux_hidden_state_layers={expected} on the main model, got '{actual}'."
-            )
+        self.require_specforge_aux_taps(target_layer_ids, "DFlash 2")
 
     def make_dflash2_model(self, input_path):
         if not self.dflash2_path:
@@ -1118,6 +1236,8 @@ class Qwen35MoEModel(MTPModel):
             self.decoder.attention_attrs["paged_block_size"],
             self.decoder.context_length,
             num_draft_tokens=self.dflash2_attrs["num_draft_tokens"],
+            quant=self.block_drafter_quant(self.dflash2_attrs["precision"]),
+            fuse_gate_up=self.dflash2_attrs["fuse_gate_up"],
         )
         self.dflash2.make_model()
 
@@ -1125,9 +1245,33 @@ class Qwen35MoEModel(MTPModel):
         if self.dflash2 is None:
             return
         self.dflash2.save_model(output_dir)
+        adopted_head = set()
+        private_head = set()
+        if getattr(self.dflash2, "lm_head_quant", None) is not None:
+            bits = self.dflash2.lm_head_quant["bits"]
+            head_initializers = {
+                f"lm_head.MatMul.weight_Q{bits}",
+                "lm_head.MatMul.weight_scales",
+            }
+            if self.dflash2.lm_head_quant.get("adopt_target", True):
+                adopted_head = head_initializers
+            else:
+                private_head = head_initializers
         self.dflash2_shared_initializers = self.share_initializers(
-            output_dir, self.decoder.filename, self.dflash2.filename
+            output_dir,
+            self.decoder.filename,
+            self.dflash2.filename,
+            adopt_source_initializers=adopted_head,
+            required_source_initializers=adopted_head,
+            excluded_source_initializers=private_head,
         )
+        shared_names = {entry["name"] for entry in self.dflash2_shared_initializers}
+        missing = adopted_head - shared_names
+        if missing:
+            raise RuntimeError(
+                "The DFlash 2 LM head could not adopt the target's quantized initializers: "
+                + ", ".join(sorted(missing))
+            )
 
     def add_dflash2_to_genai_config(self, out_dir):
         config_path = os.path.join(out_dir, "genai_config.json")
@@ -1202,12 +1346,7 @@ class Qwen35MoEModel(MTPModel):
         }
 
         target_layer_ids = draft_config["dflash_config"]["target_layer_ids"]
-        expected = ",".join(str(i + 1) for i in target_layer_ids)
-        actual = ",".join(str(i) for i in self.decoder.aux_hidden_state_layers)
-        if actual != expected:
-            raise ValueError(
-                f"The DSpark drafter needs aux_hidden_state_layers={expected} on the main model, got '{actual}'."
-            )
+        self.require_specforge_aux_taps(target_layer_ids, "DSpark")
 
     def make_dspark_model(self, input_path):
         if not self.dspark_path:
@@ -1335,6 +1474,8 @@ class Qwen35MTPModel(Qwen35MoETextModel):
             preserve_quantization=self.preserve_mtp_quantization,
             load_quantized_model=self.load_weights,
             is_moe=self.is_moe_mtp,
+            cache_dir=self.cache_dir,
+            token=self.hf_token,
         )
 
     def make_offset_rmsnorm(self, name, root_input, weight_tensor):
@@ -1356,16 +1497,7 @@ class Qwen35MTPModel(Qwen35MoETextModel):
     def make_mtp_input_projection(self):
         basename = "/model/mtp"
 
-        embed_weight = "model.embed_tokens.weight"
-        self.make_initializer(self.mtp_weights.embedding.weight, embed_weight, to=self.io_dtype)
-        embed_gather = f"{basename}/embed_tokens/Gather"
-        embed_output = f"{embed_gather}/output_0"
-        self.make_node(
-            "Gather",
-            inputs=[embed_weight, self.input_names["input_ids"]],
-            outputs=[embed_output],
-            name=embed_gather,
-        )
+        embed_output = self.make_mtp_embedding(basename)
         self.make_value(embed_output, self.io_dtype, shape=self.make_hidden_state_shape())
 
         embedding_norm = self.make_offset_rmsnorm(
@@ -1388,6 +1520,13 @@ class Qwen35MTPModel(Qwen35MoETextModel):
 
         fc_name = self.make_matmul(self.mtp_weights.fc, f"{basename}/fc/MatMul", f"{concat_name}/output_0")
         return f"{fc_name}/output_0"
+
+    def make_mtp_embedding(self, basename):
+        return self.make_embedding_lookup(
+            self.mtp_weights.embedding.weight,
+            f"{basename}/embed_tokens",
+            self.mtp_weights.lm_head,
+        )
 
 
 class Qwen35DenseMTPModel(Qwen35MTPModel):

@@ -11,6 +11,7 @@ import numpy as np
 import onnx_ir as ir
 import torch
 from onnx_ir.tensor_adapters import TorchTensor, to_torch_dtype
+from quantization import CudaQuantizer
 from tqdm import tqdm
 
 from .base import Model
@@ -20,6 +21,16 @@ from .base import Model
 # only the two stateless `Model` helpers below rather than the decoder builder's contract.
 class BlockDrafterBuilder:
     """Shared graph, initializer, I/O, and file plumbing for block drafters."""
+
+    # Weight-only quantization of the drafter body. ``quant_bits = None`` keeps every
+    # projection dense; subclasses set these from the target's quantization settings so the
+    # drafter lands in the same format as the model it drafts for.
+    quant_bits = None
+    quant_block_size = 32
+    quant_prepack = 0
+    # Set only when the target's own LM head is symmetric/`default` quantized, whose initializer
+    # names and metadata the drafter reproduces before adopting the target's exact tensors.
+    lm_head_quant = None
 
     def make_graph(self, graph_name, const_prefix):
         self.values: dict[str, ir.Value] = {}
@@ -111,16 +122,70 @@ class BlockDrafterBuilder:
     def reshape(self, name, root_input, shape_const, dtype, shape):
         return self.binary("Reshape", name, root_input, self.const(shape_const), dtype, shape)
 
-    def matmul(self, name, root_input, weight_tensor, in_features, out_features, rows, weight_name=None):
+    def matmul(self, name, root_input, weight_tensor, in_features, out_features, rows, weight_name=None, quantize=True):
         """Emit ``root_input @ weight.T`` for a torch ``[out, in]`` weight."""
         expected_shape = (out_features, in_features)
         if tuple(weight_tensor.shape) != expected_shape:
             raise ValueError(f"Weight for '{name}' has shape {tuple(weight_tensor.shape)}, expected {expected_shape}.")
         initializer_name = weight_name or (name[1:].replace("/", ".") + ".weight")
+        if quantize and self.quant_bits and in_features % self.quant_block_size == 0:
+            return self.matmul_nbits(name, root_input, weight_tensor, in_features, out_features, rows, initializer_name)
         if initializer_name not in self.values:
             self.make_initializer(weight_tensor.T, initializer_name, to=self.io_dtype)
         output = self.out(name)
         self.make_node("MatMul", [root_input, initializer_name], [output], name=name)
+        self.make_value(output, self.io_dtype, [rows, out_features])
+        return output
+
+    def matmul_nbits(self, name, root_input, weight_tensor, in_features, out_features, rows, initializer_name):
+        """Emit a weight-only quantized ``MatMulNBits`` for a torch ``[out, in]`` weight.
+
+        ``MatMulNBits`` consumes ``[N, K]`` directly, so unlike the dense path the weight is
+        not transposed. Repeat call sites reuse the initializer the first one registered.
+        """
+        # Keep the BF16 drafter body in the portable raw blockwise layout. Its generated
+        # session options disable the target decoder's fpA_intB selection for these nodes.
+        prepack = self.quant_prepack if self.io_dtype == ir.DataType.FLOAT16 else 0
+        qweight_name = f"{initializer_name}_Q{self.quant_bits}"
+        scales_name = f"{initializer_name}_scales"
+        if qweight_name not in self.values:
+            weight_tensor = weight_tensor.to(to_torch_dtype(self.io_dtype))
+            use_ort_quantizer = self.quant_block_size in (16, 32, 64, 128, 256)
+            if prepack:
+                qweight, scales = CudaQuantizer.matmulnbits_prepacked_blockwise_quantize(
+                    weight_tensor,
+                    self.quant_bits,
+                    self.quant_block_size,
+                    force_arch=90 if prepack == 2 else 80,
+                    use_ort_quantizer=use_ort_quantizer,
+                )
+            else:
+                qweight, scales = CudaQuantizer.matmulnbits_blockwise_quantize(
+                    weight_tensor,
+                    self.quant_bits,
+                    self.quant_block_size,
+                    flatten_qweight=False,
+                    use_ort_quantizer=use_ort_quantizer,
+                )
+            self.make_initializer(qweight, qweight_name)
+            self.make_initializer(scales, scales_name, to=self.io_dtype)
+        attributes = {
+            "bits": self.quant_bits,
+            "block_size": self.quant_block_size,
+            "K": in_features,
+            "N": out_features,
+        }
+        if prepack:
+            attributes["weight_prepacked"] = prepack
+        output = self.out(name)
+        self.make_node(
+            "MatMulNBits",
+            [root_input, qweight_name, scales_name],
+            [output],
+            name=name,
+            domain="com.microsoft",
+            **attributes,
+        )
         self.make_value(output, self.io_dtype, [rows, out_features])
         return output
 
@@ -174,7 +239,9 @@ class BlockDrafterBuilder:
 
         name = "/lm_head/MatMul"
         output = self.out(name)
-        if weight.dtype != torch.float8_e4m3fn:
+        if self.lm_head_quant is not None:
+            self.make_lm_head_nbits(name, root, output, weight)
+        elif weight.dtype != torch.float8_e4m3fn:
             self.make_initializer(weight.T, "lm_head.MatMul.weight", to=self.external_dtype)
             self.make_node("MatMul", [root, "lm_head.MatMul.weight"], [output], name=name)
         else:
@@ -199,6 +266,59 @@ class BlockDrafterBuilder:
             )
         self.make_value(output, self.external_dtype, [rows, self.vocab_size])
         return output
+
+    def make_lm_head_nbits(self, name, root, output, weight):
+        """Emit the LM head under the *target's* initializer names so the two fold into one copy.
+
+        The drafter's head is the target's `lm_head.weight`. It is emitted with matching
+        initializer metadata, then replaced with the target's exact tensors when the package is
+        saved. Scales stay at `external_dtype` (the target's IO dtype), not the drafter's bf16
+        body dtype.
+        """
+        bits = self.lm_head_quant["bits"]
+        block_size = self.lm_head_quant["block_size"]
+        prepack = self.lm_head_quant["prepack"]
+        allowed_block_sizes = (32, 64, 128) if prepack == 1 else (64, 128)
+        if (
+            self.external_dtype != ir.DataType.FLOAT16
+            or block_size not in allowed_block_sizes
+            or self.hidden_size % block_size != 0
+            or self.vocab_size % (32 if bits == 8 else 64) != 0
+        ):
+            prepack = 0
+        weight = weight.to(to_torch_dtype(self.external_dtype))
+        use_ort_quantizer = block_size in (16, 32, 64, 128, 256)
+        if prepack:
+            qweight, scales = CudaQuantizer.matmulnbits_prepacked_blockwise_quantize(
+                weight,
+                bits,
+                block_size,
+                force_arch=90 if prepack == 2 else 80,
+                use_ort_quantizer=use_ort_quantizer,
+            )
+        else:
+            qweight, scales = CudaQuantizer.matmulnbits_blockwise_quantize(
+                weight,
+                bits,
+                block_size,
+                flatten_qweight=False,
+                use_ort_quantizer=use_ort_quantizer,
+            )
+        qweight_name = f"lm_head.MatMul.weight_Q{bits}"
+        scales_name = "lm_head.MatMul.weight_scales"
+        self.make_initializer(qweight, qweight_name)
+        self.make_initializer(scales, scales_name, to=self.external_dtype)
+        attributes = {"bits": bits, "block_size": block_size, "K": self.hidden_size, "N": self.vocab_size}
+        if prepack:
+            attributes["weight_prepacked"] = prepack
+        self.make_node(
+            "MatMulNBits",
+            [root, qweight_name, scales_name],
+            [output],
+            name=name,
+            domain="com.microsoft",
+            **attributes,
+        )
 
     def resolve_sliding_window(self, config):
         """Return the single ``local_window_size`` every layer runs with, or -1 for full attention."""
@@ -267,6 +387,10 @@ class BlockDrafterBuilder:
         ]
         for name, dtype, shape in declarations:
             self.graph.inputs.append(self.make_value(name, dtype, shape))
+        # TODO: this is the target's block size. A drafter usually has the smaller head size and
+        # so the larger FlashAttention tile, which means the block that is fastest for the target
+        # is not the one that is fastest here. Giving the drafter its own block size would
+        # decouple them.
         for layer_id in range(self.num_layers):
             for suffix in ("key", "value"):
                 self.graph.inputs.append(
@@ -328,6 +452,7 @@ class BlockDrafterBuilder:
     def genai_config_section(self):
         return {
             "filename": self.filename,
+            "session_options": {"ep.cuda.fpa_intb_gemm": "0"},
             "num_hidden_layers": self.num_layers,
             "num_key_value_heads": self.num_kv_heads,
             "head_size": self.head_size,

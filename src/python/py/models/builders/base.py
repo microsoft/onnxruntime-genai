@@ -12,6 +12,7 @@ import ast
 import json
 import os
 import subprocess
+import types
 from collections.abc import Sequence
 
 import numpy as np
@@ -38,7 +39,7 @@ from transformers import (
     Qwen3VLForConditionalGeneration,
 )
 
-from quantization import CudaQuantizer, QuantConfig, resolve_dtype
+from quantization import KV_CACHE_CALIBRATION_QMAX, CudaQuantizer, QuantConfig, resolve_dtype
 
 
 class Model:
@@ -380,7 +381,7 @@ class Model:
             else None
         )
         bit_width = 4 if quant_type == ir.DataType.INT4 else 8 if quant_type is not None else 0
-        quant_mode = "PER_CHANNEL" if quant_scheme.endswith("per_channel") else "PER_TENSOR"
+        quant_mode = "PER_TOKEN" if quant_scheme.endswith("per_token") else "PER_CHANNEL" if quant_scheme.endswith("per_channel") else "PER_TENSOR"
         self.kv_cache_attrs = {
             "quant_scheme": quant_scheme,                                 # Quantization scheme for key-value caches
             "quant_type": quant_type,                                     # Quantization type for key-value caches
@@ -394,6 +395,7 @@ class Model:
         self.mlp_attrs = {
             "use_proj": True,                                # Use projection style for MLP (GateProj/UpProj/DownProj)
             "use_fc": False,                                 # Use fully-connected style for MLP (FC1/FC2)
+            "fuse_gate_up": extra_options.get("fuse_mlp_gate_up", False),  # Fuse gate/up projections before quantization
             "output_0": "",                                  # Output 0 for MLP subgraph
         }
 
@@ -815,6 +817,22 @@ class Model:
         self.past_present_share_buffer = self.attention_attrs["op_type"] in ("GroupQueryAttention", "PagedAttention")
 
     def make_kv_cache_init(self):
+        rotation = self.extra_options.get("kv_cache_rotation", "none").lower()
+        if rotation not in {"none", "hadamard"}:
+            raise ValueError("kv_cache_rotation must be none or hadamard.")
+        self.kv_cache_attrs["rotation"] = rotation.upper()
+        if rotation != "none":
+            if self.ep != "cuda" or not self.use_paged_attention:
+                raise ValueError("kv_cache_rotation requires CUDA PagedAttention.")
+            if self.head_size not in {16, 32, 64, 128, 256}:
+                raise ValueError("Hadamard KV rotation requires head_size in {16, 32, 64, 128, 256}.")
+            if self.kv_cache_attrs["quant_mode"] == "PER_CHANNEL":
+                raise ValueError("Hadamard KV rotation does not support per-channel scales.")
+        if self.kv_cache_attrs["quant_mode"] == "PER_TOKEN":
+            if self.ep != "cuda" or not self.use_paged_attention:
+                raise ValueError("Per-token KV quantization requires CUDA PagedAttention.")
+            if self.kv_cache_attrs["scales_path"]:
+                raise ValueError("Per-token KV quantization does not use kv_cache_scale_file.")
         if self.kv_cache_attrs["quant_scheme"] == "none":
             # Return early if quantized KV caches aren't used
             return
@@ -828,14 +846,6 @@ class Model:
             raise ValueError(
                 "Quantized KV cache is only supported for the CPU and CUDA execution providers. "
                 f"Got execution_provider='{self.ep}'."
-            )
-
-        if self.use_paged_attention and self.kv_cache_attrs["bit_width"] == 4:
-            # PagedAttention's T_CACHE type constraint is {float16, bfloat16, int8, float8e4m3fn};
-            # there is no sub-byte paged cache backend, so int4 caches cannot be exported.
-            raise ValueError(
-                "PagedAttention only supports int8 and fp8 quantized KV caches, "
-                f"got kv_cache_quant_scheme='{self.kv_cache_attrs['quant_scheme']}'."
             )
 
         cache_dtype = (
@@ -866,7 +876,25 @@ class Model:
         self.past_present_share_buffer = self.ep == "cuda"
 
         # Save calibrated scales for quantized KV caches
-        self.make_kv_cache_scale_initializers()
+        if self.kv_cache_attrs["quant_mode"] == "PER_TOKEN":
+            self.make_kv_cache_scale_io()
+        else:
+            self.make_kv_cache_scale_initializers()
+
+    def make_kv_cache_scale_io(self):
+        for side in ("key", "value"):
+            input_key = f"past_key_values.{side}_scale"
+            output_key = f"present.{side}_scale"
+            self.input_names[input_key] = {
+                layer_id: name + "_scale" for layer_id, name in self.input_names[f"past_key_values.{side}"].items()
+            }
+            self.output_names[output_key] = {
+                layer_id: name + "_scale" for layer_id, name in self.output_names[f"present.{side}"].items()
+            }
+            self.input_types[input_key] = ir.DataType.FLOAT16
+            self.output_types[output_key] = ir.DataType.FLOAT16
+            self.input_shapes[input_key] = ["num_blocks", "block_size", self.num_kv_heads]
+            self.output_shapes[output_key] = ["num_blocks", "block_size", self.num_kv_heads]
 
     def get_kv_cache_scale_names(self, layer_id):
         # Convention-based initializer names for the per-layer KV cache quantization scales,
@@ -876,6 +904,21 @@ class Model:
             f"model.layers.{layer_id}.attn.k_scale",
             f"model.layers.{layer_id}.attn.v_scale",
         )
+
+    def get_kv_cache_calibration_factor(self, file_qmax):
+        # A calibrated scale is threshold / qmax, so a file that records the qmax it was
+        # calibrated against can be retargeted to this model's bit width by the ratio of the
+        # two divisors (an int8 file reused for int4 scales up by 128/8). Files that omit
+        # `qmax` are taken as already matching the requested scheme.
+        if file_qmax is None:
+            return 1.0
+        if not isinstance(file_qmax, (int, float)) or isinstance(file_qmax, bool):
+            raise ValueError("kv_cache_scale_file qmax must be a number.")
+        if not np.isfinite(file_qmax) or file_qmax <= 0:
+            raise ValueError("kv_cache_scale_file qmax must be finite and positive.")
+        bit_width_name = self.kv_cache_attrs["quant_scheme"].split("_", 1)[0]
+        target_qmax = KV_CACHE_CALIBRATION_QMAX[bit_width_name]
+        return float(file_qmax) / target_qmax
 
     def make_kv_cache_scale_initializers(self):
         per_channel = self.kv_cache_attrs["quant_mode"] == "PER_CHANNEL"
@@ -904,6 +947,7 @@ class Model:
             raise ValueError("Scales file must contain scales.k_scales and scales.v_scales.")
 
         layer_ids = scale_data.get("layer_ids", None)
+        scale_factor = self.get_kv_cache_calibration_factor(scale_data.get("qmax", None))
         if layer_ids is None:
             layer_ids = list(range(self.num_layers))
             expected_scale_count = self.num_layers
@@ -921,12 +965,9 @@ class Model:
                 )
 
 
-            kv_input_names = self.input_names.get("past_key_values.key", [])
-            kv_layer_ids = {
-                int(parts[1])
-                for input_name in kv_input_names
-                if len(parts := input_name.split(".")) == 3 and parts[1].isdigit()
-            }
+            # `make_cache_names` keys the cache names by model layer id, so the layers that
+            # actually carry a KV cache are the keys.
+            kv_layer_ids = set(self.input_names.get("past_key_values.key", {}))
             if set(layer_ids) != kv_layer_ids:
                 raise ValueError(
                     f"kv_cache_scale_file layer_ids must match the model's KV-cache layers; "
@@ -953,6 +994,10 @@ class Model:
                 )
             if not np.all(np.isfinite(scale)) or np.any(scale <= 0):
                 raise ValueError(f"kv_cache scale for layer {layer_id} must contain finite positive values")
+            with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+                scale = (scale.astype(np.float64) * scale_factor).astype(np.float32)
+            if not np.all(np.isfinite(scale)) or np.any(scale <= 0):
+                raise ValueError(f"Rescaled kv_cache scale for layer {layer_id} must contain finite positive values")
             return scale.reshape(scale_shape)
 
         # Make initializers for each scale tensor
@@ -1047,18 +1092,12 @@ class Model:
 
         # Determine if embeddings and lm_head will be quantized or not.
         # Embeddings use Gather/GatherBlockQuantized, which only supports 4-bit (INT4/UINT4).
-        # The lm_head MatMul is quantized for INT4/UINT4 (4-bit) or INT8/UINT8 (8-bit).
-        matmul_is_quantized = self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4, ir.DataType.INT8, ir.DataType.UINT8}
         quantized_embeds = (
-            matmul_is_quantized
+            self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}
             and "Gather" in self.quant_attrs["op_types_to_quantize"]
             and "/model/embed_tokens/Gather" not in self.quant_attrs["nodes_to_exclude"]
         )
-        quantized_lm_head = (
-            matmul_is_quantized
-            and "MatMul" in self.quant_attrs["op_types_to_quantize"]
-            and "/lm_head/MatMul" not in self.quant_attrs["nodes_to_exclude"]
-        )
+        quantized_lm_head = self.is_lm_head_quantized()
 
         if shared_embeddings:
             self.tied_quantized_embeddings = quantized_embeds and quantized_lm_head
@@ -1066,6 +1105,13 @@ class Model:
         else:
             self.tied_quantized_embeddings = False
             self.tied_unquantized_embeddings = False
+
+    def is_lm_head_quantized(self):
+        return (
+            self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4, ir.DataType.INT8, ir.DataType.UINT8}
+            and "MatMul" in self.quant_attrs["op_types_to_quantize"]
+            and "/lm_head/MatMul" not in self.quant_attrs["nodes_to_exclude"]
+        )
 
     def make_tied_quantized_embedding_input_names(self):
         # Quantized tied embeddings in make_embedding() consume lm_head weights using
@@ -1104,7 +1150,13 @@ class Model:
         placement = self.matmul_mixed_precision
 
         last_matmul_type = placement.get("last_matmul")
-        bits = resolve_dtype(last_matmul_type).bits if last_matmul_type else 4
+        default_bits = {
+            ir.DataType.INT4: 4,
+            ir.DataType.UINT4: 4,
+            ir.DataType.INT8: 8,
+            ir.DataType.UINT8: 8,
+        }.get(getattr(self, "onnx_dtype", ir.DataType.INT4), 4)
+        bits = resolve_dtype(last_matmul_type).bits if last_matmul_type else default_bits
         is_symmetric = self.quant_attrs["is_symmetric"]
 
         if base_method == "rtn" or (base_method == "default" and bits != 4):
@@ -1152,8 +1204,12 @@ class Model:
                 val = getattr(gen_config, key)
                 if val is not None and val != default_val:
                     setattr(config, key, getattr(gen_config, key))
-        except:
-            pass
+        except Exception as e:
+            # config.json alone often names only <|endoftext|> as EOS, while chat models end
+            # each turn with a different token, so make the fallback visible rather than silent.
+            print(f"Warning: could not read generation_config.json ({e}). Falling back to config.json.")
+
+        bos_token_id, eos_token_id, pad_token_id = self.resolve_special_token_ids(config, extra_kwargs)
 
         # Create inputs dict
         inputs = {}
@@ -1176,6 +1232,9 @@ class Model:
             inputs["past_key_names"] = "past_key_values.%d.key"
         if "past_key_values.value" in self.input_names:
             inputs["past_value_names"] = "past_key_values.%d.value"
+        if "past_key_values.key_scale" in self.input_names:
+            inputs["past_key_scale_names"] = "past_key_values.%d.key_scale"
+            inputs["past_value_scale_names"] = "past_key_values.%d.value_scale"
         if "past.conv" in self.input_names:
             inputs["past_conv_names"] = "past.%d.conv"
         if "past.recurrent" in self.input_names:
@@ -1193,6 +1252,9 @@ class Model:
             outputs["present_key_names"] = "present.%d.key"
         if "present.value" in self.output_names:
             outputs["present_value_names"] = "present.%d.value"
+        if "present.key_scale" in self.output_names:
+            outputs["present_key_scale_names"] = "present.%d.key_scale"
+            outputs["present_value_scale_names"] = "present.%d.value_scale"
         if "present.conv" in self.output_names:
             outputs["present_conv_names"] = "present.%d.conv"
         if "present.recurrent" in self.output_names:
@@ -1202,15 +1264,6 @@ class Model:
         if "state_update.recurrent_capsule" in self.output_names:
             outputs["state_update_recurrent_capsule_names"] = "state_update.%d.recurrent_capsule"
 
-        bos_token_id = config.bos_token_id if getattr(config, "bos_token_id", None) is not None else 1
-        eos_token_id = config.eos_token_id
-        pad_token_id = (
-            config.pad_token_id
-            if getattr(config, "pad_token_id", None) is not None
-            else config.eos_token_id[0]
-            if isinstance(config.eos_token_id, list)
-            else config.eos_token_id
-        )
         genai_config = {
             "model": {
                 "bos_token_id": bos_token_id,
@@ -1289,20 +1342,48 @@ class Model:
             genai_config["search"]["chunk_size"] = int(
                 self.extra_options.get("paged_chunk_size", self.attention_attrs["paged_block_size"])
             )
+        elif self.use_paged_attention and "paged_chunk_size" in self.extra_options:
+            # Nothing forces chunking without a ring, but this caps one request where
+            # max_scheduled_tokens only caps the step, so concurrent prefills interleave
+            # instead of running one at a time.
+            genai_config["search"]["chunk_size"] = int(self.extra_options["paged_chunk_size"])
 
         if self.ep != "cpu":
             ep_name = self.ep.replace("trt-rtx", "NvTensorRtRtx")
             ep_options = {ep_name: self.ep_attrs[self.ep]}
             genai_config["model"]["decoder"]["session_options"]["provider_options"].append(ep_options)
 
+        session_options = genai_config["model"]["decoder"]["session_options"]
+        if self.ep == "cuda" and (
+            self.matmul_attrs["weights_prepacked"] > 0 or self.extra_options.get("enable_cuda_fpa_intb_gemm", False)
+        ):
+            # Prepacked nodes take the fpA_intB path unconditionally. This flag also selects that
+            # kernel family for raw-layout nodes and prepack-pass skips.
+            session_options["ep.cuda.fpa_intb_gemm"] = "1"
+        if self.extra_options.get("use_device_allocator_for_initializers", False):
+            session_options["session.use_device_allocator_for_initializers"] = "1"
+
         if self.use_paged_attention:
-            genai_config["engine"] = {
-                "dynamic_batching": {
-                    "block_size": self.attention_attrs["paged_block_size"],
-                    "gpu_utilization_factor": float(self.extra_options.get("gpu_utilization_factor", 0.6)),
-                    "max_batch_size": int(self.extra_options.get("max_batch_size", 100)),
-                },
+            dynamic_batching = {
+                "block_size": self.attention_attrs["paged_block_size"],
+                "max_batch_size": int(self.extra_options.get("max_batch_size", 100)),
             }
+            if "num_blocks" in self.extra_options:
+                dynamic_batching["num_blocks"] = int(self.extra_options["num_blocks"])
+            else:
+                dynamic_batching["gpu_utilization_factor"] = float(
+                    self.extra_options.get("gpu_utilization_factor", 0.6)
+                )
+            if "max_scheduled_tokens" in self.extra_options:
+                dynamic_batching["max_scheduled_tokens"] = int(self.extra_options["max_scheduled_tokens"])
+            genai_config["engine"] = {"dynamic_batching": dynamic_batching}
+
+        if "max_draft_tokens" in self.extra_options:
+            # Caps how many drafted tokens the engine verifies per step. This is independent of
+            # the drafter's exported geometry, which costs the same no matter how many of its
+            # tokens are used, so the best value is workload-specific and must be measured.
+            # check_extra_options already validated and normalized this to an int.
+            genai_config["speculative"] = {"max_draft_tokens": self.extra_options["max_draft_tokens"]}
 
         state_groups = self.make_decoder_state_groups(inputs, outputs)
         if state_groups:
@@ -1434,6 +1515,64 @@ class Model:
             return [shape[0], shape[1], shape[2].replace("sequence", "sliding"), shape[3]]
         return shape
 
+    def resolve_special_token_ids(self, config, extra_kwargs):
+        """Resolve special-token IDs and include the tokenizer's end-of-turn token in EOS.
+
+        A chat model ends every assistant turn with the tokenizer's ``eos_token`` (for
+        Qwen that is ``<|im_end|>``), but ``config.json`` frequently records only
+        ``<|endoftext|>``. When the checkpoint ships no ``generation_config.json`` to
+        correct that, generation never stops at the end of a turn and the model keeps
+        writing the following turns itself, which is especially visible with tool calls:
+        it invents the tool's result instead of yielding to the caller.
+        """
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(
+                self.model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs
+            )
+        except Exception as e:
+            print(f"Warning: could not resolve tokenizer special tokens ({e}).")
+            tokenizer = None
+
+        text_config = getattr(config, "text_config", None)
+
+        def resolve(attribute):
+            for source in (config, text_config, tokenizer):
+                value = getattr(source, attribute, None) if source is not None else None
+                if value is not None:
+                    return value
+            return None
+
+        bos_token_id = resolve("bos_token_id")
+        eos_token_id = resolve("eos_token_id")
+        pad_token_id = resolve("pad_token_id")
+
+        if bos_token_id is None:
+            bos_token_id = 1
+        if eos_token_id is None:
+            raise ValueError("Could not resolve eos_token_id from the model config, text config, or tokenizer")
+
+        ids = list(eos_token_id) if isinstance(eos_token_id, list) else [eos_token_id]
+        turn_end_token = getattr(tokenizer, "eos_token", None) if tokenizer is not None else None
+        try:
+            turn_end_id = tokenizer.convert_tokens_to_ids(turn_end_token) if turn_end_token is not None else None
+        except Exception as e:
+            print(f"Warning: could not resolve the tokenizer's end-of-turn token ({e}).")
+            turn_end_id = None
+
+        if turn_end_id is None or turn_end_id in ids:
+            resolved_eos_token_id = eos_token_id
+        else:
+            print(
+                f"Adding the tokenizer's end-of-turn token {turn_end_token} (id {turn_end_id}) "
+                f"to eos_token_id from the model configuration: {eos_token_id}."
+            )
+            resolved_eos_token_id = [turn_end_id, *ids]
+
+        if pad_token_id is None:
+            pad_token_id = ids[0]
+
+        return bos_token_id, resolved_eos_token_id, pad_token_id
+
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
         tokenizer = AutoTokenizer.from_pretrained(
             model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs
@@ -1479,12 +1618,18 @@ class Model:
             bits = resolve_dtype(linear_attn).bits
             # Promote linear attention projections and their MLPs.
             # Linear attention recurrence accumulates quantization errors across
-            # the full sequence (no softmax normalization).
+            # the full sequence (no softmax normalization). The decay/beta gates
+            # (a_proj/b_proj) are excluded from quantization entirely, so they are absent here.
             for i, lt in enumerate(self.layer_types):
                 if lt == "linear_attention":
-                    for proj in ("in_proj_a", "in_proj_b", "in_proj_qkv", "in_proj_z", "out_proj"):
+                    for proj in ("qkv_proj", "z_proj", "out_proj"):
                         customized_weight_config[f"/model/layers.{i}/linear_attn/{proj}/MatMul"] = {"bits": bits}
-                    for proj in ("gate_proj", "up_proj", "down_proj"):
+                    mlp_projections = (
+                        ("gate_up_proj", "down_proj")
+                        if self.mlp_attrs.get("fuse_gate_up", False)
+                        else ("gate_proj", "up_proj", "down_proj")
+                    )
+                    for proj in mlp_projections:
                         customized_weight_config[f"/model/layers.{i}/mlp/{proj}/MatMul"] = {"bits": bits}
 
         self.int4_customized_weight_config = customized_weight_config
@@ -1604,8 +1749,8 @@ class Model:
         by the target layout (SM80 -> {32, 64, 128}, SM90 -> {64, 128}), K % block_size == 0,
         and N aligned to the kernel tile (N % 32 for int8, N % 64 for int4). Only symmetric
         weights are prepacked; nodes already carrying `weight_prepacked` are left untouched.
-        An offline-prepacked model must be run with ORT_FPA_INTB_GEMM enabling the relevant
-        nbits (use ORT_FPA_INTB_GEMM=1 for int4 and int8).
+        Eligible prepacked nodes select fpA-intB automatically. The emitted session option
+        enables the same kernel family for nodes that remain in raw blockwise layout.
         """
         prepack_mode = self.matmul_attrs["weights_prepacked"]
         if self.ep != "cuda" or prepack_mode <= 0 or not self.quant_attrs["is_symmetric"]:
@@ -1616,6 +1761,10 @@ class Model:
         force_arch = 90 if prepack_mode == 2 else 80
         allowed_block_sizes = (32, 64, 128) if prepack_mode == 1 else (64, 128)
         initializers = {init.name: init for init in model_proto.graph.initializer}
+
+        candidates = 0
+        prepacked = 0
+        skipped_block_sizes = set()
 
         for node in model_proto.graph.node:
             if node.op_type != "MatMulNBits" or node.domain != "com.microsoft":
@@ -1630,6 +1779,7 @@ class Model:
             if not all(key in attrs for key in ("bits", "block_size", "K", "N")):
                 continue
 
+            candidates += 1
             bits = attrs["bits"].i
             block_size = attrs["block_size"].i
             k = attrs["K"].i
@@ -1641,6 +1791,8 @@ class Model:
                 and n % (32 if bits == 8 else 64) == 0
             )
             if not fpa_intb_eligible:
+                if block_size not in allowed_block_sizes:
+                    skipped_block_sizes.add(block_size)
                 continue
 
             init = initializers.get(node.input[1])
@@ -1650,6 +1802,23 @@ class Model:
             packed = CudaQuantizer.prepack_matmulnbits_weight(numpy_helper.to_array(init), n, k, bits, force_arch)
             init.CopyFrom(numpy_helper.from_array(np.ascontiguousarray(packed), init.name))
             node.attribute.append(onnx_helper.make_attribute("weight_prepacked", prepack_mode))
+            prepacked += 1
+
+        if candidates and not prepacked:
+            reason = (
+                f"block_size {sorted(skipped_block_sizes)} is not one of {list(allowed_block_sizes)} "
+                f"for the SM{force_arch} layout"
+                if skipped_block_sizes
+                else "no node met the fpA_intB K/N alignment"
+            )
+            raise ValueError(
+                f"matmulnbits_weights_prepacked={prepack_mode} prepacked 0 of {candidates} MatMulNBits "
+                f"nodes: {reason}. Choose a compatible block_size, use "
+                "matmulnbits_weights_prepacked=1 (SM80 layout, accepts block_size 32), or 0 to "
+                "prepack at session creation instead."
+            )
+        if candidates:
+            print(f"Prepacked {prepacked}/{candidates} MatMulNBits weights into the SM{force_arch} fpA_intB layout.")
 
     @classmethod
     def get_genai_version(cls) -> str | None:
@@ -1863,7 +2032,9 @@ class Model:
             if type(name) == dict:
                 # Cache inputs
                 for i, cache_name in name.items():
-                    if key in {"past_key_values.key", "past_key_values.value"}:
+                    if key in {"past_key_values.key_scale", "past_key_values.value_scale"}:
+                        cache_shape = ["num_blocks_windowed", *shape[1:]] if self.is_windowed_paged_layer(i) else shape
+                    elif key in {"past_key_values.key", "past_key_values.value"}:
                         cache_shape = self.make_key_value_cache_shape(i, shape)
                     else:
                         cache_shape = shape
@@ -1881,7 +2052,9 @@ class Model:
             if type(name) == dict:
                 # Cache outputs
                 for i, cache_name in name.items():
-                    if key in {"present.key", "present.value"}:
+                    if key in {"present.key_scale", "present.value_scale"}:
+                        cache_shape = ["num_blocks_windowed", *shape[1:]] if self.is_windowed_paged_layer(i) else shape
+                    elif key in {"present.key", "present.value"}:
                         cache_shape = self.make_key_value_cache_shape(i, shape)
                     else:
                         cache_shape = shape
@@ -2041,9 +2214,12 @@ class Model:
         self.make_node("Slice", inputs=inputs, outputs=[output], name=name)
         self.make_value(output, dtype, shape=shape)
 
-    def make_split(self, name, inputs, outputs, dtypes, shapes, axis=-1):
-        self.make_node("Split", inputs=inputs, outputs=outputs, name=name, axis=axis)
-        for out, dt, shape in zip(outputs, dtypes, shapes):
+    def make_split(self, name, inputs, outputs, dtypes, shapes, axis=-1, num_outputs=None):
+        kwargs = {"axis": axis}
+        if num_outputs is not None:
+            kwargs["num_outputs"] = num_outputs
+        self.make_node("Split", inputs=inputs, outputs=outputs, name=name, **kwargs)
+        for out, dt, shape in zip(outputs, dtypes, shapes, strict=True):
             self.make_value(out, dt, shape=shape)
 
     def make_mul(self, name, inputs, dtype, shape):
@@ -2188,11 +2364,14 @@ class Model:
         )
         self.make_value(output, self.io_dtype, shape=shape)
 
+    def exclude_node_from_quantization(self, basename):
+        nodes_to_exclude = self.quant_attrs["nodes_to_exclude"]
+        if basename not in nodes_to_exclude:
+            nodes_to_exclude.append(basename)
+
     def make_matmul(self, matmul, basename, root_input, **kwargs):
         if getattr(matmul, "exclude_from_quantization", False):
-            nodes_to_exclude = self.quant_attrs["nodes_to_exclude"]
-            if basename not in nodes_to_exclude:
-                nodes_to_exclude.append(basename)
+            self.exclude_node_from_quantization(basename)
         if hasattr(matmul, "base_layer"):
             # For LoRA `MatMul`
             return self.make_matmul_lora(matmul, basename, root_input, **kwargs)
@@ -2631,11 +2810,15 @@ class Model:
         add = self.make_packed_add_tensor(q_add, k_add, v_add)
         self.make_add_bias(add, name, root_input, **kwargs)
 
-    def make_embedding(self, embedding):
-        basename = "/model/embed_tokens"
+    def make_embedding_lookup(self, embedding, basename, lm_head):
+        # Tied quantized: lm_head weight -> Reshape -> GatherBlockQuantized
+        # Tied float:     lm_head weight -> Transpose -> Gather
+        # Separate:       embedding weight -------------> Gather
+        can_reuse_lm_head = getattr(lm_head, "can_reuse_as_embedding", True)
 
-        # Use GatherBlockQuantized if and only if tied embeddings are enabled and export model is quantized. quantized d_type in set_onnx_dtype is INT4/UINT4
-        if self.tied_quantized_embeddings:
+        # Use GatherBlockQuantized if and only if tied embeddings are enabled and the export model
+        # is quantized. Quantized d_type in set_onnx_dtype is INT4/UINT4.
+        if self.tied_quantized_embeddings and can_reuse_lm_head:
             bits, tied_weight_name, tied_weight_scale_name, tied_weight_zp_name = self.make_tied_quantized_embedding_input_names()
 
             gather_name = f"{basename}/GatherBlockQuantized"
@@ -2671,7 +2854,7 @@ class Model:
             )
 
         # Use Transpose + Gather for tied embeddings for float embedding layers
-        elif self.tied_unquantized_embeddings:
+        elif self.tied_unquantized_embeddings and can_reuse_lm_head:
             transpose_name = f"{basename}/Transpose"
             transpose_output = f"{transpose_name}/output_0"
             self.make_transpose(
@@ -2693,6 +2876,13 @@ class Model:
             gather_name = f"{basename}/Gather"
             gather_output = f"{gather_name}/output_0"
             self.make_node("Gather", inputs=[weight, self.input_names["input_ids"]], outputs=[gather_output], name=gather_name)
+
+        return gather_output
+
+    def make_embedding(self, embedding):
+        basename = "/model/embed_tokens"
+        lm_head = getattr(getattr(self, "weights", None), "lm_head", None)
+        gather_output = self.make_embedding_lookup(embedding, basename, lm_head)
 
         self.make_value(gather_output, self.io_dtype, shape=self.make_hidden_state_shape())
 
@@ -3825,7 +4015,7 @@ class Model:
     def get_kv_cache_scale_inputs(self, **kwargs):
         # Shared by GroupQueryAttention and PagedAttention: returns the per-layer k/v scale
         # initializer names, or empty placeholders when the KV cache is not quantized.
-        if self.kv_cache_attrs["quant_scheme"] == "none":
+        if self.kv_cache_attrs["quant_scheme"] == "none" or self.kv_cache_attrs["quant_mode"] == "PER_TOKEN":
             return "", ""
         layer_id = kwargs.get("layer_id")
         if layer_id is None:
@@ -4132,6 +4322,16 @@ class Model:
         # PagedAttention derives the cache element type from the tensor itself, so unlike
         # GroupQueryAttention it has no `kv_cache_bit_width` attribute.
         attributes = self.get_attention_op_attributes(**kwargs)
+        if self.kv_cache_attrs.get("bit_width", 0) == 4:
+            attributes.update(k_cache_dtype="int4", v_cache_dtype="int4")
+        rotation = self.kv_cache_attrs.get("rotation", "NONE")
+        if rotation != "NONE":
+            attributes.update(qk_rotation=rotation, v_rotation=rotation)
+        if self.kv_cache_attrs.get("quant_mode") == "PER_TOKEN":
+            layer_id = kwargs["layer_id"]
+            inputs.extend([""] * (17 - len(inputs)))
+            inputs.extend(self.input_names[f"past_key_values.{side}_scale"][layer_id] for side in ("key", "value"))
+            outputs.extend(self.output_names[f"present.{side}_scale"][layer_id] for side in ("key", "value"))
         self.make_node(
             "PagedAttention",
             inputs=inputs,
@@ -4581,7 +4781,10 @@ class Model:
         self.make_mlp_unpacked(layer_id, mlp, root_input)
 
         if self.mlp_attrs["use_proj"]:
-            self.make_mlp_proj(layer_id, mlp, root_input)
+            if self.mlp_attrs.get("fuse_gate_up", False):
+                self.make_mlp_proj_fused(layer_id, mlp, root_input)
+            else:
+                self.make_mlp_proj(layer_id, mlp, root_input)
         elif self.mlp_attrs["use_fc"]:
             self.make_mlp_fc(layer_id, mlp, root_input)
         else:
@@ -4741,6 +4944,106 @@ class Model:
             self.make_add_bias(mlp.down_proj.bias, down_add_name, root_input=f"{down_name}/output_0")
             down_name = down_add_name
 
+        self.mlp_attrs["output_0"] = f"{down_name}/output_0"
+
+    def make_mlp_proj_fused(self, layer_id, mlp, root_input):
+        #      root_input
+        #           |
+        #   GateUpProjMatMul
+        #           |
+        #         Split
+        #        /     \
+        #   ActFunc     |
+        #        \     /
+        #          Mul
+        #           |
+        #    DownProjMatMul
+
+        if hasattr(mlp.gate_proj, "base_layer") or hasattr(mlp.up_proj, "base_layer"):
+            raise ValueError("fuse_mlp_gate_up does not support adapted gate/up projections.")
+        if getattr(mlp.gate_proj, "quant_type", "none") != "none" or getattr(
+            mlp.up_proj, "quant_type", "none"
+        ) != "none":
+            raise ValueError("fuse_mlp_gate_up requires unpacked gate/up projections.")
+        if not mlp.gate_proj.weight.is_floating_point() or not mlp.up_proj.weight.is_floating_point():
+            raise ValueError("fuse_mlp_gate_up requires floating-point gate/up projections.")
+        expected_shape = (self.intermediate_size, self.hidden_size)
+        if tuple(mlp.gate_proj.weight.shape) != expected_shape or tuple(mlp.up_proj.weight.shape) != expected_shape:
+            raise ValueError(
+                f"fuse_mlp_gate_up requires gate/up weights with shape {expected_shape}, got "
+                f"{tuple(mlp.gate_proj.weight.shape)} and {tuple(mlp.up_proj.weight.shape)}."
+            )
+
+        basename = f"/model/layers.{layer_id}/mlp"
+        gate_basename = f"{basename}/gate_proj/MatMul"
+        up_basename = f"{basename}/up_proj/MatMul"
+        excluded_nodes = set(getattr(self, "quant_attrs", {}).get("nodes_to_exclude", ()))
+        gate_excluded = getattr(mlp.gate_proj, "exclude_from_quantization", False) or gate_basename in excluded_nodes
+        up_excluded = getattr(mlp.up_proj, "exclude_from_quantization", False) or up_basename in excluded_nodes
+        if gate_excluded != up_excluded:
+            raise ValueError(
+                "fuse_mlp_gate_up cannot preserve a quantization exclusion that applies to only one of "
+                f"'{gate_basename}' and '{up_basename}'. Exclude both projections or disable fusion."
+            )
+
+        gate_bias = mlp.gate_proj.bias
+        up_bias = mlp.up_proj.bias
+        for name, bias in (("gate", gate_bias), ("up", up_bias)):
+            if bias is not None and tuple(bias.shape) != (self.intermediate_size,):
+                raise ValueError(
+                    f"fuse_mlp_gate_up requires the {name} bias to have shape "
+                    f"({self.intermediate_size},), got {tuple(bias.shape)}."
+                )
+        bias_exists = (gate_bias is not None and torch.count_nonzero(gate_bias) > 0) or (
+            up_bias is not None and torch.count_nonzero(up_bias) > 0
+        )
+        if bias_exists:
+            gate_bias = torch.zeros_like(up_bias) if gate_bias is None else gate_bias
+            up_bias = torch.zeros_like(gate_bias) if up_bias is None else up_bias
+
+        gate_up_proj = types.SimpleNamespace(
+            weight=torch.cat((mlp.gate_proj.weight, mlp.up_proj.weight)),
+            bias=torch.cat((gate_bias, up_bias)) if bias_exists else None,
+            exclude_from_quantization=gate_excluded,
+        )
+        matmul_name = self.make_matmul(gate_up_proj, f"{basename}/gate_up_proj/MatMul", root_input)
+        projection_name = matmul_name
+        if bias_exists:
+            projection_name = f"{basename}/gate_up_proj/Add"
+            self.make_add_bias(
+                gate_up_proj.bias,
+                projection_name,
+                root_input=f"{matmul_name}/output_0",
+            )
+
+        gate_name = f"{basename}/gate_proj/MatMul/output_0"
+        up_name = f"{basename}/up_proj/MatMul/output_0"
+        self.make_split(
+            f"{basename}/gate_up_proj/Split",
+            [f"{projection_name}/output_0"],
+            [gate_name, up_name],
+            [self.io_dtype, self.io_dtype],
+            [
+                self.make_hidden_state_shape(last_dim=self.intermediate_size),
+                self.make_hidden_state_shape(last_dim=self.intermediate_size),
+            ],
+            num_outputs=2,
+        )
+
+        act_fn_name = self.make_activation(layer_id, root_input=gate_name)
+        mul_name = f"{basename}/Mul"
+        self.make_mul(
+            mul_name,
+            [f"{act_fn_name}/output_0", up_name],
+            dtype=self.io_dtype,
+            shape=self.make_hidden_state_shape(last_dim=self.intermediate_size),
+        )
+
+        down_name = self.make_matmul(mlp.down_proj, f"{basename}/down_proj/MatMul", f"{mul_name}/output_0")
+        if mlp.down_proj.bias is not None and torch.count_nonzero(mlp.down_proj.bias) > 0:
+            down_add_name = f"{basename}/down_proj/Add"
+            self.make_add_bias(mlp.down_proj.bias, down_add_name, root_input=f"{down_name}/output_0")
+            down_name = down_add_name
         self.mlp_attrs["output_0"] = f"{down_name}/output_0"
 
     def make_mlp_fc(self, layer_id, mlp, root_input):

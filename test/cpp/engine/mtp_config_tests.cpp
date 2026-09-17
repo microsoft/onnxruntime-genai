@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <filesystem>
+#include <fstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -15,6 +17,32 @@
 
 namespace Generators::test {
 namespace {
+
+namespace fs_std = std::filesystem;
+
+fs_std::path WriteDisabledMtpConfig() {
+  const auto root = fs_std::temp_directory_path() / "ortgenai_mtp_config_disabled";
+  std::error_code ec;
+  fs_std::remove_all(root, ec);
+  fs_std::create_directories(root);
+  std::ofstream out(root / "genai_config.json", std::ios::binary);
+  out << R"({
+    "model": {
+      "type": "tiny-test-model",
+      "vocab_size": 16,
+      "context_length": 32,
+      "decoder": { "filename": "model.onnx" },
+      "mtp": {
+        "enabled": false,
+        "filename": "mtp.onnx",
+        "main_hidden_states": "main_hidden",
+        "outputs": { "hidden_states": "head_feedback" }
+      }
+    },
+    "search": {}
+  })";
+  return root;
+}
 
 struct TensorMetadata {
   ONNXTensorElementDataType data_type;
@@ -56,6 +84,15 @@ class FakeModelStateMetadata final : public ModelStateMetadata {
 };
 
 }  // namespace
+
+TEST(MtpDecoderConfigTest, ParsesDisabledRuntimeToggle) {
+  const auto root = WriteDisabledMtpConfig();
+  const Config config{fs::path{root.string()}, {}};
+
+  EXPECT_FALSE(config.model.mtp.enabled);
+  EXPECT_FALSE(config.model.mtp.IsEnabled());
+  EXPECT_EQ(config.model.mtp.filename, "mtp.onnx");
+}
 
 TEST(MtpDecoderConfigTest, ProjectsPagedDecoderWithoutMainFixedState) {
   Config config;
@@ -148,6 +185,41 @@ TEST(MtpDecoderConfigTest, ProjectsPagedDecoderWithoutMainFixedState) {
   EXPECT_THROW(CreateMtpDecoderConfig(*projected), std::runtime_error);
 }
 
+// A per-token quantized target declares scale name templates on its decoder. The MTP projection
+// copies the target config wholesale, and the head is always an unquantized full-attention layer,
+// so those templates must be cleared. If they survived, the engine would size and bind the head's
+// cache against scale tensor names that exist only in the target session.
+TEST(MtpDecoderConfigTest, ClearsInheritedScaleTemplatesForTheUnquantizedHead) {
+  Config config;
+  auto& decoder = config.model.decoder;
+  decoder.filename = "text.onnx";
+  decoder.num_hidden_layers = 64;
+  decoder.num_key_value_heads = 8;
+  decoder.head_size = 128;
+  decoder.hidden_size = 2048;
+  decoder.inputs.past_key_scale_names = "past_key_values.%d.key_scale";
+  decoder.inputs.past_value_scale_names = "past_key_values.%d.value_scale";
+  decoder.outputs.present_key_scale_names = "present.%d.key_scale";
+  decoder.outputs.present_value_scale_names = "present.%d.value_scale";
+
+  auto& mtp = config.model.mtp;
+  mtp.filename = "mtp.onnx";
+  mtp.num_hidden_layers = 1;
+  mtp.num_key_value_heads = 2;
+  mtp.head_size = 64;
+
+  const auto projected = CreateMtpDecoderConfig(config);
+  const auto& head = projected->model.decoder;
+  EXPECT_TRUE(head.inputs.past_key_scale_names.empty());
+  EXPECT_TRUE(head.inputs.past_value_scale_names.empty());
+  EXPECT_TRUE(head.outputs.present_key_scale_names.empty());
+  EXPECT_TRUE(head.outputs.present_value_scale_names.empty());
+
+  // The target's own configuration is untouched: only the projected copy is unquantized.
+  EXPECT_EQ(config.model.decoder.inputs.past_key_scale_names, "past_key_values.%d.key_scale");
+  EXPECT_EQ(config.model.decoder.outputs.present_value_scale_names, "present.%d.value_scale");
+}
+
 TEST(MtpDecoderConfigTest, RejectsInvalidConfiguration) {
   Config config;
   auto& mtp = config.model.mtp;
@@ -165,6 +237,10 @@ TEST(MtpDecoderConfigTest, RejectsInvalidConfiguration) {
       EXPECT_NE(std::string_view{error.what()}.find(expected), std::string_view::npos);
     }
   };
+
+  mtp.enabled = false;
+  expect_error("model.mtp.enabled");
+  mtp.enabled = true;
 
   mtp.filename.clear();
   expect_error("filename");

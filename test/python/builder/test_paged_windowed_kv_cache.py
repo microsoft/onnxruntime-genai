@@ -401,6 +401,7 @@ def _write_genai_config(
     model.ep = "cuda"
     model.ep_attrs = {"cuda": {}}
     model.extra_options = dict(extra_options or {})
+    model.matmul_attrs = {"weights_prepacked": 0}
     model.attention_attrs = {"paged_block_size": 256}
     model.use_paged_attention = True
     model.context_length_attrs["window_kv_cache"] = use_ring
