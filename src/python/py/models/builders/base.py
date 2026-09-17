@@ -12,6 +12,7 @@ import ast
 import json
 import os
 import subprocess
+import types
 from collections.abc import Sequence
 
 import numpy as np
@@ -395,6 +396,7 @@ class Model:
         self.mlp_attrs = {
             "use_proj": True,                                # Use projection style for MLP (GateProj/UpProj/DownProj)
             "use_fc": False,                                 # Use fully-connected style for MLP (FC1/FC2)
+            "fuse_gate_up": extra_options.get("fuse_mlp_gate_up", False),  # Fuse gate/up projections before quantization
             "output_0": "",                                  # Output 0 for MLP subgraph
         }
 
@@ -1350,6 +1352,11 @@ class Model:
             genai_config["search"]["chunk_size"] = int(
                 self.extra_options.get("paged_chunk_size", self.attention_attrs["paged_block_size"])
             )
+        elif self.use_paged_attention and "paged_chunk_size" in self.extra_options:
+            # Nothing forces chunking without a ring, but this caps one request where
+            # max_scheduled_tokens only caps the step, so concurrent prefills interleave
+            # instead of running one at a time.
+            genai_config["search"]["chunk_size"] = int(self.extra_options["paged_chunk_size"])
 
         if self.ep != "cpu":
             ep_name = self.ep.replace("trt-rtx", "NvTensorRtRtx")
@@ -1357,9 +1364,11 @@ class Model:
             genai_config["model"]["decoder"]["session_options"]["provider_options"].append(ep_options)
 
         session_options = genai_config["model"]["decoder"]["session_options"]
-        if self.ep == "cuda" and self.matmul_attrs["weights_prepacked"] > 0:
-            # Prepacked nodes take the fpA_intB path unconditionally; setting the flag keeps the
-            # nodes that were skipped (unsupported N/K/block_size) on the same kernel family.
+        if self.ep == "cuda" and (
+            self.matmul_attrs["weights_prepacked"] > 0 or self.extra_options.get("enable_cuda_fpa_intb_gemm", False)
+        ):
+            # Prepacked nodes take the fpA_intB path unconditionally. This flag also selects that
+            # kernel family for raw-layout nodes and prepack-pass skips.
             session_options["ep.cuda.fpa_intb_gemm"] = "1"
         if self.extra_options.get("use_device_allocator_for_initializers", False):
             session_options["session.use_device_allocator_for_initializers"] = "1"
@@ -1591,7 +1600,12 @@ class Model:
                 if lt == "linear_attention":
                     for proj in ("qkv_proj", "z_proj", "out_proj"):
                         customized_weight_config[f"/model/layers.{i}/linear_attn/{proj}/MatMul"] = {"bits": bits}
-                    for proj in ("gate_proj", "up_proj", "down_proj"):
+                    mlp_projections = (
+                        ("gate_up_proj", "down_proj")
+                        if self.mlp_attrs.get("fuse_gate_up", False)
+                        else ("gate_proj", "up_proj", "down_proj")
+                    )
+                    for proj in mlp_projections:
                         customized_weight_config[f"/model/layers.{i}/mlp/{proj}/MatMul"] = {"bits": bits}
 
         self.int4_customized_weight_config = customized_weight_config
@@ -2176,9 +2190,12 @@ class Model:
         self.make_node("Slice", inputs=inputs, outputs=[output], name=name)
         self.make_value(output, dtype, shape=shape)
 
-    def make_split(self, name, inputs, outputs, dtypes, shapes, axis=-1):
-        self.make_node("Split", inputs=inputs, outputs=outputs, name=name, axis=axis)
-        for out, dt, shape in zip(outputs, dtypes, shapes):
+    def make_split(self, name, inputs, outputs, dtypes, shapes, axis=-1, num_outputs=None):
+        kwargs = {"axis": axis}
+        if num_outputs is not None:
+            kwargs["num_outputs"] = num_outputs
+        self.make_node("Split", inputs=inputs, outputs=outputs, name=name, **kwargs)
+        for out, dt, shape in zip(outputs, dtypes, shapes, strict=True):
             self.make_value(out, dt, shape=shape)
 
     def make_mul(self, name, inputs, dtype, shape):
@@ -4729,7 +4746,10 @@ class Model:
         self.make_mlp_unpacked(layer_id, mlp, root_input)
 
         if self.mlp_attrs["use_proj"]:
-            self.make_mlp_proj(layer_id, mlp, root_input)
+            if self.mlp_attrs.get("fuse_gate_up", False):
+                self.make_mlp_proj_fused(layer_id, mlp, root_input)
+            else:
+                self.make_mlp_proj(layer_id, mlp, root_input)
         elif self.mlp_attrs["use_fc"]:
             self.make_mlp_fc(layer_id, mlp, root_input)
         else:
@@ -4889,6 +4909,106 @@ class Model:
             self.make_add_bias(mlp.down_proj.bias, down_add_name, root_input=f"{down_name}/output_0")
             down_name = down_add_name
 
+        self.mlp_attrs["output_0"] = f"{down_name}/output_0"
+
+    def make_mlp_proj_fused(self, layer_id, mlp, root_input):
+        #      root_input
+        #           |
+        #   GateUpProjMatMul
+        #           |
+        #         Split
+        #        /     \
+        #   ActFunc     |
+        #        \     /
+        #          Mul
+        #           |
+        #    DownProjMatMul
+
+        if hasattr(mlp.gate_proj, "base_layer") or hasattr(mlp.up_proj, "base_layer"):
+            raise ValueError("fuse_mlp_gate_up does not support adapted gate/up projections.")
+        if getattr(mlp.gate_proj, "quant_type", "none") != "none" or getattr(
+            mlp.up_proj, "quant_type", "none"
+        ) != "none":
+            raise ValueError("fuse_mlp_gate_up requires unpacked gate/up projections.")
+        if not mlp.gate_proj.weight.is_floating_point() or not mlp.up_proj.weight.is_floating_point():
+            raise ValueError("fuse_mlp_gate_up requires floating-point gate/up projections.")
+        expected_shape = (self.intermediate_size, self.hidden_size)
+        if tuple(mlp.gate_proj.weight.shape) != expected_shape or tuple(mlp.up_proj.weight.shape) != expected_shape:
+            raise ValueError(
+                f"fuse_mlp_gate_up requires gate/up weights with shape {expected_shape}, got "
+                f"{tuple(mlp.gate_proj.weight.shape)} and {tuple(mlp.up_proj.weight.shape)}."
+            )
+
+        basename = f"/model/layers.{layer_id}/mlp"
+        gate_basename = f"{basename}/gate_proj/MatMul"
+        up_basename = f"{basename}/up_proj/MatMul"
+        excluded_nodes = set(getattr(self, "quant_attrs", {}).get("nodes_to_exclude", ()))
+        gate_excluded = getattr(mlp.gate_proj, "exclude_from_quantization", False) or gate_basename in excluded_nodes
+        up_excluded = getattr(mlp.up_proj, "exclude_from_quantization", False) or up_basename in excluded_nodes
+        if gate_excluded != up_excluded:
+            raise ValueError(
+                "fuse_mlp_gate_up cannot preserve a quantization exclusion that applies to only one of "
+                f"'{gate_basename}' and '{up_basename}'. Exclude both projections or disable fusion."
+            )
+
+        gate_bias = mlp.gate_proj.bias
+        up_bias = mlp.up_proj.bias
+        for name, bias in (("gate", gate_bias), ("up", up_bias)):
+            if bias is not None and tuple(bias.shape) != (self.intermediate_size,):
+                raise ValueError(
+                    f"fuse_mlp_gate_up requires the {name} bias to have shape "
+                    f"({self.intermediate_size},), got {tuple(bias.shape)}."
+                )
+        bias_exists = (gate_bias is not None and torch.count_nonzero(gate_bias) > 0) or (
+            up_bias is not None and torch.count_nonzero(up_bias) > 0
+        )
+        if bias_exists:
+            gate_bias = torch.zeros_like(up_bias) if gate_bias is None else gate_bias
+            up_bias = torch.zeros_like(gate_bias) if up_bias is None else up_bias
+
+        gate_up_proj = types.SimpleNamespace(
+            weight=torch.cat((mlp.gate_proj.weight, mlp.up_proj.weight)),
+            bias=torch.cat((gate_bias, up_bias)) if bias_exists else None,
+            exclude_from_quantization=gate_excluded,
+        )
+        matmul_name = self.make_matmul(gate_up_proj, f"{basename}/gate_up_proj/MatMul", root_input)
+        projection_name = matmul_name
+        if bias_exists:
+            projection_name = f"{basename}/gate_up_proj/Add"
+            self.make_add_bias(
+                gate_up_proj.bias,
+                projection_name,
+                root_input=f"{matmul_name}/output_0",
+            )
+
+        gate_name = f"{basename}/gate_proj/MatMul/output_0"
+        up_name = f"{basename}/up_proj/MatMul/output_0"
+        self.make_split(
+            f"{basename}/gate_up_proj/Split",
+            [f"{projection_name}/output_0"],
+            [gate_name, up_name],
+            [self.io_dtype, self.io_dtype],
+            [
+                self.make_hidden_state_shape(last_dim=self.intermediate_size),
+                self.make_hidden_state_shape(last_dim=self.intermediate_size),
+            ],
+            num_outputs=2,
+        )
+
+        act_fn_name = self.make_activation(layer_id, root_input=gate_name)
+        mul_name = f"{basename}/Mul"
+        self.make_mul(
+            mul_name,
+            [f"{act_fn_name}/output_0", up_name],
+            dtype=self.io_dtype,
+            shape=self.make_hidden_state_shape(last_dim=self.intermediate_size),
+        )
+
+        down_name = self.make_matmul(mlp.down_proj, f"{basename}/down_proj/MatMul", f"{mul_name}/output_0")
+        if mlp.down_proj.bias is not None and torch.count_nonzero(mlp.down_proj.bias) > 0:
+            down_add_name = f"{basename}/down_proj/Add"
+            self.make_add_bias(mlp.down_proj.bias, down_add_name, root_input=f"{down_name}/output_0")
+            down_name = down_add_name
         self.mlp_attrs["output_0"] = f"{down_name}/output_0"
 
     def make_mlp_fc(self, layer_id, mlp, root_input):
