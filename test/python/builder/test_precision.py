@@ -377,9 +377,14 @@ def _run_check_extra_options(
     execution_provider="cpu",
     tie_word_embeddings=True,
     layer_types=None,
+    attn_logit_softcapping=None,
 ):
     # Avoid Hugging Face network/config loading and provide only the config fields needed.
-    fake_config = types.SimpleNamespace(tie_word_embeddings=tie_word_embeddings, layer_types=layer_types)
+    fake_config = types.SimpleNamespace(
+        tie_word_embeddings=tie_word_embeddings,
+        layer_types=layer_types,
+        attn_logit_softcapping=attn_logit_softcapping,
+    )
 
     def _fake_get_hf_details(*_args, **_kwargs):
         return {
@@ -497,6 +502,17 @@ def test_state_update_capacity_is_normalized(monkeypatch):
     _run_check_extra_options(monkeypatch, options)
 
     assert options["state_update_capacity"] == 3
+
+
+def test_webgpu_paged_attention_rejects_gemma2_softcap(monkeypatch):
+    with pytest.raises(ValueError, match="does not support non-zero attention softcap"):
+        _run_check_extra_options(
+            monkeypatch,
+            {"use_paged_attention": "true", "num_blocks": "8"},
+            precision="fp16",
+            execution_provider="webgpu",
+            attn_logit_softcapping=50.0,
+        )
 
 
 def test_num_hidden_layers_rejects_more_layers_than_configured(monkeypatch):
@@ -731,6 +747,8 @@ def test_paged_attention_lm_head_pruning(monkeypatch, tmp_path, prune_lm_head, l
         ({"use_paged_attention": "true", "paged_chunk_size": "0"}, "paged_chunk_size"),
         ({"use_paged_attention": "true", "paged_chunk_size": "-1"}, "paged_chunk_size"),
         ({"use_paged_attention": "true", "paged_chunk_size": "abc"}, "paged_chunk_size"),
+        ({"use_paged_attention": "true", "num_blocks": "0"}, "num_blocks"),
+        ({"use_paged_attention": "true", "num_blocks": "abc"}, "num_blocks"),
         ({"use_paged_attention": "true", "max_batch_size": "-1"}, "max_batch_size"),
         ({"use_paged_attention": "true", "max_batch_size": "257"}, "max_batch_size"),
         ({"use_paged_attention": "true", "gpu_utilization_factor": "0"}, "gpu_utilization_factor"),
@@ -740,6 +758,16 @@ def test_paged_attention_lm_head_pruning(monkeypatch, tmp_path, prune_lm_head, l
 def test_paged_attention_rejects_invalid_engine_options(monkeypatch, extra_options, error):
     with pytest.raises(ValueError, match=error):
         _run_check_extra_options(monkeypatch, extra_options, precision="bf16", execution_provider="cuda")
+
+
+def test_webgpu_paged_attention_requires_num_blocks(monkeypatch):
+    with pytest.raises(ValueError, match="num_blocks"):
+        _run_check_extra_options(
+            monkeypatch,
+            {"use_paged_attention": "true"},
+            precision="fp16",
+            execution_provider="webgpu",
+        )
 
 
 def test_paged_attention_normalizes_engine_options(monkeypatch):
@@ -755,6 +783,13 @@ def test_paged_attention_normalizes_engine_options(monkeypatch):
     assert extra_options["paged_chunk_size"] == 64
     assert extra_options["gpu_utilization_factor"] == 0.75
     assert extra_options["max_batch_size"] == 32
+
+    fixed_cache_options = {
+        "use_paged_attention": "true",
+        "num_blocks": "1024",
+    }
+    _run_check_extra_options(monkeypatch, fixed_cache_options, precision="bf16", execution_provider="cuda")
+    assert fixed_cache_options["num_blocks"] == 1024
 
 
 @pytest.mark.parametrize(
