@@ -32,6 +32,8 @@ AttentionMetadataValues GetAttentionMetadataForPlan(const StepPlan& plan);
 AttentionMetadataValues GetAttentionMetadataForGraph(size_t max_query_len, size_t block_table_columns,
                                                      size_t block_size);
 AttentionMetadataValues GetAttentionMetadataForGraphStep(
+    const AttentionMetadataValues& exact_metadata, size_t block_table_columns, size_t block_size);
+AttentionMetadataValues GetAttentionMetadataForGraphStep(
     const StepPlan& plan, size_t block_table_columns, size_t block_size);
 std::array<int32_t, kAttentionMetadataElementCount> PackAttentionMetadata(
     const AttentionMetadataValues& metadata);
