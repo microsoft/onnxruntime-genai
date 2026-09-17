@@ -435,6 +435,23 @@ struct CudaInterfaceImplBase : DeviceInterface {
     ort_allocator_ = &allocator;
   }
 
+  void ReleaseOrtResources() {
+    std::scoped_lock lock{topk_mutex_, state_update_replay_mutex_};
+    topk_data_.reset();
+    argmax_fp32_.reset();
+    argmax_host_.reset();
+    topk_indices_host_.reset();
+    topk_scores_host_.reset();
+    state_update_replay_descriptors_.reset();
+    topk_batch_ = 0;
+    topk_vocab_ = 0;
+    argmax_fp32_count_ = 0;
+    argmax_host_count_ = 0;
+    topk_host_count_ = 0;
+    state_update_replay_capacity_ = 0;
+    ort_allocator_ = nullptr;
+  }
+
   Ort::Allocator& GetAllocator() override {
     return *ort_allocator_;
   }
@@ -863,5 +880,14 @@ Generators::DeviceInterface* GetInterface(GenaiInterface* p_genai, const char* d
     Generators::g_cuda_device = std::make_unique<Generators::CudaInterfaceImpl>();
   }
   return Generators::g_cuda_device.get();
+}
+
+void ReleaseInterfaceResources(const char* deviceType) {
+  const auto requested_type = strcasecmp(deviceType, "NvTensorRtRtx") == 0
+                                  ? Generators::DeviceType::NvTensorRtRtx
+                                  : Generators::DeviceType::CUDA;
+  if (Generators::g_cuda_device && Generators::g_cuda_device->GetType() == requested_type) {
+    static_cast<Generators::CudaInterfaceImplBase*>(Generators::g_cuda_device.get())->ReleaseOrtResources();
+  }
 }
 }

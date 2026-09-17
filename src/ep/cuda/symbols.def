@@ -1,3 +1,4 @@
 EXPORTS
    GetInterface
    GetInterfaceVersion
+   ReleaseInterfaceResources
