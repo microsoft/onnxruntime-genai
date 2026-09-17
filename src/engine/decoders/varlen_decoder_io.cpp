@@ -109,8 +109,7 @@ AttentionMetadataValues GetAttentionMetadataForGraph(size_t max_query_len, size_
 }
 
 AttentionMetadataValues GetAttentionMetadataForGraphStep(
-    const StepPlan& plan, size_t block_table_columns, size_t block_size) {
-  const auto exact_metadata = GetAttentionMetadataForPlan(plan);
+  const AttentionMetadataValues& exact_metadata, size_t block_table_columns, size_t block_size) {
   // Every request in a capturable step carries the same token count, so the step's own query bound
   // is exactly the bound for every step this graph will serve.
   auto metadata = GetAttentionMetadataForGraph(
@@ -125,6 +124,12 @@ AttentionMetadataValues GetAttentionMetadataForGraphStep(
     metadata.max_kv_len_lower_bound = 1;
   }
   return metadata;
+}
+
+AttentionMetadataValues GetAttentionMetadataForGraphStep(
+    const StepPlan& plan, size_t block_table_columns, size_t block_size) {
+  return GetAttentionMetadataForGraphStep(
+      GetAttentionMetadataForPlan(plan), block_table_columns, block_size);
 }
 
 std::array<int32_t, kAttentionMetadataElementCount> PackAttentionMetadata(

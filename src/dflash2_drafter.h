@@ -20,12 +20,16 @@ size_t Dflash2DraftWidth(size_t capability_limit, size_t configured_limit,
                          size_t sequence_length_after_step, size_t sequence_limit,
                          size_t remaining_turn_tokens_after_step);
 
+size_t Dflash2GraphBlockTableColumnLimit(size_t context_length, size_t paged_block_size,
+                                         size_t query_block_size);
+
 // Reshapes a proposal tensor the drafter reuses between steps, replacing its buffer only when a
 // step needs more room than the one it kept. `reallocated` is set when the buffer moved, which
 // invalidates any CUDA graph captured against its old address.
 Tensor& Dflash2StepTensor(std::unique_ptr<Tensor>& slot, DeviceInterface* device,
                           ONNXTensorElementDataType type, const std::vector<int64_t>& shape,
-                          bool* reallocated = nullptr);
+                          bool* reallocated = nullptr,
+                          std::unique_ptr<Tensor>* displaced = nullptr);
 
 // The drafter cannot backfill K/V for context whose auxiliary hidden states were already consumed,
 // so an untracked request can join only at position zero while its current turn is eligible to
@@ -96,6 +100,7 @@ struct Dflash2Drafter {
    */
   Dflash2Drafter(std::shared_ptr<Dflash2Model> model, size_t paged_block_size, size_t num_blocks,
                  size_t max_requests);
+  ~Dflash2Drafter();
 
   // Bytes of drafter K/V per paged block, so the main cache pool can budget for it up front.
   static size_t BytesPerBlock(const Config& config, size_t paged_block_size,
@@ -155,6 +160,9 @@ struct Dflash2Drafter {
   // gets a fixed ring instead, which its block table repeats across every column.
   void EnsureBlocks(RequestState& state, size_t positions);
   void AllocateCache();
+  Tensor& StepTensor(std::unique_ptr<Tensor>& slot, DeviceInterface* device,
+                     ONNXTensorElementDataType type, const std::vector<int64_t>& shape);
+  void ReleaseCapturedGraphs() noexcept;
 
   std::shared_ptr<Dflash2Model> model_;
   const Config::Model::Dflash2& config_;

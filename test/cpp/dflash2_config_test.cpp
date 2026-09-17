@@ -717,6 +717,17 @@ TEST(Dflash2ConfigTest, CapsDraftWidthBySessionAndTurnLimits) {
   EXPECT_EQ(Dflash2DraftWidth(7, 5, 9, 10, 9), 0u);
 }
 
+TEST(Dflash2ConfigTest, GraphBlockTableLimitIncludesWorstCaseQuerySpill) {
+  EXPECT_EQ(Dflash2GraphBlockTableColumnLimit(/*context_length=*/1024,
+                                              /*paged_block_size=*/128,
+                                              /*query_block_size=*/8),
+            9u);
+  EXPECT_EQ(Dflash2GraphBlockTableColumnLimit(/*context_length=*/1024,
+                                              /*paged_block_size=*/128,
+                                              /*query_block_size=*/129),
+            10u);
+}
+
 TEST(Dflash2ConfigTest, ReusesProposalBufferUntilAStepOutgrowsIt) {
   auto* device = GetDeviceInterface(DeviceType::CPU);
   constexpr auto type = Ort::TypeToTensorType<int32_t>;
@@ -752,17 +763,34 @@ TEST(Dflash2ConfigTest, ReportsWhenAProposalBufferMoves) {
   bool reallocated = false;
   Dflash2StepTensor(slot, device, type, {2, 4}, &reallocated);
   EXPECT_TRUE(reallocated);
+  const void* buffer = slot->buffer_;
 
   reallocated = false;
   Dflash2StepTensor(slot, device, type, {1, 3}, &reallocated);
   EXPECT_FALSE(reallocated);
 
-  Dflash2StepTensor(slot, device, type, {4, 8}, &reallocated);
+  std::unique_ptr<Tensor> displaced;
+  Dflash2StepTensor(slot, device, type, {4, 8}, &reallocated, &displaced);
   EXPECT_TRUE(reallocated);
+  ASSERT_NE(displaced, nullptr);
+  EXPECT_EQ(displaced->buffer_, buffer);
 
   reallocated = false;
   Dflash2StepTensor(slot, device, type, {2, 4}, &reallocated);
   EXPECT_FALSE(reallocated);
+}
+
+TEST(Dflash2ConfigTest, FailedReplacementPreservesTheLiveProposalBuffer) {
+  auto* device = GetDeviceInterface(DeviceType::CPU);
+  std::unique_ptr<Tensor> slot;
+  Dflash2StepTensor(slot, device, Ort::TypeToTensorType<int32_t>, {2, 4});
+  const void* buffer = slot->buffer_;
+
+  // The type change stages a replacement, while the invalid dimension makes CreateTensor fail.
+  EXPECT_ANY_THROW(
+      Dflash2StepTensor(slot, device, Ort::TypeToTensorType<float>, {0, -1}));
+  EXPECT_EQ(slot->GetType(), Ort::TypeToTensorType<int32_t>);
+  EXPECT_EQ(slot->buffer_, buffer);
 }
 
 TEST(Dflash2ConfigTest, AmortizesProposalBufferGrowth) {

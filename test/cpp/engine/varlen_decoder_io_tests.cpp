@@ -134,6 +134,20 @@ TEST(VarlenDecoderIOTest, GraphStepFallsBackWhenReservationExceedsLiveKvLength) 
   EXPECT_EQ(metadata.max_kv_len_lower_bound, 1);
 }
 
+TEST(VarlenDecoderIOTest, GraphStepFallsBackForMixedKvLengthsBelowTheBucketBoundary) {
+  const AttentionMetadataValues exact_metadata{
+      /*max_query_len_bound=*/4,
+      /*max_kv_len_bound=*/1800,
+      /*max_kv_len_lower_bound=*/700};
+
+  const auto metadata = GetAttentionMetadataForGraphStep(
+      exact_metadata, /*block_table_columns=*/16, /*block_size=*/128);
+
+  EXPECT_EQ(metadata.max_query_len_bound, 4);
+  EXPECT_EQ(metadata.max_kv_len_bound, 2048);
+  EXPECT_EQ(metadata.max_kv_len_lower_bound, 1);
+}
+
 TEST(VarlenDecoderIOTest, GraphStepRejectsInsufficientUpperBounds) {
   StepPlan plan;
   RequestStepPlan request;
@@ -317,6 +331,26 @@ TEST(VarlenDecoderIOTest, GraphIdsReportEveryAssignedIdForRelease) {
   std::sort(assigned.begin(), assigned.end());
   std::sort(handed_out.begin(), handed_out.end());
   EXPECT_EQ(assigned, handed_out);
+}
+
+TEST(VarlenDecoderIOTest, ClearingRetiredGraphIdsRestoresTheOwnerBudget) {
+  GraphAnnotationIds ids;
+  std::vector<int> retired;
+  for (size_t shape = 1; shape <= GraphAnnotationIds::kMaxCapturedShapes; ++shape) {
+    retired.push_back(ids.Id(*DecodeGraphKey(shape, 1, 8, 0)));
+  }
+
+  std::vector<int> visited;
+  ids.ForEachAssignedId([&visited](int annotation_id) { visited.push_back(annotation_id); });
+  std::sort(retired.begin(), retired.end());
+  std::sort(visited.begin(), visited.end());
+  EXPECT_EQ(visited, retired);
+
+  ids.Clear();
+  EXPECT_EQ(ids.size(), 0u);
+  const int next = ids.Id(*DecodeGraphKey(1, 1, 8, 0));
+  EXPECT_GT(next, 0);
+  EXPECT_FALSE(std::binary_search(retired.begin(), retired.end(), next));
 }
 
 TEST(VarlenDecoderIOTest, PacksMetadataInOperatorContractOrder) {

@@ -68,6 +68,15 @@ class GraphAnnotationIds {
     return assigned;
   }
 
+  template <typename Callback>
+  void ForEachAssignedId(Callback&& callback) const {
+    for (const auto& entry : ids_) {
+      callback(entry.second);
+    }
+  }
+
+  void Clear() noexcept { ids_.clear(); }
+
  private:
   static int NextProcessWideId() {
     static std::atomic<int64_t> next{1};
