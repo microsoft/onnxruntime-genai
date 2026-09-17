@@ -28,8 +28,8 @@ class BlockDrafterBuilder:
     quant_bits = None
     quant_block_size = 32
     quant_prepack = 0
-    # Set only when the target's own LM head is symmetric/`default` quantized, which is the one
-    # convention whose initializer names and bytes the drafter can reproduce and share.
+    # Set only when the target's own LM head is symmetric/`default` quantized, whose initializer
+    # names and metadata the drafter reproduces before adopting the target's exact tensors.
     lm_head_quant = None
 
     def make_graph(self, graph_name, const_prefix):
@@ -143,22 +143,29 @@ class BlockDrafterBuilder:
         ``MatMulNBits`` consumes ``[N, K]`` directly, so unlike the dense path the weight is
         not transposed. Repeat call sites reuse the initializer the first one registered.
         """
-        # The prepacked fpA_intB kernel takes FP16 activations only, so a bf16 body has to ship
-        # the plain blockwise layout even when the target it drafts for is prepacked.
+        # Keep the BF16 drafter body in the portable raw blockwise layout. Its generated
+        # session options disable the target decoder's fpA_intB selection for these nodes.
         prepack = self.quant_prepack if self.io_dtype == ir.DataType.FLOAT16 else 0
         qweight_name = f"{initializer_name}_Q{self.quant_bits}"
         scales_name = f"{initializer_name}_scales"
         if qweight_name not in self.values:
+            weight_tensor = weight_tensor.to(to_torch_dtype(self.io_dtype))
+            use_ort_quantizer = self.quant_block_size in (16, 32, 64, 128, 256)
             if prepack:
                 qweight, scales = CudaQuantizer.matmulnbits_prepacked_blockwise_quantize(
                     weight_tensor,
                     self.quant_bits,
                     self.quant_block_size,
                     force_arch=90 if prepack == 2 else 80,
+                    use_ort_quantizer=use_ort_quantizer,
                 )
             else:
                 qweight, scales = CudaQuantizer.matmulnbits_blockwise_quantize(
-                    weight_tensor, self.quant_bits, self.quant_block_size, flatten_qweight=False
+                    weight_tensor,
+                    self.quant_bits,
+                    self.quant_block_size,
+                    flatten_qweight=False,
+                    use_ort_quantizer=use_ort_quantizer,
                 )
             self.make_initializer(qweight, qweight_name)
             self.make_initializer(scales, scales_name, to=self.io_dtype)
@@ -263,10 +270,10 @@ class BlockDrafterBuilder:
     def make_lm_head_nbits(self, name, root, output, weight):
         """Emit the LM head under the *target's* initializer names so the two fold into one copy.
 
-        The drafter's head is the target's `lm_head.weight`, so quantizing it the same way
-        reproduces the target's bytes and `share_initializers` collapses them. Scales stay at
-        `external_dtype` (the target's IO dtype), not the drafter's bf16 body dtype, because a
-        byte difference there would silently cost a duplicated copy instead of failing.
+        The drafter's head is the target's `lm_head.weight`. It is emitted with matching
+        initializer metadata, then replaced with the target's exact tensors when the package is
+        saved. Scales stay at `external_dtype` (the target's IO dtype), not the drafter's bf16
+        body dtype.
         """
         bits = self.lm_head_quant["bits"]
         block_size = self.lm_head_quant["block_size"]
@@ -279,13 +286,23 @@ class BlockDrafterBuilder:
             or self.vocab_size % (32 if bits == 8 else 64) != 0
         ):
             prepack = 0
+        weight = weight.to(to_torch_dtype(self.external_dtype))
+        use_ort_quantizer = block_size in (16, 32, 64, 128, 256)
         if prepack:
             qweight, scales = CudaQuantizer.matmulnbits_prepacked_blockwise_quantize(
-                weight, bits, block_size, force_arch=90 if prepack == 2 else 80
+                weight,
+                bits,
+                block_size,
+                force_arch=90 if prepack == 2 else 80,
+                use_ort_quantizer=use_ort_quantizer,
             )
         else:
             qweight, scales = CudaQuantizer.matmulnbits_blockwise_quantize(
-                weight, bits, block_size, flatten_qweight=False
+                weight,
+                bits,
+                block_size,
+                flatten_qweight=False,
+                use_ort_quantizer=use_ort_quantizer,
             )
         qweight_name = f"lm_head.MatMul.weight_Q{bits}"
         scales_name = "lm_head.MatMul.weight_scales"
@@ -431,6 +448,7 @@ class BlockDrafterBuilder:
     def genai_config_section(self):
         return {
             "filename": self.filename,
+            "session_options": {"ep.cuda.fpa_intb_gemm": "0"},
             "num_hidden_layers": self.num_layers,
             "num_key_value_heads": self.num_kv_heads,
             "head_size": self.head_size,

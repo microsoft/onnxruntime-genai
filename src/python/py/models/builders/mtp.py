@@ -75,9 +75,18 @@ class MTPModel:
                 remaining -= read_size
         return True
 
-    def find_shared_initializers(self, source_model, target_model, source_data, target_data):
+    def find_shared_initializers(
+        self,
+        source_model,
+        target_model,
+        source_data,
+        target_data,
+        adopt_source_initializers=frozenset(),
+        excluded_source_initializers=frozenset(),
+    ):
         source_data_name = os.path.basename(source_data)
         target_data_name = os.path.basename(target_data)
+        source_data_size = os.path.getsize(source_data)
         source_info = {}
         for name, initializer in source_model.graph.initializers.items():
             tensor = initializer.const_value
@@ -86,6 +95,11 @@ class MTPModel:
                 and os.fspath(tensor.location) == source_data_name
                 and tensor.offset is not None
                 and tensor.length is not None
+                and tensor.offset >= 0
+                and tensor.length >= 0
+                and tensor.offset <= source_data_size
+                and tensor.length <= source_data_size - tensor.offset
+                and name not in excluded_source_initializers
                 and self.is_shared_initializer(name)
             ):
                 source_info[name] = (tensor.dtype.value, tuple(tensor.shape), tensor.offset, tensor.length)
@@ -106,12 +120,8 @@ class MTPModel:
                 or target_tensor.length != source_length
             ):
                 continue
-            if self.external_data_equal(
-                source_data,
-                source_offset,
-                target_data,
-                target_tensor.offset,
-                source_length,
+            if name in adopt_source_initializers or self.external_data_equal(
+                source_data, source_offset, target_data, target_tensor.offset, source_length
             ):
                 shared[name] = (source_offset, source_length, target_tensor.offset)
         return source_info, shared
@@ -183,7 +193,7 @@ class MTPModel:
                 if os.path.exists(staged_path):
                     os.remove(staged_path)
             if rollback_errors:
-                raise RuntimeError("Failed to restore MTP files after replacement failure.") from exc
+                raise RuntimeError("Failed to restore auxiliary model files after replacement failure.") from exc
             return False
 
         os.remove(backup_data)
@@ -203,7 +213,22 @@ class MTPModel:
             for name, (source_offset, length, _) in shared.items()
         ]
 
-    def share_initializers(self, output_dir, source_file, target_file):
+    def share_initializers(
+        self,
+        output_dir,
+        source_file,
+        target_file,
+        adopt_source_initializers=frozenset(),
+        required_source_initializers=frozenset(),
+        excluded_source_initializers=frozenset(),
+    ):
+        """Deduplicate auxiliary-model tensors after both models have been serialized.
+
+        Initializers normally share only when their bytes match. Names in
+        ``adopt_source_initializers`` instead use the source tensor whenever dtype, shape, and
+        byte length match; callers must establish that those tensors are semantically identical.
+        Names in ``excluded_source_initializers`` always keep the auxiliary model's private copy.
+        """
         source_model_path = os.path.join(output_dir, source_file)
         target_model_path = os.path.join(output_dir, target_file)
         source_data = source_model_path + ".data"
@@ -218,8 +243,16 @@ class MTPModel:
             source_model = ir.load(source_model_path)
             target_model = ir.load(target_model_path)
             source_info, shared = self.find_shared_initializers(
-                source_model, target_model, source_data, target_data
+                source_model,
+                target_model,
+                source_data,
+                target_data,
+                adopt_source_initializers,
+                excluded_source_initializers,
             )
+            missing = required_source_initializers - shared.keys()
+            if missing:
+                raise ValueError("Required shared initializers are unavailable: " + ", ".join(sorted(missing)))
             if not shared:
                 return []
             self.stage_shared_initializers(target_model, os.path.basename(source_data), target_data, shared)
@@ -228,15 +261,15 @@ class MTPModel:
             for staged_path in (staged_data, staged_model):
                 if os.path.exists(staged_path):
                     os.remove(staged_path)
-            print(f"Warning: could not share MTP initializers ({exc}); duplicated copies remain in {target_data}.")
+            print(f"Warning: could not share auxiliary initializers ({exc}); duplicated copies remain in {target_data}.")
             return []
 
         if not self.replace_shared_initializer_files(target_model_path, target_data, staged_model, staged_data):
-            print(f"Warning: could not commit shared MTP initializers; duplicated copies remain in {target_data}.")
+            print(f"Warning: could not commit shared auxiliary initializers; duplicated copies remain in {target_data}.")
             return []
 
         shared_size_mb = sum(length for _, length, _ in shared.values()) / 1e6
-        print(f"Shared MTP initializers with the main model (saved {shared_size_mb:.0f} MB from {target_data}).")
+        print(f"Shared auxiliary initializers with the main model (saved {shared_size_mb:.0f} MB from {target_data}).")
         return self.make_shared_initializer_config(source_info, shared, os.path.basename(source_data))
 
     def add_shared_initializers_to_genai_config(self, genai_config):
