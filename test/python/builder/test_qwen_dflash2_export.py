@@ -64,11 +64,13 @@ def _composite(aux_layers=AUX_LAYERS, use_paged_attention=True):
         exclude_embeds=False,
         onnx_dtype=ir.DataType.FLOAT16,
         quantization_algo="default",
+        tied_quantized_embeddings=False,
         quant_attrs={
             "op_types_to_quantize": ("MatMul",),
             "nodes_to_exclude": [],
             "is_symmetric": True,
             "matmul_block_size": 32,
+            "use_qdq": False,
         },
         attention_attrs={"paged_block_size": 256},
         context_length=32768,
@@ -404,6 +406,7 @@ def _quant_composite(
     last_matmul_type=None,
     io_dtype=ir.DataType.FLOAT16,
     ep="cuda",
+    use_qdq=False,
 ):
     model = _composite()
     model.decoder.exclude_lm_head = exclude_lm_head
@@ -417,6 +420,7 @@ def _quant_composite(
         "is_symmetric": True,
         "op_types_to_quantize": ["MatMul"],
         "nodes_to_exclude": [],
+        "use_qdq": use_qdq,
     }
     model.decoder.matmul_attrs = {"weights_prepacked": 1}
     if quantized_lm_head is None:
@@ -499,6 +503,14 @@ def test_dense_target_keeps_the_drafter_lm_head_dense():
     assert model.block_drafter_quant("int4")["lm_head"] is None
 
 
+# use_qdq makes the target write DequantizeLinear/MatMul over `*.weight_DQ_Q4`, so there is no
+# MatMulNBits to adopt and asking for one would abort the export.
+def test_qdq_target_keeps_the_drafter_lm_head_dense():
+    model = _quant_composite(use_qdq=True)
+
+    assert model.block_drafter_quant("int4")["lm_head"] is None
+
+
 def test_prepacked_bf16_target_keeps_a_private_raw_quantized_drafter_head():
     model = _quant_composite(io_dtype=ir.DataType.BFLOAT16)
 
@@ -521,13 +533,40 @@ def test_non_cuda_target_ignores_requested_prepack_for_shared_drafter_head():
     }
 
 
+def _embed_quant_composite(**overrides):
+    model = _quant_composite()
+    model.decoder.quant_attrs["op_types_to_quantize"] = ["MatMul", "Gather"]
+    for name, value in overrides.items():
+        setattr(model.decoder, name, value)
+    return model
+
+
+def test_quantized_target_table_is_adopted_by_the_drafter():
+    assert _embed_quant_composite().block_drafter_embed_quant() == {"bits": 4, "block_size": 32}
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        # A dense target has no `model.embed_tokens.weight_Q4` to adopt.
+        {"onnx_dtype": ir.DataType.FLOAT16},
+        {"exclude_embeds": True},
+        # `rtn`/`k_quant` name the table differently.
+        {"quantization_algo": "k_quant"},
+        # shared_embeddings gathers from a reshape of the LM head weight instead of its own table.
+        {"tied_quantized_embeddings": True},
+    ],
+)
+def test_an_unadoptable_target_table_leaves_the_drafter_embedding_dense(overrides):
+    assert _embed_quant_composite(**overrides).block_drafter_embed_quant() is None
+
+
 def test_private_quantized_drafter_head_is_not_shared(tmp_path):
     model = _composite()
     model.dflash2 = types.SimpleNamespace(
         filename="dflash2.onnx",
         lm_head_quant={"bits": 4, "block_size": 32, "prepack": 0, "adopt_target": False},
-        adopt_target_lm_head=lambda _target_model_path: None,
-        adopt_target_embedding=lambda _target_model_path: None,
+        adopt_target_tensors=lambda _target_model_path: None,
         save_model=lambda _output_dir: None,
     )
     captured = {}
@@ -540,8 +579,8 @@ def test_private_quantized_drafter_head_is_not_shared(tmp_path):
 
     model.save_dflash2_model(str(tmp_path))
 
-    assert captured["adopt_source_initializers"] == set()
-    assert captured["required_source_initializers"] == set()
+    assert captured["adopt_source_initializers"] == frozenset()
+    assert captured["required_source_initializers"] == frozenset()
     assert captured["excluded_source_initializers"] == {
         "lm_head.MatMul.weight_Q4",
         "lm_head.MatMul.weight_scales",
@@ -734,7 +773,7 @@ def _quantized_head_builder(tmp_path, bits=4, block_size=8):
             "bits": bits,
             "block_size": block_size,
             "prepack": 0,
-            "lm_head": {"bits": bits, "block_size": block_size},
+            "lm_head": {"bits": bits, "block_size": block_size, "prepack": 0, "adopt_target": True},
         },
     )
     builder.weights = {"lm_head.weight": torch.ones((builder.vocab_size, builder.hidden_size))}
@@ -803,7 +842,7 @@ def test_quantized_lm_head_adopts_the_targets_bytes_and_attributes(tmp_path):
     builder.make_lm_head("hidden_states", "num_sample")
     target_path, qweight, scales = _save_quantized_target(tmp_path, builder)
 
-    builder.adopt_target_lm_head(target_path)
+    builder.adopt_target_tensors(target_path)
 
     initializers = builder.graph.initializers
     np.testing.assert_array_equal(initializers["lm_head.MatMul.weight_Q4"].const_value.numpy(), qweight)
@@ -827,7 +866,7 @@ def test_adopted_lm_head_survives_a_round_trip_to_disk(tmp_path):
     out_dir = tmp_path / "out"
     out_dir.mkdir()
 
-    builder.adopt_target_lm_head(target_path)
+    builder.adopt_target_tensors(target_path)
     builder.save_model(str(out_dir))
 
     saved = onnx.load(str(out_dir / builder.filename))
@@ -839,7 +878,7 @@ def test_saving_before_adoption_is_rejected(tmp_path):
     builder = _quantized_head_builder(tmp_path)
     builder.make_lm_head("hidden_states", "num_sample")
 
-    with pytest.raises(ValueError, match="adopt_target_lm_head"):
+    with pytest.raises(ValueError, match="adopt_target_tensors"):
         builder.save_model(str(tmp_path))
 
 
@@ -925,7 +964,7 @@ def test_quantized_embedding_adopts_the_targets_bytes_and_attributes(tmp_path):
     builder.make_embedding("/dflash2/embed_tokens/Gather", "num_sample")
     target_path, qweight, scales = _quantized_embedding_target(tmp_path, builder, block_size=64)
 
-    builder.adopt_target_embedding(target_path)
+    builder.adopt_target_tensors(target_path)
 
     initializers = builder.graph.initializers
     np.testing.assert_array_equal(initializers["model.embed_tokens.weight_Q4"].const_value.numpy(), qweight)
@@ -941,7 +980,7 @@ def test_saving_before_embedding_adoption_is_rejected(tmp_path):
     builder = _quantized_embedding_builder(tmp_path)
     builder.make_embedding("/dflash2/embed_tokens/Gather", "num_sample")
 
-    with pytest.raises(ValueError, match="adopt_target_embedding"):
+    with pytest.raises(ValueError, match="adopt_target_tensors"):
         builder.save_model(str(tmp_path))
 
 
@@ -955,7 +994,7 @@ def test_a_target_embedding_the_drafter_cannot_adopt_is_rejected(tmp_path):
     target_path = _save_target(tmp_path, node, initializers, builder.hidden_size, builder.vocab_size)
 
     with pytest.raises(ValueError, match="different input space"):
-        builder.adopt_target_embedding(target_path)
+        builder.adopt_target_tensors(target_path)
 
 
 def test_a_target_head_the_drafter_cannot_adopt_is_rejected(tmp_path):
@@ -976,7 +1015,7 @@ def test_a_target_head_the_drafter_cannot_adopt_is_rejected(tmp_path):
     target_path = _save_target(tmp_path, node, initializers, builder.hidden_size, builder.vocab_size)
 
     with pytest.raises(ValueError, match="reject nearly every draft"):
-        builder.adopt_target_lm_head(target_path)
+        builder.adopt_target_tensors(target_path)
 
 
 # A prequantized head overrides `--precision`, and the drafter has to follow the target there:

@@ -346,6 +346,15 @@ def test_int4_checkpoint_built_at_int8_is_reported(capsys):
     assert "4-bit int" in capsys.readouterr().out
 
 
+# ModelOpt states the whole checkpoint's format in `quant_algo` rather than per-group metadata.
+def test_modelopt_checkpoint_warns_from_its_quant_algo(capsys):
+    config = types.SimpleNamespace(quantization_config={"quant_method": "modelopt", "quant_algo": "NVFP4"})
+
+    builder_module.warn_if_checkpoint_overrides_precision(config, "int4", ir.DataType.INT4)
+
+    assert "4-bit float" in capsys.readouterr().out
+
+
 # ---------------------------------------------------------------------------
 # int8's INT8/UINT8 onnx_dtype routes through the MatMulNBits builders, which
 # fall back to a float MatMul when the source model is not already quantized.

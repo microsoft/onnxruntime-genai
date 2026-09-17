@@ -31,13 +31,11 @@ class BlockDrafterBuilder:
     # Set only when the target's own LM head is symmetric/`default` quantized, which is the one
     # convention whose initializer names the drafter can reuse.
     lm_head_quant = None
-    # Records the quantized LM head `make_lm_head_nbits` left unpopulated for
-    # `adopt_target_lm_head` to fill from the saved target.
-    lm_head_adoption = None
     # Set only when the target quantizes its embedding table into `GatherBlockQuantized`.
     embed_quant = None
-    # Records the quantized embedding `make_embedding` left unpopulated for
-    # `adopt_target_embedding` to fill from the saved target.
+    # Record the nodes `make_lm_head_adopted` and `make_embedding` left without weights for
+    # `adopt_target_tensors` to fill from the saved target.
+    lm_head_adoption = None
     embed_adoption = None
 
     def make_graph(self, graph_name, const_prefix):
@@ -239,7 +237,7 @@ class BlockDrafterBuilder:
         A quantized target writes `GatherBlockQuantized` over `model.embed_tokens.weight_Q{bits}`
         instead of a dense `Gather`. The drafter has to match it, or `share_initializers` finds
         no common name and the drafter keeps a full dense copy of the largest tensor in the model.
-        No weights are produced for the quantized form: `adopt_target_embedding` copies the
+        No weights are produced for the quantized form: `adopt_target_tensors` copies the
         target's once it has been saved.
         """
         output = self.out(name)
@@ -260,31 +258,59 @@ class BlockDrafterBuilder:
                 gather_axis=0,
                 quantize_axis=1,
             )
-            self.embed_adoption = {"node": node, "initializers": (qweight_name, scales_name)}
+            self.embed_adoption = {
+                "node": node,
+                "initializers": (qweight_name, scales_name),
+                "op_type": "GatherBlockQuantized",
+                # `GatherBlockQuantized` takes the table first and the indices second.
+                "weight_input": 0,
+                "reason": (
+                    "Both models embed with the same table, so a mismatch here means the drafter "
+                    "would propose from a different input space than the target."
+                ),
+            }
         self.make_value(output, self.external_dtype, [rows, self.hidden_size])
         return output
 
-    def adopt_target_embedding(self, target_model_path):
-        """Take the embedding table's quantized bytes and attributes from the saved target model."""
-        adoption = self.embed_adoption
-        if adoption is None:
+    def pending_adoptions(self):
+        """Return the adoption records still waiting on the target's saved bytes."""
+        return [adoption for adoption in (self.embed_adoption, self.lm_head_adoption) if adoption is not None]
+
+    def adopt_target_tensors(self, target_model_path):
+        """Fill the drafter's shared tensors from the saved target model.
+
+        Called between the target's save and the drafter's, so `target_model_path` exists and
+        still holds its weights in external data that `ir` reads lazily. Each target node is
+        found by the initializer it consumes, because the quantizer renames the node (`..._Q4`).
+        """
+        pending = self.pending_adoptions()
+        if not pending:
             return
-        qweight_name, scales_name = adoption["initializers"]
         target = ir.load(target_model_path)
+        for adoption in pending:
+            self.adopt_target_node(target, adoption, os.path.basename(target_model_path))
+        self.embed_adoption = None
+        self.lm_head_adoption = None
+
+    def adopt_target_node(self, target, adoption, target_model_name):
+        """Copy one target node's initializers and attributes onto the placeholder the drafter emitted."""
+        qweight_name = adoption["initializers"][0]
+        weight_input = adoption["weight_input"]
         target_node = next(
             (
                 node
                 for node in target.graph
-                if node.op_type == "GatherBlockQuantized"
-                and [value.name for value in node.inputs if value is not None][:1] == [qweight_name]
+                if (node.domain, node.op_type) == ("com.microsoft", adoption["op_type"])
+                and len(node.inputs) > weight_input
+                and node.inputs[weight_input] is not None
+                and node.inputs[weight_input].name == qweight_name
             ),
             None,
         )
         if target_node is None:
             raise ValueError(
-                f"The block drafter quantized its embedding, but '{os.path.basename(target_model_path)}' has no "
-                f"GatherBlockQuantized over '{qweight_name}'. Both models embed with the same table, so a "
-                "mismatch here means the drafter would propose from a different input space than the target."
+                f"The block drafter expected to adopt '{qweight_name}', but '{target_model_name}' has no "
+                f"{adoption['op_type']} over it. {adoption['reason']}"
             )
         for initializer_name in adoption["initializers"]:
             tensor = target.graph.initializers[initializer_name].const_value
@@ -296,7 +322,6 @@ class BlockDrafterBuilder:
             del node.attributes[attribute_name]
         for attribute_name, attribute in target_node.attributes.items():
             node.attributes[attribute_name] = attribute
-        self.embed_adoption = None
 
     def make_lm_head(self, root, rows="num_block"):
         weight = self.weights["lm_head.weight"]
@@ -342,62 +367,28 @@ class BlockDrafterBuilder:
                 domain="com.microsoft",
                 block_size=int(weight.shape[1]),
             )
-        elif self.lm_head_quant is not None:
-            self.make_lm_head_nbits(name, root, output, weight)
-        else:
+        elif self.lm_head_quant is None:
             self.make_initializer(weight.T, "lm_head.MatMul.weight", to=self.external_dtype)
             self.make_node("MatMul", [root, "lm_head.MatMul.weight"], [output], name=name)
+        elif self.lm_head_quant["adopt_target"]:
+            self.make_lm_head_adopted(name, root, output)
+        else:
+            self.make_lm_head_nbits(name, root, output, weight)
         self.make_value(output, self.external_dtype, [rows, self.vocab_size])
         return output
 
-    def make_lm_head_nbits(self, name, root, output, weight):
+    def make_lm_head_adopted(self, name, root, output):
         """Emit the LM head as `MatMulNBits` under the *target's* initializer names.
 
-        Normally no weights are produced here: `adopt_target_lm_head` copies the target's once
-        it has been saved. Quantizing the same tensor a second time would round it through a
-        second implementation (`CudaQuantizer` here, ORT's `MatMulNBitsQuantizer` there), which
-        both defeats `share_initializers` and leaves the drafter scoring drafts with a head the
-        target does not verify with. A private raw head is emitted only when the target's
-        prepacked layout is incompatible with the drafter's activation type.
+        No weights are produced here: `adopt_target_tensors` copies the target's once it has
+        been saved. Quantizing the same tensor a second time would round it through a second
+        implementation (`CudaQuantizer` here, ORT's `MatMulNBitsQuantizer` there), which both
+        defeats `share_initializers` and leaves the drafter scoring drafts with a head the
+        target does not verify with.
         """
         bits = self.lm_head_quant["bits"]
         qweight_name = f"lm_head.MatMul.weight_Q{bits}"
         scales_name = "lm_head.MatMul.weight_scales"
-        if not self.lm_head_quant.get("adopt_target", True):
-            block_size = self.lm_head_quant["block_size"]
-            prepack = self.lm_head_quant["prepack"]
-            weight = weight.to(to_torch_dtype(self.external_dtype))
-            use_ort_quantizer = block_size in (16, 32, 64, 128, 256)
-            if prepack:
-                qweight, scales = CudaQuantizer.matmulnbits_prepacked_blockwise_quantize(
-                    weight,
-                    bits,
-                    block_size,
-                    force_arch=90 if prepack == 2 else 80,
-                    use_ort_quantizer=use_ort_quantizer,
-                )
-            else:
-                qweight, scales = CudaQuantizer.matmulnbits_blockwise_quantize(
-                    weight,
-                    bits,
-                    block_size,
-                    flatten_qweight=False,
-                    use_ort_quantizer=use_ort_quantizer,
-                )
-            self.make_initializer(qweight, qweight_name)
-            self.make_initializer(scales, scales_name, to=self.external_dtype)
-            self.make_node(
-                "MatMulNBits",
-                [root, qweight_name, scales_name],
-                [output],
-                name=name,
-                domain="com.microsoft",
-                bits=bits,
-                block_size=block_size,
-                K=self.hidden_size,
-                N=self.vocab_size,
-            )
-            return
         node = self.make_node(
             "MatMulNBits",
             [root, qweight_name, scales_name],
@@ -409,46 +400,61 @@ class BlockDrafterBuilder:
             K=self.hidden_size,
             N=self.vocab_size,
         )
-        self.lm_head_adoption = {"node": node, "initializers": (qweight_name, scales_name)}
-
-    def adopt_target_lm_head(self, target_model_path):
-        """Take the LM head's quantized bytes and attributes from the saved target model.
-
-        Called between the target's save and the drafter's, so `target_model_path` exists and
-        still holds its weights in external data that `ir` reads lazily. The target's node is
-        found by the initializers it consumes because the quantizer renames it (`..._Q4`).
-        """
-        adoption = self.lm_head_adoption
-        if adoption is None:
-            return
-        qweight_name, scales_name = adoption["initializers"]
-        target = ir.load(target_model_path)
-        target_node = next(
-            (
-                node
-                for node in target.graph
-                if (node.domain, node.op_type) == ("com.microsoft", "MatMulNBits")
-                and [value.name for value in node.inputs[1:]] == [qweight_name, scales_name]
+        self.lm_head_adoption = {
+            "node": node,
+            "initializers": (qweight_name, scales_name),
+            "op_type": "MatMulNBits",
+            # `MatMulNBits` takes the activations first and the packed weight second.
+            "weight_input": 1,
+            "reason": (
+                "Both models run the same head, so a mismatch here means the target would "
+                "reject nearly every draft."
             ),
-            None,
-        )
-        if target_node is None:
-            raise ValueError(
-                f"The block drafter quantized its LM head, but '{os.path.basename(target_model_path)}' has no "
-                f"symmetric MatMulNBits over '{qweight_name}'. Both models run the same head, so a mismatch "
-                "here means the target would reject nearly every draft."
+        }
+
+    def make_lm_head_nbits(self, name, root, output, weight):
+        """Quantize a private `MatMulNBits` LM head for a drafter that cannot adopt the target's.
+
+        Only reached when the target's prepacked layout needs FP16 activations the drafter does
+        not have, so the head is re-quantized here into the portable raw blockwise layout and
+        kept out of `share_initializers`.
+        """
+        bits = self.lm_head_quant["bits"]
+        block_size = self.lm_head_quant["block_size"]
+        prepack = self.lm_head_quant["prepack"]
+        weight = weight.to(to_torch_dtype(self.external_dtype))
+        use_ort_quantizer = block_size in (16, 32, 64, 128, 256)
+        if prepack:
+            qweight, scales = CudaQuantizer.matmulnbits_prepacked_blockwise_quantize(
+                weight,
+                bits,
+                block_size,
+                force_arch=90 if prepack == 2 else 80,
+                use_ort_quantizer=use_ort_quantizer,
             )
-        for initializer_name in adoption["initializers"]:
-            tensor = target.graph.initializers[initializer_name].const_value
-            value = self.make_value(initializer_name, tensor.dtype, tensor.shape)
-            value.const_value = tensor
-            self.graph.register_initializer(value)
-        node = adoption["node"]
-        for attribute_name in list(node.attributes):
-            del node.attributes[attribute_name]
-        for attribute_name, attribute in target_node.attributes.items():
-            node.attributes[attribute_name] = attribute
-        self.lm_head_adoption = None
+        else:
+            qweight, scales = CudaQuantizer.matmulnbits_blockwise_quantize(
+                weight,
+                bits,
+                block_size,
+                flatten_qweight=False,
+                use_ort_quantizer=use_ort_quantizer,
+            )
+        qweight_name = f"lm_head.MatMul.weight_Q{bits}"
+        scales_name = "lm_head.MatMul.weight_scales"
+        self.make_initializer(qweight, qweight_name)
+        self.make_initializer(scales, scales_name, to=self.external_dtype)
+        self.make_node(
+            "MatMulNBits",
+            [root, qweight_name, scales_name],
+            [output],
+            name=name,
+            domain="com.microsoft",
+            bits=bits,
+            block_size=block_size,
+            K=self.hidden_size,
+            N=self.vocab_size,
+        )
 
     def resolve_sliding_window(self, config):
         """Return the single ``local_window_size`` every layer runs with, or -1 for full attention."""
@@ -528,10 +534,8 @@ class BlockDrafterBuilder:
                 )
 
     def save_model(self, out_dir):
-        if self.lm_head_adoption is not None:
-            raise ValueError("adopt_target_lm_head must run before saving a drafter with a quantized LM head.")
-        if self.embed_adoption is not None:
-            raise ValueError("adopt_target_embedding must run before saving a drafter with a quantized embedding.")
+        if self.pending_adoptions():
+            raise ValueError("adopt_target_tensors must run before saving a drafter that adopts the target's tensors.")
         out_path = os.path.join(out_dir, self.filename)
         data_path = out_path + ".data"
         with tempfile.TemporaryDirectory(dir=out_dir, prefix=f".{self.filename}.") as staging_dir:

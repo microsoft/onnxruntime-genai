@@ -474,11 +474,25 @@ def checkpoint_weight_formats(quantization_config) -> set[tuple[int, str]]:
     ``kind`` is ``"int"`` or ``"float"``. An empty set means the checkpoint states its format
     in a shape this function does not read, in which case callers must not infer a mismatch.
     """
+    # ModelOpt names the whole checkpoint's format in `quant_algo` instead of per-group metadata.
+    modelopt_algos = {
+        "FP8": (8, "float"),
+        "FP8_PB_WO": (8, "float"),
+        "NVFP4": (4, "float"),
+        "NVFP4_AWQ": (4, "float"),
+        "W4A8_AWQ": (4, "int"),
+        "INT4_AWQ": (4, "int"),
+        "INT8_SQ": (8, "int"),
+    }
     formats = set()
     for group in (quantization_config.get("config_groups") or {}).values():
         weights = (group or {}).get("weights") or {}
         if "num_bits" in weights:
             formats.add((int(weights["num_bits"]), str(weights.get("type") or "int")))
+    if not formats:
+        algo = modelopt_algos.get(str(quantization_config.get("quant_algo") or "").upper())
+        if algo:
+            formats.add(algo)
     if not formats and "bits" in quantization_config:
         formats.add((int(quantization_config["bits"]), "int"))
     return formats

@@ -59,6 +59,7 @@ class DSparkBuilder(BlockDrafterBuilder):
         num_draft_tokens=None,
         top_k=16,
         embed_quant=None,
+        lm_head_quant=None,
     ):
         self.draft_dir = draft_dir
         self.target_dir = target_dir
@@ -69,6 +70,7 @@ class DSparkBuilder(BlockDrafterBuilder):
         self.io_dtype = ir.DataType.BFLOAT16
         self.external_dtype = io_dtype
         self.embed_quant = embed_quant
+        self.lm_head_quant = lm_head_quant
         self.filename = filename
         self.paged_block_size = paged_block_size
 

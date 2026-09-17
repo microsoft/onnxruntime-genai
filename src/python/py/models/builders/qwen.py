@@ -1134,24 +1134,34 @@ class Qwen35MoEModel(MTPModel):
         return precision
 
     def block_drafter_quant(self, precision):
-        """Resolve weight-only quantization for a block drafter, or ``None`` to keep it dense.
-
-        The drafter's LM head *is* the target's, so it reuses the target's initializers rather
-        than quantizing a second copy (see ``adopt_target_lm_head``). Only the
-        symmetric/``default`` naming convention is wired up here; any other algorithm leaves
-        the head dense instead of guessing at initializer names.
-        """
+        """Resolve weight-only quantization for a block drafter, or ``None`` to keep it dense."""
         if precision == "bf16":
             return None
-        bits = 4 if precision == "int4" else 8
-        block_size = int(self.decoder.quant_attrs["matmul_block_size"])
-        requested_prepack = int(self.decoder.matmul_attrs["weights_prepacked"])
-        prepack = requested_prepack if self.decoder.ep == "cuda" else 0
-        quant = {"bits": bits, "block_size": block_size, "prepack": prepack, "lm_head": None}
+        return {
+            "bits": 4 if precision == "int4" else 8,
+            "block_size": int(self.decoder.quant_attrs["matmul_block_size"]),
+            "prepack": int(self.decoder.matmul_attrs["weights_prepacked"]) if self.decoder.ep == "cuda" else 0,
+            "lm_head": self.block_drafter_lm_head_quant(),
+        }
 
-        if self.decoder.exclude_lm_head or not self.decoder.is_lm_head_quantized():
-            return quant
-        head_bits, weight_name, scales_name, zero_point_name = self.decoder.make_tied_quantized_embedding_input_names()
+    def block_drafter_lm_head_quant(self):
+        """Resolve how a block drafter gets its LM head, or ``None`` to keep it dense.
+
+        The drafter's LM head *is* the target's, so it reuses the target's initializers rather
+        than quantizing a second copy (see ``adopt_target_tensors``). Only the
+        symmetric/``default`` ``MatMulNBits`` convention is wired up here; any other algorithm
+        or output format leaves the head dense instead of guessing at initializer names.
+        """
+        decoder = self.decoder
+        if decoder.exclude_lm_head or not decoder.is_lm_head_quantized():
+            return None
+        if decoder.quant_attrs["use_qdq"]:
+            print(
+                "Leaving the block drafter's LM head dense: use_qdq makes the target write a "
+                "DequantizeLinear/MatMul pair instead of the MatMulNBits this exporter can reuse."
+            )
+            return None
+        head_bits, weight_name, scales_name, zero_point_name = decoder.make_tied_quantized_embedding_input_names()
         shareable = (
             weight_name == f"lm_head.MatMul.weight_Q{head_bits}"
             and scales_name == "lm_head.MatMul.weight_scales"
@@ -1162,21 +1172,21 @@ class Qwen35MoEModel(MTPModel):
                 f"Leaving the block drafter's LM head dense: the target writes '{weight_name}', "
                 "which this exporter does not know how to reuse."
             )
-            return quant
-        adopt_target = not (prepack and self.decoder.io_dtype != ir.DataType.FLOAT16)
+            return None
+        prepack = int(decoder.matmul_attrs["weights_prepacked"]) if decoder.ep == "cuda" else 0
+        adopt_target = not (prepack and decoder.io_dtype != ir.DataType.FLOAT16)
         if not adopt_target:
             print(
                 "Keeping a private raw quantized block-drafter LM head because its BF16 layout "
                 "cannot adopt the target's prepacked quantized weight."
             )
             prepack = 0
-        quant["lm_head"] = {
+        return {
             "bits": head_bits,
-            "block_size": block_size,
+            "block_size": int(decoder.quant_attrs["matmul_block_size"]),
             "prepack": prepack,
             "adopt_target": adopt_target,
         }
-        return quant
 
     def block_drafter_embed_quant(self):
         """Resolve the target's quantized embedding table, or ``None`` if the drafter keeps a dense one.
@@ -1191,6 +1201,14 @@ class Qwen35MoEModel(MTPModel):
         if "Gather" not in decoder.quant_attrs["op_types_to_quantize"]:
             return None
         if "/model/embed_tokens/Gather" in decoder.quant_attrs["nodes_to_exclude"]:
+            return None
+        if decoder.tied_quantized_embeddings:
+            # Tied embeddings gather from a reshape of the quantized LM head rather than from a
+            # table of their own, so there is no `model.embed_tokens.weight_Q4` to adopt.
+            print(
+                "Leaving the block drafter's embedding dense: shared_embeddings makes the target "
+                "gather from its LM head weight, which this exporter does not know how to reuse."
+            )
             return None
         # Only the symmetric/`default` convention names the table `*.weight_Q4` / `*.weight_scales`.
         if decoder.quantization_algo != "default" or not decoder.quant_attrs["is_symmetric"]:
@@ -1268,42 +1286,43 @@ class Qwen35MoEModel(MTPModel):
     def save_dflash2_model(self, output_dir):
         if self.dflash2 is None:
             return
-        target_model_path = os.path.join(output_dir, self.decoder.filename)
-        self.dflash2.adopt_target_lm_head(target_model_path)
-        self.dflash2.adopt_target_embedding(target_model_path)
-        self.dflash2.save_model(output_dir)
-        adopted_head = set()
-        private_head = set()
-        if getattr(self.dflash2, "lm_head_quant", None) is not None:
-            bits = self.dflash2.lm_head_quant["bits"]
-            head_initializers = {
-                f"lm_head.MatMul.weight_Q{bits}",
-                "lm_head.MatMul.weight_scales",
-            }
-            if self.dflash2.lm_head_quant.get("adopt_target", True):
-                adopted_head = head_initializers
-            else:
-                private_head = head_initializers
-        self.dflash2_shared_initializers = self.share_initializers(
+        self.dflash2_shared_initializers = self.save_block_drafter_model(self.dflash2, output_dir, "DFlash 2")
+
+    def save_block_drafter_model(self, drafter, output_dir, drafter_name):
+        """Adopt the target's tensors, save the drafter, and fold what the two share onto one copy."""
+        drafter.adopt_target_tensors(os.path.join(output_dir, self.decoder.filename))
+        drafter.save_model(output_dir)
+        head = drafter.lm_head_quant
+        head_initializers = (
+            frozenset({f"lm_head.MatMul.weight_Q{head['bits']}", "lm_head.MatMul.weight_scales"})
+            if head is not None
+            else frozenset()
+        )
+        # A head the drafter had to quantize itself must keep its private copy; an adopted one is
+        # the target's own tensor and has to fold back onto it.
+        adopted_head = head_initializers if head is not None and head["adopt_target"] else frozenset()
+        private_head = head_initializers - adopted_head
+        shared = self.share_initializers(
             output_dir,
             self.decoder.filename,
-            self.dflash2.filename,
+            drafter.filename,
             adopt_source_initializers=adopted_head,
             required_source_initializers=adopted_head,
             excluded_source_initializers=private_head,
         )
-        self.warn_unshared_lm_head(self.dflash2, self.dflash2_shared_initializers, "DFlash 2")
+        self.warn_unshared_lm_head(drafter, shared, drafter_name)
+        return shared
 
     def warn_unshared_lm_head(self, drafter, shared, drafter_name):
         """Report a drafter head that stayed a separate copy instead of folding onto the target's.
 
         The drafter adopts the target's own initializers, so the two are identical by
         construction and this should never fire. If it does, the bytes on disk diverged
-        somewhere after ``adopt_target_lm_head``, which costs both a duplicated copy and the
+        somewhere after ``adopt_target_tensors``, which costs both a duplicated copy and the
         guarantee that the drafter scores with the head the target verifies with.
         """
-        head = getattr(drafter, "lm_head_quant", None)
-        if head is None or not head.get("adopt_target", True):
+        head = drafter.lm_head_quant
+        if head is None or not head["adopt_target"]:
             return
         weight_name = f"lm_head.MatMul.weight_Q{head['bits']}"
         if any(entry["name"] == weight_name for entry in shared):
@@ -1404,19 +1423,14 @@ class Qwen35MoEModel(MTPModel):
             num_draft_tokens=self.dspark_attrs["num_draft_tokens"],
             top_k=self.dspark_attrs["top_k"],
             embed_quant=self.block_drafter_embed_quant(),
+            lm_head_quant=self.block_drafter_lm_head_quant(),
         )
         self.dspark.make_model()
 
     def save_dspark_model(self, output_dir):
         if self.dspark is None:
             return
-        target_model_path = os.path.join(output_dir, self.decoder.filename)
-        self.dspark.adopt_target_lm_head(target_model_path)
-        self.dspark.adopt_target_embedding(target_model_path)
-        self.dspark.save_model(output_dir)
-        self.dspark_shared_initializers = self.share_initializers(
-            output_dir, self.decoder.filename, self.dspark.filename
-        )
+        self.dspark_shared_initializers = self.save_block_drafter_model(self.dspark, output_dir, "DSpark")
 
     def add_dspark_to_genai_config(self, out_dir):
         config_path = os.path.join(out_dir, "genai_config.json")
