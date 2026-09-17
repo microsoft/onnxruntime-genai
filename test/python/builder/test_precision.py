@@ -377,9 +377,14 @@ def _run_check_extra_options(
     execution_provider="cpu",
     tie_word_embeddings=True,
     layer_types=None,
+    attn_logit_softcapping=None,
 ):
     # Avoid Hugging Face network/config loading and provide only the config fields needed.
-    fake_config = types.SimpleNamespace(tie_word_embeddings=tie_word_embeddings, layer_types=layer_types)
+    fake_config = types.SimpleNamespace(
+        tie_word_embeddings=tie_word_embeddings,
+        layer_types=layer_types,
+        attn_logit_softcapping=attn_logit_softcapping,
+    )
 
     def _fake_get_hf_details(*_args, **_kwargs):
         return {
@@ -497,6 +502,17 @@ def test_state_update_capacity_is_normalized(monkeypatch):
     _run_check_extra_options(monkeypatch, options)
 
     assert options["state_update_capacity"] == 3
+
+
+def test_webgpu_paged_attention_rejects_gemma2_softcap(monkeypatch):
+    with pytest.raises(ValueError, match="does not support non-zero attention softcap"):
+        _run_check_extra_options(
+            monkeypatch,
+            {"use_paged_attention": "true", "num_blocks": "8"},
+            precision="fp16",
+            execution_provider="webgpu",
+            attn_logit_softcapping=50.0,
+        )
 
 
 def test_num_hidden_layers_rejects_more_layers_than_configured(monkeypatch):

@@ -341,6 +341,13 @@ def check_extra_options(
     config = hf_details["hf_config"]
     extra_options["hf_details"] = hf_details
 
+    if (
+        execution_provider == "webgpu"
+        and extra_options.get("use_paged_attention", False)
+        and getattr(config, "attn_logit_softcapping", 0.0) not in (None, 0.0)
+    ):
+        raise ValueError("WebGPU paged attention does not support non-zero attention softcap.")
+
     if "num_hidden_layers" in extra_options:
         num_hidden_layers = int(extra_options["num_hidden_layers"])
         layer_types = getattr(config, "layer_types", None)

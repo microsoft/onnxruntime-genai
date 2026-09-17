@@ -8,16 +8,20 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 import numpy as np
 import onnxruntime as ort
 import pytest
+
+from _test_utils import register_webgpu_plugin
 
 
 _NUM_BLOCKS = 8
 _MODEL_ID = "Qwen/Qwen2.5-0.5B-Instruct"
 _PREFILL_TOKENS = np.asarray([1, 2, 3], dtype=np.int64)
 _DECODE_TOKENS = np.asarray([4], dtype=np.int64)
+_BUILDER_PATH = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builder.py"
 
 
 def _cache_shape(node_arg):
@@ -65,15 +69,18 @@ def _assert_close(webgpu_value, cpu_value, label):
 
 
 def test_webgpu_paged_export_runs_prefill_and_decode_with_cpu_reference(tmp_path):
-    if "WebGPUExecutionProvider" not in ort.get_available_providers():
-        pytest.skip("ONNX Runtime WebGPU execution provider is not available.")
+    if not register_webgpu_plugin():
+        pytest.skip("onnxruntime-ep-webgpu plugin package is not installed.")
+    import onnxruntime_ep_webgpu as webgpu_ep
+
+    webgpu_provider = webgpu_ep.get_ep_name()
+    ort.register_execution_provider_library(webgpu_provider, webgpu_ep.get_library_path())
 
     output_dir = tmp_path / "webgpu-paged"
     subprocess.run(
         [
             sys.executable,
-            "-m",
-            "onnxruntime_genai.models.builder",
+            str(_BUILDER_PATH),
             "-m",
             _MODEL_ID,
             "-o",
@@ -99,7 +106,7 @@ def test_webgpu_paged_export_runs_prefill_and_decode_with_cpu_reference(tmp_path
     session_options = ort.SessionOptions()
     session_options.enable_profiling = True
     session_options.profile_file_prefix = str(tmp_path / "webgpu-profile")
-    webgpu_session = ort.InferenceSession(str(model_path), session_options, ["WebGPUExecutionProvider"])
+    webgpu_session = ort.InferenceSession(str(model_path), session_options, [webgpu_provider])
     cpu_session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
 
     cache_inputs = {
@@ -126,6 +133,6 @@ def test_webgpu_paged_export_runs_prefill_and_decode_with_cpu_reference(tmp_path
     paged_attention_events = [
         event
         for event in profile
-        if "PagedAttention" in event.get("name", "") and event.get("args", {}).get("provider") == "WebGPUExecutionProvider"
+        if "PagedAttention" in event.get("name", "") and event.get("args", {}).get("provider") == webgpu_provider
     ]
     assert paged_attention_events, "PagedAttention was not assigned to WebGPUExecutionProvider"
