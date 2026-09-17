@@ -77,6 +77,10 @@ struct Greater {
  * is highly efficient for small sort sizes that fit within a single warp's processing capacity.
  * It is designed to be called by a full thread block, where only the first warp performs work.
  * The caller might need call __syncthreads() before and after this function.
+ *
+ * `temp_storage_ptr` may alias `smem_scores`/`smem_indices`: callers union the CUB temp storage
+ * with the score/index buffers to save shared memory, so the write-back below is fenced against
+ * CUB's final reads of that storage.
  */
 template <int BufferSize>
 __device__ void WarpMergeSort(float* smem_scores, int* smem_indices, void* temp_storage_ptr, int num_valid_items) {
@@ -108,6 +112,8 @@ __device__ void WarpMergeSort(float* smem_scores, int* smem_indices, void* temp_
 
   // Sort descending using a "greater than" comparator.
   WarpSortT(temp_storage).Sort(thread_keys, Greater<uint64_t>());
+  // CUB's merge loop ends on a read of its temp storage with no trailing sync.
+  __syncwarp();
 
   // Unpack and write back to the full buffer.
   for (int i = 0; i < kItemsPerThread; ++i) {
@@ -139,6 +145,8 @@ __device__ void WarpMergeSort(float* smem_scores, int* smem_indices, void* temp_
 
   // Sort descending using a "greater than" comparator.
   WarpSortT(temp_storage).Sort(thread_scores, thread_indices, Greater<float>());
+  // CUB's merge loop ends on a read of its temp storage with no trailing sync.
+  __syncwarp();
 
   // Write back to the full buffer.
   for (int i = 0; i < kItemsPerThread; ++i) {
