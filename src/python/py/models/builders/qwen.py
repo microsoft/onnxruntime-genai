@@ -1422,7 +1422,7 @@ class Qwen35MTPModel(Qwen35MoETextModel):
         extra_options["num_hidden_layers"] = 1
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
-        self.preserve_mtp_quantization = "_quant_config" not in extra_options
+        self.preserve_mtp_quantization = self.quant_config.checkpoint_policy == "preserve"
         self.input_names["hidden_states"] = "hidden_states"
         self.input_types["hidden_states"] = self.io_dtype
         self.input_shapes["hidden_states"] = self.make_hidden_state_shape()

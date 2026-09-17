@@ -210,9 +210,9 @@ def check_extra_options(
         extra_options["max_draft_tokens"] = max_draft_tokens
 
     if "mtp_quant_config" in extra_options:
-        mtp_quant_config = extra_options["mtp_quant_config"]
-        if not isinstance(mtp_quant_config, QuantConfig):
-            mtp_quant_config = QuantConfig.from_json(mtp_quant_config)
+        mtp_quant_config = QuantConfig.load(extra_options["mtp_quant_config"])
+        if "checkpoint_policy" not in mtp_quant_config.specified_fields:
+            mtp_quant_config.checkpoint_policy = "requantize"
         extra_options["mtp_quant_config"] = mtp_quant_config
 
     if extra_options.get("use_paged_attention", False):
@@ -307,7 +307,7 @@ def check_extra_options(
         if "moe_quant_type" not in extra_options:
             extra_options["moe_quant_type"] = "int8" if extra_options["use_8bits_moe"] else "int4"
 
-    if "moe_quant_type" in extra_options:
+    if "moe_quant_type" in extra_options and "quant_config" not in extra_options:
         moe_quant_type = extra_options["moe_quant_type"]
         if moe_quant_type not in supported_moe_quant_types:
             raise ValueError(
@@ -336,7 +336,7 @@ def check_extra_options(
     if execution_provider == "NvTensorRtRtx":
         extra_options["use_qdq"] = True
 
-    if precision == "int8" and extra_options.get("use_qdq", False):
+    if "quant_config" not in extra_options and precision == "int8" and extra_options.get("use_qdq", False):
         # 8-bit MatMulNBits is only supported in QOperator format, not QDQ.
         raise NotImplementedError("int8 precision does not support the QDQ format (use_qdq). Use QOperator (the default).")
 
@@ -378,9 +378,9 @@ def check_extra_options(
     if quantization_config.get("quant_method") in {"modelopt", "compressed-tensors"}:
         if execution_provider != "cuda":
             raise ValueError("ModelOpt FP8/NVFP4 checkpoints are only supported on the CUDA EP.")
-        if extra_options.get("moe_quant_type", "nvfp4") != "nvfp4":
+        if "quant_config" not in extra_options and extra_options.get("moe_quant_type", "nvfp4") != "nvfp4":
             raise ValueError("ModelOpt checkpoints require moe_quant_type=nvfp4 to preserve the original experts.")
-        extra_options["moe_quant_type"] = "nvfp4"
+        extra_options.setdefault("moe_quant_type", "nvfp4")
 
     state_window = int(extra_options.get("state_window", 0))
     if state_window >= 0:
@@ -418,6 +418,11 @@ def check_extra_options(
             op_types_to_quantize += ("Gather",)
 
         extra_options["op_types_to_quantize"] = op_types_to_quantize
+
+    if "quant_config" in extra_options:
+        quant_config = QuantConfig.from_extra_options(extra_options, precision, execution_provider)
+        quant_config.validate(execution_provider)
+        extra_options["quant_config"] = quant_config
 
 
 def parse_extra_options(
@@ -522,6 +527,11 @@ def create_model(
     # Set input/output precision of ONNX model
     io_dtype = set_io_dtype(precision, execution_provider, extra_options)
     onnx_dtype = set_onnx_dtype(precision, extra_options)
+    if "quant_config" in extra_options:
+        quant_config = QuantConfig.from_extra_options(extra_options, precision, execution_provider)
+        quant_config.validate(execution_provider)
+        extra_options["quant_config"] = quant_config
+        io_dtype, onnx_dtype = quant_config.to_onnx_dtypes()
     config_only = extra_options.get("config_only", False)
 
     # List architecture options in alphabetical order
@@ -740,6 +750,17 @@ def get_args():
                 nodes_to_exclude = Specify nodes to exclude from int4/int8 weight-only quantization.
                     Use this option when you want to exclude certain nodes from being quantized.
                     Separate the node names with a ',' when passing them here (e.g. nodes_to_exclude=/lm_head/MatMul,/model/embed_tokens/Gather)
+                quant_config = Full QuantConfig JSON object or filename for the target model. Default: unset.
+                    Sections: io_dtype (fp16/bf16/fp32), weights, moe, runtime, checkpoint_policy.
+                    Supplied fields override precision/flat defaults; omitted fields inherit them.
+                    Example: quant_config={"io_dtype":"bf16","weights":{"type":"int4","block_size":64}}
+                    weights.overrides is an ordered list; first match wins. Match by exact ONNX name or
+                    preset (last_matmul/mixed_layers/linear_attn); set type=int4/int8 or exclude=true.
+                    Structured rules precede legacy rules. Regex/composite selectors and bare lists are rejected.
+                    INT8 overrides require integer weight precision and QOperator (not use_qdq).
+                    checkpoint_policy=preserve (default) keeps native tensors and rejects explicit format changes;
+                    requantize permits supported ModelOpt/compressed-tensors conversion. HF metadata is not this schema.
+                    Dense FP4/FP8 conversion targets are unsupported; select FP4 experts through moe.type instead.
                 algo_config = Base method for int4/int8 weight-only quantization. Default is 'default'.
                     Currently supported base methods are: 'default', 'rtn', 'k_quant'.
                     - default = algo_config passed to MatMulNBitsQuantizer is None. Quantizer uses default RTN algorithm. All MatMuls are quantized to the requested bit width. Uses different node naming conventions to `rtn`.
@@ -849,6 +870,9 @@ def get_args():
                     quadratically with this value, so larger values should be benchmarked carefully.
                 mtp_quant_config = JSON object/file: Configure MTP I/O, dense weights, MoE, and runtime using the
                     structured QuantConfig schema independently from the main model.
+                    Default: unset, inheriting target-wide defaults without its per-node rules, preserving native MTP tensors.
+                    An explicit config uses independent schema defaults; checkpoint_policy defaults to requantize
+                    for compatibility. Set checkpoint_policy=preserve explicitly to retain native MTP formats.
                 linear_attn_op = linear_attention/gated_delta_net: Select the recurrent operator for non-paged
                     Qwen3.5/3.8 exports. Default is linear_attention. Paged exports always use GatedDeltaNet and
                     ignore this option. gated_delta_net is CUDA-only, requires state_window=0, and supports fp16

@@ -11,10 +11,13 @@ from types import SimpleNamespace
 import onnx_ir as ir
 import pytest
 import torch
+from loaders.base import QuantizedExperts, TensorModule
 from loaders.modelopt import ModeloptModel
 from loaders.qwen import QwenMTPModel
+from quantization import QuantConfig
 from safetensors.torch import save_file
 
+from models.builders.base import Model
 from models.builders.qwen import Qwen35DenseMTPModel, Qwen35Model, Qwen35MoEModel
 
 
@@ -179,6 +182,99 @@ def test_no_mtp_config_inherits_main_model_settings():
 
     assert model.mtp_attrs["onnx_dtype"] == ir.DataType.INT4
     assert model.mtp_attrs["extra_options"] == options
+
+
+def test_inherited_target_config_drops_overrides_and_preserves_native_mtp():
+    target = QuantConfig.from_dict(
+        {
+            "io_dtype": "bf16",
+            "checkpoint_policy": "requantize",
+            "weights": {"type": "int8", "overrides": [{"match": {"name": "/lm_head/MatMul"}, "exclude": True}]},
+        }
+    )
+    model = _resolve({"quant_config": target})
+    inherited = model.mtp_attrs["extra_options"]["quant_config"]
+    assert inherited.checkpoint_policy == "preserve"
+    assert inherited.weights.type == "int8"
+    assert inherited.weights.overrides == []
+    assert target.weights.overrides
+    assert model.mtp_attrs["io_dtype"] == ir.DataType.BFLOAT16
+
+
+def test_mtp_explicit_checkpoint_policy_overrides_legacy_default():
+    model = _resolve(
+        {"mtp_quant_config": {"checkpoint_policy": "preserve", "weights": {"type": "none"}, "moe": {"type": "none"}}}
+    )
+    assert model.mtp_attrs["extra_options"]["_quant_config"].checkpoint_policy == "preserve"
+    legacy = _resolve({"mtp_quant_config": {"weights": {"type": "int4"}}})
+    assert legacy.mtp_attrs["extra_options"]["_quant_config"].checkpoint_policy == "requantize"
+
+
+@pytest.mark.parametrize("policy", ["preserve", "requantize"])
+def test_native_loader_applies_target_checkpoint_policy(policy):
+    loader = object.__new__(ModeloptModel)
+    loader.quant_type = "modelopt"
+    loader.quant_attrs = {
+        "export_config": QuantConfig.from_dict({"checkpoint_policy": policy}),
+        "checkpoint_scope": "target",
+    }
+    module = TensorModule(weight=torch.ones((2, 4), dtype=torch.float8_e4m3fn))
+    module.quant_type = "fp8"
+    module.weight_scale = torch.tensor(0.5)
+    result = loader.apply_checkpoint_policy(module, "model.language_model.layers.0.self_attn.q_proj")
+    if policy == "preserve":
+        assert result is module
+    else:
+        assert result.quant_type == "none"
+        torch.testing.assert_close(result.weight, torch.full((2, 4), 0.5, dtype=torch.bfloat16))
+    assert loader.apply_checkpoint_policy(module, "mtp.layers.0.self_attn.q_proj") is module
+
+
+def test_native_loader_rejects_explicit_conflicting_format():
+    loader = object.__new__(ModeloptModel)
+    loader.quant_attrs = {"export_config": QuantConfig.from_dict({"weights": {"type": "int8"}})}
+    module = TensorModule()
+    module.quant_type = "fp8"
+    with pytest.raises(ValueError, match="checkpoint_policy=preserve"):
+        loader.apply_checkpoint_policy(module, "lm_head")
+
+
+def test_native_experts_requantize_to_dense_loader_representation():
+    loader = object.__new__(ModeloptModel)
+    loader.quant_type = "modelopt"
+    loader.num_experts = 1
+    loader.quant_attrs = {
+        "export_config": QuantConfig.from_dict({"checkpoint_policy": "requantize", "moe": {"type": "int4"}})
+    }
+    prefix = "model.language_model.layers.0"
+    tensors = {
+        f"{prefix}.self_attn.{projection}.weight": torch.ones((16, 16), dtype=torch.bfloat16)
+        for projection in ("q_proj", "k_proj", "v_proj", "o_proj")
+    }
+    tensors[f"{prefix}.mlp.gate.weight"] = torch.ones((1, 16))
+    for projection in ("gate_proj", "up_proj", "down_proj"):
+        name = f"{prefix}.mlp.experts.0.{projection}"
+        tensors[f"{name}.weight"] = torch.full((16, 8), 0x22, dtype=torch.uint8)
+        tensors[f"{name}.weight_scale"] = torch.ones((16, 1), dtype=torch.float8_e4m3fn)
+        tensors[f"{name}.weight_scale_2"] = torch.tensor(0.5)
+    loader.get_tensor = tensors.get
+    layer = loader.make_layer(0)
+    torch.testing.assert_close(layer.mlp.experts.gate_up_proj, torch.full((1, 32, 16), 0.5, dtype=torch.bfloat16))
+    torch.testing.assert_close(layer.mlp.experts.down_proj, torch.full((1, 16, 16), 0.5, dtype=torch.bfloat16))
+
+
+def test_inherited_mtp_preserves_native_expert_format_over_integer_default():
+    model = Model.__new__(Model)
+    model.quant_config = QuantConfig.from_dict({})
+    model.moe_attrs = {"op_type": "QMoE", "quant_type": "int", "expert_weight_bits": 4}
+    model.io_dtype = ir.DataType.BFLOAT16
+    model.make_initializer = lambda *args, **kwargs: None
+    experts = QuantizedExperts()
+    experts.quant_type = "nvfp4"
+    experts.block_size = 16
+    model.make_moe_expert_initializers(0, experts)
+    assert model.moe_attrs["quant_type"] == "nvfp4"
+    assert model.moe_attrs["block_size"] == 16
 
 
 def test_mtp_quant_config_json_configures_targets_independently():

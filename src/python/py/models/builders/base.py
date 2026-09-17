@@ -441,7 +441,7 @@ class Model:
         self.make_lm_head_init(config)
 
         # Global quantization-specific variables (INT4, INT8, etc.)
-        nodes_to_exclude = [override.match["name"] for override in self.quant_config.weights.overrides if override.exclude]
+        nodes_to_exclude = []
 
         # matmulnbits_weights_prepacked is a CUDA-only MatMulNBits (int4/int8) layout selector. It offline
         # prepacks the weights into the fpA_intB mixed-GEMM layout so the kernel can consume them directly:
@@ -1007,7 +1007,7 @@ class Model:
             self.make_initializer(make_kv_cache_scale(v_scales_per_layer, scale_index, layer_id), v_scale_name)
 
     def make_quant_config_init(self):
-        self.quant_config = self.extra_options.get("_quant_config", None)
+        self.quant_config = self.extra_options.get("quant_config", self.extra_options.get("_quant_config"))
         if self.quant_config is None:
             self.quant_config = QuantConfig.from_extra_options(
                 extra_options=self.extra_options,
@@ -1015,7 +1015,9 @@ class Model:
                 execution_provider=self.ep,
             )
         elif not isinstance(self.quant_config, QuantConfig):
-            raise TypeError("_quant_config must be a QuantConfig instance")
+            self.quant_config = QuantConfig.from_extra_options(self.extra_options, self.onnx_dtype, self.ep)
+        if "quant_config" in self.extra_options or "_quant_config" in self.extra_options:
+            self.quant_config.validate(self.ep)
 
     def make_moe_init(self):
         # MoE quantization scheme comes from `quant_config.moe.type` ("int4"/"int8"/"mxfp4"/"nvfp4"), which maps to
@@ -1060,13 +1062,7 @@ class Model:
 
         # Resolve quant config
         self.quantization_algo = self.quant_config.weights.method
-        self.matmul_mixed_precision = {
-            override.match["preset"]: override.type
-            for override in self.quant_config.weights.overrides
-            if "preset" in override.match and override.type is not None
-        }
-
-        self.make_matmul_mixed_precision(self.matmul_mixed_precision)
+        self.make_quant_overrides()
         self.quant_attrs["algo_config"] = self.make_algo_config(
             self.quantization_algo, self.int4_customized_weight_config
         )
@@ -1157,9 +1153,14 @@ class Model:
             ir.DataType.UINT8: 8,
         }.get(getattr(self, "onnx_dtype", ir.DataType.INT4), 4)
         bits = resolve_dtype(last_matmul_type).bits if last_matmul_type else default_bits
+        bits = getattr(self, "int4_customized_weight_config", {}).get("/lm_head/MatMul", {}).get("bits", bits)
         is_symmetric = self.quant_attrs["is_symmetric"]
 
-        if base_method == "rtn" or (base_method == "default" and bits != 4):
+        if base_method == "rtn" or (
+            base_method == "default"
+            and bits != 4
+            and not {"quant_config", "_quant_config"}.intersection(getattr(self, "extra_options", {}))
+        ):
             return (
                 bits,
                 f"lm_head.MatMul.weight_Q{bits}G{self.quant_attrs['matmul_block_size']}",
@@ -1634,6 +1635,26 @@ class Model:
 
         self.int4_customized_weight_config = customized_weight_config
 
+    def make_quant_overrides(self):
+        resolved = {}
+        self.matmul_mixed_precision = {}
+        for override in self.quant_config.weights.overrides:
+            if "name" in override.match:
+                names = [override.match["name"]]
+            else:
+                preset = override.match["preset"]
+                self.make_matmul_mixed_precision({preset: override.type or "int4"})
+                names = self.int4_customized_weight_config
+                self.matmul_mixed_precision.setdefault(preset, override.type)
+            for name in names:
+                resolved.setdefault(name, override)
+        self.quant_attrs["nodes_to_exclude"] = [name for name, override in resolved.items() if override.exclude]
+        self.int4_customized_weight_config = {
+            name: {"bits": resolve_dtype(override.type).bits}
+            for name, override in resolved.items()
+            if not override.exclude
+        }
+
     def make_algo_config(self, quant_method: str, customized_weight_config=None):
         """Create the MatMulNBitsQuantizer algo config for a *base* method.
 
@@ -1660,6 +1681,7 @@ class Model:
         )
 
     def to_nbits(self) -> ir.Model:
+        self.validate_quant_overrides()
         quant_format = QuantFormat.QDQ if self.quant_attrs["use_qdq"] else QuantFormat.QOperator
         nodes_to_exclude = list(self.quant_attrs["nodes_to_exclude"])
         customized_weight_config = getattr(self, "int4_customized_weight_config", {}) or {}
@@ -1875,10 +1897,13 @@ class Model:
         print(f"Saving ONNX model in {out_dir}")
 
         # Skip quantizing `MatMul` in `DequantizeLinear --> Transpose --> MatMul` path
-        already_quantized_in_qdq_format = self.quant_type is not None and self.quant_attrs["use_qdq"]
+        already_quantized_in_qdq_format = (
+            self.quant_type not in (None, "modelopt", "compressed-tensors") and self.quant_attrs["use_qdq"]
+        )
         if self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4, ir.DataType.INT8, ir.DataType.UINT8} and not already_quantized_in_qdq_format:
             model = self.to_nbits()
         else:
+            self.validate_quant_overrides()
             model = self.model
 
         # Make sure all nodes are topologically sorted
@@ -5097,6 +5122,17 @@ class Model:
         raise NotImplementedError("MoE weight preprocessing must be implemented by the model class.")
 
     def make_moe_expert_initializers(self, layer_id, experts, gate_up_weight=None, down_weight=None):
+        native_quant_type = getattr(experts, "quant_type", None)
+        config = getattr(self, "quant_config", None)
+        if (
+            native_quant_type in ("fp4", "nvfp4")
+            and config is not None
+            and config.checkpoint_policy == "preserve"
+            and "moe.type" not in config.specified_fields
+        ):
+            self.moe_attrs["op_type"] = "QMoE"
+            self.moe_attrs["quant_type"] = native_quant_type
+            self.moe_attrs["expert_weight_bits"] = 4
         op_type = self.moe_attrs["op_type"]
         weight_type = f"{'q' if op_type == 'QMoE' else ''}weight"
         gate_up_name = f"model.layers.{layer_id}.moe.experts.gate_up_proj.{weight_type}"
@@ -5104,7 +5140,6 @@ class Model:
         down_name = f"model.layers.{layer_id}.moe.experts.down_proj.{weight_type}"
         down_scales_name = f"model.layers.{layer_id}.moe.experts.down_proj.scales"
 
-        native_quant_type = getattr(experts, "quant_type", None)
         if native_quant_type is not None:
             if native_quant_type != self.moe_attrs["quant_type"]:
                 raise ValueError(
@@ -5756,6 +5791,7 @@ class Model:
         return layer.moe
 
     def load_weights(self, input_path):
+        self.make_checkpoint_policy_init()
         # Load weights of original model
         if input_path.endswith(".gguf"):
             # Load GGUF model
@@ -5836,6 +5872,45 @@ class Model:
             )
 
         return model
+
+    def make_checkpoint_policy_init(self):
+        if "quant_config" not in self.extra_options and "_quant_config" not in self.extra_options:
+            return
+        if self.quant_type not in (None, "modelopt", "compressed-tensors"):
+            numeric_fields = {
+                name for name in self.quant_config.specified_fields if name.startswith(("weights.", "moe."))
+            }
+            if self.quant_config.checkpoint_policy == "requantize" or numeric_fields:
+                raise ValueError(f"Explicit checkpoint conversion is not supported for {self.quant_type}")
+        self.quant_attrs["export_config"] = self.quant_config
+        self.quant_attrs["checkpoint_scope"] = "mtp" if getattr(self, "is_mtp_head", False) else "target"
+
+    def validate_quant_overrides(self):
+        config = getattr(self, "quant_config", None)
+        if config is None or "weights.overrides" not in config.specified_fields:
+            return
+        nodes = {node.name: node for node in self.model.graph}
+        for override in config.weights.overrides:
+            name = override.match.get("name")
+            if name is None:
+                continue
+            node = nodes.get(name)
+            if node is None:
+                raise ValueError(
+                    f"Quantization override matched no ONNX node: {name}. Check fusion settings and node names."
+                )
+            if node.op_type not in ("MatMul", "Gather"):
+                raise ValueError(
+                    f"Quantization override for {name} cannot change native or unsupported op {node.op_type}"
+                )
+            if not override.exclude and (
+                node.op_type != "MatMul"
+                or "MatMul" not in self.quant_attrs["op_types_to_quantize"]
+                or len(node.inputs) < 2
+                or node.inputs[1] is None
+                or node.inputs[1].const_value is None
+            ):
+                raise ValueError(f"Integer override requires an eligible constant-weight MatMul: {name}")
 
     def make_model(self, input_path):
         # Make inputs and outputs to ONNX model

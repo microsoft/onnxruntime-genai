@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).parents[3] / "src" / "python" / "py" / "mo
 from loaders import modelopt as model_opt_module
 from loaders import quant_model as quant_model_module
 from loaders.base import QuantizedModel
+from quantization import QuantConfig
 
 _FP4_LUT = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=np.float32)
 
@@ -124,6 +125,31 @@ def _build_synthetic_checkpoint(d):
     with open(os.path.join(d, "config.json"), "w") as f:
         json.dump(cfg, f)
     return refs
+
+
+def test_modelopt_loader_requantization_uses_reference_tensors(tmp_path):
+    refs = _build_synthetic_checkpoint(str(tmp_path))
+    config = QuantConfig.from_dict(
+        {"checkpoint_policy": "requantize", "weights": {"type": "int8"}, "moe": {"type": "int4"}}
+    )
+    model = quant_model_module.QuantModel.from_pretrained(
+        "modelopt",
+        input_path=str(tmp_path),
+        quant_attrs={"export_config": config},
+        q_size=32,
+        kv_size=32,
+        intermediate_size=16,
+        num_layers=2,
+    )
+    assert model.lm_head.quant_type == "none"
+    torch.testing.assert_close(model.lm_head.weight, refs["lm_head"])
+    torch.testing.assert_close(
+        model.layers[1].self_attn.q_proj.weight, refs["model.language_model.layers.1.self_attn.q_proj"]
+    )
+    prefix = "model.language_model.layers.0.mlp.experts.0"
+    torch.testing.assert_close(model.layers[0].mlp.experts.gate_up_proj[0, :16], refs[f"{prefix}.gate_proj"])
+    torch.testing.assert_close(model.layers[0].mlp.experts.down_proj[0], refs[f"{prefix}.down_proj"])
+    assert not model.handles
 
 
 def test_modelopt_loader_tree_preserves_quantized_tensors():

@@ -19,7 +19,9 @@ KV cache is out of scope. Auxiliary models such as MTP consume an independent
 
 from __future__ import annotations
 
+import copy
 import json
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -105,9 +107,8 @@ def resolve_dtype(name: str) -> DtypeDescriptor:
 
 # Named node groups preserved from the current ``matmul_mixed_precision`` surface.
 MATCH_PRESETS = ("last_matmul", "mixed_layers", "linear_attn")
-# Supported match keys (a subset of the full design; enough for today's presets +
-# explicit exclusions). Multiple keys in one match are ANDed.
-MATCH_KEYS = ("name", "name_regex", "layers", "role", "op_type", "preset")
+# Supported selectors are exact ONNX node names and named groups.
+MATCH_KEYS = ("name", "preset")
 
 
 @dataclass
@@ -122,6 +123,12 @@ class Override:
         for key in self.match:
             if key not in MATCH_KEYS:
                 raise ValueError(f"override match key must be one of {list(MATCH_KEYS)}, got '{key}'")
+        if len(self.match) != 1:
+            raise ValueError("override match must contain exactly one of 'name' or 'preset'")
+        if any(not isinstance(value, str) or not value.strip() for value in self.match.values()):
+            raise ValueError("override match values must be non-empty strings")
+        if not isinstance(self.exclude, bool):
+            raise ValueError("override exclude must be a boolean")
         preset = self.match.get("preset")
         if preset is not None and preset not in MATCH_PRESETS:
             raise ValueError(f"override match preset must be one of {list(MATCH_PRESETS)}, got '{preset}'")
@@ -130,14 +137,18 @@ class Override:
         if self.exclude and self.type is not None:
             raise ValueError("override cannot set both 'type' and 'exclude'")
         if self.type is not None:
-            resolve_dtype(self.type)  # validate
+            self.type = resolve_dtype(self.type).name
+            if self.type not in ("int4", "int8"):
+                raise ValueError("override type must be int4 or int8; use exclude: true to keep graph precision")
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Override":
+        if not isinstance(data, dict):
+            raise ValueError("override must be an object")
         unknown = set(data) - {"match", "type", "exclude"}
         if unknown:
             raise ValueError(f"unknown override field(s): {sorted(unknown)}")
-        return cls(match=data["match"], type=data.get("type"), exclude=bool(data.get("exclude", False)))
+        return cls(match=data.get("match"), type=data.get("type"), exclude=data.get("exclude", False))
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"match": dict(self.match)}
@@ -182,6 +193,9 @@ class WeightsConfig:
 
     def __post_init__(self):
         descriptor = resolve_dtype(self.type)
+        self.type = descriptor.name
+        if descriptor.signed is False:
+            self.symmetric = False
         if self.method not in self.METHODS:
             raise ValueError(f"weights.method must be one of {list(self.METHODS)}, got '{self.method}'")
         self.block_size = _normalize_block_size(self.block_size)
@@ -196,6 +210,10 @@ class WeightsConfig:
         unknown = set(data) - {"type", "block_size", "symmetric", "method", "accuracy_level", "op_types", "overrides"}
         if unknown:
             raise ValueError(f"unknown weights field(s): {sorted(unknown)}")
+        if not isinstance(data.get("overrides", []), list):
+            raise ValueError("weights.overrides must be a list")
+        if not isinstance(data.get("symmetric", True), bool):
+            raise ValueError("weights.symmetric must be a boolean")
         overrides = [Override.from_dict(o) for o in data.get("overrides", [])]
         return cls(
             type=data.get("type", "none"),
@@ -229,6 +247,7 @@ class MoEConfig:
 
     def __post_init__(self):
         descriptor = resolve_dtype(self.type)
+        self.type = descriptor.name
         self.block_size = _normalize_block_size(self.block_size)
         if descriptor.kind == "mx":
             # Microscaling FP4 mandates a fixed block size (mxfp4 -> 32, nvfp4 -> 16).
@@ -269,6 +288,8 @@ class RuntimeConfig:
         unknown = set(data) - {"use_qdq", "matmulnbits_weights_prepacked"}
         if unknown:
             raise ValueError(f"unknown runtime field(s): {sorted(unknown)}")
+        if not isinstance(data.get("use_qdq", False), bool):
+            raise ValueError("runtime.use_qdq must be a boolean")
         return cls(
             use_qdq=bool(data.get("use_qdq", False)),
             matmulnbits_weights_prepacked=int(data.get("matmulnbits_weights_prepacked", 0)),
@@ -330,10 +351,20 @@ class QuantConfig:
     weights: WeightsConfig = field(default_factory=WeightsConfig)
     moe: MoEConfig = field(default_factory=MoEConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+    checkpoint_policy: str = "preserve"
+    specified_fields: frozenset[str] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self):
         if self.io_dtype not in IO_DTYPES:
             raise ValueError(f"io_dtype must be one of {list(IO_DTYPES)}, got '{self.io_dtype}'")
+        if self.checkpoint_policy not in ("preserve", "requantize"):
+            raise ValueError("checkpoint_policy must be preserve or requantize")
+        if self.specified_fields is None:
+            self.specified_fields = frozenset(
+                f"{section}.{name}" if isinstance(value, dict) else section
+                for section, value in self.to_dict().items()
+                for name in (value if isinstance(value, dict) else (section,))
+            )
 
     def to_onnx_dtypes(self) -> tuple[ir.DataType, ir.DataType]:
         io_dtype = {
@@ -363,28 +394,100 @@ class QuantConfig:
         if not isinstance(data, dict):
             raise ValueError("quantization config must be an object")
         # Allow either the bare object or a wrapper with a top-level "quantization" key.
-        if "quantization" in data and isinstance(data["quantization"], dict):
+        if set(data) == {"quantization"} and isinstance(data["quantization"], dict):
             data = data["quantization"]
-        unknown = set(data) - {"io_dtype", "weights", "moe", "runtime"}
+        unknown = set(data) - {"io_dtype", "weights", "moe", "runtime", "checkpoint_policy"}
         if unknown:
             raise ValueError(f"unknown quantization field(s): {sorted(unknown)}")
+        for section in ("weights", "moe", "runtime"):
+            if not isinstance(data.get(section, {}), dict):
+                raise ValueError(f"{section} must be an object")
+        specified_fields = frozenset(
+            f"{key}.{field_name}" if isinstance(value, dict) else key
+            for key, value in data.items()
+            for field_name in (value if isinstance(value, dict) else (key,))
+        )
         return cls(
             io_dtype=data.get("io_dtype", "fp16"),
             weights=WeightsConfig.from_dict(data.get("weights", {})),
             moe=MoEConfig.from_dict(data.get("moe", {})),
             runtime=RuntimeConfig.from_dict(data.get("runtime", {})),
+            checkpoint_policy=data.get("checkpoint_policy", "preserve"),
+            specified_fields=specified_fields,
         )
 
     @classmethod
     def from_json(cls, text_or_path: str) -> "QuantConfig":
         """Load from an inline JSON string or a path to a JSON file."""
-        stripped = text_or_path.strip()
-        if stripped.startswith("{"):
-            data = json.loads(stripped)
-        else:
-            with open(text_or_path, encoding="utf-8") as handle:
-                data = json.load(handle)
-        return cls.from_dict(data)
+        return cls.load(text_or_path)
+
+    @classmethod
+    def load(cls, value: Any, defaults: QuantConfig | None = None) -> QuantConfig:
+        """Load a full config, applying only supplied fields over optional defaults."""
+        if isinstance(value, cls):
+            return copy.deepcopy(value)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.startswith(("{", "[")):
+                value = json.loads(stripped)
+            else:
+                with open(value, encoding="utf-8") as handle:
+                    value = json.load(handle)
+        if isinstance(value, dict) and set(value) == {"quantization"}:
+            value = value["quantization"]
+        parsed = cls.from_dict(value)
+        if defaults is None:
+            return parsed
+        merged = defaults.to_dict()
+        for key, setting in value.items():
+            if isinstance(setting, dict):
+                for name, field_value in setting.items():
+                    if key == "weights" and name == "overrides":
+                        merged[key][name] = copy.deepcopy(field_value) + merged[key][name]
+                    else:
+                        merged[key][name] = field_value
+            else:
+                merged[key] = setting
+        result = cls.from_dict(merged)
+        result.specified_fields = parsed.specified_fields
+        return result
+
+    def validate(self, execution_provider: str):
+        """Validate supported export combinations before loading weights."""
+        self.to_onnx_dtypes()
+        weights = resolve_dtype(self.weights.type)
+        if weights.kind == "int" and (
+            self.weights.block_size < 16 or self.weights.block_size & (self.weights.block_size - 1)
+        ):
+            raise ValueError("Dense integer block_size must be a power of two of at least 16")
+        if self.weights.type in IO_DTYPES and self.weights.type != self.io_dtype:
+            raise ValueError("Unquantized weights.type must match io_dtype; use none for graph precision")
+        if any(not override.exclude for override in self.weights.overrides) and weights.kind != "int":
+            raise ValueError("Integer overrides require integer weights.type")
+        if self.runtime.use_qdq and (
+            weights.bits == 8 or any(override.type == "int8" for override in self.weights.overrides)
+        ):
+            raise ValueError("INT8 weights and overrides require QOperator, not use_qdq")
+        if self.moe.type in ("mxfp4", "nvfp4") and execution_provider != "cuda":
+            raise ValueError(f"moe.type={self.moe.type} requires the CUDA EP")
+        if self.moe.type in ("mxfp4", "nvfp4") and self.io_dtype == "fp32":
+            raise ValueError("FP4 MoE requires fp16 or bf16 I/O")
+        if self.moe.type in ("uint4", "uint8"):
+            raise ValueError("MoE supports symmetric int4/int8, not unsigned quantization")
+        if self.runtime.matmulnbits_weights_prepacked and execution_provider != "cuda":
+            raise ValueError("matmulnbits_weights_prepacked requires the CUDA EP")
+        if self.runtime.matmulnbits_weights_prepacked and (self.runtime.use_qdq or not self.weights.symmetric):
+            raise ValueError("matmulnbits_weights_prepacked requires symmetric QOperator weights")
+        if self.weights.method != "default" and self.runtime.use_qdq:
+            raise ValueError("use_qdq requires weights.method=default")
+        if set(self.weights.op_types) - {"MatMul", "Gather"}:
+            raise ValueError("weights.op_types supports only MatMul and Gather")
+        if (
+            execution_provider == "cuda"
+            and resolve_dtype(self.moe.type).kind == "int"
+            and self.moe.block_size not in (0, 32, 64, 128)
+        ):
+            raise ValueError("CUDA integer MoE block_size must be 0, 32, 64 or 128")
 
     # -- Back-compat adapter ----------------------------------------------
 
@@ -404,17 +507,22 @@ class QuantConfig:
         """
         precision = onnx_dtype_to_precision(precision)
         extra_options = dict(extra_options or {})
+        if isinstance(extra_options.get("quant_config"), cls):
+            return copy.deepcopy(extra_options["quant_config"])
 
         weights_type = _PRECISION_TO_WEIGHTS_TYPE.get(precision, "none")
 
         # --- weights: method + mixed-precision placement -----------------
         base_method, placement = desugar_algo_config(extra_options)
 
-        overrides: list[Override] = [
-            Override(match={"preset": selector}, type=quant_type) for selector, quant_type in placement.items()
-        ]
+        overrides: list[Override] = []
         for node in extra_options.get("nodes_to_exclude", []) or []:
             overrides.append(Override(match={"name": node}, exclude=True))
+        overrides.extend(
+            Override(match={"preset": selector}, type=placement[selector])
+            for selector in ("linear_attn", "mixed_layers", "last_matmul")
+            if selector in placement
+        )
 
         is_symmetric = extra_options.get("is_symmetric", True)
         weights = WeightsConfig(
@@ -454,13 +562,48 @@ class QuantConfig:
         )
 
         io_dtype = precision if precision in IO_DTYPES else "fp16"
-        return cls(io_dtype=io_dtype, weights=weights, moe=moe, runtime=runtime)
+        if precision in ("int4", "int8"):
+            if execution_provider == "cpu" or (
+                execution_provider == "webgpu" and extra_options.get("use_webgpu_fp32", False)
+            ):
+                io_dtype = "fp32"
+            elif (
+                precision == "int4"
+                and execution_provider in ("cuda", "trt-rtx")
+                and extra_options.get("use_cuda_bf16", False)
+            ):
+                io_dtype = "bf16"
+        defaults = cls(io_dtype=io_dtype, weights=weights, moe=moe, runtime=runtime)
+        if "quant_config" not in extra_options:
+            return defaults
+        result = cls.load(extra_options["quant_config"], defaults)
+        flat_fields = {
+            "block_size": "weights.block_size",
+            "is_symmetric": "weights.symmetric",
+            "algo_config": "weights.method",
+            "accuracy_level": "weights.accuracy_level",
+            "op_types_to_quantize": "weights.op_types",
+            "moe_quant_type": "moe.type",
+            "qmoe_block_size": "moe.block_size",
+            "qmoe_weights_prepacked": "moe.weights_prepacked",
+            "use_qdq": "runtime.use_qdq",
+            "matmulnbits_weights_prepacked": "runtime.matmulnbits_weights_prepacked",
+        }
+        replaced = [
+            key
+            for key, field_name in flat_fields.items()
+            if key in extra_options and field_name in result.specified_fields
+        ]
+        if replaced:
+            warnings.warn(f"quant_config overrides flat options: {', '.join(replaced)}", stacklevel=2)
+        return result
 
     # -- Serialization -----------------------------------------------------
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "io_dtype": self.io_dtype,
+            "checkpoint_policy": self.checkpoint_policy,
             "weights": self.weights.to_dict(),
             "moe": self.moe.to_dict(),
             "runtime": self.runtime.to_dict(),
