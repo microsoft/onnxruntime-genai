@@ -200,6 +200,8 @@ def _load_builder_cli_module(monkeypatch):
         "ErnieModel",
         "Gemma2Model",
         "Gemma3Model",
+        "Gemma4MoEModel",
+        "Gemma4Model",
         "GemmaModel",
         "GPTOSSModel",
         "GraniteMoEHybridModel",
