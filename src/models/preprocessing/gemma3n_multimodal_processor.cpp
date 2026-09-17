@@ -68,23 +68,18 @@ std::string BuildSoftTokenSequence(const char* begin_token, const char* soft_tok
 std::string ResolvePlaceholder(std::string& text, const char* soft_token, const char* begin_token,
                                int64_t expected_count, const char* modality) {
   const auto soft_count = static_cast<int64_t>(CountOccurrences(text, soft_token));
-  if (soft_count > 0) {
-    if (soft_count != expected_count) {
-      throw std::runtime_error("Prompt contained " + std::to_string(soft_count) + " " + modality +
+  const auto begin_count = static_cast<int64_t>(CountOccurrences(text, begin_token));
+  const auto total_count = soft_count + begin_count;
+  if (total_count > 0) {
+    if (total_count != expected_count) {
+      throw std::runtime_error("Prompt contained " + std::to_string(total_count) + " " + modality +
                                " placeholders but received " + std::to_string(expected_count) + " " +
                                modality + " inputs.");
+    }
+    if (begin_count > 0) {
+      ReplaceAll(text, begin_token, soft_token);  // normalize to one spelling before expansion
     }
     return soft_token;
-  }
-
-  const auto begin_count = static_cast<int64_t>(CountOccurrences(text, begin_token));
-  if (begin_count > 0) {
-    if (begin_count != expected_count) {
-      throw std::runtime_error("Prompt contained " + std::to_string(begin_count) + " " + modality +
-                               " placeholders but received " + std::to_string(expected_count) + " " +
-                               modality + " inputs.");
-    }
-    return begin_token;
   }
 
   // No placeholder at all: prepend one per input so a bare prompt still works.
@@ -163,6 +158,8 @@ std::unique_ptr<NamedTensors> Gemma3nMultiModalProcessor::Process(const Tokenize
         ResolvePlaceholder(text, kImageToken, kBoiToken, num_images, "image");
     ReplaceAll(text, placeholder,
                BuildSoftTokenSequence(kBoiToken, kImageToken, kEoiToken, image_seq_length_));
+  } else {
+    ResolvePlaceholder(text, kImageToken, kBoiToken, 0, "image");  // reject a marker with no image payload
   }
 
   // Audio. The feature extractor pads or truncates to the length the conformer
@@ -197,12 +194,20 @@ std::unique_ptr<NamedTensors> Gemma3nMultiModalProcessor::Process(const Tokenize
     EmplaceProcessedTensor(*named_tensors, Config::Defaults::AudioEmbedsName, audio_features,
                            audio_features_type_, allocator);
 
-    // input_features_mask marks the valid (unpadded) frames. Single-clip inference
-    // has no padding, so every frame is valid.
-    auto mask = OrtValue::CreateTensor<bool>(allocator, std::vector<int64_t>{batch_dim, time_dim});
-    std::fill_n(mask->GetTensorMutableData<bool>(), batch_dim * time_dim, true);
-    named_tensors->emplace(std::string(Config::Defaults::AudioAttentionMaskName),
-                           std::make_shared<Tensor>(std::move(mask)));
+    // Forward the extractor's real per-frame mask when the pipeline emits
+    // one; otherwise assume the clip is unpadded (current behavior).
+    OrtxTensor* mask_tensor = nullptr;
+    ort_extensions::OrtxObjectPtr<OrtxTensor> audio_attention_mask_owner;
+    if (OrtxTensorResultGetAt(audio_result.get(), 1, &mask_tensor) == kOrtxOK) {
+      audio_attention_mask_owner.reset(mask_tensor);
+      named_tensors->emplace(std::string(Config::Defaults::AudioAttentionMaskName),
+                             std::make_shared<Tensor>(ProcessTensor<bool>(audio_attention_mask_owner.get(), allocator)));
+    } else {
+      auto mask = OrtValue::CreateTensor<bool>(allocator, std::vector<int64_t>{batch_dim, time_dim});
+      std::fill_n(mask->GetTensorMutableData<bool>(), batch_dim * time_dim, true);
+      named_tensors->emplace(std::string(Config::Defaults::AudioAttentionMaskName),
+                             std::make_shared<Tensor>(std::move(mask)));
+    }
 
     // audio_sizes is not a session input -- it is how MultiModalPipelineState
     // learns there is audio at all. GetNumAudioTokens sums it, and the sum both
@@ -226,6 +231,8 @@ std::unique_ptr<NamedTensors> Gemma3nMultiModalProcessor::Process(const Tokenize
         ResolvePlaceholder(text, kAudioToken, kBoaToken, batch_dim, "audio");
     ReplaceAll(text, placeholder,
                BuildSoftTokenSequence(kBoaToken, kAudioToken, kEoaToken, audio_seq_length_));
+  } else {
+    ResolvePlaceholder(text, kAudioToken, kBoaToken, 0, "audio");  // reject a marker with no audio payload
   }
 
   const std::vector<int32_t> input_ids = tokenizer.Encode(text.c_str());
