@@ -6,6 +6,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -135,4 +136,39 @@ TEST(LFM2CacheLayerTypesValidationTest, ValidMatchingLayers) {
   EXPECT_NO_THROW({
     CreateGeneratorForModel(model_dir);
   });
+}
+
+// An LFM2-VL checkpoint exported without exclude_embeds is labeled "lfm2_vl_text": a plain LFM2
+// decoder that must run through the LFM2 runtime (conv state cache, no rewind).
+TEST(LFM2CacheLayerTypesValidationTest, Lfm2VlTextTypeUsesLfm2Runtime) {
+  SkipIfModelUnavailable();
+
+  const auto src_dir = GetLfm2ModelPath();
+  const auto model_dir = MakeTempDir("vl_text_type");
+  fs_std::copy(src_dir, model_dir, fs_std::copy_options::recursive | fs_std::copy_options::overwrite_existing);
+  std::string config = ReadFile(model_dir / "genai_config.json");
+  ReplaceFirst(config, "\"type\": \"lfm2\"", "\"type\": \"lfm2_vl_text\"");
+  WriteFile(model_dir / "genai_config.json", config);
+
+  auto model = OgaModel::Create(model_dir.string().c_str());
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 8);
+  auto generator = OgaGenerator::Create(*model, *params);
+
+  const std::vector<int32_t> input_ids{0, 0, 195, 731};
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  generator->GenerateNextToken();
+  const size_t sequence_length = generator->GetSequenceCount(0);
+  EXPECT_GT(sequence_length, input_ids.size());
+
+  // Conv state cannot be rewound, exactly like the dense LFM2 models. The generator's up-front guard
+  // has to reject it; a throw from deeper in the state would come after the sequence was rewound.
+  std::string message;
+  try {
+    generator->RewindTo(0);
+  } catch (const std::runtime_error& e) {
+    message = e.what();
+  }
+  EXPECT_NE(message.find("RewindTo is currently not supported for lfm2_vl_text"), std::string::npos) << message;
+  EXPECT_EQ(generator->GetSequenceCount(0), sequence_length);
 }
