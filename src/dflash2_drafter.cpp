@@ -439,12 +439,12 @@ Dflash2Drafter::Dflash2Drafter(std::shared_ptr<Dflash2Model> model, size_t paged
   }
   query_spill_blocks_ = (static_cast<size_t>(config_.block_size) - 1) / paged_block_size_ + 1;
   // Widths are bucketed up to the longest sequence the model can hold, so the bucket ladder is
-    // logarithmic in the context length rather than one width per block boundary. The proposal's
-    // full query block can extend beyond the committed context near the session limit.
+  // logarithmic in the context length rather than one width per block boundary. The proposal's
+  // full query block can extend beyond the committed context near the session limit.
   const size_t context_length =
       static_cast<size_t>(std::max(model_->config_->model.context_length, 1));
-      max_block_table_columns_ = Dflash2GraphBlockTableColumnLimit(
-        context_length, paged_block_size_, static_cast<size_t>(config_.block_size));
+  max_block_table_columns_ = Dflash2GraphBlockTableColumnLimit(
+      context_length, paged_block_size_, static_cast<size_t>(config_.block_size));
   graph_capture_enabled_ =
       IsGraphCaptureEnabled(model_->config_->model.decoder.session_options);
   if (config_.sliding_window > 0) {
@@ -857,7 +857,7 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
                                   {static_cast<int64_t>(served.size())});
   fill_int32(past_lengths, layout.past_sequence_lengths);
 
-    auto& block_table = StepTensor(
+  auto& block_table = StepTensor(
       step_tensors_.block_table, device, int32_type,
       {static_cast<int64_t>(served.size()), static_cast<int64_t>(block_table_columns)});
   {
@@ -911,11 +911,11 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     // the exact per-sequence lengths from device memory, which is what keeps replay correct as the
     // sequences grow.
     const AttentionMetadataValues exact_values{
-      layout.max_query_len, layout.max_kv_len, layout.min_kv_len};
+        layout.max_query_len, layout.max_kv_len, layout.min_kv_len};
     const AttentionMetadataValues values =
-      capture ? GetAttentionMetadataForGraphStep(
-              exact_values, block_table_columns, paged_block_size_)
-          : exact_values;
+        capture ? GetAttentionMetadataForGraphStep(
+                      exact_values, block_table_columns, paged_block_size_)
+                : exact_values;
     auto span = metadata.GetDeviceSpan<int32_t>();
     auto cpu = span.CpuSpan();
     cpu[0] = values.max_query_len_bound;

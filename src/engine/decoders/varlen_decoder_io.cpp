@@ -109,7 +109,7 @@ AttentionMetadataValues GetAttentionMetadataForGraph(size_t max_query_len, size_
 }
 
 AttentionMetadataValues GetAttentionMetadataForGraphStep(
-  const AttentionMetadataValues& exact_metadata, size_t block_table_columns, size_t block_size) {
+    const AttentionMetadataValues& exact_metadata, size_t block_table_columns, size_t block_size) {
   // Every request in a capturable step carries the same token count, so the step's own query bound
   // is exactly the bound for every step this graph will serve.
   auto metadata = GetAttentionMetadataForGraph(
