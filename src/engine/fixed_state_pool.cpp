@@ -168,6 +168,8 @@ struct FixedStateReservation::Storage {
   size_t staging_bytes{};
   bool captures_state_updates{};
   bool uses_direct_bindings{};
+  uint8_t direct_active_bank{};
+  size_t first_direct_slot{};
 };
 
 struct FixedStatePool::Impl {
@@ -422,6 +424,22 @@ bool FixedStateReservation::CapturesStateUpdates() const {
 
 bool FixedStateReservation::UsesDirectBindings() const {
   return storage_ && storage_->uses_direct_bindings;
+}
+
+size_t FixedStateReservation::BindingLayoutKey() const {
+  if (!storage_) {
+    return 0;
+  }
+  // The compact state_update outputs are present in the bindings only on steps that capture them,
+  // so the two binding sets must never share a graph.
+  const size_t state_updates = storage_->captures_state_updates ? 1 : 0;
+  // Staged bindings always view the same pool-lifetime buffers, so only the direct case contributes
+  // an address. Interleaving keeps both halves distinct.
+  const size_t addresses =
+      storage_->uses_direct_bindings
+          ? 1 + storage_->first_direct_slot * 2 + storage_->direct_active_bank
+          : 0;
+  return 1 + state_updates + addresses * 2;
 }
 
 void FixedStateReservation::CommitPrefix(size_t row, size_t step_tokens, size_t kept_tokens) {
@@ -1068,6 +1086,8 @@ FixedStateReservation FixedStatePool::Reserve(
 
   const size_t batch_rows = requests.size();
   storage->uses_direct_bindings = direct_layout;
+  storage->direct_active_bank = direct_layout ? direct_active_bank : uint8_t{0};
+  storage->first_direct_slot = direct_layout ? first_direct_slot : size_t{0};
   if (impl_->state_update_capacity != 0) {
     storage->state_update_capture_count_name = impl_->state_update_capture_count_name;
     const std::array<int64_t, 1> capture_count_shape{static_cast<int64_t>(batch_rows)};

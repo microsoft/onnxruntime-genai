@@ -209,6 +209,20 @@ TEST(Dflash2ConfigTest, PreservesTargetProviderOptions) {
             Config::NamedString("device_id", "1"));
 }
 
+TEST(Dflash2ConfigTest, DrafterSessionOverridesTargetConfigEntries) {
+  auto config = MakeDflash2Config();
+  config.model.decoder.session_options.config_entries.push_back(
+      {"ep.cuda.fpa_intb_gemm", "1"});
+  config.model.dflash2.session_options.emplace();
+  config.model.dflash2.session_options->config_entries.push_back(
+      {"ep.cuda.fpa_intb_gemm", "0"});
+
+  const auto projected = CreateDflash2Config(config);
+  const auto& entries = projected->model.decoder.session_options.config_entries;
+  ASSERT_EQ(entries.size(), 1u);
+  EXPECT_EQ(entries[0], Config::NamedString("ep.cuda.fpa_intb_gemm", "0"));
+}
+
 TEST(Dflash2ConfigTest, AcceptsCompatibleAuxiliaryHiddenStates) {
   const auto config = MakeDflash2Config();
   const auto [target, drafter] = MakeCompatibleMetadata();
