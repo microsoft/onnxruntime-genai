@@ -3,6 +3,7 @@
 
 #include "generator/generators.h"
 #include "models/model.h"
+#include "models/parallel_utils.h"
 #include "models/preprocessing/processor.h"
 
 namespace Generators {
@@ -73,7 +74,8 @@ std::unique_ptr<Audios> LoadAudiosFromBuffers(std::span<const void*> audio_data,
 }
 
 template <typename T>
-std::unique_ptr<OrtValue> ProcessTensor(OrtxTensor* tensor, Ort::Allocator& allocator) {
+std::unique_ptr<OrtValue> ProcessTensor(ThreadPool* thread_pool, OrtxTensor* tensor,
+                                        Ort::Allocator& allocator) {
   const T* tensor_data{};
   const int64_t* tensor_shape{};
   size_t tensor_num_dims;
@@ -83,13 +85,13 @@ std::unique_ptr<OrtValue> ProcessTensor(OrtxTensor* tensor, Ort::Allocator& allo
                                                       tensor_shape + tensor_num_dims,
                                                       1LL, std::multiplies<int64_t>());
   auto tensor_value = OrtValue::CreateTensor<T>(allocator, std::span<int64_t>(const_cast<int64_t*>(tensor_shape), tensor_num_dims));
-  std::copy(tensor_data, tensor_data + tensor_num_elements,
-            tensor_value->template GetTensorMutableData<T>());
+  ParallelCopy(thread_pool, tensor_data, tensor_value->template GetTensorMutableData<T>(),
+               static_cast<size_t>(tensor_num_elements));
   return tensor_value;
 }
 
 template <>
-std::unique_ptr<OrtValue> ProcessTensor<Ort::Float16_t>(OrtxTensor* tensor, Ort::Allocator& allocator) {
+std::unique_ptr<OrtValue> ProcessTensor<Ort::Float16_t>(ThreadPool*, OrtxTensor* tensor, Ort::Allocator& allocator) {
   const float* tensor_data{};
   const int64_t* tensor_shape{};
   size_t tensor_num_dims;
@@ -109,7 +111,7 @@ std::unique_ptr<OrtValue> ProcessTensor<Ort::Float16_t>(OrtxTensor* tensor, Ort:
 }
 
 template <>
-std::unique_ptr<OrtValue> ProcessTensor<Ort::BFloat16_t>(OrtxTensor* tensor, Ort::Allocator& allocator) {
+std::unique_ptr<OrtValue> ProcessTensor<Ort::BFloat16_t>(ThreadPool*, OrtxTensor* tensor, Ort::Allocator& allocator) {
   const float* tensor_data{};
   const int64_t* tensor_shape{};
   size_t tensor_num_dims;
@@ -129,7 +131,7 @@ std::unique_ptr<OrtValue> ProcessTensor<Ort::BFloat16_t>(OrtxTensor* tensor, Ort
 }
 
 template <>
-std::unique_ptr<OrtValue> ProcessTensor<int64_t, float>(OrtxTensor* tensor, Ort::Allocator& allocator) {
+std::unique_ptr<OrtValue> ProcessTensor<int64_t, float>(ThreadPool* thread_pool, OrtxTensor* tensor, Ort::Allocator& allocator) {
   const int64_t* tensor_data{};
   const int64_t* tensor_shape{};
   size_t tensor_num_dims;
@@ -139,14 +141,14 @@ std::unique_ptr<OrtValue> ProcessTensor<int64_t, float>(OrtxTensor* tensor, Ort:
                                                       tensor_shape + tensor_num_dims,
                                                       1LL, std::multiplies<int64_t>());
   auto tensor_value = OrtValue::CreateTensor<float>(allocator, std::span<int64_t>(const_cast<int64_t*>(tensor_shape), tensor_num_dims));
-  std::transform(tensor_data, tensor_data + tensor_num_elements,
-                 tensor_value->GetTensorMutableData<float>(),
-                 [](int64_t value) { return static_cast<float>(value); });
+  ParallelTransform(thread_pool, tensor_data, tensor_value->GetTensorMutableData<float>(),
+                    static_cast<size_t>(tensor_num_elements), 2.0,
+                    [](int64_t value) { return static_cast<float>(value); });
   return tensor_value;
 }
 
 template <>
-std::unique_ptr<OrtValue> ProcessTensor<int64_t, Ort::Float16_t>(OrtxTensor* tensor, Ort::Allocator& allocator) {
+std::unique_ptr<OrtValue> ProcessTensor<int64_t, Ort::Float16_t>(ThreadPool* thread_pool, OrtxTensor* tensor, Ort::Allocator& allocator) {
   const int64_t* tensor_data{};
   const int64_t* tensor_shape{};
   size_t tensor_num_dims;
@@ -157,16 +159,16 @@ std::unique_ptr<OrtValue> ProcessTensor<int64_t, Ort::Float16_t>(OrtxTensor* ten
                                                       1LL, std::multiplies<int64_t>());
   auto tensor_value = OrtValue::CreateTensor<Ort::Float16_t>(allocator, std::span<int64_t>(const_cast<int64_t*>(tensor_shape), tensor_num_dims));
   auto tensor_value_fp32 = OrtValue::CreateTensor<float>(allocator, std::span<int64_t>(const_cast<int64_t*>(tensor_shape), tensor_num_dims));
-  std::transform(tensor_data, tensor_data + tensor_num_elements,
-                 tensor_value_fp32->GetTensorMutableData<float>(),
-                 [](int64_t value) { return static_cast<float>(value); });
+  ParallelTransform(thread_pool, tensor_data, tensor_value_fp32->GetTensorMutableData<float>(),
+                    static_cast<size_t>(tensor_num_elements), 2.0,
+                    [](int64_t value) { return static_cast<float>(value); });
   auto p_device = GetDeviceInterface(DeviceType::CPU);
   Cast(*tensor_value_fp32, tensor_value, *p_device, Ort::TypeToTensorType<Ort::Float16_t>);
   return tensor_value;
 }
 
 template <>
-std::unique_ptr<OrtValue> ProcessTensor<int64_t, Ort::BFloat16_t>(OrtxTensor* tensor, Ort::Allocator& allocator) {
+std::unique_ptr<OrtValue> ProcessTensor<int64_t, Ort::BFloat16_t>(ThreadPool* thread_pool, OrtxTensor* tensor, Ort::Allocator& allocator) {
   const int64_t* tensor_data{};
   const int64_t* tensor_shape{};
   size_t tensor_num_dims;
@@ -177,16 +179,16 @@ std::unique_ptr<OrtValue> ProcessTensor<int64_t, Ort::BFloat16_t>(OrtxTensor* te
                                                       1LL, std::multiplies<int64_t>());
   auto tensor_value = OrtValue::CreateTensor<Ort::BFloat16_t>(allocator, std::span<int64_t>(const_cast<int64_t*>(tensor_shape), tensor_num_dims));
   auto tensor_value_fp32 = OrtValue::CreateTensor<float>(allocator, std::span<int64_t>(const_cast<int64_t*>(tensor_shape), tensor_num_dims));
-  std::transform(tensor_data, tensor_data + tensor_num_elements,
-                 tensor_value_fp32->GetTensorMutableData<float>(),
-                 [](int64_t value) { return static_cast<float>(value); });
+  ParallelTransform(thread_pool, tensor_data, tensor_value_fp32->GetTensorMutableData<float>(),
+                    static_cast<size_t>(tensor_num_elements), 2.0,
+                    [](int64_t value) { return static_cast<float>(value); });
   auto p_device = GetDeviceInterface(DeviceType::CPU);
   Cast(*tensor_value_fp32, tensor_value, *p_device, Ort::TypeToTensorType<Ort::BFloat16_t>);
   return tensor_value;
 }
 
 template <>
-std::unique_ptr<OrtValue> ProcessTensor<float, int64_t>(OrtxTensor* tensor, Ort::Allocator& allocator) {
+std::unique_ptr<OrtValue> ProcessTensor<float, int64_t>(ThreadPool* thread_pool, OrtxTensor* tensor, Ort::Allocator& allocator) {
   const float* tensor_data{};
   const int64_t* tensor_shape{};
   size_t tensor_num_dims;
@@ -196,26 +198,26 @@ std::unique_ptr<OrtValue> ProcessTensor<float, int64_t>(OrtxTensor* tensor, Ort:
                                                       tensor_shape + tensor_num_dims,
                                                       1LL, std::multiplies<int64_t>());
   auto tensor_value = OrtValue::CreateTensor<int64_t>(allocator, std::span<int64_t>(const_cast<int64_t*>(tensor_shape), tensor_num_dims));
-  std::transform(tensor_data, tensor_data + tensor_num_elements,
-                 tensor_value->GetTensorMutableData<int64_t>(),
-                 [](float value) { return static_cast<int64_t>(value + 0.5f); });
+  ParallelTransform(thread_pool, tensor_data, tensor_value->GetTensorMutableData<int64_t>(),
+                    static_cast<size_t>(tensor_num_elements), 2.0,
+                    [](float value) { return static_cast<int64_t>(value + 0.5f); });
   return tensor_value;
 }
 
-template std::unique_ptr<OrtValue> ProcessTensor<float>(OrtxTensor* tensor, Ort::Allocator& allocator);
-template std::unique_ptr<OrtValue> ProcessTensor<int32_t>(OrtxTensor* tensor, Ort::Allocator& allocator);
-template std::unique_ptr<OrtValue> ProcessTensor<int64_t>(OrtxTensor* tensor, Ort::Allocator& allocator);
-template std::unique_ptr<OrtValue> ProcessTensor<bool>(OrtxTensor* tensor, Ort::Allocator& allocator);
+template std::unique_ptr<OrtValue> ProcessTensor<float>(ThreadPool*, OrtxTensor*, Ort::Allocator&);
+template std::unique_ptr<OrtValue> ProcessTensor<int32_t>(ThreadPool*, OrtxTensor*, Ort::Allocator&);
+template std::unique_ptr<OrtValue> ProcessTensor<int64_t>(ThreadPool*, OrtxTensor*, Ort::Allocator&);
+template std::unique_ptr<OrtValue> ProcessTensor<bool>(ThreadPool*, OrtxTensor*, Ort::Allocator&);
 
-void EmplaceProcessedTensor(NamedTensors& tensors, std::string_view name,
+void EmplaceProcessedTensor(ThreadPool* thread_pool, NamedTensors& tensors, std::string_view name,
                             OrtxTensor* tensor, ONNXTensorElementDataType type,
                             Ort::Allocator& allocator) {
   if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-    tensors.emplace(std::string(name), std::make_shared<Tensor>(ProcessTensor<float>(tensor, allocator)));
+    tensors.emplace(std::string(name), std::make_shared<Tensor>(ProcessTensor<float>(thread_pool, tensor, allocator)));
   } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16) {
-    tensors.emplace(std::string(name), std::make_shared<Tensor>(ProcessTensor<Ort::BFloat16_t>(tensor, allocator)));
+    tensors.emplace(std::string(name), std::make_shared<Tensor>(ProcessTensor<Ort::BFloat16_t>(thread_pool, tensor, allocator)));
   } else {
-    tensors.emplace(std::string(name), std::make_shared<Tensor>(ProcessTensor<Ort::Float16_t>(tensor, allocator)));
+    tensors.emplace(std::string(name), std::make_shared<Tensor>(ProcessTensor<Ort::Float16_t>(thread_pool, tensor, allocator)));
   }
 }
 

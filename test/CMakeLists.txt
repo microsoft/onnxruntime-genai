@@ -16,6 +16,8 @@ file(GLOB test_srcs CONFIGURE_DEPENDS
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/dflash2_config_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/reinit_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/search_checkpoint_tests.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_preprocessing_tests.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_utils_tests.cpp")
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)
   message(STATUS "Including CUDA kernel tests in the build.")
@@ -129,6 +131,28 @@ if (NOT MSVC)
 endif()
 
 add_test(NAME ReInitTests COMMAND reinit_tests)
+
+add_executable(parallel_preprocessing_tests
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_preprocessing_tests.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_utils_tests.cpp")
+target_include_directories(parallel_preprocessing_tests PRIVATE
+  ${ORT_HEADER_DIR}
+  ${onnxruntime_extensions_SOURCE_DIR}/shared/api
+  ${CMAKE_SOURCE_DIR}/src
+)
+target_link_libraries(parallel_preprocessing_tests PRIVATE
+  onnxruntime-genai-obj
+  GTest::gtest
+)
+add_dependencies(parallel_preprocessing_tests onnxruntime-genai)
+set_target_properties(parallel_preprocessing_tests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
+  FOLDER "Tests"
+)
+if(NOT MSVC)
+  target_compile_options(parallel_preprocessing_tests PRIVATE "-fvisibility=hidden")
+endif()
+add_test(NAME ParallelPreprocessingTests COMMAND parallel_preprocessing_tests)
 
 if (ENABLE_TELEMETRY AND NOT WIN32 AND NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
   add_executable(telemetry_device_info_tests

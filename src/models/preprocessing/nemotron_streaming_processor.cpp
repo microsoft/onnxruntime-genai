@@ -6,28 +6,36 @@
 
 #include "generator/generators.h"
 #include "models/preprocessing/nemotron_streaming_processor.h"
+#include "models/threadpool.h"
 
 namespace Generators {
 
 template <typename T, typename Convert>
-void PopulateMelTensorImpl(T* output, std::span<const float> cache,
+void PopulateMelTensorImpl(ThreadPool* thread_pool, T* output, std::span<const float> cache,
                            int cache_pos, std::span<const float> mel,
                            int num_frames, int num_mels, Convert convert) {
   const int cache_frames = static_cast<int>(cache.size()) / num_mels;
-  for (int frame = 0; frame < cache_frames; ++frame) {
-    const int source_frame = (cache_pos + frame) % cache_frames;
-    for (int mel_bin = 0; mel_bin < num_mels; ++mel_bin)
-      output[frame * num_mels + mel_bin] = convert(cache[source_frame * num_mels + mel_bin]);
-  }
-
-  T* chunk_output = output + cache.size();
-  for (int frame = 0; frame < num_frames; ++frame) {
-    for (int mel_bin = 0; mel_bin < num_mels; ++mel_bin)
-      chunk_output[frame * num_mels + mel_bin] = convert(mel[mel_bin * num_frames + frame]);
-  }
+  const int total_frames = cache_frames + num_frames;
+  ThreadPool::TryParallelFor(
+      thread_pool, total_frames, static_cast<double>(num_mels) * 8.0,
+      [&](std::ptrdiff_t first, std::ptrdiff_t last) {
+        auto local_convert = convert;
+        for (auto frame = first; frame < last; ++frame) {
+          T* frame_output = output + frame * num_mels;
+          if (frame < cache_frames) {
+            const int source_frame = (cache_pos + static_cast<int>(frame)) % cache_frames;
+            for (int mel_bin = 0; mel_bin < num_mels; ++mel_bin)
+              frame_output[mel_bin] = local_convert(cache[source_frame * num_mels + mel_bin]);
+          } else {
+            const int chunk_frame = static_cast<int>(frame) - cache_frames;
+            for (int mel_bin = 0; mel_bin < num_mels; ++mel_bin)
+              frame_output[mel_bin] = local_convert(mel[mel_bin * num_frames + chunk_frame]);
+          }
+        }
+      });
 }
 
-void PopulateMelTensor(OrtValue& output, std::span<const float> cache,
+void PopulateMelTensor(ThreadPool* thread_pool, OrtValue& output, std::span<const float> cache,
                        int cache_pos, std::span<const float> mel,
                        int num_frames, int num_mels) {
   if (num_frames < 0 || num_mels <= 0 ||
@@ -49,13 +57,18 @@ void PopulateMelTensor(OrtValue& output, std::span<const float> cache,
                 static_cast<size_t>((cache_frames - first_run) * num_mels) * sizeof(float));
 
     auto* chunk_output = output_data + cache.size();
-    for (int frame = 0; frame < num_frames; ++frame) {
-      for (int mel_bin = 0; mel_bin < num_mels; ++mel_bin)
-        chunk_output[frame * num_mels + mel_bin] = mel[mel_bin * num_frames + frame];
-    }
+    ThreadPool::TryParallelFor(
+        thread_pool, num_frames, static_cast<double>(num_mels) * 2.0,
+        [&](std::ptrdiff_t first, std::ptrdiff_t last) {
+          for (auto frame = first; frame < last; ++frame) {
+            for (int mel_bin = 0; mel_bin < num_mels; ++mel_bin)
+              chunk_output[frame * num_mels + mel_bin] =
+                  mel[mel_bin * num_frames + frame];
+          }
+        });
   } else if (output_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
-    PopulateMelTensorImpl(output.GetTensorMutableData<Ort::Float16_t>(), cache, cache_pos,
-                          mel, num_frames, num_mels, [](float value) {
+    PopulateMelTensorImpl(thread_pool, output.GetTensorMutableData<Ort::Float16_t>(), cache,
+                          cache_pos, mel, num_frames, num_mels, [](float value) {
                             return Ort::Float16_t{FastFloat32ToFloat16(value)};
                           });
   } else {
@@ -172,7 +185,7 @@ std::unique_ptr<OrtValue> NemotronStreamingProcessor::BuildMelTensor(const float
   }
   auto signal_shape = std::array<int64_t, 3>{1, total_mel_frames, num_mels};
   auto processed_signal = OrtValue::CreateTensor(allocator, signal_shape, signal_type);
-  PopulateMelTensor(*processed_signal, mel_pre_encode_cache_, cache_pos_,
+  PopulateMelTensor(nullptr, *processed_signal, mel_pre_encode_cache_, cache_pos_,
                     mel_data, num_frames, num_mels);
 
   UpdateMelCache(mel_pre_encode_cache_, cache_pos_, mel_data, num_frames, num_mels);
