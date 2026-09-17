@@ -44,9 +44,9 @@ void WriteLfm2VlImagePatches(const float* image, int64_t channels, int64_t padde
 // "<|image_start|>" + "<image>" * num_tokens + "<|image_end|>"
 std::string BuildLfm2VlImagePlaceholder(int64_t num_tokens);
 
-// Replaces the i-th "<image>" in the prompt with the placeholder run for image i. Images without a
-// matching "<image>" in the prompt are prepended, which keeps prompts that were not built from the
-// chat template working. Throws if the prompt asks for more images than were supplied.
+// Replaces the i-th "<image>" in the prompt with the placeholder run for image i. Throws unless the
+// prompt holds exactly one "<image>" per image, the rule Lfm2VlProcessor.validate_inputs applies, so
+// the vision features and the placeholder runs can never be misaligned or silently dropped.
 std::string ExpandLfm2VlImageTokens(const std::string& prompt, const std::vector<int64_t>& tokens_per_image);
 
 struct Lfm2VlImageProcessor : Processor {

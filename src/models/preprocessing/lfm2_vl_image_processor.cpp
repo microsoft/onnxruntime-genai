@@ -82,6 +82,20 @@ void RequireInt64VisionInput(const SessionInfo& session_info, const std::string&
   }
 }
 
+// The list overload of MultiModalProcessor::Process fills payload.prompts and leaves payload.prompt
+// empty. Batching is not supported, so a single-entry list is the prompt and anything longer is an error
+// rather than silently dropped text.
+std::string ResolvePrompt(const Payload& payload) {
+  if (payload.prompts.empty()) {
+    return payload.prompt;
+  }
+  if (payload.prompts.size() != 1) {
+    throw std::runtime_error("Lfm2VlImageProcessor: batched prompts are not supported; got " +
+                             std::to_string(payload.prompts.size()) + " prompts. Pass a single prompt string.");
+  }
+  return payload.prompts[0] ? std::string(payload.prompts[0]) : std::string{};
+}
+
 }  // namespace
 
 void WriteLfm2VlImagePatches(const float* image, int64_t channels, int64_t padded_height, int64_t padded_width,
@@ -149,36 +163,28 @@ std::string BuildLfm2VlImagePlaceholder(int64_t num_tokens) {
 std::string ExpandLfm2VlImageTokens(const std::string& prompt, const std::vector<int64_t>& tokens_per_image) {
   const std::string image_token{kLfm2VlImageToken};
 
+  size_t num_markers = 0;
+  for (size_t match = prompt.find(image_token); match != std::string::npos; match = prompt.find(image_token, match + image_token.size())) {
+    ++num_markers;
+  }
+  // Same rule as Lfm2VlProcessor.validate_inputs: one marker per image, in image order. Silently
+  // inventing or dropping placeholders would misalign the vision features with the decoder positions.
+  if (num_markers != tokens_per_image.size()) {
+    throw std::runtime_error("Lfm2VlImageProcessor: the prompt contains " + std::to_string(num_markers) + " " + image_token +
+                             " tokens but " + std::to_string(tokens_per_image.size()) +
+                             " images were provided. Put exactly one " + image_token + " in the prompt per image.");
+  }
+
   std::string expanded;
   expanded.reserve(prompt.size());
   size_t next_image = 0;
   size_t position = 0;
-  while (true) {
-    const size_t match = prompt.find(image_token, position);
-    if (match == std::string::npos) {
-      expanded.append(prompt, position, std::string::npos);
-      break;
-    }
-    if (next_image == tokens_per_image.size()) {
-      throw std::runtime_error("Prompt contains more " + image_token + " tokens than the " +
-                               std::to_string(tokens_per_image.size()) + " images that were provided.");
-    }
+  for (size_t match = prompt.find(image_token, position); match != std::string::npos; match = prompt.find(image_token, position)) {
     expanded.append(prompt, position, match - position);
-    expanded += BuildLfm2VlImagePlaceholder(tokens_per_image[next_image]);
-    ++next_image;
+    expanded += BuildLfm2VlImagePlaceholder(tokens_per_image[next_image++]);
     position = match + image_token.size();
   }
-
-  // Images the prompt never referenced still have to be consumed by the decoder, otherwise the
-  // vision features and the placeholder positions would not line up. Put them in front of the text.
-  if (next_image < tokens_per_image.size()) {
-    std::string leading;
-    for (size_t i = next_image; i < tokens_per_image.size(); ++i) {
-      leading += BuildLfm2VlImagePlaceholder(tokens_per_image[i]);
-    }
-    expanded.insert(0, leading);
-  }
-
+  expanded.append(prompt, position, std::string::npos);
   return expanded;
 }
 
@@ -200,14 +206,16 @@ Lfm2VlImageProcessor::Lfm2VlImageProcessor(Config& config, const SessionInfo& se
 }
 
 std::unique_ptr<NamedTensors> Lfm2VlImageProcessor::Process(const Tokenizer& tokenizer, const Payload& payload) const {
-  const std::string prompt{payload.prompt};
+  const std::string prompt = ResolvePrompt(payload);
   const Images* images = payload.images;
   Ort::Allocator& allocator{Ort::Allocator::GetWithDefaultOptions()};
   auto named_tensors = std::make_unique<NamedTensors>();
 
   if (!images) {
+    // With no images the prompt must not ask for any; the expansion with zero images enforces that.
+    const std::string text = ExpandLfm2VlImageTokens(prompt, {});
     named_tensors->emplace(std::string(Config::Defaults::InputIdsName),
-                           std::make_shared<Tensor>(MakeInputIds(tokenizer.Encode(prompt.c_str()), allocator)));
+                           std::make_shared<Tensor>(MakeInputIds(tokenizer.Encode(text.c_str()), allocator)));
     // The pipeline reads num_image_tokens to skip the vision run.
     named_tensors->emplace(std::string(Config::Defaults::NumImageTokens),
                            std::make_shared<Tensor>(MakeInt64Tensor({0}, {1}, allocator)));

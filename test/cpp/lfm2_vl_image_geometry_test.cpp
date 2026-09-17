@@ -123,17 +123,23 @@ TEST(Lfm2VlImageTokensTest, LeavesPromptsWithoutImagesAlone) {
   EXPECT_EQ(ExpandLfm2VlImageTokens("describe this", {}), "describe this");
 }
 
-TEST(Lfm2VlImageTokensTest, PrependsImagesThePromptNeverReferenced) {
-  // Prompts that were not built from the chat template still have to consume every image, otherwise
-  // the vision features would outnumber the placeholder positions in the decoder.
-  EXPECT_EQ(ExpandLfm2VlImageTokens("describe this", {1}),
-            "<|image_start|><image><|image_end|>describe this");
-}
-
 TEST(Lfm2VlImageTokensTest, RejectsPromptAskingForMoreImagesThanProvided) {
   const std::string message =
       CaptureThrowMessage([] { ExpandLfm2VlImageTokens("<image><image>", {4}); });
-  EXPECT_NE(message.find("more <image> tokens than the 1 images"), std::string::npos) << message;
+  EXPECT_NE(message.find("contains 2 <image> tokens but 1 images were provided"), std::string::npos) << message;
+}
+
+TEST(Lfm2VlImageTokensTest, RejectsPromptWithFewerImageTokensThanImages) {
+  // Prepending or appending the unreferenced images would have to guess their order relative to the
+  // referenced ones; the Hugging Face processor rejects the mismatch, and so does this one.
+  const std::string message =
+      CaptureThrowMessage([] { ExpandLfm2VlImageTokens("describe <image>", {64, 256}); });
+  EXPECT_NE(message.find("contains 1 <image> tokens but 2 images were provided"), std::string::npos) << message;
+}
+
+TEST(Lfm2VlImageTokensTest, RejectsImageTokenWhenNoImagesWereProvided) {
+  const std::string message = CaptureThrowMessage([] { ExpandLfm2VlImageTokens("<image>describe", {}); });
+  EXPECT_NE(message.find("contains 1 <image> tokens but 0 images were provided"), std::string::npos) << message;
 }
 
 }  // namespace Generators::test

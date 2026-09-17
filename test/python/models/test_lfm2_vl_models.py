@@ -209,6 +209,61 @@ def test_lfm2_vl_processor_emits_rgb_patches(test_data_path, color_type, pixel, 
     np.testing.assert_allclose(patches, np.broadcast_to(np.float32(expected), patches.shape), atol=1e-3)
 
 
+@pytest.mark.parametrize(
+    "prompt,image_names,expected",
+    [
+        ("Describe <image>.", ["cars.jpg", "sheet.png"], "contains 1 <image> tokens but 2 images were provided"),
+        ("<image><image>x", ["cars.jpg"], "contains 2 <image> tokens but 1 images were provided"),
+        ("<image>Describe.", [], "contains 1 <image> tokens but 0 images were provided"),
+    ],
+    ids=["fewer-markers-than-images", "more-markers-than-images", "marker-without-images"],
+)
+def test_lfm2_vl_rejects_image_token_count_mismatch(test_data_path, prompt, image_names, expected):
+    # Lfm2VlProcessor.validate_inputs rejects every mismatch. Prepending the unreferenced images would
+    # put a differently sized image's features under the referenced marker, and a marker without an
+    # image would reach the embedding model as a literal token with no feature to scatter into it.
+    images = og.Images.open(*[_image_path(test_data_path, name) for name in image_names]) if image_names else None
+    with pytest.raises(RuntimeError, match=expected):
+        _process(_model_path(test_data_path), prompt, images)
+
+
+def test_lfm2_vl_single_prompt_list_matches_the_string_form(test_data_path):
+    # The list overload fills payload.prompts and leaves payload.prompt empty; a one-entry list must
+    # not come back as an empty prompt.
+    model_path = _model_path(test_data_path)
+    images = og.Images.open(_image_path(test_data_path, "cars.jpg"))
+    _, from_string = _process(model_path, "<image>Describe this image.", images)
+    _, from_list = _process(model_path, ["<image>Describe this image."], images)
+    _, text_only = _process(model_path, ["Describe this image."], None)
+
+    np.testing.assert_array_equal(from_list["input_ids"].as_numpy(), from_string["input_ids"].as_numpy())
+    assert text_only["input_ids"].as_numpy().shape[1] > 0
+
+
+def test_lfm2_vl_rejects_batched_prompts(test_data_path):
+    with pytest.raises(RuntimeError, match="batched prompts are not supported; got 2 prompts"):
+        _process(_model_path(test_data_path), ["Describe.", "Describe."], None)
+
+
+def test_lfm2_vl_casts_pixel_values_to_the_vision_input_type(test_data_path, tmp_path):
+    onnx = pytest.importorskip("onnx")
+    model_dir = _copy_model(test_data_path, tmp_path)
+    vision = onnx.load(os.fspath(model_dir / "dummy_vision.onnx"))
+    next(i for i in vision.graph.input if i.name == "pixel_values").type.tensor_type.elem_type = onnx.TensorProto.FLOAT16
+    onnx.save(vision, os.fspath(model_dir / "dummy_vision.onnx"))
+
+    images = og.Images.open(_image_path(test_data_path, "cars.jpg"))
+    _, reference = _process(_model_path(test_data_path), "<image>x", images)
+    _, inputs = _process(os.fspath(model_dir), "<image>x", images)
+
+    pixel_values = inputs["pixel_values"].as_numpy()
+    assert pixel_values.dtype == np.float16
+    np.testing.assert_allclose(pixel_values.astype(np.float32), reference["pixel_values"].as_numpy(), rtol=0, atol=1e-3)
+    # The vision session must accept the cast tensor, not just the processor emit it.
+    generator, _ = _generate(os.fspath(model_dir), "<image>x", images, num_tokens=1)
+    assert generator.get_sequence(0).shape[0] > 0
+
+
 @pytest.mark.parametrize("field", ["pixel_values", "attention_mask", "image_sizes"])
 def test_lfm2_vl_rejects_vision_input_name_missing_from_the_graph(test_data_path, tmp_path, field):
     model_dir = _copy_model(test_data_path, tmp_path)

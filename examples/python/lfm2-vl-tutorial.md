@@ -194,7 +194,9 @@ $ python3 model-mm.py -m ./lfm2.5-vl-1.6b/cpu -e cpu
 The prompt is built by the chat template, which emits one `<image>` per image. The C++ image
 processor rewrites each `<image>` into `<|image_start|>`, one `<image>` per projected vision
 feature, and `<|image_end|>`, so the number of placeholders always matches the number of features
-the vision model produced. Images the prompt never referenced are prepended rather than dropped.
+the vision model produced. The prompt must hold exactly one `<image>` per image, in image order; the
+processor rejects any other count, as the Hugging Face processor does, and it accepts one prompt at
+a time (a single-entry list is fine, batching is not).
 
 ## 5. Known limitations
 
@@ -213,6 +215,10 @@ tokens — the same thing the reference implementation does when `do_image_split
 Large images therefore lose detail compared to the PyTorch model. Adding tiling needs a dedicated
 transform in onnxruntime-extensions, because the preprocessing pipeline can only resize an image
 once.
+
+**Aspect ratios above 200:1 are rejected.** The `Resize` step in onnxruntime-extensions refuses
+an image whose longer side is more than 200 times the shorter one ("Absolute aspect ratio must be
+smaller than 200"); the Hugging Face processor has no such limit.
 
 **Small images may be resized one step differently.** For images below `min_image_tokens` worth of
 pixels, the smart resize in onnxruntime-extensions truncates an intermediate product before rounding
