@@ -91,7 +91,9 @@ TEST(MtpDecoderConfigTest, ProjectsPagedDecoderWithoutMainFixedState) {
   mtp.num_key_value_heads = 2;
   mtp.head_size = 64;
   mtp.inputs.hidden_states = "head_hidden";
+  mtp.inputs.past_indexer_names = "past.%d.indexer";
   mtp.outputs.hidden_states = "head_hidden_out";
+  mtp.outputs.present_indexer_names = "present.%d.indexer";
   mtp.session_options.emplace();
   mtp.session_options->graph_optimization_level = ORT_DISABLE_ALL;
   mtp.session_options->config_entries = {
@@ -110,6 +112,8 @@ TEST(MtpDecoderConfigTest, ProjectsPagedDecoderWithoutMainFixedState) {
   EXPECT_EQ(head.hidden_size, 2048);
   EXPECT_EQ(head.inputs.hidden_states, "head_hidden");
   EXPECT_EQ(head.outputs.hidden_states, "head_hidden_out");
+  EXPECT_EQ(head.inputs.past_indexer_names, "past.%d.indexer");
+  EXPECT_EQ(head.outputs.present_indexer_names, "present.%d.indexer");
   EXPECT_EQ(head.inputs.block_table, "block_table");
   EXPECT_EQ(head.inputs.cumulative_sequence_lengths, "cumulative_sequence_lengths");
   EXPECT_EQ(head.inputs.past_sequence_lengths, "past_sequence_lengths");
@@ -253,6 +257,22 @@ TEST(MtpDecoderConfigTest, ValidatesMainAndHeadHiddenStateContract) {
                       {-1, 2048});
   EXPECT_THROW(ValidateMtpModelCompatibility(config, target, wrong_type),
                std::runtime_error);
+}
+
+TEST(MtpDecoderConfigTest, AcceptsMatchingHiddenStateWidthIndependentOfDecoderWidth) {
+  Config config;
+  config.model.decoder.hidden_size = 2048;
+  config.model.mtp.main_hidden_states = "main_hidden";
+  config.model.mtp.inputs.hidden_states = "head_hidden";
+
+  FakeModelStateMetadata target;
+  target.AddOutput("main_hidden", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16,
+                   {-1, 8192});
+  FakeModelStateMetadata head;
+  head.AddInput("head_hidden", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16,
+                {-1, 8192});
+
+  EXPECT_NO_THROW(ValidateMtpModelCompatibility(config, target, head));
 }
 
 }  // namespace Generators::test

@@ -2569,7 +2569,8 @@ class Model:
         seq_dim = kwargs.get("seq_dim", "sequence_length")
         output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
         self.make_node("MatMul", inputs=[root_input, weight], outputs=[output], name=name)
-        self.make_value(output, self.io_dtype, shape=self.make_hidden_state_shape(seq_dim=seq_dim, last_dim=last_dim))
+        output_shape = kwargs.get("output_shape", self.make_hidden_state_shape(seq_dim=seq_dim, last_dim=last_dim))
+        self.make_value(output, self.io_dtype, shape=output_shape)
 
         return name
 

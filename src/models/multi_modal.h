@@ -15,6 +15,8 @@
 #include "models/io/embeddings.h"
 #include "models/io/extra_inputs.h"
 #include "models/io/logits.h"
+#include "models/io/indexer_cache.h"
+#include "models/io/ple_state.h"
 #include "io/kv_cache.h"
 #include "models/io/position_inputs.h"
 #include "model_type.h"
@@ -200,6 +202,8 @@ struct DecoderState : State {
   std::unique_ptr<PositionInputs> position_inputs_;     // Model input
   std::unique_ptr<KeyValueCache> kv_cache_;             // Model input
   std::unique_ptr<RecurrentState> recurrent_state_;     // Model input (for hybrid models)
+  std::unique_ptr<PleState> ple_state_;                  // Model input (Qwen4-Exp PLE)
+  std::unique_ptr<IndexerCache> indexer_cache_;          // Model input (Qwen4-Exp QSA)
   Logits logits_{*this};                                // Model output
 };
 

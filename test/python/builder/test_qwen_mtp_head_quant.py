@@ -11,9 +11,9 @@ from types import SimpleNamespace
 import onnx_ir as ir
 import pytest
 import torch
-from loaders.qwen import QwenMTPModel
+from loaders.qwen import Qwen4ExpMTPModel, QwenMTPModel
 
-from models.builders.qwen import Qwen35Model, Qwen35MoEModel
+from models.builders.qwen import Qwen4ExpModel, Qwen35Model, Qwen35MoEModel
 
 
 def _resolve(extra_options, main_onnx_dtype=ir.DataType.INT4):
@@ -39,6 +39,17 @@ class FakeComponent:
         self.context_length = 128
         self.exclude_embeds = False
         self.model_type = "qwen3_5_moe"
+
+
+class FakeQwen4ExpComponent(FakeComponent):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.hc_hidden_size = 8
+        self.output_shapes = {"hidden_states": ["batch_size", "sequence_length", 2]}
+        self.filename = extra_options.get("filename", "text.onnx")
+
+    def make_hidden_state_shape(self, last_dim=None):
+        return ["batch_size", "sequence_length", last_dim or 2]
 
 
 def test_composite_without_mtp_creates_only_decoder(monkeypatch):
@@ -77,6 +88,33 @@ def test_dense_composite_with_mtp_uses_dense_components(monkeypatch):
     assert isinstance(model.decoder, FakeComponent)
     assert isinstance(model.mtp, FakeComponent)
     assert model.decoder.extra_options["include_hidden_states"] is True
+    assert model.mtp.extra_options["filename"] == "mtp.onnx"
+
+
+def test_qwen4_exp_composite_builds_declared_mtp(monkeypatch):
+    monkeypatch.setitem(Qwen4ExpModel.__init__.__globals__, "Qwen4ExpTextModel", FakeQwen4ExpComponent)
+    monkeypatch.setitem(Qwen4ExpModel.make_mtp_model.__globals__, "Qwen4ExpMTPTextModel", FakeQwen4ExpComponent)
+    text_config = SimpleNamespace(
+        mtp_num_hidden_layers=1,
+        bos_token_id=1,
+        eos_token_id=2,
+        pad_token_id=0,
+    )
+
+    model = Qwen4ExpModel(
+        SimpleNamespace(text_config=text_config),
+        ir.DataType.FLOAT16,
+        ir.DataType.FLOAT16,
+        "cuda",
+        None,
+        {},
+    )
+
+    assert isinstance(model.decoder, FakeQwen4ExpComponent)
+    assert isinstance(model.mtp, FakeQwen4ExpComponent)
+    assert model.decoder.extra_options["include_hidden_states"] is True
+    assert model.decoder.emit_pre_final_hidden_states is True
+    assert model.decoder.output_shapes["hidden_states"] == ["batch_size", "sequence_length", 8]
     assert model.mtp.extra_options["filename"] == "mtp.onnx"
 
 
@@ -363,3 +401,46 @@ def test_dense_mtp_state_uses_dense_decoder_layer(monkeypatch):
 
     assert isinstance(mtp.layers[0], FakeDenseDecoderLayer)
     assert mtp.layers[0].state == {"marker": mtp_state["mtp.layers.0.marker"]}
+
+
+def test_qwen4_exp_mtp_state_uses_residual_linear_shared_schema(monkeypatch):
+    class FakeModule:
+        def __init__(self, config, layer_idx=None, use_combine=None):
+            self.config = config
+            self.layer_idx = layer_idx
+            self.use_combine = use_combine
+
+        def load_state_dict(self, state, strict):
+            self.state = state
+            return [], []
+
+        def eval(self):
+            return self
+
+    module_name = "transformers.models.qwen4_exp.modeling_qwen4_exp"
+    modeling_module = types.ModuleType(module_name)
+    modeling_module.Qwen4ExpTextDecoderLayer = FakeModule
+    modeling_module.Qwen4ExpTextGatedResidual = FakeModule
+    monkeypatch.setitem(sys.modules, module_name, modeling_module)
+    mtp_state = {
+        "mtp.fc_embedding.weight": torch.ones((2, 2)),
+        "mtp.fc_hidden.weight": torch.ones((2, 2)),
+        "mtp.pre_fc_norm_embedding.weight": torch.ones(2),
+        "mtp.pre_fc_norm_hidden.weight": torch.ones(8),
+        "mtp.hyper_connection_mixer.marker": torch.tensor(1.0),
+        "mtp.layers.0.marker": torch.tensor(2.0),
+    }
+
+    mtp = Qwen4ExpMTPModel.from_state(
+        mtp_state,
+        torch.ones((4, 2)),
+        torch.ones((4, 2)),
+        layer_config=SimpleNamespace(),
+    )
+
+    assert mtp.fc_embedding.weight is mtp_state["mtp.fc_embedding.weight"]
+    assert mtp.fc_hidden.weight is mtp_state["mtp.fc_hidden.weight"]
+    assert mtp.layers[0].state == {"marker": mtp_state["mtp.layers.0.marker"]}
+    assert mtp.hyper_connection_mixer.state == {
+        "marker": mtp_state["mtp.hyper_connection_mixer.marker"]
+    }

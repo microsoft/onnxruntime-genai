@@ -932,6 +932,8 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         self.indexer_budget = config.indexer_budget
         self.indexer_compress_ratio = config.indexer_compress_ratio
         self.output_gate_type = config.output_gate_type or config.hidden_act
+        self.tile_first_hidden_state = True
+        self.emit_pre_final_hidden_states = False
 
         qsa_layers = {
             layer_id: f"past_key_values.{layer_id}.indexer_key"
@@ -1569,7 +1571,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         self.make_attention_output_proj(layer_id, attention, root_input)
 
     def make_layer(self, layer_id, layer):
-        if layer_id == 0:
+        if layer_id == 0 and self.tile_first_hidden_state:
             tile_name = "/model/hyper_connection/Tile"
             tile_repeats = [1, self.hc_count] if self.use_paged_attention else [1, 1, self.hc_count]
             self.make_tile(
@@ -1620,7 +1622,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         if layer_id == self.num_layers - 1:
             final_output = self.make_hyper_connection_mix(
                 self.num_layers,
-                self.weights.model.language_model.hyper_connection_mixer,
+                self.get_final_hyper_connection_mixer(),
                 hyper_states,
                 "final",
                 combine=False,
@@ -1628,12 +1630,16 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
             if self.include_hidden_states or self.exclude_lm_head:
                 self.make_node(
                     "Identity",
-                    inputs=[final_output],
+                    inputs=[hyper_states if self.emit_pre_final_hidden_states else final_output],
                     outputs=[self.output_names["hidden_states"]],
                     name="/model/final_hidden_states/Identity",
                 )
-                final_output = self.output_names["hidden_states"]
+                if not self.emit_pre_final_hidden_states:
+                    final_output = self.output_names["hidden_states"]
             self.layernorm_attrs["output_0"] = final_output
+
+    def get_final_hyper_connection_mixer(self):
+        return self.weights.model.language_model.hyper_connection_mixer
 
 
 class _Qwen4ExpGraphModel(Model):
@@ -2462,16 +2468,25 @@ class Qwen4ExpVisionModel(_Qwen4ExpGraphModel):
         )
 
 
-class Qwen4ExpModel:
+class Qwen4ExpModel(MTPModel):
     """Composite builder that emits Qwen4-Exp vision, embedding, and text graphs."""
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__()
         self.config = config
         self.extra_options = copy.deepcopy(extra_options)
+        decoder_options = self.make_mtp_init(config, self.extra_options)
         self.decoder = Qwen4ExpTextModel(
-            copy.deepcopy(config), io_dtype, onnx_dtype, ep, cache_dir, self.extra_options
+            copy.deepcopy(config), io_dtype, onnx_dtype, ep, cache_dir, decoder_options
         )
         self.decoder.model_type = "qwen3_5"
+        self.mtp = None
+        if self.mtp_attrs["build"]:
+            self.decoder.emit_pre_final_hidden_states = True
+            self.decoder.output_shapes["hidden_states"] = self.decoder.make_hidden_state_shape(
+                last_dim=self.decoder.hc_hidden_size
+            )
+            self.make_mtp_model(config, io_dtype, onnx_dtype, ep, cache_dir, decoder_options)
         self.input_path = None
 
         text_config = config.text_config
@@ -2485,12 +2500,56 @@ class Qwen4ExpModel:
         self.exclude_embeds = self.decoder.exclude_embeds
         self.model_type = "qwen3_5"
 
+    def make_mtp_init(self, config, extra_options):
+        decoder_options = super().make_mtp_init(config, extra_options)
+        num_mtp_layers = getattr(config.text_config, "mtp_num_hidden_layers", 0) or 0
+        self.mtp_attrs["build"] = num_mtp_layers > 0 and not extra_options.get("exclude_mtp", False)
+        self.mtp_attrs["shared_initializer_prefixes"] = ("lm_head.MatMul.",)
+        if not self.mtp_attrs["build"]:
+            return decoder_options
+        if num_mtp_layers != 1:
+            raise ValueError(f"Qwen4-Exp MTP export requires exactly one MTP layer, got {num_mtp_layers}.")
+        incompatible_options = [
+            option for option in ("exclude_lm_head", "prune_lm_head") if extra_options.get(option, False)
+        ]
+        if incompatible_options:
+            raise ValueError("Qwen4-Exp MTP export cannot be combined with " + ", ".join(incompatible_options) + ".")
+        decoder_options["include_hidden_states"] = True
+        return decoder_options
+
+    def make_mtp_model(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        self.mtp_attrs["io_dtype"] = io_dtype
+        self.mtp_attrs["onnx_dtype"] = onnx_dtype
+        self.mtp_attrs["extra_options"] = copy.deepcopy(extra_options)
+        self.resolve_mtp_model_config(extra_options)
+        mtp_options = self.mtp_attrs["extra_options"]
+        mtp_options["text_only"] = True
+        mtp_options["filename"] = "mtp.onnx"
+        mtp_options.pop("include_hidden_states", None)
+        mtp_options.pop("exclude_lm_head", None)
+        self.mtp = Qwen4ExpMTPTextModel(
+            copy.deepcopy(config),
+            self.mtp_attrs["io_dtype"],
+            self.mtp_attrs["onnx_dtype"],
+            ep,
+            cache_dir,
+            mtp_options,
+        )
+
     def make_model(self, input_path):
         self.input_path = input_path
         self.decoder.make_model(input_path)
+        if self.mtp is not None:
+            print("Building Qwen4-Exp MTP (multi-token prediction) head -> mtp.onnx")
+            self.mtp.make_model(input_path)
 
     def save_model(self, output_dir):
         self.decoder.save_model(output_dir)
+        if self.mtp is not None:
+            self.mtp.save_model(output_dir)
+            self.mtp_attrs["shared_initializers"] = self.share_initializers(
+                output_dir, self.decoder.filename, self.mtp.filename
+            )
         if self.input_path is None:
             raise RuntimeError("make_model must be called before save_model.")
         weights = self.decoder.load_weights(self.input_path)
@@ -2535,10 +2594,200 @@ class Qwen4ExpModel:
         }
         with open(config_path, "w") as config_file:
             json.dump(genai_config, config_file, indent=4)
+        if self.mtp is not None:
+            self.add_mtp_to_genai_config(out_dir)
+
+    def add_mtp_to_genai_config(self, out_dir):
+        config_path = os.path.join(out_dir, "genai_config.json")
+        with open(config_path) as config_file:
+            genai_config = json.load(config_file)
+
+        decoder_outputs = genai_config["model"]["decoder"].setdefault("outputs", {})
+        decoder_outputs["hidden_states"] = "hidden_states"
+        genai_config["model"]["mtp"] = {
+            "filename": "mtp.onnx",
+            "num_hidden_layers": 1,
+            "num_key_value_heads": self.decoder.num_kv_heads,
+            "head_size": self.decoder.head_size,
+            "main_hidden_states": "hidden_states",
+            "inputs": {
+                "input_ids": "input_ids",
+                "hidden_states": "hidden_states",
+                "attention_mask": "attention_mask",
+                "position_ids": "position_ids",
+                "past_key_names": "past_key_values.%d.key",
+                "past_value_names": "past_key_values.%d.value",
+                "past_indexer_names": "past_key_values.%d.indexer_key",
+            },
+            "outputs": {
+                "logits": "logits",
+                "hidden_states": "hidden_states_out",
+                "present_key_names": "present.%d.key",
+                "present_value_names": "present.%d.value",
+                "present_indexer_names": "present.%d.indexer_key",
+            },
+        }
+        self.add_shared_initializers_to_genai_config(genai_config)
+        with open(config_path, "w") as config_file:
+            json.dump(genai_config, config_file, indent=4)
 
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
         self.decoder.save_processing(model_name_or_path, extra_kwargs, out_dir)
 
+
+class Qwen4ExpMTPTextModel(Qwen4ExpTextModel):
+    """Qwen4-Exp one-layer self-speculative MTP head builder."""
+
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        config = copy.deepcopy(config)
+        config.text_config.num_hidden_layers = 1
+        config.text_config.layer_types = ["qwen_sparse_attention"]
+        config.text_config.ple_layer_ids = []
+        config.num_hidden_layers = 1
+        config.layer_types = ["qwen_sparse_attention"]
+
+        extra_options = copy.deepcopy(extra_options)
+        extra_options["num_hidden_layers"] = 1
+        extra_options["text_only"] = True
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+        self.tile_first_hidden_state = False
+        self.emit_pre_final_hidden_states = True
+        self.include_hidden_states = True
+        self.output_names["hidden_states"] = "hidden_states_out"
+        self.output_shapes["hidden_states"] = self.make_hidden_state_shape(last_dim=self.hc_hidden_size)
+        self.input_names["hidden_states"] = "hidden_states"
+        self.input_types["hidden_states"] = self.io_dtype
+        self.input_shapes["hidden_states"] = self.make_hidden_state_shape(last_dim=self.hc_hidden_size)
+
+    def get_final_hyper_connection_mixer(self):
+        return self.mtp_weights.hyper_connection_mixer
+
+    def make_offset_rmsnorm(self, name, root_input, weight_tensor):
+        weight_name = f"{name[1:].replace('/', '.')}.weight"
+        self.make_initializer(weight_tensor + self.layernorm_attrs["add_offset"], weight_name, to=self.io_dtype)
+        output = f"{name}/output_0"
+        self.make_node(
+            "SimplifiedLayerNormalization",
+            inputs=[root_input, weight_name],
+            outputs=[output],
+            name=name,
+            epsilon=self.layernorm_attrs["epsilon"],
+            axis=-1,
+            stash_type=1,
+        )
+        self.make_value(output, self.io_dtype, shape=self.make_hidden_state_shape())
+        return output
+
+    def make_model(self, input_path):
+        self.make_inputs_and_outputs()
+        self.load_mtp_weights(input_path)
+        self.make_preprocessing_nodes()
+
+        projected = self.make_mtp_input_projection()
+        self.layernorm_attrs["root_input"] = projected
+        self.layernorm_attrs["skip_input"] = projected
+        self.layernorm_attrs["first_layernorm"] = True
+        self.make_layer(0, self.mtp_weights.layers[0])
+        self.make_lm_head(self.mtp_weights.lm_head)
+
+        self.make_postprocessing_nodes()
+        del self.mtp_weights
+
+    def load_mtp_weights(self, input_path):
+        model_dir = input_path if input_path and os.path.isdir(input_path) else self.model_name_or_path
+        if not os.path.isdir(model_dir):
+            from huggingface_hub import snapshot_download  # noqa: PLC0415
+
+            model_dir = snapshot_download(
+                repo_id=model_dir,
+                cache_dir=self.cache_dir,
+                token=self.hf_token,
+                allow_patterns=["*.safetensors"],
+                local_files_only=True,
+            )
+        try:
+            from loaders.qwen import Qwen4ExpMTPModel  # noqa: PLC0415
+        except ImportError:
+            from onnxruntime_genai.models.loaders.qwen import Qwen4ExpMTPModel  # noqa: PLC0415
+
+        self.mtp_weights = Qwen4ExpMTPModel.from_pretrained(
+            self.quant_type,
+            input_path,
+            model_dir,
+            self.hf_load_config.text_config,
+            preserve_quantization=False,
+            load_quantized_model=self.load_weights,
+        )
+
+    def make_mtp_input_projection(self):
+        basename = "/model/mtp"
+        embed_weight = "model.embed_tokens.weight"
+        self.make_initializer(self.mtp_weights.embedding.weight, embed_weight, to=self.io_dtype)
+        embed_gather = f"{basename}/embed_tokens/Gather"
+        self.make_node(
+            "Gather",
+            inputs=[embed_weight, self.input_names["input_ids"]],
+            outputs=[f"{embed_gather}/output_0"],
+            name=embed_gather,
+        )
+        self.make_value(f"{embed_gather}/output_0", self.io_dtype, self.make_hidden_state_shape())
+
+        embedding_norm = self.make_offset_rmsnorm(
+            f"{basename}/pre_fc_norm_embedding",
+            f"{embed_gather}/output_0",
+            self.mtp_weights.pre_fc_norm_embedding.weight,
+        )
+        hidden_norm = self.make_branchwise_rms_norm(
+            f"{basename}/pre_fc_norm_hidden",
+            self.input_names["hidden_states"],
+            self.mtp_weights.pre_fc_norm_hidden,
+            self.hidden_size,
+        )
+        token_shape = ["num_tokens"] if self.use_paged_attention else ["batch_size", "sequence_length"]
+        grouped_shape = [*token_shape, self.hc_count, self.hidden_size]
+        grouped_dims = [-1, self.hc_count, self.hidden_size] if self.use_paged_attention else [0, 0, self.hc_count, self.hidden_size]
+        hidden_grouped = f"{basename}/hidden/Reshape"
+        self.make_reshape(
+            hidden_grouped,
+            [hidden_norm, f"/model/constants/INT64/{grouped_dims}"],
+            self.io_dtype,
+            grouped_shape,
+        )
+        hidden_proj = self.make_matmul(
+            self.mtp_weights.fc_hidden,
+            f"{basename}/fc_hidden/MatMul",
+            f"{hidden_grouped}/output_0",
+            output_shape=grouped_shape,
+        )
+        embedding_proj = self.make_matmul(
+            self.mtp_weights.fc_embedding,
+            f"{basename}/fc_embedding/MatMul",
+            embedding_norm,
+        )
+        embedding_grouped = f"{basename}/fc_embedding/Unsqueeze"
+        self.make_unsqueeze(
+            embedding_grouped,
+            [f"{embedding_proj}/output_0", "/model/constants/INT64/[-2]"],
+            self.io_dtype,
+            [*token_shape, 1, self.hidden_size],
+        )
+        fused = f"{basename}/input_fusion/Add"
+        self.make_add(
+            fused,
+            [f"{hidden_proj}/output_0", f"{embedding_grouped}/output_0"],
+            self.io_dtype,
+            grouped_shape,
+        )
+        flatten_dims = [-1, self.hc_hidden_size] if self.use_paged_attention else [0, 0, self.hc_hidden_size]
+        flattened = f"{basename}/input_fusion/Reshape"
+        self.make_reshape(
+            flattened,
+            [f"{fused}/output_0", f"/model/constants/INT64/{flatten_dims}"],
+            self.io_dtype,
+            self.make_hidden_state_shape(last_dim=self.hc_hidden_size),
+        )
+        return f"{flattened}/output_0"
 
 class Qwen35MoEModel(MTPModel):
     """Composite Qwen3.5 MoE builder for the decoder and optional MTP graph."""

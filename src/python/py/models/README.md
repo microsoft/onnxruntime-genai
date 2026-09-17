@@ -30,7 +30,7 @@ This folder contains the model builder for quickly creating optimized and quanti
     - [Enable Shared Embeddings](#enable-shared-embeddings)
     - [Enable CUDA Graph Capture](#enable-cuda-graph-capture)
     - [Export a ModelOpt or compressed-tensors NVFP4/FP8 Checkpoint](#export-a-modelopt-or-compressed-tensors-nvfp4fp8-checkpoint)
-    - [MTP Head (Qwen3.6)](#mtp-head-qwen36)
+    - [MTP Head (Qwen3.6/Qwen3.8)](#mtp-head-qwen3638)
     - [Compact State Updates (Qwen3.5/3.8)](#compact-state-updates-qwen3538)
     - [Select the Qwen3.5/3.8 Recurrent Operator](#select-the-qwen3538-recurrent-operator)
     - [Enable WebGPU Graph Capture](#enable-webgpu-graph-capture)
@@ -453,9 +453,11 @@ When `config.json` declares `quant_method=modelopt` or `quant_method=compressed-
 
 The `--precision` argument controls the unquantized tensors and model I/O; it does not change the checkpoint's native FP8/NVFP4 tensors. ModelOpt and compressed-tensors export require the CUDA EP and an ONNX Runtime build that provides the corresponding contrib ops. For CPU, CUDA, and WebGPU, the builder replaces each shared-expert output `Mul` and routed/shared `Add` pair with `com.microsoft::GatedAdd`; other execution providers retain the portable `Mul` + `Add` graph.
 
-#### MTP Head (Qwen3.6)
+#### MTP Head (Qwen3.6/Qwen3.8)
 
 When a Qwen3.5 MoE configuration declares one or more MTP layers with `mtp_num_hidden_layers`, the builder exports the multi-token-prediction head for self-speculative decoding. An auxiliary `mtp.onnx` (plus its `mtp.onnx.data`) is generated alongside the main model, and the main model automatically exposes the hidden states consumed by the MTP head. Models without declared MTP layers do not produce this file or an MTP section in `genai_config.json`.
+
+Qwen3.8 Flash Next checkpoints (`Qwen4ExpForConditionalGeneration`) use their native one-layer MTP head automatically. The exporter preserves the target's hyper-connection streams, applies the checkpoint's separate `mtp.fc_embedding` and `mtp.fc_hidden` projections, and exports the QSA indexer cache bindings required by the draft layer. Qwen3.8 MTP export currently requires the unquantized safetensors checkpoint; use `exclude_mtp=true` for pre-quantized source checkpoints.
 
 ```bash
 # From wheel:

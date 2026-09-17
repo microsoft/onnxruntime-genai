@@ -560,6 +560,7 @@ struct Config {
         std::string position_ids{Defaults::PositionIdsName};
         std::string past_key_names{Defaults::PastKeyName};
         std::string past_value_names{Defaults::PastValueName};
+        std::string past_indexer_names;
       } inputs;
 
       struct Outputs {
@@ -567,6 +568,7 @@ struct Config {
         std::string hidden_states{"hidden_states_out"};
         std::string present_key_names{Defaults::PresentKeyName};
         std::string present_value_names{Defaults::PresentValueName};
+        std::string present_indexer_names;
       } outputs;
     } mtp;
 

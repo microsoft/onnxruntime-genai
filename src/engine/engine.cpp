@@ -222,11 +222,11 @@ void ValidateMtpModelCompatibility(const Config& config,
   const auto target_shape =
       target_metadata.GetOutputShape(mtp.main_hidden_states);
   const auto head_shape = head_metadata.GetInputShape(mtp.inputs.hidden_states);
-  const int64_t hidden_size = config.model.decoder.hidden_size;
-  if (target_shape.size() != 2 || target_shape[1] != hidden_size ||
-      head_shape.size() != 2 || head_shape[1] != hidden_size) {
+  if (target_shape.size() != 2 || head_shape.size() != 2 ||
+      target_shape[1] <= 0 || head_shape[1] <= 0 ||
+      target_shape[1] != head_shape[1]) {
     throw std::runtime_error(
-        "MTP requires matching 2-D hidden-state tensors with the configured static width.");
+        "MTP requires matching 2-D hidden-state tensors with a positive static width.");
   }
   if (target_metadata.GetOutputDataType(mtp.main_hidden_states) !=
       head_metadata.GetInputDataType(mtp.inputs.hidden_states)) {

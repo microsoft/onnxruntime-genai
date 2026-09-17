@@ -7,7 +7,7 @@ import os
 import onnx
 from onnx import external_data_helper, helper
 
-from models.builders.qwen import Qwen35MoEModel
+from models.builders.qwen import Qwen4ExpModel, Qwen35MoEModel
 
 
 def _make_external_model(path, data_name, tensors):
@@ -59,6 +59,25 @@ def test_add_mtp_to_genai_config(tmp_path):
     config = json.loads(config_path.read_text())
     assert config["model"]["decoder"]["outputs"]["hidden_states"] == "hidden_states"
     assert config["model"]["mtp"]["filename"] == "mtp.onnx"
+
+
+def test_add_qwen4_exp_mtp_to_genai_config(tmp_path):
+    config_path = tmp_path / "genai_config.json"
+    config_path.write_text(json.dumps({"model": {"decoder": {}}}))
+    model = object.__new__(Qwen4ExpModel)
+    model.decoder = type(
+        "Decoder",
+        (),
+        {"num_kv_heads": 2, "head_size": 256, "hc_hidden_size": 10240},
+    )()
+    model.mtp_attrs = {"shared_initializers": []}
+
+    model.add_mtp_to_genai_config(tmp_path)
+
+    config = json.loads(config_path.read_text())
+    assert "hidden_size" not in config["model"]["mtp"]
+    assert config["model"]["mtp"]["inputs"]["past_indexer_names"] == "past_key_values.%d.indexer_key"
+    assert config["model"]["mtp"]["outputs"]["present_indexer_names"] == "present.%d.indexer_key"
 
 
 def test_share_mtp_weights_repacks_data_after_staging_metadata(tmp_path):

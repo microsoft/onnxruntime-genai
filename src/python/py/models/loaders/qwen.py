@@ -4,6 +4,7 @@
 # license information.
 # -------------------------------------------------------------------------
 
+import copy
 import glob
 import os
 from types import SimpleNamespace
@@ -88,8 +89,8 @@ class QwenMTPModel:
             raise ValueError("Could not find 'lm_head.weight' for the MTP head LM head.")
         return cls.from_state(mtp_state, embed_weight, lm_head_weight, layer_config, is_moe)
 
-    @staticmethod
-    def from_state(mtp_state, embed_weight, lm_head_weight, layer_config, is_moe=True):
+    @classmethod
+    def from_state(cls, mtp_state, embed_weight, lm_head_weight, layer_config, is_moe=True):
         try:
             if is_moe:
                 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (  # noqa: PLC0415
@@ -126,5 +127,79 @@ class QwenMTPModel:
             pre_fc_norm_embedding=TensorModule(mtp_state["mtp.pre_fc_norm_embedding.weight"]),
             pre_fc_norm_hidden=TensorModule(mtp_state["mtp.pre_fc_norm_hidden.weight"]),
             norm=TensorModule(mtp_state["mtp.norm.weight"]),
+            layers=[mtp_layer],
+        )
+
+
+class Qwen4ExpMTPModel(QwenMTPModel):
+    @classmethod
+    def from_modelopt(cls, model, layer_config, preserve_quantization, is_moe=True):
+        raise ValueError("Qwen4-Exp MTP export currently requires an unquantized safetensors checkpoint.")
+
+    @staticmethod
+    def from_state(mtp_state, embed_weight, lm_head_weight, layer_config, is_moe=True):
+        try:
+            from transformers.models.qwen4_exp.modeling_qwen4_exp import (  # noqa: PLC0415
+                Qwen4ExpTextDecoderLayer,
+                Qwen4ExpTextGatedResidual,
+            )
+        except ImportError as exc:
+            raise ImportError(
+                "Building the Qwen4-Exp MTP head requires Qwen4-Exp modeling support in transformers."
+            ) from exc
+
+        mtp_config = copy.deepcopy(layer_config)
+        mtp_config.num_hidden_layers = 1
+        mtp_config.layer_types = ["qwen_sparse_attention"]
+        mtp_config.ple_layer_ids = []
+
+        mtp_layer = Qwen4ExpTextDecoderLayer(mtp_config, layer_idx=0)
+        layer_state = {
+            key[len("mtp.layers.0.") :]: value for key, value in mtp_state.items() if key.startswith("mtp.layers.0.")
+        }
+        missing, unexpected = mtp_layer.load_state_dict(layer_state, strict=False)
+        if missing or unexpected:
+            details = []
+            if missing:
+                details.append(f"missing={missing}")
+            if unexpected:
+                details.append(f"unexpected={unexpected}")
+            raise ValueError("Invalid Qwen4-Exp MTP decoder-layer weights: " + ", ".join(details))
+        mtp_layer.eval()
+
+        hyper_connection_mixer = Qwen4ExpTextGatedResidual(mtp_config, use_combine=False)
+        mixer_state = {
+            key[len("mtp.hyper_connection_mixer.") :]: value
+            for key, value in mtp_state.items()
+            if key.startswith("mtp.hyper_connection_mixer.")
+        }
+        missing, unexpected = hyper_connection_mixer.load_state_dict(mixer_state, strict=False)
+        if missing or unexpected:
+            details = []
+            if missing:
+                details.append(f"missing={missing}")
+            if unexpected:
+                details.append(f"unexpected={unexpected}")
+            raise ValueError("Invalid Qwen4-Exp MTP final mixer weights: " + ", ".join(details))
+        hyper_connection_mixer.eval()
+
+        required = (
+            "mtp.fc_embedding.weight",
+            "mtp.fc_hidden.weight",
+            "mtp.pre_fc_norm_embedding.weight",
+            "mtp.pre_fc_norm_hidden.weight",
+        )
+        missing = [name for name in required if name not in mtp_state]
+        if missing:
+            raise ValueError(f"Missing Qwen4-Exp MTP weights: {missing}.")
+
+        return SimpleNamespace(
+            embedding=TensorModule(embed_weight),
+            lm_head=TensorModule(lm_head_weight),
+            fc_embedding=TensorModule(mtp_state["mtp.fc_embedding.weight"]),
+            fc_hidden=TensorModule(mtp_state["mtp.fc_hidden.weight"]),
+            pre_fc_norm_embedding=TensorModule(mtp_state["mtp.pre_fc_norm_embedding.weight"]),
+            pre_fc_norm_hidden=TensorModule(mtp_state["mtp.pre_fc_norm_hidden.weight"]),
+            hyper_connection_mixer=hyper_connection_mixer,
             layers=[mtp_layer],
         )

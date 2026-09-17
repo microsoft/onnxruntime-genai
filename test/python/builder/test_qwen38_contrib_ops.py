@@ -6,7 +6,7 @@ from types import MethodType, SimpleNamespace
 import onnx_ir as ir
 import torch
 
-from models.builders.qwen import Qwen4ExpTextModel
+from models.builders.qwen import Qwen4ExpMTPTextModel, Qwen4ExpTextModel
 
 
 def record_calls(model, method_names):
@@ -104,6 +104,42 @@ def make_attention():
 
 def emitted_nodes(model):
     return [(args[0], kwargs) for method, args, kwargs in model.calls if method == "make_node"]
+
+
+def test_mtp_residual_linear_shared_preserves_hyper_connection_shape():
+    model = object.__new__(Qwen4ExpMTPTextModel)
+    model.io_dtype = ir.DataType.FLOAT16
+    model.use_paged_attention = False
+    model.hidden_size = 8
+    model.hc_count = 4
+    model.hc_hidden_size = 32
+    model.input_names = {"input_ids": "input_ids", "hidden_states": "hidden_states"}
+    model.mtp_weights = SimpleNamespace(
+        embedding=SimpleNamespace(weight=torch.ones((16, 8))),
+        fc_embedding=SimpleNamespace(weight=torch.ones((8, 8))),
+        fc_hidden=SimpleNamespace(weight=torch.ones((8, 8))),
+        pre_fc_norm_embedding=SimpleNamespace(weight=torch.ones(8)),
+        pre_fc_norm_hidden=SimpleNamespace(weight=torch.ones(32)),
+    )
+    record_calls(
+        model,
+        ["make_initializer", "make_node", "make_value", "make_reshape", "make_matmul", "make_unsqueeze", "make_add"],
+    )
+    model.make_hidden_state_shape = MethodType(
+        lambda self, last_dim=None: ["batch_size", "sequence_length", last_dim or self.hidden_size], model
+    )
+    model.make_offset_rmsnorm = MethodType(lambda self, *args: "embedding_norm", model)
+    model.make_branchwise_rms_norm = MethodType(lambda self, *args: "hidden_norm", model)
+
+    output = model.make_mtp_input_projection()
+
+    hidden_projection = next(
+        call for call in model.calls if call[0] == "make_matmul" and call[1][1].endswith("fc_hidden/MatMul")
+    )
+    assert hidden_projection[2]["output_shape"] == ["batch_size", "sequence_length", 4, 8]
+    fusion = next(call for call in model.calls if call[0] == "make_add")
+    assert fusion[1][3] == ["batch_size", "sequence_length", 4, 8]
+    assert output == "/model/mtp/input_fusion/Reshape/output_0"
 
 
 def test_paged_branchwise_norm_uses_packed_shapes():

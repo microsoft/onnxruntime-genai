@@ -664,7 +664,9 @@ DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int3
       model_{model},
       position_inputs_{model_.p_device_inputs_->CreatePositionInputs(*this, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask)},
       kv_cache_{model_.p_device_kvcache_->CreateKeyValueCache(*this)},
-      recurrent_state_{CreateRecurrentState(*this)} {
+      recurrent_state_{CreateRecurrentState(*this)},
+      ple_state_{CreatePleState(*this)},
+      indexer_cache_{CreateIndexerCache(*this)} {
   inputs_embeds_.Add();
 
   // Gemma4: decoder accepts per_layer_inputs from the embedding model
@@ -695,6 +697,10 @@ DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int3
     kv_cache_->Add();
   if (recurrent_state_)
     recurrent_state_->Add();
+  if (ple_state_)
+    ple_state_->Add();
+  if (indexer_cache_)
+    indexer_cache_->Add();
 }
 
 DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
@@ -704,7 +710,14 @@ DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& nex
 
   const int seq_len = static_cast<int>(inputs_embeds_.GetShape()[1]);
   const bool graph_capture_this_run = params_->use_graph_capture && seq_len == 1;
-  const int graph_capture_variant = recurrent_state_ ? recurrent_state_->GraphCaptureVariant() : 0;
+  int graph_capture_variant = recurrent_state_ ? recurrent_state_->GraphCaptureVariant() : 0;
+  if (ple_state_) {
+    const int ple_graph_capture_variant = ple_state_->GraphCaptureVariant();
+    if (recurrent_state_ && recurrent_state_->UsesGraphCaptureDoubleBuffer() &&
+        graph_capture_variant != ple_graph_capture_variant)
+      throw std::runtime_error("PLE and recurrent state graph-capture buffer variants are out of sync");
+    graph_capture_variant = ple_graph_capture_variant;
+  }
 
   const int graph_id = seq_len * 2 + graph_capture_variant;
   if (graph_capture_this_run && recurrent_state_ && recurrent_state_->ShouldFixUpGraphCapture(graph_id)) {
@@ -765,6 +778,10 @@ DeviceSpan<float> DecoderState::RunPrefillWithChunking(int current_length, Devic
     kv_cache_->Update(next_indices, length);
     if (recurrent_state_)
       recurrent_state_->Update();
+    if (ple_state_)
+      ple_state_->Update();
+    if (indexer_cache_)
+      indexer_cache_->Update(next_indices, length);
     logits_.Update(chunk_tokens, current_chunk_size);
 
     // Feed only this chunk's slice of the pre-computed embeddings to the decoder.
@@ -793,6 +810,10 @@ void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int tot
     kv_cache_->Update(beam_indices, total_length);
   if (recurrent_state_)
     recurrent_state_->Update();
+  if (ple_state_)
+    ple_state_->Update();
+  if (indexer_cache_)
+    indexer_cache_->Update(beam_indices, total_length);
   logits_.Update(next_tokens, new_length);
   inputs_embeds_.UpdateSequenceLength(new_length);
   if (per_layer_inputs_) per_layer_inputs_->UpdateSequenceLength(new_length);
@@ -805,6 +826,10 @@ void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int tot
     kv_cache_->Update(beam_indices, total_length);
   if (recurrent_state_)
     recurrent_state_->Update();
+  if (ple_state_)
+    ple_state_->Update();
+  if (indexer_cache_)
+    indexer_cache_->Update(beam_indices, total_length);
   logits_.Update(next_tokens, new_length);
   inputs_embeds_.UpdateSequenceLength(new_length);
   if (per_layer_inputs_) per_layer_inputs_->UpdateSequenceLength(new_length);

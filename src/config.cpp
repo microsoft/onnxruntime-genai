@@ -127,6 +127,7 @@ std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   decoder.inputs.position_ids = mtp.inputs.position_ids;
   decoder.inputs.past_key_names = mtp.inputs.past_key_names;
   decoder.inputs.past_value_names = mtp.inputs.past_value_names;
+  decoder.inputs.past_indexer_names = mtp.inputs.past_indexer_names;
   // The projection starts from a copy of the target config, so a per-token quantized target would
   // otherwise leak its scale name templates into the head. The head is always an unquantized
   // full-attention layer and declares no scale tensors, so clear them: leaving them in place would
@@ -138,6 +139,7 @@ std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   decoder.outputs.hidden_states = mtp.outputs.hidden_states;
   decoder.outputs.present_key_names = mtp.outputs.present_key_names;
   decoder.outputs.present_value_names = mtp.outputs.present_value_names;
+  decoder.outputs.present_indexer_names = mtp.outputs.present_indexer_names;
   decoder.outputs.present_key_scale_names.clear();
   decoder.outputs.present_value_scale_names.clear();
 
@@ -465,6 +467,8 @@ struct DecoderInputs_Element : JSON::Element {
       v_.past_key_names = JSON::Get<std::string_view>(value);
     } else if (name == "past_value_names") {
       v_.past_value_names = JSON::Get<std::string_view>(value);
+    } else if (name == "past_indexer_names") {
+      v_.past_indexer_names = JSON::Get<std::string_view>(value);
     } else if (name == "past_key_scale_names") {
       v_.past_key_scale_names = JSON::Get<std::string_view>(value);
     } else if (name == "past_value_scale_names") {
@@ -509,8 +513,6 @@ struct DecoderInputs_Element : JSON::Element {
       v_.past_ple_token_names = JSON::Get<std::string_view>(value);
     } else if (name == "past_ple_conv_names") {
       v_.past_ple_conv_names = JSON::Get<std::string_view>(value);
-    } else if (name == "past_indexer_names") {
-      v_.past_indexer_names = JSON::Get<std::string_view>(value);
     } else if (name == "state_update_capture_count") {
       v_.state_update_capture_count = JSON::Get<std::string_view>(value);
     } else if (name == "state_update_active") {
@@ -546,6 +548,8 @@ struct DecoderOutputs_Element : JSON::Element {
       v_.present_key_names = JSON::Get<std::string_view>(value);
     } else if (name == "present_value_names") {
       v_.present_value_names = JSON::Get<std::string_view>(value);
+    } else if (name == "present_indexer_names") {
+      v_.present_indexer_names = JSON::Get<std::string_view>(value);
     } else if (name == "present_key_scale_names") {
       v_.present_key_scale_names = JSON::Get<std::string_view>(value);
     } else if (name == "present_value_scale_names") {
@@ -564,8 +568,6 @@ struct DecoderOutputs_Element : JSON::Element {
       v_.present_ple_token_names = JSON::Get<std::string_view>(value);
     } else if (name == "present_ple_conv_names") {
       v_.present_ple_conv_names = JSON::Get<std::string_view>(value);
-    } else if (name == "present_indexer_names") {
-      v_.present_indexer_names = JSON::Get<std::string_view>(value);
     } else if (name == "state_update_conv_value_names") {
       v_.state_update_conv_value_names = JSON::Get<std::string_view>(value);
     } else if (name == "state_update_recurrent_capsule_names") {
@@ -1067,6 +1069,8 @@ struct MtpInputs_Element : JSON::Element {
       v_.past_key_names = JSON::Get<std::string_view>(value);
     } else if (name == "past_value_names") {
       v_.past_value_names = JSON::Get<std::string_view>(value);
+    } else if (name == "past_indexer_names") {
+      v_.past_indexer_names = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1088,6 +1092,8 @@ struct MtpOutputs_Element : JSON::Element {
       v_.present_key_names = JSON::Get<std::string_view>(value);
     } else if (name == "present_value_names") {
       v_.present_value_names = JSON::Get<std::string_view>(value);
+    } else if (name == "present_indexer_names") {
+      v_.present_indexer_names = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
