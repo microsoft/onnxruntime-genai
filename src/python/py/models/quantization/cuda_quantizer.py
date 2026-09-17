@@ -350,12 +350,14 @@ class CudaQuantizer:
         abs_scales: bool,
         unsigned_full_range: bool,
         signed_scale: bool = True,
+        use_ort_quantizer: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Blockwise-quantize ``weights`` and return unflattened storage.
 
-        The symmetric path uses a local NumPy MLAS-style implementation (so it can
-        keep signed per-block scales); the asymmetric path delegates to the
-        MatMulNBits ORT pybinds (``quantize_matmul_4bits``/``8bits``).
+        The symmetric path uses a local NumPy MLAS-style implementation by default
+        so it can keep signed per-block scales. ``use_ort_quantizer=True`` delegates
+        supported symmetric layouts to the MatMulNBits ORT pybinds for exact ORT
+        rounding and tie-breaking. The asymmetric path always delegates to ORT.
         """
         torch = _get_torch()
 
@@ -369,12 +371,16 @@ class CudaQuantizer:
             raise ValueError(f"Blockwise quantization requires a positive block_size, got {block_size}.")
         if signed_scale and not symmetric:
             raise ValueError("signed_scale is only valid for symmetric blockwise quantization.")
+        if use_ort_quantizer and symmetric and (not unsigned_full_range or not signed_scale):
+            raise ValueError(
+                "The ORT symmetric MatMulNBits quantizer requires unsigned_full_range=true and signed_scale=true."
+            )
 
         num_blocks = (k + block_size - 1) // block_size
         pack = 8 // bits
         blob_size = (block_size + pack - 1) // pack
 
-        if symmetric:
+        if symmetric and not use_ort_quantizer:
             if bits == 4:
                 qmin, qmax, scale_divisor, zero_point = (-8, 7, 8, 8) if unsigned_full_range else (-7, 7, 7, 8)
             else:
@@ -422,7 +428,7 @@ class CudaQuantizer:
         quantize = quantize_matmul_4bits if bits == 4 else quantize_matmul_8bits
         quantize(qweight, w_t, scales, zero_points, block_size, n, k, symmetric)
 
-        if abs_scales:
+        if abs_scales and not (symmetric and signed_scale):
             scales = np.abs(scales)
 
         return torch.from_numpy(qweight), torch.from_numpy(scales), torch.from_numpy(zero_points)
@@ -439,6 +445,7 @@ class CudaQuantizer:
         flatten_qweight: bool = True,
         unsigned_full_range: bool = True,
         signed_scale: bool = True,
+        use_ort_quantizer: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Quantize one expert with ONNX Runtime's MatMulNBits blockwise encoding.
 
@@ -461,6 +468,8 @@ class CudaQuantizer:
         ``max|w| / 2^(bits-1)`` scale (negative extreme exact, positive extreme
         clipped at ``qmax``). Only valid for ``symmetric=True``; the stored
         bytes/zero-point layout is unchanged (the sign rides in the scale).
+        Set ``use_ort_quantizer=True`` to use ONNX Runtime's implementation, including
+        its exact tie-breaking and rounding behavior.
         """
         qweight, scales, zero_points = CudaQuantizer._matmulnbits_blockwise_quantize_impl(
             weights,
@@ -470,6 +479,7 @@ class CudaQuantizer:
             abs_scales=abs_scales,
             unsigned_full_range=unsigned_full_range,
             signed_scale=signed_scale,
+            use_ort_quantizer=use_ort_quantizer,
         )
         if flatten_qweight:
             qweight = qweight.reshape(qweight.shape[0], -1).contiguous()
@@ -490,6 +500,7 @@ class CudaQuantizer:
         abs_scales: bool = True,
         unsigned_full_range: bool = True,
         signed_scale: bool = True,
+        use_ort_quantizer: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Quantize and CUDA-prepack one MatMulNBits weight initializer.
 
@@ -504,6 +515,8 @@ class CudaQuantizer:
           (also used on newer GPUs via the compatibility path). Use ``weight_prepacked=1``.
         * ``force_arch=90``: SM90/Hopper layout, consumed by the native SM90 TMA/WGMMA
           kernel. Use ``weight_prepacked=2``. Requires ``block_size`` in {64, 128}.
+
+        Set ``use_ort_quantizer=True`` to quantize with ONNX Runtime before prepacking.
         """
         torch = _get_torch()
 
@@ -531,6 +544,7 @@ class CudaQuantizer:
             abs_scales=abs_scales,
             unsigned_full_range=unsigned_full_range,
             signed_scale=signed_scale,
+            use_ort_quantizer=use_ort_quantizer,
         )
 
         pack_weights_for_cuda_mixed_gemm = _pack_weights_for_cuda_mixed_gemm

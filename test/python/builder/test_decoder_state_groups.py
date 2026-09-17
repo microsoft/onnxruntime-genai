@@ -143,6 +143,28 @@ def test_common_nonpaged_builder_preserves_manifest_absence(monkeypatch, tmp_pat
     assert "state_groups" not in config["model"]["decoder"]
 
 
+@pytest.mark.parametrize(
+    "ep,enabled,prepacked,expected",
+    [
+        ("cuda", True, 0, True),
+        ("cuda", False, 0, False),
+        ("cuda", False, 1, True),
+        ("cpu", True, 0, False),
+    ],
+)
+def test_fpa_intb_session_option_selection(monkeypatch, tmp_path, ep, enabled, prepacked, expected):
+    model = _make_config_model(Model)
+    model.ep = ep
+    model.ep_attrs = {ep: {}}
+    model.extra_options["enable_cuda_fpa_intb_gemm"] = enabled
+    model.matmul_attrs["weights_prepacked"] = prepacked
+
+    config = _write_config(monkeypatch, tmp_path, model)
+
+    session_options = config["model"]["decoder"]["session_options"]
+    assert ("ep.cuda.fpa_intb_gemm" in session_options) is expected
+
+
 def test_qwen_all_attention_builder_emits_paged_kv_group(monkeypatch, tmp_path):
     config = _write_config(
         monkeypatch,

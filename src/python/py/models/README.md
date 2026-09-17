@@ -25,6 +25,7 @@ This folder contains the model builder for quickly creating optimized and quanti
     - [Include Auxiliary Hidden States Output](#include-auxiliary-hidden-states-output)
     - [Build with Paged Attention](#build-with-paged-attention)
     - [Build a DFlash 2 Block Drafter](#build-a-dflash-2-block-drafter)
+    - [Fuse Target MLP Gate/Up Projections](#fuse-target-mlp-gateup-projections)
     - [Build a DSpark Block Drafter](#build-a-dspark-block-drafter)
     - [Disable Windowed KV Cache](#disable-windowed-kv-cache)
     - [Enable Shared Embeddings](#enable-shared-embeddings)
@@ -325,7 +326,7 @@ Set `dflash2_path` to a DFlash 2 checkpoint to export an auxiliary `dflash2.onnx
 
 `dflash2_num_draft_tokens` optionally overrides how many tokens the drafter proposes per step. It must be a positive integer no greater than the draft checkpoint's block size minus the anchor token; that checkpoint limit is also the default.
 
-`dflash2_precision` accepts `bf16` (default), `int4`, or `int8`. Integer modes quantize the attention and MLP weights at the target's block size while keeping the small dynamic-convolution and selector projections dense. Body activations and KV caches remain BF16; this option does not quantize the drafter's KV cache. The body uses plain blockwise weights because CUDA fpA-intB prepacking requires FP16 activations. The LM head follows the target's symmetric DEFAULT integer quantization, including mixed-precision bit overrides, and uses prepacking only when its dtype and dimensions are eligible. Other target head formats remain dense in the drafter. Shared initializers are deduplicated only when their bytes match.
+`dflash2_precision` accepts `bf16` (default), `int4`, or `int8`. Integer modes quantize the attention and MLP weights at the target's block size while keeping the small dynamic-convolution and selector projections dense. Body activations and KV caches remain BF16; this option does not quantize the drafter's KV cache. The body is emitted in the portable raw blockwise layout, and the DFlash2 session disables the target decoder's fpA-intB selection for those nodes. For a symmetric DEFAULT INT4 target using the `weight_Q4` initializer contract, the drafter emits matching LM-head metadata and adopts the target's exact quantized tensors when their layouts match. If a BF16 target uses offline-prepacked weights, the drafter instead keeps a private raw INT4 head. Other target head formats remain dense in the drafter. Remaining shared initializers are deduplicated when their bytes match.
 
 ```bash
 python -m onnxruntime_genai.models.builder -i path_to_target_model -o path_to_output_folder -p int4 -e cuda --extra_options use_paged_attention=true aux_hidden_state_layers=2,12,22 dflash2_path=path_to_dflash2_checkpoint dflash2_precision=int4
@@ -352,6 +353,18 @@ python -m onnxruntime_genai.models.builder -i path_to_target_model -o path_to_ou
 
 # From source:
 python builder.py -i path_to_target_model -o path_to_output_folder -p bf16 -e cuda --extra_options use_paged_attention=true aux_hidden_state_layers=6,20,34,48,62 dflash2_path=path_to_dflash2_checkpoint dflash2_precision=int4 dflash2_fuse_gate_up=true
+```
+
+#### Fuse Target MLP Gate/Up Projections
+
+Set `fuse_mlp_gate_up=true` to combine each target model MLP's gate and up projections into one `MatMul` or `MatMulNBits` followed by `Split`. The default is `false`. Fusion happens before target weight quantization and requires unpacked, unadapted floating-point projections. Re-export the target to apply the setting and validate latency and quality on the deployment workload.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -i path_to_target_model -o path_to_output_folder -p int4 -e cuda --extra_options fuse_mlp_gate_up=true
+
+# From source:
+python builder.py -i path_to_target_model -o path_to_output_folder -p int4 -e cuda --extra_options fuse_mlp_gate_up=true
 ```
 
 #### Build a DSpark Block Drafter
@@ -615,6 +628,16 @@ python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folde
 
 # From source:
 python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options matmulnbits_weights_prepacked=1
+```
+
+Set `enable_cuda_fpa_intb_gemm=true` to select the same CUDA kernel family while retaining the default raw blockwise weight layout. The default is `false`; the option writes `ep.cuda.fpa_intb_gemm=1` to the decoder session options and only applies to the CUDA EP.
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options enable_cuda_fpa_intb_gemm=true
+
+# From source:
+python builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options enable_cuda_fpa_intb_gemm=true
 ```
 
 ##### Device Allocator for Initializers
