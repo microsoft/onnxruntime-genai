@@ -197,9 +197,7 @@ struct PagedCacheManager : CacheManager {
 
   size_t BlockTableColumns() const override { return key_value_cache_->BlockTableColumns(); }
 
-  size_t MaxQueryTokensPerRequest() const override {
-    return key_value_cache_->MaxQueryTokensPerRequest();
-  }
+  size_t MaxQueryTokensPerRequest() const override;
 
   size_t MaxDraftTokensPerStep() const override;
   std::shared_ptr<const PrefixCacheMatch> MatchPrefix(

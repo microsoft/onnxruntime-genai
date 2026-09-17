@@ -802,7 +802,7 @@ TEST(PagedKeyValueCacheManifestTest, PrefixCachingRejectsSlidingWindowCache) {
   EXPECT_THROW(MakePagedCache(model), std::runtime_error);
 }
 
-TEST(PagedKeyValueCacheManifestTest, PrefixCachingRejectsAuxiliaryDecoderState) {
+TEST(PagedKeyValueCacheManifestTest, PrefixCachingSupportsFixedAuxiliaryPool) {
   auto model = LoadSyntheticPagedModel();
   model->config_->engine.dynamic_batching->prefix_caching = true;
 
@@ -811,22 +811,22 @@ TEST(PagedKeyValueCacheManifestTest, PrefixCachingRejectsAuxiliaryDecoderState) 
           model, /*auxiliary_bytes_per_block=*/1,
           /*auxiliary_reserved_memory_bytes=*/0),
       std::runtime_error);
-  EXPECT_THROW(
+  EXPECT_NO_THROW(
       PagedKeyValueCache(
           model, /*auxiliary_bytes_per_block=*/0,
-          /*auxiliary_reserved_memory_bytes=*/1),
-      std::runtime_error);
+          /*auxiliary_reserved_memory_bytes=*/1));
 }
 
-TEST(PagedKeyValueCacheManifestTest, PrefixCachingRejectsFixedState) {
+TEST(PagedKeyValueCacheManifestTest, PrefixCachingAllocatesFixedStateCheckpoints) {
   auto model = LoadSyntheticCompositeModel();
   model->config_->engine.dynamic_batching->prefix_caching = true;
 
-  EXPECT_THROW(
-      {
-        PagedCacheManager manager{model};
-      },
-      std::runtime_error);
+  PagedCacheManager manager{model};
+  const auto fixed = manager.FixedStateSnapshot();
+  ASSERT_TRUE(fixed.has_value());
+  EXPECT_EQ(fixed->checkpoint_capacity,
+            model->config_->engine.dynamic_batching->max_batch_size);
+  EXPECT_EQ(fixed->checkpoint_count, 0u);
 }
 
 TEST(PagedKeyValueCacheManifestTest, RejectsSlidingWindowLayersOutsidePagedGroup) {

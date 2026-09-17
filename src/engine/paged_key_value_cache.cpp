@@ -446,7 +446,9 @@ bool MakeTailBlockExclusive(PagedCacheBlockTable& table,
 
 PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
                                        size_t auxiliary_bytes_per_block,
-                                       size_t auxiliary_reserved_memory_bytes)
+                                       size_t auxiliary_reserved_memory_bytes,
+                                       bool requires_prefix_checkpoint,
+                                       size_t max_prefix_checkpoints)
     : model_(model) {
   const auto& decoder = model->config_->model.decoder;
   const size_t block_size = model->config_->engine.dynamic_batching->block_size;
@@ -455,10 +457,9 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
   ValidateScaleBindings(decoder, paged_group);
   const auto dtype = KeyValueCacheType(model_, paged_group);
   const auto& batching = *model->config_->engine.dynamic_batching;
-  if (batching.prefix_caching &&
-      (auxiliary_bytes_per_block != 0 || auxiliary_reserved_memory_bytes != 0)) {
+  if (batching.prefix_caching && auxiliary_bytes_per_block != 0) {
     throw std::runtime_error(
-        "Prefix caching does not yet support Engine-hosted auxiliary decoder state.");
+        "Prefix caching does not yet support an auxiliary cache that mirrors target blocks.");
   }
 
   const auto windowed = WindowedLayers(model, paged_group);
@@ -562,6 +563,8 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
   prefix_options.enabled = batching.prefix_caching;
   prefix_options.min_match_blocks =
       std::max<size_t>(batching.prefix_cache_min_blocks, 1);
+  prefix_options.requires_checkpoint = requires_prefix_checkpoint;
+  prefix_options.max_checkpoints = max_prefix_checkpoints;
   if (batching.prefix_cache_max_blocks) {
     prefix_options.max_blocks =
         std::min(*batching.prefix_cache_max_blocks, num_blocks);
@@ -808,6 +811,46 @@ void PagedKeyValueCache::SealCommittedBlocks(
     table.sealed_blocks_ = index + 1;
     table.sealed_identity_ = parent;
   }
+}
+
+bool PagedKeyValueCache::CanAttachPrefixCheckpoint(
+    const void* request_id, size_t token_count) const {
+  const auto table_index = block_table_index_->Find(request_id);
+  if (!table_index || *table_index >= block_tables_.size()) {
+    return false;
+  }
+  const auto& table = block_tables_[*table_index];
+  const size_t block_size = block_pool_->BlockSize();
+  return token_count != 0 &&
+         token_count == table.committed_slots_ &&
+         token_count % block_size == 0 &&
+         table.sealed_blocks_ == token_count / block_size &&
+         prefix_cache_->CanAttachCheckpoint(table.sealed_identity_);
+}
+
+bool PagedKeyValueCache::AttachPrefixCheckpoint(
+    const void* request_id,
+    std::shared_ptr<const FixedStatePrefixCheckpoint> checkpoint) {
+  if (!checkpoint ||
+      !CanAttachPrefixCheckpoint(request_id, checkpoint->TokenCount())) {
+    return false;
+  }
+  const auto table_index = block_table_index_->Find(request_id);
+  return prefix_cache_->AttachCheckpoint(
+      block_tables_[*table_index].sealed_identity_, std::move(checkpoint));
+}
+
+size_t PagedKeyValueCache::ReclaimPrefixCheckpoints(
+    size_t checkpoints_needed) {
+  return prefix_cache_->ReclaimCheckpoints(checkpoints_needed);
+}
+
+size_t PagedKeyValueCache::ReclaimablePrefixCheckpoints() const {
+  return prefix_cache_->ReclaimableCheckpoints();
+}
+
+bool PagedKeyValueCache::RequiresPrefixCheckpoint() const {
+  return prefix_cache_->Options().requires_checkpoint;
 }
 
 void PagedKeyValueCache::RebuildBlockTableIndex() noexcept {

@@ -56,6 +56,9 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
             entry.request_id,
             entry.target_cache_slots,
             entry.draft_token_count,
+            entry.prefix_match
+                ? entry.prefix_match->fixed_state_checkpoint
+                : nullptr,
         });
       }
       if (entry.newly_admitted) {
@@ -341,20 +344,25 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
   // the composite path degrades to paged-only. Its capacity matches the paged batch limit so paged
   // admission (bounded by max_batch_size) can never outrun fixed slots.
   ModelStateManifest manifest{model->config_->model.decoder};
-  if (model->config_->engine.dynamic_batching->prefix_caching &&
-      manifest.HasFixedStateGroups()) {
-    throw std::runtime_error(
-        "Prefix caching does not yet support fixed or recurrent decoder state.");
-  }
+  const bool hybrid_prefix_caching =
+      model->config_->engine.dynamic_batching->prefix_caching &&
+      manifest.HasFixedStateGroups();
+  size_t prefix_checkpoint_capacity = 0;
   if (manifest.HasFixedStateGroups()) {
+    prefix_checkpoint_capacity =
+        hybrid_prefix_caching
+            ? model_->config_->engine.dynamic_batching->max_batch_size
+            : 0;
     auto fixed_state_pool = std::make_unique<FixedStatePool>(
-        model, model_->config_->engine.dynamic_batching->max_batch_size);
+        model, model_->config_->engine.dynamic_batching->max_batch_size,
+        prefix_checkpoint_capacity);
     fixed_state_pool_ = std::move(fixed_state_pool);
   }
   // Size the primary and auxiliary paged caches from one memory budget. The fixed pool above is
   // already reflected in the free-memory query used by the paged cache.
   key_value_cache_ = std::make_unique<PagedKeyValueCache>(
-      model, auxiliary_bytes_per_block, auxiliary_reserved_memory_bytes);
+      model, auxiliary_bytes_per_block, auxiliary_reserved_memory_bytes,
+      hybrid_prefix_caching, prefix_checkpoint_capacity);
   key_value_cache_state_ = std::make_unique<KeyValueCacheState>(*params_, *model_);
 }
 
@@ -368,6 +376,11 @@ std::shared_ptr<const PrefixCacheMatch> PagedCacheManager::MatchPrefix(
     return nullptr;
   }
   auto match = key_value_cache_->MatchPrefix(tokens, tokens.size() - 1);
+  if (!match.Empty() && fixed_state_pool_ &&
+      !match.fixed_state_checkpoint) {
+    throw std::logic_error(
+        "A hybrid prefix match has no fixed state checkpoint.");
+  }
   return match.Empty()
              ? nullptr
              : std::make_shared<const PrefixCacheMatch>(std::move(match));
@@ -380,6 +393,25 @@ void PagedCacheManager::SealCommittedBlocks(const StepPlan& plan) {
   for (const auto& entry : plan.requests) {
     key_value_cache_->SealCommittedBlocks(
         entry.request_id, entry.request->TokensCpu());
+    if (!fixed_state_pool_ || !entry.is_prefill ||
+        !key_value_cache_->CanAttachPrefixCheckpoint(
+            entry.request_id, entry.target_cache_slots)) {
+      continue;
+    }
+    if (fixed_state_pool_->AvailablePrefixCheckpoints() == 0) {
+      key_value_cache_->ReclaimPrefixCheckpoints(1);
+    }
+    if (fixed_state_pool_->AvailablePrefixCheckpoints() == 0) {
+      continue;
+    }
+    auto checkpoint =
+        fixed_state_pool_->CapturePrefixCheckpoint(entry.request_id);
+    if (checkpoint &&
+        !key_value_cache_->AttachPrefixCheckpoint(
+            entry.request_id, std::move(checkpoint))) {
+      throw std::logic_error(
+          "A captured fixed state checkpoint could not be attached to its paged prefix.");
+    }
   }
 }
 
@@ -520,6 +552,18 @@ void PagedCacheManager::DetachRequestForTeardown(
 }
 
 bool PagedCacheManager::SupportsDynamicBatching() const { return true; }
+
+size_t PagedCacheManager::MaxQueryTokensPerRequest() const {
+  size_t limit = key_value_cache_->MaxQueryTokensPerRequest();
+  if (fixed_state_pool_ &&
+      key_value_cache_->PrefixCachingEnabled()) {
+    const size_t checkpoint_interval = key_value_cache_->BlockSize();
+    if (limit == 0 || checkpoint_interval < limit) {
+      limit = checkpoint_interval;
+    }
+  }
+  return limit;
+}
 
 size_t PagedCacheManager::MaxDraftTokensPerStep() const {
   // Recurrent state can only be replayed through the compact transitions the operators captured.

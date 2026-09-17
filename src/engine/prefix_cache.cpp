@@ -9,6 +9,8 @@
 #include <utility>
 #include <vector>
 
+#include "fixed_state_pool.h"
+
 namespace Generators {
 
 namespace {
@@ -79,6 +81,8 @@ PrefixCacheMatch PrefixCache::Match(std::span<const int32_t> tokens,
   uint64_t parent_hash = RootHash();
   std::shared_ptr<const BlockIdentity> parent;
   std::vector<std::unordered_map<uint64_t, Entry>::iterator> hits;
+  size_t safe_hit_count = 0;
+  std::shared_ptr<const FixedStatePrefixCheckpoint> checkpoint;
   for (size_t offset = 0; offset + block_size <= adoptable; offset += block_size) {
     const auto chunk = tokens.subspan(offset, block_size);
     const uint64_t hash = Hash(parent_hash, chunk);
@@ -103,11 +107,20 @@ PrefixCacheMatch PrefixCache::Match(std::span<const int32_t> tokens,
     }
 
     hits.push_back(it);
+    if (it->second.checkpoint &&
+        it->second.checkpoint->TokenCount() == offset + block_size) {
+      safe_hit_count = hits.size();
+      checkpoint = it->second.checkpoint;
+    }
     parent = it->second.identity;
     parent_hash = hash;
   }
 
-  if (hits.size() < options_.min_match_blocks) {
+  if (options_.requires_checkpoint) {
+    hits.resize(safe_hit_count);
+  }
+  if (hits.size() < options_.min_match_blocks ||
+      (options_.requires_checkpoint && !checkpoint)) {
     return match;
   }
 
@@ -123,6 +136,7 @@ PrefixCacheMatch PrefixCache::Match(std::span<const int32_t> tokens,
     Reorder(it->second, it->second.identity->parent);
   }
   match.token_count = hits.size() * block_size;
+  match.fixed_state_checkpoint = std::move(checkpoint);
 
   ++metrics_.hits;
   metrics_.matched_tokens += match.token_count;
@@ -189,7 +203,7 @@ std::shared_ptr<const BlockIdentity> PrefixCache::Register(
   const auto position = parent_entry == entries_.end() ? recency_.end() : parent_entry->second.recency;
   const auto recency = recency_.insert(position, hash);
   try {
-    entries_.emplace(hash, Entry{block, identity, recency});
+    entries_.emplace(hash, Entry{block, identity, nullptr, recency});
   } catch (...) {
     recency_.erase(recency);
     throw;
@@ -201,6 +215,80 @@ std::shared_ptr<const BlockIdentity> PrefixCache::Register(
   block->SetIdentity(identity);
   ++metrics_.registered_blocks;
   return identity;
+}
+
+bool PrefixCache::CanAttachCheckpoint(
+    const std::shared_ptr<const BlockIdentity>& identity) const {
+  if (!Enabled() || !identity || options_.max_checkpoints == 0) {
+    return false;
+  }
+  const auto entry = entries_.find(identity->hash);
+  return entry != entries_.end() &&
+         entry->second.identity == identity &&
+         !entry->second.checkpoint;
+}
+
+bool PrefixCache::AttachCheckpoint(
+    const std::shared_ptr<const BlockIdentity>& identity,
+    std::shared_ptr<const FixedStatePrefixCheckpoint> checkpoint) {
+  if (!identity || !checkpoint) {
+    throw std::invalid_argument(
+        "A prefix checkpoint requires an indexed identity and fixed state.");
+  }
+  const auto entry = entries_.find(identity->hash);
+  if (entry == entries_.end() || entry->second.identity != identity) {
+    return false;
+  }
+  if (entry->second.checkpoint) {
+    return true;
+  }
+
+  size_t block_count = 0;
+  for (auto current = identity; current; current = current->parent) {
+    ++block_count;
+  }
+  if (checkpoint->TokenCount() !=
+      block_count * block_pool_.BlockSize()) {
+    throw std::runtime_error(
+        "Fixed state checkpoint does not match its paged prefix boundary.");
+  }
+  if (checkpoint_count_ >= options_.max_checkpoints &&
+      ReclaimCheckpoints(1) == 0) {
+    return false;
+  }
+
+  entry->second.checkpoint = std::move(checkpoint);
+  ++checkpoint_count_;
+  Reorder(entry->second, entry->second.identity->parent);
+  return true;
+}
+
+size_t PrefixCache::ReclaimCheckpoints(size_t checkpoints_needed) {
+  size_t reclaimed = 0;
+  for (auto recency = recency_.begin();
+       reclaimed < checkpoints_needed && recency != recency_.end();
+       ++recency) {
+    const auto entry = entries_.find(*recency);
+    if (entry == entries_.end()) {
+      throw std::logic_error(
+          "Prefix cache recency order references an unknown identity.");
+    }
+    if (entry->second.checkpoint &&
+        entry->second.checkpoint.use_count() == 1) {
+      entry->second.checkpoint.reset();
+      --checkpoint_count_;
+      ++reclaimed;
+    }
+  }
+  return reclaimed;
+}
+
+size_t PrefixCache::ReclaimableCheckpoints() const {
+  return static_cast<size_t>(std::count_if(
+      entries_.begin(), entries_.end(), [](const auto& value) {
+        return value.second.checkpoint &&
+               value.second.checkpoint.use_count() == 1;
+      }));
 }
 
 size_t PrefixCache::Reclaim(size_t blocks_needed) {
@@ -252,6 +340,9 @@ void PrefixCache::Reorder(Entry& entry, const std::shared_ptr<const BlockIdentit
 
 void PrefixCache::Evict(std::unordered_map<uint64_t, Entry>::iterator it) {
   auto block = it->second.block;
+  if (it->second.checkpoint) {
+    --checkpoint_count_;
+  }
   recency_.erase(it->second.recency);
   entries_.erase(it);
   block->ClearIdentity();

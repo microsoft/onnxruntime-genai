@@ -2921,6 +2921,117 @@ TEST_F(EngineRunTest, DensePagedPrefixAdoptionRollsBackAfterExecutionFailure) {
   EXPECT_TRUE(warm->IsTurnComplete());
 }
 
+TEST_F(EngineRunTest, HybridPrefixCacheRestoresPagedAndFixedStateAtOneBoundary) {
+  model_ = LoadSyntheticCompositeModel();
+  auto& batching = *model_->config_->engine.dynamic_batching;
+  batching.block_size = 4;
+  batching.max_batch_size = 1;
+  batching.num_blocks = 16;
+  batching.prefix_caching = true;
+  batching.prefix_cache_max_blocks = 8;
+  auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
+  const std::array<int32_t, 9> prompt{2, 3, 4, 5, 6, 7, 8, 9, 10};
+
+  size_t cold_step = 0;
+  engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
+    ++cold_step;
+    ASSERT_EQ(context.plan->requests.size(), 1u);
+    EXPECT_LE(context.plan->requests[0].unprocessed_token_count, 4u);
+    for (const auto& binding : context.fixed_state_bindings) {
+      ExpectFixedInputRow(
+          binding, 0, cold_step == 1 ? 0.0f : static_cast<float>(cold_step - 1));
+      FillFixedOutputRow(binding, 0, static_cast<float>(cold_step));
+    }
+  });
+  auto source = CreateRequestWithPrompt(engine.engine, prompt);
+  EXPECT_EQ(RunOne(*engine.engine).request, nullptr);
+  EXPECT_EQ(source->ProcessedSequenceLength(), 4);
+  EXPECT_EQ(RunOne(*engine.engine).request, nullptr);
+  EXPECT_EQ(source->ProcessedSequenceLength(), 8);
+  EXPECT_EQ(RunOne(*engine.engine).request, source);
+  ASSERT_TRUE(source->IsTurnComplete());
+  auto fixed = engine.cache->FixedStateSnapshot();
+  ASSERT_TRUE(fixed.has_value());
+  // The checkpoint pool is bounded independently from paged retention. With one slot, capturing
+  // the 8-token boundary evicts the older 4-token fixed-state payload while retaining the deeper
+  // safe boundary.
+  EXPECT_EQ(fixed->checkpoint_count, 1u);
+  source->Close();
+
+  auto warm = CreateRequestWithPrompt(engine.engine, prompt);
+  engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
+    ASSERT_EQ(context.plan->requests.size(), 1u);
+    const auto& entry = context.plan->requests.front();
+    ASSERT_NE(entry.prefix_match, nullptr);
+    ASSERT_NE(entry.prefix_match->fixed_state_checkpoint, nullptr);
+    EXPECT_EQ(entry.prefix_match->token_count, 8u);
+    EXPECT_EQ(entry.prefix_match->blocks.size(), 2u);
+    EXPECT_EQ(entry.unprocessed_token_count, 1u);
+    for (const auto& binding : context.fixed_state_bindings) {
+      ExpectFixedInputRow(binding, 0, 2.0f);
+      FillFixedOutputRow(binding, 0, 3.0f);
+    }
+  });
+
+  const auto warm_event = RunOne(*engine.engine);
+  EXPECT_EQ(warm_event.request, warm);
+  EXPECT_EQ(warm_event.usage.cached_prompt_tokens, 8u);
+  EXPECT_EQ(warm->ProcessedSequenceLength(), 9);
+  fixed = engine.cache->FixedStateSnapshot();
+  ASSERT_TRUE(fixed.has_value());
+  EXPECT_EQ(FixedSlotFor(*fixed, warm.get()).committed_tokens, 9u);
+}
+
+TEST_F(EngineRunTest, HybridPrefixAdoptionRollbackKeepsCheckpointReusable) {
+  model_ = LoadSyntheticCompositeModel();
+  auto& batching = *model_->config_->engine.dynamic_batching;
+  batching.block_size = 4;
+  batching.num_blocks = 16;
+  batching.prefix_caching = true;
+  batching.prefix_cache_max_blocks = 8;
+  auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
+  const std::array<int32_t, 5> prompt{2, 3, 4, 5, 6};
+
+  size_t source_step = 0;
+  engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
+    ++source_step;
+    for (const auto& binding : context.fixed_state_bindings) {
+      FillFixedOutputRow(binding, 0, static_cast<float>(source_step));
+    }
+  });
+  auto source = CreateRequestWithPrompt(engine.engine, prompt);
+  EXPECT_EQ(RunOne(*engine.engine).request, nullptr);
+  EXPECT_EQ(RunOne(*engine.engine).request, source);
+  source->Close();
+  const auto before = engine.cache->FixedStateSnapshot();
+  ASSERT_TRUE(before.has_value());
+  EXPECT_EQ(before->checkpoint_count, 1u);
+
+  auto warm = CreateRequestWithPrompt(engine.engine, prompt);
+  engine.executor->SetNextFailure(
+      ScriptedExecutionFailure::RetryableBeforeExecution);
+  const auto retryable = RunOne(*engine.engine);
+  EXPECT_EQ(retryable.request, nullptr);
+  EXPECT_NE(retryable.flags & EngineEventFlagRetryable, 0u);
+  EXPECT_EQ(warm->ProcessedSequenceLength(), 0);
+  auto after = engine.cache->FixedStateSnapshot();
+  ASSERT_TRUE(after.has_value());
+  EXPECT_EQ(after->checkpoint_count, 1u);
+  EXPECT_EQ(after->committed_slots, 0u);
+
+  engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
+    ASSERT_NE(context.plan->requests[0].prefix_match, nullptr);
+    EXPECT_EQ(context.plan->requests[0].prefix_match->token_count, 4u);
+    for (const auto& binding : context.fixed_state_bindings) {
+      ExpectFixedInputRow(binding, 0, 1.0f);
+      FillFixedOutputRow(binding, 0, 2.0f);
+    }
+  });
+  const auto warm_event = RunOne(*engine.engine);
+  EXPECT_EQ(warm_event.request, warm);
+  EXPECT_EQ(warm_event.usage.cached_prompt_tokens, 4u);
+}
+
 TEST_F(EngineRunTest, CompositeMixedPrefillDefersResidentDraft) {
   model_ = LoadSyntheticCompositeModel();
   model_->config_->engine.dynamic_batching->max_scheduled_tokens = 3;

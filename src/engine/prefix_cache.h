@@ -35,6 +35,8 @@
 
 namespace Generators {
 
+class FixedStatePrefixCheckpoint;
+
 struct PrefixCacheOptions {
   bool enabled{};
   // Upper bound on blocks the index may hold. Retention beyond this evicts the least recently used
@@ -43,6 +45,10 @@ struct PrefixCacheOptions {
   // A match shorter than this is not worth adopting: the saved prefill has to outweigh the extra
   // block-table width and bookkeeping.
   size_t min_match_blocks{1};
+  // Hybrid target models require a fixed-state checkpoint at the same boundary as the paged
+  // blocks. Paged-only models leave this false and continue matching every complete block.
+  bool requires_checkpoint{};
+  size_t max_checkpoints{};
   // Content hash used to address a block. Left null in production, where PrefixCache::ChainHash is
   // used. Overridable so the collision-verification path -- distinct contents landing on the same
   // identity -- can be exercised deterministically instead of hoping to find a real collision.
@@ -55,6 +61,7 @@ struct PrefixCacheOptions {
 struct PrefixCacheMatch {
   size_t token_count{};
   std::vector<std::shared_ptr<Block>> blocks;
+  std::shared_ptr<const FixedStatePrefixCheckpoint> fixed_state_checkpoint;
 
   bool Empty() const { return blocks.empty(); }
 };
@@ -120,6 +127,15 @@ class PrefixCache {
                                                 std::span<const int32_t> tokens,
                                                 const std::shared_ptr<const BlockIdentity>& parent);
 
+  bool CanAttachCheckpoint(
+      const std::shared_ptr<const BlockIdentity>& identity) const;
+  bool AttachCheckpoint(
+      const std::shared_ptr<const BlockIdentity>& identity,
+      std::shared_ptr<const FixedStatePrefixCheckpoint> checkpoint);
+  size_t ReclaimCheckpoints(size_t checkpoints_needed);
+  size_t ReclaimableCheckpoints() const;
+  size_t CheckpointCount() const { return checkpoint_count_; }
+
   /**
    * @brief Identity hash a chain starts from, before any block has contributed to it.
    */
@@ -152,6 +168,7 @@ class PrefixCache {
   struct Entry {
     std::shared_ptr<Block> block;
     std::shared_ptr<const BlockIdentity> identity;
+    std::shared_ptr<const FixedStatePrefixCheckpoint> checkpoint;
     std::list<uint64_t>::iterator recency;
   };
 
@@ -165,6 +182,7 @@ class PrefixCache {
   std::unordered_map<uint64_t, Entry> entries_;
   // Front is the least recently used identity, back the most recently used.
   std::list<uint64_t> recency_;
+  size_t checkpoint_count_{};
   PrefixCacheMetrics metrics_;
 };
 

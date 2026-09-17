@@ -87,7 +87,9 @@ struct PagedKeyValueCache {
  public:
   explicit PagedKeyValueCache(std::shared_ptr<Model> model,
                               size_t auxiliary_bytes_per_block = 0,
-                              size_t auxiliary_reserved_memory_bytes = 0);
+                              size_t auxiliary_reserved_memory_bytes = 0,
+                              bool requires_prefix_checkpoint = false,
+                              size_t max_prefix_checkpoints = 0);
 
   bool CanAdd(std::shared_ptr<Request> request) const;
 
@@ -109,7 +111,16 @@ struct PagedKeyValueCache {
                                size_t max_adoptable_tokens);
   void SealCommittedBlocks(const void* request_id,
                            std::span<const int32_t> tokens);
+  bool CanAttachPrefixCheckpoint(const void* request_id,
+                                 size_t token_count) const;
+  bool AttachPrefixCheckpoint(
+      const void* request_id,
+      std::shared_ptr<const FixedStatePrefixCheckpoint> checkpoint);
+  size_t ReclaimPrefixCheckpoints(size_t checkpoints_needed);
+  size_t ReclaimablePrefixCheckpoints() const;
   bool PrefixCachingEnabled() const;
+  bool RequiresPrefixCheckpoint() const;
+  size_t BlockSize() const { return block_pool_->BlockSize(); }
   const PrefixCacheMetrics& PrefixMetrics() const;
 
   // Selects the active and pending requests whose immediate cache growth fits this step.
