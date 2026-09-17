@@ -13,6 +13,8 @@
 #include <type_traits>
 
 #include "models/multi_modal.h"
+#include "models/pixtral_vision_state.h"
+#include "models/qwen_vl_state.h"
 
 namespace Generators::test {
 
