@@ -392,14 +392,17 @@ def _executable_model(num_experts, top_k, hidden, inter, routed_scaling_factor=1
     return model, graph
 
 
-def _hf_reference(hidden_states, moe, top_k, routed_scaling_factor):
-    """Mirror of transformers' Lfm2MoeSparseMoeBlock (route_tokens_to_experts + experts)."""
+def _hf_reference(hidden_states, moe, top_k, routed_scaling_factor, eps=1e-6):
+    """Mirror of transformers' Lfm2MoeSparseMoeBlock (route_tokens_to_experts + experts).
+
+    `eps=0` gives the plain sum-to-one normalization that the fused MoE op applies on its own.
+    """
     x = hidden_states.reshape(-1, hidden_states.shape[-1])
     logits = x @ moe.gate.weight.T
     scores = torch.sigmoid(logits)
     _, selected = torch.topk(scores + moe.expert_bias, k=top_k, dim=-1)
     weights = torch.gather(scores, 1, selected)
-    weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-6)
+    weights = weights / (weights.sum(dim=-1, keepdim=True) + eps)
     out = torch.zeros_like(x)
     inter = moe.experts.down_proj.shape[-1]
     for token in range(x.shape[0]):
@@ -419,11 +422,15 @@ def test_lfm2_moe_executed_graph_matches_hf_routing(tmp_path, routed_scaling_fac
     generator = torch.Generator().manual_seed(7)
     model, graph = _executable_model(num_experts, top_k, hidden, inter, routed_scaling_factor)
 
-    # Token t reads router logits from column t of the gate weight (one-hot hidden states below).
+    # Token t reads router logits from column t of the gate weight (one-hot hidden states below). The
+    # expert bias selects experts 0-3 whatever their sigmoid, so the routing mass can be made arbitrarily small.
+    at_eps = float(np.log(1e-6 / top_k))  # four selected sigmoids that sum to HF's epsilon
     gate_weight = torch.zeros(num_experts, hidden)
     gate_weight[:, 0] = torch.tensor([1.5, -0.5, 0.3, 2.0, -1.0, 0.8, -2.0, 0.1])  # ordinary scores
     gate_weight[:, 1] = torch.tensor([-16.0, -16.0, -16.0, -16.0, -10.0, -11.0, -12.0, -13.0])  # tiny selected
     gate_weight[:, 2] = torch.tensor([-110.0, -111.0, -112.0, -113.0, -10.0, -11.0, -12.0, -13.0])  # flushed
+    gate_weight[:, 3] = torch.tensor([-5.0, -110.0, -111.0, -112.0, -10.0, -11.0, -12.0, -13.0])  # partly flushed
+    gate_weight[:, 4] = torch.tensor([at_eps] * top_k + [-10.0, -11.0, -12.0, -13.0])  # sum == eps
     expert_bias = torch.tensor([2.0, 2.0, 2.0, 2.0, 0.0, 0.0, 0.0, 0.0])
     moe = types.SimpleNamespace(
         gate=types.SimpleNamespace(weight=gate_weight),
@@ -439,18 +446,26 @@ def test_lfm2_moe_executed_graph_matches_hf_routing(tmp_path, routed_scaling_fac
     ir.save(model.model, model_path)
     session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
 
-    hidden_states = torch.zeros(1, 3, hidden)
-    for token in range(3):
+    num_tokens = 5
+    hidden_states = torch.zeros(1, num_tokens, hidden)
+    for token in range(num_tokens):
         hidden_states[0, token, token] = 1.0
     (actual,) = session.run(None, {"hidden": hidden_states.numpy()})
     expected = _hf_reference(hidden_states, moe, top_k, routed_scaling_factor).numpy()
-
-    # Token 1: the selected sigmoids sum to ~4.5e-7, so HF's weights sum to ~0.31 and not 1.
-    # Token 2: the selected sigmoids flush to 0 in fp32, so HF returns exactly zero.
-    assert 0.2 < np.linalg.norm(expected[0, 1]) / np.linalg.norm(actual[0, 1] / 0.31) < 1.6
-    assert np.all(expected[0, 2] == 0)
     np.testing.assert_allclose(actual, expected, rtol=1e-4, atol=1e-6)
+
+    # The allclose above is what catches a regression: tokens 1, 2 and 4 trip it if the graph drops the output
+    # scale (the fused op alone normalizes like HF with eps=0), and token 3 trips it if the clamp floor leaks
+    # routing mass to flushed experts. The checks below keep the fixture in the regime where that happens.
+    without_eps = _hf_reference(hidden_states, moe, top_k, routed_scaling_factor, eps=0.0).numpy()
+    # Token 1: the selected sigmoids sum to ~4.5e-7, so HF keeps only ~31% of the routing mass.
+    assert np.isclose(np.linalg.norm(without_eps[0, 1]) / np.linalg.norm(expected[0, 1]), 3.2215, rtol=1e-3)
+    # Token 2: the selected sigmoids flush to 0 in fp32, so HF returns exactly zero (eps=0 would be 0/0).
+    assert np.all(expected[0, 2] == 0)
     assert np.all(actual[0, 2] == 0)
+    # Token 3: one selected sigmoid survives and three flush to 0; the clamped three must get no weight.
+    # Token 4: the selected sigmoids sum to exactly HF's epsilon, so HF keeps half the routing mass.
+    assert np.isclose(np.linalg.norm(without_eps[0, 4]) / np.linalg.norm(expected[0, 4]), 2.0, rtol=1e-3)
 
 
 def _stub_base_init(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
