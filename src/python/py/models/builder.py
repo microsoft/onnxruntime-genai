@@ -194,6 +194,21 @@ def check_extra_options(
             raise ValueError("state_update_capacity requires use_paged_attention=true.")
         extra_options["state_update_capacity"] = state_update_capacity
 
+    if "max_draft_tokens" in extra_options:
+        # Keep this limit synchronized with Speculative_Element::kMaxDraftTokens in src/config.cpp
+        # and the model-builder README.
+        max_draft_tokens_limit = 16
+        message = f"max_draft_tokens must be an integer between 1 and {max_draft_tokens_limit}."
+        try:
+            # Parsed from text so a fractional value is rejected instead of truncated; the runtime
+            # treats speculative.max_draft_tokens as integral.
+            max_draft_tokens = int(str(extra_options["max_draft_tokens"]).strip())
+        except (TypeError, ValueError) as e:
+            raise ValueError(message) from e
+        if not 1 <= max_draft_tokens <= max_draft_tokens_limit:
+            raise ValueError(message)
+        extra_options["max_draft_tokens"] = max_draft_tokens
+
     if "mtp_quant_config" in extra_options:
         mtp_quant_config = extra_options["mtp_quant_config"]
         if not isinstance(mtp_quant_config, QuantConfig):
@@ -787,6 +802,11 @@ def get_args():
                 dflash2_num_draft_tokens = Override the number of draft tokens the DFlash 2 block
                     drafter proposes per step. Must be positive and no greater than the draft checkpoint's
                     block size minus its anchor token. That checkpoint limit is the default.
+                max_draft_tokens = Write `speculative.max_draft_tokens` into genai_config.json, capping how
+                    many drafted tokens the engine verifies per step. Must be between 1 and 16. Unlike
+                    dflash2_num_draft_tokens this does not change the exported drafter, so a model built
+                    once can be re-tuned by editing the config. Default is unset, which leaves the runtime
+                    default of 4 in effect.
                 dflash2_fuse_gate_up = Experimental DFlash 2 MLP gate/up projection fusion.
                     Accepts true or false (default). Requires dflash2_path. Combines gate/up
                     weights into one MatMul or MatMulNBits followed by Split. Preserves BF16
