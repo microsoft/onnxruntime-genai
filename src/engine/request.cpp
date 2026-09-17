@@ -459,6 +459,11 @@ int64_t Request::CommittedSequenceLength() const {
   return CurrentSequenceLength() - static_cast<int64_t>(staged_draft_count_);
 }
 
+std::span<const int32_t> Request::CommittedTokens() const {
+  return std::span<const int32_t>{tokens_host_}.first(
+      tokens_host_.size() - staged_draft_count_);
+}
+
 int Request::TurnEosFloor() const noexcept {
   if (turn_policy_.min_generated_tokens == 0) {
     return 0;
@@ -477,11 +482,6 @@ const char* Request::DraftTokenValidationError() const noexcept {
   }
   if (!turn_policy_.IsGreedy() && turn_policy_.top_k <= 0) {
     return "Sampled speculative draft tokens require a positive top_k.";
-  }
-  if (turn_policy_.repetition_penalty != 1.0f || turn_policy_.no_repeat_ngram_size > 0 ||
-      TurnEosFloor() > CurrentSequenceLength()) {
-    return "Speculative draft tokens require repetition_penalty 1, no_repeat_ngram_size 0, and a "
-           "turn already past its minimum generated token count.";
   }
   return nullptr;
 }

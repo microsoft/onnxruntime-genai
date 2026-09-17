@@ -40,6 +40,9 @@ struct SpeculativeStats {
   size_t dflash2_failures{};
   size_t dflash2_disables{};
   size_t dflash2_admission_misses{};
+  size_t dflash2_model_executions{};
+  size_t dflash2_proposal_executions{};
+  size_t dflash2_context_sync_executions{};
   size_t full_accept_rounds{};
   size_t partial_accept_rounds{};
   size_t zero_accept_rounds{};
