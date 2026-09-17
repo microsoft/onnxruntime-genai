@@ -2812,7 +2812,9 @@ std::string CapturedMtpEngineWarnings(const std::shared_ptr<Model>& model, int32
   SetLogBool("enabled", true);
   SetLogBool("warning", true);
 
-  { auto engine = MakeMtpDoublesEngine(model, forced_token); }
+  {
+    auto engine = MakeMtpDoublesEngine(model, forced_token);
+  }
 
   SetLogString("filename", "");
   SetLogBool("enabled", false);
