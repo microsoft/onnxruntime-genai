@@ -401,36 +401,7 @@ class Model:
         self.make_quant_config_init()
 
         # MoE-specific variables
-        num_experts = (
-            config.num_local_experts
-            if hasattr(config, "num_local_experts")
-            else config.num_experts
-            if hasattr(config, "num_experts")
-            else 0
-        )
-        top_k_experts = config.num_experts_per_tok if hasattr(config, "num_experts_per_tok") else 0
-        swiglu_limit = config.swiglu_limit if hasattr(config, "swiglu_limit") else None
-        self.moe_attrs = {
-            "op_type": "MoE",                                # MoE op to use
-            "num_experts": num_experts,                      # Number of experts in MoE layer
-            "top_k": top_k_experts,                          # Number of experts to select in MoE layer
-            "activation_alpha": 1.0,                         # Alpha parameter used in activation function
-            "activation_beta": 0.0,                          # Beta parameter used in activation function
-            "activation_type": self.activation,              # Activation function for MoE layer
-            "expert_weight_bits": -1,                        # Number of bits used in quantized MoE weights (only INT4 or INT8 are supported).
-            "normalize_routing_weights": False,              # Normalize routing weights in MoE layer
-            "swiglu_fusion": 0,                              # Fusion level for SwiGLU activation function
-            "swiglu_limit": swiglu_limit,                    # Value used to clamp results into a certain range in SwiGLU activation function
-            "use_sparse_mixer": False,                       # Use SparseMixer in MoE layer (used in Phi-3.5 MoE)
-            "router_sentinel": None,                         # Router score given to unselected experts when the model selects them in-graph (e.g. LFM2-MoE)
-            "num_dense_layers": 0,                           # Leading decoder layers that keep a dense MLP instead of a MoE layer (e.g. LFM2-MoE)
-            "use_expert_bias": False,                        # Select experts on scores + a load-balancing bias but mix with the unbiased scores (e.g. LFM2-MoE)
-            "routed_scaling_factor": 1.0,                    # Multiplier applied to the routed experts' output (e.g. LFM2-MoE)
-            "weights_prepacked": 0,                          # CUDA QMoE layout: -1=auto/omit, 0=raw, 1=CUTLASS-prepacked
-            "quant_type": "int",                             # QMoE quantization type: "int" (INT4/INT8), "fp4" (MXFP4), or "nvfp4" (NVFP4).
-            "global_scale_names": {},                        # Per-layer QMoE global-scale initializer names, when required.
-            "zero_point_names": {},                          # Per-layer QMoE zero-point initializer names, when required.
-        }
+        self.make_moe_attrs_init(config)
         self.make_moe_init()
 
         # LM head-specific variables
@@ -1018,6 +989,38 @@ class Model:
             )
         elif not isinstance(self.quant_config, QuantConfig):
             raise TypeError("_quant_config must be a QuantConfig instance")
+
+    def make_moe_attrs_init(self, config):
+        num_experts = (
+            config.num_local_experts
+            if hasattr(config, "num_local_experts")
+            else config.num_experts
+            if hasattr(config, "num_experts")
+            else 0
+        )
+        top_k_experts = config.num_experts_per_tok if hasattr(config, "num_experts_per_tok") else 0
+        swiglu_limit = config.swiglu_limit if hasattr(config, "swiglu_limit") else None
+        self.moe_attrs = {
+            "op_type": "MoE",                                # MoE op to use
+            "num_experts": num_experts,                      # Number of experts in MoE layer
+            "top_k": top_k_experts,                          # Number of experts to select in MoE layer
+            "activation_alpha": 1.0,                         # Alpha parameter used in activation function
+            "activation_beta": 0.0,                          # Beta parameter used in activation function
+            "activation_type": self.activation,              # Activation function for MoE layer
+            "expert_weight_bits": -1,                        # Number of bits used in quantized MoE weights (only INT4 or INT8 are supported).
+            "normalize_routing_weights": False,              # Normalize routing weights in MoE layer
+            "swiglu_fusion": 0,                              # Fusion level for SwiGLU activation function
+            "swiglu_limit": swiglu_limit,                    # Value used to clamp results into a certain range in SwiGLU activation function
+            "use_sparse_mixer": False,                       # Use SparseMixer in MoE layer (used in Phi-3.5 MoE)
+            "router_sentinel": None,                         # Router score given to unselected experts when the model selects them in-graph (e.g. LFM2-MoE)
+            "num_dense_layers": 0,                           # Leading decoder layers that keep a dense MLP instead of a MoE layer (e.g. LFM2-MoE)
+            "use_expert_bias": False,                        # Select experts on scores + a load-balancing bias but mix with the unbiased scores (e.g. LFM2-MoE)
+            "routed_scaling_factor": 1.0,                    # Multiplier applied to the routed experts' output (e.g. LFM2-MoE)
+            "weights_prepacked": 0,                          # CUDA QMoE layout: -1=auto/omit, 0=raw, 1=CUTLASS-prepacked
+            "quant_type": "int",                             # QMoE quantization type: "int" (INT4/INT8), "fp4" (MXFP4), or "nvfp4" (NVFP4).
+            "global_scale_names": {},                        # Per-layer QMoE global-scale initializer names, when required.
+            "zero_point_names": {},                          # Per-layer QMoE zero-point initializer names, when required.
+        }
 
     def make_moe_init(self):
         # MoE quantization scheme comes from `quant_config.moe.type` ("int4"/"int8"/"mxfp4"/"nvfp4"), which maps to
@@ -5097,8 +5100,13 @@ class Model:
         raise NotImplementedError("MoE router construction must be implemented by the model class.")
 
     def make_moe_router_shape(self, last_dim=None):
-        """Shape of a per-token router tensor: one row per token, `num_experts` (or `last_dim`) columns."""
-        return ["batch_size * sequence_length", self.moe_attrs["num_experts"] if last_dim is None else last_dim]
+        """Shape of a per-token router tensor: one row per token, `num_experts` (or `last_dim`) columns.
+
+        The row dim follows `make_hidden_state_shape`: paged attention flattens tokens to `num_tokens`,
+        so the router tensors must declare the same symbolic dim as the MoE op's input.
+        """
+        rows = "num_tokens" if self.use_paged_attention else "batch_size * sequence_length"
+        return [rows, self.moe_attrs["num_experts"] if last_dim is None else last_dim]
 
     def make_moe_subgraph(self, layer_id, moe, root_input, router_probs=None, output_scale=None):
         # `router_probs` and `output_scale` are whatever the model's `make_moe_router` returned; models
@@ -5419,20 +5427,25 @@ class Model:
 
         ``weights`` is a single expert's weight of logical shape ``[N, K]``
         (quantized along the last/``K`` axis). Returns ``(qweight, scales)`` where
-        ``qweight`` is ``[N, K/pack]`` uint8 (2 INT4 elements per byte; INT8 is
-        one element per byte) and ``scales`` is ``[N, K/block_size]`` float scales
-        (SIGNED by default on this blockwise path — the MLAS ``default``
-        convention). Layout matches ``quantize_matmul_{4,8}bits``.
+        ``qweight`` is ``[N, ceil(K/pack)]`` uint8 (2 INT4 elements per byte; INT8
+        is one element per byte) and ``scales`` is ``[N, ceil(K/block_size)]``
+        float scales (SIGNED by default on this blockwise path — the MLAS
+        ``default`` convention). Layout matches ``quantize_matmul_{4,8}bits``.
         """
         bits = int(self.moe_attrs["expert_weight_bits"])
         block_size = self.quant_attrs["qmoe_block_size"]
-        return CudaQuantizer.matmulnbits_blockwise_quantize(
+        qweight, scales = CudaQuantizer.matmulnbits_blockwise_quantize(
             weights,
             bits,
             block_size,
             unsigned_full_range=True,
             signed_scale=True,
         )
+        # The quantizer pads K up to whole blocks. The QMoE op validates raw storage as [E, N, ceil(K/pack)]
+        # and its kernels handle a partial trailing block, so drop the padding bytes; the scales already
+        # have ceil(K/block_size) columns.
+        pack = 8 // bits
+        return qweight[:, : (weights.shape[-1] + pack - 1) // pack], scales
 
     def _symmetric_blockwise_quantize(self, weights, block_size):
         """Original symmetric blockwise encoding with positive scales; kept for the TRT-RTX EP."""

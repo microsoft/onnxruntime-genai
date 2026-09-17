@@ -472,8 +472,8 @@ class LFM2MoEModel(LFM2Model):
         return router_probs_name
 
     def make_moe_subgraph(self, layer_id, moe, root_input, router_probs=None, output_scale=None):
-        if router_probs is None or output_scale is None:
-            raise ValueError("LFM2-MoE needs the masked router scores and output scale returned by make_moe_router.")
+        # `make_moe` always passes the pair returned by `make_moe_router`; the defaults only keep the
+        # base-class signature.
         basename = f"/model/layers.{layer_id}/moe"
         op_type = self.moe_attrs["op_type"]
         names = self.make_moe_expert_names(layer_id)

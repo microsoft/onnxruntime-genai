@@ -12,59 +12,45 @@ selected experts and a sentinel elsewhere, and scales the op output by
 
 from __future__ import annotations
 
-import importlib.util
-import sys
 import types
-from pathlib import Path
 
 import numpy as np
 import onnxruntime as ort
 import pytest
 import torch
+from _builder_test_utils import load_builder_module
 
-BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
-sys.path.insert(0, str(BUILDERS_DIR.parent))
-
-
-def _load_builder_module(module_name):
-    spec = importlib.util.spec_from_file_location(f"models.builders.{module_name}", BUILDERS_DIR / f"{module_name}.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[f"models.builders.{module_name}"] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-sys.modules.setdefault("models", types.ModuleType("models"))
-builders_package = sys.modules.setdefault("models.builders", types.ModuleType("models.builders"))
-builders_package.__path__ = [str(BUILDERS_DIR)]
-
-base_module = _load_builder_module("base")
-lfm2_module = _load_builder_module("lfm2")
+base_module = load_builder_module("base")
+lfm2_module = load_builder_module("lfm2")
 ir = base_module.ir
 Model = base_module.Model
 LFM2Model = lfm2_module.LFM2Model
 LFM2MoEModel = lfm2_module.LFM2MoEModel
 
 
+def _stub_base_init(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+    """Stand-in for Model.__init__ that runs only the real MoE attribute hooks (unquantized experts)."""
+    self.ep = ep
+    self.activation = "silu"
+    self.quant_config = types.SimpleNamespace(moe=types.SimpleNamespace(type="none", weights_prepacked=-1))
+    self.make_moe_attrs_init(config)
+    self.make_moe_init()
+
+
 def _moe_attrs(num_experts, top_k, use_expert_bias, routed_scaling_factor):
-    return {
-        "op_type": "MoE",
-        "num_experts": num_experts,
-        "top_k": top_k,
-        "activation_alpha": 1.0,
-        "activation_beta": 0.0,
-        "activation_type": "swiglu",
-        "normalize_routing_weights": True,
-        "swiglu_fusion": 1,
-        "swiglu_limit": None,
-        "use_sparse_mixer": False,
-        "router_sentinel": -10000.0,
-        "num_dense_layers": 0,
-        "use_expert_bias": use_expert_bias,
-        "routed_scaling_factor": routed_scaling_factor,
-        "zero_point_names": {},
-        "global_scale_names": {},
-    }
+    """`moe_attrs` as the real constructors build them: base defaults plus the LFM2-MoE overrides."""
+    config = types.SimpleNamespace(
+        num_experts=num_experts,
+        num_experts_per_tok=top_k,
+        norm_topk_prob=True,
+        num_dense_layers=0,
+        moe_intermediate_size=32,
+        use_expert_bias=use_expert_bias,
+        routed_scaling_factor=routed_scaling_factor,
+    )
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(LFM2Model, "__init__", _stub_base_init)
+        return LFM2MoEModel(config, ir.DataType.FLOAT, ir.DataType.FLOAT, "cpu", None, {}).moe_attrs
 
 
 def _recording_model(io_dtype, *, num_experts=8, top_k=2, use_expert_bias=True, routed_scaling_factor=1.0):
@@ -329,11 +315,13 @@ def test_make_moe_expert_names_follows_op_type(op_type):
     }
 
 
-def test_make_moe_router_shape_is_per_token():
+@pytest.mark.parametrize("use_paged_attention,rows", [(False, "batch_size * sequence_length"), (True, "num_tokens")])
+def test_make_moe_router_shape_follows_the_token_layout(use_paged_attention, rows):
     model = Model.__new__(Model)
     model.moe_attrs = {"num_experts": 8}
-    assert model.make_moe_router_shape() == ["batch_size * sequence_length", 8]
-    assert model.make_moe_router_shape(last_dim=2) == ["batch_size * sequence_length", 2]
+    model.use_paged_attention = use_paged_attention
+    assert model.make_moe_router_shape() == [rows, 8]
+    assert model.make_moe_router_shape(last_dim=2) == [rows, 2]
 
 
 @pytest.mark.parametrize("op_type", ["MoE", "QMoE"])
@@ -361,15 +349,6 @@ def test_lfm2_moe_subgraph_feeds_masked_router_probs_and_scales_the_output(monke
     assert mul.op_type == "Mul"
     assert mul.inputs == [f"/model/layers.4/moe/{op_type}/output_0", "output_scale"]
     assert model.layernorm_attrs["skip_input"] == "/model/layers.4/moe/Mul/output_0"
-
-
-def test_lfm2_moe_subgraph_requires_router_outputs(monkeypatch):
-    model = _recording_model(ir.DataType.FLOAT16)
-    monkeypatch.setattr(model, "make_moe_op", lambda name, **kwargs: None)
-    with pytest.raises(ValueError, match="make_moe_router"):
-        model.make_moe_subgraph(4, _moe_module(), "hidden")
-    with pytest.raises(ValueError, match="make_moe_router"):
-        model.make_moe_subgraph(4, _moe_module(), "hidden", "masked_probs")
 
 
 def _executable_model(num_experts, top_k, hidden, inter, routed_scaling_factor=1.0):
@@ -466,11 +445,6 @@ def test_lfm2_moe_executed_graph_matches_hf_routing(tmp_path, routed_scaling_fac
     # Token 3: one selected sigmoid survives and three flush to 0; the clamped three must get no weight.
     # Token 4: the selected sigmoids sum to exactly HF's epsilon, so HF keeps half the routing mass.
     assert np.isclose(np.linalg.norm(without_eps[0, 4]) / np.linalg.norm(expected[0, 4]), 2.0, rtol=1e-3)
-
-
-def _stub_base_init(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-    self.moe_attrs = {}
-    self.ep = ep
 
 
 def test_lfm2_moe_rejects_unnormalized_topk(monkeypatch):

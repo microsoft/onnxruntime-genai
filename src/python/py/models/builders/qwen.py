@@ -812,7 +812,7 @@ class Qwen35MoETextModel(Qwen35TextModel):
                 f"/model/constants/INT64/{[-1, self.moe_attrs['num_experts']]}",
             ],
             dtype=self.io_dtype,
-            shape=["batch_size * sequence_length", self.moe_attrs["num_experts"]],
+            shape=self.make_moe_router_shape(),
         )
 
     def make_moe_subgraph(self, layer_id, moe, root_input):
