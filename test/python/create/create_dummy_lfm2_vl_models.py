@@ -30,13 +30,8 @@ import json
 import os
 
 import numpy as np
-
-try:
-    import onnx
-    from onnx import TensorProto, helper, numpy_helper
-except ImportError:
-    print("onnx package required: pip install onnx")
-    exit(1)
+import onnx
+from onnx import TensorProto, helper, numpy_helper
 
 HIDDEN_SIZE = 32
 NUM_KV_HEADS = 2
