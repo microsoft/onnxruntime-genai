@@ -195,6 +195,36 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
     dflash2_draft_widths_.reserve(max_batch_size);
     dflash2_drafts_.reserve(max_batch_size);
   }
+  WarnOnClampedDraftWidth();
+}
+
+void Engine::WarnOnClampedDraftWidth() const {
+  // Without a hosted drafter nothing reads speculative.max_draft_tokens, so there is nothing to
+  // clamp. Log() asserts that logging is enabled, so the guard has to come before the call.
+  if ((!dflash2_drafter_ && !mtp_model_) || !g_log.enabled || !g_log.warning) {
+    return;
+  }
+  const auto requested = static_cast<size_t>(model_->config_->speculative.max_draft_tokens);
+  // MaxDraftTokensPerStep() already folds the state-update capacity, the paged query limit and
+  // kMaxDraftTokensPerStep into one number, so a single warning can name the real width.
+  size_t effective = MaxDraftTokensPerStep();
+  if (dflash2_drafter_) {
+    effective = std::min(effective, dflash2_drafter_->NumDraftTokens());
+  }
+  if (requested <= effective) {
+    return;
+  }
+  try {
+    Log("warning",
+        "speculative.max_draft_tokens is " + std::to_string(requested) + " but this engine " +
+            (effective == 0
+                 ? "cannot verify draft tokens, so speculative decoding is disabled."
+                 : "can verify at most " + std::to_string(effective) +
+                       " per step, so each step will draft only " + std::to_string(effective) +
+                       " tokens."));
+  } catch (...) {
+    // Diagnostics must not turn a constructible Engine into a construction failure.
+  }
 }
 
 Engine::~Engine() {
@@ -248,7 +278,7 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
   }
   std::shared_ptr<DecoderOnly_Model> mtp_model;
   size_t mtp_bytes_per_block = 0;
-  if (!model->config_->model.mtp.filename.empty()) {
+  if (model->config_->model.mtp.IsEnabled()) {
     if (!model->config_->engine.dynamic_batching) {
       throw std::runtime_error("An Engine-hosted MTP head requires dynamic batching.");
     }

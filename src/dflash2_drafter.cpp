@@ -132,7 +132,7 @@ size_t Dflash2GraphBlockTableColumnLimit(size_t context_length, size_t paged_blo
 
 std::unique_ptr<Config> CreateDflash2Config(const Config& config) {
   const auto& dflash2 = config.model.dflash2;
-  if (!config.model.mtp.filename.empty()) {
+  if (config.model.mtp.IsEnabled()) {
     throw std::runtime_error(
         "An Engine model cannot configure both model.mtp and model.dflash2.");
   }

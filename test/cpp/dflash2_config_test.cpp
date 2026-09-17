@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -11,6 +12,7 @@
 #include <gtest/gtest.h>
 
 #include "dflash2_drafter.h"
+#include "engine/step_plan.h"
 #include "ort_genai.h"
 
 namespace Generators::test {
@@ -184,6 +186,13 @@ TEST(Dflash2ConfigTest, RejectsSimultaneousMtpDrafter) {
   auto config = MakeDflash2Config();
   config.model.mtp.filename = "mtp.onnx";
   EXPECT_THROW(CreateDflash2Config(config), std::runtime_error);
+}
+
+TEST(Dflash2ConfigTest, AllowsDisabledMtpMetadata) {
+  auto config = MakeDflash2Config();
+  config.model.mtp.filename = "mtp.onnx";
+  config.model.mtp.enabled = false;
+  EXPECT_NO_THROW(CreateDflash2Config(config));
 }
 
 TEST(Dflash2ConfigTest, PreservesTargetProviderOptions) {
@@ -862,6 +871,64 @@ TEST(Dflash2ConfigTest, JoinsOnlyFromAnEligibleTurnAtSequenceStart) {
   EXPECT_TRUE(Dflash2CanJoin(/*draft_eligible=*/true, /*first_position=*/0));
   EXPECT_FALSE(Dflash2CanJoin(/*draft_eligible=*/false, /*first_position=*/0));
   EXPECT_FALSE(Dflash2CanJoin(/*draft_eligible=*/true, /*first_position=*/1));
+}
+
+namespace {
+
+// Captures whatever WarnOnClampedDraftWidth logs for one config.
+std::string CapturedDraftWidthWarnings(const Config& config) {
+  const fs_std::path log_path =
+      fs_std::temp_directory_path() /
+      ("draft_width_warning_" + std::to_string(reinterpret_cast<uintptr_t>(&config)) + ".log");
+  fs_std::remove(log_path);
+  SetLogString("filename", log_path.string());
+  SetLogBool("enabled", true);
+  SetLogBool("warning", true);
+
+  WarnOnClampedDraftWidth(config);
+
+  SetLogString("filename", "");
+  SetLogBool("enabled", false);
+  std::ifstream stream{log_path};
+  std::stringstream contents;
+  contents << stream.rdbuf();
+  stream.close();
+  fs_std::remove(log_path);
+  return contents.str();
+}
+
+}  // namespace
+
+TEST(Dflash2ConfigTest, WarnsWhenTheDrafterCannotSupplyTheConfiguredDraftWidth) {
+  Config config = MakeDflash2Config();
+  config.speculative.max_draft_tokens = 3;  // equals num_draft_tokens, nothing is clamped
+  EXPECT_EQ(CapturedDraftWidthWarnings(config), "");
+
+  config.speculative.max_draft_tokens = 5;
+  EXPECT_NE(CapturedDraftWidthWarnings(config).find("model.dflash2.num_draft_tokens"),
+            std::string::npos);
+
+  config.model.dflash2.is_dspark = true;
+  EXPECT_NE(CapturedDraftWidthWarnings(config).find("model.dspark.num_draft_tokens"),
+            std::string::npos);
+}
+
+TEST(Dflash2ConfigTest, DoesNotWarnAboutHostingLimitsAtConfigLoad) {
+  Config config = MakeDflash2Config();
+  // These bounds depend on which speculative path the Engine hosts, so the Engine reports them.
+  config.model.dflash2.num_draft_tokens = 16;
+  config.model.decoder.state_update_capacity = 1;
+  config.speculative.max_draft_tokens = 16;
+  EXPECT_EQ(CapturedDraftWidthWarnings(config), "");
+}
+
+TEST(Dflash2ConfigTest, DoesNotWarnAboutDraftWidthWithoutABlockDrafter) {
+  Config config = MakeDflash2Config();
+  // MTP's ceiling is an ONNX output that no session has loaded yet, so it cannot be checked here.
+  config.model.dflash2.filename.clear();
+  config.model.mtp.filename = "mtp.onnx";
+  config.speculative.max_draft_tokens = 16;
+  EXPECT_EQ(CapturedDraftWidthWarnings(config), "");
 }
 
 }  // namespace Generators::test
