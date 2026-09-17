@@ -2853,9 +2853,11 @@ TEST_F(EngineRunTest, DensePagedPrefixCacheSkipsCommittedFullBlocks) {
     observed_adopted_prefix = warm->AdoptedPrefixLength();
     observed_processed_length = warm->ProcessedSequenceLength();
   });
-  EXPECT_EQ(RunOne(*engine.engine).request, warm);
+  const auto warm_event = RunOne(*engine.engine);
+  EXPECT_EQ(warm_event.request, warm);
 
   ASSERT_TRUE(warm->IsTurnComplete());
+  EXPECT_EQ(warm_event.usage.cached_prompt_tokens, 8u);
   ASSERT_EQ(engine.executor->decoded_token_counts.size(), 2u);
   EXPECT_EQ(engine.executor->decoded_token_counts[1], 1u);
   EXPECT_EQ(observed_adopted_prefix, 8u);
@@ -2865,6 +2867,14 @@ TEST_F(EngineRunTest, DensePagedPrefixCacheSkipsCommittedFullBlocks) {
   EXPECT_EQ(metrics->hits, 1u);
   EXPECT_EQ(metrics->matched_tokens, 8u);
   EXPECT_TRUE(ValidateCacheInvariants(engine.cache->Snapshot()).empty());
+
+  engine.executor->SetExecutionCallback({});
+  const std::array<int32_t, 1> continuation{11};
+  warm->BeginTurn(continuation);
+  const auto continuation_event = RunOne(*engine.engine);
+  EXPECT_EQ(continuation_event.request, warm);
+  EXPECT_EQ(continuation_event.usage.prompt_tokens, continuation.size());
+  EXPECT_EQ(continuation_event.usage.cached_prompt_tokens, 0u);
 }
 
 TEST_F(EngineRunTest, DensePagedPrefixAdoptionRollsBackAfterExecutionFailure) {

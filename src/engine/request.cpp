@@ -244,6 +244,7 @@ uint64_t Request::CommitTurnAdmission(
   guidance_logits_processor_ = std::move(admission.pending_guidance);
   guidance_transaction_checkpoint_.reset();
   turn_policy_ = admission.policy;
+  turn_cached_prompt_tokens_ = 0;
   // Every terminal path already discarded the previous turn's pending reseed, so this simply
   // records what this turn asked for: nothing when the seed is omitted, or a new basis that becomes
   // durable only once a sampling step commits.
@@ -806,6 +807,7 @@ void Request::StagePrefixAdoption(size_t adopted_tokens) {
   }
   processed_sequence_length_ = static_cast<int64_t>(adopted_tokens);
   adopted_prefix_length_ = adopted_tokens;
+  turn_cached_prompt_tokens_ = adopted_tokens;
   prefix_adoption_staged_ = true;
 }
 
@@ -815,6 +817,7 @@ void Request::RollbackPrefixAdoption() noexcept {
   }
   processed_sequence_length_ = 0;
   adopted_prefix_length_ = 0;
+  turn_cached_prompt_tokens_ = 0;
   prefix_adoption_staged_ = false;
   scheduled_token_count_ = 0;
 }

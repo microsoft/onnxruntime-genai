@@ -1277,7 +1277,7 @@ bool Engine::CancelRequest(const std::shared_ptr<Request>& request, uint64_t tur
   terminal.usage = {
       counters.prompt_tokens,
       counters.generated_tokens,
-      0};
+      request->TurnCachedPromptTokens()};
   if (has_existing_event) {
     existing->flags |= terminal.flags;
     existing->finish_reason = terminal.finish_reason;
@@ -2064,7 +2064,7 @@ void Engine::AppendEventsFromStep(
     event.usage = {
         request->TurnPromptTokens(),
         request->TurnGeneratedTokens(),
-        0};
+        request->TurnCachedPromptTokens()};
   };
 
   for (size_t i = 0; i < result.visible_token_count; ++i) {
@@ -2124,7 +2124,7 @@ EngineEvent Engine::FailUnserviceableRequest(const void* request_id) {
   event.usage = {
       request->TurnPromptTokens(),
       request->TurnGeneratedTokens(),
-      0};
+      request->TurnCachedPromptTokens()};
   return event;
 }
 
@@ -2235,7 +2235,7 @@ EngineEvent Engine::EventFromStepError(
       event.usage = {
           request->TurnPromptTokens(),
           request->TurnGeneratedTokens(),
-          0};
+          request->TurnCachedPromptTokens()};
       const auto existing = std::find_if(
           fatal_events_.rbegin(), fatal_events_.rend(),
           [&request](const EngineEvent& pending) {
