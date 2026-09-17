@@ -263,7 +263,7 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
     CheckResult(OrtxTensorResultGetAt(audio_result.get(), 0, audio_features_owner.ToBeAssigned()));
     OrtxTensor* audio_features = audio_features_owner.get();
 
-    EmplaceProcessedTensor(*named_tensors, Config::Defaults::AudioEmbedsName, audio_features, audio_features_type_, allocator);
+    EmplaceProcessedTensor(thread_pool_, *named_tensors, Config::Defaults::AudioEmbedsName, audio_features, audio_features_type_, allocator);
 
     // Create input_features_mask: all-True for single-clip inference (no padding)
     // Shape matches audio features: [batch, time] bool
@@ -352,7 +352,7 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
                                std::make_shared<Tensor>(std::move(trimmed_target)));
       }
     } else {
-      EmplaceProcessedTensor(*named_tensors, Config::Defaults::PixelValuesName, pixel_values, pixel_values_type_, allocator);
+      EmplaceProcessedTensor(thread_pool_, *named_tensors, Config::Defaults::PixelValuesName, pixel_values, pixel_values_type_, allocator);
     }
 
     named_tensors->emplace(std::string(Config::Defaults::NumImageTokens), std::make_shared<Tensor>(std::move(num_img_tokens)));
@@ -388,10 +388,10 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
       } else {
         if (pixel_position_ids_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
           named_tensors->emplace(std::string(Config::Defaults::PixelPositionIdsName),
-                                 std::make_shared<Tensor>(ProcessTensor<int32_t>(pixel_position_ids, allocator)));
+                                 std::make_shared<Tensor>(ProcessTensor<int32_t>(thread_pool_, pixel_position_ids, allocator)));
         } else {
           named_tensors->emplace(std::string(Config::Defaults::PixelPositionIdsName),
-                                 std::make_shared<Tensor>(ProcessTensor<int64_t>(pixel_position_ids, allocator)));
+                                 std::make_shared<Tensor>(ProcessTensor<int64_t>(thread_pool_, pixel_position_ids, allocator)));
         }
       }
     }
