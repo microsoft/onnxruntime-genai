@@ -24,10 +24,11 @@ namespace {
 
 TEST(ThreadPoolTests, NullPoolRunsSynchronously) {
   std::vector<int> values(7);
-  ThreadPool::TryParallelFor(nullptr, values.size(), 1.0,
+  const auto total = static_cast<std::ptrdiff_t>(values.size());
+  ThreadPool::TryParallelFor(nullptr, total, 1.0,
                              [&](std::ptrdiff_t first, std::ptrdiff_t last) {
                                EXPECT_EQ(first, 0);
-                               EXPECT_EQ(last, values.size());
+                               EXPECT_EQ(last, total);
                                std::fill(values.begin() + first, values.begin() + last, 1);
                              });
   EXPECT_EQ(values, std::vector<int>(7, 1));
@@ -48,11 +49,12 @@ TEST(ThreadPoolTests, CoversEveryItemExactlyOnce) {
     std::vector<std::atomic<int>> visits(1000);
     for (auto& visit : visits)
       visit.store(0);
-    ThreadPool::TryParallelFor(&pool, visits.size(), 100.0,
+    const auto total = static_cast<std::ptrdiff_t>(visits.size());
+    ThreadPool::TryParallelFor(&pool, total, 100.0,
                                [&](std::ptrdiff_t first, std::ptrdiff_t last) {
                                  EXPECT_GE(first, 0);
                                  EXPECT_LE(first, last);
-                                 EXPECT_LE(last, visits.size());
+                                 EXPECT_LE(last, total);
                                  for (auto i = first; i < last; ++i)
                                    ++visits[static_cast<size_t>(i)];
                                });
@@ -85,9 +87,9 @@ TEST(ThreadPoolTests, NestedCallsRunSynchronously) {
     ThreadPool::TryParallelFor(&pool, 5, 100000.0, [&](auto inner_first, auto inner_last) {
       EXPECT_EQ(inner_first, 0);
       EXPECT_EQ(inner_last, 5);
-      inner_items += static_cast<int>(inner_last - inner_first);
+      inner_items.fetch_add(static_cast<int>(inner_last - inner_first));
     });
-    outer_items += static_cast<int>(last - first);
+    outer_items.fetch_add(static_cast<int>(last - first));
   });
   EXPECT_EQ(outer_items.load(), 100);
   EXPECT_GT(inner_items.load(), 0);
@@ -107,7 +109,9 @@ TEST(ThreadPoolTests, PropagatesExceptionsAndRemainsReusable) {
   for (int invocation = 0; invocation < 50; ++invocation) {
     std::atomic<int> count{};
     ThreadPool::TryParallelFor(&pool, 100, 1000.0,
-                               [&](auto first, auto last) { count += static_cast<int>(last - first); });
+                               [&](auto first, auto last) {
+                                 count.fetch_add(static_cast<int>(last - first));
+                               });
     EXPECT_EQ(count.load(), 100);
   }
 }
@@ -120,10 +124,35 @@ TEST(ThreadPoolTests, StopsAssigningChunksAfterException) {
         if (first == 0)
           throw std::runtime_error("stop");
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
-        processed += static_cast<int>(last - first);
+        processed.fetch_add(static_cast<int>(last - first));
       }),
       std::runtime_error);
   EXPECT_LT(processed.load(), 1000);
+}
+
+TEST(ThreadPoolTests, SerializesConcurrentTopLevelSubmissions) {
+  ThreadPool pool{3};
+  std::atomic<int> first_count{};
+  std::atomic<int> second_count{};
+  std::atomic<bool> start{};
+
+  auto submit = [&](std::atomic<int>& count) {
+    while (!start.load(std::memory_order_acquire))
+      std::this_thread::yield();
+    ThreadPool::TryParallelFor(&pool, 1000, 100.0, [&](auto first, auto last) {
+      std::this_thread::sleep_for(std::chrono::microseconds(50));
+      count.fetch_add(static_cast<int>(last - first));
+    });
+  };
+
+  std::thread first{submit, std::ref(first_count)};
+  std::thread second{submit, std::ref(second_count)};
+  start.store(true, std::memory_order_release);
+  first.join();
+  second.join();
+
+  EXPECT_EQ(first_count.load(), 1000);
+  EXPECT_EQ(second_count.load(), 1000);
 }
 
 TEST(ThreadPoolTests, ComputeCompatibility) {

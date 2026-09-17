@@ -6,12 +6,12 @@
 #include <cstddef>
 #include <cstring>
 #include <limits>
-#include <span>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
 
 #include "threadpool.h"
+#include "span.h"
 
 namespace Generators {
 namespace detail {
