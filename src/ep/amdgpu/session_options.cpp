@@ -118,6 +118,13 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
   // DirectML backend: host-accessible decode inputs.
   session_options.AddConfigEntry("ep.directml.enable_host_accessible", "1");
 
+  // Drop any cached allocator so device init rebuilds one for this model. The device's allocator is
+  // resolved per session and is not knowable here, so a cached allocator from a prior model may not
+  // match this one and must not be reused. Safe for sequential models: the previous model's device
+  // buffers are freed before this runs.
+  GetOrtGlobals()->device_allocators_[static_cast<int>(DeviceType::AMDGPU)] = {};
+  ResetAMDGPUInterfaceAllocatorState();
+
   AppendExecutionProviderV2(session_options, provider_options,
                             DeviceType::AMDGPU, kAMDGPUExecutionProviderName);
 

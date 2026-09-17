@@ -193,6 +193,30 @@ struct InterfaceImpl : DeviceInterface {
     ort_memory_info_ = &ort_allocator_->GetInfo();
   }
 
+  // Drop all allocator-derived state so a subsequent InitOrt can re-bind cleanly: nulling
+  // ort_allocator_ satisfies InitOrt's assert(!ort_allocator_), and clearing ort_pinned_allocator_
+  // makes InitDeviceAllocators re-fetch the host-accessible allocator.
+  void ResetOrt() {
+    ort_allocator_ = nullptr;
+    ort_memory_info_ = nullptr;
+    ort_pinned_allocator_ = nullptr;
+    device_id_ = 0;
+  }
+
+  // Forward the caller's provider options to the trivial init session created by
+  // EnsureDeviceOrtInit. That session is used only to construct the device allocator that is then
+  // cached and reused for the model, so it must be configured the same way as the model session.
+  // The init session otherwise starts from an empty option set, which can cause it to build a
+  // different allocator than the one the model actually uses.
+  void ShapeInitSessionProviderOptions(Config::ProviderOptions& init_options,
+                                       const Config::ProviderOptions* user_options) const override {
+    if (user_options) {
+      for (const auto& opt : user_options->options) {
+        init_options.options.emplace_back(opt);
+      }
+    }
+  }
+
   Ort::Allocator& GetAllocator() override {
     return *ort_allocator_;
   }
@@ -296,6 +320,10 @@ struct PinnedInputsImpl : DeviceInterface {
   Ort::Allocator* GetHostAccessibleAllocator() override { return base_.PinnedAllocator(); }
   std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override { return base_.GetMemoryInfo(); }
   std::string GetExecutionProviderName() const override { return base_.GetExecutionProviderName(); }
+  void ShapeInitSessionProviderOptions(Config::ProviderOptions& init_options,
+                                       const Config::ProviderOptions* user_options) const override {
+    base_.ShapeInitSessionProviderOptions(init_options, user_options);
+  }
 
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
     return std::make_shared<PinnedMemory>(size, base_.PinnedAllocator());
@@ -343,6 +371,14 @@ DeviceInterface* GetAMDGPUInterface() {
   if (!g_amdgpu_device)
     g_amdgpu_device = std::make_unique<AMDGPU::InterfaceImpl>();
   return g_amdgpu_device.get();
+}
+
+void ResetAMDGPUInterfaceAllocatorState() {
+  // Null the allocator state in place; do NOT destroy the singleton. Its pointer is the model's
+  // p_device_ for the model's whole lifetime, so destroying it here would dangle p_device_.
+  // g_amdgpu_pinned_inputs aliases the same base singleton and needs no separate reset.
+  if (g_amdgpu_device)
+    g_amdgpu_device->ResetOrt();
 }
 
 namespace AMDGPU {
