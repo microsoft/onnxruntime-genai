@@ -17,6 +17,7 @@ list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/dflash2_config_test.
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/kv_cache_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/reinit_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/search_checkpoint_tests.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry_helpers_tests.cpp")
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)
   message(STATUS "Including CUDA kernel tests in the build.")
@@ -99,6 +100,17 @@ if (NOT MSVC)
 endif()
 
 add_test(NAME UnitTests COMMAND unit_tests)
+
+add_executable(telemetry_helpers_tests
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry_helpers_tests.cpp")
+target_include_directories(telemetry_helpers_tests PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+)
+target_link_libraries(telemetry_helpers_tests PRIVATE GTest::gtest)
+set_target_properties(telemetry_helpers_tests PROPERTIES
+  FOLDER "Tests"
+)
+add_test(NAME TelemetryHelpersTests COMMAND telemetry_helpers_tests)
 
 # Standalone shutdown / re-initialization tests. Isolated in their own executable because they call
 # OgaShutdown(), which resets process-global GenAI state (env, device interfaces, add-on libraries,
