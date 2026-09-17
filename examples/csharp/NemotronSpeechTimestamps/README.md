@@ -2,7 +2,7 @@
 
 This sample streams audio through Nemotron Speech and builds its output only from completed segment
 events. It enables `timestamp_level: "segment"` with a configuration overlay and prints each segment
-as `[StartTime]SegmentText` when the segment completes.
+as `[StartTime - StopTime] SegmentText` when the segment completes.
 
 ```bash
 dotnet run --project examples/csharp/NemotronSpeechTimestamps -- \

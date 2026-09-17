@@ -130,25 +130,25 @@ std::unique_ptr<NamedTensors> NemotronStreamingProcessor::Process(const float* a
   if (audio_buffer_.size() >= chunk_size) {
     const float* chunk_data = audio_buffer_.data();
     const bool timestamps_enabled = nemotron_config_.TimestampsEnabled();
-    const int64_t chunk_start_sample = timestamps_enabled ? consumed_samples_ : 0;
+    const int64_t chunk_start_sample = !timestamps_enabled ? 0 : consumed_samples_;
 
     // VAD check: drop chunk if prolonged silence detected
     if (ShouldDropChunk(chunk_data, chunk_size)) {
       audio_buffer_.erase(audio_buffer_.begin(),
                           audio_buffer_.begin() + static_cast<ptrdiff_t>(chunk_size));
-      if (timestamps_enabled) consumed_samples_ += static_cast<int64_t>(chunk_size);
+      if (!timestamps_enabled) return nullptr;
+      consumed_samples_ += static_cast<int64_t>(chunk_size);
       return nullptr;
     }
 
     auto mel = BuildMelTensor(chunk_data, chunk_size);
     audio_buffer_.erase(audio_buffer_.begin(),
                         audio_buffer_.begin() + static_cast<ptrdiff_t>(chunk_size));
-    if (timestamps_enabled) consumed_samples_ += static_cast<int64_t>(chunk_size);
     auto result = std::make_unique<NamedTensors>();
     result->emplace(Config::Defaults::AudioFeaturesName, std::make_shared<Tensor>(std::move(mel)));
-    if (timestamps_enabled) {
-      AddTimestampChunkOrigin(*result, chunk_start_sample);
-    }
+    if (!timestamps_enabled) return result;
+    consumed_samples_ += static_cast<int64_t>(chunk_size);
+    AddTimestampChunkOrigin(*result, chunk_start_sample);
     return result;
   }
 
@@ -163,17 +163,16 @@ std::unique_ptr<NamedTensors> NemotronStreamingProcessor::Flush() {
   const size_t chunk_size = static_cast<size_t>(nemotron_config_.chunk_samples);
   const size_t consumed_tail_samples = audio_buffer_.size();
   const bool timestamps_enabled = nemotron_config_.TimestampsEnabled();
-  const int64_t chunk_start_sample = timestamps_enabled ? consumed_samples_ : 0;
+  const int64_t chunk_start_sample = !timestamps_enabled ? 0 : consumed_samples_;
   audio_buffer_.resize(chunk_size, 0.0f);  // Pad with silence
 
   auto mel = BuildMelTensor(audio_buffer_.data(), chunk_size);
   audio_buffer_.clear();
-  if (timestamps_enabled) consumed_samples_ += static_cast<int64_t>(consumed_tail_samples);
   auto result = std::make_unique<NamedTensors>();
   result->emplace(Config::Defaults::AudioFeaturesName, std::make_shared<Tensor>(std::move(mel)));
-  if (timestamps_enabled) {
-    AddTimestampChunkOrigin(*result, chunk_start_sample);
-  }
+  if (!timestamps_enabled) return result;
+  consumed_samples_ += static_cast<int64_t>(consumed_tail_samples);
+  AddTimestampChunkOrigin(*result, chunk_start_sample);
   return result;
 }
 

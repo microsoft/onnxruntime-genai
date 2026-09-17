@@ -84,7 +84,8 @@ static void DecodeSegments(Generator generator, TokenizerStream tokenizerStream,
 
 static void AppendSegments(TimestampDecodeResult result, StringBuilder timestampedTranscript) {
   foreach (var segment in result.Segments) {
-    string timestampedSegment = $"[{segment.StartTime:F2}]{segment.Text}";
+    string separator = segment.Text.Length > 0 && char.IsWhiteSpace(segment.Text[0]) ? "" : " ";
+    string timestampedSegment = $"[{segment.StartTime:F2} - {segment.StopTime:F2}]{separator}{segment.Text}";
     timestampedTranscript.Append(timestampedSegment);
     Console.Write(timestampedSegment);
   }
