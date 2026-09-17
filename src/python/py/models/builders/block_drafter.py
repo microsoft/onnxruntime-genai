@@ -343,25 +343,61 @@ class BlockDrafterBuilder:
                 block_size=int(weight.shape[1]),
             )
         elif self.lm_head_quant is not None:
-            self.make_lm_head_nbits(name, root, output)
+            self.make_lm_head_nbits(name, root, output, weight)
         else:
             self.make_initializer(weight.T, "lm_head.MatMul.weight", to=self.external_dtype)
             self.make_node("MatMul", [root, "lm_head.MatMul.weight"], [output], name=name)
         self.make_value(output, self.external_dtype, [rows, self.vocab_size])
         return output
 
-    def make_lm_head_nbits(self, name, root, output):
+    def make_lm_head_nbits(self, name, root, output, weight):
         """Emit the LM head as `MatMulNBits` under the *target's* initializer names.
 
-        No weights are produced here: `adopt_target_lm_head` copies the target's once it has
-        been saved. Quantizing the same tensor a second time would round it through a second
-        implementation (`CudaQuantizer` here, ORT's `MatMulNBitsQuantizer` there), which both
-        defeats `share_initializers` and leaves the drafter scoring drafts with a head the
-        target does not verify with.
+        Normally no weights are produced here: `adopt_target_lm_head` copies the target's once
+        it has been saved. Quantizing the same tensor a second time would round it through a
+        second implementation (`CudaQuantizer` here, ORT's `MatMulNBitsQuantizer` there), which
+        both defeats `share_initializers` and leaves the drafter scoring drafts with a head the
+        target does not verify with. A private raw head is emitted only when the target's
+        prepacked layout is incompatible with the drafter's activation type.
         """
         bits = self.lm_head_quant["bits"]
         qweight_name = f"lm_head.MatMul.weight_Q{bits}"
         scales_name = "lm_head.MatMul.weight_scales"
+        if not self.lm_head_quant.get("adopt_target", True):
+            block_size = self.lm_head_quant["block_size"]
+            prepack = self.lm_head_quant["prepack"]
+            weight = weight.to(to_torch_dtype(self.external_dtype))
+            use_ort_quantizer = block_size in (16, 32, 64, 128, 256)
+            if prepack:
+                qweight, scales = CudaQuantizer.matmulnbits_prepacked_blockwise_quantize(
+                    weight,
+                    bits,
+                    block_size,
+                    force_arch=90 if prepack == 2 else 80,
+                    use_ort_quantizer=use_ort_quantizer,
+                )
+            else:
+                qweight, scales = CudaQuantizer.matmulnbits_blockwise_quantize(
+                    weight,
+                    bits,
+                    block_size,
+                    flatten_qweight=False,
+                    use_ort_quantizer=use_ort_quantizer,
+                )
+            self.make_initializer(qweight, qweight_name)
+            self.make_initializer(scales, scales_name, to=self.external_dtype)
+            self.make_node(
+                "MatMulNBits",
+                [root, qweight_name, scales_name],
+                [output],
+                name=name,
+                domain="com.microsoft",
+                bits=bits,
+                block_size=block_size,
+                K=self.hidden_size,
+                N=self.vocab_size,
+            )
+            return
         node = self.make_node(
             "MatMulNBits",
             [root, qweight_name, scales_name],

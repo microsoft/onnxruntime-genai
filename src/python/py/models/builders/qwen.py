@@ -1163,7 +1163,19 @@ class Qwen35MoEModel(MTPModel):
                 "which this exporter does not know how to reuse."
             )
             return quant
-        quant["lm_head"] = {"bits": head_bits, "block_size": block_size}
+        adopt_target = not (prepack and self.decoder.io_dtype != ir.DataType.FLOAT16)
+        if not adopt_target:
+            print(
+                "Keeping a private raw quantized block-drafter LM head because its BF16 layout "
+                "cannot adopt the target's prepacked quantized weight."
+            )
+            prepack = 0
+        quant["lm_head"] = {
+            "bits": head_bits,
+            "block_size": block_size,
+            "prepack": prepack,
+            "adopt_target": adopt_target,
+        }
         return quant
 
     def block_drafter_embed_quant(self):
@@ -1260,8 +1272,25 @@ class Qwen35MoEModel(MTPModel):
         self.dflash2.adopt_target_lm_head(target_model_path)
         self.dflash2.adopt_target_embedding(target_model_path)
         self.dflash2.save_model(output_dir)
+        adopted_head = set()
+        private_head = set()
+        if getattr(self.dflash2, "lm_head_quant", None) is not None:
+            bits = self.dflash2.lm_head_quant["bits"]
+            head_initializers = {
+                f"lm_head.MatMul.weight_Q{bits}",
+                "lm_head.MatMul.weight_scales",
+            }
+            if self.dflash2.lm_head_quant.get("adopt_target", True):
+                adopted_head = head_initializers
+            else:
+                private_head = head_initializers
         self.dflash2_shared_initializers = self.share_initializers(
-            output_dir, self.decoder.filename, self.dflash2.filename
+            output_dir,
+            self.decoder.filename,
+            self.dflash2.filename,
+            adopt_source_initializers=adopted_head,
+            required_source_initializers=adopted_head,
+            excluded_source_initializers=private_head,
         )
         self.warn_unshared_lm_head(self.dflash2, self.dflash2_shared_initializers, "DFlash 2")
 
@@ -1274,7 +1303,7 @@ class Qwen35MoEModel(MTPModel):
         guarantee that the drafter scores with the head the target verifies with.
         """
         head = getattr(drafter, "lm_head_quant", None)
-        if head is None:
+        if head is None or not head.get("adopt_target", True):
             return
         weight_name = f"lm_head.MatMul.weight_Q{head['bits']}"
         if any(entry["name"] == weight_name for entry in shared):

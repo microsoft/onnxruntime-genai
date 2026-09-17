@@ -463,8 +463,8 @@ def test_quantized_drafter_reuses_the_targets_lm_head_names():
     assert quant["bits"] == 4
     assert quant["block_size"] == 32
     assert quant["prepack"] == 1
-    # The head is not quantized here at all; it is adopted from the target under these names.
-    assert quant["lm_head"] == {"bits": 4, "block_size": 32}
+    # Matching metadata lets the drafter adopt the target's exact quantized head during save.
+    assert quant["lm_head"] == {"bits": 4, "block_size": 32, "prepack": 1, "adopt_target": True}
 
 
 @pytest.mark.parametrize(
@@ -526,6 +526,8 @@ def test_private_quantized_drafter_head_is_not_shared(tmp_path):
     model.dflash2 = types.SimpleNamespace(
         filename="dflash2.onnx",
         lm_head_quant={"bits": 4, "block_size": 32, "prepack": 0, "adopt_target": False},
+        adopt_target_lm_head=lambda _target_model_path: None,
+        adopt_target_embedding=lambda _target_model_path: None,
         save_model=lambda _output_dir: None,
     )
     captured = {}
