@@ -16,7 +16,7 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<
     : State{params, model},
       model_{model},
       kv_cache_(model_.p_device_kvcache_->CreateKeyValueCache(*this)),
-      recurrent_state_(CreateRecurrentState(*this)),
+      recurrent_state_(CreateRecurrentState(*this, /*graph_capture_variants_supported=*/true)),
       position_inputs_{model_.p_device_inputs_->CreatePositionInputs(*this, sequence_lengths_unk, model_.config_->model.decoder.inputs.attention_mask)} {
   input_ids_.Add();
   position_inputs_->Add();

@@ -883,9 +883,14 @@ class Qwen35MoETextModel(Qwen35TextModel):
 
         # Temporarily set new intermediate size from shared experts
         intermediate_size = self.intermediate_size
-        self.intermediate_size = self.shared_expert_intermediate_size
-        self.make_mlp_proj(layer_id, shared_expert, root_input)
-        self.intermediate_size = intermediate_size
+        try:
+            self.intermediate_size = self.shared_expert_intermediate_size
+            if self.mlp_attrs.get("fuse_gate_up", False):
+                self.make_mlp_proj_fused(layer_id, shared_expert, root_input)
+            else:
+                self.make_mlp_proj(layer_id, shared_expert, root_input)
+        finally:
+            self.intermediate_size = intermediate_size
         shared_output = self.mlp_attrs["output_0"]
 
         gate_matmul_name = self.make_matmul(shared_expert_gate, f"{basename}_gate/MatMul", root_input)
@@ -1071,6 +1076,7 @@ class Qwen35MoEModel(MTPModel):
         decoder_outputs = genai_config["model"]["decoder"].setdefault("outputs", {})
         decoder_outputs.setdefault("hidden_states", "hidden_states")
         genai_config["model"]["mtp"] = {
+            "enabled": True,
             "filename": "mtp.onnx",
             "num_hidden_layers": 1,
             "num_key_value_heads": self.decoder.num_kv_heads,
@@ -1130,16 +1136,17 @@ class Qwen35MoEModel(MTPModel):
     def block_drafter_quant(self, precision):
         """Resolve weight-only quantization for a block drafter, or ``None`` to keep it dense.
 
-        The drafter's LM head *is* the target's, so quantizing it the same way lets
-        ``share_initializers`` fold the two into one copy. Only the symmetric/``default``
-        naming convention is reproducible here, so any other algorithm leaves the head dense
-        rather than writing a second copy under a name that could never match.
+        The drafter's LM head *is* the target's, so its graph reproduces the target's initializer
+        names and metadata before adopting the target's exact tensors during serialization. Only
+        the symmetric/``default`` convention is reproducible here; other algorithms leave the
+        head dense rather than writing a second copy under a name that could never be shared.
         """
         if precision == "bf16":
             return None
         bits = 4 if precision == "int4" else 8
         block_size = int(self.decoder.quant_attrs["matmul_block_size"])
-        prepack = int(self.decoder.matmul_attrs["weights_prepacked"])
+        requested_prepack = int(self.decoder.matmul_attrs["weights_prepacked"])
+        prepack = requested_prepack if self.decoder.ep == "cuda" else 0
         quant = {"bits": bits, "block_size": block_size, "prepack": prepack, "lm_head": None}
 
         if self.decoder.exclude_lm_head or not self.decoder.is_lm_head_quantized():
@@ -1156,7 +1163,19 @@ class Qwen35MoEModel(MTPModel):
                 "which this exporter cannot reproduce byte-for-byte to share."
             )
             return quant
-        quant["lm_head"] = {"bits": head_bits, "block_size": block_size, "prepack": prepack}
+        adopt_target = not (prepack and self.decoder.io_dtype != ir.DataType.FLOAT16)
+        if not adopt_target:
+            print(
+                "Keeping a private raw quantized block-drafter LM head because its BF16 layout "
+                "cannot adopt the target's prepacked quantized weight."
+            )
+            prepack = 0
+        quant["lm_head"] = {
+            "bits": head_bits,
+            "block_size": block_size,
+            "prepack": prepack,
+            "adopt_target": adopt_target,
+        }
         return quant
 
     def make_dflash2_init(self, io_dtype, extra_options):
@@ -1227,29 +1246,33 @@ class Qwen35MoEModel(MTPModel):
         if self.dflash2 is None:
             return
         self.dflash2.save_model(output_dir)
+        adopted_head = set()
+        private_head = set()
+        if getattr(self.dflash2, "lm_head_quant", None) is not None:
+            bits = self.dflash2.lm_head_quant["bits"]
+            head_initializers = {
+                f"lm_head.MatMul.weight_Q{bits}",
+                "lm_head.MatMul.weight_scales",
+            }
+            if self.dflash2.lm_head_quant.get("adopt_target", True):
+                adopted_head = head_initializers
+            else:
+                private_head = head_initializers
         self.dflash2_shared_initializers = self.share_initializers(
-            output_dir, self.decoder.filename, self.dflash2.filename
+            output_dir,
+            self.decoder.filename,
+            self.dflash2.filename,
+            adopt_source_initializers=adopted_head,
+            required_source_initializers=adopted_head,
+            excluded_source_initializers=private_head,
         )
-        self.warn_unshared_lm_head(self.dflash2, self.dflash2_shared_initializers, "DFlash 2")
-
-    def warn_unshared_lm_head(self, drafter, shared, drafter_name):
-        """Report a drafter head that stayed a separate copy instead of folding onto the target's.
-
-        The drafter head is already much smaller than the dense one it replaces, so this is a
-        missed saving rather than a failure. It happens when this exporter's blockwise
-        quantizer and the target's MLAS pass round a block differently, which leaves the
-        bytes unequal even though both encode the same tensor the same way.
-        """
-        head = getattr(drafter, "lm_head_quant", None)
-        if head is None:
-            return
-        weight_name = f"lm_head.MatMul.weight_Q{head['bits']}"
-        if any(entry["name"] == weight_name for entry in shared):
-            return
-        print(
-            f"Note: the {drafter_name} LM head is quantized but did not match the target's "
-            f"'{weight_name}' byte-for-byte, so it remains a separate (still quantized) copy."
-        )
+        shared_names = {entry["name"] for entry in self.dflash2_shared_initializers}
+        missing = adopted_head - shared_names
+        if missing:
+            raise RuntimeError(
+                "The DFlash 2 LM head could not adopt the target's quantized initializers: "
+                + ", ".join(sorted(missing))
+            )
 
     def add_dflash2_to_genai_config(self, out_dir):
         config_path = os.path.join(out_dir, "genai_config.json")
@@ -1453,6 +1476,8 @@ class Qwen35MTPModel(Qwen35MoETextModel):
             preserve_quantization=self.preserve_mtp_quantization,
             load_quantized_model=self.load_weights,
             is_moe=self.is_moe_mtp,
+            cache_dir=self.cache_dir,
+            token=self.hf_token,
         )
 
     def make_offset_rmsnorm(self, name, root_input, weight_tensor):
@@ -1474,16 +1499,7 @@ class Qwen35MTPModel(Qwen35MoETextModel):
     def make_mtp_input_projection(self):
         basename = "/model/mtp"
 
-        embed_weight = "model.embed_tokens.weight"
-        self.make_initializer(self.mtp_weights.embedding.weight, embed_weight, to=self.io_dtype)
-        embed_gather = f"{basename}/embed_tokens/Gather"
-        embed_output = f"{embed_gather}/output_0"
-        self.make_node(
-            "Gather",
-            inputs=[embed_weight, self.input_names["input_ids"]],
-            outputs=[embed_output],
-            name=embed_gather,
-        )
+        embed_output = self.make_mtp_embedding(basename)
         self.make_value(embed_output, self.io_dtype, shape=self.make_hidden_state_shape())
 
         embedding_norm = self.make_offset_rmsnorm(
@@ -1506,6 +1522,13 @@ class Qwen35MTPModel(Qwen35MoETextModel):
 
         fc_name = self.make_matmul(self.mtp_weights.fc, f"{basename}/fc/MatMul", f"{concat_name}/output_0")
         return f"{fc_name}/output_0"
+
+    def make_mtp_embedding(self, basename):
+        return self.make_embedding_lookup(
+            self.mtp_weights.embedding.weight,
+            f"{basename}/embed_tokens",
+            self.mtp_weights.lm_head,
+        )
 
 
 class Qwen35DenseMTPModel(Qwen35MTPModel):

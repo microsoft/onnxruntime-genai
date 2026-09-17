@@ -12,6 +12,7 @@ import ast
 import json
 import os
 import subprocess
+import types
 from collections.abc import Sequence
 
 import numpy as np
@@ -394,6 +395,7 @@ class Model:
         self.mlp_attrs = {
             "use_proj": True,                                # Use projection style for MLP (GateProj/UpProj/DownProj)
             "use_fc": False,                                 # Use fully-connected style for MLP (FC1/FC2)
+            "fuse_gate_up": extra_options.get("fuse_mlp_gate_up", False),  # Fuse gate/up projections before quantization
             "output_0": "",                                  # Output 0 for MLP subgraph
         }
 
@@ -1207,7 +1209,7 @@ class Model:
             # each turn with a different token, so make the fallback visible rather than silent.
             print(f"Warning: could not read generation_config.json ({e}). Falling back to config.json.")
 
-        config.eos_token_id = self.union_chat_eos_token_ids(config, extra_kwargs)
+        bos_token_id, eos_token_id, pad_token_id = self.resolve_special_token_ids(config, extra_kwargs)
 
         # Create inputs dict
         inputs = {}
@@ -1263,15 +1265,6 @@ class Model:
         if "state_update.recurrent_capsule" in self.output_names:
             outputs["state_update_recurrent_capsule_names"] = "state_update.%d.recurrent_capsule"
 
-        bos_token_id = config.bos_token_id if getattr(config, "bos_token_id", None) is not None else 1
-        eos_token_id = config.eos_token_id
-        pad_token_id = (
-            config.pad_token_id
-            if getattr(config, "pad_token_id", None) is not None
-            else config.eos_token_id[0]
-            if isinstance(config.eos_token_id, list)
-            else config.eos_token_id
-        )
         genai_config = {
             "model": {
                 "bos_token_id": bos_token_id,
@@ -1362,9 +1355,11 @@ class Model:
             genai_config["model"]["decoder"]["session_options"]["provider_options"].append(ep_options)
 
         session_options = genai_config["model"]["decoder"]["session_options"]
-        if self.ep == "cuda" and self.matmul_attrs["weights_prepacked"] > 0:
-            # Prepacked nodes take the fpA_intB path unconditionally; setting the flag keeps the
-            # nodes that were skipped (unsupported N/K/block_size) on the same kernel family.
+        if self.ep == "cuda" and (
+            self.matmul_attrs["weights_prepacked"] > 0 or self.extra_options.get("enable_cuda_fpa_intb_gemm", False)
+        ):
+            # Prepacked nodes take the fpA_intB path unconditionally. This flag also selects that
+            # kernel family for raw-layout nodes and prepack-pass skips.
             session_options["ep.cuda.fpa_intb_gemm"] = "1"
         if self.extra_options.get("use_device_allocator_for_initializers", False):
             session_options["session.use_device_allocator_for_initializers"] = "1"
@@ -1514,8 +1509,8 @@ class Model:
             return [shape[0], shape[1], shape[2].replace("sequence", "sliding"), shape[3]]
         return shape
 
-    def union_chat_eos_token_ids(self, config, extra_kwargs):
-        """Return the EOS ids plus the tokenizer's end-of-turn token.
+    def resolve_special_token_ids(self, config, extra_kwargs):
+        """Resolve special-token IDs and include the tokenizer's end-of-turn token in EOS.
 
         A chat model ends every assistant turn with the tokenizer's ``eos_token`` (for
         Qwen that is ``<|im_end|>``), but ``config.json`` frequently records only
@@ -1524,26 +1519,53 @@ class Model:
         writing the following turns itself, which is especially visible with tool calls:
         it invents the tool's result instead of yielding to the caller.
         """
-        eos_token_id = config.eos_token_id
-        ids = list(eos_token_id) if isinstance(eos_token_id, list) else [eos_token_id]
-
         try:
             tokenizer = AutoTokenizer.from_pretrained(
                 self.model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs
             )
-            turn_end_id = tokenizer.convert_tokens_to_ids(tokenizer.eos_token)
         except Exception as e:
-            print(f"Warning: could not resolve the tokenizer's EOS token ({e}).")
-            return eos_token_id
+            print(f"Warning: could not resolve tokenizer special tokens ({e}).")
+            tokenizer = None
+
+        text_config = getattr(config, "text_config", None)
+
+        def resolve(attribute):
+            for source in (config, text_config, tokenizer):
+                value = getattr(source, attribute, None) if source is not None else None
+                if value is not None:
+                    return value
+            return None
+
+        bos_token_id = resolve("bos_token_id")
+        eos_token_id = resolve("eos_token_id")
+        pad_token_id = resolve("pad_token_id")
+
+        if bos_token_id is None:
+            bos_token_id = 1
+        if eos_token_id is None:
+            raise ValueError("Could not resolve eos_token_id from the model config, text config, or tokenizer")
+
+        ids = list(eos_token_id) if isinstance(eos_token_id, list) else [eos_token_id]
+        turn_end_token = getattr(tokenizer, "eos_token", None) if tokenizer is not None else None
+        try:
+            turn_end_id = tokenizer.convert_tokens_to_ids(turn_end_token) if turn_end_token is not None else None
+        except Exception as e:
+            print(f"Warning: could not resolve the tokenizer's end-of-turn token ({e}).")
+            turn_end_id = None
 
         if turn_end_id is None or turn_end_id in ids:
-            return eos_token_id
+            resolved_eos_token_id = eos_token_id
+        else:
+            print(
+                f"Adding the tokenizer's end-of-turn token {turn_end_token} (id {turn_end_id}) "
+                f"to eos_token_id from the model configuration: {eos_token_id}."
+            )
+            resolved_eos_token_id = [turn_end_id, *ids]
 
-        print(
-            f"Adding the tokenizer's end-of-turn token {tokenizer.eos_token} (id {turn_end_id}) "
-            f"to eos_token_id, which config.json reported as {eos_token_id}."
-        )
-        return [turn_end_id] + ids
+        if pad_token_id is None:
+            pad_token_id = ids[0]
+
+        return bos_token_id, resolved_eos_token_id, pad_token_id
 
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
         tokenizer = AutoTokenizer.from_pretrained(
@@ -1596,7 +1618,12 @@ class Model:
                 if lt == "linear_attention":
                     for proj in ("qkv_proj", "z_proj", "out_proj"):
                         customized_weight_config[f"/model/layers.{i}/linear_attn/{proj}/MatMul"] = {"bits": bits}
-                    for proj in ("gate_proj", "up_proj", "down_proj"):
+                    mlp_projections = (
+                        ("gate_up_proj", "down_proj")
+                        if self.mlp_attrs.get("fuse_gate_up", False)
+                        else ("gate_proj", "up_proj", "down_proj")
+                    )
+                    for proj in mlp_projections:
                         customized_weight_config[f"/model/layers.{i}/mlp/{proj}/MatMul"] = {"bits": bits}
 
         self.int4_customized_weight_config = customized_weight_config
@@ -2181,9 +2208,12 @@ class Model:
         self.make_node("Slice", inputs=inputs, outputs=[output], name=name)
         self.make_value(output, dtype, shape=shape)
 
-    def make_split(self, name, inputs, outputs, dtypes, shapes, axis=-1):
-        self.make_node("Split", inputs=inputs, outputs=outputs, name=name, axis=axis)
-        for out, dt, shape in zip(outputs, dtypes, shapes):
+    def make_split(self, name, inputs, outputs, dtypes, shapes, axis=-1, num_outputs=None):
+        kwargs = {"axis": axis}
+        if num_outputs is not None:
+            kwargs["num_outputs"] = num_outputs
+        self.make_node("Split", inputs=inputs, outputs=outputs, name=name, **kwargs)
+        for out, dt, shape in zip(outputs, dtypes, shapes, strict=True):
             self.make_value(out, dt, shape=shape)
 
     def make_mul(self, name, inputs, dtype, shape):
@@ -2774,11 +2804,15 @@ class Model:
         add = self.make_packed_add_tensor(q_add, k_add, v_add)
         self.make_add_bias(add, name, root_input, **kwargs)
 
-    def make_embedding(self, embedding):
-        basename = "/model/embed_tokens"
+    def make_embedding_lookup(self, embedding, basename, lm_head):
+        # Tied quantized: lm_head weight -> Reshape -> GatherBlockQuantized
+        # Tied float:     lm_head weight -> Transpose -> Gather
+        # Separate:       embedding weight -------------> Gather
+        can_reuse_lm_head = getattr(lm_head, "can_reuse_as_embedding", True)
 
-        # Use GatherBlockQuantized if and only if tied embeddings are enabled and export model is quantized. quantized d_type in set_onnx_dtype is INT4/UINT4
-        if self.tied_quantized_embeddings:
+        # Use GatherBlockQuantized if and only if tied embeddings are enabled and the export model
+        # is quantized. Quantized d_type in set_onnx_dtype is INT4/UINT4.
+        if self.tied_quantized_embeddings and can_reuse_lm_head:
             bits, tied_weight_name, tied_weight_scale_name, tied_weight_zp_name = self.make_tied_quantized_embedding_input_names()
 
             gather_name = f"{basename}/GatherBlockQuantized"
@@ -2814,7 +2848,7 @@ class Model:
             )
 
         # Use Transpose + Gather for tied embeddings for float embedding layers
-        elif self.tied_unquantized_embeddings:
+        elif self.tied_unquantized_embeddings and can_reuse_lm_head:
             transpose_name = f"{basename}/Transpose"
             transpose_output = f"{transpose_name}/output_0"
             self.make_transpose(
@@ -2836,6 +2870,13 @@ class Model:
             gather_name = f"{basename}/Gather"
             gather_output = f"{gather_name}/output_0"
             self.make_node("Gather", inputs=[weight, self.input_names["input_ids"]], outputs=[gather_output], name=gather_name)
+
+        return gather_output
+
+    def make_embedding(self, embedding):
+        basename = "/model/embed_tokens"
+        lm_head = getattr(getattr(self, "weights", None), "lm_head", None)
+        gather_output = self.make_embedding_lookup(embedding, basename, lm_head)
 
         self.make_value(gather_output, self.io_dtype, shape=self.make_hidden_state_shape())
 
@@ -4734,7 +4775,10 @@ class Model:
         self.make_mlp_unpacked(layer_id, mlp, root_input)
 
         if self.mlp_attrs["use_proj"]:
-            self.make_mlp_proj(layer_id, mlp, root_input)
+            if self.mlp_attrs.get("fuse_gate_up", False):
+                self.make_mlp_proj_fused(layer_id, mlp, root_input)
+            else:
+                self.make_mlp_proj(layer_id, mlp, root_input)
         elif self.mlp_attrs["use_fc"]:
             self.make_mlp_fc(layer_id, mlp, root_input)
         else:
@@ -4894,6 +4938,106 @@ class Model:
             self.make_add_bias(mlp.down_proj.bias, down_add_name, root_input=f"{down_name}/output_0")
             down_name = down_add_name
 
+        self.mlp_attrs["output_0"] = f"{down_name}/output_0"
+
+    def make_mlp_proj_fused(self, layer_id, mlp, root_input):
+        #      root_input
+        #           |
+        #   GateUpProjMatMul
+        #           |
+        #         Split
+        #        /     \
+        #   ActFunc     |
+        #        \     /
+        #          Mul
+        #           |
+        #    DownProjMatMul
+
+        if hasattr(mlp.gate_proj, "base_layer") or hasattr(mlp.up_proj, "base_layer"):
+            raise ValueError("fuse_mlp_gate_up does not support adapted gate/up projections.")
+        if getattr(mlp.gate_proj, "quant_type", "none") != "none" or getattr(
+            mlp.up_proj, "quant_type", "none"
+        ) != "none":
+            raise ValueError("fuse_mlp_gate_up requires unpacked gate/up projections.")
+        if not mlp.gate_proj.weight.is_floating_point() or not mlp.up_proj.weight.is_floating_point():
+            raise ValueError("fuse_mlp_gate_up requires floating-point gate/up projections.")
+        expected_shape = (self.intermediate_size, self.hidden_size)
+        if tuple(mlp.gate_proj.weight.shape) != expected_shape or tuple(mlp.up_proj.weight.shape) != expected_shape:
+            raise ValueError(
+                f"fuse_mlp_gate_up requires gate/up weights with shape {expected_shape}, got "
+                f"{tuple(mlp.gate_proj.weight.shape)} and {tuple(mlp.up_proj.weight.shape)}."
+            )
+
+        basename = f"/model/layers.{layer_id}/mlp"
+        gate_basename = f"{basename}/gate_proj/MatMul"
+        up_basename = f"{basename}/up_proj/MatMul"
+        excluded_nodes = set(getattr(self, "quant_attrs", {}).get("nodes_to_exclude", ()))
+        gate_excluded = getattr(mlp.gate_proj, "exclude_from_quantization", False) or gate_basename in excluded_nodes
+        up_excluded = getattr(mlp.up_proj, "exclude_from_quantization", False) or up_basename in excluded_nodes
+        if gate_excluded != up_excluded:
+            raise ValueError(
+                "fuse_mlp_gate_up cannot preserve a quantization exclusion that applies to only one of "
+                f"'{gate_basename}' and '{up_basename}'. Exclude both projections or disable fusion."
+            )
+
+        gate_bias = mlp.gate_proj.bias
+        up_bias = mlp.up_proj.bias
+        for name, bias in (("gate", gate_bias), ("up", up_bias)):
+            if bias is not None and tuple(bias.shape) != (self.intermediate_size,):
+                raise ValueError(
+                    f"fuse_mlp_gate_up requires the {name} bias to have shape "
+                    f"({self.intermediate_size},), got {tuple(bias.shape)}."
+                )
+        bias_exists = (gate_bias is not None and torch.count_nonzero(gate_bias) > 0) or (
+            up_bias is not None and torch.count_nonzero(up_bias) > 0
+        )
+        if bias_exists:
+            gate_bias = torch.zeros_like(up_bias) if gate_bias is None else gate_bias
+            up_bias = torch.zeros_like(gate_bias) if up_bias is None else up_bias
+
+        gate_up_proj = types.SimpleNamespace(
+            weight=torch.cat((mlp.gate_proj.weight, mlp.up_proj.weight)),
+            bias=torch.cat((gate_bias, up_bias)) if bias_exists else None,
+            exclude_from_quantization=gate_excluded,
+        )
+        matmul_name = self.make_matmul(gate_up_proj, f"{basename}/gate_up_proj/MatMul", root_input)
+        projection_name = matmul_name
+        if bias_exists:
+            projection_name = f"{basename}/gate_up_proj/Add"
+            self.make_add_bias(
+                gate_up_proj.bias,
+                projection_name,
+                root_input=f"{matmul_name}/output_0",
+            )
+
+        gate_name = f"{basename}/gate_proj/MatMul/output_0"
+        up_name = f"{basename}/up_proj/MatMul/output_0"
+        self.make_split(
+            f"{basename}/gate_up_proj/Split",
+            [f"{projection_name}/output_0"],
+            [gate_name, up_name],
+            [self.io_dtype, self.io_dtype],
+            [
+                self.make_hidden_state_shape(last_dim=self.intermediate_size),
+                self.make_hidden_state_shape(last_dim=self.intermediate_size),
+            ],
+            num_outputs=2,
+        )
+
+        act_fn_name = self.make_activation(layer_id, root_input=gate_name)
+        mul_name = f"{basename}/Mul"
+        self.make_mul(
+            mul_name,
+            [f"{act_fn_name}/output_0", up_name],
+            dtype=self.io_dtype,
+            shape=self.make_hidden_state_shape(last_dim=self.intermediate_size),
+        )
+
+        down_name = self.make_matmul(mlp.down_proj, f"{basename}/down_proj/MatMul", f"{mul_name}/output_0")
+        if mlp.down_proj.bias is not None and torch.count_nonzero(mlp.down_proj.bias) > 0:
+            down_add_name = f"{basename}/down_proj/Add"
+            self.make_add_bias(mlp.down_proj.bias, down_add_name, root_input=f"{down_name}/output_0")
+            down_name = down_add_name
         self.mlp_attrs["output_0"] = f"{down_name}/output_0"
 
     def make_mlp_fc(self, layer_id, mlp, root_input):

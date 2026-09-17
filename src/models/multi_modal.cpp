@@ -664,7 +664,7 @@ DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int3
       model_{model},
       position_inputs_{model_.p_device_inputs_->CreatePositionInputs(*this, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask)},
       kv_cache_{model_.p_device_kvcache_->CreateKeyValueCache(*this)},
-      recurrent_state_{CreateRecurrentState(*this)} {
+      recurrent_state_{CreateRecurrentState(*this, /*graph_capture_variants_supported=*/true)} {
   inputs_embeds_.Add();
 
   // Gemma4: decoder accepts per_layer_inputs from the embedding model
