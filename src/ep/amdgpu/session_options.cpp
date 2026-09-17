@@ -122,7 +122,11 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
   // resolved per session and is not knowable here, so a cached allocator from a prior model may not
   // match this one and must not be reused. Safe for sequential models: the previous model's device
   // buffers are freed before this runs.
-  GetOrtGlobals()->device_allocators_[static_cast<int>(DeviceType::AMDGPU)] = {};
+  auto& amdgpu_allocator = GetOrtGlobals()->device_allocators_[static_cast<int>(DeviceType::AMDGPU)];
+  amdgpu_allocator.allocator_.reset();
+  amdgpu_allocator.session_.reset();
+  amdgpu_allocator.host_accessible_allocator_ = nullptr;
+  amdgpu_allocator.device_id_ = 0
   ResetAMDGPUInterfaceAllocatorState();
 
   AppendExecutionProviderV2(session_options, provider_options,
