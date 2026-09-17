@@ -152,22 +152,29 @@ class BlockDrafterBuilder:
         ``MatMulNBits`` consumes ``[N, K]`` directly, so unlike the dense path the weight is
         not transposed. Repeat call sites reuse the initializer the first one registered.
         """
-        # The prepacked fpA_intB kernel takes FP16 activations only, so a bf16 body has to ship
-        # the plain blockwise layout even when the target it drafts for is prepacked.
+        # Keep the BF16 drafter body in the portable raw blockwise layout. Its generated
+        # session options disable the target decoder's fpA_intB selection for these nodes.
         prepack = self.quant_prepack if self.io_dtype == ir.DataType.FLOAT16 else 0
         qweight_name = f"{initializer_name}_Q{self.quant_bits}"
         scales_name = f"{initializer_name}_scales"
         if qweight_name not in self.values:
+            weight_tensor = weight_tensor.to(to_torch_dtype(self.io_dtype))
+            use_ort_quantizer = self.quant_block_size in (16, 32, 64, 128, 256)
             if prepack:
                 qweight, scales = CudaQuantizer.matmulnbits_prepacked_blockwise_quantize(
                     weight_tensor,
                     self.quant_bits,
                     self.quant_block_size,
                     force_arch=90 if prepack == 2 else 80,
+                    use_ort_quantizer=use_ort_quantizer,
                 )
             else:
                 qweight, scales = CudaQuantizer.matmulnbits_blockwise_quantize(
-                    weight_tensor, self.quant_bits, self.quant_block_size, flatten_qweight=False
+                    weight_tensor,
+                    self.quant_bits,
+                    self.quant_block_size,
+                    flatten_qweight=False,
+                    use_ort_quantizer=use_ort_quantizer,
                 )
             self.make_initializer(qweight, qweight_name)
             self.make_initializer(scales, scales_name, to=self.io_dtype)
@@ -539,6 +546,7 @@ class BlockDrafterBuilder:
     def genai_config_section(self):
         return {
             "filename": self.filename,
+            "session_options": {"ep.cuda.fpa_intb_gemm": "0"},
             "num_hidden_layers": self.num_layers,
             "num_key_value_heads": self.num_kv_heads,
             "head_size": self.head_size,

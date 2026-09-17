@@ -883,9 +883,14 @@ class Qwen35MoETextModel(Qwen35TextModel):
 
         # Temporarily set new intermediate size from shared experts
         intermediate_size = self.intermediate_size
-        self.intermediate_size = self.shared_expert_intermediate_size
-        self.make_mlp_proj(layer_id, shared_expert, root_input)
-        self.intermediate_size = intermediate_size
+        try:
+            self.intermediate_size = self.shared_expert_intermediate_size
+            if self.mlp_attrs.get("fuse_gate_up", False):
+                self.make_mlp_proj_fused(layer_id, shared_expert, root_input)
+            else:
+                self.make_mlp_proj(layer_id, shared_expert, root_input)
+        finally:
+            self.intermediate_size = intermediate_size
         shared_output = self.mlp_attrs["output_0"]
 
         gate_matmul_name = self.make_matmul(shared_expert_gate, f"{basename}_gate/MatMul", root_input)
@@ -1140,7 +1145,8 @@ class Qwen35MoEModel(MTPModel):
             return None
         bits = 4 if precision == "int4" else 8
         block_size = int(self.decoder.quant_attrs["matmul_block_size"])
-        prepack = int(self.decoder.matmul_attrs["weights_prepacked"])
+        requested_prepack = int(self.decoder.matmul_attrs["weights_prepacked"])
+        prepack = requested_prepack if self.decoder.ep == "cuda" else 0
         quant = {"bits": bits, "block_size": block_size, "prepack": prepack, "lm_head": None}
 
         if self.decoder.exclude_lm_head or not self.decoder.is_lm_head_quantized():

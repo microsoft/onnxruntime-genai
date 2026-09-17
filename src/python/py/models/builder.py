@@ -155,6 +155,8 @@ def check_extra_options(
         "use_paged_attention",
         "windowed_kv_cache",
         "use_device_allocator_for_initializers",
+        "enable_cuda_fpa_intb_gemm",
+        "fuse_mlp_gate_up",
         "exclude_mtp",
     ]
 
@@ -837,11 +839,16 @@ def get_args():
                     weights into one MatMul or MatMulNBits followed by Split. Preserves BF16
                     activations and body quantization; does not change the target or LM head.
                     Requires re-export and workload-specific performance/quality validation.
+                fuse_mlp_gate_up = Fuse each target model MLP's gate/up projections into one
+                    MatMul or MatMulNBits followed by Split. Default is false. Applies before
+                    target weight quantization and requires unpacked, unadapted gate/up
+                    floating-point projections.
                 dflash2_precision = Weight precision for the DFlash 2 drafter body: bf16 (default),
                     int4, or int8. bf16 keeps every projection dense. int4/int8 emit `MatMulNBits`
                     at the target's block size for the attention and MLP projections, leaving the
                     small dynamic-convolution and candidate-selector projections dense. The BF16
-                    body uses plain blockwise weights because fpA-intB requires FP16 activations.
+                    body is emitted in the portable raw blockwise layout, and its session disables
+                    the target decoder's fpA-intB selection for those nodes.
                     Body activations and KV caches remain bf16; this option does not quantize the
                     drafter's KV cache. When the target LM head uses a reproducible symmetric default
                     layout, the drafter head uses its actual bit width, block size, initializer names,
@@ -872,6 +879,10 @@ def get_args():
                     Qwen3.5/3.8 exports using GatedDeltaNet (paged, or linear_attn_op=gated_delta_net) require
                     state_window=0.
                     Requires ONNX Runtime kernels that implement this attribute.
+                enable_cuda_fpa_intb_gemm = Select the CUDA fpA_intB MatMulNBits kernel family
+                    for weights exported in the default raw blockwise layout. Default is false.
+                    Writes ep.cuda.fpa_intb_gemm=1 to the decoder session options and only
+                    applies to the CUDA EP. Prepacked exports enable this automatically.
                 use_paged_attention = Build the model with PagedAttention for the continuous-batching engine. Default is false.
                     Replaces GroupQueryAttention with the PagedAttention contrib op, packs all sequences into a single
                     flattened token axis (`input_ids` becomes 1D), stores the KV-cache in paged
@@ -887,9 +898,14 @@ def get_args():
                     Must be a positive multiple of 256 (required by the ONNX Runtime PagedAttention CUDA kernel).
                     Default is 256. Also written to the `engine.dynamic_batching` section of genai_config.json.
                 paged_chunk_size = Prefill chunk size written to `search.chunk_size` in genai_config.json.
-                    Only used when use_paged_attention is set and the model's sliding-window layers are served
-                    from a ring of blocks; those layers hold only `paged_chunk_size + window_size - 1` positions,
-                    so prefill must be chunked. Must be a positive integer. Default is paged_block_size.
+                    Applies only when use_paged_attention is set; it is ignored otherwise. Caps the
+                    prompt tokens ONE request contributes to a
+                    step, where max_scheduled_tokens caps the whole step, so a value at or above
+                    max_scheduled_tokens has no effect and a smaller one lets concurrent prefills
+                    interleave instead of running one request at a time. Models whose sliding-window
+                    layers are served from a ring of blocks hold only `paged_chunk_size +
+                    window_size - 1` positions, so they require chunking and default to
+                    paged_block_size. Must be a positive integer. Default is unset otherwise.
                 windowed_kv_cache = Use a reduced KV cache for sliding-window layers. Default is true.
                     With paged attention, eligible local layers use a ring of blocks while at least one full-context
                     layer remains. Without paged attention, supported execution providers use their windowed-cache
