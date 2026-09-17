@@ -508,6 +508,23 @@ def test_structured_config_resolves_after_shared_embedding_defaults(monkeypatch)
     assert config.weights.op_types == ("MatMul", "Gather")
 
 
+@pytest.mark.parametrize("execution_provider", ["NvTensorRtRtx", "trt-rtx"])
+def test_structured_trt_config_uses_normalized_provider_defaults(monkeypatch, execution_provider):
+    options = {"quant_config": {}, "use_cuda_bf16": "true"}
+    _run_check_extra_options(monkeypatch, options, execution_provider=execution_provider)
+    config = options["quant_config"]
+    assert config.io_dtype == "bf16"
+    assert config.moe.block_size == 128
+    assert config.runtime.use_qdq
+
+
+@pytest.mark.parametrize("execution_provider", ["NvTensorRtRtx", "trt-rtx"])
+def test_structured_trt_config_cannot_disable_qdq(monkeypatch, execution_provider):
+    options = {"quant_config": {"runtime": {"use_qdq": False}}}
+    with pytest.warns(UserWarning, match="use_qdq"), pytest.raises(ValueError, match="TRT-RTX.*use_qdq"):
+        _run_check_extra_options(monkeypatch, options, execution_provider=execution_provider)
+
+
 @pytest.mark.parametrize("use_qdq", [False, True])
 def test_structured_overrides_emit_real_quantized_graph(use_qdq):
     helper = onnx.helper
@@ -559,6 +576,110 @@ def test_structured_overrides_emit_real_quantized_graph(use_qdq):
         assert scale_name == "lm_head.MatMul.weight_scales"
         session = ort.InferenceSession(output.SerializeToString(), providers=["CPUExecutionProvider"])
         assert np.isfinite(session.run(None, {"input": np.ones((1, 32), np.float32)})[0]).all()
+
+
+@pytest.mark.parametrize("head_type", ["int4", "int8"])
+@pytest.mark.parametrize("selector", [{"name": "/lm_head/MatMul"}, {"preset": "last_matmul"}])
+def test_tied_quantized_embeddings_require_four_bit_head(head_type, selector):
+    model = _make_quant_model(4)
+    model.onnx_dtype = ir.DataType.INT4
+    model.extra_options = {"shared_embeddings": True}
+    model.exclude_embeds = False
+    model.exclude_lm_head = False
+    model.quant_attrs["op_types_to_quantize"] = ("MatMul", "Gather")
+    model.quant_config = base_module.QuantConfig.from_dict(
+        {"weights": {"type": "int4", "overrides": [{"match": selector, "type": head_type}]}}
+    )
+    model.make_quant_overrides()
+
+    model.make_tied_embeddings_init(types.SimpleNamespace())
+
+    assert model.tied_quantized_embeddings == (head_type == "int4")
+    assert not model.tied_unquantized_embeddings
+
+
+def test_int8_head_with_shared_embeddings_emits_runnable_graph():
+    model = _make_quant_model(4)
+    model.onnx_dtype = ir.DataType.INT4
+    model.io_dtype = ir.DataType.FLOAT
+    model.extra_options = {"shared_embeddings": True}
+    model.exclude_embeds = False
+    model.exclude_lm_head = False
+    model.quant_attrs["op_types_to_quantize"] = ("MatMul", "Gather")
+    model.quant_config = base_module.QuantConfig.from_dict(
+        {"weights": {"type": "int4", "overrides": [{"match": {"name": "/lm_head/MatMul"}, "type": "int8"}]}}
+    )
+    model.make_quant_overrides()
+    model.make_tied_embeddings_init(types.SimpleNamespace())
+    model.model = ir.from_proto(
+        onnx.helper.make_model(
+            onnx.helper.make_graph(
+                [],
+                "tied_embeddings",
+                [onnx.helper.make_tensor_value_info("input_ids", onnx.TensorProto.INT64, [1])],
+                [],
+            ),
+            opset_imports=[onnx.helper.make_opsetid("", 21)],
+            ir_version=10,
+        )
+    )
+    model.values = {value.name: value for value in model.model.graph.inputs}
+    model.node_names = set()
+    model.input_names = {"input_ids": "input_ids"}
+    weight = np.ones((32, 32), np.float32)
+    embedding_output = model.make_embedding_lookup(weight, "/model/embed_tokens", None)
+    model.make_value(embedding_output, ir.DataType.FLOAT, [1, 32])
+    model.make_initializer(weight.T, "lm_head.MatMul.weight")
+    model.make_node("MatMul", [embedding_output, "lm_head.MatMul.weight"], ["logits"], name="/lm_head/MatMul")
+    model.model.graph.outputs.append(model.make_value("logits", ir.DataType.FLOAT, [1, 32]))
+
+    output = ir.to_proto(model.to_nbits())
+    onnx.checker.check_model(output)
+    node_bits = {
+        node.op_type: onnx.helper.get_attribute_value(attribute)
+        for node in output.graph.node
+        for attribute in node.attribute
+        if attribute.name == "bits"
+    }
+    assert node_bits == {"MatMulNBits": 8}
+    gather = next(node for node in output.graph.node if node.op_type == "GatherBlockQuantized")
+    initializers = {tensor.name: tensor for tensor in output.graph.initializer}
+    assert initializers[gather.input[0]].data_type == onnx.TensorProto.INT4
+    session = ort.InferenceSession(output.SerializeToString(), providers=["CPUExecutionProvider"])
+    np.testing.assert_allclose(session.run(None, {"input_ids": np.array([0], np.int64)})[0], 32.0)
+
+
+@pytest.mark.parametrize("op_type", ["MatMul", "Gather"])
+@pytest.mark.parametrize("constant_weight", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_structured_exclusion_requires_eligible_node(op_type, constant_weight, enabled):
+    inputs = ["input", "weight"] if op_type == "MatMul" else ["weight", "input"]
+    initializers = [onnx.numpy_helper.from_array(np.ones((32, 32), np.float32), "weight")] if constant_weight else []
+    proto = onnx.helper.make_model(
+        onnx.helper.make_graph(
+            [onnx.helper.make_node(op_type, inputs, ["output"], name="target")],
+            "exclusion",
+            [
+                onnx.helper.make_tensor_value_info(
+                    "input", onnx.TensorProto.INT64 if op_type == "Gather" else onnx.TensorProto.FLOAT, [1]
+                )
+            ],
+            [onnx.helper.make_tensor_value_info("output", onnx.TensorProto.FLOAT, [1, 32])],
+            initializers,
+        ),
+        opset_imports=[onnx.helper.make_opsetid("", 21)],
+    )
+    model = _make_quant_model(4)
+    model.model = ir.from_proto(proto)
+    model.quant_attrs["op_types_to_quantize"] = (op_type,) if enabled else ()
+    model.quant_config = base_module.QuantConfig.from_dict(
+        {"weights": {"type": "int4", "overrides": [{"match": {"name": "target"}, "exclude": True}]}}
+    )
+    if constant_weight and enabled:
+        model.validate_quant_overrides()
+    else:
+        with pytest.raises(ValueError, match="eligible constant-weight"):
+            model.validate_quant_overrides()
 
 
 def test_structured_override_rejects_fused_away_name():

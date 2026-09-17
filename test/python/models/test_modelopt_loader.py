@@ -20,8 +20,8 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
-import pytest
 import onnx_ir as ir
+import pytest
 import torch
 from safetensors.torch import load_file, save_file
 
@@ -125,6 +125,13 @@ def _build_synthetic_checkpoint(d):
     with open(os.path.join(d, "config.json"), "w") as f:
         json.dump(cfg, f)
     return refs
+
+
+def test_lazy_quantized_model_retains_quantization_attributes():
+    quant_attrs = {"export_config": QuantConfig.from_dict({"checkpoint_policy": "requantize"})}
+    model = QuantizedModel("modelopt", None, quant_attrs, 32, 32, 16, 2, load_weights=False)
+    assert model.quant_attrs is quant_attrs
+    assert model.layers == []
 
 
 def test_modelopt_loader_requantization_uses_reference_tensors(tmp_path):

@@ -125,9 +125,17 @@ def test_weights_mx_dtype_block_size_conflict():
         WeightsConfig.from_dict({"type": "mxfp4", "block_size": 64})
 
 
-def test_moe_mxfp4_forces_block_size_32():
-    m = MoEConfig.from_dict({"type": "mxfp4", "block_size": 128})
-    assert m.block_size == 32
+@pytest.mark.parametrize("dtype,block_size", [("mxfp4", 32), ("nvfp4", 16)])
+def test_moe_fp4_defaults_to_fixed_block_size(dtype, block_size):
+    assert MoEConfig.from_dict({"type": dtype}).block_size == block_size
+    assert MoEConfig.from_dict({"type": dtype, "block_size": block_size}).block_size == block_size
+    with pytest.raises(ValueError, match="fixes block_size"):
+        MoEConfig.from_dict({"type": dtype, "block_size": 128})
+
+
+def test_structured_moe_block_size_cannot_conflict_with_native_default():
+    with pytest.raises(ValueError, match="fixes block_size=16"):
+        QuantConfig.from_extra_options({"moe_quant_type": "nvfp4", "quant_config": {"moe": {"block_size": 64}}})
 
 
 def test_moe_rejects_bad_prepacked():
@@ -430,6 +438,26 @@ def test_config_rejects_int8_override_with_qdq():
 def test_config_rejects_unknown_checkpoint_policy():
     with pytest.raises(ValueError, match="checkpoint_policy"):
         QuantConfig.from_dict({"checkpoint_policy": "auto"})
+
+
+@pytest.mark.parametrize("dtype", ["fp16", "bf16", "fp32"])
+def test_config_rejects_float_moe_type(dtype):
+    config = QuantConfig.from_dict({"moe": {"type": dtype}})
+    with pytest.raises(ValueError, match="moe.type must be"):
+        config.validate("cuda")
+
+
+@pytest.mark.parametrize("dtype", ["none", "int4", "int8", "mxfp4", "nvfp4"])
+def test_config_accepts_supported_moe_type(dtype):
+    QuantConfig.from_dict({"moe": {"type": dtype}}).validate("cuda")
+
+
+def test_resolved_trt_config_requires_qdq_for_integer_weights():
+    config = QuantConfig(weights=WeightsConfig(type="int4"))
+    with pytest.raises(ValueError, match="TRT-RTX.*use_qdq"):
+        config.validate("trt-rtx")
+    config.weights.type = "none"
+    config.validate("trt-rtx")
 
 
 def test_unsigned_dense_type_resolves_asymmetric_quantizer():

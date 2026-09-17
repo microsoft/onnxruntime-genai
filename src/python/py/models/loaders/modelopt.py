@@ -41,7 +41,6 @@ class ModeloptModel(QuantizedModel):
             lm_head=TensorModule(),
         )
         self.input_path = input_path
-        self.quant_attrs = quant_attrs
         self.handles = {}
         self.handle_keys = {}
 

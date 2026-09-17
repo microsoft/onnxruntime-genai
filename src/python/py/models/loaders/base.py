@@ -241,6 +241,7 @@ class QuantizedModel:
         global_bits=None,
     ):
         self.quant_type = quant_type
+        self.quant_attrs = quant_attrs
         self.embedding = TensorModule()
         self.final_norm = TensorModule()
         self.lm_head = lm_head if lm_head is not None else TensorModule()
@@ -249,7 +250,6 @@ class QuantizedModel:
         if not load_weights:
             return
 
-        self.quant_attrs = quant_attrs
         self.global_group_size = (
             quant_attrs["config"]["group_size"] if global_group_size is None else global_group_size
         )

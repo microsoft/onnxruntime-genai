@@ -277,6 +277,37 @@ def test_inherited_mtp_preserves_native_expert_format_over_integer_default():
     assert model.moe_attrs["block_size"] == 16
 
 
+@pytest.mark.parametrize(
+    "settings,conflicts",
+    [
+        ({}, False),
+        ({"block_size": 16}, False),
+        ({"block_size": 32}, True),
+        ({"weights_prepacked": -1}, False),
+        ({"weights_prepacked": 1}, False),
+        ({"weights_prepacked": 0}, True),
+    ],
+)
+def test_native_experts_validate_explicit_preserved_layout(settings, conflicts):
+    model = Model.__new__(Model)
+    model.quant_config = QuantConfig.from_dict({"moe": settings})
+    model.moe_attrs = {"op_type": "QMoE", "quant_type": "int", "expert_weight_bits": 4}
+    model.io_dtype = ir.DataType.BFLOAT16
+    model.make_initializer = lambda *args, **kwargs: None
+    experts = QuantizedExperts()
+    experts.quant_type = "nvfp4"
+    experts.block_size = 16
+    experts.weights_prepacked = 1
+
+    if conflicts:
+        with pytest.raises(ValueError, match="checkpoint_policy=preserve cannot apply moe"):
+            model.make_moe_expert_initializers(0, experts)
+    else:
+        model.make_moe_expert_initializers(0, experts)
+        assert model.moe_attrs["block_size"] == 16
+        assert model.moe_attrs["weights_prepacked"] == 1
+
+
 def test_mtp_quant_config_json_configures_targets_independently():
     model = _resolve(
         {

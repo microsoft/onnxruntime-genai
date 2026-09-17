@@ -260,6 +260,13 @@ class MoEConfig:
         unknown = set(data) - {"type", "block_size", "weights_prepacked"}
         if unknown:
             raise ValueError(f"unknown moe field(s): {sorted(unknown)}")
+        descriptor = resolve_dtype(data.get("type", "int4"))
+        if (
+            descriptor.kind == "mx"
+            and "block_size" in data
+            and _normalize_block_size(data["block_size"]) != descriptor.block_size
+        ):
+            raise ValueError(f"moe.type={descriptor.name} fixes block_size={descriptor.block_size}")
         return cls(
             type=data.get("type", "int4"),
             block_size=data.get("block_size", 32),
@@ -446,6 +453,13 @@ class QuantConfig:
                         merged[key][name] = copy.deepcopy(field_value) + merged[key][name]
                     else:
                         merged[key][name] = field_value
+                if (
+                    key == "moe"
+                    and "type" in setting
+                    and "block_size" not in setting
+                    and resolve_dtype(parsed.moe.type).kind == "mx"
+                ):
+                    merged[key]["block_size"] = parsed.moe.block_size
             else:
                 merged[key] = setting
         result = cls.from_dict(merged)
@@ -474,6 +488,10 @@ class QuantConfig:
             raise ValueError("FP4 MoE requires fp16 or bf16 I/O")
         if self.moe.type in ("uint4", "uint8"):
             raise ValueError("MoE supports symmetric int4/int8, not unsigned quantization")
+        if self.moe.type not in ("none", "int4", "int8", "mxfp4", "nvfp4"):
+            raise ValueError("moe.type must be none, int4, int8, mxfp4 or nvfp4; use none for graph precision")
+        if execution_provider == "trt-rtx" and weights.kind == "int" and not self.runtime.use_qdq:
+            raise ValueError("TRT-RTX integer weights require runtime.use_qdq=true")
         if self.runtime.matmulnbits_weights_prepacked and execution_provider != "cuda":
             raise ValueError("matmulnbits_weights_prepacked requires the CUDA EP")
         if self.runtime.matmulnbits_weights_prepacked and (self.runtime.use_qdq or not self.weights.symmetric):

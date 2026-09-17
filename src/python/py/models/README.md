@@ -621,7 +621,11 @@ Dense types are `int4`, `uint4`, `int8`, `uint8`, or `none` (retain graph precis
 
 Regex, layer/role selectors, compound matches, bare override lists, and unknown fields are rejected. Exact names must identify eligible emitted nodes; fusion can remove names, so disable the relevant fusion or target the fused node. An explicit type override must identify a constant-weight MatMul included in `weights.op_types`. There are no per-node group-size or FP4/FP8 conversion overrides in this interface.
 
+Exact-name exclusions also require a constant-weight MatMul or Gather included in `weights.op_types`. With `shared_embeddings=true`, an INT8 LM-head override disables quantized weight sharing: the embedding retains its separate INT4 weights. TRT-RTX (including the `NvTensorRtRtx` alias) requires `runtime.use_qdq=true` for integer dense weights; a structured configuration cannot disable this requirement.
+
 `checkpoint_policy=preserve` leaves existing supported native quantized tensors and scales intact, while applying requested quantization to floating-point tensors. Explicit requests that change native formats are errors. `requantize` explicitly permits dequantization of supported ModelOpt/compressed-tensors FP8/NVFP4 weights before the selected quantizer runs; it can change accuracy and uses additional host memory. Unsupported source-format conversions fail rather than silently ignoring the configuration. The policy is scoped to the target or MTP model being exported.
+
+Explicit MoE block sizes must match the selected FP4 format. When preserving native experts, explicit block-size and packing settings must also match the loader's native layout; omitted settings and auto packing (`weights_prepacked=-1`) retain that layout. Use `requantize` for supported conversions that change it.
 
 Hugging Face/ModelOpt metadata such as `quant_algo`, `quantized_layers`, or `exclude_modules` describes checkpoint storage and is **not** this schema. Passing it to `quant_config` raises an error; the native checkpoint loader remains responsible for reading source formats.
 

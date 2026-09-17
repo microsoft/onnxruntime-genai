@@ -135,6 +135,9 @@ def check_extra_options(
     """
     Check key-value pairs and set values correctly
     """
+    if execution_provider == "NvTensorRtRtx":
+        execution_provider = "trt-rtx"
+
     bools = [
         "is_symmetric",
         "exclude_embeds",
@@ -333,7 +336,7 @@ def check_extra_options(
             "Both 'exclude_lm_head' and 'include_hidden_states' cannot be used together. Please use only one of them at once."
         )
 
-    if execution_provider == "NvTensorRtRtx":
+    if execution_provider == "trt-rtx":
         extra_options["use_qdq"] = True
 
     if "quant_config" not in extra_options and precision == "int8" and extra_options.get("use_qdq", False):
@@ -757,9 +760,14 @@ def get_args():
                     weights.overrides is an ordered list; first match wins. Match by exact ONNX name or
                     preset (last_matmul/mixed_layers/linear_attn); set type=int4/int8 or exclude=true.
                     Structured rules precede legacy rules. Regex/composite selectors and bare lists are rejected.
+                    Exact-name rules require constant-weight nodes included in weights.op_types (exclusions too).
                     INT8 overrides require integer weight precision and QOperator (not use_qdq).
+                    An INT8 LM head uses separate INT4 embedding weights even with shared_embeddings=true.
+                    TRT-RTX/NvTensorRtRtx requires runtime.use_qdq=true for integer dense weights.
                     checkpoint_policy=preserve (default) keeps native tensors and rejects explicit format changes;
                     requantize permits supported ModelOpt/compressed-tensors conversion. HF metadata is not this schema.
+                    Explicit MoE block size/packing must match preserved native experts; -1 packing means auto.
+                    MoE types: none/int4/int8/mxfp4/nvfp4. Explicit FP4 block sizes must be 32/16 respectively.
                     Dense FP4/FP8 conversion targets are unsupported; select FP4 experts through moe.type instead.
                 algo_config = Base method for int4/int8 weight-only quantization. Default is 'default'.
                     Currently supported base methods are: 'default', 'rtn', 'k_quant'.

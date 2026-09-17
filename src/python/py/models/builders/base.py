@@ -1096,7 +1096,8 @@ class Model:
         quantized_lm_head = self.is_lm_head_quantized()
 
         if shared_embeddings:
-            self.tied_quantized_embeddings = quantized_embeds and quantized_lm_head
+            head_bits = getattr(self, "int4_customized_weight_config", {}).get("/lm_head/MatMul", {}).get("bits", 4)
+            self.tied_quantized_embeddings = quantized_embeds and quantized_lm_head and head_bits == 4
             self.tied_unquantized_embeddings = not quantized_embeds and not quantized_lm_head
         else:
             self.tied_quantized_embeddings = False
@@ -5141,6 +5142,20 @@ class Model:
         down_scales_name = f"model.layers.{layer_id}.moe.experts.down_proj.scales"
 
         if native_quant_type is not None:
+            if config is not None and config.checkpoint_policy == "preserve":
+                for field_name in ("block_size", "weights_prepacked"):
+                    native_value = getattr(experts, field_name)
+                    requested_value = getattr(config.moe, field_name)
+                    if (
+                        f"moe.{field_name}" in config.specified_fields
+                        and native_value is not None
+                        and requested_value != native_value
+                        and not (field_name == "weights_prepacked" and requested_value == -1)
+                    ):
+                        raise ValueError(
+                            f"checkpoint_policy=preserve cannot apply moe.{field_name}={requested_value} "
+                            f"to native experts with {field_name}={native_value}; use requantize instead."
+                        )
             if native_quant_type != self.moe_attrs["quant_type"]:
                 raise ValueError(
                     f"Checkpoint experts use {native_quant_type}, but QMoE is configured for "
@@ -5903,13 +5918,15 @@ class Model:
                 raise ValueError(
                     f"Quantization override for {name} cannot change native or unsupported op {node.op_type}"
                 )
-            if not override.exclude and (
-                node.op_type != "MatMul"
-                or "MatMul" not in self.quant_attrs["op_types_to_quantize"]
-                or len(node.inputs) < 2
-                or node.inputs[1] is None
-                or node.inputs[1].const_value is None
+            weight_index = 1 if node.op_type == "MatMul" else 0
+            if (
+                node.op_type not in self.quant_attrs["op_types_to_quantize"]
+                or len(node.inputs) <= weight_index
+                or node.inputs[weight_index] is None
+                or node.inputs[weight_index].const_value is None
             ):
+                raise ValueError(f"Quantization override requires an eligible constant-weight {node.op_type}: {name}")
+            if not override.exclude and node.op_type != "MatMul":
                 raise ValueError(f"Integer override requires an eligible constant-weight MatMul: {name}")
 
     def make_model(self, input_path):
