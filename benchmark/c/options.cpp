@@ -29,6 +29,9 @@ namespace {
     << "  Options:\n"
     << "    -i,--input_folder <path>\n"
     << "      Path to the ONNX model directory to benchmark, compatible with onnxruntime-genai.\n"
+    << "    --adapter <path>\n"
+    << "      Path to LoRA adapter.safetensors (int8, packed uint8, or fp16 graph-input weights).\n"
+    << "      Default: <model_dir>/adapter.safetensors if that file exists.\n"
     << "    -e,--execution_provider <provider>\n"
     << "      Execution provider to use. Valid values are: cpu, cuda, dml, NvTensorRtRtx, AMDGPU. Default: " << defaults.execution_provider << "\n"
     << "    -b,--batch_size <number>\n"
@@ -160,6 +163,8 @@ Options ParseOptionsFromCommandLine(int argc, const char* const* argv) {
         opts.max_length = ParseNumber<int64_t>(next_arg(i));
       } else if (arg == "--reuse_generator") {
         opts.reuse_generator = true;
+      } else if (arg == "--adapter") {
+        opts.adapter_path = next_arg(i);
       } else if (arg == "--use_random_tokens") {
         opts.use_random_tokens = true;
       } else if (arg == "--profile_prefill") {
