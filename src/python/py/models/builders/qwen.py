@@ -1135,14 +1135,13 @@ class Qwen35MoEModel(MTPModel):
         return precision
 
     def block_drafter_quant(self, precision):
-        """Resolve weight-only quantization for a block drafter, or ``None`` to keep it dense."""
+        """Resolve weight-only quantization for a block-drafter body, or ``None`` to keep it dense."""
         if precision == "bf16":
             return None
         return {
             "bits": 4 if precision == "int4" else 8,
             "block_size": int(self.decoder.quant_attrs["matmul_block_size"]),
             "prepack": int(self.decoder.matmul_attrs["weights_prepacked"]) if self.decoder.ep == "cuda" else 0,
-            "lm_head": self.block_drafter_lm_head_quant(),
         }
 
     def block_drafter_lm_head_quant(self):
@@ -1279,6 +1278,7 @@ class Qwen35MoEModel(MTPModel):
             self.decoder.context_length,
             num_draft_tokens=self.dflash2_attrs["num_draft_tokens"],
             quant=self.block_drafter_quant(self.dflash2_attrs["precision"]),
+            lm_head_quant=self.block_drafter_lm_head_quant(),
             embed_quant=self.block_drafter_embed_quant(),
             fuse_gate_up=self.dflash2_attrs["fuse_gate_up"],
         )

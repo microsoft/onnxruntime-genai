@@ -57,6 +57,7 @@ class DFlash2Builder(BlockDrafterBuilder):
         filename="dflash2.onnx",
         num_draft_tokens=None,
         quant=None,
+        lm_head_quant=None,
         embed_quant=None,
         fuse_gate_up=False,
     ):
@@ -72,7 +73,7 @@ class DFlash2Builder(BlockDrafterBuilder):
             self.quant_bits = quant["bits"]
             self.quant_block_size = quant["block_size"]
             self.quant_prepack = quant["prepack"]
-            self.lm_head_quant = quant["lm_head"]
+        self.lm_head_quant = lm_head_quant
         self.embed_quant = embed_quant
         self.filename = filename
         self.paged_block_size = paged_block_size

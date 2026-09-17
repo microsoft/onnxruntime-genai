@@ -62,6 +62,8 @@ def _composite(aux_layers=AUX_LAYERS, use_paged_attention=True):
         num_layers=32,
         filename="model.onnx",
         exclude_embeds=False,
+        exclude_lm_head=False,
+        is_lm_head_quantized=lambda: False,
         onnx_dtype=ir.DataType.FLOAT16,
         quantization_algo="default",
         tied_quantized_embeddings=False,
@@ -452,23 +454,47 @@ def test_precision_option_is_rejected_when_unknown(tmp_path, precision):
         )
 
 
-def test_precision_defaults_to_dense_bf16(tmp_path):
-    model = _composite()
+def test_precision_defaults_to_dense_bf16_with_adopted_target_head(tmp_path, monkeypatch):
+    captured = {}
+
+    class StubDFlash2Builder:
+        def __init__(self, *_args, **kwargs):
+            captured.update(kwargs)
+
+        def make_model(self):
+            pass
+
+    dflash2_module = importlib.import_module("models.builders.dflash2")
+    monkeypatch.setattr(dflash2_module, "DFlash2Builder", StubDFlash2Builder)
+    model = _quant_composite()
 
     model.make_dflash2_init(io_dtype=None, extra_options={"dflash2_path": _draft_checkpoint(tmp_path)})
+    model.make_dflash2_model(str(tmp_path))
 
     assert model.dflash2_attrs["precision"] == "bf16"
-    assert model.block_drafter_quant("bf16") is None
+    assert captured["quant"] is None
+    assert captured["lm_head_quant"] == {
+        "bits": 4,
+        "block_size": 32,
+        "prepack": 1,
+        "adopt_target": True,
+    }
 
 
 def test_quantized_drafter_reuses_the_targets_lm_head_names():
-    quant = _quant_composite().block_drafter_quant("int4")
+    model = _quant_composite()
+    quant = model.block_drafter_quant("int4")
 
     assert quant["bits"] == 4
     assert quant["block_size"] == 32
     assert quant["prepack"] == 1
     # Matching metadata lets the drafter adopt the target's exact quantized head during save.
-    assert quant["lm_head"] == {"bits": 4, "block_size": 32, "prepack": 1, "adopt_target": True}
+    assert model.block_drafter_lm_head_quant() == {
+        "bits": 4,
+        "block_size": 32,
+        "prepack": 1,
+        "adopt_target": True,
+    }
 
 
 @pytest.mark.parametrize(
@@ -487,20 +513,20 @@ def test_drafter_resolves_the_actual_target_lm_head_bit_width(onnx_dtype, last_m
     )
 
     head_bits, *_ = model.decoder.make_tied_quantized_embedding_input_names()
-    quant = model.block_drafter_quant("int4")
+    head_quant = model.block_drafter_lm_head_quant()
 
     assert head_bits == expected_bits
     if expected_bits == 4:
-        assert quant["lm_head"]["bits"] == expected_bits
+        assert head_quant["bits"] == expected_bits
     else:
         # The block-drafter quantizer cannot reproduce the target's Q8G initializer layout.
-        assert quant["lm_head"] is None
+        assert head_quant is None
 
 
 def test_dense_target_keeps_the_drafter_lm_head_dense():
     model = _quant_composite(weight_name=None, onnx_dtype=ir.DataType.FLOAT16)
 
-    assert model.block_drafter_quant("int4")["lm_head"] is None
+    assert model.block_drafter_lm_head_quant() is None
 
 
 # use_qdq makes the target write DequantizeLinear/MatMul over `*.weight_DQ_Q4`, so there is no
@@ -508,13 +534,13 @@ def test_dense_target_keeps_the_drafter_lm_head_dense():
 def test_qdq_target_keeps_the_drafter_lm_head_dense():
     model = _quant_composite(use_qdq=True)
 
-    assert model.block_drafter_quant("int4")["lm_head"] is None
+    assert model.block_drafter_lm_head_quant() is None
 
 
 def test_prepacked_bf16_target_keeps_a_private_raw_quantized_drafter_head():
     model = _quant_composite(io_dtype=ir.DataType.BFLOAT16)
 
-    assert model.block_drafter_quant("int4")["lm_head"] == {
+    assert model.block_drafter_lm_head_quant() == {
         "bits": 4,
         "block_size": 32,
         "prepack": 0,
@@ -525,7 +551,7 @@ def test_prepacked_bf16_target_keeps_a_private_raw_quantized_drafter_head():
 def test_non_cuda_target_ignores_requested_prepack_for_shared_drafter_head():
     model = _quant_composite(ep="webgpu")
 
-    assert model.block_drafter_quant("int4")["lm_head"] == {
+    assert model.block_drafter_lm_head_quant() == {
         "bits": 4,
         "block_size": 32,
         "prepack": 0,
@@ -598,10 +624,11 @@ def test_private_quantized_drafter_head_is_not_shared(tmp_path):
     ],
 )
 def test_unshareable_target_head_leaves_the_drafter_head_dense(kwargs):
-    quant = _quant_composite(**kwargs).block_drafter_quant("int4")
+    model = _quant_composite(**kwargs)
+    quant = model.block_drafter_quant("int4")
 
     assert quant["bits"] == 4
-    assert quant["lm_head"] is None
+    assert model.block_drafter_lm_head_quant() is None
 
 
 def test_quantized_body_emits_matmulnbits_without_transposing(tmp_path):
@@ -611,7 +638,7 @@ def test_quantized_body_emits_matmulnbits_without_transposing(tmp_path):
         ir.DataType.FLOAT16,
         paged_block_size=256,
         max_position_embeddings=128,
-        quant={"bits": 4, "block_size": 8, "prepack": 0, "lm_head": None},
+        quant={"bits": 4, "block_size": 8, "prepack": 0},
     )
 
     builder.matmul("/probe/MatMul", "hidden_states", torch.ones((16, 8)), 8, 16, "num_block")
@@ -632,7 +659,7 @@ def test_quantized_body_uses_ort_tie_breaking(tmp_path):
         ir.DataType.FLOAT16,
         paged_block_size=256,
         max_position_embeddings=128,
-        quant={"bits": 4, "block_size": 32, "prepack": 0, "lm_head": None},
+        quant={"bits": 4, "block_size": 32, "prepack": 0},
     )
     values = torch.tensor([[1.0, -1.0, 0.5, -0.5, 0.25, -0.25, 0.125, -0.125] * 4])
 
@@ -653,7 +680,7 @@ def test_bf16_body_never_prepacks_even_when_the_target_does(tmp_path):
         ir.DataType.FLOAT16,
         paged_block_size=256,
         max_position_embeddings=128,
-        quant={"bits": 4, "block_size": 8, "prepack": 1, "lm_head": None},
+        quant={"bits": 4, "block_size": 8, "prepack": 1},
     )
 
     builder.matmul("/probe/MatMul", "hidden_states", torch.ones((16, 8)), 8, 16, "num_block")
@@ -666,7 +693,7 @@ def test_bf16_body_never_prepacks_even_when_the_target_does(tmp_path):
 @pytest.mark.parametrize("bits", [None, 4, 8])
 @pytest.mark.parametrize("fuse_gate_up", [False, True])
 def test_mlp_gate_up_fusion_preserves_weight_rows(tmp_path, bits, fuse_gate_up):
-    quant = {"bits": bits, "block_size": 8, "prepack": 0, "lm_head": None} if bits else None
+    quant = {"bits": bits, "block_size": 8, "prepack": 0} if bits else None
     builder = DFlash2Builder(
         _draft_checkpoint(tmp_path),
         str(tmp_path),
@@ -742,7 +769,7 @@ def test_mlp_gate_up_fusion_execution_matches_unfused(tmp_path, bits):
             ir.DataType.FLOAT,
             paged_block_size=256,
             max_position_embeddings=128,
-            quant={"bits": bits, "block_size": 32, "prepack": 0, "lm_head": None} if bits else None,
+            quant={"bits": bits, "block_size": 32, "prepack": 0} if bits else None,
             fuse_gate_up=fused,
         )
         builder.io_dtype = ir.DataType.FLOAT
@@ -773,8 +800,8 @@ def _quantized_head_builder(tmp_path, bits=4, block_size=8):
             "bits": bits,
             "block_size": block_size,
             "prepack": 0,
-            "lm_head": {"bits": bits, "block_size": block_size, "prepack": 0, "adopt_target": True},
         },
+        lm_head_quant={"bits": bits, "block_size": block_size, "prepack": 0, "adopt_target": True},
     )
     builder.weights = {"lm_head.weight": torch.ones((builder.vocab_size, builder.hidden_size))}
     return builder
