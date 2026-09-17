@@ -667,6 +667,9 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetModelInput(OgaGenerator* gene
 
 /**
  * \brief For additional model inputs that genai does not handle, this lets the user set their values.
+ * For supported vision models, a later call appends a new turn's input_ids and images to the
+ * same conversation, retaining the decoder cache. Supply only the new turn, not the full history.
+ * This operation runs synchronously; the caller may release named_tensors after it returns.
  * \param[in] generator The generator to add the inputs to.
  * \param[in] named_tensors The named tensors to set the inputs as.
  */
@@ -774,7 +777,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* ge
 
 /**
  * \brief Returns a copy of the logits from the model as an OgaTensor on CPU. The buffer is owned by returned OgaTensor
- *        and will be released when the OgaTensor is destroyed
+ *        and will be released when the OgaTensor is destroyed. After greedy decoding ends at EOS,
+ *        returns the retained logits without running the uncommitted EOS through the model.
  * \param[in] generator The generator get the logits from
  * \param[out] out The OgaTensor containing the logits, it only contains the last token logits even in prompt processing
  * \return OgaResult containing the error message if the computation failed.

@@ -1,176 +1,94 @@
-# ONNX Runtime GenAI - AI Coding Agent Instructions
+# ONNX Runtime GenAI - Copilot Instructions
 
-## Architecture Overview
+## Build, test, and lint
 
-This is **ONNX Runtime GenAI**, a high-performance inference library for generative AI models. The codebase implements the complete generative AI loop including preprocessing, ONNX Runtime inference, logits processing, search/sampling, and KV cache management.
-
-### Core Components
-
-- **`src/models/`** - Model implementations with support for LLMs, VLMs (Vision), ALMs (Audio), and Pipeline models
-- **`src/engine/`** - Request batching engine for concurrent model execution with dynamic scheduling  
-- **`src/generators.h`** - Central generator logic coordinating the full inference pipeline
-- **`src/ort_genai.h`** - Zero-cost C++ wrapper around the C API for automatic resource management
-- **Language bindings**: Python (`src/python/`), C# (`src/csharp/`), Java (`src/java/`), Objective-C (`src/objectivec/`)
-
-### Key Abstractions
-
-```cpp
-// Core inference flow: Model -> Generator -> Tokenizer
-auto model = OgaModel::Create("phi-2");
-auto tokenizer = OgaTokenizer::Create(*model);
-auto generator = OgaGenerator::Create(*model, params);
-```
-
-The `State` class hierarchy in `src/models/model.h` handles device-specific execution, while the `Engine` class in `src/engine/` manages request batching and scheduling.
-
-## Build System & Development Workflow
-
-### Primary Build Commands
+`build.py` is the cross-platform entry point; `build.bat` and `build.sh` are thin wrappers. It configures, builds, and tests by default, builds a Python wheel, and writes to `build/<platform>/<config>/`. Native dependencies are fetched by CMake from `cmake/deps.txt`; this repository has no git submodules.
 
 ```bash
-# Cross-platform Python build script (preferred)
-python build.py --config Release --use_cuda --build_java --enable_tests
+# Install common build dependencies.
+python -m pip install -r requirements-dev.txt
 
-# Platform-specific scripts
-build.bat         # Windows batch
-build.sh          # Linux/Mac shell
+# Default CPU build: native library, Python wheel, C examples, and native tests.
+python build.py
+
+# Fast native/Python inner loop. RelWithDebInfo is the default configuration.
+python build.py --config RelWithDebInfo --parallel --skip_tests --skip_examples
+
+# Rebuild an already configured tree without rerunning CMake or tests.
+python build.py --build
+
+# Provider and binding builds.
+python build.py --use_cuda --config RelWithDebInfo
+python build.py --use_dml --config RelWithDebInfo
+python build.py --use_winml --winml_sdk_version 2.1.1 --config RelWithDebInfo
+python build.py --build_csharp --config RelWithDebInfo
+python build.py --build_java --config RelWithDebInfo
 ```
 
-### Key Build Options (cmake/options.cmake)
+CPU is the default provider. Use `--ort_home <path>` to build against a prebuilt ONNX Runtime instead of resolving one automatically. Put all CMake options in `cmake/options.cmake`; pass exceptional overrides through `--cmake_extra_defines K=V`. Run `python build.py --help` for platform, cross-compilation, and packaging flags.
 
-- `USE_CUDA/USE_DML` - Hardware acceleration backends
-- `USE_WINML` - Windows ML integration requiring `WINML_SDK_VERSION` parameter
-- `ENABLE_JAVA/ENABLE_PYTHON` - Language binding compilation
-- `USE_GUIDANCE` - Constrained generation support
-
-### WinML Build Pattern
-
-WinML builds require explicit SDK version specification:
+After building, use the matching platform/configuration directory:
 
 ```bash
-# WinML build - WINML_SDK_VERSION is mandatory
-python build.py --use_winml -DWINML_SDK_VERSION=2.1.1
+# All registered native test executables.
+ctest --test-dir build/<platform>/<config> --build-config <config> --output-on-failure
+
+# One registered native suite (UnitTests, ReInitTests, EngineUnitTests, etc.).
+ctest --test-dir build/<platform>/<config> --build-config <config> -R "^EngineUnitTests$" --output-on-failure
+
+# Python test dependencies and one Python test selection.
+python -m pip install -r test/python/requirements.txt
+python -m pytest -sv test/python/test_onnxruntime_genai_api.py -k "test_greedy_search" --test_models test/models
 ```
 
-WinML integration downloads `Microsoft.Windows.AI.MachineLearning` via NuGet and copies headers/libs to a local `ort/` directory.
+Python API tests need a built wheel installed and real model assets supplied through `--test_models`; provider-specific tests can have additional requirements under `test/python/<provider>/`. `build.py` disables native execution for ARM64/ARM64EC cross-builds, and Android/iOS do not use the normal host CTest path.
 
-### Testing
+Linting is driven by `.lintrunner.toml`. Ruff/Ruff Format cover Python except excluded paths (notably `src/python/py/models/**`), and clang-format covers C/C++/CUDA/Objective-C. CI requires clang-format 20.1.0.
 
 ```bash
-# Python tests with test models
-python -m pytest -sv test_onnxruntime_genai_api.py -k "test_name" --test_models ..\models
-
-# C++ unit tests via CMake/CTest
-ctest --build-config Release --output-on-failure
+pip install -r requirements-lintrunner.txt
+lintrunner init
+lintrunner                  # Check changed files against origin/main.
+lintrunner -a               # Auto-fix changed files.
+lintrunner --all-files      # Check the entire tree.
 ```
 
-## Code Patterns & Conventions
+## Architecture
 
-### Device Interface Pattern
+### API and generation stack
 
-Each hardware backend implements `DeviceInterface` (defined in `src/smartptrs.h`):
+- `src/ort_genai_c.h` is the stable ABI boundary: opaque `Oga*` handles, explicit create/destroy functions, and `OgaResult*` errors. `src/ort_genai.h` is a zero-cost C++ RAII layer over that API; it converts failures with `OgaCheckResult()` and owns handles through custom deletion. Keep internal C++ types behind the C ABI.
+- A `Config` resolves `genai_config.json`, model/tokenizer paths, execution providers, token IDs, and canonical graph input/output names. These configured tensor names and `SessionInfo` validation are the contract between exported ONNX models and runtime state; do not hard-code model I/O names in generator logic.
+- `Model` owns configuration, sessions, provider/device assignments, and creates a model-specific `State`. Decoder-only state composes token/position inputs, logits, KV/recurrent state, and optional hidden-state I/O around an ONNX Runtime session.
+- `Generator` creates device-specific `Search` state and model `State`. Generation advances through a strategy (`GenerateNextToken()` delegates to `strategy_->Step`), allowing ordinary, beam, speculative, and other flows to share lifecycle and state machinery.
+- `Search` is both the sampling policy and sequence owner: it holds sequences, lengths, next-token/index buffers, logits, EOS state, and checkpoint/rewind hooks. Beam search is selected for `num_beams > 1`; otherwise the selected `DeviceInterface` creates greedy/sampling search.
+- Tokenization is model-adjacent but independently constructible from a model, config, or path. It supports scalar/batch encode/decode and streaming decode; do not couple tokenizer lifetime to generation state.
 
-```cpp
-struct CudaInterface : DeviceInterface {
-  std::unique_ptr<DeviceBuffer> Allocate(size_t size) override;
-  void CopyToDevice(DeviceSpan<T> dst, std::span<const T> src) override;
-};
-```
+### Execution providers and memory
 
-### Model State Management
+Provider implementations live behind `DeviceInterface`; generation code should use `DeviceSpan`/`DeviceBuffer` and interface operations rather than call CUDA, DirectML, or CPU implementations directly. A model may assign execution, inputs, logits, scoring, and KV cache to different devices. In particular, CUDA/TRT-RTX can score on-device while other providers score on CPU, and input placement changes for providers such as WebGPU and graph capture.
 
-Models follow the `State` pattern where each model type extends the base `State` class:
+CUDA sources build into a separately loaded `onnxruntime-genai-cuda` library. The main core is normally compiled as an object target and linked into the public shared library so white-box tests can reuse internal objects; Apple framework/Xcode builds are the exception.
 
-```cpp
-struct State {
-  virtual DeviceSpan<float> Run(int total_length, 
-                               DeviceSpan<int32_t>& next_tokens) = 0;
-  virtual void RewindTo(size_t index) {}  // For session continuation
-};
-```
+### Continuous-batching Engine
 
-### Error Handling Convention
+`src/engine/` is a separate request-oriented execution path, not an extension of `Generator`. `EngineDependencies` composes a cache manager, scheduler, model executor, optional draft/MTP components, and sampler state. Static and dynamic schedulers share the same Engine surface; `engine.dynamic_batching` selects continuous batching, paged cache management, and variable-length decoder I/O.
 
-Use `OgaCheckResult()` wrapper for C API error propagation:
+Dynamic steps are transactional before event publication: plan a batch, reserve paged/fixed state, checkpoint request/search/sampler state, pack and execute once, stage samples, then commit state and publish events. Recoverable pre-publication failures restore checkpoints and reservations; unexpected publication failures make the Engine permanently unhealthy rather than exposing partial state. Preserve this boundary when changing scheduling, cache ownership, sampling, or request bookkeeping.
 
-```cpp
-OgaCheckResult(OgaCreateModel(model_path, &model));  // Throws std::runtime_error
-```
+An Engine has no worker thread. One owner thread performs Engine and Request operations and `Run()` makes synchronous progress while returning event records. Each Engine request represents one sequence (`batch_size == 1`, `num_beams == 1`); throughput comes from batching requests. Completed requests remain resident for continuation and consume cache/batch capacity until `Close()`. Keep `docs/paged_attention_engine.md` current when changing admission, scheduling, cache ownership, packed I/O, transactions, request lifecycle, or failure handling.
 
-### Memory Management
+### Language bindings and model builder
 
-- **DeviceSpan/DeviceBuffer**: Device-agnostic memory abstractions
-- **std::unique_ptr with custom deleters**: For C API resource cleanup
-- **LeakChecked<T>**: Debug-mode leak detection for core types
+Python, Java, C#, and Objective-C bindings are thin adapters over native handles. Preserve explicit native ownership/destruction and C-API error translation; avoid reimplementing core generation behavior in a binding. Python maps contiguous NumPy memory to native spans, while Java JNI transports handles as `jlong`.
 
-## Critical Integration Points
+`src/python/py/models/` exports ONNX graphs and `genai_config.json`; it is not runtime inference code. Builder output must preserve the tensor names, shapes, cache metadata, and model configuration consumed by the C++ runtime.
 
-### ONNX Runtime Dependency Management
+## Repository-specific conventions
 
-ADO pipelines obtain ORT lib/headers via three methods:
-1. **Explicit `ORT_HOME`** - Pipeline provides pre-built ORT artifacts (preferred)
-2. **Auto-download via CMake** - `cmake/ortlib.cmake` fetches from ORT-Nightly feed when `ORT_HOME` unset
-3. **Python build driver** - `tools/python/util/dependency_resolver.py` downloads NuGet packages
-
-### Model Loading Pipeline
-
-1. **Config parsing** (`src/config.cpp`) - Reads `genai_config.json` model metadata
-2. **ONNX session creation** via `onnxruntime_api.h` wrappers
-3. **Device interface selection** based on provider availability
-4. **KV cache initialization** (`src/models/io/kv_cache.cpp`) for transformer models
-
-### Multi-Modal Support
-
-Vision models (Phi-Vision) use separate processor classes:
-- `PhiImageProcessor` - Image tokenization and preprocessing
-- `MultiModalProcessor` - Coordinates text/image inputs
-
-### Execution Provider Detection
-
-Hardware acceleration auto-detection follows this priority:
-1. CUDA (if `USE_CUDA=ON` and CUDA runtime available)
-2. DirectML (Windows, if `USE_DML=ON`)
-3. CPU fallback
-
-## Project-Specific Gotchas
-
-### Windows-Specific Build Requirements
-
-- **Visual Studio 2022** required for C++20 features
-- **WinML integration** requires specific NuGet package versions (see `cmake/nuget.cmake`)
-- **Cross-compilation** for ARM64/ARM64EC supported via CMake platform flags
-
-### Model Compatibility Matrix
-
-The repo supports specific model architectures - check `src/models/model_type.h` for the canonical list. New models require:
-1. Config template in model directory
-2. State implementation extending base `State` class
-3. Optional custom processors for multi-modal inputs
-
-### Performance Considerations
-
-- **KV caching** is automatically managed but can be configured via `src/runtime_settings.cpp`
-- **Continuous decoding** (session continuation) requires careful state management
-- **Multi-LoRA** adapters use separate weight loading in `src/models/io/adapters.cpp`
-
-## Testing Strategy
-
-Tests are organized by language binding:
-- **C++ tests**: `test/` directory, focused on core API validation
-- **Python tests**: `test/python/`, includes end-to-end model testing
-- **Platform tests**: Android/iOS tests run via emulator/simulator
-
-Always test with actual model files from `test/models/` directory rather than mock data.
-
-## Model Builder Review Rules
-
-For any pull request that modifies files under `src/python/py/models/**`, reviewers and Copilot must apply:
-
-- `.github/instructions/python-model-builder.instructions.md`
-- `src/python/py/models/README.md`
-- `src/python/py/models/DESIGN.md`
-- `src/python/py/models/loaders/LOADERS.md`
-- `src/python/py/models/quantization/QUANTIZATION.md`
-
-When reviewing those files, prioritize these model-builder rules over generic guidance and flag violations explicitly.
-
+- When adding or changing a public operation, keep the C ABI, C++ RAII wrapper, relevant language bindings, and tests synchronized. Preserve opaque-handle ownership and return errors through `OgaResult*`/binding translation.
+- Use configured model I/O names and provider/device abstractions. Model-family differences belong in configuration, model/state implementations, decoder I/O, or processors—not scattered conditionals in generic generation code.
+- State that participates in speculative decoding or Engine transactions must implement matching checkpoint, commit, and rewind/restore behavior. Do not update only logical sequences while leaving KV, recurrent, sampler, or request bookkeeping state unhandled.
+- CMake options are centralized in `cmake/options.cmake`, source collections in `cmake/global_variables.cmake`, ORT resolution in `cmake/ortlib.cmake`, and fetched dependency versions in `cmake/deps.txt`.
+- Native `unit_tests` deliberately exercise the public shared-library API. Tests requiring internal symbols belong in dedicated white-box executables linked to `onnxruntime-genai-obj`, following `reinit_tests` and `engine_unit_tests`.
+- For changes under `src/python/py/models/**`, first read `.github/instructions/python-model-builder.instructions.md` plus the linked `README.md`, `DESIGN.md`, `loaders/LOADERS.md`, and `quantization/QUANTIZATION.md`. Those scoped rules take precedence, and this subtree is excluded from the repository Ruff/lintrunner configuration.

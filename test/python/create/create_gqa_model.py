@@ -41,6 +41,29 @@ def zeros_init(name, shape, dtype=np.float16):
     return numpy_helper.from_array(np.zeros(shape, dtype=dtype), name=name)
 
 
+def gqa_node(prefix, layer):
+    """The exposed-cache attention node shared by the recurrent and multimodal fixtures."""
+    return helper.make_node(
+        "GroupQueryAttention",
+        [
+            f"{prefix}.q",
+            f"{prefix}.k",
+            f"{prefix}.v",
+            f"past_key_values.{layer}.key",
+            f"past_key_values.{layer}.value",
+            "seqlens_k",
+            "total_sl",
+            "",
+            "",
+        ],
+        [f"{prefix}.attn", f"present.{layer}.key", f"present.{layer}.value"],
+        domain="com.microsoft",
+        name=f"GQA_{layer}",
+        num_heads=NUM_HEADS,
+        kv_num_heads=NUM_KV_HEADS,
+    )
+
+
 def create_decoder(output_dir):
     """Create and optimize a GQA decoder model with input_ids."""
     onnx_dtype = TensorProto.FLOAT16
@@ -160,27 +183,7 @@ def create_decoder(output_dir):
         nodes.append(helper.make_node("MatMul", [f"{p}.ln1", f"{p}.v.w"], [f"{p}.v"]))
 
         # GQA with separate Q, K, V
-        nodes.append(
-            helper.make_node(
-                "GroupQueryAttention",
-                [
-                    f"{p}.q",
-                    f"{p}.k",
-                    f"{p}.v",
-                    f"past_key_values.{li}.key",
-                    f"past_key_values.{li}.value",
-                    "seqlens_k",
-                    "total_sl",
-                    "",
-                    "",  # cos/sin cache
-                ],
-                [f"{p}.attn", f"present.{li}.key", f"present.{li}.value"],
-                domain=ms,
-                name=f"GQA_{li}",
-                num_heads=NUM_HEADS,
-                kv_num_heads=NUM_KV_HEADS,
-            )
-        )
+        nodes.append(gqa_node(p, li))
 
         # Output projection + residual
         inits.append(rand_init(f"{p}.o.w", [NUM_HEADS * HEAD_SIZE, HIDDEN_SIZE]))

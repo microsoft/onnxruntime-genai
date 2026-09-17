@@ -144,8 +144,11 @@ jobs:
       # This will also download all the test models to the test/models directory
       # These models are used by the python tests as well as C#, C++ and others.
       - name: Run the Python tests
+        env:
+          ORTGENAI_MULTIMODAL_TEST_EPS: cpu
         run: |
           export ORTGENAI_LOG_ORT_LIB=1
+          PYTHONPATH=test/python python3 -m create.create_multimodal_gqa_model --suite --output_dir build/cpu/Release/test/multimodal_gqa --devices cpu
           python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/models
 
       - name: Build the C# API and Run the C# Tests
@@ -175,3 +178,4 @@ jobs:
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$GITHUB_WORKSPACE/ort/lib
           ./build/cpu/Release/unit_tests
           ./build/cpu/Release/engine_unit_tests
+          ./build/cpu/Release/multimodal_device_tests --devices cpu

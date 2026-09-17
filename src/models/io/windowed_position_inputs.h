@@ -12,8 +12,12 @@ struct WindowedPositionInputs : PositionInputs {
 
   void Add() override;
   void Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) override;
-  void RewindTo(size_t index) override {
+  void ValidateRewindTo(size_t index) const override {
+    (void)index;
     throw std::runtime_error("WindowedPositionInputs does not support RewindTo.");
+  }
+  void RewindTo(size_t index) override {
+    ValidateRewindTo(index);
   };
 
  private:

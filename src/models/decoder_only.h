@@ -25,6 +25,7 @@ struct DecoderOnly_State : State {
 
   DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
 
+  void ValidateRewindTo(size_t index) const override;
   void RewindTo(size_t index) override;
 
   void SnapshotState(size_t position) override;

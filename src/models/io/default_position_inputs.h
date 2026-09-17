@@ -9,6 +9,7 @@ struct DefaultPositionInputs : PositionInputs {
 
   void Add() override;
   void Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) override;
+  bool SupportsContinuousDecoding() const override { return true; }
   void RewindTo(size_t index) override;
 
  private:

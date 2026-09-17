@@ -67,11 +67,14 @@ void CombinedKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_l
   is_first_update_ = false;
 }
 
-void CombinedKeyValueCache::RewindTo(size_t index) {
+void CombinedKeyValueCache::ValidateRewindTo(size_t index) const {
   if (shape_[3] <= static_cast<int>(index)) {
     throw std::runtime_error("Requested length of rewind is greater than the current length.");
   }
+}
 
+void CombinedKeyValueCache::RewindTo(size_t index) {
+  ValidateRewindTo(index);
   is_first_update_ = true;
   if (index == 0) {
     for (int i = 0; i < layer_count_; i++) {
