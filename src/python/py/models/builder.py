@@ -856,9 +856,14 @@ def get_args():
                     drafter (dflash2_path/dspark_path) shares this block size and usually has a smaller head
                     size, so it reaches its tile at a larger block than the target does.
                 paged_chunk_size = Prefill chunk size written to `search.chunk_size` in genai_config.json.
-                    Only used when use_paged_attention is set and the model's sliding-window layers are served
-                    from a ring of blocks; those layers hold only `paged_chunk_size + window_size - 1` positions,
-                    so prefill must be chunked. Must be a positive integer. Default is paged_block_size.
+                    Applies only when use_paged_attention is set; it is ignored otherwise. Caps the
+                    prompt tokens ONE request contributes to a
+                    step, where max_scheduled_tokens caps the whole step, so a value at or above
+                    max_scheduled_tokens has no effect and a smaller one lets concurrent prefills
+                    interleave instead of running one request at a time. Models whose sliding-window
+                    layers are served from a ring of blocks hold only `paged_chunk_size +
+                    window_size - 1` positions, so they require chunking and default to
+                    paged_block_size. Must be a positive integer. Default is unset otherwise.
                 windowed_kv_cache = Use a reduced KV cache for sliding-window layers. Default is true.
                     With paged attention, eligible local layers use a ring of blocks while at least one full-context
                     layer remains. Without paged attention, supported execution providers use their windowed-cache

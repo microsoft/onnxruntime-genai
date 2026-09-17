@@ -4,8 +4,10 @@
 #pragma once
 
 #include <array>
+#include <optional>
 
 #include "decoder.h"
+#include "../graph_annotation_ids.h"
 #include "../step_plan.h"
 #include "../../models/decoder_only.h"
 
@@ -25,11 +27,37 @@ void ValidatePackedPositionIdsInput(
     std::span<const char* const> symbolic_shape = {});
 
 AttentionMetadataValues GetAttentionMetadataForPlan(const StepPlan& plan);
-AttentionMetadataValues GetAttentionMetadataForGraph(size_t block_table_columns, size_t block_size);
+// `max_query_len` is the number of new tokens every sequence contributes to steps served by this
+// graph, which is one for plain decode and the verified block for speculative decode.
+AttentionMetadataValues GetAttentionMetadataForGraph(size_t max_query_len, size_t block_table_columns,
+                                                     size_t block_size);
 AttentionMetadataValues GetAttentionMetadataForGraphStep(
     const StepPlan& plan, size_t block_table_columns, size_t block_size);
 std::array<int32_t, kAttentionMetadataElementCount> PackAttentionMetadata(
     const AttentionMetadataValues& metadata);
+
+// True when the decoder emits one logits row per packed token rather than one per request. Only
+// such a model can verify draft tokens, because a rejected draft is checked against the logits of
+// the row that precedes it.
+bool DecoderLogitsArePerToken(const Model& model);
+
+// 0 when the model takes no packed position_ids, 1 for [num_tokens], and 3 for the [3, num_tokens]
+// multimodal-rope layout.
+size_t PackedPositionIdPlanes(const Model& model);
+
+// Bytes VarlenGraphBuffers will hold for this model. The engine prices these buffers before the
+// paged cache probes free memory, because they are allocated afterwards out of the same pool.
+size_t VarlenGraphBufferBytes(const Model& model, size_t position_planes,
+                              size_t max_query_tokens_per_request);
+
+// Returns the annotation key for a captured decode step, or nullopt when the shape cannot be
+// captured. Every component changes something the captured launches bake in: tensor shapes come
+// from the batch and the per-request token count, grid dimensions from the block-table width, and
+// the device addresses of the fixed decoder state from its binding layout. `state_binding_key` is
+// zero for models without fixed decoder state.
+std::optional<GraphAnnotationIds::Key> DecodeGraphKey(size_t batch_size, size_t tokens_per_request,
+                                                      size_t block_table_columns,
+                                                      size_t state_binding_key);
 
 /**
  * @struct VarlenGraphBuffers
@@ -45,17 +73,30 @@ std::array<int32_t, kAttentionMetadataElementCount> PackAttentionMetadata(
  * smaller prefix of them. Steps that differ in shape are captured under different annotation ids.
  */
 struct VarlenGraphBuffers {
-  VarlenGraphBuffers(DecoderOnly_Model& model);
+  // `position_planes` is 0 when the model takes no packed position_ids, 1 for [num_tokens], and 3
+  // for the [3, num_tokens] multimodal-rope layout. `max_query_tokens` is the largest number of
+  // tokens one request may contribute to a step, which the engine caps at one plus the draft width
+  // its cache can roll back.
+  VarlenGraphBuffers(DecoderOnly_Model& model, size_t position_planes, size_t max_query_tokens);
 
-  // Annotation id for a decode step of this shape. Distinct (batch, block table columns) pairs need
-  // distinct graphs because the captured launches bake in grid dimensions derived from both.
-  static int GraphId(size_t batch_size, size_t block_table_columns);
+  // Annotation id for a decode step of this shape, or -1 when it cannot be captured.
+  int GraphId(size_t batch_size, size_t tokens_per_request, size_t block_table_columns,
+              size_t state_binding_key) {
+    const auto key =
+        DecodeGraphKey(batch_size, tokens_per_request, block_table_columns, state_binding_key);
+    return key ? graph_ids.Id(*key) : -1;
+  }
 
-  bool Fits(size_t batch_size) const { return batch_size <= max_batch_size; }
+  bool Fits(size_t batch_size, size_t tokens_per_request) const {
+    return batch_size <= max_batch_size && tokens_per_request <= max_query_tokens &&
+           batch_size * tokens_per_request <= max_token_rows;
+  }
 
   std::unique_ptr<Tensor> input_ids;
   std::unique_ptr<Tensor> cumulative_sequence_lengths;
   std::unique_ptr<Tensor> past_sequence_lengths;
+  // Null unless the model consumes packed position_ids.
+  std::unique_ptr<Tensor> position_ids;
   std::unique_ptr<Tensor> logits;
   // Null unless the model consumes hidden_states (for example, an MTP head).
   std::unique_ptr<Tensor> hidden_states_input;
@@ -64,6 +105,11 @@ struct VarlenGraphBuffers {
   // Null unless the model exposes auxiliary hidden states for a DFlash 2 drafter.
   std::unique_ptr<Tensor> aux_hidden_states;
   size_t max_batch_size{};
+  // Largest per-request token count a captured step may carry, and the largest packed row count the
+  // buffers above can hold.
+  size_t max_query_tokens{};
+  size_t max_token_rows{};
+  GraphAnnotationIds graph_ids;
 };
 
 /**
