@@ -843,18 +843,25 @@ std::string CapturedDraftWidthWarnings(const Config& config) {
 
 TEST(Dflash2ConfigTest, WarnsWhenTheDrafterCannotSupplyTheConfiguredDraftWidth) {
   Config config = MakeDflash2Config();
-  config.model.decoder.state_update_capacity = 3;
   config.speculative.max_draft_tokens = 3;  // equals num_draft_tokens, nothing is clamped
   EXPECT_EQ(CapturedDraftWidthWarnings(config), "");
 
   config.speculative.max_draft_tokens = 5;
-  const std::string warnings = CapturedDraftWidthWarnings(config);
-  EXPECT_NE(warnings.find("model.dflash2.num_draft_tokens"), std::string::npos);
-  EXPECT_NE(warnings.find("model.decoder.state_update_capacity"), std::string::npos);
+  EXPECT_NE(CapturedDraftWidthWarnings(config).find("model.dflash2.num_draft_tokens"),
+            std::string::npos);
 
   config.model.dflash2.is_dspark = true;
   EXPECT_NE(CapturedDraftWidthWarnings(config).find("model.dspark.num_draft_tokens"),
             std::string::npos);
+}
+
+TEST(Dflash2ConfigTest, DoesNotWarnAboutHostingLimitsAtConfigLoad) {
+  Config config = MakeDflash2Config();
+  // These bounds depend on which speculative path the Engine hosts, so the Engine reports them.
+  config.model.dflash2.num_draft_tokens = 16;
+  config.model.decoder.state_update_capacity = 1;
+  config.speculative.max_draft_tokens = 16;
+  EXPECT_EQ(CapturedDraftWidthWarnings(config), "");
 }
 
 TEST(Dflash2ConfigTest, DoesNotWarnAboutDraftWidthWithoutABlockDrafter) {
@@ -864,15 +871,6 @@ TEST(Dflash2ConfigTest, DoesNotWarnAboutDraftWidthWithoutABlockDrafter) {
   config.model.mtp.filename = "mtp.onnx";
   config.speculative.max_draft_tokens = 16;
   EXPECT_EQ(CapturedDraftWidthWarnings(config), "");
-}
-
-TEST(Dflash2ConfigTest, WarnsWhenTheConfiguredDraftWidthExceedsTheEngineLimit) {
-  Config config = MakeDflash2Config();
-  config.model.dflash2.num_draft_tokens = 16;
-  config.model.decoder.state_update_capacity = 0;  // no compact state-update bindings
-  config.speculative.max_draft_tokens = static_cast<int>(kMaxDraftTokensPerStep) + 1;
-  EXPECT_NE(CapturedDraftWidthWarnings(config).find("kMaxDraftTokensPerStep"),
-            std::string::npos);
 }
 
 }  // namespace Generators::test

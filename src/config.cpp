@@ -3,7 +3,6 @@
 // Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 // Portions of this file consist of AI generated content.
 #include "generator/generators.h"
-#include "engine/step_plan.h"
 #include "models/model_state_manifest.h"
 #include "models/model_type.h"
 #include "runtime_settings.h"
@@ -2543,43 +2542,34 @@ void ValidateModelPaths(const Config& config) {
 }  // namespace
 
 // The engine picks the per-step draft width as the minimum of every bound it knows, so a config
-// asking for more than the model can deliver is silently clamped rather than rejected. Surface
-// that at load time, where the value can still be edited.
+// asking for more than the drafter can deliver is silently clamped rather than rejected. Surface
+// that at load time, where the value can still be edited. The engine-side bounds (state-update
+// capacity, paged query limit, kMaxDraftTokensPerStep) depend on which speculative path is
+// actually hosted, so Engine setup warns about those instead.
 void WarnOnClampedDraftWidth(const Config& config) {
   if (!g_log.enabled || !g_log.warning) {
     return;
   }
-  // DFlash 2 and its DSpark alias are the only drafters whose ceiling is known from the config
-  // alone. MTP's depends on an ONNX output that no session has loaded yet, and MtpGenerator runs
-  // outside the engine, so neither of the bounds below applies to it.
+  // DFlash 2 and its DSpark alias are the only drafters whose geometry is known from the config
+  // alone. MTP's depends on an ONNX output that no session has loaded yet.
   const auto& dflash2 = config.model.dflash2;
-  if (dflash2.filename.empty()) {
+  if (dflash2.filename.empty() || dflash2.num_draft_tokens <= 0) {
     return;
   }
 
   const int requested = config.speculative.max_draft_tokens;
+  if (requested <= dflash2.num_draft_tokens) {
+    return;
+  }
   const std::string alias = dflash2.is_dspark ? "dspark" : "dflash2";
-  const auto warn = [&](const std::string& bound_name, int bound) {
-    try {
-      Log("warning", "speculative.max_draft_tokens is " + std::to_string(requested) + " but " +
-                         bound_name + " is " + std::to_string(bound) +
-                         ", so each step will draft only " + std::to_string(bound) + " tokens.");
-    } catch (...) {
-      // Diagnostics must not turn a loadable config into a load failure.
-    }
-  };
-
-  if (dflash2.num_draft_tokens > 0 && requested > dflash2.num_draft_tokens) {
-    warn("model." + alias + ".num_draft_tokens", dflash2.num_draft_tokens);
-  }
-  // Capacity 0 means the model exports no compact state-update bindings, which leaves the width
-  // to the paged KV boundary instead.
-  if (config.model.decoder.state_update_capacity > 0 &&
-      requested > config.model.decoder.state_update_capacity) {
-    warn("model.decoder.state_update_capacity", config.model.decoder.state_update_capacity);
-  }
-  if (requested > static_cast<int>(kMaxDraftTokensPerStep)) {
-    warn("the engine limit kMaxDraftTokensPerStep", static_cast<int>(kMaxDraftTokensPerStep));
+  try {
+    Log("warning", "speculative.max_draft_tokens is " + std::to_string(requested) + " but model." +
+                       alias + ".num_draft_tokens is " + std::to_string(dflash2.num_draft_tokens) +
+                       ", which caps each step to at most " +
+                       std::to_string(dflash2.num_draft_tokens) +
+                       " drafted tokens. The engine may cap it further.");
+  } catch (...) {
+    // Diagnostics must not turn a loadable config into a load failure.
   }
 }
 

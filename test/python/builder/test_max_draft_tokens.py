@@ -7,6 +7,9 @@ The option writes a ``speculative`` block into ``genai_config.json`` so that a
 speculative-decoding model can ship with a verified proposal width instead of
 falling back to the runtime default. It is deliberately independent of the
 drafter's exported geometry, so it applies to any model and any drafter.
+
+``check_extra_options`` validates and normalizes the value before the export
+starts; ``make_genai_config`` only writes the already validated integer.
 """
 
 from __future__ import annotations
@@ -20,7 +23,8 @@ from types import SimpleNamespace
 
 import pytest
 
-BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
+MODELS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models"
+BUILDERS_DIR = MODELS_DIR / "builders"
 sys.path.insert(0, str(BUILDERS_DIR.parent))
 
 
@@ -32,11 +36,26 @@ def _load_builder_module(module_name):
     return module
 
 
+def _load_builder_entrypoint_module():
+    # `builder.py` imports every concrete model class via `from builders import (...)`. Stub that
+    # package out so the CLI-level option validation can be imported on its own.
+    builders_stub = types.ModuleType("builders")
+    builders_stub.__getattr__ = lambda name: type(name, (), {})  # PEP 562
+    builders_stub.__path__ = [str(BUILDERS_DIR)]
+    sys.modules["builders"] = builders_stub
+
+    spec = importlib.util.spec_from_file_location("models_builder_entrypoint", MODELS_DIR / "builder.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 sys.modules.setdefault("models", types.ModuleType("models"))
 builders_package = sys.modules.setdefault("models.builders", types.ModuleType("models.builders"))
 builders_package.__path__ = [str(BUILDERS_DIR)]
 
 base_module = _load_builder_module("base")
+builder_module = _load_builder_entrypoint_module()
 Model = base_module.Model
 
 
@@ -83,6 +102,29 @@ def _write_genai_config(monkeypatch, out_dir, extra_options):
     return json.loads((Path(out_dir) / "genai_config.json").read_text())
 
 
+def _check_extra_options(monkeypatch, extra_options):
+    # Avoid Hugging Face network/config loading; this option does not read the model config.
+    monkeypatch.setattr(
+        builder_module,
+        "get_hf_details",
+        lambda *args, **kwargs: {
+            "extra_kwargs": {},
+            "hf_name": "fake-model",
+            "hf_config": SimpleNamespace(tie_word_embeddings=True, layer_types=None),
+        },
+    )
+    builder_module.check_extra_options(
+        model_name="fake-model",
+        input_path="/tmp/fake-model",
+        output_dir="/tmp/fake-output",
+        precision="int4",
+        execution_provider="cuda",
+        cache_dir="/tmp/fake-cache",
+        extra_options=extra_options,
+    )
+    return extra_options
+
+
 def test_genai_config_omits_speculative_by_default(monkeypatch, tmp_path):
     config = _write_genai_config(monkeypatch, tmp_path, {})
 
@@ -96,22 +138,25 @@ def test_genai_config_emits_max_draft_tokens(monkeypatch, tmp_path, value):
     assert config["speculative"] == {"max_draft_tokens": value}
 
 
-def test_genai_config_accepts_max_draft_tokens_as_a_string(monkeypatch, tmp_path):
-    # Olive and the command line both hand extra options through as strings.
-    config = _write_genai_config(monkeypatch, tmp_path, {"max_draft_tokens": "6"})
+def test_check_extra_options_normalizes_max_draft_tokens_to_an_int(monkeypatch):
+    # Olive and the command line both hand extra options through as strings, so the option is
+    # normalized before the export runs and make_genai_config only consumes the int.
+    options = _check_extra_options(monkeypatch, {"max_draft_tokens": "6"})
 
-    assert config["speculative"] == {"max_draft_tokens": 6}
+    assert options["max_draft_tokens"] == 6
 
 
 @pytest.mark.parametrize("value", [0, -1, 17])
-def test_genai_config_rejects_out_of_range_max_draft_tokens(monkeypatch, tmp_path, value):
-    with pytest.raises(ValueError, match="max_draft_tokens must be between 1 and 16"):
-        _write_genai_config(monkeypatch, tmp_path, {"max_draft_tokens": value})
+def test_check_extra_options_rejects_out_of_range_max_draft_tokens(monkeypatch, value):
+    # Validation happens here rather than in make_genai_config so a bad width fails before the
+    # potentially long ONNX export writes partial output.
+    with pytest.raises(ValueError, match="max_draft_tokens must be an integer between 1 and 16"):
+        _check_extra_options(monkeypatch, {"max_draft_tokens": value})
 
 
 @pytest.mark.parametrize("value", [6.5, "6.5", 0.5, "1e1", "", "six"])
-def test_genai_config_rejects_non_integer_max_draft_tokens(monkeypatch, tmp_path, value):
+def test_check_extra_options_rejects_non_integer_max_draft_tokens(monkeypatch, value):
     # The runtime parses this field as an integer, so truncating 6.5 to 6 would silently
     # export a width the caller never asked for.
     with pytest.raises(ValueError, match="max_draft_tokens must be an integer between 1 and 16"):
-        _write_genai_config(monkeypatch, tmp_path, {"max_draft_tokens": value})
+        _check_extra_options(monkeypatch, {"max_draft_tokens": value})
