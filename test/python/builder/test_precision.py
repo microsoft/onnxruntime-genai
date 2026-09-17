@@ -744,6 +744,16 @@ def test_paged_attention_rejects_invalid_engine_options(monkeypatch, extra_optio
         _run_check_extra_options(monkeypatch, extra_options, precision="bf16", execution_provider="cuda")
 
 
+def test_webgpu_paged_attention_requires_num_blocks(monkeypatch):
+    with pytest.raises(ValueError, match="num_blocks"):
+        _run_check_extra_options(
+            monkeypatch,
+            {"use_paged_attention": "true"},
+            precision="fp16",
+            execution_provider="webgpu",
+        )
+
+
 def test_paged_attention_normalizes_engine_options(monkeypatch):
     extra_options = {
         "use_paged_attention": "true",

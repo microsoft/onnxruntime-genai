@@ -593,8 +593,6 @@ class Model:
                 del self.input_names["attention_mask"]
             if not self.has_windowed_paged_layers():
                 del self.input_names["block_table_windowed"]
-            if self.ep == "webgpu":
-                del self.input_names["attention_metadata"]
         else:
             for name in [
                 "block_table",

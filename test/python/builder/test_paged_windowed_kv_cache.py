@@ -253,13 +253,13 @@ def test_paged_model_without_a_ring_drops_the_windowed_block_table():
     assert "block_table" in model.input_names
 
 
-def test_webgpu_paged_model_drops_attention_metadata():
+def test_webgpu_paged_model_keeps_attention_metadata():
     model = _make_inputs_model(use_paged_attention=True, use_ring=True)
     model.ep = "webgpu"
 
     model.make_inputs_init()
 
-    assert "attention_metadata" not in model.input_names
+    assert "attention_metadata" in model.input_names
     assert "block_table" in model.input_names
     assert "block_table_windowed" in model.input_names
 
@@ -435,8 +435,6 @@ def _write_genai_config(
         "past_key_values.key": [],
         "past_key_values.value": [],
     }
-    if ep == "webgpu":
-        del model.input_names["attention_metadata"]
     model.output_names = {"logits": "logits", "present.key": [], "present.value": []}
 
     model.make_genai_config(hf_config, {}, str(out_dir))
@@ -464,12 +462,12 @@ def test_genai_config_names_the_windowed_block_table(monkeypatch, tmp_path):
     assert inputs["block_table"] == "block_table"
 
 
-@pytest.mark.parametrize("ep, expected", [("cuda", True), ("webgpu", False)])
-def test_genai_config_uses_provider_specific_attention_metadata(monkeypatch, tmp_path, ep, expected):
+@pytest.mark.parametrize("ep", ["cuda", "webgpu"])
+def test_genai_config_binds_attention_metadata_for_paged_attention(monkeypatch, tmp_path, ep):
     config = _write_genai_config(monkeypatch, tmp_path, window_size=128, ep=ep)
 
     inputs = config["model"]["decoder"]["inputs"]
-    assert ("attention_metadata" in inputs) is expected
+    assert inputs["attention_metadata"] == "attention_metadata"
 
 
 def test_genai_config_defaults_chunk_size_to_the_block_size(monkeypatch, tmp_path):
