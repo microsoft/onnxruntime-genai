@@ -89,7 +89,7 @@ steps:
           PY="/opt/python/${cpv}-${cpv}/bin/python${v}"
           if [ ! -x "$PY" ]; then echo "ASSERT FAIL: interpreter $PY not found in manylinux image"; exit 1; fi
           echo "===== Building wheel for Python ${v} ($PY) ====="
-          $PY -m pip install pybind11 wheel requests
+          $PY -m pip install pybind11 wheel requests pybind11-stubgen numpy
 
           # Per-version build dir so the extensions/wheels do not clobber each other.
           # The core is NOT recompiled — only the pybind extension + wheel are built.

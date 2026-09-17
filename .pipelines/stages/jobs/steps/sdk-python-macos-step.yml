@@ -70,7 +70,7 @@ steps:
       versionSpec: '${{ pyVer }}'
       addToPath: true
 
-  - script: python3 -m pip install --user --break-system-packages pybind11 wheel requests
+  - script: python3 -m pip install --user --break-system-packages pybind11 wheel requests pybind11-stubgen numpy
     displayName: 'Install build-time Python deps (${{ pyVer }})'
 
   - bash: |

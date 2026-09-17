@@ -153,8 +153,12 @@ if(BUILD_WHEEL)
   endif()
   set(PACKAGE_DIR_NAME "onnxruntime_genai")
   set(WHEEL_TARGET_NAME "${WHEEL_FILES_DIR}/${PACKAGE_DIR_NAME}")
+  set(GENERATE_TYPE_DIR_NAME "stubgen")
+  set(GENERATE_TYPE_DIR "${WHEEL_FILES_DIR}/${GENERATE_TYPE_DIR_NAME}")
+  file(MAKE_DIRECTORY "${GENERATE_TYPE_DIR}")
   configure_file(${CMAKE_CURRENT_SOURCE_DIR}/setup.py.in ${WHEEL_FILES_DIR}/setup.py @ONLY)
   configure_file(${CMAKE_CURRENT_SOURCE_DIR}/__init__.py.in ${WHEEL_TARGET_NAME}/__init__.py @ONLY)
+  configure_file(${CMAKE_CURRENT_SOURCE_DIR}/__init__.pyi.in ${WHEEL_TARGET_NAME}/__init__.pyi @ONLY)
 
   # Copy over any additional python files
   file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/py/" DESTINATION ${WHEEL_TARGET_NAME}/)
@@ -168,6 +172,63 @@ if(BUILD_WHEEL)
     ${WHEEL_TARGET_NAME}
     COMMENT "Copying files to wheel directory: ${WHEEL_TARGET_NAME}"
   )
+  # pybind11-stubgen introspects the extension by importing it, so the freshly
+  # built module must be runnable on the build host. That is only true when the
+  # target architecture matches the host; cross-compiled wheels (e.g. arm64 built
+  # on an x64 host, or a macOS x86_64 wheel built on Apple Silicon) produce a
+  # module the host cannot load, which fails the packaging pipeline. Detect this
+  # and skip stub generation for cross builds.
+  string(TOLOWER "${CMAKE_HOST_SYSTEM_PROCESSOR}" _genai_host_processor)
+  if(_genai_host_processor MATCHES "arm64|aarch64")
+    set(_genai_host_platform "arm64")
+  elseif(_genai_host_processor MATCHES "x86_64|amd64|x64")
+    set(_genai_host_platform "x64")
+  else()
+    set(_genai_host_platform "${_genai_host_processor}")
+  endif()
+
+  # ORT runtime copied into the isolated stub-generation dir so the freshly built
+  # extension can be imported. For CPU/CUDA this is the ORT the core was built
+  # against (ORT_LIB_DIR), which matches the required API. For WinML the bundled
+  # SDK ORT can be older than the API the GenAI core requires, so importing the
+  # extension fails with an ORT API-version mismatch. Use the pip-installed
+  # onnxruntime runtime instead (the WinML pipeline installs a matching onnxruntime
+  # before the build — see sdk-python-winml-win-step.yml); copying it over the
+  # isolated dir replaces the stale bundled ORT there. The shipped wheel is
+  # unaffected (it still bundles the SDK ORT for end users).
+  set(STUBGEN_ORT_LIB_DIR "${ORT_LIB_DIR}")
+  if(USE_WINML)
+    execute_process(
+      COMMAND ${PYTHON_EXECUTABLE} -c "import onnxruntime, os, sys; sys.stdout.write(os.path.join(os.path.dirname(onnxruntime.__file__), 'capi'))"
+      OUTPUT_VARIABLE _ort_python_capi_dir
+      RESULT_VARIABLE _ort_python_capi_result
+      ERROR_QUIET)
+    if(_ort_python_capi_result EQUAL 0 AND EXISTS "${_ort_python_capi_dir}")
+      set(STUBGEN_ORT_LIB_DIR "${_ort_python_capi_dir}")
+      message(STATUS "WinML stub generation will use the pip-installed onnxruntime runtime at: ${_ort_python_capi_dir}")
+    else()
+      message(WARNING "WinML stub generation: pip-installed onnxruntime not found; falling back to the bundled SDK ORT (${ORT_LIB_DIR}). The stubgen import may fail with an ORT API-version mismatch. Install a matching onnxruntime before building.")
+    endif()
+  endif()
+
+  if(genai_target_platform STREQUAL _genai_host_platform)
+    add_custom_command(TARGET python POST_BUILD
+      # Use a new directory to fix the onnxruntime_genai runtime dependency and avoid contamination
+      COMMAND ${CMAKE_COMMAND} -E copy_directory "${WHEEL_TARGET_NAME}" "${GENERATE_TYPE_DIR}"
+      COMMAND ${CMAKE_COMMAND} -E copy_directory "${STUBGEN_ORT_LIB_DIR}" "${GENERATE_TYPE_DIR}"
+      # pybind11-stubgen and numpy must already be installed in the Python environment used for the
+      # build (see test/python/requirements.txt).
+      # --numpy-array-use-type-var makes stubgen emit valid `numpy.ndarray[Any, numpy.dtype[...]]`
+      # annotations (equivalent to numpy.typing.NDArray[...]) instead of the invalid
+      # `numpy.ndarray[numpy.<dtype>]` form that type checkers reject.
+      COMMAND ${PYTHON_EXECUTABLE} -m pybind11_stubgen $<TARGET_FILE_BASE_NAME:python> --output-dir "${WHEEL_TARGET_NAME}" --numpy-array-use-type-var
+      COMMAND ${PYTHON_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/fix_pyi.py" -i "${WHEEL_TARGET_NAME}/$<TARGET_FILE_BASE_NAME:python>.pyi"
+      WORKING_DIRECTORY "${GENERATE_TYPE_DIR}"
+      COMMENT "Generate type stubs for onnxruntime_genai"
+    )
+  else()
+    message(STATUS "Skipping onnxruntime_genai type stub generation: cross-compiling for '${genai_target_platform}' on host '${_genai_host_platform}' (the built module cannot be imported on the build host).")
+  endif()
   set(auditwheel_exclude_list
     "libcuda.so.1"
     "libcublas.so.11"
