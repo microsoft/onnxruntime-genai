@@ -118,7 +118,7 @@ jobs:
           python -m pip install -r $env:TEMP\requirements-win-arm64.txt --user
           python -m pip install -r test\python\cpu\torch\requirements.txt --user
           python -m pip install -r test\python\cpu\ort\requirements.txt --user
-          python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl"))
+          python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --user --force-reinstall --no-deps
 
       - name: Run the Java tests
         run: |
