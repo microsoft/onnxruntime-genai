@@ -855,6 +855,16 @@ TEST(PagedKeyValueCacheManifestTest, PositivePrefixFractionRetainsAtLeastOneBloc
   EXPECT_TRUE(cache->PrefixCachingEnabled());
 }
 
+TEST(PagedKeyValueCacheManifestTest, PrefixCachingRejectsDsparkAuxiliaryState) {
+  auto model = LoadSyntheticPagedModel();
+  auto& batching = *model->config_->engine.dynamic_batching;
+  batching.prefix_caching_explicitly_set = true;
+  model->config_->model.dflash2.filename = "dspark.onnx";
+  model->config_->model.dflash2.is_dspark = true;
+
+  EXPECT_THROW(MakePagedCache(model), std::runtime_error);
+}
+
 TEST(PagedKeyValueCacheManifestTest, PrefixCachingSupportsFixedAuxiliaryPool) {
   auto model = LoadSyntheticPagedModel();
   model->config_->engine.dynamic_batching->prefix_caching = true;

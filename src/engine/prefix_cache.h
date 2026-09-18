@@ -145,8 +145,9 @@ class PrefixCache {
       std::span<const int32_t> tokens,
       const std::shared_ptr<const BlockIdentity>& parent);
 
-  // Publishes a match as an actual hit only after its adopting cache transaction commits.
-  void RecordAdoption(size_t token_count) noexcept;
+  // Publishes and refreshes a match only after its adopting cache transaction commits.
+  void RecordAdoption(
+      std::span<const std::shared_ptr<Block>> blocks) noexcept;
 
   bool CanAttachCheckpoint(
       const std::shared_ptr<const BlockIdentity>& identity) const;

@@ -128,7 +128,7 @@ TEST(PrefixCacheTest, ExactPrefixMatchAdoptsEveryFullBlock) {
   EXPECT_EQ(cache.Metrics().hits, 0u);
   EXPECT_EQ(cache.Metrics().matched_tokens, 0u);
 
-  cache.RecordAdoption(match.token_count);
+  cache.RecordAdoption(match.blocks);
   EXPECT_EQ(cache.Metrics().hits, 1u);
   EXPECT_EQ(cache.Metrics().matched_tokens, 2 * kBlockSize);
 }
@@ -348,12 +348,13 @@ TEST(PrefixCacheTest, ReclaimReturnsRetainedBlocksInLeastRecentlyUsedOrder) {
   pool.Free({newer_block});
   ASSERT_EQ(cache.ReclaimableBlocks(), 2u);
 
+  const std::array<int32_t, 5> older_probe{1, 2, 3, 4, 9};
+  EXPECT_EQ(cache.Match(older_probe, older_probe.size() - 1).blocks.size(), 1u);
   EXPECT_EQ(cache.Reclaim(1), 1u);
 
-  // The older entry went first, so the newer one still matches.
+  // A lookup alone does not refresh recency, so the older entry still goes first.
   const std::array<int32_t, 5> newer_probe{5, 6, 7, 8, 9};
   EXPECT_EQ(cache.Match(newer_probe, newer_probe.size() - 1).blocks.size(), 1u);
-  const std::array<int32_t, 5> older_probe{1, 2, 3, 4, 9};
   EXPECT_TRUE(cache.Match(older_probe, older_probe.size() - 1).Empty());
   EXPECT_EQ(cache.Metrics().evictions, 1u);
 }
@@ -381,27 +382,39 @@ TEST(PrefixCacheTest, EvictionTakesTheTailOfAChainBeforeItsHead) {
   EXPECT_EQ(match.blocks.front()->Id(), head->Id());
 }
 
-// A hit refreshes the whole run, and it has to keep the head newer than the tail so the next
-// eviction still takes the tail.
+// A committed hit refreshes the whole run, and it has to keep the head newer than its descendants
+// so the next eviction still takes the deepest suffix.
 TEST(PrefixCacheTest, AHitKeepsTheHeadOfTheChainNewerThanItsTail) {
   BlockPool pool{kBlockSize, 8};
   PrefixCache cache{pool, MakeOptions(8)};
 
-  const std::array<int32_t, 8> chain{1, 2, 3, 4, 5, 6, 7, 8};
+  const std::array<int32_t, 12> chain{
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
   std::shared_ptr<const BlockIdentity> parent;
   auto head = SealBlock(pool, cache, std::span<const int32_t>{chain}.subspan(0, kBlockSize), parent);
-  auto tail = SealBlock(pool, cache, std::span<const int32_t>{chain}.subspan(kBlockSize, kBlockSize),
-                        parent);
+  auto middle = SealBlock(
+      pool, cache,
+      std::span<const int32_t>{chain}.subspan(kBlockSize, kBlockSize),
+      parent);
+  auto tail = SealBlock(
+      pool, cache,
+      std::span<const int32_t>{chain}.subspan(2 * kBlockSize, kBlockSize),
+      parent);
   pool.Free({head});
+  pool.Free({middle});
   pool.Free({tail});
 
-  const std::array<int32_t, 9> probe{1, 2, 3, 4, 5, 6, 7, 8, 9};
-  ASSERT_EQ(cache.Match(probe, probe.size() - 1).blocks.size(), 2u);
+  const std::array<int32_t, 13> probe{
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13};
+  const auto adopted = cache.Match(probe, probe.size() - 1);
+  ASSERT_EQ(adopted.blocks.size(), 3u);
+  cache.RecordAdoption(adopted.blocks);
 
   EXPECT_EQ(cache.Reclaim(1), 1u);
   const auto match = cache.Match(probe, probe.size() - 1);
-  ASSERT_EQ(match.blocks.size(), 1u);
+  ASSERT_EQ(match.blocks.size(), 2u);
   EXPECT_EQ(match.blocks.front()->Id(), head->Id());
+  EXPECT_EQ(match.blocks.back()->Id(), middle->Id());
 }
 
 // Retention must never starve a live request: a block a request still holds is not the cache's to

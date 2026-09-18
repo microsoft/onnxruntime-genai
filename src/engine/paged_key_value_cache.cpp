@@ -459,7 +459,11 @@ bool ResolvePrefixCachingEnabled(const std::shared_ptr<Model>& model,
       ResolvePagedKeyValueGroup(model->config_->model.decoder);
   const auto windowed = WindowedLayers(model, paged_group);
   const char* unsupported_layout = nullptr;
-  if (auxiliary_bytes_per_block != 0) {
+  if (!model->config_->model.dflash2.filename.empty() &&
+      model->config_->model.dflash2.is_dspark) {
+    unsupported_layout =
+        "Prefix caching does not yet support an Engine-hosted DSpark drafter.";
+  } else if (auxiliary_bytes_per_block != 0) {
     unsupported_layout =
         "Prefix caching does not yet support an auxiliary cache that mirrors target blocks.";
   } else if (!windowed.empty()) {
@@ -801,8 +805,14 @@ PrefixCacheMatch PagedKeyValueCache::MatchPrefix(
 void PagedKeyValueCache::RecordPrefixAdoptions(
     const PagedCacheReservation& reservation) noexcept {
   for (const auto& delta : reservation.Deltas()) {
+    if (delta.adopted_block_count == 0) {
+      continue;
+    }
     prefix_cache_->RecordAdoption(
-        delta.adopted_block_count * block_pool_->BlockSize());
+        std::span<const std::shared_ptr<Block>>{
+            reservation.AdoptedBlocks().data() +
+                delta.adopted_block_offset,
+            delta.adopted_block_count});
   }
 }
 

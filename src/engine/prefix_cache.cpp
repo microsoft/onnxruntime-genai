@@ -4,6 +4,7 @@
 #include "prefix_cache.h"
 
 #include <algorithm>
+#include <exception>
 #include <memory>
 #include <stdexcept>
 #include <utility>
@@ -128,13 +129,6 @@ PrefixCacheMatch PrefixCache::Match(std::span<const int32_t> tokens,
   for (const auto& it : hits) {
     match.blocks.push_back(it->second.block);
   }
-  // Refresh the run head first, so each block lands immediately before the one it chains from and
-  // the head of the chain ends up the most recently used. Evicting the head would orphan every
-  // block behind it -- their identities chain from it, so no lookup can reach them again -- while
-  // evicting the tail just shortens the prefix that stays reusable.
-  for (const auto& it : hits) {
-    Reorder(it->second, it->second.identity->parent);
-  }
   match.token_count = hits.size() * block_size;
   match.fixed_state_checkpoint = std::move(checkpoint);
 
@@ -215,12 +209,28 @@ PrefixCacheRegistration PrefixCache::Register(
   return {PrefixCacheRegistrationStatus::Indexed, std::move(identity)};
 }
 
-void PrefixCache::RecordAdoption(size_t token_count) noexcept {
-  if (token_count == 0) {
+void PrefixCache::RecordAdoption(
+    std::span<const std::shared_ptr<Block>> blocks) noexcept {
+  if (blocks.empty()) {
     return;
   }
+  // Root-to-deepest keeps each child immediately before its parent. The root ends as the most
+  // recently used entry, while eviction still takes the deepest disposable suffix first.
+  for (const auto& block : blocks) {
+    if (!block || !block->HasIdentity()) {
+      std::terminate();
+    }
+    const auto& identity = block->IdentityPtr();
+    const auto entry = entries_.find(identity->hash);
+    if (entry == entries_.end() ||
+        entry->second.block != block ||
+        entry->second.identity != identity) {
+      std::terminate();
+    }
+    Reorder(entry->second, identity->parent);
+  }
   ++metrics_.hits;
-  metrics_.matched_tokens += token_count;
+  metrics_.matched_tokens += blocks.size() * block_pool_.BlockSize();
 }
 
 bool PrefixCache::CanAttachCheckpoint(

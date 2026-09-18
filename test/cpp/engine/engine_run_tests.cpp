@@ -2889,6 +2889,7 @@ TEST_F(EngineRunTest, DensePagedPrefixCacheSkipsCommittedFullBlocks) {
   engine.executor->SetExecutionCallback({});
   const std::array<int32_t, 1> continuation{11};
   warm->BeginTurn(continuation);
+  EXPECT_EQ(warm->AdoptedPrefixLength(), 0u);
   const auto continuation_event = RunOne(*engine.engine);
   EXPECT_EQ(continuation_event.request, warm);
   EXPECT_EQ(continuation_event.usage.prompt_tokens, continuation.size());

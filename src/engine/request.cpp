@@ -244,6 +244,7 @@ uint64_t Request::CommitTurnAdmission(
   guidance_logits_processor_ = std::move(admission.pending_guidance);
   guidance_transaction_checkpoint_.reset();
   turn_policy_ = admission.policy;
+  adopted_prefix_length_ = 0;
   turn_cached_prompt_tokens_ = 0;
   // Every terminal path already discarded the previous turn's pending reseed, so this simply
   // records what this turn asked for: nothing when the seed is omitted, or a new basis that becomes
