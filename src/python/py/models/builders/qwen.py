@@ -13,7 +13,6 @@ import os
 import numpy as np
 import onnx_ir as ir
 import torch
-from transformers import Qwen2ForCausalLM
 
 from .base import Model
 from .mtp import MTPModel
@@ -105,6 +104,8 @@ class VideoChatFlashQwenModel(QwenModel):
     def load_weights(self, input_path):
         # Load the standard Qwen2 backbone without importing the checkpoint's
         # custom video modeling code and its optional dependencies.
+        from transformers import Qwen2ForCausalLM
+
         extra_kwargs = {} if os.path.isdir(self.model_name_or_path) else {"cache_dir": self.cache_dir}
         return Qwen2ForCausalLM.from_pretrained(
             self.model_name_or_path,

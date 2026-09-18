@@ -5,7 +5,6 @@
 # --------------------------------------------------------------------------
 
 import torch
-from transformers import Mistral3ForConditionalGeneration
 
 from .base import Model
 
@@ -36,6 +35,8 @@ class Mistral3TextModel(MistralModel):
     def load_weights(self, input_path):
         if self.quant_type is not None or input_path.endswith(".gguf"):
             return super().load_weights(input_path)
+
+        from transformers import Mistral3ForConditionalGeneration
 
         extra_kwargs = {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {}
         print("Loading Mistral3ForConditionalGeneration model...")
