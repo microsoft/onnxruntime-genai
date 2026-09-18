@@ -2343,4 +2343,10 @@ SpeculativeStats Engine::GetSpeculativeStats() const {
   return stats;
 }
 
+std::optional<PrefixCacheMetrics> Engine::PrefixCacheStats() const {
+  ValidateOwnerThread();
+  const auto* metrics = cache_manager_->PrefixMetrics();
+  return metrics ? std::optional<PrefixCacheMetrics>{*metrics} : std::nullopt;
+}
+
 }  // namespace Generators

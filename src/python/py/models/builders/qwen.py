@@ -1091,7 +1091,9 @@ class Qwen35MoEModel(MTPModel):
                 "present_value_names": "present.%d.value",
             },
         }
-        genai_config["engine"]["dynamic_batching"]["prefix_caching"] = False
+        dynamic_batching = genai_config.get("engine", {}).get("dynamic_batching")
+        if dynamic_batching is not None:
+            dynamic_batching["prefix_caching"] = False
         self.add_shared_initializers_to_genai_config(genai_config)
 
         with open(config_path, "w") as config_file:
@@ -1270,6 +1272,9 @@ class Qwen35MoEModel(MTPModel):
             decoder["shared_initializers"] = existing
             section["shared_initializers"] = self.dflash2_shared_initializers
         genai_config["model"]["dflash2"] = section
+        dynamic_batching = genai_config.get("engine", {}).get("dynamic_batching")
+        if dynamic_batching is not None and section.get("sliding_window", 0) <= 0:
+            dynamic_batching["prefix_caching"] = False
 
         with open(config_path, "w") as config_file:
             json.dump(genai_config, config_file, indent=4)

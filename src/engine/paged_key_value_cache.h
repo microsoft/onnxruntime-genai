@@ -73,6 +73,11 @@ size_t ResolveConfiguredPagedBlockCount(size_t configured_num_blocks,
 // Windowed layers are excluded because their ring is sized separately.
 size_t PagedKeyValueCacheBytesPerBlock(const std::shared_ptr<Model>& model);
 
+// Resolves the configured prefix-cache flag, retention capacity, and target/auxiliary layout into
+// one policy shared by paged block retention and hybrid fixed-state checkpoint allocation.
+bool ResolvePrefixCachingEnabled(const std::shared_ptr<Model>& model,
+                                 size_t auxiliary_bytes_per_block);
+
 /*
  * PagedKeyValueCache manages a paged key-value cache for models that use the PagedAttention operator.
  * The cache is divided into blocks, each containing a fixed number of slots. Each slot holds

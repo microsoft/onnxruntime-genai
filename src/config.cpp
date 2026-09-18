@@ -2063,6 +2063,7 @@ struct DynamicBatching_Element : JSON::Element {
       v_->max_scheduled_tokens = static_cast<size_t>(parsed_value);
     } else if (name == "prefix_caching") {
       v_->prefix_caching = JSON::Get<bool>(value);
+      v_->prefix_caching_explicitly_set = true;
     } else if (name == "prefix_cache_pool_fraction") {
       const auto parsed_value = JSON::Get<double>(value);
       if (!std::isfinite(parsed_value) || parsed_value < 0 || parsed_value > 1)

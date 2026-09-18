@@ -656,6 +656,7 @@ struct Config {
       size_t max_batch_size{16};                    // Maximum batch size for dynamically batching requests.
       size_t max_scheduled_tokens{2048};            // Maximum tokens in one dynamically batched model run.
       bool prefix_caching{true};
+      bool prefix_caching_explicitly_set{};
       float prefix_cache_pool_fraction{0.5f};
       std::optional<size_t> prefix_cache_max_blocks;
       size_t prefix_cache_min_blocks{1};

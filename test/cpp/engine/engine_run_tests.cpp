@@ -2774,6 +2774,24 @@ TEST_F(EngineRunTest, SpeculativeStatsRejectOffOwnerThreadReads) {
   EXPECT_THROW(std::rethrow_exception(off_thread_error), std::runtime_error);
 }
 
+TEST_F(EngineRunTest, PrefixCacheStatsRejectOffOwnerThreadReads) {
+  model_ = LoadSyntheticPagedModel();
+  auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
+
+  std::exception_ptr off_thread_error;
+  std::thread off_owner_thread([&] {
+    try {
+      static_cast<void>(engine.engine->PrefixCacheStats());
+    } catch (...) {
+      off_thread_error = std::current_exception();
+    }
+  });
+  off_owner_thread.join();
+
+  ASSERT_NE(off_thread_error, nullptr);
+  EXPECT_THROW(std::rethrow_exception(off_thread_error), std::runtime_error);
+}
+
 TEST_F(EngineRunTest, MtpRollbackFailureMarksEngineUnhealthy) {
   model_ = LoadSyntheticPagedMtpModel();
   const int32_t eos = EosToken(*model_);
@@ -2862,8 +2880,8 @@ TEST_F(EngineRunTest, DensePagedPrefixCacheSkipsCommittedFullBlocks) {
   EXPECT_EQ(engine.executor->decoded_token_counts[1], 1u);
   EXPECT_EQ(observed_adopted_prefix, 8u);
   EXPECT_EQ(observed_processed_length, 8);
-  const auto* metrics = engine.engine->PrefixCacheStats();
-  ASSERT_NE(metrics, nullptr);
+  const auto metrics = engine.engine->PrefixCacheStats();
+  ASSERT_TRUE(metrics.has_value());
   EXPECT_EQ(metrics->hits, 1u);
   EXPECT_EQ(metrics->matched_tokens, 8u);
   EXPECT_TRUE(ValidateCacheInvariants(engine.cache->Snapshot()).empty());
@@ -2902,8 +2920,8 @@ TEST_F(EngineRunTest, DensePagedPrefixAdoptionRollsBackAfterExecutionFailure) {
   EXPECT_NE(retryable.flags & EngineEventFlagRetryable, 0u);
   EXPECT_EQ(warm->ProcessedSequenceLength(), 0);
   EXPECT_EQ(warm->AdoptedPrefixLength(), 0u);
-  const auto* metrics = engine.engine->PrefixCacheStats();
-  ASSERT_NE(metrics, nullptr);
+  auto metrics = engine.engine->PrefixCacheStats();
+  ASSERT_TRUE(metrics.has_value());
   EXPECT_EQ(metrics->hits, 0u);
   EXPECT_EQ(metrics->matched_tokens, 0u);
   const auto after = engine.cache->Snapshot();
@@ -2923,6 +2941,8 @@ TEST_F(EngineRunTest, DensePagedPrefixAdoptionRollsBackAfterExecutionFailure) {
   EXPECT_EQ(RunOne(*engine.engine).request, warm);
   EXPECT_EQ(observed_adopted_prefix, 8u);
   EXPECT_TRUE(warm->IsTurnComplete());
+  metrics = engine.engine->PrefixCacheStats();
+  ASSERT_TRUE(metrics.has_value());
   EXPECT_EQ(metrics->hits, 1u);
   EXPECT_EQ(metrics->matched_tokens, 8u);
 }
@@ -2949,8 +2969,8 @@ TEST_F(EngineRunTest, DuplicatePrefixStopsSealingItsSuffix) {
     RunOne(*engine.engine);
   }
 
-  const auto* metrics = engine.engine->PrefixCacheStats();
-  ASSERT_NE(metrics, nullptr);
+  const auto metrics = engine.engine->PrefixCacheStats();
+  ASSERT_TRUE(metrics.has_value());
   EXPECT_EQ(metrics->registered_blocks, 2u);
   EXPECT_EQ(metrics->duplicate_registrations, 1u);
   EXPECT_TRUE(first->IsTurnComplete());
@@ -3066,6 +3086,38 @@ TEST_F(EngineRunTest, HybridPrefixAdoptionRollbackKeepsCheckpointReusable) {
   const auto warm_event = RunOne(*engine.engine);
   EXPECT_EQ(warm_event.request, warm);
   EXPECT_EQ(warm_event.usage.cached_prompt_tokens, 4u);
+}
+
+TEST_F(EngineRunTest, HybridPrefixCacheDoesNotSealGeneratedBlocksWithoutCheckpoints) {
+  model_ = LoadSyntheticCompositeModel();
+  auto& batching = *model_->config_->engine.dynamic_batching;
+  batching.block_size = 4;
+  batching.num_blocks = 16;
+  batching.prefix_caching = true;
+  batching.prefix_cache_max_blocks = 8;
+  auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
+  engine.executor->SetForcedToken(11);
+  const std::array<int32_t, 5> prompt{2, 3, 4, 5, 6};
+  TurnOptions options;
+  options.max_generated_tokens = 6;
+  auto request = CreateRequestWithPrompt(engine.engine, prompt, options);
+
+  for (size_t iteration = 0;
+       iteration < 8 && request->TurnGeneratedTokens() < 4;
+       ++iteration) {
+    RunOne(*engine.engine);
+  }
+
+  ASSERT_EQ(request->TurnGeneratedTokens(), 4u);
+  const auto metrics = engine.engine->PrefixCacheStats();
+  ASSERT_TRUE(metrics.has_value());
+  EXPECT_EQ(metrics->registered_blocks, 1u);
+  const auto fixed = engine.cache->FixedStateSnapshot();
+  ASSERT_TRUE(fixed.has_value());
+  EXPECT_EQ(fixed->checkpoint_count, 1u);
+
+  engine.executor->SetForcedToken(EosToken(*model_));
+  EXPECT_EQ(RunOne(*engine.engine).request, request);
 }
 
 TEST_F(EngineRunTest, CompositeMixedPrefillDefersResidentDraft) {

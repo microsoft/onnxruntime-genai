@@ -347,7 +347,7 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
   // admission (bounded by max_batch_size) can never outrun fixed slots.
   ModelStateManifest manifest{model->config_->model.decoder};
   const bool hybrid_prefix_caching =
-      model->config_->engine.dynamic_batching->prefix_caching &&
+      ResolvePrefixCachingEnabled(model, auxiliary_bytes_per_block) &&
       manifest.HasFixedStateGroups();
   size_t prefix_checkpoint_capacity = 0;
   if (manifest.HasFixedStateGroups()) {
@@ -393,9 +393,12 @@ void PagedCacheManager::SealCommittedBlocks(const StepPlan& plan) {
     return;
   }
   for (const auto& entry : plan.requests) {
+    if (fixed_state_pool_ && !entry.is_prefill) {
+      continue;
+    }
     key_value_cache_->SealCommittedBlocks(
         entry.request_id, entry.request->TokensCpu());
-    if (!fixed_state_pool_ || !entry.is_prefill ||
+    if (!fixed_state_pool_ ||
         !key_value_cache_->CanAttachPrefixCheckpoint(
             entry.request_id, entry.target_cache_slots)) {
       continue;

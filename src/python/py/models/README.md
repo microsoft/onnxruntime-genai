@@ -304,9 +304,10 @@ Paged attention supports CUDA with `fp16` or `bf16` precision and WebGPU with `f
 Prefix caching is enabled by default for dynamic batching and can be disabled by
 setting `engine.dynamic_batching.prefix_caching` to `false` in
 `genai_config.json`. The builder writes this opt-out automatically for paged
-sliding-window KV rings, MTP, and DSpark because those layouts do not yet support
-prefix caching. DFlash 2 uses a fixed-size auxiliary pool and retains the default
-target prefix caching behavior.
+sliding-window KV rings, MTP, DSpark, and full-attention DFlash 2 because those
+layouts mirror auxiliary state per target block and do not yet support prefix
+caching. DFlash 2 with a positive sliding window uses a fixed-size auxiliary pool
+and retains the default target prefix caching behavior.
 
 `max_scheduled_tokens` and `num_blocks` are additional `engine.dynamic_batching` knobs and are written only when passed. `max_scheduled_tokens` caps the tokens in one dynamically batched forward pass and therefore caps the peak prefill activation, which is the largest transient in a long-context deployment. `num_blocks` sets the total block budget before auxiliary-cache reservations. The target's resolved pool can be smaller when MTP or a full-attention block drafter reserves cache memory, and all resident requests share that pool, so `num_blocks * paged_block_size` is only the single-request upper bound when the target owns every configured block. `num_blocks` is mutually exclusive with `gpu_utilization_factor`, which is omitted from the config when `num_blocks` is set.
 

@@ -171,6 +171,34 @@ def test_genai_config_gains_the_drafter_and_the_target_tap(tmp_path):
     assert config["model"]["dflash2"]["aux_hidden_state_layers"] == AUX_LAYERS
 
 
+@pytest.mark.parametrize(
+    ("sliding_window", "prefix_caching"),
+    [(0, False), (2048, True)],
+)
+def test_genai_config_disables_prefix_caching_only_for_full_attention_drafter(tmp_path, sliding_window, prefix_caching):
+    config_path = tmp_path / "genai_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "model": {"decoder": {}},
+                "engine": {"dynamic_batching": {}},
+            }
+        )
+    )
+    model = _composite()
+    model.dflash2 = types.SimpleNamespace(
+        genai_config_section=lambda: {
+            "filename": "dflash2.onnx",
+            "sliding_window": sliding_window,
+        }
+    )
+
+    model.add_dflash2_to_genai_config(str(tmp_path))
+
+    config = json.loads(config_path.read_text())
+    assert config["engine"]["dynamic_batching"].get("prefix_caching", True) is prefix_caching
+
+
 def test_shared_initializers_are_recorded_once_on_both_sides(tmp_path):
     config_path = tmp_path / "genai_config.json"
     shared = {"name": "model.embed_tokens.weight", "filename": "model.onnx.data"}

@@ -63,6 +63,8 @@ TEST(DynamicBatchingConfigTest, PrefixCachingDefaultsToEnabled) {
 
   ASSERT_TRUE(config.engine.dynamic_batching.has_value());
   EXPECT_TRUE(config.engine.dynamic_batching->prefix_caching);
+  EXPECT_FALSE(
+      config.engine.dynamic_batching->prefix_caching_explicitly_set);
   EXPECT_FLOAT_EQ(
       config.engine.dynamic_batching->prefix_cache_pool_fraction, 0.5f);
   EXPECT_FALSE(
@@ -76,6 +78,8 @@ TEST(DynamicBatchingConfigTest, PrefixCachingAcceptsExplicitDisable) {
 
   ASSERT_TRUE(config.engine.dynamic_batching.has_value());
   EXPECT_FALSE(config.engine.dynamic_batching->prefix_caching);
+  EXPECT_TRUE(
+      config.engine.dynamic_batching->prefix_caching_explicitly_set);
 }
 
 TEST(DynamicBatchingConfigTest, PrefixCachingAcceptsExplicitLimits) {
@@ -88,6 +92,8 @@ TEST(DynamicBatchingConfigTest, PrefixCachingAcceptsExplicitLimits) {
 
   ASSERT_TRUE(config.engine.dynamic_batching.has_value());
   EXPECT_TRUE(config.engine.dynamic_batching->prefix_caching);
+  EXPECT_TRUE(
+      config.engine.dynamic_batching->prefix_caching_explicitly_set);
   EXPECT_FLOAT_EQ(
       config.engine.dynamic_batching->prefix_cache_pool_fraction, 0.25f);
   EXPECT_EQ(config.engine.dynamic_batching->prefix_cache_max_blocks, 17u);

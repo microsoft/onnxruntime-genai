@@ -444,6 +444,37 @@ bool MakeTailBlockExclusive(PagedCacheBlockTable& table,
   return true;
 }
 
+bool ResolvePrefixCachingEnabled(const std::shared_ptr<Model>& model,
+                                 size_t auxiliary_bytes_per_block) {
+  const auto& batching = *model->config_->engine.dynamic_batching;
+  const bool has_retention_capacity =
+      batching.prefix_cache_max_blocks
+          ? *batching.prefix_cache_max_blocks != 0
+          : batching.prefix_cache_pool_fraction > 0;
+  if (!batching.prefix_caching || !has_retention_capacity) {
+    return false;
+  }
+
+  const auto paged_group =
+      ResolvePagedKeyValueGroup(model->config_->model.decoder);
+  const auto windowed = WindowedLayers(model, paged_group);
+  const char* unsupported_layout = nullptr;
+  if (auxiliary_bytes_per_block != 0) {
+    unsupported_layout =
+        "Prefix caching does not yet support an auxiliary cache that mirrors target blocks.";
+  } else if (!windowed.empty()) {
+    unsupported_layout =
+        "Prefix caching does not yet support sliding-window paged KV rings.";
+  }
+  if (!unsupported_layout) {
+    return true;
+  }
+  if (batching.prefix_caching_explicitly_set) {
+    throw std::runtime_error(unsupported_layout);
+  }
+  return false;
+}
+
 PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
                                        size_t auxiliary_bytes_per_block,
                                        size_t auxiliary_reserved_memory_bytes,
@@ -457,16 +488,10 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
   ValidateScaleBindings(decoder, paged_group);
   const auto dtype = KeyValueCacheType(model_, paged_group);
   const auto& batching = *model->config_->engine.dynamic_batching;
-  if (batching.prefix_caching && auxiliary_bytes_per_block != 0) {
-    throw std::runtime_error(
-        "Prefix caching does not yet support an auxiliary cache that mirrors target blocks.");
-  }
+  const bool prefix_caching_enabled =
+      ResolvePrefixCachingEnabled(model, auxiliary_bytes_per_block);
 
   const auto windowed = WindowedLayers(model, paged_group);
-  if (batching.prefix_caching && !windowed.empty()) {
-    throw std::runtime_error(
-        "Prefix caching does not yet support sliding-window paged KV rings.");
-  }
   size_t num_window_blocks = 0;
   if (!windowed.empty()) {
     if (decoder.sliding_window->window_size <= 0) {
@@ -560,7 +585,7 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
   }
   block_pool_ = std::make_unique<BlockPool>(block_size, num_blocks);
   PrefixCacheOptions prefix_options;
-  prefix_options.enabled = batching.prefix_caching;
+  prefix_options.enabled = prefix_caching_enabled;
   prefix_options.min_match_blocks =
       std::max<size_t>(batching.prefix_cache_min_blocks, 1);
   prefix_options.requires_checkpoint = requires_prefix_checkpoint;
@@ -573,6 +598,9 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
         static_cast<double>(num_blocks) *
         std::clamp(static_cast<double>(batching.prefix_cache_pool_fraction),
                    0.0, 1.0));
+    if (prefix_options.enabled && prefix_options.max_blocks == 0) {
+      prefix_options.max_blocks = 1;
+    }
   }
   prefix_cache_ =
       std::make_unique<PrefixCache>(*block_pool_, prefix_options);
