@@ -8,7 +8,7 @@ import onnx_ir as ir
 class Qwen38:
     """Standard ONNX subgraphs retained around Qwen3.8 contrib-op replacements."""
 
-    def make_branchwise_rms_norm(self, name, root_input, norm, hidden_size):
+    def make_branchwise_rms_norm_expansion(self, name, root_input, norm, hidden_size):
         """Apply RMS normalization independently to each hyper-connection branch."""
         token_shape = ["num_tokens"] if self.use_paged_attention else ["batch_size", "sequence_length"]
         grouped_shape = [*token_shape, self.hc_count, hidden_size]
@@ -36,7 +36,11 @@ class Qwen38:
         self.make_value(normalized, self.io_dtype, grouped_shape)
         flatten_name = f"{name}/Flatten"
         flat_shape = [*token_shape, self.hc_count * hidden_size]
-        flat_dims = [-1, self.hc_count * hidden_size] if self.use_paged_attention else [0, 0, self.hc_count * hidden_size]
+        flat_dims = (
+            [-1, self.hc_count * hidden_size]
+            if self.use_paged_attention
+            else [0, 0, self.hc_count * hidden_size]
+        )
         self.make_reshape(
             flatten_name,
             [normalized, f"/model/constants/INT64/{flat_dims}"],
@@ -48,6 +52,103 @@ class Qwen38:
         scale_mul_name = f"{name}/Scale"
         self.make_mul(scale_mul_name, [f"{flatten_name}/output_0", scale_name], self.io_dtype, flat_shape)
         return f"{scale_mul_name}/output_0"
+
+    def make_scaled_silu_expansion(self, name, root_input, shape, alpha):
+        """Expand ScaledSiLU into standard ONNX operators."""
+        divide_name = f"{name}/Div"
+        self.make_div(
+            divide_name,
+            [root_input, f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{1 / alpha:g}"],
+            self.io_dtype,
+            shape,
+        )
+        sigmoid_name = f"{name}/Sigmoid"
+        self.make_sigmoid(sigmoid_name, f"{divide_name}/output_0", self.io_dtype, shape)
+        self.make_mul(
+            name,
+            [f"{divide_name}/output_0", f"{sigmoid_name}/output_0"],
+            self.io_dtype,
+            shape,
+        )
+        return f"{name}/output_0"
+
+    def make_hyper_connection_pre_mix_expansion(self, name, streams, pre_mix, token_shape, hidden_size):
+        """Expand HyperConnectionPreMix into reshape, multiply, and reduction nodes."""
+        grouped_shape = [*token_shape, self.hc_count, hidden_size]
+        grouped_dims = (
+            [-1, self.hc_count, hidden_size]
+            if self.use_paged_attention
+            else [0, 0, self.hc_count, hidden_size]
+        )
+        stream_reshape = f"{name}/streams/Reshape"
+        self.make_reshape(
+            stream_reshape,
+            [streams, f"/model/constants/INT64/{grouped_dims}"],
+            self.io_dtype,
+            grouped_shape,
+        )
+        gate_reshape = f"{name}/pre_mix/Reshape"
+        self.make_reshape(
+            gate_reshape,
+            [pre_mix, f"/model/constants/INT64/{grouped_dims}"],
+            self.io_dtype,
+            grouped_shape,
+        )
+        weighted = f"{name}/Mul"
+        self.make_mul(
+            weighted,
+            [f"{stream_reshape}/output_0", f"{gate_reshape}/output_0"],
+            self.io_dtype,
+            grouped_shape,
+        )
+        self.make_reduce_mean(
+            name,
+            [f"{weighted}/output_0", "/model/constants/INT64/[-2]"],
+            self.io_dtype,
+            [*token_shape, hidden_size],
+        )
+        return f"{name}/output_0"
+
+    def make_hyper_connection_post_mix_expansion(
+        self, name, streams, block_output, post_mix, token_shape, hidden_size
+    ):
+        """Expand identity-stream HyperConnectionPostMix into standard ONNX operators."""
+        output_unsqueeze = f"{name}/output/Unsqueeze"
+        self.make_unsqueeze(
+            output_unsqueeze,
+            [block_output, "/model/constants/INT64/[-2]"],
+            self.io_dtype,
+            [*token_shape, 1, hidden_size],
+        )
+        weight_unsqueeze = f"{name}/weight/Unsqueeze"
+        self.make_unsqueeze(
+            weight_unsqueeze,
+            [post_mix, "/model/constants/INT64/[-1]"],
+            self.io_dtype,
+            [*token_shape, self.hc_count, 1],
+        )
+        weighted = f"{name}/Mul"
+        self.make_mul(
+            weighted,
+            [f"{output_unsqueeze}/output_0", f"{weight_unsqueeze}/output_0"],
+            self.io_dtype,
+            [*token_shape, self.hc_count, hidden_size],
+        )
+        flatten = f"{name}/Reshape"
+        flat_dims = [-1, self.hc_count * hidden_size] if self.use_paged_attention else [0, 0, self.hc_count * hidden_size]
+        self.make_reshape(
+            flatten,
+            [f"{weighted}/output_0", f"/model/constants/INT64/{flat_dims}"],
+            self.io_dtype,
+            [*token_shape, self.hc_count * hidden_size],
+        )
+        self.make_add(
+            name,
+            [streams, f"{flatten}/output_0"],
+            self.io_dtype,
+            [*token_shape, self.hc_count * hidden_size],
+        )
+        return f"{name}/output_0"
 
     def make_qsa_rotary_caches(self, layer_id, root_input, cos_cache, sin_cache):
         """Promote shared rotary tables to the indexer's batched rank-3 layout."""

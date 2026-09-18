@@ -1172,6 +1172,76 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         )
         self.make_value(output, self.io_dtype, shape=shape)
 
+    def make_branchwise_rms_norm(self, name, root_input, norm, hidden_size):
+        token_shape = ["num_tokens"] if self.use_paged_attention else ["batch_size", "sequence_length"]
+        output = f"{name}/output_0"
+        scale_name = f"{name[1:].replace('/', '.')}.weight"
+        self.make_initializer(norm.weight + 1.0, scale_name, to=self.io_dtype)
+        self.make_node(
+            "BranchwiseRMSNorm",
+            inputs=[root_input, scale_name],
+            outputs=[output],
+            name=name,
+            domain="com.microsoft",
+            epsilon=self.layernorm_attrs["epsilon"],
+            num_branches=self.hc_count,
+        )
+        self.make_value(output, self.io_dtype, [*token_shape, self.hc_count * hidden_size])
+        return output
+
+    def make_scaled_silu(self, name, root_input, shape):
+        output = f"{name}/output_0"
+        self.make_node(
+            "ScaledSiLU",
+            inputs=[root_input],
+            outputs=[output],
+            name=name,
+            domain="com.microsoft",
+            alpha=1.0 / self.hc_count,
+        )
+        self.make_value(output, self.io_dtype, shape)
+        return output
+
+    def make_hyper_connection_pre_mix(self, name, streams, pre_mix, token_shape):
+        grouped_shape = [*token_shape, self.hc_count, self.hidden_size]
+        grouped_dims = (
+            [-1, self.hc_count, self.hidden_size]
+            if self.use_paged_attention
+            else [0, 0, self.hc_count, self.hidden_size]
+        )
+        gate_reshape = f"{name}/pre_mix/Reshape"
+        self.make_reshape(
+            gate_reshape,
+            [pre_mix, f"/model/constants/INT64/{grouped_dims}"],
+            self.io_dtype,
+            grouped_shape,
+        )
+        output = f"{name}/output_0"
+        self.make_node(
+            "HyperConnectionPreMix",
+            inputs=[streams, f"{gate_reshape}/output_0"],
+            outputs=[output],
+            name=name,
+            domain="com.microsoft",
+            num_branches=self.hc_count,
+            reduction_scale=1.0 / self.hc_count,
+        )
+        self.make_value(output, self.io_dtype, [*token_shape, self.hidden_size])
+        return output
+
+    def make_hyper_connection_post_mix(self, name, streams, block_output, post_mix, token_shape):
+        output = f"{name}/output_0"
+        self.make_node(
+            "HyperConnectionPostMix",
+            inputs=[streams, block_output, post_mix],
+            outputs=[output],
+            name=name,
+            domain="com.microsoft",
+            num_branches=self.hc_count,
+        )
+        self.make_value(output, self.io_dtype, [*token_shape, self.hc_hidden_size])
+        return output
+
     def make_hyper_connection_mix(self, layer_id, hyper_connection, root_input, location, combine=True):
         basename = f"/model/layers.{layer_id}/{location}_hyper_connection"
         token_shape = ["num_tokens"] if self.use_paged_attention else ["batch_size", "sequence_length"]
@@ -1181,32 +1251,13 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         down_name = self.make_matmul(
             hyper_connection.input_mix_weight_down, f"{basename}/input_mix_weight_down/MatMul", normalized
         )
-        divide_name = f"{basename}/input_mix_weight_down/Div"
-        self.make_div(
-            divide_name,
-            [f"{down_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.hc_count}"],
-            self.io_dtype,
-            [*token_shape, hyper_connection.input_mix_weight_down.out_features],
-        )
         silu_shape = [*token_shape, hyper_connection.input_mix_weight_down.out_features]
-        silu_sigmoid = f"{basename}/input_mix_weight_down/Sigmoid"
-        self.make_sigmoid(
-            silu_sigmoid,
-            f"{divide_name}/output_0",
-            self.io_dtype,
-            silu_shape,
-        )
         silu_name = f"{basename}/input_mix_weight_down/SiLU"
-        self.make_mul(
-            silu_name,
-            [f"{divide_name}/output_0", f"{silu_sigmoid}/output_0"],
-            self.io_dtype,
-            silu_shape,
-        )
+        silu_output = self.make_scaled_silu(silu_name, f"{down_name}/output_0", silu_shape)
         up_name = self.make_matmul(
             hyper_connection.input_mix_weight_up,
             f"{basename}/input_mix_weight_up/MatMul",
-            f"{silu_name}/output_0",
+            silu_output,
         )
         mix_sigmoid_shape = [*token_shape, self.hc_hidden_size]
         mix_sigmoid = f"{basename}/input_mix_weight_up/Sigmoid"
@@ -1216,42 +1267,15 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
             self.io_dtype,
             mix_sigmoid_shape,
         )
-        mix_reshape = f"{basename}/input_mix_weight/Reshape"
-        grouped_shape = [*token_shape, self.hc_count, self.hidden_size]
-        grouped_dims = (
-            [-1, self.hc_count, self.hidden_size]
-            if self.use_paged_attention
-            else [0, 0, self.hc_count, self.hidden_size]
-        )
-        self.make_reshape(
-            mix_reshape,
-            [f"{mix_sigmoid}/output_0", f"/model/constants/INT64/{grouped_dims}"],
-            self.io_dtype,
-            grouped_shape,
-        )
-        norm_reshape = f"{basename}/normalized/Reshape"
-        self.make_reshape(
-            norm_reshape,
-            [normalized, f"/model/constants/INT64/{grouped_dims}"],
-            self.io_dtype,
-            grouped_shape,
-        )
-        weighted_name = f"{basename}/mixed/Mul"
-        self.make_mul(
-            weighted_name,
-            [f"{mix_reshape}/output_0", f"{norm_reshape}/output_0"],
-            self.io_dtype,
-            grouped_shape,
-        )
         mixed_name = f"{basename}/mixed/Mean"
-        self.make_reduce_mean(
+        mixed_output = self.make_hyper_connection_pre_mix(
             mixed_name,
-            [f"{weighted_name}/output_0", "/model/constants/INT64/[-2]"],
-            self.io_dtype,
-            [*token_shape, self.hidden_size],
+            normalized,
+            f"{mix_sigmoid}/output_0",
+            token_shape,
         )
         if not combine:
-            return f"{mixed_name}/output_0"
+            return mixed_output
 
         inject_name = self.make_matmul(
             hyper_connection.block_inject_weight, f"{basename}/block_inject_weight/MatMul", normalized
@@ -1273,48 +1297,14 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
             self.io_dtype,
             inject_shape,
         )
-        return f"{mixed_name}/output_0", root_input, f"{inject_scale}/output_0"
+        return mixed_output, root_input, f"{inject_scale}/output_0"
 
     def make_hyper_connection_injection(self, layer_id, block_output, hyper_input, injection_weights, location):
         basename = f"/model/layers.{layer_id}/{location}_hyper_connection/injection"
         token_shape = ["num_tokens"] if self.use_paged_attention else ["batch_size", "sequence_length"]
-        output_unsqueeze = f"{basename}/output/Unsqueeze"
-        self.make_unsqueeze(
-            output_unsqueeze,
-            [block_output, "/model/constants/INT64/[-2]"],
-            self.io_dtype,
-            [*token_shape, 1, self.hidden_size],
+        return self.make_hyper_connection_post_mix(
+            basename, hyper_input, block_output, injection_weights, token_shape
         )
-        weight_unsqueeze = f"{basename}/weight/Unsqueeze"
-        self.make_unsqueeze(
-            weight_unsqueeze,
-            [injection_weights, "/model/constants/INT64/[-1]"],
-            self.io_dtype,
-            [*token_shape, self.hc_count, 1],
-        )
-        weighted_name = f"{basename}/Mul"
-        self.make_mul(
-            weighted_name,
-            [f"{output_unsqueeze}/output_0", f"{weight_unsqueeze}/output_0"],
-            self.io_dtype,
-            [*token_shape, self.hc_count, self.hidden_size],
-        )
-        flatten_name = f"{basename}/Reshape"
-        flat_dims = [-1, self.hc_hidden_size] if self.use_paged_attention else [0, 0, self.hc_hidden_size]
-        self.make_reshape(
-            flatten_name,
-            [f"{weighted_name}/output_0", f"/model/constants/INT64/{flat_dims}"],
-            self.io_dtype,
-            [*token_shape, self.hc_hidden_size],
-        )
-        add_name = f"{basename}/Add"
-        self.make_add(
-            add_name,
-            [hyper_input, f"{flatten_name}/output_0"],
-            self.io_dtype,
-            [*token_shape, self.hc_hidden_size],
-        )
-        return f"{add_name}/output_0"
 
     def make_ple(self, layer_id, ple, root_input):
         basename = f"/model/layers.{layer_id}/ple"

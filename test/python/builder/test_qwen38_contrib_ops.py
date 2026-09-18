@@ -232,74 +232,46 @@ def test_mtp_residual_linear_shared_preserves_hyper_connection_shape():
     assert output == "/model/mtp/input_fusion/Reshape/output_0"
 
 
-def test_paged_branchwise_norm_uses_packed_shapes():
+def test_paged_branchwise_norm_emits_fused_op():
     model = object.__new__(Qwen4ExpTextModel)
     model.use_paged_attention = True
     model.io_dtype = ir.DataType.FLOAT16
     model.hc_count = 2
     model.layernorm_attrs = {"epsilon": 1e-6}
-    record_calls(
-        model,
-        [
-            "make_reshape",
-            "make_initializer",
-            "make_node",
-            "make_value",
-            "make_mul",
-            "make_cast",
-        ],
-    )
+    record_calls(model, ["make_initializer", "make_node", "make_value"])
 
     model.make_branchwise_rms_norm("/norm", "hidden_states", SimpleNamespace(weight=torch.zeros(16)), 8)
 
-    reshapes = [args for method, args, _ in model.calls if method == "make_reshape"]
-    assert reshapes[0][1][1] == "/model/constants/INT64/[-1, 2, 8]"
-    assert reshapes[0][3] == ["num_tokens", 2, 8]
-    assert reshapes[1][1][1] == "/model/constants/INT64/[-1, 16]"
-    assert reshapes[1][3] == ["num_tokens", 16]
-
     initializers = [call for call in model.calls if call[0] == "make_initializer"]
-    assert initializers[0][1][0].shape == (8,)
-    assert torch.equal(initializers[0][1][0], torch.ones(8))
-    assert initializers[1][1][0].shape == (16,)
-    assert torch.equal(initializers[1][1][0], torch.ones(16))
-
-    layer_norm = next(
-        call for call in model.calls if call[0] == "make_node" and call[1][0] == "SimplifiedLayerNormalization"
-    )
-    assert layer_norm[1][0] == "SimplifiedLayerNormalization"
-    assert layer_norm[2]["inputs"] == ["/norm/Reshape/output_0", "norm.norm_scale"]
-    assert "domain" not in layer_norm[2]
-    assert layer_norm[2]["axis"] == -1
-    assert layer_norm[2]["epsilon"] == 1e-6
-    assert not [call for call in model.calls if call[0] == "make_cast"]
+    assert initializers[0][1][0].shape == (16,)
+    assert torch.equal(initializers[0][1][0], torch.ones(16))
+    norm = emitted_nodes(model)[0]
+    assert norm[0] == "BranchwiseRMSNorm"
+    assert norm[1]["inputs"] == ["hidden_states", "norm.weight"]
+    assert norm[1]["domain"] == "com.microsoft"
+    assert norm[1]["num_branches"] == 2
+    assert norm[1]["epsilon"] == 1e-6
 
 
-def test_dense_branchwise_norm_preserves_batch_and_sequence_shapes():
+def test_dense_branchwise_norm_emits_fused_op():
     model = object.__new__(Qwen4ExpTextModel)
     model.use_paged_attention = False
     model.io_dtype = ir.DataType.BFLOAT16
     model.hc_count = 4
     model.layernorm_attrs = {"epsilon": 1e-6}
-    record_calls(
-        model,
-        ["make_reshape", "make_initializer", "make_node", "make_value", "make_mul", "make_cast"],
-    )
+    record_calls(model, ["make_initializer", "make_node", "make_value"])
 
     output = model.make_branchwise_rms_norm(
         "/norm", "hidden_states", SimpleNamespace(weight=torch.zeros(32)), 8
     )
 
-    reshapes = [args for method, args, _ in model.calls if method == "make_reshape"]
-    assert reshapes[0][1][1] == "/model/constants/INT64/[0, 0, 4, 8]"
-    assert reshapes[0][3] == ["batch_size", "sequence_length", 4, 8]
-    assert reshapes[1][1][1] == "/model/constants/INT64/[0, 0, 32]"
-    assert reshapes[1][3] == ["batch_size", "sequence_length", 32]
-    assert output == "/norm/Scale/output_0"
-    assert not [call for call in model.calls if call[0] == "make_cast"]
+    assert output == "/norm/output_0"
+    norm = emitted_nodes(model)[0]
+    assert norm[0] == "BranchwiseRMSNorm"
+    assert norm[1]["num_branches"] == 4
 
 
-def test_hyper_connection_mix_stays_in_model_dtype_without_casts():
+def test_hyper_connection_emits_fused_ops():
     model = object.__new__(Qwen4ExpTextModel)
     model.use_paged_attention = False
     model.io_dtype = ir.DataType.FLOAT16
@@ -314,8 +286,8 @@ def test_hyper_connection_mix_stays_in_model_dtype_without_casts():
             "make_sigmoid",
             "make_mul",
             "make_reshape",
-            "make_reduce_mean",
-            "make_cast",
+            "make_node",
+            "make_value",
         ],
     )
     model.make_branchwise_rms_norm = MethodType(lambda self, *args: "normalized", model)
@@ -328,11 +300,87 @@ def test_hyper_connection_mix_stays_in_model_dtype_without_casts():
 
     model.make_hyper_connection_mix(0, weights, "hidden_states", "attn")
 
-    assert not [call for call in model.calls if call[0] == "make_cast"]
-    sigmoids = [call for call in model.calls if call[0] == "make_sigmoid"]
-    assert all(call[1][2] == ir.DataType.FLOAT16 for call in sigmoids)
+    nodes = emitted_nodes(model)
+    assert [op_type for op_type, _ in nodes] == ["ScaledSiLU", "HyperConnectionPreMix"]
+    assert nodes[0][1]["inputs"] == ["/model/layers.0/attn_hyper_connection/input_mix_weight_down/MatMul/output_0"]
+    assert nodes[0][1]["alpha"] == 0.25
+    assert nodes[1][1]["inputs"] == [
+        "normalized",
+        "/model/layers.0/attn_hyper_connection/mixed/Mean/pre_mix/Reshape/output_0",
+    ]
+    assert nodes[1][1]["num_branches"] == 4
+    assert nodes[1][1]["reduction_scale"] == 0.25
     matmuls = [call for call in model.calls if call[0] == "make_matmul"]
     assert matmuls[1][1][2] == "/model/layers.0/attn_hyper_connection/input_mix_weight_down/SiLU/output_0"
+
+
+def test_hyper_connection_injection_emits_fused_post_mix():
+    model = object.__new__(Qwen4ExpTextModel)
+    model.use_paged_attention = False
+    model.io_dtype = ir.DataType.FLOAT16
+    model.hc_count = 4
+    model.hidden_size = 8
+    model.hc_hidden_size = 32
+    record_calls(model, ["make_node", "make_value"])
+
+    output = model.make_hyper_connection_injection(
+        0, "block_output", "hyper_input", "injection_weights", "attn"
+    )
+
+    assert output == "/model/layers.0/attn_hyper_connection/injection/output_0"
+    post_mix = emitted_nodes(model)[0]
+    assert post_mix[0] == "HyperConnectionPostMix"
+    assert post_mix[1]["inputs"] == ["hyper_input", "block_output", "injection_weights"]
+    assert post_mix[1]["domain"] == "com.microsoft"
+    assert post_mix[1]["num_branches"] == 4
+
+
+def test_qwen_hyper_connection_expansions_emit_standard_onnx():
+    model = object.__new__(Qwen4ExpTextModel)
+    model.use_paged_attention = False
+    model.io_dtype = ir.DataType.FLOAT16
+    model.hc_count = 4
+    model.hidden_size = 8
+    model.layernorm_attrs = {"epsilon": 1e-6}
+    record_calls(
+        model,
+        [
+            "make_add",
+            "make_div",
+            "make_initializer",
+            "make_mul",
+            "make_node",
+            "make_reduce_mean",
+            "make_reshape",
+            "make_sigmoid",
+            "make_unsqueeze",
+            "make_value",
+        ],
+    )
+
+    model.make_branchwise_rms_norm_expansion(
+        "/norm", "streams", SimpleNamespace(weight=torch.zeros(32)), 8
+    )
+    model.make_scaled_silu_expansion("/silu", "down", ["batch_size", "sequence_length", 4], 0.25)
+    model.make_hyper_connection_pre_mix_expansion(
+        "/pre", "normalized", "pre_mix", ["batch_size", "sequence_length"], 8
+    )
+    model.make_hyper_connection_post_mix_expansion(
+        "/post", "streams", "block_output", "post_mix", ["batch_size", "sequence_length"], 8
+    )
+
+    standard_nodes = [op_type for op_type, _ in emitted_nodes(model)]
+    assert standard_nodes == ["SimplifiedLayerNormalization"]
+    assert not {
+        "BranchwiseRMSNorm",
+        "ScaledSiLU",
+        "HyperConnectionPreMix",
+        "HyperConnectionPostMix",
+    }.intersection(standard_nodes)
+    assert [call[0] for call in model.calls].count("make_reshape") == 5
+    assert [call[0] for call in model.calls].count("make_mul") == 4
+    assert [call[0] for call in model.calls].count("make_reduce_mean") == 1
+    assert [call[0] for call in model.calls].count("make_add") == 1
 
 
 def test_gated_rms_norm_emits_configured_activation():
