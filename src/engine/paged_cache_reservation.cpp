@@ -64,22 +64,19 @@ size_t CheckedAdd(
 }  // namespace
 
 PagedCacheBlockTable& PagedCacheBlockTable::operator=(
-    const PagedCacheBlockTable& other) {
-  if (this != &other) {
-    PagedCacheBlockTable copy{other};
-    *this = std::move(copy);
-  }
-  return *this;
-}
-
-PagedCacheBlockTable& PagedCacheBlockTable::operator=(
     PagedCacheBlockTable&& other) noexcept {
   if (this != &other) {
+    if (!blocks_.empty() || !window_blocks_.empty()) {
+      std::terminate();
+    }
     const uint64_t next_generation = mutation_generation_ + 1;
     request_id_ = other.request_id_;
     committed_slots_ = other.committed_slots_;
     blocks_ = std::move(other.blocks_);
     window_blocks_ = std::move(other.window_blocks_);
+    sealed_blocks_ = other.sealed_blocks_;
+    sealed_identity_ = std::move(other.sealed_identity_);
+    sealing_stopped_ = other.sealing_stopped_;
     mutation_generation_ = next_generation;
   }
   return *this;
@@ -139,7 +136,12 @@ void RemoveValidatedPagedCacheBlockTable(
   if (window_block_pool) {
     window_block_pool->FreeValidated(table->WindowBlocks());
   }
-  committed_tables.erase(table);
+  table->blocks_.clear();
+  table->window_blocks_.clear();
+  if (table != committed_tables.end() - 1) {
+    *table = std::move(committed_tables.back());
+  }
+  committed_tables.pop_back();
 }
 
 PagedCacheReservation::PagedCacheReservation(
@@ -148,7 +150,8 @@ PagedCacheReservation::PagedCacheReservation(
     std::span<const PagedCacheReservationRequest> requests,
     BlockPool* window_block_pool,
     size_t window_ring_blocks,
-    RequestIndex* table_index)
+    RequestIndex* table_index,
+    BlockReclaimer* reclaimer)
     : block_pool_{&block_pool},
       window_block_pool_{window_block_pool},
       window_ring_blocks_{window_ring_blocks},
@@ -201,8 +204,35 @@ PagedCacheReservation::PagedCacheReservation(
       throw std::runtime_error("Paged cache reservation request membership does not match the committed cache.");
     }
 
-    const size_t committed_slots = committed_table ? committed_table->committed_slots_ : 0;
-    const size_t committed_blocks = committed_table ? committed_table->blocks_.size() : 0;
+    const PrefixCacheMatch* match =
+        request.prefix_match && !request.prefix_match->Empty() ? request.prefix_match : nullptr;
+    if (match && (!request.newly_admitted || window_block_pool_)) {
+      throw std::runtime_error(
+          "Cached prefixes can only be adopted by newly admitted full-attention requests.");
+    }
+    const size_t adopted_block_offset = adopted_blocks_.size();
+    const size_t adopted_block_count = match ? match->blocks.size() : 0;
+    if (match) {
+      if (match->token_count !=
+              CheckedBlockSlots(adopted_block_count, block_pool.BlockSize(), "adopted") ||
+          match->token_count >= request.target_slots) {
+        throw std::runtime_error(
+            "A cached prefix must cover complete blocks and leave at least one token to execute.");
+      }
+      for (const auto& block : match->blocks) {
+        if (!block_pool.Owns(block) || !block->IsShareable()) {
+          throw std::runtime_error(
+              "A cached prefix can only adopt indexed full blocks from this cache.");
+        }
+      }
+      adopted_blocks_.insert(
+          adopted_blocks_.end(), match->blocks.begin(), match->blocks.end());
+    }
+
+    const size_t committed_slots =
+        committed_table ? committed_table->committed_slots_ : (match ? match->token_count : 0);
+    const size_t committed_blocks =
+        committed_table ? committed_table->blocks_.size() : adopted_block_count;
     const uint64_t table_generation =
         committed_table ? committed_table->mutation_generation_ : 0;
     if (request.target_slots < committed_slots) {
@@ -281,6 +311,8 @@ PagedCacheReservation::PagedCacheReservation(
         request.newly_admitted ? window_ring_blocks_ : 0,
         advance_block_count,
         request_advance_blocks,
+        adopted_block_offset,
+        adopted_block_count,
         request.newly_admitted,
     });
     reserved_block_count = CheckedAdd(
@@ -300,24 +332,37 @@ PagedCacheReservation::PagedCacheReservation(
     } else {
       PagedCacheBlockTable table;
       table.request_id_ = request.request_id;
-      table.blocks_.reserve(new_blocks);
+      table.committed_slots_ = committed_slots;
+      if (match) {
+        table.blocks_ = match->blocks;
+        table.sealed_blocks_ = adopted_block_count;
+        table.sealed_identity_ = match->blocks.back()->IdentityPtr();
+      }
+      table.blocks_.reserve(CheckedAdd(
+          adopted_block_count, new_blocks, "new table block capacity"));
       table.window_blocks_.reserve(window_ring_blocks_);
       new_tables_.push_back(std::move(table));
     }
   }
 
   resident_table_snapshots_.reserve(committed_tables.size());
-  if (reserved_block_count > block_pool.AvailableBlocks()) {
-    throw std::runtime_error("Not enough free blocks for the complete paged cache reservation.");
-  }
   if (window_block_pool_ && reserved_window_block_count > window_block_pool_->AvailableBlocks()) {
     throw std::runtime_error("Not enough free window blocks for the complete paged cache reservation.");
   }
 
   advance_blocks_.reserve(advance_block_count);
-  reserved_blocks_ = block_pool.ReserveBlocks(CheckedBlockSlots(
-      reserved_block_count, block_pool.BlockSize(), "reserved"));
+  if (!adopted_blocks_.empty()) {
+    block_pool.AddRef(adopted_blocks_);
+  }
   try {
+    if (reclaimer && reserved_block_count > block_pool.AvailableBlocks()) {
+      reclaimer->Reclaim(reserved_block_count - block_pool.AvailableBlocks());
+    }
+    if (reserved_block_count > block_pool.AvailableBlocks()) {
+      throw std::runtime_error("Not enough free blocks for the complete paged cache reservation.");
+    }
+    reserved_blocks_ = block_pool.ReserveBlocks(CheckedBlockSlots(
+        reserved_block_count, block_pool.BlockSize(), "reserved"));
     if (window_block_pool_) {
       reserved_window_blocks_ = window_block_pool_->ReserveBlocks(CheckedBlockSlots(
           reserved_window_block_count, window_block_pool_->BlockSize(),
@@ -326,6 +371,10 @@ PagedCacheReservation::PagedCacheReservation(
   } catch (...) {
     block_pool.RollbackReservedBlocks(reserved_blocks_);
     reserved_blocks_.clear();
+    for (const auto& block : adopted_blocks_) {
+      block_pool.Release(block);
+    }
+    adopted_blocks_.clear();
     throw;
   }
   block_pool_generation_ = block_pool_->MutationGeneration();
@@ -333,7 +382,8 @@ PagedCacheReservation::PagedCacheReservation(
       window_block_pool_ ? window_block_pool_->MutationGeneration() : 0;
   for (const auto& delta : deltas_) {
     const auto* table = FindCommittedTable(delta.request_id);
-    const size_t committed_blocks = table ? table->blocks_.size() : 0;
+    const size_t committed_blocks =
+        table ? table->blocks_.size() : delta.adopted_block_count;
     const size_t first_block = delta.committed_slots / block_pool_->BlockSize();
     for (size_t i = 0; i < delta.advance_block_count; ++i) {
       const size_t block_index = first_block + i;
@@ -368,6 +418,7 @@ PagedCacheReservation::PagedCacheReservation(PagedCacheReservation&& other) noex
       resident_table_index_{std::move(other.resident_table_index_)},
       reserved_blocks_{std::move(other.reserved_blocks_)},
       reserved_window_blocks_{std::move(other.reserved_window_blocks_)},
+      adopted_blocks_{std::move(other.adopted_blocks_)},
       deltas_{std::move(other.deltas_)},
       delta_index_{std::move(other.delta_index_)},
       delta_visit_generations_{
@@ -388,6 +439,9 @@ PagedCacheReservation::~PagedCacheReservation() noexcept {
       window_block_pool_->RollbackReservedBlocks(
           reserved_window_blocks_);
     }
+    for (const auto& block : adopted_blocks_) {
+      block_pool_->Release(block);
+    }
   }
 }
 
@@ -395,7 +449,8 @@ size_t PagedCacheReservation::RequiredBlockTableColumns() const {
   size_t columns = 0;
   for (const auto& delta : deltas_) {
     const auto* table = FindCommittedTable(delta.request_id);
-    const size_t committed_blocks = table ? table->blocks_.size() : 0;
+    const size_t committed_blocks =
+        table ? table->blocks_.size() : delta.adopted_block_count;
     columns = std::max(columns, committed_blocks + delta.reserved_block_count);
   }
   return columns;
@@ -423,6 +478,11 @@ void PagedCacheReservation::FillBlockTable(std::span<const void* const> request_
     if (table) {
       for (const auto& block : table->blocks_) {
         output[row * columns + column++] = static_cast<int32_t>(block->Id());
+      }
+    } else {
+      for (size_t i = 0; i < delta.adopted_block_count; ++i) {
+        output[row * columns + column++] = static_cast<int32_t>(
+            adopted_blocks_[delta.adopted_block_offset + i]->Id());
       }
     }
     for (size_t i = 0; i < delta.reserved_block_count; ++i) {
@@ -511,6 +571,7 @@ void PagedCacheReservation::ValidateCommit() const {
   size_t new_table_count = 0;
   size_t assigned_reserved_blocks = 0;
   size_t assigned_reserved_window_blocks = 0;
+  size_t assigned_adopted_blocks = 0;
   for (size_t index = 0; index < committed_tables_->size(); ++index) {
     const auto& table = (*committed_tables_)[index];
     const auto indexed = resident_table_index_.Find(table.request_id_);
@@ -549,7 +610,11 @@ void PagedCacheReservation::ValidateCommit() const {
         delta.reserved_window_block_offset != assigned_reserved_window_blocks ||
         assigned_reserved_window_blocks > reserved_window_blocks_.size() ||
         delta.reserved_window_block_count >
-            reserved_window_blocks_.size() - assigned_reserved_window_blocks) {
+            reserved_window_blocks_.size() - assigned_reserved_window_blocks ||
+        delta.adopted_block_offset != assigned_adopted_blocks ||
+        assigned_adopted_blocks > adopted_blocks_.size() ||
+        delta.adopted_block_count >
+            adopted_blocks_.size() - assigned_adopted_blocks) {
       throw std::logic_error("Paged cache reservation delta is inconsistent.");
     }
 
@@ -579,8 +644,17 @@ void PagedCacheReservation::ValidateCommit() const {
         }
       }
     }
+    for (const auto& block :
+         std::span<const std::shared_ptr<Block>>{adopted_blocks_}.subspan(
+             assigned_adopted_blocks, delta.adopted_block_count)) {
+      if (!block_pool_->Owns(block) || !block->IsShareable()) {
+        throw std::logic_error(
+            "Paged cache adopted blocks are no longer valid.");
+      }
+    }
 
-    const size_t committed_blocks = table ? table->blocks_.size() : 0;
+    const size_t committed_blocks =
+        table ? table->blocks_.size() : delta.adopted_block_count;
     const size_t total_blocks = CheckedAdd(
         committed_blocks, delta.reserved_block_count,
         "target block capacity");
@@ -602,11 +676,13 @@ void PagedCacheReservation::ValidateCommit() const {
 
     assigned_reserved_blocks += delta.reserved_block_count;
     assigned_reserved_window_blocks += delta.reserved_window_block_count;
+    assigned_adopted_blocks += delta.adopted_block_count;
     new_table_count += delta.newly_admitted ? 1 : 0;
   }
 
   if (assigned_reserved_blocks != reserved_blocks_.size() ||
       assigned_reserved_window_blocks != reserved_window_blocks_.size() ||
+      assigned_adopted_blocks != adopted_blocks_.size() ||
       new_table_count != new_tables_.size() ||
       (table_index_ &&
        new_table_count > table_index_->Capacity() - table_index_->Size()) ||
@@ -707,6 +783,9 @@ void PagedCacheReservation::CommitValidated() {
 
   reserved_blocks_.clear();
   reserved_window_blocks_.clear();
+  // Post-commit prefix publication consumes these handles to update recency and metrics. Their
+  // pool references have transferred to the committed tables; retaining the shared_ptr handles
+  // until this reservation is destroyed does not add pool-local ownership.
   new_tables_.clear();
   advance_blocks_.clear();
   state_ = PagedCacheReservationState::Committed;
@@ -721,15 +800,18 @@ void PagedCacheReservation::Release() {
   }
 
   block_pool_->ValidateFree(reserved_blocks_);
+  block_pool_->ValidateFree(adopted_blocks_);
   if (window_block_pool_) {
     window_block_pool_->ValidateFree(reserved_window_blocks_);
   }
   block_pool_->FreeValidated(reserved_blocks_);
+  block_pool_->FreeValidated(adopted_blocks_);
   if (window_block_pool_) {
     window_block_pool_->FreeValidated(reserved_window_blocks_);
   }
   reserved_blocks_.clear();
   reserved_window_blocks_.clear();
+  adopted_blocks_.clear();
   new_tables_.clear();
   advance_blocks_.clear();
   state_ = PagedCacheReservationState::Released;

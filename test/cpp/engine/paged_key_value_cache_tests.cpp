@@ -771,6 +771,7 @@ TEST(PagedKeyValueCacheManifestTest, ExplicitBlockCountCoversBothPools) {
 
 TEST(PagedKeyValueCacheManifestTest, AllocatesSparseSlidingAndFullLayerCaches) {
   auto model = LoadSyntheticPagedModel();
+  model->config_->engine.dynamic_batching->prefix_caching = false;
   auto& decoder = model->config_->model.decoder;
   decoder.sliding_window = Config::Model::Decoder::SlidingWindow{};
   decoder.sliding_window->window_size = 4;
@@ -788,6 +789,108 @@ TEST(PagedKeyValueCacheManifestTest, AllocatesSparseSlidingAndFullLayerCaches) {
   EXPECT_EQ(
       values[1].first->GetTensorTypeAndShapeInfo()->GetShape(),
       std::vector<int64_t>({128, 4, 1, 1}));
+}
+
+TEST(PagedKeyValueCacheManifestTest, PrefixCachingRejectsSlidingWindowCache) {
+  auto model = LoadSyntheticPagedModel();
+  model->config_->engine.dynamic_batching->prefix_caching_explicitly_set = true;
+  auto& decoder = model->config_->model.decoder;
+  decoder.sliding_window = Config::Model::Decoder::SlidingWindow{};
+  decoder.sliding_window->window_size = 4;
+  decoder.sliding_window->layers = {1};
+  decoder.inputs.block_table_windowed = decoder.inputs.block_table;
+
+  EXPECT_THROW(MakePagedCache(model), std::runtime_error);
+}
+
+TEST(PagedKeyValueCacheManifestTest, OmittedPrefixCachingPreservesSlidingWindowCompatibility) {
+  auto model = LoadSyntheticPagedModel();
+  auto& decoder = model->config_->model.decoder;
+  decoder.sliding_window = Config::Model::Decoder::SlidingWindow{};
+  decoder.sliding_window->window_size = 4;
+  decoder.sliding_window->layers = {1};
+  decoder.inputs.block_table_windowed = decoder.inputs.block_table;
+  model->config_->search.chunk_size = 4;
+
+  auto cache = MakePagedCache(model);
+
+  EXPECT_FALSE(cache->PrefixCachingEnabled());
+}
+
+TEST(PagedKeyValueCacheManifestTest, ZeroPrefixCapacityDoesNotRejectSlidingWindowCache) {
+  auto model = LoadSyntheticPagedModel();
+  auto& batching = *model->config_->engine.dynamic_batching;
+  batching.prefix_caching_explicitly_set = true;
+  batching.prefix_cache_max_blocks = 0;
+  auto& decoder = model->config_->model.decoder;
+  decoder.sliding_window = Config::Model::Decoder::SlidingWindow{};
+  decoder.sliding_window->window_size = 4;
+  decoder.sliding_window->layers = {1};
+  decoder.inputs.block_table_windowed = decoder.inputs.block_table;
+  model->config_->search.chunk_size = 4;
+
+  auto cache = MakePagedCache(model);
+
+  EXPECT_FALSE(cache->PrefixCachingEnabled());
+}
+
+TEST(PagedKeyValueCacheManifestTest, OmittedPrefixCachingPreservesAuxiliaryCacheCompatibility) {
+  auto model = LoadSyntheticPagedModel();
+
+  PagedKeyValueCache cache(
+      model, /*auxiliary_bytes_per_block=*/1,
+      /*auxiliary_reserved_memory_bytes=*/0);
+
+  EXPECT_FALSE(cache.PrefixCachingEnabled());
+}
+
+TEST(PagedKeyValueCacheManifestTest, PositivePrefixFractionRetainsAtLeastOneBlock) {
+  auto model = LoadSyntheticPagedModel();
+  auto& batching = *model->config_->engine.dynamic_batching;
+  batching.num_blocks = 1;
+  batching.prefix_cache_pool_fraction = 0.1f;
+
+  auto cache = MakePagedCache(model);
+
+  EXPECT_TRUE(cache->PrefixCachingEnabled());
+}
+
+TEST(PagedKeyValueCacheManifestTest, PrefixCachingRejectsDsparkAuxiliaryState) {
+  auto model = LoadSyntheticPagedModel();
+  auto& batching = *model->config_->engine.dynamic_batching;
+  batching.prefix_caching_explicitly_set = true;
+  model->config_->model.dflash2.filename = "dspark.onnx";
+  model->config_->model.dflash2.is_dspark = true;
+
+  EXPECT_THROW(MakePagedCache(model), std::runtime_error);
+}
+
+TEST(PagedKeyValueCacheManifestTest, PrefixCachingSupportsFixedAuxiliaryPool) {
+  auto model = LoadSyntheticPagedModel();
+  model->config_->engine.dynamic_batching->prefix_caching = true;
+  model->config_->engine.dynamic_batching->prefix_caching_explicitly_set = true;
+
+  EXPECT_THROW(
+      PagedKeyValueCache(
+          model, /*auxiliary_bytes_per_block=*/1,
+          /*auxiliary_reserved_memory_bytes=*/0),
+      std::runtime_error);
+  EXPECT_NO_THROW(
+      PagedKeyValueCache(
+          model, /*auxiliary_bytes_per_block=*/0,
+          /*auxiliary_reserved_memory_bytes=*/1));
+}
+
+TEST(PagedKeyValueCacheManifestTest, PrefixCachingAllocatesFixedStateCheckpoints) {
+  auto model = LoadSyntheticCompositeModel();
+  model->config_->engine.dynamic_batching->prefix_caching = true;
+
+  PagedCacheManager manager{model};
+  const auto fixed = manager.FixedStateSnapshot();
+  ASSERT_TRUE(fixed.has_value());
+  EXPECT_EQ(fixed->checkpoint_capacity,
+            model->config_->engine.dynamic_batching->max_batch_size);
+  EXPECT_EQ(fixed->checkpoint_count, 0u);
 }
 
 TEST(PagedKeyValueCacheManifestTest, RejectsSlidingWindowLayersOutsidePagedGroup) {

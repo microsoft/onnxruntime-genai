@@ -1381,6 +1381,8 @@ class Model:
                 "block_size": self.attention_attrs["paged_block_size"],
                 "max_batch_size": int(self.extra_options.get("max_batch_size", 100)),
             }
+            if self.has_windowed_paged_layers():
+                dynamic_batching["prefix_caching"] = False
             if "num_blocks" in self.extra_options:
                 dynamic_batching["num_blocks"] = int(self.extra_options["num_blocks"])
             else:

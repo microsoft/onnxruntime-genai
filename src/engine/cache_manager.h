@@ -101,6 +101,11 @@ struct CacheManager {
   // roll a rejected draft back. A verify step runs 1 + drafts tokens, so a model with recurrent
   // state is capped by its checkpoint window.
   virtual size_t MaxDraftTokensPerStep() const { return 0; }
+  virtual std::shared_ptr<const PrefixCacheMatch> MatchPrefix(const Request&) {
+    return nullptr;
+  }
+  virtual void SealCommittedBlocks(const StepPlan&) {}
+  virtual const PrefixCacheMetrics* PrefixMetrics() const { return nullptr; }
 
   // Immutable snapshot of the cache's block accounting for invariant validation and state
   // inspection. Caches that do not use paged blocks return an empty snapshot.
@@ -192,11 +197,15 @@ struct PagedCacheManager : CacheManager {
 
   size_t BlockTableColumns() const override { return key_value_cache_->BlockTableColumns(); }
 
-  size_t MaxQueryTokensPerRequest() const override {
-    return key_value_cache_->MaxQueryTokensPerRequest();
-  }
+  size_t MaxQueryTokensPerRequest() const override;
 
   size_t MaxDraftTokensPerStep() const override;
+  std::shared_ptr<const PrefixCacheMatch> MatchPrefix(
+      const Request& request) override;
+  void SealCommittedBlocks(const StepPlan& plan) override;
+  const PrefixCacheMetrics* PrefixMetrics() const override {
+    return &key_value_cache_->PrefixMetrics();
+  }
 
   PagedCacheSnapshot Snapshot() const override { return key_value_cache_->Snapshot(); }
 
