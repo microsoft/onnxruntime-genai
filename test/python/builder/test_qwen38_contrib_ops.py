@@ -49,6 +49,7 @@ def make_sparse_model(paged):
     model.mask_attrs = {"seqlens_k": "seqlens", "total_seq_len": "total_length"}
     model.input_names = {
         "position_ids": "position_ids",
+        "attention_mask": "attention_mask",
         "past.indexer": {3: "past.3.indexer_key"},
         "cumulative_sequence_lengths": "cumulative_sequence_lengths",
         "past_sequence_lengths": "past_sequence_lengths",
@@ -81,7 +82,6 @@ def make_sparse_model(paged):
     model.make_key_value_cache_names = MethodType(
         lambda self, layer_id: ("past_key", "past_value", "present_key", "present_value"), model
     )
-    model.make_qsa_visibility_mask = MethodType(lambda self, layer_id, root_input: "visibility_mask", model)
     model.make_selected_counts = MethodType(
         lambda self, layer_id, selected, capacity, packed: "selected_counts", model
     )
@@ -419,10 +419,11 @@ def test_dense_qwen_sparse_attention_emits_indexer_and_dynamic_executor():
         "model.layers.3.attn.indexer.k_norm.weight",
         "cos_cache",
         "sin_cache",
-        "visibility_mask",
+        "attention_mask",
         "past.3.indexer_key",
     ]
     assert not any("/rotary_cache/" in str(call) for call in model.calls)
+    assert not any("/visibility/" in str(call) for call in model.calls)
     assert indexer["outputs"] == [
         "/model/layers.3/attn/SparseAttentionIndexer/output_0",
         "present.3.indexer_key",
