@@ -138,6 +138,9 @@ void TensorScatterKeyValueCache::Update(DeviceSpan<int32_t>,
               static_cast<int64_t>(write_index));
     values.CopyCpuToDevice();
   }
+}
+
+void TensorScatterKeyValueCache::Commit(int total_length) {
   current_length_ = total_length;
 }
 

@@ -9,7 +9,31 @@
 #include "models/io/logits.h"
 #include "models/io/tensor_scatter_kv_cache.h"
 
+#include <atomic>
+
 namespace Generators {
+
+void ValidateNemotronParsePromptLength(size_t prompt_length,
+                                     int64_t required_prompt_length,
+                                     int context_length) {
+  if (prompt_length == 0 || prompt_length >= static_cast<size_t>(context_length)) {
+    throw std::runtime_error(
+        "Nemotron Parse prompt has " + std::to_string(prompt_length) +
+        " tokens including special tokens; it must be non-empty and shorter "
+        "than context_length=" + std::to_string(context_length) +
+        " to leave room for generation.");
+  }
+  if (required_prompt_length > 0 &&
+      prompt_length != static_cast<size_t>(required_prompt_length)) {
+    throw std::runtime_error(
+        "Nemotron Parse prompt has " + std::to_string(prompt_length) +
+        " tokens including special tokens, but the fixed prefill session "
+        "requires exactly " + std::to_string(required_prompt_length) +
+        ". Shorter prompts are not padded and longer prompts are not truncated. "
+        "Export a decoder with a dynamic sequence dimension to support other prompt lengths.");
+  }
+}
+
 namespace {
 
 constexpr const char* kNvProfileMinShapes =
@@ -71,22 +95,20 @@ std::string MakeDecoderProfile(const Config& config, int sequence_length) {
   return profile.str();
 }
 
-void SpecializeDecoderSession(OrtSessionOptions& session_options,
-                              const Config& config,
-                              int sequence_length) {
-  // Fixed TRT profiles alone do not make symbolic dimensions static during
-  // ORT graph optimization. Override every free dimension so TRT-RTX can
-  // compile each decoder phase as a static graph.
+void ConfigureDecoderSession(OrtSessionOptions& session_options,
+                             const Config& config,
+                             int min_length, int opt_length, int max_length) {
+  // Shape overrides enable ORT's static optimizations on the fast paths.
+  // Only custom-prompt prefill retains a symbolic sequence dimension.
   session_options.AddFreeDimensionOverrideByName("batch_size", 1);
   session_options.AddFreeDimensionOverrideByName(
       "encoder_sequence_length", config.model.vision.num_visual_tokens);
-  session_options.AddFreeDimensionOverrideByName("sequence_length",
-                                                 sequence_length);
-
-  const auto profile = MakeDecoderProfile(config, sequence_length);
-  session_options.AddConfigEntry(kNvProfileMinShapes, profile.c_str());
-  session_options.AddConfigEntry(kNvProfileOptShapes, profile.c_str());
-  session_options.AddConfigEntry(kNvProfileMaxShapes, profile.c_str());
+  if (min_length == max_length) {
+    session_options.AddFreeDimensionOverrideByName("sequence_length", min_length);
+  }
+  session_options.AddConfigEntry(kNvProfileMinShapes, MakeDecoderProfile(config, min_length).c_str());
+  session_options.AddConfigEntry(kNvProfileOptShapes, MakeDecoderProfile(config, opt_length).c_str());
+  session_options.AddConfigEntry(kNvProfileMaxShapes, MakeDecoderProfile(config, max_length).c_str());
 }
 
 class EncoderState : public State {
@@ -158,14 +180,17 @@ class DecoderState : public State {
   DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t>) override {
     const size_t new_length = next_tokens.size() / params_->BatchBeamSize();
-    const bool is_prompt = first_run_;
+    const bool is_prompt = prompt_pending_;
     if (is_prompt) {
-      if (total_length !=
-              model_.config_->model.decoder.prefill_sequence_length ||
-          new_length != static_cast<size_t>(total_length)) {
+      if (new_length != static_cast<size_t>(total_length)) {
         throw std::runtime_error(
-            "Nemotron Parse prompt length must match prefill_sequence_length");
+            "Nemotron Parse requires the entire prompt in the first decoder call");
       }
+      ValidateNemotronParsePromptLength(
+          new_length,
+          model_.session_info_.GetInputShape(
+              model_.config_->model.decoder.inputs.input_ids)[1],
+          model_.config_->model.context_length);
     } else if (new_length != 1) {
       throw std::runtime_error(
           "Nemotron Parse TensorScatter decode accepts one token per step");
@@ -181,18 +206,23 @@ class DecoderState : public State {
                            static_cast<int>(new_length));
     self_cache_.Update({}, total_length);
     logits_.Update(next_tokens, new_length);
-    auto& decoder_session =
-        is_prompt && model_.prefill_decoder_session_
-            ? *model_.prefill_decoder_session_
-            : *model_.decoder_session_;
-    UpdateIoBinding(decoder_session, new_length);
+    auto* decoder_session = model_.decoder_session_.get();
+    if (is_prompt && model_.prefill_decoder_session_) {
+      decoder_session = new_length == static_cast<size_t>(model_.config_->model.decoder.prefill_sequence_length)
+                            ? model_.prefill_decoder_session_.get()
+                            : model_.dynamic_prefill_decoder_session_.get();
+    }
+    UpdateIoBinding(*decoder_session, new_length);
     if (model_.config_->model.decoder.run_options.has_value()) {
       State::SetRunOptions(*model_.config_->model.decoder.run_options);
     }
-    State::Run(decoder_session,
+    State::Run(*decoder_session,
                params_->use_graph_capture && !is_prompt,
                static_cast<int>(new_length), 0, io_binding_.get());
-    return logits_.Get();
+    auto logits = logits_.Get();
+    self_cache_.Commit(total_length);
+    prompt_pending_ = false;
+    return logits;
   }
 
  private:
@@ -228,6 +258,7 @@ class DecoderState : public State {
   std::unique_ptr<OrtIoBinding> io_binding_;
   OrtSession* bound_session_{};
   size_t bound_sequence_length_{};
+  bool prompt_pending_{true};
 };
 
 class NemotronParseState : public State {
@@ -239,15 +270,6 @@ class NemotronParseState : public State {
         model_{model},
         encoder_state_{std::make_unique<EncoderState>(model, params)},
         decoder_state_{model, sequence_lengths, params} {
-    if (params_->search.batch_size != 1 || params_->search.num_beams != 1) {
-      throw std::runtime_error(
-          "Nemotron Parse TensorScatter supports batch_size=1 and num_beams=1");
-    }
-    if (params_->search.max_length > model_.config_->model.context_length) {
-      throw std::runtime_error(
-          "Nemotron Parse max_length exceeds the TensorScatter cache capacity");
-    }
-
     cross_cache_ = std::make_unique<CrossCache>(
         *this, model_.config_->model.vision.num_visual_tokens);
     encoder_state_->AddCrossCache(*cross_cache_);
@@ -255,7 +277,8 @@ class NemotronParseState : public State {
   }
 
   void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override {
-    if (!encoder_state_) {
+    ThrowIfFailed();
+    if (encoder_has_run_) {
       throw std::runtime_error(
           "Nemotron Parse inputs cannot be changed after prompt processing");
     }
@@ -264,23 +287,73 @@ class NemotronParseState : public State {
 
   DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices) override {
-    if (encoder_state_) {
-      encoder_state_->RunEncoder();
-      encoder_state_.reset();
+    ThrowIfFailed();
+    try {
+      if (!encoder_has_run_) {
+        encoder_state_->RunEncoder();
+        encoder_has_run_ = true;
+      }
+      return decoder_state_.Run(total_length, next_tokens, next_indices);
+    } catch (...) {
+      // A failed in-place run may have modified only part of the cache.
+      failed_ = true;
+      session_terminated_ = true;
+      throw;
     }
-    return decoder_state_.Run(total_length, next_tokens, next_indices);
   }
+
+  bool SupportsRewind() const override { return false; }
 
   void RewindTo(size_t) override {
     throw std::runtime_error(
         "Nemotron Parse TensorScatter does not support rewind");
   }
 
+  void SetRunOption(const char* key, const char* value) override {
+    ThrowIfFailed();
+    if (!key || !value) {
+      throw std::runtime_error("Nemotron Parse runtime option key and value must not be null");
+    }
+    // Keep the encoder alive so cancellation can reach it throughout a run.
+    State::SetRunOption(key, value);
+    encoder_state_->SetRunOption(key, value);
+    decoder_state_.SetRunOption(key, value);
+  }
+
+  OrtValue* GetInput(const char* name) override {
+    ThrowIfFailed();
+    if (auto* input = decoder_state_.GetInput(name)) {
+      return input;
+    }
+    return encoder_state_->GetInput(name);
+  }
+
+  OrtValue* GetOutput(const char* name) override {
+    ThrowIfFailed();
+    if (auto* output = decoder_state_.GetOutput(name)) {
+      return output;
+    }
+    return encoder_state_->GetOutput(name);
+  }
+
+  void SetActiveAdapter(Adapters*, const std::string&) override {
+    throw std::runtime_error("Nemotron Parse does not support adapters");
+  }
+
  private:
+  void ThrowIfFailed() const {
+    if (failed_) {
+      throw std::runtime_error(
+          "Nemotron Parse generator is unusable after a failed inference run; create a new generator");
+    }
+  }
+
   const NemotronParseModel& model_;
   std::unique_ptr<EncoderState> encoder_state_;
   DecoderState decoder_state_;
   std::unique_ptr<CrossCache> cross_cache_;
+  bool encoder_has_run_{false};
+  std::atomic<bool> failed_{false};
 };
 
 }  // namespace
@@ -289,6 +362,10 @@ NemotronParseModel::NemotronParseModel(std::unique_ptr<Config> config,
                                        OrtEnv& ort_env)
     : Model{std::move(config)} {
   const auto& decoder = config_->model.decoder;
+  if (IsMultiProfileEnabled(decoder.session_options)) {
+    throw std::runtime_error(
+        "Nemotron Parse uses separate single-profile sessions; nv_multi_profile_enable must be disabled");
+  }
   if (config_->model.vision.filename.empty() || decoder.filename.empty() ||
       config_->model.context_length <= 0 ||
       decoder.prefill_sequence_length <= 0 ||
@@ -321,15 +398,23 @@ NemotronParseModel::NemotronParseModel(std::unique_ptr<Config> config,
                                  /*disable_graph_capture=*/true);
 
   if (p_device_->GetType() == DeviceType::NvTensorRtRtx) {
-    // Reuse one ONNX file, but create independently optimized prefill and
-    // decode sessions. A single dynamic engine is materially slower at Q=1.
+    // Preserve static default-prompt and Q=1 decode performance. Custom prompts
+    // use an eagerly created dynamic session; no sessions are built during Run.
     prefill_decoder_session_options_ = OrtSessionOptions::Create();
     CreateSessionOptionsFromConfig(
         decoder.session_options, *prefill_decoder_session_options_,
         /*is_primary_session_options=*/false);
-    SpecializeDecoderSession(*session_options_, *config_, 1);
-    SpecializeDecoderSession(*prefill_decoder_session_options_, *config_,
-                             decoder.prefill_sequence_length);
+    dynamic_prefill_decoder_session_options_ = OrtSessionOptions::Create();
+    CreateSessionOptionsFromConfig(
+        decoder.session_options, *dynamic_prefill_decoder_session_options_,
+        /*is_primary_session_options=*/false,
+        /*disable_graph_capture=*/true);
+    ConfigureDecoderSession(*session_options_, *config_, 1, 1, 1);
+    ConfigureDecoderSession(*prefill_decoder_session_options_, *config_,
+                            decoder.prefill_sequence_length, decoder.prefill_sequence_length,
+                            decoder.prefill_sequence_length);
+    ConfigureDecoderSession(*dynamic_prefill_decoder_session_options_, *config_,
+                            1, decoder.prefill_sequence_length, config_->model.context_length - 1);
   }
 
   encoder_session_ = CreateSession(ort_env, config_->model.vision.filename,
@@ -339,10 +424,25 @@ NemotronParseModel::NemotronParseModel(std::unique_ptr<Config> config,
   if (prefill_decoder_session_options_) {
     prefill_decoder_session_ = CreateSession(
         ort_env, decoder.filename, prefill_decoder_session_options_.get());
+    dynamic_prefill_decoder_session_ = CreateSession(
+        ort_env, decoder.filename, dynamic_prefill_decoder_session_options_.get());
   }
 
+  // SessionInfo keeps the first shape for duplicate names. Expose the broadest
+  // prefill shape to the processor, not the static fast-path or decode shape.
+  if (dynamic_prefill_decoder_session_) {
+    session_info_.Add(*dynamic_prefill_decoder_session_);
+  }
+  if (prefill_decoder_session_) {
+    session_info_.Add(*prefill_decoder_session_);
+  }
   session_info_.Add(*decoder_session_);
   session_info_.Add(*encoder_session_);
+
+  if (session_info_.GetInputShape(decoder.inputs.input_ids).size() != 2) {
+    throw std::runtime_error(
+        "Nemotron Parse decoder input_ids must have rank 2");
+  }
 
   const auto pixel_values_shape = session_info_.GetInputShape(
       config_->model.vision.inputs.pixel_values);
@@ -364,6 +464,16 @@ NemotronParseModel::NemotronParseModel(std::unique_ptr<Config> config,
 
 std::unique_ptr<State> NemotronParseModel::CreateState(
     DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const {
+  if (params.search.batch_size != 1 || params.search.num_beams != 1) {
+    throw std::runtime_error(
+        "Nemotron Parse TensorScatter supports batch_size=1 and num_beams=1");
+  }
+  if (params.search.max_length <= 0 || params.search.max_length > config_->model.context_length) {
+    throw std::runtime_error("Nemotron Parse max_length must fit the TensorScatter cache capacity");
+  }
+  if (params.use_multi_profile) {
+    throw std::runtime_error("Nemotron Parse does not support multi-profile mode");
+  }
   return std::make_unique<NemotronParseState>(*this, sequence_lengths, params);
 }
 
