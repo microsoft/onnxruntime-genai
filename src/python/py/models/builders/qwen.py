@@ -788,10 +788,6 @@ class Qwen35MoETextModel(Qwen35TextModel):
         self.moe_attrs["activation_type"] = "swiglu"
         self.moe_attrs["swiglu_fusion"] = 1
         self.moe_attrs["normalize_routing_weights"] = True
-        if self.moe_attrs.get("swiglu_limit") is None and self.ep == "trt-rtx":
-            # TRT-RTX EP builds currently require QMoE swiglu_limit to be present;
-            # use +inf to preserve the "no clamp" behavior when the model omits it.
-            self.moe_attrs["swiglu_limit"] = float("inf")
 
         self.moe_intermediate_size = getattr(config, "moe_intermediate_size", 512)
         self.shared_expert_intermediate_size = getattr(
@@ -802,24 +798,7 @@ class Qwen35MoETextModel(Qwen35TextModel):
         return layer.mlp
 
     def make_moe_preprocessing(self, layer_id, moe, root_input):
-        gate_up_proj_bias = f"model.layers.{layer_id}.moe.experts.gate_up_proj.bias"
-        down_proj_bias = f"model.layers.{layer_id}.moe.experts.down_proj.bias"
-
-        gate_up_weight = None
-        down_weight = None
-        if getattr(moe.experts, "gate_up_proj", None) is not None:
-            # Repack HF concatenated [gate|up] to ORT interleaved [g0,u0,g1,u1,...].
-            raw_gate_up = moe.experts.gate_up_proj
-            half = raw_gate_up.shape[1] // 2
-            gate_up_weight = torch.stack([raw_gate_up[:, :half, :], raw_gate_up[:, half:, :]], dim=2).reshape_as(
-                raw_gate_up
-            )
-            down_weight = moe.experts.down_proj
-        self.make_moe_expert_initializers(layer_id, moe.experts, gate_up_weight, down_weight)
-
-        num_e = self.moe_attrs["num_experts"]
-        self.make_initializer(torch.zeros(num_e, 2 * self.moe_intermediate_size), gate_up_proj_bias, to=self.io_dtype)
-        self.make_initializer(torch.zeros(num_e, self.hidden_size), down_proj_bias, to=self.io_dtype)
+        self.make_interleaved_swiglu_moe_preprocessing(layer_id, moe)
 
     def make_moe_router(self, layer_id, moe, root_input):
         basename = f"/model/layers.{layer_id}/moe"
@@ -833,19 +812,13 @@ class Qwen35MoETextModel(Qwen35TextModel):
                 f"/model/constants/INT64/{[-1, self.moe_attrs['num_experts']]}",
             ],
             dtype=self.io_dtype,
-            shape=["batch_size * sequence_length", self.moe_attrs["num_experts"]],
+            shape=self.make_moe_router_shape(),
         )
 
     def make_moe_subgraph(self, layer_id, moe, root_input):
         basename = f"/model/layers.{layer_id}/moe"
         op_type = self.moe_attrs["op_type"]
-        moe_weight_type = f"{'q' if op_type == 'QMoE' else ''}weight"
-        gate_up_proj_weight = f"model.layers.{layer_id}.moe.experts.gate_up_proj.{moe_weight_type}"
-        gate_up_proj_scales = f"model.layers.{layer_id}.moe.experts.gate_up_proj.scales"
-        gate_up_proj_bias = f"model.layers.{layer_id}.moe.experts.gate_up_proj.bias"
-        down_proj_weight = f"model.layers.{layer_id}.moe.experts.down_proj.{moe_weight_type}"
-        down_proj_scales = f"model.layers.{layer_id}.moe.experts.down_proj.scales"
-        down_proj_bias = f"model.layers.{layer_id}.moe.experts.down_proj.bias"
+        names = self.make_moe_expert_names(layer_id)
         gate_up_proj_global_scales, down_proj_global_scales = self.moe_attrs.get("global_scale_names", {}).get(
             layer_id, ("", "")
         )
@@ -855,12 +828,12 @@ class Qwen35MoETextModel(Qwen35TextModel):
             moe_name,
             root_input=root_input,
             router_probs=f"{basename}/router/Reshape/output_0",
-            weight1=gate_up_proj_weight,
-            scales1=gate_up_proj_scales if op_type == "QMoE" else "",
-            bias1=gate_up_proj_bias,
-            weight2=down_proj_weight,
-            scales2=down_proj_scales if op_type == "QMoE" else "",
-            bias2=down_proj_bias,
+            weight1=names["gate_up_weight"],
+            scales1=names["gate_up_scales"] if op_type == "QMoE" else "",
+            bias1=names["gate_up_bias"],
+            weight2=names["down_weight"],
+            scales2=names["down_scales"] if op_type == "QMoE" else "",
+            bias2=names["down_bias"],
             global_scales1=gate_up_proj_global_scales,
             global_scales2=down_proj_global_scales,
         )

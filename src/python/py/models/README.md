@@ -75,6 +75,7 @@ The tool currently supports the following model architectures.
 - HunYuan Dense V1
 - InternLM2
 - LFM2 (text and the decoder of LFM2-VL / LFM2.5-VL)
+- LFM2 MoE
 - Llama
 - Mistral
 - Nemotron
@@ -599,7 +600,8 @@ python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_pr
 ##### QMoE Block Size
 
 This scenario is for when you want to set the block size for QMoE expert weights.
-Set `qmoe_block_size` to `0` or a negative value for per-channel quantization. CUDA block-wise QMoE supports only `32`, `64`, or `128`; the default is `32` except for TRT-RTX, which defaults to `128`.
+Set `qmoe_block_size` to `0` or a negative value for per-channel quantization. Block-wise QMoE on CPU, CUDA, and WebGPU supports only `32`, `64`, or `128`; TRT-RTX also accepts `16` and `256`. The default is `32` except for TRT-RTX, which defaults to `128`.
+WebGPU block-wise QMoE requires both `hidden_size` and `moe_intermediate_size` to be divisible by `qmoe_block_size`. Raw block-wise INT4 QMoE requires both dimensions to be even.
 
 ```bash
 # From wheel:
@@ -608,6 +610,12 @@ python -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folde
 # From source:
 python builder.py -m model_name -o path_to_output_folder -p int4 -e execution_provider --extra_options qmoe_block_size=128
 ```
+
+On CPU and WebGPU the block-wise expert weights use ONNX Runtime's MatMulNBits encoding with signed block scales: each block's max-magnitude element maps exactly to the lowest quantized value, so no extreme is clipped. This encoding has been validated end to end against the Hugging Face reference on CPU, and the WebGPU QMoE kernel consumes the MatMulNBits layout directly. TRT-RTX keeps the builder's original symmetric encoding with positive block scales until the signed-scale grid has been measured on that execution provider.
+
+The CPU `QMoE` kernel dequantizes the experts to fp32 on every call unless the environment variable `ORT_USE_MLAS_Q4_GEMM_MOE=1` is set at runtime, which enables its AVX-512 MLAS Q4 fast path. That fast path re-quantizes to the same grid as this encoding, so enabling it only changes results at fp32 rounding level.
+
+ONNX Runtime builds that include [microsoft/onnxruntime#32644](https://github.com/microsoft/onnxruntime/pull/32644) run block-wise experts on the MLAS QNBit GEMM (`MatMulNBits`) kernels directly, without the environment variable. For LFM2.5-8B-A1B int4 on a 30-core x86 server, CPU decode went from about 0.8 s per token with the default dequantize-then-GEMM path to 35 ms per token with `ORT_USE_MLAS_Q4_GEMM_MOE=1` and 15 ms per token with #32644.
 
 ##### QMoE Weights Prepacked
 

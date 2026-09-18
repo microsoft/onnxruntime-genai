@@ -29,6 +29,7 @@ from builders import (
     HunyuanDenseV1Model,
     InternLM2Model,
     LFM2Model,
+    LFM2MoEModel,
     LlamaModel,
     Mistral3TextModel,
     MistralModel,
@@ -562,6 +563,9 @@ def create_model(
         onnx_model = InternLM2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Lfm2ForCausalLM":
         onnx_model = LFM2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Lfm2MoeForCausalLM":
+        onnx_model = LFM2MoEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        onnx_model.model_type = "lfm2_moe"
     elif config.architectures[0] == "Lfm2VlForConditionalGeneration":
         onnx_model = LFM2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         # With the embedding layer excluded the decoder is one stage of the LFM2-VL vision pipeline;
@@ -728,7 +732,9 @@ def get_args():
                     Default value is 32.
                 qmoe_block_size = <=0/16/32/64/128/256: Specify the block size for QMoE expert weights quantization.
                     Set <= 0 for per-channel quantization. Default is 128 for TRT-RTX, 32 for others.
-                    CUDA block-wise QMoE supports 32/64/128 only.
+                    CPU, CUDA, and WebGPU block-wise QMoE support 32/64/128 only; TRT-RTX also accepts 16/256.
+                    WebGPU requires hidden_size and moe_intermediate_size to be divisible by qmoe_block_size.
+                    Raw block-wise INT4 QMoE requires both dimensions to be even.
                     Supported EPs: CPU, CUDA, WebGPU, TRT-RTX.
                 qmoe_weights_prepacked = -1/0/1: Specify the CUDA QMoE expert weight layout.
                     -1 lets the builder choose automatically, 0 exports raw weights for runtime prepacking, and 1 exports CUTLASS-prepacked weights.
