@@ -770,6 +770,14 @@ PrefixCacheMatch PagedKeyValueCache::MatchPrefix(
   return prefix_cache_->Match(tokens, max_adoptable_tokens);
 }
 
+void PagedKeyValueCache::RecordPrefixAdoptions(
+    const PagedCacheReservation& reservation) noexcept {
+  for (const auto& delta : reservation.Deltas()) {
+    prefix_cache_->RecordAdoption(
+        delta.adopted_block_count * block_pool_->BlockSize());
+  }
+}
+
 bool PagedKeyValueCache::PrefixCachingEnabled() const {
   return prefix_cache_->Enabled();
 }
@@ -788,6 +796,9 @@ void PagedKeyValueCache::SealCommittedBlocks(
     return;
   }
   auto& table = block_tables_[*table_index];
+  if (table.sealing_stopped_) {
+    return;
+  }
   const size_t block_size = block_pool_->BlockSize();
   const size_t full_blocks = table.committed_slots_ / block_size;
   if (full_blocks <= table.sealed_blocks_) {
@@ -800,14 +811,15 @@ void PagedKeyValueCache::SealCommittedBlocks(
 
   auto parent = table.sealed_identity_;
   for (size_t index = table.sealed_blocks_; index < full_blocks; ++index) {
-    auto identity = prefix_cache_->Register(
+    auto registration = prefix_cache_->Register(
         table.blocks_[index],
         tokens.subspan(index * block_size, block_size),
         parent);
-    if (!identity) {
+    if (!registration.identity) {
+      table.sealing_stopped_ = registration.StopsSealing();
       break;
     }
-    parent = std::move(identity);
+    parent = std::move(registration.identity);
     table.sealed_blocks_ = index + 1;
     table.sealed_identity_ = parent;
   }

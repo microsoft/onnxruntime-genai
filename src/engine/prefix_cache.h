@@ -66,6 +66,23 @@ struct PrefixCacheMatch {
   bool Empty() const { return blocks.empty(); }
 };
 
+enum class PrefixCacheRegistrationStatus {
+  Indexed,
+  Duplicate,
+  HashCollision,
+  CapacityRefused,
+};
+
+struct PrefixCacheRegistration {
+  PrefixCacheRegistrationStatus status{};
+  std::shared_ptr<const BlockIdentity> identity;
+
+  bool StopsSealing() const {
+    return status == PrefixCacheRegistrationStatus::Duplicate ||
+           status == PrefixCacheRegistrationStatus::HashCollision;
+  }
+};
+
 struct PrefixCacheMetrics {
   uint64_t lookups{};                  // Prompts offered to the index.
   uint64_t hits{};                     // Prompts that adopted at least one block.
@@ -112,20 +129,24 @@ class PrefixCache {
    * @param block A full block whose slots hold exactly `tokens`.
    * @param tokens The block-size-many tokens the block holds.
    * @param parent The exact identity of the block that precedes it, or null for the first block.
-   * @return The identity the block after it chains from, or nothing when the chain has to stop.
+   * @return The registration outcome and, when indexed, the identity the next block chains from.
    *
    * A block whose content is already indexed keeps no identity of its own and stays private: the
    * first physical copy serves every lookup, so a lookup never has to choose between duplicates.
-   * The chain still continues through it, because the indexed copy holds the same tokens behind the
-   * same parent.
+   * Sealing stops at that duplicate because its request does not own the canonical physical block
+   * and therefore cannot keep the canonical lineage alive for later blocks.
    *
    * Nothing is returned when the identity is already taken by a different block (a collision) or
    * when the budget is full and nothing can be evicted. Neither this block nor anything after it is
    * reachable then, so the caller stops sealing.
    */
-  std::shared_ptr<const BlockIdentity> Register(const std::shared_ptr<Block>& block,
-                                                std::span<const int32_t> tokens,
-                                                const std::shared_ptr<const BlockIdentity>& parent);
+  PrefixCacheRegistration Register(
+      const std::shared_ptr<Block>& block,
+      std::span<const int32_t> tokens,
+      const std::shared_ptr<const BlockIdentity>& parent);
+
+  // Publishes a match as an actual hit only after its adopting cache transaction commits.
+  void RecordAdoption(size_t token_count) noexcept;
 
   bool CanAttachCheckpoint(
       const std::shared_ptr<const BlockIdentity>& identity) const;

@@ -64,15 +64,6 @@ size_t CheckedAdd(
 }  // namespace
 
 PagedCacheBlockTable& PagedCacheBlockTable::operator=(
-    const PagedCacheBlockTable& other) {
-  if (this != &other) {
-    PagedCacheBlockTable copy{other};
-    *this = std::move(copy);
-  }
-  return *this;
-}
-
-PagedCacheBlockTable& PagedCacheBlockTable::operator=(
     PagedCacheBlockTable&& other) noexcept {
   if (this != &other) {
     const uint64_t next_generation = mutation_generation_ + 1;
@@ -82,6 +73,7 @@ PagedCacheBlockTable& PagedCacheBlockTable::operator=(
     window_blocks_ = std::move(other.window_blocks_);
     sealed_blocks_ = other.sealed_blocks_;
     sealed_identity_ = std::move(other.sealed_identity_);
+    sealing_stopped_ = other.sealing_stopped_;
     mutation_generation_ = next_generation;
   }
   return *this;

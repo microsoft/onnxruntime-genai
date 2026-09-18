@@ -31,9 +31,9 @@ class PagedCacheBlockTable {
         committed_slots_{committed_slots},
         blocks_{std::move(blocks)},
         window_blocks_{std::move(window_blocks)} {}
-  PagedCacheBlockTable(const PagedCacheBlockTable&) = default;
+  PagedCacheBlockTable(const PagedCacheBlockTable&) = delete;
   PagedCacheBlockTable(PagedCacheBlockTable&&) noexcept = default;
-  PagedCacheBlockTable& operator=(const PagedCacheBlockTable& other);
+  PagedCacheBlockTable& operator=(const PagedCacheBlockTable&) = delete;
   PagedCacheBlockTable& operator=(PagedCacheBlockTable&& other) noexcept;
 
   const void* RequestId() const { return request_id_; }
@@ -57,6 +57,7 @@ class PagedCacheBlockTable {
   std::vector<std::shared_ptr<Block>> window_blocks_;
   size_t sealed_blocks_{};
   std::shared_ptr<const BlockIdentity> sealed_identity_;
+  bool sealing_stopped_{};
   uint64_t mutation_generation_{};
 };
 

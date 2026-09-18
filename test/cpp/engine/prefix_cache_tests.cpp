@@ -38,9 +38,9 @@ std::shared_ptr<Block> SealBlock(BlockPool& pool, PrefixCache& cache,
                                  std::shared_ptr<const BlockIdentity>& parent) {
   auto blocks = pool.AllocateBlocks(kBlockSize);
   EXPECT_EQ(blocks.size(), 1u);
-  auto chained = cache.Register(blocks.front(), tokens, parent);
-  if (chained) {
-    parent = std::move(chained);
+  auto registration = cache.Register(blocks.front(), tokens, parent);
+  if (registration.identity) {
+    parent = std::move(registration.identity);
   }
   return blocks.front();
 }
@@ -125,6 +125,10 @@ TEST(PrefixCacheTest, ExactPrefixMatchAdoptsEveryFullBlock) {
 
   EXPECT_EQ(match.blocks.size(), 2u);
   EXPECT_EQ(match.token_count, 2 * kBlockSize);
+  EXPECT_EQ(cache.Metrics().hits, 0u);
+  EXPECT_EQ(cache.Metrics().matched_tokens, 0u);
+
+  cache.RecordAdoption(match.token_count);
   EXPECT_EQ(cache.Metrics().hits, 1u);
   EXPECT_EQ(cache.Metrics().matched_tokens, 2 * kBlockSize);
 }
@@ -269,6 +273,7 @@ TEST(PrefixCacheTest, DuplicateContentKeepsTheFirstPhysicalBlock) {
   EXPECT_FALSE(second->HasIdentity());
   EXPECT_EQ(cache.IndexedBlocks(), 1u);
   EXPECT_EQ(cache.Metrics().duplicate_registrations, 1u);
+  EXPECT_FALSE(second_parent);
 
   const std::array<int32_t, 5> probe{1, 2, 3, 4, 9};
   const auto match = cache.Match(probe, probe.size() - 1);

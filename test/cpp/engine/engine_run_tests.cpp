@@ -2902,6 +2902,10 @@ TEST_F(EngineRunTest, DensePagedPrefixAdoptionRollsBackAfterExecutionFailure) {
   EXPECT_NE(retryable.flags & EngineEventFlagRetryable, 0u);
   EXPECT_EQ(warm->ProcessedSequenceLength(), 0);
   EXPECT_EQ(warm->AdoptedPrefixLength(), 0u);
+  const auto* metrics = engine.engine->PrefixCacheStats();
+  ASSERT_NE(metrics, nullptr);
+  EXPECT_EQ(metrics->hits, 0u);
+  EXPECT_EQ(metrics->matched_tokens, 0u);
   const auto after = engine.cache->Snapshot();
   EXPECT_TRUE(ValidateCacheInvariants(after).empty());
   EXPECT_EQ(after.free_blocks, before.free_blocks);
@@ -2919,6 +2923,38 @@ TEST_F(EngineRunTest, DensePagedPrefixAdoptionRollsBackAfterExecutionFailure) {
   EXPECT_EQ(RunOne(*engine.engine).request, warm);
   EXPECT_EQ(observed_adopted_prefix, 8u);
   EXPECT_TRUE(warm->IsTurnComplete());
+  EXPECT_EQ(metrics->hits, 1u);
+  EXPECT_EQ(metrics->matched_tokens, 8u);
+}
+
+TEST_F(EngineRunTest, DuplicatePrefixStopsSealingItsSuffix) {
+  model_ = LoadSyntheticPagedModel();
+  auto& batching = *model_->config_->engine.dynamic_batching;
+  batching.block_size = 4;
+  batching.num_blocks = 16;
+  batching.max_batch_size = 2;
+  batching.max_scheduled_tokens = 8;
+  batching.prefix_caching = true;
+  batching.prefix_cache_max_blocks = 8;
+  auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
+  const std::array<int32_t, 9> prompt{2, 3, 4, 5, 6, 7, 8, 9, 10};
+
+  auto first = CreateRequestWithPrompt(engine.engine, prompt);
+  auto duplicate = CreateRequestWithPrompt(engine.engine, prompt);
+
+  for (size_t iteration = 0;
+       iteration < 8 &&
+       (!first->IsTurnComplete() || !duplicate->IsTurnComplete());
+       ++iteration) {
+    RunOne(*engine.engine);
+  }
+
+  const auto* metrics = engine.engine->PrefixCacheStats();
+  ASSERT_NE(metrics, nullptr);
+  EXPECT_EQ(metrics->registered_blocks, 2u);
+  EXPECT_EQ(metrics->duplicate_registrations, 1u);
+  EXPECT_TRUE(first->IsTurnComplete());
+  EXPECT_TRUE(duplicate->IsTurnComplete());
 }
 
 TEST_F(EngineRunTest, HybridPrefixCacheRestoresPagedAndFixedStateAtOneBoundary) {

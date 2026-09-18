@@ -32,7 +32,7 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
                                 FixedStatePool* fixed_state_pool,
                                 std::vector<std::shared_ptr<Request>>& allocated_requests,
                                 const StepPlan& plan)
-      : allocated_requests_{allocated_requests} {
+      : cache_{cache}, allocated_requests_{allocated_requests} {
     std::vector<PagedCacheReservationRequest> paged_requests;
     paged_requests.reserve(plan.requests.size());
     std::vector<FixedStateReservationRequest> fixed_requests;
@@ -159,6 +159,7 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
     if (fixed_reservation_) {
       fixed_reservation_->PublishCommit();
     }
+    cache_.RecordPrefixAdoptions(*paged_reservation_);
     allocated_requests_.insert(allocated_requests_.end(),
                                newly_admitted_.begin(),
                                newly_admitted_.end());
@@ -192,6 +193,7 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
   }
 
  private:
+  PagedKeyValueCache& cache_;
   std::vector<std::shared_ptr<Request>>& allocated_requests_;
   std::vector<std::shared_ptr<Request>> newly_admitted_;
   // Destroyed in reverse declaration order: the fixed reservation unwinds before the paged one,

@@ -138,17 +138,15 @@ PrefixCacheMatch PrefixCache::Match(std::span<const int32_t> tokens,
   match.token_count = hits.size() * block_size;
   match.fixed_state_checkpoint = std::move(checkpoint);
 
-  ++metrics_.hits;
-  metrics_.matched_tokens += match.token_count;
   return match;
 }
 
-std::shared_ptr<const BlockIdentity> PrefixCache::Register(
+PrefixCacheRegistration PrefixCache::Register(
     const std::shared_ptr<Block>& block,
     std::span<const int32_t> tokens,
     const std::shared_ptr<const BlockIdentity>& parent) {
   if (!Enabled()) {
-    return nullptr;
+    return {PrefixCacheRegistrationStatus::CapacityRefused, nullptr};
   }
   if (!block) {
     throw std::runtime_error("Cannot index a null block in the prefix cache.");
@@ -158,7 +156,7 @@ std::shared_ptr<const BlockIdentity> PrefixCache::Register(
   }
   if (block->HasIdentity()) {
     // Already indexed, which is the normal case for an adopted block being re-walked.
-    return block->IdentityPtr();
+    return {PrefixCacheRegistrationStatus::Indexed, block->IdentityPtr()};
   }
   if (!block_pool_.Owns(block)) {
     throw std::runtime_error("Cannot index a block the pool does not own.");
@@ -174,21 +172,21 @@ std::shared_ptr<const BlockIdentity> PrefixCache::Register(
       // A different block already holds this identity. Nothing after it can be reached either, so
       // the caller stops here rather than indexing entries no lookup can ever verify.
       ++metrics_.hash_collisions;
-      return nullptr;
+      return {PrefixCacheRegistrationStatus::HashCollision, nullptr};
     }
     // Two sequences computed the same prefix before either was indexed. The first physical copy
-    // serves every lookup, so this one stays private; the chain still continues through it because
-    // the indexed copy holds exactly the same tokens behind the same parent.
+    // serves every lookup, so this one stays private. Stop this request's sealing here because it
+    // does not hold a request reference on the canonical physical block.
     ++metrics_.duplicate_registrations;
     Reorder(existing->second, parent);
-    return existing->second.identity;
+    return {PrefixCacheRegistrationStatus::Duplicate, nullptr};
   }
 
   if (entries_.size() >= options_.max_blocks && Reclaim(1) == 0) {
     // The budget is full and every indexed block is still in use. Leaving this block unindexed is
     // the safe outcome: it stays private and is freed with its request.
     ++metrics_.retention_refusals;
-    return nullptr;
+    return {PrefixCacheRegistrationStatus::CapacityRefused, nullptr};
   }
 
   auto identity = std::make_shared<BlockIdentity>();
@@ -214,7 +212,15 @@ std::shared_ptr<const BlockIdentity> PrefixCache::Register(
   block_pool_.AddRef(block);
   block->SetIdentity(identity);
   ++metrics_.registered_blocks;
-  return identity;
+  return {PrefixCacheRegistrationStatus::Indexed, std::move(identity)};
+}
+
+void PrefixCache::RecordAdoption(size_t token_count) noexcept {
+  if (token_count == 0) {
+    return;
+  }
+  ++metrics_.hits;
+  metrics_.matched_tokens += token_count;
 }
 
 bool PrefixCache::CanAttachCheckpoint(
@@ -314,7 +320,8 @@ size_t PrefixCache::Reclaim(size_t blocks_needed) {
 
 size_t PrefixCache::ReclaimableBlocks() const {
   size_t reclaimable = 0;
-  for (const auto& [hash, entry] : entries_) {
+  for (const auto& value : entries_) {
+    const auto& entry = value.second;
     if (entry.block->RefCount() == 1) {
       ++reclaimable;
     }
