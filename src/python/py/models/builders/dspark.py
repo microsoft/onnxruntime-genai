@@ -58,6 +58,8 @@ class DSparkBuilder(BlockDrafterBuilder):
         filename="dspark.onnx",
         num_draft_tokens=None,
         top_k=16,
+        embed_quant=None,
+        lm_head_quant=None,
     ):
         self.draft_dir = draft_dir
         self.target_dir = target_dir
@@ -67,6 +69,8 @@ class DSparkBuilder(BlockDrafterBuilder):
         # target's dtype.
         self.io_dtype = ir.DataType.BFLOAT16
         self.external_dtype = io_dtype
+        self.embed_quant = embed_quant
+        self.lm_head_quant = lm_head_quant
         self.filename = filename
         self.paged_block_size = paged_block_size
 
@@ -216,15 +220,7 @@ class DSparkBuilder(BlockDrafterBuilder):
             ctx_kv.append((k, v))
 
         # --- query path ---
-        self.make_initializer(w["embed_tokens.weight"], "model.embed_tokens.weight", to=self.external_dtype)
-        emb_ext = self.binary(
-            "Gather",
-            "/dspark/embed_tokens/Gather",
-            "model.embed_tokens.weight",
-            "input_ids",
-            self.external_dtype,
-            [rows_q, self.hidden_size],
-        )
+        emb_ext = self.make_embedding("/dspark/embed_tokens/Gather", rows_q)
         hidden = self.unary(
             "Cast", "/dspark/embed_tokens/Cast", emb_ext, self.io_dtype, [rows_q, self.hidden_size], to=self.io_dtype
         )

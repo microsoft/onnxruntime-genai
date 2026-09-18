@@ -172,6 +172,8 @@ struct FixedStateReservation::Storage {
   size_t staging_bytes{};
   bool captures_state_updates{};
   bool uses_direct_bindings{};
+  uint8_t direct_active_bank{};
+  size_t first_direct_slot{};
 };
 
 struct FixedStatePool::Impl {
@@ -449,6 +451,22 @@ bool FixedStateReservation::UsesDirectBindings() const {
   return storage_ && storage_->uses_direct_bindings;
 }
 
+size_t FixedStateReservation::BindingLayoutKey() const {
+  if (!storage_) {
+    return 0;
+  }
+  // The compact state_update outputs are present in the bindings only on steps that capture them,
+  // so the two binding sets must never share a graph.
+  const size_t state_updates = storage_->captures_state_updates ? 1 : 0;
+  // Staged bindings always view the same pool-lifetime buffers, so only the direct case contributes
+  // an address. Interleaving keeps both halves distinct.
+  const size_t addresses =
+      storage_->uses_direct_bindings
+          ? 1 + storage_->first_direct_slot * 2 + storage_->direct_active_bank
+          : 0;
+  return 1 + state_updates + addresses * 2;
+}
+
 void FixedStateReservation::CommitPrefix(size_t row, size_t step_tokens, size_t kept_tokens) {
   if (!storage_ || !storage_->captures_state_updates) {
     throw std::logic_error(
@@ -557,12 +575,6 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity,
     throw std::runtime_error(
         "Fixed state pool requires a model state device.");
   }
-  if (impl_->device->GetType() != DeviceType::CPU &&
-      impl_->device->GetType() != DeviceType::CUDA) {
-    throw std::runtime_error(
-        "Fixed state pools currently support only CPU and CUDA devices.");
-  }
-
   impl_->owner = this;
   impl_->checkpoint_owner->pool = this;
   const ModelStateManifest manifest{impl_->model->config_->model.decoder};
@@ -711,6 +723,16 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity,
   impl_->state_update_capacity = state_update_capacity;
   impl_->state_update_capture_count_name = state_update_capture_count_name;
   impl_->state_update_active_name = state_update_active_name;
+  if (!impl_->device->SupportsTransactionalFixedState()) {
+    throw std::runtime_error(
+        "Fixed state pools require qualified transactional device semantics.");
+  }
+  if (SupportsStateUpdates() &&
+      impl_->device->GetType() != DeviceType::CPU &&
+      impl_->device->GetType() != DeviceType::CUDA) {
+    throw std::runtime_error(
+        "Compact fixed state replay currently supports only CPU and CUDA devices.");
+  }
   if (impl_->state_update_capacity != 0) {
     impl_->persistent_bytes = CheckedAdd(
         impl_->persistent_bytes,
@@ -1151,7 +1173,7 @@ FixedStateReservation FixedStatePool::Reserve(
   // Normalize only minority rows by copying their visible state to the cohort's canonical bank.
   // The copy does not advance request state: both banks contain the same committed value, and the
   // host bank selector changes only after every copy completes successfully.
-  bool direct_layout = true;
+  bool direct_layout = impl_->device->SupportsOffsetTensorViews();
   const size_t first_direct_slot = plan.front().slot_index;
   size_t bank_one_count = 0;
   for (size_t row = 0; row < plan.size(); ++row) {
@@ -1226,6 +1248,8 @@ FixedStateReservation FixedStatePool::Reserve(
 
   const size_t batch_rows = requests.size();
   storage->uses_direct_bindings = direct_layout;
+  storage->direct_active_bank = direct_layout ? direct_active_bank : uint8_t{0};
+  storage->first_direct_slot = direct_layout ? first_direct_slot : size_t{0};
   if (impl_->state_update_capacity != 0) {
     storage->state_update_capture_count_name = impl_->state_update_capture_count_name;
     const std::array<int64_t, 1> capture_count_shape{static_cast<int64_t>(batch_rows)};

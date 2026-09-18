@@ -480,6 +480,24 @@ TEST_F(RequestLifecycleTest, StaticEngineRejectsModelConfiguredChunking) {
   }
 }
 
+TEST_F(RequestLifecycleTest, StaticEngineDoesNotLoadDisabledMtpHead) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
+  config->model.type = "decoder";
+  config->engine.dynamic_batching.reset();
+  config->model.mtp.enabled = false;
+  config->model.mtp.filename = "missing-mtp-head.onnx";
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+
+  auto dependencies = Engine::CreateDependencies(model);
+
+  EXPECT_EQ(dependencies.mtp_model, nullptr);
+  EXPECT_EQ(dependencies.mtp_cache_manager, nullptr);
+  EXPECT_EQ(dependencies.mtp_model_executor, nullptr);
+  EXPECT_FALSE(model->config_->engine.hidden_states_output_required);
+  EXPECT_NO_THROW(static_cast<void>(
+      std::make_shared<Engine>(model, std::move(dependencies))));
+}
+
 // An Engine assembled from injected dependencies never runs Engine::CreateDependencies, so the
 // static scheduler keeps its own admission guard. Admission is rejected before the batch is
 // touched, leaving the Request retryable on a dynamic Engine.

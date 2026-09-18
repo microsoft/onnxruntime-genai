@@ -25,82 +25,50 @@ function(ortgenai_replace_required file_path old_text new_text)
   file(WRITE "${file_path}" "${contents}")
 endfunction()
 
-set(root_cmake "${SOURCE_DIR}/CMakeLists.txt")
-set(lib_cmake "${SOURCE_DIR}/lib/CMakeLists.txt")
+ortgenai_replace_required(
+  "${SOURCE_DIR}/lib/include/mat/config-default.h"
+  [=[#define HAVE_MAT_LOGGING]=]
+  [=[#if !defined(MATSDK_DISABLE_LOGGING)
+#define HAVE_MAT_LOGGING
+#endif]=])
 
 ortgenai_replace_required(
-  "${root_cmake}"
-  [=[include_directories(${CMAKE_SOURCE_DIR})]=]
-  [=[include_directories(${CMAKE_CURRENT_SOURCE_DIR})]=])
+  "${SOURCE_DIR}/lib/pal/PAL.cpp"
+  [=[#if !defined(_WIN32) && defined(__linux__)
+        static std::mutex m;
+        static std::map<std::thread::id, pid_t> threads;]=]
+  [=[#if !defined(_WIN32) && defined(__linux__)
+#ifdef HAVE_MAT_LOGGING
+        static std::mutex m;
+        static std::map<std::thread::id, pid_t> threads;]=])
 
 ortgenai_replace_required(
-  "${root_cmake}"
-  [=[  find_package(CURL REQUIRED)]=]
-  [=[  if(NOT TARGET CURL::libcurl)
-    find_package(CURL REQUIRED)
-  endif()]=])
+  "${SOURCE_DIR}/lib/pal/PAL.cpp"
+  [=[        }
+#else
+#define     gettid()       std::this_thread::get_id()
+#endif]=]
+  [=[        }
+#endif
+#else
+#define     gettid()       std::this_thread::get_id()
+#endif]=])
 
 ortgenai_replace_required(
-  "${lib_cmake}"
-  [=[if(NOT MATSDK_USE_VCPKG_DEPS)]=]
-  [=[if(NOT MATSDK_USE_VCPKG_DEPS AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")]=])
+  "${SOURCE_DIR}/lib/pal/TaskDispatcher_CAPI.cpp"
+  [=[                catch (const std::exception& ex) {
+                    LOG_ERROR("Unhandled exception in CAPI task: %s", ex.what());]=]
+  [=[                catch (const std::exception& ex) {
+                    (void)ex;
+                    LOG_ERROR("Unhandled exception in CAPI task: %s", ex.what());]=])
 
 ortgenai_replace_required(
-  "${lib_cmake}"
-  [=[else()
-  # Legacy mode: use vendored or system-installed deps
-  if(CMAKE_SYSTEM_NAME STREQUAL "Android")]=]
-  [=[else()
-  # Legacy mode: use vendored or system-installed deps
-  if(CMAKE_SYSTEM_NAME STREQUAL "Android" OR MATSDK_BUNDLE_VENDORED_DEPS)]=])
-
-ortgenai_replace_required(
-  "${lib_cmake}"
-  [=[target_compile_options(sqlite3_bundled PRIVATE -fno-finite-math-only -Wno-unused-function)]=]
-  [=[target_compile_options(sqlite3_bundled PRIVATE -fno-finite-math-only -Wno-unused-function)
-    target_compile_definitions(sqlite3_bundled PRIVATE HAVE_GETHOSTUUID=0)]=])
-
-ortgenai_replace_required(
-  "${lib_cmake}"
-  [=[  elseif(PAL_IMPLEMENTATION STREQUAL "WIN32")]=]
-  [=[  elseif(APPLE)
-    target_link_libraries(mat PRIVATE sqlite3 z ${LIBS})
-  elseif(PAL_IMPLEMENTATION STREQUAL "WIN32")]=])
-
-ortgenai_replace_required(
-  "${SOURCE_DIR}/lib/system/EventProperties.cpp"
-  [=[calloc(sizeof(evt_prop), size)]=]
-  [=[calloc(size, sizeof(evt_prop))]=])
-
-ortgenai_replace_required(
-  "${SOURCE_DIR}/lib/http/HttpClient_Curl.hpp"
-  [=[        if (!m_sslCaInfo.empty()) {
-            curl_easy_setopt(curl, CURLOPT_CAINFO, m_sslCaInfo.c_str());
-        }]=]
-  [=[        if (!m_sslCaInfo.empty()) {
-            curl_easy_setopt(curl, CURLOPT_CAINFO, m_sslCaInfo.c_str());
-        } else {
-            static const char* const ca_paths[] = {
-                "/etc/ssl/certs/ca-certificates.crt",
-                "/etc/pki/tls/certs/ca-bundle.crt",
-                "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
-                "/etc/ssl/ca-bundle.pem",
-                "/etc/ssl/cert.pem",
-            };
-            for (const char* ca_path : ca_paths) {
-                if (access(ca_path, R_OK) == 0) {
-                    curl_easy_setopt(curl, CURLOPT_CAINFO, ca_path);
-                    break;
-                }
-            }
-        }]=])
-
-ortgenai_replace_required(
-  "${SOURCE_DIR}/lib/http/HttpClient_Curl.hpp"
-  [=[        // HTTP/2 please, fallback to HTTP/1.1 if not supported
-        curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2_0);]=]
-  [=[        // The embedded Linux curl omits nghttp2 to keep the transport self-contained.
-        curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);]=])
+  "${SOURCE_DIR}/lib/pal/WorkerThread.cpp"
+  [=[                        catch (const std::exception& ex) {
+                            LOG_ERROR("Unhandled exception in worker task: %s", ex.what());]=]
+  [=[                        catch (const std::exception& ex) {
+                            (void)ex;
+                            LOG_ERROR("Unhandled exception in worker task: %s", ex.what());]=])
 
 # OfflineStorageHandler::Flush() brackets its body with ILogManager::StartActivity() /
 # EndActivity() using raw calls rather than a scope guard, so any exception thrown between them

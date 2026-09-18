@@ -206,6 +206,10 @@ struct Engine : std::enable_shared_from_this<Engine>,
  private:
   void DetachRequestForTeardown(
       const std::shared_ptr<Request>& request) noexcept;
+  // Logs one warning when the hosted speculative path cannot deliver the configured
+  // speculative.max_draft_tokens. Only known once the cache manager and drafter exist, so it
+  // complements the config-time drafter geometry check in WarnOnClampedDraftWidth().
+  void WarnOnClampedDraftWidth() const;
   void ReclaimAbandonedRequests();
   void CompleteNonresidentClosedRequests();
   size_t DrainPendingEvents(std::span<EngineEvent> events);

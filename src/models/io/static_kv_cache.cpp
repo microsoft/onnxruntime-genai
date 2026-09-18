@@ -87,6 +87,13 @@ int64_t DetectAndConfigureFixedKvShape(const SessionInfo& session_info,
   return common_seq_len;
 }
 
+int GetWindowedKeyValueCacheSize(const Model& model, const Config::Search& search, int max_length) {
+  if (!CanUseTopLevelDeviceKeyValueCachePolicy(model))
+    return 0;
+  return model.p_device_kvcache_->GetWindowedKeyValueCacheSize(
+      model.config_->model.decoder, search, max_length);
+}
+
 namespace {
 
 std::vector<std::string> MakePastKeyValueInputNames(const Model& model) {
@@ -286,8 +293,8 @@ DefaultKeyValueCacheBase::DefaultKeyValueCacheBase(State& state)
   // Compute the capacity for sliding-window layers and apply it to the cache shapes.
   // ComputeWindowedKvCacheSize() returns 0 when the config does not call for a windowed cache.
   const int max_length = state_.params_->search.max_length;
-  const int windowed_cache_size = Device().GetWindowedKeyValueCacheSize(
-      model_.config_->model.decoder, state_.params_->search, max_length);
+  const int windowed_cache_size =
+      GetWindowedKeyValueCacheSize(model_, state_.params_->search, max_length);
 
   if (windowed_cache_size > 0 &&
       // Beam reordering across a compacted cache is correct in principle but untested.

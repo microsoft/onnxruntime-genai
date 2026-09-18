@@ -12,11 +12,15 @@
 #include <array>
 #include <atomic>
 #include <condition_variable>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <new>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -2812,6 +2816,63 @@ TEST_F(EngineRunTest, MtpRollbackFailureMarksEngineUnhealthy) {
             EngineEventFlagTurnFinished | EngineEventFlagFailed);
   EXPECT_EQ(failure.error_code, EngineErrorCode::EngineExecutionFailure);
   EXPECT_THROW(static_cast<void>(RunOne(*engine.engine)), EngineStepError);
+}
+
+namespace {
+
+// Captures whatever the Engine constructor logs while building an MTP-hosted engine.
+std::string CapturedMtpEngineWarnings(const std::shared_ptr<Model>& model, int32_t forced_token) {
+  const std::filesystem::path log_path =
+      std::filesystem::temp_directory_path() /
+      ("mtp_engine_warning_" + std::to_string(reinterpret_cast<uintptr_t>(model.get())) + ".log");
+  std::filesystem::remove(log_path);
+  SetLogString("filename", log_path.string());
+  SetLogBool("enabled", true);
+  SetLogBool("warning", true);
+
+  {
+    auto engine = MakeMtpDoublesEngine(model, forced_token);
+  }
+
+  SetLogString("filename", "");
+  SetLogBool("enabled", false);
+  std::ifstream stream{log_path};
+  std::stringstream contents;
+  contents << stream.rdbuf();
+  stream.close();
+  std::filesystem::remove(log_path);
+  return contents.str();
+}
+
+}  // namespace
+
+TEST_F(EngineRunTest, EngineHostedMtpWarnsWhenTheConfiguredDraftWidthIsClamped) {
+  model_ = LoadSyntheticPagedMtpModel();
+  const int32_t filler = EosToken(*model_) == 5 ? 6 : 5;
+
+  // MakeMtpDoublesEngine caps the cache manager at 3, which is what a step can actually verify.
+  model_->config_->speculative.max_draft_tokens = 3;
+  EXPECT_EQ(CapturedMtpEngineWarnings(model_, filler), "");
+
+  model_->config_->speculative.max_draft_tokens = 16;
+  const std::string warnings = CapturedMtpEngineWarnings(model_, filler);
+  EXPECT_NE(warnings.find("speculative.max_draft_tokens is 16"), std::string::npos);
+  // One warning naming the real width, not one per contributing bound.
+  EXPECT_NE(warnings.find("each step will draft only 3 tokens"), std::string::npos);
+  EXPECT_EQ(warnings.find("16 tokens"), std::string::npos);
+}
+
+TEST_F(EngineRunTest, EngineHostedMtpClampsTheConfiguredDraftWidth) {
+  model_ = LoadSyntheticPagedMtpModel();
+  model_->config_->speculative.max_draft_tokens = 16;
+  auto engine = MakeMtpDoublesEngine(model_, EosToken(*model_) == 5 ? 6 : 5);
+  auto request = CreateRequestWithPrompt(engine.engine, Prompt(10));
+
+  std::array<EngineEvent, 8> storage;
+  ASSERT_GT(engine.engine->Run(storage), 0u);
+  EXPECT_EQ(engine.engine->MaxDraftTokensPerStep(), 3u);
+  EXPECT_GT(request->PendingDraftTokenCount(), 0u);
+  EXPECT_LE(request->PendingDraftTokenCount(), 3u);
 }
 
 // ---------------------------------------------------------------------------------------------

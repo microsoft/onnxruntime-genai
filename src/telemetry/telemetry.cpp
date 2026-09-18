@@ -24,6 +24,10 @@
 #include <random>
 #include <string>
 
+#if defined(__linux__) && !defined(__ANDROID__)
+#include <unistd.h>
+#endif
+
 // Version string defined by the build system
 #ifndef ORTGENAI_VERSION
 #define ORTGENAI_VERSION "unknown"
@@ -83,6 +87,29 @@ bool PrepareSampledEvent(MAT::EventProperties& event, std::string_view app_sessi
   event.SetPopsample(TelemetryInternal::kModelSessionSampleRatePercent);
   return true;
 }
+
+#if defined(__linux__) && !defined(__ANDROID__)
+std::string GetCertificateAuthorityBundlePath() {
+  if (const char* ssl_cert_file = std::getenv("SSL_CERT_FILE");
+      ssl_cert_file != nullptr && access(ssl_cert_file, R_OK) == 0) {
+    return ssl_cert_file;
+  }
+
+  constexpr const char* kCertificateAuthorityBundlePaths[] = {
+      "/etc/ssl/certs/ca-certificates.crt",
+      "/etc/pki/tls/certs/ca-bundle.crt",
+      "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+      "/etc/ssl/ca-bundle.pem",
+      "/etc/pki/tls/cacert.pem",
+      "/etc/ssl/cert.pem",
+      "/var/lib/ca-certificates/ca-bundle.pem",
+  };
+  for (const char* path : kCertificateAuthorityBundlePaths) {
+    if (access(path, R_OK) == 0) return path;
+  }
+  return {};
+}
+#endif
 
 // Generate a random v4 UUID as a hex string (e.g. "f81d4fae-7dec-41d0-8f12-00a0c91e6bf6").
 // Used for the process-wide AppSessionGuid (Tier 1 identity).
@@ -202,9 +229,19 @@ void GenAiTelemetry::Initialize() {
     auto& config = pending_impl->config;
     config[MAT::CFG_STR_COLLECTOR_URL] = "https://mobile.events.data.microsoft.com/OneCollector/1.0";
     config[MAT::CFG_STR_PRIMARY_TOKEN] = ikey;
+    config[MAT::CFG_BOOL_ENABLE_TRACE] = false;
     config[MAT::CFG_INT_TRACE_LEVEL_MASK] = 0;
     config[MAT::CFG_INT_SDK_MODE] = MAT::SdkModeTypes::SdkModeTypes_CS;
     config[MAT::CFG_INT_RAM_QUEUE_SIZE] = 512 * 1024;
+#if defined(_WIN32)
+    // The 1DS network detector leaves a netprofm.dll allocation at process exit.
+    config[MAT::CFG_BOOL_ENABLE_NET_DETECT] = false;
+#endif
+#if defined(__linux__) && !defined(__ANDROID__)
+    if (std::string ca_bundle = GetCertificateAuthorityBundlePath(); !ca_bundle.empty()) {
+      config[MAT::CFG_MAP_HTTP][MAT::CFG_STR_HTTP_SSL_CAINFO] = ca_bundle;
+    }
+#endif
 
     // Do not block process teardown to upload: persisted events are sent on the next
     // run. 0 keeps Shutdown non-blocking and avoids adding exit latency to host apps.
@@ -377,6 +414,15 @@ void GenAiTelemetry::LogProcessInfo() {
     event.SetProperty("totalMemoryMB", static_cast<int64_t>(device.total_memory_mb));
     event.SetProperty("cpuModel", device.cpu_model);
     event.SetProperty("deviceIdStatus", device.device_id_status);
+    event.SetProperty("isContainer", device.is_container);
+    event.SetProperty("containerType", device.container_type);
+    event.SetProperty("isVirtualMachine", device.is_virtual_machine);
+    event.SetProperty("virtualizationType", device.virtualization_type);
+    event.SetProperty("isEmulator", device.is_emulator);
+    event.SetProperty("hostEnvironment", device.host_environment);
+    event.SetProperty("environmentDetectionConfidence",
+                      device.environment_detection_confidence);
+    event.SetProperty("deviceIdScope", device.device_id_scope);
 
     impl_->logger->LogEvent(event);
     // ProcessInfo captures PAL network context. Clearing it afterward is best effort.
