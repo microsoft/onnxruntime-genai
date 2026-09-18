@@ -539,6 +539,31 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             Assert.NotEmpty(completion.Text);
         }
 
+        [Fact(DisplayName = "TestChatClientGetServiceGenerator")]
+        public async Task TestChatClientGetServiceGenerator()
+        {
+            OnnxRuntimeGenAIChatClientOptions options = new()
+            {
+                EnableCaching = true,
+                PromptFormatter = static (messages, _) => string.Concat(messages.Select(message => message.Text)),
+            };
+
+            using var client = new OnnxRuntimeGenAIChatClient(_tinyRandomGpt2ModelPath, options);
+            IChatClient chatClient = client;
+
+            Assert.Null(chatClient.GetService<Generator>(null));
+
+            await client.GetResponseAsync("H", new()
+            {
+                MaxOutputTokens = 1,
+                Temperature = 0f,
+            });
+
+            var generator = Assert.IsType<Generator>(chatClient.GetService<Generator>(null));
+            Assert.Same(generator, chatClient.GetService<Generator>(null));
+            Assert.Null(chatClient.GetService<Generator>(new object()));
+        }
+
         [IgnoreOnModelAbsenceFact(DisplayName = "TestTokenizerBatchEncodeDecode")]
         public void TestTokenizerBatchEncodeDecode()
         {
