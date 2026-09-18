@@ -493,6 +493,63 @@ def set_onnx_dtype(precision: str, extra_options: dict[str, Any]) -> ir.DataType
     return to_onnx_dtype[precision]
 
 
+def checkpoint_weight_formats(quantization_config) -> set[tuple[int, str]]:
+    """Return the weight formats a prequantized checkpoint declares, as ``{(bits, kind)}``.
+
+    ``kind`` is ``"int"`` or ``"float"``. An empty set means the checkpoint states its format
+    in a shape this function does not read, in which case callers must not infer a mismatch.
+    """
+    # ModelOpt names the whole checkpoint's format in `quant_algo` instead of per-group metadata.
+    modelopt_algos = {
+        "FP8": (8, "float"),
+        "FP8_PB_WO": (8, "float"),
+        "NVFP4": (4, "float"),
+        "NVFP4_AWQ": (4, "float"),
+        "W4A8_AWQ": (4, "int"),
+        "INT4_AWQ": (4, "int"),
+        "INT8_SQ": (8, "int"),
+    }
+    formats = set()
+    for group in (quantization_config.get("config_groups") or {}).values():
+        weights = (group or {}).get("weights") or {}
+        if "num_bits" in weights:
+            formats.add((int(weights["num_bits"]), str(weights.get("type") or "int")))
+    if not formats:
+        algo = modelopt_algos.get(str(quantization_config.get("quant_algo") or "").upper())
+        if algo:
+            formats.add(algo)
+    if not formats and "bits" in quantization_config:
+        formats.add((int(quantization_config["bits"]), "int"))
+    return formats
+
+
+def warn_if_checkpoint_overrides_precision(config, precision, onnx_dtype):
+    """Say so when ``--precision`` cannot reach weights the checkpoint already quantized.
+
+    Model Builder re-exports a prequantized checkpoint's tensors in their own format, so
+    ``--precision int4`` against, say, an FP8/NVFP4 checkpoint only quantizes whatever that
+    checkpoint left in floating point. That is a legitimate mixed build rather than an error,
+    but it is otherwise silent: the only giveaway is an artifact far larger than an int4 model.
+    """
+    quantization_config = getattr(config, "quantization_config", None)
+    quantized_dtypes = {ir.DataType.INT4, ir.DataType.UINT4, ir.DataType.INT8, ir.DataType.UINT8}
+    if not quantization_config or onnx_dtype not in quantized_dtypes:
+        return
+    requested_bits = 4 if onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4} else 8
+    formats = checkpoint_weight_formats(quantization_config)
+    if not formats or formats == {(requested_bits, "int")}:
+        return
+
+    described = ", ".join(f"{bits}-bit {kind}" for bits, kind in sorted(formats))
+    method = quantization_config.get("quant_method", "prequantized")
+    print(
+        f"WARNING: this is a '{method}' checkpoint whose weights are already {described}. Model Builder "
+        f"re-exports those tensors unchanged, so `--precision {precision}` reaches only the parts of the "
+        f"model the checkpoint left unquantized. Build from an unquantized checkpoint to quantize "
+        f"everything to {precision}."
+    )
+
+
 @torch.no_grad
 def create_model(
     model_name,
@@ -643,6 +700,10 @@ def create_model(
         onnx_model = Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     else:
         raise NotImplementedError(f"The {hf_name} model is not currently supported.")
+
+    # Checked after the architecture dispatch above, which is where a checkpoint's quantization
+    # metadata is dropped when the builder does not honor it.
+    warn_if_checkpoint_overrides_precision(config, precision, onnx_dtype)
 
     if not config_only:
         # Make ONNX model
