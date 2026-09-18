@@ -43,6 +43,7 @@ struct Payload {
   std::span<const char*> prompts;
   const Images* images;
   const Audios* audios;
+  bool prompt_is_list{false};
 };
 
 struct Config;

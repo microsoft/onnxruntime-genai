@@ -4,27 +4,16 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+import warnings
 
 import onnx_ir as ir
 import torch
-from transformers import AutoModel, AutoProcessor
+from transformers import AutoModel, AutoProcessor, GenerationConfig
 
 from .nemotron_parse_decoder import NemotronParseDecoderComponent
 from .nemotron_parse_encoder import NemotronParseEncoderComponent
-
-
-def _resolve_image_size(config, extra_options):
-    image_size = getattr(config, "image_size", None)
-    if isinstance(image_size, (list, tuple)) and len(image_size) >= 2:
-        default_height, default_width = image_size[:2]
-    else:
-        default_height = default_width = 768
-
-    return (
-        int(extra_options.get("image_height", default_height)),
-        int(extra_options.get("image_width", default_width)),
-    )
 
 
 class NemotronParseModel:
@@ -47,11 +36,10 @@ class NemotronParseModel:
         self.hf_token = self.extra_options.get("hf_token", True)
         self.hf_remote = self.extra_options.get("hf_remote", False)
         self.model_name_or_path = None
+        self.generation_config = None
         self.model_type = "nemotron_parse"
 
-        self.image_height, self.image_width = _resolve_image_size(
-            config, self.extra_options
-        )
+        self.image_height, self.image_width = self.resolve_image_size()
         if self.image_height <= 0 or self.image_width <= 0:
             raise ValueError("image_height and image_width must be positive.")
 
@@ -87,6 +75,10 @@ class NemotronParseModel:
             raise ValueError(
                 "export_components must contain only encoder and/or decoder."
             )
+        if self.export_components != {"encoder", "decoder"}:
+            raise ValueError(
+                "Nemotron Parse requires both encoder and decoder; component-only export is not supported."
+            )
 
         patch_size = int(getattr(config.encoder, "patch_size", 16))
         encoder_grid_h = self.image_height // patch_size
@@ -103,7 +95,18 @@ class NemotronParseModel:
         self.encoder_filename = "encoder.onnx"
         self.decoder_filename = "decoder.onnx"
 
-    def _provider_options(self):
+    def resolve_image_size(self):
+        image_size = getattr(self.config, "image_size", None)
+        if isinstance(image_size, (list, tuple)) and len(image_size) >= 2:
+            default_height, default_width = image_size[:2]
+        else:
+            default_height = default_width = 768
+        return (
+            int(self.extra_options.get("image_height", default_height)),
+            int(self.extra_options.get("image_width", default_width)),
+        )
+
+    def provider_options(self):
         if self.ep == "cpu":
             return []
         ep_name = self.ep.replace("trt-rtx", "NvTensorRtRtx")
@@ -112,10 +115,10 @@ class NemotronParseModel:
         )
         return [{ep_name: attrs}]
 
-    def _session_options(self):
+    def session_options(self):
         options = {
             "log_id": "onnxruntime-genai",
-            "provider_options": self._provider_options(),
+            "provider_options": self.provider_options(),
         }
         if (
             self.ep == "cuda"
@@ -129,15 +132,21 @@ class NemotronParseModel:
             )
         return options
 
-    def _torch_dtype(self):
+    def torch_dtype(self):
         dtype = self.extra_options.get("torch_dtype")
-        if dtype == "fp32":
-            return torch.float32
-        if dtype == "bf16":
-            return torch.bfloat16
-        return torch.float16
+        if dtype is not None:
+            supported = {"fp32": torch.float32, "fp16": torch.float16,
+                         "bf16": torch.bfloat16, "auto": "auto"}
+            if dtype not in supported:
+                raise ValueError("torch_dtype must be fp32, fp16, bf16, or auto")
+            return supported[dtype]
+        return {
+            ir.DataType.FLOAT: torch.float32,
+            ir.DataType.FLOAT16: torch.float16,
+            ir.DataType.BFLOAT16: torch.bfloat16,
+        }.get(self.onnx_dtype, "auto")
 
-    def _load_model(self, input_path):
+    def load_model(self, input_path):
         self.model_name_or_path = (
             input_path
             if os.path.isdir(input_path)
@@ -146,7 +155,7 @@ class NemotronParseModel:
         extra_kwargs = (
             {} if os.path.isdir(input_path) else {"cache_dir": self.cache_dir}
         )
-        torch_dtype = self._torch_dtype()
+        torch_dtype = self.torch_dtype()
         model = AutoModel.from_pretrained(
             self.model_name_or_path,
             token=self.hf_token,
@@ -156,6 +165,7 @@ class NemotronParseModel:
             **extra_kwargs,
         )
         model.eval()
+        self.generation_config = getattr(model, "generation_config", None)
 
         if getattr(model.config.decoder, "_attn_implementation", None) != "eager":
             model.config.decoder._attn_implementation = "eager"
@@ -166,7 +176,7 @@ class NemotronParseModel:
             model.decoder.config._attn_implementation = "eager"
         return model
 
-    def _make_encoder_component(self, model):
+    def make_encoder_component(self, model):
         return NemotronParseEncoderComponent(
             self.config,
             model,
@@ -180,7 +190,7 @@ class NemotronParseModel:
             encoder_sequence_length=self.encoder_sequence_length,
         )
 
-    def _make_decoder_component(self):
+    def make_decoder_component(self):
         return NemotronParseDecoderComponent(
             self.config,
             self.io_dtype,
@@ -194,35 +204,48 @@ class NemotronParseModel:
         )
 
     def make_model(self, input_path):
-        self._model = self._load_model(input_path)
+        self.weights = self.load_model(input_path)
 
     def save_model(self, output_dir):
         try:
             if "encoder" in self.export_components:
                 if self.cache_dir:
                     os.makedirs(self.cache_dir, exist_ok=True)
-                component = self._make_encoder_component(self._model)
+                component = self.make_encoder_component(self.weights)
                 component.build()
                 component.save_model(output_dir)
 
             if "decoder" in self.export_components:
                 # The explicit graph builder serializes parameters from CPU.
                 # The RADIO encoder is no longer needed once its graph is saved.
-                self._model.encoder = None
-                self._model.decoder.to("cpu")
-                self._model.lm_head.to("cpu")
+                self.weights.encoder = None
+                self.weights.decoder.to("cpu")
+                self.weights.lm_head.to("cpu")
                 if self.cache_dir:
                     os.makedirs(self.cache_dir, exist_ok=True)
-                component = self._make_decoder_component()
-                component.build(self._model)
+                component = self.make_decoder_component()
+                component.build(self.weights)
                 component.save_model(output_dir)
         finally:
-            del self._model
+            del self.weights
 
     def make_genai_config(
         self, model_name_or_path, extra_kwargs, out_dir
     ):
         decoder_config = self.config.decoder
+        generation_config = self.generation_config
+        if generation_config is None:
+            source = self.model_name_or_path or self.config._name_or_path
+            try:
+                generation_config = GenerationConfig.from_pretrained(
+                    source, token=self.hf_token, **extra_kwargs
+                )
+            except OSError as exc:
+                warnings.warn(
+                    f"Could not load generation_config.json from {source}: {exc}. "
+                    "Using decoder configuration defaults.", stacklevel=2,
+                )
+                generation_config = decoder_config
         genai_config = {
             "model": {
                 "type": self.model_type,
@@ -247,7 +270,7 @@ class NemotronParseModel:
                     "num_visual_tokens": self.encoder_sequence_length,
                 },
                 "decoder": {
-                    "session_options": self._session_options(),
+                    "session_options": self.session_options(),
                     "filename": self.decoder_filename,
                     "prefill_sequence_length": self.prefill_sequence_length,
                     "hidden_size": decoder_config.d_model,
@@ -296,6 +319,12 @@ class NemotronParseModel:
             },
         }
 
+        for key in ("do_sample", "temperature", "top_k", "top_p", "repetition_penalty", "length_penalty"):
+            value = getattr(generation_config, key, None)
+            if value is not None:
+                genai_config["search"][key] = value
+        genai_config["search"].setdefault("repetition_penalty", 1.0)
+
         out_path = os.path.join(out_dir, "genai_config.json")
         print(f"Saving GenAI config in {out_path}")
         with open(out_path, "w") as config_file:
@@ -310,6 +339,7 @@ class NemotronParseModel:
             trust_remote_code=self.hf_remote,
             **extra_kwargs,
         )
+        self.validate_image_processor(getattr(processor, "image_processor", None))
         tokenizer = getattr(processor, "tokenizer", None)
         if tokenizer is None:
             raise RuntimeError(
@@ -338,3 +368,47 @@ class NemotronParseModel:
             os.path.join(out_dir, "processor_config.json"), "w"
         ) as processor_file:
             json.dump(processor_config, processor_file, indent=2)
+
+    def validate_image_processor(self, processor):
+        # The native processor implements this checkpoint's resize/pad algorithm,
+        # not the full Transformers image-processing API.
+        if processor is None or type(processor).__name__ != "NemotronParseImageProcessor":
+            raise ValueError("Nemotron Parse requires a NemotronParseImageProcessor with the supported native contract")
+        expected = {
+            "do_resize": True, "do_rescale": True, "do_normalize": True, "do_pad": True,
+            "rescale_factor": 1.0 / 255.0,
+            "image_mean": [0.48145466, 0.4578275, 0.40821073],
+            "image_std": [0.26862954, 0.26130258, 0.27577711],
+            "resample": 2, "interpolation": 1,
+            "padding_value": 255, "padding_mode": "constant", "padding_position": "center",
+        }
+        for name, supported in expected.items():
+            value = getattr(processor, name, supported)
+            if isinstance(supported, list):
+                matches = isinstance(value, (list, tuple)) and len(value) == len(supported) and all(
+                    math.isclose(float(a), b, rel_tol=0, abs_tol=1e-7) for a, b in zip(value, supported)
+                )
+            elif isinstance(supported, float):
+                matches = isinstance(value, (int, float)) and math.isclose(value, supported, rel_tol=0, abs_tol=1e-9)
+            else:
+                matches = value == supported
+            if not matches:
+                raise ValueError(
+                    f"Nemotron Parse native preprocessing does not support {name}={value!r}; expected {supported!r}"
+                )
+        transforms = getattr(getattr(processor, "transform", None), "transforms", [])
+        if len(transforms) != 1 or type(transforms[0]).__name__ != "PadIfNeeded":
+            raise ValueError("Nemotron Parse native preprocessing requires a single centered white PadIfNeeded transform")
+        padding = transforms[0]
+        fill = getattr(padding, "fill", getattr(padding, "value", None))
+        white = fill == 255 if isinstance(fill, (int, float)) else fill in ([255, 255, 255], (255, 255, 255))
+        position = getattr(padding, "position", None)
+        position = getattr(position, "value", position)
+        if not white or getattr(padding, "border_mode", None) != 0 or position != "center":
+            raise ValueError(
+                "Nemotron Parse native preprocessing requires centered constant white padding; "
+                "check the source processor and its albumentations version"
+            )
+        tensor_transforms = getattr(getattr(processor, "torch_transform", None), "transforms", [])
+        if len(tensor_transforms) != 1 or type(tensor_transforms[0]).__name__ != "ToTensor":
+            raise ValueError("Nemotron Parse native preprocessing requires the checkpoint's ToTensor transform")

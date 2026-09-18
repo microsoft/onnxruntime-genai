@@ -6,6 +6,10 @@
 
 namespace Generators {
 
+void ValidateNemotronParsePromptLength(size_t prompt_length,
+                                     int64_t required_prompt_length,
+                                     int context_length);
+
 struct NemotronParseModel : Model {
   NemotronParseModel(std::unique_ptr<Config> config, OrtEnv& ort_env);
 
@@ -15,9 +19,11 @@ struct NemotronParseModel : Model {
   std::unique_ptr<OrtSession> encoder_session_;
   std::unique_ptr<OrtSession> decoder_session_;
   std::unique_ptr<OrtSession> prefill_decoder_session_;
+  std::unique_ptr<OrtSession> dynamic_prefill_decoder_session_;
 
   std::unique_ptr<OrtSessionOptions> encoder_session_options_;
   std::unique_ptr<OrtSessionOptions> prefill_decoder_session_options_;
+  std::unique_ptr<OrtSessionOptions> dynamic_prefill_decoder_session_options_;
 };
 
 }  // namespace Generators
