@@ -51,10 +51,33 @@ same structure.
 The target checkpoint remains Olive's `input_model`, or the direct builder's
 `model_name`/`input_path`. Do not duplicate it inside `target_options`.
 
-Version `2` denotes the new envelope, not a GenAI release number. Legacy-only
-input without a version uses legacy normalization. Structured fields without a
-version select this new schema; examples specify the version explicitly.
-Unsupported explicit versions fail before loading weights.
+Version `2` denotes the new envelope, not a GenAI release number. Version `1`
+names today's flat `extra_options` surface: supplying it explicitly is accepted
+and selects legacy normalization, exactly as omitting the field does for
+legacy-only input. Structured fields without a version select this new schema;
+examples specify the version explicitly. Version `1` combined with structured
+fields is an error, as is any other explicit version. Both failures happen
+before loading weights.
+
+The execution provider is not part of this envelope and must not be duplicated
+into it. It stays where each front end already carries it: Olive's
+`systems.<name>.accelerators[].execution_providers`, and the direct builder's
+`--execution_provider`. Normalization nonetheless *reads* it, because several
+compatibility defaults are provider-dependent today:
+
+| Resolved value | Current provider-dependent rule |
+| --- | --- |
+| `weights.accuracy_level` | `4` on CPU/WebGPU, else `0` |
+| `moe.block_size` | `128` on TRT-RTX, else `32` |
+| `moe.type` | `mxfp4`/`nvfp4` accepted only on CUDA |
+| `format.matmulnbits_weights_prepacked` | Prepacked layouts are CUDA-only; a block drafter's packing is forced off elsewhere |
+| `format.use_qdq` | Required `true` for TRT-RTX integer dense weights |
+
+So the resolver signature is (envelope, execution provider), and rule 1 in
+section 9 means "identical given the same provider." Resolve the provider before
+normalization and record it with the effective configuration, so a recipe moved
+between accelerators reports a changed effective policy instead of silently
+producing one.
 
 Olive forwards typed dictionaries, lists, booleans, and numbers. It must not
 flatten these objects into legacy strings or implement a second version of the
@@ -72,7 +95,7 @@ full quantization configuration from PR #2588:
 | --- | --- |
 | `io_dtype` | Requested activation/I/O dtype, subject to the component's supported contract. |
 | `checkpoint_policy` | `preserve` or `requantize`; distinct from source checkpoint storage metadata. |
-| `weights` | Type, block size, symmetry, algorithm, accuracy level, eligible operators, and ordered overrides. |
+| `weights` | `type`, `block_size`, `symmetric`, `method`, `accuracy_level`, `op_types`, and ordered `overrides`. |
 | `moe` | Expert quantization type, block size, and packing. |
 | `format` | `use_qdq` and `matmulnbits_weights_prepacked`. |
 
@@ -85,6 +108,19 @@ Keep MoE quantization in `quant_config.moe`, separately for each model. Do not a
 a duplicate `moe.quant_config` location. Future non-quantization MoE export options
 can have their own group when there are concrete supported settings to expose.
 
+An omitted `moe` group needs an explicit rule, because today's default derives
+from the legacy root `precision` rather than from the dense weight type: `int8`
+(or `use_8bits_moe`) gives `int8` experts, a float precision gives `none`, and
+anything else gives `int4`. Under version 2 an omitted `moe.type` follows
+`weights.type` instead, mapping integer dense types to the same expert type,
+`none` to `none`, and leaving FP4 expert formats as an explicit opt-in. That
+reproduces the legacy result whenever `precision` and `weights.type` agree, which
+is the only shape a migrated recipe should have. Report the derived expert type
+with the effective configuration, and require an explicit `moe` group when
+`weights.type` is `none` on an MoE checkpoint, so that dropping the legacy
+`precision` shorthand from an MoE recipe can never silently change how experts
+are quantized.
+
 Preserve the existing ordered, first-match override semantics. Exact-name rules
 must match eligible emitted nodes, and unsupported algorithms or numeric formats
 must fail rather than be ignored. A shared schema does not mean every exporter
@@ -96,15 +132,23 @@ Each supported component can have an `attention` group:
 
 | Field | Meaning |
 | --- | --- |
-| `implementation` | `auto`, `gqa`, `paged`, or `mha`; explicit requests require backend/architecture support. |
+| `implementation` | `auto` or `paged`; an explicit `paged` request requires backend/architecture support. |
 | `paged.block_size` | Exported page layout; valid only with paged attention. |
 | `kv_cache.scheme` | Existing scheme spelling, such as `int4_per_channel`; `none` means unquantized. |
 | `kv_cache.scale_file` | Calibration-scale input resource used during export. |
-| `kv_cache.windowed` | Existing windowed-cache export behavior, subject to architecture support. |
+| `kv_cache.windowed` | Existing windowed-cache export behavior (legacy `windowed_kv_cache`), subject to architecture support. |
 
-`auto` retains architecture/provider selection. Explicit selections must not
-silently fall back. Head counts and other checkpoint architecture metadata are
-not tuning options.
+`auto` retains architecture/provider selection and is the only spelling for
+non-paged exports, because `paged` versus not-paged is the only attention choice
+the builder exposes today (`use_paged_attention`). Version 2 deliberately does
+**not** introduce `gqa` or `mha` values: there is no current option to force
+either one, so accepting them would be new capability rather than a rename, and
+the implementation phases in section 11 do not cover it. Adding named
+implementations later is a compatible extension of this enum, gated on its own
+exporter support and acceptance checks.
+
+Explicit selections must not silently fall back. Head counts and other checkpoint
+architecture metadata are not tuning options.
 
 Pool size, scheduler limits, utilization targets, and prefill chunk size belong
 to `runtime_config`. They remain constrained by the exported graph and supported
@@ -231,6 +275,25 @@ DFlash2's BF16 body currently uses raw, not prepacked, matmul weights. Its borro
 LM head has separate layout rules. Reject explicit new options that cannot be
 honored; preserve legacy effective behavior through the legacy adapter.
 
+### Two Dtypes in a Block Drafter
+
+`quant_config.io_dtype` names one dtype per component, but a block drafter has
+two. DFlash2 runs its body in BF16 because the activations genuinely leave the
+FP16 range, while the tensors it shares with the target -- the auxiliary hidden
+states, the embedding table, and the LM head -- stay at the *target's* I/O dtype.
+Only the body dtype is a component property; the boundary dtype is a consequence
+of the target's, and the drafter cannot choose it independently without breaking
+the sharing it depends on.
+
+So `drafter_options.quant_config.io_dtype` describes the body only, and for
+DFlash2 and DSpark today `bf16` is its single supported value. An explicit
+`fp16`/`fp32` body request must be rejected with that reason rather than
+silently honored or silently ignored; omitting the field selects the supported
+body dtype. The examples below spell `bf16` out to document the exporter's
+choice, not to imply an alternative exists. Do not add a second boundary-dtype
+field: it is derived, and letting a recipe set it would only create a way to
+express an invalid pair.
+
 ## 5. Speculative Graph Contract
 
 `speculative_options` contains build-time coordination settings:
@@ -306,6 +369,13 @@ These are the proposed builder-fragment semantics. They are not a claim that
 every array in the existing C++ overlay API behaves this way. That API remains
 unchanged. Runtime tuning applies before model/session construction, not as
 arbitrary live mutation of existing sessions.
+
+The same object/scalar/array semantics -- rules 2 and 3 -- also describe how a
+partial pass fragment in this document composes with a full pass: objects merge
+recursively, scalars replace, arrays replace whole. That is a documentation
+convention for presenting a variant without repeating a long recipe, not a
+second configuration feature. A pass is always supplied whole; nothing in the
+implementation merges two pass objects.
 
 Olive must not perform a second independent search merge on the new path.
 Updating only a runtime profile may reuse a validated metadata-only path for an
@@ -438,6 +508,11 @@ there, or be supplied as resolved Olive resources.
 
 The root `precision` is retained to illustrate an agreeing legacy shorthand; the
 new API can omit it when `target_options.quant_config.weights.type` is explicit.
+Qwen3.8-27B is an MoE model and this pass carries no `moe` group, so dropping
+`precision` relies on the version-2 rule above that an omitted `moe.type`
+follows `weights.type`: `int4` dense weights keep `int4` experts either way.
+Check that rule before deleting a root `precision` from any MoE recipe, since
+the legacy default derives from `precision` alone.
 The scale filename retains the original `int8` label intentionally: validate its
 contents for the selected INT4 KV scheme rather than inferring format from its name.
 
@@ -499,9 +574,15 @@ The profile does not duplicate them. For an inline profile, replace the recipe's
 ### Require Shared Embedding and Head
 
 For a package that must store one target/drafter copy of each tensor, change both
-policies to `required`. The following are selected fields to merge into the pass
-above, not a complete recipe. First replace its runtime-profile filename with
-the loaded profile object, then merge the session overrides shown here.
+policies to `required`. The fragment below is a variant of the pass above, shown
+without repeating it. Compose it using the section 6 convention: objects merge
+recursively, scalars replace, arrays replace whole. So its
+`target_options.quant_config.format` changes only
+`matmulnbits_weights_prepacked`, and the base pass's `use_qdq: false` survives;
+its `runtime_config` object first replaces the recipe's profile filename with
+that file's loaded contents, then merges the session entries shown here on top,
+leaving the base profile's `provider_options` array and `engine`, `search`, and
+`speculative` sections intact. The result is one complete pass.
 
 ```json
 {
@@ -657,10 +738,14 @@ target/drafter/runtime envelope.
 | `quant_config` | `target_options.quant_config` |
 | List-form quantization override | `target_options.quant_config.weights.overrides` |
 | `block_size`, `op_types_to_quantize` | Target `quant_config.weights` fields |
+| `is_symmetric`, `accuracy_level` | Target `quant_config.weights.symmetric` and `weights.accuracy_level` |
+| `algo_config`, `nodes_to_exclude` | Target `quant_config.weights.method` plus generated `weights.overrides` entries |
 | `matmulnbits_weights_prepacked`, `use_qdq` | Target `quant_config.format` fields |
-| `moe_quant_type`, `qmoe_weights_prepacked` | Target `quant_config.moe` fields |
+| `moe_quant_type`, `qmoe_block_size`, `qmoe_weights_prepacked` | Target `quant_config.moe` fields |
+| `use_8bits_moe` | Deprecated `moe_quant_type` alias; unchanged |
 | `use_paged_attention`, `paged_block_size` | Target `attention.implementation` and `attention.paged.block_size` |
 | `kv_cache_quant_scheme`, `kv_cache_scale_file` | Target `attention.kv_cache` fields |
+| `windowed_kv_cache` | Target `attention.kv_cache.windowed` |
 | `mtp_quant_config` | MTP quantization, retaining legacy defaults through the adapter |
 | `dflash2_path`, `dspark_path` | Drafter selection and `path` |
 | `dflash2_precision` | Drafter weight policy plus explicit legacy-derived settings |
@@ -677,10 +762,13 @@ target/drafter/runtime envelope.
 | `enable_cuda_graph`, `use_device_allocator_for_initializers` | Runtime decoder session/provider settings |
 | `enable_cuda_fpa_intb_gemm` | Runtime decoder session entry `ep.cuda.fpa_intb_gemm` |
 | Olive `search` | Runtime `search` |
+| Any other `extra_options` key | No canonical destination yet; see rule 8 |
 
 Normalization rules:
 
-1. Legacy-only calls preserve current precedence, defaults, and behavior. In
+1. Legacy-only calls preserve current precedence, defaults, and behavior, for a
+   given execution provider. Several defaults are provider-dependent (see
+   section 2), so "unchanged" is only meaningful against a fixed provider. In
    Olive, legacy `extra_options` continues to override legacy pass-level knobs.
 2. Structured leaves override legacy aliases with a warning naming both paths.
    Omitted target leaves retain compatibility defaults. An explicit new drafter
@@ -696,6 +784,18 @@ Normalization rules:
 7. New Olive with old GenAI can still execute legacy recipes. Structured recipes
    require a supported schema/capability and fail early with upgrade guidance;
    never drop unknown groups or guess a lossy flattening.
+8. The table above is not exhaustive, and the remaining `extra_options` keys --
+   `exclude_embeds`, `exclude_lm_head`, `prune_lm_head`, `state_window`,
+   `hf_token`, and the rest -- keep working unchanged under version 2. They pass
+   through to the same handling they have today, alongside the structured
+   groups, until a later version gives each one a canonical home. This is
+   deliberate: it keeps the migration incremental instead of requiring the whole
+   flat surface to be redesigned first. Two consequences. A structured group and
+   a passthrough key that govern the same graph property still conflict, and
+   must be detected by rule 3 rather than silently resolved by ordering. And a
+   key that the installed builder does not recognize at all must fail, not be
+   dropped, so that a recipe written for a newer builder cannot quietly export a
+   different model.
 
 ## 10. Olive Resources and Caching
 
@@ -750,7 +850,20 @@ feature, not merely a rename of configuration keys.
 ### Acceptance Checks
 
 - Parser tests for legacy equivalence, ordered overrides, explicit/omitted
-  defaults, aliases, unsupported versions, and independent drafter policy.
+  defaults, aliases, explicit version `1`, unsupported versions, version `1`
+  combined with structured fields, unrecognized passthrough keys, and
+  independent drafter policy.
+- Provider-dependent default tests: resolve the same envelope against CPU,
+  WebGPU, CUDA, and TRT-RTX and check `weights.accuracy_level`, `moe.block_size`,
+  FP4 expert acceptance, prepacked layout, and `use_qdq` each match today's
+  values for that provider, and that the effective configuration records which
+  provider produced them.
+- MoE derivation tests: an omitted `moe` group follows `weights.type`, matches
+  the legacy `precision`-derived expert type for every agreeing pair, and fails
+  rather than defaulting when `weights.type` is `none` on an MoE checkpoint.
+- Drafter body-dtype tests: an omitted `io_dtype` selects BF16, an explicit
+  `bf16` is accepted, an explicit `fp16`/`fp32` is rejected with the body-range
+  reason, and boundary tensors stay at the target's dtype in every case.
 - Graph tests for exact tap order, page-size agreement, draft/state limits,
   per-model KV policy, borrowed tensors, and unsupported drafter settings.
 - Sharing tests for each tensor and policy, including dense-body/quantized-head
