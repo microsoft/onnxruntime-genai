@@ -2896,6 +2896,35 @@ TEST_F(EngineRunTest, DensePagedPrefixCacheSkipsCommittedFullBlocks) {
   EXPECT_EQ(continuation_event.usage.cached_prompt_tokens, 0u);
 }
 
+TEST_F(EngineRunTest, CanceledUnstartedPromptIsNotCountedAsCurrentTurnCache) {
+  model_ = LoadSyntheticPagedModel();
+  auto& batching = *model_->config_->engine.dynamic_batching;
+  batching.block_size = 4;
+  batching.num_blocks = 16;
+  batching.prefix_caching = true;
+  batching.prefix_cache_max_blocks = 8;
+  auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
+  const std::array<int32_t, 9> canceled_prompt{2, 3, 4, 5, 6, 7, 8, 9, 10};
+
+  auto source = CreateRequestWithPrompt(engine.engine, canceled_prompt);
+  EXPECT_EQ(RunOne(*engine.engine).request, source);
+  source->Close();
+
+  auto warm = CreateRequestWithPrompt(engine.engine, canceled_prompt);
+  ASSERT_TRUE(warm->Cancel(warm->CurrentTurnId()));
+  const auto canceled_event = RunOne(*engine.engine);
+  EXPECT_EQ(canceled_event.request, warm);
+  EXPECT_EQ(canceled_event.finish_reason, GenerationFinishReason::Canceled);
+  const std::array<int32_t, 1> current_prompt{11};
+  warm->BeginTurn(current_prompt);
+
+  const auto event = RunOne(*engine.engine);
+  EXPECT_EQ(event.request, warm);
+  EXPECT_EQ(warm->AdoptedPrefixLength(), 8u);
+  EXPECT_EQ(event.usage.prompt_tokens, current_prompt.size());
+  EXPECT_EQ(event.usage.cached_prompt_tokens, 0u);
+}
+
 TEST_F(EngineRunTest, DensePagedPrefixAdoptionRollsBackAfterExecutionFailure) {
   model_ = LoadSyntheticPagedModel();
   auto& batching = *model_->config_->engine.dynamic_batching;

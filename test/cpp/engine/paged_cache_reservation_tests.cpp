@@ -91,7 +91,7 @@ TEST(PagedCacheReservationTest, MoveAssignmentRejectsOwnedDestination) {
   PagedCacheBlockTable table{kRequestA, 1, pool.AllocateBlocks(1)};
   PagedCacheBlockTable replacement{kRequestB, 1, pool.AllocateBlocks(1)};
 
-  EXPECT_DEATH(table = std::move(replacement), "");
+  EXPECT_DEATH_IF_SUPPORTED(table = std::move(replacement), "");
 }
 
 TEST(PagedCacheReservationTest, SumsPerRequestBlockCeilings) {

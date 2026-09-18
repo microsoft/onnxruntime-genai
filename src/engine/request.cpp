@@ -808,7 +808,9 @@ void Request::StagePrefixAdoption(size_t adopted_tokens) {
   }
   processed_sequence_length_ = static_cast<int64_t>(adopted_tokens);
   adopted_prefix_length_ = adopted_tokens;
-  turn_cached_prompt_tokens_ = adopted_tokens;
+  const size_t turn_start = tokens_host_.size() - turn_prompt_tokens_;
+  turn_cached_prompt_tokens_ =
+      adopted_tokens > turn_start ? adopted_tokens - turn_start : 0;
   prefix_adoption_staged_ = true;
 }
 
