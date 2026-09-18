@@ -102,6 +102,96 @@ def make_attention():
     return SimpleNamespace(q_norm=norm, k_norm=norm, indexer=indexer)
 
 
+def test_qwen_attention_packs_gated_qkv_before_splitting():
+    model = object.__new__(Qwen4ExpTextModel)
+    model.use_paged_attention = False
+    model.io_dtype = ir.DataType.FLOAT16
+    model.q_size = 128
+    model.kv_size = 32
+    model.num_attn_heads = 4
+    model.head_size = 32
+    model.attention_attrs = {
+        "use_matmul_in_attn": False,
+        "use_packed_matmul": True,
+        "q_norm": True,
+        "k_norm": True,
+    }
+    projection = lambda output_size: SimpleNamespace(  # noqa: E731
+        weight=torch.zeros(output_size, 64, dtype=torch.float16), bias=None
+    )
+    attention = SimpleNamespace(q_proj=projection(256), k_proj=projection(32), v_proj=projection(32))
+    record_calls(model, ["make_attention_unpacked", "make_split", "make_reshape"])
+
+    def make_packed_matmul(self, q_proj, k_proj, v_proj, basename, root_input):
+        self.calls.append(("make_packed_matmul", (q_proj, k_proj, v_proj, basename, root_input), {}))
+        return basename
+
+    model.make_packed_matmul = MethodType(make_packed_matmul, model)
+
+    model.make_attention_input_proj(3, attention, "hidden_states")
+
+    packed = next(call for call in model.calls if call[0] == "make_packed_matmul")
+    assert packed[1][4] == "hidden_states"
+    qkv_split = next(call for call in model.calls if call[0] == "make_split")
+    assert qkv_split[2]["inputs"][1] == "/model/constants/INT64/[256, 32, 32]"
+    assert qkv_split[2]["shapes"] == [
+        ["batch_size", "sequence_length", 256],
+        ["batch_size", "sequence_length", 32],
+        ["batch_size", "sequence_length", 32],
+    ]
+    assert model.q_size == 128
+    assert model.attention_attrs["q_path"] == "/model/layers.3/attn/q_proj/Reshape/output_0"
+    assert model.attention_attrs["k_path"] == "/model/layers.3/attn/qkv_proj/Split/output_1"
+    assert model.attention_attrs["v_path"] == "/model/layers.3/attn/qkv_proj/Split/output_2"
+
+
+def test_qwen_moe_packs_shared_gate_up_and_router():
+    model = object.__new__(Qwen4ExpTextModel)
+    model.use_paged_attention = False
+    model.io_dtype = ir.DataType.FLOAT16
+    model.hidden_size = 64
+    model.intermediate_size = 256
+    model.shared_expert_intermediate_size = 16
+    model.moe_attrs = {"num_experts": 32}
+    projection = lambda output_size: SimpleNamespace(out_features=output_size, bias=None)  # noqa: E731
+    shared_expert = SimpleNamespace(
+        gate_proj=projection(16),
+        up_proj=projection(16),
+        down_proj=projection(64),
+    )
+    moe = SimpleNamespace(shared_expert=shared_expert, gate=projection(32))
+    record_calls(
+        model,
+        ["make_split", "make_reshape", "make_activation", "make_mul", "make_matmul", "make_sigmoid"],
+    )
+
+    def make_packed_matmul(self, gate_proj, up_proj, router, basename, root_input):
+        self.calls.append(("make_packed_matmul", (gate_proj, up_proj, router, basename, root_input), {}))
+        return basename
+
+    model.make_packed_matmul = MethodType(make_packed_matmul, model)
+
+    model.make_moe_router(3, moe, "hidden_states")
+    output, gate = model.make_shared_expert(3, shared_expert, projection(1), "hidden_states")
+
+    packed = next(call for call in model.calls if call[0] == "make_packed_matmul")
+    assert packed[1][4] == "hidden_states"
+    packed_split = next(call for call in model.calls if call[0] == "make_split")
+    assert packed_split[1][1][1] == "/model/constants/INT64/[16, 16, 32]"
+    assert packed_split[1][4] == [
+        ["batch_size", "sequence_length", 16],
+        ["batch_size", "sequence_length", 16],
+        ["batch_size", "sequence_length", 32],
+    ]
+    router_reshape = next(call for call in model.calls if call[0] == "make_reshape")
+    assert router_reshape[1][1][0] == "/model/layers.3/moe/gate_up_router/Split/output_2"
+    mul = next(call for call in model.calls if call[0] == "make_mul")
+    assert mul[1][1][1] == "/model/layers.3/moe/gate_up_router/Split/output_1"
+    assert output == "/model/layers.3/mlp/down_proj/MatMul/output_0"
+    assert gate == "/model/layers.3/shared_expert_gate/Sigmoid/output_0"
+    assert not model.moe_attrs["shared_expert_paths"]
+
+
 def emitted_nodes(model):
     return [(args[0], kwargs) for method, args, kwargs in model.calls if method == "make_node"]
 

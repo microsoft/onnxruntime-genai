@@ -902,6 +902,122 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
 
     CPU_EMBEDDING_ANNOTATION = "cpu_embedding"
 
+    def is_packed_matmul_supported(self):
+        return Model.is_packed_matmul_supported(self)
+
+    def make_attention_init(self, config):
+        super().make_attention_init(config)
+        self.attention_attrs["use_packed_matmul"] = self.is_packed_matmul_supported()
+
+    def make_attention_input_proj(self, layer_id, attention, root_input, **kwargs):
+        if not self.attention_attrs["use_packed_matmul"]:
+            return super().make_attention_input_proj(layer_id, attention, root_input, **kwargs)
+
+        q_size = self.q_size
+        self.q_size = 2 * q_size
+        try:
+            super().make_attention_input_proj(layer_id, attention, root_input, **kwargs)
+        finally:
+            self.q_size = q_size
+
+    def make_moe_router(self, layer_id, moe, root_input):
+        basename = f"/model/layers.{layer_id}/moe/gate_up_router"
+        packed_matmul = self.make_packed_matmul(
+            moe.shared_expert.gate_proj,
+            moe.shared_expert.up_proj,
+            moe.gate,
+            f"{basename}/MatMul",
+            root_input,
+        )
+        packed_output = f"{packed_matmul}/output_0"
+
+        projections = (moe.shared_expert.gate_proj, moe.shared_expert.up_proj, moe.gate)
+        biases = [getattr(projection, "bias", None) for projection in projections]
+        if any(bias is not None and torch.count_nonzero(bias) > 0 for bias in biases):
+            bias_template = next(bias for bias in biases if bias is not None)
+            packed_bias = torch.cat(
+                [
+                    bias
+                    if bias is not None
+                    else torch.zeros(
+                        projection.out_features,
+                        dtype=bias_template.dtype,
+                        device=bias_template.device,
+                    )
+                    for projection, bias in zip(projections, biases, strict=True)
+                ]
+            )
+            packed_add = f"{basename}/Add"
+            self.make_add_bias(packed_bias, packed_add, packed_output)
+            packed_output = f"{packed_add}/output_0"
+
+        intermediate_size = self.shared_expert_intermediate_size
+        num_experts = self.moe_attrs["num_experts"]
+        split_outputs = [f"{basename}/Split/output_{index}" for index in range(3)]
+        self.make_split(
+            f"{basename}/Split",
+            [packed_output, f"/model/constants/INT64/[{intermediate_size}, {intermediate_size}, {num_experts}]"],
+            split_outputs,
+            [self.io_dtype] * 3,
+            [
+                self.make_hidden_state_shape(last_dim=intermediate_size),
+                self.make_hidden_state_shape(last_dim=intermediate_size),
+                self.make_hidden_state_shape(last_dim=num_experts),
+            ],
+            axis=-1,
+        )
+        self.moe_attrs.setdefault("shared_expert_paths", {})[layer_id] = tuple(split_outputs[:2])
+
+        router_reshape_name = f"/model/layers.{layer_id}/moe/router/Reshape"
+        self.make_reshape(
+            router_reshape_name,
+            [split_outputs[2], f"/model/constants/INT64/{[-1, num_experts]}"],
+            dtype=self.io_dtype,
+            shape=["batch_size * sequence_length", num_experts],
+        )
+
+    def make_shared_expert(self, layer_id, shared_expert, shared_expert_gate, root_input):
+        gate_path, up_path = self.moe_attrs["shared_expert_paths"].pop(layer_id)
+        intermediate_size = self.intermediate_size
+        self.intermediate_size = self.shared_expert_intermediate_size
+        try:
+            activation = self.make_activation(layer_id, gate_path)
+            mul_name = f"/model/layers.{layer_id}/mlp/Mul"
+            self.make_mul(
+                mul_name,
+                [f"{activation}/output_0", up_path],
+                self.io_dtype,
+                self.make_hidden_state_shape(last_dim=self.intermediate_size),
+            )
+            down_name = self.make_matmul(
+                shared_expert.down_proj,
+                f"/model/layers.{layer_id}/mlp/down_proj/MatMul",
+                f"{mul_name}/output_0",
+            )
+            if (
+                shared_expert.down_proj.bias is not None
+                and torch.count_nonzero(shared_expert.down_proj.bias) > 0
+            ):
+                down_add = f"/model/layers.{layer_id}/mlp/down_proj/Add"
+                self.make_add_bias(shared_expert.down_proj.bias, down_add, f"{down_name}/output_0")
+                down_name = down_add
+        finally:
+            self.intermediate_size = intermediate_size
+
+        gate_matmul_name = self.make_matmul(
+            shared_expert_gate,
+            f"/model/layers.{layer_id}/shared_expert_gate/MatMul",
+            root_input,
+        )
+        gate_sigmoid_name = f"/model/layers.{layer_id}/shared_expert_gate/Sigmoid"
+        self.make_sigmoid(
+            gate_sigmoid_name,
+            f"{gate_matmul_name}/output_0",
+            self.io_dtype,
+            shape=self.make_hidden_state_shape(last_dim=1),
+        )
+        return f"{down_name}/output_0", f"{gate_sigmoid_name}/output_0"
+
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         extra_options = copy.deepcopy(extra_options)
         text_only = extra_options.get("text_only", False)
@@ -909,7 +1025,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         extra_options.setdefault("filename", "model.onnx" if text_only else "text.onnx")
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.use_cpu_embedding_gather = text_only
-        self.model.metadata_props["qwen4_exp.past_indexer_names"] = "past_key_values.%d.indexer_key"
+        self.model.metadata_props["qwen4_exp.past_indexer_names"] = "past.%d.indexer_key"
         self.model.metadata_props["qwen4_exp.present_indexer_names"] = "present.%d.indexer_key"
         self.model.metadata_props["qwen4_exp.past_ple_token_names"] = "past.%d.ple_tokens"
         self.model.metadata_props["qwen4_exp.present_ple_token_names"] = "present.%d.ple_tokens"
@@ -936,7 +1052,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         self.emit_pre_final_hidden_states = False
 
         qsa_layers = {
-            layer_id: f"past_key_values.{layer_id}.indexer_key"
+            layer_id: f"past.{layer_id}.indexer_key"
             for layer_id, layer_type in enumerate(self.layer_types)
             if layer_type == "qwen_sparse_attention"
         }
@@ -1032,7 +1148,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         decoder = genai_config["model"]["decoder"]
         decoder["inputs"]["past_ple_token_names"] = "past.%d.ple_tokens"
         decoder["inputs"]["past_ple_conv_names"] = "past.%d.ple_conv"
-        decoder["inputs"]["past_indexer_names"] = "past_key_values.%d.indexer_key"
+        decoder["inputs"]["past_indexer_names"] = "past.%d.indexer_key"
         decoder["outputs"]["present_ple_token_names"] = "present.%d.ple_tokens"
         decoder["outputs"]["present_ple_conv_names"] = "present.%d.ple_conv"
         decoder["outputs"]["present_indexer_names"] = "present.%d.indexer_key"
