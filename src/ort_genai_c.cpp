@@ -2070,6 +2070,17 @@ OgaResult* OgaRequestCancelTurn(
   OGA_CATCH
 }
 
+OgaResult* OgaRequestRewindToStartOfTurn(
+    OgaRequest* request, uint64_t turn_id) {
+  OGA_TRY
+  if (!request) {
+    throw std::runtime_error("request must not be null.");
+  }
+  request->RewindToStartOfTurn(turn_id);
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OgaRequestClose(OgaRequest* request) {
   OGA_TRY
   if (!request) {
