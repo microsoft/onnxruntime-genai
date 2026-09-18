@@ -19,6 +19,8 @@ struct NemotronParseProcessor : Processor {
   int64_t target_height_;
   int64_t target_width_;
   int32_t decoder_start_token_id_;
+  int64_t required_prompt_length_;
+  int context_length_;
 };
 
 }  // namespace Generators
