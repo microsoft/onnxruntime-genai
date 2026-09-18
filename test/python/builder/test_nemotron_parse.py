@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import math
+import os
 import sys
 import tempfile
 import types
@@ -25,6 +26,7 @@ BUILDERS_DIR = (
 )
 REPO_ROOT = Path(__file__).parents[3]
 sys.path.insert(0, str(BUILDERS_DIR.parents[1]))
+sys.path.insert(0, str(BUILDERS_DIR.parent))
 
 
 def _load_builder_module(module_name):
@@ -314,7 +316,7 @@ class _TinyFullModel(_TinyModel):
 
 def _build_component():
     builder = _make_builder()
-    component = builder._make_decoder_component()
+    component = builder.make_decoder_component()
     component.build(_TinyModel(builder.config))
     model = nemotron_parse.ir.to_proto(component.model)
     return builder, component, model
@@ -327,7 +329,7 @@ def _shape_dims(value):
     ]
 
 
-def _split_heads(value, num_heads):
+def split_heads(value, num_heads):
     batch_size, sequence_length, hidden_size = value.shape
     return value.reshape(
         batch_size,
@@ -344,9 +346,9 @@ def _reference_attention(
     attention_mask=None,
 ):
     num_heads = 2
-    query = _split_heads(attention.q_proj(hidden_states), num_heads)
-    key = _split_heads(attention.k_proj(key_value_states), num_heads)
-    value = _split_heads(attention.v_proj(key_value_states), num_heads)
+    query = split_heads(attention.q_proj(hidden_states), num_heads)
+    key = split_heads(attention.k_proj(key_value_states), num_heads)
+    value = split_heads(attention.v_proj(key_value_states), num_heads)
     scores = torch.matmul(query, key.transpose(-1, -2))
     scores *= 1.0 / math.sqrt(query.shape[-1])
     if attention_mask is not None:
@@ -416,7 +418,39 @@ def _reference_decoder(model, input_ids, attention_mask, encoder_states):
     return model.lm_head(hidden_states), caches
 
 
+def _make_image_processor(**overrides):
+    padding = type("PadIfNeeded", (), {"fill": 255, "border_mode": 0, "position": "center"})()
+    attributes = {
+        "do_normalize": True,
+        "transform": types.SimpleNamespace(transforms=[padding]),
+        "torch_transform": types.SimpleNamespace(transforms=[type("ToTensor", (), {})()]),
+        **overrides,
+    }
+    return type("NemotronParseImageProcessor", (), attributes)()
+
+
 class NemotronParseBuilderTests(TestCase):
+    def setUp(self):
+        generation = mock.patch.object(
+            nemotron_parse.GenerationConfig, "from_pretrained",
+            return_value=nemotron_parse.GenerationConfig(repetition_penalty=1.1),
+        )
+        self.generation_loader = generation.start()
+        self.addCleanup(generation.stop)
+
+    def test_builder_method_conventions(self):
+        for builder_class in (
+            NemotronParseModel,
+            nemotron_parse.NemotronParseEncoderComponent,
+            nemotron_parse.NemotronParseDecoderComponent,
+        ):
+            for name, member in vars(builder_class).items():
+                if name.startswith("__"):
+                    continue
+                with self.subTest(builder=builder_class.__name__, member=name):
+                    self.assertFalse(name.startswith("_"))
+                    self.assertNotIsInstance(member, staticmethod)
+
     def test_defaults_to_block32(self):
         builder = _make_builder()
 
@@ -442,7 +476,7 @@ class NemotronParseBuilderTests(TestCase):
     def test_decoder_component_preserves_base_output_policy(self):
         builder = _make_builder(io_dtype=nemotron_parse.ir.DataType.BFLOAT16)
 
-        decoder = builder._make_decoder_component()
+        decoder = builder.make_decoder_component()
 
         self.assertEqual(decoder.filename, "decoder.onnx")
         self.assertEqual(
@@ -463,6 +497,30 @@ class NemotronParseBuilderTests(TestCase):
             ValueError, "only encoder and/or decoder"
         ):
             _make_builder(export_components="encoder,tokenizer")
+
+    def test_rejects_component_only_export(self):
+        for components in ("encoder", "decoder"):
+            with self.subTest(components=components), self.assertRaisesRegex(ValueError, "component-only export"):
+                _make_builder(export_components=components)
+
+    def test_load_precision_matches_export(self):
+        for dtype, expected in (
+            (nemotron_parse.ir.DataType.FLOAT, torch.float32),
+            (nemotron_parse.ir.DataType.FLOAT16, torch.float16),
+            (nemotron_parse.ir.DataType.BFLOAT16, torch.bfloat16),
+            (nemotron_parse.ir.DataType.INT4, "auto"),
+        ):
+            with self.subTest(dtype=dtype):
+                builder = _make_builder(onnx_dtype=dtype)
+                with mock.patch.object(nemotron_parse.AutoModel, "from_pretrained") as loader:
+                    builder.load_model("missing-local-path")
+                self.assertEqual(loader.call_args.kwargs["torch_dtype"], expected)
+
+    def test_explicit_load_precision(self):
+        self.assertEqual(_make_builder(torch_dtype="fp16").torch_dtype(), torch.float16)
+        self.assertEqual(_make_builder(torch_dtype="auto").torch_dtype(), "auto")
+        with self.assertRaisesRegex(ValueError, "torch_dtype"):
+            _make_builder(torch_dtype="invalid").torch_dtype()
 
     def test_decoder_emits_dynamic_tensor_scatter_graph(self):
         builder, _, model = _build_component()
@@ -553,7 +611,7 @@ class NemotronParseBuilderTests(TestCase):
                 )
             )
 
-        decoder = builder._make_decoder_component()
+        decoder = builder.make_decoder_component()
         decoder.build(model)
         session = ort.InferenceSession(
             nemotron_parse.ir.to_proto(decoder.model).SerializeToString(),
@@ -678,7 +736,7 @@ class NemotronParseBuilderTests(TestCase):
                 cache_dir=str(cache_dir),
                 extra_options={"use_qdq": True},
             )
-            component = builder._make_decoder_component()
+            component = builder.make_decoder_component()
 
             self.assertIs(component.quant_attrs["use_qdq"], True)
             self.assertEqual(component.quant_attrs["matmul_block_size"], 32)
@@ -732,6 +790,147 @@ class NemotronParseBuilderTests(TestCase):
             self.assertEqual(matmul.input[1], dequantize.output[0])
         onnx.checker.check_model(model)
 
+    def test_trt_rtx_int4_matches_fp_reference_without_cpu_fallback(self):
+        self.check_trt_rtx_int4_matches_fp_reference(dynamic_prefill=False)
+
+    def test_trt_rtx_dynamic_int4_matches_fp_reference_without_cpu_fallback(self):
+        self.check_trt_rtx_int4_matches_fp_reference(dynamic_prefill=True)
+
+    def check_trt_rtx_int4_matches_fp_reference(self, dynamic_prefill):
+        if os.environ.get("NEMOTRON_PARSE_REQUIRE_TRT_RTX") != "1":
+            self.skipTest("Set NEMOTRON_PARSE_REQUIRE_TRT_RTX=1 on a TRT-RTX test host")
+        self.assertIsNotNone(ort, "TRT-RTX validation requires onnxruntime")
+        provider = "NvTensorRTRTXExecutionProvider"
+        provider_names = {provider, "NvTensorRtRtx"}
+        library = os.environ.get("ORT_TRT_RTX_EP_LIBRARY")
+        devices = None
+        if library:
+            if not any(device.ep_name in provider_names for device in ort.get_ep_devices()):
+                ort.register_execution_provider_library(provider, library)
+            devices = [device for device in ort.get_ep_devices()
+                       if device.ep_name in provider_names]
+            self.assertTrue(devices, "The TRT-RTX plugin did not expose a supported device")
+        torch.manual_seed(0)
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp) / "cache"
+            cache.mkdir()
+            builder = NemotronParseModel(
+                _make_builder_config(), nemotron_parse.ir.DataType.FLOAT16,
+                nemotron_parse.ir.DataType.INT4, "trt-rtx", str(cache),
+                {"use_qdq": True, "block_size": 32, "prefill_sequence_length": 4, "cache_sequence_length": 8},
+            )
+            weights = _TinyModel(builder.config).eval()
+            component = builder.make_decoder_component()
+            component.build(weights)
+            component.save_model(tmp)
+            exported = onnx.load(str(Path(tmp) / "decoder.onnx"))
+            self.assertTrue(any(weight.data_type == TensorProto.INT4 for weight in exported.graph.initializer))
+            self.assertTrue(any(node.op_type == "DequantizeLinear" for node in exported.graph.node))
+            output_dtypes = {
+                output.name: helper.tensor_dtype_to_np_dtype(output.type.tensor_type.elem_type)
+                for output in exported.graph.output
+            }
+            reference_builder = _make_builder(
+                io_dtype=nemotron_parse.ir.DataType.FLOAT, prefill_sequence_length=4, cache_sequence_length=8,
+            )
+            reference = reference_builder.make_decoder_component()
+            reference.build(weights)
+            reference_session = ort.InferenceSession(
+                nemotron_parse.ir.to_proto(reference.model).SerializeToString(), providers=["CPUExecutionProvider"],
+            )
+            rng = np.random.default_rng(0)
+            prefill_length = 6 if dynamic_prefill else 4
+            attention_mask = np.zeros((1, 8), dtype=np.int64)
+            attention_mask[:, :prefill_length] = 1
+            feeds = {
+                "decoder_input_ids": np.arange(2, 2 + prefill_length, dtype=np.int64)[None, :],
+                "decoder_attention_mask": attention_mask,
+                "cache_write_indices": np.array([0], dtype=np.int64),
+            }
+            for kind in ("key", "value"):
+                feeds[f"past_key_values.0.{kind}"] = np.zeros((1, 2, 8, 4), dtype=np.float32)
+                feeds[f"cross_past_key_values.0.{kind}"] = rng.standard_normal(
+                    (1, 2, builder.encoder_sequence_length, 4)
+                ).astype(np.float32)
+
+            # Keep the target's own prefill caches resident for decode, independently of the FP32 reference.
+            device_feeds = {
+                name: ort.OrtValue.ortvalue_from_numpy(value.astype(np.float16), "cuda", 0)
+                for name, value in feeds.items() if value.dtype == np.float32
+            }
+            for sequence_length in (prefill_length, 1):
+                options = ort.SessionOptions()
+                options.add_session_config_entry("session.disable_cpu_ep_fallback", "1")
+                options.enable_profiling = True
+                options.profile_file_prefix = str(Path(tmp) / f"trt_{sequence_length}")
+                options.add_free_dimension_override_by_name("batch_size", 1)
+                provider_options = {}
+                if dynamic_prefill and sequence_length != 1:
+                    for kind, length in (("min", 1), ("opt", 4), ("max", 7)):
+                        shapes = {name: list(value.shape) for name, value in feeds.items()}
+                        shapes["decoder_input_ids"][1] = length
+                        provider_options[f"nv_profile_{kind}_shapes"] = ",".join(
+                            name + ":" + "x".join(map(str, shape)) for name, shape in shapes.items()
+                        )
+                else:
+                    options.add_free_dimension_override_by_name("sequence_length", sequence_length)
+                options.add_free_dimension_override_by_name("encoder_sequence_length", builder.encoder_sequence_length)
+                if library:
+                    options.add_provider_for_devices([devices[0]], provider_options)
+                    session = ort.InferenceSession(str(Path(tmp) / "decoder.onnx"), sess_options=options)
+                else:
+                    session = ort.InferenceSession(
+                        str(Path(tmp) / "decoder.onnx"), sess_options=options,
+                        providers=[(provider, provider_options)],
+                    )
+                session.disable_fallback()
+                self.assertTrue(provider_names.intersection(session.get_providers()))
+                expected = dict(zip(
+                    [output.name for output in reference_session.get_outputs()], reference_session.run(None, feeds)
+                ))
+                for name, value in feeds.items():
+                    if value.dtype != np.float32:
+                        device_feeds[name] = ort.OrtValue.ortvalue_from_numpy(value, "cuda", 0)
+                binding = session.io_binding()
+                for name, value in device_feeds.items():
+                    binding.bind_ortvalue_input(name, value)
+                output_names = [output.name for output in session.get_outputs()]
+                device_outputs = {}
+                for name in output_names:
+                    if name.startswith("present."):
+                        past_name = name.replace("present.", "past_key_values.", 1)
+                        device_outputs[name] = device_feeds[past_name]
+                    else:
+                        device_outputs[name] = ort.OrtValue.ortvalue_from_numpy(
+                            np.zeros(expected[name].shape, dtype=output_dtypes[name]), "cuda", 0
+                        )
+                    binding.bind_ortvalue_output(name, device_outputs[name])
+                binding.synchronize_inputs()
+                session.run_with_iobinding(binding)
+                binding.synchronize_outputs()
+                actual = {name: value.numpy() for name, value in device_outputs.items()}
+                # Bound absolute error relative to the FP logits scale, including values near zero.
+                np.testing.assert_allclose(actual["logits"], expected["logits"], rtol=0.1, atol=0.1)
+                self.assertTrue(np.isfinite(actual["logits"]).all())
+                for kind in ("key", "value"):
+                    present_name = f"present.0.{kind}"
+                    self.assertEqual(
+                        device_outputs[present_name].data_ptr(), device_feeds[f"past_key_values.0.{kind}"].data_ptr()
+                    )
+                    np.testing.assert_allclose(actual[present_name], expected[present_name], rtol=0.1, atol=0.1)
+                    consumed = int(feeds["cache_write_indices"][0]) + sequence_length
+                    np.testing.assert_array_equal(actual[present_name][:, :, consumed:, :], 0)
+                events = json.loads(Path(session.end_profiling()).read_text())
+                assignments = [event.get("args", {}).get("provider") for event in events
+                               if event.get("cat") == "Node" and event.get("args", {}).get("provider")]
+                self.assertTrue(provider_names.intersection(assignments))
+                self.assertNotIn("CPUExecutionProvider", assignments)
+                feeds["decoder_input_ids"] = np.array([[int(expected["logits"].argmax())]], dtype=np.int64)
+                feeds["decoder_attention_mask"][0, prefill_length] = 1
+                feeds["cache_write_indices"][0] = prefill_length
+                for kind in ("key", "value"):
+                    feeds[f"past_key_values.0.{kind}"] = expected[f"present.0.{kind}"]
+
     @skipIf(ort is None, "onnxruntime is required for numerical graph validation")
     def test_manual_encoder_matches_radio_neck_and_cross_cache(self):
         torch.manual_seed(1)
@@ -746,7 +945,7 @@ class NemotronParseBuilderTests(TestCase):
         with torch.no_grad():
             encoder_hidden_states = model.encoder(pixel_values)
 
-        component = builder._make_encoder_component(model)
+        component = builder.make_encoder_component(model)
         component.build()
         exported = nemotron_parse.ir.to_proto(component.model)
         onnx.checker.check_model(exported)
@@ -775,7 +974,7 @@ class NemotronParseBuilderTests(TestCase):
                 ("key", layer.encoder_attn.k_proj),
                 ("value", layer.encoder_attn.v_proj),
             ):
-                expected = _split_heads(
+                expected = split_heads(
                     projection(encoder_hidden_states), 2
                 ).detach().numpy()
                 np.testing.assert_allclose(
@@ -839,6 +1038,28 @@ class NemotronParseBuilderTests(TestCase):
         self.assertIs(
             config["search"]["past_present_share_buffer"], True
         )
+        self.assertEqual(config["search"]["repetition_penalty"], 1.1)
+
+    def test_config_uses_loaded_generation_defaults(self):
+        builder = _make_builder()
+        builder.generation_config = nemotron_parse.GenerationConfig(
+            repetition_penalty=1.2, do_sample=True, temperature=0.8, top_k=7, top_p=0.9,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            builder.make_genai_config(builder.config, {}, tmp)
+            search = json.loads((Path(tmp) / "genai_config.json").read_text())["search"]
+        for key in ("repetition_penalty", "do_sample", "temperature", "top_k", "top_p"):
+            self.assertEqual(search[key], getattr(builder.generation_config, key))
+        self.generation_loader.assert_not_called()
+
+    def test_missing_generation_config_falls_back_with_warning(self):
+        builder = _make_builder()
+        builder.config.decoder.repetition_penalty = 1.15
+        self.generation_loader.side_effect = OSError("missing generation config")
+        with tempfile.TemporaryDirectory() as tmp, self.assertWarnsRegex(UserWarning, "decoder configuration defaults"):
+            builder.make_genai_config(builder.config, {}, tmp)
+            search = json.loads((Path(tmp) / "genai_config.json").read_text())["search"]
+        self.assertEqual(search["repetition_penalty"], 1.15)
 
     def test_cuda_int4_config_keeps_matmul_bias_separate(self):
         builder = _make_builder(onnx_dtype=nemotron_parse.ir.DataType.INT4)
@@ -877,7 +1098,8 @@ class NemotronParseBuilderTests(TestCase):
     def test_save_processing_writes_native_config_and_tokenizer(self):
         builder = _make_builder()
         tokenizer = mock.Mock()
-        processor = types.SimpleNamespace(tokenizer=tokenizer)
+        image_processor = _make_image_processor()
+        processor = types.SimpleNamespace(tokenizer=tokenizer, image_processor=image_processor)
         tmp_root = REPO_ROOT / "build" / "test_tmp"
         tmp_root.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=tmp_root) as tmp:
@@ -902,6 +1124,29 @@ class NemotronParseBuilderTests(TestCase):
             config["processor"]["transforms"][0]["operation"]["attrs"],
             {"color_space": "RGB"},
         )
+
+    def test_rejects_incompatible_preprocessing_before_saving(self):
+        cases = {
+            "do_normalize": False, "do_rescale": False, "do_resize": False, "do_pad": False,
+            "rescale_factor": 1.0, "image_mean": [0.0, 0.0, 0.0], "image_std": [1.0, 1.0, 1.0],
+            "resample": 0, "interpolation": 0, "padding_value": 0, "padding_position": "top_left",
+        }
+        for name, value in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                image_processor = _make_image_processor(**{name: value})
+                tokenizer = mock.Mock()
+                processor = types.SimpleNamespace(tokenizer=tokenizer, image_processor=image_processor)
+                with mock.patch.object(nemotron_parse.AutoProcessor, "from_pretrained", return_value=processor):
+                    with self.assertRaisesRegex(ValueError, name):
+                        _make_builder().save_processing("local", {}, tmp)
+                tokenizer.save_pretrained.assert_not_called()
+                self.assertFalse((Path(tmp) / "processor_config.json").exists())
+
+    def test_rejects_padding_library_default_changes(self):
+        processor = _make_image_processor()
+        processor.transform.transforms[0].fill = 0
+        with self.assertRaisesRegex(ValueError, "white padding"):
+            _make_builder().validate_image_processor(processor)
 
 
 if __name__ == "__main__":
