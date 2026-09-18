@@ -61,6 +61,7 @@ class TensorModule:
         self.weight = weight
         self.bias = bias
         self.quant_type = "none"
+        self.can_reuse_as_embedding = True
         self.exclude_from_quantization = False
         self.weight_scale = None
         self.weight_scale_2 = None

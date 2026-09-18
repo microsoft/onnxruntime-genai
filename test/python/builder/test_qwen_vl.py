@@ -992,3 +992,27 @@ def test_qwen35_shared_expert_reuses_mlp_builder(monkeypatch):
     assert model.intermediate_size == 2048
     assert output == "shared_output"
     assert gate == "/model/layers.3/shared_expert_gate/Sigmoid/output_0"
+
+
+def test_qwen35_shared_expert_uses_fused_mlp_builder(monkeypatch):
+    model = Qwen35MoETextModel.__new__(Qwen35MoETextModel)
+    model.io_dtype = ir.DataType.FLOAT16
+    model.intermediate_size = 2048
+    model.shared_expert_intermediate_size = 512
+    model.mlp_attrs = {"fuse_gate_up": True, "output_0": ""}
+    calls = []
+
+    def make_mlp_proj_fused(layer_id, mlp, root_input):
+        calls.append((layer_id, mlp, root_input, model.intermediate_size))
+        model.mlp_attrs["output_0"] = "shared_output"
+
+    monkeypatch.setattr(model, "make_mlp_proj_fused", make_mlp_proj_fused)
+    monkeypatch.setattr(model, "make_matmul", lambda *_args: "/shared_expert_gate/MatMul")
+    monkeypatch.setattr(model, "make_sigmoid", lambda *_args, **_kwargs: None)
+
+    shared_expert = object()
+    output, _ = model.make_shared_expert(3, shared_expert, object(), "hidden_states")
+
+    assert calls == [(3, shared_expert, "hidden_states", 512)]
+    assert model.intermediate_size == 2048
+    assert output == "shared_output"

@@ -156,6 +156,8 @@ def check_extra_options(
         "use_paged_attention",
         "windowed_kv_cache",
         "use_device_allocator_for_initializers",
+        "enable_cuda_fpa_intb_gemm",
+        "fuse_mlp_gate_up",
         "exclude_mtp",
     ]
 
@@ -193,6 +195,21 @@ def check_extra_options(
             raise ValueError("state_update_capacity requires use_paged_attention=true.")
         extra_options["state_update_capacity"] = state_update_capacity
 
+    if "max_draft_tokens" in extra_options:
+        # Keep this limit synchronized with Speculative_Element::kMaxDraftTokens in src/config.cpp
+        # and the model-builder README.
+        max_draft_tokens_limit = 16
+        message = f"max_draft_tokens must be an integer between 1 and {max_draft_tokens_limit}."
+        try:
+            # Parsed from text so a fractional value is rejected instead of truncated; the runtime
+            # treats speculative.max_draft_tokens as integral.
+            max_draft_tokens = int(str(extra_options["max_draft_tokens"]).strip())
+        except (TypeError, ValueError) as e:
+            raise ValueError(message) from e
+        if not 1 <= max_draft_tokens <= max_draft_tokens_limit:
+            raise ValueError(message)
+        extra_options["max_draft_tokens"] = max_draft_tokens
+
     if "mtp_quant_config" in extra_options:
         mtp_quant_config = extra_options["mtp_quant_config"]
         if not isinstance(mtp_quant_config, QuantConfig):
@@ -221,8 +238,17 @@ def check_extra_options(
                 raise ValueError(f"{key} must be a positive integer.")
             extra_options[key] = value
 
-        if "paged_block_size" in extra_options and extra_options["paged_block_size"] % 256 != 0:
-            raise ValueError("paged_block_size must be a multiple of 256.")
+        # Mirrors CheckInputs in onnxruntime paged_attention_helper.h, which is the only hard
+        # bound. ORT's FlashAttention path wants block_size % tile == 0 on top of it, where tile
+        # is 256 for head_size <= 64, 128 for head_size <= 128 and 64 above that, and falls back
+        # to another backend otherwise. That is a throughput choice per head size, not a validity
+        # rule, and the head sizes involved are not known here, so only the op-level rule is
+        # enforced.
+        # TODO: give a block drafter its own block size, so a target can take a small vLLM-style
+        # page (16 tokens) without moving the drafter off its own FlashAttention tile.
+        block_size = extra_options.get("paged_block_size")
+        if block_size is not None and (block_size < 16 or block_size & (block_size - 1) != 0):
+            raise ValueError("paged_block_size must be a power of two and at least 16.")
         if extra_options.get("max_batch_size", 1) > 256:
             raise ValueError("max_batch_size must be at most 256.")
 
@@ -540,6 +566,11 @@ def create_model(
     elif config.architectures[0] == "Lfm2MoeForCausalLM":
         onnx_model = LFM2MoEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         onnx_model.model_type = "lfm2_moe"
+    elif config.architectures[0] == "Lfm2VlForConditionalGeneration":
+        onnx_model = LFM2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        # With the embedding layer excluded the decoder is one stage of the LFM2-VL vision pipeline;
+        # otherwise it is a standalone text model that happens to come from a VLM checkpoint.
+        onnx_model.model_type = "lfm2_vl" if onnx_model.exclude_embeds else "lfm2_vl_text"
     elif config.architectures[0] == "LlamaForCausalLM":
         onnx_model = LlamaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "MistralForCausalLM":
@@ -791,16 +822,26 @@ def get_args():
                 dflash2_num_draft_tokens = Override the number of draft tokens the DFlash 2 block
                     drafter proposes per step. Must be positive and no greater than the draft checkpoint's
                     block size minus its anchor token. That checkpoint limit is the default.
+                max_draft_tokens = Write `speculative.max_draft_tokens` into genai_config.json, capping how
+                    many drafted tokens the engine verifies per step. Must be between 1 and 16. Unlike
+                    dflash2_num_draft_tokens this does not change the exported drafter, so a model built
+                    once can be re-tuned by editing the config. Default is unset, which leaves the runtime
+                    default of 4 in effect.
                 dflash2_fuse_gate_up = Experimental DFlash 2 MLP gate/up projection fusion.
                     Accepts true or false (default). Requires dflash2_path. Combines gate/up
                     weights into one MatMul or MatMulNBits followed by Split. Preserves BF16
                     activations and body quantization; does not change the target or LM head.
                     Requires re-export and workload-specific performance/quality validation.
+                fuse_mlp_gate_up = Fuse each target model MLP's gate/up projections into one
+                    MatMul or MatMulNBits followed by Split. Default is false. Applies before
+                    target weight quantization and requires unpacked, unadapted gate/up
+                    floating-point projections.
                 dflash2_precision = Weight precision for the DFlash 2 drafter body: bf16 (default),
                     int4, or int8. bf16 keeps every projection dense. int4/int8 emit `MatMulNBits`
                     at the target's block size for the attention and MLP projections, leaving the
                     small dynamic-convolution and candidate-selector projections dense. The BF16
-                    body uses plain blockwise weights because fpA-intB requires FP16 activations.
+                    body is emitted in the portable raw blockwise layout, and its session disables
+                    the target decoder's fpA-intB selection for those nodes.
                     Body activations and KV caches remain bf16; this option does not quantize the
                     drafter's KV cache. When the target LM head uses a reproducible symmetric default
                     layout, the drafter head uses its actual bit width, block size, initializer names,
@@ -831,6 +872,10 @@ def get_args():
                     Qwen3.5/3.8 exports using GatedDeltaNet (paged, or linear_attn_op=gated_delta_net) require
                     state_window=0.
                     Requires ONNX Runtime kernels that implement this attribute.
+                enable_cuda_fpa_intb_gemm = Select the CUDA fpA_intB MatMulNBits kernel family
+                    for weights exported in the default raw blockwise layout. Default is false.
+                    Writes ep.cuda.fpa_intb_gemm=1 to the decoder session options and only
+                    applies to the CUDA EP. Prepacked exports enable this automatically.
                 use_paged_attention = Build the model with PagedAttention for the continuous-batching engine. Default is false.
                     Replaces GroupQueryAttention with the PagedAttention contrib op, packs all sequences into a single
                     flattened token axis (`input_ids` becomes 1D), stores the KV-cache in paged
@@ -842,13 +887,25 @@ def get_args():
                     [batch_size, vocab_size] logits. By default, the model outputs [num_tokens, vocab_size] logits.
                     Currently only supported for the CUDA execution provider with fp16 or bf16 precision. Cannot be
                     combined with exclude_embeds or exclude_lm_head.
-                paged_block_size = 256/512/768/...: Paged KV-cache block size used when use_paged_attention is set.
-                    Must be a positive multiple of 256 (required by the ONNX Runtime PagedAttention CUDA kernel).
-                    Default is 256. Also written to the `engine.dynamic_batching` section of genai_config.json.
+                paged_block_size = 16/32/64/128/256/...: Paged KV-cache block size used when use_paged_attention is set.
+                    Must be a power of two and at least 16, which is what the ONNX Runtime PagedAttention op
+                    accepts. Default is 256. Also written to the `engine.dynamic_batching` section of
+                    genai_config.json. The vendored FlashAttention paged kernel additionally needs the block
+                    to be a multiple of its tile (256 for head_size <= 64, 128 for head_size <= 128, else 64);
+                    a smaller block is still valid but makes ORT fall back to another attention backend. A
+                    quantized KV cache is exempt from the tile requirement alone: FlashAttention still serves
+                    it, through a dense dequantized path that has no page alignment to satisfy. A block
+                    drafter (dflash2_path/dspark_path) shares this block size and usually has a smaller head
+                    size, so it reaches its tile at a larger block than the target does.
                 paged_chunk_size = Prefill chunk size written to `search.chunk_size` in genai_config.json.
-                    Only used when use_paged_attention is set and the model's sliding-window layers are served
-                    from a ring of blocks; those layers hold only `paged_chunk_size + window_size - 1` positions,
-                    so prefill must be chunked. Must be a positive integer. Default is paged_block_size.
+                    Applies only when use_paged_attention is set; it is ignored otherwise. Caps the
+                    prompt tokens ONE request contributes to a
+                    step, where max_scheduled_tokens caps the whole step, so a value at or above
+                    max_scheduled_tokens has no effect and a smaller one lets concurrent prefills
+                    interleave instead of running one request at a time. Models whose sliding-window
+                    layers are served from a ring of blocks hold only `paged_chunk_size +
+                    window_size - 1` positions, so they require chunking and default to
+                    paged_block_size. Must be a positive integer. Default is unset otherwise.
                 windowed_kv_cache = Use a reduced KV cache for sliding-window layers. Default is true.
                     With paged attention, eligible local layers use a ring of blocks while at least one full-context
                     layer remains. Without paged attention, supported execution providers use their windowed-cache
