@@ -41,7 +41,7 @@ class NemotronParseEncoderComponent(Model):
         self.image_width = int(image_width)
         self.encoder_sequence_length = int(encoder_sequence_length)
 
-        self.radio = self._radio_model()
+        self.radio = self.radio_model()
         self.vit = self.radio.model
         self.patch_generator = self.vit.patch_generator
         self.patch_size = int(self.patch_generator.patch_size)
@@ -81,28 +81,24 @@ class NemotronParseEncoderComponent(Model):
             component_options,
         )
         self.graph.name = "nemotron_parse_radio_encoder"
-        self._validate_architecture()
+        self.validate_architecture()
 
-    def _radio_model(self):
+    def radio_model(self):
         model_encoder = self.encoder.model_encoder
         return getattr(model_encoder, "radio_model", model_encoder)
 
-    @staticmethod
-    def _is_identity(module):
-        return isinstance(module, torch.nn.Identity)
-
-    def _validate_architecture(self):
+    def validate_architecture(self):
         if self.image_height % self.patch_size or self.image_width % self.patch_size:
             raise ValueError("Nemotron Parse image dimensions must be divisible by patch_size.")
         if not self.vit.blocks:
             raise ValueError("Nemotron Parse RADIO encoder has no transformer blocks.")
         if self.radio_hidden_size % self.radio_num_heads:
             raise ValueError("RADIO hidden size must be divisible by its attention head count.")
-        if not self._is_identity(self.vit.norm):
+        if not isinstance(self.vit.norm, torch.nn.Identity):
             raise ValueError("Nemotron Parse builder currently requires RADIO's final norm to be Identity.")
-        if not self._is_identity(self.patch_generator.patch_normalizer):
+        if not isinstance(self.patch_generator.patch_normalizer, torch.nn.Identity):
             raise ValueError("Nemotron Parse builder currently requires unnormalized RADIO patches.")
-        if not self._is_identity(self.radio.feature_normalizer):
+        if not isinstance(self.radio.feature_normalizer, torch.nn.Identity):
             raise ValueError("Nemotron Parse builder currently requires RADIO's feature normalizer to be Identity.")
         if getattr(self.radio, "adaptors", None):
             raise ValueError("Nemotron Parse builder does not support RADIO adaptors.")
@@ -115,7 +111,7 @@ class NemotronParseEncoderComponent(Model):
             raise ValueError("Encoder sequence length does not match the RADIO neck geometry.")
         for block in self.vit.blocks:
             if not all(
-                self._is_identity(module)
+                isinstance(module, torch.nn.Identity)
                 for module in (
                     block.ls1,
                     block.drop_path1,
@@ -139,14 +135,14 @@ class NemotronParseEncoderComponent(Model):
         raise RuntimeError("NemotronParseEncoderComponent receives weights from its parent builder")
 
     def build(self):
-        self._make_inputs_and_outputs()
-        hidden_states = self._make_patch_embedding()
+        self.make_inputs_and_outputs()
+        hidden_states = self.make_patch_embedding()
         for layer_id, block in enumerate(self.vit.blocks):
-            hidden_states = self._make_radio_block(layer_id, block, hidden_states)
-        encoder_hidden_states = self._make_neck(hidden_states)
-        self._make_cross_cache(encoder_hidden_states)
+            hidden_states = self.make_radio_block(layer_id, block, hidden_states)
+        encoder_hidden_states = self.make_neck(hidden_states)
+        self.make_cross_cache(encoder_hidden_states)
 
-    def _make_inputs_and_outputs(self):
+    def make_inputs_and_outputs(self):
         self.graph.inputs.append(
             self.make_value(
                 "pixel_values",
@@ -176,7 +172,7 @@ class NemotronParseEncoderComponent(Model):
                 self.make_value(f"cross_present.{layer_id}.value", self.io_dtype, cross_shape)
             )
 
-    def _make_layer_norm(self, layer_norm, name, root_input, shape):
+    def make_layer_norm(self, layer_norm, name, root_input, shape):
         weight = f"{name[1:].replace('/', '.')}.weight"
         bias = f"{name[1:].replace('/', '.')}.bias"
         self.make_initializer(layer_norm.weight, weight, to=self.io_dtype)
@@ -194,7 +190,7 @@ class NemotronParseEncoderComponent(Model):
         self.make_value(output, self.io_dtype, shape)
         return output
 
-    def _make_linear(self, linear, name, root_input, sequence_length):
+    def make_linear(self, linear, name, root_input, sequence_length):
         matmul = self.make_matmul(linear, f"{name}/MatMul", root_input, seq_dim=sequence_length)
         output = f"{matmul}/output_0"
         if linear.bias is not None:
@@ -207,7 +203,7 @@ class NemotronParseEncoderComponent(Model):
             output = f"{name}/Add/output_0"
         return output
 
-    def _make_patch_embedding(self):
+    def make_patch_embedding(self):
         base = "/encoder/radio/patch_generator"
         projection = self.patch_generator.embedder
         weight_name = "encoder.radio.patch_generator.weight"
@@ -246,7 +242,7 @@ class NemotronParseEncoderComponent(Model):
         )
 
         position_name = "encoder.radio.patch_generator.position_embedding"
-        self.make_initializer(self._specialized_position_embedding(), position_name, to=self.io_dtype)
+        self.make_initializer(self.specialized_position_embedding(), position_name, to=self.io_dtype)
         add = f"{base}/AddPosition"
         self.make_add(
             add,
@@ -271,7 +267,7 @@ class NemotronParseEncoderComponent(Model):
         )
         return f"{concat}/output_0"
 
-    def _specialized_position_embedding(self):
+    def specialized_position_embedding(self):
         position = self.patch_generator.pos_embed.detach().float().reshape(
             1,
             self.patch_generator.num_rows,
@@ -302,11 +298,11 @@ class NemotronParseEncoderComponent(Model):
             1, self.patch_count, self.radio_hidden_size
         )
 
-    def _make_radio_block(self, layer_id, block, hidden_states):
+    def make_radio_block(self, layer_id, block, hidden_states):
         base = f"/encoder/radio/layers.{layer_id}"
         token_shape = [1, self.radio_sequence_length, self.radio_hidden_size]
-        normalized = self._make_layer_norm(block.norm1, f"{base}/norm1", hidden_states, token_shape)
-        qkv = self._make_linear(
+        normalized = self.make_layer_norm(block.norm1, f"{base}/norm1", hidden_states, token_shape)
+        qkv = self.make_linear(
             block.attn.qkv,
             f"{base}/attn/qkv",
             normalized,
@@ -430,7 +426,7 @@ class NemotronParseEncoderComponent(Model):
             self.io_dtype,
             token_shape,
         )
-        projection = self._make_linear(
+        projection = self.make_linear(
             block.attn.proj,
             f"{base}/attn/proj",
             f"{merge}/output_0",
@@ -444,13 +440,13 @@ class NemotronParseEncoderComponent(Model):
             token_shape,
         )
 
-        normalized = self._make_layer_norm(
+        normalized = self.make_layer_norm(
             block.norm2,
             f"{base}/norm2",
             f"{attention_residual}/output_0",
             token_shape,
         )
-        fc1 = self._make_linear(
+        fc1 = self.make_linear(
             block.mlp.fc1,
             f"{base}/mlp/fc1",
             normalized,
@@ -469,7 +465,7 @@ class NemotronParseEncoderComponent(Model):
             self.io_dtype,
             [1, self.radio_sequence_length, block.mlp.fc1.out_features],
         )
-        fc2 = self._make_linear(
+        fc2 = self.make_linear(
             block.mlp.fc2,
             f"{base}/mlp/fc2",
             f"{activation}/output_0",
@@ -484,7 +480,7 @@ class NemotronParseEncoderComponent(Model):
         )
         return f"{output}/output_0"
 
-    def _make_neck(self, hidden_states):
+    def make_neck(self, hidden_states):
         base = "/encoder/neck"
         feature_starts = f"{base}/feature_starts"
         feature_ends = f"{base}/feature_ends"
@@ -526,13 +522,13 @@ class NemotronParseEncoderComponent(Model):
             weight=self.encoder.conv1.weight.squeeze(-1),
             bias=self.encoder.conv1.bias,
         )
-        projected = self._make_linear(
+        projected = self.make_linear(
             conv1_linear,
             f"{base}/conv1",
             f"{feature_slice}/output_0",
             self.patch_count,
         )
-        projected = self._make_layer_norm(
+        projected = self.make_layer_norm(
             self.encoder.layer_norm1,
             f"{base}/layer_norm1",
             projected,
@@ -594,20 +590,20 @@ class NemotronParseEncoderComponent(Model):
             self.io_dtype,
             [1, compressed_count, self.source_config.decoder.d_model],
         )
-        compressed = self._make_layer_norm(
+        compressed = self.make_layer_norm(
             self.encoder.layer_norm2,
             f"{base}/layer_norm2",
             f"{compressed_reshape}/output_0",
             [1, compressed_count, self.source_config.decoder.d_model],
         )
 
-        summary = self._make_linear(
+        summary = self.make_linear(
             self.encoder.sum_proj,
             f"{base}/sum_proj",
             f"{summary_reshape}/output_0",
             1,
         )
-        summary = self._make_layer_norm(
+        summary = self.make_layer_norm(
             self.encoder.layer_norm3,
             f"{base}/layer_norm3",
             summary,
@@ -628,7 +624,7 @@ class NemotronParseEncoderComponent(Model):
         )
         return "encoder_hidden_states"
 
-    def _make_cross_cache(self, encoder_hidden_states):
+    def make_cross_cache(self, encoder_hidden_states):
         decoder_heads = self.source_config.decoder.decoder_attention_heads
         decoder_head_size = self.source_config.decoder.d_model // decoder_heads
         reshape_shape_name = "/encoder/cross_cache/reshape_shape"
@@ -645,7 +641,7 @@ class NemotronParseEncoderComponent(Model):
                 ("value", layer.encoder_attn.v_proj),
             ):
                 base = f"/encoder/cross_cache/layers.{layer_id}/{kind}"
-                projected = self._make_linear(
+                projected = self.make_linear(
                     projection,
                     f"{base}/proj",
                     encoder_hidden_states,

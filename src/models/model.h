@@ -29,6 +29,7 @@ struct State {
   virtual DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {}) = 0;
   virtual void Finalize(int current_length) {}
 
+  virtual bool SupportsRewind() const { return true; }
   virtual void RewindTo(size_t index) { (void)index; };
 
   // Snapshot/restore the model's recurrent state for speculative decoding. Default no-op

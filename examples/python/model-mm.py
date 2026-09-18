@@ -97,9 +97,12 @@ def main(args):
         audios, num_audios = get_user_audios(args.audio_paths, args.non_interactive)
 
         # Get user prompt
-        if is_nemotron_parse and args.non_interactive and args.user_prompt is None:
-            # An empty prompt asks the native processor to use its default task.
-            text = ""
+        if is_nemotron_parse:
+            text = (
+                (args.user_prompt or "")
+                if args.non_interactive
+                else input("Task prompt (Enter for default task, quit() to exit): ")
+            )
         else:
             text = get_user_prompt(user_prompt, args.non_interactive)
         if text == "quit()":
@@ -257,7 +260,13 @@ if __name__ == "__main__":
         "--user_prompt",
         type=str,
         default=None,
-        help="User prompt to use for the model.",
+        help=(
+            "User prompt. For Nemotron Parse, omit or pass an empty string to use "
+            "the default document-parsing task (8 tokens including special tokens). "
+            "Task prompts must contain 1 through context_length-1 tokens including "
+            "special tokens, with no padding or truncation. TRT-RTX uses a static "
+            "fast path at prefill_sequence_length and dynamic prefill otherwise."
+        ),
     )
     parser.add_argument(
         "--image_paths",

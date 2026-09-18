@@ -15,6 +15,7 @@ namespace Generators {
 // length, so the same graph can write a multi-token prompt and later append
 // one token at a time.
 //
+// Commit() advances the processed length only after a successful decoder run.
 // Past and present bind to the same OrtValue, so Update() only changes
 // cache_write_indices; it does not swap or reallocate cache tensors. Beam
 // reordering and rewind are not supported.
@@ -23,6 +24,7 @@ struct TensorScatterKeyValueCache final : KeyValueCache {
 
   void Add() override;
   void Update(DeviceSpan<int32_t> beam_indices, int total_length) override;
+  void Commit(int total_length);
   void RewindTo(size_t index) override;
 
  private:
