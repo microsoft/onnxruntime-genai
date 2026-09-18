@@ -38,6 +38,7 @@ This folder contains the model builder for quickly creating optimized and quanti
     - [Disable QKV Projections Fusion](#disable-qkv-projections-fusion)
     - [Disable QK Norm GQA Fusion in CUDA or WebGPU](#disable-qk-norm-gqa-fusion-in-cuda-or-webgpu)
     - [Quantization Options](#quantization-options)
+      - [Structured Quantization Config](#structured-quantization-config)
       - [Accuracy Level](#accuracy-level)
       - [MatMul Block Size](#matmul-block-size)
       - [QMoE Block Size](#qmoe-block-size)
@@ -497,7 +498,7 @@ By default the MTP head inherits the main model's settings. For a ModelOpt or co
 
 To configure the MTP model independently, use `mtp_quant_config` with an inline JSON object or a JSON file using the structured `QuantConfig` schema. Its `io_dtype`, `weights`, `moe`, and `runtime` targets are independent. For example, `mtp_quant_config='{"io_dtype":"bf16","weights":{"type":"int4","block_size":64},"moe":{"type":"nvfp4"}}'` exports INT4 dense MTP MatMuls, NVFP4 MTP experts, and BF16 I/O.
 
-Supplying `mtp_quant_config` explicitly dequantizes native ModelOpt or compressed-tensors MTP tensors before applying the MTP configuration. Dense `weights.type` supports integer or unquantized formats; use `moe.type=mxfp4/nvfp4` to select FP4 experts independently. Without an explicit MTP configuration, pre-quantized NVFP4 dense weights remain `MatMulBlockQuantizedFp4Weight` and native FP8 attention projections remain `MatMulBlockQuantizedFp8Weight`.
+Both `quant_config` and `mtp_quant_config` use the full schema described in [Structured Quantization Config](#structured-quantization-config). An explicit MTP configuration is independent of the target: omitted fields use schema defaults rather than target overrides. For compatibility, an explicit MTP config without `checkpoint_policy` uses `requantize`, dequantizing native ModelOpt or compressed-tensors MTP tensors before applying the configuration. Set `checkpoint_policy=preserve` explicitly to retain them. Without an explicit MTP config, target-wide defaults are inherited without target per-node rules, and native MTP formats are preserved. Dense `weights.type` supports integer or unquantized formats; use `moe.type=mxfp4/nvfp4` to select FP4 experts independently.
 
 The head always exports `hidden_states_out` (its own post-final-norm hidden state), which a multi-token loop feeds back as the next chained draft's `hidden_states` input. It is required for `num_speculative_tokens > 1` and ignored otherwise.
 
@@ -571,6 +572,65 @@ These options apply when exporting weight-only quantized models (`-p int4` for 4
 
 > **Note:** These weight-only quantization options were previously prefixed with `int4_` (e.g. `int4_algo_config`, `int4_block_size`). Because they now apply to both int4 and int8 (and future) precisions, the prefix has been dropped (`algo_config`, `block_size`, `is_symmetric`, `accuracy_level`, `op_types_to_quantize`, `nodes_to_exclude`). The old `int4_`-prefixed names are not accepted as deprecated aliases anymore and have been removed.
 
+
+##### Structured Quantization Config
+
+`quant_config` accepts a full `QuantConfig` JSON object or a JSON filename. Python callers may also pass a `dict` or `QuantConfig` instance. It defaults to unset, retaining the existing `--precision` and flat-option behavior. For JSON/dict input, only supplied fields override those defaults, including the EP-specific I/O dtype. A `QuantConfig` instance is already resolved and is copied rather than merged.
+
+For a floating-point checkpoint, this configuration produces INT4 dense weights, an INT8 LM head, NVFP4 experts, and BF16 I/O on CUDA:
+
+```json
+{
+  "io_dtype": "bf16",
+  "checkpoint_policy": "preserve",
+  "weights": {
+    "type": "int4",
+    "method": "default",
+    "block_size": 64,
+    "symmetric": true,
+    "overrides": [
+      {"match": {"name": "/lm_head/MatMul"}, "type": "int8"},
+      {"match": {"name": "/model/embed_tokens/Gather"}, "exclude": true}
+    ]
+  },
+  "moe": {"type": "nvfp4", "block_size": 16},
+  "runtime": {"use_qdq": false, "matmulnbits_weights_prepacked": 0}
+}
+```
+
+```bash
+# From wheel, using a JSON file containing the configuration above:
+python -m onnxruntime_genai.models.builder -i path_to_checkpoint -o path_to_output -p int4 -e cuda --extra_options quant_config=target_quant.json
+
+# From source, using inline JSON:
+python builder.py -i path_to_checkpoint -o path_to_output -p int4 -e cuda --extra_options quant_config='{"io_dtype":"bf16","weights":{"overrides":[{"match":{"name":"/lm_head/MatMul"},"type":"int8"}]}}'
+```
+
+The schema has the following sections:
+
+| Section | Fields |
+| --- | --- |
+| `io_dtype` | `fp16`, `bf16`, or `fp32`, independently of weight precision |
+| `weights` | `type`, `method`, `block_size`, `symmetric`, `accuracy_level`, `op_types`, `overrides` |
+| `moe` | `type`, `block_size`, `weights_prepacked` |
+| `runtime` | `use_qdq`, `matmulnbits_weights_prepacked` |
+| `checkpoint_policy` | `preserve` (target default) or `requantize` |
+
+Dense types are `int4`, `uint4`, `int8`, `uint8`, or `none` (retain graph precision); `fp16`/`bf16`/`fp32` must match `io_dtype`. Dense integer block sizes must be powers of two of at least 16. Methods are `default`, `rtn`, and `k_quant`. MoE supports symmetric `int4`/`int8`, `none`, and CUDA-only `mxfp4`/`nvfp4` with fixed block sizes 32/16. Runtime options retain the restrictions documented below. KV-cache options remain separate.
+
+`weights.overrides` uses first-match-wins ordering, with structured rules before legacy exclusions/presets. Each rule has exactly one selector: an exact ONNX `name`, or a `preset` (`last_matmul`, `mixed_layers`, `linear_attn`). It sets either `type: int4/int8` or `exclude: true`. Type overrides change the integer bit width while retaining the target's global block size and symmetry; they require integer dense precision. Exclusions retain floating-point weights at graph precision, not necessarily FP32. INT8 requires QOperator; QDQ requires the `default` method. Architectural exclusions, such as sensitive recurrent gates, remain mandatory.
+
+Regex, layer/role selectors, compound matches, bare override lists, and unknown fields are rejected. Exact names must identify eligible emitted nodes; fusion can remove names, so disable the relevant fusion or target the fused node. An explicit type override must identify a constant-weight MatMul included in `weights.op_types`. There are no per-node group-size or FP4/FP8 conversion overrides in this interface.
+
+Exact-name exclusions also require a constant-weight MatMul or Gather included in `weights.op_types`. With `shared_embeddings=true`, an INT8 LM-head override disables quantized weight sharing: the embedding retains its separate INT4 weights. TRT-RTX (including the `NvTensorRtRtx` alias) requires `runtime.use_qdq=true` for integer dense weights; a structured configuration cannot disable this requirement.
+
+`checkpoint_policy=preserve` leaves existing supported native quantized tensors and scales intact, while applying requested quantization to floating-point tensors. Explicit requests that change native formats are errors. `requantize` explicitly permits dequantization of supported ModelOpt/compressed-tensors FP8/NVFP4 weights before the selected quantizer runs; it can change accuracy and uses additional host memory. Unsupported source-format conversions fail rather than silently ignoring the configuration. The policy is scoped to the target or MTP model being exported.
+
+Explicit MoE block sizes must match the selected FP4 format. When preserving native experts, explicit block-size and packing settings must also match the loader's native layout; omitted settings and auto packing (`weights_prepacked=-1`) retain that layout. Use `requantize` for supported conversions that change it.
+
+Hugging Face/ModelOpt metadata such as `quant_algo`, `quantized_layers`, or `exclude_modules` describes checkpoint storage and is **not** this schema. Passing it to `quant_config` raises an error; the native checkpoint loader remains responsible for reading source formats.
+
+`mtp_quant_config` uses the same schema but is independent when supplied, with schema defaults for omitted fields (`io_dtype=fp16`, dense `weights.type=none`, `moe.type=int4`). Its omitted `checkpoint_policy` defaults to `requantize` for compatibility with existing MTP recipes. Without it, MTP inherits target-wide defaults but not target per-node rules, and preserves its own native tensor formats. A target override for `/lm_head/MatMul` does not automatically target MTP's LM head.
 
 ##### Accuracy Level
 

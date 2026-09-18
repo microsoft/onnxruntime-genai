@@ -189,3 +189,37 @@ def test_make_config_supports_distinct_types_per_selector():
     mixed_layer_nodes = [node for node in cfg if node != "/lm_head/MatMul"]
     assert mixed_layer_nodes
     assert all(cfg[node] == {"bits": 4} for node in mixed_layer_nodes)
+
+
+@pytest.mark.parametrize("first,second", [("int8", "int4"), ("int4", "int8")])
+def test_structured_overrides_first_match_wins(first, second):
+    model = Model.__new__(Model)
+    model.quant_attrs = {}
+    model.quant_config = base_module.QuantConfig.from_dict(
+        {
+            "weights": {
+                "overrides": [
+                    {"match": {"name": "/lm_head/MatMul"}, "type": first},
+                    {"match": {"preset": "last_matmul"}, "type": second},
+                ]
+            }
+        }
+    )
+    model.make_quant_overrides()
+    assert model.int4_customized_weight_config == {"/lm_head/MatMul": {"bits": int(first[3:])}}
+
+
+@pytest.mark.parametrize("exclude_first", [True, False])
+def test_structured_exclusion_and_type_share_precedence(exclude_first):
+    rules = [
+        {"match": {"preset": "last_matmul"}, "exclude": True},
+        {"match": {"name": "/lm_head/MatMul"}, "type": "int8"},
+    ]
+    model = Model.__new__(Model)
+    model.quant_attrs = {}
+    model.quant_config = base_module.QuantConfig.from_dict(
+        {"weights": {"overrides": rules if exclude_first else rules[::-1]}}
+    )
+    model.make_quant_overrides()
+    assert model.quant_attrs["nodes_to_exclude"] == (["/lm_head/MatMul"] if exclude_first else [])
+    assert model.int4_customized_weight_config == ({} if exclude_first else {"/lm_head/MatMul": {"bits": 8}})

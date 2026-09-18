@@ -125,9 +125,17 @@ def test_weights_mx_dtype_block_size_conflict():
         WeightsConfig.from_dict({"type": "mxfp4", "block_size": 64})
 
 
-def test_moe_mxfp4_forces_block_size_32():
-    m = MoEConfig.from_dict({"type": "mxfp4", "block_size": 128})
-    assert m.block_size == 32
+@pytest.mark.parametrize("dtype,block_size", [("mxfp4", 32), ("nvfp4", 16)])
+def test_moe_fp4_defaults_to_fixed_block_size(dtype, block_size):
+    assert MoEConfig.from_dict({"type": dtype}).block_size == block_size
+    assert MoEConfig.from_dict({"type": dtype, "block_size": block_size}).block_size == block_size
+    with pytest.raises(ValueError, match="fixes block_size"):
+        MoEConfig.from_dict({"type": dtype, "block_size": 128})
+
+
+def test_structured_moe_block_size_cannot_conflict_with_native_default():
+    with pytest.raises(ValueError, match="fixes block_size=16"):
+        QuantConfig.from_extra_options({"moe_quant_type": "nvfp4", "quant_config": {"moe": {"block_size": 64}}})
 
 
 def test_moe_rejects_bad_prepacked():
@@ -253,7 +261,7 @@ def test_extra_options_legacy_k_quant_mixed_alias():
     cfg = QuantConfig.from_extra_options({"algo_config": "k_quant_mixed"}, precision="int4")
     assert cfg.weights.method == "k_quant"
     presets = [(o.match["preset"], o.type) for o in cfg.weights.overrides]
-    assert presets == [("last_matmul", "int8"), ("mixed_layers", "int8")]
+    assert presets == [("mixed_layers", "int8"), ("last_matmul", "int8")]
 
 
 def test_extra_options_matmul_mixed_precision_string():
@@ -313,3 +321,152 @@ def test_extra_options_runtime_and_prepack_knobs():
     assert cfg.runtime.matmulnbits_weights_prepacked == 2
     assert cfg.moe.weights_prepacked == 1
     assert cfg.moe.block_size == 64
+
+
+def test_extra_options_quant_config_json_string_overrides():
+    cfg = QuantConfig.from_extra_options(
+        {"quant_config": '{"weights":{"overrides":[{"match":{"name":"/lm_head/MatMul"},"type":"int8"}]}}'},
+        precision="int4",
+    )
+    assert cfg.weights.overrides == [Override(match={"name": "/lm_head/MatMul"}, type="int8")]
+
+
+def test_extra_options_quant_config_object_form_and_flat_merge():
+    cfg = QuantConfig.from_extra_options(
+        {
+            "algo_config": "rtn_last",
+            "nodes_to_exclude": ["/model/embed_tokens/Gather"],
+            "quant_config": {
+                "weights": {"overrides": [{"match": {"name": "/model/layers.0/attn/o_proj/MatMul"}, "type": "int8"}]}
+            },
+        },
+        precision="int4",
+    )
+    assert cfg.weights.overrides == [
+        Override(match={"name": "/model/layers.0/attn/o_proj/MatMul"}, type="int8"),
+        Override(match={"name": "/model/embed_tokens/Gather"}, exclude=True),
+        Override(match={"preset": "last_matmul"}, type="int8"),
+    ]
+
+
+def test_extra_options_quant_config_from_file(tmp_path):
+    path = tmp_path / "quant_config.json"
+    path.write_text(json.dumps({"weights": {"overrides": [{"match": {"name": "/lm_head/MatMul"}, "exclude": True}]}}))
+    cfg = QuantConfig.from_extra_options({"quant_config": str(path)}, precision="int4")
+    assert cfg.weights.overrides == [Override(match={"name": "/lm_head/MatMul"}, exclude=True)]
+
+
+def test_extra_options_quant_config_rejects_unknown_field():
+    with pytest.raises(ValueError, match="unknown override field"):
+        QuantConfig.from_extra_options(
+            {"quant_config": {"weights": {"overrides": [{"match": {"name": "/lm_head/MatMul"}, "bits": 8}]}}},
+            precision="int4",
+        )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        [],
+        "[]",
+        {"overrides": []},
+        {"overides": []},
+        {"quantization": {"quant_algo": "MIXED_PRECISION"}},
+        {"weights": None},
+    ],
+)
+def test_full_config_rejects_invalid_envelopes(value):
+    with pytest.raises(ValueError):
+        QuantConfig.from_extra_options({"quant_config": value})
+
+
+def test_full_config_merges_only_supplied_fields():
+    cfg = QuantConfig.from_extra_options(
+        {
+            "block_size": 128,
+            "algo_config": "k_quant",
+            "quant_config": {"io_dtype": "bf16", "weights": {"type": "int8"}, "moe": {"type": "nvfp4"}},
+        },
+        precision="int4",
+    )
+    assert cfg.weights.type == "int8"
+    assert cfg.weights.block_size == 128
+    assert cfg.weights.method == "k_quant"
+    assert cfg.moe.block_size == 16
+    assert cfg.to_onnx_dtypes() == (qc.ir.DataType.BFLOAT16, qc.ir.DataType.INT8)
+    assert cfg.specified_fields == {"io_dtype", "weights.type", "moe.type"}
+
+
+def test_full_config_reports_shadowed_flat_options():
+    with pytest.warns(UserWarning, match="quant_config overrides flat options: block_size"):
+        cfg = QuantConfig.from_extra_options({"block_size": 128, "quant_config": {"weights": {"block_size": 64}}})
+    assert cfg.weights.block_size == 64
+
+
+def test_full_config_instance_is_copied():
+    original = QuantConfig.from_dict({"checkpoint_policy": "requantize", "weights": {"type": "int8"}})
+    loaded = QuantConfig.load(original)
+    assert loaded == original
+    assert loaded.weights is not original.weights
+
+
+@pytest.mark.parametrize("dtype", ["nvfp4", "mxfp4", "bf16", "none", "uint8"])
+def test_override_rejects_unsupported_formats(dtype):
+    with pytest.raises(ValueError, match="override type must be int4 or int8"):
+        Override.from_dict({"match": {"name": "node"}, "type": dtype})
+
+
+@pytest.mark.parametrize(
+    "match", [{"name_regex": ".*"}, {"layers": [0]}, {"name": "node", "preset": "last_matmul"}, {"name": 3}]
+)
+def test_override_rejects_unsupported_selectors(match):
+    with pytest.raises(ValueError):
+        Override.from_dict({"match": match, "exclude": True})
+
+
+def test_config_rejects_int8_override_with_qdq():
+    cfg = QuantConfig.from_dict(
+        {
+            "weights": {"type": "int4", "overrides": [{"match": {"name": "node"}, "type": "int8"}]},
+            "runtime": {"use_qdq": True},
+        }
+    )
+    with pytest.raises(ValueError, match="require QOperator"):
+        cfg.validate("cuda")
+
+
+def test_config_rejects_unknown_checkpoint_policy():
+    with pytest.raises(ValueError, match="checkpoint_policy"):
+        QuantConfig.from_dict({"checkpoint_policy": "auto"})
+
+
+@pytest.mark.parametrize("dtype", ["fp16", "bf16", "fp32"])
+def test_config_rejects_float_moe_type(dtype):
+    config = QuantConfig.from_dict({"moe": {"type": dtype}})
+    with pytest.raises(ValueError, match="moe.type must be"):
+        config.validate("cuda")
+
+
+@pytest.mark.parametrize("dtype", ["none", "int4", "int8", "mxfp4", "nvfp4"])
+def test_config_accepts_supported_moe_type(dtype):
+    QuantConfig.from_dict({"moe": {"type": dtype}}).validate("cuda")
+
+
+def test_resolved_trt_config_requires_qdq_for_integer_weights():
+    config = QuantConfig(weights=WeightsConfig(type="int4"))
+    with pytest.raises(ValueError, match="TRT-RTX.*use_qdq"):
+        config.validate("trt-rtx")
+    config.weights.type = "none"
+    config.validate("trt-rtx")
+
+
+def test_unsigned_dense_type_resolves_asymmetric_quantizer():
+    cfg = QuantConfig.from_extra_options({"quant_config": {"weights": {"type": "uint8"}}})
+    assert cfg.weights.symmetric is False
+    assert cfg.to_onnx_dtypes()[1] == qc.ir.DataType.UINT8
+
+
+def test_constructed_config_is_fully_specified():
+    cfg = QuantConfig(weights=WeightsConfig(type="int8"))
+    assert {"weights.type", "weights.overrides", "checkpoint_policy"} <= cfg.specified_fields
+    assert QuantConfig.from_dict({}).specified_fields == frozenset()

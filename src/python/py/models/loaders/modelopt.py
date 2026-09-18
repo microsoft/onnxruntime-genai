@@ -181,6 +181,35 @@ class ModeloptModel(QuantizedModel):
         bias = self.get_tensor(f"{base}.bias")
         if bias is not None:
             module.bias = bias
+        resolved = self.apply_checkpoint_policy(module, base)
+        if resolved is not module:
+            module.__dict__.update(resolved.__dict__)
+        return module
+
+    def apply_checkpoint_policy(self, module, base):
+        config = getattr(self, "quant_attrs", {}).get("export_config")
+        if config is None or module.quant_type == "none":
+            return module
+        scope = self.quant_attrs.get("checkpoint_scope", "target")
+        if (scope == "mtp") != base.startswith("mtp.") and not (scope == "mtp" and base == "lm_head"):
+            return module
+        if config.checkpoint_policy == "requantize":
+            if scope == "mtp":
+                return module
+            weight = self.dequantize_tensor(module.weight, module.weight_scale, module.weight_scale_2, f"{base}.weight")
+            return TensorModule(weight=weight, bias=module.bias)
+        target = "moe" if ".mlp.experts." in base else "weights"
+        settings = getattr(config, target)
+        if f"{target}.type" in config.specified_fields and settings.type != module.quant_type:
+            raise ValueError(
+                f"checkpoint_policy=preserve: {base} uses {module.quant_type}, not {settings.type}; select requantize to convert"
+            )
+        if target == "weights" and config.specified_fields.intersection(
+            {"weights.method", "weights.block_size", "weights.symmetric"}
+        ):
+            raise ValueError(
+                f"checkpoint_policy=preserve: numeric weights settings cannot change native tensor {base}; select requantize"
+            )
         return module
 
     def make_dense_linear_module(self, base):
@@ -313,7 +342,15 @@ class ModeloptModel(QuantizedModel):
                 expert.up_proj = self.make_linear_module(f"{expert_prefix}.up_proj")
                 expert.down_proj = self.make_linear_module(f"{expert_prefix}.down_proj")
                 mlp.experts.append(expert)
-            mlp.experts = self.prepare_qmoe_experts(mlp.experts)
+            if all(expert.gate_proj.quant_type == "none" for expert in mlp.experts):
+                mlp.experts = SimpleNamespace(
+                    gate_up_proj=torch.stack(
+                        [torch.cat((expert.gate_proj.weight, expert.up_proj.weight)) for expert in mlp.experts]
+                    ),
+                    down_proj=torch.stack([expert.down_proj.weight for expert in mlp.experts]),
+                )
+            else:
+                mlp.experts = self.prepare_qmoe_experts(mlp.experts)
         else:
             mlp.gate_proj = self.make_linear_module(f"{prefix}.mlp.gate_proj")
             mlp.up_proj = self.make_linear_module(f"{prefix}.mlp.up_proj")

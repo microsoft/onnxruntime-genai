@@ -29,6 +29,13 @@ class MTPModel:
     def resolve_mtp_model_config(self, extra_options):
         mtp_quant_config_value = extra_options.get("mtp_quant_config")
         if mtp_quant_config_value is None:
+            if "quant_config" in extra_options:
+                quant_config = QuantConfig.load(extra_options["quant_config"])
+                quant_config.weights.overrides = []
+                quant_config.checkpoint_policy = "preserve"
+                quant_config.specified_fields = frozenset()
+                self.mtp_attrs["extra_options"]["quant_config"] = quant_config
+                self.mtp_attrs["io_dtype"], self.mtp_attrs["onnx_dtype"] = quant_config.to_onnx_dtypes()
             return
 
         inherited_options = {
@@ -36,11 +43,9 @@ class MTPModel:
             for key in ("hf_token", "hf_remote", "shared_embeddings")
             if key in extra_options
         }
-        quant_config = (
-            copy.deepcopy(mtp_quant_config_value)
-            if isinstance(mtp_quant_config_value, QuantConfig)
-            else QuantConfig.from_json(mtp_quant_config_value)
-        )
+        quant_config = QuantConfig.load(mtp_quant_config_value)
+        if "checkpoint_policy" not in quant_config.specified_fields:
+            quant_config.checkpoint_policy = "requantize"
         self.mtp_attrs["io_dtype"], self.mtp_attrs["onnx_dtype"] = quant_config.to_onnx_dtypes()
         inherited_options["_quant_config"] = quant_config
         self.mtp_attrs["extra_options"] = inherited_options
