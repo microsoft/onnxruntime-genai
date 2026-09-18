@@ -963,7 +963,7 @@ SpeculativeStats Generator::GetSpeculativeStats() const {
 
 void Generator::RewindToLength(size_t new_length) {
   const auto& model_type = model_->config_->model.type;
-  if (model_type == "whisper" || model_type == "phi3v" || model_type == "decoder-pipeline" ||
+  if (model_type == "whisper" || model_type == "decoder-pipeline" ||
       ModelType::IsLFM2(model_type) || model_type == "lfm2_vl")
     throw std::runtime_error("RewindTo is currently not supported for " + model_type + ".");
   const size_t current_length = search_->GetSequenceLength();
