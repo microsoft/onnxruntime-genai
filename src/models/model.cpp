@@ -132,7 +132,7 @@ void State::DumpOutputs() {
 }
 
 void State::Run(OrtSession& session, bool graph_capture_this_run, int graph_capture_length,
-                int graph_capture_variant, OrtIoBinding* io_binding) {
+                int graph_capture_variant) {
   DurationTrace trace{"State::Run"};
 
   if (params_->use_graph_capture) {
@@ -175,12 +175,8 @@ void State::Run(OrtSession& session, bool graph_capture_this_run, int graph_capt
     run_options_->AddConfigEntry("disable_synchronize_execution_providers", "1");
   }
 
-  if (io_binding) {
-    session.Run(run_options_.get(), *io_binding);
-  } else {
-    session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
-                output_names_.data(), outputs_.data(), output_names_.size());
-  }
+  session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
+              output_names_.data(), outputs_.data(), output_names_.size());
 
   extra_outputs_.RegisterOutputs();
 
