@@ -1238,6 +1238,7 @@ class Qwen35MoEModel(MTPModel):
             num_draft_tokens=self.dflash2_attrs["num_draft_tokens"],
             quant=self.block_drafter_quant(self.dflash2_attrs["precision"]),
             fuse_gate_up=self.dflash2_attrs["fuse_gate_up"],
+            include_attention_metadata=self.decoder.ep != "webgpu",
         )
         self.dflash2.make_model()
 
@@ -1363,6 +1364,7 @@ class Qwen35MoEModel(MTPModel):
             self.decoder.context_length,
             num_draft_tokens=self.dspark_attrs["num_draft_tokens"],
             top_k=self.dspark_attrs["top_k"],
+            include_attention_metadata=self.decoder.ep != "webgpu",
         )
         self.dspark.make_model()
 

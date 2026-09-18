@@ -250,6 +250,8 @@ def check_extra_options(
             raise ValueError("paged_block_size must be a power of two and at least 16.")
         if extra_options.get("max_batch_size", 1) > 256:
             raise ValueError("max_batch_size must be at most 256.")
+        if execution_provider == "webgpu" and "num_blocks" not in extra_options:
+            raise ValueError("WebGPU paged attention requires num_blocks to be a positive integer.")
 
         if "gpu_utilization_factor" in extra_options:
             try:
@@ -364,6 +366,13 @@ def check_extra_options(
     hf_details = get_hf_details(model_name, input_path, cache_dir, extra_options)
     config = hf_details["hf_config"]
     extra_options["hf_details"] = hf_details
+
+    if (
+        execution_provider == "webgpu"
+        and extra_options.get("use_paged_attention", False)
+        and getattr(config, "attn_logit_softcapping", 0.0) not in (None, 0.0)
+    ):
+        raise ValueError("WebGPU paged attention does not support non-zero attention softcap.")
 
     if "num_hidden_layers" in extra_options:
         num_hidden_layers = int(extra_options["num_hidden_layers"])
@@ -879,8 +888,10 @@ def get_args():
                     cumulative_sequence_lengths, and past_sequence_lengths metadata inputs are added. With
                     prune_lm_head=true, selects the final packed hidden state for each sequence so the model outputs
                     [batch_size, vocab_size] logits. By default, the model outputs [num_tokens, vocab_size] logits.
-                    Currently only supported for the CUDA execution provider with fp16 or bf16 precision. Cannot be
-                    combined with exclude_embeds or exclude_lm_head.
+                    Supports CUDA with fp16 or bf16 precision. WebGPU supports fp16 only for causal, full-context
+                    attention with zero softcap, FP16 KV caches, and no Q/K normalization inputs; for example,
+                    Gemma2's non-zero attention softcap is unsupported. Cannot be combined with exclude_embeds or
+                    exclude_lm_head.
                 paged_block_size = 16/32/64/128/256/...: Paged KV-cache block size used when use_paged_attention is set.
                     Must be a power of two and at least 16, which is what the ONNX Runtime PagedAttention op
                     accepts. Default is 256. Also written to the `engine.dynamic_batching` section of

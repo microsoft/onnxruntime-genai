@@ -267,12 +267,14 @@ ONNXTensorElementDataType ValidateDflash2ModelCompatibility(
     throw std::runtime_error(
         "model.dflash2 block_table must have two dynamic dimensions and a unique name.");
   }
-  RequireTensor(drafter_metadata, inputs.attention_metadata, true,
-                Ort::TypeToTensorType<int32_t>, 1);
-  const auto metadata_shape = drafter_metadata.GetInputShape(inputs.attention_metadata);
-  if (metadata_shape[0] != 3 || !input_names.insert(inputs.attention_metadata).second) {
-    throw std::runtime_error(
-        "model.dflash2 attention_metadata must contain three values and have a unique name.");
+  if (!inputs.attention_metadata.empty()) {
+    RequireTensor(drafter_metadata, inputs.attention_metadata, true,
+                  Ort::TypeToTensorType<int32_t>, 1);
+    const auto metadata_shape = drafter_metadata.GetInputShape(inputs.attention_metadata);
+    if (metadata_shape[0] != 3 || !input_names.insert(inputs.attention_metadata).second) {
+      throw std::runtime_error(
+          "model.dflash2 attention_metadata must contain three values and have a unique name.");
+    }
   }
   if (!input_names.insert(inputs.aux_hidden_states).second) {
     throw std::runtime_error("model.dflash2 input names must be unique.");
@@ -927,13 +929,22 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
       config_.inputs.aux_hidden_states.c_str(), config_.inputs.input_ids.c_str(),
       config_.inputs.q_row_map.c_str(), config_.inputs.qkv_row_map.c_str(),
       config_.inputs.block_row_index.c_str(), config_.inputs.cumulative_sequence_lengths.c_str(),
-      config_.inputs.past_sequence_lengths.c_str(), config_.inputs.block_table.c_str(),
-      config_.inputs.attention_metadata.c_str()};
+      config_.inputs.past_sequence_lengths.c_str(), config_.inputs.block_table.c_str()};
   std::vector<OrtValue*> inputs{packed_aux.GetOrtTensor(), input_ids.GetOrtTensor(),
                                 q_row_map.GetOrtTensor(), qkv_row_map.GetOrtTensor(),
                                 block_row_index.GetOrtTensor(), cumulative.GetOrtTensor(),
-                                past_lengths.GetOrtTensor(), block_table.GetOrtTensor(),
-                                metadata.GetOrtTensor()};
+                                past_lengths.GetOrtTensor(), block_table.GetOrtTensor()};
+  if (!config_.inputs.attention_metadata.empty()) {
+    auto& attention_metadata = Dflash2StepTensor(
+        step_tensors_.attention_metadata, GetDeviceInterface(DeviceType::CPU), int32_type, {3});
+    auto span = attention_metadata.GetDeviceSpan<int32_t>();
+    auto cpu = span.CpuSpan();
+    cpu[0] = layout.max_query_len;
+    cpu[1] = layout.max_kv_len;
+    cpu[2] = layout.min_kv_len;
+    input_names.push_back(config_.inputs.attention_metadata.c_str());
+    inputs.push_back(attention_metadata.GetOrtTensor());
+  }
   std::vector<const char*> output_names{config_.outputs.candidate_ids.c_str(),
                                         config_.outputs.scores.c_str()};
   std::vector<OrtValue*> outputs{candidate_ids.GetOrtTensor(), scores.GetOrtTensor()};

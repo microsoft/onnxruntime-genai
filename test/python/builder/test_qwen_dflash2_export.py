@@ -50,7 +50,7 @@ def _draft_checkpoint(tmp_path, target_layer_ids=TARGET_LAYER_IDS):
     return str(draft_dir)
 
 
-def _composite(aux_layers=AUX_LAYERS, use_paged_attention=True):
+def _composite(aux_layers=AUX_LAYERS, use_paged_attention=True, ep="cuda"):
     model = object.__new__(Qwen35MoEModel)
     model.dflash2 = None
     model.dflash2_shared_initializers = []
@@ -64,6 +64,7 @@ def _composite(aux_layers=AUX_LAYERS, use_paged_attention=True):
         attention_attrs={"paged_block_size": 256},
         context_length=32768,
         original_context_length=131072,
+        ep=ep,
     )
     return model
 
@@ -365,6 +366,22 @@ def test_kv_cache_uses_configured_paged_block_size(tmp_path):
     builder.declare_io()
 
     assert builder.values["past_key_values.0.key"].shape[1] == 512
+
+
+def test_webgpu_drafter_omits_attention_metadata(tmp_path):
+    builder = DFlash2Builder(
+        _draft_checkpoint(tmp_path),
+        str(tmp_path),
+        ir.DataType.FLOAT16,
+        paged_block_size=256,
+        max_position_embeddings=128,
+        include_attention_metadata=False,
+    )
+
+    builder.declare_io()
+
+    assert "attention_metadata" not in builder.values
+    assert builder.genai_config_section()["inputs"]["attention_metadata"] == ""
 
 
 def test_non_fp8_lm_head_preserves_target_layout_and_dtype(tmp_path):
@@ -830,13 +847,14 @@ def test_drafter_uses_target_context_length(tmp_path, monkeypatch, fuse_gate_up)
         def __init__(self, _draft_dir, _target_dir, _io_dtype, _paged_block_size, max_position, **_kwargs):
             captured["max_position"] = max_position
             captured["fuse_gate_up"] = _kwargs["fuse_gate_up"]
+            captured["include_attention_metadata"] = _kwargs["include_attention_metadata"]
 
         def make_model(self):
             pass
 
     dflash2_module = importlib.import_module("models.builders.dflash2")
     monkeypatch.setattr(dflash2_module, "DFlash2Builder", StubDFlash2Builder)
-    model = _composite()
+    model = _composite(ep="webgpu")
     model.make_dflash2_init(
         io_dtype=None,
         extra_options={"dflash2_path": _draft_checkpoint(tmp_path), "dflash2_fuse_gate_up": fuse_gate_up},
@@ -846,6 +864,7 @@ def test_drafter_uses_target_context_length(tmp_path, monkeypatch, fuse_gate_up)
 
     assert captured["max_position"] == model.decoder.context_length
     assert captured["fuse_gate_up"] is (str(fuse_gate_up).lower() == "true")
+    assert captured["include_attention_metadata"] is False
 
 
 def test_gate_up_fusion_defaults_off(tmp_path):
