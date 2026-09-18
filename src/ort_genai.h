@@ -466,6 +466,16 @@ struct OgaTokenizer : OgaAbstract {
   static void operator delete(void* p) { OgaDestroyTokenizer(reinterpret_cast<OgaTokenizer*>(p)); }
 };
 
+struct OgaTimestampDecodeResult : OgaAbstract {
+  const char* GetText() const {
+    const char* out;
+    OgaCheckResult(OgaTimestampDecodeResultGetText(this, &out));
+    return out;
+  }
+  size_t GetWordCount() const { return OgaTimestampDecodeResultGetWordCount(this); }
+  size_t GetSegmentCount() const { return OgaTimestampDecodeResultGetSegmentCount(this); }
+};
+
 struct OgaTokenizerStream : OgaAbstract {
   static std::unique_ptr<OgaTokenizerStream> Create(const OgaTokenizer& tokenizer) {
     OgaTokenizerStream* p;
@@ -489,6 +499,20 @@ struct OgaTokenizerStream : OgaAbstract {
     OgaCheckResult(OgaTokenizerStreamDecode(this, token, &out));
     return out;
   }
+
+  // Word and segment collections are per-call events. Either may be empty or
+  // contain multiple completed records when one token spans multiple boundaries.
+  const OgaTimestampDecodeResult& DecodeWithTimestamps(const OgaTokenTiming& token) {
+    const OgaTimestampDecodeResult* out;
+    OgaCheckResult(OgaTokenizerStreamDecodeWithTimestamps(this, &token, &out));
+    return *out;
+  }
+  const OgaTimestampDecodeResult& FinalizeTimestamps() {
+    const OgaTimestampDecodeResult* out;
+    OgaCheckResult(OgaTokenizerStreamFinalizeTimestamps(this, &out));
+    return *out;
+  }
+  void Reset() { OgaCheckResult(OgaTokenizerStreamReset(this)); }
 
   static void operator delete(void* p) { OgaDestroyTokenizerStream(reinterpret_cast<OgaTokenizerStream*>(p)); }
 };
@@ -605,6 +629,22 @@ struct OgaGenerator : OgaAbstract {
     size_t out_count;
     OgaCheckResult(OgaGenerator_GetNextTokens(this, &out, &out_count));
     return std::vector<int32_t>(out, out + out_count);
+  }
+#endif
+
+#if OGA_USE_SPAN
+  std::span<const OgaTokenTiming> GetNextTokensWithTimings() {
+    const OgaTokenTiming* out;
+    size_t out_count;
+    OgaCheckResult(OgaGenerator_GetNextTokensWithTimings(this, &out, &out_count));
+    return {out, out_count};
+  }
+#else
+  std::vector<OgaTokenTiming> GetNextTokensWithTimings() {
+    const OgaTokenTiming* out;
+    size_t out_count;
+    OgaCheckResult(OgaGenerator_GetNextTokensWithTimings(this, &out, &out_count));
+    return std::vector<OgaTokenTiming>(out, out + out_count);
   }
 #endif
 

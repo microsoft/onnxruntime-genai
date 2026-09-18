@@ -1790,6 +1790,29 @@ struct Model_Element : JSON::Element {
       v_.blank_id = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "max_symbols_per_step") {
       v_.max_symbols_per_step = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "timestamp_level") {
+      const auto level = JSON::Get<std::string_view>(value);
+      if (level == "off") {
+        v_.timestamp_level = Config::TimestampLevel::Off;
+      } else if (level == "word") {
+        v_.timestamp_level = Config::TimestampLevel::Word;
+      } else if (level == "segment") {
+        v_.timestamp_level = Config::TimestampLevel::Segment;
+      } else if (level == "all") {
+        v_.timestamp_level = Config::TimestampLevel::All;
+      } else {
+        throw std::runtime_error("timestamp_level must be one of: off, word, segment, all");
+      }
+    } else if (name == "segment_gap_threshold_seconds") {
+      if (std::holds_alternative<std::nullptr_t>(value)) {
+        v_.segment_gap_threshold_seconds.reset();
+      } else {
+        const double threshold = JSON::Get<double>(value);
+        if (!std::isfinite(threshold) || threshold <= 0.0) {
+          throw std::runtime_error("segment_gap_threshold_seconds must be finite and > 0");
+        }
+        v_.segment_gap_threshold_seconds = threshold;
+      }
     } else if (name == "left_context_samples") {
       v_.left_context_samples = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "right_context_samples") {
@@ -1812,6 +1835,10 @@ struct Model_Element : JSON::Element {
       return eos_token_id_;
     if (name == "tdt_durations")
       return tdt_durations_;
+    if (name == "segment_separators") {
+      v_.segment_separators.clear();
+      return segment_separators_;
+    }
     throw JSON::unknown_value_error{};
   }
 
@@ -1868,6 +1895,7 @@ struct Model_Element : JSON::Element {
   std::unique_ptr<Decoder_Element> draft_;
   Int_Array_Element eos_token_id_{v_.eos_token_id};
   Int_Array_Element tdt_durations_{v_.tdt_durations};
+  StringArray_Element segment_separators_{v_.segment_separators};
   Vision_Element vision_{v_.vision};
   Embedding_Element embedding_{v_.embedding};
   Speech_Element speech_{v_.speech};
@@ -1910,6 +1938,26 @@ int SafeDoubleToInt(double x, std::string_view name) {
 
   // 4. Perform the cast.
   return static_cast<int>(x);
+}
+
+std::optional<int> GetSegmentGapThresholdFrames(const Config::Model& model) {
+  if (!model.segment_gap_threshold_seconds) return std::nullopt;
+  if (!std::isfinite(*model.segment_gap_threshold_seconds) ||
+      *model.segment_gap_threshold_seconds <= 0.0) {
+    throw std::runtime_error("segment_gap_threshold_seconds must be finite and > 0");
+  }
+  if (model.sample_rate <= 0 || model.hop_length <= 0 || model.subsampling_factor <= 0) {
+    throw std::runtime_error(
+        "segment_gap_threshold_seconds requires positive sample_rate, hop_length, and subsampling_factor");
+  }
+
+  const int64_t samples_per_frame = static_cast<int64_t>(model.hop_length) * model.subsampling_factor;
+  const double rounded_frames = std::round(
+      *model.segment_gap_threshold_seconds * model.sample_rate / samples_per_frame);
+  if (rounded_frames > std::numeric_limits<int>::max()) {
+    throw std::runtime_error("segment_gap_threshold_seconds is too large");
+  }
+  return static_cast<int>(rounded_frames);
 }
 
 int64_t SafeDoubleToInt64(double x, std::string_view name) {

@@ -71,6 +71,7 @@ typedef struct OgaModel OgaModel;
 typedef struct OgaSequences OgaSequences;
 typedef struct OgaTokenizer OgaTokenizer;
 typedef struct OgaTokenizerStream OgaTokenizerStream;
+typedef struct OgaTimestampDecodeResult OgaTimestampDecodeResult;
 typedef struct OgaTensor OgaTensor;
 typedef struct OgaImages OgaImages;
 typedef struct OgaNamedTensors OgaNamedTensors;
@@ -86,6 +87,12 @@ typedef struct OgaRequestOptions OgaRequestOptions;
 typedef struct OgaTurnOptions OgaTurnOptions;
 typedef struct OgaTurnUsage OgaTurnUsage;
 typedef struct OgaStreamingProcessor OgaStreamingProcessor;
+
+typedef struct OgaTokenTiming {
+    int32_t token_id;
+    int64_t start_frame;
+    int64_t stop_frame;
+} OgaTokenTiming;
 
 /**
  * \brief Reason why an Engine Request's generation turn stopped.
@@ -713,6 +720,12 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetNextTokens(const OgaGenerator* generator, const int32_t** out, size_t* out_count);
 
 /**
+ * \brief Returns self-contained token and timing records from the most recent timestamp-enabled transducer step.
+ * The returned pointer is valid until the next OgaGenerator call. The count is zero when timestamps are disabled.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetNextTokensWithTimings(const OgaGenerator* generator, const OgaTokenTiming** out, size_t* out_count);
+
+/**
  * \brief Set a runtime option's name and value.
  * \param[in] generator The generator to rewind to the given length.
  * \param[in] key The runtime option's name
@@ -1058,6 +1071,17 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizerStream(OgaTokenizerStream*);
  * 'out' is valid until the next call to OgaTokenizerStreamDecode or when the OgaTokenizerStream is destroyed
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream*, int32_t token, const char** out);
+
+/** Timestamp-aware decode on the existing stream. Results remain valid until its next operation. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamDecodeWithTimestamps(OgaTokenizerStream*, const OgaTokenTiming* token, const OgaTimestampDecodeResult** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamFinalizeTimestamps(OgaTokenizerStream*, const OgaTimestampDecodeResult** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamReset(OgaTokenizerStream*);
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTimestampDecodeResultGetText(const OgaTimestampDecodeResult*, const char** out);
+OGA_EXPORT size_t OGA_API_CALL OgaTimestampDecodeResultGetWordCount(const OgaTimestampDecodeResult*);
+OGA_EXPORT size_t OGA_API_CALL OgaTimestampDecodeResultGetSegmentCount(const OgaTimestampDecodeResult*);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTimestampDecodeResultGetWord(const OgaTimestampDecodeResult*, size_t index, const char** text, int64_t* start_frame, int64_t* stop_frame, double* start_time, double* stop_time);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTimestampDecodeResultGetSegment(const OgaTimestampDecodeResult*, size_t index, const char** text, int64_t* start_frame, int64_t* stop_frame, double* start_time, double* stop_time);
 
 /** Create an OgaTensor from an optional user owned buffer. If a user owned buffer is supplied, the OgaTensor does
  * not own the memory (as it has no way to free it) so the 'data' parameter must be valid for the lifetime of the OgaTensor.

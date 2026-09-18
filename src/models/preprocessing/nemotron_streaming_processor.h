@@ -43,6 +43,9 @@ struct NemotronStreamingProcessor : StreamingProcessor {
   // Audio accumulation buffer for incoming PCM samples
   std::vector<float> audio_buffer_;
 
+  // Absolute input position, including complete chunks discarded by VAD.
+  int64_t consumed_samples_{0};
+
   std::unique_ptr<OrtValue> BuildMelTensor(const float* audio_chunk, size_t chunk_samples);
 };
 

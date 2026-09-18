@@ -318,6 +318,40 @@ pybind11::dict ToSpeculativeStatsDict(const OgaSpeculativeStats& stats) {
   return d;
 }
 
+pybind11::dict ToTimestampDecodeResult(const OgaTimestampDecodeResult& result) {
+  pybind11::dict output;
+  output["text"] = result.GetText();
+
+  const auto copy_records = [&result](bool words) {
+    pybind11::list records;
+    const size_t count = words ? result.GetWordCount() : result.GetSegmentCount();
+    for (size_t index = 0; index < count; ++index) {
+      const char* text;
+      int64_t start_frame;
+      int64_t stop_frame;
+      double start_time;
+      double stop_time;
+      OgaCheckResult(words
+                         ? OgaTimestampDecodeResultGetWord(&result, index, &text, &start_frame, &stop_frame,
+                                                           &start_time, &stop_time)
+                         : OgaTimestampDecodeResultGetSegment(&result, index, &text, &start_frame, &stop_frame,
+                                                              &start_time, &stop_time));
+      pybind11::dict record;
+      record["text"] = text;
+      record["start_frame"] = start_frame;
+      record["stop_frame"] = stop_frame;
+      record["start_time"] = start_time;
+      record["stop_time"] = stop_time;
+      records.append(std::move(record));
+    }
+    return records;
+  };
+
+  output["words"] = copy_records(true);
+  output["segments"] = copy_records(false);
+  return output;
+}
+
 struct PyGenerator {
   PyGenerator(const OgaModel& model, PyGeneratorParams& params) {
     generator_ = OgaGenerator::Create(model, *params.params_);
@@ -325,6 +359,14 @@ struct PyGenerator {
 
   pybind11::array_t<int32_t> GetNextTokens() {
     return ToPython(generator_->GetNextTokens());
+  }
+
+  pybind11::list GetNextTokensWithTimings() {
+    pybind11::list result;
+    for (const auto& token : generator_->GetNextTokensWithTimings()) {
+      result.append(pybind11::make_tuple(token.token_id, token.start_frame, token.stop_frame));
+    }
+    return result;
   }
 
   pybind11::array_t<int32_t> GetSequence(int index) {
@@ -496,7 +538,16 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("get_search_options", &PyGeneratorParams::GetSearchOptions);
 
   pybind11::class_<OgaTokenizerStream>(m, "TokenizerStream")
-      .def("decode", [](OgaTokenizerStream& t, int32_t token) { return t.Decode(token); });
+      .def("decode", [](OgaTokenizerStream& t, int32_t token) { return t.Decode(token); })
+      .def("decode_with_timestamps", [](OgaTokenizerStream& stream, const pybind11::tuple& token) {
+        if (token.size() != 3) throw std::invalid_argument("timed token must contain token_id, start_frame, stop_frame");
+        const OgaTokenTiming timing{token[0].cast<int32_t>(), token[1].cast<int64_t>(), token[2].cast<int64_t>()};
+        return ToTimestampDecodeResult(stream.DecodeWithTimestamps(timing));
+      })
+      .def("finalize_timestamps", [](OgaTokenizerStream& stream) {
+        return ToTimestampDecodeResult(stream.FinalizeTimestamps());
+      })
+      .def("reset", &OgaTokenizerStream::Reset);
 
   pybind11::class_<OgaNamedTensors>(m, "NamedTensors")
       .def(pybind11::init([]() { return OgaNamedTensors::Create(); }))
@@ -658,6 +709,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("snapshot_state", &PyGenerator::SnapshotState)
       .def("set_hidden_states", &PyGenerator::SetHiddenStates)
       .def("get_next_tokens", &PyGenerator::GetNextTokens)
+      .def("get_next_tokens_with_timings", &PyGenerator::GetNextTokensWithTimings)
       .def("get_sequence", &PyGenerator::GetSequence)
       .def("set_active_adapter", &PyGenerator::SetActiveAdapter)
       .def("set_runtime_option", &PyGenerator::SetRuntimeOption)

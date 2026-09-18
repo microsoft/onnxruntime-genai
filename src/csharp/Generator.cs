@@ -79,6 +79,16 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             }
         }
 
+        public ReadOnlySpan<TokenTiming> GetNextTokensWithTimings()
+        {
+            Result.VerifySuccess(NativeMethods.OgaGenerator_GetNextTokensWithTimings(
+                _generatorHandle, out IntPtr tokens, out UIntPtr tokenCount));
+            unsafe
+            {
+                return new ReadOnlySpan<TokenTiming>(tokens.ToPointer(), (int)tokenCount.ToUInt64());
+            }
+        }
+
         public ReadOnlySpan<int> GetSequence(ulong index)
         {
             ulong sequenceLength = NativeMethods.OgaGenerator_GetSequenceCount(_generatorHandle, (UIntPtr)index).ToUInt64();
