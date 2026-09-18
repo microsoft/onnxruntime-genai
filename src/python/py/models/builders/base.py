@@ -5792,6 +5792,7 @@ class Model:
             auto_class_map = {
                 "ForCausalLM": "AutoModelForCausalLM",
                 "gemma3_vl_text": "Gemma3ForConditionalGeneration",
+                "lfm2_vl": "Lfm2VlForConditionalGeneration",
                 "mistral3_text": "Mistral3ForConditionalGeneration",
                 "Mistral3": "Mistral3ForConditionalGeneration",
                 "qwen2_5_vl_text": "Qwen2_5_VLForConditionalGeneration",
@@ -5901,6 +5902,7 @@ class Model:
         # hf_transformer_final_layernorm: for ChatGLM-3
         # hf_language_model_norm:         for Gemma-3 multimodal (4B, 12B, 27B)
         # hf_embedding_norm:              for LFM-2
+        # hf_language_model_embedding_norm: for LFM2-VL (the LFM-2 decoder nested under a vision model)
         hf_norm = hasattr(model, "model") and hasattr(model.model, "norm") and module == model.model.norm
         hf_final_layernorm = (
             hasattr(model, "model")
@@ -5924,11 +5926,24 @@ class Model:
             and hasattr(model.model, "embedding_norm")
             and module == model.model.embedding_norm
         )
+        hf_language_model_embedding_norm = (
+            hasattr(model, "model")
+            and hasattr(model.model, "language_model")
+            and hasattr(model.model.language_model, "embedding_norm")
+            and module == model.model.language_model.embedding_norm
+        )
 
         # GGUF names (all models loaded with GGUFModel.from_pretrained)
         gguf_final_norm = hasattr(model, "final_norm") and module == model.final_norm
 
-        hf_names = [hf_norm, hf_final_layernorm, hf_transformer_final_layernorm, hf_language_model_norm, hf_embedding_norm]
+        hf_names = [
+            hf_norm,
+            hf_final_layernorm,
+            hf_transformer_final_layernorm,
+            hf_language_model_norm,
+            hf_embedding_norm,
+            hf_language_model_embedding_norm,
+        ]
         gguf_names = [gguf_final_norm]
         return any(hf_names + gguf_names)
 

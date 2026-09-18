@@ -317,6 +317,11 @@ def get_user_content(model_type: str, num_images: int, num_audios: int, prompt: 
         # Qwen-2.5 VL, Qwen-3 VL, Fara
         image_tags = "".join(["<|vision_start|><|image_pad|><|vision_end|>" for _ in range(num_images)])
         content = image_tags + prompt
+    elif model_type == "lfm2_vl":
+        # LFM2-VL: the C++ image processor expands each <image> into <|image_start|>, one <image>
+        # per projected vision feature, and <|image_end|>, based on the resized image's patch grid.
+        image_tags = "".join(["<image>" for _ in range(num_images)])
+        content = image_tags + prompt
     elif model_type == "mistral3":
         # Pixtral / Ministral-3 VLM: the C++ image processor expands each
         # [IMG] into the full token sequence based on image resolution.

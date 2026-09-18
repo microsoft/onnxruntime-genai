@@ -100,6 +100,8 @@ def weight_loader(monkeypatch):
         ("Gemma3ForCausalLM", "AutoModelForCausalLM"),
         ("llama", "AutoModelForCausalLM"),
         ("gemma3_vl_text", "Gemma3ForConditionalGeneration"),
+        ("lfm2_vl", "Lfm2VlForConditionalGeneration"),
+        ("lfm2_vl_text", "Lfm2VlForConditionalGeneration"),
         ("mistral3_text", "Mistral3ForConditionalGeneration"),
         ("Mistral3ForConditionalGeneration", "Mistral3ForConditionalGeneration"),
         ("qwen2_5_vl_text", "Qwen2_5_VLForConditionalGeneration"),
