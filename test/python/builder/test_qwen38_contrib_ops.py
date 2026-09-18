@@ -306,7 +306,7 @@ def test_hyper_connection_emits_fused_ops():
     assert nodes[0][1]["alpha"] == 0.25
     assert nodes[1][1]["inputs"] == [
         "normalized",
-        "/model/layers.0/attn_hyper_connection/mixed/Mean/pre_mix/Reshape/output_0",
+        "/model/layers.0/attn_hyper_connection/input_mix_weight_up/Sigmoid/output_0",
     ]
     assert nodes[1][1]["num_branches"] == 4
     assert nodes[1][1]["reduction_scale"] == 0.25

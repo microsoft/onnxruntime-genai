@@ -1203,23 +1203,10 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         return output
 
     def make_hyper_connection_pre_mix(self, name, streams, pre_mix, token_shape):
-        grouped_shape = [*token_shape, self.hc_count, self.hidden_size]
-        grouped_dims = (
-            [-1, self.hc_count, self.hidden_size]
-            if self.use_paged_attention
-            else [0, 0, self.hc_count, self.hidden_size]
-        )
-        gate_reshape = f"{name}/pre_mix/Reshape"
-        self.make_reshape(
-            gate_reshape,
-            [pre_mix, f"/model/constants/INT64/{grouped_dims}"],
-            self.io_dtype,
-            grouped_shape,
-        )
         output = f"{name}/output_0"
         self.make_node(
             "HyperConnectionPreMix",
-            inputs=[streams, f"{gate_reshape}/output_0"],
+            inputs=[streams, pre_mix],
             outputs=[output],
             name=name,
             domain="com.microsoft",
