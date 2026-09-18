@@ -81,9 +81,6 @@ def make_sparse_model(paged):
     model.make_key_value_cache_names = MethodType(
         lambda self, layer_id: ("past_key", "past_value", "present_key", "present_value"), model
     )
-    model.make_qsa_rotary_caches = MethodType(
-        lambda self, layer_id, root_input, cos, sin: ("index_cos", "index_sin"), model
-    )
     model.make_qsa_visibility_mask = MethodType(lambda self, layer_id, root_input: "visibility_mask", model)
     model.make_selected_counts = MethodType(
         lambda self, layer_id, selected, capacity, packed: "selected_counts", model
@@ -420,11 +417,12 @@ def test_dense_qwen_sparse_attention_emits_indexer_and_dynamic_executor():
         "/model/layers.3/attn/indexer/query/SimplifiedLayerNormalization/output_0",
         "/model/layers.3/attn/indexer/key",
         "model.layers.3.attn.indexer.k_norm.weight",
-        "index_cos",
-        "index_sin",
+        "cos_cache",
+        "sin_cache",
         "visibility_mask",
         "past.3.indexer_key",
     ]
+    assert not any("/rotary_cache/" in str(call) for call in model.calls)
     assert indexer["outputs"] == [
         "/model/layers.3/attn/SparseAttentionIndexer/output_0",
         "present.3.indexer_key",
@@ -503,27 +501,6 @@ def test_qwen_attention_gate_uses_resolved_attention_output():
 
     gate = next(call for call in model.calls if call[0] == "make_mul")
     assert gate[1][1][0] == "/model/layers.3/attn/DynamicSparseAttention/output_0"
-
-
-def test_qsa_rotary_caches_use_model_dtype_without_casts():
-    model = object.__new__(Qwen4ExpTextModel)
-    model.io_dtype = ir.DataType.BFLOAT16
-    record_calls(model, ["make_shape", "make_gather", "make_concat", "make_cast", "make_unsqueeze", "make_tile"])
-
-    model.make_qsa_rotary_caches(3, "hidden_states", "cos_cache", "sin_cache")
-
-    assert not [call for call in model.calls if call[0] == "make_cast"]
-    unsqueezes = [
-        call for call in model.calls if call[0] == "make_unsqueeze" and call[1][1][0] in {"cos_cache", "sin_cache"}
-    ]
-    assert [call[1][1][0] for call in unsqueezes] == ["cos_cache", "sin_cache"]
-    cache_calls = [
-        call for call in model.calls
-        if call[0] in {"make_unsqueeze", "make_tile"}
-        and ("/rotary_cache/cos/" in call[1][0] or "/rotary_cache/sin/" in call[1][0])
-    ]
-    assert cache_calls
-    assert all(call[1][2] == ir.DataType.BFLOAT16 for call in cache_calls)
 
 
 def make_ple_model(paged, fp8_embedding=False):

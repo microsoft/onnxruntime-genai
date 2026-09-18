@@ -150,54 +150,6 @@ class Qwen38:
         )
         return f"{name}/output_0"
 
-    def make_qsa_rotary_caches(self, layer_id, root_input, cos_cache, sin_cache):
-        """Promote shared rotary tables to the indexer's batched rank-3 layout."""
-        basename = f"/model/layers.{layer_id}/attn/indexer/rotary_cache"
-        input_shape = f"{basename}/input/Shape"
-        self.make_shape(input_shape, root_input, [3])
-        batch_size = f"{basename}/batch_size/Gather"
-        self.make_gather(
-            batch_size,
-            [f"{input_shape}/output_0", "/model/constants/INT64/0"],
-            ir.DataType.INT64,
-            [],
-            axis=0,
-        )
-        batch_size_1d = f"{basename}/batch_size/Unsqueeze"
-        self.make_unsqueeze(
-            batch_size_1d,
-            [f"{batch_size}/output_0", "/model/constants/INT64/[0]"],
-            ir.DataType.INT64,
-            [1],
-        )
-        repeats = f"{basename}/repeats/Concat"
-        self.make_concat(
-            repeats,
-            [f"{batch_size_1d}/output_0", "/model/constants/INT64/[1, 1]"],
-            ir.DataType.INT64,
-            [3],
-            axis=0,
-        )
-
-        outputs = []
-        for label, cache in (("cos", cos_cache), ("sin", sin_cache)):
-            unsqueeze = f"{basename}/{label}/Unsqueeze"
-            self.make_unsqueeze(
-                unsqueeze,
-                [cache, "/model/constants/INT64/[0]"],
-                self.io_dtype,
-                [1, "max_sequence_length", "rotary_width"],
-            )
-            tile = f"{basename}/{label}/Tile"
-            self.make_tile(
-                tile,
-                [f"{unsqueeze}/output_0", f"{repeats}/output_0"],
-                self.io_dtype,
-                ["batch_size", "max_sequence_length", "rotary_width"],
-            )
-            outputs.append(f"{tile}/output_0")
-        return outputs
-
     def make_qsa_visibility_mask(self, layer_id, root_input):
         """Build the dense causal visibility mask consumed by SparseAttentionIndexer."""
         basename = f"/model/layers.{layer_id}/attn/indexer/visibility"

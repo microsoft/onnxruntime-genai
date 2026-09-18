@@ -1525,9 +1525,6 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
                 self.io_dtype,
                 ["batch_size", "sequence_length", self.indexer_num_heads, self.indexer_head_dim],
             )
-            index_cos, index_sin = self.make_qsa_rotary_caches(
-                layer_id, root_input, cos_cache, sin_cache
-            )
             visibility_mask = self.make_qsa_visibility_mask(layer_id, root_input)
             indexer_name = f"/model/layers.{layer_id}/attn/SparseAttentionIndexer"
             selected_indices = f"{indexer_name}/output_0"
@@ -1537,8 +1534,8 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
                     f"{index_q_norm}/output_0",
                     index_k,
                     index_k_scale,
-                    index_cos,
-                    index_sin,
+                    cos_cache,
+                    sin_cache,
                     visibility_mask,
                     self.input_names["past.indexer"][layer_id],
                 ],
