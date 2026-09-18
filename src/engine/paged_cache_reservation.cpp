@@ -330,13 +330,13 @@ PagedCacheReservation::PagedCacheReservation(
       PagedCacheBlockTable table;
       table.request_id_ = request.request_id;
       table.committed_slots_ = committed_slots;
-      table.blocks_.reserve(CheckedAdd(
-          adopted_block_count, new_blocks, "new table block capacity"));
       if (match) {
         table.blocks_ = match->blocks;
         table.sealed_blocks_ = adopted_block_count;
         table.sealed_identity_ = match->blocks.back()->IdentityPtr();
       }
+      table.blocks_.reserve(CheckedAdd(
+          adopted_block_count, new_blocks, "new table block capacity"));
       table.window_blocks_.reserve(window_ring_blocks_);
       new_tables_.push_back(std::move(table));
     }

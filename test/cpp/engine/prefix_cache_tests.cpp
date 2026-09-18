@@ -7,13 +7,13 @@
 
 #include <array>
 #include <memory>
-#include <span>
 #include <stdexcept>
 #include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
 
+#include "span.h"
 #include "engine/block.h"
 #include "engine/paged_key_value_cache.h"
 #include "engine/prefix_cache.h"
