@@ -49,7 +49,14 @@ def _make_qwen_mtp_model():
 
 def test_add_mtp_to_genai_config(tmp_path):
     config_path = tmp_path / "genai_config.json"
-    config_path.write_text(json.dumps({"model": {"decoder": {}}}))
+    config_path.write_text(
+        json.dumps(
+            {
+                "model": {"decoder": {}},
+                "engine": {"dynamic_batching": {}},
+            }
+        )
+    )
     model = object.__new__(Qwen35MoEModel)
     model.decoder = type("Decoder", (), {"num_kv_heads": 2, "head_size": 128})()
     model.mtp_attrs = {"shared_initializers": []}
@@ -59,6 +66,7 @@ def test_add_mtp_to_genai_config(tmp_path):
     config = json.loads(config_path.read_text())
     assert config["model"]["decoder"]["outputs"]["hidden_states"] == "hidden_states"
     assert config["model"]["mtp"]["filename"] == "mtp.onnx"
+    assert config["engine"]["dynamic_batching"]["prefix_caching"] is False
 
 
 def test_share_mtp_weights_repacks_data_after_staging_metadata(tmp_path):

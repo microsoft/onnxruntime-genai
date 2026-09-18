@@ -108,11 +108,11 @@ to 2048. Both limits are positive and independent.
 
 ### Prefix caching
 
-Dynamic batching can reuse complete prompt blocks from earlier requests by setting
-`engine.dynamic_batching.prefix_caching` to `true`. It is disabled by default. A
-lookup compares both the token contents and the complete parent-block identity;
-hash equality alone is never accepted as a match. The final prompt token always
-runs through the model, and partial blocks are never shared.
+Dynamic batching reuses complete prompt blocks from earlier requests by default.
+Set `engine.dynamic_batching.prefix_caching` to `false` to disable it. A lookup
+compares both the token contents and the complete parent-block identity; hash
+equality alone is never accepted as a match. The final prompt token always runs
+through the model, and partial blocks are never shared.
 
 The cache retains indexed blocks after their producing request releases them.
 `prefix_cache_max_blocks` sets an explicit retention limit. When it is omitted,
@@ -151,7 +151,8 @@ restores the request cursor.
 
 The implementation applies only to newly admitted requests and does not splice
 a prefix into resident continuation turns. It still rejects target
-sliding-window KV rings and auxiliary caches that mirror every target block. A
+sliding-window KV rings and auxiliary caches that mirror every target block;
+models using either layout must explicitly set `prefix_caching` to `false`. A
 fixed-size Engine-hosted auxiliary pool can coexist with target prefix caching.
 In particular, a DFlash 2 drafter that did not process the skipped prefix cannot
 join at a nonzero position, so that request keeps the valid target hit and runs

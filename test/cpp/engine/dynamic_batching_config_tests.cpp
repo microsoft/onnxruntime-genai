@@ -58,16 +58,24 @@ TEST(DynamicBatchingConfigTest, ScheduledTokenBudgetAcceptsOverride) {
   EXPECT_EQ(config.engine.dynamic_batching->max_scheduled_tokens, 321u);
 }
 
-TEST(DynamicBatchingConfigTest, PrefixCachingDefaultsToDisabled) {
+TEST(DynamicBatchingConfigTest, PrefixCachingDefaultsToEnabled) {
   const auto config = LoadDynamicConfig(R"({ "max_batch_size": 4 })");
 
   ASSERT_TRUE(config.engine.dynamic_batching.has_value());
-  EXPECT_FALSE(config.engine.dynamic_batching->prefix_caching);
+  EXPECT_TRUE(config.engine.dynamic_batching->prefix_caching);
   EXPECT_FLOAT_EQ(
       config.engine.dynamic_batching->prefix_cache_pool_fraction, 0.5f);
   EXPECT_FALSE(
       config.engine.dynamic_batching->prefix_cache_max_blocks.has_value());
   EXPECT_EQ(config.engine.dynamic_batching->prefix_cache_min_blocks, 1u);
+}
+
+TEST(DynamicBatchingConfigTest, PrefixCachingAcceptsExplicitDisable) {
+  const auto config =
+      LoadDynamicConfig(R"({ "prefix_caching": false })");
+
+  ASSERT_TRUE(config.engine.dynamic_batching.has_value());
+  EXPECT_FALSE(config.engine.dynamic_batching->prefix_caching);
 }
 
 TEST(DynamicBatchingConfigTest, PrefixCachingAcceptsExplicitLimits) {

@@ -771,6 +771,7 @@ TEST(PagedKeyValueCacheManifestTest, ExplicitBlockCountCoversBothPools) {
 
 TEST(PagedKeyValueCacheManifestTest, AllocatesSparseSlidingAndFullLayerCaches) {
   auto model = LoadSyntheticPagedModel();
+  model->config_->engine.dynamic_batching->prefix_caching = false;
   auto& decoder = model->config_->model.decoder;
   decoder.sliding_window = Config::Model::Decoder::SlidingWindow{};
   decoder.sliding_window->window_size = 4;
@@ -797,7 +798,6 @@ TEST(PagedKeyValueCacheManifestTest, PrefixCachingRejectsSlidingWindowCache) {
   decoder.sliding_window->window_size = 4;
   decoder.sliding_window->layers = {1};
   decoder.inputs.block_table_windowed = decoder.inputs.block_table;
-  model->config_->engine.dynamic_batching->prefix_caching = true;
 
   EXPECT_THROW(MakePagedCache(model), std::runtime_error);
 }
