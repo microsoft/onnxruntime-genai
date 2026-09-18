@@ -208,7 +208,11 @@ bool ParseArgs(
 
   app.add_option("--ep_path", ep_path, "Path to execution provider DLL/SO for plug-in providers (ex: onnxruntime_providers_cuda.dll or onnxruntime_providers_tensorrt.dll)");
   app.add_option("--system_prompt", system_prompt, "System prompt to use for the model.");
-  app.add_option("--user_prompt", user_prompt, "User prompt to use for the model.");
+  app.add_option("--user_prompt", user_prompt,
+                 "User prompt. Nemotron Parse accepts 1 through context_length-1 "
+                 "tokens including special tokens (no padding or truncation). "
+                 "TRT-RTX uses a static fast path at prefill_sequence_length. "
+                 "The default Nemotron Parse task uses 8 tokens.");
   app.add_flag("--rewind", rewind, "Rewind to the system prompt after each generation. Defaults to false. Only used in model_chat.");
   app.add_flag_callback(
       "--non_interactive", [&] { interactive = false; }, "Disable interactive mode");

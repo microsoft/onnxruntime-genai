@@ -97,17 +97,17 @@ class NemotronParseDecoderComponent(Model):
 
     def build(self, weights):
         self.weights = weights
-        self._make_inputs_and_outputs()
-        self._make_constants()
+        self.make_inputs_and_outputs()
+        self.make_constants()
 
-        hidden_states = self._make_embedding(weights.decoder)
-        attention_mask = self._make_attention_mask()
+        hidden_states = self.make_decoder_embedding(weights.decoder)
+        attention_mask = self.make_attention_mask()
         for layer_id, layer in enumerate(weights.decoder.layers):
-            hidden_states = self._make_layer(
+            hidden_states = self.make_decoder_layer(
                 layer_id, layer, hidden_states, attention_mask
             )
 
-        hidden_states = self._make_layer_norm(
+        hidden_states = self.make_layer_norm(
             weights.decoder.layer_norm,
             "/decoder/layer_norm",
             hidden_states,
@@ -116,7 +116,7 @@ class NemotronParseDecoderComponent(Model):
         self.layernorm_attrs["output_0"] = hidden_states
         self.make_lm_head(weights.lm_head)
 
-    def _make_inputs_and_outputs(self):
+    def make_inputs_and_outputs(self):
         batch = "batch_size"
         encoder_sequence = "encoder_sequence_length"
         head_shape = [
@@ -178,9 +178,9 @@ class NemotronParseDecoderComponent(Model):
                     self.make_value(name, self.io_dtype, shape)
                 )
 
-    def _make_constants(self):
+    def make_constants(self):
         prefix = "/nemotron_parse/constants"
-        self._constants = {
+        self.constant_names = {
             "reshape_heads": f"{prefix}/reshape_heads",
             "merge_heads": f"{prefix}/merge_heads",
             "mask_axes": f"{prefix}/mask_axes",
@@ -200,19 +200,19 @@ class NemotronParseDecoderComponent(Model):
                 [0, 0, self.num_attn_heads, self.head_size],
                 dtype=torch.int64,
             ),
-            self._constants["reshape_heads"],
+            self.constant_names["reshape_heads"],
         )
         self.make_initializer(
             torch.tensor([0, 0, self.hidden_size], dtype=torch.int64),
-            self._constants["merge_heads"],
+            self.constant_names["merge_heads"],
         )
         self.make_initializer(
             torch.tensor([1, 2], dtype=torch.int64),
-            self._constants["mask_axes"],
+            self.constant_names["mask_axes"],
         )
         self.make_initializer(
             torch.tensor(0, dtype=torch.int64),
-            self._constants["mask_zero"],
+            self.constant_names["mask_zero"],
         )
         torch_dtype = {
             ir.DataType.FLOAT16: torch.float16,
@@ -226,61 +226,61 @@ class NemotronParseDecoderComponent(Model):
         mask_value = float(torch.finfo(torch_dtype).min)
         self.make_initializer(
             torch.tensor(mask_value, dtype=torch.float32),
-            self._constants["mask_value"],
+            self.constant_names["mask_value"],
             to=self.io_dtype,
         )
         self.make_initializer(
             torch.tensor(0.0, dtype=torch.float32),
-            self._constants["float_zero"],
+            self.constant_names["float_zero"],
             to=self.io_dtype,
         )
         self.make_initializer(
             torch.tensor(
                 1.0 / math.sqrt(self.head_size), dtype=torch.float32
             ),
-            self._constants["attention_scale"],
+            self.constant_names["attention_scale"],
             to=self.io_dtype,
         )
         self.make_initializer(
             torch.tensor(1, dtype=torch.int64),
-            self._constants["shape_index"],
+            self.constant_names["shape_index"],
         )
         self.make_initializer(
             torch.tensor(0, dtype=torch.int64),
-            self._constants["range_start"],
+            self.constant_names["range_start"],
         )
         self.make_initializer(
             torch.tensor(1, dtype=torch.int64),
-            self._constants["range_step"],
+            self.constant_names["range_step"],
         )
         self.make_initializer(
             torch.tensor([1], dtype=torch.int64),
-            self._constants["write_index_axes"],
+            self.constant_names["write_index_axes"],
         )
         self.make_initializer(
             torch.tensor([1, 3], dtype=torch.int64),
-            self._constants["query_position_axes"],
+            self.constant_names["query_position_axes"],
         )
         self.make_initializer(
             torch.arange(
                 self.cache_sequence_length, dtype=torch.int64
             ).reshape(1, 1, 1, self.cache_sequence_length),
-            self._constants["key_positions"],
+            self.constant_names["key_positions"],
         )
 
-    def _make_attention_mask(self):
+    def make_attention_mask(self):
         key_length = self.cache_sequence_length
         base = "/decoder/attention_mask"
         equal = f"{base}/EqualPadding"
         self.make_equal(
             equal,
-            ["decoder_attention_mask", self._constants["mask_zero"]],
+            ["decoder_attention_mask", self.constant_names["mask_zero"]],
             ["batch_size", key_length],
         )
         unsqueeze = f"{base}/Unsqueeze"
         self.make_unsqueeze(
             unsqueeze,
-            [f"{equal}/output_0", self._constants["mask_axes"]],
+            [f"{equal}/output_0", self.constant_names["mask_axes"]],
             ir.DataType.BOOL,
             ["batch_size", 1, 1, key_length],
         )
@@ -290,7 +290,7 @@ class NemotronParseDecoderComponent(Model):
         sequence_length = f"{base}/SequenceLength"
         self.make_gather(
             sequence_length,
-            [f"{input_shape}/output_0", self._constants["shape_index"]],
+            [f"{input_shape}/output_0", self.constant_names["shape_index"]],
             ir.DataType.INT64,
             [],
             axis=0,
@@ -299,9 +299,9 @@ class NemotronParseDecoderComponent(Model):
         self.make_range(
             query_offsets,
             [
-                self._constants["range_start"],
+                self.constant_names["range_start"],
                 f"{sequence_length}/output_0",
-                self._constants["range_step"],
+                self.constant_names["range_step"],
             ],
             ir.DataType.INT64,
             [self.sequence_length],
@@ -311,7 +311,7 @@ class NemotronParseDecoderComponent(Model):
             write_indices,
             [
                 "cache_write_indices",
-                self._constants["write_index_axes"],
+                self.constant_names["write_index_axes"],
             ],
             ir.DataType.INT64,
             ["batch_size", 1],
@@ -328,7 +328,7 @@ class NemotronParseDecoderComponent(Model):
             query_positions_4d,
             [
                 f"{query_positions}/output_0",
-                self._constants["query_position_axes"],
+                self.constant_names["query_position_axes"],
             ],
             ir.DataType.INT64,
             ["batch_size", 1, self.sequence_length, 1],
@@ -337,7 +337,7 @@ class NemotronParseDecoderComponent(Model):
         self.make_greater(
             causal,
             [
-                self._constants["key_positions"],
+                self.constant_names["key_positions"],
                 f"{query_positions_4d}/output_0",
             ],
             ["batch_size", 1, self.sequence_length, key_length],
@@ -359,15 +359,15 @@ class NemotronParseDecoderComponent(Model):
             where,
             [
                 f"{invalid}/output_0",
-                self._constants["mask_value"],
-                self._constants["float_zero"],
+                self.constant_names["mask_value"],
+                self.constant_names["float_zero"],
             ],
             self.io_dtype,
             ["batch_size", 1, self.sequence_length, key_length],
         )
         return f"{where}/output_0"
 
-    def _make_embedding(self, decoder):
+    def make_decoder_embedding(self, decoder):
         base = "/decoder/embed_tokens"
         weight = "decoder.embed_tokens.weight"
         self.make_initializer(decoder.embed_tokens.weight, weight, to=self.io_dtype)
@@ -398,14 +398,14 @@ class NemotronParseDecoderComponent(Model):
             )
             hidden_states = f"{mul}/output_0"
 
-        return self._make_layer_norm(
+        return self.make_layer_norm(
             decoder.layernorm_embedding,
             "/decoder/layernorm_embedding",
             hidden_states,
             self.sequence_length,
         )
 
-    def _make_layer_norm(self, layer_norm, name, root_input, sequence_length):
+    def make_layer_norm(self, layer_norm, name, root_input, sequence_length):
         weight = f"{name[1:].replace('/', '.')}.weight"
         bias = f"{name[1:].replace('/', '.')}.bias"
         self.make_initializer(layer_norm.weight, weight, to=self.io_dtype)
@@ -427,7 +427,7 @@ class NemotronParseDecoderComponent(Model):
         )
         return output
 
-    def _make_linear(self, linear, name, root_input, sequence_length):
+    def make_linear(self, linear, name, root_input, sequence_length):
         matmul = self.make_matmul(
             linear,
             f"{name}/MatMul",
@@ -446,7 +446,7 @@ class NemotronParseDecoderComponent(Model):
             output = f"{add}/output_0"
         return output
 
-    def _split_heads(
+    def split_heads(
         self,
         root_input,
         name,
@@ -457,7 +457,7 @@ class NemotronParseDecoderComponent(Model):
         reshape = f"{name}/Reshape"
         self.make_reshape(
             reshape,
-            [root_input, self._constants["reshape_heads"]],
+            [root_input, self.constant_names["reshape_heads"]],
             self.io_dtype,
             [
                 "batch_size",
@@ -487,7 +487,7 @@ class NemotronParseDecoderComponent(Model):
         )
         return transpose_output
 
-    def _merge_heads(self, root_input, name, sequence_length):
+    def merge_heads(self, root_input, name, sequence_length):
         transpose = f"{name}/Transpose"
         self.make_transpose(
             transpose,
@@ -504,13 +504,13 @@ class NemotronParseDecoderComponent(Model):
         reshape = f"{name}/Reshape"
         self.make_reshape(
             reshape,
-            [f"{transpose}/output_0", self._constants["merge_heads"]],
+            [f"{transpose}/output_0", self.constant_names["merge_heads"]],
             self.io_dtype,
             ["batch_size", sequence_length, self.hidden_size],
         )
         return f"{reshape}/output_0"
 
-    def _make_scaled_dot_product_attention(
+    def make_scaled_dot_product_attention(
         self,
         name,
         query,
@@ -551,7 +551,7 @@ class NemotronParseDecoderComponent(Model):
         scale = f"{name}/scores/Mul"
         self.make_mul(
             scale,
-            [f"{scores}/output_0", self._constants["attention_scale"]],
+            [f"{scores}/output_0", self.constant_names["attention_scale"]],
             self.io_dtype,
             scores_shape,
         )
@@ -593,12 +593,12 @@ class NemotronParseDecoderComponent(Model):
         )
         return f"{context}/output_0"
 
-    def _make_self_attention(
+    def make_self_attention(
         self, layer_id, attention, root_input, attention_mask
     ):
         base = f"/decoder/layers.{layer_id}/self_attn"
-        query = self._split_heads(
-            self._make_linear(
+        query = self.split_heads(
+            self.make_linear(
                 attention.q_proj,
                 f"{base}/q_proj",
                 root_input,
@@ -607,8 +607,8 @@ class NemotronParseDecoderComponent(Model):
             f"{base}/q",
             self.sequence_length,
         )
-        key_update = self._split_heads(
-            self._make_linear(
+        key_update = self.split_heads(
+            self.make_linear(
                 attention.k_proj,
                 f"{base}/k_proj",
                 root_input,
@@ -617,8 +617,8 @@ class NemotronParseDecoderComponent(Model):
             f"{base}/k",
             self.sequence_length,
         )
-        value_update = self._split_heads(
-            self._make_linear(
+        value_update = self.split_heads(
+            self.make_linear(
                 attention.v_proj,
                 f"{base}/v_proj",
                 root_input,
@@ -652,7 +652,7 @@ class NemotronParseDecoderComponent(Model):
             output=f"present.{layer_id}.value",
         )
 
-        context = self._make_scaled_dot_product_attention(
+        context = self.make_scaled_dot_product_attention(
             base,
             query,
             key,
@@ -661,20 +661,20 @@ class NemotronParseDecoderComponent(Model):
             self.cache_sequence_length,
             attention_mask,
         )
-        merged = self._merge_heads(
+        merged = self.merge_heads(
             context, f"{base}/merge_heads", self.sequence_length
         )
-        return self._make_linear(
+        return self.make_linear(
             attention.out_proj,
             f"{base}/out_proj",
             merged,
             self.sequence_length,
         )
 
-    def _make_cross_attention(self, layer_id, attention, root_input):
+    def make_cross_attention(self, layer_id, attention, root_input):
         base = f"/decoder/layers.{layer_id}/encoder_attn"
-        query = self._split_heads(
-            self._make_linear(
+        query = self.split_heads(
+            self.make_linear(
                 attention.q_proj,
                 f"{base}/q_proj",
                 root_input,
@@ -686,7 +686,7 @@ class NemotronParseDecoderComponent(Model):
         key = f"cross_past_key_values.{layer_id}.key"
         value = f"cross_past_key_values.{layer_id}.value"
 
-        context = self._make_scaled_dot_product_attention(
+        context = self.make_scaled_dot_product_attention(
             base,
             query,
             key,
@@ -694,25 +694,25 @@ class NemotronParseDecoderComponent(Model):
             self.sequence_length,
             "encoder_sequence_length",
         )
-        merged = self._merge_heads(
+        merged = self.merge_heads(
             context, f"{base}/merge_heads", self.sequence_length
         )
-        return self._make_linear(
+        return self.make_linear(
             attention.out_proj,
             f"{base}/out_proj",
             merged,
             self.sequence_length,
         )
 
-    def _make_layer(self, layer_id, layer, hidden_states, attention_mask):
+    def make_decoder_layer(self, layer_id, layer, hidden_states, attention_mask):
         base = f"/decoder/layers.{layer_id}"
-        self_norm = self._make_layer_norm(
+        self_norm = self.make_layer_norm(
             layer.self_attn_layer_norm,
             f"{base}/self_attn_layer_norm",
             hidden_states,
             self.sequence_length,
         )
-        self_attention = self._make_self_attention(
+        self_attention = self.make_self_attention(
             layer_id, layer.self_attn, self_norm, attention_mask
         )
         self_residual = f"{base}/self_attn/Add"
@@ -723,13 +723,13 @@ class NemotronParseDecoderComponent(Model):
             ["batch_size", self.sequence_length, self.hidden_size],
         )
 
-        cross_norm = self._make_layer_norm(
+        cross_norm = self.make_layer_norm(
             layer.encoder_attn_layer_norm,
             f"{base}/encoder_attn_layer_norm",
             f"{self_residual}/output_0",
             self.sequence_length,
         )
-        cross_attention = self._make_cross_attention(
+        cross_attention = self.make_cross_attention(
             layer_id, layer.encoder_attn, cross_norm
         )
         cross_residual = f"{base}/encoder_attn/Add"
@@ -740,13 +740,13 @@ class NemotronParseDecoderComponent(Model):
             ["batch_size", self.sequence_length, self.hidden_size],
         )
 
-        final_norm = self._make_layer_norm(
+        final_norm = self.make_layer_norm(
             layer.final_layer_norm,
             f"{base}/final_layer_norm",
             f"{cross_residual}/output_0",
             self.sequence_length,
         )
-        fc1 = self._make_linear(
+        fc1 = self.make_linear(
             layer.fc1, f"{base}/fc1", final_norm, self.sequence_length
         )
         if self.activation != "gelu":
@@ -766,7 +766,7 @@ class NemotronParseDecoderComponent(Model):
             self.io_dtype,
             ["batch_size", self.sequence_length, self.intermediate_size],
         )
-        fc2 = self._make_linear(
+        fc2 = self.make_linear(
             layer.fc2,
             f"{base}/fc2",
             f"{activation}/output_0",

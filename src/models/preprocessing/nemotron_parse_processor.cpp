@@ -3,6 +3,7 @@
 
 #include "generator/generators.h"
 #include "models/model.h"
+#include "models/nemotron_parse.h"
 #include "models/preprocessing/genai_tokenizer.h"
 #include "models/preprocessing/nemotron_parse_processor.h"
 
@@ -24,6 +25,8 @@ constexpr std::string_view kDefaultTaskPrompt =
 std::unique_ptr<OrtValue> BuildInputIds(const Tokenizer& tokenizer,
                                         std::string_view prompt,
                                         int32_t decoder_start_token_id,
+                                        int64_t required_prompt_length,
+                                        int context_length,
                                         Ort::Allocator& allocator) {
   const auto task_prompt = prompt.empty() ? kDefaultTaskPrompt : prompt;
   auto prompt_ids = tokenizer.Encode(std::string(task_prompt).c_str());
@@ -39,6 +42,9 @@ std::unique_ptr<OrtValue> BuildInputIds(const Tokenizer& tokenizer,
   input_ids.push_back(tokenizer_bos);
   input_ids.insert(input_ids.end(), prompt_ids.begin(), prompt_ids.end());
   input_ids.push_back(tokenizer_eos);
+
+  ValidateNemotronParsePromptLength(input_ids.size(), required_prompt_length,
+                                   context_length);
 
   const std::array<int64_t, 2> shape{1, static_cast<int64_t>(input_ids.size())};
   auto value = OrtValue::CreateTensor<int32_t>(allocator, shape);
@@ -171,7 +177,15 @@ NemotronParseProcessor::NemotronParseProcessor(
     Config& config, const SessionInfo& session_info)
     : pixel_values_type_{session_info.GetInputDataType(
           config.model.vision.inputs.pixel_values)},
-      decoder_start_token_id_{config.model.bos_token_id} {
+      decoder_start_token_id_{config.model.bos_token_id},
+      context_length_{config.model.context_length} {
+  const auto input_ids_shape =
+      session_info.GetInputShape(config.model.decoder.inputs.input_ids);
+  if (input_ids_shape.size() != 2) {
+    throw std::runtime_error(
+        "Nemotron Parse decoder input_ids must have rank 2");
+  }
+  required_prompt_length_ = input_ids_shape[1];
   const auto shape =
       session_info.GetInputShape(config.model.vision.inputs.pixel_values);
   if (shape.size() != 4 || shape[0] != 1 || shape[1] != 3 ||
@@ -203,13 +217,21 @@ std::unique_ptr<NamedTensors> NemotronParseProcessor::Process(
   if (payload.audios) {
     throw std::runtime_error("Nemotron Parse does not accept audio input");
   }
+  if (payload.prompt_is_list &&
+      (payload.prompts.size() != 1 || payload.prompts[0] == nullptr)) {
+    throw std::runtime_error("Nemotron Parse requires exactly one prompt in a prompt list");
+  }
+  const std::string_view prompt = payload.prompt_is_list
+                                      ? std::string_view{payload.prompts[0]}
+                                      : std::string_view{payload.prompt};
 
   Ort::Allocator& allocator{Ort::Allocator::GetWithDefaultOptions()};
   auto named_tensors = std::make_unique<NamedTensors>();
   named_tensors->emplace(
       std::string(Config::Defaults::InputIdsName),
       std::make_shared<Tensor>(BuildInputIds(
-          tokenizer, payload.prompt, decoder_start_token_id_, allocator)));
+          tokenizer, prompt, decoder_start_token_id_,
+          required_prompt_length_, context_length_, allocator)));
 
   ort_extensions::OrtxObjectPtr<OrtxTensorResult> result;
   CheckResult(OrtxImagePreProcess(processor_.get(),

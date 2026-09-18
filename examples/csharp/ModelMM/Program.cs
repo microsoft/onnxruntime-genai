@@ -304,7 +304,10 @@ RootCommand GetArgs()
     )
     {
         Arity = ArgumentArity.ExactlyOne,
-        Description = "User prompt to use for the model."
+        Description = "User prompt. Nemotron Parse accepts 1 through context_length-1 " +
+            "tokens including special tokens (no padding or truncation). " +
+            "TRT-RTX uses a static fast path at prefill_sequence_length. " +
+            "The default Nemotron Parse task uses 8 tokens."
     };
 
     var rewind = new Option<bool>(
