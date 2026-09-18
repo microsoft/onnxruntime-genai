@@ -212,13 +212,12 @@ class DecoderState : public State {
                             ? model_.prefill_decoder_session_.get()
                             : model_.dynamic_prefill_decoder_session_.get();
     }
-    UpdateIoBinding(*decoder_session, new_length);
     if (model_.config_->model.decoder.run_options.has_value()) {
       State::SetRunOptions(*model_.config_->model.decoder.run_options);
     }
     State::Run(*decoder_session,
                params_->use_graph_capture && !is_prompt,
-               static_cast<int>(new_length), 0, io_binding_.get());
+               static_cast<int>(new_length));
     auto logits = logits_.Get();
     self_cache_.Commit(total_length);
     prompt_pending_ = false;
@@ -226,38 +225,11 @@ class DecoderState : public State {
   }
 
  private:
-  void UpdateIoBinding(OrtSession& session, size_t sequence_length) {
-    if (io_binding_ && bound_session_ == &session &&
-        bound_sequence_length_ == sequence_length) {
-      return;
-    }
-
-    // TRT-RTX lowers TensorScatter to an in-place layer, so each past/present
-    // pair must alias the same preallocated OrtValue. Rebuild the binding only
-    // when prompt-to-token decoding changes the input and logits shapes.
-    io_binding_ = OrtIoBinding::Create(session);
-    for (size_t i = 0; i < input_names_.size(); ++i) {
-      io_binding_->BindInput(input_names_[i], *inputs_[i]);
-    }
-    for (size_t i = 0; i < output_names_.size(); ++i) {
-      if (!outputs_[i]) {
-        throw std::runtime_error(
-            "Nemotron Parse requires preallocated decoder outputs");
-      }
-      io_binding_->BindOutput(output_names_[i], *outputs_[i]);
-    }
-    bound_session_ = &session;
-    bound_sequence_length_ = sequence_length;
-  }
-
   const NemotronParseModel& model_;
   DefaultInputIDs input_ids_;
   DefaultPositionInputs attention_mask_;
   TensorScatterKeyValueCache self_cache_;
   Logits logits_;
-  std::unique_ptr<OrtIoBinding> io_binding_;
-  OrtSession* bound_session_{};
-  size_t bound_sequence_length_{};
   bool prompt_pending_{true};
 };
 
