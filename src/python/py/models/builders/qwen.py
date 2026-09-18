@@ -1630,6 +1630,8 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
             self.make_initializer(attention.indexer.k_layernorm.weight + 1, index_k_scale, to=self.io_dtype)
             indexer_name = f"/model/layers.{layer_id}/attn/SparseAttentionIndexer"
             selected_indices = f"{indexer_name}/output_0"
+            if self.input_types["attention_mask"] != ir.DataType.INT64:
+                raise ValueError("SparseAttentionIndexer requires an INT64 attention_mask input.")
             self.make_node(
                 "SparseAttentionIndexer",
                 inputs=[

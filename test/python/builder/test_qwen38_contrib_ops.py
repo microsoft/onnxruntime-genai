@@ -4,6 +4,7 @@
 from types import MethodType, SimpleNamespace
 
 import onnx_ir as ir
+import pytest
 import torch
 
 from models.builders.qwen import Qwen4ExpMTPTextModel, Qwen4ExpTextModel
@@ -47,6 +48,7 @@ def make_sparse_model(paged):
         "qk_norm_epsilon": 1e-6,
     }
     model.mask_attrs = {"seqlens_k": "seqlens", "total_seq_len": "total_length"}
+    model.input_types = {"attention_mask": ir.DataType.INT64}
     model.input_names = {
         "position_ids": "position_ids",
         "attention_mask": "attention_mask",
@@ -568,6 +570,14 @@ def test_dense_qwen_sparse_attention_emits_indexer_and_dynamic_executor():
     assert attention["is_causal"] == 1
     assert attention["attention_mode"] == "selected_only"
     assert attention["selected_kv_source"] == "main"
+
+
+def test_dense_qwen_sparse_attention_rejects_boolean_mask():
+    model = make_sparse_model(paged=False)
+    model.input_types["attention_mask"] = ir.DataType.BOOL
+
+    with pytest.raises(ValueError, match="requires an INT64 attention_mask"):
+        model.make_qwen_sparse_attention(3, make_attention(), "hidden_states")
 
 
 def test_paged_qwen_sparse_attention_emits_shared_webgpu_schema():
