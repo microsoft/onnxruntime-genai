@@ -536,23 +536,9 @@ class Qwen35TextModel(Model):
         """
         basename = f"/model/layers.{layer_id}/linear_attn"
 
-        qkv_name = f"{basename}/qkv_proj/MatMul"
-        self.make_matmul(attention.in_proj_qkv, qkv_name, root_input)
+        qkv_name, z_name = self.make_linear_attention_qkv_z_proj(layer_id, attention, root_input)
 
-        z_name = f"{basename}/z_proj/MatMul"
-        self.make_matmul(attention.in_proj_z, z_name, root_input)
-
-        # The decay and beta gates drive the GatedDeltaNet recurrence, and their weights are
-        # ~0.1% of the model, so they stay dense regardless of which loader supplied them.
-        b_name = f"{basename}/b_proj/MatMul"
-        self.require_dense_linear_attention_gate(attention.in_proj_b, b_name)
-        self.exclude_node_from_quantization(b_name)
-        self.make_matmul(attention.in_proj_b, b_name, root_input)
-
-        a_name = f"{basename}/a_proj/MatMul"
-        self.require_dense_linear_attention_gate(attention.in_proj_a, a_name)
-        self.exclude_node_from_quantization(a_name)
-        self.make_matmul(attention.in_proj_a, a_name, root_input)
+        b_name, a_name = self.make_linear_attention_a_b_proj(layer_id, attention, root_input)
 
         conv_input = f"{qkv_name}/output_0"
         if not self.use_paged_attention:
@@ -570,6 +556,29 @@ class Qwen35TextModel(Model):
         self.make_initializer(attention.conv1d.weight, conv_weight_name, to=self.io_dtype)
 
         return z_name, b_name, a_name, conv_input, conv_weight_name
+
+    def make_linear_attention_qkv_z_proj(self, layer_id, attention, root_input):
+        basename = f"/model/layers.{layer_id}/linear_attn"
+        qkv_name = f"{basename}/qkv_proj/MatMul"
+        z_name = f"{basename}/z_proj/MatMul"
+        self.make_matmul(attention.in_proj_qkv, qkv_name, root_input)
+        self.make_matmul(attention.in_proj_z, z_name, root_input)
+        return qkv_name, z_name
+
+    def make_linear_attention_a_b_proj(self, layer_id, attention, root_input):
+        basename = f"/model/layers.{layer_id}/linear_attn"
+        # The decay and beta gates drive the GatedDeltaNet recurrence, and their weights are
+        # ~0.1% of the model, so they stay dense regardless of which loader supplied them.
+        b_name = f"{basename}/b_proj/MatMul"
+        self.require_dense_linear_attention_gate(attention.in_proj_b, b_name)
+        self.exclude_node_from_quantization(b_name)
+        self.make_matmul(attention.in_proj_b, b_name, root_input)
+
+        a_name = f"{basename}/a_proj/MatMul"
+        self.require_dense_linear_attention_gate(attention.in_proj_a, a_name)
+        self.exclude_node_from_quantization(a_name)
+        self.make_matmul(attention.in_proj_a, a_name, root_input)
+        return b_name, a_name
 
     def require_dense_linear_attention_gate(self, projection, name):
         if hasattr(projection, "qweight") or getattr(projection, "quant_type", "none") != "none":
@@ -920,18 +929,101 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         finally:
             self.q_size = q_size
 
-    def make_moe_router(self, layer_id, moe, root_input):
-        basename = f"/model/layers.{layer_id}/moe/gate_up_router"
-        packed_matmul = self.make_packed_matmul(
-            moe.shared_expert.gate_proj,
-            moe.shared_expert.up_proj,
-            moe.gate,
-            f"{basename}/MatMul",
-            root_input,
+    def make_linear_attention_qkv_z_proj(self, layer_id, attention, root_input):
+        qkv = attention.in_proj_qkv
+        z = attention.in_proj_z
+        if any(getattr(projection, "quant_type", "none") != "none" for projection in (qkv, z)):
+            return super().make_linear_attention_qkv_z_proj(layer_id, attention, root_input)
+
+        basename = f"/model/layers.{layer_id}/linear_attn"
+        packed_name = f"{basename}/qkv_z_proj/MatMul"
+
+        if hasattr(qkv, "qweight") and hasattr(z, "qweight"):
+            if qkv.bits != z.bits or qkv.group_size != z.group_size or qkv.in_features != z.in_features:
+                raise ValueError("QKV and Z must use compatible quantization to share a packed MatMul.")
+            if hasattr(qkv, "qzeros") != hasattr(z, "qzeros"):
+                raise ValueError("QKV and Z must use the same zero-point representation to share a packed MatMul.")
+
+            class PackedQkvZ:
+                qweight = torch.cat([qkv.qweight, z.qweight], dim=0)
+                scales = torch.cat([qkv.scales, z.scales], dim=0)
+                qzeros = torch.cat([qkv.qzeros, z.qzeros], dim=0) if hasattr(qkv, "qzeros") else None
+                g_idx = getattr(qkv, "g_idx", None)
+                in_features = qkv.in_features
+                out_features = qkv.out_features + z.out_features
+                bits = qkv.bits
+                group_size = qkv.group_size
+
+            packed_matmul = self.make_matmul_nbits(PackedQkvZ(), packed_name, root_input)
+            qkv_size = qkv.out_features
+            z_size = z.out_features
+        elif hasattr(qkv, "weight") and hasattr(z, "weight"):
+
+            class PackedQkvZ:
+                weight = torch.cat([qkv.weight, z.weight], dim=0)
+
+            packed_matmul = self.make_matmul(PackedQkvZ(), packed_name, root_input)
+            qkv_size = qkv.weight.shape[0]
+            z_size = z.weight.shape[0]
+        else:
+            raise ValueError("QKV and Z must use the same weight representation to share a packed MatMul.")
+
+        qkv_name = f"{basename}/qkv_proj/MatMul"
+        z_name = f"{basename}/z_proj/MatMul"
+        self.make_split(
+            f"{basename}/qkv_z_proj/Split",
+            [f"{packed_matmul}/output_0", f"/model/constants/INT64/[{qkv_size}, {z_size}]"],
+            [f"{qkv_name}/output_0", f"{z_name}/output_0"],
+            [self.io_dtype] * 2,
+            [
+                self.make_hidden_state_shape(last_dim=qkv_size),
+                self.make_hidden_state_shape(last_dim=z_size),
+            ],
+            axis=-1,
         )
+        return qkv_name, z_name
+
+    def make_linear_attention_a_b_proj(self, layer_id, attention, root_input):
+        basename = f"/model/layers.{layer_id}/linear_attn"
+        a = attention.in_proj_a
+        b = attention.in_proj_b
+        a_name = f"{basename}/a_proj/MatMul"
+        b_name = f"{basename}/b_proj/MatMul"
+        self.require_dense_linear_attention_gate(a, a_name)
+        self.require_dense_linear_attention_gate(b, b_name)
+
+        packed_name = f"{basename}/a_b_proj/MatMul"
+        self.exclude_node_from_quantization(packed_name)
+
+        class PackedAB:
+            weight = torch.cat([a.weight, b.weight], dim=0)
+
+        packed_matmul = self.make_matmul(PackedAB(), packed_name, root_input)
+        a_size = a.weight.shape[0]
+        b_size = b.weight.shape[0]
+        self.make_split(
+            f"{basename}/a_b_proj/Split",
+            [f"{packed_matmul}/output_0", f"/model/constants/INT64/[{a_size}, {b_size}]"],
+            [f"{a_name}/output_0", f"{b_name}/output_0"],
+            [self.io_dtype] * 2,
+            [
+                self.make_hidden_state_shape(last_dim=a_size),
+                self.make_hidden_state_shape(last_dim=b_size),
+            ],
+            axis=-1,
+        )
+        return b_name, a_name
+
+    def make_moe_router(self, layer_id, moe, root_input):
+        basename = f"/model/layers.{layer_id}/moe/gate_up"
+
+        class PackedGateUp:
+            weight = torch.cat([moe.shared_expert.gate_proj.weight, moe.shared_expert.up_proj.weight], dim=0)
+
+        packed_matmul = self.make_matmul(PackedGateUp(), f"{basename}/MatMul", root_input)
         packed_output = f"{packed_matmul}/output_0"
 
-        projections = (moe.shared_expert.gate_proj, moe.shared_expert.up_proj, moe.gate)
+        projections = (moe.shared_expert.gate_proj, moe.shared_expert.up_proj)
         biases = [getattr(projection, "bias", None) for projection in projections]
         if any(bias is not None and torch.count_nonzero(bias) > 0 for bias in biases):
             bias_template = next(bias for bias in biases if bias is not None)
@@ -953,25 +1045,25 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
 
         intermediate_size = self.shared_expert_intermediate_size
         num_experts = self.moe_attrs["num_experts"]
-        split_outputs = [f"{basename}/Split/output_{index}" for index in range(3)]
+        split_outputs = [f"{basename}/Split/output_{index}" for index in range(2)]
         self.make_split(
             f"{basename}/Split",
-            [packed_output, f"/model/constants/INT64/[{intermediate_size}, {intermediate_size}, {num_experts}]"],
+            [packed_output, f"/model/constants/INT64/[{intermediate_size}, {intermediate_size}]"],
             split_outputs,
-            [self.io_dtype] * 3,
+            [self.io_dtype] * 2,
             [
                 self.make_hidden_state_shape(last_dim=intermediate_size),
                 self.make_hidden_state_shape(last_dim=intermediate_size),
-                self.make_hidden_state_shape(last_dim=num_experts),
             ],
             axis=-1,
         )
-        self.moe_attrs.setdefault("shared_expert_paths", {})[layer_id] = tuple(split_outputs[:2])
+        self.moe_attrs.setdefault("shared_expert_paths", {})[layer_id] = tuple(split_outputs)
 
+        router_matmul = self.make_matmul(moe.gate, f"/model/layers.{layer_id}/moe/router/MatMul", root_input)
         router_reshape_name = f"/model/layers.{layer_id}/moe/router/Reshape"
         self.make_reshape(
             router_reshape_name,
-            [split_outputs[2], f"/model/constants/INT64/{[-1, num_experts]}"],
+            [f"{router_matmul}/output_0", f"/model/constants/INT64/{[-1, num_experts]}"],
             dtype=self.io_dtype,
             shape=["batch_size * sequence_length", num_experts],
         )
@@ -1235,9 +1327,14 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         normalized = self.make_branchwise_rms_norm(
             f"{basename}/hc_norm", root_input, hyper_connection.hc_norm, self.hidden_size
         )
-        down_name = self.make_matmul(
-            hyper_connection.input_mix_weight_down, f"{basename}/input_mix_weight_down/MatMul", normalized
-        )
+        if combine:
+            down_name, inject_name = self.make_hyper_connection_down_inject_proj(
+                basename, hyper_connection, normalized, token_shape
+            )
+        else:
+            down_name = self.make_matmul(
+                hyper_connection.input_mix_weight_down, f"{basename}/input_mix_weight_down/MatMul", normalized
+            )
         silu_shape = [*token_shape, hyper_connection.input_mix_weight_down.out_features]
         silu_name = f"{basename}/input_mix_weight_down/SiLU"
         silu_output = self.make_scaled_silu(silu_name, f"{down_name}/output_0", silu_shape)
@@ -1264,9 +1361,6 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         if not combine:
             return mixed_output
 
-        inject_name = self.make_matmul(
-            hyper_connection.block_inject_weight, f"{basename}/block_inject_weight/MatMul", normalized
-        )
         inject_div = f"{basename}/block_inject_weight/Div"
         inject_shape = [*token_shape, self.hc_count]
         self.make_div(
@@ -1285,6 +1379,37 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
             inject_shape,
         )
         return mixed_output, root_input, f"{inject_scale}/output_0"
+
+    def make_hyper_connection_down_inject_proj(self, basename, hyper_connection, root_input, token_shape):
+        down = hyper_connection.input_mix_weight_down
+        inject = hyper_connection.block_inject_weight
+        if any(
+            hasattr(projection, "qweight") or getattr(projection, "quant_type", "none") != "none"
+            for projection in (down, inject)
+        ):
+            raise ValueError("Input-mix-down and block-inject must use dense weights before graph quantization.")
+
+        class PackedDownInject:
+            weight = torch.cat([down.weight, inject.weight], dim=0)
+
+        packed_name = f"{basename}/input_mix_down_block_inject/MatMul"
+        packed_matmul = self.make_matmul(PackedDownInject(), packed_name, root_input)
+        down_name = f"{basename}/input_mix_weight_down/MatMul"
+        inject_name = f"{basename}/block_inject_weight/MatMul"
+        down_size = down.out_features
+        inject_size = inject.out_features
+        self.make_split(
+            f"{basename}/input_mix_down_block_inject/Split",
+            [f"{packed_matmul}/output_0", f"/model/constants/INT64/[{down_size}, {inject_size}]"],
+            [f"{down_name}/output_0", f"{inject_name}/output_0"],
+            [self.io_dtype] * 2,
+            [
+                [*token_shape, down_size],
+                [*token_shape, inject_size],
+            ],
+            axis=-1,
+        )
+        return down_name, inject_name
 
     def make_hyper_connection_injection(self, layer_id, block_output, hyper_input, injection_weights, location):
         basename = f"/model/layers.{layer_id}/{location}_hyper_connection/injection"
@@ -1499,39 +1624,18 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
                     ["batch_size", "sequence_length", index_k_size],
                 ],
             )
-            index_q_4d = f"/model/layers.{layer_id}/attn/indexer/query/Reshape"
-            self.make_reshape(
-                index_q_4d,
-                [index_q, f"/model/constants/INT64/[0, 0, {self.indexer_num_heads}, {self.indexer_head_dim}]"],
-                self.io_dtype,
-                ["batch_size", "sequence_length", self.indexer_num_heads, self.indexer_head_dim],
-            )
             index_q_scale = f"model.layers.{layer_id}.attn.indexer.q_norm.weight"
             index_k_scale = f"model.layers.{layer_id}.attn.indexer.k_norm.weight"
             self.make_initializer(attention.indexer.q_layernorm.weight + 1, index_q_scale, to=self.io_dtype)
             self.make_initializer(attention.indexer.k_layernorm.weight + 1, index_k_scale, to=self.io_dtype)
-            index_q_norm = f"/model/layers.{layer_id}/attn/indexer/query/SimplifiedLayerNormalization"
-            self.make_node(
-                "SimplifiedLayerNormalization",
-                inputs=[f"{index_q_4d}/output_0", index_q_scale],
-                outputs=[f"{index_q_norm}/output_0"],
-                name=index_q_norm,
-                axis=-1,
-                epsilon=self.layernorm_attrs["epsilon"],
-                stash_type=1,
-            )
-            self.make_value(
-                f"{index_q_norm}/output_0",
-                self.io_dtype,
-                ["batch_size", "sequence_length", self.indexer_num_heads, self.indexer_head_dim],
-            )
             indexer_name = f"/model/layers.{layer_id}/attn/SparseAttentionIndexer"
             selected_indices = f"{indexer_name}/output_0"
             self.make_node(
                 "SparseAttentionIndexer",
                 inputs=[
-                    f"{index_q_norm}/output_0",
+                    index_q,
                     index_k,
+                    index_q_scale,
                     index_k_scale,
                     cos_cache,
                     sin_cache,

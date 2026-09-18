@@ -15,7 +15,7 @@ def record_calls(model, method_names):
     def make_recorder(method_name):
         def record(self, *args, **kwargs):
             self.calls.append((method_name, args, kwargs))
-            if method_name == "make_matmul":
+            if method_name in {"make_matmul", "make_matmul_nbits"}:
                 return args[1]
 
         return record
@@ -142,6 +142,99 @@ def test_qwen_attention_packs_gated_qkv_before_splitting():
     assert model.attention_attrs["v_path"] == "/model/layers.3/attn/qkv_proj/Split/output_2"
 
 
+def test_qwen_linear_attention_packs_qkv_and_z():
+    model = object.__new__(Qwen4ExpTextModel)
+    model.io_dtype = ir.DataType.FLOAT16
+    model.make_hidden_state_shape = MethodType(
+        lambda self, last_dim: ["batch_size", "sequence_length", last_dim], model
+    )
+    record_calls(model, ["make_matmul", "make_split"])
+    attention = SimpleNamespace(
+        in_proj_qkv=SimpleNamespace(weight=torch.ones((10, 8))),
+        in_proj_z=SimpleNamespace(weight=torch.full((6, 8), 2.0)),
+    )
+
+    qkv_name, z_name = model.make_linear_attention_qkv_z_proj(3, attention, "hidden_states")
+
+    matmul = next(call for call in model.calls if call[0] == "make_matmul")
+    assert matmul[1][0].weight.shape == (16, 8)
+    torch.testing.assert_close(matmul[1][0].weight[:10], attention.in_proj_qkv.weight)
+    torch.testing.assert_close(matmul[1][0].weight[10:], attention.in_proj_z.weight)
+    assert matmul[1][1:] == ("/model/layers.3/linear_attn/qkv_z_proj/MatMul", "hidden_states")
+    split = next(call for call in model.calls if call[0] == "make_split")
+    assert split[1][1][1] == "/model/constants/INT64/[10, 6]"
+    assert split[1][2] == [
+        "/model/layers.3/linear_attn/qkv_proj/MatMul/output_0",
+        "/model/layers.3/linear_attn/z_proj/MatMul/output_0",
+    ]
+    assert qkv_name == "/model/layers.3/linear_attn/qkv_proj/MatMul"
+    assert z_name == "/model/layers.3/linear_attn/z_proj/MatMul"
+
+
+def test_qwen_linear_attention_packs_prequantized_qkv_and_z():
+    model = object.__new__(Qwen4ExpTextModel)
+    model.io_dtype = ir.DataType.FLOAT16
+    model.make_hidden_state_shape = MethodType(
+        lambda self, last_dim: ["batch_size", "sequence_length", last_dim], model
+    )
+    record_calls(model, ["make_matmul_nbits", "make_split"])
+
+    def projection(out_features, value):
+        return SimpleNamespace(
+            qweight=torch.full((out_features, 2, 2), value, dtype=torch.int32),
+            scales=torch.full((out_features, 2), float(value)),
+            qzeros=torch.full((out_features, 2), value, dtype=torch.int32),
+            g_idx=None,
+            in_features=8,
+            out_features=out_features,
+            bits=4,
+            group_size=4,
+        )
+
+    attention = SimpleNamespace(in_proj_qkv=projection(10, 1), in_proj_z=projection(6, 2))
+    model.make_linear_attention_qkv_z_proj(3, attention, "hidden_states")
+
+    matmul = next(call for call in model.calls if call[0] == "make_matmul_nbits")
+    packed = matmul[1][0]
+    assert packed.qweight.shape == (16, 2, 2)
+    assert packed.scales.shape == (16, 2)
+    assert packed.qzeros.shape == (16, 2)
+    assert packed.out_features == 16
+    assert torch.all(packed.qweight[:10] == 1)
+    assert torch.all(packed.qweight[10:] == 2)
+    assert matmul[1][1:] == ("/model/layers.3/linear_attn/qkv_z_proj/MatMul", "hidden_states")
+
+
+def test_qwen_linear_attention_packs_a_and_b():
+    model = object.__new__(Qwen4ExpTextModel)
+    model.io_dtype = ir.DataType.FLOAT16
+    model.make_hidden_state_shape = MethodType(
+        lambda self, last_dim: ["batch_size", "sequence_length", last_dim], model
+    )
+    record_calls(model, ["make_matmul", "make_split", "exclude_node_from_quantization"])
+    attention = SimpleNamespace(
+        in_proj_a=SimpleNamespace(weight=torch.ones((3, 8))),
+        in_proj_b=SimpleNamespace(weight=torch.full((5, 8), 2.0)),
+    )
+
+    b_name, a_name = model.make_linear_attention_a_b_proj(3, attention, "hidden_states")
+
+    matmul = next(call for call in model.calls if call[0] == "make_matmul")
+    assert matmul[1][0].weight.shape == (8, 8)
+    torch.testing.assert_close(matmul[1][0].weight[:3], attention.in_proj_a.weight)
+    torch.testing.assert_close(matmul[1][0].weight[3:], attention.in_proj_b.weight)
+    assert matmul[1][1:] == ("/model/layers.3/linear_attn/a_b_proj/MatMul", "hidden_states")
+    split = next(call for call in model.calls if call[0] == "make_split")
+    assert split[1][1][1] == "/model/constants/INT64/[3, 5]"
+    assert split[1][2] == [
+        "/model/layers.3/linear_attn/a_proj/MatMul/output_0",
+        "/model/layers.3/linear_attn/b_proj/MatMul/output_0",
+    ]
+    assert ("exclude_node_from_quantization", ("/model/layers.3/linear_attn/a_b_proj/MatMul",), {}) in model.calls
+    assert b_name == "/model/layers.3/linear_attn/b_proj/MatMul"
+    assert a_name == "/model/layers.3/linear_attn/a_proj/MatMul"
+
+
 def test_qwen_moe_packs_shared_gate_up_and_router():
     model = object.__new__(Qwen4ExpTextModel)
     model.use_paged_attention = False
@@ -150,7 +243,9 @@ def test_qwen_moe_packs_shared_gate_up_and_router():
     model.intermediate_size = 256
     model.shared_expert_intermediate_size = 16
     model.moe_attrs = {"num_experts": 32}
-    projection = lambda output_size: SimpleNamespace(out_features=output_size, bias=None)  # noqa: E731
+    projection = lambda output_size: SimpleNamespace(  # noqa: E731
+        out_features=output_size, bias=None, weight=torch.ones((output_size, 64))
+    )
     shared_expert = SimpleNamespace(
         gate_proj=projection(16),
         up_proj=projection(16),
@@ -162,28 +257,24 @@ def test_qwen_moe_packs_shared_gate_up_and_router():
         ["make_split", "make_reshape", "make_activation", "make_mul", "make_matmul", "make_sigmoid"],
     )
 
-    def make_packed_matmul(self, gate_proj, up_proj, router, basename, root_input):
-        self.calls.append(("make_packed_matmul", (gate_proj, up_proj, router, basename, root_input), {}))
-        return basename
-
-    model.make_packed_matmul = MethodType(make_packed_matmul, model)
-
     model.make_moe_router(3, moe, "hidden_states")
     output, gate = model.make_shared_expert(3, shared_expert, projection(1), "hidden_states")
 
-    packed = next(call for call in model.calls if call[0] == "make_packed_matmul")
-    assert packed[1][4] == "hidden_states"
+    matmuls = [call for call in model.calls if call[0] == "make_matmul"]
+    assert matmuls[0][1][0].weight.shape == (32, 64)
+    assert matmuls[0][1][1:] == ("/model/layers.3/moe/gate_up/MatMul", "hidden_states")
+    assert matmuls[1][1][0] is moe.gate
+    assert matmuls[1][1][1:] == ("/model/layers.3/moe/router/MatMul", "hidden_states")
     packed_split = next(call for call in model.calls if call[0] == "make_split")
-    assert packed_split[1][1][1] == "/model/constants/INT64/[16, 16, 32]"
+    assert packed_split[1][1][1] == "/model/constants/INT64/[16, 16]"
     assert packed_split[1][4] == [
         ["batch_size", "sequence_length", 16],
         ["batch_size", "sequence_length", 16],
-        ["batch_size", "sequence_length", 32],
     ]
     router_reshape = next(call for call in model.calls if call[0] == "make_reshape")
-    assert router_reshape[1][1][0] == "/model/layers.3/moe/gate_up_router/Split/output_2"
+    assert router_reshape[1][1][0] == "/model/layers.3/moe/router/MatMul/output_0"
     mul = next(call for call in model.calls if call[0] == "make_mul")
-    assert mul[1][1][1] == "/model/layers.3/moe/gate_up_router/Split/output_1"
+    assert mul[1][1][1] == "/model/layers.3/moe/gate_up/Split/output_1"
     assert output == "/model/layers.3/mlp/down_proj/MatMul/output_0"
     assert gate == "/model/layers.3/shared_expert_gate/Sigmoid/output_0"
     assert not model.moe_attrs["shared_expert_paths"]
@@ -279,6 +370,7 @@ def test_hyper_connection_emits_fused_ops():
         model,
         [
             "make_matmul",
+            "make_split",
             "make_div",
             "make_sigmoid",
             "make_mul",
@@ -289,9 +381,9 @@ def test_hyper_connection_emits_fused_ops():
     )
     model.make_branchwise_rms_norm = MethodType(lambda self, *args: "normalized", model)
     weights = SimpleNamespace(
-        input_mix_weight_down=SimpleNamespace(out_features=4),
+        input_mix_weight_down=SimpleNamespace(out_features=4, weight=torch.ones((4, 8))),
         input_mix_weight_up=SimpleNamespace(),
-        block_inject_weight=SimpleNamespace(),
+        block_inject_weight=SimpleNamespace(out_features=4, weight=torch.full((4, 8), 2.0)),
         hc_norm=SimpleNamespace(),
     )
 
@@ -308,6 +400,21 @@ def test_hyper_connection_emits_fused_ops():
     assert nodes[1][1]["num_branches"] == 4
     assert nodes[1][1]["reduction_scale"] == 0.25
     matmuls = [call for call in model.calls if call[0] == "make_matmul"]
+    assert len(matmuls) == 2
+    packed = matmuls[0]
+    assert packed[1][0].weight.shape == (8, 8)
+    torch.testing.assert_close(packed[1][0].weight[:4], weights.input_mix_weight_down.weight)
+    torch.testing.assert_close(packed[1][0].weight[4:], weights.block_inject_weight.weight)
+    assert packed[1][1:] == (
+        "/model/layers.0/attn_hyper_connection/input_mix_down_block_inject/MatMul",
+        "normalized",
+    )
+    split = next(call for call in model.calls if call[0] == "make_split")
+    assert split[1][1][1] == "/model/constants/INT64/[4, 4]"
+    assert split[1][2] == [
+        "/model/layers.0/attn_hyper_connection/input_mix_weight_down/MatMul/output_0",
+        "/model/layers.0/attn_hyper_connection/block_inject_weight/MatMul/output_0",
+    ]
     assert matmuls[1][1][2] == "/model/layers.0/attn_hyper_connection/input_mix_weight_down/SiLU/output_0"
 
 
@@ -414,14 +521,19 @@ def test_dense_qwen_sparse_attention_emits_indexer_and_dynamic_executor():
 
     indexer = nodes[-2][1]
     assert indexer["inputs"] == [
-        "/model/layers.3/attn/indexer/query/SimplifiedLayerNormalization/output_0",
+        "/model/layers.3/attn/indexer/query",
         "/model/layers.3/attn/indexer/key",
+        "model.layers.3.attn.indexer.q_norm.weight",
         "model.layers.3.attn.indexer.k_norm.weight",
         "cos_cache",
         "sin_cache",
         "attention_mask",
         "past.3.indexer_key",
     ]
+    assert not any(
+        call[0] == "make_reshape" and "/attn/indexer/query/Reshape" in str(call)
+        for call in model.calls
+    )
     assert not any("/rotary_cache/" in str(call) for call in model.calls)
     assert not any("/visibility/" in str(call) for call in model.calls)
     assert indexer["outputs"] == [
@@ -431,8 +543,7 @@ def test_dense_qwen_sparse_attention_emits_indexer_and_dynamic_executor():
     assert indexer["policy_mode"] == "qsa"
     assert indexer["token_budget"] == 32
     assert indexer["compress_ratio"] == 4
-    index_norm = next(kwargs for op_type, kwargs in nodes if op_type == "SimplifiedLayerNormalization")
-    assert "domain" not in index_norm
+    assert not any(op_type == "SimplifiedLayerNormalization" for op_type, _ in nodes)
 
     attention = nodes[-1][1]
     casts = [call for call in model.calls if call[0] == "make_cast"]
