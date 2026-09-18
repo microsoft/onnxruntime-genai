@@ -12,4 +12,9 @@ constexpr const char* kAMDGPUExecutionProviderName = "AMDGPUExecutionProvider";
 
 DeviceInterface* GetAMDGPUInterface();
 
+// Null the AMDGPU interface singleton's allocator-derived state (allocator, memory info, pinned
+// allocator, device id) in place, without destroying the singleton. Called per model so the next
+// device init rebinds a fresh allocator.
+void ResetAMDGPUInterfaceAllocatorState();
+
 }  // namespace Generators
