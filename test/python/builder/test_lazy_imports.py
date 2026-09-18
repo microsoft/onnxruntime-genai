@@ -170,16 +170,35 @@ assert loaded == {expected_modules!r}, loaded
 
 def test_unknown_builder_attribute_raises():
     models_dir = Path(__file__).parents[3] / "src" / "python" / "py" / "models"
+    script = """
+import builders
+assert not hasattr(builders, "UnknownModel")
+assert not hasattr(builders, "__missing__")
+"""
     result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import builders; assert not hasattr(builders, 'UnknownModel'); "
-            "assert not hasattr(builders, '__missing__')",
-        ],
+        [sys.executable, "-c", script],
         cwd=models_dir,
         capture_output=True,
         text=True,
         check=False,
     )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("test_module", ["test_paged_block_size.py", "test_precision.py", "test_quantized_kv_cache.py"])
+def test_collecting_builder_tests_preserves_module_metadata(test_module):
+    script = f"""
+import inspect
+import runpy
+import sys
+sys.path.insert(0, {str(Path(__file__).parents[3] / "src" / "python" / "py" / "models")!r})
+import builders
+original_builders = builders
+runpy.run_path({str(Path(__file__).with_name(test_module))!r})
+assert sys.modules["builders"] is original_builders, "Test collection replaced the builders package"
+assert inspect.getsourcefile(sys.modules["builders"]) == original_builders.__file__
+from transformers import Qwen2_5_VLForConditionalGeneration
+assert Qwen2_5_VLForConditionalGeneration.__name__ == "Qwen2_5_VLForConditionalGeneration"
+"""
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stdout + result.stderr

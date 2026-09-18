@@ -14,7 +14,6 @@ import onnx_ir as ir
 import onnxruntime as ort
 import pytest
 import torch
-import transformers
 
 BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
 sys.path.insert(0, str(BUILDERS_DIR.parent))
@@ -84,8 +83,10 @@ def test_qwen35_moe_loads_moe_transformers_model(monkeypatch):
     class FakeDenseModel(FakeMoEModel):
         pass
 
-    monkeypatch.setattr(transformers, "Qwen3_5MoeForConditionalGeneration", FakeMoEModel, raising=False)
-    monkeypatch.setattr(transformers, "Qwen3_5ForConditionalGeneration", FakeDenseModel, raising=False)
+    transformers_stub = types.ModuleType("transformers")
+    transformers_stub.Qwen3_5MoeForConditionalGeneration = FakeMoEModel
+    transformers_stub.Qwen3_5ForConditionalGeneration = FakeDenseModel
+    monkeypatch.setitem(sys.modules, "transformers", transformers_stub)
 
     model = Qwen35MoETextModel.__new__(Qwen35MoETextModel)
     model.model_type = "qwen3_5_moe_text"
