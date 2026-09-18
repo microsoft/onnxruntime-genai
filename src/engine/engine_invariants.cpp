@@ -46,9 +46,8 @@ std::vector<InvariantViolation> ValidateCacheInvariants(const PagedCacheSnapshot
   const size_t physical_blocks =
       cache.blocks.empty() ? transaction_reserved + allocated : cache.blocks.size();
   if (cache.free_blocks + physical_blocks != cache.total_blocks) {
-    add("free (" + std::to_string(cache.free_blocks) + ") + transaction_reserved (" +
-        std::to_string(transaction_reserved) + ") + allocated (" +
-        std::to_string(allocated) + ") does not describe total_blocks (" +
+    add("free (" + std::to_string(cache.free_blocks) + ") + physical_blocks (" +
+        std::to_string(physical_blocks) + ") does not describe total_blocks (" +
         std::to_string(cache.total_blocks) + ").");
   }
 

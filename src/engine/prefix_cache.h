@@ -120,7 +120,8 @@ class PrefixCache {
    * @param max_adoptable_tokens Upper bound on tokens the caller may skip. A request must always
    *        compute at least its last token, so the caller passes one less than the sequence length.
    *
-   * Marks every block it hands out as recently used, so adoption feeds the eviction order.
+   * Matching does not affect eviction order. After adoption commits, the caller must pass the
+   * adopted blocks to RecordAdoption so committed use refreshes recency and metrics.
    */
   PrefixCacheMatch Match(std::span<const int32_t> tokens, size_t max_adoptable_tokens);
 

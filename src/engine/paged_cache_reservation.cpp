@@ -775,7 +775,9 @@ void PagedCacheReservation::CommitValidated() {
 
   reserved_blocks_.clear();
   reserved_window_blocks_.clear();
-  adopted_blocks_.clear();
+  // Post-commit prefix publication consumes these handles to update recency and metrics. Their
+  // pool references have transferred to the committed tables; retaining the shared_ptr handles
+  // until this reservation is destroyed does not add pool-local ownership.
   new_tables_.clear();
   advance_blocks_.clear();
   state_ = PagedCacheReservationState::Committed;

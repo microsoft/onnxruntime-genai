@@ -293,6 +293,8 @@ TEST(PagedCacheReservationTest, CommitTransfersAdoptedReferenceToNewTable) {
   PagedCacheReservation reservation{pool, tables, requests};
   reservation.Commit();
 
+  ASSERT_EQ(reservation.AdoptedBlocks().size(), 1u);
+  EXPECT_EQ(reservation.AdoptedBlocks().front(), match.blocks.front());
   ASSERT_EQ(tables.size(), 1u);
   ASSERT_EQ(tables.front().Blocks().size(), 2u);
   EXPECT_EQ(tables.front().Blocks().front(), match.blocks.front());
