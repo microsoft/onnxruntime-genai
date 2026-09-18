@@ -18,6 +18,7 @@ namespace Generators {
 
 struct PagedKeyValueCache;
 struct BlockCopier;
+struct PagedCacheBlockTableTestAccess;
 
 class PagedCacheBlockTable {
  public:
@@ -49,7 +50,11 @@ class PagedCacheBlockTable {
  private:
   friend class PagedCacheReservation;
   friend struct PagedKeyValueCache;
+  friend struct PagedCacheBlockTableTestAccess;
   friend bool MakeTailBlockExclusive(PagedCacheBlockTable&, size_t, BlockPool&, BlockCopier&);
+  friend void RemoveValidatedPagedCacheBlockTable(
+      BlockPool&, BlockPool*, std::vector<PagedCacheBlockTable>&,
+      const void*) noexcept;
 
   const void* request_id_{};
   size_t committed_slots_{};

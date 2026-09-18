@@ -66,6 +66,9 @@ size_t CheckedAdd(
 PagedCacheBlockTable& PagedCacheBlockTable::operator=(
     PagedCacheBlockTable&& other) noexcept {
   if (this != &other) {
+    if (!blocks_.empty() || !window_blocks_.empty()) {
+      std::terminate();
+    }
     const uint64_t next_generation = mutation_generation_ + 1;
     request_id_ = other.request_id_;
     committed_slots_ = other.committed_slots_;
@@ -133,6 +136,8 @@ void RemoveValidatedPagedCacheBlockTable(
   if (window_block_pool) {
     window_block_pool->FreeValidated(table->WindowBlocks());
   }
+  table->blocks_.clear();
+  table->window_blocks_.clear();
   committed_tables.erase(table);
 }
 

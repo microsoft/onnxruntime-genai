@@ -13,6 +13,19 @@
 #include "engine/prefix_cache.h"
 
 namespace Generators {
+struct PagedCacheBlockTableTestAccess {
+  static void Replace(
+      PagedCacheBlockTable& table,
+      size_t committed_slots,
+      std::vector<std::shared_ptr<Block>> blocks,
+      std::vector<std::shared_ptr<Block>> window_blocks) {
+    table.committed_slots_ = committed_slots;
+    table.blocks_ = std::move(blocks);
+    table.window_blocks_ = std::move(window_blocks);
+    ++table.mutation_generation_;
+  }
+};
+
 namespace {
 
 constexpr size_t kBlockSize = 4;
@@ -51,9 +64,15 @@ void ReplaceTable(
     size_t committed_slots,
     std::vector<std::shared_ptr<Block>> blocks,
     std::vector<std::shared_ptr<Block>> window_blocks = {}) {
-  table = PagedCacheBlockTable{
-      table.RequestId(), committed_slots, std::move(blocks),
-      std::move(window_blocks)};
+  if (table.Blocks().empty() && table.WindowBlocks().empty()) {
+    table = PagedCacheBlockTable{
+        table.RequestId(), committed_slots, std::move(blocks),
+        std::move(window_blocks)};
+  } else {
+    PagedCacheBlockTableTestAccess::Replace(
+        table, committed_slots, std::move(blocks),
+        std::move(window_blocks));
+  }
 }
 
 TEST(PagedCacheReservationTest, TableReplacementAdvancesGeneration) {
@@ -65,6 +84,14 @@ TEST(PagedCacheReservationTest, TableReplacementAdvancesGeneration) {
   PagedCacheBlockTable replacement{kRequestA, 2};
   table = std::move(replacement);
   EXPECT_EQ(table.MutationGeneration(), 2u);
+}
+
+TEST(PagedCacheReservationTest, MoveAssignmentRejectsOwnedDestination) {
+  BlockPool pool{kBlockSize, 2};
+  PagedCacheBlockTable table{kRequestA, 1, pool.AllocateBlocks(1)};
+  PagedCacheBlockTable replacement{kRequestB, 1, pool.AllocateBlocks(1)};
+
+  EXPECT_DEATH(table = std::move(replacement), "");
 }
 
 TEST(PagedCacheReservationTest, SumsPerRequestBlockCeilings) {
@@ -776,8 +803,9 @@ TEST(PagedCacheReservationTest, RejectsSameScalarResidentTableReplacement) {
 
   // Preserve request ID, vector sizes, block ID, capacity, and occupancy. Only the mapping storage
   // and physical block identity change; move assignment also advances the destination generation.
-  tables[1] = PagedCacheBlockTable{
-      kRequestB, 4, {std::make_shared<Block>(block_id, kBlockSize, kBlockSize)}};
+  ReplaceTable(
+      tables[1], 4,
+      {std::make_shared<Block>(block_id, kBlockSize, kBlockSize)});
 
   EXPECT_THROW(reservation.ValidateCommit(), std::logic_error);
   EXPECT_EQ(tables[0].CommittedSlots(), 4u);
@@ -798,7 +826,9 @@ TEST(PagedCacheReservationTest, RejectsMoveAssignedOmittedResidentMapping) {
 
   // Move assignment may reuse the destination vector's storage. Its explicit generation advance
   // must still invalidate the omitted resident snapshot.
-  tables[1] = std::move(replacement);
+  ReplaceTable(
+      tables[1], replacement.CommittedSlots(),
+      replacement.Blocks(), replacement.WindowBlocks());
 
   EXPECT_THROW(reservation.ValidateCommit(), std::logic_error);
   EXPECT_EQ(tables[0].CommittedSlots(), 4u);
