@@ -9,6 +9,7 @@
 #include "models/preprocessing/genai_tokenizer.h"
 #include "models/preprocessing/lfm2_vl_image_processor.h"
 #include "models/preprocessing/mistral3_image_processor.h"
+#include "models/preprocessing/nemotron_parse_processor.h"
 #include "models/preprocessing/parakeet_processor.h"
 #include "models/preprocessing/phi_image_processor.h"
 #include "models/preprocessing/phi_multimodal_processor.h"
@@ -40,6 +41,7 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
           {"qwen3_vl", Processor::Create<QwenImageProcessor>},
           {"qwen3_5", Processor::Create<QwenImageProcessor>},
           {"qwen3_5_moe", Processor::Create<QwenImageProcessor>},
+          {"nemotron_parse", Processor::Create<NemotronParseProcessor>},
           {"videochat_flash_qwen", Processor::Create<VideoChatFlashProcessor>}} {
   auto processor = processor_factory_.find(config.model.type);
   if (processor != processor_factory_.end()) {
@@ -55,7 +57,7 @@ std::unique_ptr<NamedTensors> MultiModalProcessor::Process(const std::string& pr
 }
 
 std::unique_ptr<NamedTensors> MultiModalProcessor::Process(std::span<const char*> prompts, const Images* images, const Audios* audios) const {
-  Payload payload{"", prompts, images, audios};
+  Payload payload{"", prompts, images, audios, true};
   return processor_->Process(*tokenizer_, payload);
 }
 
