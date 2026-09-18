@@ -138,7 +138,10 @@ void RemoveValidatedPagedCacheBlockTable(
   }
   table->blocks_.clear();
   table->window_blocks_.clear();
-  committed_tables.erase(table);
+  if (table != committed_tables.end() - 1) {
+    *table = std::move(committed_tables.back());
+  }
+  committed_tables.pop_back();
 }
 
 PagedCacheReservation::PagedCacheReservation(

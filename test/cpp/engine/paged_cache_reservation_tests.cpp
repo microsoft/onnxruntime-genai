@@ -31,8 +31,10 @@ namespace {
 constexpr size_t kBlockSize = 4;
 const char kRequestStorageA{};
 const char kRequestStorageB{};
+const char kRequestStorageC{};
 const void* const kRequestA = &kRequestStorageA;
 const void* const kRequestB = &kRequestStorageB;
+const void* const kRequestC = &kRequestStorageC;
 
 static_assert(!std::is_copy_constructible_v<PagedCacheBlockTable>);
 static_assert(!std::is_copy_assignable_v<PagedCacheBlockTable>);
@@ -331,6 +333,25 @@ TEST(PagedCacheReservationTest, CommitTransfersAdoptedReferenceToNewTable) {
   RemovePagedCacheBlockTable(pool, nullptr, tables, kRequestA);
   EXPECT_EQ(match.blocks.front()->RefCount(), 1u);
   EXPECT_EQ(pool.AvailableBlocks(), 2u);
+}
+
+TEST(PagedCacheReservationTest, RemovingEarlierTableRelocatesLastWithoutReplacingOwnedTable) {
+  BlockPool pool{kBlockSize, 3};
+  auto tables = MakeTables(
+      PagedCacheBlockTable{kRequestA, 1, pool.AllocateBlocks(1)},
+      PagedCacheBlockTable{kRequestB, 1, pool.AllocateBlocks(1)},
+      PagedCacheBlockTable{kRequestC, 1, pool.AllocateBlocks(1)});
+  const auto last_request = tables.back().RequestId();
+  const auto last_block = tables.back().Blocks().front();
+
+  RemovePagedCacheBlockTable(pool, nullptr, tables, kRequestA);
+
+  ASSERT_EQ(tables.size(), 2u);
+  EXPECT_EQ(tables.front().RequestId(), last_request);
+  ASSERT_EQ(tables.front().Blocks().size(), 1u);
+  EXPECT_EQ(tables.front().Blocks().front(), last_block);
+  EXPECT_EQ(tables.back().RequestId(), kRequestB);
+  EXPECT_EQ(pool.AvailableBlocks(), 1u);
 }
 
 TEST(PagedCacheReservationTest, DuplicateAdoptersHoldAndReleaseOneReferenceEach) {
