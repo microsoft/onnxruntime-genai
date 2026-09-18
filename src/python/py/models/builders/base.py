@@ -26,18 +26,7 @@ from onnxruntime.quantization.matmul_nbits_quantizer import (
     RTNWeightOnlyQuantConfig,
 )
 from tqdm import tqdm
-from transformers import (
-    AutoModelForCausalLM,
-    AutoModelForSpeechSeq2Seq,
-    AutoTokenizer,
-    Gemma3ForConditionalGeneration,
-    GenerationConfig,
-    Mistral3ForConditionalGeneration,
-    Qwen2_5_VLForConditionalGeneration,
-    Qwen3_5ForConditionalGeneration,
-    Qwen3_5MoeForConditionalGeneration,
-    Qwen3VLForConditionalGeneration,
-)
+from transformers import AutoTokenizer, GenerationConfig
 
 from quantization import KV_CACHE_CALIBRATION_QMAX, CudaQuantizer, QuantConfig, resolve_dtype
 
@@ -5795,29 +5784,32 @@ class Model:
             )
 
         else:
+            import transformers
+
             extra_kwargs = {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {}
 
             # Get auto class to load PyTorch model based on model type
             auto_class_map = {
-                "ForCausalLM": AutoModelForCausalLM,
-                "gemma3_vl_text": Gemma3ForConditionalGeneration,
-                "mistral3_text": Mistral3ForConditionalGeneration,
-                "Mistral3": Mistral3ForConditionalGeneration,
-                "qwen2_5_vl_text": Qwen2_5_VLForConditionalGeneration,
-                "Qwen2_5_VL": Qwen2_5_VLForConditionalGeneration,
-                "qwen3_vl_text": Qwen3VLForConditionalGeneration,
-                "Qwen3VL": Qwen3VLForConditionalGeneration,
-                "qwen3_5_moe_text": Qwen3_5MoeForConditionalGeneration,
-                "qwen3_5_moe": Qwen3_5MoeForConditionalGeneration,
-                "qwen3_5_text": Qwen3_5ForConditionalGeneration,
-                "qwen3_5": Qwen3_5ForConditionalGeneration,
-                "Whisper": AutoModelForSpeechSeq2Seq,
+                "ForCausalLM": "AutoModelForCausalLM",
+                "gemma3_vl_text": "Gemma3ForConditionalGeneration",
+                "mistral3_text": "Mistral3ForConditionalGeneration",
+                "Mistral3": "Mistral3ForConditionalGeneration",
+                "qwen2_5_vl_text": "Qwen2_5_VLForConditionalGeneration",
+                "Qwen2_5_VL": "Qwen2_5_VLForConditionalGeneration",
+                "qwen3_vl_text": "Qwen3VLForConditionalGeneration",
+                "Qwen3VL": "Qwen3VLForConditionalGeneration",
+                "qwen3_5_moe_text": "Qwen3_5MoeForConditionalGeneration",
+                "qwen3_5_moe": "Qwen3_5MoeForConditionalGeneration",
+                "qwen3_5_text": "Qwen3_5ForConditionalGeneration",
+                "qwen3_5": "Qwen3_5ForConditionalGeneration",
+                "Whisper": "AutoModelForSpeechSeq2Seq",
             }
-            auto_class = AutoModelForCausalLM
+            auto_class_name = "AutoModelForCausalLM"
             for k, v in auto_class_map.items():
                 if k in self.model_type:
-                    auto_class = v
+                    auto_class_name = v
                     break
+            auto_class = getattr(transformers, auto_class_name)
 
             # Load PyTorch model
             model = auto_class.from_pretrained(

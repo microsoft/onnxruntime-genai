@@ -37,13 +37,6 @@ def _load_builder_module(module_name):
 
 
 def _load_builder_entrypoint_module():
-    # `builder.py` imports every concrete model class via `from builders import (...)`. Stub that
-    # package out so the CLI-level option validation can be imported on its own.
-    builders_stub = types.ModuleType("builders")
-    builders_stub.__getattr__ = lambda name: type(name, (), {})  # PEP 562
-    builders_stub.__path__ = [str(BUILDERS_DIR)]
-    sys.modules["builders"] = builders_stub
-
     spec = importlib.util.spec_from_file_location("models_builder_entrypoint", MODELS_DIR / "builder.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

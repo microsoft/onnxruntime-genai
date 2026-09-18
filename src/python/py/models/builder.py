@@ -17,41 +17,6 @@ from typing import Any
 
 import onnx_ir as ir
 import torch
-from builders import (
-    ChatGLMModel,
-    ErnieModel,
-    Gemma2Model,
-    Gemma3Model,
-    GemmaModel,
-    GPTOSSModel,
-    GraniteModel,
-    GraniteMoEHybridModel,
-    HunyuanDenseV1Model,
-    InternLM2Model,
-    LFM2Model,
-    LlamaModel,
-    Mistral3TextModel,
-    MistralModel,
-    Model,
-    NemotronModel,
-    OLMoModel,
-    Phi3MiniLongRoPEModel,
-    Phi3MiniModel,
-    Phi3MoELongRoPEModel,
-    Phi3SmallLongRoPEModel,
-    Phi3SmallModel,
-    Phi3VModel,
-    Phi4MMModel,
-    PhiModel,
-    Qwen3Model,
-    Qwen3VLTextModel,
-    Qwen25VLTextModel,
-    QwenModel,
-    SmolLM3Model,
-    VideoChatFlashQwenModel,
-    WhisperModel,
-)
-from builders.qwen import Qwen35Model, Qwen35MoEModel
 from quantization import KV_CACHE_QUANT_SCHEMES, QuantConfig
 from transformers import AutoConfig, AutoTokenizer
 
@@ -526,110 +491,180 @@ def create_model(
 
     # List architecture options in alphabetical order
     if config.architectures[0] == "ChatGLMForConditionalGeneration" or config.architectures[0] == "ChatGLMModel":
+        from builders import ChatGLMModel
+
         # Quantized ChatGLM model has ChatGLMForConditionalGeneration as architecture whereas HF model as the latter
         config.bos_token_id = 1
         config.hidden_act = "swiglu"
         onnx_model = ChatGLMModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         onnx_model.model_type = "chatglm"
     elif config.architectures[0] == "Ernie4_5ForCausalLM":
+        from builders import ErnieModel
+
         onnx_model = ErnieModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "GemmaForCausalLM":
+        from builders import GemmaModel
+
         onnx_model = GemmaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Gemma2ForCausalLM":
+        from builders import Gemma2Model
+
         print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
         onnx_model = Gemma2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Gemma3ForCausalLM":
+        from builders import Gemma3Model
+
         print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
         onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         onnx_model.model_type = "gemma3_text"
     elif config.architectures[0] == "Gemma3ForConditionalGeneration":
+        from builders import Gemma3Model
+
         print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
         onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         if not onnx_model.exclude_embeds:
             onnx_model.model_type = "gemma3_vl_text"
     elif config.architectures[0] == "GptOssForCausalLM":
+        from builders import GPTOSSModel
+
         print("WARNING: This model only supports symmetric quantization for `QMoE`.")
         if hasattr(config, "quantization_config") and config.quantization_config.get("quant_method") != "quark":
             delattr(config, "quantization_config")
         onnx_model = GPTOSSModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "GraniteForCausalLM":
+        from builders import GraniteModel
+
         onnx_model = GraniteModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "GraniteMoeHybridForCausalLM":
+        from builders import GraniteMoEHybridModel
+
         onnx_model = GraniteMoEHybridModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "HunYuanDenseV1ForCausalLM":
+        from builders import HunyuanDenseV1Model
+
         onnx_model = HunyuanDenseV1Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "InternLM2ForCausalLM":
+        from builders import InternLM2Model
+
         onnx_model = InternLM2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Lfm2ForCausalLM":
+        from builders import LFM2Model
+
         onnx_model = LFM2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "LlamaForCausalLM":
+        from builders import LlamaModel
+
         onnx_model = LlamaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "MistralForCausalLM":
+        from builders import MistralModel
+
         onnx_model = MistralModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Mistral3ForConditionalGeneration":
+        from builders import Mistral3TextModel
+
         if hasattr(config, "quantization_config"):
             delattr(config, "quantization_config")
         onnx_model = Mistral3TextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         if not onnx_model.exclude_embeds:
             onnx_model.model_type = "mistral3_text"
     elif config.architectures[0] == "NemotronForCausalLM":
+        from builders import NemotronModel
+
         onnx_model = NemotronModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "OlmoForCausalLM":
+        from builders import OLMoModel
+
         onnx_model = OLMoModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "PhiForCausalLM":
+        from builders import PhiModel
+
         onnx_model = PhiModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings == config.original_max_position_embeddings:
+        from builders import Phi3MiniModel
+
         onnx_model = Phi3MiniModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
+        from builders import Phi3MiniLongRoPEModel
+
         onnx_model = Phi3MiniLongRoPEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "PhiMoEForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
+        from builders import Phi3MoELongRoPEModel
+
         print("WARNING: This model only works for CUDA currently because `MoE` is only supported for CUDA in ONNX Runtime. Setting `--execution_provider cuda` by default.")
         print("WARNING: This model currently only supports the quantized version. Setting `--precision int4` by default.")
         execution_provider = "cuda"
         onnx_dtype = set_onnx_dtype("int4", extra_options)
         onnx_model = Phi3MoELongRoPEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings == config.original_max_position_embeddings:
+        from builders import Phi3SmallModel
+
         onnx_model = Phi3SmallModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
+        from builders import Phi3SmallLongRoPEModel
+
         onnx_model = Phi3SmallLongRoPEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Phi3VForCausalLM":
+        from builders import Phi3VModel
+
         onnx_model = Phi3VModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         if not onnx_model.exclude_embeds:
             onnx_model.model_type = "phi3"
     elif config.architectures[0] == "Phi4MMForCausalLM":
+        from builders import Phi4MMModel
+
         onnx_model = Phi4MMModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         if not onnx_model.exclude_embeds:
             onnx_model.model_type = "phi3"
     elif config.architectures[0] == "Qwen2ForCausalLM":
+        from builders import QwenModel
+
         onnx_model = QwenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen2_5_VLForConditionalGeneration":
+        from builders import Qwen25VLTextModel
+
         onnx_model = Qwen25VLTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         if not onnx_model.exclude_embeds:
             onnx_model.model_type = "qwen2_5_vl_text"
     elif config.architectures[0] == "Qwen3ForCausalLM":
+        from builders import Qwen3Model
+
         onnx_model = Qwen3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen3VLForConditionalGeneration":
+        from builders import Qwen3VLTextModel
+
         onnx_model = Qwen3VLTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         if not onnx_model.exclude_embeds:
             onnx_model.model_type = "qwen3_vl_text"
     elif config.architectures[0] == "Qwen3_5ForConditionalGeneration":
+        from builders.qwen import Qwen35Model
+
         onnx_model = Qwen35Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         if not onnx_model.exclude_embeds:
             onnx_model.model_type = "qwen3_5_text"
     elif config.architectures[0] == "Qwen3_5MoeForConditionalGeneration":
+        from builders.qwen import Qwen35MoEModel
+
         onnx_model = Qwen35MoEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         if not onnx_model.exclude_embeds:
             onnx_model.model_type = "qwen3_5_moe_text"
         else:
             onnx_model.model_type = "qwen3_5_moe"
     elif config.architectures[0] == "SmolLM3ForCausalLM":
+        from builders import SmolLM3Model
+
         onnx_model = SmolLM3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "VideoChatFlashQwenForCausalLM":
+        from builders import VideoChatFlashQwenModel
+
         onnx_model = VideoChatFlashQwenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         onnx_model.model_type = "qwen2"
     elif config.architectures[0] == "WhisperForConditionalGeneration":
+        from builders import WhisperModel
+
         onnx_model = WhisperModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config_only:
+        from builders import Model
+
         # Create base Model class to guess model attributes
         onnx_model = Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     else:

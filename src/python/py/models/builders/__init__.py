@@ -6,45 +6,7 @@
 # Modifications Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # Portions of this file consist of AI generated content.
 # -------------------------------------------------------------------------
-from .base import Model
-from .chatglm import ChatGLMModel
-from .ernie import ErnieModel
-from .gemma import Gemma2Model, Gemma3Model, GemmaModel
-from .gptoss import GPTOSSModel
-from .granite import GraniteModel, GraniteMoEHybridModel
-from .hunyuan import HunyuanDenseV1Model
-from .internlm import InternLM2Model
-from .lfm2 import LFM2Model
-from .llama import LlamaModel
-from .mistral import Mistral3TextModel, MistralModel
-from .mtp import MTPModel
-from .nemotron import NemotronModel
-from .olmo import OLMoModel
-from .phi import (
-    Phi3MiniLongRoPEModel,
-    Phi3MiniModel,
-    Phi3MoELongRoPEModel,
-    Phi3SmallLongRoPEModel,
-    Phi3SmallModel,
-    Phi3VModel,
-    Phi4MMModel,
-    PhiModel,
-)
-from .qwen import (
-    Qwen3Model,
-    Qwen3VLTextModel,
-    Qwen25VLTextModel,
-    Qwen35DenseMTPModel,
-    Qwen35Model,
-    Qwen35MoEModel,
-    Qwen35MoETextModel,
-    Qwen35MTPModel,
-    Qwen35TextModel,
-    QwenModel,
-    VideoChatFlashQwenModel,
-)
-from .smollm import SmolLM3Model
-from .whisper import WhisperModel
+from importlib import import_module
 
 __all__ = [
     "ChatGLMModel",
@@ -87,3 +49,50 @@ __all__ = [
     "VideoChatFlashQwenModel",
     "WhisperModel",
 ]
+
+
+def __getattr__(name):
+    modules = {
+        "ChatGLMModel": "chatglm",
+        "ErnieModel": "ernie",
+        "GPTOSSModel": "gptoss",
+        "Gemma2Model": "gemma",
+        "Gemma3Model": "gemma",
+        "GemmaModel": "gemma",
+        "GraniteMoEHybridModel": "granite",
+        "GraniteModel": "granite",
+        "HunyuanDenseV1Model": "hunyuan",
+        "InternLM2Model": "internlm",
+        "LFM2Model": "lfm2",
+        "LlamaModel": "llama",
+        "MTPModel": "mtp",
+        "Mistral3TextModel": "mistral",
+        "MistralModel": "mistral",
+        "Model": "base",
+        "NemotronModel": "nemotron",
+        "OLMoModel": "olmo",
+        "Phi3MiniLongRoPEModel": "phi",
+        "Phi3MiniModel": "phi",
+        "Phi3MoELongRoPEModel": "phi",
+        "Phi3SmallLongRoPEModel": "phi",
+        "Phi3SmallModel": "phi",
+        "Phi3VModel": "phi",
+        "Phi4MMModel": "phi",
+        "PhiModel": "phi",
+        "Qwen3Model": "qwen",
+        "Qwen3VLTextModel": "qwen",
+        "Qwen25VLTextModel": "qwen",
+        "Qwen35DenseMTPModel": "qwen",
+        "Qwen35Model": "qwen",
+        "Qwen35MoEModel": "qwen",
+        "Qwen35MoETextModel": "qwen",
+        "Qwen35MTPModel": "qwen",
+        "Qwen35TextModel": "qwen",
+        "QwenModel": "qwen",
+        "SmolLM3Model": "smollm",
+        "VideoChatFlashQwenModel": "qwen",
+        "WhisperModel": "whisper",
+    }
+    if name not in modules:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return getattr(import_module(f".{modules[name]}", __name__), name)
