@@ -273,6 +273,10 @@ struct Config {
                                  // 0 = auto-compute as patch_size * spatial_merge_size * 2
                                  // Qwen2.5-VL default: 56 (14*4), Qwen3-VL default: 64 (16*4)
 
+      // LFM2-VL: patch-sequence length every image is padded to so one batch shares a vision run.
+      // 0 = pad to the longest image in the batch. Shipped models: max_image_tokens * downsample_factor^2 = 1024.
+      int max_num_patches{0};
+
       std::string config_filename{"processor_config.json"};
       std::optional<std::string> adapter_filename{};
 
