@@ -46,6 +46,14 @@ struct StreamingProcessor : LeakChecked<StreamingProcessor> {
   /// Handles consecutive silence tracking internally.
   bool ShouldDropChunk(const float* chunk_data, size_t chunk_size);
 
+  /// Stateless single-chunk VAD verdict.
+  /// Returns true iff VAD is enabled AND `vad_->ContainsSpeech()` returns false
+  /// for this chunk. Does NOT update consecutive-silence tracking — call this
+  /// when you want the raw per-chunk silence flag for segmentation (vs.
+  /// ShouldDropChunk's prolonged-silence drop logic). Returns false if VAD is
+  /// disabled (so callers can treat silence as opt-in).
+  bool IsChunkSilent(const float* chunk_data, size_t chunk_size);
+
   /// Initialize VAD from the model's genai_config.json vad section.
   /// Called by derived constructors if config has vad.enabled = true.
   void InitVadFromConfig(Model& model);
