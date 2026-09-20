@@ -485,7 +485,7 @@ class TestVersionResolution(unittest.TestCase):
 
 class TestTelemetryPackaging(unittest.TestCase):
     @staticmethod
-    def _configured_packages(telemetry_enabled: bool):
+    def _configured_setup(telemetry_enabled: bool):
         setup_template = Path(__file__).parents[2] / "src" / "python" / "setup.py.in"
         source = (
             setup_template.read_text(encoding="utf-8")
@@ -499,18 +499,21 @@ class TestTelemetryPackaging(unittest.TestCase):
             patch("setuptools.setup") as setup,
         ):
             exec(compile(source, str(setup_template), "exec"), {"__name__": "__main__"})
-        return setup.call_args.kwargs["packages"]
+        return setup.call_args.kwargs
 
     def test_telemetry_enabled_wheel_includes_python_telemetry(self):
-        packages = self._configured_packages(True)
+        packages = self._configured_setup(True)["packages"]
 
         self.assertIn("onnxruntime_genai.telemetry", packages)
 
     def test_telemetry_disabled_wheel_excludes_python_telemetry(self):
-        packages = self._configured_packages(False)
+        packages = self._configured_setup(False)["packages"]
 
         self.assertNotIn("onnxruntime_genai.telemetry", packages)
         self.assertIn("onnxruntime_genai.models", packages)
+
+    def test_wheel_requires_supported_python(self):
+        self.assertEqual(self._configured_setup(True)["python_requires"], ">=3.10")
 
     def test_standalone_sdk_missing_telemetry_metadata_fails_closed(self):
         cmake = (Path(__file__).parents[2] / "src" / "python" / "CMakeLists.txt").read_text(encoding="utf-8")
@@ -669,6 +672,34 @@ class TestActionFastPath(unittest.TestCase):
             fail()
 
         mock_log_error.assert_called_once()
+
+    def test_action_logs_outer_and_immediate_inner_exception_details(self):
+        from telemetry.telemetry_extensions import action
+
+        telemetry = MagicMock(accepts_detailed_events=True)
+
+        @action
+        def fail():
+            try:
+                raise RuntimeError(r"failed to read C:\Users\alice\secret\weights.bin")
+            except RuntimeError as inner:
+                raise ValueError("outer failure") from inner
+
+        with (
+            patch("telemetry.telemetry_extensions._get_telemetry", return_value=telemetry),
+            patch("telemetry.telemetry_extensions.log_error") as mock_log_error,
+            self.assertRaisesRegex(ValueError, "outer failure"),
+        ):
+            fail()
+
+        details = mock_log_error.call_args.kwargs
+        self.assertEqual(details["exception_type"], "ValueError")
+        self.assertEqual(details["exception_message"], "outer failure")
+        self.assertEqual(details["inner_exception_type"], "RuntimeError")
+        self.assertEqual(details["inner_exception_message"], "failed to read [path]")
+        self.assertNotIn("alice", str(details))
+        self.assertIn('File "[path]"', details["stack_trace"])
+        self.assertIn('File "[path]"', details["inner_stack_trace"])
 
     def test_positional_function_uses_function_action_name(self):
         from telemetry.telemetry_extensions import action
@@ -1104,27 +1135,26 @@ class TestPathRedaction(unittest.TestCase):
         self.assertNotIn("alice", message)
         self.assertIn("[path]", message)
 
-    def test_format_exception_message_redacts_external_file_path(self):
-        from telemetry.telemetry import _format_exception_message
+    def test_build_exception_details_separates_bounded_stack_traces(self):
+        from telemetry.telemetry import _build_exception_details
 
-        with patch(
-            "telemetry.telemetry.traceback.format_exception",
-            return_value=['  File "/home/Alice Smith/project/external.py", line 7, in run\n'],
-        ):
-            message = _format_exception_message(RuntimeError("boom"))
+        try:
+            try:
+                raise RuntimeError(r"failed to read C:\Users\alice\secret\weights.bin")
+            except RuntimeError as inner:
+                raise ValueError("outer failure") from inner
+        except ValueError as exc:
+            details = _build_exception_details(exc, exc.__traceback__)
 
-        self.assertEqual(message, 'File "[path]", line 7, in run')
-
-    def test_format_exception_message_redacts_internal_file_path_and_keeps_context(self):
-        from telemetry.telemetry import _format_exception_message
-
-        with patch(
-            "telemetry.telemetry.traceback.format_exception",
-            return_value=['  File "/home/user/onnxruntime_genai/telemetry/telemetry.py", line 9, in run\n'],
-        ):
-            message = _format_exception_message(RuntimeError("boom"))
-
-        self.assertEqual(message, 'File "[path]", line 9, in run')
+        self.assertEqual(details["exception_type"], "ValueError")
+        self.assertEqual(details["exception_message"], "outer failure")
+        self.assertEqual(details["inner_exception_type"], "RuntimeError")
+        self.assertEqual(details["inner_exception_message"], "failed to read [path]")
+        self.assertNotIn("alice", str(details))
+        self.assertIn('File "[path]"', details["stack_trace"])
+        self.assertIn('File "[path]"', details["inner_stack_trace"])
+        self.assertLessEqual(len(details["stack_trace"].splitlines()), 6)
+        self.assertLessEqual(len(details["inner_stack_trace"].splitlines()), 6)
 
     def test_public_log_error_redacts_paths(self):
         from telemetry.telemetry_extensions import log_error
@@ -1135,10 +1165,18 @@ class TestPathRedaction(unittest.TestCase):
                 "FileNotFoundError",
                 r"missing C:\Users\Alice Smith\models\phi.onnx",
                 metadata={"exception_message": r"C:\Users\Mallory\secret.txt"},
+                stack_trace='File "C:\\Users\\Alice Smith\\app.py", line 7, in run',
+                inner_exception_type="ValueError",
+                inner_exception_message=r"invalid C:\Users\Mallory\secret.txt",
+                inner_stack_trace='File "/home/Mallory/app.py", line 3, in parse',
             )
 
         attributes = telemetry.log.call_args.args[1]
         self.assertEqual(attributes["exceptionMessage"], "missing [path]")
+        self.assertEqual(attributes["innerExceptionType"], "ValueError")
+        self.assertNotIn("Alice", attributes["stackTrace"])
+        self.assertNotIn("Mallory", attributes["innerExceptionMessage"])
+        self.assertNotIn("Mallory", attributes["innerStackTrace"])
 
     def test_core_event_methods_redact_model_names(self):
         from telemetry.telemetry import GenAITelemetry

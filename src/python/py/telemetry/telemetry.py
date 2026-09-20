@@ -21,6 +21,7 @@ import threading
 import time
 import traceback
 import uuid
+from collections import deque
 from contextlib import suppress
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError
@@ -125,27 +126,62 @@ def _redact_error_message(text: str) -> str:
     return scrub_error_message_for_telemetry(text)
 
 
-def _format_exception_message(ex: BaseException, tb=None) -> str:
-    """Format an exception and strip local paths for privacy.
+def _get_exception_message(ex: BaseException) -> str:
+    try:
+        message = str(ex)
+    except Exception:
+        message = "<exception str() failed>"
+    return _redact_error_message(message)
 
-    Each entry from ``traceback.format_exception`` is a multi-line string (the
-    ``File "..."`` line plus the offending source line), so we process every
-    physical line: filenames are replaced with ``[path]``, and any path that
-    remains on a source or message line is redacted so a username embedded in it
-    cannot leak.
-    """
-    formatted = traceback.format_exception(type(ex), ex, tb, limit=5)
+
+def _format_stack_trace(tb) -> str | None:
+    """Format bounded frame metadata without collecting paths or source-code lines."""
+    if tb is None:
+        return None
     lines = []
-    for chunk in formatted:
-        for raw_line in chunk.splitlines():
-            line_trunc = raw_line.strip()
-            if line_trunc.startswith('File "'):
-                path_end = line_trunc.find('"', len('File "'))
-                if path_end != -1:
-                    line_trunc = f'File "[path]"{line_trunc[path_end + 1 :]}'
-            line_trunc = _redact_error_message(line_trunc)
-            lines.append(line_trunc)
-    return "\n".join(lines)
+    for frame, line_number in deque(traceback.walk_tb(tb), maxlen=5):
+        frame_name = _redact_error_message(frame.f_code.co_name)
+        lines.append(f'File "[path]", line {line_number}, in {frame_name}')
+    if not lines:
+        return None
+    lines.insert(0, "Traceback (most recent call last):")
+    return _redact_error_message("\n".join(lines))
+
+
+def _get_inner_exception(ex: BaseException) -> BaseException | None:
+    if ex.__cause__ is not None:
+        return ex.__cause__
+    if not ex.__suppress_context__:
+        return ex.__context__
+    return None
+
+
+def _build_exception_details(ex: BaseException, tb=None) -> dict[str, str | None]:
+    details = {
+        "exception_type": type(ex).__name__,
+        "exception_message": _get_exception_message(ex),
+        "stack_trace": _format_stack_trace(tb),
+        "inner_exception_type": None,
+        "inner_exception_message": None,
+        "inner_stack_trace": None,
+    }
+    inner = _get_inner_exception(ex)
+    if inner is not None:
+        details.update(
+            {
+                "inner_exception_type": type(inner).__name__,
+                "inner_exception_message": _get_exception_message(inner),
+                "inner_stack_trace": _format_stack_trace(inner.__traceback__),
+            }
+        )
+    return details
+
+
+def _format_exception_message(ex: BaseException, tb=None) -> str:
+    """Return the legacy combined exception text for compatibility."""
+    message = f"{type(ex).__name__}: {_get_exception_message(ex)}"
+    stack_trace = _format_stack_trace(tb)
+    return f"{stack_trace}\n{message}" if stack_trace else message
 
 
 class GenAITelemetry:
@@ -255,10 +291,9 @@ class GenAITelemetry:
         data = self._common_context()
         if attributes:
             scrubbed_attributes = scrub_value_for_telemetry(attributes)
-            if isinstance(attributes.get("exceptionMessage"), str):
-                scrubbed_attributes["exceptionMessage"] = scrub_error_message_for_telemetry(
-                    attributes["exceptionMessage"]
-                )
+            for field in ("exceptionMessage", "stackTrace", "innerExceptionMessage", "innerStackTrace"):
+                if isinstance(attributes.get(field), str):
+                    scrubbed_attributes[field] = scrub_error_message_for_telemetry(attributes[field])
             data.update(scrubbed_attributes)
         envelope = CommonSchemaJsonSerializationHelper.create_event_envelope(
             event_name=event_name,
@@ -345,6 +380,7 @@ class GenAITelemetry:
                 if self._enabled and not self._telemetry_disabled and self._store is not None:
                     released = self._store.release(row_id, payload)
         except Exception:
+            # The reserved minimal heartbeat remains durable and is released below.
             pass
         finally:
             with self._lock:
@@ -547,6 +583,11 @@ class GenAITelemetry:
         model_name: str = "",
         execution_provider: str = "",
         session_id: int | None = None,
+        *,
+        stack_trace: str | None = None,
+        inner_exception_type: str | None = None,
+        inner_exception_message: str | None = None,
+        inner_stack_trace: str | None = None,
     ) -> None:
         """Log an error/crash telemetry event."""
         if not self._enabled or self._store is None:
@@ -555,10 +596,17 @@ class GenAITelemetry:
             attributes = {
                 "exceptionType": exception_type,
                 "exceptionMessage": _redact_error_message(exception_message),
+                "stackTrace": _redact_error_message(stack_trace) if stack_trace else None,
+                "innerExceptionType": inner_exception_type,
+                "innerExceptionMessage": (
+                    _redact_error_message(inner_exception_message) if inner_exception_message else None
+                ),
+                "innerStackTrace": _redact_error_message(inner_stack_trace) if inner_stack_trace else None,
                 "action": action,
                 "modelName": _redact_paths(model_name),
                 "executionProvider": execution_provider,
             }
+            attributes = {key: value for key, value in attributes.items() if value is not None}
             if session_id is not None:
                 attributes["sessionId"] = session_id
             self._emit(ERROR_EVENT, attributes)

@@ -16,6 +16,7 @@ The lock is an OS advisory lock on a sidecar file (``msvcrt`` on Windows,
 process exits, so a crashed holder never blocks other processes permanently.
 """
 
+import errno
 import os
 import time
 from contextlib import suppress
@@ -27,6 +28,7 @@ class ProcessDrainLock:
     def __init__(self, lock_path: str):
         self._lock_path = lock_path
         self._fh = None
+        self._posix_lock_api = None
 
     @property
     def held(self) -> bool:
@@ -52,10 +54,26 @@ class ProcessDrainLock:
                 else:
                     import fcntl  # noqa: PLC0415
 
-                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    try:
+                        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        self._posix_lock_api = "flock"
+                    except AttributeError:
+                        fcntl.lockf(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        self._posix_lock_api = "lockf"
+                    except OSError as exc:
+                        unsupported_errors = {errno.ENOSYS}
+                        if hasattr(errno, "ENOTSUP"):
+                            unsupported_errors.add(errno.ENOTSUP)
+                        if hasattr(errno, "EOPNOTSUPP"):
+                            unsupported_errors.add(errno.EOPNOTSUPP)
+                        if exc.errno not in unsupported_errors:
+                            raise
+                        fcntl.lockf(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        self._posix_lock_api = "lockf"
                 self._fh = fh
                 return True
             except Exception:
+                self._posix_lock_api = None
                 if fh is not None:
                     with suppress(Exception):
                         fh.close()
@@ -67,7 +85,9 @@ class ProcessDrainLock:
         if self._fh is None:
             return
         fh = self._fh
+        posix_lock_api = self._posix_lock_api
         self._fh = None
+        self._posix_lock_api = None
         try:
             if os.name == "nt":
                 import msvcrt  # noqa: PLC0415
@@ -79,7 +99,10 @@ class ProcessDrainLock:
                 import fcntl  # noqa: PLC0415
 
                 with suppress(Exception):
-                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                    if posix_lock_api == "lockf":
+                        fcntl.lockf(fh.fileno(), fcntl.LOCK_UN)
+                    else:
+                        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
         finally:
             with suppress(Exception):
                 fh.close()

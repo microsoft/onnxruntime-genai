@@ -25,6 +25,36 @@ function(ortgenai_replace_required file_path old_text new_text)
   file(WRITE "${file_path}" "${contents}")
 endfunction()
 
+set(fetch_curl_cmake "${SOURCE_DIR}/cmake/MatsdkFetchCurl.cmake")
+
+ortgenai_replace_required(
+  "${fetch_curl_cmake}"
+  [=[      USE_SHARED_MBEDTLS_LIBRARY
+      LINK_WITH_PTHREAD
+      BUILD_CURL_EXE]=]
+  [=[      USE_SHARED_MBEDTLS_LIBRARY
+      BUILD_CURL_EXE]=])
+
+ortgenai_replace_required(
+  "${fetch_curl_cmake}"
+  [=[  if(MATSDK_CURL_TLS_BACKEND_UPPER STREQUAL "MBEDTLS")
+    set(USE_STATIC_MBEDTLS_LIBRARY ON)]=]
+  [=[  if(MATSDK_CURL_TLS_BACKEND_UPPER STREQUAL "MBEDTLS")
+    set(LINK_WITH_PTHREAD ON)
+    set(USE_STATIC_MBEDTLS_LIBRARY ON)]=])
+
+ortgenai_replace_required(
+  "${fetch_curl_cmake}"
+  [=[    foreach(target mbedtls mbedx509 mbedcrypto)
+      matsdk_configure_fetched_static_target("${target}")
+    endforeach()]=]
+  [=[    foreach(target mbedtls mbedx509 mbedcrypto)
+      matsdk_configure_fetched_static_target("${target}")
+      target_compile_definitions("${target}" PRIVATE
+        MBEDTLS_THREADING_C
+        MBEDTLS_THREADING_PTHREAD)
+    endforeach()]=])
+
 ortgenai_replace_required(
   "${SOURCE_DIR}/lib/include/mat/config-default.h"
   [=[#define HAVE_MAT_LOGGING]=]

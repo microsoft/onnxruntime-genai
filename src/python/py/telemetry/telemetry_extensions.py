@@ -20,7 +20,7 @@ from .telemetry import (
     ACTION_EVENT,
     ERROR_EVENT,
     GenAITelemetry,
-    _format_exception_message,
+    _build_exception_details,
     _redact_error_message,
 )
 
@@ -62,6 +62,11 @@ def log_error(
     exception_type: str,
     exception_message: str,
     metadata: dict[str, Any] | None = None,
+    *,
+    stack_trace: str | None = None,
+    inner_exception_type: str | None = None,
+    inner_exception_message: str | None = None,
+    inner_stack_trace: str | None = None,
 ) -> None:
     """Log a telemetry error event."""
     with suppress(Exception):
@@ -71,8 +76,15 @@ def log_error(
             {
                 "exceptionType": exception_type,
                 "exceptionMessage": _redact_error_message(exception_message),
+                "stackTrace": _redact_error_message(stack_trace) if stack_trace else None,
+                "innerExceptionType": inner_exception_type,
+                "innerExceptionMessage": (
+                    _redact_error_message(inner_exception_message) if inner_exception_message else None
+                ),
+                "innerStackTrace": _redact_error_message(inner_stack_trace) if inner_stack_trace else None,
             }
         )
+        attributes = {key: value for key, value in attributes.items() if value is not None}
         telemetry.log(ERROR_EVENT, attributes)
 
 
@@ -84,6 +96,15 @@ def _mark_exception_logged(exc: BaseException) -> None:
     # Some exception implementations do not allow custom attributes.
     with suppress(Exception):
         setattr(exc, _ERROR_LOGGED_ATTR, True)
+
+
+def _log_exception(
+    exc: BaseException,
+    tb: TracebackType | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    with suppress(Exception):
+        log_error(**_build_exception_details(exc, tb), metadata=metadata)
 
 
 def _resolve_invoked_from(skip_frames: int = 0) -> str:
@@ -171,11 +192,7 @@ class ActionContext:
         )
 
         if exc_type is not None and exc_val is not None and not _is_exception_logged(exc_val):
-            log_error(
-                exception_type=exc_type.__name__,
-                exception_message=_format_exception_message(exc_val, exc_tb),
-                metadata=self.metadata,
-            )
+            _log_exception(exc_val, exc_tb, self.metadata)
             _mark_exception_logged(exc_val)
 
         return False
@@ -217,10 +234,7 @@ def action(func: _TFunc) -> _TFunc:
         except Exception as exc:
             success = False
             if not _is_exception_logged(exc):
-                log_error(
-                    exception_type=type(exc).__name__,
-                    exception_message=_format_exception_message(exc, exc.__traceback__),
-                )
+                _log_exception(exc, exc.__traceback__)
                 _mark_exception_logged(exc)
             raise
         finally:

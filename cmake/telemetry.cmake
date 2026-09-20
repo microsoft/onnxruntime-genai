@@ -60,12 +60,6 @@ include(FetchContent)
 # The FetchContent source requires a few deterministic CMake adjustments for nested include paths,
 # self-contained static dependencies, and Apple portability. Apply them without external tools.
 
-# Linux packages must not depend on a system libcurl. Build an internal HTTP(S)-only curl with
-# mbedTLS before configuring 1DS so its CURL::libcurl reference resolves to the static target.
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  include(${PROJECT_SOURCE_DIR}/cmake/telemetry/linux-http.cmake)
-endif()
-
 # Use the SDK's canonical build options. GenAI consumes only the C++ library and supplies all
 # dependencies needed by its packaged static/shared target.
 set(MATSDK_BUILD_HEADERS ON CACHE BOOL "Build 1DS SDK headers" FORCE)
@@ -85,10 +79,19 @@ set(MATSDK_BUILD_JNI_WRAPPER OFF CACHE BOOL "Disable 1DS JNI wrapper" FORCE)
 set(MATSDK_BUILD_PACKAGE OFF CACHE BOOL "Disable 1DS package generation" FORCE)
 set(MATSDK_BUILD_APPLE_HTTP ${APPLE} CACHE BOOL "Build the 1DS Apple HTTP client" FORCE)
 set(MATSDK_ANDROID_HTTP_CLIENT JAVA CACHE STRING "Use the 1DS Java HTTP bridge on Android" FORCE)
-set(MATSDK_CURL_PROVIDER SYSTEM CACHE STRING "Use GenAI's selected 1DS curl target" FORCE)
 set(MATSDK_CURL_TLS_BACKEND MBEDTLS CACHE STRING "Use mbedTLS for 1DS curl" FORCE)
-set(MATSDK_SQLITE_PROVIDER VENDORED CACHE STRING "Use bundled 1DS SQLite" FORCE)
-set(MATSDK_ZLIB_PROVIDER VENDORED CACHE STRING "Use bundled 1DS zlib" FORCE)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  set(MATSDK_CURL_PROVIDER FETCH CACHE STRING "Build the SDK's pinned curl with mbedTLS" FORCE)
+else()
+  set(MATSDK_CURL_PROVIDER SYSTEM CACHE STRING "Use the platform HTTP transport" FORCE)
+endif()
+if(APPLE)
+  set(MATSDK_SQLITE_PROVIDER SYSTEM CACHE STRING "Use Apple's system SQLite" FORCE)
+  set(MATSDK_ZLIB_PROVIDER SYSTEM CACHE STRING "Use Apple's system libz" FORCE)
+else()
+  set(MATSDK_SQLITE_PROVIDER MINIMAL CACHE STRING "Build the SDK's minimal private SQLite" FORCE)
+  set(MATSDK_ZLIB_PROVIDER VENDORED CACHE STRING "Build the SDK's private zlib" FORCE)
+endif()
 
 # BUILD_SHARED_LIBS is a global that onnxruntime-genai's own targets read after this module, and the SDK
 # selects mat's library type from it. Save it and restore it after the SDK is configured. Desktop and

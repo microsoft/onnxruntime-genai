@@ -70,12 +70,14 @@ def _resolve_home_dir() -> Path:
             if passwd_home.is_absolute():
                 return passwd_home
         except (AttributeError, ImportError, KeyError, OSError):
+            # Fall through to pathlib's cross-platform home-directory resolution.
             pass
     try:
         fallback_home = Path.home()
         if fallback_home.is_absolute():
             return fallback_home
     except (RuntimeError, KeyError):
+        # The caller raises a single explicit error after all supported fallbacks fail.
         pass
     raise RuntimeError("No absolute per-user telemetry storage directory is available")
 
@@ -203,7 +205,9 @@ class _WindowsDeviceIdMutex:
     def acquire(self) -> bool:
         try:
             import ctypes  # noqa: PLC0415
-            from ctypes import wintypes  # noqa: PLC0415
+            import ctypes.wintypes  # noqa: PLC0415
+
+            wintypes = ctypes.wintypes
 
             class SidAndAttributes(ctypes.Structure):
                 _fields_: ClassVar = [("sid", ctypes.c_void_p), ("attributes", wintypes.DWORD)]

@@ -21,13 +21,18 @@ def _load_builder_entrypoint_module():
     builders_stub.__getattr__ = _getattr
     previous_builders = sys.modules.get("builders")
     had_previous_builders = "builders" in sys.modules
+    models_path_added = str(MODELS_DIR) not in sys.path
     try:
+        if models_path_added:
+            sys.path.insert(0, str(MODELS_DIR))
         sys.modules["builders"] = builders_stub
         spec = importlib.util.spec_from_file_location("models_builder_telemetry", MODELS_DIR / "builder.py")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module
     finally:
+        if models_path_added:
+            sys.path.remove(str(MODELS_DIR))
         if had_previous_builders:
             sys.modules["builders"] = previous_builders
         else:

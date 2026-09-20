@@ -221,17 +221,17 @@ def run_benchmark_memory(args, batch_size, prompt_length, generation_length, max
     peak_gpu_memory = 0.0
     peak_cpu_memory = 0.0
 
+    monitor_threads = [threading.Thread(target=monitor_cpu_memory)]
     if IS_NVIDIA_SYSTEM:
-        monitor_thread = threading.Thread(target=monitor_gpu_memory)
-    else:
-        monitor_thread = threading.Thread(target=monitor_cpu_memory)
-
-    monitor_thread.start()
-
-    metrics = run_benchmark(args, batch_size, prompt_length, generation_length, max_length)
-
-    stop_monitoring = True
-    monitor_thread.join()
+        monitor_threads.append(threading.Thread(target=monitor_gpu_memory))
+    for monitor_thread in monitor_threads:
+        monitor_thread.start()
+    try:
+        metrics = run_benchmark(args, batch_size, prompt_length, generation_length, max_length)
+    finally:
+        stop_monitoring = True
+        for monitor_thread in monitor_threads:
+            monitor_thread.join()
 
     if IS_NVIDIA_SYSTEM:
         metrics.append(peak_gpu_memory)
@@ -520,7 +520,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     per_token_prompt_thrpt = batch_size * (1000 / per_token_prompt_latency_ms)
 
     # Time to first token = prompt prefill + first-token sampling
-    ttft_times = [p + s for p, s in zip(prompt_times, sampling_times)]
+    ttft_times = [p + s for p, s in zip(prompt_times, sampling_times, strict=True)]
     ttft_ms = aggregate_measurements(ttft_times, args.aggregation) * 1000
     std_ttft_ms = float(np.std(ttft_times)) * 1000
     print(f"{aggregation_label} Time to First Token: {ttft_ms} ms")
@@ -643,7 +643,7 @@ def main(args):
     elif args.execution_provider == "webgpu":
         print("WebGPU EP selected. Attempting to import 'onnxruntime-ep-webgpu' for registration...")
         try:
-            import onnxruntime_ep_webgpu as webgpu_ep
+            import onnxruntime_ep_webgpu as webgpu_ep  # noqa: PLC0415
         except ImportError as exc:
             raise ValueError(
                 "WebGPU EP selected but 'onnxruntime-ep-webgpu' is not installed. "

@@ -139,7 +139,7 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
     tokenizer = AutoTokenizer.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
     add_special_token_ids(config, tokenizer)
     if extra_options.get("adapter_path", False):
-        from peft import PeftConfig
+        from peft import PeftConfig  # noqa: PLC0415
 
         peft_config = PeftConfig.from_pretrained(
             extra_options["adapter_path"],
@@ -527,6 +527,14 @@ def set_onnx_dtype(precision: str, extra_options: dict[str, Any]) -> ir.DataType
     return to_onnx_dtype[precision]
 
 
+def _normalize_execution_provider_name(execution_provider):
+    return normalize_execution_provider(execution_provider)
+
+
+def _sanitize_path_value(value):
+    return sanitize_model_identifier(value)
+
+
 def _sanitize_extra_options(extra_options: dict[str, Any]) -> dict[str, Any]:
     """Exclude authentication/internal Hugging Face state and scrub user-facing options."""
     return {
@@ -618,7 +626,7 @@ def _emit_model_build_telemetry(
             action=action_name,
             duration_ms=duration_ms,
             success=success,
-            model_name=sanitize_model_identifier(getattr(config, "_name_or_path", "") or fallback_model_name),
+            model_name=_sanitize_path_value(getattr(config, "_name_or_path", "") or fallback_model_name),
             model_type=str(model_type),
             hidden_size=hidden_size,
             num_layers=num_layers,
@@ -628,7 +636,7 @@ def _emit_model_build_telemetry(
             context_length=context_length,
             io_dtype=io_dtype,
             quant_type=quant_type,
-            execution_provider=normalize_execution_provider(execution_provider),
+            execution_provider=_normalize_execution_provider_name(execution_provider),
             output_model_size_bytes=output_model_size,
             num_onnx_operators=num_ops,
             operator_types=op_types,
@@ -710,12 +718,10 @@ def _create_model_impl(
     **extra_options,
 ):
     overall_start = time.perf_counter()
-    normalized_execution_provider = normalize_execution_provider(execution_provider)
+    normalized_execution_provider = _normalize_execution_provider_name(execution_provider)
     if normalized_execution_provider != execution_provider:
         execution_provider = normalized_execution_provider
         extra_options["use_qdq"] = True
-
-    apply_deprecated_extra_option_aliases(extra_options)
 
     # Create cache and output directories
     os.makedirs(output_dir, exist_ok=True)
@@ -725,7 +731,9 @@ def _create_model_impl(
     try:
         hf_details = extra_options.pop("hf_details")
     except KeyError:
-        raise Exception("Hugging Face details not found in extra_options. Please call `parse_extra_options` before `create_model`.")
+        raise Exception(
+            "Hugging Face details not found in extra_options. Please call `parse_extra_options` before `create_model`."
+        ) from None
     extra_kwargs = hf_details.pop("extra_kwargs")
     hf_name = hf_details.pop("hf_name")
     config = hf_details.pop("hf_config")
