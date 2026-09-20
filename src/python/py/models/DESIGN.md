@@ -62,17 +62,13 @@ The experimental version-2 path adds grouped configuration entry points in
 4. The composite exporter writes the decoder and auxiliary runtime sections.
 5. The runtime fragment is merged into the completed `genai_config.json`.
 
-This order describes the implementation, not a guarantee of validation
-completeness. In particular, resolving policy before legacy syntax conversion
-currently causes compatibility defects. A resolved `QuantConfig` is export
-intent; loader capabilities, emitted node names, tensor adoption, and runtime
-requirements need separate checks. The effective policy dictionary is not a
-final graph manifest.
+Legacy syntax is normalized before structured leaves are overlaid. A resolved
+`QuantConfig` is still export intent rather than a final graph manifest, so the
+builder separately validates emitted node names, tensor adoption, exporter
+capabilities, and runtime requirements.
 
 Do not move checkpoint unpacking into this layer or change the C++ runtime
-schema to accommodate builder inputs. See the
-[implementation review](../../../../docs/ModelBuilderConfigurationImplementation.md)
-for open correctness and model-builder convention issues before extending it.
+schema to accommodate builder inputs.
 
 ### Architecture Classes
 

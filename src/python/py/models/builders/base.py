@@ -1076,14 +1076,10 @@ class Model:
         self.matmul_mixed_precision = {}
         customized_weight_config = {}
         self.exact_quant_override_names = set()
-        # setdefault preserves the first typed rule for each node. Exclusions
-        # are collected separately in quant_attrs and currently take precedence;
-        # they still need to join this resolver to implement full first-match rules.
+        resolved_names = set()
+        nodes_to_exclude = []
+        self.int4_customized_weight_config = {}
         for override in self.quant_config.weights.overrides:
-            if override.exclude:
-                if set(override.match) != {"name"}:
-                    raise ValueError("quantization exclusion overrides currently require an exact node name")
-                continue
             if set(override.match) == {"preset"}:
                 preset = override.match["preset"]
                 if preset in self.matmul_mixed_precision:
@@ -1091,24 +1087,33 @@ class Model:
                 self.matmul_mixed_precision[preset] = override.type
                 self.make_matmul_mixed_precision({preset: override.type})
                 for node_name, node_config in self.int4_customized_weight_config.items():
-                    customized_weight_config.setdefault(node_name, node_config)
+                    if node_name not in resolved_names:
+                        customized_weight_config[node_name] = node_config
+                        resolved_names.add(node_name)
                 continue
             if set(override.match) == {"name"}:
+                node_name = override.match["name"]
+                self.exact_quant_override_names.add(node_name)
+                if node_name in resolved_names:
+                    continue
+                resolved_names.add(node_name)
+                if override.exclude:
+                    nodes_to_exclude.append(node_name)
+                    continue
                 descriptor = resolve_dtype(override.type)
                 if descriptor.kind != "int" or descriptor.bits not in (4, 8):
                     raise ValueError("exact-name weight overrides currently support only int4 or int8")
-                node_name = override.match["name"]
                 if node_name.endswith("/Gather") and descriptor.bits == 8:
                     raise NotImplementedError(
                         "INT8 embedding export is not supported; GatherBlockQuantized currently supports INT4 only"
                     )
-                customized_weight_config.setdefault(node_name, {"bits": descriptor.bits})
-                self.exact_quant_override_names.add(node_name)
+                customized_weight_config[node_name] = {"bits": descriptor.bits}
                 continue
             raise ValueError(
-                "typed weight overrides currently support only a preset or an exact node name"
+                "weight overrides currently support only a preset or an exact node name"
             )
 
+        self.quant_attrs["nodes_to_exclude"] = nodes_to_exclude
         self.int4_customized_weight_config = customized_weight_config
         lm_head_config = customized_weight_config.get("/lm_head/MatMul")
         if lm_head_config is not None:

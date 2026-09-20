@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import sys
 from pathlib import Path
@@ -83,6 +84,24 @@ def test_structured_target_overrides_legacy_alias():
     assert effective.target_options["quant_config"]["weights"]["block_size"] == 128
 
 
+def test_structured_config_normalizes_legacy_quantization_lists():
+    effective = normalize_builder_config(
+        "int4",
+        "cuda",
+        {
+            "op_types_to_quantize": "MatMul/Gather",
+            "nodes_to_exclude": "/model/a/MatMul,/model/b/MatMul",
+        },
+        target_options={},
+    )
+    weights = effective.target_options["quant_config"]["weights"]
+    assert weights["op_types"] == ["MatMul", "Gather"]
+    assert [override["match"]["name"] for override in weights["overrides"]] == [
+        "/model/a/MatMul",
+        "/model/b/MatMul",
+    ]
+
+
 def make_drafter_checkpoint(tmp_path):
     path = tmp_path / "drafter"
     path.mkdir()
@@ -119,6 +138,67 @@ def test_dflash2_rejects_unsupported_body_dtype(tmp_path):
                 "quant_config": {"io_dtype": "fp16"},
             },
         )
+
+
+@pytest.mark.parametrize("field", ["accuracy_level", "op_types", "overrides"])
+def test_dflash2_rejects_unconsumed_weight_policy(tmp_path, field):
+    values = {
+        "accuracy_level": 4,
+        "op_types": ["MatMul"],
+        "overrides": [{"match": {"name": "/model/a/MatMul"}, "exclude": True}],
+    }
+    with pytest.raises(ValueError, match=f"weights.{field} is not supported"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            target_options={"attention": {"implementation": "paged"}},
+            drafter_options={
+                "drafter_type": "dflash2",
+                "path": make_drafter_checkpoint(tmp_path),
+                "quant_config": {"weights": {field: values[field]}},
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    "drafter_options,legacy_options",
+    [
+        ({"drafter_type": "none"}, {"dflash2_path": "legacy"}),
+        ({"drafter_type": "mtp"}, {"dspark_path": "legacy"}),
+        ({"drafter_type": "dflash2", "path": "structured"}, {"dspark_path": "legacy"}),
+    ],
+)
+def test_structured_drafter_rejects_conflicting_legacy_selection(tmp_path, drafter_options, legacy_options):
+    if drafter_options.get("path"):
+        drafter_options["path"] = make_drafter_checkpoint(tmp_path)
+    with pytest.raises(ValueError, match="conflicts with legacy drafter selection"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            legacy_options,
+            target_options={"attention": {"implementation": "paged"}},
+            drafter_options=drafter_options,
+        )
+
+
+def test_block_drafter_rejects_windowed_kv_cache(tmp_path):
+    with pytest.raises(ValueError, match="windowed KV cache is not supported"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            target_options={"attention": {"implementation": "paged"}},
+            drafter_options={
+                "drafter_type": "dflash2",
+                "path": make_drafter_checkpoint(tmp_path),
+                "attention": {"kv_cache": {"windowed": True}},
+            },
+        )
+
+
+def test_search_alone_is_preserved_in_legacy_configuration():
+    effective = normalize_builder_config("int4", "cuda", search={"top_k": 7})
+    assert effective.version == 1
+    assert effective.runtime_config == {"search": {"top_k": 7}}
 
 
 def test_unquantized_moe_requires_explicit_expert_policy():
@@ -175,6 +255,7 @@ def test_runtime_merge_replaces_arrays_and_fixed_allocation():
         "engine": {"dynamic_batching": {"block_size": 256, "gpu_utilization_factor": 0.6}},
         "search": {"top_k": 50},
     }
+    original = copy.deepcopy(generated)
     runtime = {
         "model": {"decoder": {"session_options": {"provider_options": [{"CUDA": {"new": "1"}}]}}},
         "engine": {"dynamic_batching": {"num_blocks": 128}},
@@ -185,6 +266,7 @@ def test_runtime_merge_replaces_arrays_and_fixed_allocation():
     assert merged["model"]["decoder"]["session_options"]["provider_options"] == [{"CUDA": {"new": "1"}}]
     assert merged["engine"]["dynamic_batching"] == {"block_size": 256, "num_blocks": 128}
     assert merged["search"]["top_k"] == 1
+    assert generated == original
 
 
 def test_runtime_rejects_protected_and_absent_components():
@@ -193,3 +275,88 @@ def test_runtime_rejects_protected_and_absent_components():
         apply_runtime_config(generated, {"engine": {"dynamic_batching": {"block_size": 16}}})
     with pytest.raises(ValueError, match="absent model component 'dflash2'"):
         apply_runtime_config(generated, {"model": {"dflash2": {"session_options": {}}}})
+
+
+def test_runtime_rejects_absent_engine_and_speculative_capabilities():
+    generated = {"model": {"decoder": {}}, "search": {}}
+    with pytest.raises(ValueError, match="absent engine configuration"):
+        apply_runtime_config(generated, {"engine": {"dynamic_batching": {"num_blocks": 16}}})
+    with pytest.raises(ValueError, match="absent speculative configuration"):
+        apply_runtime_config(generated, {"speculative": {"max_draft_tokens": 4}})
+
+
+@pytest.mark.parametrize("value", [True, 0, 17, 1.5, "4"])
+def test_runtime_rejects_invalid_max_draft_tokens(value):
+    generated = {"model": {"decoder": {}}, "speculative": {"max_draft_tokens": 4}}
+    with pytest.raises(ValueError, match="max_draft_tokens must be an integer between 1 and 16"):
+        apply_runtime_config(generated, {"speculative": {"max_draft_tokens": value}})
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("max_batch_size", 0),
+        ("max_scheduled_tokens", -1),
+        ("num_blocks", 0),
+        ("gpu_utilization_factor", 0),
+        ("gpu_utilization_factor", 1.1),
+    ],
+)
+def test_runtime_rejects_invalid_dynamic_batching_values(field, value):
+    generated = {"model": {"decoder": {}}, "engine": {"dynamic_batching": {"block_size": 256}}}
+    with pytest.raises(ValueError, match=field):
+        apply_runtime_config(generated, {"engine": {"dynamic_batching": {field: value}}})
+
+
+def test_runtime_rejects_overwriting_required_session_option():
+    generated = {
+        "model": {
+            "dflash2": {
+                "filename": "dflash2.onnx",
+                "session_options": {"ep.cuda.fpa_intb_gemm": "0"},
+            }
+        }
+    }
+    with pytest.raises(ValueError, match="required session option"):
+        apply_runtime_config(
+            generated,
+            {"model": {"dflash2": {"session_options": {"ep.cuda.fpa_intb_gemm": "1"}}}},
+        )
+
+
+def test_runtime_rejects_provider_changes():
+    generated = {
+        "model": {
+            "decoder": {
+                "session_options": {"provider_options": [{"CUDA": {}}]},
+            }
+        }
+    }
+    with pytest.raises(ValueError, match="cannot change execution providers"):
+        apply_runtime_config(
+            generated,
+            {"model": {"decoder": {"session_options": {"provider_options": [{"CPU": {}}]}}}},
+        )
+    with pytest.raises(ValueError, match="cannot change execution providers"):
+        apply_runtime_config(
+            generated,
+            {"model": {"decoder": {"session_options": {"provider_options": []}}}},
+        )
+
+
+def test_runtime_rejects_non_session_model_members():
+    generated = {"model": {"decoder": {"session_options": {}}, "vocab_size": 32000}}
+    with pytest.raises(ValueError, match="not a session-bearing component"):
+        apply_runtime_config(generated, {"model": {"vocab_size": {"session_options": {}}}})
+
+
+def test_runtime_rejects_draft_limit_above_exported_capacity():
+    generated = {
+        "model": {
+            "decoder": {"session_options": {}},
+            "dflash2": {"session_options": {}, "num_draft_tokens": 4},
+        },
+        "speculative": {"max_draft_tokens": 4},
+    }
+    with pytest.raises(ValueError, match="exceeds the exported drafter/state capacity"):
+        apply_runtime_config(generated, {"speculative": {"max_draft_tokens": 5}})

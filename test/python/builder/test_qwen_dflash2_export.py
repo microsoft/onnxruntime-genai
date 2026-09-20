@@ -380,6 +380,47 @@ def test_exact_name_quantization_override_is_forwarded_to_quantizer():
     assert model.int4_customized_weight_config == {"/model/layers.0/mlp/down_proj/MatMul": {"bits": 8}}
 
 
+def test_preset_quantization_override_initializes_the_node_map():
+    model = object.__new__(Model)
+    model.quant_config = types.SimpleNamespace(
+        weights=types.SimpleNamespace(
+            method="default",
+            overrides=[types.SimpleNamespace(match={"preset": "last_matmul"}, type="int8", exclude=False)],
+        )
+    )
+    model.quant_type = None
+    model.quant_attrs = {"nodes_to_exclude": []}
+
+    model.make_quant_init(types.SimpleNamespace())
+
+    assert model.int4_customized_weight_config == {"/lm_head/MatMul": {"bits": 8}}
+
+
+@pytest.mark.parametrize("exclude_first", [False, True])
+def test_exact_quantization_rules_use_first_match(exclude_first):
+    node_name = "/lm_head/MatMul"
+    typed = types.SimpleNamespace(match={"name": node_name}, type="int8", exclude=False)
+    excluded = types.SimpleNamespace(match={"name": node_name}, type=None, exclude=True)
+    model = object.__new__(Model)
+    model.quant_config = types.SimpleNamespace(
+        weights=types.SimpleNamespace(
+            method="default",
+            overrides=[excluded, typed] if exclude_first else [typed, excluded],
+        )
+    )
+    model.quant_type = None
+    model.quant_attrs = {"nodes_to_exclude": [node_name]}
+
+    model.make_quant_init(types.SimpleNamespace())
+
+    if exclude_first:
+        assert model.int4_customized_weight_config == {}
+        assert model.quant_attrs["nodes_to_exclude"] == [node_name]
+    else:
+        assert model.int4_customized_weight_config == {node_name: {"bits": 8}}
+        assert model.quant_attrs["nodes_to_exclude"] == []
+
+
 def test_unsupported_typed_quantization_match_is_rejected():
     model = object.__new__(Model)
     model.quant_config = types.SimpleNamespace(
@@ -703,6 +744,53 @@ def test_off_policy_keeps_embedding_and_head_private(tmp_path):
         "model.embed_tokens.weight",
         "lm_head.MatMul.weight",
     }
+
+
+def test_off_policy_uses_emitted_fp8_head_inventory(tmp_path):
+    model = _composite()
+    model.dflash2 = types.SimpleNamespace(
+        filename="dflash2.onnx",
+        lm_head_quant=None,
+        graph=types.SimpleNamespace(
+            initializers={
+                "model.embed_tokens.weight": object(),
+                "lm_head.MatMul.fp8_weight": object(),
+                "lm_head.MatMul.fp8_weight_scale": object(),
+            }
+        ),
+        save_model=lambda _output_dir: None,
+    )
+    model.dflash2_shared_weight_policies = {"embedding": "off", "lm_head": "off"}
+    captured = {}
+
+    def share_initializers(*args, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    model.share_initializers = share_initializers
+
+    model.save_dflash2_model(str(tmp_path))
+
+    assert captured["excluded_source_initializers"] == {
+        "model.embed_tokens.weight",
+        "lm_head.MatMul.fp8_weight",
+        "lm_head.MatMul.fp8_weight_scale",
+    }
+
+
+def test_off_policy_suppresses_unshared_adopted_head_warning(tmp_path, capsys):
+    model = _composite()
+    model.dflash2 = types.SimpleNamespace(
+        filename="dflash2.onnx",
+        lm_head_quant={"bits": 4, "block_size": 32, "prepack": 0, "adopt_target": True},
+        save_model=lambda _output_dir: None,
+    )
+    model.dflash2_shared_weight_policies = {"embedding": "auto", "lm_head": "off"}
+    model.share_initializers = lambda *args, **kwargs: []
+
+    model.save_dflash2_model(str(tmp_path))
+
+    assert "may no longer agree" not in capsys.readouterr().out
 
 
 def test_required_policy_requests_exact_target_adoption(tmp_path):

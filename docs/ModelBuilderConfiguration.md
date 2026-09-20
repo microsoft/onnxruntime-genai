@@ -1,15 +1,12 @@
 # Shared Model Builder and Olive Configuration
 
-Status: partially implemented prototype. The GenAI version-2 entry points exist,
-but normalization, drafter sharing, and runtime validation still have correctness
-gaps. The contract and acceptance checks below remain the intended design, not a
-claim that all described combinations are supported. Olive pass integration and
-INT8 `GatherBlockQuantized` export are also pending.
+Status: experimental implementation. The GenAI version-2 entry points normalize
+legacy and structured policy, reject unsupported drafter combinations, validate
+runtime overlays against the exported package, and apply ordered quantization
+overrides. Olive pass integration, target checkpoint conversion policy, and INT8
+`GatherBlockQuantized` export are still pending.
 
 Date: 2026-09-18
-
-See [Implementation Review](ModelBuilderConfigurationImplementation.md) for
-verified behavior, known defects, API caveats, and missing acceptance coverage.
 
 This document proposes a shared configuration contract for the ONNX Runtime
 GenAI model builder and Olive's `ModelBuilder` pass. It extends the quantization

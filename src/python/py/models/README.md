@@ -103,11 +103,13 @@ python builder.py --help
 
 ### Structured Builder Configuration
 
-Schema version 2 is an **experimental, partial implementation** of the
+Schema version 2 is an **experimental implementation** of the
 [shared configuration design](../../../../docs/ModelBuilderConfiguration.md).
-Read the [implementation review](../../../../docs/ModelBuilderConfigurationImplementation.md)
-before migrating recipes. In particular, legacy/new policy equivalence,
-borrowed-head layout compatibility, and runtime validation are incomplete.
+It normalizes legacy quantization syntax before applying structured overrides,
+rejects unsupported or conflicting drafter policies, validates runtime overlays
+against exported capabilities, and checks borrowed quantized-head layouts before
+adoption. Olive integration, target checkpoint conversion policy, and INT8
+embedding export remain pending.
 
 Each structured CLI option accepts an inline JSON object or a JSON file path.
 Relative paths use the process working directory, including nested checkpoint
@@ -144,14 +146,14 @@ for the target. Root CLI `precision` is optional when target weight type is expl
 DFlash2 and DSpark selection requires a local checkpoint `path`, paged target
 attention, and BF16 body I/O. Omitted target taps are inferred from checkpoint
 `target_layer_ids + 1` before construction. DFlash2 parses `auto`, `required`,
-and `off` sharing modes, but acceptance does not establish graph-level layout
-compatibility. MTP/DSpark currently accept only `auto`. Do not mix structured
-drafter selection with legacy drafter paths until conflict handling is fixed.
+and `off` sharing modes and validates adopted quantized-head node attributes.
+MTP/DSpark currently accept only `auto`. Structured drafter selections that
+conflict with legacy drafter paths are rejected.
 
 Runtime fragments are applied after composite configuration generation. Objects
-merge recursively; arrays replace whole. The current validator protects outer
-graph fields but does not enforce provider compatibility, nested field validity,
-or numeric/speculative limits. It must not be treated as a complete safety check.
+merge recursively; arrays replace whole. The validator rejects absent engine or
+speculative capabilities, invalid allocation and draft limits, provider changes,
+and changes to graph-required session options.
 
 Python callers should pass structured dictionaries to `parse_extra_options`
 before calling `create_model` with its returned options. The legacy options

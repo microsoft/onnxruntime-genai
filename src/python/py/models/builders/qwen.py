@@ -1289,23 +1289,30 @@ class Qwen35MoEModel(MTPModel):
             drafter.adopt_target_tensors(os.path.join(output_dir, self.decoder.filename))
         drafter.save_model(output_dir)
 
+        initializer_names = set(getattr(getattr(drafter, "graph", None), "initializers", {}))
+        embedding_initializers = frozenset(
+            name for name in initializer_names if name.startswith("model.embed_tokens.")
+        )
+        head_initializers = frozenset(name for name in initializer_names if name.startswith("lm_head.MatMul."))
         embedding = getattr(drafter, "embed_quant", None)
-        embedding_initializers = (
-            frozenset(
-                {
-                    f"model.embed_tokens.weight_Q{embedding['bits']}",
-                    "model.embed_tokens.weight_scales",
-                }
+        if not embedding_initializers:
+            embedding_initializers = (
+                frozenset(
+                    {
+                        f"model.embed_tokens.weight_Q{embedding['bits']}",
+                        "model.embed_tokens.weight_scales",
+                    }
+                )
+                if embedding is not None
+                else frozenset({"model.embed_tokens.weight"})
             )
-            if embedding is not None
-            else frozenset({"model.embed_tokens.weight"})
-        )
         head = getattr(drafter, "lm_head_quant", None)
-        head_initializers = (
-            frozenset({f"lm_head.MatMul.weight_Q{head['bits']}", "lm_head.MatMul.weight_scales"})
-            if head is not None
-            else frozenset({"lm_head.MatMul.weight"})
-        )
+        if not head_initializers:
+            head_initializers = (
+                frozenset({f"lm_head.MatMul.weight_Q{head['bits']}", "lm_head.MatMul.weight_scales"})
+                if head is not None
+                else frozenset({"lm_head.MatMul.weight"})
+            )
         # A head the drafter had to quantize itself must keep its private copy; an adopted one is
         # the target's own tensor and has to fold back onto it.
         adopted = set(head_initializers if head is not None and head["adopt_target"] else ())
@@ -1341,10 +1348,15 @@ class Qwen35MoEModel(MTPModel):
         missing = required - shared_names
         if missing:
             raise ValueError("Required shared initializers are unavailable: " + ", ".join(sorted(missing)))
-        self.warn_unshared_lm_head(drafter, shared, drafter_name)
+        self.warn_unshared_lm_head(
+            drafter,
+            shared,
+            drafter_name,
+            shared_weight_policies.get("lm_head", "auto") if shared_weight_policies is not None else "auto",
+        )
         return shared
 
-    def warn_unshared_lm_head(self, drafter, shared, drafter_name):
+    def warn_unshared_lm_head(self, drafter, shared, drafter_name, sharing_policy="auto"):
         """Report a drafter head that stayed a separate copy instead of folding onto the target's.
 
         The drafter adopts the target's own initializers, so the two are identical by
@@ -1353,7 +1365,7 @@ class Qwen35MoEModel(MTPModel):
         guarantee that the drafter scores with the head the target verifies with.
         """
         head = drafter.lm_head_quant
-        if head is None or not head["adopt_target"]:
+        if sharing_policy == "off" or head is None or not head["adopt_target"]:
             return
         weight_name = f"lm_head.MatMul.weight_Q{head['bits']}"
         if any(entry["name"] == weight_name for entry in shared):

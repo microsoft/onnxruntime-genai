@@ -27,13 +27,11 @@ Parsing `checkpoint_policy=preserve/requantize` does not establish loader
 support. Currently the target does not enforce it; Qwen MTP uses it when loading
 its tensors. Do not promise preservation/conversion from schema acceptance alone.
 
-Typed overrides currently support preset or exact-name selection, and
-exclusions require exact names. Ordered first-match resolution is incomplete:
-exclusions are applied separately and can override an earlier typed rule.
-INT8 embedding overrides are rejected; INT8 MatMul support does not supply an
-INT8 Gather export path. See the
-[implementation review](../../../../../docs/ModelBuilderConfigurationImplementation.md)
-for the remaining final-graph, sharing, and numerical validation requirements.
+Typed overrides support preset or exact-name selection, and exclusions require
+exact names. Typed and exclusion rules share ordered first-match resolution;
+exact names are checked against the emitted graph after fusion. INT8 embedding
+overrides are rejected because INT8 MatMul support does not supply an INT8
+Gather export path.
 
 ## Design: method vs. mixed precision
 

@@ -167,15 +167,17 @@ def normalize_target_quant_config(
     precision: str | None,
     execution_provider: str,
 ) -> tuple[QuantConfig, str]:
-    """Seed target policy from legacy options, then overlay structured leaves.
-
-    The legacy adapter expects parsed options. The CLI currently reaches this
-    function before check_extra_options, so string lists and some effective
-    dtype/default decisions still need reconciliation with that earlier API.
-    """
+    """Seed target policy from legacy options, then overlay structured leaves."""
     canonical = canonical_quant_data(data)
     seed_precision = precision_from_quant_data(canonical, precision)
-    legacy_config = QuantConfig.from_extra_options(legacy_options, seed_precision, execution_provider)
+    normalized_legacy = copy.deepcopy(legacy_options)
+    op_types = normalized_legacy.get("op_types_to_quantize")
+    if isinstance(op_types, str):
+        normalized_legacy["op_types_to_quantize"] = tuple(op_types.split("/"))
+    exclusions = normalized_legacy.get("nodes_to_exclude")
+    if isinstance(exclusions, str):
+        normalized_legacy["nodes_to_exclude"] = exclusions.split(",")
+    legacy_config = QuantConfig.from_extra_options(normalized_legacy, seed_precision, execution_provider)
     merged = merge_objects(legacy_config.to_dict(), canonical)
 
     if "moe" not in canonical or "type" not in canonical.get("moe", {}):
@@ -295,6 +297,10 @@ def normalize_drafter_quant_config(data: dict[str, Any], drafter_type: str, exec
     if drafter_type == "dspark" and quant_config.weights.type != "none":
         raise ValueError("DSpark integer weight quantization is not supported")
     if drafter_type == "dflash2":
+        weights = canonical.get("weights", {})
+        for field_name in ("accuracy_level", "op_types", "overrides"):
+            if field_name in weights:
+                raise ValueError(f"DFlash2 weights.{field_name} is not supported")
         if quant_config.weights.type not in ("none", "int4", "int8"):
             raise ValueError("DFlash2 weights.type must be none, int4, or int8")
         if quant_config.weights.method != "default" or not quant_config.weights.symmetric:
@@ -323,6 +329,17 @@ def flatten_drafter_options(
     drafter_type = options.get("drafter_type")
     if drafter_type not in ("none", "mtp", "dflash2", "dspark"):
         raise ValueError("drafter_options.drafter_type must be mtp, dflash2, dspark, or none")
+
+    legacy_drafters = {
+        name.removesuffix("_path")
+        for name in ("dflash2_path", "dspark_path")
+        if flattened.get(name)
+    }
+    if legacy_drafters and legacy_drafters != {drafter_type}:
+        raise ValueError(
+            f"drafter_options.drafter_type={drafter_type} conflicts with legacy drafter selection "
+            + ", ".join(sorted(legacy_drafters))
+        )
 
     incompatible = {
         "none": set(options) - {"drafter_type"},
@@ -388,6 +405,8 @@ def flatten_drafter_options(
         check_fields(kv_cache, {"scheme", "scale_file", "windowed"}, "drafter_options.attention.kv_cache")
         if kv_cache.get("scheme", "none") != "none" or "scale_file" in kv_cache:
             raise ValueError(f"{drafter_type} KV cache quantization is not supported")
+        if kv_cache.get("windowed", False):
+            raise ValueError(f"{drafter_type} windowed KV cache is not supported")
 
     optimizations = options.get("optimizations", {})
     check_fields(optimizations, {"fuse_mlp_gate_up"}, "drafter_options.optimizations")
@@ -462,6 +481,9 @@ def normalize_builder_config(
 
     provider = normalize_provider(execution_provider)
     if version == 1:
+        runtime = load_json_object(runtime_config, "runtime_config") if runtime_config is not None else {}
+        if search is not None:
+            runtime = merge_objects({"search": load_json_object(search, "search")}, runtime)
         return EffectiveBuilderConfig(
             version=1,
             execution_provider=provider,
@@ -470,7 +492,7 @@ def normalize_builder_config(
             target_options={},
             drafter_options=None,
             speculative_options={},
-            runtime_config=load_json_object(runtime_config, "runtime_config") if runtime_config is not None else {},
+            runtime_config=runtime,
         )
 
     target = load_json_object(target_options, "target_options")
@@ -520,12 +542,7 @@ def validate_model_dependent_config(effective_config: EffectiveBuilderConfig, mo
 
 
 def validate_runtime_config(runtime_config: dict[str, Any], generated_config: dict[str, Any]):
-    """Check permitted section names against the completed component inventory.
-
-    This currently protects outer graph metadata only. Numeric ranges, nested
-    session/search fields, provider compatibility, and graph-required session
-    settings still need semantic validation before profiles are production-safe.
-    """
+    """Check a runtime overlay against the completed exported configuration."""
     check_fields(runtime_config, {"search", "speculative", "engine", "model"}, "runtime_config")
     if "search" in runtime_config and not isinstance(runtime_config["search"], dict):
         raise ValueError("runtime_config.search must be an object")
@@ -534,6 +551,24 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
     if not isinstance(speculative, dict):
         raise ValueError("runtime_config.speculative must be an object")
     check_fields(speculative, {"max_draft_tokens"}, "runtime_config.speculative")
+    if "speculative" in runtime_config and "speculative" not in generated_config:
+        raise ValueError("runtime_config references absent speculative configuration")
+    if "max_draft_tokens" in speculative:
+        max_draft_tokens = speculative["max_draft_tokens"]
+        if isinstance(max_draft_tokens, bool) or not isinstance(max_draft_tokens, int) or not 1 <= max_draft_tokens <= 16:
+            raise ValueError("runtime_config.speculative.max_draft_tokens must be an integer between 1 and 16")
+        capacities = [
+            component["num_draft_tokens"]
+            for component in generated_config.get("model", {}).values()
+            if isinstance(component, dict) and isinstance(component.get("num_draft_tokens"), int)
+        ]
+        decoder_capacity = generated_config.get("model", {}).get("decoder", {}).get("state_update_capacity")
+        if isinstance(decoder_capacity, int) and decoder_capacity > 0:
+            capacities.append(decoder_capacity)
+        if capacities and max_draft_tokens > min(capacities):
+            raise ValueError(
+                "runtime_config.speculative.max_draft_tokens exceeds the exported drafter/state capacity"
+            )
 
     engine = runtime_config.get("engine", {})
     if not isinstance(engine, dict):
@@ -547,8 +582,24 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
         {"max_batch_size", "max_scheduled_tokens", "num_blocks", "gpu_utilization_factor"},
         "runtime_config.engine.dynamic_batching",
     )
+    if "engine" in runtime_config and "engine" not in generated_config:
+        raise ValueError("runtime_config references absent engine configuration")
     if "num_blocks" in dynamic_batching and "gpu_utilization_factor" in dynamic_batching:
         raise ValueError("runtime_config cannot specify both num_blocks and gpu_utilization_factor")
+    for field_name in ("max_batch_size", "max_scheduled_tokens", "num_blocks"):
+        if field_name not in dynamic_batching:
+            continue
+        value = dynamic_batching[field_name]
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"runtime_config.engine.dynamic_batching.{field_name} must be a positive integer")
+    if dynamic_batching.get("max_batch_size", 1) > 256:
+        raise ValueError("runtime_config.engine.dynamic_batching.max_batch_size must be at most 256")
+    if "gpu_utilization_factor" in dynamic_batching:
+        value = dynamic_batching["gpu_utilization_factor"]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value <= 1:
+            raise ValueError(
+                "runtime_config.engine.dynamic_batching.gpu_utilization_factor must be greater than 0 and at most 1"
+            )
 
     model = runtime_config.get("model", {})
     if not isinstance(model, dict):
@@ -564,23 +615,46 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
             {"session_options", "run_options"},
             f"runtime_config.model.{component_name}",
         )
+        generated_component = generated_components[component_name]
+        if not isinstance(generated_component, dict) or "session_options" not in generated_component:
+            raise ValueError(f"runtime_config.model.{component_name} is not a session-bearing component")
+        generated_session = generated_component["session_options"]
+        runtime_session = component_options.get("session_options", {})
+        if not isinstance(runtime_session, dict):
+            raise ValueError(f"runtime_config.model.{component_name}.session_options must be an object")
+        for key, value in runtime_session.items():
+            if key in generated_session and key not in ("log_id", "provider_options") and value != generated_session[key]:
+                raise ValueError(
+                    f"runtime_config.model.{component_name}.session_options cannot overwrite required session option '{key}'"
+                )
+        if "provider_options" in runtime_session:
+            generated_providers = generated_session.get("provider_options", [])
+            runtime_providers = runtime_session["provider_options"]
+            if not isinstance(runtime_providers, list) or any(
+                not isinstance(entry, dict) for entry in runtime_providers
+            ):
+                raise ValueError(
+                    f"runtime_config.model.{component_name}.session_options.provider_options must be an array of objects"
+                )
+            generated_names = {name for entry in generated_providers for name in entry}
+            runtime_names = {name for entry in runtime_providers for name in entry}
+            if generated_names != runtime_names:
+                raise ValueError(
+                    f"runtime_config.model.{component_name}.session_options cannot change execution providers"
+                )
 
 
 def apply_runtime_config(generated_config: dict[str, Any], runtime_config: dict[str, Any]) -> dict[str, Any]:
-    """Apply a structurally checked profile after all component sections exist.
-
-    Allocation selection currently removes the opposite allocation key from
-    ``generated_config`` in place before merging; callers must not reuse that
-    object as an untouched baseline. Semantic profile validation is incomplete.
-    """
+    """Apply a validated profile after all component sections exist."""
     if not runtime_config:
         return generated_config
     validate_runtime_config(runtime_config, generated_config)
+    baseline = copy.deepcopy(generated_config)
     overlay = copy.deepcopy(runtime_config)
     dynamic_batching = overlay.get("engine", {}).get("dynamic_batching", {})
-    generated_dynamic_batching = generated_config.get("engine", {}).get("dynamic_batching", {})
+    generated_dynamic_batching = baseline.get("engine", {}).get("dynamic_batching", {})
     if "num_blocks" in dynamic_batching:
         generated_dynamic_batching.pop("gpu_utilization_factor", None)
     elif "gpu_utilization_factor" in dynamic_batching:
         generated_dynamic_batching.pop("num_blocks", None)
-    return merge_objects(generated_config, overlay)
+    return merge_objects(baseline, overlay)
