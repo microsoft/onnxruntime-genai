@@ -487,6 +487,13 @@ class TestTelemetryPackaging(unittest.TestCase):
     @staticmethod
     def _configured_setup(telemetry_enabled: bool):
         setup_template = Path(__file__).parents[2] / "src" / "python" / "setup.py.in"
+        real_open = open
+
+        def open_package_description(file, *args, **kwargs):
+            if os.fspath(file) == "./package_description.md":
+                return mock_open(read_data="description")()
+            return real_open(file, *args, **kwargs)
+
         source = (
             setup_template.read_text(encoding="utf-8")
             .replace("@TARGET_NAME@", "onnxruntime-genai")
@@ -495,7 +502,7 @@ class TestTelemetryPackaging(unittest.TestCase):
         )
         with (
             patch("os.path.exists", return_value=True),
-            patch("builtins.open", mock_open(read_data="description")),
+            patch("builtins.open", side_effect=open_package_description),
             patch("setuptools.setup") as setup,
         ):
             exec(compile(source, str(setup_template), "exec"), {"__name__": "__main__"})
