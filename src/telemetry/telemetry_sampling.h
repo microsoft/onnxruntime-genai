@@ -8,12 +8,15 @@
 
 namespace Generators::TelemetryInternal {
 
-// Percentage of model-session lifecycle events retained. ProcessInfo remains at 100%.
+// Keep model-session and process rates independent so they can be tuned without changing schemas.
 // 1DS popSample is metadata only; ShouldSampleSession performs the actual client-side sampling.
 inline constexpr double kModelSessionSampleRatePercent = 1.0;
+inline constexpr double kProcessEventSampleRatePercent = 1.0;
 
 static_assert(kModelSessionSampleRatePercent >= 0.0 &&
               kModelSessionSampleRatePercent <= 100.0);
+static_assert(kProcessEventSampleRatePercent >= 0.0 &&
+              kProcessEventSampleRatePercent <= 100.0);
 
 inline uint64_t HashSamplingKey(std::string_view app_session_guid, uint32_t session_id) {
   uint64_t hash = 14695981039346656037ULL;
