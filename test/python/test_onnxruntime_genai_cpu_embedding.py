@@ -20,6 +20,7 @@ from onnxruntime_genai.models.split_cpu_embedding import convert
 
 SOURCE = os.environ.get("ORTGENAI_CPU_EMBEDDING_SOURCE_MODEL")
 SPLIT = os.environ.get("ORTGENAI_CPU_EMBEDDING_MODEL")
+_DEVICES = ["cpu"] + (["cuda"] if og.is_cuda_available() else [])
 real_model = pytest.mark.skipif(
     not SOURCE or not SPLIT or not og.is_cuda_available(),
     reason="Requires original and CPU-embedding CUDA Engine models",
@@ -90,8 +91,9 @@ def test_cpu_embedding_matches_gpu_and_eager(batch_size, prompt_length):
     assert captured == eager == expected
 
 
-def test_cpu_embedding_engine_without_gpu(tmp_path):
-    """Exercise the native lookup and embedding-only target binding on a tiny CPU model."""
+@pytest.mark.parametrize("device", _DEVICES)
+def test_cpu_embedding_engine_synthetic(tmp_path, device):
+    """Exercise the native lookup and embedding-only target binding on a tiny model."""
     original = Path(__file__).resolve().parent.parent / "models" / "engine" / "synthetic-paged"
     source = tmp_path / "source"
     shutil.copytree(original, source)
@@ -118,7 +120,11 @@ def test_cpu_embedding_engine_without_gpu(tmp_path):
     split = convert(source, tmp_path / "split")
 
     def run(path):
-        model = og.Model(str(path))
+        config = og.Config(str(path))
+        config.clear_providers()
+        if device == "cuda":
+            config.append_provider("cuda")
+        model = og.Model(config)
         results = []
         for _ in range(2):
             engine = og.Engine(model)
@@ -147,7 +153,8 @@ def test_cpu_embedding_engine_without_gpu(tmp_path):
         gc.collect()
         return results
 
-    assert run(split) == run(original)
+    expected = run(original)
+    assert run(split) == expected
     config_path = split / "genai_config.json"
     config = json.loads(config_path.read_text())
     config["model"]["embedding"]["outputs"]["inputs_embeds"] = "missing_output"

@@ -55,20 +55,26 @@ void CpuEmbedding::Run(std::span<const int64_t> ids, Tensor& output) const {
   if (output.GetType() != type_ || output.GetShape() != shape) {
     throw std::runtime_error("CPU embedding destination has an incompatible shape or type.");
   }
-  const auto& memory = GetDeviceInterface(DeviceType::CPU)->GetAllocator().GetInfo();
-  auto input = OrtValue::CreateTensor(memory, const_cast<int64_t*>(ids.data()), ids.size_bytes(),
+  const auto& cpu_memory = GetDeviceInterface(DeviceType::CPU)->GetAllocator().GetInfo();
+  auto input = OrtValue::CreateTensor(cpu_memory, const_cast<int64_t*>(ids.data()), ids.size_bytes(),
                                       id_shape, Ort::TypeToTensorType<int64_t>);
   auto bytes = output.GetByteSpan();
   auto host = bytes.CpuSpan();
-  auto result = OrtValue::CreateTensor(memory, host.data(), host.size_bytes(), shape, type_);
+  auto output_memory = output.p_device_->GetType() == DeviceType::CUDA
+                           ? OrtMemoryInfo::Create("CudaPinned", OrtDeviceAllocator,
+                                                   output.p_device_->GetMemoryInfo()->GetDeviceId(), OrtMemTypeCPUOutput)
+                           : OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+  auto result = OrtValue::CreateTensor(*output_memory, host.data(), host.size_bytes(), shape, type_);
   const char* input_name = config_.inputs.input_ids.c_str();
   const char* output_name = config_.outputs.embeddings.c_str();
   OrtValue* input_value = input.get();
   OrtValue* output_value = result.get();
   session_->Run(run_options_.get(), &input_name, &input_value, 1, &output_name, &output_value, 1);
-  // Complete the transfer before releasing the host mirror. This is outside capture;
-  // only the selected rows cross PCIe, into the caller's persistent device buffer.
-  if (output.p_device_->GetType() != DeviceType::CPU) {
+  // The pinned mirror has the destination buffer's lifetime, so this asynchronous copy can
+  // remain ordered with the consuming CUDA session without entering graph capture.
+  if (output.p_device_->GetType() == DeviceType::CUDA) {
+    bytes.CopyCpuToDevice();
+  } else if (output.p_device_->GetType() != DeviceType::CPU) {
     bytes.CopyFromCpu(host);
   }
 }

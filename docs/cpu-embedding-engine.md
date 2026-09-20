@@ -7,10 +7,11 @@ session mixed-device. CUDA graph capture cannot replay the CPU lookup. Disabling
 capture only for prefill does not solve the mixed-device decode graph.
 
 Split the embedding lookup into a separate CPU-only ONNX session. Run it eagerly
-before each target/drafter invocation, copy only the selected rows to CUDA, and bind
-those rows as `inputs_embeds`. The target and DFlash share one `CpuEmbedding` session
-and therefore one copy of the embedding table in host memory. Their LM head remains
-shared through the existing CUDA shared-initializer mechanism.
+before each target/drafter invocation, bind its output to pinned host memory, copy only
+the selected rows to CUDA, and bind those rows as `inputs_embeds`. The target and
+DFlash share one `CpuEmbedding` session and therefore one copy of the embedding table
+in host memory. Their LM head remains shared through the existing CUDA shared-initializer
+mechanism.
 
 ```mermaid
 flowchart LR
