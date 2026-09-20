@@ -1504,6 +1504,32 @@ TEST_F(EngineRunTest, PartialPrefillCommitsOneTransactionAndReturnsNoEvents) {
   EXPECT_EQ(request->status_, RequestStatus::TurnComplete);
 }
 
+TEST_F(EngineRunTest, CancelBetweenPrefillChunksSkipsRemainingPrefill) {
+  model_ = LoadDummyDecoderModelWithChunking(/*chunk_size=*/2);
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
+  auto prompt = Prompt(10);
+  auto request = CreateRequestWithPrompt(engine.engine, prompt);
+
+  std::array<EngineEvent, 1> storage;
+  ASSERT_EQ(engine.engine->Run(storage), 0u);
+  ASSERT_EQ(engine.executor->decode_calls, 1);
+  ASSERT_EQ(request->ProcessedSequenceLength(), 2);
+  ASSERT_TRUE(request->IsPrefill());
+
+  ASSERT_TRUE(request->Cancel(request->CurrentTurnId()));
+  ASSERT_EQ(engine.engine->Run(storage), 1u);
+  EXPECT_EQ(storage[0].request, request);
+  EXPECT_EQ(storage[0].flags, EngineEventFlagTurnFinished);
+  EXPECT_EQ(storage[0].finish_reason, GenerationFinishReason::Canceled);
+  EXPECT_EQ(engine.executor->decode_calls, 1);
+  EXPECT_EQ(request->ProcessedSequenceLength(), 2);
+  EXPECT_EQ(request->CurrentSequenceLength(),
+            static_cast<int64_t>(prompt.size()));
+
+  EXPECT_EQ(engine.engine->Run(storage), 0u);
+  EXPECT_EQ(engine.executor->decode_calls, 1);
+}
+
 TEST_F(EngineRunTest, UnserviceableContinuationPublishesTerminalFailure) {
   auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
   auto prompt = Prompt(10);
