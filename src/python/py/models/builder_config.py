@@ -180,7 +180,8 @@ def normalize_target_quant_config(
     legacy_config = QuantConfig.from_extra_options(normalized_legacy, seed_precision, execution_provider)
     merged = merge_objects(legacy_config.to_dict(), canonical)
 
-    if "moe" not in canonical or "type" not in canonical.get("moe", {}):
+    legacy_moe_explicit = "moe_quant_type" in legacy_options or "use_8bits_moe" in legacy_options
+    if ("moe" not in canonical or "type" not in canonical.get("moe", {})) and not legacy_moe_explicit:
         weights_type = merged["weights"]["type"]
         merged["moe"]["type"] = {
             "int4": "int4",
@@ -241,6 +242,8 @@ def flatten_target_options(
     flattened["op_types_to_quantize"] = quant_config.weights.op_types
     flattened["use_qdq"] = quant_config.format.use_qdq
     flattened["matmulnbits_weights_prepacked"] = quant_config.format.matmulnbits_weights_prepacked
+    if "type" in options.get("quant_config", {}).get("moe", {}):
+        flattened["moe_quant_type"] = quant_config.moe.type
 
     attention = options.get("attention", {})
     check_fields(attention, {"implementation", "paged", "kv_cache"}, "target_options.attention")
@@ -296,6 +299,15 @@ def normalize_drafter_quant_config(data: dict[str, Any], drafter_type: str, exec
         )
     if drafter_type == "dspark" and quant_config.weights.type != "none":
         raise ValueError("DSpark integer weight quantization is not supported")
+    if drafter_type == "dspark":
+        supported = QuantConfig.from_dict(defaults)
+        if (
+            quant_config.checkpoint_policy != supported.checkpoint_policy
+            or quant_config.weights != supported.weights
+            or quant_config.moe != supported.moe
+            or quant_config.format != supported.format
+        ):
+            raise ValueError("DSpark quantization settings other than bf16 I/O are not supported")
     if drafter_type == "dflash2":
         weights = canonical.get("weights", {})
         for field_name in ("accuracy_level", "op_types", "overrides"):
@@ -528,9 +540,18 @@ def normalize_builder_config(
 
 
 def validate_model_dependent_config(effective_config: EffectiveBuilderConfig, model_config: Any):
-    if effective_config.version != 2 or effective_config.target_moe_explicit:
+    if effective_config.version != 2:
         return
     quant_config = effective_config.extra_options.get("_quant_config")
+    checkpoint_moe_type = effective_config.extra_options.get("moe_quant_type")
+    if quant_config is not None and checkpoint_moe_type is not None and quant_config.moe.type != checkpoint_moe_type:
+        quant_data = quant_config.to_dict()
+        quant_data["moe"]["type"] = checkpoint_moe_type
+        quant_config = QuantConfig.from_dict(quant_data)
+        effective_config.extra_options["_quant_config"] = quant_config
+        effective_config.target_options["quant_config"] = quant_config.to_dict()
+    if effective_config.target_moe_explicit or checkpoint_moe_type is not None:
+        return
     if quant_config is None or quant_config.weights.type != "none":
         return
     text_config = getattr(model_config, "text_config", model_config)

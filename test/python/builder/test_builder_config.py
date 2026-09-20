@@ -84,6 +84,23 @@ def test_structured_target_overrides_legacy_alias():
     assert effective.target_options["quant_config"]["weights"]["block_size"] == 128
 
 
+@pytest.mark.parametrize(
+    "legacy_options",
+    [
+        {"moe_quant_type": "int8"},
+        {"use_8bits_moe": True},
+    ],
+)
+def test_structured_dense_weights_preserve_explicit_legacy_moe_policy(legacy_options):
+    effective = normalize_builder_config(
+        "int4",
+        "cuda",
+        legacy_options,
+        target_options={"quant_config": {"weights": {"type": "int4"}}},
+    )
+    assert effective.target_options["quant_config"]["moe"]["type"] == "int8"
+
+
 def test_structured_config_normalizes_legacy_quantization_lists():
     effective = normalize_builder_config(
         "int4",
@@ -136,6 +153,29 @@ def test_dflash2_rejects_unsupported_body_dtype(tmp_path):
                 "drafter_type": "dflash2",
                 "path": make_drafter_checkpoint(tmp_path),
                 "quant_config": {"io_dtype": "fp16"},
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    "quant_config",
+    [
+        {"weights": {"type": "none", "block_size": 64}},
+        {"weights": {"type": "none", "method": "rtn"}},
+        {"weights": {"type": "none", "overrides": [{"match": {"name": "/model/a/MatMul"}, "exclude": True}]}},
+        {"format": {"use_qdq": True}},
+    ],
+)
+def test_dspark_rejects_unconsumed_quantization_policy(tmp_path, quant_config):
+    with pytest.raises(ValueError, match="DSpark quantization settings"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            target_options={"attention": {"implementation": "paged"}},
+            drafter_options={
+                "drafter_type": "dspark",
+                "path": make_drafter_checkpoint(tmp_path),
+                "quant_config": quant_config,
             },
         )
 
@@ -223,6 +263,21 @@ def test_unquantized_moe_requires_explicit_expert_policy():
         },
     )
     validate_model_dependent_config(explicit, model_config)
+
+
+def test_checkpoint_moe_policy_updates_implicit_structured_config():
+    effective = normalize_builder_config(
+        "bf16",
+        "cuda",
+        target_options={"quant_config": {"weights": {"type": "none"}}},
+    )
+    effective.extra_options["moe_quant_type"] = "nvfp4"
+
+    validate_model_dependent_config(effective, type("Config", (), {"num_experts": 8})())
+
+    assert effective.extra_options["_quant_config"].moe.type == "nvfp4"
+    assert effective.extra_options["_quant_config"].moe.block_size == 16
+    assert effective.target_options["quant_config"]["moe"]["type"] == "nvfp4"
 
 
 def test_speculative_layers_flatten_in_order():
