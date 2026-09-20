@@ -1073,7 +1073,7 @@ class Qwen35MoEModel(MTPModel):
         }
         dynamic_batching = genai_config.get("engine", {}).get("dynamic_batching")
         if dynamic_batching is not None:
-            dynamic_batching["prefix_caching"] = False
+            dynamic_batching.setdefault("prefix_caching", False)
         self.add_shared_initializers_to_genai_config(genai_config)
 
         with open(config_path, "w") as config_file:
@@ -1330,7 +1330,7 @@ class Qwen35MoEModel(MTPModel):
         genai_config["model"]["dflash2"] = section
         dynamic_batching = genai_config.get("engine", {}).get("dynamic_batching")
         if dynamic_batching is not None and section.get("sliding_window", 0) <= 0:
-            dynamic_batching["prefix_caching"] = False
+            dynamic_batching.setdefault("prefix_caching", False)
 
         with open(config_path, "w") as config_file:
             json.dump(genai_config, config_file, indent=4)
@@ -1431,7 +1431,7 @@ class Qwen35MoEModel(MTPModel):
             decoder["shared_initializers"] = existing
             section["shared_initializers"] = self.dspark_shared_initializers
         genai_config["model"]["dspark"] = section
-        genai_config["engine"]["dynamic_batching"]["prefix_caching"] = False
+        genai_config["engine"]["dynamic_batching"].setdefault("prefix_caching", False)
 
         with open(config_path, "w") as config_file:
             json.dump(genai_config, config_file, indent=4)

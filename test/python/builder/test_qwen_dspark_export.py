@@ -440,13 +440,15 @@ def test_drafter_uses_target_context_length(tmp_path, monkeypatch):
     assert captured["max_position"] == model.decoder.context_length
 
 
-def test_genai_config_gains_the_drafter_and_the_target_tap(tmp_path):
+@pytest.mark.parametrize("prefix_caching", [None, False, True])
+def test_genai_config_gains_the_drafter_and_the_target_tap(tmp_path, prefix_caching):
     config_path = tmp_path / "genai_config.json"
+    dynamic_batching = {} if prefix_caching is None else {"prefix_caching": prefix_caching}
     config_path.write_text(
         json.dumps(
             {
                 "model": {"decoder": {}},
-                "engine": {"dynamic_batching": {}},
+                "engine": {"dynamic_batching": dynamic_batching},
             }
         )
     )
@@ -459,7 +461,8 @@ def test_genai_config_gains_the_drafter_and_the_target_tap(tmp_path):
     assert config["model"]["decoder"]["outputs"]["aux_hidden_states"] == "aux_hidden_states"
     assert config["model"]["dspark"]["filename"] == "dspark.onnx"
     assert config["model"]["dspark"]["aux_hidden_state_layers"] == AUX_LAYERS
-    assert config["engine"]["dynamic_batching"]["prefix_caching"] is False
+    expected_prefix_caching = False if prefix_caching is None else prefix_caching
+    assert config["engine"]["dynamic_batching"]["prefix_caching"] is expected_prefix_caching
 
 
 def test_shared_initializers_are_recorded_once_on_both_sides(tmp_path):

@@ -5,6 +5,7 @@ import json
 import os
 
 import onnx
+import pytest
 from onnx import external_data_helper, helper
 
 from models.builders.qwen import Qwen35MoEModel
@@ -47,13 +48,15 @@ def _make_qwen_mtp_model():
     return model
 
 
-def test_add_mtp_to_genai_config(tmp_path):
+@pytest.mark.parametrize("prefix_caching", [None, False, True])
+def test_add_mtp_to_genai_config(tmp_path, prefix_caching):
     config_path = tmp_path / "genai_config.json"
+    dynamic_batching = {} if prefix_caching is None else {"prefix_caching": prefix_caching}
     config_path.write_text(
         json.dumps(
             {
                 "model": {"decoder": {}},
-                "engine": {"dynamic_batching": {}},
+                "engine": {"dynamic_batching": dynamic_batching},
             }
         )
     )
@@ -67,7 +70,8 @@ def test_add_mtp_to_genai_config(tmp_path):
     assert config["model"]["decoder"]["outputs"]["hidden_states"] == "hidden_states"
     assert config["model"]["mtp"]["enabled"] is True
     assert config["model"]["mtp"]["filename"] == "mtp.onnx"
-    assert config["engine"]["dynamic_batching"]["prefix_caching"] is False
+    expected_prefix_caching = False if prefix_caching is None else prefix_caching
+    assert config["engine"]["dynamic_batching"]["prefix_caching"] is expected_prefix_caching
 
 
 def test_add_mtp_to_static_genai_config(tmp_path):
