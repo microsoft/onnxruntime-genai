@@ -1,4 +1,4 @@
-#include "generators.h"
+#include "generator/generators.h"
 #include "softmax.h"
 #include "sampling_distribution.h"
 #include "search.h"

@@ -7,6 +7,7 @@ option(USE_DML "Build with DML support" OFF)
 option(USE_WINML "Build with WinML support" OFF)
 option(USE_GUIDANCE "Build with guidance support" OFF)
 set(NUGET_PACKAGE_SOURCE "" CACHE STRING "Override the NuGet package source used by the build")
+set(NUGET_CONFIG_FILE "" CACHE FILEPATH "Use a custom NuGet configuration file")
 
 # bindings
 option(ENABLE_JAVA "Build the Java API." OFF)
@@ -21,6 +22,7 @@ option(TEST_QWEN_2_5 "Enable tests for Qwen-2.5 0.5B" OFF)
 
 # performance
 option(ENABLE_MODEL_BENCHMARK "Build model benchmark program" ON)
+option(ENABLE_ENGINE_BENCHMARK "Build the GenAI engine benchmark program" OFF)
 
 # diagnostics
 option(ENABLE_TRACING "Enable recording of tracing data" OFF)

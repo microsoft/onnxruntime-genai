@@ -53,7 +53,10 @@ Reason about every dynamic Engine step as a transaction:
 
 Never approve a change that can leave request progress, sampler state, cache slots, block ownership, host token mirrors, or caller-visible events at different logical token boundaries.
 
-The current dynamic Engine does not bind or checkpoint recurrent, convolutional, hybrid, or other mutable model state. If a future Engine path owns such state, it must participate in the same transaction boundary as request, sampler, and cache state.
+For manifests with fixed convolutional or recurrent state, the dynamic Engine binds that state
+through `HybridDecoderIO` and checkpoints it through `FixedStatePool`. Any additional mutable model
+state must participate in the same transaction boundary as request, sampler, paged cache, and
+existing fixed state.
 
 Maintain these invariants:
 

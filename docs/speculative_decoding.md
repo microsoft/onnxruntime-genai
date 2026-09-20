@@ -12,6 +12,11 @@ This document describes the two speculative-decoding runtimes in onnxruntime-gen
 Both share the same sampling, penalty, verification and statistics code so that their outputs match
 plain autoregressive decoding.
 
+The continuous-batching Engine has a separate lower-level interface for caller-supplied greedy
+drafts. It does not run either proposer described here and does not use this `Generator` round state
+machine. See [Speculative decoding: Engine caller-supplied proposals](SpeculativeDecoding.md#engine-caller-supplied-proposals)
+and [Paged Attention Engine](paged_attention_engine.md#caller-supplied-speculative-drafts).
+
 ---
 
 ## 1. Why speculative decoding
@@ -38,12 +43,12 @@ preserved by the acceptance rule, not by the draft's quality — the draft only 
 | `ComputeSampledCategorical` | [src/sampling_distribution.h](../src/sampling_distribution.h) | Builds the top-k / top-p / temperature truncated distribution. `top_k > 1` enables top-k; `0 < top_p < 1` enables the nucleus cutoff |
 | `FindNucleus` | [src/sampling_distribution.h](../src/sampling_distribution.h) | Adaptive partial-sort nucleus search with a log-space tail bound (avoids the O(V) softmax partition) |
 | `LogitsPenaltyProcessor` | [src/sampling_distribution.h](../src/sampling_distribution.h) | Applies min-length, repetition penalty and no-repeat-ngram to one logits row, identical to `Search_Cpu` |
-| `ComputeAcceptProb` | [src/speculative_sampling.h](../src/speculative_sampling.h) | `min(1, p_target / p_draft)` |
-| `GetSparseTokenProbability` | [src/speculative_sampling.h](../src/speculative_sampling.h) | O(K) probability lookup in a sparse distribution |
-| `SampleSparseToken` | [src/speculative_sampling.h](../src/speculative_sampling.h) | Draw from a sparse categorical |
-| `SampleCorrectionToken` | [src/speculative_sampling.h](../src/speculative_sampling.h) | Draw from the normalized residual `max(0, p - q)` over the target's support |
-| `ComputeTargetTokenSelection` | [src/speculative_sampling.h](../src/speculative_sampling.h) | Penalties + greedy argmax or truncated sampling for one target row |
-| `SpeculativeStats` | [src/speculative_stats.h](../src/speculative_stats.h) | Counters, timings and derived rates reported by both runtimes |
+| `ComputeAcceptProb` | [src/decoding/speculative_sampling.h](../src/decoding/speculative_sampling.h) | `min(1, p_target / p_draft)` |
+| `GetSparseTokenProbability` | [src/decoding/speculative_sampling.h](../src/decoding/speculative_sampling.h) | O(K) probability lookup in a sparse distribution |
+| `SampleSparseToken` | [src/decoding/speculative_sampling.h](../src/decoding/speculative_sampling.h) | Draw from a sparse categorical |
+| `SampleCorrectionToken` | [src/decoding/speculative_sampling.h](../src/decoding/speculative_sampling.h) | Draw from the normalized residual `max(0, p - q)` over the target's support |
+| `ComputeTargetTokenSelection` | [src/decoding/speculative_sampling.h](../src/decoding/speculative_sampling.h) | Penalties + greedy argmax or truncated sampling for one target row |
+| `SpeculativeStats` | [src/decoding/speculative_stats.h](../src/decoding/speculative_stats.h) | Counters, timings and derived rates reported by both runtimes |
 
 ### Acceptance rules
 
@@ -75,7 +80,7 @@ materializes two full-vocab vectors.
 
 ### Strategy selection
 
-`MakeDecodingStrategy(Generator&)` in [src/decoding_strategy.cpp](../src/decoding_strategy.cpp)
+`MakeDecodingStrategy(Generator&)` in [src/decoding/decoding_strategy.cpp](../src/decoding/decoding_strategy.cpp)
 picks the strategy once per `Generator`:
 
 ```
@@ -84,7 +89,7 @@ config.model.draft        -> BaseSpeculativeStrategy
 otherwise                 -> StandardDecodingStrategy
 ```
 
-`DecodingStrategy` (see [src/decoding_strategy.h](../src/decoding_strategy.h)) exposes
+`DecodingStrategy` (see [src/decoding/decoding_strategy.h](../src/decoding/decoding_strategy.h)) exposes
 `Step`, `Reset`, `GetStats`, `PrepareForAppend`, `TryGetExternalLogits` and `PrepareForSetLogits`.
 `Generator::GenerateNextToken` calls `Step` exactly once per user-visible token, so speculative
 decoding is transparent to callers.
@@ -108,7 +113,7 @@ positive range at parse time).
 
 ### Round structure
 
-`SpeculativeDecodingStrategy` ([src/speculative_decoding_strategy.h](../src/speculative_decoding_strategy.h))
+`SpeculativeDecodingStrategy` ([src/decoding/speculative_decoding_strategy.h](../src/decoding/speculative_decoding_strategy.h))
 owns the round state machine and defers to two virtuals implemented by `BaseSpeculativeStrategy`:
 
 - `Proposal Propose(Generator&, int K, int seed_length)` — run the draft model `K` times, applying
@@ -236,14 +241,14 @@ stream costs one main forward and one head forward per two tokens.
 
 The single head module is chained `N` times, feeding its own post-norm hidden forward
 (`head_out_hidden_`), the way vLLM's `AutoRegressiveSpeculator` does. Then `[t, d_0 .. d_{N-1}]` is
-verified in one `N+1`-wide main forward, `a` = length of the greedy-matching prefix, and one of four
+verified in one `N+1`-wide main forward, `a` = length of the greedy-matching prefix, and one of three
 finalize branches runs:
 
 | Branch | Condition | Cost |
 |---|---|---|
 | All accepted | `a == N` | No extra forward; bonus is verify row `N` |
-| Lossless crop + `M=1` replay | `a >= 1` and windowed recurrent state | Crop to `L+a`, replay the last committed token (1-wide, decode-consistent bonus) |
-| Snapshot rewind + replay | otherwise | `RewindToLength(L)` + replay `[t, d_0 .. d_{a-1}]` |
+| Windowed direct commit | `a < N` and windowed recurrent state | Crop to `L+a+1`; bonus is verify row `a` |
+| Snapshot rewind + replay | `a < N` otherwise | `RewindToLength(L)` + replay `[t, d_0 .. d_{a-1}]` |
 
 Re-materializing the `a` accepted drafts in the head's KV and drafting the next round's first token
 both consume *main-model* hidden states over consecutive positions, so they are **deferred and
@@ -263,14 +268,15 @@ forward, the reject path can crop instead of replaying whenever the recurrent st
 
 A wide (`M = N+1`) verify forward is numerically close to, but not bit-identical to, `M = 1` decode
 (different GEMM tiling; XQA vs. Flash attention). Only the **last** row of a forward matches a
-1-token decode. Greedy MTP is therefore "lossless modulo near-ties": the finalize branches are
-ordered so that the bonus token comes from a decode-consistent row wherever that is affordable.
-Under sampling this is a non-issue by construction.
+1-token decode. Greedy MTP is therefore "lossless modulo near-ties." On a partial accept, a
+windowed model commits verify row `a` directly because replaying from recurrent state produced by
+the same wide verify is not more decode-consistent; a non-windowed model restores its pre-verify
+snapshot and replays the committed prefix. Under sampling this is a non-issue by construction.
 
 ### Device offloads
 
 MTP adds five `DeviceInterface` virtuals ([src/smartptrs.h](../src/smartptrs.h), CUDA
-implementations in [src/cuda/interface.cpp](../src/cuda/interface.cpp)). All are appended at the end
+implementations in [src/ep/cuda/interface.cpp](../src/ep/cuda/interface.cpp)). All are appended at the end
 of the struct for vtable/ABI stability and return `false` on devices without an implementation, so
 every call site has a host fallback.
 
@@ -291,7 +297,7 @@ Because the add-on is loaded dynamically, `kDeviceInterfaceVersion` in
 Models like Qwen3.6 interleave GQA layers with GatedDeltaNet layers. The attention KV cache can be
 cropped to any length, but the recurrent state cannot — it is a single tensor that has already
 absorbed every token of the forward. `RecurrentState`
-([src/models/recurrent_state.h](../src/models/recurrent_state.h)) offers two rollback mechanisms:
+([src/models/io/recurrent_state.h](../src/models/io/recurrent_state.h)) offers two rollback mechanisms:
 
 - **Snapshot / restore** — `Snapshot(position)` copies the live conv + recurrent buffers before a
   speculative forward; `RewindTo` restores them in place (in place, so buffer addresses stay stable
@@ -324,7 +330,7 @@ shape, so `GeneratorParams::max_graph_capture_length` is set to `num_speculative
   `(length, recurrent variant)` pair, so ORT captures and replays an independent graph per shape.
 
 `HiddenStatesInputs` / `HiddenStatesOutputs`
-([src/models/hidden_states_inputs.h](../src/models/hidden_states_inputs.h)) keep one dedicated
+([src/models/io/hidden_states.h](../src/models/io/hidden_states.h)) keep one dedicated
 static buffer per captured length and a single shared dynamic buffer for everything else (prompt
 prefill), so the prompt does not leave a per-length buffer behind. `HiddenStatesInputs::Update`
 validates the source element type and byte count, then prefers a stream-ordered device-to-device
@@ -397,7 +403,7 @@ speculative loop in Python (see the reference implementation in
 ## 6. Statistics
 
 Both runtimes report the same `SpeculativeStats` schema
-([src/speculative_stats.h](../src/speculative_stats.h)), surfaced as a dict in Python and through
+([src/decoding/speculative_stats.h](../src/decoding/speculative_stats.h)), surfaced as a dict in Python and through
 `OgaSpeculativeStatsGetCount` / `OgaSpeculativeStatsGetNumber` / `OgaSpeculativeStatsGetBool` in C.
 
 | Group | Fields |
@@ -458,8 +464,8 @@ When no draft is accepted, it restores the snapshot and replays the committed to
 
 | Test | Coverage |
 |---|---|
-| [test/sampling_distribution_tests.cpp](../test/sampling_distribution_tests.cpp) | `ComputeSampledCategorical`, `FindNucleus`, the three logits penalties |
-| [test/speculative_sampling_tests.cpp](../test/speculative_sampling_tests.cpp) | `ComputeAcceptProb`, sparse lookup/sampling, correction sampling, densification |
+| [test/cpp/sampling_distribution_tests.cpp](../test/cpp/sampling_distribution_tests.cpp) | `ComputeSampledCategorical`, `FindNucleus`, the three logits penalties |
+| [test/cpp/speculative_sampling_tests.cpp](../test/cpp/speculative_sampling_tests.cpp) | `ComputeAcceptProb`, sparse lookup/sampling, correction sampling, densification |
 | [test/python/models/test_speculative_decoding.py](../test/python/models/test_speculative_decoding.py) | End-to-end draft-model speculative decoding, config validation, stats schema |
 
 When changing either runtime, the load-bearing invariant to test is **distributional equivalence to

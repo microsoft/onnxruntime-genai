@@ -2,65 +2,339 @@
 // Licensed under the MIT License.
 
 #include "varlen_decoder_io.h"
-#include "../../models/decoder_only.h"
-#include "../sequence_positions.h"
 
+#include <algorithm>
+#include <array>
+#include <limits>
+#include <numeric>
+#include <stdexcept>
+#include <string>
 #include <string_view>
+
+#include "../../models/decoder_only.h"
+#include "../../models/utils.h"
+#include "../paged_key_value_cache.h"
+#include "../sequence_positions.h"
 
 namespace Generators {
 
-VarlenGraphBuffers::VarlenGraphBuffers(DecoderOnly_Model& model) {
-  max_batch_size = model.config_->engine.dynamic_batching->max_batch_size;
+void ValidatePackedPositionIdsInput(
+    ONNXTensorElementDataType data_type,
+    std::span<const int64_t> shape,
+    std::span<const char* const> symbolic_shape) {
+  const bool packed_vector = shape.size() == 1 && shape[0] < 0;
+  const bool packed_mrope =
+      shape.size() == 2 && shape[0] == 3 && shape[1] < 0;
+  const char* token_dimension =
+      symbolic_shape.size() == shape.size() ? symbolic_shape.back() : nullptr;
+  if (data_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 ||
+      (!packed_vector && !packed_mrope) ||
+      (token_dimension &&
+       std::string_view{token_dimension} == "batch_size")) {
+    throw std::runtime_error(
+        "Packed hybrid execution requires position_ids with dynamic int64 "
+        "[num_tokens] or [3, num_tokens] geometry");
+  }
+}
 
-  auto make = [&](DeviceInterface* device, ONNXTensorElementDataType type, int64_t elements) {
-    auto tensor = std::make_unique<Tensor>(device, type);
-    tensor->CreateTensor(std::vector<int64_t>{elements}, /*make_static=*/true);
+namespace {
+
+int32_t CheckedMetadataLength(size_t value, const char* name) {
+  if (value > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+    throw std::runtime_error(std::string{name} + " exceeds the int32 attention metadata range.");
+  }
+  return static_cast<int32_t>(value);
+}
+
+int32_t CheckedMetadataLength(int64_t value, const char* name) {
+  if (value < 0 || value > std::numeric_limits<int32_t>::max()) {
+    throw std::runtime_error(std::string{name} + " is outside the int32 attention metadata range.");
+  }
+  return static_cast<int32_t>(value);
+}
+
+int32_t CheckedMetadataLength(size_t count, size_t block_size, const char* name) {
+  const size_t int32_max = static_cast<size_t>(std::numeric_limits<int32_t>::max());
+  if (count > int32_max / block_size) {
+    throw std::runtime_error(std::string{name} + " exceeds the int32 attention metadata range.");
+  }
+  return static_cast<int32_t>(count * block_size);
+}
+
+}  // namespace
+
+AttentionMetadataValues GetAttentionMetadataForPlan(const StepPlan& plan) {
+  AttentionMetadataValues metadata;
+  for (const auto& entry : plan.requests) {
+    metadata.max_query_len_bound =
+        std::max(metadata.max_query_len_bound,
+                 CheckedMetadataLength(entry.unprocessed_token_count, "Query length"));
+    metadata.max_kv_len_bound =
+        std::max(metadata.max_kv_len_bound,
+                 CheckedMetadataLength(entry.target_cache_slots, "KV length"));
+  }
+  metadata.max_kv_len_lower_bound = metadata.max_kv_len_bound;
+  return metadata;
+}
+
+AttentionMetadataValues GetAttentionMetadataForGraph(size_t max_query_len, size_t block_table_columns,
+                                                     size_t block_size) {
+  if (block_table_columns == 0 || block_size == 0) {
+    throw std::runtime_error("Captured attention metadata requires non-zero block-table columns and block size.");
+  }
+  if (max_query_len == 0) {
+    throw std::runtime_error("Captured attention metadata requires a non-zero query length.");
+  }
+
+  size_t max_kv_len_lower_bound = 1;
+  if (block_table_columns > kMinGraphBlockTableColumns) {
+    // Graph shapes use 8, 16, 32, ... columns, with the configured maximum possibly truncating the
+    // final bucket. Reaching a bucket wider than eight proves that the longest live table exceeded
+    // the preceding power-of-two boundary because capturable decode steps reserve exactly the blocks
+    // needed by their current KV length. This remains true when the graph is reused for different
+    // requests, unlike the exact length observed during capture.
+    size_t preceding_bucket = 1;
+    while (preceding_bucket <= (block_table_columns - 1) / 2) {
+      preceding_bucket *= 2;
+    }
+    max_kv_len_lower_bound =
+        static_cast<size_t>(CheckedMetadataLength(preceding_bucket, block_size, "KV lower bound")) + 1;
+  }
+
+  return {
+      CheckedMetadataLength(max_query_len, "Query length"),
+      CheckedMetadataLength(block_table_columns, block_size, "KV length"),
+      CheckedMetadataLength(max_kv_len_lower_bound, "KV lower bound"),
+  };
+}
+
+AttentionMetadataValues GetAttentionMetadataForGraphStep(
+    const AttentionMetadataValues& exact_metadata, size_t block_table_columns, size_t block_size) {
+  // Every request in a capturable step carries the same token count, so the step's own query bound
+  // is exactly the bound for every step this graph will serve.
+  auto metadata = GetAttentionMetadataForGraph(
+      static_cast<size_t>(exact_metadata.max_query_len_bound), block_table_columns, block_size);
+  if (exact_metadata.max_query_len_bound > metadata.max_query_len_bound ||
+      exact_metadata.max_kv_len_bound > metadata.max_kv_len_bound) {
+    throw std::runtime_error("Captured attention metadata upper bounds do not cover the current step.");
+  }
+  if (exact_metadata.max_kv_len_lower_bound < metadata.max_kv_len_lower_bound) {
+    // The lower bound is only a backend-selection hint. If reservation policy ever gets ahead of
+    // the live KV length, keep the graph correct and conservatively disable lower-bound optimizations.
+    metadata.max_kv_len_lower_bound = 1;
+  }
+  return metadata;
+}
+
+AttentionMetadataValues GetAttentionMetadataForGraphStep(
+    const StepPlan& plan, size_t block_table_columns, size_t block_size) {
+  return GetAttentionMetadataForGraphStep(
+      GetAttentionMetadataForPlan(plan), block_table_columns, block_size);
+}
+
+std::array<int32_t, kAttentionMetadataElementCount> PackAttentionMetadata(
+    const AttentionMetadataValues& metadata) {
+  return {
+      metadata.max_query_len_bound,
+      metadata.max_kv_len_bound,
+      metadata.max_kv_len_lower_bound,
+  };
+}
+
+bool DecoderLogitsArePerToken(const Model& model) {
+  // Logits with a symbolic batch_size first dimension hold one row per request; any other first
+  // dimension holds one row per packed token.
+  const auto logits_symbolic_shape =
+      model.session_info_.GetOutputSymbolicShape(model.config_->model.decoder.outputs.logits);
+  return logits_symbolic_shape.empty() ||
+         logits_symbolic_shape[0] == nullptr ||
+         std::string_view(logits_symbolic_shape[0]) != "batch_size";
+}
+
+size_t PackedPositionIdPlanes(const Model& model) {
+  const auto& position_ids = model.config_->model.decoder.inputs.position_ids;
+  if (!model.session_info_.HasInput(position_ids)) {
+    return 0;
+  }
+  return model.session_info_.GetInputShape(position_ids).size() == 2 ? 3 : 1;
+}
+
+namespace {
+
+// Every persistent buffer a capturable decode step needs, as a type and a shape. The constructor
+// allocates from this list and the engine's memory budget prices it, so the two cannot disagree.
+// A buffer the model does not use carries an empty shape.
+struct GraphBufferPlan {
+  enum Slot {
+    kInputIds,
+    kCumulativeSequenceLengths,
+    kPastSequenceLengths,
+    kPositionIds,
+    kLogits,
+    kHiddenStatesInput,
+    kHiddenStates,
+    kAuxHiddenStates,
+    kSlotCount,
+  };
+
+  struct Buffer {
+    ONNXTensorElementDataType type{};
+    std::vector<int64_t> shape;
+  };
+
+  size_t max_batch_size{};
+  size_t max_query_tokens{};
+  size_t max_token_rows{};
+  std::array<Buffer, kSlotCount> buffers;
+};
+
+GraphBufferPlan PlanGraphBuffers(const Model& model, size_t position_planes,
+                                 size_t max_query_tokens_per_request) {
+  GraphBufferPlan plan;
+  plan.max_batch_size = model.config_->engine.dynamic_batching->max_batch_size;
+  const bool logits_are_per_token = DecoderLogitsArePerToken(model);
+  // A speculative step submits the drafted tokens plus the token the target always advances, so the
+  // packed row count is a multiple of the batch rather than equal to it. A model whose logits carry
+  // one row per request cannot verify drafts at all, so its steps are always one token wide.
+  plan.max_query_tokens =
+      logits_are_per_token ? std::max<size_t>(max_query_tokens_per_request, 1) : 1;
+  plan.max_token_rows = plan.max_batch_size * plan.max_query_tokens;
+  const size_t scheduled_token_cap = model.config_->engine.dynamic_batching->max_scheduled_tokens;
+  if (scheduled_token_cap != 0) {
+    plan.max_token_rows =
+        std::max(plan.max_batch_size, std::min(plan.max_token_rows, scheduled_token_cap));
+  }
+
+  const auto rows = static_cast<int64_t>(plan.max_token_rows);
+  const auto batch = static_cast<int64_t>(plan.max_batch_size);
+  const int64_t hidden_size = model.config_->model.decoder.hidden_size;
+
+  plan.buffers[GraphBufferPlan::kInputIds] = {Ort::TypeToTensorType<int64_t>, {rows}};
+  plan.buffers[GraphBufferPlan::kCumulativeSequenceLengths] = {Ort::TypeToTensorType<int32_t>,
+                                                               {batch + 1}};
+  plan.buffers[GraphBufferPlan::kPastSequenceLengths] = {Ort::TypeToTensorType<int32_t>, {batch}};
+  if (position_planes != 0) {
+    plan.buffers[GraphBufferPlan::kPositionIds] = {
+        Ort::TypeToTensorType<int64_t>, {static_cast<int64_t>(position_planes) * rows}};
+  }
+  plan.buffers[GraphBufferPlan::kLogits] = {
+      model.session_info_.GetOutputDataType(model.config_->model.decoder.outputs.logits),
+      {logits_are_per_token ? rows : batch, static_cast<int64_t>(model.config_->model.vocab_size)}};
+
+  const auto& hidden_states_input_name = model.config_->model.decoder.inputs.hidden_states;
+  if (!hidden_states_input_name.empty() && model.session_info_.HasInput(hidden_states_input_name)) {
+    plan.buffers[GraphBufferPlan::kHiddenStatesInput] = {
+        model.session_info_.GetInputDataType(hidden_states_input_name), {rows, hidden_size}};
+  }
+
+  const auto& hidden_states_name = model.config_->model.decoder.outputs.hidden_states;
+  if (model.config_->engine.hidden_states_output_required &&
+      !hidden_states_name.empty() && model.session_info_.HasOutput(hidden_states_name)) {
+    plan.buffers[GraphBufferPlan::kHiddenStates] = {
+        model.session_info_.GetOutputDataType(hidden_states_name), {rows, hidden_size}};
+  }
+
+  const auto& aux_hidden_states_name = model.config_->model.decoder.outputs.aux_hidden_states;
+  if (model.config_->engine.aux_hidden_states_output_required &&
+      !aux_hidden_states_name.empty() && model.session_info_.HasOutput(aux_hidden_states_name)) {
+    const auto shape = model.session_info_.GetOutputShape(aux_hidden_states_name);
+    if (shape.size() != 2 || shape[1] <= 0) {
+      throw std::runtime_error("aux_hidden_states must be 2-D with a static width.");
+    }
+    plan.buffers[GraphBufferPlan::kAuxHiddenStates] = {
+        model.session_info_.GetOutputDataType(aux_hidden_states_name), {rows, shape[1]}};
+  }
+  return plan;
+}
+
+}  // namespace
+
+size_t VarlenGraphBufferBytes(const Model& model, size_t position_planes,
+                              size_t max_query_tokens_per_request) {
+  const auto plan = PlanGraphBuffers(model, position_planes, max_query_tokens_per_request);
+  size_t bytes = 0;
+  for (const auto& buffer : plan.buffers) {
+    if (buffer.shape.empty()) {
+      continue;
+    }
+    const auto elements = static_cast<size_t>(ElementCountFromShape(buffer.shape));
+    const size_t element_size = Ort::SizeOf(buffer.type);
+    if (element_size != 0 && elements > (std::numeric_limits<size_t>::max() - bytes) / element_size) {
+      throw std::runtime_error("CUDA graph buffer bytes overflow size_t.");
+    }
+    bytes += elements * element_size;
+  }
+  return bytes;
+}
+
+VarlenGraphBuffers::VarlenGraphBuffers(DecoderOnly_Model& model, size_t position_planes,
+                                       size_t max_query_tokens_per_request) {
+  const auto plan = PlanGraphBuffers(model, position_planes, max_query_tokens_per_request);
+  max_batch_size = plan.max_batch_size;
+  max_query_tokens = plan.max_query_tokens;
+  max_token_rows = plan.max_token_rows;
+
+  auto make = [&](GraphBufferPlan::Slot slot) -> std::unique_ptr<Tensor> {
+    const auto& buffer = plan.buffers[slot];
+    if (buffer.shape.empty()) {
+      return nullptr;
+    }
+    auto tensor = std::make_unique<Tensor>(model.p_device_inputs_, buffer.type);
+    tensor->CreateTensor(buffer.shape, /*make_static=*/true);
     return tensor;
   };
 
-  // One token per sequence on a decode step, so the token count equals the batch size.
-  input_ids = make(model.p_device_inputs_, Ort::TypeToTensorType<int64_t>, static_cast<int64_t>(max_batch_size));
-  cumulative_sequence_lengths =
-      make(model.p_device_inputs_, Ort::TypeToTensorType<int32_t>, static_cast<int64_t>(max_batch_size + 1));
-  past_sequence_lengths =
-      make(model.p_device_inputs_, Ort::TypeToTensorType<int32_t>, static_cast<int64_t>(max_batch_size));
-
-  logits = std::make_unique<Tensor>(model.p_device_inputs_,
-                                    model.session_info_.GetOutputDataType(model.config_->model.decoder.outputs.logits));
-  logits->CreateTensor(std::vector<int64_t>{static_cast<int64_t>(max_batch_size),
-                                            static_cast<int64_t>(model.config_->model.vocab_size)},
-                       /*make_static=*/true);
+  input_ids = make(GraphBufferPlan::kInputIds);
+  cumulative_sequence_lengths = make(GraphBufferPlan::kCumulativeSequenceLengths);
+  past_sequence_lengths = make(GraphBufferPlan::kPastSequenceLengths);
+  position_ids = make(GraphBufferPlan::kPositionIds);
+  logits = make(GraphBufferPlan::kLogits);
+  hidden_states_input = make(GraphBufferPlan::kHiddenStatesInput);
+  hidden_states = make(GraphBufferPlan::kHiddenStates);
+  aux_hidden_states = make(GraphBufferPlan::kAuxHiddenStates);
 }
 
-int VarlenGraphBuffers::GraphId(size_t batch_size, size_t block_table_columns) {
-  // Block table columns are bucketed to powers of two by the cache, so the exponent is enough to
-  // separate them. Ids must be positive: ORT reserves -1 for "do not capture or replay".
-  int columns_bucket = 0;
+std::optional<GraphAnnotationIds::Key> DecodeGraphKey(size_t batch_size, size_t tokens_per_request,
+                                                      size_t block_table_columns,
+                                                      size_t state_binding_key) {
+  if (batch_size == 0 || tokens_per_request == 0 || block_table_columns == 0) {
+    return std::nullopt;
+  }
+  // Block table columns are bucketed to powers of two by the cache, so the exponent identifies the
+  // bucket. This is only injective because GetGraphBlockTableColumns can hand out nothing but
+  // {8, 16, 32, ...} below the configured maximum plus the maximum itself; two genuinely different
+  // widths sharing an id would replay launches recorded against the wrong block-table shape.
+  size_t columns_bucket = 0;
   while ((size_t{1} << columns_bucket) < block_table_columns) {
     ++columns_bucket;
   }
-  return static_cast<int>(batch_size) * 64 + columns_bucket + 1;
+  return GraphAnnotationIds::Key{batch_size, tokens_per_request, columns_bucket, state_binding_key};
 }
 
 VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
                                  ScheduledRequests& scheduled_requests,
                                  std::shared_ptr<CacheManager> cache_manager,
                                  const ExecutionContext* execution_context,
-                                 VarlenGraphBuffers* graph_buffers)
+                                 VarlenGraphBuffers* graph_buffers,
+                                 size_t position_planes)
     : DecoderIO(model, scheduled_requests, cache_manager),
       graph_buffers_{graph_buffers},
-      execution_context_{execution_context} {
-  // Logits with a symbolic batch_size first dimension contain one row per request. Any other first
-  // dimension is treated as one row per packed token.
-  const auto logits_symbolic_shape =
-      model->session_info_.GetOutputSymbolicShape(model->config_->model.decoder.outputs.logits);
-  logits_are_per_token_ = logits_symbolic_shape.empty() ||
-                          logits_symbolic_shape[0] == nullptr ||
-                          std::string_view(logits_symbolic_shape[0]) != "batch_size";
+      plan_{execution_context ? execution_context->plan : nullptr},
+      block_table_columns_{
+          execution_context ? execution_context->block_table_columns : 0},
+      input_ids_{execution_context ? execution_context->input_ids : DeviceSpan<int32_t>{}},
+      hidden_states_input_{
+          execution_context ? execution_context->hidden_states_input : nullptr},
+      position_planes_{position_planes} {
+  logits_are_per_token_ = DecoderLogitsArePerToken(*model);
 
   PrepareInputIds(model, scheduled_requests);
+  PreparePositionIds(model, scheduled_requests);
   PrepareAttentionMetadata(model, scheduled_requests);
+  PrepareHiddenStatesInput(model, scheduled_requests);
   PrepareLogits(model, scheduled_requests);
+  PrepareHiddenStates(model, scheduled_requests);
+  PrepareAuxHiddenStates(model, scheduled_requests);
 
   auto cache = cache_manager->Cache();
   for (size_t i = 0; i < cache->input_names_.size(); ++i) {
@@ -74,8 +348,50 @@ VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
   }
 }
 
+void VarlenDecoderIO::PrepareHiddenStatesInput(
+    std::shared_ptr<DecoderOnly_Model> model,
+    ScheduledRequests& scheduled_requests) {
+  const auto& hidden_states_name = model->config_->model.decoder.inputs.hidden_states;
+  if (hidden_states_name.empty() || !model->session_info_.HasInput(hidden_states_name)) {
+    return;
+  }
+  if (!hidden_states_input_) {
+    throw std::runtime_error(
+        "The decoder requires a packed hidden_states input, but the execution context did not provide one.");
+  }
+
+  const auto info = hidden_states_input_->GetTensorTypeAndShapeInfo();
+  const auto shape = info->GetShape();
+  const std::vector<int64_t> expected_shape = {
+      static_cast<int64_t>(TokenCount(scheduled_requests)),
+      static_cast<int64_t>(model->config_->model.decoder.hidden_size)};
+  if (shape != expected_shape) {
+    throw std::runtime_error(
+        "The packed hidden_states input shape does not match the scheduled token rows.");
+  }
+  if (info->GetElementType() != model->session_info_.GetInputDataType(hidden_states_name)) {
+    throw std::runtime_error(
+        "The packed hidden_states input type does not match the decoder input type.");
+  }
+
+  OrtValue* active_hidden_states_input = hidden_states_input_;
+  if (graph_buffers_ != nullptr) {
+    if (!graph_buffers_->hidden_states_input) {
+      throw std::runtime_error(
+          "Captured decoder step has no persistent hidden_states input buffer.");
+    }
+    graph_buffers_->hidden_states_input->CreateTensor(expected_shape, /*make_static=*/true);
+    graph_buffers_->hidden_states_input->GetByteSpan().CopyFrom(
+        ByteWrapTensor(*model->p_device_inputs_, *hidden_states_input_));
+    active_hidden_states_input = graph_buffers_->hidden_states_input->GetOrtTensor();
+  }
+
+  input_names_.push_back(hidden_states_name.c_str());
+  inputs_.push_back(active_hidden_states_input);
+}
+
 void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests) {
-  const StepPlan* plan = execution_context_ ? execution_context_->plan : nullptr;
+  const StepPlan* plan = plan_;
   if (plan && plan->requests.size() != scheduled_requests.size()) {
     throw std::runtime_error("Step plan size does not match the scheduled batch.");
   }
@@ -83,7 +399,7 @@ void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, 
       plan ? plan->token_count
            : std::accumulate(scheduled_requests.begin(), scheduled_requests.end(), size_t{0},
                              [](size_t sum, const std::shared_ptr<Request>& request) {
-                               return sum + request->UnprocessedTokens().size();
+                               return sum + request->ScheduledTokenCount();
                              });
   // On a capturable step the tensors are views onto buffers that were allocated once, so their
   // device addresses match the ones recorded in the graph. Otherwise each step allocates its own.
@@ -119,16 +435,31 @@ void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, 
   auto sequence_lengths_span = sequence_lengths_tensor->GetDeviceSpan<int32_t>();
   auto sequence_lengths_cpu_span = sequence_lengths_span.CpuSpan();
 
+  DeviceSpan<int32_t> device_input_ids = input_ids_;
+  if (!device_input_ids.empty()) {
+    if (device_input_ids.size() != num_tokens) {
+      throw std::runtime_error("Packed device input IDs do not match the step token count.");
+    }
+    if (!model->p_device_inputs_->Cast(
+            device_input_ids.Span().data(), device_span.Span().data(),
+            Ort::TypeToTensorType<int32_t>, Ort::TypeToTensorType<int64_t>, num_tokens)) {
+      throw std::runtime_error("The model device cannot cast packed input IDs to int64.");
+    }
+  }
+
   for (size_t i = 0, running_length = 0; i < scheduled_requests.size(); ++i) {
     auto request = scheduled_requests[i];
-    auto input_ids = request->UnprocessedTokensCpu();
+    const size_t input_id_count = request->ScheduledTokenCount();
     const RequestStepPlan* entry = plan ? &plan->requests[i] : nullptr;
     if (entry && (entry->request != request ||
-                  entry->unprocessed_token_count != input_ids.size() ||
+                  entry->unprocessed_token_count != input_id_count ||
                   entry->packed_token_offset != running_length)) {
       throw std::runtime_error("Step plan token layout does not match the scheduled request.");
     }
-    std::copy(input_ids.begin(), input_ids.end(), cpu_span.begin() + running_length);
+    if (device_input_ids.empty()) {
+      auto input_ids = request->UnprocessedTokensCpu();
+      std::copy(input_ids.begin(), input_ids.end(), cpu_span.begin() + running_length);
+    }
 
     // The batch is represented as three coordinated arrays:
     //   input_ids                  = all pending tokens concatenated
@@ -137,18 +468,22 @@ void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, 
     // The operator writes token j at past_sequence_lengths[i] + j. The processed cursor is the
     // number of tokens already in the cache and therefore the base position for this step.
     const int64_t processed_sequence_length = request->ProcessedSequenceLength();
-    if (entry && (request->CurrentSequenceLength() != entry->sequence_length_before ||
+    if (entry && (request->CurrentSequenceLength() !=
+                      entry->sequence_length_before +
+                          static_cast<int64_t>(entry->draft_token_count) ||
                   SlotsAfterStep(processed_sequence_length, entry->unprocessed_token_count) !=
                       entry->target_cache_slots)) {
       throw std::runtime_error("Step plan processed sequence length does not match the request.");
     }
     sequence_lengths_cpu_span[i] = static_cast<int32_t>(processed_sequence_length);
 
-    running_length += input_ids.size();
+    running_length += input_id_count;
     cumulative_sequence_lengths_cpu_span[i + 1] = static_cast<int32_t>(running_length);
   }
 
-  device_span.CopyCpuToDevice();
+  if (device_input_ids.empty()) {
+    device_span.CopyCpuToDevice();
+  }
   cumulative_sequence_lengths_span.CopyCpuToDevice();
   sequence_lengths_span.CopyCpuToDevice();
 
@@ -166,15 +501,89 @@ void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, 
   if (owned_sequence_lengths) owned_inputs_.push_back(std::move(owned_sequence_lengths));
 }
 
+void VarlenDecoderIO::PreparePositionIds(
+    std::shared_ptr<DecoderOnly_Model> model,
+    ScheduledRequests& scheduled_requests) {
+  if (position_planes_ == 0) {
+    return;
+  }
+  const std::string& position_ids_name =
+      model->config_->model.decoder.inputs.position_ids;
+
+  const StepPlan* plan = plan_;
+  if (plan && plan->requests.size() != scheduled_requests.size()) {
+    throw std::logic_error(
+        "Step plan size does not match packed position_ids batch.");
+  }
+  const size_t num_tokens =
+      plan ? plan->token_count
+           : std::accumulate(
+                 scheduled_requests.begin(), scheduled_requests.end(), size_t{0},
+                 [](size_t sum, const std::shared_ptr<Request>& request) {
+                   return sum + request->ScheduledTokenCount();
+                 });
+  const std::vector<int64_t> position_shape =
+      position_planes_ == 1
+          ? std::vector<int64_t>{static_cast<int64_t>(num_tokens)}
+          : std::vector<int64_t>{3, static_cast<int64_t>(num_tokens)};
+  std::unique_ptr<Tensor> owned_position_ids;
+  Tensor* position_ids_tensor{};
+  if (graph_buffers_ != nullptr) {
+    if (!graph_buffers_->position_ids) {
+      throw std::runtime_error(
+          "Captured decoder step has no persistent position_ids buffer.");
+    }
+    graph_buffers_->position_ids->CreateTensor(position_shape, /*make_static=*/true);
+    position_ids_tensor = graph_buffers_->position_ids.get();
+  } else {
+    owned_position_ids = std::make_unique<Tensor>(
+        model->p_device_inputs_, Ort::TypeToTensorType<int64_t>);
+    owned_position_ids->CreateTensor(position_shape);
+    position_ids_tensor = owned_position_ids.get();
+  }
+  auto position_span = position_ids_tensor->GetDeviceSpan<int64_t>();
+  auto position_cpu = position_span.CpuSpan();
+
+  size_t packed_offset = 0;
+  for (size_t row = 0; row < scheduled_requests.size(); ++row) {
+    const auto& request = scheduled_requests[row];
+    const size_t token_count = request->ScheduledTokenCount();
+    if (plan) {
+      const auto& entry = plan->requests[row];
+      if (entry.request != request ||
+          entry.packed_token_offset != packed_offset ||
+          entry.unprocessed_token_count != token_count) {
+        throw std::logic_error(
+            "Step plan token layout does not match packed position_ids.");
+      }
+    }
+    const int64_t first_position = request->ProcessedSequenceLength();
+    for (size_t token = 0; token < token_count; ++token) {
+      const int64_t position =
+          first_position + static_cast<int64_t>(token);
+      for (size_t plane = 0; plane < position_planes_; ++plane) {
+        position_cpu[plane * num_tokens + packed_offset + token] = position;
+      }
+    }
+    packed_offset += token_count;
+  }
+  position_span.CopyCpuToDevice();
+
+  input_names_.push_back(position_ids_name.c_str());
+  inputs_.push_back(position_ids_tensor->GetOrtTensor());
+  if (owned_position_ids) owned_inputs_.push_back(std::move(owned_position_ids));
+}
+
 // PagedAttention accepts an optional `attention_metadata` CPU input holding
-// [max_query_len_bound, max_kv_len_bound]. Both are upper bounds on the current step; the operator
+// [max_query_len_bound, max_kv_len_bound, max_kv_len_lower_bound]. The first two values are upper
+// bounds and the third value is a lower bound on the longest live KV sequence. The operator
 // uses them only to select a backend and to size its launch dimensions and workspaces, never as a
 // mask boundary. Supplying them lets the operator skip the device-to-host readback of the sequence
 // lengths, which otherwise forces a full stream synchronization inside every attention node.
 //
 // The engine already has both quantities on the host while it builds the sequence length inputs, so
-// this costs nothing. The bounds are exact rather than conservative, which is the tightest valid
-// choice: a larger bound is still correct but sizes the launch for more work than the step needs.
+// this costs nothing. Eager bounds are exact. Captured bounds describe the entire graph bucket so
+// they remain valid when the graph is replayed for different requests.
 void VarlenDecoderIO::PrepareAttentionMetadata(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests) {
   const std::string& metadata_name = model->config_->model.decoder.inputs.attention_metadata;
   if (!model->session_info_.HasInput(metadata_name)) {
@@ -182,53 +591,53 @@ void VarlenDecoderIO::PrepareAttentionMetadata(std::shared_ptr<DecoderOnly_Model
     return;
   }
 
-  int32_t max_query_len = 0;
-  int32_t max_kv_len = 0;
+  AttentionMetadataValues metadata;
   if (graph_buffers_ != nullptr) {
-    // A CPU input is read once, while the graph is being captured, and the recorded launch is reused
-    // for every later replay. Reporting the current step's exact lengths would freeze them, so a
-    // capturable step reports bounds that hold for the whole life of the graph instead: one token per
-    // sequence, and the KV length the block table can address at its current column count.
-    max_query_len = 1;
-    max_kv_len = static_cast<int32_t>(execution_context_->block_table_columns *
-                                      model->config_->engine.dynamic_batching->block_size);
-  } else if (execution_context_ && execution_context_->plan) {
-    for (const auto& entry : execution_context_->plan->requests) {
-      max_query_len = std::max(max_query_len, static_cast<int32_t>(entry.unprocessed_token_count));
-      max_kv_len = std::max(max_kv_len, static_cast<int32_t>(entry.target_cache_slots));
+    if (plan_ == nullptr) {
+      throw std::runtime_error("Captured attention metadata requires a step plan.");
     }
+    metadata = GetAttentionMetadataForGraphStep(
+        *plan_,
+        block_table_columns_,
+        model->config_->engine.dynamic_batching->block_size);
+  } else if (plan_) {
+    metadata = GetAttentionMetadataForPlan(*plan_);
   } else {
     for (auto& request : scheduled_requests) {
-      const int32_t query_len = static_cast<int32_t>(request->UnprocessedTokens().size());
-      // KV length after the step is past length plus query length, which is the current length.
-      const int32_t kv_len = static_cast<int32_t>(request->CurrentSequenceLength());
-      max_query_len = std::max(max_query_len, query_len);
-      max_kv_len = std::max(max_kv_len, kv_len);
+      const int32_t query_len =
+          CheckedMetadataLength(request->ScheduledTokenCount(), "Query length");
+      const int32_t kv_len =
+          CheckedMetadataLength(request->ProcessedSequenceLength() + query_len, "KV length");
+      metadata.max_query_len_bound = std::max(metadata.max_query_len_bound, query_len);
+      metadata.max_kv_len_bound = std::max(metadata.max_kv_len_bound, kv_len);
     }
+    metadata.max_kv_len_lower_bound = metadata.max_kv_len_bound;
   }
 
+  const auto packed_metadata = PackAttentionMetadata(metadata);
   auto metadata_tensor = std::make_unique<Tensor>(GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<int32_t>);
-  metadata_tensor->CreateTensor(std::vector<int64_t>{2});
+  metadata_tensor->CreateTensor(std::vector<int64_t>{static_cast<int64_t>(packed_metadata.size())});
   auto metadata_span = metadata_tensor->GetDeviceSpan<int32_t>().CpuSpan();
-  metadata_span[0] = max_query_len;
-  metadata_span[1] = max_kv_len;
+  std::copy(packed_metadata.begin(), packed_metadata.end(), metadata_span.begin());
 
   input_names_.push_back(metadata_name.c_str());
   inputs_.push_back(metadata_tensor->GetOrtTensor());
   owned_inputs_.push_back(std::move(metadata_tensor));
 }
 
-void VarlenDecoderIO::PrepareLogits(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests) {
-  size_t logits_rows = scheduled_requests.size();
-  if (logits_are_per_token_) {
-    const StepPlan* plan = execution_context_ ? execution_context_->plan : nullptr;
-    logits_rows =
-        plan ? plan->token_count
-             : std::accumulate(scheduled_requests.begin(), scheduled_requests.end(), size_t{0},
-                               [](size_t sum, const std::shared_ptr<Request>& request) {
-                                 return sum + request->UnprocessedTokens().size();
-                               });
+size_t VarlenDecoderIO::TokenCount(ScheduledRequests& scheduled_requests) const {
+  const StepPlan* plan = plan_;
+  if (plan) {
+    return plan->token_count;
   }
+  return std::accumulate(scheduled_requests.begin(), scheduled_requests.end(), size_t{0},
+                         [](size_t sum, const std::shared_ptr<Request>& request) {
+                           return sum + request->ScheduledTokenCount();
+                         });
+}
+
+void VarlenDecoderIO::PrepareLogits(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests) {
+  const size_t logits_rows = logits_are_per_token_ ? TokenCount(scheduled_requests) : scheduled_requests.size();
   const std::vector<int64_t> logits_shape = {
       static_cast<int64_t>(logits_rows),
       static_cast<int64_t>(model->config_->model.vocab_size)};
@@ -247,11 +656,75 @@ void VarlenDecoderIO::PrepareLogits(std::shared_ptr<DecoderOnly_Model> model, Sc
   outputs_.push_back(active_logits_->GetOrtTensor());
 }
 
+void VarlenDecoderIO::PrepareHiddenStates(std::shared_ptr<DecoderOnly_Model> model,
+                                          ScheduledRequests& scheduled_requests) {
+  // Bind this optional output only when the Engine declared that it consumes these hidden states.
+  // A model may expose hidden states for other clients without requiring the Engine to produce them
+  // each step.
+  const auto& hidden_states_name = model->config_->model.decoder.outputs.hidden_states;
+  if (!model->config_->engine.hidden_states_output_required ||
+      hidden_states_name.empty() || !model->session_info_.HasOutput(hidden_states_name)) {
+    return;
+  }
+
+  // Always one row per packed token, matching the packed input order, so a draft head can be fed
+  // the hidden state of whichever tokens the verify step accepted. Note this is not necessarily
+  // the logits row count: a pruned LM head emits only one logits row per request.
+  const std::vector<int64_t> hidden_states_shape = {
+      static_cast<int64_t>(TokenCount(scheduled_requests)),
+      static_cast<int64_t>(model->config_->model.decoder.hidden_size)};
+  if (graph_buffers_ != nullptr && graph_buffers_->hidden_states != nullptr) {
+    graph_buffers_->hidden_states->CreateTensor(hidden_states_shape, /*make_static=*/true);
+    active_hidden_states_ = graph_buffers_->hidden_states.get();
+  } else {
+    hidden_states_ = std::make_unique<Tensor>(model->p_device_inputs_,
+                                              model->session_info_.GetOutputDataType(hidden_states_name));
+    hidden_states_->CreateTensor(hidden_states_shape);
+    active_hidden_states_ = hidden_states_.get();
+  }
+
+  output_names_.push_back(hidden_states_name.c_str());
+  outputs_.push_back(active_hidden_states_->GetOrtTensor());
+}
+
+void VarlenDecoderIO::PrepareAuxHiddenStates(std::shared_ptr<DecoderOnly_Model> model,
+                                             ScheduledRequests& scheduled_requests) {
+  // Only models exported with aux_hidden_state_layers expose this; it is what a DFlash 2 drafter
+  // turns into its own per-layer K/V. Engine construction points this at
+  // model.dflash2.main_aux_hidden_states when a drafter is configured.
+  const auto& name = model->config_->model.decoder.outputs.aux_hidden_states;
+  if (!model->config_->engine.aux_hidden_states_output_required ||
+      name.empty() || !model->session_info_.HasOutput(name)) {
+    return;
+  }
+  const auto shape = model->session_info_.GetOutputShape(name);
+  if (shape.size() != 2 || shape[1] <= 0) {
+    throw std::runtime_error("aux_hidden_states must be 2-D with a static width.");
+  }
+  const std::vector<int64_t> output_shape{
+      static_cast<int64_t>(TokenCount(scheduled_requests)), shape[1]};
+  if (graph_buffers_ != nullptr && graph_buffers_->aux_hidden_states != nullptr) {
+    graph_buffers_->aux_hidden_states->CreateTensor(output_shape, /*make_static=*/true);
+    active_aux_hidden_states_ = graph_buffers_->aux_hidden_states.get();
+  } else {
+    aux_hidden_states_ = std::make_unique<Tensor>(model->p_device_inputs_,
+                                                  model->session_info_.GetOutputDataType(name));
+    aux_hidden_states_->CreateTensor(output_shape);
+    active_aux_hidden_states_ = aux_hidden_states_.get();
+  }
+
+  output_names_.push_back(name.c_str());
+  outputs_.push_back(active_aux_hidden_states_->GetOrtTensor());
+}
+
 std::vector<DeviceSpan<float>> VarlenDecoderIO::ProcessLogits() {
-  std::vector<size_t> valid_token_indices(scheduled_requests_.size());
+  // One row per request, plus the extra rows a speculative step needs to verify its drafts: the
+  // request's whole packed range ends with the row that predicts the token after the last draft.
+  std::vector<size_t> valid_token_indices;
+  valid_token_indices.reserve(scheduled_requests_.size());
   if (logits_are_per_token_) {
-    if (execution_context_ && execution_context_->plan) {
-      const auto& plan = *execution_context_->plan;
+    if (plan_) {
+      const auto& plan = *plan_;
       if (plan.requests.size() != scheduled_requests_.size()) {
         throw std::runtime_error("Step plan size does not match logits batch size.");
       }
@@ -259,17 +732,30 @@ std::vector<DeviceSpan<float>> VarlenDecoderIO::ProcessLogits() {
         if (plan.requests[i].request != scheduled_requests_[i]) {
           throw std::runtime_error("Step plan order does not match logits batch order.");
         }
-        valid_token_indices[i] = plan.requests[i].logits_row_index;
+        const auto& entry = plan.requests[i];
+        for (size_t draft = entry.draft_token_count; draft > 0; --draft) {
+          valid_token_indices.push_back(entry.logits_row_index - draft);
+        }
+        valid_token_indices.push_back(entry.logits_row_index);
       }
     } else {
       for (size_t i = 0, running_length = 0; i < scheduled_requests_.size(); ++i) {
-        valid_token_indices[i] = running_length + scheduled_requests_[i]->UnprocessedTokens().size() - 1;
-        running_length += scheduled_requests_[i]->UnprocessedTokens().size();
+        valid_token_indices.push_back(running_length + scheduled_requests_[i]->ScheduledTokenCount() - 1);
+        running_length += scheduled_requests_[i]->ScheduledTokenCount();
       }
     }
   } else {
+    const auto* plan = plan_;
+    if (plan && std::any_of(plan->requests.begin(), plan->requests.end(),
+                            [](const RequestStepPlan& entry) {
+                              return entry.draft_token_count != 0;
+                            })) {
+      throw std::runtime_error(
+          "Verifying draft tokens requires a model whose logits have one row per packed token; "
+          "this model returned only one logits row per request.");
+    }
     for (size_t i = 0; i < scheduled_requests_.size(); ++i) {
-      valid_token_indices[i] = i;
+      valid_token_indices.push_back(i);
     }
   }
 
@@ -286,7 +772,7 @@ std::vector<DeviceSpan<float>> VarlenDecoderIO::ProcessLogits() {
   }
 
   std::vector<DeviceSpan<float>> logits_vector;
-  const std::vector<int64_t> logits_shape{static_cast<int64_t>(scheduled_requests_.size()),
+  const std::vector<int64_t> logits_shape{static_cast<int64_t>(valid_token_indices.size()),
                                           vocab_size};
 
   const bool requires_cast = active_logits_->GetType() != Ort::TypeToTensorType<float>;

@@ -10,7 +10,9 @@ import pytest
 import torch
 
 BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
-sys.path.insert(0, str(BUILDERS_DIR.parents[1]))
+sys.path.insert(0, str(BUILDERS_DIR.parent))
+
+from quantization import desugar_algo_config
 
 
 def _load_builder_module(module_name):
@@ -274,9 +276,8 @@ def test_tied_quantized_embedding_weight_names_cover_all_supported_algorithms(
 ):
     model = Model.__new__(Model)
     model.extra_options = {"algo_config": algo_config}
-    model.algo_config_name = algo_config
-    model.matmul_block_size = matmul_block_size
-    model.quant_attrs = {"is_symmetric": is_symmetric}
+    model.quantization_algo, model.matmul_mixed_precision = desugar_algo_config(model.extra_options)
+    model.quant_attrs = {"is_symmetric": is_symmetric, "matmul_block_size": matmul_block_size}
 
     bits, weight_name, scale_name, zp_name = model.make_tied_quantized_embedding_input_names()
 
@@ -288,25 +289,65 @@ def test_tied_quantized_embedding_weight_names_cover_all_supported_algorithms(
 
 def test_tied_quantized_embedding_weight_names_raise_for_unknown_algorithm():
     model = Model.__new__(Model)
-    model.extra_options = {"algo_config": "unexpected"}
-    model.algo_config_name = "unexpected"
-    model.matmul_block_size = 32
-    model.quant_attrs = {"is_symmetric": True}
+    model.quantization_algo = "unexpected"
+    model.matmul_mixed_precision = {}
+    model.quant_attrs = {"is_symmetric": True, "matmul_block_size": 32}
 
     with pytest.raises(AssertionError, match="Unknown quantization algo config name detected"):
         model.make_tied_quantized_embedding_input_names()
+
+
+def test_prequantized_lm_head_returns_matmul_nbits_names_with_zeros():
+    """Pre-quantized lm_head (e.g. quant_auto) returns MatMulNBits initializer names."""
+    lm_head = types.SimpleNamespace(qweight=object(), qzeros=object(), bits=4)
+    model = Model.__new__(Model)
+    model.weights = types.SimpleNamespace(lm_head=lm_head)
+
+    bits, weight_name, scale_name, zp_name = model.make_tied_quantized_embedding_input_names()
+
+    assert bits == 4
+    assert weight_name == "lm_head.MatMulNBits.qweight"
+    assert scale_name == "lm_head.MatMulNBits.scales"
+    assert zp_name == "lm_head.MatMulNBits.qzeros"
+
+
+def test_prequantized_lm_head_returns_matmul_nbits_names_without_zeros():
+    """Pre-quantized lm_head without zero-points returns empty zp name."""
+    lm_head = types.SimpleNamespace(qweight=object(), qzeros=None, bits=4)
+    model = Model.__new__(Model)
+    model.weights = types.SimpleNamespace(lm_head=lm_head)
+
+    bits, weight_name, scale_name, zp_name = model.make_tied_quantized_embedding_input_names()
+
+    assert bits == 4
+    assert weight_name == "lm_head.MatMulNBits.qweight"
+    assert scale_name == "lm_head.MatMulNBits.scales"
+    assert zp_name == ""
+
+
+def test_prequantized_lm_head_check_is_skipped_when_weights_not_loaded():
+    """make_tied_quantized_embedding_input_names falls through to algo-based names when
+    self.weights hasn't been set yet (unit-test context without make_model)."""
+    model = Model.__new__(Model)
+    model.extra_options = {"algo_config": "rtn"}
+    model.quantization_algo, model.matmul_mixed_precision = desugar_algo_config(model.extra_options)
+    model.quant_attrs = {"is_symmetric": True, "matmul_block_size": 32}
+    # No model.weights set — simulates unit-test call without make_model
+
+    bits, weight_name, _, _ = model.make_tied_quantized_embedding_input_names()
+
+    assert weight_name == "lm_head.MatMul.weight_Q4G32"
 
 
 def _make_minimal_model_for_quantized_tied_embedding(*, algo_config, is_symmetric=True, quant_type=None):
     model = Model.__new__(Model)
     model.use_paged_attention = False
     model.extra_options = {"algo_config": algo_config}
-    model.algo_config_name = algo_config
-    model.matmul_block_size = 32
+    model.quantization_algo, model.matmul_mixed_precision = desugar_algo_config(model.extra_options)
     model.hidden_size = 64
     model.vocab_size = 32000
     model.io_dtype = ir.DataType.FLOAT16
-    model.quant_attrs = {"is_symmetric": is_symmetric}
+    model.quant_attrs = {"is_symmetric": is_symmetric, "matmul_block_size": 32}
     model.quant_type = quant_type
     model.input_names = {"input_ids": "input_ids"}
     model.embed_attrs = {"scale": 1}
@@ -403,7 +444,9 @@ def test_make_embedding_uses_algo_specific_lm_head_initializer_names_for_tied_qu
         assert "lm_head.MatMul.weight_zero_points" not in gather_inputs
 
 
-def _make_minimal_model_for_embedding_branches(*, tied_quantized_embeddings=False, tied_unquantized_embeddings=False):
+def _make_minimal_model_for_embedding_branches(
+    *, tied_quantized_embeddings=False, tied_unquantized_embeddings=False, can_reuse_lm_head=True
+):
     model = Model.__new__(Model)
     model.use_paged_attention = False
     model.hidden_size = 64
@@ -418,6 +461,7 @@ def _make_minimal_model_for_embedding_branches(*, tied_quantized_embeddings=Fals
     }
     model.tied_quantized_embeddings = tied_quantized_embeddings
     model.tied_unquantized_embeddings = tied_unquantized_embeddings
+    model.weights = types.SimpleNamespace(lm_head=types.SimpleNamespace(can_reuse_as_embedding=can_reuse_lm_head))
 
     model._transpose_calls = []
     model._initializer_calls = []
@@ -486,6 +530,24 @@ def test_make_embedding_non_tied_path_uses_embed_tokens_initializer_and_gather()
     assert gather_inputs[0] == "model.embed_tokens.weight"
     assert gather_inputs[1] == "input_ids"
 
+    assert model._transpose_calls == []
+
+
+@pytest.mark.parametrize("tied_quantized, tied_unquantized", [(True, False), (False, True)])
+def test_make_embedding_incompatible_lm_head_keeps_checkpoint_embedding(tied_quantized, tied_unquantized):
+    model = _make_minimal_model_for_embedding_branches(
+        tied_quantized_embeddings=tied_quantized,
+        tied_unquantized_embeddings=tied_unquantized,
+        can_reuse_lm_head=False,
+    )
+    embedding = object()
+
+    model.make_embedding(embedding=embedding)
+
+    assert model._initializer_calls == [(embedding, "model.embed_tokens.weight", ir.DataType.FLOAT16)]
+    gather_calls = [call for call in model._node_calls if call[0] == "Gather"]
+    assert len(gather_calls) == 1
+    assert gather_calls[0][1]["inputs"] == ["model.embed_tokens.weight", "input_ids"]
     assert model._transpose_calls == []
 
 

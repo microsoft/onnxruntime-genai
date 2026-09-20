@@ -20,6 +20,28 @@ public class Tokenizer implements AutoCloseable {
   }
 
   /**
+   * Creates a Tokenizer from the given config.
+   *
+   * @param config The config to use.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public Tokenizer(Config config) throws GenAIException {
+    assert (config.nativeHandle() != 0); // internal code should never pass an invalid config
+
+    nativeHandle = createTokenizerFromConfig(config.nativeHandle());
+  }
+
+  /**
+   * Creates a Tokenizer from the given configuration directory.
+   *
+   * @param modelPath The path to the configuration directory.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public Tokenizer(String modelPath) throws GenAIException {
+    nativeHandle = createTokenizerFromPath(modelPath);
+  }
+
+  /**
    * Encodes a string into a sequence of token ids.
    *
    * @param string Text to encode as token ids.
@@ -270,6 +292,10 @@ public class Tokenizer implements AutoCloseable {
   }
 
   private native long createTokenizer(long modelHandle) throws GenAIException;
+
+  private native long createTokenizerFromConfig(long configHandle) throws GenAIException;
+
+  private native long createTokenizerFromPath(String modelPath) throws GenAIException;
 
   private native void destroyTokenizer(long tokenizerHandle);
 

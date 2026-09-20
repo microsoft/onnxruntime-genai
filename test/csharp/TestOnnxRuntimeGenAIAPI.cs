@@ -104,6 +104,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         private static readonly KeyValuePair<string, string>[] _knownEpLibraries = new[]
         {
             new KeyValuePair<string, string>("WebGpuExecutionProvider", "onnxruntime_providers_webgpu"),
+            new KeyValuePair<string, string>("CUDA.GenAI", "onnxruntime_providers_cuda"),
         };
 
         // Resolves the directory containing the execution provider plugin libraries to register.
@@ -565,6 +566,20 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                     Assert.Equal(strings, decodedStrings);
                 }
             }
+        }
+
+        [IgnoreOnModelAbsenceFact(DisplayName = "TestTokenizerCreateFromConfigAndPath")]
+        public void TestTokenizerCreateFromConfigAndPath()
+        {
+            string modelPath = _phi2Path;
+            string str = "She sells sea shells by the sea shore.";
+
+            using var config = new Config(modelPath);
+            using var tokenizerFromConfig = new Tokenizer(config);
+            using var tokenizerFromPath = new Tokenizer(modelPath);
+
+            using var sequences = tokenizerFromConfig.Encode(str);
+            Assert.Equal(str, tokenizerFromPath.Decode(sequences[0]));
         }
 
         [IgnoreOnModelAbsenceFact(DisplayName = "TestTokenizerBatchEncodeSingleDecode")]

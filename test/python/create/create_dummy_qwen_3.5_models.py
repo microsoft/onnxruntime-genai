@@ -5,10 +5,11 @@
 """
 Generate dummy ONNX models for Qwen3.5 hybrid model testing.
 
-Creates minimal ONNX models (decoder, embedding, vision) with the correct
-input/output signatures for a hybrid model with both KV cache and recurrent
-state tensors. These models produce dummy outputs but have the correct
-shapes for testing the ort-genai runtime's auto-discovery and state management.
+Creates minimal ONNX models (multimodal decoder, text-only decoder, embedding,
+and vision) with the correct input/output signatures for a hybrid model with
+both KV cache and recurrent state tensors. These models produce dummy outputs
+but have the correct shapes for testing the ort-genai runtime's auto-discovery
+and state management.
 
 Usage:
     python create_dummy_qwen_3.5_models.py --output test/models/qwen3-5
@@ -130,6 +131,7 @@ def create_dummy_decoder_model(
     conv_dim: int = 6144,
     conv_kernel: int = 3,
     vocab_size: int = 248320,
+    use_input_ids: bool = False,
 ):
     """
     Create dummy decoder model with hybrid KV cache + recurrent state inputs.
@@ -144,14 +146,17 @@ def create_dummy_decoder_model(
     outputs = []
 
     # Standard inputs
-    inputs_embeds = helper.make_tensor_value_info(
-        "inputs_embeds", TensorProto.FLOAT, ["batch", "sequence_len", hidden_size]
+    decoder_input_name = "input_ids" if use_input_ids else "inputs_embeds"
+    decoder_input_type = TensorProto.INT32 if use_input_ids else TensorProto.FLOAT
+    decoder_input_shape = (
+        ["batch", "sequence_len"] if use_input_ids else ["batch", "sequence_len", hidden_size]
     )
+    decoder_input = helper.make_tensor_value_info(decoder_input_name, decoder_input_type, decoder_input_shape)
     attention_mask = helper.make_tensor_value_info(
         "attention_mask", TensorProto.INT64, ["batch", "past_seq_len_plus_seq_len"]
     )
     position_ids = helper.make_tensor_value_info("position_ids", TensorProto.INT64, [3, "batch", "sequence_len"])
-    inputs.extend([inputs_embeds, attention_mask, position_ids])
+    inputs.extend([decoder_input, attention_mask, position_ids])
 
     # Per-layer inputs/outputs
     for layer_idx in range(num_layers):
@@ -219,8 +224,8 @@ def create_dummy_decoder_model(
     # Create a minimal graph: Identity pass-through for state tensors, zeros for logits
     nodes = []
 
-    # Logits: zeros from inputs_embeds shape
-    shape_node = helper.make_node("Shape", ["inputs_embeds"], ["embed_shape"])
+    # Logits: zeros from the decoder input's batch and sequence dimensions.
+    shape_node = helper.make_node("Shape", [decoder_input_name], ["embed_shape"])
     nodes.append(shape_node)
 
     gather_batch = helper.make_node("Gather", ["embed_shape", "idx_0"], ["batch_dim"], axis=0)
@@ -242,12 +247,45 @@ def create_dummy_decoder_model(
         "Constant", [], ["one_shape"], value=helper.make_tensor("one_shape", TensorProto.INT64, [1], [1])
     )
     concat_logits_shape = helper.make_node("Concat", ["batch_1d", "seq_1d", "vocab_dim"], ["logits_shape"], axis=0)
-    logits_node = helper.make_node(
-        "ConstantOfShape", ["logits_shape"], ["logits"], value=helper.make_tensor("val", TensorProto.FLOAT, [1], [0.0])
+    zero_logits_node = helper.make_node(
+        "ConstantOfShape",
+        ["logits_shape"],
+        ["zero_logits"],
+        value=helper.make_tensor("val", TensorProto.FLOAT, [1], [0.0]),
     )
-    nodes.extend([one_shape_const, reshape_batch, reshape_seq, concat_logits_shape, logits_node])
+    nodes.extend([one_shape_const, reshape_batch, reshape_seq, concat_logits_shape, zero_logits_node])
 
-    # Identity for all state tensors
+    # Make logits observe the first recurrent-state value. The state starts at zero and is
+    # incremented below after every forward, so an integration test can verify that graph capture
+    # rebinds both directions of WebGPU's separate past/present buffers instead of replaying stale
+    # state. Keep a fallback for an all-KV model even though this fixture is hybrid by default.
+    recurrent_layers = [layer_idx for layer_idx in range(num_layers) if layer_idx not in kv_layers]
+    observed_layer = recurrent_layers[0] if recurrent_layers else None
+    if observed_layer is not None:
+        flatten_shape_const = helper.make_node(
+            "Constant",
+            [],
+            ["flatten_shape"],
+            value=helper.make_tensor("flatten_shape", TensorProto.INT64, [1], [-1]),
+        )
+        flatten_state = helper.make_node(
+            "Reshape",
+            [f"past_key_values.{observed_layer}.recurrent_state", "flatten_shape"],
+            ["flat_recurrent_state"],
+        )
+        state_value = helper.make_node("Gather", ["flat_recurrent_state", "idx_0"], ["recurrent_state_value"], axis=0)
+        logits_node = helper.make_node("Add", ["zero_logits", "recurrent_state_value"], ["logits"])
+        nodes.extend([flatten_shape_const, flatten_state, state_value, logits_node])
+    else:
+        nodes.append(helper.make_node("Identity", ["zero_logits"], ["logits"]))
+
+    # Identity for all state tensors except the observed recurrent state, which advances by one
+    # per forward so stale graph-capture bindings are visible in the next step's logits.
+    if recurrent_layers:
+        one_float_const = helper.make_node(
+            "Constant", [], ["one_float"], value=helper.make_tensor("one_float", TensorProto.FLOAT, [], [1.0])
+        )
+        nodes.append(one_float_const)
     for layer_idx in range(num_layers):
         if layer_idx in kv_layers:
             nodes.append(
@@ -262,10 +300,14 @@ def create_dummy_decoder_model(
                     "Identity", [f"past_key_values.{layer_idx}.conv_state"], [f"present.{layer_idx}.conv_state"]
                 )
             )
+            recurrent_op = "Add" if layer_idx == observed_layer else "Identity"
+            recurrent_inputs = [f"past_key_values.{layer_idx}.recurrent_state"]
+            if recurrent_op == "Add":
+                recurrent_inputs.append("one_float")
             nodes.append(
                 helper.make_node(
-                    "Identity",
-                    [f"past_key_values.{layer_idx}.recurrent_state"],
+                    recurrent_op,
+                    recurrent_inputs,
                     [f"present.{layer_idx}.recurrent_state"],
                 )
             )
@@ -292,11 +334,15 @@ def create_genai_config(output_path: str, num_kv_layers: int, kv_layers: list):
                     "position_ids": "position_ids",
                     "past_key_names": "past_key_values.%d.key",
                     "past_value_names": "past_key_values.%d.value",
+                    "past_conv_names": "past_key_values.%d.conv_state",
+                    "past_recurrent_names": "past_key_values.%d.recurrent_state",
                 },
                 "outputs": {
                     "logits": "logits",
                     "present_key_names": "present.%d.key",
                     "present_value_names": "present.%d.value",
+                    "present_conv_names": "present.%d.conv_state",
+                    "present_recurrent_names": "present.%d.recurrent_state",
                 },
                 "num_attention_heads": 8,
                 "num_hidden_layers": num_kv_layers,
@@ -377,6 +423,14 @@ def main():
         kv_layers=kv_layers,
     )
     print("  Created dummy_text.onnx")
+
+    create_dummy_decoder_model(
+        os.path.join(output_dir, "dummy_text_only.onnx"),
+        num_layers=num_layers,
+        kv_layers=kv_layers,
+        use_input_ids=True,
+    )
+    print("  Created dummy_text_only.onnx")
 
     create_genai_config(os.path.join(output_dir, "genai_config.json"), num_kv_layers, kv_layers)
     print("  Created genai_config.json")

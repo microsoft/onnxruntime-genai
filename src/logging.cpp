@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include "generators.h"
+#include "generator/generators.h"
 #include "json.h"
 #include <iostream>
 #include <fstream>
@@ -68,6 +68,8 @@ void SetLogBool(std::string_view name, bool value) {
     g_log.model_output_values = value;
   else if (name == "model_logits")
     g_log.model_logits = value;
+  else if (name == "graph_capture")
+    g_log.graph_capture = value;
   else if (name == "ort_lib")
     g_log.ort_lib = value;
   else if (name == "value_stats")

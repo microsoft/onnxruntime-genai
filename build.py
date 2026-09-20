@@ -145,6 +145,15 @@ def _parse_args():
         help="Extra definitions to pass to CMake during build system "
         "generation. These are just CMake -D options without the leading -D.",
     )
+    parser.add_argument(
+        "--nuget_config_file",
+        type=Path,
+        help="Custom NuGet.Config used for package restore operations.",
+    )
+    parser.add_argument(
+        "--nuget_package_source",
+        help="Override the NuGet package source used by the build.",
+    )
 
     parser.add_argument("--ort_home", default=None, type=Path, help="Root directory of onnxruntime.")
 
@@ -256,6 +265,12 @@ def _parse_args():
         "--skip_examples",
         action="store_true",
         help="Skip building the sample executables. Builds only on Linux and Windows otherwise.",
+    )
+
+    parser.add_argument(
+        "--build_engine_benchmark",
+        action="store_true",
+        help="Build the GenAI engine benchmark and stage its runtime dependencies. Linux only.",
     )
 
     return parser.parse_args()
@@ -401,6 +416,9 @@ def _validate_ios_args(args: argparse.Namespace):
 
 
 def _validate_cmake_args(args: argparse.Namespace):
+    if args.nuget_config_file:
+        args.nuget_config_file = args.nuget_config_file.resolve(strict=True)
+
     args.cmake_extra_defines = [i for j in args.cmake_extra_defines for i in j] if args.cmake_extra_defines else []
     args.cmake_extra_defines = [f"-D{define}" for define in args.cmake_extra_defines]
 
@@ -631,12 +649,19 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         f"-DENABLE_JAVA={'ON' if args.build_java else 'OFF'}",
         f"-DBUILD_WHEEL={build_wheel}",
         f"-DUSE_GUIDANCE={'ON' if args.use_guidance else 'OFF'}",
+        f"-DENABLE_ENGINE_BENCHMARK={'ON' if args.build_engine_benchmark else 'OFF'}",
         f"-DPUBLISH_JAVA_MAVEN_LOCAL={'ON' if args.publish_java_maven_local else 'OFF'}",
         f"-DENABLE_TELEMETRY={'OFF' if args.no_telemetry or util.is_aix() or args.macos == 'Catalyst' else 'ON'}",
     ]
 
     if args.ort_home:
         command += [f"-DORT_HOME={args.ort_home}"]
+
+    if args.nuget_config_file:
+        command += [f"-DNUGET_CONFIG_FILE={args.nuget_config_file}"]
+
+    if args.nuget_package_source:
+        command += [f"-DNUGET_PACKAGE_SOURCE={args.nuget_package_source}"]
 
     if args.use_winml:
         command += [f"-DWINML_SDK_VERSION={args.winml_sdk_version}"]
@@ -774,7 +799,13 @@ def build(args: argparse.Namespace, env: dict[str, str]):
         lib_dir = lib_dir / args.config
 
     if not args.ort_home:
-        _ = util.download_dependencies(args.use_cuda, args.use_dml, lib_dir)
+        _ = util.download_dependencies(
+            args.use_cuda,
+            args.use_dml,
+            lib_dir,
+            args.nuget_config_file,
+            args.nuget_package_source,
+        )
     else:
         lib_dir = args.ort_home / "lib"
 
@@ -790,6 +821,10 @@ def build(args: argparse.Namespace, env: dict[str, str]):
         csharp_build_command += _get_csharp_properties(args)
         util.run(csharp_build_command, cwd=REPO_ROOT / "src" / "csharp")
         util.run(csharp_build_command, cwd=REPO_ROOT / "test" / "csharp")
+
+    engine_benchmark_dir = args.build_dir / "benchmark" / "engine"
+    if args.build_engine_benchmark and util.is_linux() and engine_benchmark_dir.is_dir():
+        util.setup_engine_benchmark_dependencies(args.build_dir, engine_benchmark_dir)
 
 
 def install_core(args: argparse.Namespace, env: dict[str, str]):
@@ -923,7 +958,13 @@ def test(args: argparse.Namespace, env: dict[str, str]):
         # Whereas on as on platforms, the executable is directly under the test directory.
         lib_dir = lib_dir / args.config
     if not args.ort_home:
-        _ = util.download_dependencies(args.use_cuda, args.use_dml, lib_dir)
+        _ = util.download_dependencies(
+            args.use_cuda,
+            args.use_dml,
+            lib_dir,
+            args.nuget_config_file,
+            args.nuget_package_source,
+        )
     else:
         lib_dir = args.ort_home / "lib"
 

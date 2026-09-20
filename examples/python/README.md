@@ -106,3 +106,15 @@ python model-mm.py -m {path to model folder} -e {execution provider} --response_
 
 # Using Lark Grammar with text or tool call output
 python model-chat.py -m {path to model folder} -e {execution provider} --response_format lark_grammar --tools_file {path to json file} --text_output --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"
+```
+
+## Engine Tool Calling
+
+Run a complete Engine tool-calling round trip with host execution and incremental continuation. Add `--guidance` to constrain the tool call in a guidance-enabled build:
+
+```bash
+python build.py --use_cuda --use_guidance --skip_tests --skip_examples
+python examples/python/engine/tool-calling.py -m {path to model folder} -e cuda --tools_file test/tool-definitions/weather.json --guidance
+```
+
+`USE_GUIDANCE` is off by default. Guidance is request-local and optional; omit `--guidance` for models that natively produce tool-call output.

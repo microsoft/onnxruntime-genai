@@ -3,7 +3,7 @@
 
 #include "graph_executor.h"
 #include "graph_builder.h"
-#include "../generators.h"
+#include "generator/generators.h"
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -57,9 +57,10 @@ std::unique_ptr<OrtSession> CreateSession(
 
   // Append execution provider
   if (!ep_name.empty()) {
-    if (!AppendExecutionProviderV2(*session_options, Config::ProviderOptions(),
+    const Config::ProviderOptions provider_options{ep_name, {}};
+    if (!AppendExecutionProviderV2(*session_options, provider_options,
                                    device_type, ep_name)) {
-      AppendExecutionProviderV1(*session_options, Config::ProviderOptions());
+      AppendExecutionProviderV1(*session_options, provider_options);
     }
   }
 

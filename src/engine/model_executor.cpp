@@ -70,4 +70,8 @@ void DecoderModelExecutor::Decode(ScheduledRequests& scheduled_requests,
   }
 }
 
+bool DecoderModelExecutor::SupportsDraftVerification() const {
+  return DecoderLogitsArePerToken(*model_);
+}
+
 }  // namespace Generators

@@ -29,21 +29,17 @@ import psutil
 from metrics import BenchmarkRecord
 from telemetry_utils import (
     emit_benchmark_telemetry,
+    get_telemetry,
     normalize_execution_provider,
     sanitize_model_identifier,
     shutdown_telemetry,
 )
-from telemetry_utils import get_telemetry as _get_telemetry
 from tqdm import tqdm
 
-
-class _MemoryMonitor:
-    def __init__(self):
-        self.stop = threading.Event()
-        self.lock = threading.Lock()
-        self.peak_cpu_memory = 0.0
-        self.peak_gpu_memory = 0.0
-
+peak_cpu_memory = 0.0
+peak_gpu_memory = 0.0
+peak_memory_lock = threading.Lock()
+stop_monitoring = False
 
 try:
     subprocess.run(["nvidia-smi"], check=True)
@@ -53,8 +49,10 @@ except Exception:
 
 
 # Monitor the GPU memory usage
-def monitor_gpu_memory(memory_monitor):
-    while not memory_monitor.stop.is_set():
+def monitor_gpu_memory():
+    global peak_gpu_memory  # noqa: PLW0603
+
+    while not stop_monitoring:
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
             check=False,
@@ -67,19 +65,21 @@ def monitor_gpu_memory(memory_monitor):
         if len(memory_usage) >= 1:
             gpu_memory = [float(line) for line in memory_usage]
             current_peak = round(max(gpu_memory) / 1024, 2)
-            with memory_monitor.lock:
-                memory_monitor.peak_gpu_memory = max(current_peak, memory_monitor.peak_gpu_memory)
+            with peak_memory_lock:
+                peak_gpu_memory = max(current_peak, peak_gpu_memory)
         else:
             print("No GPU Memory Info Found")
         time.sleep(0.1)
 
 
 # Monitor the CPU memory usage
-def monitor_cpu_memory(memory_monitor):
-    while not memory_monitor.stop.is_set():
+def monitor_cpu_memory():
+    global peak_cpu_memory  # noqa: PLW0603
+
+    while not stop_monitoring:
         current_used_memory = round(psutil.virtual_memory().used / 1024**3, 2)
-        with memory_monitor.lock:
-            memory_monitor.peak_cpu_memory = max(memory_monitor.peak_cpu_memory, current_used_memory)
+        with peak_memory_lock:
+            peak_cpu_memory = max(peak_cpu_memory, current_used_memory)
         time.sleep(0.1)
 
 
@@ -125,6 +125,10 @@ def save_results(args, results, filename, print_memory_usage=False):
         "Prompt Length",
         "Tokens Generated",
         "Max Length",
+        "Model Creation Latency (ms)",
+        "Tokenizer Creation Latency (ms)",
+        "Generator Creation Latency (ms)",
+        "First Warmup AppendTokens Latency (ms)",
         "Tokenization Throughput (tps)",
         "Tokenization Latency (ms)",
         "Prompt Processing Throughput (tps)",
@@ -170,6 +174,14 @@ def save_results(args, results, filename, print_memory_usage=False):
         record.config.customized["tokens_generated"] = row["Tokens Generated"]
         record.config.customized["max_length"] = row["Max Length"]
         record.config.customized["aggregation"] = args.aggregation
+        record.metrics.customized["model_creation_latency_ms"] = row["Model Creation Latency (ms)"]
+        record.metrics.customized["tokenizer_creation_latency_ms"] = row["Tokenizer Creation Latency (ms)"]
+        generator_creation_latency_ms = row["Generator Creation Latency (ms)"]
+        if pd.notna(generator_creation_latency_ms):
+            record.metrics.customized["generator_creation_latency_ms"] = generator_creation_latency_ms
+        first_warmup_append_tokens_latency_ms = row["First Warmup AppendTokens Latency (ms)"]
+        if pd.notna(first_warmup_append_tokens_latency_ms):
+            record.metrics.customized["first_warmup_append_tokens_latency_ms"] = first_warmup_append_tokens_latency_ms
         record.metrics.customized["tokenization_throughput_tps"] = row["Tokenization Throughput (tps)"]
         record.metrics.customized["tokenization_latency_ms"] = row["Tokenization Latency (ms)"]
         record.metrics.customized["prompt_processing_throughput_tps"] = row["Prompt Processing Throughput (tps)"]
@@ -200,30 +212,36 @@ def run_benchmark_memory(args, batch_size, prompt_length, generation_length, max
     """
     This function is to run benchmark and print the memory usage
     """
-    memory_monitor = _MemoryMonitor()
+    global stop_monitoring  # noqa: PLW0603
+    global peak_gpu_memory  # noqa: PLW0603
+    global peak_cpu_memory  # noqa: PLW0603
 
-    monitor_threads = [threading.Thread(target=monitor_cpu_memory, args=(memory_monitor,))]
-    if IS_NVIDIA_SYSTEM:
-        monitor_threads.append(threading.Thread(target=monitor_gpu_memory, args=(memory_monitor,)))
-    for monitor_thread in monitor_threads:
-        monitor_thread.start()
-    try:
-        metrics = run_benchmark(args, batch_size, prompt_length, generation_length, max_length, memory_monitor)
-    finally:
-        memory_monitor.stop.set()
-        for monitor_thread in monitor_threads:
-            monitor_thread.join()
+    # Reset the peak memory variables and the monitoring flag
+    stop_monitoring = False
+    peak_gpu_memory = 0.0
+    peak_cpu_memory = 0.0
 
     if IS_NVIDIA_SYSTEM:
-        metrics.append(memory_monitor.peak_gpu_memory)
+        monitor_thread = threading.Thread(target=monitor_gpu_memory)
     else:
-        metrics.append(memory_monitor.peak_cpu_memory)
+        monitor_thread = threading.Thread(target=monitor_cpu_memory)
+
+    monitor_thread.start()
+
+    metrics = run_benchmark(args, batch_size, prompt_length, generation_length, max_length)
+
+    stop_monitoring = True
+    monitor_thread.join()
+
+    if IS_NVIDIA_SYSTEM:
+        metrics.append(peak_gpu_memory)
+    else:
+        metrics.append(peak_cpu_memory)
 
     return metrics
 
 
-def run_benchmark(args, batch_size, prompt_length, generation_length, max_length, memory_monitor=None):
-    memory_monitor = memory_monitor or _MemoryMonitor()
+def run_benchmark(args, batch_size, prompt_length, generation_length, max_length):
     # Get user arguments
     num_repetitions = args.repetitions
     temperature = 1.0
@@ -242,25 +260,26 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
             config.append_provider(provider_to_append)
     if args.verbose:
         print("Loading model... ")
-    model_load_start = time.time()
+    model_creation_start_time = time.perf_counter()
     model = og.Model(config)
-    model_load_time_ms = (time.time() - model_load_start) * 1000
+    model_creation_latency_s = time.perf_counter() - model_creation_start_time
     if args.verbose:
-        print(f"Model loaded in {model_load_time_ms:.1f} ms")
+        print("Model loaded")
 
-    # Emit model load telemetry
     model_session_id = None
     with suppress(Exception):
-        telemetry = _get_telemetry()
+        telemetry = get_telemetry()
         model_session_id = telemetry.allocate_model_session_id()
         telemetry.log_model_load(
             model_name=sanitize_model_identifier(args.model_name),
             execution_provider=normalize_execution_provider(args.execution_provider),
-            total_load_time_ms=model_load_time_ms,
+            total_load_time_ms=model_creation_latency_s * 1000,
             session_id=model_session_id,
         )
 
+    tokenizer_creation_start_time = time.perf_counter()
     tokenizer = og.Tokenizer(model)
+    tokenizer_creation_latency_s = time.perf_counter() - tokenizer_creation_start_time
 
     # Get model type
     model_type = None
@@ -334,15 +353,27 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         batch_size=batch_size,
     )
 
+    # Time the first generator without changing where generators are created.
+    generator_creation_latency_s = None
+
+    def create_generator():
+        nonlocal generator_creation_latency_s
+        if generator_creation_latency_s is not None:
+            return og.Generator(model, params)
+        generator_creation_start_time = time.perf_counter()
+        gen = og.Generator(model, params)
+        generator_creation_latency_s = time.perf_counter() - generator_creation_start_time
+        return gen
+
     # When reuse_generator is enabled, create a single generator and reuse it via
     # rewind_to(0). This avoids recreating the generator (and reallocating
     # KV cache) each iteration. Otherwise, create a fresh generator per iteration.
-    generator = og.Generator(model, params) if args.reuse_generator else None
+    generator = create_generator() if args.reuse_generator else None
 
     if need_generate_prompt:
         # Use a generator to produce the prompt.  When reusing, use the single
         # generator; otherwise create a temporary one that is destroyed after.
-        gen = generator if args.reuse_generator else og.Generator(model, params)
+        gen = generator if args.reuse_generator else create_generator()
 
         text_seed = "a"
         seed_prompt = f"{args.chat_template.format(input=text_seed)}"
@@ -364,13 +395,26 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
 
     if args.verbose:
         print("Running warmup runs...")
-    for _ in tqdm(range(args.warmup)):
+    if need_generate_prompt and args.warmup > 0:
+        print(
+            "WARNING: The prompt was generated with the model before warmup, so the first warmup append_tokens "
+            "call is not a cold-start measurement. Use --use_random_tokens or --use_prompt_set to prepare the "
+            "prompt without an earlier model run."
+        )
+    first_warmup_append_tokens_latency_s = None
+    for warmup_index in tqdm(range(args.warmup)):
         if args.reuse_generator:
             generator.rewind_to(0)
             gen = generator
         else:
-            gen = og.Generator(model, params)
+            gen = create_generator()
+        if warmup_index == 0:
+            # Measure the Python-visible append_tokens call, not an isolated or
+            # explicitly synchronized Ort::Run invocation.
+            first_warmup_start_time = time.perf_counter()
         gen.append_tokens(tokens)
+        if warmup_index == 0:
+            first_warmup_append_tokens_latency_s = time.perf_counter() - first_warmup_start_time
         target_token_count = gen.token_count() + generation_length
         while not gen.is_done() and gen.token_count() < target_token_count:
             gen.generate_next_token()
@@ -402,7 +446,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
             generator.rewind_to(0)
             gen = generator
         else:
-            gen = og.Generator(model, params)
+            gen = create_generator()
 
         # Measure prompt processing
         prompt_start_time = time.perf_counter()
@@ -439,6 +483,27 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         del generator
 
     aggregation_label = "Average" if args.aggregation == "mean" else "Median"
+
+    model_creation_latency_ms = model_creation_latency_s * 1000
+    tokenizer_creation_latency_ms = tokenizer_creation_latency_s * 1000
+    generator_creation_latency_ms = (
+        generator_creation_latency_s * 1000 if generator_creation_latency_s is not None else None
+    )
+    first_warmup_append_tokens_latency_ms = (
+        first_warmup_append_tokens_latency_s * 1000
+        if first_warmup_append_tokens_latency_s is not None
+        else None
+    )
+    print(f"Model Creation Latency: {model_creation_latency_ms} ms")
+    print(f"Tokenizer Creation Latency: {tokenizer_creation_latency_ms} ms")
+    if generator_creation_latency_ms is None:
+        print("Generator Creation Latency: N/A (no generator was created)")
+    else:
+        print(f"Generator Creation Latency: {generator_creation_latency_ms} ms")
+    if first_warmup_append_tokens_latency_ms is None:
+        print("First Warmup AppendTokens Latency: N/A (--warmup=0)")
+    else:
+        print(f"First Warmup AppendTokens Latency: {first_warmup_append_tokens_latency_ms} ms")
 
     # Calculate tokenization metrics
     tokenization_latency_s = aggregate_measurements(tokenize_times, args.aggregation)
@@ -485,15 +550,19 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
 
     if args.print_memory_usage:
         if IS_NVIDIA_SYSTEM:
-            print(f"Peak GPU Memory Usage: {memory_monitor.peak_gpu_memory} GiB ")
+            print(f"Peak GPU Memory Usage: {peak_gpu_memory} GiB ")
         else:
-            print(f"Peak CPU Memory Usage: {memory_monitor.peak_cpu_memory} GiB ")
+            print(f"Peak CPU Memory Usage: {peak_cpu_memory} GiB ")
 
     metrics = [
         batch_size,
         prompt_length,
         generation_length,
         max_length,
+        model_creation_latency_ms,
+        tokenizer_creation_latency_ms,
+        generator_creation_latency_ms,
+        first_warmup_append_tokens_latency_ms,
         tokenization_thrpt,
         tokenization_latency_ms,
         per_token_prompt_thrpt,
@@ -508,7 +577,6 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         wall_clock_time,
     ]
 
-    # Emit telemetry for this benchmark run
     with suppress(Exception):
         emit_benchmark_telemetry(
             model_name=args.model_name,
@@ -519,7 +587,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
             tokens_generated=generation_length,
             tokenization_latency_ms=tokenization_latency_ms,
             tokenization_throughput=tokenization_thrpt,
-            prompt_processing_latency_ms=prompt_latency_ms,
+            prompt_processing_latency_ms=per_token_prompt_latency_ms,
             prompt_processing_throughput=per_token_prompt_thrpt,
             token_generation_latency_ms=token_gen_latency_ms,
             token_generation_throughput=token_gen_thrpt,
@@ -528,8 +596,8 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
             wall_clock_time_ms=wall_clock_time * 1000,
             wall_clock_throughput=wall_clock_thrpt,
             time_to_first_token_ms=ttft_ms,
-            peak_memory_gpu_mb=memory_monitor.peak_gpu_memory * 1024 if IS_NVIDIA_SYSTEM else 0.0,
-            peak_memory_cpu_mb=memory_monitor.peak_cpu_memory * 1024,
+            peak_memory_gpu_mb=peak_gpu_memory * 1024 if IS_NVIDIA_SYSTEM else 0.0,
+            peak_memory_cpu_mb=peak_cpu_memory * 1024,
             session_id=model_session_id,
         )
 

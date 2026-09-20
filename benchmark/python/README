@@ -11,3 +11,12 @@ Prerequisites:
 
 Example call to benchmarking script
 python benchmark_e2e.py -i {model folder} -b 1 -l 128 -g 256 -r 100 -w 10 -k 5 -o {output csv file name}
+
+Engine guidance benchmark
+
+Build with guidance and run paired guided and unguided requests to compare setup latency, time to first token, inter-token latency, decode throughput, and schema compliance:
+
+python build.py --use_cuda --use_guidance --skip_tests --skip_examples
+python benchmark/python/benchmark_engine_guidance.py -m {model folder} -e cuda --warmup 5 --iterations 30 --output guidance-profile.json
+
+Guidance remains request-local. The benchmark alternates guided and unguided requests on one Engine and reports token counts because constrained and unconstrained output lengths may differ.

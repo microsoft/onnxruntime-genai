@@ -139,7 +139,8 @@ namespace CommonUtils
             {
                 var name = prop.Name;
                 var value = prop.GetValue(args);
-                if (value == null || name == "chunk_size") continue;
+                if (value == null) continue;
+                if (name == "chunk_size" && Convert.ToInt32(value) == 0) continue;
 
                 if (name == "do_sample")
                 {

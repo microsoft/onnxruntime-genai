@@ -1,0 +1,27 @@
+{
+  "backend": "tokenizers",
+  "bos_token": "<|startoftext|>",
+  "clean_up_tokenization_spaces": true,
+  "eos_token": "<|im_end|>",
+  "image_end_token": "<|image_end|>",
+  "image_start_token": "<|image_start|>",
+  "image_thumbnail": "<|img_thumbnail|>",
+  "image_token": "<image>",
+  "is_local": true,
+  "legacy": false,
+  "local_files_only": false,
+  "model_max_length": 128000,
+  "model_specific_special_tokens": {
+    "image_end_token": "<|image_end|>",
+    "image_start_token": "<|image_start|>",
+    "image_token": "<image>"
+  },
+  "pad_token": "<|pad|>",
+  "processor_class": "Lfm2VlProcessor",
+  "return_token_type_ids": false,
+  "sp_model_kwargs": {},
+  "spaces_between_special_tokens": false,
+  "tokenizer_class": "TokenizersBackend",
+  "use_default_system_prompt": false,
+  "use_fast": true
+}

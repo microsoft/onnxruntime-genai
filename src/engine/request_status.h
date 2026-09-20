@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <cstdint>
+
 /**
  * @file request_status.h
  * @brief Defines the lifecycle status of an engine Request.
@@ -15,11 +17,41 @@
 namespace Generators {
 
 enum class RequestStatus {
-  Unassigned,  // A request has been created but has not been added to the engine yet.
-               // This is the state of a request when it is first created.
-  Assigned,    // The request has been added to the engine and is waiting to be scheduled.
-  InProgress,  // The request has been scheduled and is currently being processed.
-  Completed,   // The request has been completed successfully.
+  Unassigned,    // Created and Engine-bound, with no turn queued.
+  Assigned,      // Queued: initial work or a resident continuation awaits execution.
+  Active,        // The current generation turn is executable and owned by the Engine.
+  TurnComplete,  // The current turn stopped; output and resident model state remain available.
+  Closed,        // Permanently terminal; never scheduled again. Static batch storage may linger.
 };
+
+enum class GenerationFinishReason : uint32_t {
+  None = 0,
+  EosToken = 1,
+  StopString = 2,
+  TurnLimit = 3,
+  ContextLimit = 4,
+  Canceled = 5,
+  Failed = 6,
+};
+
+constexpr bool IsQueued(RequestStatus status) noexcept {
+  return status == RequestStatus::Assigned;
+}
+
+constexpr bool IsExecuting(RequestStatus status) noexcept {
+  return status == RequestStatus::Active;
+}
+
+constexpr bool IsExecutable(RequestStatus status) noexcept {
+  return IsQueued(status) || IsExecuting(status);
+}
+
+constexpr bool IsTurnComplete(RequestStatus status) noexcept {
+  return status == RequestStatus::TurnComplete;
+}
+
+constexpr bool IsClosed(RequestStatus status) noexcept {
+  return status == RequestStatus::Closed;
+}
 
 }  // namespace Generators

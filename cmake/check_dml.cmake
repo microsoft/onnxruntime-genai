@@ -7,8 +7,8 @@ if(USE_DML)
     add_compile_definitions(DML_TARGET_VERSION_USE_LATEST)
 
     file(GLOB dml_srcs CONFIGURE_DEPENDS
-      "${PROJECT_SOURCE_DIR}/src/dml/*.h"
-      "${PROJECT_SOURCE_DIR}/src/dml/*.cpp"
+      "${PROJECT_SOURCE_DIR}/src/ep/dml/*.h"
+      "${PROJECT_SOURCE_DIR}/src/ep/dml/*.cpp"
     )
 
     list(APPEND generator_srcs ${dml_srcs})
