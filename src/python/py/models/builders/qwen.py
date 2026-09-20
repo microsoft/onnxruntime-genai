@@ -788,10 +788,6 @@ class Qwen35MoETextModel(Qwen35TextModel):
         self.moe_attrs["activation_type"] = "swiglu"
         self.moe_attrs["swiglu_fusion"] = 1
         self.moe_attrs["normalize_routing_weights"] = True
-        if self.moe_attrs.get("swiglu_limit") is None and self.ep == "trt-rtx":
-            # TRT-RTX EP builds currently require QMoE swiglu_limit to be present;
-            # use +inf to preserve the "no clamp" behavior when the model omits it.
-            self.moe_attrs["swiglu_limit"] = float("inf")
 
         self.moe_intermediate_size = getattr(config, "moe_intermediate_size", 512)
         self.shared_expert_intermediate_size = getattr(
@@ -802,24 +798,7 @@ class Qwen35MoETextModel(Qwen35TextModel):
         return layer.mlp
 
     def make_moe_preprocessing(self, layer_id, moe, root_input):
-        gate_up_proj_bias = f"model.layers.{layer_id}.moe.experts.gate_up_proj.bias"
-        down_proj_bias = f"model.layers.{layer_id}.moe.experts.down_proj.bias"
-
-        gate_up_weight = None
-        down_weight = None
-        if getattr(moe.experts, "gate_up_proj", None) is not None:
-            # Repack HF concatenated [gate|up] to ORT interleaved [g0,u0,g1,u1,...].
-            raw_gate_up = moe.experts.gate_up_proj
-            half = raw_gate_up.shape[1] // 2
-            gate_up_weight = torch.stack([raw_gate_up[:, :half, :], raw_gate_up[:, half:, :]], dim=2).reshape_as(
-                raw_gate_up
-            )
-            down_weight = moe.experts.down_proj
-        self.make_moe_expert_initializers(layer_id, moe.experts, gate_up_weight, down_weight)
-
-        num_e = self.moe_attrs["num_experts"]
-        self.make_initializer(torch.zeros(num_e, 2 * self.moe_intermediate_size), gate_up_proj_bias, to=self.io_dtype)
-        self.make_initializer(torch.zeros(num_e, self.hidden_size), down_proj_bias, to=self.io_dtype)
+        self.make_interleaved_swiglu_moe_preprocessing(layer_id, moe)
 
     def make_moe_router(self, layer_id, moe, root_input):
         basename = f"/model/layers.{layer_id}/moe"
@@ -833,19 +812,13 @@ class Qwen35MoETextModel(Qwen35TextModel):
                 f"/model/constants/INT64/{[-1, self.moe_attrs['num_experts']]}",
             ],
             dtype=self.io_dtype,
-            shape=["batch_size * sequence_length", self.moe_attrs["num_experts"]],
+            shape=self.make_moe_router_shape(),
         )
 
     def make_moe_subgraph(self, layer_id, moe, root_input):
         basename = f"/model/layers.{layer_id}/moe"
         op_type = self.moe_attrs["op_type"]
-        moe_weight_type = f"{'q' if op_type == 'QMoE' else ''}weight"
-        gate_up_proj_weight = f"model.layers.{layer_id}.moe.experts.gate_up_proj.{moe_weight_type}"
-        gate_up_proj_scales = f"model.layers.{layer_id}.moe.experts.gate_up_proj.scales"
-        gate_up_proj_bias = f"model.layers.{layer_id}.moe.experts.gate_up_proj.bias"
-        down_proj_weight = f"model.layers.{layer_id}.moe.experts.down_proj.{moe_weight_type}"
-        down_proj_scales = f"model.layers.{layer_id}.moe.experts.down_proj.scales"
-        down_proj_bias = f"model.layers.{layer_id}.moe.experts.down_proj.bias"
+        names = self.make_moe_expert_names(layer_id)
         gate_up_proj_global_scales, down_proj_global_scales = self.moe_attrs.get("global_scale_names", {}).get(
             layer_id, ("", "")
         )
@@ -855,12 +828,12 @@ class Qwen35MoETextModel(Qwen35TextModel):
             moe_name,
             root_input=root_input,
             router_probs=f"{basename}/router/Reshape/output_0",
-            weight1=gate_up_proj_weight,
-            scales1=gate_up_proj_scales if op_type == "QMoE" else "",
-            bias1=gate_up_proj_bias,
-            weight2=down_proj_weight,
-            scales2=down_proj_scales if op_type == "QMoE" else "",
-            bias2=down_proj_bias,
+            weight1=names["gate_up_weight"],
+            scales1=names["gate_up_scales"] if op_type == "QMoE" else "",
+            bias1=names["gate_up_bias"],
+            weight2=names["down_weight"],
+            scales2=names["down_scales"] if op_type == "QMoE" else "",
+            bias2=names["down_bias"],
             global_scales1=gate_up_proj_global_scales,
             global_scales2=down_proj_global_scales,
         )
@@ -883,9 +856,14 @@ class Qwen35MoETextModel(Qwen35TextModel):
 
         # Temporarily set new intermediate size from shared experts
         intermediate_size = self.intermediate_size
-        self.intermediate_size = self.shared_expert_intermediate_size
-        self.make_mlp_proj(layer_id, shared_expert, root_input)
-        self.intermediate_size = intermediate_size
+        try:
+            self.intermediate_size = self.shared_expert_intermediate_size
+            if self.mlp_attrs.get("fuse_gate_up", False):
+                self.make_mlp_proj_fused(layer_id, shared_expert, root_input)
+            else:
+                self.make_mlp_proj(layer_id, shared_expert, root_input)
+        finally:
+            self.intermediate_size = intermediate_size
         shared_output = self.mlp_attrs["output_0"]
 
         gate_matmul_name = self.make_matmul(shared_expert_gate, f"{basename}_gate/MatMul", root_input)
@@ -949,7 +927,8 @@ class Qwen35MoEModel(MTPModel):
             num_mtp_layers = getattr(config, "mtp_num_hidden_layers", 0)
         self.mtp_attrs["build"] = (num_mtp_layers or 0) > 0
         self.mtp_attrs["shared_initializer_names"] = {"model.embed_tokens.weight"}
-        self.mtp_attrs["shared_initializer_prefixes"] = ("lm_head.MatMul.",)
+        # `_` catches the quantized table's `weight_Q4` / `weight_scales` pair.
+        self.mtp_attrs["shared_initializer_prefixes"] = ("lm_head.MatMul.", "model.embed_tokens.weight_")
 
         block_drafter = self.requested_block_drafter(extra_options)
         if self.mtp_attrs["build"] and block_drafter:
@@ -1071,6 +1050,7 @@ class Qwen35MoEModel(MTPModel):
         decoder_outputs = genai_config["model"]["decoder"].setdefault("outputs", {})
         decoder_outputs.setdefault("hidden_states", "hidden_states")
         genai_config["model"]["mtp"] = {
+            "enabled": True,
             "filename": "mtp.onnx",
             "num_hidden_layers": 1,
             "num_key_value_heads": self.decoder.num_kv_heads,
@@ -1128,23 +1108,33 @@ class Qwen35MoEModel(MTPModel):
         return precision
 
     def block_drafter_quant(self, precision):
-        """Resolve weight-only quantization for a block drafter, or ``None`` to keep it dense.
-
-        The drafter's LM head *is* the target's, so quantizing it the same way lets
-        ``share_initializers`` fold the two into one copy. Only the symmetric/``default``
-        naming convention is reproducible here, so any other algorithm leaves the head dense
-        rather than writing a second copy under a name that could never match.
-        """
+        """Resolve weight-only quantization for a block-drafter body, or ``None`` to keep it dense."""
         if precision == "bf16":
             return None
-        bits = 4 if precision == "int4" else 8
-        block_size = int(self.decoder.quant_attrs["matmul_block_size"])
-        prepack = int(self.decoder.matmul_attrs["weights_prepacked"])
-        quant = {"bits": bits, "block_size": block_size, "prepack": prepack, "lm_head": None}
+        return {
+            "bits": 4 if precision == "int4" else 8,
+            "block_size": int(self.decoder.quant_attrs["matmul_block_size"]),
+            "prepack": int(self.decoder.matmul_attrs["weights_prepacked"]) if self.decoder.ep == "cuda" else 0,
+        }
 
-        if self.decoder.exclude_lm_head or not self.decoder.is_lm_head_quantized():
-            return quant
-        head_bits, weight_name, scales_name, zero_point_name = self.decoder.make_tied_quantized_embedding_input_names()
+    def block_drafter_lm_head_quant(self):
+        """Resolve how a block drafter gets its LM head, or ``None`` to keep it dense.
+
+        The drafter's LM head *is* the target's, so it reuses the target's initializers rather
+        than quantizing a second copy (see ``adopt_target_tensors``). Only the
+        symmetric/``default`` ``MatMulNBits`` convention is wired up here; any other algorithm
+        or output format leaves the head dense instead of guessing at initializer names.
+        """
+        decoder = self.decoder
+        if decoder.exclude_lm_head or not decoder.is_lm_head_quantized():
+            return None
+        if decoder.quant_attrs["use_qdq"]:
+            print(
+                "Leaving the block drafter's LM head dense: use_qdq makes the target write a "
+                "DequantizeLinear/MatMul pair instead of the MatMulNBits this exporter can reuse."
+            )
+            return None
+        head_bits, weight_name, scales_name, zero_point_name = decoder.make_tied_quantized_embedding_input_names()
         shareable = (
             weight_name == f"lm_head.MatMul.weight_Q{head_bits}"
             and scales_name == "lm_head.MatMul.weight_scales"
@@ -1153,11 +1143,54 @@ class Qwen35MoEModel(MTPModel):
         if not shareable:
             print(
                 f"Leaving the block drafter's LM head dense: the target writes '{weight_name}', "
-                "which this exporter cannot reproduce byte-for-byte to share."
+                "which this exporter does not know how to reuse."
             )
-            return quant
-        quant["lm_head"] = {"bits": head_bits, "block_size": block_size, "prepack": prepack}
-        return quant
+            return None
+        prepack = int(decoder.matmul_attrs["weights_prepacked"]) if decoder.ep == "cuda" else 0
+        adopt_target = not (prepack and decoder.io_dtype != ir.DataType.FLOAT16)
+        if not adopt_target:
+            print(
+                "Keeping a private raw quantized block-drafter LM head because its BF16 layout "
+                "cannot adopt the target's prepacked quantized weight."
+            )
+            prepack = 0
+        return {
+            "bits": head_bits,
+            "block_size": int(decoder.quant_attrs["matmul_block_size"]),
+            "prepack": prepack,
+            "adopt_target": adopt_target,
+        }
+
+    def block_drafter_embed_quant(self):
+        """Resolve the target's quantized embedding table, or ``None`` if the drafter keeps a dense one.
+
+        The drafter embeds with the target's table, so when the target quantizes it the drafter has
+        to emit the same ``GatherBlockQuantized`` over the same initializers. Emitting a dense
+        ``Gather`` instead costs a second, unshareable copy of the largest tensor in either graph.
+        """
+        decoder = self.decoder
+        if decoder.exclude_embeds or decoder.onnx_dtype not in {ir.DataType.INT4, ir.DataType.UINT4}:
+            return None
+        if "Gather" not in decoder.quant_attrs["op_types_to_quantize"]:
+            return None
+        if "/model/embed_tokens/Gather" in decoder.quant_attrs["nodes_to_exclude"]:
+            return None
+        if decoder.tied_quantized_embeddings:
+            # Tied embeddings gather from a reshape of the quantized LM head rather than from a
+            # table of their own, so there is no `model.embed_tokens.weight_Q4` to adopt.
+            print(
+                "Leaving the block drafter's embedding dense: shared_embeddings makes the target "
+                "gather from its LM head weight, which this exporter does not know how to reuse."
+            )
+            return None
+        # Only the symmetric/`default` convention names the table `*.weight_Q4` / `*.weight_scales`.
+        if decoder.quantization_algo != "default" or not decoder.quant_attrs["is_symmetric"]:
+            print(
+                f"Leaving the block drafter's embedding dense: the target quantizes it with "
+                f"'{decoder.quantization_algo}', whose initializer names this exporter does not know how to reuse."
+            )
+            return None
+        return {"bits": 4, "block_size": int(decoder.quant_attrs["matmul_block_size"])}
 
     def make_dflash2_init(self, io_dtype, extra_options):
         """DFlash 2 block drafter, exported as an auxiliary ``dflash2.onnx``.
@@ -1218,6 +1251,8 @@ class Qwen35MoEModel(MTPModel):
             self.decoder.context_length,
             num_draft_tokens=self.dflash2_attrs["num_draft_tokens"],
             quant=self.block_drafter_quant(self.dflash2_attrs["precision"]),
+            lm_head_quant=self.block_drafter_lm_head_quant(),
+            embed_quant=self.block_drafter_embed_quant(),
             fuse_gate_up=self.dflash2_attrs["fuse_gate_up"],
         )
         self.dflash2.make_model()
@@ -1225,29 +1260,50 @@ class Qwen35MoEModel(MTPModel):
     def save_dflash2_model(self, output_dir):
         if self.dflash2 is None:
             return
-        self.dflash2.save_model(output_dir)
-        self.dflash2_shared_initializers = self.share_initializers(
-            output_dir, self.decoder.filename, self.dflash2.filename
+        self.dflash2_shared_initializers = self.save_block_drafter_model(self.dflash2, output_dir, "DFlash 2")
+
+    def save_block_drafter_model(self, drafter, output_dir, drafter_name):
+        """Adopt the target's tensors, save the drafter, and fold what the two share onto one copy."""
+        drafter.adopt_target_tensors(os.path.join(output_dir, self.decoder.filename))
+        drafter.save_model(output_dir)
+        head = drafter.lm_head_quant
+        head_initializers = (
+            frozenset({f"lm_head.MatMul.weight_Q{head['bits']}", "lm_head.MatMul.weight_scales"})
+            if head is not None
+            else frozenset()
         )
-        self.warn_unshared_lm_head(self.dflash2, self.dflash2_shared_initializers, "DFlash 2")
+        # A head the drafter had to quantize itself must keep its private copy; an adopted one is
+        # the target's own tensor and has to fold back onto it.
+        adopted_head = head_initializers if head is not None and head["adopt_target"] else frozenset()
+        private_head = head_initializers - adopted_head
+        shared = self.share_initializers(
+            output_dir,
+            self.decoder.filename,
+            drafter.filename,
+            adopt_source_initializers=adopted_head,
+            required_source_initializers=adopted_head,
+            excluded_source_initializers=private_head,
+        )
+        self.warn_unshared_lm_head(drafter, shared, drafter_name)
+        return shared
 
     def warn_unshared_lm_head(self, drafter, shared, drafter_name):
         """Report a drafter head that stayed a separate copy instead of folding onto the target's.
 
-        The drafter head is already much smaller than the dense one it replaces, so this is a
-        missed saving rather than a failure. It happens when this exporter's blockwise
-        quantizer and the target's MLAS pass round a block differently, which leaves the
-        bytes unequal even though both encode the same tensor the same way.
+        The drafter adopts the target's own initializers, so the two are identical by
+        construction and this should never fire. If it does, the bytes on disk diverged
+        somewhere after ``adopt_target_tensors``, which costs both a duplicated copy and the
+        guarantee that the drafter scores with the head the target verifies with.
         """
-        head = getattr(drafter, "lm_head_quant", None)
-        if head is None:
+        head = drafter.lm_head_quant
+        if head is None or not head["adopt_target"]:
             return
         weight_name = f"lm_head.MatMul.weight_Q{head['bits']}"
         if any(entry["name"] == weight_name for entry in shared):
             return
         print(
-            f"Note: the {drafter_name} LM head is quantized but did not match the target's "
-            f"'{weight_name}' byte-for-byte, so it remains a separate (still quantized) copy."
+            f"WARNING: the {drafter_name} LM head adopted the target's '{weight_name}' but did not "
+            "share it. The two copies may no longer agree."
         )
 
     def add_dflash2_to_genai_config(self, out_dir):
@@ -1340,16 +1396,15 @@ class Qwen35MoEModel(MTPModel):
             self.decoder.context_length,
             num_draft_tokens=self.dspark_attrs["num_draft_tokens"],
             top_k=self.dspark_attrs["top_k"],
+            embed_quant=self.block_drafter_embed_quant(),
+            lm_head_quant=self.block_drafter_lm_head_quant(),
         )
         self.dspark.make_model()
 
     def save_dspark_model(self, output_dir):
         if self.dspark is None:
             return
-        self.dspark.save_model(output_dir)
-        self.dspark_shared_initializers = self.share_initializers(
-            output_dir, self.decoder.filename, self.dspark.filename
-        )
+        self.dspark_shared_initializers = self.save_block_drafter_model(self.dspark, output_dir, "DSpark")
 
     def add_dspark_to_genai_config(self, out_dir):
         config_path = os.path.join(out_dir, "genai_config.json")
@@ -1451,6 +1506,8 @@ class Qwen35MTPModel(Qwen35MoETextModel):
             preserve_quantization=self.preserve_mtp_quantization,
             load_quantized_model=self.load_weights,
             is_moe=self.is_moe_mtp,
+            cache_dir=self.cache_dir,
+            token=self.hf_token,
         )
 
     def make_offset_rmsnorm(self, name, root_input, weight_tensor):
@@ -1472,16 +1529,7 @@ class Qwen35MTPModel(Qwen35MoETextModel):
     def make_mtp_input_projection(self):
         basename = "/model/mtp"
 
-        embed_weight = "model.embed_tokens.weight"
-        self.make_initializer(self.mtp_weights.embedding.weight, embed_weight, to=self.io_dtype)
-        embed_gather = f"{basename}/embed_tokens/Gather"
-        embed_output = f"{embed_gather}/output_0"
-        self.make_node(
-            "Gather",
-            inputs=[embed_weight, self.input_names["input_ids"]],
-            outputs=[embed_output],
-            name=embed_gather,
-        )
+        embed_output = self.make_mtp_embedding(basename)
         self.make_value(embed_output, self.io_dtype, shape=self.make_hidden_state_shape())
 
         embedding_norm = self.make_offset_rmsnorm(
@@ -1504,6 +1552,13 @@ class Qwen35MTPModel(Qwen35MoETextModel):
 
         fc_name = self.make_matmul(self.mtp_weights.fc, f"{basename}/fc/MatMul", f"{concat_name}/output_0")
         return f"{fc_name}/output_0"
+
+    def make_mtp_embedding(self, basename):
+        return self.make_embedding_lookup(
+            self.mtp_weights.embedding.weight,
+            f"{basename}/embed_tokens",
+            self.mtp_weights.lm_head,
+        )
 
 
 class Qwen35DenseMTPModel(Qwen35MTPModel):

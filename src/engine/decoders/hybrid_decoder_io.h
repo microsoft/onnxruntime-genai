@@ -16,6 +16,7 @@ struct HybridDecoderIO : DecoderIO {
                   ScheduledRequests& scheduled_requests,
                   std::shared_ptr<CacheManager> cache_manager,
                   const ExecutionContext& execution_context,
+                  VarlenGraphBuffers* graph_buffers,
                   size_t position_planes);
 
   std::vector<DeviceSpan<float>> ProcessLogits() override;

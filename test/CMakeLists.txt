@@ -14,10 +14,13 @@ file(GLOB test_srcs CONFIGURE_DEPENDS
 
 # Keep tests with dedicated white-box executables out of the public-API unit_tests target.
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/dflash2_config_test.cpp")
-list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/reinit_tests.cpp")
-list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/search_checkpoint_tests.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/kv_cache_tests.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/lfm2_vl_image_geometry_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_preprocessing_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_utils_tests.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/reinit_tests.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/search_checkpoint_tests.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry_helpers_tests.cpp")
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)
   message(STATUS "Including CUDA kernel tests in the build.")
@@ -101,6 +104,17 @@ endif()
 
 add_test(NAME UnitTests COMMAND unit_tests)
 
+add_executable(telemetry_helpers_tests
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry_helpers_tests.cpp")
+target_include_directories(telemetry_helpers_tests PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+)
+target_link_libraries(telemetry_helpers_tests PRIVATE GTest::gtest)
+set_target_properties(telemetry_helpers_tests PROPERTIES
+  FOLDER "Tests"
+)
+add_test(NAME TelemetryHelpersTests COMMAND telemetry_helpers_tests)
+
 # Standalone shutdown / re-initialization tests. Isolated in their own executable because they call
 # OgaShutdown(), which resets process-global GenAI state (env, device interfaces, add-on libraries,
 # registered plugin EPs). Keeping them out of unit_tests avoids any coupling to test order. This
@@ -131,6 +145,26 @@ if (NOT MSVC)
 endif()
 
 add_test(NAME ReInitTests COMMAND reinit_tests)
+
+add_executable(kv_cache_unit_tests "${CMAKE_CURRENT_SOURCE_DIR}/cpp/kv_cache_tests.cpp")
+target_include_directories(kv_cache_unit_tests PRIVATE
+  ${ORT_HEADER_DIR}
+  ${onnxruntime_extensions_SOURCE_DIR}/shared/api
+  ${CMAKE_SOURCE_DIR}/src
+)
+target_link_libraries(kv_cache_unit_tests PRIVATE
+  onnxruntime-genai-obj
+  GTest::gtest
+)
+add_dependencies(kv_cache_unit_tests onnxruntime-genai)
+set_target_properties(kv_cache_unit_tests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
+  FOLDER "Tests"
+)
+if (NOT MSVC)
+  target_compile_options(kv_cache_unit_tests PRIVATE "-fvisibility=hidden")
+endif()
+add_test(NAME KvCacheUnitTests COMMAND kv_cache_unit_tests)
 
 add_executable(parallel_preprocessing_tests
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_preprocessing_tests.cpp"
@@ -192,6 +226,7 @@ file(GLOB engine_unit_test_srcs CONFIGURE_DEPENDS
 )
 list(APPEND engine_unit_test_srcs
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/dflash2_config_test.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/lfm2_vl_image_geometry_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/search_checkpoint_tests.cpp"
 )
 add_executable(engine_unit_tests ${engine_unit_test_srcs})
