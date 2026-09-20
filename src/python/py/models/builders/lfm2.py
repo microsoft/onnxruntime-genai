@@ -4,9 +4,15 @@
 # license information.
 # Modifications Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # --------------------------------------------------------------------------
+import json
+import os
+
 import onnx_ir as ir
+import torch
 
 from .base import Model
+
+LFM2_AUDIO_ARCHITECTURE = "Lfm2AudioForConditionalGeneration"
 
 
 class LFM2Model(Model):
@@ -188,6 +194,87 @@ class LFM2Model(Model):
         decoder = genai_config["model"]["decoder"]
         decoder["layer_types"] = self.layer_types
         decoder["conv_cache_size"] = self.conv_L_cache - 1
+
+
+def load_lfm2_audio_config(model_name_or_path, **kwargs):
+    """The LFM2 decoder config of an LFM2-Audio checkpoint (LFM2-Audio-1.5B, LFM2.5-Audio-1.5B).
+
+    These checkpoints have no transformers model class and their config.json nests the decoder
+    config under "lfm" next to the audio encoder, depthformer and mel front-end settings, so
+    AutoConfig cannot read them. Returns None if the checkpoint is not an LFM2-Audio one.
+    """
+    from transformers import Lfm2Config, PretrainedConfig
+
+    try:
+        config_dict, _ = PretrainedConfig.get_config_dict(model_name_or_path, **kwargs)
+    except Exception:  # noqa: BLE001 - not an LFM2-Audio checkpoint (or not readable): AutoConfig reports the real error
+        return None
+    if config_dict.get("architectures") != [LFM2_AUDIO_ARCHITECTURE]:
+        return None
+    config = Lfm2Config(**config_dict["lfm"])
+    config.architectures = [LFM2_AUDIO_ARCHITECTURE]
+    config._name_or_path = model_name_or_path
+    return config
+
+
+class LFM2AudioModel(LFM2Model):
+    """The LFM2 decoder of an LFM2-Audio checkpoint, exported for text generation.
+
+    The checkpoint stores the decoder as an Lfm2Model under the "lfm." prefix, with the logits tied
+    to the token embeddings; the audio encoder, depthformer and audio embeddings that surround it in
+    the checkpoint are left out. With the embedding layer excluded the export is the decoder stage of
+    the lfm2_audio pipeline, whose embedding model splices the audio encoder output into the token
+    embeddings; otherwise it is a plain text model.
+    """
+
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.decoder_config = config
+
+    def load_weights(self, input_path):
+        if input_path.endswith(".gguf") or self.quant_type is not None:
+            return super().load_weights(input_path)
+
+        from transformers import Lfm2ForCausalLM
+
+        with torch.device("meta"):
+            model = Lfm2ForCausalLM(self.decoder_config)
+        state_dict = {}
+        for name, tensor in self.load_lfm2_audio_checkpoint(input_path).items():
+            if name.startswith("lfm."):
+                state_dict["model." + name[len("lfm.") :]] = tensor
+        missing, unexpected = model.load_state_dict(state_dict, strict=False, assign=True)
+        if unexpected or set(missing) - {"lm_head.weight"}:
+            raise ValueError(
+                f"The LFM2 decoder of {input_path} does not match its config: missing {sorted(missing)}, unexpected {sorted(unexpected)}."
+            )
+        model.tie_weights()
+        return model.eval()
+
+    def load_lfm2_audio_checkpoint(self, input_path):
+        """The checkpoint tensors, from a local directory or the Hugging Face Hub."""
+        from safetensors.torch import load_file
+
+        if os.path.isdir(input_path):
+            checkpoint_dir = input_path
+        else:
+            from huggingface_hub import snapshot_download
+
+            checkpoint_dir = snapshot_download(
+                input_path, cache_dir=self.cache_dir, token=self.hf_token, allow_patterns=["*.safetensors", "*.json"]
+            )
+
+        index_path = os.path.join(checkpoint_dir, "model.safetensors.index.json")
+        if os.path.exists(index_path):
+            with open(index_path) as f:
+                shards = sorted(set(json.load(f)["weight_map"].values()))
+        else:
+            shards = ["model.safetensors"]
+
+        tensors = {}
+        for shard in shards:
+            tensors.update(load_file(os.path.join(checkpoint_dir, shard)))
+        return tensors
 
 
 class LFM2MoEModel(LFM2Model):

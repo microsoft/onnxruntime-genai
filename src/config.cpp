@@ -1473,6 +1473,8 @@ struct SpeechInputs_Element : JSON::Element {
       v_.attention_mask = JSON::Get<std::string_view>(value);
     } else if (name == "audio_sizes") {
       v_.audio_sizes = JSON::Get<std::string_view>(value);
+    } else if (name == "audio_lengths") {
+      v_.audio_lengths = JSON::Get<std::string_view>(value);
     } else if (name == "audio_projection_mode") {
       v_.audio_projection_mode = JSON::Get<std::string_view>(value);
     } else {

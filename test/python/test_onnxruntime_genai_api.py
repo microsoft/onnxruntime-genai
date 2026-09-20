@@ -979,6 +979,26 @@ def test_whisper_preprocessing_multiple_audios(test_data_path, relative_model_pa
     _ = processor(prompts, audios=audios)
 
 
+@pytest.mark.parametrize("opener", ["images", "audios"])
+def test_open_keeps_short_paths_alive(test_data_path, tmp_path, opener):
+    # The paths are copied into a vector first and only then turned into char pointers: a short
+    # string keeps its characters inside the string object, so taking the pointer as the vector
+    # grows leaves the earlier entries pointing at moved-from memory.
+    source = Path(test_data_path) / ("images/cars.jpg" if opener == "images" else "audios/jfk.flac")
+    suffix = source.suffix
+    short_dir = tmp_path / "s"
+    short_dir.mkdir()
+    paths = []
+    for index in range(4):
+        path = short_dir / f"{index}{suffix}"
+        shutil.copy(source, path)
+        paths.append(os.fspath(path))
+
+    opened = (og.Images if opener == "images" else og.Audios).open(*paths)
+
+    assert opened is not None
+
+
 def test_streaming_asr_create(nemotron_speech_model_path):
     """Test that Generator + StreamingProcessor can be created from a nemotron_speech model."""
     model = og.Model(nemotron_speech_model_path)

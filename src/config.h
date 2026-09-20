@@ -48,6 +48,7 @@ struct Config {
     // Speech encoder names
     static constexpr std::string_view AudioAttentionMaskName = "audio_attention_mask";
     static constexpr std::string_view AudioSizesName = "audio_sizes";
+    static constexpr std::string_view AudioLengthsName = "audio_lengths";
     static constexpr std::string_view AudioProjectionModeName = "audio_projection_mode";
     static constexpr std::string_view AudioFeaturesName = "audio_features";
     static constexpr std::string_view NumAudioTokens = "num_audio_tokens";
@@ -317,6 +318,7 @@ struct Config {
         std::string audio_embeds{Defaults::AudioEmbedsName};
         std::string attention_mask{Defaults::AudioAttentionMaskName};
         std::string audio_sizes{Defaults::AudioSizesName};
+        std::string audio_lengths{Defaults::AudioLengthsName};  // per-clip valid frame count of audio_embeds (LFM2-Audio)
         std::string audio_projection_mode{Defaults::AudioProjectionModeName};
       } inputs;
 

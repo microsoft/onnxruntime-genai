@@ -675,12 +675,19 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   pybind11::class_<OgaImages>(m, "Images")
       .def_static("open", [](pybind11::args image_paths) {
         std::vector<std::string> image_paths_string;
-        std::vector<const char*> image_paths_vector;
+        image_paths_string.reserve(image_paths.size());
         for (auto image_path : image_paths) {
           if (!pybind11::isinstance<pybind11::str>(image_path))
             throw std::runtime_error("Image paths must be strings.");
           image_paths_string.push_back(image_path.cast<std::string>());
-          image_paths_vector.push_back(image_paths_string.back().c_str());
+        }
+
+        // Take the pointers only once the strings have stopped moving: a short string keeps its
+        // characters inside the string object, so growing the vector would dangle them.
+        std::vector<const char*> image_paths_vector;
+        image_paths_vector.reserve(image_paths_string.size());
+        for (const auto& image_path : image_paths_string) {
+          image_paths_vector.push_back(image_path.c_str());
         }
 
         return OgaImages::Load(image_paths_vector);
@@ -703,13 +710,19 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   pybind11::class_<OgaAudios>(m, "Audios")
       .def_static("open", [](pybind11::args audio_paths) {
         std::vector<std::string> audio_paths_string;
-        std::vector<const char*> audio_paths_vector;
-
+        audio_paths_string.reserve(audio_paths.size());
         for (const auto& audio_path : audio_paths) {
           if (!pybind11::isinstance<pybind11::str>(audio_path))
             throw std::runtime_error("Audio paths must be strings.");
           audio_paths_string.push_back(audio_path.cast<std::string>());
-          audio_paths_vector.push_back(audio_paths_string.back().c_str());
+        }
+
+        // Take the pointers only once the strings have stopped moving: a short string keeps its
+        // characters inside the string object, so growing the vector would dangle them.
+        std::vector<const char*> audio_paths_vector;
+        audio_paths_vector.reserve(audio_paths_string.size());
+        for (const auto& audio_path : audio_paths_string) {
+          audio_paths_vector.push_back(audio_path.c_str());
         }
 
         return OgaAudios::Load(audio_paths_vector);

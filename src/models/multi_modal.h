@@ -133,10 +133,10 @@ struct SpeechState : State {
   SpeechState(const SpeechState&) = delete;
   SpeechState& operator=(const SpeechState&) = delete;
 
-  void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, const int64_t num_audio_tokens);
+  virtual void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, const int64_t num_audio_tokens);
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {}) override;
 
- private:
+ protected:
   friend struct MultiModalPipelineState;
 
   const MultiModalLanguageModel& model_;
@@ -144,6 +144,30 @@ struct SpeechState : State {
   ExtraInputs extra_inputs_{*this};  // Model inputs
   std::unique_ptr<MultiModalFeatures> audio_features_;
 };
+
+// Lfm2AudioSpeechState: per-clip encoder loop for LFM2-Audio.
+//
+// The processor stacks the clips of one prompt into a zero-padded [N, T_max, num_mels] mel tensor
+// with their real frame counts alongside. The published encoder export is traced for a single clip
+// (its subsampling mask cannot broadcast over a batch), so with several clips this subclass slices
+// each clip's own frames out of that tensor, runs the encoder on [1, T_i, num_mels], and writes the
+// results one after another into the contiguous [1, total_tokens, hidden] feature buffer the
+// embedding model expects, in clip order.
+struct Lfm2AudioSpeechState : SpeechState {
+  using SpeechState::SpeechState;  // inherit constructor
+
+  void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, const int64_t num_audio_tokens) override;
+  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {}) override;
+
+ private:
+  size_t FindInput(const std::string& name) const;
+  size_t FindOutput(const std::string& name) const;
+
+  std::vector<int64_t> tokens_per_clip_;
+};
+
+// Factory: pick the right SpeechState subclass based on model type.
+std::unique_ptr<SpeechState> CreateSpeechState(const MultiModalLanguageModel& model, const GeneratorParams& params);
 
 struct EmbeddingState : State {
   EmbeddingState(const MultiModalLanguageModel& model, const GeneratorParams& params);

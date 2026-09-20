@@ -946,6 +946,8 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<NemotronSpeechModel>(std::move(config), ort_env);
   if (ModelType::IsTDT(config->model.type))
     return std::make_shared<ParakeetTdtModel>(std::move(config), ort_env);
+  if (config->model.type == "lfm2_audio")
+    return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, /*vision=*/false, /*speech=*/true);
   if (ModelType::IsALM(config->model.type))
     return std::make_shared<WhisperModel>(std::move(config), ort_env);
   if (ModelType::IsVLM(config->model.type))

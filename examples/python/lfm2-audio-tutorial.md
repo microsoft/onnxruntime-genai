@@ -1,0 +1,264 @@
+# Build your LFM2-Audio / LFM2.5-Audio ONNX models for ONNX Runtime GenAI
+
+LFM2-Audio pairs a FastConformer speech encoder (based on
+[nvidia/canary-180m-flash](https://huggingface.co/nvidia/canary-180m-flash)) with an LFM2 decoder
+(the hybrid conv/attention model described in
+[the LFM2 support PR](https://github.com/microsoft/onnxruntime-genai/pull/1979)). ONNX Runtime GenAI
+runs the speech-to-text half of it — ASR and spoken-prompt chat — as three ONNX models:
+
+| Model | Inputs | Outputs |
+| --- | --- | --- |
+| `speech.onnx` | `mel_spectrogram`, `mel_lengths` | `audio_embeddings`, `audio_lengths` |
+| `embeddings.onnx` | `input_ids`, `audio_features` | `inputs_embeds` |
+| `model.onnx` (decoder) | `inputs_embeds`, `attention_mask`, `position_ids`, KV + conv cache | `logits` |
+
+Only the decoder is produced by the model builder in this repository; the speech encoder is
+published as ONNX by LiquidAI, and the embedding model is a small graph you build once.
+
+**Audio output is not supported.** The model can also *speak*: it emits audio codes through an
+RQ-transformer ("depthformer") that ONNX Runtime GenAI has no generation loop for, and those codes
+then need the audio detokenizer and an inverse STFT to become a waveform. The export below drops the
+depthformer and the audio embeddings with it, so the model answers in text only. See
+[Known limitations](#5-known-limitations).
+
+## Steps
+
+1. [Build the decoder](#1-build-the-decoder)
+2. [Get the speech encoder and build the embedding model](#2-get-the-speech-encoder-and-build-the-embedding-model)
+3. [Write `genai_config.json`](#3-write-genai_configjson)
+4. [Run the model](#4-run-the-model)
+5. [Known limitations](#5-known-limitations)
+
+## 1. Build the decoder
+
+```bash
+# Download the PyTorch model
+$ huggingface-cli download LiquidAI/LFM2.5-Audio-1.5B --local-dir ./lfm2.5-audio/pytorch
+
+# Build the decoder as INT4 with FP32 inputs/outputs for CPU
+$ python3 -m onnxruntime_genai.models.builder \
+    -i ./lfm2.5-audio/pytorch \
+    -o ./lfm2.5-audio/cpu \
+    -p int4 \
+    -e cpu \
+    --extra_options exclude_embeds=true
+```
+
+The checkpoint has no `model_type` and no transformers model class: its `config.json` nests the LFM2
+decoder config under `"lfm"`, next to the speech encoder, depthformer and mel front-end settings, and
+the checkpoint stores the decoder under the `lfm.` prefix. The builder recognizes
+`Lfm2AudioForConditionalGeneration`, reads that nested config and loads only the decoder, whose
+logits are tied to the token embeddings.
+
+`exclude_embeds=true` is what makes this a speech pipeline stage: the decoder then takes
+`inputs_embeds` instead of `input_ids`, so the embedding model can splice the encoder output into the
+token embeddings before the decoder runs. The builder writes `"type": "lfm2_audio"` into
+`genai_config.json` for this case, and `"type": "lfm2_audio_text"` when the flag is omitted — that
+second form is a plain text-only LFM2 model that happens to come from an audio checkpoint, and it
+runs through the normal `AppendTokens` path with no speech or embedding model.
+
+## 2. Get the speech encoder and build the embedding model
+
+The speech encoder is `onnx/audio_encoder.onnx` in
+[LiquidAI/LFM2.5-Audio-1.5B-ONNX](https://huggingface.co/LiquidAI/LFM2.5-Audio-1.5B-ONNX)
+(`audio_encoder_fp16.onnx` and `audio_encoder_q4.onnx` are there too). Download the graph together
+with every `*.onnx_data*` file next to it. It has the signature ONNX Runtime GenAI expects:
+
+| Name | Shape | Type |
+| --- | --- | --- |
+| `mel_spectrogram` (input) | `[num_clips, num_frames, 128]` | float |
+| `mel_lengths` (input) | `[num_clips]` | int64 |
+| `audio_embeddings` (output) | `[num_clips, ceil(num_frames / 8), hidden_size]` | float |
+| `audio_lengths` (output) | `[num_clips]` | int64 |
+
+The encoder subsamples the mel frames by 8 (three stride-2 convolutions) and its adapter projects the
+result to the decoder's hidden size, so one output frame covers 80 ms of audio. The `audio_lengths`
+output is not read by the runtime — the runtime derives the same counts itself so it can size the
+prompt before the encoder runs — but the graph produces it and the input it shares with
+`mel_lengths` matters: the encoder masks the padding of a batched run with it.
+
+The embedding model looks up `input_ids` in the decoder's embedding table and scatters
+`audio_features` into the positions holding the audio placeholder token. Build it from
+`lfm.embed_tokens.weight` in the checkpoint:
+
+```python
+import json
+from pathlib import Path
+
+import numpy as np
+import onnx
+from onnx import TensorProto, helper, numpy_helper
+from safetensors.torch import load_file
+
+pytorch_dir = Path("./lfm2.5-audio/pytorch")
+output_dir = Path("./lfm2.5-audio/cpu")
+
+config = json.loads((pytorch_dir / "config.json").read_text())["lfm"]
+hidden_size, vocab_size = config["hidden_size"], config["vocab_size"]
+# Pick any id the text never uses; it must match model.audio_token_id in genai_config.json.
+audio_token_id = 133  # <|reserved_123|>
+
+embed_weight = load_file(pytorch_dir / "model.safetensors")["lfm.embed_tokens.weight"]
+table = numpy_helper.from_array(embed_weight.float().numpy(), name="embed_tokens.weight")
+
+graph = helper.make_graph(
+    [
+        helper.make_node("Gather", ["embed_tokens.weight", "input_ids"], ["text_embeds"], axis=0),
+        helper.make_node("Shape", ["text_embeds"], ["embeds_shape"]),
+        helper.make_node("Reshape", ["text_embeds", "flat_rows"], ["flat_embeds"]),
+        helper.make_node("Reshape", ["input_ids", "flat"], ["flat_ids"]),
+        helper.make_node("Equal", ["flat_ids", "audio_token_id"], ["is_audio"]),
+        helper.make_node("NonZero", ["is_audio"], ["audio_positions_t"]),
+        helper.make_node("Transpose", ["audio_positions_t"], ["audio_positions"], perm=[1, 0]),
+        helper.make_node("ScatterND", ["flat_embeds", "audio_positions", "audio_features"], ["merged"]),
+        helper.make_node("Reshape", ["merged", "embeds_shape"], ["inputs_embeds"]),
+    ],
+    "embedding",
+    [
+        helper.make_tensor_value_info("input_ids", TensorProto.INT64, ["batch_size", "sequence_length"]),
+        helper.make_tensor_value_info("audio_features", TensorProto.FLOAT, ["num_audio_tokens", hidden_size]),
+    ],
+    [helper.make_tensor_value_info("inputs_embeds", TensorProto.FLOAT, ["batch_size", "sequence_length", hidden_size])],
+    initializer=[
+        table,
+        numpy_helper.from_array(np.array([-1, hidden_size], np.int64), name="flat_rows"),
+        numpy_helper.from_array(np.array([-1], np.int64), name="flat"),
+        numpy_helper.from_array(np.array(audio_token_id, np.int64), name="audio_token_id"),
+    ],
+)
+model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)], ir_version=8)
+onnx.checker.check_model(model)
+onnx.save(model, output_dir / "embeddings.onnx", save_as_external_data=True, location="embeddings.onnx.data")
+```
+
+## 3. Write `genai_config.json`
+
+Add `embedding` and `speech` sections and an `audio_token_id` to the `genai_config.json` the builder
+produced. Leave the `decoder` and `search` sections it wrote alone:
+
+```json
+{
+    "model": {
+        "audio_token_id": 133,
+        "bos_token_id": 1,
+        "context_length": 32768,
+        "decoder": { "...": "written by the model builder" },
+        "embedding": {
+            "filename": "embeddings.onnx",
+            "inputs": {
+                "input_ids": "input_ids",
+                "audio_features": "audio_features"
+            },
+            "outputs": {
+                "inputs_embeds": "inputs_embeds"
+            },
+            "session_options": {
+                "log_id": "onnxruntime-genai",
+                "provider_options": []
+            }
+        },
+        "eos_token_id": 7,
+        "pad_token_id": 0,
+        "speech": {
+            "filename": "speech.onnx",
+            "inputs": {
+                "audio_embeds": "mel_spectrogram",
+                "audio_lengths": "mel_lengths",
+                "audio_sizes": "audio_sizes"
+            },
+            "outputs": {
+                "audio_features": "audio_embeddings"
+            },
+            "session_options": {
+                "log_id": "onnxruntime-genai",
+                "provider_options": []
+            }
+        },
+        "type": "lfm2_audio",
+        "vocab_size": 65536
+    },
+    "search": { "...": "written by the model builder" }
+}
+```
+
+`audio_sizes` is not an encoder input; the name only tells the runtime what to call the per-clip
+token counts it computes, so leave it as is unless it collides with a real input of your graph.
+`audio_token_id` must be the id the embedding model scatters over, and must not be an id the
+tokenizer can emit for ordinary text — the reserved range of the LFM2 tokenizer is the natural home
+for it.
+
+The audio front end needs no configuration file: it defaults to the settings every published
+LFM2-Audio checkpoint shares (`"preprocessor"` in `config.json`), which are NeMo's
+`AudioToMelSpectrogramPreprocessor`:
+
+| Setting | Value | `genai_config.json` override |
+| --- | --- | --- |
+| Sample rate | 16000 | `model.sample_rate` |
+| Mel bins | 128 | `model.num_mels` |
+| FFT size | 512 | `model.fft_size` |
+| Window | 400 samples (25 ms), symmetric Hann | `model.win_length` |
+| Hop | 160 samples (10 ms) | `model.hop_length` |
+| Pre-emphasis | 0.97 | `model.preemph` |
+| Log guard | 2⁻²⁴ | `model.log_eps` |
+| Normalization epsilon | 1e-5 | `model.norm_eps` |
+| Encoder subsampling | 8 | `model.subsampling_factor` |
+
+Set the overrides only for a fine-tune that changed them; the defaults already match all the
+published models.
+
+## 4. Run the model
+
+[`model-mm.py`](model-mm.py) drives any multi-modal model in this repository:
+
+```bash
+$ python3 model-mm.py -m ./lfm2.5-audio/cpu -e cpu --audio_paths ./question.wav
+```
+
+The prompt must hold exactly one `<|audio|>` marker per clip, in clip order; the processor rejects
+any other count rather than guessing, and it accepts one prompt at a time (a single-entry list is
+fine, batching is not). The C++ audio processor replaces each marker with one `audio_token_id` per
+encoder frame, so the number of placeholders always matches the number of features the encoder
+produced. Text on either side of a marker is tokenized on its own, which is what
+`liquid_audio.ChatState` does.
+
+LFM2-Audio has no audio token of its own and no chat-template entry for audio: `<|audio|>` is this
+runtime's marker, the same role `<image>` plays for LFM2-VL. The system prompt selects the task, as
+in the reference implementation:
+
+| Task | System prompt |
+| --- | --- |
+| Transcription | `Perform ASR.` |
+| Spoken question, text answer | `Respond with interleaved text and audio.` (the text half of the answer) |
+
+```
+<|startoftext|><|im_start|>system
+Perform ASR.<|im_end|>
+<|im_start|>user
+<|audio|><|im_end|>
+<|im_start|>assistant
+```
+
+## 5. Known limitations
+
+**Audio output is not supported.** Interleaved and TTS generation need the depthformer, which
+predicts 8 codebook entries per 80 ms audio frame in an inner autoregressive loop, plus the audio
+detokenizer and an inverse STFT to turn those codes into a waveform. ONNX Runtime GenAI's generation
+loop samples one token stream, so none of that has a home here yet. The model still answers in text
+when asked to; a prompt that asks it to speak makes it emit `<|audio_start|>` and then codes the
+runtime has nothing to do with. LiquidAI ships `vocoder_depthformer.onnx` and
+`audio_detokenizer.onnx` in the ONNX repository, and their
+[onnx-export](https://github.com/Liquid4All/onnx-export) repository drives them from Python.
+
+**One prompt at a time.** Several clips in one prompt work and share a single encoder run, but
+batched prompts are refused.
+
+**Audio is not chunked.** The whole clip goes through the encoder in one run, and one hour of audio
+is 450k mel frames, so memory grows with the clip length. The reference implementation has the same
+shape; for long-form transcription, split the audio yourself.
+
+**The mel front end differs from the reference by about 1e-4.** It computes the same NeMo pipeline in
+float32 where the reference uses float64 intermediates in places, and the FFT is a different
+implementation. The difference is far below the audio's own quantization noise.
+
+**Dither is off, as in the reference's eval mode.** NeMo adds 1e-5 of white noise to the samples
+during training only; the runtime never does.
