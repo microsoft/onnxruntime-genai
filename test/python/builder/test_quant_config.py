@@ -89,9 +89,10 @@ def test_float_dtype_is_not_quantized():
 def test_from_dict_empty_uses_defaults():
     cfg = QuantConfig.from_dict({})
     assert cfg.io_dtype == "fp16"
+    assert cfg.checkpoint_policy == "preserve"
     assert cfg.weights.type == "none"
     assert cfg.moe.type == "int4"
-    assert cfg.runtime.use_qdq is False
+    assert cfg.format.use_qdq is False
 
 
 def test_from_dict_accepts_quantization_wrapper():
@@ -108,6 +109,22 @@ def test_from_dict_rejects_unknown_top_level_field():
 def test_from_dict_rejects_bad_io_dtype():
     with pytest.raises(ValueError, match="io_dtype must be one of"):
         QuantConfig.from_dict({"io_dtype": "int4"})
+
+
+def test_from_dict_rejects_bad_checkpoint_policy():
+    with pytest.raises(ValueError, match="checkpoint_policy must be"):
+        QuantConfig.from_dict({"checkpoint_policy": "convert"})
+
+
+def test_from_dict_accepts_runtime_compatibility_alias():
+    cfg = QuantConfig.from_dict({"runtime": {"use_qdq": True}})
+    assert cfg.format.use_qdq is True
+    assert "runtime" not in cfg.to_dict()
+
+
+def test_from_dict_rejects_conflicting_format_alias():
+    with pytest.raises(ValueError, match="format and compatibility alias runtime conflict"):
+        QuantConfig.from_dict({"format": {"use_qdq": True}, "runtime": {"use_qdq": False}})
 
 
 def test_weights_rejects_bad_method():
@@ -170,6 +187,11 @@ def test_override_rejects_type_and_exclude():
 def test_override_requires_type_or_exclude():
     with pytest.raises(ValueError, match="must set either"):
         Override.from_dict({"match": {"name": "x"}})
+
+
+def test_override_exclusion_requires_exact_name():
+    with pytest.raises(ValueError, match="require an exact node name"):
+        Override.from_dict({"match": {"name_regex": ".*mlp.*"}, "exclude": True})
 
 
 # ---------------------------------------------------------------------------

@@ -129,6 +129,8 @@ class Override:
             raise ValueError("override must set either 'type' or 'exclude: true'")
         if self.exclude and self.type is not None:
             raise ValueError("override cannot set both 'type' and 'exclude'")
+        if self.exclude and set(self.match) != {"name"}:
+            raise ValueError("exclusion overrides currently require an exact node name")
         if self.type is not None:
             resolve_dtype(self.type)  # validate
 
@@ -164,6 +166,16 @@ def _normalize_block_size(value: Any) -> int:
     if value < 0:
         raise ValueError(f"block_size must be >= 0 (0 == per_channel), got {value}")
     return value
+
+
+def normalize_bool(value: Any, field_name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value in ("true", "True", "1", 1):
+        return True
+    if value in ("false", "False", "0", 0):
+        return False
+    raise ValueError(f"{field_name} must be a boolean, got {value!r}")
 
 
 @dataclass
@@ -327,6 +339,9 @@ def desugar_algo_config(extra_options: dict[str, Any]) -> tuple[str, dict[str, s
 @dataclass
 class QuantConfig:
     io_dtype: str = "fp16"
+    # This records export intent. Loaders must implement the conversion policy;
+    # parsing it alone does not make preserve/requantize effective for a target.
+    checkpoint_policy: str = "preserve"
     weights: WeightsConfig = field(default_factory=WeightsConfig)
     moe: MoEConfig = field(default_factory=MoEConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
@@ -334,6 +349,16 @@ class QuantConfig:
     def __post_init__(self):
         if self.io_dtype not in IO_DTYPES:
             raise ValueError(f"io_dtype must be one of {list(IO_DTYPES)}, got '{self.io_dtype}'")
+        if self.checkpoint_policy not in ("preserve", "requantize"):
+            raise ValueError(
+                "checkpoint_policy must be 'preserve' or 'requantize', "
+                f"got '{self.checkpoint_policy}'"
+            )
+
+    @property
+    def format(self) -> RuntimeConfig:
+        """Graph-format settings; ``runtime`` remains the compatibility attribute."""
+        return self.runtime
 
     def to_onnx_dtypes(self) -> tuple[ir.DataType, ir.DataType]:
         io_dtype = {
@@ -365,14 +390,19 @@ class QuantConfig:
         # Allow either the bare object or a wrapper with a top-level "quantization" key.
         if "quantization" in data and isinstance(data["quantization"], dict):
             data = data["quantization"]
-        unknown = set(data) - {"io_dtype", "weights", "moe", "runtime"}
+        unknown = set(data) - {"io_dtype", "checkpoint_policy", "weights", "moe", "format", "runtime"}
         if unknown:
             raise ValueError(f"unknown quantization field(s): {sorted(unknown)}")
+        format_data = data.get("format")
+        runtime_data = data.get("runtime")
+        if format_data is not None and runtime_data is not None and format_data != runtime_data:
+            raise ValueError("quantization format and compatibility alias runtime conflict")
         return cls(
             io_dtype=data.get("io_dtype", "fp16"),
+            checkpoint_policy=data.get("checkpoint_policy", "preserve"),
             weights=WeightsConfig.from_dict(data.get("weights", {})),
             moe=MoEConfig.from_dict(data.get("moe", {})),
-            runtime=RuntimeConfig.from_dict(data.get("runtime", {})),
+            runtime=RuntimeConfig.from_dict(format_data if format_data is not None else runtime_data or {}),
         )
 
     @classmethod
@@ -416,11 +446,11 @@ class QuantConfig:
         for node in extra_options.get("nodes_to_exclude", []) or []:
             overrides.append(Override(match={"name": node}, exclude=True))
 
-        is_symmetric = extra_options.get("is_symmetric", True)
+        is_symmetric = normalize_bool(extra_options.get("is_symmetric", True), "is_symmetric")
         weights = WeightsConfig(
             type=weights_type,
             block_size=int(extra_options.get("block_size", 32)),
-            symmetric=bool(is_symmetric),
+            symmetric=is_symmetric,
             method=base_method,
             accuracy_level=int(
                 extra_options.get("accuracy_level", 4 if execution_provider in ("cpu", "webgpu") else 0)
@@ -449,21 +479,27 @@ class QuantConfig:
 
         # --- runtime -----------------------------------------------------
         runtime = RuntimeConfig(
-            use_qdq=bool(extra_options.get("use_qdq", False)),
+            use_qdq=normalize_bool(extra_options.get("use_qdq", False), "use_qdq"),
             matmulnbits_weights_prepacked=int(extra_options.get("matmulnbits_weights_prepacked", 0)),
         )
 
         io_dtype = precision if precision in IO_DTYPES else "fp16"
-        return cls(io_dtype=io_dtype, weights=weights, moe=moe, runtime=runtime)
+        return cls(io_dtype=io_dtype, checkpoint_policy="preserve", weights=weights, moe=moe, runtime=runtime)
 
     # -- Serialization -----------------------------------------------------
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize canonical format, even when input used the runtime alias.
+
+        Consumers of older dictionaries must migrate from the runtime key;
+        backward-compatible parsing does not preserve that serialization shape.
+        """
         return {
             "io_dtype": self.io_dtype,
+            "checkpoint_policy": self.checkpoint_policy,
             "weights": self.weights.to_dict(),
             "moe": self.moe.to_dict(),
-            "runtime": self.runtime.to_dict(),
+            "format": self.format.to_dict(),
         }
 
 

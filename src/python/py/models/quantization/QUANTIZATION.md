@@ -14,6 +14,27 @@ block size 32, set with `block_size`) into a `MatMulNBits` contrib op. They are
 all *round-to-nearest* (RTN) — none of them use calibration data or error feedback
 (unlike GPTQ/AWQ/HQQ).
 
+## Structured Configuration Status
+
+The experimental builder envelope uses `target_options.quant_config` and
+`drafter_options.quant_config`. Numeric policy remains in `weights` and `moe`;
+QDQ and packing belong to `format` because they change the exported graph or
+stored bytes. `runtime` remains an input alias, but `QuantConfig.to_dict()` now
+emits `format` and `checkpoint_policy`. Consumers expecting the old serialized
+shape need an explicit migration.
+
+Parsing `checkpoint_policy=preserve/requantize` does not establish loader
+support. Currently the target does not enforce it; Qwen MTP uses it when loading
+its tensors. Do not promise preservation/conversion from schema acceptance alone.
+
+Typed overrides currently support preset or exact-name selection, and
+exclusions require exact names. Ordered first-match resolution is incomplete:
+exclusions are applied separately and can override an earlier typed rule.
+INT8 embedding overrides are rejected; INT8 MatMul support does not supply an
+INT8 Gather export path. See the
+[implementation review](../../../../../docs/ModelBuilderConfigurationImplementation.md)
+for the remaining final-graph, sharing, and numerical validation requirements.
+
 ## Design: method vs. mixed precision
 
 A quantization configuration has two independent parts:

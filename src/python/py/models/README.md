@@ -7,6 +7,7 @@ This folder contains the model builder for quickly creating optimized and quanti
 - [Current Support](#current-support)
 - [Usage](#usage)
   - [Full Usage](#full-usage)
+  - [Structured Builder Configuration](#structured-builder-configuration)
   - [Original PyTorch Model from Hugging Face](#original-pytorch-model-from-hugging-face)
   - [Original PyTorch Model from Disk](#original-pytorch-model-from-disk)
   - [Customized or Finetuned PyTorch Model](#customized-or-finetuned-pytorch-model)
@@ -99,6 +100,64 @@ python -m onnxruntime_genai.models.builder --help
 # From source:
 python builder.py --help
 ```
+
+### Structured Builder Configuration
+
+Schema version 2 is an **experimental, partial implementation** of the
+[shared configuration design](../../../../docs/ModelBuilderConfiguration.md).
+Read the [implementation review](../../../../docs/ModelBuilderConfigurationImplementation.md)
+before migrating recipes. In particular, legacy/new policy equivalence,
+borrowed-head layout compatibility, and runtime validation are incomplete.
+
+Each structured CLI option accepts an inline JSON object or a JSON file path.
+Relative paths use the process working directory, including nested checkpoint
+and calibration paths. Omitting `builder_config_version` selects version 2 when
+a target, drafter, speculative, or runtime field is present. Version 1 cannot
+be combined with those fields. `search` alone does not select version 2.
+
+The following target-only invocation template requires a supported dense,
+unquantized checkpoint and its tokenizer. It makes the CPU I/O dtype explicit
+and does not exercise checkpoint conversion, sharing, or speculative limits:
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -i path_to_dense_checkpoint -o output -e cpu \
+  --builder_config_version 2 \
+  --target_options '{"quant_config":{"io_dtype":"fp32","weights":{"type":"int4","block_size":32}}}' \
+  --drafter_options '{"drafter_type":"none"}' \
+  --runtime_config '{"search":{"max_length":128}}'
+
+# From source, at the repository root:
+python src/python/py/models/builder.py -i path_to_dense_checkpoint -o output -e cpu \
+  --builder_config_version 2 \
+  --target_options '{"quant_config":{"io_dtype":"fp32","weights":{"type":"int4","block_size":32}}}' \
+  --drafter_options '{"drafter_type":"none"}' \
+  --runtime_config '{"search":{"max_length":128}}'
+```
+
+`target_options` routes `quant_config`, `attention`, and
+`optimizations.fuse_mlp_gate_up` to the existing exporter. `quant_config.format`
+is the canonical graph-layout key; `runtime` remains a parsing alias. The
+checkpoint policy is parsed as `preserve` or `requantize` but is not yet enforced
+for the target. Root CLI `precision` is optional when target weight type is explicit.
+
+DFlash2 and DSpark selection requires a local checkpoint `path`, paged target
+attention, and BF16 body I/O. Omitted target taps are inferred from checkpoint
+`target_layer_ids + 1` before construction. DFlash2 parses `auto`, `required`,
+and `off` sharing modes, but acceptance does not establish graph-level layout
+compatibility. MTP/DSpark currently accept only `auto`. Do not mix structured
+drafter selection with legacy drafter paths until conflict handling is fixed.
+
+Runtime fragments are applied after composite configuration generation. Objects
+merge recursively; arrays replace whole. The current validator protects outer
+graph fields but does not enforce provider compatibility, nested field validity,
+or numeric/speculative limits. It must not be treated as a complete safety check.
+
+Python callers should pass structured dictionaries to `parse_extra_options`
+before calling `create_model` with its returned options. The legacy options
+parameter still takes a list of `KEY=VALUE` strings, not a dictionary. Pass
+`precision=None` explicitly when deriving it from the structured target. A
+standalone `create_model` call without prepared Hugging Face metadata still fails.
 
 ### Original PyTorch Model from Hugging Face
 

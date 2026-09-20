@@ -358,6 +358,62 @@ def test_target_mlp_gate_up_fusion_rejects_one_sided_exclusion():
         model.make_mlp_proj_fused(0, mlp, "residual")
 
 
+def test_exact_name_quantization_override_is_forwarded_to_quantizer():
+    model = object.__new__(Model)
+    model.quant_config = types.SimpleNamespace(
+        weights=types.SimpleNamespace(
+            method="default",
+            overrides=[
+                types.SimpleNamespace(
+                    match={"name": "/model/layers.0/mlp/down_proj/MatMul"},
+                    type="int8",
+                    exclude=False,
+                )
+            ],
+        )
+    )
+    model.quant_type = None
+    model.quant_attrs = {}
+
+    model.make_quant_init(types.SimpleNamespace())
+
+    assert model.int4_customized_weight_config == {"/model/layers.0/mlp/down_proj/MatMul": {"bits": 8}}
+
+
+def test_unsupported_typed_quantization_match_is_rejected():
+    model = object.__new__(Model)
+    model.quant_config = types.SimpleNamespace(
+        weights=types.SimpleNamespace(
+            method="default",
+            overrides=[types.SimpleNamespace(match={"name_regex": ".*down_proj.*"}, type="int8", exclude=False)],
+        )
+    )
+    model.quant_type = None
+
+    with pytest.raises(ValueError, match="only a preset or an exact node name"):
+        model.make_quant_init(types.SimpleNamespace())
+
+
+def test_int8_embedding_override_fails_until_export_is_supported():
+    model = object.__new__(Model)
+    model.quant_config = types.SimpleNamespace(
+        weights=types.SimpleNamespace(
+            method="default",
+            overrides=[
+                types.SimpleNamespace(
+                    match={"name": "/model/embed_tokens/Gather"},
+                    type="int8",
+                    exclude=False,
+                )
+            ],
+        )
+    )
+    model.quant_type = None
+
+    with pytest.raises(NotImplementedError, match="INT8 embedding export is not supported"):
+        model.make_quant_init(types.SimpleNamespace())
+
+
 def test_duplicate_node_names_are_rejected():
     builder = object.__new__(DFlash2Builder)
     builder.node_names = {"duplicate"}
@@ -497,6 +553,18 @@ def test_quantized_drafter_reuses_the_targets_lm_head_names():
     }
 
 
+def test_structured_drafter_quantization_does_not_inherit_target_layout():
+    quant_config = types.SimpleNamespace(
+        weights=types.SimpleNamespace(block_size=128),
+        format=types.SimpleNamespace(matmulnbits_weights_prepacked=0),
+    )
+
+    quant = _quant_composite().block_drafter_quant("int4", quant_config)
+
+    assert quant["block_size"] == 128
+    assert quant["prepack"] == 0
+
+
 @pytest.mark.parametrize(
     "onnx_dtype,last_matmul_type,expected_bits",
     [
@@ -611,6 +679,63 @@ def test_private_quantized_drafter_head_is_not_shared(tmp_path):
         "lm_head.MatMul.weight_Q4",
         "lm_head.MatMul.weight_scales",
     }
+
+
+def test_off_policy_keeps_embedding_and_head_private(tmp_path):
+    model = _composite()
+    model.dflash2 = types.SimpleNamespace(
+        filename="dflash2.onnx",
+        lm_head_quant=None,
+        save_model=lambda _output_dir: None,
+    )
+    model.dflash2_shared_weight_policies = {"embedding": "off", "lm_head": "off"}
+    captured = {}
+
+    def share_initializers(*args, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    model.share_initializers = share_initializers
+
+    model.save_dflash2_model(str(tmp_path))
+
+    assert captured["excluded_source_initializers"] == {
+        "model.embed_tokens.weight",
+        "lm_head.MatMul.weight",
+    }
+
+
+def test_required_policy_requests_exact_target_adoption(tmp_path):
+    model = _composite()
+    model.dflash2 = types.SimpleNamespace(
+        filename="dflash2.onnx",
+        lm_head_quant=None,
+        save_model=lambda _output_dir: None,
+    )
+    model.dflash2_shared_weight_policies = {"embedding": "required", "lm_head": "required"}
+    required = {"model.embed_tokens.weight", "lm_head.MatMul.weight"}
+
+    def share_initializers(*args, **kwargs):
+        assert kwargs["adopt_source_initializers"] == required
+        assert kwargs["required_source_initializers"] == required
+        return [{"name": name} for name in required]
+
+    model.share_initializers = share_initializers
+
+    model.save_dflash2_model(str(tmp_path))
+
+
+def test_required_policy_rejects_a_private_quantized_head(tmp_path):
+    model = _composite()
+    model.dflash2 = types.SimpleNamespace(
+        filename="dflash2.onnx",
+        lm_head_quant={"bits": 4, "block_size": 32, "prepack": 0, "adopt_target": False},
+        save_model=lambda _output_dir: None,
+    )
+    model.dflash2_shared_weight_policies = {"embedding": "auto", "lm_head": "required"}
+
+    with pytest.raises(ValueError, match="required LM-head sharing is incompatible"):
+        model.save_dflash2_model(str(tmp_path))
 
 
 @pytest.mark.parametrize(

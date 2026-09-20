@@ -475,6 +475,21 @@ def test_mtp_quant_config_json_is_parsed(monkeypatch):
 
     assert options["mtp_quant_config"].io_dtype == "bf16"
     assert options["mtp_quant_config"].weights.type == "int4"
+    assert options["mtp_quant_config"].checkpoint_policy == "requantize"
+
+
+def test_mtp_quant_config_typed_dict_preserves_explicit_policy(monkeypatch):
+    options = {
+        "mtp_quant_config": {
+            "checkpoint_policy": "preserve",
+            "io_dtype": "bf16",
+            "weights": {"type": "int4"},
+        }
+    }
+
+    _run_check_extra_options(monkeypatch, options)
+
+    assert options["mtp_quant_config"].checkpoint_policy == "preserve"
 
 
 def test_parse_extra_options_preserves_equals_inside_json(monkeypatch):
