@@ -195,19 +195,16 @@ def _pack_weights_for_cuda_mixed_gemm(q_weights, n: int, k: int, bits: int, forc
     return out.reshape(-1).cpu().numpy()
 
 
-def _get_quantize_matmul_nbits():
-    """Return MatMulNBits blockwise quantizers from the ORT pybind module."""
+def _get_quantize_matmul_nbits(bits: int):
+    """Return the requested MatMulNBits blockwise quantizer from the ORT pybind module."""
     try:
-        from onnxruntime.capi._pybind_state import (  # noqa: PLC0415
-            quantize_matmul_4bits,
-            quantize_matmul_8bits,
-        )
-    except ImportError as e:
-        raise ImportError(
-            "CUDA blockwise quantization requires quantize_matmul_4bits and quantize_matmul_8bits from onnxruntime."
-        ) from e
+        from onnxruntime.capi import _pybind_state  # noqa: PLC0415
 
-    return quantize_matmul_4bits, quantize_matmul_8bits
+        return getattr(_pybind_state, f"quantize_matmul_{bits}bits")
+    except (AttributeError, ImportError) as e:
+        raise ImportError(
+            f"CUDA {bits}-bit blockwise quantization requires quantize_matmul_{bits}bits from onnxruntime."
+        ) from e
 
 
 class CudaQuantizer:
@@ -365,8 +362,8 @@ class CudaQuantizer:
         block_size = int(block_size)
         w = weights.detach().cpu().to(torch.float32).contiguous().numpy()
         n, k = w.shape
-        if bits not in (4, 8):
-            raise ValueError(f"Blockwise quantization only supports 4 or 8 bits, got {bits}.")
+        if bits not in (2, 4, 8):
+            raise ValueError(f"Blockwise quantization only supports 2, 4, or 8 bits, got {bits}.")
         if block_size <= 0:
             raise ValueError(f"Blockwise quantization requires a positive block_size, got {block_size}.")
         if signed_scale and not symmetric:
@@ -381,7 +378,9 @@ class CudaQuantizer:
         blob_size = (block_size + pack - 1) // pack
 
         if symmetric and not use_ort_quantizer:
-            if bits == 4:
+            if bits == 2:
+                qmin, qmax, scale_divisor, zero_point = (-2, 1, 2, 2) if unsigned_full_range else (-1, 1, 1, 2)
+            elif bits == 4:
                 qmin, qmax, scale_divisor, zero_point = (-8, 7, 8, 8) if unsigned_full_range else (-7, 7, 7, 8)
             else:
                 qmin, qmax, scale_divisor, zero_point = (
@@ -409,23 +408,27 @@ class CudaQuantizer:
             quantized = np.clip(np.rint(blocked / scales[:, :, np.newaxis]), qmin, qmax).astype(np.int16)
             quantized = (quantized + zero_point).astype(np.uint8)
 
-            if bits == 4:
+            if bits == 2:
+                qweight = np.zeros((n, num_blocks, blob_size), dtype=np.uint8)
+                for offset in range(4):
+                    values = quantized[:, :, offset::4]
+                    qweight[:, :, : values.shape[2]] |= (values & 0x3) << (2 * offset)
+            elif bits == 4:
                 qweight = np.zeros((n, num_blocks, blob_size), dtype=np.uint8)
                 qweight[:, :, : quantized[:, :, 0::2].shape[2]] = quantized[:, :, 0::2] & 0xF
                 qweight[:, :, : quantized[:, :, 1::2].shape[2]] |= (quantized[:, :, 1::2] & 0xF) << 4
             else:
                 qweight = quantized
 
-            zero_points = np.zeros((n, (num_blocks + 1) // 2 if bits == 4 else num_blocks), dtype=np.uint8)
+            zero_points = np.zeros((n, (num_blocks + pack - 1) // pack), dtype=np.uint8)
             return torch.from_numpy(qweight), torch.from_numpy(scales), torch.from_numpy(zero_points)
 
         w_t = np.ascontiguousarray(w.T)
         qweight = np.zeros((n, num_blocks, blob_size), dtype=np.uint8)
         scales = np.zeros((n, num_blocks), dtype=np.float32)
-        zero_points = np.zeros((n, (num_blocks + 1) // 2 if bits == 4 else num_blocks), dtype=np.uint8)
+        zero_points = np.zeros((n, (num_blocks + pack - 1) // pack), dtype=np.uint8)
 
-        quantize_matmul_4bits, quantize_matmul_8bits = _get_quantize_matmul_nbits()
-        quantize = quantize_matmul_4bits if bits == 4 else quantize_matmul_8bits
+        quantize = _get_quantize_matmul_nbits(bits)
         quantize(qweight, w_t, scales, zero_points, block_size, n, k, symmetric)
 
         if abs_scales and not (symmetric and signed_scale):

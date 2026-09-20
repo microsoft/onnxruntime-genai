@@ -849,6 +849,7 @@ target/drafter/runtime envelope.
 | `is_symmetric`, `accuracy_level` | Target `quant_config.weights.symmetric` and `weights.accuracy_level` |
 | `algo_config`, `nodes_to_exclude` | Target `quant_config.weights.method` plus generated `weights.overrides` entries; exclusions precede generated preset rules so they stay unconditional |
 | `matmulnbits_weights_prepacked`, `use_qdq` | Target `quant_config.format` fields |
+| `enable_cuda_fpa_intb_gemm` | `runtime_config.model.decoder.session_options["ep.cuda.fpa_intb_gemm"]` |
 | `moe_quant_type`, `qmoe_block_size`, `qmoe_weights_prepacked` | Target `quant_config.moe` fields |
 | `use_8bits_moe` | Deprecated `moe_quant_type` alias; unchanged |
 | `use_paged_attention`, `paged_block_size` | Target `attention.implementation` and `attention.paged.block_size` |
@@ -868,7 +869,6 @@ target/drafter/runtime envelope.
 | `max_batch_size`, `max_scheduled_tokens`, `num_blocks`, `gpu_utilization_factor` | Runtime `engine.dynamic_batching` fields |
 | `paged_chunk_size` | Runtime `search.chunk_size` |
 | `enable_cuda_graph`, `use_device_allocator_for_initializers` | Runtime decoder session/provider settings |
-| `enable_cuda_fpa_intb_gemm` | Runtime decoder session entry `ep.cuda.fpa_intb_gemm` |
 | Olive `search` | Runtime `search` |
 | Any other `extra_options` key | No canonical destination yet; see rule 8 |
 

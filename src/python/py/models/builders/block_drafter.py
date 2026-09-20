@@ -150,11 +150,12 @@ class BlockDrafterBuilder:
         ``MatMulNBits`` consumes ``[N, K]`` directly, so unlike the dense path the weight is
         not transposed. Repeat call sites reuse the initializer the first one registered.
         """
-        # Mirror prepack_matmulnbits_weights: nodes the fpA-intB kernel cannot run stay raw.
+    # Mirror prepack_matmulnbits_weights: BF16 and ineligible nodes stay raw.
         allowed_block_sizes = (32, 64, 128) if self.quant_prepack == 1 else (64, 128)
         prepack = (
             self.quant_prepack
-            if self.quant_block_size in allowed_block_sizes
+        if self.io_dtype == ir.DataType.FLOAT16
+        and self.quant_block_size in allowed_block_sizes
             and in_features % self.quant_block_size == 0
             and out_features % (32 if self.quant_bits == 8 else 64) == 0
             else 0

@@ -1105,7 +1105,7 @@ class Qwen35MoEModel(MTPModel):
 
     def block_drafter_precision(self, extra_options, option_name):
         precision = str(extra_options.get(option_name, "bf16")).lower()
-        allowed = {"bf16", "int4", "int8"}
+        allowed = {"bf16", "int2", "int4", "int8"}
         if precision not in allowed:
             raise ValueError(f"{option_name} must be one of {sorted(allowed)}, got '{precision}'.")
         return precision
@@ -1114,7 +1114,7 @@ class Qwen35MoEModel(MTPModel):
         """Resolve weight-only quantization for a block-drafter body, or ``None`` to keep it dense."""
         if precision == "bf16":
             return None
-        bits = 4 if precision == "int4" else 8
+        bits = int(precision.removeprefix("int"))
         block_size = int(
             quant_config.weights.block_size
             if quant_config is not None
@@ -1126,7 +1126,11 @@ class Qwen35MoEModel(MTPModel):
             else self.decoder.matmul_attrs["weights_prepacked"]
         )
         prepack = requested_prepack if self.decoder.ep == "cuda" else 0
-        return {"bits": bits, "block_size": block_size, "prepack": prepack}
+        return {
+            "bits": bits,
+            "block_size": block_size,
+            "prepack": prepack,
+        }
 
     def block_drafter_lm_head_quant(self):
         """Resolve how a block drafter gets its LM head, or ``None`` to keep it dense.

@@ -58,6 +58,7 @@ _DTYPES: dict[str, DtypeDescriptor] = {
     "bf16": DtypeDescriptor("bf16", "float", 16),
     "int8": DtypeDescriptor("int8", "int", 8, signed=True),
     "uint8": DtypeDescriptor("uint8", "int", 8, signed=False),
+    "int2": DtypeDescriptor("int2", "int", 2, signed=True),
     "int4": DtypeDescriptor("int4", "int", 4, signed=True),
     "uint4": DtypeDescriptor("uint4", "int", 4, signed=False),
     "mxfp4": DtypeDescriptor("mxfp4", "mx", 4, block_size=32),

@@ -808,6 +808,28 @@ def test_structured_drafter_quantization_does_not_inherit_target_layout():
     assert quant["prepack"] == 0
 
 
+def test_int2_fpa_body_keeps_the_targets_int4_lm_head():
+    model = _quant_composite()
+    quant_config = types.SimpleNamespace(
+        weights=types.SimpleNamespace(block_size=64),
+        format=types.SimpleNamespace(matmulnbits_weights_prepacked=0),
+    )
+
+    quant = model.block_drafter_quant("int2", quant_config)
+
+    assert quant == {
+        "bits": 2,
+        "block_size": 64,
+        "prepack": 0,
+    }
+    assert model.block_drafter_lm_head_quant() == {
+        "bits": 4,
+        "block_size": 32,
+        "prepack": 1,
+        "adopt_target": True,
+    }
+
+
 @pytest.mark.parametrize(
     "onnx_dtype,last_matmul_type,expected_bits",
     [
@@ -1086,7 +1108,7 @@ def test_quantized_body_uses_ort_tie_breaking(tmp_path):
     np.testing.assert_array_equal(scales, [[0.125]])
 
 
-def test_bf16_body_honors_prepacked_weight_format(tmp_path):
+def test_bf16_body_keeps_raw_weight_format(tmp_path):
     builder = DFlash2Builder(
         _draft_checkpoint(tmp_path),
         str(tmp_path),
@@ -1100,7 +1122,8 @@ def test_bf16_body_honors_prepacked_weight_format(tmp_path):
 
     node = next(node for node in builder.graph if node.name == "/probe/MatMul")
     assert builder.io_dtype == ir.DataType.BFLOAT16
-    assert node.attributes["weight_prepacked"].value == 1
+    assert "weight_prepacked" not in node.attributes
+    assert tuple(builder.graph.initializers["probe.MatMul.weight_Q4"].const_value.shape) == (64, 2, 16)
 
 
 @pytest.mark.parametrize(("bits", "out_features"), [(4, 32), (8, 48)])
@@ -1123,7 +1146,7 @@ def test_prepack_keeps_ineligible_output_width_raw(tmp_path, bits, out_features)
     assert tuple(qweight.shape) == (out_features, 2, 32 * bits // 8)
 
 
-@pytest.mark.parametrize("bits", [None, 4, 8])
+@pytest.mark.parametrize("bits", [None, 2, 4, 8])
 @pytest.mark.parametrize("fuse_gate_up", [False, True])
 def test_mlp_gate_up_fusion_preserves_weight_rows(tmp_path, bits, fuse_gate_up):
     quant = {"bits": bits, "block_size": 8, "prepack": 0} if bits else None
@@ -1182,7 +1205,7 @@ def test_mlp_gate_up_fusion_preserves_weight_rows(tmp_path, bits, fuse_gate_up):
         np.testing.assert_array_equal(combined, np.concatenate(separate, axis=axis))
 
 
-@pytest.mark.parametrize("bits", [None, 4, 8])
+@pytest.mark.parametrize("bits", [None, 2, 4, 8])
 def test_mlp_gate_up_fusion_execution_matches_unfused(tmp_path, bits):
     draft_dir = _draft_checkpoint(tmp_path)
     generator = torch.Generator().manual_seed(123)

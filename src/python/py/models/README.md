@@ -404,7 +404,7 @@ Set `dflash2_path` to a DFlash 2 checkpoint to export an auxiliary `dflash2.onnx
 
 `max_draft_tokens` writes `speculative.max_draft_tokens` into `genai_config.json`, capping how many drafted tokens the engine verifies each step. It must be between 1 and 16, and defaults to unset, which leaves the runtime default of 4 in effect. This differs from `dflash2_num_draft_tokens`: the drafter's exported block costs the same to run no matter how many of its tokens are verified, so raising this value buys extra accepted tokens for free until the wider verification step costs more than it saves. The best value is workload-specific and must be measured; it can be retuned on an already-exported model by editing the config.
 
-`dflash2_precision` accepts `bf16` (default), `int4`, or `int8`. Integer modes quantize the attention and MLP weights at the target's block size while keeping the small dynamic-convolution and selector projections dense. Body activations and KV caches remain BF16; this option does not quantize the drafter's KV cache. The body uses the portable raw blockwise layout by default. On CUDA, set the drafter quantization format's `matmulnbits_weights_prepacked` to `1` or `2` to emit the corresponding fpA-intB layout when the runtime supports BF16 activations for that layout. Only projections the kernel supports are prepacked (output width divisible by 64 for INT4 or 32 for INT8); the rest stay in the raw layout. Normally the LM head is not quantized separately: the drafter adopts the target's saved head, bytes and layout alike, so the two always agree and are deduplicated into one copy on disk. When the target's head uses a format the drafter cannot address by name, such as asymmetric, `use_qdq`, or `rtn`/`k_quant` layouts, the drafter's head stays dense. A head the checkpoint supplies already quantized (FP8) overrides `--precision` for the target and for the drafter alike. The embedding table works the same way: `op_types_to_quantize=MatMul/Gather` turns the target's `Gather` into `GatherBlockQuantized`, and the drafter adopts that table rather than keeping a dense copy. It has to, because the two graphs are deduplicated by initializer name — a target that renames the table while the drafter keeps a dense `Gather` costs more than the target saved. Under `shared_embeddings` the target gathers from its LM-head weight instead of a table of its own, so the drafter's embedding stays dense.
+The legacy `dflash2_precision` option accepts `bf16` (default), `int4`, or `int8`. With builder configuration version 2, `drafter_options.quant_config` independently controls the DFlash 2 body and additionally supports `weights.type=int2`. Integer modes quantize the attention and MLP weights at the target's block size while keeping the small dynamic-convolution and selector projections dense. Body activations and KV caches remain BF16; this option does not quantize the drafter's KV cache. INT2 requires an ONNX Runtime build with 2-bit `MatMulNBits` support. The BF16 body uses the portable raw blockwise layout; set `runtime_config.model.dflash2.session_options["ep.cuda.fpa_intb_gemm"]` to `"1"` to let CUDA runtime-prepack eligible weights. BF16 x INT2 requires block size 64 or 128 and a full fpA-intB kernel build. For FP16 bodies, set the drafter quantization format's `matmulnbits_weights_prepacked` to `1` or `2` to offline-prepack eligible projections (output width divisible by 64 for INT4 or 32 for INT8); the rest stay raw. Normally the LM head is not quantized separately: the drafter adopts the target's saved head, bytes and layout alike, so the two always agree and are deduplicated into one copy on disk. Its precision and block size remain the target's. If a BF16 target uses offline-prepacked weights, the drafter instead keeps a private raw INT4 head because the prepacked kernel requires FP16 activations. When the target's head uses a format the drafter cannot address by name, such as asymmetric, `use_qdq`, or `rtn`/`k_quant` layouts, the drafter's head stays dense. A head the checkpoint supplies already quantized (FP8) overrides `--precision` for the target and for the drafter alike. The embedding table works the same way: `op_types_to_quantize=MatMul/Gather` turns the target's `Gather` into `GatherBlockQuantized`, and the drafter adopts that table rather than keeping a dense copy. It has to, because the two graphs are deduplicated by initializer name — a target that renames the table while the drafter keeps a dense `Gather` costs more than the target saved. Under `shared_embeddings` the target gathers from its LM-head weight instead of a table of its own, so the drafter's embedding stays dense.
 
 ```bash
 python -m onnxruntime_genai.models.builder -i path_to_target_model -o path_to_output_folder -p int4 -e cuda --extra_options use_paged_attention=true aux_hidden_state_layers=2,12,22 dflash2_path=path_to_dflash2_checkpoint dflash2_precision=int4 max_draft_tokens=7
@@ -418,9 +418,38 @@ python -m onnxruntime_genai.models.builder -i path_to_target_model -o path_to_ou
 python builder.py -i path_to_target_model -o path_to_output_folder -p fp16 -e cuda -c cache_dir_for_hf_files --extra_options use_paged_attention=true aux_hidden_state_layers=2,12,22 dflash2_path=path_to_dflash2_checkpoint dflash2_num_draft_tokens=4 dflash2_precision=int4 max_draft_tokens=4
 ```
 
+For a BF16 x INT2 DFlash 2 body using CUDA runtime prepacking, use builder configuration
+version 2 and an ONNX Runtime build with the full fpA-intB kernel set:
+
+```json
+{
+  "builder_config_version": 2,
+  "target_options": {
+    "attention": {"implementation": "paged"}
+  },
+  "drafter_options": {
+    "drafter_type": "dflash2",
+    "path": "path_to_dflash2_checkpoint",
+    "num_draft_tokens": 7,
+    "quant_config": {
+      "io_dtype": "bf16",
+      "weights": {"type": "int2", "block_size": 64}
+    }
+  },
+  "runtime_config": {
+    "model": {
+      "dflash2": {
+        "session_options": {"ep.cuda.fpa_intb_gemm": "1"}
+      }
+    },
+    "speculative": {"max_draft_tokens": 7}
+  }
+}
+```
+
 Set `dflash2_fuse_gate_up=true` to experimentally combine each DFlash 2 MLP's gate and up
 projections into one `MatMul` or `MatMulNBits`, followed by `Split`. The default is `false`.
-This export-time option requires `dflash2_path` and supports all three `dflash2_precision`
+This export-time option requires `dflash2_path` and supports all four `dflash2_precision`
 values. It preserves BF16 body activations and the existing quantization scheme; the target,
 attention projections, and LM head are unchanged. Re-export the drafter to apply it and
 validate latency and quality on the deployment workload before enabling it in production.
