@@ -5958,6 +5958,13 @@ class Model:
                 **extra_kwargs,
             )
 
+        return self.load_adapter(model)
+
+    def load_adapter(self, model):
+        """Wraps a loaded PyTorch model with the LoRA adapter named by `adapter_path`, if any.
+
+        Every `load_weights` override has to end with this, or the adapter is silently dropped.
+        """
         if "adapter_path" in self.extra_options:
             from peft import PeftModel
 

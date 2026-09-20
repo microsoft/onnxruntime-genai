@@ -244,8 +244,18 @@ std::unique_ptr<NamedTensors> Lfm2AudioProcessor::Process(const Tokenizer& token
   int64_t total_tokens = 0;
   for (size_t i = 0; i < num_clips; ++i) {
     ort_extensions::OrtxObjectPtr<OrtxTensorResult> decoded;
-    CheckResult(OrtxDecodeAudio(audios->audios_.get(), i, static_cast<int64_t>(mel_config_.sample_rate),
-                                /*stereo_to_mono=*/1, decoded.ToBeAssigned()));
+    // The decoder resamples down to the encoder's rate and mixes to mono, but it cannot upsample:
+    // say which clip it was and what to do about it, rather than passing its bare message through.
+    try {
+      CheckResult(OrtxDecodeAudio(audios->audios_.get(), i, static_cast<int64_t>(mel_config_.sample_rate),
+                                  /*stereo_to_mono=*/1, decoded.ToBeAssigned()));
+    } catch (const std::exception& e) {
+      throw std::runtime_error("Lfm2AudioProcessor: could not decode audio clip " + std::to_string(i) + " at " +
+                               std::to_string(mel_config_.sample_rate) +
+                               " Hz. A clip recorded below that rate has to be resampled up to it first, as the "
+                               "decoder only resamples downwards. The decoder reported: " +
+                               e.what());
+    }
     ort_extensions::OrtxObjectPtr<OrtxTensor> pcm_tensor;
     CheckResult(OrtxTensorResultGetAt(decoded.get(), 0, pcm_tensor.ToBeAssigned()));
 
@@ -293,8 +303,9 @@ std::unique_ptr<NamedTensors> Lfm2AudioProcessor::Process(const Tokenizer& token
     return named_tensors;
   }
 
-  // Clips share one encoder run as a zero-padded [num_clips, longest, num_mels] batch with their
-  // real lengths alongside, the same batching the reference applies before its encoder.
+  // The clips are staged in one zero-padded [num_clips, longest, num_mels] tensor with their real
+  // lengths alongside. It is a container, not a batched encoder run: Lfm2AudioSpeechState slices
+  // each clip's own frames back out and runs the encoder on them one clip at a time.
   const int64_t num_mels = mel_config_.num_mels;
   auto batch = OrtValue::CreateTensor<float>(allocator, std::vector<int64_t>{static_cast<int64_t>(num_clips), longest, num_mels});
   float* batch_data = batch->GetTensorMutableData<float>();

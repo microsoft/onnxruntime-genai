@@ -62,20 +62,25 @@ runs through the normal `AppendTokens` path with no speech or embedding model.
 The speech encoder is `onnx/audio_encoder.onnx` in
 [LiquidAI/LFM2.5-Audio-1.5B-ONNX](https://huggingface.co/LiquidAI/LFM2.5-Audio-1.5B-ONNX)
 (`audio_encoder_fp16.onnx` and `audio_encoder_q4.onnx` are there too). Download the graph together
-with every `*.onnx_data*` file next to it. It has the signature ONNX Runtime GenAI expects:
+with every `*.onnx_data*` file next to it. It has the signature ONNX Runtime GenAI expects, for a
+single clip at a time:
 
 | Name | Shape | Type |
 | --- | --- | --- |
-| `mel_spectrogram` (input) | `[num_clips, num_frames, 128]` | float |
-| `mel_lengths` (input) | `[num_clips]` | int64 |
-| `audio_embeddings` (output) | `[num_clips, ceil(num_frames / 8), hidden_size]` | float |
-| `audio_lengths` (output) | `[num_clips]` | int64 |
+| `mel_spectrogram` (input) | `[1, num_frames, 128]` | float |
+| `mel_lengths` (input) | `[1]` | int64 |
+| `audio_embeddings` (output) | `[1, ceil(num_frames / 8), hidden_size]` | float |
+| `audio_lengths` (output) | `[1]` | int64 |
 
 The encoder subsamples the mel frames by 8 (three stride-2 convolutions) and its adapter projects the
-result to the decoder's hidden size, so one output frame covers 80 ms of audio. The `audio_lengths`
-output is not read by the runtime — the runtime derives the same counts itself so it can size the
-prompt before the encoder runs — but the graph produces it and the input it shares with
-`mel_lengths` matters: the encoder masks the padding of a batched run with it.
+result to the decoder's hidden size, so one output frame covers 80 ms of audio. `mel_lengths` gives
+it the clip's real length; the runtime always passes the clip's own frames, so nothing is padded.
+The `audio_lengths` output is not read — the runtime derives the same counts itself, before the
+encoder runs, so that it can size the prompt — but the graph produces it.
+
+The published export only handles one clip per run: its subsampling mask is traced for a batch of
+one, and a wider `mel_spectrogram` fails inside the graph. The runtime therefore runs it once per
+clip. An encoder exported to take a real batch would work here too, one clip at a time.
 
 The embedding model looks up `input_ids` in the decoder's embedding table and scatters
 `audio_features` into the positions holding the audio placeholder token. Build it from
@@ -249,8 +254,9 @@ runtime has nothing to do with. LiquidAI ships `vocoder_depthformer.onnx` and
 `audio_detokenizer.onnx` in the ONNX repository, and their
 [onnx-export](https://github.com/Liquid4All/onnx-export) repository drives them from Python.
 
-**One prompt at a time.** Several clips in one prompt work and share a single encoder run, but
-batched prompts are refused.
+**One prompt at a time.** Several clips in one prompt work, but batched prompts are refused. The
+clips do not share an encoder run: the published encoder export is traced for a single clip, so each
+one is encoded on its own frames and the results are concatenated in prompt order.
 
 **Audio is not chunked.** The whole clip goes through the encoder in one run, and one hour of audio
 is 450k mel frames, so memory grows with the clip length. The reference implementation has the same

@@ -13,6 +13,7 @@ label the export `lfm2_audio` (a pipeline stage) or `lfm2_audio_text` (a text-on
 from __future__ import annotations
 
 import json
+import sys
 import types
 
 import pytest
@@ -84,10 +85,10 @@ def _write_checkpoint(path, decoder_weights=None):
     return decoder_weights
 
 
-def test_load_lfm2_audio_config_reads_the_nested_decoder_config(tmp_path):
+def test_lfm2_audio_load_config_reads_the_nested_decoder_config(tmp_path):
     _write_checkpoint(tmp_path)
 
-    config = lfm2_module.load_lfm2_audio_config(str(tmp_path))
+    config = LFM2AudioModel.load_config(str(tmp_path))
 
     assert config.architectures == ["Lfm2AudioForConditionalGeneration"]
     assert config._name_or_path == str(tmp_path)
@@ -97,18 +98,19 @@ def test_load_lfm2_audio_config_reads_the_nested_decoder_config(tmp_path):
     assert config.tie_word_embeddings
 
 
-def test_load_lfm2_audio_config_leaves_other_checkpoints_to_autoconfig(tmp_path):
+def test_lfm2_audio_load_config_leaves_other_checkpoints_to_autoconfig(tmp_path):
     (tmp_path / "config.json").write_text(json.dumps(DECODER_CONFIG))
-    assert lfm2_module.load_lfm2_audio_config(str(tmp_path)) is None
-    assert lfm2_module.load_lfm2_audio_config(str(tmp_path / "missing")) is None
+    assert LFM2AudioModel.load_config(str(tmp_path)) is None
+    assert LFM2AudioModel.load_config(str(tmp_path / "missing")) is None
 
 
-def _audio_builder(tmp_path):
+def _audio_builder(tmp_path, extra_options=None):
     model = LFM2AudioModel.__new__(LFM2AudioModel)
-    model.decoder_config = lfm2_module.load_lfm2_audio_config(str(tmp_path))
+    model.decoder_config = LFM2AudioModel.load_config(str(tmp_path))
     model.quant_type = None
     model.cache_dir = str(tmp_path / "cache")
     model.hf_token = True
+    model.extra_options = extra_options or {}
     return model
 
 
@@ -142,6 +144,38 @@ def test_lfm2_audio_load_weights_rejects_a_checkpoint_missing_decoder_tensors(tm
         ValueError, match=r"does not match its config: missing .*'model\.layers\.1\.self_attn\.q_proj\.weight'"
     ):
         _audio_builder(tmp_path).load_weights(str(tmp_path))
+
+
+def test_lfm2_audio_load_weights_applies_the_lora_adapter(monkeypatch, tmp_path):
+    # `load_weights` is overridden for these checkpoints, so it has to apply `adapter_path` itself;
+    # returning the bare decoder would drop the adapter without a word.
+    _write_checkpoint(tmp_path)
+    wrapped = []
+
+    class FakePeftModel:
+        @classmethod
+        def from_pretrained(cls, model, adapter_path, **kwargs):
+            wrapped.append((model, adapter_path, kwargs))
+            return "adapted"
+
+    peft = types.ModuleType("peft")
+    peft.PeftModel = FakePeftModel
+    monkeypatch.setitem(sys.modules, "peft", peft)
+
+    builder = _audio_builder(tmp_path, {"adapter_path": "some/adapter"})
+    loaded = builder.load_weights(str(tmp_path))
+
+    assert loaded == "adapted"
+    model, adapter_path, kwargs = wrapped[0]
+    assert type(model).__name__ == "Lfm2ForCausalLM"
+    assert adapter_path == "some/adapter"
+    assert kwargs == {"cache_dir": builder.cache_dir, "token": True}
+
+
+def test_lfm2_audio_load_weights_without_an_adapter_returns_the_decoder(tmp_path):
+    _write_checkpoint(tmp_path)
+    loaded = _audio_builder(tmp_path).load_weights(str(tmp_path))
+    assert type(loaded).__name__ == "Lfm2ForCausalLM"
 
 
 @pytest.mark.parametrize("exclude_embeds,expected_type", [(True, "lfm2_audio"), (False, "lfm2_audio_text")])

@@ -12,8 +12,6 @@ import torch
 
 from .base import Model
 
-LFM2_AUDIO_ARCHITECTURE = "Lfm2AudioForConditionalGeneration"
-
 
 class LFM2Model(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
@@ -196,27 +194,6 @@ class LFM2Model(Model):
         decoder["conv_cache_size"] = self.conv_L_cache - 1
 
 
-def load_lfm2_audio_config(model_name_or_path, **kwargs):
-    """The LFM2 decoder config of an LFM2-Audio checkpoint (LFM2-Audio-1.5B, LFM2.5-Audio-1.5B).
-
-    These checkpoints have no transformers model class and their config.json nests the decoder
-    config under "lfm" next to the audio encoder, depthformer and mel front-end settings, so
-    AutoConfig cannot read them. Returns None if the checkpoint is not an LFM2-Audio one.
-    """
-    from transformers import Lfm2Config, PretrainedConfig
-
-    try:
-        config_dict, _ = PretrainedConfig.get_config_dict(model_name_or_path, **kwargs)
-    except Exception:  # noqa: BLE001 - not an LFM2-Audio checkpoint (or not readable): AutoConfig reports the real error
-        return None
-    if config_dict.get("architectures") != [LFM2_AUDIO_ARCHITECTURE]:
-        return None
-    config = Lfm2Config(**config_dict["lfm"])
-    config.architectures = [LFM2_AUDIO_ARCHITECTURE]
-    config._name_or_path = model_name_or_path
-    return config
-
-
 class LFM2AudioModel(LFM2Model):
     """The LFM2 decoder of an LFM2-Audio checkpoint, exported for text generation.
 
@@ -226,6 +203,30 @@ class LFM2AudioModel(LFM2Model):
     the lfm2_audio pipeline, whose embedding model splices the audio encoder output into the token
     embeddings; otherwise it is a plain text model.
     """
+
+    @classmethod
+    def load_config(cls, model_name_or_path, **kwargs):
+        """The LFM2 decoder config of an LFM2-Audio checkpoint, or None if it is not one.
+
+        These checkpoints have no model type and no transformers model class, and their config.json
+        nests the decoder config under "lfm" next to the audio encoder, depthformer and mel front-end
+        settings, so AutoConfig cannot read them. The builder calls this before it knows which model
+        class to use, which is why it cannot be an instance method.
+        """
+        from transformers import Lfm2Config, PretrainedConfig
+
+        architecture = "Lfm2AudioForConditionalGeneration"
+        try:
+            config_dict, _ = PretrainedConfig.get_config_dict(model_name_or_path, **kwargs)
+        except Exception:  # noqa: BLE001 - not an LFM2-Audio checkpoint, or unreadable: AutoConfig reports the real error
+            return None
+        if config_dict.get("architectures") != [architecture]:
+            return None
+
+        config = Lfm2Config(**config_dict["lfm"])
+        config.architectures = [architecture]
+        config._name_or_path = model_name_or_path
+        return config
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
@@ -249,7 +250,7 @@ class LFM2AudioModel(LFM2Model):
                 f"The LFM2 decoder of {input_path} does not match its config: missing {sorted(missing)}, unexpected {sorted(unexpected)}."
             )
         model.tie_weights()
-        return model.eval()
+        return self.load_adapter(model.eval())
 
     def load_lfm2_audio_checkpoint(self, input_path):
         """The checkpoint tensors, from a local directory or the Hugging Face Hub."""

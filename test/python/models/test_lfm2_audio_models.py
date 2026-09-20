@@ -241,7 +241,7 @@ def test_lfm2_audio_processor_text_only(test_data_path):
     assert AUDIO_TOKEN_ID not in inputs["input_ids"].as_numpy()
     np.testing.assert_array_equal(inputs["audio_sizes"].as_numpy(), [0])
     with pytest.raises(RuntimeError, match="audio_embeds"):
-        inputs["audio_embeds"]
+        _ = inputs["audio_embeds"]
 
 
 def test_lfm2_audio_processor_two_clips_of_different_lengths(test_data_path, tmp_path):
@@ -251,8 +251,8 @@ def test_lfm2_audio_processor_two_clips_of_different_lengths(test_data_path, tmp
     prompt = f"First {AUDIO_MARKER} then {AUDIO_MARKER} done"
     _, inputs = _process(_model_path(test_data_path), prompt, og.Audios.open(*clips))
 
-    # Clips are zero-padded into one batch for a single encoder run, each with its real length, in
-    # prompt order; the placeholders follow the same order.
+    # Clips are staged as one zero-padded tensor, each with its real length, in prompt order; the
+    # placeholders follow the same order. The encoder itself runs once per clip on those lengths.
     assert _placeholder_runs(inputs["input_ids"].as_numpy()[0]) == [_num_tokens(len(short)), _num_tokens(len(long))]
     mel = inputs["audio_embeds"].as_numpy()
     assert mel.shape == (2, _num_frames(len(long)), NUM_MELS)
@@ -276,6 +276,87 @@ def test_lfm2_audio_rejects_marker_count_mismatch(test_data_path, tmp_path, prom
     audios = og.Audios.open(*clips) if clips else None
     with pytest.raises(RuntimeError, match=expected):
         _process(_model_path(test_data_path), prompt, audios)
+
+
+def test_lfm2_audio_open_bytes_matches_open(test_data_path, tmp_path):
+    clip = Path(_write_wav(tmp_path / "clip.wav", _synthetic_signal(0.9, seed=7)))
+    model = og.Model(_model_path(test_data_path))
+    processor = model.create_multimodal_processor()
+
+    from_path = processor(AUDIO_MARKER, audios=og.Audios.open(os.fspath(clip)))
+    from_bytes = processor(AUDIO_MARKER, audios=og.Audios.open_bytes(clip.read_bytes()))
+
+    np.testing.assert_array_equal(from_bytes["input_ids"].as_numpy(), from_path["input_ids"].as_numpy())
+    np.testing.assert_array_equal(from_bytes["audio_embeds"].as_numpy(), from_path["audio_embeds"].as_numpy())
+    np.testing.assert_array_equal(from_bytes["audio_sizes"].as_numpy(), from_path["audio_sizes"].as_numpy())
+
+
+@pytest.mark.parametrize("source_rate", [22050, 44100, 48000])
+def test_lfm2_audio_resamples_to_the_encoder_rate(test_data_path, tmp_path, source_rate):
+    # Whatever the file's rate, the clip reaches the mel front end at the encoder's 16 kHz, so the
+    # frame count follows the resampled length rather than the original sample count.
+    seconds = 0.75
+    samples = _synthetic_signal(seconds, seed=8)[: int(seconds * source_rate)]
+    if source_rate > SAMPLE_RATE:  # _synthetic_signal only makes 16 kHz worth of samples
+        samples = np.interp(
+            np.linspace(0, 1, int(seconds * source_rate)), np.linspace(0, 1, samples.size), samples
+        ).astype(np.float32)
+    clip = _write_wav(tmp_path / "clip.wav", samples, sample_rate=source_rate)
+
+    _, inputs = _process(_model_path(test_data_path), AUDIO_MARKER, og.Audios.open(clip))
+
+    resampled_length = round(samples.size * SAMPLE_RATE / source_rate)
+    num_frames = int(inputs["audio_lengths"].as_numpy()[0])
+    # The resampler may land a sample either side of the exact ratio, so allow one hop of slack.
+    assert abs(num_frames - _num_frames(resampled_length)) <= 1, f"{num_frames} frames for {resampled_length} samples"
+    assert inputs["audio_embeds"].as_numpy().shape == (1, num_frames, NUM_MELS)
+    assert int(inputs["audio_sizes"].as_numpy()[0]) == math.ceil(num_frames / SUBSAMPLING_FACTOR)
+
+
+def test_lfm2_audio_rejects_a_clip_recorded_below_the_encoder_rate(test_data_path, tmp_path):
+    # The decoder resamples downwards only, so 8 kHz telephone audio cannot be read as 16 kHz. The
+    # message has to name the clip and say what to do, not just repeat the decoder's complaint.
+    clip = _write_wav(tmp_path / "telephone.wav", _synthetic_signal(0.5, seed=11)[:4000], sample_rate=8000)
+    with pytest.raises(RuntimeError, match="could not decode audio clip 0 at 16000 Hz.*resampled up"):
+        _process(_model_path(test_data_path), AUDIO_MARKER, og.Audios.open(clip))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("hop_length", 320), ("win_length", 320), ("fft_size", 1024), ("num_mels", 64), ("sample_rate", 8000)],
+)
+def test_lfm2_audio_honors_the_mel_config_overrides(test_data_path, tmp_path, field, value):
+    # The front end defaults to the published checkpoints' settings, and genai_config.json can
+    # override each one; a fine-tune that changed them would otherwise be silently mis-framed.
+    model_path = _copy_model(test_data_path, tmp_path)
+    _edit_json(model_path / "genai_config.json", lambda config: config["model"].update({field: value}))
+    samples = _synthetic_signal(1.0, seed=9)
+    clip = _write_wav(tmp_path / "clip.wav", samples)
+
+    _, inputs = _process(os.fspath(model_path), AUDIO_MARKER, og.Audios.open(clip))
+    mel = inputs["audio_embeds"].as_numpy()
+
+    expected_mels = value if field == "num_mels" else NUM_MELS
+    expected_hop = value if field == "hop_length" else HOP_LENGTH
+    # A different sample rate resamples the clip instead of changing the framing arithmetic.
+    expected_samples = len(samples) * value // SAMPLE_RATE if field == "sample_rate" else len(samples)
+    expected_frames = expected_samples // expected_hop + 1
+
+    assert mel.shape[2] == expected_mels
+    assert abs(mel.shape[1] - expected_frames) <= 1, f"{mel.shape[1]} frames, expected about {expected_frames}"
+    np.testing.assert_array_equal(inputs["audio_lengths"].as_numpy(), [mel.shape[1]])
+
+
+def test_lfm2_audio_subsampling_factor_override_changes_the_placeholder_count(test_data_path, tmp_path):
+    model_path = _copy_model(test_data_path, tmp_path)
+    _edit_json(model_path / "genai_config.json", lambda config: config["model"].update({"subsampling_factor": 4}))
+    clip = _write_wav(tmp_path / "clip.wav", _synthetic_signal(1.0, seed=10))
+
+    _, inputs = _process(os.fspath(model_path), AUDIO_MARKER, og.Audios.open(clip))
+
+    num_frames = int(inputs["audio_lengths"].as_numpy()[0])
+    assert int(inputs["audio_sizes"].as_numpy()[0]) == math.ceil(num_frames / 4)
+    assert _placeholder_runs(inputs["input_ids"].as_numpy()[0]) == [math.ceil(num_frames / 4)]
 
 
 def test_lfm2_audio_rejects_a_clip_too_short_to_normalize(test_data_path, tmp_path):

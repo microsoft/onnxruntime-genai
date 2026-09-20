@@ -31,7 +31,6 @@ from builders import (
     LFM2AudioModel,
     LFM2Model,
     LFM2MoEModel,
-    load_lfm2_audio_config,
     LlamaModel,
     Mistral3TextModel,
     MistralModel,
@@ -104,7 +103,7 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
     hf_remote = extra_options.get("hf_remote", False)
 
     # LFM2-Audio checkpoints have no model_type, so AutoConfig cannot read them: use their nested LFM2 decoder config.
-    config = load_lfm2_audio_config(hf_name, token=hf_token, **extra_kwargs)
+    config = LFM2AudioModel.load_config(hf_name, token=hf_token, **extra_kwargs)
     if config is None:
         config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
     tokenizer = AutoTokenizer.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
