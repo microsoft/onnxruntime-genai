@@ -256,13 +256,16 @@ class LFM2AudioModel(LFM2Model):
         """The checkpoint tensors, from a local directory or the Hugging Face Hub."""
         from safetensors.torch import load_file
 
-        if os.path.isdir(input_path):
-            checkpoint_dir = input_path
+        # `-i` gives a local directory. With `-m` it is empty and the checkpoint is the one the
+        # config was read from, which is the repository name.
+        source = input_path or self.model_name_or_path
+        if os.path.isdir(source):
+            checkpoint_dir = source
         else:
             from huggingface_hub import snapshot_download
 
             checkpoint_dir = snapshot_download(
-                input_path, cache_dir=self.cache_dir, token=self.hf_token, allow_patterns=["*.safetensors", "*.json"]
+                source, cache_dir=self.cache_dir, token=self.hf_token, allow_patterns=["*.safetensors", "*.json"]
             )
 
         index_path = os.path.join(checkpoint_dir, "model.safetensors.index.json")

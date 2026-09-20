@@ -44,6 +44,13 @@ $ python3 -m onnxruntime_genai.models.builder \
     --extra_options exclude_embeds=true
 ```
 
+`-m LiquidAI/LFM2.5-Audio-1.5B` instead of `-i` works too, and downloads the checkpoint itself.
+
+The three checkpoints LiquidAI publishes as PyTorch — `LFM2-Audio-1.5B`, `LFM2.5-Audio-1.5B` and
+`LFM2.5-Audio-1.5B-JP` — build the same way. Their `"lfm"`, `"encoder"` and `"preprocessor"` settings
+are identical, so the front-end defaults below fit all three; only the weights differ. The GGUF
+repositories are for llama.cpp and are not inputs to this builder.
+
 The checkpoint has no `model_type` and no transformers model class: its `config.json` nests the LFM2
 decoder config under `"lfm"`, next to the speech encoder, depthformer and mel front-end settings, and
 the checkpoint stores the decoder under the `lfm.` prefix. The builder recognizes
@@ -62,7 +69,11 @@ runs through the normal `AppendTokens` path with no speech or embedding model.
 The speech encoder is `onnx/audio_encoder.onnx` in
 [LiquidAI/LFM2.5-Audio-1.5B-ONNX](https://huggingface.co/LiquidAI/LFM2.5-Audio-1.5B-ONNX)
 (`audio_encoder_fp16.onnx` and `audio_encoder_q4.onnx` are there too). Download the graph together
-with every `*.onnx_data*` file next to it. It has the signature ONNX Runtime GenAI expects, for a
+with every `*.onnx_data*` file next to it. That repository is the export of `LFM2.5-Audio-1.5B`, so
+its encoder belongs to that checkpoint only; `LFM2-Audio-1.5B` and `LFM2.5-Audio-1.5B-JP` have their
+own encoder weights and need their own export, from `conformer.*` and `audio_adapter.*` in the
+checkpoint (`liquid_audio.model.conformer.ConformerEncoder` plus its adapter MLP, traced for one
+clip). It has the signature ONNX Runtime GenAI expects, for a
 single clip at a time:
 
 | Name | Shape | Type |
@@ -257,6 +268,10 @@ runtime has nothing to do with. LiquidAI ships `vocoder_depthformer.onnx` and
 **One prompt at a time.** Several clips in one prompt work, but batched prompts are refused. The
 clips do not share an encoder run: the published encoder export is traced for a single clip, so each
 one is encoded on its own frames and the results are concatenated in prompt order.
+
+**Audio below 16 kHz is refused.** The decoder resamples down to the encoder's rate and mixes to
+mono, but it does not resample upwards, so 8 kHz telephone audio has to be resampled before it gets
+here. The processor says so, naming the clip.
 
 **Audio is not chunked.** The whole clip goes through the encoder in one run, and one hour of audio
 is 450k mel frames, so memory grows with the clip length. The reference implementation has the same

@@ -104,13 +104,14 @@ def test_lfm2_audio_load_config_leaves_other_checkpoints_to_autoconfig(tmp_path)
     assert LFM2AudioModel.load_config(str(tmp_path / "missing")) is None
 
 
-def _audio_builder(tmp_path, extra_options=None):
+def _audio_builder(tmp_path, extra_options=None, model_name_or_path=None):
     model = LFM2AudioModel.__new__(LFM2AudioModel)
     model.decoder_config = LFM2AudioModel.load_config(str(tmp_path))
     model.quant_type = None
     model.cache_dir = str(tmp_path / "cache")
     model.hf_token = True
     model.extra_options = extra_options or {}
+    model.model_name_or_path = model_name_or_path or str(tmp_path)
     return model
 
 
@@ -144,6 +145,43 @@ def test_lfm2_audio_load_weights_rejects_a_checkpoint_missing_decoder_tensors(tm
         ValueError, match=r"does not match its config: missing .*'model\.layers\.1\.self_attn\.q_proj\.weight'"
     ):
         _audio_builder(tmp_path).load_weights(str(tmp_path))
+
+
+def test_lfm2_audio_load_weights_downloads_the_checkpoint_named_by_the_config(monkeypatch, tmp_path):
+    # `-m <repo id>` leaves the input path empty; the checkpoint to fetch is then the one the config
+    # was read from. Passing the empty path straight to the Hub asks it for a repository called "".
+    _write_checkpoint(tmp_path)
+    asked = []
+
+    def fake_snapshot_download(repo_id, **kwargs):
+        asked.append((repo_id, kwargs))
+        return str(tmp_path)
+
+    hub = types.ModuleType("huggingface_hub")
+    hub.snapshot_download = fake_snapshot_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
+
+    builder = _audio_builder(tmp_path, model_name_or_path="LiquidAI/LFM2.5-Audio-1.5B")
+    loaded = builder.load_weights("")
+
+    assert type(loaded).__name__ == "Lfm2ForCausalLM"
+    assert asked[0][0] == "LiquidAI/LFM2.5-Audio-1.5B"
+    assert asked[0][1]["cache_dir"] == builder.cache_dir
+
+
+def test_lfm2_audio_load_weights_prefers_a_local_input_path(monkeypatch, tmp_path):
+    _write_checkpoint(tmp_path)
+
+    def fail(*args, **kwargs):
+        raise AssertionError("a local checkpoint directory must not be downloaded")
+
+    hub = types.ModuleType("huggingface_hub")
+    hub.snapshot_download = fail
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
+
+    loaded = _audio_builder(tmp_path, model_name_or_path="LiquidAI/LFM2.5-Audio-1.5B").load_weights(str(tmp_path))
+
+    assert type(loaded).__name__ == "Lfm2ForCausalLM"
 
 
 def test_lfm2_audio_load_weights_applies_the_lora_adapter(monkeypatch, tmp_path):
