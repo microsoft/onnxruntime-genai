@@ -345,10 +345,16 @@ ONNXTensorElementDataType ValidateDflash2ModelCompatibility(
   return cache_type;
 }
 
-Dflash2Model::Dflash2Model(std::unique_ptr<Config> config, OrtEnv& ort_env)
-    : Model{std::move(config)} {
+Dflash2Model::Dflash2Model(std::unique_ptr<Config> config, OrtEnv& ort_env,
+                           std::shared_ptr<CpuEmbedding> cpu_embedding)
+    : Model{std::move(config)}, cpu_embedding_{std::move(cpu_embedding)} {
   session_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
   session_info_.Add(*session_);
+  if (cpu_embedding_) {
+    cpu_embedding_->ValidateConsumer(session_info_, config_->model.dflash2.inputs.embeddings);
+  } else if (!config_->model.embedding.filename.empty()) {
+    throw std::runtime_error("DFlash CPU embedding requires the target's shared embedding session.");
+  }
 }
 
 std::unique_ptr<State> Dflash2Model::CreateState(DeviceSpan<int32_t>, const GeneratorParams&) const {
@@ -827,6 +833,11 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
 
   auto& input_ids = StepTensor(step_tensors_.input_ids, device, Ort::TypeToTensorType<int64_t>,
                                {static_cast<int64_t>(num_block_rows)});
+  Tensor* embeddings = nullptr;
+  if (model_->cpu_embedding_) {
+    embeddings = &StepTensor(step_tensors_.embeddings, device, model_->cpu_embedding_->type_,
+                             {static_cast<int64_t>(num_block_rows), model_->cpu_embedding_->hidden_size_});
+  }
   {
     auto span = input_ids.GetDeviceSpan<int64_t>();
     auto cpu = span.CpuSpan();
@@ -838,6 +849,7 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
       }
     }
     span.CopyCpuToDevice();
+    if (embeddings) model_->cpu_embedding_->Run(cpu, *embeddings);
   }
 
   constexpr auto int32_type = Ort::TypeToTensorType<int32_t>;
@@ -894,6 +906,7 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
                              static_cast<int64_t>(top_k), static_cast<int64_t>(top_k)});
   // Everything the captured launches bake in: the packed row counts, the block-table width, and the
   // generation of the buffers those launches recorded addresses for.
+  const size_t known_graph_shapes = graph_ids_.size();
   const int annotation_id =
       graph_eligible
           ? graph_ids_.Id(GraphAnnotationIds::Key{
@@ -901,6 +914,10 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
                 static_cast<size_t>(layout.max_query_len), buffer_generation_})
           : -1;
   const bool capture = annotation_id > 0;
+  if (capture && graph_ids_.size() != known_graph_shapes && g_log.enabled && g_log.graph_capture) {
+    Log("graph_capture") << "dflash2 batch=" << batch << " context_rows=" << num_ctx_rows
+                         << " -> graph id " << annotation_id << std::endl;
+  }
   if (graph_capture_enabled_) {
     run_options_->AddConfigEntry("gpu_graph_id", std::to_string(annotation_id).c_str());
   }
@@ -934,6 +951,10 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
                                 block_row_index.GetOrtTensor(), cumulative.GetOrtTensor(),
                                 past_lengths.GetOrtTensor(), block_table.GetOrtTensor(),
                                 metadata.GetOrtTensor()};
+  if (embeddings) {
+    input_names.push_back(config_.inputs.embeddings.c_str());
+    inputs.push_back(embeddings->GetOrtTensor());
+  }
   std::vector<const char*> output_names{config_.outputs.candidate_ids.c_str(),
                                         config_.outputs.scores.c_str()};
   std::vector<OrtValue*> outputs{candidate_ids.GetOrtTensor(), scores.GetOrtTensor()};

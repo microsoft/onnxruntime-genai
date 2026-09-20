@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "models/model.h"
+#include "models/cpu_embedding.h"
 #include "engine/graph_annotation_ids.h"
 
 namespace Generators {
@@ -43,11 +44,13 @@ bool Dflash2CanJoin(bool draft_eligible, size_t first_position) noexcept;
  * shared initializers and device interfaces. It never produces a State.
  */
 struct Dflash2Model : Model {
-  Dflash2Model(std::unique_ptr<Config> config, OrtEnv& ort_env);
+  Dflash2Model(std::unique_ptr<Config> config, OrtEnv& ort_env,
+               std::shared_ptr<CpuEmbedding> cpu_embedding = nullptr);
 
   std::unique_ptr<State> CreateState(DeviceSpan<int32_t>, const GeneratorParams&) const override;
 
   std::unique_ptr<OrtSession> session_;
+  std::shared_ptr<CpuEmbedding> cpu_embedding_;
 };
 
 // Decoder-shaped view of model.dflash2, so Model's session-option and shared-initializer plumbing
@@ -187,6 +190,7 @@ struct Dflash2Drafter {
   struct StepTensors {
     std::unique_ptr<Tensor> packed_aux;
     std::unique_ptr<Tensor> input_ids;
+    std::unique_ptr<Tensor> embeddings;
     std::unique_ptr<Tensor> q_row_map;
     std::unique_ptr<Tensor> qkv_row_map;
     std::unique_ptr<Tensor> block_row_index;

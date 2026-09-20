@@ -1154,6 +1154,8 @@ struct Dflash2Inputs_Element : JSON::Element {
       v_.aux_hidden_states = JSON::Get<std::string_view>(value);
     } else if (name == "input_ids") {
       v_.input_ids = JSON::Get<std::string_view>(value);
+    } else if (name == "inputs_embeds") {
+      v_.embeddings = JSON::Get<std::string_view>(value);
     } else if (name == "q_row_map") {
       v_.q_row_map = JSON::Get<std::string_view>(value);
     } else if (name == "qkv_row_map") {

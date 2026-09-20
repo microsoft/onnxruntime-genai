@@ -322,8 +322,10 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
     const auto& batching = *model->config_->engine.dynamic_batching;
     const size_t paged_block_size = static_cast<size_t>(batching.block_size);
     dflash2_max_batch_size = static_cast<size_t>(batching.max_batch_size);
+    auto decoder_model = std::dynamic_pointer_cast<DecoderOnly_Model>(model);
     dflash2_model = std::make_shared<Dflash2Model>(
-        CreateDflash2Config(*model->config_), GetOrtEnv());
+        CreateDflash2Config(*model->config_), GetOrtEnv(),
+        decoder_model ? decoder_model->cpu_embedding_ : nullptr);
     const auto dflash2_cache_type = ValidateDflash2ModelCompatibility(
         *model->config_, model->session_info_, dflash2_model->session_info_, paged_block_size);
     model->config_->engine.aux_hidden_states_output_required = true;
