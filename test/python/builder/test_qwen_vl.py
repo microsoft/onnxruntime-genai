@@ -373,7 +373,6 @@ def test_qwen35_configures_interleaved_partial_mrope(monkeypatch):
     assert model.rope_attrs["mrope_layout"] == 1
     assert model.rope_attrs["rotary_embedding_dim"] == 32
     assert model.rope_attrs["cast"] == {"use_fp32": True, "root_input": True, "output_0": True}
-    assert model.linear_attn_op == "linear_attention"
     assert not model.is_fused_rope_supported()
 
 
@@ -756,8 +755,8 @@ def test_linear_attention_gate_emitter():
     ]
 
 
-def test_qwen35_linear_attention_uses_fused_gate(monkeypatch):
-    model = Qwen35TextModel.__new__(Qwen35TextModel)
+def test_qwen38_gated_delta_net_expansion_uses_linear_attention_gate(monkeypatch):
+    model = qwen_module.Qwen4ExpTextModel.__new__(qwen_module.Qwen4ExpTextModel)
     model.io_dtype = ir.DataType.FLOAT16
     model.linear_key_dim = 8
     model.linear_value_dim = 16
@@ -770,7 +769,7 @@ def test_qwen35_linear_attention_uses_fused_gate(monkeypatch):
     initializers = []
     gate_calls = []
     monkeypatch.setattr(model, "make_split", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(model, "make_l2_normalize", lambda name, _input: f"{name}/output_0")
+    monkeypatch.setattr(model, "make_l2_normalize_expansion", lambda name, _input: f"{name}/output_0")
     monkeypatch.setattr(model, "make_mul", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         model,
@@ -783,7 +782,7 @@ def test_qwen35_linear_attention_uses_fused_gate(monkeypatch):
         lambda name, **kwargs: gate_calls.append((name, kwargs)),
     )
 
-    outputs = model.make_linear_attention_normalize_and_gate(
+    outputs = model.make_gated_delta_net_gates_expansion(
         3,
         attention,
         "conv_output",

@@ -2765,53 +2765,50 @@ class Model:
         else:
             raise NotImplementedError(f"The {self.onnx_dtype} precision is not currently supported.")
 
-    def make_packed_matmul_class(self, q_matmul, k_matmul, v_matmul):
+    def make_packed_matmul_class(self, *matmuls):
         if self.onnx_dtype in {ir.DataType.FLOAT, ir.DataType.FLOAT16, ir.DataType.BFLOAT16}:
-            return self.make_packed_matmul_float_class(q_matmul, k_matmul, v_matmul)
+            return self.make_packed_matmul_float_class(*matmuls)
         elif self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4, ir.DataType.INT8, ir.DataType.UINT8}:
-            return self.make_packed_matmul_int4_class(q_matmul, k_matmul, v_matmul)
+            return self.make_packed_matmul_int4_class(*matmuls)
         else:
             raise NotImplementedError(f"The {self.onnx_dtype} precision is not currently supported.")
 
-    def make_packed_matmul_float_class(self, q_matmul, k_matmul, v_matmul, **kwargs):
-        # N_q = num_attention_heads * head_size, N_kv = num_key_value_heads * head_size, H = hidden_size
-        # Combine 3 MatMuls of shape N_q x H, N_kv x H, N_kv x H into 1 packed MatMul of shape (N_q+N_kv+N_kv)xH
-        #
-        # Note: Packed MatMul is of shape (N_q+N_kv+N_kv)xH instead of Hx(N_q+N_kv+N_kv) because `make_matmul` will
-        # apply a transpose before saving
-        N_q, H = q_matmul.weight.shape
-        N_kv, _ = k_matmul.weight.shape
+    def make_packed_matmul_float_class(self, *matmuls, **kwargs):
+        if not matmuls:
+            raise ValueError("Packed MatMul requires at least one projection.")
 
         # Create dummy PackedMatMul class
         class PackedMatMul:
             def __init__(self):
-                self.weight = torch.cat([q_matmul.weight, k_matmul.weight, v_matmul.weight], dim=0).reshape(
-                    N_q + N_kv + N_kv, H
-                )
+                self.weight = torch.cat([matmul.weight for matmul in matmuls], dim=0)
 
         matmul = PackedMatMul()
         return matmul
 
-    def make_packed_matmul_int4_class(self, q_matmul, k_matmul, v_matmul):
-        if not hasattr(q_matmul, "qweight"):
-            return self.make_packed_matmul_float_class(q_matmul, k_matmul, v_matmul)
+    def make_packed_matmul_int4_class(self, *matmuls):
+        if not matmuls:
+            raise ValueError("Packed MatMul requires at least one projection.")
+        if not hasattr(matmuls[0], "qweight"):
+            return self.make_packed_matmul_float_class(*matmuls)
+
+        first = matmuls[0]
+        if any(matmul.bits != first.bits for matmul in matmuls[1:]):
+            raise ValueError("All MatMuls must have the same bits for packed MatMul.")
+        if any(matmul.group_size != first.group_size for matmul in matmuls[1:]):
+            raise ValueError("All MatMuls must have the same group size for packed MatMul.")
 
         # Create dummy PackedMatMul class
         class PackedMatMul:
             def __init__(self):
-                if q_matmul.bits != k_matmul.bits or q_matmul.bits != v_matmul.bits:
-                    raise ValueError("All MatMuls must have the same bits for packed MatMul.")
-                if q_matmul.group_size != k_matmul.group_size or q_matmul.group_size != v_matmul.group_size:
-                    raise ValueError("All MatMuls must have the same group size for packed MatMul.")
-                self.qweight = torch.cat([q_matmul.qweight, k_matmul.qweight, v_matmul.qweight], dim=0)
-                self.scales = torch.cat([q_matmul.scales, k_matmul.scales, v_matmul.scales], dim=0)
-                self.qzeros = torch.cat([q_matmul.qzeros, k_matmul.qzeros, v_matmul.qzeros], dim=0)
-                self.g_idx = q_matmul.g_idx
+                self.qweight = torch.cat([matmul.qweight for matmul in matmuls], dim=0)
+                self.scales = torch.cat([matmul.scales for matmul in matmuls], dim=0)
+                self.qzeros = torch.cat([matmul.qzeros for matmul in matmuls], dim=0)
+                self.g_idx = first.g_idx
 
-                self.in_features = q_matmul.in_features
-                self.out_features = q_matmul.out_features + k_matmul.out_features + v_matmul.out_features
-                self.bits = q_matmul.bits
-                self.group_size = q_matmul.group_size
+                self.in_features = first.in_features
+                self.out_features = sum(matmul.out_features for matmul in matmuls)
+                self.bits = first.bits
+                self.group_size = first.group_size
 
         matmul = PackedMatMul()
         return matmul

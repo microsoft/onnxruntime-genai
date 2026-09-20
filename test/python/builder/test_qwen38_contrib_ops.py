@@ -4,7 +4,6 @@
 from types import MethodType, SimpleNamespace
 
 import onnx_ir as ir
-import pytest
 import torch
 
 from models.builders.qwen import Qwen4ExpMTPTextModel, Qwen4ExpTextModel
@@ -48,10 +47,9 @@ def make_sparse_model(paged):
         "qk_norm_epsilon": 1e-6,
     }
     model.mask_attrs = {"seqlens_k": "seqlens", "total_seq_len": "total_length"}
-    model.input_types = {"attention_mask": ir.DataType.INT64}
     model.input_names = {
-        "position_ids": "position_ids",
         "attention_mask": "attention_mask",
+        "position_ids": "position_ids",
         "past.indexer": {3: "past.3.indexer_key"},
         "cumulative_sequence_lengths": "cumulative_sequence_lengths",
         "past_sequence_lengths": "past_sequence_lengths",
@@ -75,8 +73,13 @@ def make_sparse_model(paged):
         ],
     )
 
-    def make_attention_input_proj(self, layer_id, attention, root_input):
-        self.attention_attrs.update(q_path="query", k_path="key", v_path="value")
+    def make_attention_input_proj(self, layer_id, attention, root_input, **kwargs):
+        if self.use_paged_attention:
+            self.attention_attrs.update(q_path="query", k_path="key", v_path="value")
+        else:
+            self.attention_attrs.update(q_path="packed_qkv", k_path="", v_path="")
+        if kwargs.get("indexer_proj") is not None:
+            self.attention_attrs["indexer_qk_path"] = "index_qk"
 
     model.make_attention_input_proj = MethodType(make_attention_input_proj, model)
     model.get_qk_norm_weight_names = MethodType(lambda self, layer_id: ("q_norm", "k_norm"), model)
@@ -99,6 +102,79 @@ def make_attention():
         k_layernorm=norm,
     )
     return SimpleNamespace(q_norm=norm, k_norm=norm, indexer=indexer)
+
+
+def test_qwen38_gated_delta_net_expansion_emits_linear_attention():
+    model = object.__new__(Qwen4ExpTextModel)
+    model.linear_num_key_heads = 2
+    model.linear_num_value_heads = 3
+    model.input_names = {"past.recurrent": {4: "past"}}
+    model.output_names = {"present.recurrent": {4: "present"}}
+    record_calls(model, ["make_linear_attention"])
+    model.make_gated_delta_net_gates_expansion = MethodType(
+        lambda self, *args: ("q", "k", "v", "decay", "beta"), model
+    )
+
+    output = model.make_gated_delta_net_expansion(4, SimpleNamespace(), "conv", "b", "a")
+
+    assert output == "/model/layers.4/linear_attn/LinearAttention/output_0"
+    call = model.calls[0]
+    assert call[0] == "make_linear_attention"
+    assert call[2] == {
+        "q_path": "q",
+        "k_path": "k",
+        "v_path": "v",
+        "past_recurrent_state": "past",
+        "present_recurrent_state": "present",
+        "decay": "decay",
+        "beta": "beta",
+        "q_num_heads": 2,
+        "kv_num_heads": 3,
+        "update_rule": "gated_delta",
+        "scale": 1.0,
+    }
+
+
+def test_qwen38_dense_linear_attention_layer_always_emits_gated_delta_net():
+    model = object.__new__(Qwen4ExpTextModel)
+    model.use_paged_attention = False
+    model.io_dtype = ir.DataType.FLOAT16
+    model.linear_conv_dim = 8
+    model.input_names = {"past.conv": {2: "past.conv"}}
+    model.output_names = {"present.conv": {2: "present.conv"}}
+    calls = []
+    model.make_linear_attention_input_proj = MethodType(
+        lambda self, *args: ("z", "b", "a", "conv_input", "conv_weight"), model
+    )
+    model.make_initializer = MethodType(lambda self, *args, **kwargs: None, model)
+    model.make_causal_conv_with_state = MethodType(lambda self, *args, **kwargs: None, model)
+    model.make_transpose = MethodType(lambda self, *args, **kwargs: None, model)
+    model.make_gated_delta_net_layer = MethodType(
+        lambda self, *args: calls.append(("gated_delta_net", args)) or "gdn_output", model
+    )
+    model.make_linear_attention_output_proj = MethodType(
+        lambda self, *args: calls.append(("output_proj", args)), model
+    )
+    model.make_linear_attention = MethodType(
+        lambda self, *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected expansion")), model
+    )
+    attention = SimpleNamespace()
+
+    model.make_qwen_gated_delta_net(2, attention, "hidden_states")
+
+    assert calls == [
+        (
+            "gated_delta_net",
+            (
+                2,
+                attention,
+                "/model/layers.2/linear_attn/conv_out/Transpose/output_0",
+                "b",
+                "a",
+            ),
+        ),
+        ("output_proj", (2, attention, "gdn_output", "z")),
+    ]
 
 
 def test_qwen_attention_packs_gated_qkv_before_splitting():
@@ -237,7 +313,112 @@ def test_qwen_linear_attention_packs_a_and_b():
     assert a_name == "/model/layers.3/linear_attn/a_proj/MatMul"
 
 
-def test_qwen_moe_packs_shared_gate_up_and_router():
+def test_qwen_attention_emits_packed_qkv_with_separate_gate_and_indexer_qk():
+    model = object.__new__(Qwen4ExpTextModel)
+    model.use_paged_attention = False
+    model.io_dtype = ir.DataType.FLOAT16
+    model.q_size = 128
+    model.kv_size = 32
+    model.num_attn_heads = 4
+    model.head_size = 32
+    model.attention_attrs = {"use_packed_matmul": True}
+    projection = lambda output_size, offset=0: SimpleNamespace(  # noqa: E731
+        weight=torch.arange(offset, offset + output_size, dtype=torch.float16).unsqueeze(1).expand(-1, 64),
+        bias=None,
+        out_features=output_size,
+    )
+    attention = SimpleNamespace(q_proj=projection(256), k_proj=projection(32, 300), v_proj=projection(32, 400))
+    indexer_proj = projection(40, 500)
+    record_calls(model, ["make_matmul", "make_split"])
+
+    def make_packed_matmul_class(self, *projections):
+        self.calls.append(("make_packed_matmul_class", projections, {}))
+        return SimpleNamespace()
+
+    model.make_packed_matmul_class = MethodType(make_packed_matmul_class, model)
+
+    model.make_attention_input_proj(3, attention, "hidden_states", indexer_proj=indexer_proj)
+
+    packed = next(call for call in model.calls if call[0] == "make_packed_matmul_class")
+    q_proj, k_proj, v_proj = packed[1]
+    assert (k_proj, v_proj) == (attention.k_proj, attention.v_proj)
+    expected_q_rows = torch.cat([torch.arange(head * 64, head * 64 + 32) for head in range(4)])
+    torch.testing.assert_close(q_proj.weight[:, 0], expected_q_rows.to(torch.float16))
+
+    matmuls = [call for call in model.calls if call[0] == "make_matmul"]
+    assert [call[1][1] for call in matmuls] == [
+        "/model/layers.3/attn/qkv_proj/MatMul",
+        "/model/layers.3/attn/gate_proj/MatMul",
+        "/model/layers.3/attn/indexer/index_qk_proj/MatMul",
+    ]
+    expected_gate_rows = expected_q_rows + 32
+    torch.testing.assert_close(matmuls[1][1][0].weight[:, 0], expected_gate_rows.to(torch.float16))
+    assert not any(call[0] == "make_split" for call in model.calls)
+    assert model.attention_attrs["q_path"] == "/model/layers.3/attn/qkv_proj/MatMul/output_0"
+    assert model.attention_attrs["k_path"] == ""
+    assert model.attention_attrs["v_path"] == ""
+    assert model.attention_attrs["gate_path"] == "/model/layers.3/attn/gate_proj/MatMul/output_0"
+    assert model.attention_attrs["indexer_qk_path"] == (
+        "/model/layers.3/attn/indexer/index_qk_proj/MatMul/output_0"
+    )
+
+
+def test_packed_matmul_class_concatenates_four_int4_projections():
+    model = object.__new__(Qwen4ExpTextModel)
+    model.onnx_dtype = ir.DataType.INT4
+
+    def projection(output_size, value):
+        return SimpleNamespace(
+            qweight=torch.full((output_size, 2, 16), value, dtype=torch.uint8),
+            scales=torch.full((output_size, 2), float(value), dtype=torch.float16),
+            qzeros=torch.zeros((output_size, 2), dtype=torch.uint8),
+            g_idx=None,
+            in_features=64,
+            out_features=output_size,
+            bits=4,
+            group_size=32,
+        )
+
+    projections = [projection(size, index + 1) for index, size in enumerate((8, 2, 2, 4))]
+
+    packed = model.make_packed_matmul_class(*projections)
+
+    assert packed.qweight.shape == (16, 2, 16)
+    assert packed.scales.shape == (16, 2)
+    assert packed.qzeros.shape == (16, 2)
+    assert packed.in_features == 64
+    assert packed.out_features == 16
+    assert packed.bits == 4
+    assert packed.group_size == 32
+    assert [packed.qweight[offset, 0, 0].item() for offset in (0, 8, 10, 12)] == [1, 2, 3, 4]
+
+
+def test_qwen_attention_deinterleaves_prequantized_q_and_gate_rows():
+    model = object.__new__(Qwen4ExpTextModel)
+    projection = SimpleNamespace(
+        qweight=torch.arange(8).reshape(8, 1, 1),
+        scales=torch.arange(8).reshape(8, 1),
+        qzeros=torch.arange(8).reshape(8, 1),
+        g_idx=None,
+        in_features=4,
+        out_features=8,
+        bits=4,
+        group_size=4,
+    )
+
+    query = model.select_projection_outputs(projection, torch.tensor([0, 1, 4, 5]))
+    gate = model.select_projection_outputs(projection, torch.tensor([2, 3, 6, 7]))
+
+    assert query.out_features == gate.out_features == 4
+    assert query.qweight.flatten().tolist() == [0, 1, 4, 5]
+    assert query.scales.flatten().tolist() == [0, 1, 4, 5]
+    assert query.qzeros.flatten().tolist() == [0, 1, 4, 5]
+    assert gate.qweight.flatten().tolist() == [2, 3, 6, 7]
+    assert gate.scales.flatten().tolist() == [2, 3, 6, 7]
+    assert gate.qzeros.flatten().tolist() == [2, 3, 6, 7]
+
+
+def test_qwen_moe_emits_separate_shared_gate_up_and_router_matmuls():
     model = object.__new__(Qwen4ExpTextModel)
     model.use_paged_attention = False
     model.io_dtype = ir.DataType.FLOAT16
@@ -245,9 +426,11 @@ def test_qwen_moe_packs_shared_gate_up_and_router():
     model.intermediate_size = 256
     model.shared_expert_intermediate_size = 16
     model.moe_attrs = {"num_experts": 32}
-    projection = lambda output_size: SimpleNamespace(  # noqa: E731
-        out_features=output_size, bias=None, weight=torch.ones((output_size, 64))
+    model.mlp_attrs = {}
+    model.make_hidden_state_shape = MethodType(
+        lambda self, last_dim: ["batch_size", "sequence_length", last_dim], model
     )
+    projection = lambda output_size: SimpleNamespace(out_features=output_size, bias=None)  # noqa: E731
     shared_expert = SimpleNamespace(
         gate_proj=projection(16),
         up_proj=projection(16),
@@ -262,24 +445,21 @@ def test_qwen_moe_packs_shared_gate_up_and_router():
     model.make_moe_router(3, moe, "hidden_states")
     output, gate = model.make_shared_expert(3, shared_expert, projection(1), "hidden_states")
 
-    matmuls = [call for call in model.calls if call[0] == "make_matmul"]
-    assert matmuls[0][1][0].weight.shape == (32, 64)
-    assert matmuls[0][1][1:] == ("/model/layers.3/moe/gate_up/MatMul", "hidden_states")
-    assert matmuls[1][1][0] is moe.gate
-    assert matmuls[1][1][1:] == ("/model/layers.3/moe/router/MatMul", "hidden_states")
-    packed_split = next(call for call in model.calls if call[0] == "make_split")
-    assert packed_split[1][1][1] == "/model/constants/INT64/[16, 16]"
-    assert packed_split[1][4] == [
-        ["batch_size", "sequence_length", 16],
-        ["batch_size", "sequence_length", 16],
+    matmuls = [call[1][1] for call in model.calls if call[0] == "make_matmul"]
+    assert matmuls == [
+        "/model/layers.3/moe/router/MatMul",
+        "/model/layers.3/mlp/gate_proj/MatMul",
+        "/model/layers.3/mlp/up_proj/MatMul",
+        "/model/layers.3/mlp/down_proj/MatMul",
+        "/model/layers.3/shared_expert_gate/MatMul",
     ]
+    assert not any(call[0] == "make_split" for call in model.calls)
     router_reshape = next(call for call in model.calls if call[0] == "make_reshape")
     assert router_reshape[1][1][0] == "/model/layers.3/moe/router/MatMul/output_0"
     mul = next(call for call in model.calls if call[0] == "make_mul")
-    assert mul[1][1][1] == "/model/layers.3/moe/gate_up/Split/output_1"
+    assert mul[1][1][1] == "/model/layers.3/mlp/up_proj/MatMul/output_0"
     assert output == "/model/layers.3/mlp/down_proj/MatMul/output_0"
     assert gate == "/model/layers.3/shared_expert_gate/Sigmoid/output_0"
-    assert not model.moe_attrs["shared_expert_paths"]
 
 
 def emitted_nodes(model):
@@ -372,11 +552,11 @@ def test_hyper_connection_emits_fused_ops():
         model,
         [
             "make_matmul",
-            "make_split",
             "make_div",
             "make_sigmoid",
             "make_mul",
             "make_reshape",
+            "make_split",
             "make_node",
             "make_value",
         ],
@@ -402,22 +582,20 @@ def test_hyper_connection_emits_fused_ops():
     assert nodes[1][1]["num_branches"] == 4
     assert nodes[1][1]["reduction_scale"] == 0.25
     matmuls = [call for call in model.calls if call[0] == "make_matmul"]
-    assert len(matmuls) == 2
-    packed = matmuls[0]
-    assert packed[1][0].weight.shape == (8, 8)
-    torch.testing.assert_close(packed[1][0].weight[:4], weights.input_mix_weight_down.weight)
-    torch.testing.assert_close(packed[1][0].weight[4:], weights.block_inject_weight.weight)
-    assert packed[1][1:] == (
+    assert matmuls[0][1][0].weight.shape == (8, 8)
+    torch.testing.assert_close(matmuls[0][1][0].weight[:4], weights.input_mix_weight_down.weight)
+    torch.testing.assert_close(matmuls[0][1][0].weight[4:], weights.block_inject_weight.weight)
+    assert matmuls[0][1][1:] == (
         "/model/layers.0/attn_hyper_connection/input_mix_down_block_inject/MatMul",
         "normalized",
     )
+    assert matmuls[1][1][2] == "/model/layers.0/attn_hyper_connection/input_mix_weight_down/SiLU/output_0"
     split = next(call for call in model.calls if call[0] == "make_split")
     assert split[1][1][1] == "/model/constants/INT64/[4, 4]"
     assert split[1][2] == [
         "/model/layers.0/attn_hyper_connection/input_mix_weight_down/MatMul/output_0",
         "/model/layers.0/attn_hyper_connection/block_inject_weight/MatMul/output_0",
     ]
-    assert matmuls[1][1][2] == "/model/layers.0/attn_hyper_connection/input_mix_weight_down/SiLU/output_0"
 
 
 def test_hyper_connection_injection_emits_fused_post_mix():
@@ -523,8 +701,8 @@ def test_dense_qwen_sparse_attention_emits_indexer_and_dynamic_executor():
 
     indexer = nodes[-2][1]
     assert indexer["inputs"] == [
-        "/model/layers.3/attn/indexer/query",
-        "/model/layers.3/attn/indexer/key",
+        "index_qk",
+        "",
         "model.layers.3.attn.indexer.q_norm.weight",
         "model.layers.3.attn.indexer.k_norm.weight",
         "cos_cache",
@@ -532,12 +710,6 @@ def test_dense_qwen_sparse_attention_emits_indexer_and_dynamic_executor():
         "attention_mask",
         "past.3.indexer_key",
     ]
-    assert not any(
-        call[0] == "make_reshape" and "/attn/indexer/query/Reshape" in str(call)
-        for call in model.calls
-    )
-    assert not any("/rotary_cache/" in str(call) for call in model.calls)
-    assert not any("/visibility/" in str(call) for call in model.calls)
     assert indexer["outputs"] == [
         "/model/layers.3/attn/SparseAttentionIndexer/output_0",
         "present.3.indexer_key",
@@ -548,6 +720,7 @@ def test_dense_qwen_sparse_attention_emits_indexer_and_dynamic_executor():
     assert not any(op_type == "SimplifiedLayerNormalization" for op_type, _ in nodes)
 
     attention = nodes[-1][1]
+    assert attention["inputs"][:3] == ["packed_qkv", "", ""]
     casts = [call for call in model.calls if call[0] == "make_cast"]
     assert not casts
     assert attention["inputs"][7:11] == [
@@ -570,14 +743,6 @@ def test_dense_qwen_sparse_attention_emits_indexer_and_dynamic_executor():
     assert attention["is_causal"] == 1
     assert attention["attention_mode"] == "selected_only"
     assert attention["selected_kv_source"] == "main"
-
-
-def test_dense_qwen_sparse_attention_rejects_boolean_mask():
-    model = make_sparse_model(paged=False)
-    model.input_types["attention_mask"] = ir.DataType.BOOL
-
-    with pytest.raises(ValueError, match="requires an INT64 attention_mask"):
-        model.make_qwen_sparse_attention(3, make_attention(), "hidden_states")
 
 
 def test_paged_qwen_sparse_attention_emits_shared_webgpu_schema():

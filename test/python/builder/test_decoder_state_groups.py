@@ -522,29 +522,16 @@ def test_dense_gated_delta_net_supports_bfloat16_io():
 
 
 @pytest.mark.parametrize(
-    ("use_paged_attention", "linear_attn_op", "state_window", "ep", "message"),
+    ("state_window", "ep", "message"),
     [
-        (True, "linear_attention", 0, "webgpu", "CUDA execution provider"),
-        (False, "gated_delta_net", 0, "webgpu", "CUDA execution provider"),
-        (True, "linear_attention", 1, "cuda", "require state_window=0"),
-        (False, "gated_delta_net", 1, "cuda", "require state_window=0"),
+        (0, "webgpu", "CUDA execution provider"),
+        (1, "cuda", "require state_window=0"),
     ],
 )
-def test_qwen35_gated_delta_net_option_validation(
-    use_paged_attention,
-    linear_attn_op,
-    state_window,
-    ep,
-    message,
-):
+def test_qwen35_gated_delta_net_validation(state_window, ep, message):
     model = Qwen35TextModel.__new__(Qwen35TextModel)
     with pytest.raises(ValueError, match=message):
-        model.validate_gated_delta_net_options(
-            use_paged_attention,
-            linear_attn_op,
-            state_window,
-            ep,
-        )
+        model.validate_gated_delta_net_options(state_window, ep)
 
 
 def _packed_gated_delta_net_model(
@@ -554,7 +541,6 @@ def _packed_gated_delta_net_model(
 ):
     model = Qwen35TextModel.__new__(Qwen35TextModel)
     model.use_paged_attention = True
-    model.linear_attn_op = "gated_delta_net"
     model.ep = "cuda"
     model.context_length_attrs = {"state_window": 0, "state_update_capacity": capacity}
     model.io_dtype = io_dtype
@@ -628,6 +614,9 @@ def test_qwen38_packed_layer_reuses_declared_state_update_bindings(monkeypatch):
     model.make_gated_delta_net_layer(0, SimpleNamespace(A_log="a_log", dt_bias="dt_bias"), "conv", "b", "a")
 
     gdn = calls[0]
+    assert gdn["q_path"] == "conv"
+    assert gdn["k_path"] == ""
+    assert gdn["v_path"] == ""
     assert gdn["state_update_capture_count"] == model.input_names["state_update.capture_count"]
     assert gdn["state_update_active"] == model.input_names["state_update.active"]
     assert gdn["state_update_capsule"] == model.output_names["state_update.recurrent_capsule"][0]
@@ -671,6 +660,9 @@ def test_qwen38_dense_gated_delta_net_exports_raw_a_log(monkeypatch):
     )
 
     gdn = calls[0][1]
+    assert gdn["q_path"] == "conv_output"
+    assert gdn["k_path"] == ""
+    assert gdn["v_path"] == ""
     assert gdn["a_log"] == "model.layers.1.linear_attn.A_log"
     assert gdn["state_shape"] == ["batch_size", 3, 8, 4]
     assert gdn["gate_shape"] == ["batch_size", "sequence_length", 3]

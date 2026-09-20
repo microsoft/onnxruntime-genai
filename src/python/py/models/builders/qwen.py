@@ -10,7 +10,6 @@ import copy
 import json
 import os
 
-import numpy as np
 import onnx_ir as ir
 import torch
 from transformers import Qwen2ForCausalLM
@@ -115,19 +114,15 @@ class VideoChatFlashQwenModel(QwenModel):
 
 
 class Qwen35TextModel(Model):
-    def validate_gated_delta_net_options(self, use_paged_attention, linear_attn_op, state_window, ep):
-        uses_gated_delta_net = use_paged_attention or linear_attn_op == "gated_delta_net"
-        if uses_gated_delta_net and ep != "cuda":
+    def validate_gated_delta_net_options(self, state_window, ep):
+        if ep != "cuda":
             raise ValueError("GatedDeltaNet exports require the CUDA execution provider")
-        if uses_gated_delta_net and state_window:
+        if state_window:
             raise ValueError("GatedDeltaNet exports commit an unwindowed recurrent state and require state_window=0")
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
-        self.linear_attn_op = str(extra_options.get("linear_attn_op", "linear_attention")).lower()
-        if self.linear_attn_op not in ("linear_attention", "gated_delta_net"):
-            raise ValueError("linear_attn_op must be one of: linear_attention, gated_delta_net")
         self.configure_gated_delta_net_io()
 
         # OffsetRMSNorm: Qwen3.5 uses (1 + weight) * RMSNorm(x).
@@ -152,8 +147,6 @@ class Qwen35TextModel(Model):
             return
 
         self.validate_gated_delta_net_options(
-            self.use_paged_attention,
-            self.linear_attn_op,
             self.context_length_attrs["state_window"],
             self.ep,
         )
@@ -163,17 +156,16 @@ class Qwen35TextModel(Model):
             self.input_shapes["past.conv"] = conv_shape
             self.output_shapes["present.conv"] = conv_shape
 
-        if self.use_paged_attention or self.linear_attn_op == "gated_delta_net":
-            recurrent_shape = [
-                "batch_size",
-                self.linear_num_value_heads,
-                self.linear_value_head_dim,
-                self.linear_key_head_dim,
-            ]
-            self.input_types["past.recurrent"] = ir.DataType.FLOAT
-            self.input_shapes["past.recurrent"] = recurrent_shape
-            self.output_types["present.recurrent"] = ir.DataType.FLOAT
-            self.output_shapes["present.recurrent"] = recurrent_shape
+        recurrent_shape = [
+            "batch_size",
+            self.linear_num_value_heads,
+            self.linear_value_head_dim,
+            self.linear_key_head_dim,
+        ]
+        self.input_types["past.recurrent"] = ir.DataType.FLOAT
+        self.input_shapes["past.recurrent"] = recurrent_shape
+        self.output_types["present.recurrent"] = ir.DataType.FLOAT
+        self.output_shapes["present.recurrent"] = recurrent_shape
 
         capacity = self.context_length_attrs["state_update_capacity"]
         if not capacity:
@@ -241,6 +233,11 @@ class Qwen35TextModel(Model):
     def make_attention_input_proj(self, layer_id, attention, root_input, **kwargs):
         """Split Qwen3.5's doubled, per-head Q projection into Q and gate."""
         super().make_attention_input_proj(layer_id, attention, root_input, **kwargs)
+
+        self.split_attention_query_gate(layer_id)
+
+    def split_attention_query_gate(self, layer_id):
+        """Split the doubled per-head query projection into query and output gate."""
 
         q_size = self.num_attn_heads * self.head_size
         token_shape = ["num_tokens"] if self.use_paged_attention else ["batch_size", "sequence_length"]
@@ -374,45 +371,14 @@ class Qwen35TextModel(Model):
             [0, 2, 1],
         )
 
-        if self.linear_attn_op == "gated_delta_net":
-            linear_output = self.make_gated_delta_net_layer(
-                layer_id,
-                linear_attn,
-                conv_out_t_output,
-                b_name,
-                a_name,
-            )
-            self.make_linear_attention_output_proj(layer_id, linear_attn, linear_output, z_name)
-            return
-
-        q_scaled_output, k_norm_out, v_out, g_output, beta_output = self.make_linear_attention_normalize_and_gate(
+        linear_output = self.make_gated_delta_net_layer(
             layer_id,
             linear_attn,
             conv_out_t_output,
             b_name,
             a_name,
         )
-
-        # --- Fused recurrence: LinearAttention (com.microsoft) ---
-        la_op_name = f"{basename}/LinearAttention"
-        self.make_linear_attention(
-            la_op_name,
-            q_path=q_scaled_output,
-            k_path=k_norm_out,
-            v_path=v_out,
-            past_recurrent_state=self.input_names["past.recurrent"][layer_id],
-            present_recurrent_state=self.output_names["present.recurrent"][layer_id],
-            decay=g_output,
-            beta=beta_output,
-            q_num_heads=self.linear_num_key_heads,
-            kv_num_heads=self.linear_num_value_heads,
-            update_rule="gated_delta",
-            scale=1.0,  # Q is already pre-scaled by 1/sqrt(d_k)
-        )
-        la_output = f"{la_op_name}/output_0"
-
-        # Gated RMSNorm + output projection
-        self.make_linear_attention_output_proj(layer_id, linear_attn, la_output, z_name)
+        self.make_linear_attention_output_proj(layer_id, linear_attn, linear_output, z_name)
 
     def make_conv_state_update_kwargs(self, layer_id):
         """Compact convolution-capture bindings for this layer, or nothing when capture is disabled."""
@@ -440,41 +406,14 @@ class Qwen35TextModel(Model):
         }
 
     def make_gated_delta_net_layer(self, layer_id, linear_attn, conv_output, b_name, a_name):
-        """Split the conv output into per-head Q/K/V and run GatedDeltaNet over dense or packed tokens."""
+        """Run GatedDeltaNet directly from the packed convolution QKV output."""
         basename = f"/model/layers.{layer_id}/linear_attn"
         packed = self.use_paged_attention
         token_shape = ["num_tokens"] if packed else ["batch_size", "sequence_length"]
         # Reshape constants keep every token axis, so packed layouts carry one leading 0 and dense two.
         kept_axes = "0" if packed else "0, 0"
-        key_heads, key_head_dim = self.linear_num_key_heads, self.linear_key_head_dim
         value_heads, value_head_dim = self.linear_num_value_heads, self.linear_value_head_dim
-        key_dim, value_dim = self.linear_key_dim, self.linear_value_dim
-
-        split_name = f"{basename}/split_qkv/Split"
-        split_outputs = [f"{split_name}/output_{index}" for index in range(3)]
-        self.make_split(
-            split_name,
-            inputs=[conv_output, f"/model/constants/INT64/[{key_dim}, {key_dim}, {value_dim}]"],
-            outputs=split_outputs,
-            dtypes=[self.io_dtype] * 3,
-            shapes=[[*token_shape, key_dim], [*token_shape, key_dim], [*token_shape, value_dim]],
-            axis=-1,
-        )
-
-        head_paths = []
-        for tag, split_output, num_heads, head_dim in (
-            ("q", split_outputs[0], key_heads, key_head_dim),
-            ("k", split_outputs[1], key_heads, key_head_dim),
-            ("v", split_outputs[2], value_heads, value_head_dim),
-        ):
-            reshape_name = f"{basename}/{tag}_heads/Reshape"
-            self.make_reshape(
-                reshape_name,
-                [split_output, f"/model/constants/INT64/[{kept_axes}, {num_heads}, {head_dim}]"],
-                self.io_dtype,
-                [*token_shape, num_heads, head_dim],
-            )
-            head_paths.append(f"{reshape_name}/output_0")
+        value_dim = self.linear_value_dim
 
         # The kernel applies Qwen's own gate arithmetic, so the raw checkpoint tensors are exported as-is.
         a_log_name = f"model.layers.{layer_id}.linear_attn.A_log"
@@ -485,9 +424,9 @@ class Qwen35TextModel(Model):
         op_name = f"{basename}/GatedDeltaNet"
         recurrent_shape = self.output_shapes["present.recurrent"]
         shared_kwargs = {
-            "q_path": head_paths[0],
-            "k_path": head_paths[1],
-            "v_path": head_paths[2],
+            "q_path": conv_output,
+            "k_path": "",
+            "v_path": "",
             "decay": f"{a_name}/output_0",
             "beta": f"{b_name}/output_0",
             "a_log": a_log_name,
@@ -587,78 +526,6 @@ class Qwen35TextModel(Model):
                 "pre-quantized weights that its loader did not dequantize."
             )
 
-    def make_linear_attention_normalize_and_gate(self, layer_id, attention, conv_out_3d, b_name, a_name):
-        """Split QKV, per-head L2 norm, Q scale, and compute decay/beta gates.
-
-        Args:
-            conv_out_3d: Conv output transposed to [B, S, linear_conv_dim].
-            b_name: Name of the beta projection MatMul node.
-            a_name: Name of the alpha projection MatMul node.
-
-        Returns:
-            (q_scaled_output, k_norm_out, v_out, g_output, beta_output)
-        """
-        basename = f"/model/layers.{layer_id}/linear_attn"
-
-        # Split into Q, K, V
-        split_qkv_name = f"{basename}/split_qkv/Split"
-        q_out = f"{split_qkv_name}/output_0"
-        k_out = f"{split_qkv_name}/output_1"
-        v_out = f"{split_qkv_name}/output_2"
-        self.make_split(
-            split_qkv_name,
-            inputs=[
-                conv_out_3d,
-                f"/model/constants/INT64/[{self.linear_key_dim}, {self.linear_key_dim}, {self.linear_value_dim}]",
-            ],
-            outputs=[q_out, k_out, v_out],
-            dtypes=[self.io_dtype] * 3,
-            shapes=[
-                ["batch_size", "sequence_length", self.linear_key_dim],
-                ["batch_size", "sequence_length", self.linear_key_dim],
-                ["batch_size", "sequence_length", self.linear_value_dim],
-            ],
-            axis=-1,
-        )
-
-        # Per-head L2 normalize Q and K
-        q_norm_out = self.make_l2_normalize(f"{basename}/q_l2norm", q_out)
-        k_norm_out = self.make_l2_normalize(f"{basename}/k_l2norm", k_out)
-
-        # Scale Q by 1/sqrt(head_k_dim)
-        scale_name = f"/model/constants/{self.io_dtype}/{float(1.0 / np.sqrt(self.linear_key_head_dim))}"
-        q_scaled_name = f"{basename}/q_scaled/Mul"
-        self.make_mul(
-            q_scaled_name,
-            [q_norm_out, scale_name],
-            self.io_dtype,
-            ["batch_size", "sequence_length", self.linear_key_dim],
-        )
-        q_scaled_output = f"{q_scaled_name}/output_0"
-
-        # g = -exp(A_log) * softplus(a + dt_bias), beta = sigmoid(b)
-        dt_bias_init = f"model.layers.{layer_id}.linear_attn.dt_bias"
-        self.make_initializer(attention.dt_bias, dt_bias_init, to=ir.DataType.FLOAT)
-
-        neg_exp_a_name = f"model.layers.{layer_id}.linear_attn.neg_exp_A"
-        neg_exp_a = (-attention.A_log.data.exp()).detach()
-        self.make_initializer(neg_exp_a, neg_exp_a_name, to=ir.DataType.FLOAT)
-
-        gate_name = f"{basename}/LinearAttentionGate"
-        gate_shape = ["batch_size", "sequence_length", self.linear_num_value_heads]
-        self.make_linear_attention_gate(
-            gate_name,
-            a=f"{a_name}/output_0",
-            dt_bias=dt_bias_init,
-            decay_scale=neg_exp_a_name,
-            b=f"{b_name}/output_0",
-            shape=gate_shape,
-        )
-        g_output = f"{gate_name}/output_0"
-        beta_output = f"{gate_name}/output_1"
-
-        return q_scaled_output, k_norm_out, v_out, g_output, beta_output
-
     def make_linear_attention_output_proj(self, layer_id, attention, attn_output_3d, z_name):
         """Build gated RMSNorm and output projection.
 
@@ -689,46 +556,6 @@ class Qwen35TextModel(Model):
         self.make_matmul(attention.out_proj, o_name, f"{gated_norm_name}/output_0")
 
         self.layernorm_attrs["skip_input"] = f"{o_name}/output_0"
-
-    def make_l2_normalize(self, basename, root_input):
-        """Per-head L2 normalize: reshape [B, S, N*H] -> [B, S, N, H], norm, reshape back.
-
-        Uses [0, 0, N, H] / [0, 0, N*H] reshape targets so all dims are
-        constants or copied from the 3D/4D input, avoiding Shape ops that
-        would run on CPU and block CUDA graph capture.
-        """
-        total_dim = self.linear_num_key_heads * self.linear_key_head_dim
-
-        # Reshape to [B, S, N, H] for per-head normalization
-        flat_name = f"{basename}/flat/Reshape"
-        flat_out = f"{flat_name}/output_0"
-        self.make_reshape(
-            flat_name,
-            [root_input, f"/model/constants/INT64/[0, 0, {self.linear_num_key_heads}, {self.linear_key_head_dim}]"],
-            self.io_dtype,
-            ["batch_size", "sequence_length", self.linear_num_key_heads, self.linear_key_head_dim],
-        )
-
-        norm_name = f"{basename}/LpNormalization"
-        self.make_lp_normalization(
-            norm_name,
-            flat_out,
-            self.io_dtype,
-            ["batch_size", "sequence_length", self.linear_num_key_heads, self.linear_key_head_dim],
-            axis=-1,
-            p=2,
-        )
-
-        # Reshape back to [B, S, N*H]
-        unflat_name = f"{basename}/unflat/Reshape"
-        unflat_out = f"{unflat_name}/output_0"
-        self.make_reshape(
-            unflat_name,
-            [f"{norm_name}/output_0", f"/model/constants/INT64/[0, 0, {total_dim}]"],
-            self.io_dtype,
-            ["batch_size", "sequence_length", total_dim],
-        )
-        return unflat_out
 
     def make_decoder_state_groups(self, inputs, outputs):
         if not self.use_paged_attention:
@@ -918,7 +745,95 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         super().make_attention_init(config)
         self.attention_attrs["use_packed_matmul"] = self.is_packed_matmul_supported()
 
+    def select_projection_outputs(self, projection, indices):
+        """Clone a projection while selecting output rows and their quantization metadata."""
+        selected = copy.copy(projection)
+        out_features = getattr(projection, "out_features", None)
+        if out_features is None:
+            out_features = projection.weight.shape[0]
+        for attribute in ("weight", "bias", "qweight", "scales", "qzeros", "weight_scale"):
+            tensor = getattr(projection, attribute, None)
+            if tensor is None or tensor.ndim == 0:
+                continue
+            index = indices.to(tensor.device)
+            if tensor.shape[0] == out_features:
+                value = tensor.index_select(0, index).contiguous()
+            elif tensor.ndim > 1 and tensor.shape[1] == out_features:
+                value = tensor.index_select(1, index).contiguous()
+            else:
+                continue
+            if isinstance(tensor, torch.nn.Parameter):
+                value = torch.nn.Parameter(value, requires_grad=False)
+            setattr(selected, attribute, value)
+        selected.out_features = indices.numel()
+        return selected
+
     def make_attention_input_proj(self, layer_id, attention, root_input, **kwargs):
+        indexer_proj = kwargs.pop("indexer_proj", None)
+        if indexer_proj is not None and self.attention_attrs["use_packed_matmul"]:
+            q_size = self.q_size
+            q_gate_rows = torch.arange(2 * q_size).reshape(self.num_attn_heads, 2, self.head_size)
+            q_proj = self.select_projection_outputs(attention.q_proj, q_gate_rows[:, 0, :].reshape(-1))
+            gate_proj = self.select_projection_outputs(attention.q_proj, q_gate_rows[:, 1, :].reshape(-1))
+
+            qkv_projections = (q_proj, attention.k_proj, attention.v_proj)
+            packed_qkv = self.make_packed_matmul_class(*qkv_projections)
+            packed_qkv_name = self.make_matmul(
+                packed_qkv,
+                f"/model/layers.{layer_id}/attn/qkv_proj/MatMul",
+                root_input,
+            )
+            packed_qkv_output = f"{packed_qkv_name}/output_0"
+            biases = [getattr(projection, "bias", None) for projection in qkv_projections]
+            if any(bias is not None and torch.count_nonzero(bias) > 0 for bias in biases):
+                bias_template = next(bias for bias in biases if bias is not None)
+                packed_bias = torch.cat(
+                    [
+                        bias
+                        if bias is not None
+                        else torch.zeros(
+                            projection.out_features,
+                            dtype=bias_template.dtype,
+                            device=bias_template.device,
+                        )
+                        for projection, bias in zip(qkv_projections, biases, strict=True)
+                    ]
+                )
+                packed_add = f"/model/layers.{layer_id}/attn/qkv_proj/Add"
+                self.make_add_bias(packed_bias, packed_add, packed_qkv_output)
+                packed_qkv_output = f"{packed_add}/output_0"
+
+            gate_name = self.make_matmul(
+                gate_proj,
+                f"/model/layers.{layer_id}/attn/gate_proj/MatMul",
+                root_input,
+            )
+            gate_output = f"{gate_name}/output_0"
+            gate_bias = getattr(gate_proj, "bias", None)
+            if gate_bias is not None and torch.count_nonzero(gate_bias) > 0:
+                gate_add = f"/model/layers.{layer_id}/attn/gate_proj/Add"
+                self.make_add_bias(gate_bias, gate_add, gate_output)
+                gate_output = f"{gate_add}/output_0"
+
+            indexer_name = self.make_matmul(
+                indexer_proj,
+                f"/model/layers.{layer_id}/attn/indexer/index_qk_proj/MatMul",
+                root_input,
+            )
+            indexer_output = f"{indexer_name}/output_0"
+            indexer_bias = getattr(indexer_proj, "bias", None)
+            if indexer_bias is not None and torch.count_nonzero(indexer_bias) > 0:
+                indexer_add = f"/model/layers.{layer_id}/attn/indexer/index_qk_proj/Add"
+                self.make_add_bias(indexer_bias, indexer_add, indexer_output)
+                indexer_output = f"{indexer_add}/output_0"
+
+            self.attention_attrs["q_path"] = packed_qkv_output
+            self.attention_attrs["k_path"] = ""
+            self.attention_attrs["v_path"] = ""
+            self.attention_attrs["gate_path"] = gate_output
+            self.attention_attrs["indexer_qk_path"] = indexer_output
+            return
+
         if not self.attention_attrs["use_packed_matmul"]:
             return super().make_attention_input_proj(layer_id, attention, root_input, **kwargs)
 
@@ -1015,100 +930,10 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         return b_name, a_name
 
     def make_moe_router(self, layer_id, moe, root_input):
-        basename = f"/model/layers.{layer_id}/moe/gate_up"
-
-        class PackedGateUp:
-            weight = torch.cat([moe.shared_expert.gate_proj.weight, moe.shared_expert.up_proj.weight], dim=0)
-
-        packed_matmul = self.make_matmul(PackedGateUp(), f"{basename}/MatMul", root_input)
-        packed_output = f"{packed_matmul}/output_0"
-
-        projections = (moe.shared_expert.gate_proj, moe.shared_expert.up_proj)
-        biases = [getattr(projection, "bias", None) for projection in projections]
-        if any(bias is not None and torch.count_nonzero(bias) > 0 for bias in biases):
-            bias_template = next(bias for bias in biases if bias is not None)
-            packed_bias = torch.cat(
-                [
-                    bias
-                    if bias is not None
-                    else torch.zeros(
-                        projection.out_features,
-                        dtype=bias_template.dtype,
-                        device=bias_template.device,
-                    )
-                    for projection, bias in zip(projections, biases, strict=True)
-                ]
-            )
-            packed_add = f"{basename}/Add"
-            self.make_add_bias(packed_bias, packed_add, packed_output)
-            packed_output = f"{packed_add}/output_0"
-
-        intermediate_size = self.shared_expert_intermediate_size
-        num_experts = self.moe_attrs["num_experts"]
-        split_outputs = [f"{basename}/Split/output_{index}" for index in range(2)]
-        self.make_split(
-            f"{basename}/Split",
-            [packed_output, f"/model/constants/INT64/[{intermediate_size}, {intermediate_size}]"],
-            split_outputs,
-            [self.io_dtype] * 2,
-            [
-                self.make_hidden_state_shape(last_dim=intermediate_size),
-                self.make_hidden_state_shape(last_dim=intermediate_size),
-            ],
-            axis=-1,
-        )
-        self.moe_attrs.setdefault("shared_expert_paths", {})[layer_id] = tuple(split_outputs)
-
-        router_matmul = self.make_matmul(moe.gate, f"/model/layers.{layer_id}/moe/router/MatMul", root_input)
-        router_reshape_name = f"/model/layers.{layer_id}/moe/router/Reshape"
-        self.make_reshape(
-            router_reshape_name,
-            [f"{router_matmul}/output_0", f"/model/constants/INT64/{[-1, num_experts]}"],
-            dtype=self.io_dtype,
-            shape=["batch_size * sequence_length", num_experts],
-        )
+        return super().make_moe_router(layer_id, moe, root_input)
 
     def make_shared_expert(self, layer_id, shared_expert, shared_expert_gate, root_input):
-        gate_path, up_path = self.moe_attrs["shared_expert_paths"].pop(layer_id)
-        intermediate_size = self.intermediate_size
-        self.intermediate_size = self.shared_expert_intermediate_size
-        try:
-            activation = self.make_activation(layer_id, gate_path)
-            mul_name = f"/model/layers.{layer_id}/mlp/Mul"
-            self.make_mul(
-                mul_name,
-                [f"{activation}/output_0", up_path],
-                self.io_dtype,
-                self.make_hidden_state_shape(last_dim=self.intermediate_size),
-            )
-            down_name = self.make_matmul(
-                shared_expert.down_proj,
-                f"/model/layers.{layer_id}/mlp/down_proj/MatMul",
-                f"{mul_name}/output_0",
-            )
-            if (
-                shared_expert.down_proj.bias is not None
-                and torch.count_nonzero(shared_expert.down_proj.bias) > 0
-            ):
-                down_add = f"/model/layers.{layer_id}/mlp/down_proj/Add"
-                self.make_add_bias(shared_expert.down_proj.bias, down_add, f"{down_name}/output_0")
-                down_name = down_add
-        finally:
-            self.intermediate_size = intermediate_size
-
-        gate_matmul_name = self.make_matmul(
-            shared_expert_gate,
-            f"/model/layers.{layer_id}/shared_expert_gate/MatMul",
-            root_input,
-        )
-        gate_sigmoid_name = f"/model/layers.{layer_id}/shared_expert_gate/Sigmoid"
-        self.make_sigmoid(
-            gate_sigmoid_name,
-            f"{gate_matmul_name}/output_0",
-            self.io_dtype,
-            shape=self.make_hidden_state_shape(last_dim=1),
-        )
-        return f"{down_name}/output_0", f"{gate_sigmoid_name}/output_0"
+        return super().make_shared_expert(layer_id, shared_expert, shared_expert_gate, root_input)
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         extra_options = copy.deepcopy(extra_options)
@@ -1593,7 +1418,8 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         return f"{add_name}/output_0"
 
     def make_qwen_sparse_attention(self, layer_id, attention, root_input):
-        self.make_attention_input_proj(layer_id, attention, root_input)
+        indexer_proj = None if self.use_paged_attention else attention.indexer.index_qk_proj
+        self.make_attention_input_proj(layer_id, attention, root_input, indexer_proj=indexer_proj)
         q_norm_weight, k_norm_weight = self.get_qk_norm_weight_names(layer_id)
         self.make_initializer(attention.q_norm.weight + 1, q_norm_weight, to=self.io_dtype)
         self.make_initializer(attention.k_norm.weight + 1, k_norm_weight, to=self.io_dtype)
@@ -1605,38 +1431,25 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
             selected_indices = self.input_names["sparse_attention.selected_indices"][layer_id]
             selected_counts = self.input_names["sparse_attention.selected_counts"][layer_id]
         else:
-            index_q_size = self.indexer_num_heads * self.indexer_head_dim
-            index_k_size = self.indexer_kv_heads * self.indexer_head_dim
-            index_matmul = self.make_matmul(
-                attention.indexer.index_qk_proj,
-                f"/model/layers.{layer_id}/attn/indexer/index_qk_proj/MatMul",
-                root_input,
-            )
-            index_q = f"/model/layers.{layer_id}/attn/indexer/query"
-            index_k = f"/model/layers.{layer_id}/attn/indexer/key"
-            self.make_split(
-                f"/model/layers.{layer_id}/attn/indexer/Split",
-                [f"{index_matmul}/output_0", f"/model/constants/INT64/[{index_q_size}, {index_k_size}]"],
-                [index_q, index_k],
-                [self.io_dtype, self.io_dtype],
-                [
-                    ["batch_size", "sequence_length", index_q_size],
-                    ["batch_size", "sequence_length", index_k_size],
-                ],
-            )
+            index_qk_path = self.attention_attrs.pop("indexer_qk_path", None)
+            if index_qk_path is None:
+                index_matmul = self.make_matmul(
+                    attention.indexer.index_qk_proj,
+                    f"/model/layers.{layer_id}/attn/indexer/index_qk_proj/MatMul",
+                    root_input,
+                )
+                index_qk_path = f"{index_matmul}/output_0"
             index_q_scale = f"model.layers.{layer_id}.attn.indexer.q_norm.weight"
             index_k_scale = f"model.layers.{layer_id}.attn.indexer.k_norm.weight"
             self.make_initializer(attention.indexer.q_layernorm.weight + 1, index_q_scale, to=self.io_dtype)
             self.make_initializer(attention.indexer.k_layernorm.weight + 1, index_k_scale, to=self.io_dtype)
             indexer_name = f"/model/layers.{layer_id}/attn/SparseAttentionIndexer"
             selected_indices = f"{indexer_name}/output_0"
-            if self.input_types["attention_mask"] != ir.DataType.INT64:
-                raise ValueError("SparseAttentionIndexer requires an INT64 attention_mask input.")
             self.make_node(
                 "SparseAttentionIndexer",
                 inputs=[
-                    index_q,
-                    index_k,
+                    index_qk_path,
+                    "",
                     index_q_scale,
                     index_k_scale,
                     cos_cache,

@@ -2,11 +2,124 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 # --------------------------------------------------------------------------
+import math
+
 import onnx_ir as ir
 
 
 class Qwen38:
     """Standard ONNX subgraphs retained around Qwen3.8 contrib-op replacements."""
+
+    def make_gated_delta_net_expansion(self, layer_id, attention, conv_out_3d, b_name, a_name):
+        """Expand dense GatedDeltaNet into gate preprocessing plus LinearAttention."""
+        q_path, k_path, v_path, decay, beta = self.make_gated_delta_net_gates_expansion(
+            layer_id, attention, conv_out_3d, b_name, a_name
+        )
+        name = f"/model/layers.{layer_id}/linear_attn/LinearAttention"
+        self.make_linear_attention(
+            name,
+            q_path=q_path,
+            k_path=k_path,
+            v_path=v_path,
+            past_recurrent_state=self.input_names["past.recurrent"][layer_id],
+            present_recurrent_state=self.output_names["present.recurrent"][layer_id],
+            decay=decay,
+            beta=beta,
+            q_num_heads=self.linear_num_key_heads,
+            kv_num_heads=self.linear_num_value_heads,
+            update_rule="gated_delta",
+            scale=1.0,
+        )
+        return f"{name}/output_0"
+
+    def make_gated_delta_net_gates_expansion(self, layer_id, attention, conv_out_3d, b_name, a_name):
+        """Expand Qwen gate arithmetic and Q/K normalization around LinearAttention."""
+        basename = f"/model/layers.{layer_id}/linear_attn"
+        split_name = f"{basename}/split_qkv/Split"
+        q_path = f"{split_name}/output_0"
+        k_path = f"{split_name}/output_1"
+        v_path = f"{split_name}/output_2"
+        self.make_split(
+            split_name,
+            inputs=[
+                conv_out_3d,
+                f"/model/constants/INT64/[{self.linear_key_dim}, {self.linear_key_dim}, {self.linear_value_dim}]",
+            ],
+            outputs=[q_path, k_path, v_path],
+            dtypes=[self.io_dtype] * 3,
+            shapes=[
+                ["batch_size", "sequence_length", self.linear_key_dim],
+                ["batch_size", "sequence_length", self.linear_key_dim],
+                ["batch_size", "sequence_length", self.linear_value_dim],
+            ],
+            axis=-1,
+        )
+
+        q_path = self.make_l2_normalize_expansion(f"{basename}/q_l2norm", q_path)
+        k_path = self.make_l2_normalize_expansion(f"{basename}/k_l2norm", k_path)
+        scale = 1.0 / math.sqrt(self.linear_key_head_dim)
+        q_scaled = f"{basename}/q_scaled/Mul"
+        self.make_mul(
+            q_scaled,
+            [q_path, f"/model/constants/{self.io_dtype}/{scale}"],
+            self.io_dtype,
+            ["batch_size", "sequence_length", self.linear_key_dim],
+        )
+
+        dt_bias = f"model.layers.{layer_id}.linear_attn.dt_bias"
+        self.make_initializer(attention.dt_bias, dt_bias, to=ir.DataType.FLOAT)
+        decay_scale = f"model.layers.{layer_id}.linear_attn.neg_exp_A"
+        self.make_initializer((-attention.A_log.data.exp()).detach(), decay_scale, to=ir.DataType.FLOAT)
+        gate_name = f"{basename}/LinearAttentionGate"
+        self.make_linear_attention_gate(
+            gate_name,
+            a=f"{a_name}/output_0",
+            dt_bias=dt_bias,
+            decay_scale=decay_scale,
+            b=f"{b_name}/output_0",
+            shape=["batch_size", "sequence_length", self.linear_num_value_heads],
+        )
+        return (
+            f"{q_scaled}/output_0",
+            k_path,
+            v_path,
+            f"{gate_name}/output_0",
+            f"{gate_name}/output_1",
+        )
+
+    def make_l2_normalize_expansion(self, basename, root_input):
+        """Expand per-head L2 normalization without runtime Shape operators."""
+        total_dim = self.linear_num_key_heads * self.linear_key_head_dim
+        grouped_shape = [
+            "batch_size",
+            "sequence_length",
+            self.linear_num_key_heads,
+            self.linear_key_head_dim,
+        ]
+        flat_name = f"{basename}/flat/Reshape"
+        self.make_reshape(
+            flat_name,
+            [root_input, f"/model/constants/INT64/[0, 0, {self.linear_num_key_heads}, {self.linear_key_head_dim}]"],
+            self.io_dtype,
+            grouped_shape,
+        )
+        norm_name = f"{basename}/LpNormalization"
+        self.make_lp_normalization(
+            norm_name,
+            f"{flat_name}/output_0",
+            self.io_dtype,
+            grouped_shape,
+            axis=-1,
+            p=2,
+        )
+        unflat_name = f"{basename}/unflat/Reshape"
+        self.make_reshape(
+            unflat_name,
+            [f"{norm_name}/output_0", f"/model/constants/INT64/[0, 0, {total_dim}]"],
+            self.io_dtype,
+            ["batch_size", "sequence_length", total_dim],
+        )
+        return f"{unflat_name}/output_0"
 
     def make_branchwise_rms_norm_expansion(self, name, root_input, norm, hidden_size):
         """Apply RMS normalization independently to each hyper-connection branch."""
