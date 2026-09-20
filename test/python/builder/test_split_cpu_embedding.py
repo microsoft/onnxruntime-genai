@@ -2,7 +2,9 @@
 # Licensed under the MIT License.
 
 import copy
+import importlib.util
 import json
+from pathlib import Path
 
 import numpy as np
 import onnx
@@ -10,7 +12,13 @@ import onnxruntime as ort
 import pytest
 from onnx import TensorProto, helper, numpy_helper
 
-from models.split_cpu_embedding import convert, split_graph
+spec = importlib.util.spec_from_file_location(
+    "split_cpu_embedding", Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "split_cpu_embedding.py"
+)
+split_cpu_embedding = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(split_cpu_embedding)
+convert = split_cpu_embedding.convert
+split_graph = split_cpu_embedding.split_graph
 
 
 def lookup_model(quantized=False, retain_ids=False):
