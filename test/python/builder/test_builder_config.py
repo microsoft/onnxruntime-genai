@@ -340,6 +340,20 @@ def test_runtime_rejects_absent_engine_and_speculative_capabilities():
         apply_runtime_config(generated, {"speculative": {"max_draft_tokens": 4}})
 
 
+def test_runtime_adds_speculative_config_for_exported_drafter():
+    generated = {
+        "model": {
+            "decoder": {},
+            "dflash2": {"filename": "dflash2.onnx", "num_draft_tokens": 7},
+        },
+        "search": {},
+    }
+
+    updated = apply_runtime_config(generated, {"speculative": {"max_draft_tokens": 7}})
+
+    assert updated["speculative"] == {"max_draft_tokens": 7}
+
+
 @pytest.mark.parametrize("value", [True, 0, 17, 1.5, "4"])
 def test_runtime_rejects_invalid_max_draft_tokens(value):
     generated = {"model": {"decoder": {}}, "speculative": {"max_draft_tokens": 4}}
@@ -397,6 +411,28 @@ def test_runtime_rejects_provider_changes():
             generated,
             {"model": {"decoder": {"session_options": {"provider_options": []}}}},
         )
+
+
+def test_runtime_allows_block_drafter_to_repeat_decoder_provider_options():
+    generated = {
+        "model": {
+            "decoder": {"session_options": {"provider_options": [{"cuda": {"enable_cuda_graph": "0"}}]}},
+            "dflash2": {"session_options": {"ep.cuda.fpa_intb_gemm": "0"}},
+        }
+    }
+    runtime = {
+        "model": {
+            "dflash2": {
+                "session_options": {"provider_options": [{"cuda": {"enable_cuda_graph": "1"}}]}
+            }
+        }
+    }
+
+    updated = apply_runtime_config(generated, runtime)
+
+    assert updated["model"]["dflash2"]["session_options"]["provider_options"] == [
+        {"cuda": {"enable_cuda_graph": "1"}}
+    ]
 
 
 def test_runtime_rejects_non_session_model_members():

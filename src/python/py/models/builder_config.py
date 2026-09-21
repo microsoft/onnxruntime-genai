@@ -572,8 +572,6 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
     if not isinstance(speculative, dict):
         raise ValueError("runtime_config.speculative must be an object")
     check_fields(speculative, {"max_draft_tokens"}, "runtime_config.speculative")
-    if "speculative" in runtime_config and "speculative" not in generated_config:
-        raise ValueError("runtime_config references absent speculative configuration")
     if "max_draft_tokens" in speculative:
         max_draft_tokens = speculative["max_draft_tokens"]
         if isinstance(max_draft_tokens, bool) or not isinstance(max_draft_tokens, int) or not 1 <= max_draft_tokens <= 16:
@@ -586,6 +584,8 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
         decoder_capacity = generated_config.get("model", {}).get("decoder", {}).get("state_update_capacity")
         if isinstance(decoder_capacity, int) and decoder_capacity > 0:
             capacities.append(decoder_capacity)
+        if not capacities:
+            raise ValueError("runtime_config references absent speculative configuration")
         if capacities and max_draft_tokens > min(capacities):
             raise ValueError(
                 "runtime_config.speculative.max_draft_tokens exceeds the exported drafter/state capacity"
@@ -659,6 +659,11 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
                 )
             generated_names = {name for entry in generated_providers for name in entry}
             runtime_names = {name for entry in runtime_providers for name in entry}
+            if component_name in ("dflash2", "dspark") and not generated_names:
+                decoder_providers = generated_components.get("decoder", {}).get("session_options", {}).get(
+                    "provider_options", []
+                )
+                generated_names = {name for entry in decoder_providers for name in entry}
             if generated_names != runtime_names:
                 raise ValueError(
                     f"runtime_config.model.{component_name}.session_options cannot change execution providers"
