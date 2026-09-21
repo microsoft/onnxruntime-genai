@@ -411,16 +411,19 @@ def test_lfm2_vl_generation_matches_onnxruntime_reference(test_data_path, with_i
     np.testing.assert_array_equal(generator.get_sequence(0), _reference_generation(model_path, input_ids, num_tokens))
 
 
-def _generate_on(model_dir: Path, provider: str | None, image_path: str, num_tokens: int) -> np.ndarray:
+def _model_on(model_dir: Path, provider: str | None) -> og.Model:
     config = og.Config(os.fspath(model_dir))
     config.clear_providers()
     if provider is not None:
         config.append_provider(provider)
     try:
-        model = og.Model(config)
+        return og.Model(config)
     except RuntimeError as error:
         pytest.skip(f"{provider} execution provider is not usable here: {error}")
 
+
+def _generate_on(model_dir: Path, provider: str | None, image_path: str, num_tokens: int) -> np.ndarray:
+    model = _model_on(model_dir, provider)
     processor = model.create_multimodal_processor()
     params = og.GeneratorParams(model)
     params.set_search_options(do_sample=False, max_length=2048)
