@@ -618,6 +618,86 @@ void Lfm2AudioSpeechState::SetExtraInputs(const std::vector<ExtraInput>& extra_i
   }
 }
 
+Lfm2AudioSpeechState::SpeechBindings Lfm2AudioSpeechState::ResolveBindings() const {
+  SpeechBindings bindings;
+  bindings.mel_index = FindInput(model_.config_->model.speech.inputs.audio_embeds);
+  bindings.lengths_index = FindInput(model_.config_->model.speech.inputs.audio_lengths);
+  bindings.features_index = FindOutput(model_.config_->model.speech.outputs.audio_features);
+
+  const auto mel_info = inputs_[bindings.mel_index]->GetTensorTypeAndShapeInfo();
+  const auto mel_shape = mel_info->GetShape();  // [num_clips, longest_clip, num_mels]
+  if (mel_shape.size() != 3) {
+    throw std::runtime_error("Lfm2AudioSpeechState: expected a 3D [num_clips, num_frames, num_mels] mel tensor, got rank " +
+                             std::to_string(mel_shape.size()) + ".");
+  }
+  bindings.num_clips = mel_shape[0];
+  bindings.longest_clip = mel_shape[1];
+  bindings.num_mels = mel_shape[2];
+  bindings.mel_type = mel_info->GetElementType();
+
+  if (bindings.num_clips != static_cast<int64_t>(tokens_per_clip_.size())) {
+    throw std::runtime_error("Lfm2AudioSpeechState: the mel tensor holds " + std::to_string(bindings.num_clips) +
+                             " clips but audio_sizes has " + std::to_string(tokens_per_clip_.size()) + " entries.");
+  }
+  const int64_t total = std::accumulate(tokens_per_clip_.begin(), tokens_per_clip_.end(), int64_t{0});
+  if (total != num_audio_tokens_) {
+    throw std::runtime_error("Lfm2AudioSpeechState: audio_sizes sums to " + std::to_string(total) + " tokens but " +
+                             std::to_string(num_audio_tokens_) + " were expected.");
+  }
+
+  const auto lengths_info = inputs_[bindings.lengths_index]->GetTensorTypeAndShapeInfo();
+  if (static_cast<int64_t>(lengths_info->GetElementCount()) != bindings.num_clips) {
+    throw std::runtime_error("Lfm2AudioSpeechState: the mel tensor holds " + std::to_string(bindings.num_clips) +
+                             " clips but " + model_.config_->model.speech.inputs.audio_lengths + " has " +
+                             std::to_string(lengths_info->GetElementCount()) + " entries.");
+  }
+
+  const auto features_info = outputs_[bindings.features_index]->GetTensorTypeAndShapeInfo();
+  const auto features_shape = features_info->GetShape();  // [batch, num_audio_tokens, hidden_size]
+  // Several clips are concatenated into one prompt, which the pipeline only ever builds for a single
+  // sequence; a wider feature buffer would need the whole run repeated per beam.
+  if (features_shape.size() == 3 && features_shape[0] != 1) {
+    throw std::runtime_error("Lfm2AudioSpeechState: several audio clips need a batch size of 1, got " +
+                             std::to_string(features_shape[0]) + ".");
+  }
+  bindings.features_type = features_info->GetElementType();
+  bindings.hidden_size = features_shape.back();
+  return bindings;
+}
+
+std::unique_ptr<OrtValue> Lfm2AudioSpeechState::RunClip(const SpeechBindings& bindings, int64_t index,
+                                                        int64_t num_frames) {
+  const size_t mel_element_size = Ort::SizeOf(bindings.mel_type);
+  const size_t clip_stride = static_cast<size_t>(bindings.longest_clip * bindings.num_mels) * mel_element_size;
+  const auto* mel_data = static_cast<const uint8_t*>(inputs_[bindings.mel_index]->GetTensorRawData());
+
+  auto clip_mel = OrtValue::CreateTensor(Ort::Allocator::GetWithDefaultOptions(),
+                                         std::vector<int64_t>{1, num_frames, bindings.num_mels}, bindings.mel_type);
+  std::memcpy(clip_mel->GetTensorMutableRawData(), mel_data + static_cast<size_t>(index) * clip_stride,
+              static_cast<size_t>(num_frames * bindings.num_mels) * mel_element_size);
+
+  auto clip_length = OrtValue::CreateTensor<int64_t>(Ort::Allocator::GetWithDefaultOptions(), std::vector<int64_t>{1});
+  clip_length->GetTensorMutableData<int64_t>()[0] = num_frames;
+
+  auto clip_features = OrtValue::CreateTensor(
+      model_.p_device_->GetAllocator(),
+      std::vector<int64_t>{1, tokens_per_clip_[static_cast<size_t>(index)], bindings.hidden_size},
+      bindings.features_type);
+
+  OrtValue* mel_batch = inputs_[bindings.mel_index];
+  OrtValue* lengths = inputs_[bindings.lengths_index];
+  OrtValue* features = outputs_[bindings.features_index];
+  inputs_[bindings.mel_index] = clip_mel.get();
+  inputs_[bindings.lengths_index] = clip_length.get();
+  outputs_[bindings.features_index] = clip_features.get();
+  State::Run(*model_.speech_session_);
+  inputs_[bindings.mel_index] = mel_batch;
+  inputs_[bindings.lengths_index] = lengths;
+  outputs_[bindings.features_index] = features;
+
+  return clip_features;
+}
+
 DeviceSpan<float> Lfm2AudioSpeechState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
   if (model_.config_->model.speech.run_options.has_value()) {
     State::SetRunOptions(model_.config_->model.speech.run_options.value());
@@ -628,96 +708,28 @@ DeviceSpan<float> Lfm2AudioSpeechState::Run(int current_length, DeviceSpan<int32
     return {};
   }
 
-  const auto& mel_name = model_.config_->model.speech.inputs.audio_embeds;
-  const auto& lengths_name = model_.config_->model.speech.inputs.audio_lengths;
-  const size_t mel_index = FindInput(mel_name);
-  const size_t lengths_index = FindInput(lengths_name);
-  const size_t features_index = FindOutput(model_.config_->model.speech.outputs.audio_features);
-
-  OrtValue* mel_batch = inputs_[mel_index];
-  OrtValue* lengths = inputs_[lengths_index];
-  OrtValue* features = outputs_[features_index];
-
-  const auto mel_info = mel_batch->GetTensorTypeAndShapeInfo();
-  const auto mel_shape = mel_info->GetShape();  // [num_clips, longest_clip, num_mels]
-  if (mel_shape.size() != 3) {
-    throw std::runtime_error("Lfm2AudioSpeechState: expected a 3D [num_clips, num_frames, num_mels] mel tensor, got rank " +
-                             std::to_string(mel_shape.size()) + ".");
-  }
-  const int64_t num_clips = mel_shape[0];
-  const int64_t longest_clip = mel_shape[1];
-  const int64_t num_mels = mel_shape[2];
-  if (num_clips != static_cast<int64_t>(tokens_per_clip_.size())) {
-    throw std::runtime_error("Lfm2AudioSpeechState: the mel tensor holds " + std::to_string(num_clips) +
-                             " clips but audio_sizes has " + std::to_string(tokens_per_clip_.size()) + " entries.");
-  }
-  const int64_t total = std::accumulate(tokens_per_clip_.begin(), tokens_per_clip_.end(), int64_t{0});
-  if (total != num_audio_tokens_) {
-    throw std::runtime_error("Lfm2AudioSpeechState: audio_sizes sums to " + std::to_string(total) + " tokens but " +
-                             std::to_string(num_audio_tokens_) + " were expected.");
-  }
-
-  const auto mel_type = mel_info->GetElementType();
-  const size_t mel_element_size = Ort::SizeOf(mel_type);
-  const auto lengths_info = lengths->GetTensorTypeAndShapeInfo();
-  if (static_cast<int64_t>(lengths_info->GetElementCount()) != num_clips) {
-    throw std::runtime_error("Lfm2AudioSpeechState: the mel tensor holds " + std::to_string(num_clips) + " clips but " +
-                             lengths_name + " has " + std::to_string(lengths_info->GetElementCount()) + " entries.");
-  }
-  const int64_t* frames_per_clip = lengths->GetTensorData<int64_t>();
-
-  const auto features_info = features->GetTensorTypeAndShapeInfo();
-  const auto features_type = features_info->GetElementType();
-  const auto features_shape = features_info->GetShape();  // [batch, num_audio_tokens, hidden_size]
-  // Several clips are concatenated into one prompt, which the pipeline only ever builds for a single
-  // sequence; a wider feature buffer would need the whole run repeated per beam.
-  if (features_shape.size() == 3 && features_shape[0] != 1) {
-    throw std::runtime_error("Lfm2AudioSpeechState: several audio clips need a batch size of 1, got " +
-                             std::to_string(features_shape[0]) + ".");
-  }
-  const int64_t hidden_size = features_shape.back();
-  const size_t feature_row_bytes = static_cast<size_t>(hidden_size) * Ort::SizeOf(features_type);
-
-  auto features_bytes = ByteWrapTensor(*model_.p_device_, *features);
-  const auto* mel_data = static_cast<const uint8_t*>(mel_batch->GetTensorRawData());
-  const size_t clip_stride = static_cast<size_t>(longest_clip * num_mels) * mel_element_size;
+  const SpeechBindings bindings = ResolveBindings();
+  const int64_t* frames_per_clip = inputs_[bindings.lengths_index]->GetTensorData<int64_t>();
+  auto features_bytes = ByteWrapTensor(*model_.p_device_, *outputs_[bindings.features_index]);
+  const size_t feature_row_bytes = static_cast<size_t>(bindings.hidden_size) * Ort::SizeOf(bindings.features_type);
   size_t destination = 0;
 
   // The published encoder export is traced for one clip (its subsampling mask cannot broadcast over
   // a batch), so run it once per clip on that clip's own frames — which also keeps the padding out
   // of the encoder entirely — and concatenate the results in clip order.
-  for (int64_t clip = 0; clip < num_clips; ++clip) {
+  for (int64_t clip = 0; clip < bindings.num_clips; ++clip) {
     const int64_t num_frames = frames_per_clip[clip];
-    if (num_frames <= 0 || num_frames > longest_clip) {
+    if (num_frames <= 0 || num_frames > bindings.longest_clip) {
       throw std::runtime_error("Lfm2AudioSpeechState: clip " + std::to_string(clip) + " reports " +
                                std::to_string(num_frames) + " mel frames, outside the 1.." +
-                               std::to_string(longest_clip) + " the mel tensor holds.");
+                               std::to_string(bindings.longest_clip) + " the mel tensor holds.");
     }
-    const std::vector<int64_t> clip_mel_shape{1, num_frames, num_mels};
-    auto clip_mel = OrtValue::CreateTensor(Ort::Allocator::GetWithDefaultOptions(), clip_mel_shape, mel_type);
-    std::memcpy(clip_mel->GetTensorMutableRawData(), mel_data + static_cast<size_t>(clip) * clip_stride,
-                static_cast<size_t>(num_frames * num_mels) * mel_element_size);
 
-    auto clip_length = OrtValue::CreateTensor<int64_t>(Ort::Allocator::GetWithDefaultOptions(), std::vector<int64_t>{1});
-    clip_length->GetTensorMutableData<int64_t>()[0] = num_frames;
-
-    const int64_t clip_tokens = tokens_per_clip_[static_cast<size_t>(clip)];
-    auto clip_features = OrtValue::CreateTensor(model_.p_device_->GetAllocator(),
-                                                std::vector<int64_t>{1, clip_tokens, hidden_size}, features_type);
-
-    inputs_[mel_index] = clip_mel.get();
-    inputs_[lengths_index] = clip_length.get();
-    outputs_[features_index] = clip_features.get();
-    State::Run(*model_.speech_session_);
-
-    const size_t clip_bytes = static_cast<size_t>(clip_tokens) * feature_row_bytes;
+    auto clip_features = RunClip(bindings, clip, num_frames);
+    const size_t clip_bytes = static_cast<size_t>(tokens_per_clip_[static_cast<size_t>(clip)]) * feature_row_bytes;
     features_bytes.subspan(destination, clip_bytes).CopyFrom(ByteWrapTensor(*model_.p_device_, *clip_features));
     destination += clip_bytes;
   }
-
-  inputs_[mel_index] = mel_batch;
-  inputs_[lengths_index] = lengths;
-  outputs_[features_index] = features;
   return {};
 }
 

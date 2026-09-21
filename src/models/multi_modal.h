@@ -160,6 +160,25 @@ struct Lfm2AudioSpeechState : SpeechState {
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {}) override;
 
  private:
+  // Where the processor's staged mel tensor and the encoder's feature buffer are bound.
+  struct SpeechBindings {
+    size_t mel_index{};       // the [num_clips, longest, num_mels] staging tensor
+    size_t lengths_index{};   // its per-clip frame counts
+    size_t features_index{};  // the [1, total_tokens, hidden] buffer the embedding model reads
+    int64_t num_clips{};
+    int64_t longest_clip{};
+    int64_t num_mels{};
+    int64_t hidden_size{};
+    ONNXTensorElementDataType mel_type{};
+    ONNXTensorElementDataType features_type{};
+  };
+
+  // Reads the bound shapes and checks them against the per-clip token counts.
+  SpeechBindings ResolveBindings() const;
+
+  // Runs the encoder on clip `index`'s own frames and returns its features.
+  std::unique_ptr<OrtValue> RunClip(const SpeechBindings& bindings, int64_t index, int64_t num_frames);
+
   size_t FindInput(const std::string& name) const;
   size_t FindOutput(const std::string& name) const;
 

@@ -226,6 +226,98 @@ Lfm2AudioProcessor::Lfm2AudioProcessor(Config& config, const SessionInfo& sessio
   config.AddMapping(std::string(Config::Defaults::AudioSizesName), config.model.speech.inputs.audio_sizes);
 }
 
+Lfm2AudioProcessor::ClipMel Lfm2AudioProcessor::ComputeClipMel(const Audios& audios, size_t index) const {
+  ort_extensions::OrtxObjectPtr<OrtxTensorResult> decoded;
+  // The decoder resamples down to the encoder's rate and mixes to mono, but it cannot upsample:
+  // say which clip it was and what to do about it, rather than passing its bare message through.
+  try {
+    CheckResult(OrtxDecodeAudio(audios.audios_.get(), index, static_cast<int64_t>(mel_config_.sample_rate),
+                                /*stereo_to_mono=*/1, decoded.ToBeAssigned()));
+  } catch (const std::exception& e) {
+    throw std::runtime_error("Lfm2AudioProcessor: could not decode audio clip " + std::to_string(index) + " at " +
+                             std::to_string(mel_config_.sample_rate) +
+                             " Hz. A clip recorded below that rate has to be resampled up to it first, as the "
+                             "decoder only resamples downwards. The decoder reported: " +
+                             e.what());
+  }
+
+  ort_extensions::OrtxObjectPtr<OrtxTensor> pcm_tensor;
+  CheckResult(OrtxTensorResultGetAt(decoded.get(), 0, pcm_tensor.ToBeAssigned()));
+  const float* pcm{};
+  const int64_t* pcm_shape{};
+  size_t pcm_dims{};
+  CheckResult(OrtxGetTensorData(pcm_tensor.get(), reinterpret_cast<const void**>(&pcm), &pcm_shape, &pcm_dims));
+
+  int64_t num_samples = 0;
+  if (pcm_dims == 1) {
+    num_samples = pcm_shape[0];
+  } else if (pcm_dims == 2 && pcm_shape[0] == 1) {
+    num_samples = pcm_shape[1];
+  } else {
+    throw std::runtime_error("Lfm2AudioProcessor: expected mono PCM from the audio decoder for clip " +
+                             std::to_string(index) + ", got a rank " + std::to_string(pcm_dims) + " tensor.");
+  }
+
+  ClipMel clip;
+  clip.mel = ComputeLfm2AudioMel(pcm, num_samples, mel_config_, clip.num_frames);
+  clip.num_tokens = Lfm2AudioNumTokens(clip.num_frames, subsampling_factor_);
+  return clip;
+}
+
+std::vector<int32_t> Lfm2AudioProcessor::MakePromptTokens(const Tokenizer& tokenizer,
+                                                          const std::vector<std::string>& segments,
+                                                          const std::vector<ClipMel>& clips) const {
+  // Text segments are tokenized on their own, as the reference ChatState does, and each clip
+  // contributes one placeholder per encoder frame between them.
+  std::vector<int32_t> input_ids;
+  for (size_t i = 0; i < segments.size(); ++i) {
+    if (!segments[i].empty()) {
+      const std::vector<int32_t> ids = tokenizer.Encode(segments[i].c_str());
+      input_ids.insert(input_ids.end(), ids.begin(), ids.end());
+    }
+    if (i < clips.size()) {
+      input_ids.insert(input_ids.end(), static_cast<size_t>(clips[i].num_tokens), audio_token_id_);
+    }
+  }
+  return input_ids;
+}
+
+void Lfm2AudioProcessor::AddAudioTensors(const std::vector<ClipMel>& clips, Ort::Allocator& allocator,
+                                         NamedTensors& named_tensors) const {
+  const int64_t num_clips = static_cast<int64_t>(clips.size());
+  const int64_t num_mels = mel_config_.num_mels;
+  int64_t longest = 0;
+  std::vector<int64_t> mel_lengths;
+  std::vector<int64_t> tokens_per_clip;
+  for (const auto& clip : clips) {
+    longest = std::max(longest, clip.num_frames);
+    mel_lengths.push_back(clip.num_frames);
+    tokens_per_clip.push_back(clip.num_tokens);
+  }
+
+  // The clips are staged in one zero-padded [num_clips, longest, num_mels] tensor with their real
+  // lengths alongside. It is a container, not a batched encoder run: Lfm2AudioSpeechState slices
+  // each clip's own frames back out and runs the encoder on them one clip at a time.
+  auto batch = OrtValue::CreateTensor<float>(allocator, std::vector<int64_t>{num_clips, longest, num_mels});
+  float* batch_data = batch->GetTensorMutableData<float>();
+  std::fill_n(batch_data, static_cast<size_t>(num_clips) * static_cast<size_t>(longest * num_mels), 0.0f);
+  for (size_t i = 0; i < clips.size(); ++i) {
+    std::copy(clips[i].mel.begin(), clips[i].mel.end(), batch_data + i * static_cast<size_t>(longest * num_mels));
+  }
+
+  if (mel_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+    named_tensors.emplace(std::string(Config::Defaults::AudioEmbedsName), std::make_shared<Tensor>(std::move(batch)));
+  } else {
+    std::unique_ptr<OrtValue> converted;
+    Cast(*batch, converted, *GetDeviceInterface(DeviceType::CPU), mel_type_);
+    named_tensors.emplace(std::string(Config::Defaults::AudioEmbedsName), std::make_shared<Tensor>(std::move(converted)));
+  }
+  named_tensors.emplace(std::string(Config::Defaults::AudioLengthsName),
+                        std::make_shared<Tensor>(MakeInt64Tensor(mel_lengths, {num_clips}, allocator)));
+  named_tensors.emplace(std::string(Config::Defaults::AudioSizesName),
+                        std::make_shared<Tensor>(MakeInt64Tensor(tokens_per_clip, {num_clips}, allocator)));
+}
+
 std::unique_ptr<NamedTensors> Lfm2AudioProcessor::Process(const Tokenizer& tokenizer, const Payload& payload) const {
   const std::string prompt = ResolvePrompt(payload);
   const Audios* audios = payload.audios;
@@ -236,95 +328,23 @@ std::unique_ptr<NamedTensors> Lfm2AudioProcessor::Process(const Tokenizer& token
   // With no clips the prompt must not ask for any; the split with zero clips enforces that.
   const std::vector<std::string> segments = SplitLfm2AudioPrompt(prompt, num_clips);
 
-  // Mel spectrogram per clip, decoded to mono at the encoder's sample rate.
-  std::vector<std::vector<float>> mels;
-  std::vector<int64_t> mel_lengths;
-  std::vector<int64_t> tokens_per_clip;
-  int64_t longest = 0;
-  int64_t total_tokens = 0;
+  std::vector<ClipMel> clips;
+  clips.reserve(num_clips);
   for (size_t i = 0; i < num_clips; ++i) {
-    ort_extensions::OrtxObjectPtr<OrtxTensorResult> decoded;
-    // The decoder resamples down to the encoder's rate and mixes to mono, but it cannot upsample:
-    // say which clip it was and what to do about it, rather than passing its bare message through.
-    try {
-      CheckResult(OrtxDecodeAudio(audios->audios_.get(), i, static_cast<int64_t>(mel_config_.sample_rate),
-                                  /*stereo_to_mono=*/1, decoded.ToBeAssigned()));
-    } catch (const std::exception& e) {
-      throw std::runtime_error("Lfm2AudioProcessor: could not decode audio clip " + std::to_string(i) + " at " +
-                               std::to_string(mel_config_.sample_rate) +
-                               " Hz. A clip recorded below that rate has to be resampled up to it first, as the "
-                               "decoder only resamples downwards. The decoder reported: " +
-                               e.what());
-    }
-    ort_extensions::OrtxObjectPtr<OrtxTensor> pcm_tensor;
-    CheckResult(OrtxTensorResultGetAt(decoded.get(), 0, pcm_tensor.ToBeAssigned()));
-
-    const float* pcm{};
-    const int64_t* pcm_shape{};
-    size_t pcm_dims{};
-    CheckResult(OrtxGetTensorData(pcm_tensor.get(), reinterpret_cast<const void**>(&pcm), &pcm_shape, &pcm_dims));
-    int64_t num_samples = 0;
-    if (pcm_dims == 1) {
-      num_samples = pcm_shape[0];
-    } else if (pcm_dims == 2 && pcm_shape[0] == 1) {
-      num_samples = pcm_shape[1];
-    } else {
-      throw std::runtime_error("Lfm2AudioProcessor: expected mono PCM from the audio decoder for clip " +
-                               std::to_string(i) + ", got a rank " + std::to_string(pcm_dims) + " tensor.");
-    }
-
-    int64_t num_frames = 0;
-    mels.push_back(ComputeLfm2AudioMel(pcm, num_samples, mel_config_, num_frames));
-    mel_lengths.push_back(num_frames);
-    tokens_per_clip.push_back(Lfm2AudioNumTokens(num_frames, subsampling_factor_));
-    longest = std::max(longest, num_frames);
-    total_tokens += tokens_per_clip.back();
+    clips.push_back(ComputeClipMel(*audios, i));
   }
 
-  // Text segments are tokenized on their own, as the reference ChatState does, and each clip
-  // contributes one placeholder per encoder frame between them.
-  std::vector<int32_t> input_ids;
-  for (size_t i = 0; i < segments.size(); ++i) {
-    if (!segments[i].empty()) {
-      const std::vector<int32_t> ids = tokenizer.Encode(segments[i].c_str());
-      input_ids.insert(input_ids.end(), ids.begin(), ids.end());
-    }
-    if (i < tokens_per_clip.size()) {
-      input_ids.insert(input_ids.end(), static_cast<size_t>(tokens_per_clip[i]), audio_token_id_);
-    }
-  }
   named_tensors->emplace(std::string(Config::Defaults::InputIdsName),
-                         std::make_shared<Tensor>(MakeInputIds(input_ids, allocator)));
+                         std::make_shared<Tensor>(MakeInputIds(MakePromptTokens(tokenizer, segments, clips), allocator)));
 
-  if (num_clips == 0) {
+  if (clips.empty()) {
     // The pipeline reads audio_sizes to skip the speech run.
     named_tensors->emplace(std::string(Config::Defaults::AudioSizesName),
                            std::make_shared<Tensor>(MakeInt64Tensor({0}, {1}, allocator)));
     return named_tensors;
   }
 
-  // The clips are staged in one zero-padded [num_clips, longest, num_mels] tensor with their real
-  // lengths alongside. It is a container, not a batched encoder run: Lfm2AudioSpeechState slices
-  // each clip's own frames back out and runs the encoder on them one clip at a time.
-  const int64_t num_mels = mel_config_.num_mels;
-  auto batch = OrtValue::CreateTensor<float>(allocator, std::vector<int64_t>{static_cast<int64_t>(num_clips), longest, num_mels});
-  float* batch_data = batch->GetTensorMutableData<float>();
-  std::fill_n(batch_data, static_cast<size_t>(num_clips) * static_cast<size_t>(longest * num_mels), 0.0f);
-  for (size_t i = 0; i < num_clips; ++i) {
-    std::copy(mels[i].begin(), mels[i].end(), batch_data + i * static_cast<size_t>(longest * num_mels));
-  }
-
-  if (mel_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-    named_tensors->emplace(std::string(Config::Defaults::AudioEmbedsName), std::make_shared<Tensor>(std::move(batch)));
-  } else {
-    std::unique_ptr<OrtValue> converted;
-    Cast(*batch, converted, *GetDeviceInterface(DeviceType::CPU), mel_type_);
-    named_tensors->emplace(std::string(Config::Defaults::AudioEmbedsName), std::make_shared<Tensor>(std::move(converted)));
-  }
-  named_tensors->emplace(std::string(Config::Defaults::AudioLengthsName),
-                         std::make_shared<Tensor>(MakeInt64Tensor(mel_lengths, {static_cast<int64_t>(num_clips)}, allocator)));
-  named_tensors->emplace(std::string(Config::Defaults::AudioSizesName),
-                         std::make_shared<Tensor>(MakeInt64Tensor(tokens_per_clip, {static_cast<int64_t>(num_clips)}, allocator)));
+  AddAudioTensors(clips, allocator, *named_tensors);
   return named_tensors;
 }
 

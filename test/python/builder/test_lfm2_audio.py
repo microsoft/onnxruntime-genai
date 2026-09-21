@@ -54,7 +54,7 @@ DECODER_CONFIG = {
 }
 
 
-def _write_checkpoint(path, decoder_weights=None):
+def _write_checkpoint(path, decoder_weights=None, shards=1):
     """An LFM2-Audio checkpoint directory: nested config.json plus lfm.* and audio tensors."""
     path.mkdir(parents=True, exist_ok=True)
     config = {
@@ -81,7 +81,20 @@ def _write_checkpoint(path, decoder_weights=None):
     tensors["audio_embedding.embedding.weight"] = torch.zeros(16, 32)
     tensors["depth_linear.weight"] = torch.zeros(8, 32)
     tensors["codebook_offsets"] = torch.arange(8) * 2049
-    save_file({name: tensor.contiguous() for name, tensor in tensors.items()}, str(path / "model.safetensors"))
+    tensors = {name: tensor.contiguous() for name, tensor in tensors.items()}
+    if shards == 1:
+        save_file(tensors, str(path / "model.safetensors"))
+    else:
+        # What `save_pretrained` writes once a checkpoint is over its shard size: several files and
+        # an index naming which tensor lives in which. An fp32 fine-tune of this model reaches it.
+        names = sorted(tensors)
+        weight_map = {}
+        for shard in range(shards):
+            filename = f"model-{shard + 1:05d}-of-{shards:05d}.safetensors"
+            part = {name: tensors[name] for name in names[shard::shards]}
+            save_file(part, str(path / filename))
+            weight_map.update(dict.fromkeys(part, filename))
+        (path / "model.safetensors.index.json").write_text(json.dumps({"metadata": {}, "weight_map": weight_map}))
     return decoder_weights
 
 
@@ -127,6 +140,23 @@ def test_lfm2_audio_load_weights_loads_the_decoder_with_tied_logits(tmp_path):
     torch.testing.assert_close(loaded.model.embedding_norm.weight, decoder_weights["lfm.embedding_norm.weight"])
     assert loaded.lm_head.weight.data_ptr() == loaded.model.embed_tokens.weight.data_ptr()
     assert not any("conformer" in name or "depth" in name or "audio" in name for name, _ in loaded.named_parameters())
+    assert not any(parameter.is_meta for parameter in loaded.parameters())
+
+
+@pytest.mark.parametrize("shards", [2, 3])
+def test_lfm2_audio_load_weights_reads_a_sharded_checkpoint(tmp_path, shards):
+    # These checkpoints are one file today, but `save_pretrained` shards anything over its size
+    # limit, which an fp32 fine-tune of this model exceeds. The tensors have to be gathered from
+    # every shard the index names, not just the first.
+    decoder_weights = _write_checkpoint(tmp_path, shards=shards)
+    assert not (tmp_path / "model.safetensors").exists(), "the sharded layout has no single file"
+
+    loaded = _audio_builder(tmp_path).load_weights(str(tmp_path))
+
+    torch.testing.assert_close(
+        loaded.model.layers[0].conv.in_proj.weight, decoder_weights["lfm.layers.0.conv.in_proj.weight"]
+    )
+    torch.testing.assert_close(loaded.model.embedding_norm.weight, decoder_weights["lfm.embedding_norm.weight"])
     assert not any(parameter.is_meta for parameter in loaded.parameters())
 
 

@@ -57,6 +57,24 @@ struct Lfm2AudioProcessor : Processor {
   std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const Payload& payload) const override;
 
  private:
+  // One clip's log-mel frames, with what the rest of the pipeline has to know about them.
+  struct ClipMel {
+    std::vector<float> mel;  // num_frames * num_mels, frame-major
+    int64_t num_frames{};    // what the encoder is given for this clip
+    int64_t num_tokens{};    // placeholders it is worth, one per encoder frame
+  };
+
+  // Decodes clip `index` to mono PCM at the encoder's sample rate and turns it into log-mel frames.
+  ClipMel ComputeClipMel(const Audios& audios, size_t index) const;
+
+  // The prompt's text tokenized segment by segment, with each clip's placeholders spliced between.
+  std::vector<int32_t> MakePromptTokens(const Tokenizer& tokenizer, const std::vector<std::string>& segments,
+                                        const std::vector<ClipMel>& clips) const;
+
+  // Stages the clips in one zero-padded [num_clips, longest, num_mels] tensor, cast to the speech
+  // model's input type, and adds it with the per-clip frame and placeholder counts.
+  void AddAudioTensors(const std::vector<ClipMel>& clips, Ort::Allocator& allocator, NamedTensors& named_tensors) const;
+
   ONNXTensorElementDataType mel_type_;
   Lfm2AudioMelConfig mel_config_;
   int64_t subsampling_factor_{};
