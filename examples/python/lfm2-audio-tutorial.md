@@ -296,12 +296,13 @@ routine of its own. Only the first produces text alone, so only the first runs h
 
 **ASR** is the supported path, and matches the reference token for token.
 
-**TTS** produces nothing here. The model answers a TTS prompt by emitting `<|audio_start|>` as its
-very first token and then audio codes, so generation stops there and the answer is empty. That is
-deliberate: the builder puts `<|audio_start|>` in `eos_token_id` for these models, because the
-positions after it are meant for the depthformer this runtime does not have — read off the text head
-they decode to fluent, plausible nonsense. A sequential answer that begins in text and turns to
-speech part way keeps the text it had before the switch.
+**TTS** produces nothing here, and there is no text to be had: asked to speak a sentence, the whole
+text stream the model emits is `<|audio_start|>` followed by `<|im_end|>`, with everything in between
+being audio. Generation stops at that first token, which is deliberate — the builder puts
+`<|audio_start|>` in `eos_token_id` for these models, because the positions after it are meant for
+the depthformer this runtime does not have, and read off the text head they decode to fluent,
+plausible nonsense. A sequential answer that begins in text and turns to speech part way keeps the
+text it had before the switch.
 
 **Interleaved** returns text only. The reference alternates by count — six text tokens, then
 `interleaved_n_audio` audio frames (12, or 9 for the JP checkpoint) — rather than on any token in the
@@ -323,9 +324,11 @@ produce; they have no text-side equivalent to set.
 
 **Audio output is not supported.** TTS and the speech half of interleaved generation need the
 depthformer, which predicts 8 codebook entries per 80 ms audio frame in an inner autoregressive loop,
-plus the audio detokenizer to turn those codes into a waveform. That speech is worth having: the 48
-frames the reference generated for the clip above decode to 3.8 seconds of 24 kHz audio, which this
-runtime's own ASR transcribes back as the opening of the same answer. It simply has no path here. ONNX Runtime
+plus the audio detokenizer to turn those codes into a waveform. That speech is worth having, and it
+is good: asked through the reference to say *The quick brown fox jumps over the lazy dog.*, the model
+produced about three seconds of 24 kHz audio per voice, and this runtime's own ASR read both back as
+that sentence exactly, punctuation included. The two voices are different waveforms, and the male one
+carries more of its energy below 1 kHz than the female one, as it should. None of it has a path here. ONNX Runtime
 GenAI's generation loop samples one token stream, so none of that has a home here yet. Generation
 stops at `<|audio_start|>` rather than reading the depthformer's positions off the text head; see
 [the three modes](#the-models-three-modes) for what each prompt gives you. LiquidAI ships
