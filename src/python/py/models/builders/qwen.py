@@ -1225,6 +1225,9 @@ class Qwen35MoEModel(MTPModel):
             extra_options.get("_shared_weight_policies", {"embedding": "auto", "lm_head": "auto"})
         )
         drafter_quant_config = extra_options.get("_drafter_quant_config")
+        drafter_io_dtype = (
+            drafter_quant_config.to_onnx_dtypes()[0] if drafter_quant_config is not None else io_dtype
+        )
 
         num_draft_tokens = None
         if "dflash2_num_draft_tokens" in extra_options:
@@ -1240,6 +1243,7 @@ class Qwen35MoEModel(MTPModel):
             raise ValueError("dflash2_fuse_gate_up must be true or false.")
         self.dflash2_attrs = {
             "io_dtype": io_dtype,
+            "compute_dtype": drafter_io_dtype,
             "num_draft_tokens": num_draft_tokens,
             "precision": self.block_drafter_precision(extra_options, "dflash2_precision"),
             "quant_config": drafter_quant_config,
@@ -1286,6 +1290,7 @@ class Qwen35MoEModel(MTPModel):
             lm_head_quant=self.block_drafter_lm_head_quant(),
             embed_quant=self.block_drafter_embed_quant(),
             fuse_gate_up=self.dflash2_attrs["fuse_gate_up"],
+            compute_dtype=self.dflash2_attrs["compute_dtype"],
         )
         self.dflash2.make_model()
 

@@ -222,18 +222,18 @@ def test_dflash2_policy_is_independent_from_target(tmp_path):
     assert effective.extra_options["aux_hidden_state_layers"] == "2,4"
 
 
-def test_dflash2_rejects_unsupported_body_dtype(tmp_path):
-    with pytest.raises(ValueError, match="body io_dtype must be bf16"):
-        normalize_builder_config(
-            "int4",
-            "cuda",
-            target_options={"attention": {"implementation": "paged"}},
-            drafter_options={
-                "drafter_type": "dflash2",
-                "path": make_drafter_checkpoint(tmp_path),
-                "quant_config": {"io_dtype": "fp16"},
-            },
-        )
+def test_dflash2_accepts_fp16_body_dtype(tmp_path):
+    effective = normalize_builder_config(
+        "int4",
+        "cuda",
+        target_options={"attention": {"implementation": "paged"}},
+        drafter_options={
+            "drafter_type": "dflash2",
+            "path": make_drafter_checkpoint(tmp_path),
+            "quant_config": {"io_dtype": "fp16"},
+        },
+    )
+    assert effective.drafter_options["quant_config"]["io_dtype"] == "fp16"
 
 
 def test_dflash2_rejects_unsupported_checkpoint_policy(tmp_path):
@@ -364,6 +364,27 @@ def test_dflash2_int2_fpa_uses_structured_quant_config(tmp_path):
     assert quant.format.matmulnbits_weights_prepacked == 0
     assert effective.extra_options["dflash2_precision"] == "int2"
     assert effective.runtime_config["model"]["dflash2"]["session_options"]["ep.cuda.fpa_intb_gemm"] == "1"
+
+
+def test_dflash2_int2_offline_prepack_uses_sm80_layout(tmp_path):
+    effective = normalize_builder_config(
+        "int4",
+        "cuda",
+        target_options={"attention": {"implementation": "paged"}},
+        drafter_options={
+            "drafter_type": "dflash2",
+            "path": make_drafter_checkpoint(tmp_path),
+            "quant_config": {
+                "weights": {"type": "int2", "block_size": 64},
+                "format": {"matmulnbits_weights_prepacked": 1},
+            },
+        },
+        runtime_config={"model": {"dflash2": {"session_options": {"ep.cuda.fpa_intb_gemm": "0"}}}},
+    )
+
+    quant = effective.extra_options["_drafter_quant_config"]
+    assert quant.format.matmulnbits_weights_prepacked == 1
+    assert effective.runtime_config["model"]["dflash2"]["session_options"]["ep.cuda.fpa_intb_gemm"] == "0"
 
 
 @pytest.mark.parametrize("block_size", [16, 32, 256])

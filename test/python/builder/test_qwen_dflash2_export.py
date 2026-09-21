@@ -18,6 +18,7 @@ from models.builders.base import Model
 from models.builders.dflash2 import DFlash2Builder
 from models.builders.mtp import MTPModel
 from models.builders.qwen import Qwen35MoEModel
+from models.quantization.quant_config import QuantConfig
 
 TARGET_LAYER_IDS = [1, 11, 21]
 AUX_LAYERS = [layer_id + 1 for layer_id in TARGET_LAYER_IDS]
@@ -808,6 +809,24 @@ def test_structured_drafter_quantization_does_not_inherit_target_layout():
     assert quant["prepack"] == 0
 
 
+@pytest.mark.parametrize(
+    "drafter_dtype,expected_dtype",
+    [("fp16", ir.DataType.FLOAT16), ("bf16", ir.DataType.BFLOAT16)],
+)
+def test_structured_drafter_uses_its_own_io_dtype(tmp_path, drafter_dtype, expected_dtype):
+    model = _composite()
+    model.make_dflash2_init(
+        io_dtype=ir.DataType.FLOAT16,
+        extra_options={
+            "dflash2_path": _draft_checkpoint(tmp_path),
+            "_drafter_quant_config": QuantConfig.from_dict({"io_dtype": drafter_dtype}),
+        },
+    )
+
+    assert model.dflash2_attrs["io_dtype"] == ir.DataType.FLOAT16
+    assert model.dflash2_attrs["compute_dtype"] == expected_dtype
+
+
 def test_int2_fpa_body_keeps_the_targets_int4_lm_head():
     model = _quant_composite()
     quant_config = types.SimpleNamespace(
@@ -1108,42 +1127,26 @@ def test_quantized_body_uses_ort_tie_breaking(tmp_path):
     np.testing.assert_array_equal(scales, [[0.125]])
 
 
-def test_bf16_body_keeps_raw_weight_format(tmp_path):
+@pytest.mark.parametrize("io_dtype", [ir.DataType.FLOAT16, ir.DataType.BFLOAT16])
+def test_quantized_body_uses_requested_dtype_and_sm80_prepack(tmp_path, io_dtype):
     builder = DFlash2Builder(
         _draft_checkpoint(tmp_path),
         str(tmp_path),
-        ir.DataType.FLOAT16,
+        io_dtype,
         paged_block_size=256,
         max_position_embeddings=128,
-        quant={"bits": 4, "block_size": 32, "prepack": 1},
+        quant={"bits": 2, "block_size": 64, "prepack": 1},
     )
 
-    builder.matmul("/probe/MatMul", "hidden_states", torch.ones((64, 64)), 64, 64, "num_block")
+    output = builder.matmul("/probe/MatMul", "hidden_states", torch.ones((128, 64)), 64, 128, "num_block")
 
     node = next(node for node in builder.graph if node.name == "/probe/MatMul")
-    assert builder.io_dtype == ir.DataType.BFLOAT16
-    assert "weight_prepacked" not in node.attributes
-    assert tuple(builder.graph.initializers["probe.MatMul.weight_Q4"].const_value.shape) == (64, 2, 16)
-
-
-@pytest.mark.parametrize(("bits", "out_features"), [(4, 32), (8, 48)])
-def test_prepack_keeps_ineligible_output_width_raw(tmp_path, bits, out_features):
-    builder = DFlash2Builder(
-        _draft_checkpoint(tmp_path),
-        str(tmp_path),
-        ir.DataType.FLOAT16,
-        paged_block_size=256,
-        max_position_embeddings=128,
-        quant={"bits": bits, "block_size": 32, "prepack": 1},
-    )
-
-    builder.matmul("/probe/MatMul", "hidden_states", torch.ones((out_features, 64)), 64, out_features, "num_block")
-
-    node = next(node for node in builder.graph if node.name == "/probe/MatMul")
-    assert node.op_type == "MatMulNBits"
-    assert "weight_prepacked" not in node.attributes
-    qweight = builder.graph.initializers[f"probe.MatMul.weight_Q{bits}"].const_value
-    assert tuple(qweight.shape) == (out_features, 2, 32 * bits // 8)
+    assert builder.io_dtype == io_dtype
+    assert builder.values[output].dtype == io_dtype
+    assert builder.graph.initializers["probe.MatMul.weight_scales"].dtype == io_dtype
+    assert node.attributes["bits"].value == 2
+    assert node.attributes["block_size"].value == 64
+    assert node.attributes["weight_prepacked"].value == 1
 
 
 @pytest.mark.parametrize("bits", [None, 2, 4, 8])
