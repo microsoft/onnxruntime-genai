@@ -116,6 +116,28 @@ MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config,
   embedding_session_ = CreateSession(ort_env, config_->model.embedding.filename, embedding_session_options_.get());
   decoder_session_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
 
+  const auto& audio_output = config_->model.audio_output;
+  if (!audio_output.depthformer.filename.empty() || !audio_output.embedding.filename.empty()) {
+    if (audio_output.depthformer.filename.empty() || audio_output.embedding.filename.empty()) {
+      throw std::runtime_error("model.audio_output needs both depthformer.filename and embedding.filename.");
+    }
+    // With speech output these tokens hand the turn to the depthformer; as stop tokens they would end
+    // it there instead, which is what a text-only export needs and this one must not have.
+    for (const int token : {audio_output.audio_start_token_id, audio_output.text_end_token_id}) {
+      if (std::find(config_->model.eos_token_id.begin(), config_->model.eos_token_id.end(), token) !=
+          config_->model.eos_token_id.end()) {
+        throw std::runtime_error("model.eos_token_id holds " + std::to_string(token) +
+                                 ", which model.audio_output uses to start speech. Remove it from eos_token_id.");
+      }
+    }
+    depthformer_session_options_ = OrtSessionOptions::Create();
+    CreateSessionOptionsFromConfig(audio_output.depthformer.session_options.has_value() ? audio_output.depthformer.session_options.value() : config_->model.decoder.session_options, *depthformer_session_options_, true, /*disable_graph_capture=*/true);
+    depthformer_session_ = CreateSession(ort_env, audio_output.depthformer.filename, depthformer_session_options_.get());
+    audio_embedding_session_options_ = OrtSessionOptions::Create();
+    CreateSessionOptionsFromConfig(audio_output.embedding.session_options.has_value() ? audio_output.embedding.session_options.value() : config_->model.decoder.session_options, *audio_embedding_session_options_, true, /*disable_graph_capture=*/true);
+    audio_embedding_session_ = CreateSession(ort_env, audio_output.embedding.filename, audio_embedding_session_options_.get());
+  }
+
   session_info_.Add(*decoder_session_);
   session_info_.Add(*embedding_session_);
   if (speech) {
@@ -968,6 +990,9 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& 
   }
   embedding_state_ = std::make_unique<EmbeddingState>(model, params);
   decoder_state_ = std::make_unique<DecoderState>(model_, sequence_lengths, params);
+  if (model_.depthformer_session_) {
+    audio_output_ = std::make_unique<Lfm2AudioOutput>(model_, params);
+  }
 
   if (vision_state_ != nullptr && model_.config_->model.vision.adapter_filename.has_value() && num_image_tokens_ > 0) {
     const auto lora_adapter = (model_.config_->config_path / fs::path(*model_.config_->model.vision.adapter_filename)).string();
@@ -1023,6 +1048,9 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
   //   - input_ids, image_features, audio_features -> |embeddings_model| -> inputs_embeds
   //   - inputs_embeds -> |decoder_model| -> logits
 
+  if (audio_output_) {
+    audio_output_->BeginStep(next_tokens, is_prompt_);
+  }
   embedding_state_->UpdateInputsOutputs(next_tokens, is_prompt_);
 
   // Prefill chunking (search.chunk_size): during the prompt stage the decoder can process the
@@ -1076,15 +1104,36 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
     if (vision_state_) vision_state_.reset();  // The vision state is no longer needed in generation stage
     if (speech_state_) speech_state_.reset();  // The speech state is no longer needed in generation stage
 
-    return logits;
+    return audio_output_ ? SampleAudioOrText(logits) : logits;
   }
 
   embedding_state_->inputs_embeds_.ReuseEmbeddingsBuffer(decoder_state_->inputs_embeds_);
   if (embedding_state_->per_layer_inputs_ && decoder_state_->per_layer_inputs_) {
     embedding_state_->per_layer_inputs_->ReuseEmbeddingsBuffer(*decoder_state_->per_layer_inputs_);
   }
-  embedding_state_->Run(current_length, next_tokens, next_indices);
-  return decoder_state_->Run(current_length, next_tokens, next_indices);
+  if (audio_output_ && audio_output_->HasPendingFrame()) {
+    // The token is only the placeholder of the last audio frame: the decoder takes the frame itself,
+    // and the embedding model would look for audio features to put in the placeholder's place.
+    audio_output_->WritePendingFrame(*decoder_state_->inputs_embeds_.Get());
+  } else {
+    embedding_state_->Run(current_length, next_tokens, next_indices);
+  }
+  auto logits = decoder_state_->Run(current_length, next_tokens, next_indices);
+  return audio_output_ ? SampleAudioOrText(logits) : logits;
+}
+
+DeviceSpan<float> MultiModalPipelineState::SampleAudioOrText(DeviceSpan<float> logits) {
+  if (!audio_output_->InAudio()) {
+    return logits;
+  }
+  const std::string& configured = model_.config_->model.decoder.outputs.hidden_states;
+  const std::string name = configured.empty() ? std::string(Config::Defaults::HiddenStatesName) : configured;
+  OrtValue* hidden_states = decoder_state_->GetOutput(name.c_str());
+  if (!hidden_states) {
+    throw std::runtime_error("Speech output needs the decoder's \"" + name +
+                             "\" output. Build the decoder with --extra_options include_hidden_states=true.");
+  }
+  return audio_output_->SampleFrame(*hidden_states);
 }
 
 OrtValue* MultiModalPipelineState::GetInput(const char* name) {
@@ -1124,6 +1173,10 @@ OrtValue* MultiModalPipelineState::GetInput(const char* name) {
 };
 
 OrtValue* MultiModalPipelineState::GetOutput(const char* name) {
+  if (audio_output_ && std::strcmp(name, "audio_codes") == 0) {
+    return audio_output_->GetAudioCodes();
+  }
+
   if (vision_state_) {
     // Check if output name is in vision state's outputs
     for (size_t i = 0; i < vision_state_->output_names_.size(); i++) {

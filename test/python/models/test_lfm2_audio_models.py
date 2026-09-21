@@ -754,6 +754,253 @@ def test_lfm2_audio_fixture_config_is_what_the_builder_writes(test_data_path):
     assert config["model"]["eos_token_id"] == [7, AUDIO_START_TOKEN_ID, TEXT_END_TOKEN_ID]
 
 
+# Speech output. The fixture's depthformer and audio embedding have the contract of LiquidAI's exports,
+# and its decoder has the hidden_states output they read; model.audio_output switches them on.
+NUM_CODEBOOKS = 8
+CODEBOOK_SIZE = 2049
+INTERLEAVED_N_TEXT = 6
+INTERLEAVED_N_AUDIO = 12
+
+
+def _speech_model(test_data_path, tmp_path, **audio_output) -> Path:
+    model_path = _copy_model(test_data_path, tmp_path)
+
+    def edit(config):
+        # The modality-switch tokens must not be stop tokens once there is speech to switch to.
+        config["model"]["eos_token_id"] = 7
+        config["model"]["audio_output"] = {
+            "depthformer": {"filename": "dummy_depthformer.onnx"},
+            "embedding": {"filename": "dummy_audio_embedding.onnx"},
+            **audio_output,
+        }
+
+    _edit_json(model_path / "genai_config.json", edit)
+    return model_path
+
+
+def _generate_speech(model_path, prompt, audios, num_items, **search):
+    model = og.Model(os.fspath(model_path))
+    inputs = model.create_multimodal_processor()(prompt, audios=audios)
+    prompt_length = inputs["input_ids"].as_numpy().shape[1]
+    params = og.GeneratorParams(model)
+    params.set_search_options(do_sample=False, max_length=prompt_length + num_items, **search)
+    generator = og.Generator(model, params)
+    generator.set_inputs(inputs)
+    while not generator.is_done():
+        generator.generate_next_token()
+    return inputs, generator.get_sequence(0)[prompt_length:].tolist(), generator.get_output("audio_codes")
+
+
+def _reference_speech(model_path, inputs, num_items, interleaved, audio_start=128, codebook_size=CODEBOOK_SIZE):
+    """liquid-audio's generate_sequential / generate_interleaved over the fixture, audio taken greedily.
+
+    Returns the generated sequence, with AUDIO_TOKEN_ID standing for each audio frame as the runtime
+    records it, and the frames themselves without the end-of-audio ones.
+    """
+    ort = pytest.importorskip("onnxruntime")
+    config = json.loads((Path(model_path) / "genai_config.json").read_text())["model"]
+    decoder_config = config["decoder"]
+    session = lambda name: ort.InferenceSession(os.path.join(model_path, name))  # noqa: E731
+    speech, embedding, decoder = (session(config[k]["filename"]) for k in ("speech", "embedding", "decoder"))
+    depthformer, audio_embedding = session("dummy_depthformer.onnx"), session("dummy_audio_embedding.onnx")
+    hidden_size = decoder_config["hidden_size"]
+    no_features = np.zeros((0, hidden_size), np.float32)
+
+    features = no_features
+    if inputs["audio_sizes"].as_numpy().sum() > 0:
+        mel, frames = inputs["audio_embeds"].as_numpy(), inputs["audio_lengths"].as_numpy()
+        features = np.concatenate(
+            [
+                speech.run(None, {"mel_spectrogram": mel[i : i + 1, :n], "mel_lengths": frames[i : i + 1]})[0][0]
+                for i, n in enumerate(frames)
+            ]
+        )
+    embeds = embedding.run(
+        None, {"input_ids": inputs["input_ids"].as_numpy().astype(np.int64), "audio_features": features}
+    )[0]
+
+    state = {}
+    for layer, layer_type in enumerate(decoder_config["layer_types"]):
+        if layer_type == "conv":
+            state[f"past.{layer}.conv"] = np.zeros((1, hidden_size, decoder_config["conv_cache_size"]), np.float32)
+        else:
+            for kind in ("key", "value"):
+                state[f"past_key_values.{layer}.{kind}"] = np.zeros(
+                    (1, decoder_config["num_key_value_heads"], 0, decoder_config["head_size"]), np.float32
+                )
+    output_names = [output.name for output in decoder.get_outputs()]
+
+    def sample_frame(hidden):
+        keys = np.zeros((1, 1, 1, 0, 16), np.float32)
+        values, slices, previous, frame = keys.copy(), np.zeros((1, NUM_CODEBOOKS, 16), np.float32), 0, []
+        for step in range(NUM_CODEBOOKS):
+            logits, new_slices, keys, values = depthformer.run(
+                ["logits", "depth_slices", "new_keys", "new_values"],
+                {
+                    "hidden_states": hidden[None],
+                    "depth_slices_in": slices,
+                    "step_idx": np.array(step, np.int64),
+                    "prev_token": np.array([previous], np.int64),
+                    "past_keys": keys,
+                    "past_values": values,
+                    "seqlens_k": np.array([step], np.int32),
+                    "total_seq_len": np.array(step + 1, np.int32),
+                },
+            )
+            slices = new_slices if step == 0 else slices
+            previous = int(logits[0, :codebook_size].argmax())
+            frame.append(previous)
+        return np.array(frame, np.int64)
+
+    sequence, frames, total = [], [], 0
+    in_audio, left, text_done = False, INTERLEAVED_N_TEXT, False
+    for _ in range(num_items):
+        left -= 1
+        total += embeds.shape[1]
+        feeds = {"inputs_embeds": embeds, "attention_mask": np.ones((1, total), np.int64), **state}
+        outputs = dict(zip(output_names, decoder.run(None, feeds), strict=True))
+        for name in state:
+            state[name] = outputs[name.replace("past_key_values.", "present.").replace("past.", "present.")]
+
+        if not in_audio:
+            token = int(outputs["logits"][0, -1].argmax())
+            sequence.append(token)
+            if token == 7:
+                break
+            if interleaved:
+                text_done = text_done or token == 130
+                if left == 0 or text_done:
+                    in_audio, left = True, INTERLEAVED_N_AUDIO
+            elif token == audio_start:
+                in_audio = True
+            embeds = embedding.run(None, {"input_ids": np.array([[token]], np.int64), "audio_features": no_features})[0]
+        else:
+            frame = sample_frame(outputs["hidden_states"][0, -1])
+            if interleaved and left == 0 and not text_done:
+                in_audio, left = False, INTERLEAVED_N_TEXT
+            if frame[0] == codebook_size - 1:
+                frame[:] = codebook_size - 1
+                in_audio = False
+            else:
+                frames.append(frame.copy())
+            sequence.append(AUDIO_TOKEN_ID)
+            rows = (frame + np.arange(NUM_CODEBOOKS) * codebook_size)[None]
+            embeds = audio_embedding.run(None, {"audio_codes": rows})[0].sum(axis=1, keepdims=True)
+    return sequence, np.array(frames, np.int64).reshape(-1, NUM_CODEBOOKS)
+
+
+@pytest.mark.parametrize("num_clips", [0, 1], ids=["typed", "spoken"])
+def test_lfm2_audio_interleaved_speech_matches_reference(test_data_path, tmp_path, num_clips):
+    # Six text tokens, twelve audio frames, and round again: each frame is eight codes from the
+    # depthformer, and its embedding rather than a token's is what the decoder reads next. The
+    # sequence keeps one placeholder per frame, and the codes come out on their own.
+    model_path = _speech_model(test_data_path, tmp_path)
+    clips = [_write_wav(tmp_path / "question.wav", _synthetic_signal(0.9, seed=70))] * num_clips
+    prompt = "<|startoftext|>Answer aloud. " + AUDIO_MARKER * num_clips
+
+    inputs, sequence, codes = _generate_speech(
+        model_path, prompt, og.Audios.open(*clips) if clips else None, 45, audio_interleaved=True, audio_top_k=1
+    )
+    expected_sequence, expected_codes = _reference_speech(os.fspath(model_path), inputs, 45, interleaved=True)
+
+    layout = "".join("A" if token == AUDIO_TOKEN_ID else "T" for token in sequence)
+    assert layout.startswith("T" * INTERLEAVED_N_TEXT + "A" * INTERLEAVED_N_AUDIO + "T" * INTERLEAVED_N_TEXT)
+    assert sequence == expected_sequence
+    np.testing.assert_array_equal(codes, expected_codes)
+    assert codes.shape == (layout.count("A"), NUM_CODEBOOKS)
+
+
+def _text_stream(test_data_path, tmp_path, num_tokens):
+    """What the fixture writes when nothing turns it to speech."""
+    clip = _write_wav(tmp_path / "probe.wav", _synthetic_signal(0.5, seed=71))
+    return _generate_with_eos(_copy_model(test_data_path, tmp_path / "probe"), clip, [7], num_tokens)
+
+
+def test_lfm2_audio_sequential_speech_starts_at_audio_start_and_ends_at_end_of_audio(test_data_path, tmp_path):
+    # TTS and the like: text until <|audio_start|>, speech until the end-of-audio code, then text
+    # again. The fixture emits neither on its own, so the start token is one it does write, and the
+    # codebook is cut down to sixteen entries so that the last of them, end-of-audio, comes up.
+    text = _text_stream(test_data_path, tmp_path, 12)
+    audio_start = text[3]
+    model_path = _speech_model(test_data_path, tmp_path, audio_start_token_id=audio_start, codebook_size=16)
+    clip = _write_wav(tmp_path / "clip.wav", _synthetic_signal(0.5, seed=71))
+
+    inputs, sequence, codes = _generate_speech(model_path, AUDIO_MARKER, og.Audios.open(clip), 60, audio_top_k=1)
+    expected_sequence, expected_codes = _reference_speech(
+        os.fspath(model_path), inputs, 60, interleaved=False, audio_start=audio_start, codebook_size=16
+    )
+
+    assert sequence[: text.index(audio_start) + 1] == text[: text.index(audio_start) + 1]
+    assert sequence[text.index(audio_start) + 1] == AUDIO_TOKEN_ID, "speech starts right after <|audio_start|>"
+    assert sequence == expected_sequence
+    np.testing.assert_array_equal(codes, expected_codes)
+    # End-of-audio frames hold a place in the sequence but are not speech.
+    assert 0 < len(codes) < sequence.count(AUDIO_TOKEN_ID)
+    assert codes[:, 0].max() < 15, "only the first codebook carries the end-of-audio code"
+    after_speech = sequence[text.index(audio_start) + 1 :]
+    assert any(token != AUDIO_TOKEN_ID for token in after_speech), "the turn goes back to text after end-of-audio"
+
+
+def test_lfm2_audio_speech_output_leaves_a_text_answer_alone(test_data_path, tmp_path):
+    text = _text_stream(test_data_path, tmp_path, 20)
+    clip = _write_wav(tmp_path / "clip.wav", _synthetic_signal(0.5, seed=71))
+
+    _, sequence, codes = _generate_speech(
+        _speech_model(test_data_path, tmp_path), AUDIO_MARKER, og.Audios.open(clip), 20
+    )
+
+    assert sequence == text
+    assert codes.shape == (0, NUM_CODEBOOKS)
+
+
+def test_lfm2_audio_speech_sampling_follows_the_seed(test_data_path, tmp_path):
+    model_path = _speech_model(test_data_path, tmp_path)
+    # The fixture's logits are far apart, so it takes a high temperature for the four likeliest to share the odds.
+    options = {"audio_interleaved": True, "audio_temperature": 100.0, "audio_top_k": 4}
+    run = lambda **search: _generate_speech(model_path, "Say something.", None, 30, **options, **search)[2]  # noqa: E731
+
+    first, again, other = run(random_seed=3), run(random_seed=3), run(random_seed=4)
+    greedy = _generate_speech(model_path, "Say something.", None, 30, audio_interleaved=True, audio_top_k=1)[2]
+
+    np.testing.assert_array_equal(first, again)
+    assert not np.array_equal(first, other)
+    assert not np.array_equal(first, greedy)
+    # The first frame follows text only, so it is sampled from the same logits whatever the seed:
+    # with top_k 4 every code in it has to be one of the four likeliest.
+    assert first.shape == greedy.shape and first.min() >= 0 and first.max() < CODEBOOK_SIZE
+
+
+@pytest.mark.parametrize(
+    "edit,expected",
+    [
+        (lambda m: m.update({"eos_token_id": [7, 128]}), "eos_token_id holds 128.*Remove it"),
+        (lambda m: m.update({"eos_token_id": [7, 130]}), "eos_token_id holds 130.*Remove it"),
+        (lambda m: m["audio_output"].pop("embedding"), "needs both depthformer.filename and embedding.filename"),
+        (lambda m: m["audio_output"].update({"num_codebooks": 4}), "expected inputs for 4 codebooks"),
+    ],
+    ids=["audio-start-is-a-stop-token", "text-end-is-a-stop-token", "one-graph-missing", "codebook-count"],
+)
+def test_lfm2_audio_rejects_a_speech_output_config_that_cannot_work(test_data_path, tmp_path, edit, expected):
+    model_path = _speech_model(test_data_path, tmp_path)
+    _edit_json(model_path / "genai_config.json", lambda config: edit(config["model"]))
+
+    with pytest.raises(RuntimeError, match=expected):
+        model = og.Model(os.fspath(model_path))
+        og.Generator(model, og.GeneratorParams(model))
+
+
+def test_lfm2_audio_speech_output_needs_the_decoder_hidden_states(test_data_path, tmp_path):
+    onnx = pytest.importorskip("onnx")
+    model_path = _speech_model(test_data_path, tmp_path)
+    decoder_path = model_path / "dummy_text.onnx"
+    decoder = onnx.load(decoder_path)
+    del decoder.graph.output[[output.name for output in decoder.graph.output].index("hidden_states")]
+    onnx.save(decoder, decoder_path)
+
+    with pytest.raises(RuntimeError, match="include_hidden_states=true"):
+        _generate_speech(model_path, "Say something.", None, 12, audio_interleaved=True)
+
+
 def _two_clip_inputs(model_path, tmp_path):
     clips = [_write_wav(tmp_path / f"{i}.wav", _synthetic_signal(1.5 - 0.5 * i, seed=50 + i)) for i in range(2)]
     model = og.Model(os.fspath(model_path))

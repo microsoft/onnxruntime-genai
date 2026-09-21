@@ -15,11 +15,10 @@ runs the speech-to-text half of it — ASR and spoken-prompt chat — as three O
 Only the decoder is produced by the model builder in this repository; the speech encoder is
 published as ONNX by LiquidAI, and the embedding model is a small graph you build once.
 
-**Audio output is not supported.** The model can also *speak*: it emits audio codes through an
-RQ-transformer ("depthformer") that ONNX Runtime GenAI has no generation loop for, and those codes
-then need the audio detokenizer and an inverse STFT to become a waveform. The export below drops the
-depthformer and the audio embeddings with it, so the model answers in text only. See
-[Known limitations](#6-known-limitations).
+The model can also *speak*. Two more graphs, both published by LiquidAI, give it a voice here: a
+depthformer that turns a decoder hidden state into a frame of audio codes, and the audio embedding that
+feeds each frame back to the decoder. [Speech output](#6-speech-output) adds them; without them the
+model answers in text only.
 
 ## Steps
 
@@ -28,7 +27,8 @@ depthformer and the audio embeddings with it, so the model answers in text only.
 3. [Write `genai_config.json`](#3-write-genai_configjson)
 4. [Choose the precisions](#4-choose-the-precisions)
 5. [Run the model](#5-run-the-model)
-6. [Known limitations](#6-known-limitations)
+6. [Speech output](#6-speech-output)
+7. [Known limitations](#7-known-limitations)
 
 ## 1. Build the decoder
 
@@ -291,66 +291,197 @@ Perform ASR.<|im_end|>
 ### The model's modes
 
 The system prompt picks the task, and the reference implementation pairs each with a generation
-routine of its own. Text comes out of two of them here:
+routine of its own:
 
-| Mode | System prompt | Reference routine | Output | Here |
-| --- | --- | --- | --- | --- |
-| Chat | none | `generate_sequential` | text | works |
-| ASR | `Perform ASR.` | `generate_sequential` | text | works |
-| TTS | `Perform TTS. Use the UK male voice.` (also US male, US female, UK female) | `generate_sequential` | speech | stops immediately |
-| Interleaved | `Respond with interleaved text and audio.` | `generate_interleaved` | text and speech, alternating | six tokens, then nonsense: do not use |
+| Mode | System prompt | Reference routine | Output | Text-only build | With [speech output](#6-speech-output) |
+| --- | --- | --- | --- | --- | --- |
+| Chat | none | `generate_sequential` | text | works | works |
+| ASR | `Perform ASR.` | `generate_sequential` | text | works | works |
+| TTS | `Perform TTS. Use the UK male voice.` (also US male, US female, UK female) | `generate_sequential` | speech | stops immediately | works |
+| Interleaved | `Respond with interleaved text and audio.` | `generate_interleaved` | text and speech, alternating | do not use | works, with `audio_interleaved=True` |
 
-**ASR** and **chat** are the supported paths. A spoken or typed question with no system prompt gets a
-text answer, and both match the reference step for step: on the reference's own `question.wav` and
-three typed questions the text logits agree to within 6e-4 and every token is the same.
+**ASR** and **chat** need nothing more than the three models above. A spoken or typed question with
+no system prompt gets a text answer, and both match the reference step for step: on the reference's
+own `question.wav` and three typed questions the text logits agree to within 6e-4 and every token is
+the same.
 
 `LFM2.5-Audio-1.5B-JP` takes its own prompts, `Perform ASR in japanese.` and
 `Perform TTS in japanese.`; the rest of this section applies to it unchanged.
 
-Two tokens mark the turn passing from text to speech, and the builder puts both in `eos_token_id`:
-`<|audio_start|>` when the rest of the answer is spoken, and `<|text_end|>` when the text half of an
-interleaved answer is done. The positions after either are audio codes meant for the depthformer this
-runtime does not have; read off the text head they decode to fluent, plausible nonsense, so
-generation ends there with whatever text came first.
+Two tokens mark the turn passing from text to speech: `<|audio_start|>` when the rest of the answer is
+spoken, and `<|text_end|>` when the text half of an interleaved answer is done. In a text-only build
+the builder puts both in `eos_token_id`, because the positions after either are audio codes meant for
+the depthformer, and read off the text head they decode to fluent, plausible nonsense.
 
-**TTS** produces nothing here, and there is no text to be had: asked to speak a sentence, the whole
-text stream the model emits is `<|audio_start|>` followed by `<|im_end|>`, everything in between
-being audio. Generation stops on that first token, and the stop token is not added to the sequence,
-so there is nothing after the prompt to decode: expect an empty string. The first-step logits match
-the reference to 4e-5 in all four voices.
+**TTS** in a text-only build produces nothing: the whole text stream the model emits is
+`<|audio_start|>` followed by `<|im_end|>`, everything in between being audio. Generation stops on
+that first token, and the stop token is not added to the sequence, so there is nothing after the
+prompt to decode: expect an empty string.
 
-**Interleaved** is not usable here. The reference writes `interleaved_n_text` text tokens (six),
-then `interleaved_n_audio` audio frames (12, or 9 for the JP checkpoint) whose embeddings go back
-into the context, then six more text tokens, and so on. This runtime has no audio frames to feed, so
-after the sixth token it keeps reading the text head at positions the model means for speech. The
-first six tokens match the reference exactly; from the seventh the output is mostly the
-non-breaking-space token, with the odd word between. Asked *Name three primary colors.*, the reference
-writes *Red, blue, and yellow are the three primary colors…* and this runtime writes
-*Red, blue, and yellow* followed by a hundred `\xa0`. Only an answer that fits in six tokens plus
-`<|text_end|>` survives (*The capital of France is Paris*). For a text answer, leave the system prompt
-out and use chat mode, which is the same model answering the same question in text.
+**Interleaved** cannot be used in a text-only build. The reference writes six text tokens, then
+`interleaved_n_audio` audio frames (12, or 9 for the JP checkpoint) whose embeddings go back into the
+context, then six more text tokens, and so on. Without audio frames to feed, the text head is read at
+positions the model means for speech: the first six tokens are right and the rest is mostly the
+non-breaking-space token. For a text answer, leave the system prompt out and use chat mode.
 
 Sampling: the reference generates text greedily in every mode, so `do_sample=False` is right here.
-The temperatures and `top_k` values quoted for the model (`audio_temperature=0.8, audio_top_k=64`
-for TTS, `1.0` and `4` for interleaved) apply only to the audio stream, which this runtime does not
-produce; they have no text-side equivalent to set.
+The temperatures and `top_k` values quoted for the model apply to the audio codes only; see
+[Speech output](#6-speech-output) for where they go.
 
-## 6. Known limitations
+## 6. Speech output
 
-**Audio output is not supported.** TTS and the speech half of interleaved generation need the
-depthformer, which predicts 8 codebook entries per 80 ms audio frame in an inner autoregressive loop,
-plus the audio detokenizer to turn those codes into a waveform. That speech is worth having, and it
-is good: asked through the reference to say *The quick brown fox jumps over the lazy dog.*, the model
-produced about three seconds of 24 kHz audio per voice, and this runtime's own ASR read both back as
-that sentence exactly, punctuation included. The two voices are different waveforms, and the male one
-carries more of its energy below 1 kHz than the female one, as it should. Asked the spoken question
-above in interleaved mode, it answered in 41 audio frames ending in the end-of-audio code, 3.2
-seconds that read back as *The capital of France is Paris.* ONNX Runtime GenAI's generation loop
-samples one token stream, so none of that has a home here yet. Generation stops at `<|audio_start|>`
-and `<|text_end|>` rather than reading the depthformer's positions off the text head, and interleaved
-mode is out; see [the modes](#the-models-modes) for what each prompt gives you. LiquidAI ships
-`vocoder_depthformer.onnx` and `audio_detokenizer.onnx` in the ONNX repository, and their
-[onnx-export](https://github.com/Liquid4All/onnx-export) repository drives them from Python.
+Speech needs the decoder's hidden states, two more graphs and a few lines of `genai_config.json`.
+
+**Build the decoder with its hidden states.** The depthformer reads the hidden state the logits are
+projected from, so add `include_hidden_states=true`:
+
+```bash
+$ python3 -m onnxruntime_genai.models.builder \
+    -i ./lfm2.5-audio/pytorch -o ./lfm2.5-audio/cpu -p int4 -e cpu \
+    --extra_options exclude_embeds=true include_hidden_states=true
+```
+
+**Get the two graphs** from
+[LiquidAI/LFM2.5-Audio-1.5B-ONNX](https://huggingface.co/LiquidAI/LFM2.5-Audio-1.5B-ONNX):
+`onnx/vocoder_depthformer.onnx` and `onnx/audio_embedding.onnx` (with their `*.onnx_data` files for
+the `fp16` and `q4` variants), and `onnx/audio_detokenizer.onnx` for turning the codes into sound
+afterwards. Like the encoder they belong to `LFM2.5-Audio-1.5B`; the other checkpoints need their own
+export, which LiquidAI's [onnx-export](https://github.com/Liquid4All/onnx-export) produces.
+
+**Fix the depthformer's rotary embedding.** As published, the graph's attention nodes carry rotary
+tables but do not apply them (`do_rotary` is unset), and the tables are computed for `theta` 10000
+where the model uses 1,000,000. The first codebook of each frame sits at position zero and is
+unaffected; the other seven come out with logits up to 2.5 away from the PyTorch model's. The speech
+is intelligible either way, since the first codebook carries most of what is said, but only the
+corrected graph gives the model's own codes: with both fixes every codebook agrees to 1e-5.
+
+```python
+import numpy as np
+import onnx
+from onnx import helper, numpy_helper
+
+model = onnx.load("vocoder_depthformer.onnx")
+for node in model.graph.node:
+    if node.op_type == "GroupQueryAttention" and not any(a.name == "do_rotary" for a in node.attribute):
+        node.attribute.append(helper.make_attribute("do_rotary", 1))
+for table in model.graph.initializer:
+    if table.name.endswith((".gqa_cos", ".gqa_sin")):
+        positions, half = numpy_helper.to_array(table).shape
+        angles = np.outer(np.arange(positions), 1.0 / 1_000_000 ** (np.arange(0, 2 * half, 2) / (2 * half)))
+        values = np.cos(angles) if table.name.endswith("cos") else np.sin(angles)
+        table.CopyFrom(numpy_helper.from_array(values.astype(np.float32), table.name))
+onnx.save(model, "vocoder_depthformer.onnx")
+```
+
+**Add `audio_output` to `genai_config.json`, and take the two switch tokens out of `eos_token_id`.**
+They end a text-only answer; here they are where speech begins, and the model is refused if they are
+still stop tokens:
+
+```json
+{
+    "model": {
+        "eos_token_id": 7,
+        "audio_output": {
+            "depthformer": { "filename": "vocoder_depthformer.onnx" },
+            "embedding": { "filename": "audio_embedding.onnx" }
+        }
+    }
+}
+```
+
+`audio_output` also takes `num_codebooks` (8), `codebook_size` (2049, the last entry being the
+end-of-audio code), `audio_start_token_id` (128), `text_end_token_id` (130), `interleaved_n_text` (6)
+and `interleaved_n_audio` (12). The defaults are the published checkpoints'; set
+`interleaved_n_audio` to 9 for `LFM2.5-Audio-1.5B-JP`.
+
+**Generate.** Three search options steer the speech, next to the usual ones:
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `audio_interleaved` | `false` | Alternate text and speech by count, as `generate_interleaved` does. Leave it off for TTS, ASR and chat, which switch on `<|audio_start|>` alone. |
+| `audio_temperature` | `1.0` | Temperature of the audio codes. `0` takes the likeliest code. The model card uses 0.8 for TTS and 1.0 for interleaved. |
+| `audio_top_k` | `4` | Audio codes kept when sampling. `1` takes the likeliest code. The model card uses 64 for TTS and 4 for interleaved. |
+
+The text is still decoded greedily, and `random_seed` seeds the audio codes as well.
+
+```python
+import numpy as np
+import onnxruntime_genai as og
+
+model = og.Model("./lfm2.5-audio/cpu")
+processor = model.create_multimodal_processor()
+tokenizer = og.Tokenizer(model)
+
+prompt = (
+    "<|startoftext|><|im_start|>system\nRespond with interleaved text and audio.<|im_end|>\n"
+    "<|im_start|>user\n<|audio|><|im_end|>\n<|im_start|>assistant\n"
+)
+inputs = processor(prompt, audios=og.Audios.open("question.wav"))
+prompt_length = inputs["input_ids"].as_numpy().shape[1]
+
+params = og.GeneratorParams(model)
+params.set_search_options(
+    do_sample=False, max_length=prompt_length + 512, audio_interleaved=True, audio_temperature=1.0, audio_top_k=4
+)
+generator = og.Generator(model, params)
+generator.set_inputs(inputs)
+while not generator.is_done():
+    generator.generate_next_token()
+
+answer = generator.get_sequence(0)[prompt_length:]
+audio_token_id, audio_start, text_end = 133, 128, 130
+text = tokenizer.decode(np.array([t for t in answer if t not in (audio_token_id, audio_start, text_end)], np.int32))
+codes = generator.get_output("audio_codes")  # [num_frames, 8] int64, 80 ms of speech per frame
+```
+
+Each audio frame takes one place in the sequence, held by `audio_token_id`, so `max_length` counts
+frames as well as text tokens; twelve and a half frames make a second of speech. The frames themselves
+come from `get_output("audio_codes")`, at any point during generation or after it, with the
+end-of-audio frames left out.
+
+**Turn the codes into sound** with `audio_detokenizer.onnx`, which gives the log-magnitude and phase
+of a short-time Fourier transform, six columns per frame, and an inverse transform with the
+reference's "same" padding. This graph needs no correction: it matches the PyTorch detokenizer to
+1e-5.
+
+```python
+import onnxruntime as ort
+import soundfile as sf
+
+n_fft, hop = 1280, 320
+detokenizer = ort.InferenceSession("audio_detokenizer.onnx")
+# Only the first codebook carries the end-of-audio code on purpose; the detokenizer takes 0..2047.
+features = detokenizer.run(None, {"audio_codes": np.minimum(codes, 2047).T[None]})[0][0]
+spectrum = (np.exp(features[:, : n_fft // 2 + 1]) * np.exp(1j * features[:, n_fft // 2 + 1 :])).T
+
+window = 0.5 - 0.5 * np.cos(2 * np.pi * np.arange(n_fft) / n_fft)  # torch.hann_window: periodic
+frames = np.fft.irfft(spectrum, n_fft, axis=0) * window[:, None]
+wave = np.zeros((frames.shape[1] - 1) * hop + n_fft)
+envelope = np.zeros_like(wave)
+for t in range(frames.shape[1]):
+    wave[t * hop : t * hop + n_fft] += frames[:, t]
+    envelope[t * hop : t * hop + n_fft] += window**2
+pad = (n_fft - hop) // 2
+sf.write("answer.wav", (wave[pad:-pad] / envelope[pad:-pad]).astype(np.float32), 24000)
+```
+
+**How it compares with the reference.** With the audio codes taken greedily on both sides
+(`audio_top_k=1`), so that the two can be compared at all, this runtime reproduces liquid-audio
+exactly: every text token and every audio frame of an interleaved answer to the reference's
+`question.wav` (200 items, 149 of them frames), of an interleaved answer to a typed question, and of a
+TTS sentence. With the model card's sampling the speech reads back through this runtime's own ASR as
+the text the model wrote: *Red, blue, and yellow are the three primary colors. Would you like to hear
+how they’re used in art?* comes back word for word, and *The quick brown fox jumps over the lazy dog.*
+comes back exactly in TTS.
+
+## 7. Known limitations
+
+**The waveform is made outside the runtime.** Generation gives audio codes; the detokenizer and the
+inverse transform that turn them into sound are the few lines of Python in
+[Speech output](#6-speech-output), not part of the generation loop.
+
+**Speech output is for one sequence.** A batch size of 1 and no beam search, as for speech input.
+After an answer that ended in speech, a new turn appended to the same generator starts in text.
 
 **One prompt at a time, decoded greedily.** Several clips in one prompt work, but batched prompts
 and beam search (`num_beams` above 1) are refused; the reference decodes its text greedily too. The

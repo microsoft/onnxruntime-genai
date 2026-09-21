@@ -19,6 +19,7 @@
 #include "models/io/position_inputs.h"
 #include "model_type.h"
 #include "models/io/recurrent_state.h"
+#include "models/lfm2_audio_output.h"
 
 namespace Generators {
 
@@ -37,6 +38,12 @@ struct MultiModalLanguageModel : Model {
   std::unique_ptr<OrtSessionOptions> vision_session_options_;
   std::unique_ptr<OrtSessionOptions> speech_session_options_;
   std::unique_ptr<OrtSessionOptions> embedding_session_options_;
+
+  // LFM2-Audio speech output, present when model.audio_output names the two graphs.
+  std::unique_ptr<OrtSession> depthformer_session_;      // hidden_states -> one audio code per run, a frame in num_codebooks runs
+  std::unique_ptr<OrtSession> audio_embedding_session_;  // audio_codes -> audio_embeds, summed into the decoder's next input
+  std::unique_ptr<OrtSessionOptions> depthformer_session_options_;
+  std::unique_ptr<OrtSessionOptions> audio_embedding_session_options_;
 };
 
 // Base VisionState: runs vision.onnx with a single State::Run() call.
@@ -264,6 +271,8 @@ struct MultiModalPipelineState : State {
  private:
   void UpdateInputsOutputs(const DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices,
                            int current_length);
+  // The decoder's logits while the answer is text, or the next audio frame's placeholder while it is speech.
+  DeviceSpan<float> SampleAudioOrText(DeviceSpan<float> logits);
 
   const MultiModalLanguageModel& model_;
   int64_t num_image_tokens_{};
@@ -273,6 +282,7 @@ struct MultiModalPipelineState : State {
   std::unique_ptr<SpeechState> speech_state_;
   std::unique_ptr<EmbeddingState> embedding_state_;
   std::unique_ptr<DecoderState> decoder_state_;
+  std::unique_ptr<Lfm2AudioOutput> audio_output_;  // LFM2-Audio speech output, when the model has it
   std::shared_ptr<Adapters> adapters_;
   bool is_prompt_{true};
 

@@ -21,6 +21,14 @@ that wires them together:
                         convolution over past.%d.conv, so generation only matches between runs when the
                         conv state is carried correctly.
 
+  dummy_depthformer.onnx, dummy_audio_embedding.onnx
+                        Speech output, with the contract of LiquidAI's vocoder_depthformer.onnx and
+                        audio_embedding.onnx. The depthformer gives one codebook's logits per run; they
+                        depend on the hidden state, the codebook, the code before it and the cache of
+                        the runs before, so a frame only comes out right when all four are carried.
+                        The decoder has the hidden_states output they read. genai_config.json leaves
+                        them out: the tests that use them add model.audio_output themselves.
+
 The tokenizer is checked in separately, and zipped: tokenizer.zip holds tokenizer.json and
 tokenizer_config.json from LiquidAI/LFM2.5-Audio-1.5B (LFM2-Audio-1.5B ships the same files), whose
 4.8 MB compresses to under 1 MB. test_lfm2_audio_models.py unpacks it into a temporary directory
@@ -131,6 +139,89 @@ def create_dummy_embedding_model(output_path: str, rng: np.random.Generator):
     _save(helper.make_graph(nodes, "embedding", inputs, outputs, initializer=[table]), output_path)
 
 
+NUM_CODEBOOKS = 8
+CODEBOOK_SIZE = 2049  # 2048 codes and the end-of-audio code
+DEPTH_SIZE = 16
+TABLE_ROWS = 251  # the embedding tables are folded to keep the files small; prime, so codebooks do not collide
+
+
+def create_dummy_depthformer_model(output_path: str, rng: np.random.Generator):
+    """One codebook's logits per run, with the inputs and outputs of LiquidAI's vocoder_depthformer.onnx"""
+    cache_shape = [1, "batch", 1, "past_len", DEPTH_SIZE]
+    inputs = [
+        helper.make_tensor_value_info("hidden_states", TensorProto.FLOAT, ["batch", HIDDEN_SIZE]),
+        helper.make_tensor_value_info("depth_slices_in", TensorProto.FLOAT, ["batch", NUM_CODEBOOKS, DEPTH_SIZE]),
+        helper.make_tensor_value_info("step_idx", TensorProto.INT64, []),
+        helper.make_tensor_value_info("prev_token", TensorProto.INT64, ["batch"]),
+        helper.make_tensor_value_info("past_keys", TensorProto.FLOAT, cache_shape),
+        helper.make_tensor_value_info("past_values", TensorProto.FLOAT, cache_shape),
+        helper.make_tensor_value_info("seqlens_k", TensorProto.INT32, ["batch"]),
+        helper.make_tensor_value_info("total_seq_len", TensorProto.INT32, []),
+    ]
+    new_cache_shape = [1, "batch", 1, "new_len", DEPTH_SIZE]
+    outputs = [
+        helper.make_tensor_value_info("logits", TensorProto.FLOAT, ["batch", CODEBOOK_SIZE]),
+        helper.make_tensor_value_info("depth_slices", TensorProto.FLOAT, ["batch", NUM_CODEBOOKS, DEPTH_SIZE]),
+        helper.make_tensor_value_info("new_keys", TensorProto.FLOAT, new_cache_shape),
+        helper.make_tensor_value_info("new_values", TensorProto.FLOAT, new_cache_shape),
+    ]
+    initializers = [
+        numpy_helper.from_array(
+            rng.standard_normal((HIDDEN_SIZE, NUM_CODEBOOKS * DEPTH_SIZE)).astype(np.float32), name="depth_linear"
+        ),
+        numpy_helper.from_array(rng.standard_normal((TABLE_ROWS, DEPTH_SIZE)).astype(np.float32), name="code_table"),
+        numpy_helper.from_array(rng.standard_normal((DEPTH_SIZE, CODEBOOK_SIZE)).astype(np.float32), name="to_logits"),
+    ]
+    nodes = [
+        _const("slices_shape", [-1, NUM_CODEBOOKS, DEPTH_SIZE]),
+        _const("cache_entry_shape", [1, -1, 1, 1, DEPTH_SIZE]),
+        _const("zero", [0], dims=[]),
+        _const("past_axis", [3]),
+        _const("table_rows", [TABLE_ROWS]),
+        # The projection of the hidden state is only computed on the first codebook's run; later runs
+        # are handed it back, as the real graph does to skip the projection.
+        helper.make_node("MatMul", ["hidden_states", "depth_linear"], ["projected"]),
+        helper.make_node("Reshape", ["projected", "slices_shape"], ["computed_slices"]),
+        helper.make_node("Equal", ["step_idx", "zero"], ["is_first"]),
+        helper.make_node("Where", ["is_first", "computed_slices", "depth_slices_in"], ["depth_slices"]),
+        helper.make_node("Gather", ["depth_slices", "step_idx"], ["slice"], axis=1),
+        helper.make_node("Mod", ["prev_token", "table_rows"], ["previous_row"]),
+        helper.make_node("Gather", ["code_table", "previous_row"], ["previous"], axis=0),
+        helper.make_node("Add", ["slice", "previous"], ["position"]),
+        # What the earlier codebooks of this frame left in the cache.
+        helper.make_node("ReduceSum", ["past_keys", "past_axis"], ["history_5d"], keepdims=0),
+        helper.make_node("Reshape", ["history_5d", _shape_name("history")], ["history"]),
+        helper.make_node("Add", ["position", "history"], ["mixed"]),
+        helper.make_node("MatMul", ["mixed", "to_logits"], ["logits"]),
+        helper.make_node("Reshape", ["position", "cache_entry_shape"], ["cache_entry"]),
+        helper.make_node("Concat", ["past_keys", "cache_entry"], ["new_keys"], axis=3),
+        helper.make_node("Concat", ["past_values", "cache_entry"], ["new_values"], axis=3),
+    ]
+    nodes.insert(0, _const(_shape_name("history"), [-1, DEPTH_SIZE]))
+    _save(helper.make_graph(nodes, "depthformer", inputs, outputs, initializer=initializers), output_path)
+
+
+def _shape_name(name: str) -> str:
+    return f"{name}_shape"
+
+
+def create_dummy_audio_embedding_model(output_path: str, rng: np.random.Generator):
+    """audio_codes [batch, length], each offset into its codebook's rows -> audio_embeds [batch, length, hidden]"""
+    inputs = [helper.make_tensor_value_info("audio_codes", TensorProto.INT64, ["batch_size", "audio_length"])]
+    outputs = [
+        helper.make_tensor_value_info("audio_embeds", TensorProto.FLOAT, ["batch_size", "audio_length", HIDDEN_SIZE])
+    ]
+    table = numpy_helper.from_array(
+        rng.standard_normal((TABLE_ROWS, HIDDEN_SIZE)).astype(np.float32), name="audio_table"
+    )
+    nodes = [
+        _const("table_rows", [TABLE_ROWS]),
+        helper.make_node("Mod", ["audio_codes", "table_rows"], ["rows"]),
+        helper.make_node("Gather", ["audio_table", "rows"], ["audio_embeds"], axis=0),
+    ]
+    _save(helper.make_graph(nodes, "audio_embedding", inputs, outputs, initializer=[table]), output_path)
+
+
 def create_genai_config(output_path: str):
     session_options = {"log_id": "onnxruntime-genai", "provider_options": []}
     config = {
@@ -214,7 +305,9 @@ def main():
     rng = np.random.default_rng(42)
     create_dummy_speech_model(os.path.join(args.output, "dummy_speech.onnx"), rng)
     create_dummy_embedding_model(os.path.join(args.output, "dummy_embedding.onnx"), rng)
-    create_dummy_decoder_model(os.path.join(args.output, "dummy_text.onnx"), rng)
+    create_dummy_decoder_model(os.path.join(args.output, "dummy_text.onnx"), rng, hidden_states_output=True)
+    create_dummy_depthformer_model(os.path.join(args.output, "dummy_depthformer.onnx"), rng)
+    create_dummy_audio_embedding_model(os.path.join(args.output, "dummy_audio_embedding.onnx"), rng)
     create_genai_config(os.path.join(args.output, "genai_config.json"))
     print(f"Wrote dummy LFM2-Audio models to {args.output}")
 
