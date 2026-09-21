@@ -103,15 +103,6 @@ bool PrepareSampledEvent(MAT::EventProperties& event, std::string_view app_sessi
   return true;
 }
 
-bool PrepareProcessEvent(MAT::EventProperties& event, std::string_view app_session_guid) {
-  if (!TelemetryInternal::ShouldSampleSession(
-          app_session_guid, 0, TelemetryInternal::kProcessEventSampleRatePercent)) {
-    return false;
-  }
-  event.SetPopsample(TelemetryInternal::kProcessEventSampleRatePercent);
-  return true;
-}
-
 #if defined(__linux__) && !defined(__ANDROID__)
 std::string GetCertificateAuthorityBundlePath() {
   if (const char* ssl_cert_file = std::getenv("SSL_CERT_FILE");
@@ -431,10 +422,6 @@ void GenAiTelemetry::LogProcessInfo() {
     warn_device_id_fallback = device.device_id_status == "Failed";
 
     auto event = MakeEvent("ProcessInfo", EventPriority::Critical);
-    if (!PrepareProcessEvent(event, app_session_guid_)) {
-      emitted = true;
-      return;
-    }
     // sessionId 0 = process scope (model sessions are numbered from 1); ProcessInfo
     // correlates with model/generate events via the AppSessionGuid logger context.
     event.SetProperty("sessionId", static_cast<int64_t>(0));
