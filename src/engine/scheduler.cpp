@@ -35,19 +35,31 @@ ScheduledRequests Scheduler::CreateScheduledRequests(const StepPlan& plan) {
                            GetBatchedSamplingPlan()};
 }
 
+std::unique_ptr<BatchedSamplerState> Scheduler::CreateSamplingState(
+    const Request& request) const {
+  if (auto* sampler = GetBatchedSampler()) {
+    return sampler->CreateState(request.SamplerSeedBasis());
+  }
+  return nullptr;
+}
+
 StaticBatchScheduler::StaticBatchScheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager)
     : Scheduler{model}, model_{model}, cache_manager_{cache_manager} {}
 
 void StaticBatchScheduler::AddRequest(std::shared_ptr<Request> request) {
-  // The static batch decoder rebuilds its contiguous cache from the whole sequence every step, so it
-  // cannot resume a half written prompt. Only the paged cache can hold one.
-  if (request->SearchOptions().chunk_size.value_or(0) != 0) {
+  // Engine::CreateDependencies already rejects a chunking model for static batching, but an Engine
+  // built with injected dependencies never runs that check. Keep this guard: the static batch
+  // decoder rebuilds its contiguous cache from the whole sequence every step, so it cannot resume a
+  // half-written prompt, and admitting one here would corrupt the batch instead of failing.
+  if (request->PrefillChunkSize().value_or(0) != 0) {
     throw std::runtime_error(
-        "search.chunk_size requires dynamic batching; the static batch scheduler cannot chunk a prefill.");
+        "search.chunk_size requires dynamic batching; the static batch scheduler cannot chunk a "
+        "prefill.");
   }
-  if (auto* sampler = GetBatchedSampler())
-    request->SamplingState(*sampler);
-  requests_pool_.push_back(request);
+  requests_pool_.reserve(requests_pool_.size() + 1);
+  auto sampling_state = CreateSamplingState(*request);
+  request->CommitSamplingState(std::move(sampling_state));
+  requests_pool_.push_back(std::move(request));
 }
 
 void StaticBatchScheduler::RemoveRequest(std::shared_ptr<Request> request) {
@@ -129,9 +141,10 @@ DynamicBatchScheduler::DynamicBatchScheduler(std::shared_ptr<Model> model, std::
     : Scheduler{model}, model_{model}, cache_manager_{cache_manager} {}
 
 void DynamicBatchScheduler::AddRequest(std::shared_ptr<Request> request) {
-  if (auto* sampler = GetBatchedSampler())
-    request->SamplingState(*sampler);
-  requests_pool_.push_back(request);
+  requests_pool_.reserve(requests_pool_.size() + 1);
+  auto sampling_state = CreateSamplingState(*request);
+  request->CommitSamplingState(std::move(sampling_state));
+  requests_pool_.push_back(std::move(request));
 }
 
 void DynamicBatchScheduler::RemoveRequest(std::shared_ptr<Request> request) {
@@ -209,7 +222,7 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
         SlotsForWholeSequence(snapshot.current_sequence_length);
     candidate.entry.is_prefill = snapshot.is_prefill;
     candidate.entry.newly_admitted = newly_admitted;
-    auto prefill_token_cap = request->SearchOptions().chunk_size;
+    auto prefill_token_cap = request->PrefillChunkSize();
     if (cache_query_token_cap != 0 &&
         (prefill_token_cap.value_or(0) == 0 || *prefill_token_cap > cache_query_token_cap)) {
       prefill_token_cap = cache_query_token_cap;
@@ -318,6 +331,9 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
       const auto resource_result = cache_manager_->PlanStepResources(plan);
       if (resource_result.executable &&
           plan.requests.size() == selected_request_count) {
+        for (const auto& entry : plan.requests) {
+          token_counts[entry.scheduling_order] = entry.unprocessed_token_count;
+        }
         break;
       }
 
@@ -366,7 +382,8 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
   // describe that packed layout and identify the last logits row for each request, which is the row
   // used to sample its next token.
   size_t packed_token_offset = 0;
-  plan.graph_capture_eligible = true;
+  plan.graph_capture_eligible = !plan.requests.empty();
+  size_t uniform_token_count = 0;
   for (size_t i = 0; i < plan.requests.size(); ++i) {
     auto& entry = plan.requests[i];
     const size_t scheduling_index = entry.scheduling_order;
@@ -379,8 +396,14 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
         packed_token_offset + entry.unprocessed_token_count - 1;
     packed_token_offset += entry.unprocessed_token_count;
     plan.token_count += entry.unprocessed_token_count;
+    if (i == 0) {
+      uniform_token_count = entry.unprocessed_token_count;
+    }
+    // One captured graph bakes in every tensor shape it was recorded with, so a step qualifies only
+    // when each request contributes the same number of tokens.
     plan.graph_capture_eligible &=
-        !entry.is_prefill && entry.unprocessed_token_count == 1;
+        !entry.is_prefill && entry.unprocessed_token_count == uniform_token_count &&
+        entry.unprocessed_token_count != 0;
   }
   return result;
 }

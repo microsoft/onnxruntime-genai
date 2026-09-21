@@ -79,6 +79,25 @@ TEST(DecoderStateGroupsConfigTest, PreservesLegacyManifestAbsence) {
   EXPECT_FALSE(config.model.decoder.state_groups.has_value());
 }
 
+TEST(DecoderStateGroupsConfigTest, ParsesStateUpdateWithDefaultOptions) {
+  const auto config = LoadDecoderConfig(R"({
+    "num_hidden_layers": 1,
+    "state_groups": [{
+      "kind": "fixed_conv",
+      "layer_ids": [0],
+      "state_update": { "capacity": 3 }
+    }]
+  })");
+
+  ASSERT_TRUE(config.model.decoder.state_groups);
+  const auto& groups = *config.model.decoder.state_groups;
+  ASSERT_EQ(groups.size(), 1u);
+  ASSERT_TRUE(groups[0].state_update);
+  EXPECT_TRUE(groups[0].state_update->enabled);
+  EXPECT_EQ(groups[0].state_update->capacity, 3);
+  EXPECT_EQ(groups[0].state_update->key_head_count, 0);
+}
+
 TEST(DecoderStateGroupsConfigTest, UsesDefaultStateUpdateBindings) {
   const auto config = LoadDecoderConfig(R"({ "state_update_capacity": 3 })");
 
@@ -87,6 +106,15 @@ TEST(DecoderStateGroupsConfigTest, UsesDefaultStateUpdateBindings) {
   EXPECT_EQ(config.model.decoder.outputs.state_update_conv_value_names, Config::Defaults::StateUpdateConvValueName);
   EXPECT_EQ(config.model.decoder.outputs.state_update_recurrent_capsule_names,
             Config::Defaults::StateUpdateRecurrentCapsuleName);
+}
+
+TEST(DecoderStateGroupsConfigTest, UsesLegacyRecurrentStateBindingDefaults) {
+  const auto config = LoadDecoderConfig("{}");
+
+  EXPECT_EQ(config.model.decoder.inputs.past_conv_names, "past_key_values.%d.conv_state");
+  EXPECT_EQ(config.model.decoder.inputs.past_recurrent_names, "past_key_values.%d.recurrent_state");
+  EXPECT_EQ(config.model.decoder.outputs.present_conv_names, "present.%d.conv_state");
+  EXPECT_EQ(config.model.decoder.outputs.present_recurrent_names, "present.%d.recurrent_state");
 }
 
 TEST(DecoderStateGroupsConfigTest, ParsesSparseHybridManifest) {

@@ -526,8 +526,7 @@ void NemotronSpeechState::RunEncoder() {
 
   OrtValue* mel_tensor = current_mel_->ort_tensor_.get();
   auto mel_shape = mel_tensor->GetTensorTypeAndShapeInfo()->GetShape();
-  ValidateNemotronMelInputShape(mel_shape, nemotron_config_.num_mels);
-  int64_t total_mel_frames = mel_shape[2];
+  const auto total_mel_frames = GetValidatedNemotronMelFrameCount(mel_shape, nemotron_config_.num_mels);
 
   encoder_state_->SetMelInput(mel_tensor, total_mel_frames);
   encoder_state_->UpdateCacheInputs();

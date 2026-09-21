@@ -31,6 +31,7 @@ examples/csharp/ModelChat/models
 
 !test/models/gemma4/*
 !test/models/hf-internal-testing/*
+!test/models/lfm2-vl/*
 !test/models/marian-batch/*
 !test/models/marian-batch-beams/*
 !test/models/marian-batch-values/
@@ -44,6 +45,12 @@ examples/csharp/ModelChat/models
 !test/models/qwen3-5/*
 !test/models/qwen3-vl/*
 !test/models/whisper/*
+
+!/test/models/engine/
+/test/models/engine/*
+!/test/models/engine/synthetic-paged-scales/
+!/test/models/engine/synthetic-paged-scales/decoder.onnx
+!/test/models/engine/synthetic-paged-scales/genai_config.json
 
 .ipynb_checkpoints/
 /src/java/.gradle

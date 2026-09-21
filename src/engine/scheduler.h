@@ -72,6 +72,10 @@ struct Scheduler {
 
   ScheduledRequests CreateScheduledRequests(const StepPlan& plan);
 
+  bool SupportsTransactionalSamplerState() const {
+    return !batched_sampler_ || batched_sampler_->SupportsTransactions();
+  }
+
   /**
    * @brief Checks if the Scheduler has any pending requests.
    * @return True if there are pending requests, false otherwise.
@@ -84,6 +88,8 @@ struct Scheduler {
   virtual ~Scheduler() = default;
 
  protected:
+  std::unique_ptr<BatchedSamplerState> CreateSamplingState(
+      const Request& request) const;
   BatchedSampler* GetBatchedSampler() const { return batched_sampler_.get(); }
   BatchedSamplingPlan* GetBatchedSamplingPlan() { return &batched_sampling_plan_; }
 

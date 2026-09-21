@@ -87,13 +87,15 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
   for (int run = 0; run < total_runs; ++run) {
     const bool is_warmup = run < config.warmup_runs;
 
-    std::vector<std::unique_ptr<OgaGeneratorParams>> params;
+    std::vector<std::unique_ptr<OgaRequestOptions>> request_options;
+    std::vector<std::unique_ptr<OgaTurnOptions>> turn_options;
     std::vector<RequestRunState> request_states(static_cast<size_t>(config.concurrency));
     std::vector<std::unique_ptr<OgaRequest>> requests;
     std::unordered_map<const OgaRequest*, RequestRunState*>
         request_states_by_request;
 
-    params.reserve(static_cast<size_t>(config.concurrency));
+    request_options.reserve(static_cast<size_t>(config.concurrency));
+    turn_options.reserve(static_cast<size_t>(config.concurrency));
     requests.reserve(static_cast<size_t>(config.concurrency));
 
     // Start timing before submission so TTFT captures arrival-to-first-token, including admission.
@@ -101,21 +103,26 @@ ScenarioExecutionOutput DecodeBaselineScenario::Execute(const ScenarioConfig& co
     size_t generated_tokens = 0;
 
     for (int i = 0; i < config.concurrency; ++i) {
-      params.emplace_back(OgaGeneratorParams::Create(*engineResources.model));
-      const size_t max_length = prompt_token_count + static_cast<size_t>(config.generation_tokens);
-      params.back()->SetSearchOption(
-          "max_length", static_cast<double>(max_length));
-      params.back()->SetSearchOption("random_seed", kRandomSeed);
+      request_options.emplace_back(OgaRequestOptions::Create());
+      const size_t max_session_tokens =
+          prompt_token_count + static_cast<size_t>(config.generation_tokens);
+      request_options.back()->SetMaxSessionTokens(max_session_tokens);
 
       auto& request_state = request_states[static_cast<size_t>(i)];
       request_state.tokens.assign(
           prompt_tokens->SequenceData(0), prompt_tokens->SequenceData(0) + prompt_token_count);
 
-      requests.emplace_back(engineResources.engine->CreateRequest(*params.back()));
+      requests.emplace_back(
+          engineResources.engine->CreateRequest(request_options.back().get()));
       request_states_by_request.emplace(
           requests.back().get(), &request_state);
+      turn_options.push_back(requests.back()->CreateTurnOptions());
+      if (engineResources.uses_dynamic_batching) {
+        turn_options.back()->SetSeed(kRandomSeed);
+      }
       requests.back()->BeginTurn(
-          prompt_tokens->SequenceData(0), prompt_token_count);
+          prompt_tokens->SequenceData(0), prompt_token_count,
+          turn_options.back().get());
     }
 
     auto event_buffer = engineResources.engine->CreateEventBuffer(

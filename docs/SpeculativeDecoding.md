@@ -316,7 +316,7 @@ acceptance must be considered together.
 | `interrupted_rounds` | Rounds invalidated by an external operation before normal completion |
 | `active_rounds` | `1` while a round has buffered output, otherwise `0` |
 | `draft_tokens_proposed` | Tokens produced by the active proposer; for n-gram decoding these are lookup proposals |
-| `draft_tokens_evaluated` | Proposed tokens examined before acceptance stopped |
+| `draft_tokens_evaluated` | Proposed token positions logically resolved before the committed output boundary: the accepted prefix plus the first rejected proposal when rejection ends verification. Engine stops counting at a stop string or token limit, so later proposal positions are not counted. |
 | `draft_tokens_accepted` | Proposed tokens accepted directly |
 | `correction_tokens` | Target-selected tokens committed after a rejection |
 | `bonus_tokens` | Target-selected trailing tokens committed after full proposal acceptance |
@@ -328,7 +328,8 @@ acceptance must be considered together.
 | `target_forward_passes` | All target verification, re-anchor, and lifecycle reconciliation executions |
 
 `acceptance_rate` is `draft_tokens_accepted / draft_tokens_evaluated`. It is zero until at least
-one proposed token has been evaluated.
+one proposed token has been evaluated. An Engine round truncated by a stop string or token limit can
+have an acceptance rate of `1.0` even when later proposed tokens were not evaluated.
 
 ### Round and target execution breakdown
 

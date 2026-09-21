@@ -14,12 +14,16 @@ from datasets import load_dataset
 
 
 def request_for_event(event: og.EngineEvent) -> og.Request | None:
+    if event.flags & og.EngineEventFlags.FAILED and (
+        event.request is None
+        or event.error_code != og.EngineErrorCode.REQUEST_UNSERVICEABLE
+    ):
+        raise RuntimeError(f"Engine failed; error_code={event.error_code}")
     if event.request is not None:
         return event.request
     if event.flags & (og.EngineEventFlags.CAPACITY_BLOCKED | og.EngineEventFlags.RETRYABLE):
         return None
-    outcome = "failed" if event.flags & og.EngineEventFlags.FAILED else "returned an invalid request-less event"
-    raise RuntimeError(f"Engine {outcome}; error_code={event.error_code}")
+    raise RuntimeError(f"Engine returned an invalid request-less event; error_code={event.error_code}")
 
 
 def get_random_prompts(num_questions: int, split="validation") -> list[str]:
@@ -61,11 +65,8 @@ class RequestPool:
 
     def admit(self, prompt: str):
         client_request = ClientRequest(prompt, self.tokenizer)
-        params = og.GeneratorParams(self.model)
-        params.set_search_options(
-            do_sample=False,
-            max_length=256,
-        )
+        request_options = og.RequestOptions()
+        request_options.set_max_session_tokens(256)
         messages = json.dumps(
             [
                 {"role": "system", "content": ""},
@@ -75,9 +76,11 @@ class RequestPool:
         tokens = self.tokenizer.encode(
             self.tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)
         )
-        request = self.engine.create_request(params)
+        request = self.engine.create_request(options=request_options)
         self.requests[request] = client_request
         turn_options = og.TurnOptions(request)
+        # Per-turn policy never carries over, so a turn that wants the top logit says so every time.
+        turn_options.set_do_sample(False)
         turn_options.set_max_generated_tokens(128)
         request.begin_turn(
             np.asarray(tokens, dtype=np.int32),
@@ -101,6 +104,10 @@ class RequestPool:
         client_request = self.requests.get(request)
         assert client_request is not None, "Canonical request not found in the pool"
         token_count = 0
+        if event.flags & og.EngineEventFlags.FAILED:
+            tqdm.tqdm.write(
+                f"Request failed; error_code={event.error_code}, prompt={client_request.prompt!r}"
+            )
         if event.flags & og.EngineEventFlags.TOKEN:
             token = event.token
             client_request.token_stream += client_request.streaming_tokenizer.decode(token)

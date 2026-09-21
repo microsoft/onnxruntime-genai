@@ -105,19 +105,6 @@ std::string ExpandBinding(const std::string& value, int layer_id) {
   return result;
 }
 
-bool ShapesCompatible(const std::vector<int64_t>& left,
-                      const std::vector<int64_t>& right) {
-  if (left.size() != right.size()) {
-    return false;
-  }
-  for (size_t i = 0; i < left.size(); ++i) {
-    if (left[i] >= 0 && right[i] >= 0 && left[i] != right[i]) {
-      return false;
-    }
-  }
-  return true;
-}
-
 std::string ShapeString(const std::vector<int64_t>& shape) {
   std::ostringstream output;
   output << '[';
@@ -147,7 +134,7 @@ void ValidateCompatiblePair(std::string_view group_label,
         "' has incompatible dtypes for input '" + input.name + "' and output '" +
         output.name + "'");
   }
-  if (!ShapesCompatible(input.shape, output.shape)) {
+  if (!StateShapesCompatible(input.shape, output.shape)) {
     throw std::runtime_error(
         std::string{group_label} + " binding '" + std::string{semantic} +
         "' has incompatible shapes for input '" + input.name + "' " +
@@ -169,7 +156,7 @@ void ValidatePagedGeometry(std::string_view group_label,
     return;
   }
   if (tensor.data_type != reference->data_type ||
-      !ShapesCompatible(tensor.shape, reference->shape)) {
+      !StateShapesCompatible(tensor.shape, reference->shape)) {
     throw std::runtime_error(
         std::string{group_label} + " has incompatible paged geometry between '" +
         reference->name + "' " + ShapeString(reference->shape) +
@@ -319,6 +306,19 @@ void ValidateStateUpdateSession(std::string_view group_label,
 }
 
 }  // namespace
+
+bool StateShapesCompatible(const std::vector<int64_t>& left,
+                           const std::vector<int64_t>& right) {
+  if (left.size() != right.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < left.size(); ++i) {
+    if (left[i] >= 0 && right[i] >= 0 && left[i] != right[i]) {
+      return false;
+    }
+  }
+  return true;
+}
 
 ModelStateManifest::ModelStateManifest(const Decoder& decoder)
     : state_groups_{decoder.state_groups.value_or(std::vector<StateGroup>{})},

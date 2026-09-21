@@ -89,6 +89,9 @@ void InheritSessionOptions(const Config::SessionOptions& parent,
 
 std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   const auto& mtp = config.model.mtp;
+  if (!mtp.enabled) {
+    throw std::runtime_error("model.mtp is disabled by model.mtp.enabled.");
+  }
   if (mtp.filename.empty()) {
     throw std::runtime_error("model.mtp.filename is required to create an MTP decoder.");
   }
@@ -127,10 +130,19 @@ std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   decoder.inputs.position_ids = mtp.inputs.position_ids;
   decoder.inputs.past_key_names = mtp.inputs.past_key_names;
   decoder.inputs.past_value_names = mtp.inputs.past_value_names;
+  // The projection starts from a copy of the target config, so a per-token quantized target would
+  // otherwise leak its scale name templates into the head. The head is always an unquantized
+  // full-attention layer and declares no scale tensors, so clear them: leaving them in place would
+  // make PagedKeyValueCacheBytesPerBlock() and CacheManager::Create() look up the target's scale
+  // tensor names in the head's own session.
+  decoder.inputs.past_key_scale_names.clear();
+  decoder.inputs.past_value_scale_names.clear();
   decoder.outputs.logits = mtp.outputs.logits;
   decoder.outputs.hidden_states = mtp.outputs.hidden_states;
   decoder.outputs.present_key_names = mtp.outputs.present_key_names;
   decoder.outputs.present_value_names = mtp.outputs.present_value_names;
+  decoder.outputs.present_key_scale_names.clear();
+  decoder.outputs.present_value_scale_names.clear();
 
   // The MTP graph is one full-attention layer. Paged-attention metadata and block-table names are
   // deliberately inherited above; fixed recurrent state and a main-model sliding window are not.
@@ -140,6 +152,9 @@ std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   decoder.sliding_window.reset();
   decoder.state_groups.reset();
   decoder.pipeline.clear();
+  // A chained draft feeds every stage the previous stage's hidden states, so the head must emit its
+  // own hidden states. Record that before clearing the MTP section the demand was inferred from.
+  projected->engine.hidden_states_output_required = true;
   projected->model.mtp = {};
   return projected;
 }
@@ -453,6 +468,10 @@ struct DecoderInputs_Element : JSON::Element {
       v_.past_key_names = JSON::Get<std::string_view>(value);
     } else if (name == "past_value_names") {
       v_.past_value_names = JSON::Get<std::string_view>(value);
+    } else if (name == "past_key_scale_names") {
+      v_.past_key_scale_names = JSON::Get<std::string_view>(value);
+    } else if (name == "past_value_scale_names") {
+      v_.past_value_scale_names = JSON::Get<std::string_view>(value);
     } else if (name == "past_names") {
       v_.past_names = JSON::Get<std::string_view>(value);
     } else if (name == "cross_past_key_names") {
@@ -524,6 +543,10 @@ struct DecoderOutputs_Element : JSON::Element {
       v_.present_key_names = JSON::Get<std::string_view>(value);
     } else if (name == "present_value_names") {
       v_.present_value_names = JSON::Get<std::string_view>(value);
+    } else if (name == "present_key_scale_names") {
+      v_.present_key_scale_names = JSON::Get<std::string_view>(value);
+    } else if (name == "present_value_scale_names") {
+      v_.present_value_scale_names = JSON::Get<std::string_view>(value);
     } else if (name == "present_names") {
       v_.present_names = JSON::Get<std::string_view>(value);
     } else if (name == "output_cross_qk_names") {
@@ -540,6 +563,8 @@ struct DecoderOutputs_Element : JSON::Element {
       v_.state_update_recurrent_capsule_names = JSON::Get<std::string_view>(value);
     } else if (name == "hidden_states") {
       v_.hidden_states = JSON::Get<std::string_view>(value);
+    } else if (name == "aux_hidden_states") {
+      v_.aux_hidden_states = JSON::Get<std::string_view>(value);
     } else if (name == "outputs") {
       v_.outputs = JSON::Get<std::string_view>(value);
     } else if (name == "lstm_hidden_state") {
@@ -705,7 +730,7 @@ struct StateGroup_Element : JSON::Element {
       if (v_.state_update) {
         throw std::runtime_error("Duplicate decoder state_update declaration");
       }
-      v_.state_update.emplace();
+      v_.state_update.emplace(DecoderStateUpdate{});
       state_update_ = std::make_unique<StateUpdate_Element>(*v_.state_update);
       return *state_update_;
     }
@@ -1065,7 +1090,9 @@ struct Mtp_Element : JSON::Element {
   explicit Mtp_Element(Config::Model::Mtp& v) : v_{v} {}
 
   void OnValue(std::string_view name, JSON::Value value) override {
-    if (name == "filename") {
+    if (name == "enabled") {
+      v_.enabled = JSON::Get<bool>(value);
+    } else if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
     } else if (name == "num_hidden_layers") {
       v_.num_hidden_layers = SafeDoubleToInt(JSON::Get<double>(value), name);
@@ -1117,6 +1144,145 @@ struct Mtp_Element : JSON::Element {
   MtpInputs_Element inputs_{v_.inputs};
   MtpOutputs_Element outputs_{v_.outputs};
   SharedInitializers_Element shared_initializers_{v_.shared_initializers};
+};
+
+struct Dflash2Inputs_Element : JSON::Element {
+  explicit Dflash2Inputs_Element(Config::Model::Dflash2::Inputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "aux_hidden_states") {
+      v_.aux_hidden_states = JSON::Get<std::string_view>(value);
+    } else if (name == "input_ids") {
+      v_.input_ids = JSON::Get<std::string_view>(value);
+    } else if (name == "q_row_map") {
+      v_.q_row_map = JSON::Get<std::string_view>(value);
+    } else if (name == "qkv_row_map") {
+      v_.qkv_row_map = JSON::Get<std::string_view>(value);
+    } else if (name == "block_row_index") {
+      v_.block_row_index = JSON::Get<std::string_view>(value);
+    } else if (name == "past_key_scale_names") {
+      v_.past_key_scale_names = JSON::Get<std::string_view>(value);
+    } else if (name == "past_value_scale_names") {
+      v_.past_value_scale_names = JSON::Get<std::string_view>(value);
+    } else if (name == "cumulative_sequence_lengths") {
+      v_.cumulative_sequence_lengths = JSON::Get<std::string_view>(value);
+    } else if (name == "past_sequence_lengths") {
+      v_.past_sequence_lengths = JSON::Get<std::string_view>(value);
+    } else if (name == "block_table") {
+      v_.block_table = JSON::Get<std::string_view>(value);
+    } else if (name == "attention_metadata") {
+      v_.attention_metadata = JSON::Get<std::string_view>(value);
+    } else if (name == "past_key_names") {
+      v_.past_key_names = JSON::Get<std::string_view>(value);
+    } else if (name == "past_value_names") {
+      v_.past_value_names = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Dflash2::Inputs& v_;
+};
+
+struct Dflash2Outputs_Element : JSON::Element {
+  explicit Dflash2Outputs_Element(Config::Model::Dflash2::Outputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "candidate_ids") {
+      v_.candidate_ids = JSON::Get<std::string_view>(value);
+    } else if (name == "scores") {
+      v_.scores = JSON::Get<std::string_view>(value);
+    } else if (name == "present_key_scale_names") {
+      v_.present_key_scale_names = JSON::Get<std::string_view>(value);
+    } else if (name == "present_value_scale_names") {
+      v_.present_value_scale_names = JSON::Get<std::string_view>(value);
+    } else if (name == "present_key_names") {
+      v_.present_key_names = JSON::Get<std::string_view>(value);
+    } else if (name == "present_value_names") {
+      v_.present_value_names = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Dflash2::Outputs& v_;
+};
+
+struct Dflash2_Element : JSON::Element {
+  explicit Dflash2_Element(Config::Model::Dflash2& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "filename") {
+      v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "num_hidden_layers") {
+      v_.num_hidden_layers = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.num_hidden_layers <= 0) throw std::out_of_range("num_hidden_layers must be > 0");
+    } else if (name == "num_key_value_heads") {
+      v_.num_key_value_heads = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.num_key_value_heads <= 0) throw std::out_of_range("num_key_value_heads must be > 0");
+    } else if (name == "head_size") {
+      v_.head_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.head_size <= 0) throw std::out_of_range("head_size must be > 0");
+    } else if (name == "block_size") {
+      v_.block_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.block_size <= 1) throw std::out_of_range("block_size must be > 1");
+    } else if (name == "num_draft_tokens") {
+      v_.num_draft_tokens = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.num_draft_tokens <= 0) throw std::out_of_range("num_draft_tokens must be > 0");
+    } else if (name == "selector_top_k") {
+      v_.selector_top_k = SafeDoubleToInt(JSON::Get<double>(value), name);
+      if (v_.selector_top_k <= 0) throw std::out_of_range("selector_top_k must be > 0");
+    } else if (name == "mask_token_id") {
+      v_.mask_token_id = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "sliding_window") {
+      v_.sliding_window = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "main_aux_hidden_states") {
+      v_.main_aux_hidden_states = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "session_options") {
+      v_.session_options = Config::SessionOptions{};
+      session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
+      return *session_options_;
+    }
+    if (name == "run_options") {
+      v_.run_options = Config::RunOptions{};
+      run_options_ = std::make_unique<RunOptions_Element>(*v_.run_options);
+      return *run_options_;
+    }
+    if (name == "inputs") {
+      return inputs_;
+    }
+    if (name == "outputs") {
+      return outputs_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+  Element& OnArray(std::string_view name) override {
+    if (name == "shared_initializers") {
+      return shared_initializers_;
+    }
+    if (name == "aux_hidden_state_layers") {
+      return aux_hidden_state_layers_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Dflash2& v_;
+  std::unique_ptr<SessionOptions_Element> session_options_;
+  std::unique_ptr<RunOptions_Element> run_options_;
+  Dflash2Inputs_Element inputs_{v_.inputs};
+  Dflash2Outputs_Element outputs_{v_.outputs};
+  SharedInitializers_Element shared_initializers_{v_.shared_initializers};
+  IntArray_Element aux_hidden_state_layers_{v_.aux_hidden_state_layers};
 };
 
 struct VisionInputs_Element : JSON::Element {
@@ -1248,6 +1414,8 @@ struct Vision_Element : JSON::Element {
       v_.num_visual_tokens = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "window_size") {
       v_.window_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "max_num_patches") {
+      v_.max_num_patches = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1880,7 +2048,8 @@ struct Embedding_Element : JSON::Element {
 };
 
 struct Model_Element : JSON::Element {
-  explicit Model_Element(Config::Model& v) : v_{v} {}
+  explicit Model_Element(Config::Model& v)
+      : v_{v}, block_drafter_alias_{v_.dflash2.configured_alias_is_dspark} {}
 
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "type") {
@@ -2003,6 +2172,17 @@ struct Model_Element : JSON::Element {
     if (name == "mtp") {
       return mtp_;
     }
+    if (name == "dflash2" || name == "dspark") {
+      // DSpark replaces DFlash's candidate selector with a Markov head but emits the same lattice.
+      const bool is_dspark = name == "dspark";
+      if (block_drafter_alias_.has_value() && *block_drafter_alias_ != is_dspark) {
+        throw std::runtime_error("Only one of model.dflash2 and model.dspark may be configured");
+      }
+      block_drafter_alias_ = is_dspark;
+      v_.dflash2.is_dspark = is_dspark;
+      v_.dflash2.configured_alias_is_dspark = is_dspark;
+      return dflash2_;
+    }
     throw JSON::unknown_value_error{};
   }
 
@@ -2020,6 +2200,8 @@ struct Model_Element : JSON::Element {
   VAD_Element vad_{v_.vad};
   Moonshine_Element moonshine_{v_.moonshine};
   Mtp_Element mtp_{v_.mtp};
+  Dflash2_Element dflash2_{v_.dflash2};
+  std::optional<bool> block_drafter_alias_;
 };
 
 // Throws std::runtime_error (rather than std::overflow_error/std::invalid_argument) on failure.
@@ -2140,33 +2322,37 @@ struct Search_Element : JSON::Element {
 struct Speculative_Element : JSON::Element {
   explicit Speculative_Element(Config::Speculative& v) : v_{v} {}
 
-  // K (draft tokens per round) must be within [kMinK, kMaxK].
+  // Draft widths (max_draft_tokens, min_adaptive_k) must be within [kMinK, kMaxDraftTokens].
+  // This is a parse-time sanity bound, not a capability: the engine clamps the width again at
+  // dispatch against the drafter geometry, the state-update capacity and kMaxDraftTokensPerStep.
   static constexpr int kMinK = 1;
-  static constexpr int kMaxK = 16;
+  static constexpr int kMaxDraftTokens = 16;
+  // ngram_size is the lookup key length, not a token count, so it does not share the draft bound.
+  static constexpr int kMaxNGramSize = 16;
 
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "max_draft_tokens") {
       int k = SafeDoubleToInt(JSON::Get<double>(value), name);
-      if (k < kMinK || k > kMaxK)
+      if (k < kMinK || k > kMaxDraftTokens)
         throw std::runtime_error(
             "speculative.max_draft_tokens must be between " + std::to_string(kMinK) + " and " +
-            std::to_string(kMaxK) + " Got: " + std::to_string(k) + ".");
+            std::to_string(kMaxDraftTokens) + " Got: " + std::to_string(k) + ".");
       v_.max_draft_tokens = k;
     } else if (name == "ngram_size") {
       const int ngram_size = SafeDoubleToInt(JSON::Get<double>(value), name);
-      if (ngram_size != 0 && (ngram_size < 2 || ngram_size > kMaxK))
+      if (ngram_size != 0 && (ngram_size < 2 || ngram_size > kMaxNGramSize))
         throw std::runtime_error(
-            "speculative.ngram_size must be 0 or between 2 and " + std::to_string(kMaxK) +
+            "speculative.ngram_size must be 0 or between 2 and " + std::to_string(kMaxNGramSize) +
             ". Got: " + std::to_string(ngram_size) + ".");
       v_.ngram_size = ngram_size;
     } else if (name == "ngram_chained_lookup") {
       v_.ngram_chained_lookup = JSON::Get<bool>(value);
     } else if (name == "min_adaptive_k") {
       const int min_adaptive_k = SafeDoubleToInt(JSON::Get<double>(value), name);
-      if (min_adaptive_k < 0 || min_adaptive_k > kMaxK)
+      if (min_adaptive_k < 0 || min_adaptive_k > kMaxDraftTokens)
         throw std::runtime_error(
             "speculative.min_adaptive_k must be 0 or between " + std::to_string(kMinK) +
-            " and " + std::to_string(kMaxK) + ". Got: " +
+            " and " + std::to_string(kMaxDraftTokens) + ". Got: " +
             std::to_string(min_adaptive_k) + ".");
       v_.min_adaptive_k = min_adaptive_k;
     } else if (name == "cooldown") {
@@ -2694,6 +2880,38 @@ void ValidateModelPaths(const Config& config) {
 
 }  // namespace
 
+// The engine picks the per-step draft width as the minimum of every bound it knows, so a config
+// asking for more than the drafter can deliver is silently clamped rather than rejected. Surface
+// that at load time, where the value can still be edited. The engine-side bounds (state-update
+// capacity, paged query limit, kMaxDraftTokensPerStep) depend on which speculative path is
+// actually hosted, so Engine setup warns about those instead.
+void WarnOnClampedDraftWidth(const Config& config) {
+  if (!g_log.enabled || !g_log.warning) {
+    return;
+  }
+  // DFlash 2 and its DSpark alias are the only drafters whose geometry is known from the config
+  // alone. MTP's depends on an ONNX output that no session has loaded yet.
+  const auto& dflash2 = config.model.dflash2;
+  if (dflash2.filename.empty() || dflash2.num_draft_tokens <= 0) {
+    return;
+  }
+
+  const int requested = config.speculative.max_draft_tokens;
+  if (requested <= dflash2.num_draft_tokens) {
+    return;
+  }
+  const std::string alias = dflash2.is_dspark ? "dspark" : "dflash2";
+  try {
+    Log("warning", "speculative.max_draft_tokens is " + std::to_string(requested) + " but model." +
+                       alias + ".num_draft_tokens is " + std::to_string(dflash2.num_draft_tokens) +
+                       ", which caps each step to at most " +
+                       std::to_string(dflash2.num_draft_tokens) +
+                       " drafted tokens. The engine may cap it further.");
+  } catch (...) {
+    // Diagnostics must not turn a loadable config into a load failure.
+  }
+}
+
 Config::Config(const fs::path& path, std::string_view json_overlay) : config_path{path} {
   ParseConfig(path / "genai_config.json", json_overlay, *this);
   ModelStateManifest::ValidateConfig(model.decoder);
@@ -2748,6 +2966,8 @@ Config::Config(const fs::path& path, std::string_view json_overlay) : config_pat
   // Validate all config-specified filenames/paths after parsing so downstream loaders
   // (model/processor/adapter creation) can rely on them being safe.
   ValidateModelPaths(*this);
+
+  WarnOnClampedDraftWidth(*this);
 }
 
 void Config::AddMapping(const std::string& nominal_name, const std::string& graph_name) {

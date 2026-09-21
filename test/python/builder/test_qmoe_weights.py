@@ -14,6 +14,10 @@ must:
   4. restore per-channel quantization when ``qmoe_block_size <= 0``, and
   5. keep the SIGNED blockwise scales (taking ``abs()`` reintroduces the
      garbage-output bug).
+
+The CPU and WebGPU paths share the raw MatMulNBits encoding and must keep the
+``[N, K/pack]`` storage contract the QMoE op validates, for INT4 and INT8.
+WebGPU additionally requires whole blocks; INT4 requires even K.
 """
 
 from __future__ import annotations
@@ -21,97 +25,18 @@ from __future__ import annotations
 import importlib.util
 import sys
 import types
-from pathlib import Path
 
 import pytest
 import torch
+from _builder_test_utils import BUILDERS_DIR, load_builder_module
 
-
-def _module_available(module_name):
-    try:
-        return importlib.util.find_spec(module_name) is not None
-    except (ModuleNotFoundError, ValueError):
-        return False
-
-
-def _stub_missing_builder_dependencies():
-    if not _module_available("onnx_ir"):
-        onnx_ir = types.ModuleType("onnx_ir")
-        onnx_ir.DataType = types.SimpleNamespace(INT4=object(), FLOAT=object(), FLOAT16=object(), BFLOAT16=object())
-        tensor_adapters = types.ModuleType("onnx_ir.tensor_adapters")
-        tensor_adapters.TorchTensor = object
-        tensor_adapters.to_torch_dtype = lambda dtype: dtype
-        sys.modules["onnx_ir"] = onnx_ir
-        sys.modules["onnx_ir.tensor_adapters"] = tensor_adapters
-
-    if not _module_available("onnxruntime.quantization.matmul_nbits_quantizer"):
-        # Prefer the real onnxruntime package when it is installed; only fabricate a
-        # top-level stub when the package truly isn't available. This avoids shadowing a
-        # real onnxruntime wheel (which would break other tests in the session) and only
-        # supplies the specific submodule the builder needs.
-        if _module_available("onnxruntime"):
-            import onnxruntime  # noqa: PLC0415
-        else:
-            onnxruntime = sys.modules.setdefault("onnxruntime", types.ModuleType("onnxruntime"))
-        quantization = getattr(onnxruntime, "quantization", None)
-        if quantization is None:
-            quantization = types.ModuleType("onnxruntime.quantization")
-        matmul_nbits_quantizer = types.ModuleType("onnxruntime.quantization.matmul_nbits_quantizer")
-        for class_name in (
-            "KQuantWeightOnlyQuantConfig",
-            "MatMulNBitsQuantizer",
-            "QuantFormat",
-            "RTNWeightOnlyQuantConfig",
-        ):
-            setattr(matmul_nbits_quantizer, class_name, type(class_name, (), {}))
-        onnxruntime.quantization = quantization
-        quantization.matmul_nbits_quantizer = matmul_nbits_quantizer
-        sys.modules["onnxruntime.quantization"] = quantization
-        sys.modules["onnxruntime.quantization.matmul_nbits_quantizer"] = matmul_nbits_quantizer
-
-    if not _module_available("tqdm"):
-        tqdm_module = types.ModuleType("tqdm")
-        tqdm_module.tqdm = lambda iterable=None, *args, **kwargs: iterable
-        sys.modules["tqdm"] = tqdm_module
-
-    if not _module_available("transformers"):
-        transformers = types.ModuleType("transformers")
-        for class_name in (
-            "AutoConfig",
-            "AutoModelForCausalLM",
-            "AutoModelForSpeechSeq2Seq",
-            "AutoTokenizer",
-            "GenerationConfig",
-        ):
-            setattr(transformers, class_name, type(class_name, (), {}))
-        sys.modules["transformers"] = transformers
-
-
-_stub_missing_builder_dependencies()
-
-BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
-sys.path.insert(0, str(BUILDERS_DIR.parent))
-
-
-def _load_builder_module(module_name):
-    spec = importlib.util.spec_from_file_location(f"models.builders.{module_name}", BUILDERS_DIR / f"{module_name}.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[f"models.builders.{module_name}"] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-sys.modules.setdefault("models", types.ModuleType("models"))
-builders_package = sys.modules.setdefault("models.builders", types.ModuleType("models.builders"))
-builders_package.__path__ = [str(BUILDERS_DIR)]
-
-base_module = _load_builder_module("base")
+base_module = load_builder_module("base")
 Model = base_module.Model
 cuda_quantizer_module = sys.modules["quantization.cuda_quantizer"]
 qmoe_symmetric_per_channel_quantize = cuda_quantizer_module.CudaQuantizer.qmoe_symmetric_per_channel_quantize
-gptoss_module = _load_builder_module("gptoss")
+gptoss_module = load_builder_module("gptoss")
 GPTOSSModel = gptoss_module.GPTOSSModel
-phi_module = _load_builder_module("phi")
+phi_module = load_builder_module("phi")
 Phi3MoELongRoPEModel = phi_module.Phi3MoELongRoPEModel
 
 
@@ -207,6 +132,7 @@ def _load_builder_cli_module(monkeypatch):
         "HunyuanDenseV1Model",
         "InternLM2Model",
         "LFM2Model",
+        "LFM2MoEModel",
         "LlamaModel",
         "Mistral3TextModel",
         "MistralModel",
@@ -473,14 +399,110 @@ def test_cuda_raw_path_for_zero():
     assert model.calls == [("matmulnbits", 128)]
 
 
-def test_non_cuda_does_not_use_cuda_only_paths():
-    """The CUDA-only encodings must not be used on other EPs, even when
-    weights_prepacked is set."""
-    model = _FakeMoEModel("cpu", 128, 0)
+@pytest.mark.parametrize("ep", ["cpu", "webgpu"])
+@pytest.mark.parametrize("weights_prepacked", [-1, 0, 1])
+def test_cpu_and_webgpu_use_signed_scale_blockwise_quantizer(ep, weights_prepacked):
+    """CPU and WebGPU ship raw MatMulNBits-convention blockwise weights (signed
+    block scales) regardless of the CUDA-only weights_prepacked knob, and never
+    the CUTLASS-prepacked encoding."""
+    model = _FakeMoEModel(ep, 128, weights_prepacked)
     model.make_qmoe_weights(_W)
-    assert ("cutlass", 128) not in model.calls
-    assert ("matmulnbits", 128) not in model.calls
+    assert model.calls == [("matmulnbits", 128)]
+    assert model.moe_attrs["block_size"] == 128
+
+
+@pytest.mark.parametrize("weights_prepacked", [-1, 0, 1])
+def test_trt_rtx_keeps_the_original_symmetric_blockwise_encoding(weights_prepacked):
+    """The signed-scale grid has not been measured on the TRT-RTX kernel, so that
+    EP stays on the encoding it shipped with."""
+    model = _FakeMoEModel("trt-rtx", 128, weights_prepacked)
+    model.make_qmoe_weights(_W)
     assert model.calls == [("symmetric", 128)]
+    assert model.moe_attrs["block_size"] == 128
+
+
+@pytest.mark.parametrize("ep", ["cpu", "webgpu", "cuda"])
+def test_matmulnbits_blockwise_paths_validate_block_size(ep):
+    """Every EP on the MatMulNBits grid shares the CUDA block-size constraint."""
+    model = _FakeMoEModel(ep, 16, -1)
+    with pytest.raises(ValueError, match="block_size 32, 64, or 128"):
+        model.make_qmoe_weights(_W)
+    assert model.calls == []
+
+
+@pytest.mark.parametrize("ep,weights_prepacked", [("cpu", -1), ("cuda", 0)])
+@pytest.mark.parametrize("bits,k,expected_columns", [(4, 40, 20), (8, 40, 40), (8, 33, 33)])
+def test_raw_blockwise_storage_drops_the_block_padding(ep, weights_prepacked, bits, k, expected_columns):
+    """The MatMulNBits quantizer pads K up to whole blocks; the QMoE op validates raw storage as
+    [E, N, K/pack], so the padding must not reach the initializer."""
+    model = _RealMoEModel(ep, 32, weights_prepacked, bits=bits)
+    model._matmulnbits_blockwise_quantize = Model._matmulnbits_blockwise_quantize.__get__(model)
+    torch.manual_seed(0)
+    weights = torch.randn(3, k)
+    qweight, scales = model.make_qmoe_weights(weights)
+    assert tuple(qweight.shape) == (3, expected_columns)
+    assert tuple(scales.shape) == (3, 2)
+    padded, _ = cuda_quantizer_module.CudaQuantizer.matmulnbits_blockwise_quantize(
+        weights, bits, 32, unsigned_full_range=True, signed_scale=True
+    )
+    assert tuple(padded.shape) == (3, 2 * (32 // (8 // bits)))
+    assert torch.equal(qweight, padded[:, :expected_columns])
+
+
+@pytest.mark.parametrize("ep,weights_prepacked", [("cpu", -1), ("webgpu", -1), ("cuda", 0)])
+def test_raw_blockwise_int4_rejects_odd_input_dimension(ep, weights_prepacked):
+    model = _RealMoEModel(ep, 32, weights_prepacked)
+    model._matmulnbits_blockwise_quantize = Model._matmulnbits_blockwise_quantize.__get__(model)
+    with pytest.raises(RuntimeError, match=r"INT4 QMoE requires expert input dimension K \(33\) to be divisible by 2"):
+        model.make_qmoe_weights(torch.zeros(4, 33))
+
+
+@pytest.mark.parametrize("bits", [4, 8])
+@pytest.mark.parametrize("block_size", [32, 64, 128])
+def test_webgpu_blockwise_rejects_partial_blocks(bits, block_size):
+    model = _RealMoEModel("webgpu", block_size, -1, bits=bits)
+    model._matmulnbits_blockwise_quantize = Model._matmulnbits_blockwise_quantize.__get__(model)
+    with pytest.raises(RuntimeError, match=rf"WebGPU QMoE.*K \(40\).*qmoe_block_size \({block_size}\)"):
+        model.make_qmoe_weights(torch.zeros(4, 40))
+
+
+@pytest.mark.parametrize("ep,weights_prepacked", [("cpu", -1), ("webgpu", -1)])
+def test_non_cuda_blockwise_int8_uses_offset_128_storage(ep, weights_prepacked):
+    """INT8 QMoE bytes are q + 128 (the CPU kernel dequantizes with default_zp_8bit = 128), on the
+    same signed-scale grid as INT4: the block's max-magnitude element maps exactly to qmin."""
+    model = _RealMoEModel(ep, 32, weights_prepacked, bits=8)
+    model._matmulnbits_blockwise_quantize = Model._matmulnbits_blockwise_quantize.__get__(model)
+    weights = torch.zeros(1, 32)
+    weights[0, 0] = 8.0  # positive extreme of block 0
+    weights[0, 1] = -4.0
+    weights[0, 2] = 0.0625
+    qweight, scales = model.make_qmoe_weights(weights)
+    assert qweight.dtype == torch.uint8 and tuple(qweight.shape) == (1, 32)
+    assert scales.shape == (1, 1) and scales[0, 0] == -0.0625  # signed: 8.0 / qmin(-128)
+    assert qweight[0, 0].item() == 0  # 8.0 -> qmin (-128) + 128, exact
+    assert qweight[0, 1].item() == 64 + 128  # -4.0 / -0.0625 = 64
+    assert qweight[0, 2].item() == 127  # 0.0625 / -0.0625 = -1
+    assert qweight[0, 3].item() == 128  # zero -> the zero point
+    dequantized = (qweight[0].to(torch.float32) - 128.0) * scales[0, 0].to(torch.float32)
+    assert torch.equal(dequantized, weights[0])
+
+
+@pytest.mark.parametrize("ep", ["cpu", "webgpu"])
+def test_non_cuda_blockwise_scales_are_signed_and_do_not_clip_the_extreme(ep):
+    """The signed-scale grid maps each block's max-magnitude element exactly to
+    qmin, so a positive extreme is no longer clipped to 7/8 of its value. This is
+    also the grid the CPU QMoE MLAS Q4 fast path re-quantizes to, keeping that path
+    lossless."""
+    model = _RealMoEModel(ep, 32, -1, bits=4)
+    model._matmulnbits_blockwise_quantize = Model._matmulnbits_blockwise_quantize.__get__(model)
+    weights = torch.zeros(1, 32)
+    weights[0, 0] = 8.0  # positive extreme of block 0
+    weights[0, 1] = -4.0
+    qweight, scales = model.make_qmoe_weights(weights)
+    assert scales.shape == (1, 1) and scales[0, 0] == -1.0  # signed: 8.0 / qmin(-8)
+    q = qweight[0, 0].item()
+    assert (q & 0xF) == 0  # 8.0 -> qmin (-8) + 8 == 0, exact
+    assert (q >> 4) == 12  # -4.0 / -1.0 = 4 -> 4 + 8
 
 
 @pytest.mark.parametrize(

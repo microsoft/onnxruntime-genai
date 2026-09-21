@@ -1,14 +1,98 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <filesystem>
+#include <fstream>
 #include <stdexcept>
+#include <string>
 #include <string_view>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include <gtest/gtest.h>
 
 #include "config.h"
+#include "engine/engine.h"
 
 namespace Generators::test {
+namespace {
+
+namespace fs_std = std::filesystem;
+
+fs_std::path WriteDisabledMtpConfig() {
+  const auto root = fs_std::temp_directory_path() / "ortgenai_mtp_config_disabled";
+  std::error_code ec;
+  fs_std::remove_all(root, ec);
+  fs_std::create_directories(root);
+  std::ofstream out(root / "genai_config.json", std::ios::binary);
+  out << R"({
+    "model": {
+      "type": "tiny-test-model",
+      "vocab_size": 16,
+      "context_length": 32,
+      "decoder": { "filename": "model.onnx" },
+      "mtp": {
+        "enabled": false,
+        "filename": "mtp.onnx",
+        "main_hidden_states": "main_hidden",
+        "outputs": { "hidden_states": "head_feedback" }
+      }
+    },
+    "search": {}
+  })";
+  return root;
+}
+
+struct TensorMetadata {
+  ONNXTensorElementDataType data_type;
+  std::vector<int64_t> shape;
+};
+
+class FakeModelStateMetadata final : public ModelStateMetadata {
+ public:
+  void AddInput(std::string name, ONNXTensorElementDataType data_type,
+                std::vector<int64_t> shape) {
+    inputs_.insert_or_assign(
+        std::move(name), TensorMetadata{data_type, std::move(shape)});
+  }
+
+  void AddOutput(std::string name, ONNXTensorElementDataType data_type,
+                 std::vector<int64_t> shape) {
+    outputs_.insert_or_assign(
+        std::move(name), TensorMetadata{data_type, std::move(shape)});
+  }
+
+  bool HasInput(const std::string& name) const override { return inputs_.contains(name); }
+  bool HasOutput(const std::string& name) const override { return outputs_.contains(name); }
+  ONNXTensorElementDataType GetInputDataType(const std::string& name) const override {
+    return inputs_.at(name).data_type;
+  }
+  ONNXTensorElementDataType GetOutputDataType(const std::string& name) const override {
+    return outputs_.at(name).data_type;
+  }
+  std::vector<int64_t> GetInputShape(const std::string& name) const override {
+    return inputs_.at(name).shape;
+  }
+  std::vector<int64_t> GetOutputShape(const std::string& name) const override {
+    return outputs_.at(name).shape;
+  }
+
+ private:
+  std::unordered_map<std::string, TensorMetadata> inputs_;
+  std::unordered_map<std::string, TensorMetadata> outputs_;
+};
+
+}  // namespace
+
+TEST(MtpDecoderConfigTest, ParsesDisabledRuntimeToggle) {
+  const auto root = WriteDisabledMtpConfig();
+  const Config config{fs::path{root.string()}, {}};
+
+  EXPECT_FALSE(config.model.mtp.enabled);
+  EXPECT_FALSE(config.model.mtp.IsEnabled());
+  EXPECT_EQ(config.model.mtp.filename, "mtp.onnx");
+}
 
 TEST(MtpDecoderConfigTest, ProjectsPagedDecoderWithoutMainFixedState) {
   Config config;
@@ -93,9 +177,47 @@ TEST(MtpDecoderConfigTest, ProjectsPagedDecoderWithoutMainFixedState) {
   EXPECT_FALSE(head.state_groups.has_value());
   EXPECT_TRUE(head.pipeline.empty());
   EXPECT_TRUE(projected->model.mtp.filename.empty());
+  // The projection clears model.mtp, so the head's own demand for hidden states must be recorded
+  // explicitly. Without it a chained draft cannot feed the next stage.
+  EXPECT_TRUE(projected->engine.hidden_states_output_required);
   ASSERT_EQ(head.layer_types.size(), 1u);
   EXPECT_EQ(head.layer_types[0], "full_attention");
   EXPECT_THROW(CreateMtpDecoderConfig(*projected), std::runtime_error);
+}
+
+// A per-token quantized target declares scale name templates on its decoder. The MTP projection
+// copies the target config wholesale, and the head is always an unquantized full-attention layer,
+// so those templates must be cleared. If they survived, the engine would size and bind the head's
+// cache against scale tensor names that exist only in the target session.
+TEST(MtpDecoderConfigTest, ClearsInheritedScaleTemplatesForTheUnquantizedHead) {
+  Config config;
+  auto& decoder = config.model.decoder;
+  decoder.filename = "text.onnx";
+  decoder.num_hidden_layers = 64;
+  decoder.num_key_value_heads = 8;
+  decoder.head_size = 128;
+  decoder.hidden_size = 2048;
+  decoder.inputs.past_key_scale_names = "past_key_values.%d.key_scale";
+  decoder.inputs.past_value_scale_names = "past_key_values.%d.value_scale";
+  decoder.outputs.present_key_scale_names = "present.%d.key_scale";
+  decoder.outputs.present_value_scale_names = "present.%d.value_scale";
+
+  auto& mtp = config.model.mtp;
+  mtp.filename = "mtp.onnx";
+  mtp.num_hidden_layers = 1;
+  mtp.num_key_value_heads = 2;
+  mtp.head_size = 64;
+
+  const auto projected = CreateMtpDecoderConfig(config);
+  const auto& head = projected->model.decoder;
+  EXPECT_TRUE(head.inputs.past_key_scale_names.empty());
+  EXPECT_TRUE(head.inputs.past_value_scale_names.empty());
+  EXPECT_TRUE(head.outputs.present_key_scale_names.empty());
+  EXPECT_TRUE(head.outputs.present_value_scale_names.empty());
+
+  // The target's own configuration is untouched: only the projected copy is unquantized.
+  EXPECT_EQ(config.model.decoder.inputs.past_key_scale_names, "past_key_values.%d.key_scale");
+  EXPECT_EQ(config.model.decoder.outputs.present_value_scale_names, "present.%d.value_scale");
 }
 
 TEST(MtpDecoderConfigTest, RejectsInvalidConfiguration) {
@@ -115,6 +237,10 @@ TEST(MtpDecoderConfigTest, RejectsInvalidConfiguration) {
       EXPECT_NE(std::string_view{error.what()}.find(expected), std::string_view::npos);
     }
   };
+
+  mtp.enabled = false;
+  expect_error("model.mtp.enabled");
+  mtp.enabled = true;
 
   mtp.filename.clear();
   expect_error("filename");
@@ -136,6 +262,38 @@ TEST(MtpDecoderConfigTest, RejectsInvalidConfiguration) {
 
   config.model.decoder.hidden_size = 0;
   expect_error("model.decoder.hidden_size must be positive");
+}
+
+TEST(MtpDecoderConfigTest, ValidatesMainAndHeadHiddenStateContract) {
+  Config config;
+  config.model.decoder.hidden_size = 2048;
+  config.model.mtp.main_hidden_states = "main_hidden";
+  config.model.mtp.inputs.hidden_states = "head_hidden";
+
+  FakeModelStateMetadata target;
+  target.AddOutput("main_hidden", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16,
+                   {-1, 2048});
+  FakeModelStateMetadata head;
+  head.AddInput("head_hidden", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16,
+                {-1, 2048});
+  EXPECT_NO_THROW(ValidateMtpModelCompatibility(config, target, head));
+
+  config.model.mtp.main_hidden_states = "missing";
+  EXPECT_THROW(ValidateMtpModelCompatibility(config, target, head),
+               std::runtime_error);
+  config.model.mtp.main_hidden_states = "main_hidden";
+
+  FakeModelStateMetadata wrong_width;
+  wrong_width.AddInput("head_hidden", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16,
+                       {-1, 1024});
+  EXPECT_THROW(ValidateMtpModelCompatibility(config, target, wrong_width),
+               std::runtime_error);
+
+  FakeModelStateMetadata wrong_type;
+  wrong_type.AddInput("head_hidden", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
+                      {-1, 2048});
+  EXPECT_THROW(ValidateMtpModelCompatibility(config, target, wrong_type),
+               std::runtime_error);
 }
 
 }  // namespace Generators::test

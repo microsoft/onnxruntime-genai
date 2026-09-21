@@ -80,9 +80,9 @@ jobs:
             --use_guidance `
             --update --build `
             --skip_examples `
+            --nuget_package_source ${{ env.ORT_NIGHTLY_SOURCE }} `
             --cmake_extra_defines `
-              "NUGET_PACKAGE_SOURCE=${{ env.ORT_NIGHTLY_SOURCE }}" `
-              CMAKE_CUDA_ARCHITECTURES=86-real `
+              'CMAKE_CUDA_ARCHITECTURES=86-real' `
               'CMAKE_EXE_LINKER_FLAGS_INIT=/profile /DYNAMICBASE' `
               'CMAKE_MODULE_LINKER_FLAGS_INIT=/profile /DYNAMICBASE' `
               'CMAKE_SHARED_LINKER_FLAGS_INIT=/profile /DYNAMICBASE' `

@@ -10,7 +10,7 @@ namespace Generators::TelemetryInternal {
 
 // Percentage of model-session lifecycle events retained. ProcessInfo remains at 100%.
 // 1DS popSample is metadata only; ShouldSampleSession performs the actual client-side sampling.
-inline constexpr double kModelSessionSampleRatePercent = 100.0;
+inline constexpr double kModelSessionSampleRatePercent = 1.0;
 
 static_assert(kModelSessionSampleRatePercent >= 0.0 &&
               kModelSessionSampleRatePercent <= 100.0);

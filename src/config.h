@@ -24,13 +24,13 @@ struct Config {
     static constexpr std::string_view PositionIdsName = "position_ids";
     static constexpr std::string_view PastKeyName = "past_key_values.%d.key";
     static constexpr std::string_view PastValueName = "past_key_values.%d.value";
-    static constexpr std::string_view PastConvName = "past.%d.conv";
-    static constexpr std::string_view PastRecurrentName = "past.%d.recurrent";
+    static constexpr std::string_view PastConvName = "past_key_values.%d.conv_state";
+    static constexpr std::string_view PastRecurrentName = "past_key_values.%d.recurrent_state";
     static constexpr std::string_view LogitsName = "logits";
     static constexpr std::string_view PresentKeyName = "present.%d.key";
     static constexpr std::string_view PresentValueName = "present.%d.value";
-    static constexpr std::string_view PresentConvName = "present.%d.conv";
-    static constexpr std::string_view PresentRecurrentName = "present.%d.recurrent";
+    static constexpr std::string_view PresentConvName = "present.%d.conv_state";
+    static constexpr std::string_view PresentRecurrentName = "present.%d.recurrent_state";
     static constexpr std::string_view StateUpdateCaptureCountName = "state_update_capture_count";
     static constexpr std::string_view StateUpdateActiveName = "state_update_active";
     static constexpr std::string_view StateUpdateConvValueName = "state_update.%d.conv_value";
@@ -272,6 +272,10 @@ struct Config {
       int window_size{0};        // Used by CalculateWindowIndex() in QNN pipeline only.
                                  // 0 = auto-compute as patch_size * spatial_merge_size * 2
                                  // Qwen2.5-VL default: 56 (14*4), Qwen3-VL default: 64 (16*4)
+
+      // LFM2-VL: patch-sequence length every image is padded to so one batch shares a vision run.
+      // 0 = pad to the longest image in the batch. Shipped models: max_image_tokens * downsample_factor^2 = 1024.
+      int max_num_patches{0};
 
       std::string config_filename{"processor_config.json"};
       std::optional<std::string> adapter_filename{};
@@ -520,6 +524,8 @@ struct Config {
         std::string position_ids{Defaults::PositionIdsName};
         std::string past_key_names{Defaults::PastKeyName};
         std::string past_value_names{Defaults::PastValueName};
+        std::string past_key_scale_names;
+        std::string past_value_scale_names;
         std::string past_names;  // When key/value pairs are combined
         std::string cross_past_key_names, cross_past_value_names;
         std::string past_key_values_length{Defaults::PastKeyValuesLengthName};
@@ -563,6 +569,8 @@ struct Config {
         std::string logits{Defaults::LogitsName};
         std::string present_key_names{Defaults::PresentKeyName};
         std::string present_value_names{Defaults::PresentValueName};
+        std::string present_key_scale_names;
+        std::string present_value_scale_names;
         std::string present_names;  // When key/value pairs are combined
         std::string output_cross_qk_names{Defaults::OutputCrossQKName};
         std::string rnn_states{Defaults::RnnStatesName};
@@ -571,6 +579,9 @@ struct Config {
         std::string state_update_conv_value_names{Defaults::StateUpdateConvValueName};
         std::string state_update_recurrent_capsule_names{Defaults::StateUpdateRecurrentCapsuleName};
         std::string hidden_states;  // Last hidden state output (when exported with include_hidden_states; e.g. fed to the MTP head)
+        // Residual streams tapped at model.dflash2.aux_hidden_state_layers, concatenated on the
+        // last axis. Empty unless the model was exported with aux_hidden_state_layers.
+        std::string aux_hidden_states;
 
         // RNNT decoder outputs
         std::string outputs;
@@ -610,6 +621,7 @@ struct Config {
     // loads the head as a separate Model; MtpGenerator uses this block to map the main model's
     // hidden-state output and the head's feedback output.
     struct Mtp {
+      bool enabled{true};
       std::string filename;  // e.g. "mtp.onnx"; used by model packaging/building tools
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
@@ -624,6 +636,9 @@ struct Config {
       // The main model must be exported with this output exposed (include_hidden_states).
       std::string main_hidden_states{Defaults::HiddenStatesName};
 
+      // The head's paged cache is built from a projection of model.decoder. The head is always an
+      // unquantized full-attention layer: it owns no per-token scale caches, and the projection
+      // clears the target's scale name templates rather than letting the head inherit them.
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};
         std::string hidden_states{Defaults::HiddenStatesName};
@@ -639,7 +654,62 @@ struct Config {
         std::string present_key_names{Defaults::PresentKeyName};
         std::string present_value_names{Defaults::PresentValueName};
       } outputs;
+
+      bool IsEnabled() const noexcept { return enabled && !filename.empty(); }
     } mtp;
+
+    // DFlash 2/DSpark block-drafter metadata. Unlike MTP the drafter is not decoder-shaped: it
+    // reads the main model's auxiliary hidden states, predicts a whole block of tokens at once,
+    // and returns a candidate lattice that the Engine walks greedily. model.dspark is a config
+    // alias for this shared runtime.
+    struct Dflash2 {
+      std::string filename;  // e.g. "dflash2.onnx"
+      bool is_dspark{};      // True when parsed from the model.dspark alias.
+      std::optional<bool> configured_alias_is_dspark;
+      std::optional<SessionOptions> session_options;
+      std::optional<RunOptions> run_options;
+      std::vector<SharedInitializer> shared_initializers;
+
+      int num_hidden_layers{};
+      int num_key_value_heads{};
+      int head_size{};
+      int block_size{};        // Query rows per request.
+      int num_draft_tokens{};  // DFlash 2: block_size - 1; DSpark: block_size.
+      int selector_top_k{};
+      int mask_token_id{};
+      int sliding_window{-1};
+      std::vector<int> aux_hidden_state_layers;
+
+      // Name of the main decoder's auxiliary hidden-states output that feeds the drafter.
+      std::string main_aux_hidden_states{"aux_hidden_states"};
+
+      struct Inputs {
+        std::string aux_hidden_states{"aux_hidden_states"};
+        std::string input_ids{Defaults::InputIdsName};
+        std::string q_row_map{"q_row_map"};
+        std::string qkv_row_map{"qkv_row_map"};
+        std::string block_row_index{"block_row_index"};
+        std::string cumulative_sequence_lengths{Defaults::CumulativeSequenceLengthsName};
+        std::string past_sequence_lengths{Defaults::PastSequenceLengthsName};
+        std::string block_table{Defaults::BlockTableName};
+        std::string attention_metadata{Defaults::AttentionMetadataName};
+        std::string past_key_names{Defaults::PastKeyName};
+        std::string past_value_names{Defaults::PastValueName};
+        // Parsed but not yet implemented: the block drafter owns its own unquantized K/V pool, so a
+        // non-empty value is rejected by ValidateDflash2ModelCompatibility rather than ignored.
+        std::string past_key_scale_names;
+        std::string past_value_scale_names;
+      } inputs;
+
+      struct Outputs {
+        std::string candidate_ids{"draft_candidate_ids"};
+        std::string scores{"draft_scores"};
+        std::string present_key_names{Defaults::PresentKeyName};
+        std::string present_value_names{Defaults::PresentValueName};
+        std::string present_key_scale_names;
+        std::string present_value_scale_names;
+      } outputs;
+    } dflash2;
 
     std::optional<Decoder> draft;
 
@@ -680,8 +750,9 @@ struct Config {
 
   struct Engine {
     struct DynamicBatching {
-      size_t block_size{256};                       // Total number of slots per block.
-      std::optional<size_t> num_blocks;             // Total number of blocks per layer.
+      size_t block_size{256};  // Total number of slots per block.
+      // Baseline target blocks; Engine auxiliary caches share the equivalent byte budget.
+      std::optional<size_t> num_blocks;
       std::optional<float> gpu_utilization_factor;  // Fraction of free GPU memory to use for key-value cache.
       size_t max_batch_size{16};                    // Maximum batch size for dynamically batching requests.
       size_t max_scheduled_tokens{2048};            // Maximum tokens in one dynamically batched model run.
@@ -692,7 +763,15 @@ struct Config {
       size_t max_batch_size{4};  // Maximum batch size for static batching
     };
     std::optional<StaticBatching> static_batching;  // Static batching settings
-  } engine;                                         // Engine settings
+
+    // Runtime-only capability flag, never parsed from genai_config.json. The Engine sets it on
+    // every decoder whose packed hidden states it consumes: the target decoder feeds the MTP head,
+    // and the head feeds the next link of a chained draft. Models that merely export hidden states
+    // leave it false so an ordinary step does not pay for the extra output.
+    bool hidden_states_output_required{};
+    // Runtime-only counterpart for the auxiliary hidden states consumed by DFlash 2.
+    bool aux_hidden_states_output_required{};
+  } engine;  // Engine settings
 
   void AddMapping(const std::string& nominal_name, const std::string& graph_name);
   // Returns graph name and true if the nominal name is found in the mapping
@@ -715,6 +794,12 @@ void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);
 int SafeDoubleToInt(double x, std::string_view name);
+
+// Logs a warning when the drafter's exported geometry is narrower than
+// speculative.max_draft_tokens. The engine clamps to the smallest bound at dispatch rather than
+// failing, so this is the only signal that a configured width will not be used. Bounds that
+// depend on how the model is hosted are reported by the engine instead.
+void WarnOnClampedDraftWidth(const Config& config);
 
 // Normalizes historical casings, short aliases, and full ORT names (e.g.
 // "CUDAExecutionProvider") to the canonical dispatch-table name; unknown names pass through.

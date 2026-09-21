@@ -27,7 +27,7 @@ enum class RequestStatus {
 enum class GenerationFinishReason : uint32_t {
   None = 0,
   EosToken = 1,
-  StopToken = 2,
+  StopString = 2,
   TurnLimit = 3,
   ContextLimit = 4,
   Canceled = 5,

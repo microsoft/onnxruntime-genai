@@ -56,6 +56,10 @@ struct DecoderIO : ModelIO {
 
   virtual Tensor* HiddenStates() const { return nullptr; }
 
+  // The step's packed [total_num_tokens, aux_hidden_size] auxiliary hidden states, or null when
+  // the model was not exported with aux_hidden_state_layers. Row order matches HiddenStates().
+  virtual Tensor* AuxHiddenStates() const { return nullptr; }
+
  protected:
   ScheduledRequests& scheduled_requests_;
   std::shared_ptr<CacheManager> cache_manager_;
