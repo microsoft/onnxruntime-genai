@@ -32,6 +32,7 @@ import onnxruntime_genai as og
 import pytest
 
 AUDIO_MARKER = "<|audio|>"
+AUDIO_START_TOKEN_ID = 128  # <|audio_start|>: the model switching from text to speech
 AUDIO_TOKEN_ID = 133  # <|reserved_123|>, model.audio_token_id in the fixture's genai_config.json
 NUM_MELS = 128
 SAMPLE_RATE = 16000
@@ -610,6 +611,66 @@ def test_lfm2_audio_features_follow_the_clip_order(test_data_path, tmp_path):
         start = len(inputs["input_ids"].as_numpy()[0])
         outputs.append(generator.get_sequence(0)[start:].tolist())
     assert outputs[0] != outputs[1], "swapping the clips must change what the decoder sees"
+
+
+def _generate_with_eos(model_path, clip, eos, num_tokens):
+    model = og.Model(os.fspath(model_path))
+    processor = model.create_multimodal_processor()
+    inputs = processor(AUDIO_MARKER, audios=og.Audios.open(clip))
+    prompt_length = inputs["input_ids"].as_numpy().shape[1]
+    params = og.GeneratorParams(model)
+    params.set_search_options(do_sample=False, max_length=prompt_length + num_tokens)
+    generator = og.Generator(model, params)
+    generator.set_inputs(inputs)
+    generated = []
+    while not generator.is_done():
+        generator.generate_next_token()
+        generated.append(int(generator.get_next_tokens()[0]))
+    return generated
+
+
+def test_lfm2_audio_generation_stops_when_the_model_starts_speaking(test_data_path, tmp_path):
+    # Everything the model emits after <|audio_start|> is audio codes for a depthformer this runtime
+    # does not have, so the builder puts that token in eos_token_id and generation has to end on it.
+    # The fixture decoder never emits 128 on its own, so this pins the mechanism on a token it does
+    # emit: whichever id is named as the audio stop, the run ends at its first occurrence.
+    model_path = _copy_model(test_data_path, tmp_path)
+    clip = _write_wav(tmp_path / "clip.wav", _synthetic_signal(0.5, seed=40))
+
+    unrestricted = _generate_with_eos(model_path, clip, [7], num_tokens=40)
+    assert len(unrestricted) == 40, "the fixture should run to max_length without a stop token"
+
+    stop_token = unrestricted[5]
+    first = unrestricted.index(stop_token)
+    _edit_json(model_path / "genai_config.json", lambda config: config["model"].update({"eos_token_id": [stop_token]}))
+
+    stopped = _generate_with_eos(model_path, clip, [stop_token], num_tokens=40)
+
+    assert stopped == unrestricted[: first + 1], "generation must end at the stop token, with nothing after it"
+
+
+def test_lfm2_audio_audio_start_in_eos_leaves_normal_stopping_alone(test_data_path, tmp_path):
+    # Adding <|audio_start|> alongside <|im_end|> must not change a run that never starts speaking.
+    model_path = _copy_model(test_data_path, tmp_path)
+    clip = _write_wav(tmp_path / "clip.wav", _synthetic_signal(0.5, seed=41))
+
+    without = _generate_with_eos(model_path, clip, [7], num_tokens=25)
+    _edit_json(
+        model_path / "genai_config.json",
+        lambda config: config["model"].update({"eos_token_id": [7, AUDIO_START_TOKEN_ID]}),
+    )
+    with_audio_stop = _generate_with_eos(model_path, clip, [7, AUDIO_START_TOKEN_ID], num_tokens=25)
+
+    assert AUDIO_START_TOKEN_ID not in without, "the fixture is not expected to emit <|audio_start|>"
+    assert with_audio_stop == without
+
+
+def test_lfm2_audio_fixture_config_is_what_the_builder_writes(test_data_path):
+    # The tiny model stands in for a built one; its stop tokens have to match what the builder emits
+    # for these checkpoints, or the tests above would be exercising a different contract.
+    config = json.loads((Path(_model_path(test_data_path)) / "genai_config.json").read_text())
+    assert config["model"]["type"] == "lfm2_audio"
+    assert config["model"]["audio_token_id"] == AUDIO_TOKEN_ID
 
 
 def test_lfm2_audio_rejects_rewind(test_data_path, tmp_path):

@@ -273,13 +273,7 @@ produced. Text on either side of a marker is tokenized on its own, which is what
 `liquid_audio.ChatState` does.
 
 LFM2-Audio has no audio token of its own and no chat-template entry for audio: `<|audio|>` is this
-runtime's marker, the same role `<image>` plays for LFM2-VL. The system prompt selects the task, as
-in the reference implementation:
-
-| Task | System prompt |
-| --- | --- |
-| Transcription | `Perform ASR.` |
-| Spoken question, text answer | `Respond with interleaved text and audio.` (the text half of the answer) |
+runtime's marker, the same role `<image>` plays for LFM2-VL.
 
 ```
 <|startoftext|><|im_start|>system
@@ -289,15 +283,48 @@ Perform ASR.<|im_end|>
 <|im_start|>assistant
 ```
 
+### The model's three modes
+
+The system prompt picks the task, and the reference implementation pairs each with a generation
+routine of its own. Only the first produces text alone, so only the first runs here in full:
+
+| Mode | System prompt | Reference routine | Output | Here |
+| --- | --- | --- | --- | --- |
+| ASR | `Perform ASR.` | `generate_sequential` | text | works |
+| TTS | `Perform TTS. Use the UK male voice.` (also US male, US female, UK female) | `generate_sequential` | speech | stops immediately |
+| Interleaved | `Respond with interleaved text and audio.` | `generate_interleaved` | text and speech, alternating | the text, up to the first switch to speech |
+
+**ASR** is the supported path, and matches the reference token for token.
+
+**TTS** produces nothing here. The model answers a TTS prompt by emitting `<|audio_start|>` as its
+very first token and then audio codes, so generation stops there and the answer is empty. That is
+deliberate: the builder puts `<|audio_start|>` in `eos_token_id` for these models, because the
+positions after it are meant for the depthformer this runtime does not have — read off the text head
+they decode to fluent, plausible nonsense. A sequential answer that begins in text and turns to
+speech part way keeps the text it had before the switch.
+
+**Interleaved** returns text only. The reference alternates by count — `interleaved_n_text` text
+tokens, then `interleaved_n_audio` audio frames, from `config.json` — rather than by any token in the
+stream, so there is nothing here to switch on, and generation simply runs to `<|im_end|>`. On a ten
+second clip the text produced this way was the reference's interleaved text stream exactly, for all
+29 tokens before the end of the turn; the reference then carried on past that point, alternating
+text with speech, where this ends the turn. Treat it as the opening of the answer, not the whole of
+it.
+
+Sampling: the reference generates text greedily in every mode, so `do_sample=False` is right here.
+The temperatures and `top_k` values quoted for the model (`audio_temperature=0.8, audio_top_k=64`
+for TTS, `1.0` and `4` for interleaved) apply only to the audio stream, which this runtime does not
+produce; they have no text-side equivalent to set.
+
 ## 6. Known limitations
 
-**Audio output is not supported.** Interleaved and TTS generation need the depthformer, which
-predicts 8 codebook entries per 80 ms audio frame in an inner autoregressive loop, plus the audio
-detokenizer and an inverse STFT to turn those codes into a waveform. ONNX Runtime GenAI's generation
-loop samples one token stream, so none of that has a home here yet. The model still answers in text
-when asked to; a prompt that asks it to speak makes it emit `<|audio_start|>` and then codes the
-runtime has nothing to do with. LiquidAI ships `vocoder_depthformer.onnx` and
-`audio_detokenizer.onnx` in the ONNX repository, and their
+**Audio output is not supported.** TTS and the speech half of interleaved generation need the
+depthformer, which predicts 8 codebook entries per 80 ms audio frame in an inner autoregressive loop,
+plus the audio detokenizer and an inverse STFT to turn those codes into a waveform. ONNX Runtime
+GenAI's generation loop samples one token stream, so none of that has a home here yet. Generation
+stops at `<|audio_start|>` rather than reading the depthformer's positions off the text head; see
+[the three modes](#the-models-three-modes) for what each prompt gives you. LiquidAI ships
+`vocoder_depthformer.onnx` and `audio_detokenizer.onnx` in the ONNX repository, and their
 [onnx-export](https://github.com/Liquid4All/onnx-export) repository drives them from Python.
 
 **One prompt at a time.** Several clips in one prompt work, but batched prompts are refused. The

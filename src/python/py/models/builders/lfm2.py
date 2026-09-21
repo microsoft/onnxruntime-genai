@@ -232,6 +232,20 @@ class LFM2AudioModel(LFM2Model):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.decoder_config = config
 
+    def update_genai_config(self, genai_config):
+        super().update_genai_config(genai_config)
+
+        # These checkpoints answer in speech as well as text: asked to, the model emits
+        # <|audio_start|> and everything after it is audio codes for the depthformer, which this
+        # runtime does not have. Sampling those positions from the text head gives fluent nonsense,
+        # so stop there instead. An answer that turns to speech part way keeps the text it had.
+        audio_start_token_id = 128
+        eos_token_id = genai_config["model"].get("eos_token_id")
+        eos_token_ids = list(eos_token_id) if isinstance(eos_token_id, list) else [eos_token_id]
+        if audio_start_token_id not in eos_token_ids:
+            eos_token_ids.append(audio_start_token_id)
+        genai_config["model"]["eos_token_id"] = eos_token_ids
+
     def load_weights(self, input_path):
         if input_path.endswith(".gguf") or self.quant_type is not None:
             return super().load_weights(input_path)

@@ -246,6 +246,28 @@ def test_lfm2_audio_load_weights_without_an_adapter_returns_the_decoder(tmp_path
     assert type(loaded).__name__ == "Lfm2ForCausalLM"
 
 
+@pytest.mark.parametrize(
+    "existing,expected",
+    [(7, [7, 128]), ([7], [7, 128]), ([7, 2], [7, 2, 128]), ([7, 128], [7, 128])],
+    ids=["scalar", "list", "several", "already-there"],
+)
+def test_lfm2_audio_stops_when_the_model_starts_speaking(existing, expected):
+    # The model answers in speech too. Everything after <|audio_start|> is audio codes meant for the
+    # depthformer, which this runtime does not have, so generation has to end there rather than read
+    # those positions off the text head.
+    builder = LFM2AudioModel.__new__(LFM2AudioModel)
+    builder.layer_types = ["conv", "full_attention"]
+    builder.conv_L_cache = 3
+    genai_config = {"model": {"decoder": {}, "eos_token_id": existing}}
+
+    builder.update_genai_config(genai_config)
+
+    assert genai_config["model"]["eos_token_id"] == expected
+    # The LFM2 decoder settings the base class writes are still there.
+    assert genai_config["model"]["decoder"]["layer_types"] == ["conv", "full_attention"]
+    assert genai_config["model"]["decoder"]["conv_cache_size"] == 2
+
+
 @pytest.mark.parametrize("exclude_embeds,expected_type", [(True, "lfm2_audio"), (False, "lfm2_audio_text")])
 def test_lfm2_audio_architecture_labels_the_export(monkeypatch, tmp_path, exclude_embeds, expected_type):
     captured = {}
