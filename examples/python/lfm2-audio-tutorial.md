@@ -347,6 +347,13 @@ stops at `<|audio_start|>` rather than reading the depthformer's positions off t
 clips do not share an encoder run: the published encoder export is traced for a single clip, so each
 one is encoded on its own frames and the results are concatenated in prompt order.
 
+**More than two channels has to be downmixed first.** Mono and stereo are handled: a stereo clip is
+mixed down and reaches the front end at its true length. Wider audio is not — the decoder
+deinterleaves it as though it were stereo, so a six channel clip arrives three times too long and
+garbled, and transcribes to nonsense. Nothing in the decoder's interface reports how many channels a
+file had, so this cannot be caught and refused here. Mix down to mono or stereo before passing the
+file in.
+
 **Audio below 16 kHz is refused.** The decoder resamples down to the encoder's rate and mixes to
 mono, but it does not resample upwards, so 8 kHz telephone audio has to be resampled before it gets
 here. The processor says so, naming the clip.

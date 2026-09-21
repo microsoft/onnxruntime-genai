@@ -421,6 +421,27 @@ def test_lfm2_audio_mel_matches_reference(test_data_path, tmp_path):
     assert np.any(mel[-2] != 0)
 
 
+def test_lfm2_audio_more_than_two_channels_is_not_downmixed(test_data_path, tmp_path):
+    # The decoder downmixes one and two channels correctly, but deinterleaves anything wider as
+    # though it were stereo, so a six channel clip arrives three times too long and garbled. Nothing
+    # in the decoder's API reports the channel count, so this cannot be caught here; the tutorial
+    # says to downmix first. This pins the behaviour so a fix upstream shows up as a failure here.
+    samples = _synthetic_signal(0.6, seed=13)
+    frames = {}
+    for channels in (1, 2, 6):
+        clip = _write_wav(tmp_path / f"c{channels}.wav", samples, channels=channels)
+        _, inputs = _process(_model_path(test_data_path), AUDIO_MARKER, og.Audios.open(clip))
+        frames[channels] = int(inputs["audio_lengths"].as_numpy()[0])
+
+    assert frames[2] == frames[1], "two channels are downmixed, so the clip keeps its length"
+    # Compare the hops rather than the frames: every clip gets one extra frame from the centre
+    # padding, so only `frames - 1` scales with the length.
+    assert frames[6] - 1 == (frames[1] - 1) * 3, (
+        f"six channels still arrive as {frames[6]} frames against {frames[1]}; if these now match, "
+        "the decoder has learned to downmix and the tutorial's warning can go"
+    )
+
+
 def test_lfm2_audio_downmixes_stereo_to_mono(test_data_path, tmp_path):
     samples = _synthetic_signal(0.8, seed=4)
     mono = _write_wav(tmp_path / "mono.wav", samples)
