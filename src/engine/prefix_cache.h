@@ -42,9 +42,6 @@ struct PrefixCacheOptions {
   // Upper bound on blocks the index may hold. Retention beyond this evicts the least recently used
   // unreferenced entry. Zero disables the cache regardless of `enabled`.
   size_t max_blocks{};
-  // A match shorter than this is not worth adopting: the saved prefill has to outweigh the extra
-  // block-table width and bookkeeping.
-  size_t min_match_blocks{1};
   // Hybrid target models require a fixed-state checkpoint at the same boundary as the paged
   // blocks. Paged-only models leave this false and continue matching every complete block.
   bool requires_checkpoint{};

@@ -2908,7 +2908,6 @@ TEST_F(EngineRunTest, DensePagedPrefixCacheSkipsCommittedFullBlocks) {
   batching.block_size = 4;
   batching.num_blocks = 16;
   batching.prefix_caching = true;
-  batching.prefix_cache_max_blocks = 8;
   auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
   const std::array<int32_t, 9> prompt{2, 3, 4, 5, 6, 7, 8, 9, 10};
 
@@ -2963,7 +2962,6 @@ TEST_F(EngineRunTest, CanceledUnstartedPromptIsNotCountedAsCurrentTurnCache) {
   batching.block_size = 4;
   batching.num_blocks = 16;
   batching.prefix_caching = true;
-  batching.prefix_cache_max_blocks = 8;
   auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
   const std::array<int32_t, 9> canceled_prompt{2, 3, 4, 5, 6, 7, 8, 9, 10};
 
@@ -2992,7 +2990,6 @@ TEST_F(EngineRunTest, DensePagedPrefixAdoptionRollsBackAfterExecutionFailure) {
   batching.block_size = 4;
   batching.num_blocks = 16;
   batching.prefix_caching = true;
-  batching.prefix_cache_max_blocks = 8;
   auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
   const std::array<int32_t, 9> prompt{2, 3, 4, 5, 6, 7, 8, 9, 10};
 
@@ -3046,7 +3043,6 @@ TEST_F(EngineRunTest, DuplicatePrefixStopsSealingItsSuffix) {
   batching.max_batch_size = 2;
   batching.max_scheduled_tokens = 8;
   batching.prefix_caching = true;
-  batching.prefix_cache_max_blocks = 8;
   auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
   const std::array<int32_t, 9> prompt{2, 3, 4, 5, 6, 7, 8, 9, 10};
 
@@ -3075,7 +3071,6 @@ TEST_F(EngineRunTest, HybridPrefixCacheRestoresPagedAndFixedStateAtOneBoundary) 
   batching.max_batch_size = 1;
   batching.num_blocks = 16;
   batching.prefix_caching = true;
-  batching.prefix_cache_max_blocks = 8;
   auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
   const std::array<int32_t, 9> prompt{2, 3, 4, 5, 6, 7, 8, 9, 10};
 
@@ -3135,7 +3130,6 @@ TEST_F(EngineRunTest, HybridPrefixAdoptionRollbackKeepsCheckpointReusable) {
   batching.block_size = 4;
   batching.num_blocks = 16;
   batching.prefix_caching = true;
-  batching.prefix_cache_max_blocks = 8;
   auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
   const std::array<int32_t, 5> prompt{2, 3, 4, 5, 6};
 
@@ -3185,7 +3179,6 @@ TEST_F(EngineRunTest, HybridPrefixCacheDoesNotSealGeneratedBlocksWithoutCheckpoi
   batching.block_size = 4;
   batching.num_blocks = 16;
   batching.prefix_caching = true;
-  batching.prefix_cache_max_blocks = 8;
   auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
   engine.executor->SetForcedToken(11);
   const std::array<int32_t, 5> prompt{2, 3, 4, 5, 6};

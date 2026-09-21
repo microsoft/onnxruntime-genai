@@ -120,8 +120,7 @@ PrefixCacheMatch PrefixCache::Match(std::span<const int32_t> tokens,
   if (options_.requires_checkpoint) {
     hits.resize(safe_hit_count);
   }
-  if (hits.size() < options_.min_match_blocks ||
-      (options_.requires_checkpoint && !checkpoint)) {
+  if (hits.empty() || (options_.requires_checkpoint && !checkpoint)) {
     return match;
   }
 

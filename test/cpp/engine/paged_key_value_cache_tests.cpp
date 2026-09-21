@@ -817,23 +817,6 @@ TEST(PagedKeyValueCacheManifestTest, OmittedPrefixCachingPreservesSlidingWindowC
   EXPECT_FALSE(cache->PrefixCachingEnabled());
 }
 
-TEST(PagedKeyValueCacheManifestTest, ZeroPrefixCapacityDoesNotRejectSlidingWindowCache) {
-  auto model = LoadSyntheticPagedModel();
-  auto& batching = *model->config_->engine.dynamic_batching;
-  batching.prefix_caching_explicitly_set = true;
-  batching.prefix_cache_max_blocks = 0;
-  auto& decoder = model->config_->model.decoder;
-  decoder.sliding_window = Config::Model::Decoder::SlidingWindow{};
-  decoder.sliding_window->window_size = 4;
-  decoder.sliding_window->layers = {1};
-  decoder.inputs.block_table_windowed = decoder.inputs.block_table;
-  model->config_->search.chunk_size = 4;
-
-  auto cache = MakePagedCache(model);
-
-  EXPECT_FALSE(cache->PrefixCachingEnabled());
-}
-
 TEST(PagedKeyValueCacheManifestTest, OmittedPrefixCachingPreservesAuxiliaryCacheCompatibility) {
   auto model = LoadSyntheticPagedModel();
 
@@ -844,11 +827,10 @@ TEST(PagedKeyValueCacheManifestTest, OmittedPrefixCachingPreservesAuxiliaryCache
   EXPECT_FALSE(cache.PrefixCachingEnabled());
 }
 
-TEST(PagedKeyValueCacheManifestTest, PositivePrefixFractionRetainsAtLeastOneBlock) {
+TEST(PagedKeyValueCacheManifestTest, SingleBlockPoolKeepsPrefixCachingEnabled) {
   auto model = LoadSyntheticPagedModel();
   auto& batching = *model->config_->engine.dynamic_batching;
   batching.num_blocks = 1;
-  batching.prefix_cache_pool_fraction = 0.1f;
 
   auto cache = MakePagedCache(model);
 

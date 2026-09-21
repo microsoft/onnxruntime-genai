@@ -447,11 +447,7 @@ bool MakeTailBlockExclusive(PagedCacheBlockTable& table,
 bool ResolvePrefixCachingEnabled(const std::shared_ptr<Model>& model,
                                  size_t auxiliary_bytes_per_block) {
   const auto& batching = *model->config_->engine.dynamic_batching;
-  const bool has_retention_capacity =
-      batching.prefix_cache_max_blocks
-          ? *batching.prefix_cache_max_blocks != 0
-          : batching.prefix_cache_pool_fraction > 0;
-  if (!batching.prefix_caching || !has_retention_capacity) {
+  if (!batching.prefix_caching) {
     return false;
   }
 
@@ -491,7 +487,6 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
   const auto paged_group = ResolvePagedKeyValueGroup(decoder);
   ValidateScaleBindings(decoder, paged_group);
   const auto dtype = KeyValueCacheType(model_, paged_group);
-  const auto& batching = *model->config_->engine.dynamic_batching;
   const bool prefix_caching_enabled =
       ResolvePrefixCachingEnabled(model, auxiliary_bytes_per_block);
 
@@ -590,22 +585,9 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
   block_pool_ = std::make_unique<BlockPool>(block_size, num_blocks);
   PrefixCacheOptions prefix_options;
   prefix_options.enabled = prefix_caching_enabled;
-  prefix_options.min_match_blocks =
-      std::max<size_t>(batching.prefix_cache_min_blocks, 1);
+  prefix_options.max_blocks = num_blocks;
   prefix_options.requires_checkpoint = requires_prefix_checkpoint;
   prefix_options.max_checkpoints = max_prefix_checkpoints;
-  if (batching.prefix_cache_max_blocks) {
-    prefix_options.max_blocks =
-        std::min(*batching.prefix_cache_max_blocks, num_blocks);
-  } else {
-    prefix_options.max_blocks = static_cast<size_t>(
-        static_cast<double>(num_blocks) *
-        std::clamp(static_cast<double>(batching.prefix_cache_pool_fraction),
-                   0.0, 1.0));
-    if (prefix_options.enabled && prefix_options.max_blocks == 0) {
-      prefix_options.max_blocks = 1;
-    }
-  }
   prefix_cache_ =
       std::make_unique<PrefixCache>(*block_pool_, prefix_options);
   if (Windowed()) {

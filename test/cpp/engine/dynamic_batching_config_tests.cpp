@@ -65,11 +65,6 @@ TEST(DynamicBatchingConfigTest, PrefixCachingDefaultsToEnabled) {
   EXPECT_TRUE(config.engine.dynamic_batching->prefix_caching);
   EXPECT_FALSE(
       config.engine.dynamic_batching->prefix_caching_explicitly_set);
-  EXPECT_FLOAT_EQ(
-      config.engine.dynamic_batching->prefix_cache_pool_fraction, 0.5f);
-  EXPECT_FALSE(
-      config.engine.dynamic_batching->prefix_cache_max_blocks.has_value());
-  EXPECT_EQ(config.engine.dynamic_batching->prefix_cache_min_blocks, 1u);
 }
 
 TEST(DynamicBatchingConfigTest, PrefixCachingAcceptsExplicitDisable) {
@@ -80,71 +75,6 @@ TEST(DynamicBatchingConfigTest, PrefixCachingAcceptsExplicitDisable) {
   EXPECT_FALSE(config.engine.dynamic_batching->prefix_caching);
   EXPECT_TRUE(
       config.engine.dynamic_batching->prefix_caching_explicitly_set);
-}
-
-TEST(DynamicBatchingConfigTest, PrefixCachingAcceptsExplicitLimits) {
-  const auto config = LoadDynamicConfig(R"({
-    "prefix_caching": true,
-    "prefix_cache_pool_fraction": 0.25,
-    "prefix_cache_max_blocks": 17,
-    "prefix_cache_min_blocks": 2
-  })");
-
-  ASSERT_TRUE(config.engine.dynamic_batching.has_value());
-  EXPECT_TRUE(config.engine.dynamic_batching->prefix_caching);
-  EXPECT_TRUE(
-      config.engine.dynamic_batching->prefix_caching_explicitly_set);
-  EXPECT_FLOAT_EQ(
-      config.engine.dynamic_batching->prefix_cache_pool_fraction, 0.25f);
-  EXPECT_EQ(config.engine.dynamic_batching->prefix_cache_max_blocks, 17u);
-  EXPECT_EQ(config.engine.dynamic_batching->prefix_cache_min_blocks, 2u);
-}
-
-class InvalidPrefixCachePoolFractionTest
-    : public ::testing::TestWithParam<const char*> {};
-
-TEST_P(InvalidPrefixCachePoolFractionTest, RejectsOutOfRangeOrNonFiniteValue) {
-  EXPECT_THROW(
-      LoadDynamicConfig(
-          std::string{R"({ "prefix_cache_pool_fraction": )"} +
-          GetParam() + " }"),
-      std::runtime_error);
-}
-
-INSTANTIATE_TEST_SUITE_P(
-    InvalidValues,
-    InvalidPrefixCachePoolFractionTest,
-    ::testing::Values("-0.1", "1.1", "1e999"));
-
-class InvalidPrefixCacheBlockLimitTest
-    : public ::testing::TestWithParam<const char*> {};
-
-TEST_P(InvalidPrefixCacheBlockLimitTest, RejectsInvalidValue) {
-  const std::string value = GetParam();
-  EXPECT_THROW(
-      LoadDynamicConfig(
-          std::string{R"({ "prefix_cache_max_blocks": )"} + value +
-          R"(, "prefix_cache_min_blocks": )" + value + " }"),
-      std::runtime_error);
-}
-
-INSTANTIATE_TEST_SUITE_P(
-    InvalidValues,
-    InvalidPrefixCacheBlockLimitTest,
-    ::testing::Values("-1", "1.5", "4000000000"));
-
-TEST(DynamicBatchingConfigTest, PrefixCacheMaximumMayDisableRetention) {
-  const auto config =
-      LoadDynamicConfig(R"({ "prefix_cache_max_blocks": 0 })");
-
-  ASSERT_TRUE(config.engine.dynamic_batching.has_value());
-  EXPECT_EQ(config.engine.dynamic_batching->prefix_cache_max_blocks, 0u);
-}
-
-TEST(DynamicBatchingConfigTest, PrefixCacheMinimumMustBePositive) {
-  EXPECT_THROW(
-      LoadDynamicConfig(R"({ "prefix_cache_min_blocks": 0 })"),
-      std::runtime_error);
 }
 
 class InvalidScheduledTokenBudgetTest

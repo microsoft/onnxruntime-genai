@@ -24,11 +24,10 @@ namespace {
 
 constexpr size_t kBlockSize = 4;
 
-PrefixCacheOptions MakeOptions(size_t max_blocks, size_t min_match_blocks = 1) {
+PrefixCacheOptions MakeOptions(size_t max_blocks) {
   PrefixCacheOptions options;
   options.enabled = true;
   options.max_blocks = max_blocks;
-  options.min_match_blocks = min_match_blocks;
   return options;
 }
 
@@ -279,18 +278,6 @@ TEST(PrefixCacheTest, DuplicateContentKeepsTheFirstPhysicalBlock) {
   const auto match = cache.Match(probe, probe.size() - 1);
   ASSERT_EQ(match.blocks.size(), 1u);
   EXPECT_EQ(match.blocks.front()->Id(), first->Id());
-}
-
-TEST(PrefixCacheTest, AMatchShorterThanTheMinimumIsNotWorthAdopting) {
-  BlockPool pool{kBlockSize, 8};
-  PrefixCache cache{pool, MakeOptions(8, /*min_match_blocks=*/2)};
-
-  const std::array<int32_t, 4> tokens{1, 2, 3, 4};
-  std::shared_ptr<const BlockIdentity> parent;
-  SealBlock(pool, cache, tokens, parent);
-
-  const std::array<int32_t, 6> probe{1, 2, 3, 4, 9, 9};
-  EXPECT_TRUE(cache.Match(probe, probe.size() - 1).Empty());
 }
 
 TEST(PrefixCacheTest, ADisabledCacheIndexesAndMatchesNothing) {

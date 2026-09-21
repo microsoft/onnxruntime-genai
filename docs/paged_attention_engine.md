@@ -115,14 +115,11 @@ equality alone is never accepted as a match. The final prompt token always runs
 through the model, and partial blocks are never shared.
 
 The cache retains indexed blocks after their producing request releases them.
-`prefix_cache_max_blocks` sets an explicit retention limit. When it is omitted,
-`prefix_cache_pool_fraction` selects the fraction of the paged block pool that may
-be retained (default `0.5`, range `0` through `1`). `prefix_cache_min_blocks`
-sets the minimum number of matching full blocks required to adopt a prefix
-(default `1`). A zero block limit or zero pool fraction disables retention; a
-positive fraction retains at least one block. Retained blocks are reclaimable under admission pressure; blocks
-being adopted by an in-flight reservation are protected by reservation-owned
-references.
+Every matching full block may be adopted. Retained blocks use the same paged KV
+pool as active requests and are reclaimed in least-recently-used order under
+admission pressure; prefix retention never reserves a separate share of the
+pool. Blocks being adopted by an in-flight reservation are protected by
+reservation-owned references.
 
 Prefix adoption participates in the normal Engine transaction. Planning stages
 the request's processed-token cursor at the matched block boundary, reservation
