@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <numeric>
 
 namespace Generators {
 
@@ -89,6 +90,60 @@ int64_t Lfm2AudioNumTokens(int64_t num_mel_frames, int64_t subsampling_factor) {
     throw std::runtime_error("Lfm2AudioProcessor: subsampling_factor must be positive.");
   }
   return (num_mel_frames + subsampling_factor - 1) / subsampling_factor;
+}
+
+std::vector<float> ResampleLfm2Audio(const float* pcm, int64_t num_samples, int64_t source_rate, int64_t target_rate) {
+  if (source_rate <= 0 || target_rate <= 0) {
+    throw std::runtime_error("Lfm2AudioProcessor: cannot resample from " + std::to_string(source_rate) + " Hz to " +
+                             std::to_string(target_rate) + " Hz.");
+  }
+  if (source_rate == target_rate) {
+    return {pcm, pcm + num_samples};
+  }
+
+  constexpr double kPi = 3.14159265358979323846;
+  constexpr double kLowpassFilterWidth = 6.0;
+  constexpr double kRolloff = 0.99;
+  const int64_t divisor = std::gcd(source_rate, target_rate);
+  const int64_t orig = source_rate / divisor;
+  const int64_t target = target_rate / divisor;
+  const double base_freq = static_cast<double>(std::min(orig, target)) * kRolloff;
+  const int64_t width = static_cast<int64_t>(std::ceil(kLowpassFilterWidth * static_cast<double>(orig) / base_freq));
+  const int64_t kernel_size = 2 * width + orig;
+
+  // One kernel per output phase, built in double and stored in float as torchaudio does.
+  std::vector<float> kernels(static_cast<size_t>(target * kernel_size));
+  for (int64_t phase = 0; phase < target; ++phase) {
+    for (int64_t k = 0; k < kernel_size; ++k) {
+      double t = (-static_cast<double>(phase) / static_cast<double>(target) +
+                  static_cast<double>(k - width) / static_cast<double>(orig)) *
+                 base_freq;
+      t = std::clamp(t, -kLowpassFilterWidth, kLowpassFilterWidth);
+      const double window = std::pow(std::cos(t * kPi / kLowpassFilterWidth / 2.0), 2.0);
+      t *= kPi;
+      const double sinc = t == 0.0 ? 1.0 : std::sin(t) / t;
+      kernels[static_cast<size_t>(phase * kernel_size + k)] =
+          static_cast<float>(sinc * window * base_freq / static_cast<double>(orig));
+    }
+  }
+
+  std::vector<float> padded(static_cast<size_t>(width + num_samples + width + orig), 0.0f);
+  std::copy(pcm, pcm + num_samples, padded.begin() + width);
+
+  // ceil(target * num_samples / orig) samples; the strided convolution makes a few more, which
+  // torchaudio trims.
+  const int64_t num_outputs = (target * num_samples + orig - 1) / orig;
+  std::vector<float> resampled(static_cast<size_t>(num_outputs));
+  for (int64_t i = 0; i < num_outputs; ++i) {
+    const float* frame = padded.data() + (i / target) * orig;
+    const float* kernel = kernels.data() + (i % target) * kernel_size;
+    float value = 0.0f;
+    for (int64_t k = 0; k < kernel_size; ++k) {
+      value += frame[k] * kernel[k];
+    }
+    resampled[static_cast<size_t>(i)] = value;
+  }
+  return resampled;
 }
 
 std::vector<float> ComputeLfm2AudioMel(const float* pcm, int64_t num_samples, const Lfm2AudioMelConfig& config,
@@ -227,19 +282,11 @@ Lfm2AudioProcessor::Lfm2AudioProcessor(Config& config, const SessionInfo& sessio
 }
 
 Lfm2AudioProcessor::ClipMel Lfm2AudioProcessor::ComputeClipMel(const Audios& audios, size_t index) const {
+  // Decoded at the file's own rate and resampled here, the way the reference does it: the decoder's
+  // resampler is a different filter, enough to change a token, and it cannot resample upwards.
   ort_extensions::OrtxObjectPtr<OrtxTensorResult> decoded;
-  // The decoder resamples down to the encoder's rate and mixes to mono, but it cannot upsample:
-  // say which clip it was and what to do about it, rather than passing its bare message through.
-  try {
-    CheckResult(OrtxDecodeAudio(audios.audios_.get(), index, static_cast<int64_t>(mel_config_.sample_rate),
-                                /*stereo_to_mono=*/1, decoded.ToBeAssigned()));
-  } catch (const std::exception& e) {
-    throw std::runtime_error("Lfm2AudioProcessor: could not decode audio clip " + std::to_string(index) + " at " +
-                             std::to_string(mel_config_.sample_rate) +
-                             " Hz. A clip recorded below that rate has to be resampled up to it first, as the "
-                             "decoder only resamples downwards. The decoder reported: " +
-                             e.what());
-  }
+  CheckResult(OrtxDecodeAudio(audios.audios_.get(), index, /*target_sample_rate=*/0, /*stereo_to_mono=*/1,
+                              decoded.ToBeAssigned()));
 
   ort_extensions::OrtxObjectPtr<OrtxTensor> pcm_tensor;
   CheckResult(OrtxTensorResultGetAt(decoded.get(), 0, pcm_tensor.ToBeAssigned()));
@@ -258,8 +305,15 @@ Lfm2AudioProcessor::ClipMel Lfm2AudioProcessor::ComputeClipMel(const Audios& aud
                              std::to_string(index) + ", got a rank " + std::to_string(pcm_dims) + " tensor.");
   }
 
+  ort_extensions::OrtxObjectPtr<OrtxTensor> rate_tensor;
+  CheckResult(OrtxTensorResultGetAt(decoded.get(), 1, rate_tensor.ToBeAssigned()));
+  const int64_t* source_rate{};
+  CheckResult(OrtxGetTensorData(rate_tensor.get(), reinterpret_cast<const void**>(&source_rate), nullptr, nullptr));
+
+  const std::vector<float> samples = ResampleLfm2Audio(pcm, num_samples, *source_rate, mel_config_.sample_rate);
+
   ClipMel clip;
-  clip.mel = ComputeLfm2AudioMel(pcm, num_samples, mel_config_, clip.num_frames);
+  clip.mel = ComputeLfm2AudioMel(samples.data(), static_cast<int64_t>(samples.size()), mel_config_, clip.num_frames);
   clip.num_tokens = Lfm2AudioNumTokens(clip.num_frames, subsampling_factor_);
   return clip;
 }

@@ -196,6 +196,33 @@ def _reference_mel(
     return normalized.astype(np.float32)
 
 
+def _reference_resample(samples: np.ndarray, source_rate: int, target_rate: int = SAMPLE_RATE) -> np.ndarray:
+    """torchaudio.functional.resample with its defaults, which liquid-audio's ChatState.add_audio uses.
+
+    A Hann-windowed sinc with lowpass_filter_width 6 and rolloff 0.99: one kernel per output phase,
+    built in float64 and applied in float32, strided over the zero-padded input.
+    """
+    if source_rate == target_rate:
+        return samples
+    divisor = math.gcd(source_rate, target_rate)
+    orig, new = source_rate // divisor, target_rate // divisor
+    base_freq = min(orig, new) * 0.99
+    width = math.ceil(6 * orig / base_freq)
+    idx = np.arange(-width, width + orig, dtype=np.float64) / orig
+    t = (np.arange(0, -new, -1, dtype=np.float64)[:, None] / new + idx[None, :]) * base_freq
+    t = t.clip(-6, 6)
+    window = np.cos(t * np.pi / 6 / 2) ** 2
+    t *= np.pi
+    kernels = (np.where(t == 0, 1.0, np.sin(t) / np.where(t == 0, 1.0, t)) * window * base_freq / orig).astype(
+        np.float32
+    )
+
+    padded = np.pad(samples.astype(np.float32), (width, width + orig))
+    steps = len(samples) // orig + 1
+    frames = np.lib.stride_tricks.sliding_window_view(padded, 2 * width + orig)[::orig][:steps]
+    return (frames @ kernels.T).reshape(-1)[: math.ceil(new * len(samples) / orig)]
+
+
 def _process(model_path: str, prompt: str, audios):
     model = og.Model(model_path)
     inputs = model.create_multimodal_processor()(prompt, audios=audios)
@@ -298,34 +325,41 @@ def test_lfm2_audio_open_bytes_matches_open(test_data_path, tmp_path):
     np.testing.assert_array_equal(from_bytes["audio_sizes"].as_numpy(), from_path["audio_sizes"].as_numpy())
 
 
-@pytest.mark.parametrize("source_rate", [22050, 44100, 48000])
-def test_lfm2_audio_resamples_to_the_encoder_rate(test_data_path, tmp_path, source_rate):
-    # Whatever the file's rate, the clip reaches the mel front end at the encoder's 16 kHz, so the
-    # frame count follows the resampled length rather than the original sample count.
-    seconds = 0.75
-    samples = _synthetic_signal(seconds, seed=8)[: int(seconds * source_rate)]
-    if source_rate > SAMPLE_RATE:  # _synthetic_signal only makes 16 kHz worth of samples
-        samples = np.interp(
-            np.linspace(0, 1, int(seconds * source_rate)), np.linspace(0, 1, samples.size), samples
-        ).astype(np.float32)
+def _signal_at(source_rate: int, seconds: float, seed: int) -> np.ndarray:
+    """`_synthetic_signal` stretched to another rate, quantized to 16-bit like the WAV that carries it."""
+    base = _synthetic_signal(seconds, seed=seed)
+    stretched = np.interp(np.linspace(0, 1, int(seconds * source_rate)), np.linspace(0, 1, base.size), base)
+    return (np.round(stretched * 32768.0).clip(-32768, 32767) / 32768.0).astype(np.float32)
+
+
+@pytest.mark.parametrize("source_rate", [8000, 22050, 24000, 44100, 48000])
+def test_lfm2_audio_resamples_the_way_the_reference_does(test_data_path, tmp_path, source_rate):
+    # The clip is decoded at its own rate and brought to the encoder's 16 kHz with torchaudio's
+    # resampler, upwards as well as downwards, as ChatState.add_audio does. The decoder's own
+    # resampler is a different filter: near enough to transcribe, far enough to change a token.
+    samples = _signal_at(source_rate, 0.75, seed=8)
     clip = _write_wav(tmp_path / "clip.wav", samples, sample_rate=source_rate)
 
     _, inputs = _process(_model_path(test_data_path), AUDIO_MARKER, og.Audios.open(clip))
 
-    resampled_length = round(samples.size * SAMPLE_RATE / source_rate)
-    num_frames = int(inputs["audio_lengths"].as_numpy()[0])
-    # The resampler may land a sample either side of the exact ratio, so allow one hop of slack.
-    assert abs(num_frames - _num_frames(resampled_length)) <= 1, f"{num_frames} frames for {resampled_length} samples"
-    assert inputs["audio_embeds"].as_numpy().shape == (1, num_frames, NUM_MELS)
-    assert int(inputs["audio_sizes"].as_numpy()[0]) == math.ceil(num_frames / SUBSAMPLING_FACTOR)
+    resampled = _reference_resample(samples, source_rate)
+    assert len(resampled) == math.ceil(len(samples) * SAMPLE_RATE / source_rate)
+    np.testing.assert_array_equal(inputs["audio_lengths"].as_numpy(), [_num_frames(len(resampled))])
+    np.testing.assert_array_equal(inputs["audio_sizes"].as_numpy(), [_num_tokens(len(resampled))])
+    np.testing.assert_allclose(inputs["audio_embeds"].as_numpy()[0], _reference_mel(resampled), atol=2e-3)
 
 
-def test_lfm2_audio_rejects_a_clip_recorded_below_the_encoder_rate(test_data_path, tmp_path):
-    # The decoder resamples downwards only, so 8 kHz telephone audio cannot be read as 16 kHz. The
-    # message has to name the clip and say what to do, not just repeat the decoder's complaint.
-    clip = _write_wav(tmp_path / "telephone.wav", _synthetic_signal(0.5, seed=11)[:4000], sample_rate=8000)
-    with pytest.raises(RuntimeError, match="could not decode audio clip 0 at 16000 Hz.*resampled up"):
-        _process(_model_path(test_data_path), AUDIO_MARKER, og.Audios.open(clip))
+@pytest.mark.parametrize("source_rate", [8000, 44100])
+def test_lfm2_audio_reference_resampler_is_torchaudio(source_rate):
+    """The numpy resampler above against the real one, when torchaudio is installed."""
+    torch = pytest.importorskip("torch")
+    torchaudio = pytest.importorskip("torchaudio")
+    samples = _signal_at(source_rate, 0.5, seed=14)
+
+    expected = torchaudio.functional.resample(torch.from_numpy(samples)[None], source_rate, SAMPLE_RATE)[0].numpy()
+
+    # Float32 sums taken in a different order.
+    np.testing.assert_allclose(_reference_resample(samples, source_rate), expected, atol=1e-5)
 
 
 @pytest.mark.parametrize(

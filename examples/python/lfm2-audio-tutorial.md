@@ -301,6 +301,9 @@ routine of its own. Only the first produces text alone, so only the first runs h
 
 **ASR** is the supported path, and matches the reference token for token.
 
+`LFM2.5-Audio-1.5B-JP` takes its own prompts, `Perform ASR in japanese.` and
+`Perform TTS in japanese.`; the rest of this section applies to it unchanged.
+
 Two tokens mark the turn passing from text to speech, and the builder puts both in `eos_token_id`:
 `<|audio_start|>` when the rest of the answer is spoken, and `<|text_end|>` when the text half of an
 interleaved answer is done. The positions after either are audio codes meant for the depthformer this
@@ -371,10 +374,6 @@ garbled, and transcribes to nonsense. Nothing in the decoder's interface reports
 file had, so this cannot be caught and refused here. Mix down to mono or stereo before passing the
 file in.
 
-**Audio below 16 kHz is refused.** The decoder resamples down to the encoder's rate and mixes to
-mono, but it does not resample upwards, so 8 kHz telephone audio has to be resampled before it gets
-here. The processor says so, naming the clip.
-
 **Audio is not chunked.** The whole clip goes through the encoder in one run, and one hour of audio
 is 450k mel frames, so memory grows with the clip length. The reference implementation has the same
 shape; for long-form transcription, split the audio yourself.
@@ -382,6 +381,12 @@ shape; for long-form transcription, split the audio yourself.
 **The mel front end differs from the reference by about 1e-4.** It computes the same NeMo pipeline in
 float32 where the reference uses float64 intermediates in places, and the FFT is a different
 implementation. The difference is far below the audio's own quantization noise.
+
+**Resampling is the reference's.** A clip at any other rate is decoded at its own rate and brought to
+16 kHz with `torchaudio`'s resampler (Hann-windowed sinc), upwards as well as downwards, which is what
+`ChatState.add_audio` does. The audio decoder's own resampler is a different filter and changes the
+log-mel frames by up to about 2, enough to flip a token: on the reference's 24 kHz `asr_jp.wav` it
+turned one homophone, and resampled this way the transcript matches token for token.
 
 **Dither is off, as in the reference's eval mode.** NeMo adds 1e-5 of white noise to the samples
 during training only; the runtime never does.

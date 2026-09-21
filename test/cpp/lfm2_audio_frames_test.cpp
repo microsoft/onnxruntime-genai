@@ -154,4 +154,34 @@ TEST(Lfm2AudioPromptTest, RejectsAMarkerCountThatDoesNotMatchTheClips) {
             std::string::npos);
 }
 
+TEST(Lfm2AudioResampleTest, SameRateIsACopy) {
+  const std::vector<float> samples{0.1f, -0.2f, 0.3f};
+  EXPECT_EQ(ResampleLfm2Audio(samples.data(), 3, 16000, 16000), samples);
+}
+
+TEST(Lfm2AudioResampleTest, LengthIsTheCeilingOfTheRateRatio) {
+  // torchaudio trims to ceil(target * num_samples / source), up as well as down.
+  const std::vector<float> samples(1001, 0.0f);
+  EXPECT_EQ(ResampleLfm2Audio(samples.data(), 1001, 44100, 16000).size(), 364u);
+  EXPECT_EQ(ResampleLfm2Audio(samples.data(), 1001, 48000, 16000).size(), 334u);
+  EXPECT_EQ(ResampleLfm2Audio(samples.data(), 1001, 8000, 16000).size(), 2002u);
+}
+
+TEST(Lfm2AudioResampleTest, KeepsAConstantSignalConstantAwayFromTheEdges) {
+  // The kernels of every output phase sum to one, so only the zero padding at the ends shows.
+  const std::vector<float> samples(4410, 0.5f);
+  for (const int64_t source_rate : {8000, 22050, 44100}) {
+    const auto resampled = ResampleLfm2Audio(samples.data(), 4410, source_rate, 16000);
+    for (size_t i = resampled.size() / 4; i < 3 * resampled.size() / 4; ++i) {
+      ASSERT_NEAR(resampled[i], 0.5f, 2e-3f) << source_rate << " Hz, sample " << i;
+    }
+  }
+}
+
+TEST(Lfm2AudioResampleTest, RejectsARateThatIsNotPositive) {
+  const std::vector<float> samples(16, 0.0f);
+  EXPECT_NE(CaptureThrowMessage([&] { ResampleLfm2Audio(samples.data(), 16, 0, 16000); }).find("cannot resample"),
+            std::string::npos);
+}
+
 }  // namespace Generators::test

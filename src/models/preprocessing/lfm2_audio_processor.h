@@ -40,6 +40,11 @@ int64_t Lfm2AudioNumValidMelFrames(int64_t num_samples, const Lfm2AudioMelConfig
 // with ceil rounding (three stride-2 convolutions with padding 1 for the shipped models).
 int64_t Lfm2AudioNumTokens(int64_t num_mel_frames, int64_t subsampling_factor);
 
+// torchaudio.functional.resample with its defaults (Hann-windowed sinc, lowpass_filter_width 6,
+// rolloff 0.99), which is what the reference's ChatState.add_audio brings every clip to the
+// encoder's rate with, upwards as well as downwards.
+std::vector<float> ResampleLfm2Audio(const float* pcm, int64_t num_samples, int64_t source_rate, int64_t target_rate);
+
 // Computes the normalized log-mel spectrogram of one mono clip, time-major [num_frames, num_mels],
 // the layout the encoder's mel_spectrogram input takes. Throws if the clip is too short to
 // normalize (fewer than two valid frames).
