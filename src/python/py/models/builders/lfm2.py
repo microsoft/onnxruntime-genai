@@ -245,6 +245,11 @@ class LFM2AudioModel(LFM2Model):
         genai_config["model"]["eos_token_id"] = eos_token_ids
 
     def load_weights(self, input_path):
+        # A fine-tune of these checkpoints names the decoder "lfm.*", which matches nothing in the
+        # Lfm2ForCausalLM loaded here: PEFT only warns, and the export would carry untrained LoRA weights.
+        if "adapter_path" in self.extra_options:
+            raise ValueError("LoRA adapters are not supported for LFM2-Audio checkpoints; merge the adapter first.")
+
         if input_path.endswith(".gguf") or self.quant_type is not None:
             return super().load_weights(input_path)
 
@@ -262,7 +267,7 @@ class LFM2AudioModel(LFM2Model):
                 f"The LFM2 decoder of {input_path} does not match its config: missing {sorted(missing)}, unexpected {sorted(unexpected)}."
             )
         model.tie_weights()
-        return self.load_adapter(model.eval())
+        return model.eval()
 
     def load_lfm2_audio_checkpoint(self, input_path):
         """The checkpoint tensors, from a local directory or the Hugging Face Hub."""

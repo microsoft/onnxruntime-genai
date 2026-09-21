@@ -360,6 +360,10 @@ the model and not this runtime: the reference implementation, given the same two
 `ChatState.add_audio`, produces the same tokens exactly, in both orders. Transcribe one clip per
 request.
 
+**LoRA adapters are not supported.** The builder refuses `adapter_path` for these checkpoints: an
+adapter trained on them names the decoder `lfm.*`, which does not match the decoder the builder
+loads. Merge the adapter into the checkpoint first.
+
 **More than two channels has to be downmixed first.** Mono and stereo are handled: a stereo clip is
 mixed down and reaches the front end at its true length. Wider audio is not — the decoder
 deinterleaves it as though it were stereo, so a six channel clip arrives three times too long and

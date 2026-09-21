@@ -269,36 +269,14 @@ def test_lfm2_audio_load_weights_prefers_a_local_input_path(monkeypatch, tmp_pat
     assert type(loaded).__name__ == "Lfm2ForCausalLM"
 
 
-def test_lfm2_audio_load_weights_applies_the_lora_adapter(monkeypatch, tmp_path):
-    # `load_weights` is overridden for these checkpoints, so it has to apply `adapter_path` itself;
-    # returning the bare decoder would drop the adapter without a word.
+def test_lfm2_audio_load_weights_refuses_a_lora_adapter(tmp_path):
+    # An adapter trained on these checkpoints is keyed "lfm.*" and matches nothing in the decoder
+    # loaded here, so PEFT would attach untrained weights with only a warning.
     _write_checkpoint(tmp_path)
-    wrapped = []
-
-    class FakePeftModel:
-        @classmethod
-        def from_pretrained(cls, model, adapter_path, **kwargs):
-            wrapped.append((model, adapter_path, kwargs))
-            return "adapted"
-
-    peft = types.ModuleType("peft")
-    peft.PeftModel = FakePeftModel
-    monkeypatch.setitem(sys.modules, "peft", peft)
-
     builder = _audio_builder(tmp_path, {"adapter_path": "some/adapter"})
-    loaded = builder.load_weights(str(tmp_path))
 
-    assert loaded == "adapted"
-    model, adapter_path, kwargs = wrapped[0]
-    assert type(model).__name__ == "Lfm2ForCausalLM"
-    assert adapter_path == "some/adapter"
-    assert kwargs == {"cache_dir": builder.cache_dir, "token": True}
-
-
-def test_lfm2_audio_load_weights_without_an_adapter_returns_the_decoder(tmp_path):
-    _write_checkpoint(tmp_path)
-    loaded = _audio_builder(tmp_path).load_weights(str(tmp_path))
-    assert type(loaded).__name__ == "Lfm2ForCausalLM"
+    with pytest.raises(ValueError, match="LoRA adapters are not supported for LFM2-Audio"):
+        builder.load_weights(str(tmp_path))
 
 
 @pytest.mark.parametrize(
