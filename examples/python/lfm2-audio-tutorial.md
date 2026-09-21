@@ -292,7 +292,7 @@ routine of its own. Only the first produces text alone, so only the first runs h
 | --- | --- | --- | --- | --- |
 | ASR | `Perform ASR.` | `generate_sequential` | text | works |
 | TTS | `Perform TTS. Use the UK male voice.` (also US male, US female, UK female) | `generate_sequential` | speech | stops immediately |
-| Interleaved | `Respond with interleaved text and audio.` | `generate_interleaved` | text and speech, alternating | the text, up to the first switch to speech |
+| Interleaved | `Respond with interleaved text and audio.` | `generate_interleaved` | text and speech, alternating | the text; none of the speech |
 
 **ASR** is the supported path, and matches the reference token for token.
 
@@ -303,13 +303,16 @@ positions after it are meant for the depthformer this runtime does not have — 
 they decode to fluent, plausible nonsense. A sequential answer that begins in text and turns to
 speech part way keeps the text it had before the switch.
 
-**Interleaved** returns text only. The reference alternates by count — `interleaved_n_text` text
-tokens, then `interleaved_n_audio` audio frames, from `config.json` — rather than by any token in the
-stream, so there is nothing here to switch on, and generation simply runs to `<|im_end|>`. On a ten
-second clip the text produced this way was the reference's interleaved text stream exactly, for all
-29 tokens before the end of the turn; the reference then carried on past that point, alternating
-text with speech, where this ends the turn. Treat it as the opening of the answer, not the whole of
-it.
+**Interleaved** returns text only. The reference alternates by count — six text tokens, then
+`interleaved_n_audio` audio frames (12, or 9 for the JP checkpoint) — rather than on any token in the
+stream, so there is nothing here to switch on and generation simply runs to `<|im_end|>`.
+
+The speech it generates is real, and it feeds back into the context, so the text depends on it. On a
+ten second clip the reference answered with 29 text tokens and 48 audio frames using the sampling the
+model card gives (`audio_temperature=1.0, audio_top_k=4`), and with 54 text tokens when the audio was
+taken greedily instead. This runtime produced those same first 29 tokens and stopped. The first 29
+agree across all three, and they diverge after that. So take what you get as the answer the model
+would speak, not as a reproduction of any one interleaved run.
 
 Sampling: the reference generates text greedily in every mode, so `do_sample=False` is right here.
 The temperatures and `top_k` values quoted for the model (`audio_temperature=0.8, audio_top_k=64`
@@ -320,7 +323,9 @@ produce; they have no text-side equivalent to set.
 
 **Audio output is not supported.** TTS and the speech half of interleaved generation need the
 depthformer, which predicts 8 codebook entries per 80 ms audio frame in an inner autoregressive loop,
-plus the audio detokenizer and an inverse STFT to turn those codes into a waveform. ONNX Runtime
+plus the audio detokenizer to turn those codes into a waveform. That speech is worth having: the 48
+frames the reference generated for the clip above decode to 3.8 seconds of 24 kHz audio, which this
+runtime's own ASR transcribes back as the opening of the same answer. It simply has no path here. ONNX Runtime
 GenAI's generation loop samples one token stream, so none of that has a home here yet. Generation
 stops at `<|audio_start|>` rather than reading the depthformer's positions off the text head; see
 [the three modes](#the-models-three-modes) for what each prompt gives you. LiquidAI ships
