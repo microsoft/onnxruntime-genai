@@ -640,6 +640,18 @@ def test_qwen35_gated_delta_net_supported_providers(ep):
     model.validate_gated_delta_net_options(True, "linear_attention", 0, ep)
 
 
+@pytest.mark.parametrize("use_paged_attention", [False, True])
+def test_qwen35_gated_delta_net_accepts_webgpu(use_paged_attention):
+    model = Qwen35TextModel.__new__(Qwen35TextModel)
+
+    model.validate_gated_delta_net_options(
+        use_paged_attention,
+        "gated_delta_net",
+        0,
+        "webgpu",
+    )
+
+
 def _packed_gated_delta_net_model(
     capacity=3,
     layer_types=("linear_attention", "full_attention"),
