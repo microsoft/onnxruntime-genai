@@ -3,6 +3,7 @@
 
 #include "generator/generators.h"
 #include "models/io/indexer_cache.h"
+#include "models/io/static_kv_cache.h"
 #include <algorithm>
 
 namespace Generators {
@@ -53,16 +54,27 @@ IndexerCache::IndexerCache(State& state) : state_{state} {
   shape_[0] = state_.params_->BatchBeamSize();
   if (shape_[2] <= 0)
     throw std::runtime_error("IndexerCache: head dimension must be static");
-  share_buffer_ = shape_[1] > 0;
-  if (share_buffer_) {
-    for (const auto& output_name : output_name_strings_) {
-      const auto output_shape = model_.session_info_.GetOutputShape(output_name);
-      if (output_shape.size() != 3 || output_shape[1] != shape_[1] || output_shape[2] != shape_[2])
-        throw std::runtime_error("IndexerCache: fixed input and output cache shapes must match");
-    }
-  } else {
-    shape_[1] = 0;
+  const int64_t fixed_sequence_length = shape_[1] > 0 ? shape_[1] : 0;
+  share_buffer_ = ShouldUseSharedPastPresentKeyValueCache(state_);
+  if (fixed_sequence_length > 0) {
+    if (state_.params_->search.num_beams != 1)
+      throw std::runtime_error("IndexerCache: beam search is not supported with a fixed cache shape");
+    share_buffer_ = true;
   }
+
+  for (const auto& output_name : output_name_strings_) {
+    const auto output_shape = model_.session_info_.GetOutputShape(output_name);
+    if (output_shape.size() != 3 || output_shape[2] != shape_[2])
+      throw std::runtime_error("IndexerCache: input and output cache head dimensions must match");
+    if (fixed_sequence_length > 0 && output_shape[1] > 0 && output_shape[1] != fixed_sequence_length)
+      throw std::runtime_error("IndexerCache: fixed input and output cache shapes must match");
+  }
+
+  shape_[1] = share_buffer_
+                  ? (fixed_sequence_length > 0 ? fixed_sequence_length : state_.params_->search.max_length)
+                  : 0;
+  if (share_buffer_ && shape_[1] <= 0)
+    throw std::runtime_error("IndexerCache: shared caches require search.max_length > 0");
 
   auto& allocator = model_.p_device_kvcache_->GetAllocator();
   pasts_.resize(layer_indices_.size());
@@ -71,13 +83,14 @@ IndexerCache::IndexerCache(State& state) : state_{state} {
   for (size_t index = 0; index < layer_indices_.size(); ++index)
     empty_pasts_.push_back(OrtValue::CreateTensor(allocator, shape_, type_));
 
-  if (share_buffer_) {
-    const auto& length_name = inputs.past_sequence_length;
-    if (!model_.session_info_.HasInput(length_name) ||
-        model_.session_info_.GetInputDataType(length_name) != Ort::TypeToTensorType<int32_t>)
-      throw std::runtime_error("IndexerCache: fixed caches require an int32 past_sequence_length input");
+  const auto& length_name = inputs.past_sequence_length;
+  if (!length_name.empty() && model_.session_info_.HasInput(length_name)) {
+    if (model_.session_info_.GetInputDataType(length_name) != Ort::TypeToTensorType<int32_t>)
+      throw std::runtime_error("IndexerCache: past_sequence_length input must be int32");
     past_sequence_length_ = OrtValue::CreateTensor(
         model_.allocator_cpu_, std::array<int64_t, 1>{1}, Ort::TypeToTensorType<int32_t>);
+  } else if (share_buffer_) {
+    throw std::runtime_error("IndexerCache: shared caches require an int32 past_sequence_length input");
   }
 }
 
@@ -100,10 +113,14 @@ void IndexerCache::Add() {
 void IndexerCache::Update(DeviceSpan<int32_t> beam_indices, int total_length, int current_length) {
   if (!beam_indices.empty())
     throw std::runtime_error("IndexerCache does not support beam reordering");
-  if (share_buffer_) {
+  if (past_sequence_length_) {
     if (current_length < 0 || current_length > total_length)
       throw std::runtime_error("IndexerCache: current length must be in [0, total length]");
     *past_sequence_length_->GetTensorMutableData<int32_t>() = total_length - current_length;
+  }
+  if (share_buffer_) {
+    if (total_length > shape_[1])
+      throw std::runtime_error("IndexerCache: total length exceeds the shared cache capacity");
     return;
   }
   if (!first_update_) {

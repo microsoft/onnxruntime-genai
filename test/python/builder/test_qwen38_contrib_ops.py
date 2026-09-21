@@ -6,7 +6,7 @@ from types import MethodType, SimpleNamespace
 import onnx_ir as ir
 import torch
 
-from models.builders.qwen import Qwen4ExpMTPTextModel, Qwen4ExpTextModel
+from models.builders.qwen import Qwen35MoETextModel, Qwen4ExpMTPTextModel, Qwen4ExpTextModel
 
 
 def record_calls(model, method_names):
@@ -104,6 +104,48 @@ def make_attention():
         k_layernorm=norm,
     )
     return SimpleNamespace(q_norm=norm, k_norm=norm, indexer=indexer)
+
+
+def test_dense_cuda_indexer_cache_shapes_are_symbolic(monkeypatch):
+    def initialize_parent(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        self.io_dtype = io_dtype
+        self.ep = ep
+        self.use_paged_attention = False
+        self.hidden_size = 16
+        self.layer_types = ["qwen_sparse_attention"]
+        self.input_names = {}
+        self.input_types = {}
+        self.input_shapes = {}
+        self.output_names = {}
+        self.output_types = {}
+        self.output_shapes = {}
+        self.rope_attrs = {"cast": {"use_fp32": True}}
+        self.model = SimpleNamespace(metadata_props={})
+
+    monkeypatch.setattr(Qwen35MoETextModel, "__init__", initialize_parent)
+    config = SimpleNamespace(
+        hc_count=1,
+        ple_layer_ids=[],
+        ple_embed_dim=8,
+        ple_conv_kernel_size=2,
+        ngram_size=2,
+        eos_token_id=0,
+        heads_per_ngram=1,
+        indexer_n_heads=4,
+        indexer_kv_heads=1,
+        indexer_head_dim=16,
+        indexer_budget=32,
+        indexer_compress_ratio=4,
+        output_gate_type=None,
+        hidden_act="silu",
+    )
+
+    model = Qwen4ExpTextModel(config, ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cuda", None, {})
+
+    assert model.fixed_indexer_cache
+    assert model.input_shapes["past.indexer"] == ["batch_size", "past_sequence_length", 16]
+    assert model.output_shapes["present.indexer"] == ["batch_size", "total_sequence_length", 16]
+    assert model.input_shapes["past_sequence_length"] == [1]
 
 
 def test_qwen38_gated_delta_net_expansion_emits_linear_attention():

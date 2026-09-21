@@ -989,12 +989,10 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         self.input_names["past.indexer"] = qsa_layers
         self.input_types["past.indexer"] = self.io_dtype
         self.fixed_indexer_cache = not self.use_paged_attention and self.ep == "cuda"
-        indexer_cache_length = self.context_length if self.fixed_indexer_cache else "past_sequence_length"
-        self.input_shapes["past.indexer"] = ["batch_size", indexer_cache_length, self.indexer_head_dim]
+        self.input_shapes["past.indexer"] = ["batch_size", "past_sequence_length", self.indexer_head_dim]
         self.output_names["present.indexer"] = qsa_outputs
         self.output_types["present.indexer"] = self.io_dtype
-        indexer_output_length = self.context_length if self.fixed_indexer_cache else "total_sequence_length"
-        self.output_shapes["present.indexer"] = ["batch_size", indexer_output_length, self.indexer_head_dim]
+        self.output_shapes["present.indexer"] = ["batch_size", "total_sequence_length", self.indexer_head_dim]
         if self.fixed_indexer_cache:
             self.input_names["past_sequence_length"] = "past_sequence_length"
             self.input_types["past_sequence_length"] = ir.DataType.INT32
