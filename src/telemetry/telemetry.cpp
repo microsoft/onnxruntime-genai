@@ -599,7 +599,6 @@ void GenAiTelemetry::LogRuntimeError(uint32_t session_id,
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
   RunLocked([&] {
     auto event = MakeEvent("RuntimeError", EventPriority::High);
-    if (!PrepareSampledEvent(event, app_session_guid_, session_id)) return;
     event.SetProperty("sessionId", static_cast<int64_t>(session_id));
     event.SetProperty("errorType", error_type);
     event.SetProperty("errorMessage", ScrubStringForTelemetry(error_message));
