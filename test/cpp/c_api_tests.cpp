@@ -2558,6 +2558,88 @@ TEST(StreamingASRTests, MoonshineSegmentResetEmitsSecondSegment) {
          "the segment-reset bookkeeping was not fully reset.";
 }
 
+// Test that reaching the hard segment-memory cap keeps the boundary audio.
+//
+// On the normal (non-final) encode path the State holds back the last
+// total_lookahead frames. When memory crosses max_segment_memory_frames the
+// segment must close like Flush/VAD: drain those held-back frames with a final
+// encode, refresh cross-KV, decode and commit, THEN reset. If it instead reset
+// without draining, the last ~total_lookahead frames of audio would be lost.
+//
+// The check is model-agnostic: a hard-cap close over a given audio must commit
+// the SAME tokens as a Flush over the same audio (both drain the lookahead).
+// max_segment_memory_frames is overlaid onto the config so the cap trips on the
+// second chunk; the buggy path would commit fewer tokens than the Flush baseline.
+TEST(StreamingASRTests, MoonshineHardCapKeepsBoundaryAudio) {
+  const std::string model_path = std::string(MODEL_PATH) + "moonshine-streaming-small";
+  if (!std::filesystem::exists(model_path))
+    GTEST_SKIP() << "Moonshine streaming model not found at " << model_path;
+
+  const size_t chunk_samples =
+      static_cast<size_t>(ReadConfigNumber(model_path, "chunk_samples", 8000));
+  const float sample_rate =
+      static_cast<float>(ReadConfigNumber(model_path, "sample_rate", 16000));
+  const double seconds_per_memory_frame =
+      ReadConfigNumber(model_path, "seconds_per_memory_frame", 0.02);
+  const int lookahead =
+      static_cast<int>(ReadConfigNumber(model_path, "total_lookahead", 16));
+
+  // Committed memory grows ~frames_per_chunk per chunk behind a constant
+  // total_lookahead holdback, so committed(1) ~= fpc - lookahead and
+  // committed(2) ~= 2*fpc - lookahead. Put the cap at the midpoint so it trips
+  // on the second chunk (never the first) with ~half a chunk of margin either way.
+  const int frames_per_chunk = static_cast<int>(
+      (static_cast<double>(chunk_samples) / sample_rate) / seconds_per_memory_frame);
+  const int hard_cap = std::max(1, (3 * frames_per_chunk) / 2 - lookahead);
+
+  // Synthetic tone routed through the speech path (Silero VAD would drop it).
+  const std::vector<float> speech =
+      GenerateSineWave(chunk_samples, /*frequency=*/440.0f, sample_rate);
+
+  // Build a fresh generator from a config with max_segment_memory_frames overlaid,
+  // feed two speech chunks, optionally Flush, and return the committed tokens.
+  auto run = [&](int cap_frames, bool flush_after) {
+    auto config = OgaConfig::Create(model_path.c_str());
+    const std::string overlay =
+        "{\"model\":{\"moonshine\":{\"max_segment_memory_frames\":" +
+        std::to_string(cap_frames) + "}}}";
+    config->Overlay(overlay.c_str());
+    auto model = OgaModel::Create(*config);
+    auto processor = OgaStreamingProcessor::Create(*model);
+    auto params = OgaGeneratorParams::Create(*model);
+    auto generator = OgaGenerator::Create(*model, *params);
+    processor->SetOption("use_vad", "false");
+    for (int i = 0; i < 2; ++i) {
+      auto chunk = processor->Process(speech.data(), speech.size());
+      DecodeInputs(*generator, chunk.get());
+    }
+    if (flush_after) {
+      auto tail = processor->Flush();
+      DecodeInputs(*generator, tail.get());
+    }
+    const size_t count = generator->GetSequenceCount(0);
+    const int32_t* data = generator->GetSequenceData(0);
+    return std::vector<int32_t>(data, data + count);
+  };
+
+  // Baseline: cap effectively disabled; Flush() drains the held-back lookahead
+  // and commits every token for the two-chunk audio.
+  const std::vector<int32_t> flush_tokens =
+      run(/*cap_frames=*/frames_per_chunk * 100, /*flush_after=*/true);
+
+  // Hard cap trips on the second chunk (no Flush). With the fix it drains the
+  // same lookahead and commits the same tokens; the pre-fix code drops them.
+  const std::vector<int32_t> cap_tokens =
+      run(/*cap_frames=*/hard_cap, /*flush_after=*/false);
+
+  if (flush_tokens.empty() && cap_tokens.empty())
+    GTEST_SKIP() << "Model emitted 0 tokens for the synthetic tone; cannot check boundary retention.";
+
+  EXPECT_EQ(cap_tokens, flush_tokens)
+      << "Hard-cap segment close dropped boundary audio: committed " << cap_tokens.size()
+      << " tokens vs. " << flush_tokens.size() << " for the same audio drained via Flush.";
+}
+
 // Run every StreamingASR* test above once per streaming ASR model. The
 // instantiation prefix "StreamingASR" combined with the StreamingASRParamTests
 // fixture yields test names like

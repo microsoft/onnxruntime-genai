@@ -2680,6 +2680,12 @@ void ValidateModelPaths(const Config& config) {
   ValidateConfigPath(m.joiner.filename, "model.joiner.filename");
   ValidateConfigPath(m.vad.filename, "model.vad.filename");
 
+  ValidateConfigPath(m.moonshine.frontend_filename, "model.moonshine.frontend_filename");
+  ValidateConfigPath(m.moonshine.encoder_filename, "model.moonshine.encoder_filename");
+  ValidateConfigPath(m.moonshine.adapter_filename, "model.moonshine.adapter_filename");
+  ValidateConfigPath(m.moonshine.cross_kv_filename, "model.moonshine.cross_kv_filename");
+  ValidateConfigPath(m.moonshine.decoder_kv_filename, "model.moonshine.decoder_kv_filename");
+
   ValidateConfigPath(m.decoder.filename, "model.decoder.filename");
   for (const auto& stage : m.decoder.pipeline) {
     ValidateConfigPath(stage.filename, "model.decoder.pipeline.filename");

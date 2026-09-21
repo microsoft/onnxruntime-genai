@@ -43,6 +43,12 @@ ONNXTensorElementDataType ValidateMoonshineFloatType(std::span<const ONNXTensorE
   return type;
 }
 
+void ValidateMoonshineInt64Input(const std::string& name, ONNXTensorElementDataType type) {
+  if (type != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64)
+    throw std::runtime_error(
+        "Moonshine streaming: integer input '" + name + "' must be int64.");
+}
+
 void MoonshineConfig::PopulateFromConfig(const Config& config) {
   const auto& m = config.model;
   const auto& enc = m.encoder;
@@ -196,6 +202,15 @@ MoonshineStreamingModel::MoonshineStreamingModel(std::unique_ptr<Config> config,
       session_info_.GetOutputDataType(mc.decoder_kv.out_v_cross),
   };
   float_type_ = ValidateMoonshineFloatType(float_types);
+
+  ValidateMoonshineInt64Input(mc.frontend.in_sample_len,
+                              session_info_.GetInputDataType(mc.frontend.in_sample_len));
+  ValidateMoonshineInt64Input(mc.frontend.in_frame_count,
+                              session_info_.GetInputDataType(mc.frontend.in_frame_count));
+  ValidateMoonshineInt64Input(mc.adapter.in_pos_offset,
+                              session_info_.GetInputDataType(mc.adapter.in_pos_offset));
+  ValidateMoonshineInt64Input(mc.decoder_kv.in_token,
+                              session_info_.GetInputDataType(mc.decoder_kv.in_token));
 }
 
 std::unique_ptr<State> MoonshineStreamingModel::CreateState(DeviceSpan<int32_t> /*sequence_lengths*/,
@@ -586,10 +601,13 @@ void MoonshineStreamingState::RunPipeline() {
   } else {
     // Speech (or VAD disabled).
     if (!encode_chunk(audio, num, /*is_final=*/false)) return;
-    // Hard-cap: once memory crosses the segment cap, schedule a reset for the
-    // next chunk (which also commits all tokens — see below).
+    // Hard-cap: once memory crosses the segment cap, release the held-back
+    // lookahead with a final encode (same path as Flush/VAD) so the boundary
+    // audio is committed rather than dropped by the reset, then schedule a
+    // reset for the next chunk (which also commits all tokens — see below).
     if (config_.max_segment_memory_frames > 0 &&
         memory_frames_ >= config_.max_segment_memory_frames) {
+      encode_chunk(nullptr, 0, /*is_final=*/true);
       needs_reset_ = true;
     }
   }

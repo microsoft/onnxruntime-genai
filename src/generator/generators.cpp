@@ -964,8 +964,14 @@ SpeculativeStats Generator::GetSpeculativeStats() const {
 }
 
 void Generator::RewindToLength(size_t new_length) {
-  if (model_->config_->model.type == "whisper" || model_->config_->model.type == "phi3v" || model_->config_->model.type == "decoder-pipeline" || model_->config_->model.type == "lfm2")
-    throw std::runtime_error("RewindTo is currently not supported for " + model_->config_->model.type + ".");
+  const auto& model_type = model_->config_->model.type;
+  // RNNT/TDT/streaming-enc-dec-ASR models (e.g. Moonshine) take the
+  // TransducerState path and never create search_, so rewind is unsupported.
+  // Fail clearly here before search_ is dereferenced below.
+  if (ModelType::IsTransducer(model_type) || ModelType::IsStreamingEncDecASR(model_type))
+    throw std::runtime_error("RewindTo is not supported for streaming ASR models (" + model_type + ").");
+  if (model_type == "whisper" || model_type == "phi3v" || model_type == "decoder-pipeline" || model_type == "lfm2")
+    throw std::runtime_error("RewindTo is currently not supported for " + model_type + ".");
   const size_t current_length = search_->GetSequenceLength();
   if (new_length > current_length)
     throw std::runtime_error("Cannot rewind to a length greater than the current sequence length");

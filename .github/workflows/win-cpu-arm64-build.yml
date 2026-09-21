@@ -103,7 +103,7 @@ jobs:
       - name: Build the C Examples
         run: |
           cmake -S examples\c -B examples\c\build `
-            -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER= -DNEMOTRON_SPEECH=ON `
+            -DMODEL_QA=ON -DMODEL_CHAT=ON -DMODEL_MM=ON -DWHISPER= -DMODEL_ASR=ON `
             "-DORT_INCLUDE_DIR=$env:GITHUB_WORKSPACE\$env:binaryDir\_deps\ortlib-src\build\native\include" `
             "-DORT_LIB_DIR=$env:GITHUB_WORKSPACE\$env:binaryDir\_deps\ortlib-src\runtimes\win-arm64\native" `
             "-DOGA_INCLUDE_DIR=$env:GITHUB_WORKSPACE\src" `

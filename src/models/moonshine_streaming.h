@@ -175,6 +175,8 @@ struct MoonshineStreamingModel : Model {
 /// returns that type. Throws std::runtime_error otherwise.
 ONNXTensorElementDataType ValidateMoonshineFloatType(std::span<const ONNXTensorElementDataType> types);
 
+void ValidateMoonshineInt64Input(const std::string& name, ONNXTensorElementDataType type);
+
 /// frontend: audio to new feature frames + updated causal state buffers.
 struct MoonshineFrontendSubState : State {
   MoonshineFrontendSubState(const MoonshineStreamingModel& model, const GeneratorParams& params);
