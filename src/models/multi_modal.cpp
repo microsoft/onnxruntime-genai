@@ -639,12 +639,6 @@ Lfm2AudioSpeechState::SpeechBindings Lfm2AudioSpeechState::ResolveBindings() con
     throw std::runtime_error("Lfm2AudioSpeechState: the mel tensor holds " + std::to_string(bindings.num_clips) +
                              " clips but audio_sizes has " + std::to_string(tokens_per_clip_.size()) + " entries.");
   }
-  const int64_t total = std::accumulate(tokens_per_clip_.begin(), tokens_per_clip_.end(), int64_t{0});
-  if (total != num_audio_tokens_) {
-    throw std::runtime_error("Lfm2AudioSpeechState: audio_sizes sums to " + std::to_string(total) + " tokens but " +
-                             std::to_string(num_audio_tokens_) + " were expected.");
-  }
-
   const auto lengths_info = inputs_[bindings.lengths_index]->GetTensorTypeAndShapeInfo();
   if (static_cast<int64_t>(lengths_info->GetElementCount()) != bindings.num_clips) {
     throw std::runtime_error("Lfm2AudioSpeechState: the mel tensor holds " + std::to_string(bindings.num_clips) +

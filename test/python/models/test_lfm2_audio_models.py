@@ -165,14 +165,16 @@ def _slaney_mel_filterbank() -> np.ndarray:
     return weights.astype(np.float32)
 
 
-def _reference_mel(samples: np.ndarray) -> np.ndarray:
+def _reference_mel(
+    samples: np.ndarray, preemph: float = 0.97, log_eps: float = LOG_EPS, norm_eps: float = NORM_EPS
+) -> np.ndarray:
     """NeMo's AudioToMelSpectrogramPreprocessor in eval mode, as liquid-audio ships it, in numpy.
 
     Pre-emphasis, constant center padding, symmetric Hann window, power spectrum, Slaney mel filter
     bank, log with the 2^-24 guard, then per-feature normalization over the num_samples // hop
     frames get_seq_len counts as valid, with the frames past that zeroed.
     """
-    preemphasized = np.concatenate([samples[:1], samples[1:] - 0.97 * samples[:-1]])
+    preemphasized = np.concatenate([samples[:1], samples[1:] - preemph * samples[:-1]])
     padded = np.pad(preemphasized, FFT_SIZE // 2)
     num_frames = _num_frames(len(samples))
     window = np.zeros(FFT_SIZE, np.float64)
@@ -181,11 +183,11 @@ def _reference_mel(samples: np.ndarray) -> np.ndarray:
     )
     frames = np.stack([padded[t * HOP_LENGTH : t * HOP_LENGTH + FFT_SIZE] * window for t in range(num_frames)])
     power = np.abs(np.fft.rfft(frames, axis=1)) ** 2
-    log_mel = np.log(power @ _slaney_mel_filterbank().T.astype(np.float64) + LOG_EPS)
+    log_mel = np.log(power @ _slaney_mel_filterbank().T.astype(np.float64) + log_eps)
 
     valid = len(samples) // HOP_LENGTH
     mean = log_mel[:valid].mean(axis=0)
-    std = np.sqrt(((log_mel[:valid] - mean) ** 2).sum(axis=0) / (valid - 1)) + NORM_EPS
+    std = np.sqrt(((log_mel[:valid] - mean) ** 2).sum(axis=0) / (valid - 1)) + norm_eps
     normalized = (log_mel - mean) / std
     normalized[valid:] = 0.0
     return normalized.astype(np.float32)
@@ -347,6 +349,26 @@ def test_lfm2_audio_honors_the_mel_config_overrides(test_data_path, tmp_path, fi
     assert mel.shape[2] == expected_mels
     assert abs(mel.shape[1] - expected_frames) <= 1, f"{mel.shape[1]} frames, expected about {expected_frames}"
     np.testing.assert_array_equal(inputs["audio_lengths"].as_numpy(), [mel.shape[1]])
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("preemph", 0.5), ("log_eps", 1e-4), ("norm_eps", 0.5)],
+)
+def test_lfm2_audio_honors_the_mel_value_overrides(test_data_path, tmp_path, field, value):
+    # These three change the numbers rather than the shape, so a default silently ignoring the
+    # override would look perfectly healthy. Check them against the same arithmetic done here.
+    model_path = _copy_model(test_data_path, tmp_path)
+    _edit_json(model_path / "genai_config.json", lambda config: config["model"].update({field: value}))
+    samples = _synthetic_signal(1.0, seed=12)
+    clip = _write_wav(tmp_path / "clip.wav", samples)
+
+    _, inputs = _process(os.fspath(model_path), AUDIO_MARKER, og.Audios.open(clip))
+    mel = inputs["audio_embeds"].as_numpy()[0]
+
+    np.testing.assert_allclose(mel, _reference_mel(samples, **{field: value}), atol=2e-3)
+    # And it is genuinely a different front end from the default one.
+    assert not np.allclose(mel, _reference_mel(samples), atol=2e-3)
 
 
 def test_lfm2_audio_subsampling_factor_override_changes_the_placeholder_count(test_data_path, tmp_path):
@@ -674,6 +696,64 @@ def test_lfm2_audio_fixture_config_is_what_the_builder_writes(test_data_path):
     config = json.loads((Path(_model_path(test_data_path)) / "genai_config.json").read_text())
     assert config["model"]["type"] == "lfm2_audio"
     assert config["model"]["audio_token_id"] == AUDIO_TOKEN_ID
+
+
+def _two_clip_inputs(model_path, tmp_path):
+    clips = [_write_wav(tmp_path / f"{i}.wav", _synthetic_signal(1.5 - 0.5 * i, seed=50 + i)) for i in range(2)]
+    model = og.Model(os.fspath(model_path))
+    inputs = model.create_multimodal_processor()(f"{AUDIO_MARKER} and {AUDIO_MARKER}", audios=og.Audios.open(*clips))
+    return model, inputs
+
+
+def _set_inputs(model, inputs):
+    params = og.GeneratorParams(model)
+    params.set_search_options(do_sample=False, max_length=4096)
+    og.Generator(model, params).set_inputs(inputs)
+
+
+@pytest.mark.parametrize(
+    "corrupt,expected",
+    [
+        (lambda i, lengths: i.__setitem__("audio_embeds", np.zeros((2, 5), np.float32)), "expected a 3D"),
+        (
+            lambda i, lengths: i.__setitem__("audio_embeds", np.zeros((3, 20, NUM_MELS), np.float32)),
+            "holds 3 clips but audio_sizes has 2 entries",
+        ),
+        (lambda i, lengths: i.__setitem__("audio_lengths", np.array([8], np.int64)), "mel_lengths has 1 entries"),
+        # Past the end of the staged tensor: the clip's frames would be copied out of bounds.
+        (
+            lambda i, lengths: i.__setitem__("audio_lengths", np.array([lengths[0], 10**6], np.int64)),
+            r"clip 1 reports 1000000 mel frames, outside the 1\.\.",
+        ),
+        (
+            lambda i, lengths: i.__setitem__("audio_lengths", np.array([lengths[0], 0], np.int64)),
+            r"clip 1 reports 0 mel frames, outside the 1\.\.",
+        ),
+    ],
+    ids=["mel-rank", "clip-count", "lengths-count", "frames-past-the-end", "frames-zero"],
+)
+def test_lfm2_audio_rejects_inconsistent_speech_inputs(test_data_path, tmp_path, corrupt, expected):
+    # The tensors the processor hands back can be replaced before they reach the generator, so the
+    # speech state checks that they still agree with one another. Without these the mismatch would
+    # surface as a confusing shape error from inside the encoder, or as an out-of-bounds read.
+    model, inputs = _two_clip_inputs(_model_path(test_data_path), tmp_path)
+    corrupt(inputs, inputs["audio_lengths"].as_numpy().copy())
+
+    with pytest.raises(RuntimeError, match=expected):
+        _set_inputs(model, inputs)
+
+
+def test_lfm2_audio_several_clips_reject_beam_search(test_data_path, tmp_path):
+    # The clips of one prompt are concatenated into a single feature buffer, which only holds for a
+    # batch of one; a wider buffer would need the whole encoder run repeated per beam.
+    clips = [_write_wav(tmp_path / f"{i}.wav", _synthetic_signal(1.5 - 0.5 * i, seed=60 + i)) for i in range(2)]
+    model = og.Model(_model_path(test_data_path))
+    inputs = model.create_multimodal_processor()(f"{AUDIO_MARKER} and {AUDIO_MARKER}", audios=og.Audios.open(*clips))
+    params = og.GeneratorParams(model)
+    params.set_search_options(do_sample=False, max_length=4096, num_beams=2)
+
+    with pytest.raises(RuntimeError, match="need a batch size of 1"):
+        og.Generator(model, params).set_inputs(inputs)
 
 
 def test_lfm2_audio_rejects_rewind(test_data_path, tmp_path):
