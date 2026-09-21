@@ -115,7 +115,7 @@ void Lfm2AudioOutput::WritePendingFrame(OrtValue& inputs_embeds) {
                              std::to_string(info->GetElementCount()) + ".");
   }
 
-  auto bytes = ByteWrapTensor(*model_.p_device_, inputs_embeds);
+  auto bytes = ByteWrapTensor(DeviceForTensor(inputs_embeds, *model_.p_device_inputs_), inputs_embeds);
   auto cpu = bytes.CpuSpan();
   if (info->GetElementType() == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
     std::memcpy(cpu.data(), pending_embedding_.data(), pending_embedding_.size() * sizeof(float));
@@ -140,7 +140,7 @@ DeviceSpan<float> Lfm2AudioOutput::SampleFrame(OrtValue& hidden_states) {
   // The last position of [batch, sequence, hidden_size].
   const size_t count = static_cast<size_t>(hidden_size_);
   const size_t first = info->GetElementCount() - count;
-  auto bytes = ByteWrapTensor(*model_.p_device_, hidden_states).CopyDeviceToCpu();
+  auto bytes = ByteWrapTensor(DeviceForTensor(hidden_states, *model_.p_device_inputs_), hidden_states).CopyDeviceToCpu();
   std::vector<float> hidden(count);
   if (info->GetElementType() == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
     std::memcpy(hidden.data(), bytes.data() + first * sizeof(float), count * sizeof(float));
