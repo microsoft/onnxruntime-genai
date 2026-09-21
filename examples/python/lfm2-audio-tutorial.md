@@ -373,6 +373,21 @@ for table in model.graph.initializer:
 onnx.save(model, "vocoder_depthformer.onnx")
 ```
 
+The same defect is in all four published depthformers (`fp16`, `q4` and `q8` too), and the same fix
+applies to each. Which variants are worth taking, measured against the PyTorch model:
+
+| Graph | fp32 | fp16 | q8 | q4 |
+| --- | --- | --- | --- | --- |
+| `vocoder_depthformer` (fixed), largest logit difference | 9e-6 | 7e-3 | not measured | 2.0, and 37 of 48 codes agree |
+| `audio_detokenizer`, waveform SNR on real speech | 112 dB | 51 dB | 18 dB | 3 dB |
+| `audio_embedding`, against the checkpoint | exact | 6e-8 | exact | exact |
+
+Take `fp32` or `fp16`. The `q4` depthformer loses more to quantization than the rotary fix gains, and
+the `q4` detokenizer's waveform is barely correlated with the model's, though the speech is still
+understood: all four detokenizers read back word for word through ASR. The `q4` and `q8` audio
+embeddings are the `fp32` table under another name, so they save nothing. LiquidAI's own `decoder*.onnx`
+graphs, which this pipeline does not use, do apply their rotary embedding.
+
 **Add `audio_output` to `genai_config.json`, and take the two switch tokens out of `eos_token_id`.**
 They end a text-only answer; here they are where speech begins, and the model is refused if they are
 still stop tokens:
@@ -468,8 +483,8 @@ sf.write("answer.wav", (wave[pad:-pad] / envelope[pad:-pad]).astype(np.float32),
 **How it compares with the reference.** With the audio codes taken greedily on both sides
 (`audio_top_k=1`), so that the two can be compared at all, this runtime reproduces liquid-audio
 exactly: every text token and every audio frame of an interleaved answer to the reference's
-`question.wav` (200 items, 149 of them frames), of an interleaved answer to a typed question, and of a
-TTS sentence. With the model card's sampling the speech reads back through this runtime's own ASR as
+`question.wav` (200 items, 149 of them frames), of two interleaved answers to typed questions, and of a
+TTS sentence, on Linux x64 and on macOS arm64 alike. With the model card's sampling the speech reads back through this runtime's own ASR as
 the text the model wrote: *Red, blue, and yellow are the three primary colors. Would you like to hear
 how they’re used in art?* comes back word for word, and *The quick brown fox jumps over the lazy dog.*
 comes back exactly in TTS.
