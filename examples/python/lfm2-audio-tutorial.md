@@ -10,7 +10,7 @@ runs the speech-to-text half of it — ASR and spoken-prompt chat — as three O
 | --- | --- | --- |
 | speech encoder (`audio_encoder.onnx`) | `mel_spectrogram`, `mel_lengths` | `audio_embeddings`, `audio_lengths` |
 | `embeddings.onnx` | `input_ids`, `audio_features` | `inputs_embeds` |
-| `model.onnx` (decoder) | `inputs_embeds`, `attention_mask`, `position_ids`, KV + conv cache | `logits` |
+| `model.onnx` (decoder) | `inputs_embeds`, `attention_mask`, KV + conv cache | `logits` |
 
 Only the decoder is produced by the model builder in this repository; the speech encoder is
 published as ONNX by LiquidAI, and the embedding model is a small graph you build once.
@@ -174,7 +174,7 @@ produced. Leave the `decoder` and `search` sections it wrote alone:
                 "provider_options": []
             }
         },
-        "eos_token_id": 7,
+        "eos_token_id": [7, 128, 130],
         "pad_token_id": 0,
         "speech": {
             "filename": "audio_encoder.onnx",
@@ -197,6 +197,11 @@ produced. Leave the `decoder` and `search` sections it wrote alone:
     "search": { "...": "written by the model builder" }
 }
 ```
+
+Keep the `eos_token_id` list the builder wrote. Besides `<|im_end|>` (7) it holds `<|audio_start|>`
+(128) and `<|text_end|>` (130), where the model turns from text to speech; without them generation
+runs on into positions meant for the audio head and returns fluent nonsense. See
+[the three modes](#the-models-three-modes).
 
 `filename` is whatever the encoder file is called on disk — keep the name it was published under,
 for the reason in [Choose the precisions](#4-choose-the-precisions).
@@ -304,7 +309,8 @@ generation ends there with whatever text came first.
 
 **TTS** produces nothing here, and there is no text to be had: asked to speak a sentence, the whole
 text stream the model emits is `<|audio_start|>` followed by `<|im_end|>`, everything in between
-being audio. Generation stops on that first token. A sequential answer that begins in text and turns
+being audio. Generation stops on that first token, and the stop token is not added to the sequence,
+so there is nothing after the prompt to decode: expect an empty string. A sequential answer that begins in text and turns
 to speech part way keeps the text it had before the switch.
 
 **Interleaved** gives the text answer and none of the speech. Asked a spoken question, the model
@@ -336,16 +342,23 @@ produced about three seconds of 24 kHz audio per voice, and this runtime's own A
 that sentence exactly, punctuation included. The two voices are different waveforms, and the male one
 carries more of its energy below 1 kHz than the female one, as it should. Asked the spoken question
 above in interleaved mode, it answered in 41 audio frames ending in the end-of-audio code, 3.2
-seconds that read back as *The capital of France is Paris.* None of it has a path here. ONNX Runtime
-GenAI's generation loop samples one token stream, so none of that has a home here yet. Generation
+seconds that read back as *The capital of France is Paris.* ONNX Runtime GenAI's generation loop
+samples one token stream, so none of that has a home here yet. Generation
 stops at `<|audio_start|>` rather than reading the depthformer's positions off the text head; see
 [the three modes](#the-models-three-modes) for what each prompt gives you. LiquidAI ships
 `vocoder_depthformer.onnx` and `audio_detokenizer.onnx` in the ONNX repository, and their
 [onnx-export](https://github.com/Liquid4All/onnx-export) repository drives them from Python.
 
-**One prompt at a time.** Several clips in one prompt work, but batched prompts are refused. The
+**One prompt at a time, decoded greedily.** Several clips in one prompt work, but batched prompts
+and beam search (`num_beams` above 1) are refused; the reference decodes its text greedily too. The
 clips do not share an encoder run: the published encoder export is traced for a single clip, so each
 one is encoded on its own frames and the results are concatenated in prompt order.
+
+**In ASR mode, two clips in one turn give one transcript.** Asked to transcribe a turn holding two
+clips, the model writes out the last one and leaves the first, whichever order they come in. That is
+the model and not this runtime: the reference implementation, given the same two clips through
+`ChatState.add_audio`, produces the same tokens exactly, in both orders. Transcribe one clip per
+request.
 
 **More than two channels has to be downmixed first.** Mono and stereo are handled: a stereo clip is
 mixed down and reaches the front end at its true length. Wider audio is not — the decoder

@@ -162,7 +162,7 @@ def create_genai_config(output_path: str):
                 "layer_types": LAYER_TYPES,
                 "conv_cache_size": CONV_CACHE_SIZE,
             },
-            "eos_token_id": 7,
+            "eos_token_id": [7, 128, 130],  # <|im_end|>, <|audio_start|>, <|text_end|>: what the builder writes
             "pad_token_id": 0,
             "type": "lfm2_audio",
             "vocab_size": VOCAB_SIZE,

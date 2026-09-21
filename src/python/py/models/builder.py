@@ -102,10 +102,13 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
     hf_token = extra_options.get("hf_token", True)
     hf_remote = extra_options.get("hf_remote", False)
 
-    # LFM2-Audio checkpoints have no model_type, so AutoConfig cannot read them: use their nested LFM2 decoder config.
-    config = LFM2AudioModel.load_config(hf_name, token=hf_token, **extra_kwargs)
-    if config is None:
+    try:
         config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
+    except ValueError:
+        # LFM2-Audio checkpoints have no model_type; their LFM2 decoder config is nested.
+        config = LFM2AudioModel.load_config(hf_name, token=hf_token, **extra_kwargs)
+        if config is None:
+            raise
     tokenizer = AutoTokenizer.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
     add_special_token_ids(config, tokenizer)
     if extra_options.get("adapter_path", False):

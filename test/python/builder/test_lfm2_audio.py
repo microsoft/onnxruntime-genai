@@ -111,10 +111,65 @@ def test_lfm2_audio_load_config_reads_the_nested_decoder_config(tmp_path):
     assert config.tie_word_embeddings
 
 
-def test_lfm2_audio_load_config_leaves_other_checkpoints_to_autoconfig(tmp_path):
+def test_lfm2_audio_load_config_is_none_for_other_checkpoints(tmp_path):
     (tmp_path / "config.json").write_text(json.dumps(DECODER_CONFIG))
     assert LFM2AudioModel.load_config(str(tmp_path)) is None
-    assert LFM2AudioModel.load_config(str(tmp_path / "missing")) is None
+
+
+def _hf_details_with(monkeypatch, auto_config):
+    """`get_hf_details` with AutoConfig and the tokenizer replaced, and the calls it made."""
+    calls = []
+
+    def from_pretrained(name, **kwargs):
+        calls.append("AutoConfig")
+        return auto_config(name)
+
+    def load_config(name, **kwargs):
+        calls.append("load_config")
+        return LFM2AudioModel.load_config(name)
+
+    monkeypatch.setattr(builder_module, "AutoConfig", types.SimpleNamespace(from_pretrained=from_pretrained))
+    monkeypatch.setattr(
+        builder_module, "AutoTokenizer", types.SimpleNamespace(from_pretrained=lambda *args, **kwargs: None)
+    )
+    monkeypatch.setattr(builder_module, "add_special_token_ids", lambda config, tokenizer: None)
+    monkeypatch.setattr(builder_module, "LFM2AudioModel", types.SimpleNamespace(load_config=load_config))
+    return calls
+
+
+def test_lfm2_audio_config_is_read_only_once_autoconfig_refuses_the_checkpoint(monkeypatch, tmp_path):
+    _write_checkpoint(tmp_path)
+
+    def refuse(name):
+        raise ValueError(f"Unrecognized model in {name}. Should have a `model_type` key in its config.json.")
+
+    calls = _hf_details_with(monkeypatch, refuse)
+    details = builder_module.get_hf_details("", str(tmp_path), str(tmp_path / "cache"), {})
+
+    assert calls == ["AutoConfig", "load_config"]
+    assert details["hf_config"].architectures == ["Lfm2AudioForConditionalGeneration"]
+
+
+def test_lfm2_audio_config_lookup_is_skipped_for_every_other_model(monkeypatch, tmp_path):
+    # Every build goes through get_hf_details; other models must not pay for a second config read.
+    recognized = types.SimpleNamespace(architectures=["LlamaForCausalLM"])
+    calls = _hf_details_with(monkeypatch, lambda name: recognized)
+
+    details = builder_module.get_hf_details("", str(tmp_path), str(tmp_path / "cache"), {})
+
+    assert calls == ["AutoConfig"]
+    assert details["hf_config"] is recognized
+
+
+def test_lfm2_audio_config_lookup_keeps_autoconfig_error_for_an_unknown_checkpoint(monkeypatch, tmp_path):
+    (tmp_path / "config.json").write_text(json.dumps({"architectures": ["SomethingElse"]}))
+
+    def refuse(name):
+        raise ValueError("Unrecognized model")
+
+    _hf_details_with(monkeypatch, refuse)
+    with pytest.raises(ValueError, match="Unrecognized model"):
+        builder_module.get_hf_details("", str(tmp_path), str(tmp_path / "cache"), {})
 
 
 def _audio_builder(tmp_path, extra_options=None, model_name_or_path=None):

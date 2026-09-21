@@ -604,6 +604,13 @@ DeviceSpan<float> SpeechState::Run(int current_length, DeviceSpan<int32_t>& next
 }
 
 void Lfm2AudioSpeechState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, const int64_t num_audio_tokens) {
+  // The feature buffer is one sequence wide, so beams would fail as a shape mismatch inside the
+  // encoder. The reference decodes greedily.
+  if (params_->search.num_beams > 1) {
+    throw std::runtime_error("Lfm2AudioSpeechState: beam search is not supported for lfm2_audio; got num_beams " +
+                             std::to_string(params_->search.num_beams) + ". Set num_beams to 1.");
+  }
+
   SpeechState::SetExtraInputs(extra_inputs, num_audio_tokens);
 
   // audio_sizes holds the decoder tokens each clip contributes; its sum is num_audio_tokens.
@@ -647,13 +654,7 @@ Lfm2AudioSpeechState::SpeechBindings Lfm2AudioSpeechState::ResolveBindings() con
   }
 
   const auto features_info = outputs_[bindings.features_index]->GetTensorTypeAndShapeInfo();
-  const auto features_shape = features_info->GetShape();  // [batch, num_audio_tokens, hidden_size]
-  // Several clips are concatenated into one prompt, which the pipeline only ever builds for a single
-  // sequence; a wider feature buffer would need the whole run repeated per beam.
-  if (features_shape.size() == 3 && features_shape[0] != 1) {
-    throw std::runtime_error("Lfm2AudioSpeechState: several audio clips need a batch size of 1, got " +
-                             std::to_string(features_shape[0]) + ".");
-  }
+  const auto features_shape = features_info->GetShape();  // [1, num_audio_tokens, hidden_size]
   bindings.features_type = features_info->GetElementType();
   bindings.hidden_size = features_shape.back();
   return bindings;

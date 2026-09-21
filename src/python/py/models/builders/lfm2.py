@@ -210,16 +210,14 @@ class LFM2AudioModel(LFM2Model):
 
         These checkpoints have no model type and no transformers model class, and their config.json
         nests the decoder config under "lfm" next to the audio encoder, depthformer and mel front-end
-        settings, so AutoConfig cannot read them. The builder calls this before it knows which model
-        class to use, which is why it cannot be an instance method.
+        settings, so AutoConfig cannot read them. The builder calls this once AutoConfig has refused
+        the checkpoint and before it knows which model class to use, which is why it cannot be an
+        instance method.
         """
         from transformers import Lfm2Config, PretrainedConfig
 
         architecture = "Lfm2AudioForConditionalGeneration"
-        try:
-            config_dict, _ = PretrainedConfig.get_config_dict(model_name_or_path, **kwargs)
-        except Exception:  # noqa: BLE001 - not an LFM2-Audio checkpoint, or unreadable: AutoConfig reports the real error
-            return None
+        config_dict, _ = PretrainedConfig.get_config_dict(model_name_or_path, **kwargs)
         if config_dict.get("architectures") != [architecture]:
             return None
 

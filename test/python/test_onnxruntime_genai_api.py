@@ -67,6 +67,15 @@ def test_tokenizer_create_from_config_and_path(test_data_path):
     assert tokenizer_from_path.decode(tokenizer_from_config.encode(text)) == text
 
 
+def test_tokenizer_decodes_no_tokens_to_an_empty_string(test_data_path):
+    # What is left after the prompt when generation stops on its first token; it used to SIGFPE.
+    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    tokenizer = og.Tokenizer(model_path)
+
+    assert tokenizer.decode(np.array([], dtype=np.int32)) == ""
+    assert tokenizer.decode(np.arange(4, dtype=np.int32)[4:]) == ""
+
+
 def test_telemetry_control():
     og.disable_telemetry_events()
     og.enable_telemetry_events()

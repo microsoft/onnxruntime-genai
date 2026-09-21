@@ -61,10 +61,13 @@ PREPROCESSOR_CONFIG = {
 
 
 # The tokenizer is checked in zipped: its 4.8 MB of vocabulary compresses to under 1 MB, and no test
-# reads it as text. Refresh it with, from the model directory,
-#   python -c "import zipfile; \
-#              [zipfile.ZipFile('tokenizer.zip', 'w').writestr(n, open(n, 'rb').read()) for n in NAMES]"
-# or take a fresh copy from LiquidAI/LFM2.5-Audio-1.5B.
+# reads it as text. The files come from LiquidAI/LFM2.5-Audio-1.5B. To rebuild the same bytes:
+#   import zipfile
+#   with zipfile.ZipFile("tokenizer.zip", "w", zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+#       for name in ("tokenizer.json", "tokenizer_config.json"):
+#           info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+#           info.compress_type, info.external_attr = zipfile.ZIP_DEFLATED, 0o644 << 16
+#           archive.writestr(info, open(name, "rb").read(), compresslevel=9)
 TOKENIZER_ARCHIVE = "tokenizer.zip"
 TOKENIZER_FILES = ("tokenizer.json", "tokenizer_config.json")
 
@@ -658,6 +661,8 @@ def test_lfm2_audio_features_follow_the_clip_order(test_data_path, tmp_path):
 
 
 def _generate_with_eos(model_path, clip, eos, num_tokens):
+    """Greedy generation from a copied model directory, stopping on the token ids in `eos`."""
+    _edit_json(model_path / "genai_config.json", lambda config: config["model"].update({"eos_token_id": eos}))
     model = og.Model(os.fspath(model_path))
     processor = model.create_multimodal_processor()
     inputs = processor(AUDIO_MARKER, audios=og.Audios.open(clip))
@@ -686,7 +691,6 @@ def test_lfm2_audio_generation_stops_when_the_model_starts_speaking(test_data_pa
 
     stop_token = unrestricted[5]
     first = unrestricted.index(stop_token)
-    _edit_json(model_path / "genai_config.json", lambda config: config["model"].update({"eos_token_id": [stop_token]}))
 
     stopped = _generate_with_eos(model_path, clip, [stop_token], num_tokens=40)
 
@@ -701,10 +705,6 @@ def test_lfm2_audio_modality_stops_leave_normal_stopping_alone(test_data_path, t
     switches = [AUDIO_START_TOKEN_ID, TEXT_END_TOKEN_ID]
 
     without = _generate_with_eos(model_path, clip, [7], num_tokens=25)
-    _edit_json(
-        model_path / "genai_config.json",
-        lambda config: config["model"].update({"eos_token_id": [7, *switches]}),
-    )
     with_switch_stops = _generate_with_eos(model_path, clip, [7, *switches], num_tokens=25)
 
     assert not set(switches) & set(without), "the fixture is not expected to emit the switch tokens"
@@ -717,6 +717,7 @@ def test_lfm2_audio_fixture_config_is_what_the_builder_writes(test_data_path):
     config = json.loads((Path(_model_path(test_data_path)) / "genai_config.json").read_text())
     assert config["model"]["type"] == "lfm2_audio"
     assert config["model"]["audio_token_id"] == AUDIO_TOKEN_ID
+    assert config["model"]["eos_token_id"] == [7, AUDIO_START_TOKEN_ID, TEXT_END_TOKEN_ID]
 
 
 def _two_clip_inputs(model_path, tmp_path):
@@ -764,16 +765,17 @@ def test_lfm2_audio_rejects_inconsistent_speech_inputs(test_data_path, tmp_path,
         _set_inputs(model, inputs)
 
 
-def test_lfm2_audio_several_clips_reject_beam_search(test_data_path, tmp_path):
-    # The clips of one prompt are concatenated into a single feature buffer, which only holds for a
-    # batch of one; a wider buffer would need the whole encoder run repeated per beam.
-    clips = [_write_wav(tmp_path / f"{i}.wav", _synthetic_signal(1.5 - 0.5 * i, seed=60 + i)) for i in range(2)]
+@pytest.mark.parametrize("num_clips", [0, 1, 2], ids=["text", "one-clip", "two-clips"])
+def test_lfm2_audio_rejects_beam_search(test_data_path, tmp_path, num_clips):
+    # Without the check a single clip fails with a shape mismatch from inside the encoder.
+    clips = [_write_wav(tmp_path / f"{i}.wav", _synthetic_signal(1.5 - 0.5 * i, seed=60 + i)) for i in range(num_clips)]
     model = og.Model(_model_path(test_data_path))
-    inputs = model.create_multimodal_processor()(f"{AUDIO_MARKER} and {AUDIO_MARKER}", audios=og.Audios.open(*clips))
+    prompt = "Hi " + " and ".join([AUDIO_MARKER] * num_clips)
+    inputs = model.create_multimodal_processor()(prompt, audios=og.Audios.open(*clips) if clips else None)
     params = og.GeneratorParams(model)
     params.set_search_options(do_sample=False, max_length=4096, num_beams=2)
 
-    with pytest.raises(RuntimeError, match="need a batch size of 1"):
+    with pytest.raises(RuntimeError, match="beam search is not supported for lfm2_audio; got num_beams 2"):
         og.Generator(model, params).set_inputs(inputs)
 
 

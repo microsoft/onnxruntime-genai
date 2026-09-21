@@ -159,8 +159,6 @@ def _load_builder_cli_module(monkeypatch):
         "WhisperModel",
     ):
         setattr(builders_module, class_name, type(class_name, (), {}))
-    # builder.py calls this before the dispatch, to spot an LFM2-Audio checkpoint.
-    builders_module.LFM2AudioModel.load_config = lambda *args, **kwargs: None
     # Submodule imports (e.g. `from quantization import ...`) must resolve to the
     # real, dependency-free modules rather than the class stubs above.
     builders_module.__path__ = [str(BUILDERS_DIR)]

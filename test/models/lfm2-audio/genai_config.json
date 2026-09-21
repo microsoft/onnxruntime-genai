@@ -35,7 +35,11 @@
             ],
             "conv_cache_size": 2
         },
-        "eos_token_id": 7,
+        "eos_token_id": [
+            7,
+            128,
+            130
+        ],
         "pad_token_id": 0,
         "type": "lfm2_audio",
         "vocab_size": 65536,
