@@ -483,6 +483,29 @@ class TestVersionResolution(unittest.TestCase):
         )
 
 
+class TestProcessExitCleanup(unittest.TestCase):
+    def test_exit_cleanup_does_not_initialize_telemetry(self):
+        from telemetry.telemetry import GenAITelemetry, _shutdown_existing_telemetry_at_exit
+
+        with patch.object(GenAITelemetry, "_instance", None):
+            _shutdown_existing_telemetry_at_exit()
+
+        self.assertIsNone(GenAITelemetry._instance)
+
+    def test_exit_cleanup_disables_before_bounded_shutdown(self):
+        from telemetry.telemetry import GenAITelemetry, _shutdown_existing_telemetry_at_exit
+
+        instance = MagicMock()
+        calls = MagicMock()
+        calls.attach_mock(instance.disable_telemetry, "disable")
+        calls.attach_mock(instance.shutdown, "shutdown")
+
+        with patch.object(GenAITelemetry, "_instance", instance):
+            _shutdown_existing_telemetry_at_exit()
+
+        self.assertEqual(calls.mock_calls, [call.disable(), call.shutdown(1.0)])
+
+
 class TestTelemetryPackaging(unittest.TestCase):
     @staticmethod
     def _configured_setup(telemetry_enabled: bool):

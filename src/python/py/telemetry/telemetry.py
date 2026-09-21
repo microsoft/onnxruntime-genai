@@ -15,6 +15,7 @@ Provides high-level telemetry for:
 
 from __future__ import annotations
 
+import atexit
 import base64
 import os
 import threading
@@ -674,6 +675,20 @@ class GenAITelemetry:
             self._store = None
         if self._heartbeat_thread is None and self._uploader is None and self._store is None:
             self._initialized = False
+
+
+def _shutdown_existing_telemetry_at_exit() -> None:
+    instance = GenAITelemetry._instance
+    if instance is None:
+        return
+    try:
+        instance.disable_telemetry()
+        instance.shutdown(1.0)
+    except Exception:
+        return
+
+
+atexit.register(_shutdown_existing_telemetry_at_exit)
 
 
 # Module-level convenience functions
