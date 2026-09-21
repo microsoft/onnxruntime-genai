@@ -201,7 +201,7 @@ produced. Leave the `decoder` and `search` sections it wrote alone:
 Keep the `eos_token_id` list the builder wrote. Besides `<|im_end|>` (7) it holds `<|audio_start|>`
 (128) and `<|text_end|>` (130), where the model turns from text to speech; without them generation
 runs on into positions meant for the audio head and returns fluent nonsense. See
-[the three modes](#the-models-three-modes).
+[the modes](#the-models-modes).
 
 `filename` is whatever the encoder file is called on disk — keep the name it was published under,
 for the reason in [Choose the precisions](#4-choose-the-precisions).
@@ -288,18 +288,21 @@ Perform ASR.<|im_end|>
 <|im_start|>assistant
 ```
 
-### The model's three modes
+### The model's modes
 
 The system prompt picks the task, and the reference implementation pairs each with a generation
-routine of its own. Only the first produces text alone, so only the first runs here in full:
+routine of its own. Text comes out of two of them here:
 
 | Mode | System prompt | Reference routine | Output | Here |
 | --- | --- | --- | --- | --- |
+| Chat | none | `generate_sequential` | text | works |
 | ASR | `Perform ASR.` | `generate_sequential` | text | works |
 | TTS | `Perform TTS. Use the UK male voice.` (also US male, US female, UK female) | `generate_sequential` | speech | stops immediately |
-| Interleaved | `Respond with interleaved text and audio.` | `generate_interleaved` | text and speech, alternating | the text answer; none of the speech |
+| Interleaved | `Respond with interleaved text and audio.` | `generate_interleaved` | text and speech, alternating | six tokens, then nonsense: do not use |
 
-**ASR** is the supported path, and matches the reference token for token.
+**ASR** and **chat** are the supported paths. A spoken or typed question with no system prompt gets a
+text answer, and both match the reference step for step: on the reference's own `question.wav` and
+three typed questions the text logits agree to within 6e-4 and every token is the same.
 
 `LFM2.5-Audio-1.5B-JP` takes its own prompts, `Perform ASR in japanese.` and
 `Perform TTS in japanese.`; the rest of this section applies to it unchanged.
@@ -313,22 +316,19 @@ generation ends there with whatever text came first.
 **TTS** produces nothing here, and there is no text to be had: asked to speak a sentence, the whole
 text stream the model emits is `<|audio_start|>` followed by `<|im_end|>`, everything in between
 being audio. Generation stops on that first token, and the stop token is not added to the sequence,
-so there is nothing after the prompt to decode: expect an empty string. A sequential answer that begins in text and turns
-to speech part way keeps the text it had before the switch.
+so there is nothing after the prompt to decode: expect an empty string. The first-step logits match
+the reference to 4e-5 in all four voices.
 
-**Interleaved** gives the text answer and none of the speech. Asked a spoken question, the model
-writes its answer, emits `<|text_end|>`, and says the rest aloud; generation stops at that token, so
-what comes back is the answer itself. Asked *What is the capital of France?*, this runtime returns
-`The capital of France is Paris` — the same text the reference produced before it began speaking,
-which it then spoke.
-
-Between those text tokens the reference is also emitting audio, six text tokens at a time against
-`interleaved_n_audio` audio frames (12, or 9 for the JP checkpoint), and that speech feeds back into
-the context. So the text can depend on audio this runtime never generates: on a ten second clip with
-no question in it, the reference wrote 29 text tokens with the sampling the model card gives and 54
-with the audio taken greedily, and this runtime matched the first 29 and stopped. Short answers to
-spoken questions come through whole; a long turn is the model's answer as far as it gets, not a
-reproduction of any one interleaved run.
+**Interleaved** is not usable here. The reference writes `interleaved_n_text` text tokens (six),
+then `interleaved_n_audio` audio frames (12, or 9 for the JP checkpoint) whose embeddings go back
+into the context, then six more text tokens, and so on. This runtime has no audio frames to feed, so
+after the sixth token it keeps reading the text head at positions the model means for speech. The
+first six tokens match the reference exactly; from the seventh the output is mostly the
+non-breaking-space token, with the odd word between. Asked *Name three primary colors.*, the reference
+writes *Red, blue, and yellow are the three primary colors…* and this runtime writes
+*Red, blue, and yellow* followed by a hundred `\xa0`. Only an answer that fits in six tokens plus
+`<|text_end|>` survives (*The capital of France is Paris*). For a text answer, leave the system prompt
+out and use chat mode, which is the same model answering the same question in text.
 
 Sampling: the reference generates text greedily in every mode, so `do_sample=False` is right here.
 The temperatures and `top_k` values quoted for the model (`audio_temperature=0.8, audio_top_k=64`
@@ -346,9 +346,9 @@ that sentence exactly, punctuation included. The two voices are different wavefo
 carries more of its energy below 1 kHz than the female one, as it should. Asked the spoken question
 above in interleaved mode, it answered in 41 audio frames ending in the end-of-audio code, 3.2
 seconds that read back as *The capital of France is Paris.* ONNX Runtime GenAI's generation loop
-samples one token stream, so none of that has a home here yet. Generation
-stops at `<|audio_start|>` rather than reading the depthformer's positions off the text head; see
-[the three modes](#the-models-three-modes) for what each prompt gives you. LiquidAI ships
+samples one token stream, so none of that has a home here yet. Generation stops at `<|audio_start|>`
+and `<|text_end|>` rather than reading the depthformer's positions off the text head, and interleaved
+mode is out; see [the modes](#the-models-modes) for what each prompt gives you. LiquidAI ships
 `vocoder_depthformer.onnx` and `audio_detokenizer.onnx` in the ONNX repository, and their
 [onnx-export](https://github.com/Liquid4All/onnx-export) repository drives them from Python.
 
