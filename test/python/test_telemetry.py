@@ -24,7 +24,7 @@ import tempfile
 import unittest
 from importlib.metadata import PackageNotFoundError
 from pathlib import Path
-from unittest.mock import MagicMock, call, mock_open, patch
+from unittest.mock import MagicMock, call, patch
 
 _TELEMETRY_SOURCE_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "src", "python", "py"))
 _TELEMETRY_SOURCE_PATH_ADDED = _TELEMETRY_SOURCE_PATH not in sys.path
@@ -487,25 +487,21 @@ class TestTelemetryPackaging(unittest.TestCase):
     @staticmethod
     def _configured_setup(telemetry_enabled: bool):
         setup_template = Path(__file__).parents[2] / "src" / "python" / "setup.py.in"
-        real_open = open
-
-        def open_package_description(file, *args, **kwargs):
-            if os.fspath(file) == "./package_description.md":
-                return mock_open(read_data="description")()
-            return real_open(file, *args, **kwargs)
-
         source = (
             setup_template.read_text(encoding="utf-8")
             .replace("@TARGET_NAME@", "onnxruntime-genai")
             .replace("@VERSION_INFO@", "0.0.0")
             .replace("@PYTHON_TELEMETRY_ENABLED@", str(telemetry_enabled))
         )
-        with (
-            patch("os.path.exists", return_value=True),
-            patch("builtins.open", side_effect=open_package_description),
-            patch("setuptools.setup") as setup,
-        ):
-            exec(compile(source, str(setup_template), "exec"), {"__name__": "__main__"})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            Path(temp_dir, "package_description.md").write_text("description", encoding="utf-8")
+            previous_dir = os.getcwd()
+            try:
+                os.chdir(temp_dir)
+                with patch("setuptools.setup") as setup:
+                    exec(compile(source, str(setup_template), "exec"), {"__name__": "__main__"})
+            finally:
+                os.chdir(previous_dir)
         return setup.call_args.kwargs
 
     def test_telemetry_enabled_wheel_includes_python_telemetry(self):
