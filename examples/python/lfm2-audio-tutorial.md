@@ -534,5 +534,21 @@ implementation. The difference is far below the audio's own quantization noise.
 log-mel frames by up to about 2, enough to flip a token: on the reference's 24 kHz `asr_jp.wav` it
 turned one homophone, and resampled this way the transcript matches token for token.
 
+**CPU is the verified path; a GPU needs every graph on it.** All three modes were checked against
+the reference on CPU, x64 and arm64, and match token for token and frame for frame. On **CUDA** they
+match too, but only once *every* graph runs there: build the model for CUDA, or leave the embedding
+and speech entries without their own `session_options` so they inherit the decoder's provider. A
+mixed configuration — the decoder on the GPU and the embedding or encoder left on CPU, which is what
+a CPU export's `genai_config.json` describes — crashes, because the runtime keeps the pipeline's
+buffers in device memory and a CPU kernel cannot write them. The encoder's convolutions need cuDNN
+on the library path. Expect the audio codes to drift a little against a CPU run: on one of the test
+clips two of 1192 codes differed, both in the last two codebooks, with every text token identical.
+
+**WebGPU runs the text-in modes only.** Interleaved and TTS match the reference once the
+`audio_output` graphs keep their own CPU `session_options`: ONNX Runtime's WebGPU
+`GroupQueryAttention` cannot start the depthformer from an empty KV cache. Speech *input* does not
+work there at all — the WebGPU EP fails to create a session for the encoder, in its fused `Conv`
+kernel. Both are ONNX Runtime issues, reproducible without this runtime.
+
 **Dither is off, as in the reference's eval mode.** NeMo adds 1e-5 of white noise to the samples
 during training only; the runtime never does.
