@@ -61,15 +61,21 @@ PREPROCESSOR_CONFIG = {
 
 
 # The tokenizer is checked in zipped: its 4.8 MB of vocabulary compresses to under 1 MB, and no test
-# reads it as text. The files come from LiquidAI/LFM2.5-Audio-1.5B. To rebuild the same bytes:
-#   import zipfile
-#   with zipfile.ZipFile("tokenizer.zip", "w", zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
-#       for name in ("tokenizer.json", "tokenizer_config.json"):
-#           info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
-#           info.compress_type, info.external_attr = zipfile.ZIP_DEFLATED, 0o644 << 16
-#           archive.writestr(info, open(name, "rb").read(), compresslevel=9)
+# reads it as text. The files come from LiquidAI/LFM2.5-Audio-1.5B; _write_tokenizer_archive rebuilds it.
 TOKENIZER_ARCHIVE = "tokenizer.zip"
 TOKENIZER_FILES = ("tokenizer.json", "tokenizer_config.json")
+
+
+def _write_tokenizer_archive(directory: Path, archive_path: Path):
+    """Zips the tokenizer files in `directory`, with the timestamp and mode pinned so that refreshing
+    the archive from the same files does not show up as a changed binary."""
+    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+        for name in TOKENIZER_FILES:
+            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o644 << 16
+            archive.writestr(info, (directory / name).read_bytes(), compresslevel=9)
+
 
 # One assembled directory per source, kept alive (and so undeleted) for the whole session.
 _MODEL_DIRECTORIES: dict[str, tempfile.TemporaryDirectory] = {}
@@ -99,6 +105,23 @@ def _model_path(test_data_path) -> str:
                 (destination / name).write_bytes(archive.read(name))
         _MODEL_DIRECTORIES[key] = holder
     return _MODEL_DIRECTORIES[key].name
+
+
+def test_lfm2_audio_tokenizer_archive_can_be_rebuilt(test_data_path, tmp_path):
+    # Rebuilding from the unpacked files gives the same archive every time, holding what is checked in.
+    unpacked = Path(_model_path(test_data_path))
+    _write_tokenizer_archive(unpacked, tmp_path / "first.zip")
+    _write_tokenizer_archive(unpacked, tmp_path / "second.zip")
+
+    assert (tmp_path / "first.zip").read_bytes() == (tmp_path / "second.zip").read_bytes()
+    with (
+        zipfile.ZipFile(tmp_path / "first.zip") as rebuilt,
+        zipfile.ZipFile(Path(test_data_path) / "lfm2-audio" / TOKENIZER_ARCHIVE) as checked_in,
+    ):
+        assert rebuilt.namelist() == checked_in.namelist() == list(TOKENIZER_FILES)
+        for name in TOKENIZER_FILES:
+            assert rebuilt.read(name) == checked_in.read(name)
+            assert rebuilt.getinfo(name).date_time == checked_in.getinfo(name).date_time
 
 
 def _copy_model(test_data_path, tmp_path) -> Path:
