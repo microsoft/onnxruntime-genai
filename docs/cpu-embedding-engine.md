@@ -31,6 +31,14 @@ after capture. Eager prefill owns its temporary output. DFlash uses its existing
 lookup and host-to-device copies happen before `OrtSession::Run`, outside capture.
 Consequently replay reads updated values at the same device address on every step.
 
+Each target decoder and DFlash workspace retains a pinned host staging allocation,
+reusing it across destination and shape changes until more capacity is needed.
+The workspace synchronizes an outstanding upload before rewriting or releasing
+that memory. This currently uses the device stream synchronization API, not a
+CUDA event; its latency cost must be included in performance measurements.
+DFlash reserves three times the maximum logical embedding-buffer size before
+cache sizing, covering an old buffer and its doubled replacement during growth.
+
 Keep DFlash's `input_ids`: the selector also uses them. Extract only the embedding
 lookup, leaving subsequent casts and all other operators in their original graphs.
 This matters when target and drafter computation use different floating point types.
@@ -66,7 +74,8 @@ python src/python/py/models/split_cpu_embedding.py \
   --input /path/to/original-model --output /path/to/cpu-embedding-model
 ```
 
-The destination must be new. It contains rewritten ONNX metadata, `embedding.onnx`,
+The destination must be new. It contains rewritten ONNX metadata, `embedding.onnx`
+(or an unused `embedding_N.onnx` when that filename is already occupied),
 updated configuration, and hard links to the source data/tokenizer files on the same filesystem.
 Treat these shared data files as immutable. Embedding initializers are removed from both GPU graphs and their
 `shared_initializers` lists. The converter verifies that target and drafter lookup
@@ -82,9 +91,9 @@ accepts a direct axis-zero `Gather` or `GatherBlockQuantized`, with a logical
 different embedding in the drafter; it does not silently offload a tied LM head.
 
 CPU lookup adds host work and a small host-to-device transfer every invocation.
-Target tokens produced on CUDA require readback for lookup. Decode should still
-benefit from capture, but performance must be measured against both the original
-GPU embedding and CPU embedding with capture disabled. Prefill remains eager.
+Target tokens produced on CUDA require readback for lookup. No latency improvement
+is established here. Compare GPU embedding with and without CUDA graphs, ordinary
+mixed CPU/CUDA execution, and this split-session path. Prefill remains eager.
 
 For the supplied Qwen INT4 table, weights plus scales occupy 715,161,600 bytes
 (682.03 MiB). These move out of device memory. An eight-token lookup transfers
@@ -100,4 +109,6 @@ the measured peak-memory difference differ from the table size.
    each with eager and captured decode; compare greedy token streams and drafter
    statistics. Include long/chunked prefill, repeated requests, and multiple batches.
 4. Verify actual CUDA graph replay in both target and drafter, not just configured
-   provider options; record loaded library paths, phase timings, and GPU memory.
+  provider options: capture a CUDA API trace and verify repeated `cudaGraphLaunch`
+  calls after warmup. Graph annotation logs alone do not prove replay. Record
+  loaded library paths, phase timings, and GPU memory for all four baselines.

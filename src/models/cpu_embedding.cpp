@@ -49,7 +49,47 @@ void CpuEmbedding::ValidateConsumer(const SessionInfo& info, const std::string& 
   }
 }
 
-void CpuEmbedding::Run(std::span<const int64_t> ids, Tensor& output) const {
+CpuEmbedding::Workspace::~Workspace() {
+  try {
+    Wait();
+  } catch (...) {
+    if (g_log.enabled) Log("cpu_embedding") << "Failed to synchronize embedding upload during teardown." << std::endl;
+  }
+}
+
+void CpuEmbedding::Workspace::Wait() {
+  if (pending_) {
+    device_->Synchronize();
+    pending_ = false;
+  }
+}
+
+DeviceSpan<uint8_t> CpuEmbedding::Workspace::Prepare(Tensor& output) {
+  Wait();
+  const size_t bytes = output.GetByteSpan().size();
+  if (device_ != output.p_device_ || capacity_ < bytes || !buffer_ ||
+      device_->GetType() != DeviceType::CUDA) {
+    auto replacement = output.p_device_->WrapMemoryBase(output.GetMutableRawData(), bytes);
+    replacement->AllocateCpu();
+    buffer_ = std::move(replacement);
+    capacity_ = bytes;
+    device_ = output.p_device_;
+  }
+  buffer_->p_device_ = static_cast<uint8_t*>(output.GetMutableRawData());
+  buffer_->size_in_bytes_ = bytes;
+  return DeviceSpan<uint8_t>{std::shared_ptr<DeviceBuffer>{buffer_}};
+}
+
+void CpuEmbedding::Workspace::Upload() {
+  if (device_->GetType() == DeviceType::CUDA) {
+    pending_ = true;
+    buffer_->CopyCpuToDevice();
+  } else if (device_->GetType() != DeviceType::CPU) {
+    buffer_->CopyFromCpu(buffer_->p_cpu_, buffer_->size_in_bytes_);
+  }
+}
+
+void CpuEmbedding::Run(std::span<const int64_t> ids, Tensor& output, Workspace& workspace) const {
   const std::array<int64_t, 1> id_shape{static_cast<int64_t>(ids.size())};
   const std::vector<int64_t> shape{static_cast<int64_t>(ids.size()), hidden_size_};
   if (output.GetType() != type_ || output.GetShape() != shape) {
@@ -58,7 +98,7 @@ void CpuEmbedding::Run(std::span<const int64_t> ids, Tensor& output) const {
   const auto& cpu_memory = GetDeviceInterface(DeviceType::CPU)->GetAllocator().GetInfo();
   auto input = OrtValue::CreateTensor(cpu_memory, const_cast<int64_t*>(ids.data()), ids.size_bytes(),
                                       id_shape, Ort::TypeToTensorType<int64_t>);
-  auto bytes = output.GetByteSpan();
+  auto bytes = workspace.Prepare(output);
   auto host = bytes.CpuSpan();
   auto output_memory = output.p_device_->GetType() == DeviceType::CUDA
                            ? OrtMemoryInfo::Create("CudaPinned", OrtDeviceAllocator,
@@ -70,13 +110,7 @@ void CpuEmbedding::Run(std::span<const int64_t> ids, Tensor& output) const {
   OrtValue* input_value = input.get();
   OrtValue* output_value = result.get();
   session_->Run(run_options_.get(), &input_name, &input_value, 1, &output_name, &output_value, 1);
-  // The pinned mirror has the destination buffer's lifetime, so this asynchronous copy can
-  // remain ordered with the consuming CUDA session without entering graph capture.
-  if (output.p_device_->GetType() == DeviceType::CUDA) {
-    bytes.CopyCpuToDevice();
-  } else if (output.p_device_->GetType() != DeviceType::CPU) {
-    bytes.CopyFromCpu(host);
-  }
+  workspace.Upload();
 }
 
 }  // namespace Generators

@@ -63,8 +63,11 @@ def lookup_model(quantized=False, retain_ids=False):
 
 @pytest.mark.parametrize("quantized", [False, True])
 @pytest.mark.parametrize("retain_ids", [False, True])
-def test_split_preserves_results_and_selector_ids(quantized, retain_ids):
+@pytest.mark.parametrize("lookup_output", ["lookup", "inputs_embeds"])
+def test_split_preserves_results_and_selector_ids(quantized, retain_ids, lookup_output):
     model = lookup_model(quantized, retain_ids)
+    model.graph.node[0].output[0] = lookup_output
+    model.graph.node[1].input[0] = lookup_output
     original = ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
     embedding, removed = split_graph(model, "input_ids", 32)
     onnx.checker.check_model(model)
@@ -92,40 +95,65 @@ def test_rejects_embedding_weights_used_by_other_nodes():
         split_graph(model, "input_ids", 32)
 
 
-def test_conversion_preserves_external_offsets_and_shared_head(tmp_path):
+@pytest.mark.parametrize("collision", ["input", "node", "initializer"])
+def test_rejects_embedding_output_name_collisions(collision):
+    model = lookup_model()
+    if collision == "input":
+        model.graph.input.append(helper.make_tensor_value_info("inputs_embeds", TensorProto.FLOAT, ["tokens", 32]))
+    elif collision == "node":
+        model.graph.node.append(helper.make_node("Identity", ["lookup"], ["inputs_embeds"]))
+    else:
+        model.graph.initializer.append(numpy_helper.from_array(np.zeros((1, 32), np.float32), "inputs_embeds"))
+    with pytest.raises(ValueError, match="Tensor name already exists"):
+        split_graph(model, "input_ids", 32)
+
+
+@pytest.mark.parametrize("decoder_filename", ["model.onnx", "embedding.onnx"])
+@pytest.mark.parametrize("rename_drafter_weight", [False, True])
+def test_conversion_preserves_external_offsets_and_shared_head(tmp_path, decoder_filename, rename_drafter_weight):
     source = tmp_path / "source"
     source.mkdir()
     target = lookup_model(retain_ids=False)
     onnx.save_model(
         target,
-        source / "model.onnx",
+        source / decoder_filename,
         save_as_external_data=True,
         all_tensors_to_one_file=True,
         location="weights.data",
         size_threshold=0,
     )
-    drafter = onnx.load(source / "model.onnx", load_external_data=False)
+    drafter = onnx.load(source / decoder_filename, load_external_data=False)
+    if rename_drafter_weight:
+        drafter.graph.initializer[0].name = "draft.embedding.weight"
+        drafter.graph.node[0].input[0] = "draft.embedding.weight"
     drafter.graph.node.append(helper.make_node("Identity", ["input_ids"], ["selector_ids"]))
     drafter.graph.output.append(helper.make_tensor_value_info("selector_ids", TensorProto.INT64, ["tokens"]))
     (source / "dflash2.onnx").write_bytes(drafter.SerializeToString())
     shared = [{"name": "embedding.weight"}, {"name": "lm_head.weight"}]
     config = {
         "model": {
-            "decoder": {"filename": "model.onnx", "hidden_size": 32, "shared_initializers": shared},
-            "dflash2": {"filename": "dflash2.onnx", "shared_initializers": shared},
+            "decoder": {"filename": decoder_filename, "hidden_size": 32, "shared_initializers": shared},
+            "dflash2": {
+                "filename": "dflash2.onnx",
+                "shared_initializers": [{"name": drafter.graph.initializer[0].name}, {"name": "lm_head.weight"}],
+            },
         },
         "engine": {"dynamic_batching": {"max_batch_size": 1}},
     }
     (source / "genai_config.json").write_text(json.dumps(config))
-    before = (source / "model.onnx").read_bytes()
+    before = (source / decoder_filename).read_bytes()
     destination = convert(source, tmp_path / "split")
     result = json.loads((destination / "genai_config.json").read_text())
     assert result["model"]["decoder"]["shared_initializers"] == [{"name": "lm_head.weight"}]
     assert result["model"]["dflash2"]["shared_initializers"] == [{"name": "lm_head.weight"}]
-    assert (source / "model.onnx").read_bytes() == before
+    assert (source / decoder_filename).read_bytes() == before
     assert (destination / "weights.data").stat().st_ino == (source / "weights.data").stat().st_ino
-    session = ort.InferenceSession(str(destination / "embedding.onnx"), providers=["CPUExecutionProvider"])
-    assert session.run(None, {"input_ids": np.array([0, 7], np.int64)})[0].shape == (2, 32)
+    embedding_filename = result["model"]["embedding"]["filename"]
+    assert embedding_filename != decoder_filename
+    session = ort.InferenceSession(str(destination / embedding_filename), providers=["CPUExecutionProvider"])
+    rows = session.run(None, {"input_ids": np.array([0, 7], np.int64)})[0]
+    consumer = ort.InferenceSession(str(destination / decoder_filename), providers=["CPUExecutionProvider"])
+    np.testing.assert_array_equal(consumer.run(None, {"inputs_embeds": rows})[0], rows)
     # Same-shaped but independently stored drafter weights cannot silently become shared.
     altered = copy.deepcopy(drafter)
     for entry in altered.graph.initializer[0].external_data:
@@ -135,3 +163,19 @@ def test_conversion_preserves_external_offsets_and_shared_head(tmp_path):
     with pytest.raises(ValueError, match="share identical"):
         convert(source, tmp_path / "invalid")
     assert not (tmp_path / "invalid").exists()
+
+
+def test_rejects_unsupported_embedding_output_type():
+    model = lookup_model()
+    model.graph.initializer[0].CopyFrom(
+        numpy_helper.from_array(np.arange(8 * 32, dtype=np.int64).reshape(8, 32), "embedding.weight")
+    )
+    with pytest.raises(ValueError, match="output must be float32, float16, or bfloat16"):
+        split_graph(model, "input_ids", 32)
+
+
+def test_rejects_missing_quantized_scales():
+    model = lookup_model(quantized=True)
+    del model.graph.node[0].input[2:]
+    with pytest.raises(ValueError, match="scales must be an initializer"):
+        split_graph(model, "input_ids", 32)

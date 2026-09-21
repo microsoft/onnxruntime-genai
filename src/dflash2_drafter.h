@@ -125,6 +125,9 @@ struct Dflash2Drafter {
   static size_t FullAttentionReservedBytes(size_t paged_block_size, size_t query_block_size,
                                            size_t max_batch_size, size_t bytes_per_block);
 
+  static size_t EmbeddingReservedBytes(size_t max_batch_size, size_t query_block_size,
+                                       size_t hidden_size, ONNXTensorElementDataType type);
+
   size_t NumDraftTokens() const { return static_cast<size_t>(config_.num_draft_tokens); }
   size_t AdmissionMisses() const { return admission_misses_; }
 
@@ -191,6 +194,7 @@ struct Dflash2Drafter {
     std::unique_ptr<Tensor> packed_aux;
     std::unique_ptr<Tensor> input_ids;
     std::unique_ptr<Tensor> embeddings;
+    CpuEmbedding::Workspace embedding_workspace;
     std::unique_ptr<Tensor> q_row_map;
     std::unique_ptr<Tensor> qkv_row_map;
     std::unique_ptr<Tensor> block_row_index;

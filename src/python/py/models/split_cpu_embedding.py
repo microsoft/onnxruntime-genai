@@ -45,9 +45,17 @@ def split_graph(model, input_name, hidden_size, output_name="inputs_embeds"):
     weight = initializers[node.input[0]]
     if len(weight.dims) != 2 or weight.dims[1] != hidden_size:
         raise ValueError("Embedding weight does not match hidden_size (packed UINT8 weights are not supported)")
+    if node.op_type == "GatherBlockQuantized" and (len(node.input) < 3 or node.input[2] not in initializers):
+        raise ValueError("Quantized embedding scales must be an initializer")
     dtype = initializers[node.input[2]].data_type if node.op_type == "GatherBlockQuantized" else weight.data_type
+    if dtype not in (TensorProto.FLOAT, TensorProto.FLOAT16, TensorProto.BFLOAT16):
+        raise ValueError("CPU embedding output must be float32, float16, or bfloat16")
     old_output = node.output[0]
-    if output_name in {i.name for i in model.graph.input} or any(output_name in n.output for n in model.graph.node):
+    if (
+        output_name in {i.name for i in model.graph.input}
+        or output_name in initializers
+        or any(output_name in other.output for other in model.graph.node if other is not node)
+    ):
         raise ValueError(f"Tensor name already exists: {output_name}")
     lookup = copy.deepcopy(node)
     lookup.input[1] = "input_ids"
@@ -89,8 +97,12 @@ def lookup_signature(model, source_dir):
     """Compare the operator and exact shared storage, ignoring graph-local tensor names."""
     node = model.graph.node[0]
     weights = []
-    for tensor in model.graph.initializer:
-        value = copy.deepcopy(tensor)
+    initializers = {tensor.name: tensor for tensor in model.graph.initializer}
+    for index, name in enumerate(node.input):
+        if index == 1 or not name:
+            continue
+        value = copy.deepcopy(initializers[name])
+        value.ClearField("name")
         for entry in value.external_data:
             if entry.key == "location":
                 entry.value = str((source_dir / entry.value).resolve())
@@ -134,13 +146,18 @@ def convert(source, destination):
             i for i in settings.get("shared_initializers", []) if i["name"] not in removed
         ]
         graphs[filename] = graph
+    embedding_filename = "embedding.onnx"
+    suffix = 0
+    while embedding_filename in graphs or (source / embedding_filename).exists():
+        suffix += 1
+        embedding_filename = f"embedding_{suffix}.onnx"
     model_config["embedding"] = {
-        "filename": "embedding.onnx",
+        "filename": embedding_filename,
         "session_options": {"intra_op_num_threads": 1},
         "inputs": {"input_ids": "input_ids"},
         "outputs": {"inputs_embeds": "inputs_embeds"},
     }
-    graphs["embedding.onnx"] = embedding
+    graphs[embedding_filename] = embedding
     # ORT rejects external-data symlinks that resolve outside the model directory.
     for graph in graphs.values():
         for tensor in graph.graph.initializer:

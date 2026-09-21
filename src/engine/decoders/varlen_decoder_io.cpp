@@ -323,7 +323,8 @@ VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
                                  std::shared_ptr<CacheManager> cache_manager,
                                  const ExecutionContext* execution_context,
                                  VarlenGraphBuffers* graph_buffers,
-                                 size_t position_planes)
+                                 size_t position_planes,
+                                 CpuEmbedding::Workspace* embedding_workspace)
     : DecoderIO(model, scheduled_requests, cache_manager),
       graph_buffers_{graph_buffers},
       plan_{execution_context ? execution_context->plan : nullptr},
@@ -332,7 +333,8 @@ VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
       input_ids_{execution_context ? execution_context->input_ids : DeviceSpan<int32_t>{}},
       hidden_states_input_{
           execution_context ? execution_context->hidden_states_input : nullptr},
-      position_planes_{position_planes} {
+      position_planes_{position_planes},
+      embedding_workspace_{embedding_workspace ? embedding_workspace : &local_embedding_workspace_} {
   logits_are_per_token_ = DecoderLogitsArePerToken(*model);
 
   PrepareInputIds(model, scheduled_requests);
@@ -502,7 +504,7 @@ void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, 
     auto* embeddings = reshape(owned_embeddings, graph_buffers_ ? graph_buffers_->embeddings.get() : nullptr,
                                model->cpu_embedding_->type_,
                                {static_cast<int64_t>(num_tokens), model->cpu_embedding_->hidden_size_});
-    model->cpu_embedding_->Run(cpu_span, *embeddings);
+    model->cpu_embedding_->Run(cpu_span, *embeddings, *embedding_workspace_);
     input_names_.push_back(model->config_->model.decoder.inputs.embeddings.c_str());
     inputs_.push_back(embeddings->GetOrtTensor());
     if (owned_embeddings) owned_inputs_.push_back(std::move(owned_embeddings));

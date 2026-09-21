@@ -277,6 +277,10 @@ ONNXTensorElementDataType ValidateDflash2ModelCompatibility(
   if (!input_names.insert(inputs.aux_hidden_states).second) {
     throw std::runtime_error("model.dflash2 input names must be unique.");
   }
+  if (!config.model.embedding.filename.empty() &&
+      (inputs.embeddings.empty() || !input_names.insert(inputs.embeddings).second)) {
+    throw std::runtime_error("model.dflash2 embedding input must have a unique non-empty name.");
+  }
 
   ONNXTensorElementDataType cache_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
   std::unordered_set<std::string> cache_output_names;
@@ -428,6 +432,14 @@ size_t Dflash2Drafter::FullAttentionReservedBytes(size_t paged_block_size,
       0, paged_block_size, query_block_size, max_batch_size);
   return CheckedMultiply(spill_blocks, bytes_per_block,
                          "DFlash 2 query spill bytes");
+}
+
+size_t Dflash2Drafter::EmbeddingReservedBytes(size_t max_batch_size, size_t query_block_size,
+                                              size_t hidden_size, ONNXTensorElementDataType type) {
+  const size_t rows = CheckedMultiply(max_batch_size, query_block_size, "DFlash 2 embedding rows");
+  const size_t elements = CheckedMultiply(rows, hidden_size, "DFlash 2 embedding elements");
+  const size_t bytes = CheckedMultiply(elements, Ort::SizeOf(type), "DFlash 2 embedding bytes");
+  return CheckedMultiply(bytes, 3, "DFlash 2 embedding growth reservation");
 }
 
 Dflash2Drafter::Dflash2Drafter(std::shared_ptr<Dflash2Model> model, size_t paged_block_size,
@@ -849,7 +861,7 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
       }
     }
     span.CopyCpuToDevice();
-    if (embeddings) model_->cpu_embedding_->Run(cpu, *embeddings);
+    if (embeddings) model_->cpu_embedding_->Run(cpu, *embeddings, step_tensors_.embedding_workspace);
   }
 
   constexpr auto int32_type = Ort::TypeToTensorType<int32_t>;
