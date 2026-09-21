@@ -292,28 +292,34 @@ routine of its own. Only the first produces text alone, so only the first runs h
 | --- | --- | --- | --- | --- |
 | ASR | `Perform ASR.` | `generate_sequential` | text | works |
 | TTS | `Perform TTS. Use the UK male voice.` (also US male, US female, UK female) | `generate_sequential` | speech | stops immediately |
-| Interleaved | `Respond with interleaved text and audio.` | `generate_interleaved` | text and speech, alternating | the text; none of the speech |
+| Interleaved | `Respond with interleaved text and audio.` | `generate_interleaved` | text and speech, alternating | the text answer; none of the speech |
 
 **ASR** is the supported path, and matches the reference token for token.
 
+Two tokens mark the turn passing from text to speech, and the builder puts both in `eos_token_id`:
+`<|audio_start|>` when the rest of the answer is spoken, and `<|text_end|>` when the text half of an
+interleaved answer is done. The positions after either are audio codes meant for the depthformer this
+runtime does not have; read off the text head they decode to fluent, plausible nonsense, so
+generation ends there with whatever text came first.
+
 **TTS** produces nothing here, and there is no text to be had: asked to speak a sentence, the whole
-text stream the model emits is `<|audio_start|>` followed by `<|im_end|>`, with everything in between
-being audio. Generation stops at that first token, which is deliberate — the builder puts
-`<|audio_start|>` in `eos_token_id` for these models, because the positions after it are meant for
-the depthformer this runtime does not have, and read off the text head they decode to fluent,
-plausible nonsense. A sequential answer that begins in text and turns to speech part way keeps the
-text it had before the switch.
+text stream the model emits is `<|audio_start|>` followed by `<|im_end|>`, everything in between
+being audio. Generation stops on that first token. A sequential answer that begins in text and turns
+to speech part way keeps the text it had before the switch.
 
-**Interleaved** returns text only. The reference alternates by count — six text tokens, then
-`interleaved_n_audio` audio frames (12, or 9 for the JP checkpoint) — rather than on any token in the
-stream, so there is nothing here to switch on and generation simply runs to `<|im_end|>`.
+**Interleaved** gives the text answer and none of the speech. Asked a spoken question, the model
+writes its answer, emits `<|text_end|>`, and says the rest aloud; generation stops at that token, so
+what comes back is the answer itself. Asked *What is the capital of France?*, this runtime returns
+`The capital of France is Paris` — the same text the reference produced before it began speaking,
+which it then spoke.
 
-The speech it generates is real, and it feeds back into the context, so the text depends on it. On a
-ten second clip the reference answered with 29 text tokens and 48 audio frames using the sampling the
-model card gives (`audio_temperature=1.0, audio_top_k=4`), and with 54 text tokens when the audio was
-taken greedily instead. This runtime produced those same first 29 tokens and stopped. The first 29
-agree across all three, and they diverge after that. So take what you get as the answer the model
-would speak, not as a reproduction of any one interleaved run.
+Between those text tokens the reference is also emitting audio, six text tokens at a time against
+`interleaved_n_audio` audio frames (12, or 9 for the JP checkpoint), and that speech feeds back into
+the context. So the text can depend on audio this runtime never generates: on a ten second clip with
+no question in it, the reference wrote 29 text tokens with the sampling the model card gives and 54
+with the audio taken greedily, and this runtime matched the first 29 and stopped. Short answers to
+spoken questions come through whole; a long turn is the model's answer as far as it gets, not a
+reproduction of any one interleaved run.
 
 Sampling: the reference generates text greedily in every mode, so `do_sample=False` is right here.
 The temperatures and `top_k` values quoted for the model (`audio_temperature=0.8, audio_top_k=64`
@@ -328,7 +334,9 @@ plus the audio detokenizer to turn those codes into a waveform. That speech is w
 is good: asked through the reference to say *The quick brown fox jumps over the lazy dog.*, the model
 produced about three seconds of 24 kHz audio per voice, and this runtime's own ASR read both back as
 that sentence exactly, punctuation included. The two voices are different waveforms, and the male one
-carries more of its energy below 1 kHz than the female one, as it should. None of it has a path here. ONNX Runtime
+carries more of its energy below 1 kHz than the female one, as it should. Asked the spoken question
+above in interleaved mode, it answered in 41 audio frames ending in the end-of-audio code, 3.2
+seconds that read back as *The capital of France is Paris.* None of it has a path here. ONNX Runtime
 GenAI's generation loop samples one token stream, so none of that has a home here yet. Generation
 stops at `<|audio_start|>` rather than reading the depthformer's positions off the text head; see
 [the three modes](#the-models-three-modes) for what each prompt gives you. LiquidAI ships

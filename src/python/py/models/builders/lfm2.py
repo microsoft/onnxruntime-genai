@@ -235,15 +235,15 @@ class LFM2AudioModel(LFM2Model):
     def update_genai_config(self, genai_config):
         super().update_genai_config(genai_config)
 
-        # These checkpoints answer in speech as well as text: asked to, the model emits
-        # <|audio_start|> and everything after it is audio codes for the depthformer, which this
-        # runtime does not have. Sampling those positions from the text head gives fluent nonsense,
-        # so stop there instead. An answer that turns to speech part way keeps the text it had.
-        audio_start_token_id = 128
+        # These checkpoints answer in speech as well as text, and two tokens mark the turn passing
+        # from one to the other: <|audio_start|> when the whole answer is spoken, and <|text_end|>
+        # when text and speech are interleaved. Everything after either is audio codes for the
+        # depthformer, which this runtime does not have, and sampling those positions from the text
+        # head gives fluent nonsense. Stop on them instead, keeping whatever text came first.
+        modality_switch_token_ids = [128, 130]  # <|audio_start|>, <|text_end|>
         eos_token_id = genai_config["model"].get("eos_token_id")
         eos_token_ids = list(eos_token_id) if isinstance(eos_token_id, list) else [eos_token_id]
-        if audio_start_token_id not in eos_token_ids:
-            eos_token_ids.append(audio_start_token_id)
+        eos_token_ids += [token for token in modality_switch_token_ids if token not in eos_token_ids]
         genai_config["model"]["eos_token_id"] = eos_token_ids
 
     def load_weights(self, input_path):

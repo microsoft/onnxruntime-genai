@@ -32,7 +32,8 @@ import onnxruntime_genai as og
 import pytest
 
 AUDIO_MARKER = "<|audio|>"
-AUDIO_START_TOKEN_ID = 128  # <|audio_start|>: the model switching from text to speech
+AUDIO_START_TOKEN_ID = 128  # <|audio_start|>: the answer is spoken from here on
+TEXT_END_TOKEN_ID = 130  # <|text_end|>: the text half of an interleaved answer is over
 AUDIO_TOKEN_ID = 133  # <|reserved_123|>, model.audio_token_id in the fixture's genai_config.json
 NUM_MELS = 128
 SAMPLE_RATE = 16000
@@ -649,20 +650,22 @@ def test_lfm2_audio_generation_stops_when_the_model_starts_speaking(test_data_pa
     assert stopped == unrestricted[: first + 1], "generation must end at the stop token, with nothing after it"
 
 
-def test_lfm2_audio_audio_start_in_eos_leaves_normal_stopping_alone(test_data_path, tmp_path):
-    # Adding <|audio_start|> alongside <|im_end|> must not change a run that never starts speaking.
+def test_lfm2_audio_modality_stops_leave_normal_stopping_alone(test_data_path, tmp_path):
+    # Adding the two modality-switch tokens alongside <|im_end|> must not change a run that stays in
+    # text the whole way.
     model_path = _copy_model(test_data_path, tmp_path)
     clip = _write_wav(tmp_path / "clip.wav", _synthetic_signal(0.5, seed=41))
+    switches = [AUDIO_START_TOKEN_ID, TEXT_END_TOKEN_ID]
 
     without = _generate_with_eos(model_path, clip, [7], num_tokens=25)
     _edit_json(
         model_path / "genai_config.json",
-        lambda config: config["model"].update({"eos_token_id": [7, AUDIO_START_TOKEN_ID]}),
+        lambda config: config["model"].update({"eos_token_id": [7, *switches]}),
     )
-    with_audio_stop = _generate_with_eos(model_path, clip, [7, AUDIO_START_TOKEN_ID], num_tokens=25)
+    with_switch_stops = _generate_with_eos(model_path, clip, [7, *switches], num_tokens=25)
 
-    assert AUDIO_START_TOKEN_ID not in without, "the fixture is not expected to emit <|audio_start|>"
-    assert with_audio_stop == without
+    assert not set(switches) & set(without), "the fixture is not expected to emit the switch tokens"
+    assert with_switch_stops == without
 
 
 def test_lfm2_audio_fixture_config_is_what_the_builder_writes(test_data_path):

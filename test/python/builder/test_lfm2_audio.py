@@ -248,13 +248,20 @@ def test_lfm2_audio_load_weights_without_an_adapter_returns_the_decoder(tmp_path
 
 @pytest.mark.parametrize(
     "existing,expected",
-    [(7, [7, 128]), ([7], [7, 128]), ([7, 2], [7, 2, 128]), ([7, 128], [7, 128])],
-    ids=["scalar", "list", "several", "already-there"],
+    [
+        (7, [7, 128, 130]),
+        ([7], [7, 128, 130]),
+        ([7, 2], [7, 2, 128, 130]),
+        ([7, 128, 130], [7, 128, 130]),
+        ([128], [128, 130]),
+    ],
+    ids=["scalar", "list", "several", "already-there", "partly-there"],
 )
 def test_lfm2_audio_stops_when_the_model_starts_speaking(existing, expected):
-    # The model answers in speech too. Everything after <|audio_start|> is audio codes meant for the
-    # depthformer, which this runtime does not have, so generation has to end there rather than read
-    # those positions off the text head.
+    # The model answers in speech too. <|audio_start|> marks a wholly spoken answer and <|text_end|>
+    # the text half of an interleaved one ending; after either, the positions are audio codes meant
+    # for the depthformer, which this runtime does not have, so generation has to end there rather
+    # than read them off the text head.
     builder = LFM2AudioModel.__new__(LFM2AudioModel)
     builder.layer_types = ["conv", "full_attention"]
     builder.conv_L_cache = 3
