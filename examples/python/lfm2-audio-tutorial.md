@@ -8,7 +8,7 @@ runs the speech-to-text half of it — ASR and spoken-prompt chat — as three O
 
 | Model | Inputs | Outputs |
 | --- | --- | --- |
-| `speech.onnx` | `mel_spectrogram`, `mel_lengths` | `audio_embeddings`, `audio_lengths` |
+| speech encoder (`audio_encoder.onnx`) | `mel_spectrogram`, `mel_lengths` | `audio_embeddings`, `audio_lengths` |
 | `embeddings.onnx` | `input_ids`, `audio_features` | `inputs_embeds` |
 | `model.onnx` (decoder) | `inputs_embeds`, `attention_mask`, `position_ids`, KV + conv cache | `logits` |
 
@@ -19,15 +19,16 @@ published as ONNX by LiquidAI, and the embedding model is a small graph you buil
 RQ-transformer ("depthformer") that ONNX Runtime GenAI has no generation loop for, and those codes
 then need the audio detokenizer and an inverse STFT to become a waveform. The export below drops the
 depthformer and the audio embeddings with it, so the model answers in text only. See
-[Known limitations](#5-known-limitations).
+[Known limitations](#6-known-limitations).
 
 ## Steps
 
 1. [Build the decoder](#1-build-the-decoder)
 2. [Get the speech encoder and build the embedding model](#2-get-the-speech-encoder-and-build-the-embedding-model)
 3. [Write `genai_config.json`](#3-write-genai_configjson)
-4. [Run the model](#4-run-the-model)
-5. [Known limitations](#5-known-limitations)
+4. [Choose the precisions](#4-choose-the-precisions)
+5. [Run the model](#5-run-the-model)
+6. [Known limitations](#6-known-limitations)
 
 ## 1. Build the decoder
 
@@ -176,7 +177,7 @@ produced. Leave the `decoder` and `search` sections it wrote alone:
         "eos_token_id": 7,
         "pad_token_id": 0,
         "speech": {
-            "filename": "speech.onnx",
+            "filename": "audio_encoder.onnx",
             "inputs": {
                 "audio_embeds": "mel_spectrogram",
                 "audio_lengths": "mel_lengths",
@@ -196,6 +197,9 @@ produced. Leave the `decoder` and `search` sections it wrote alone:
     "search": { "...": "written by the model builder" }
 }
 ```
+
+`filename` is whatever the encoder file is called on disk — keep the name it was published under,
+for the reason in [Choose the precisions](#4-choose-the-precisions).
 
 `audio_sizes` is not an encoder input; the name only tells the runtime what to call the per-clip
 token counts it computes, so leave it as is unless it collides with a real input of your graph.
@@ -222,7 +226,38 @@ LFM2-Audio checkpoint shares (`"preprocessor"` in `config.json`), which are NeMo
 Set the overrides only for a fine-tune that changed them; the defaults already match all the
 published models.
 
-## 4. Run the model
+## 4. Choose the precisions
+
+`-p int4` quantizes the decoder, and the decoder alone. The embedding model and the speech encoder
+are assembled by hand, so they stay at whatever precision you built or downloaded them at — and
+together they are bigger than the quantized decoder. Measured on LFM2.5-Audio-1.5B, transcribing
+three clips (16 kHz, 44.1 kHz stereo, and an mp3):
+
+| Decoder | Embedding table | Encoder | Size | Transcripts |
+| --- | --- | --- | --- | --- |
+| fp32 | fp32 | fp32 | 5736 MB | baseline |
+| int4 | fp32 | fp32 | 1787 MB | correct; one comma differs from fp32 |
+| int4 | fp16 | fp32 | 1518 MB | identical to the row above |
+| int4 | fp16 | fp16 | 1278 MB | identical to the row above |
+| **int4** | **fp16** | **q4** | **1178 MB** | **identical to the row above** |
+
+Quantizing the other two components is free here: every int4 row produced the same tokens as every
+other, so the last row is the one to build. The only difference anywhere is the int4 decoder against
+fp32 — `And so, my fellow Americans` became `And so my fellow Americans` on one clip, with the words
+otherwise unchanged.
+
+For the embedding table, `astype(np.float16)` on the weight in the snippet above is the whole change;
+keep the graph's output fp32 by casting after the `Gather`, so the decoder still receives what it
+declares. A 4-bit table would be smaller still — the builder's own text-only export gets one, through
+`GatherBlockQuantized` over the quantized `lm_head` weights — but `exclude_embeds` is what puts the
+table outside the decoder in the first place, so the pipeline cannot share that copy.
+
+For the encoder, take `audio_encoder_q4.onnx` instead of `audio_encoder.onnx`. **Keep the published
+file names.** Each variant's graph refers to its own `*.onnx_data` by name, so renaming the pair to
+`speech.onnx` breaks the lookup with `External data path validation failed`. Leave both files as they
+are and point `model.speech.filename` at the name you downloaded.
+
+## 5. Run the model
 
 [`model-mm.py`](model-mm.py) drives any multi-modal model in this repository:
 
@@ -254,7 +289,7 @@ Perform ASR.<|im_end|>
 <|im_start|>assistant
 ```
 
-## 5. Known limitations
+## 6. Known limitations
 
 **Audio output is not supported.** Interleaved and TTS generation need the depthformer, which
 predicts 8 codebook entries per 80 ms audio frame in an inner autoregressive loop, plus the audio
