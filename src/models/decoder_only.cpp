@@ -193,7 +193,7 @@ void DecoderOnly_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, De
   if (ple_state_)
     ple_state_->Update();
   if (indexer_cache_)
-    indexer_cache_->Update(beam_indices, total_length);
+    indexer_cache_->Update(beam_indices, total_length, static_cast<int>(new_length));
   if (hidden_states_)
     hidden_states_->Update(static_cast<int>(new_length));
   if (hidden_states_output_)

@@ -988,10 +988,17 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         self.output_names["present.value"] = self.make_cache_names(["qwen_sparse_attention"], "present.value")
         self.input_names["past.indexer"] = qsa_layers
         self.input_types["past.indexer"] = self.io_dtype
-        self.input_shapes["past.indexer"] = ["batch_size", "past_sequence_length", self.indexer_head_dim]
+        self.fixed_indexer_cache = not self.use_paged_attention and self.ep == "cuda"
+        indexer_cache_length = self.context_length if self.fixed_indexer_cache else "past_sequence_length"
+        self.input_shapes["past.indexer"] = ["batch_size", indexer_cache_length, self.indexer_head_dim]
         self.output_names["present.indexer"] = qsa_outputs
         self.output_types["present.indexer"] = self.io_dtype
-        self.output_shapes["present.indexer"] = ["batch_size", "total_sequence_length", self.indexer_head_dim]
+        indexer_output_length = self.context_length if self.fixed_indexer_cache else "total_sequence_length"
+        self.output_shapes["present.indexer"] = ["batch_size", indexer_output_length, self.indexer_head_dim]
+        if self.fixed_indexer_cache:
+            self.input_names["past_sequence_length"] = "past_sequence_length"
+            self.input_types["past_sequence_length"] = ir.DataType.INT32
+            self.input_shapes["past_sequence_length"] = [1]
         if self.use_paged_attention:
             capacity = self.indexer_budget + self.indexer_compress_ratio - 1
             self.model.metadata_props["qwen4_exp.selected_index_names"] = "sparse_attention.%d.selected_indices"
@@ -1066,6 +1073,8 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         decoder["inputs"]["past_ple_token_names"] = "past.%d.ple_tokens"
         decoder["inputs"]["past_ple_conv_names"] = "past.%d.ple_conv"
         decoder["inputs"]["past_indexer_names"] = "past.%d.indexer_key"
+        if getattr(self, "fixed_indexer_cache", False):
+            decoder["inputs"]["past_sequence_length"] = self.input_names["past_sequence_length"]
         decoder["outputs"]["present_ple_token_names"] = "present.%d.ple_tokens"
         decoder["outputs"]["present_ple_conv_names"] = "present.%d.ple_conv"
         decoder["outputs"]["present_indexer_names"] = "present.%d.indexer_key"
@@ -1445,9 +1454,24 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
             self.make_initializer(attention.indexer.k_layernorm.weight + 1, index_k_scale, to=self.io_dtype)
             indexer_name = f"/model/layers.{layer_id}/attn/SparseAttentionIndexer"
             selected_indices = f"{indexer_name}/output_0"
-            self.make_node(
-                "SparseAttentionIndexer",
-                inputs=[
+            if self.fixed_indexer_cache:
+                indexer_inputs = [
+                    index_qk_path,
+                    "",
+                    index_q_scale,
+                    index_k_scale,
+                    cos_cache,
+                    sin_cache,
+                    "",
+                    self.input_names["past.indexer"][layer_id],
+                    "",
+                    "",
+                    "",
+                    "",
+                    self.input_names["past_sequence_length"],
+                ]
+            else:
+                indexer_inputs = [
                     index_qk_path,
                     "",
                     index_q_scale,
@@ -1456,7 +1480,10 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
                     sin_cache,
                     self.input_names["attention_mask"],
                     self.input_names["past.indexer"][layer_id],
-                ],
+                ]
+            self.make_node(
+                "SparseAttentionIndexer",
+                inputs=indexer_inputs,
                 outputs=[selected_indices, self.output_names["present.indexer"][layer_id]],
                 name=indexer_name,
                 domain="com.microsoft",

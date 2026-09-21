@@ -36,6 +36,7 @@ def make_sparse_model(paged):
     model.indexer_head_dim = 16
     model.indexer_budget = 32
     model.indexer_compress_ratio = 4
+    model.fixed_indexer_cache = not paged
     model.layernorm_attrs = {"epsilon": 1e-6}
     model.rope_attrs = {"interleaved": 0, "cast": {"use_fp32": True}}
     model.attention_attrs = {
@@ -50,6 +51,7 @@ def make_sparse_model(paged):
     model.input_names = {
         "attention_mask": "attention_mask",
         "position_ids": "position_ids",
+        "past_sequence_length": "past_sequence_length",
         "past.indexer": {3: "past.3.indexer_key"},
         "cumulative_sequence_lengths": "cumulative_sequence_lengths",
         "past_sequence_lengths": "past_sequence_lengths",
@@ -707,8 +709,13 @@ def test_dense_qwen_sparse_attention_emits_indexer_and_dynamic_executor():
         "model.layers.3.attn.indexer.k_norm.weight",
         "cos_cache",
         "sin_cache",
-        "attention_mask",
+        "",
         "past.3.indexer_key",
+        "",
+        "",
+        "",
+        "",
+        "past_sequence_length",
     ]
     assert indexer["outputs"] == [
         "/model/layers.3/attn/SparseAttentionIndexer/output_0",
@@ -731,7 +738,11 @@ def test_dense_qwen_sparse_attention_emits_indexer_and_dynamic_executor():
     ]
     assert attention["inputs"][11:13] == ["cos_cache", "sin_cache"]
     assert attention["inputs"][13] == "/model/layers.3/attn/DynamicSparseAttention/position_ids/Gather/output_0"
-    position_gather = next(call for call in model.calls if call[0] == "make_gather")
+    position_gather = next(
+        call
+        for call in model.calls
+        if call[0] == "make_gather" and call[1][0].endswith("DynamicSparseAttention/position_ids/Gather")
+    )
     assert position_gather[1][1] == ["position_ids", "/model/constants/INT64/0"]
     assert position_gather[1][3] == ["batch_size", "sequence_length"]
     assert position_gather[2]["axis"] == 0
@@ -967,10 +978,13 @@ def test_qwen38_config_assigns_embedding_annotation_to_cpu():
     model = object.__new__(Qwen4ExpTextModel)
     model.ep = "cuda"
     model.ple_token_pad_id = 248044
+    model.fixed_indexer_cache = True
+    model.input_names = {"past_sequence_length": "past_sequence_length"}
     genai_config = {"model": {"decoder": {"inputs": {}, "outputs": {}, "session_options": {}}}}
 
     model.update_genai_config(genai_config)
 
+    assert genai_config["model"]["decoder"]["inputs"]["past_sequence_length"] == "past_sequence_length"
     assert genai_config["model"]["decoder"]["session_options"]["session.layer_assignment_settings"] == (
         "cpu(=cpu_embedding)"
     )

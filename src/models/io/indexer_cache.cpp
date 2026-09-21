@@ -51,9 +51,18 @@ IndexerCache::IndexerCache(State& state) : state_{state} {
   if (shape_.size() != 3)
     throw std::runtime_error("IndexerCache: expected rank-3 cache tensors");
   shape_[0] = state_.params_->BatchBeamSize();
-  shape_[1] = 0;
   if (shape_[2] <= 0)
     throw std::runtime_error("IndexerCache: head dimension must be static");
+  share_buffer_ = shape_[1] > 0;
+  if (share_buffer_) {
+    for (const auto& output_name : output_name_strings_) {
+      const auto output_shape = model_.session_info_.GetOutputShape(output_name);
+      if (output_shape.size() != 3 || output_shape[1] != shape_[1] || output_shape[2] != shape_[2])
+        throw std::runtime_error("IndexerCache: fixed input and output cache shapes must match");
+    }
+  } else {
+    shape_[1] = 0;
+  }
 
   auto& allocator = model_.p_device_kvcache_->GetAllocator();
   pasts_.resize(layer_indices_.size());
@@ -61,6 +70,15 @@ IndexerCache::IndexerCache(State& state) : state_{state} {
   empty_pasts_.reserve(layer_indices_.size());
   for (size_t index = 0; index < layer_indices_.size(); ++index)
     empty_pasts_.push_back(OrtValue::CreateTensor(allocator, shape_, type_));
+
+  if (share_buffer_) {
+    const auto& length_name = inputs.past_sequence_length;
+    if (!model_.session_info_.HasInput(length_name) ||
+        model_.session_info_.GetInputDataType(length_name) != Ort::TypeToTensorType<int32_t>)
+      throw std::runtime_error("IndexerCache: fixed caches require an int32 past_sequence_length input");
+    past_sequence_length_ = OrtValue::CreateTensor(
+        model_.allocator_cpu_, std::array<int64_t, 1>{1}, Ort::TypeToTensorType<int32_t>);
+  }
 }
 
 void IndexerCache::Add() {
@@ -70,14 +88,24 @@ void IndexerCache::Add() {
   for (size_t index = 0; index < layer_indices_.size(); ++index) {
     state_.inputs_.push_back(empty_pasts_[index].get());
     state_.input_names_.push_back(input_name_strings_[index].c_str());
-    state_.outputs_.push_back(nullptr);
+    state_.outputs_.push_back(share_buffer_ ? empty_pasts_[index].get() : nullptr);
     state_.output_names_.push_back(output_name_strings_[index].c_str());
+  }
+  if (past_sequence_length_) {
+    state_.inputs_.push_back(past_sequence_length_.get());
+    state_.input_names_.push_back(model_.config_->model.decoder.inputs.past_sequence_length.c_str());
   }
 }
 
-void IndexerCache::Update(DeviceSpan<int32_t> beam_indices, int total_length) {
+void IndexerCache::Update(DeviceSpan<int32_t> beam_indices, int total_length, int current_length) {
   if (!beam_indices.empty())
     throw std::runtime_error("IndexerCache does not support beam reordering");
+  if (share_buffer_) {
+    if (current_length < 0 || current_length > total_length)
+      throw std::runtime_error("IndexerCache: current length must be in [0, total length]");
+    *past_sequence_length_->GetTensorMutableData<int32_t>() = total_length - current_length;
+    return;
+  }
   if (!first_update_) {
     for (size_t index = 0; index < layer_indices_.size(); ++index) {
       pasts_[index] = std::move(presents_[index]);
@@ -99,6 +127,8 @@ void IndexerCache::RewindTo(size_t index) {
   if (layer_indices_.empty()) return;
   if (index != 0)
     throw std::runtime_error("IndexerCache only supports rewinding to zero");
+  if (share_buffer_)
+    return;
   first_update_ = true;
   for (size_t cache_index = 0; cache_index < layer_indices_.size(); ++cache_index) {
     pasts_[cache_index].reset();

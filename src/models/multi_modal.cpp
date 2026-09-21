@@ -781,7 +781,7 @@ DeviceSpan<float> DecoderState::RunPrefillWithChunking(int current_length, Devic
     if (ple_state_)
       ple_state_->Update();
     if (indexer_cache_)
-      indexer_cache_->Update(next_indices, length);
+      indexer_cache_->Update(next_indices, length, static_cast<int>(current_chunk_size));
     logits_.Update(chunk_tokens, current_chunk_size);
 
     // Feed only this chunk's slice of the pre-computed embeddings to the decoder.
@@ -813,7 +813,7 @@ void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int tot
   if (ple_state_)
     ple_state_->Update();
   if (indexer_cache_)
-    indexer_cache_->Update(beam_indices, total_length);
+    indexer_cache_->Update(beam_indices, total_length, static_cast<int>(new_length));
   logits_.Update(next_tokens, new_length);
   inputs_embeds_.UpdateSequenceLength(new_length);
   if (per_layer_inputs_) per_layer_inputs_->UpdateSequenceLength(new_length);
@@ -829,7 +829,7 @@ void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int tot
   if (ple_state_)
     ple_state_->Update();
   if (indexer_cache_)
-    indexer_cache_->Update(beam_indices, total_length);
+    indexer_cache_->Update(beam_indices, total_length, static_cast<int>(new_length));
   logits_.Update(next_tokens, new_length);
   inputs_embeds_.UpdateSequenceLength(new_length);
   if (per_layer_inputs_) per_layer_inputs_->UpdateSequenceLength(new_length);
