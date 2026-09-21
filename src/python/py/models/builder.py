@@ -29,6 +29,7 @@ from builders import (
     HunyuanDenseV1Model,
     InternLM2Model,
     LFM2Model,
+    LFM2MoEModel,
     LlamaModel,
     Mistral3TextModel,
     MistralModel,
@@ -194,6 +195,21 @@ def check_extra_options(
             raise ValueError("state_update_capacity requires use_paged_attention=true.")
         extra_options["state_update_capacity"] = state_update_capacity
 
+    if "max_draft_tokens" in extra_options:
+        # Keep this limit synchronized with Speculative_Element::kMaxDraftTokens in src/config.cpp
+        # and the model-builder README.
+        max_draft_tokens_limit = 16
+        message = f"max_draft_tokens must be an integer between 1 and {max_draft_tokens_limit}."
+        try:
+            # Parsed from text so a fractional value is rejected instead of truncated; the runtime
+            # treats speculative.max_draft_tokens as integral.
+            max_draft_tokens = int(str(extra_options["max_draft_tokens"]).strip())
+        except (TypeError, ValueError) as e:
+            raise ValueError(message) from e
+        if not 1 <= max_draft_tokens <= max_draft_tokens_limit:
+            raise ValueError(message)
+        extra_options["max_draft_tokens"] = max_draft_tokens
+
     if "mtp_quant_config" in extra_options:
         mtp_quant_config = extra_options["mtp_quant_config"]
         if not isinstance(mtp_quant_config, QuantConfig):
@@ -222,8 +238,17 @@ def check_extra_options(
                 raise ValueError(f"{key} must be a positive integer.")
             extra_options[key] = value
 
-        if "paged_block_size" in extra_options and extra_options["paged_block_size"] % 256 != 0:
-            raise ValueError("paged_block_size must be a multiple of 256.")
+        # Mirrors CheckInputs in onnxruntime paged_attention_helper.h, which is the only hard
+        # bound. ORT's FlashAttention path wants block_size % tile == 0 on top of it, where tile
+        # is 256 for head_size <= 64, 128 for head_size <= 128 and 64 above that, and falls back
+        # to another backend otherwise. That is a throughput choice per head size, not a validity
+        # rule, and the head sizes involved are not known here, so only the op-level rule is
+        # enforced.
+        # TODO: give a block drafter its own block size, so a target can take a small vLLM-style
+        # page (16 tokens) without moving the drafter off its own FlashAttention tile.
+        block_size = extra_options.get("paged_block_size")
+        if block_size is not None and (block_size < 16 or block_size & (block_size - 1) != 0):
+            raise ValueError("paged_block_size must be a power of two and at least 16.")
         if extra_options.get("max_batch_size", 1) > 256:
             raise ValueError("max_batch_size must be at most 256.")
         if execution_provider == "webgpu" and "num_blocks" not in extra_options:
@@ -477,6 +502,63 @@ def set_onnx_dtype(precision: str, extra_options: dict[str, Any]) -> ir.DataType
     return to_onnx_dtype[precision]
 
 
+def checkpoint_weight_formats(quantization_config) -> set[tuple[int, str]]:
+    """Return the weight formats a prequantized checkpoint declares, as ``{(bits, kind)}``.
+
+    ``kind`` is ``"int"`` or ``"float"``. An empty set means the checkpoint states its format
+    in a shape this function does not read, in which case callers must not infer a mismatch.
+    """
+    # ModelOpt names the whole checkpoint's format in `quant_algo` instead of per-group metadata.
+    modelopt_algos = {
+        "FP8": (8, "float"),
+        "FP8_PB_WO": (8, "float"),
+        "NVFP4": (4, "float"),
+        "NVFP4_AWQ": (4, "float"),
+        "W4A8_AWQ": (4, "int"),
+        "INT4_AWQ": (4, "int"),
+        "INT8_SQ": (8, "int"),
+    }
+    formats = set()
+    for group in (quantization_config.get("config_groups") or {}).values():
+        weights = (group or {}).get("weights") or {}
+        if "num_bits" in weights:
+            formats.add((int(weights["num_bits"]), str(weights.get("type") or "int")))
+    if not formats:
+        algo = modelopt_algos.get(str(quantization_config.get("quant_algo") or "").upper())
+        if algo:
+            formats.add(algo)
+    if not formats and "bits" in quantization_config:
+        formats.add((int(quantization_config["bits"]), "int"))
+    return formats
+
+
+def warn_if_checkpoint_overrides_precision(config, precision, onnx_dtype):
+    """Say so when ``--precision`` cannot reach weights the checkpoint already quantized.
+
+    Model Builder re-exports a prequantized checkpoint's tensors in their own format, so
+    ``--precision int4`` against, say, an FP8/NVFP4 checkpoint only quantizes whatever that
+    checkpoint left in floating point. That is a legitimate mixed build rather than an error,
+    but it is otherwise silent: the only giveaway is an artifact far larger than an int4 model.
+    """
+    quantization_config = getattr(config, "quantization_config", None)
+    quantized_dtypes = {ir.DataType.INT4, ir.DataType.UINT4, ir.DataType.INT8, ir.DataType.UINT8}
+    if not quantization_config or onnx_dtype not in quantized_dtypes:
+        return
+    requested_bits = 4 if onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4} else 8
+    formats = checkpoint_weight_formats(quantization_config)
+    if not formats or formats == {(requested_bits, "int")}:
+        return
+
+    described = ", ".join(f"{bits}-bit {kind}" for bits, kind in sorted(formats))
+    method = quantization_config.get("quant_method", "prequantized")
+    print(
+        f"WARNING: this is a '{method}' checkpoint whose weights are already {described}. Model Builder "
+        f"re-exports those tensors unchanged, so `--precision {precision}` reaches only the parts of the "
+        f"model the checkpoint left unquantized. Build from an unquantized checkpoint to quantize "
+        f"everything to {precision}."
+    )
+
+
 @torch.no_grad
 def create_model(
     model_name,
@@ -547,6 +629,14 @@ def create_model(
         onnx_model = InternLM2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Lfm2ForCausalLM":
         onnx_model = LFM2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Lfm2MoeForCausalLM":
+        onnx_model = LFM2MoEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        onnx_model.model_type = "lfm2_moe"
+    elif config.architectures[0] == "Lfm2VlForConditionalGeneration":
+        onnx_model = LFM2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        # With the embedding layer excluded the decoder is one stage of the LFM2-VL vision pipeline;
+        # otherwise it is a standalone text model that happens to come from a VLM checkpoint.
+        onnx_model.model_type = "lfm2_vl" if onnx_model.exclude_embeds else "lfm2_vl_text"
     elif config.architectures[0] == "LlamaForCausalLM":
         onnx_model = LlamaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "MistralForCausalLM":
@@ -619,6 +709,10 @@ def create_model(
         onnx_model = Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     else:
         raise NotImplementedError(f"The {hf_name} model is not currently supported.")
+
+    # Checked after the architecture dispatch above, which is where a checkpoint's quantization
+    # metadata is dropped when the builder does not honor it.
+    warn_if_checkpoint_overrides_precision(config, precision, onnx_dtype)
 
     if not config_only:
         # Make ONNX model
@@ -708,7 +802,9 @@ def get_args():
                     Default value is 32.
                 qmoe_block_size = <=0/16/32/64/128/256: Specify the block size for QMoE expert weights quantization.
                     Set <= 0 for per-channel quantization. Default is 128 for TRT-RTX, 32 for others.
-                    CUDA block-wise QMoE supports 32/64/128 only.
+                    CPU, CUDA, and WebGPU block-wise QMoE support 32/64/128 only; TRT-RTX also accepts 16/256.
+                    WebGPU requires hidden_size and moe_intermediate_size to be divisible by qmoe_block_size.
+                    Raw block-wise INT4 QMoE requires both dimensions to be even.
                     Supported EPs: CPU, CUDA, WebGPU, TRT-RTX.
                 qmoe_weights_prepacked = -1/0/1: Specify the CUDA QMoE expert weight layout.
                     -1 lets the builder choose automatically, 0 exports raw weights for runtime prepacking, and 1 exports CUTLASS-prepacked weights.
@@ -796,6 +892,11 @@ def get_args():
                 dflash2_num_draft_tokens = Override the number of draft tokens the DFlash 2 block
                     drafter proposes per step. Must be positive and no greater than the draft checkpoint's
                     block size minus its anchor token. That checkpoint limit is the default.
+                max_draft_tokens = Write `speculative.max_draft_tokens` into genai_config.json, capping how
+                    many drafted tokens the engine verifies per step. Must be between 1 and 16. Unlike
+                    dflash2_num_draft_tokens this does not change the exported drafter, so a model built
+                    once can be re-tuned by editing the config. Default is unset, which leaves the runtime
+                    default of 4 in effect.
                 dflash2_fuse_gate_up = Experimental DFlash 2 MLP gate/up projection fusion.
                     Accepts true or false (default). Requires dflash2_path. Combines gate/up
                     weights into one MatMul or MatMulNBits followed by Split. Preserves BF16
@@ -858,9 +959,16 @@ def get_args():
                     attention with zero softcap, FP16 KV caches, and no Q/K normalization inputs; for example,
                     Gemma2's non-zero attention softcap is unsupported. Cannot be combined with exclude_embeds or
                     exclude_lm_head.
-                paged_block_size = 256/512/768/...: Paged KV-cache block size used when use_paged_attention is set.
-                    Must be a positive multiple of 256 (required by the ONNX Runtime PagedAttention CUDA kernel).
-                    Default is 256. Also written to the `engine.dynamic_batching` section of genai_config.json.
+                paged_block_size = 16/32/64/128/256/...: Paged KV-cache block size used when use_paged_attention is set.
+                    Must be a power of two and at least 16, which is what the ONNX Runtime PagedAttention op
+                    accepts. Default is 256. Also written to the `engine.dynamic_batching` section of
+                    genai_config.json. The vendored FlashAttention paged kernel additionally needs the block
+                    to be a multiple of its tile (256 for head_size <= 64, 128 for head_size <= 128, else 64);
+                    a smaller block is still valid but makes ORT fall back to another attention backend. A
+                    quantized KV cache is exempt from the tile requirement alone: FlashAttention still serves
+                    it, through a dense dequantized path that has no page alignment to satisfy. A block
+                    drafter (dflash2_path/dspark_path) shares this block size and usually has a smaller head
+                    size, so it reaches its tile at a larger block than the target does.
                 paged_chunk_size = Prefill chunk size written to `search.chunk_size` in genai_config.json.
                     Applies only when use_paged_attention is set; it is ignored otherwise. Caps the
                     prompt tokens ONE request contributes to a

@@ -548,12 +548,6 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity)
     throw std::runtime_error(
         "Fixed state pool requires a model state device.");
   }
-  if (impl_->device->GetType() != DeviceType::CPU &&
-      impl_->device->GetType() != DeviceType::CUDA) {
-    throw std::runtime_error(
-        "Fixed state pools currently support only CPU and CUDA devices.");
-  }
-
   impl_->owner = this;
   const ModelStateManifest manifest{impl_->model->config_->model.decoder};
   manifest.ValidateSession(impl_->model->session_info_);
@@ -696,6 +690,16 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity)
   impl_->state_update_capacity = state_update_capacity;
   impl_->state_update_capture_count_name = state_update_capture_count_name;
   impl_->state_update_active_name = state_update_active_name;
+  if (!impl_->device->SupportsTransactionalFixedState()) {
+    throw std::runtime_error(
+        "Fixed state pools require qualified transactional device semantics.");
+  }
+  if (SupportsStateUpdates() &&
+      impl_->device->GetType() != DeviceType::CPU &&
+      impl_->device->GetType() != DeviceType::CUDA) {
+    throw std::runtime_error(
+        "Compact fixed state replay currently supports only CPU and CUDA devices.");
+  }
   if (impl_->state_update_capacity != 0) {
     impl_->persistent_bytes = CheckedAdd(
         impl_->persistent_bytes,
@@ -1011,7 +1015,7 @@ FixedStateReservation FixedStatePool::Reserve(
   // Normalize only minority rows by copying their visible state to the cohort's canonical bank.
   // The copy does not advance request state: both banks contain the same committed value, and the
   // host bank selector changes only after every copy completes successfully.
-  bool direct_layout = true;
+  bool direct_layout = impl_->device->SupportsOffsetTensorViews();
   const size_t first_direct_slot = plan.front().slot_index;
   size_t bank_one_count = 0;
   for (size_t row = 0; row < plan.size(); ++row) {

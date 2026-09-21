@@ -55,6 +55,19 @@ def _composite(aux_layers=AUX_LAYERS, use_paged_attention=True, dflash2_path=Non
         aux_hidden_state_layers=list(aux_layers),
         num_layers=32,
         filename="model.onnx",
+        exclude_embeds=False,
+        exclude_lm_head=False,
+        onnx_dtype=ir.DataType.FLOAT16,
+        quantization_algo="default",
+        tied_quantized_embeddings=False,
+        is_lm_head_quantized=lambda: False,
+        quant_attrs={
+            "op_types_to_quantize": ("MatMul",),
+            "nodes_to_exclude": [],
+            "is_symmetric": True,
+            "matmul_block_size": 32,
+            "use_qdq": False,
+        },
         attention_attrs={"paged_block_size": 256},
         context_length=32768,
         original_context_length=131072,
@@ -251,6 +264,26 @@ def test_non_fp8_lm_head_does_not_require_a_scale(tmp_path):
     assert initializer.dtype == ir.DataType.FLOAT16
     assert tuple(initializer.shape) == (builder.hidden_size, builder.vocab_size)
     assert builder.values[output].dtype == ir.DataType.FLOAT16
+
+
+def test_quantized_target_head_is_adopted_by_the_dspark_drafter(tmp_path):
+    builder = DSparkBuilder(
+        _draft_checkpoint(tmp_path),
+        str(tmp_path),
+        ir.DataType.FLOAT16,
+        paged_block_size=256,
+        max_position_embeddings=128,
+        lm_head_quant={"bits": 4, "block_size": 32, "prepack": 0, "adopt_target": True},
+    )
+    builder.weights = {"lm_head.weight": torch.ones((builder.vocab_size, builder.hidden_size), dtype=torch.float16)}
+
+    builder.make_lm_head("hidden_states")
+
+    node = next(node for node in builder.graph if node.name == "/lm_head/MatMul")
+    assert node.op_type == "MatMulNBits"
+    # A dense DSpark head would be a second, unshareable copy scored differently from the target.
+    assert "lm_head.MatMul.weight" not in builder.graph.initializers
+    assert builder.lm_head_adoption is not None
 
 
 def test_fp8_lm_head_requires_a_scale(tmp_path):

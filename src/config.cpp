@@ -1414,6 +1414,8 @@ struct Vision_Element : JSON::Element {
       v_.num_visual_tokens = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "window_size") {
       v_.window_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "max_num_patches") {
+      v_.max_num_patches = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1994,33 +1996,37 @@ struct Search_Element : JSON::Element {
 struct Speculative_Element : JSON::Element {
   explicit Speculative_Element(Config::Speculative& v) : v_{v} {}
 
-  // K (draft tokens per round) must be within [kMinK, kMaxK].
+  // Draft widths (max_draft_tokens, min_adaptive_k) must be within [kMinK, kMaxDraftTokens].
+  // This is a parse-time sanity bound, not a capability: the engine clamps the width again at
+  // dispatch against the drafter geometry, the state-update capacity and kMaxDraftTokensPerStep.
   static constexpr int kMinK = 1;
-  static constexpr int kMaxK = 16;
+  static constexpr int kMaxDraftTokens = 16;
+  // ngram_size is the lookup key length, not a token count, so it does not share the draft bound.
+  static constexpr int kMaxNGramSize = 16;
 
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "max_draft_tokens") {
       int k = SafeDoubleToInt(JSON::Get<double>(value), name);
-      if (k < kMinK || k > kMaxK)
+      if (k < kMinK || k > kMaxDraftTokens)
         throw std::runtime_error(
             "speculative.max_draft_tokens must be between " + std::to_string(kMinK) + " and " +
-            std::to_string(kMaxK) + " Got: " + std::to_string(k) + ".");
+            std::to_string(kMaxDraftTokens) + " Got: " + std::to_string(k) + ".");
       v_.max_draft_tokens = k;
     } else if (name == "ngram_size") {
       const int ngram_size = SafeDoubleToInt(JSON::Get<double>(value), name);
-      if (ngram_size != 0 && (ngram_size < 2 || ngram_size > kMaxK))
+      if (ngram_size != 0 && (ngram_size < 2 || ngram_size > kMaxNGramSize))
         throw std::runtime_error(
-            "speculative.ngram_size must be 0 or between 2 and " + std::to_string(kMaxK) +
+            "speculative.ngram_size must be 0 or between 2 and " + std::to_string(kMaxNGramSize) +
             ". Got: " + std::to_string(ngram_size) + ".");
       v_.ngram_size = ngram_size;
     } else if (name == "ngram_chained_lookup") {
       v_.ngram_chained_lookup = JSON::Get<bool>(value);
     } else if (name == "min_adaptive_k") {
       const int min_adaptive_k = SafeDoubleToInt(JSON::Get<double>(value), name);
-      if (min_adaptive_k < 0 || min_adaptive_k > kMaxK)
+      if (min_adaptive_k < 0 || min_adaptive_k > kMaxDraftTokens)
         throw std::runtime_error(
             "speculative.min_adaptive_k must be 0 or between " + std::to_string(kMinK) +
-            " and " + std::to_string(kMaxK) + ". Got: " +
+            " and " + std::to_string(kMaxDraftTokens) + ". Got: " +
             std::to_string(min_adaptive_k) + ".");
       v_.min_adaptive_k = min_adaptive_k;
     } else if (name == "cooldown") {
@@ -2542,6 +2548,38 @@ void ValidateModelPaths(const Config& config) {
 
 }  // namespace
 
+// The engine picks the per-step draft width as the minimum of every bound it knows, so a config
+// asking for more than the drafter can deliver is silently clamped rather than rejected. Surface
+// that at load time, where the value can still be edited. The engine-side bounds (state-update
+// capacity, paged query limit, kMaxDraftTokensPerStep) depend on which speculative path is
+// actually hosted, so Engine setup warns about those instead.
+void WarnOnClampedDraftWidth(const Config& config) {
+  if (!g_log.enabled || !g_log.warning) {
+    return;
+  }
+  // DFlash 2 and its DSpark alias are the only drafters whose geometry is known from the config
+  // alone. MTP's depends on an ONNX output that no session has loaded yet.
+  const auto& dflash2 = config.model.dflash2;
+  if (dflash2.filename.empty() || dflash2.num_draft_tokens <= 0) {
+    return;
+  }
+
+  const int requested = config.speculative.max_draft_tokens;
+  if (requested <= dflash2.num_draft_tokens) {
+    return;
+  }
+  const std::string alias = dflash2.is_dspark ? "dspark" : "dflash2";
+  try {
+    Log("warning", "speculative.max_draft_tokens is " + std::to_string(requested) + " but model." +
+                       alias + ".num_draft_tokens is " + std::to_string(dflash2.num_draft_tokens) +
+                       ", which caps each step to at most " +
+                       std::to_string(dflash2.num_draft_tokens) +
+                       " drafted tokens. The engine may cap it further.");
+  } catch (...) {
+    // Diagnostics must not turn a loadable config into a load failure.
+  }
+}
+
 Config::Config(const fs::path& path, std::string_view json_overlay) : config_path{path} {
   ParseConfig(path / "genai_config.json", json_overlay, *this);
   ModelStateManifest::ValidateConfig(model.decoder);
@@ -2596,6 +2634,8 @@ Config::Config(const fs::path& path, std::string_view json_overlay) : config_pat
   // Validate all config-specified filenames/paths after parsing so downstream loaders
   // (model/processor/adapter creation) can rely on them being safe.
   ValidateModelPaths(*this);
+
+  WarnOnClampedDraftWidth(*this);
 }
 
 void Config::AddMapping(const std::string& nominal_name, const std::string& graph_name) {

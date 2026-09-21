@@ -15,8 +15,10 @@ file(GLOB test_srcs CONFIGURE_DEPENDS
 # Keep tests with dedicated white-box executables out of the public-API unit_tests target.
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/dflash2_config_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/kv_cache_tests.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/lfm2_vl_image_geometry_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/reinit_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/search_checkpoint_tests.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry_helpers_tests.cpp")
 
 if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)
   message(STATUS "Including CUDA kernel tests in the build.")
@@ -99,6 +101,17 @@ if (NOT MSVC)
 endif()
 
 add_test(NAME UnitTests COMMAND unit_tests)
+
+add_executable(telemetry_helpers_tests
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/telemetry_helpers_tests.cpp")
+target_include_directories(telemetry_helpers_tests PRIVATE
+  ${CMAKE_SOURCE_DIR}/src
+)
+target_link_libraries(telemetry_helpers_tests PRIVATE GTest::gtest)
+set_target_properties(telemetry_helpers_tests PROPERTIES
+  FOLDER "Tests"
+)
+add_test(NAME TelemetryHelpersTests COMMAND telemetry_helpers_tests)
 
 # Standalone shutdown / re-initialization tests. Isolated in their own executable because they call
 # OgaShutdown(), which resets process-global GenAI state (env, device interfaces, add-on libraries,
@@ -189,6 +202,7 @@ file(GLOB engine_unit_test_srcs CONFIGURE_DEPENDS
 )
 list(APPEND engine_unit_test_srcs
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/dflash2_config_test.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/lfm2_vl_image_geometry_test.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/search_checkpoint_tests.cpp"
 )
 add_executable(engine_unit_tests ${engine_unit_test_srcs})

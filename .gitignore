@@ -31,6 +31,7 @@ examples/csharp/ModelChat/models
 
 !test/models/gemma4/*
 !test/models/hf-internal-testing/*
+!test/models/lfm2-vl/*
 !test/models/marian-batch/*
 !test/models/marian-batch-beams/*
 !test/models/marian-batch-values/

@@ -273,6 +273,10 @@ struct Config {
                                  // 0 = auto-compute as patch_size * spatial_merge_size * 2
                                  // Qwen2.5-VL default: 56 (14*4), Qwen3-VL default: 64 (16*4)
 
+      // LFM2-VL: patch-sequence length every image is padded to so one batch shares a vision run.
+      // 0 = pad to the longest image in the batch. Shipped models: max_image_tokens * downsample_factor^2 = 1024.
+      int max_num_patches{0};
+
       std::string config_filename{"processor_config.json"};
       std::optional<std::string> adapter_filename{};
 
@@ -696,6 +700,12 @@ void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);
 int SafeDoubleToInt(double x, std::string_view name);
+
+// Logs a warning when the drafter's exported geometry is narrower than
+// speculative.max_draft_tokens. The engine clamps to the smallest bound at dispatch rather than
+// failing, so this is the only signal that a configured width will not be used. Bounds that
+// depend on how the model is hosted are reported by the engine instead.
+void WarnOnClampedDraftWidth(const Config& config);
 
 // Normalizes historical casings, short aliases, and full ORT names (e.g.
 // "CUDAExecutionProvider") to the canonical dispatch-table name; unknown names pass through.
