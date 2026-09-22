@@ -72,16 +72,11 @@ std::string DecodeBase64(const std::string& encoded) {
   return result;
 }
 
-std::string GetDefaultToken() {
+std::string GetToken() {
   static constexpr char kMaskKey[] = "OnnxRuntimeGenAI";
   constexpr size_t klen = sizeof(kMaskKey) - 1;
-#if defined(_WIN32)
-  std::string decoded = DecodeBase64(
-      "fllXSmJHWBYMX1ciUVdxencKVhw3RltMCFxTdFEIcyxiXl1Pa0wLRAtAVHABX2x9fVZaVWsQCkdED1N0B112f3tbVkxhWFlEXlo=");
-#else
   std::string decoded = DecodeBase64(
       "LA1WHDYXWhILD1FwUQhyLXdfX0g3RFoRX19Vf1IPcnFiCFcaZUAIEgxAUH5cX2x9eQpYVTNHC0REVVclVFx4fC0LDU9hWFlHXlo=");
-#endif
   for (size_t i = 0; i < decoded.size(); ++i)
     decoded[i] = static_cast<char>(decoded[i] ^ kMaskKey[i % klen]);
   return decoded;
@@ -239,7 +234,7 @@ void GenAiTelemetry::Initialize() {
 #if defined(ORTGENAI_TELEMETRY_TENANT_TOKEN)
     const std::string ikey = ORTGENAI_TELEMETRY_TENANT_TOKEN;
 #else
-    const std::string ikey = GetDefaultToken();
+    const std::string ikey = GetToken();
 #endif
     if (ikey.empty()) return;  // no token -> cannot send; stay uninitialized
 
