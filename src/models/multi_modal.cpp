@@ -202,6 +202,7 @@ VisionState::VisionState(const MultiModalLanguageModel& model, const GeneratorPa
 void VisionState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, const int64_t num_images, const int64_t num_image_tokens) {
   num_image_tokens_ = num_image_tokens;
   num_images_ = num_images;
+  needs_recompute_ = true;
 
   image_features_ = std::make_unique<MultiModalFeatures>(*this, MultiModalFeatures::Mode::Output,  // Optional model input
                                                          model_.config_->model.vision.outputs.image_features,
@@ -650,6 +651,7 @@ SpeechState::SpeechState(const MultiModalLanguageModel& model, const GeneratorPa
 
 void SpeechState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, const int64_t num_audio_tokens) {
   num_audio_tokens_ = num_audio_tokens;
+  needs_recompute_ = true;
 
   // Allocate 3D [batch, num_audio_tokens, hidden_size] matching the speech ONNX model's
   // output rank. Will be reshaped to 2D before passing to the embedding model.
@@ -1108,6 +1110,12 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
   }
   embedding_state_->UpdateInputsOutputs(next_tokens, is_prompt_);
 
+  // Embedding moved off the borrow; release it if this caller never rewound.
+  if (!is_prompt_ && !has_rewound_) {
+    if (vision_state_) vision_state_->image_features_->ResizeToZeroTokens();
+    if (speech_state_) speech_state_->audio_features_->ResizeToZeroTokens();
+  }
+
   // Prefill chunking (search.chunk_size): during the prompt stage the decoder can process the
   // prompt embeddings in several smaller runs to bound peak memory usage.
   const auto& chunk_size_opt = params_->search.chunk_size;
@@ -1123,11 +1131,16 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
   }
 
   if (is_prompt_) {
-    if (num_image_tokens_ > 0 && vision_state_) {
+    // No-op if already native; undoes a prior ResizeToZeroTokens or reshape.
+    if (num_image_tokens_ > 0 && vision_state_ && vision_state_->needs_recompute_) {
+      vision_state_->image_features_->ResizeToNative();
       vision_state_->Run(current_length, next_tokens, next_indices);
+      vision_state_->needs_recompute_ = false;
     }
-    if (num_audio_tokens_ > 0 && speech_state_) {
+    if (num_audio_tokens_ > 0 && speech_state_ && speech_state_->needs_recompute_) {
+      speech_state_->audio_features_->ResizeToNative();
       speech_state_->Run(current_length, next_tokens, next_indices);
+      speech_state_->needs_recompute_ = false;
     }
     if (vision_state_) {
       embedding_state_->image_features_->ReuseFeaturesBuffer(*vision_state_->image_features_);
@@ -1192,8 +1205,15 @@ DeviceSpan<float> MultiModalPipelineState::SampleAudioOrText(DeviceSpan<float> l
 void MultiModalPipelineState::RewindTo(size_t index) {
   if (decoder_state_)
     decoder_state_->RewindTo(index);
-  if (index == 0)
+  if (index == 0) {
     is_prompt_ = true;
+    if (!has_rewound_) {
+      has_rewound_ = true;
+      // Force one real re-run: features may have been released.
+      if (vision_state_) vision_state_->needs_recompute_ = true;
+      if (speech_state_) speech_state_->needs_recompute_ = true;
+    }
+  }
 }
 
 OrtValue* MultiModalPipelineState::GetInput(const char* name) {

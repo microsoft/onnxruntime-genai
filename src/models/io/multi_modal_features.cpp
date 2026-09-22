@@ -75,17 +75,31 @@ void MultiModalFeatures::ReuseFeaturesBuffer(MultiModalFeatures& other) {
     throw std::runtime_error("Incorrect usage of the MultiModalFeatures inputs and outputs.");
   }
 
-  // Take ownership of other's computed tensor as this input.
+  // Borrow other's tensor; other keeps ownership so a replay can reuse it.
   shape_ = other.shape_;
-  features_ = std::move(other.features_);
-  state_.inputs_[index_] = features_.get();
+  features_.reset();
+  state_.inputs_[index_] = other.features_.get();
+}
 
-  // Give other a real copy so its output binding has valid data before its next Run() overwrites it.
-  other.shape_ = other.native_shape_;
-  other.features_ = OrtValue::CreateTensor(other.model_.p_device_->GetAllocator(), other.shape_, other.type_);
-  ByteWrapTensor(*other.model_.p_device_, *other.features_)
-      .CopyFrom(ByteWrapTensor(*other.model_.p_device_, *features_));
-  other.state_.outputs_[other.index_] = other.features_.get();
+void MultiModalFeatures::ResizeToNative() {
+  ResizeTo(native_shape_);
+}
+
+void MultiModalFeatures::ResizeToZeroTokens() {
+  auto zeroed_shape = shape_;
+  zeroed_shape[zeroed_shape.size() - 2] = 0;
+  ResizeTo(std::move(zeroed_shape));
+}
+
+void MultiModalFeatures::ResizeTo(std::vector<int64_t> new_shape) {
+  if (mode_ != MultiModalFeatures::Mode::Output) {
+    throw std::runtime_error("Incorrect usage of the MultiModalFeatures inputs and outputs.");
+  }
+  if (shape_ == new_shape) return;
+
+  shape_ = std::move(new_shape);
+  features_ = OrtValue::CreateTensor(model_.p_device_->GetAllocator(), shape_, type_);
+  state_.outputs_[index_] = features_.get();
 }
 
 void MultiModalFeatures::AllocateEmptyFeatures() {
