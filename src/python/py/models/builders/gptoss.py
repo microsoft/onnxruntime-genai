@@ -140,6 +140,10 @@ class GPTOSSModel(Model):
         # gate_up_proj arrives [E, H, 2I]; the kernel wants [E, 2I, H].
         gate_up = gate_up.transpose(0, 2, 1) if gate_up.shape[1] == hidden_size else gate_up
         assert gate_up.shape == (num_experts, two_i, hidden_size), gate_up.shape
+        # down_proj arrives [E, I, H] from HF; the kernel wants [E, H, I] (per-expert
+        # [out=H, in=I], packed along I). hidden==intermediate for gpt-oss-20b, so the
+        # shape guard below cannot catch a missing transpose — transpose explicitly.
+        down = down.transpose(0, 2, 1)
         assert down.shape == (num_experts, hidden_size, intermediate_size), down.shape
 
         fc1_w = np.zeros((num_experts, two_i, hidden_size // 8), np.uint32)
