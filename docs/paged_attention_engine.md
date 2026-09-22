@@ -1397,9 +1397,12 @@ positive fixed extent before allocating device storage. It also rejects a zero b
 two different fixed batch extents on input and output,
 dynamic or mismatched non-batch axes, and dtype mismatches. Every dtype and
 per-request row size is derived from that validated geometry, and state is
-allocated with the model state-device allocator. The initial implementation
-supports CPU and CUDA; other devices are rejected until they provide the required
-offset-copy and completion guarantees.
+allocated with the model state-device allocator. Devices are admitted only when
+they qualify the allocation, fill, ranged-copy, tensor-binding, and synchronization
+semantics needed to publish state transactionally. CPU, CUDA, and WebGPU satisfy
+that contract. CPU and CUDA bind offset tensor views directly; WebGPU uses staging
+bindings. Compact partial-acceptance replay is device-native on CUDA and currently
+stages the required ranges through CPU on WebGPU for correctness.
 
 Each resident request owns a stable slot identified by request identity and an
 allocation generation. A released and reused slot receives a new generation, so

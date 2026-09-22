@@ -695,10 +695,9 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity)
         "Fixed state pools require qualified transactional device semantics.");
   }
   if (SupportsStateUpdates() &&
-      impl_->device->GetType() != DeviceType::CPU &&
-      impl_->device->GetType() != DeviceType::CUDA) {
+      !impl_->device->SupportsCompactStateReplay()) {
     throw std::runtime_error(
-        "Compact fixed state replay currently supports only CPU and CUDA devices.");
+        "Compact fixed state replay is not supported by this device.");
   }
   if (impl_->state_update_capacity != 0) {
     impl_->persistent_bytes = CheckedAdd(

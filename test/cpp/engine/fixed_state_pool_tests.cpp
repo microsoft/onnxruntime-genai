@@ -13,6 +13,7 @@
 #include "engine/fixed_state_pool.h"
 #include "engine_test_helpers.h"
 #include "models/model_state_manifest.h"
+#include "models/session_options.h"
 
 namespace Generators {
 namespace test {
@@ -31,10 +32,12 @@ class OffsetTensorViewsUnsupportedDevice final : public DeviceInterface {
  public:
   explicit OffsetTensorViewsUnsupportedDevice(
       DeviceInterface& inner, DeviceType type = DeviceType::CPU,
-      bool supports_transactional_fixed_state = true)
+      bool supports_transactional_fixed_state = true,
+      bool supports_compact_state_replay = true)
       : inner_{inner},
         type_{type},
-        supports_transactional_fixed_state_{supports_transactional_fixed_state} {}
+        supports_transactional_fixed_state_{supports_transactional_fixed_state},
+        supports_compact_state_replay_{supports_compact_state_replay} {}
 
   DeviceType GetType() const override { return type_; }
   void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
@@ -67,11 +70,15 @@ class OffsetTensorViewsUnsupportedDevice final : public DeviceInterface {
   bool SupportsTransactionalFixedState() const override {
     return supports_transactional_fixed_state_;
   }
+  bool SupportsCompactStateReplay() const override {
+    return supports_compact_state_replay_;
+  }
 
  private:
   DeviceInterface& inner_;
   DeviceType type_;
   bool supports_transactional_fixed_state_;
+  bool supports_compact_state_replay_;
 };
 
 class ScopedKeyValueCacheDevice {
@@ -601,7 +608,7 @@ TEST_F(FixedStatePoolTest, RejectsGenericDeviceWithoutTransactionalFixedStateSup
 TEST_F(FixedStatePoolTest, GenericDeviceRejectsCompactStateReplay) {
   auto replay_model = LoadSyntheticHybridModel();
   OffsetTensorViewsUnsupportedDevice generic_device{
-      *replay_model->p_device_kvcache_, DeviceType::DML};
+      *replay_model->p_device_kvcache_, DeviceType::DML, true, false};
   ScopedKeyValueCacheDevice scoped_device{*replay_model, generic_device};
 
   try {
@@ -610,7 +617,7 @@ TEST_F(FixedStatePoolTest, GenericDeviceRejectsCompactStateReplay) {
   } catch (const std::runtime_error& error) {
     EXPECT_STREQ(
         error.what(),
-        "Compact fixed state replay currently supports only CPU and CUDA devices.");
+        "Compact fixed state replay is not supported by this device.");
   }
 }
 
@@ -938,14 +945,11 @@ TEST_F(FixedStatePoolTest, DirectBindingStorageOutlivesPool) {
   }
 }
 
-#if USE_CUDA
-TEST(CudaFixedStatePoolTest, CompactPartialAcceptanceReplaysConvAndGdn) {
-  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-hybrid");
-  ClearProviders(*config);
-  SetProviderOption(*config, "cuda", {}, {});
-  auto model = CreateModel(GetOrtEnv(), std::move(config));
+void RunDeviceCompactPartialAcceptanceReplay(
+    const std::shared_ptr<Model>& model, bool expect_direct_bindings) {
   auto& device = *model->p_device_kvcache_;
   FixedStatePool pool{model, 1};
+  EXPECT_TRUE(device.SupportsCompactStateReplay());
 
   const auto fill_tensor = [&](OrtValue& tensor, std::span<const float> values) {
     auto tensor_span = WrapTensor<float>(device, tensor);
@@ -975,7 +979,7 @@ TEST(CudaFixedStatePoolTest, CompactPartialAcceptanceReplaysConvAndGdn) {
   }
   {
     auto reservation = pool.Reserve(One(kRequestA, 4, 3));
-    ASSERT_TRUE(reservation.UsesDirectBindings());
+    EXPECT_EQ(reservation.UsesDirectBindings(), expect_direct_bindings);
     for (const auto& binding : reservation.Bindings()) {
       fill_tensor_value(*binding.output, 99.0f);
     }
@@ -1011,7 +1015,27 @@ TEST(CudaFixedStatePoolTest, CompactPartialAcceptanceReplaysConvAndGdn) {
   expect_tensor(*reservation.Bindings()[2].input, expected_gdn);
   expect_tensor(*reservation.Bindings()[3].input, expected_gdn);
 }
+
+#if USE_CUDA
+TEST(CudaFixedStatePoolTest, CompactPartialAcceptanceReplaysConvAndGdn) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-hybrid");
+  ClearProviders(*config);
+  SetProviderOption(*config, "cuda", {}, {});
+  RunDeviceCompactPartialAcceptanceReplay(
+      CreateModel(GetOrtEnv(), std::move(config)), true);
+}
 #endif
+
+TEST(WebGpuFixedStatePoolTest, CompactPartialAcceptanceReplaysConvAndGdn) {
+  if (FindRegisteredEpDevices("WebGpuExecutionProvider").empty()) {
+    GTEST_SKIP() << "No WebGPU EP device is registered.";
+  }
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-hybrid");
+  ClearProviders(*config);
+  SetProviderOption(*config, "webgpu", {}, {});
+  RunDeviceCompactPartialAcceptanceReplay(
+      CreateModel(GetOrtEnv(), std::move(config)), false);
+}
 
 TEST_F(FixedStatePoolTest, CapacityOverflowLeavesPoolUntouched) {
   auto pool = MakePool(1);
