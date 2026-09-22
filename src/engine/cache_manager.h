@@ -104,7 +104,9 @@ struct CacheManager {
   virtual std::shared_ptr<const PrefixCacheMatch> MatchPrefix(const Request&) {
     return nullptr;
   }
+  virtual void RecordDeferredPrefixMatches(size_t) noexcept {}
   virtual void SealCommittedBlocks(const StepPlan&) {}
+  virtual void RecordPrefixPublicationRefusal() noexcept {}
   virtual const PrefixCacheMetrics* PrefixMetrics() const { return nullptr; }
 
   // Immutable snapshot of the cache's block accounting for invariant validation and state
@@ -202,7 +204,13 @@ struct PagedCacheManager : CacheManager {
   size_t MaxDraftTokensPerStep() const override;
   std::shared_ptr<const PrefixCacheMatch> MatchPrefix(
       const Request& request) override;
+  void RecordDeferredPrefixMatches(size_t count) noexcept override {
+    key_value_cache_->RecordDeferredPrefixMatches(count);
+  }
   void SealCommittedBlocks(const StepPlan& plan) override;
+  void RecordPrefixPublicationRefusal() noexcept override {
+    key_value_cache_->RecordPrefixPublicationRefusal();
+  }
   const PrefixCacheMetrics* PrefixMetrics() const override {
     return &key_value_cache_->PrefixMetrics();
   }

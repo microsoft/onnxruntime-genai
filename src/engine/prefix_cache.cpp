@@ -139,6 +139,7 @@ PrefixCacheMatch PrefixCache::Match(std::span<const int32_t> tokens,
   }
   match.token_count = hits.size() * block_size;
   match.fixed_state_checkpoint = std::move(checkpoint);
+  ++metrics_.matches;
 
   return match;
 }

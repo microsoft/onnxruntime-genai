@@ -798,6 +798,14 @@ void PagedKeyValueCache::RecordPrefixAdoptions(
   }
 }
 
+void PagedKeyValueCache::RecordDeferredPrefixMatches(size_t count) noexcept {
+  prefix_cache_->RecordDeferredMatches(count);
+}
+
+void PagedKeyValueCache::RecordPrefixPublicationRefusal() noexcept {
+  prefix_cache_->RecordPublicationRefusal();
+}
+
 bool PagedKeyValueCache::PrefixCachingEnabled() const {
   return prefix_cache_->Enabled();
 }

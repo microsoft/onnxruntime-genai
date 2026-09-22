@@ -23,6 +23,15 @@ namespace {
 
 using StateGroupKind = Config::Model::Decoder::StateGroupKind;
 
+class FixedStateCheckpointCaptureError final
+    : public std::exception,
+      public std::nested_exception {
+ public:
+  const char* what() const noexcept override {
+    return "Failed to capture a fixed state prefix checkpoint.";
+  }
+};
+
 std::string ExpandBinding(const std::string& binding, int layer_id) {
   std::string name{binding};
   name.replace(name.find("%d"), 2, std::to_string(layer_id));
@@ -965,7 +974,7 @@ FixedStatePool::CapturePrefixCheckpoint(const void* request_id) {
       impl_->device->Synchronize();
     } catch (...) {
     }
-    throw;
+    throw FixedStateCheckpointCaptureError{};
   }
 
   checkpoint_slot->generation = checkpoint_generation;
