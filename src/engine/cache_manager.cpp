@@ -404,6 +404,13 @@ void PagedCacheManager::SealCommittedBlocks(const StepPlan& plan) {
       continue;
     }
     if (fixed_state_pool_->AvailablePrefixCheckpoints() == 0) {
+      // Prefix matching always leaves the request's final prompt token to execute. A checkpoint at
+      // the exact prompt boundary therefore cannot serve an identical replay. Keep the newest
+      // earlier checkpoint instead of reclaiming it when the checkpoint pool is full.
+      if (entry.target_cache_slots ==
+          static_cast<size_t>(entry.sequence_length_before)) {
+        continue;
+      }
       key_value_cache_->ReclaimPrefixCheckpoints(1);
     }
     if (fixed_state_pool_->AvailablePrefixCheckpoints() == 0) {
