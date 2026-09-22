@@ -458,7 +458,7 @@ class Model:
                 if not hasattr(config, key):
                     setattr(config, key, getattr(text_config, key))
 
-        if getattr(config, "rope_scaling", None) is not None:
+        if hasattr(config, "rope_scaling") and isinstance(config.rope_scaling, dict):
             # Collapse all options inside rope_scaling to rope_parameters for easier access.
             rope_scaling = config.rope_scaling
             for key in rope_scaling:

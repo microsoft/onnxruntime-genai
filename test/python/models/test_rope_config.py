@@ -19,7 +19,7 @@ from builders.base import Model
 from builders.phi import Phi3MiniLongRoPEModel
 
 
-@pytest.mark.parametrize("scaling", ["absent", None])
+@pytest.mark.parametrize("scaling", ["absent", None, {}, "linear", ["factor"], ("factor",), 2.0, False])
 @pytest.mark.parametrize("parameters", ["absent", None, {"rope_type": "default", "rope_theta": 10000.0}])
 def test_no_rope_scaling(scaling, parameters):
     config = SimpleNamespace(rope_theta=10000.0)
@@ -40,6 +40,25 @@ def test_no_rope_scaling(scaling, parameters):
         assert getattr(config, key) == value
     assert getattr(config, "rope_scaling", "absent") == scaling
     assert getattr(config, "rope_parameters", "absent") == parameters
+
+
+@pytest.mark.parametrize("parameters", ["absent", {}, {"rope_type": "linear", "factor": 4.0}])
+def test_dictionary_rope_scaling(parameters):
+    scaling = {"rope_type": "linear", "factor": 2.0, "rope_theta": 500000.0}
+    original = copy.deepcopy(scaling)
+    config = SimpleNamespace(rope_scaling=scaling, rope_theta=10000.0)
+    if parameters != "absent":
+        config.rope_parameters = copy.deepcopy(parameters)
+    model = object.__new__(Model)
+    model.rope_attrs = {}
+
+    model.make_config_init(config)
+    model.make_rope_init(config)
+
+    assert config.rope_parameters == original
+    assert config.rope_theta == 10000.0
+    assert model.rope_attrs["rescale_factors"] == 2.0
+    assert config.rope_scaling == original
 
 
 @pytest.mark.parametrize("kwargs", [{}, {"rope_scaling": None}])
