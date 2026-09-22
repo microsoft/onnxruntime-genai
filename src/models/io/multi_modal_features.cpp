@@ -84,19 +84,10 @@ void MultiModalFeatures::ReuseFeaturesBuffer(MultiModalFeatures& other) {
   auto& consumer_device = *state_.p_session_device_inputs_;
 
   if (SessionCanAccess(*state_.p_session_device_, producer_device)) {
-    // Take ownership of other's computed tensor as this input.
+    // Borrow other's tensor; other keeps ownership so a replay can reuse it.
     shape_ = other.shape_;
-    features_ = std::move(other.features_);
-    state_.inputs_[index_] = features_.get();
-
-    // Give other a real copy so its output binding has valid data before its next Run() overwrites it.
-    // Reset to native_shape_ first: shape_ may still hold an in-place ReshapeFeatures() result (e.g.
-    // speech's 3D->2D reshape), which is not the shape other's own model output actually binds to.
-    other.shape_ = other.native_shape_;
-    other.features_ = OrtValue::CreateTensor(producer_device.GetAllocator(), other.shape_, other.type_);
-    ByteWrapTensor(producer_device, *other.features_)
-        .CopyFrom(ByteWrapTensor(producer_device, *features_));
-    other.state_.outputs_[other.index_] = other.features_.get();
+    features_.reset();
+    state_.inputs_[index_] = other.features_.get();
     return;
   }
 
@@ -110,6 +101,27 @@ void MultiModalFeatures::ReuseFeaturesBuffer(MultiModalFeatures& other) {
     ByteWrapTensor(consumer_device, *features_).CopyFrom(ByteWrapTensor(producer_device, *other.features_));
   }
   state_.inputs_[index_] = features_.get();
+}
+
+void MultiModalFeatures::ResizeToNative() {
+  ResizeTo(native_shape_);
+}
+
+void MultiModalFeatures::ResizeToZeroTokens() {
+  auto zeroed_shape = shape_;
+  zeroed_shape[zeroed_shape.size() - 2] = 0;
+  ResizeTo(std::move(zeroed_shape));
+}
+
+void MultiModalFeatures::ResizeTo(std::vector<int64_t> new_shape) {
+  if (mode_ != MultiModalFeatures::Mode::Output) {
+    throw std::runtime_error("Incorrect usage of the MultiModalFeatures inputs and outputs.");
+  }
+  if (shape_ == new_shape) return;
+
+  shape_ = std::move(new_shape);
+  features_ = OrtValue::CreateTensor(state_.p_session_device_->GetAllocator(), shape_, type_);
+  state_.outputs_[index_] = features_.get();
 }
 
 void MultiModalFeatures::AllocateEmptyFeatures() {

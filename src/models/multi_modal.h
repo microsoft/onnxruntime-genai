@@ -71,6 +71,7 @@ struct VisionState : State {
   int64_t num_images_{};
   ExtraInputs extra_inputs_{*this};  // Model inputs
   std::unique_ptr<MultiModalFeatures> image_features_;
+  bool needs_recompute_{true};  // SetExtraInputs re-arms this for new content.
 };
 
 // Factory: pick the right VisionState subclass based on model type.
@@ -91,6 +92,7 @@ struct SpeechState : State {
   int64_t num_audio_tokens_;
   ExtraInputs extra_inputs_{*this};  // Model inputs
   std::unique_ptr<MultiModalFeatures> audio_features_;
+  bool needs_recompute_{true};  // SetExtraInputs re-arms this for new content.
 };
 
 // Lfm2AudioSpeechState: per-clip encoder loop for LFM2-Audio.
@@ -229,6 +231,8 @@ struct MultiModalPipelineState : State {
   std::unique_ptr<Lfm2AudioOutput> audio_output_;  // LFM2-Audio speech output, when the model has it
   std::shared_ptr<Adapters> adapters_;
   bool is_prompt_{true};
+  // Set on first RewindTo(0); until then, features release after the prompt.
+  bool has_rewound_{false};
 
   const std::string vision_adapter_name_{"vision"};
   const std::string speech_adapter_name_{"speech"};
