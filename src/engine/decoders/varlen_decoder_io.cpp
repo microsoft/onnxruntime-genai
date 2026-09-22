@@ -167,6 +167,7 @@ namespace {
 struct GraphBufferPlan {
   enum Slot {
     kInputIds,
+    kEmbeddings,
     kCumulativeSequenceLengths,
     kPastSequenceLengths,
     kPositionIds,
@@ -210,6 +211,11 @@ GraphBufferPlan PlanGraphBuffers(const Model& model, size_t position_planes,
   const int64_t hidden_size = model.config_->model.decoder.hidden_size;
 
   plan.buffers[GraphBufferPlan::kInputIds] = {Ort::TypeToTensorType<int64_t>, {rows}};
+  if (!model.config_->model.embedding.filename.empty()) {
+    const auto& name = model.config_->model.decoder.inputs.embeddings;
+    plan.buffers[GraphBufferPlan::kEmbeddings] = {
+        model.session_info_.GetInputDataType(name), {rows, hidden_size}};
+  }
   plan.buffers[GraphBufferPlan::kCumulativeSequenceLengths] = {Ort::TypeToTensorType<int32_t>,
                                                                {batch + 1}};
   plan.buffers[GraphBufferPlan::kPastSequenceLengths] = {Ort::TypeToTensorType<int32_t>, {batch}};
@@ -285,6 +291,7 @@ VarlenGraphBuffers::VarlenGraphBuffers(DecoderOnly_Model& model, size_t position
   };
 
   input_ids = make(GraphBufferPlan::kInputIds);
+  embeddings = make(GraphBufferPlan::kEmbeddings);
   cumulative_sequence_lengths = make(GraphBufferPlan::kCumulativeSequenceLengths);
   past_sequence_lengths = make(GraphBufferPlan::kPastSequenceLengths);
   position_ids = make(GraphBufferPlan::kPositionIds);
@@ -316,7 +323,8 @@ VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
                                  std::shared_ptr<CacheManager> cache_manager,
                                  const ExecutionContext* execution_context,
                                  VarlenGraphBuffers* graph_buffers,
-                                 size_t position_planes)
+                                 size_t position_planes,
+                                 CpuEmbedding::Workspace* embedding_workspace)
     : DecoderIO(model, scheduled_requests, cache_manager),
       graph_buffers_{graph_buffers},
       plan_{execution_context ? execution_context->plan : nullptr},
@@ -325,7 +333,8 @@ VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
       input_ids_{execution_context ? execution_context->input_ids : DeviceSpan<int32_t>{}},
       hidden_states_input_{
           execution_context ? execution_context->hidden_states_input : nullptr},
-      position_planes_{position_planes} {
+      position_planes_{position_planes},
+      embedding_workspace_{embedding_workspace ? embedding_workspace : &local_embedding_workspace_} {
   logits_are_per_token_ = DecoderLogitsArePerToken(*model);
 
   PrepareInputIds(model, scheduled_requests);
@@ -487,8 +496,23 @@ void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, 
   cumulative_sequence_lengths_span.CopyCpuToDevice();
   sequence_lengths_span.CopyCpuToDevice();
 
-  input_names_.push_back(model->config_->model.decoder.inputs.input_ids.c_str());
-  inputs_.push_back(input_ids_tensor->GetOrtTensor());
+  if (model->cpu_embedding_) {
+    if (!device_input_ids.empty()) {
+      device_span.CopyDeviceToCpu();
+    }
+    std::unique_ptr<Tensor> owned_embeddings;
+    auto* embeddings = reshape(owned_embeddings, graph_buffers_ ? graph_buffers_->embeddings.get() : nullptr,
+                               model->cpu_embedding_->type_,
+                               {static_cast<int64_t>(num_tokens), model->cpu_embedding_->hidden_size_});
+    model->cpu_embedding_->Run(cpu_span, *embeddings, *embedding_workspace_);
+    input_names_.push_back(model->config_->model.decoder.inputs.embeddings.c_str());
+    inputs_.push_back(embeddings->GetOrtTensor());
+    if (owned_embeddings) owned_inputs_.push_back(std::move(owned_embeddings));
+  }
+  if (model->session_info_.HasInput(model->config_->model.decoder.inputs.input_ids)) {
+    input_names_.push_back(model->config_->model.decoder.inputs.input_ids.c_str());
+    inputs_.push_back(input_ids_tensor->GetOrtTensor());
+  }
 
   input_names_.push_back(model->config_->model.decoder.inputs.cumulative_sequence_lengths.c_str());
   inputs_.push_back(cumulative_sequence_lengths_tensor->GetOrtTensor());

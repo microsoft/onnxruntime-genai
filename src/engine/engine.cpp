@@ -322,8 +322,10 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
     const auto& batching = *model->config_->engine.dynamic_batching;
     const size_t paged_block_size = static_cast<size_t>(batching.block_size);
     dflash2_max_batch_size = static_cast<size_t>(batching.max_batch_size);
+    auto decoder_model = std::dynamic_pointer_cast<DecoderOnly_Model>(model);
     dflash2_model = std::make_shared<Dflash2Model>(
-        CreateDflash2Config(*model->config_), GetOrtEnv());
+        CreateDflash2Config(*model->config_), GetOrtEnv(),
+        decoder_model ? decoder_model->cpu_embedding_ : nullptr);
     const auto dflash2_cache_type = ValidateDflash2ModelCompatibility(
         *model->config_, model->session_info_, dflash2_model->session_info_, paged_block_size);
     model->config_->engine.aux_hidden_states_output_required = true;
@@ -348,6 +350,16 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
       dflash2_reserved_memory_bytes = Dflash2Drafter::FullAttentionReservedBytes(
           paged_block_size, static_cast<size_t>(dflash2.block_size),
           dflash2_max_batch_size, dflash2_bytes_per_block);
+    }
+    if (dflash2_model->cpu_embedding_) {
+      const size_t embedding_bytes = Dflash2Drafter::EmbeddingReservedBytes(
+          dflash2_max_batch_size, static_cast<size_t>(dflash2.block_size),
+          static_cast<size_t>(dflash2_model->cpu_embedding_->hidden_size_),
+          dflash2_model->cpu_embedding_->type_);
+      if (embedding_bytes > std::numeric_limits<size_t>::max() - dflash2_reserved_memory_bytes) {
+        throw std::runtime_error("DFlash 2 reserved memory bytes overflow size_t.");
+      }
+      dflash2_reserved_memory_bytes += embedding_bytes;
     }
   }
 

@@ -279,6 +279,10 @@ ONNXTensorElementDataType ValidateDflash2ModelCompatibility(
   if (!input_names.insert(inputs.aux_hidden_states).second) {
     throw std::runtime_error("model.dflash2 input names must be unique.");
   }
+  if (!config.model.embedding.filename.empty() &&
+      (inputs.embeddings.empty() || !input_names.insert(inputs.embeddings).second)) {
+    throw std::runtime_error("model.dflash2 embedding input must have a unique non-empty name.");
+  }
 
   ONNXTensorElementDataType cache_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
   std::unordered_set<std::string> cache_output_names;
@@ -347,10 +351,16 @@ ONNXTensorElementDataType ValidateDflash2ModelCompatibility(
   return cache_type;
 }
 
-Dflash2Model::Dflash2Model(std::unique_ptr<Config> config, OrtEnv& ort_env)
-    : Model{std::move(config)} {
+Dflash2Model::Dflash2Model(std::unique_ptr<Config> config, OrtEnv& ort_env,
+                           std::shared_ptr<CpuEmbedding> cpu_embedding)
+    : Model{std::move(config)}, cpu_embedding_{std::move(cpu_embedding)} {
   session_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
   session_info_.Add(*session_);
+  if (cpu_embedding_) {
+    cpu_embedding_->ValidateConsumer(session_info_, config_->model.dflash2.inputs.embeddings);
+  } else if (!config_->model.embedding.filename.empty()) {
+    throw std::runtime_error("DFlash CPU embedding requires the target's shared embedding session.");
+  }
 }
 
 std::unique_ptr<State> Dflash2Model::CreateState(DeviceSpan<int32_t>, const GeneratorParams&) const {
@@ -424,6 +434,14 @@ size_t Dflash2Drafter::FullAttentionReservedBytes(size_t paged_block_size,
       0, paged_block_size, query_block_size, max_batch_size);
   return CheckedMultiply(spill_blocks, bytes_per_block,
                          "DFlash 2 query spill bytes");
+}
+
+size_t Dflash2Drafter::EmbeddingReservedBytes(size_t max_batch_size, size_t query_block_size,
+                                              size_t hidden_size, ONNXTensorElementDataType type) {
+  const size_t rows = CheckedMultiply(max_batch_size, query_block_size, "DFlash 2 embedding rows");
+  const size_t elements = CheckedMultiply(rows, hidden_size, "DFlash 2 embedding elements");
+  const size_t bytes = CheckedMultiply(elements, Ort::SizeOf(type), "DFlash 2 embedding bytes");
+  return CheckedMultiply(bytes, 3, "DFlash 2 embedding growth reservation");
 }
 
 Dflash2Drafter::Dflash2Drafter(std::shared_ptr<Dflash2Model> model, size_t paged_block_size,
@@ -829,6 +847,11 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
 
   auto& input_ids = StepTensor(step_tensors_.input_ids, device, Ort::TypeToTensorType<int64_t>,
                                {static_cast<int64_t>(num_block_rows)});
+  Tensor* embeddings = nullptr;
+  if (model_->cpu_embedding_) {
+    embeddings = &StepTensor(step_tensors_.embeddings, device, model_->cpu_embedding_->type_,
+                             {static_cast<int64_t>(num_block_rows), model_->cpu_embedding_->hidden_size_});
+  }
   {
     auto span = input_ids.GetDeviceSpan<int64_t>();
     auto cpu = span.CpuSpan();
@@ -840,6 +863,7 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
       }
     }
     span.CopyCpuToDevice();
+    if (embeddings) model_->cpu_embedding_->Run(cpu, *embeddings, step_tensors_.embedding_workspace);
   }
 
   constexpr auto int32_type = Ort::TypeToTensorType<int32_t>;
@@ -896,6 +920,7 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
                              static_cast<int64_t>(top_k), static_cast<int64_t>(top_k)});
   // Everything the captured launches bake in: the packed row counts, the block-table width, and the
   // generation of the buffers those launches recorded addresses for.
+  const size_t known_graph_shapes = graph_ids_.size();
   const int annotation_id =
       graph_eligible
           ? graph_ids_.Id(GraphAnnotationIds::Key{
@@ -903,6 +928,10 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
                 static_cast<size_t>(layout.max_query_len), buffer_generation_})
           : -1;
   const bool capture = annotation_id > 0;
+  if (capture && graph_ids_.size() != known_graph_shapes && g_log.enabled && g_log.graph_capture) {
+    Log("graph_capture") << "dflash2 batch=" << batch << " context_rows=" << num_ctx_rows
+                         << " -> graph id " << annotation_id << std::endl;
+  }
   if (graph_capture_enabled_) {
     run_options_->AddConfigEntry("gpu_graph_id", std::to_string(annotation_id).c_str());
   }
@@ -933,7 +962,8 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   std::vector<OrtValue*> inputs{packed_aux.GetOrtTensor(), input_ids.GetOrtTensor(),
                                 q_row_map.GetOrtTensor(), qkv_row_map.GetOrtTensor(),
                                 block_row_index.GetOrtTensor(), cumulative.GetOrtTensor(),
-                                past_lengths.GetOrtTensor(), block_table.GetOrtTensor()};
+                                past_lengths.GetOrtTensor(), block_table.GetOrtTensor(),
+                                metadata.GetOrtTensor()};
   if (!config_.inputs.attention_metadata.empty()) {
     auto& attention_metadata = Dflash2StepTensor(
         step_tensors_.attention_metadata, GetDeviceInterface(DeviceType::CPU), int32_type, {3});
@@ -944,6 +974,10 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
     cpu[2] = layout.min_kv_len;
     input_names.push_back(config_.inputs.attention_metadata.c_str());
     inputs.push_back(attention_metadata.GetOrtTensor());
+  }
+  if (embeddings) {
+    input_names.push_back(config_.inputs.embeddings.c_str());
+    inputs.push_back(embeddings->GetOrtTensor());
   }
   std::vector<const char*> output_names{config_.outputs.candidate_ids.c_str(),
                                         config_.outputs.scores.c_str()};
