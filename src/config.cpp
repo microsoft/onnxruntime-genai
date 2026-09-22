@@ -2052,7 +2052,7 @@ void SetProviderOption(Config& config, std::string_view provider_name, std::stri
   // option_name, or option_value would let a caller inject arbitrary JSON structure
   // (sibling keys, new provider entries, etc.) into the parsed configuration.
   std::ostringstream json;
-  json << R"({")" << EscapeJsonString(provider_name) << R"(":{)";
+  json << R"({")" << EscapeJsonString(normalized_provider) << R"(":{)";
   if (!option_name.empty()) {
     json << R"(")" << EscapeJsonString(option_name) << R"(":")" << EscapeJsonString(option_value) << R"(")";
   }
