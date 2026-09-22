@@ -298,6 +298,10 @@ choice, not to imply an alternative exists. Do not add a second boundary-dtype
 field: it is derived, and letting a recipe set it would only create a way to
 express an invalid pair.
 
+An MTP graph has no such split: it consumes the decoder hidden state directly,
+so its `io_dtype` defaults to the resolved target I/O dtype, and an explicitly
+different value is rejected until an exporter inserts the conversion.
+
 ## 5. Speculative Graph Contract
 
 `speculative_options` contains build-time coordination settings:
@@ -355,6 +359,11 @@ Session/provider settings are not an unrestricted escape hatch: profiles cannot
 disable requirements of a prepacked graph or switch to an incompatible provider.
 Reject absent components and unknown structural fields. Preserve intentional
 string-valued ORT session/run/provider extension entries.
+
+Session-option values must match the types the runtime config parser reads:
+numbers for the thread/log-level fields, booleans for the arena/memory-pattern
+fields, a supported `ORT_*` name for `graph_optimization_level`, and strings for
+everything else, including extension entries.
 
 ### Merge Rules
 
@@ -742,7 +751,7 @@ target/drafter/runtime envelope.
 | List-form quantization override | `target_options.quant_config.weights.overrides` |
 | `block_size`, `op_types_to_quantize` | Target `quant_config.weights` fields |
 | `is_symmetric`, `accuracy_level` | Target `quant_config.weights.symmetric` and `weights.accuracy_level` |
-| `algo_config`, `nodes_to_exclude` | Target `quant_config.weights.method` plus generated `weights.overrides` entries |
+| `algo_config`, `nodes_to_exclude` | Target `quant_config.weights.method` plus generated `weights.overrides` entries; exclusions precede generated preset rules so they stay unconditional |
 | `matmulnbits_weights_prepacked`, `use_qdq` | Target `quant_config.format` fields |
 | `moe_quant_type`, `qmoe_block_size`, `qmoe_weights_prepacked` | Target `quant_config.moe` fields |
 | `use_8bits_moe` | Deprecated `moe_quant_type` alias; unchanged |
@@ -866,7 +875,8 @@ feature, not merely a rename of configuration keys.
   rather than defaulting when `weights.type` is `none` on an MoE checkpoint.
 - Drafter body-dtype tests: an omitted `io_dtype` selects BF16, an explicit
   `bf16` is accepted, an explicit `fp16`/`fp32` is rejected with the body-range
-  reason, and boundary tensors stay at the target's dtype in every case.
+  reason, and boundary tensors stay at the target's dtype in every case. MTP
+  instead follows the resolved target I/O dtype and rejects a different one.
 - Graph tests for exact tap order, page-size agreement, draft/state limits,
   per-model KV policy, borrowed tensors, and unsupported drafter settings.
 - Sharing tests for each tensor and policy, including dense-body/quantized-head

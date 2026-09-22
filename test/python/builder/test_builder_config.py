@@ -309,6 +309,34 @@ def test_structured_mtp_rejects_legacy_exclusion():
         )
 
 
+@pytest.mark.parametrize(
+    "precision,provider,legacy_options,expected_io_dtype",
+    [
+        ("int4", "cuda", {}, "fp16"),
+        ("int4", "cuda", {"use_cuda_bf16": "true"}, "bf16"),
+        ("fp32", "cpu", {}, "fp32"),
+    ],
+)
+def test_structured_mtp_inherits_target_io_dtype(precision, provider, legacy_options, expected_io_dtype):
+    effective = normalize_builder_config(
+        precision,
+        provider,
+        legacy_options,
+        drafter_options={"drafter_type": "mtp"},
+    )
+    assert effective.drafter_options["quant_config"]["io_dtype"] == expected_io_dtype
+    assert effective.extra_options["mtp_quant_config"].io_dtype == expected_io_dtype
+
+
+def test_structured_mtp_rejects_io_dtype_that_differs_from_the_target():
+    with pytest.raises(ValueError, match="MTP io_dtype must match the target io_dtype 'fp16'"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            drafter_options={"drafter_type": "mtp", "quant_config": {"io_dtype": "bf16"}},
+        )
+
+
 def test_block_drafter_rejects_windowed_kv_cache(tmp_path):
     with pytest.raises(ValueError, match="windowed KV cache is not supported"):
         normalize_builder_config(
@@ -429,6 +457,42 @@ def test_speculative_layers_flatten_in_order():
         speculative_options={"aux_hidden_state_layers": [6, 20, 34]},
     )
     assert effective.extra_options["aux_hidden_state_layers"] == "6,20,34"
+
+
+@pytest.mark.parametrize("value", [1.5, True, "4"])
+def test_structured_state_update_capacity_must_be_an_integer(value):
+    with pytest.raises(ValueError, match="state_update_capacity must be an integer"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            target_options={"attention": {"implementation": "paged"}},
+            speculative_options={"state_update_capacity": value},
+        )
+
+
+@pytest.mark.parametrize("value", [256.0, True, "256"])
+def test_structured_paged_block_size_must_be_an_integer(value):
+    with pytest.raises(ValueError, match="attention.paged.block_size must be an integer"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            target_options={"attention": {"implementation": "paged", "paged": {"block_size": value}}},
+        )
+
+
+@pytest.mark.parametrize("value", [3.5, True, "3"])
+def test_structured_drafter_integer_fields_reject_coercion(tmp_path, value):
+    with pytest.raises(ValueError, match="num_draft_tokens must be an integer"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            target_options={"attention": {"implementation": "paged"}},
+            drafter_options={
+                "drafter_type": "dflash2",
+                "path": make_drafter_checkpoint(tmp_path),
+                "num_draft_tokens": value,
+            },
+        )
 
 
 def test_json_loader_rejects_duplicates_and_null(tmp_path):
@@ -747,3 +811,39 @@ def test_runtime_accepts_mtp_without_static_draft_capacity():
     updated = apply_runtime_config(generated, {"speculative": {"max_draft_tokens": 8}})
 
     assert updated["speculative"] == {"max_draft_tokens": 8}
+
+
+@pytest.mark.parametrize(
+    "session_options",
+    [
+        {"intra_op_num_threads": "4"},
+        {"inter_op_num_threads": 1.5},
+        {"log_severity_level": True},
+        {"log_verbosity_level": 2**31},
+        {"enable_cpu_mem_arena": "true"},
+        {"enable_mem_pattern": 1},
+        {"graph_optimization_level": "ORT_ENABLE_EVERYTHING"},
+        {"enable_profiling": 1},
+        {"ep.cuda.fpa_intb_gemm": 1},
+    ],
+)
+def test_runtime_rejects_invalid_session_option_values(session_options):
+    generated = {"model": {"decoder": {"session_options": {}}}}
+
+    with pytest.raises(ValueError, match="session_options"):
+        apply_runtime_config(generated, {"model": {"decoder": {"session_options": session_options}}})
+
+
+def test_runtime_accepts_parser_typed_session_options():
+    generated = {"model": {"decoder": {"session_options": {}}}}
+    session_options = {
+        "intra_op_num_threads": 4,
+        "enable_cpu_mem_arena": False,
+        "graph_optimization_level": "ORT_ENABLE_ALL",
+        "log_id": "decoder",
+        "ep.cuda.fpa_intb_gemm": "1",
+    }
+
+    updated = apply_runtime_config(generated, {"model": {"decoder": {"session_options": session_options}}})
+
+    assert updated["model"]["decoder"]["session_options"] == session_options

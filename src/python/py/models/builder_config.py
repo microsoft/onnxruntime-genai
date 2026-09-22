@@ -54,6 +54,22 @@ RUNTIME_TUNABLE_PROVIDER_OPTIONS = {
     "nvtensorrtrtx": {"enable_cuda_graph"},
 }
 
+# Value types accepted by SessionOptions_Element in src/config.cpp. Names outside these
+# groups become AddConfigEntry entries, which the parser reads as strings.
+SESSION_OPTION_INTEGER_FIELDS = (
+    "intra_op_num_threads",
+    "inter_op_num_threads",
+    "log_severity_level",
+    "log_verbosity_level",
+)
+SESSION_OPTION_BOOLEAN_FIELDS = ("enable_cpu_mem_arena", "enable_mem_pattern")
+GRAPH_OPTIMIZATION_LEVELS = (
+    "ORT_DISABLE_ALL",
+    "ORT_ENABLE_BASIC",
+    "ORT_ENABLE_EXTENDED",
+    "ORT_ENABLE_ALL",
+)
+
 
 @dataclass
 class EffectiveBuilderConfig:
@@ -149,6 +165,37 @@ def check_fields(data: dict[str, Any], allowed: set[str], path: str):
     unknown = set(data) - allowed
     if unknown:
         raise ValueError(f"unknown {path} field(s): {sorted(unknown)}")
+
+
+def require_integer(value: Any, path: str) -> int:
+    """Reject JSON values that int() would silently truncate or reinterpret."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{path} must be an integer")
+    return value
+
+
+def validate_session_option(key: str, value: Any, path: str):
+    """Reject values the C++ session-options parser would fail to read."""
+    if key in SESSION_OPTION_BOOLEAN_FIELDS:
+        if not isinstance(value, bool):
+            raise ValueError(f"{path}.{key} must be a boolean")
+        return
+    if key in SESSION_OPTION_INTEGER_FIELDS:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or (isinstance(value, float) and not math.isfinite(value))
+            or value != math.trunc(value)
+            or not -2_147_483_648 <= value <= 2_147_483_647
+        ):
+            raise ValueError(f"{path}.{key} must be an integer within the int32 range")
+        return
+    if key == "graph_optimization_level":
+        if value not in GRAPH_OPTIMIZATION_LEVELS:
+            raise ValueError(f"{path}.{key} must be one of {list(GRAPH_OPTIMIZATION_LEVELS)}")
+        return
+    if not isinstance(value, str):
+        raise ValueError(f"{path}.{key} must be a string")
 
 
 def normalize_provider(execution_provider: str) -> str:
@@ -302,7 +349,9 @@ def flatten_target_options(
         raise ValueError("target_options.attention.paged is valid only when implementation='paged'")
     if "block_size" in paged:
         warn_structured_override(legacy_options, "paged_block_size", "target_options.attention.paged.block_size")
-        flattened["paged_block_size"] = paged["block_size"]
+        flattened["paged_block_size"] = require_integer(
+            paged["block_size"], "target_options.attention.paged.block_size"
+        )
 
     kv_cache = attention.get("kv_cache", {})
     check_fields(kv_cache, {"scheme", "scale_file", "windowed"}, "target_options.attention.kv_cache")
@@ -324,12 +373,17 @@ def flatten_target_options(
     return flattened, quant_config, effective_precision
 
 
-def normalize_drafter_quant_config(data: dict[str, Any], drafter_type: str, execution_provider: str) -> QuantConfig:
+def normalize_drafter_quant_config(
+    data: dict[str, Any],
+    drafter_type: str,
+    execution_provider: str,
+    target_io_dtype: str,
+) -> QuantConfig:
     canonical = canonical_quant_data(data)
     # Drafter body defaults must not copy the target's overrides, KV policy, or
     # quantization layout. Borrowed embedding/head tensors need separate checks.
     defaults = {
-        "io_dtype": "bf16" if drafter_type in ("dflash2", "dspark") else "fp16",
+        "io_dtype": "bf16" if drafter_type in ("dflash2", "dspark") else target_io_dtype,
         "checkpoint_policy": "preserve",
         "weights": {"type": "none", "block_size": 32},
         "moe": {"type": "none", "block_size": 32, "weights_prepacked": 0},
@@ -339,6 +393,11 @@ def normalize_drafter_quant_config(data: dict[str, Any], drafter_type: str, exec
     if drafter_type in ("dflash2", "dspark") and quant_config.io_dtype != "bf16":
         raise ValueError(
             f"{drafter_type} body io_dtype must be bf16 because its activations can exceed the fp16 range"
+        )
+    if drafter_type == "mtp" and quant_config.io_dtype != target_io_dtype:
+        # The MTP graph consumes the decoder hidden state directly; no exporter converts it.
+        raise ValueError(
+            f"MTP io_dtype must match the target io_dtype '{target_io_dtype}'"
         )
     if drafter_type == "dspark" and quant_config.weights.type != "none":
         raise ValueError("DSpark integer weight quantization is not supported")
@@ -439,13 +498,17 @@ def flatten_drafter_options(
                 raise ValueError(f"the {drafter_type} checkpoint must define target_layer_ids")
             flattened["aux_hidden_state_layers"] = ",".join(str(int(layer_id) + 1) for layer_id in target_layer_ids)
 
-    quant_config = normalize_drafter_quant_config(options.get("quant_config", {}), drafter_type, execution_provider)
+    quant_config = normalize_drafter_quant_config(
+        options.get("quant_config", {}), drafter_type, execution_provider, flattened["_target_io_dtype"]
+    )
     if drafter_type == "mtp":
         flattened["mtp_quant_config"] = quant_config
     else:
         flattened[f"{drafter_type}_path"] = options["path"]
         if "num_draft_tokens" in options:
-            flattened[f"{drafter_type}_num_draft_tokens"] = options["num_draft_tokens"]
+            flattened[f"{drafter_type}_num_draft_tokens"] = require_integer(
+                options["num_draft_tokens"], "drafter_options.num_draft_tokens"
+            )
         flattened["_drafter_quant_config"] = quant_config
         flattened[f"{drafter_type}_precision"] = (
             quant_config.weights.type if quant_config.weights.type != "none" else "bf16"
@@ -493,7 +556,7 @@ def flatten_drafter_options(
     if dspark and drafter_type != "dspark":
         raise ValueError("drafter_options.dspark is valid only for drafter_type=dspark")
     if "top_k" in dspark:
-        flattened["dspark_top_k"] = dspark["top_k"]
+        flattened["dspark_top_k"] = require_integer(dspark["top_k"], "drafter_options.dspark.top_k")
 
     effective = copy.deepcopy(options)
     effective["quant_config"] = quant_config_schema_dict(quant_config)
@@ -509,7 +572,9 @@ def flatten_speculative_options(options: dict[str, Any], flattened: dict[str, An
             raise ValueError("speculative_options.aux_hidden_state_layers must be a list of integers")
         flattened["aux_hidden_state_layers"] = ",".join(str(layer) for layer in layers)
     if "state_update_capacity" in options:
-        flattened["state_update_capacity"] = options["state_update_capacity"]
+        flattened["state_update_capacity"] = require_integer(
+            options["state_update_capacity"], "speculative_options.state_update_capacity"
+        )
 
 
 def normalize_builder_config(
@@ -779,7 +844,10 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
         if not isinstance(runtime_session, dict):
             raise ValueError(f"runtime_config.model.{component_name}.session_options must be an object")
         for key, value in runtime_session.items():
-            if key in generated_session and key not in ("log_id", "provider_options") and value != generated_session[key]:
+            if key == "provider_options":
+                continue
+            validate_session_option(key, value, f"runtime_config.model.{component_name}.session_options")
+            if key in generated_session and key != "log_id" and value != generated_session[key]:
                 raise ValueError(
                     f"runtime_config.model.{component_name}.session_options cannot overwrite required session option '{key}'"
                 )

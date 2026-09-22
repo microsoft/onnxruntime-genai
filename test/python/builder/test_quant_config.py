@@ -331,6 +331,17 @@ def test_extra_options_nodes_to_exclude_become_overrides():
     assert excludes == [Override(match={"name": "/model/embed_tokens/Gather"}, exclude=True)]
 
 
+def test_extra_options_nodes_to_exclude_precede_mixed_precision_presets():
+    # Legacy nodes_to_exclude is unconditional, so it must win first-match resolution
+    # against a preset that selects the same node.
+    cfg = QuantConfig.from_extra_options(
+        {"matmul_mixed_precision": "last_matmul:int8", "nodes_to_exclude": ["/lm_head/MatMul"]},
+        precision="int4",
+    )
+    assert cfg.weights.overrides[0] == Override(match={"name": "/lm_head/MatMul"}, exclude=True)
+    assert cfg.weights.overrides[1].match == {"preset": "last_matmul"}
+
+
 def test_extra_options_moe_quant_type_and_use_8bits_moe():
     assert QuantConfig.from_extra_options({"moe_quant_type": "mxfp4"}, precision="int4").moe.type == "mxfp4"
     # Deprecated use_8bits_moe maps to int8 when moe_quant_type is absent.

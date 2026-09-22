@@ -463,11 +463,15 @@ class QuantConfig:
         # --- weights: method + mixed-precision placement -----------------
         base_method, placement = desugar_algo_config(extra_options)
 
+        # Legacy `nodes_to_exclude` is unconditional, so it must precede the generated
+        # preset rules that ordered first-match resolution would otherwise apply first.
         overrides: list[Override] = [
-            Override(match={"preset": selector}, type=quant_type) for selector, quant_type in placement.items()
+            Override(match={"name": node}, exclude=True)
+            for node in extra_options.get("nodes_to_exclude", []) or []
         ]
-        for node in extra_options.get("nodes_to_exclude", []) or []:
-            overrides.append(Override(match={"name": node}, exclude=True))
+        overrides.extend(
+            Override(match={"preset": selector}, type=quant_type) for selector, quant_type in placement.items()
+        )
 
         is_symmetric = normalize_bool(extra_options.get("is_symmetric", True), "is_symmetric")
         weights = WeightsConfig(

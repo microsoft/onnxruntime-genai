@@ -12,6 +12,7 @@ import onnx_ir as ir
 import onnxruntime as ort
 import pytest
 import torch
+from quantization import QuantConfig
 
 from models.builders.base import Model
 from models.builders.dflash2 import DFlash2Builder
@@ -468,6 +469,22 @@ def test_preset_quantization_override_initializes_the_node_map():
     model.make_quant_init(types.SimpleNamespace())
 
     assert model.int4_customized_weight_config == {"/lm_head/MatMul": {"bits": 8}}
+
+
+def test_legacy_exclusion_wins_over_mixed_precision_preset():
+    quant_config = QuantConfig.from_extra_options(
+        {"matmul_mixed_precision": "last_matmul:int8", "nodes_to_exclude": ["/lm_head/MatMul"]},
+        precision="int4",
+    )
+    model = object.__new__(Model)
+    model.quant_config = quant_config
+    model.quant_type = None
+    model.quant_attrs = {"nodes_to_exclude": []}
+
+    model.make_quant_init(types.SimpleNamespace())
+
+    assert model.int4_customized_weight_config == {}
+    assert model.quant_attrs["nodes_to_exclude"] == ["/lm_head/MatMul"]
 
 
 @pytest.mark.parametrize("exclude_first", [False, True])
