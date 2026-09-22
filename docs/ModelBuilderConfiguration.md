@@ -362,7 +362,9 @@ string-valued ORT session/run/provider extension entries.
 2. Overlay explicit `runtime_config`: merge objects recursively, replace scalars,
    and replace arrays atomically. Reject duplicate JSON keys and `null` initially.
 3. A supplied `provider_options` array is complete, not a partial array patch.
-   Validate that required provider settings remain satisfied.
+  Provider entries merge by case-insensitive provider name, but graph-derived
+  options such as WebGPU/TRT-RTX rotary-cache offsets cannot be changed. Only
+  known runtime-tunable provider options are accepted.
 4. Explicit `num_blocks` selects fixed allocation and removes a generated
    `gpu_utilization_factor`; explicit utilization removes generated `num_blocks`.
    Supplying both explicitly is an error.
@@ -566,8 +568,8 @@ Proposed contents of `runtime_cuda_24gb.json`:
 
 ORT provider options and the allocator config entry above use string values,
 not booleans. Other required generated session entries survive recursive object
-merging. Because provider arrays are replaced, any additional required provider
-entries must be included and checked for the selected export.
+merging. Provider arrays must repeat every generated provider, and entries merge
+by provider name; graph-derived provider values remain unchanged.
 
 The builder supplies the page size, bindings, state groups, and DFlash2 geometry.
 The profile does not duplicate them. For an inline profile, replace the recipe's

@@ -1109,6 +1109,8 @@ class Model:
                     raise NotImplementedError(
                         "INT8 embedding export is not supported; GatherBlockQuantized currently supports INT4 only"
                     )
+                if descriptor.bits == 8 and self.quant_attrs.get("use_qdq", False):
+                    raise NotImplementedError("exact INT8 weight overrides are not supported with QDQ format")
                 customized_weight_config[node_name] = {"bits": descriptor.bits}
                 continue
             raise ValueError(

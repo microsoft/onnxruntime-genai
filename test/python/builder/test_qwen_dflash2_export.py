@@ -380,6 +380,27 @@ def test_exact_name_quantization_override_is_forwarded_to_quantizer():
     assert model.int4_customized_weight_config == {"/model/layers.0/mlp/down_proj/MatMul": {"bits": 8}}
 
 
+def test_exact_int8_quantization_override_rejects_qdq_format():
+    model = object.__new__(Model)
+    model.quant_config = types.SimpleNamespace(
+        weights=types.SimpleNamespace(
+            method="default",
+            overrides=[
+                types.SimpleNamespace(
+                    match={"name": "/model/layers.0/mlp/down_proj/MatMul"},
+                    type="int8",
+                    exclude=False,
+                )
+            ],
+        )
+    )
+    model.quant_type = None
+    model.quant_attrs = {"use_qdq": True}
+
+    with pytest.raises(NotImplementedError, match="INT8 weight overrides are not supported with QDQ"):
+        model.make_quant_init(types.SimpleNamespace())
+
+
 def _exact_override_model(tmp_path, *, constant_weight):
     node_name = "/probe/MatMul"
     builder = DFlash2Builder(

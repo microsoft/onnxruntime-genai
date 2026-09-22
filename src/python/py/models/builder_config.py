@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 import warnings
 from dataclasses import dataclass
@@ -25,6 +26,33 @@ STRUCTURED_FIELDS = (
     "speculative_options",
     "runtime_config",
 )
+
+GRAPH_DERIVED_PROVIDER_OPTIONS = {
+    "webgpu": {"enableGraphCapture", "multiRotaryCacheConcatOffset"},
+    "nvtensorrtrtx": {"multi_rotary_cache_concat_offset"},
+}
+
+RUNTIME_TUNABLE_PROVIDER_OPTIONS = {
+    "cuda": {
+        "arena_extend_strategy",
+        "cudnn_conv1d_pad_to_nc1d",
+        "cudnn_conv_algo_search",
+        "cudnn_conv_use_max_workspace",
+        "device_id",
+        "do_copy_in_default_stream",
+        "enable_cuda_graph",
+        "enable_skip_layer_norm_strict_mode",
+        "gpu_mem_limit",
+        "prefer_nhwc",
+        "tunable_op_enable",
+        "tunable_op_max_tuning_duration_ms",
+        "tunable_op_tuning_enable",
+        "use_ep_level_unified_stream",
+        "use_tf32",
+    },
+    "webgpu": {"validationMode"},
+    "nvtensorrtrtx": {"enable_cuda_graph"},
+}
 
 
 @dataclass
@@ -201,6 +229,8 @@ def normalize_target_quant_config(
         }.get(weights_type, merged["moe"]["type"])
 
     weights_type = merged["weights"]["type"]
+    if weights_type == "none" and merged["weights"]["overrides"]:
+        raise ValueError("target weight overrides are not supported when weights.type=none")
     if merged["moe"]["type"] in ("mxfp4", "nvfp4") and execution_provider != "cuda":
         raise ValueError(f"moe.type={merged['moe']['type']} is supported only on CUDA")
     if merged["format"]["matmulnbits_weights_prepacked"] and execution_provider != "cuda":
@@ -322,6 +352,8 @@ def normalize_drafter_quant_config(data: dict[str, Any], drafter_type: str, exec
         ):
             raise ValueError("DSpark quantization settings other than bf16 I/O are not supported")
     if drafter_type == "dflash2":
+        if quant_config.checkpoint_policy != "preserve":
+            raise ValueError("DFlash2 checkpoint_policy other than 'preserve' is not supported")
         weights = canonical.get("weights", {})
         for field_name in ("accuracy_level", "op_types", "overrides"):
             if field_name in weights:
@@ -356,6 +388,8 @@ def flatten_drafter_options(
     drafter_type = options.get("drafter_type")
     if drafter_type not in ("none", "mtp", "dflash2", "dspark"):
         raise ValueError("drafter_options.drafter_type must be mtp, dflash2, dspark, or none")
+    if drafter_type == "mtp" and flattened.get("exclude_mtp", False):
+        raise ValueError("drafter_options.drafter_type=mtp conflicts with legacy extra_options.exclude_mtp")
 
     legacy_drafters = {
         name.removesuffix("_path")
@@ -557,6 +591,19 @@ def normalize_builder_config(
 def validate_model_dependent_config(effective_config: EffectiveBuilderConfig, model_config: Any):
     if effective_config.version != 2:
         return
+    if effective_config.drafter_options is not None and effective_config.drafter_options["drafter_type"] == "mtp":
+        architectures = getattr(model_config, "architectures", ())
+        if not architectures or architectures[0] not in (
+            "Qwen3_5ForConditionalGeneration",
+            "Qwen3_5MoeForConditionalGeneration",
+        ):
+            raise ValueError("drafter_options.drafter_type=mtp requires a supported Qwen3.5 architecture")
+        text_config = getattr(model_config, "text_config", model_config)
+        num_mtp_layers = getattr(text_config, "mtp_num_hidden_layers", None)
+        if num_mtp_layers is None:
+            num_mtp_layers = getattr(model_config, "mtp_num_hidden_layers", 0)
+        if not isinstance(num_mtp_layers, int) or isinstance(num_mtp_layers, bool) or num_mtp_layers <= 0:
+            raise ValueError("drafter_options.drafter_type=mtp requires a checkpoint with an MTP head")
     quant_config = effective_config.extra_options.get("_quant_config")
     checkpoint_moe_type = effective_config.extra_options.get("moe_quant_type")
     if quant_config is not None and checkpoint_moe_type is not None and quant_config.moe.type != checkpoint_moe_type:
@@ -593,15 +640,66 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
         },
         "runtime_config.search",
     )
+    boolean_search_fields = {"do_sample", "early_stopping", "past_present_share_buffer"}
+    integer_search_bounds = {
+        "min_length": (0, 2_147_483_647),
+        "max_length": (1, 2_147_483_647),
+        "batch_size": (1, 32),
+        "num_beams": (1, 32),
+        "num_return_sequences": (1, 2_147_483_647),
+        "top_k": (0, 2_147_483_647),
+        "no_repeat_ngram_size": (0, 2_147_483_647),
+        "random_seed": (-1, 2_147_483_647),
+        "chunk_size": (1, None),
+    }
+    numeric_search_bounds = {
+        "top_p": (0, 1, False),
+        "temperature": (0, None, False),
+        "repetition_penalty": (0, None, True),
+        "blank_penalty": (None, None, False),
+        "diversity_penalty": (None, None, False),
+        "length_penalty": (None, None, False),
+    }
+    for field_name in boolean_search_fields & search.keys():
+        if not isinstance(search[field_name], bool):
+            raise ValueError(f"runtime_config.search.{field_name} must be a boolean")
+    for field_name, (minimum, maximum) in integer_search_bounds.items():
+        if field_name not in search:
+            continue
+        value = search[field_name]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or (isinstance(value, float) and not math.isfinite(value))
+            or value != math.trunc(value)
+            or value < minimum
+            or (maximum is not None and value > maximum)
+        ):
+            bounds = f"between {minimum} and {maximum}" if maximum is not None else f"at least {minimum}"
+            raise ValueError(f"runtime_config.search.{field_name} must be an integer {bounds}")
+    for field_name, (minimum, maximum, exclusive_minimum) in numeric_search_bounds.items():
+        if field_name not in search:
+            continue
+        value = search[field_name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError(f"runtime_config.search.{field_name} must be a finite number")
+        if minimum is not None and (value < minimum or (exclusive_minimum and value == minimum)):
+            comparison = "greater than" if exclusive_minimum else "at least"
+            raise ValueError(f"runtime_config.search.{field_name} must be {comparison} {minimum}")
+        if maximum is not None and value > maximum:
+            raise ValueError(f"runtime_config.search.{field_name} must be at most {maximum}")
     if "max_length" in search:
         max_length = search["max_length"]
-        if isinstance(max_length, bool) or not isinstance(max_length, int) or max_length <= 0:
-            raise ValueError("runtime_config.search.max_length must be a positive integer")
         context_length = generated_config.get("model", {}).get("context_length")
         if context_length is None:
             context_length = generated_config.get("search", {}).get("max_length")
         if isinstance(context_length, int) and max_length > context_length:
             raise ValueError("runtime_config.search.max_length exceeds the exported model context_length")
+    effective_search = merge_objects(generated_config.get("search", {}), search)
+    if effective_search.get("min_length", 0) > effective_search.get("max_length", float("inf")):
+        raise ValueError("runtime_config.search.min_length must not exceed max_length")
+    if effective_search.get("num_return_sequences", 1) > effective_search.get("num_beams", 1):
+        raise ValueError("runtime_config.search.num_return_sequences must not exceed num_beams")
 
     speculative = runtime_config.get("speculative", {})
     if not isinstance(speculative, dict):
@@ -611,17 +709,19 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
         max_draft_tokens = speculative["max_draft_tokens"]
         if isinstance(max_draft_tokens, bool) or not isinstance(max_draft_tokens, int) or not 1 <= max_draft_tokens <= 16:
             raise ValueError("runtime_config.speculative.max_draft_tokens must be an integer between 1 and 16")
+        generated_model = generated_config.get("model", {})
         capacities = [
             component["num_draft_tokens"]
-            for component in generated_config.get("model", {}).values()
+            for component in generated_model.values()
             if isinstance(component, dict) and isinstance(component.get("num_draft_tokens"), int)
         ]
-        decoder_capacity = generated_config.get("model", {}).get("decoder", {}).get("state_update_capacity")
+        decoder_capacity = generated_model.get("decoder", {}).get("state_update_capacity")
         if isinstance(decoder_capacity, int) and decoder_capacity > 0:
             capacities.append(decoder_capacity)
-        if not capacities:
+        has_dynamic_mtp = isinstance(generated_model.get("mtp"), dict)
+        if not capacities and not has_dynamic_mtp:
             raise ValueError("runtime_config references absent speculative configuration")
-        if capacities and max_draft_tokens > min(capacities):
+        if not has_dynamic_mtp and capacities and max_draft_tokens > min(capacities):
             raise ValueError(
                 "runtime_config.speculative.max_draft_tokens exceeds the exported drafter/state capacity"
             )
@@ -707,11 +807,44 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
                 decoder_providers = generated_components.get("decoder", {}).get("session_options", {}).get(
                     "provider_options", []
                 )
+                generated_providers = decoder_providers
                 generated_names = {name.casefold() for entry in decoder_providers for name in entry}
             if generated_names != runtime_names:
                 raise ValueError(
                     f"runtime_config.model.{component_name}.session_options cannot change execution providers"
                 )
+            generated_by_name = {
+                name.casefold(): options
+                for entry in generated_providers
+                for name, options in entry.items()
+            }
+            for entry in runtime_providers:
+                for provider_name, runtime_options in entry.items():
+                    normalized_name = provider_name.casefold()
+                    protected_options = GRAPH_DERIVED_PROVIDER_OPTIONS.get(normalized_name, set())
+                    tunable_options = RUNTIME_TUNABLE_PROVIDER_OPTIONS.get(normalized_name, set())
+                    generated_options = generated_by_name[normalized_name]
+                    changed_protected = [
+                        option_name
+                        for option_name in protected_options & runtime_options.keys()
+                        if runtime_options[option_name] != generated_options.get(option_name)
+                    ]
+                    if changed_protected:
+                        raise ValueError(
+                            f"runtime_config.model.{component_name}.session_options cannot overwrite "
+                            f"graph-derived provider option(s) {sorted(changed_protected)}"
+                        )
+                    unsupported_options = runtime_options.keys() - protected_options - tunable_options
+                    if unsupported_options:
+                        raise ValueError(
+                            f"runtime_config.model.{component_name}.session_options contains unsupported "
+                            f"runtime provider option(s) {sorted(unsupported_options)} for {provider_name}"
+                        )
+                    if any(not isinstance(value, str) for value in runtime_options.values()):
+                        raise ValueError(
+                            f"runtime_config.model.{component_name}.session_options provider option values "
+                            "must be strings"
+                        )
 
 
 def apply_runtime_config(generated_config: dict[str, Any], runtime_config: dict[str, Any]) -> dict[str, Any]:

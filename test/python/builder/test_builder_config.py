@@ -105,6 +105,23 @@ def test_explicit_target_checkpoint_policy_is_rejected():
         )
 
 
+def test_dense_target_rejects_weight_overrides():
+    with pytest.raises(ValueError, match="weight overrides are not supported when weights.type=none"):
+        normalize_builder_config(
+            None,
+            "cuda",
+            target_options={
+                "quant_config": {
+                    "io_dtype": "bf16",
+                    "weights": {
+                        "type": "none",
+                        "overrides": [{"match": {"name": "/model/a/MatMul"}, "type": "int8"}],
+                    },
+                }
+            },
+        )
+
+
 def test_structured_target_overrides_legacy_alias():
     with pytest.warns(UserWarning, match="weights.block_size overrides"):
         effective = normalize_builder_config(
@@ -189,6 +206,20 @@ def test_dflash2_rejects_unsupported_body_dtype(tmp_path):
         )
 
 
+def test_dflash2_rejects_unsupported_checkpoint_policy(tmp_path):
+    with pytest.raises(ValueError, match="checkpoint_policy other than 'preserve' is not supported"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            target_options={"attention": {"implementation": "paged"}},
+            drafter_options={
+                "drafter_type": "dflash2",
+                "path": make_drafter_checkpoint(tmp_path),
+                "quant_config": {"checkpoint_policy": "requantize"},
+            },
+        )
+
+
 @pytest.mark.parametrize("block_size", [0, "per_channel", 17])
 def test_dflash2_rejects_unsupported_body_block_size(tmp_path, block_size):
     with pytest.raises(ValueError, match="integer weights.block_size must be one of"):
@@ -268,6 +299,16 @@ def test_structured_drafter_rejects_conflicting_legacy_selection(tmp_path, draft
         )
 
 
+def test_structured_mtp_rejects_legacy_exclusion():
+    with pytest.raises(ValueError, match="drafter_type=mtp conflicts with legacy extra_options.exclude_mtp"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            {"exclude_mtp": True},
+            drafter_options={"drafter_type": "mtp"},
+        )
+
+
 def test_block_drafter_rejects_windowed_kv_cache(tmp_path):
     with pytest.raises(ValueError, match="windowed KV cache is not supported"):
         normalize_builder_config(
@@ -310,6 +351,45 @@ def test_unquantized_moe_requires_explicit_expert_policy():
         },
     )
     validate_model_dependent_config(explicit, model_config)
+
+
+@pytest.mark.parametrize(
+    "model_config,error",
+    [
+        (
+            type("Config", (), {"architectures": ["Qwen3_5ForConditionalGeneration"], "mtp_num_hidden_layers": 0})(),
+            "checkpoint with an MTP head",
+        ),
+        (
+            type("Config", (), {"architectures": ["LlamaForCausalLM"], "mtp_num_hidden_layers": 1})(),
+            "supported Qwen3.5 architecture",
+        ),
+    ],
+)
+def test_explicit_mtp_requires_supported_checkpoint(model_config, error):
+    effective = normalize_builder_config(
+        "int4",
+        "cuda",
+        drafter_options={"drafter_type": "mtp"},
+    )
+
+    with pytest.raises(ValueError, match=error):
+        validate_model_dependent_config(effective, model_config)
+
+
+def test_explicit_mtp_accepts_supported_checkpoint():
+    effective = normalize_builder_config(
+        "int4",
+        "cuda",
+        drafter_options={"drafter_type": "mtp"},
+    )
+    model_config = type(
+        "Config",
+        (),
+        {"architectures": ["Qwen3_5MoeForConditionalGeneration"], "mtp_num_hidden_layers": 1},
+    )()
+
+    validate_model_dependent_config(effective, model_config)
 
 
 def test_explicit_unquantized_moe_is_not_copied_to_legacy_options():
@@ -373,14 +453,18 @@ def test_runtime_merge_replaces_arrays_and_fixed_allocation():
     }
     original = copy.deepcopy(generated)
     runtime = {
-        "model": {"decoder": {"session_options": {"provider_options": [{"CUDA": {"new": "1"}}]}}},
+        "model": {
+            "decoder": {
+                "session_options": {"provider_options": [{"CUDA": {"gpu_mem_limit": "1024"}}]}
+            }
+        },
         "engine": {"dynamic_batching": {"num_blocks": 128}},
         "search": {"top_k": 1},
     }
     merged = apply_runtime_config(generated, runtime)
     assert merged["model"]["decoder"]["filename"] == "model.onnx"
     assert merged["model"]["decoder"]["session_options"]["provider_options"] == [
-        {"CUDA": {"required": "1", "new": "1"}}
+        {"CUDA": {"required": "1", "gpu_mem_limit": "1024"}}
     ]
     assert merged["engine"]["dynamic_batching"] == {"block_size": 256, "num_blocks": 128}
     assert merged["search"]["top_k"] == 1
@@ -477,18 +561,20 @@ def test_runtime_rejects_provider_changes():
 
 
 @pytest.mark.parametrize(
-    "generated_name,runtime_name",
-    [("cuda", "CUDA"), ("WebGPU", "webgpu"), ("NvTensorRtRtx", "NVTENSORRTRTX")],
+    "generated_name,runtime_name,generated_options,runtime_options",
+    [
+        ("cuda", "CUDA", {"enable_cuda_graph": "1", "device_id": "0"}, {"gpu_mem_limit": "1024"}),
+        ("WebGPU", "webgpu", {"validationMode": "basic"}, {"validationMode": "disabled"}),
+        ("NvTensorRtRtx", "NVTENSORRTRTX", {"enable_cuda_graph": "1"}, {"enable_cuda_graph": "0"}),
+    ],
 )
-def test_runtime_provider_options_merge_case_insensitively(generated_name, runtime_name):
+def test_runtime_provider_options_merge_case_insensitively(
+    generated_name, runtime_name, generated_options, runtime_options
+):
     generated = {
         "model": {
             "decoder": {
-                "session_options": {
-                    "provider_options": [
-                        {generated_name: {"enable_cuda_graph": "1", "device_id": "0"}}
-                    ]
-                },
+                "session_options": {"provider_options": [{generated_name: generated_options}]},
             }
         }
     }
@@ -499,7 +585,7 @@ def test_runtime_provider_options_merge_case_insensitively(generated_name, runti
             "model": {
                 "decoder": {
                     "session_options": {
-                        "provider_options": [{runtime_name: {"gpu_mem_limit": "1024"}}]
+                        "provider_options": [{runtime_name: runtime_options}]
                     }
                 }
             }
@@ -507,14 +593,58 @@ def test_runtime_provider_options_merge_case_insensitively(generated_name, runti
     )
 
     assert updated["model"]["decoder"]["session_options"]["provider_options"] == [
-        {
-            generated_name: {
-                "enable_cuda_graph": "1",
-                "device_id": "0",
-                "gpu_mem_limit": "1024",
+        {generated_name: {**generated_options, **runtime_options}}
+    ]
+
+
+@pytest.mark.parametrize(
+    "provider,option_name",
+    [
+        ("WebGPU", "multiRotaryCacheConcatOffset"),
+        ("NvTensorRtRtx", "multi_rotary_cache_concat_offset"),
+    ],
+)
+def test_runtime_rejects_graph_derived_provider_option_changes(provider, option_name):
+    generated = {
+        "model": {
+            "decoder": {
+                "session_options": {"provider_options": [{provider: {option_name: "4096"}}]}
             }
         }
-    ]
+    }
+    runtime = {
+        "model": {
+            "decoder": {
+                "session_options": {"provider_options": [{provider: {option_name: "1"}}]}
+            }
+        }
+    }
+
+    with pytest.raises(ValueError, match="cannot overwrite graph-derived provider option"):
+        apply_runtime_config(generated, runtime)
+
+
+@pytest.mark.parametrize("runtime_options", [{"unknown": "1"}, {"gpu_mem_limit": 1024}])
+def test_runtime_rejects_unsupported_or_non_string_provider_options(runtime_options):
+    generated = {
+        "model": {
+            "decoder": {
+                "session_options": {"provider_options": [{"CUDA": {"enable_cuda_graph": "0"}}]}
+            }
+        }
+    }
+
+    with pytest.raises(ValueError, match="unsupported runtime provider option|must be strings"):
+        apply_runtime_config(
+            generated,
+            {
+                "model": {
+                    "decoder": {
+                        "session_options": {"provider_options": [{"CUDA": runtime_options}]}
+                    }
+                }
+            },
+        )
 
 
 @pytest.mark.parametrize("run_options", ["invalid", [], {"tag": 1}])
@@ -529,8 +659,29 @@ def test_runtime_run_options_must_be_an_object_of_strings(run_options):
 def test_runtime_search_max_length_must_be_a_positive_integer(max_length):
     generated = {"model": {"context_length": 4096}}
 
-    with pytest.raises(ValueError, match="max_length must be a positive integer"):
+    with pytest.raises(ValueError, match="max_length must be an integer between 1 and 2147483647"):
         apply_runtime_config(generated, {"search": {"max_length": max_length}})
+
+
+@pytest.mark.parametrize(
+    "field,value,error",
+    [
+        ("do_sample", "false", "must be a boolean"),
+        ("top_k", "7", "must be an integer"),
+        ("top_k", -1, "must be an integer between 0 and 2147483647"),
+        ("top_k", 2**31, "must be an integer between 0 and 2147483647"),
+        ("top_p", "0.9", "must be a finite number"),
+        ("top_p", 1.1, "must be at most 1"),
+        ("temperature", -0.1, "must be at least 0"),
+        ("repetition_penalty", 0, "must be greater than 0"),
+        ("batch_size", 33, "must be an integer between 1 and 32"),
+    ],
+)
+def test_runtime_search_validates_parser_types_and_ranges(field, value, error):
+    generated = {"model": {"context_length": 4096}, "search": {"max_length": 4096}}
+
+    with pytest.raises(ValueError, match=error):
+        apply_runtime_config(generated, {"search": {field: value}})
 
 
 def test_runtime_search_max_length_cannot_exceed_context_length():
@@ -583,3 +734,16 @@ def test_runtime_rejects_draft_limit_above_exported_capacity():
     }
     with pytest.raises(ValueError, match="exceeds the exported drafter/state capacity"):
         apply_runtime_config(generated, {"speculative": {"max_draft_tokens": 5}})
+
+
+def test_runtime_accepts_mtp_without_static_draft_capacity():
+    generated = {
+        "model": {
+            "decoder": {"session_options": {}},
+            "mtp": {"filename": "mtp.onnx", "session_options": {}},
+        }
+    }
+
+    updated = apply_runtime_config(generated, {"speculative": {"max_draft_tokens": 8}})
+
+    assert updated["speculative"] == {"max_draft_tokens": 8}
