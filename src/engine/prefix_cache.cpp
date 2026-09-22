@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <exception>
+#include <iterator>
 #include <memory>
 #include <stdexcept>
 #include <utility>
@@ -47,19 +48,27 @@ uint64_t PrefixCache::ChainHash(uint64_t parent_hash, std::span<const int32_t> t
 }
 
 PrefixCache::PrefixCache(BlockPool& block_pool, PrefixCacheOptions options)
-    : block_pool_{block_pool}, options_{options} {}
+    : block_pool_{block_pool},
+      options_{options},
+      entries_by_block_id_(block_pool.Capacity()) {
+  block_pool_.SetReferenceObserver(this);
+}
 
 PrefixCache::~PrefixCache() {
+  block_pool_.SetReferenceObserver(nullptr);
   // Hand every retained block back so the pool's accounting is balanced when the cache outlives its
   // requests. Blocks a request still holds simply lose the cache's reference. The single-block
   // release allocates nothing, so teardown cannot fail on a failed allocation.
   for (auto& value : entries_) {
     auto& entry = value.second;
+    entry.block->ClearReferenceObserverCookie();
     entry.block->ClearIdentity();
     block_pool_.Release(entry.block);
   }
   entries_.clear();
   recency_.clear();
+  referenced_entries_.clear();
+  reclaimable_entries_.clear();
 }
 
 PrefixCacheMatch PrefixCache::Match(std::span<const int32_t> tokens,
@@ -191,19 +200,54 @@ PrefixCacheRegistration PrefixCache::Register(
   // always evicted from its tail: the head is what every longer match starts from, and losing it
   // would orphan everything chained behind it.
   const auto parent_entry = parent ? entries_.find(parent->hash) : entries_.end();
-  const auto position = parent_entry == entries_.end() ? recency_.end() : parent_entry->second.recency;
-  const auto recency = recency_.insert(position, hash);
+  Entry* const parent_entry_ptr =
+      parent_entry == entries_.end() ? nullptr : &parent_entry->second;
+  auto [entry_it, inserted] = entries_.try_emplace(
+      hash, Entry{block, identity, nullptr, {}, {}, !parent_entry_ptr ? std::optional<size_t>{} : std::optional<size_t>{parent_entry_ptr->block->Id()}});
+  if (!inserted) {
+    throw std::logic_error("Prefix cache identity became occupied during registration.");
+  }
+  auto& entry = entry_it->second;
   try {
-    entries_.emplace(hash, Entry{block, identity, nullptr, recency});
+    const auto recency_position =
+        !parent_entry_ptr ? recency_.end() : parent_entry_ptr->recency;
+    entry.recency = recency_.insert(recency_position, &entry);
   } catch (...) {
-    recency_.erase(recency);
+    entries_.erase(entry_it);
+    throw;
+  }
+  try {
+    entry.reference_state = referenced_entries_.insert(referenced_entries_.end(), &entry);
+  } catch (...) {
+    recency_.erase(entry.recency);
+    entries_.erase(entry_it);
     throw;
   }
 
   // The index owns a reference of its own, which is what keeps the block alive once its request
-  // releases it. Neither step allocates, so the entry above cannot end up without its reference.
-  block_pool_.AddRef(block);
-  block->SetIdentity(identity);
+  // releases it. Publish the observer cookie last so no reference transition can expose a partially
+  // initialized entry.
+  bool cache_reference_added = false;
+  bool identity_set = false;
+  try {
+    block_pool_.AddRef(block);
+    cache_reference_added = true;
+    block->SetIdentity(identity);
+    identity_set = true;
+    entries_by_block_id_[block->Id()] = &entry;
+    block->SetReferenceObserverCookie(&entry);
+  } catch (...) {
+    if (identity_set) {
+      block->ClearIdentity();
+    }
+    if (cache_reference_added) {
+      block_pool_.Release(block);
+    }
+    referenced_entries_.erase(entry.reference_state);
+    recency_.erase(entry.recency);
+    entries_.erase(entry_it);
+    throw;
+  }
   ++metrics_.registered_blocks;
   return {PrefixCacheRegistrationStatus::Indexed, std::move(identity)};
 }
@@ -226,6 +270,7 @@ void PrefixCache::RecordAdoption(
         entry->second.identity != identity) {
       std::terminate();
     }
+    entry->second.promote_on_release = true;
     Reorder(entry->second, identity->parent);
   }
   ++metrics_.hits;
@@ -283,14 +328,10 @@ size_t PrefixCache::ReclaimCheckpoints(size_t checkpoints_needed) {
   for (auto recency = recency_.begin();
        reclaimed < checkpoints_needed && recency != recency_.end();
        ++recency) {
-    const auto entry = entries_.find(*recency);
-    if (entry == entries_.end()) {
-      throw std::logic_error(
-          "Prefix cache recency order references an unknown identity.");
-    }
-    if (entry->second.checkpoint &&
-        entry->second.checkpoint.use_count() == 1) {
-      entry->second.checkpoint.reset();
+    auto& entry = **recency;
+    if (entry.checkpoint &&
+        entry.checkpoint.use_count() == 1) {
+      entry.checkpoint.reset();
       --checkpoint_count_;
       ++reclaimed;
     }
@@ -308,18 +349,15 @@ size_t PrefixCache::ReclaimableCheckpoints() const {
 
 size_t PrefixCache::Reclaim(size_t blocks_needed) {
   size_t reclaimed = 0;
-  auto recency_it = recency_.begin();
-  while (reclaimed < blocks_needed && recency_it != recency_.end()) {
-    const auto entry_it = entries_.find(*recency_it);
+  while (reclaimed < blocks_needed && !reclaimable_entries_.empty()) {
+    Entry* entry = reclaimable_entries_.front();
+    if (!entry || !entry->reclaimable || entry->block->RefCount() != 1) {
+      throw std::logic_error("Prefix cache reclaimable order contains an invalid entry.");
+    }
+    const auto entry_it = entries_.find(entry->identity->hash);
     if (entry_it == entries_.end()) {
-      throw std::logic_error("Prefix cache recency order references an unknown identity.");
+      throw std::logic_error("Prefix cache reclaimable order references an unknown identity.");
     }
-    // A block a request still holds is not the cache's to give back.
-    if (entry_it->second.block->RefCount() > 1) {
-      ++recency_it;
-      continue;
-    }
-    ++recency_it;
     Evict(entry_it);
     ++reclaimed;
     ++metrics_.evictions;
@@ -328,14 +366,7 @@ size_t PrefixCache::Reclaim(size_t blocks_needed) {
 }
 
 size_t PrefixCache::ReclaimableBlocks() const {
-  size_t reclaimable = 0;
-  for (const auto& value : entries_) {
-    const auto& entry = value.second;
-    if (entry.block->RefCount() == 1) {
-      ++reclaimable;
-    }
-  }
-  return reclaimable;
+  return reclaimable_entries_.size();
 }
 
 void PrefixCache::Reorder(Entry& entry, const std::shared_ptr<const BlockIdentity>& parent) {
@@ -343,15 +374,74 @@ void PrefixCache::Reorder(Entry& entry, const std::shared_ptr<const BlockIdentit
   // the most recently used of its run and eviction takes the tail first.
   if (!parent) {
     recency_.splice(recency_.end(), recency_, entry.recency);
+    if (entry.reclaimable) {
+      reclaimable_entries_.splice(
+          reclaimable_entries_.end(), reclaimable_entries_, entry.reference_state);
+    }
     return;
   }
   const auto parent_entry = entries_.find(parent->hash);
   if (parent_entry == entries_.end()) {
     // No lookup can reach this entry any more, so it is the first thing worth reclaiming.
     recency_.splice(recency_.begin(), recency_, entry.recency);
+    if (entry.reclaimable) {
+      reclaimable_entries_.splice(
+          reclaimable_entries_.begin(), reclaimable_entries_, entry.reference_state);
+    }
     return;
   }
   recency_.splice(parent_entry->second.recency, recency_, entry.recency);
+  if (entry.reclaimable) {
+    const auto position = parent_entry->second.reclaimable
+                              ? parent_entry->second.reference_state
+                              : reclaimable_entries_.end();
+    reclaimable_entries_.splice(position, reclaimable_entries_, entry.reference_state);
+  }
+}
+
+void PrefixCache::OnBlockBecameReferenced(Block& block, void* cookie) noexcept {
+  auto* entry = static_cast<Entry*>(cookie);
+  if (!entry || entry->block.get() != &block || !entry->reclaimable) {
+    std::terminate();
+  }
+  referenced_entries_.splice(
+      referenced_entries_.end(), reclaimable_entries_, entry->reference_state);
+  entry->reclaimable = false;
+  entry->promote_on_release = false;
+}
+
+void PrefixCache::OnBlockBecameReclaimable(Block& block, void* cookie) noexcept {
+  auto* entry = static_cast<Entry*>(cookie);
+  if (!entry || entry->block.get() != &block || entry->reclaimable) {
+    std::terminate();
+  }
+
+  auto position = reclaimable_entries_.end();
+  if (entry->promote_on_release) {
+    if (entry->parent_block_id) {
+      Entry* parent = entries_by_block_id_[*entry->parent_block_id];
+      if (parent && parent->identity != entry->identity->parent) {
+        parent = nullptr;
+      }
+      if (!parent) {
+        position = reclaimable_entries_.begin();
+      } else if (parent->reclaimable) {
+        position = parent->reference_state;
+      }
+    }
+  } else {
+    for (auto next = std::next(entry->recency); next != recency_.end(); ++next) {
+      if ((*next)->reclaimable) {
+        position = (*next)->reference_state;
+        break;
+      }
+    }
+  }
+
+  reclaimable_entries_.splice(
+      position, referenced_entries_, entry->reference_state);
+  entry->reclaimable = true;
+  entry->promote_on_release = true;
 }
 
 void PrefixCache::Evict(std::unordered_map<uint64_t, Entry>::iterator it) {
@@ -359,7 +449,14 @@ void PrefixCache::Evict(std::unordered_map<uint64_t, Entry>::iterator it) {
   if (it->second.checkpoint) {
     --checkpoint_count_;
   }
+  if (it->second.reclaimable) {
+    reclaimable_entries_.erase(it->second.reference_state);
+  } else {
+    referenced_entries_.erase(it->second.reference_state);
+  }
   recency_.erase(it->second.recency);
+  entries_by_block_id_[block->Id()] = nullptr;
+  block->ClearReferenceObserverCookie();
   entries_.erase(it);
   block->ClearIdentity();
   block_pool_.Release(block);

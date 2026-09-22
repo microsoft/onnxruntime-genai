@@ -559,15 +559,10 @@ void PagedCacheManager::DetachRequestForTeardown(
 bool PagedCacheManager::SupportsDynamicBatching() const { return true; }
 
 size_t PagedCacheManager::MaxQueryTokensPerRequest() const {
-  size_t limit = key_value_cache_->MaxQueryTokensPerRequest();
-  if (fixed_state_pool_ &&
-      key_value_cache_->PrefixCachingEnabled()) {
-    const size_t checkpoint_interval = key_value_cache_->BlockSize();
-    if (limit == 0 || checkpoint_interval < limit) {
-      limit = checkpoint_interval;
-    }
-  }
-  return limit;
+  // Fixed state stores one row per request and commits the state after the complete query, so it
+  // does not constrain prefill length. Prefix checkpoints are attached only when that committed
+  // endpoint is block-aligned; they must not reduce the model's configured prefill chunk.
+  return key_value_cache_->MaxQueryTokensPerRequest();
 }
 
 size_t PagedCacheManager::MaxDraftTokensPerStep() const {

@@ -148,7 +148,14 @@ void BlockPool::AddRef(std::span<const std::shared_ptr<Block>> blocks) {
       ValidateOwnership(blocks, "add a reference to", /*require_references=*/false);
   for (const auto [id, count] : occurrences) {
     for (size_t i = 0; i < count; ++i) {
-      blocks_[id]->AddRef();
+      auto& block = *blocks_[id];
+      const bool was_reclaimable =
+          block.RefCount() == 1 && block.reference_observer_cookie_;
+      block.AddRef();
+      if (was_reclaimable && reference_observer_) {
+        reference_observer_->OnBlockBecameReferenced(
+            block, block.reference_observer_cookie_);
+      }
     }
   }
 }
@@ -157,18 +164,36 @@ void BlockPool::AddRef(const std::shared_ptr<Block>& block) {
   if (!Owns(block)) {
     throw std::runtime_error("Cannot add a reference to a block this pool does not own.");
   }
+  const bool was_reclaimable =
+      block->RefCount() == 1 && block->reference_observer_cookie_;
   block->AddRef();
+  if (was_reclaimable && reference_observer_) {
+    reference_observer_->OnBlockBecameReferenced(
+        *block, block->reference_observer_cookie_);
+  }
 }
 
 void BlockPool::Release(const std::shared_ptr<Block>& block) {
   if (!Owns(block)) {
     throw std::runtime_error("Cannot release a block this pool does not own.");
   }
-  if (block->ReleaseRef() == 0) {
+  const size_t remaining_references = block->ReleaseRef();
+  if (remaining_references == 1 && block->reference_observer_cookie_ &&
+      reference_observer_) {
+    reference_observer_->OnBlockBecameReclaimable(
+        *block, block->reference_observer_cookie_);
+  } else if (remaining_references == 0) {
     block->ClearIdentity();
     blocks_[block->Id()].reset();
     ++mutation_generation_;
   }
+}
+
+void BlockPool::SetReferenceObserver(BlockReferenceObserver* observer) {
+  if (reference_observer_ && observer && reference_observer_ != observer) {
+    throw std::runtime_error("A block pool supports only one reference observer.");
+  }
+  reference_observer_ = observer;
 }
 
 std::vector<std::pair<size_t, size_t>> BlockPool::ValidateOwnership(
@@ -225,7 +250,12 @@ void BlockPool::FreeValidated(
     std::terminate();
   }
   for (const auto& block : blocks) {
-    if (block->ReleaseRef() == 0) {
+    const size_t remaining_references = block->ReleaseRef();
+    if (remaining_references == 1 && block->reference_observer_cookie_ &&
+        reference_observer_) {
+      reference_observer_->OnBlockBecameReclaimable(
+          *block, block->reference_observer_cookie_);
+    } else if (remaining_references == 0) {
       block->ClearIdentity();
       blocks_[block->Id()].reset();
     }

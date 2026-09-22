@@ -100,7 +100,7 @@ struct PrefixCacheMetrics {
  * produced it. `Reclaim` gives that capacity straight back to the pool under memory pressure, which
  * is what keeps retention from ever starving a live request.
  */
-class PrefixCache {
+class PrefixCache final : private BlockReferenceObserver {
  public:
   PrefixCache(BlockPool& block_pool, PrefixCacheOptions options);
   PrefixCache(const PrefixCache&) = delete;
@@ -189,19 +189,30 @@ class PrefixCache {
     std::shared_ptr<Block> block;
     std::shared_ptr<const BlockIdentity> identity;
     std::shared_ptr<const FixedStatePrefixCheckpoint> checkpoint;
-    std::list<uint64_t>::iterator recency;
+    std::list<Entry*>::iterator recency;
+    std::list<Entry*>::iterator reference_state;
+    std::optional<size_t> parent_block_id;
+    bool reclaimable{};
+    bool promote_on_release{true};
   };
 
   // Keeps `entry` ordered immediately before the entry it chains from, so a chain is always
   // evicted from its tail rather than its head.
   void Reorder(Entry& entry, const std::shared_ptr<const BlockIdentity>& parent);
+  void OnBlockBecameReferenced(Block& block, void* cookie) noexcept override;
+  void OnBlockBecameReclaimable(Block& block, void* cookie) noexcept override;
   void Evict(std::unordered_map<uint64_t, Entry>::iterator it);
 
   BlockPool& block_pool_;
   PrefixCacheOptions options_;
   std::unordered_map<uint64_t, Entry> entries_;
   // Front is the least recently used identity, back the most recently used.
-  std::list<uint64_t> recency_;
+  std::list<Entry*> recency_;
+  // Every entry always owns one preallocated node in exactly one of these lists. Reference-count
+  // transitions splice that node without allocating, including in validated no-throw publication.
+  std::list<Entry*> referenced_entries_;
+  std::list<Entry*> reclaimable_entries_;
+  std::vector<Entry*> entries_by_block_id_;
   size_t checkpoint_count_{};
   PrefixCacheMetrics metrics_;
 };

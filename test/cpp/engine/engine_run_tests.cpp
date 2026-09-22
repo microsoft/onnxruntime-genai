@@ -3065,7 +3065,7 @@ TEST_F(EngineRunTest, DuplicatePrefixStopsSealingItsSuffix) {
 }
 
 TEST_F(EngineRunTest, HybridPrefixCacheRestoresPagedAndFixedStateAtOneBoundary) {
-  model_ = LoadSyntheticCompositeModel();
+  model_ = LoadSyntheticCompositeModelWithChunking(/*chunk_size=*/4);
   auto& batching = *model_->config_->engine.dynamic_batching;
   batching.block_size = 4;
   batching.max_batch_size = 1;
@@ -3124,8 +3124,60 @@ TEST_F(EngineRunTest, HybridPrefixCacheRestoresPagedAndFixedStateAtOneBoundary) 
   EXPECT_EQ(FixedSlotFor(*fixed, warm.get()).committed_tokens, 9u);
 }
 
+TEST_F(EngineRunTest, HybridPrefixCacheResumesPartwayThroughConfiguredChunk) {
+  model_ = LoadSyntheticCompositeModelWithChunking(/*chunk_size=*/8);
+  auto& batching = *model_->config_->engine.dynamic_batching;
+  batching.block_size = 4;
+  batching.max_batch_size = 1;
+  batching.max_scheduled_tokens = 4;
+  batching.num_blocks = 16;
+  batching.prefix_caching = true;
+  auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
+
+  size_t state_value = 0;
+  engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
+    ++state_value;
+    for (const auto& binding : context.fixed_state_bindings) {
+      FillFixedOutputRow(binding, 0, static_cast<float>(state_value));
+    }
+  });
+
+  const std::array<int32_t, 5> source_prompt{2, 3, 4, 5, 6};
+  auto source = CreateRequestWithPrompt(engine.engine, source_prompt);
+  EXPECT_EQ(RunOne(*engine.engine).request, nullptr);
+  EXPECT_EQ(source->ProcessedSequenceLength(), 4);
+
+  // Finish the source without the temporary global cap. Its first full block retains the
+  // checkpoint captured at token 4.
+  batching.max_scheduled_tokens = 8;
+  EXPECT_EQ(RunOne(*engine.engine).request, source);
+  ASSERT_TRUE(source->IsTurnComplete());
+  source->Close();
+
+  const std::array<int32_t, 13> warm_prompt{
+      2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14};
+  auto warm = CreateRequestWithPrompt(engine.engine, warm_prompt);
+  engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
+    ASSERT_EQ(context.plan->requests.size(), 1u);
+    const auto& entry = context.plan->requests.front();
+    ASSERT_NE(entry.prefix_match, nullptr);
+    ASSERT_NE(entry.prefix_match->fixed_state_checkpoint, nullptr);
+    EXPECT_EQ(entry.prefix_match->token_count, 4u);
+    EXPECT_EQ(entry.unprocessed_token_count, 8u);
+    EXPECT_EQ(warm->ProcessedSequenceLength(), 4);
+    for (const auto& binding : context.fixed_state_bindings) {
+      ExpectFixedInputRow(binding, 0, 1.0f);
+      FillFixedOutputRow(binding, 0, 3.0f);
+    }
+  });
+
+  // The 8-token chunk starts at the adopted position 4, rather than being reduced to one block.
+  EXPECT_EQ(RunOne(*engine.engine).request, nullptr);
+  EXPECT_EQ(warm->ProcessedSequenceLength(), 12);
+}
+
 TEST_F(EngineRunTest, HybridPrefixAdoptionRollbackKeepsCheckpointReusable) {
-  model_ = LoadSyntheticCompositeModel();
+  model_ = LoadSyntheticCompositeModelWithChunking(/*chunk_size=*/4);
   auto& batching = *model_->config_->engine.dynamic_batching;
   batching.block_size = 4;
   batching.num_blocks = 16;
@@ -3174,7 +3226,7 @@ TEST_F(EngineRunTest, HybridPrefixAdoptionRollbackKeepsCheckpointReusable) {
 }
 
 TEST_F(EngineRunTest, HybridPrefixCacheDoesNotSealGeneratedBlocksWithoutCheckpoints) {
-  model_ = LoadSyntheticCompositeModel();
+  model_ = LoadSyntheticCompositeModelWithChunking(/*chunk_size=*/4);
   auto& batching = *model_->config_->engine.dynamic_batching;
   batching.block_size = 4;
   batching.num_blocks = 16;

@@ -15,9 +15,17 @@ namespace Generators {
 
 class PagedCacheBlockTable;
 class PagedCacheReservation;
+class PrefixCache;
 struct BlockCopier;
 struct PagedKeyValueCache;
 struct BlockPool;
+struct Block;
+
+struct BlockReferenceObserver {
+  virtual ~BlockReferenceObserver() = default;
+  virtual void OnBlockBecameReferenced(Block& block, void* cookie) noexcept = 0;
+  virtual void OnBlockBecameReclaimable(Block& block, void* cookie) noexcept = 0;
+};
 
 struct BlockIdentity {
   uint64_t hash{};
@@ -61,6 +69,7 @@ struct Block {
  private:
   friend class PagedCacheBlockTable;
   friend class PagedCacheReservation;
+  friend class PrefixCache;
   friend bool MakeTailBlockExclusive(PagedCacheBlockTable&, size_t, BlockPool&, BlockCopier&);
   friend struct PagedKeyValueCache;
   friend struct BlockPool;
@@ -68,12 +77,15 @@ struct Block {
   void AddSlots(size_t slots);
   void AddRef();
   size_t ReleaseRef();
+  void SetReferenceObserverCookie(void* cookie) noexcept { reference_observer_cookie_ = cookie; }
+  void ClearReferenceObserverCookie() noexcept { reference_observer_cookie_ = nullptr; }
 
   size_t id_;
   size_t size_;
   size_t capacity_;
   size_t ref_count_{1};
   std::shared_ptr<const BlockIdentity> identity_;
+  void* reference_observer_cookie_{};
 };
 
 /*
@@ -106,6 +118,7 @@ struct BlockPool {
   void AddRef(std::span<const std::shared_ptr<Block>> blocks);
   void AddRef(const std::shared_ptr<Block>& block);
   void Release(const std::shared_ptr<Block>& block);
+  void SetReferenceObserver(BlockReferenceObserver* observer);
 
   void Free(const std::vector<std::shared_ptr<Block>>& blocks);
   void ValidateFree(std::span<const std::shared_ptr<Block>> blocks) const;
@@ -140,6 +153,7 @@ struct BlockPool {
   mutable std::vector<size_t> validation_counts_;
   mutable uint64_t validation_epoch_{};
   uint64_t mutation_generation_{};
+  BlockReferenceObserver* reference_observer_{};
 };
 
 }  // namespace Generators

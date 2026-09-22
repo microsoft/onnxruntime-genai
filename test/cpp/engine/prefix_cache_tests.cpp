@@ -321,6 +321,59 @@ TEST(PrefixCacheTest, AnIndexedBlockOutlivesTheRequestThatProducedIt) {
   EXPECT_EQ(cache.Match(probe, probe.size() - 1).blocks.size(), 1u);
 }
 
+TEST(PrefixCacheTest, ReclaimableCountTracksRequestReferencesExactly) {
+  BlockPool pool{kBlockSize, 8};
+  PrefixCache cache{pool, MakeOptions(8)};
+
+  const std::array<int32_t, 4> tokens{1, 2, 3, 4};
+  std::shared_ptr<const BlockIdentity> parent;
+  auto block = SealBlock(pool, cache, tokens, parent);
+  EXPECT_EQ(cache.ReclaimableBlocks(), 0u);
+
+  pool.Release(block);
+  EXPECT_EQ(block->RefCount(), 1u);
+  EXPECT_EQ(cache.ReclaimableBlocks(), 1u);
+
+  pool.AddRef(block);
+  EXPECT_EQ(block->RefCount(), 2u);
+  EXPECT_EQ(cache.ReclaimableBlocks(), 0u);
+
+  pool.Release(block);
+  EXPECT_EQ(block->RefCount(), 1u);
+  EXPECT_EQ(cache.ReclaimableBlocks(), 1u);
+
+  EXPECT_EQ(cache.Reclaim(1), 1u);
+  EXPECT_EQ(cache.ReclaimableBlocks(), 0u);
+  EXPECT_EQ(pool.AvailableBlocks(), pool.Capacity());
+}
+
+TEST(PrefixCacheTest, RolledBackAdoptionDoesNotRefreshReclaimableOrder) {
+  BlockPool pool{kBlockSize, 8};
+  PrefixCache cache{pool, MakeOptions(8)};
+
+  const std::array<int32_t, 4> older{1, 2, 3, 4};
+  const std::array<int32_t, 4> newer{5, 6, 7, 8};
+  std::shared_ptr<const BlockIdentity> older_parent;
+  auto older_block = SealBlock(pool, cache, older, older_parent);
+  std::shared_ptr<const BlockIdentity> newer_parent;
+  auto newer_block = SealBlock(pool, cache, newer, newer_parent);
+  pool.Release(older_block);
+  pool.Release(newer_block);
+  ASSERT_EQ(cache.ReclaimableBlocks(), 2u);
+
+  // A reservation temporarily references the matched block, then rolls back before adoption
+  // commits. Neither the lookup nor that transient reference may refresh the block's LRU position.
+  pool.AddRef(older_block);
+  pool.Release(older_block);
+  ASSERT_EQ(cache.ReclaimableBlocks(), 2u);
+  EXPECT_EQ(cache.Reclaim(1), 1u);
+
+  const std::array<int32_t, 5> older_probe{1, 2, 3, 4, 9};
+  const std::array<int32_t, 5> newer_probe{5, 6, 7, 8, 9};
+  EXPECT_TRUE(cache.Match(older_probe, older_probe.size() - 1).Empty());
+  EXPECT_EQ(cache.Match(newer_probe, newer_probe.size() - 1).blocks.size(), 1u);
+}
+
 TEST(PrefixCacheTest, ReclaimReturnsRetainedBlocksInLeastRecentlyUsedOrder) {
   BlockPool pool{kBlockSize, 8};
   PrefixCache cache{pool, MakeOptions(8)};
