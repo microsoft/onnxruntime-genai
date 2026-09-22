@@ -106,6 +106,8 @@ struct PagedKeyValueCache {
                                size_t max_adoptable_tokens);
   void RecordPrefixAdoptions(
       const PagedCacheReservation& reservation) noexcept;
+  void RecordDeferredPrefixMatches(size_t count) noexcept;
+  void RecordPrefixPublicationRefusal() noexcept;
   void SealCommittedBlocks(const void* request_id,
                            std::span<const int32_t> tokens);
   bool CanAttachPrefixCheckpoint(const void* request_id,

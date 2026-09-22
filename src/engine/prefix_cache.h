@@ -82,7 +82,9 @@ struct PrefixCacheRegistration {
 
 struct PrefixCacheMetrics {
   uint64_t lookups{};                  // Prompts offered to the index.
-  uint64_t hits{};                     // Prompts that adopted at least one block.
+  uint64_t matches{};                  // Lookups that found an adoptable prefix.
+  uint64_t deferred_matches{};         // Matching candidates deferred before execution.
+  uint64_t hits{};                     // Matches whose adoption committed.
   uint64_t queried_tokens{};           // Prompt tokens eligible for adoption across all lookups.
   uint64_t matched_tokens{};           // Prompt tokens actually adopted (prefill work skipped).
   uint64_t registered_blocks{};        // Blocks given a content identity.
@@ -90,6 +92,7 @@ struct PrefixCacheMetrics {
   uint64_t hash_collisions{};          // Distinct contents that hashed to an indexed identity.
   uint64_t evictions{};                // Indexed blocks dropped to make room.
   uint64_t retention_refusals{};       // Registrations skipped because nothing was evictable.
+  uint64_t publication_refusals{};     // Boundaries skipped after metadata allocation failures.
 };
 
 /**
@@ -146,6 +149,12 @@ class PrefixCache final : private BlockReferenceObserver {
   // Publishes and refreshes a match only after its adopting cache transaction commits.
   void RecordAdoption(
       std::span<const std::shared_ptr<Block>> blocks) noexcept;
+  void RecordDeferredMatches(size_t count) noexcept {
+    metrics_.deferred_matches += count;
+  }
+  void RecordPublicationRefusal() noexcept {
+    ++metrics_.publication_refusals;
+  }
 
   bool CanAttachCheckpoint(
       const std::shared_ptr<const BlockIdentity>& identity) const;

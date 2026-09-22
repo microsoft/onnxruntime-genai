@@ -116,10 +116,13 @@ TEST(PrefixCacheTest, ExactPrefixMatchAdoptsEveryFullBlock) {
 
   EXPECT_EQ(match.blocks.size(), 2u);
   EXPECT_EQ(match.token_count, 2 * kBlockSize);
+  EXPECT_EQ(cache.Metrics().lookups, 1u);
+  EXPECT_EQ(cache.Metrics().matches, 1u);
   EXPECT_EQ(cache.Metrics().hits, 0u);
   EXPECT_EQ(cache.Metrics().matched_tokens, 0u);
 
   cache.RecordAdoption(match.blocks);
+  EXPECT_EQ(cache.Metrics().matches, 1u);
   EXPECT_EQ(cache.Metrics().hits, 1u);
   EXPECT_EQ(cache.Metrics().matched_tokens, 2 * kBlockSize);
 }

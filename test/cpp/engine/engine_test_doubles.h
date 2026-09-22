@@ -290,6 +290,23 @@ struct RecordingCacheManager : CacheManager {
     return std::make_unique<Reservation>(*this, plan);
   }
 
+  void SealCommittedBlocks(const StepPlan&) override {
+    if (std::exchange(throw_seal_bad_alloc_, false)) {
+      throw std::bad_alloc{};
+    }
+    if (std::exchange(throw_seal_invariant_failure_, false)) {
+      throw std::logic_error("Injected prefix publication invariant failure.");
+    }
+  }
+
+  void RecordPrefixPublicationRefusal() noexcept override {
+    ++prefix_metrics_.publication_refusals;
+  }
+
+  const PrefixCacheMetrics* PrefixMetrics() const override {
+    return &prefix_metrics_;
+  }
+
   // Scriptable knobs.
   void SetCanAllocate(bool verdict) { can_allocate_verdict_ = verdict; }
   void SetUnserviceableRequest(const std::shared_ptr<Request>& request) {
@@ -318,6 +335,10 @@ struct RecordingCacheManager : CacheManager {
     throw_deallocate_invariant_failure_ = true;
   }
   void ThrowReleaseFailureOnce() { throw_release_failure_ = true; }
+  void ThrowSealBadAllocOnce() { throw_seal_bad_alloc_ = true; }
+  void ThrowSealInvariantFailureOnce() {
+    throw_seal_invariant_failure_ = true;
+  }
   // Forces the composite plan/reservation consistency guard in Engine::StepDynamic. PlanStepResources
   // publishes `plan`, and every reservation reports slots, new-slot count, and staging bytes, so a
   // test can make the planned resources disagree with the reservation the Engine actually receives.
@@ -365,6 +386,9 @@ struct RecordingCacheManager : CacheManager {
   bool throw_deallocate_failure_{};
   bool throw_deallocate_invariant_failure_{};
   bool throw_release_failure_{};
+  bool throw_seal_bad_alloc_{};
+  bool throw_seal_invariant_failure_{};
+  PrefixCacheMetrics prefix_metrics_;
   std::shared_ptr<CallTrace> trace_;
   bool can_allocate_verdict_{true};
   const void* unserviceable_request_id_{};

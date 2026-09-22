@@ -281,7 +281,27 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
       dynamic_batching.max_batch_size);
 
   auto result = cache_manager_->PlanStepResources(plan);
+  const auto record_deferred_prefix_matches = [&] {
+    if (!result.capacity_deferred) {
+      return;
+    }
+    size_t deferred_matches = 0;
+    for (const auto& candidate : candidates) {
+      if (!candidate.entry.prefix_match ||
+          candidate.entry.request_id == result.unserviceable_request_id) {
+        continue;
+      }
+      const bool selected = std::any_of(
+          plan.requests.begin(), plan.requests.end(),
+          [&](const RequestStepPlan& entry) {
+            return entry.request_id == candidate.entry.request_id;
+          });
+      deferred_matches += selected ? 0 : 1;
+    }
+    cache_manager_->RecordDeferredPrefixMatches(deferred_matches);
+  };
   if (!result.executable) {
+    record_deferred_prefix_matches();
     return result;
   }
 
@@ -384,6 +404,7 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
       plan.requests = budgeted_requests;
     }
   }
+  record_deferred_prefix_matches();
   cache_manager_->OrderStepForExecution(plan);
 
   // VarlenDecoderIO concatenates every request's pending tokens into one flat input. These offsets

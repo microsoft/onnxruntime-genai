@@ -10,6 +10,7 @@
 #include "decoders/varlen_decoder_io.h"
 
 #include <limits>
+#include <new>
 
 namespace Generators {
 
@@ -1696,6 +1697,7 @@ void Engine::RunDynamic() {
           "Dynamic scheduler planning failed and the Engine is no longer healthy.",
           std::current_exception());
     }
+    PrefixAdoptionGuard prefix_adoption_guard{step_plan_};
     if (planning_result.capacity_deferred) {
       ++transaction_metrics_.capacity_deferrals;
     }
@@ -1727,7 +1729,6 @@ void Engine::RunDynamic() {
           "Dynamic scheduler returned no executable work while requests remain pending.",
           nullptr);
     }
-    PrefixAdoptionGuard prefix_adoption_guard{step_plan_};
 
     std::unique_ptr<CacheStepReservation> reservation;
     try {
@@ -2050,7 +2051,14 @@ void Engine::RunDynamic() {
         step_plan_.requests[i].request->CommitStep(
             step_plan_.requests[i], step_results_[i]);
       }
-      cache_manager_->SealCommittedBlocks(step_plan_);
+      for (auto& entry : step_plan_.requests) {
+        entry.prefix_match.reset();
+      }
+      try {
+        cache_manager_->SealCommittedBlocks(step_plan_);
+      } catch (const std::bad_alloc&) {
+        cache_manager_->RecordPrefixPublicationRefusal();
+      }
       if (mtp_step) {
         PublishMtpDrafts(*mtp_step);
       }
