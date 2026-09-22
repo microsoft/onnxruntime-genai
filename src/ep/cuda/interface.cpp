@@ -28,6 +28,8 @@
 
 namespace Generators {
 
+static_assert(std::is_trivially_copyable_v<cuda::StateUpdateReplayDescGpu>);
+
 GenaiInterface* gp_genai{};
 Ort::Allocator* ort_allocator_{};
 const char* device_label = "cuda";
@@ -596,12 +598,42 @@ struct CudaInterfaceImplBase : DeviceInterface {
     }
     std::scoped_lock lock{state_update_replay_mutex_};
     cudaStream_t stream = GetStream();
+    state_update_replay_host_descriptors_.resize(count);
+    for (size_t index = 0; index < count; ++index) {
+      const auto& source = descriptors[index];
+      auto& destination = state_update_replay_host_descriptors_[index];
+      destination = cuda::StateUpdateReplayDescGpu{
+          source.source_state.Span().data(),
+          source.destination_state.Span().data(),
+          source.value.empty() ? nullptr : source.value.Span().data(),
+          source.decay.empty()
+              ? nullptr
+              : reinterpret_cast<const float*>(source.decay.Span().data()),
+          source.key.empty()
+              ? nullptr
+              : reinterpret_cast<const float*>(source.key.Span().data()),
+          source.delta.empty()
+              ? nullptr
+              : reinterpret_cast<const float*>(source.delta.Span().data()),
+          source.channel_count,
+          source.state_width,
+          source.key_width,
+          source.key_head_count,
+          source.capacity,
+          source.kept_count,
+          source.element_size,
+          static_cast<uint32_t>(source.kind),
+      };
+    }
     if (state_update_replay_capacity_ < count) {
-      state_update_replay_descriptors_ = CudaMallocArray<StateUpdateReplayDesc>(count);
+      state_update_replay_descriptors_ =
+          CudaMallocArray<cuda::StateUpdateReplayDescGpu>(count);
       state_update_replay_capacity_ = count;
     }
-    CUDA_CHECK(cudaMemcpyAsync(state_update_replay_descriptors_.get(), descriptors,
-                               count * sizeof(StateUpdateReplayDesc), cudaMemcpyHostToDevice,
+    CUDA_CHECK(cudaMemcpyAsync(state_update_replay_descriptors_.get(),
+                               state_update_replay_host_descriptors_.data(),
+                               count * sizeof(cuda::StateUpdateReplayDescGpu),
+                               cudaMemcpyHostToDevice,
                                stream));
     cuda::LaunchReplayStateUpdates(
         state_update_replay_descriptors_.get(), static_cast<int>(count), stream);
@@ -722,7 +754,8 @@ struct CudaInterfaceImplBase : DeviceInterface {
   cuda_host_unique_ptr<float> topk_scores_host_;     // pinned host buffer for the top-k score copy
   size_t topk_host_count_{0};
   std::mutex state_update_replay_mutex_;
-  cuda_unique_ptr<StateUpdateReplayDesc> state_update_replay_descriptors_;
+  std::vector<cuda::StateUpdateReplayDescGpu> state_update_replay_host_descriptors_;
+  cuda_unique_ptr<cuda::StateUpdateReplayDescGpu> state_update_replay_descriptors_;
   size_t state_update_replay_capacity_{0};
 };
 
