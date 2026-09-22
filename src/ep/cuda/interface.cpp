@@ -1033,6 +1033,7 @@ struct CudaInterfaceImpl final : CudaInterfaceImplBase {
   bool RecyclesHostMirrorsAfterUpload(size_t bytes) const override {
     return PinnedHostPool::Pooled(bytes);
   }
+  bool SupportsCompactStateReplay() const override { return true; }
   int GetWindowedKeyValueCacheSize(const Config::Model::Decoder& decoder,
                                    const Config::Search& search,
                                    int max_length) const override {
