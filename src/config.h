@@ -678,6 +678,10 @@ struct Config {
       int selector_top_k{};
       int mask_token_id{};
       int sliding_window{-1};
+      bool independent_sampling{};
+      float sampling_temperature{0.1f};
+      float sampling_top_p{0.95f};
+      float sampling_min_p{0.3f};
       std::vector<int> aux_hidden_state_layers;
 
       // Name of the main decoder's auxiliary hidden-states output that feeds the drafter.

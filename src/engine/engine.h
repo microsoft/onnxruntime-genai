@@ -286,6 +286,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
   std::unique_ptr<Dflash2Drafter> dflash2_drafter_;
   std::vector<Dflash2Drafter::Feed> dflash2_feeds_;
   std::vector<std::vector<int32_t>> dflash2_drafts_;
+  std::vector<std::vector<TargetTokenSelection>> dflash2_draft_distributions_;
   std::vector<size_t> dflash2_draft_widths_;
   size_t dflash2_consecutive_failures_{};
   bool dflash2_disabled_{};

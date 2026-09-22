@@ -88,7 +88,7 @@ TopKScores TryDeviceTopKScoresPerRow(DeviceInterface& device,
 
 TargetTokenSelection BuildTargetSelection(
     size_t row, DeviceSpan<float> logits, const EffectiveTurnPolicy& policy,
-    const TopKScores& topk, SampledCategorical& scratch) {
+    const TopKScores& topk, float min_p, SampledCategorical& scratch) {
   TargetTokenSelection selection;
   if (topk.k == 0) {
     const auto cpu_logits = logits.CopyDeviceToCpu();
@@ -114,24 +114,20 @@ TargetTokenSelection BuildTargetSelection(
   for (float& probability : probabilities)
     probability /= sum;
 
-  int keep = k;
-  if (policy.top_p > 0.0f && policy.top_p < 1.0f) {
-    float cumulative = 0.0f;
-    for (int i = 0; i < k; ++i) {
-      cumulative += probabilities[static_cast<size_t>(i)];
-      if (cumulative >= policy.top_p) {
-        keep = i + 1;
-        break;
-      }
+  const float min_probability = min_p * probabilities.front();
+  float cumulative = 0.0f;
+  for (int i = 0; i < k; ++i) {
+    const float probability = probabilities[static_cast<size_t>(i)];
+    const bool keep_min_p = probability >= min_probability;
+    const bool keep_top_p = !(policy.top_p > 0.0f && policy.top_p < 1.0f) ||
+                            cumulative < policy.top_p;
+    cumulative += probability;
+    if (keep_min_p && keep_top_p) {
+      selection.indices.push_back(topk.tokens[offset + static_cast<size_t>(i)]);
+      selection.probs.push_back(probability);
     }
   }
-  float kept_sum = 0.0f;
-  for (int i = 0; i < keep; ++i)
-    kept_sum += probabilities[static_cast<size_t>(i)];
-  selection.indices.assign(
-      topk.tokens.begin() + static_cast<ptrdiff_t>(offset),
-      topk.tokens.begin() + static_cast<ptrdiff_t>(offset + static_cast<size_t>(keep)));
-  selection.probs.assign(probabilities.begin(), probabilities.begin() + keep);
+  const float kept_sum = std::accumulate(selection.probs.begin(), selection.probs.end(), 0.0f);
   for (float& probability : selection.probs)
     probability /= kept_sum;
   return selection;
@@ -376,6 +372,8 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
         rng_checkpoints[i].reserve(draft_count + 1);
       }
       const auto drafts = requests_[i]->StagedDraftTokens();
+      const auto draft_distributions = requests_[i]->StagedDraftTokenDistributions();
+      const bool ratio_verification = draft_distributions.size() == draft_count;
       const size_t token_budget = requests_[i]->RemainingTurnTokenBudget();
       requests_[i]->RewindDraftsForTransaction(0);
       size_t accepted_count = 0;
@@ -383,13 +381,35 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
              selected_tokens[i].size() < token_budget) {
         const auto selection = BuildTargetSelection(
             row + accepted_count, verify_rows[row + accepted_count],
-            requests_[i]->TurnPolicy(), topk, sampling_scratch);
-        const int32_t token = SampleTargetToken(selection, requests_[i]->rng_);
+            requests_[i]->TurnPolicy(), topk,
+            ratio_verification ? requests_[i]->DraftTargetMinP() : 0.0f,
+            sampling_scratch);
+        int32_t token;
+        bool accepted = false;
+        if (ratio_verification) {
+          const int32_t draft_token = drafts[accepted_count];
+          const auto& draft_distribution = draft_distributions[accepted_count];
+          const float target_probability = GetTargetTokenProbability(selection, draft_token);
+          const float draft_probability = GetSparseTokenProbability(
+              draft_distribution.indices, draft_distribution.probs, draft_token);
+          std::uniform_real_distribution<float> uniform(0.0f, 1.0f);
+          accepted = uniform(requests_[i]->rng_) <
+                     ComputeAcceptProb(target_probability, draft_probability);
+          token = accepted
+                      ? draft_token
+                      : SampleCorrectionToken(
+                            selection.indices, selection.probs,
+                            draft_distribution.indices, draft_distribution.probs,
+                            requests_[i]->rng_);
+        } else {
+          token = SampleTargetToken(selection, requests_[i]->rng_);
+          accepted = token == drafts[accepted_count];
+        }
         selected_tokens[i].push_back(token);
         if (checkpoint_rng) {
           rng_checkpoints[i].push_back(requests_[i]->rng_);
         }
-        if (token != drafts[accepted_count] || requests_[i]->IsStopToken(token))
+        if (!accepted || requests_[i]->IsStopToken(token))
           break;
         ++accepted_count;
       }
@@ -397,7 +417,9 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
           selected_tokens[i].size() < token_budget) {
         const auto selection = BuildTargetSelection(
             row + draft_count, verify_rows[row + draft_count],
-            requests_[i]->TurnPolicy(), topk, sampling_scratch);
+            requests_[i]->TurnPolicy(), topk,
+            ratio_verification ? requests_[i]->DraftTargetMinP() : 0.0f,
+            sampling_scratch);
         selected_tokens[i].push_back(
             SampleTargetToken(selection, requests_[i]->rng_));
         if (checkpoint_rng) {

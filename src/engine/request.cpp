@@ -127,6 +127,7 @@ Request::Request(
       params_{CreateRequestParams(model, max_session_tokens)},
       current_seed_basis_{InitialSeedBasis(model.config_->search.random_seed)},
       rng_{MakeHostRandomGenerator(current_seed_basis_)},
+      draft_rng_{rng_},
       search_{CreateSearch(*params_)} {
   draft_tokens_.reserve(kMaxDraftTokensPerStep);
 
@@ -322,6 +323,8 @@ void Request::MarkClosedFromEngine(const Engine& engine) noexcept {
   stop_controller_transaction_checkpoint_ = 0;
   batched_sampler_state_.reset();
   std::vector<int32_t>{}.swap(draft_tokens_);
+  std::vector<TargetTokenSelection>{}.swap(draft_token_distributions_);
+  draft_target_min_p_ = 0.0f;
   staged_draft_count_ = 0;
   accepted_draft_count_ = 0;
   evaluated_draft_count_ = 0;
@@ -366,6 +369,8 @@ void Request::ReleaseTurnResources() noexcept {
   // unserviceable failure happen between steps with nothing staged, and a fatal failure leaves the
   // Request unable to execute again at all.
   draft_tokens_.clear();
+  draft_token_distributions_.clear();
+  draft_target_min_p_ = 0.0f;
   staged_draft_count_ = 0;
   accepted_draft_count_ = 0;
   evaluated_draft_count_ = 0;
@@ -424,6 +429,8 @@ void Request::CompleteClose() noexcept {
   search_.reset();
   params_.reset();
   std::vector<int32_t>{}.swap(draft_tokens_);
+  std::vector<TargetTokenSelection>{}.swap(draft_token_distributions_);
+  draft_target_min_p_ = 0.0f;
   staged_draft_count_ = 0;
   accepted_draft_count_ = 0;
   evaluated_draft_count_ = 0;
@@ -497,6 +504,8 @@ void Request::SetDraftTokens(std::span<const int32_t> tokens) {
   }
   if (tokens.empty()) {
     draft_tokens_.clear();
+    draft_token_distributions_.clear();
+    draft_target_min_p_ = 0.0f;
     return;
   }
   if (!IsExecuting(status_) || IsPrefill()) {
@@ -524,10 +533,33 @@ void Request::SetDraftTokens(std::span<const int32_t> tokens) {
     throw std::logic_error("The request host token mirror does not have reserved draft capacity.");
   }
   draft_tokens_.assign(tokens.begin(), tokens.end());
+  draft_token_distributions_.clear();
+  draft_target_min_p_ = 0.0f;
+}
+
+void Request::SetDraftTokenDistributions(
+    std::span<const TargetTokenSelection> distributions,
+    float target_min_p) {
+  std::vector<int32_t> tokens;
+  tokens.reserve(distributions.size());
+  for (const auto& distribution : distributions) {
+    if (distribution.indices.empty() || distribution.indices.size() != distribution.probs.size()) {
+      throw std::runtime_error("Each independent draft distribution must be non-empty and aligned.");
+    }
+    tokens.push_back(SampleSparseToken(distribution.indices, distribution.probs, draft_rng_));
+  }
+  SetDraftTokens(tokens);
+  draft_token_distributions_.assign(distributions.begin(), distributions.end());
+  draft_target_min_p_ = target_min_p;
 }
 
 std::span<const int32_t> Request::StagedDraftTokens() const {
   return std::span<const int32_t>{draft_tokens_}.subspan(0, staged_draft_count_);
+}
+
+std::span<const TargetTokenSelection> Request::StagedDraftTokenDistributions() const {
+  return std::span<const TargetTokenSelection>{draft_token_distributions_}.subspan(
+      0, std::min(staged_draft_count_, draft_token_distributions_.size()));
 }
 
 bool Request::IsStopToken(int32_t token) const {
@@ -1004,6 +1036,7 @@ void Request::CommitStateForTransaction() {
   // never-sampled step leaves both the pending marker and the durable basis exactly as they were.
   if (pending_reseed_applied_) {
     current_seed_basis_ = *pending_reseed_;
+    draft_rng_ = MakeHostRandomGenerator(current_seed_basis_);
     pending_reseed_.reset();
     pending_reseed_applied_ = false;
   }
@@ -1030,6 +1063,8 @@ void Request::CommitStep(const RequestStepPlan& plan,
     ReleaseTurnResources();
   }
   draft_tokens_.clear();
+  draft_token_distributions_.clear();
+  draft_target_min_p_ = 0.0f;
   staged_draft_count_ = 0;
   accepted_draft_count_ = 0;
   evaluated_draft_count_ = 0;

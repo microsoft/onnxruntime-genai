@@ -1240,6 +1240,21 @@ struct Dflash2_Element : JSON::Element {
       v_.mask_token_id = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "sliding_window") {
       v_.sliding_window = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "independent_sampling") {
+      v_.independent_sampling = JSON::Get<bool>(value);
+    } else if (name == "sampling_temperature") {
+      v_.sampling_temperature = static_cast<float>(JSON::Get<double>(value));
+      if (!(v_.sampling_temperature > 0.0f)) throw std::out_of_range("sampling_temperature must be > 0");
+    } else if (name == "sampling_top_p") {
+      v_.sampling_top_p = static_cast<float>(JSON::Get<double>(value));
+      if (!(v_.sampling_top_p > 0.0f && v_.sampling_top_p <= 1.0f)) {
+        throw std::out_of_range("sampling_top_p must be in (0, 1]");
+      }
+    } else if (name == "sampling_min_p") {
+      v_.sampling_min_p = static_cast<float>(JSON::Get<double>(value));
+      if (!(v_.sampling_min_p >= 0.0f && v_.sampling_min_p <= 1.0f)) {
+        throw std::out_of_range("sampling_min_p must be in [0, 1]");
+      }
     } else if (name == "main_aux_hidden_states") {
       v_.main_aux_hidden_states = JSON::Get<std::string_view>(value);
     } else {
