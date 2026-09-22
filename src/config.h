@@ -686,6 +686,7 @@ struct Config {
       struct Inputs {
         std::string aux_hidden_states{"aux_hidden_states"};
         std::string input_ids{Defaults::InputIdsName};
+        std::string embeddings{Defaults::InputsEmbedsName};
         std::string q_row_map{"q_row_map"};
         std::string qkv_row_map{"qkv_row_map"};
         std::string block_row_index{"block_row_index"};
