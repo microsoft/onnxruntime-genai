@@ -139,7 +139,11 @@ class Override:
         unknown = set(data) - {"match", "type", "exclude"}
         if unknown:
             raise ValueError(f"unknown override field(s): {sorted(unknown)}")
-        return cls(match=data["match"], type=data.get("type"), exclude=bool(data.get("exclude", False)))
+        return cls(
+            match=data["match"],
+            type=data.get("type"),
+            exclude=require_bool(data.get("exclude", False), "override.exclude"),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"match": dict(self.match)}
@@ -178,6 +182,12 @@ def normalize_bool(value: Any, field_name: str) -> bool:
     raise ValueError(f"{field_name} must be a boolean, got {value!r}")
 
 
+def require_bool(value: Any, field_name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    raise ValueError(f"{field_name} must be a boolean, got {value!r}")
+
+
 @dataclass
 class WeightsConfig:
     """Dense (non-MoE) weight quantization."""
@@ -212,7 +222,7 @@ class WeightsConfig:
         return cls(
             type=data.get("type", "none"),
             block_size=data.get("block_size", 32),
-            symmetric=bool(data.get("symmetric", True)),
+            symmetric=require_bool(data.get("symmetric", True), "weights.symmetric"),
             method=data.get("method", "default"),
             accuracy_level=int(data.get("accuracy_level", 0)),
             op_types=tuple(data.get("op_types", ("MatMul",))),
@@ -282,7 +292,7 @@ class RuntimeConfig:
         if unknown:
             raise ValueError(f"unknown runtime field(s): {sorted(unknown)}")
         return cls(
-            use_qdq=bool(data.get("use_qdq", False)),
+            use_qdq=require_bool(data.get("use_qdq", False), "format.use_qdq"),
             matmulnbits_weights_prepacked=int(data.get("matmulnbits_weights_prepacked", 0)),
         )
 
@@ -317,6 +327,21 @@ _PRECISION_TO_WEIGHTS_TYPE = {
 }
 
 
+def default_io_dtype(precision: str, execution_provider: str, extra_options: dict[str, Any]) -> str:
+    cpu_quant = precision in {"int4", "int8"} and execution_provider == "cpu"
+    fp32_webgpu = execution_provider == "webgpu" and normalize_bool(
+        extra_options.get("use_webgpu_fp32", False), "use_webgpu_fp32"
+    )
+    bf16_cuda = precision == "int4" and execution_provider in {"cuda", "trt-rtx"} and normalize_bool(
+        extra_options.get("use_cuda_bf16", False), "use_cuda_bf16"
+    )
+    if precision == "fp32" or cpu_quant or fp32_webgpu:
+        return "fp32"
+    if precision == "bf16" or bf16_cuda:
+        return "bf16"
+    return "fp16"
+
+
 def desugar_algo_config(extra_options: dict[str, Any]) -> tuple[str, dict[str, str]]:
     """Desugar the flat weight-only quant options into ``(base_method, {preset: quant_type})``.
 
@@ -339,12 +364,10 @@ def desugar_algo_config(extra_options: dict[str, Any]) -> tuple[str, dict[str, s
 @dataclass
 class QuantConfig:
     io_dtype: str = "fp16"
-    # This records export intent. Loaders must implement the conversion policy;
-    # parsing it alone does not make preserve/requantize effective for a target.
-    checkpoint_policy: str = "preserve"
     weights: WeightsConfig = field(default_factory=WeightsConfig)
     moe: MoEConfig = field(default_factory=MoEConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+    checkpoint_policy: str = "preserve"
 
     def __post_init__(self):
         if self.io_dtype not in IO_DTYPES:
@@ -399,10 +422,10 @@ class QuantConfig:
             raise ValueError("quantization format and compatibility alias runtime conflict")
         return cls(
             io_dtype=data.get("io_dtype", "fp16"),
-            checkpoint_policy=data.get("checkpoint_policy", "preserve"),
             weights=WeightsConfig.from_dict(data.get("weights", {})),
             moe=MoEConfig.from_dict(data.get("moe", {})),
             runtime=RuntimeConfig.from_dict(format_data if format_data is not None else runtime_data or {}),
+            checkpoint_policy=data.get("checkpoint_policy", "preserve"),
         )
 
     @classmethod
@@ -483,23 +506,18 @@ class QuantConfig:
             matmulnbits_weights_prepacked=int(extra_options.get("matmulnbits_weights_prepacked", 0)),
         )
 
-        io_dtype = precision if precision in IO_DTYPES else "fp16"
-        return cls(io_dtype=io_dtype, checkpoint_policy="preserve", weights=weights, moe=moe, runtime=runtime)
+        io_dtype = default_io_dtype(precision, execution_provider, extra_options)
+        return cls(io_dtype=io_dtype, weights=weights, moe=moe, runtime=runtime, checkpoint_policy="preserve")
 
     # -- Serialization -----------------------------------------------------
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize canonical format, even when input used the runtime alias.
-
-        Consumers of older dictionaries must migrate from the runtime key;
-        backward-compatible parsing does not preserve that serialization shape.
-        """
+        """Serialize using the compatibility shape consumed by existing callers."""
         return {
             "io_dtype": self.io_dtype,
-            "checkpoint_policy": self.checkpoint_policy,
             "weights": self.weights.to_dict(),
             "moe": self.moe.to_dict(),
-            "format": self.format.to_dict(),
+            "runtime": self.runtime.to_dict(),
         }
 
 

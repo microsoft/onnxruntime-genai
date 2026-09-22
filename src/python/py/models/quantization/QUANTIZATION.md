@@ -19,13 +19,13 @@ all *round-to-nearest* (RTN) — none of them use calibration data or error feed
 The experimental builder envelope uses `target_options.quant_config` and
 `drafter_options.quant_config`. Numeric policy remains in `weights` and `moe`;
 QDQ and packing belong to `format` because they change the exported graph or
-stored bytes. `runtime` remains an input alias, but `QuantConfig.to_dict()` now
-emits `format` and `checkpoint_policy`. Consumers expecting the old serialized
-shape need an explicit migration.
+stored bytes. `runtime` remains the compatibility key emitted by
+`QuantConfig.to_dict()`; the builder envelope translates it to canonical
+`format` without changing the public serializer.
 
-Parsing `checkpoint_policy=preserve/requantize` does not establish loader
-support. Currently the target does not enforce it; Qwen MTP uses it when loading
-its tensors. Do not promise preservation/conversion from schema acceptance alone.
+Target options reject an explicit checkpoint policy because target loaders do
+not implement both paths. Qwen MTP supports `preserve` and `requantize` when
+loading its tensors.
 
 Typed overrides support preset or exact-name selection, and exclusions require
 exact names. Typed and exclusion rules share ordered first-match resolution;

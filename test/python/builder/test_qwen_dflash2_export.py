@@ -380,6 +380,59 @@ def test_exact_name_quantization_override_is_forwarded_to_quantizer():
     assert model.int4_customized_weight_config == {"/model/layers.0/mlp/down_proj/MatMul": {"bits": 8}}
 
 
+def _exact_override_model(tmp_path, *, constant_weight):
+    node_name = "/probe/MatMul"
+    builder = DFlash2Builder(
+        _draft_checkpoint(tmp_path),
+        str(tmp_path),
+        ir.DataType.FLOAT16,
+        paged_block_size=256,
+        max_position_embeddings=128,
+    )
+    if constant_weight:
+        builder.matmul(node_name, "hidden_states", torch.ones((16, 32)), 32, 16, "num_block")
+    else:
+        builder.make_value("dynamic_weight", ir.DataType.FLOAT16, [32, 16])
+        builder.make_node("MatMul", ["hidden_states", "dynamic_weight"], ["output"], name=node_name)
+
+    override = types.SimpleNamespace(match={"name": node_name}, type="int8", exclude=False)
+    model = object.__new__(Model)
+    model.model = builder.model
+    model.exact_quant_override_names = {node_name}
+    model.exact_quant_overrides = {node_name: override}
+    model.quantization_algo = "default"
+    model.int4_customized_weight_config = {node_name: {"bits": 8}}
+    model.quant_attrs = {
+        "accuracy_level": 0,
+        "bits": 4,
+        "is_symmetric": True,
+        "matmul_block_size": 16,
+        "nodes_to_exclude": [],
+        "op_types_to_quantize": ("MatMul",),
+        "use_qdq": False,
+    }
+    model.matmul_attrs = {"weights_prepacked": 0}
+    model.ep = "cpu"
+    return model, node_name
+
+
+def test_exact_name_override_rejects_dynamic_weight(tmp_path):
+    model, _ = _exact_override_model(tmp_path, constant_weight=False)
+
+    with pytest.raises(ValueError, match="require a constant weight initializer"):
+        model.to_nbits()
+
+
+def test_exact_name_override_is_verified_after_quantization(tmp_path):
+    model, node_name = _exact_override_model(tmp_path, constant_weight=True)
+
+    quantized = model.to_nbits()
+    node = next(node for node in quantized.graph if node.name == f"{node_name}_Q8")
+
+    assert node.op_type == "MatMulNBits"
+    assert node.attributes["bits"].value == 8
+
+
 def test_preset_quantization_override_initializes_the_node_map():
     model = object.__new__(Model)
     model.quant_config = types.SimpleNamespace(

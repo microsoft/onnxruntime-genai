@@ -73,6 +73,38 @@ def test_provider_defaults_are_recorded(provider, accuracy_level, moe_block_size
     assert effective.execution_provider == ("trt-rtx" if provider == "NvTensorRtRtx" else provider)
 
 
+@pytest.mark.parametrize(
+    "precision,provider,legacy_options,expected_io_dtype",
+    [
+        ("int4", "cpu", {}, "fp32"),
+        ("int8", "cpu", {}, "fp32"),
+        ("int4", "cuda", {"use_cuda_bf16": "true"}, "bf16"),
+        ("int4", "webgpu", {"use_webgpu_fp32": "true"}, "fp32"),
+    ],
+)
+def test_structured_defaults_preserve_provider_aware_io_dtype(
+    precision, provider, legacy_options, expected_io_dtype
+):
+    effective = normalize_builder_config(
+        precision,
+        provider,
+        legacy_options,
+        builder_config_version=2,
+        target_options={},
+    )
+
+    assert effective.target_options["quant_config"]["io_dtype"] == expected_io_dtype
+
+
+def test_explicit_target_checkpoint_policy_is_rejected():
+    with pytest.raises(ValueError, match="checkpoint_policy is not supported"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            target_options={"quant_config": {"checkpoint_policy": "preserve"}},
+        )
+
+
 def test_structured_target_overrides_legacy_alias():
     with pytest.warns(UserWarning, match="weights.block_size overrides"):
         effective = normalize_builder_config(
@@ -153,6 +185,21 @@ def test_dflash2_rejects_unsupported_body_dtype(tmp_path):
                 "drafter_type": "dflash2",
                 "path": make_drafter_checkpoint(tmp_path),
                 "quant_config": {"io_dtype": "fp16"},
+            },
+        )
+
+
+@pytest.mark.parametrize("block_size", [0, "per_channel", 17])
+def test_dflash2_rejects_unsupported_body_block_size(tmp_path, block_size):
+    with pytest.raises(ValueError, match="integer weights.block_size must be one of"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            target_options={"attention": {"implementation": "paged"}},
+            drafter_options={
+                "drafter_type": "dflash2",
+                "path": make_drafter_checkpoint(tmp_path),
+                "quant_config": {"weights": {"type": "int4", "block_size": block_size}},
             },
         )
 
@@ -265,6 +312,20 @@ def test_unquantized_moe_requires_explicit_expert_policy():
     validate_model_dependent_config(explicit, model_config)
 
 
+def test_explicit_unquantized_moe_is_not_copied_to_legacy_options():
+    with pytest.warns(UserWarning, match="moe.type overrides legacy"):
+        effective = normalize_builder_config(
+            "int4",
+            "cuda",
+            {"moe_quant_type": "int8", "use_8bits_moe": True},
+            target_options={"quant_config": {"moe": {"type": "none"}}},
+        )
+
+    assert effective.extra_options["_quant_config"].moe.type == "none"
+    assert "moe_quant_type" not in effective.extra_options
+    assert "use_8bits_moe" not in effective.extra_options
+
+
 def test_checkpoint_moe_policy_updates_implicit_structured_config():
     effective = normalize_builder_config(
         "bf16",
@@ -318,7 +379,9 @@ def test_runtime_merge_replaces_arrays_and_fixed_allocation():
     }
     merged = apply_runtime_config(generated, runtime)
     assert merged["model"]["decoder"]["filename"] == "model.onnx"
-    assert merged["model"]["decoder"]["session_options"]["provider_options"] == [{"CUDA": {"new": "1"}}]
+    assert merged["model"]["decoder"]["session_options"]["provider_options"] == [
+        {"CUDA": {"required": "1", "new": "1"}}
+    ]
     assert merged["engine"]["dynamic_batching"] == {"block_size": 256, "num_blocks": 128}
     assert merged["search"]["top_k"] == 1
     assert generated == original
@@ -411,6 +474,75 @@ def test_runtime_rejects_provider_changes():
             generated,
             {"model": {"decoder": {"session_options": {"provider_options": []}}}},
         )
+
+
+@pytest.mark.parametrize(
+    "generated_name,runtime_name",
+    [("cuda", "CUDA"), ("WebGPU", "webgpu"), ("NvTensorRtRtx", "NVTENSORRTRTX")],
+)
+def test_runtime_provider_options_merge_case_insensitively(generated_name, runtime_name):
+    generated = {
+        "model": {
+            "decoder": {
+                "session_options": {
+                    "provider_options": [
+                        {generated_name: {"enable_cuda_graph": "1", "device_id": "0"}}
+                    ]
+                },
+            }
+        }
+    }
+
+    updated = apply_runtime_config(
+        generated,
+        {
+            "model": {
+                "decoder": {
+                    "session_options": {
+                        "provider_options": [{runtime_name: {"gpu_mem_limit": "1024"}}]
+                    }
+                }
+            }
+        },
+    )
+
+    assert updated["model"]["decoder"]["session_options"]["provider_options"] == [
+        {
+            generated_name: {
+                "enable_cuda_graph": "1",
+                "device_id": "0",
+                "gpu_mem_limit": "1024",
+            }
+        }
+    ]
+
+
+@pytest.mark.parametrize("run_options", ["invalid", [], {"tag": 1}])
+def test_runtime_run_options_must_be_an_object_of_strings(run_options):
+    generated = {"model": {"decoder": {"session_options": {}}}}
+
+    with pytest.raises(ValueError, match="run_options must be an object of strings"):
+        apply_runtime_config(generated, {"model": {"decoder": {"run_options": run_options}}})
+
+
+@pytest.mark.parametrize("max_length", ["8192", 0, True])
+def test_runtime_search_max_length_must_be_a_positive_integer(max_length):
+    generated = {"model": {"context_length": 4096}}
+
+    with pytest.raises(ValueError, match="max_length must be a positive integer"):
+        apply_runtime_config(generated, {"search": {"max_length": max_length}})
+
+
+def test_runtime_search_max_length_cannot_exceed_context_length():
+    generated = {"model": {"context_length": 4096}, "search": {"max_length": 4096}}
+
+    with pytest.raises(ValueError, match="exceeds the exported model context_length"):
+        apply_runtime_config(generated, {"search": {"max_length": 8192}})
+
+
+def test_runtime_search_rejects_unknown_fields():
+    with pytest.raises(ValueError, match="unknown runtime_config.search field"):
+        apply_runtime_config({"model": {"context_length": 4096}}, {"search": {"unsupported": 1}})
 
 
 def test_runtime_allows_block_drafter_to_repeat_decoder_provider_options():

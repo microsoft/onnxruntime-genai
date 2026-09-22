@@ -60,7 +60,7 @@ from builders import (
     WhisperModel,
 )
 from builders.qwen import Qwen35Model, Qwen35MoEModel
-from quantization import KV_CACHE_QUANT_SCHEMES, QuantConfig
+from quantization import KV_CACHE_QUANT_SCHEMES, QuantConfig, default_io_dtype
 from transformers import AutoConfig, AutoTokenizer
 
 
@@ -500,20 +500,11 @@ def set_io_dtype(precision, execution_provider, extra_options) -> ir.DataType:
     """
     Set the input/output precision of the ONNX model based on the provided precision and execution provider.
     """
-    cpu_quant = precision in {"int4", "int8"} and execution_provider == "cpu"
-    fp32_webgpu = execution_provider == "webgpu" and extra_options.get("use_webgpu_fp32", False)
-    bf16_cuda = precision == "int4" and execution_provider in {"cuda", "trt-rtx"} and extra_options.get("use_cuda_bf16", False)
-
-    if precision == "fp32" or cpu_quant or fp32_webgpu:
-        # FP32 precision
-        return ir.DataType.FLOAT
-
-    if precision == "bf16" or bf16_cuda:
-        # BF16 precision
-        return ir.DataType.BFLOAT16
-
-    # FP16 precision
-    return ir.DataType.FLOAT16
+    return {
+        "fp32": ir.DataType.FLOAT,
+        "bf16": ir.DataType.BFLOAT16,
+        "fp16": ir.DataType.FLOAT16,
+    }[default_io_dtype(precision, execution_provider, extra_options)]
 
 
 def set_onnx_dtype(precision: str, extra_options: dict[str, Any]) -> ir.DataType:

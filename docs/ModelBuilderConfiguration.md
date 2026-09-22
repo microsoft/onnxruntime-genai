@@ -98,7 +98,7 @@ full quantization configuration from PR #2588:
 | Section | Contents |
 | --- | --- |
 | `io_dtype` | Requested activation/I/O dtype, subject to the component's supported contract. |
-| `checkpoint_policy` | `preserve` or `requantize`; distinct from source checkpoint storage metadata. |
+| `checkpoint_policy` | Reserved for loaders that implement both paths. Target options currently reject it; MTP supports `preserve` and `requantize`. |
 | `weights` | `type`, `block_size`, `symmetric`, `method`, `accuracy_level`, `op_types`, and ordered `overrides`. |
 | `moe` | Expert quantization type, block size, and packing. |
 | `format` | `use_qdq` and `matmulnbits_weights_prepacked`. |
@@ -437,7 +437,6 @@ there, or be supplied as resolved Olive resources.
       "target_options": {
         "quant_config": {
           "io_dtype": "fp16",
-          "checkpoint_policy": "preserve",
           "weights": {
             "type": "int4",
             "block_size": 32,
@@ -481,7 +480,6 @@ there, or be supplied as resolved Olive resources.
         },
         "quant_config": {
           "io_dtype": "bf16",
-          "checkpoint_policy": "preserve",
           "weights": {
             "type": "int4",
             "block_size": 32,
@@ -658,7 +656,6 @@ DSpark with its currently supported dense body:
     },
     "quant_config": {
       "io_dtype": "bf16",
-      "checkpoint_policy": "preserve",
       "weights": {"type": "none"}
     },
     "dspark": {"top_k": 16}

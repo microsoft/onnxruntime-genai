@@ -119,7 +119,35 @@ def test_from_dict_rejects_bad_checkpoint_policy():
 def test_from_dict_accepts_runtime_compatibility_alias():
     cfg = QuantConfig.from_dict({"runtime": {"use_qdq": True}})
     assert cfg.format.use_qdq is True
-    assert "runtime" not in cfg.to_dict()
+    assert cfg.to_dict()["runtime"]["use_qdq"] is True
+    assert "checkpoint_policy" not in cfg.to_dict()
+
+
+def test_quant_config_positional_arguments_keep_legacy_order():
+    weights = WeightsConfig(type="int4")
+    moe = MoEConfig(type="none")
+    runtime = RuntimeConfig(use_qdq=True)
+
+    cfg = QuantConfig("bf16", weights, moe, runtime)
+
+    assert cfg.io_dtype == "bf16"
+    assert cfg.weights is weights
+    assert cfg.moe is moe
+    assert cfg.runtime is runtime
+
+
+@pytest.mark.parametrize(
+    "factory,data,field",
+    [
+        (WeightsConfig.from_dict, {"symmetric": "false"}, "weights.symmetric"),
+        (WeightsConfig.from_dict, {"symmetric": 0}, "weights.symmetric"),
+        (RuntimeConfig.from_dict, {"use_qdq": "false"}, "format.use_qdq"),
+        (Override.from_dict, {"match": {"name": "x"}, "exclude": 0}, "override.exclude"),
+    ],
+)
+def test_structured_booleans_require_json_booleans(factory, data, field):
+    with pytest.raises(ValueError, match=field):
+        factory(data)
 
 
 def test_from_dict_rejects_conflicting_format_alias():

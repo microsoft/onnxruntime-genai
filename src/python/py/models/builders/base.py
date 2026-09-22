@@ -1076,6 +1076,7 @@ class Model:
         self.matmul_mixed_precision = {}
         customized_weight_config = {}
         self.exact_quant_override_names = set()
+        self.exact_quant_overrides = {}
         resolved_names = set()
         nodes_to_exclude = []
         self.int4_customized_weight_config = {}
@@ -1093,9 +1094,10 @@ class Model:
                 continue
             if set(override.match) == {"name"}:
                 node_name = override.match["name"]
-                self.exact_quant_override_names.add(node_name)
                 if node_name in resolved_names:
                     continue
+                self.exact_quant_override_names.add(node_name)
+                self.exact_quant_overrides[node_name] = override
                 resolved_names.add(node_name)
                 if override.exclude:
                     nodes_to_exclude.append(node_name)
@@ -1713,8 +1715,6 @@ class Model:
     def to_nbits(self) -> ir.Model:
         exact_quant_override_names = getattr(self, "exact_quant_override_names", set())
         if exact_quant_override_names:
-            # Resolve names after fusion has determined the emitted graph. This
-            # does not yet check exclusions or constant-weight eligibility.
             emitted_nodes = {node.name: node for node in self.model.graph}
             missing = exact_quant_override_names - emitted_nodes.keys()
             if missing:
@@ -1731,6 +1731,17 @@ class Model:
                 raise ValueError(
                     "exact quantization override(s) matched an ineligible operator: "
                     + ", ".join(sorted(ineligible))
+                )
+            nonconstant = []
+            for name in exact_quant_override_names:
+                node = emitted_nodes[name]
+                weight_index = 0 if node.op_type == "Gather" else 1
+                if len(node.inputs) <= weight_index or node.inputs[weight_index].const_value is None:
+                    nonconstant.append(name)
+            if nonconstant:
+                raise ValueError(
+                    "exact quantization override(s) require a constant weight initializer: "
+                    + ", ".join(sorted(nonconstant))
                 )
         quant_format = QuantFormat.QDQ if self.quant_attrs["use_qdq"] else QuantFormat.QOperator
         nodes_to_exclude = list(self.quant_attrs["nodes_to_exclude"])
@@ -1800,6 +1811,28 @@ class Model:
             )
             quant.process()
             model_proto = quant.model.model
+
+        exact_quant_overrides = getattr(self, "exact_quant_overrides", {})
+        if exact_quant_overrides:
+            quantized_nodes = {node.name: node for node in model_proto.graph.node}
+            for name, override in exact_quant_overrides.items():
+                if override.exclude:
+                    if name not in quantized_nodes:
+                        raise ValueError(f"exact exclusion override for '{name}' was not preserved")
+                    continue
+                bits = resolve_dtype(override.type).bits
+                expected_name = f"{name}_matmul_Q4" if quant_format == QuantFormat.QDQ else f"{name}_Q{bits}"
+                quantized_node = quantized_nodes.get(expected_name)
+                if quantized_node is None:
+                    raise ValueError(
+                        f"exact quantization override for '{name}' did not produce the requested int{bits} node"
+                    )
+                if quant_format == QuantFormat.QOperator:
+                    attributes = {attribute.name: attribute for attribute in quantized_node.attribute}
+                    if "bits" in attributes and attributes["bits"].i != bits:
+                        raise ValueError(
+                            f"exact quantization override for '{name}' produced {attributes['bits'].i} bits, expected {bits}"
+                        )
 
         # Offline CUDA weight prepacking is a pure weight *layout* conversion for the
         # fpA_intB mixed-GEMM kernel and is independent of the quantization method or bit

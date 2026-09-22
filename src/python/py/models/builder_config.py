@@ -152,6 +152,13 @@ def canonical_quant_data(data: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def quant_config_schema_dict(quant_config: QuantConfig) -> dict[str, Any]:
+    result = quant_config.to_dict()
+    result["format"] = result.pop("runtime")
+    result["checkpoint_policy"] = quant_config.checkpoint_policy
+    return result
+
+
 def warn_structured_override(legacy_options: dict[str, Any], legacy_key: str, structured_path: str):
     if legacy_key in legacy_options:
         warnings.warn(
@@ -169,6 +176,8 @@ def normalize_target_quant_config(
 ) -> tuple[QuantConfig, str]:
     """Seed target policy from legacy options, then overlay structured leaves."""
     canonical = canonical_quant_data(data)
+    if "checkpoint_policy" in canonical:
+        raise ValueError("target_options.quant_config.checkpoint_policy is not supported by target loaders")
     seed_precision = precision_from_quant_data(canonical, precision)
     normalized_legacy = copy.deepcopy(legacy_options)
     op_types = normalized_legacy.get("op_types_to_quantize")
@@ -178,7 +187,7 @@ def normalize_target_quant_config(
     if isinstance(exclusions, str):
         normalized_legacy["nodes_to_exclude"] = exclusions.split(",")
     legacy_config = QuantConfig.from_extra_options(normalized_legacy, seed_precision, execution_provider)
-    merged = merge_objects(legacy_config.to_dict(), canonical)
+    merged = merge_objects(quant_config_schema_dict(legacy_config), canonical)
 
     legacy_moe_explicit = "moe_quant_type" in legacy_options or "use_8bits_moe" in legacy_options
     if ("moe" not in canonical or "type" not in canonical.get("moe", {})) and not legacy_moe_explicit:
@@ -219,7 +228,7 @@ def normalize_target_quant_config(
             warn_structured_override(legacy_options, legacy_key, f"target_options.quant_config.{path}")
 
     quant_config = QuantConfig.from_dict(merged)
-    return quant_config, precision_from_quant_data(quant_config.to_dict(), precision)
+    return quant_config, precision_from_quant_data(quant_config_schema_dict(quant_config), precision)
 
 
 def flatten_target_options(
@@ -243,7 +252,11 @@ def flatten_target_options(
     flattened["use_qdq"] = quant_config.format.use_qdq
     flattened["matmulnbits_weights_prepacked"] = quant_config.format.matmulnbits_weights_prepacked
     if "type" in options.get("quant_config", {}).get("moe", {}):
-        flattened["moe_quant_type"] = quant_config.moe.type
+        if quant_config.moe.type == "none":
+            flattened.pop("moe_quant_type", None)
+            flattened.pop("use_8bits_moe", None)
+        else:
+            flattened["moe_quant_type"] = quant_config.moe.type
 
     attention = options.get("attention", {})
     check_fields(attention, {"implementation", "paged", "kv_cache"}, "target_options.attention")
@@ -315,6 +328,8 @@ def normalize_drafter_quant_config(data: dict[str, Any], drafter_type: str, exec
                 raise ValueError(f"DFlash2 weights.{field_name} is not supported")
         if quant_config.weights.type not in ("none", "int4", "int8"):
             raise ValueError("DFlash2 weights.type must be none, int4, or int8")
+        if quant_config.weights.type != "none" and quant_config.weights.block_size not in (16, 32, 64, 128, 256):
+            raise ValueError("DFlash2 integer weights.block_size must be one of 16, 32, 64, 128, or 256")
         if quant_config.weights.method != "default" or not quant_config.weights.symmetric:
             raise ValueError("DFlash2 supports only symmetric DEFAULT integer weight quantization")
         if quant_config.format.use_qdq or quant_config.format.matmulnbits_weights_prepacked != 0:
@@ -447,7 +462,7 @@ def flatten_drafter_options(
         flattened["dspark_top_k"] = dspark["top_k"]
 
     effective = copy.deepcopy(options)
-    effective["quant_config"] = quant_config.to_dict()
+    effective["quant_config"] = quant_config_schema_dict(quant_config)
     effective["shared_weights"] = policies
     return effective
 
@@ -523,7 +538,7 @@ def normalize_builder_config(
     flattened["_runtime_config"] = runtime
 
     effective_target = copy.deepcopy(target)
-    effective_target["quant_config"] = quant_config.to_dict()
+    effective_target["quant_config"] = quant_config_schema_dict(quant_config)
     target_quant_data = target.get("quant_config", {})
     target_moe_explicit = "moe" in target_quant_data and "type" in target_quant_data["moe"]
     return EffectiveBuilderConfig(
@@ -545,11 +560,11 @@ def validate_model_dependent_config(effective_config: EffectiveBuilderConfig, mo
     quant_config = effective_config.extra_options.get("_quant_config")
     checkpoint_moe_type = effective_config.extra_options.get("moe_quant_type")
     if quant_config is not None and checkpoint_moe_type is not None and quant_config.moe.type != checkpoint_moe_type:
-        quant_data = quant_config.to_dict()
+        quant_data = quant_config_schema_dict(quant_config)
         quant_data["moe"]["type"] = checkpoint_moe_type
         quant_config = QuantConfig.from_dict(quant_data)
         effective_config.extra_options["_quant_config"] = quant_config
-        effective_config.target_options["quant_config"] = quant_config.to_dict()
+        effective_config.target_options["quant_config"] = quant_config_schema_dict(quant_config)
     if effective_config.target_moe_explicit or checkpoint_moe_type is not None:
         return
     if quant_config is None or quant_config.weights.type != "none":
@@ -565,8 +580,28 @@ def validate_model_dependent_config(effective_config: EffectiveBuilderConfig, mo
 def validate_runtime_config(runtime_config: dict[str, Any], generated_config: dict[str, Any]):
     """Check a runtime overlay against the completed exported configuration."""
     check_fields(runtime_config, {"search", "speculative", "engine", "model"}, "runtime_config")
-    if "search" in runtime_config and not isinstance(runtime_config["search"], dict):
+    search = runtime_config.get("search", {})
+    if not isinstance(search, dict):
         raise ValueError("runtime_config.search must be an object")
+    check_fields(
+        search,
+        {
+            "batch_size", "blank_penalty", "chunk_size", "diversity_penalty", "do_sample",
+            "early_stopping", "length_penalty", "max_length", "min_length", "no_repeat_ngram_size",
+            "num_beams", "num_return_sequences", "past_present_share_buffer", "random_seed",
+            "repetition_penalty", "temperature", "top_k", "top_p",
+        },
+        "runtime_config.search",
+    )
+    if "max_length" in search:
+        max_length = search["max_length"]
+        if isinstance(max_length, bool) or not isinstance(max_length, int) or max_length <= 0:
+            raise ValueError("runtime_config.search.max_length must be a positive integer")
+        context_length = generated_config.get("model", {}).get("context_length")
+        if context_length is None:
+            context_length = generated_config.get("search", {}).get("max_length")
+        if isinstance(context_length, int) and max_length > context_length:
+            raise ValueError("runtime_config.search.max_length exceeds the exported model context_length")
 
     speculative = runtime_config.get("speculative", {})
     if not isinstance(speculative, dict):
@@ -648,22 +683,31 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
                 raise ValueError(
                     f"runtime_config.model.{component_name}.session_options cannot overwrite required session option '{key}'"
                 )
+        run_options = component_options.get("run_options", {})
+        if not isinstance(run_options, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str) for key, value in run_options.items()
+        ):
+            raise ValueError(f"runtime_config.model.{component_name}.run_options must be an object of strings")
         if "provider_options" in runtime_session:
             generated_providers = generated_session.get("provider_options", [])
             runtime_providers = runtime_session["provider_options"]
             if not isinstance(runtime_providers, list) or any(
-                not isinstance(entry, dict) for entry in runtime_providers
+                not isinstance(entry, dict)
+                or len(entry) != 1
+                or any(not isinstance(name, str) or not isinstance(options, dict) for name, options in entry.items())
+                for entry in runtime_providers
             ):
                 raise ValueError(
-                    f"runtime_config.model.{component_name}.session_options.provider_options must be an array of objects"
+                    f"runtime_config.model.{component_name}.session_options.provider_options "
+                    "must be an array of single-provider objects"
                 )
-            generated_names = {name for entry in generated_providers for name in entry}
-            runtime_names = {name for entry in runtime_providers for name in entry}
+            generated_names = {name.casefold() for entry in generated_providers for name in entry}
+            runtime_names = {name.casefold() for entry in runtime_providers for name in entry}
             if component_name in ("dflash2", "dspark") and not generated_names:
                 decoder_providers = generated_components.get("decoder", {}).get("session_options", {}).get(
                     "provider_options", []
                 )
-                generated_names = {name for entry in decoder_providers for name in entry}
+                generated_names = {name.casefold() for entry in decoder_providers for name in entry}
             if generated_names != runtime_names:
                 raise ValueError(
                     f"runtime_config.model.{component_name}.session_options cannot change execution providers"
@@ -677,6 +721,29 @@ def apply_runtime_config(generated_config: dict[str, Any], runtime_config: dict[
     validate_runtime_config(runtime_config, generated_config)
     baseline = copy.deepcopy(generated_config)
     overlay = copy.deepcopy(runtime_config)
+    for component_name, component_options in overlay.get("model", {}).items():
+        runtime_session = component_options.get("session_options", {})
+        if "provider_options" not in runtime_session:
+            continue
+        generated_components = baseline["model"]
+        generated_providers = generated_components[component_name]["session_options"].get("provider_options", [])
+        if component_name in ("dflash2", "dspark") and not generated_providers:
+            generated_providers = generated_components.get("decoder", {}).get("session_options", {}).get(
+                "provider_options", []
+            )
+        generated_by_name = {
+            name.casefold(): (name, options)
+            for entry in generated_providers
+            for name, options in entry.items()
+        }
+        merged_providers = []
+        for entry in runtime_session["provider_options"]:
+            for runtime_name, runtime_options in entry.items():
+                generated_name, generated_options = generated_by_name[runtime_name.casefold()]
+                merged_providers.append(
+                    {generated_name: merge_objects(generated_options, runtime_options)}
+                )
+        runtime_session["provider_options"] = merged_providers
     dynamic_batching = overlay.get("engine", {}).get("dynamic_batching", {})
     generated_dynamic_batching = baseline.get("engine", {}).get("dynamic_batching", {})
     if "num_blocks" in dynamic_batching:

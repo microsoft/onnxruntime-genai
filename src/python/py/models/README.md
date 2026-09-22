@@ -140,8 +140,8 @@ python src/python/py/models/builder.py -i path_to_dense_checkpoint -o output -e 
 `target_options` routes `quant_config`, `attention`, and
 `optimizations.fuse_mlp_gate_up` to the existing exporter. `quant_config.format`
 is the canonical graph-layout key; `runtime` remains a parsing alias. The
-checkpoint policy is parsed as `preserve` or `requantize` but is not yet enforced
-for the target. Root CLI `precision` is optional when target weight type is explicit.
+target rejects an explicit checkpoint policy until its loaders implement both
+paths. Root CLI `precision` is optional when target weight type is explicit.
 
 DFlash2 and DSpark selection requires a local checkpoint `path`, paged target
 attention, and BF16 body I/O. Omitted target taps are inferred from checkpoint
