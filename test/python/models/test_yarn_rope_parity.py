@@ -665,7 +665,7 @@ class TestYarnRopeCacheParity:
     # transformers v5 `rope_parameters` support (PR: rope_parameters)
     # -----------------------------------------------------------------------
     def test_make_config_init_merges_rope_scaling_into_rope_parameters(self):
-        """Legacy RoPE values are merged into and promoted from the canonical mapping."""
+        """Legacy RoPE values fill missing keys without overwriting canonical settings."""
         model = object.__new__(Model)
         config = types.SimpleNamespace(
             rope_parameters={"rope_type": "yarn", "factor": 32.0},
@@ -673,9 +673,9 @@ class TestYarnRopeCacheParity:
         )
         model.make_config_init(config)
 
-        assert config.rope_parameters == {"rope_type": "linear", "factor": 8.0, "beta_fast": 16.0}
-        assert config.rope_type == "linear"
-        assert config.factor == 8.0
+        assert config.rope_parameters == {"rope_type": "yarn", "factor": 32.0, "beta_fast": 16.0}
+        assert config.rope_type == "yarn"
+        assert config.factor == 32.0
         assert config.beta_fast == 16.0
 
     def test_make_config_init_populates_empty_rope_parameters(self):

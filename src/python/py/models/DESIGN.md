@@ -48,6 +48,8 @@ The models produced by the model builder should directly work in ONNX Runtime Ge
 
 The `Model` base class holds all of the information for making models. It auto-determines optimizations and quantizations that can be applied (e.g. replace MultiHeadAttention with GroupQueryAttention). It also holds all important attributes and the many functions that make the final ONNX model.
 
+`make_config_init` normalizes legacy `rope_scaling` into `rope_parameters`, treating absent or null scaling as unset. Existing `rope_parameters` keys take precedence over legacy values, and the legacy `type` key supplies `rope_type` only when the canonical key is missing. Builders consume `rope_type`; they must not require the legacy alias. Empty RoPE settings leave the default rotary embedding behavior unchanged.
+
 After the final ONNX model is created, additional files are saved in the output folder to run with ONNX Runtime GenAI. These include the GenAI config and the pre-processing/post-processing files (e.g. tokenizer).
 
 ### Architecture Classes

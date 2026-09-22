@@ -458,18 +458,19 @@ class Model:
                 if not hasattr(config, key):
                     setattr(config, key, getattr(text_config, key))
 
-        if hasattr(config, "rope_scaling"):
+        if getattr(config, "rope_scaling", None) is not None:
             # Collapse all options inside rope_scaling to rope_parameters for easier access.
             rope_scaling = config.rope_scaling
+            if getattr(config, "rope_parameters", None) is None:
+                config.rope_parameters = {}
             for key in rope_scaling:
-                if not hasattr(config, "rope_parameters"):
-                    setattr(config, "rope_parameters", dict())
-                if not hasattr(config.rope_parameters, key):
-                    config.rope_parameters[key] = rope_scaling[key]
+                config.rope_parameters.setdefault(key, rope_scaling[key])
 
         if hasattr(config, "rope_parameters") and isinstance(config.rope_parameters, dict):
             # Collapse all options inside rope_parameters to the top-level config for easier access.
             rope_params = config.rope_parameters
+            if "type" in rope_params:
+                rope_params.setdefault("rope_type", rope_params["type"])
             for key in rope_params:
                 if not hasattr(config, key):
                     setattr(config, key, rope_params[key])
@@ -644,7 +645,7 @@ class Model:
             del self.output_names["logits"]
 
     def make_rope_init(self, config):
-        if not hasattr(config, "rope_parameters") or not isinstance(config.rope_parameters, dict):
+        if not getattr(config, "rope_parameters", None) or not isinstance(config.rope_parameters, dict):
             # Early return if no RoPE parameters are set
             return
 
