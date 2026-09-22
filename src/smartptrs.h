@@ -73,7 +73,7 @@ struct DeviceSpan {
   bool SameBufferAs(const DeviceSpan<T>& other) const { return p_device_memory_ == other.p_device_memory_; }
 
   // Return the device accessible memory. Should only be done in device specific code, as it's not CPU accessible
-  std::span<T> Span() { return std::span<T>{reinterpret_cast<T*>(p_device_memory_->p_device_) + begin_, length_}; }
+  std::span<T> Span() const { return std::span<T>{reinterpret_cast<T*>(p_device_memory_->p_device_) + begin_, length_}; }
 
   // Return the CPU accessible memory, allocating if necessary (note, to get the current device memory on CPU, use 'CopyDeviceToCpu' instead)
   std::span<T> CpuSpan() {
@@ -194,12 +194,14 @@ enum class StateUpdateReplayKind : uint32_t {
 };
 
 struct StateUpdateReplayDesc {
-  const void* source_state;
-  void* destination_state;
-  const void* value;
-  const float* decay;
-  const float* key;
-  const float* delta;
+  // DeviceSpan preserves the backing-buffer identity, byte offset, byte length, and lifetime
+  // without assuming that the device exposes an addressable pointer.
+  DeviceSpan<const uint8_t> source_state;
+  DeviceSpan<uint8_t> destination_state;
+  DeviceSpan<const uint8_t> value;
+  DeviceSpan<const uint8_t> decay;
+  DeviceSpan<const uint8_t> key;
+  DeviceSpan<const uint8_t> delta;
   uint64_t channel_count;
   uint64_t state_width;
   uint64_t key_width;
@@ -209,8 +211,6 @@ struct StateUpdateReplayDesc {
   uint32_t element_size;
   StateUpdateReplayKind kind;
 };
-
-static_assert(std::is_trivially_copyable_v<StateUpdateReplayDesc>);
 
 // Increment whenever a layout the add-on boundary depends on changes: DeviceInterface's virtual
 // layout, or the virtual or data layout of any type constructed by, passed to, or returned across
