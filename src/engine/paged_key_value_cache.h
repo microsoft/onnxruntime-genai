@@ -18,16 +18,6 @@
 
 namespace Generators {
 
-struct BlockCopier {
-  virtual void CopyBlock(size_t source_block_id, size_t destination_block_id) = 0;
-  virtual ~BlockCopier() = default;
-};
-
-bool MakeTailBlockExclusive(PagedCacheBlockTable& table,
-                            size_t target_slots,
-                            BlockPool& pool,
-                            BlockCopier& copier);
-
 inline constexpr size_t kMinGraphBlockTableColumns = 8;
 
 inline size_t GetGraphBlockTableColumns(size_t max_blocks, size_t max_columns) {

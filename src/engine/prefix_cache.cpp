@@ -61,7 +61,7 @@ PrefixCache::~PrefixCache() {
   // release allocates nothing, so teardown cannot fail on a failed allocation.
   for (auto& value : entries_) {
     auto& entry = value.second;
-    entry.block->ClearReferenceObserverCookie();
+    block_pool_.ClearReferenceObserverCookie(entry.block);
     entry.block->ClearIdentity();
     block_pool_.Release(entry.block);
   }
@@ -235,7 +235,7 @@ PrefixCacheRegistration PrefixCache::Register(
     block->SetIdentity(identity);
     identity_set = true;
     entries_by_block_id_[block->Id()] = &entry;
-    block->SetReferenceObserverCookie(&entry);
+    block_pool_.SetReferenceObserverCookie(block, &entry);
   } catch (...) {
     if (identity_set) {
       block->ClearIdentity();
@@ -456,7 +456,7 @@ void PrefixCache::Evict(std::unordered_map<uint64_t, Entry>::iterator it) {
   }
   recency_.erase(it->second.recency);
   entries_by_block_id_[block->Id()] = nullptr;
-  block->ClearReferenceObserverCookie();
+  block_pool_.ClearReferenceObserverCookie(block);
   entries_.erase(it);
   block->ClearIdentity();
   block_pool_.Release(block);

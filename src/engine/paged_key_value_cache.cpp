@@ -408,42 +408,6 @@ size_t PagedKeyValueCacheBytesPerBlock(const std::shared_ptr<Model>& model) {
   return bytes;
 }
 
-bool MakeTailBlockExclusive(PagedCacheBlockTable& table,
-                            size_t target_slots,
-                            BlockPool& pool,
-                            BlockCopier& copier) {
-  if (target_slots <= table.committed_slots_ || pool.BlockSize() == 0) {
-    return false;
-  }
-  const size_t block_index = table.committed_slots_ / pool.BlockSize();
-  if (block_index >= table.blocks_.size()) {
-    return false;
-  }
-  auto& block = table.blocks_[block_index];
-  if (!block->IsShared()) {
-    return false;
-  }
-  if (table.sealed_blocks_ > block_index) {
-    throw std::logic_error("A sealed prefix block cannot be made writable.");
-  }
-
-  auto replacement = pool.ReserveBlocks(pool.BlockSize());
-  if (replacement.size() != 1) {
-    throw std::runtime_error("Copy-on-write needs exactly one replacement block.");
-  }
-  try {
-    copier.CopyBlock(block->Id(), replacement.front()->Id());
-    replacement.front()->AddSlots(block->Size());
-  } catch (...) {
-    pool.RollbackReservedBlocks(replacement);
-    throw;
-  }
-  auto shared = block;
-  block = replacement.front();
-  pool.Free({shared});
-  return true;
-}
-
 bool ResolvePrefixCachingEnabled(const std::shared_ptr<Model>& model,
                                  size_t auxiliary_bytes_per_block) {
   const auto& batching = *model->config_->engine.dynamic_batching;
@@ -738,19 +702,51 @@ void PagedKeyValueCache::AppendTokens(std::shared_ptr<Request> request) {
 }
 
 void PagedKeyValueCache::Remove(std::shared_ptr<Request> request) {
-  RemovePagedCacheBlockTable(*block_pool_, window_block_pool_.get(),
-                             block_tables_, request.get());
-  RebuildBlockTableIndex();
+  ValidateRemove(request.get());
+  RemoveValidated(request.get());
 }
 
 void PagedKeyValueCache::ValidateRemove(const void* request_id) const {
-  ValidateRemovePagedCacheBlockTable(
-      *block_pool_, window_block_pool_.get(), block_tables_, request_id);
+  const auto table = std::find_if(
+      block_tables_.begin(), block_tables_.end(),
+      [request_id](const PagedCacheBlockTable& candidate) {
+        return candidate.RequestId() == request_id;
+      });
+  if (table == block_tables_.end()) {
+    return;
+  }
+
+  block_pool_->ValidateFree(table->Blocks());
+  if (window_block_pool_) {
+    window_block_pool_->ValidateFree(table->WindowBlocks());
+  }
 }
 
 void PagedKeyValueCache::RemoveValidated(const void* request_id) noexcept {
-  RemoveValidatedPagedCacheBlockTable(
-      *block_pool_, window_block_pool_.get(), block_tables_, request_id);
+  const auto table = std::find_if(
+      block_tables_.begin(), block_tables_.end(),
+      [request_id](const PagedCacheBlockTable& candidate) {
+        return candidate.RequestId() == request_id;
+      });
+  if (table == block_tables_.end()) {
+    return;
+  }
+
+  if (!block_pool_->CanFreeValidated(table->Blocks()) ||
+      (window_block_pool_ &&
+       !window_block_pool_->CanFreeValidated(table->WindowBlocks()))) {
+    std::terminate();
+  }
+  block_pool_->FreeValidated(table->Blocks());
+  if (window_block_pool_) {
+    window_block_pool_->FreeValidated(table->WindowBlocks());
+  }
+  table->blocks_.clear();
+  table->window_blocks_.clear();
+  if (table != block_tables_.end() - 1) {
+    *table = std::move(block_tables_.back());
+  }
+  block_tables_.pop_back();
   RebuildBlockTableIndex();
 }
 

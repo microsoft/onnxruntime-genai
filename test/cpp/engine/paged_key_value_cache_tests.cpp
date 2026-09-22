@@ -131,6 +131,22 @@ TEST_F(PagedKeyValueCacheTest, ReportsCommittedBoundaryForResident) {
   EXPECT_THROW(cache_->CommittedSlots(this), StepPlanningConsistencyError);
 }
 
+TEST_F(PagedKeyValueCacheTest, ValidatedRemovalReleasesAndReindexesCommittedTables) {
+  auto first = AddCommittedRequest({2, 3, 4, 5});
+  auto second = AddCommittedRequest({6, 7, 8, 9});
+
+  cache_->ValidateRemove(first.get());
+  cache_->RemoveValidated(first.get());
+
+  EXPECT_FALSE(cache_->OwnsRequest(first.get()));
+  EXPECT_TRUE(cache_->OwnsRequest(second.get()));
+  EXPECT_EQ(cache_->CommittedSlots(second.get()), 4u);
+  const auto snapshot = cache_->Snapshot();
+  ASSERT_EQ(snapshot.requests.size(), 1u);
+  EXPECT_EQ(snapshot.requests.front().request_id, second.get());
+  EXPECT_EQ(snapshot.free_blocks, 2u);
+}
+
 TEST_F(PagedKeyValueCacheTest, DeferredActiveRequestsStillConsumeAdmissionCapacity) {
   auto unserviceable = AddCommittedRequest({2, 3, 4, 5});
   auto fitting = AddCommittedRequest({6, 7, 8, 9});
@@ -789,6 +805,40 @@ TEST(PagedKeyValueCacheManifestTest, AllocatesSparseSlidingAndFullLayerCaches) {
   EXPECT_EQ(
       values[1].first->GetTensorTypeAndShapeInfo()->GetShape(),
       std::vector<int64_t>({128, 4, 1, 1}));
+}
+
+TEST(PagedKeyValueCacheManifestTest, RemovalReusesCommittedSlidingWindowCapacity) {
+  auto model = LoadSyntheticPagedModel();
+  model->config_->engine.dynamic_batching->prefix_caching = false;
+  auto& decoder = model->config_->model.decoder;
+  decoder.sliding_window = Config::Model::Decoder::SlidingWindow{};
+  decoder.sliding_window->window_size = 4;
+  decoder.sliding_window->layers = {1};
+  decoder.inputs.block_table_windowed = decoder.inputs.block_table;
+  model->config_->search.chunk_size = 4;
+  auto assign_target =
+      MakeDoublesEngine(model, /*capacity=*/2, EosToken(*model)).engine;
+  auto cache = MakePagedCache(model);
+
+  auto first = CreateRequestWithPrompt(
+      assign_target, std::array<int32_t, 4>{2, 3, 4, 5});
+  cache->Add(first);
+  cache->AppendTokens(first);
+  const auto before = cache->Snapshot();
+  ASSERT_EQ(before.requests.size(), 1u);
+
+  cache->Remove(first);
+
+  EXPECT_FALSE(cache->OwnsRequest(first.get()));
+  const auto removed = cache->Snapshot();
+  EXPECT_TRUE(removed.requests.empty());
+  EXPECT_EQ(removed.free_blocks, removed.total_blocks);
+
+  auto second = CreateRequestWithPrompt(
+      assign_target, std::array<int32_t, 4>{6, 7, 8, 9});
+  cache->Add(second);
+  cache->AppendTokens(second);
+  EXPECT_TRUE(cache->OwnsRequest(second.get()));
 }
 
 TEST(PagedKeyValueCacheManifestTest, PrefixCachingRejectsSlidingWindowCache) {

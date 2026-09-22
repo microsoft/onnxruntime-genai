@@ -82,68 +82,6 @@ PagedCacheBlockTable& PagedCacheBlockTable::operator=(
   return *this;
 }
 
-void RemovePagedCacheBlockTable(
-    BlockPool& block_pool,
-    BlockPool* window_block_pool,
-    std::vector<PagedCacheBlockTable>& committed_tables,
-    const void* request_id) {
-  ValidateRemovePagedCacheBlockTable(
-      block_pool, window_block_pool, committed_tables, request_id);
-  RemoveValidatedPagedCacheBlockTable(
-      block_pool, window_block_pool, committed_tables, request_id);
-}
-
-void ValidateRemovePagedCacheBlockTable(
-    const BlockPool& block_pool,
-    const BlockPool* window_block_pool,
-    const std::vector<PagedCacheBlockTable>& committed_tables,
-    const void* request_id) {
-  const auto table = std::find_if(
-      committed_tables.begin(), committed_tables.end(),
-      [request_id](const PagedCacheBlockTable& candidate) {
-        return candidate.RequestId() == request_id;
-      });
-  if (table == committed_tables.end()) {
-    return;
-  }
-
-  block_pool.ValidateFree(table->Blocks());
-  if (window_block_pool) {
-    window_block_pool->ValidateFree(table->WindowBlocks());
-  }
-}
-
-void RemoveValidatedPagedCacheBlockTable(
-    BlockPool& block_pool,
-    BlockPool* window_block_pool,
-    std::vector<PagedCacheBlockTable>& committed_tables,
-    const void* request_id) noexcept {
-  const auto table = std::find_if(
-      committed_tables.begin(), committed_tables.end(),
-      [request_id](const PagedCacheBlockTable& candidate) {
-        return candidate.RequestId() == request_id;
-      });
-  if (table == committed_tables.end()) {
-    return;
-  }
-
-  if (!block_pool.CanFreeValidated(table->Blocks()) ||
-      (window_block_pool &&
-       !window_block_pool->CanFreeValidated(table->WindowBlocks()))) {
-    std::terminate();
-  }
-  block_pool.FreeValidated(table->Blocks());
-  if (window_block_pool) {
-    window_block_pool->FreeValidated(table->WindowBlocks());
-  }
-  table->blocks_.clear();
-  table->window_blocks_.clear();
-  if (table != committed_tables.end() - 1) {
-    *table = std::move(committed_tables.back());
-  }
-  committed_tables.pop_back();
-}
-
 PagedCacheReservation::PagedCacheReservation(
     BlockPool& block_pool,
     std::vector<PagedCacheBlockTable>& committed_tables,

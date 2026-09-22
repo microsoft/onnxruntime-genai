@@ -15,8 +15,6 @@ namespace Generators {
 
 class PagedCacheBlockTable;
 class PagedCacheReservation;
-class PrefixCache;
-struct BlockCopier;
 struct PagedKeyValueCache;
 struct BlockPool;
 struct Block;
@@ -69,8 +67,6 @@ struct Block {
  private:
   friend class PagedCacheBlockTable;
   friend class PagedCacheReservation;
-  friend class PrefixCache;
-  friend bool MakeTailBlockExclusive(PagedCacheBlockTable&, size_t, BlockPool&, BlockCopier&);
   friend struct PagedKeyValueCache;
   friend struct BlockPool;
   void AddSlot();
@@ -119,6 +115,10 @@ struct BlockPool {
   void AddRef(const std::shared_ptr<Block>& block);
   void Release(const std::shared_ptr<Block>& block);
   void SetReferenceObserver(BlockReferenceObserver* observer);
+  void SetReferenceObserverCookie(const std::shared_ptr<Block>& block,
+                                  void* cookie);
+  void ClearReferenceObserverCookie(
+      const std::shared_ptr<Block>& block) noexcept;
 
   void Free(const std::vector<std::shared_ptr<Block>>& blocks);
   void ValidateFree(std::span<const std::shared_ptr<Block>> blocks) const;
@@ -133,7 +133,6 @@ struct BlockPool {
  private:
   friend class PagedCacheReservation;
   friend struct PagedKeyValueCache;
-  friend bool MakeTailBlockExclusive(PagedCacheBlockTable&, size_t, BlockPool&, BlockCopier&);
 
   std::vector<std::shared_ptr<Block>> AllocateBlocks(size_t num_slots, bool mark_slots_used);
   void RollbackReservedBlocks(const std::vector<std::shared_ptr<Block>>& blocks) noexcept;

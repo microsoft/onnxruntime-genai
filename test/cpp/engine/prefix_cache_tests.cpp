@@ -44,14 +44,6 @@ std::shared_ptr<Block> SealBlock(BlockPool& pool, PrefixCache& cache,
   return blocks.front();
 }
 
-// A BlockCopier double that records the copies the divergence policy asks for.
-struct RecordingBlockCopier final : BlockCopier {
-  void CopyBlock(size_t source_block_id, size_t destination_block_id) override {
-    copies.emplace_back(source_block_id, destination_block_id);
-  }
-  std::vector<std::pair<size_t, size_t>> copies;
-};
-
 // ---------------------------------------------------------------------------------------------
 // Reference counting
 // ---------------------------------------------------------------------------------------------
@@ -510,59 +502,6 @@ TEST(PrefixCacheTest, AFullBudgetOfLiveBlocksRefusesRetentionRatherThanEvicting)
   EXPECT_FALSE(refused_block->HasIdentity());
   EXPECT_EQ(cache.Metrics().retention_refusals, 1u);
   EXPECT_EQ(cache.IndexedBlocks(), 1u);
-}
-
-// ---------------------------------------------------------------------------------------------
-// Copy-on-write divergence
-// ---------------------------------------------------------------------------------------------
-
-// Two owners sharing a block that is still being written must not both write into it. The writer
-// takes a private copy of the block's key-value data and diverges into that instead.
-TEST(CopyOnWriteTest, AWriterDivergesFromASharedTailBlockByCopyingIt) {
-  BlockPool pool{kBlockSize, 4};
-  auto blocks = pool.AllocateBlocks(1);  // One slot used, so the block is still being written.
-  ASSERT_EQ(blocks.size(), 1u);
-  pool.AddRef(blocks);  // A second owner references the same partially filled block.
-
-  PagedCacheBlockTable table{&table, 1, blocks};
-
-  RecordingBlockCopier copier;
-  const bool copied = MakeTailBlockExclusive(table, /*target_slots=*/2, pool, copier);
-
-  ASSERT_TRUE(copied);
-  ASSERT_EQ(copier.copies.size(), 1u);
-  EXPECT_EQ(copier.copies.front().first, blocks.front()->Id());
-  EXPECT_EQ(copier.copies.front().second, table.Blocks().front()->Id());
-  EXPECT_NE(table.Blocks().front()->Id(), blocks.front()->Id());
-  // The private copy carries the same tokens so far, and neither owner is shared any more.
-  EXPECT_EQ(table.Blocks().front()->Size(), 1u);
-  EXPECT_FALSE(table.Blocks().front()->IsShared());
-  EXPECT_EQ(blocks.front()->RefCount(), 1u);
-}
-
-TEST(CopyOnWriteTest, AnExclusiveTailBlockIsWrittenInPlace) {
-  BlockPool pool{kBlockSize, 4};
-  auto blocks = pool.AllocateBlocks(1);
-
-  PagedCacheBlockTable table{&table, 1, blocks};
-
-  RecordingBlockCopier copier;
-  EXPECT_FALSE(MakeTailBlockExclusive(table, /*target_slots=*/2, pool, copier));
-  EXPECT_TRUE(copier.copies.empty());
-  EXPECT_EQ(table.Blocks().front()->Id(), blocks.front()->Id());
-}
-
-// A step that writes nothing has nothing to diverge from, so a shared block stays shared.
-TEST(CopyOnWriteTest, AStepThatWritesNothingLeavesASharedBlockAlone) {
-  BlockPool pool{kBlockSize, 4};
-  auto blocks = pool.AllocateBlocks(kBlockSize);
-  pool.AddRef(blocks);
-
-  PagedCacheBlockTable table{&table, kBlockSize, blocks};
-
-  RecordingBlockCopier copier;
-  EXPECT_FALSE(MakeTailBlockExclusive(table, /*target_slots=*/kBlockSize, pool, copier));
-  EXPECT_TRUE(blocks.front()->IsShared());
 }
 
 }  // namespace

@@ -140,11 +140,15 @@ components remain available. Hybrid targets index only blocks completed during
 prefill; decode and reasoning steps do not publish paged identities without matching
 fixed-state checkpoints.
 
-Hybrid prefix caching caps a prefill step at the target paged block size so it
-regularly produces aligned checkpoint boundaries. A match pins both its paged
-blocks and fixed checkpoint through reservation. The fixed reservation gathers
-the checkpoint into the newly admitted row instead of gathering zero, and its
-baseline committed-token count is the same as the paged match. Existing
+Hybrid prefix caching does not reduce the configured prefill chunk size. A
+checkpoint is attached only when a successful step's committed endpoint is
+block-aligned; paged-only descendants remain indexed but are not adoptable by a
+hybrid request. After adoption, prefill resumes at that checkpoint and may
+process the full configured chunk, so later checkpoint positions can shift
+relative to the original request's chunk boundaries. A match pins both its
+paged blocks and fixed checkpoint through reservation. The fixed reservation
+gathers the checkpoint into the newly admitted row instead of gathering zero,
+and its baseline committed-token count is the same as the paged match. Existing
 prepare/publish ordering then advances both components atomically; rollback
 discards the provisional fixed row, releases adopted paged references, and
 restores the request cursor.

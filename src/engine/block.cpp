@@ -196,6 +196,23 @@ void BlockPool::SetReferenceObserver(BlockReferenceObserver* observer) {
   reference_observer_ = observer;
 }
 
+void BlockPool::SetReferenceObserverCookie(
+    const std::shared_ptr<Block>& block, void* cookie) {
+  if (!Owns(block) || !cookie) {
+    throw std::invalid_argument(
+        "A reference observer cookie requires an owned block and non-null cookie.");
+  }
+  block->SetReferenceObserverCookie(cookie);
+}
+
+void BlockPool::ClearReferenceObserverCookie(
+    const std::shared_ptr<Block>& block) noexcept {
+  if (!Owns(block)) {
+    std::terminate();
+  }
+  block->ClearReferenceObserverCookie();
+}
+
 std::vector<std::pair<size_t, size_t>> BlockPool::ValidateOwnership(
     std::span<const std::shared_ptr<Block>> blocks,
     const char* operation,

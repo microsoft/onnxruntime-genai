@@ -17,8 +17,6 @@
 namespace Generators {
 
 struct PagedKeyValueCache;
-struct BlockCopier;
-struct PagedCacheBlockTableTestAccess;
 
 class PagedCacheBlockTable {
  public:
@@ -45,16 +43,10 @@ class PagedCacheBlockTable {
   const std::shared_ptr<const BlockIdentity>& SealedIdentity() const {
     return sealed_identity_;
   }
-  uint64_t MutationGeneration() const { return mutation_generation_; }
 
  private:
   friend class PagedCacheReservation;
   friend struct PagedKeyValueCache;
-  friend struct PagedCacheBlockTableTestAccess;
-  friend bool MakeTailBlockExclusive(PagedCacheBlockTable&, size_t, BlockPool&, BlockCopier&);
-  friend void RemoveValidatedPagedCacheBlockTable(
-      BlockPool&, BlockPool*, std::vector<PagedCacheBlockTable>&,
-      const void*) noexcept;
 
   const void* request_id_{};
   size_t committed_slots_{};
@@ -96,23 +88,6 @@ struct PagedCacheReservationDelta {
   size_t adopted_block_count{};
   bool newly_admitted{};
 };
-
-void RemovePagedCacheBlockTable(BlockPool& block_pool,
-                                BlockPool* window_block_pool,
-                                std::vector<PagedCacheBlockTable>& committed_tables,
-                                const void* request_id);
-void ValidateRemovePagedCacheBlockTable(
-    const BlockPool& block_pool,
-    const BlockPool* window_block_pool,
-    const std::vector<PagedCacheBlockTable>& committed_tables,
-    const void* request_id);
-// Allocation-free publication for state accepted by ValidateRemovePagedCacheBlockTable().
-// An ownership guard failure terminates rather than silently orphaning state.
-void RemoveValidatedPagedCacheBlockTable(
-    BlockPool& block_pool,
-    BlockPool* window_block_pool,
-    std::vector<PagedCacheBlockTable>& committed_tables,
-    const void* request_id) noexcept;
 
 enum class PagedCacheReservationState {
   Reserved,
