@@ -263,6 +263,13 @@ def normalize_target_quant_config(
         normalized_legacy["nodes_to_exclude"] = exclusions.split(",")
     legacy_config = QuantConfig.from_extra_options(normalized_legacy, seed_precision, execution_provider)
     merged = merge_objects(quant_config_schema_dict(legacy_config), canonical)
+    structured_weights = canonical.get("weights", {})
+    if (
+        "type" in structured_weights
+        and "symmetric" not in structured_weights
+        and "is_symmetric" not in legacy_options
+    ):
+        merged["weights"].pop("symmetric", None)
 
     legacy_moe_explicit = "moe_quant_type" in legacy_options or "use_8bits_moe" in legacy_options
     if ("moe" not in canonical or "type" not in canonical.get("moe", {})) and not legacy_moe_explicit:
@@ -672,6 +679,11 @@ def validate_model_dependent_config(effective_config: EffectiveBuilderConfig, mo
     quant_config = effective_config.extra_options.get("_quant_config")
     checkpoint_moe_type = effective_config.extra_options.get("moe_quant_type")
     if quant_config is not None and checkpoint_moe_type is not None and quant_config.moe.type != checkpoint_moe_type:
+        if effective_config.target_moe_explicit:
+            raise ValueError(
+                f"target_options.quant_config.moe.type={quant_config.moe.type!r} conflicts with "
+                f"checkpoint moe_quant_type={checkpoint_moe_type!r}"
+            )
         quant_data = quant_config_schema_dict(quant_config)
         quant_data["moe"]["type"] = checkpoint_moe_type
         quant_config = QuantConfig.from_dict(quant_data)

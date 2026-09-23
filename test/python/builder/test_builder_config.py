@@ -45,6 +45,17 @@ def test_structured_fields_select_version_two():
     assert effective.target_options["quant_config"]["moe"]["type"] == "int4"
 
 
+def test_unsigned_weight_type_defaults_to_asymmetric_quantization():
+    effective = normalize_builder_config(
+        None,
+        "cuda",
+        target_options={"quant_config": {"weights": {"type": "uint4"}}},
+    )
+
+    assert effective.extra_options["_quant_config"].weights.symmetric is False
+    assert effective.extra_options["is_symmetric"] is False
+
+
 def test_version_one_rejects_structured_fields():
     with pytest.raises(ValueError, match="version=1 cannot be combined"):
         normalize_builder_config("int4", "cuda", builder_config_version=1, target_options={})
@@ -445,6 +456,21 @@ def test_checkpoint_moe_policy_updates_implicit_structured_config():
     assert effective.extra_options["_quant_config"].moe.type == "nvfp4"
     assert effective.extra_options["_quant_config"].moe.block_size == 16
     assert effective.target_options["quant_config"]["moe"]["type"] == "nvfp4"
+
+
+def test_checkpoint_moe_policy_rejects_conflicting_explicit_type():
+    effective = normalize_builder_config(
+        "bf16",
+        "cuda",
+        target_options={"quant_config": {"moe": {"type": "none"}}},
+    )
+    effective.extra_options["moe_quant_type"] = "nvfp4"
+
+    with pytest.raises(ValueError, match="conflicts with checkpoint moe_quant_type"):
+        validate_model_dependent_config(effective, type("Config", (), {"num_experts": 8})())
+
+    assert effective.extra_options["_quant_config"].moe.type == "none"
+    assert effective.target_options["quant_config"]["moe"]["type"] == "none"
 
 
 def test_speculative_layers_flatten_in_order():

@@ -194,7 +194,7 @@ class WeightsConfig:
 
     type: str = "none"
     block_size: int = 32
-    symmetric: bool = True
+    symmetric: Optional[bool] = None
     method: str = "default"  # default | rtn | k_quant
     accuracy_level: int = 0
     op_types: tuple[str, ...] = ("MatMul",)
@@ -204,6 +204,12 @@ class WeightsConfig:
 
     def __post_init__(self):
         descriptor = resolve_dtype(self.type)
+        if self.symmetric is None:
+            self.symmetric = descriptor.signed is not False
+        else:
+            self.symmetric = require_bool(self.symmetric, "weights.symmetric")
+            if descriptor.signed is False and self.symmetric:
+                raise ValueError(f"weights.type={self.type} requires weights.symmetric=false")
         if self.method not in self.METHODS:
             raise ValueError(f"weights.method must be one of {list(self.METHODS)}, got '{self.method}'")
         if type(self.accuracy_level) is not int or self.accuracy_level not in range(5):
@@ -226,10 +232,11 @@ class WeightsConfig:
         ):
             raise ValueError("weights.op_types must be a non-empty array of supported operator names: MatMul, Gather")
         overrides = [Override.from_dict(o) for o in data.get("overrides", [])]
+        symmetric = None if "symmetric" not in data else require_bool(data["symmetric"], "weights.symmetric")
         return cls(
             type=data.get("type", "none"),
             block_size=data.get("block_size", 32),
-            symmetric=require_bool(data.get("symmetric", True), "weights.symmetric"),
+            symmetric=symmetric,
             method=data.get("method", "default"),
             accuracy_level=data.get("accuracy_level", 0),
             op_types=tuple(op_types),

@@ -95,6 +95,20 @@ def test_from_dict_empty_uses_defaults():
     assert cfg.format.use_qdq is False
 
 
+@pytest.mark.parametrize("weights_type", ["uint4", "uint8"])
+def test_unsigned_weights_default_to_asymmetric(weights_type):
+    weights = WeightsConfig.from_dict({"type": weights_type})
+
+    assert weights.symmetric is False
+    assert weights.to_dict()["symmetric"] is False
+
+
+@pytest.mark.parametrize("weights_type", ["uint4", "uint8"])
+def test_unsigned_weights_reject_explicit_symmetric_mode(weights_type):
+    with pytest.raises(ValueError, match="requires weights.symmetric=false"):
+        WeightsConfig.from_dict({"type": weights_type, "symmetric": True})
+
+
 def test_from_dict_accepts_quantization_wrapper():
     cfg = QuantConfig.from_dict({"quantization": {"io_dtype": "bf16", "weights": {"type": "int4"}}})
     assert cfg.io_dtype == "bf16"
