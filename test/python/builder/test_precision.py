@@ -498,7 +498,7 @@ def test_qwen35_moe_architecture_selects_composite_builder(monkeypatch, tmp_path
             captured["processing"] = args
 
     config = types.SimpleNamespace(architectures=["Qwen3_5MoeForConditionalGeneration"])
-    monkeypatch.setattr(importlib.import_module("builders.qwen"), "Qwen35MoEModel", FakeQwen35MoEModel)
+    monkeypatch.setattr(builder_module, "Qwen35MoEModel", FakeQwen35MoEModel)
 
     builder_module.create_model(
         "fake-model",

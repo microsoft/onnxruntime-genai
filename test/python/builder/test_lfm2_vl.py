@@ -67,7 +67,7 @@ def test_lfm2_vl_architecture_uses_lfm2_builder_and_labels_the_export(
             pass
 
     config = types.SimpleNamespace(architectures=["Lfm2VlForConditionalGeneration"])
-    monkeypatch.setattr(importlib.import_module("builders"), "LFM2Model", FakeLFM2Model)
+    monkeypatch.setattr(builder_module, "LFM2Model", FakeLFM2Model)
 
     builder_module.create_model(
         "LiquidAI/LFM2.5-VL-1.6B",

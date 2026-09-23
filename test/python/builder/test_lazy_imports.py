@@ -39,7 +39,6 @@ def test_all_builder_exports_are_lazy(monkeypatch):
 @pytest.mark.parametrize(
     ("relative_path", "dependency"),
     [
-        (("builder.py",), "builders"),
         (("builders", "base.py"), "transformers"),
         (("builders", "mistral.py"), "transformers"),
         (("builders", "qwen.py"), "transformers"),
@@ -76,18 +75,26 @@ def test_no_module_level_model_class_imports(relative_path, dependency):
     assert not violations, f"Eager {dependency} model imports found at lines {sorted(violations)}"
 
 
-@pytest.mark.parametrize("module_name", ["base", "mistral", "qwen"])
-def test_no_local_transformers_imports(module_name):
-    builders_dir = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
-    tree = ast.parse((builders_dir / f"{module_name}.py").read_text(encoding="utf-8"))
+@pytest.mark.parametrize(
+    ("relative_path", "dependency"),
+    [
+        (("builder.py",), "builders"),
+        (("builders", "base.py"), "transformers"),
+        (("builders", "mistral.py"), "transformers"),
+        (("builders", "qwen.py"), "transformers"),
+    ],
+)
+def test_no_local_model_imports(relative_path, dependency):
+    models_dir = Path(__file__).parents[3] / "src" / "python" / "py" / "models"
+    tree = ast.parse(models_dir.joinpath(*relative_path).read_text(encoding="utf-8"))
     for function in ast.walk(tree):
         if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         for node in ast.walk(function):
             if isinstance(node, ast.Import):
-                assert not any(alias.name.split(".")[0] == "transformers" for alias in node.names)
+                assert not any(alias.name.split(".")[0] == dependency for alias in node.names)
             elif isinstance(node, ast.ImportFrom):
-                assert (node.module or "").split(".")[0] != "transformers"
+                assert (node.module or "").split(".")[0] != dependency
 
 
 @pytest.fixture
@@ -218,7 +225,6 @@ def test_custom_weight_loaders_use_shared_resolver(weight_loader, class_name, lo
 @pytest.mark.parametrize(
     ("statement", "expected_modules"),
     [
-        ("import builder", set()),
         ("import builders", set()),
         ("from builders import Model", {"base"}),
         ("from builders import LlamaModel", {"base", "llama"}),
@@ -237,6 +243,25 @@ loaded = {{
     if name.startswith("builders.") and name.count(".") == 1
 }}
 assert loaded == {expected_modules!r}, loaded
+"""
+    result = subprocess.run([sys.executable, "-c", script], cwd=models_dir, capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_importing_entrypoint_does_not_load_transformers_architectures():
+    models_dir = Path(__file__).parents[3] / "src" / "python" / "py" / "models"
+    script = """
+import sys
+import builder
+assert builder.LlamaModel.__module__ == "builders.llama"
+assert builder.Qwen35MoEModel.__module__ == "builders.qwen"
+loaded = {
+    name for name in sys.modules
+    if name.startswith("transformers.models.")
+    and not name.startswith("transformers.models.auto.")
+    and ".modeling_" in name
+}
+assert not loaded, loaded
 """
     result = subprocess.run([sys.executable, "-c", script], cwd=models_dir, capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stdout + result.stderr

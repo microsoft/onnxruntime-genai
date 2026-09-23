@@ -52,10 +52,10 @@ After the final ONNX model is created, additional files are saved in the output 
 
 ### Architecture Classes
 
-`builder.py` imports architecture classes only after selecting the model type. The
-`builders` package resolves its public class exports lazily so selecting one
-architecture does not import unrelated builder modules.
-Transformers model classes are also resolved only when loading weights for the
+`builder.py` imports ORT GenAI architecture classes at module scope. The
+`builders` package resolves its public class exports lazily for direct callers,
+but the entrypoint requests all supported builder classes.
+Transformers model classes are resolved only when loading weights for the
 selected architecture. Supporting a newer architecture must not require upgrading
 Transformers to continue exporting an older, already supported architecture.
 `Model.resolve_model_loader` keeps the ordered architecture-to-class-name registry,
