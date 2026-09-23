@@ -1079,6 +1079,7 @@ class Model:
         self.exact_quant_overrides = {}
         resolved_names = set()
         nodes_to_exclude = []
+        legacy_nodes_to_exclude = getattr(self.quant_config, "legacy_nodes_to_exclude", frozenset())
         self.int4_customized_weight_config = {}
         for override in self.quant_config.weights.overrides:
             if set(override.match) == {"preset"}:
@@ -1099,8 +1100,9 @@ class Model:
                 node_name = override.match["name"]
                 if node_name in resolved_names:
                     continue
-                self.exact_quant_override_names.add(node_name)
-                self.exact_quant_overrides[node_name] = override
+                if not (override.exclude and node_name in legacy_nodes_to_exclude):
+                    self.exact_quant_override_names.add(node_name)
+                    self.exact_quant_overrides[node_name] = override
                 resolved_names.add(node_name)
                 if override.exclude:
                     nodes_to_exclude.append(node_name)

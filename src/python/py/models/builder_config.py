@@ -312,6 +312,8 @@ def normalize_target_quant_config(
             warn_structured_override(legacy_options, legacy_key, f"target_options.quant_config.{path}")
 
     quant_config = QuantConfig.from_dict(merged)
+    if "overrides" not in structured_weights:
+        quant_config.legacy_nodes_to_exclude = legacy_config.legacy_nodes_to_exclude
     return quant_config, precision_from_quant_data(quant_config_schema_dict(quant_config), precision)
 
 

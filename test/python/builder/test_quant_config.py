@@ -403,6 +403,7 @@ def test_extra_options_nodes_to_exclude_become_overrides():
     cfg = QuantConfig.from_extra_options({"nodes_to_exclude": ["/model/embed_tokens/Gather"]}, precision="int4")
     excludes = [o for o in cfg.weights.overrides if o.exclude]
     assert excludes == [Override(match={"name": "/model/embed_tokens/Gather"}, exclude=True)]
+    assert cfg.legacy_nodes_to_exclude == frozenset({"/model/embed_tokens/Gather"})
 
 
 def test_extra_options_nodes_to_exclude_precede_mixed_precision_presets():

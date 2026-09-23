@@ -175,6 +175,27 @@ def test_structured_config_normalizes_legacy_quantization_lists():
         "/model/a/MatMul",
         "/model/b/MatMul",
     ]
+    assert effective.extra_options["_quant_config"].legacy_nodes_to_exclude == frozenset(
+        {"/model/a/MatMul", "/model/b/MatMul"}
+    )
+
+
+def test_structured_exclusions_replace_legacy_exclusion_provenance():
+    node_name = "/model/a/MatMul"
+    effective = normalize_builder_config(
+        "int4",
+        "cuda",
+        {"nodes_to_exclude": node_name},
+        target_options={
+            "quant_config": {
+                "weights": {
+                    "overrides": [{"match": {"name": node_name}, "exclude": True}],
+                }
+            }
+        },
+    )
+
+    assert effective.extra_options["_quant_config"].legacy_nodes_to_exclude == frozenset()
 
 
 def make_drafter_checkpoint(tmp_path):

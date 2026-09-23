@@ -447,6 +447,38 @@ def test_exact_name_override_rejects_dynamic_weight(tmp_path):
         model.to_nbits()
 
 
+def test_legacy_exclusion_does_not_require_an_emitted_node(tmp_path):
+    model, _ = _exact_override_model(tmp_path, constant_weight=True)
+    missing_name = "/missing/MatMul"
+    model.quant_config = QuantConfig.from_extra_options(
+        {"nodes_to_exclude": [missing_name]}, precision="int4", execution_provider="cpu"
+    )
+    model.quant_type = None
+
+    model.make_quant_init(types.SimpleNamespace())
+    quantized = model.to_nbits()
+
+    assert any(node.name == "/probe/MatMul_Q4" for node in quantized.graph)
+
+
+def test_structured_exact_exclusion_requires_an_emitted_node(tmp_path):
+    model, _ = _exact_override_model(tmp_path, constant_weight=True)
+    missing_name = "/missing/MatMul"
+    model.quant_config = QuantConfig.from_dict(
+        {
+            "weights": {
+                "type": "int4",
+                "overrides": [{"match": {"name": missing_name}, "exclude": True}],
+            }
+        }
+    )
+    model.quant_type = None
+
+    model.make_quant_init(types.SimpleNamespace())
+    with pytest.raises(ValueError, match="did not match an emitted node"):
+        model.to_nbits()
+
+
 def test_exact_name_override_is_verified_after_quantization(tmp_path):
     model, node_name = _exact_override_model(tmp_path, constant_weight=True)
 

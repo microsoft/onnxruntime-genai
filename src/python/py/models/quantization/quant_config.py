@@ -382,6 +382,7 @@ class QuantConfig:
     moe: MoEConfig = field(default_factory=MoEConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     checkpoint_policy: str = "preserve"
+    legacy_nodes_to_exclude: frozenset[str] = field(default_factory=frozenset, repr=False, compare=False)
 
     def __post_init__(self):
         if self.io_dtype not in IO_DTYPES:
@@ -525,7 +526,14 @@ class QuantConfig:
         )
 
         io_dtype = default_io_dtype(precision, execution_provider, extra_options)
-        return cls(io_dtype=io_dtype, weights=weights, moe=moe, runtime=runtime, checkpoint_policy="preserve")
+        return cls(
+            io_dtype=io_dtype,
+            weights=weights,
+            moe=moe,
+            runtime=runtime,
+            checkpoint_policy="preserve",
+            legacy_nodes_to_exclude=frozenset(extra_options.get("nodes_to_exclude", []) or []),
+        )
 
     # -- Serialization -----------------------------------------------------
 
