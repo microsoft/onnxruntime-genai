@@ -963,6 +963,10 @@ SpeculativeStats Generator::GetSpeculativeStats() const {
   return strategy_->GetStats();
 }
 
+bool RewindSplitsPrompt(size_t new_length, size_t prompt_length) {
+  return new_length > 0 && new_length < prompt_length;
+}
+
 void Generator::RewindToLength(size_t new_length) {
   const auto& model_type = model_->config_->model.type;
   // RNNT/TDT/streaming-enc-dec-ASR models (e.g. Moonshine) take the
@@ -983,6 +987,8 @@ void Generator::RewindToLength(size_t new_length) {
     throw std::runtime_error("RewindToLength must be called with new_length=0 when batch_size > 1");
   if (search_->params_->search.num_beams > 1)
     throw std::runtime_error("RewindToLength is not supported with beam search");
+  if (RewindSplitsPrompt(new_length, state_->PromptLength()))
+    throw std::runtime_error("Cannot rewind to a length inside the prompt; rewind to 0 instead");
   const int64_t rewound_token_count =
       static_cast<int64_t>(current_length - new_length) *
       static_cast<int64_t>(search_->params_->BatchBeamSize());

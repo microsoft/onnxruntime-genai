@@ -280,6 +280,8 @@ struct MultiModalPipelineState : State {
 
   void RewindTo(size_t index) override;
 
+  size_t PromptLength() const override { return prompt_length_; }
+
  private:
   void UpdateInputsOutputs(const DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices,
                            int current_length);
@@ -297,6 +299,7 @@ struct MultiModalPipelineState : State {
   std::unique_ptr<Lfm2AudioOutput> audio_output_;  // LFM2-Audio speech output, when the model has it
   std::shared_ptr<Adapters> adapters_;
   bool is_prompt_{true};
+  size_t prompt_length_{};  // Set once the prompt finishes
   // Set on first RewindTo(0); until then, features release after the prompt.
   bool has_rewound_{false};
 

@@ -1169,6 +1169,7 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
                       : decoder_state_->Run(current_length, next_tokens, next_indices);
 
     is_prompt_ = false;
+    prompt_length_ = static_cast<size_t>(current_length);
 
     return audio_output_ ? SampleAudioOrText(logits) : logits;
   }
