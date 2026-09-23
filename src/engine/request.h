@@ -34,7 +34,7 @@ class StopStringController;
 // Resident-session policy. Everything here outlives a single turn.
 struct RequestOptions {
   // Total tokens (prompt plus generated, across every turn) the Request may ever reach. Defaults to
-  // the model-configured search.max_length, which is also its ceiling.
+  // model-configured search.max_length capped by a nonzero Engine max_request_length.
   std::optional<size_t> max_session_tokens;
 };
 

@@ -28,6 +28,7 @@ enum class EngineHealth {
 struct EngineCapabilities {
   size_t configured_max_batch_size{};
   size_t max_scheduled_tokens{};
+  uint64_t max_request_length{};
 };
 
 enum class EngineErrorCode : uint32_t {

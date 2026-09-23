@@ -544,6 +544,26 @@ TEST_F(RequestLifecycleTest, CapabilitiesReportDefaultStaticBatchSetting) {
 
   EXPECT_EQ(capabilities.configured_max_batch_size, 4u);
   EXPECT_EQ(capabilities.max_scheduled_tokens, 0u);
+  EXPECT_EQ(capabilities.max_request_length, 0u);
+
+  const auto configured_max_length = static_cast<size_t>(model->config_->search.max_length);
+  EXPECT_NO_THROW(engine.engine->CreateRequest());
+
+  RequestOptions boundary_options;
+  boundary_options.max_session_tokens = configured_max_length;
+  EXPECT_NO_THROW(engine.engine->CreateRequest(boundary_options));
+
+  RequestOptions excessive_options;
+  excessive_options.max_session_tokens = configured_max_length + 1;
+  try {
+    static_cast<void>(engine.engine->CreateRequest(excessive_options));
+    FAIL() << "Expected max_session_tokens above search.max_length to fail.";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string(error.what()).find("model-configured search.max_length"),
+              std::string::npos);
+    EXPECT_EQ(std::string(error.what()).find("max_request_length"),
+              std::string::npos);
+  }
 }
 
 TEST_F(RequestLifecycleTest, CapabilitiesReportExplicitStaticBatchSetting) {
@@ -557,6 +577,7 @@ TEST_F(RequestLifecycleTest, CapabilitiesReportExplicitStaticBatchSetting) {
 
   EXPECT_EQ(capabilities.configured_max_batch_size, 8u);
   EXPECT_EQ(capabilities.max_scheduled_tokens, 0u);
+  EXPECT_EQ(capabilities.max_request_length, 0u);
 }
 
 TEST_F(RequestLifecycleTest, StaticEngineDoesNotLoadDisabledMtpHead) {

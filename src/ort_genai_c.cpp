@@ -1518,6 +1518,11 @@ size_t OgaEngineCapabilitiesGetMaxScheduledTokens(
   return capabilities ? capabilities->max_scheduled_tokens : 0;
 }
 
+uint64_t OgaEngineCapabilitiesGetMaxRequestLength(
+    const OgaEngineCapabilities* capabilities) {
+  return capabilities ? capabilities->max_request_length : 0;
+}
+
 OgaResult* OgaCreateEngineEventBuffer(
     OgaEngine* engine,
     size_t capacity,

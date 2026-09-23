@@ -242,6 +242,12 @@ Omitted fields retain their base values. Every other config field is rejected fr
 profile overlay. In particular, profiles cannot override `search.max_length`; applications set
 request/session policy independently.
 
+An overlaid `search.max_length` remains the default Engine Request length. The Engine's
+`max_request_length` capability reports the hard per-request limit derived from the resolved target
+cache and model context. A caller may explicitly choose a `max_session_tokens` value above the
+default but not above that capability when it is nonzero. A zero capability means the cache-backed
+ceiling is unavailable and preserves the `search.max_length` default and ceiling.
+
 Selection uses total device memory from the primary CUDA interface selected by the normal provider
 append path. The query intentionally uses the existing device-ID-agnostic interface for the current
 single-discrete-GPU scope. Distinguishing CUDA device ordinals on heterogeneous multi-GPU machines

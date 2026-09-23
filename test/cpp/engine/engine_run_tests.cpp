@@ -1954,7 +1954,7 @@ TEST_F(EngineRunTest, UnserviceableRequestDoesNotBlockFittingRequest) {
   EXPECT_EQ(RunOne(*engine.engine).request, fitting);
 }
 
-TEST_F(EngineRunTest, UnserviceableRequestRollsBackStagedPrefixAdoption) {
+TEST_F(EngineRunTest, StructurallyOversizedRequestIsRejectedBeforePrefixAdoption) {
   model_ = LoadSyntheticPagedModel();
   auto& batching = *model_->config_->engine.dynamic_batching;
   batching.block_size = 4;
@@ -1969,12 +1969,11 @@ TEST_F(EngineRunTest, UnserviceableRequestRollsBackStagedPrefixAdoption) {
   source->Close();
 
   std::vector<int32_t> oversized_prompt(25, 7);
-  auto too_large = CreateRequestWithPrompt(engine.engine, oversized_prompt);
+  EXPECT_THROW(
+      static_cast<void>(CreateRequestWithPrompt(engine.engine, oversized_prompt)),
+      std::runtime_error);
   auto warm = CreateRequestWithPrompt(engine.engine, prompt);
 
-  const auto failed = RunOne(*engine.engine);
-  EXPECT_EQ(failed.request, too_large);
-  EXPECT_EQ(failed.error_code, EngineErrorCode::RequestUnserviceable);
   EXPECT_EQ(warm->ProcessedSequenceLength(), 0);
   EXPECT_EQ(warm->AdoptedPrefixLength(), 0u);
 

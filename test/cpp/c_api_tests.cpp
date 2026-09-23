@@ -956,6 +956,8 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
   auto capabilities = engine->GetCapabilities();
   EXPECT_EQ(capabilities->ConfiguredMaxBatchSize(), 8u);
   EXPECT_EQ(capabilities->MaxScheduledTokens(), 2048u);
+  EXPECT_EQ(capabilities->MaxRequestLength(), 128u);
+  EXPECT_EQ(OgaEngineCapabilitiesGetMaxRequestLength(nullptr), 0u);
   std::exception_ptr off_thread_capabilities_error;
   std::thread off_owner_capabilities_thread([&] {
     try {
@@ -1001,7 +1003,7 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
   auto options_request = engine->CreateRequest(request_options.get());
   options_request->Close();
 
-  // Omitting the option (or clearing it with zero) uses the model-configured ceiling.
+  // Omitting the option (or clearing it with zero) uses the configured default within the Engine ceiling.
   request_options->SetMaxSessionTokens(0);
   auto default_limit_request = engine->CreateRequest(request_options.get());
   default_limit_request->Close();
@@ -1011,13 +1013,13 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
   try {
     static_cast<void>(
         engine->CreateRequest(excessive_request_options.get()));
-    FAIL() << "Expected max_session_tokens above the model ceiling to fail.";
+    FAIL() << "Expected max_session_tokens above the Engine ceiling to fail.";
   } catch (const std::runtime_error& error) {
     EXPECT_NE(
         std::string(error.what()).find("max_session_tokens (129)"),
         std::string::npos);
     EXPECT_NE(
-        std::string(error.what()).find("search.max_length (128)"),
+        std::string(error.what()).find("max_request_length (128)"),
         std::string::npos);
   }
 
@@ -1077,6 +1079,39 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
   EXPECT_EQ(engine->Run(*idle_buffer), 0u);
   EXPECT_EQ(idle_buffer->Count(), 0u);
   EXPECT_EQ(idle_buffer->Get(0), nullptr);
+}
+
+TEST(CAPITests, EngineMaxRequestLengthUsesResolvedCacheCapacity) {
+  auto config = OgaConfig::Create(MODEL_PATH "engine/synthetic-paged");
+  config->Overlay(R"({
+    "search":{"max_length":4},
+    "engine":{"dynamic_batching":{"num_blocks":2}}
+  })");
+  auto model = OgaModel::Create(*config);
+  auto engine = OgaEngine::Create(*model);
+
+  auto capabilities = engine->GetCapabilities();
+  EXPECT_EQ(capabilities->MaxRequestLength(), 9u);
+
+  auto request_options = OgaRequestOptions::Create();
+  request_options->SetMaxSessionTokens(8);
+  EXPECT_NO_THROW(engine->CreateRequest(request_options.get()));
+
+  request_options->SetMaxSessionTokens(9);
+  auto boundary_request = engine->CreateRequest(request_options.get());
+  const std::array<int32_t, 8> fitting_prompt{2, 3, 4, 5, 6, 7, 8, 9};
+  const auto boundary_turn = boundary_request->BeginTurn(fitting_prompt);
+  EXPECT_TRUE(boundary_request->CancelTurn(boundary_turn));
+  const auto boundary_event = RunOne(*engine);
+  EXPECT_EQ(boundary_event.flags, OgaEngineEventFlag_TurnFinished);
+  EXPECT_EQ(boundary_event.finish_reason, OgaFinishReason_Cancelled);
+
+  auto full_request = engine->CreateRequest(request_options.get());
+  const std::array<int32_t, 9> full_prompt{2, 3, 4, 5, 6, 7, 8, 9, 10};
+  EXPECT_THROW(full_request->BeginTurn(full_prompt), std::runtime_error);
+
+  request_options->SetMaxSessionTokens(10);
+  EXPECT_THROW(engine->CreateRequest(request_options.get()), std::runtime_error);
 }
 
 TEST(CAPITests, EngineTurnOptionsGenerationPolicy) {

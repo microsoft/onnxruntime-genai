@@ -1176,14 +1176,21 @@ std::shared_ptr<Request> Engine::CreateRequest(const RequestOptions& options) {
         R"(config.overlay('{"search": {"num_beams": 1}}') -- )"
         "and batch across Requests instead.");
   }
-  const size_t model_ceiling = static_cast<size_t>(model_search.max_length);
+  const size_t configured_default = static_cast<size_t>(model_search.max_length);
+  const uint64_t capability = GetCapabilities().max_request_length;
+  if (capability > std::numeric_limits<size_t>::max()) {
+    throw std::overflow_error("Engine max_request_length exceeds size_t.");
+  }
+  const size_t engine_ceiling = capability == 0 ? configured_default : static_cast<size_t>(capability);
   const size_t max_session_tokens =
-      options.max_session_tokens.value_or(model_ceiling);
-  if (max_session_tokens == 0 || max_session_tokens > model_ceiling) {
+      options.max_session_tokens.value_or(std::min(configured_default, engine_ceiling));
+  if (max_session_tokens == 0 || max_session_tokens > engine_ceiling) {
+    const char* ceiling_name =
+        capability == 0 ? "model-configured search.max_length" : "Engine's max_request_length";
     throw std::runtime_error(
         "max_session_tokens (" + std::to_string(max_session_tokens) +
-        ") must be greater than zero and no greater than the model-configured search.max_length (" +
-        std::to_string(model_ceiling) + ").");
+        ") must be greater than zero and no greater than the " + ceiling_name + " (" +
+        std::to_string(engine_ceiling) + ").");
   }
   auto request = std::make_shared<Request>(
       *model_, max_session_tokens, abandonment_pending_);
@@ -2431,6 +2438,16 @@ EngineCapabilities Engine::GetCapabilities() const {
     const auto& batching = *model_->config_->engine.dynamic_batching;
     capabilities.configured_max_batch_size = batching.max_batch_size;
     capabilities.max_scheduled_tokens = batching.max_scheduled_tokens;
+    const size_t block_count = cache_manager_->TargetBlockCount();
+    const size_t block_size = cache_manager_->TargetBlockSize();
+    if (block_count != 0 && block_size != 0) {
+      if (block_count > (std::numeric_limits<uint64_t>::max() - 1) / block_size) {
+        throw std::overflow_error("Engine max_request_length exceeds uint64_t.");
+      }
+      const uint64_t cache_limit = static_cast<uint64_t>(block_count) * block_size + 1;
+      capabilities.max_request_length =
+          std::min<uint64_t>(static_cast<uint64_t>(model_->config_->model.context_length), cache_limit);
+    }
   } else if (model_->config_->engine.static_batching) {
     capabilities.configured_max_batch_size =
         model_->config_->engine.static_batching->max_batch_size;

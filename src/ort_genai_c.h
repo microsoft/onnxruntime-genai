@@ -1256,6 +1256,16 @@ OGA_EXPORT size_t OGA_API_CALL OgaEngineCapabilitiesGetConfiguredMaxBatchSize(
 OGA_EXPORT size_t OGA_API_CALL OgaEngineCapabilitiesGetMaxScheduledTokens(
     const OgaEngineCapabilities* capabilities);
 
+/**
+ * \brief Returns the maximum logical token length of one Request, or zero when unavailable.
+ *
+ * The value reflects the resolved target cache after runtime-profile selection and auxiliary
+ * drafter allocations. It is an exclusive-use structural limit, not current free capacity. Zero
+ * means the cache-backed ceiling is unsupported or unavailable, including for non-paged Engines.
+ */
+OGA_EXPORT uint64_t OGA_API_CALL OgaEngineCapabilitiesGetMaxRequestLength(
+    const OgaEngineCapabilities* capabilities);
+
 /** \brief Destroys an Engine capability snapshot. */
 OGA_EXPORT void OGA_API_CALL OgaDestroyEngineCapabilities(
     OgaEngineCapabilities* capabilities);
@@ -1386,7 +1396,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineHasPendingRequests(OgaEngine* engine
  *
  * \param[in] engine The owning Engine.
  * \param[in] options Nullable request-scoped options. Null options, or zero max_session_tokens, use
- * the model-configured search.max_length, which is also the ceiling for an explicit value.
+ * model-configured search.max_length capped by the Engine's max_request_length when that capability
+ * is nonzero. A zero capability means the ceiling is unavailable and preserves search.max_length.
  * \param[out] out The caller-owned Request handle.
  * \return OgaResult containing the error message if the operation failed, or nullptr on success.
  */
@@ -1403,9 +1414,11 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyRequestOptions(
 /**
  * \brief Sets the total tokens (prompt plus generated, across every Turn) the Request may reach.
  *
- * Zero restores the default, which is the model-configured search.max_length. A nonzero value may
- * be lower than that ceiling but never higher. This is the Request's one session limit: Search
- * completion, cache sizing, speculative bounds, and the MaxSessionTokens finish reason all use it.
+ * Zero restores the default, which is model-configured search.max_length capped by the Engine's
+ * max_request_length when that capability is nonzero. A nonzero value may not exceed the capability
+ * when available; otherwise it may not exceed search.max_length. This is the Request's one session
+ * limit: Search completion, cache sizing, speculative bounds, and the MaxSessionTokens finish reason
+ * all use it.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestOptionsSetMaxSessionTokens(
     OgaRequestOptions* options, uint64_t max_session_tokens);
