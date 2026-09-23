@@ -12,7 +12,10 @@ Run the model builder to create the desired ONNX model.
 
 import argparse
 import os
+import sys
 import textwrap
+import time
+from contextlib import suppress
 from typing import Any
 
 import onnx_ir as ir
@@ -55,6 +58,37 @@ from builders import (
 from builders.qwen import Qwen35Model, Qwen35MoEModel
 from quantization import KV_CACHE_QUANT_SCHEMES, QuantConfig
 from transformers import AutoConfig, AutoTokenizer
+
+try:
+    from ..telemetry.path_utils import (
+        normalize_execution_provider,
+        sanitize_model_identifier,
+        scrub_value_for_telemetry,
+    )
+except Exception:
+    telemetry_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    path_added = telemetry_root not in sys.path
+    if path_added:
+        sys.path.insert(0, telemetry_root)
+    try:
+        try:
+            from telemetry.path_utils import (
+                normalize_execution_provider,
+                sanitize_model_identifier,
+                scrub_value_for_telemetry,
+            )
+        except Exception:
+            def normalize_execution_provider(value):
+                return "trt-rtx" if value == "NvTensorRtRtx" else value
+
+            def sanitize_model_identifier(value):
+                return value if value in (None, "") else "[path]"
+
+            def scrub_value_for_telemetry(value):
+                return value if value is None or isinstance(value, (bool, int, float)) else "[redacted]"
+    finally:
+        if path_added and telemetry_root in sys.path:
+            sys.path.remove(telemetry_root)
 
 
 def add_special_token_ids(config, tokenizer):
@@ -105,7 +139,7 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
     tokenizer = AutoTokenizer.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
     add_special_token_ids(config, tokenizer)
     if extra_options.get("adapter_path", False):
-        from peft import PeftConfig
+        from peft import PeftConfig  # noqa: PLC0415
 
         peft_config = PeftConfig.from_pretrained(
             extra_options["adapter_path"],
@@ -493,6 +527,128 @@ def set_onnx_dtype(precision: str, extra_options: dict[str, Any]) -> ir.DataType
     return to_onnx_dtype[precision]
 
 
+def _normalize_execution_provider_name(execution_provider):
+    return normalize_execution_provider(execution_provider)
+
+
+def _sanitize_path_value(value):
+    return sanitize_model_identifier(value)
+
+
+def _sanitize_extra_options(extra_options: dict[str, Any]) -> dict[str, Any]:
+    """Exclude authentication/internal Hugging Face state and scrub user-facing options."""
+    return {
+        key: scrub_value_for_telemetry(value)
+        for key, value in extra_options.items()
+        if key not in {"hf_token", "hf_details"}
+    }
+
+
+def _get_model_builder_telemetry():
+    """Return telemetry without making it a model-builder dependency."""
+    try:
+        try:
+            from onnxruntime_genai.telemetry import GenAITelemetry  # noqa: PLC0415
+        except Exception:
+            telemetry_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+            path_added = telemetry_root not in sys.path
+            if path_added:
+                sys.path.insert(0, telemetry_root)
+            try:
+                from telemetry import GenAITelemetry  # noqa: PLC0415
+            finally:
+                if path_added and telemetry_root in sys.path:
+                    sys.path.remove(telemetry_root)
+        return GenAITelemetry()
+    except Exception:
+        return None
+
+
+def _shutdown_model_builder_telemetry(max_seconds: float = 1.0) -> None:
+    """Best-effort bounded delivery for the model-builder CLI."""
+    telemetry = _get_model_builder_telemetry()
+    if telemetry is not None:
+        telemetry.shutdown(max_seconds)
+
+
+def _emit_model_build_telemetry(
+    action_name: str,
+    duration_ms: float,
+    success: bool,
+    config,
+    onnx_model,
+    precision: str,
+    execution_provider: str,
+    output_dir: str,
+    extra_options: dict[str, Any],
+    source_format: str = "huggingface",
+    fallback_model_name: str = "",
+) -> None:
+    try:
+        telemetry = _get_model_builder_telemetry()
+        if telemetry is None or not telemetry.accepts_detailed_events:
+            return
+
+        model_type = getattr(onnx_model, "model_type", getattr(config, "model_type", ""))
+        hidden_size = getattr(config, "hidden_size", 0)
+        num_layers = getattr(config, "num_hidden_layers", 0)
+        num_attn_heads = getattr(config, "num_attention_heads", 0)
+        num_kv_heads = getattr(config, "num_key_value_heads", num_attn_heads)
+        vocab_size = getattr(config, "vocab_size", 0)
+        context_length = getattr(config, "max_position_embeddings", 0)
+
+        output_model_size = 0
+        if success and os.path.isdir(output_dir):
+            for filename in os.listdir(output_dir):
+                file_path = os.path.join(output_dir, filename)
+                if os.path.isfile(file_path) and filename.endswith((".onnx", ".onnx_data", ".onnx.data")):
+                    output_model_size += os.path.getsize(file_path)
+
+        num_ops = 0
+        op_types = ""
+        has_custom_ops = False
+        if hasattr(onnx_model, "model") and onnx_model.model is not None:
+            with suppress(Exception):
+                graph = onnx_model.model.graph
+                if graph is not None:
+                    op_type_set = set()
+                    for node in graph:
+                        num_ops += 1
+                        op_type_set.add(node.op_type)
+                        if node.domain and not node.domain.startswith("ai.onnx"):
+                            has_custom_ops = True
+                    op_types = ",".join(sorted(op_type_set))
+
+        io_dtype = str(getattr(onnx_model, "io_dtype", "")).replace("DataType.", "")
+        quant_type = str(getattr(onnx_model, "onnx_dtype", precision)).replace("DataType.", "")
+
+        telemetry.log_model_build(
+            action=action_name,
+            duration_ms=duration_ms,
+            success=success,
+            model_name=_sanitize_path_value(getattr(config, "_name_or_path", "") or fallback_model_name),
+            model_type=str(model_type),
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            num_attn_heads=num_attn_heads,
+            num_kv_heads=num_kv_heads,
+            vocab_size=vocab_size,
+            context_length=context_length,
+            io_dtype=io_dtype,
+            quant_type=quant_type,
+            execution_provider=_normalize_execution_provider_name(execution_provider),
+            output_model_size_bytes=output_model_size,
+            num_onnx_operators=num_ops,
+            operator_types=op_types,
+            has_custom_ops=has_custom_ops,
+            source_format=source_format,
+            has_adapter="adapter_path" in extra_options,
+            extra_options=_sanitize_extra_options(extra_options),
+        )
+    except Exception:
+        return
+
+
 def checkpoint_weight_formats(quantization_config) -> set[tuple[int, str]]:
     """Return the weight formats a prequantized checkpoint declares, as ``{(bits, kind)}``.
 
@@ -551,18 +707,21 @@ def warn_if_checkpoint_overrides_precision(config, precision, onnx_dtype):
 
 
 @torch.no_grad
-def create_model(
+def _create_model_impl(
     model_name,
     input_path,
     output_dir,
     precision,
     execution_provider,
     cache_dir,
+    telemetry_state,
     **extra_options,
 ):
-    # Update name alias for TRT-RTX
-    if execution_provider == "NvTensorRtRtx":
-        execution_provider = "trt-rtx"
+    overall_start = time.perf_counter()
+    normalized_execution_provider = _normalize_execution_provider_name(execution_provider)
+    if normalized_execution_provider != execution_provider:
+        execution_provider = normalized_execution_provider
+        extra_options["use_qdq"] = True
 
     # Create cache and output directories
     os.makedirs(output_dir, exist_ok=True)
@@ -572,7 +731,9 @@ def create_model(
     try:
         hf_details = extra_options.pop("hf_details")
     except KeyError:
-        raise Exception("Hugging Face details not found in extra_options. Please call `parse_extra_options` before `create_model`.")
+        raise Exception(
+            "Hugging Face details not found in extra_options. Please call `parse_extra_options` before `create_model`."
+        ) from None
     extra_kwargs = hf_details.pop("extra_kwargs")
     hf_name = hf_details.pop("hf_name")
     config = hf_details.pop("hf_config")
@@ -705,18 +866,81 @@ def create_model(
     # metadata is dropped when the builder does not honor it.
     warn_if_checkpoint_overrides_precision(config, precision, onnx_dtype)
 
-    if not config_only:
-        # Make ONNX model
-        onnx_model.make_model(input_path)
+    source_format = "gguf" if input_path and input_path.lower().endswith(".gguf") else "huggingface"
+    build_success = False
+    try:
+        if not config_only:
+            onnx_model.make_model(input_path)
+            onnx_model.save_model(output_dir)
 
-        # Save ONNX model
-        onnx_model.save_model(output_dir)
+        onnx_model.make_genai_config(config, extra_kwargs, output_dir)
+        onnx_model.save_processing(hf_name, extra_kwargs, output_dir)
+        build_success = True
+    finally:
+        overall_duration_ms = (time.perf_counter() - overall_start) * 1000
+        telemetry_state["emitted"] = True
+        _emit_model_build_telemetry(
+            action_name="create_model",
+            duration_ms=overall_duration_ms,
+            success=build_success,
+            config=config,
+            onnx_model=onnx_model,
+            precision=precision,
+            execution_provider=execution_provider,
+            output_dir=output_dir,
+            extra_options=extra_options,
+            source_format=source_format,
+            fallback_model_name=model_name,
+        )
 
-    # Make GenAI config
-    onnx_model.make_genai_config(config, extra_kwargs, output_dir)
 
-    # Copy Hugging Face processing files to output folder
-    onnx_model.save_processing(hf_name, extra_kwargs, output_dir)
+def create_model(
+    model_name,
+    input_path,
+    output_dir,
+    precision,
+    execution_provider,
+    cache_dir,
+    **extra_options,
+):
+    """Create a model and emit a minimal failure event even before model selection."""
+    overall_start = time.perf_counter()
+    telemetry_state = {"emitted": False}
+    normalized_input_path = input_path
+    _get_model_builder_telemetry()
+    try:
+        if input_path:
+            normalized_input_path = os.fsdecode(input_path)
+        return _create_model_impl(
+            model_name,
+            normalized_input_path,
+            output_dir,
+            precision,
+            execution_provider,
+            cache_dir,
+            telemetry_state,
+            **extra_options,
+        )
+    except Exception:
+        if not telemetry_state["emitted"]:
+            _emit_model_build_telemetry(
+                action_name="create_model",
+                duration_ms=(time.perf_counter() - overall_start) * 1000,
+                success=False,
+                config=None,
+                onnx_model=None,
+                precision=precision,
+                execution_provider=execution_provider,
+                output_dir="",
+                extra_options=extra_options,
+                source_format=(
+                    "gguf"
+                    if isinstance(normalized_input_path, str) and normalized_input_path.lower().endswith(".gguf")
+                    else "huggingface"
+                ),
+                fallback_model_name=normalized_input_path or model_name,
+            )
+        raise
 
 
 def get_args():
@@ -772,6 +996,12 @@ def get_args():
         type=str,
         default=os.path.join(".", "cache_dir"),
         help="Cache directory for Hugging Face files and temporary ONNX external data files",
+    )
+
+    parser.add_argument(
+        "--disable_telemetry",
+        action="store_true",
+        help="Disable all Python telemetry for this process (equivalent to ORT_DISABLE_TELEMETRY=1).",
     )
 
     parser.add_argument(
@@ -1054,6 +1284,8 @@ def get_args():
 
 if __name__ == "__main__":
     args = get_args()
+    if args.disable_telemetry:
+        os.environ["ORT_DISABLE_TELEMETRY"] = "1"
     extra_options = parse_extra_options(
         args.model_name,
         args.input,
@@ -1063,12 +1295,15 @@ if __name__ == "__main__":
         args.cache_dir,
         args.extra_options,
     )
-    create_model(
-        args.model_name,
-        args.input,
-        args.output,
-        args.precision,
-        args.execution_provider,
-        args.cache_dir,
-        **extra_options,
-    )
+    try:
+        create_model(
+            args.model_name,
+            args.input,
+            args.output,
+            args.precision,
+            args.execution_provider,
+            args.cache_dir,
+            **extra_options,
+        )
+    finally:
+        _shutdown_model_builder_telemetry()

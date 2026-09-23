@@ -19,16 +19,23 @@ import os
 import subprocess
 import threading
 import time
+from contextlib import suppress
 
 import onnxruntime_genai as og
 import pandas as pd
 import psutil
+from telemetry_utils import get_telemetry as _get_telemetry
+from telemetry_utils import sanitize_model_identifier, shutdown_telemetry
 from tqdm import tqdm
 
-peak_cpu_memory = 0.0
-peak_gpu_memory = 0.0
-peak_memory_lock = threading.Lock()
-stop_monitoring = False
+
+class _MemoryMonitor:
+    def __init__(self):
+        self.stop = threading.Event()
+        self.lock = threading.Lock()
+        self.peak_cpu_memory = 0.0
+        self.peak_gpu_memory = 0.0
+
 
 try:
     subprocess.run(["nvidia-smi"], check=True)
@@ -38,10 +45,8 @@ except Exception:
 
 
 # Monitor the GPU memory usage
-def monitor_gpu_memory():
-    global peak_gpu_memory  # noqa: PLW0603
-
-    while not stop_monitoring:
+def monitor_gpu_memory(memory_monitor):
+    while not memory_monitor.stop.is_set():
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
             check=False,
@@ -54,21 +59,19 @@ def monitor_gpu_memory():
         if len(memory_usage) >= 1:
             gpu_memory = [float(line) for line in memory_usage]
             current_peak = round(max(gpu_memory) / 1024, 2)
-            with peak_memory_lock:
-                peak_gpu_memory = max(current_peak, peak_gpu_memory)
+            with memory_monitor.lock:
+                memory_monitor.peak_gpu_memory = max(current_peak, memory_monitor.peak_gpu_memory)
         else:
             print("No GPU Memory Info Found")
         time.sleep(0.1)
 
 
 # Monitor the CPU memory usage
-def monitor_cpu_memory():
-    global peak_cpu_memory  # noqa: PLW0603
-
-    while not stop_monitoring:
+def monitor_cpu_memory(memory_monitor):
+    while not memory_monitor.stop.is_set():
         current_used_memory = round(psutil.virtual_memory().used / 1024**3, 2)
-        with peak_memory_lock:
-            peak_cpu_memory = max(peak_cpu_memory, current_used_memory)
+        with memory_monitor.lock:
+            memory_monitor.peak_cpu_memory = max(memory_monitor.peak_cpu_memory, current_used_memory)
         time.sleep(0.1)
 
 
@@ -95,40 +98,38 @@ def save_results(results, filename):
     print(f"Results saved in {filename}!")
 
 
-def run_benchmark_memory(args, model, processor, image, audio, generation_length, max_length):
+def run_benchmark_memory(args, model, processor, image, audio, generation_length, max_length, model_session_id=None):
     """
     This function is to run benchmark and print the memory usage
     """
-    global stop_monitoring  # noqa: PLW0603
-    global peak_gpu_memory  # noqa: PLW0603
-    global peak_cpu_memory  # noqa: PLW0603
+    memory_monitor = _MemoryMonitor()
 
-    # Reset the peak memory variables and the monitoring flag
-    stop_monitoring = False
-    peak_gpu_memory = 0.0
-    peak_cpu_memory = 0.0
+    monitor_threads = [threading.Thread(target=monitor_cpu_memory, args=(memory_monitor,))]
+    if IS_NVIDIA_SYSTEM:
+        monitor_threads.append(threading.Thread(target=monitor_gpu_memory, args=(memory_monitor,)))
+    for monitor_thread in monitor_threads:
+        monitor_thread.start()
+    try:
+        metrics = run_benchmark(
+            args, model, processor, image, audio, generation_length, max_length, memory_monitor, model_session_id
+        )
+    finally:
+        memory_monitor.stop.set()
+        for monitor_thread in monitor_threads:
+            monitor_thread.join()
 
     if IS_NVIDIA_SYSTEM:
-        monitor_thread = threading.Thread(target=monitor_gpu_memory)
+        metrics.append(memory_monitor.peak_gpu_memory)
     else:
-        monitor_thread = threading.Thread(target=monitor_cpu_memory)
-
-    monitor_thread.start()
-
-    metrics = run_benchmark(args, model, processor, image, audio, generation_length, max_length)
-
-    stop_monitoring = True
-    monitor_thread.join()
-
-    if IS_NVIDIA_SYSTEM:
-        metrics.append(peak_gpu_memory)
-    else:
-        metrics.append(peak_cpu_memory)
+        metrics.append(memory_monitor.peak_cpu_memory)
 
     return metrics
 
 
-def run_benchmark(args, model, processor, image, audio, generation_length, max_length):
+def run_benchmark(
+    args, model, processor, image, audio, generation_length, max_length, memory_monitor=None, model_session_id=None
+):
+    memory_monitor = memory_monitor or _MemoryMonitor()
     # Get user arguments
     num_repetitions = args.repetitions
     temperature = 1.0
@@ -304,6 +305,29 @@ def run_benchmark(args, model, processor, image, audio, generation_length, max_l
         avg_wall_clock_thrpt,
         avg_wall_clock_time,
     ]
+
+    # Emit telemetry for this benchmark run
+    with suppress(Exception):
+        telemetry = _get_telemetry()
+        telemetry.log_benchmark(
+            model_name=sanitize_model_identifier(args.input_folder),
+            backend="onnxruntime-genai",
+            device="default",
+            prompt_length=prompt_length,
+            tokens_generated=generation_length,
+            prompt_processing_latency_ms=avg_prompt_latency_ms,
+            token_generation_latency_ms=avg_token_gen_latency_ms,
+            token_generation_throughput=avg_token_gen_thrpt,
+            sampling_latency_ms=avg_sampling_latency_ms,
+            sampling_throughput=avg_sampling_thrpt,
+            wall_clock_time_ms=avg_wall_clock_time * 1000,
+            wall_clock_throughput=avg_wall_clock_thrpt,
+            time_to_first_token_ms=avg_prompt_latency_ms + avg_sampling_latency_ms,
+            peak_memory_gpu_mb=memory_monitor.peak_gpu_memory * 1024 if IS_NVIDIA_SYSTEM else 0.0,
+            peak_memory_cpu_mb=memory_monitor.peak_cpu_memory * 1024,
+            session_id=model_session_id,
+        )
+
     return metrics
 
 
@@ -314,9 +338,24 @@ def main(args):
     model_path = args.input_folder
     if args.verbose:
         print("Loading model... ")
+    model_load_start = time.time()
     model = og.Model(f"{model_path}")
+    model_load_time_ms = (time.time() - model_load_start) * 1000
     if args.verbose:
-        print("Model loaded, loading processor...")
+        print(f"Model loaded in {model_load_time_ms:.1f} ms, loading processor...")
+
+    # Emit model load telemetry
+    model_session_id = None
+    with suppress(Exception):
+        telemetry = _get_telemetry()
+        model_session_id = telemetry.allocate_model_session_id()
+        telemetry.log_model_load(
+            model_name=sanitize_model_identifier(model_path),
+            execution_provider="default",
+            total_load_time_ms=model_load_time_ms,
+            session_id=model_session_id,
+        )
+
     processor = model.create_multimodal_processor()
     if args.verbose:
         print("Processor loaded, loading image...")
@@ -347,7 +386,7 @@ def main(args):
         else:
             max_length = 3072
         print(f"Args: tokens = {gen_length}, max_length = {max_length}")
-        metrics = run_benchmark_memory(args, model, processor, image, audio, gen_length, max_length)
+        metrics = run_benchmark_memory(args, model, processor, image, audio, gen_length, max_length, model_session_id)
         all_csv_metrics.append(metrics)
     # Add metrics to CSV
     if args.verbose:
@@ -395,4 +434,7 @@ if __name__ == "__main__":
     parser.add_argument("-v", "--verbose", action="store_true", help="Print extra information")
     parser.add_argument("-mo", "--print_model_output", action="store_true", help="Print model output")
     args = parser.parse_args()
-    main(args)
+    try:
+        main(args)
+    finally:
+        shutdown_telemetry()
