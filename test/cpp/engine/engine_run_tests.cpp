@@ -31,10 +31,30 @@
 
 #include "engine_test_helpers.h"
 #include "engine_test_doubles.h"
+#include "engine/scheduled_requests.h"
 #include "decoding/speculative_sampling.h"
 
 namespace Generators {
 namespace test {
+
+struct EngineRunTestAccess {
+  static void PublishDraftResults(
+      Engine& engine, std::span<Request* const> requests,
+      const std::vector<std::vector<TargetTokenSelection>>& distributions) {
+    engine.dflash2_feeds_.clear();
+    engine.dflash2_drafts_.assign(requests.size(), {});
+    engine.dflash2_draft_distributions_ = distributions;
+    engine.dflash2_draft_widths_.assign(requests.size(), 1);
+    for (Request* request : requests)
+      engine.dflash2_feeds_.push_back({.request = request});
+    engine.PublishDflash2DraftResults();
+  }
+
+  static int32_t DraftToken(const Request& request) {
+    return request.draft_tokens_.front();
+  }
+};
+
 namespace {
 
 class TestBarrier {
@@ -93,6 +113,22 @@ TargetTokenSelection SingletonDraftDistribution(int32_t token) {
   distribution.indices.push_back(token);
   distribution.probs.push_back(1.0f);
   return distribution;
+}
+
+TEST(TopKTargetSelectionTest, RenormalizesAfterTopPTruncation) {
+  EffectiveTurnPolicy policy;
+  policy.top_k = 3;
+  policy.top_p = 0.7f;
+  policy.temperature = 1.0f;
+  const std::array<int32_t, 3> tokens{11, 12, 13};
+  const std::array<float, 3> scores{std::log(0.5f), std::log(0.3f), std::log(0.2f)};
+
+  const auto selection = BuildTopKTargetSelection(tokens, scores, policy);
+
+  EXPECT_EQ(selection.indices, (std::vector<int32_t>{11, 12}));
+  ASSERT_EQ(selection.probs.size(), 2u);
+  EXPECT_NEAR(selection.probs[0], 0.625f, 1e-6f);
+  EXPECT_NEAR(selection.probs[1], 0.375f, 1e-6f);
 }
 
 uint64_t SeedWithFirstHostDrawBetween(float lower, float upper) {
@@ -2351,6 +2387,49 @@ TEST_F(EngineRunTest, SampledRatioSpeculativeRunRetriesDeterministicallyFromItsS
   const auto direct = RunSeededRatioProposal(model_, seed, /*retry_before_verify=*/false);
   const auto retried = RunSeededRatioProposal(model_, seed, /*retry_before_verify=*/true);
   EXPECT_EQ(retried, direct);
+}
+
+TEST_F(EngineRunTest, FailedDflashPublicationRestoresEarlierRequestDraftRng) {
+  const int32_t eos = EosToken(*model_);
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, eos == 5 ? 6 : 5);
+  engine.cache->SetMaxDraftTokensPerStep(1);
+  TargetTokenSelection distribution;
+  distribution.indices = {11, 12};
+  distribution.probs = {0.5f, 0.5f};
+  uint32_t seed = 0;
+  for (; seed < 1000; ++seed) {
+    std::seed_seq seed_sequence{seed, 0u, 0x44464c53u};
+    std::mt19937 draft_rng{seed_sequence};
+    const auto first_draw = SampleSparseToken(distribution.indices, distribution.probs, draft_rng);
+    if (first_draw != SampleSparseToken(distribution.indices, distribution.probs, draft_rng))
+      break;
+  }
+  ASSERT_LT(seed, 1000u);
+  auto first = CreateRequestWithPrompt(engine.engine, Prompt(10), SampledTurnOptions(seed));
+  auto second = CreateRequestWithPrompt(engine.engine, Prompt(20), SampledTurnOptions(seed + 1));
+  auto reference = CreateRequestWithPrompt(engine.engine, Prompt(30), SampledTurnOptions(seed));
+  std::array<EngineEvent, 3> prefill_events;
+  ASSERT_EQ(engine.engine->Run(prefill_events), 3u);
+
+  const std::array valid_distribution{distribution};
+  reference->SetDraftTokenDistributions(valid_distribution);
+  const int32_t expected = EngineRunTestAccess::DraftToken(*reference);
+  reference->SetDraftTokens({});
+  reference->SetDraftTokenDistributions(valid_distribution);
+  ASSERT_NE(EngineRunTestAccess::DraftToken(*reference), expected);
+
+  TargetTokenSelection invalid_distribution;
+  invalid_distribution.indices = {11};
+  const std::array<Request*, 2> requests{first.get(), second.get()};
+  std::vector<std::vector<TargetTokenSelection>> distributions{{distribution}, {invalid_distribution}};
+  EXPECT_THROW(EngineRunTestAccess::PublishDraftResults(*engine.engine, requests, distributions),
+               std::runtime_error);
+  ASSERT_EQ(first->PendingDraftTokenCount(), 1u);
+  first->SetDraftTokens({});
+  distributions[1] = {distribution};
+  EXPECT_NO_THROW(EngineRunTestAccess::PublishDraftResults(*engine.engine, requests, distributions));
+  ASSERT_EQ(first->PendingDraftTokenCount(), 1u);
+  EXPECT_EQ(EngineRunTestAccess::DraftToken(*first), expected);
 }
 
 TEST_F(EngineRunTest, SampledSpeculativeBatchHandlesMixedDraftLengths) {

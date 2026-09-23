@@ -24,6 +24,7 @@
 namespace Generators {
 
 namespace test {
+struct EngineRunTestAccess;
 struct RequestGuidanceTestAccess;
 }  // namespace test
 
@@ -557,7 +558,9 @@ struct Request : std::enable_shared_from_this<Request>,
   // Host-side mirror of the full sequence (prompt + generated tokens). Kept in step with the
   // search's device sequence so that streaming and input-id preparation never read it back.
   std::vector<int32_t> tokens_host_;
+  friend class Engine;
   friend struct ScheduledRequests;
+  friend struct test::EngineRunTestAccess;
   friend struct test::RequestGuidanceTestAccess;
 
   void CompleteClose() noexcept;

@@ -12,8 +12,41 @@
 #include <cstdint>
 #include <exception>
 #include <limits>
+#include <numeric>
 
 namespace Generators {
+
+TargetTokenSelection BuildTopKTargetSelection(
+    std::span<const int32_t> tokens, std::span<const float> scores,
+    const EffectiveTurnPolicy& policy) {
+  TargetTokenSelection selection;
+  const float max_score = scores.front();
+  const float inverse_temperature = 1.0f / policy.temperature;
+  std::vector<float> probabilities(scores.size());
+  float sum = 0.0f;
+  for (size_t i = 0; i < scores.size(); ++i) {
+    probabilities[i] = std::exp((scores[i] - max_score) * inverse_temperature);
+    sum += probabilities[i];
+  }
+  for (float& probability : probabilities)
+    probability /= sum;
+
+  float cumulative = 0.0f;
+  for (size_t i = 0; i < scores.size(); ++i) {
+    const float probability = probabilities[i];
+    const bool keep_top_p = !(policy.top_p > 0.0f && policy.top_p < 1.0f) ||
+                            cumulative < policy.top_p;
+    cumulative += probability;
+    if (keep_top_p) {
+      selection.indices.push_back(tokens[i]);
+      selection.probs.push_back(probability);
+    }
+  }
+  const float retained_mass = std::accumulate(selection.probs.begin(), selection.probs.end(), 0.0f);
+  for (float& probability : selection.probs)
+    probability /= retained_mass;
+  return selection;
+}
 
 namespace {
 
@@ -101,31 +134,9 @@ TargetTokenSelection BuildTargetSelection(
 
   const int k = std::min(policy.top_k, topk.k);
   const size_t offset = row * static_cast<size_t>(topk.k);
-  const float max_score = topk.scores[offset];
-  const float inverse_temperature = 1.0f / policy.temperature;
-  std::vector<float> probabilities(static_cast<size_t>(k));
-  float sum = 0.0f;
-  for (int i = 0; i < k; ++i) {
-    probabilities[static_cast<size_t>(i)] =
-        std::exp((topk.scores[offset + static_cast<size_t>(i)] - max_score) *
-                 inverse_temperature);
-    sum += probabilities[static_cast<size_t>(i)];
-  }
-  for (float& probability : probabilities)
-    probability /= sum;
-
-  float cumulative = 0.0f;
-  for (int i = 0; i < k; ++i) {
-    const float probability = probabilities[static_cast<size_t>(i)];
-    const bool keep_top_p = !(policy.top_p > 0.0f && policy.top_p < 1.0f) ||
-                            cumulative < policy.top_p;
-    cumulative += probability;
-    if (keep_top_p) {
-      selection.indices.push_back(topk.tokens[offset + static_cast<size_t>(i)]);
-      selection.probs.push_back(probability);
-    }
-  }
-  return selection;
+  return BuildTopKTargetSelection(
+      std::span<const int32_t>{topk.tokens}.subspan(offset, static_cast<size_t>(k)),
+      std::span<const float>{topk.scores}.subspan(offset, static_cast<size_t>(k)), policy);
 }
 
 }  // namespace

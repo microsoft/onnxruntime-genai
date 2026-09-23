@@ -221,6 +221,7 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
     dflash2_draft_widths_.reserve(max_batch_size);
     dflash2_drafts_.reserve(max_batch_size);
     dflash2_draft_distributions_.reserve(max_batch_size);
+    dflash2_rng_checkpoints_.reserve(max_batch_size);
   }
   WarnOnClampedDraftWidth();
 }
@@ -521,23 +522,38 @@ void Engine::PublishDflash2Drafts(ScheduledRequests& scheduled_requests) {
                                 &dflash2_draft_distributions_)) {
     ++speculative_stats_.draft_forward_passes;
   }
-  for (size_t i = 0; i < dflash2_feeds_.size(); ++i) {
-    auto& drafts = dflash2_drafts_[i];
-    auto& distributions = dflash2_draft_distributions_[i];
-    if (drafts.empty() && distributions.empty()) {
-      continue;
+  PublishDflash2DraftResults();
+}
+
+void Engine::PublishDflash2DraftResults() {
+  dflash2_rng_checkpoints_.clear();
+  try {
+    for (size_t i = 0; i < dflash2_feeds_.size(); ++i) {
+      auto& drafts = dflash2_drafts_[i];
+      auto& distributions = dflash2_draft_distributions_[i];
+      if (drafts.empty() && distributions.empty()) {
+        continue;
+      }
+      // The drafter always emits its full block; a request with a narrower budget takes the prefix
+      // of the same greedy path.
+      if (!distributions.empty()) {
+        dflash2_rng_checkpoints_.emplace_back(dflash2_feeds_[i].request,
+                                              dflash2_feeds_[i].request->draft_rng_);
+        distributions.resize(std::min(distributions.size(), dflash2_draft_widths_[i]));
+        dflash2_feeds_[i].request->SetDraftTokenDistributions(
+            distributions);
+      } else {
+        drafts.resize(std::min(drafts.size(), dflash2_draft_widths_[i]));
+        dflash2_feeds_[i].request->SetDraftTokens(drafts);
+      }
     }
-    // The drafter always emits its full block; a request with a narrower budget takes the prefix
-    // of the same greedy path.
-    if (!distributions.empty()) {
-      distributions.resize(std::min(distributions.size(), dflash2_draft_widths_[i]));
-      dflash2_feeds_[i].request->SetDraftTokenDistributions(
-          distributions);
-    } else {
-      drafts.resize(std::min(drafts.size(), dflash2_draft_widths_[i]));
-      dflash2_feeds_[i].request->SetDraftTokens(drafts);
-    }
+  } catch (...) {
+    for (const auto& [request, rng] : dflash2_rng_checkpoints_)
+      request->draft_rng_ = rng;
+    dflash2_rng_checkpoints_.clear();
+    throw;
   }
+  dflash2_rng_checkpoints_.clear();
 }
 
 void Engine::RecordDflash2Failure(std::exception_ptr error, bool contract_error) {
