@@ -30,6 +30,7 @@ from pathlib import Path
 import numpy as np
 import onnxruntime_genai as og
 import pytest
+from _test_utils import is_webgpu_ep_available
 
 AUDIO_MARKER = "<|audio|>"
 AUDIO_START_TOKEN_ID = 128  # <|audio_start|>: the answer is spoken from here on
@@ -608,6 +609,58 @@ def test_lfm2_audio_rejects_cpu_sub_models_next_to_a_cuda_decoder(test_data_path
         og.Model(config)
 
 
+def _run_prompt(model, prompt, audios, num_tokens):
+    inputs = model.create_multimodal_processor()(prompt, audios=audios)
+    params = og.GeneratorParams(model)
+    params.set_search_options(do_sample=False, max_length=inputs["input_ids"].as_numpy().shape[1] + num_tokens)
+    generator = og.Generator(model, params)
+    generator.set_inputs(inputs)
+    while not generator.is_done():
+        generator.generate_next_token()
+    return generator.get_sequence(0)
+
+
+def _model_on(model_path, provider):
+    config = og.Config(os.fspath(model_path))
+    config.clear_providers()
+    config.append_provider(provider)
+    return og.Model(config)
+
+
+@pytest.mark.skipif(not og.is_cuda_available(), reason="needs a CUDA decoder next to a CPU encoder")
+def test_lfm2_audio_refuses_audio_for_a_cpu_encoder_next_to_a_cuda_decoder(test_data_path, tmp_path):
+    # With the embedding following the decoder only the encoder is left on CPU. Text-only prompts never
+    # run it; a prompt with audio is refused before it writes its features into CUDA memory.
+    model_path = _copy_model(test_data_path, tmp_path)
+    _edit_json(model_path / "genai_config.json", lambda config: config["model"]["embedding"].pop("session_options"))
+    model = _model_on(model_path, "cuda")
+
+    prompt = "<|startoftext|>Transcribe. "
+    assert len(_run_prompt(model, prompt, None, 4)) > 0
+    clip = _write_wav(tmp_path / "clip.wav", _synthetic_signal(0.5, seed=72))
+    with pytest.raises(
+        RuntimeError,
+        match="speech.session_options run the speech model on CPU, but the audio features are passed in CUDA memory",
+    ):
+        _run_prompt(model, prompt + AUDIO_MARKER, og.Audios.open(clip), 4)
+
+
+@pytest.mark.skipif(not is_webgpu_ep_available(), reason="needs the WebGPU plug-in EP")
+def test_lfm2_audio_keeps_text_prompts_on_webgpu_with_cpu_sub_models(test_data_path, tmp_path):
+    # WebGPU without graph capture keeps the decoder's inputs on the host, so a CPU export's config still
+    # runs text-only prompts. Only a prompt with audio, whose features are in WebGPU memory, is refused.
+    model = _model_on(_copy_model(test_data_path, tmp_path), "webgpu")
+
+    prompt = "<|startoftext|>Transcribe. "
+    assert len(_run_prompt(model, prompt, None, 4)) > 0
+    clip = _write_wav(tmp_path / "clip.wav", _synthetic_signal(0.5, seed=73))
+    with pytest.raises(
+        RuntimeError,
+        match="speech.session_options run the speech model on CPU, but the audio features are passed in WebGPU memory",
+    ):
+        _run_prompt(model, prompt + AUDIO_MARKER, og.Audios.open(clip), 4)
+
+
 def _generate(model_path: str, prompt: str, audios, num_tokens: int, chunk_size: int | None = None):
     model = og.Model(model_path)
     processor = model.create_multimodal_processor()
@@ -1052,9 +1105,75 @@ def test_lfm2_audio_rejects_a_codebook_size_past_the_depthformer_logits(test_dat
     model_path = _speech_model(test_data_path, tmp_path, codebook_size=CODEBOOK_SIZE + 1)
     with pytest.raises(
         RuntimeError,
-        match=f"codebook_size is {CODEBOOK_SIZE + 1}, but the depthformer produces {CODEBOOK_SIZE} float logits",
+        match=f"codebook_size is {CODEBOOK_SIZE + 1}, but the depthformer produces {CODEBOOK_SIZE} logits",
     ):
         _generate_speech(model_path, "<|startoftext|>Answer aloud. ", None, 10, audio_interleaved=True, audio_top_k=1)
+
+
+def _replace_graph_output(onnx, path: Path, name: str, build) -> None:
+    """Has build(raw) -> (nodes, initializers, elem_type) produce the graph output `name` from what did."""
+    model = onnx.load(path)
+    raw = f"{name}_raw"
+    for node in model.graph.node:
+        node.output[:] = [raw if output == name else output for output in node.output]
+    nodes, initializers, elem_type = build(raw)
+    model.graph.node.extend(nodes)
+    model.graph.initializer.extend(initializers)
+    output = next(output for output in model.graph.output if output.name == name)
+    output.type.tensor_type.ClearField("shape")
+    output.type.tensor_type.elem_type = elem_type
+    onnx.save(model, path)
+
+
+def test_lfm2_audio_rejects_depthformer_logits_that_are_not_float(test_data_path, tmp_path):
+    onnx = pytest.importorskip("onnx")
+    model_path = _speech_model(test_data_path, tmp_path)
+    _replace_graph_output(
+        onnx,
+        model_path / "dummy_depthformer.onnx",
+        "logits",
+        lambda raw: (
+            [onnx.helper.make_node("Cast", [raw], ["logits"], to=onnx.TensorProto.FLOAT16)],
+            [],
+            onnx.TensorProto.FLOAT16,
+        ),
+    )
+    with pytest.raises(RuntimeError, match="depthformer's logits must be float, got float16"):
+        _generate_speech(model_path, "<|startoftext|>Answer aloud. ", None, 10, audio_interleaved=True, audio_top_k=1)
+
+
+def test_lfm2_audio_rejects_an_audio_embedding_short_of_a_codebook(test_data_path, tmp_path):
+    # A frame's embedding is the sum of one row per codebook; fewer rows than codes would be read past.
+    onnx = pytest.importorskip("onnx")
+    model_path = _speech_model(test_data_path, tmp_path)
+    ints = onnx.numpy_helper.from_array
+
+    def keep_half_the_codebooks(raw):
+        slice_bounds = [
+            ints(np.array([0], np.int64), "keep_starts"),
+            ints(np.array([NUM_CODEBOOKS // 2], np.int64), "keep_ends"),
+            ints(np.array([1], np.int64), "keep_axes"),
+        ]
+        node = onnx.helper.make_node("Slice", [raw, "keep_starts", "keep_ends", "keep_axes"], ["audio_embeds"])
+        return [node], slice_bounds, onnx.TensorProto.FLOAT
+
+    _replace_graph_output(onnx, model_path / "dummy_audio_embedding.onnx", "audio_embeds", keep_half_the_codebooks)
+    with pytest.raises(RuntimeError, match="audio embedding model must produce one float embedding per codebook"):
+        _generate_speech(model_path, "<|startoftext|>Answer aloud. ", None, 10, audio_interleaved=True, audio_top_k=1)
+
+
+def test_lfm2_audio_rejects_a_negative_codebook_count_the_graph_leaves_open(test_data_path, tmp_path):
+    # With the codebook dimension symbolic the graph reports it as -1, which a count of -1 would match.
+    onnx = pytest.importorskip("onnx")
+    model_path = _speech_model(test_data_path, tmp_path, num_codebooks=-1)
+    depthformer = onnx.load(model_path / "dummy_depthformer.onnx")
+    slices = next(value for value in depthformer.graph.input if value.name == "depth_slices_in")
+    slices.type.tensor_type.shape.dim[1].dim_param = "num_codebooks"
+    onnx.save(depthformer, model_path / "dummy_depthformer.onnx")
+
+    with pytest.raises(RuntimeError, match="expected inputs for -1 codebooks"):
+        model = og.Model(os.fspath(model_path))
+        og.Generator(model, og.GeneratorParams(model))
 
 
 def test_lfm2_audio_speech_output_needs_the_decoder_hidden_states(test_data_path, tmp_path):

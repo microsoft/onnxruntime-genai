@@ -205,12 +205,15 @@ std::vector<int64_t> Lfm2AudioOutput::RunDepthformer(std::span<const float> hidd
 
     // The code is sampled from the first codebook_size logits, so there have to be at least that many.
     const auto logits_info = outputs[0]->GetTensorTypeAndShapeInfo();
+    if (logits_info->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+      throw std::runtime_error(std::string("Lfm2AudioOutput: the depthformer's logits must be float, got ") +
+                               TypeToString(logits_info->GetElementType()) + ".");
+    }
     const auto logits_shape = logits_info->GetShape();
-    if (logits_info->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT || logits_shape.empty() ||
-        logits_shape.back() < config_.codebook_size) {
+    if (logits_shape.empty() || logits_shape.back() < config_.codebook_size) {
       throw std::runtime_error("Lfm2AudioOutput: model.audio_output.codebook_size is " +
                                std::to_string(config_.codebook_size) + ", but the depthformer produces " +
-                               std::to_string(logits_shape.empty() ? 0 : logits_shape.back()) + " float logits.");
+                               std::to_string(logits_shape.empty() ? 0 : logits_shape.back()) + " logits.");
     }
     const float* logits = outputs[0]->GetTensorData<float>();
     previous_code = SampleCode({logits, static_cast<size_t>(config_.codebook_size)});
