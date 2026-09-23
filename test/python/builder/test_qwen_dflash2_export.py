@@ -12,7 +12,6 @@ import onnx_ir as ir
 import onnxruntime as ort
 import pytest
 import torch
-from quantization import QuantConfig
 
 from models.builders.base import Model
 from models.builders.dflash2 import DFlash2Builder
