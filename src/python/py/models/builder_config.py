@@ -872,6 +872,13 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
             not isinstance(key, str) or not isinstance(value, str) for key, value in run_options.items()
         ):
             raise ValueError(f"runtime_config.model.{component_name}.run_options must be an object of strings")
+        if (
+            component_name in ("dflash2", "dspark")
+            and run_options.get("disable_synchronize_execution_providers") == "1"
+        ):
+            raise ValueError(
+                f"runtime_config.model.{component_name}.run_options cannot disable execution-provider synchronization"
+            )
         if "provider_options" in runtime_session:
             generated_providers = generated_session.get("provider_options", [])
             runtime_providers = runtime_session["provider_options"]

@@ -730,6 +730,21 @@ def test_runtime_run_options_must_be_an_object_of_strings(run_options):
         apply_runtime_config(generated, {"model": {"decoder": {"run_options": run_options}}})
 
 
+@pytest.mark.parametrize("component_name", ["dflash2", "dspark"])
+def test_runtime_block_drafter_cannot_disable_execution_provider_synchronization(component_name):
+    generated = {"model": {component_name: {"session_options": {}}}}
+    runtime = {
+        "model": {
+            component_name: {
+                "run_options": {"disable_synchronize_execution_providers": "1"},
+            }
+        }
+    }
+
+    with pytest.raises(ValueError, match="cannot disable execution-provider synchronization"):
+        apply_runtime_config(generated, runtime)
+
+
 @pytest.mark.parametrize("max_length", ["8192", 0, True])
 def test_runtime_search_max_length_must_be_a_positive_integer(max_length):
     generated = {"model": {"context_length": 4096}}
