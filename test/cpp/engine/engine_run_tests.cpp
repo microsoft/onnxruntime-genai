@@ -2807,6 +2807,23 @@ TEST_F(EngineRunTest, SpeculativeStatsRejectOffOwnerThreadReads) {
   EXPECT_THROW(std::rethrow_exception(off_thread_error), std::runtime_error);
 }
 
+TEST_F(EngineRunTest, CapabilitiesRejectOffOwnerThreadReads) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, EosToken(*model_));
+
+  std::exception_ptr off_thread_error;
+  std::thread off_owner_thread([&] {
+    try {
+      static_cast<void>(engine.engine->GetCapabilities());
+    } catch (...) {
+      off_thread_error = std::current_exception();
+    }
+  });
+  off_owner_thread.join();
+
+  ASSERT_NE(off_thread_error, nullptr);
+  EXPECT_THROW(std::rethrow_exception(off_thread_error), std::runtime_error);
+}
+
 TEST_F(EngineRunTest, PrefixCacheStatsRejectOffOwnerThreadReads) {
   model_ = LoadSyntheticPagedModel();
   auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));

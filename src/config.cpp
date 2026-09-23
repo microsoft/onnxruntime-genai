@@ -2528,8 +2528,6 @@ struct RuntimeProfileSearch_Element : JSON::Element {
     }
     if (name == "chunk_size") {
       v_.chunk_size = static_cast<size_t>(parsed);
-    } else if (name == "max_length") {
-      v_.max_length = parsed;
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -2556,7 +2554,7 @@ struct RuntimeProfileOverlay_Element : JSON::Element {
 
 struct RuntimeProfile_Element : JSON::Element {
   explicit RuntimeProfile_Element(Config::RuntimeProfile& v)
-  : v_{v}, eligibility_{v.eligibility}, overlay_{v.overlay} {}
+      : v_{v}, eligibility_{v.eligibility}, overlay_{v.overlay} {}
 
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "id") {
@@ -2618,7 +2616,7 @@ void ValidateRuntimeProfiles(const Config& config) {
     const auto& batching = profile.overlay.dynamic_batching;
     const auto& search = profile.overlay.search;
     if (!batching.num_blocks && !batching.max_batch_size &&
-        !batching.max_scheduled_tokens && !search.chunk_size && !search.max_length) {
+        !batching.max_scheduled_tokens && !search.chunk_size) {
       throw std::runtime_error("runtime profile '" + profile.id +
                                "' does not contain any overlay fields");
     }
@@ -3017,7 +3015,6 @@ void ApplyRuntimeProfile(Config& config, uint64_t total_device_memory_bytes) {
   }
   const auto& search = selected->overlay.search;
   if (search.chunk_size) candidate.search.chunk_size = search.chunk_size;
-  if (search.max_length) candidate.search.max_length = *search.max_length;
   std::swap(config, candidate);
 }
 

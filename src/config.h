@@ -793,7 +793,6 @@ struct Config {
 
       struct Search {
         std::optional<size_t> chunk_size;
-        std::optional<int> max_length;
       } search;
     } overlay;
   };

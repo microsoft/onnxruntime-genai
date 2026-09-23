@@ -221,8 +221,7 @@ resolution and before Engine allocation.
           }
         },
         "search": {
-          "chunk_size": 512,
-          "max_length": 262144
+          "chunk_size": 512
         }
       }
     }
@@ -232,23 +231,22 @@ resolution and before Engine allocation.
 
 Profile IDs must be non-empty and unique. Every profile requires a minimum total-memory value;
 the maximum is optional and inclusive. Ranges must be valid and non-overlapping. Zero matches uses
-the base settings. `overlay` is typed and may contain any subset of these five fields:
+the base settings. `overlay` is typed and may contain any subset of these four fields:
 
 - `engine.dynamic_batching.num_blocks`
 - `engine.dynamic_batching.max_batch_size`
 - `engine.dynamic_batching.max_scheduled_tokens`
 - `search.chunk_size`
-- `search.max_length`
 
 Omitted fields retain their base values. Every other config field is rejected from a runtime
-profile overlay.
+profile overlay. In particular, profiles cannot override `search.max_length`; applications set
+request/session policy independently.
 
-An overlaid `search.max_length` remains the current Engine Request ceiling. Reporting the
-cache-backed per-request maximum so a host can safely choose `max_session_tokens` is intentionally
-deferred to a follow-up API; it is not part of `OgaEngineCapabilities` in this change.
-
-Selection uses total device memory after model/provider resolution. Actual model and Engine
-allocation remains the authoritative fit check; profiles do not add a separate free-memory gate.
+Selection uses total device memory from the primary CUDA interface selected by the normal provider
+append path. The query intentionally uses the existing device-ID-agnostic interface for the current
+single-discrete-GPU scope. Distinguishing CUDA device ordinals on heterogeneous multi-GPU machines
+is deferred to a future interface change. Actual model and Engine allocation remains the
+authoritative fit check; profiles do not add a separate free-memory gate.
 
 ## Authoring notes
 

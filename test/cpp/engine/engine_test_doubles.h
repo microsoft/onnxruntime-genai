@@ -607,6 +607,9 @@ struct RecordingModelExecutor : ModelExecutor {
 struct CountingCudaDeviceState {
   size_t device_to_host_copies{};
   size_t synchronize_calls{};
+  size_t memory_queries{};
+  size_t device_id_queries{};
+  size_t total_memory_bytes{};
   std::vector<int> argmax_rows;
 };
 
@@ -640,10 +643,14 @@ struct CountingCudaMemory final : DeviceBuffer {
 };
 
 struct CountingCudaDevice final : DeviceInterface {
-  CountingCudaDevice()
-      : state{std::make_shared<CountingCudaDeviceState>()} {}
+  explicit CountingCudaDevice(DeviceType device_type = DeviceType::CUDA)
+      : device_type_{device_type}, state{std::make_shared<CountingCudaDeviceState>()} {}
 
-  DeviceType GetType() const override { return DeviceType::CUDA; }
+  DeviceType GetType() const override { return device_type_; }
+  int GetDeviceId(const ProviderOptions*) override {
+    ++state->device_id_queries;
+    return 0;
+  }
   void InitOrt(const OrtApi&, Ort::Allocator&) override {}
   Ort::Allocator& GetAllocator() override {
     return GetDeviceInterface(DeviceType::CPU)->GetAllocator();
@@ -664,6 +671,11 @@ struct CountingCudaDevice final : DeviceInterface {
   }
   std::unique_ptr<KeyValueCache> CreateKeyValueCache(State&) override { return {}; }
   void Synchronize() override { ++state->synchronize_calls; }
+  void GetAvailableMemory(size_t& free_bytes, size_t& total_bytes) override {
+    ++state->memory_queries;
+    free_bytes = state->total_memory_bytes;
+    total_bytes = state->total_memory_bytes;
+  }
 
   bool ArgMaxDevice(const void* logits, ONNXTensorElementDataType logits_type,
                     int num_rows, int vocab_size,
@@ -683,6 +695,7 @@ struct CountingCudaDevice final : DeviceInterface {
     return true;
   }
 
+  DeviceType device_type_;
   std::shared_ptr<CountingCudaDeviceState> state;
 };
 
@@ -723,6 +736,23 @@ inline DoublesEngine MakeDoublesEngine(std::shared_ptr<Model> model, size_t capa
     model->config_->engine.dynamic_batching = Config::Engine::DynamicBatching{};
   auto trace = std::make_shared<CallTrace>();
   auto cache = std::make_shared<RecordingCacheManager>(model, capacity, trace);
+  auto scheduler = Scheduler::Create(model, cache);
+  auto executor = std::make_unique<RecordingModelExecutor>(model, cache, forced_token, trace);
+
+  RecordingCacheManager* cache_observer = cache.get();
+  RecordingModelExecutor* executor_observer = executor.get();
+
+  EngineDependencies dependencies{std::move(cache), std::move(scheduler), std::move(executor)};
+  auto engine = std::make_shared<Engine>(std::move(model), std::move(dependencies));
+
+  return DoublesEngine{std::move(engine), cache_observer, executor_observer, std::move(trace)};
+}
+
+inline DoublesEngine MakeStaticDoublesEngine(std::shared_ptr<Model> model, size_t capacity,
+                                             int32_t forced_token) {
+  auto trace = std::make_shared<CallTrace>();
+  auto cache = std::make_shared<RecordingCacheManager>(model, capacity, trace,
+                                                       /*supports_dynamic_batching=*/false);
   auto scheduler = Scheduler::Create(model, cache);
   auto executor = std::make_unique<RecordingModelExecutor>(model, cache, forced_token, trace);
 

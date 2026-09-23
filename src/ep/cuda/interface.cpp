@@ -709,25 +709,6 @@ struct CudaInterfaceImplBase : DeviceInterface {
     cudaMemGetInfo(&free_bytes, &total_bytes);
   }
 
-  void GetAvailableMemoryForDevice(int device_id, size_t& free_bytes, size_t& total_bytes) override {
-    int original_device{};
-    CUDA_CHECK(cudaGetDevice(&original_device));
-    if (original_device != device_id) {
-      CUDA_CHECK(cudaSetDevice(device_id));
-    }
-    try {
-      CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
-    } catch (...) {
-      if (original_device != device_id) {
-        cudaSetDevice(original_device);
-      }
-      throw;
-    }
-    if (original_device != device_id) {
-      CUDA_CHECK(cudaSetDevice(original_device));
-    }
-  }
-
   // Cached working set for the on-device ArgMax (Top-K, k=1) path.
   std::mutex topk_mutex_;
   std::unique_ptr<cuda::TopkData> topk_data_;

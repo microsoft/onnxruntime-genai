@@ -567,7 +567,10 @@ whose `search.max_length` is lower than its context length uses the same overlay
 
 `OgaEngineGetCapabilities` returns a caller-owned opaque snapshot. The snapshot reports the
 effective configured maximum batch size and dynamic scheduler token budget after runtime-profile
-selection. It does not report or impose a per-Request session ceiling.
+selection. For static batching, the maximum batch size is the configured value, or the default of
+four when no `static_batching` entry exists; it does not account for any lower operational limit in
+the current static scheduler. The call follows the Engine owner-thread rule. The snapshot does not
+report or impose a per-Request session ceiling.
 
 The cache-backed per-request maximum is not exposed by this API yet; that contract is deferred to
 a follow-up change.

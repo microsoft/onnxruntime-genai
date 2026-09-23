@@ -6,6 +6,9 @@
 #include <gtest/gtest.h>
 
 #include "config.h"
+#include "engine_test_doubles.h"
+#include "models/runtime_profiles.h"
+#include "models/session_options.h"
 
 namespace Generators::test {
 
@@ -40,7 +43,7 @@ TEST(ConfigTest, ParsesAndAppliesOneMatchingRuntimeProfile) {
       "eligibility":{"minimum_total_device_memory_bytes":34359738368},
       "overlay":{
         "engine":{"dynamic_batching":{"num_blocks":64,"max_batch_size":8}},
-        "search":{"chunk_size":512,"max_length":262144}
+        "search":{"chunk_size":512}
       }
     }]
   })");
@@ -52,7 +55,6 @@ TEST(ConfigTest, ParsesAndAppliesOneMatchingRuntimeProfile) {
   EXPECT_EQ(config.engine.dynamic_batching->max_batch_size, 8u);
   EXPECT_EQ(config.engine.dynamic_batching->max_scheduled_tokens, 1024u);
   EXPECT_EQ(config.search.chunk_size, 512u);
-  EXPECT_EQ(config.search.max_length, 262144);
 }
 
 TEST(ConfigTest, RuntimeProfileUsesBaseWhenNoRangeMatches) {
@@ -70,6 +72,56 @@ TEST(ConfigTest, RuntimeProfileUsesBaseWhenNoRangeMatches) {
 
   ASSERT_TRUE(config.engine.dynamic_batching->num_blocks);
   EXPECT_EQ(*config.engine.dynamic_batching->num_blocks, 32u);
+}
+
+TEST(ConfigTest, RuntimeProfileUsesSelectedDeviceWithoutResolvingDeviceId) {
+  Config config;
+  OverlayConfig(config, R"({
+    "engine":{"dynamic_batching":{"num_blocks":32}},
+    "runtime_profiles":[{
+      "id":"larger-gpu",
+      "eligibility":{"minimum_total_device_memory_bytes":100},
+      "overlay":{"engine":{"dynamic_batching":{"num_blocks":64}}}
+    }]
+  })");
+  CountingCudaDevice device;
+  device.state->total_memory_bytes = 100;
+
+  ApplyRuntimeProfileForSelectedDevice(config, device);
+
+  EXPECT_EQ(device.state->memory_queries, 1u);
+  EXPECT_EQ(device.state->device_id_queries, 0u);
+  EXPECT_EQ(*config.engine.dynamic_batching->num_blocks, 64u);
+  EXPECT_TRUE(config.runtime_profiles.empty());
+}
+
+TEST(ConfigTest, NoRuntimeProfilesSkipDeviceMemoryQuery) {
+  Config config;
+  CountingCudaDevice device;
+
+  ApplyRuntimeProfileForSelectedDevice(config, device);
+
+  EXPECT_EQ(device.state->memory_queries, 0u);
+}
+
+TEST(ConfigTest, PrimaryProviderSelectionKeepsFirstDevice) {
+  CountingCudaDevice dml_device{DeviceType::DML};
+  CountingCudaDevice cuda_device;
+
+  auto* selected = SelectPrimarySessionDevice(nullptr, &dml_device);
+  selected = SelectPrimarySessionDevice(selected, &cuda_device);
+
+  EXPECT_EQ(selected, &dml_device);
+}
+
+TEST(ConfigTest, PrimaryProviderSelectionKeepsCudaWhenFirst) {
+  CountingCudaDevice cuda_device;
+  CountingCudaDevice dml_device{DeviceType::DML};
+
+  auto* selected = SelectPrimarySessionDevice(nullptr, &cuda_device);
+  selected = SelectPrimarySessionDevice(selected, &dml_device);
+
+  EXPECT_EQ(selected, &cuda_device);
 }
 
 TEST(ConfigTest, RuntimeProfilePreservesOmittedSearchFields) {
@@ -118,7 +170,8 @@ TEST(ConfigTest, RejectsDuplicateRuntimeProfileIds) {
      "overlay":{"engine":{"dynamic_batching":{"num_blocks":1}}}},
     {"id":"same","eligibility":{"minimum_total_device_memory_bytes":2},
      "overlay":{"engine":{"dynamic_batching":{"num_blocks":2}}}}
-  ]})"), std::runtime_error);
+  ]})"),
+               std::runtime_error);
 }
 
 TEST(ConfigTest, RejectsInvalidRuntimeProfileRange) {
@@ -128,7 +181,8 @@ TEST(ConfigTest, RejectsInvalidRuntimeProfileRange) {
     "eligibility":{"minimum_total_device_memory_bytes":2,
                    "maximum_total_device_memory_bytes":1},
     "overlay":{"engine":{"dynamic_batching":{"num_blocks":1}}}
-  }]})"), std::runtime_error);
+  }]})"),
+               std::runtime_error);
 }
 
 TEST(ConfigTest, RejectsMultipleMatchingRuntimeProfiles) {
@@ -143,7 +197,8 @@ TEST(ConfigTest, RejectsMultipleMatchingRuntimeProfiles) {
                                        "maximum_total_device_memory_bytes":15},
        "overlay":{"engine":{"dynamic_batching":{"num_blocks":96}}}}
     ]
-  })"), std::runtime_error);
+  })"),
+               std::runtime_error);
 }
 
 TEST(ConfigTest, RejectsUnapprovedSearchOverlayField) {
@@ -152,7 +207,8 @@ TEST(ConfigTest, RejectsUnapprovedSearchOverlayField) {
     "id":"unapproved-search",
     "eligibility":{"minimum_total_device_memory_bytes":1},
     "overlay":{"search":{"temperature":0.5}}
-  }]})"), std::runtime_error);
+  }]})"),
+               std::runtime_error);
 }
 
 TEST(ConfigTest, RejectsModelOverlayField) {
@@ -161,21 +217,31 @@ TEST(ConfigTest, RejectsModelOverlayField) {
     "id":"filename",
     "eligibility":{"minimum_total_device_memory_bytes":1},
     "overlay":{"model":{"decoder":{"filename":"decoder-large.onnx"}}}
-  }]})"), std::runtime_error);
+  }]})"),
+               std::runtime_error);
 }
 
-TEST(ConfigTest, AppliesSearchOnlyRuntimeProfileWithoutDynamicBatching) {
+TEST(ConfigTest, AppliesChunkSizeOnlyRuntimeProfileWithoutDynamicBatching) {
   Config config;
   OverlayConfig(config, R"({"runtime_profiles":[{
-    "id":"search-only",
+    "id":"chunk-size-only",
     "eligibility":{"minimum_total_device_memory_bytes":1},
-    "overlay":{"search":{"chunk_size":256,"max_length":4096}}
+    "overlay":{"search":{"chunk_size":256}}
   }]})");
 
   ApplyRuntimeProfile(config, 1);
 
   EXPECT_EQ(config.search.chunk_size, 256u);
-  EXPECT_EQ(config.search.max_length, 4096);
+}
+
+TEST(ConfigTest, RejectsRuntimeProfileMaxLengthOverride) {
+  Config config;
+  EXPECT_THROW(OverlayConfig(config, R"({"runtime_profiles":[{
+    "id":"request-limit",
+    "eligibility":{"minimum_total_device_memory_bytes":1},
+    "overlay":{"search":{"max_length":4096}}
+  }]})"),
+               std::runtime_error);
 }
 
 TEST(ConfigTest, RejectsRuntimeProfileContextLengthChange) {
@@ -185,7 +251,8 @@ TEST(ConfigTest, RejectsRuntimeProfileContextLengthChange) {
     "id":"context-change",
     "eligibility":{"minimum_total_device_memory_bytes":1},
     "overlay":{"model":{"context_length":8192}}
-  }]})"), std::runtime_error);
+  }]})"),
+               std::runtime_error);
 }
 
 TEST(ConfigTest, RejectsRecursiveRuntimeProfilesOverlay) {
@@ -194,7 +261,8 @@ TEST(ConfigTest, RejectsRecursiveRuntimeProfilesOverlay) {
     "id":"recursive",
     "eligibility":{"minimum_total_device_memory_bytes":1},
     "overlay":{"runtime_profiles":[]}
-  }]})"), std::runtime_error);
+  }]})"),
+               std::runtime_error);
 }
 
 TEST(ConfigTest, ParsesPagedScaleBindings) {

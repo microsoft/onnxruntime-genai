@@ -956,6 +956,17 @@ TEST(CAPITests, EngineRequestTurnAndEventContracts) {
   auto capabilities = engine->GetCapabilities();
   EXPECT_EQ(capabilities->ConfiguredMaxBatchSize(), 8u);
   EXPECT_EQ(capabilities->MaxScheduledTokens(), 2048u);
+  std::exception_ptr off_thread_capabilities_error;
+  std::thread off_owner_capabilities_thread([&] {
+    try {
+      static_cast<void>(engine->GetCapabilities());
+    } catch (...) {
+      off_thread_capabilities_error = std::current_exception();
+    }
+  });
+  off_owner_capabilities_thread.join();
+  ASSERT_NE(off_thread_capabilities_error, nullptr);
+  EXPECT_THROW(std::rethrow_exception(off_thread_capabilities_error), std::runtime_error);
   auto session_options = OgaRequestOptions::Create();
   session_options->SetMaxSessionTokens(16);
   auto request = engine->CreateRequest(session_options.get());

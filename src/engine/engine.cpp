@@ -2425,6 +2425,7 @@ SpeculativeStats Engine::GetSpeculativeStats() const {
 }
 
 EngineCapabilities Engine::GetCapabilities() const {
+  ValidateOwnerThread();
   EngineCapabilities capabilities;
   if (model_->config_->engine.dynamic_batching) {
     const auto& batching = *model_->config_->engine.dynamic_batching;
@@ -2433,6 +2434,8 @@ EngineCapabilities Engine::GetCapabilities() const {
   } else if (model_->config_->engine.static_batching) {
     capabilities.configured_max_batch_size =
         model_->config_->engine.static_batching->max_batch_size;
+  } else {
+    capabilities.configured_max_batch_size = kDefaultStaticBatchSize;
   }
   return capabilities;
 }
