@@ -108,6 +108,14 @@ weight packing change the exported graph or its initializers. They are not
 runtime-profile overrides. Keep `quant_config.runtime` as a compatibility alias;
 conflicting values supplied through both names are errors.
 
+Structured `weights.accuracy_level` must be a JSON integer from `0` to `4`,
+`moe.weights_prepacked` must be `-1`, `0`, or `1`, and
+`format.matmulnbits_weights_prepacked` must be `0`, `1`, or `2`. Booleans,
+floating-point values, and numeric strings are rejected for these fields;
+legacy adapters retain their string conversion. `weights.op_types` must be a
+non-empty JSON array containing only `"MatMul"` and/or `"Gather"`, not a single
+string.
+
 Keep MoE quantization in `quant_config.moe`, separately for each model. Do not add
 a duplicate `moe.quant_config` location. Future non-quantization MoE export options
 can have their own group when there are concrete supported settings to expose.
@@ -129,6 +137,11 @@ Preserve the existing ordered, first-match override semantics. Exact-name rules
 must match eligible emitted nodes, and unsupported algorithms or numeric formats
 must fail rather than be ignored. A shared schema does not mean every exporter
 supports every combination.
+
+Preset and exact-name typed weight overrides currently support only `int4` and
+`int8`, using the base quantizer's other settings. Float, FP4, and unsigned
+override types are rejected rather than reduced to a bit count. INT8 overrides
+also require QOperator format; they are not supported with QDQ.
 
 ### Attention and KV Cache
 
@@ -349,6 +362,10 @@ Allow supported settings under:
 - `engine.dynamic_batching`, including batch/token limits and cache allocation.
 - `model.<existing-component>.session_options` and `run_options`, including
   supported provider, allocator, threading, and profiling options.
+
+MTP accepts session and run options even when its generated component has no
+`session_options` object. MTP, DFlash2, and DSpark provider overlays use decoder
+providers as their starting point when the component has no provider list.
 
 Protect generated filenames, bindings, dtypes, geometry, state manifests,
 capture capacity, auxiliary taps, shared-initializer descriptors, and drafter

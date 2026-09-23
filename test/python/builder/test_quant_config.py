@@ -185,6 +185,66 @@ def test_runtime_rejects_bad_prepacked():
         RuntimeConfig.from_dict({"matmulnbits_weights_prepacked": 3})
 
 
+@pytest.mark.parametrize(
+    "config_type,field,valid_values",
+    [
+        (WeightsConfig, "accuracy_level", range(5)),
+        (MoEConfig, "weights_prepacked", (-1, 0, 1)),
+        (RuntimeConfig, "matmulnbits_weights_prepacked", (0, 1, 2)),
+    ],
+)
+def test_structured_integer_fields_require_in_range_json_integers(config_type, field, valid_values):
+    invalid_values = (True, False, 0.0, 0.9, 1.5, 2.7, "1", None, min(valid_values) - 1, max(valid_values) + 1)
+    for value in invalid_values:
+        with pytest.raises(ValueError, match=field):
+            config_type.from_dict({field: value})
+        with pytest.raises(ValueError, match=field):
+            config_type(**{field: value})
+    for value in valid_values:
+        config = config_type.from_dict({field: value})
+        assert getattr(config, field) == value
+        assert config_type.from_dict(config.to_dict()) == config
+
+
+@pytest.mark.parametrize(
+    "op_types",
+    [
+        "MatMul",
+        "MatMul/Gather",
+        ("MatMul",),
+        {"MatMul": True},
+        None,
+        [],
+        [""],
+        ["matmul"],
+        ["Add"],
+        [1],
+        [None],
+        ["MatMul", ""],
+    ],
+)
+def test_structured_op_types_rejects_invalid_arrays(op_types):
+    with pytest.raises(ValueError, match="weights.op_types"):
+        WeightsConfig.from_dict({"op_types": op_types})
+
+
+@pytest.mark.parametrize("op_types", [["MatMul"], ["Gather"], ["MatMul", "Gather"]])
+def test_structured_op_types_accepts_supported_arrays(op_types):
+    config = WeightsConfig.from_dict({"op_types": op_types})
+    assert config.op_types == tuple(op_types)
+    assert WeightsConfig.from_dict(config.to_dict()) == config
+
+
+def test_extra_options_accepts_legacy_integer_strings():
+    config = QuantConfig.from_extra_options(
+        {"accuracy_level": "4", "qmoe_weights_prepacked": "-1", "matmulnbits_weights_prepacked": "2"},
+        precision="int4",
+    )
+    assert config.weights.accuracy_level == 4
+    assert config.moe.weights_prepacked == -1
+    assert config.runtime.matmulnbits_weights_prepacked == 2
+
+
 # ---------------------------------------------------------------------------
 # Overrides
 # ---------------------------------------------------------------------------

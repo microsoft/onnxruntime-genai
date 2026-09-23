@@ -837,9 +837,11 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
             f"runtime_config.model.{component_name}",
         )
         generated_component = generated_components[component_name]
-        if not isinstance(generated_component, dict) or "session_options" not in generated_component:
+        if not isinstance(generated_component, dict) or (
+            "session_options" not in generated_component and component_name != "mtp"
+        ):
             raise ValueError(f"runtime_config.model.{component_name} is not a session-bearing component")
-        generated_session = generated_component["session_options"]
+        generated_session = generated_component.get("session_options", {})
         runtime_session = component_options.get("session_options", {})
         if not isinstance(runtime_session, dict):
             raise ValueError(f"runtime_config.model.{component_name}.session_options must be an object")
@@ -871,7 +873,7 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
                 )
             generated_names = {name.casefold() for entry in generated_providers for name in entry}
             runtime_names = {name.casefold() for entry in runtime_providers for name in entry}
-            if component_name in ("dflash2", "dspark") and not generated_names:
+            if component_name in ("mtp", "dflash2", "dspark") and not generated_names:
                 decoder_providers = generated_components.get("decoder", {}).get("session_options", {}).get(
                     "provider_options", []
                 )
@@ -927,8 +929,8 @@ def apply_runtime_config(generated_config: dict[str, Any], runtime_config: dict[
         if "provider_options" not in runtime_session:
             continue
         generated_components = baseline["model"]
-        generated_providers = generated_components[component_name]["session_options"].get("provider_options", [])
-        if component_name in ("dflash2", "dspark") and not generated_providers:
+        generated_providers = generated_components[component_name].get("session_options", {}).get("provider_options", [])
+        if component_name in ("mtp", "dflash2", "dspark") and not generated_providers:
             generated_providers = generated_components.get("decoder", {}).get("session_options", {}).get(
                 "provider_options", []
             )

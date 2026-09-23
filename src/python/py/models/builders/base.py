@@ -1085,6 +1085,9 @@ class Model:
                 preset = override.match["preset"]
                 if preset in self.matmul_mixed_precision:
                     continue
+                descriptor = self.resolve_weight_override_type(override.type)
+                if descriptor.bits == 8 and self.quant_attrs.get("use_qdq", False):
+                    raise NotImplementedError("preset INT8 weight overrides are not supported with QDQ format")
                 self.matmul_mixed_precision[preset] = override.type
                 self.make_matmul_mixed_precision({preset: override.type})
                 for node_name, node_config in self.int4_customized_weight_config.items():
@@ -1102,9 +1105,7 @@ class Model:
                 if override.exclude:
                     nodes_to_exclude.append(node_name)
                     continue
-                descriptor = resolve_dtype(override.type)
-                if descriptor.kind != "int" or descriptor.bits not in (4, 8):
-                    raise ValueError("exact-name weight overrides currently support only int4 or int8")
+                descriptor = self.resolve_weight_override_type(override.type)
                 if node_name.endswith("/Gather") and descriptor.bits == 8:
                     raise NotImplementedError(
                         "INT8 embedding export is not supported; GatherBlockQuantized currently supports INT4 only"
@@ -1638,12 +1639,18 @@ class Model:
         print(f"Saving processing files in {out_dir} for GenAI")
         tokenizer.save_pretrained(out_dir)
 
+    def resolve_weight_override_type(self, quant_type):
+        descriptor = resolve_dtype(quant_type)
+        if descriptor.name not in ("int4", "int8"):
+            raise ValueError("weight overrides currently support only int4 or int8")
+        return descriptor
+
     def make_matmul_mixed_precision(self, placement):
         """Build the per-node `customized_weight_config` from the mixed-precision map.
 
         `placement` maps selectors ("last_matmul", "mixed_layers", "linear_attn") to a quant
-        type (e.g. "int8"). Each selected MatMul is emitted with that type's bit-width, so a
-        new type only needs to be a recognized quant dtype (resolved via ``resolve_dtype``).
+        type ("int4" or "int8"). Each selected MatMul uses that bit-width with the
+        base quantizer's remaining settings.
         """
         customized_weight_config = {}
 

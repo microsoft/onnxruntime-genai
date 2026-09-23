@@ -82,9 +82,7 @@ def test_provider_defaults_are_recorded(provider, accuracy_level, moe_block_size
         ("int4", "webgpu", {"use_webgpu_fp32": "true"}, "fp32"),
     ],
 )
-def test_structured_defaults_preserve_provider_aware_io_dtype(
-    precision, provider, legacy_options, expected_io_dtype
-):
+def test_structured_defaults_preserve_provider_aware_io_dtype(precision, provider, legacy_options, expected_io_dtype):
     effective = normalize_builder_config(
         precision,
         provider,
@@ -517,11 +515,7 @@ def test_runtime_merge_replaces_arrays_and_fixed_allocation():
     }
     original = copy.deepcopy(generated)
     runtime = {
-        "model": {
-            "decoder": {
-                "session_options": {"provider_options": [{"CUDA": {"gpu_mem_limit": "1024"}}]}
-            }
-        },
+        "model": {"decoder": {"session_options": {"provider_options": [{"CUDA": {"gpu_mem_limit": "1024"}}]}}},
         "engine": {"dynamic_batching": {"num_blocks": 128}},
         "search": {"top_k": 1},
     }
@@ -645,15 +639,7 @@ def test_runtime_provider_options_merge_case_insensitively(
 
     updated = apply_runtime_config(
         generated,
-        {
-            "model": {
-                "decoder": {
-                    "session_options": {
-                        "provider_options": [{runtime_name: runtime_options}]
-                    }
-                }
-            }
-        },
+        {"model": {"decoder": {"session_options": {"provider_options": [{runtime_name: runtime_options}]}}}},
     )
 
     assert updated["model"]["decoder"]["session_options"]["provider_options"] == [
@@ -669,20 +655,8 @@ def test_runtime_provider_options_merge_case_insensitively(
     ],
 )
 def test_runtime_rejects_graph_derived_provider_option_changes(provider, option_name):
-    generated = {
-        "model": {
-            "decoder": {
-                "session_options": {"provider_options": [{provider: {option_name: "4096"}}]}
-            }
-        }
-    }
-    runtime = {
-        "model": {
-            "decoder": {
-                "session_options": {"provider_options": [{provider: {option_name: "1"}}]}
-            }
-        }
-    }
+    generated = {"model": {"decoder": {"session_options": {"provider_options": [{provider: {option_name: "4096"}}]}}}}
+    runtime = {"model": {"decoder": {"session_options": {"provider_options": [{provider: {option_name: "1"}}]}}}}
 
     with pytest.raises(ValueError, match="cannot overwrite graph-derived provider option"):
         apply_runtime_config(generated, runtime)
@@ -691,23 +665,13 @@ def test_runtime_rejects_graph_derived_provider_option_changes(provider, option_
 @pytest.mark.parametrize("runtime_options", [{"unknown": "1"}, {"gpu_mem_limit": 1024}])
 def test_runtime_rejects_unsupported_or_non_string_provider_options(runtime_options):
     generated = {
-        "model": {
-            "decoder": {
-                "session_options": {"provider_options": [{"CUDA": {"enable_cuda_graph": "0"}}]}
-            }
-        }
+        "model": {"decoder": {"session_options": {"provider_options": [{"CUDA": {"enable_cuda_graph": "0"}}]}}}
     }
 
     with pytest.raises(ValueError, match="unsupported runtime provider option|must be strings"):
         apply_runtime_config(
             generated,
-            {
-                "model": {
-                    "decoder": {
-                        "session_options": {"provider_options": [{"CUDA": runtime_options}]}
-                    }
-                }
-            },
+            {"model": {"decoder": {"session_options": {"provider_options": [{"CUDA": runtime_options}]}}}},
         )
 
 
@@ -767,19 +731,11 @@ def test_runtime_allows_block_drafter_to_repeat_decoder_provider_options():
             "dflash2": {"session_options": {"ep.cuda.fpa_intb_gemm": "0"}},
         }
     }
-    runtime = {
-        "model": {
-            "dflash2": {
-                "session_options": {"provider_options": [{"cuda": {"enable_cuda_graph": "1"}}]}
-            }
-        }
-    }
+    runtime = {"model": {"dflash2": {"session_options": {"provider_options": [{"cuda": {"enable_cuda_graph": "1"}}]}}}}
 
     updated = apply_runtime_config(generated, runtime)
 
-    assert updated["model"]["dflash2"]["session_options"]["provider_options"] == [
-        {"cuda": {"enable_cuda_graph": "1"}}
-    ]
+    assert updated["model"]["dflash2"]["session_options"]["provider_options"] == [{"cuda": {"enable_cuda_graph": "1"}}]
 
 
 def test_runtime_rejects_non_session_model_members():
@@ -804,13 +760,75 @@ def test_runtime_accepts_mtp_without_static_draft_capacity():
     generated = {
         "model": {
             "decoder": {"session_options": {}},
-            "mtp": {"filename": "mtp.onnx", "session_options": {}},
+            "mtp": {"filename": "mtp.onnx"},
         }
     }
 
     updated = apply_runtime_config(generated, {"speculative": {"max_draft_tokens": 8}})
 
     assert updated["speculative"] == {"max_draft_tokens": 8}
+
+
+@pytest.mark.parametrize(
+    "mtp_options",
+    [
+        {"session_options": {"intra_op_num_threads": 4}},
+        {"run_options": {"tag": "mtp"}},
+        {"session_options": {"log_id": "mtp"}, "run_options": {"tag": "mtp"}},
+    ],
+)
+def test_runtime_accepts_mtp_options_without_generated_session_options(mtp_options):
+    generated = {"model": {"decoder": {"session_options": {}}, "mtp": {"filename": "mtp.onnx"}}}
+    updated = apply_runtime_config(generated, {"model": {"mtp": mtp_options}})
+
+    assert updated["model"]["mtp"] == {"filename": "mtp.onnx", **mtp_options}
+    assert generated["model"]["mtp"] == {"filename": "mtp.onnx"}
+
+
+@pytest.mark.parametrize("mtp_session", [None, {}, {"provider_options": [{"CUDA": {"gpu_mem_limit": "2048"}}]}])
+def test_runtime_mtp_provider_options_use_component_or_inherited_providers(mtp_session):
+    generated = {
+        "model": {
+            "decoder": {"session_options": {"provider_options": [{"CUDA": {"gpu_mem_limit": "1024"}}]}},
+            "mtp": {"filename": "mtp.onnx"},
+        }
+    }
+    if mtp_session is not None:
+        generated["model"]["mtp"]["session_options"] = mtp_session
+    original = copy.deepcopy(generated)
+    runtime = {"model": {"mtp": {"session_options": {"provider_options": [{"cuda": {"enable_cuda_graph": "1"}}]}}}}
+    original_runtime = copy.deepcopy(runtime)
+
+    updated = apply_runtime_config(generated, runtime)
+
+    assert updated["model"]["mtp"]["session_options"]["provider_options"] == [
+        {"CUDA": {"gpu_mem_limit": "2048" if mtp_session else "1024", "enable_cuda_graph": "1"}}
+    ]
+    assert generated == original
+    assert runtime == original_runtime
+
+
+@pytest.mark.parametrize(
+    "runtime_providers,error",
+    [
+        ([{"CPU": {}}], "cannot change execution providers"),
+        ([], "cannot change execution providers"),
+        ([{"webgpu": {"multiRotaryCacheConcatOffset": "0"}}], "graph-derived provider option"),
+    ],
+)
+def test_runtime_mtp_rejects_incompatible_provider_overrides(runtime_providers, error):
+    generated = {
+        "model": {
+            "decoder": {
+                "session_options": {"provider_options": [{"WebGPU": {"multiRotaryCacheConcatOffset": "4096"}}]}
+            },
+            "mtp": {"filename": "mtp.onnx"},
+        }
+    }
+    with pytest.raises(ValueError, match=error):
+        apply_runtime_config(
+            generated, {"model": {"mtp": {"session_options": {"provider_options": runtime_providers}}}}
+        )
 
 
 @pytest.mark.parametrize(

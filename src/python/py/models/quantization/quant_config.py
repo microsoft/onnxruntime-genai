@@ -206,6 +206,8 @@ class WeightsConfig:
         descriptor = resolve_dtype(self.type)
         if self.method not in self.METHODS:
             raise ValueError(f"weights.method must be one of {list(self.METHODS)}, got '{self.method}'")
+        if type(self.accuracy_level) is not int or self.accuracy_level not in range(5):
+            raise ValueError(f"weights.accuracy_level must be an integer from 0 to 4, got {self.accuracy_level!r}")
         self.block_size = _normalize_block_size(self.block_size)
         if descriptor.kind == "mx" and self.block_size not in (0, descriptor.block_size):
             raise ValueError(
@@ -218,14 +220,19 @@ class WeightsConfig:
         unknown = set(data) - {"type", "block_size", "symmetric", "method", "accuracy_level", "op_types", "overrides"}
         if unknown:
             raise ValueError(f"unknown weights field(s): {sorted(unknown)}")
+        op_types = data.get("op_types", ["MatMul"])
+        if not isinstance(op_types, list) or not op_types or any(
+            op_type not in ("MatMul", "Gather") for op_type in op_types
+        ):
+            raise ValueError("weights.op_types must be a non-empty array of supported operator names: MatMul, Gather")
         overrides = [Override.from_dict(o) for o in data.get("overrides", [])]
         return cls(
             type=data.get("type", "none"),
             block_size=data.get("block_size", 32),
             symmetric=require_bool(data.get("symmetric", True), "weights.symmetric"),
             method=data.get("method", "default"),
-            accuracy_level=int(data.get("accuracy_level", 0)),
-            op_types=tuple(data.get("op_types", ("MatMul",))),
+            accuracy_level=data.get("accuracy_level", 0),
+            op_types=tuple(op_types),
             overrides=overrides,
         )
 
@@ -255,7 +262,7 @@ class MoEConfig:
         if descriptor.kind == "mx":
             # Microscaling FP4 mandates a fixed block size (mxfp4 -> 32, nvfp4 -> 16).
             self.block_size = descriptor.block_size
-        if self.weights_prepacked not in (-1, 0, 1):
+        if type(self.weights_prepacked) is not int or self.weights_prepacked not in (-1, 0, 1):
             raise ValueError(f"moe.weights_prepacked must be -1, 0, or 1, got {self.weights_prepacked}")
 
     @classmethod
@@ -266,7 +273,7 @@ class MoEConfig:
         return cls(
             type=data.get("type", "int4"),
             block_size=data.get("block_size", 32),
-            weights_prepacked=int(data.get("weights_prepacked", -1)),
+            weights_prepacked=data.get("weights_prepacked", -1),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -281,7 +288,7 @@ class RuntimeConfig:
     matmulnbits_weights_prepacked: int = 0  # CUDA fpA_intB layout: 0 off | 1 SM80 | 2 SM90
 
     def __post_init__(self):
-        if self.matmulnbits_weights_prepacked not in (0, 1, 2):
+        if type(self.matmulnbits_weights_prepacked) is not int or self.matmulnbits_weights_prepacked not in (0, 1, 2):
             raise ValueError(
                 f"runtime.matmulnbits_weights_prepacked must be 0, 1, or 2, got {self.matmulnbits_weights_prepacked}"
             )
@@ -293,7 +300,7 @@ class RuntimeConfig:
             raise ValueError(f"unknown runtime field(s): {sorted(unknown)}")
         return cls(
             use_qdq=require_bool(data.get("use_qdq", False), "format.use_qdq"),
-            matmulnbits_weights_prepacked=int(data.get("matmulnbits_weights_prepacked", 0)),
+            matmulnbits_weights_prepacked=data.get("matmulnbits_weights_prepacked", 0),
         )
 
     def to_dict(self) -> dict[str, Any]:

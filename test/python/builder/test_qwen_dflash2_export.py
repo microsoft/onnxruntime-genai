@@ -359,7 +359,8 @@ def test_target_mlp_gate_up_fusion_rejects_one_sided_exclusion():
         model.make_mlp_proj_fused(0, mlp, "residual")
 
 
-def test_exact_name_quantization_override_is_forwarded_to_quantizer():
+@pytest.mark.parametrize("quant_type,bits", [("int4", 4), ("int8", 8)])
+def test_exact_name_quantization_override_is_forwarded_to_quantizer(quant_type, bits):
     model = object.__new__(Model)
     model.quant_config = types.SimpleNamespace(
         weights=types.SimpleNamespace(
@@ -367,7 +368,7 @@ def test_exact_name_quantization_override_is_forwarded_to_quantizer():
             overrides=[
                 types.SimpleNamespace(
                     match={"name": "/model/layers.0/mlp/down_proj/MatMul"},
-                    type="int8",
+                    type=quant_type,
                     exclude=False,
                 )
             ],
@@ -378,17 +379,18 @@ def test_exact_name_quantization_override_is_forwarded_to_quantizer():
 
     model.make_quant_init(types.SimpleNamespace())
 
-    assert model.int4_customized_weight_config == {"/model/layers.0/mlp/down_proj/MatMul": {"bits": 8}}
+    assert model.int4_customized_weight_config == {"/model/layers.0/mlp/down_proj/MatMul": {"bits": bits}}
 
 
-def test_exact_int8_quantization_override_rejects_qdq_format():
+@pytest.mark.parametrize("match", [{"name": "/model/layers.0/mlp/down_proj/MatMul"}, {"preset": "last_matmul"}])
+def test_int8_quantization_override_rejects_qdq_format(match):
     model = object.__new__(Model)
     model.quant_config = types.SimpleNamespace(
         weights=types.SimpleNamespace(
             method="default",
             overrides=[
                 types.SimpleNamespace(
-                    match={"name": "/model/layers.0/mlp/down_proj/MatMul"},
+                    match=match,
                     type="int8",
                     exclude=False,
                 )
@@ -455,20 +457,45 @@ def test_exact_name_override_is_verified_after_quantization(tmp_path):
     assert node.attributes["bits"].value == 8
 
 
-def test_preset_quantization_override_initializes_the_node_map():
+@pytest.mark.parametrize("preset", ["last_matmul", "mixed_layers", "linear_attn"])
+@pytest.mark.parametrize("quant_type,bits", [("int4", 4), ("int8", 8), (" INT8 ", 8)])
+def test_preset_quantization_override_initializes_the_node_map(preset, quant_type, bits):
     model = object.__new__(Model)
     model.quant_config = types.SimpleNamespace(
         weights=types.SimpleNamespace(
             method="default",
-            overrides=[types.SimpleNamespace(match={"preset": "last_matmul"}, type="int8", exclude=False)],
+            overrides=[types.SimpleNamespace(match={"preset": preset}, type=quant_type, exclude=False)],
         )
     )
     model.quant_type = None
     model.quant_attrs = {"nodes_to_exclude": []}
+    model.num_layers = 1
+    model.layer_types = ["linear_attention"]
+    model.mlp_attrs = {}
 
     model.make_quant_init(types.SimpleNamespace())
 
-    assert model.int4_customized_weight_config == {"/lm_head/MatMul": {"bits": 8}}
+    assert model.int4_customized_weight_config
+    assert all(config == {"bits": bits} for config in model.int4_customized_weight_config.values())
+    if preset == "last_matmul":
+        assert model.int4_customized_weight_config == {"/lm_head/MatMul": {"bits": bits}}
+
+
+@pytest.mark.parametrize(
+    "match",
+    [{"preset": preset} for preset in ("last_matmul", "mixed_layers", "linear_attn")] + [{"name": "/lm_head/MatMul"}],
+)
+@pytest.mark.parametrize("quant_type", ["none", "fp16", "fp32", "bf16", "mxfp4", "nvfp4", "uint4", "uint8"])
+def test_weight_overrides_reject_formats_not_representable_by_bit_width(match, quant_type):
+    model = object.__new__(Model)
+    model.quant_config = QuantConfig.from_dict(
+        {"weights": {"type": "int4", "overrides": [{"match": match, "type": quant_type}]}}
+    )
+    model.quant_type = None
+    model.quant_attrs = {}
+
+    with pytest.raises(ValueError, match="weight overrides currently support only int4 or int8"):
+        model.make_quant_init(types.SimpleNamespace())
 
 
 def test_legacy_exclusion_wins_over_mixed_precision_preset():
