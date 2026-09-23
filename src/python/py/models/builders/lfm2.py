@@ -223,7 +223,7 @@ class LFM2AudioModel(LFM2Model):
 
         config = Lfm2Config(**config_dict["lfm"])
         config.architectures = [architecture]
-        config._name_or_path = model_name_or_path
+        config.name_or_path = model_name_or_path
         return config
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):

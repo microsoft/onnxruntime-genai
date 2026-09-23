@@ -539,9 +539,9 @@ the reference on CPU, x64 and arm64, and match token for token and frame for fra
 match too, but only once *every* graph runs there: build the model for CUDA, or leave the embedding
 and speech entries without their own `session_options` so they inherit the decoder's provider. A
 mixed configuration — the decoder on the GPU and the embedding or encoder left on CPU, which is what
-a CPU export's `genai_config.json` describes — corrupts memory and usually crashes: the encoder is
-handed an output buffer that lives on the decoder's device and writes host bytes into it
-([onnxruntime-genai#2604](https://github.com/microsoft/onnxruntime-genai/issues/2604)). The encoder's convolutions need cuDNN
+a CPU export's `genai_config.json` describes — is refused with an error naming the entry to remove:
+the CPU graph would be handed buffers that live on the decoder's device and write host bytes into
+them ([onnxruntime-genai#2604](https://github.com/microsoft/onnxruntime-genai/issues/2604)). The encoder's convolutions need cuDNN
 on the library path. Expect the audio codes to drift a little against a CPU run: on one of the test
 clips two of 1192 codes differed, both in the last two codebooks, with every text token identical.
 
@@ -551,7 +551,8 @@ whenever the present KV cache has to grow past the buffer it was given, which is
 depthformer's loop ([onnxruntime#32716](https://github.com/microsoft/onnxruntime/issues/32716)).
 Speech *input* does not work there yet, for a reason of this runtime's own rather than the
 encoder's: the features buffer lands on the wrong device
-([onnxruntime-genai#2604](https://github.com/microsoft/onnxruntime-genai/issues/2604)). Note also
+([onnxruntime-genai#2604](https://github.com/microsoft/onnxruntime-genai/issues/2604)), so a prompt
+with audio is refused while the encoder or embedding keeps its own CPU `session_options`. Note also
 that the shipped `onnxruntime-ep-webgpu` 0.3.0 cannot load the encoder at the default optimisation
 level — it rejects the fused `Conv` activation that a current `onnxruntime` emits — but does load
 and run it at `ORT_ENABLE_BASIC`.

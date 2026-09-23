@@ -63,7 +63,7 @@ Lfm2AudioOutput::Lfm2AudioOutput(const MultiModalLanguageModel& model, const Gen
   const auto slices_shape = InputShape(*model_.depthformer_session_, "depth_slices_in", "depthformer");
   const auto keys_shape = InputShape(*model_.depthformer_session_, "past_keys", "depthformer");
   if (hidden_shape.size() != 2 || slices_shape.size() != 3 || keys_shape.size() != 5 ||
-      slices_shape[1] != config_.num_codebooks) {
+      config_.num_codebooks <= 0 || slices_shape[1] != config_.num_codebooks) {
     throw std::runtime_error("Lfm2AudioOutput: the depthformer model does not have the expected inputs for " +
                              std::to_string(config_.num_codebooks) + " codebooks.");
   }
@@ -73,9 +73,20 @@ Lfm2AudioOutput::Lfm2AudioOutput(const MultiModalLanguageModel& model, const Gen
   num_kv_heads_ = keys_shape[2];
   head_size_ = keys_shape[4];
 
+  // RunDepthformer checks it against the logits the depthformer produces.
+  if (config_.codebook_size <= 0) {
+    throw std::runtime_error("Lfm2AudioOutput: model.audio_output.codebook_size " +
+                             std::to_string(config_.codebook_size) + " must be positive.");
+  }
+
   // The search has to pick the placeholder whatever its sampling settings are.
-  const size_t vocab_size = static_cast<size_t>(model_.config_->model.vocab_size);
-  placeholder_logits_ = model_.p_device_->Allocate<float>(vocab_size);
+  const int vocab_size = model_.config_->model.vocab_size;
+  if (placeholder_token_id_ <= 0 || placeholder_token_id_ >= vocab_size) {
+    throw std::runtime_error("Lfm2AudioOutput: model.audio_token_id " + std::to_string(placeholder_token_id_) +
+                             " must be set to a token inside the vocabulary of " + std::to_string(vocab_size) +
+                             " tokens.");
+  }
+  placeholder_logits_ = model_.p_device_->Allocate<float>(static_cast<size_t>(vocab_size));
   auto logits = placeholder_logits_.CpuSpan();
   std::fill(logits.begin(), logits.end(), std::numeric_limits<float>::lowest());
   logits[static_cast<size_t>(placeholder_token_id_)] = 0.0f;
@@ -192,6 +203,15 @@ std::vector<int64_t> Lfm2AudioOutput::RunDepthformer(std::span<const float> hidd
     auto outputs = model_.depthformer_session_->Run(nullptr, kDepthformerInputs, inputs, std::size(inputs),
                                                     kDepthformerOutputs, std::size(kDepthformerOutputs));
 
+    // The code is sampled from the first codebook_size logits, so there have to be at least that many.
+    const auto logits_info = outputs[0]->GetTensorTypeAndShapeInfo();
+    const auto logits_shape = logits_info->GetShape();
+    if (logits_info->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT || logits_shape.empty() ||
+        logits_shape.back() < config_.codebook_size) {
+      throw std::runtime_error("Lfm2AudioOutput: model.audio_output.codebook_size is " +
+                               std::to_string(config_.codebook_size) + ", but the depthformer produces " +
+                               std::to_string(logits_shape.empty() ? 0 : logits_shape.back()) + " float logits.");
+    }
     const float* logits = outputs[0]->GetTensorData<float>();
     previous_code = SampleCode({logits, static_cast<size_t>(config_.codebook_size)});
     frame.push_back(previous_code);
@@ -235,7 +255,12 @@ void Lfm2AudioOutput::EmbedFrame(std::span<const int64_t> frame) {
   auto outputs = model_.audio_embedding_session_->Run(nullptr, kEmbeddingInputs, inputs, std::size(inputs),
                                                       kEmbeddingOutputs, std::size(kEmbeddingOutputs));
 
-  const auto shape = outputs[0]->GetTensorTypeAndShapeInfo()->GetShape();  // [1, num_codebooks, hidden_size]
+  const auto info = outputs[0]->GetTensorTypeAndShapeInfo();
+  const auto shape = info->GetShape();  // [1, num_codebooks, hidden_size]
+  if (info->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT || shape.empty() ||
+      info->GetElementCount() != frame.size() * static_cast<size_t>(shape.back())) {
+    throw std::runtime_error("Lfm2AudioOutput: the audio embedding model must produce one float embedding per codebook.");
+  }
   const size_t width = static_cast<size_t>(shape.back());
   const float* embeddings = outputs[0]->GetTensorData<float>();
   pending_embedding_.assign(width, 0.0f);

@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+#include "generator/generators.h"
+#include "models/multi_modal.h"
 #include "models/preprocessing/lfm2_audio_processor.h"
 
 // LFM2-Audio turns a clip into log-mel frames, one per 10 ms hop, and the encoder subsamples those
@@ -182,6 +184,72 @@ TEST(Lfm2AudioResampleTest, RejectsARateThatIsNotPositive) {
   const std::vector<float> samples(16, 0.0f);
   EXPECT_NE(CaptureThrowMessage([&] { ResampleLfm2Audio(samples.data(), 16, 0, 16000); }).find("cannot resample"),
             std::string::npos);
+}
+
+// The embedding and speech sessions are handed buffers allocated on the decoder's devices, so neither
+// may be left on CPU by session_options of its own while such a buffer is device memory.
+namespace {
+
+Config CpuSubModelsConfig() {
+  Config config;  // as a CPU export writes it: both graphs have session_options with no provider
+  config.model.speech.session_options = Config::SessionOptions{};
+  config.model.embedding.session_options = Config::SessionOptions{};
+  return config;
+}
+
+}  // namespace
+
+TEST(Lfm2AudioSessionDevicesTest, ACpuEmbeddingCannotTakeTheInputsOfADecoderOnCuda) {
+  const auto message = CaptureThrowMessage([] {
+    CheckLfm2AudioSessionDevices(CpuSubModelsConfig(), DeviceType::CUDA, DeviceType::CUDA, /*with_audio=*/false);
+  });
+  EXPECT_NE(message.find("model.embedding.session_options run the embedding model on CPU, but the decoder takes "
+                         "its inputs in CUDA memory"),
+            std::string::npos)
+      << message;
+}
+
+TEST(Lfm2AudioSessionDevicesTest, CpuSubModelsTakeTextOnlyPromptsWhenTheInputsAreOnTheHost) {
+  // WebGPU without graph capture keeps the decoder's inputs on the host, so text-only prompts run.
+  EXPECT_NO_THROW(
+      CheckLfm2AudioSessionDevices(CpuSubModelsConfig(), DeviceType::WEBGPU, DeviceType::CPU, /*with_audio=*/false));
+
+  // Audio features are allocated on the decoder's device, which a CPU encoder cannot write.
+  const auto message = CaptureThrowMessage([] {
+    CheckLfm2AudioSessionDevices(CpuSubModelsConfig(), DeviceType::WEBGPU, DeviceType::CPU, /*with_audio=*/true);
+  });
+  EXPECT_NE(message.find("model.speech.session_options run the speech model on CPU, but the audio features are "
+                         "passed in WebGPU memory"),
+            std::string::npos)
+      << message;
+
+  // Nor can a CPU embedding read them.
+  auto config = CpuSubModelsConfig();
+  config.model.speech.session_options.reset();
+  EXPECT_NE(CaptureThrowMessage([&] {
+              CheckLfm2AudioSessionDevices(config, DeviceType::WEBGPU, DeviceType::CPU, /*with_audio=*/true);
+            }).find("model.embedding.session_options"),
+            std::string::npos);
+}
+
+TEST(Lfm2AudioSessionDevicesTest, SubModelsThatCanUseTheBuffersAreAccepted) {
+  // Without session_options of their own both graphs follow the decoder.
+  EXPECT_NO_THROW(CheckLfm2AudioSessionDevices(Config{}, DeviceType::CUDA, DeviceType::CUDA, /*with_audio=*/true));
+
+  auto config = CpuSubModelsConfig();
+  config.model.speech.session_options->providers = {"cuda"};
+  config.model.embedding.session_options->providers = {"cuda"};
+  EXPECT_NO_THROW(CheckLfm2AudioSessionDevices(config, DeviceType::CUDA, DeviceType::CUDA, /*with_audio=*/true));
+
+  // An explicit CPU provider is still CPU.
+  config.model.speech.session_options->providers = {"CPU"};
+  EXPECT_THROW(CheckLfm2AudioSessionDevices(config, DeviceType::CUDA, DeviceType::CUDA, /*with_audio=*/true),
+               std::runtime_error);
+
+  // Everything on CPU, and a decoder whose buffers a CPU session can use: OpenVINO allocates from the CPU.
+  for (const auto device : {DeviceType::CPU, DeviceType::OpenVINO}) {
+    EXPECT_NO_THROW(CheckLfm2AudioSessionDevices(CpuSubModelsConfig(), device, device, /*with_audio=*/true));
+  }
 }
 
 }  // namespace Generators::test

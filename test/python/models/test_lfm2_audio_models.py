@@ -589,6 +589,25 @@ def test_lfm2_audio_requires_audio_token_id(test_data_path, tmp_path):
         og.Model(os.fspath(model_path)).create_multimodal_processor()
 
 
+def test_lfm2_audio_requires_audio_token_id_inside_the_vocabulary(test_data_path, tmp_path):
+    model_path = _copy_model(test_data_path, tmp_path)
+    _edit_json(model_path / "genai_config.json", lambda config: config["model"].update({"audio_token_id": 65536}))
+    with pytest.raises(RuntimeError, match="audio_token_id 65536 is outside the vocabulary of 65536 tokens"):
+        og.Model(os.fspath(model_path)).create_multimodal_processor()
+
+
+@pytest.mark.skipif(not og.is_cuda_available(), reason="needs a CUDA decoder next to the CPU sub-models")
+def test_lfm2_audio_rejects_cpu_sub_models_next_to_a_cuda_decoder(test_data_path, tmp_path):
+    # The fixture's speech and embedding entries have session_options of their own, as a CPU export
+    # writes them, so only the decoder moves to CUDA: the embedding session would be handed its inputs
+    # in CUDA memory and write host bytes over them.
+    config = og.Config(os.fspath(_copy_model(test_data_path, tmp_path)))
+    config.clear_providers()
+    config.append_provider("cuda")
+    with pytest.raises(RuntimeError, match="embedding.session_options run the embedding model on CPU"):
+        og.Model(config)
+
+
 def _generate(model_path: str, prompt: str, audios, num_tokens: int, chunk_size: int | None = None):
     model = og.Model(model_path)
     processor = model.create_multimodal_processor()
@@ -1000,8 +1019,23 @@ def test_lfm2_audio_speech_sampling_follows_the_seed(test_data_path, tmp_path):
         (lambda m: m.update({"eos_token_id": [7, 130]}), "eos_token_id holds 130.*Remove it"),
         (lambda m: m["audio_output"].pop("embedding"), "needs both depthformer.filename and embedding.filename"),
         (lambda m: m["audio_output"].update({"num_codebooks": 4}), "expected inputs for 4 codebooks"),
+        (lambda m: m["audio_output"].update({"num_codebooks": -8}), "expected inputs for -8 codebooks"),
+        (lambda m: m["audio_output"].update({"codebook_size": -1}), "codebook_size -1 must be positive"),
+        (lambda m: m["audio_output"].update({"codebook_size": 0}), "codebook_size 0 must be positive"),
+        (lambda m: m.update({"audio_token_id": 65536}), "audio_token_id 65536 .* vocabulary of 65536"),
+        (lambda m: m.update({"audio_token_id": -1}), "audio_token_id -1 .* vocabulary of 65536"),
     ],
-    ids=["audio-start-is-a-stop-token", "text-end-is-a-stop-token", "one-graph-missing", "codebook-count"],
+    ids=[
+        "audio-start-is-a-stop-token",
+        "text-end-is-a-stop-token",
+        "one-graph-missing",
+        "codebook-count",
+        "negative-codebook-count",
+        "negative-codebook-size",
+        "zero-codebook-size",
+        "audio-token-past-the-vocabulary",
+        "negative-audio-token",
+    ],
 )
 def test_lfm2_audio_rejects_a_speech_output_config_that_cannot_work(test_data_path, tmp_path, edit, expected):
     model_path = _speech_model(test_data_path, tmp_path)
@@ -1010,6 +1044,17 @@ def test_lfm2_audio_rejects_a_speech_output_config_that_cannot_work(test_data_pa
     with pytest.raises(RuntimeError, match=expected):
         model = og.Model(os.fspath(model_path))
         og.Generator(model, og.GeneratorParams(model))
+
+
+def test_lfm2_audio_rejects_a_codebook_size_past_the_depthformer_logits(test_data_path, tmp_path):
+    # The codes are sampled from the first codebook_size logits; one more than there are would read
+    # past the end of them.
+    model_path = _speech_model(test_data_path, tmp_path, codebook_size=CODEBOOK_SIZE + 1)
+    with pytest.raises(
+        RuntimeError,
+        match=f"codebook_size is {CODEBOOK_SIZE + 1}, but the depthformer produces {CODEBOOK_SIZE} float logits",
+    ):
+        _generate_speech(model_path, "<|startoftext|>Answer aloud. ", None, 10, audio_interleaved=True, audio_top_k=1)
 
 
 def test_lfm2_audio_speech_output_needs_the_decoder_hidden_states(test_data_path, tmp_path):

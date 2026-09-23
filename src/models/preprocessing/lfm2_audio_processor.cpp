@@ -262,6 +262,10 @@ Lfm2AudioProcessor::Lfm2AudioProcessor(Config& config, const SessionInfo& sessio
         "Lfm2AudioProcessor: model.audio_token_id must be set in genai_config.json to the id "
         "the embedding model replaces with the audio features.");
   }
+  if (audio_token_id_ >= config.model.vocab_size) {
+    throw std::runtime_error("Lfm2AudioProcessor: model.audio_token_id " + std::to_string(audio_token_id_) +
+                             " is outside the vocabulary of " + std::to_string(config.model.vocab_size) + " tokens.");
+  }
 
   // The mel front end defaults to the settings of the published checkpoints; a genai_config.json can
   // override any of them with the same top-level fields the Parakeet and Nemotron models use.
