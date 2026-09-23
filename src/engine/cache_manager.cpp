@@ -32,7 +32,7 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
                                 FixedStatePool* fixed_state_pool,
                                 std::vector<std::shared_ptr<Request>>& allocated_requests,
                                 const StepPlan& plan)
-      : allocated_requests_{allocated_requests} {
+      : cache_{cache}, allocated_requests_{allocated_requests} {
     std::vector<PagedCacheReservationRequest> paged_requests;
     paged_requests.reserve(plan.requests.size());
     std::vector<FixedStateReservationRequest> fixed_requests;
@@ -46,6 +46,7 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
           entry.target_cache_slots,
           entry.newly_admitted,
           entry.whole_sequence_cache_slots,
+          entry.prefix_match.get(),
       });
       if (fixed_state_pool) {
         // Fixed and paged track the same per-request cache-slot boundary: the fixed target_tokens
@@ -55,6 +56,9 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
             entry.request_id,
             entry.target_cache_slots,
             entry.draft_token_count,
+            entry.prefix_match
+                ? entry.prefix_match->fixed_state_checkpoint
+                : nullptr,
         });
       }
       if (entry.newly_admitted) {
@@ -155,6 +159,7 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
     if (fixed_reservation_) {
       fixed_reservation_->PublishCommit();
     }
+    cache_.RecordPrefixAdoptions(*paged_reservation_);
     allocated_requests_.insert(allocated_requests_.end(),
                                newly_admitted_.begin(),
                                newly_admitted_.end());
@@ -188,6 +193,7 @@ class CompositeCacheStepReservation final : public CacheStepReservation {
   }
 
  private:
+  PagedKeyValueCache& cache_;
   std::vector<std::shared_ptr<Request>>& allocated_requests_;
   std::vector<std::shared_ptr<Request>> newly_admitted_;
   // Destroyed in reverse declaration order: the fixed reservation unwinds before the paged one,
@@ -340,16 +346,85 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model,
   // the composite path degrades to paged-only. Its capacity matches the paged batch limit so paged
   // admission (bounded by max_batch_size) can never outrun fixed slots.
   ModelStateManifest manifest{model->config_->model.decoder};
+  const bool hybrid_prefix_caching =
+      ResolvePrefixCachingEnabled(model, auxiliary_bytes_per_block) &&
+      manifest.HasFixedStateGroups();
+  size_t prefix_checkpoint_capacity = 0;
   if (manifest.HasFixedStateGroups()) {
+    prefix_checkpoint_capacity =
+        hybrid_prefix_caching
+            ? model_->config_->engine.dynamic_batching->max_batch_size
+            : 0;
     auto fixed_state_pool = std::make_unique<FixedStatePool>(
-        model, model_->config_->engine.dynamic_batching->max_batch_size);
+        model, model_->config_->engine.dynamic_batching->max_batch_size,
+        prefix_checkpoint_capacity);
     fixed_state_pool_ = std::move(fixed_state_pool);
   }
   // Size the primary and auxiliary paged caches from one memory budget. The fixed pool above is
   // already reflected in the free-memory query used by the paged cache.
   key_value_cache_ = std::make_unique<PagedKeyValueCache>(
-      model, auxiliary_bytes_per_block, auxiliary_reserved_memory_bytes);
+      model, auxiliary_bytes_per_block, auxiliary_reserved_memory_bytes,
+      hybrid_prefix_caching, prefix_checkpoint_capacity);
   key_value_cache_state_ = std::make_unique<KeyValueCacheState>(*params_, *model_);
+}
+
+std::shared_ptr<const PrefixCacheMatch> PagedCacheManager::MatchPrefix(
+    const Request& request) {
+  if (!key_value_cache_->PrefixCachingEnabled()) {
+    return nullptr;
+  }
+  const auto tokens = request.TokensCpu();
+  if (tokens.size() <= 1) {
+    return nullptr;
+  }
+  auto match = key_value_cache_->MatchPrefix(tokens, tokens.size() - 1);
+  if (!match.Empty() && fixed_state_pool_ &&
+      !match.fixed_state_checkpoint) {
+    throw std::logic_error(
+        "A hybrid prefix match has no fixed state checkpoint.");
+  }
+  return match.Empty()
+             ? nullptr
+             : std::make_shared<const PrefixCacheMatch>(std::move(match));
+}
+
+void PagedCacheManager::SealCommittedBlocks(const StepPlan& plan) {
+  if (!key_value_cache_->PrefixCachingEnabled()) {
+    return;
+  }
+  for (const auto& entry : plan.requests) {
+    if (fixed_state_pool_ && !entry.is_prefill) {
+      continue;
+    }
+    key_value_cache_->SealCommittedBlocks(
+        entry.request_id, entry.request->TokensCpu());
+    if (!fixed_state_pool_ ||
+        !key_value_cache_->CanAttachPrefixCheckpoint(
+            entry.request_id, entry.target_cache_slots)) {
+      continue;
+    }
+    if (fixed_state_pool_->AvailablePrefixCheckpoints() == 0) {
+      // Prefix matching always leaves the request's final prompt token to execute. A checkpoint at
+      // the exact prompt boundary therefore cannot serve an identical replay. Keep the newest
+      // earlier checkpoint instead of reclaiming it when the checkpoint pool is full.
+      if (entry.target_cache_slots ==
+          static_cast<size_t>(entry.sequence_length_before)) {
+        continue;
+      }
+      key_value_cache_->ReclaimPrefixCheckpoints(1);
+    }
+    if (fixed_state_pool_->AvailablePrefixCheckpoints() == 0) {
+      continue;
+    }
+    auto checkpoint =
+        fixed_state_pool_->CapturePrefixCheckpoint(entry.request_id);
+    if (checkpoint &&
+        !key_value_cache_->AttachPrefixCheckpoint(
+            entry.request_id, std::move(checkpoint))) {
+      throw std::logic_error(
+          "A captured fixed state checkpoint could not be attached to its paged prefix.");
+    }
+  }
 }
 
 bool PagedCacheManager::CanAllocate(const std::vector<std::shared_ptr<Request>>& requests) const {
@@ -489,6 +564,13 @@ void PagedCacheManager::DetachRequestForTeardown(
 }
 
 bool PagedCacheManager::SupportsDynamicBatching() const { return true; }
+
+size_t PagedCacheManager::MaxQueryTokensPerRequest() const {
+  // Fixed state stores one row per request and commits the state after the complete query, so it
+  // does not constrain prefill length. Prefix checkpoints are attached only when that committed
+  // endpoint is block-aligned; they must not reduce the model's configured prefill chunk.
+  return key_value_cache_->MaxQueryTokensPerRequest();
+}
 
 size_t PagedCacheManager::MaxDraftTokensPerStep() const {
   // Recurrent state can only be replayed through the compact transitions the operators captured.

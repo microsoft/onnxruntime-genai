@@ -7,6 +7,7 @@ This folder contains the model builder for quickly creating optimized and quanti
 - [Current Support](#current-support)
 - [Usage](#usage)
   - [Full Usage](#full-usage)
+  - [Structured Builder Configuration](#structured-builder-configuration)
   - [Original PyTorch Model from Hugging Face](#original-pytorch-model-from-hugging-face)
   - [Original PyTorch Model from Disk](#original-pytorch-model-from-disk)
   - [Customized or Finetuned PyTorch Model](#customized-or-finetuned-pytorch-model)
@@ -99,6 +100,66 @@ python -m onnxruntime_genai.models.builder --help
 # From source:
 python builder.py --help
 ```
+
+### Structured Builder Configuration
+
+Schema version 2 is an **experimental implementation** of the
+[shared configuration design](../../../../docs/ModelBuilderConfiguration.md).
+It normalizes legacy quantization syntax before applying structured overrides,
+rejects unsupported or conflicting drafter policies, validates runtime overlays
+against exported capabilities, and checks borrowed quantized-head layouts before
+adoption. Olive integration, target checkpoint conversion policy, and INT8
+embedding export remain pending.
+
+Each structured CLI option accepts an inline JSON object or a JSON file path.
+Relative paths use the process working directory, including nested checkpoint
+and calibration paths. Omitting `builder_config_version` selects version 2 when
+a target, drafter, speculative, or runtime field is present. Version 1 cannot
+be combined with those fields. `search` alone does not select version 2.
+
+The following target-only invocation template requires a supported dense,
+unquantized checkpoint and its tokenizer. It makes the CPU I/O dtype explicit
+and does not exercise checkpoint conversion, sharing, or speculative limits:
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -i path_to_dense_checkpoint -o output -e cpu \
+  --builder_config_version 2 \
+  --target_options '{"quant_config":{"io_dtype":"fp32","weights":{"type":"int4","block_size":32}}}' \
+  --drafter_options '{"drafter_type":"none"}' \
+  --runtime_config '{"search":{"max_length":128}}'
+
+# From source, at the repository root:
+python src/python/py/models/builder.py -i path_to_dense_checkpoint -o output -e cpu \
+  --builder_config_version 2 \
+  --target_options '{"quant_config":{"io_dtype":"fp32","weights":{"type":"int4","block_size":32}}}' \
+  --drafter_options '{"drafter_type":"none"}' \
+  --runtime_config '{"search":{"max_length":128}}'
+```
+
+`target_options` routes `quant_config`, `attention`, and
+`optimizations.fuse_mlp_gate_up` to the existing exporter. `quant_config.format`
+is the canonical graph-layout key; `runtime` remains a parsing alias. The
+target rejects an explicit checkpoint policy until its loaders implement both
+paths. Root CLI `precision` is optional when target weight type is explicit.
+
+DFlash2 and DSpark selection requires a local checkpoint `path`, paged target
+attention, and BF16 body I/O. Omitted target taps are inferred from checkpoint
+`target_layer_ids + 1` before construction. DFlash2 parses `auto`, `required`,
+and `off` sharing modes and validates adopted quantized-head node attributes.
+MTP/DSpark currently accept only `auto`. Structured drafter selections that
+conflict with legacy drafter paths are rejected.
+
+Runtime fragments are applied after composite configuration generation. Objects
+merge recursively; arrays replace whole. The validator rejects absent engine or
+speculative capabilities, invalid allocation and draft limits, provider changes,
+and changes to graph-required session options.
+
+Python callers should pass structured dictionaries to `parse_extra_options`
+before calling `create_model` with its returned options. The legacy options
+parameter still takes a list of `KEY=VALUE` strings, not a dictionary. Pass
+`precision=None` explicitly when deriving it from the structured target. A
+standalone `create_model` call without prepared Hugging Face metadata still fails.
 
 ### Original PyTorch Model from Hugging Face
 
@@ -304,7 +365,15 @@ This scenario is for when you want to build a model that uses the `PagedAttentio
 
 Paged attention supports CUDA with `fp16` or `bf16` precision and WebGPU with `fp16` precision. Paged exports include the CPU `attention_metadata` input used by the runtime to provide stable query and KV bounds without downloading device sequence lengths in every attention layer. Paged attention cannot be combined with `exclude_embeds` or `exclude_lm_head`. `paged_block_size` defaults to `256` and must be a power of two and at least `16`, matching what the ONNX Runtime PagedAttention op accepts; for models with short and long rotary caches, it must also evenly divide `original_max_position_embeddings`. The vendored FlashAttention paged kernel needs the block to be a multiple of its tile as well (256 for `head_size <= 64`, 128 for `head_size <= 128`, otherwise 64), so a smaller block stays valid but makes ORT fall back to another attention backend. A quantized KV cache is exempt from the tile requirement alone: FlashAttention still serves it, through a dense dequantized path with no page alignment to satisfy. A block drafter (`dflash2_path`/`dspark_path`) shares the target's block size and usually has the smaller head size, so it reaches its tile at a larger block than the target does. `gpu_utilization_factor` defaults to `0.6` and must be greater than `0` and at most `1`. `max_batch_size` defaults to `100` and must be a positive integer no greater than `256`. `paged_chunk_size` must be a positive integer and is written to `search.chunk_size`. It caps the prompt tokens a single request contributes to one step, whereas `max_scheduled_tokens` caps the step as a whole; a value at or above `max_scheduled_tokens` therefore has no effect, and a smaller one lets concurrent prefills interleave rather than letting one request consume the step budget on its own. Models whose sliding-window layers are served from a ring of blocks hold only `paged_chunk_size + window_size - 1` positions, so they require chunked prefill and default to `paged_block_size`. For every other paged model it is written only when passed.
 
-`max_scheduled_tokens` and `num_blocks` are the two remaining `engine.dynamic_batching` knobs and are written only when passed. `max_scheduled_tokens` caps the tokens in one dynamically batched forward pass and therefore caps the peak prefill activation, which is the largest transient in a long-context deployment. `num_blocks` sets the total block budget before auxiliary-cache reservations. The target's resolved pool can be smaller when MTP or a full-attention block drafter reserves cache memory, and all resident requests share that pool, so `num_blocks * paged_block_size` is only the single-request upper bound when the target owns every configured block. `num_blocks` is mutually exclusive with `gpu_utilization_factor`, which is omitted from the config when `num_blocks` is set.
+Prefix caching is enabled by default for dynamic batching and can be disabled by
+setting `engine.dynamic_batching.prefix_caching` to `false` in
+`genai_config.json`. The builder writes this opt-out automatically for paged
+sliding-window KV rings, MTP, DSpark, and full-attention DFlash 2 because those
+layouts mirror auxiliary state per target block and do not yet support prefix
+caching. DFlash 2 with a positive sliding window uses a fixed-size auxiliary pool
+and retains the default target prefix caching behavior.
+
+`max_scheduled_tokens` and `num_blocks` are additional `engine.dynamic_batching` knobs and are written only when passed. `max_scheduled_tokens` caps the tokens in one dynamically batched forward pass and therefore caps the peak prefill activation, which is the largest transient in a long-context deployment. `num_blocks` sets the total block budget before auxiliary-cache reservations. The target's resolved pool can be smaller when MTP or a full-attention block drafter reserves cache memory, and all resident requests share that pool, so `num_blocks * paged_block_size` is only the single-request upper bound when the target owns every configured block. `num_blocks` is mutually exclusive with `gpu_utilization_factor`, which is omitted from the config when `num_blocks` is set.
 
 Both options require positive integers. Auxiliary drafter caches share this memory budget, so they can reduce the target's allocated block count.
 

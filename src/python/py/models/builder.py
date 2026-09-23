@@ -11,12 +11,19 @@ Run the model builder to create the desired ONNX model.
 """
 
 import argparse
+import json
 import os
 import textwrap
 from typing import Any
 
 import onnx_ir as ir
 import torch
+from builder_config import (
+    apply_runtime_config,
+    load_json_object,
+    normalize_builder_config,
+    validate_model_dependent_config,
+)
 from builders import (
     ChatGLMModel,
     ErnieModel,
@@ -53,7 +60,7 @@ from builders import (
     WhisperModel,
 )
 from builders.qwen import Qwen35Model, Qwen35MoEModel
-from quantization import KV_CACHE_QUANT_SCHEMES, QuantConfig
+from quantization import KV_CACHE_QUANT_SCHEMES, QuantConfig, default_io_dtype
 from transformers import AutoConfig, AutoTokenizer
 
 
@@ -163,6 +170,8 @@ def check_extra_options(
 
     for key in bools:
         if key in extra_options:
+            if isinstance(extra_options[key], bool):
+                continue
             if extra_options[key] in {"false", "False", "0"}:
                 extra_options[key] = False
             elif extra_options[key] in {"true", "True", "1"}:
@@ -213,7 +222,12 @@ def check_extra_options(
     if "mtp_quant_config" in extra_options:
         mtp_quant_config = extra_options["mtp_quant_config"]
         if not isinstance(mtp_quant_config, QuantConfig):
-            mtp_quant_config = QuantConfig.from_json(mtp_quant_config)
+            mtp_quant_data = load_json_object(mtp_quant_config, "mtp_quant_config")
+            wrapped_data = mtp_quant_data.get("quantization", mtp_quant_data)
+            checkpoint_policy_explicit = "checkpoint_policy" in wrapped_data
+            mtp_quant_config = QuantConfig.from_dict(mtp_quant_data)
+            if not checkpoint_policy_explicit:
+                mtp_quant_config.checkpoint_policy = "requantize"
         extra_options["mtp_quant_config"] = mtp_quant_config
 
     if extra_options.get("use_paged_attention", False):
@@ -280,13 +294,14 @@ def check_extra_options(
         extra_options["hf_token"] = parse_hf_token(extra_options["hf_token"])
 
     if extra_options.get("op_types_to_quantize", False):
-        op_types_to_quantize = ()
-        for op_type in extra_options["op_types_to_quantize"].split("/"):
-            op_types_to_quantize += (op_type,)
-        extra_options["op_types_to_quantize"] = op_types_to_quantize
+        op_types = extra_options["op_types_to_quantize"]
+        extra_options["op_types_to_quantize"] = (
+            tuple(op_types.split("/")) if isinstance(op_types, str) else tuple(op_types)
+        )
 
     if extra_options.get("nodes_to_exclude", False):
-        extra_options["nodes_to_exclude"] = extra_options["nodes_to_exclude"].split(",")
+        excluded = extra_options["nodes_to_exclude"]
+        extra_options["nodes_to_exclude"] = excluded.split(",") if isinstance(excluded, str) else list(excluded)
 
     for key in ("qmoe_weights_prepacked", "matmulnbits_weights_prepacked"):
         if key in extra_options:
@@ -438,9 +453,20 @@ def parse_extra_options(
     execution_provider,
     cache_dir,
     extra_options,
+    builder_config_version=None,
+    target_options=None,
+    drafter_options=None,
+    speculative_options=None,
+    runtime_config=None,
+    search=None,
 ):
     """
-    Parse key-value pairs that are separated by '='
+    Parse CLI KEY=VALUE options and normalize the structured envelope.
+
+    Structured keyword arguments may be dictionaries, inline JSON, or JSON file
+    paths. extra_options itself remains a list of KEY=VALUE strings. This step
+    also loads Hugging Face metadata required by create_model; it is not a
+    checkpoint-free validation API.
     """
     kv_pairs = {}
 
@@ -451,16 +477,31 @@ def parse_extra_options(
             key, value = kv_str.split("=", 1)
             kv_pairs[key.strip()] = value.strip()
 
+    effective_config = normalize_builder_config(
+        precision,
+        execution_provider,
+        kv_pairs,
+        builder_config_version=builder_config_version,
+        target_options=target_options,
+        drafter_options=drafter_options,
+        speculative_options=speculative_options,
+        runtime_config=runtime_config,
+        search=search,
+    )
+    kv_pairs = effective_config.extra_options
     print(f"Extra options: {kv_pairs}")
     check_extra_options(
         model_name,
         input_path,
         output_dir,
-        precision,
+        effective_config.precision,
         execution_provider,
         cache_dir,
         kv_pairs
     )
+    if "hf_details" in kv_pairs:
+        validate_model_dependent_config(effective_config, kv_pairs["hf_details"]["hf_config"])
+    kv_pairs["_effective_builder_config"] = effective_config
     return kv_pairs
 
 
@@ -468,20 +509,11 @@ def set_io_dtype(precision, execution_provider, extra_options) -> ir.DataType:
     """
     Set the input/output precision of the ONNX model based on the provided precision and execution provider.
     """
-    cpu_quant = precision in {"int4", "int8"} and execution_provider == "cpu"
-    fp32_webgpu = execution_provider == "webgpu" and extra_options.get("use_webgpu_fp32", False)
-    bf16_cuda = precision == "int4" and execution_provider in {"cuda", "trt-rtx"} and extra_options.get("use_cuda_bf16", False)
-
-    if precision == "fp32" or cpu_quant or fp32_webgpu:
-        # FP32 precision
-        return ir.DataType.FLOAT
-
-    if precision == "bf16" or bf16_cuda:
-        # BF16 precision
-        return ir.DataType.BFLOAT16
-
-    # FP16 precision
-    return ir.DataType.FLOAT16
+    return {
+        "fp32": ir.DataType.FLOAT,
+        "bf16": ir.DataType.BFLOAT16,
+        "fp16": ir.DataType.FLOAT16,
+    }[default_io_dtype(precision, execution_provider, extra_options)]
 
 
 def set_onnx_dtype(precision: str, extra_options: dict[str, Any]) -> ir.DataType:
@@ -569,6 +601,36 @@ def create_model(
     cache_dir,
     **extra_options,
 ):
+    """Export using options prepared by parse_extra_options.
+
+    A standalone structured call still needs prepared hf_details. Python callers
+    must supply the positional precision argument (None is allowed for an
+    explicit target weight type), even when the CLI permits omitting it.
+    """
+    effective_config = extra_options.pop("_effective_builder_config", None)
+    structured = {
+        key: extra_options.pop(key)
+        for key in (
+            "builder_config_version",
+            "target_options",
+            "drafter_options",
+            "speculative_options",
+            "runtime_config",
+            "search",
+        )
+        if key in extra_options
+    }
+    if effective_config is None and structured:
+        effective_config = normalize_builder_config(
+            precision,
+            execution_provider,
+            extra_options,
+            **structured,
+        )
+        extra_options = effective_config.extra_options
+    if effective_config is not None:
+        precision = effective_config.precision
+
     # Update name alias for TRT-RTX
     if execution_provider == "NvTensorRtRtx":
         execution_provider = "trt-rtx"
@@ -585,10 +647,16 @@ def create_model(
     extra_kwargs = hf_details.pop("extra_kwargs")
     hf_name = hf_details.pop("hf_name")
     config = hf_details.pop("hf_config")
+    if effective_config is not None:
+        validate_model_dependent_config(effective_config, config)
 
     # Set input/output precision of ONNX model
-    io_dtype = set_io_dtype(precision, execution_provider, extra_options)
-    onnx_dtype = set_onnx_dtype(precision, extra_options)
+    quant_config = extra_options.get("_quant_config")
+    if quant_config is not None:
+        io_dtype, onnx_dtype = quant_config.to_onnx_dtypes()
+    else:
+        io_dtype = set_io_dtype(precision, execution_provider, extra_options)
+        onnx_dtype = set_onnx_dtype(precision, extra_options)
     config_only = extra_options.get("config_only", False)
 
     # List architecture options in alphabetical order
@@ -724,6 +792,18 @@ def create_model(
     # Make GenAI config
     onnx_model.make_genai_config(config, extra_kwargs, output_dir)
 
+    # Composite exporters append MTP/block-drafter sections after the decoder.
+    # Applying a profile earlier would reject valid component names or lose it
+    # when a component rewrites the generated configuration.
+    runtime_config = effective_config.runtime_config if effective_config is not None else extra_options.get("_runtime_config", {})
+    if runtime_config:
+        config_path = os.path.join(output_dir, "genai_config.json")
+        with open(config_path, encoding="utf-8") as config_file:
+            genai_config = json.load(config_file)
+        genai_config = apply_runtime_config(genai_config, runtime_config)
+        with open(config_path, "w", encoding="utf-8") as config_file:
+            json.dump(genai_config, config_file, indent=4)
+
     # Copy Hugging Face processing files to output folder
     onnx_model.save_processing(hf_name, extra_kwargs, output_dir)
 
@@ -761,9 +841,10 @@ def get_args():
     parser.add_argument(
         "-p",
         "--precision",
-        required=True,
+        required=False,
+        default=None,
         choices=["int4", "int8", "bf16", "fp16", "fp32"],
-        help="Precision of model",
+        help="Precision of model. Optional when target_options.quant_config specifies the target weight type.",
     )
 
     parser.add_argument(
@@ -1056,6 +1137,38 @@ def get_args():
             """),
     )
 
+    parser.add_argument(
+        "--builder_config_version",
+        type=int,
+        default=None,
+        help="Structured model-builder configuration version. Version 2 enables the shared configuration envelope.",
+    )
+    parser.add_argument(
+        "--target_options",
+        default=None,
+        help="Target export options as an inline JSON object or JSON file path.",
+    )
+    parser.add_argument(
+        "--drafter_options",
+        default=None,
+        help="Drafter export options as an inline JSON object or JSON file path.",
+    )
+    parser.add_argument(
+        "--speculative_options",
+        default=None,
+        help="Speculative graph options as an inline JSON object or JSON file path.",
+    )
+    parser.add_argument(
+        "--runtime_config",
+        default=None,
+        help="Runtime configuration fragment as an inline JSON object or JSON file path.",
+    )
+    parser.add_argument(
+        "--search",
+        default=None,
+        help="Legacy search settings as an inline JSON object or JSON file path.",
+    )
+
     args = parser.parse_args()
     print(
         "Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, FP16 TRT-RTX, BF16 CUDA, BF16 TRT-RTX, INT8 CPU, INT8 CUDA, INT8 WebGPU, INT4 CPU, INT4 CUDA, INT4 DML, INT4 WebGPU"
@@ -1073,6 +1186,12 @@ if __name__ == "__main__":
         args.execution_provider,
         args.cache_dir,
         args.extra_options,
+        builder_config_version=args.builder_config_version,
+        target_options=args.target_options,
+        drafter_options=args.drafter_options,
+        speculative_options=args.speculative_options,
+        runtime_config=args.runtime_config,
+        search=args.search,
     )
     create_model(
         args.model_name,

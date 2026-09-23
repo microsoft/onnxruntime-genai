@@ -129,6 +129,8 @@ class Override:
             raise ValueError("override must set either 'type' or 'exclude: true'")
         if self.exclude and self.type is not None:
             raise ValueError("override cannot set both 'type' and 'exclude'")
+        if self.exclude and set(self.match) != {"name"}:
+            raise ValueError("exclusion overrides currently require an exact node name")
         if self.type is not None:
             resolve_dtype(self.type)  # validate
 
@@ -137,7 +139,11 @@ class Override:
         unknown = set(data) - {"match", "type", "exclude"}
         if unknown:
             raise ValueError(f"unknown override field(s): {sorted(unknown)}")
-        return cls(match=data["match"], type=data.get("type"), exclude=bool(data.get("exclude", False)))
+        return cls(
+            match=data["match"],
+            type=data.get("type"),
+            exclude=require_bool(data.get("exclude", False), "override.exclude"),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"match": dict(self.match)}
@@ -166,13 +172,29 @@ def _normalize_block_size(value: Any) -> int:
     return value
 
 
+def normalize_bool(value: Any, field_name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value in ("true", "True", "1", 1):
+        return True
+    if value in ("false", "False", "0", 0):
+        return False
+    raise ValueError(f"{field_name} must be a boolean, got {value!r}")
+
+
+def require_bool(value: Any, field_name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    raise ValueError(f"{field_name} must be a boolean, got {value!r}")
+
+
 @dataclass
 class WeightsConfig:
     """Dense (non-MoE) weight quantization."""
 
     type: str = "none"
     block_size: int = 32
-    symmetric: bool = True
+    symmetric: Optional[bool] = None
     method: str = "default"  # default | rtn | k_quant
     accuracy_level: int = 0
     op_types: tuple[str, ...] = ("MatMul",)
@@ -182,8 +204,16 @@ class WeightsConfig:
 
     def __post_init__(self):
         descriptor = resolve_dtype(self.type)
+        if self.symmetric is None:
+            self.symmetric = descriptor.signed is not False
+        else:
+            self.symmetric = require_bool(self.symmetric, "weights.symmetric")
+            if descriptor.signed is False and self.symmetric:
+                raise ValueError(f"weights.type={self.type} requires weights.symmetric=false")
         if self.method not in self.METHODS:
             raise ValueError(f"weights.method must be one of {list(self.METHODS)}, got '{self.method}'")
+        if type(self.accuracy_level) is not int or self.accuracy_level not in range(5):
+            raise ValueError(f"weights.accuracy_level must be an integer from 0 to 4, got {self.accuracy_level!r}")
         self.block_size = _normalize_block_size(self.block_size)
         if descriptor.kind == "mx" and self.block_size not in (0, descriptor.block_size):
             raise ValueError(
@@ -196,14 +226,20 @@ class WeightsConfig:
         unknown = set(data) - {"type", "block_size", "symmetric", "method", "accuracy_level", "op_types", "overrides"}
         if unknown:
             raise ValueError(f"unknown weights field(s): {sorted(unknown)}")
+        op_types = data.get("op_types", ["MatMul"])
+        if not isinstance(op_types, list) or not op_types or any(
+            op_type not in ("MatMul", "Gather") for op_type in op_types
+        ):
+            raise ValueError("weights.op_types must be a non-empty array of supported operator names: MatMul, Gather")
         overrides = [Override.from_dict(o) for o in data.get("overrides", [])]
+        symmetric = None if "symmetric" not in data else require_bool(data["symmetric"], "weights.symmetric")
         return cls(
             type=data.get("type", "none"),
             block_size=data.get("block_size", 32),
-            symmetric=bool(data.get("symmetric", True)),
+            symmetric=symmetric,
             method=data.get("method", "default"),
-            accuracy_level=int(data.get("accuracy_level", 0)),
-            op_types=tuple(data.get("op_types", ("MatMul",))),
+            accuracy_level=data.get("accuracy_level", 0),
+            op_types=tuple(op_types),
             overrides=overrides,
         )
 
@@ -233,7 +269,7 @@ class MoEConfig:
         if descriptor.kind == "mx":
             # Microscaling FP4 mandates a fixed block size (mxfp4 -> 32, nvfp4 -> 16).
             self.block_size = descriptor.block_size
-        if self.weights_prepacked not in (-1, 0, 1):
+        if type(self.weights_prepacked) is not int or self.weights_prepacked not in (-1, 0, 1):
             raise ValueError(f"moe.weights_prepacked must be -1, 0, or 1, got {self.weights_prepacked}")
 
     @classmethod
@@ -244,7 +280,7 @@ class MoEConfig:
         return cls(
             type=data.get("type", "int4"),
             block_size=data.get("block_size", 32),
-            weights_prepacked=int(data.get("weights_prepacked", -1)),
+            weights_prepacked=data.get("weights_prepacked", -1),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -259,7 +295,7 @@ class RuntimeConfig:
     matmulnbits_weights_prepacked: int = 0  # CUDA fpA_intB layout: 0 off | 1 SM80 | 2 SM90
 
     def __post_init__(self):
-        if self.matmulnbits_weights_prepacked not in (0, 1, 2):
+        if type(self.matmulnbits_weights_prepacked) is not int or self.matmulnbits_weights_prepacked not in (0, 1, 2):
             raise ValueError(
                 f"runtime.matmulnbits_weights_prepacked must be 0, 1, or 2, got {self.matmulnbits_weights_prepacked}"
             )
@@ -270,8 +306,8 @@ class RuntimeConfig:
         if unknown:
             raise ValueError(f"unknown runtime field(s): {sorted(unknown)}")
         return cls(
-            use_qdq=bool(data.get("use_qdq", False)),
-            matmulnbits_weights_prepacked=int(data.get("matmulnbits_weights_prepacked", 0)),
+            use_qdq=require_bool(data.get("use_qdq", False), "format.use_qdq"),
+            matmulnbits_weights_prepacked=data.get("matmulnbits_weights_prepacked", 0),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -305,6 +341,21 @@ _PRECISION_TO_WEIGHTS_TYPE = {
 }
 
 
+def default_io_dtype(precision: str, execution_provider: str, extra_options: dict[str, Any]) -> str:
+    cpu_quant = precision in {"int4", "int8"} and execution_provider == "cpu"
+    fp32_webgpu = execution_provider == "webgpu" and normalize_bool(
+        extra_options.get("use_webgpu_fp32", False), "use_webgpu_fp32"
+    )
+    bf16_cuda = precision == "int4" and execution_provider in {"cuda", "trt-rtx"} and normalize_bool(
+        extra_options.get("use_cuda_bf16", False), "use_cuda_bf16"
+    )
+    if precision == "fp32" or cpu_quant or fp32_webgpu:
+        return "fp32"
+    if precision == "bf16" or bf16_cuda:
+        return "bf16"
+    return "fp16"
+
+
 def desugar_algo_config(extra_options: dict[str, Any]) -> tuple[str, dict[str, str]]:
     """Desugar the flat weight-only quant options into ``(base_method, {preset: quant_type})``.
 
@@ -330,10 +381,22 @@ class QuantConfig:
     weights: WeightsConfig = field(default_factory=WeightsConfig)
     moe: MoEConfig = field(default_factory=MoEConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+    checkpoint_policy: str = "preserve"
+    legacy_nodes_to_exclude: frozenset[str] = field(default_factory=frozenset, repr=False, compare=False)
 
     def __post_init__(self):
         if self.io_dtype not in IO_DTYPES:
             raise ValueError(f"io_dtype must be one of {list(IO_DTYPES)}, got '{self.io_dtype}'")
+        if self.checkpoint_policy not in ("preserve", "requantize"):
+            raise ValueError(
+                "checkpoint_policy must be 'preserve' or 'requantize', "
+                f"got '{self.checkpoint_policy}'"
+            )
+
+    @property
+    def format(self) -> RuntimeConfig:
+        """Graph-format settings; ``runtime`` remains the compatibility attribute."""
+        return self.runtime
 
     def to_onnx_dtypes(self) -> tuple[ir.DataType, ir.DataType]:
         io_dtype = {
@@ -365,14 +428,19 @@ class QuantConfig:
         # Allow either the bare object or a wrapper with a top-level "quantization" key.
         if "quantization" in data and isinstance(data["quantization"], dict):
             data = data["quantization"]
-        unknown = set(data) - {"io_dtype", "weights", "moe", "runtime"}
+        unknown = set(data) - {"io_dtype", "checkpoint_policy", "weights", "moe", "format", "runtime"}
         if unknown:
             raise ValueError(f"unknown quantization field(s): {sorted(unknown)}")
+        format_data = data.get("format")
+        runtime_data = data.get("runtime")
+        if format_data is not None and runtime_data is not None and format_data != runtime_data:
+            raise ValueError("quantization format and compatibility alias runtime conflict")
         return cls(
             io_dtype=data.get("io_dtype", "fp16"),
             weights=WeightsConfig.from_dict(data.get("weights", {})),
             moe=MoEConfig.from_dict(data.get("moe", {})),
-            runtime=RuntimeConfig.from_dict(data.get("runtime", {})),
+            runtime=RuntimeConfig.from_dict(format_data if format_data is not None else runtime_data or {}),
+            checkpoint_policy=data.get("checkpoint_policy", "preserve"),
         )
 
     @classmethod
@@ -410,17 +478,21 @@ class QuantConfig:
         # --- weights: method + mixed-precision placement -----------------
         base_method, placement = desugar_algo_config(extra_options)
 
+        # Legacy `nodes_to_exclude` is unconditional, so it must precede the generated
+        # preset rules that ordered first-match resolution would otherwise apply first.
         overrides: list[Override] = [
-            Override(match={"preset": selector}, type=quant_type) for selector, quant_type in placement.items()
+            Override(match={"name": node}, exclude=True)
+            for node in extra_options.get("nodes_to_exclude", []) or []
         ]
-        for node in extra_options.get("nodes_to_exclude", []) or []:
-            overrides.append(Override(match={"name": node}, exclude=True))
+        overrides.extend(
+            Override(match={"preset": selector}, type=quant_type) for selector, quant_type in placement.items()
+        )
 
-        is_symmetric = extra_options.get("is_symmetric", True)
+        is_symmetric = normalize_bool(extra_options.get("is_symmetric", True), "is_symmetric")
         weights = WeightsConfig(
             type=weights_type,
             block_size=int(extra_options.get("block_size", 32)),
-            symmetric=bool(is_symmetric),
+            symmetric=is_symmetric,
             method=base_method,
             accuracy_level=int(
                 extra_options.get("accuracy_level", 4 if execution_provider in ("cpu", "webgpu") else 0)
@@ -449,16 +521,24 @@ class QuantConfig:
 
         # --- runtime -----------------------------------------------------
         runtime = RuntimeConfig(
-            use_qdq=bool(extra_options.get("use_qdq", False)),
+            use_qdq=normalize_bool(extra_options.get("use_qdq", False), "use_qdq"),
             matmulnbits_weights_prepacked=int(extra_options.get("matmulnbits_weights_prepacked", 0)),
         )
 
-        io_dtype = precision if precision in IO_DTYPES else "fp16"
-        return cls(io_dtype=io_dtype, weights=weights, moe=moe, runtime=runtime)
+        io_dtype = default_io_dtype(precision, execution_provider, extra_options)
+        return cls(
+            io_dtype=io_dtype,
+            weights=weights,
+            moe=moe,
+            runtime=runtime,
+            checkpoint_policy="preserve",
+            legacy_nodes_to_exclude=frozenset(extra_options.get("nodes_to_exclude", []) or []),
+        )
 
     # -- Serialization -----------------------------------------------------
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize using the compatibility shape consumed by existing callers."""
         return {
             "io_dtype": self.io_dtype,
             "weights": self.weights.to_dict(),
