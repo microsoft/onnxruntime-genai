@@ -1110,15 +1110,23 @@ class Qwen35MoEModel(MTPModel):
             raise ValueError(f"{option_name} must be one of {sorted(allowed)}, got '{precision}'.")
         return precision
 
-    def block_drafter_quant(self, precision):
+    def block_drafter_quant(self, precision, quant_config=None):
         """Resolve weight-only quantization for a block-drafter body, or ``None`` to keep it dense."""
         if precision == "bf16":
             return None
-        return {
-            "bits": 4 if precision == "int4" else 8,
-            "block_size": int(self.decoder.quant_attrs["matmul_block_size"]),
-            "prepack": int(self.decoder.matmul_attrs["weights_prepacked"]) if self.decoder.ep == "cuda" else 0,
-        }
+        bits = 4 if precision == "int4" else 8
+        block_size = int(
+            quant_config.weights.block_size
+            if quant_config is not None
+            else self.decoder.quant_attrs["matmul_block_size"]
+        )
+        requested_prepack = int(
+            quant_config.format.matmulnbits_weights_prepacked
+            if quant_config is not None
+            else self.decoder.matmul_attrs["weights_prepacked"]
+        )
+        prepack = requested_prepack if self.decoder.ep == "cuda" else 0
+        return {"bits": bits, "block_size": block_size, "prepack": prepack}
 
     def block_drafter_lm_head_quant(self):
         """Resolve how a block drafter gets its LM head, or ``None`` to keep it dense.
@@ -1199,7 +1207,7 @@ class Qwen35MoEModel(MTPModel):
         """DFlash 2 block drafter, exported as an auxiliary ``dflash2.onnx``.
 
         ``dflash2_path`` points at the draft checkpoint. The drafter has no embedding and no
-        LM head of its own, so both come from the target and are shared on disk. SpecForge taps
+        LM head of its own, so both come from the target source; sharing on disk is conditional. SpecForge taps
         the output of each ``target_layer_ids`` entry, which is the residual stream entering the
         following layer.
         """
@@ -1208,6 +1216,11 @@ class Qwen35MoEModel(MTPModel):
             return
         if not self.decoder.use_paged_attention:
             raise ValueError("dflash2_path requires use_paged_attention=true.")
+
+        self.dflash2_shared_weight_policies = copy.deepcopy(
+            extra_options.get("_shared_weight_policies", {"embedding": "auto", "lm_head": "auto"})
+        )
+        drafter_quant_config = extra_options.get("_drafter_quant_config")
 
         num_draft_tokens = None
         if "dflash2_num_draft_tokens" in extra_options:
@@ -1225,6 +1238,7 @@ class Qwen35MoEModel(MTPModel):
             "io_dtype": io_dtype,
             "num_draft_tokens": num_draft_tokens,
             "precision": self.block_drafter_precision(extra_options, "dflash2_precision"),
+            "quant_config": drafter_quant_config,
             "fuse_gate_up": fuse_gate_up == "true",
         }
 
@@ -1253,7 +1267,9 @@ class Qwen35MoEModel(MTPModel):
             self.decoder.attention_attrs["paged_block_size"],
             self.decoder.context_length,
             num_draft_tokens=self.dflash2_attrs["num_draft_tokens"],
-            quant=self.block_drafter_quant(self.dflash2_attrs["precision"]),
+            quant=self.block_drafter_quant(
+                self.dflash2_attrs["precision"], self.dflash2_attrs["quant_config"]
+            ),
             lm_head_quant=self.block_drafter_lm_head_quant(),
             embed_quant=self.block_drafter_embed_quant(),
             fuse_gate_up=self.dflash2_attrs["fuse_gate_up"],
@@ -1263,34 +1279,87 @@ class Qwen35MoEModel(MTPModel):
     def save_dflash2_model(self, output_dir):
         if self.dflash2 is None:
             return
-        self.dflash2_shared_initializers = self.save_block_drafter_model(self.dflash2, output_dir, "DFlash 2")
-
-    def save_block_drafter_model(self, drafter, output_dir, drafter_name):
-        """Adopt the target's tensors, save the drafter, and fold what the two share onto one copy."""
-        drafter.adopt_target_tensors(os.path.join(output_dir, self.decoder.filename))
-        drafter.save_model(output_dir)
-        head = drafter.lm_head_quant
-        head_initializers = (
-            frozenset({f"lm_head.MatMul.weight_Q{head['bits']}", "lm_head.MatMul.weight_scales"})
-            if head is not None
-            else frozenset()
+        self.dflash2_shared_initializers = self.save_block_drafter_model(
+            self.dflash2,
+            output_dir,
+            "DFlash 2",
+            getattr(self, "dflash2_shared_weight_policies", {"embedding": "auto", "lm_head": "auto"}),
         )
+
+    def save_block_drafter_model(self, drafter, output_dir, drafter_name, shared_weight_policies=None):
+        """Adopt the target's tensors, save the drafter, and fold what the two share onto one copy."""
+        if hasattr(drafter, "adopt_target_tensors"):
+            drafter.adopt_target_tensors(os.path.join(output_dir, self.decoder.filename))
+        drafter.save_model(output_dir)
+
+        initializer_names = set(getattr(getattr(drafter, "graph", None), "initializers", {}))
+        embedding_initializers = frozenset(
+            name for name in initializer_names if name.startswith("model.embed_tokens.")
+        )
+        head_initializers = frozenset(name for name in initializer_names if name.startswith("lm_head.MatMul."))
+        embedding = getattr(drafter, "embed_quant", None)
+        if not embedding_initializers:
+            embedding_initializers = (
+                frozenset(
+                    {
+                        f"model.embed_tokens.weight_Q{embedding['bits']}",
+                        "model.embed_tokens.weight_scales",
+                    }
+                )
+                if embedding is not None
+                else frozenset({"model.embed_tokens.weight"})
+            )
+        head = getattr(drafter, "lm_head_quant", None)
+        if not head_initializers:
+            head_initializers = (
+                frozenset({f"lm_head.MatMul.weight_Q{head['bits']}", "lm_head.MatMul.weight_scales"})
+                if head is not None
+                else frozenset({"lm_head.MatMul.weight"})
+            )
         # A head the drafter had to quantize itself must keep its private copy; an adopted one is
         # the target's own tensor and has to fold back onto it.
-        adopted_head = head_initializers if head is not None and head["adopt_target"] else frozenset()
-        private_head = head_initializers - adopted_head
+        adopted = set(head_initializers if head is not None and head["adopt_target"] else ())
+        required = set(adopted)
+        private = set(head_initializers - adopted) if head is not None else set()
+
+        if shared_weight_policies is not None:
+            for tensor_name, initializers in (
+                ("embedding", embedding_initializers),
+                ("lm_head", head_initializers),
+            ):
+                policy = shared_weight_policies[tensor_name]
+                if policy == "off":
+                    adopted.difference_update(initializers)
+                    required.difference_update(initializers)
+                    private.update(initializers)
+                elif policy == "required":
+                    if tensor_name == "lm_head" and head is not None and not head["adopt_target"]:
+                        raise ValueError("required LM-head sharing is incompatible with the drafter's private layout")
+                    adopted.update(initializers)
+                    required.update(initializers)
+                    private.difference_update(initializers)
+
         shared = self.share_initializers(
             output_dir,
             self.decoder.filename,
             drafter.filename,
-            adopt_source_initializers=adopted_head,
-            required_source_initializers=adopted_head,
-            excluded_source_initializers=private_head,
+            adopt_source_initializers=adopted,
+            required_source_initializers=required,
+            excluded_source_initializers=private,
         )
-        self.warn_unshared_lm_head(drafter, shared, drafter_name)
+        shared_names = {entry["name"] for entry in shared}
+        missing = required - shared_names
+        if missing:
+            raise ValueError("Required shared initializers are unavailable: " + ", ".join(sorted(missing)))
+        self.warn_unshared_lm_head(
+            drafter,
+            shared,
+            drafter_name,
+            shared_weight_policies.get("lm_head", "auto") if shared_weight_policies is not None else "auto",
+        )
         return shared
 
-    def warn_unshared_lm_head(self, drafter, shared, drafter_name):
+    def warn_unshared_lm_head(self, drafter, shared, drafter_name, sharing_policy="auto"):
         """Report a drafter head that stayed a separate copy instead of folding onto the target's.
 
         The drafter adopts the target's own initializers, so the two are identical by
@@ -1299,7 +1368,7 @@ class Qwen35MoEModel(MTPModel):
         guarantee that the drafter scores with the head the target verifies with.
         """
         head = drafter.lm_head_quant
-        if head is None or not head["adopt_target"]:
+        if sharing_policy == "off" or head is None or not head["adopt_target"]:
             return
         weight_name = f"lm_head.MatMul.weight_Q{head['bits']}"
         if any(entry["name"] == weight_name for entry in shared):
@@ -1461,7 +1530,10 @@ class Qwen35MTPModel(Qwen35MoETextModel):
         extra_options["num_hidden_layers"] = 1
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
-        self.preserve_mtp_quantization = "_quant_config" not in extra_options
+        quant_config = extra_options.get("_quant_config")
+        self.preserve_mtp_quantization = (
+            quant_config is None or quant_config.checkpoint_policy == "preserve"
+        )
         self.input_names["hidden_states"] = "hidden_states"
         self.input_types["hidden_states"] = self.io_dtype
         self.input_shapes["hidden_states"] = self.make_hidden_state_shape()
