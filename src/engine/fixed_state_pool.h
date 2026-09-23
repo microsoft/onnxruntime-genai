@@ -9,6 +9,7 @@
 #include <optional>
 #include <span>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "../config.h"
@@ -21,6 +22,7 @@ namespace Generators {
 
 struct Model;
 class FixedStatePool;
+class FixedStatePrefixCheckpoint;
 
 // Per-request row geometry derived from a fixed-state binding's session metadata.
 struct FixedStateGeometry {
@@ -69,9 +71,20 @@ struct FixedStateCommittedState {
 // the slot at publish (as `committed_tokens`) and must never regress below the slot's currently
 // committed value.
 struct FixedStateReservationRequest {
+  FixedStateReservationRequest() = default;
+  FixedStateReservationRequest(
+      const void* request_id_value, uint64_t target_tokens_value,
+      size_t capture_count_value = 0,
+      std::shared_ptr<const FixedStatePrefixCheckpoint> prefix_checkpoint_value = {})
+      : request_id{request_id_value},
+        target_tokens{target_tokens_value},
+        capture_count{capture_count_value},
+        prefix_checkpoint{std::move(prefix_checkpoint_value)} {}
+
   const void* request_id{};
   uint64_t target_tokens{};
   size_t capture_count{};
+  std::shared_ptr<const FixedStatePrefixCheckpoint> prefix_checkpoint;
 };
 
 struct FixedStateBinding {
@@ -115,11 +128,36 @@ struct FixedStatePoolSnapshot {
   size_t free_slots{};
   size_t reserved_slots{};
   size_t committed_slots{};
+  size_t checkpoint_capacity{};
+  size_t checkpoint_count{};
   size_t persistent_bytes{};
   size_t zeroing_scratch_bytes{};
   size_t active_staging_bytes{};
   bool healthy{true};
   std::vector<FixedStateSlotSnapshot> slots;
+};
+
+class FixedStatePrefixCheckpoint {
+ public:
+  size_t TokenCount() const { return token_count_; }
+
+ private:
+  FixedStatePrefixCheckpoint(const FixedStatePool* pool, size_t slot,
+                             uint64_t generation, size_t token_count,
+                             std::shared_ptr<void> lease)
+      : pool_{pool},
+        slot_{slot},
+        generation_{generation},
+        token_count_{token_count},
+        lease_{std::move(lease)} {}
+
+  const FixedStatePool* pool_{};
+  size_t slot_{};
+  uint64_t generation_{};
+  size_t token_count_{};
+  std::shared_ptr<void> lease_;
+
+  friend class FixedStatePool;
 };
 
 class FixedStateReservation {
@@ -139,6 +177,13 @@ class FixedStateReservation {
   bool CapturesStateUpdates() const;
   // True when model inputs and outputs view the active and inactive persistent banks directly.
   bool UsesDirectBindings() const;
+
+  // Identifies the bindings this reservation presents: which device addresses they view, and
+  // whether the compact state_update outputs are among them. Direct bindings view a persistent bank
+  // at a slot offset, and which bank is active flips on every commit, so a captured CUDA graph may
+  // only be replayed against a reservation reporting the same key. Staged bindings always view the
+  // pool's pool-lifetime staging buffers. Zero means the step has no fixed state at all.
+  size_t BindingLayoutKey() const;
 
   // Commits only the first `kept_tokens` of the `step_tokens` this row's request contributed,
   // by replaying the captured compact updates through the accepted transition and lowering the
@@ -184,7 +229,8 @@ class FixedStateReservation {
 
 class FixedStatePool {
  public:
-  FixedStatePool(std::shared_ptr<Model> model, size_t capacity);
+  FixedStatePool(std::shared_ptr<Model> model, size_t capacity,
+                 size_t prefix_checkpoint_capacity = 0);
   ~FixedStatePool();
 
   FixedStatePool(const FixedStatePool&) = delete;
@@ -207,6 +253,10 @@ class FixedStatePool {
   size_t PlannedStagingBytes(size_t row_count, bool captures_state_updates = false) const;
   bool SupportsStateUpdates() const;
   size_t StateUpdateCapacity() const;
+  size_t PrefixCheckpointCapacity() const;
+  size_t AvailablePrefixCheckpoints() const;
+  std::shared_ptr<const FixedStatePrefixCheckpoint> CapturePrefixCheckpoint(
+      const void* request_id);
 
   FixedStateSlotHandle HandleFor(const void* request_id) const;
   // True when `request_id` currently owns a committed slot. Non-throwing counterpart to HandleFor
@@ -238,6 +288,9 @@ class FixedStatePool {
   void ReleaseProvisionalSlots(FixedStateReservation& reservation) noexcept;
   void Discard(FixedStateReservation& reservation) noexcept;
   void Finish(FixedStateReservation& reservation) noexcept;
+  void ReleasePrefixCheckpoint(size_t slot, uint64_t generation) noexcept;
+  void ValidatePrefixCheckpoint(
+      const FixedStatePrefixCheckpoint& checkpoint) const;
 
   std::unique_ptr<Impl> impl_;
 

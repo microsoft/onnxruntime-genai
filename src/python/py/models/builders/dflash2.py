@@ -56,6 +56,10 @@ class DFlash2Builder(BlockDrafterBuilder):
         max_position_embeddings,
         filename="dflash2.onnx",
         num_draft_tokens=None,
+        quant=None,
+        lm_head_quant=None,
+        embed_quant=None,
+        fuse_gate_up=False,
     ):
         self.draft_dir = draft_dir
         self.target_dir = target_dir
@@ -65,8 +69,15 @@ class DFlash2Builder(BlockDrafterBuilder):
         # states, the embedding table and the FP8 LM head -- stay at the target's dtype.
         self.io_dtype = ir.DataType.BFLOAT16
         self.external_dtype = io_dtype
+        if quant is not None:
+            self.quant_bits = quant["bits"]
+            self.quant_block_size = quant["block_size"]
+            self.quant_prepack = quant["prepack"]
+        self.lm_head_quant = lm_head_quant
+        self.embed_quant = embed_quant
         self.filename = filename
         self.paged_block_size = paged_block_size
+        self.mlp_attrs = {"fuse_gate_up": fuse_gate_up}
 
         with open(os.path.join(draft_dir, "config.json")) as f:
             cfg = json.load(f)
@@ -151,6 +162,7 @@ class DFlash2Builder(BlockDrafterBuilder):
 
     def _conv_coefficients(self, prefix, x, kernel_weight, rows):
         """``kernel_projection(x)`` split into ``[side][tap]`` per-group deltas."""
+        # Left dense: 5120x64 saves nothing, and these coefficients steer every dynamic conv.
         proj = self.matmul(
             f"{prefix}/kernel_projection/MatMul",
             x,
@@ -158,6 +170,7 @@ class DFlash2Builder(BlockDrafterBuilder):
             self.hidden_size,
             2 * self.taps * self.num_groups,
             rows,
+            quantize=False,
         )
         flat = self.reshape(
             f"{prefix}/kernel_projection/Reshape",
@@ -292,15 +305,7 @@ class DFlash2Builder(BlockDrafterBuilder):
             ctx_kv.append((k, v))
 
         # --- query path ---
-        self.make_initializer(w["embed_tokens.weight"], "model.embed_tokens.weight", to=self.external_dtype)
-        emb_ext = self.binary(
-            "Gather",
-            "/dflash2/embed_tokens/Gather",
-            "model.embed_tokens.weight",
-            "input_ids",
-            self.external_dtype,
-            [rows_q, self.hidden_size],
-        )
+        emb_ext = self.make_embedding("/dflash2/embed_tokens/Gather", rows_q)
         emb = self.unary(
             "Cast", "/dflash2/embed_tokens/Cast", emb_ext, self.io_dtype, [rows_q, self.hidden_size], to=self.io_dtype
         )
@@ -494,22 +499,42 @@ class DFlash2Builder(BlockDrafterBuilder):
 
     def _make_mlp(self, i, x, w, rows_q):
         p = f"/dflash2/layers.{i}/mlp"
-        gate = self.matmul(
-            f"{p}/gate_proj/MatMul",
-            x,
-            w[f"layers.{i}.mlp.gate_proj.weight"],
-            self.hidden_size,
-            self.intermediate_size,
-            rows_q,
-        )
-        up = self.matmul(
-            f"{p}/up_proj/MatMul",
-            x,
-            w[f"layers.{i}.mlp.up_proj.weight"],
-            self.hidden_size,
-            self.intermediate_size,
-            rows_q,
-        )
+        if self.mlp_attrs["fuse_gate_up"]:
+            gate_up = self.matmul(
+                f"{p}/gate_up_proj/MatMul",
+                x,
+                torch.cat((w[f"layers.{i}.mlp.gate_proj.weight"], w[f"layers.{i}.mlp.up_proj.weight"]), dim=0),
+                self.hidden_size,
+                2 * self.intermediate_size,
+                rows_q,
+            )
+            gate, up = self.out(f"{p}/gate_proj/MatMul"), self.out(f"{p}/up_proj/MatMul")
+            self.make_node(
+                "Split",
+                [gate_up, self.const([self.intermediate_size, self.intermediate_size])],
+                [gate, up],
+                name=f"{p}/gate_up_proj/Split",
+                axis=-1,
+            )
+            self.make_value(gate, self.io_dtype, [rows_q, self.intermediate_size])
+            self.make_value(up, self.io_dtype, [rows_q, self.intermediate_size])
+        else:
+            gate = self.matmul(
+                f"{p}/gate_proj/MatMul",
+                x,
+                w[f"layers.{i}.mlp.gate_proj.weight"],
+                self.hidden_size,
+                self.intermediate_size,
+                rows_q,
+            )
+            up = self.matmul(
+                f"{p}/up_proj/MatMul",
+                x,
+                w[f"layers.{i}.mlp.up_proj.weight"],
+                self.hidden_size,
+                self.intermediate_size,
+                rows_q,
+            )
         sig = self.unary("Sigmoid", f"{p}/act/Sigmoid", gate, self.io_dtype, [rows_q, self.intermediate_size])
         silu = self.binary("Mul", f"{p}/act/Mul", gate, sig, self.io_dtype, [rows_q, self.intermediate_size])
         prod = self.binary("Mul", f"{p}/act/MulUp", silu, up, self.io_dtype, [rows_q, self.intermediate_size])
@@ -576,6 +601,7 @@ class DFlash2Builder(BlockDrafterBuilder):
         )
 
         # Low-rank edge scores between position l-1 and l.
+        # Left dense: rank is small and this projection decides which draft path is kept.
         hp = self.matmul(
             "/dflash2/selector/hidden_projection/MatMul",
             hsel,
@@ -583,6 +609,7 @@ class DFlash2Builder(BlockDrafterBuilder):
             self.hidden_size,
             rank,
             "num_sample",
+            quantize=False,
         )
         hp3 = self.reshape(
             "/dflash2/selector/hp", hp, [-1, n_spec, 1, rank], self.io_dtype, ["batch_size", n_spec, 1, rank]

@@ -273,6 +273,10 @@ struct Config {
                                  // 0 = auto-compute as patch_size * spatial_merge_size * 2
                                  // Qwen2.5-VL default: 56 (14*4), Qwen3-VL default: 64 (16*4)
 
+      // LFM2-VL: patch-sequence length every image is padded to so one batch shares a vision run.
+      // 0 = pad to the longest image in the batch. Shipped models: max_image_tokens * downsample_factor^2 = 1024.
+      int max_num_patches{0};
+
       std::string config_filename{"processor_config.json"};
       std::optional<std::string> adapter_filename{};
 
@@ -344,6 +348,100 @@ struct Config {
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
     } vad;
+
+    struct Moonshine {
+      std::string frontend_filename;
+      std::string encoder_filename;
+      std::string adapter_filename;
+      std::string cross_kv_filename;
+      std::string decoder_kv_filename;
+
+      int sample_buffer_size{};
+      int conv1_buffer_size{};
+      int conv2_buffer_size{};
+
+      // Encoder sliding-window geometry.
+      int total_lookahead{};
+      int left_context_frames{};
+
+      // Decoder token-emission cap & frame rate.
+      int max_seq_len{};
+      float tokens_per_second{};
+      float seconds_per_memory_frame{};
+
+      // Segmentation limits (hard cap + VAD-silence min duration), in memory frames.
+      int max_segment_memory_frames{};
+      int min_segment_memory_frames{};
+
+      // Optional per-submodel ORT graph I/O name overrides. If a field is left
+      // empty in genai_config.json, the runtime falls back to the built-in
+      // Moonshine default (see MoonshineConfig::PopulateFromConfig). This
+      // lets a future model rename an input/output without a rebuild.
+      struct Frontend {
+        struct Inputs {
+          std::string audio_chunk;
+          std::string sample_buffer;
+          std::string sample_len;
+          std::string conv1_buffer;
+          std::string conv2_buffer;
+          std::string frame_count;
+        } inputs;
+        struct Outputs {
+          std::string features;
+          std::string sample_buffer;
+          std::string sample_len;
+          std::string conv1_buffer;
+          std::string conv2_buffer;
+          std::string frame_count;
+        } outputs;
+      } frontend;
+
+      struct Encoder {
+        struct Inputs {
+          std::string features;
+        } inputs;
+        struct Outputs {
+          std::string encoded;
+        } outputs;
+      } encoder;
+
+      struct Adapter {
+        struct Inputs {
+          std::string encoded;
+          std::string pos_offset;
+        } inputs;
+        struct Outputs {
+          std::string memory;
+        } outputs;
+      } adapter;
+
+      struct CrossKv {
+        struct Inputs {
+          std::string memory;
+        } inputs;
+        struct Outputs {
+          std::string k_cross;
+          std::string v_cross;
+        } outputs;
+      } cross_kv;
+
+      struct DecoderKv {
+        struct Inputs {
+          std::string token;
+          std::string k_self;
+          std::string v_self;
+          std::string k_cross;
+          std::string v_cross;
+        } inputs;
+        struct Outputs {
+          std::string logits;
+          std::string k_self;
+          std::string v_self;
+          std::string k_cross;
+          std::string v_cross;
+        } outputs;
+      } decoder_kv;
+    } moonshine;
 
     struct SharedInitializer {
       std::string name;
@@ -426,6 +524,8 @@ struct Config {
         std::string position_ids{Defaults::PositionIdsName};
         std::string past_key_names{Defaults::PastKeyName};
         std::string past_value_names{Defaults::PastValueName};
+        std::string past_key_scale_names;
+        std::string past_value_scale_names;
         std::string past_names;  // When key/value pairs are combined
         std::string cross_past_key_names, cross_past_value_names;
         std::string past_key_values_length{Defaults::PastKeyValuesLengthName};
@@ -469,6 +569,8 @@ struct Config {
         std::string logits{Defaults::LogitsName};
         std::string present_key_names{Defaults::PresentKeyName};
         std::string present_value_names{Defaults::PresentValueName};
+        std::string present_key_scale_names;
+        std::string present_value_scale_names;
         std::string present_names;  // When key/value pairs are combined
         std::string output_cross_qk_names{Defaults::OutputCrossQKName};
         std::string rnn_states{Defaults::RnnStatesName};
@@ -519,6 +621,7 @@ struct Config {
     // loads the head as a separate Model; MtpGenerator uses this block to map the main model's
     // hidden-state output and the head's feedback output.
     struct Mtp {
+      bool enabled{true};
       std::string filename;  // e.g. "mtp.onnx"; used by model packaging/building tools
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
@@ -533,6 +636,9 @@ struct Config {
       // The main model must be exported with this output exposed (include_hidden_states).
       std::string main_hidden_states{Defaults::HiddenStatesName};
 
+      // The head's paged cache is built from a projection of model.decoder. The head is always an
+      // unquantized full-attention layer: it owns no per-token scale caches, and the projection
+      // clears the target's scale name templates rather than letting the head inherit them.
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};
         std::string hidden_states{Defaults::HiddenStatesName};
@@ -548,6 +654,8 @@ struct Config {
         std::string present_key_names{Defaults::PresentKeyName};
         std::string present_value_names{Defaults::PresentValueName};
       } outputs;
+
+      bool IsEnabled() const noexcept { return enabled && !filename.empty(); }
     } mtp;
 
     // DFlash 2/DSpark block-drafter metadata. Unlike MTP the drafter is not decoder-shaped: it
@@ -578,6 +686,7 @@ struct Config {
       struct Inputs {
         std::string aux_hidden_states{"aux_hidden_states"};
         std::string input_ids{Defaults::InputIdsName};
+        std::string embeddings{Defaults::InputsEmbedsName};
         std::string q_row_map{"q_row_map"};
         std::string qkv_row_map{"qkv_row_map"};
         std::string block_row_index{"block_row_index"};
@@ -587,6 +696,10 @@ struct Config {
         std::string attention_metadata{Defaults::AttentionMetadataName};
         std::string past_key_names{Defaults::PastKeyName};
         std::string past_value_names{Defaults::PastValueName};
+        // Parsed but not yet implemented: the block drafter owns its own unquantized K/V pool, so a
+        // non-empty value is rejected by ValidateDflash2ModelCompatibility rather than ignored.
+        std::string past_key_scale_names;
+        std::string past_value_scale_names;
       } inputs;
 
       struct Outputs {
@@ -594,6 +707,8 @@ struct Config {
         std::string scores{"draft_scores"};
         std::string present_key_names{Defaults::PresentKeyName};
         std::string present_value_names{Defaults::PresentValueName};
+        std::string present_key_scale_names;
+        std::string present_value_scale_names;
       } outputs;
     } dflash2;
 
@@ -636,11 +751,14 @@ struct Config {
 
   struct Engine {
     struct DynamicBatching {
-      size_t block_size{256};                       // Total number of slots per block.
-      std::optional<size_t> num_blocks;             // Total number of blocks per layer.
+      size_t block_size{256};  // Total number of slots per block.
+      // Baseline target blocks; Engine auxiliary caches share the equivalent byte budget.
+      std::optional<size_t> num_blocks;
       std::optional<float> gpu_utilization_factor;  // Fraction of free GPU memory to use for key-value cache.
       size_t max_batch_size{16};                    // Maximum batch size for dynamically batching requests.
       size_t max_scheduled_tokens{2048};            // Maximum tokens in one dynamically batched model run.
+      bool prefix_caching{true};
+      bool prefix_caching_explicitly_set{};
     };
     std::optional<DynamicBatching> dynamic_batching;  // Dynamic batching settings
 
@@ -679,6 +797,12 @@ void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);
 int SafeDoubleToInt(double x, std::string_view name);
+
+// Logs a warning when the drafter's exported geometry is narrower than
+// speculative.max_draft_tokens. The engine clamps to the smallest bound at dispatch rather than
+// failing, so this is the only signal that a configured width will not be used. Bounds that
+// depend on how the model is hosted are reported by the engine instead.
+void WarnOnClampedDraftWidth(const Config& config);
 
 // Normalizes historical casings, short aliases, and full ORT names (e.g.
 // "CUDAExecutionProvider") to the canonical dispatch-table name; unknown names pass through.

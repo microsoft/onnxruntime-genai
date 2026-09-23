@@ -187,7 +187,8 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
   const size_t cache_query_token_cap = cache_manager_->MaxQueryTokensPerRequest();
   const size_t max_draft_token_count = cache_manager_->MaxDraftTokensPerStep();
 
-  const auto add_candidate = [&candidates, cache_query_token_cap, max_draft_token_count](
+  const auto add_candidate = [&candidates, cache_query_token_cap, max_draft_token_count,
+                              this](
                                  const std::shared_ptr<Request>& request,
                                  bool newly_admitted) {
     const auto snapshot = request->Snapshot();
@@ -197,8 +198,14 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
       throw StepPlanningConsistencyError(
           "Request status is invalid for dynamic step planning.");
     }
+    auto prefix_match =
+        newly_admitted ? cache_manager_->MatchPrefix(*request) : nullptr;
+    const size_t effective_processed_sequence_length =
+        prefix_match ? prefix_match->token_count
+                     : static_cast<size_t>(snapshot.processed_sequence_length);
     const auto remaining_token_count =
-        snapshot.current_sequence_length - snapshot.processed_sequence_length;
+        snapshot.current_sequence_length -
+        static_cast<int64_t>(effective_processed_sequence_length);
     if (remaining_token_count <= 0) {
       throw StepPlanningConsistencyError(
           "Cannot plan a request with no unprocessed tokens.");
@@ -208,6 +215,7 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
     candidate.entry.request = request;
     candidate.entry.request_id = request.get();
     candidate.entry.sequence_length_before = snapshot.current_sequence_length;
+    candidate.entry.prefix_match = std::move(prefix_match);
     // Drafts extend a decode step, which by definition ends at the sequence tail. A prefill chunk
     // has committed tokens of its own left to push through, so it can never verify one.
     candidate.entry.draft_token_count =
@@ -234,7 +242,7 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
         candidate.entry.draft_token_count,
     };
     candidate.processed_sequence_length =
-        static_cast<size_t>(snapshot.processed_sequence_length);
+        effective_processed_sequence_length;
     candidate.remaining_token_count = static_cast<size_t>(remaining_token_count);
     candidates.push_back(std::move(candidate));
   };
@@ -273,7 +281,27 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
       dynamic_batching.max_batch_size);
 
   auto result = cache_manager_->PlanStepResources(plan);
+  const auto record_deferred_prefix_matches = [&] {
+    if (!result.capacity_deferred) {
+      return;
+    }
+    size_t deferred_matches = 0;
+    for (const auto& candidate : candidates) {
+      if (!candidate.entry.prefix_match ||
+          candidate.entry.request_id == result.unserviceable_request_id) {
+        continue;
+      }
+      const bool selected = std::any_of(
+          plan.requests.begin(), plan.requests.end(),
+          [&](const RequestStepPlan& entry) {
+            return entry.request_id == candidate.entry.request_id;
+          });
+      deferred_matches += selected ? 0 : 1;
+    }
+    cache_manager_->RecordDeferredPrefixMatches(deferred_matches);
+  };
   if (!result.executable) {
+    record_deferred_prefix_matches();
     return result;
   }
 
@@ -376,13 +404,15 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
       plan.requests = budgeted_requests;
     }
   }
+  record_deferred_prefix_matches();
   cache_manager_->OrderStepForExecution(plan);
 
   // VarlenDecoderIO concatenates every request's pending tokens into one flat input. These offsets
   // describe that packed layout and identify the last logits row for each request, which is the row
   // used to sample its next token.
   size_t packed_token_offset = 0;
-  plan.graph_capture_eligible = true;
+  plan.graph_capture_eligible = !plan.requests.empty();
+  size_t uniform_token_count = 0;
   for (size_t i = 0; i < plan.requests.size(); ++i) {
     auto& entry = plan.requests[i];
     const size_t scheduling_index = entry.scheduling_order;
@@ -395,8 +425,26 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
         packed_token_offset + entry.unprocessed_token_count - 1;
     packed_token_offset += entry.unprocessed_token_count;
     plan.token_count += entry.unprocessed_token_count;
+    if (i == 0) {
+      uniform_token_count = entry.unprocessed_token_count;
+    }
+    // One captured graph bakes in every tensor shape it was recorded with, so a step qualifies only
+    // when each request contributes the same number of tokens.
     plan.graph_capture_eligible &=
-        !entry.is_prefill && entry.unprocessed_token_count == 1;
+        !entry.is_prefill && entry.unprocessed_token_count == uniform_token_count &&
+        entry.unprocessed_token_count != 0;
+  }
+  try {
+    for (const auto& entry : plan.requests) {
+      if (entry.prefix_match) {
+        entry.request->StagePrefixAdoption(entry.prefix_match->token_count);
+      }
+    }
+  } catch (...) {
+    for (const auto& entry : plan.requests) {
+      entry.request->RollbackPrefixAdoption();
+    }
+    throw;
   }
   return result;
 }

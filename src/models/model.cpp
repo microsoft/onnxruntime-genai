@@ -34,6 +34,7 @@
 #include "whisper.h"
 #include "parakeet.h"
 #include "nemotron_speech.h"
+#include "moonshine_streaming.h"
 #include "multi_modal.h"
 #include "lfm2.h"
 #include "marian.h"
@@ -936,7 +937,7 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
   // Check if it's a pipeline model by checking if decoder.pipeline is configured
   if ((config->model.type == "fara" || config->model.type == "qwen2_5_vl" || config->model.type == "qwen3_vl") && !config->model.decoder.pipeline.empty())
     return std::make_shared<Qwen2_5_VL_PipelineModel>(std::move(config), ort_env);
-  if (config->model.type == "lfm2")
+  if (ModelType::IsLFM2(config->model.type))
     return std::make_shared<LFM2_Model>(std::move(config), ort_env);
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
@@ -944,6 +945,8 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
   if (ModelType::IsRNNT(config->model.type))
     return std::make_shared<NemotronSpeechModel>(std::move(config), ort_env);
+  if (ModelType::IsStreamingEncDecASR(config->model.type))
+    return std::make_shared<MoonshineStreamingModel>(std::move(config), ort_env);
   if (ModelType::IsTDT(config->model.type))
     return std::make_shared<ParakeetTdtModel>(std::move(config), ort_env);
   if (ModelType::IsALM(config->model.type))

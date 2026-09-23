@@ -36,7 +36,7 @@ def _const(name, array):
     return tensor
 
 
-def _decoder_graph(logits_per_token=False):
+def _decoder_graph(logits_per_token=False, scale_caches=False):
     i64 = lambda v: np.asarray(v, dtype=np.int64)  # noqa: E731
     initializers = [
         _const("c0", i64(0)),
@@ -162,12 +162,21 @@ def _decoder_graph(logits_per_token=False):
             for layer in PAGED_LAYERS
         ],
     ]
+    if scale_caches:
+        for layer in PAGED_LAYERS:
+            for side in ("key", "value"):
+                input_name = f"past_key_values.{layer}.{side}_scale"
+                output_name = f"present.{layer}.{side}_scale"
+                shape = [NUM_BLOCKS, BLOCK_SIZE, 1]
+                inputs.append(helper.make_tensor_value_info(input_name, TensorProto.FLOAT16, shape))
+                outputs.append(helper.make_tensor_value_info(output_name, TensorProto.FLOAT16, shape))
+                node("Identity", [input_name], [output_name])
     return helper.make_graph(nodes, "synthetic_paged_decoder", inputs, outputs, initializer=initializers)
 
 
-def create_decoder(output_dir, logits_per_token=False):
+def create_decoder(output_dir, logits_per_token=False, scale_caches=False):
     model = helper.make_model(
-        _decoder_graph(logits_per_token),
+        _decoder_graph(logits_per_token, scale_caches),
         opset_imports=[helper.make_operatorsetid("", 17)],
         ir_version=9,
         producer_name="onnxruntime-genai",
@@ -178,7 +187,7 @@ def create_decoder(output_dir, logits_per_token=False):
     onnx.save_model(model, path)
 
 
-def create_config(output_dir):
+def create_config(output_dir, scale_caches=False):
     config = {
         "model": {
             "type": "decoder",
@@ -230,6 +239,11 @@ def create_config(output_dir):
             },
         },
     }
+    if scale_caches:
+        decoder = config["model"]["decoder"]
+        for side in ("key", "value"):
+            decoder["inputs"][f"past_{side}_scale_names"] = f"past_key_values.%d.{side}_scale"
+            decoder["outputs"][f"present_{side}_scale_names"] = f"present.%d.{side}_scale"
     path = os.path.join(output_dir, "genai_config.json")
     with open(path, "w") as f:
         json.dump(config, f, indent=2)
@@ -242,11 +256,12 @@ def main():
         default=os.path.join(os.path.dirname(__file__), "..", "..", "models", "engine", "synthetic-paged"),
     )
     parser.add_argument("--logits_per_token", action="store_true")
+    parser.add_argument("--scale_caches", action="store_true")
     args = parser.parse_args()
     output_dir = os.path.normpath(args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
-    create_decoder(output_dir, args.logits_per_token)
-    create_config(output_dir)
+    create_decoder(output_dir, args.logits_per_token, args.scale_caches)
+    create_config(output_dir, args.scale_caches)
 
 
 if __name__ == "__main__":

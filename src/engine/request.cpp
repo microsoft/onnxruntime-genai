@@ -244,6 +244,8 @@ uint64_t Request::CommitTurnAdmission(
   guidance_logits_processor_ = std::move(admission.pending_guidance);
   guidance_transaction_checkpoint_.reset();
   turn_policy_ = admission.policy;
+  adopted_prefix_length_ = 0;
+  turn_cached_prompt_tokens_ = 0;
   // Every terminal path already discarded the previous turn's pending reseed, so this simply
   // records what this turn asked for: nothing when the seed is omitted, or a new basis that becomes
   // durable only once a sampling step commits.
@@ -323,8 +325,7 @@ void Request::MarkClosedFromEngine(const Engine& engine) noexcept {
   staged_draft_count_ = 0;
   accepted_draft_count_ = 0;
   evaluated_draft_count_ = 0;
-  draft_verification_completed_generation_ = false;
-  draft_verification_stop_match_index_ = -1;
+  draft_verification_.Reset();
 }
 
 void Request::CompleteCloseFromEngine(const Engine& engine) noexcept {
@@ -368,8 +369,7 @@ void Request::ReleaseTurnResources() noexcept {
   staged_draft_count_ = 0;
   accepted_draft_count_ = 0;
   evaluated_draft_count_ = 0;
-  draft_verification_completed_generation_ = false;
-  draft_verification_stop_match_index_ = -1;
+  draft_verification_.Reset();
   // The turn's reseed dies with the turn. A reseed that a sampling step already committed was
   // promoted to current_seed_basis_ by CommitStateForTransaction(), which runs before any terminal
   // boundary; anything still pending here belongs to a turn that ended before it sampled (or whose
@@ -427,8 +427,7 @@ void Request::CompleteClose() noexcept {
   staged_draft_count_ = 0;
   accepted_draft_count_ = 0;
   evaluated_draft_count_ = 0;
-  draft_verification_completed_generation_ = false;
-  draft_verification_stop_match_index_ = -1;
+  draft_verification_.Reset();
   std::vector<int32_t>{}.swap(tokens_host_);
 }
 
@@ -551,8 +550,7 @@ void Request::AppendDraftsForTransaction(size_t draft_count) {
   staged_draft_count_ = draft_count;
   accepted_draft_count_ = 0;
   evaluated_draft_count_ = 0;
-  draft_verification_completed_generation_ = false;
-  draft_verification_stop_match_index_ = -1;
+  draft_verification_.Reset();
 }
 
 void Request::CommitAcceptedDraftsForTransaction(size_t accepted_count) {
@@ -567,8 +565,7 @@ void Request::CommitAcceptedDraftsForTransaction(size_t accepted_count) {
   staged_draft_count_ = 0;
   accepted_draft_count_ = 0;
   evaluated_draft_count_ = 0;
-  draft_verification_completed_generation_ = false;
-  draft_verification_stop_match_index_ = -1;
+  draft_verification_.Reset();
 
   for (size_t offset = 0; offset < accepted_count; ++offset) {
     // Every iteration examines exactly one proposed draft position's target acceptance, whether or
@@ -590,8 +587,8 @@ void Request::CommitAcceptedDraftsForTransaction(size_t accepted_count) {
       // so its bytes must never reach the controller or be able to produce a StopString result.
       if (stop_controller_) {
         if (const auto& match = stop_controller_->ObserveToken(token)) {
-          draft_verification_stop_match_index_ = static_cast<int32_t>(match->index);
-          draft_verification_completed_generation_ = true;
+          draft_verification_.stop_match_index = static_cast<int32_t>(match->index);
+          draft_verification_.completed_generation = true;
           break;
         }
       }
@@ -605,7 +602,9 @@ void Request::CommitAcceptedDraftsForTransaction(size_t accepted_count) {
         turn_generated_tokens_ + accepted_draft_count_ >=
             *turn_policy_.max_generated_tokens;
     if (search_->IsDone() || turn_limit_reached) {
-      draft_verification_completed_generation_ = true;
+      draft_verification_.completed_generation = true;
+      draft_verification_.eos =
+          search_->IsDone() && contains(params_->config.model.eos_token_id, token);
       break;
     }
   }
@@ -616,7 +615,7 @@ void Request::CommitAcceptedDraftsForTransaction(size_t accepted_count) {
   // turn/context limit interrupted it) and the caller proposed more drafts than were confirmed,
   // that rejected position was examined (compared against the target's own argmax and found not to
   // match) even though it is not processed here, so it counts too.
-  if (!draft_verification_completed_generation_ && accepted_count < proposed_count) {
+  if (!draft_verification_.completed_generation && accepted_count < proposed_count) {
     ++evaluated_draft_count_;
   }
 }
@@ -672,8 +671,7 @@ void Request::DiscardStagedDrafts() noexcept {
   }
   accepted_draft_count_ = 0;
   evaluated_draft_count_ = 0;
-  draft_verification_completed_generation_ = false;
-  draft_verification_stop_match_index_ = -1;
+  draft_verification_.Reset();
 }
 
 RequestStateSnapshot Request::Snapshot() const {
@@ -800,6 +798,33 @@ std::span<const int32_t> Request::UnprocessedTokensCpu() const {
   return std::span<const int32_t>{tokens_host_}.subspan(begin, end - begin);
 }
 
+void Request::StagePrefixAdoption(size_t adopted_tokens) {
+  if (!IsQueued(status_) || prefix_adoption_staged_ ||
+      processed_sequence_length_ != 0 || adopted_tokens == 0 ||
+      adopted_tokens >= static_cast<size_t>(CurrentSequenceLength()) ||
+      adopted_tokens > tokens_host_.size()) {
+    throw std::runtime_error(
+        "A cached prefix can only be staged for an unprocessed queued request.");
+  }
+  processed_sequence_length_ = static_cast<int64_t>(adopted_tokens);
+  adopted_prefix_length_ = adopted_tokens;
+  const size_t turn_start = tokens_host_.size() - turn_prompt_tokens_;
+  turn_cached_prompt_tokens_ =
+      adopted_tokens > turn_start ? adopted_tokens - turn_start : 0;
+  prefix_adoption_staged_ = true;
+}
+
+void Request::RollbackPrefixAdoption() noexcept {
+  if (!prefix_adoption_staged_) {
+    return;
+  }
+  processed_sequence_length_ = 0;
+  adopted_prefix_length_ = 0;
+  turn_cached_prompt_tokens_ = 0;
+  prefix_adoption_staged_ = false;
+  scheduled_token_count_ = 0;
+}
+
 bool Request::IsTurnComplete() const {
   return status_ == RequestStatus::TurnComplete;
 }
@@ -881,7 +906,7 @@ RequestStepResult Request::StageGenerationForTransaction(
 }
 
 RequestStepResult Request::StageDraftCompletionForTransaction() {
-  if (!draft_verification_completed_generation_) {
+  if (!draft_verification_.completed_generation) {
     throw std::logic_error(
         "Draft completion was staged before verification completed generation.");
   }
@@ -891,22 +916,20 @@ RequestStepResult Request::StageDraftCompletionForTransaction() {
   // Stop-string precedence over the turn/context limit was already decided when this token was
   // observed, immediately after it was accepted in CommitAcceptedDraftsForTransaction()'s loop --
   // mirroring StageGeneration()'s identical precedence for the ordinary one-token path.
-  if (draft_verification_stop_match_index_ >= 0) {
+  if (draft_verification_.stop_match_index >= 0) {
     finish_reason = GenerationFinishReason::StopString;
-    matched_stop_string_index = draft_verification_stop_match_index_;
+    matched_stop_string_index = draft_verification_.stop_match_index;
   } else {
     const bool turn_limit_reached =
         turn_policy_.max_generated_tokens &&
         turn_generated_tokens_ + accepted_draft_count_ >=
             *turn_policy_.max_generated_tokens;
+    // An accepted EOS does not append, so it cannot newly reach the turn limit at the same
+    // position. The order here is therefore deliberate but unobservable for a valid turn.
     if (turn_limit_reached) {
       finish_reason = GenerationFinishReason::TurnLimit;
-    } else {
-      const auto next_tokens = search_->GetNextTokens().CpuSpan();
-      if (search_->IsDone() && !next_tokens.empty() &&
-          contains(params_->config.model.eos_token_id, next_tokens.back())) {
-        finish_reason = GenerationFinishReason::EosToken;
-      }
+    } else if (draft_verification_.eos) {
+      finish_reason = GenerationFinishReason::EosToken;
     }
   }
   RequestStepResult result{
@@ -929,8 +952,7 @@ void Request::RestoreStateForTransaction() {
   accepted_draft_count_ = 0;
   evaluated_draft_count_ = 0;
   scheduled_token_count_ = 0;
-  draft_verification_completed_generation_ = false;
-  draft_verification_stop_match_index_ = -1;
+  draft_verification_.Reset();
   // The pending reseed itself is deliberately kept so the retry reseeds identically; only its
   // "already applied to the live streams" marker is undone, because rng_ was just rolled back.
   pending_reseed_applied_ = false;
@@ -954,8 +976,7 @@ void Request::QueueStateRestoreForTransaction() {
   accepted_draft_count_ = 0;
   evaluated_draft_count_ = 0;
   scheduled_token_count_ = 0;
-  draft_verification_completed_generation_ = false;
-  draft_verification_stop_match_index_ = -1;
+  draft_verification_.Reset();
   pending_reseed_applied_ = false;
   // Deliberately does not replay the stop controller yet: like the guidance checkpoint swap below,
   // that work is deferred to CompleteStateRestoreForTransaction() so this stays lightweight
@@ -1012,8 +1033,7 @@ void Request::CommitStep(const RequestStepPlan& plan,
   staged_draft_count_ = 0;
   accepted_draft_count_ = 0;
   evaluated_draft_count_ = 0;
-  draft_verification_completed_generation_ = false;
-  draft_verification_stop_match_index_ = -1;
+  draft_verification_.Reset();
 }
 
 // Records the tokens this step makes externally visible, in sequence order. Accepted drafts are

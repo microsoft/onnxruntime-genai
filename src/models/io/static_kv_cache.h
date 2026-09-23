@@ -15,6 +15,8 @@ int64_t DetectAndConfigureFixedKvShape(const SessionInfo& session_info,
                                        bool& past_present_share_buffer,
                                        const char* cache_name);
 
+int GetWindowedKeyValueCacheSize(const Model& model, const Config::Search& search, int max_length);
+
 // Abstract base for exposed past/present KV-cache variants. It owns the common
 // layer-name discovery, shape planning, tensor binding, beam-reorder, and rewind
 // copy helpers; concrete variants implement their own update/rewind policy.

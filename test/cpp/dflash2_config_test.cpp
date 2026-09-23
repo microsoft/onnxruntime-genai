@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -11,6 +12,7 @@
 #include <gtest/gtest.h>
 
 #include "dflash2_drafter.h"
+#include "engine/step_plan.h"
 #include "ort_genai.h"
 
 namespace Generators::test {
@@ -186,6 +188,13 @@ TEST(Dflash2ConfigTest, RejectsSimultaneousMtpDrafter) {
   EXPECT_THROW(CreateDflash2Config(config), std::runtime_error);
 }
 
+TEST(Dflash2ConfigTest, AllowsDisabledMtpMetadata) {
+  auto config = MakeDflash2Config();
+  config.model.mtp.filename = "mtp.onnx";
+  config.model.mtp.enabled = false;
+  EXPECT_NO_THROW(CreateDflash2Config(config));
+}
+
 TEST(Dflash2ConfigTest, PreservesTargetProviderOptions) {
   auto config = MakeDflash2Config();
   config.model.decoder.session_options.providers = {"cuda"};
@@ -207,10 +216,57 @@ TEST(Dflash2ConfigTest, PreservesTargetProviderOptions) {
             Config::NamedString("device_id", "1"));
 }
 
+TEST(Dflash2ConfigTest, DrafterSessionOverridesTargetConfigEntries) {
+  auto config = MakeDflash2Config();
+  config.model.decoder.session_options.config_entries.push_back(
+      {"ep.cuda.fpa_intb_gemm", "1"});
+  config.model.dflash2.session_options.emplace();
+  config.model.dflash2.session_options->config_entries.push_back(
+      {"ep.cuda.fpa_intb_gemm", "0"});
+
+  const auto projected = CreateDflash2Config(config);
+  const auto& entries = projected->model.decoder.session_options.config_entries;
+  ASSERT_EQ(entries.size(), 1u);
+  EXPECT_EQ(entries[0], Config::NamedString("ep.cuda.fpa_intb_gemm", "0"));
+}
+
 TEST(Dflash2ConfigTest, AcceptsCompatibleAuxiliaryHiddenStates) {
   const auto config = MakeDflash2Config();
   const auto [target, drafter] = MakeCompatibleMetadata();
   EXPECT_NO_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8));
+}
+
+// Dflash2Drafter::AllocateCache() allocates only key and value buffers from the logical head size
+// and binds only past_key_names/past_value_names, so a declared scale template would be silently
+// dropped and the drafter session would run against unbound, uninitialized scales. Reject it.
+TEST(Dflash2ConfigTest, RejectsScaleNameTemplates) {
+  const auto metadata = MakeCompatibleMetadata();
+  for (int field = 0; field < 4; ++field) {
+    auto config = MakeDflash2Config();
+    auto& inputs = config.model.dflash2.inputs;
+    auto& outputs = config.model.dflash2.outputs;
+    switch (field) {
+      case 0:
+        inputs.past_key_scale_names = "draft_past.%d.key_scale";
+        break;
+      case 1:
+        inputs.past_value_scale_names = "draft_past.%d.value_scale";
+        break;
+      case 2:
+        outputs.present_key_scale_names = "draft_present.%d.key_scale";
+        break;
+      default:
+        outputs.present_value_scale_names = "draft_present.%d.value_scale";
+        break;
+    }
+    try {
+      static_cast<void>(ValidateDflash2ModelCompatibility(config, metadata.first, metadata.second, 8));
+      FAIL() << "Expected a quantized block-drafter cache to be rejected for field " << field;
+    } catch (const std::runtime_error& error) {
+      EXPECT_NE(std::string{error.what()}.find("not supported"), std::string::npos)
+          << "field " << field << ": " << error.what();
+    }
+  }
 }
 
 TEST(Dflash2ConfigTest, UsesConfiguredTargetOutput) {
@@ -294,6 +350,31 @@ TEST(Dflash2ConfigTest, RequiresCompleteDrafterContract) {
   drafter.AddInput("past_key_values.1.key", ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16,
                    {-1, -1, 4, 8});
   EXPECT_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8), std::runtime_error);
+}
+
+TEST(Dflash2ConfigTest, RequiresUniqueEmbeddingInputName) {
+  auto config = MakeDflash2Config();
+  config.model.embedding.filename = "embedding.onnx";
+  auto [target, drafter] = MakeCompatibleMetadata();
+  drafter.AddInput(config.model.dflash2.inputs.embeddings, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16, {-1, 64});
+  EXPECT_NO_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8));
+  for (const auto* alias : {"aux_hidden_states", "input_ids", "past_key_values.0.key", ""}) {
+    config.model.dflash2.inputs.embeddings = alias;
+    EXPECT_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8), std::runtime_error) << alias;
+  }
+}
+
+TEST(Dflash2ConfigTest, ReservesEmbeddingGrowthPeak) {
+  EXPECT_EQ(Dflash2Drafter::EmbeddingReservedBytes(2, 4, 64, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16),
+            3u * 2 * 4 * 64 * 2);
+  EXPECT_EQ(Dflash2Drafter::EmbeddingReservedBytes(3, 8, 64, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT),
+            3u * 3 * 8 * 64 * 4);
+  EXPECT_THROW(Dflash2Drafter::EmbeddingReservedBytes(std::numeric_limits<size_t>::max(), 2, 64,
+                                                      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16),
+               std::runtime_error);
+  EXPECT_THROW(Dflash2Drafter::EmbeddingReservedBytes(std::numeric_limits<size_t>::max() / 2, 1, 1,
+                                                      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16),
+               std::runtime_error);
 }
 
 TEST(Dflash2ConfigTest, RequiresOneDraftPerNonAnchorBlockRow) {
@@ -392,6 +473,18 @@ TEST(Dflash2ConfigTest, AccountsForWindowedPagedCache) {
                 config, 16, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16),
             3072u);
   EXPECT_EQ(Dflash2Drafter::PoolBlocks(config, 8, 3), 15u);
+  EXPECT_EQ(Dflash2Drafter::PoolBytes(
+                config, 8, 15, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16),
+            23040u);
+}
+
+TEST(Dflash2ConfigTest, RejectsWindowedPoolByteOverflow) {
+  const auto config = MakeDflash2Config();
+  EXPECT_THROW(
+      Dflash2Drafter::PoolBytes(
+          config, 8, std::numeric_limits<size_t>::max(),
+          ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16),
+      std::runtime_error);
 }
 
 TEST(Dflash2ConfigTest, BillsFullAttentionCachePerTargetBlock) {
@@ -672,6 +765,17 @@ TEST(Dflash2ConfigTest, CapsDraftWidthBySessionAndTurnLimits) {
   EXPECT_EQ(Dflash2DraftWidth(7, 5, 9, 10, 9), 0u);
 }
 
+TEST(Dflash2ConfigTest, GraphBlockTableLimitIncludesWorstCaseQuerySpill) {
+  EXPECT_EQ(Dflash2GraphBlockTableColumnLimit(/*context_length=*/1024,
+                                              /*paged_block_size=*/128,
+                                              /*query_block_size=*/8),
+            9u);
+  EXPECT_EQ(Dflash2GraphBlockTableColumnLimit(/*context_length=*/1024,
+                                              /*paged_block_size=*/128,
+                                              /*query_block_size=*/129),
+            10u);
+}
+
 TEST(Dflash2ConfigTest, ReusesProposalBufferUntilAStepOutgrowsIt) {
   auto* device = GetDeviceInterface(DeviceType::CPU);
   constexpr auto type = Ort::TypeToTensorType<int32_t>;
@@ -695,6 +799,46 @@ TEST(Dflash2ConfigTest, ReusesProposalBufferUntilAStepOutgrowsIt) {
 
   Dflash2StepTensor(slot, device, type, {2, 4});
   EXPECT_EQ(slot->buffer_, grown);
+}
+
+TEST(Dflash2ConfigTest, ReportsWhenAProposalBufferMoves) {
+  auto* device = GetDeviceInterface(DeviceType::CPU);
+  constexpr auto type = Ort::TypeToTensorType<int32_t>;
+  std::unique_ptr<Tensor> slot;
+
+  // A CUDA graph records the address it was captured against, so the caller has to learn about
+  // every move to stop replaying a graph that now points at a freed buffer.
+  bool reallocated = false;
+  Dflash2StepTensor(slot, device, type, {2, 4}, &reallocated);
+  EXPECT_TRUE(reallocated);
+  const void* buffer = slot->buffer_;
+
+  reallocated = false;
+  Dflash2StepTensor(slot, device, type, {1, 3}, &reallocated);
+  EXPECT_FALSE(reallocated);
+
+  std::unique_ptr<Tensor> displaced;
+  Dflash2StepTensor(slot, device, type, {4, 8}, &reallocated, &displaced);
+  EXPECT_TRUE(reallocated);
+  ASSERT_NE(displaced, nullptr);
+  EXPECT_EQ(displaced->buffer_, buffer);
+
+  reallocated = false;
+  Dflash2StepTensor(slot, device, type, {2, 4}, &reallocated);
+  EXPECT_FALSE(reallocated);
+}
+
+TEST(Dflash2ConfigTest, FailedReplacementPreservesTheLiveProposalBuffer) {
+  auto* device = GetDeviceInterface(DeviceType::CPU);
+  std::unique_ptr<Tensor> slot;
+  Dflash2StepTensor(slot, device, Ort::TypeToTensorType<int32_t>, {2, 4});
+  const void* buffer = slot->buffer_;
+
+  // The type change stages a replacement, while the invalid dimension makes CreateTensor fail.
+  EXPECT_ANY_THROW(
+      Dflash2StepTensor(slot, device, Ort::TypeToTensorType<float>, {0, -1}));
+  EXPECT_EQ(slot->GetType(), Ort::TypeToTensorType<int32_t>);
+  EXPECT_EQ(slot->buffer_, buffer);
 }
 
 TEST(Dflash2ConfigTest, AmortizesProposalBufferGrowth) {
@@ -752,6 +896,64 @@ TEST(Dflash2ConfigTest, JoinsOnlyFromAnEligibleTurnAtSequenceStart) {
   EXPECT_TRUE(Dflash2CanJoin(/*draft_eligible=*/true, /*first_position=*/0));
   EXPECT_FALSE(Dflash2CanJoin(/*draft_eligible=*/false, /*first_position=*/0));
   EXPECT_FALSE(Dflash2CanJoin(/*draft_eligible=*/true, /*first_position=*/1));
+}
+
+namespace {
+
+// Captures whatever WarnOnClampedDraftWidth logs for one config.
+std::string CapturedDraftWidthWarnings(const Config& config) {
+  const fs_std::path log_path =
+      fs_std::temp_directory_path() /
+      ("draft_width_warning_" + std::to_string(reinterpret_cast<uintptr_t>(&config)) + ".log");
+  fs_std::remove(log_path);
+  SetLogString("filename", log_path.string());
+  SetLogBool("enabled", true);
+  SetLogBool("warning", true);
+
+  WarnOnClampedDraftWidth(config);
+
+  SetLogString("filename", "");
+  SetLogBool("enabled", false);
+  std::ifstream stream{log_path};
+  std::stringstream contents;
+  contents << stream.rdbuf();
+  stream.close();
+  fs_std::remove(log_path);
+  return contents.str();
+}
+
+}  // namespace
+
+TEST(Dflash2ConfigTest, WarnsWhenTheDrafterCannotSupplyTheConfiguredDraftWidth) {
+  Config config = MakeDflash2Config();
+  config.speculative.max_draft_tokens = 3;  // equals num_draft_tokens, nothing is clamped
+  EXPECT_EQ(CapturedDraftWidthWarnings(config), "");
+
+  config.speculative.max_draft_tokens = 5;
+  EXPECT_NE(CapturedDraftWidthWarnings(config).find("model.dflash2.num_draft_tokens"),
+            std::string::npos);
+
+  config.model.dflash2.is_dspark = true;
+  EXPECT_NE(CapturedDraftWidthWarnings(config).find("model.dspark.num_draft_tokens"),
+            std::string::npos);
+}
+
+TEST(Dflash2ConfigTest, DoesNotWarnAboutHostingLimitsAtConfigLoad) {
+  Config config = MakeDflash2Config();
+  // These bounds depend on which speculative path the Engine hosts, so the Engine reports them.
+  config.model.dflash2.num_draft_tokens = 16;
+  config.model.decoder.state_update_capacity = 1;
+  config.speculative.max_draft_tokens = 16;
+  EXPECT_EQ(CapturedDraftWidthWarnings(config), "");
+}
+
+TEST(Dflash2ConfigTest, DoesNotWarnAboutDraftWidthWithoutABlockDrafter) {
+  Config config = MakeDflash2Config();
+  // MTP's ceiling is an ONNX output that no session has loaded yet, so it cannot be checked here.
+  config.model.dflash2.filename.clear();
+  config.model.mtp.filename = "mtp.onnx";
+  config.speculative.max_draft_tokens = 16;
+  EXPECT_EQ(CapturedDraftWidthWarnings(config), "");
 }
 
 }  // namespace Generators::test

@@ -23,6 +23,15 @@ namespace {
 
 using StateGroupKind = Config::Model::Decoder::StateGroupKind;
 
+class FixedStateCheckpointCaptureError final
+    : public std::exception,
+      public std::nested_exception {
+ public:
+  const char* what() const noexcept override {
+    return "Failed to capture a fixed state prefix checkpoint.";
+  }
+};
+
 std::string ExpandBinding(const std::string& binding, int layer_id) {
   std::string name{binding};
   name.replace(name.find("%d"), 2, std::to_string(layer_id));
@@ -63,6 +72,10 @@ std::vector<int64_t> StorageShape(size_t rows,
   shape[0] = static_cast<int64_t>(rows);
   return shape;
 }
+
+struct PrefixCheckpointOwner {
+  FixedStatePool* pool{};
+};
 
 }  // namespace
 
@@ -168,6 +181,8 @@ struct FixedStateReservation::Storage {
   size_t staging_bytes{};
   bool captures_state_updates{};
   bool uses_direct_bindings{};
+  uint8_t direct_active_bank{};
+  size_t first_direct_slot{};
 };
 
 struct FixedStatePool::Impl {
@@ -202,6 +217,7 @@ struct FixedStatePool::Impl {
     // and a commit stages into the inactive bank, so publish is a bank flip with no device work and
     // a failed prepare cannot corrupt the visible (active) state. See PrepareCommit/PublishCommit.
     std::array<std::shared_ptr<OrtValue>, 2> banks;
+    std::shared_ptr<OrtValue> checkpoint_bank;
     std::unique_ptr<OrtValue> zero_row;  // [1, row...] reusable zeroed gather source.
     // Capacity-sized backing storage shared by the single live reservation. Reservations expose
     // exact-row tensor views over these buffers, so staging allocation is paid before paged KV
@@ -222,12 +238,21 @@ struct FixedStatePool::Impl {
     FixedStateSlotOwnership ownership{FixedStateSlotOwnership::Free};
   };
 
-  explicit Impl(std::shared_ptr<Model> model_value, size_t capacity_value)
+  struct PrefixCheckpointSlot {
+    uint64_t generation{};
+    size_t token_count{};
+    bool occupied{};
+  };
+
+  explicit Impl(std::shared_ptr<Model> model_value, size_t capacity_value,
+                size_t checkpoint_capacity_value)
       : model{std::move(model_value)},
         device{model ? model->p_device_kvcache_ : nullptr},
         capacity{capacity_value},
         slots(capacity_value),
-        committed_index(capacity_value) {}
+        committed_index(capacity_value),
+        prefix_checkpoints(checkpoint_capacity_value),
+        checkpoint_owner(std::make_shared<PrefixCheckpointOwner>()) {}
 
   Slot* FindSlot(const void* request_id) {
     const auto index = committed_index.Find(request_id);
@@ -317,6 +342,15 @@ struct FixedStatePool::Impl {
     destination.CopyFrom(source);
   }
 
+  void GatherCheckpointRow(const TensorSpec& spec, size_t checkpoint_slot,
+                           size_t batch_row, OrtValue& gathered) {
+    auto destination = ByteWrapTensor(*device, gathered)
+                           .subspan(batch_row * spec.row_bytes, spec.row_bytes);
+    const auto source = ByteWrapTensor(*device, *spec.checkpoint_bank)
+                            .subspan(checkpoint_slot * spec.row_bytes, spec.row_bytes);
+    destination.CopyFrom(source);
+  }
+
   // Stages a committed batch row into the slot's inactive persistent bank. The active bank (the
   // visible state) is untouched, so this device copy is fully reversible until PublishCommit flips
   // the slot to `inactive_bank`.
@@ -350,6 +384,8 @@ struct FixedStatePool::Impl {
   std::vector<TensorSpec> tensors;
   std::vector<Slot> slots;
   RequestIndex committed_index;
+  std::vector<PrefixCheckpointSlot> prefix_checkpoints;
+  std::shared_ptr<PrefixCheckpointOwner> checkpoint_owner;
 };
 
 FixedStateReservation::FixedStateReservation(
@@ -422,6 +458,22 @@ bool FixedStateReservation::CapturesStateUpdates() const {
 
 bool FixedStateReservation::UsesDirectBindings() const {
   return storage_ && storage_->uses_direct_bindings;
+}
+
+size_t FixedStateReservation::BindingLayoutKey() const {
+  if (!storage_) {
+    return 0;
+  }
+  // The compact state_update outputs are present in the bindings only on steps that capture them,
+  // so the two binding sets must never share a graph.
+  const size_t state_updates = storage_->captures_state_updates ? 1 : 0;
+  // Staged bindings always view the same pool-lifetime buffers, so only the direct case contributes
+  // an address. Interleaving keeps both halves distinct.
+  const size_t addresses =
+      storage_->uses_direct_bindings
+          ? 1 + storage_->first_direct_slot * 2 + storage_->direct_active_bank
+          : 0;
+  return 1 + state_updates + addresses * 2;
 }
 
 void FixedStateReservation::CommitPrefix(size_t row, size_t step_tokens, size_t kept_tokens) {
@@ -513,8 +565,10 @@ void FixedStateReservation::Discard() {
   pool_->Discard(*this);
 }
 
-FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity)
-    : impl_{std::make_unique<Impl>(std::move(model), capacity)} {
+FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity,
+                               size_t prefix_checkpoint_capacity)
+    : impl_{std::make_unique<Impl>(std::move(model), capacity,
+                                   prefix_checkpoint_capacity)} {
   if (!impl_->model) {
     throw std::invalid_argument("Fixed state pool requires a model.");
   }
@@ -530,13 +584,8 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity)
     throw std::runtime_error(
         "Fixed state pool requires a model state device.");
   }
-  if (impl_->device->GetType() != DeviceType::CPU &&
-      impl_->device->GetType() != DeviceType::CUDA) {
-    throw std::runtime_error(
-        "Fixed state pools currently support only CPU and CUDA devices.");
-  }
-
   impl_->owner = this;
+  impl_->checkpoint_owner->pool = this;
   const ModelStateManifest manifest{impl_->model->config_->model.decoder};
   manifest.ValidateSession(impl_->model->session_info_);
 
@@ -644,6 +693,11 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity)
           "persistent allocation");
       impl_->persistent_bytes = CheckedAdd(
           impl_->persistent_bytes,
+          CheckedMultiply(prefix_checkpoint_capacity, spec.row_bytes,
+                          "prefix checkpoint allocation"),
+          "prefix checkpoint allocation");
+      impl_->persistent_bytes = CheckedAdd(
+          impl_->persistent_bytes,
           CheckedMultiply(capacity, spec.state_update_row_bytes,
                           "state_update persistent allocation"),
           "state_update persistent allocation");
@@ -678,6 +732,16 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity)
   impl_->state_update_capacity = state_update_capacity;
   impl_->state_update_capture_count_name = state_update_capture_count_name;
   impl_->state_update_active_name = state_update_active_name;
+  if (!impl_->device->SupportsTransactionalFixedState()) {
+    throw std::runtime_error(
+        "Fixed state pools require qualified transactional device semantics.");
+  }
+  if (SupportsStateUpdates() &&
+      impl_->device->GetType() != DeviceType::CPU &&
+      impl_->device->GetType() != DeviceType::CUDA) {
+    throw std::runtime_error(
+        "Compact fixed state replay currently supports only CPU and CUDA devices.");
+  }
   if (impl_->state_update_capacity != 0) {
     impl_->persistent_bytes = CheckedAdd(
         impl_->persistent_bytes,
@@ -705,6 +769,12 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity)
     for (auto& bank : spec.banks) {
       bank = OrtValue::CreateTensor(
           impl_->device->GetAllocator(), bank_shape, spec.data_type);
+    }
+    if (prefix_checkpoint_capacity != 0) {
+      spec.checkpoint_bank = OrtValue::CreateTensor(
+          impl_->device->GetAllocator(),
+          StorageShape(prefix_checkpoint_capacity, spec.session_shape),
+          spec.data_type);
     }
     spec.zero_row = OrtValue::CreateTensor(
         impl_->device->GetAllocator(), zero_shape, spec.data_type);
@@ -758,6 +828,7 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity)
 }
 
 FixedStatePool::~FixedStatePool() {
+  impl_->checkpoint_owner->pool = nullptr;
   // Neutralize a still-live reservation so its accessors stay valid but any further transactional
   // call fails cleanly. Only an in-flight (Reserved/Prepared) reservation is downgraded to Failed;
   // a terminal reservation has already detached itself (see Finish) and must keep its final state.
@@ -836,6 +907,111 @@ size_t FixedStatePool::StateUpdateCapacity() const {
   return SupportsStateUpdates() ? impl_->state_update_capacity : 0;
 }
 
+size_t FixedStatePool::PrefixCheckpointCapacity() const {
+  return impl_->prefix_checkpoints.size();
+}
+
+size_t FixedStatePool::AvailablePrefixCheckpoints() const {
+  return static_cast<size_t>(std::count_if(
+      impl_->prefix_checkpoints.begin(), impl_->prefix_checkpoints.end(),
+      [](const Impl::PrefixCheckpointSlot& slot) { return !slot.occupied; }));
+}
+
+std::shared_ptr<const FixedStatePrefixCheckpoint>
+FixedStatePool::CapturePrefixCheckpoint(const void* request_id) {
+  impl_->EnsureHealthy();
+  const auto committed = CommittedState(request_id);
+  if (!committed) {
+    throw std::runtime_error(
+        "Cannot capture fixed state for a request without committed ownership.");
+  }
+  const auto checkpoint_slot = std::find_if(
+      impl_->prefix_checkpoints.begin(), impl_->prefix_checkpoints.end(),
+      [](const Impl::PrefixCheckpointSlot& slot) { return !slot.occupied; });
+  if (checkpoint_slot == impl_->prefix_checkpoints.end()) {
+    return nullptr;
+  }
+  if (checkpoint_slot->generation == std::numeric_limits<uint64_t>::max()) {
+    throw std::overflow_error(
+        "Fixed state prefix checkpoint generation is exhausted.");
+  }
+
+  const size_t checkpoint_index = static_cast<size_t>(
+      checkpoint_slot - impl_->prefix_checkpoints.begin());
+  const uint64_t checkpoint_generation = checkpoint_slot->generation + 1;
+  auto owner = impl_->checkpoint_owner;
+  auto lease = std::shared_ptr<void>{
+      new uint8_t{},
+      [owner, checkpoint_index, checkpoint_generation](void* value) noexcept {
+        delete static_cast<uint8_t*>(value);
+        if (owner->pool) {
+          owner->pool->ReleasePrefixCheckpoint(
+              checkpoint_index, checkpoint_generation);
+        }
+      }};
+  auto checkpoint = std::shared_ptr<const FixedStatePrefixCheckpoint>{
+      new FixedStatePrefixCheckpoint{
+          this, checkpoint_index, checkpoint_generation,
+          static_cast<size_t>(committed->committed_tokens), std::move(lease)}};
+
+  const auto& source_slot = impl_->slots[committed->handle.slot];
+  try {
+    for (const auto& spec : impl_->tensors) {
+      auto destination = ByteWrapTensor(*impl_->device, *spec.checkpoint_bank)
+                             .subspan(checkpoint_index * spec.row_bytes,
+                                      spec.row_bytes);
+      const auto source = ByteWrapTensor(
+                              *impl_->device,
+                              *spec.banks[source_slot.active_bank])
+                              .subspan(committed->handle.slot * spec.row_bytes,
+                                       spec.row_bytes);
+      destination.CopyFrom(source);
+    }
+    impl_->device->Synchronize();
+  } catch (...) {
+    impl_->healthy = false;
+    try {
+      impl_->device->Synchronize();
+    } catch (...) {
+    }
+    throw FixedStateCheckpointCaptureError{};
+  }
+
+  checkpoint_slot->generation = checkpoint_generation;
+  checkpoint_slot->token_count =
+      static_cast<size_t>(committed->committed_tokens);
+  checkpoint_slot->occupied = true;
+  return checkpoint;
+}
+
+void FixedStatePool::ValidatePrefixCheckpoint(
+    const FixedStatePrefixCheckpoint& checkpoint) const {
+  if (checkpoint.pool_ != this ||
+      checkpoint.slot_ >= impl_->prefix_checkpoints.size()) {
+    throw std::runtime_error(
+        "Fixed state prefix checkpoint belongs to another pool.");
+  }
+  const auto& slot = impl_->prefix_checkpoints[checkpoint.slot_];
+  if (!slot.occupied ||
+      slot.generation != checkpoint.generation_ ||
+      slot.token_count != checkpoint.token_count_) {
+    throw std::runtime_error("Fixed state prefix checkpoint is stale.");
+  }
+}
+
+void FixedStatePool::ReleasePrefixCheckpoint(
+    size_t slot_index, uint64_t generation) noexcept {
+  if (!impl_ || slot_index >= impl_->prefix_checkpoints.size()) {
+    return;
+  }
+  auto& slot = impl_->prefix_checkpoints[slot_index];
+  if (!slot.occupied || slot.generation != generation) {
+    return;
+  }
+  slot.token_count = 0;
+  slot.occupied = false;
+}
+
 FixedStateSlotHandle FixedStatePool::HandleFor(
     const void* request_id) const {
   if (!request_id) {
@@ -912,6 +1088,7 @@ FixedStateReservation FixedStatePool::Reserve(
     uint64_t handle_generation{};
     uint64_t expected_state_generation{};
     uint64_t target_tokens{};
+    std::shared_ptr<const FixedStatePrefixCheckpoint> prefix_checkpoint;
   };
   std::vector<RowPlan> plan;
   plan.reserve(requests.size());
@@ -944,10 +1121,21 @@ FixedStateReservation FixedStatePool::Reserve(
           "Fixed state reservation contains an invalid or duplicate request.");
     }
     const Impl::Slot* slot = impl_->FindSlot(request_id);
+    if (request.prefix_checkpoint) {
+      ValidatePrefixCheckpoint(*request.prefix_checkpoint);
+      if (request.prefix_checkpoint->TokenCount() >= request.target_tokens) {
+        throw std::runtime_error(
+            "A fixed state prefix checkpoint must leave at least one token to execute.");
+      }
+    }
     RowPlan row;
     row.request_id = request_id;
     row.target_tokens = request.target_tokens;
     if (slot && slot->ownership == FixedStateSlotOwnership::Committed) {
+      if (request.prefix_checkpoint) {
+        throw std::runtime_error(
+            "A resident request cannot adopt a fixed state prefix checkpoint.");
+      }
       row.slot_index = impl_->SlotIndex(*slot);
       row.provisional = false;
       row.handle_generation = slot->generation;
@@ -964,6 +1152,7 @@ FixedStateReservation FixedStatePool::Reserve(
       row.provisional = true;
       row.handle_generation = free_slot.generation + 1;
       row.expected_state_generation = 0;
+      row.prefix_checkpoint = request.prefix_checkpoint;
     }
     plan.push_back(row);
   }
@@ -993,7 +1182,7 @@ FixedStateReservation FixedStatePool::Reserve(
   // Normalize only minority rows by copying their visible state to the cohort's canonical bank.
   // The copy does not advance request state: both banks contain the same committed value, and the
   // host bank selector changes only after every copy completes successfully.
-  bool direct_layout = true;
+  bool direct_layout = impl_->device->SupportsOffsetTensorViews();
   const size_t first_direct_slot = plan.front().slot_index;
   size_t bank_one_count = 0;
   for (size_t row = 0; row < plan.size(); ++row) {
@@ -1068,6 +1257,8 @@ FixedStateReservation FixedStatePool::Reserve(
 
   const size_t batch_rows = requests.size();
   storage->uses_direct_bindings = direct_layout;
+  storage->direct_active_bank = direct_layout ? direct_active_bank : uint8_t{0};
+  storage->first_direct_slot = direct_layout ? first_direct_slot : size_t{0};
   if (impl_->state_update_capacity != 0) {
     storage->state_update_capture_count_name = impl_->state_update_capture_count_name;
     const std::array<int64_t, 1> capture_count_shape{static_cast<int64_t>(batch_rows)};
@@ -1234,7 +1425,12 @@ FixedStateReservation FixedStatePool::Reserve(
         auto& gathered = *storage->gathered_inputs[tensor_index];
         for (size_t row = 0; row < plan.size(); ++row) {
           if (plan[row].provisional) {
-            impl_->GatherZeroRow(spec, row, gathered);
+            if (plan[row].prefix_checkpoint) {
+              impl_->GatherCheckpointRow(
+                  spec, plan[row].prefix_checkpoint->slot_, row, gathered);
+            } else {
+              impl_->GatherZeroRow(spec, row, gathered);
+            }
           } else {
             impl_->GatherResidentRow(spec, plan[row].slot_index,
                                      impl_->slots[plan[row].slot_index].active_bank,
@@ -1265,7 +1461,10 @@ FixedStateReservation FixedStatePool::Reserve(
     slot.request_id = plan[row].request_id;
     ++slot.generation;
     slot.state_generation = 0;
-    slot.committed_tokens = 0;
+    slot.committed_tokens =
+        plan[row].prefix_checkpoint
+            ? plan[row].prefix_checkpoint->TokenCount()
+            : 0;
     slot.reservation_id = reservation_id;
     slot.active_bank = provisional_active_bank;
     slot.ownership = FixedStateSlotOwnership::Reserved;
@@ -1332,6 +1531,9 @@ uint64_t FixedStatePool::CommittedTokens(
 FixedStatePoolSnapshot FixedStatePool::Snapshot() const {
   FixedStatePoolSnapshot snapshot;
   snapshot.capacity = impl_->capacity;
+  snapshot.checkpoint_capacity = impl_->prefix_checkpoints.size();
+  snapshot.checkpoint_count = impl_->prefix_checkpoints.size() -
+                              AvailablePrefixCheckpoints();
   snapshot.persistent_bytes = impl_->persistent_bytes;
   snapshot.zeroing_scratch_bytes = impl_->zeroing_scratch_bytes;
   snapshot.active_staging_bytes = impl_->active_staging_bytes;

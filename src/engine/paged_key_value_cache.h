@@ -12,6 +12,7 @@
 #include "block.h"
 #include "engine_invariants.h"
 #include "paged_cache_reservation.h"
+#include "prefix_cache.h"
 #include "request.h"
 #include "step_plan.h"
 
@@ -34,15 +35,17 @@ inline size_t GetGraphBlockTableColumns(size_t max_blocks, size_t max_columns) {
   return columns;
 }
 
-size_t ComputePagedBlockCapacity(size_t available_memory_bytes,
-                                 float gpu_utilization_factor,
-                                 size_t reserved_memory_bytes,
-                                 size_t block_size,
-                                 size_t num_key_value_heads,
-                                 size_t head_size,
-                                 size_t full_layer_count,
-                                 size_t element_size,
-                                 size_t auxiliary_bytes_per_block = 0);
+// Blocks the target pool can hold in `available_memory_bytes`, after a fragmentation allowance and
+// the caller's utilization factor. `primary_bytes_per_block` is the target's own cost for one block
+// across all full-attention layers -- use PagedKeyValueCacheBytesPerBlock() to obtain it, so that
+// physical head widths and per-token scale caches are both accounted for. `auxiliary_bytes_per_block`
+// is what a second pool sized per target block (an MTP head, a full-attention block drafter) adds,
+// and `reserved_memory_bytes` is fixed state that is taken off the top before the division.
+size_t ComputePagedBlockCapacityFromBytes(size_t available_memory_bytes,
+                                          float gpu_utilization_factor,
+                                          size_t reserved_memory_bytes,
+                                          size_t primary_bytes_per_block,
+                                          size_t auxiliary_bytes_per_block = 0);
 
 // Resolves an explicitly configured engine.dynamic_batching.num_blocks into the target pool's
 // block count. num_blocks is the whole paged budget: an Engine-hosted MTP head is given the same
@@ -54,7 +57,16 @@ size_t ResolveConfiguredPagedBlockCount(size_t configured_num_blocks,
                                         size_t auxiliary_bytes_per_block,
                                         size_t auxiliary_reserved_memory_bytes = 0);
 
+// Bytes one block costs across every full-attention layer of the target's paged group: the key and
+// value caches at the physical trailing width the graph declares (which is head_size/2 for a
+// 4-bit packed cache, not head_size), plus the per-token scale caches when the model binds them.
+// Windowed layers are excluded because their ring is sized separately.
 size_t PagedKeyValueCacheBytesPerBlock(const std::shared_ptr<Model>& model);
+
+// Resolves the configured prefix-cache flag, retention capacity, and target/auxiliary layout into
+// one policy shared by paged block retention and hybrid fixed-state checkpoint allocation.
+bool ResolvePrefixCachingEnabled(const std::shared_ptr<Model>& model,
+                                 size_t auxiliary_bytes_per_block);
 
 /*
  * PagedKeyValueCache manages a paged key-value cache for models that use the PagedAttention operator.
@@ -70,7 +82,9 @@ struct PagedKeyValueCache {
  public:
   explicit PagedKeyValueCache(std::shared_ptr<Model> model,
                               size_t auxiliary_bytes_per_block = 0,
-                              size_t auxiliary_reserved_memory_bytes = 0);
+                              size_t auxiliary_reserved_memory_bytes = 0,
+                              bool requires_prefix_checkpoint = false,
+                              size_t max_prefix_checkpoints = 0);
 
   bool CanAdd(std::shared_ptr<Request> request) const;
 
@@ -87,6 +101,26 @@ struct PagedKeyValueCache {
   size_t CommittedSlots(const void* request_id) const;
 
   PagedCacheReservation Reserve(std::span<const PagedCacheReservationRequest> requests);
+
+  PrefixCacheMatch MatchPrefix(std::span<const int32_t> tokens,
+                               size_t max_adoptable_tokens);
+  void RecordPrefixAdoptions(
+      const PagedCacheReservation& reservation) noexcept;
+  void RecordDeferredPrefixMatches(size_t count) noexcept;
+  void RecordPrefixPublicationRefusal() noexcept;
+  void SealCommittedBlocks(const void* request_id,
+                           std::span<const int32_t> tokens);
+  bool CanAttachPrefixCheckpoint(const void* request_id,
+                                 size_t token_count) const;
+  bool AttachPrefixCheckpoint(
+      const void* request_id,
+      std::shared_ptr<const FixedStatePrefixCheckpoint> checkpoint);
+  size_t ReclaimPrefixCheckpoints(size_t checkpoints_needed);
+  size_t ReclaimablePrefixCheckpoints() const;
+  bool PrefixCachingEnabled() const;
+  bool RequiresPrefixCheckpoint() const;
+  size_t BlockSize() const { return block_pool_->BlockSize(); }
+  const PrefixCacheMetrics& PrefixMetrics() const;
 
   // Selects the active and pending requests whose immediate cache growth fits this step.
   StepPlanningResult PlanStepResources(StepPlan& plan) const;
@@ -163,25 +197,45 @@ struct PagedKeyValueCache {
 
  private:
   struct LayerCache {
-    std::unique_ptr<OrtValue> key_cache;    // Shape: [num_blocks, block_size, num_kv_heads, head_size]
-    std::unique_ptr<OrtValue> value_cache;  // Shape: [num_blocks, block_size, num_kv_heads, head_size]
+    // Shape: [num_blocks, block_size, num_kv_heads, head_width], where head_width is the trailing
+    // dimension the graph declares for this layer's cache input, not config head_size. They differ
+    // whenever the cache is packed: a 4-bit cache stores two elements per uint8, so head_width is
+    // (head_size + 1) / 2. Sizing and allocation both read the graph, never head_size.
+    std::unique_ptr<OrtValue> key_cache;
+    std::unique_ptr<OrtValue> value_cache;
     std::string key_cache_name;
     std::string value_cache_name;
     std::string key_cache_output_name;
     std::string value_cache_output_name;
   };
 
+  // Per-token quantization scales for one side (key or value) of one layer, present only when the
+  // model declares scale name templates. Shape: [num_blocks, block_size, num_kv_heads] -- the same
+  // block and slot addressing as LayerCache with the head-width dimension dropped, so the block
+  // table the model already receives indexes both tensors identically. The past and present name
+  // templates are required as a pair, and this one buffer is bound on both sides so the model
+  // updates it in place. `storage` owns the device memory and must outlive `value`, which only
+  // wraps it.
+  struct ScaleCache {
+    std::unique_ptr<void, Ort::AllocatorDeleter> storage;
+    std::unique_ptr<OrtValue> value;
+    std::string input_name;
+    std::string output_name;
+  };
+
   void BindCache(State& state);
 
   //   The key and the value cache is represented as an array of blocks. Each block contains
-  //   a number of slots equal to the block size. Each slot contains num_kv_heads * head_size
-  //   elements. Here the slot represents data generated by the model for a single token.
-  //   This key-value cache is allocated for each layer in the model.
+  //   a number of slots equal to the block size. Each slot contains num_kv_heads * head_width
+  //   elements, where head_width is the graph's physical trailing dimension. Here the slot
+  //   represents data generated by the model for a single token.
+  //   This key-value cache is allocated for each layer in the model. A quantized model adds a
+  //   companion scale cache per layer and side, holding one scale per (block, slot, kv head).
   //   Although the cache is preallocated, the actual memory is alloted to a request only as needed.
   //   View of the cache for each layer (LayerCache):
   //         -->|size of each block = block_size(M) * size of each slot|<--
   //            |______________________________________________________|
-  //            |       -->|          |<-- size of each slot = num_kv_heads * head_size
+  //            |       -->|          |<-- size of each slot = num_kv_heads * head_width
   //            |          |          |                                |
   //            |__________|__________|________________________________|
   //   block 0  |  slot 0  |  slot 1  |  slot 2  |     .    |  slot M  |
@@ -201,7 +255,11 @@ struct PagedKeyValueCache {
                        int32_t* data, size_t columns);
   void RebuildBlockTableIndex() noexcept;
   std::shared_ptr<Model> model_;
-  std::vector<LayerCache> cache_;                   // Pair of key and value caches for all layers
+  std::vector<LayerCache> cache_;  // Pair of key and value caches for all layers
+  // Scale caches in binding order: for each layer of cache_, the key scale then the value scale,
+  // skipping a side whose input template is empty. BindCache() lays them out immediately after the
+  // key/value inputs, so the block table inputs start at cache_.size() * 2 + scale_cache_.size().
+  std::vector<ScaleCache> scale_cache_;
   std::unique_ptr<BlockPool> block_pool_;           // Allocator for blocks
   std::vector<PagedCacheBlockTable> block_tables_;  // Block table for all requests in the cache
   std::unique_ptr<RequestIndex> block_table_index_;
@@ -221,6 +279,18 @@ struct PagedKeyValueCache {
 
   bool Windowed() const { return window_ring_blocks_ > 0; }
 
+  class RetainedBlockReclaimer final : public BlockReclaimer {
+   public:
+    explicit RetainedBlockReclaimer(PrefixCache& prefix_cache)
+        : prefix_cache_{prefix_cache} {}
+    size_t Reclaim(size_t blocks_needed) override {
+      return prefix_cache_.Reclaim(blocks_needed);
+    }
+
+   private:
+    PrefixCache& prefix_cache_;
+  };
+
   // Graph capture needs the block table at a device address that never moves and at a shape that
   // repeats across steps, so it gets a dedicated persistent tensor instead of the per-step CPU one.
   bool graph_capture_{};
@@ -229,6 +299,7 @@ struct PagedKeyValueCache {
   size_t max_block_table_columns_{};
   size_t max_block_table_rows_{};
   std::unique_ptr<Tensor> block_tables_tensor_;
+  std::unique_ptr<PrefixCache> prefix_cache_;
 };
 
 }  // namespace Generators

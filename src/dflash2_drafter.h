@@ -10,6 +10,8 @@
 #include <vector>
 
 #include "models/model.h"
+#include "models/cpu_embedding.h"
+#include "engine/graph_annotation_ids.h"
 
 namespace Generators {
 
@@ -19,10 +21,16 @@ size_t Dflash2DraftWidth(size_t capability_limit, size_t configured_limit,
                          size_t sequence_length_after_step, size_t sequence_limit,
                          size_t remaining_turn_tokens_after_step);
 
+size_t Dflash2GraphBlockTableColumnLimit(size_t context_length, size_t paged_block_size,
+                                         size_t query_block_size);
+
 // Reshapes a proposal tensor the drafter reuses between steps, replacing its buffer only when a
-// step needs more room than the one it kept.
+// step needs more room than the one it kept. `reallocated` is set when the buffer moved, which
+// invalidates any CUDA graph captured against its old address.
 Tensor& Dflash2StepTensor(std::unique_ptr<Tensor>& slot, DeviceInterface* device,
-                          ONNXTensorElementDataType type, const std::vector<int64_t>& shape);
+                          ONNXTensorElementDataType type, const std::vector<int64_t>& shape,
+                          bool* reallocated = nullptr,
+                          std::unique_ptr<Tensor>* displaced = nullptr);
 
 // The drafter cannot backfill K/V for context whose auxiliary hidden states were already consumed,
 // so an untracked request can join only at position zero while its current turn is eligible to
@@ -36,11 +44,13 @@ bool Dflash2CanJoin(bool draft_eligible, size_t first_position) noexcept;
  * shared initializers and device interfaces. It never produces a State.
  */
 struct Dflash2Model : Model {
-  Dflash2Model(std::unique_ptr<Config> config, OrtEnv& ort_env);
+  Dflash2Model(std::unique_ptr<Config> config, OrtEnv& ort_env,
+               std::shared_ptr<CpuEmbedding> cpu_embedding = nullptr);
 
   std::unique_ptr<State> CreateState(DeviceSpan<int32_t>, const GeneratorParams&) const override;
 
   std::unique_ptr<OrtSession> session_;
+  std::shared_ptr<CpuEmbedding> cpu_embedding_;
 };
 
 // Decoder-shaped view of model.dflash2, so Model's session-option and shared-initializer plumbing
@@ -93,6 +103,7 @@ struct Dflash2Drafter {
    */
   Dflash2Drafter(std::shared_ptr<Dflash2Model> model, size_t paged_block_size, size_t num_blocks,
                  size_t max_requests);
+  ~Dflash2Drafter();
 
   // Bytes of drafter K/V per paged block, so the main cache pool can budget for it up front.
   static size_t BytesPerBlock(const Config& config, size_t paged_block_size,
@@ -102,6 +113,10 @@ struct Dflash2Drafter {
   // be sized against the target pool. A windowed drafter only needs a fixed ring per request.
   static size_t PoolBlocks(const Config& config, size_t paged_block_size, size_t max_batch_size);
 
+  // Total K/V bytes occupied by a pool of `pool_blocks`.
+  static size_t PoolBytes(const Config& config, size_t paged_block_size, size_t pool_blocks,
+                          ONNXTensorElementDataType cache_type);
+
   // A full-attention drafter mirrors the target's committed blocks and reserves enough extra
   // blocks for every active request's query rows.
   static size_t FullAttentionPoolBlocks(size_t target_blocks, size_t paged_block_size,
@@ -109,6 +124,9 @@ struct Dflash2Drafter {
 
   static size_t FullAttentionReservedBytes(size_t paged_block_size, size_t query_block_size,
                                            size_t max_batch_size, size_t bytes_per_block);
+
+  static size_t EmbeddingReservedBytes(size_t max_batch_size, size_t query_block_size,
+                                       size_t hidden_size, ONNXTensorElementDataType type);
 
   size_t NumDraftTokens() const { return static_cast<size_t>(config_.num_draft_tokens); }
   size_t AdmissionMisses() const { return admission_misses_; }
@@ -148,6 +166,9 @@ struct Dflash2Drafter {
   // gets a fixed ring instead, which its block table repeats across every column.
   void EnsureBlocks(RequestState& state, size_t positions);
   void AllocateCache();
+  Tensor& StepTensor(std::unique_ptr<Tensor>& slot, DeviceInterface* device,
+                     ONNXTensorElementDataType type, const std::vector<int64_t>& shape);
+  void ReleaseCapturedGraphs() noexcept;
 
   std::shared_ptr<Dflash2Model> model_;
   const Config::Model::Dflash2& config_;
@@ -172,6 +193,8 @@ struct Dflash2Drafter {
   struct StepTensors {
     std::unique_ptr<Tensor> packed_aux;
     std::unique_ptr<Tensor> input_ids;
+    std::unique_ptr<Tensor> embeddings;
+    CpuEmbedding::Workspace embedding_workspace;
     std::unique_ptr<Tensor> q_row_map;
     std::unique_ptr<Tensor> qkv_row_map;
     std::unique_ptr<Tensor> block_row_index;
@@ -182,6 +205,14 @@ struct Dflash2Drafter {
     std::unique_ptr<Tensor> candidate_ids;
     std::unique_ptr<Tensor> scores;
   } step_tensors_;
+  // Block-table widths are bucketed to powers of two up to this cap so that a growing context
+  // reuses a captured graph instead of retiring one per block boundary.
+  size_t max_block_table_columns_{};
+  bool graph_capture_enabled_{};
+  GraphAnnotationIds graph_ids_;
+  // Bumped whenever a proposal tensor outgrows its buffer and moves. A captured graph records the
+  // old addresses, so anything captured before a move must never be replayed after it.
+  size_t buffer_generation_{};
   std::vector<int32_t> free_blocks_;
   std::unordered_map<const Request*, RequestState> requests_;
   size_t admission_misses_{};

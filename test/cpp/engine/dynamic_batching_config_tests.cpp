@@ -58,6 +58,25 @@ TEST(DynamicBatchingConfigTest, ScheduledTokenBudgetAcceptsOverride) {
   EXPECT_EQ(config.engine.dynamic_batching->max_scheduled_tokens, 321u);
 }
 
+TEST(DynamicBatchingConfigTest, PrefixCachingDefaultsToEnabled) {
+  const auto config = LoadDynamicConfig(R"({ "max_batch_size": 4 })");
+
+  ASSERT_TRUE(config.engine.dynamic_batching.has_value());
+  EXPECT_TRUE(config.engine.dynamic_batching->prefix_caching);
+  EXPECT_FALSE(
+      config.engine.dynamic_batching->prefix_caching_explicitly_set);
+}
+
+TEST(DynamicBatchingConfigTest, PrefixCachingAcceptsExplicitDisable) {
+  const auto config =
+      LoadDynamicConfig(R"({ "prefix_caching": false })");
+
+  ASSERT_TRUE(config.engine.dynamic_batching.has_value());
+  EXPECT_FALSE(config.engine.dynamic_batching->prefix_caching);
+  EXPECT_TRUE(
+      config.engine.dynamic_batching->prefix_caching_explicitly_set);
+}
+
 class InvalidScheduledTokenBudgetTest
     : public ::testing::TestWithParam<const char*> {};
 
@@ -77,6 +96,25 @@ TEST(DecoderStateGroupsConfigTest, PreservesLegacyManifestAbsence) {
   const auto config = LoadDynamicConfig(R"({ "max_batch_size": 4 })");
 
   EXPECT_FALSE(config.model.decoder.state_groups.has_value());
+}
+
+TEST(DecoderStateGroupsConfigTest, ParsesStateUpdateWithDefaultOptions) {
+  const auto config = LoadDecoderConfig(R"({
+    "num_hidden_layers": 1,
+    "state_groups": [{
+      "kind": "fixed_conv",
+      "layer_ids": [0],
+      "state_update": { "capacity": 3 }
+    }]
+  })");
+
+  ASSERT_TRUE(config.model.decoder.state_groups);
+  const auto& groups = *config.model.decoder.state_groups;
+  ASSERT_EQ(groups.size(), 1u);
+  ASSERT_TRUE(groups[0].state_update);
+  EXPECT_TRUE(groups[0].state_update->enabled);
+  EXPECT_EQ(groups[0].state_update->capacity, 3);
+  EXPECT_EQ(groups[0].state_update->key_head_count, 0);
 }
 
 TEST(DecoderStateGroupsConfigTest, UsesDefaultStateUpdateBindings) {

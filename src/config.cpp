@@ -89,6 +89,9 @@ void InheritSessionOptions(const Config::SessionOptions& parent,
 
 std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   const auto& mtp = config.model.mtp;
+  if (!mtp.enabled) {
+    throw std::runtime_error("model.mtp is disabled by model.mtp.enabled.");
+  }
   if (mtp.filename.empty()) {
     throw std::runtime_error("model.mtp.filename is required to create an MTP decoder.");
   }
@@ -127,10 +130,19 @@ std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   decoder.inputs.position_ids = mtp.inputs.position_ids;
   decoder.inputs.past_key_names = mtp.inputs.past_key_names;
   decoder.inputs.past_value_names = mtp.inputs.past_value_names;
+  // The projection starts from a copy of the target config, so a per-token quantized target would
+  // otherwise leak its scale name templates into the head. The head is always an unquantized
+  // full-attention layer and declares no scale tensors, so clear them: leaving them in place would
+  // make PagedKeyValueCacheBytesPerBlock() and CacheManager::Create() look up the target's scale
+  // tensor names in the head's own session.
+  decoder.inputs.past_key_scale_names.clear();
+  decoder.inputs.past_value_scale_names.clear();
   decoder.outputs.logits = mtp.outputs.logits;
   decoder.outputs.hidden_states = mtp.outputs.hidden_states;
   decoder.outputs.present_key_names = mtp.outputs.present_key_names;
   decoder.outputs.present_value_names = mtp.outputs.present_value_names;
+  decoder.outputs.present_key_scale_names.clear();
+  decoder.outputs.present_value_scale_names.clear();
 
   // The MTP graph is one full-attention layer. Paged-attention metadata and block-table names are
   // deliberately inherited above; fixed recurrent state and a main-model sliding window are not.
@@ -456,6 +468,10 @@ struct DecoderInputs_Element : JSON::Element {
       v_.past_key_names = JSON::Get<std::string_view>(value);
     } else if (name == "past_value_names") {
       v_.past_value_names = JSON::Get<std::string_view>(value);
+    } else if (name == "past_key_scale_names") {
+      v_.past_key_scale_names = JSON::Get<std::string_view>(value);
+    } else if (name == "past_value_scale_names") {
+      v_.past_value_scale_names = JSON::Get<std::string_view>(value);
     } else if (name == "past_names") {
       v_.past_names = JSON::Get<std::string_view>(value);
     } else if (name == "cross_past_key_names") {
@@ -527,6 +543,10 @@ struct DecoderOutputs_Element : JSON::Element {
       v_.present_key_names = JSON::Get<std::string_view>(value);
     } else if (name == "present_value_names") {
       v_.present_value_names = JSON::Get<std::string_view>(value);
+    } else if (name == "present_key_scale_names") {
+      v_.present_key_scale_names = JSON::Get<std::string_view>(value);
+    } else if (name == "present_value_scale_names") {
+      v_.present_value_scale_names = JSON::Get<std::string_view>(value);
     } else if (name == "present_names") {
       v_.present_names = JSON::Get<std::string_view>(value);
     } else if (name == "output_cross_qk_names") {
@@ -710,7 +730,7 @@ struct StateGroup_Element : JSON::Element {
       if (v_.state_update) {
         throw std::runtime_error("Duplicate decoder state_update declaration");
       }
-      v_.state_update.emplace();
+      v_.state_update.emplace(DecoderStateUpdate{});
       state_update_ = std::make_unique<StateUpdate_Element>(*v_.state_update);
       return *state_update_;
     }
@@ -1070,7 +1090,9 @@ struct Mtp_Element : JSON::Element {
   explicit Mtp_Element(Config::Model::Mtp& v) : v_{v} {}
 
   void OnValue(std::string_view name, JSON::Value value) override {
-    if (name == "filename") {
+    if (name == "enabled") {
+      v_.enabled = JSON::Get<bool>(value);
+    } else if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
     } else if (name == "num_hidden_layers") {
       v_.num_hidden_layers = SafeDoubleToInt(JSON::Get<double>(value), name);
@@ -1132,12 +1154,18 @@ struct Dflash2Inputs_Element : JSON::Element {
       v_.aux_hidden_states = JSON::Get<std::string_view>(value);
     } else if (name == "input_ids") {
       v_.input_ids = JSON::Get<std::string_view>(value);
+    } else if (name == "inputs_embeds") {
+      v_.embeddings = JSON::Get<std::string_view>(value);
     } else if (name == "q_row_map") {
       v_.q_row_map = JSON::Get<std::string_view>(value);
     } else if (name == "qkv_row_map") {
       v_.qkv_row_map = JSON::Get<std::string_view>(value);
     } else if (name == "block_row_index") {
       v_.block_row_index = JSON::Get<std::string_view>(value);
+    } else if (name == "past_key_scale_names") {
+      v_.past_key_scale_names = JSON::Get<std::string_view>(value);
+    } else if (name == "past_value_scale_names") {
+      v_.past_value_scale_names = JSON::Get<std::string_view>(value);
     } else if (name == "cumulative_sequence_lengths") {
       v_.cumulative_sequence_lengths = JSON::Get<std::string_view>(value);
     } else if (name == "past_sequence_lengths") {
@@ -1167,6 +1195,10 @@ struct Dflash2Outputs_Element : JSON::Element {
       v_.candidate_ids = JSON::Get<std::string_view>(value);
     } else if (name == "scores") {
       v_.scores = JSON::Get<std::string_view>(value);
+    } else if (name == "present_key_scale_names") {
+      v_.present_key_scale_names = JSON::Get<std::string_view>(value);
+    } else if (name == "present_value_scale_names") {
+      v_.present_value_scale_names = JSON::Get<std::string_view>(value);
     } else if (name == "present_key_names") {
       v_.present_key_names = JSON::Get<std::string_view>(value);
     } else if (name == "present_value_names") {
@@ -1384,6 +1416,8 @@ struct Vision_Element : JSON::Element {
       v_.num_visual_tokens = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "window_size") {
       v_.window_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "max_num_patches") {
+      v_.max_num_patches = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -1618,6 +1652,328 @@ struct VAD_Element : JSON::Element {
   std::unique_ptr<RunOptions_Element> run_options_;
 };
 
+struct MoonshineFrontendInputs_Element : JSON::Element {
+  explicit MoonshineFrontendInputs_Element(Config::Model::Moonshine::Frontend::Inputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "audio_chunk") {
+      v_.audio_chunk = JSON::Get<std::string_view>(value);
+    } else if (name == "sample_buffer") {
+      v_.sample_buffer = JSON::Get<std::string_view>(value);
+    } else if (name == "sample_len") {
+      v_.sample_len = JSON::Get<std::string_view>(value);
+    } else if (name == "conv1_buffer") {
+      v_.conv1_buffer = JSON::Get<std::string_view>(value);
+    } else if (name == "conv2_buffer") {
+      v_.conv2_buffer = JSON::Get<std::string_view>(value);
+    } else if (name == "frame_count") {
+      v_.frame_count = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Moonshine::Frontend::Inputs& v_;
+};
+
+struct MoonshineFrontendOutputs_Element : JSON::Element {
+  explicit MoonshineFrontendOutputs_Element(Config::Model::Moonshine::Frontend::Outputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "features") {
+      v_.features = JSON::Get<std::string_view>(value);
+    } else if (name == "sample_buffer") {
+      v_.sample_buffer = JSON::Get<std::string_view>(value);
+    } else if (name == "sample_len") {
+      v_.sample_len = JSON::Get<std::string_view>(value);
+    } else if (name == "conv1_buffer") {
+      v_.conv1_buffer = JSON::Get<std::string_view>(value);
+    } else if (name == "conv2_buffer") {
+      v_.conv2_buffer = JSON::Get<std::string_view>(value);
+    } else if (name == "frame_count") {
+      v_.frame_count = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Moonshine::Frontend::Outputs& v_;
+};
+
+struct MoonshineFrontend_Element : JSON::Element {
+  explicit MoonshineFrontend_Element(Config::Model::Moonshine::Frontend& v) : v_{v} {}
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "inputs") return inputs_;
+    if (name == "outputs") return outputs_;
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Moonshine::Frontend& v_;
+  MoonshineFrontendInputs_Element inputs_{v_.inputs};
+  MoonshineFrontendOutputs_Element outputs_{v_.outputs};
+};
+
+struct MoonshineEncoderInputs_Element : JSON::Element {
+  explicit MoonshineEncoderInputs_Element(Config::Model::Moonshine::Encoder::Inputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "features") {
+      v_.features = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Moonshine::Encoder::Inputs& v_;
+};
+
+struct MoonshineEncoderOutputs_Element : JSON::Element {
+  explicit MoonshineEncoderOutputs_Element(Config::Model::Moonshine::Encoder::Outputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "encoded") {
+      v_.encoded = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Moonshine::Encoder::Outputs& v_;
+};
+
+struct MoonshineEncoder_Element : JSON::Element {
+  explicit MoonshineEncoder_Element(Config::Model::Moonshine::Encoder& v) : v_{v} {}
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "inputs") return inputs_;
+    if (name == "outputs") return outputs_;
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Moonshine::Encoder& v_;
+  MoonshineEncoderInputs_Element inputs_{v_.inputs};
+  MoonshineEncoderOutputs_Element outputs_{v_.outputs};
+};
+
+struct MoonshineAdapterInputs_Element : JSON::Element {
+  explicit MoonshineAdapterInputs_Element(Config::Model::Moonshine::Adapter::Inputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "encoded") {
+      v_.encoded = JSON::Get<std::string_view>(value);
+    } else if (name == "pos_offset") {
+      v_.pos_offset = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Moonshine::Adapter::Inputs& v_;
+};
+
+struct MoonshineAdapterOutputs_Element : JSON::Element {
+  explicit MoonshineAdapterOutputs_Element(Config::Model::Moonshine::Adapter::Outputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "memory") {
+      v_.memory = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Moonshine::Adapter::Outputs& v_;
+};
+
+struct MoonshineAdapter_Element : JSON::Element {
+  explicit MoonshineAdapter_Element(Config::Model::Moonshine::Adapter& v) : v_{v} {}
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "inputs") return inputs_;
+    if (name == "outputs") return outputs_;
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Moonshine::Adapter& v_;
+  MoonshineAdapterInputs_Element inputs_{v_.inputs};
+  MoonshineAdapterOutputs_Element outputs_{v_.outputs};
+};
+
+struct MoonshineCrossKvInputs_Element : JSON::Element {
+  explicit MoonshineCrossKvInputs_Element(Config::Model::Moonshine::CrossKv::Inputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "memory") {
+      v_.memory = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Moonshine::CrossKv::Inputs& v_;
+};
+
+struct MoonshineCrossKvOutputs_Element : JSON::Element {
+  explicit MoonshineCrossKvOutputs_Element(Config::Model::Moonshine::CrossKv::Outputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "k_cross") {
+      v_.k_cross = JSON::Get<std::string_view>(value);
+    } else if (name == "v_cross") {
+      v_.v_cross = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Moonshine::CrossKv::Outputs& v_;
+};
+
+struct MoonshineCrossKv_Element : JSON::Element {
+  explicit MoonshineCrossKv_Element(Config::Model::Moonshine::CrossKv& v) : v_{v} {}
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "inputs") return inputs_;
+    if (name == "outputs") return outputs_;
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Moonshine::CrossKv& v_;
+  MoonshineCrossKvInputs_Element inputs_{v_.inputs};
+  MoonshineCrossKvOutputs_Element outputs_{v_.outputs};
+};
+
+struct MoonshineDecoderKvInputs_Element : JSON::Element {
+  explicit MoonshineDecoderKvInputs_Element(Config::Model::Moonshine::DecoderKv::Inputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "token") {
+      v_.token = JSON::Get<std::string_view>(value);
+    } else if (name == "k_self") {
+      v_.k_self = JSON::Get<std::string_view>(value);
+    } else if (name == "v_self") {
+      v_.v_self = JSON::Get<std::string_view>(value);
+    } else if (name == "k_cross") {
+      v_.k_cross = JSON::Get<std::string_view>(value);
+    } else if (name == "v_cross") {
+      v_.v_cross = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Moonshine::DecoderKv::Inputs& v_;
+};
+
+struct MoonshineDecoderKvOutputs_Element : JSON::Element {
+  explicit MoonshineDecoderKvOutputs_Element(Config::Model::Moonshine::DecoderKv::Outputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "logits") {
+      v_.logits = JSON::Get<std::string_view>(value);
+    } else if (name == "k_self") {
+      v_.k_self = JSON::Get<std::string_view>(value);
+    } else if (name == "v_self") {
+      v_.v_self = JSON::Get<std::string_view>(value);
+    } else if (name == "k_cross") {
+      v_.k_cross = JSON::Get<std::string_view>(value);
+    } else if (name == "v_cross") {
+      v_.v_cross = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Moonshine::DecoderKv::Outputs& v_;
+};
+
+struct MoonshineDecoderKv_Element : JSON::Element {
+  explicit MoonshineDecoderKv_Element(Config::Model::Moonshine::DecoderKv& v) : v_{v} {}
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "inputs") return inputs_;
+    if (name == "outputs") return outputs_;
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Moonshine::DecoderKv& v_;
+  MoonshineDecoderKvInputs_Element inputs_{v_.inputs};
+  MoonshineDecoderKvOutputs_Element outputs_{v_.outputs};
+};
+
+struct Moonshine_Element : JSON::Element {
+  explicit Moonshine_Element(Config::Model::Moonshine& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "frontend_filename") {
+      v_.frontend_filename = JSON::Get<std::string_view>(value);
+    } else if (name == "encoder_filename") {
+      v_.encoder_filename = JSON::Get<std::string_view>(value);
+    } else if (name == "adapter_filename") {
+      v_.adapter_filename = JSON::Get<std::string_view>(value);
+    } else if (name == "cross_kv_filename") {
+      v_.cross_kv_filename = JSON::Get<std::string_view>(value);
+    } else if (name == "decoder_kv_filename") {
+      v_.decoder_kv_filename = JSON::Get<std::string_view>(value);
+    } else if (name == "sample_buffer_size") {
+      v_.sample_buffer_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "conv1_buffer_size") {
+      v_.conv1_buffer_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "conv2_buffer_size") {
+      v_.conv2_buffer_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "total_lookahead") {
+      v_.total_lookahead = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "left_context_frames") {
+      v_.left_context_frames = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "max_seq_len") {
+      v_.max_seq_len = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "tokens_per_second") {
+      v_.tokens_per_second = static_cast<float>(JSON::Get<double>(value));
+    } else if (name == "seconds_per_memory_frame") {
+      v_.seconds_per_memory_frame = static_cast<float>(JSON::Get<double>(value));
+    } else if (name == "max_segment_memory_frames") {
+      v_.max_segment_memory_frames = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "min_segment_memory_frames") {
+      v_.min_segment_memory_frames = static_cast<int>(JSON::Get<double>(value));
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "frontend") return frontend_;
+    if (name == "encoder") return encoder_;
+    if (name == "adapter") return adapter_;
+    if (name == "cross_kv") return cross_kv_;
+    if (name == "decoder_kv") return decoder_kv_;
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Moonshine& v_;
+  MoonshineFrontend_Element frontend_{v_.frontend};
+  MoonshineEncoder_Element encoder_{v_.encoder};
+  MoonshineAdapter_Element adapter_{v_.adapter};
+  MoonshineCrossKv_Element cross_kv_{v_.cross_kv};
+  MoonshineDecoderKv_Element decoder_kv_{v_.decoder_kv};
+};
+
 struct EmbeddingInputs_Element : JSON::Element {
   explicit EmbeddingInputs_Element(Config::Model::Embedding::Inputs& v) : v_{v} {}
 
@@ -1812,6 +2168,9 @@ struct Model_Element : JSON::Element {
     if (name == "vad") {
       return vad_;
     }
+    if (name == "moonshine") {
+      return moonshine_;
+    }
     if (name == "mtp") {
       return mtp_;
     }
@@ -1841,6 +2200,7 @@ struct Model_Element : JSON::Element {
   Speech_Element speech_{v_.speech};
   Joiner_Element joiner_{v_.joiner};
   VAD_Element vad_{v_.vad};
+  Moonshine_Element moonshine_{v_.moonshine};
   Mtp_Element mtp_{v_.mtp};
   Dflash2_Element dflash2_{v_.dflash2};
   std::optional<bool> block_drafter_alias_;
@@ -1964,33 +2324,37 @@ struct Search_Element : JSON::Element {
 struct Speculative_Element : JSON::Element {
   explicit Speculative_Element(Config::Speculative& v) : v_{v} {}
 
-  // K (draft tokens per round) must be within [kMinK, kMaxK].
+  // Draft widths (max_draft_tokens, min_adaptive_k) must be within [kMinK, kMaxDraftTokens].
+  // This is a parse-time sanity bound, not a capability: the engine clamps the width again at
+  // dispatch against the drafter geometry, the state-update capacity and kMaxDraftTokensPerStep.
   static constexpr int kMinK = 1;
-  static constexpr int kMaxK = 16;
+  static constexpr int kMaxDraftTokens = 16;
+  // ngram_size is the lookup key length, not a token count, so it does not share the draft bound.
+  static constexpr int kMaxNGramSize = 16;
 
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "max_draft_tokens") {
       int k = SafeDoubleToInt(JSON::Get<double>(value), name);
-      if (k < kMinK || k > kMaxK)
+      if (k < kMinK || k > kMaxDraftTokens)
         throw std::runtime_error(
             "speculative.max_draft_tokens must be between " + std::to_string(kMinK) + " and " +
-            std::to_string(kMaxK) + " Got: " + std::to_string(k) + ".");
+            std::to_string(kMaxDraftTokens) + " Got: " + std::to_string(k) + ".");
       v_.max_draft_tokens = k;
     } else if (name == "ngram_size") {
       const int ngram_size = SafeDoubleToInt(JSON::Get<double>(value), name);
-      if (ngram_size != 0 && (ngram_size < 2 || ngram_size > kMaxK))
+      if (ngram_size != 0 && (ngram_size < 2 || ngram_size > kMaxNGramSize))
         throw std::runtime_error(
-            "speculative.ngram_size must be 0 or between 2 and " + std::to_string(kMaxK) +
+            "speculative.ngram_size must be 0 or between 2 and " + std::to_string(kMaxNGramSize) +
             ". Got: " + std::to_string(ngram_size) + ".");
       v_.ngram_size = ngram_size;
     } else if (name == "ngram_chained_lookup") {
       v_.ngram_chained_lookup = JSON::Get<bool>(value);
     } else if (name == "min_adaptive_k") {
       const int min_adaptive_k = SafeDoubleToInt(JSON::Get<double>(value), name);
-      if (min_adaptive_k < 0 || min_adaptive_k > kMaxK)
+      if (min_adaptive_k < 0 || min_adaptive_k > kMaxDraftTokens)
         throw std::runtime_error(
             "speculative.min_adaptive_k must be 0 or between " + std::to_string(kMinK) +
-            " and " + std::to_string(kMaxK) + ". Got: " +
+            " and " + std::to_string(kMaxDraftTokens) + ". Got: " +
             std::to_string(min_adaptive_k) + ".");
       v_.min_adaptive_k = min_adaptive_k;
     } else if (name == "cooldown") {
@@ -2036,6 +2400,9 @@ struct DynamicBatching_Element : JSON::Element {
       if (parsed_value <= 0)
         throw std::out_of_range("max_scheduled_tokens must be > 0");
       v_->max_scheduled_tokens = static_cast<size_t>(parsed_value);
+    } else if (name == "prefix_caching") {
+      v_->prefix_caching = JSON::Get<bool>(value);
+      v_->prefix_caching_explicitly_set = true;
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -2504,6 +2871,12 @@ void ValidateModelPaths(const Config& config) {
   ValidateConfigPath(m.joiner.filename, "model.joiner.filename");
   ValidateConfigPath(m.vad.filename, "model.vad.filename");
 
+  ValidateConfigPath(m.moonshine.frontend_filename, "model.moonshine.frontend_filename");
+  ValidateConfigPath(m.moonshine.encoder_filename, "model.moonshine.encoder_filename");
+  ValidateConfigPath(m.moonshine.adapter_filename, "model.moonshine.adapter_filename");
+  ValidateConfigPath(m.moonshine.cross_kv_filename, "model.moonshine.cross_kv_filename");
+  ValidateConfigPath(m.moonshine.decoder_kv_filename, "model.moonshine.decoder_kv_filename");
+
   ValidateConfigPath(m.decoder.filename, "model.decoder.filename");
   for (const auto& stage : m.decoder.pipeline) {
     ValidateConfigPath(stage.filename, "model.decoder.pipeline.filename");
@@ -2512,11 +2885,43 @@ void ValidateModelPaths(const Config& config) {
 
 }  // namespace
 
+// The engine picks the per-step draft width as the minimum of every bound it knows, so a config
+// asking for more than the drafter can deliver is silently clamped rather than rejected. Surface
+// that at load time, where the value can still be edited. The engine-side bounds (state-update
+// capacity, paged query limit, kMaxDraftTokensPerStep) depend on which speculative path is
+// actually hosted, so Engine setup warns about those instead.
+void WarnOnClampedDraftWidth(const Config& config) {
+  if (!g_log.enabled || !g_log.warning) {
+    return;
+  }
+  // DFlash 2 and its DSpark alias are the only drafters whose geometry is known from the config
+  // alone. MTP's depends on an ONNX output that no session has loaded yet.
+  const auto& dflash2 = config.model.dflash2;
+  if (dflash2.filename.empty() || dflash2.num_draft_tokens <= 0) {
+    return;
+  }
+
+  const int requested = config.speculative.max_draft_tokens;
+  if (requested <= dflash2.num_draft_tokens) {
+    return;
+  }
+  const std::string alias = dflash2.is_dspark ? "dspark" : "dflash2";
+  try {
+    Log("warning", "speculative.max_draft_tokens is " + std::to_string(requested) + " but model." +
+                       alias + ".num_draft_tokens is " + std::to_string(dflash2.num_draft_tokens) +
+                       ", which caps each step to at most " +
+                       std::to_string(dflash2.num_draft_tokens) +
+                       " drafted tokens. The engine may cap it further.");
+  } catch (...) {
+    // Diagnostics must not turn a loadable config into a load failure.
+  }
+}
+
 Config::Config(const fs::path& path, std::string_view json_overlay) : config_path{path} {
   ParseConfig(path / "genai_config.json", json_overlay, *this);
   ModelStateManifest::ValidateConfig(model.decoder);
 
-  if (model.context_length == 0 && !ModelType::IsRNNT(model.type)) {
+  if (model.context_length == 0 && !ModelType::IsRNNT(model.type) && !ModelType::IsStreamingEncDecASR(model.type)) {
     throw std::runtime_error("model context_length is 0 or was not set. It must be greater than 0");
   }
 
@@ -2566,6 +2971,8 @@ Config::Config(const fs::path& path, std::string_view json_overlay) : config_pat
   // Validate all config-specified filenames/paths after parsing so downstream loaders
   // (model/processor/adapter creation) can rely on them being safe.
   ValidateModelPaths(*this);
+
+  WarnOnClampedDraftWidth(*this);
 }
 
 void Config::AddMapping(const std::string& nominal_name, const std::string& graph_name) {

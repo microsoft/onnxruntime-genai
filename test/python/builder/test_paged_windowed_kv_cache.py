@@ -401,6 +401,7 @@ def _write_genai_config(
     model.ep = "cuda"
     model.ep_attrs = {"cuda": {}}
     model.extra_options = dict(extra_options or {})
+    model.matmul_attrs = {"weights_prepacked": 0}
     model.attention_attrs = {"paged_block_size": 256}
     model.use_paged_attention = True
     model.context_length_attrs["window_kv_cache"] = use_ring
@@ -455,6 +456,12 @@ def test_genai_config_names_the_windowed_block_table(monkeypatch, tmp_path):
     inputs = config["model"]["decoder"]["inputs"]
     assert inputs["block_table_windowed"] == "block_table_windowed"
     assert inputs["block_table"] == "block_table"
+
+
+def test_genai_config_disables_prefix_caching_for_windowed_blocks(monkeypatch, tmp_path):
+    config = _write_genai_config(monkeypatch, tmp_path, window_size=128)
+
+    assert config["engine"]["dynamic_batching"]["prefix_caching"] is False
 
 
 def test_genai_config_defaults_chunk_size_to_the_block_size(monkeypatch, tmp_path):

@@ -16,7 +16,9 @@ struct HybridDecoderIO : DecoderIO {
                   ScheduledRequests& scheduled_requests,
                   std::shared_ptr<CacheManager> cache_manager,
                   const ExecutionContext& execution_context,
-                  size_t position_planes);
+                  VarlenGraphBuffers* graph_buffers,
+                  size_t position_planes,
+                  CpuEmbedding::Workspace* embedding_workspace = nullptr);
 
   std::vector<DeviceSpan<float>> ProcessLogits() override;
   Tensor* HiddenStates() const override { return varlen_io_.HiddenStates(); }
