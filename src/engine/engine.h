@@ -189,6 +189,14 @@ struct Engine : std::enable_shared_from_this<Engine>,
    */
   SpeculativeStats GetSpeculativeStats() const;
 
+  /**
+   * @brief Returns a snapshot of cumulative prefix-cache activity, when available.
+   *
+   * Must be called from the Engine owner thread: the counters are updated by Run() without
+   * synchronization.
+   */
+  std::optional<PrefixCacheMetrics> PrefixCacheStats() const;
+
   uint64_t BeginTurn(const std::shared_ptr<Request>& request,
                      std::span<const int32_t> tokens,
                      const TurnOptions& options);

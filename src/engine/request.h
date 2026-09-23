@@ -260,6 +260,12 @@ struct Request : std::enable_shared_from_this<Request>,
    * one full stream synchronization per request per step.
    */
   std::span<const int32_t> UnprocessedTokensCpu() const;
+  std::span<const int32_t> TokensCpu() const { return tokens_host_; }
+  void StagePrefixAdoption(size_t adopted_tokens);
+  void RollbackPrefixAdoption() noexcept;
+  void CommitPrefixAdoption() noexcept { prefix_adoption_staged_ = false; }
+  size_t AdoptedPrefixLength() const noexcept { return adopted_prefix_length_; }
+  size_t TurnCachedPromptTokens() const noexcept { return turn_cached_prompt_tokens_; }
 
   /**
    * @brief Launches the generation of the next token based on the provided logits.
@@ -574,6 +580,9 @@ struct Request : std::enable_shared_from_this<Request>,
   void DiscardStagedDrafts() noexcept;
 
   int64_t processed_sequence_length_{};
+  size_t adopted_prefix_length_{};
+  size_t turn_cached_prompt_tokens_{};
+  bool prefix_adoption_staged_{};
   // Sequence length the application's tokens reach up to. Everything below it is prompt, so the
   // request is still prefilling while processed_sequence_length_ has not caught up with it.
   int64_t prompt_sequence_length_{};

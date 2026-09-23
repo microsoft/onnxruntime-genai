@@ -757,6 +757,8 @@ struct Config {
       std::optional<float> gpu_utilization_factor;  // Fraction of free GPU memory to use for key-value cache.
       size_t max_batch_size{16};                    // Maximum batch size for dynamically batching requests.
       size_t max_scheduled_tokens{2048};            // Maximum tokens in one dynamically batched model run.
+      bool prefix_caching{true};
+      bool prefix_caching_explicitly_set{};
     };
     std::optional<DynamicBatching> dynamic_batching;  // Dynamic batching settings
 
