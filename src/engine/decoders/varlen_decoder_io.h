@@ -95,6 +95,7 @@ struct VarlenGraphBuffers {
   }
 
   std::unique_ptr<Tensor> input_ids;
+  std::unique_ptr<Tensor> embeddings;
   std::unique_ptr<Tensor> cumulative_sequence_lengths;
   std::unique_ptr<Tensor> past_sequence_lengths;
   // Null unless the model consumes packed position_ids.
@@ -140,7 +141,8 @@ struct VarlenDecoderIO : DecoderIO {
                   std::shared_ptr<CacheManager> cache_manager,
                   const ExecutionContext* execution_context = nullptr,
                   VarlenGraphBuffers* graph_buffers = nullptr,
-                  size_t position_planes = 0);
+                  size_t position_planes = 0,
+                  CpuEmbedding::Workspace* embedding_workspace = nullptr);
 
   std::vector<DeviceSpan<float>> ProcessLogits() override;
 
@@ -176,6 +178,8 @@ struct VarlenDecoderIO : DecoderIO {
   OrtValue* hidden_states_input_{};
   size_t position_planes_{};
   std::vector<std::unique_ptr<Tensor>> owned_inputs_;
+  CpuEmbedding::Workspace local_embedding_workspace_;
+  CpuEmbedding::Workspace* embedding_workspace_{};
   std::unique_ptr<Tensor> logits_;
   Tensor* active_logits_{};
   std::unique_ptr<Tensor> logits_fp32_;

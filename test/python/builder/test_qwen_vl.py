@@ -863,9 +863,35 @@ def test_qwen35_linear_attention_uses_gated_rms_norm(monkeypatch):
     )
 
 
+@pytest.mark.parametrize("use_paged_attention,rows", [(False, "batch_size * sequence_length"), (True, "num_tokens")])
+def test_qwen35_moe_router_declares_the_token_layout(monkeypatch, use_paged_attention, rows):
+    """The router Reshape must declare the same row dim as the hidden states feeding the MoE op."""
+    model = Qwen35MoETextModel.__new__(Qwen35MoETextModel)
+    model.io_dtype = ir.DataType.FLOAT16
+    model.use_paged_attention = use_paged_attention
+    model.moe_attrs = {"num_experts": 4}
+    reshapes = []
+    monkeypatch.setattr(model, "make_matmul", lambda *_args: "/model/layers.1/moe/router/MatMul")
+    monkeypatch.setattr(
+        model, "make_reshape", lambda name, inputs, dtype, shape: reshapes.append((name, inputs, dtype, shape))
+    )
+
+    model.make_moe_router(1, types.SimpleNamespace(gate=object()), "hidden_states")
+
+    assert reshapes == [
+        (
+            "/model/layers.1/moe/router/Reshape",
+            ["/model/layers.1/moe/router/MatMul/output_0", "/model/constants/INT64/[-1, 4]"],
+            ir.DataType.FLOAT16,
+            [rows, 4],
+        )
+    ]
+
+
 def test_qwen35_moe_combines_shared_expert_with_gated_add(monkeypatch):
     model = Qwen35MoETextModel.__new__(Qwen35MoETextModel)
     model.io_dtype = ir.DataType.FLOAT16
+    model.use_paged_attention = False
     model.hidden_size = 16
     model.moe_intermediate_size = 4
     model.moe_attrs = {

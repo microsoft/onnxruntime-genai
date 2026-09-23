@@ -233,6 +233,10 @@ void GenAiTelemetry::Initialize() {
     config[MAT::CFG_INT_TRACE_LEVEL_MASK] = 0;
     config[MAT::CFG_INT_SDK_MODE] = MAT::SdkModeTypes::SdkModeTypes_CS;
     config[MAT::CFG_INT_RAM_QUEUE_SIZE] = 512 * 1024;
+#if defined(_WIN32)
+    // The 1DS network detector leaves a netprofm.dll allocation at process exit.
+    config[MAT::CFG_BOOL_ENABLE_NET_DETECT] = false;
+#endif
 #if defined(__linux__) && !defined(__ANDROID__)
     if (std::string ca_bundle = GetCertificateAuthorityBundlePath(); !ca_bundle.empty()) {
       config[MAT::CFG_MAP_HTTP][MAT::CFG_STR_HTTP_SSL_CAINFO] = ca_bundle;

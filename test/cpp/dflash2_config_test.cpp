@@ -352,6 +352,31 @@ TEST(Dflash2ConfigTest, RequiresCompleteDrafterContract) {
   EXPECT_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8), std::runtime_error);
 }
 
+TEST(Dflash2ConfigTest, RequiresUniqueEmbeddingInputName) {
+  auto config = MakeDflash2Config();
+  config.model.embedding.filename = "embedding.onnx";
+  auto [target, drafter] = MakeCompatibleMetadata();
+  drafter.AddInput(config.model.dflash2.inputs.embeddings, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16, {-1, 64});
+  EXPECT_NO_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8));
+  for (const auto* alias : {"aux_hidden_states", "input_ids", "past_key_values.0.key", ""}) {
+    config.model.dflash2.inputs.embeddings = alias;
+    EXPECT_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8), std::runtime_error) << alias;
+  }
+}
+
+TEST(Dflash2ConfigTest, ReservesEmbeddingGrowthPeak) {
+  EXPECT_EQ(Dflash2Drafter::EmbeddingReservedBytes(2, 4, 64, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16),
+            3u * 2 * 4 * 64 * 2);
+  EXPECT_EQ(Dflash2Drafter::EmbeddingReservedBytes(3, 8, 64, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT),
+            3u * 3 * 8 * 64 * 4);
+  EXPECT_THROW(Dflash2Drafter::EmbeddingReservedBytes(std::numeric_limits<size_t>::max(), 2, 64,
+                                                      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16),
+               std::runtime_error);
+  EXPECT_THROW(Dflash2Drafter::EmbeddingReservedBytes(std::numeric_limits<size_t>::max() / 2, 1, 1,
+                                                      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16),
+               std::runtime_error);
+}
+
 TEST(Dflash2ConfigTest, RequiresOneDraftPerNonAnchorBlockRow) {
   auto config = MakeDflash2Config();
   config.model.dflash2.num_draft_tokens = 1;

@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "models/model.h"
+#include "models/cpu_embedding.h"
 #include "engine/graph_annotation_ids.h"
 
 namespace Generators {
@@ -43,11 +44,13 @@ bool Dflash2CanJoin(bool draft_eligible, size_t first_position) noexcept;
  * shared initializers and device interfaces. It never produces a State.
  */
 struct Dflash2Model : Model {
-  Dflash2Model(std::unique_ptr<Config> config, OrtEnv& ort_env);
+  Dflash2Model(std::unique_ptr<Config> config, OrtEnv& ort_env,
+               std::shared_ptr<CpuEmbedding> cpu_embedding = nullptr);
 
   std::unique_ptr<State> CreateState(DeviceSpan<int32_t>, const GeneratorParams&) const override;
 
   std::unique_ptr<OrtSession> session_;
+  std::shared_ptr<CpuEmbedding> cpu_embedding_;
 };
 
 // Decoder-shaped view of model.dflash2, so Model's session-option and shared-initializer plumbing
@@ -122,6 +125,9 @@ struct Dflash2Drafter {
   static size_t FullAttentionReservedBytes(size_t paged_block_size, size_t query_block_size,
                                            size_t max_batch_size, size_t bytes_per_block);
 
+  static size_t EmbeddingReservedBytes(size_t max_batch_size, size_t query_block_size,
+                                       size_t hidden_size, ONNXTensorElementDataType type);
+
   size_t NumDraftTokens() const { return static_cast<size_t>(config_.num_draft_tokens); }
   size_t AdmissionMisses() const { return admission_misses_; }
 
@@ -187,6 +193,8 @@ struct Dflash2Drafter {
   struct StepTensors {
     std::unique_ptr<Tensor> packed_aux;
     std::unique_ptr<Tensor> input_ids;
+    std::unique_ptr<Tensor> embeddings;
+    CpuEmbedding::Workspace embedding_workspace;
     std::unique_ptr<Tensor> q_row_map;
     std::unique_ptr<Tensor> qkv_row_map;
     std::unique_ptr<Tensor> block_row_index;

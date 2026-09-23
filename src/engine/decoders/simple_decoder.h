@@ -41,6 +41,7 @@ struct SimpleDecoder : public Decoder {
   // Allocated only when the model asked for CUDA graphs. Owning it here, rather than in the per-step
   // decoder IO, is what gives the captured graph stable buffer addresses to replay against.
   std::unique_ptr<VarlenGraphBuffers> graph_buffers_;
+  CpuEmbedding::Workspace embedding_workspace_;
 };
 
 }  // namespace Generators

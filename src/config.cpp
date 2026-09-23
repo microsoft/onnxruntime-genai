@@ -1154,6 +1154,8 @@ struct Dflash2Inputs_Element : JSON::Element {
       v_.aux_hidden_states = JSON::Get<std::string_view>(value);
     } else if (name == "input_ids") {
       v_.input_ids = JSON::Get<std::string_view>(value);
+    } else if (name == "inputs_embeds") {
+      v_.embeddings = JSON::Get<std::string_view>(value);
     } else if (name == "q_row_map") {
       v_.q_row_map = JSON::Get<std::string_view>(value);
     } else if (name == "qkv_row_map") {
@@ -1650,6 +1652,328 @@ struct VAD_Element : JSON::Element {
   std::unique_ptr<RunOptions_Element> run_options_;
 };
 
+struct MoonshineFrontendInputs_Element : JSON::Element {
+  explicit MoonshineFrontendInputs_Element(Config::Model::Moonshine::Frontend::Inputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "audio_chunk") {
+      v_.audio_chunk = JSON::Get<std::string_view>(value);
+    } else if (name == "sample_buffer") {
+      v_.sample_buffer = JSON::Get<std::string_view>(value);
+    } else if (name == "sample_len") {
+      v_.sample_len = JSON::Get<std::string_view>(value);
+    } else if (name == "conv1_buffer") {
+      v_.conv1_buffer = JSON::Get<std::string_view>(value);
+    } else if (name == "conv2_buffer") {
+      v_.conv2_buffer = JSON::Get<std::string_view>(value);
+    } else if (name == "frame_count") {
+      v_.frame_count = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Moonshine::Frontend::Inputs& v_;
+};
+
+struct MoonshineFrontendOutputs_Element : JSON::Element {
+  explicit MoonshineFrontendOutputs_Element(Config::Model::Moonshine::Frontend::Outputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "features") {
+      v_.features = JSON::Get<std::string_view>(value);
+    } else if (name == "sample_buffer") {
+      v_.sample_buffer = JSON::Get<std::string_view>(value);
+    } else if (name == "sample_len") {
+      v_.sample_len = JSON::Get<std::string_view>(value);
+    } else if (name == "conv1_buffer") {
+      v_.conv1_buffer = JSON::Get<std::string_view>(value);
+    } else if (name == "conv2_buffer") {
+      v_.conv2_buffer = JSON::Get<std::string_view>(value);
+    } else if (name == "frame_count") {
+      v_.frame_count = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Moonshine::Frontend::Outputs& v_;
+};
+
+struct MoonshineFrontend_Element : JSON::Element {
+  explicit MoonshineFrontend_Element(Config::Model::Moonshine::Frontend& v) : v_{v} {}
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "inputs") return inputs_;
+    if (name == "outputs") return outputs_;
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Moonshine::Frontend& v_;
+  MoonshineFrontendInputs_Element inputs_{v_.inputs};
+  MoonshineFrontendOutputs_Element outputs_{v_.outputs};
+};
+
+struct MoonshineEncoderInputs_Element : JSON::Element {
+  explicit MoonshineEncoderInputs_Element(Config::Model::Moonshine::Encoder::Inputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "features") {
+      v_.features = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Moonshine::Encoder::Inputs& v_;
+};
+
+struct MoonshineEncoderOutputs_Element : JSON::Element {
+  explicit MoonshineEncoderOutputs_Element(Config::Model::Moonshine::Encoder::Outputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "encoded") {
+      v_.encoded = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Moonshine::Encoder::Outputs& v_;
+};
+
+struct MoonshineEncoder_Element : JSON::Element {
+  explicit MoonshineEncoder_Element(Config::Model::Moonshine::Encoder& v) : v_{v} {}
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "inputs") return inputs_;
+    if (name == "outputs") return outputs_;
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Moonshine::Encoder& v_;
+  MoonshineEncoderInputs_Element inputs_{v_.inputs};
+  MoonshineEncoderOutputs_Element outputs_{v_.outputs};
+};
+
+struct MoonshineAdapterInputs_Element : JSON::Element {
+  explicit MoonshineAdapterInputs_Element(Config::Model::Moonshine::Adapter::Inputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "encoded") {
+      v_.encoded = JSON::Get<std::string_view>(value);
+    } else if (name == "pos_offset") {
+      v_.pos_offset = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Moonshine::Adapter::Inputs& v_;
+};
+
+struct MoonshineAdapterOutputs_Element : JSON::Element {
+  explicit MoonshineAdapterOutputs_Element(Config::Model::Moonshine::Adapter::Outputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "memory") {
+      v_.memory = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Moonshine::Adapter::Outputs& v_;
+};
+
+struct MoonshineAdapter_Element : JSON::Element {
+  explicit MoonshineAdapter_Element(Config::Model::Moonshine::Adapter& v) : v_{v} {}
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "inputs") return inputs_;
+    if (name == "outputs") return outputs_;
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Moonshine::Adapter& v_;
+  MoonshineAdapterInputs_Element inputs_{v_.inputs};
+  MoonshineAdapterOutputs_Element outputs_{v_.outputs};
+};
+
+struct MoonshineCrossKvInputs_Element : JSON::Element {
+  explicit MoonshineCrossKvInputs_Element(Config::Model::Moonshine::CrossKv::Inputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "memory") {
+      v_.memory = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Moonshine::CrossKv::Inputs& v_;
+};
+
+struct MoonshineCrossKvOutputs_Element : JSON::Element {
+  explicit MoonshineCrossKvOutputs_Element(Config::Model::Moonshine::CrossKv::Outputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "k_cross") {
+      v_.k_cross = JSON::Get<std::string_view>(value);
+    } else if (name == "v_cross") {
+      v_.v_cross = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Moonshine::CrossKv::Outputs& v_;
+};
+
+struct MoonshineCrossKv_Element : JSON::Element {
+  explicit MoonshineCrossKv_Element(Config::Model::Moonshine::CrossKv& v) : v_{v} {}
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "inputs") return inputs_;
+    if (name == "outputs") return outputs_;
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Moonshine::CrossKv& v_;
+  MoonshineCrossKvInputs_Element inputs_{v_.inputs};
+  MoonshineCrossKvOutputs_Element outputs_{v_.outputs};
+};
+
+struct MoonshineDecoderKvInputs_Element : JSON::Element {
+  explicit MoonshineDecoderKvInputs_Element(Config::Model::Moonshine::DecoderKv::Inputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "token") {
+      v_.token = JSON::Get<std::string_view>(value);
+    } else if (name == "k_self") {
+      v_.k_self = JSON::Get<std::string_view>(value);
+    } else if (name == "v_self") {
+      v_.v_self = JSON::Get<std::string_view>(value);
+    } else if (name == "k_cross") {
+      v_.k_cross = JSON::Get<std::string_view>(value);
+    } else if (name == "v_cross") {
+      v_.v_cross = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Moonshine::DecoderKv::Inputs& v_;
+};
+
+struct MoonshineDecoderKvOutputs_Element : JSON::Element {
+  explicit MoonshineDecoderKvOutputs_Element(Config::Model::Moonshine::DecoderKv::Outputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "logits") {
+      v_.logits = JSON::Get<std::string_view>(value);
+    } else if (name == "k_self") {
+      v_.k_self = JSON::Get<std::string_view>(value);
+    } else if (name == "v_self") {
+      v_.v_self = JSON::Get<std::string_view>(value);
+    } else if (name == "k_cross") {
+      v_.k_cross = JSON::Get<std::string_view>(value);
+    } else if (name == "v_cross") {
+      v_.v_cross = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Moonshine::DecoderKv::Outputs& v_;
+};
+
+struct MoonshineDecoderKv_Element : JSON::Element {
+  explicit MoonshineDecoderKv_Element(Config::Model::Moonshine::DecoderKv& v) : v_{v} {}
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "inputs") return inputs_;
+    if (name == "outputs") return outputs_;
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Moonshine::DecoderKv& v_;
+  MoonshineDecoderKvInputs_Element inputs_{v_.inputs};
+  MoonshineDecoderKvOutputs_Element outputs_{v_.outputs};
+};
+
+struct Moonshine_Element : JSON::Element {
+  explicit Moonshine_Element(Config::Model::Moonshine& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "frontend_filename") {
+      v_.frontend_filename = JSON::Get<std::string_view>(value);
+    } else if (name == "encoder_filename") {
+      v_.encoder_filename = JSON::Get<std::string_view>(value);
+    } else if (name == "adapter_filename") {
+      v_.adapter_filename = JSON::Get<std::string_view>(value);
+    } else if (name == "cross_kv_filename") {
+      v_.cross_kv_filename = JSON::Get<std::string_view>(value);
+    } else if (name == "decoder_kv_filename") {
+      v_.decoder_kv_filename = JSON::Get<std::string_view>(value);
+    } else if (name == "sample_buffer_size") {
+      v_.sample_buffer_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "conv1_buffer_size") {
+      v_.conv1_buffer_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "conv2_buffer_size") {
+      v_.conv2_buffer_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "total_lookahead") {
+      v_.total_lookahead = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "left_context_frames") {
+      v_.left_context_frames = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "max_seq_len") {
+      v_.max_seq_len = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "tokens_per_second") {
+      v_.tokens_per_second = static_cast<float>(JSON::Get<double>(value));
+    } else if (name == "seconds_per_memory_frame") {
+      v_.seconds_per_memory_frame = static_cast<float>(JSON::Get<double>(value));
+    } else if (name == "max_segment_memory_frames") {
+      v_.max_segment_memory_frames = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "min_segment_memory_frames") {
+      v_.min_segment_memory_frames = static_cast<int>(JSON::Get<double>(value));
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "frontend") return frontend_;
+    if (name == "encoder") return encoder_;
+    if (name == "adapter") return adapter_;
+    if (name == "cross_kv") return cross_kv_;
+    if (name == "decoder_kv") return decoder_kv_;
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Moonshine& v_;
+  MoonshineFrontend_Element frontend_{v_.frontend};
+  MoonshineEncoder_Element encoder_{v_.encoder};
+  MoonshineAdapter_Element adapter_{v_.adapter};
+  MoonshineCrossKv_Element cross_kv_{v_.cross_kv};
+  MoonshineDecoderKv_Element decoder_kv_{v_.decoder_kv};
+};
+
 struct EmbeddingInputs_Element : JSON::Element {
   explicit EmbeddingInputs_Element(Config::Model::Embedding::Inputs& v) : v_{v} {}
 
@@ -1844,6 +2168,9 @@ struct Model_Element : JSON::Element {
     if (name == "vad") {
       return vad_;
     }
+    if (name == "moonshine") {
+      return moonshine_;
+    }
     if (name == "mtp") {
       return mtp_;
     }
@@ -1873,6 +2200,7 @@ struct Model_Element : JSON::Element {
   Speech_Element speech_{v_.speech};
   Joiner_Element joiner_{v_.joiner};
   VAD_Element vad_{v_.vad};
+  Moonshine_Element moonshine_{v_.moonshine};
   Mtp_Element mtp_{v_.mtp};
   Dflash2_Element dflash2_{v_.dflash2};
   std::optional<bool> block_drafter_alias_;
@@ -2072,6 +2400,9 @@ struct DynamicBatching_Element : JSON::Element {
       if (parsed_value <= 0)
         throw std::out_of_range("max_scheduled_tokens must be > 0");
       v_->max_scheduled_tokens = static_cast<size_t>(parsed_value);
+    } else if (name == "prefix_caching") {
+      v_->prefix_caching = JSON::Get<bool>(value);
+      v_->prefix_caching_explicitly_set = true;
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -2540,6 +2871,12 @@ void ValidateModelPaths(const Config& config) {
   ValidateConfigPath(m.joiner.filename, "model.joiner.filename");
   ValidateConfigPath(m.vad.filename, "model.vad.filename");
 
+  ValidateConfigPath(m.moonshine.frontend_filename, "model.moonshine.frontend_filename");
+  ValidateConfigPath(m.moonshine.encoder_filename, "model.moonshine.encoder_filename");
+  ValidateConfigPath(m.moonshine.adapter_filename, "model.moonshine.adapter_filename");
+  ValidateConfigPath(m.moonshine.cross_kv_filename, "model.moonshine.cross_kv_filename");
+  ValidateConfigPath(m.moonshine.decoder_kv_filename, "model.moonshine.decoder_kv_filename");
+
   ValidateConfigPath(m.decoder.filename, "model.decoder.filename");
   for (const auto& stage : m.decoder.pipeline) {
     ValidateConfigPath(stage.filename, "model.decoder.pipeline.filename");
@@ -2584,7 +2921,7 @@ Config::Config(const fs::path& path, std::string_view json_overlay) : config_pat
   ParseConfig(path / "genai_config.json", json_overlay, *this);
   ModelStateManifest::ValidateConfig(model.decoder);
 
-  if (model.context_length == 0 && !ModelType::IsRNNT(model.type)) {
+  if (model.context_length == 0 && !ModelType::IsRNNT(model.type) && !ModelType::IsStreamingEncDecASR(model.type)) {
     throw std::runtime_error("model context_length is 0 or was not set. It must be greater than 0");
   }
 

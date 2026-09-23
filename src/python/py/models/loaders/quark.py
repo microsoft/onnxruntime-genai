@@ -247,7 +247,7 @@ class QuarkModel(QuantizedModel):
     def repack_qweight(self, weights, bits) -> torch.Tensor:
         """
         Repacks unpacked uint8 weights (representing 4-bit values) into a packed uint8 tensor.
-        This mirrors the packing logic from builder.py's _symmetric_blockwise_quantize.
+        This mirrors the packing logic of CudaQuantizer.symmetric_blockwise_quantize.
         """
         if bits != 4:
             raise NotImplementedError("This repacking function is specifically for 4-bit weights.")
@@ -341,7 +341,7 @@ class QuarkModel(QuantizedModel):
         """
         Unpack `qweight` to standard format and reorder for OGA.
         This is based on the packing logic from Quark's Pack_4_bits with reorder=True
-        and the unpacking logic from ORT GenAI's _symmetric_blockwise_quantize.
+        and the unpacking logic of ORT GenAI's CudaQuantizer.symmetric_blockwise_quantize.
         """
         to_unpack = module.qweight
 

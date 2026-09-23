@@ -458,6 +458,12 @@ def test_genai_config_names_the_windowed_block_table(monkeypatch, tmp_path):
     assert inputs["block_table"] == "block_table"
 
 
+def test_genai_config_disables_prefix_caching_for_windowed_blocks(monkeypatch, tmp_path):
+    config = _write_genai_config(monkeypatch, tmp_path, window_size=128)
+
+    assert config["engine"]["dynamic_batching"]["prefix_caching"] is False
+
+
 def test_genai_config_defaults_chunk_size_to_the_block_size(monkeypatch, tmp_path):
     # The ring only holds chunk_size + window_size - 1 positions, so a one-shot prefill would
     # overwrite positions it still had to attend to. Chunking is therefore not optional here.
