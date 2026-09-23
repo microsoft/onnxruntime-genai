@@ -26,6 +26,12 @@ std::mt19937 MakeHostRandomGenerator(uint64_t seed) {
   return std::mt19937{seed_sequence};
 }
 
+std::mt19937 MakeDraftRandomGenerator(uint64_t seed) {
+  std::seed_seq seed_sequence{static_cast<uint32_t>(seed & 0xffffffffu),
+                              static_cast<uint32_t>(seed >> 32), 0x44464c53u};
+  return std::mt19937{seed_sequence};
+}
+
 // The model-configured seed initializes the Request's durable basis exactly once. A negative
 // configured seed means "pick one", and the drawn value becomes the basis so later turns that omit
 // a seed continue that same stream instead of redrawing.
@@ -127,7 +133,7 @@ Request::Request(
       params_{CreateRequestParams(model, max_session_tokens)},
       current_seed_basis_{InitialSeedBasis(model.config_->search.random_seed)},
       rng_{MakeHostRandomGenerator(current_seed_basis_)},
-      draft_rng_{rng_},
+      draft_rng_{MakeDraftRandomGenerator(current_seed_basis_)},
       search_{CreateSearch(*params_)} {
   draft_tokens_.reserve(kMaxDraftTokensPerStep);
 
@@ -1036,7 +1042,7 @@ void Request::CommitStateForTransaction() {
   // never-sampled step leaves both the pending marker and the durable basis exactly as they were.
   if (pending_reseed_applied_) {
     current_seed_basis_ = *pending_reseed_;
-    draft_rng_ = MakeHostRandomGenerator(current_seed_basis_);
+    draft_rng_ = MakeDraftRandomGenerator(current_seed_basis_);
     pending_reseed_.reset();
     pending_reseed_applied_ = false;
   }

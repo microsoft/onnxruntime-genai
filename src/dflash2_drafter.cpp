@@ -65,11 +65,18 @@ TargetTokenSelection BuildIndependentDraftDistribution(
   if (top_k == 0) {
     return distribution;
   }
-  const float max_logit = *std::max_element(logits, logits + top_k);
+  std::vector<size_t> sorted_indices(top_k);
+  std::iota(sorted_indices.begin(), sorted_indices.end(), 0);
+  std::stable_sort(sorted_indices.begin(), sorted_indices.end(),
+                   [logits](size_t left, size_t right) {
+                     return logits[left] > logits[right];
+                   });
+  const float max_logit = logits[sorted_indices.front()];
   std::vector<float> probabilities(top_k);
   float sum = 0.0f;
   for (size_t i = 0; i < top_k; ++i) {
-    const float probability = std::exp((logits[i] - max_logit) / temperature);
+    const float probability =
+        std::exp((logits[sorted_indices[i]] - max_logit) / temperature);
     probabilities[i] = probability;
     sum += probability;
   }
@@ -81,7 +88,7 @@ TargetTokenSelection BuildIndependentDraftDistribution(
     const bool keep_top_p = cumulative < top_p;
     cumulative += probability;
     if (keep_min_p && keep_top_p) {
-      distribution.indices.push_back(candidate_ids[i]);
+      distribution.indices.push_back(candidate_ids[sorted_indices[i]]);
       distribution.probs.push_back(probabilities[i]);
     }
   }

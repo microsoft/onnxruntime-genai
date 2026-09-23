@@ -1243,8 +1243,15 @@ struct Dflash2_Element : JSON::Element {
     } else if (name == "independent_sampling") {
       v_.independent_sampling = JSON::Get<bool>(value);
     } else if (name == "sampling_temperature") {
-      v_.sampling_temperature = static_cast<float>(JSON::Get<double>(value));
-      if (!(v_.sampling_temperature > 0.0f)) throw std::out_of_range("sampling_temperature must be > 0");
+      const double sampling_temperature = JSON::Get<double>(value);
+      if (!std::isfinite(sampling_temperature) || sampling_temperature <= 0.0 ||
+          sampling_temperature > static_cast<double>(std::numeric_limits<float>::max())) {
+        throw std::out_of_range("sampling_temperature must be finite and > 0");
+      }
+      v_.sampling_temperature = static_cast<float>(sampling_temperature);
+      if (!std::isfinite(v_.sampling_temperature) || !(v_.sampling_temperature > 0.0f)) {
+        throw std::out_of_range("sampling_temperature must be finite and > 0");
+      }
     } else if (name == "sampling_top_p") {
       v_.sampling_top_p = static_cast<float>(JSON::Get<double>(value));
       if (!(v_.sampling_top_p > 0.0f && v_.sampling_top_p <= 1.0f)) {

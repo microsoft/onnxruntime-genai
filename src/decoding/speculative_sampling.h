@@ -19,6 +19,31 @@ struct TargetTokenSelection {
   std::vector<float> probs;
 };
 
+inline void ApplyMinPToTargetSelection(TargetTokenSelection& selection, float min_p) {
+  if (selection.probs.empty())
+    return;
+
+  const float min_probability =
+      min_p * *std::max_element(selection.probs.begin(), selection.probs.end());
+  size_t kept_count = 0;
+  float kept_sum = 0.0f;
+  for (size_t index = 0; index < selection.probs.size(); ++index) {
+    const float probability = selection.probs[index];
+    if (probability >= min_probability) {
+      selection.indices[kept_count] = selection.indices[index];
+      selection.probs[kept_count] = probability;
+      kept_sum += probability;
+      ++kept_count;
+    }
+  }
+  selection.indices.resize(kept_count);
+  selection.probs.resize(kept_count);
+  if (kept_sum > 0.0f) {
+    for (float& probability : selection.probs)
+      probability /= kept_sum;
+  }
+}
+
 inline float GetSparseTokenProbability(std::span<const int32_t> indices,
                                        std::span<const float> probs,
                                        int32_t token) {

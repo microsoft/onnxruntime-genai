@@ -96,6 +96,7 @@ TargetTokenSelection BuildTargetSelection(
                               policy.temperature, scratch);
     selection.indices = scratch.indices;
     selection.probs = scratch.probs;
+    ApplyMinPToTargetSelection(selection, min_p);
     return selection;
   }
 
@@ -114,22 +115,18 @@ TargetTokenSelection BuildTargetSelection(
   for (float& probability : probabilities)
     probability /= sum;
 
-  const float min_probability = min_p * probabilities.front();
   float cumulative = 0.0f;
   for (int i = 0; i < k; ++i) {
     const float probability = probabilities[static_cast<size_t>(i)];
-    const bool keep_min_p = probability >= min_probability;
     const bool keep_top_p = !(policy.top_p > 0.0f && policy.top_p < 1.0f) ||
                             cumulative < policy.top_p;
     cumulative += probability;
-    if (keep_min_p && keep_top_p) {
+    if (keep_top_p) {
       selection.indices.push_back(topk.tokens[offset + static_cast<size_t>(i)]);
       selection.probs.push_back(probability);
     }
   }
-  const float kept_sum = std::accumulate(selection.probs.begin(), selection.probs.end(), 0.0f);
-  for (float& probability : selection.probs)
-    probability /= kept_sum;
+  ApplyMinPToTargetSelection(selection, min_p);
   return selection;
 }
 
