@@ -58,7 +58,11 @@ struct FixedStateSlotHandle {
     return pool != nullptr && request_id != nullptr;
   }
 
-  bool operator==(const FixedStateSlotHandle&) const = default;
+  bool operator==(const FixedStateSlotHandle& other) const {
+    return pool == other.pool && request_id == other.request_id && slot == other.slot &&
+           generation == other.generation;
+  }
+  bool operator!=(const FixedStateSlotHandle& other) const { return !(*this == other); }
 };
 
 struct FixedStateCommittedState {

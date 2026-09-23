@@ -20,7 +20,7 @@ TargetTokenSelection BuildTopKTargetSelection(
     std::span<const int32_t> tokens, std::span<const float> scores,
     const EffectiveTurnPolicy& policy) {
   TargetTokenSelection selection;
-  const float max_score = scores.front();
+  const float max_score = scores[0];
   const float inverse_temperature = 1.0f / policy.temperature;
   std::vector<float> probabilities(scores.size());
   float sum = 0.0f;
