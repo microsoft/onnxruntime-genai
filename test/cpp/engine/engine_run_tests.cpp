@@ -12,12 +12,14 @@
 #include <array>
 #include <atomic>
 #include <condition_variable>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <mutex>
 #include <new>
 #include <optional>
+#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -29,6 +31,7 @@
 
 #include "engine_test_helpers.h"
 #include "engine_test_doubles.h"
+#include "decoding/speculative_sampling.h"
 
 namespace Generators {
 namespace test {
@@ -83,6 +86,71 @@ TurnOptions SampledTurnOptions(uint64_t seed = 1234) {
   options.temperature = 0.01f;
   options.seed = seed;
   return options;
+}
+
+TargetTokenSelection SingletonDraftDistribution(int32_t token) {
+  TargetTokenSelection distribution;
+  distribution.indices.push_back(token);
+  distribution.probs.push_back(1.0f);
+  return distribution;
+}
+
+uint64_t SeedWithFirstHostDrawBetween(float lower, float upper) {
+  std::uniform_real_distribution<float> uniform(0.0f, 1.0f);
+  for (uint32_t seed = 0; seed < 100000; ++seed) {
+    std::mt19937 rng{seed};
+    const float draw = uniform(rng);
+    if (lower < draw && draw < upper) {
+      return seed;
+    }
+  }
+  throw std::runtime_error("Could not find a seed with the requested host RNG draw.");
+}
+
+std::vector<float> ThreeWayTargetLogits(size_t vocab_size) {
+  std::vector<float> logits(vocab_size, -100.0f);
+  logits[11] = std::log(0.55f);
+  logits[12] = std::log(0.30f);
+  logits[13] = std::log(0.15f);
+  return logits;
+}
+
+std::vector<int32_t> RunSeededRatioProposal(
+    const std::shared_ptr<Model>& model, uint64_t seed, bool retry_before_verify) {
+  const int32_t eos = EosToken(*model);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto engine = MakeDoublesEngine(model, /*capacity=*/8, filler);
+  engine.cache->SetMaxDraftTokensPerStep(2);
+  auto options = SampledTurnOptions(seed);
+  options.temperature = 1.0f;
+  auto request = CreateRequestWithPrompt(engine.engine, Prompt(10), options);
+  if (RunOne(*engine.engine).request != request) {
+    throw std::runtime_error("Sampled ratio test failed to prefill its request.");
+  }
+
+  TargetTokenSelection draft_distribution;
+  draft_distribution.indices = {11, 12};
+  draft_distribution.probs = {0.5f, 0.5f};
+  request->SetDraftTokenDistributions(std::array{draft_distribution});
+  engine.executor->SetVerifyRowTokens({11, 25});
+
+  if (retry_before_verify) {
+    engine.executor->SetNextFailure(ScriptedExecutionFailure::RetryableBeforeExecution);
+    if (RunOne(*engine.engine).flags != EngineEventFlagRetryable ||
+        request->PendingDraftTokenCount() != 1) {
+      throw std::runtime_error("Sampled ratio retry did not preserve its proposal.");
+    }
+  }
+
+  std::array<EngineEvent, 3> events;
+  const size_t event_count = engine.engine->Run(events);
+  std::vector<int32_t> tokens;
+  for (size_t index = 0; index < event_count; ++index) {
+    if (events[index].flags & EngineEventFlagToken) {
+      tokens.push_back(events[index].token);
+    }
+  }
+  return tokens;
 }
 
 // Index of the first occurrence of `entry` in the trace, or -1 if absent.
@@ -2230,6 +2298,59 @@ TEST_F(EngineRunTest, SampledSpeculativeRunKeepsAcceptedPrefixAndCorrection) {
   EXPECT_EQ(stats.draft_tokens_proposed, 3u);
   EXPECT_EQ(stats.draft_tokens_evaluated, 3u);
   EXPECT_EQ(stats.draft_tokens_accepted, 2u);
+}
+
+TEST_F(EngineRunTest, SampledRatioSpeculativeRunAcceptsDraftsAndEmitsBonus) {
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, filler);
+  engine.cache->SetMaxDraftTokensPerStep(3);
+  auto options = SampledTurnOptions();
+  options.temperature = 1.0f;
+  auto request = CreateRequestWithPrompt(engine.engine, Prompt(10), options);
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
+
+  const std::array distributions{
+      SingletonDraftDistribution(11), SingletonDraftDistribution(12)};
+  request->SetDraftTokenDistributions(distributions);
+  engine.executor->SetVerifyRowTokens({11, 12, 25});
+
+  std::array<EngineEvent, 3> events;
+  ASSERT_EQ(engine.engine->Run(events), 3u);
+  EXPECT_EQ(events[0].token, 11);
+  EXPECT_EQ(events[1].token, 12);
+  EXPECT_EQ(events[2].token, 25);
+  EXPECT_EQ(engine.engine->GetSpeculativeStats().draft_tokens_accepted, 2u);
+}
+
+TEST_F(EngineRunTest, SampledRatioSpeculativeRunUsesCanonicalTargetForCorrection) {
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, filler);
+  engine.cache->SetMaxDraftTokensPerStep(1);
+  const uint64_t seed = SeedWithFirstHostDrawBetween(0.31f, 0.34f);
+  auto options = SampledTurnOptions(seed);
+  options.temperature = 1.0f;
+  auto request = CreateRequestWithPrompt(engine.engine, Prompt(10), options);
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
+
+  const std::array distributions{SingletonDraftDistribution(12)};
+  request->SetDraftTokenDistributions(distributions);
+  const auto target_logits = ThreeWayTargetLogits(
+      static_cast<size_t>(model_->config_->model.vocab_size));
+  engine.executor->SetVerifyRowLogits({target_logits, target_logits});
+
+  std::array<EngineEvent, 2> events;
+  ASSERT_EQ(engine.engine->Run(events), 1u);
+  EXPECT_NE(events[0].token, 12);
+  EXPECT_EQ(engine.engine->GetSpeculativeStats().draft_tokens_accepted, 0u);
+}
+
+TEST_F(EngineRunTest, SampledRatioSpeculativeRunRetriesDeterministicallyFromItsSeed) {
+  constexpr uint64_t seed = 9876;
+  const auto direct = RunSeededRatioProposal(model_, seed, /*retry_before_verify=*/false);
+  const auto retried = RunSeededRatioProposal(model_, seed, /*retry_before_verify=*/true);
+  EXPECT_EQ(retried, direct);
 }
 
 TEST_F(EngineRunTest, SampledSpeculativeBatchHandlesMixedDraftLengths) {

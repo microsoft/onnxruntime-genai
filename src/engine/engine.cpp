@@ -532,7 +532,7 @@ void Engine::PublishDflash2Drafts(ScheduledRequests& scheduled_requests) {
     if (!distributions.empty()) {
       distributions.resize(std::min(distributions.size(), dflash2_draft_widths_[i]));
       dflash2_feeds_[i].request->SetDraftTokenDistributions(
-          distributions, model_->config_->model.dflash2.sampling_min_p);
+          distributions);
     } else {
       drafts.resize(std::min(drafts.size(), dflash2_draft_widths_[i]));
       dflash2_feeds_[i].request->SetDraftTokens(drafts);

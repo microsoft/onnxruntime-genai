@@ -1716,8 +1716,9 @@ contract. Each draft position then samples independently from the drafter's spar
 distribution, and target verification uses the probability ratio $\min(1, p(x) / q(x))$ with the
 residual distribution after rejection. The drafter distribution defaults to temperature `0.1`,
 top-p `0.95`, and min-p `0.3`; override them with `sampling_temperature`, `sampling_top_p`, and
-`sampling_min_p` in the same section. The learned-lattice greedy path remains unchanged when this
-option is absent or false.
+`sampling_min_p` in the same section. Min-p truncates only the proposal distribution; verification
+continues to use the target model's canonical distribution for the current turn. The learned-lattice
+greedy path remains unchanged when this option is absent or false.
 
 A windowed block drafter (DFlash 2) owns a fixed ring of cache blocks per maximum batch row, so its
 pool is sized for `max_batch_size` rings and its footprint is independent of context length. With

@@ -88,7 +88,7 @@ TopKScores TryDeviceTopKScoresPerRow(DeviceInterface& device,
 
 TargetTokenSelection BuildTargetSelection(
     size_t row, DeviceSpan<float> logits, const EffectiveTurnPolicy& policy,
-    const TopKScores& topk, float min_p, SampledCategorical& scratch) {
+  const TopKScores& topk, SampledCategorical& scratch) {
   TargetTokenSelection selection;
   if (topk.k == 0) {
     const auto cpu_logits = logits.CopyDeviceToCpu();
@@ -96,7 +96,6 @@ TargetTokenSelection BuildTargetSelection(
                               policy.temperature, scratch);
     selection.indices = scratch.indices;
     selection.probs = scratch.probs;
-    ApplyMinPToTargetSelection(selection, min_p);
     return selection;
   }
 
@@ -126,7 +125,6 @@ TargetTokenSelection BuildTargetSelection(
       selection.probs.push_back(probability);
     }
   }
-  ApplyMinPToTargetSelection(selection, min_p);
   return selection;
 }
 
@@ -378,9 +376,7 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
              selected_tokens[i].size() < token_budget) {
         const auto selection = BuildTargetSelection(
             row + accepted_count, verify_rows[row + accepted_count],
-            requests_[i]->TurnPolicy(), topk,
-            ratio_verification ? requests_[i]->DraftTargetMinP() : 0.0f,
-            sampling_scratch);
+          requests_[i]->TurnPolicy(), topk, sampling_scratch);
         int32_t token;
         bool accepted = false;
         if (ratio_verification) {
@@ -414,9 +410,7 @@ std::vector<DeviceSpan<float>> ScheduledRequests::SelectSampledRows(
           selected_tokens[i].size() < token_budget) {
         const auto selection = BuildTargetSelection(
             row + draft_count, verify_rows[row + draft_count],
-            requests_[i]->TurnPolicy(), topk,
-            ratio_verification ? requests_[i]->DraftTargetMinP() : 0.0f,
-            sampling_scratch);
+          requests_[i]->TurnPolicy(), topk, sampling_scratch);
         selected_tokens[i].push_back(
             SampleTargetToken(selection, requests_[i]->rng_));
         if (checkpoint_rng) {

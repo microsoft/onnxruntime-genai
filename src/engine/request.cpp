@@ -330,7 +330,6 @@ void Request::MarkClosedFromEngine(const Engine& engine) noexcept {
   batched_sampler_state_.reset();
   std::vector<int32_t>{}.swap(draft_tokens_);
   std::vector<TargetTokenSelection>{}.swap(draft_token_distributions_);
-  draft_target_min_p_ = 0.0f;
   staged_draft_count_ = 0;
   accepted_draft_count_ = 0;
   evaluated_draft_count_ = 0;
@@ -376,7 +375,6 @@ void Request::ReleaseTurnResources() noexcept {
   // Request unable to execute again at all.
   draft_tokens_.clear();
   draft_token_distributions_.clear();
-  draft_target_min_p_ = 0.0f;
   staged_draft_count_ = 0;
   accepted_draft_count_ = 0;
   evaluated_draft_count_ = 0;
@@ -436,7 +434,6 @@ void Request::CompleteClose() noexcept {
   params_.reset();
   std::vector<int32_t>{}.swap(draft_tokens_);
   std::vector<TargetTokenSelection>{}.swap(draft_token_distributions_);
-  draft_target_min_p_ = 0.0f;
   staged_draft_count_ = 0;
   accepted_draft_count_ = 0;
   evaluated_draft_count_ = 0;
@@ -511,7 +508,6 @@ void Request::SetDraftTokens(std::span<const int32_t> tokens) {
   if (tokens.empty()) {
     draft_tokens_.clear();
     draft_token_distributions_.clear();
-    draft_target_min_p_ = 0.0f;
     return;
   }
   if (!IsExecuting(status_) || IsPrefill()) {
@@ -540,12 +536,10 @@ void Request::SetDraftTokens(std::span<const int32_t> tokens) {
   }
   draft_tokens_.assign(tokens.begin(), tokens.end());
   draft_token_distributions_.clear();
-  draft_target_min_p_ = 0.0f;
 }
 
 void Request::SetDraftTokenDistributions(
-    std::span<const TargetTokenSelection> distributions,
-    float target_min_p) {
+    std::span<const TargetTokenSelection> distributions) {
   std::vector<int32_t> tokens;
   tokens.reserve(distributions.size());
   for (const auto& distribution : distributions) {
@@ -556,7 +550,6 @@ void Request::SetDraftTokenDistributions(
   }
   SetDraftTokens(tokens);
   draft_token_distributions_.assign(distributions.begin(), distributions.end());
-  draft_target_min_p_ = target_min_p;
 }
 
 std::span<const int32_t> Request::StagedDraftTokens() const {
@@ -1070,7 +1063,6 @@ void Request::CommitStep(const RequestStepPlan& plan,
   }
   draft_tokens_.clear();
   draft_token_distributions_.clear();
-  draft_target_min_p_ = 0.0f;
   staged_draft_count_ = 0;
   accepted_draft_count_ = 0;
   evaluated_draft_count_ = 0;

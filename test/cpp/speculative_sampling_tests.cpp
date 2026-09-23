@@ -494,19 +494,6 @@ TEST(SpeculativeSamplingTest, SamplingDistTopKTopPCombined) {
 
 // TargetTokenSelection
 
-TEST(SpeculativeSamplingTest, MinPFiltersAndRenormalizesTargetSelection) {
-  TargetTokenSelection selection;
-  selection.indices = {10, 11, 12};
-  selection.probs = {0.6f, 0.3f, 0.1f};
-
-  ApplyMinPToTargetSelection(selection, 0.2f);
-
-  ASSERT_EQ(selection.indices, (std::vector<int32_t>{10, 11}));
-  ASSERT_EQ(selection.probs.size(), 2u);
-  EXPECT_NEAR(selection.probs[0], 2.0f / 3.0f, 1e-6f);
-  EXPECT_NEAR(selection.probs[1], 1.0f / 3.0f, 1e-6f);
-}
-
 TEST(SpeculativeSamplingTest, TargetGreedySelectionAppliesMinLengthBeforeArgmax) {
   std::array<float, 4> logits{1.0f, 2.0f, 8.0f, 3.0f};
   std::array<int32_t, 1> eos_ids{2};
