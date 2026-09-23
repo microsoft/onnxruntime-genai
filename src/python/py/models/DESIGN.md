@@ -52,6 +52,21 @@ After the final ONNX model is created, additional files are saved in the output 
 
 ### Architecture Classes
 
+`builder.py` imports ORT GenAI architecture classes at module scope. The
+`builders` package resolves its public class exports lazily for direct callers,
+but the entrypoint requests all supported builder classes.
+Transformers model classes are resolved only when loading weights for the
+selected architecture. Supporting a newer architecture must not require upgrading
+Transformers to continue exporting an older, already supported architecture.
+`Model.resolve_model_loader` keeps the ordered architecture-to-class-name registry,
+and `Model.resolve_transformers_class` resolves only the selected class.
+The Transformers package is imported at module scope; model classes are accessed
+conditionally through its lazy attributes, without local Transformers imports.
+Architecture-specific weight loaders use the same resolver. A missing selected
+class raises an `ImportError` naming the class and installed Transformers version
+with upgrade guidance; it never silently falls back to a different loader.
+Dependency import failures propagate without being rewritten as missing-class errors.
+
 Classes are the main abstraction within the model builder. Information that is specific to a particular model architecture is stored within the model architecture's class. Class inheritance is used to re-use existing code and reduce the time it takes to support a new model architecture. It also allows for any functions in the `Model` class to be overwritten as needed. Any changes in the `Model` class that add or modify support for optimization or quantization will benefit all models without any additional effort to support per model.
 
 When adding support for a new model architecture, it is preferred to make changes in the `Model` class when possible. This allows the functions in `Model` to become more generic to multiple model architectures. An example of this is the changes made to support the `GemmaModel` class. If the changes are large or the model architecture is different than the currently supported options, it is easier to override or create new `Make` functions in the new model architecture's class. Examples of this include the changes made to support the `MistralModel` and `PhiModel` classes.

@@ -189,21 +189,6 @@ def test_webgpu_paged_attention_rejects_unsupported_io_dtype(io_dtype):
 
 
 def _load_builder_entrypoint_module():
-    # `builder.py` imports the concrete model classes via `from builders import (...)`.
-    # Provide a stub `builders` module so we can import the lightweight precision helpers
-    # (`set_onnx_dtype` / `set_io_dtype` / `check_extra_options`) without pulling in every
-    # model builder.
-    builders_stub = types.ModuleType("builders")
-
-    def _stub_getattr(name):  # PEP 562: satisfies `from builders import <ModelClass>`
-        return type(name, (), {})
-
-    builders_stub.__getattr__ = _stub_getattr
-    # Submodule imports (e.g. `from quantization import ...`) must resolve to the
-    # real, dependency-free modules rather than the catch-all above.
-    builders_stub.__path__ = [str(BUILDERS_DIR)]
-    sys.modules["builders"] = builders_stub
-
     spec = importlib.util.spec_from_file_location("models_builder_entrypoint", MODELS_DIR / "builder.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
