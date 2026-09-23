@@ -102,7 +102,7 @@ def test_lfm2_vl_loads_the_vlm_transformers_model(monkeypatch, model_type):
     transformers_stub = types.ModuleType("transformers")
     transformers_stub.Lfm2VlForConditionalGeneration = FakeLfm2VlModel
     transformers_stub.AutoModelForCausalLM = FakeCausalLM
-    monkeypatch.setitem(sys.modules, "transformers", transformers_stub)
+    monkeypatch.setattr(base_module, "transformers", transformers_stub)
 
     model = Model.__new__(Model)
     model.model_type = model_type

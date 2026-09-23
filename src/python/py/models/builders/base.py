@@ -14,10 +14,12 @@ import os
 import subprocess
 import types
 from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 import onnx_ir as ir
 import torch
+import transformers
 from onnx_ir.tensor_adapters import TorchTensor, to_torch_dtype
 from onnxruntime.quantization.matmul_nbits_quantizer import (
     KQuantWeightOnlyQuantConfig,
@@ -25,10 +27,9 @@ from onnxruntime.quantization.matmul_nbits_quantizer import (
     QuantFormat,
     RTNWeightOnlyQuantConfig,
 )
+from quantization import KV_CACHE_CALIBRATION_QMAX, CudaQuantizer, QuantConfig, resolve_dtype
 from tqdm import tqdm
 from transformers import AutoTokenizer, GenerationConfig
-
-from quantization import KV_CACHE_CALIBRATION_QMAX, CudaQuantizer, QuantConfig, resolve_dtype
 
 
 class Model:
@@ -5874,6 +5875,39 @@ class Model:
     def get_moe_module(self, layer_id, layer):
         return layer.moe
 
+    def resolve_transformers_class(self, class_name: str) -> type[Any]:
+        """Resolve only the selected Transformers class, without requiring newer architectures."""
+        try:
+            return getattr(transformers, class_name)
+        except AttributeError as error:
+            version = getattr(transformers, "__version__", "unknown")
+            raise ImportError(
+                f"The selected model requires transformers.{class_name}, but "
+                f"Transformers {version} does not provide that class. Upgrade "
+                "Transformers to use this model architecture."
+            ) from error
+
+    def resolve_model_loader(self) -> type[Any]:
+        """Resolve the Transformers weight loader for this model's architecture."""
+        # More specific markers must precede overlapping general markers (e.g. Qwen3.5 MoE before dense).
+        model_loader_rules = (
+            ("qwen3_5_moe", "Qwen3_5MoeForConditionalGeneration"),
+            ("qwen3_5", "Qwen3_5ForConditionalGeneration"),
+            ("qwen3_vl_text", "Qwen3VLForConditionalGeneration"),
+            ("Qwen3VL", "Qwen3VLForConditionalGeneration"),
+            ("qwen2_5_vl_text", "Qwen2_5_VLForConditionalGeneration"),
+            ("Qwen2_5_VL", "Qwen2_5_VLForConditionalGeneration"),
+            ("gemma3_vl_text", "Gemma3ForConditionalGeneration"),
+            ("lfm2_vl", "Lfm2VlForConditionalGeneration"),
+            ("mistral3_text", "Mistral3ForConditionalGeneration"),
+            ("Mistral3", "Mistral3ForConditionalGeneration"),
+            ("Whisper", "AutoModelForSpeechSeq2Seq"),
+        )
+        for model_type_marker, class_name in model_loader_rules:
+            if model_type_marker in self.model_type:
+                return self.resolve_transformers_class(class_name)
+        return self.resolve_transformers_class("AutoModelForCausalLM")
+
     def load_weights(self, input_path):
         # Load weights of original model
         if input_path.endswith(".gguf"):
@@ -5914,33 +5948,8 @@ class Model:
             )
 
         else:
-            import transformers
-
             extra_kwargs = {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {}
-
-            # Get auto class to load PyTorch model based on model type
-            auto_class_map = {
-                "ForCausalLM": "AutoModelForCausalLM",
-                "gemma3_vl_text": "Gemma3ForConditionalGeneration",
-                "lfm2_vl": "Lfm2VlForConditionalGeneration",
-                "mistral3_text": "Mistral3ForConditionalGeneration",
-                "Mistral3": "Mistral3ForConditionalGeneration",
-                "qwen2_5_vl_text": "Qwen2_5_VLForConditionalGeneration",
-                "Qwen2_5_VL": "Qwen2_5_VLForConditionalGeneration",
-                "qwen3_vl_text": "Qwen3VLForConditionalGeneration",
-                "Qwen3VL": "Qwen3VLForConditionalGeneration",
-                "qwen3_5_moe_text": "Qwen3_5MoeForConditionalGeneration",
-                "qwen3_5_moe": "Qwen3_5MoeForConditionalGeneration",
-                "qwen3_5_text": "Qwen3_5ForConditionalGeneration",
-                "qwen3_5": "Qwen3_5ForConditionalGeneration",
-                "Whisper": "AutoModelForSpeechSeq2Seq",
-            }
-            auto_class_name = "AutoModelForCausalLM"
-            for k, v in auto_class_map.items():
-                if k in self.model_type:
-                    auto_class_name = v
-                    break
-            auto_class = getattr(transformers, auto_class_name)
+            auto_class = self.resolve_model_loader()
 
             # Load PyTorch model
             model = auto_class.from_pretrained(

@@ -58,6 +58,14 @@ architecture does not import unrelated builder modules.
 Transformers model classes are also resolved only when loading weights for the
 selected architecture. Supporting a newer architecture must not require upgrading
 Transformers to continue exporting an older, already supported architecture.
+`Model.resolve_model_loader` keeps the ordered architecture-to-class-name registry,
+and `Model.resolve_transformers_class` resolves only the selected class.
+The Transformers package is imported at module scope; model classes are accessed
+conditionally through its lazy attributes, without local Transformers imports.
+Architecture-specific weight loaders use the same resolver. A missing selected
+class raises an `ImportError` naming the class and installed Transformers version
+with upgrade guidance; it never silently falls back to a different loader.
+Dependency import failures propagate without being rewritten as missing-class errors.
 
 Classes are the main abstraction within the model builder. Information that is specific to a particular model architecture is stored within the model architecture's class. Class inheritance is used to re-use existing code and reduce the time it takes to support a new model architecture. It also allows for any functions in the `Model` class to be overwritten as needed. Any changes in the `Model` class that add or modify support for optimization or quantization will benefit all models without any additional effort to support per model.
 

@@ -45,7 +45,7 @@ def test_all_builder_exports_are_lazy(monkeypatch):
         (("builders", "qwen.py"), "transformers"),
     ],
 )
-def test_no_module_level_model_imports(relative_path, dependency):
+def test_no_module_level_model_class_imports(relative_path, dependency):
     models_dir = Path(__file__).parents[3] / "src" / "python" / "py" / "models"
     tree = ast.parse(models_dir.joinpath(*relative_path).read_text(encoding="utf-8"))
     pending = list(tree.body)
@@ -61,6 +61,8 @@ def test_no_module_level_model_imports(relative_path, dependency):
             and all(alias.name in {"AutoTokenizer", "GenerationConfig"} for alias in node.names)
         ):
             continue
+        if isinstance(node, ast.Import) and all(alias.name == "transformers" for alias in node.names):
+            continue
         if isinstance(node, ast.Import):
             modules = [alias.name for alias in node.names]
         elif isinstance(node, ast.ImportFrom):
@@ -71,15 +73,30 @@ def test_no_module_level_model_imports(relative_path, dependency):
             violations.append(node.lineno)
         pending.extend(ast.iter_child_nodes(node))
 
-    assert not violations, f"{dependency} imports must be inside functions, found at lines {sorted(violations)}"
+    assert not violations, f"Eager {dependency} model imports found at lines {sorted(violations)}"
+
+
+@pytest.mark.parametrize("module_name", ["base", "mistral", "qwen"])
+def test_no_local_transformers_imports(module_name):
+    builders_dir = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
+    tree = ast.parse((builders_dir / f"{module_name}.py").read_text(encoding="utf-8"))
+    for function in ast.walk(tree):
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for node in ast.walk(function):
+            if isinstance(node, ast.Import):
+                assert not any(alias.name.split(".")[0] == "transformers" for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                assert (node.module or "").split(".")[0] != "transformers"
 
 
 @pytest.fixture
-def weight_loader(monkeypatch):
+def weight_loader(monkeypatch, request):
     models_dir = Path(__file__).parents[3] / "src" / "python" / "py" / "models"
     monkeypatch.syspath_prepend(str(models_dir))
-    base = importlib.import_module("builders.base")
-    model = base.Model.__new__(base.Model)
+    module_name, builder_name = getattr(request, "param", ("base", "Model"))
+    builder_class = getattr(importlib.import_module(f"builders.{module_name}"), builder_name)
+    model = builder_class.__new__(builder_class)
     model.model_type = "LlamaForCausalLM"
     model.model_name_or_path = "local-checkpoint"
     model.cache_dir = "cache"
@@ -89,7 +106,7 @@ def weight_loader(monkeypatch):
     model.num_layers = 2
     model.extra_options = {"num_hidden_layers": 2}
     transformers = ModuleType("transformers")
-    monkeypatch.setitem(sys.modules, "transformers", transformers)
+    monkeypatch.setattr(importlib.import_module("builders.base"), "transformers", transformers)
     return model, transformers
 
 
@@ -131,14 +148,71 @@ def test_load_weights_requires_only_selected_transformers_class(weight_loader, m
     )
 
 
-def test_load_weights_reports_missing_selected_transformers_class(weight_loader):
+@pytest.mark.parametrize(
+    ("weight_loader", "class_name"),
+    [
+        (("base", "Model"), "Qwen3_5ForConditionalGeneration"),
+        (("mistral", "Mistral3TextModel"), "Mistral3ForConditionalGeneration"),
+        (("qwen", "VideoChatFlashQwenModel"), "Qwen2ForCausalLM"),
+    ],
+    indirect=["weight_loader"],
+)
+@pytest.mark.parametrize("version", ["4.45.0", None])
+def test_load_weights_reports_missing_selected_transformers_class(weight_loader, class_name, version):
     model, transformers = weight_loader
     model.model_type = "qwen3_5_text"
     transformers.AutoModelForCausalLM = Mock()
+    if version is not None:
+        transformers.__version__ = version
 
-    with pytest.raises(AttributeError, match="Qwen3_5ForConditionalGeneration"):
+    with pytest.raises(ImportError, match=rf"requires transformers\.{class_name}") as error:
         model.load_weights("")
+    assert f"Transformers {version or 'unknown'} does not provide that class" in str(error.value)
+    assert "Upgrade Transformers" in str(error.value)
+    assert isinstance(error.value.__cause__, AttributeError)
     transformers.AutoModelForCausalLM.from_pretrained.assert_not_called()
+
+
+@pytest.mark.parametrize("error_type", [ImportError, ModuleNotFoundError, RuntimeError])
+def test_transformers_resolver_preserves_dependency_errors(weight_loader, error_type):
+    model, transformers = weight_loader
+    error = error_type("Selected model dependency failed to import")
+    transformers.__getattr__ = Mock(side_effect=error)
+
+    with pytest.raises(error_type) as raised:
+        model.resolve_transformers_class("AutoModelForCausalLM")
+    assert raised.value is error
+    transformers.__getattr__.assert_called_once_with("AutoModelForCausalLM")
+
+
+@pytest.mark.parametrize(
+    ("weight_loader", "class_name"),
+    [
+        (("mistral", "Mistral3TextModel"), "Mistral3ForConditionalGeneration"),
+        (("qwen", "VideoChatFlashQwenModel"), "Qwen2ForCausalLM"),
+    ],
+    indirect=["weight_loader"],
+)
+@pytest.mark.parametrize("local_checkpoint", [False, True])
+def test_custom_weight_loaders_use_shared_resolver(weight_loader, class_name, local_checkpoint, tmp_path):
+    model, transformers = weight_loader
+    if local_checkpoint:
+        model.model_name_or_path = str(tmp_path)
+    loader = Mock()
+    loader.from_pretrained.return_value.named_modules.return_value = []
+    setattr(transformers, class_name, loader)
+    resolver = Mock(wraps=model.resolve_transformers_class)
+    model.resolve_transformers_class = resolver
+
+    assert model.load_weights("") is loader.from_pretrained.return_value
+
+    resolver.assert_called_once_with(class_name)
+    kwargs = {"token": model.hf_token}
+    if class_name == "Mistral3ForConditionalGeneration":
+        kwargs.update(cache_dir=model.cache_dir, trust_remote_code=model.hf_remote, num_hidden_layers=model.num_layers)
+    elif not local_checkpoint:
+        kwargs["cache_dir"] = model.cache_dir
+    loader.from_pretrained.assert_called_once_with(model.model_name_or_path, **kwargs)
 
 
 @pytest.mark.parametrize(
