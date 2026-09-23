@@ -185,6 +185,35 @@ TEST(VarlenDecoderIOTest, GraphStepTakesItsQueryBoundFromTheStep) {
   EXPECT_EQ(metadata.max_kv_len_bound, 2048);
 }
 
+TEST(VarlenDecoderIOTest, SelectsOnlyConsumedLogitsRowsInRequestOrder) {
+  StepPlan plan;
+  RequestStepPlan verified;
+  verified.packed_token_offset = 0;
+  verified.logits_row_index = 3;
+  verified.draft_token_count = 3;
+  RequestStepPlan decode;
+  decode.packed_token_offset = 4;
+  decode.logits_row_index = 4;
+  RequestStepPlan prefill;
+  prefill.packed_token_offset = 5;
+  prefill.logits_row_index = 14;
+  plan.requests = {verified, decode, prefill};
+
+  EXPECT_EQ(GetSelectedLogitsIndices(plan),
+            (std::vector<size_t>{0, 1, 2, 3, 4, 14}));
+}
+
+TEST(VarlenDecoderIOTest, RejectsVerificationRowsOutsideTheRequestRange) {
+  StepPlan plan;
+  RequestStepPlan invalid;
+  invalid.packed_token_offset = 4;
+  invalid.logits_row_index = 5;
+  invalid.draft_token_count = 2;
+  plan.requests = {invalid};
+
+  EXPECT_THROW(GetSelectedLogitsIndices(plan), std::runtime_error);
+}
+
 TEST(VarlenDecoderIOTest, GraphBufferBytesIgnoreAWidthTheModelCannotUse) {
   // A model whose logits carry one row per request can never verify drafts, so a wider capture
   // window must not enlarge the buffers the engine has to reserve for it.

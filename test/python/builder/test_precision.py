@@ -740,7 +740,7 @@ def test_hidden_state_shape_uses_flat_token_axis_for_paged_model():
     "extra_options, logits_first_dim",
     [
         ({"include_hidden_states": True}, "num_tokens"),
-        ({"include_hidden_states": True, "prune_lm_head": True}, "batch_size"),
+        ({"include_hidden_states": True, "prune_lm_head": True}, "num_logits"),
     ],
 )
 def test_paged_attention_uses_flat_hidden_states_output_shape(extra_options, logits_first_dim):
@@ -771,24 +771,26 @@ def test_paged_attention_uses_flat_hidden_states_output_shape(extra_options, log
 
     assert model.output_shapes["hidden_states"] == ["num_tokens", model.hidden_size]
     assert model.output_shapes["logits"] == [logits_first_dim, model.vocab_size]
-    assert model.prune_lm_head is (logits_first_dim == "batch_size")
+    assert model.prune_lm_head is (logits_first_dim == "num_logits")
 
 
 @pytest.mark.parametrize(
-    "prune_lm_head, logits_first_dim, expected_rows",
+    "prune_lm_head, logits_first_dim, logits_indices, expected_rows",
     [
-        (True, "batch_size", [1, 4, 5]),
-        (False, "num_tokens", [0, 1, 2, 3, 4, 5]),
+        (True, "num_logits", [1, 2, 3, 5], [1, 2, 3, 5]),
+        (False, "num_tokens", None, [0, 1, 2, 3, 4, 5]),
     ],
 )
-def test_paged_attention_lm_head_pruning(monkeypatch, tmp_path, prune_lm_head, logits_first_dim, expected_rows):
+def test_paged_attention_lm_head_pruning(
+    monkeypatch, tmp_path, prune_lm_head, logits_first_dim, logits_indices, expected_rows
+):
     model = Model.__new__(Model)
     model.use_paged_attention = True
     model.prune_lm_head = prune_lm_head
     model.io_dtype = ir.DataType.FLOAT
     model.hidden_size = 3
     model.vocab_size = 3
-    model.input_names = {"cumulative_sequence_lengths": "cumulative_sequence_lengths"}
+    model.input_names = {"logits_indices": "logits_indices"}
     model.output_types = {"logits": ir.DataType.FLOAT}
     model.output_shapes = {"logits": [logits_first_dim, model.vocab_size]}
     model.layernorm_attrs = {"output_0": "hidden_states"}
@@ -804,7 +806,8 @@ def test_paged_attention_lm_head_pruning(monkeypatch, tmp_path, prune_lm_head, l
     )
     model.model = ir.Model(graph, ir_version=10)
     graph.inputs.append(model.make_value("hidden_states", ir.DataType.FLOAT, ["num_tokens", model.hidden_size]))
-    graph.inputs.append(model.make_value("cumulative_sequence_lengths", ir.DataType.INT32, ["batch_size + 1"]))
+    if prune_lm_head:
+        graph.inputs.append(model.make_value("logits_indices", ir.DataType.INT32, ["num_logits"]))
 
     def make_matmul(_lm_head, name, root_input, **_kwargs):
         model.make_node("Identity", inputs=[root_input], outputs=["logits"], name=name)
@@ -820,18 +823,79 @@ def test_paged_attention_lm_head_pruning(monkeypatch, tmp_path, prune_lm_head, l
     session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
 
     hidden_states = np.arange(18, dtype=np.float32).reshape(6, model.hidden_size)
-    cumulative_sequence_lengths = np.array([0, 2, 5, 6], dtype=np.int32)
+    feeds = {"hidden_states": hidden_states}
+    if logits_indices is not None:
+        feeds["logits_indices"] = np.asarray(logits_indices, dtype=np.int32)
     (logits,) = session.run(
         None,
-        {
-            "hidden_states": hidden_states,
-            "cumulative_sequence_lengths": cumulative_sequence_lengths,
-        },
+        feeds,
     )
 
     np.testing.assert_array_equal(logits, hidden_states[expected_rows])
     assert session.get_outputs()[0].shape == [logits_first_dim, model.vocab_size]
     assert model.output_shapes["logits"] == [logits_first_dim, model.vocab_size]
+
+
+@pytest.mark.parametrize("include_hidden_states, prunes", [(False, True), (True, False)])
+def test_paged_rows_are_selected_before_the_final_norm(monkeypatch, tmp_path, include_hidden_states, prunes):
+    model = Model.__new__(Model)
+    model.use_paged_attention = True
+    model.prune_lm_head = True
+    model.include_hidden_states = include_hidden_states
+    model.io_dtype = ir.DataType.FLOAT
+    model.hidden_size = 3
+    model.vocab_size = 3
+    model.input_names = {"logits_indices": "logits_indices"}
+    model.output_types = {"logits": ir.DataType.FLOAT}
+    model.output_shapes = {"logits": ["num_logits", model.vocab_size]}
+    model.layernorm_attrs = {"root_input": "residual", "skip_input": "mlp_output"}
+    model.lm_head_attrs = {"scale": 1, "mask": None, "softcap": 0.0}
+    model.values = {}
+    model.node_names = set()
+    graph = ir.Graph(inputs=(), outputs=(), nodes=(), opset_imports={"": 21}, name="paged_rows_test")
+    model.model = ir.Model(graph, ir_version=10)
+    for name in ("residual", "mlp_output"):
+        graph.inputs.append(model.make_value(name, ir.DataType.FLOAT, ["num_tokens", model.hidden_size]))
+    graph.inputs.append(model.make_value("logits_indices", ir.DataType.INT32, ["num_logits"]))
+
+    assert model.prunes_hidden_rows() is prunes
+    if prunes:
+        model.make_selected_hidden_rows()
+    rows = model.make_hidden_state_shape()[0]
+    assert rows == ("num_logits" if prunes else "num_tokens")
+
+    # Stand-in for the final SkipLayerNorm: any row-wise op on the residual and the MLP output.
+    model.make_node(
+        "Add",
+        inputs=[model.layernorm_attrs["root_input"], model.layernorm_attrs["skip_input"]],
+        outputs=["final_norm"],
+        name="final_norm",
+    )
+    model.make_value("final_norm", ir.DataType.FLOAT, [rows, model.hidden_size])
+    model.layernorm_attrs["output_0"] = "final_norm"
+
+    def make_matmul(_lm_head, name, root_input, **_kwargs):
+        model.make_node("Identity", inputs=[root_input], outputs=["logits"], name=name)
+        model.make_value("logits", ir.DataType.FLOAT, ["num_logits", model.vocab_size])
+        return name
+
+    monkeypatch.setattr(model, "make_matmul", make_matmul)
+    model.make_lm_head(types.SimpleNamespace(bias=None))
+    graph.outputs.append(model.make_value("logits"))
+
+    gathers = [node for node in graph if node.op_type == "Gather"]
+    assert len(gathers) == (2 if prunes else 1)
+    assert model.make_hidden_state_shape()[0] == "num_tokens"
+
+    model_path = tmp_path / "paged_rows.onnx"
+    ir.save(model.model, model_path)
+    session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+    residual = np.arange(18, dtype=np.float32).reshape(6, model.hidden_size)
+    mlp_output = 100 * residual
+    indices = np.array([1, 2, 5], dtype=np.int32)
+    (logits,) = session.run(None, {"residual": residual, "mlp_output": mlp_output, "logits_indices": indices})
+
+    np.testing.assert_array_equal(logits, (residual + mlp_output)[indices])
 
 
 @pytest.mark.parametrize(

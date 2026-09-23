@@ -504,6 +504,8 @@ struct DecoderInputs_Element : JSON::Element {
       v_.block_table_windowed = JSON::Get<std::string_view>(value);
     } else if (name == "attention_metadata") {
       v_.attention_metadata = JSON::Get<std::string_view>(value);
+    } else if (name == "logits_indices") {
+      v_.logits_indices = JSON::Get<std::string_view>(value);
     } else if (name == "past_conv_names") {
       v_.past_conv_names = JSON::Get<std::string_view>(value);
     } else if (name == "past_recurrent_names") {

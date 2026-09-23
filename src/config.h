@@ -44,6 +44,7 @@ struct Config {
     static constexpr std::string_view BlockTableName = "block_table";
     static constexpr std::string_view BlockTableWindowedName = "block_table_windowed";
     static constexpr std::string_view AttentionMetadataName = "attention_metadata";
+    static constexpr std::string_view LogitsIndicesName = "logits_indices";
 
     // Speech encoder names
     static constexpr std::string_view AudioAttentionMaskName = "audio_attention_mask";
@@ -544,6 +545,8 @@ struct Config {
         // ones. Empty when the model has no windowed paged layers.
         std::string block_table_windowed{Defaults::BlockTableWindowedName};
         std::string attention_metadata{Defaults::AttentionMetadataName};
+        // Packed token rows to project through the LM head. Empty for legacy full-logits models.
+        std::string logits_indices;
         std::string past_conv_names{Defaults::PastConvName};  // Conv cache input name template (LFM2)
         std::string past_recurrent_names{Defaults::PastRecurrentName};
         std::string state_update_capture_count{Defaults::StateUpdateCaptureCountName};  // Per-sequence capture count

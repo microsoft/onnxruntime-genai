@@ -267,6 +267,8 @@ std::vector<DeviceSpan<float>> ScheduledRequests::ProcessLogits() {
   }
 
   // A verify step gets one row per draft on top of the row that predicts the request's next token.
+  // The current contract keeps at least one row per request, including an incomplete prefill chunk
+  // whose row is not sampled. This could later be optimized by allowing zero rows for such chunks.
   size_t expected_rows = requests_.size();
   for (size_t draft_count : draft_token_counts_) {
     expected_rows += draft_count;
