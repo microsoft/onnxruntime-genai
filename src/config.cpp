@@ -2400,6 +2400,9 @@ struct DynamicBatching_Element : JSON::Element {
       if (parsed_value <= 0)
         throw std::out_of_range("max_scheduled_tokens must be > 0");
       v_->max_scheduled_tokens = static_cast<size_t>(parsed_value);
+    } else if (name == "prefix_caching") {
+      v_->prefix_caching = JSON::Get<bool>(value);
+      v_->prefix_caching_explicitly_set = true;
     } else {
       throw JSON::unknown_value_error{};
     }

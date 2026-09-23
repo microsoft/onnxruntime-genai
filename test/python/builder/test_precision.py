@@ -468,6 +468,34 @@ def _run_check_extra_options(
     )
 
 
+def test_structured_unquantized_moe_completes_cli_option_parsing(monkeypatch):
+    fake_config = types.SimpleNamespace(tie_word_embeddings=True, layer_types=None)
+    monkeypatch.setattr(
+        builder_module,
+        "get_hf_details",
+        lambda *_args, **_kwargs: {
+            "extra_kwargs": {},
+            "hf_name": "fake-model",
+            "hf_config": fake_config,
+        },
+    )
+
+    options = builder_module.parse_extra_options(
+        model_name="fake-model",
+        input_path="/tmp/fake-model",
+        output_dir="/tmp/fake-output",
+        precision="int4",
+        execution_provider="cuda",
+        cache_dir="/tmp/fake-cache",
+        extra_options=[],
+        builder_config_version=2,
+        target_options={"quant_config": {"moe": {"type": "none"}}},
+    )
+
+    assert options["_quant_config"].moe.type == "none"
+    assert "moe_quant_type" not in options
+
+
 def test_mtp_quant_config_json_is_parsed(monkeypatch):
     options = {"mtp_quant_config": '{"io_dtype":"bf16","weights":{"type":"int4"}}'}
 
@@ -475,6 +503,21 @@ def test_mtp_quant_config_json_is_parsed(monkeypatch):
 
     assert options["mtp_quant_config"].io_dtype == "bf16"
     assert options["mtp_quant_config"].weights.type == "int4"
+    assert options["mtp_quant_config"].checkpoint_policy == "requantize"
+
+
+def test_mtp_quant_config_typed_dict_preserves_explicit_policy(monkeypatch):
+    options = {
+        "mtp_quant_config": {
+            "checkpoint_policy": "preserve",
+            "io_dtype": "bf16",
+            "weights": {"type": "int4"},
+        }
+    }
+
+    _run_check_extra_options(monkeypatch, options)
+
+    assert options["mtp_quant_config"].checkpoint_policy == "preserve"
 
 
 def test_parse_extra_options_preserves_equals_inside_json(monkeypatch):

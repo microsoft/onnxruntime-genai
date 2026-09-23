@@ -425,7 +425,8 @@ produce `Failed` events. Capacity pressure is operational and does not set `Fail
 
 `prompt_tokens` is the number of input IDs accepted by the current `BeginTurn`.
 `generated_tokens` is the number of visible output tokens committed for the Turn.
-`cached_prompt_tokens` is currently always zero; no prefix-cache hit accounting is exposed.
+`cached_prompt_tokens` is the number of current-turn prompt tokens restored from an Engine-local
+prefix entry. It is zero when no prefix was adopted, including resident continuation turns.
 Scheduler `max_scheduled_tokens` is not usage: it is a per-step budget shared across Requests.
 
 Event getters require non-null event and output pointers and return `OgaResult*` on misuse. They

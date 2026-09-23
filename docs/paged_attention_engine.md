@@ -106,6 +106,64 @@ Dynamic batching limits scheduled rows with `max_batch_size` and limits the tota
 query tokens in one model run with `max_scheduled_tokens`. The token limit defaults
 to 2048. Both limits are positive and independent.
 
+### Prefix caching
+
+Dynamic batching reuses complete prompt blocks from earlier requests by default.
+Set `engine.dynamic_batching.prefix_caching` to `false` to disable it. A lookup
+compares both the token contents and the complete parent-block identity; hash
+equality alone is never accepted as a match. The final prompt token always runs
+through the model, and partial blocks are never shared.
+
+The cache retains indexed blocks after their producing request releases them.
+Every matching full block may be adopted. Retained blocks use the same paged KV
+pool as active requests and are reclaimed in least-recently-used order under
+admission pressure; prefix retention never reserves a separate share of the
+pool. Blocks being adopted by an in-flight reservation are protected by
+reservation-owned references.
+
+Prefix adoption participates in the normal Engine transaction. Planning stages
+the request's processed-token cursor at the matched block boundary, reservation
+takes references to the shared blocks, rollback restores the cursor and releases
+those references, and commit transfers them to the request's block table. Newly
+completed full blocks are indexed only after the cache and request transaction
+commits.
+
+For a hybrid target with `fixed_conv` or `fixed_recurrent` groups, a paged-block
+match is usable only when the same prefix identity owns an immutable checkpoint
+of every fixed-state tensor. The fixed-state pool preallocates
+`max_batch_size` checkpoint rows before the paged cache is sized. A successful
+prefill step whose committed boundary is block-aligned copies the request's
+published fixed state into one of those rows. Checkpoint payloads have their own
+bounded LRU lifetime: dropping one leaves the paged blocks indexed, but a hybrid
+lookup skips paged-only descendants and adopts the deepest boundary where both
+components remain available. Hybrid targets index only blocks completed during
+prefill; decode and reasoning steps do not publish paged identities without matching
+fixed-state checkpoints.
+
+Hybrid prefix caching does not reduce the configured prefill chunk size. A
+checkpoint is attached only when a successful step's committed endpoint is
+block-aligned; paged-only descendants remain indexed but are not adoptable by a
+hybrid request. After adoption, prefill resumes at that checkpoint and may
+process the full configured chunk, so later checkpoint positions can shift
+relative to the original request's chunk boundaries. A match pins both its
+paged blocks and fixed checkpoint through reservation. The fixed reservation
+gathers the checkpoint into the newly admitted row instead of gathering zero,
+and its baseline committed-token count is the same as the paged match. Existing
+prepare/publish ordering then advances both components atomically; rollback
+discards the provisional fixed row, releases adopted paged references, and
+restores the request cursor.
+
+The implementation applies only to newly admitted requests and does not splice
+a prefix into resident continuation turns. It still rejects target
+sliding-window KV rings and auxiliary caches that mirror every target block when
+`prefix_caching` is explicitly set to `true`. Existing configurations that omit
+the setting keep loading with caching disabled for those layouts, and builders
+emit an explicit `false` opt-out. A
+fixed-size Engine-hosted auxiliary pool can coexist with target prefix caching.
+In particular, a DFlash 2 drafter that did not process the skipped prefix cannot
+join at a nonzero position, so that request keeps the valid target hit and runs
+target-only rather than shortening the target boundary.
+
 Without dynamic batching, the engine uses the older static batching path. Static batching allocates and advances a batch as a unit. It does not use the transaction flow described below.
 
 ## Decoder state manifest
