@@ -233,7 +233,8 @@ own single-row search and decodes exactly one sequence either way.
 The same overlay route raises the session ceiling where that is what the caller wants: because
 `max_session_tokens` cannot exceed the model-configured `search.max_length`, a model whose
 `search.max_length` is lower than the context length its cache can serve is raised with
-`config.overlay('{"search": {"max_length": <tokens>}}')` before the Model is created.
+`config.overlay('{"search": {"max_length": <tokens>}}')` before the Model is created. A future API
+will report the cache-backed per-request maximum so hosts can choose this value safely.
 
 ### `Active`
 

@@ -480,6 +480,36 @@ TEST_F(RequestLifecycleTest, StaticEngineRejectsModelConfiguredChunking) {
   }
 }
 
+TEST_F(RequestLifecycleTest, RuntimeProfilesRejectNonCudaModelVariant) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
+  Config::RuntimeProfile profile;
+  profile.id = "gpu-profile";
+  profile.eligibility.minimum_total_device_memory_bytes = 1;
+  profile.overlay.dynamic_batching.num_blocks = 64;
+  config->runtime_profiles.push_back(std::move(profile));
+  EXPECT_THROW(CreateModel(GetOrtEnv(), std::move(config)), std::runtime_error);
+}
+
+TEST_F(RequestLifecycleTest, CapabilitiesReportAppliedRuntimeProfileTuning) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
+  config->engine.dynamic_batching = Config::Engine::DynamicBatching{};
+  Config::RuntimeProfile profile;
+  profile.id = "larger-gpu";
+  profile.eligibility.minimum_total_device_memory_bytes = 1;
+  profile.overlay.dynamic_batching.max_batch_size = 12;
+  profile.overlay.dynamic_batching.max_scheduled_tokens = 3072;
+  config->runtime_profiles.push_back(std::move(profile));
+  ApplyRuntimeProfile(*config, 1);
+  config->runtime_profiles.clear();
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  auto engine = MakeDoublesEngine(model, /*capacity=*/12, EosToken(*model));
+
+  const auto capabilities = engine.engine->GetCapabilities();
+
+  EXPECT_EQ(capabilities.configured_max_batch_size, 12u);
+  EXPECT_EQ(capabilities.max_scheduled_tokens, 3072u);
+}
+
 TEST_F(RequestLifecycleTest, StaticEngineDoesNotLoadDisabledMtpHead) {
   auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
   config->model.type = "decoder";

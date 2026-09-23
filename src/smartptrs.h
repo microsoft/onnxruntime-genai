@@ -217,7 +217,7 @@ static_assert(std::is_trivially_copyable_v<StateUpdateReplayDesc>);
 // that boundary (Search, BatchedSampler, BatchedSamplerState, GeneratorParams, or Config).
 // Dynamically loaded add-ons must report this exact version before the host can safely call through
 // the C++ interface.
-inline constexpr uint32_t kDeviceInterfaceVersion = 6;
+inline constexpr uint32_t kDeviceInterfaceVersion = 7;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}
@@ -358,6 +358,14 @@ struct DeviceInterface {
   // to complete fixed-state device work before FixedStatePool publishes a bank flip.
   // Keep last for vtable ABI stability.
   virtual bool SupportsTransactionalFixedState() const { return false; }
+  // Queries memory for an explicit device ordinal before Engine allocation. Keep last for vtable
+  // ABI stability; changing this interface requires a kDeviceInterfaceVersion bump.
+  virtual void GetAvailableMemoryForDevice(int device_id, size_t& free_bytes, size_t& total_bytes) {
+    if (device_id != 0) {
+      throw std::runtime_error("Device-specific memory queries are not supported by this execution provider.");
+    }
+    GetAvailableMemory(free_bytes, total_bytes);
+  }
 };
 
 // A shared_ptr based type that we expose through our C API should inherit from this type.

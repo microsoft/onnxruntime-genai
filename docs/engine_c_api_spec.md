@@ -562,6 +562,25 @@ value on the `Config` before creating the Model, for example
 `OgaConfigOverlay(config, "{\"search\":{\"num_beams\":1}}")`. Raising the session ceiling of a model
 whose `search.max_length` is lower than its context length uses the same overlay route.
 
+### Engine capabilities
+
+`OgaEngineGetCapabilities` returns a caller-owned opaque snapshot. The snapshot reports the
+effective configured maximum batch size and dynamic scheduler token budget after runtime-profile
+selection. It does not report or impose a per-Request session ceiling.
+
+The cache-backed per-request maximum is not exposed by this API yet; that contract is deferred to
+a follow-up change.
+
+```c
+OgaEngineCapabilities* capabilities = NULL;
+OgaCheckResult(OgaEngineGetCapabilities(engine, &capabilities));
+size_t max_batch_size =
+  OgaEngineCapabilitiesGetConfiguredMaxBatchSize(capabilities);
+size_t max_scheduled_tokens =
+  OgaEngineCapabilitiesGetMaxScheduledTokens(capabilities);
+OgaDestroyEngineCapabilities(capabilities);
+```
+
 Per-Turn generation policy is validated separately, at each `OgaRequestBeginTurn`, before the Turn
 mutates the Request. Creation itself does not queue work.
 

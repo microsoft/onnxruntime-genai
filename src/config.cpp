@@ -2452,6 +2452,193 @@ struct Engine_Element : JSON::Element {
   StaticBatching_Element static_batching_{v_.static_batching};
 };
 
+uint64_t ParseRuntimeProfileMemoryBytes(JSON::Value& value, std::string_view name) {
+  constexpr double kLargestExactlyRepresentableInteger = 9007199254740991.0;
+  const double parsed = JSON::Get<double>(value);
+  if (!std::isfinite(parsed) || parsed < 0 || std::floor(parsed) != parsed ||
+      parsed > kLargestExactlyRepresentableInteger) {
+    throw std::out_of_range(std::string{name} + " must be a non-negative integer byte count");
+  }
+  return static_cast<uint64_t>(parsed);
+}
+
+struct RuntimeProfileEligibility_Element : JSON::Element {
+  explicit RuntimeProfileEligibility_Element(Config::RuntimeProfile::Eligibility& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "minimum_total_device_memory_bytes") {
+      v_.minimum_total_device_memory_bytes = ParseRuntimeProfileMemoryBytes(value, name);
+    } else if (name == "maximum_total_device_memory_bytes") {
+      v_.maximum_total_device_memory_bytes = ParseRuntimeProfileMemoryBytes(value, name);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::RuntimeProfile::Eligibility& v_;
+};
+
+struct RuntimeProfileDynamicBatching_Element : JSON::Element {
+  explicit RuntimeProfileDynamicBatching_Element(Config::RuntimeProfile::Overlay::DynamicBatching& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    const auto parsed = SafeDoubleToInt(JSON::Get<double>(value), name);
+    if (parsed <= 0) {
+      throw std::out_of_range(std::string{name} + " must be > 0");
+    }
+    if (name == "num_blocks") {
+      v_.num_blocks = static_cast<size_t>(parsed);
+    } else if (name == "max_batch_size") {
+      v_.max_batch_size = static_cast<size_t>(parsed);
+    } else if (name == "max_scheduled_tokens") {
+      v_.max_scheduled_tokens = static_cast<size_t>(parsed);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::RuntimeProfile::Overlay::DynamicBatching& v_;
+};
+
+struct RuntimeProfileEngine_Element : JSON::Element {
+  explicit RuntimeProfileEngine_Element(Config::RuntimeProfile::Overlay::DynamicBatching& v)
+      : dynamic_batching_{v} {}
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "dynamic_batching") return dynamic_batching_;
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  RuntimeProfileDynamicBatching_Element dynamic_batching_;
+};
+
+struct RuntimeProfileSearch_Element : JSON::Element {
+  explicit RuntimeProfileSearch_Element(Config::RuntimeProfile::Overlay::Search& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    const auto parsed = SafeDoubleToInt(JSON::Get<double>(value), name);
+    if (parsed <= 0) {
+      throw std::out_of_range(std::string{name} + " must be > 0");
+    }
+    if (name == "chunk_size") {
+      v_.chunk_size = static_cast<size_t>(parsed);
+    } else if (name == "max_length") {
+      v_.max_length = parsed;
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::RuntimeProfile::Overlay::Search& v_;
+};
+
+struct RuntimeProfileOverlay_Element : JSON::Element {
+  explicit RuntimeProfileOverlay_Element(Config::RuntimeProfile::Overlay& v)
+      : engine_{v.dynamic_batching}, search_{v.search} {}
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "engine") return engine_;
+    if (name == "search") return search_;
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  RuntimeProfileEngine_Element engine_;
+  RuntimeProfileSearch_Element search_;
+};
+
+struct RuntimeProfile_Element : JSON::Element {
+  explicit RuntimeProfile_Element(Config::RuntimeProfile& v)
+  : v_{v}, eligibility_{v.eligibility}, overlay_{v.overlay} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "id") {
+      v_.id = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "eligibility") {
+      return eligibility_;
+    }
+    if (name == "overlay") {
+      return overlay_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::RuntimeProfile& v_;
+  RuntimeProfileEligibility_Element eligibility_;
+  RuntimeProfileOverlay_Element overlay_;
+};
+
+struct RuntimeProfiles_Element : JSON::Element {
+  explicit RuntimeProfiles_Element(std::vector<Config::RuntimeProfile>& v) : v_{v} {}
+
+  Element& OnObject(std::string_view) override {
+    auto& profile = v_.emplace_back();
+    element_ = std::make_unique<RuntimeProfile_Element>(profile);
+    return *element_;
+  }
+
+ private:
+  std::vector<Config::RuntimeProfile>& v_;
+  std::unique_ptr<RuntimeProfile_Element> element_;
+};
+
+void ValidateRuntimeProfiles(const Config& config) {
+  std::unordered_set<std::string> ids;
+  for (const auto& profile : config.runtime_profiles) {
+    if (profile.id.empty()) {
+      throw std::runtime_error("runtime profile id must not be empty");
+    }
+    if (!ids.insert(profile.id).second) {
+      throw std::runtime_error("duplicate runtime profile id: " + profile.id);
+    }
+    if (!profile.eligibility.minimum_total_device_memory_bytes) {
+      throw std::runtime_error("runtime profile '" + profile.id +
+                               "' is missing minimum_total_device_memory_bytes");
+    }
+    if (profile.eligibility.maximum_total_device_memory_bytes &&
+        *profile.eligibility.maximum_total_device_memory_bytes <
+            *profile.eligibility.minimum_total_device_memory_bytes) {
+      throw std::runtime_error("runtime profile '" + profile.id +
+                               "' has maximum_total_device_memory_bytes below its minimum");
+    }
+    const auto& batching = profile.overlay.dynamic_batching;
+    const auto& search = profile.overlay.search;
+    if (!batching.num_blocks && !batching.max_batch_size &&
+        !batching.max_scheduled_tokens && !search.chunk_size && !search.max_length) {
+      throw std::runtime_error("runtime profile '" + profile.id +
+                               "' does not contain any overlay fields");
+    }
+  }
+
+  for (size_t first = 0; first < config.runtime_profiles.size(); ++first) {
+    const auto& a = config.runtime_profiles[first];
+    const uint64_t a_minimum = *a.eligibility.minimum_total_device_memory_bytes;
+    const uint64_t a_maximum = a.eligibility.maximum_total_device_memory_bytes.value_or(
+        std::numeric_limits<uint64_t>::max());
+    for (size_t second = first + 1; second < config.runtime_profiles.size(); ++second) {
+      const auto& b = config.runtime_profiles[second];
+      const uint64_t b_minimum = *b.eligibility.minimum_total_device_memory_bytes;
+      const uint64_t b_maximum = b.eligibility.maximum_total_device_memory_bytes.value_or(
+          std::numeric_limits<uint64_t>::max());
+      if (a_minimum <= b_maximum && b_minimum <= a_maximum) {
+        throw std::runtime_error("runtime profile eligibility ranges overlap: '" +
+                                 a.id + "' and '" + b.id + "'");
+      }
+    }
+  }
+}
+
 void SetSearchNumber(Config::Search& search, std::string_view name, double value) {
   try {
     Search_Element(search).OnValue(name, value);
@@ -2724,11 +2911,17 @@ struct Root_Element : JSON::Element {
     throw JSON::unknown_value_error{};
   }
 
+  Element& OnArray(std::string_view name) override {
+    if (name == "runtime_profiles") return runtime_profiles_element_;
+    throw JSON::unknown_value_error{};
+  }
+
   Config& config_;
   Model_Element model_element_{config_.model};
   Search_Element search_element_{config_.search};
   Speculative_Element speculative_element_{config_.speculative};
   Engine_Element engine_element_{config_.engine};
+  RuntimeProfiles_Element runtime_profiles_element_{config_.runtime_profiles};
 };
 
 struct RootObject_Element : JSON::Element {
@@ -2773,6 +2966,7 @@ void ParseConfig(const fs::path& filename, std::string_view json_overlay, Config
       throw std::runtime_error(oss.str());
     }
   }
+  ValidateRuntimeProfiles(config);
 }
 
 void OverlayConfig(Config& config, std::string_view json) {
@@ -2780,7 +2974,47 @@ void OverlayConfig(Config& config, std::string_view json) {
   Root_Element root{candidate};
   RootObject_Element element{root};
   JSON::Parse(element, json);
+  ValidateRuntimeProfiles(candidate);
   ModelStateManifest::ValidateConfig(candidate.model.decoder);
+  std::swap(config, candidate);
+}
+
+void ApplyRuntimeProfile(Config& config, uint64_t total_device_memory_bytes) {
+  ValidateRuntimeProfiles(config);
+  const Config::RuntimeProfile* selected = nullptr;
+  for (const auto& profile : config.runtime_profiles) {
+    const auto minimum = *profile.eligibility.minimum_total_device_memory_bytes;
+    const auto maximum = profile.eligibility.maximum_total_device_memory_bytes;
+    if (total_device_memory_bytes < minimum ||
+        (maximum && total_device_memory_bytes > *maximum)) {
+      continue;
+    }
+    if (selected) {
+      throw std::runtime_error("multiple runtime profiles match total device memory: '" +
+                               selected->id + "' and '" + profile.id + "'");
+    }
+    selected = &profile;
+  }
+  if (!selected) {
+    return;
+  }
+  const auto& batching = selected->overlay.dynamic_batching;
+  const bool has_batching_overlay = batching.num_blocks || batching.max_batch_size ||
+                                    batching.max_scheduled_tokens;
+  if (has_batching_overlay && !config.engine.dynamic_batching) {
+    throw std::runtime_error("runtime profile '" + selected->id +
+                             "' requires engine.dynamic_batching in the base config");
+  }
+  Config candidate{config};
+  if (has_batching_overlay) {
+    auto& effective = *candidate.engine.dynamic_batching;
+    if (batching.num_blocks) effective.num_blocks = batching.num_blocks;
+    if (batching.max_batch_size) effective.max_batch_size = *batching.max_batch_size;
+    if (batching.max_scheduled_tokens) effective.max_scheduled_tokens = *batching.max_scheduled_tokens;
+  }
+  const auto& search = selected->overlay.search;
+  if (search.chunk_size) candidate.search.chunk_size = search.chunk_size;
+  if (search.max_length) candidate.search.max_length = *search.max_length;
   std::swap(config, candidate);
 }
 

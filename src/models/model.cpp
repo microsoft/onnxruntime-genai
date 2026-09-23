@@ -485,6 +485,87 @@ std::vector<const char*> SessionInfo::GetOutputSymbolicShape(const std::string& 
   return type_info->second->GetTensorTypeAndShapeInfo().GetSymbolicDimensions();
 }
 
+int ResolveProfileDeviceId(const Config& config, const DeviceInterface& device) {
+  std::optional<int> provider_device_id;
+  std::optional<int> hardware_device_id;
+  const auto selected_provider = NormalizeProviderName(device.GetExecutionProviderName());
+  for (const auto& provider : config.model.decoder.session_options.provider_options) {
+    if (NormalizeProviderName(provider.name) != selected_provider) {
+      continue;
+    }
+    for (const auto& [name, value] : provider.options) {
+      if (name != "device_id") {
+        continue;
+      }
+      size_t consumed{};
+      const long parsed = std::stol(value, &consumed);
+      if (consumed != value.size() || parsed < 0 || parsed > std::numeric_limits<int>::max()) {
+        throw std::runtime_error("provider device_id must be a non-negative integer");
+      }
+      provider_device_id = static_cast<int>(parsed);
+    }
+    if (provider.device_filtering_options &&
+        provider.device_filtering_options->hardware_device_id) {
+      const auto value = *provider.device_filtering_options->hardware_device_id;
+      if (value > static_cast<uint32_t>(std::numeric_limits<int>::max())) {
+        throw std::runtime_error("hardware_device_id is out of range");
+      }
+      hardware_device_id = static_cast<int>(value);
+    }
+  }
+  if (provider_device_id && hardware_device_id &&
+      *provider_device_id != *hardware_device_id) {
+    throw std::runtime_error("provider device_id conflicts with hardware_device_id");
+  }
+  if (provider_device_id) return *provider_device_id;
+  if (hardware_device_id) return *hardware_device_id;
+  return Ort::GetCurrentGpuDeviceId();
+}
+
+DeviceType ResolveRuntimeProfileDeviceType(const Config& config) {
+  std::optional<DeviceType> selected;
+  for (const auto& provider : config.model.decoder.session_options.providers) {
+    const auto normalized = NormalizeProviderName(provider);
+    std::optional<DeviceType> candidate;
+    if (normalized == "cuda") {
+      candidate = DeviceType::CUDA;
+    } else if (normalized == "NvTensorRtRtx") {
+      candidate = DeviceType::NvTensorRtRtx;
+    }
+    if (!candidate) continue;
+    if (selected && *selected != *candidate) {
+      throw std::runtime_error("runtime_profiles require exactly one CUDA-capable provider");
+    }
+    selected = candidate;
+  }
+  if (!selected) {
+    throw std::runtime_error("runtime_profiles require a CUDA-capable model variant");
+  }
+  return *selected;
+}
+
+void ApplyRuntimeProfileForResolvedDevice(Config& config) {
+  if (config.runtime_profiles.empty()) return;
+
+  const auto device_type = ResolveRuntimeProfileDeviceType(config);
+  auto* profile_device = GetDeviceInterface(device_type);
+  const int device_id = ResolveProfileDeviceId(config, *profile_device);
+  size_t available_device_memory_bytes{};
+  size_t total_device_memory_bytes{};
+  profile_device->GetAvailableMemoryForDevice(
+      device_id, available_device_memory_bytes, total_device_memory_bytes);
+  ApplyRuntimeProfile(config, total_device_memory_bytes);
+
+  const auto effective_device_type = ResolveRuntimeProfileDeviceType(config);
+  const int effective_device_id = ResolveProfileDeviceId(
+      config, *GetDeviceInterface(effective_device_type));
+  if (effective_device_type != device_type || effective_device_id != device_id) {
+    throw std::runtime_error(
+        "runtime profile overlay must not change the resolved provider or device");
+  }
+  config.runtime_profiles.clear();
+}
+
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   CreateSessionOptions();
   EnsureDeviceOrtInit(*p_device_, *config_);
@@ -932,6 +1013,7 @@ std::unique_ptr<Config> CreateConfig(OrtEnv& ort_env, const char* config_path, c
 }
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
+  ApplyRuntimeProfileForResolvedDevice(*config);
   if (config->model.draft)
     return std::make_shared<SpeculativeDecodingModel>(std::move(config), ort_env);
   // Check if it's a pipeline model by checking if decoder.pipeline is configured

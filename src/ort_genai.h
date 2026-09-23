@@ -951,6 +951,20 @@ struct OgaTurnUsage : OgaAbstract {
   }
 };
 
+struct OgaEngineCapabilities : OgaAbstract {
+  size_t ConfiguredMaxBatchSize() const {
+    return OgaEngineCapabilitiesGetConfiguredMaxBatchSize(this);
+  }
+
+  size_t MaxScheduledTokens() const {
+    return OgaEngineCapabilitiesGetMaxScheduledTokens(this);
+  }
+
+  static void operator delete(void* p) {
+    OgaDestroyEngineCapabilities(reinterpret_cast<OgaEngineCapabilities*>(p));
+  }
+};
+
 struct OgaEngineEvent : OgaAbstract {
   OgaEngineEventFlags Flags() const {
     OgaEngineEventFlags value{};
@@ -1188,6 +1202,12 @@ struct OgaEngine : OgaAbstract {
     size_t count{};
     OgaCheckResult(OgaEngineMaxDraftTokensPerProposal(this, &count));
     return count;
+  }
+
+  std::unique_ptr<OgaEngineCapabilities> GetCapabilities() const {
+    OgaEngineCapabilities* capabilities{};
+    OgaCheckResult(OgaEngineGetCapabilities(this, &capabilities));
+    return std::unique_ptr<OgaEngineCapabilities>(capabilities);
   }
 
   /**

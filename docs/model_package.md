@@ -189,6 +189,67 @@ auto model_ov = OgaModel::Create(*config);
 
 `OgaConfig::CreateFromPackageEp` requires the path to be a model package.
 
+## Runtime profiles
+
+The selected variant's `genai_config.json` may contain typed runtime profiles for CUDA GPU memory
+classes. Base `engine.dynamic_batching` values must remain safe for the minimum supported device;
+profiles are optional tuning upgrades applied once during Model creation, after provider/device
+resolution and before Engine allocation.
+
+```json
+{
+  "engine": {
+    "dynamic_batching": {
+      "num_blocks": 512,
+      "max_batch_size": 8,
+      "max_scheduled_tokens": 2048
+    }
+  },
+  "runtime_profiles": [
+    {
+      "id": "24gib-to-32gib",
+      "eligibility": {
+        "minimum_total_device_memory_bytes": 25769803776,
+        "maximum_total_device_memory_bytes": 34359738368
+      },
+      "overlay": {
+        "engine": {
+          "dynamic_batching": {
+            "num_blocks": 768,
+            "max_batch_size": 12,
+            "max_scheduled_tokens": 3072
+          }
+        },
+        "search": {
+          "chunk_size": 512,
+          "max_length": 262144
+        }
+      }
+    }
+  ]
+}
+```
+
+Profile IDs must be non-empty and unique. Every profile requires a minimum total-memory value;
+the maximum is optional and inclusive. Ranges must be valid and non-overlapping. Zero matches uses
+the base settings. `overlay` is typed and may contain any subset of these five fields:
+
+- `engine.dynamic_batching.num_blocks`
+- `engine.dynamic_batching.max_batch_size`
+- `engine.dynamic_batching.max_scheduled_tokens`
+- `search.chunk_size`
+- `search.max_length`
+
+Omitted fields retain their base values. Every other config field is rejected from a runtime
+profile overlay.
+
+An overlaid `search.max_length` remains the current Engine Request ceiling. Reporting the
+cache-backed per-request maximum so a host can safely choose `max_session_tokens` is intentionally
+deferred to a follow-up API; it is not part of `OgaEngineCapabilities` in this change.
+
+Selection uses total device memory after model/provider resolution. Actual model and Engine
+allocation remains the authoritative fit check; profiles do not add a separate free-memory gate.
+
 ## Authoring notes
 
 - Every variant declared in the component's `variants` map must have its own directory

@@ -953,6 +953,9 @@ TEST(CAPITests, SetTerminate) {
 TEST(CAPITests, EngineRequestTurnAndEventContracts) {
   auto model = OgaModel::Create(MODEL_PATH "engine/synthetic-paged");
   auto engine = OgaEngine::Create(*model);
+  auto capabilities = engine->GetCapabilities();
+  EXPECT_EQ(capabilities->ConfiguredMaxBatchSize(), 8u);
+  EXPECT_EQ(capabilities->MaxScheduledTokens(), 2048u);
   auto session_options = OgaRequestOptions::Create();
   session_options->SetMaxSessionTokens(16);
   auto request = engine->CreateRequest(session_options.get());

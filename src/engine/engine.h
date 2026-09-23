@@ -25,6 +25,11 @@ enum class EngineHealth {
   Unhealthy,
 };
 
+struct EngineCapabilities {
+  size_t configured_max_batch_size{};
+  size_t max_scheduled_tokens{};
+};
+
 enum class EngineErrorCode : uint32_t {
   None = 0,
   CapacityDeferred = 1,
@@ -188,6 +193,8 @@ struct Engine : std::enable_shared_from_this<Engine>,
    * synchronization.
    */
   SpeculativeStats GetSpeculativeStats() const;
+
+  EngineCapabilities GetCapabilities() const;
 
   uint64_t BeginTurn(const std::shared_ptr<Request>& request,
                      std::span<const int32_t> tokens,
