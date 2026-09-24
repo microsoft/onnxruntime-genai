@@ -720,7 +720,8 @@ void VarlenDecoderIO::PrepareLogitsIndices(
       valid_token_indices_ = GetSelectedLogitsIndices(*plan_);
     } else {
       valid_token_indices_.reserve(scheduled_requests.size());
-      for (size_t running_length = 0; const auto& request : scheduled_requests) {
+      size_t running_length = 0;
+      for (const auto& request : scheduled_requests) {
         valid_token_indices_.push_back(running_length + request->ScheduledTokenCount() - 1);
         running_length += request->ScheduledTokenCount();
       }

@@ -155,6 +155,9 @@ class LFM2Model(Model):
             conv_output = self.make_short_conv(layer_id, layer.conv, self.layernorm_attrs["output_0"])
             self.layernorm_attrs["skip_input"] = conv_output
 
+        if layer_id == self.num_layers - 1 and self.prunes_hidden_rows():
+            self.make_selected_hidden_rows()
+
         self.make_layernorm(
             layer_id,
             layer.ffn_norm,

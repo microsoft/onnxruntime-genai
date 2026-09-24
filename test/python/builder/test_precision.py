@@ -925,6 +925,122 @@ def test_paged_rows_are_selected_after_the_last_attention(monkeypatch, layer_id,
     assert calls == expected
 
 
+@pytest.mark.parametrize("layer_id, selects", [(0, False), (1, True)])
+def test_phi_selects_rows_before_final_mlp_and_residual(monkeypatch, layer_id, selects):
+    model_type = importlib.import_module("models.builders.phi").PhiModel
+    model = model_type.__new__(model_type)
+    model.use_paged_attention = True
+    model.prune_lm_head = True
+    model.include_hidden_states = False
+    model.hidden_rows_dim = "num_tokens"
+    model.num_layers = 2
+    model.hidden_size = 3
+    model.io_dtype = ir.DataType.FLOAT
+    model.input_names = {"logits_indices": "logits_indices"}
+    model.values = {"norm": types.SimpleNamespace(dtype=ir.DataType.FLOAT)}
+    model.layernorm_attrs = {
+        "first_layernorm": False,
+        "last_layernorm": False,
+        "simple": False,
+        "output_0": "norm",
+        "skip_input": "residual",
+    }
+    calls = []
+    monkeypatch.setattr(model, "make_layernorm", lambda *_args, **_kwargs: calls.append("input"))
+    monkeypatch.setattr(model, "make_attention", lambda *_args, **_kwargs: calls.append("attention"))
+    monkeypatch.setattr(model, "make_mlp", lambda _id, _mlp, root_input: calls.append(("mlp", root_input)))
+    monkeypatch.setattr(model, "make_gather", lambda *_args, **_kwargs: calls.append("gather"))
+
+    def select_rows():
+        calls.append("select")
+        model.hidden_rows_dim = "num_logits"
+
+    monkeypatch.setattr(model, "make_selected_hidden_rows", select_rows)
+    monkeypatch.setattr(
+        model, "make_add", lambda _name, _inputs, **kwargs: calls.append(("residual", kwargs["shape"][0]))
+    )
+    layer = types.SimpleNamespace(input_layernorm=None, self_attn=None, mlp=None)
+
+    model.make_layer(layer_id, layer)
+
+    mlp_input = "/model/layers.1/mlp_input/Gather/output_0" if selects else "norm"
+    expected = ["input", "attention", ("mlp", mlp_input), ("residual", "num_logits" if selects else "num_tokens")]
+    if selects:
+        expected[2:2] = ["select", "gather"]
+    assert calls == expected
+
+
+@pytest.mark.parametrize(
+    "model_name, uses_conv", [("gemma", False), ("granite", False), ("lfm2", False), ("lfm2", True)]
+)
+@pytest.mark.parametrize("layer_id", [0, 1])
+def test_paged_layer_overrides_select_rows_before_final_feed_forward(monkeypatch, model_name, uses_conv, layer_id):
+    module_name, class_name = {
+        "gemma": ("gemma", "Gemma2Model"),
+        "granite": ("granite", "GraniteModel"),
+        "lfm2": ("lfm2", "LFM2Model"),
+    }[model_name]
+    model_type = getattr(importlib.import_module(f"models.builders.{module_name}"), class_name)
+    model = model_type.__new__(model_type)
+    model.use_paged_attention = True
+    model.prune_lm_head = True
+    model.include_hidden_states = False
+    model.hidden_rows_dim = "num_tokens"
+    model.num_layers = 2
+    model.hidden_size = 3
+    model.io_dtype = ir.DataType.FLOAT
+    model.residual_scale = 1
+    model.layer_types = ["full_attention", "conv" if uses_conv else "full_attention"]
+    model.layernorm_attrs = {
+        "first_layernorm": False,
+        "last_layernorm": False,
+        "simple": True,
+        "root_input": "residual",
+        "skip_input": "attention_output",
+        "output_0": "norm",
+        "cast": {"root_input": False, "output_0": False},
+    }
+    calls = []
+    monkeypatch.setattr(model, "make_layernorm", lambda _id, _norm, skip, simple, location: calls.append(location))
+    monkeypatch.setattr(model, "make_attention", lambda *_args, **_kwargs: calls.append("attention"))
+    monkeypatch.setattr(model, "make_mlp", lambda *_args, **_kwargs: calls.append("mlp"))
+    if model_name == "lfm2":
+        monkeypatch.setattr(model, "make_feed_forward", lambda *_args, **_kwargs: calls.append("feed_forward"))
+        monkeypatch.setattr(model, "make_short_conv", lambda *_args: calls.append("conv") or "conv_output")
+    monkeypatch.setattr(
+        model, "make_mul", lambda name, _inputs, **kwargs: calls.append((name[-5:], kwargs["shape"][0]))
+    )
+
+    def select_rows():
+        calls.append("select")
+        model.hidden_rows_dim = "num_logits"
+
+    monkeypatch.setattr(model, "make_selected_hidden_rows", select_rows)
+    layer = types.SimpleNamespace(
+        input_layernorm=None,
+        operator_norm=None,
+        self_attn=None,
+        conv=None,
+        post_attention_layernorm=None,
+        pre_feedforward_layernorm=None,
+        post_feedforward_layernorm=None,
+        ffn_norm=None,
+        mlp=None,
+    )
+
+    model.make_layer(layer_id, layer)
+
+    row_dim = "num_logits" if layer_id == 1 else "num_tokens"
+    expected = {
+        "gemma": ["input", "attention", "post_attention", "pre_feedforward", "mlp", "post_feedforward"],
+        "granite": ["input", "attention", ("Mul_1", row_dim), "post_attention", "mlp", ("Mul_2", row_dim)],
+        "lfm2": ["operator", "conv" if uses_conv and layer_id == 1 else "attention", "ffn", "feed_forward"],
+    }[model_name]
+    if layer_id == 1:
+        expected.insert(2, "select")
+    assert calls == expected
+
+
 @pytest.mark.parametrize(
     "extra_options, error",
     [
