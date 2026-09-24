@@ -182,6 +182,11 @@ bool SpeculativeDecodingState::CanRewindTo(size_t index) const {
   return target_state_->CanRewindTo(index) && draft_state_->CanRewindTo(index);
 }
 
+void SpeculativeDecodingState::SnapshotState(size_t position) {
+  target_state_->SnapshotState(position);
+  draft_state_->SnapshotState(position);
+}
+
 OrtValue* SpeculativeDecodingState::GetInput(const char* name) {
   if (auto* input = target_state_->GetInput(name))
     return input;
