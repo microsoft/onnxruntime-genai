@@ -9,7 +9,7 @@
 #      configured CMake environment.
 #
 #   2. FetchContent source build (default): when the package is not available, the
-#      SDK source (pinned in cmake/deps.txt) is downloaded, patched, and built locally.
+#      SDK source (pinned in cmake/deps.txt) is downloaded and built locally.
 #      This matches onnxruntime-genai's dependency model (ORT_HOME + FetchContent) and works
 #      on supported platforms since GenAI uses 1DS everywhere.
 #
@@ -57,9 +57,6 @@ message(STATUS "Telemetry: MSTelemetry::mat not found; building the 1DS SDK from
 
 include(FetchContent)
 
-# The FetchContent source requires a few deterministic CMake adjustments for nested include paths,
-# self-contained static dependencies, and Apple portability. Apply them without external tools.
-
 # Use the SDK's canonical build options. GenAI consumes only the C++ library and supplies all
 # dependencies needed by its packaged static/shared target.
 set(MATSDK_BUILD_HEADERS ON CACHE BOOL "Build 1DS SDK headers" FORCE)
@@ -105,17 +102,10 @@ else()
   set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build the 1DS SDK as a static library" FORCE)
 endif()
 
-set(_ortgenai_telemetry_patch
-  "${CMAKE_COMMAND}"
-  "-DSOURCE_DIR=<SOURCE_DIR>"
-  "-P"
-  "${PROJECT_SOURCE_DIR}/cmake/patches/cpp_client_telemetry/apply_patch.cmake")
-
 FetchContent_Declare(
   cpp_client_telemetry
   URL ${DEP_URL_cpp_client_telemetry}
   URL_HASH SHA1=${DEP_SHA1_cpp_client_telemetry}
-  PATCH_COMMAND ${_ortgenai_telemetry_patch}
   EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(cpp_client_telemetry)
@@ -183,7 +173,7 @@ if(MSVC)
       "$<$<COMPILE_LANGUAGE:CXX>:/w15038>")
     set_target_properties(mat PROPERTIES COMPILE_OPTIONS "${_ortgenai_mat_opts}")
   endif()
-  target_compile_options(mat PRIVATE /wd5038)
+  target_compile_options(mat PRIVATE /EHsc /wd5038)
 else()
   # Guard the SDK's bundled nlohmann/json.hpp use of infinity() against any -ffast-math /
   # -ffinite-math-only in the inherited flags.

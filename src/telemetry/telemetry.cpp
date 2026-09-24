@@ -97,9 +97,14 @@ MAT::EventProperties MakeEvent(std::string event_name, EventPriority priority) {
 }
 
 bool PrepareSampledEvent(MAT::EventProperties& event, std::string_view app_session_guid,
-                         uint32_t session_id) {
-  if (!TelemetryInternal::ShouldSampleSession(app_session_guid, session_id)) return false;
-  event.SetPopsample(TelemetryInternal::kModelSessionSampleRatePercent);
+                         uint32_t session_id,
+                         double sample_rate_percent =
+                             TelemetryInternal::kModelSessionSampleRatePercent) {
+  if (!TelemetryInternal::ShouldSampleSession(
+          app_session_guid, session_id, sample_rate_percent)) {
+    return false;
+  }
+  event.SetPopsample(sample_rate_percent);
   return true;
 }
 
@@ -422,6 +427,11 @@ void GenAiTelemetry::LogProcessInfo() {
     warn_device_id_fallback = device.device_id_status == "Failed";
 
     auto event = MakeEvent("ProcessInfo", EventPriority::Critical);
+    if (!PrepareSampledEvent(event, app_session_guid_, 0,
+                             TelemetryInternal::kCriticalEventSampleRatePercent)) {
+      emitted = true;
+      return;
+    }
     // sessionId 0 = process scope (model sessions are numbered from 1); ProcessInfo
     // correlates with model/generate events via the AppSessionGuid logger context.
     event.SetProperty("sessionId", static_cast<int64_t>(0));
@@ -599,6 +609,10 @@ void GenAiTelemetry::LogRuntimeError(uint32_t session_id,
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
   RunLocked([&] {
     auto event = MakeEvent("RuntimeError", EventPriority::High);
+    if (!PrepareSampledEvent(event, app_session_guid_, session_id,
+                             TelemetryInternal::kCriticalEventSampleRatePercent)) {
+      return;
+    }
     event.SetProperty("sessionId", static_cast<int64_t>(session_id));
     event.SetProperty("errorType", error_type);
     event.SetProperty("errorMessage", ScrubStringForTelemetry(error_message));
