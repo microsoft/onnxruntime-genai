@@ -2,6 +2,8 @@
 
 This folder contains the model builder for quickly creating optimized and quantized ONNX models within a few minutes that run with ONNX Runtime GenAI.
 
+Exported graphs use ONNX opset 24, including support for `TensorScatter`, and require a runtime that supports this opset. The ONNX IR version remains 10 and the `com.microsoft` domain remains at version 1.
+
 # Contents
 
 - [Current Support](#current-support)
@@ -301,114 +303,8 @@ python builder.py -m model_name -o path_to_output_folder -p precision -e executi
 
 #### Nemotron Parse Options
 
-Nemotron Parse exports two graphs constructed directly with the common ONNX IR
-builder: a static RADIO encoder that also produces cross-attention K/V caches,
-and one mBART decoder used for both prompt processing and token generation. The
-decoder emits the standard main-domain `TensorScatter` operator from opset 24.
-Both graph components reuse `Model` for weight serialization, quantization,
-MatMul/bias construction, and shape/operator wrappers. Their linear helpers only
-compose the shared MatMul and bias builders. Standalone LayerNormalization keeps
-each source module's epsilon and tensor shape without the base decoder's residual
-state bookkeeping. RADIO's packed QKV, patch geometry, and compression neck, plus
-mBART's absolute positions, cross-attention, and fixed TensorScatter cache, remain
-model-specific; they do not use the base decoder's fused-attention/cache pipeline.
-
-Its model-specific options are:
-
-- `image_height` and `image_width`: fixed encoder input dimensions. They default to the checkpoint's `image_size` (or `768` when absent); the encoder graph is specialized to these dimensions.
-- `prefill_sequence_length`: static TRT-RTX prefill fast-path length, including special tokens. The default is `8`. Other prompt lengths use dynamic prefill; this option does not restrict prompt length.
-- `export_components`: must be `encoder,decoder` (the default). Component-only exports are rejected because a runnable package requires both graphs.
-- `cache_sequence_length`: static self-attention KV-cache and decoder attention-mask length. The default is the model's maximum sequence length and it must exceed `prefill_sequence_length`.
-- `torch_dtype`: optional checkpoint loading precision (`fp16`, `bf16`, `fp32`, or `auto`). By default, floating-point exports load at the requested precision and INT4 exports preserve the checkpoint dtype with `auto`. Explicit FP16 loading trades source precision for memory usage.
-
-Supported sampling defaults, including `repetition_penalty`, are preserved from
-the checkpoint's generation configuration. Batch size and beam count remain one.
-The native image processor supports the checkpoint's bilinear aspect-preserving
-resize, centered constant white padding, rescaling by 1/255, and CLIP normalization.
-Export rejects incompatible source settings or transforms, including padding
-library versions that silently change white padding to black.
-
-INT4 export uses the model builder's standard quantization options. For
-TRT-RTX, use `use_qdq=true block_size=32` to emit the
-`DequantizeLinear -> MatMul` weight-only pattern.
-
-For models that provide custom Hugging Face code, explicitly set
-`hf_remote=true` only after verifying and trusting that code. For example, the
-following exports a native-size INT4 package:
-
-```bash
-# From wheel:
-python -m onnxruntime_genai.models.builder -i path_to_nemotron_parse_model -o path_to_output_folder -p int4 -e NvTensorRtRtx --extra_options hf_remote=true image_height=2048 image_width=1648 prefill_sequence_length=8 cache_sequence_length=1032 export_components=encoder,decoder use_qdq=true block_size=32
-
-# From source:
-python builder.py -i path_to_nemotron_parse_model -o path_to_output_folder -p int4 -e NvTensorRtRtx --extra_options hf_remote=true image_height=2048 image_width=1648 prefill_sequence_length=8 cache_sequence_length=1032 export_components=encoder,decoder use_qdq=true block_size=32
-```
-
-Run the exported package through the shared multimodal example:
-
-```bash
-python examples/python/model-mm.py -m path_to_output_folder --image_paths document.png --non_interactive
-```
-
-For Nemotron Parse, omitting `--user_prompt` (or passing an empty string) uses
-`</s><s><predict_bbox><predict_classes><output_markdown>`. The processor adds
-the decoder-start token and tokenizer BOS/EOS tokens, making the default task
-eight input tokens. Custom task prompts are tokenized the same way; count tokens,
-not characters or words. All prompts must be shorter than `context_length` to
-leave room for generation.
-
-CPU/CUDA sessions accept shorter and longer prompts, independently of
-`prefill_sequence_length`. TRT-RTX eagerly creates three sessions from the same
-dynamic decoder ONNX file: static prefill at `prefill_sequence_length`, dynamic
-prefill for other lengths, and static one-token decode. The dynamic profile spans
-`1` through `context_length - 1`, with `prefill_sequence_length` as its optimum.
-The processor rejects prompts outside this range before image preprocessing;
-the runtime also validates callers that bypass the processor. No automatic
-padding or truncation is performed. A package configured with
-`prefill_sequence_length=16` still accepts the default eight-token task through
-dynamic prefill, while 16-token prompts use the static fast path.
-
-All sessions are created during model loading, so custom prompts do not trigger
-session creation on the first request. The extra session increases model startup
-time and memory usage. Custom prompts accept dynamic-prefill latency; the static
-prefill and one-token decode fast paths retain their shape specialization. This
-supports varying prompt length, not arbitrary batch or image shapes. Manually
-specialized ONNX files with a fixed sequence dimension remain restricted to that
-dimension and must be re-exported to support varying lengths.
-
-The processor accepts a string or a singleton prompt list; empty and multi-item
-lists are rejected. Rewind, adapters, and `nv_multi_profile_enable=1` are not
-supported. Runtime options are forwarded to both encoder and decoder sessions.
-After an inference error or interrupted inference, discard the generator and
-create a new one; partially written in-place caches cannot safely be reused.
-
-From a source checkout with the native Python bindings built and importable:
-
-```bash
-python -m pytest test/python/models/test_nemotron_parse_prompts.py test/python/builder/test_nemotron_parse.py -q
-# Require CUDA runtime coverage on a CUDA-enabled build:
-NEMOTRON_PARSE_REQUIRE_CUDA=1 python -m pytest test/python/models/test_nemotron_parse_prompts.py -k in_place_cache -q
-# Require TRT-RTX INT4 compilation, placement, and numerical coverage:
-NEMOTRON_PARSE_REQUIRE_TRT_RTX=1 python -m pytest test/python/models/test_nemotron_parse_prompts.py test/python/builder/test_nemotron_parse.py -k trt_rtx -q
-```
-
-For a plugin TRT-RTX build, set `ORT_TRT_RTX_EP_LIBRARY` to its library before
-running the last command. The target-provider tests disable CPU fallback; missing
-required providers fail instead of silently passing on CPU. Pixel-level tests
-also require Pillow and OpenCV. GPU-specific tests skip on ordinary CPU runs.
-The cache regression covers FP16 and FP32 on CPU/CUDA, checking both past/present
-buffers and untouched cache slots after prefill and five decode steps. It also
-checks profiling evidence for all twelve key/value TensorScatter executions on
-the requested provider. CUDA validation requires a CUDA-enabled GenAI build and
-CUDA-enabled ONNX Runtime with drivers compatible with its compiled kernels.
-The TRT-RTX tests bind each past/present cache pair to the same GPU allocation
-and carry the target's static or dynamic prefill cache into decode; both logits
-and caches are compared against the FP32 reference. Native runtime tests alternate
-static and dynamic prompts on one model, cover profile boundaries and non-default
-fast-path lengths, and verify cache contents through decode. On GB10 with the legacy TRT-RTX 1.6.1.75
-bundle, also set `__LUNOWUD=-l2cm:enable=off` for the test process: that bundle's
-L2CM promotion kernel lacks an sm_121 image. This is a runtime workaround, not
-a change to the exported model.
+See [Nemotron Parse](docs/nemotron_parse.md) for model-specific export options,
+runtime behavior, and validation commands.
 
 #### Exclude Embedding Layer
 

@@ -553,10 +553,6 @@ struct DecoderOutputs_Element : JSON::Element {
       v_.present_value_scale_names = JSON::Get<std::string_view>(value);
     } else if (name == "present_names") {
       v_.present_names = JSON::Get<std::string_view>(value);
-    } else if (name == "cross_present_key_names") {
-      v_.cross_present_key_names = JSON::Get<std::string_view>(value);
-    } else if (name == "cross_present_value_names") {
-      v_.cross_present_value_names = JSON::Get<std::string_view>(value);
     } else if (name == "output_cross_qk_names") {
       v_.output_cross_qk_names = JSON::Get<std::string_view>(value);
     } else if (name == "rnn_states") {
@@ -2154,6 +2150,8 @@ struct Model_Element : JSON::Element {
       v_.type = JSON::Get<std::string_view>(value);
     } else if (name == "tokenizer_dir") {
       v_.tokenizer_dir = JSON::Get<std::string_view>(value);
+    } else if (name == "default_user_prompt") {
+      v_.default_user_prompt = std::string{JSON::Get<std::string_view>(value)};
     } else if (name == "vocab_size") {
       v_.vocab_size = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "context_length") {

@@ -3,6 +3,7 @@
 
 #include "generator/generators.h"
 #include "multi_modal.h"
+#include "nemotron_parse.h"
 #include "models/io/default_position_inputs.h"
 #include "models/io/qwen_vl_position_inputs.h"
 #include <cstring>
@@ -133,6 +134,12 @@ void CheckLfm2AudioSessionDevices(const Config& config, DeviceType decoder_devic
     check(config.model.speech.session_options, "speech", "the audio features are passed", decoder_device);
     check(config.model.embedding.session_options, "embedding", "the audio features are passed", decoder_device);
   }
+}
+
+std::shared_ptr<Model> MultiModalLanguageModel::Create(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech) {
+  if (config->model.type == "nemotron_parse")
+    return std::make_shared<NemotronParseModel>(std::move(config), ort_env);
+  return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, vision, speech);
 }
 
 MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech)

@@ -70,6 +70,8 @@ TEST(ModelTests, NemotronParseConfig) {
   Generators::Config config{config_path, std::string_view{}};
 
   EXPECT_EQ(config.model.type, "nemotron_parse");
+  EXPECT_EQ(config.model.default_user_prompt,
+            "</s><s><predict_bbox><predict_classes><output_markdown>");
   EXPECT_EQ(config.model.context_length, 1032);
   EXPECT_TRUE(Generators::ModelType::IsVLM(config.model.type));
   EXPECT_EQ(config.model.vision.num_visual_tokens, 3201);

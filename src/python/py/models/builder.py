@@ -933,14 +933,6 @@ def get_args():
                     Used for unit testing purposes.
                 filename = Filename for ONNX model (default is 'model.onnx').
                     For models with multiple components, each component is exported to its own ONNX model.
-                image_height/image_width = Nemotron Parse fixed encoder dimensions; default to checkpoint image_size or 768.
-                prefill_sequence_length = Nemotron Parse static TRT-RTX prefill fast-path length including special tokens (default 8).
-                    Other prompt lengths use dynamic prefill, up to cache_sequence_length-1 tokens.
-                cache_sequence_length = Nemotron Parse cache capacity; defaults to checkpoint max_sequence_length.
-                    Must exceed prefill_sequence_length.
-                export_components = Nemotron Parse requires encoder,decoder (default); component-only exports are unsupported.
-                torch_dtype = Nemotron Parse checkpoint loading dtype: fp16, bf16, fp32, or auto.
-                    Defaults to requested floating-point export precision, or auto for INT4.
                 config_only = Generate config and pre/post processing files only.
                     Use this option when you already have your optimized and/or quantized ONNX model.
                 hf_token = false/token: Use this to manage authentication with Hugging Face.

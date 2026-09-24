@@ -42,10 +42,10 @@ from transformers import (
 
 from quantization import KV_CACHE_CALIBRATION_QMAX, CudaQuantizer, QuantConfig, resolve_dtype
 
+DEFAULT_OPSET = 24
+
 
 class Model:
-    external_data_size_threshold_bytes = 0
-
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         self.extra_options = extra_options
         self.make_config_init(config)
@@ -134,7 +134,7 @@ class Model:
             inputs=(),
             outputs=(),
             nodes=(),
-            opset_imports={"": 22, "com.microsoft": 1},
+            opset_imports={"": DEFAULT_OPSET, "com.microsoft": 1},
             name="main_graph",
         )
         self.model = ir.Model(self.graph, ir_version=10, producer_name="onnxruntime-genai")
@@ -1253,13 +1253,16 @@ class Model:
             "",
         )
 
+    def load_generation_config(self, extra_kwargs):
+        return GenerationConfig.from_pretrained(
+            self.model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs
+        )
+
     def make_genai_config(self, config, extra_kwargs, out_dir):
         # Create config with attributes from config.json and generation_config.json (if latter file exists)
         try:
             # Override search attributes in config based on values in generation_config.json
-            gen_config = GenerationConfig.from_pretrained(
-                self.model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs
-            )
+            gen_config = self.load_generation_config(extra_kwargs)
             defaults = {
                 "bos_token_id": None,
                 "do_sample": False,
@@ -2042,7 +2045,7 @@ class Model:
                 model,
                 out_path,
                 external_data=os.path.basename(data_path),
-                size_threshold_bytes=self.external_data_size_threshold_bytes,
+                size_threshold_bytes=0,
                 callback=callback,
             )
 
@@ -2394,9 +2397,6 @@ class Model:
         mode="linear",
     ):
         """Update slices of a tensor with the standard ONNX TensorScatter op."""
-        self.model.graph.opset_imports[""] = max(
-            self.model.graph.opset_imports.get("", 0), 24
-        )
         output = output or f"{name}/output_0"
         self.make_node(
             "TensorScatter",

@@ -17,8 +17,6 @@ from .base import Model
 class NemotronParseEncoderComponent(Model):
     """Build the fixed-resolution RADIO encoder and decoder cross-KV projections."""
 
-    external_data_size_threshold_bytes = 1024
-
     def __init__(
         self,
         config,
@@ -177,6 +175,7 @@ class NemotronParseEncoderComponent(Model):
         bias = f"{name[1:].replace('/', '.')}.bias"
         self.make_initializer(layer_norm.weight, weight, to=self.io_dtype)
         self.make_initializer(layer_norm.bias, bias, to=self.io_dtype)
+        name = f"{name}/LayerNormalization"
         output = f"{name}/output_0"
         self.make_node(
             "LayerNormalization",
@@ -204,7 +203,7 @@ class NemotronParseEncoderComponent(Model):
         return output
 
     def make_patch_embedding(self):
-        base = "/encoder/radio/patch_generator"
+        base = "/model/encoder/radio/patch_generator"
         projection = self.patch_generator.embedder
         weight_name = "encoder.radio.patch_generator.weight"
         conv_weight = projection.weight.reshape(
@@ -228,11 +227,7 @@ class NemotronParseEncoderComponent(Model):
             [1, self.patch_rows, self.patch_cols, self.radio_hidden_size],
             [0, 2, 3, 1],
         )
-        reshape_shape = f"{base}/patch_shape"
-        self.make_initializer(
-            torch.tensor([1, self.patch_count, self.radio_hidden_size], dtype=torch.int64),
-            reshape_shape,
-        )
+        reshape_shape = f"/model/constants/INT64/[1, {self.patch_count}, {self.radio_hidden_size}]"
         reshape = f"{base}/Reshape"
         self.make_reshape(
             reshape,
@@ -243,7 +238,7 @@ class NemotronParseEncoderComponent(Model):
 
         position_name = "encoder.radio.patch_generator.position_embedding"
         self.make_initializer(self.specialized_position_embedding(), position_name, to=self.io_dtype)
-        add = f"{base}/AddPosition"
+        add = f"{base}/position/Add"
         self.make_add(
             add,
             [f"{reshape}/output_0", position_name],
@@ -257,7 +252,7 @@ class NemotronParseEncoderComponent(Model):
             prefix_name,
             to=self.io_dtype,
         )
-        concat = f"{base}/ConcatPrefix"
+        concat = f"{base}/prefix/Concat"
         self.make_concat(
             concat,
             [prefix_name, f"{add}/output_0"],
@@ -299,7 +294,7 @@ class NemotronParseEncoderComponent(Model):
         )
 
     def make_radio_block(self, layer_id, block, hidden_states):
-        base = f"/encoder/radio/layers.{layer_id}"
+        base = f"/model/encoder/radio/layers.{layer_id}"
         token_shape = [1, self.radio_sequence_length, self.radio_hidden_size]
         normalized = self.make_layer_norm(block.norm1, f"{base}/norm1", hidden_states, token_shape)
         qkv = self.make_linear(
@@ -309,25 +304,19 @@ class NemotronParseEncoderComponent(Model):
             self.radio_sequence_length,
         )
 
-        qkv_shape_name = f"{base}/attn/qkv_shape"
-        self.make_initializer(
-            torch.tensor(
-                [1, self.radio_sequence_length, 3, self.radio_num_heads, self.radio_head_size],
-                dtype=torch.int64,
-            ),
-            qkv_shape_name,
+        qkv_shape_name = (
+            f"/model/constants/INT64/[1, {self.radio_sequence_length}, 3, {self.radio_num_heads}, {self.radio_head_size}]"
         )
-        qkv_reshape = f"{base}/attn/ReshapeQKV"
+        qkv_reshape = f"{base}/attn/qkv/Reshape"
         self.make_reshape(
             qkv_reshape,
             [qkv, qkv_shape_name],
             self.io_dtype,
             [1, self.radio_sequence_length, 3, self.radio_num_heads, self.radio_head_size],
         )
-        split_name = f"{base}/attn/SplitQKV"
-        split_sizes = f"{base}/attn/split_sizes"
-        self.make_initializer(torch.tensor([1, 1, 1], dtype=torch.int64), split_sizes)
-        split_outputs = [f"{split_name}/q", f"{split_name}/k", f"{split_name}/v"]
+        split_name = f"{base}/attn/qkv/Split"
+        split_sizes = "/model/constants/INT64/[1, 1, 1]"
+        split_outputs = [f"{split_name}/output_{index}" for index in range(3)]
         split_shape = [1, self.radio_sequence_length, 1, self.radio_num_heads, self.radio_head_size]
         self.make_split(
             split_name,
@@ -337,8 +326,7 @@ class NemotronParseEncoderComponent(Model):
             [split_shape] * 3,
             axis=2,
         )
-        squeeze_axes = f"{base}/attn/squeeze_axes"
-        self.make_initializer(torch.tensor([2], dtype=torch.int64), squeeze_axes)
+        squeeze_axes = "/model/constants/INT64/[2]"
         qkv_bhsd = []
         for label, value in zip(("q", "k", "v"), split_outputs):
             squeeze = f"{base}/attn/{label}/Squeeze"
@@ -358,20 +346,15 @@ class NemotronParseEncoderComponent(Model):
             )
             qkv_bhsd.append(f"{transpose}/output_0")
 
-        scale_name = f"{base}/attn/scale"
-        self.make_initializer(
-            torch.tensor(math.sqrt(float(block.attn.scale)), dtype=torch.float32),
-            scale_name,
-            to=self.io_dtype,
-        )
-        q_scale = f"{base}/attn/q/MulScale"
+        scale_name = f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{math.sqrt(float(block.attn.scale))}"
+        q_scale = f"{base}/attn/q/Mul"
         self.make_mul(
             q_scale,
             [qkv_bhsd[0], scale_name],
             self.io_dtype,
             [1, self.radio_num_heads, self.radio_sequence_length, self.radio_head_size],
         )
-        k_transpose = f"{base}/attn/k/TransposeScores"
+        k_transpose = f"{base}/attn/k/scores/Transpose"
         self.make_transpose(
             k_transpose,
             qkv_bhsd[1],
@@ -379,14 +362,14 @@ class NemotronParseEncoderComponent(Model):
             [1, self.radio_num_heads, self.radio_head_size, self.radio_sequence_length],
             [0, 1, 3, 2],
         )
-        k_scale = f"{base}/attn/k/MulScale"
+        k_scale = f"{base}/attn/k/Mul"
         self.make_mul(
             k_scale,
             [f"{k_transpose}/output_0", scale_name],
             self.io_dtype,
             [1, self.radio_num_heads, self.radio_head_size, self.radio_sequence_length],
         )
-        scores = f"{base}/attn/MatMulScores"
+        scores = f"{base}/attn/scores/MatMul"
         score_shape = [1, self.radio_num_heads, self.radio_sequence_length, self.radio_sequence_length]
         self.make_node(
             "MatMul",
@@ -397,7 +380,7 @@ class NemotronParseEncoderComponent(Model):
         self.make_value(f"{scores}/output_0", self.io_dtype, score_shape)
         softmax = f"{base}/attn/Softmax"
         self.make_softmax(softmax, f"{scores}/output_0", self.io_dtype, score_shape, axis=-1)
-        context = f"{base}/attn/MatMulContext"
+        context = f"{base}/attn/context/MatMul"
         context_shape = [1, self.radio_num_heads, self.radio_sequence_length, self.radio_head_size]
         self.make_node(
             "MatMul",
@@ -406,7 +389,7 @@ class NemotronParseEncoderComponent(Model):
             name=context,
         )
         self.make_value(f"{context}/output_0", self.io_dtype, context_shape)
-        context_transpose = f"{base}/attn/TransposeContext"
+        context_transpose = f"{base}/attn/context/Transpose"
         self.make_transpose(
             context_transpose,
             f"{context}/output_0",
@@ -414,12 +397,8 @@ class NemotronParseEncoderComponent(Model):
             [1, self.radio_sequence_length, self.radio_num_heads, self.radio_head_size],
             [0, 2, 1, 3],
         )
-        merge_shape_name = f"{base}/attn/merge_shape"
-        self.make_initializer(
-            torch.tensor([1, self.radio_sequence_length, self.radio_hidden_size], dtype=torch.int64),
-            merge_shape_name,
-        )
-        merge = f"{base}/attn/ReshapeContext"
+        merge_shape_name = f"/model/constants/INT64/[1, {self.radio_sequence_length}, {self.radio_hidden_size}]"
+        merge = f"{base}/attn/context/Reshape"
         self.make_reshape(
             merge,
             [f"{context_transpose}/output_0", merge_shape_name],
@@ -432,7 +411,7 @@ class NemotronParseEncoderComponent(Model):
             f"{merge}/output_0",
             self.radio_sequence_length,
         )
-        attention_residual = f"{base}/AddAttention"
+        attention_residual = f"{base}/attn/residual/Add"
         self.make_add(
             attention_residual,
             [hidden_states, projection],
@@ -471,7 +450,7 @@ class NemotronParseEncoderComponent(Model):
             f"{activation}/output_0",
             self.radio_sequence_length,
         )
-        output = f"{base}/AddMlp"
+        output = f"{base}/mlp/residual/Add"
         self.make_add(
             output,
             [f"{attention_residual}/output_0", fc2],
@@ -481,14 +460,11 @@ class NemotronParseEncoderComponent(Model):
         return f"{output}/output_0"
 
     def make_neck(self, hidden_states):
-        base = "/encoder/neck"
-        feature_starts = f"{base}/feature_starts"
-        feature_ends = f"{base}/feature_ends"
-        feature_axes = f"{base}/feature_axes"
-        self.make_initializer(torch.tensor([self.prefix_count], dtype=torch.int64), feature_starts)
-        self.make_initializer(torch.tensor([self.radio_sequence_length], dtype=torch.int64), feature_ends)
-        self.make_initializer(torch.tensor([1], dtype=torch.int64), feature_axes)
-        feature_slice = f"{base}/SliceFeatures"
+        base = "/model/encoder/neck"
+        feature_starts = f"/model/constants/INT64/[{self.prefix_count}]"
+        feature_ends = f"/model/constants/INT64/[{self.radio_sequence_length}]"
+        feature_axes = "/model/constants/INT64/[1]"
+        feature_slice = f"{base}/features/Slice"
         self.make_slice(
             feature_slice,
             [hidden_states, feature_starts, feature_ends, feature_axes],
@@ -497,9 +473,8 @@ class NemotronParseEncoderComponent(Model):
         )
 
         summary_indices = self.radio.summary_idxs.to(dtype=torch.int64)
-        summary_indices_name = f"{base}/summary_indices"
-        self.make_initializer(summary_indices, summary_indices_name)
-        summary_gather = f"{base}/GatherSummary"
+        summary_indices_name = f"/model/constants/INT64/{summary_indices.tolist()}"
+        summary_gather = f"{base}/summary/Gather"
         self.make_gather(
             summary_gather,
             [hidden_states, summary_indices_name],
@@ -507,10 +482,9 @@ class NemotronParseEncoderComponent(Model):
             [1, int(summary_indices.numel()), self.radio_hidden_size],
             axis=1,
         )
-        summary_shape = f"{base}/summary_shape"
         summary_width = int(summary_indices.numel()) * self.radio_hidden_size
-        self.make_initializer(torch.tensor([1, 1, summary_width], dtype=torch.int64), summary_shape)
-        summary_reshape = f"{base}/ReshapeSummary"
+        summary_shape = f"/model/constants/INT64/[1, 1, {summary_width}]"
+        summary_reshape = f"{base}/summary/Reshape"
         self.make_reshape(
             summary_reshape,
             [f"{summary_gather}/output_0", summary_shape],
@@ -534,22 +508,17 @@ class NemotronParseEncoderComponent(Model):
             projected,
             [1, self.patch_count, self.source_config.decoder.d_model],
         )
-        grid_shape = f"{base}/grid_shape"
-        self.make_initializer(
-            torch.tensor(
-                [1, self.patch_rows, self.patch_cols, self.source_config.decoder.d_model],
-                dtype=torch.int64,
-            ),
-            grid_shape,
+        grid_shape = (
+            f"/model/constants/INT64/[1, {self.patch_rows}, {self.patch_cols}, {self.source_config.decoder.d_model}]"
         )
-        grid_reshape = f"{base}/ReshapeGrid"
+        grid_reshape = f"{base}/grid/Reshape"
         self.make_reshape(
             grid_reshape,
             [projected, grid_shape],
             self.io_dtype,
             [1, self.patch_rows, self.patch_cols, self.source_config.decoder.d_model],
         )
-        grid_transpose = f"{base}/TransposeGrid"
+        grid_transpose = f"{base}/grid/Transpose"
         self.make_transpose(
             grid_transpose,
             f"{grid_reshape}/output_0",
@@ -569,7 +538,7 @@ class NemotronParseEncoderComponent(Model):
             kernel_shape=[1, 4],
             strides=[1, 4],
         )
-        compressed_transpose = f"{base}/TransposeCompressed"
+        compressed_transpose = f"{base}/compressed/Transpose"
         self.make_transpose(
             compressed_transpose,
             f"{conv2}/output_0",
@@ -577,13 +546,9 @@ class NemotronParseEncoderComponent(Model):
             [1, self.patch_rows, compressed_cols, self.source_config.decoder.d_model],
             [0, 2, 3, 1],
         )
-        compressed_shape = f"{base}/compressed_shape"
         compressed_count = self.patch_rows * compressed_cols
-        self.make_initializer(
-            torch.tensor([1, compressed_count, self.source_config.decoder.d_model], dtype=torch.int64),
-            compressed_shape,
-        )
-        compressed_reshape = f"{base}/ReshapeCompressed"
+        compressed_shape = f"/model/constants/INT64/[1, {compressed_count}, {self.source_config.decoder.d_model}]"
+        compressed_reshape = f"{base}/compressed/Reshape"
         self.make_reshape(
             compressed_reshape,
             [f"{compressed_transpose}/output_0", compressed_shape],
@@ -609,7 +574,7 @@ class NemotronParseEncoderComponent(Model):
             summary,
             [1, 1, self.source_config.decoder.d_model],
         )
-        concat = f"{base}/ConcatOutput"
+        concat = f"{base}/output/Concat"
         self.make_node(
             "Concat",
             inputs=[compressed, summary],
@@ -627,20 +592,15 @@ class NemotronParseEncoderComponent(Model):
     def make_cross_cache(self, encoder_hidden_states):
         decoder_heads = self.source_config.decoder.decoder_attention_heads
         decoder_head_size = self.source_config.decoder.d_model // decoder_heads
-        reshape_shape_name = "/encoder/cross_cache/reshape_shape"
-        self.make_initializer(
-            torch.tensor(
-                [1, self.encoder_sequence_length, decoder_heads, decoder_head_size],
-                dtype=torch.int64,
-            ),
-            reshape_shape_name,
+        reshape_shape_name = (
+            f"/model/constants/INT64/[1, {self.encoder_sequence_length}, {decoder_heads}, {decoder_head_size}]"
         )
         for layer_id, layer in enumerate(self.decoder.layers):
             for kind, projection in (
                 ("key", layer.encoder_attn.k_proj),
                 ("value", layer.encoder_attn.v_proj),
             ):
-                base = f"/encoder/cross_cache/layers.{layer_id}/{kind}"
+                base = f"/model/encoder/cross_cache/layers.{layer_id}/{kind}"
                 projected = self.make_linear(
                     projection,
                     f"{base}/proj",

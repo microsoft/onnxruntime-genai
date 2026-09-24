@@ -12,12 +12,25 @@ import torch
 from .base import Model
 
 
+def make_decoder_config(config, cache_sequence_length):
+    decoder_config = copy.deepcopy(config.decoder)
+    decoder_config._name_or_path = config._name_or_path
+    decoder_config.architectures = config.architectures
+    decoder_config.num_hidden_layers = decoder_config.decoder_layers
+    decoder_config.num_key_value_heads = decoder_config.decoder_attention_heads
+    decoder_config.num_attention_heads = decoder_config.decoder_attention_heads
+    decoder_config.hidden_size = decoder_config.d_model
+    decoder_config.intermediate_size = decoder_config.decoder_ffn_dim
+    decoder_config.hidden_act = decoder_config.activation_function
+    decoder_config.max_position_embeddings = cache_sequence_length
+    decoder_config.rms_norm_eps = getattr(decoder_config, "layer_norm_eps", None) or 1e-5
+    if hasattr(decoder_config, "quantization_config") and decoder_config.quantization_config is None:
+        delattr(decoder_config, "quantization_config")
+    return decoder_config
+
+
 class NemotronParseDecoderComponent(Model):
     """Build the unified Nemotron Parse mBART prefill/decode graph."""
-
-    # ORT shape inference needs static Reshape inputs in the model protobuf.
-    # Keep small graph constants embedded while externalizing decoder weights.
-    external_data_size_threshold_bytes = 1024
 
     def __init__(
         self,
@@ -29,43 +42,18 @@ class NemotronParseDecoderComponent(Model):
         extra_options,
         *,
         encoder_sequence_length,
-        prefill_sequence_length,
         cache_sequence_length,
     ):
         self.encoder_sequence_length = int(encoder_sequence_length)
-        self.prefill_sequence_length = int(prefill_sequence_length)
         self.cache_sequence_length = int(cache_sequence_length)
         self.sequence_length = "sequence_length"
-
-        decoder_config = copy.deepcopy(config.decoder)
-        decoder_config._name_or_path = config._name_or_path
-        decoder_config.architectures = config.architectures
-        decoder_config.num_hidden_layers = decoder_config.decoder_layers
-        decoder_config.num_key_value_heads = (
-            decoder_config.decoder_attention_heads
-        )
-        decoder_config.num_attention_heads = (
-            decoder_config.decoder_attention_heads
-        )
-        decoder_config.hidden_size = decoder_config.d_model
-        decoder_config.intermediate_size = decoder_config.decoder_ffn_dim
-        decoder_config.hidden_act = decoder_config.activation_function
-        decoder_config.max_position_embeddings = self.cache_sequence_length
-        decoder_config.rms_norm_eps = (
-            getattr(decoder_config, "layer_norm_eps", None) or 1e-5
-        )
-        if (
-            hasattr(decoder_config, "quantization_config")
-            and decoder_config.quantization_config is None
-        ):
-            delattr(decoder_config, "quantization_config")
 
         component_options = copy.deepcopy(extra_options)
         component_options["filename"] = "decoder.onnx"
         component_options["prune_lm_head"] = True
         component_options["shared_embeddings"] = False
         super().__init__(
-            decoder_config,
+            make_decoder_config(config, self.cache_sequence_length),
             io_dtype,
             onnx_dtype,
             ep,
@@ -74,13 +62,19 @@ class NemotronParseDecoderComponent(Model):
         )
 
         self.graph.name = "nemotron_parse_decoder"
-        self.graph.opset_imports[""] = 24
 
         self.output_shapes["logits"] = [
-            "batch_size",
+            1,
             1,
             self.vocab_size,
         ]
+
+    def make_value(self, name, dtype=None, shape=None):
+        # Shared helpers use symbolic dimensions even though this component fixes them.
+        if shape is not None:
+            fixed_dims = {"batch_size": 1, "encoder_sequence_length": self.encoder_sequence_length}
+            shape = [fixed_dims.get(dim, dim) for dim in shape]
+        return super().make_value(name, dtype, shape)
 
     def is_gqa_supported(self):
         # This component emits the checkpoint's primitive mBART attention graph.
@@ -109,7 +103,7 @@ class NemotronParseDecoderComponent(Model):
 
         hidden_states = self.make_layer_norm(
             weights.decoder.layer_norm,
-            "/decoder/layer_norm",
+            "/model/layer_norm",
             hidden_states,
             self.sequence_length,
         )
@@ -117,8 +111,8 @@ class NemotronParseDecoderComponent(Model):
         self.make_lm_head(weights.lm_head)
 
     def make_inputs_and_outputs(self):
-        batch = "batch_size"
-        encoder_sequence = "encoder_sequence_length"
+        batch = 1
+        encoder_sequence = self.encoder_sequence_length
         head_shape = [
             batch,
             self.num_attn_heads,
@@ -179,41 +173,6 @@ class NemotronParseDecoderComponent(Model):
                 )
 
     def make_constants(self):
-        prefix = "/nemotron_parse/constants"
-        self.constant_names = {
-            "reshape_heads": f"{prefix}/reshape_heads",
-            "merge_heads": f"{prefix}/merge_heads",
-            "mask_axes": f"{prefix}/mask_axes",
-            "mask_zero": f"{prefix}/mask_zero",
-            "mask_value": f"{prefix}/mask_value",
-            "float_zero": f"{prefix}/float_zero",
-            "attention_scale": f"{prefix}/attention_scale",
-            "shape_index": f"{prefix}/shape_index",
-            "range_start": f"{prefix}/range_start",
-            "range_step": f"{prefix}/range_step",
-            "write_index_axes": f"{prefix}/write_index_axes",
-            "query_position_axes": f"{prefix}/query_position_axes",
-            "key_positions": f"{prefix}/key_positions",
-        }
-        self.make_initializer(
-            torch.tensor(
-                [0, 0, self.num_attn_heads, self.head_size],
-                dtype=torch.int64,
-            ),
-            self.constant_names["reshape_heads"],
-        )
-        self.make_initializer(
-            torch.tensor([0, 0, self.hidden_size], dtype=torch.int64),
-            self.constant_names["merge_heads"],
-        )
-        self.make_initializer(
-            torch.tensor([1, 2], dtype=torch.int64),
-            self.constant_names["mask_axes"],
-        )
-        self.make_initializer(
-            torch.tensor(0, dtype=torch.int64),
-            self.constant_names["mask_zero"],
-        )
         torch_dtype = {
             ir.DataType.FLOAT16: torch.float16,
             ir.DataType.BFLOAT16: torch.bfloat16,
@@ -224,43 +183,23 @@ class NemotronParseDecoderComponent(Model):
                 "Nemotron Parse decoder inputs must use float, float16, or bfloat16"
             )
         mask_value = float(torch.finfo(torch_dtype).min)
-        self.make_initializer(
-            torch.tensor(mask_value, dtype=torch.float32),
-            self.constant_names["mask_value"],
-            to=self.io_dtype,
-        )
-        self.make_initializer(
-            torch.tensor(0.0, dtype=torch.float32),
-            self.constant_names["float_zero"],
-            to=self.io_dtype,
-        )
-        self.make_initializer(
-            torch.tensor(
-                1.0 / math.sqrt(self.head_size), dtype=torch.float32
-            ),
-            self.constant_names["attention_scale"],
-            to=self.io_dtype,
-        )
-        self.make_initializer(
-            torch.tensor(1, dtype=torch.int64),
-            self.constant_names["shape_index"],
-        )
-        self.make_initializer(
-            torch.tensor(0, dtype=torch.int64),
-            self.constant_names["range_start"],
-        )
-        self.make_initializer(
-            torch.tensor(1, dtype=torch.int64),
-            self.constant_names["range_step"],
-        )
-        self.make_initializer(
-            torch.tensor([1], dtype=torch.int64),
-            self.constant_names["write_index_axes"],
-        )
-        self.make_initializer(
-            torch.tensor([1, 3], dtype=torch.int64),
-            self.constant_names["query_position_axes"],
-        )
+        prefix = "/model/constants"
+        dtype = self.to_str_dtype(self.io_dtype)
+        self.constant_names = {
+            "reshape_heads": f"{prefix}/INT64/[0, 0, {self.num_attn_heads}, {self.head_size}]",
+            "merge_heads": f"{prefix}/INT64/[0, 0, {self.hidden_size}]",
+            "mask_axes": f"{prefix}/INT64/[1, 2]",
+            "mask_zero": f"{prefix}/INT64/0",
+            "mask_value": f"{prefix}/{dtype}/{mask_value}",
+            "float_zero": f"{prefix}/{dtype}/0.0",
+            "attention_scale": f"{prefix}/{dtype}/{1.0 / math.sqrt(self.head_size)}",
+            "shape_index": f"{prefix}/INT64/1",
+            "range_start": f"{prefix}/INT64/0",
+            "range_step": f"{prefix}/INT64/1",
+            "write_index_axes": f"{prefix}/INT64/[1]",
+            "query_position_axes": f"{prefix}/INT64/[1, 3]",
+            "key_positions": "/model/attention_mask/key_positions",
+        }
         self.make_initializer(
             torch.arange(
                 self.cache_sequence_length, dtype=torch.int64
@@ -270,8 +209,8 @@ class NemotronParseDecoderComponent(Model):
 
     def make_attention_mask(self):
         key_length = self.cache_sequence_length
-        base = "/decoder/attention_mask"
-        equal = f"{base}/EqualPadding"
+        base = "/model/attention_mask"
+        equal = f"{base}/padding/Equal"
         self.make_equal(
             equal,
             ["decoder_attention_mask", self.constant_names["mask_zero"]],
@@ -285,9 +224,9 @@ class NemotronParseDecoderComponent(Model):
             ["batch_size", 1, 1, key_length],
         )
 
-        input_shape = f"{base}/InputShape"
+        input_shape = f"{base}/input/Shape"
         self.make_shape(input_shape, "decoder_input_ids", [2])
-        sequence_length = f"{base}/SequenceLength"
+        sequence_length = f"{base}/sequence_length/Gather"
         self.make_gather(
             sequence_length,
             [f"{input_shape}/output_0", self.constant_names["shape_index"]],
@@ -295,7 +234,7 @@ class NemotronParseDecoderComponent(Model):
             [],
             axis=0,
         )
-        query_offsets = f"{base}/QueryOffsets"
+        query_offsets = f"{base}/query_offsets/Range"
         self.make_range(
             query_offsets,
             [
@@ -306,7 +245,7 @@ class NemotronParseDecoderComponent(Model):
             ir.DataType.INT64,
             [self.sequence_length],
         )
-        write_indices = f"{base}/UnsqueezeWriteIndices"
+        write_indices = f"{base}/write_indices/Unsqueeze"
         self.make_unsqueeze(
             write_indices,
             [
@@ -316,14 +255,14 @@ class NemotronParseDecoderComponent(Model):
             ir.DataType.INT64,
             ["batch_size", 1],
         )
-        query_positions = f"{base}/AddQueryOffsets"
+        query_positions = f"{base}/query_positions/Add"
         self.make_add(
             query_positions,
             [f"{write_indices}/output_0", f"{query_offsets}/output_0"],
             ir.DataType.INT64,
             ["batch_size", self.sequence_length],
         )
-        query_positions_4d = f"{base}/UnsqueezeQueryPositions"
+        query_positions_4d = f"{base}/query_positions/Unsqueeze"
         self.make_unsqueeze(
             query_positions_4d,
             [
@@ -333,7 +272,7 @@ class NemotronParseDecoderComponent(Model):
             ir.DataType.INT64,
             ["batch_size", 1, self.sequence_length, 1],
         )
-        causal = f"{base}/GreaterCausal"
+        causal = f"{base}/causal/Greater"
         self.make_greater(
             causal,
             [
@@ -342,7 +281,7 @@ class NemotronParseDecoderComponent(Model):
             ],
             ["batch_size", 1, self.sequence_length, key_length],
         )
-        invalid = f"{base}/OrPaddingAndCausal"
+        invalid = f"{base}/padding_and_causal/Or"
         self.make_node(
             "Or",
             inputs=[f"{unsqueeze}/output_0", f"{causal}/output_0"],
@@ -368,8 +307,8 @@ class NemotronParseDecoderComponent(Model):
         return f"{where}/output_0"
 
     def make_decoder_embedding(self, decoder):
-        base = "/decoder/embed_tokens"
-        weight = "decoder.embed_tokens.weight"
+        base = "/model/embed_tokens"
+        weight = "model.embed_tokens.weight"
         self.make_initializer(decoder.embed_tokens.weight, weight, to=self.io_dtype)
         gather = f"{base}/Gather"
         self.make_gather(
@@ -383,12 +322,7 @@ class NemotronParseDecoderComponent(Model):
 
         embed_scale = float(getattr(decoder.embed_tokens, "embed_scale", 1.0))
         if embed_scale != 1.0:
-            scale = f"{base}/scale"
-            self.make_initializer(
-                torch.tensor(embed_scale, dtype=torch.float32),
-                scale,
-                to=self.io_dtype,
-            )
+            scale = f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{embed_scale}"
             mul = f"{base}/Mul"
             self.make_mul(
                 mul,
@@ -400,7 +334,7 @@ class NemotronParseDecoderComponent(Model):
 
         return self.make_layer_norm(
             decoder.layernorm_embedding,
-            "/decoder/layernorm_embedding",
+            "/model/layernorm_embedding",
             hidden_states,
             self.sequence_length,
         )
@@ -410,6 +344,7 @@ class NemotronParseDecoderComponent(Model):
         bias = f"{name[1:].replace('/', '.')}.bias"
         self.make_initializer(layer_norm.weight, weight, to=self.io_dtype)
         self.make_initializer(layer_norm.bias, bias, to=self.io_dtype)
+        name = f"{name}/LayerNormalization"
         output = f"{name}/output_0"
         self.make_node(
             "LayerNormalization",
@@ -557,7 +492,7 @@ class NemotronParseDecoderComponent(Model):
         )
         softmax_input = f"{scale}/output_0"
         if attention_mask is not None:
-            add_mask = f"{name}/scores/AddMask"
+            add_mask = f"{name}/scores/mask/Add"
             self.make_add(
                 add_mask,
                 [softmax_input, attention_mask],
@@ -596,7 +531,7 @@ class NemotronParseDecoderComponent(Model):
     def make_self_attention(
         self, layer_id, attention, root_input, attention_mask
     ):
-        base = f"/decoder/layers.{layer_id}/self_attn"
+        base = f"/model/layers.{layer_id}/attn"
         query = self.split_heads(
             self.make_linear(
                 attention.q_proj,
@@ -666,13 +601,13 @@ class NemotronParseDecoderComponent(Model):
         )
         return self.make_linear(
             attention.out_proj,
-            f"{base}/out_proj",
+            f"{base}/o_proj",
             merged,
             self.sequence_length,
         )
 
     def make_cross_attention(self, layer_id, attention, root_input):
-        base = f"/decoder/layers.{layer_id}/encoder_attn"
+        base = f"/model/layers.{layer_id}/cross_attn"
         query = self.split_heads(
             self.make_linear(
                 attention.q_proj,
@@ -692,20 +627,20 @@ class NemotronParseDecoderComponent(Model):
             key,
             value,
             self.sequence_length,
-            "encoder_sequence_length",
+            self.encoder_sequence_length,
         )
         merged = self.merge_heads(
             context, f"{base}/merge_heads", self.sequence_length
         )
         return self.make_linear(
             attention.out_proj,
-            f"{base}/out_proj",
+            f"{base}/o_proj",
             merged,
             self.sequence_length,
         )
 
     def make_decoder_layer(self, layer_id, layer, hidden_states, attention_mask):
-        base = f"/decoder/layers.{layer_id}"
+        base = f"/model/layers.{layer_id}"
         self_norm = self.make_layer_norm(
             layer.self_attn_layer_norm,
             f"{base}/self_attn_layer_norm",
@@ -715,7 +650,7 @@ class NemotronParseDecoderComponent(Model):
         self_attention = self.make_self_attention(
             layer_id, layer.self_attn, self_norm, attention_mask
         )
-        self_residual = f"{base}/self_attn/Add"
+        self_residual = f"{base}/attn/residual/Add"
         self.make_add(
             self_residual,
             [hidden_states, self_attention],
@@ -732,7 +667,7 @@ class NemotronParseDecoderComponent(Model):
         cross_attention = self.make_cross_attention(
             layer_id, layer.encoder_attn, cross_norm
         )
-        cross_residual = f"{base}/encoder_attn/Add"
+        cross_residual = f"{base}/cross_attn/residual/Add"
         self.make_add(
             cross_residual,
             [f"{self_residual}/output_0", cross_attention],
@@ -747,13 +682,13 @@ class NemotronParseDecoderComponent(Model):
             self.sequence_length,
         )
         fc1 = self.make_linear(
-            layer.fc1, f"{base}/fc1", final_norm, self.sequence_length
+            layer.fc1, f"{base}/mlp/fc1", final_norm, self.sequence_length
         )
         if self.activation != "gelu":
             raise ValueError(
                 "Nemotron Parse builder currently supports the checkpoint's gelu MLP"
             )
-        activation = f"{base}/activation_fn/Gelu"
+        activation = f"{base}/mlp/activation_fn/Gelu"
         self.make_node(
             "Gelu",
             inputs=[fc1],
@@ -768,11 +703,11 @@ class NemotronParseDecoderComponent(Model):
         )
         fc2 = self.make_linear(
             layer.fc2,
-            f"{base}/fc2",
+            f"{base}/mlp/fc2",
             f"{activation}/output_0",
             self.sequence_length,
         )
-        output = f"{base}/fc2/AddResidual"
+        output = f"{base}/mlp/residual/Add"
         self.make_add(
             output,
             [f"{cross_residual}/output_0", fc2],

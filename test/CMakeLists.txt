@@ -16,6 +16,7 @@ file(GLOB test_srcs CONFIGURE_DEPENDS
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/dflash2_config_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/kv_cache_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/lfm2_audio_frames_test.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/position_inputs_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/lfm2_vl_image_geometry_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/reinit_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/search_checkpoint_tests.cpp")
@@ -164,6 +165,26 @@ if (NOT MSVC)
   target_compile_options(kv_cache_unit_tests PRIVATE "-fvisibility=hidden")
 endif()
 add_test(NAME KvCacheUnitTests COMMAND kv_cache_unit_tests)
+
+add_executable(position_inputs_unit_tests "${CMAKE_CURRENT_SOURCE_DIR}/cpp/position_inputs_tests.cpp")
+target_include_directories(position_inputs_unit_tests PRIVATE
+  ${ORT_HEADER_DIR}
+  ${onnxruntime_extensions_SOURCE_DIR}/shared/api
+  ${CMAKE_SOURCE_DIR}/src
+)
+target_link_libraries(position_inputs_unit_tests PRIVATE
+  onnxruntime-genai-obj
+  GTest::gtest
+)
+add_dependencies(position_inputs_unit_tests onnxruntime-genai)
+set_target_properties(position_inputs_unit_tests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
+  FOLDER "Tests"
+)
+if (NOT MSVC)
+  target_compile_options(position_inputs_unit_tests PRIVATE "-fvisibility=hidden")
+endif()
+add_test(NAME PositionInputsUnitTests COMMAND position_inputs_unit_tests)
 
 if (ENABLE_TELEMETRY AND NOT WIN32 AND NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
   add_executable(telemetry_device_info_tests
