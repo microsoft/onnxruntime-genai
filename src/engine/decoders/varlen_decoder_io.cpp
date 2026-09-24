@@ -152,6 +152,10 @@ std::vector<size_t> GetSelectedLogitsIndices(const StepPlan& plan) {
     if (entry.logits_row_index < entry.packed_token_offset + entry.draft_token_count) {
       throw std::runtime_error("Draft verification logits precede the request's packed token range.");
     }
+    // CUDA Gather writes zeros for an out-of-range index instead of failing.
+    if (entry.logits_row_index >= plan.token_count) {
+      throw std::runtime_error("A selected logits row lies past the step's packed token range.");
+    }
     for (size_t draft = entry.draft_token_count; draft > 0; --draft) {
       indices.push_back(entry.logits_row_index - draft);
     }
@@ -168,6 +172,18 @@ bool DecoderLogitsArePerToken(const Model& model) {
   return logits_symbolic_shape.empty() ||
          logits_symbolic_shape[0] == nullptr ||
          std::string_view(logits_symbolic_shape[0]) != "batch_size";
+}
+
+bool DecoderLogitsAreSelected(const Model& model) {
+  const auto& name = model.config_->model.decoder.inputs.logits_indices;
+  if (name.empty() || !model.session_info_.HasInput(name)) {
+    return false;
+  }
+  if (!DecoderLogitsArePerToken(model)) {
+    throw std::runtime_error(
+        "A decoder with a logits_indices input must emit the selected rows, not batch_size logits rows.");
+  }
+  return true;
 }
 
 size_t PackedPositionIdPlanes(const Model& model) {
@@ -243,8 +259,7 @@ GraphBufferPlan PlanGraphBuffers(const Model& model, size_t position_planes,
     plan.buffers[GraphBufferPlan::kPositionIds] = {
         Ort::TypeToTensorType<int64_t>, {static_cast<int64_t>(position_planes) * rows}};
   }
-  const auto& logits_indices_name = model.config_->model.decoder.inputs.logits_indices;
-  if (!logits_indices_name.empty() && model.session_info_.HasInput(logits_indices_name)) {
+  if (DecoderLogitsAreSelected(model)) {
     plan.buffers[GraphBufferPlan::kLogitsIndices] = {
         Ort::TypeToTensorType<int32_t>, {rows}};
   }
@@ -362,8 +377,7 @@ VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
       position_planes_{position_planes},
       embedding_workspace_{embedding_workspace ? embedding_workspace : &local_embedding_workspace_} {
   logits_are_per_token_ = DecoderLogitsArePerToken(*model);
-  const auto& logits_indices_name = model->config_->model.decoder.inputs.logits_indices;
-  logits_are_selected_ = !logits_indices_name.empty() && model->session_info_.HasInput(logits_indices_name);
+  logits_are_selected_ = DecoderLogitsAreSelected(*model);
 
   PrepareInputIds(model, scheduled_requests);
   PreparePositionIds(model, scheduled_requests);
@@ -692,7 +706,6 @@ size_t VarlenDecoderIO::TokenCount(ScheduledRequests& scheduled_requests) const 
 void VarlenDecoderIO::PrepareLogitsIndices(
     std::shared_ptr<DecoderOnly_Model> model,
     ScheduledRequests& scheduled_requests) {
-    valid_token_indices_.reserve(plan_ ? plan_->token_count : scheduled_requests.size());
   if (logits_are_per_token_) {
     if (plan_) {
       if (plan_->requests.size() != scheduled_requests.size()) {
@@ -706,6 +719,7 @@ void VarlenDecoderIO::PrepareLogitsIndices(
       }
       valid_token_indices_ = GetSelectedLogitsIndices(*plan_);
     } else {
+      valid_token_indices_.reserve(scheduled_requests.size());
       for (size_t running_length = 0; const auto& request : scheduled_requests) {
         valid_token_indices_.push_back(running_length + request->ScheduledTokenCount() - 1);
         running_length += request->ScheduledTokenCount();
@@ -720,6 +734,7 @@ void VarlenDecoderIO::PrepareLogitsIndices(
           "Verifying draft tokens requires a model whose logits have one row per packed token; "
           "this model returned only one logits row per request.");
     }
+    valid_token_indices_.reserve(scheduled_requests.size());
     for (size_t i = 0; i < scheduled_requests.size(); ++i) {
       valid_token_indices_.push_back(i);
     }
@@ -768,7 +783,7 @@ void VarlenDecoderIO::PrepareLogits(std::shared_ptr<DecoderOnly_Model> model, Sc
   const size_t logits_rows = logits_are_selected_
                                  ? valid_token_indices_.size()
                                  : (logits_are_per_token_ ? TokenCount(scheduled_requests)
-                                                         : scheduled_requests.size());
+                                                          : scheduled_requests.size());
   const std::vector<int64_t> logits_shape = {
       static_cast<int64_t>(logits_rows),
       static_cast<int64_t>(model->config_->model.vocab_size)};

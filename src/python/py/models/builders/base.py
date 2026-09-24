@@ -44,9 +44,6 @@ from quantization import KV_CACHE_CALIBRATION_QMAX, CudaQuantizer, QuantConfig, 
 
 
 class Model:
-    # Row dim of paged hidden states; "num_logits" once the LM head's rows have been selected.
-    hidden_rows_dim = "num_tokens"
-
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         self.extra_options = extra_options
         self.make_config_init(config)
@@ -555,6 +552,9 @@ class Model:
         }
 
     def make_inputs_init(self):
+        # Row dim of paged hidden states; "num_logits" once the LM head's rows have been selected.
+        self.hidden_rows_dim = "num_tokens"
+
         # Manage the inputs for the embedding
         self.exclude_embeds = self.extra_options.get("exclude_embeds", False)
         if self.exclude_embeds:

@@ -47,6 +47,10 @@ std::vector<size_t> GetSelectedLogitsIndices(const StepPlan& plan);
 // draft is checked against the logits of the row that precedes it.
 bool DecoderLogitsArePerToken(const Model& model);
 
+// True when the decoder accepts logits_indices and emits only those rows. Throws for a model that
+// also declares batch_size logits rows, because the selected rows could not be mapped back.
+bool DecoderLogitsAreSelected(const Model& model);
+
 // 0 when the model takes no packed position_ids, 1 for [num_tokens], and 3 for the [3, num_tokens]
 // multimodal-rope layout.
 size_t PackedPositionIdPlanes(const Model& model);

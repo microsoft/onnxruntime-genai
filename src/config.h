@@ -44,7 +44,6 @@ struct Config {
     static constexpr std::string_view BlockTableName = "block_table";
     static constexpr std::string_view BlockTableWindowedName = "block_table_windowed";
     static constexpr std::string_view AttentionMetadataName = "attention_metadata";
-    static constexpr std::string_view LogitsIndicesName = "logits_indices";
 
     // Speech encoder names
     static constexpr std::string_view AudioAttentionMaskName = "audio_attention_mask";
