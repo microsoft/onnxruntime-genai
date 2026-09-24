@@ -1016,18 +1016,10 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   std::vector<OrtValue*> inputs{packed_aux.GetOrtTensor(), input_ids.GetOrtTensor(),
                                 q_row_map.GetOrtTensor(), qkv_row_map.GetOrtTensor(),
                                 block_row_index.GetOrtTensor(), cumulative.GetOrtTensor(),
-                                past_lengths.GetOrtTensor(), block_table.GetOrtTensor(),
-                                metadata.GetOrtTensor()};
+                                past_lengths.GetOrtTensor(), block_table.GetOrtTensor()};
   if (!config_.inputs.attention_metadata.empty()) {
-    auto& attention_metadata = Dflash2StepTensor(
-        step_tensors_.attention_metadata, GetDeviceInterface(DeviceType::CPU), int32_type, {3});
-    auto span = attention_metadata.GetDeviceSpan<int32_t>();
-    auto cpu = span.CpuSpan();
-    cpu[0] = layout.max_query_len;
-    cpu[1] = layout.max_kv_len;
-    cpu[2] = layout.min_kv_len;
     input_names.push_back(config_.inputs.attention_metadata.c_str());
-    inputs.push_back(attention_metadata.GetOrtTensor());
+    inputs.push_back(metadata.GetOrtTensor());
   }
   if (embeddings) {
     input_names.push_back(config_.inputs.embeddings.c_str());
