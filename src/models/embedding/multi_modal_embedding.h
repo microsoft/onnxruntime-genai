@@ -9,7 +9,7 @@
 #include "models/model.h"
 #include "models/io/input_ids.h"
 #include "models/io/multi_modal_features.h"
-#include "models/io/embeddings.h"
+#include "models/embedding/embeddings.h"
 
 namespace Generators {
 
@@ -22,7 +22,7 @@ struct EmbeddingState : State {
   EmbeddingState(const EmbeddingState&) = delete;
   EmbeddingState& operator=(const EmbeddingState&) = delete;
 
-  void SetExtraInputs(const int64_t num_images_, const int64_t num_image_tokens_, const int64_t num_audio_tokens_);
+  virtual void SetExtraInputs(const int64_t num_images_, const int64_t num_image_tokens_, const int64_t num_audio_tokens_);
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {});
 
   // Hands the embedding buffers this state produced off to the decoder for the next run, so the

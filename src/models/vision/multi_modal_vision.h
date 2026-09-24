@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-#include "model.h"
+#include "models/model.h"
 #include "models/io/multi_modal_features.h"
 #include "models/io/extra_inputs.h"
 
@@ -25,6 +25,8 @@ struct VisionState : State {
   VisionState& operator=(const VisionState&) = delete;
 
   virtual void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, const int64_t num_images, const int64_t num_image_tokens);
+  virtual int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs) const;
+  virtual int64_t GetNumImageTokens(const std::vector<ExtraInput>& extra_inputs) const;
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {}) override;
 
  protected:
@@ -83,13 +85,6 @@ inline void ValidateImageGridThwLayoutAndCount(const std::vector<int64_t>& shape
 //    VisionState::Run—always receives a 2-D input regardless of image count.
 //    Rank-2 pixel_values carries no image-count information, so we fall through and
 //    read num_images from image_grid_thw.shape[0] ([num_images, 3]).
-int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs);
-
-// Returns the total number of image tokens across the images in the current batch, read from the
-// Config::Defaults::NumImageTokens extra input (each image's contribution to the decoder's token
-// sequence).
-int64_t GetNumImageTokens(const std::vector<ExtraInput>& extra_inputs);
-
 // Factory: pick the right VisionState subclass based on model type.
 std::unique_ptr<VisionState> CreateVisionState(const MultiModalLanguageModel& model, const GeneratorParams& params);
 

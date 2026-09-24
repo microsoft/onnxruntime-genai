@@ -9,6 +9,24 @@
 
 namespace Generators {
 
+int64_t QwenVisionState::GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs) const {
+  if (const auto batch_size = VisionState::GetImageFeatureBatchSize(extra_inputs); batch_size != 0) {
+    return batch_size;
+  }
+
+  for (const auto& input : extra_inputs) {
+    if (input.name == Config::Defaults::ImageGridThwName) {
+      assert(input.tensor->ort_tensor_);
+      const auto type_and_shape = input.tensor->ort_tensor_->GetTensorTypeAndShapeInfo();
+      const auto shape = type_and_shape->GetShape();
+      const int64_t num_images = shape.empty() ? 0 : shape[0];
+      ValidateImageGridThwLayoutAndCount(shape, type_and_shape->GetElementCount(), num_images, "image_grid_thw");
+      return num_images;
+    }
+  }
+  return 0;
+}
+
 DeviceSpan<float> QwenVisionState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
   if (model_.config_->model.vision.run_options.has_value()) {
     State::SetRunOptions(model_.config_->model.vision.run_options.value());

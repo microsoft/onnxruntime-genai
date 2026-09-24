@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "models/multi_modal_vision.h"
+#include "models/vision/multi_modal_vision.h"
 
 namespace Generators {
 

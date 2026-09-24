@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-#include "model.h"
+#include "models/model.h"
 #include "models/io/multi_modal_features.h"
 #include "models/io/extra_inputs.h"
 
@@ -22,6 +22,8 @@ struct SpeechState : State {
   SpeechState& operator=(const SpeechState&) = delete;
 
   virtual void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, const int64_t num_audio_tokens);
+  virtual int64_t GetNumAudioTokens(const std::vector<ExtraInput>& extra_inputs) const;
+  virtual void ReuseFeaturesBuffer(MultiModalFeatures& embedding_features);
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {}) override;
 
  protected:
@@ -35,8 +37,6 @@ struct SpeechState : State {
 
 // Returns the total number of audio tokens across the clips in the current batch, read from the
 // `audio_sizes_name` extra input (each clip's contribution to the decoder's token sequence).
-int64_t GetNumAudioTokens(const std::vector<ExtraInput>& extra_inputs, const std::string& audio_sizes_name);
-
 // Factory: pick the right SpeechState subclass based on model type.
 std::unique_ptr<SpeechState> CreateSpeechState(const MultiModalLanguageModel& model, const GeneratorParams& params);
 

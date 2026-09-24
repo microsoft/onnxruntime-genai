@@ -2,9 +2,10 @@
 // Licensed under the MIT License.
 
 #include "generator/generators.h"
-#include "multi_modal_speech.h"
-#include "multi_modal.h"
+#include "models/speech/multi_modal_speech.h"
+#include "models/multi_modal.h"
 #include "models/model_type.h"
+#include "models/speech/gemma4_speech_state.h"
 #include "models/speech/lfm2_audio_speech_state.h"
 
 #include <numeric>
@@ -18,11 +19,9 @@ SpeechState::SpeechState(const MultiModalLanguageModel& model, const GeneratorPa
 void SpeechState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, const int64_t num_audio_tokens) {
   num_audio_tokens_ = num_audio_tokens;
 
-  // Allocate 3D [batch, num_audio_tokens, hidden_size] matching the speech ONNX model's
-  // output rank. Will be reshaped to 2D before passing to the embedding model.
   audio_features_ = std::make_unique<MultiModalFeatures>(*this, MultiModalFeatures::Mode::Output,
                                                          model_.config_->model.speech.outputs.audio_features,
-                                                         params_->BatchBeamSize(), num_audio_tokens_);
+                                                         -1, num_audio_tokens_);
   audio_features_->Add();
   extra_inputs_.Add(extra_inputs, model_.speech_session_->GetInputNames());
 }
@@ -35,7 +34,8 @@ DeviceSpan<float> SpeechState::Run(int current_length, DeviceSpan<int32_t>& next
   return {};
 }
 
-int64_t GetNumAudioTokens(const std::vector<ExtraInput>& extra_inputs, const std::string& audio_sizes_name) {
+int64_t SpeechState::GetNumAudioTokens(const std::vector<ExtraInput>& extra_inputs) const {
+  const auto& audio_sizes_name = model_.config_->model.speech.inputs.audio_sizes;
   for (size_t i = 0; i < extra_inputs.size(); ++i) {
     if (extra_inputs[i].name == audio_sizes_name) {
       assert(extra_inputs[i].tensor->ort_tensor_);
@@ -53,7 +53,14 @@ int64_t GetNumAudioTokens(const std::vector<ExtraInput>& extra_inputs, const std
   return 0;
 }
 
+void SpeechState::ReuseFeaturesBuffer(MultiModalFeatures& embedding_features) {
+  embedding_features.ReuseFeaturesBuffer(*audio_features_);
+}
+
 std::unique_ptr<SpeechState> CreateSpeechState(const MultiModalLanguageModel& model, const GeneratorParams& params) {
+  if (model.config_->model.type == "gemma4") {
+    return std::make_unique<Gemma4SpeechState>(model, params);
+  }
   if (ModelType::IsLfm2Audio(model.config_->model.type)) {
     return std::make_unique<Lfm2AudioSpeechState>(model, params);
   }

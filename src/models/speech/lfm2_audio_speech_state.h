@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "models/multi_modal_speech.h"
+#include "models/speech/multi_modal_speech.h"
 
 namespace Generators {
 
@@ -27,6 +27,7 @@ struct Lfm2AudioSpeechState : SpeechState {
   using SpeechState::SpeechState;  // inherit constructor
 
   void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, const int64_t num_audio_tokens) override;
+  void ReuseFeaturesBuffer(MultiModalFeatures& embedding_features) override;
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {}) override;
 
  private:

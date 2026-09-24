@@ -58,7 +58,12 @@ void Lfm2AudioSpeechState::SetExtraInputs(const std::vector<ExtraInput>& extra_i
                              std::to_string(params_->search.num_beams) + ". Set num_beams to 1.");
   }
 
-  SpeechState::SetExtraInputs(extra_inputs, num_audio_tokens);
+  num_audio_tokens_ = num_audio_tokens;
+  audio_features_ = std::make_unique<MultiModalFeatures>(*this, MultiModalFeatures::Mode::Output,
+                                                         model_.config_->model.speech.outputs.audio_features,
+                                                         params_->BatchBeamSize(), num_audio_tokens_);
+  audio_features_->Add();
+  extra_inputs_.Add(extra_inputs, model_.speech_session_->GetInputNames());
 
   // audio_sizes holds the decoder tokens each clip contributes; its sum is num_audio_tokens.
   tokens_per_clip_.clear();
@@ -70,6 +75,14 @@ void Lfm2AudioSpeechState::SetExtraInputs(const std::vector<ExtraInput>& extra_i
       break;
     }
   }
+}
+
+void Lfm2AudioSpeechState::ReuseFeaturesBuffer(MultiModalFeatures& embedding_features) {
+  auto& speech_shape = audio_features_->GetShape();
+  if (speech_shape.size() == 3) {
+    audio_features_->ReshapeFeatures({speech_shape[0] * speech_shape[1], speech_shape[2]});
+  }
+  SpeechState::ReuseFeaturesBuffer(embedding_features);
 }
 
 Lfm2AudioSpeechState::SpeechBindings Lfm2AudioSpeechState::ResolveBindings() const {

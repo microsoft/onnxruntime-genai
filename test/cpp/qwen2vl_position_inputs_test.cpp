@@ -4,7 +4,7 @@
 #include <gtest/gtest.h>
 #include <vector>
 
-#include "models/vision/qwen_vl_position_inputs.h"
+#include "models/io/qwen_vl_position_inputs.h"
 
 namespace Generators::test {
 namespace {

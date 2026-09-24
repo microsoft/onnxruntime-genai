@@ -98,6 +98,8 @@ file(GLOB generator_srcs CONFIGURE_DEPENDS
   "${MODELS_ROOT}/*.cpp"
   "${MODELS_ROOT}/io/*.h"
   "${MODELS_ROOT}/io/*.cpp"
+  "${MODELS_ROOT}/embedding/*.h"
+  "${MODELS_ROOT}/embedding/*.cpp"
   "${MODELS_ROOT}/vision/*.h"
   "${MODELS_ROOT}/vision/*.cpp"
   "${MODELS_ROOT}/speech/*.h"

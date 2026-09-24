@@ -12,14 +12,14 @@
 #include "model.h"
 #include "models/io/extra_inputs.h"
 #include "model_type.h"
-#include "models/multi_modal_vision.h"
+#include "models/vision/multi_modal_vision.h"
 #include "models/vision/qwen_vision_state.h"
 #include "models/vision/pixtral_vision_state.h"
-#include "models/multi_modal_speech.h"
+#include "models/speech/multi_modal_speech.h"
 #include "models/speech/lfm2_audio_speech_state.h"
-#include "models/multi_modal_embedding.h"
+#include "models/embedding/multi_modal_embedding.h"
 #include "models/multi_modal_decoder.h"
-#include "models/gemma4_multi_modal.h"
+#include "models/gemma4_decoder_state.h"
 
 namespace Generators {
 

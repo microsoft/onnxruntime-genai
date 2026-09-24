@@ -97,9 +97,9 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& 
 }
 
 void MultiModalPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
-  num_image_tokens_ = GetNumImageTokens(extra_inputs);
-  num_audio_tokens_ = GetNumAudioTokens(extra_inputs, model_.config_->model.speech.inputs.audio_sizes);
-  num_images_ = GetImageFeatureBatchSize(extra_inputs);
+  num_image_tokens_ = vision_state_ ? vision_state_->GetNumImageTokens(extra_inputs) : 0;
+  num_audio_tokens_ = speech_state_ ? speech_state_->GetNumAudioTokens(extra_inputs) : 0;
+  num_images_ = vision_state_ ? vision_state_->GetImageFeatureBatchSize(extra_inputs) : 0;
 
   if (model_.vision_session_) {
     vision_state_->SetExtraInputs(extra_inputs, num_images_, num_image_tokens_);
@@ -167,16 +167,8 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
       embedding_state_->image_features_->ReuseFeaturesBuffer(*vision_state_->image_features_);
     }
     if (speech_state_ && num_audio_tokens_ > 0) {
-      // Reshape speech output from 3D [B, T, hidden] to 2D [B*T, hidden]
-      // to match embedding model's expected 2D audio_features input rank.
-      auto& speech_shape = speech_state_->audio_features_->GetShape();
-      if (speech_shape.size() == 3) {
-        speech_state_->audio_features_->ReshapeFeatures(
-            {speech_shape[0] * speech_shape[1], speech_shape[2]});
-      }
-      embedding_state_->audio_features_->ReuseFeaturesBuffer(*speech_state_->audio_features_);
+      speech_state_->ReuseFeaturesBuffer(*embedding_state_->audio_features_);
     } else if (embedding_state_->audio_features_) {
-      // No audio: provide empty 2D tensor [0, hidden_size] for the embedding model
       embedding_state_->audio_features_->AllocateEmptyFeatures();
     }
     embedding_state_->ReuseBuffersInDecoder(*decoder_state_);

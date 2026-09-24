@@ -6,16 +6,13 @@
 #include "static_kv_cache.h"
 #include "../../logging.h"
 #include "../model.h"
-#include "../lfm2.h"
 
 #include <algorithm>
 
 namespace Generators {
 
 bool HasConvKeyValueCache(const Model& model) {
-  // The layer_types metadata is the generic, architecture-agnostic signal; RequiresLfm2ConvKeyValueCache
-  // is the LFM2-specific fallback for older exports that predate that metadata.
-  return !model.config_->model.decoder.layer_types.empty() || RequiresLfm2ConvKeyValueCache(model);
+  return ModelType::IsLFM2(model.config_->model.type) || !model.config_->model.decoder.layer_types.empty();
 }
 
 ConvKeyValueCache::ConvKeyValueCache(State& state)

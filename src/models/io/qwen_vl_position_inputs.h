@@ -1,6 +1,6 @@
 #pragma once
 
-#include "models/io/position_inputs.h"
+#include "position_inputs.h"
 
 namespace Generators {
 

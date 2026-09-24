@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "models/multi_modal_vision.h"
+#include "models/vision/multi_modal_vision.h"
 
 namespace Generators {
 
@@ -18,6 +18,7 @@ namespace Generators {
 struct QwenVisionState : VisionState {
   using VisionState::VisionState;  // inherit constructor
 
+  int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs) const override;
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {}) override;
 };
 

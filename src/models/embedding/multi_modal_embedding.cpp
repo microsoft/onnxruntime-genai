@@ -2,10 +2,10 @@
 // Licensed under the MIT License.
 
 #include "generator/generators.h"
-#include "multi_modal.h"
-#include "multi_modal_embedding.h"
-#include "multi_modal_decoder.h"
-#include "gemma4_multi_modal.h"
+#include "models/multi_modal.h"
+#include "models/embedding/multi_modal_embedding.h"
+#include "models/multi_modal_decoder.h"
+#include "models/embedding/gemma4_embedding_state.h"
 
 namespace Generators {
 
@@ -32,14 +32,6 @@ void EmbeddingState::SetExtraInputs(const int64_t num_images, const int64_t num_
                                                            model_.config_->model.embedding.inputs.audio_features,
                                                            -1, num_audio_tokens_);
     audio_features_->Add();
-  } else if (model_.session_info_.HasInput(model_.config_->model.embedding.inputs.audio_features)) {
-    // No speech session, but embedding model requires audio_features — provide empty tensor with shape (0, hidden_size)
-    audio_features_ = std::make_unique<MultiModalFeatures>(*this, MultiModalFeatures::Mode::Input,
-                                                           model_.config_->model.embedding.inputs.audio_features,
-                                                           -1, 0);
-    audio_features_->Add();
-    // Pre-allocate an empty tensor since there's no speech session to provide one via ReuseFeaturesBuffer
-    audio_features_->AllocateEmptyFeatures();
   }
 }
 
