@@ -225,6 +225,7 @@ def _make_inputs_model(use_paged_attention, use_ring):
         "cumulative_sequence_lengths": "cumulative_sequence_lengths",
         "past_sequence_lengths": "past_sequence_lengths",
         "attention_metadata": "attention_metadata",
+        "logits_indices": "logits_indices",
         "past.conv": {},
         "past.recurrent": {},
     }
@@ -336,6 +337,7 @@ def _make_attention_model(use_ring, local_layers=(0,)):
         "cumulative_sequence_lengths": "cumulative_sequence_lengths",
         "past_sequence_lengths": "past_sequence_lengths",
         "attention_metadata": "attention_metadata",
+        "logits_indices": "logits_indices",
     }
     model.paged_attention_calls = []
     model.make_paged_attention = lambda name, **kwargs: model.paged_attention_calls.append(kwargs)

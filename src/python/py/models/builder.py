@@ -35,6 +35,7 @@ from builders import (
     GraniteMoEHybridModel,
     HunyuanDenseV1Model,
     InternLM2Model,
+    LFM2AudioModel,
     LFM2Model,
     LFM2MoEModel,
     LlamaModel,
@@ -108,7 +109,13 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
     hf_token = extra_options.get("hf_token", True)
     hf_remote = extra_options.get("hf_remote", False)
 
-    config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
+    try:
+        config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
+    except ValueError:
+        # LFM2-Audio checkpoints have no model_type; their LFM2 decoder config is nested.
+        config = LFM2AudioModel.load_config(hf_name, token=hf_token, **extra_kwargs)
+        if config is None:
+            raise
     tokenizer = AutoTokenizer.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
     add_special_token_ids(config, tokenizer)
     if extra_options.get("adapter_path", False):
@@ -705,6 +712,10 @@ def create_model(
         # With the embedding layer excluded the decoder is one stage of the LFM2-VL vision pipeline;
         # otherwise it is a standalone text model that happens to come from a VLM checkpoint.
         onnx_model.model_type = "lfm2_vl" if onnx_model.exclude_embeds else "lfm2_vl_text"
+    elif config.architectures[0] == "Lfm2AudioForConditionalGeneration":
+        onnx_model = LFM2AudioModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        # Same split as LFM2-VL: the decoder stage of the lfm2_audio pipeline, or a plain text model.
+        onnx_model.model_type = "lfm2_audio" if onnx_model.exclude_embeds else "lfm2_audio_text"
     elif config.architectures[0] == "LlamaForCausalLM":
         onnx_model = LlamaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "MistralForCausalLM":
@@ -1034,8 +1045,9 @@ def get_args():
                     It also removes `position_ids` when RoPE is fused; architectures with external MRoPE retain packed
                     position IDs (for example, Qwen3.5/3.8 uses [3, num_tokens]). The block_table,
                     cumulative_sequence_lengths, and past_sequence_lengths metadata inputs are added. With
-                    prune_lm_head=true, selects the final packed hidden state for each sequence so the model outputs
-                    [batch_size, vocab_size] logits. By default, the model outputs [num_tokens, vocab_size] logits.
+                    prune_lm_head=true, adds a logits_indices input that selects the packed hidden states consumed
+                    by generation or draft verification, so the model outputs [num_logits, vocab_size] logits.
+                    By default, the model outputs [num_tokens, vocab_size] logits.
                     Supports CUDA with fp16 or bf16 precision. WebGPU supports fp16 only for causal, full-context
                     attention with zero softcap, FP16 KV caches, and no Q/K normalization inputs; for example,
                     Gemma2's non-zero attention softcap is unsupported. Cannot be combined with exclude_embeds or

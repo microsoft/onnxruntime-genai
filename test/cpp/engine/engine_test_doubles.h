@@ -82,6 +82,25 @@ struct RecordingCacheManager : CacheManager {
     }
   }
 
+  void ValidateRewind(
+      const std::shared_ptr<Request>& request) const override {
+    if (!supports_dynamic_batching_ && IsResident(request) &&
+        allocated_.size() != 1) {
+      throw std::runtime_error(
+          "Static Engine Request rewind requires exactly one resident Request.");
+    }
+  }
+
+  void ReleaseForRewind(
+      const std::shared_ptr<Request>& request) override {
+    ValidateRewind(request);
+    if (!IsResident(request)) {
+      return;
+    }
+    std::vector<std::shared_ptr<Request>> requests{request};
+    Deallocate(requests);
+  }
+
   void DetachRequestForTeardown(
       const std::shared_ptr<Request>& request) noexcept override {
     deallocate_calls++;
@@ -413,6 +432,7 @@ struct ScriptedDecoderIO : DecoderIO {
                     const StepPlan* plan = nullptr,
                     std::span<const int32_t> row_tokens = {},
                     std::span<const int32_t> sampling_candidate_tokens = {},
+                    std::span<const std::vector<float>> verify_row_logits = {},
                     int64_t hidden_size = 0,
                     ONNXTensorElementDataType hidden_type = Ort::TypeToTensorType<float>)
       : DecoderIO(model, scheduled_requests, cache_manager),
@@ -430,8 +450,14 @@ struct ScriptedDecoderIO : DecoderIO {
     if (!row_tokens.empty() && row_tokens.size() != rows) {
       throw std::runtime_error("ScriptedDecoderIO: row token script does not cover every row.");
     }
-    if (!row_tokens.empty() && !sampling_candidate_tokens.empty()) {
-      throw std::runtime_error("ScriptedDecoderIO: row tokens and sampling candidates are mutually exclusive.");
+    const int scripted_modes = static_cast<int>(!row_tokens.empty()) +
+                               static_cast<int>(!sampling_candidate_tokens.empty()) +
+                               static_cast<int>(!verify_row_logits.empty());
+    if (scripted_modes > 1) {
+      throw std::runtime_error("ScriptedDecoderIO: logits scripts are mutually exclusive.");
+    }
+    if (!verify_row_logits.empty() && verify_row_logits.size() != rows) {
+      throw std::runtime_error("ScriptedDecoderIO: logits script does not cover every row.");
     }
     row_count_ = rows;
     logits_ = std::make_unique<Tensor>(model->p_device_inputs_, Ort::TypeToTensorType<float>);
@@ -441,6 +467,15 @@ struct ScriptedDecoderIO : DecoderIO {
     auto cpu_span = device_span.CpuSpan();
     std::fill(cpu_span.begin(), cpu_span.end(), 0.0f);
     for (size_t row = 0; row < rows; ++row) {
+      if (!verify_row_logits.empty()) {
+        const auto& scripted_logits = verify_row_logits[row];
+        if (scripted_logits.size() != static_cast<size_t>(vocab_size_)) {
+          throw std::runtime_error("ScriptedDecoderIO: logits row has the wrong vocabulary size.");
+        }
+        const size_t offset = row * static_cast<size_t>(vocab_size_);
+        std::copy(scripted_logits.begin(), scripted_logits.end(), cpu_span.begin() + offset);
+        continue;
+      }
       if (!sampling_candidate_tokens.empty()) {
         for (const int32_t token : sampling_candidate_tokens) {
           if (token < 0 || token >= vocab_size_) {
@@ -555,7 +590,7 @@ struct RecordingModelExecutor : ModelExecutor {
             model_, scheduled_requests, cache_manager_, forced_token_,
             failure == ScriptedExecutionFailure::PostProcessing,
             context.plan, verify_row_tokens_, sampling_candidate_tokens_,
-            hidden_size_, hidden_type_));
+            verify_row_logits_, hidden_size_, hidden_type_));
     static_cast<void>(context);
   }
 
@@ -569,6 +604,9 @@ struct RecordingModelExecutor : ModelExecutor {
   }
   void SetSamplingCandidateTokens(std::vector<int32_t> tokens) {
     sampling_candidate_tokens_ = std::move(tokens);
+  }
+  void SetVerifyRowLogits(std::vector<std::vector<float>> logits) {
+    verify_row_logits_ = std::move(logits);
   }
   bool SupportsDraftVerification() const override {
     return supports_draft_verification_;
@@ -599,6 +637,7 @@ struct RecordingModelExecutor : ModelExecutor {
   std::function<void(ExecutionContext&)> on_execute_;
   std::vector<int32_t> verify_row_tokens_;
   std::vector<int32_t> sampling_candidate_tokens_;
+  std::vector<std::vector<float>> verify_row_logits_;
   bool supports_draft_verification_{true};
   int64_t hidden_size_{};
   ONNXTensorElementDataType hidden_type_{Ort::TypeToTensorType<float>};
@@ -607,6 +646,10 @@ struct RecordingModelExecutor : ModelExecutor {
 struct CountingCudaDeviceState {
   size_t device_to_host_copies{};
   size_t synchronize_calls{};
+  size_t memory_queries{};
+  size_t device_id_queries{};
+  size_t total_memory_bytes{};
+  bool fail_memory_query{};
   std::vector<int> argmax_rows;
 };
 
@@ -640,10 +683,14 @@ struct CountingCudaMemory final : DeviceBuffer {
 };
 
 struct CountingCudaDevice final : DeviceInterface {
-  CountingCudaDevice()
-      : state{std::make_shared<CountingCudaDeviceState>()} {}
+  explicit CountingCudaDevice(DeviceType device_type = DeviceType::CUDA)
+      : device_type_{device_type}, state{std::make_shared<CountingCudaDeviceState>()} {}
 
-  DeviceType GetType() const override { return DeviceType::CUDA; }
+  DeviceType GetType() const override { return device_type_; }
+  int GetDeviceId(const ProviderOptions*) override {
+    ++state->device_id_queries;
+    return 0;
+  }
   void InitOrt(const OrtApi&, Ort::Allocator&) override {}
   Ort::Allocator& GetAllocator() override {
     return GetDeviceInterface(DeviceType::CPU)->GetAllocator();
@@ -664,6 +711,14 @@ struct CountingCudaDevice final : DeviceInterface {
   }
   std::unique_ptr<KeyValueCache> CreateKeyValueCache(State&) override { return {}; }
   void Synchronize() override { ++state->synchronize_calls; }
+  void GetAvailableMemory(size_t& free_bytes, size_t& total_bytes) override {
+    ++state->memory_queries;
+    if (state->fail_memory_query) {
+      throw std::runtime_error("test device memory query failed");
+    }
+    free_bytes = state->total_memory_bytes;
+    total_bytes = state->total_memory_bytes;
+  }
 
   bool ArgMaxDevice(const void* logits, ONNXTensorElementDataType logits_type,
                     int num_rows, int vocab_size,
@@ -683,6 +738,7 @@ struct CountingCudaDevice final : DeviceInterface {
     return true;
   }
 
+  DeviceType device_type_;
   std::shared_ptr<CountingCudaDeviceState> state;
 };
 
@@ -723,6 +779,23 @@ inline DoublesEngine MakeDoublesEngine(std::shared_ptr<Model> model, size_t capa
     model->config_->engine.dynamic_batching = Config::Engine::DynamicBatching{};
   auto trace = std::make_shared<CallTrace>();
   auto cache = std::make_shared<RecordingCacheManager>(model, capacity, trace);
+  auto scheduler = Scheduler::Create(model, cache);
+  auto executor = std::make_unique<RecordingModelExecutor>(model, cache, forced_token, trace);
+
+  RecordingCacheManager* cache_observer = cache.get();
+  RecordingModelExecutor* executor_observer = executor.get();
+
+  EngineDependencies dependencies{std::move(cache), std::move(scheduler), std::move(executor)};
+  auto engine = std::make_shared<Engine>(std::move(model), std::move(dependencies));
+
+  return DoublesEngine{std::move(engine), cache_observer, executor_observer, std::move(trace)};
+}
+
+inline DoublesEngine MakeStaticDoublesEngine(std::shared_ptr<Model> model, size_t capacity,
+                                             int32_t forced_token) {
+  auto trace = std::make_shared<CallTrace>();
+  auto cache = std::make_shared<RecordingCacheManager>(model, capacity, trace,
+                                                       /*supports_dynamic_batching=*/false);
   auto scheduler = Scheduler::Create(model, cache);
   auto executor = std::make_unique<RecordingModelExecutor>(model, cache, forced_token, trace);
 

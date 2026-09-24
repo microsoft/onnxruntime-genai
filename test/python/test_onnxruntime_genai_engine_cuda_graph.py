@@ -21,6 +21,8 @@ Coverage depends on what the supplied model declares:
   or the ``[3, num_tokens]`` geometry;
 * ``fixed_conv``/``fixed_recurrent`` state groups exercise HybridDecoderIO, the persistent bank
   flip, and the staged-binding fallback.
+* rewind followed by a peer request exercises reuse of released paged blocks and, when declared,
+  fixed-state slots before the original request replays.
 """
 
 from __future__ import annotations
@@ -151,6 +153,51 @@ def test_captured_batched_decode_matches_eager():
     assert captured == eager
 
 
+def _generate_after_rewind_and_reuse(model):
+    engine = og.Engine(model)
+    event_buffer = engine.create_event_buffer(8)
+    request_options = og.RequestOptions()
+    request_options.set_max_session_tokens(32)
+    request_a = engine.create_request(options=request_options)
+    streams = {request_a: []}
+
+    def run_turn(request, prompt, max_new_tokens):
+        turn_options = og.TurnOptions(request)
+        turn_options.set_max_generated_tokens(max_new_tokens)
+        turn_id = request.begin_turn(np.asarray(prompt, dtype=np.int32), turn_options)
+        steps = 0
+        while engine.has_pending_requests():
+            _drain(engine, streams, event_buffer)
+            steps += 1
+            assert steps <= _MAX_STEPS, "engine.run() exceeded the safety bound"
+        tokens = list(streams[request])
+        streams[request].clear()
+        assert tokens, "the turn produced no tokens"
+        return turn_id, tokens
+
+    _, prefix = run_turn(request_a, _PROMPT_A, 6)
+    discarded_turn, original = run_turn(request_a, [17], 6)
+    request_a.rewind_to_start_of_turn(discarded_turn)
+
+    request_b = engine.create_request(options=request_options)
+    streams[request_b] = []
+    _, peer = run_turn(request_b, _PROMPT_B, 6)
+    request_b.close()
+
+    _, replay = run_turn(request_a, [17], 6)
+    assert replay == original, "rewind and state reuse changed request A's continuation"
+    request_a.close()
+    return prefix, original, peer, replay
+
+
+def test_captured_rewind_after_peer_reuses_state_matches_eager():
+    """B reuses A's released paged blocks and fixed-state slot before A replays its prefix."""
+    eager = _generate_after_rewind_and_reuse(_load_model(graph_capture=False))
+    captured = _generate_after_rewind_and_reuse(_load_model(graph_capture=True))
+
+    assert captured == eager
+
+
 def test_captured_multi_token_verification_matches_eager():
     """Uniform multi-token verify steps, which only a per-token-logits model can schedule."""
     max_new_tokens = 24
@@ -166,9 +213,7 @@ def test_captured_multi_token_verification_matches_eager():
 
     reference = _generate(eager_model, [_PROMPT_A], max_new_tokens)[0]
     eager = _generate_with_drafts(eager_model, _PROMPT_A, max_new_tokens, draft_width, reference)
-    captured = _generate_with_drafts(
-        _load_model(graph_capture=True), _PROMPT_A, max_new_tokens, draft_width, reference
-    )
+    captured = _generate_with_drafts(_load_model(graph_capture=True), _PROMPT_A, max_new_tokens, draft_width, reference)
 
     assert eager, "the draft run produced no tokens"
     assert captured == eager

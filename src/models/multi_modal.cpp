@@ -95,8 +95,51 @@ int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs) {
 
 }  // namespace
 
+void CheckLfm2AudioSessionDevices(const Config& config, DeviceType decoder_device, DeviceType inputs_device,
+                                  bool with_audio) {
+  // Whether a buffer allocated on the device is device memory. OpenVINO allocates from the CPU and
+  // QNN from shared memory, both of which a CPU session can use.
+  const auto is_device_memory = [](DeviceType device) {
+    switch (device) {
+      case DeviceType::CUDA:
+      case DeviceType::DML:
+      case DeviceType::WEBGPU:
+      case DeviceType::NvTensorRtRtx:
+      case DeviceType::RyzenAI:
+      case DeviceType::AMDGPU:
+        return true;
+      default:
+        return false;
+    }
+  };
+  const auto check = [](const std::optional<Config::SessionOptions>& options, const char* graph,
+                        const char* buffers, DeviceType device) {
+    // Without session_options of its own a graph follows the decoder; with them, no provider but CPU
+    // leaves it on CPU.
+    if (!options.has_value() || !std::all_of(options->providers.begin(), options->providers.end(),
+                                             [](const std::string& provider) { return provider == "CPU"; })) {
+      return;
+    }
+    throw std::runtime_error(std::string("lfm2_audio: model.") + graph + ".session_options run the " + graph +
+                             " model on CPU, but " + buffers + " in " + to_string(device) +
+                             " memory, which it cannot use. Remove model." + graph +
+                             ".session_options so that it runs on the decoder's device.");
+  };
+
+  if (is_device_memory(inputs_device)) {
+    check(config.model.embedding.session_options, "embedding", "the decoder takes its inputs", inputs_device);
+  }
+  if (with_audio && is_device_memory(decoder_device)) {
+    check(config.model.speech.session_options, "speech", "the audio features are passed", decoder_device);
+    check(config.model.embedding.session_options, "embedding", "the audio features are passed", decoder_device);
+  }
+}
+
 MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech)
     : Model(std::move(config)) {
+  if (config_->model.type == "lfm2_audio") {
+    CheckLfm2AudioSessionDevices(*config_, p_device_->GetType(), p_device_inputs_->GetType(), /*with_audio=*/false);
+  }
   // The non-decoder models don't support graph capture because of control flow nodes, so disable graph capture for them
   if (vision) {
     vision_session_options_ = OrtSessionOptions::Create();
@@ -115,6 +158,28 @@ MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config,
 
   embedding_session_ = CreateSession(ort_env, config_->model.embedding.filename, embedding_session_options_.get());
   decoder_session_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
+
+  const auto& audio_output = config_->model.audio_output;
+  if (!audio_output.depthformer.filename.empty() || !audio_output.embedding.filename.empty()) {
+    if (audio_output.depthformer.filename.empty() || audio_output.embedding.filename.empty()) {
+      throw std::runtime_error("model.audio_output needs both depthformer.filename and embedding.filename.");
+    }
+    // With speech output these tokens hand the turn to the depthformer; as stop tokens they would end
+    // it there instead, which is what a text-only export needs and this one must not have.
+    for (const int token : {audio_output.audio_start_token_id, audio_output.text_end_token_id}) {
+      if (std::find(config_->model.eos_token_id.begin(), config_->model.eos_token_id.end(), token) !=
+          config_->model.eos_token_id.end()) {
+        throw std::runtime_error("model.eos_token_id holds " + std::to_string(token) +
+                                 ", which model.audio_output uses to start speech. Remove it from eos_token_id.");
+      }
+    }
+    depthformer_session_options_ = OrtSessionOptions::Create();
+    CreateSessionOptionsFromConfig(audio_output.depthformer.session_options.has_value() ? audio_output.depthformer.session_options.value() : config_->model.decoder.session_options, *depthformer_session_options_, true, /*disable_graph_capture=*/true);
+    depthformer_session_ = CreateSession(ort_env, audio_output.depthformer.filename, depthformer_session_options_.get());
+    audio_embedding_session_options_ = OrtSessionOptions::Create();
+    CreateSessionOptionsFromConfig(audio_output.embedding.session_options.has_value() ? audio_output.embedding.session_options.value() : config_->model.decoder.session_options, *audio_embedding_session_options_, true, /*disable_graph_capture=*/true);
+    audio_embedding_session_ = CreateSession(ort_env, audio_output.embedding.filename, audio_embedding_session_options_.get());
+  }
 
   session_info_.Add(*decoder_session_);
   session_info_.Add(*embedding_session_);
@@ -603,6 +668,154 @@ DeviceSpan<float> SpeechState::Run(int current_length, DeviceSpan<int32_t>& next
   return {};
 }
 
+void Lfm2AudioSpeechState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, const int64_t num_audio_tokens) {
+  // The feature buffer is one sequence wide, so beams would fail as a shape mismatch inside the
+  // encoder. The reference decodes greedily.
+  if (params_->search.num_beams > 1) {
+    throw std::runtime_error("Lfm2AudioSpeechState: beam search is not supported for lfm2_audio; got num_beams " +
+                             std::to_string(params_->search.num_beams) + ". Set num_beams to 1.");
+  }
+
+  SpeechState::SetExtraInputs(extra_inputs, num_audio_tokens);
+
+  // audio_sizes holds the decoder tokens each clip contributes; its sum is num_audio_tokens.
+  tokens_per_clip_.clear();
+  for (const auto& input : extra_inputs) {
+    if (input.name == model_.config_->model.speech.inputs.audio_sizes) {
+      const auto info = input.tensor->ort_tensor_->GetTensorTypeAndShapeInfo();
+      const int64_t* sizes = input.tensor->ort_tensor_->GetTensorData<int64_t>();
+      tokens_per_clip_.assign(sizes, sizes + info->GetElementCount());
+      break;
+    }
+  }
+}
+
+Lfm2AudioSpeechState::SpeechBindings Lfm2AudioSpeechState::ResolveBindings() const {
+  SpeechBindings bindings;
+  bindings.mel_index = FindInput(model_.config_->model.speech.inputs.audio_embeds);
+  bindings.lengths_index = FindInput(model_.config_->model.speech.inputs.audio_lengths);
+  bindings.features_index = FindOutput(model_.config_->model.speech.outputs.audio_features);
+
+  const auto mel_info = inputs_[bindings.mel_index]->GetTensorTypeAndShapeInfo();
+  const auto mel_shape = mel_info->GetShape();  // [num_clips, longest_clip, num_mels]
+  if (mel_shape.size() != 3) {
+    throw std::runtime_error("Lfm2AudioSpeechState: expected a 3D [num_clips, num_frames, num_mels] mel tensor, got rank " +
+                             std::to_string(mel_shape.size()) + ".");
+  }
+  bindings.num_clips = mel_shape[0];
+  bindings.longest_clip = mel_shape[1];
+  bindings.num_mels = mel_shape[2];
+  bindings.mel_type = mel_info->GetElementType();
+
+  if (bindings.num_clips != static_cast<int64_t>(tokens_per_clip_.size())) {
+    throw std::runtime_error("Lfm2AudioSpeechState: the mel tensor holds " + std::to_string(bindings.num_clips) +
+                             " clips but audio_sizes has " + std::to_string(tokens_per_clip_.size()) + " entries.");
+  }
+  const auto lengths_info = inputs_[bindings.lengths_index]->GetTensorTypeAndShapeInfo();
+  if (static_cast<int64_t>(lengths_info->GetElementCount()) != bindings.num_clips) {
+    throw std::runtime_error("Lfm2AudioSpeechState: the mel tensor holds " + std::to_string(bindings.num_clips) +
+                             " clips but " + model_.config_->model.speech.inputs.audio_lengths + " has " +
+                             std::to_string(lengths_info->GetElementCount()) + " entries.");
+  }
+
+  const auto features_info = outputs_[bindings.features_index]->GetTensorTypeAndShapeInfo();
+  const auto features_shape = features_info->GetShape();  // [1, num_audio_tokens, hidden_size]
+  bindings.features_type = features_info->GetElementType();
+  bindings.hidden_size = features_shape.back();
+  return bindings;
+}
+
+std::unique_ptr<OrtValue> Lfm2AudioSpeechState::RunClip(const SpeechBindings& bindings, int64_t index,
+                                                        int64_t num_frames) {
+  const size_t mel_element_size = Ort::SizeOf(bindings.mel_type);
+  const size_t clip_stride = static_cast<size_t>(bindings.longest_clip * bindings.num_mels) * mel_element_size;
+  const auto* mel_data = static_cast<const uint8_t*>(inputs_[bindings.mel_index]->GetTensorRawData());
+
+  auto clip_mel = OrtValue::CreateTensor(Ort::Allocator::GetWithDefaultOptions(),
+                                         std::vector<int64_t>{1, num_frames, bindings.num_mels}, bindings.mel_type);
+  std::memcpy(clip_mel->GetTensorMutableRawData(), mel_data + static_cast<size_t>(index) * clip_stride,
+              static_cast<size_t>(num_frames * bindings.num_mels) * mel_element_size);
+
+  auto clip_length = OrtValue::CreateTensor<int64_t>(Ort::Allocator::GetWithDefaultOptions(), std::vector<int64_t>{1});
+  clip_length->GetTensorMutableData<int64_t>()[0] = num_frames;
+
+  auto clip_features = OrtValue::CreateTensor(
+      model_.p_device_->GetAllocator(),
+      std::vector<int64_t>{1, tokens_per_clip_[static_cast<size_t>(index)], bindings.hidden_size},
+      bindings.features_type);
+
+  OrtValue* mel_batch = inputs_[bindings.mel_index];
+  OrtValue* lengths = inputs_[bindings.lengths_index];
+  OrtValue* features = outputs_[bindings.features_index];
+  inputs_[bindings.mel_index] = clip_mel.get();
+  inputs_[bindings.lengths_index] = clip_length.get();
+  outputs_[bindings.features_index] = clip_features.get();
+  State::Run(*model_.speech_session_);
+  inputs_[bindings.mel_index] = mel_batch;
+  inputs_[bindings.lengths_index] = lengths;
+  outputs_[bindings.features_index] = features;
+
+  return clip_features;
+}
+
+DeviceSpan<float> Lfm2AudioSpeechState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
+  CheckLfm2AudioSessionDevices(*model_.config_, model_.p_device_->GetType(), model_.p_device_inputs_->GetType(),
+                               /*with_audio=*/true);
+  if (model_.config_->model.speech.run_options.has_value()) {
+    State::SetRunOptions(model_.config_->model.speech.run_options.value());
+  }
+  // A single clip fills the whole mel tensor and the whole feature buffer; run it as it stands.
+  if (tokens_per_clip_.size() <= 1) {
+    State::Run(*model_.speech_session_);
+    return {};
+  }
+
+  const SpeechBindings bindings = ResolveBindings();
+  const int64_t* frames_per_clip = inputs_[bindings.lengths_index]->GetTensorData<int64_t>();
+  auto features_bytes = ByteWrapTensor(*model_.p_device_, *outputs_[bindings.features_index]);
+  const size_t feature_row_bytes = static_cast<size_t>(bindings.hidden_size) * Ort::SizeOf(bindings.features_type);
+  size_t destination = 0;
+
+  // The published encoder export is traced for one clip (its subsampling mask cannot broadcast over
+  // a batch), so run it once per clip on that clip's own frames — which also keeps the padding out
+  // of the encoder entirely — and concatenate the results in clip order.
+  for (int64_t clip = 0; clip < bindings.num_clips; ++clip) {
+    const int64_t num_frames = frames_per_clip[clip];
+    if (num_frames <= 0 || num_frames > bindings.longest_clip) {
+      throw std::runtime_error("Lfm2AudioSpeechState: clip " + std::to_string(clip) + " reports " +
+                               std::to_string(num_frames) + " mel frames, outside the 1.." +
+                               std::to_string(bindings.longest_clip) + " the mel tensor holds.");
+    }
+
+    auto clip_features = RunClip(bindings, clip, num_frames);
+    const size_t clip_bytes = static_cast<size_t>(tokens_per_clip_[static_cast<size_t>(clip)]) * feature_row_bytes;
+    features_bytes.subspan(destination, clip_bytes).CopyFrom(ByteWrapTensor(*model_.p_device_, *clip_features));
+    destination += clip_bytes;
+  }
+  return {};
+}
+
+size_t Lfm2AudioSpeechState::FindInput(const std::string& name) const {
+  for (size_t i = 0; i < input_names_.size(); ++i) {
+    if (name == input_names_[i]) return i;
+  }
+  throw std::runtime_error("Lfm2AudioSpeechState: speech input \"" + name + "\" is not bound.");
+}
+
+size_t Lfm2AudioSpeechState::FindOutput(const std::string& name) const {
+  for (size_t i = 0; i < output_names_.size(); ++i) {
+    if (name == output_names_[i]) return i;
+  }
+  throw std::runtime_error("Lfm2AudioSpeechState: speech output \"" + name + "\" is not bound.");
+}
+
+std::unique_ptr<SpeechState> CreateSpeechState(const MultiModalLanguageModel& model, const GeneratorParams& params) {
+  if (model.config_->model.type == "lfm2_audio") {
+    return std::make_unique<Lfm2AudioSpeechState>(model, params);
+  }
+  return std::make_unique<SpeechState>(model, params);
+}
+
 EmbeddingState::EmbeddingState(const MultiModalLanguageModel& model, const GeneratorParams& params)
     : State{params, model},
       model_{model} {
@@ -818,10 +1031,13 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& 
     vision_state_ = CreateVisionState(model_, params);
   }
   if (model_.speech_session_) {
-    speech_state_ = std::make_unique<SpeechState>(model_, params);
+    speech_state_ = CreateSpeechState(model_, params);
   }
   embedding_state_ = std::make_unique<EmbeddingState>(model, params);
   decoder_state_ = std::make_unique<DecoderState>(model_, sequence_lengths, params);
+  if (model_.depthformer_session_) {
+    audio_output_ = std::make_unique<Lfm2AudioOutput>(model_, params);
+  }
 
   if (vision_state_ != nullptr && model_.config_->model.vision.adapter_filename.has_value() && num_image_tokens_ > 0) {
     const auto lora_adapter = (model_.config_->config_path / fs::path(*model_.config_->model.vision.adapter_filename)).string();
@@ -877,6 +1093,9 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
   //   - input_ids, image_features, audio_features -> |embeddings_model| -> inputs_embeds
   //   - inputs_embeds -> |decoder_model| -> logits
 
+  if (audio_output_) {
+    audio_output_->BeginStep(next_tokens, is_prompt_);
+  }
   embedding_state_->UpdateInputsOutputs(next_tokens, is_prompt_);
 
   // Prefill chunking (search.chunk_size): during the prompt stage the decoder can process the
@@ -930,15 +1149,36 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
     if (vision_state_) vision_state_.reset();  // The vision state is no longer needed in generation stage
     if (speech_state_) speech_state_.reset();  // The speech state is no longer needed in generation stage
 
-    return logits;
+    return audio_output_ ? SampleAudioOrText(logits) : logits;
   }
 
   embedding_state_->inputs_embeds_.ReuseEmbeddingsBuffer(decoder_state_->inputs_embeds_);
   if (embedding_state_->per_layer_inputs_ && decoder_state_->per_layer_inputs_) {
     embedding_state_->per_layer_inputs_->ReuseEmbeddingsBuffer(*decoder_state_->per_layer_inputs_);
   }
-  embedding_state_->Run(current_length, next_tokens, next_indices);
-  return decoder_state_->Run(current_length, next_tokens, next_indices);
+  if (audio_output_ && audio_output_->HasPendingFrame()) {
+    // The token is only the placeholder of the last audio frame: the decoder takes the frame itself,
+    // and the embedding model would look for audio features to put in the placeholder's place.
+    audio_output_->WritePendingFrame(*decoder_state_->inputs_embeds_.Get());
+  } else {
+    embedding_state_->Run(current_length, next_tokens, next_indices);
+  }
+  auto logits = decoder_state_->Run(current_length, next_tokens, next_indices);
+  return audio_output_ ? SampleAudioOrText(logits) : logits;
+}
+
+DeviceSpan<float> MultiModalPipelineState::SampleAudioOrText(DeviceSpan<float> logits) {
+  if (!audio_output_->InAudio()) {
+    return logits;
+  }
+  const std::string& configured = model_.config_->model.decoder.outputs.hidden_states;
+  const std::string name = configured.empty() ? std::string(Config::Defaults::HiddenStatesName) : configured;
+  OrtValue* hidden_states = decoder_state_->GetOutput(name.c_str());
+  if (!hidden_states) {
+    throw std::runtime_error("Speech output needs the decoder's \"" + name +
+                             "\" output. Build the decoder with --extra_options include_hidden_states=true.");
+  }
+  return audio_output_->SampleFrame(*hidden_states);
 }
 
 OrtValue* MultiModalPipelineState::GetInput(const char* name) {
@@ -978,6 +1218,10 @@ OrtValue* MultiModalPipelineState::GetInput(const char* name) {
 };
 
 OrtValue* MultiModalPipelineState::GetOutput(const char* name) {
+  if (audio_output_ && std::strcmp(name, "audio_codes") == 0) {
+    return audio_output_->GetAudioCodes();
+  }
+
   if (vision_state_) {
     // Check if output name is in vision state's outputs
     for (size_t i = 0; i < vision_state_->output_names_.size(); i++) {

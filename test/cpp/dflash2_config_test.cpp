@@ -199,6 +199,68 @@ TEST(Dflash2ConfigTest, RequiresPositiveSelectorTopK) {
   EXPECT_THROW(CreateDflash2Config(config), std::runtime_error);
 }
 
+TEST(Dflash2ConfigTest, ParsesIndependentSamplingOptions) {
+  const auto root = fs_std::temp_directory_path() / "ortgenai_dflash_independent_sampling";
+  std::error_code error;
+  fs_std::remove_all(root, error);
+  fs_std::create_directories(root);
+  std::ofstream out(root / "genai_config.json", std::ios::binary);
+  out << R"({"model":{"type":"tiny-test-model","vocab_size":128,"context_length":32,)"
+         R"("decoder":{"filename":"model.onnx"},"dflash2":{"filename":"dflash2.onnx",)"
+         R"("num_hidden_layers":1,"num_key_value_heads":2,"head_size":8,"block_size":4,)"
+         R"("num_draft_tokens":3,"selector_top_k":4,"mask_token_id":31,"sliding_window":17,)"
+         R"("independent_sampling":true,"sampling_temperature":0.1,"sampling_top_p":0.95,)"
+         R"("sampling_min_p":0.3}},"search":{}})";
+  out.close();
+
+  Config config(fs::path{root.string()}, "");
+  EXPECT_TRUE(config.model.dflash2.independent_sampling);
+  EXPECT_FLOAT_EQ(config.model.dflash2.sampling_temperature, 0.1f);
+  EXPECT_FLOAT_EQ(config.model.dflash2.sampling_top_p, 0.95f);
+  EXPECT_FLOAT_EQ(config.model.dflash2.sampling_min_p, 0.3f);
+}
+
+TEST(Dflash2ConfigTest, RejectsSamplingTemperatureOutsideFloatRange) {
+  const auto root = fs_std::temp_directory_path() /
+                    "ortgenai_dflash_sampling_temperature_out_of_range";
+  std::error_code error;
+  fs_std::remove_all(root, error);
+  fs_std::create_directories(root);
+  std::ofstream out(root / "genai_config.json", std::ios::binary);
+  out << R"({"model":{"type":"tiny-test-model","vocab_size":128,"context_length":32,)"
+         R"("decoder":{"filename":"model.onnx"},"dflash2":{"filename":"dflash2.onnx",)"
+         R"("num_hidden_layers":1,"num_key_value_heads":2,"head_size":8,"block_size":4,)"
+         R"("num_draft_tokens":3,"selector_top_k":4,"mask_token_id":31,"sliding_window":17,)"
+         R"("independent_sampling":true,"sampling_temperature":1e39}},"search":{}})";
+  out.close();
+
+  EXPECT_THROW(Config(fs::path{root.string()}, ""), std::runtime_error);
+}
+
+TEST(Dflash2ConfigTest, BuildsReferenceIndependentDistribution) {
+  const std::array<int32_t, 4> candidates{10, 11, 12, 13};
+  const std::array<float, 4> logits{4.0f, 3.0f, 2.0f, 1.0f};
+  const auto distribution = Dflash2IndependentDraftDistribution(
+      candidates.data(), logits.data(), candidates.size(),
+      /*temperature=*/1.0f, /*top_p=*/0.95f, /*min_p=*/0.3f);
+  ASSERT_EQ(distribution.indices, (std::vector<int32_t>{10, 11}));
+  ASSERT_EQ(distribution.probs.size(), 2u);
+  EXPECT_NEAR(distribution.probs[0], 0.7310586f, 1e-6f);
+  EXPECT_NEAR(distribution.probs[1], 0.2689414f, 1e-6f);
+}
+
+TEST(Dflash2ConfigTest, SortsSelectorScoresBeforeApplyingProbabilityFilters) {
+  const std::array<int32_t, 4> candidates{10, 11, 12, 13};
+  const std::array<float, 4> logits{2.0f, 4.0f, 1.0f, 3.0f};
+  const auto distribution = Dflash2IndependentDraftDistribution(
+      candidates.data(), logits.data(), candidates.size(),
+      /*temperature=*/1.0f, /*top_p=*/0.7f, /*min_p=*/0.2f);
+  ASSERT_EQ(distribution.indices, (std::vector<int32_t>{11, 13}));
+  ASSERT_EQ(distribution.probs.size(), 2u);
+  EXPECT_NEAR(distribution.probs[0], 0.7310586f, 1e-6f);
+  EXPECT_NEAR(distribution.probs[1], 0.2689414f, 1e-6f);
+}
+
 TEST(Dflash2ConfigTest, RejectsAsynchronousExecution) {
   auto config = MakeDflash2Config();
   config.model.dflash2.run_options = Config::RunOptions{
@@ -567,12 +629,10 @@ TEST(Dflash2ConfigTest, RunsFullAttentionDsparkAcrossRequestLifecycles) {
 
   int request_a_id = 0;
   int request_b_id = 0;
-  int request_c_id = 0;
   int request_d_id = 0;
   int request_e_id = 0;
   auto* request_a = reinterpret_cast<Request*>(&request_a_id);
   auto* request_b = reinterpret_cast<Request*>(&request_b_id);
-  auto* request_c = reinterpret_cast<Request*>(&request_c_id);
   auto* request_d = reinterpret_cast<Request*>(&request_d_id);
   auto* request_e = reinterpret_cast<Request*>(&request_e_id);
 
@@ -602,22 +662,27 @@ TEST(Dflash2ConfigTest, RunsFullAttentionDsparkAcrossRequestLifecycles) {
   EXPECT_EQ(drafts[0], (std::vector<int32_t>{14, 9, 8, 44}));
   EXPECT_EQ(drafts[1], (std::vector<int32_t>{31, 9, 8, 44}));
 
+  // Rewind releases only the selected request. It can replay from position zero while the peer
+  // continues from its existing drafter state.
   drafter.Release(request_a);
   Tensor reused_aux{device, Ort::TypeToTensorType<float>};
-  const std::array<int64_t, 2> reused_aux_shape{9, 1};
+  const std::array<int64_t, 2> reused_aux_shape{10, 1};
   reused_aux.CreateTensor(reused_aux_shape);
-  const std::array reused_feed{
-      Dflash2Drafter::Feed{.request = request_c, .aux_row_begin = 0, .aux_row_count = 9, .first_position = 0, .anchor_token = 15, .draft_eligible = true, .wants_drafts = true},
+  const std::array reused_feeds{
+      Dflash2Drafter::Feed{.request = request_a, .aux_row_begin = 0, .aux_row_count = 9, .first_position = 0, .anchor_token = 15, .draft_eligible = true, .wants_drafts = true},
+      Dflash2Drafter::Feed{.request = request_b, .aux_row_begin = 9, .aux_row_count = 1, .first_position = 13, .anchor_token = 16, .draft_eligible = true, .wants_drafts = true},
   };
-  drafter.Propose(reused_aux, reused_feed, drafts);
-  ASSERT_EQ(drafts.size(), 1u);
-  EXPECT_EQ(drafts[0], (std::vector<int32_t>{14, 0, 13, 6}));
+  drafter.Propose(reused_aux, reused_feeds, drafts);
+  ASSERT_EQ(drafts.size(), 2u);
+  EXPECT_EQ(drafts[0], (std::vector<int32_t>{13, 0, 13, 32}));
+  EXPECT_EQ(drafts[1], (std::vector<int32_t>{31, 13, 5, 32}));
+  EXPECT_EQ(drafter.AdmissionMisses(), 0u);
 
   Tensor failed_aux{device, Ort::TypeToTensorType<float>};
   const std::array<int64_t, 2> failed_aux_shape{1, 1};
   failed_aux.CreateTensor(failed_aux_shape);
   const std::array failed_feed{
-      Dflash2Drafter::Feed{.request = request_c, .aux_row_begin = 0, .aux_row_count = 1, .first_position = 10, .anchor_token = 16, .draft_eligible = true, .wants_drafts = true},
+      Dflash2Drafter::Feed{.request = request_a, .aux_row_begin = 0, .aux_row_count = 1, .first_position = 10, .anchor_token = 17, .draft_eligible = true, .wants_drafts = true},
   };
   EXPECT_THROW(drafter.Propose(failed_aux, failed_feed, drafts), std::logic_error);
   drafter.ReleaseAll();

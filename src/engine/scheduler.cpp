@@ -11,8 +11,7 @@ namespace Generators {
 
 Scheduler::Scheduler(std::shared_ptr<Model> model)
     : model_{model} {
-  constexpr size_t default_static_batch_size = 4;
-  size_t max_batch_size = default_static_batch_size;
+  size_t max_batch_size = kDefaultStaticBatchSize;
   const auto& engine_config = model->config_->engine;
   if (engine_config.dynamic_batching)
     max_batch_size = std::max(max_batch_size, engine_config.dynamic_batching->max_batch_size);

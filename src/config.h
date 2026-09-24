@@ -48,6 +48,7 @@ struct Config {
     // Speech encoder names
     static constexpr std::string_view AudioAttentionMaskName = "audio_attention_mask";
     static constexpr std::string_view AudioSizesName = "audio_sizes";
+    static constexpr std::string_view AudioLengthsName = "audio_lengths";
     static constexpr std::string_view AudioProjectionModeName = "audio_projection_mode";
     static constexpr std::string_view AudioFeaturesName = "audio_features";
     static constexpr std::string_view NumAudioTokens = "num_audio_tokens";
@@ -317,6 +318,7 @@ struct Config {
         std::string audio_embeds{Defaults::AudioEmbedsName};
         std::string attention_mask{Defaults::AudioAttentionMaskName};
         std::string audio_sizes{Defaults::AudioSizesName};
+        std::string audio_lengths{Defaults::AudioLengthsName};  // per-clip valid frame count of audio_embeds (LFM2-Audio)
         std::string audio_projection_mode{Defaults::AudioProjectionModeName};
       } inputs;
 
@@ -324,6 +326,24 @@ struct Config {
         std::string audio_features{Defaults::AudioFeaturesName};
       } outputs;
     } speech;
+
+    // Speech output of LFM2-Audio: the depthformer turns one decoder hidden state into a frame of
+    // audio codes, one per codebook, and the audio embedding turns that frame back into the decoder's
+    // next input. Empty filenames leave the model answering in text only.
+    struct AudioOutput {
+      struct Graph {
+        std::string filename;
+        std::optional<SessionOptions> session_options;
+      };
+      Graph depthformer;
+      Graph embedding;
+      int num_codebooks{8};
+      int codebook_size{2049};        // entries per codebook; the last one is the end-of-audio code
+      int audio_start_token_id{128};  // <|audio_start|>: the rest of a sequential answer is speech
+      int text_end_token_id{130};     // <|text_end|>: the text of an interleaved answer is over
+      int interleaved_n_text{6};      // text tokens per turn of an interleaved answer
+      int interleaved_n_audio{12};    // audio frames per turn of an interleaved answer
+    } audio_output;
 
     struct Joiner {
       std::string filename;
@@ -544,6 +564,8 @@ struct Config {
         // ones. Empty when the model has no windowed paged layers.
         std::string block_table_windowed{Defaults::BlockTableWindowedName};
         std::string attention_metadata{Defaults::AttentionMetadataName};
+        // Packed token rows to project through the LM head. Empty for legacy full-logits models.
+        std::string logits_indices;
         std::string past_conv_names{Defaults::PastConvName};  // Conv cache input name template (LFM2)
         std::string past_recurrent_names{Defaults::PastRecurrentName};
         std::string state_update_capture_count{Defaults::StateUpdateCaptureCountName};  // Per-sequence capture count
@@ -678,6 +700,10 @@ struct Config {
       int selector_top_k{};
       int mask_token_id{};
       int sliding_window{-1};
+      bool independent_sampling{};
+      float sampling_temperature{0.1f};
+      float sampling_top_p{0.95f};
+      float sampling_min_p{0.3f};
       std::vector<int> aux_hidden_state_layers;
 
       // Name of the main decoder's auxiliary hidden-states output that feeds the drafter.
@@ -735,6 +761,9 @@ struct Config {
     int random_seed{-1};               // -1 = Seed with random device, otherwise use value to seed RNG
     std::optional<size_t> chunk_size;  // Chunk size for prefill chunking during context processing. If present, chunking is enabled with the chunk size > 0.
     float blank_penalty{};             // Penalty applied to blank token logits in CTC/RNNT decoding. Default 0 means no penalty.
+    bool audio_interleaved{};          // LFM2-Audio: alternate text tokens and audio frames by count (interleaved mode) rather than switching on <|audio_start|>.
+    float audio_temperature{1.0f};     // LFM2-Audio: temperature the audio codes are sampled with. 0 takes the most likely code.
+    int audio_top_k{4};                // LFM2-Audio: number of most likely audio codes kept when sampling. 1 takes the most likely code.
   } search;
 
   struct Speculative {
@@ -776,6 +805,28 @@ struct Config {
     bool aux_hidden_states_output_required{};
   } engine;  // Engine settings
 
+  struct RuntimeProfile {
+    std::string id;
+
+    struct Eligibility {
+      std::optional<uint64_t> minimum_total_device_memory_bytes;
+      std::optional<uint64_t> maximum_total_device_memory_bytes;
+    } eligibility;
+
+    struct Overlay {
+      struct DynamicBatching {
+        std::optional<size_t> num_blocks;
+        std::optional<size_t> max_batch_size;
+        std::optional<size_t> max_scheduled_tokens;
+      } dynamic_batching;
+
+      struct Search {
+        std::optional<size_t> chunk_size;
+      } search;
+    } overlay;
+  };
+  std::vector<RuntimeProfile> runtime_profiles;
+
   void AddMapping(const std::string& nominal_name, const std::string& graph_name);
   // Returns graph name and true if the nominal name is found in the mapping
   // otherwise returns the nominal name and false
@@ -796,6 +847,7 @@ std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);
+void ApplyRuntimeProfile(Config& config, uint64_t total_device_memory_bytes);
 int SafeDoubleToInt(double x, std::string_view name);
 
 // Logs a warning when the drafter's exported geometry is narrower than
