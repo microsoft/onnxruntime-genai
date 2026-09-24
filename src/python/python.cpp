@@ -975,6 +975,14 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           },
           pybind11::return_value_policy::reference_internal);
 
+  pybind11::class_<OgaEngineCapabilities>(m, "EngineCapabilities")
+      .def_property_readonly(
+          "configured_max_batch_size",
+          &OgaEngineCapabilities::ConfiguredMaxBatchSize)
+      .def_property_readonly(
+          "max_scheduled_tokens",
+          &OgaEngineCapabilities::MaxScheduledTokens);
+
   pybind11::class_<OgaEngine>(m, "Engine")
       .def(pybind11::init([](OgaModel& model) { return OgaEngine::Create(model); }))
       .def(
@@ -1003,6 +1011,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           },
           pybind11::arg("buffer"))
       .def("has_pending_requests", &OgaEngine::HasPendingRequests)
+      .def("get_capabilities", &OgaEngine::GetCapabilities)
       .def("max_draft_tokens_per_proposal", &OgaEngine::MaxDraftTokensPerProposal,
            "Speculative draft tokens a request may attach to one proposal; zero when unsupported.")
       .def("get_speculative_stats", [](const OgaEngine& engine) { return ToSpeculativeStatsDict(*engine.GetSpeculativeStats()); }, "Return cumulative speculative-decoding telemetry.");

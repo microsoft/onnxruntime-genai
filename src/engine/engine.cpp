@@ -2424,6 +2424,22 @@ SpeculativeStats Engine::GetSpeculativeStats() const {
   return stats;
 }
 
+EngineCapabilities Engine::GetCapabilities() const {
+  ValidateOwnerThread();
+  EngineCapabilities capabilities;
+  if (model_->config_->engine.dynamic_batching) {
+    const auto& batching = *model_->config_->engine.dynamic_batching;
+    capabilities.configured_max_batch_size = batching.max_batch_size;
+    capabilities.max_scheduled_tokens = batching.max_scheduled_tokens;
+  } else if (model_->config_->engine.static_batching) {
+    capabilities.configured_max_batch_size =
+        model_->config_->engine.static_batching->max_batch_size;
+  } else {
+    capabilities.configured_max_batch_size = kDefaultStaticBatchSize;
+  }
+  return capabilities;
+}
+
 std::optional<PrefixCacheMetrics> Engine::PrefixCacheStats() const {
   ValidateOwnerThread();
   const auto* metrics = cache_manager_->PrefixMetrics();

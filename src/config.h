@@ -776,6 +776,28 @@ struct Config {
     bool aux_hidden_states_output_required{};
   } engine;  // Engine settings
 
+  struct RuntimeProfile {
+    std::string id;
+
+    struct Eligibility {
+      std::optional<uint64_t> minimum_total_device_memory_bytes;
+      std::optional<uint64_t> maximum_total_device_memory_bytes;
+    } eligibility;
+
+    struct Overlay {
+      struct DynamicBatching {
+        std::optional<size_t> num_blocks;
+        std::optional<size_t> max_batch_size;
+        std::optional<size_t> max_scheduled_tokens;
+      } dynamic_batching;
+
+      struct Search {
+        std::optional<size_t> chunk_size;
+      } search;
+    } overlay;
+  };
+  std::vector<RuntimeProfile> runtime_profiles;
+
   void AddMapping(const std::string& nominal_name, const std::string& graph_name);
   // Returns graph name and true if the nominal name is found in the mapping
   // otherwise returns the nominal name and false
@@ -796,6 +818,7 @@ std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);
+void ApplyRuntimeProfile(Config& config, uint64_t total_device_memory_bytes);
 int SafeDoubleToInt(double x, std::string_view name);
 
 // Logs a warning when the drafter's exported geometry is narrower than

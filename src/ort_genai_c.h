@@ -79,6 +79,7 @@ typedef struct OgaAudios OgaAudios;
 typedef struct OgaStringArray OgaStringArray;
 typedef struct OgaAdapters OgaAdapters;
 typedef struct OgaEngine OgaEngine;
+typedef struct OgaEngineCapabilities OgaEngineCapabilities;
 typedef struct OgaEngineEvent OgaEngineEvent;
 typedef struct OgaEngineEventBuffer OgaEngineEventBuffer;
 typedef struct OgaRequest OgaRequest;
@@ -1233,6 +1234,31 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaSetActiveAdapter(OgaGenerator* generator, 
  * \return OgaResult containing the error message if the engine creation failed, or nullptr on success.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateEngine(OgaModel* model, OgaEngine** out);
+
+/**
+ * \brief Returns a caller-owned snapshot of the Engine's configured runtime capabilities.
+ * This call must run on the Engine's owner thread.
+ * \param[in] engine The Engine to inspect.
+ * \param[out] out The capability snapshot. Destroy it with OgaDestroyEngineCapabilities.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineGetCapabilities(
+    const OgaEngine* engine, OgaEngineCapabilities** out);
+
+/**
+ * \brief Returns the configured maximum batch size.
+ * Static Engines without an explicit setting report the configured default of four. This value
+ * does not account for lower operational limits imposed by a scheduler implementation.
+ */
+OGA_EXPORT size_t OGA_API_CALL OgaEngineCapabilitiesGetConfiguredMaxBatchSize(
+    const OgaEngineCapabilities* capabilities);
+
+/** \brief Returns the dynamic scheduler's configured token budget, or zero for static batching. */
+OGA_EXPORT size_t OGA_API_CALL OgaEngineCapabilitiesGetMaxScheduledTokens(
+    const OgaEngineCapabilities* capabilities);
+
+/** \brief Destroys an Engine capability snapshot. */
+OGA_EXPORT void OGA_API_CALL OgaDestroyEngineCapabilities(
+    OgaEngineCapabilities* capabilities);
 
 /**
  * \brief Destroys the given engine.

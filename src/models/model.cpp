@@ -27,6 +27,7 @@
 #include "../search.h"
 #include "../tracing.h"
 #include "model.h"
+#include "runtime_profiles.h"
 #include "model_package.h"
 #include "gpt.h"
 #include "decoder_only.h"
@@ -831,6 +832,8 @@ void Model::CreateSessionOptions() {
   // Fallback to CPU if no provider specific interface was set
   if (!p_device_)
     p_device_ = GetDeviceInterface(DeviceType::CPU);
+
+  ApplyRuntimeProfileForSelectedDevice(*config_, *p_device_);
 }
 
 OrtSessionOptions* Model::GetSessionOptions(const std::string& model_id) const {
