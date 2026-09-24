@@ -1376,8 +1376,8 @@ void Engine::RewindRequestToStartOfTurn(
   }
 
   // Every fallible preparation and temporary allocation completes before committed target-cache
-  // ownership changes. The cache managers validate their complete release up front, prepare any
-  // temporary containers, and then publish the ownership change through no-throw operations.
+  // ownership changes. The cache managers validate their complete release up front, then publish
+  // the ownership change through allocation-free no-throw operations.
   cache_manager_->ValidateRewind(request);
   auto rewind_state =
       request->PrepareRewindToStartOfTurn(turn_id);

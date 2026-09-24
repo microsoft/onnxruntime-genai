@@ -326,7 +326,10 @@ void StaticCacheManager::ReleaseForRewind(
   if (!IsResident(request)) {
     return;
   }
-  Deallocate(cache_allocated_requests_);
+  key_value_cache_.reset();
+  key_value_cache_state_.reset();
+  params_.reset();
+  cache_allocated_requests_.clear();
 }
 
 void StaticCacheManager::DetachRequestForTeardown(
@@ -511,8 +514,15 @@ void PagedCacheManager::ReleaseForRewind(
   if (!IsResident(request)) {
     return;
   }
-  std::vector<std::shared_ptr<Request>> requests{request};
-  Deallocate(requests);
+  // Deallocate builds temporary vectors; rewind publishes only after auxiliary state is released.
+  // The single-request path uses the already validated no-throw release primitives instead.
+  if (fixed_state_pool_) {
+    fixed_state_pool_->ReleaseValidated(fixed_state_pool_->HandleFor(request.get()));
+  }
+  key_value_cache_->RemoveValidated(request.get());
+  cache_allocated_requests_.erase(
+      std::remove(cache_allocated_requests_.begin(), cache_allocated_requests_.end(), request),
+      cache_allocated_requests_.end());
 }
 
 void PagedCacheManager::DetachRequestForTeardown(
