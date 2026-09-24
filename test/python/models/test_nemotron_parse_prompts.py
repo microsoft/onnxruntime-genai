@@ -1,16 +1,23 @@
 import json
 import os
+import runpy
+from argparse import Namespace
 from pathlib import Path
+from unittest.mock import Mock
 
 import numpy as np
 import onnx
 import onnxruntime_genai as og
 import pytest
 from onnx import TensorProto, helper, numpy_helper
-from tokenizers import Tokenizer, models
+from tokenizers import Tokenizer, models, processors
 
 DEFAULT_TASK = "</s><s><predict_bbox><predict_classes><output_markdown>"
 CONTEXT_LENGTH = 32
+DEFAULT_NORMALIZATION = {
+    "image_mean": [0.48145466, 0.4578275, 0.40821073],
+    "image_std": [0.26862954, 0.26130258, 0.27577711],
+}
 
 
 def _save_graph(path, nodes, inputs, outputs, initializers=()):
@@ -26,14 +33,22 @@ def _save_graph(path, nodes, inputs, outputs, initializers=()):
 @pytest.fixture
 def model_factory(tmp_path):
     def create(prefill_length=8, fixed_length=None, provider="cpu", fail_decoder=False,
-               decoder_run_options=None, invalid_cache=False, cache_dtype=np.float32):
+               decoder_run_options=None, invalid_cache=False, cache_dtype=np.float32,
+               default_user_prompt=DEFAULT_TASK, normalization=None,
+               vision_config_filename="vision_processing.json", add_bos_token=True, add_eos_token=True,
+               profile_keys=("min", "opt", "max")):
         cache_type = helper.np_dtype_to_tensor_dtype(np.dtype(cache_dtype))
         model_dir = tmp_path / f"model_{prefill_length}_{fixed_length}"
         model_dir.mkdir()
         config_path = Path(__file__).parents[2] / "configs/nemotron-parse/genai_config.json"
         config = json.loads(config_path.read_text())
         config["model"].update(context_length=CONTEXT_LENGTH, vocab_size=32)
+        if default_user_prompt is None:
+            config["model"].pop("default_user_prompt", None)
+        else:
+            config["model"]["default_user_prompt"] = default_user_prompt
         config["model"]["vision"]["num_visual_tokens"] = 1
+        config["model"]["vision"]["config_filename"] = vision_config_filename
         config["model"]["decoder"].update(
             prefill_sequence_length=prefill_length,
             hidden_size=1,
@@ -49,11 +64,23 @@ def model_factory(tmp_path):
                 "provider_options": [{provider: {}}],
                 "session.disable_cpu_ep_fallback": "1",
             })
+        if provider == "NvTensorRtRtx":
+            config["model"]["vision"]["session_options"] = {
+                "provider_options": [{provider: {}}],
+                "session.disable_cpu_ep_fallback": "1",
+            }
+            for kind in profile_keys:
+                key = f"ep.nvtensorrtrtxexecutionprovider.nv_profile_{kind}_shapes"
+                config["model"]["decoder"]["session_options"][key] = "decoder_input_ids:1x1"
+                config["model"]["vision"]["session_options"][key] = "pixel_values:1x3x2x2"
         if decoder_run_options:
             config["model"]["decoder"]["run_options"] = decoder_run_options
         (model_dir / "genai_config.json").write_text(json.dumps(config))
-        (model_dir / "processor_config.json").write_text(
+        (model_dir / vision_config_filename).write_text(
             json.dumps({
+                "image_height": 2,
+                "image_width": 2,
+                **(DEFAULT_NORMALIZATION if normalization is None else normalization),
                 "processor": {
                     "name": "nemotron_parse_image_processor",
                     "transforms": [{
@@ -74,6 +101,10 @@ def model_factory(tmp_path):
         vocab = {token: index for index, token in enumerate(special_tokens + ["x"])}
         tokenizer = Tokenizer(models.BPE(vocab=vocab, merges=[], unk_token="<unk>"))
         tokenizer.add_special_tokens(special_tokens)
+        template = (["<s>"] if add_bos_token else []) + ["$A"] + (["</s>"] if add_eos_token else [])
+        tokenizer.post_processor = processors.TemplateProcessing(
+            single=" ".join(template), special_tokens=[(token, vocab[token]) for token in template if token != "$A"],
+        )
         tokenizer.save(str(model_dir / "tokenizer.json"))
         (model_dir / "tokenizer_config.json").write_text(
             json.dumps({
@@ -161,6 +192,12 @@ def trt_rtx_provider():
     return "NvTensorRtRtx"
 
 
+@pytest.mark.parametrize("missing", ["min", "opt", "max"])
+def test_trt_rtx_rejects_partial_explicit_profiles(model_factory, trt_rtx_provider, missing):
+    with pytest.raises(RuntimeError, match="Explicit TRT-RTX profiles must specify.*together"):
+        model_factory(provider=trt_rtx_provider, profile_keys=tuple(kind for kind in ("min", "opt", "max") if kind != missing))
+
+
 @pytest.mark.parametrize("prefill_length", [8, 16])
 def test_trt_rtx_static_and_dynamic_prefill(model_factory, images, trt_rtx_provider, prefill_length):
     model = model_factory(prefill_length=prefill_length, provider=trt_rtx_provider)
@@ -236,6 +273,25 @@ def test_dynamic_prompt_prefill_and_decode(model_factory, images, prefill_length
     np.testing.assert_array_equal(generator.get_sequence(0), expected_ids + expected_new_tokens)
 
 
+@pytest.mark.parametrize("add_bos_token,add_eos_token", [(True, True), (False, True), (True, False), (False, False)])
+@pytest.mark.parametrize("prompt", ["", DEFAULT_TASK, "x", "x" * 17])
+def test_processor_uses_tokenizer_special_tokens(model_factory, tmp_path, images, prompt, add_bos_token, add_eos_token):
+    model = model_factory(add_bos_token=add_bos_token, add_eos_token=add_eos_token)
+    reference = Tokenizer.from_file(str(tmp_path / "model_8_None" / "tokenizer.json"))
+    text = prompt or DEFAULT_TASK
+    expected = [2] + reference.encode(text, add_special_tokens=True).ids
+    standalone = og.Tokenizer(model)
+    raw = reference.encode(text, add_special_tokens=False).ids
+    np.testing.assert_array_equal(standalone.encode(text), raw)
+
+    processor = model.create_multimodal_processor()
+    for _ in range(2):
+        inputs = processor(prompt, images=images)
+        np.testing.assert_array_equal(inputs["input_ids"].as_numpy(), [expected])
+    # Configuring the processor must not change independently created tokenizers.
+    np.testing.assert_array_equal(standalone.encode(text), raw)
+
+
 @pytest.mark.parametrize(
     "prefill_length,prompt,prompt_length",
     [
@@ -282,17 +338,148 @@ def test_runtime_rejects_fixed_prompt_when_processor_is_bypassed(model_factory):
 @pytest.mark.parametrize("prompt", ["", "x", DEFAULT_TASK])
 def test_single_prompt_list_matches_string(model_factory, images, prompt):
     processor = model_factory().create_multimodal_processor()
+    from_list = processor([prompt], images=images)
+    from_string = processor(prompt, images=images)
+    for name in ("input_ids", "pixel_values"):
+        np.testing.assert_array_equal(from_list[name].as_numpy(), from_string[name].as_numpy())
+
+
+@pytest.mark.parametrize("prompt", ["", [""], []])
+@pytest.mark.parametrize("default_prompt", [DEFAULT_TASK, "x"])
+def test_empty_prompt_forms_select_default_task(model_factory, images, prompt, default_prompt):
+    processor = model_factory(default_user_prompt=default_prompt).create_multimodal_processor()
+    actual = processor(prompt, images=images)
+    expected = processor(default_prompt, images=images)
+    for name in ("input_ids", "pixel_values"):
+        np.testing.assert_array_equal(actual[name].as_numpy(), expected[name].as_numpy())
+
+
+@pytest.mark.parametrize("prompts", [["x", DEFAULT_TASK], ["", ""]])
+def test_processor_rejects_multiple_prompts(model_factory, images, prompts):
+    processor = model_factory().create_multimodal_processor()
+    with pytest.raises(RuntimeError, match="does not support multiple prompts"):
+        processor(prompts, images=images)
+
+
+@pytest.fixture
+def example_common(monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).parents[3] / "examples/python"))
+    import common
+    return common
+
+
+@pytest.mark.parametrize("configured", [None, DEFAULT_TASK, "", "custom"])
+def test_example_package_prompt_default(tmp_path, example_common, configured):
+    model = {} if configured is None else {"default_user_prompt": configured}
+    (tmp_path / "genai_config.json").write_text(json.dumps({"model": model}))
+    fallback = "What color is the sky?"
+    assert example_common.get_default_user_prompt(str(tmp_path), fallback) == (
+        fallback if configured is None else configured
+    )
+
+
+@pytest.mark.parametrize("configured", [None, 42, [], {}])
+def test_example_rejects_invalid_prompt_default(tmp_path, example_common, configured):
+    (tmp_path / "genai_config.json").write_text(json.dumps({"model": {"default_user_prompt": configured}}))
+    with pytest.raises(ValueError, match="must be a string"):
+        example_common.get_default_user_prompt(str(tmp_path), "fallback")
+
+
+@pytest.mark.parametrize("prompt", ["custom", "What color is the sky?", DEFAULT_TASK])
+def test_example_preserves_explicit_prompt(example_common, prompt):
+    assert example_common.get_user_prompt(prompt, non_interactive=True) == prompt
+
+
+@pytest.mark.parametrize("default_prompt", [DEFAULT_TASK, "What color is the sky?"])
+def test_example_interactive_empty_input_reprompts(example_common, monkeypatch, capsys, default_prompt):
+    answers = iter(["", "", "custom"])
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    assert example_common.get_user_prompt(default_prompt, non_interactive=False) == "custom"
+    assert capsys.readouterr().out.count("Error, input cannot be empty") == 2
+
+
+@pytest.mark.parametrize("configured", [None, DEFAULT_TASK, "x", ""])
+def test_processor_uses_package_prompt_default(model_factory, images, configured):
+    model = model_factory(default_user_prompt=configured)
+    actual = model.create_multimodal_processor()("", images=images)["input_ids"].as_numpy()
+    task = DEFAULT_TASK if configured is None else configured
+    expected = [2, 0, *og.Tokenizer(model).encode(task).tolist(), 2]
+    np.testing.assert_array_equal(actual, [expected])
+
+
+@pytest.mark.parametrize("model_type", ["nemotron_parse", "gemma3"])
+@pytest.mark.parametrize("package_max, explicit_max, expected", [
+    (1032, None, 1032),
+    (4096, None, 4096),
+    (8192, None, 7680),
+    (1032, 512, 512),
+    (8192, 8000, 8000),
+    (1032, 2048, 2048),
+])
+def test_multimodal_example_max_length(
+    example_common, monkeypatch, model_type, package_max, explicit_max, expected
+):
+    main = runpy.run_path(str(Path(__file__).parents[3] / "examples/python/model-mm.py"))["main"]
+    runtime = Mock()
+    runtime.Model.return_value.type = model_type
+    params = runtime.GeneratorParams.return_value
+    params.get_search_options.return_value = {"max_length": package_max}
+    runtime.Generator.return_value.is_done.return_value = True
+    monkeypatch.setitem(main.__globals__, "og", runtime)
+    for name, result in {
+        "register_ep": None,
+        "get_config": None,
+        "get_user_images": (None, 0),
+        "get_user_audios": (None, 0),
+        "apply_chat_template": DEFAULT_TASK,
+    }.items():
+        monkeypatch.setitem(main.__globals__, name, Mock(return_value=result))
+    args = Namespace(
+        model_path="unused", execution_provider="cpu", ep_path=None, use_winml=False,
+        user_prompt=DEFAULT_TASK, system_prompt="system", debug=False, verbose=False,
+        response_format="", timings=False, non_interactive=True, image_paths=[], audio_paths=[],
+    )
+    if explicit_max is not None:
+        args.max_length = explicit_max
+    main(args)
+    assert params.set_search_options.call_args.kwargs["max_length"] == expected
+
+
+@pytest.mark.parametrize("structured", [False, True])
+@pytest.mark.parametrize("prompt", ["", DEFAULT_TASK, "x", "What color is the sky?", " x\n"])
+def test_exported_chat_template_preserves_task(
+    model_factory, images, tmp_path, monkeypatch, example_common, structured, prompt
+):
+    monkeypatch.syspath_prepend(str(Path(__file__).parents[3] / "src/python/py/models"))
+    from builders.nemotron_parse import NemotronParseModel
+
+    model = model_factory()
+    package_dir = tmp_path / "model_8_None"
+    (package_dir / "chat_template.jinja").write_text(NemotronParseModel.chat_template)
+    content = example_common.get_user_content("nemotron_parse", 1, 0, prompt) if structured else prompt
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "previous task"},
+        {"role": "assistant", "content": "previous result"},
+        {"role": "user", "content": content},
+    ]
+    rendered = example_common.apply_chat_template(str(package_dir), og.Tokenizer(model), json.dumps(messages), True)
+    assert rendered == prompt
+    processor = model.create_multimodal_processor()
     np.testing.assert_array_equal(
-        processor([prompt], images=images)["input_ids"].as_numpy(),
+        processor(rendered, images=images)["input_ids"].as_numpy(),
         processor(prompt, images=images)["input_ids"].as_numpy(),
     )
 
 
-@pytest.mark.parametrize("prompts", [[], ["x", DEFAULT_TASK]])
-def test_processor_rejects_wrong_list_size(model_factory, images, prompts):
-    processor = model_factory().create_multimodal_processor()
-    with pytest.raises(RuntimeError, match="exactly one prompt"):
-        processor(prompts, images=images)
+def test_example_preserves_conversational_template(model_factory, tmp_path, example_common):
+    model = model_factory(default_user_prompt=None)
+    (tmp_path / "chat_template.jinja").write_text(
+        "{{ messages[0]['content'] }}|{{ messages[-1]['content'] }}|assistant:"
+    )
+    messages = [{"role": "system", "content": "system"}, {"role": "user", "content": "hello"}]
+    rendered = example_common.apply_chat_template(str(tmp_path), og.Tokenizer(model), json.dumps(messages), True)
+    assert rendered == "system|hello|assistant:"
 
 
 @pytest.mark.parametrize("rewind_length", [0, 4, 9])
@@ -381,6 +568,9 @@ def test_in_place_cache_across_multiple_steps(model_factory, images, tmp_path, p
         generator.generate_next_token()
         generator.set_runtime_option("enable_profiling", "0")
         consumed = generator.get_sequence(0)[:-1]
+        expected_mask = np.zeros((1, CONTEXT_LENGTH), dtype=np.int64)
+        expected_mask[:, :len(consumed)] = 1
+        np.testing.assert_array_equal(generator.get_input("decoder_attention_mask"), expected_mask)
         expected = np.zeros((1, 1, CONTEXT_LENGTH, 1), dtype=cache_dtype)
         expected[0, 0, :len(consumed), 0] = consumed
         for kind in ("key", "value"):
@@ -400,13 +590,17 @@ def test_in_place_cache_across_multiple_steps(model_factory, images, tmp_path, p
 
 
 @pytest.mark.parametrize("height,width", [(1, 1), (2, 2), (7, 3), (3, 7)])
-def test_pixels_match_checkpoint_resize_pad_normalize(model_factory, tmp_path, height, width):
+@pytest.mark.parametrize("normalization", [
+    DEFAULT_NORMALIZATION,
+    {"image_mean": [0.1, 0.2, 0.3], "image_std": [0.5, 0.75, 1.0]},
+], ids=["checkpoint", "configured"])
+def test_pixels_match_checkpoint_resize_pad_normalize(model_factory, tmp_path, height, width, normalization):
     cv2 = pytest.importorskip("cv2")
     image_module = pytest.importorskip("PIL.Image")
     pixels = np.random.default_rng(1).integers(0, 256, (height, width, 3), dtype=np.uint8)
     path = tmp_path / "pixels.png"
     image_module.fromarray(pixels).save(path)
-    processor = model_factory().create_multimodal_processor()
+    processor = model_factory(normalization=normalization).create_multimodal_processor()
     actual = processor("", images=og.Images.open(str(path)))["pixel_values"].as_numpy()
 
     resized_h, resized_w = height, width
@@ -419,8 +613,58 @@ def test_pixels_match_checkpoint_resize_pad_normalize(model_factory, tmp_path, h
     canvas = np.full((2, 2, 3), 255, dtype=np.uint8)
     top, left = (2 - resized_h) // 2, (2 - resized_w) // 2
     canvas[top:top + resized_h, left:left + resized_w] = resized
-    mean = np.array([0.48145466, 0.4578275, 0.40821073], dtype=np.float32)
-    std = np.array([0.26862954, 0.26130258, 0.27577711], dtype=np.float32)
+    mean = np.array(normalization["image_mean"], dtype=np.float32)
+    std = np.array(normalization["image_std"], dtype=np.float32)
     expected = ((canvas.astype(np.float32) / 255 - mean) / std).transpose(2, 0, 1)[None]
     # OpenCV rounds resized uint8 pixels; the native bilinear path retains fractions.
     np.testing.assert_allclose(actual, expected, rtol=0, atol=1.1 / (255 * std.min()))
+
+
+@pytest.mark.parametrize("field,value", [
+    ("image_mean", None), ("image_std", None),
+    ("image_mean", []), ("image_mean", [0.1, 0.2]),
+    ("image_std", [1, 1, 1, 1]), ("image_std", [1, 0, 1]),
+    ("image_std", [1, -1, 1]), ("image_std", [1, 1e-50, 1]),
+    ("image_mean", [1e100, 0, 0]), ("image_std", [1, "invalid", 1]),
+    ("image_mean", 0.5), ("image_std", True),
+])
+def test_rejects_invalid_normalization_config(model_factory, field, value):
+    normalization = dict(DEFAULT_NORMALIZATION)
+    if value is None:
+        del normalization[field]
+    else:
+        normalization[field] = value
+    model = model_factory(normalization=normalization)
+    with pytest.raises(RuntimeError, match=field):
+        model.create_multimodal_processor()
+
+
+def test_uses_configured_vision_processing_filename(model_factory, images):
+    model = model_factory(vision_config_filename="custom_vision.json")
+    processor = model.create_multimodal_processor()
+    assert processor("", images=images)["pixel_values"].as_numpy().shape == (1, 3, 2, 2)
+
+
+@pytest.mark.parametrize("field", ["image_height", "image_width"])
+@pytest.mark.parametrize("value", [0, -1, 3, 2.5, "2", None])
+def test_rejects_processing_dimensions_inconsistent_with_graph(model_factory, field, value):
+    model = model_factory(normalization={**DEFAULT_NORMALIZATION, field: value})
+    with pytest.raises(RuntimeError, match="Invalid Nemotron Parse vision processing config"):
+        model.create_multimodal_processor()
+
+
+def test_legacy_processing_dimensions_come_from_graph(model_factory, tmp_path, images):
+    model = model_factory()
+    path = tmp_path / "model_8_None" / "vision_processing.json"
+    config = json.loads(path.read_text())
+    del config["image_height"], config["image_width"]
+    path.write_text(json.dumps(config))
+    processor = model.create_multimodal_processor()
+    assert processor("", images=images)["pixel_values"].as_numpy().shape == (1, 3, 2, 2)
+
+
+def test_missing_vision_processing_file_has_clear_error(model_factory, tmp_path):
+    model = model_factory()
+    (tmp_path / "model_8_None" / "vision_processing.json").unlink()
+    with pytest.raises(RuntimeError, match="Cannot open.*vision_processing.json"):
+        model.create_multimodal_processor()

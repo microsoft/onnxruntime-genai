@@ -2,7 +2,6 @@
 
 #include "generator/generators.h"
 #include "models/model.h"
-#include "models/model_type.h"
 
 #include <algorithm>
 #include <cmath>
@@ -11,29 +10,11 @@
 
 namespace Generators {
 
-// Helper to dispatch type-specific tensor operations
-template <typename Func>
-void DispatchOnType(ONNXTensorElementDataType type, Func&& func) {
-  if (type == Ort::TypeToTensorType<int32_t>)
-    func.template operator()<int32_t>();
-  else
-    func.template operator()<int64_t>();
-}
-
-DefaultPositionInputs::DefaultPositionInputs(
-    const Model& model, State& state,
-    DeviceSpan<int32_t> sequence_lengths_unk,
-    const std::string& attention_mask_name,
-    AttentionMaskOptions attention_mask_options)
+DefaultPositionInputs::DefaultPositionInputs(const Model& model, State& state, DeviceSpan<int32_t> sequence_lengths_unk, const std::string& attention_mask_name,
+                                           std::optional<int> static_mask_capacity)
     : model_{model},
       state_{state},
-      attention_mask_name_{attention_mask_name},
-      attention_mask_options_{attention_mask_options} {
-  if (attention_mask_options_.static_mask_length_override < 0) {
-    throw std::runtime_error(
-        "attention mask static_mask_length_override must not be negative");
-  }
-
+      attention_mask_name_{attention_mask_name} {
   has_mask_input_ = model_.session_info_.HasInput(attention_mask_name_);
   has_posid_input_ = model_.session_info_.HasInput(model_.config_->model.decoder.inputs.position_ids);
 
@@ -63,12 +44,11 @@ DefaultPositionInputs::DefaultPositionInputs(
   sequence_lengths_unk.CopyCpuToDevice();
 
   position_ids_shape_ = shape;
-  attention_mask_shape_ = shape;
 
   position_ids_ = std::make_unique<Tensor>(model_.p_device_inputs_, type_);
   position_ids_next_ = std::make_unique<Tensor>(model_.p_device_inputs_, type_);
-  attention_mask_ = std::make_unique<Tensor>(model_.p_device_inputs_, type_);
-  attention_mask_next_ = std::make_unique<Tensor>(model_.p_device_inputs_, type_);
+  if (has_mask_input_)
+    attention_mask_ = CreateAttentionMask(model_, state_, type_, static_mask_capacity);
 }
 
 void DefaultPositionInputs::Add() {
@@ -96,11 +76,11 @@ void DefaultPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_le
   if (has_mask_input_) {
     // Initialize on first update
     if (is_first_update_) {
-      attention_mask_shape_[1] = new_length;
+      std::array<int64_t, 2> shape{state_.params_->search.batch_size, new_length};
       if (type_ == Ort::TypeToTensorType<int32_t>)
-        CreateAndInitializeAttentionMask<int32_t>(next_tokens, attention_mask_shape_);
+        CreateAndInitializeAttentionMask<int32_t>(next_tokens, shape);
       else
-        CreateAndInitializeAttentionMask<int64_t>(next_tokens, attention_mask_shape_);
+        CreateAndInitializeAttentionMask<int64_t>(next_tokens, shape);
     } else {
       UpdateAttentionMask(total_length, new_length);
     }
@@ -117,8 +97,8 @@ void DefaultPositionInputs::RewindTo(size_t index) {
       position_ids_next_ = std::make_unique<Tensor>(model_.p_device_inputs_, type_);
     // Rewind the mask input to a previous state
   } else if (has_mask_input_) {
-    if (attention_mask_shape_[0] == 1) {
-      RewindMask(index);
+    if (attention_mask_->GetShape()[0] == 1) {
+      attention_mask_->RewindTo(index);
     } else
       throw std::runtime_error("DefaultPositionInputs::RewindTo - Unsupported batch size");
   }
@@ -169,49 +149,9 @@ void DefaultPositionInputs::UpdatePositionIDs(int total_length, int new_kv_lengt
   }
 }
 
-void DefaultPositionInputs::CreateNextAttentionMaskTensor(int total_length) {
-  if (ShouldUseStaticMaskHandling())
-    return;
-  attention_mask_shape_[1] = total_length;
-  attention_mask_next_->CreateTensor(attention_mask_shape_);
-}
-
 void DefaultPositionInputs::UpdateAttentionMask(int total_length, int new_kv_length) {
-  if (position_ids_shape_[0] != 1 && !(total_length == 0 || new_kv_length == 1))
-    throw std::runtime_error("DefaultPositionInputs::UpdatePositionIDs - batch_size must be 1 for continuous decoding.");
-
-  const int mask_capacity = GetAttentionMaskCapacity();
-  if (ShouldUseStaticMaskHandling() && total_length > mask_capacity) {
-    throw std::runtime_error(
-        "DefaultPositionInputs::UpdateAttentionMask - total_length exceeds the static mask capacity.");
-  }
-
-  CreateNextAttentionMaskTensor(total_length);
-
-  // Update the attention mask on the device. If it fails, copy to CPU, update there, and copy back to device.
-  if (!model_.p_device_inputs_->UpdateAttentionMask(ShouldUseStaticMaskHandling() ? nullptr : attention_mask_next_->GetMutableRawData(),
-                                                    attention_mask_->GetMutableRawData(),
-                                                    static_cast<int>(attention_mask_shape_[0]),
-                                                    new_kv_length,
-                                                    total_length,
-                                                    mask_capacity,
-                                                    ShouldUseStaticMaskHandling(),
-                                                    type_)) {
-    // auto* attention_mask_next_span = state_.params_->use_graph_capture ? &attention_mask_next_->GetByteSpan() : nullptr;
-    DeviceSpan<uint8_t> attention_mask_next_span;
-    if (!ShouldUseStaticMaskHandling())
-      attention_mask_next_span = attention_mask_next_->GetByteSpan();
-    auto attention_mask_span = attention_mask_->GetByteSpan();
-    model_.p_device_inputs_->GetCpuFallbackDevice().UpdateAttentionMask(ShouldUseStaticMaskHandling() ? nullptr : attention_mask_next_span.CopyDeviceToCpu().data(), attention_mask_span.CopyDeviceToCpu().data(), static_cast<int>(attention_mask_shape_[0]), new_kv_length, total_length, mask_capacity, ShouldUseStaticMaskHandling(), type_);
-    if (!ShouldUseStaticMaskHandling())
-      attention_mask_next_span.CopyCpuToDevice();
-    attention_mask_span.CopyCpuToDevice();
-  }
-
-  if (!ShouldUseStaticMaskHandling()) {
-    attention_mask_->ort_tensor_ = std::move(attention_mask_next_->ort_tensor_);
-    state_.inputs_[mask_input_index_] = attention_mask_->GetOrtTensor();
-  }
+  attention_mask_->Update(total_length, new_kv_length);
+  state_.inputs_[mask_input_index_] = attention_mask_->GetOrtTensor();
 }
 
 template <typename T>
@@ -263,41 +203,6 @@ void DefaultPositionInputs::CreateAndInitializePositionIDs(DeviceSpan<int32_t> n
   state_.inputs_[posid_input_index_] = position_ids_->GetOrtTensor();
 }
 
-// Initialize a static attention mask of size max_length and expanded by num_beams
-template <typename T>
-void DefaultPositionInputs::InitializeStaticMask(OrtValue& cpu_attention_mask) {
-  // Create static tensor of size max_length and expanded by num_beams
-  attention_mask_shape_[0] *= state_.params_->search.num_beams;
-  attention_mask_shape_[1] = GetAttentionMaskCapacity();
-  attention_mask_->CreateTensor(attention_mask_shape_, true);
-  auto output_span = attention_mask_->GetDeviceSpan<T>();
-  output_span.Zero();
-  // Copy the first new_kv_length elements of each sequence num_beams times each
-  auto input_span = WrapTensor<T>(model_.p_device_inputs_->GetCpuFallbackDevice(), cpu_attention_mask);
-  auto input_shape = cpu_attention_mask.GetTensorTypeAndShapeInfo()->GetShape();
-  auto batch_size = input_shape[0];
-  auto num_beams = state_.params_->search.num_beams;
-  auto new_kv_length = input_shape[1];
-  if (new_kv_length > attention_mask_shape_[1]) {
-    throw std::runtime_error(
-        "DefaultPositionInputs::InitializeStaticMask - prompt exceeds the static mask capacity.");
-  }
-  // Number of elements per (batch * beam) row in the *output* tensor
-  // equals the full max_length configured for generation, which is
-  // attention_mask_shape_[1] after the assignment above.
-  auto max_length = attention_mask_shape_[1];
-  for (int i = 0; i < batch_size; i++) {
-    for (int j = 0; j < num_beams; j++) {
-      auto output_subspan = output_span.subspan((i * num_beams + j) * max_length, new_kv_length);
-      auto input_subspan = input_span.subspan(i * new_kv_length, new_kv_length);
-      output_subspan.CopyFrom(input_subspan);
-    }
-  }
-}
-
-template void DefaultPositionInputs::InitializeStaticMask<int32_t>(OrtValue& cpu_attention_mask);
-template void DefaultPositionInputs::InitializeStaticMask<int64_t>(OrtValue& cpu_attention_mask);
-
 template <typename T>
 void DefaultPositionInputs::CreateAndInitializeAttentionMask(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 2> shape) {
   // Set attention mask to be 0 for pad tokens, and 1 for all other tokens.
@@ -329,13 +234,7 @@ void DefaultPositionInputs::CreateAndInitializeAttentionMask(DeviceSpan<int32_t>
     }
   }
 
-  if (ShouldUseStaticMaskHandling()) {
-    InitializeStaticMask<T>(*attention_mask);
-  } else {
-    attention_mask = model_.ExpandInputs(attention_mask, state_.params_->search.num_beams);
-    attention_mask_->ort_tensor_ = std::move(attention_mask);
-    attention_mask_shape_[0] *= state_.params_->search.num_beams;
-  }
+  attention_mask_->Initialize(std::move(attention_mask));
   state_.inputs_[mask_input_index_] = attention_mask_->GetOrtTensor();
 }
 
@@ -344,65 +243,6 @@ void DefaultPositionInputs::InitializeSequenceLengths(std::array<int64_t, 2> sha
   for (int i = 0; i < shape[0] * state_.params_->search.num_beams; i++) {
     sequence_lengths_unk[i] = 0;
   }
-}
-
-void DefaultPositionInputs::RewindMask(size_t index) {
-  if (ShouldUseStaticMaskHandling()) {
-    // Static mask layout: [batch_beam_size, max_length]
-    // Rewind to index: write 1s for [0, index), 0s for [index, max_length)
-    size_t max_len = static_cast<size_t>(GetAttentionMaskCapacity());
-    if (index > max_len) {
-      throw std::runtime_error("RewindMask: index exceeds max_length");
-    }
-    size_t batch_beam_size = static_cast<size_t>(attention_mask_shape_[0]);
-    auto byte_span = attention_mask_->GetByteSpan();
-    auto cpu_data = byte_span.CpuSpan();
-    if (type_ == Ort::TypeToTensorType<int32_t>) {
-      auto* data = reinterpret_cast<int32_t*>(cpu_data.data());
-      for (size_t i = 0; i < batch_beam_size; i++) {
-        std::fill_n(data + i * max_len, index, static_cast<int32_t>(1));
-        std::fill_n(data + i * max_len + index, max_len - index, static_cast<int32_t>(0));
-      }
-    } else {
-      auto* data = reinterpret_cast<int64_t*>(cpu_data.data());
-      for (size_t i = 0; i < batch_beam_size; i++) {
-        std::fill_n(data + i * max_len, index, static_cast<int64_t>(1));
-        std::fill_n(data + i * max_len + index, max_len - index, static_cast<int64_t>(0));
-      }
-    }
-    byte_span.CopyCpuToDevice();
-    return;
-  }
-
-  // Dynamic mask: adjust shape so the next Update() creates the correct-sized tensor.
-  // For batch_beam_size == 1 (the only case RewindTo supports), the CPU UpdateAttentionMask
-  // fills the entire next mask with 1s, so no data fixup is needed - just the shape.
-  attention_mask_shape_[1] = static_cast<int64_t>(index);
-}
-
-// Returns true when the attention mask is a fixed-size [batch_beam_size, max_length] buffer
-// that must be updated in-place (write 1s/0s) rather than re-created per step.
-// Currently triggered by graph capture or by EP policy for shared past-present buffers.
-bool DefaultPositionInputs::ShouldUseStaticMaskHandling() const {
-  switch (attention_mask_options_.mode) {
-    case AttentionMaskMode::Dynamic:
-      return false;
-    case AttentionMaskMode::Static:
-      return true;
-    case AttentionMaskMode::Automatic:
-      return state_.params_->use_graph_capture ||
-             (state_.params_->IsPastPresentShareBufferEnabled(
-                  model_.config_->model.type) &&
-              model_.p_device_inputs_->ShouldUseStaticPositionInputsForSharedBuffers(
-                  model_.config_->model));
-  }
-  throw std::runtime_error("Unknown attention mask mode");
-}
-
-int DefaultPositionInputs::GetAttentionMaskCapacity() const {
-  return attention_mask_options_.static_mask_length_override > 0
-             ? attention_mask_options_.static_mask_length_override
-             : state_.params_->search.max_length;
 }
 
 }  // namespace Generators
