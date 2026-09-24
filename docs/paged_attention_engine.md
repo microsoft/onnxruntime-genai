@@ -616,6 +616,14 @@ combined budget: the target pool is scaled down so target plus head together cos
 configured block count would have cost without a head. A `num_blocks` too small to leave at least
 one block for each pool is rejected at Engine construction.
 
+The Engine also owns one MTP scratch workspace sized for the configured maximum batch and effective
+draft width. Packed hidden states, device token ids, and one feedback/stage slot per outstanding
+CUDA draft stage are allocated on first use and reshaped without growing thereafter. Automatic
+memory sizing reserves this footprint before sizing the paged cache; an explicit `num_blocks`
+continues to make the caller responsible for the pinned budget. Stage slots retain their decoder
+outputs until the final device-to-host draft copy completes, then release Request references while
+keeping their storage capacity for the next step.
+
 **Failure isolation.** The target decode is mandatory; MTP drafting is optional acceleration. A
 recoverable head failure (cache pressure, shape mismatch, binding or session error) releases only
 MTP state, and the target step still commits — without drafts for that step — and increments
