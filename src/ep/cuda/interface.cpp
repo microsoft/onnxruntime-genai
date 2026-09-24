@@ -425,6 +425,7 @@ struct CudaBatchedSampler final : BatchedSampler {
 struct CudaInterfaceImplBase : DeviceInterface {
   CudaInterfaceImplBase() {
     g_stream.Create();
+    cuda::InitializeTopkDeviceCache(g_stream.get());
   }
 
   ~CudaInterfaceImplBase() {

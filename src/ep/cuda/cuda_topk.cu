@@ -23,8 +23,28 @@
 namespace Generators {
 namespace cuda {
 
+void InitializeTopkDeviceCache(cudaStream_t stream) {
+  int stream_device;
+  CUDA_CHECK(cudaStreamGetDevice(stream, &stream_device));
+  cub::SwitchDevice switch_device(stream_device);
+  // CCCL caches device-query failures for the process lifetime. Consume errors left by
+  // optional provider probes before its first query so a valid device is not cached as absent.
+  (void)cudaGetLastError();
+  int ptx_version;
+  CUDA_CHECK(cub::PtxVersion(ptx_version));
+}
+
 // Constructor for the host-side parameter planning struct.
 TopkDataDetail::TopkDataDetail(int batch_size, int vocab_size, cudaStream_t stream) {
+  int stream_device;
+  CUDA_CHECK(cudaStreamGetDevice(stream, &stream_device));
+  cub::SwitchDevice switch_device(stream_device);
+  (void)cudaGetLastError();
+  const int cub_device_count = cub::DeviceCount();
+  if (stream_device < 0 || stream_device >= cub_device_count) {
+    throw Generators::CudaError("CUB device cache does not contain the stream device", cudaErrorInvalidDevice);
+  }
+
   // Partition sizes are now calculated just-in-time in the benchmark/run functions
   // based on the specific `k` value for the operation.
   hybrid_sort_partition_size = 0;

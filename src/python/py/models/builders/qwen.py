@@ -1259,7 +1259,16 @@ class Qwen35MoEModel(MTPModel):
         from .dflash2 import DFlash2Builder  # noqa: PLC0415
 
         print("Building DFlash 2 draft model -> dflash2.onnx")
-        target_dir = input_path if input_path and os.path.isdir(input_path) else self.decoder.model_name_or_path
+        if input_path and os.path.isdir(input_path):
+            target_dir = input_path
+        else:
+            from huggingface_hub import snapshot_download  # noqa: PLC0415
+
+            target_dir = snapshot_download(
+                self.decoder.model_name_or_path,
+                cache_dir=self.decoder.cache_dir,
+                token=self.decoder.hf_token,
+            )
         self.dflash2 = DFlash2Builder(
             self.dflash2_path,
             target_dir,

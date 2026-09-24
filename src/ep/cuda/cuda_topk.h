@@ -34,6 +34,8 @@ __host__ __device__ inline size_t AlignUp(size_t size, size_t alignment) {
   return (size + alignment - 1) & ~(alignment - 1);
 }
 
+void InitializeTopkDeviceCache(cudaStream_t stream);
+
 constexpr int kGpuBufferAlignment = 256;
 
 // The maximum supported k value for each specialized algorithm.

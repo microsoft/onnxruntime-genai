@@ -265,6 +265,41 @@ def test_dflash2_rejects_unsupported_body_block_size(tmp_path, block_size):
         )
 
 
+def test_dflash2_accepts_prepacked_body_weights_on_cuda(tmp_path):
+    effective = normalize_builder_config(
+        "int4",
+        "cuda",
+        target_options={"attention": {"implementation": "paged"}},
+        drafter_options={
+            "drafter_type": "dflash2",
+            "path": make_drafter_checkpoint(tmp_path),
+            "quant_config": {
+                "weights": {"type": "int4", "block_size": 32},
+                "format": {"matmulnbits_weights_prepacked": 1},
+            },
+        },
+    )
+
+    assert effective.drafter_options["quant_config"]["format"]["matmulnbits_weights_prepacked"] == 1
+
+
+def test_dflash2_rejects_prepacked_body_weights_off_cuda(tmp_path):
+    with pytest.raises(ValueError, match="prepacked MatMulNBits weights are supported only on CUDA"):
+        normalize_builder_config(
+            "int4",
+            "cpu",
+            target_options={"attention": {"implementation": "paged"}},
+            drafter_options={
+                "drafter_type": "dflash2",
+                "path": make_drafter_checkpoint(tmp_path),
+                "quant_config": {
+                    "weights": {"type": "int4", "block_size": 32},
+                    "format": {"matmulnbits_weights_prepacked": 1},
+                },
+            },
+        )
+
+
 @pytest.mark.parametrize(
     "quant_config",
     [

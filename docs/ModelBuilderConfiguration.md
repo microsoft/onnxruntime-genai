@@ -74,7 +74,7 @@ compatibility defaults are provider-dependent today:
 | `weights.accuracy_level` | `4` on CPU/WebGPU, else `0` |
 | `moe.block_size` | `128` on TRT-RTX, else `32` |
 | `moe.type` | `mxfp4`/`nvfp4` accepted only on CUDA |
-| `format.matmulnbits_weights_prepacked` | Prepacked layouts are CUDA-only; a block drafter's packing is forced off elsewhere |
+| `format.matmulnbits_weights_prepacked` | Prepacked layouts are CUDA-only, including block-drafter body weights |
 | `format.use_qdq` | Required `true` for TRT-RTX integer dense weights |
 
 So the resolver signature is (envelope, execution provider), and rule 1 in
