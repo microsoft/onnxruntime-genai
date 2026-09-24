@@ -25,11 +25,15 @@ void PopulateMelTensorImpl(ThreadPool* thread_pool, T* output, std::span<const f
           if (frame < cache_frames) {
             const int source_frame = (cache_pos + static_cast<int>(frame)) % cache_frames;
             for (int mel_bin = 0; mel_bin < num_mels; ++mel_bin)
-              frame_output[mel_bin] = local_convert(cache[source_frame * num_mels + mel_bin]);
+              frame_output[mel_bin] = local_convert(
+                  cache[static_cast<size_t>(source_frame) * static_cast<size_t>(num_mels) +
+                        static_cast<size_t>(mel_bin)]);
           } else {
             const int chunk_frame = static_cast<int>(frame) - cache_frames;
             for (int mel_bin = 0; mel_bin < num_mels; ++mel_bin)
-              frame_output[mel_bin] = local_convert(mel[mel_bin * num_frames + chunk_frame]);
+              frame_output[mel_bin] = local_convert(
+                  mel[static_cast<size_t>(mel_bin) * static_cast<size_t>(num_frames) +
+                      static_cast<size_t>(chunk_frame)]);
           }
         }
       });
@@ -40,7 +44,7 @@ void PopulateMelTensor(ThreadPool* thread_pool, OrtValue& output, std::span<cons
                        int num_frames, int num_mels) {
   if (num_frames < 0 || num_mels <= 0 ||
       cache.size() % static_cast<size_t>(num_mels) != 0 ||
-      mel.size() != static_cast<size_t>(num_frames * num_mels) ||
+      mel.size() != static_cast<size_t>(num_frames) * static_cast<size_t>(num_mels) ||
       output.GetTensorTypeAndShapeInfo()->GetElementCount() != cache.size() + mel.size())
     throw std::runtime_error("PopulateMelTensor: incompatible buffer dimensions");
 
@@ -50,11 +54,11 @@ void PopulateMelTensor(ThreadPool* thread_pool, OrtValue& output, std::span<cons
     const int cache_frames = static_cast<int>(cache.size()) / num_mels;
     const int first_run = cache_frames - cache_pos;
     std::memcpy(output_data,
-                cache.data() + cache_pos * num_mels,
-                static_cast<size_t>(first_run * num_mels) * sizeof(float));
-    std::memcpy(output_data + first_run * num_mels,
+                cache.data() + static_cast<size_t>(cache_pos) * static_cast<size_t>(num_mels),
+                static_cast<size_t>(first_run) * static_cast<size_t>(num_mels) * sizeof(float));
+    std::memcpy(output_data + static_cast<size_t>(first_run) * static_cast<size_t>(num_mels),
                 cache.data(),
-                static_cast<size_t>((cache_frames - first_run) * num_mels) * sizeof(float));
+                static_cast<size_t>(cache_frames - first_run) * static_cast<size_t>(num_mels) * sizeof(float));
 
     auto* chunk_output = output_data + cache.size();
     ThreadPool::TryParallelFor(
@@ -63,7 +67,8 @@ void PopulateMelTensor(ThreadPool* thread_pool, OrtValue& output, std::span<cons
           for (auto frame = first; frame < last; ++frame) {
             for (int mel_bin = 0; mel_bin < num_mels; ++mel_bin)
               chunk_output[frame * num_mels + mel_bin] =
-                  mel[mel_bin * num_frames + frame];
+                  mel[static_cast<size_t>(mel_bin) * static_cast<size_t>(num_frames) +
+                      static_cast<size_t>(frame)];
           }
         });
   } else if (output_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {

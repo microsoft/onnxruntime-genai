@@ -141,8 +141,8 @@ void BenchmarkVideo(size_t workers, int64_t images, int64_t height, int64_t widt
 void BenchmarkMel(size_t workers, int frames, int mels,
                   ONNXTensorElementDataType type) {
   constexpr int cache_frames = 16;
-  std::vector<float> cache(cache_frames * mels, 1.0f);
-  std::vector<float> mel(frames * mels, 2.0f);
+  std::vector<float> cache(static_cast<size_t>(cache_frames) * static_cast<size_t>(mels), 1.0f);
+  std::vector<float> mel(static_cast<size_t>(frames) * static_cast<size_t>(mels), 2.0f);
   auto& allocator = Ort::Allocator::GetWithDefaultOptions();
   auto output = OrtValue::CreateTensor(
       allocator, std::array<int64_t, 3>{1, cache_frames + frames, mels}, type);

@@ -16,13 +16,31 @@
 #include "models/preprocessing/qwen2_5_vl_image_processor.h"
 #include "models/preprocessing/videochat_flash_processor.h"
 #include "models/preprocessing/whisper_processor.h"
+#include "models/threadpool.h"
 
+#include <algorithm>
 #include <stdexcept>
+#include <thread>
 
 namespace Generators {
 
+std::shared_ptr<ThreadPool> Model::GetOrCreatePreprocessingThreadPool() const {
+  std::call_once(preprocessing_thread_pool_once_, [&] {
+    const size_t hardware_threads = std::thread::hardware_concurrency();
+    const size_t preprocessing_workers =
+        hardware_threads > 1 ? std::min<size_t>(3, hardware_threads / 2) : 0;
+    preprocessing_thread_pool_ = std::make_shared<ThreadPool>(preprocessing_workers);
+  });
+  return preprocessing_thread_pool_;
+}
+
+ThreadPool* Model::GetPreprocessingThreadPool() const {
+  return GetOrCreatePreprocessingThreadPool().get();
+}
+
 std::shared_ptr<MultiModalProcessor> Model::CreateMultiModalProcessor() const {
-  return std::make_shared<MultiModalProcessor>(*config_, session_info_, preprocessing_thread_pool_);
+  return std::make_shared<MultiModalProcessor>(*config_, session_info_,
+                                               GetOrCreatePreprocessingThreadPool());
 }
 
 MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& session_info,
