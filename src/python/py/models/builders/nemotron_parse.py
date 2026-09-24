@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import os
@@ -12,73 +13,58 @@ import onnx_ir as ir
 import torch
 from transformers import AutoModel, AutoProcessor, GenerationConfig
 
-from .nemotron_parse_decoder import NemotronParseDecoderComponent
+from .base import Model
+from .nemotron_parse_decoder import NemotronParseDecoderComponent, make_decoder_config
 from .nemotron_parse_encoder import NemotronParseEncoderComponent
 
 
-class NemotronParseModel:
+class NemotronParseModel(Model):
     """Build the RADIO/cross-KV encoder and unified mBART decoder."""
+
+    default_user_prompt = "</s><s><predict_bbox><predict_classes><output_markdown>"
+    # The examples append the current user message before applying the template.
+    chat_template = (
+        "{%- set content = messages[-1]['content'] -%}"
+        "{%- if content is string -%}{{ content }}"
+        "{%- else -%}"
+        "{%- for part in content -%}"
+        "{%- if part['type'] == 'text' -%}{{ part['text'] }}{%- endif -%}"
+        "{%- endfor -%}"
+        "{%- endif -%}"
+    )
 
     def __init__(
         self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options
     ):
         self.config = config
-        self.io_dtype = (
+        io_dtype = (
             ir.DataType.FLOAT16 if io_dtype is None else ir.DataType(io_dtype)
         )
-        self.onnx_dtype = (
-            self.io_dtype if onnx_dtype is None else ir.DataType(onnx_dtype)
+        onnx_dtype = (
+            io_dtype if onnx_dtype is None else ir.DataType(onnx_dtype)
         )
-        self.ep = ep
-        self.cache_dir = cache_dir
         self.extra_options = dict(extra_options)
+        removed_options = self.extra_options.keys() & {
+            "image_height", "image_width", "prefill_sequence_length",
+            "cache_sequence_length", "export_components", "torch_dtype",
+        }
+        if removed_options:
+            raise ValueError(
+                f"Nemotron Parse no longer accepts extra options: {', '.join(sorted(removed_options))}. "
+                "Image size and cache capacity come from checkpoint metadata, prefill length "
+                "from the default task prompt, and loading dtype from export precision; both graphs are always exported."
+            )
         self.extra_options.setdefault("block_size", 32)
-        self.hf_token = self.extra_options.get("hf_token", True)
-        self.hf_remote = self.extra_options.get("hf_remote", False)
-        self.model_name_or_path = None
         self.generation_config = None
-        self.model_type = "nemotron_parse"
+        self.processor = None
 
         self.image_height, self.image_width = self.resolve_image_size()
         if self.image_height <= 0 or self.image_width <= 0:
-            raise ValueError("image_height and image_width must be positive.")
+            raise ValueError("Checkpoint image_size dimensions must be positive.")
 
-        self.prefill_sequence_length = int(
-            self.extra_options.get("prefill_sequence_length", 8)
-        )
-        self.cache_sequence_length = int(
-            self.extra_options.get(
-                "cache_sequence_length", self.config.max_sequence_length
-            )
-        )
-        if self.prefill_sequence_length <= 0:
-            raise ValueError("prefill_sequence_length must be positive.")
+        self.cache_sequence_length = int(self.config.max_sequence_length)
         if self.cache_sequence_length <= 0:
-            raise ValueError("cache_sequence_length must be positive.")
-        if self.cache_sequence_length <= self.prefill_sequence_length:
-            raise ValueError(
-                "cache_sequence_length must leave room for at least one decoded token."
-            )
-
-        self.export_components = {
-            component.strip()
-            for component in self.extra_options.get(
-                "export_components", "encoder,decoder"
-            ).split(",")
-            if component.strip()
-        }
-        unsupported_components = self.export_components - {
-            "encoder",
-            "decoder",
-        }
-        if not self.export_components or unsupported_components:
-            raise ValueError(
-                "export_components must contain only encoder and/or decoder."
-            )
-        if self.export_components != {"encoder", "decoder"}:
-            raise ValueError(
-                "Nemotron Parse requires both encoder and decoder; component-only export is not supported."
-            )
+            raise ValueError("Checkpoint max_sequence_length must be positive.")
 
         patch_size = int(getattr(config.encoder, "patch_size", 16))
         encoder_grid_h = self.image_height // patch_size
@@ -92,54 +78,30 @@ class NemotronParseModel:
             encoder_grid_h * compressed_grid_w + 1
         )
 
+        super().__init__(
+            make_decoder_config(config, self.cache_sequence_length),
+            io_dtype, onnx_dtype, ep, cache_dir, self.extra_options,
+        )
+        self.model_type = "nemotron_parse"
         self.encoder_filename = "encoder.onnx"
-        self.decoder_filename = "decoder.onnx"
+        self.filename = self.decoder_filename = "decoder.onnx"
+        self.input_names["input_ids"] = "decoder_input_ids"
+        self.input_names["attention_mask"] = "decoder_attention_mask"
+        self.input_names.pop("position_ids", None)
+
+    def is_gqa_supported(self):
+        return False
+
+    def is_packed_attn_supported(self):
+        return False
 
     def resolve_image_size(self):
         image_size = getattr(self.config, "image_size", None)
-        if isinstance(image_size, (list, tuple)) and len(image_size) >= 2:
-            default_height, default_width = image_size[:2]
-        else:
-            default_height = default_width = 768
-        return (
-            int(self.extra_options.get("image_height", default_height)),
-            int(self.extra_options.get("image_width", default_width)),
-        )
-
-    def provider_options(self):
-        if self.ep == "cpu":
-            return []
-        ep_name = self.ep.replace("trt-rtx", "NvTensorRtRtx")
-        attrs = (
-            {"enable_cuda_graph": "1"} if self.ep == "trt-rtx" else {}
-        )
-        return [{ep_name: attrs}]
-
-    def session_options(self):
-        options = {
-            "log_id": "onnxruntime-genai",
-            "provider_options": self.provider_options(),
-        }
-        if (
-            self.ep == "cuda"
-            and self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}
-        ):
-            # ORT's CUDA MatMulNBits kernel does not accept the optional bias
-            # that MatMulAddFusion would attach. Keep the bias as a separate Add.
-            # TRT-RTX exports QDQ and must retain this optimizer for INT4 fusion.
-            options["optimization.disable_specified_optimizers"] = (
-                "MatMulAddFusion"
-            )
-        return options
+        if not isinstance(image_size, (list, tuple)) or len(image_size) != 2:
+            raise ValueError("Nemotron Parse checkpoint image_size must contain height and width.")
+        return int(image_size[0]), int(image_size[1])
 
     def torch_dtype(self):
-        dtype = self.extra_options.get("torch_dtype")
-        if dtype is not None:
-            supported = {"fp32": torch.float32, "fp16": torch.float16,
-                         "bf16": torch.bfloat16, "auto": "auto"}
-            if dtype not in supported:
-                raise ValueError("torch_dtype must be fp32, fp16, bf16, or auto")
-            return supported[dtype]
         return {
             ir.DataType.FLOAT: torch.float32,
             ir.DataType.FLOAT16: torch.float16,
@@ -199,7 +161,6 @@ class NemotronParseModel:
             self.cache_dir,
             self.extra_options,
             encoder_sequence_length=self.encoder_sequence_length,
-            prefill_sequence_length=self.prefill_sequence_length,
             cache_sequence_length=self.cache_sequence_length,
         )
 
@@ -208,149 +169,127 @@ class NemotronParseModel:
 
     def save_model(self, output_dir):
         try:
-            if "encoder" in self.export_components:
-                if self.cache_dir:
-                    os.makedirs(self.cache_dir, exist_ok=True)
-                component = self.make_encoder_component(self.weights)
-                component.build()
-                component.save_model(output_dir)
+            if self.cache_dir:
+                os.makedirs(self.cache_dir, exist_ok=True)
+            component = self.make_encoder_component(self.weights)
+            component.build()
+            component.save_model(output_dir)
 
-            if "decoder" in self.export_components:
-                # The explicit graph builder serializes parameters from CPU.
-                # The RADIO encoder is no longer needed once its graph is saved.
-                self.weights.encoder = None
-                self.weights.decoder.to("cpu")
-                self.weights.lm_head.to("cpu")
-                if self.cache_dir:
-                    os.makedirs(self.cache_dir, exist_ok=True)
-                component = self.make_decoder_component()
-                component.build(self.weights)
-                component.save_model(output_dir)
+            # The explicit graph builder serializes parameters from CPU.
+            # The RADIO encoder is no longer needed once its graph is saved.
+            self.weights.encoder = None
+            self.weights.decoder.to("cpu")
+            self.weights.lm_head.to("cpu")
+            component = self.make_decoder_component()
+            component.build(self.weights)
+            component.save_model(output_dir)
         finally:
             del self.weights
 
-    def make_genai_config(
-        self, model_name_or_path, extra_kwargs, out_dir
-    ):
-        decoder_config = self.config.decoder
-        generation_config = self.generation_config
-        if generation_config is None:
-            source = self.model_name_or_path or self.config._name_or_path
+    def load_generation_config(self, extra_kwargs):
+        if self.generation_config is None:
             try:
-                generation_config = GenerationConfig.from_pretrained(
-                    source, token=self.hf_token, **extra_kwargs
-                )
+                self.generation_config = super().load_generation_config(extra_kwargs)
             except OSError as exc:
                 warnings.warn(
-                    f"Could not load generation_config.json from {source}: {exc}. "
+                    f"Could not load generation_config.json from {self.model_name_or_path}: {exc}. "
                     "Using decoder configuration defaults.", stacklevel=2,
                 )
-                generation_config = decoder_config
-        genai_config = {
-            "model": {
-                "type": self.model_type,
-                "bos_token_id": self.config.decoder_start_token_id,
-                "eos_token_id": decoder_config.eos_token_id,
-                "pad_token_id": decoder_config.pad_token_id,
-                "context_length": self.cache_sequence_length,
-                "vocab_size": decoder_config.vocab_size,
-                "encoder": {
-                    "outputs": {
-                        "cross_present_key_names": "cross_present.%d.key",
-                        "cross_present_value_names": "cross_present.%d.value",
-                    }
-                },
-                "vision": {
-                    "filename": self.encoder_filename,
-                    "config_filename": "processor_config.json",
-                    "inputs": {"pixel_values": "pixel_values"},
-                    "outputs": {
-                        "image_features": "encoder_hidden_states"
-                    },
-                    "num_visual_tokens": self.encoder_sequence_length,
-                },
-                "decoder": {
-                    "session_options": self.session_options(),
-                    "filename": self.decoder_filename,
-                    "prefill_sequence_length": self.prefill_sequence_length,
-                    "hidden_size": decoder_config.d_model,
-                    "head_size": (
-                        decoder_config.d_model
-                        // decoder_config.decoder_attention_heads
-                    ),
-                    "num_attention_heads": (
-                        decoder_config.decoder_attention_heads
-                    ),
-                    "num_hidden_layers": decoder_config.decoder_layers,
-                    "num_key_value_heads": (
-                        decoder_config.decoder_attention_heads
-                    ),
-                    "inputs": {
-                        "input_ids": "decoder_input_ids",
-                        "attention_mask": "decoder_attention_mask",
-                        "past_key_names": "past_key_values.%d.key",
-                        "past_value_names": "past_key_values.%d.value",
-                        "cross_past_key_names": (
-                            "cross_past_key_values.%d.key"
-                        ),
-                        "cross_past_value_names": (
-                            "cross_past_key_values.%d.value"
-                        ),
-                        "cache_write_indices": "cache_write_indices",
-                    },
-                    "outputs": {
-                        "logits": "logits",
-                        "present_key_names": "present.%d.key",
-                        "present_value_names": "present.%d.value",
-                    },
-                },
-            },
-            "search": {
-                "do_sample": False,
-                "early_stopping": True,
-                "max_length": self.cache_sequence_length,
-                "min_length": 0,
-                "num_beams": 1,
-                "num_return_sequences": 1,
-                "past_present_share_buffer": True,
-                "temperature": 1.0,
-                "top_k": 50,
-                "top_p": 1.0,
+                return GenerationConfig()
+        return self.generation_config
+
+    def resolve_special_token_ids(self, config, extra_kwargs):
+        # Parse uses the decoder-start token, not a chat tokenizer's BOS/EOS rules.
+        return (
+            self.config.decoder_start_token_id,
+            self.config.decoder.eos_token_id,
+            self.config.decoder.pad_token_id,
+        )
+
+    def make_genai_config(self, config, extra_kwargs, out_dir):
+        processor = self.load_processor(self.model_name_or_path, extra_kwargs)
+        # Match native tokenization, then account for the model's decoder-start token.
+        prompt_ids = processor.tokenizer.encode(self.default_user_prompt, add_special_tokens=True)
+        self.prefill_sequence_length = len(prompt_ids) + 1
+        if self.cache_sequence_length <= self.prefill_sequence_length:
+            raise ValueError("Checkpoint max_sequence_length must leave room for at least one decoded token.")
+        super().make_genai_config(copy.deepcopy(self.config.decoder), extra_kwargs, out_dir)
+
+    def update_genai_config(self, genai_config):
+        model = genai_config["model"]
+        model["default_user_prompt"] = self.default_user_prompt
+        model["encoder"] = {
+            "outputs": {
+                "cross_present_key_names": "cross_present.%d.key",
+                "cross_present_value_names": "cross_present.%d.value",
             },
         }
+        model["vision"] = {
+            "filename": self.encoder_filename,
+            "config_filename": "vision_processing.json",
+            "inputs": {"pixel_values": "pixel_values"},
+            "outputs": {"image_features": "encoder_hidden_states"},
+            "num_visual_tokens": self.encoder_sequence_length,
+        }
+        decoder = model["decoder"]
+        decoder["prefill_sequence_length"] = self.prefill_sequence_length
+        decoder["inputs"].update({
+            "cross_past_key_names": "cross_past_key_values.%d.key",
+            "cross_past_value_names": "cross_past_key_values.%d.value",
+            "cache_write_indices": "cache_write_indices",
+        })
+        if self.ep == "trt-rtx":
+            # Profiles must be present before the base runtime appends the provider.
+            # Only the decoder's token dimension is dynamic; all other inputs are fixed.
+            vision_options = copy.deepcopy(decoder["session_options"])
+            model["vision"]["session_options"] = vision_options
+            for kind in ("min", "opt", "max"):
+                key = f"ep.nvtensorrtrtxexecutionprovider.nv_profile_{kind}_shapes"
+                decoder["session_options"][key] = f"{decoder['inputs']['input_ids']}:1x1"
+                vision_options[key] = f"pixel_values:1x3x{self.image_height}x{self.image_width}"
+        if self.ep == "cuda" and self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}:
+            # CUDA MatMulNBits cannot accept the bias attached by MatMulAddFusion.
+            # TRT-RTX QDQ exports must retain this optimizer for INT4 fusion.
+            decoder["session_options"]["optimization.disable_specified_optimizers"] = "MatMulAddFusion"
 
+        search = genai_config["search"]
+        search.update(num_beams=1, num_return_sequences=1, past_present_share_buffer=True)
+        generation_config = self.generation_config or self.config.decoder
         for key in ("do_sample", "temperature", "top_k", "top_p", "repetition_penalty", "length_penalty"):
             value = getattr(generation_config, key, None)
             if value is not None:
-                genai_config["search"][key] = value
-        genai_config["search"].setdefault("repetition_penalty", 1.0)
+                search[key] = value
 
-        out_path = os.path.join(out_dir, "genai_config.json")
-        print(f"Saving GenAI config in {out_path}")
-        with open(out_path, "w") as config_file:
-            json.dump(genai_config, config_file, indent=4)
+    def load_processor(self, model_name_or_path, extra_kwargs):
+        if self.processor is None:
+            processor = AutoProcessor.from_pretrained(
+                model_name_or_path,
+                token=self.hf_token,
+                trust_remote_code=self.hf_remote,
+                **extra_kwargs,
+            )
+            if getattr(processor, "tokenizer", None) is None:
+                raise RuntimeError("Nemotron Parse processor does not expose a tokenizer")
+            self.processor = processor
+        return self.processor
 
     def save_processing(
         self, model_name_or_path, extra_kwargs, out_dir
     ):
-        processor = AutoProcessor.from_pretrained(
-            model_name_or_path,
-            token=self.hf_token,
-            trust_remote_code=self.hf_remote,
-            **extra_kwargs,
-        )
-        self.validate_image_processor(getattr(processor, "image_processor", None))
-        tokenizer = getattr(processor, "tokenizer", None)
-        if tokenizer is None:
-            raise RuntimeError(
-                "Nemotron Parse processor does not expose a tokenizer"
-            )
+        processor = self.load_processor(model_name_or_path, extra_kwargs)
+        normalization = self.validate_image_processor(getattr(processor, "image_processor", None))
+        tokenizer = processor.tokenizer
 
         print(
             f"Saving tokenizer and native image processor config in {out_dir}"
         )
         tokenizer.save_pretrained(out_dir)
+        with open(os.path.join(out_dir, "chat_template.jinja"), "w", encoding="utf-8") as template_file:
+            template_file.write(self.chat_template)
         processor_config = {
+            **normalization,
+            "image_height": self.image_height,
+            "image_width": self.image_width,
             "processor": {
                 "name": "nemotron_parse_image_processor",
                 "transforms": [
@@ -365,7 +304,7 @@ class NemotronParseModel:
             }
         }
         with open(
-            os.path.join(out_dir, "processor_config.json"), "w"
+            os.path.join(out_dir, "vision_processing.json"), "w"
         ) as processor_file:
             json.dump(processor_config, processor_file, indent=2)
 
@@ -412,3 +351,7 @@ class NemotronParseModel:
         tensor_transforms = getattr(getattr(processor, "torch_transform", None), "transforms", [])
         if len(tensor_transforms) != 1 or type(tensor_transforms[0]).__name__ != "ToTensor":
             raise ValueError("Nemotron Parse native preprocessing requires the checkpoint's ToTensor transform")
+        return {
+            name: [float(value) for value in getattr(processor, name, expected[name])]
+            for name in ("image_mean", "image_std")
+        }

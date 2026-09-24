@@ -175,7 +175,8 @@ bool ParseArgs(
     bool& interactive,
     bool& rewind,
     std::vector<std::string>& image_paths,
-    std::vector<std::string>& audio_paths) {
+    std::vector<std::string>& audio_paths,
+    bool use_model_prompt_default) {
   CLI::App app{"Command-line arguments for ORT GenAI C/C++ examples"};
   argv = app.ensure_utf8(argv);
 
@@ -208,11 +209,8 @@ bool ParseArgs(
 
   app.add_option("--ep_path", ep_path, "Path to execution provider DLL/SO for plug-in providers (ex: onnxruntime_providers_cuda.dll or onnxruntime_providers_tensorrt.dll)");
   app.add_option("--system_prompt", system_prompt, "System prompt to use for the model.");
-  app.add_option("--user_prompt", user_prompt,
-                 "User prompt. Nemotron Parse accepts 1 through context_length-1 "
-                 "tokens including special tokens (no padding or truncation). "
-                 "TRT-RTX uses a static fast path at prefill_sequence_length. "
-                 "The default Nemotron Parse task uses 8 tokens.");
+  auto* user_prompt_option = app.add_option("--user_prompt", user_prompt,
+                 "User prompt. Multimodal examples use the package's default_user_prompt when omitted. Model prompt restrictions apply.");
   app.add_flag("--rewind", rewind, "Rewind to the system prompt after each generation. Defaults to false. Only used in model_chat.");
   app.add_flag_callback(
       "--non_interactive", [&] { interactive = false; }, "Disable interactive mode");
@@ -225,6 +223,14 @@ bool ParseArgs(
   } catch (...) {
     std::cout << app.help() << std::endl;
     return false;
+  }
+  if (use_model_prompt_default && user_prompt_option->count() == 0) {
+    try {
+      user_prompt = GetDefaultUserPrompt(model_path, user_prompt);
+    } catch (const std::exception& e) {
+      std::cerr << "Error reading model.default_user_prompt: " << e.what() << std::endl;
+      return false;
+    }
   }
   return true;
 }
@@ -353,6 +359,12 @@ std::string ApplyChatTemplate(const std::string& model_path, OgaTokenizer& token
   return prompt;
 }
 
+std::string GetDefaultUserPrompt(const std::string& model_path, const std::string& fallback) {
+  std::ifstream file{std::filesystem::path(model_path) / "genai_config.json"};
+  const auto config = nlohmann::json::parse(file);
+  return config.at("model").value("default_user_prompt", fallback);
+}
+
 std::string GetUserPrompt(const std::string& prompt, bool interactive) {
   std::string text;
 
@@ -456,11 +468,7 @@ nlohmann::ordered_json GetUserContent(const std::string& model_type, int num_ima
 
   // Combine all image tags, audio tags, and text into one user content
   std::string image_tags = "", audio_tags = "", content = "";
-  if (model_type == "nemotron_parse") {
-    // Nemotron Parse consumes document-task control tokens directly.
-    content_json = nlohmann::ordered_json(prompt);
-
-  } else if (model_type == "phi3v") {
+  if (model_type == "phi3v") {
     // Phi-3 vision, Phi-3.5 vision
     for (int i = 0; i < num_images; i++) {
       image_tags += "<|image_" + std::to_string(i + 1) + "|>\\n";

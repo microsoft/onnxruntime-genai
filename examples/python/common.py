@@ -184,6 +184,24 @@ def apply_chat_template(
     return prompt
 
 
+def get_default_user_prompt(model_path: str, fallback: str) -> str:
+    """
+    Get the default user prompt from the model package
+
+    Args:
+        model_path (str): path to folder containing model
+        fallback (str): prompt to use when model.default_user_prompt is absent
+    Returns:
+        str: package default or fallback, preserving an explicitly empty value
+    """
+    with open(os.path.join(model_path, "genai_config.json"), encoding="utf-8") as f:
+        model_config = json.load(f)["model"]
+    prompt = model_config.get("default_user_prompt", fallback)
+    if not isinstance(prompt, str):
+        raise ValueError("model.default_user_prompt must be a string")
+    return prompt
+
+
 def get_user_prompt(prompt: str, non_interactive: bool) -> str:
     """
     Get prompt for 'user' role in chat template
@@ -304,11 +322,7 @@ def get_user_content(model_type: str, num_images: int, num_audios: int, prompt: 
     """
     content = None
     # Combine all image tags, audio tags, and text into one user content
-    if model_type == "nemotron_parse":
-        # Nemotron Parse is a document parser, not a chat model. Its task
-        # control tokens are passed directly to the native processor.
-        content = prompt
-    elif model_type == "phi3v":
+    if model_type == "phi3v":
         # Phi-3 vision, Phi-3.5 vision
         image_tags = "".join([f"<|image_{i + 1}|>\n" for i in range(num_images)])
         content = image_tags + prompt
