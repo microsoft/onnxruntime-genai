@@ -497,6 +497,7 @@ TEST_F(RequestLifecycleTest, RuntimeProfileLoadsWithImplicitCudaPluginDevice) {
   }
 
   auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
+  config->engine.dynamic_batching = Config::Engine::DynamicBatching{};
   config->model.decoder.session_options.providers = {"cuda"};
   config->model.decoder.session_options.provider_options = {{"cuda", {}}};
   Config::RuntimeProfile profile;
