@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "generator/generators.h"
+#include "multi_modal.h"
 #include "multi_modal_embedding.h"
 #include "multi_modal_decoder.h"
 #include "gemma4_multi_modal.h"
@@ -10,7 +11,8 @@ namespace Generators {
 
 EmbeddingState::EmbeddingState(const MultiModalLanguageModel& model, const GeneratorParams& params)
     : State{params, model},
-      model_{model} {
+      model_{model},
+      inputs_embeds_{*this, Embeddings::Mode::Output, model.config_->model.embedding.outputs.embeddings} {
   input_ids_.Add();
   inputs_embeds_.Add();
 }

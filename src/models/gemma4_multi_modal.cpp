@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "generator/generators.h"
+#include "multi_modal.h"
 #include "gemma4_multi_modal.h"
 
 namespace Generators {

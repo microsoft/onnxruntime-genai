@@ -9,7 +9,7 @@
 #include <cstdint>
 #include <stdexcept>
 
-#include "onnxruntime_api.h"
+#include "models/onnxruntime_api.h"
 
 namespace Generators {
 

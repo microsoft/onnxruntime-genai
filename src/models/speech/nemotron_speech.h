@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-#include "model.h"
+#include "models/model.h"
 #include "models/io/audio_features.h"
 #include "models/speech/transducer_state.h"
 

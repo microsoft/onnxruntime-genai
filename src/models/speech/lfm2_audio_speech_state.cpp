@@ -3,7 +3,7 @@
 
 #include "generator/generators.h"
 #include "models/speech/lfm2_audio_speech_state.h"
-#include "multi_modal.h"
+#include "models/multi_modal.h"
 
 #include <algorithm>
 #include <cstring>

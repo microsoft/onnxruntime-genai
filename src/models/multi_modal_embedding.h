@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <memory>
 
-#include "model.h"
+#include "models/model.h"
 #include "models/io/input_ids.h"
 #include "models/io/multi_modal_features.h"
 #include "models/io/embeddings.h"
@@ -42,8 +42,7 @@ struct EmbeddingState : State {
   DefaultInputIDs input_ids_{*this};                          // Model input
   std::unique_ptr<MultiModalFeatures> image_features_;        // Optional model input
   std::unique_ptr<MultiModalFeatures> audio_features_;        // Optional model input
-  Embeddings inputs_embeds_{*this, Embeddings::Mode::Output,  // Model output
-                            model_.config_->model.embedding.outputs.embeddings};
+  Embeddings inputs_embeds_;  // Model output
 };
 
 // Factory: pick the right EmbeddingState subclass based on model configuration.

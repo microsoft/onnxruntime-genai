@@ -3,7 +3,7 @@
 
 #include "generator/generators.h"
 #include "models/vision/pixtral_vision_state.h"
-#include "multi_modal.h"
+#include "models/multi_modal.h"
 
 #include <cstring>
 

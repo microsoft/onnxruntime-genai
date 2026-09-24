@@ -13,7 +13,7 @@
 #include <span>
 #include <vector>
 
-#include "model.h"
+#include "models/model.h"
 
 namespace Generators {
 

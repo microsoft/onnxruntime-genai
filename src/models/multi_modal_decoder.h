@@ -6,11 +6,11 @@
 #include <cstddef>
 #include <memory>
 
-#include "model.h"
+#include "models/model.h"
 #include "models/io/input_ids.h"
 #include "models/io/embeddings.h"
 #include "models/io/logits.h"
-#include "io/kv_cache.h"
+#include "models/io/kv_cache.h"
 #include "models/io/position_inputs.h"
 #include "models/io/recurrent_state.h"
 
@@ -58,8 +58,7 @@ struct DecoderState : State {
   virtual void RestoreExtraFullView() {}
 
   const MultiModalLanguageModel& model_;
-  Embeddings inputs_embeds_{*this, Embeddings::Mode::Input,  // Model input
-                            model_.config_->model.decoder.inputs.embeddings};
+  Embeddings inputs_embeds_;                              // Model input
   std::unique_ptr<DefaultInputIDs> decoder_input_ids_;  // Optional model input (e.g., Gemma4 decoder needs input_ids)
   std::unique_ptr<PositionInputs> position_inputs_;     // Model input
   std::unique_ptr<KeyValueCache> kv_cache_;             // Model input

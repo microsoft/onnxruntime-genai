@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "generator/generators.h"
+#include "multi_modal.h"
 #include "multi_modal_decoder.h"
 #include "gemma4_multi_modal.h"
 
@@ -12,6 +13,7 @@ namespace Generators {
 DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params)
     : State{params, model},
       model_{model},
+      inputs_embeds_{*this, Embeddings::Mode::Input, model.config_->model.decoder.inputs.embeddings},
       position_inputs_{model_.p_device_inputs_->CreatePositionInputs(*this, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask)},
       kv_cache_{model_.p_device_kvcache_->CreateKeyValueCache(*this)},
       recurrent_state_{CreateRecurrentState(*this, /*graph_capture_variants_supported=*/true)} {

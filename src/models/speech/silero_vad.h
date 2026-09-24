@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-#include "model.h"
+#include "models/model.h"
 
 namespace Generators {
 
