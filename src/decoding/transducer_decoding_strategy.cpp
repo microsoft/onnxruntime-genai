@@ -3,7 +3,7 @@
 #include "decoding/transducer_decoding_strategy.h"
 
 #include "generator/generators.h"
-#include "models/transducer_state.h"
+#include "models/speech/transducer_state.h"
 
 namespace Generators {
 

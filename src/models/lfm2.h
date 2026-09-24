@@ -19,6 +19,11 @@ struct LFM2_Model : Model {
   std::unique_ptr<OrtSession> session_decoder_;
 };
 
+// Whether the model's hybrid attention/conv architecture (LFM2 family) requires the conv+attention
+// key-value cache even when the decoder config doesn't declare per-layer layer_types (older
+// exports that predate that metadata). Used by CreateStandardKeyValueCache's conv-cache dispatch.
+bool RequiresLfm2ConvKeyValueCache(const Model& model);
+
 struct LFM2_State : State {
   LFM2_State(const LFM2_Model& model, DeviceSpan<int32_t> sequence_lengths_unk, const GeneratorParams& params);
 

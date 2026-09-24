@@ -5,6 +5,14 @@
 #include "lfm2.h"
 
 namespace Generators {
+
+bool RequiresLfm2ConvKeyValueCache(const Model& model) {
+  // Liquid Foundation Model 2: hybrid attention/conv architecture with conv state cache. The MoE
+  // variant and the lfm2_vl_text / lfm2_audio_text plain-text-decoder exports share the same
+  // conv/attention layer mix and need the same conv state cache; see ModelType::IsLFM2.
+  return ModelType::IsLFM2(model.config_->model.type);
+}
+
 LFM2_Model::LFM2_Model(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
   session_decoder_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());

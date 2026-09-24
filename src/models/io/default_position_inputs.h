@@ -11,6 +11,9 @@ struct DefaultPositionInputs : PositionInputs {
   void Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) override;
   void RewindTo(size_t index) override;
 
+  // Position ids are produced sequentially, so resuming mid-prompt at any chunk boundary is safe.
+  bool SupportsSequentialPrefillChunking(bool /*has_multimodal_content*/) const override { return true; }
+
  private:
   void AddAttentionMask();
   void AddPositionIDs();
