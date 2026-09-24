@@ -21,6 +21,15 @@ TEST(ConfigTest, ParsesStaticBatching) {
   EXPECT_EQ(config.engine.static_batching->max_batch_size, 8u);
 }
 
+TEST(ConfigTest, ParsesSelectedLogitsInput) {
+  Config config;
+  EXPECT_TRUE(config.model.decoder.inputs.logits_indices.empty());
+
+  OverlayConfig(config, R"({"model":{"decoder":{"inputs":{"logits_indices":"selected_rows"}}}})");
+
+  EXPECT_EQ(config.model.decoder.inputs.logits_indices, "selected_rows");
+}
+
 TEST(ConfigTest, RejectsNonPositiveStaticBatchSize) {
   Config config;
 

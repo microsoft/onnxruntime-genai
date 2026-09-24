@@ -1025,8 +1025,9 @@ def get_args():
                     It also removes `position_ids` when RoPE is fused; architectures with external MRoPE retain packed
                     position IDs (for example, Qwen3.5/3.8 uses [3, num_tokens]). The block_table,
                     cumulative_sequence_lengths, and past_sequence_lengths metadata inputs are added. With
-                    prune_lm_head=true, selects the final packed hidden state for each sequence so the model outputs
-                    [batch_size, vocab_size] logits. By default, the model outputs [num_tokens, vocab_size] logits.
+                    prune_lm_head=true, adds a logits_indices input that selects the packed hidden states consumed
+                    by generation or draft verification, so the model outputs [num_logits, vocab_size] logits.
+                    By default, the model outputs [num_tokens, vocab_size] logits.
                     Currently only supported for the CUDA execution provider with fp16 or bf16 precision. Cannot be
                     combined with exclude_embeds or exclude_lm_head.
                 paged_block_size = 16/32/64/128/256/...: Paged KV-cache block size used when use_paged_attention is set.

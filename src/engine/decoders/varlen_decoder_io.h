@@ -38,10 +38,18 @@ AttentionMetadataValues GetAttentionMetadataForGraphStep(
 std::array<int32_t, kAttentionMetadataElementCount> PackAttentionMetadata(
     const AttentionMetadataValues& metadata);
 
-// True when the decoder emits one logits row per packed token rather than one per request. Only
-// such a model can verify draft tokens, because a rejected draft is checked against the logits of
-// the row that precedes it.
+// Packed token rows whose logits the Engine consumes, ordered exactly as ProcessLogits returns
+// them: every draft-verification row followed by the row that produces each request's next token.
+std::vector<size_t> GetSelectedLogitsIndices(const StepPlan& plan);
+
+// True when the decoder can expose logits for arbitrary packed tokens, either by emitting every
+// row or by accepting logits_indices. Only such a model can verify draft tokens, because a rejected
+// draft is checked against the logits of the row that precedes it.
 bool DecoderLogitsArePerToken(const Model& model);
+
+// True when the decoder accepts logits_indices and emits only those rows. Throws for a model that
+// also declares batch_size logits rows, because the selected rows could not be mapped back.
+bool DecoderLogitsAreSelected(const Model& model);
 
 // 0 when the model takes no packed position_ids, 1 for [num_tokens], and 3 for the [3, num_tokens]
 // multimodal-rope layout.
@@ -100,6 +108,8 @@ struct VarlenGraphBuffers {
   std::unique_ptr<Tensor> past_sequence_lengths;
   // Null unless the model consumes packed position_ids.
   std::unique_ptr<Tensor> position_ids;
+  // Null unless the model gathers selected packed rows before its LM head.
+  std::unique_ptr<Tensor> logits_indices;
   std::unique_ptr<Tensor> logits;
   // Null unless the model consumes hidden_states (for example, an MTP head).
   std::unique_ptr<Tensor> hidden_states_input;
@@ -160,6 +170,7 @@ struct VarlenDecoderIO : DecoderIO {
   void PreparePositionIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
   void PrepareAttentionMetadata(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
   void PrepareHiddenStatesInput(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
+  void PrepareLogitsIndices(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
   void PrepareLogits(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
   void PrepareHiddenStates(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
   void PrepareAuxHiddenStates(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
@@ -183,11 +194,13 @@ struct VarlenDecoderIO : DecoderIO {
   std::unique_ptr<Tensor> logits_;
   Tensor* active_logits_{};
   std::unique_ptr<Tensor> logits_fp32_;
+  std::vector<size_t> valid_token_indices_;
   std::unique_ptr<Tensor> hidden_states_;
   Tensor* active_hidden_states_{};
   std::unique_ptr<Tensor> aux_hidden_states_;
   Tensor* active_aux_hidden_states_{};
   bool logits_are_per_token_{true};
+  bool logits_are_selected_{};
 };
 
 }  // namespace Generators

@@ -44,6 +44,11 @@ inline std::shared_ptr<Model> LoadSyntheticPagedPerTokenModel() {
   return CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged-per-token");
 }
 
+// Same graph with a logits_indices input, so its logits hold only the rows the Engine selects.
+inline std::shared_ptr<Model> LoadSyntheticPagedSelectedLogitsModel() {
+  return CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged-selected-logits");
+}
+
 inline std::shared_ptr<Model> LoadSyntheticPagedMtpModel() {
   auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged");
   config->model.mtp.filename = "decoder.onnx";

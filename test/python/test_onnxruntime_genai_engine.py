@@ -23,6 +23,9 @@ register_plugin_providers(logging.getLogger(__name__))
 
 _MODEL_DIR = Path(__file__).resolve().parent.parent / "models" / "engine" / "synthetic-paged"
 _DRAFT_MODEL_DIR = Path(__file__).resolve().parent.parent / "models" / "engine" / "synthetic-paged-per-token"
+_SELECTED_LOGITS_MODEL_DIR = (
+    Path(__file__).resolve().parent.parent / "models" / "engine" / "synthetic-paged-selected-logits"
+)
 
 _VOCAB_SIZE = 64
 _BLOCK_SIZE = 4
@@ -80,9 +83,18 @@ def model(device):
     return og.Model(config)
 
 
+@pytest.fixture(params=[_DRAFT_MODEL_DIR, _SELECTED_LOGITS_MODEL_DIR], ids=["per-token", "selected-logits"])
+def draft_model(device, request):
+    config = og.Config(str(request.param))
+    config.clear_providers()
+    if device != "cpu":
+        config.append_provider(device)
+    return og.Model(config)
+
+
 @pytest.fixture
-def draft_model(device):
-    config = og.Config(str(_DRAFT_MODEL_DIR))
+def selected_logits_model(device):
+    config = og.Config(str(_SELECTED_LOGITS_MODEL_DIR))
     config.clear_providers()
     if device != "cpu":
         config.append_provider(device)
@@ -360,6 +372,51 @@ def test_draft_proposal_public_api(draft_model):
     assert all(event.flags & og.EngineEventFlags.TOKEN for event in proposal_events)
     assert proposal_events[-1].flags & og.EngineEventFlags.TURN_FINISHED
     request.close()
+
+
+def test_rejected_draft_resamples_from_its_verification_row(draft_model):
+    expected = predicted_tokens(_PROMPT_A, 4)
+    engine = og.Engine(draft_model)
+    request_options = og.RequestOptions()
+    request_options.set_max_session_tokens(len(_PROMPT_A) + len(expected))
+    request = engine.create_request(options=request_options)
+    turn_options = og.TurnOptions(request)
+    turn_options.set_max_generated_tokens(len(expected))
+    request.begin_turn(np.asarray(_PROMPT_A, dtype=np.int32), turn_options)
+    event_buffer = engine.create_event_buffer(3)
+
+    assert [event.token for event in engine.run(event_buffer)] == expected[:1]
+    wrong = (expected[2] + 1) % _VOCAB_SIZE
+    assert wrong != _EOS_TOKEN_ID
+    request.set_draft_tokens(np.asarray([expected[1], wrong], dtype=np.int32))
+
+    assert [event.token for event in engine.run(event_buffer)] == expected[1:3]
+    request.close()
+
+
+def test_selected_logits_model_declares_indices_and_compact_logits():
+    graph = onnx.load(_SELECTED_LOGITS_MODEL_DIR / "decoder.onnx", load_external_data=False).graph
+    indices = next(value for value in graph.input if value.name == "logits_indices")
+    logits = next(value for value in graph.output if value.name == "logits")
+    config = json.loads((_SELECTED_LOGITS_MODEL_DIR / "genai_config.json").read_text())
+
+    assert indices.type.tensor_type.elem_type == onnx.TensorProto.INT32
+    assert logits.type.tensor_type.shape.dim[0].dim_param == "num_logits"
+    assert config["model"]["decoder"]["inputs"]["logits_indices"] == "logits_indices"
+
+
+def test_selected_logits_follow_each_packed_request(selected_logits_model):
+    max_new = 8
+    prompts = [_PROMPT_A, _PROMPT_B, _PROMPT_LONG]
+    engine = og.Engine(selected_logits_model)
+    sinks = {}
+    outputs = [_Sink() for _ in prompts]
+    for prompt, sink in zip(prompts, outputs, strict=True):
+        _create_request(engine, prompt, max_new, sink, sinks)
+    _run(engine, sinks)
+
+    for prompt, sink in zip(prompts, outputs, strict=True):
+        assert sink.tokens == predicted_tokens(prompt, max_new)
 
 
 def test_isolated_matches_simultaneous(model):
