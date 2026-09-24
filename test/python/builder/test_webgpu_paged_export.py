@@ -43,6 +43,8 @@ def _make_inputs(session, tokens, past_length, caches):
             [len(tokens), past_length + len(tokens), past_length + len(tokens)], dtype=np.int32
         ),
     }
+    if any(node_arg.name == "logits_indices" for node_arg in session.get_inputs()):
+        inputs["logits_indices"] = np.asarray([len(tokens) - 1], dtype=np.int32)
     for node_arg in session.get_inputs():
         if not node_arg.name.startswith("past_key_values."):
             continue

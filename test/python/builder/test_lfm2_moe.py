@@ -467,7 +467,9 @@ def test_lfm2_qmoe_cpu_executes_partial_blocks(tmp_path, bits, hidden, inter):
     hidden_states = torch.linspace(-0.1, 0.2, 2 * hidden).reshape(1, 2, hidden)
     (actual,) = session.run(None, {"hidden": hidden_states.numpy()})
     expected = _hf_reference(hidden_states, moe, 1, 1.0).numpy()
-    np.testing.assert_allclose(actual, expected, rtol=1e-4, atol=1e-6)
+    # The 8-bit ORT kernel quantizes activations, while the reference keeps them in float.
+    # Adjust tolerance accordingly.
+    np.testing.assert_allclose(actual, expected, rtol=1e-4, atol=5e-5 if bits == 8 else 1e-6)
 
 
 @pytest.mark.parametrize("hidden,inter", [(33, 64), (64, 33)])
