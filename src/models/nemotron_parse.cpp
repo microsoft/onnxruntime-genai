@@ -4,9 +4,9 @@
 #include "generator/generators.h"
 #include "nemotron_parse.h"
 #include "models/io/cross_kv_cache.h"
-#include "models/io/default_position_inputs.h"
 #include "models/io/input_ids.h"
 #include "models/io/logits.h"
+#include "models/io/default_position_inputs.h"
 #include "models/io/tensor_scatter_kv_cache.h"
 
 #include <atomic>
@@ -100,9 +100,6 @@ void ConfigureDecoderSession(OrtSessionOptions& session_options,
                              int min_length, int opt_length, int max_length) {
   // Shape overrides enable ORT's static optimizations on the fast paths.
   // Only custom-prompt prefill retains a symbolic sequence dimension.
-  session_options.AddFreeDimensionOverrideByName("batch_size", 1);
-  session_options.AddFreeDimensionOverrideByName(
-      "encoder_sequence_length", config.model.vision.num_visual_tokens);
   if (min_length == max_length) {
     session_options.AddFreeDimensionOverrideByName("sequence_length", min_length);
   }
@@ -164,7 +161,7 @@ class DecoderState : public State {
         attention_mask_{
             model, *this, sequence_lengths,
             model.config_->model.decoder.inputs.attention_mask,
-            {AttentionMaskMode::Static, model.config_->model.context_length}},
+            model.config_->model.context_length},
         self_cache_{*this},
         logits_{*this} {
     input_ids_.Add();
@@ -372,21 +369,24 @@ NemotronParseModel::NemotronParseModel(std::unique_ptr<Config> config,
   if (p_device_->GetType() == DeviceType::NvTensorRtRtx) {
     // Preserve static default-prompt and Q=1 decode performance. Custom prompts
     // use an eagerly created dynamic session; no sessions are built during Run.
-    prefill_decoder_session_options_ = OrtSessionOptions::Create();
-    CreateSessionOptionsFromConfig(
-        decoder.session_options, *prefill_decoder_session_options_,
-        /*is_primary_session_options=*/false);
-    dynamic_prefill_decoder_session_options_ = OrtSessionOptions::Create();
-    CreateSessionOptionsFromConfig(
-        decoder.session_options, *dynamic_prefill_decoder_session_options_,
-        /*is_primary_session_options=*/false,
-        /*disable_graph_capture=*/true);
-    ConfigureDecoderSession(*session_options_, *config_, 1, 1, 1);
-    ConfigureDecoderSession(*prefill_decoder_session_options_, *config_,
-                            decoder.prefill_sequence_length, decoder.prefill_sequence_length,
-                            decoder.prefill_sequence_length);
-    ConfigureDecoderSession(*dynamic_prefill_decoder_session_options_, *config_,
-                            1, decoder.prefill_sequence_length, config_->model.context_length - 1);
+    const auto create_prefill_options = [&](int min_length, int opt_length, int max_length,
+                                             bool disable_graph_capture) {
+      auto options = OrtSessionOptions::Create();
+      auto session_config = decoder.session_options;
+      // Replace the package's decode profile before provider setup, preserving other options.
+      std::erase_if(session_config.config_entries, [](const auto& entry) {
+        return entry.first == kNvProfileMinShapes || entry.first == kNvProfileOptShapes || entry.first == kNvProfileMaxShapes;
+      });
+      ConfigureDecoderSession(*options, *config_, min_length, opt_length, max_length);
+      CreateSessionOptionsFromConfig(session_config, *options,
+                                     /*is_primary_session_options=*/false, disable_graph_capture);
+      return options;
+    };
+    session_options_->AddFreeDimensionOverrideByName("sequence_length", 1);
+    prefill_decoder_session_options_ = create_prefill_options(
+        decoder.prefill_sequence_length, decoder.prefill_sequence_length, decoder.prefill_sequence_length, false);
+    dynamic_prefill_decoder_session_options_ = create_prefill_options(
+        1, decoder.prefill_sequence_length, config_->model.context_length - 1, true);
   }
 
   encoder_session_ = CreateSession(ort_env, config_->model.vision.filename,

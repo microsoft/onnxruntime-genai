@@ -19,6 +19,7 @@ list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/dflash2_config_test.
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/environment-tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/kv_cache_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/lfm2_audio_frames_test.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/position_inputs_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/lfm2_vl_image_geometry_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/multi_modal_device_placement_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_performance_tests.cpp")
@@ -234,6 +235,26 @@ if(ENABLE_PREPROCESSING_PERFORMANCE_TESTS)
     COMMAND parallel_preprocessing_tests --gtest_filter=ParallelPerformanceTests.*)
   set_tests_properties(ParallelPreprocessingPerformanceTests PROPERTIES LABELS "performance")
 endif()
+
+add_executable(position_inputs_unit_tests "${CMAKE_CURRENT_SOURCE_DIR}/cpp/position_inputs_tests.cpp")
+target_include_directories(position_inputs_unit_tests PRIVATE
+  ${ORT_HEADER_DIR}
+  ${onnxruntime_extensions_SOURCE_DIR}/shared/api
+  ${CMAKE_SOURCE_DIR}/src
+)
+target_link_libraries(position_inputs_unit_tests PRIVATE
+  onnxruntime-genai-obj
+  GTest::gtest
+)
+add_dependencies(position_inputs_unit_tests onnxruntime-genai)
+set_target_properties(position_inputs_unit_tests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
+  FOLDER "Tests"
+)
+if (NOT MSVC)
+  target_compile_options(position_inputs_unit_tests PRIVATE "-fvisibility=hidden")
+endif()
+add_test(NAME PositionInputsUnitTests COMMAND position_inputs_unit_tests)
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/telemetry-shutdown-tests.cmake")
 

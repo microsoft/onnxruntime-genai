@@ -14,10 +14,13 @@ namespace {
 void ConfigureProfile(const Config& config,
                       OrtSessionOptions& session_options,
                       bool is_multi_profile_enabled) {
-  // Nemotron Parse has a fixed-shape encoder and a decoder whose only dynamic
-  // dimension is prompt-versus-token sequence length. Its graph-specific
-  // decoder profile is configured by NemotronParseModel.
-  if (config.model.type == "nemotron_parse") {
+  const bool has_min = session_options.HasConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_min_shapes");
+  const bool has_opt = session_options.HasConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_opt_shapes");
+  const bool has_max = session_options.HasConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_max_shapes");
+  if (has_min || has_opt || has_max) {
+    if (!(has_min && has_opt && has_max)) {
+      throw std::runtime_error("Explicit TRT-RTX profiles must specify nv_profile_min_shapes, nv_profile_opt_shapes, and nv_profile_max_shapes together");
+    }
     return;
   }
 
