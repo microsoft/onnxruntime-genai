@@ -48,6 +48,7 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
   auto processor = processor_factory_.find(config.model.type);
   if (processor != processor_factory_.end()) {
     processor_ = processor->second(config, session_info);
+    processor_->ConfigureTokenizer(*tokenizer_);
   } else {
     throw std::runtime_error("MultiModalProcessor cannot be created. " + config.model.type + " is not a registered multi-modal model type.");
   }
@@ -59,7 +60,7 @@ std::unique_ptr<NamedTensors> MultiModalProcessor::Process(const std::string& pr
 }
 
 std::unique_ptr<NamedTensors> MultiModalProcessor::Process(std::span<const char*> prompts, const Images* images, const Audios* audios) const {
-  Payload payload{"", prompts, images, audios, true};
+  Payload payload{"", prompts, images, audios};
   return processor_->Process(*tokenizer_, payload);
 }
 

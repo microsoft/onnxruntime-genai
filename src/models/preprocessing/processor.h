@@ -43,7 +43,6 @@ struct Payload {
   std::span<const char*> prompts;
   const Images* images;
   const Audios* audios;
-  bool prompt_is_list{false};
 };
 
 struct Config;
@@ -70,6 +69,7 @@ struct Processor {
     return std::make_shared<ProcessorType>(config, session_info);
   }
 
+  virtual void ConfigureTokenizer(Tokenizer&) const {}
   virtual std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const Payload& payload) const = 0;
 };
 
