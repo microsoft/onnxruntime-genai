@@ -3,8 +3,10 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include "../span.h"
@@ -15,6 +17,19 @@ class PagedCacheBlockTable;
 class PagedCacheReservation;
 struct PagedKeyValueCache;
 struct BlockPool;
+struct Block;
+
+struct BlockReferenceObserver {
+  virtual ~BlockReferenceObserver() = default;
+  virtual void OnBlockBecameReferenced(Block& block, void* cookie) noexcept = 0;
+  virtual void OnBlockBecameReclaimable(Block& block, void* cookie) noexcept = 0;
+};
+
+struct BlockIdentity {
+  uint64_t hash{};
+  std::shared_ptr<const BlockIdentity> parent;
+  std::vector<int32_t> tokens;
+};
 
 /*
  * Block represents a contiguous set of slots in the paged key-value cache.
@@ -40,6 +55,15 @@ struct Block {
 
   std::vector<size_t> SlotIds() const;
 
+  size_t RefCount() const { return ref_count_; }
+  bool IsShared() const { return ref_count_ > 1; }
+  bool IsShareable() const { return IsFull() && HasIdentity(); }
+  bool HasIdentity() const { return identity_ != nullptr; }
+  const BlockIdentity& Identity() const;
+  const std::shared_ptr<const BlockIdentity>& IdentityPtr() const { return identity_; }
+  void SetIdentity(std::shared_ptr<const BlockIdentity> identity);
+  void ClearIdentity();
+
  private:
   friend class PagedCacheBlockTable;
   friend class PagedCacheReservation;
@@ -47,10 +71,17 @@ struct Block {
   friend struct BlockPool;
   void AddSlot();
   void AddSlots(size_t slots);
+  void AddRef();
+  size_t ReleaseRef();
+  void SetReferenceObserverCookie(void* cookie) noexcept { reference_observer_cookie_ = cookie; }
+  void ClearReferenceObserverCookie() noexcept { reference_observer_cookie_ = nullptr; }
 
   size_t id_;
   size_t size_;
   size_t capacity_;
+  size_t ref_count_{1};
+  std::shared_ptr<const BlockIdentity> identity_;
+  void* reference_observer_cookie_{};
 };
 
 /*
@@ -80,6 +111,15 @@ struct BlockPool {
   // used via Block::AddSlot() as the tokens are actually written to the cache.
   std::vector<std::shared_ptr<Block>> ReserveBlocks(size_t num_slots);
 
+  void AddRef(std::span<const std::shared_ptr<Block>> blocks);
+  void AddRef(const std::shared_ptr<Block>& block);
+  void Release(const std::shared_ptr<Block>& block);
+  void SetReferenceObserver(BlockReferenceObserver* observer);
+  void SetReferenceObserverCookie(const std::shared_ptr<Block>& block,
+                                  void* cookie);
+  void ClearReferenceObserverCookie(
+      const std::shared_ptr<Block>& block) noexcept;
+
   void Free(const std::vector<std::shared_ptr<Block>>& blocks);
   void ValidateFree(std::span<const std::shared_ptr<Block>> blocks) const;
   // Allocation-free publication for an unchanged span accepted by ValidateFree(). A guard failure
@@ -88,6 +128,7 @@ struct BlockPool {
   bool CanFreeValidated(std::span<const std::shared_ptr<Block>> blocks) const noexcept;
 
   size_t BlocksNeeded(size_t num_slots);
+  std::vector<std::shared_ptr<Block>> OwnedBlocks() const;
 
  private:
   friend class PagedCacheReservation;
@@ -96,6 +137,10 @@ struct BlockPool {
   std::vector<std::shared_ptr<Block>> AllocateBlocks(size_t num_slots, bool mark_slots_used);
   void RollbackReservedBlocks(const std::vector<std::shared_ptr<Block>>& blocks) noexcept;
   void RecordOccupancyMutation() noexcept { ++mutation_generation_; }
+  std::vector<std::pair<size_t, size_t>> ValidateOwnership(
+      std::span<const std::shared_ptr<Block>> blocks,
+      const char* operation,
+      bool require_references) const;
 
   const size_t block_size_;
   const size_t capacity_;
@@ -104,8 +149,10 @@ struct BlockPool {
   // Validation mutates this scratch even through const methods and therefore relies on the
   // Engine's external serialization; it is not safe for concurrent inspection.
   mutable std::vector<uint64_t> validation_marks_;
+  mutable std::vector<size_t> validation_counts_;
   mutable uint64_t validation_epoch_{};
   uint64_t mutation_generation_{};
+  BlockReferenceObserver* reference_observer_{};
 };
 
 }  // namespace Generators

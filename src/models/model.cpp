@@ -28,6 +28,7 @@
 #include "../tracing.h"
 #include "model.h"
 #include "threadpool.h"
+#include "runtime_profiles.h"
 #include "model_package.h"
 #include "gpt.h"
 #include "decoder_only.h"
@@ -35,6 +36,7 @@
 #include "whisper.h"
 #include "parakeet.h"
 #include "nemotron_speech.h"
+#include "moonshine_streaming.h"
 #include "multi_modal.h"
 #include "lfm2.h"
 #include "marian.h"
@@ -835,6 +837,8 @@ void Model::CreateSessionOptions() {
   // Fallback to CPU if no provider specific interface was set
   if (!p_device_)
     p_device_ = GetDeviceInterface(DeviceType::CPU);
+
+  ApplyRuntimeProfileForSelectedDevice(*config_, *p_device_);
 }
 
 OrtSessionOptions* Model::GetSessionOptions(const std::string& model_id) const {
@@ -949,8 +953,12 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
   if (ModelType::IsRNNT(config->model.type))
     return std::make_shared<NemotronSpeechModel>(std::move(config), ort_env);
+  if (ModelType::IsStreamingEncDecASR(config->model.type))
+    return std::make_shared<MoonshineStreamingModel>(std::move(config), ort_env);
   if (ModelType::IsTDT(config->model.type))
     return std::make_shared<ParakeetTdtModel>(std::move(config), ort_env);
+  if (config->model.type == "lfm2_audio")
+    return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, /*vision=*/false, /*speech=*/true);
   if (ModelType::IsALM(config->model.type))
     return std::make_shared<WhisperModel>(std::move(config), ort_env);
   if (ModelType::IsVLM(config->model.type))

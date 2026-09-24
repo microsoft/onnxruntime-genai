@@ -16,6 +16,7 @@ def _mtp_head(use_paged_attention):
     model.onnx_dtype = ir.DataType.FLOAT
     model.hidden_size = HIDDEN_SIZE
     model.use_paged_attention = use_paged_attention
+    model.hidden_rows_dim = "num_tokens"
     model.values = {}
     model.node_names = set()
     model.initializers = {}

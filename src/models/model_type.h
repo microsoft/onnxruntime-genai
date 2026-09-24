@@ -17,7 +17,7 @@ namespace Generators {
 struct ModelType {
   inline static bool IsLLM(const std::string& model_type) {
     // Large-language model (LLM)
-    static constexpr std::array<std::string_view, 33> LLM = {"chatglm", "decoder", "ernie4_5", "gemma", "gemma2", "gemma3_text", "gemma3_vl_text", "gemma4_text", "gpt2", "gptoss", "granite", "granitemoehybrid", "hunyuandensev1", "internlm2", "lfm2", "lfm2_moe", "lfm2_vl_text", "llama", "mistral", "mistral3_text", "nemotron", "olmo", "phi", "phimoe", "phi3", "phi3small", "qwen2", "qwen2_5_vl_text", "qwen3", "qwen3_vl_text", "qwen3_5_moe_text", "qwen3_5_text", "smollm3"};
+    static constexpr std::array<std::string_view, 34> LLM = {"chatglm", "decoder", "ernie4_5", "gemma", "gemma2", "gemma3_text", "gemma3_vl_text", "gemma4_text", "gpt2", "gptoss", "granite", "granitemoehybrid", "hunyuandensev1", "internlm2", "lfm2", "lfm2_audio_text", "lfm2_moe", "lfm2_vl_text", "llama", "mistral", "mistral3_text", "nemotron", "olmo", "phi", "phimoe", "phi3", "phi3small", "qwen2", "qwen2_5_vl_text", "qwen3", "qwen3_vl_text", "qwen3_5_moe_text", "qwen3_5_text", "smollm3"};
     return std::find(LLM.begin(), LLM.end(), model_type) != LLM.end();
   }
 
@@ -28,8 +28,9 @@ struct ModelType {
   }
 
   inline static bool IsALM(const std::string& model_type) {
-    // Audio-language model (ALM)
-    static constexpr std::array<std::string_view, 1> ALM = {"whisper"};
+    // Audio-language model (ALM): audio in, text out. "lfm2_audio" runs the multi-modal pipeline
+    // (speech encoder -> embedding -> LFM2 decoder), "whisper" its own encoder-decoder model.
+    static constexpr std::array<std::string_view, 2> ALM = {"lfm2_audio", "whisper"};
     return std::find(ALM.begin(), ALM.end(), model_type) != ALM.end();
   }
 
@@ -46,7 +47,7 @@ struct ModelType {
   }
 
   inline static bool IsRNNT(const std::string& model_type) {
-    // RNNT models bypass the search/logits pipeline entirely.
+    // RNN-Transducer encoder/decoder/joiner models.
     static constexpr std::array<std::string_view, 1> rnnt_types = {"nemotron_speech"};
     return std::find(rnnt_types.begin(), rnnt_types.end(), model_type) != rnnt_types.end();
   }
@@ -60,6 +61,16 @@ struct ModelType {
   // and drive a custom encoder/decoder/joiner loop via TransducerState.
   inline static bool IsTransducer(const std::string& model_type) {
     return IsRNNT(model_type) || IsTDT(model_type);
+  }
+
+  // Streaming encoder-decoder ASR models (e.g. Moonshine). Architecturally
+  // distinct from transducers (audio encoder + auto-regressive transformer
+  // decoder with self+cross KV cache) but share the same runtime contract:
+  // bypass the search/logits pipeline and drive token emission via
+  // TransducerState::StepToken().
+  inline static bool IsStreamingEncDecASR(const std::string& model_type) {
+    static constexpr std::array<std::string_view, 1> streaming_enc_dec = {"streaming_enc_dec_asr"};
+    return std::find(streaming_enc_dec.begin(), streaming_enc_dec.end(), model_type) != streaming_enc_dec.end();
   }
 
   inline static bool IsQwenVLFamily(const std::string& model_type) {
@@ -76,9 +87,10 @@ struct ModelType {
   inline static bool IsLFM2(const std::string& model_type) {
     // Liquid Foundation Model 2: hybrid attention/conv architecture with conv state cache.
     // The MoE variant (LFM2-8B-A1B, LFM2.5-8B-A1B, LFM2-24B-A2B) has the same runtime shape, and
-    // "lfm2_vl_text" is an LFM2-VL checkpoint exported as a plain text decoder; both have the same
-    // conv/attention layer mix and need the same conv state cache.
-    return model_type == "lfm2" || model_type == "lfm2_moe" || model_type == "lfm2_vl_text";
+    // "lfm2_vl_text" / "lfm2_audio_text" are LFM2-VL / LFM2-Audio checkpoints exported as plain text
+    // decoders; all have the same conv/attention layer mix and need the same conv state cache.
+    return model_type == "lfm2" || model_type == "lfm2_moe" || model_type == "lfm2_vl_text" ||
+           model_type == "lfm2_audio_text";
   }
 };
 
