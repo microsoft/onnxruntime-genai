@@ -554,6 +554,10 @@ void DecoderState::RewindTo(size_t index) {
     recurrent_state_->RewindTo(index);
 }
 
+bool DecoderState::CanRewindTo(size_t index) const {
+  return !recurrent_state_ || recurrent_state_->CanRewindTo(index);
+}
+
 MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params)
     : State{params, model},
       model_{model},
