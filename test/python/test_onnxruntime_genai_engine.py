@@ -161,6 +161,31 @@ def _generate_isolated(model, prompt, max_new_tokens):
     return sink.tokens
 
 
+def test_engine_capabilities(model):
+    engine = og.Engine(model)
+
+    capabilities = engine.get_capabilities()
+
+    assert capabilities.configured_max_batch_size == 8
+    assert capabilities.max_scheduled_tokens == 2048
+
+    off_thread_errors = []
+
+    def read_capabilities_off_owner_thread():
+        try:
+            engine.get_capabilities()
+        except Exception as error:
+            off_thread_errors.append(error)
+
+    thread = threading.Thread(target=read_capabilities_off_owner_thread)
+    thread.start()
+    thread.join()
+
+    assert len(off_thread_errors) == 1
+    assert isinstance(off_thread_errors[0], RuntimeError)
+    assert "Engine operations must be called from the Engine owner thread" in str(off_thread_errors[0])
+
+
 def test_engine_run_releases_gil(model):
     engine = og.Engine(model)
     request_options = og.RequestOptions()

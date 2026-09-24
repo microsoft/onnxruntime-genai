@@ -18,6 +18,10 @@ enum class BatchedGuidanceMaskStatus {
   FallbackRequired,
 };
 
+TargetTokenSelection BuildTopKTargetSelection(
+    std::span<const int32_t> tokens, std::span<const float> scores,
+    const EffectiveTurnPolicy& policy);
+
 BatchedGuidanceMaskStatus CollectBatchedGuidanceMasks(
     std::span<const std::shared_ptr<Request>> requests,
     size_t words_per_row,

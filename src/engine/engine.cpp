@@ -10,6 +10,7 @@
 #include "decoders/varlen_decoder_io.h"
 
 #include <limits>
+#include <new>
 
 namespace Generators {
 
@@ -23,6 +24,31 @@ constexpr size_t kDflash2FailureDisableThreshold = 3;
 
 struct MtpRollbackError : std::runtime_error {
   using std::runtime_error::runtime_error;
+};
+
+class PrefixAdoptionGuard {
+ public:
+  explicit PrefixAdoptionGuard(StepPlan& plan) : plan_{plan} {}
+  PrefixAdoptionGuard(const PrefixAdoptionGuard&) = delete;
+  PrefixAdoptionGuard& operator=(const PrefixAdoptionGuard&) = delete;
+  ~PrefixAdoptionGuard() {
+    if (!committed_) {
+      for (const auto& entry : plan_.requests) {
+        entry.request->RollbackPrefixAdoption();
+      }
+    }
+  }
+
+  void Commit() noexcept {
+    for (const auto& entry : plan_.requests) {
+      entry.request->CommitPrefixAdoption();
+    }
+    committed_ = true;
+  }
+
+ private:
+  StepPlan& plan_;
+  bool committed_{};
 };
 
 std::string AddExceptionCause(std::string message, std::exception_ptr error) {
@@ -194,6 +220,8 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
     dflash2_feeds_.reserve(max_batch_size);
     dflash2_draft_widths_.reserve(max_batch_size);
     dflash2_drafts_.reserve(max_batch_size);
+    dflash2_draft_distributions_.reserve(max_batch_size);
+    dflash2_rng_checkpoints_.reserve(max_batch_size);
   }
   WarnOnClampedDraftWidth();
 }
@@ -322,8 +350,10 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
     const auto& batching = *model->config_->engine.dynamic_batching;
     const size_t paged_block_size = static_cast<size_t>(batching.block_size);
     dflash2_max_batch_size = static_cast<size_t>(batching.max_batch_size);
+    auto decoder_model = std::dynamic_pointer_cast<DecoderOnly_Model>(model);
     dflash2_model = std::make_shared<Dflash2Model>(
-        CreateDflash2Config(*model->config_), GetOrtEnv());
+        CreateDflash2Config(*model->config_), GetOrtEnv(),
+        decoder_model ? decoder_model->cpu_embedding_ : nullptr);
     const auto dflash2_cache_type = ValidateDflash2ModelCompatibility(
         *model->config_, model->session_info_, dflash2_model->session_info_, paged_block_size);
     model->config_->engine.aux_hidden_states_output_required = true;
@@ -348,6 +378,16 @@ EngineDependencies Engine::CreateDependencies(std::shared_ptr<Model> model) {
       dflash2_reserved_memory_bytes = Dflash2Drafter::FullAttentionReservedBytes(
           paged_block_size, static_cast<size_t>(dflash2.block_size),
           dflash2_max_batch_size, dflash2_bytes_per_block);
+    }
+    if (dflash2_model->cpu_embedding_) {
+      const size_t embedding_bytes = Dflash2Drafter::EmbeddingReservedBytes(
+          dflash2_max_batch_size, static_cast<size_t>(dflash2.block_size),
+          static_cast<size_t>(dflash2_model->cpu_embedding_->hidden_size_),
+          dflash2_model->cpu_embedding_->type_);
+      if (embedding_bytes > std::numeric_limits<size_t>::max() - dflash2_reserved_memory_bytes) {
+        throw std::runtime_error("DFlash 2 reserved memory bytes overflow size_t.");
+      }
+      dflash2_reserved_memory_bytes += embedding_bytes;
     }
   }
 
@@ -425,6 +465,8 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
   for (size_t i = 0; i < plan.requests.size(); ++i) {
     const auto& entry = plan.requests[i];
     const bool greedy = entry.request->TurnPolicy().IsGreedy();
+    const bool independent_sampling =
+        model_->config_->model.dflash2.independent_sampling && !greedy;
     const size_t accepted = entry.request->AcceptedDraftTokenCount();
     if (accepted > entry.draft_token_count) {
       throw std::logic_error("DFlash 2 observed more accepted drafts than the target planned.");
@@ -442,7 +484,8 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
     feed.aux_row_begin = entry.packed_token_offset;
     feed.aux_row_count = valid_rows;
     feed.first_position = first_position;
-    feed.draft_eligible = greedy;
+    feed.draft_eligible = greedy || independent_sampling;
+    feed.wants_independent_sampling = independent_sampling;
 
     // The committed length this step ends at: the accepted prefix plus the token just sampled.
     const int64_t length_after_step = static_cast<int64_t>(first_position + valid_rows) +
@@ -457,7 +500,8 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
         max_drafts, static_cast<size_t>(entry.request->SpeculativeOptions().max_draft_tokens),
         static_cast<size_t>(length_after_step), sequence_limit,
         remaining_turn_tokens_after_step);
-    feed.wants_drafts = greedy && width > 0 && results[i].token_appended && !results[i].done &&
+    feed.wants_drafts = (greedy || independent_sampling) && width > 0 &&
+                        results[i].token_appended && !results[i].done &&
                         !entry.request->DraftTokenValidationError();
     feed.anchor_token = results[i].token;
     dflash2_feeds_.push_back(feed);
@@ -474,19 +518,42 @@ void Engine::PublishDflash2Drafts(ScheduledRequests& scheduled_requests) {
     throw std::logic_error("The main decoder did not expose auxiliary hidden states for DFlash 2.");
   }
 
-  if (dflash2_drafter_->Propose(*aux_hidden_states, dflash2_feeds_, dflash2_drafts_)) {
+  if (dflash2_drafter_->Propose(*aux_hidden_states, dflash2_feeds_, dflash2_drafts_,
+                                &dflash2_draft_distributions_)) {
     ++speculative_stats_.draft_forward_passes;
   }
-  for (size_t i = 0; i < dflash2_feeds_.size(); ++i) {
-    auto& drafts = dflash2_drafts_[i];
-    if (drafts.empty()) {
-      continue;
+  PublishDflash2DraftResults();
+}
+
+void Engine::PublishDflash2DraftResults() {
+  dflash2_rng_checkpoints_.clear();
+  try {
+    for (size_t i = 0; i < dflash2_feeds_.size(); ++i) {
+      auto& drafts = dflash2_drafts_[i];
+      auto& distributions = dflash2_draft_distributions_[i];
+      if (drafts.empty() && distributions.empty()) {
+        continue;
+      }
+      // The drafter always emits its full block; a request with a narrower budget takes the prefix
+      // of the same greedy path.
+      if (!distributions.empty()) {
+        dflash2_rng_checkpoints_.emplace_back(dflash2_feeds_[i].request,
+                                              dflash2_feeds_[i].request->draft_rng_);
+        distributions.resize(std::min(distributions.size(), dflash2_draft_widths_[i]));
+        dflash2_feeds_[i].request->SetDraftTokenDistributions(
+            distributions);
+      } else {
+        drafts.resize(std::min(drafts.size(), dflash2_draft_widths_[i]));
+        dflash2_feeds_[i].request->SetDraftTokens(drafts);
+      }
     }
-    // The drafter always emits its full block; a request with a narrower budget takes the prefix
-    // of the same greedy path.
-    drafts.resize(std::min(drafts.size(), dflash2_draft_widths_[i]));
-    dflash2_feeds_[i].request->SetDraftTokens(drafts);
+  } catch (...) {
+    for (const auto& [request, rng] : dflash2_rng_checkpoints_)
+      request->draft_rng_ = rng;
+    dflash2_rng_checkpoints_.clear();
+    throw;
   }
+  dflash2_rng_checkpoints_.clear();
 }
 
 void Engine::RecordDflash2Failure(std::exception_ptr error, bool contract_error) {
@@ -1315,7 +1382,7 @@ bool Engine::CancelRequest(const std::shared_ptr<Request>& request, uint64_t tur
   terminal.usage = {
       counters.prompt_tokens,
       counters.generated_tokens,
-      0};
+      request->TurnCachedPromptTokens()};
   if (has_existing_event) {
     existing->flags |= terminal.flags;
     existing->finish_reason = terminal.finish_reason;
@@ -1738,6 +1805,7 @@ void Engine::RunDynamic() {
           "Dynamic scheduler planning failed and the Engine is no longer healthy.",
           std::current_exception());
     }
+    PrefixAdoptionGuard prefix_adoption_guard{step_plan_};
     if (planning_result.capacity_deferred) {
       ++transaction_metrics_.capacity_deferrals;
     }
@@ -2082,6 +2150,7 @@ void Engine::RunDynamic() {
       scheduled_requests.CommitStateForTransaction();
       request_transaction_active = false;
       reservation->Commit();
+      prefix_adoption_guard.Commit();
       if (mtp_step) {
         CommitMtpStep(*mtp_step);
       }
@@ -2089,6 +2158,14 @@ void Engine::RunDynamic() {
       for (size_t i = 0; i < step_plan_.requests.size(); ++i) {
         step_plan_.requests[i].request->CommitStep(
             step_plan_.requests[i], step_results_[i]);
+      }
+      for (auto& entry : step_plan_.requests) {
+        entry.prefix_match.reset();
+      }
+      try {
+        cache_manager_->SealCommittedBlocks(step_plan_);
+      } catch (const std::bad_alloc&) {
+        cache_manager_->RecordPrefixPublicationRefusal();
       }
       if (mtp_step) {
         PublishMtpDrafts(*mtp_step);
@@ -2164,7 +2241,7 @@ void Engine::AppendEventsFromStep(
     event.usage = {
         request->TurnPromptTokens(),
         request->TurnGeneratedTokens(),
-        0};
+        request->TurnCachedPromptTokens()};
   };
 
   for (size_t i = 0; i < result.visible_token_count; ++i) {
@@ -2224,7 +2301,7 @@ EngineEvent Engine::FailUnserviceableRequest(const void* request_id) {
   event.usage = {
       request->TurnPromptTokens(),
       request->TurnGeneratedTokens(),
-      0};
+      request->TurnCachedPromptTokens()};
   return event;
 }
 
@@ -2335,7 +2412,7 @@ EngineEvent Engine::EventFromStepError(
       event.usage = {
           request->TurnPromptTokens(),
           request->TurnGeneratedTokens(),
-          0};
+          request->TurnCachedPromptTokens()};
       const auto existing = std::find_if(
           fatal_events_.rbegin(), fatal_events_.rend(),
           [&request](const EngineEvent& pending) {
@@ -2441,6 +2518,28 @@ SpeculativeStats Engine::GetSpeculativeStats() const {
         static_cast<float>(stats.rounds);
   }
   return stats;
+}
+
+EngineCapabilities Engine::GetCapabilities() const {
+  ValidateOwnerThread();
+  EngineCapabilities capabilities;
+  if (model_->config_->engine.dynamic_batching) {
+    const auto& batching = *model_->config_->engine.dynamic_batching;
+    capabilities.configured_max_batch_size = batching.max_batch_size;
+    capabilities.max_scheduled_tokens = batching.max_scheduled_tokens;
+  } else if (model_->config_->engine.static_batching) {
+    capabilities.configured_max_batch_size =
+        model_->config_->engine.static_batching->max_batch_size;
+  } else {
+    capabilities.configured_max_batch_size = kDefaultStaticBatchSize;
+  }
+  return capabilities;
+}
+
+std::optional<PrefixCacheMetrics> Engine::PrefixCacheStats() const {
+  ValidateOwnerThread();
+  const auto* metrics = cache_manager_->PrefixMetrics();
+  return metrics ? std::optional<PrefixCacheMetrics>{*metrics} : std::nullopt;
 }
 
 }  // namespace Generators

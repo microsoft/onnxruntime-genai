@@ -109,6 +109,7 @@ struct OgaTensor : Generators::Tensor, OgaAbstract {};
 struct OgaTokenizer : Generators::Tokenizer, OgaAbstract {};
 struct OgaTokenizerStream : Generators::TokenizerStream, OgaAbstract {};
 struct OgaEngine : Generators::Engine, OgaAbstract {};
+struct OgaEngineCapabilities : Generators::EngineCapabilities, OgaAbstract {};
 struct OgaEngineEvent : Generators::EngineEvent, OgaAbstract {};
 struct OgaEngineEventBuffer : Generators::EngineEventBuffer, OgaAbstract {};
 struct OgaRequest : Generators::Request, OgaAbstract {};
@@ -1491,6 +1492,32 @@ OgaResult* OgaCreateEngine(OgaModel* model, OgaEngine** out) {
   OGA_CATCH
 }
 
+OgaResult* OgaEngineGetCapabilities(
+    const OgaEngine* engine, OgaEngineCapabilities** out) {
+  OGA_TRY
+  if (!out) {
+    throw std::runtime_error("out must not be null.");
+  }
+  *out = nullptr;
+  if (!engine) {
+    throw std::runtime_error("engine must not be null.");
+  }
+  *out = ReturnUnique<OgaEngineCapabilities>(
+      std::make_unique<Generators::EngineCapabilities>(engine->GetCapabilities()));
+  return nullptr;
+  OGA_CATCH
+}
+
+size_t OgaEngineCapabilitiesGetConfiguredMaxBatchSize(
+    const OgaEngineCapabilities* capabilities) {
+  return capabilities ? capabilities->configured_max_batch_size : 0;
+}
+
+size_t OgaEngineCapabilitiesGetMaxScheduledTokens(
+    const OgaEngineCapabilities* capabilities) {
+  return capabilities ? capabilities->max_scheduled_tokens : 0;
+}
+
 OgaResult* OgaCreateEngineEventBuffer(
     OgaEngine* engine,
     size_t capacity,
@@ -2115,6 +2142,9 @@ void OGA_API_CALL OgaDestroyNamedTensors(OgaNamedTensors* p) { delete static_cas
 void OGA_API_CALL OgaDestroyAdapters(OgaAdapters* p) { p->ExternalRelease(); }
 void OGA_API_CALL OgaDestroyRuntimeSettings(OgaRuntimeSettings* p) { delete static_cast<Generators::RuntimeSettings*>(p); }
 void OGA_API_CALL OgaDestroyEngine(OgaEngine* p) { p->ExternalRelease(); }
+void OGA_API_CALL OgaDestroyEngineCapabilities(OgaEngineCapabilities* p) {
+  delete static_cast<Generators::EngineCapabilities*>(p);
+}
 void OGA_API_CALL OgaDestroyEngineEventBuffer(OgaEngineEventBuffer* p) {
   delete static_cast<Generators::EngineEventBuffer*>(p);
 }

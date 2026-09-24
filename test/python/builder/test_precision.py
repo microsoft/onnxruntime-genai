@@ -288,6 +288,74 @@ def test_int8_io_dtype_is_not_forced_to_fp32(execution_provider, expected):
 
 
 # ---------------------------------------------------------------------------
+# `--precision` cannot re-quantize weights a checkpoint already quantized, so a request the
+# checkpoint overrides has to say so: the only other symptom is an oversized artifact.
+# ---------------------------------------------------------------------------
+
+
+def _float_quantized_config():
+    return types.SimpleNamespace(
+        quantization_config={
+            "quant_method": "compressed-tensors",
+            "config_groups": {
+                "group_0": {"weights": {"num_bits": 8, "type": "float"}},
+                "group_1": {"weights": {"num_bits": 4, "type": "float"}},
+            },
+        }
+    )
+
+
+def test_float_quantized_checkpoint_warns_that_int4_will_not_reach_its_weights(capsys):
+    builder_module.warn_if_checkpoint_overrides_precision(_float_quantized_config(), "int4", ir.DataType.INT4)
+
+    captured = capsys.readouterr().out
+    assert "compressed-tensors" in captured
+    assert "4-bit float, 8-bit float" in captured
+
+
+@pytest.mark.parametrize(
+    "quantization_config,precision,onnx_dtype",
+    [
+        # An int4 checkpoint built at int4 is the intended flow, not an override.
+        ({"quant_method": "gptq", "bits": 4}, "int4", ir.DataType.INT4),
+        # A float build makes no quantization request to override.
+        ({"quant_method": "compressed-tensors", "config_groups": {}}, "bf16", ir.DataType.BFLOAT16),
+        # An undeclared format is not evidence of a mismatch.
+        ({"quant_method": "quark"}, "int4", ir.DataType.INT4),
+    ],
+)
+def test_no_warning_when_the_checkpoint_and_the_request_agree(capsys, quantization_config, precision, onnx_dtype):
+    config = types.SimpleNamespace(quantization_config=quantization_config)
+
+    builder_module.warn_if_checkpoint_overrides_precision(config, precision, onnx_dtype)
+
+    assert capsys.readouterr().out == ""
+
+
+def test_unquantized_checkpoint_is_never_warned_about(capsys):
+    builder_module.warn_if_checkpoint_overrides_precision(types.SimpleNamespace(), "int4", ir.DataType.INT4)
+
+    assert capsys.readouterr().out == ""
+
+
+def test_int4_checkpoint_built_at_int8_is_reported(capsys):
+    config = types.SimpleNamespace(quantization_config={"quant_method": "gptq", "bits": 4})
+
+    builder_module.warn_if_checkpoint_overrides_precision(config, "int8", ir.DataType.INT8)
+
+    assert "4-bit int" in capsys.readouterr().out
+
+
+# ModelOpt states the whole checkpoint's format in `quant_algo` rather than per-group metadata.
+def test_modelopt_checkpoint_warns_from_its_quant_algo(capsys):
+    config = types.SimpleNamespace(quantization_config={"quant_method": "modelopt", "quant_algo": "NVFP4"})
+
+    builder_module.warn_if_checkpoint_overrides_precision(config, "int4", ir.DataType.INT4)
+
+    assert "4-bit float" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
 # int8's INT8/UINT8 onnx_dtype routes through the MatMulNBits builders, which
 # fall back to a float MatMul when the source model is not already quantized.
 # ---------------------------------------------------------------------------
@@ -400,6 +468,34 @@ def _run_check_extra_options(
     )
 
 
+def test_structured_unquantized_moe_completes_cli_option_parsing(monkeypatch):
+    fake_config = types.SimpleNamespace(tie_word_embeddings=True, layer_types=None)
+    monkeypatch.setattr(
+        builder_module,
+        "get_hf_details",
+        lambda *_args, **_kwargs: {
+            "extra_kwargs": {},
+            "hf_name": "fake-model",
+            "hf_config": fake_config,
+        },
+    )
+
+    options = builder_module.parse_extra_options(
+        model_name="fake-model",
+        input_path="/tmp/fake-model",
+        output_dir="/tmp/fake-output",
+        precision="int4",
+        execution_provider="cuda",
+        cache_dir="/tmp/fake-cache",
+        extra_options=[],
+        builder_config_version=2,
+        target_options={"quant_config": {"moe": {"type": "none"}}},
+    )
+
+    assert options["_quant_config"].moe.type == "none"
+    assert "moe_quant_type" not in options
+
+
 def test_mtp_quant_config_json_is_parsed(monkeypatch):
     options = {"mtp_quant_config": '{"io_dtype":"bf16","weights":{"type":"int4"}}'}
 
@@ -407,6 +503,21 @@ def test_mtp_quant_config_json_is_parsed(monkeypatch):
 
     assert options["mtp_quant_config"].io_dtype == "bf16"
     assert options["mtp_quant_config"].weights.type == "int4"
+    assert options["mtp_quant_config"].checkpoint_policy == "requantize"
+
+
+def test_mtp_quant_config_typed_dict_preserves_explicit_policy(monkeypatch):
+    options = {
+        "mtp_quant_config": {
+            "checkpoint_policy": "preserve",
+            "io_dtype": "bf16",
+            "weights": {"type": "int4"},
+        }
+    }
+
+    _run_check_extra_options(monkeypatch, options)
+
+    assert options["mtp_quant_config"].checkpoint_policy == "preserve"
 
 
 def test_parse_extra_options_preserves_equals_inside_json(monkeypatch):

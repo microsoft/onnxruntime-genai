@@ -30,6 +30,10 @@ bool AppendExecutionProviderV2(OrtSessionOptions& session_options,
 void AppendExecutionProviderV1(OrtSessionOptions& session_options,
                                const Config::ProviderOptions& provider_options);
 
+// Keeps the first provider-specific device selected for the primary session.
+DeviceInterface* SelectPrimarySessionDevice(DeviceInterface* selected_device,
+                                            DeviceInterface* candidate_device);
+
 // Iterates over the requested providers, dispatches to provider-specific
 // AppendExecutionProvider implementations, and returns the DeviceInterface
 // for the first provider that supplies one (or nullptr if none do).

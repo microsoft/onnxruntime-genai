@@ -426,7 +426,8 @@ produce `Failed` events. Capacity pressure is operational and does not set `Fail
 
 `prompt_tokens` is the number of input IDs accepted by the current `BeginTurn`.
 `generated_tokens` is the number of visible output tokens committed for the Turn.
-`cached_prompt_tokens` is currently always zero; no prefix-cache hit accounting is exposed.
+`cached_prompt_tokens` is the number of current-turn prompt tokens restored from an Engine-local
+prefix entry. It is zero when no prefix was adopted, including resident continuation turns.
 Scheduler `max_scheduled_tokens` is not usage: it is a per-step budget shared across Requests.
 
 Event getters require non-null event and output pointers and return `OgaResult*` on misuse. They
@@ -566,6 +567,28 @@ The rejections name a route the caller can take without editing the model direct
 value on the `Config` before creating the Model, for example
 `OgaConfigOverlay(config, "{\"search\":{\"num_beams\":1}}")`. Raising the session ceiling of a model
 whose `search.max_length` is lower than its context length uses the same overlay route.
+
+### Engine capabilities
+
+`OgaEngineGetCapabilities` returns a caller-owned opaque snapshot. The snapshot reports the
+effective configured maximum batch size and dynamic scheduler token budget after runtime-profile
+selection. For static batching, the maximum batch size is the configured value, or the default of
+four when no `static_batching` entry exists; it does not account for any lower operational limit in
+the current static scheduler. The call follows the Engine owner-thread rule. The snapshot does not
+report or impose a per-Request session ceiling.
+
+The cache-backed per-request maximum is not exposed by this API yet; that contract is deferred to
+a follow-up change.
+
+```c
+OgaEngineCapabilities* capabilities = NULL;
+OgaCheckResult(OgaEngineGetCapabilities(engine, &capabilities));
+size_t max_batch_size =
+  OgaEngineCapabilitiesGetConfiguredMaxBatchSize(capabilities);
+size_t max_scheduled_tokens =
+  OgaEngineCapabilitiesGetMaxScheduledTokens(capabilities);
+OgaDestroyEngineCapabilities(capabilities);
+```
 
 Per-Turn generation policy is validated separately, at each `OgaRequestBeginTurn`, before the Turn
 mutates the Request. Creation itself does not queue work.

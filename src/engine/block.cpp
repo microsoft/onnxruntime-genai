@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <exception>
 #include <numeric>
+#include <string>
+#include <utility>
 
 namespace Generators {
 
@@ -51,11 +53,47 @@ std::vector<size_t> Block::SlotIds() const {
   return slot_ids;
 }
 
+const BlockIdentity& Block::Identity() const {
+  if (!identity_) {
+    throw std::runtime_error("Block " + std::to_string(id_) + " carries no content identity.");
+  }
+  return *identity_;
+}
+
+void Block::SetIdentity(std::shared_ptr<const BlockIdentity> identity) {
+  if (!identity) {
+    throw std::runtime_error("Cannot give a block a null content identity.");
+  }
+  if (!IsFull()) {
+    throw std::runtime_error("Only a full block can carry a content identity.");
+  }
+  if (identity->tokens.size() != Capacity()) {
+    throw std::runtime_error("Block content identity does not cover every slot in the block.");
+  }
+  identity_ = std::move(identity);
+}
+
+void Block::ClearIdentity() {
+  identity_.reset();
+}
+
+void Block::AddRef() {
+  ++ref_count_;
+}
+
+size_t Block::ReleaseRef() {
+  if (ref_count_ == 0) {
+    throw std::runtime_error("Cannot release a block that has no remaining references.");
+  }
+  return --ref_count_;
+}
+
 BlockPool::BlockPool(size_t block_size, size_t num_blocks)
     : block_size_(block_size),
       capacity_(num_blocks),
       blocks_(num_blocks),
-      validation_marks_(num_blocks) {}
+      validation_marks_(num_blocks),
+      validation_counts_(num_blocks) {}
 
 std::vector<std::shared_ptr<Block>> BlockPool::AllocateBlocks(size_t num_slots, bool mark_slots_used) {
   const size_t blocks_needed = BlocksNeeded(num_slots);
@@ -102,36 +140,125 @@ void BlockPool::Free(const std::vector<std::shared_ptr<Block>>& blocks) {
 
 void BlockPool::ValidateFree(
     std::span<const std::shared_ptr<Block>> blocks) const {
-  // Validate every block before mutating any pool state so that an invalid request (a null block,
-  // an out-of-range id, a block this pool does not currently own, or the same block listed twice)
-  // is rejected without partially freeing the batch.
+  ValidateOwnership(blocks, "free", /*require_references=*/true);
+}
+
+void BlockPool::AddRef(std::span<const std::shared_ptr<Block>> blocks) {
+  const auto occurrences =
+      ValidateOwnership(blocks, "add a reference to", /*require_references=*/false);
+  for (const auto [id, count] : occurrences) {
+    for (size_t i = 0; i < count; ++i) {
+      auto& block = *blocks_[id];
+      const bool was_reclaimable =
+          block.RefCount() == 1 && block.reference_observer_cookie_;
+      block.AddRef();
+      if (was_reclaimable && reference_observer_) {
+        reference_observer_->OnBlockBecameReferenced(
+            block, block.reference_observer_cookie_);
+      }
+    }
+  }
+}
+
+void BlockPool::AddRef(const std::shared_ptr<Block>& block) {
+  if (!Owns(block)) {
+    throw std::runtime_error("Cannot add a reference to a block this pool does not own.");
+  }
+  const bool was_reclaimable =
+      block->RefCount() == 1 && block->reference_observer_cookie_;
+  block->AddRef();
+  if (was_reclaimable && reference_observer_) {
+    reference_observer_->OnBlockBecameReferenced(
+        *block, block->reference_observer_cookie_);
+  }
+}
+
+void BlockPool::Release(const std::shared_ptr<Block>& block) {
+  if (!Owns(block)) {
+    throw std::runtime_error("Cannot release a block this pool does not own.");
+  }
+  const size_t remaining_references = block->ReleaseRef();
+  if (remaining_references == 1 && block->reference_observer_cookie_ &&
+      reference_observer_) {
+    reference_observer_->OnBlockBecameReclaimable(
+        *block, block->reference_observer_cookie_);
+  } else if (remaining_references == 0) {
+    block->ClearIdentity();
+    blocks_[block->Id()].reset();
+    ++mutation_generation_;
+  }
+}
+
+void BlockPool::SetReferenceObserver(BlockReferenceObserver* observer) {
+  if (reference_observer_ && observer && reference_observer_ != observer) {
+    throw std::runtime_error("A block pool supports only one reference observer.");
+  }
+  reference_observer_ = observer;
+}
+
+void BlockPool::SetReferenceObserverCookie(
+    const std::shared_ptr<Block>& block, void* cookie) {
+  if (!Owns(block) || !cookie) {
+    throw std::invalid_argument(
+        "A reference observer cookie requires an owned block and non-null cookie.");
+  }
+  block->SetReferenceObserverCookie(cookie);
+}
+
+void BlockPool::ClearReferenceObserverCookie(
+    const std::shared_ptr<Block>& block) noexcept {
+  if (!Owns(block)) {
+    std::terminate();
+  }
+  block->ClearReferenceObserverCookie();
+}
+
+std::vector<std::pair<size_t, size_t>> BlockPool::ValidateOwnership(
+    std::span<const std::shared_ptr<Block>> blocks,
+    const char* operation,
+    bool require_references) const {
   std::vector<size_t> ids;
   ids.reserve(blocks.size());
   for (const auto& block : blocks) {
     if (!block) {
-      throw std::runtime_error("Cannot free a null block.");
+      throw std::runtime_error(std::string{"Cannot "} + operation + " a null block.");
     }
 
     const size_t id = block->Id();
     if (id >= Capacity()) {
-      throw std::runtime_error("Cannot free block with out-of-range id " + std::to_string(id) +
+      throw std::runtime_error(std::string{"Cannot "} + operation +
+                               " block with out-of-range id " + std::to_string(id) +
                                " for a pool with capacity " + std::to_string(Capacity()) + ".");
     }
 
     if (blocks_[id] != block) {
-      throw std::runtime_error("Cannot free block with id " + std::to_string(id) +
+      throw std::runtime_error(std::string{"Cannot "} + operation +
+                               " block with id " + std::to_string(id) +
                                " that is not currently allocated by this pool.");
     }
 
     ids.push_back(id);
   }
   std::sort(ids.begin(), ids.end());
-  const auto duplicate = std::adjacent_find(ids.begin(), ids.end());
-  if (duplicate != ids.end()) {
-    throw std::runtime_error(
-        "Cannot free block with id " + std::to_string(*duplicate) +
-        " more than once in the same call.");
+
+  std::vector<std::pair<size_t, size_t>> occurrences;
+  occurrences.reserve(ids.size());
+  for (const size_t id : ids) {
+    if (occurrences.empty() || occurrences.back().first != id) {
+      occurrences.emplace_back(id, 1);
+    } else {
+      ++occurrences.back().second;
+    }
   }
+  for (const auto [id, count] : occurrences) {
+    if (require_references && blocks_[id]->RefCount() < count) {
+      throw std::runtime_error(std::string{"Cannot "} + operation +
+                               " block with id " + std::to_string(id) + " " +
+                               std::to_string(count) + " times when it only holds " +
+                               std::to_string(blocks_[id]->RefCount()) + " reference(s).");
+    }
+  }
+  return occurrences;
 }
 
 void BlockPool::FreeValidated(
@@ -140,7 +267,15 @@ void BlockPool::FreeValidated(
     std::terminate();
   }
   for (const auto& block : blocks) {
-    blocks_[block->Id()].reset();
+    const size_t remaining_references = block->ReleaseRef();
+    if (remaining_references == 1 && block->reference_observer_cookie_ &&
+        reference_observer_) {
+      reference_observer_->OnBlockBecameReclaimable(
+          *block, block->reference_observer_cookie_);
+    } else if (remaining_references == 0) {
+      block->ClearIdentity();
+      blocks_[block->Id()].reset();
+    }
   }
   if (!blocks.empty()) {
     ++mutation_generation_;
@@ -156,11 +291,17 @@ bool BlockPool::CanFreeValidated(
   }
   for (const auto& block : blocks) {
     if (!block || block->Id() >= blocks_.size() ||
-        blocks_[block->Id()] != block ||
-        validation_marks_[block->Id()] == validation_epoch_) {
+        blocks_[block->Id()] != block) {
       return false;
     }
-    validation_marks_[block->Id()] = validation_epoch_;
+    const size_t id = block->Id();
+    if (validation_marks_[id] != validation_epoch_) {
+      validation_marks_[id] = validation_epoch_;
+      validation_counts_[id] = 0;
+    }
+    if (++validation_counts_[id] > block->RefCount()) {
+      return false;
+    }
   }
   return true;
 }
@@ -178,6 +319,17 @@ void BlockPool::RollbackReservedBlocks(
   if (released) {
     ++mutation_generation_;
   }
+}
+
+std::vector<std::shared_ptr<Block>> BlockPool::OwnedBlocks() const {
+  std::vector<std::shared_ptr<Block>> owned;
+  owned.reserve(Size());
+  for (const auto& block : blocks_) {
+    if (block) {
+      owned.push_back(block);
+    }
+  }
+  return owned;
 }
 
 size_t BlockPool::AvailableBlocks() const {
