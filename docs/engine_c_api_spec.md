@@ -697,15 +697,17 @@ receives the monotonic next-Turn ID as usual. The implementation records one com
 successful `BeginTurn`, not per-token random-state checkpoints.
 
 Rewind clears speculative draft state and resets guidance to the start state used by a later Turn.
-It does not rewind sampling state. CPU and device stochastic sampling continue from their current
-random streams.
+Unlike in-flight transaction rollback, it does not restore sampling state. CPU and device stochastic
+sampling continue from their current random streams.
 
 The implementation releases all resident physical model state rather than attempting an in-place
 crop. On the dynamic path it atomically releases the complete paged KV block table, any paired fixed
-recurrent/convolution slot, and any auxiliary MTP state. The next `BeginTurn` re-admits the same
+recurrent/convolution slot, and any auxiliary MTP state. Indexed prefix blocks retain the cache's
+reference after the Request releases its own; they remain reusable and reclaimable under pressure,
+while unindexed blocks return to the pool immediately. The next `BeginTurn` re-admits the same
 Request and prefills the retained prefix together with the new Turn input, reconstructing paged KV,
-fixed state, and sliding-window rings from tokens. This immediately returns all prior physical
-capacity to the pools. On the static path the same replay strategy is supported only when the
+fixed state, and sliding-window rings from tokens or adopting matching cached prefixes. On the
+static path the same replay strategy is supported only when the
 Request is the sole resident row; a multi-row static rewind is rejected because one row cannot be
 detached from the shared contiguous cache allocation. Closed peers still count as resident until
 the static batch recycles, so they can temporarily prevent an otherwise completed Request from

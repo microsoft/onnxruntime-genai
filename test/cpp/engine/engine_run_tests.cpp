@@ -3530,6 +3530,67 @@ TEST_F(EngineRunTest, DensePagedPrefixCacheSkipsCommittedFullBlocks) {
   EXPECT_EQ(continuation_event.usage.cached_prompt_tokens, 0u);
 }
 
+TEST_F(EngineRunTest, RewindReleasesOnlyRequestReferencesToCachedPrefix) {
+  model_ = LoadSyntheticPagedModel();
+  auto& batching = *model_->config_->engine.dynamic_batching;
+  batching.block_size = 4;
+  batching.num_blocks = 16;
+  batching.prefix_caching = true;
+  auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
+  const std::array<int32_t, 9> prompt{2, 3, 4, 5, 6, 7, 8, 9, 10};
+
+  auto source = CreateRequestWithPrompt(engine.engine, prompt);
+  ASSERT_EQ(RunOne(*engine.engine).request, source);
+  auto peer = CreateRequestWithPrompt(engine.engine, prompt);
+  const auto peer_event = RunOne(*engine.engine);
+  ASSERT_EQ(peer_event.request, peer);
+  EXPECT_EQ(peer_event.usage.cached_prompt_tokens, 8u);
+
+  const auto shared = engine.cache->Snapshot();
+  ASSERT_EQ(shared.requests.size(), 2u);
+  ASSERT_GE(shared.requests[0].block_ids.size(), 2u);
+  const auto cached_ids = std::array{
+      shared.requests[0].block_ids[0], shared.requests[0].block_ids[1]};
+  for (const size_t id : cached_ids) {
+    const auto block = std::find_if(
+        shared.blocks.begin(), shared.blocks.end(),
+        [id](const auto& entry) { return entry.block_id == id; });
+    ASSERT_NE(block, shared.blocks.end());
+    EXPECT_TRUE(block->indexed);
+    EXPECT_EQ(block->ref_count, 3u);
+  }
+  EXPECT_TRUE(ValidateCacheInvariants(shared).empty());
+
+  source->RewindToStartOfTurn(1);
+  const auto one_owner = engine.cache->Snapshot();
+  ASSERT_EQ(one_owner.requests.size(), 1u);
+  EXPECT_EQ(one_owner.requests[0].request_id, peer.get());
+  for (const size_t id : cached_ids) {
+    const auto block = std::find_if(
+        one_owner.blocks.begin(), one_owner.blocks.end(),
+        [id](const auto& entry) { return entry.block_id == id; });
+    ASSERT_NE(block, one_owner.blocks.end());
+    EXPECT_EQ(block->ref_count, 2u);
+  }
+  EXPECT_TRUE(ValidateCacheInvariants(one_owner).empty());
+
+  peer->RewindToStartOfTurn(1);
+  const auto cache_only = engine.cache->Snapshot();
+  EXPECT_TRUE(cache_only.requests.empty());
+  EXPECT_EQ(cache_only.blocks.size(), cached_ids.size());
+  for (const auto& block : cache_only.blocks) {
+    EXPECT_TRUE(block.indexed);
+    EXPECT_EQ(block.ref_count, 1u);
+  }
+  EXPECT_TRUE(ValidateCacheInvariants(cache_only).empty());
+
+  ASSERT_EQ(source->BeginTurn(prompt, std::optional<size_t>{1}), 2u);
+  const auto replay_event = RunOne(*engine.engine);
+  EXPECT_EQ(replay_event.request, source);
+  EXPECT_EQ(replay_event.usage.cached_prompt_tokens, 8u);
+  EXPECT_TRUE(ValidateCacheInvariants(engine.cache->Snapshot()).empty());
+}
+
 TEST_F(EngineRunTest, CanceledUnstartedPromptIsNotCountedAsCurrentTurnCache) {
   model_ = LoadSyntheticPagedModel();
   auto& batching = *model_->config_->engine.dynamic_batching;

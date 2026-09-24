@@ -130,6 +130,12 @@ admission pressure; prefix retention never reserves a separate share of the
 pool. Blocks being adopted by an in-flight reservation are protected by
 reservation-owned references.
 
+Rewinding a completed request releases its reference to every paged block,
+including blocks shared with other requests. Full indexed blocks keep the
+prefix cache's reference and become reclaimable once no request holds them;
+unindexed tail blocks return to the pool immediately. A later turn replaying
+the retained prefix can adopt matching cached blocks on admission.
+
 Prefix adoption participates in the normal Engine transaction. Planning stages
 the request's processed-token cursor at the matched block boundary, reservation
 takes references to the shared blocks, rollback restores the cursor and releases
@@ -345,15 +351,17 @@ and leaves the current completed attempt's historical Turn ID and finish reason 
 the next `BeginTurn()`. Turn IDs are never reused, so that call receives the monotonic next ID.
 Rewind clears speculative drafts and resets the guidance cursor for the next Turn.
 
-Sampling state is not rewound. CPU and device stochastic sampling continue from their current
-random streams rather than returning to the retained token boundary.
+Unlike rollback of an in-flight Engine transaction, completed-turn rewind does not restore
+sampling state. CPU and device stochastic sampling continue from their current random streams
+rather than returning to the retained token boundary.
 
 Rewind deliberately releases all resident physical model state instead of cropping it in place.
 Dynamic Requests return their complete paged KV block table, paired fixed-state slot, and auxiliary
 MTP state, if present. A later `BeginTurn()` re-admits the same Request and prefills the retained
 prefix together with new input, rebuilding paged KV, sliding-window rings, fixed convolution state,
 and fixed recurrent state from the token sequence. The MTP shadow state is recreated when drafting
-resumes. This returns physical capacity immediately without persistent rewind checkpoints. Static
+resumes. The request's physical state is released without persistent rewind checkpoints; indexed
+prefix blocks may stay cached until reused or reclaimed under pressure. Static
 Requests use the same strategy only when they are the sole resident row; multi-row static rewind
 fails before mutation because a row cannot be removed from the shared contiguous cache allocation.
 
