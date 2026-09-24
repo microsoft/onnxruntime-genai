@@ -506,7 +506,11 @@ TEST_F(RequestLifecycleTest, RuntimeProfileLoadsWithImplicitCudaPluginDevice) {
   profile.overlay.dynamic_batching.num_blocks = 64;
   config->runtime_profiles.push_back(std::move(profile));
 
-  EXPECT_NO_THROW(static_cast<void>(CreateModel(GetOrtEnv(), std::move(config))));
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+
+  ASSERT_TRUE(model->config_->engine.dynamic_batching);
+  ASSERT_TRUE(model->config_->engine.dynamic_batching->num_blocks);
+  EXPECT_EQ(*model->config_->engine.dynamic_batching->num_blocks, 64u);
 }
 
 TEST_F(RequestLifecycleTest, CapabilitiesReportAppliedRuntimeProfileTuning) {

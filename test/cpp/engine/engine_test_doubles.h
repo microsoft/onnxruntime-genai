@@ -610,6 +610,7 @@ struct CountingCudaDeviceState {
   size_t memory_queries{};
   size_t device_id_queries{};
   size_t total_memory_bytes{};
+  bool fail_memory_query{};
   std::vector<int> argmax_rows;
 };
 
@@ -673,6 +674,9 @@ struct CountingCudaDevice final : DeviceInterface {
   void Synchronize() override { ++state->synchronize_calls; }
   void GetAvailableMemory(size_t& free_bytes, size_t& total_bytes) override {
     ++state->memory_queries;
+    if (state->fail_memory_query) {
+      throw std::runtime_error("test device memory query failed");
+    }
     free_bytes = state->total_memory_bytes;
     total_bytes = state->total_memory_bytes;
   }

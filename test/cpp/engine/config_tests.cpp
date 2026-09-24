@@ -104,6 +104,33 @@ TEST(ConfigTest, NoRuntimeProfilesSkipDeviceMemoryQuery) {
   EXPECT_EQ(device.state->memory_queries, 0u);
 }
 
+TEST(ConfigTest, RuntimeProfilePropagatesDeviceMemoryQueryFailure) {
+  Config config;
+  OverlayConfig(config, R"({
+    "engine":{"dynamic_batching":{"num_blocks":32}},
+    "runtime_profiles":[{
+      "id":"larger-gpu",
+      "eligibility":{"minimum_total_device_memory_bytes":100},
+      "overlay":{"engine":{"dynamic_batching":{"num_blocks":64}}}
+    }]
+  })");
+  CountingCudaDevice device;
+  device.state->fail_memory_query = true;
+
+  try {
+    ApplyRuntimeProfileForSelectedDevice(config, device);
+    FAIL() << "Expected device memory query failure to propagate";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string(error.what()).find("device memory query failed"),
+              std::string::npos)
+        << error.what();
+  }
+
+  EXPECT_EQ(device.state->memory_queries, 1u);
+  EXPECT_EQ(*config.engine.dynamic_batching->num_blocks, 32u);
+  EXPECT_FALSE(config.runtime_profiles.empty());
+}
+
 TEST(ConfigTest, PrimaryProviderSelectionKeepsFirstDevice) {
   CountingCudaDevice dml_device{DeviceType::DML};
   CountingCudaDevice cuda_device;
