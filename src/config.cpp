@@ -1499,6 +1499,8 @@ struct SpeechInputs_Element : JSON::Element {
       v_.attention_mask = JSON::Get<std::string_view>(value);
     } else if (name == "audio_sizes") {
       v_.audio_sizes = JSON::Get<std::string_view>(value);
+    } else if (name == "audio_lengths") {
+      v_.audio_lengths = JSON::Get<std::string_view>(value);
     } else if (name == "audio_projection_mode") {
       v_.audio_projection_mode = JSON::Get<std::string_view>(value);
     } else {
@@ -1566,6 +1568,68 @@ struct Speech_Element : JSON::Element {
   std::unique_ptr<RunOptions_Element> run_options_;
   SpeechInputs_Element inputs_{v_.inputs};
   SpeechOutputs_Element outputs_{v_.outputs};
+};
+
+struct AudioOutputGraph_Element : JSON::Element {
+  explicit AudioOutputGraph_Element(Config::Model::AudioOutput::Graph& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "filename") {
+      v_.filename = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "session_options") {
+      v_.session_options = Config::SessionOptions{};
+      session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
+      return *session_options_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::AudioOutput::Graph& v_;
+  std::unique_ptr<SessionOptions_Element> session_options_;
+};
+
+struct AudioOutput_Element : JSON::Element {
+  explicit AudioOutput_Element(Config::Model::AudioOutput& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "num_codebooks") {
+      v_.num_codebooks = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "codebook_size") {
+      v_.codebook_size = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "audio_start_token_id") {
+      v_.audio_start_token_id = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "text_end_token_id") {
+      v_.text_end_token_id = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "interleaved_n_text") {
+      v_.interleaved_n_text = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "interleaved_n_audio") {
+      v_.interleaved_n_audio = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "depthformer") {
+      return depthformer_;
+    }
+    if (name == "embedding") {
+      return embedding_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::AudioOutput& v_;
+  AudioOutputGraph_Element depthformer_{v_.depthformer};
+  AudioOutputGraph_Element embedding_{v_.embedding};
 };
 
 struct JoinerInputs_Element : JSON::Element {
@@ -2186,6 +2250,9 @@ struct Model_Element : JSON::Element {
     if (name == "speech") {
       return speech_;
     }
+    if (name == "audio_output") {
+      return audio_output_;
+    }
     if (name == "joiner") {
       return joiner_;
     }
@@ -2222,6 +2289,7 @@ struct Model_Element : JSON::Element {
   Vision_Element vision_{v_.vision};
   Embedding_Element embedding_{v_.embedding};
   Speech_Element speech_{v_.speech};
+  AudioOutput_Element audio_output_{v_.audio_output};
   Joiner_Element joiner_{v_.joiner};
   VAD_Element vad_{v_.vad};
   Moonshine_Element moonshine_{v_.moonshine};
@@ -2336,6 +2404,12 @@ struct Search_Element : JSON::Element {
       v_.early_stopping = JSON::Get<bool>(value);
     } else if (name == "blank_penalty") {
       v_.blank_penalty = static_cast<float>(JSON::Get<double>(value));
+    } else if (name == "audio_interleaved") {
+      v_.audio_interleaved = JSON::Get<bool>(value);
+    } else if (name == "audio_temperature") {
+      v_.audio_temperature = static_cast<float>(JSON::Get<double>(value));
+    } else if (name == "audio_top_k") {
+      v_.audio_top_k = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else {
       throw JSON::unknown_value_error{};
     }

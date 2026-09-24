@@ -48,6 +48,7 @@ struct Config {
     // Speech encoder names
     static constexpr std::string_view AudioAttentionMaskName = "audio_attention_mask";
     static constexpr std::string_view AudioSizesName = "audio_sizes";
+    static constexpr std::string_view AudioLengthsName = "audio_lengths";
     static constexpr std::string_view AudioProjectionModeName = "audio_projection_mode";
     static constexpr std::string_view AudioFeaturesName = "audio_features";
     static constexpr std::string_view NumAudioTokens = "num_audio_tokens";
@@ -317,6 +318,7 @@ struct Config {
         std::string audio_embeds{Defaults::AudioEmbedsName};
         std::string attention_mask{Defaults::AudioAttentionMaskName};
         std::string audio_sizes{Defaults::AudioSizesName};
+        std::string audio_lengths{Defaults::AudioLengthsName};  // per-clip valid frame count of audio_embeds (LFM2-Audio)
         std::string audio_projection_mode{Defaults::AudioProjectionModeName};
       } inputs;
 
@@ -324,6 +326,24 @@ struct Config {
         std::string audio_features{Defaults::AudioFeaturesName};
       } outputs;
     } speech;
+
+    // Speech output of LFM2-Audio: the depthformer turns one decoder hidden state into a frame of
+    // audio codes, one per codebook, and the audio embedding turns that frame back into the decoder's
+    // next input. Empty filenames leave the model answering in text only.
+    struct AudioOutput {
+      struct Graph {
+        std::string filename;
+        std::optional<SessionOptions> session_options;
+      };
+      Graph depthformer;
+      Graph embedding;
+      int num_codebooks{8};
+      int codebook_size{2049};        // entries per codebook; the last one is the end-of-audio code
+      int audio_start_token_id{128};  // <|audio_start|>: the rest of a sequential answer is speech
+      int text_end_token_id{130};     // <|text_end|>: the text of an interleaved answer is over
+      int interleaved_n_text{6};      // text tokens per turn of an interleaved answer
+      int interleaved_n_audio{12};    // audio frames per turn of an interleaved answer
+    } audio_output;
 
     struct Joiner {
       std::string filename;
@@ -741,6 +761,9 @@ struct Config {
     int random_seed{-1};               // -1 = Seed with random device, otherwise use value to seed RNG
     std::optional<size_t> chunk_size;  // Chunk size for prefill chunking during context processing. If present, chunking is enabled with the chunk size > 0.
     float blank_penalty{};             // Penalty applied to blank token logits in CTC/RNNT decoding. Default 0 means no penalty.
+    bool audio_interleaved{};          // LFM2-Audio: alternate text tokens and audio frames by count (interleaved mode) rather than switching on <|audio_start|>.
+    float audio_temperature{1.0f};     // LFM2-Audio: temperature the audio codes are sampled with. 0 takes the most likely code.
+    int audio_top_k{4};                // LFM2-Audio: number of most likely audio codes kept when sampling. 1 takes the most likely code.
   } search;
 
   struct Speculative {

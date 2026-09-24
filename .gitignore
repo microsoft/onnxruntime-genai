@@ -30,6 +30,8 @@ examples/python/hf_cache
 examples/csharp/ModelChat/models
 
 !test/models/gemma4/*
+!/test/models/lfm2-audio/
+!test/models/lfm2-audio/*
 !test/models/hf-internal-testing/*
 !test/models/lfm2-vl/*
 !test/models/marian-batch/*

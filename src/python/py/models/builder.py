@@ -35,6 +35,7 @@ from builders import (
     GraniteMoEHybridModel,
     HunyuanDenseV1Model,
     InternLM2Model,
+    LFM2AudioModel,
     LFM2Model,
     LFM2MoEModel,
     LlamaModel,
@@ -108,7 +109,13 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
     hf_token = extra_options.get("hf_token", True)
     hf_remote = extra_options.get("hf_remote", False)
 
-    config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
+    try:
+        config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
+    except ValueError:
+        # LFM2-Audio checkpoints have no model_type; their LFM2 decoder config is nested.
+        config = LFM2AudioModel.load_config(hf_name, token=hf_token, **extra_kwargs)
+        if config is None:
+            raise
     tokenizer = AutoTokenizer.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
     add_special_token_ids(config, tokenizer)
     if extra_options.get("adapter_path", False):
@@ -696,6 +703,10 @@ def create_model(
         # With the embedding layer excluded the decoder is one stage of the LFM2-VL vision pipeline;
         # otherwise it is a standalone text model that happens to come from a VLM checkpoint.
         onnx_model.model_type = "lfm2_vl" if onnx_model.exclude_embeds else "lfm2_vl_text"
+    elif config.architectures[0] == "Lfm2AudioForConditionalGeneration":
+        onnx_model = LFM2AudioModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        # Same split as LFM2-VL: the decoder stage of the lfm2_audio pipeline, or a plain text model.
+        onnx_model.model_type = "lfm2_audio" if onnx_model.exclude_embeds else "lfm2_audio_text"
     elif config.architectures[0] == "LlamaForCausalLM":
         onnx_model = LlamaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "MistralForCausalLM":
