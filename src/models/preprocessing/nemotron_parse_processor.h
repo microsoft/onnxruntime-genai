@@ -3,12 +3,16 @@
 
 #pragma once
 
+#include <array>
+
 #include "models/preprocessing/processor.h"
 
 namespace Generators {
 
 struct NemotronParseProcessor : Processor {
   NemotronParseProcessor(Config& config, const SessionInfo& session_info);
+
+  void ConfigureTokenizer(Tokenizer& tokenizer) const override;
 
   std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer,
                                         const Payload& payload) const override;
@@ -18,9 +22,12 @@ struct NemotronParseProcessor : Processor {
   ONNXTensorElementDataType pixel_values_type_;
   int64_t target_height_;
   int64_t target_width_;
+  std::array<float, 3> image_mean_;
+  std::array<float, 3> image_std_;
   int32_t decoder_start_token_id_;
   int64_t required_prompt_length_;
   int context_length_;
+  std::string default_user_prompt_;
 };
 
 }  // namespace Generators

@@ -13,7 +13,7 @@ from onnx_ir.tensor_adapters import TorchTensor, to_torch_dtype
 from quantization import CudaQuantizer
 from tqdm import tqdm
 
-from .base import Model
+from .base import DEFAULT_OPSET, Model
 
 
 # Block drafters share Model's graph lifecycle while retaining their packed block I/O.
@@ -39,7 +39,7 @@ class BlockDrafterBuilder(Model):
     embed_adoption = None
 
     def __init__(self, graph_name="block_drafter", const_prefix="drafter"):
-        super().__init__(graph_name=graph_name, graph_opset=21)
+        super().__init__(graph_name=graph_name, graph_opset=DEFAULT_OPSET)
         self.graph.opset_imports["com.microsoft"] = 1
         self.const_cache = {}
         self.const_prefix = const_prefix

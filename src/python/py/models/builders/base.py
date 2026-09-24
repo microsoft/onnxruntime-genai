@@ -78,6 +78,8 @@ def load_text_backbone_adapter(
         parent.language_model = merged
     return base_container
 
+DEFAULT_OPSET = 24
+
 
 class Model:
     def __init__(
@@ -173,7 +175,7 @@ class Model:
         self.revision = extra_options.get("base_revision")
 
         # States for building the model
-        self.make_graph("main_graph", opset=22)
+        self.make_graph("main_graph", opset=DEFAULT_OPSET)
         self.graph.opset_imports["com.microsoft"] = 1
 
         # EP-specific variables
@@ -1382,13 +1384,16 @@ class Model:
                 dynamic_batching["max_scheduled_tokens"] = int(self.extra_options["max_scheduled_tokens"])
             genai_config["engine"] = {"dynamic_batching": dynamic_batching}
 
+    def load_generation_config(self, extra_kwargs):
+        return GenerationConfig.from_pretrained(
+            self.model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs
+        )
+
     def make_genai_config(self, config, extra_kwargs, out_dir):
         # Create config with attributes from config.json and generation_config.json (if latter file exists)
         try:
             # Override search attributes in config based on values in generation_config.json
-            gen_config = GenerationConfig.from_pretrained(
-                self.model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs
-            )
+            gen_config = self.load_generation_config(extra_kwargs)
             defaults = {
                 "bos_token_id": None,
                 "do_sample": False,
@@ -2683,9 +2688,6 @@ class Model:
         mode="linear",
     ):
         """Update slices of a tensor with the standard ONNX TensorScatter op."""
-        self.model.graph.opset_imports[""] = max(
-            self.model.graph.opset_imports.get("", 0), 24
-        )
         output = output or f"{name}/output_0"
         self.make_node(
             "TensorScatter",

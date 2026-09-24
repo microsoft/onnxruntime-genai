@@ -7,9 +7,7 @@
 namespace Generators {
 
 struct DefaultPositionInputs : PositionInputs {
-  DefaultPositionInputs(const Model& model, State& state,
-                        DeviceSpan<int32_t> sequence_lengths_unk,
-                        const std::string& attention_mask_name,
+  DefaultPositionInputs(const Model& model, State& state, DeviceSpan<int32_t> sequence_lengths_unk, const std::string& attention_mask_name,
                         std::optional<int> static_mask_capacity = std::nullopt);
 
   void Add() override;

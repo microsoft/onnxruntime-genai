@@ -20,11 +20,8 @@ void DispatchOnType(ONNXTensorElementDataType type, Func&& func) {
     func.template operator()<int64_t>();
 }
 
-DefaultPositionInputs::DefaultPositionInputs(
-    const Model& model, State& state,
-    DeviceSpan<int32_t> sequence_lengths_unk,
-    const std::string& attention_mask_name,
-    std::optional<int> static_mask_capacity)
+DefaultPositionInputs::DefaultPositionInputs(const Model& model, State& state, DeviceSpan<int32_t> sequence_lengths_unk, const std::string& attention_mask_name,
+                                           std::optional<int> static_mask_capacity)
     : model_{model},
       state_{state},
       attention_mask_name_{attention_mask_name} {
