@@ -238,6 +238,7 @@ struct DecoderState : State {
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int current_length, DeviceSpan<int32_t> beam_indices);
   void RewindTo(size_t index) override;
+  bool CanRewindTo(size_t index) const override;
 
   // Prefill chunking (see search.chunk_size). The embedding model still runs once over the whole
   // prompt (it is a lookup/projection), while the decoder prefill is split into several runs so the
@@ -279,6 +280,7 @@ struct MultiModalPipelineState : State {
   OrtValue* GetOutput(const char* name) override;
 
   void RewindTo(size_t index) override;
+  bool CanRewindTo(size_t index) const override { return !decoder_state_ || decoder_state_->CanRewindTo(index); }
 
   size_t PromptLength() const override { return prompt_length_; }
 
