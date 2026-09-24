@@ -419,7 +419,7 @@ def _model_on(model_dir: Path, provider: str | None) -> og.Model:
     try:
         return og.Model(config)
     except RuntimeError as error:
-        pytest.skip(f"{provider} execution provider is not usable here: {error}")
+        raise pytest.skip.Exception(f"{provider} execution provider is not usable here: {error}") from error
 
 
 def _generate_on(model_dir: Path, provider: str | None, image_path: str, num_tokens: int) -> np.ndarray:
