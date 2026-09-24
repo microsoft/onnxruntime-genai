@@ -180,6 +180,7 @@ def test_engine_capabilities(model):
 
     assert capabilities.configured_max_batch_size == 8
     assert capabilities.max_scheduled_tokens == 2048
+    assert capabilities.max_request_length == 128
 
     off_thread_errors = []
 

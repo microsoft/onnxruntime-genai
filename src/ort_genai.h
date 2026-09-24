@@ -960,6 +960,10 @@ struct OgaEngineCapabilities : OgaAbstract {
     return OgaEngineCapabilitiesGetMaxScheduledTokens(this);
   }
 
+  uint64_t MaxRequestLength() const {
+    return OgaEngineCapabilitiesGetMaxRequestLength(this);
+  }
+
   static void operator delete(void* p) {
     OgaDestroyEngineCapabilities(reinterpret_cast<OgaEngineCapabilities*>(p));
   }
@@ -1052,8 +1056,8 @@ struct OgaRequestOptions : OgaAbstract {
     return std::unique_ptr<OgaRequestOptions>(options);
   }
 
-  /** Total tokens (prompt plus generated, across every Turn) the Request may reach. Zero restores
-   *  the model-configured search.max_length, which is also the ceiling for any explicit value. */
+  /** Total tokens (prompt plus generated, across every Turn) the Request may reach. Zero uses the
+   *  configured default capped by a nonzero EngineCapabilities.max_request_length. */
   void SetMaxSessionTokens(uint64_t value) {
     OgaCheckResult(OgaRequestOptionsSetMaxSessionTokens(this, value));
   }

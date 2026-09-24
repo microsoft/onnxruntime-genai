@@ -93,6 +93,11 @@ struct CacheManager {
   // `attention_metadata`.
   virtual size_t BlockTableColumns() const { return 0; }
 
+  // Immutable target-cache geometry after profile selection, automatic sizing, and auxiliary
+  // cache deductions. Non-paged caches return zero.
+  virtual size_t TargetBlockCount() const { return 0; }
+  virtual size_t TargetBlockSize() const { return 0; }
+
   // Maximum query tokens one request can contribute to a step, or 0 when the cache imposes no
   // per-request limit. Sliding-window rings use this to prevent a step from overwriting live KV.
   virtual size_t MaxQueryTokensPerRequest() const { return 0; }
@@ -198,6 +203,8 @@ struct PagedCacheManager : CacheManager {
   size_t ResidentRequestCount() const override { return cache_allocated_requests_.size(); }
 
   size_t BlockTableColumns() const override { return key_value_cache_->BlockTableColumns(); }
+  size_t TargetBlockCount() const override { return key_value_cache_->MaxRequestBlockCount(); }
+  size_t TargetBlockSize() const override { return key_value_cache_->BlockSize(); }
 
   size_t MaxQueryTokensPerRequest() const override;
 

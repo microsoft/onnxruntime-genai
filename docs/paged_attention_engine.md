@@ -244,7 +244,9 @@ generated token below the Request's `max_session_tokens`.
 `max_session_tokens` is the cumulative total
 sequence limit for the entire Request: the initial
 prompt, generated output, and every continuation input all count against the same limit. It defaults
-to the model-configured `search.max_length`, cannot exceed it, and is not reset by `BeginTurn()`.
+to the model-configured `search.max_length` capped by a nonzero Engine `max_request_length`. An
+explicit value may exceed `search.max_length` but cannot exceed a nonzero `max_request_length`. When
+the capability is zero, `search.max_length` remains the ceiling. The limit is not reset by `BeginTurn()`.
 It is the Request's one session limit: Search completion, static cache sizing, speculative bounds,
 and the `MaxSessionTokens` finish reason all read the same value.
 
@@ -256,10 +258,11 @@ do not count. A later turn may begin whenever its input still leaves room for at
 token under the cumulative limit, and it may choose a different per-Turn limit.
 
 `OgaRequestOptions` is an opaque, reusable handle carrying resident-session policy only. Null
-options and zero `max_session_tokens` use the model-configured `search.max_length`, which normally
-defaults from the model context length. Request creation takes no generation parameters at all: the
-Engine builds each Request's private, Model-derived search configuration itself, forcing one
-sequence and one beam.
+options and zero `max_session_tokens` use the model-configured `search.max_length` capped by the
+Engine's `max_request_length` when that capability is nonzero. A zero capability preserves
+`search.max_length` as both the default and ceiling. Request creation takes no generation parameters
+at all: the Engine builds each Request's private, Model-derived search configuration itself, forcing
+one sequence and one beam.
 
 `OgaTurnOptions` is opaque and reusable and carries the whole generation policy of one turn;
 `BeginTurn()` snapshots it. See "Per-turn generation policy" below.
@@ -279,7 +282,7 @@ the Model:
   contract and its next tokens would never be copied back. Forcing it to one would decode something
   the caller never asked for, so it is rejected instead:
   `config.overlay('{"search": {"num_beams": 1}}')`, and batch across Requests.
-- A `search.max_length` of zero or less, since it is the Request's session ceiling.
+- A `search.max_length` of zero or less, since it supplies the default Request length.
 - A nonzero `search.chunk_size` when static batching is selected. Chunking is an Engine/model
   scheduler policy, so this is rejected at Engine creation; disable it with
   `config.overlay('{"search": {"chunk_size": 0}}')`.
@@ -288,11 +291,11 @@ the Model:
 wider configured batch simply means "configured for the classic Generator"; the Request derives its
 own single-row search and decodes exactly one sequence either way.
 
-The same overlay route raises the session ceiling where that is what the caller wants: because
-`max_session_tokens` cannot exceed the model-configured `search.max_length`, a model whose
-`search.max_length` is lower than the context length its cache can serve is raised with
-`config.overlay('{"search": {"max_length": <tokens>}}')` before the Model is created. A future API
-will report the cache-backed per-request maximum so hosts can choose this value safely.
+`search.max_length` supplies the default Request length. A caller may set a larger
+`max_session_tokens` explicitly when a nonzero `EngineCapabilities.max_request_length` permits it.
+The capability is derived from the resolved target cache and model context after Engine
+construction. Zero means that cache-backed ceiling is unavailable, so `search.max_length` remains
+the ceiling.
 
 ### `Active`
 

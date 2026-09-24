@@ -832,8 +832,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       }))
       .def("set_max_session_tokens", &OgaRequestOptions::SetMaxSessionTokens,
            "Total tokens (prompt plus generated, across every turn) the request may reach. Zero "
-           "restores the model-configured search.max_length, which is also the ceiling for an "
-           "explicit value.");
+           "uses the configured default capped by a nonzero "
+           "EngineCapabilities.max_request_length.");
 
   pybind11::class_<OgaTurnOptions>(m, "TurnOptions")
       .def(pybind11::init([](OgaRequest& request) {
@@ -981,7 +981,10 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           &OgaEngineCapabilities::ConfiguredMaxBatchSize)
       .def_property_readonly(
           "max_scheduled_tokens",
-          &OgaEngineCapabilities::MaxScheduledTokens);
+          &OgaEngineCapabilities::MaxScheduledTokens)
+      .def_property_readonly(
+          "max_request_length",
+          &OgaEngineCapabilities::MaxRequestLength);
 
   pybind11::class_<OgaEngine>(m, "Engine")
       .def(pybind11::init([](OgaModel& model) { return OgaEngine::Create(model); }))
