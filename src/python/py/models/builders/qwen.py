@@ -1226,7 +1226,7 @@ class Qwen35MoEModel(MTPModel):
         )
         drafter_quant_config = extra_options.get("_drafter_quant_config")
         drafter_io_dtype = (
-            drafter_quant_config.to_onnx_dtypes()[0] if drafter_quant_config is not None else io_dtype
+            drafter_quant_config.to_onnx_dtypes()[0] if drafter_quant_config is not None else ir.DataType.BFLOAT16
         )
 
         num_draft_tokens = None

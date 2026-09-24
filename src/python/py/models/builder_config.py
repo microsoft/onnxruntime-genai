@@ -253,6 +253,13 @@ def normalize_target_quant_config(
     canonical = canonical_quant_data(data)
     if "checkpoint_policy" in canonical:
         raise ValueError("target_options.quant_config.checkpoint_policy is not supported by target loaders")
+    target_weights = canonical.get("weights", {})
+    if (
+        target_weights.get("type") == "int2"
+        or canonical.get("moe", {}).get("type") == "int2"
+        or any(override.get("type") == "int2" for override in target_weights.get("overrides", []))
+    ):
+        raise ValueError("target_options.quant_config does not support int2; use drafter_options.quant_config")
     seed_precision = precision_from_quant_data(canonical, precision)
     normalized_legacy = copy.deepcopy(legacy_options)
     op_types = normalized_legacy.get("op_types_to_quantize")

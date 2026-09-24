@@ -114,6 +114,28 @@ def test_explicit_target_checkpoint_policy_is_rejected():
         )
 
 
+@pytest.mark.parametrize(
+    "quant_config",
+    [
+        {"weights": {"type": "int2"}},
+        {"moe": {"type": "int2"}},
+        {
+            "weights": {
+                "type": "int4",
+                "overrides": [{"match": {"name": "/model/a/MatMul"}, "type": "int2"}],
+            }
+        },
+    ],
+)
+def test_target_int2_policy_is_rejected(quant_config):
+    with pytest.raises(ValueError, match="target_options.quant_config does not support int2"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            target_options={"quant_config": quant_config},
+        )
+
+
 def test_dense_target_rejects_weight_overrides():
     with pytest.raises(ValueError, match="weight overrides are not supported when weights.type=none"):
         normalize_builder_config(

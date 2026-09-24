@@ -64,7 +64,7 @@ class DFlash2Builder(BlockDrafterBuilder):
     ):
         self.draft_dir = draft_dir
         self.target_dir = target_dir
-        self.io_dtype = compute_dtype or io_dtype
+        self.io_dtype = compute_dtype or ir.DataType.BFLOAT16
         self.external_dtype = io_dtype
         if quant is not None:
             self.quant_bits = quant["bits"]

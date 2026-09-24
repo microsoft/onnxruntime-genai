@@ -196,7 +196,7 @@ not be accepted just because the schema has the field.
 Fusion is distinct from selecting the CUDA fpA/intB kernel family. The legacy
 `enable_cuda_fpa_intb_gemm` option maps to the runtime decoder session entry
 `ep.cuda.fpa_intb_gemm`, whereas offline weight layout remains in
-`quant_config.format`. Neither setting implies fusion. DFlash2's raw BF16 body
+`quant_config.format`. Neither setting implies fusion. DFlash2's raw body
 must retain its own supported session settings rather than inherit target flags.
 
 ## 4. Drafter Configuration
@@ -285,29 +285,29 @@ is supplied.
 | Drafter | Current exporter boundary to preserve and validate |
 | --- | --- |
 | MTP | Full `QuantConfig` path with model-specific loader and state constraints. |
-| DFlash2 | BF16 body, target-typed boundary tensors, paged attention, unquantized drafter KV; dense or supported symmetric DEFAULT INT4/INT8 matmuls. |
+| DFlash2 | BF16 body by default (explicit FP16 supported), target-typed boundary tensors, paged attention, unquantized drafter KV; dense or supported symmetric DEFAULT INT2/INT4/INT8 matmuls. |
 | DSpark | Dense BF16 export, paged attention, unquantized drafter KV; integer quantization is separate future work. |
 
-DFlash2's BF16 body currently uses raw, not prepacked, matmul weights. Its borrowed
+DFlash2's body defaults to raw, not prepacked, matmul weights. Its borrowed
 LM head has separate layout rules. Reject explicit new options that cannot be
 honored; preserve legacy effective behavior through the legacy adapter.
 
 ### Two Dtypes in a Block Drafter
 
 `quant_config.io_dtype` names one dtype per component, but a block drafter has
-two. DFlash2 runs its body in BF16 because the activations genuinely leave the
-FP16 range, while the tensors it shares with the target -- the auxiliary hidden
+two. DFlash2 defaults its body to BF16 because the activations can leave the
+FP16 range; structured configuration can explicitly select FP16 at the risk of
+overflow. The tensors it shares with the target -- the auxiliary hidden
 states, the embedding table, and the LM head -- stay at the *target's* I/O dtype.
 Only the body dtype is a component property; the boundary dtype is a consequence
 of the target's, and the drafter cannot choose it independently without breaking
 the sharing it depends on.
 
-So `drafter_options.quant_config.io_dtype` describes the body only, and for
-DFlash2 and DSpark today `bf16` is its single supported value. An explicit
-`fp16`/`fp32` body request must be rejected with that reason rather than
-silently honored or silently ignored; omitting the field selects the supported
-body dtype. The examples below spell `bf16` out to document the exporter's
-choice, not to imply an alternative exists. Do not add a second boundary-dtype
+So `drafter_options.quant_config.io_dtype` describes the body only. DSpark
+requires `bf16`, while DFlash2 defaults to `bf16` and allows explicit `fp16`.
+The generic config parser also accepts `fp32`, but provider support for the
+resulting drafter graph is not validated. The examples below spell `bf16` out
+to document the default exporter's choice. Do not add a second boundary-dtype
 field: it is derived, and letting a recipe set it would only create a way to
 express an invalid pair.
 
@@ -626,7 +626,7 @@ The scale filename retains the original `int8` label intentionally: validate its
 contents for the selected INT4 KV scheme rather than inferring format from its name.
 
 Drafter block size is explicit to reproduce the former target-derived value
-without new implicit inheritance. Drafter packing `0` describes the BF16 body;
+without new implicit inheritance. Drafter packing `0` describes the raw body weight layout;
 the target's borrowed head follows its separately validated sharing/layout policy.
 Effective shared tensor behavior must be checked during migration, not assumed
 from these numeric settings alone.

@@ -826,6 +826,20 @@ def test_structured_drafter_uses_its_own_io_dtype(tmp_path, drafter_dtype, expec
     assert model.dflash2_attrs["compute_dtype"] == expected_dtype
 
 
+def test_legacy_drafter_keeps_bf16_body_with_fp16_target(tmp_path):
+    model = _composite()
+    draft_dir = _draft_checkpoint(tmp_path)
+    model.make_dflash2_init(
+        io_dtype=ir.DataType.FLOAT16,
+        extra_options={"dflash2_path": draft_dir, "dflash2_precision": "int4"},
+    )
+
+    assert model.dflash2_attrs["compute_dtype"] == ir.DataType.BFLOAT16
+    builder = DFlash2Builder(draft_dir, str(tmp_path), ir.DataType.FLOAT16, 256, 128)
+    assert builder.io_dtype == ir.DataType.BFLOAT16
+    assert builder.external_dtype == ir.DataType.FLOAT16
+
+
 def test_int2_fpa_body_keeps_the_targets_int4_lm_head():
     model = _quant_composite()
     quant_config = types.SimpleNamespace(
@@ -1135,6 +1149,7 @@ def test_quantized_body_uses_requested_dtype_and_sm80_prepack(tmp_path, io_dtype
         paged_block_size=256,
         max_position_embeddings=128,
         quant={"bits": 2, "block_size": 64, "prepack": 1},
+        compute_dtype=io_dtype,
     )
 
     output = builder.matmul("/probe/MatMul", "hidden_states", torch.ones((128, 64)), 64, 128, "num_block")
@@ -1146,6 +1161,38 @@ def test_quantized_body_uses_requested_dtype_and_sm80_prepack(tmp_path, io_dtype
     assert node.attributes["bits"].value == 2
     assert node.attributes["block_size"].value == 64
     assert node.attributes["weight_prepacked"].value == 1
+
+
+@pytest.mark.parametrize(
+    "bits,block_size,prepack,out_features,expected_prepack",
+    [
+        (2, 64, 1, 96, False),
+        (2, 64, 1, 128, True),
+        (2, 32, 1, 128, False),
+        (2, 64, 2, 128, False),
+        (4, 64, 1, 32, False),
+        (4, 64, 1, 64, True),
+        (4, 32, 2, 64, False),
+        (8, 64, 1, 16, False),
+        (8, 64, 1, 32, True),
+    ],
+)
+def test_quantized_body_prepacking_requires_supported_shape(
+    tmp_path, bits, block_size, prepack, out_features, expected_prepack
+):
+    builder = DFlash2Builder(
+        _draft_checkpoint(tmp_path),
+        str(tmp_path),
+        ir.DataType.FLOAT16,
+        paged_block_size=256,
+        max_position_embeddings=128,
+        quant={"bits": bits, "block_size": block_size, "prepack": prepack},
+    )
+
+    builder.matmul("/probe/MatMul", "hidden_states", torch.ones((out_features, 64)), 64, out_features, "num_block")
+
+    node = next(node for node in builder.graph if node.name == "/probe/MatMul")
+    assert ("weight_prepacked" in node.attributes) is expected_prepack
 
 
 @pytest.mark.parametrize("bits", [None, 2, 4, 8])
