@@ -23,6 +23,7 @@
 #include "engine_test_doubles.h"
 #include "engine/request_status.h"
 #include "models/preprocessing/genai_tokenizer.h"
+#include "models/session_options.h"
 
 namespace Generators {
 namespace test {
@@ -478,6 +479,105 @@ TEST_F(RequestLifecycleTest, StaticEngineRejectsModelConfiguredChunking) {
     EXPECT_NE(std::string(error.what()).find("chunk_size requires dynamic batching"),
               std::string::npos);
   }
+}
+
+TEST_F(RequestLifecycleTest, RuntimeProfilesRejectNonCudaModelVariant) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
+  Config::RuntimeProfile profile;
+  profile.id = "gpu-profile";
+  profile.eligibility.minimum_total_device_memory_bytes = 1;
+  profile.overlay.dynamic_batching.num_blocks = 64;
+  config->runtime_profiles.push_back(std::move(profile));
+  EXPECT_THROW(CreateModel(GetOrtEnv(), std::move(config)), std::runtime_error);
+}
+
+TEST_F(RequestLifecycleTest, RuntimeProfileLoadsWithImplicitCudaPluginDevice) {
+  if (FindRegisteredEpDevices("CUDAExecutionProvider").empty()) {
+    GTEST_SKIP() << "CUDA plugin is not registered";
+  }
+
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
+  config->engine.dynamic_batching = Config::Engine::DynamicBatching{};
+  config->model.decoder.session_options.providers = {"cuda"};
+  config->model.decoder.session_options.provider_options = {{"cuda", {}}};
+  Config::RuntimeProfile profile;
+  profile.id = "implicit-plugin-device";
+  profile.eligibility.minimum_total_device_memory_bytes = 1;
+  profile.overlay.dynamic_batching.num_blocks = 64;
+  config->runtime_profiles.push_back(std::move(profile));
+
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+
+  ASSERT_TRUE(model->config_->engine.dynamic_batching);
+  ASSERT_TRUE(model->config_->engine.dynamic_batching->num_blocks);
+  EXPECT_EQ(*model->config_->engine.dynamic_batching->num_blocks, 64u);
+}
+
+TEST_F(RequestLifecycleTest, CapabilitiesReportAppliedRuntimeProfileTuning) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
+  config->engine.dynamic_batching = Config::Engine::DynamicBatching{};
+  Config::RuntimeProfile profile;
+  profile.id = "larger-gpu";
+  profile.eligibility.minimum_total_device_memory_bytes = 1;
+  profile.overlay.dynamic_batching.max_batch_size = 12;
+  profile.overlay.dynamic_batching.max_scheduled_tokens = 3072;
+  config->runtime_profiles.push_back(std::move(profile));
+  ApplyRuntimeProfile(*config, 1);
+  config->runtime_profiles.clear();
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  auto engine = MakeDoublesEngine(model, /*capacity=*/12, EosToken(*model));
+
+  const auto capabilities = engine.engine->GetCapabilities();
+
+  EXPECT_EQ(capabilities.configured_max_batch_size, 12u);
+  EXPECT_EQ(capabilities.max_scheduled_tokens, 3072u);
+}
+
+TEST_F(RequestLifecycleTest, CapabilitiesReportDefaultStaticBatchSetting) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
+  config->engine.dynamic_batching.reset();
+  config->engine.static_batching.reset();
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  auto engine = MakeStaticDoublesEngine(model, /*capacity=*/4, EosToken(*model));
+
+  const auto capabilities = engine.engine->GetCapabilities();
+
+  EXPECT_EQ(capabilities.configured_max_batch_size, 4u);
+  EXPECT_EQ(capabilities.max_scheduled_tokens, 0u);
+  EXPECT_EQ(capabilities.max_request_length, 0u);
+
+  const auto configured_max_length = static_cast<size_t>(model->config_->search.max_length);
+  EXPECT_NO_THROW(engine.engine->CreateRequest());
+
+  RequestOptions boundary_options;
+  boundary_options.max_session_tokens = configured_max_length;
+  EXPECT_NO_THROW(engine.engine->CreateRequest(boundary_options));
+
+  RequestOptions excessive_options;
+  excessive_options.max_session_tokens = configured_max_length + 1;
+  try {
+    static_cast<void>(engine.engine->CreateRequest(excessive_options));
+    FAIL() << "Expected max_session_tokens above search.max_length to fail.";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string(error.what()).find("model-configured search.max_length"),
+              std::string::npos);
+    EXPECT_EQ(std::string(error.what()).find("max_request_length"),
+              std::string::npos);
+  }
+}
+
+TEST_F(RequestLifecycleTest, CapabilitiesReportExplicitStaticBatchSetting) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
+  config->engine.dynamic_batching.reset();
+  config->engine.static_batching = Config::Engine::StaticBatching{8};
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  auto engine = MakeStaticDoublesEngine(model, /*capacity=*/8, EosToken(*model));
+
+  const auto capabilities = engine.engine->GetCapabilities();
+
+  EXPECT_EQ(capabilities.configured_max_batch_size, 8u);
+  EXPECT_EQ(capabilities.max_scheduled_tokens, 0u);
+  EXPECT_EQ(capabilities.max_request_length, 0u);
 }
 
 TEST_F(RequestLifecycleTest, StaticEngineDoesNotLoadDisabledMtpHead) {

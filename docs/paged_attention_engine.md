@@ -106,6 +106,64 @@ Dynamic batching limits scheduled rows with `max_batch_size` and limits the tota
 query tokens in one model run with `max_scheduled_tokens`. The token limit defaults
 to 2048. Both limits are positive and independent.
 
+### Prefix caching
+
+Dynamic batching reuses complete prompt blocks from earlier requests by default.
+Set `engine.dynamic_batching.prefix_caching` to `false` to disable it. A lookup
+compares both the token contents and the complete parent-block identity; hash
+equality alone is never accepted as a match. The final prompt token always runs
+through the model, and partial blocks are never shared.
+
+The cache retains indexed blocks after their producing request releases them.
+Every matching full block may be adopted. Retained blocks use the same paged KV
+pool as active requests and are reclaimed in least-recently-used order under
+admission pressure; prefix retention never reserves a separate share of the
+pool. Blocks being adopted by an in-flight reservation are protected by
+reservation-owned references.
+
+Prefix adoption participates in the normal Engine transaction. Planning stages
+the request's processed-token cursor at the matched block boundary, reservation
+takes references to the shared blocks, rollback restores the cursor and releases
+those references, and commit transfers them to the request's block table. Newly
+completed full blocks are indexed only after the cache and request transaction
+commits.
+
+For a hybrid target with `fixed_conv` or `fixed_recurrent` groups, a paged-block
+match is usable only when the same prefix identity owns an immutable checkpoint
+of every fixed-state tensor. The fixed-state pool preallocates
+`max_batch_size` checkpoint rows before the paged cache is sized. A successful
+prefill step whose committed boundary is block-aligned copies the request's
+published fixed state into one of those rows. Checkpoint payloads have their own
+bounded LRU lifetime: dropping one leaves the paged blocks indexed, but a hybrid
+lookup skips paged-only descendants and adopts the deepest boundary where both
+components remain available. Hybrid targets index only blocks completed during
+prefill; decode and reasoning steps do not publish paged identities without matching
+fixed-state checkpoints.
+
+Hybrid prefix caching does not reduce the configured prefill chunk size. A
+checkpoint is attached only when a successful step's committed endpoint is
+block-aligned; paged-only descendants remain indexed but are not adoptable by a
+hybrid request. After adoption, prefill resumes at that checkpoint and may
+process the full configured chunk, so later checkpoint positions can shift
+relative to the original request's chunk boundaries. A match pins both its
+paged blocks and fixed checkpoint through reservation. The fixed reservation
+gathers the checkpoint into the newly admitted row instead of gathering zero,
+and its baseline committed-token count is the same as the paged match. Existing
+prepare/publish ordering then advances both components atomically; rollback
+discards the provisional fixed row, releases adopted paged references, and
+restores the request cursor.
+
+The implementation applies only to newly admitted requests and does not splice
+a prefix into resident continuation turns. It still rejects target
+sliding-window KV rings and auxiliary caches that mirror every target block when
+`prefix_caching` is explicitly set to `true`. Existing configurations that omit
+the setting keep loading with caching disabled for those layouts, and builders
+emit an explicit `false` opt-out. A
+fixed-size Engine-hosted auxiliary pool can coexist with target prefix caching.
+In particular, a DFlash 2 drafter that did not process the skipped prefix cannot
+join at a nonzero position, so that request keeps the valid target hit and runs
+target-only rather than shortening the target boundary.
+
 Without dynamic batching, the engine uses the older static batching path. Static batching allocates and advances a batch as a unit. It does not use the transaction flow described below.
 
 ## Decoder state manifest
@@ -186,7 +244,9 @@ generated token below the Request's `max_session_tokens`.
 `max_session_tokens` is the cumulative total
 sequence limit for the entire Request: the initial
 prompt, generated output, and every continuation input all count against the same limit. It defaults
-to the model-configured `search.max_length`, cannot exceed it, and is not reset by `BeginTurn()`.
+to the model-configured `search.max_length` capped by a nonzero Engine `max_request_length`. An
+explicit value may exceed `search.max_length` but cannot exceed a nonzero `max_request_length`. When
+the capability is zero, `search.max_length` remains the ceiling. The limit is not reset by `BeginTurn()`.
 It is the Request's one session limit: Search completion, static cache sizing, speculative bounds,
 and the `MaxSessionTokens` finish reason all read the same value.
 
@@ -198,10 +258,11 @@ do not count. A later turn may begin whenever its input still leaves room for at
 token under the cumulative limit, and it may choose a different per-Turn limit.
 
 `OgaRequestOptions` is an opaque, reusable handle carrying resident-session policy only. Null
-options and zero `max_session_tokens` use the model-configured `search.max_length`, which normally
-defaults from the model context length. Request creation takes no generation parameters at all: the
-Engine builds each Request's private, Model-derived search configuration itself, forcing one
-sequence and one beam.
+options and zero `max_session_tokens` use the model-configured `search.max_length` capped by the
+Engine's `max_request_length` when that capability is nonzero. A zero capability preserves
+`search.max_length` as both the default and ceiling. Request creation takes no generation parameters
+at all: the Engine builds each Request's private, Model-derived search configuration itself, forcing
+one sequence and one beam.
 
 `OgaTurnOptions` is opaque and reusable and carries the whole generation policy of one turn;
 `BeginTurn()` snapshots it. See "Per-turn generation policy" below.
@@ -221,7 +282,7 @@ the Model:
   contract and its next tokens would never be copied back. Forcing it to one would decode something
   the caller never asked for, so it is rejected instead:
   `config.overlay('{"search": {"num_beams": 1}}')`, and batch across Requests.
-- A `search.max_length` of zero or less, since it is the Request's session ceiling.
+- A `search.max_length` of zero or less, since it supplies the default Request length.
 - A nonzero `search.chunk_size` when static batching is selected. Chunking is an Engine/model
   scheduler policy, so this is rejected at Engine creation; disable it with
   `config.overlay('{"search": {"chunk_size": 0}}')`.
@@ -230,10 +291,11 @@ the Model:
 wider configured batch simply means "configured for the classic Generator"; the Request derives its
 own single-row search and decodes exactly one sequence either way.
 
-The same overlay route raises the session ceiling where that is what the caller wants: because
-`max_session_tokens` cannot exceed the model-configured `search.max_length`, a model whose
-`search.max_length` is lower than the context length its cache can serve is raised with
-`config.overlay('{"search": {"max_length": <tokens>}}')` before the Model is created.
+`search.max_length` supplies the default Request length. A caller may set a larger
+`max_session_tokens` explicitly when a nonzero `EngineCapabilities.max_request_length` permits it.
+The capability is derived from the resolved target cache and model context after Engine
+construction. Zero means that cache-backed ceiling is unavailable, so `search.max_length` remains
+the ceiling.
 
 ### `Active`
 
@@ -1646,12 +1708,21 @@ still get them, and the retry budget is therefore spent on real drafter failures
 failures disable the drafter for the Engine, and a proposal contract violation disables it at once.
 `dflash2_failures` and `dflash2_disables` report those events.
 
-Automatic block drafting is greedy-only. A request joins on its position-zero step only when the
-current turn is greedy. If a sampled first turn executes that step, eligibility is not reconsidered
-and the request decodes without block drafts for the rest of its life. Once a request has joined,
-later sampled turns continue feeding their committed context into its cache without requesting
-drafts, so a subsequent greedy turn can resume drafting without a cache hole. These ingest-only
-steps still execute the drafter session to preserve that continuity.
+Automatic block drafting is greedy-only by default. A request joins on its position-zero step only
+when the current turn is greedy. If a sampled first turn executes that step, eligibility is not
+reconsidered and the request decodes without block drafts for the rest of its life. Once a request
+has joined, later sampled turns continue feeding their committed context into its cache without
+requesting drafts, so a subsequent greedy turn can resume drafting without a cache hole. These
+ingest-only steps still execute the drafter session to preserve that continuity.
+
+Set `model.dflash2.independent_sampling` to opt sampled turns into the reference DFlash proposal
+contract. Each draft position then samples independently from the drafter's sparse top-k
+distribution, and target verification uses the probability ratio $\min(1, p(x) / q(x))$ with the
+residual distribution after rejection. The drafter distribution defaults to temperature `0.1`,
+top-p `0.95`, and min-p `0.3`; override them with `sampling_temperature`, `sampling_top_p`, and
+`sampling_min_p` in the same section. Min-p truncates only the proposal distribution; verification
+continues to use the target model's canonical distribution for the current turn. The learned-lattice
+greedy path remains unchanged when this option is absent or false.
 
 A windowed block drafter (DFlash 2) owns a fixed ring of cache blocks per maximum batch row, so its
 pool is sized for `max_batch_size` rings and its footprint is independent of context length. With

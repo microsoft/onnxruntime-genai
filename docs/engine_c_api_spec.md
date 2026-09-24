@@ -69,9 +69,10 @@ Rules:
 
 - `OgaRequestOptions` is an opaque, reusable, caller-owned handle.
 - Conversion from `uint64_t` to internal sizes is checked before mutation.
-- Null options or zero `max_session_tokens` use the model-configured `search.max_length`, which
-  normally defaults from the model context length.
-- A nonzero `max_session_tokens` may not exceed that model-configured ceiling.
+- Null options or zero `max_session_tokens` use model-configured `search.max_length` capped by a
+  nonzero Engine `max_request_length`.
+- A nonzero `max_session_tokens` may not exceed `max_request_length` when the capability is nonzero.
+  When it is zero, `search.max_length` remains the ceiling.
 - This is the Request's one session limit: Search completion, cache sizing, speculative bounds, and
   the `MaxSessionTokens` finish reason all use it.
 - The value counts the initial input, generated tokens, and continuation input over the complete
@@ -425,7 +426,8 @@ produce `Failed` events. Capacity pressure is operational and does not set `Fail
 
 `prompt_tokens` is the number of input IDs accepted by the current `BeginTurn`.
 `generated_tokens` is the number of visible output tokens committed for the Turn.
-`cached_prompt_tokens` is currently always zero; no prefix-cache hit accounting is exposed.
+`cached_prompt_tokens` is the number of current-turn prompt tokens restored from an Engine-local
+prefix entry. It is zero when no prefix was adopted, including resident continuation turns.
 Scheduler `max_scheduled_tokens` is not usage: it is a per-step budget shared across Requests.
 
 Event getters require non-null event and output pointers and return `OgaResult*` on misuse. They
@@ -548,8 +550,8 @@ sampling, guidance, or stop strings is fixed at creation.
 
 Creation validates the model configuration it is about to derive from, before minting a Request:
 
-- `search.max_length` must be greater than zero. It is the ceiling for `max_session_tokens`, which
-  defaults to it and may be lower but never higher.
+- `search.max_length` must be greater than zero. It is the default for `max_session_tokens`, capped
+  by the Engine's `max_request_length` when that capability is nonzero.
 - `search.num_beams` must be one. Beam search is rejected rather than silently forced, because the
   Request would otherwise decode something the caller never asked for. `search.batch_size` is not
   rejected: the Engine batches Requests rather than rows, so it simply derives its own single-row
@@ -560,7 +562,38 @@ Creation validates the model configuration it is about to derive from, before mi
 The rejections name a route the caller can take without editing the model directory: overlay the
 value on the `Config` before creating the Model, for example
 `OgaConfigOverlay(config, "{\"search\":{\"num_beams\":1}}")`. Raising the session ceiling of a model
-whose `search.max_length` is lower than its context length uses the same overlay route.
+above `search.max_length` uses an explicit Request option and is supported only when bounded by a
+nonzero `max_request_length`.
+
+### Engine capabilities
+
+`OgaEngineGetCapabilities` returns a caller-owned opaque snapshot. The snapshot reports the
+effective configured maximum batch size and dynamic scheduler token budget after runtime-profile
+selection. For static batching, the maximum batch size is the configured value, or the default of
+four when no `static_batching` entry exists; it does not account for any lower operational limit in
+the current static scheduler. The snapshot also reports the maximum Request length after
+runtime-profile selection and cache construction. The call follows the Engine owner-thread rule.
+
+`max_request_length` is the maximum logical token length one Request can reach when it has exclusive
+use of the target paged cache. It includes the final sampled token that has not yet been written to
+the KV cache and is capped by the model context length. Auxiliary MTP and DFlash cache allocations
+are reflected in the resolved target pool. Draft width may narrow near this boundary. The value is
+not current free capacity and does not guarantee immediate admission while other Requests are
+resident. Static Engines report zero.
+Zero means the cache-backed ceiling is unavailable, so Request options retain the existing
+`search.max_length` default and ceiling.
+
+```c
+OgaEngineCapabilities* capabilities = NULL;
+OgaCheckResult(OgaEngineGetCapabilities(engine, &capabilities));
+size_t max_batch_size =
+  OgaEngineCapabilitiesGetConfiguredMaxBatchSize(capabilities);
+size_t max_scheduled_tokens =
+  OgaEngineCapabilitiesGetMaxScheduledTokens(capabilities);
+uint64_t max_request_length =
+  OgaEngineCapabilitiesGetMaxRequestLength(capabilities);
+OgaDestroyEngineCapabilities(capabilities);
+```
 
 Per-Turn generation policy is validated separately, at each `OgaRequestBeginTurn`, before the Turn
 mutates the Request. Creation itself does not queue work.

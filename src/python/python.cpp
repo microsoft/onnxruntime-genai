@@ -675,12 +675,19 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   pybind11::class_<OgaImages>(m, "Images")
       .def_static("open", [](pybind11::args image_paths) {
         std::vector<std::string> image_paths_string;
-        std::vector<const char*> image_paths_vector;
+        image_paths_string.reserve(image_paths.size());
         for (auto image_path : image_paths) {
           if (!pybind11::isinstance<pybind11::str>(image_path))
             throw std::runtime_error("Image paths must be strings.");
           image_paths_string.push_back(image_path.cast<std::string>());
-          image_paths_vector.push_back(image_paths_string.back().c_str());
+        }
+
+        // Take the pointers only once the strings have stopped moving: a short string keeps its
+        // characters inside the string object, so growing the vector would dangle them.
+        std::vector<const char*> image_paths_vector;
+        image_paths_vector.reserve(image_paths_string.size());
+        for (const auto& image_path : image_paths_string) {
+          image_paths_vector.push_back(image_path.c_str());
         }
 
         return OgaImages::Load(image_paths_vector);
@@ -703,13 +710,19 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   pybind11::class_<OgaAudios>(m, "Audios")
       .def_static("open", [](pybind11::args audio_paths) {
         std::vector<std::string> audio_paths_string;
-        std::vector<const char*> audio_paths_vector;
-
+        audio_paths_string.reserve(audio_paths.size());
         for (const auto& audio_path : audio_paths) {
           if (!pybind11::isinstance<pybind11::str>(audio_path))
             throw std::runtime_error("Audio paths must be strings.");
           audio_paths_string.push_back(audio_path.cast<std::string>());
-          audio_paths_vector.push_back(audio_paths_string.back().c_str());
+        }
+
+        // Take the pointers only once the strings have stopped moving: a short string keeps its
+        // characters inside the string object, so growing the vector would dangle them.
+        std::vector<const char*> audio_paths_vector;
+        audio_paths_vector.reserve(audio_paths_string.size());
+        for (const auto& audio_path : audio_paths_string) {
+          audio_paths_vector.push_back(audio_path.c_str());
         }
 
         return OgaAudios::Load(audio_paths_vector);
@@ -832,8 +845,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       }))
       .def("set_max_session_tokens", &OgaRequestOptions::SetMaxSessionTokens,
            "Total tokens (prompt plus generated, across every turn) the request may reach. Zero "
-           "restores the model-configured search.max_length, which is also the ceiling for an "
-           "explicit value.");
+           "uses the configured default capped by a nonzero "
+           "EngineCapabilities.max_request_length.");
 
   pybind11::class_<OgaTurnOptions>(m, "TurnOptions")
       .def(pybind11::init([](OgaRequest& request) {
@@ -975,6 +988,17 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           },
           pybind11::return_value_policy::reference_internal);
 
+  pybind11::class_<OgaEngineCapabilities>(m, "EngineCapabilities")
+      .def_property_readonly(
+          "configured_max_batch_size",
+          &OgaEngineCapabilities::ConfiguredMaxBatchSize)
+      .def_property_readonly(
+          "max_scheduled_tokens",
+          &OgaEngineCapabilities::MaxScheduledTokens)
+      .def_property_readonly(
+          "max_request_length",
+          &OgaEngineCapabilities::MaxRequestLength);
+
   pybind11::class_<OgaEngine>(m, "Engine")
       .def(pybind11::init([](OgaModel& model) { return OgaEngine::Create(model); }))
       .def(
@@ -1003,6 +1027,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           },
           pybind11::arg("buffer"))
       .def("has_pending_requests", &OgaEngine::HasPendingRequests)
+      .def("get_capabilities", &OgaEngine::GetCapabilities)
       .def("max_draft_tokens_per_proposal", &OgaEngine::MaxDraftTokensPerProposal,
            "Speculative draft tokens a request may attach to one proposal; zero when unsupported.")
       .def("get_speculative_stats", [](const OgaEngine& engine) { return ToSpeculativeStatsDict(*engine.GetSpeculativeStats()); }, "Return cumulative speculative-decoding telemetry.");

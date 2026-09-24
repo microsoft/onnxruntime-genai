@@ -131,6 +131,7 @@ def _load_builder_cli_module(monkeypatch):
         "GraniteModel",
         "HunyuanDenseV1Model",
         "InternLM2Model",
+        "LFM2AudioModel",
         "LFM2Model",
         "LFM2MoEModel",
         "LlamaModel",

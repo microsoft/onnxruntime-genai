@@ -468,6 +468,34 @@ def _run_check_extra_options(
     )
 
 
+def test_structured_unquantized_moe_completes_cli_option_parsing(monkeypatch):
+    fake_config = types.SimpleNamespace(tie_word_embeddings=True, layer_types=None)
+    monkeypatch.setattr(
+        builder_module,
+        "get_hf_details",
+        lambda *_args, **_kwargs: {
+            "extra_kwargs": {},
+            "hf_name": "fake-model",
+            "hf_config": fake_config,
+        },
+    )
+
+    options = builder_module.parse_extra_options(
+        model_name="fake-model",
+        input_path="/tmp/fake-model",
+        output_dir="/tmp/fake-output",
+        precision="int4",
+        execution_provider="cuda",
+        cache_dir="/tmp/fake-cache",
+        extra_options=[],
+        builder_config_version=2,
+        target_options={"quant_config": {"moe": {"type": "none"}}},
+    )
+
+    assert options["_quant_config"].moe.type == "none"
+    assert "moe_quant_type" not in options
+
+
 def test_mtp_quant_config_json_is_parsed(monkeypatch):
     options = {"mtp_quant_config": '{"io_dtype":"bf16","weights":{"type":"int4"}}'}
 
@@ -475,6 +503,21 @@ def test_mtp_quant_config_json_is_parsed(monkeypatch):
 
     assert options["mtp_quant_config"].io_dtype == "bf16"
     assert options["mtp_quant_config"].weights.type == "int4"
+    assert options["mtp_quant_config"].checkpoint_policy == "requantize"
+
+
+def test_mtp_quant_config_typed_dict_preserves_explicit_policy(monkeypatch):
+    options = {
+        "mtp_quant_config": {
+            "checkpoint_policy": "preserve",
+            "io_dtype": "bf16",
+            "weights": {"type": "int4"},
+        }
+    }
+
+    _run_check_extra_options(monkeypatch, options)
+
+    assert options["mtp_quant_config"].checkpoint_policy == "preserve"
 
 
 def test_parse_extra_options_preserves_equals_inside_json(monkeypatch):
@@ -688,6 +731,7 @@ def test_hidden_state_shape_defaults_to_non_paged_for_bare_model():
 def test_hidden_state_shape_uses_flat_token_axis_for_paged_model():
     model = Model.__new__(Model)
     model.use_paged_attention = True
+    model.hidden_rows_dim = "num_tokens"
     model.hidden_size = 64
     assert model.make_hidden_state_shape() == ["num_tokens", 64]
     assert model.make_hidden_state_shape(seq_dim="batch_size") == ["batch_size", 64]
@@ -697,7 +741,7 @@ def test_hidden_state_shape_uses_flat_token_axis_for_paged_model():
     "extra_options, logits_first_dim",
     [
         ({"include_hidden_states": True}, "num_tokens"),
-        ({"include_hidden_states": True, "prune_lm_head": True}, "batch_size"),
+        ({"include_hidden_states": True, "prune_lm_head": True}, "num_logits"),
     ],
 )
 def test_paged_attention_uses_flat_hidden_states_output_shape(extra_options, logits_first_dim):
@@ -728,24 +772,27 @@ def test_paged_attention_uses_flat_hidden_states_output_shape(extra_options, log
 
     assert model.output_shapes["hidden_states"] == ["num_tokens", model.hidden_size]
     assert model.output_shapes["logits"] == [logits_first_dim, model.vocab_size]
-    assert model.prune_lm_head is (logits_first_dim == "batch_size")
+    assert model.prune_lm_head is (logits_first_dim == "num_logits")
 
 
 @pytest.mark.parametrize(
-    "prune_lm_head, logits_first_dim, expected_rows",
+    "prune_lm_head, logits_first_dim, logits_indices, expected_rows",
     [
-        (True, "batch_size", [1, 4, 5]),
-        (False, "num_tokens", [0, 1, 2, 3, 4, 5]),
+        (True, "num_logits", [1, 2, 3, 5], [1, 2, 3, 5]),
+        (False, "num_tokens", None, [0, 1, 2, 3, 4, 5]),
     ],
 )
-def test_paged_attention_lm_head_pruning(monkeypatch, tmp_path, prune_lm_head, logits_first_dim, expected_rows):
+def test_paged_attention_lm_head_pruning(
+    monkeypatch, tmp_path, prune_lm_head, logits_first_dim, logits_indices, expected_rows
+):
     model = Model.__new__(Model)
     model.use_paged_attention = True
+    model.hidden_rows_dim = "num_tokens"
     model.prune_lm_head = prune_lm_head
     model.io_dtype = ir.DataType.FLOAT
     model.hidden_size = 3
     model.vocab_size = 3
-    model.input_names = {"cumulative_sequence_lengths": "cumulative_sequence_lengths"}
+    model.input_names = {"logits_indices": "logits_indices"}
     model.output_types = {"logits": ir.DataType.FLOAT}
     model.output_shapes = {"logits": [logits_first_dim, model.vocab_size]}
     model.layernorm_attrs = {"output_0": "hidden_states"}
@@ -761,7 +808,8 @@ def test_paged_attention_lm_head_pruning(monkeypatch, tmp_path, prune_lm_head, l
     )
     model.model = ir.Model(graph, ir_version=10)
     graph.inputs.append(model.make_value("hidden_states", ir.DataType.FLOAT, ["num_tokens", model.hidden_size]))
-    graph.inputs.append(model.make_value("cumulative_sequence_lengths", ir.DataType.INT32, ["batch_size + 1"]))
+    if prune_lm_head:
+        graph.inputs.append(model.make_value("logits_indices", ir.DataType.INT32, ["num_logits"]))
 
     def make_matmul(_lm_head, name, root_input, **_kwargs):
         model.make_node("Identity", inputs=[root_input], outputs=["logits"], name=name)
@@ -777,18 +825,220 @@ def test_paged_attention_lm_head_pruning(monkeypatch, tmp_path, prune_lm_head, l
     session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
 
     hidden_states = np.arange(18, dtype=np.float32).reshape(6, model.hidden_size)
-    cumulative_sequence_lengths = np.array([0, 2, 5, 6], dtype=np.int32)
+    feeds = {"hidden_states": hidden_states}
+    if logits_indices is not None:
+        feeds["logits_indices"] = np.asarray(logits_indices, dtype=np.int32)
     (logits,) = session.run(
         None,
-        {
-            "hidden_states": hidden_states,
-            "cumulative_sequence_lengths": cumulative_sequence_lengths,
-        },
+        feeds,
     )
 
     np.testing.assert_array_equal(logits, hidden_states[expected_rows])
     assert session.get_outputs()[0].shape == [logits_first_dim, model.vocab_size]
     assert model.output_shapes["logits"] == [logits_first_dim, model.vocab_size]
+
+
+@pytest.mark.parametrize("include_hidden_states, prunes", [(False, True), (True, False)])
+def test_paged_rows_are_selected_before_the_final_norm(monkeypatch, tmp_path, include_hidden_states, prunes):
+    model = Model.__new__(Model)
+    model.use_paged_attention = True
+    model.hidden_rows_dim = "num_tokens"
+    model.prune_lm_head = True
+    model.include_hidden_states = include_hidden_states
+    model.io_dtype = ir.DataType.FLOAT
+    model.hidden_size = 3
+    model.vocab_size = 3
+    model.input_names = {"logits_indices": "logits_indices"}
+    model.output_types = {"logits": ir.DataType.FLOAT}
+    model.output_shapes = {"logits": ["num_logits", model.vocab_size]}
+    model.layernorm_attrs = {"root_input": "residual", "skip_input": "mlp_output"}
+    model.lm_head_attrs = {"scale": 1, "mask": None, "softcap": 0.0}
+    model.values = {}
+    model.node_names = set()
+    graph = ir.Graph(inputs=(), outputs=(), nodes=(), opset_imports={"": 21}, name="paged_rows_test")
+    model.model = ir.Model(graph, ir_version=10)
+    for name in ("residual", "mlp_output"):
+        graph.inputs.append(model.make_value(name, ir.DataType.FLOAT, ["num_tokens", model.hidden_size]))
+    graph.inputs.append(model.make_value("logits_indices", ir.DataType.INT32, ["num_logits"]))
+
+    assert model.prunes_hidden_rows() is prunes
+    if prunes:
+        model.make_selected_hidden_rows()
+    rows = model.make_hidden_state_shape()[0]
+    assert rows == ("num_logits" if prunes else "num_tokens")
+
+    # Stand-in for the final SkipLayerNorm: any row-wise op on the residual and the MLP output.
+    model.make_node(
+        "Add",
+        inputs=[model.layernorm_attrs["root_input"], model.layernorm_attrs["skip_input"]],
+        outputs=["final_norm"],
+        name="final_norm",
+    )
+    model.make_value("final_norm", ir.DataType.FLOAT, [rows, model.hidden_size])
+    model.layernorm_attrs["output_0"] = "final_norm"
+
+    def make_matmul(_lm_head, name, root_input, **_kwargs):
+        model.make_node("Identity", inputs=[root_input], outputs=["logits"], name=name)
+        model.make_value("logits", ir.DataType.FLOAT, ["num_logits", model.vocab_size])
+        return name
+
+    monkeypatch.setattr(model, "make_matmul", make_matmul)
+    model.make_lm_head(types.SimpleNamespace(bias=None))
+    graph.outputs.append(model.make_value("logits"))
+
+    gathers = [node for node in graph if node.op_type == "Gather"]
+    assert len(gathers) == (2 if prunes else 1)
+    assert model.make_hidden_state_shape()[0] == "num_tokens"
+
+    model_path = tmp_path / "paged_rows.onnx"
+    ir.save(model.model, model_path)
+    session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+    residual = np.arange(18, dtype=np.float32).reshape(6, model.hidden_size)
+    mlp_output = 100 * residual
+    indices = np.array([1, 2, 5], dtype=np.int32)
+    (logits,) = session.run(None, {"residual": residual, "mlp_output": mlp_output, "logits_indices": indices})
+
+    np.testing.assert_array_equal(logits, (residual + mlp_output)[indices])
+
+
+@pytest.mark.parametrize("layer_id, selects", [(0, False), (1, True)])
+def test_paged_rows_are_selected_after_the_last_attention(monkeypatch, layer_id, selects):
+    model = Model.__new__(Model)
+    model.use_paged_attention = True
+    model.prune_lm_head = True
+    model.include_hidden_states = False
+    model.num_layers = 2
+    model.moe_attrs = {"num_experts": 0}
+    model.layernorm_attrs = {"first_layernorm": False, "last_layernorm": False, "simple": True, "output_0": "norm"}
+    calls = []
+    monkeypatch.setattr(model, "make_layernorm", lambda _id, _norm, skip, simple, location: calls.append(location))
+    monkeypatch.setattr(model, "make_attention", lambda *_args, **_kwargs: calls.append("attention"))
+    monkeypatch.setattr(model, "make_selected_hidden_rows", lambda: calls.append("select"))
+    monkeypatch.setattr(model, "make_mlp", lambda *_args, **_kwargs: calls.append("mlp"))
+    layer = types.SimpleNamespace(input_layernorm=None, self_attn=None, post_attention_layernorm=None, mlp=None)
+
+    model.make_layer(layer_id, layer)
+
+    expected = ["input", "attention", "post_attention", "mlp"]
+    if selects:
+        expected.insert(2, "select")
+    assert calls == expected
+
+
+@pytest.mark.parametrize("layer_id, selects", [(0, False), (1, True)])
+def test_phi_selects_rows_before_final_mlp_and_residual(monkeypatch, layer_id, selects):
+    model_type = importlib.import_module("models.builders.phi").PhiModel
+    model = model_type.__new__(model_type)
+    model.use_paged_attention = True
+    model.prune_lm_head = True
+    model.include_hidden_states = False
+    model.hidden_rows_dim = "num_tokens"
+    model.num_layers = 2
+    model.hidden_size = 3
+    model.io_dtype = ir.DataType.FLOAT
+    model.input_names = {"logits_indices": "logits_indices"}
+    model.values = {"norm": types.SimpleNamespace(dtype=ir.DataType.FLOAT)}
+    model.layernorm_attrs = {
+        "first_layernorm": False,
+        "last_layernorm": False,
+        "simple": False,
+        "output_0": "norm",
+        "skip_input": "residual",
+    }
+    calls = []
+    monkeypatch.setattr(model, "make_layernorm", lambda *_args, **_kwargs: calls.append("input"))
+    monkeypatch.setattr(model, "make_attention", lambda *_args, **_kwargs: calls.append("attention"))
+    monkeypatch.setattr(model, "make_mlp", lambda _id, _mlp, root_input: calls.append(("mlp", root_input)))
+    monkeypatch.setattr(model, "make_gather", lambda *_args, **_kwargs: calls.append("gather"))
+
+    def select_rows():
+        calls.append("select")
+        model.hidden_rows_dim = "num_logits"
+
+    monkeypatch.setattr(model, "make_selected_hidden_rows", select_rows)
+    monkeypatch.setattr(
+        model, "make_add", lambda _name, _inputs, **kwargs: calls.append(("residual", kwargs["shape"][0]))
+    )
+    layer = types.SimpleNamespace(input_layernorm=None, self_attn=None, mlp=None)
+
+    model.make_layer(layer_id, layer)
+
+    mlp_input = "/model/layers.1/mlp_input/Gather/output_0" if selects else "norm"
+    expected = ["input", "attention", ("mlp", mlp_input), ("residual", "num_logits" if selects else "num_tokens")]
+    if selects:
+        expected[2:2] = ["select", "gather"]
+    assert calls == expected
+
+
+@pytest.mark.parametrize(
+    "model_name, uses_conv", [("gemma", False), ("granite", False), ("lfm2", False), ("lfm2", True)]
+)
+@pytest.mark.parametrize("layer_id", [0, 1])
+def test_paged_layer_overrides_select_rows_before_final_feed_forward(monkeypatch, model_name, uses_conv, layer_id):
+    module_name, class_name = {
+        "gemma": ("gemma", "Gemma2Model"),
+        "granite": ("granite", "GraniteModel"),
+        "lfm2": ("lfm2", "LFM2Model"),
+    }[model_name]
+    model_type = getattr(importlib.import_module(f"models.builders.{module_name}"), class_name)
+    model = model_type.__new__(model_type)
+    model.use_paged_attention = True
+    model.prune_lm_head = True
+    model.include_hidden_states = False
+    model.hidden_rows_dim = "num_tokens"
+    model.num_layers = 2
+    model.hidden_size = 3
+    model.io_dtype = ir.DataType.FLOAT
+    model.residual_scale = 1
+    model.layer_types = ["full_attention", "conv" if uses_conv else "full_attention"]
+    model.layernorm_attrs = {
+        "first_layernorm": False,
+        "last_layernorm": False,
+        "simple": True,
+        "root_input": "residual",
+        "skip_input": "attention_output",
+        "output_0": "norm",
+        "cast": {"root_input": False, "output_0": False},
+    }
+    calls = []
+    monkeypatch.setattr(model, "make_layernorm", lambda _id, _norm, skip, simple, location: calls.append(location))
+    monkeypatch.setattr(model, "make_attention", lambda *_args, **_kwargs: calls.append("attention"))
+    monkeypatch.setattr(model, "make_mlp", lambda *_args, **_kwargs: calls.append("mlp"))
+    if model_name == "lfm2":
+        monkeypatch.setattr(model, "make_feed_forward", lambda *_args, **_kwargs: calls.append("feed_forward"))
+        monkeypatch.setattr(model, "make_short_conv", lambda *_args: calls.append("conv") or "conv_output")
+    monkeypatch.setattr(
+        model, "make_mul", lambda name, _inputs, **kwargs: calls.append((name[-5:], kwargs["shape"][0]))
+    )
+
+    def select_rows():
+        calls.append("select")
+        model.hidden_rows_dim = "num_logits"
+
+    monkeypatch.setattr(model, "make_selected_hidden_rows", select_rows)
+    layer = types.SimpleNamespace(
+        input_layernorm=None,
+        operator_norm=None,
+        self_attn=None,
+        conv=None,
+        post_attention_layernorm=None,
+        pre_feedforward_layernorm=None,
+        post_feedforward_layernorm=None,
+        ffn_norm=None,
+        mlp=None,
+    )
+
+    model.make_layer(layer_id, layer)
+
+    row_dim = "num_logits" if layer_id == 1 else "num_tokens"
+    expected = {
+        "gemma": ["input", "attention", "post_attention", "pre_feedforward", "mlp", "post_feedforward"],
+        "granite": ["input", "attention", ("Mul_1", row_dim), "post_attention", "mlp", ("Mul_2", row_dim)],
+        "lfm2": ["operator", "conv" if uses_conv and layer_id == 1 else "attention", "ffn", "feed_forward"],
+    }[model_name]
+    if layer_id == 1:
+        expected.insert(2, "select")
+    assert calls == expected
 
 
 @pytest.mark.parametrize(

@@ -93,6 +93,11 @@ struct CacheManager {
   // `attention_metadata`.
   virtual size_t BlockTableColumns() const { return 0; }
 
+  // Immutable target-cache geometry after profile selection, automatic sizing, and auxiliary
+  // cache deductions. Non-paged caches return zero.
+  virtual size_t TargetBlockCount() const { return 0; }
+  virtual size_t TargetBlockSize() const { return 0; }
+
   // Maximum query tokens one request can contribute to a step, or 0 when the cache imposes no
   // per-request limit. Sliding-window rings use this to prevent a step from overwriting live KV.
   virtual size_t MaxQueryTokensPerRequest() const { return 0; }
@@ -101,6 +106,13 @@ struct CacheManager {
   // roll a rejected draft back. A verify step runs 1 + drafts tokens, so a model with recurrent
   // state is capped by its checkpoint window.
   virtual size_t MaxDraftTokensPerStep() const { return 0; }
+  virtual std::shared_ptr<const PrefixCacheMatch> MatchPrefix(const Request&) {
+    return nullptr;
+  }
+  virtual void RecordDeferredPrefixMatches(size_t) noexcept {}
+  virtual void SealCommittedBlocks(const StepPlan&) {}
+  virtual void RecordPrefixPublicationRefusal() noexcept {}
+  virtual const PrefixCacheMetrics* PrefixMetrics() const { return nullptr; }
 
   // Immutable snapshot of the cache's block accounting for invariant validation and state
   // inspection. Caches that do not use paged blocks return an empty snapshot.
@@ -191,12 +203,24 @@ struct PagedCacheManager : CacheManager {
   size_t ResidentRequestCount() const override { return cache_allocated_requests_.size(); }
 
   size_t BlockTableColumns() const override { return key_value_cache_->BlockTableColumns(); }
+  size_t TargetBlockCount() const override { return key_value_cache_->MaxRequestBlockCount(); }
+  size_t TargetBlockSize() const override { return key_value_cache_->BlockSize(); }
 
-  size_t MaxQueryTokensPerRequest() const override {
-    return key_value_cache_->MaxQueryTokensPerRequest();
-  }
+  size_t MaxQueryTokensPerRequest() const override;
 
   size_t MaxDraftTokensPerStep() const override;
+  std::shared_ptr<const PrefixCacheMatch> MatchPrefix(
+      const Request& request) override;
+  void RecordDeferredPrefixMatches(size_t count) noexcept override {
+    key_value_cache_->RecordDeferredPrefixMatches(count);
+  }
+  void SealCommittedBlocks(const StepPlan& plan) override;
+  void RecordPrefixPublicationRefusal() noexcept override {
+    key_value_cache_->RecordPrefixPublicationRefusal();
+  }
+  const PrefixCacheMetrics* PrefixMetrics() const override {
+    return &key_value_cache_->PrefixMetrics();
+  }
 
   PagedCacheSnapshot Snapshot() const override { return key_value_cache_->Snapshot(); }
 

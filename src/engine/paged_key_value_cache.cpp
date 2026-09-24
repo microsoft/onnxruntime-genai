@@ -3,10 +3,12 @@
 
 #include "cache_manager.h"
 
+#include <algorithm>
 #include <limits>
 #include <numeric>
 #include <set>
 #include <string_view>
+#include <unordered_set>
 
 #include "../models/model_state_manifest.h"
 #include "sequence_positions.h"
@@ -406,9 +408,42 @@ size_t PagedKeyValueCacheBytesPerBlock(const std::shared_ptr<Model>& model) {
   return bytes;
 }
 
+bool ResolvePrefixCachingEnabled(const std::shared_ptr<Model>& model,
+                                 size_t auxiliary_bytes_per_block) {
+  const auto& batching = *model->config_->engine.dynamic_batching;
+  if (!batching.prefix_caching) {
+    return false;
+  }
+
+  const auto paged_group =
+      ResolvePagedKeyValueGroup(model->config_->model.decoder);
+  const auto windowed = WindowedLayers(model, paged_group);
+  const char* unsupported_layout = nullptr;
+  if (!model->config_->model.dflash2.filename.empty() &&
+      model->config_->model.dflash2.is_dspark) {
+    unsupported_layout =
+        "Prefix caching does not yet support an Engine-hosted DSpark drafter.";
+  } else if (auxiliary_bytes_per_block != 0) {
+    unsupported_layout =
+        "Prefix caching does not yet support an auxiliary cache that mirrors target blocks.";
+  } else if (!windowed.empty()) {
+    unsupported_layout =
+        "Prefix caching does not yet support sliding-window paged KV rings.";
+  }
+  if (!unsupported_layout) {
+    return true;
+  }
+  if (batching.prefix_caching_explicitly_set) {
+    throw std::runtime_error(unsupported_layout);
+  }
+  return false;
+}
+
 PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
                                        size_t auxiliary_bytes_per_block,
-                                       size_t auxiliary_reserved_memory_bytes)
+                                       size_t auxiliary_reserved_memory_bytes,
+                                       bool requires_prefix_checkpoint,
+                                       size_t max_prefix_checkpoints)
     : model_(model) {
   const auto& decoder = model->config_->model.decoder;
   const size_t block_size = model->config_->engine.dynamic_batching->block_size;
@@ -416,6 +451,8 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
   const auto paged_group = ResolvePagedKeyValueGroup(decoder);
   ValidateScaleBindings(decoder, paged_group);
   const auto dtype = KeyValueCacheType(model_, paged_group);
+  const bool prefix_caching_enabled =
+      ResolvePrefixCachingEnabled(model, auxiliary_bytes_per_block);
 
   const auto windowed = WindowedLayers(model, paged_group);
   size_t num_window_blocks = 0;
@@ -510,6 +547,13 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model,
     }
   }
   block_pool_ = std::make_unique<BlockPool>(block_size, num_blocks);
+  PrefixCacheOptions prefix_options;
+  prefix_options.enabled = prefix_caching_enabled;
+  prefix_options.max_blocks = num_blocks;
+  prefix_options.requires_checkpoint = requires_prefix_checkpoint;
+  prefix_options.max_checkpoints = max_prefix_checkpoints;
+  prefix_cache_ =
+      std::make_unique<PrefixCache>(*block_pool_, prefix_options);
   if (Windowed()) {
     window_block_pool_ = std::make_unique<BlockPool>(block_size, num_window_blocks);
   }
@@ -658,19 +702,51 @@ void PagedKeyValueCache::AppendTokens(std::shared_ptr<Request> request) {
 }
 
 void PagedKeyValueCache::Remove(std::shared_ptr<Request> request) {
-  RemovePagedCacheBlockTable(*block_pool_, window_block_pool_.get(),
-                             block_tables_, request.get());
-  RebuildBlockTableIndex();
+  ValidateRemove(request.get());
+  RemoveValidated(request.get());
 }
 
 void PagedKeyValueCache::ValidateRemove(const void* request_id) const {
-  ValidateRemovePagedCacheBlockTable(
-      *block_pool_, window_block_pool_.get(), block_tables_, request_id);
+  const auto table = std::find_if(
+      block_tables_.begin(), block_tables_.end(),
+      [request_id](const PagedCacheBlockTable& candidate) {
+        return candidate.RequestId() == request_id;
+      });
+  if (table == block_tables_.end()) {
+    return;
+  }
+
+  block_pool_->ValidateFree(table->Blocks());
+  if (window_block_pool_) {
+    window_block_pool_->ValidateFree(table->WindowBlocks());
+  }
 }
 
 void PagedKeyValueCache::RemoveValidated(const void* request_id) noexcept {
-  RemoveValidatedPagedCacheBlockTable(
-      *block_pool_, window_block_pool_.get(), block_tables_, request_id);
+  const auto table = std::find_if(
+      block_tables_.begin(), block_tables_.end(),
+      [request_id](const PagedCacheBlockTable& candidate) {
+        return candidate.RequestId() == request_id;
+      });
+  if (table == block_tables_.end()) {
+    return;
+  }
+
+  if (!block_pool_->CanFreeValidated(table->Blocks()) ||
+      (window_block_pool_ &&
+       !window_block_pool_->CanFreeValidated(table->WindowBlocks()))) {
+    std::terminate();
+  }
+  block_pool_->FreeValidated(table->Blocks());
+  if (window_block_pool_) {
+    window_block_pool_->FreeValidated(table->WindowBlocks());
+  }
+  table->blocks_.clear();
+  table->window_blocks_.clear();
+  if (table != block_tables_.end() - 1) {
+    *table = std::move(block_tables_.back());
+  }
+  block_tables_.pop_back();
   RebuildBlockTableIndex();
 }
 
@@ -693,9 +769,124 @@ size_t PagedKeyValueCache::CommittedSlots(
 }
 
 PagedCacheReservation PagedKeyValueCache::Reserve(std::span<const PagedCacheReservationRequest> requests) {
+  RetainedBlockReclaimer reclaimer{*prefix_cache_};
   return PagedCacheReservation{*block_pool_, block_tables_, requests,
                                window_block_pool_.get(), window_ring_blocks_,
-                               block_table_index_.get()};
+                               block_table_index_.get(), &reclaimer};
+}
+
+PrefixCacheMatch PagedKeyValueCache::MatchPrefix(
+    std::span<const int32_t> tokens, size_t max_adoptable_tokens) {
+  return prefix_cache_->Match(tokens, max_adoptable_tokens);
+}
+
+void PagedKeyValueCache::RecordPrefixAdoptions(
+    const PagedCacheReservation& reservation) noexcept {
+  for (const auto& delta : reservation.Deltas()) {
+    if (delta.adopted_block_count == 0) {
+      continue;
+    }
+    prefix_cache_->RecordAdoption(
+        std::span<const std::shared_ptr<Block>>{
+            reservation.AdoptedBlocks().data() +
+                delta.adopted_block_offset,
+            delta.adopted_block_count});
+  }
+}
+
+void PagedKeyValueCache::RecordDeferredPrefixMatches(size_t count) noexcept {
+  prefix_cache_->RecordDeferredMatches(count);
+}
+
+void PagedKeyValueCache::RecordPrefixPublicationRefusal() noexcept {
+  prefix_cache_->RecordPublicationRefusal();
+}
+
+bool PagedKeyValueCache::PrefixCachingEnabled() const {
+  return prefix_cache_->Enabled();
+}
+
+const PrefixCacheMetrics& PagedKeyValueCache::PrefixMetrics() const {
+  return prefix_cache_->Metrics();
+}
+
+void PagedKeyValueCache::SealCommittedBlocks(
+    const void* request_id, std::span<const int32_t> tokens) {
+  if (!prefix_cache_->Enabled()) {
+    return;
+  }
+  const auto table_index = block_table_index_->Find(request_id);
+  if (!table_index || *table_index >= block_tables_.size()) {
+    return;
+  }
+  auto& table = block_tables_[*table_index];
+  if (table.sealing_stopped_) {
+    return;
+  }
+  const size_t block_size = block_pool_->BlockSize();
+  const size_t full_blocks = table.committed_slots_ / block_size;
+  if (full_blocks <= table.sealed_blocks_) {
+    return;
+  }
+  if (tokens.size() < full_blocks * block_size) {
+    throw std::runtime_error(
+        "The request token mirror is shorter than its committed paged cache.");
+  }
+
+  auto parent = table.sealed_identity_;
+  for (size_t index = table.sealed_blocks_; index < full_blocks; ++index) {
+    auto registration = prefix_cache_->Register(
+        table.blocks_[index],
+        tokens.subspan(index * block_size, block_size),
+        parent);
+    if (!registration.identity) {
+      table.sealing_stopped_ = registration.StopsSealing();
+      break;
+    }
+    parent = std::move(registration.identity);
+    table.sealed_blocks_ = index + 1;
+    table.sealed_identity_ = parent;
+  }
+}
+
+bool PagedKeyValueCache::CanAttachPrefixCheckpoint(
+    const void* request_id, size_t token_count) const {
+  const auto table_index = block_table_index_->Find(request_id);
+  if (!table_index || *table_index >= block_tables_.size()) {
+    return false;
+  }
+  const auto& table = block_tables_[*table_index];
+  const size_t block_size = block_pool_->BlockSize();
+  return token_count != 0 &&
+         token_count == table.committed_slots_ &&
+         token_count % block_size == 0 &&
+         table.sealed_blocks_ == token_count / block_size &&
+         prefix_cache_->CanAttachCheckpoint(table.sealed_identity_);
+}
+
+bool PagedKeyValueCache::AttachPrefixCheckpoint(
+    const void* request_id,
+    std::shared_ptr<const FixedStatePrefixCheckpoint> checkpoint) {
+  if (!checkpoint ||
+      !CanAttachPrefixCheckpoint(request_id, checkpoint->TokenCount())) {
+    return false;
+  }
+  const auto table_index = block_table_index_->Find(request_id);
+  return prefix_cache_->AttachCheckpoint(
+      block_tables_[*table_index].sealed_identity_, std::move(checkpoint));
+}
+
+size_t PagedKeyValueCache::ReclaimPrefixCheckpoints(
+    size_t checkpoints_needed) {
+  return prefix_cache_->ReclaimCheckpoints(checkpoints_needed);
+}
+
+size_t PagedKeyValueCache::ReclaimablePrefixCheckpoints() const {
+  return prefix_cache_->ReclaimableCheckpoints();
+}
+
+bool PagedKeyValueCache::RequiresPrefixCheckpoint() const {
+  return prefix_cache_->Options().requires_checkpoint;
 }
 
 void PagedKeyValueCache::RebuildBlockTableIndex() noexcept {
@@ -723,7 +914,8 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
         "Step plan request limit exceeds the configured batch size.");
   }
 
-  const size_t available_blocks = block_pool_->AvailableBlocks();
+  const size_t available_blocks =
+      block_pool_->AvailableBlocks() + prefix_cache_->ReclaimableBlocks();
   const size_t available_window_blocks =
       Windowed() ? window_block_pool_->AvailableBlocks() : 0;
   size_t planned_blocks = 0;
@@ -736,14 +928,20 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
   struct CacheGrowth {
     size_t proposed_blocks{};
     size_t new_blocks{};
+    std::vector<size_t> claimed_retained_blocks;
   };
+  std::unordered_set<size_t> charged_retained_blocks;
   // Blocks the request has to own for this step. A chunked prefill is planned one chunk at a time,
   // but the blocks are taken for the whole sequence: admitting a prompt on the strength of its
   // first chunk and then losing the rest of the pool to another request would stall it part way
   // through, holding the blocks it already took. PagedCacheReservation reserves the same blocks.
   const auto calculate_growth = [&](const RequestStepPlan& entry,
                                     const PagedCacheBlockTable* table) {
-    const size_t committed_slots = table ? table->committed_slots_ : 0;
+    const size_t adopted_blocks =
+        entry.prefix_match ? entry.prefix_match->blocks.size() : 0;
+    const size_t committed_slots =
+        table ? table->committed_slots_
+              : (entry.prefix_match ? entry.prefix_match->token_count : 0);
     if (entry.target_cache_slots < committed_slots) {
       throw StepPlanningConsistencyError(
           "Step plan target precedes the committed cache boundary.");
@@ -751,12 +949,23 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
 
     const size_t reserved_slots =
         std::max(entry.whole_sequence_cache_slots, entry.target_cache_slots);
-    const size_t committed_blocks = table ? table->blocks_.size() : 0;
+    std::vector<size_t> claimed_retained_blocks;
+    if (entry.prefix_match) {
+      for (const auto& block : entry.prefix_match->blocks) {
+        if (block->RefCount() == 1 &&
+            charged_retained_blocks.count(block->Id()) == 0) {
+          claimed_retained_blocks.push_back(block->Id());
+        }
+      }
+    }
+    const size_t committed_blocks =
+        table ? table->blocks_.size() : adopted_blocks;
     const size_t committed_capacity = committed_blocks * block_pool_->BlockSize();
     const size_t additional_slots =
         reserved_slots > committed_capacity ? reserved_slots - committed_capacity : 0;
     const size_t new_blocks = block_pool_->BlocksNeeded(additional_slots);
-    return CacheGrowth{committed_blocks + new_blocks, new_blocks};
+    return CacheGrowth{committed_blocks + new_blocks, new_blocks,
+                       std::move(claimed_retained_blocks)};
   };
   const auto permanently_unserviceable = [&](const CacheGrowth& growth) {
     return growth.proposed_blocks > block_pool_->Capacity() ||
@@ -767,7 +976,11 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
                           const CacheGrowth& growth) {
     // Compact selected entries in place. Requests skipped for temporary capacity pressure remain
     // pending with their committed block tables untouched and can be reconsidered next Run().
-    planned_blocks += growth.new_blocks;
+    planned_blocks +=
+        growth.new_blocks + growth.claimed_retained_blocks.size();
+    charged_retained_blocks.insert(
+        growth.claimed_retained_blocks.begin(),
+        growth.claimed_retained_blocks.end());
     max_blocks_per_request =
         std::max(max_blocks_per_request, growth.proposed_blocks);
     if (selected_requests != request_index) {
@@ -811,7 +1024,9 @@ StepPlanningResult PagedKeyValueCache::PlanStepResources(StepPlan& plan) const {
          (committed_request_count + selected_new_requests >= max_batch_size_ ||
           (Windowed() &&
            (selected_new_requests + 1) * window_ring_blocks_ > available_window_blocks))) ||
-        planned_blocks + growth.new_blocks > available_blocks) {
+        planned_blocks + growth.new_blocks +
+                growth.claimed_retained_blocks.size() >
+            available_blocks) {
       capacity_deferred = true;
       continue;
     }
@@ -870,6 +1085,13 @@ PagedCacheSnapshot PagedKeyValueCache::Snapshot() const {
   snapshot.total_blocks = block_pool_->Capacity();
   snapshot.free_blocks = block_pool_->AvailableBlocks();
   snapshot.block_table_columns = block_table_columns_;
+  const auto owned_blocks = block_pool_->OwnedBlocks();
+  snapshot.blocks.reserve(owned_blocks.size());
+  for (const auto& block : owned_blocks) {
+    snapshot.blocks.push_back(CachedBlockSnapshot{
+        block->Id(), block->RefCount(), block->Size(),
+        block->IsFull(), block->HasIdentity()});
+  }
   snapshot.requests.reserve(block_tables_.size());
   for (const auto& block_table : block_tables_) {
     RequestBlockSnapshot request_snapshot;
@@ -908,6 +1130,11 @@ PagedCacheSnapshot PagedKeyValueCache::Snapshot(
   for (const auto& block : reservation.ReservedBlocks()) {
     snapshot.transaction_reserved_block_ids.push_back(block->Id());
   }
+  snapshot.transaction_adopted_block_ids.reserve(
+      reservation.AdoptedBlocks().size());
+  for (const auto& block : reservation.AdoptedBlocks()) {
+    snapshot.transaction_adopted_block_ids.push_back(block->Id());
+  }
   snapshot.window_blocks.transaction_reserved_block_ids.reserve(
       reservation.ReservedWindowBlocks().size());
   for (const auto& block : reservation.ReservedWindowBlocks()) {
@@ -924,6 +1151,12 @@ PagedCacheSnapshot PagedKeyValueCache::Snapshot(
     for (size_t i = 0; i < delta.reserved_block_count; ++i) {
       request_reservation.reserved_block_ids.push_back(
           reservation.ReservedBlocks()[delta.reserved_block_offset + i]->Id());
+    }
+    request_reservation.adopted_block_ids.reserve(
+        delta.adopted_block_count);
+    for (size_t i = 0; i < delta.adopted_block_count; ++i) {
+      request_reservation.adopted_block_ids.push_back(
+          reservation.AdoptedBlocks()[delta.adopted_block_offset + i]->Id());
     }
     snapshot.reservations.push_back(std::move(request_reservation));
   }

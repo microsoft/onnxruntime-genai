@@ -174,6 +174,7 @@ class Model:
             "cumulative_sequence_lengths": "cumulative_sequence_lengths",                                                            # For paged attention models
             "past_sequence_lengths": "past_sequence_lengths",                                                                        # For paged attention models
             "attention_metadata": "attention_metadata",                                                                              # For paged attention models
+            "logits_indices": "logits_indices",                                                                                      # For paged attention models with a pruned LM head
         }
         self.input_types = {
             "input_ids": ir.DataType.INT64,                                                                                          # For standard models
@@ -189,6 +190,7 @@ class Model:
             "cumulative_sequence_lengths": ir.DataType.INT32,                                                                        # For paged attention models
             "past_sequence_lengths": ir.DataType.INT32,                                                                              # For paged attention models
             "attention_metadata": ir.DataType.INT32,                                                                                 # For paged attention models
+            "logits_indices": ir.DataType.INT32,                                                                                     # For paged attention models with a pruned LM head
         }
         self.input_shapes = {
             "input_ids": ["batch_size", "sequence_length"],                                                                          # For standard models
@@ -215,6 +217,7 @@ class Model:
             "cumulative_sequence_lengths": ["batch_size + 1"],                                                                       # For paged attention models
             "past_sequence_lengths": ["batch_size"],                                                                                 # For paged attention models
             "attention_metadata": [3],                                                                                               # For paged attention models. Static shape: a tuple of scalars, not a per-sequence tensor.
+            "logits_indices": ["num_logits"],                                                                                        # For paged attention models with a pruned LM head
         }
         self.make_inputs_init()
 
@@ -549,6 +552,9 @@ class Model:
         }
 
     def make_inputs_init(self):
+        # Row dim of paged hidden states; "num_logits" once the LM head's rows have been selected.
+        self.hidden_rows_dim = "num_tokens"
+
         # Manage the inputs for the embedding
         self.exclude_embeds = self.extra_options.get("exclude_embeds", False)
         if self.exclude_embeds:
@@ -571,6 +577,8 @@ class Model:
                 del self.input_names["attention_mask"]
             if not self.has_windowed_paged_layers():
                 del self.input_names["block_table_windowed"]
+            if not self.extra_options.get("prune_lm_head", False):
+                del self.input_names["logits_indices"]
         else:
             for name in [
                 "block_table",
@@ -578,6 +586,7 @@ class Model:
                 "cumulative_sequence_lengths",
                 "past_sequence_lengths",
                 "attention_metadata",
+                "logits_indices",
             ]:
                 del self.input_names[name]
 
@@ -621,7 +630,7 @@ class Model:
             self.output_shapes["present.key"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
             self.output_shapes["present.value"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
             self.output_shapes["hidden_states"] = ["num_tokens", self.hidden_size]
-            logits_first_dim = "batch_size" if self.prune_lm_head else "num_tokens"
+            logits_first_dim = "num_logits" if self.prune_lm_head else "num_tokens"
             self.output_shapes["logits"] = [logits_first_dim, self.vocab_size]
 
         if not (self.include_hidden_states or self.exclude_lm_head):
@@ -1073,13 +1082,58 @@ class Model:
 
         # Resolve quant config
         self.quantization_algo = self.quant_config.weights.method
-        self.matmul_mixed_precision = {
-            override.match["preset"]: override.type
-            for override in self.quant_config.weights.overrides
-            if "preset" in override.match and override.type is not None
-        }
+        self.matmul_mixed_precision = {}
+        customized_weight_config = {}
+        self.exact_quant_override_names = set()
+        self.exact_quant_overrides = {}
+        resolved_names = set()
+        nodes_to_exclude = []
+        legacy_nodes_to_exclude = getattr(self.quant_config, "legacy_nodes_to_exclude", frozenset())
+        self.int4_customized_weight_config = {}
+        for override in self.quant_config.weights.overrides:
+            if set(override.match) == {"preset"}:
+                preset = override.match["preset"]
+                if preset in self.matmul_mixed_precision:
+                    continue
+                descriptor = self.resolve_weight_override_type(override.type)
+                if descriptor.bits == 8 and self.quant_attrs.get("use_qdq", False):
+                    raise NotImplementedError("preset INT8 weight overrides are not supported with QDQ format")
+                self.matmul_mixed_precision[preset] = override.type
+                self.make_matmul_mixed_precision({preset: override.type})
+                for node_name, node_config in self.int4_customized_weight_config.items():
+                    if node_name not in resolved_names:
+                        customized_weight_config[node_name] = node_config
+                        resolved_names.add(node_name)
+                continue
+            if set(override.match) == {"name"}:
+                node_name = override.match["name"]
+                if node_name in resolved_names:
+                    continue
+                if not (override.exclude and node_name in legacy_nodes_to_exclude):
+                    self.exact_quant_override_names.add(node_name)
+                    self.exact_quant_overrides[node_name] = override
+                resolved_names.add(node_name)
+                if override.exclude:
+                    nodes_to_exclude.append(node_name)
+                    continue
+                descriptor = self.resolve_weight_override_type(override.type)
+                if node_name.endswith("/Gather") and descriptor.bits == 8:
+                    raise NotImplementedError(
+                        "INT8 embedding export is not supported; GatherBlockQuantized currently supports INT4 only"
+                    )
+                if descriptor.bits == 8 and self.quant_attrs.get("use_qdq", False):
+                    raise NotImplementedError("exact INT8 weight overrides are not supported with QDQ format")
+                customized_weight_config[node_name] = {"bits": descriptor.bits}
+                continue
+            raise ValueError(
+                "weight overrides currently support only a preset or an exact node name"
+            )
 
-        self.make_matmul_mixed_precision(self.matmul_mixed_precision)
+        self.quant_attrs["nodes_to_exclude"] = nodes_to_exclude
+        self.int4_customized_weight_config = customized_weight_config
+        lm_head_config = customized_weight_config.get("/lm_head/MatMul")
+        if lm_head_config is not None:
+            self.matmul_mixed_precision["last_matmul"] = f"int{lm_head_config['bits']}"
         self.quant_attrs["algo_config"] = self.make_algo_config(
             self.quantization_algo, self.int4_customized_weight_config
         )
@@ -1241,6 +1295,8 @@ class Model:
             inputs["cumulative_sequence_lengths"] = self.input_names["cumulative_sequence_lengths"]
             inputs["past_sequence_lengths"] = self.input_names["past_sequence_lengths"]
             inputs["attention_metadata"] = self.input_names["attention_metadata"]
+            if "logits_indices" in self.input_names:
+                inputs["logits_indices"] = self.input_names["logits_indices"]
         if "past_key_values.key" in self.input_names:
             inputs["past_key_names"] = "past_key_values.%d.key"
         if "past_key_values.value" in self.input_names:
@@ -1381,6 +1437,8 @@ class Model:
                 "block_size": self.attention_attrs["paged_block_size"],
                 "max_batch_size": int(self.extra_options.get("max_batch_size", 100)),
             }
+            if self.has_windowed_paged_layers():
+                dynamic_batching["prefix_caching"] = False
             if "num_blocks" in self.extra_options:
                 dynamic_batching["num_blocks"] = int(self.extra_options["num_blocks"])
             else:
@@ -1422,7 +1480,7 @@ class Model:
         """Return a standard 3D shape or a 2D paged-attention shape."""
         last_dim = self.hidden_size if last_dim is None else last_dim
         if self.use_paged_attention:
-            first_dim = "num_tokens" if seq_dim == "sequence_length" else seq_dim
+            first_dim = self.hidden_rows_dim if seq_dim == "sequence_length" else seq_dim
             return [first_dim, last_dim]
         return ["batch_size", seq_dim, last_dim]
 
@@ -1596,12 +1654,18 @@ class Model:
         print(f"Saving processing files in {out_dir} for GenAI")
         tokenizer.save_pretrained(out_dir)
 
+    def resolve_weight_override_type(self, quant_type):
+        descriptor = resolve_dtype(quant_type)
+        if descriptor.name not in ("int4", "int8"):
+            raise ValueError("weight overrides currently support only int4 or int8")
+        return descriptor
+
     def make_matmul_mixed_precision(self, placement):
         """Build the per-node `customized_weight_config` from the mixed-precision map.
 
         `placement` maps selectors ("last_matmul", "mixed_layers", "linear_attn") to a quant
-        type (e.g. "int8"). Each selected MatMul is emitted with that type's bit-width, so a
-        new type only needs to be a recognized quant dtype (resolved via ``resolve_dtype``).
+        type ("int4" or "int8"). Each selected MatMul uses that bit-width with the
+        base quantizer's remaining settings.
         """
         customized_weight_config = {}
 
@@ -1673,6 +1737,36 @@ class Model:
         )
 
     def to_nbits(self) -> ir.Model:
+        exact_quant_override_names = getattr(self, "exact_quant_override_names", set())
+        if exact_quant_override_names:
+            emitted_nodes = {node.name: node for node in self.model.graph}
+            missing = exact_quant_override_names - emitted_nodes.keys()
+            if missing:
+                raise ValueError(
+                    "exact quantization override(s) did not match an emitted node: "
+                    + ", ".join(sorted(missing))
+                )
+            ineligible = [
+                name
+                for name in exact_quant_override_names
+                if emitted_nodes[name].op_type not in self.quant_attrs["op_types_to_quantize"]
+            ]
+            if ineligible:
+                raise ValueError(
+                    "exact quantization override(s) matched an ineligible operator: "
+                    + ", ".join(sorted(ineligible))
+                )
+            nonconstant = []
+            for name in exact_quant_override_names:
+                node = emitted_nodes[name]
+                weight_index = 0 if node.op_type == "Gather" else 1
+                if len(node.inputs) <= weight_index or node.inputs[weight_index].const_value is None:
+                    nonconstant.append(name)
+            if nonconstant:
+                raise ValueError(
+                    "exact quantization override(s) require a constant weight initializer: "
+                    + ", ".join(sorted(nonconstant))
+                )
         quant_format = QuantFormat.QDQ if self.quant_attrs["use_qdq"] else QuantFormat.QOperator
         nodes_to_exclude = list(self.quant_attrs["nodes_to_exclude"])
         customized_weight_config = getattr(self, "int4_customized_weight_config", {}) or {}
@@ -1741,6 +1835,28 @@ class Model:
             )
             quant.process()
             model_proto = quant.model.model
+
+        exact_quant_overrides = getattr(self, "exact_quant_overrides", {})
+        if exact_quant_overrides:
+            quantized_nodes = {node.name: node for node in model_proto.graph.node}
+            for name, override in exact_quant_overrides.items():
+                if override.exclude:
+                    if name not in quantized_nodes:
+                        raise ValueError(f"exact exclusion override for '{name}' was not preserved")
+                    continue
+                bits = resolve_dtype(override.type).bits
+                expected_name = f"{name}_matmul_Q4" if quant_format == QuantFormat.QDQ else f"{name}_Q{bits}"
+                quantized_node = quantized_nodes.get(expected_name)
+                if quantized_node is None:
+                    raise ValueError(
+                        f"exact quantization override for '{name}' did not produce the requested int{bits} node"
+                    )
+                if quant_format == QuantFormat.QOperator:
+                    attributes = {attribute.name: attribute for attribute in quantized_node.attribute}
+                    if "bits" in attributes and attributes["bits"].i != bits:
+                        raise ValueError(
+                            f"exact quantization override for '{name}' produced {attributes['bits'].i} bits, expected {bits}"
+                        )
 
         # Offline CUDA weight prepacking is a pure weight *layout* conversion for the
         # fpA_intB mixed-GEMM kernel and is independent of the quantization method or bit
@@ -2966,6 +3082,8 @@ class Model:
         self.layernorm_attrs["skip_input"] = layernorm_attrs_value
 
     def make_layernorm(self, layer_id, layernorm, skip, simple, location):
+        if location == "final_norm" and self.prunes_hidden_rows():
+            self.make_selected_hidden_rows()
         root_input = self.layernorm_attrs["root_input"]
         skip_input = self.layernorm_attrs["skip_input"]
 
@@ -5262,7 +5380,7 @@ class Model:
         The row dim follows `make_hidden_state_shape`: paged attention flattens tokens to `num_tokens`,
         so the router tensors must declare the same symbolic dim as the MoE op's input.
         """
-        rows = "num_tokens" if self.use_paged_attention else "batch_size * sequence_length"
+        rows = self.hidden_rows_dim if self.use_paged_attention else "batch_size * sequence_length"
         return [rows, self.moe_attrs["num_experts"] if last_dim is None else last_dim]
 
     def make_moe_subgraph(self, layer_id, moe, root_input, router_probs=None, output_scale=None):
@@ -5708,6 +5826,30 @@ class Model:
             raise NotImplementedError(f"The {self.activation} activation function is not currently supported.")
         return output_name
 
+    def prunes_hidden_rows(self):
+        # The hidden_states output is the final norm's output, so it pins every row before the LM head.
+        return self.use_paged_attention and self.prune_lm_head and not self.include_hidden_states
+
+    def make_selected_hidden_rows(self):
+        """Gather the residual-stream rows the LM head reads, so every later op runs on those rows only."""
+        if self.hidden_rows_dim == "num_logits":
+            return
+        selected = {}
+        for key in ("root_input", "skip_input"):
+            name = self.layernorm_attrs[key]
+            if name not in selected:
+                gather_name = f"/model/selected_rows/{key}/Gather"
+                self.make_gather(
+                    gather_name,
+                    [name, self.input_names["logits_indices"]],
+                    dtype=self.values[name].dtype,
+                    shape=["num_logits", self.hidden_size],
+                    axis=0,
+                )
+                selected[name] = f"{gather_name}/output_0"
+            self.layernorm_attrs[key] = selected[name]
+        self.hidden_rows_dim = "num_logits"
+
     def make_lm_head(self, lm_head):
         basename = "/lm_head"
 
@@ -5729,38 +5871,24 @@ class Model:
         seq_dim = "sequence_length"
 
         if self.use_paged_attention and self.prune_lm_head:
-            # Select the final packed token from every sequence before applying the LM head:
-            #
-            # cumulative_sequence_lengths --> Slice[1:] --> Sub(1) --+
-            # hidden_states -----------------------------------------> Gather(axis=0)
-            #
-            # This reduces the expensive LM-head projection from num_tokens rows to batch_size rows.
-            seq_dim = "batch_size"
-            indices_basename = f"{basename}/last_token_indices"
-            slice_name = f"{indices_basename}/Slice"
-            slice_inputs = [
-                self.input_names["cumulative_sequence_lengths"],
-                "/model/constants/INT64/[1]",
-                f"/model/constants/INT64/[{torch.iinfo(torch.int64).max}]",
-                "/model/constants/INT64/[0]",
-            ]
-            self.make_slice(slice_name, slice_inputs, dtype=ir.DataType.INT32, shape=["batch_size"])
-
-            sub_name = f"{indices_basename}/Sub"
-            sub_inputs = [f"{slice_name}/output_0", "/model/constants/INT32/1"]
-            self.make_sub(sub_name, sub_inputs, dtype=ir.DataType.INT32, shape=["batch_size"])
-
-            gather_name = f"{basename}/last_hidden_state/Gather"
-            gather_inputs = [root_input, f"{sub_name}/output_0"]
-            self.make_gather(
-                gather_name,
-                gather_inputs,
-                dtype=self.io_dtype,
-                shape=["batch_size", self.hidden_size],
-                axis=0,
-            )
-            root_input = f"{gather_name}/output_0"
-            self.output_shapes["logits"] = ["batch_size", self.vocab_size]
+            # The runtime selects one final row per prefill request and every row required for
+            # speculative verification. Rows are usually selected earlier, in the last decoder layer;
+            # gather here only when the final norm's output must keep every row.
+            seq_dim = "num_logits"
+            if self.hidden_rows_dim != "num_logits":
+                gather_name = f"{basename}/selected_hidden_states/Gather"
+                gather_inputs = [root_input, self.input_names["logits_indices"]]
+                self.make_gather(
+                    gather_name,
+                    gather_inputs,
+                    dtype=self.io_dtype,
+                    shape=["num_logits", self.hidden_size],
+                    axis=0,
+                )
+                root_input = f"{gather_name}/output_0"
+            # Outputs built after the LM head, such as aux_hidden_states, keep every row.
+            self.hidden_rows_dim = "num_tokens"
+            self.output_shapes["logits"] = ["num_logits", self.vocab_size]
 
         elif self.prune_lm_head:
             # Insert Gather(axis=1, idx=-1) + Unsqueeze(axis=1) to select only the last token's
@@ -5863,6 +5991,9 @@ class Model:
         # input_layernorm --> attention --> output_layernorm --> MLP/MoE
         self.make_layernorm(layer_id, layer.input_layernorm, skip=not self.layernorm_attrs["first_layernorm"], simple=self.layernorm_attrs["simple"], location="input")
         self.make_attention(layer_id, self.get_attn_module(layer_id, layer), root_input=self.layernorm_attrs["output_0"])
+        if layer_id == self.num_layers - 1 and self.prunes_hidden_rows():
+            # Past the last attention, every row only feeds the LM head, so drop the unselected ones.
+            self.make_selected_hidden_rows()
         self.make_layernorm(layer_id, layer.post_attention_layernorm, skip=True, simple=self.layernorm_attrs["simple"], location="post_attention")
 
         if self.moe_attrs["num_experts"] > 0:
