@@ -494,6 +494,8 @@ struct DecoderInputs_Element : JSON::Element {
       v_.past_key_values_length = JSON::Get<std::string_view>(value);
     } else if (name == "cache_indirection") {
       v_.cache_indirection = JSON::Get<std::string_view>(value);
+    } else if (name == "cache_write_indices") {
+      v_.cache_write_indices = JSON::Get<std::string_view>(value);
     } else if (name == "cumulative_sequence_lengths") {
       v_.cumulative_sequence_lengths = JSON::Get<std::string_view>(value);
     } else if (name == "past_sequence_lengths") {
@@ -957,6 +959,8 @@ struct Decoder_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "prefill_sequence_length") {
+      v_.prefill_sequence_length = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "hidden_size") {
       v_.hidden_size = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "num_attention_heads") {
@@ -2146,6 +2150,8 @@ struct Model_Element : JSON::Element {
       v_.type = JSON::Get<std::string_view>(value);
     } else if (name == "tokenizer_dir") {
       v_.tokenizer_dir = JSON::Get<std::string_view>(value);
+    } else if (name == "default_user_prompt") {
+      v_.default_user_prompt = std::string{JSON::Get<std::string_view>(value)};
     } else if (name == "vocab_size") {
       v_.vocab_size = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "context_length") {

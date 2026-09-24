@@ -14,7 +14,7 @@ from onnx_ir.tensor_adapters import TorchTensor, to_torch_dtype
 from quantization import CudaQuantizer
 from tqdm import tqdm
 
-from .base import Model
+from .base import DEFAULT_OPSET, Model
 
 
 # Deliberately not a `Model` subclass: a block drafter emits a hand-written graph, so it shares
@@ -45,7 +45,7 @@ class BlockDrafterBuilder:
             inputs=(),
             outputs=(),
             nodes=(),
-            opset_imports={"": 21, "com.microsoft": 1},
+            opset_imports={"": DEFAULT_OPSET, "com.microsoft": 1},
             name=graph_name,
         )
         self.model = ir.Model(self.graph, ir_version=10, producer_name="onnxruntime-genai")

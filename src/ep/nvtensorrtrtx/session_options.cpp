@@ -11,7 +11,19 @@ namespace Generators::NvTensorRtRtxExecutionProvider {
 
 namespace {
 
-void ConfigureProfile(const Config& config, OrtSessionOptions& session_options, bool is_multi_profile_enabled) {
+void ConfigureProfile(const Config& config,
+                      OrtSessionOptions& session_options,
+                      bool is_multi_profile_enabled) {
+  const bool has_min = session_options.HasConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_min_shapes");
+  const bool has_opt = session_options.HasConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_opt_shapes");
+  const bool has_max = session_options.HasConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_max_shapes");
+  if (has_min || has_opt || has_max) {
+    if (!(has_min && has_opt && has_max)) {
+      throw std::runtime_error("Explicit TRT-RTX profiles must specify nv_profile_min_shapes, nv_profile_opt_shapes, and nv_profile_max_shapes together");
+    }
+    return;
+  }
+
   // Get model parameters from decoder config
   const int num_layers = config.model.decoder.num_hidden_layers;
   const int num_kv_heads = config.model.decoder.num_key_value_heads;
@@ -140,7 +152,7 @@ void ConfigureProfile(const Config& config, OrtSessionOptions& session_options, 
 DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
                                          const Config::ProviderOptions& provider_options,
                                          const Config& config,
-                                         bool /*disable_graph_capture*/) {
+                                         bool disable_graph_capture) {
   auto device = GetDeviceInterface(DeviceType::NvTensorRtRtx);
   Generators::CUDAExecutionProvider::AddCudaStreamConfig(session_options, device);
   Generators::CUDAExecutionProvider::AddCudaStreamConfig(
@@ -149,7 +161,8 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
   // Configure NvTensorRT-specific settings (needed for both pre-registered and built-in paths)
   NvTensorRtRtxExecutionProvider::ConfigureProfile(config, session_options,
                                                    IsMultiProfileEnabled(config.model.decoder.session_options));
-  if (IsGraphCaptureEnabled(config.model.decoder.session_options)) {
+  if (!disable_graph_capture &&
+      IsGraphCaptureEnabled(config.model.decoder.session_options)) {
     session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.enable_cuda_graph", "1");
   }
 

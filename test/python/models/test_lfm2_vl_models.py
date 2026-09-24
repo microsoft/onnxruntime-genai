@@ -240,6 +240,18 @@ def test_lfm2_vl_single_prompt_list_matches_the_string_form(test_data_path):
     assert text_only["input_ids"].as_numpy().shape[1] > 0
 
 
+def test_lfm2_vl_empty_prompt_list_keeps_string_behavior(test_data_path):
+    model_path = _model_path(test_data_path)
+    _, from_string = _process(model_path, "", None)
+    _, from_list = _process(model_path, [], None)
+    for name in ("input_ids", "num_image_tokens"):
+        np.testing.assert_array_equal(from_list[name].as_numpy(), from_string[name].as_numpy())
+    images = og.Images.open(_image_path(test_data_path, "cars.jpg"))
+    for prompt in ("", []):
+        with pytest.raises(RuntimeError, match="contains 0 <image> tokens but 1 images were provided"):
+            _process(model_path, prompt, images)
+
+
 def test_lfm2_vl_rejects_batched_prompts(test_data_path):
     with pytest.raises(RuntimeError, match="batched prompts are not supported; got 2 prompts"):
         _process(_model_path(test_data_path), ["Describe.", "Describe."], None)
