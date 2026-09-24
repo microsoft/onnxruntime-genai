@@ -680,14 +680,18 @@ There is no Request `Continue` operation. Initial input, tool results, and later
 - that Turn did not finish with `Failed`;
 - every event for that Request has been delivered by `OgaEngineRun`;
 - `turn_id` identifies a previously begun Turn that remains in the Request's active branch; and
-- the Request either remains resident or is a canceled, never-admitted Request that still has
-  scheduler ownership.
+- the Request remains resident, is a canceled never-admitted Request with scheduler ownership,
+  or was already rewound and has not begun another Turn.
 
 Queued and active Turns are rejected; rewind never implicitly cancels a Turn. A closed Request,
-failed Request, unknown Turn ID, unexpected nonresident Request, and a Request with an undelivered
+failed Request, unknown Turn ID, other nonresident Request, and a Request with an undelivered
 event are all rejected before mutation. Rewind emits no event. Events already delivered remain
 immutable snapshots of the completed attempt; no undelivered event can survive to contradict the
 rewound state.
+
+Consecutive rewinds are allowed without an intervening `BeginTurn`: each can discard an earlier
+Turn still in the active branch even though the first rewind released model residency. A discarded
+Turn ID cannot be selected again, and the next `BeginTurn` still receives a new monotonic ID.
 
 Rewind retains the token prefix that existed immediately before the named Turn's successful
 `BeginTurn`. It discards that Turn and all later Turn boundaries from the active branch. The
@@ -702,7 +706,7 @@ sampling continue from their current random streams.
 
 The implementation releases all resident physical model state rather than attempting an in-place
 crop. On the dynamic path it atomically releases the complete paged KV block table, any paired fixed
-recurrent/convolution slot, and any auxiliary MTP state. Indexed prefix blocks retain the cache's
+recurrent/convolution slot, and the MTP or DFlash/DSpark auxiliary state. Indexed prefix blocks retain the cache's
 reference after the Request releases its own; they remain reusable and reclaimable under pressure,
 while unindexed blocks return to the pool immediately. The next `BeginTurn` re-admits the same
 Request and prefills the retained prefix together with the new Turn input, reconstructing paged KV,

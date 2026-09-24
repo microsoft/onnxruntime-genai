@@ -1548,9 +1548,11 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestCancelTurn(
  * previously begun by this Request and still present in its active history. The named Turn and all
  * later Turns are discarded. Turn IDs are never reused, and sampling continues from its current
  * random stream rather than restoring a previous sampling state. The operation releases the
- * Request's model-state ownership; indexed prefix blocks may remain cached. The next
- * OgaRequestBeginTurn creates a new Turn and replays the retained prefix together with its new
- * input before generation, possibly adopting matching cached blocks.
+ * Request's model-state ownership, including auxiliary MTP or DFlash/DSpark state; indexed prefix
+ * blocks may remain cached. Another rewind to an earlier retained Turn is allowed before the next
+ * OgaRequestBeginTurn even though the Request is no longer resident. That call creates a new Turn
+ * and replays the retained prefix together with its new input before generation, possibly adopting
+ * matching cached blocks.
  *
  * Dynamic paged Requests release their paged blocks and any fixed recurrent/convolution slot
  * atomically. Static Requests are rewindable only when they are the sole resident row, because one

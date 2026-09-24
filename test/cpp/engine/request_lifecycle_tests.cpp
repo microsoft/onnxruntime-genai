@@ -725,6 +725,30 @@ TEST_F(RequestLifecycleTest, RewindToTurnStartPrunesBranchAndKeepsTurnIdsMonoton
   EXPECT_EQ(request->CurrentTurnId(), replacement_turn);
 }
 
+TEST_F(RequestLifecycleTest, ConsecutiveRewindsCanDiscardEarlierTurnsWithoutResidency) {
+  auto request = CreateRequestWithPrompt(engine_.engine, Prompt());
+  ASSERT_EQ(RunOne(*engine_.engine).request, request);
+  const std::array<int32_t, 1> continuation{9};
+  ASSERT_EQ(request->BeginTurn(continuation, std::optional<size_t>{1}), 2u);
+  ASSERT_EQ(RunOne(*engine_.engine).request, request);
+  ASSERT_TRUE(request->IsTurnComplete());
+  ASSERT_EQ(engine_.cache->AllocatedCount(), 1u);
+
+  request->RewindToStartOfTurn(2);
+  EXPECT_EQ(engine_.cache->AllocatedCount(), 0u);
+  EXPECT_FALSE(engine_.engine->HasPendingRequests());
+  EXPECT_NO_THROW(request->RewindToStartOfTurn(1));
+  EXPECT_EQ(request->CurrentSequenceLength(), 0);
+  EXPECT_EQ(request->ProcessedSequenceLength(), 0);
+  EXPECT_EQ(engine_.cache->AllocatedCount(), 0u);
+  EXPECT_FALSE(engine_.engine->HasPendingRequests());
+  EXPECT_THROW(request->RewindToStartOfTurn(2), std::runtime_error);
+
+  EXPECT_EQ(request->BeginTurn(continuation, std::optional<size_t>{1}), 3u);
+  EXPECT_EQ(RunOne(*engine_.engine).request, request);
+  EXPECT_TRUE(request->IsTurnComplete());
+}
+
 // After a turn completes, BeginTurn appends another input fragment and queues the resident request.
 TEST_F(RequestLifecycleTest, BeginTurnAfterTurnCompleteQueuesNextTurn) {
   auto prompt = Prompt();

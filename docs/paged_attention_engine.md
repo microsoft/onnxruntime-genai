@@ -342,8 +342,10 @@ scheduler preparation succeeds.
 has been drained. The current Turn must not have failed. The named Turn must have been successfully
 begun and must remain in the active branch. The operation also rejects queued or active Turns,
 closed Requests, and model state that is unexpectedly nonresident. A first Turn canceled before
-admission is the one supported nonresident case because it still has scheduler ownership and has
-processed no model tokens. Rewind does not cancel or replace an active Turn and emits no event.
+admission is supported while it still has scheduler ownership and has processed no model tokens.
+A Request already rewound but not yet restarted is also eligible for another rewind to an earlier
+Turn remaining in its active branch, even though it is no longer resident. The discarded Turn ID
+cannot be rewound again. Rewind does not cancel or replace an active Turn and emits no event.
 
 The operation retains the token prefix that existed immediately before the named Turn's
 `BeginTurn()`, then discards that Turn and all later Turn boundaries. It preserves Request identity
@@ -357,7 +359,7 @@ rather than returning to the retained token boundary.
 
 Rewind deliberately releases all resident physical model state instead of cropping it in place.
 Dynamic Requests return their complete paged KV block table, paired fixed-state slot, and auxiliary
-MTP state, if present. A later `BeginTurn()` re-admits the same Request and prefills the retained
+MTP or DFlash/DSpark state, if present. A later `BeginTurn()` re-admits the same Request and prefills the retained
 prefix together with new input, rebuilding paged KV, sliding-window rings, fixed convolution state,
 and fixed recurrent state from the token sequence. The MTP shadow state is recreated when drafting
 resumes. The request's physical state is released without persistent rewind checkpoints; indexed
@@ -1758,7 +1760,8 @@ failures disable the drafter for the Engine, and a proposal contract violation d
 
 Automatic block drafting is greedy-only by default. A request joins on its position-zero step only
 when the current turn is greedy. If a sampled first turn executes that step, eligibility is not
-reconsidered and the request decodes without block drafts for the rest of its life. Once a request
+reconsidered during the same residency and the request decodes without block drafts until rewind
+or close. Once a request
 has joined, later sampled turns continue feeding their committed context into its cache without
 requesting drafts, so a subsequent greedy turn can resume drafting without a cache hole. These
 ingest-only steps still execute the drafter session to preserve that continuity.
@@ -1784,12 +1787,16 @@ layer geometry as the target roughly halves the target's paged-cache capacity fo
 memory budget, and it attends the whole resident sequence on every step rather than a window.
 
 Both pools are only sufficient while at most `max_batch_size` requests are tracked. A request denied
-cache blocks at its join point is skipped for the rest of its life and decodes without block drafts;
+cache blocks at its join point is skipped until rewind or close and decodes without block drafts;
 the drafter keeps serving requests that already hold blocks. This makes `max_batch_size` the
 drafter's service-capacity limit across both active and idle long-lived requests, not merely the
 per-step scheduler limit. `dflash2_admission_misses` reports requests denied cache blocks because
 that capacity was occupied. A tracked request remains part of this capacity while a sampled turn is
 ingest-only, because retaining its cache is what lets a later greedy turn resume drafting.
+Rewind releases any tracked DFlash/DSpark state, including its cache blocks. On replay, a request
+that was previously sampled or admission-denied can try to join again if its new position-zero
+step is draft-eligible and capacity is available. A prefix-cache hit that skips position zero
+still prevents drafter admission, so rewind does not guarantee renewed drafting.
 
 ## Backpressure and fairness
 
