@@ -5,6 +5,13 @@
 
 namespace Generators {
 
+namespace {
+constexpr std::array<const char*, 6> kCachedSourceProjectionNames{
+    "cached_source_projection_0", "cached_source_projection_1",
+    "cached_source_projection_2", "cached_source_projection_3",
+    "cached_source_projection_4", "cached_source_projection_5"};
+}
+
 MarianModel::MarianModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
   encoder_session_options_ = OrtSessionOptions::Create();
@@ -15,6 +22,30 @@ MarianModel::MarianModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
 
   session_info_.Add(*session_decoder_);
   session_info_.Add(*session_encoder_);
+  size_t cached_projection_count = 0;
+  for (const char* name : kCachedSourceProjectionNames) {
+    const bool input = session_info_.HasInput(name);
+    const bool output = session_info_.HasOutput(name);
+    if (input != output) {
+      throw std::runtime_error("Marian cached projections require matching encoder outputs and decoder inputs");
+    }
+    cached_projection_count += input;
+    if (input) {
+      const auto input_shape = session_info_.GetInputShape(name);
+      const auto output_shape = session_info_.GetOutputShape(name);
+      if (input_shape.size() != 3 || output_shape.size() != 3 ||
+          input_shape[2] != config_->model.encoder.hidden_size ||
+          output_shape[2] != config_->model.encoder.hidden_size ||
+          session_info_.GetInputDataType(name) != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
+          session_info_.GetOutputDataType(name) != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+        throw std::runtime_error("Marian cached projections require matching float [batch, source, hidden] tensors");
+      }
+    }
+  }
+  if (cached_projection_count != 0 && cached_projection_count != kCachedSourceProjectionNames.size()) {
+    throw std::runtime_error("Marian cached projection interface is incomplete");
+  }
+  has_cached_source_projections_ = cached_projection_count != 0;
 }
 
 MarianLogits::MarianLogits(State& state)
@@ -25,6 +56,10 @@ MarianLogits::MarianLogits(State& state)
 }
 
 std::unique_ptr<State> MarianModel::CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const {
+  if (has_cached_source_projections_ &&
+      (p_device_->GetType() != DeviceType::CPU || params.search.num_beams != 1 || params.search.do_sample)) {
+    throw std::runtime_error("Marian cached projection prototype supports CPU greedy generation with one beam only");
+  }
   return std::make_unique<MarianState>(*this, sequence_lengths, params);
 }
 
@@ -180,6 +215,14 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
 
     output_names_.push_back(model_.config_->model.encoder.outputs.encoder_outputs.c_str());
     outputs_.push_back(encoder_outputs_.get());
+    if (model_.has_cached_source_projections_) {
+      for (size_t i = 0; i < cached_source_projections_.size(); ++i) {
+        cached_source_projections_[i] = OrtValue::CreateTensor(
+            model_.p_device_inputs_->GetAllocator(), encoder_outputs_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+        output_names_.push_back(kCachedSourceProjectionNames[i]);
+        outputs_.push_back(cached_source_projections_[i].get());
+      }
+    }
 
     if (model_.config_->model.encoder.run_options.has_value()) {
       State::SetRunOptions(model_.config_->model.encoder.run_options.value());
@@ -188,6 +231,12 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
 
     // Clear inputs and outputs for the decoder
     ClearIO();
+    if (model_.has_cached_source_projections_) {
+      for (size_t i = 0; i < cached_source_projections_.size(); ++i) {
+        input_names_.push_back(kCachedSourceProjectionNames[i]);
+        inputs_.push_back(cached_source_projections_[i].get());
+      }
+    }
 
     // Initialize the decoder inputs and outputs
     decoder_input_ids_.name_ = model_.config_->model.decoder.inputs.input_ids.c_str();
