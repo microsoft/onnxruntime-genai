@@ -220,6 +220,8 @@ Engine::Engine(std::shared_ptr<Model> model, EngineDependencies dependencies)
     dflash2_feeds_.reserve(max_batch_size);
     dflash2_draft_widths_.reserve(max_batch_size);
     dflash2_drafts_.reserve(max_batch_size);
+    dflash2_draft_distributions_.reserve(max_batch_size);
+    dflash2_rng_checkpoints_.reserve(max_batch_size);
   }
   WarnOnClampedDraftWidth();
 }
@@ -463,6 +465,8 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
   for (size_t i = 0; i < plan.requests.size(); ++i) {
     const auto& entry = plan.requests[i];
     const bool greedy = entry.request->TurnPolicy().IsGreedy();
+    const bool independent_sampling =
+        model_->config_->model.dflash2.independent_sampling && !greedy;
     const size_t accepted = entry.request->AcceptedDraftTokenCount();
     if (accepted > entry.draft_token_count) {
       throw std::logic_error("DFlash 2 observed more accepted drafts than the target planned.");
@@ -480,7 +484,8 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
     feed.aux_row_begin = entry.packed_token_offset;
     feed.aux_row_count = valid_rows;
     feed.first_position = first_position;
-    feed.draft_eligible = greedy;
+    feed.draft_eligible = greedy || independent_sampling;
+    feed.wants_independent_sampling = independent_sampling;
 
     // The committed length this step ends at: the accepted prefix plus the token just sampled.
     const int64_t length_after_step = static_cast<int64_t>(first_position + valid_rows) +
@@ -495,7 +500,8 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
         max_drafts, static_cast<size_t>(entry.request->SpeculativeOptions().max_draft_tokens),
         static_cast<size_t>(length_after_step), sequence_limit,
         remaining_turn_tokens_after_step);
-    feed.wants_drafts = greedy && width > 0 && results[i].token_appended && !results[i].done &&
+    feed.wants_drafts = (greedy || independent_sampling) && width > 0 &&
+                        results[i].token_appended && !results[i].done &&
                         !entry.request->DraftTokenValidationError();
     feed.anchor_token = results[i].token;
     dflash2_feeds_.push_back(feed);
@@ -512,19 +518,42 @@ void Engine::PublishDflash2Drafts(ScheduledRequests& scheduled_requests) {
     throw std::logic_error("The main decoder did not expose auxiliary hidden states for DFlash 2.");
   }
 
-  if (dflash2_drafter_->Propose(*aux_hidden_states, dflash2_feeds_, dflash2_drafts_)) {
+  if (dflash2_drafter_->Propose(*aux_hidden_states, dflash2_feeds_, dflash2_drafts_,
+                                &dflash2_draft_distributions_)) {
     ++speculative_stats_.draft_forward_passes;
   }
-  for (size_t i = 0; i < dflash2_feeds_.size(); ++i) {
-    auto& drafts = dflash2_drafts_[i];
-    if (drafts.empty()) {
-      continue;
+  PublishDflash2DraftResults();
+}
+
+void Engine::PublishDflash2DraftResults() {
+  dflash2_rng_checkpoints_.clear();
+  try {
+    for (size_t i = 0; i < dflash2_feeds_.size(); ++i) {
+      auto& drafts = dflash2_drafts_[i];
+      auto& distributions = dflash2_draft_distributions_[i];
+      if (drafts.empty() && distributions.empty()) {
+        continue;
+      }
+      // The drafter always emits its full block; a request with a narrower budget takes the prefix
+      // of the same greedy path.
+      if (!distributions.empty()) {
+        dflash2_rng_checkpoints_.emplace_back(dflash2_feeds_[i].request,
+                                              dflash2_feeds_[i].request->draft_rng_);
+        distributions.resize(std::min(distributions.size(), dflash2_draft_widths_[i]));
+        dflash2_feeds_[i].request->SetDraftTokenDistributions(
+            distributions);
+      } else {
+        drafts.resize(std::min(drafts.size(), dflash2_draft_widths_[i]));
+        dflash2_feeds_[i].request->SetDraftTokens(drafts);
+      }
     }
-    // The drafter always emits its full block; a request with a narrower budget takes the prefix
-    // of the same greedy path.
-    drafts.resize(std::min(drafts.size(), dflash2_draft_widths_[i]));
-    dflash2_feeds_[i].request->SetDraftTokens(drafts);
+  } catch (...) {
+    for (const auto& [request, rng] : dflash2_rng_checkpoints_)
+      request->draft_rng_ = rng;
+    dflash2_rng_checkpoints_.clear();
+    throw;
   }
+  dflash2_rng_checkpoints_.clear();
 }
 
 void Engine::RecordDflash2Failure(std::exception_ptr error, bool contract_error) {

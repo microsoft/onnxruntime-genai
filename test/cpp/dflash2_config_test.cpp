@@ -175,6 +175,68 @@ TEST(Dflash2ConfigTest, RequiresPositiveSelectorTopK) {
   EXPECT_THROW(CreateDflash2Config(config), std::runtime_error);
 }
 
+TEST(Dflash2ConfigTest, ParsesIndependentSamplingOptions) {
+  const auto root = fs_std::temp_directory_path() / "ortgenai_dflash_independent_sampling";
+  std::error_code error;
+  fs_std::remove_all(root, error);
+  fs_std::create_directories(root);
+  std::ofstream out(root / "genai_config.json", std::ios::binary);
+  out << R"({"model":{"type":"tiny-test-model","vocab_size":128,"context_length":32,)"
+         R"("decoder":{"filename":"model.onnx"},"dflash2":{"filename":"dflash2.onnx",)"
+         R"("num_hidden_layers":1,"num_key_value_heads":2,"head_size":8,"block_size":4,)"
+         R"("num_draft_tokens":3,"selector_top_k":4,"mask_token_id":31,"sliding_window":17,)"
+         R"("independent_sampling":true,"sampling_temperature":0.1,"sampling_top_p":0.95,)"
+         R"("sampling_min_p":0.3}},"search":{}})";
+  out.close();
+
+  Config config(fs::path{root.string()}, "");
+  EXPECT_TRUE(config.model.dflash2.independent_sampling);
+  EXPECT_FLOAT_EQ(config.model.dflash2.sampling_temperature, 0.1f);
+  EXPECT_FLOAT_EQ(config.model.dflash2.sampling_top_p, 0.95f);
+  EXPECT_FLOAT_EQ(config.model.dflash2.sampling_min_p, 0.3f);
+}
+
+TEST(Dflash2ConfigTest, RejectsSamplingTemperatureOutsideFloatRange) {
+  const auto root = fs_std::temp_directory_path() /
+                    "ortgenai_dflash_sampling_temperature_out_of_range";
+  std::error_code error;
+  fs_std::remove_all(root, error);
+  fs_std::create_directories(root);
+  std::ofstream out(root / "genai_config.json", std::ios::binary);
+  out << R"({"model":{"type":"tiny-test-model","vocab_size":128,"context_length":32,)"
+         R"("decoder":{"filename":"model.onnx"},"dflash2":{"filename":"dflash2.onnx",)"
+         R"("num_hidden_layers":1,"num_key_value_heads":2,"head_size":8,"block_size":4,)"
+         R"("num_draft_tokens":3,"selector_top_k":4,"mask_token_id":31,"sliding_window":17,)"
+         R"("independent_sampling":true,"sampling_temperature":1e39}},"search":{}})";
+  out.close();
+
+  EXPECT_THROW(Config(fs::path{root.string()}, ""), std::runtime_error);
+}
+
+TEST(Dflash2ConfigTest, BuildsReferenceIndependentDistribution) {
+  const std::array<int32_t, 4> candidates{10, 11, 12, 13};
+  const std::array<float, 4> logits{4.0f, 3.0f, 2.0f, 1.0f};
+  const auto distribution = Dflash2IndependentDraftDistribution(
+      candidates.data(), logits.data(), candidates.size(),
+      /*temperature=*/1.0f, /*top_p=*/0.95f, /*min_p=*/0.3f);
+  ASSERT_EQ(distribution.indices, (std::vector<int32_t>{10, 11}));
+  ASSERT_EQ(distribution.probs.size(), 2u);
+  EXPECT_NEAR(distribution.probs[0], 0.7310586f, 1e-6f);
+  EXPECT_NEAR(distribution.probs[1], 0.2689414f, 1e-6f);
+}
+
+TEST(Dflash2ConfigTest, SortsSelectorScoresBeforeApplyingProbabilityFilters) {
+  const std::array<int32_t, 4> candidates{10, 11, 12, 13};
+  const std::array<float, 4> logits{2.0f, 4.0f, 1.0f, 3.0f};
+  const auto distribution = Dflash2IndependentDraftDistribution(
+      candidates.data(), logits.data(), candidates.size(),
+      /*temperature=*/1.0f, /*top_p=*/0.7f, /*min_p=*/0.2f);
+  ASSERT_EQ(distribution.indices, (std::vector<int32_t>{11, 13}));
+  ASSERT_EQ(distribution.probs.size(), 2u);
+  EXPECT_NEAR(distribution.probs[0], 0.7310586f, 1e-6f);
+  EXPECT_NEAR(distribution.probs[1], 0.2689414f, 1e-6f);
+}
+
 TEST(Dflash2ConfigTest, RejectsAsynchronousExecution) {
   auto config = MakeDflash2Config();
   config.model.dflash2.run_options = Config::RunOptions{

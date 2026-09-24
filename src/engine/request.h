@@ -13,6 +13,7 @@
 #include "engine_invariants.h"
 #include "step_plan.h"
 #include "turn_policy.h"
+#include "../decoding/speculative_sampling.h"
 
 /**
  * @file request.h
@@ -23,6 +24,7 @@
 namespace Generators {
 
 namespace test {
+struct EngineRunTestAccess;
 struct RequestGuidanceTestAccess;
 }  // namespace test
 
@@ -294,6 +296,11 @@ struct Request : std::enable_shared_from_this<Request>,
    */
   void SetDraftTokens(std::span<const int32_t> tokens);
 
+  // Samples one token from each independent draft distribution and retains the sparse q(x)
+  // distributions for probability-ratio verification. Learned-lattice DFlash2 continues to call
+  // SetDraftTokens.
+  void SetDraftTokenDistributions(std::span<const TargetTokenSelection> distributions);
+
   /**
    * @brief Draft tokens proposed for the next step but not yet sent through the model.
    */
@@ -320,6 +327,7 @@ struct Request : std::enable_shared_from_this<Request>,
 
   void AppendDraftsForTransaction(size_t draft_count);
   std::span<const int32_t> StagedDraftTokens() const;
+  std::span<const TargetTokenSelection> StagedDraftTokenDistributions() const;
   void CommitAcceptedDraftsForTransaction(size_t accepted_count);
   bool DraftVerificationCompletedGeneration() const noexcept {
     return draft_verification_.completed_generation;
@@ -550,7 +558,9 @@ struct Request : std::enable_shared_from_this<Request>,
   // Host-side mirror of the full sequence (prompt + generated tokens). Kept in step with the
   // search's device sequence so that streaming and input-id preparation never read it back.
   std::vector<int32_t> tokens_host_;
+  friend struct Engine;
   friend struct ScheduledRequests;
+  friend struct test::EngineRunTestAccess;
   friend struct test::RequestGuidanceTestAccess;
 
   void CompleteClose() noexcept;
@@ -605,6 +615,7 @@ struct Request : std::enable_shared_from_this<Request>,
   // Drafts proposed for the next step, the ones the step in flight staged onto the sequence, and
   // the leading part of those the target model accepted.
   std::vector<int32_t> draft_tokens_;
+  std::vector<TargetTokenSelection> draft_token_distributions_;
   size_t staged_draft_count_{};
   size_t accepted_draft_count_{};
   // Proposed draft positions whose target acceptance verification has actually examined this
@@ -650,6 +661,7 @@ struct Request : std::enable_shared_from_this<Request>,
   std::optional<uint64_t> pending_reseed_;
   bool pending_reseed_applied_{};
   std::mt19937 rng_;
+  std::mt19937 draft_rng_;
   std::mt19937 transaction_rng_;
   int64_t transaction_processed_sequence_length_{};
   size_t transaction_tokens_host_size_{};

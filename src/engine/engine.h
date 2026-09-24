@@ -9,7 +9,9 @@
 #include "../decoding/speculative_stats.h"
 #include "../dflash2_drafter.h"
 
+#include <random>
 #include <thread>
+#include <utility>
 
 /**
  * @file engine.h
@@ -19,6 +21,9 @@
  */
 
 namespace Generators {
+namespace test {
+struct EngineRunTestAccess;
+}
 
 enum class EngineHealth {
   Healthy,
@@ -211,6 +216,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
   bool CancelRequest(const std::shared_ptr<Request>& request, uint64_t turn_id);
 
  private:
+  friend struct test::EngineRunTestAccess;
   void DetachRequestForTeardown(
       const std::shared_ptr<Request>& request) noexcept;
   // Logs one warning when the hosted speculative path cannot deliver the configured
@@ -259,6 +265,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
   // feeds are captured before Request::CommitStep clears the accepted-draft counts they depend on.
   void PrepareDflash2Feeds(const StepPlan& plan, const std::vector<RequestStepResult>& results);
   void PublishDflash2Drafts(ScheduledRequests& scheduled_requests);
+  void PublishDflash2DraftResults();
   // Accounts for a recoverable DFlash 2 failure and decides whether the drafter stays enabled.
   void RecordDflash2Failure(std::exception_ptr error, bool contract_error);
   void RecordSpeculativeCommit(const StepPlan& plan) noexcept;
@@ -293,7 +300,9 @@ struct Engine : std::enable_shared_from_this<Engine>,
   std::unique_ptr<Dflash2Drafter> dflash2_drafter_;
   std::vector<Dflash2Drafter::Feed> dflash2_feeds_;
   std::vector<std::vector<int32_t>> dflash2_drafts_;
+  std::vector<std::vector<TargetTokenSelection>> dflash2_draft_distributions_;
   std::vector<size_t> dflash2_draft_widths_;
+  std::vector<std::pair<Request*, std::mt19937>> dflash2_rng_checkpoints_;
   size_t dflash2_consecutive_failures_{};
   bool dflash2_disabled_{};
   DeviceSpan<int32_t> mtp_device_drafts_;
