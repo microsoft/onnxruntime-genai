@@ -145,7 +145,11 @@ ScheduledRequests::ScheduledRequests(std::vector<std::shared_ptr<Request>> reque
                                      std::shared_ptr<Model> model,
                                      BatchedSampler* batched_sampler,
                                      BatchedSamplingPlan* sampling_plan)
-    : requests_{std::move(requests)}, model_{std::move(model)}, batched_sampler_{batched_sampler}, sampling_plan_{sampling_plan} {
+    : requests_{std::move(requests)},
+      model_{std::move(model)},
+      batched_sampler_{batched_sampler},
+      sampling_plan_{sampling_plan},
+      request_ids_{requests_.size()} {
   // Fixes what each request contributes to this step before anything reads UnprocessedTokens().
   for (auto& request : requests_) {
     request->ScheduleTokens();
@@ -156,13 +160,31 @@ ScheduledRequests::ScheduledRequests(const StepPlan& plan,
                                      std::shared_ptr<Model> model,
                                      BatchedSampler* batched_sampler,
                                      BatchedSamplingPlan* sampling_plan)
-    : model_{std::move(model)}, batched_sampler_{batched_sampler}, sampling_plan_{sampling_plan} {
-  requests_.reserve(plan.requests.size());
-  draft_token_counts_.reserve(plan.requests.size());
-  RequestIndex request_ids{plan.requests.size()};
+    : ScheduledRequests(std::move(model), batched_sampler, sampling_plan,
+                        plan.requests.size()) {
+  Reset(plan);
+}
+
+ScheduledRequests::ScheduledRequests(std::shared_ptr<Model> model,
+                                     BatchedSampler* batched_sampler,
+                                     BatchedSamplingPlan* sampling_plan,
+                                     size_t capacity)
+    : model_{std::move(model)},
+      batched_sampler_{batched_sampler},
+      sampling_plan_{sampling_plan},
+      request_ids_{capacity} {
+  requests_.reserve(capacity);
+  draft_token_counts_.reserve(capacity);
+}
+
+void ScheduledRequests::Reset(const StepPlan& plan) {
+  if (plan.requests.size() > request_ids_.Capacity()) {
+    throw std::runtime_error("The dynamic step plan exceeds the scheduled-request capacity.");
+  }
+  request_ids_.Clear();
   for (const auto& entry : plan.requests) {
     if (!entry.request || entry.request_id != entry.request.get() ||
-        !request_ids.Insert(entry.request_id, request_ids.Size())) {
+        !request_ids_.Insert(entry.request_id, request_ids_.Size())) {
       throw std::runtime_error("The dynamic step plan contains an invalid request.");
     }
     if (!IsExecutable(entry.request->status_)) {
@@ -186,12 +208,25 @@ ScheduledRequests::ScheduledRequests(const StepPlan& plan,
           std::to_string(remaining) + ").");
     }
   }
+  Clear();
   for (const auto& entry : plan.requests) {
     entry.request->BindScheduledTokenCount(
         entry.unprocessed_token_count);
     requests_.push_back(entry.request);
     draft_token_counts_.push_back(entry.draft_token_count);
   }
+}
+
+void ScheduledRequests::Clear() {
+  requests_.clear();
+  draft_token_counts_.clear();
+  decoder_state_.reset();
+  execution_context_.reset();
+  checkpointed_sampler_states_.clear();
+  transaction_checkpoint_count_ = 0;
+  transaction_uses_batched_sampler_ = false;
+  sampler_checkpoint_active_ = false;
+  request_ids_.Clear();
 }
 
 ExecutionContext& ScheduledRequests::CreateExecutionContext() {

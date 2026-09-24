@@ -199,6 +199,12 @@ struct Request : std::enable_shared_from_this<Request>,
       std::shared_ptr<std::atomic<bool>> abandonment_pending,
       const std::shared_ptr<Engine>& engine,
       std::span<const int32_t> tokens);
+  static std::shared_ptr<Request> CreateAuxiliaryDecoderRequest(
+      const Model& model,
+      size_t max_session_tokens,
+      std::shared_ptr<std::atomic<bool>> abandonment_pending,
+      const std::shared_ptr<Engine>& engine,
+      DeviceSpan<int32_t> tokens);
   void AppendTokensForAuxiliaryDecoder(std::span<const int32_t> tokens);
   void AppendTokensForAuxiliaryDecoder(DeviceSpan<int32_t> tokens);
   void RewindAuxiliaryDecoderTo(size_t sequence_length);

@@ -625,6 +625,7 @@ struct RecordingModelExecutor : ModelExecutor {
 };
 
 struct CountingCudaDeviceState {
+  size_t allocation_calls{};
   size_t device_to_host_copies{};
   size_t synchronize_calls{};
   size_t memory_queries{};
@@ -679,6 +680,7 @@ struct CountingCudaDevice final : DeviceInterface {
   std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override { return {}; }
   std::string GetExecutionProviderName() const override { return "test_cuda"; }
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
+    ++state->allocation_calls;
     return std::make_shared<CountingCudaMemory>(size, state);
   }
   std::shared_ptr<DeviceBuffer> WrapMemoryBase(void* memory, size_t size) override {
@@ -805,7 +807,8 @@ inline CompositeDoublesEngine MakeCompositeDoublesEngine(std::shared_ptr<Model> 
 }
 
 inline MtpDoublesEngine MakeMtpDoublesEngine(std::shared_ptr<Model> model,
-                                             int32_t forced_token) {
+                                             int32_t forced_token,
+                                             bool cuda_chain = false) {
   auto cache = std::make_shared<RecordingCacheManager>(model, /*capacity=*/8);
   cache->SetMaxDraftTokensPerStep(3);
   auto* cache_observer = cache.get();
@@ -817,6 +820,15 @@ inline MtpDoublesEngine MakeMtpDoublesEngine(std::shared_ptr<Model> model,
 
   auto mtp_model = std::make_shared<DecoderOnly_Model>(
       CreateMtpDecoderConfig(*model->config_), GetOrtEnv());
+  std::unique_ptr<CountingCudaDevice> device;
+  std::shared_ptr<CountingCudaDeviceState> device_state;
+  if (cuda_chain) {
+    device = std::make_unique<CountingCudaDevice>();
+    device_state = device->state;
+    mtp_model->p_device_ = device.get();
+    mtp_model->p_device_inputs_ = device.get();
+    mtp_model->p_device_scoring_ = device.get();
+  }
   auto mtp_cache = std::make_shared<RecordingCacheManager>(
       mtp_model, /*capacity=*/8);
   auto* mtp_cache_observer = mtp_cache.get();
@@ -831,8 +843,8 @@ inline MtpDoublesEngine MakeMtpDoublesEngine(std::shared_ptr<Model> model,
       std::move(mtp_model), std::move(mtp_cache), std::move(mtp_executor)};
   auto engine = std::make_shared<Engine>(std::move(model), std::move(dependencies));
   return MtpDoublesEngine{
-      nullptr, std::move(engine), cache_observer, executor_observer,
-      mtp_cache_observer, mtp_executor_observer, nullptr};
+      std::move(device), std::move(engine), cache_observer, executor_observer,
+      mtp_cache_observer, mtp_executor_observer, std::move(device_state)};
 }
 
 }  // namespace test

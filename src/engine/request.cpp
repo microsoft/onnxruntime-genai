@@ -773,6 +773,21 @@ std::shared_ptr<Request> Request::CreateAuxiliaryDecoderRequest(
   return request;
 }
 
+std::shared_ptr<Request> Request::CreateAuxiliaryDecoderRequest(
+    const Model& model,
+    size_t max_session_tokens,
+    std::shared_ptr<std::atomic<bool>> abandonment_pending,
+    const std::shared_ptr<Engine>& engine,
+    DeviceSpan<int32_t> tokens) {
+  auto request = std::make_shared<Request>(
+      model, max_session_tokens, std::move(abandonment_pending));
+  request->AttachToEngine(engine);
+  request->status_ = RequestStatus::Active;
+  request->AppendTokensForAuxiliaryDecoder(tokens);
+  request->prompt_sequence_length_ = request->CurrentSequenceLength();
+  return request;
+}
+
 void Request::AppendTokensForAuxiliaryDecoder(std::span<const int32_t> tokens) {
   if (status_ != RequestStatus::Active || tokens.empty() ||
       processed_sequence_length_ != CurrentSequenceLength()) {

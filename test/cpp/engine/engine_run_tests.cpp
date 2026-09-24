@@ -53,6 +53,10 @@ struct EngineRunTestAccess {
   static int32_t DraftToken(const Request& request) {
     return request.draft_tokens_.front();
   }
+
+  static const void* MtpWorkspace(const Engine& engine) {
+    return engine.mtp_workspace_.get();
+  }
 };
 
 namespace {
@@ -3118,6 +3122,55 @@ TEST_F(EngineRunTest, EngineHostedMtpClampsTheConfiguredDraftWidth) {
   EXPECT_EQ(engine.engine->MaxDraftTokensPerStep(), 3u);
   EXPECT_GT(request->PendingDraftTokenCount(), 0u);
   EXPECT_LE(request->PendingDraftTokenCount(), 3u);
+}
+
+TEST_F(EngineRunTest, CudaMtpChainCompactsRowsAndReusesWorkspace) {
+  model_ = LoadSyntheticPagedMtpModel();
+  const int32_t filler = EosToken(*model_) == 5 ? 6 : 5;
+  auto engine = MakeMtpDoublesEngine(model_, filler, /*cuda_chain=*/true);
+
+  auto short_request = CreateEngineRequest(engine.engine);
+  short_request->BeginTurn(Prompt(10), std::optional<size_t>{3});
+  auto full_request = CreateRequestWithPrompt(engine.engine, Prompt(20));
+  engine.executor->SetVerifyRowTokens({11, 12});
+  std::vector<std::vector<int32_t>> mtp_device_inputs;
+  engine.mtp_executor->SetExecutionCallback(
+      [&](ExecutionContext& context) {
+        std::vector<int32_t> inputs;
+        if (!context.input_ids.empty()) {
+          const auto ids = context.input_ids.Span();
+          inputs.assign(ids.begin(), ids.end());
+        }
+        mtp_device_inputs.push_back(std::move(inputs));
+      });
+
+  std::array<EngineEvent, 8> storage;
+  ASSERT_EQ(engine.engine->Run(storage), 2u);
+  ASSERT_NE(engine.device_state, nullptr);
+  ASSERT_NE(EngineRunTestAccess::MtpWorkspace(*engine.engine), nullptr);
+  const void* workspace = EngineRunTestAccess::MtpWorkspace(*engine.engine);
+
+  ASSERT_GE(engine.mtp_executor->decoded_batch_sizes.size(), 3u);
+  const size_t first_stage = engine.mtp_executor->decoded_batch_sizes.size() - 3;
+  EXPECT_EQ(engine.mtp_executor->decoded_batch_sizes[first_stage], 2u);
+  EXPECT_EQ(engine.mtp_executor->decoded_batch_sizes[first_stage + 1], 1u);
+  EXPECT_EQ(engine.mtp_executor->decoded_batch_sizes[first_stage + 2], 1u);
+  EXPECT_TRUE(engine.mtp_executor->used_device_input_ids[first_stage]);
+  EXPECT_TRUE(engine.mtp_executor->used_device_input_ids[first_stage + 1]);
+  EXPECT_TRUE(engine.mtp_executor->used_device_input_ids[first_stage + 2]);
+  ASSERT_GE(mtp_device_inputs.size(), 3u);
+  EXPECT_EQ(mtp_device_inputs[0], (std::vector<int32_t>{11, 12}));
+  EXPECT_EQ(short_request->PendingDraftTokenCount(), 1u);
+  EXPECT_EQ(full_request->PendingDraftTokenCount(), 3u);
+  EXPECT_FALSE(engine.device_state->argmax_rows.empty());
+  const size_t allocation_calls = engine.device_state->allocation_calls;
+
+  engine.executor->SetVerifyRowTokens({});
+  ASSERT_GT(engine.engine->Run(storage), 0u);
+  EXPECT_EQ(EngineRunTestAccess::MtpWorkspace(*engine.engine), workspace);
+  EXPECT_EQ(engine.device_state->allocation_calls, allocation_calls);
+  EXPECT_TRUE(short_request->IsTurnComplete());
+  EXPECT_EQ(full_request->PendingDraftTokenCount(), 3u);
 }
 
 // ---------------------------------------------------------------------------------------------
