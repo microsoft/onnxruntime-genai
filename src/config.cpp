@@ -2160,6 +2160,7 @@ struct Model_Element : JSON::Element {
       return embedding_;
     }
     if (name == "speech") {
+      v_.speech.has_speech_section = true;
       return speech_;
     }
     if (name == "joiner") {
