@@ -555,8 +555,8 @@ TEST(Dflash2ConfigTest, RunsFullAttentionDsparkAcrossRequestLifecycles) {
   };
   drafter.Propose(reused_aux, reused_feeds, drafts);
   ASSERT_EQ(drafts.size(), 2u);
-  EXPECT_FALSE(drafts[0].empty());
-  EXPECT_FALSE(drafts[1].empty());
+  EXPECT_EQ(drafts[0], (std::vector<int32_t>{14, 0, 13, 32}));
+  EXPECT_EQ(drafts[1], (std::vector<int32_t>{31, 13, 5, 32}));
   EXPECT_EQ(drafter.AdmissionMisses(), 0u);
 
   Tensor failed_aux{device, Ort::TypeToTensorType<float>};
