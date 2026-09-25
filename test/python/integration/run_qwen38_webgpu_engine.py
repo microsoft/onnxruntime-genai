@@ -1,7 +1,12 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
-"""Build and validate paged Qwen3.8-27B through GenAI Engine on WebGPU."""
+"""Build and validate paged Qwen3.8-27B through GenAI Engine on WebGPU.
+
+With --dflash2, require accepted drafts across multiple rounds for each fixed greedy
+prompt. This checks real Engine activity; floating-point output coverage lives in
+test_dflash2_webgpu_precision.py.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +15,7 @@ import gc
 import hashlib
 import importlib.metadata
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -24,10 +30,16 @@ import onnxruntime_genai as og
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from _test_utils import register_webgpu_plugin
 
-
 MODEL_ID = "Qwen/Qwen3.8-27B"
 DFLASH2_CHECKPOINT = "z-lab/Qwen3.8-27B-DFlash2"
-PROMPT = "Reply with only the city name: What is the capital of France?"
+PROMPTS = (
+    ("Reply with only the city name: What is the capital of France?", r"\bParis\b"),
+    ("What is 17 + 25? Reply with the number.", r"\b42\b"),
+    (
+        "List the integers from 1 through 20 in order, separated by commas. Do not skip any numbers.",
+        r"\b" + r",\s*".join(str(i) for i in range(1, 21)) + r"\b",
+    ),
+)
 BUILD_METADATA = "qwen38_webgpu_build.json"
 REQUIRED_WEBGPU_OPS = {
     "GatedDeltaNet",
@@ -113,7 +125,7 @@ def format_extra_option(key: str, value: object) -> str:
     # Booleans/numbers are written lowercase to match the builder's true/false parsing; strings
     # (e.g. dflash2_path, a filesystem path) must be passed through verbatim -- lowercasing them
     # would corrupt any mixed-case path on a case-sensitive filesystem.
-    if isinstance(value, bool) or isinstance(value, (int, float)):
+    if isinstance(value, (bool, int, float)):
         return f"{key}={str(value).lower()}"
     if isinstance(value, (list, tuple)):
         return f"{key}=" + ",".join(str(item) for item in value)
@@ -223,8 +235,8 @@ def make_config(model_path: Path, provider: str, profile_prefix: Path | None = N
     return config
 
 
-def prompt_tokens(tokenizer: og.Tokenizer) -> np.ndarray:
-    messages = json.dumps([{"role": "user", "content": PROMPT}])
+def prompt_tokens(tokenizer: og.Tokenizer, prompt: str) -> np.ndarray:
+    messages = json.dumps([{"role": "user", "content": prompt}])
     prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)
     return np.asarray(tokenizer.encode(prompt), dtype=np.int32)
 
@@ -349,43 +361,71 @@ def validate_profile(webgpu_ops: Counter, cpu_ops: Counter) -> None:
     if required_cpu_fallback:
         raise RuntimeError(f"Required Qwen3.8 kernels fell back to CPU: {sorted(required_cpu_fallback)}")
     if webgpu_ops["GatedDeltaNet"] < 2 * 48 or webgpu_ops["PagedAttention"] < 2 * 16:
-        raise RuntimeError(
-            "The profile did not contain both prefill and decode forwards for every Qwen3.8 state group"
-        )
+        raise RuntimeError("The profile did not contain both prefill and decode forwards for every Qwen3.8 state group")
 
 
 def run_backend(
     model_path: Path,
     provider: str,
     max_new_tokens: int,
+    prompts: tuple,
     profile_prefix: Path | None = None,
-) -> tuple[list[int], str, float, dict]:
+) -> list[dict]:
     model = og.Model(make_config(model_path, provider, profile_prefix))
     tokenizer = og.Tokenizer(model)
-    tokens = prompt_tokens(tokenizer)
-    output_tokens, elapsed, speculative_stats = run_engine(model, tokens, max_new_tokens)
-    output_text = tokenizer.decode(np.asarray(output_tokens, dtype=np.int32))
+    results = []
+    for prompt, expected in prompts:
+        tokens = prompt_tokens(tokenizer, prompt)
+        output_tokens, elapsed, speculative_stats = run_engine(model, tokens, max_new_tokens)
+        output_text = tokenizer.decode(np.asarray(output_tokens, dtype=np.int32))
+        results.append(
+            {
+                "prompt": prompt,
+                "expected_pattern": expected,
+                "elapsed_seconds": elapsed,
+                "output": output_text,
+                "tokens": output_tokens,
+                "speculative_stats": speculative_stats,
+            }
+        )
+        activity = {
+            key: speculative_stats[key]
+            for key in (
+                "completed_rounds",
+                "draft_tokens_proposed",
+                "draft_tokens_evaluated",
+                "draft_tokens_accepted",
+                "acceptance_rate",
+                "dflash2_failures",
+                "standard_fallback_steps",
+            )
+        }
+        print(f"{provider} prompt: {prompt}\nOutput: {output_text}\nSpeculative stats: {activity}", flush=True)
     del tokenizer
     del model
     gc.collect()
-    return output_tokens, output_text, elapsed, speculative_stats
+    return results
 
 
 def validate_dflash2_activity(speculative_stats: dict) -> None:
     """Confirm DFlash2 actually drafted/verified tokens rather than silently falling back."""
     if speculative_stats.get("rounds", 0) <= 0:
         raise RuntimeError("DFlash2 was configured but the Engine ran zero speculative rounds")
+    if speculative_stats.get("completed_rounds", 0) < 2:
+        raise RuntimeError("DFlash2 validation requires at least two completed speculative rounds per prompt")
     if speculative_stats.get("draft_tokens_proposed", 0) <= 0:
         raise RuntimeError("DFlash2 was configured but no draft tokens were ever proposed")
     if speculative_stats.get("draft_tokens_accepted", 0) <= 0:
         raise RuntimeError("DFlash2 was configured but zero draft tokens were ever accepted")
-    if speculative_stats.get("dflash2_disables", 0) > 0:
+    if speculative_stats["dflash2_disables"] != 0:
         raise RuntimeError(
             f"DFlash2 was disabled mid-run ({speculative_stats['dflash2_disables']} time(s)); "
             "the Engine silently fell back to ordinary decoding"
         )
-    if speculative_stats.get("dflash2_failures", 0) > 0:
+    if speculative_stats["dflash2_failures"] != 0:
         raise RuntimeError(f"DFlash2 recorded {speculative_stats['dflash2_failures']} drafter failure(s)")
+    if speculative_stats["standard_fallback_steps"] != 0:
+        raise RuntimeError(f"DFlash2 used {speculative_stats['standard_fallback_steps']} standard fallback step(s)")
 
 
 def main() -> int:
@@ -409,7 +449,7 @@ def main() -> int:
         type=Path,
         default=Path("/tmp/qwen38-paged-webgpu-engine"),
     )
-    parser.add_argument("--max-new-tokens", type=int, default=64)
+    parser.add_argument("--max-new-tokens", type=int, default=128)
     parser.add_argument(
         "--dflash2",
         action="store_true",
@@ -441,48 +481,31 @@ def main() -> int:
     for profile_path in args.artifacts_dir.glob("webgpu-profile*.json"):
         profile_path.unlink()
     profile_prefix = args.artifacts_dir / "webgpu-profile"
-
-    webgpu_tokens, webgpu_text, webgpu_elapsed, webgpu_speculative_stats = run_backend(
+    prompts = PROMPTS if args.dflash2 else PROMPTS[:1]
+    webgpu_results = run_backend(
         args.model_path,
         "webgpu",
         args.max_new_tokens,
+        prompts,
         profile_prefix,
     )
     webgpu_ops, cpu_ops = read_profile(args.artifacts_dir)
     validate_profile(webgpu_ops, cpu_ops)
-    if "paris" not in webgpu_text.lower():
-        raise RuntimeError(f"WebGPU output did not contain the expected answer 'Paris': {webgpu_text!r}")
-    if args.dflash2:
-        validate_dflash2_activity(webgpu_speculative_stats)
-
     cpu_result = None
     cpu_reference_error = None
     if not args.skip_cpu_reference:
         try:
-            cpu_tokens, cpu_text, cpu_elapsed, _cpu_speculative_stats = run_backend(
+            cpu_result = run_backend(
                 args.model_path,
                 "cpu",
                 args.max_new_tokens,
+                prompts,
             )
-            cpu_result = {
-                "elapsed_seconds": cpu_elapsed,
-                "output": cpu_text,
-                "tokens": cpu_tokens,
-            }
         except RuntimeError as error:
             cpu_reference_error = str(error)
-    if cpu_result and "paris" not in cpu_result["output"].lower():
-        raise RuntimeError(f"CPU output did not contain the expected answer 'Paris': {cpu_result['output']!r}")
-
     result = {
-        "prompt": PROMPT,
         "dflash2": args.dflash2,
-        "webgpu": {
-            "elapsed_seconds": webgpu_elapsed,
-            "output": webgpu_text,
-            "tokens": webgpu_tokens,
-            "speculative_stats": webgpu_speculative_stats,
-        },
+        "webgpu": webgpu_results,
         "cpu": cpu_result,
         "cpu_reference_error": cpu_reference_error,
         "webgpu_operator_counts": dict(webgpu_ops),
@@ -493,27 +516,18 @@ def main() -> int:
         encoding="utf-8",
     )
 
-    print(f"Prompt: {PROMPT}")
-    print(f"WebGPU Engine output ({webgpu_elapsed:.2f}s): {webgpu_text}")
-    if cpu_result:
-        print(f"CPU Engine output ({cpu_result['elapsed_seconds']:.2f}s): {cpu_result['output']}")
-    elif cpu_reference_error:
+    for item in webgpu_results:
+        if not re.search(item["expected_pattern"], item["output"], re.IGNORECASE):
+            raise RuntimeError(f"WebGPU output did not contain the expected answer: {item}")
+        if args.dflash2:
+            validate_dflash2_activity(item["speculative_stats"])
+    for item in cpu_result or []:
+        if not re.search(item["expected_pattern"], item["output"], re.IGNORECASE):
+            raise RuntimeError(f"CPU output did not contain the expected answer: {item}")
+    if cpu_reference_error:
         print(f"CPU reference unavailable: {cpu_reference_error}")
     print(f"WebGPU operator counts: {dict(webgpu_ops)}")
     print(f"CPU fallback operator counts: {dict(cpu_ops)}")
-    if args.dflash2:
-        stats = webgpu_speculative_stats
-        print(
-            "DFlash2 stats: "
-            f"rounds={stats.get('rounds')} "
-            f"draft_tokens_proposed={stats.get('draft_tokens_proposed')} "
-            f"draft_tokens_accepted={stats.get('draft_tokens_accepted')} "
-            f"acceptance_rate={stats.get('acceptance_rate'):.4f} "
-            f"avg_draft_tokens_per_round={stats.get('avg_draft_tokens_per_round'):.4f} "
-            f"dflash2_failures={stats.get('dflash2_failures')} "
-            f"dflash2_disables={stats.get('dflash2_disables')} "
-            f"standard_fallback_steps={stats.get('standard_fallback_steps')}"
-        )
     print(f"Artifacts: {args.artifacts_dir}")
     print("Paged Qwen3.8 Engine execution completed correctly on WebGPU.")
     return 0

@@ -1031,7 +1031,7 @@ def get_args():
                     default of 4 in effect.
                 dflash2_fuse_gate_up = Experimental DFlash 2 MLP gate/up projection fusion.
                     Accepts true or false (default). Requires dflash2_path. Combines gate/up
-                    weights into one MatMul or MatMulNBits followed by Split. Preserves BF16
+                    weights into one MatMul or MatMulNBits followed by Split. Preserves EP-specific
                     activations and body quantization; does not change the target or LM head.
                     Requires re-export and workload-specific performance/quality validation.
                 dflash2_fuse_qkv = Experimental DFlash 2 attention Q/K/V projection fusion.
@@ -1053,8 +1053,11 @@ def get_args():
                     format with matmulnbits_weights_prepacked=1 or 2 emits that fpA-intB layout for
                     projections the kernel supports (N % 64 for int4, N % 32 for int8); other
                     projections stay raw, and the drafter session disables fpA-intB selection for them.
-                    Body activations and KV caches remain bf16; this option does not quantize the
-                    drafter's KV cache. When the target LM head uses a reproducible symmetric default
+                    CUDA body activations and KV caches default to bf16. WebGPU uses FP16,
+                    with FP32 residual/skip normalization and convolution-finish accumulation for FP16
+                    models. Finish outputs stay FP32 until after normalization; normalized outputs
+                    return to FP16. This option does not quantize the drafter's KV cache.
+                    When the target LM head uses a reproducible symmetric default
                     layout, the drafter head uses its actual bit width, block size, initializer names,
                     and prepack mode when eligible so `share_initializers` can fold it onto the target's
                     copy. Dense or unsupported target LM-head layouts keep the drafter head dense.
