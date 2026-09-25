@@ -232,8 +232,7 @@ GPU's memory while loading its graph on another GPU.
           }
         },
         "search": {
-          "chunk_size": 512,
-          "max_length": 65536
+          "chunk_size": 512
         },
         "speculative": {
           "max_draft_tokens": 6
@@ -253,14 +252,14 @@ the base settings. `overlay` is typed and may contain any subset of these fields
 - `engine.dynamic_batching.max_batch_size`
 - `engine.dynamic_batching.max_scheduled_tokens`
 - `search.chunk_size`
-- `search.max_length`
 - `speculative.max_draft_tokens`
 
 Omitted fields retain their base values. Every other config field is rejected from a runtime
-profile overlay. Alternate decoder graphs may share one external-data file; each graph still owns
-its graph-specific inputs, outputs, attributes, and small initializers.
+profile overlay. In particular, profiles cannot override `search.max_length`; applications set
+request/session policy independently. Alternate decoder graphs may share one external-data file;
+each graph still owns its graph-specific inputs, outputs, attributes, and small initializers.
 
-An overlaid `search.max_length` remains the default Engine Request length. The Engine's
+The base `search.max_length` remains the default Engine Request length. The Engine's
 `max_request_length` capability reports the hard per-request limit derived from the resolved target
 cache and model context. A caller may explicitly choose a `max_session_tokens` value above the
 default but not above that capability when it is nonzero. A zero capability means the cache-backed

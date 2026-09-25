@@ -592,7 +592,7 @@ def test_runtime_adds_config_only_profile():
         "eligibility": {"minimum_total_device_memory_bytes": 34359738368},
         "overlay": {
             "engine": {"dynamic_batching": {"num_blocks": 928, "max_batch_size": 8}},
-            "search": {"max_length": 65536},
+            "search": {"chunk_size": 256},
             "speculative": {"max_draft_tokens": 6},
         },
     }
@@ -672,6 +672,17 @@ def test_runtime_rejects_profile_without_overlay_fields(overlay):
     generated = {"model": {"decoder": {}}, "engine": {"dynamic_batching": {}}, "search": {}}
     profile = {"id": "empty", "eligibility": {"minimum_total_device_memory_bytes": 1}, "overlay": overlay}
     with pytest.raises(ValueError, match="must contain at least one overlay field"):
+        apply_runtime_config(generated, {"runtime_profiles": [profile]})
+
+
+def test_runtime_rejects_profile_max_length():
+    generated = {"model": {"context_length": 4096}, "search": {"max_length": 4096}}
+    profile = {
+        "id": "request-limit",
+        "eligibility": {"minimum_total_device_memory_bytes": 1},
+        "overlay": {"search": {"max_length": 2048}},
+    }
+    with pytest.raises(ValueError, match="unknown runtime_config.runtime_profiles\\[0\\].overlay.search"):
         apply_runtime_config(generated, {"runtime_profiles": [profile]})
 
 

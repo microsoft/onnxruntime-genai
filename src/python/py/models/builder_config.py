@@ -1023,13 +1023,10 @@ def validate_runtime_profiles(runtime_profiles: Any, generated_config: dict[str,
         search = overlay.get("search", {})
         if not isinstance(search, dict):
             raise ValueError(f"{path}.overlay.search must be an object")
-        check_fields(search, {"chunk_size", "max_length"}, f"{path}.overlay.search")
+        check_fields(search, {"chunk_size"}, f"{path}.overlay.search")
         for field_name, value in search.items():
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{path}.overlay.search.{field_name} must be a positive integer")
-        context_length = generated_config.get("model", {}).get("context_length")
-        if "max_length" in search and isinstance(context_length, int) and search["max_length"] > context_length:
-            raise ValueError(f"{path}.overlay.search.max_length exceeds the exported model context_length")
 
         speculative = overlay.get("speculative", {})
         if not isinstance(speculative, dict):

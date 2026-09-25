@@ -2653,8 +2653,6 @@ struct RuntimeProfileSearch_Element : JSON::Element {
     }
     if (name == "chunk_size") {
       v_.chunk_size = static_cast<size_t>(parsed);
-    } else if (name == "max_length") {
-      v_.max_length = parsed;
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -2817,7 +2815,7 @@ void ValidateRuntimeProfiles(const Config& config) {
                          "runtime profile '" + profile.id + "' model.decoder.filename");
     }
     if (!profile.overlay.model.decoder_filename && !batching.num_blocks && !batching.max_batch_size &&
-        !batching.max_scheduled_tokens && !search.chunk_size && !search.max_length &&
+        !batching.max_scheduled_tokens && !search.chunk_size &&
         !profile.overlay.speculative.max_draft_tokens) {
       throw std::runtime_error("runtime profile '" + profile.id +
                                "' does not contain any overlay fields");
@@ -3220,7 +3218,6 @@ void ApplyRuntimeProfile(Config& config, uint64_t total_device_memory_bytes) {
   }
   const auto& search = selected->overlay.search;
   if (search.chunk_size) candidate.search.chunk_size = search.chunk_size;
-  if (search.max_length) candidate.search.max_length = *search.max_length;
   if (selected->overlay.speculative.max_draft_tokens) {
     candidate.speculative.max_draft_tokens = *selected->overlay.speculative.max_draft_tokens;
   }

@@ -369,7 +369,8 @@ When every memory class uses the same ONNX graphs, place `runtime_profiles`
 directly inside `runtime_config`. Model Builder validates and writes the array
 to `genai_config.json` in the first export pass. No post-processing pass is
 needed. A profile overlay may change `engine.dynamic_batching`, `search.chunk_size`,
-`search.max_length`, and `speculative.max_draft_tokens`.
+and `speculative.max_draft_tokens`. Profiles cannot override `search.max_length`;
+the Engine derives each GPU's request ceiling from the profile's cache allocation.
 
 An alternate graph may additionally set `model.decoder.filename`. The named
 graph must already be present in the package. Use the `KVCacheVariant` API below
