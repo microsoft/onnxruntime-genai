@@ -60,6 +60,7 @@ class DFlash2Builder(BlockDrafterBuilder):
         lm_head_quant=None,
         embed_quant=None,
         fuse_gate_up=False,
+        include_attention_metadata=True,
     ):
         self.draft_dir = draft_dir
         self.target_dir = target_dir
@@ -77,6 +78,7 @@ class DFlash2Builder(BlockDrafterBuilder):
         self.embed_quant = embed_quant
         self.filename = filename
         self.paged_block_size = paged_block_size
+        self.include_attention_metadata = include_attention_metadata
         self.mlp_attrs = {"fuse_gate_up": fuse_gate_up}
 
         with open(os.path.join(draft_dir, "config.json")) as f:
@@ -459,7 +461,7 @@ class DFlash2Builder(BlockDrafterBuilder):
                 k_norm,
                 "",
                 "",  # k_scale / v_scale
-                "attention_metadata",
+                "attention_metadata" if self.include_attention_metadata else "",
             ],
             [attn_out, f"present.{i}.key", f"present.{i}.value"],
             name=attn_name,
