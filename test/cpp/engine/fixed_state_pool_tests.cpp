@@ -313,6 +313,61 @@ TEST_F(FixedStatePoolTest, SlotReuseGathersZeroAfterRelease) {
   ExpectInputRows(reservation, 0, 0.0f);  // Reused slot must not leak the released request's state.
 }
 
+TEST_F(FixedStatePoolTest, PrefixCheckpointRestoresEveryFixedStateRow) {
+  FixedStatePool pool{model_, /*capacity=*/1,
+                      /*prefix_checkpoint_capacity=*/1};
+  const auto source = MakeResident(
+      pool, kRequestA, 7.0f, /*target_tokens=*/4);
+  auto checkpoint = pool.CapturePrefixCheckpoint(kRequestA);
+  ASSERT_NE(checkpoint, nullptr);
+  EXPECT_EQ(checkpoint->TokenCount(), 4u);
+  EXPECT_EQ(pool.AvailablePrefixCheckpoints(), 0u);
+  pool.Release(source);
+
+  const std::array<FixedStateReservationRequest, 1> requests{
+      FixedStateReservationRequest{
+          kRequestB, /*target_tokens=*/5, /*capture_count=*/0, checkpoint}};
+  {
+    auto reservation = pool.Reserve(requests);
+    EXPECT_FALSE(reservation.UsesDirectBindings());
+    ExpectInputRows(reservation, 0, 7.0f);
+    FillStagedRows(reservation, 0, 9.0f);
+    reservation.Commit();
+  }
+  EXPECT_EQ(pool.CommittedTokens(pool.HandleFor(kRequestB)), 5u);
+
+  checkpoint.reset();
+  EXPECT_EQ(pool.AvailablePrefixCheckpoints(), 0u);
+}
+
+TEST_F(FixedStatePoolTest, PrefixCheckpointLeaseReleasesItsPreallocatedSlot) {
+  FixedStatePool pool{model_, /*capacity=*/1,
+                      /*prefix_checkpoint_capacity=*/1};
+  MakeResident(pool, kRequestA, 3.0f, /*target_tokens=*/4);
+  auto checkpoint = pool.CapturePrefixCheckpoint(kRequestA);
+  ASSERT_NE(checkpoint, nullptr);
+  EXPECT_EQ(pool.Snapshot().checkpoint_count, 1u);
+
+  checkpoint.reset();
+
+  EXPECT_EQ(pool.AvailablePrefixCheckpoints(), 1u);
+  EXPECT_EQ(pool.Snapshot().checkpoint_count, 0u);
+}
+
+TEST_F(FixedStatePoolTest, PrefixCheckpointMustBelongToTheAdoptingPool) {
+  FixedStatePool source_pool{model_, /*capacity=*/1,
+                             /*prefix_checkpoint_capacity=*/1};
+  FixedStatePool destination_pool{model_, /*capacity=*/1,
+                                  /*prefix_checkpoint_capacity=*/1};
+  MakeResident(source_pool, kRequestA, 3.0f, /*target_tokens=*/4);
+  auto checkpoint = source_pool.CapturePrefixCheckpoint(kRequestA);
+  const std::array<FixedStateReservationRequest, 1> requests{
+      FixedStateReservationRequest{
+          kRequestB, /*target_tokens=*/5, /*capture_count=*/0, checkpoint}};
+
+  EXPECT_THROW(destination_pool.Reserve(requests), std::runtime_error);
+}
+
 TEST_F(FixedStatePoolTest, ValidateReleaseIsPureAndPublicationIsNoexcept) {
   auto pool = MakePool(1);
   const auto handle = MakeResident(*pool, kRequestA, 1.0f);

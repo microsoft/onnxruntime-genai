@@ -61,6 +61,15 @@ struct RequestReservationSnapshot {
   size_t committed_slots{};
   size_t target_slots{};
   std::vector<size_t> reserved_block_ids;
+  std::vector<size_t> adopted_block_ids;
+};
+
+struct CachedBlockSnapshot {
+  size_t block_id{};
+  size_t ref_count{};
+  size_t used_slots{};
+  bool full{};
+  bool indexed{};
 };
 
 struct WindowBlockPoolSnapshot {
@@ -79,7 +88,9 @@ struct PagedCacheSnapshot {
   size_t block_table_columns{};  // Padded block-table width the model sees, or 0 when unused.
   std::vector<RequestBlockSnapshot> requests;
   std::vector<size_t> transaction_reserved_block_ids;
+  std::vector<size_t> transaction_adopted_block_ids;
   std::vector<RequestReservationSnapshot> reservations;
+  std::vector<CachedBlockSnapshot> blocks;
   WindowBlockPoolSnapshot window_blocks;
 
   // Blocks currently owned by some Request (sum of per-Request block counts).

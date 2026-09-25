@@ -738,7 +738,7 @@ struct CudaInterfaceImplBase : DeviceInterface {
   }
 
   void GetAvailableMemory(size_t& free_bytes, size_t& total_bytes) override {
-    cudaMemGetInfo(&free_bytes, &total_bytes);
+    CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
   }
 
   // Cached working set for the on-device ArgMax (Top-K, k=1) path.
@@ -761,6 +761,11 @@ struct CudaInterfaceImplBase : DeviceInterface {
 
 struct CudaInterfaceImpl final : CudaInterfaceImplBase {
   DeviceType GetType() const override { return DeviceType::CUDA; }
+  int GetDeviceId(const ProviderOptions*) override {
+    int device_id{};
+    CUDA_CHECK(cudaGetDevice(&device_id));
+    return device_id;
+  }
   bool SupportsOffsetTensorViews() const override { return true; }
   bool SupportsTransactionalFixedState() const override { return true; }
   bool SupportsCompactStateReplay() const override { return true; }

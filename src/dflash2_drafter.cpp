@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <limits>
 #include <numeric>
 #include <string>
@@ -55,6 +56,48 @@ int32_t CheckedMetadataValue(size_t value, std::string_view description) {
         std::string{description} + " exceeds the int32 attention metadata range.");
   }
   return static_cast<int32_t>(value);
+}
+
+TargetTokenSelection BuildIndependentDraftDistribution(
+    const int32_t* candidate_ids, const float* logits, size_t top_k,
+    float temperature, float top_p, float min_p) {
+  TargetTokenSelection distribution;
+  if (top_k == 0) {
+    return distribution;
+  }
+  std::vector<size_t> sorted_indices(top_k);
+  std::iota(sorted_indices.begin(), sorted_indices.end(), 0);
+  std::stable_sort(sorted_indices.begin(), sorted_indices.end(),
+                   [logits](size_t left, size_t right) {
+                     return logits[left] > logits[right];
+                   });
+  const float max_logit = logits[sorted_indices.front()];
+  std::vector<float> probabilities(top_k);
+  float sum = 0.0f;
+  for (size_t i = 0; i < top_k; ++i) {
+    const float probability =
+        std::exp((logits[sorted_indices[i]] - max_logit) / temperature);
+    probabilities[i] = probability;
+    sum += probability;
+  }
+
+  float cumulative = 0.0f;
+  for (size_t i = 0; i < top_k; ++i) {
+    const float probability = probabilities[i] / sum;
+    const bool keep_min_p = probabilities[i] >= min_p * probabilities[0];
+    const bool keep_top_p = cumulative < top_p;
+    cumulative += probability;
+    if (keep_min_p && keep_top_p) {
+      distribution.indices.push_back(candidate_ids[sorted_indices[i]]);
+      distribution.probs.push_back(probabilities[i]);
+    }
+  }
+  const float kept_sum = std::accumulate(
+      distribution.probs.begin(), distribution.probs.end(), 0.0f);
+  for (float& probability : distribution.probs) {
+    probability /= kept_sum;
+  }
+  return distribution;
 }
 
 void InheritProviderOptions(const Config::SessionOptions& parent,
@@ -105,6 +148,13 @@ void RequireTensor(const ModelStateMetadata& metadata, const std::string& name,
 }
 
 }  // namespace
+
+TargetTokenSelection Dflash2IndependentDraftDistribution(
+    const int32_t* candidate_ids, const float* logits, size_t top_k,
+    float temperature, float top_p, float min_p) {
+  return BuildIndependentDraftDistribution(
+      candidate_ids, logits, top_k, temperature, top_p, min_p);
+}
 
 size_t Dflash2DraftWidth(size_t capability_limit, size_t configured_limit,
                          size_t sequence_length_after_step, size_t sequence_limit,
@@ -279,6 +329,10 @@ ONNXTensorElementDataType ValidateDflash2ModelCompatibility(
   if (!input_names.insert(inputs.aux_hidden_states).second) {
     throw std::runtime_error("model.dflash2 input names must be unique.");
   }
+  if (!config.model.embedding.filename.empty() &&
+      (inputs.embeddings.empty() || !input_names.insert(inputs.embeddings).second)) {
+    throw std::runtime_error("model.dflash2 embedding input must have a unique non-empty name.");
+  }
 
   ONNXTensorElementDataType cache_type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
   std::unordered_set<std::string> cache_output_names;
@@ -347,10 +401,16 @@ ONNXTensorElementDataType ValidateDflash2ModelCompatibility(
   return cache_type;
 }
 
-Dflash2Model::Dflash2Model(std::unique_ptr<Config> config, OrtEnv& ort_env)
-    : Model{std::move(config)} {
+Dflash2Model::Dflash2Model(std::unique_ptr<Config> config, OrtEnv& ort_env,
+                           std::shared_ptr<CpuEmbedding> cpu_embedding)
+    : Model{std::move(config)}, cpu_embedding_{std::move(cpu_embedding)} {
   session_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
   session_info_.Add(*session_);
+  if (cpu_embedding_) {
+    cpu_embedding_->ValidateConsumer(session_info_, config_->model.dflash2.inputs.embeddings);
+  } else if (!config_->model.embedding.filename.empty()) {
+    throw std::runtime_error("DFlash CPU embedding requires the target's shared embedding session.");
+  }
 }
 
 std::unique_ptr<State> Dflash2Model::CreateState(DeviceSpan<int32_t>, const GeneratorParams&) const {
@@ -424,6 +484,14 @@ size_t Dflash2Drafter::FullAttentionReservedBytes(size_t paged_block_size,
       0, paged_block_size, query_block_size, max_batch_size);
   return CheckedMultiply(spill_blocks, bytes_per_block,
                          "DFlash 2 query spill bytes");
+}
+
+size_t Dflash2Drafter::EmbeddingReservedBytes(size_t max_batch_size, size_t query_block_size,
+                                              size_t hidden_size, ONNXTensorElementDataType type) {
+  const size_t rows = CheckedMultiply(max_batch_size, query_block_size, "DFlash 2 embedding rows");
+  const size_t elements = CheckedMultiply(rows, hidden_size, "DFlash 2 embedding elements");
+  const size_t bytes = CheckedMultiply(elements, Ort::SizeOf(type), "DFlash 2 embedding bytes");
+  return CheckedMultiply(bytes, 3, "DFlash 2 embedding growth reservation");
 }
 
 Dflash2Drafter::Dflash2Drafter(std::shared_ptr<Dflash2Model> model, size_t paged_block_size,
@@ -639,8 +707,12 @@ void Dflash2Drafter::ReleaseAll() {
 }
 
 bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> feeds,
-                             std::vector<std::vector<int32_t>>& drafts) {
+                             std::vector<std::vector<int32_t>>& drafts,
+                             std::vector<std::vector<TargetTokenSelection>>* draft_distributions) {
   drafts.assign(feeds.size(), {});
+  if (draft_distributions) {
+    draft_distributions->assign(feeds.size(), {});
+  }
   if (feeds.empty()) {
     return false;
   }
@@ -829,6 +901,11 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
 
   auto& input_ids = StepTensor(step_tensors_.input_ids, device, Ort::TypeToTensorType<int64_t>,
                                {static_cast<int64_t>(num_block_rows)});
+  Tensor* embeddings = nullptr;
+  if (model_->cpu_embedding_) {
+    embeddings = &StepTensor(step_tensors_.embeddings, device, model_->cpu_embedding_->type_,
+                             {static_cast<int64_t>(num_block_rows), model_->cpu_embedding_->hidden_size_});
+  }
   {
     auto span = input_ids.GetDeviceSpan<int64_t>();
     auto cpu = span.CpuSpan();
@@ -840,6 +917,7 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
       }
     }
     span.CopyCpuToDevice();
+    if (embeddings) model_->cpu_embedding_->Run(cpu, *embeddings, step_tensors_.embedding_workspace);
   }
 
   constexpr auto int32_type = Ort::TypeToTensorType<int32_t>;
@@ -896,6 +974,7 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
                              static_cast<int64_t>(top_k), static_cast<int64_t>(top_k)});
   // Everything the captured launches bake in: the packed row counts, the block-table width, and the
   // generation of the buffers those launches recorded addresses for.
+  const size_t known_graph_shapes = graph_ids_.size();
   const int annotation_id =
       graph_eligible
           ? graph_ids_.Id(GraphAnnotationIds::Key{
@@ -903,6 +982,10 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
                 static_cast<size_t>(layout.max_query_len), buffer_generation_})
           : -1;
   const bool capture = annotation_id > 0;
+  if (capture && graph_ids_.size() != known_graph_shapes && g_log.enabled && g_log.graph_capture) {
+    Log("graph_capture") << "dflash2 batch=" << batch << " context_rows=" << num_ctx_rows
+                         << " -> graph id " << annotation_id << std::endl;
+  }
   if (graph_capture_enabled_) {
     run_options_->AddConfigEntry("gpu_graph_id", std::to_string(annotation_id).c_str());
   }
@@ -935,15 +1018,12 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
                                 block_row_index.GetOrtTensor(), cumulative.GetOrtTensor(),
                                 past_lengths.GetOrtTensor(), block_table.GetOrtTensor()};
   if (!config_.inputs.attention_metadata.empty()) {
-    auto& attention_metadata = Dflash2StepTensor(
-        step_tensors_.attention_metadata, GetDeviceInterface(DeviceType::CPU), int32_type, {3});
-    auto span = attention_metadata.GetDeviceSpan<int32_t>();
-    auto cpu = span.CpuSpan();
-    cpu[0] = layout.max_query_len;
-    cpu[1] = layout.max_kv_len;
-    cpu[2] = layout.min_kv_len;
     input_names.push_back(config_.inputs.attention_metadata.c_str());
-    inputs.push_back(attention_metadata.GetOrtTensor());
+    inputs.push_back(metadata.GetOrtTensor());
+  }
+  if (embeddings) {
+    input_names.push_back(config_.inputs.embeddings.c_str());
+    inputs.push_back(embeddings->GetOrtTensor());
   }
   std::vector<const char*> output_names{config_.outputs.candidate_ids.c_str(),
                                         config_.outputs.scores.c_str()};
@@ -974,9 +1054,24 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   auto candidate_cpu = candidate_span.CopyDeviceToCpu();
   auto scores_cpu = scores_span.CopyDeviceToCpu();
   for (size_t slot = 0; slot < block_feed_indices.size(); ++slot) {
+    const size_t feed_index = block_feed_indices[slot];
+    if (feeds[feed_index].wants_independent_sampling && draft_distributions) {
+      auto& out = (*draft_distributions)[feed_index];
+      out.reserve(num_spec);
+      for (size_t step = 0; step < num_spec; ++step) {
+        const size_t candidate_offset = (slot * num_spec + step) * top_k;
+        const size_t score_offset = candidate_offset * top_k;
+        out.push_back(BuildIndependentDraftDistribution(
+            candidate_cpu.data() + candidate_offset,
+            scores_cpu.data() + score_offset,
+            top_k, config_.sampling_temperature,
+            config_.sampling_top_p, config_.sampling_min_p));
+      }
+      continue;
+    }
     // Greedy walk of the lattice: slot l's chosen candidate index selects the row of slot l+1's
     // score matrix, so the drafted block is one coherent path rather than seven independent argmaxes.
-    auto& out = drafts[block_feed_indices[slot]];
+    auto& out = drafts[feed_index];
     out.reserve(num_spec);
     size_t previous = 0;
     for (size_t step = 0; step < num_spec; ++step) {

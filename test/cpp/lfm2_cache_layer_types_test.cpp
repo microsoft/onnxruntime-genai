@@ -98,6 +98,39 @@ void ExpectLayerTypesValidationMessage(const std::string& message, size_t actual
   EXPECT_NE(message.find("num_hidden_layers (" + std::to_string(expected_layers) + ")"), std::string::npos) << message;
 }
 
+// LFM2 variants that the exporter labels with their own model type still have to run through the
+// LFM2 runtime: the same conv state cache, and no rewind.
+void ExpectLfm2Runtime(const std::string& model_type, const std::string& temp_suffix) {
+  const auto src_dir = GetLfm2ModelPath();
+  const auto model_dir = MakeTempDir(temp_suffix);
+  fs_std::copy(src_dir, model_dir, fs_std::copy_options::recursive | fs_std::copy_options::overwrite_existing);
+  std::string config = ReadFile(model_dir / "genai_config.json");
+  ReplaceFirst(config, "\"type\": \"lfm2\"", "\"type\": \"" + model_type + "\"");
+  WriteFile(model_dir / "genai_config.json", config);
+
+  auto model = OgaModel::Create(model_dir.string().c_str());
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 8);
+  auto generator = OgaGenerator::Create(*model, *params);
+
+  const std::vector<int32_t> input_ids{0, 0, 195, 731};
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+  generator->GenerateNextToken();
+  const size_t sequence_length = generator->GetSequenceCount(0);
+  EXPECT_GT(sequence_length, input_ids.size());
+
+  // Conv state cannot be rewound, exactly like the dense LFM2 models. The generator's up-front guard
+  // has to reject it; a throw from deeper in the state would come after the sequence was rewound.
+  std::string message;
+  try {
+    generator->RewindTo(0);
+  } catch (const std::runtime_error& e) {
+    message = e.what();
+  }
+  EXPECT_NE(message.find("RewindTo is currently not supported for " + model_type), std::string::npos) << message;
+  EXPECT_EQ(generator->GetSequenceCount(0), sequence_length);
+}
+
 }  // namespace
 
 TEST(LFM2CacheLayerTypesValidationTest, UndersizedLayerTypesArray) {
@@ -138,37 +171,22 @@ TEST(LFM2CacheLayerTypesValidationTest, ValidMatchingLayers) {
   });
 }
 
+// The MoE variant (LFM2-8B-A1B, LFM2.5-8B-A1B, LFM2-24B-A2B) is exported as "lfm2_moe".
+TEST(LFM2CacheLayerTypesValidationTest, Lfm2MoeTypeUsesLfm2Runtime) {
+  SkipIfModelUnavailable();
+  ExpectLfm2Runtime("lfm2_moe", "moe_type");
+}
+
 // An LFM2-VL checkpoint exported without exclude_embeds is labeled "lfm2_vl_text": a plain LFM2
-// decoder that must run through the LFM2 runtime (conv state cache, no rewind).
+// decoder rather than a stage of the vision pipeline.
 TEST(LFM2CacheLayerTypesValidationTest, Lfm2VlTextTypeUsesLfm2Runtime) {
   SkipIfModelUnavailable();
+  ExpectLfm2Runtime("lfm2_vl_text", "vl_text_type");
+}
 
-  const auto src_dir = GetLfm2ModelPath();
-  const auto model_dir = MakeTempDir("vl_text_type");
-  fs_std::copy(src_dir, model_dir, fs_std::copy_options::recursive | fs_std::copy_options::overwrite_existing);
-  std::string config = ReadFile(model_dir / "genai_config.json");
-  ReplaceFirst(config, "\"type\": \"lfm2\"", "\"type\": \"lfm2_vl_text\"");
-  WriteFile(model_dir / "genai_config.json", config);
-
-  auto model = OgaModel::Create(model_dir.string().c_str());
-  auto params = OgaGeneratorParams::Create(*model);
-  params->SetSearchOption("max_length", 8);
-  auto generator = OgaGenerator::Create(*model, *params);
-
-  const std::vector<int32_t> input_ids{0, 0, 195, 731};
-  generator->AppendTokens(input_ids.data(), input_ids.size());
-  generator->GenerateNextToken();
-  const size_t sequence_length = generator->GetSequenceCount(0);
-  EXPECT_GT(sequence_length, input_ids.size());
-
-  // Conv state cannot be rewound, exactly like the dense LFM2 models. The generator's up-front guard
-  // has to reject it; a throw from deeper in the state would come after the sequence was rewound.
-  std::string message;
-  try {
-    generator->RewindTo(0);
-  } catch (const std::runtime_error& e) {
-    message = e.what();
-  }
-  EXPECT_NE(message.find("RewindTo is currently not supported for lfm2_vl_text"), std::string::npos) << message;
-  EXPECT_EQ(generator->GetSequenceCount(0), sequence_length);
+// An LFM2-Audio checkpoint exported without exclude_embeds is labeled "lfm2_audio_text": a plain
+// LFM2 decoder rather than a stage of the speech pipeline.
+TEST(LFM2CacheLayerTypesValidationTest, Lfm2AudioTextTypeUsesLfm2Runtime) {
+  SkipIfModelUnavailable();
+  ExpectLfm2Runtime("lfm2_audio_text", "audio_text_type");
 }

@@ -225,6 +225,7 @@ def _make_inputs_model(use_paged_attention, use_ring):
         "cumulative_sequence_lengths": "cumulative_sequence_lengths",
         "past_sequence_lengths": "past_sequence_lengths",
         "attention_metadata": "attention_metadata",
+        "logits_indices": "logits_indices",
         "past.conv": {},
         "past.recurrent": {},
     }
@@ -336,6 +337,7 @@ def _make_attention_model(use_ring, local_layers=(0,)):
         "cumulative_sequence_lengths": "cumulative_sequence_lengths",
         "past_sequence_lengths": "past_sequence_lengths",
         "attention_metadata": "attention_metadata",
+        "logits_indices": "logits_indices",
     }
     model.paged_attention_calls = []
     model.make_paged_attention = lambda name, **kwargs: model.paged_attention_calls.append(kwargs)
@@ -468,6 +470,12 @@ def test_genai_config_binds_attention_metadata_for_paged_attention(monkeypatch, 
 
     inputs = config["model"]["decoder"]["inputs"]
     assert inputs["attention_metadata"] == "attention_metadata"
+
+
+def test_genai_config_disables_prefix_caching_for_windowed_blocks(monkeypatch, tmp_path):
+    config = _write_genai_config(monkeypatch, tmp_path, window_size=128)
+
+    assert config["engine"]["dynamic_batching"]["prefix_caching"] is False
 
 
 def test_genai_config_defaults_chunk_size_to_the_block_size(monkeypatch, tmp_path):
