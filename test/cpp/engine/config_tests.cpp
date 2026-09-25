@@ -272,6 +272,29 @@ TEST(ConfigTest, RejectsEmptyRuntimeProfileDecoderFilename) {
                std::runtime_error);
 }
 
+TEST(ConfigTest, RejectsRuntimeProfileDecoderFilenameOutsideModelDirectory) {
+  for (const char* filename : {"../model.onnx", "variants/../../model.onnx", "/tmp/model.onnx"}) {
+    Config config;
+    const std::string overlay = std::string{R"({"runtime_profiles":[{
+      "id":"escape",
+      "eligibility":{"minimum_total_device_memory_bytes":1},
+      "overlay":{"model":{"decoder":{"filename":")"} +
+                                filename + R"("}}}
+    }]})";
+    EXPECT_THROW(OverlayConfig(config, overlay), std::runtime_error) << filename;
+  }
+}
+
+TEST(ConfigTest, RejectsRuntimeProfileMaxDraftTokensAboveSpeculativeLimit) {
+  Config config;
+  EXPECT_THROW(OverlayConfig(config, R"({"runtime_profiles":[{
+    "id":"too-many-drafts",
+    "eligibility":{"minimum_total_device_memory_bytes":1},
+    "overlay":{"speculative":{"max_draft_tokens":17}}
+  }]})"),
+               std::runtime_error);
+}
+
 TEST(ConfigTest, AppliesChunkSizeOnlyRuntimeProfileWithoutDynamicBatching) {
   Config config;
   OverlayConfig(config, R"({"runtime_profiles":[{

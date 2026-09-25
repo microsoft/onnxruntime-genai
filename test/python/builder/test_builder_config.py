@@ -600,6 +600,17 @@ def test_runtime_adds_config_only_profile():
     assert updated["engine"]["dynamic_batching"]["num_blocks"] == 800
 
 
+@pytest.mark.parametrize(
+    "overlay",
+    [{}, {"model": {}}, {"model": {"decoder": {}}}, {"engine": {"dynamic_batching": {}}}, {"search": {}}],
+)
+def test_runtime_rejects_profile_without_overlay_fields(overlay):
+    generated = {"model": {"decoder": {}}, "engine": {"dynamic_batching": {}}, "search": {}}
+    profile = {"id": "empty", "eligibility": {"minimum_total_device_memory_bytes": 1}, "overlay": overlay}
+    with pytest.raises(ValueError, match="must contain at least one overlay field"):
+        apply_runtime_config(generated, {"runtime_profiles": [profile]})
+
+
 def test_runtime_rejects_protected_and_absent_components():
     generated = {"model": {"decoder": {}}, "engine": {"dynamic_batching": {"block_size": 256}}}
     with pytest.raises(ValueError, match="unknown runtime_config.engine.dynamic_batching"):

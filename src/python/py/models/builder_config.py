@@ -989,8 +989,8 @@ def validate_runtime_profiles(runtime_profiles: Any, generated_config: dict[str,
         ranges.append((minimum, maximum, profile_id))
 
         overlay = profile.get("overlay")
-        if not isinstance(overlay, dict) or not overlay:
-            raise ValueError(f"{path}.overlay must be a non-empty object")
+        if not isinstance(overlay, dict):
+            raise ValueError(f"{path}.overlay must be an object")
         check_fields(overlay, {"model", "engine", "search", "speculative"}, f"{path}.overlay")
 
         model = overlay.get("model", {})
@@ -1041,6 +1041,9 @@ def validate_runtime_profiles(runtime_profiles: Any, generated_config: dict[str,
             value = speculative["max_draft_tokens"]
             if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 16:
                 raise ValueError(f"{path}.overlay.speculative.max_draft_tokens must be an integer between 1 and 16")
+
+        if not (decoder or dynamic_batching or search or speculative):
+            raise ValueError(f"{path}.overlay must contain at least one overlay field")
 
     for index, (minimum, maximum, profile_id) in enumerate(ranges):
         for other_minimum, other_maximum, other_id in ranges[index + 1 :]:
