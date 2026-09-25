@@ -434,6 +434,13 @@ def normalize_drafter_quant_config(
             raise ValueError("DFlash2 supports only symmetric DEFAULT integer weight quantization")
         if quant_config.format.use_qdq:
             raise ValueError("DFlash2 body weights require QOperator format")
+        if quant_config.weights.type != "none" and quant_config.format.matmulnbits_weights_prepacked:
+            prepack_mode = quant_config.format.matmulnbits_weights_prepacked
+            allowed_block_sizes = (32, 64, 128) if prepack_mode == 1 else (64, 128)
+            if quant_config.weights.block_size not in allowed_block_sizes:
+                raise ValueError(
+                    f"DFlash2 prepacked body weights require block_size in {allowed_block_sizes} for mode {prepack_mode}"
+                )
     if quant_config.moe.type != "none":
         raise ValueError(f"{drafter_type} does not support MoE expert quantization")
     if execution_provider != "cuda" and quant_config.format.matmulnbits_weights_prepacked:
