@@ -155,6 +155,11 @@ merge recursively; arrays replace whole. The validator rejects absent engine or
 speculative capabilities, invalid allocation and draft limits, provider changes,
 and changes to graph-required session options.
 
+For memory-dependent INT4/INT8 KV-cache graphs that share external weights, use
+the [KV-cache variant authoring workflow](../../../../docs/ModelBuilderConfiguration.md#authoring-kv-cache-variants).
+The supported `KVCacheVariant` API requires source and output graphs in the same
+directory and validates every layer's per-channel scale geometry.
+
 Python callers should pass structured dictionaries to `parse_extra_options`
 before calling `create_model` with its returned options. The legacy options
 parameter still takes a list of `KEY=VALUE` strings, not a dictionary. Pass

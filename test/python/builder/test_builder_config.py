@@ -576,6 +576,116 @@ def test_runtime_merge_replaces_arrays_and_fixed_allocation():
     assert generated == original
 
 
+def test_runtime_adds_config_only_profile():
+    generated = {
+        "model": {
+            "context_length": 262144,
+            "decoder": {"filename": "model.onnx"},
+            "dflash2": {"num_draft_tokens": 7},
+        },
+        "engine": {"dynamic_batching": {"num_blocks": 800, "max_batch_size": 1}},
+        "search": {"max_length": 200001, "chunk_size": 512},
+        "speculative": {"max_draft_tokens": 7},
+    }
+    profile = {
+        "id": "32gib",
+        "eligibility": {"minimum_total_device_memory_bytes": 34359738368},
+        "overlay": {
+            "engine": {"dynamic_batching": {"num_blocks": 928, "max_batch_size": 8}},
+            "search": {"chunk_size": 256},
+            "speculative": {"max_draft_tokens": 6},
+        },
+    }
+
+    updated = apply_runtime_config(generated, {"runtime_profiles": [profile]})
+
+    assert updated["runtime_profiles"] == [profile]
+    assert updated["model"]["decoder"]["filename"] == "model.onnx"
+    assert updated["engine"]["dynamic_batching"]["num_blocks"] == 800
+
+
+@pytest.mark.parametrize("in_profile", [False, True])
+@pytest.mark.parametrize(
+    "engine,field,value,error",
+    [
+        ({"static_batching": {}}, "num_blocks", 16, "absent dynamic_batching"),
+        ({"dynamic_batching": {}}, "num_blocks", 2**31, "at most 2147483647"),
+        ({"dynamic_batching": {}}, "max_scheduled_tokens", 2**31, "at most 2147483647"),
+        ({"dynamic_batching": {}}, "max_batch_size", 257, "at most 256"),
+        ({"dynamic_batching": {}}, "num_blocks", True, "positive integer"),
+    ],
+)
+def test_runtime_batching_validation_is_shared_with_profiles(in_profile, engine, field, value, error):
+    generated = {"model": {"decoder": {}}, "engine": engine}
+    runtime = {"engine": {"dynamic_batching": {field: value}}}
+    if in_profile:
+        runtime = {
+            "runtime_profiles": [
+                {"id": "gpu", "eligibility": {"minimum_total_device_memory_bytes": 1}, "overlay": runtime}
+            ]
+        }
+
+    with pytest.raises(ValueError, match=error):
+        apply_runtime_config(generated, runtime)
+
+
+@pytest.mark.parametrize("in_profile", [False, True])
+@pytest.mark.parametrize(
+    "model,max_draft_tokens,error",
+    [
+        ({"decoder": {}}, 4, "absent speculative configuration"),
+        ({"decoder": {}, "dflash2": {"num_draft_tokens": 4}}, 5, "exported drafter/state capacity"),
+        (
+            {"decoder": {"state_update_capacity": 3}, "dspark": {"num_draft_tokens": 7}},
+            4,
+            "exported drafter/state capacity",
+        ),
+        ({"decoder": {}, "dflash2": {"num_draft_tokens": 4}}, 4, None),
+        ({"decoder": {"state_update_capacity": 3}, "dspark": {"num_draft_tokens": 7}}, 3, None),
+        ({"decoder": {}, "mtp": {}}, 16, None),
+    ],
+)
+def test_runtime_draft_capacity_validation_is_shared_with_profiles(in_profile, model, max_draft_tokens, error):
+    generated = {"model": model}
+    runtime = {"speculative": {"max_draft_tokens": max_draft_tokens}}
+    if in_profile:
+        runtime = {
+            "runtime_profiles": [
+                {"id": "gpu", "eligibility": {"minimum_total_device_memory_bytes": 1}, "overlay": runtime}
+            ]
+        }
+
+    if error:
+        with pytest.raises(ValueError, match=error):
+            apply_runtime_config(generated, runtime)
+    else:
+        updated = apply_runtime_config(generated, runtime)
+        for key, value in runtime.items():
+            assert updated[key] == value
+
+
+@pytest.mark.parametrize(
+    "overlay",
+    [{}, {"model": {}}, {"model": {"decoder": {}}}, {"engine": {"dynamic_batching": {}}}, {"search": {}}],
+)
+def test_runtime_rejects_profile_without_overlay_fields(overlay):
+    generated = {"model": {"decoder": {}}, "engine": {"dynamic_batching": {}}, "search": {}}
+    profile = {"id": "empty", "eligibility": {"minimum_total_device_memory_bytes": 1}, "overlay": overlay}
+    with pytest.raises(ValueError, match="must contain at least one overlay field"):
+        apply_runtime_config(generated, {"runtime_profiles": [profile]})
+
+
+def test_runtime_rejects_profile_max_length():
+    generated = {"model": {"context_length": 4096}, "search": {"max_length": 4096}}
+    profile = {
+        "id": "request-limit",
+        "eligibility": {"minimum_total_device_memory_bytes": 1},
+        "overlay": {"search": {"max_length": 2048}},
+    }
+    with pytest.raises(ValueError, match="unknown runtime_config.runtime_profiles\\[0\\].overlay.search"):
+        apply_runtime_config(generated, {"runtime_profiles": [profile]})
+
+
 def test_runtime_rejects_protected_and_absent_components():
     generated = {"model": {"decoder": {}}, "engine": {"dynamic_batching": {"block_size": 256}}}
     with pytest.raises(ValueError, match="unknown runtime_config.engine.dynamic_batching"):

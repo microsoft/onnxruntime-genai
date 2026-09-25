@@ -965,17 +965,18 @@ TEST(Dflash2ConfigTest, JoinsOnlyFromAnEligibleTurnAtSequenceStart) {
 
 namespace {
 
-// Captures whatever WarnOnClampedDraftWidth logs for one config.
-std::string CapturedDraftWidthWarnings(const Config& config) {
+// Captures whatever the action logs as a warning.
+template <typename Action>
+std::string CapturedWarnings(Action&& action) {
   const fs_std::path log_path =
       fs_std::temp_directory_path() /
-      ("draft_width_warning_" + std::to_string(reinterpret_cast<uintptr_t>(&config)) + ".log");
+      ("draft_width_warning_" + std::to_string(reinterpret_cast<uintptr_t>(&action)) + ".log");
   fs_std::remove(log_path);
   SetLogString("filename", log_path.string());
   SetLogBool("enabled", true);
   SetLogBool("warning", true);
 
-  WarnOnClampedDraftWidth(config);
+  action();
 
   SetLogString("filename", "");
   SetLogBool("enabled", false);
@@ -985,6 +986,11 @@ std::string CapturedDraftWidthWarnings(const Config& config) {
   stream.close();
   fs_std::remove(log_path);
   return contents.str();
+}
+
+// Captures whatever WarnOnClampedDraftWidth logs for one config.
+std::string CapturedDraftWidthWarnings(const Config& config) {
+  return CapturedWarnings([&] { WarnOnClampedDraftWidth(config); });
 }
 
 }  // namespace
@@ -1001,6 +1007,20 @@ TEST(Dflash2ConfigTest, WarnsWhenTheDrafterCannotSupplyTheConfiguredDraftWidth) 
   config.model.dflash2.is_dspark = true;
   EXPECT_NE(CapturedDraftWidthWarnings(config).find("model.dspark.num_draft_tokens"),
             std::string::npos);
+}
+
+TEST(Dflash2ConfigTest, WarnsWhenARuntimeProfileRaisesDraftWidthBeyondTheDrafter) {
+  Config config = MakeDflash2Config();
+  config.speculative.max_draft_tokens = 3;
+  Config::RuntimeProfile profile;
+  profile.id = "large";
+  profile.eligibility.minimum_total_device_memory_bytes = 1;
+  profile.overlay.speculative.max_draft_tokens = 5;
+  config.runtime_profiles.push_back(profile);
+
+  const auto warnings = CapturedWarnings([&] { ApplyRuntimeProfile(config, 1); });
+  EXPECT_EQ(config.speculative.max_draft_tokens, 5);
+  EXPECT_NE(warnings.find("model.dflash2.num_draft_tokens"), std::string::npos);
 }
 
 TEST(Dflash2ConfigTest, DoesNotWarnAboutHostingLimitsAtConfigLoad) {
