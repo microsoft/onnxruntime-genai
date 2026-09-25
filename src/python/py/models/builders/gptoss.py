@@ -3,10 +3,30 @@
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 # --------------------------------------------------------------------------
+import numpy as np
 import onnx_ir as ir
 import torch
 
 from .base import Model
+
+_MOE_INT4_BLOCK = 32
+
+
+def _quantize_moe_int4_u32(w):
+    """[N, K] fp32 -> packed [N, K/8] uint32 (8 LSB-first nibbles/word) + [N, K/32]
+    fp32 scales. Dequant: (nibble - 8) * scale, block_size 32. Matches the layout
+    the MIGraphX gpu::gptoss_moe kernel (moe_kernels.h) expects."""
+    n, k = w.shape
+    assert k % _MOE_INT4_BLOCK == 0, f"K={k} not divisible by {_MOE_INT4_BLOCK}"
+    nb = k // _MOE_INT4_BLOCK
+    wb = w.reshape(n, nb, _MOE_INT4_BLOCK)
+    scale = np.maximum(np.abs(wb).max(2, keepdims=True) / 7.0, 1e-8).astype(np.float32)
+    q = np.clip(np.rint(wb / scale) + 8.0, 0, 15).astype(np.uint32).reshape(n, k)
+    qp = q.reshape(n, k // 8, 8)
+    packed = np.zeros((n, k // 8), dtype=np.uint32)
+    for j in range(8):
+        packed |= (qp[:, :, j] & 0xF) << (j * 4)
+    return packed, scale.reshape(n, nb).astype(np.float32)
 
 
 class GPTOSSModel(Model):
@@ -20,6 +40,14 @@ class GPTOSSModel(Model):
         self.moe_attrs["activation_type"] = "swiglu"
         self.moe_attrs["normalize_routing_weights"] = True
         self.moe_attrs["swiglu_fusion"] = 1
+
+        # Opt-in: emit a single fused com.migraphx `GptOssMoE` INT4 node per layer
+        # instead of the decomposed MoE subgraph, for the OGA -> MIGraphX plugin-EP
+        # path on gfx1151. Default off => the builder's behavior for every existing
+        # EP is byte-for-byte unchanged.
+        self.moe_migraphx = str(extra_options.get("fused_gptoss_moe_migraphx", "0")).lower() in ("1", "true", "yes")
+        if self.moe_migraphx:
+            self.model.graph.opset_imports["com.migraphx"] = 1
 
     def load_mxfp4_experts(self, layer_id):
         try:
@@ -49,13 +77,128 @@ class GPTOSSModel(Model):
         return cos_cache, sin_cache
 
     def make_moe(self, layer_id, moe, root_input):
-        if self.ep in {"cpu", "cuda", "trt-rtx", "webgpu"}:
+        if self.moe_migraphx:
+            self.make_moe_gptoss_migraphx(layer_id, moe, root_input)
+        elif self.ep in {"cpu", "cuda", "trt-rtx", "webgpu"}:
             super().make_moe(layer_id, moe, root_input)
         else:
             self.make_moe_decomposed(layer_id, moe, root_input)
 
     def get_moe_module(self, layer_id, layer):
         return layer.mlp
+
+    def make_moe_gptoss_migraphx(self, layer_id, moe, root_input):
+        # Fused MoE for the OGA -> MIGraphX plugin-EP path: emit one com.migraphx
+        # `GptOssMoE` INT4 node per layer (device-side top-k routing + fused INT4
+        # dequant expert GEMMs in gpu::gptoss_moe). The router MatMul+Add stays in
+        # the ONNX graph; the node consumes router_logits. Expert weights are
+        # repacked to the kernel-native per-expert INT4 layout (uint32-packed
+        # nibbles, block 32, dequant (nibble-8)*scale). This folds in the standalone
+        # Route-A rewriter so the builder emits the MIGraphX-ready graph directly.
+        basename = f"/model/layers.{layer_id}/moe"
+        num_experts = self.moe_attrs["num_experts"]
+        top_k = self.moe_attrs["top_k"]
+        hidden_size = self.hidden_size
+        intermediate_size = self.intermediate_size
+
+        # Router (stays in graph): MatMul -> Add -> Cast(fp32) -> Squeeze -> [S, E]
+        router_matmul_name = self.make_matmul(moe.router, f"{basename}/router/MatMul", root_input)
+        router_add_name = f"{basename}/router/Add"
+        self.make_add_bias(moe.router.bias, router_add_name, root_input=f"{router_matmul_name}/output_0")
+        logits_cast_name = f"{basename}/router/Cast"
+        self.make_cast(
+            logits_cast_name,
+            f"{router_add_name}/output_0",
+            ir.DataType.FLOAT,
+            shape=["batch_size", "sequence_length", num_experts],
+        )
+        logits_squeeze_name = f"{basename}/router/Squeeze"
+        self.make_squeeze(
+            logits_squeeze_name,
+            [f"{logits_cast_name}/output_0", "/model/constants/INT64/[0]"],
+            dtype=ir.DataType.FLOAT,
+            shape=["batch_size_x_sequence_length", num_experts],
+        )
+
+        # Hidden states [1, S, H] -> [S, H] (io_dtype)
+        hidden_squeeze_name = f"{basename}/hidden/Squeeze"
+        self.make_squeeze(
+            hidden_squeeze_name,
+            [root_input, "/model/constants/INT64/[0]"],
+            dtype=self.io_dtype,
+            shape=["batch_size_x_sequence_length", hidden_size],
+        )
+
+        # Per-expert INT4 repack of gate_up_proj / down_proj (+ fp32 biases). Quantize
+        # from the fp16-cast weights (the export stores MoE weights at io_dtype) so the
+        # packing is bit-identical to the Route-A rewriter's output.
+        gate_up = moe.experts.gate_up_proj.detach().to(torch.float16).to(torch.float32).cpu().numpy()
+        down = moe.experts.down_proj.detach().to(torch.float16).to(torch.float32).cpu().numpy()
+        gate_up_bias = moe.experts.gate_up_proj_bias.detach().to(torch.float16).to(torch.float32).cpu().numpy()
+        down_bias = moe.experts.down_proj_bias.detach().to(torch.float16).to(torch.float32).cpu().numpy()
+        two_i = gate_up_bias.shape[1]
+        # gate_up_proj arrives [E, H, 2I]; the kernel wants [E, 2I, H].
+        gate_up = gate_up.transpose(0, 2, 1) if gate_up.shape[1] == hidden_size else gate_up
+        assert gate_up.shape == (num_experts, two_i, hidden_size), gate_up.shape
+        # down_proj arrives [E, I, H] from HF; the kernel wants [E, H, I] (per-expert
+        # [out=H, in=I], packed along I). hidden==intermediate for gpt-oss-20b, so the
+        # shape guard below cannot catch a missing transpose — transpose explicitly.
+        down = down.transpose(0, 2, 1)
+        assert down.shape == (num_experts, hidden_size, intermediate_size), down.shape
+
+        fc1_w = np.zeros((num_experts, two_i, hidden_size // 8), np.uint32)
+        fc1_s = np.zeros((num_experts, two_i, hidden_size // _MOE_INT4_BLOCK), np.float32)
+        fc2_w = np.zeros((num_experts, hidden_size, intermediate_size // 8), np.uint32)
+        fc2_s = np.zeros((num_experts, hidden_size, intermediate_size // _MOE_INT4_BLOCK), np.float32)
+        for e in range(num_experts):
+            fc1_w[e], fc1_s[e] = _quantize_moe_int4_u32(gate_up[e])
+            fc2_w[e], fc2_s[e] = _quantize_moe_int4_u32(down[e])
+
+        self.make_initializer(fc1_w, f"{basename}/fc1_w")
+        self.make_initializer(fc1_s, f"{basename}/fc1_s")
+        self.make_initializer(fc2_w, f"{basename}/fc2_w")
+        self.make_initializer(fc2_s, f"{basename}/fc2_s")
+        self.make_initializer(gate_up_bias, f"{basename}/fc1_b")
+        self.make_initializer(down_bias, f"{basename}/fc2_b")
+
+        # Fused MoE node. swiglu constants match the decomposed activation / rewriter
+        # (alpha=1.703125, beta=1.0, limit=7.0).
+        moe_name = f"{basename}/GptOssMoE"
+        moe_out = f"{moe_name}/output_0"
+        self.make_node(
+            "GptOssMoE",
+            inputs=[
+                f"{hidden_squeeze_name}/output_0",
+                f"{logits_squeeze_name}/output_0",
+                f"{basename}/fc1_w",
+                f"{basename}/fc1_s",
+                f"{basename}/fc2_w",
+                f"{basename}/fc2_s",
+                f"{basename}/fc1_b",
+                f"{basename}/fc2_b",
+            ],
+            outputs=[moe_out],
+            name=moe_name,
+            domain="com.migraphx",
+            num_experts=num_experts,
+            top_k=top_k,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            swiglu_alpha=1.703125,
+            swiglu_beta=1.0,
+            swiglu_limit=7.0,
+        )
+        self.make_value(moe_out, self.io_dtype, shape=["batch_size_x_sequence_length", hidden_size])
+
+        # [S, H] -> [1, S, H] for the following SkipLayerNorm
+        moe_unsqueeze_name = f"{basename}/Unsqueeze"
+        self.make_unsqueeze(
+            moe_unsqueeze_name,
+            [moe_out, "/model/constants/INT64/[0]"],
+            dtype=self.io_dtype,
+            shape=["batch_size", "sequence_length", hidden_size],
+        )
+        self.layernorm_attrs["skip_input"] = f"{moe_unsqueeze_name}/output_0"
 
     def make_moe_decomposed(self, layer_id, moe, root_input):
         # Make nodes for the MoE subgraph
