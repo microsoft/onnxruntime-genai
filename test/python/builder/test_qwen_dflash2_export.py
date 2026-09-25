@@ -1568,7 +1568,7 @@ def test_drafter_uses_target_context_length(tmp_path, monkeypatch, fuse_gate_up)
 
     assert captured["max_position"] == model.decoder.context_length
     assert captured["fuse_gate_up"] is (str(fuse_gate_up).lower() == "true")
-    assert captured["include_attention_metadata"] is False
+    assert captured["include_attention_metadata"] is True
 
 
 def test_gate_up_fusion_defaults_off(tmp_path):

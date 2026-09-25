@@ -456,7 +456,7 @@ def test_drafter_uses_target_context_length(tmp_path, monkeypatch):
     model.make_dspark_model(str(tmp_path))
 
     assert captured["max_position"] == model.decoder.context_length
-    assert captured["include_attention_metadata"] is False
+    assert captured["include_attention_metadata"] is True
 
 
 @pytest.mark.parametrize("prefix_caching", [None, False, True])
