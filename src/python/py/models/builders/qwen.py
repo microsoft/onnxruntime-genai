@@ -151,7 +151,7 @@ class Qwen35TextModel(Model):
             self.context_length_attrs["state_window"],
             self.ep,
         )
-        if capture_indexer_updates:
+        if self.context_length_attrs["state_window"]:
             self.context_length_attrs["state_update_capacity"] = (
                 self.context_length_attrs["state_window"] - 1
             )
@@ -1373,6 +1373,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
             if self.use_paged_attention
             else 0
         )
+        flatten_dims = [-1, self.ple_embed_dim] if self.use_paged_attention else [0, 0, self.ple_embed_dim]
         if getattr(self, "external_engram", False):
             engram_embeddings = self.input_names["engram_embeddings"]
             self.make_node(
@@ -1748,15 +1749,18 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
                 ["batch_size", "sequence_length", capacity],
             )
             if capture_indexer_updates:
-                self.make_value(
+                indexer_update_value = self.make_value(
                     f"state_update.{layer_id}.indexer_value",
                     self.io_dtype,
                     ["batch_size", "sequence_length", self.indexer_head_dim],
                 )
-                self.make_value(
+                indexer_update_row = self.make_value(
                     f"state_update.{layer_id}.indexer_row",
                     ir.DataType.INT32,
                     ["batch_size", "sequence_length"],
+                )
+                self.model.graph.outputs.extend(
+                    [indexer_update_value, indexer_update_row]
                 )
             selected_counts = self.make_selected_counts(layer_id, selected_indices, capacity, packed=False)
             selected_indices_flat = f"{indexer_name}/Flatten"
