@@ -114,10 +114,19 @@ class VideoChatFlashQwenModel(QwenModel):
 
 
 class Qwen35TextModel(Model):
-    def validate_gated_delta_net_options(self, use_paged_attention, linear_attn_op, state_window, ep):
+    def validate_gated_delta_net_options(self, use_paged_attention, linear_attn_op, state_window, ep, io_dtype):
         uses_gated_delta_net = use_paged_attention or linear_attn_op == "gated_delta_net"
         if uses_gated_delta_net and ep not in ("cuda", "webgpu"):
             raise ValueError("GatedDeltaNet exports require the CUDA or WebGPU execution provider")
+        if uses_gated_delta_net and ep == "webgpu":
+            supported_dtypes = (
+                (ir.DataType.FLOAT16,) if use_paged_attention else (ir.DataType.FLOAT16, ir.DataType.FLOAT)
+            )
+            if io_dtype not in supported_dtypes:
+                raise ValueError(
+                    "GatedDeltaNet exports on WebGPU require FP16 for paged attention "
+                    "or FP16/FP32 for non-paged attention"
+                )
         if uses_gated_delta_net and state_window:
             raise ValueError("GatedDeltaNet exports commit an unwindowed recurrent state and require state_window=0")
 
@@ -155,6 +164,7 @@ class Qwen35TextModel(Model):
             self.linear_attn_op,
             self.context_length_attrs["state_window"],
             self.ep,
+            self.io_dtype,
         )
 
         if self.use_paged_attention:
