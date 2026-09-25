@@ -67,13 +67,14 @@ static bool _ = (Ort::InitApi(), false);
 bool SupportsContinuousDecoding(DeviceType device_type) noexcept {
   // Some models fall back to CPU attention, where continuation is valid because their KV cache is
   // also on CPU. Other listed providers preserve appendable KV state across generation turns.
-  constexpr std::array<DeviceType, 6> supported_devices{
+  constexpr std::array<DeviceType, 7> supported_devices{
       DeviceType::CPU,
       DeviceType::CUDA,
       DeviceType::WEBGPU,
       DeviceType::OpenVINO,
       DeviceType::NvTensorRtRtx,
-      DeviceType::RyzenAI};
+      DeviceType::RyzenAI,
+      DeviceType::QnnGpu};
   return std::find(supported_devices.begin(), supported_devices.end(), device_type) !=
          supported_devices.end();
 }
