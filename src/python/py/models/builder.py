@@ -981,9 +981,11 @@ def get_args():
                 dflash2_precision = Weight precision for the DFlash 2 drafter body: bf16 (default),
                     int4, or int8. bf16 keeps every projection dense. int4/int8 emit `MatMulNBits`
                     at the target's block size for the attention and MLP projections, leaving the
-                    small dynamic-convolution and candidate-selector projections dense. The BF16
-                    body is emitted in the portable raw blockwise layout, and its session disables
-                    the target decoder's fpA-intB selection for those nodes.
+                    small dynamic-convolution and candidate-selector projections dense. The body
+                    uses the raw blockwise layout by default. On CUDA, a drafter quantization
+                    format with matmulnbits_weights_prepacked=1 or 2 emits that fpA-intB layout for
+                    projections the kernel supports (N % 64 for int4, N % 32 for int8); other
+                    projections stay raw, and the drafter session disables fpA-intB selection for them.
                     Body activations and KV caches remain bf16; this option does not quantize the
                     drafter's KV cache. When the target LM head uses a reproducible symmetric default
                     layout, the drafter head uses its actual bit width, block size, initializer names,

@@ -1103,6 +1103,26 @@ def test_bf16_body_honors_prepacked_weight_format(tmp_path):
     assert node.attributes["weight_prepacked"].value == 1
 
 
+@pytest.mark.parametrize(("bits", "out_features"), [(4, 32), (8, 48)])
+def test_prepack_keeps_ineligible_output_width_raw(tmp_path, bits, out_features):
+    builder = DFlash2Builder(
+        _draft_checkpoint(tmp_path),
+        str(tmp_path),
+        ir.DataType.FLOAT16,
+        paged_block_size=256,
+        max_position_embeddings=128,
+        quant={"bits": bits, "block_size": 32, "prepack": 1},
+    )
+
+    builder.matmul("/probe/MatMul", "hidden_states", torch.ones((out_features, 64)), 64, out_features, "num_block")
+
+    node = next(node for node in builder.graph if node.name == "/probe/MatMul")
+    assert node.op_type == "MatMulNBits"
+    assert "weight_prepacked" not in node.attributes
+    qweight = builder.graph.initializers[f"probe.MatMul.weight_Q{bits}"].const_value
+    assert tuple(qweight.shape) == (out_features, 2, 32 * bits // 8)
+
+
 @pytest.mark.parametrize("bits", [None, 4, 8])
 @pytest.mark.parametrize("fuse_gate_up", [False, True])
 def test_mlp_gate_up_fusion_preserves_weight_rows(tmp_path, bits, fuse_gate_up):
