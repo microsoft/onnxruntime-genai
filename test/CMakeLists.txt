@@ -17,6 +17,7 @@ list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/dflash2_config_test.
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/kv_cache_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/lfm2_audio_frames_test.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/lfm2_vl_image_geometry_test.cpp")
+list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_performance_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_preprocessing_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_utils_tests.cpp")
 list(REMOVE_ITEM test_srcs "${CMAKE_CURRENT_SOURCE_DIR}/cpp/reinit_tests.cpp")
@@ -168,6 +169,7 @@ endif()
 add_test(NAME KvCacheUnitTests COMMAND kv_cache_unit_tests)
 
 add_executable(parallel_preprocessing_tests
+  "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_performance_tests.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_preprocessing_tests.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/cpp/parallel_utils_tests.cpp")
 target_include_directories(parallel_preprocessing_tests PRIVATE
