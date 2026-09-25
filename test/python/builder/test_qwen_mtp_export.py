@@ -104,6 +104,7 @@ def test_add_qwen4_exp_mtp_to_genai_config(tmp_path):
     config = json.loads(config_path.read_text())
     assert "hidden_size" not in config["model"]["mtp"]
     assert config["model"]["mtp"]["inputs"]["past_indexer_names"] == "past.%d.indexer_key"
+    assert config["model"]["mtp"]["inputs"]["past_sequence_length"] == "past_sequence_length"
     assert config["model"]["mtp"]["outputs"]["present_indexer_names"] == "present.%d.indexer_key"
 
 

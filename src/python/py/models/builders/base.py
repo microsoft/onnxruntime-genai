@@ -4478,21 +4478,41 @@ class Model:
         dt_bias = kwargs.get("dt_bias", "")
         if bool(a_log) != bool(dt_bias):
             raise ValueError("a_log and dt_bias must be set together")
-        if a_log:
+        state_update_capacity = kwargs.get("state_update_capacity", 0)
+        if a_log or state_update_capacity:
             inputs.extend([a_log, dt_bias])
+        if state_update_capacity:
+            inputs.extend(
+                [
+                    kwargs["state_update_capture_count"],
+                    kwargs["state_update_active"],
+                ]
+            )
 
         output = f"{name}/output_0"
         final_state = kwargs["final_state"]
+        outputs = [output, final_state]
+        if state_update_capacity:
+            outputs.append(kwargs["state_update_capsule"])
+        attributes = self.make_gated_delta_net_attributes(kwargs)
+        if state_update_capacity:
+            attributes["state_update_capacity"] = state_update_capacity
         self.make_node(
             "GatedDeltaNet",
             inputs=inputs,
-            outputs=[output, final_state],
+            outputs=outputs,
             name=name,
             domain="com.microsoft",
-            **self.make_gated_delta_net_attributes(kwargs),
+            **attributes,
         )
         self.make_value(output, self.io_dtype, shape=kwargs["output_shape"])
         self.make_value(final_state, ir.DataType.FLOAT, shape=kwargs["state_shape"])
+        if state_update_capacity:
+            self.make_value(
+                kwargs["state_update_capsule"],
+                ir.DataType.FLOAT,
+                shape=kwargs["state_update_capsule_shape"],
+            )
 
     def make_varlen_gated_delta_net(self, name, **kwargs):
         """Emit packed GatedDeltaNet with optional compact transition capsules."""

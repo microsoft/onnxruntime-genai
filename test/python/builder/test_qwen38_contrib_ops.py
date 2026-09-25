@@ -6,7 +6,12 @@ from types import MethodType, SimpleNamespace
 import onnx_ir as ir
 import torch
 
-from models.builders.qwen import Qwen35MoETextModel, Qwen4ExpMTPTextModel, Qwen4ExpTextModel
+from models.builders.qwen import (
+    Qwen35MoETextModel,
+    Qwen4ExpEngramModel,
+    Qwen4ExpMTPTextModel,
+    Qwen4ExpTextModel,
+)
 
 
 def record_calls(model, method_names):
@@ -326,6 +331,43 @@ def test_qwen38_dense_linear_attention_layer_always_emits_gated_delta_net():
     ]
 
 
+def test_dense_gated_delta_net_emits_compact_state_update():
+    model = object.__new__(Qwen4ExpTextModel)
+    model.io_dtype = ir.DataType.FLOAT16
+    record_calls(model, ["make_cast", "make_node", "make_value"])
+
+    model.make_gated_delta_net(
+        "/gdn",
+        q_path="qkv",
+        k_path="",
+        v_path="",
+        decay="decay",
+        beta="beta",
+        gate_shape=["batch_size", "sequence_length", 48],
+        initial_state="past",
+        final_state="present",
+        state_shape=["batch_size", 48, 128, 128],
+        output_shape=["batch_size", "sequence_length", 48, 128],
+        a_log="a_log",
+        dt_bias="dt_bias",
+        state_update_capacity=1,
+        state_update_capture_count="capture_count",
+        state_update_active="capture_active",
+        state_update_capsule="state_update.0.recurrent_capsule",
+        state_update_capsule_shape=["batch_size", 7216],
+    )
+
+    node_call = next(call for call in model.calls if call[0] == "make_node")
+    assert node_call[1][0] == "GatedDeltaNet"
+    assert node_call[2]["inputs"][9:] == ["capture_count", "capture_active"]
+    assert node_call[2]["outputs"] == [
+        "/gdn/output_0",
+        "present",
+        "state_update.0.recurrent_capsule",
+    ]
+    assert node_call[2]["state_update_capacity"] == 1
+
+
 def test_qwen_attention_packs_gated_qkv_before_splitting():
     model = object.__new__(Qwen4ExpTextModel)
     model.use_paged_attention = False
@@ -565,6 +607,20 @@ def test_qwen_attention_deinterleaves_prequantized_q_and_gate_rows():
     assert gate.qweight.flatten().tolist() == [2, 3, 6, 7]
     assert gate.scales.flatten().tolist() == [2, 3, 6, 7]
     assert gate.qzeros.flatten().tolist() == [2, 3, 6, 7]
+
+
+def test_qwen_attention_projection_selection_does_not_mutate_torch_module():
+    model = object.__new__(Qwen4ExpTextModel)
+    projection = torch.nn.Linear(4, 8, bias=False)
+    projection.weight.data.copy_(torch.arange(32).reshape(8, 4))
+    original = projection.weight.detach().clone()
+
+    query = model.select_projection_outputs(projection, torch.tensor([0, 1, 4, 5]))
+    gate = model.select_projection_outputs(projection, torch.tensor([2, 3, 6, 7]))
+
+    assert torch.equal(projection.weight, original)
+    assert torch.equal(query.weight, original[[0, 1, 4, 5]])
+    assert torch.equal(gate.weight, original[[2, 3, 6, 7]])
 
 
 def test_qwen_moe_emits_separate_shared_gate_up_and_router_matmuls():
@@ -1249,6 +1305,36 @@ def test_ple_reuses_model_level_embedding_initializers():
     ]
 
 
+def test_qwen4_exp_engram_model_extracts_cpu_lookup_graph(tmp_path):
+    embedding = SimpleNamespace(
+        layer_multipliers=torch.tensor([0, 1, 2], dtype=torch.int64),
+        ngram_heads_vocab_sizes=torch.tensor([7, 7, 7, 7], dtype=torch.int64),
+        ngram_heads_offsets=torch.tensor([0, 7, 14, 21], dtype=torch.int64),
+        eos_token_id=0,
+        ngram_embedding=torch.nn.Embedding(28, 8),
+    )
+    ple = SimpleNamespace(ple_embedding=embedding)
+    config = SimpleNamespace(ngram_size=3, heads_per_ngram=2, ple_embed_dim=8)
+
+    model = Qwen4ExpEngramModel(ple, config, ir.DataType.FLOAT16)
+    model.save_model(tmp_path)
+
+    assert [value.name for value in model.graph.inputs] == ["input_ids", "past_ple_tokens"]
+    assert [value.name for value in model.graph.outputs] == [
+        "engram_embeddings",
+        "present_ple_tokens",
+    ]
+    assert [node.op_type for node in model.graph] == [
+        "NGramHashMapping",
+        "GatherBlockQuantized",
+        "Constant",
+        "Reshape",
+        "Identity",
+    ]
+    assert (tmp_path / "engram.onnx").exists()
+    assert (tmp_path / "engram.data").exists()
+
+
 def test_qwen38_config_assigns_embedding_annotation_to_cpu():
     model = object.__new__(Qwen4ExpTextModel)
     model.ep = "cuda"
@@ -1263,3 +1349,17 @@ def test_qwen38_config_assigns_embedding_annotation_to_cpu():
     assert genai_config["model"]["decoder"]["session_options"]["session.layer_assignment_settings"] == (
         "cpu(=cpu_embedding)"
     )
+
+
+def test_qwen38_external_engram_keeps_decoder_cuda_only():
+    model = object.__new__(Qwen4ExpTextModel)
+    model.ep = "cuda"
+    model.external_engram = True
+    model.ple_token_pad_id = 248044
+    model.fixed_indexer_cache = True
+    model.input_names = {"past_sequence_length": "past_sequence_length"}
+    genai_config = {"model": {"decoder": {"inputs": {}, "outputs": {}, "session_options": {}}}}
+
+    model.update_genai_config(genai_config)
+
+    assert "session.layer_assignment_settings" not in genai_config["model"]["decoder"]["session_options"]

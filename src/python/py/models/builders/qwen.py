@@ -12,6 +12,7 @@ import os
 
 import onnx_ir as ir
 import torch
+from huggingface_hub import hf_hub_download
 from transformers import Qwen2ForCausalLM
 
 from .base import Model
@@ -117,8 +118,8 @@ class Qwen35TextModel(Model):
     def validate_gated_delta_net_options(self, state_window, ep):
         if ep != "cuda":
             raise ValueError("GatedDeltaNet exports require the CUDA execution provider")
-        if state_window:
-            raise ValueError("GatedDeltaNet exports commit an unwindowed recurrent state and require state_window=0")
+        if state_window == 1:
+            raise ValueError("GatedDeltaNet state_window must be 0 or at least 2")
 
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
@@ -150,6 +151,10 @@ class Qwen35TextModel(Model):
             self.context_length_attrs["state_window"],
             self.ep,
         )
+        if capture_indexer_updates:
+            self.context_length_attrs["state_update_capacity"] = (
+                self.context_length_attrs["state_window"] - 1
+            )
 
         if self.use_paged_attention:
             conv_shape = ["batch_size", self.linear_conv_dim, self.linear_conv_kernel_dim - 1]
@@ -178,11 +183,12 @@ class Qwen35TextModel(Model):
         self.input_types["state_update.active"] = ir.DataType.INT32
         self.input_shapes["state_update.active"] = [1]
 
-        self.output_names["state_update.conv_value"] = {
-            layer_id: f"state_update.{layer_id}.conv_value" for layer_id in linear_layers
-        }
-        self.output_types["state_update.conv_value"] = self.io_dtype
-        self.output_shapes["state_update.conv_value"] = ["batch_size", capacity, self.linear_conv_dim]
+        if self.use_paged_attention:
+            self.output_names["state_update.conv_value"] = {
+                layer_id: f"state_update.{layer_id}.conv_value" for layer_id in linear_layers
+            }
+            self.output_types["state_update.conv_value"] = self.io_dtype
+            self.output_shapes["state_update.conv_value"] = ["batch_size", capacity, self.linear_conv_dim]
 
         # One capsule packs each captured token's decay gates, key row, and value row back to back.
         capsule_width = capacity * (
@@ -456,6 +462,7 @@ class Qwen35TextModel(Model):
                 initial_state=self.input_names["past.recurrent"][layer_id],
                 final_state=self.output_names["present.recurrent"][layer_id],
                 state_shape=recurrent_shape,
+                **self.make_recurrent_state_update_kwargs(layer_id),
                 **shared_kwargs,
             )
 
@@ -727,6 +734,10 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
     def select_projection_outputs(self, projection, indices):
         """Clone a projection while selecting output rows and their quantization metadata."""
         selected = copy.copy(projection)
+        if hasattr(projection, "_parameters"):
+            selected._parameters = projection._parameters.copy()
+        if hasattr(projection, "_buffers"):
+            selected._buffers = projection._buffers.copy()
         out_features = getattr(projection, "out_features", None)
         if out_features is None:
             out_features = projection.weight.shape[0]
@@ -920,6 +931,8 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         extra_options["exclude_embeds"] = not text_only
         extra_options.setdefault("filename", "model.onnx" if text_only else "text.onnx")
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        if not hasattr(self, "context_length_attrs"):
+            self.context_length_attrs = {"state_window": 0, "state_window_dims": []}
         self.use_cpu_embedding_gather = text_only
         if self.use_paged_attention:
             self.input_names.pop("position_ids", None)
@@ -948,6 +961,11 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         self.output_gate_type = config.output_gate_type or config.hidden_act
         self.tile_first_hidden_state = True
         self.emit_pre_final_hidden_states = False
+        self.external_engram = extra_options.get("external_engram", False)
+        if getattr(self, "external_engram", False):
+            self.input_names["engram_embeddings"] = "engram_embeddings"
+            self.input_types["engram_embeddings"] = self.io_dtype
+            self.input_shapes["engram_embeddings"] = self.make_hidden_state_shape(last_dim=self.ple_embed_dim)
 
         qsa_layers = {
             layer_id: f"past.{layer_id}.indexer_key"
@@ -1027,7 +1045,12 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         self.input_shapes["past.ple_conv"] = (
             ["batch_size", self.hc_hidden_size, ple_conv_state_length]
             if self.use_paged_attention
-            else ["batch_size", ple_conv_state_length, self.hc_hidden_size]
+            else [
+                *self.context_length_attrs["state_window_dims"],
+                "batch_size",
+                ple_conv_state_length,
+                self.hc_hidden_size,
+            ]
         )
         self.output_names["present.ple_tokens"] = present_ple_tokens
         self.output_types["present.ple_tokens"] = ir.DataType.INT64
@@ -1115,8 +1138,15 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         decoder["outputs"]["present_indexer_names"] = "present.%d.indexer_key"
         decoder["outputs"]["present_indexer_kv_buffer_names"] = "present.%d.indexer_kv_buffer"
         decoder["outputs"]["present_indexer_state_lengths_names"] = "present.%d.indexer_state_lengths"
+        if getattr(self, "context_length_attrs", {}).get("state_window", 0):
+            decoder["outputs"]["state_update_indexer_value_names"] = (
+                "state_update.%d.indexer_value"
+            )
+            decoder["outputs"]["state_update_indexer_row_names"] = (
+                "state_update.%d.indexer_row"
+            )
         decoder["ple_token_pad_id"] = self.ple_token_pad_id
-        if self.ep != "cpu":
+        if self.ep != "cpu" and not getattr(self, "external_engram", False):
             session_options = decoder["session_options"]
             session_options["session.layer_assignment_settings"] = (
                 f"cpu(={self.CPU_EMBEDDING_ANNOTATION})"
@@ -1337,98 +1367,108 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
     def make_ple(self, layer_id, ple, root_input):
         basename = f"/model/layers.{layer_id}/ple"
         embedding = ple.ple_embedding
-        multipliers = f"model.layers.{layer_id}.ple.layer_multipliers"
-        vocab_sizes = f"model.layers.{layer_id}.ple.head_vocab_sizes"
-        offsets = f"model.layers.{layer_id}.ple.head_offsets"
-        eos = f"model.layers.{layer_id}.ple.eos_token_id"
-        self.make_initializer(embedding.layer_multipliers, multipliers)
-        self.make_initializer(embedding.ngram_heads_vocab_sizes, vocab_sizes)
-        self.make_initializer(embedding.ngram_heads_offsets, offsets)
-        self.make_initializer(torch.tensor(embedding.eos_token_id, dtype=torch.int64), eos)
-        ngram_op_type = "VarlenNGramHashMapping" if self.use_paged_attention else "NGramHashMapping"
-        ngram_name = f"{basename}/{ngram_op_type}"
-        ngram_ids = f"{ngram_name}/output_0"
-        ngram_inputs = [
-            self.input_names["input_ids"],
-            multipliers,
-            vocab_sizes,
-        ]
-        if self.use_paged_attention:
-            ngram_inputs.append(self.input_names["cumulative_sequence_lengths"])
-        ngram_inputs.extend(
-            [
-                self.input_names["past.ple_tokens"][layer_id],
-                offsets,
-                eos,
-            ]
-        )
-        state_update_capacity = getattr(self, "context_length_attrs", {}).get("state_update_capacity", 0)
-        if self.use_paged_attention and state_update_capacity:
-            ngram_inputs.extend(["", "", self.input_names["state_update.capture_count"]])
-        ngram_outputs = [ngram_ids, self.output_names["present.ple_tokens"][layer_id]]
-        if self.use_paged_attention and state_update_capacity:
-            ngram_outputs.extend(["", self.output_names["state_update.ple_tokens"][layer_id]])
-        self.make_node(
-            ngram_op_type,
-            inputs=ngram_inputs,
-            outputs=ngram_outputs,
-            name=ngram_name,
-            domain="com.microsoft",
-            max_ngram_size=self.ngram_size,
-            n_head_per_ngram=self.heads_per_ngram,
-            pad_id=embedding.eos_token_id,
-            reset_on_eos=1,
-            **({"state_update_capacity": state_update_capacity} if self.use_paged_attention and state_update_capacity else {}),
-        )
-        ngram_heads = (self.ngram_size - 1) * self.heads_per_ngram
-        self.make_value(
-            ngram_ids,
-            ir.DataType.INT64,
-            ["num_tokens", ngram_heads]
-            if self.use_paged_attention
-            else ["batch_size", "sequence_length", ngram_heads],
-        )
-        table_name = "model.ple.ngram_embedding.weight"
-        table = embedding.ngram_embedding
-        if table_name not in self.values:
-            quantized_weight, weight_scale = self.prepare_engram_embedding(table)
-            self.make_initializer(quantized_weight, table_name)
-            self.make_initializer(
-                weight_scale.reshape(1, 1),
-                "model.ple.ngram_embedding.weight_scale",
-                to=self.io_dtype,
-            )
-        if not hasattr(self, "external_data_files"):
-            self.external_data_files = {}
-        self.external_data_files[table_name] = "engram.data"
-        gather_name = f"{basename}/ngram_embedding/GatherBlockQuantized"
-        head_dim = self.ple_embed_dim // ngram_heads
-        gather_shape = (
-            ["num_tokens", ngram_heads, head_dim]
-            if self.use_paged_attention
-            else ["batch_size", "sequence_length", ngram_heads, head_dim]
-        )
-        self.make_node(
-            "GatherBlockQuantized",
-            inputs=[table_name, ngram_ids, "model.ple.ngram_embedding.weight_scale"],
-            outputs=[f"{gather_name}/output_0"],
-            name=gather_name,
-            domain="com.microsoft",
-            metadata_props={"layer_ann": self.CPU_EMBEDDING_ANNOTATION},
-            gather_axis=0,
-            quantize_axis=1,
-            block_size=0,
-        )
-        self.make_value(f"{gather_name}/output_0", self.io_dtype, gather_shape)
-        flatten_name = f"{basename}/ngram_embedding/Reshape"
         token_shape = ["num_tokens"] if self.use_paged_attention else ["batch_size", "sequence_length"]
-        flatten_dims = [-1, self.ple_embed_dim] if self.use_paged_attention else [0, 0, self.ple_embed_dim]
-        self.make_reshape(
-            flatten_name,
-            [f"{gather_name}/output_0", f"/model/constants/INT64/{flatten_dims}"],
-            self.io_dtype,
-            [*token_shape, self.ple_embed_dim],
+        state_update_capacity = (
+            getattr(self, "context_length_attrs", {}).get("state_update_capacity", 0)
+            if self.use_paged_attention
+            else 0
         )
+        if getattr(self, "external_engram", False):
+            engram_embeddings = self.input_names["engram_embeddings"]
+            self.make_node(
+                "Identity",
+                inputs=[self.input_names["past.ple_tokens"][layer_id]],
+                outputs=[self.output_names["present.ple_tokens"][layer_id]],
+                name=f"{basename}/token_state/Identity",
+            )
+        else:
+            multipliers = f"model.layers.{layer_id}.ple.layer_multipliers"
+            vocab_sizes = f"model.layers.{layer_id}.ple.head_vocab_sizes"
+            offsets = f"model.layers.{layer_id}.ple.head_offsets"
+            eos = f"model.layers.{layer_id}.ple.eos_token_id"
+            self.make_initializer(embedding.layer_multipliers, multipliers)
+            self.make_initializer(embedding.ngram_heads_vocab_sizes, vocab_sizes)
+            self.make_initializer(embedding.ngram_heads_offsets, offsets)
+            self.make_initializer(torch.tensor(embedding.eos_token_id, dtype=torch.int64), eos)
+            ngram_op_type = "VarlenNGramHashMapping" if self.use_paged_attention else "NGramHashMapping"
+            ngram_name = f"{basename}/{ngram_op_type}"
+            ngram_ids = f"{ngram_name}/output_0"
+            ngram_inputs = [self.input_names["input_ids"], multipliers, vocab_sizes]
+            if self.use_paged_attention:
+                ngram_inputs.append(self.input_names["cumulative_sequence_lengths"])
+            ngram_inputs.extend(
+                [self.input_names["past.ple_tokens"][layer_id], offsets, eos]
+            )
+            if self.use_paged_attention and state_update_capacity:
+                ngram_inputs.extend(["", "", self.input_names["state_update.capture_count"]])
+            ngram_outputs = [ngram_ids, self.output_names["present.ple_tokens"][layer_id]]
+            if self.use_paged_attention and state_update_capacity:
+                ngram_outputs.extend(["", self.output_names["state_update.ple_tokens"][layer_id]])
+            self.make_node(
+                ngram_op_type,
+                inputs=ngram_inputs,
+                outputs=ngram_outputs,
+                name=ngram_name,
+                domain="com.microsoft",
+                max_ngram_size=self.ngram_size,
+                n_head_per_ngram=self.heads_per_ngram,
+                pad_id=embedding.eos_token_id,
+                reset_on_eos=1,
+                **(
+                    {"state_update_capacity": state_update_capacity}
+                    if self.use_paged_attention and state_update_capacity
+                    else {}
+                ),
+            )
+            ngram_heads = (self.ngram_size - 1) * self.heads_per_ngram
+            self.make_value(
+                ngram_ids,
+                ir.DataType.INT64,
+                ["num_tokens", ngram_heads]
+                if self.use_paged_attention
+                else ["batch_size", "sequence_length", ngram_heads],
+            )
+            table_name = "model.ple.ngram_embedding.weight"
+            table = embedding.ngram_embedding
+            if table_name not in self.values:
+                quantized_weight, weight_scale = self.prepare_engram_embedding(table)
+                self.make_initializer(quantized_weight, table_name)
+                self.make_initializer(
+                    weight_scale.reshape(1, 1),
+                    "model.ple.ngram_embedding.weight_scale",
+                    to=self.io_dtype,
+                )
+            if not hasattr(self, "external_data_files"):
+                self.external_data_files = {}
+            self.external_data_files[table_name] = "engram.data"
+            gather_name = f"{basename}/ngram_embedding/GatherBlockQuantized"
+            head_dim = self.ple_embed_dim // ngram_heads
+            gather_shape = (
+                ["num_tokens", ngram_heads, head_dim]
+                if self.use_paged_attention
+                else ["batch_size", "sequence_length", ngram_heads, head_dim]
+            )
+            self.make_node(
+                "GatherBlockQuantized",
+                inputs=[table_name, ngram_ids, "model.ple.ngram_embedding.weight_scale"],
+                outputs=[f"{gather_name}/output_0"],
+                name=gather_name,
+                domain="com.microsoft",
+                metadata_props={"layer_ann": self.CPU_EMBEDDING_ANNOTATION},
+                gather_axis=0,
+                quantize_axis=1,
+                block_size=0,
+            )
+            self.make_value(f"{gather_name}/output_0", self.io_dtype, gather_shape)
+            flatten_name = f"{basename}/ngram_embedding/Reshape"
+            flatten_dims = [-1, self.ple_embed_dim] if self.use_paged_attention else [0, 0, self.ple_embed_dim]
+            self.make_reshape(
+                flatten_name,
+                [f"{gather_name}/output_0", f"/model/constants/INT64/{flatten_dims}"],
+                self.io_dtype,
+                [*token_shape, self.ple_embed_dim],
+            )
+            engram_embeddings = f"{flatten_name}/output_0"
 
         key_scale = f"model.layers.{layer_id}.ple.key_norm_scale"
         query_scale = f"model.layers.{layer_id}.ple.query_norm_scale"
@@ -1436,8 +1476,8 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         self.make_initializer((ple.norm_key.weight + 1).reshape(self.hc_count, self.hidden_size), key_scale, to=self.io_dtype)
         self.make_initializer((ple.norm_query.weight + 1).reshape(self.hc_count, self.hidden_size), query_scale, to=self.io_dtype)
         self.make_initializer((ple.norm_conv.weight + 1).reshape(self.hc_count, self.hidden_size), conv_scale, to=self.io_dtype)
-        key_matmul = self.make_matmul(ple.key_proj, f"{basename}/key_proj/MatMul", f"{flatten_name}/output_0")
-        value_matmul = self.make_matmul(ple.value_proj, f"{basename}/value_proj/MatMul", f"{flatten_name}/output_0")
+        key_matmul = self.make_matmul(ple.key_proj, f"{basename}/key_proj/MatMul", engram_embeddings)
+        value_matmul = self.make_matmul(ple.value_proj, f"{basename}/value_proj/MatMul", engram_embeddings)
         grouped_shape = [*token_shape, self.hc_count, self.hidden_size]
         key_reshape = f"{basename}/key_proj/Reshape"
         query_reshape = f"{basename}/query/Reshape"
@@ -1539,6 +1579,7 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
                 dilation=self.ple_conv_dilation,
                 channels_last=1,
                 activation="silu",
+                state_window=getattr(self, "context_length_attrs", {}).get("state_window", 0),
             )
             self.make_value(conv_output, self.io_dtype, ple_shape)
         add_name = f"{basename}/Add"
@@ -1676,10 +1717,23 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
                     self.input_names["attention_mask"],
                     self.input_names["past.indexer"][layer_id],
                 ]
+            capture_indexer_updates = (
+                getattr(self, "context_length_attrs", {}).get("state_window", 0)
+                > 0
+            )
             self.make_node(
                 "SparseAttentionIndexer",
                 inputs=indexer_inputs,
-                outputs=[selected_indices, self.output_names["present.indexer"][layer_id]],
+                outputs=(
+                    [
+                        selected_indices,
+                        self.output_names["present.indexer"][layer_id],
+                        f"state_update.{layer_id}.indexer_value",
+                        f"state_update.{layer_id}.indexer_row",
+                    ]
+                    if capture_indexer_updates
+                    else [selected_indices, self.output_names["present.indexer"][layer_id]]
+                ),
                 name=indexer_name,
                 domain="com.microsoft",
                 policy_mode="qsa",
@@ -1693,6 +1747,17 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
                 ir.DataType.INT32,
                 ["batch_size", "sequence_length", capacity],
             )
+            if capture_indexer_updates:
+                self.make_value(
+                    f"state_update.{layer_id}.indexer_value",
+                    self.io_dtype,
+                    ["batch_size", "sequence_length", self.indexer_head_dim],
+                )
+                self.make_value(
+                    f"state_update.{layer_id}.indexer_row",
+                    ir.DataType.INT32,
+                    ["batch_size", "sequence_length"],
+                )
             selected_counts = self.make_selected_counts(layer_id, selected_indices, capacity, packed=False)
             selected_indices_flat = f"{indexer_name}/Flatten"
             selected_counts_flat = f"{indexer_name}/CountsFlatten"
@@ -2001,6 +2066,105 @@ class Qwen4ExpEmbeddingModel(_Qwen4ExpGraphModel):
             [gathered, scatter_indices, "image_features"],
             ["inputs_embeds"],
             name="/model/merge_embeddings/ScatterND",
+        )
+
+
+class Qwen4ExpEngramModel(_Qwen4ExpGraphModel):
+    def __init__(self, ple, config, io_dtype):
+        super().__init__(io_dtype, "engram.onnx", "qwen4_exp_engram")
+        self.graph.opset_imports["com.microsoft"] = 1
+        embedding = ple.ple_embedding
+        ngram_size = config.ngram_size
+        heads_per_ngram = config.heads_per_ngram
+        ngram_heads = (ngram_size - 1) * heads_per_ngram
+        ple_embed_dim = config.ple_embed_dim
+        head_dim = ple_embed_dim // ngram_heads
+
+        input_ids = self.make_value("input_ids", ir.DataType.INT64, ["batch_size", "sequence_length"])
+        past_tokens = self.make_value(
+            "past_ple_tokens", ir.DataType.INT64, ["batch_size", ngram_size - 1]
+        )
+        engram_embeddings = self.make_value(
+            "engram_embeddings", self.io_dtype, ["batch_size", "sequence_length", ple_embed_dim]
+        )
+        present_tokens = self.make_value(
+            "present_ple_tokens", ir.DataType.INT64, ["batch_size", ngram_size - 1]
+        )
+        self.graph.inputs.extend([input_ids, past_tokens])
+        self.graph.outputs.extend([engram_embeddings, present_tokens])
+
+        multipliers = "model.ple.layer_multipliers"
+        vocab_sizes = "model.ple.head_vocab_sizes"
+        offsets = "model.ple.head_offsets"
+        eos = "model.ple.eos_token_id"
+        self.make_initializer(embedding.layer_multipliers, multipliers)
+        self.make_initializer(embedding.ngram_heads_vocab_sizes, vocab_sizes)
+        self.make_initializer(embedding.ngram_heads_offsets, offsets)
+        self.make_initializer(torch.tensor(embedding.eos_token_id, dtype=torch.int64), eos)
+
+        ngram_ids = "/model/ple/NGramHashMapping/output_0"
+        self.make_node(
+            "NGramHashMapping",
+            inputs=[input_ids.name, multipliers, vocab_sizes, past_tokens.name, offsets, eos],
+            outputs=[ngram_ids, present_tokens.name],
+            name="/model/ple/NGramHashMapping",
+            domain="com.microsoft",
+            max_ngram_size=ngram_size,
+            n_head_per_ngram=heads_per_ngram,
+            pad_id=embedding.eos_token_id,
+            reset_on_eos=1,
+        )
+        self.make_value(
+            ngram_ids,
+            ir.DataType.INT64,
+            ["batch_size", "sequence_length", ngram_heads],
+        )
+
+        table_name = "model.ple.ngram_embedding.weight"
+        quantized_weight, weight_scale = Qwen4ExpTextModel.prepare_engram_embedding(
+            embedding.ngram_embedding
+        )
+        self.make_initializer(quantized_weight, table_name)
+        self.make_initializer(
+            weight_scale.reshape(1, 1),
+            "model.ple.ngram_embedding.weight_scale",
+            to=self.io_dtype,
+        )
+        gathered = "/model/ple/ngram_embedding/GatherBlockQuantized/output_0"
+        self.make_node(
+            "GatherBlockQuantized",
+            inputs=[table_name, ngram_ids, "model.ple.ngram_embedding.weight_scale"],
+            outputs=[gathered],
+            name="/model/ple/ngram_embedding/GatherBlockQuantized",
+            domain="com.microsoft",
+            gather_axis=0,
+            quantize_axis=1,
+            block_size=0,
+        )
+        self.make_value(
+            gathered,
+            self.io_dtype,
+            ["batch_size", "sequence_length", ngram_heads, head_dim],
+        )
+        self.make_reshape(
+            "/model/ple/ngram_embedding/Reshape",
+            [gathered, f"/model/constants/INT64/[0, 0, {ple_embed_dim}]"],
+            self.io_dtype,
+            ["batch_size", "sequence_length", ple_embed_dim],
+        )
+        self.make_node(
+            "Identity",
+            ["/model/ple/ngram_embedding/Reshape/output_0"],
+            [engram_embeddings.name],
+            name="/model/ple/ngram_embedding/Identity",
+        )
+
+    def save_model(self, output_dir):
+        ir.save(
+            self.model,
+            os.path.join(output_dir, self.filename),
+            external_data="engram.data",
+            size_threshold_bytes=0,
         )
 
 
@@ -2707,6 +2871,7 @@ class Qwen4ExpModel(MTPModel):
         self.extra_options = copy.deepcopy(extra_options)
         self.text_only = self.extra_options.get("text_only", False)
         decoder_options = self.make_mtp_init(config, self.extra_options)
+        decoder_options["external_engram"] = True
         self.decoder = Qwen4ExpTextModel(
             copy.deepcopy(config), io_dtype, onnx_dtype, ep, cache_dir, decoder_options
         )
@@ -2758,6 +2923,7 @@ class Qwen4ExpModel(MTPModel):
         mtp_options["filename"] = "mtp.onnx"
         mtp_options.pop("include_hidden_states", None)
         mtp_options.pop("exclude_lm_head", None)
+        mtp_options.pop("external_engram", None)
         self.mtp = Qwen4ExpMTPTextModel(
             copy.deepcopy(config),
             self.mtp_attrs["io_dtype"],
@@ -2791,6 +2957,17 @@ class Qwen4ExpModel(MTPModel):
             self.config, language_model.embed_tokens.weight.detach().cpu(), self.decoder.io_dtype
         )
         embedding_model.save_model(output_dir)
+        if len(self.decoder.ple_layer_ids) != 1:
+            raise ValueError(
+                f"Qwen4-Exp Engram export requires exactly one PLE layer, got {sorted(self.decoder.ple_layer_ids)}."
+            )
+        ple_layer_id = next(iter(self.decoder.ple_layer_ids))
+        engram_model = Qwen4ExpEngramModel(
+            language_model.layers[ple_layer_id].ple,
+            self.config.text_config,
+            self.decoder.io_dtype,
+        )
+        engram_model.save_model(output_dir)
         vision_config = self.config.vision_config
         if vision_config.out_hidden_size != self.decoder.hidden_size:
             raise ValueError(
@@ -2818,6 +2995,7 @@ class Qwen4ExpModel(MTPModel):
         decoder_inputs = model_config["decoder"]["inputs"]
         decoder_inputs["inputs_embeds"] = "inputs_embeds"
         decoder_inputs["input_ids"] = "input_ids"
+        decoder_inputs["engram_embeddings"] = "engram_embeddings"
         model_config["embedding"] = {
             "filename": "embedding.onnx",
             "inputs": {"input_ids": "input_ids", "image_features": "image_features"},
@@ -2828,6 +3006,22 @@ class Qwen4ExpModel(MTPModel):
             "spatial_merge_size": config.vision_config.spatial_merge_size,
             "inputs": {"pixel_values": "pixel_values", "image_grid_thw": "image_grid_thw"},
             "outputs": {"image_features": "image_features"},
+        }
+        model_config["engram"] = {
+            "filename": "engram.onnx",
+            "cache_capacity": 4096,
+            "session_options": {
+                "intra_op_num_threads": 8,
+                "provider_options": [{"cpu": {}}],
+            },
+            "inputs": {
+                "input_ids": "input_ids",
+                "past_tokens": "past_ple_tokens",
+            },
+            "outputs": {
+                "embeddings": "engram_embeddings",
+                "present_tokens": "present_ple_tokens",
+            },
         }
         with open(config_path, "w") as config_file:
             json.dump(genai_config, config_file, indent=4)
@@ -2855,6 +3049,7 @@ class Qwen4ExpModel(MTPModel):
                 "past_key_names": "past_key_values.%d.key",
                 "past_value_names": "past_key_values.%d.value",
                 "past_indexer_names": "past.%d.indexer_key",
+                "past_sequence_length": "past_sequence_length",
             },
             "outputs": {
                 "logits": "logits",
@@ -2870,6 +3065,79 @@ class Qwen4ExpModel(MTPModel):
 
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
         self.decoder.save_processing(model_name_or_path, extra_kwargs, out_dir)
+        preprocessor_path = (
+            os.path.join(model_name_or_path, "preprocessor_config.json")
+            if os.path.isdir(model_name_or_path)
+            else hf_hub_download(
+                model_name_or_path,
+                "preprocessor_config.json",
+                cache_dir=extra_kwargs.get("cache_dir"),
+                token=self.hf_token,
+            )
+        )
+        with open(preprocessor_path) as preprocessor_file:
+            image_processor = json.load(preprocessor_file)
+        processor_config = {
+            "processor": {
+                "name": "qwen4_exp_image_processor",
+                "transforms": [
+                    {
+                        "operation": {
+                            "name": "decode_image",
+                            "type": "DecodeImage",
+                            "attrs": {"color_space": "RGB"},
+                        }
+                    },
+                    {"operation": {"name": "convert_to_rgb", "type": "ConvertRGB"}},
+                    {
+                        "operation": {
+                            "name": "resize",
+                            "type": "Resize",
+                            "attrs": {
+                                "width": 540,
+                                "height": 360,
+                                "smart_resize": 1,
+                                "min_pixels": image_processor["size"]["shortest_edge"],
+                                "max_pixels": image_processor["size"]["longest_edge"],
+                                "patch_size": image_processor["patch_size"],
+                                "merge_size": image_processor["merge_size"],
+                            },
+                        }
+                    },
+                    {
+                        "operation": {
+                            "name": "rescale",
+                            "type": "Rescale",
+                            "attrs": {"rescale_factor": 1 / 255},
+                        }
+                    },
+                    {
+                        "operation": {
+                            "name": "normalize",
+                            "type": "Normalize",
+                            "attrs": {
+                                "mean": image_processor["image_mean"],
+                                "std": image_processor["image_std"],
+                                "qwen3_vl": 1,
+                            },
+                        }
+                    },
+                    {
+                        "operation": {
+                            "name": "patch_image",
+                            "type": "PatchImage",
+                            "attrs": {
+                                "patch_size": image_processor["patch_size"],
+                                "temporal_patch_size": image_processor["temporal_patch_size"],
+                                "merge_size": image_processor["merge_size"],
+                            },
+                        }
+                    },
+                ],
+            }
+        }
+        with open(os.path.join(out_dir, "processor_config.json"), "w") as processor_config_file:
+            json.dump(processor_config, processor_config_file, indent=4)
 
 
 class Qwen4ExpMTPTextModel(Qwen4ExpTextModel):

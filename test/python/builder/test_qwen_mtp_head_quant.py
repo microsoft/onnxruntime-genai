@@ -46,6 +46,7 @@ class FakeComponent:
 class FakeQwen4ExpComponent(FakeComponent):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.model_type = "qwen4_exp"
         self.hc_hidden_size = 8
         self.output_shapes = {"hidden_states": ["batch_size", "sequence_length", 2]}
         self.filename = extra_options.get("filename", "text.onnx")
@@ -114,6 +115,7 @@ def test_qwen4_exp_composite_builds_declared_mtp(monkeypatch):
 
     assert isinstance(model.decoder, FakeQwen4ExpComponent)
     assert isinstance(model.mtp, FakeQwen4ExpComponent)
+    assert model.decoder.model_type == "qwen3_5"
     assert model.decoder.extra_options["include_hidden_states"] is True
     assert model.decoder.emit_pre_final_hidden_states is True
     assert model.decoder.output_shapes["hidden_states"] == ["batch_size", "sequence_length", 8]
@@ -178,6 +180,55 @@ def test_qwen4_exp_text_only_dispatches_composite_builder(monkeypatch, tmp_path)
 
     assert captured["args"][0] is config
     assert captured["args"][-1]["text_only"] is True
+
+
+def test_qwen4_exp_composite_saves_image_processor_config(monkeypatch, tmp_path):
+    image_processor = {
+        "size": {"shortest_edge": 65536, "longest_edge": 16777216},
+        "patch_size": 16,
+        "temporal_patch_size": 2,
+        "merge_size": 2,
+        "image_mean": [0.5, 0.5, 0.5],
+        "image_std": [0.5, 0.5, 0.5],
+    }
+    preprocessor_path = tmp_path / "preprocessor_config.json"
+    preprocessor_path.write_text(json.dumps(image_processor))
+    monkeypatch.setitem(
+        Qwen4ExpModel.save_processing.__globals__,
+        "hf_hub_download",
+        lambda *args, **kwargs: preprocessor_path,
+    )
+    decoder_calls = []
+    model = object.__new__(Qwen4ExpModel)
+    model.decoder = SimpleNamespace(save_processing=lambda *args: decoder_calls.append(args))
+    model.hf_token = True
+    model.hf_remote = False
+
+    model.save_processing("Qwen/Qwen3.8-Flash-Next", {}, tmp_path)
+
+    assert decoder_calls == [("Qwen/Qwen3.8-Flash-Next", {}, tmp_path)]
+    with open(tmp_path / "processor_config.json") as processor_config_file:
+        processor_config = json.load(processor_config_file)
+    transforms = processor_config["processor"]["transforms"]
+    assert transforms[2]["operation"]["attrs"] == {
+        "width": 540,
+        "height": 360,
+        "smart_resize": 1,
+        "min_pixels": 65536,
+        "max_pixels": 16777216,
+        "patch_size": 16,
+        "merge_size": 2,
+    }
+    assert transforms[4]["operation"]["attrs"] == {
+        "mean": [0.5, 0.5, 0.5],
+        "std": [0.5, 0.5, 0.5],
+        "qwen3_vl": 1,
+    }
+    assert transforms[5]["operation"]["attrs"] == {
+        "patch_size": 16,
+        "temporal_patch_size": 2,
+        "merge_size": 2,
+    }
 
 
 def test_dense_config_only_composite_does_not_require_decoder_token_ids(monkeypatch):
