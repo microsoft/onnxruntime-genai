@@ -63,17 +63,7 @@ class DFlash2Builder(BlockDrafterBuilder):
     ):
         self.draft_dir = draft_dir
         self.target_dir = target_dir
-        # The drafter is a bf16 checkpoint and its activations genuinely leave the fp16 range
-        # (the fc output alone reaches ~1.4e4 and the MLP product overflows two layers in), so the
-        # body runs in bf16 on CUDA (which has a BFloat16 kernel for every op this graph emits).
-        # ONNX Runtime's WebGPU EP has no BFloat16 kernel at all (not even for a dense MatMul), so
-        # there we fall back to the target's own io_dtype (fp16) -- the same dtype the target model
-        # already runs its MatMul/MatMulNBits/PagedAttention kernels in on WebGPU. This trades away
-        # some numerical headroom (a real risk given the measurements above) in exchange for the
-        # graph loading at all; validate_dflash2_activity()-style acceptance-rate/NaN checks should
-        # be used to confirm the drafter is still producing usable candidates after this fallback.
-        self.io_dtype = ir.DataType.BFLOAT16 if ep == "cuda" else io_dtype
-        self.external_dtype = io_dtype
+        self.make_precision_init(io_dtype, ep)
         if quant is not None:
             self.quant_bits = quant["bits"]
             self.quant_block_size = quant["block_size"]
@@ -127,6 +117,16 @@ class DFlash2Builder(BlockDrafterBuilder):
         self.input_embedding_scale = float(dfl.get("input_embedding_scale", 1.0))
         self.aux_hidden_size = self.hidden_size * len(self.target_layer_ids)
         self.make_graph("dflash2_graph", "dflash2")
+
+    def make_precision_init(self, io_dtype, ep):
+        self.io_dtype = ir.DataType.BFLOAT16 if ep == "cuda" else io_dtype
+        self.external_dtype = io_dtype
+        self.layernorm_attrs = {
+            # WebGPU lacks BF16; widen residual-producing paths until after normalization.
+            "residual_dtype": ir.DataType.FLOAT
+            if ep == "webgpu" and io_dtype == ir.DataType.FLOAT16
+            else self.io_dtype,
+        }
 
     # ------------------------------------------------------------ rope caches
 
@@ -203,8 +203,15 @@ class DFlash2Builder(BlockDrafterBuilder):
         # Split output index is side * taps + tap (the reference reshapes to [T, 2, taps, G]).
         return [deltas[side * self.taps : (side + 1) * self.taps] for side in range(2)]
 
-    def _grouped_conv(self, prefix, x, deltas, base_kernel, shift_mask, rows):
-        """``sum_tap (base[tap] + delta[tap]) * shift(x, tap)`` inside each block."""
+    def _grouped_conv(self, prefix, x, deltas, base_kernel, shift_mask, rows, dtype=None):
+        """``coef, shift(x) -> [Cast] -> Mul -> Mask -> Add`` inside each block.
+
+        Finish convolutions retain the accumulation dtype through the following skip norm.
+        Coefficient construction and shifts stay at the normal activation dtype.
+        """
+        dtype = self.io_dtype if dtype is None else dtype
+        if dtype != self.io_dtype:
+            shift_mask = self.unary("Cast", f"{prefix}/mask/Cast", shift_mask, dtype, ["num_block", 1], to=dtype)
         terms = []
         for tap in range(self.taps):
             base_name = f"{prefix}.base_kernel.{tap}"
@@ -254,17 +261,20 @@ class DFlash2Builder(BlockDrafterBuilder):
                 self.make_node("Concat", [head, sl], [cat], name=f"{prefix}/shift{tap}/Concat", axis=0)
                 self.make_value(cat, self.io_dtype, ["num_block", self.hidden_size])
                 shifted = cat
-            term = self.binary(
-                "Mul", f"{prefix}/term{tap}/Mul", shifted, coef, self.io_dtype, ["num_block", self.hidden_size]
-            )
+            if dtype != self.io_dtype:
+                shifted = self.unary(
+                    "Cast", f"{prefix}/term{tap}/input/Cast", shifted, dtype, [rows, self.hidden_size], to=dtype
+                )
+                coef = self.unary("Cast", f"{prefix}/coef{tap}/Cast", coef, dtype, [rows, self.hidden_size], to=dtype)
+            term = self.binary("Mul", f"{prefix}/term{tap}/Mul", shifted, coef, dtype, ["num_block", self.hidden_size])
             if tap > 0:
                 term = self.binary(
-                    "Mul", f"{prefix}/term{tap}/Mask", term, shift_mask, self.io_dtype, ["num_block", self.hidden_size]
+                    "Mul", f"{prefix}/term{tap}/Mask", term, shift_mask, dtype, ["num_block", self.hidden_size]
                 )
             terms.append(term)
         out = terms[0]
         for i, term in enumerate(terms[1:], start=1):
-            out = self.binary("Add", f"{prefix}/sum{i}/Add", out, term, self.io_dtype, ["num_block", self.hidden_size])
+            out = self.binary("Add", f"{prefix}/sum{i}/Add", out, term, dtype, ["num_block", self.hidden_size])
         return out
 
     # ------------------------------------------------------------------ graph
@@ -341,7 +351,12 @@ class DFlash2Builder(BlockDrafterBuilder):
                 residual = hidden
             else:
                 x, residual = self.skip_rms_norm(
-                    f"{p}/input_layernorm", residual, hidden, w[f"layers.{i}.input_layernorm.weight"], rows_q
+                    f"{p}/input_layernorm",
+                    residual,
+                    hidden,
+                    w[f"layers.{i}.input_layernorm.weight"],
+                    rows_q,
+                    dtype=self.layernorm_attrs["residual_dtype"],
                 )
 
             # attention_conv.prepare / .finish
@@ -365,6 +380,7 @@ class DFlash2Builder(BlockDrafterBuilder):
                 w[f"layers.{i}.attention_conv.base_kernel"][1],
                 shift_mask,
                 rows_q,
+                dtype=self.layernorm_attrs["residual_dtype"],
             )
 
             y, residual = self.skip_rms_norm(
@@ -373,6 +389,7 @@ class DFlash2Builder(BlockDrafterBuilder):
                 attn_out,
                 w[f"layers.{i}.post_attention_layernorm.weight"],
                 rows_q,
+                dtype=self.layernorm_attrs["residual_dtype"],
             )
 
             mlp_deltas = self._conv_coefficients(
@@ -383,10 +400,24 @@ class DFlash2Builder(BlockDrafterBuilder):
             )
             m = self._make_mlp(i, y, w, rows_q)
             hidden = self._grouped_conv(
-                f"{p}/mlp_conv/finish", m, mlp_deltas[1], w[f"layers.{i}.mlp_conv.base_kernel"][1], shift_mask, rows_q
+                f"{p}/mlp_conv/finish",
+                m,
+                mlp_deltas[1],
+                w[f"layers.{i}.mlp_conv.base_kernel"][1],
+                shift_mask,
+                rows_q,
+                dtype=self.layernorm_attrs["residual_dtype"],
             )
 
-        final, _ = self.skip_rms_norm("/dflash2/norm", residual, hidden, w["norm.weight"], rows_q, want_sum=False)
+        final, _ = self.skip_rms_norm(
+            "/dflash2/norm",
+            residual,
+            hidden,
+            w["norm.weight"],
+            rows_q,
+            want_sum=False,
+            dtype=self.layernorm_attrs["residual_dtype"],
+        )
 
         self._make_candidates_and_selector(final, w)
         self.graph.sort()

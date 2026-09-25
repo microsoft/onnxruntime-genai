@@ -333,13 +333,24 @@ python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p fp
 
 #### Build a DFlash 2 Block Drafter
 
-Set `dflash2_path` to a DFlash 2 checkpoint to export an auxiliary `dflash2.onnx` block drafter beside a Qwen3.5 MoE target model. The target must use paged attention. SpecForge identifies the target layers whose outputs are tapped, while `aux_hidden_state_layers` identifies residual streams entering layers, so each configured auxiliary layer must be one greater than the corresponding `target_layer_ids` entry in the DFlash checkpoint. The drafter reuses the target's embedding and LM-head initializers, so both checkpoints must use compatible tensors.
+Set `dflash2_path` to a DFlash 2 checkpoint to export an auxiliary `dflash2.onnx` block drafter beside a Qwen3.5 or Qwen3.8 target model. The target must use paged attention. SpecForge identifies the target layers whose outputs are tapped, while `aux_hidden_state_layers` identifies residual streams entering layers, so each configured auxiliary layer must be one greater than the corresponding `target_layer_ids` entry in the DFlash checkpoint. The drafter reuses the target's embedding and LM-head initializers, so both checkpoints must use compatible tensors.
 
 `dflash2_num_draft_tokens` optionally overrides how many tokens the drafter proposes per step. It must be a positive integer no greater than the draft checkpoint's block size minus the anchor token; that checkpoint limit is also the default.
 
 `max_draft_tokens` writes `speculative.max_draft_tokens` into `genai_config.json`, capping how many drafted tokens the engine verifies each step. It must be between 1 and 16, and defaults to unset, which leaves the runtime default of 4 in effect. This differs from `dflash2_num_draft_tokens`: the drafter's exported block costs the same to run no matter how many of its tokens are verified, so raising this value buys extra accepted tokens for free until the wider verification step costs more than it saves. The best value is workload-specific and must be measured; it can be retuned on an already-exported model by editing the config.
 
-`dflash2_precision` accepts `bf16` (default), `int4`, or `int8`. Integer modes quantize the attention and MLP weights at the target's block size while keeping the small dynamic-convolution and selector projections dense. Body activations and KV caches remain BF16; this option does not quantize the drafter's KV cache. The body is emitted in the portable raw blockwise layout, and the DFlash2 session disables the target decoder's fpA-intB selection for those nodes. For a symmetric DEFAULT INT4 target using the `weight_Q4` initializer contract, the drafter emits matching LM-head metadata and adopts the target's exact quantized tensors when their layouts match. If a BF16 target uses offline-prepacked weights, the drafter instead keeps a private raw INT4 head. Other target head formats remain dense in the drafter. Remaining shared initializers are deduplicated when their bytes match.
+`dflash2_precision` accepts `bf16` (default), `int4`, or `int8`. Integer modes quantize the attention and MLP weights at the target's block size while keeping the small dynamic-convolution and selector projections dense. CUDA body activations and KV caches remain BF16; this option does not quantize the drafter's KV cache. The BF16 body is emitted in the portable raw blockwise layout, and the DFlash2 session disables the target decoder's fpA-intB selection for those nodes. For a symmetric DEFAULT INT4 target using the `weight_Q4` initializer contract, the drafter emits matching LM-head metadata and adopts the target's exact quantized tensors when their layouts match. If a BF16 target uses offline-prepacked weights, the drafter instead keeps a private raw INT4 head. Other target head formats remain dense in the drafter. Remaining shared initializers are deduplicated when their bytes match.
+
+WebGPU uses the target's I/O dtype instead of BF16. For FP16 models, residual addition and
+`SkipSimplifiedLayerNormalization` execute in FP32, with persistent residual sums kept in FP32.
+Attention/MLP convolution **finish** multiply, mask, and accumulation paths also stay FP32 through
+the following skip normalization. Only normalized outputs are cast back to FP16. Convolution
+prepare paths and coefficients, attention/KV caches, and INT4 `MatMulNBits` activations remain
+FP16. This policy is automatic and requires re-exporting older WebGPU drafters.
+
+```bash
+python -m onnxruntime_genai.models.builder -i path_to_target_model -o path_to_output_folder -p int4 -e webgpu --extra_options use_paged_attention=true state_update_capacity=7 aux_hidden_state_layers=6,20,34,48,62 dflash2_path=path_to_dflash2_checkpoint dflash2_precision=int4
+```
 
 ```bash
 python -m onnxruntime_genai.models.builder -i path_to_target_model -o path_to_output_folder -p int4 -e cuda --extra_options use_paged_attention=true aux_hidden_state_layers=2,12,22 dflash2_path=path_to_dflash2_checkpoint dflash2_precision=int4 max_draft_tokens=7
@@ -356,7 +367,7 @@ python builder.py -i path_to_target_model -o path_to_output_folder -p fp16 -e cu
 Set `dflash2_fuse_gate_up=true` to experimentally combine each DFlash 2 MLP's gate and up
 projections into one `MatMul` or `MatMulNBits`, followed by `Split`. The default is `false`.
 This export-time option requires `dflash2_path` and supports all three `dflash2_precision`
-values. It preserves BF16 body activations and the existing quantization scheme; the target,
+values. It preserves the EP-specific body activation policy and the existing quantization scheme; the target,
 attention projections, and LM head are unchanged. Re-export the drafter to apply it and
 validate latency and quality on the deployment workload before enabling it in production.
 

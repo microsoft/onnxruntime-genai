@@ -33,6 +33,11 @@ def pytest_addoption(parser):
         help="Execution providers to test (repeatable). Defaults to cpu only.",
     )
     group.addoption(
+        "--dflash2-webgpu-model",
+        default=None,
+        help="Exported paged Qwen3.8 WebGPU DFlash2 model directory for opt-in floating-point output tests.",
+    )
+    group.addoption(
         "--run-engine-tests",
         action="store_true",
         default=False,

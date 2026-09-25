@@ -12,8 +12,10 @@ import onnx_ir as ir
 import onnxruntime as ort
 import pytest
 import torch
+from safetensors.torch import save_file
 
 from models.builders.base import Model
+from models.builders.block_drafter import BlockDrafterBuilder
 from models.builders.dflash2 import DFlash2Builder
 from models.builders.mtp import MTPModel
 from models.builders.qwen import Qwen35MoEModel
@@ -382,6 +384,193 @@ def test_webgpu_drafter_omits_attention_metadata(tmp_path):
 
     assert "attention_metadata" not in builder.values
     assert builder.genai_config_section()["inputs"]["attention_metadata"] == ""
+
+
+def make_precision_checkpoint(tmp_path, num_layers):
+    """Write a small checkpoint so graph tests exercise the real loader and quantizer."""
+    draft_dir = _draft_checkpoint(tmp_path)
+    config_path = os.path.join(draft_dir, "config.json")
+    with open(config_path) as f:
+        config = json.load(f)
+    config.update(hidden_size=32, intermediate_size=64, head_dim=16, num_hidden_layers=num_layers)
+    with open(config_path, "w") as f:
+        json.dump(config, f)
+    generator = torch.Generator().manual_seed(7)
+
+    def weight(*shape):
+        return torch.randn(shape, generator=generator) * 0.01
+
+    weights = {
+        "fc.weight": weight(32, 96),
+        "hidden_norm.weight": torch.ones(32),
+        "norm.weight": torch.ones(32),
+        "candidate_selector.hidden_projection.weight": weight(4, 32),
+        "candidate_selector.predecessor_codebook": weight(32, 4),
+        "candidate_selector.successor_codebook": weight(32, 4),
+    }
+    for layer in range(num_layers):
+        prefix = f"layers.{layer}"
+        for norm in ("input_layernorm", "post_attention_layernorm"):
+            weights[f"{prefix}.{norm}.weight"] = torch.ones(32)
+        for name, shape in (
+            ("self_attn.q_proj", (32, 32)),
+            ("self_attn.k_proj", (16, 32)),
+            ("self_attn.v_proj", (16, 32)),
+            ("self_attn.o_proj", (32, 32)),
+            ("mlp.gate_proj", (64, 32)),
+            ("mlp.up_proj", (64, 32)),
+            ("mlp.down_proj", (32, 64)),
+        ):
+            weights[f"{prefix}.{name}.weight"] = weight(*shape)
+        for norm in ("q_norm", "k_norm"):
+            weights[f"{prefix}.self_attn.{norm}.weight"] = torch.ones(16)
+        for conv in ("attention_conv", "mlp_conv"):
+            weights[f"{prefix}.{conv}.kernel_projection.weight"] = weight(32, 32)
+            weights[f"{prefix}.{conv}.base_kernel"] = weight(2, 2, 8, 4)
+    save_file(weights, os.path.join(draft_dir, "model.safetensors"))
+    save_file(
+        {"model.embed_tokens.weight": weight(32, 32), "lm_head.weight": weight(32, 32)},
+        str(tmp_path / "model.safetensors"),
+    )
+    return draft_dir
+
+
+@pytest.mark.parametrize("ep", ["webgpu", "cuda"])
+@pytest.mark.parametrize("num_layers", [1, 3])
+@pytest.mark.parametrize("fuse_gate_up", [False, True])
+def test_dflash2_residual_precision_graph(tmp_path, ep, num_layers, fuse_gate_up):
+    builder = DFlash2Builder(
+        make_precision_checkpoint(tmp_path, num_layers),
+        str(tmp_path),
+        ir.DataType.FLOAT16,
+        256,
+        128,
+        ep=ep,
+        fuse_gate_up=fuse_gate_up,
+        include_attention_metadata=ep == "cuda",
+        quant={"bits": 4, "block_size": 32, "prepack": 0, "lm_head": None},
+    )
+    builder.make_model()
+    model = ir.serde.serialize_model(builder.model)
+    activation = ir.DataType.FLOAT16 if ep == "webgpu" else ir.DataType.BFLOAT16
+    residual = ir.DataType.FLOAT if ep == "webgpu" else activation
+    norms = [node for node in builder.graph if node.op_type == "SkipSimplifiedLayerNormalization"]
+    assert len(norms) == 2 * num_layers
+    for node in norms:
+        assert all(value.dtype == residual for value in node.inputs)
+        assert all(value.dtype == residual for value in node.outputs if value.name)
+        assert builder.graph.initializers[node.name[1:].replace("/", ".") + ".weight"].dtype == activation
+        if ep == "webgpu":
+            cast = next(n for n in builder.graph if n.name == node.name + "/Cast")
+            assert cast.inputs[0] is node.outputs[0]
+            assert cast.outputs[0].dtype == activation
+            assert node.inputs[1].producer().op_type == "Add"  # No narrowing between finish and norm.
+            if node.name != "/dflash2/layers.0/post_attention_layernorm":
+                parent = node.inputs[0].producer()
+                assert parent.op_type == "SkipSimplifiedLayerNormalization"
+                assert node.inputs[0] is parent.outputs[3]
+        else:
+            assert not any(n.name == node.name + "/Cast" for n in builder.graph)
+    for node in builder.graph:
+        if "/finish/term" in node.name or "/finish/sum" in node.name:
+            assert node.outputs[0].dtype == residual
+        if "/prepare/" in node.name and node.op_type in ("Mul", "Add"):
+            assert node.outputs[0].dtype == activation
+        if "/coef" in node.name and node.op_type == "Add":
+            assert node.outputs[0].dtype == activation
+        if node.op_type in ("MatMulNBits", "PagedAttention"):
+            assert node.inputs[0].dtype == activation
+            assert node.outputs[0].dtype == activation
+        if node.op_type == "MatMulNBits":
+            assert node.attributes["bits"].value == 4
+    assert all(v.dtype == activation for v in builder.graph.inputs if v.name.startswith("past_key_values."))
+    assert {v.name for v in builder.graph.outputs} == {
+        "draft_candidate_ids",
+        "draft_scores",
+        *(f"present.{i}.{kind}" for i in range(num_layers) for kind in ("key", "value")),
+    }
+    if ep == "webgpu":
+        reference = DFlash2Builder(
+            builder.draft_dir,
+            str(tmp_path),
+            ir.DataType.FLOAT16,
+            256,
+            128,
+            ep=ep,
+            fuse_gate_up=fuse_gate_up,
+            include_attention_metadata=False,
+            quant={"bits": 4, "block_size": 32, "prepack": 0, "lm_head": None},
+        )
+        reference.layernorm_attrs["residual_dtype"] = reference.io_dtype
+        reference.make_model()
+        original = ir.serde.serialize_model(reference.model)
+        assert {v.name: v.SerializeToString() for v in model.graph.initializer} == {
+            v.name: v.SerializeToString() for v in original.graph.initializer
+        }
+        assert list(model.graph.input) == list(original.graph.input)
+        assert list(model.graph.output) == list(original.graph.output)
+
+
+@pytest.mark.parametrize("ep,io_dtype", [("cpu", ir.DataType.FLOAT), ("webgpu", ir.DataType.FLOAT)])
+def test_non_fp16_precision_policy_is_unchanged(tmp_path, ep, io_dtype):
+    builder = DFlash2Builder(_draft_checkpoint(tmp_path), str(tmp_path), io_dtype, 256, 128, ep=ep)
+    assert builder.io_dtype == builder.layernorm_attrs["residual_dtype"] == io_dtype
+
+
+def test_shared_skip_norm_default_keeps_existing_dtype():
+    builder = BlockDrafterBuilder()
+    builder.io_dtype = ir.DataType.BFLOAT16
+    builder.hidden_size, builder.rms_eps = 8, 1e-6
+    builder.make_graph("skip_norm", "test")
+    for name in ("root", "skip"):
+        builder.graph.inputs.append(builder.make_value(name, builder.io_dtype, [5, 8]))
+    output, residual = builder.skip_rms_norm("/norm", "root", "skip", torch.ones(8), 5)
+    assert [node.op_type for node in builder.graph] == ["SkipSimplifiedLayerNormalization"]
+    assert builder.values[output].dtype == builder.values[residual].dtype == ir.DataType.BFLOAT16
+
+
+@pytest.mark.parametrize("with_conv", [False, True])
+def test_fp32_finish_and_residual_norm_stay_finite(tmp_path, with_conv):
+    builder = DFlash2Builder(_draft_checkpoint(tmp_path), str(tmp_path), ir.DataType.FLOAT16, 256, 128, ep="webgpu")
+    rows = 10  # Two blocks, including a shift-mask reset.
+    for name in ("root", "branch"):
+        builder.graph.inputs.append(builder.make_value(name, ir.DataType.FLOAT16, [rows, 8]))
+    branch = "branch"
+    if with_conv:
+        mask = builder._block_shift_mask(branch)
+        deltas = [builder.make_initializer(torch.zeros(rows, 2, 1), f"delta{i}", to=builder.io_dtype) for i in range(2)]
+        branch = builder._grouped_conv(
+            "/conv/finish",
+            branch,
+            deltas,
+            torch.stack((torch.full((2, 4), 7.0), torch.ones(2, 4))),
+            mask,
+            rows,
+            dtype=builder.layernorm_attrs["residual_dtype"],
+        )
+    normalized, residual = builder.skip_rms_norm(
+        "/norm", "root", branch, torch.ones(8), rows, dtype=builder.layernorm_attrs["residual_dtype"]
+    )
+    builder.graph.outputs.extend([builder.values[normalized], builder.values[residual]])
+    model = ir.serde.serialize_model(builder.model)
+    onnx.checker.check_model(model)
+    session = ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"])
+    root = np.full((rows, 8), 55008, dtype=np.float16)
+    values = np.tile(np.array([-15200, 100, 200, 300, 400, 500, 600, 700], dtype=np.float16), (rows, 1))
+    if not with_conv:
+        values.fill(40576)
+    expected_branch = values.astype(np.float32)
+    if with_conv:
+        shifted = np.concatenate((expected_branch[:1], expected_branch[:-1]))
+        mask = (np.arange(rows) % builder.block_size != 0).astype(np.float32)[:, None]
+        expected_branch = expected_branch * 7 + shifted * mask
+    expected_sum = root.astype(np.float32) + expected_branch
+    expected = expected_sum / np.sqrt(np.mean(expected_sum**2, axis=-1, keepdims=True) + builder.rms_eps)
+    assert np.abs(expected_branch if with_conv else expected_sum).max() > np.finfo(np.float16).max
+    actual, actual_sum = session.run(None, {"root": root, "branch": values})
+    assert np.isfinite(actual).all() and np.isfinite(actual_sum).all()
+    np.testing.assert_allclose(actual_sum, expected_sum, rtol=0, atol=0)
+    np.testing.assert_allclose(actual, expected.astype(np.float16), rtol=1e-3, atol=1e-3)
 
 
 def test_non_fp8_lm_head_preserves_target_layout_and_dtype(tmp_path):

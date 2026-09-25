@@ -832,7 +832,7 @@ def get_args():
                     default of 4 in effect.
                 dflash2_fuse_gate_up = Experimental DFlash 2 MLP gate/up projection fusion.
                     Accepts true or false (default). Requires dflash2_path. Combines gate/up
-                    weights into one MatMul or MatMulNBits followed by Split. Preserves BF16
+                    weights into one MatMul or MatMulNBits followed by Split. Preserves EP-specific
                     activations and body quantization; does not change the target or LM head.
                     Requires re-export and workload-specific performance/quality validation.
                 fuse_mlp_gate_up = Fuse each target model MLP's gate/up projections into one
@@ -845,8 +845,11 @@ def get_args():
                     small dynamic-convolution and candidate-selector projections dense. The BF16
                     body is emitted in the portable raw blockwise layout, and its session disables
                     the target decoder's fpA-intB selection for those nodes.
-                    Body activations and KV caches remain bf16; this option does not quantize the
-                    drafter's KV cache. When the target LM head uses a reproducible symmetric default
+                    CUDA body activations and KV caches remain bf16. WebGPU uses the target I/O dtype,
+                    with FP32 residual/skip normalization and convolution-finish accumulation for FP16
+                    models. Finish outputs stay FP32 until after normalization; normalized outputs
+                    return to FP16. This option does not quantize the drafter's KV cache.
+                    When the target LM head uses a reproducible symmetric default
                     layout, the drafter head uses its actual bit width, block size, initializer names,
                     and prepack mode when eligible so `share_initializers` can fold it onto the target's
                     copy. Dense or unsupported target LM-head layouts keep the drafter head dense.
