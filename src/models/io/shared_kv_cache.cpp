@@ -13,6 +13,7 @@ void SharedKeyValueCache::Update(DeviceSpan<int32_t> /*beam_indices*/, int total
 
 void SharedKeyValueCache::RewindTo(size_t index) {
   CheckWindowedKvCacheRewind(windowed_cache_size_, current_length_, index);
+  current_length_ = static_cast<int>(index);
 }
 
 }  // namespace Generators

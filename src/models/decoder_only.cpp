@@ -101,6 +101,8 @@ DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& 
     recurrent_state_->RestoreAfterGraphCapture(graph_id);
   }
   State::Run(*model_.session_decoder_, graph_capture_this_run, seq_len, graph_capture_variant);
+  if (recurrent_state_) recurrent_state_->SetForwardLength(seq_len);
+  if (ple_state_) ple_state_->SetForwardLength(seq_len);
 
   return logits_.Get();
 }
@@ -151,10 +153,15 @@ void DecoderOnly_State::RewindTo(size_t index) {
 void DecoderOnly_State::SnapshotState(size_t position) {
   if (recurrent_state_)
     recurrent_state_->Snapshot(position);
+  if (ple_state_)
+    ple_state_->Snapshot(position);
+  if (indexer_cache_)
+    indexer_cache_->Snapshot(position);
 }
 
 bool DecoderOnly_State::HasCroppableRecurrentState() const {
-  return recurrent_state_ && recurrent_state_->IsWindowed();
+  return recurrent_state_ && recurrent_state_->IsWindowed() && !ple_state_ &&
+         (!indexer_cache_ || indexer_cache_->HasStateUpdates());
 }
 
 int64_t DecoderOnly_State::RecurrentStateWindow() const {
@@ -170,6 +177,10 @@ void DecoderOnly_State::CropToAccepted(size_t new_length, size_t recurrent_posit
     kv_cache_->RewindTo(new_length);
   if (recurrent_state_)
     recurrent_state_->CropToPosition(recurrent_position);
+  if (ple_state_)
+    ple_state_->CropToPosition(recurrent_position);
+  if (indexer_cache_)
+    indexer_cache_->CommitAcceptedPrefix(recurrent_position + 1);
 }
 
 void DecoderOnly_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int total_length) {

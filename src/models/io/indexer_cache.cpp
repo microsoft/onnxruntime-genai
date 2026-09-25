@@ -46,6 +46,24 @@ IndexerCache::IndexerCache(State& state) : state_{state} {
     if (!model_.session_info_.HasOutput(output_name_strings_.back()))
       throw std::runtime_error("IndexerCache: missing output for layer " + std::to_string(layer_index));
   }
+  const auto& update_value_template =
+      outputs.state_update_indexer_value_names;
+  const auto& update_row_template =
+      outputs.state_update_indexer_row_names;
+  if (update_value_template.empty() != update_row_template.empty()) {
+    throw std::runtime_error(
+        "IndexerCache: state update value and row templates must be configured together");
+  }
+  if (!update_value_template.empty()) {
+    for (int layer_index : layer_indices_) {
+      state_update_value_name_strings_.push_back(
+          ComposeIndexerName(update_value_template, layer_index));
+      state_update_row_name_strings_.push_back(
+          ComposeIndexerName(update_row_template, layer_index));
+    }
+    state_update_values_.resize(layer_indices_.size());
+    state_update_rows_values_.resize(layer_indices_.size());
+  }
 
   type_ = model_.session_info_.GetInputDataType(input_name_strings_[0]);
   shape_ = model_.session_info_.GetInputShape(input_name_strings_[0]);
@@ -108,6 +126,17 @@ void IndexerCache::Add() {
     state_.inputs_.push_back(past_sequence_length_.get());
     state_.input_names_.push_back(model_.config_->model.decoder.inputs.past_sequence_length.c_str());
   }
+  if (!state_update_value_name_strings_.empty()) {
+    state_update_output_index_ = state_.outputs_.size();
+    for (size_t index = 0; index < layer_indices_.size(); ++index) {
+      state_.outputs_.push_back(nullptr);
+      state_.output_names_.push_back(
+          state_update_value_name_strings_[index].c_str());
+      state_.outputs_.push_back(nullptr);
+      state_.output_names_.push_back(
+          state_update_row_name_strings_[index].c_str());
+    }
+  }
 }
 
 void IndexerCache::Update(DeviceSpan<int32_t> beam_indices, int total_length, int current_length) {
@@ -121,8 +150,33 @@ void IndexerCache::Update(DeviceSpan<int32_t> beam_indices, int total_length, in
   if (share_buffer_) {
     if (total_length > shape_[1])
       throw std::runtime_error("IndexerCache: total length exceeds the shared cache capacity");
+    if (!state_update_value_name_strings_.empty()) {
+      state_update_length_ = static_cast<size_t>(current_length);
+      auto& allocator = model_.p_device_kvcache_->GetAllocator();
+      for (size_t index = 0; index < layer_indices_.size(); ++index) {
+        state_update_values_[index] = OrtValue::CreateTensor(
+            allocator,
+            std::array<int64_t, 3>{
+                state_.params_->BatchBeamSize(), current_length, shape_[2]},
+            type_);
+        state_update_rows_values_[index] = OrtValue::CreateTensor(
+            allocator,
+            std::array<int64_t, 2>{
+                state_.params_->BatchBeamSize(), current_length},
+            ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+        auto rows = WrapTensor<int32_t>(
+            *model_.p_device_kvcache_, *state_update_rows_values_[index]);
+        std::fill(rows.CpuSpan().begin(), rows.CpuSpan().end(), -1);
+        rows.CopyCpuToDevice();
+        state_.outputs_[state_update_output_index_ + index * 2] =
+            state_update_values_[index].get();
+        state_.outputs_[state_update_output_index_ + index * 2 + 1] =
+            state_update_rows_values_[index].get();
+      }
+    }
     return;
   }
+
   if (!first_update_) {
     for (size_t index = 0; index < layer_indices_.size(); ++index) {
       pasts_[index] = std::move(presents_[index]);
@@ -140,12 +194,113 @@ void IndexerCache::Update(DeviceSpan<int32_t> beam_indices, int total_length, in
   first_update_ = false;
 }
 
+void IndexerCache::CommitAcceptedPrefix(size_t token_count) {
+  if (!HasStateUpdates() || token_count > state_update_length_) {
+    throw std::runtime_error(
+        "IndexerCache accepted-prefix commit exceeds captured state updates");
+  }
+  RewindTo(snapshot_position_);
+  auto& device = *model_.p_device_kvcache_;
+  const size_t representative_capacity =
+      static_cast<size_t>(shape_[1]) / 4;
+
+  for (size_t layer = 0; layer < layer_indices_.size(); ++layer) {
+    auto cache = ByteWrapTensor(device, *empty_pasts_[layer]);
+    auto updates = ByteWrapTensor(device, *state_update_values_[layer]);
+    for (size_t token = 0; token < token_count; ++token) {
+      const size_t position = snapshot_position_ + token;
+      const size_t row =
+          position % 4 == 3 ? position / 4
+                            : representative_capacity + position % 4;
+      if (row >= static_cast<size_t>(shape_[1])) {
+        throw std::runtime_error(
+            "IndexerCache state update contains invalid cache row " +
+            std::to_string(row) + " at layer " + std::to_string(layer) +
+            " token " + std::to_string(token) + " with capacity " +
+            std::to_string(shape_[1]));
+      }
+      cache
+          .subspan(row * snapshot_row_bytes_, snapshot_row_bytes_)
+          .CopyFrom(updates.subspan(token * snapshot_row_bytes_,
+                                    snapshot_row_bytes_));
+    }
+  }
+}
+
+void IndexerCache::Snapshot(size_t position) {
+  if (!share_buffer_ || empty_pasts_.empty()) return;
+
+  const size_t capacity = static_cast<size_t>(shape_[1]);
+  snapshot_rows_.clear();
+  const auto add_row = [&](size_t row) {
+    if (row < capacity &&
+        std::find(snapshot_rows_.begin(), snapshot_rows_.end(), row) ==
+            snapshot_rows_.end()) {
+      snapshot_rows_.push_back(row);
+    }
+  };
+
+  // Qwen's compressed indexer cache stores completed block representatives in the first quarter
+  // and the current four raw keys in scratch rows immediately after that prefix.
+  const size_t representative_capacity = capacity / 4;
+  add_row(position / 4);
+  for (size_t row = 0; row < 4; ++row) {
+    add_row(representative_capacity + row);
+  }
+  // Also preserve ordinary append positions for non-compressed/fallback layouts.
+  for (size_t row = position; row < position + 8; ++row) {
+    add_row(row);
+  }
+  std::sort(snapshot_rows_.begin(), snapshot_rows_.end());
+
+  snapshot_row_bytes_ =
+      static_cast<size_t>(shape_[2]) * Ort::SizeOf(type_);
+  const size_t total_bytes =
+      layer_indices_.size() * snapshot_rows_.size() * snapshot_row_bytes_;
+  auto& device = *model_.p_device_kvcache_;
+  if (snapshot_data_.size() != total_bytes) {
+    snapshot_data_ = device.Allocate<uint8_t>(total_bytes);
+  }
+  for (size_t layer = 0; layer < empty_pasts_.size(); ++layer) {
+    auto cache = ByteWrapTensor(device, *empty_pasts_[layer]);
+    for (size_t row_index = 0; row_index < snapshot_rows_.size(); ++row_index) {
+      snapshot_data_
+          .subspan(
+              (layer * snapshot_rows_.size() + row_index) * snapshot_row_bytes_,
+              snapshot_row_bytes_)
+          .CopyFrom(cache.subspan(
+              snapshot_rows_[row_index] * snapshot_row_bytes_,
+              snapshot_row_bytes_));
+    }
+  }
+  snapshot_position_ = position;
+}
+
 void IndexerCache::RewindTo(size_t index) {
   if (layer_indices_.empty()) return;
+  if (share_buffer_) {
+    if (index > static_cast<size_t>(shape_[1]))
+      throw std::runtime_error("IndexerCache rewind exceeds the shared cache capacity");
+    if (!snapshot_rows_.empty() && index == snapshot_position_) {
+      auto& device = *model_.p_device_kvcache_;
+      for (size_t layer = 0; layer < empty_pasts_.size(); ++layer) {
+        auto cache = ByteWrapTensor(device, *empty_pasts_[layer]);
+        for (size_t row_index = 0; row_index < snapshot_rows_.size(); ++row_index) {
+          cache
+              .subspan(
+                  snapshot_rows_[row_index] * snapshot_row_bytes_,
+                  snapshot_row_bytes_)
+              .CopyFrom(snapshot_data_.subspan(
+                  (layer * snapshot_rows_.size() + row_index) *
+                      snapshot_row_bytes_,
+                  snapshot_row_bytes_));
+        }
+      }
+    }
+    return;
+  }
   if (index != 0)
     throw std::runtime_error("IndexerCache only supports rewinding to zero");
-  if (share_buffer_)
-    return;
   first_update_ = true;
   for (size_t cache_index = 0; cache_index < layer_indices_.size(); ++cache_index) {
     pasts_[cache_index].reset();

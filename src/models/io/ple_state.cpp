@@ -17,10 +17,14 @@ std::string ComposePleName(const std::string& name_template, int layer_index) {
   return name;
 }
 
-void FixAndValidateBatchDimension(std::vector<int64_t>& shape, int batch_size, const std::string& name) {
+void FixAndValidateBatchDimension(
+    std::vector<int64_t>& shape, int batch_size, const std::string& name,
+    size_t batch_axis = 0) {
   if (shape.empty())
     throw std::runtime_error("PleState: " + name + " must have a batch dimension");
-  if (shape[0] <= 0) shape[0] = batch_size;
+  if (batch_axis >= shape.size())
+    throw std::runtime_error("PleState: " + name + " has no batch axis");
+  if (shape[batch_axis] <= 0) shape[batch_axis] = batch_size;
   for (size_t axis = 0; axis < shape.size(); ++axis) {
     if (shape[axis] <= 0)
       throw std::runtime_error("PleState: " + name + " has unsupported dynamic dimension at axis " +
@@ -68,8 +72,13 @@ PleState::PleState(State& state) : state_{state} {
   conv_type_ = model_.session_info_.GetInputDataType(input_name_strings_[1]);
   token_shape_ = model_.session_info_.GetInputShape(input_name_strings_[0]);
   conv_shape_ = model_.session_info_.GetInputShape(input_name_strings_[1]);
+  if (conv_shape_.size() == 4) {
+    state_window_ = conv_shape_[0];
+  }
   FixAndValidateBatchDimension(token_shape_, state_.params_->BatchBeamSize(), "token history");
-  FixAndValidateBatchDimension(conv_shape_, state_.params_->BatchBeamSize(), "convolution state");
+  FixAndValidateBatchDimension(
+      conv_shape_, state_.params_->BatchBeamSize(), "convolution state",
+      conv_shape_.size() == 4 ? 1 : 0);
 
   auto& allocator = model_.p_device_kvcache_->GetAllocator();
   pasts_.reserve(layer_indices_.size() * 2);
@@ -107,10 +116,81 @@ void PleState::Update() {
 
 void PleState::RewindTo(size_t index) {
   if (layer_indices_.empty()) return;
-  if (index != 0)
-    throw std::runtime_error("PleState only supports rewinding to the initial state");
+  if (index != 0) {
+    if (!snapshot_valid_ || index != snapshot_position_) {
+      throw std::runtime_error(
+          "PleState cannot rewind to position " + std::to_string(index) +
+          " without a matching snapshot");
+    }
+    CopyStates(snapshot_, presents_);
+    if (std::getenv("ORTGENAI_MTP_DEBUG_STATE") != nullptr) {
+      auto& device = *model_.p_device_kvcache_;
+      device.Synchronize();
+      for (size_t state_index = 0; state_index < snapshot_.size(); ++state_index) {
+        auto expected_tensor = ByteWrapTensor(device, *snapshot_[state_index]);
+        auto actual_tensor = ByteWrapTensor(device, *presents_[state_index]);
+        const auto expected = expected_tensor.CopyDeviceToCpu();
+        const auto actual = actual_tensor.CopyDeviceToCpu();
+        if (!std::equal(expected.begin(), expected.end(), actual.begin())) {
+          throw std::runtime_error(
+              "PleState snapshot restore mismatch at state " +
+              std::to_string(state_index));
+        }
+      }
+    }
+    return;
+  }
+  snapshot_valid_ = false;
   InitializeStates(pasts_);
   InitializeStates(presents_);
+}
+
+void PleState::Snapshot(size_t position) {
+  if (layer_indices_.empty()) return;
+  if (snapshot_.empty()) {
+    auto& allocator = model_.p_device_kvcache_->GetAllocator();
+    snapshot_.reserve(layer_indices_.size() * 2);
+    for (size_t index = 0; index < layer_indices_.size(); ++index) {
+      snapshot_.push_back(
+          OrtValue::CreateTensor(allocator, token_shape_, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64));
+      snapshot_.push_back(OrtValue::CreateTensor(allocator, conv_shape_, conv_type_));
+    }
+
+  }
+  CopyStates(presents_, snapshot_);
+  snapshot_position_ = position;
+  snapshot_valid_ = true;
+}
+
+void PleState::CropToPosition(size_t position) {
+  if (!IsWindowed()) {
+    throw std::runtime_error("PleState::CropToPosition requires windowed convolution state");
+  }
+  const int64_t signed_slot =
+      static_cast<int64_t>(position) + state_window_ - forward_length_;
+  if (signed_slot < 0 || signed_slot >= state_window_) {
+    throw std::runtime_error("PleState crop position is outside the retained state window");
+  }
+  const size_t slot = static_cast<size_t>(signed_slot);
+  if (slot + 1 == static_cast<size_t>(state_window_)) return;
+
+  auto& device = *model_.p_device_kvcache_;
+  for (size_t index = 1; index < presents_.size(); index += 2) {
+    auto bytes = ByteWrapTensor(device, *presents_[index]);
+    const size_t slot_bytes = bytes.size() / static_cast<size_t>(state_window_);
+    bytes.subspan((state_window_ - 1) * slot_bytes, slot_bytes)
+        .CopyFrom(bytes.subspan(slot * slot_bytes, slot_bytes));
+  }
+}
+
+void PleState::CopyStates(
+    const std::vector<std::unique_ptr<OrtValue>>& source,
+    std::vector<std::unique_ptr<OrtValue>>& destination) {
+  auto& device = *model_.p_device_kvcache_;
+  for (size_t index = 0; index < source.size(); ++index) {
+    ByteWrapTensor(device, *destination[index]).CopyFrom(
+        ByteWrapTensor(device, *source[index]));
+  }
 }
 
 void PleState::InitializeStates(std::vector<std::unique_ptr<OrtValue>>& states) {
