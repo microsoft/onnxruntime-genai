@@ -3225,6 +3225,9 @@ void ApplyRuntimeProfile(Config& config, uint64_t total_device_memory_bytes) {
     candidate.speculative.max_draft_tokens = *selected->overlay.speculative.max_draft_tokens;
   }
   std::swap(config, candidate);
+  if (selected->overlay.speculative.max_draft_tokens) {
+    WarnOnClampedDraftWidth(config);
+  }
 }
 
 fs::path Config::ResolvePath(std::string_view value) const {

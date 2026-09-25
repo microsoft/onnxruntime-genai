@@ -31,6 +31,8 @@ class KVCacheVariant:
         output_model_path = Path(output_model_path)
         if source_model_path.resolve().parent != output_model_path.resolve().parent:
             raise ValueError("Source and output graphs must share a directory to reuse external weights.")
+        if source_model_path.resolve() == output_model_path.resolve():
+            raise ValueError("Output graph must not overwrite the source graph.")
         scale_data = self.load_scale_data(Path(scale_file), source_model_path.stem)
         model = onnx.load(source_model_path, load_external_data=False)
 

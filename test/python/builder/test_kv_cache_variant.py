@@ -204,6 +204,16 @@ def test_create_kv_cache_variant_rejects_different_output_directory(tmp_path):
     assert not output_path.exists()
 
 
+def test_create_kv_cache_variant_rejects_overwriting_source(tmp_path):
+    source_path, scale_path = _write_source_model(tmp_path, head_size=4)
+    source_bytes = source_path.read_bytes()
+
+    with pytest.raises(ValueError, match="must not overwrite the source graph"):
+        KVCacheVariant("int4_per_channel").create(source_path, source_path, scale_path)
+
+    assert source_path.read_bytes() == source_bytes
+
+
 def test_create_kv_cache_variant_maps_scales_by_layer_id(tmp_path):
     source_path, scale_path = _write_source_model(tmp_path, head_size=4, layer_ids=(3, 7))
     scale_data = json.loads(scale_path.read_text())
