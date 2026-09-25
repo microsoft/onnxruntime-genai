@@ -18,7 +18,7 @@
 
 namespace Generators {
 
-void ValidatePackedPositionIdsInput(
+size_t GetPackedPositionIdsPlaneCount(
     ONNXTensorElementDataType data_type,
     std::span<const int64_t> shape,
     std::span<const char* const> symbolic_shape) {
@@ -34,6 +34,28 @@ void ValidatePackedPositionIdsInput(
     throw std::runtime_error(
         "Packed hybrid execution requires position_ids with dynamic int64 "
         "[num_tokens] or [3, num_tokens] geometry");
+  }
+  return packed_vector ? 1 : 3;
+}
+
+void FillPackedPositionIdsRange(
+    std::span<int64_t> position_ids,
+    size_t position_planes,
+    size_t num_tokens,
+    size_t packed_offset,
+    int64_t first_position,
+    size_t token_count) {
+  if ((position_planes != 1 && position_planes != 3) ||
+      num_tokens > std::numeric_limits<size_t>::max() / position_planes ||
+      position_ids.size() != position_planes * num_tokens ||
+      packed_offset > num_tokens ||
+      token_count > num_tokens - packed_offset) {
+    throw std::logic_error("Invalid packed position_ids range.");
+  }
+  for (size_t plane = 0; plane < position_planes; ++plane) {
+    auto first = position_ids.begin() +
+                 static_cast<std::ptrdiff_t>(plane * num_tokens + packed_offset);
+    std::iota(first, first + static_cast<std::ptrdiff_t>(token_count), first_position);
   }
 }
 
@@ -191,7 +213,10 @@ size_t PackedPositionIdPlanes(const Model& model) {
   if (!model.session_info_.HasInput(position_ids)) {
     return 0;
   }
-  return model.session_info_.GetInputShape(position_ids).size() == 2 ? 3 : 1;
+  return GetPackedPositionIdsPlaneCount(
+      model.session_info_.GetInputDataType(position_ids),
+      model.session_info_.GetInputShape(position_ids),
+      model.session_info_.GetInputSymbolicShape(position_ids));
 }
 
 namespace {
@@ -592,7 +617,8 @@ void VarlenDecoderIO::PreparePositionIds(
   const std::vector<int64_t> position_shape =
       position_planes_ == 1
           ? std::vector<int64_t>{static_cast<int64_t>(num_tokens)}
-          : std::vector<int64_t>{3, static_cast<int64_t>(num_tokens)};
+          : std::vector<int64_t>{static_cast<int64_t>(position_planes_),
+                                 static_cast<int64_t>(num_tokens)};
   std::unique_ptr<Tensor> owned_position_ids;
   Tensor* position_ids_tensor{};
   if (graph_buffers_ != nullptr) {
@@ -624,14 +650,9 @@ void VarlenDecoderIO::PreparePositionIds(
             "Step plan token layout does not match packed position_ids.");
       }
     }
-    const int64_t first_position = request->ProcessedSequenceLength();
-    for (size_t token = 0; token < token_count; ++token) {
-      const int64_t position =
-          first_position + static_cast<int64_t>(token);
-      for (size_t plane = 0; plane < position_planes_; ++plane) {
-        position_cpu[plane * num_tokens + packed_offset + token] = position;
-      }
-    }
+    FillPackedPositionIdsRange(
+        position_cpu, position_planes_, num_tokens, packed_offset,
+        request->ProcessedSequenceLength(), token_count);
     packed_offset += token_count;
   }
   position_span.CopyCpuToDevice();
