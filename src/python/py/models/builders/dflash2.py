@@ -59,14 +59,20 @@ class DFlash2Builder(BlockDrafterBuilder):
         quant=None,
         fuse_gate_up=False,
         include_attention_metadata=True,
+        ep="cuda",
     ):
         self.draft_dir = draft_dir
         self.target_dir = target_dir
         # The drafter is a bf16 checkpoint and its activations genuinely leave the fp16 range
         # (the fc output alone reaches ~1.4e4 and the MLP product overflows two layers in), so the
-        # body runs in bf16. Only the tensors it shares with the fp16 target -- the aux hidden
-        # states, the embedding table and the FP8 LM head -- stay at the target's dtype.
-        self.io_dtype = ir.DataType.BFLOAT16
+        # body runs in bf16 on CUDA (which has a BFloat16 kernel for every op this graph emits).
+        # ONNX Runtime's WebGPU EP has no BFloat16 kernel at all (not even for a dense MatMul), so
+        # there we fall back to the target's own io_dtype (fp16) -- the same dtype the target model
+        # already runs its MatMul/MatMulNBits/PagedAttention kernels in on WebGPU. This trades away
+        # some numerical headroom (a real risk given the measurements above) in exchange for the
+        # graph loading at all; validate_dflash2_activity()-style acceptance-rate/NaN checks should
+        # be used to confirm the drafter is still producing usable candidates after this fallback.
+        self.io_dtype = ir.DataType.BFLOAT16 if ep == "cuda" else io_dtype
         self.external_dtype = io_dtype
         if quant is not None:
             self.quant_bits = quant["bits"]

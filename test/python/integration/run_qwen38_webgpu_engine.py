@@ -18,6 +18,7 @@ from collections import Counter
 from pathlib import Path
 
 import numpy as np
+import onnxruntime as ort
 import onnxruntime_genai as og
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -25,6 +26,7 @@ from _test_utils import register_webgpu_plugin
 
 
 MODEL_ID = "Qwen/Qwen3.8-27B"
+DFLASH2_CHECKPOINT = "z-lab/Qwen3.8-27B-DFlash2"
 PROMPT = "Reply with only the city name: What is the capital of France?"
 BUILD_METADATA = "qwen38_webgpu_build.json"
 REQUIRED_WEBGPU_OPS = {
@@ -44,6 +46,10 @@ BUILD_OPTIONS = {
     "state_update_capacity": 0,
     "use_paged_attention": True,
 }
+# DFlash2 is a block drafter: it supersedes exclude_mtp/MTP entirely (the Engine drives one
+# drafter per model) and needs the target's aux hidden states, which are derived from the
+# draft checkpoint's own `dflash_config.target_layer_ids` (see build_dflash2_options()).
+DFLASH2_PRECISION = "int4"
 
 
 def hash_model_builder_sources(repo_root: Path) -> str:
@@ -60,23 +66,95 @@ def source_revision(cache_dir: Path) -> str | None:
     return revision_path.read_text(encoding="utf-8").strip() if revision_path.is_file() else None
 
 
-def build_identity(repo_root: Path, cache_dir: Path) -> dict:
+def download_dflash2_checkpoint(cache_dir: Path) -> Path:
+    """Fetch the DFlash 2 block-drafter checkpoint for Qwen3.8-27B.
+
+    ``dflash2_path`` must be a local directory (the builder reads its ``config.json`` and
+    weights directly), so the HF repo is snapshotted onto disk rather than passed as a repo id.
+    """
+    from huggingface_hub import snapshot_download  # noqa: PLC0415
+
+    print(f"Fetching DFlash 2 draft checkpoint {DFLASH2_CHECKPOINT}", flush=True)
+    return Path(snapshot_download(repo_id=DFLASH2_CHECKPOINT, cache_dir=str(cache_dir)))
+
+
+def download_target_snapshot(cache_dir: Path) -> Path:
+    """Resolve Qwen3.8-27B to a local directory.
+
+    DFlash2's builder reads the target's `embed_tokens.weight`/`lm_head.weight` straight out of
+    `*.safetensors` shards on disk (see DFlash2Builder.load_weights); it does not go through the
+    `transformers`-based loader that the plain `-m <hub_id> -c <cache_dir>` path uses for the
+    target. Every DFlash2 README example therefore passes `-i <local_dir>` instead of `-m`. The
+    non-DFlash2 build path is left untouched and keeps using `-m`/`-c`.
+    """
+    from huggingface_hub import snapshot_download  # noqa: PLC0415
+
+    return Path(snapshot_download(repo_id=MODEL_ID, cache_dir=str(cache_dir)))
+
+
+def dflash2_aux_hidden_state_layers(draft_dir: Path) -> list[int]:
+    """SpecForge's ``target_layer_ids`` name layer *outputs*; the target's
+    ``aux_hidden_state_layers`` names residual streams *entering* a layer, one higher."""
+    draft_config = json.loads((draft_dir / "config.json").read_text(encoding="utf-8"))
+    target_layer_ids = draft_config["dflash_config"]["target_layer_ids"]
+    return [layer_id + 1 for layer_id in target_layer_ids]
+
+
+def build_dflash2_options(draft_dir: Path) -> dict:
+    return {
+        "dflash2_path": str(draft_dir),
+        "dflash2_precision": DFLASH2_PRECISION,
+        "aux_hidden_state_layers": dflash2_aux_hidden_state_layers(draft_dir),
+        "state_update_capacity": 7,
+    }
+
+
+def format_extra_option(key: str, value: object) -> str:
+    # Booleans/numbers are written lowercase to match the builder's true/false parsing; strings
+    # (e.g. dflash2_path, a filesystem path) must be passed through verbatim -- lowercasing them
+    # would corrupt any mixed-case path on a case-sensitive filesystem.
+    if isinstance(value, bool) or isinstance(value, (int, float)):
+        return f"{key}={str(value).lower()}"
+    if isinstance(value, (list, tuple)):
+        return f"{key}=" + ",".join(str(item) for item in value)
+    return f"{key}={value}"
+
+
+def build_identity(repo_root: Path, cache_dir: Path, build_options: dict, dflash2_draft_dir: Path | None) -> dict:
     return {
         "model_id": MODEL_ID,
         "model_revision": source_revision(cache_dir),
         "precision": "int4",
         "execution_provider": "webgpu",
-        "options": BUILD_OPTIONS,
+        "options": build_options,
+        "dflash2_checkpoint": DFLASH2_CHECKPOINT if dflash2_draft_dir is not None else None,
+        "dflash2_checkpoint_revision": dflash2_draft_dir.name if dflash2_draft_dir is not None else None,
         "model_builder_sha256": hash_model_builder_sources(repo_root),
         "runtime_versions": {
-            package: importlib.metadata.version(package)
-            for package in ("onnxruntime", "onnxruntime-genai", "onnxruntime-ep-webgpu")
+            "onnxruntime": ort.__version__,
+            "onnxruntime-genai": importlib.metadata.version("onnxruntime-genai"),
+            "webgpu": (
+                importlib.metadata.version("onnxruntime-webgpu")
+                if "WebGpuExecutionProvider" in ort.get_available_providers()
+                else importlib.metadata.version("onnxruntime-ep-webgpu")
+            ),
         },
     }
 
 
-def build_model(model_path: Path, cache_dir: Path, repo_root: Path) -> None:
-    identity = build_identity(repo_root, cache_dir)
+def build_model(
+    model_path: Path,
+    cache_dir: Path,
+    repo_root: Path,
+    dflash2_draft_dir: Path | None = None,
+) -> None:
+    build_options = dict(BUILD_OPTIONS)
+    if dflash2_draft_dir is not None:
+        # DFlash 2 supersedes the MTP head outright, so exclude_mtp is redundant but harmless;
+        # leave it set for clarity and drop it in favor of the drafter's own options.
+        build_options.update(build_dflash2_options(dflash2_draft_dir))
+
+    identity = build_identity(repo_root, cache_dir, build_options, dflash2_draft_dir)
     metadata_path = model_path / BUILD_METADATA
     config_path = model_path / "genai_config.json"
     if config_path.is_file() and metadata_path.is_file():
@@ -91,12 +169,18 @@ def build_model(model_path: Path, cache_dir: Path, repo_root: Path) -> None:
     model_path.mkdir(parents=True)
 
     builder = repo_root / "src" / "python" / "py" / "models" / "builder.py"
-    extra_options = [f"{key}={str(value).lower()}" for key, value in BUILD_OPTIONS.items()]
+    extra_options = [format_extra_option(key, value) for key, value in build_options.items()]
+    if dflash2_draft_dir is not None:
+        # DFlash2 needs a local target directory (see download_target_snapshot()); -m alone
+        # would leave DFlash2Builder globbing a HF hub id as if it were a filesystem path.
+        target_dir = download_target_snapshot(cache_dir)
+        source_flags = ["-i", str(target_dir)]
+    else:
+        source_flags = ["-m", MODEL_ID]
     command = [
         sys.executable,
         str(builder),
-        "-m",
-        MODEL_ID,
+        *source_flags,
         "-o",
         str(model_path),
         "-p",
@@ -108,7 +192,9 @@ def build_model(model_path: Path, cache_dir: Path, repo_root: Path) -> None:
         "--extra_options",
         *extra_options,
     ]
-    print("Exporting paged Qwen3.8-27B INT4 for WebGPU", flush=True)
+    label = "DFlash2-enabled" if dflash2_draft_dir is not None else "paged"
+    print(f"Exporting {label} Qwen3.8-27B INT4 for WebGPU", flush=True)
+    print("Model Builder command:", " ".join(command), flush=True)
     subprocess.run(command, check=True)
     metadata_path.write_text(json.dumps(identity, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -143,7 +229,7 @@ def prompt_tokens(tokenizer: og.Tokenizer) -> np.ndarray:
     return np.asarray(tokenizer.encode(prompt), dtype=np.int32)
 
 
-def run_engine(model: og.Model, tokens: np.ndarray, max_new_tokens: int) -> tuple[list[int], float]:
+def run_engine(model: og.Model, tokens: np.ndarray, max_new_tokens: int) -> tuple[list[int], float, dict]:
     engine = og.Engine(model)
     request_options = og.RequestOptions()
     request_options.set_max_session_tokens(int(tokens.size) + max_new_tokens)
@@ -168,9 +254,10 @@ def run_engine(model: og.Model, tokens: np.ndarray, max_new_tokens: int) -> tupl
     finally:
         request.close()
     elapsed = time.perf_counter() - started
+    speculative_stats = engine.get_speculative_stats()
     del engine
     gc.collect()
-    return output, elapsed
+    return output, elapsed, speculative_stats
 
 
 def read_profile(artifacts_dir: Path) -> tuple[Counter, Counter]:
@@ -195,7 +282,7 @@ def read_profile(artifacts_dir: Path) -> tuple[Counter, Counter]:
     return webgpu_ops, cpu_ops
 
 
-def validate_export(config_data: dict) -> None:
+def validate_export(config_data: dict, build_options: dict, expect_dflash2: bool) -> None:
     dynamic_batching = config_data.get("engine", {}).get("dynamic_batching")
     if not dynamic_batching:
         raise RuntimeError("Export did not enable Engine dynamic batching")
@@ -206,10 +293,10 @@ def validate_export(config_data: dict) -> None:
         "block_size": "paged_block_size",
     }
     for config_key, option_key in config_options.items():
-        if dynamic_batching.get(config_key) != BUILD_OPTIONS[option_key]:
+        if dynamic_batching.get(config_key) != build_options[option_key]:
             raise RuntimeError(
                 f"Exported dynamic batching option {config_key}={dynamic_batching.get(config_key)!r}, "
-                f"expected {BUILD_OPTIONS[option_key]!r}"
+                f"expected {build_options[option_key]!r}"
             )
 
     decoder = config_data["model"]["decoder"]
@@ -218,10 +305,37 @@ def validate_export(config_data: dict) -> None:
     required_groups = {"paged_kv", "fixed_conv", "fixed_recurrent"}
     if not required_groups.issubset(kinds):
         raise RuntimeError(f"Exported state groups {kinds} do not include {required_groups}")
-    if any("state_update" in group for group in groups):
-        raise RuntimeError("WebGPU validation must not enable unsupported compact state updates")
+    capacity = build_options["state_update_capacity"]
+    if capacity:
+        if decoder.get("state_update_capacity") != capacity:
+            raise RuntimeError(
+                f"Exported state_update_capacity={decoder.get('state_update_capacity')!r}, expected {capacity}"
+            )
+        for group in groups:
+            if group["kind"] in {"fixed_conv", "fixed_recurrent"}:
+                if group.get("state_update", {}).get("capacity") != capacity:
+                    raise RuntimeError(f"Exported {group['kind']} state_update capacity is not {capacity}")
+    elif any("state_update" in group for group in groups):
+        raise RuntimeError("Export enabled compact state updates despite state_update_capacity=0")
     if config_data.get("model", {}).get("mtp", {}).get("enabled"):
         raise RuntimeError("The exported package unexpectedly enabled MTP speculative decoding")
+
+    dflash2_section = config_data.get("model", {}).get("dflash2")
+    if expect_dflash2:
+        if not dflash2_section:
+            raise RuntimeError("Export did not add a 'model.dflash2' section despite --dflash2 being requested")
+        if dflash2_section.get("filename") != "dflash2.onnx":
+            raise RuntimeError(f"Unexpected DFlash2 drafter filename: {dflash2_section.get('filename')!r}")
+        expected_layers = build_options["aux_hidden_state_layers"]
+        actual_layers = dflash2_section.get("aux_hidden_state_layers")
+        if actual_layers != expected_layers:
+            raise RuntimeError(
+                f"Exported dflash2.aux_hidden_state_layers={actual_layers!r}, expected {expected_layers!r}"
+            )
+        if decoder.get("outputs", {}).get("aux_hidden_states") != "aux_hidden_states":
+            raise RuntimeError("Export did not wire the target's aux_hidden_states output for DFlash2")
+    elif dflash2_section:
+        raise RuntimeError("The exported package unexpectedly enabled DFlash2 speculative decoding")
 
 
 def validate_profile(webgpu_ops: Counter, cpu_ops: Counter) -> None:
@@ -245,16 +359,33 @@ def run_backend(
     provider: str,
     max_new_tokens: int,
     profile_prefix: Path | None = None,
-) -> tuple[list[int], str, float]:
+) -> tuple[list[int], str, float, dict]:
     model = og.Model(make_config(model_path, provider, profile_prefix))
     tokenizer = og.Tokenizer(model)
     tokens = prompt_tokens(tokenizer)
-    output_tokens, elapsed = run_engine(model, tokens, max_new_tokens)
+    output_tokens, elapsed, speculative_stats = run_engine(model, tokens, max_new_tokens)
     output_text = tokenizer.decode(np.asarray(output_tokens, dtype=np.int32))
     del tokenizer
     del model
     gc.collect()
-    return output_tokens, output_text, elapsed
+    return output_tokens, output_text, elapsed, speculative_stats
+
+
+def validate_dflash2_activity(speculative_stats: dict) -> None:
+    """Confirm DFlash2 actually drafted/verified tokens rather than silently falling back."""
+    if speculative_stats.get("rounds", 0) <= 0:
+        raise RuntimeError("DFlash2 was configured but the Engine ran zero speculative rounds")
+    if speculative_stats.get("draft_tokens_proposed", 0) <= 0:
+        raise RuntimeError("DFlash2 was configured but no draft tokens were ever proposed")
+    if speculative_stats.get("draft_tokens_accepted", 0) <= 0:
+        raise RuntimeError("DFlash2 was configured but zero draft tokens were ever accepted")
+    if speculative_stats.get("dflash2_disables", 0) > 0:
+        raise RuntimeError(
+            f"DFlash2 was disabled mid-run ({speculative_stats['dflash2_disables']} time(s)); "
+            "the Engine silently fell back to ordinary decoding"
+        )
+    if speculative_stats.get("dflash2_failures", 0) > 0:
+        raise RuntimeError(f"DFlash2 recorded {speculative_stats['dflash2_failures']} drafter failure(s)")
 
 
 def main() -> int:
@@ -262,7 +393,11 @@ def main() -> int:
     parser.add_argument(
         "--model-path",
         type=Path,
-        default=Path("/workspace/models/qwen3.8-27b-int4-webgpu-paged"),
+        default=None,
+        help="Defaults to /workspace/models/qwen3.8-27b-int4-webgpu-paged, or "
+        ".../qwen3.8-27b-int4-webgpu-paged-dflash2 when --dflash2 is set. An explicit override "
+        "always wins, so it must not be reused between the two modes: their genai_config.json "
+        "are incompatible (one carries a 'model.dflash2' section, the other must not).",
     )
     parser.add_argument(
         "--cache-dir",
@@ -275,22 +410,39 @@ def main() -> int:
         default=Path("/tmp/qwen38-paged-webgpu-engine"),
     )
     parser.add_argument("--max-new-tokens", type=int, default=64)
+    parser.add_argument(
+        "--dflash2",
+        action="store_true",
+        help="Build (if needed) and run with DFlash2 block-drafter speculative decoding enabled.",
+    )
+    parser.add_argument(
+        "--skip-cpu-reference",
+        action="store_true",
+        help="Skip the CPU Engine reference run (useful for a 27B model where CPU decoding is slow).",
+    )
     args = parser.parse_args()
+    if args.model_path is None:
+        suffix = "-dflash2" if args.dflash2 else ""
+        args.model_path = Path(f"/workspace/models/qwen3.8-27b-int4-webgpu-paged{suffix}")
 
-    if not register_webgpu_plugin():
-        raise RuntimeError("onnxruntime-ep-webgpu is not installed")
+    if "WebGpuExecutionProvider" not in ort.get_available_providers() and not register_webgpu_plugin():
+        raise RuntimeError("WebGPU EP is not available in ONNX Runtime or as a plugin")
 
     repo_root = Path(__file__).resolve().parents[3]
-    build_model(args.model_path, args.cache_dir, repo_root)
+    dflash2_draft_dir = download_dflash2_checkpoint(args.cache_dir) if args.dflash2 else None
+    build_model(args.model_path, args.cache_dir, repo_root, dflash2_draft_dir)
     config_data = json.loads((args.model_path / "genai_config.json").read_text(encoding="utf-8"))
-    validate_export(config_data)
+    build_options = dict(BUILD_OPTIONS)
+    if dflash2_draft_dir is not None:
+        build_options.update(build_dflash2_options(dflash2_draft_dir))
+    validate_export(config_data, build_options, expect_dflash2=args.dflash2)
 
     args.artifacts_dir.mkdir(parents=True, exist_ok=True)
     for profile_path in args.artifacts_dir.glob("webgpu-profile*.json"):
         profile_path.unlink()
     profile_prefix = args.artifacts_dir / "webgpu-profile"
 
-    webgpu_tokens, webgpu_text, webgpu_elapsed = run_backend(
+    webgpu_tokens, webgpu_text, webgpu_elapsed, webgpu_speculative_stats = run_backend(
         args.model_path,
         "webgpu",
         args.max_new_tokens,
@@ -300,31 +452,36 @@ def main() -> int:
     validate_profile(webgpu_ops, cpu_ops)
     if "paris" not in webgpu_text.lower():
         raise RuntimeError(f"WebGPU output did not contain the expected answer 'Paris': {webgpu_text!r}")
+    if args.dflash2:
+        validate_dflash2_activity(webgpu_speculative_stats)
 
     cpu_result = None
     cpu_reference_error = None
-    try:
-        cpu_tokens, cpu_text, cpu_elapsed = run_backend(
-            args.model_path,
-            "cpu",
-            args.max_new_tokens,
-        )
-        cpu_result = {
-            "elapsed_seconds": cpu_elapsed,
-            "output": cpu_text,
-            "tokens": cpu_tokens,
-        }
-    except RuntimeError as error:
-        cpu_reference_error = str(error)
+    if not args.skip_cpu_reference:
+        try:
+            cpu_tokens, cpu_text, cpu_elapsed, _cpu_speculative_stats = run_backend(
+                args.model_path,
+                "cpu",
+                args.max_new_tokens,
+            )
+            cpu_result = {
+                "elapsed_seconds": cpu_elapsed,
+                "output": cpu_text,
+                "tokens": cpu_tokens,
+            }
+        except RuntimeError as error:
+            cpu_reference_error = str(error)
     if cpu_result and "paris" not in cpu_result["output"].lower():
         raise RuntimeError(f"CPU output did not contain the expected answer 'Paris': {cpu_result['output']!r}")
 
     result = {
         "prompt": PROMPT,
+        "dflash2": args.dflash2,
         "webgpu": {
             "elapsed_seconds": webgpu_elapsed,
             "output": webgpu_text,
             "tokens": webgpu_tokens,
+            "speculative_stats": webgpu_speculative_stats,
         },
         "cpu": cpu_result,
         "cpu_reference_error": cpu_reference_error,
@@ -340,10 +497,23 @@ def main() -> int:
     print(f"WebGPU Engine output ({webgpu_elapsed:.2f}s): {webgpu_text}")
     if cpu_result:
         print(f"CPU Engine output ({cpu_result['elapsed_seconds']:.2f}s): {cpu_result['output']}")
-    else:
+    elif cpu_reference_error:
         print(f"CPU reference unavailable: {cpu_reference_error}")
     print(f"WebGPU operator counts: {dict(webgpu_ops)}")
     print(f"CPU fallback operator counts: {dict(cpu_ops)}")
+    if args.dflash2:
+        stats = webgpu_speculative_stats
+        print(
+            "DFlash2 stats: "
+            f"rounds={stats.get('rounds')} "
+            f"draft_tokens_proposed={stats.get('draft_tokens_proposed')} "
+            f"draft_tokens_accepted={stats.get('draft_tokens_accepted')} "
+            f"acceptance_rate={stats.get('acceptance_rate'):.4f} "
+            f"avg_draft_tokens_per_round={stats.get('avg_draft_tokens_per_round'):.4f} "
+            f"dflash2_failures={stats.get('dflash2_failures')} "
+            f"dflash2_disables={stats.get('dflash2_disables')} "
+            f"standard_fallback_steps={stats.get('standard_fallback_steps')}"
+        )
     print(f"Artifacts: {args.artifacts_dir}")
     print("Paged Qwen3.8 Engine execution completed correctly on WebGPU.")
     return 0

@@ -1239,6 +1239,7 @@ class Qwen35MoEModel(MTPModel):
             quant=self.block_drafter_quant(self.dflash2_attrs["precision"]),
             fuse_gate_up=self.dflash2_attrs["fuse_gate_up"],
             include_attention_metadata=self.decoder.ep != "webgpu",
+            ep=self.decoder.ep,
         )
         self.dflash2.make_model()
 
