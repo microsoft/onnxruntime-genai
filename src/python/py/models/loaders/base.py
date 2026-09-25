@@ -982,19 +982,15 @@ class QuantizedModel:
 
         orig_tensor = tensor.T if transpose else tensor
 
-        original_cols = orig_tensor.shape[1]
-        pad_len = (values_per_pack - (original_cols % values_per_pack)) % values_per_pack
-        if pad_len > 0:
-            orig_tensor = torch.nn.functional.pad(orig_tensor, (0, pad_len), "constant", 0)
+        packed_cols = (orig_tensor.shape[1] + values_per_pack - 1) // values_per_pack
+        out = torch.zeros((orig_tensor.shape[0], packed_cols), dtype=packed_dtype, device=orig_tensor.device)
 
-        wf = torch.arange(0, bits).view(1, 1, -1)
-        out = torch.bitwise_right_shift(orig_tensor.unsqueeze(-1), wf)
-        out = torch.bitwise_and(out, 1)
-
-        out = out.reshape(orig_tensor.shape[0], -1, values_per_pack * bits)
-        wf1 = torch.arange(0, values_per_pack * bits, 1).view(1, 1, -1)
-        out = torch.bitwise_left_shift(out, wf1)
-        out = out.sum(dim=-1).to(packed_dtype)
+        # Accumulate one value per packed word at a time instead of expanding every bit to int64.
+        # Zero initialization supplies the padding bits for an incomplete final word.
+        mask = (1 << bits) - 1
+        for offset in range(values_per_pack):
+            values = orig_tensor[:, offset::values_per_pack].to(packed_dtype)
+            out[:, :values.shape[1]] |= (values & mask) << (offset * bits)
         return out.T if transpose else out
 
     def pack_on_row(self, tensor, bits, transpose, packed_dtype=torch.int32):
