@@ -322,7 +322,7 @@ def check_extra_options(
 
     # `moe_quant_type` is the single option that selects the MoE quantization scheme. It replaces the
     # older per-type flags (`use_8bits_moe``) so new schemes can be added without a new flag.
-    supported_moe_quant_types = {"int4", "int8", "mxfp4", "nvfp4"}
+    supported_moe_quant_types = {"int2", "int4", "int8", "mxfp4", "nvfp4"}
 
     # Backward compatibility: `use_8bits_moe` is deprecated in favor of `moe_quant_type`.
     if "use_8bits_moe" in extra_options:
@@ -348,6 +348,21 @@ def check_extra_options(
                     "int4 build precision is what exports the quantized QMoE op, and the FP4 scheme only sets the "
                     "MoE expert weights to the FP4 encoding."
                 )
+
+    projection_types = {
+        key: extra_options[key]
+        for key in ("qmoe_fc1_type", "qmoe_fc2_type")
+        if key in extra_options
+    }
+    if projection_types or extra_options.get("moe_quant_type") == "int2":
+        invalid = {key: value for key, value in projection_types.items() if value not in {"int2", "int4", "int8"}}
+        if invalid:
+            raise ValueError(f"QMoE projection types must be int2, int4, or int8, got {invalid}.")
+        if execution_provider != "cuda":
+            raise ValueError("INT2 and mixed-width QMoE are only supported on the CUDA EP.")
+        qmoe_block_size = int(extra_options.get("qmoe_block_size", 32))
+        if qmoe_block_size not in (64, 128):
+            raise ValueError("INT2 and mixed-width CUDA QMoE require qmoe_block_size=64 or 128.")
 
     if extra_options.get("exclude_lm_head", False) and extra_options.get("include_hidden_states", False):
         # 'exclude_lm_head' is for when 'hidden_states' are outputted and 'logits' are not outputted
@@ -889,6 +904,10 @@ def get_args():
                     WebGPU requires hidden_size and moe_intermediate_size to be divisible by qmoe_block_size.
                     Raw block-wise INT4 QMoE requires both dimensions to be even.
                     Supported EPs: CPU, CUDA, WebGPU, TRT-RTX.
+                qmoe_fc1_type = int2/int4/int8: Override the gate/up (FC1/FC3) QMoE weight type.
+                    INT2 and mixed-width QMoE require CUDA and qmoe_block_size=64 or 128.
+                qmoe_fc2_type = int2/int4/int8: Override the down-projection (FC2) QMoE weight type.
+                    INT2 and mixed-width QMoE require CUDA and qmoe_block_size=64 or 128.
                 qmoe_weights_prepacked = -1/0/1: Specify the CUDA QMoE expert weight layout.
                     -1 lets the builder choose automatically, 0 exports raw weights for runtime prepacking, and 1 exports CUTLASS-prepacked weights.
                     Default is -1.
@@ -1098,7 +1117,8 @@ def get_args():
                     are returned to the driver instead of being retained as free arena blocks.
                 use_qdq = Use the QDQ decomposition for ops.
                     Use this option when you want to use quantize-dequantize ops. For example, you will have a quantized MatMul op instead of the MatMulNBits op.
-                moe_quant_type = int4/int8/mxfp4/nvfp4: Quantization scheme for MoE (QMoE) layers. Default is int4.
+                moe_quant_type = int2/int4/int8/mxfp4/nvfp4: Quantization scheme for MoE (QMoE) layers. Default is int4.
+                    int2 = 2-bit integer QMoE weights on CUDA. Requires qmoe_block_size=64 or 128.
                     int4 = 4-bit integer QMoE weights (expert_weight_bits=4, quant_type="int").
                     int8 = 8-bit integer QMoE weights (expert_weight_bits=8, quant_type="int").
                     mxfp4 = MXFP4 QMoE weights on the CUDA EP (quant_type="fp4", expert_weight_bits=4, block_size=32):

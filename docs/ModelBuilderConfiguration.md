@@ -73,7 +73,8 @@ compatibility defaults are provider-dependent today:
 | --- | --- |
 | `weights.accuracy_level` | `4` on CPU/WebGPU, else `0` |
 | `moe.block_size` | `128` on TRT-RTX, else `32` |
-| `moe.type` | `mxfp4`/`nvfp4` accepted only on CUDA |
+| `moe.type` | `int2`/`mxfp4`/`nvfp4` accepted only on CUDA |
+| `moe.fc1_type`, `moe.fc2_type` | Projection overrides require integer QMoE on CUDA; INT2 and mixed widths require block size 64 or 128 |
 | `format.matmulnbits_weights_prepacked` | Prepacked layouts are CUDA-only; a block drafter's packing is forced off elsewhere |
 | `format.use_qdq` | Required `true` for TRT-RTX integer dense weights |
 
@@ -100,7 +101,7 @@ full quantization configuration from PR #2588:
 | `io_dtype` | Requested activation/I/O dtype, subject to the component's supported contract. |
 | `checkpoint_policy` | Reserved for loaders that implement both paths. Target options currently reject it; MTP supports `preserve` and `requantize`. |
 | `weights` | `type`, `block_size`, `symmetric`, `method`, `accuracy_level`, `op_types`, and ordered `overrides`. |
-| `moe` | Expert quantization type, block size, and packing. |
+| `moe` | Expert quantization type, optional `fc1_type`/`fc2_type` projection overrides, block size, and packing. |
 | `format` | `use_qdq` and `matmulnbits_weights_prepacked`. |
 
 `format` is the proposed replacement name for `quant_config.runtime`: QDQ and
@@ -119,6 +120,10 @@ string.
 Keep MoE quantization in `quant_config.moe`, separately for each model. Do not add
 a duplicate `moe.quant_config` location. Future non-quantization MoE export options
 can have their own group when there are concrete supported settings to expose.
+`moe.fc1_type` controls the fused gate/up projection (FC1 and FC3), while
+`moe.fc2_type` controls the down projection. They inherit `moe.type` when omitted.
+The initial mixed-width implementation accepts `int2`, `int4`, and `int8`, uses
+symmetric weights without zero points, and requires CUDA with block size 64 or 128.
 
 An omitted `moe` group needs an explicit rule, because today's default derives
 from the legacy root `precision` rather than from the dense weight type: `int8`
@@ -770,7 +775,7 @@ target/drafter/runtime envelope.
 | `is_symmetric`, `accuracy_level` | Target `quant_config.weights.symmetric` and `weights.accuracy_level` |
 | `algo_config`, `nodes_to_exclude` | Target `quant_config.weights.method` plus generated `weights.overrides` entries; exclusions precede generated preset rules so they stay unconditional |
 | `matmulnbits_weights_prepacked`, `use_qdq` | Target `quant_config.format` fields |
-| `moe_quant_type`, `qmoe_block_size`, `qmoe_weights_prepacked` | Target `quant_config.moe` fields |
+| `moe_quant_type`, `qmoe_fc1_type`, `qmoe_fc2_type`, `qmoe_block_size`, `qmoe_weights_prepacked` | Target `quant_config.moe` fields |
 | `use_8bits_moe` | Deprecated `moe_quant_type` alias; unchanged |
 | `use_paged_attention`, `paged_block_size` | Target `attention.implementation` and `attention.paged.block_size` |
 | `kv_cache_quant_scheme`, `kv_cache_scale_file` | Target `attention.kv_cache` fields |

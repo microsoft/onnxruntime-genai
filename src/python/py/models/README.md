@@ -824,13 +824,21 @@ This option is not supported with `-p int8` because 8-bit `MatMulNBits` is QOper
 
 ##### Choose the MoE Quantization Type in QMoE
 
-This scenario is for when you want to select the quantization scheme for MoE (QMoE) layers via the single `moe_quant_type` option. Supported values are `int4` (default), `int8`, and `mxfp4`:
+This scenario is for when you want to select the quantization scheme for MoE (QMoE) layers via the single `moe_quant_type` option. Supported values include:
 
+- `int2`: 2-bit integer QMoE weights on CUDA (`expert_weight_bits=2`, `quant_type="int"`). Requires block size 64 or 128.
 - `int4`: 4-bit integer QMoE weights (`expert_weight_bits=4`, `quant_type="int"`).
 - `int8`: 8-bit integer QMoE weights (`expert_weight_bits=8`, `quant_type="int"`).
 - `mxfp4`: MXFP4 QMoE weights on the CUDA EP (`quant_type="fp4"`, `expert_weight_bits=4`, `block_size=32`): 4-bit e2m1 weights with ue8m0 (float8e8m0) block scales and a per-expert float32 global scale. Requires an ONNX Runtime build with `onnxruntime_USE_FP4_QMOE=ON`, `precision=int4` with symmetric INT4 quantization, and is only supported on the CUDA EP.
 
 This single option replaces the older per-type flags so new quantization schemes can be added without introducing a new flag each time. The `use_8bits_moe` flag is deprecated (use `moe_quant_type=int8`).
+
+Use `qmoe_fc1_type` and `qmoe_fc2_type` to override the gate/up and down-projection widths. These options accept `int2`, `int4`, or `int8`; INT2 and mixed-width exports require the CUDA EP and `qmoe_block_size=64` or `128`. Symmetric quantization is used without zero points so ONNX Runtime can select its packed INT GEMV path.
+
+```bash
+# GPT-OSS mixed-width QMoE: INT2 gate/up and INT4 down projection
+python -m onnxruntime_genai.models.builder -m openai/gpt-oss-20b -o gpt-oss-20b-int2-int4 -p int4 -e cuda --extra_options moe_quant_type=int4 qmoe_fc1_type=int2 qmoe_fc2_type=int4 qmoe_block_size=64
+```
 
 ```bash
 # From wheel (8-bit integer QMoE):

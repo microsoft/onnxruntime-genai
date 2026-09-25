@@ -60,6 +60,7 @@ _DTYPES: dict[str, DtypeDescriptor] = {
     "uint8": DtypeDescriptor("uint8", "int", 8, signed=False),
     "int4": DtypeDescriptor("int4", "int", 4, signed=True),
     "uint4": DtypeDescriptor("uint4", "int", 4, signed=False),
+    "int2": DtypeDescriptor("int2", "int", 2, signed=True),
     "mxfp4": DtypeDescriptor("mxfp4", "mx", 4, block_size=32),
     "nvfp4": DtypeDescriptor("nvfp4", "mx", 4, block_size=16),
     "none": DtypeDescriptor("none", "float", 0),  # explicit "do not quantize this target"
@@ -204,6 +205,8 @@ class WeightsConfig:
 
     def __post_init__(self):
         descriptor = resolve_dtype(self.type)
+        if descriptor.kind == "int" and descriptor.bits not in (4, 8):
+            raise ValueError(f"weights.type={self.type} is unsupported; dense integer weights require int4 or int8")
         if self.symmetric is None:
             self.symmetric = descriptor.signed is not False
         else:
@@ -260,11 +263,20 @@ class MoEConfig:
     """MoE expert (QMoE) weight quantization."""
 
     type: str = "int4"
+    fc1_type: Optional[str] = None
+    fc2_type: Optional[str] = None
     block_size: int = 32
     weights_prepacked: int = -1  # CUDA QMoE layout: -1 auto | 0 raw | 1 prepacked
 
     def __post_init__(self):
         descriptor = resolve_dtype(self.type)
+        for field_name in ("fc1_type", "fc2_type"):
+            projection_type = getattr(self, field_name)
+            if projection_type is None:
+                continue
+            projection_descriptor = resolve_dtype(projection_type)
+            if descriptor.kind != "int" or projection_descriptor.kind != "int":
+                raise ValueError(f"moe.{field_name} is only supported for integer QMoE types")
         self.block_size = _normalize_block_size(self.block_size)
         if descriptor.kind == "mx":
             # Microscaling FP4 mandates a fixed block size (mxfp4 -> 32, nvfp4 -> 16).
@@ -274,17 +286,28 @@ class MoEConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "MoEConfig":
-        unknown = set(data) - {"type", "block_size", "weights_prepacked"}
+        unknown = set(data) - {"type", "fc1_type", "fc2_type", "block_size", "weights_prepacked"}
         if unknown:
             raise ValueError(f"unknown moe field(s): {sorted(unknown)}")
         return cls(
             type=data.get("type", "int4"),
+            fc1_type=data.get("fc1_type"),
+            fc2_type=data.get("fc2_type"),
             block_size=data.get("block_size", 32),
             weights_prepacked=data.get("weights_prepacked", -1),
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {"type": self.type, "block_size": self.block_size, "weights_prepacked": self.weights_prepacked}
+        result = {
+            "type": self.type,
+            "block_size": self.block_size,
+            "weights_prepacked": self.weights_prepacked,
+        }
+        if self.fc1_type is not None:
+            result["fc1_type"] = self.fc1_type
+        if self.fc2_type is not None:
+            result["fc2_type"] = self.fc2_type
+        return result
 
 
 @dataclass
@@ -515,6 +538,8 @@ class QuantConfig:
         default_moe_block = 128 if execution_provider == "trt-rtx" else 32
         moe = MoEConfig(
             type=moe_quant_type,
+            fc1_type=extra_options.get("qmoe_fc1_type"),
+            fc2_type=extra_options.get("qmoe_fc2_type"),
             block_size=int(extra_options.get("qmoe_block_size", default_moe_block)),
             weights_prepacked=int(extra_options.get("qmoe_weights_prepacked", -1)),
         )

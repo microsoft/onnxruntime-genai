@@ -489,6 +489,71 @@ class CudaQuantizer:
         return qweight, scales
 
     @staticmethod
+    def qmoe_blockwise_quantize(
+        weights: torch.Tensor,
+        bits: int,
+        block_size: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Quantize raw symmetric QMoE weights, including CUDA-only INT2 storage."""
+        torch = _get_torch()
+        bits = int(bits)
+        if bits not in (2, 4, 8):
+            raise ValueError(f"QMoE blockwise quantization only supports 2, 4, or 8 bits, got {bits}.")
+        if bits in (4, 8):
+            return CudaQuantizer.matmulnbits_blockwise_quantize(
+                weights,
+                bits,
+                block_size,
+                unsigned_full_range=True,
+                signed_scale=True,
+            )
+
+        qweight, scales, _ = CudaQuantizer._qmoe_symmetric_blockwise_quantize_impl(weights, bits, block_size)
+        return qweight.reshape(qweight.shape[0], -1).contiguous(), scales
+
+    @staticmethod
+    def _qmoe_symmetric_blockwise_quantize_impl(
+        weights: torch.Tensor,
+        bits: int,
+        block_size: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return MLAS-grid QMoE storage without enabling INT2 MatMulNBits."""
+        torch = _get_torch()
+        bits = int(bits)
+        block_size = int(block_size)
+        if bits not in (2, 4, 8):
+            raise ValueError(f"QMoE blockwise quantization only supports 2, 4, or 8 bits, got {bits}.")
+        if block_size <= 0:
+            raise ValueError(f"QMoE blockwise quantization requires a positive block_size, got {block_size}.")
+
+        weights = weights.detach().cpu().to(torch.float32).contiguous()
+        n, k = weights.shape
+        pack = 8 // bits
+        num_blocks = (k + block_size - 1) // block_size
+        padded_k = num_blocks * block_size
+        if padded_k != k:
+            weights = torch.nn.functional.pad(weights, (0, padded_k - k))
+        blocked = weights.reshape(n, num_blocks, block_size)
+
+        qmin = -(1 << (bits - 1))
+        qmax = (1 << (bits - 1)) - 1
+        zero_point = 1 << (bits - 1)
+        argmax = blocked.abs().argmax(dim=2, keepdim=True)
+        scales = blocked.gather(2, argmax).squeeze(2) / float(qmin)
+        eps = torch.finfo(torch.float32).eps
+        scales = torch.where(scales.abs() < eps, torch.full_like(scales, eps), scales)
+        quantized = torch.clamp(torch.round(blocked / scales.unsqueeze(-1)), qmin, qmax).to(torch.int16)
+        quantized = (quantized + zero_point).to(torch.uint8)
+
+        blob_size = (block_size + pack - 1) // pack
+        qweight = torch.zeros((n, num_blocks, blob_size), dtype=torch.uint8)
+        for offset in range(pack):
+            values = quantized[:, :, offset::pack]
+            qweight[:, :, : values.shape[2]] |= (values & ((1 << bits) - 1)) << (offset * bits)
+        zero_points = torch.zeros((n, (num_blocks + pack - 1) // pack), dtype=torch.uint8)
+        return qweight.contiguous(), scales.contiguous(), zero_points
+
+    @staticmethod
     def matmulnbits_prepacked_blockwise_quantize(
         weights: torch.Tensor,
         bits: int,

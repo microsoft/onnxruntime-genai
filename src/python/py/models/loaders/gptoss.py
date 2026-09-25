@@ -103,6 +103,39 @@ class GptOssMXFP4Loader:
             .contiguous()
         )
 
+    def decode_blocks(self, blocks, scales):
+        """Decode checkpoint MXFP4 blocks to dense ``[E, N, K]`` float32 weights."""
+        if blocks.dtype != torch.uint8:
+            blocks = blocks.to(torch.uint8)
+        if scales.dtype != torch.uint8:
+            scales = scales.to(torch.uint8)
+        if blocks.ndim != 4 or blocks.shape[-1] != 16:
+            raise ValueError(f"GPT-OSS MXFP4 blocks must have shape [E, N, K/32, 16], got {tuple(blocks.shape)}.")
+        if tuple(scales.shape) != tuple(blocks.shape[:-1]):
+            raise ValueError(
+                f"GPT-OSS MXFP4 scales must have shape {tuple(blocks.shape[:-1])}, got {tuple(scales.shape)}."
+            )
+
+        codes = torch.empty((*blocks.shape[:-1], 32), dtype=torch.uint8)
+        codes[..., 0::2] = blocks & 0x0F
+        codes[..., 1::2] = blocks >> 4
+        magnitudes = torch.tensor((0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0), dtype=torch.float32)
+        values = magnitudes[(codes & 0x07).long()]
+        values = torch.where((codes & 0x08) != 0, -values, values)
+        block_scales = torch.pow(2.0, scales.to(torch.float32) - 127.0)
+        return (values * block_scales.unsqueeze(-1)).reshape(blocks.shape[0], blocks.shape[1], -1).contiguous()
+
+    def decode_experts(self, layer_id):
+        prefix = f"model.layers.{layer_id}.moe.experts"
+        gate_up_blocks = self.load_tensor(f"{prefix}.gate_up_proj_blocks")
+        gate_up_scales = self.load_tensor(f"{prefix}.gate_up_proj_scales")
+        down_blocks = self.load_tensor(f"{prefix}.down_proj_blocks")
+        down_scales = self.load_tensor(f"{prefix}.down_proj_scales")
+        return (
+            self.decode_blocks(gate_up_blocks, gate_up_scales),
+            self.decode_blocks(down_blocks, down_scales),
+        )
+
     def prepare_experts(self, layer_id):
         prefix = f"model.layers.{layer_id}.moe.experts"
         gate_up_blocks = self.load_tensor(f"{prefix}.gate_up_proj_blocks")

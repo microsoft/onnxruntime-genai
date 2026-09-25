@@ -301,6 +301,8 @@ def normalize_target_quant_config(
         "op_types_to_quantize": "weights.op_types",
         "algo_config": "weights.method",
         "moe_quant_type": "moe.type",
+        "qmoe_fc1_type": "moe.fc1_type",
+        "qmoe_fc2_type": "moe.fc2_type",
         "qmoe_block_size": "moe.block_size",
         "qmoe_weights_prepacked": "moe.weights_prepacked",
         "use_qdq": "format.use_qdq",
