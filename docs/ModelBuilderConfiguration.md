@@ -372,10 +372,74 @@ needed. A profile overlay may change `engine.dynamic_batching`, `search.chunk_si
 `search.max_length`, and `speculative.max_draft_tokens`.
 
 An alternate graph may additionally set `model.decoder.filename`. The named
-graph must already be present in the package, for example because an Olive
-post-processing pass derived a different KV-cache variant while retaining the
-base graph's external weights. Do not set a different filename for a
-configuration-only profile.
+graph must already be present in the package. Use the `KVCacheVariant` API below
+to derive a different KV-cache variant while retaining the base graph's external
+weights. Do not set a different filename for a configuration-only profile.
+
+### Authoring KV-Cache Variants
+
+Start with a supported checkpoint and a calibrated per-channel scale file as
+described in [KV-cache quantization](../src/python/py/models/README.md#quantize-the-kv-cache).
+Record `qmax` in the scale file so the same calibration can be rescaled for INT4
+and INT8. Export the base graph with static per-channel paged KV quantization:
+
+```bash
+python src/python/py/models/builder.py -i checkpoint -o package -p fp16 -e cuda \
+  --extra_options use_paged_attention=true kv_cache_quant_scheme=int4_per_channel \
+  kv_cache_scale_file=scales.json num_blocks=128
+```
+
+From the repository root, create the alternate graph and add a memory profile:
+
+```python
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, "src/python/py/models")
+from builder_config import apply_runtime_config
+from kv_cache_variant import KVCacheVariant
+
+package = Path("package")
+KVCacheVariant("int8_per_channel").create(
+    package / "model.onnx", package / "model_int8.onnx", "scales.json"
+)
+config_path = package / "genai_config.json"
+config = apply_runtime_config(json.loads(config_path.read_text()), {
+    "runtime_profiles": [{
+        "id": "int8-large-gpu",
+        "eligibility": {"minimum_total_device_memory_bytes": 34359738368},
+        "overlay": {"model": {"decoder": {"filename": "model_int8.onnx"}}},
+    }],
+})
+config_path.write_text(json.dumps(config, indent=2))
+```
+
+The API accepts `int4_per_channel` and `int8_per_channel` for a statically
+per-channel-quantized `PagedAttention` export. Source and output ONNX files must
+share a directory. Only KV scale initializers are replaced and embedded in the
+variant; other external-data locations, offsets, and lengths remain unchanged.
+Keep the shared external-data files beside both graphs when distributing the
+package. Scale `layer_ids` may be reordered but must cover exactly the exported
+attention layers, and every K/V scale must have consistent head geometry.
+
+Memory profiles require visible CUDA ordinal 0; select a physical GPU with
+`CUDA_VISIBLE_DEVICES` before launching. Recreate the Model and Engine to apply
+a different profile. Batch/token limits must fit the runtime's signed 32-bit
+parser, `max_batch_size` cannot exceed 256, and batching overrides require an
+exported dynamic-batching configuration. Draft-token overrides are checked
+against the same exported drafter/state capacity as ordinary runtime overlays.
+
+With a CUDA-enabled GenAI build and ORT built with INT4 KV-cache support, this
+integration test assembles a temporary shared-weight package, selects each
+INT4/INT8 profile, creates an Engine, and performs a short decode:
+
+```bash
+ORTGENAI_PAGED_CUDA_GRAPH_MODEL="$PWD/package" python -m pytest -q \
+  test/python/test_onnxruntime_genai_engine_cuda_graph.py -k runtime_profile_kv_variants
+```
+
+### Component Options
 
 MTP accepts session and run options even when its generated component has no
 `session_options` object. MTP, DFlash2, and DSpark provider overlays use decoder

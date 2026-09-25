@@ -833,6 +833,8 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
     )
     if "engine" in runtime_config and "engine" not in generated_config:
         raise ValueError("runtime_config references absent engine configuration")
+    if dynamic_batching and not isinstance(generated_config.get("engine", {}).get("dynamic_batching"), dict):
+        raise ValueError("runtime_config references absent dynamic_batching configuration")
     if "num_blocks" in dynamic_batching and "gpu_utilization_factor" in dynamic_batching:
         raise ValueError("runtime_config cannot specify both num_blocks and gpu_utilization_factor")
     for field_name in ("max_batch_size", "max_scheduled_tokens", "num_blocks"):
@@ -841,6 +843,8 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
         value = dynamic_batching[field_name]
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ValueError(f"runtime_config.engine.dynamic_batching.{field_name} must be a positive integer")
+        if value > 2_147_483_647:
+            raise ValueError(f"runtime_config.engine.dynamic_batching.{field_name} must be at most 2147483647")
     if dynamic_batching.get("max_batch_size", 1) > 256:
         raise ValueError("runtime_config.engine.dynamic_batching.max_batch_size must be at most 256")
     if "gpu_utilization_factor" in dynamic_batching:
@@ -1016,12 +1020,6 @@ def validate_runtime_profiles(runtime_profiles: Any, generated_config: dict[str,
             {"num_blocks", "max_batch_size", "max_scheduled_tokens"},
             f"{path}.overlay.engine.dynamic_batching",
         )
-        if dynamic_batching and "engine" not in generated_config:
-            raise ValueError(f"{path} references absent engine configuration")
-        for field_name, value in dynamic_batching.items():
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-                raise ValueError(f"{path}.overlay.engine.dynamic_batching.{field_name} must be a positive integer")
-
         search = overlay.get("search", {})
         if not isinstance(search, dict):
             raise ValueError(f"{path}.overlay.search must be an object")
@@ -1037,10 +1035,11 @@ def validate_runtime_profiles(runtime_profiles: Any, generated_config: dict[str,
         if not isinstance(speculative, dict):
             raise ValueError(f"{path}.overlay.speculative must be an object")
         check_fields(speculative, {"max_draft_tokens"}, f"{path}.overlay.speculative")
-        if "max_draft_tokens" in speculative:
-            value = speculative["max_draft_tokens"]
-            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 16:
-                raise ValueError(f"{path}.overlay.speculative.max_draft_tokens must be an integer between 1 and 16")
+        runtime_overlay = {key: overlay[key] for key in ("engine", "speculative") if key in overlay}
+        try:
+            validate_runtime_config(runtime_overlay, generated_config)
+        except ValueError as error:
+            raise ValueError(f"{path}.overlay: {error}") from error
 
         if not (decoder or dynamic_batching or search or speculative):
             raise ValueError(f"{path}.overlay must contain at least one overlay field")

@@ -196,6 +196,12 @@ classes. Base `engine.dynamic_batching` values must remain safe for the minimum 
 profiles are optional tuning upgrades applied once during Model creation, after provider/device
 resolution and before Engine allocation.
 
+Memory profiles currently require visible CUDA device 0, both as the current device and in
+the provider options. Explicit `hardware_device_id` filtering is not supported with profiles.
+To select a different physical GPU, set `CUDA_VISIBLE_DEVICES` before starting the process;
+that GPU becomes visible ordinal 0. This restriction prevents selecting a profile using one
+GPU's memory while loading its graph on another GPU.
+
 ```json
 {
   "engine": {

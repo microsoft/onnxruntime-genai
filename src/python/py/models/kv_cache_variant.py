@@ -29,12 +29,14 @@ class KVCacheVariant:
     def create(self, source_model_path: str | Path, output_model_path: str | Path, scale_file: str | Path) -> None:
         source_model_path = Path(source_model_path)
         output_model_path = Path(output_model_path)
+        if source_model_path.resolve().parent != output_model_path.resolve().parent:
+            raise ValueError("Source and output graphs must share a directory to reuse external weights.")
         scale_data = self.load_scale_data(Path(scale_file), source_model_path.stem)
         model = onnx.load(source_model_path, load_external_data=False)
 
         layer_ids = self.update_paged_attention_nodes(model)
-        self.validate_scale_layers(scale_data, layer_ids)
-        head_size = self.update_scale_initializers(model, scale_data, layer_ids)
+        scale_indices = self.validate_scale_layers(scale_data, layer_ids)
+        head_size = self.update_scale_initializers(model, scale_data, scale_indices)
         self.update_cache_values(model, layer_ids, head_size)
 
         output_model_path.parent.mkdir(parents=True, exist_ok=True)
@@ -81,11 +83,16 @@ class KVCacheVariant:
             raise ValueError("Source graph contains multiple PagedAttention nodes for one layer.")
         return layer_ids
 
-    def validate_scale_layers(self, scale_data: dict, layer_ids: list[int]) -> None:
+    def validate_scale_layers(self, scale_data: dict, layer_ids: list[int]) -> dict[int, int]:
         k_scales = scale_data["scales"]["k_scales"]
         v_scales = scale_data["scales"]["v_scales"]
         scale_layer_ids = scale_data.get("layer_ids", list(range(len(k_scales))))
-        if scale_layer_ids != layer_ids:
+        if (
+            not isinstance(scale_layer_ids, list)
+            or any(type(layer_id) is not int for layer_id in scale_layer_ids)
+            or len(scale_layer_ids) != len(layer_ids)
+            or set(scale_layer_ids) != set(layer_ids)
+        ):
             raise ValueError(
                 f"Scale layer_ids must match PagedAttention layers; got {scale_layer_ids}, expected {layer_ids}."
             )
@@ -93,6 +100,7 @@ class KVCacheVariant:
             raise ValueError(
                 f"Scales file must provide {len(layer_ids)} layers, got k={len(k_scales)} v={len(v_scales)}."
             )
+        return {layer_id: scale_index for scale_index, layer_id in enumerate(scale_layer_ids)}
 
     def get_calibration_factor(self, file_qmax) -> float:
         if file_qmax is None:
@@ -101,23 +109,29 @@ class KVCacheVariant:
             raise ValueError("KV-cache scale qmax must be a positive number.")
         return float(file_qmax) / KV_CACHE_CALIBRATION_QMAX[f"int{self.target_bits}"]
 
-    def update_scale_initializers(self, model: onnx.ModelProto, scale_data: dict, layer_ids: list[int]) -> int:
+    def update_scale_initializers(self, model: onnx.ModelProto, scale_data: dict, scale_indices: dict[int, int]) -> int:
         scale_factor = self.get_calibration_factor(scale_data.get("qmax"))
         initializers = {initializer.name: initializer for initializer in model.graph.initializer}
-        head_size = None
-        for scale_index, layer_id in enumerate(layer_ids):
+        scale_shape = None
+        for layer_id in scale_indices:
             for kind in ("k", "v"):
                 name = f"model.layers.{layer_id}.attn.{kind}_scale"
                 if name not in initializers:
                     raise ValueError(f"Source graph is missing KV-cache scale initializer {name!r}.")
                 initializer = initializers[name]
-                if head_size is None:
-                    if len(initializer.dims) != 3 or initializer.dims[1] != 1:
-                        raise ValueError(f"KV-cache scale {name!r} must have shape (num_kv_heads, 1, head_size).")
-                    head_size = initializer.dims[-1]
+                shape = tuple(initializer.dims)
+                if len(shape) != 3 or shape[1] != 1 or shape[0] <= 0 or shape[2] <= 0:
+                    raise ValueError(f"KV-cache scale {name!r} must have shape (num_kv_heads, 1, head_size).")
+                if scale_shape is not None and shape != scale_shape:
+                    raise ValueError(f"KV-cache scale {name!r} has shape {shape}, expected {scale_shape}.")
+                scale_shape = shape
+
+        for layer_id, scale_index in scale_indices.items():
+            for kind in ("k", "v"):
+                initializer = initializers[f"model.layers.{layer_id}.attn.{kind}_scale"]
                 values = scale_data["scales"][f"{kind}_scales"][scale_index]
                 self.replace_scale_initializer(initializer, values, scale_factor)
-        return head_size
+        return scale_shape[-1]
 
     def replace_scale_initializer(
         self, initializer: onnx.TensorProto, values: list[float], scale_factor: float

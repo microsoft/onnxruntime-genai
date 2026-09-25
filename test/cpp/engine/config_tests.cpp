@@ -88,7 +88,7 @@ TEST(ConfigTest, RuntimeProfileUsesBaseWhenNoRangeMatches) {
   EXPECT_EQ(*config.engine.dynamic_batching->num_blocks, 32u);
 }
 
-TEST(ConfigTest, RuntimeProfileUsesSelectedDeviceWithoutResolvingDeviceId) {
+TEST(ConfigTest, RuntimeProfileUsesDefaultCudaDevice) {
   Config config;
   OverlayConfig(config, R"({
     "engine":{"dynamic_batching":{"num_blocks":32}},
@@ -104,18 +104,49 @@ TEST(ConfigTest, RuntimeProfileUsesSelectedDeviceWithoutResolvingDeviceId) {
   ApplyRuntimeProfileForSelectedDevice(config, device);
 
   EXPECT_EQ(device.state->memory_queries, 1u);
-  EXPECT_EQ(device.state->device_id_queries, 0u);
+  EXPECT_EQ(device.state->device_id_queries, 1u);
   EXPECT_EQ(*config.engine.dynamic_batching->num_blocks, 64u);
   EXPECT_TRUE(config.runtime_profiles.empty());
+}
+
+TEST(ConfigTest, RuntimeProfilesRejectAmbiguousCudaDeviceBeforeMemoryQuery) {
+  for (const auto& selection : {"provider", "filter", "current"}) {
+    SCOPED_TRACE(selection);
+    Config config;
+    OverlayConfig(config, R"({
+      "model":{"decoder":{"session_options":{"provider_options":[{"cuda":{}}]}}},
+      "runtime_profiles":[{
+        "id":"gpu",
+        "eligibility":{"minimum_total_device_memory_bytes":1},
+        "overlay":{"search":{"chunk_size":512}}
+      }]
+    })");
+    CountingCudaDevice device;
+    auto& provider = config.model.decoder.session_options.provider_options.front();
+    if (std::string{selection} == "provider") {
+      provider.options.emplace_back("device_id", "1");
+    } else if (std::string{selection} == "filter") {
+      provider.device_filtering_options.emplace().hardware_device_id = 0;
+    } else {
+      device.state->device_id = 1;
+    }
+
+    EXPECT_THROW(ApplyRuntimeProfileForSelectedDevice(config, device), std::runtime_error);
+    EXPECT_EQ(device.state->memory_queries, 0u);
+    EXPECT_FALSE(config.search.chunk_size.has_value());
+    EXPECT_FALSE(config.runtime_profiles.empty());
+  }
 }
 
 TEST(ConfigTest, NoRuntimeProfilesSkipDeviceMemoryQuery) {
   Config config;
   CountingCudaDevice device;
+  device.state->device_id = 1;
 
   ApplyRuntimeProfileForSelectedDevice(config, device);
 
   EXPECT_EQ(device.state->memory_queries, 0u);
+  EXPECT_EQ(device.state->device_id_queries, 0u);
 }
 
 TEST(ConfigTest, RuntimeProfilePropagatesDeviceMemoryQueryFailure) {
