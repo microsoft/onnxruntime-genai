@@ -36,6 +36,7 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
           {"lfm2_audio", Processor::Create<Lfm2AudioProcessor>},
           {"lfm2_vl", Processor::Create<Lfm2VlImageProcessor>},
           {"gemma4", Processor::Create<Gemma4MultiModalProcessor>},
+          {"gemma4_unified", Processor::Create<Gemma4MultiModalProcessor>},
           {"mistral3", Processor::Create<Mistral3ImageProcessor>},
           {"fara", Processor::Create<QwenImageProcessor>},
           {"qwen2_5_vl", Processor::Create<QwenImageProcessor>},
