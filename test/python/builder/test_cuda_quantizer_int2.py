@@ -5,6 +5,7 @@ import importlib.util
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 
 QUANTIZATION_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "quantization"
@@ -14,31 +15,31 @@ spec.loader.exec_module(cuda_quantizer)
 CudaQuantizer = cuda_quantizer.CudaQuantizer
 
 
-def test_int2_blockwise_quantization_matches_ort(monkeypatch):
+def test_int2_blockwise_quantization_matches_ort():
     weights = torch.tensor(
-        [[-2.0, -1.0, 0.0, 1.0, 2.0, 3.0, -3.0, 0.5], [1.0, -1.0, 2.0, -2.0, 0.0, 0.5, -0.5, 3.0]],
+        [[-2.0, -1.0, 0.0, 1.0, 2.0, 3.0, -2.5, 0.5] * 4, [1.0, -1.0, 2.0, -2.0, 0.0, 0.5, -0.5, 3.0] * 4],
         dtype=torch.float32,
     )
-    expected_qweight = np.arange(4, dtype=np.uint8).reshape(2, 1, 2)
-    expected_scales = np.array([[1.0], [2.0]], dtype=np.float32)
+    ort_pybind = pytest.importorskip("onnxruntime.capi._pybind_state")
+    quantize_2bits = getattr(ort_pybind, "quantize_matmul_2bits", None)
+    if quantize_2bits is None:
+        pytest.skip("ORT build does not expose quantize_matmul_2bits")
 
-    def quantize_2bits(packed, weight, scales, zero_points, block_size, cols, rows, symmetric):
-        assert weight.shape == (8, 2)
-        assert (block_size, cols, rows, symmetric) == (8, 2, 8, True)
-        packed[:] = expected_qweight
-        scales[:] = expected_scales
-        zero_points[:] = 0xAA
-
-    monkeypatch.setattr(
-        cuda_quantizer, "_get_quantize_matmul_nbits", lambda bits: quantize_2bits if bits == 2 else None
+    expected_qweight = np.zeros((2, 1, 8), dtype=np.uint8)
+    expected_scales = np.zeros((2, 1), dtype=np.float32)
+    zero_points = np.zeros((2, 1), dtype=np.uint8)
+    quantize_2bits(
+        expected_qweight, np.ascontiguousarray(weights.numpy().T), expected_scales, zero_points, 32, 2, 32, True
     )
+
+    np.testing.assert_array_equal(expected_qweight, np.array([[[111, 177] * 4], [[221, 42] * 4]], dtype=np.uint8))
+    np.testing.assert_array_equal(expected_scales, [[-1.5], [-1.5]])
 
     qweight, scales = CudaQuantizer.matmulnbits_blockwise_quantize(
         weights,
         bits=2,
-        block_size=8,
+        block_size=32,
         flatten_qweight=False,
-        use_ort_quantizer=True,
     )
 
     assert torch.equal(qweight, torch.from_numpy(expected_qweight))

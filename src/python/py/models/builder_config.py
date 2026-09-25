@@ -407,9 +407,17 @@ def normalize_drafter_quant_config(
     quant_config = QuantConfig.from_dict(merge_objects(defaults, canonical))
     if drafter_type == "dspark" and quant_config.io_dtype != "bf16":
         raise ValueError("dspark body io_dtype must be bf16 because its activations can exceed the fp16 range")
+    if drafter_type == "dflash2" and quant_config.io_dtype not in ("fp16", "bf16"):
+        raise ValueError("DFlash2 body io_dtype must be fp16 or bf16")
     if drafter_type == "mtp" and quant_config.io_dtype != target_io_dtype:
         # The MTP graph consumes the decoder hidden state directly; no exporter converts it.
         raise ValueError(f"MTP io_dtype must match the target io_dtype '{target_io_dtype}'")
+    if drafter_type == "mtp" and (
+        quant_config.weights.type == "int2"
+        or quant_config.moe.type == "int2"
+        or any(override.type == "int2" for override in quant_config.weights.overrides)
+    ):
+        raise ValueError("MTP quant_config does not support int2; use DFlash2")
     if drafter_type == "dspark" and quant_config.weights.type != "none":
         raise ValueError("DSpark integer weight quantization is not supported")
     if drafter_type == "dspark":
@@ -444,7 +452,11 @@ def normalize_drafter_quant_config(
         if prepack and quant_config.weights.type == "int2" and quant_config.weights.block_size not in (64, 128):
             raise ValueError("DFlash2 INT2 offline prepacking requires weights.block_size=64 or 128")
         supported_blocks = (32, 64, 128) if prepack == 1 else (64, 128)
-        if prepack and quant_config.weights.type in ("int4", "int8") and quant_config.weights.block_size not in supported_blocks:
+        if (
+            prepack
+            and quant_config.weights.type in ("int4", "int8")
+            and quant_config.weights.block_size not in supported_blocks
+        ):
             raise ValueError(f"DFlash2 INT4/INT8 offline prepacking requires weights.block_size in {supported_blocks}")
     if quant_config.moe.type != "none":
         raise ValueError(f"{drafter_type} does not support MoE expert quantization")

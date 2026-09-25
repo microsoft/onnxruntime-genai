@@ -136,6 +136,23 @@ def test_target_int2_policy_is_rejected(quant_config):
         )
 
 
+@pytest.mark.parametrize(
+    "quant_config",
+    [
+        {"weights": {"type": "int2"}},
+        {"moe": {"type": "int2"}},
+        {"weights": {"type": "int4", "overrides": [{"match": {"name": "/model/a/MatMul"}, "type": "int2"}]}},
+    ],
+)
+def test_structured_mtp_rejects_int2(quant_config):
+    with pytest.raises(ValueError, match="MTP quant_config does not support int2"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            drafter_options={"drafter_type": "mtp", "quant_config": quant_config},
+        )
+
+
 def test_dense_target_rejects_weight_overrides():
     with pytest.raises(ValueError, match="weight overrides are not supported when weights.type=none"):
         normalize_builder_config(
@@ -256,6 +273,20 @@ def test_dflash2_accepts_fp16_body_dtype(tmp_path):
         },
     )
     assert effective.drafter_options["quant_config"]["io_dtype"] == "fp16"
+
+
+def test_dflash2_rejects_fp32_body_dtype(tmp_path):
+    with pytest.raises(ValueError, match="DFlash2 body io_dtype must be fp16 or bf16"):
+        normalize_builder_config(
+            "int4",
+            "cuda",
+            target_options={"attention": {"implementation": "paged"}},
+            drafter_options={
+                "drafter_type": "dflash2",
+                "path": make_drafter_checkpoint(tmp_path),
+                "quant_config": {"io_dtype": "fp32"},
+            },
+        )
 
 
 def test_dflash2_rejects_unsupported_checkpoint_policy(tmp_path):

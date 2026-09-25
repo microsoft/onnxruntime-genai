@@ -1105,7 +1105,9 @@ class Qwen35MoEModel(MTPModel):
 
     def block_drafter_precision(self, extra_options, option_name):
         precision = str(extra_options.get(option_name, "bf16")).lower()
-        allowed = {"bf16", "int2", "int4", "int8"}
+        allowed = {"bf16", "int4", "int8"}
+        if extra_options.get("_drafter_quant_config") is not None:
+            allowed.add("int2")
         if precision not in allowed:
             raise ValueError(f"{option_name} must be one of {sorted(allowed)}, got '{precision}'.")
         return precision

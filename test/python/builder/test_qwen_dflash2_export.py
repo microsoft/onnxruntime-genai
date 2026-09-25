@@ -753,6 +753,16 @@ def test_precision_option_is_rejected_when_unknown(tmp_path, precision):
         )
 
 
+def test_legacy_dflash2_rejects_int2_precision(tmp_path):
+    model = _composite()
+
+    with pytest.raises(ValueError, match="dflash2_precision"):
+        model.make_dflash2_init(
+            io_dtype=None,
+            extra_options={"dflash2_path": _draft_checkpoint(tmp_path), "dflash2_precision": "int2"},
+        )
+
+
 def test_precision_defaults_to_dense_bf16_with_adopted_target_head(tmp_path, monkeypatch):
     captured = {}
 
