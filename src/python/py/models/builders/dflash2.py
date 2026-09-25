@@ -61,12 +61,13 @@ class DFlash2Builder(BlockDrafterBuilder):
         embed_quant=None,
         fuse_gate_up=False,
         include_attention_metadata=True,
+        ep="cuda",
         compute_dtype=None,
         fuse_qkv=False,
     ):
         self.draft_dir = draft_dir
         self.target_dir = target_dir
-        self.io_dtype = compute_dtype or ir.DataType.BFLOAT16
+        self.io_dtype = compute_dtype or (ir.DataType.BFLOAT16 if ep == "cuda" else io_dtype)
         self.external_dtype = io_dtype
         if quant is not None:
             self.quant_bits = quant["bits"]

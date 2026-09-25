@@ -1304,6 +1304,7 @@ class Qwen35MoEModel(MTPModel):
             embed_quant=self.block_drafter_embed_quant(),
             fuse_gate_up=self.dflash2_attrs["fuse_gate_up"],
             include_attention_metadata=True,
+            ep=self.decoder.ep,
             compute_dtype=self.dflash2_attrs["compute_dtype"],
             fuse_qkv=self.dflash2_attrs["fuse_qkv"],
         )
