@@ -70,6 +70,7 @@ struct MtpGenerator {
   void ExtractHiddenPosition(OrtValue* hidden, int position);
   // Copy one [1,1,H] row out of a [1,S,H] hidden OrtValue (on `main_model_`'s device) into `dst`.
   void CopyHiddenRow(OrtValue* hidden, int position, Tensor& dst);
+  void CopyHiddenRows(OrtValue* hidden, int first_position, int count, DeviceSpan<uint8_t> dst);
   // One MTP-head forward on a single token: the head's `hidden_states` input must already be set
   // (via SetHiddenStates) by the caller. Appends `token` to the head KV, captures the head's own
   // post-final-norm output (hidden_states_out, last row) into `head_out_hidden_` for the next
@@ -179,6 +180,7 @@ struct MtpGenerator {
   // `drafts_device_` with D2D copies.
   DeviceSpan<int32_t> head_tokens_upload_;
   DeviceSpan<int32_t> head_tokens_device_;
+  DeviceSpan<int32_t> head_step_token_device_;
   DeviceSpan<int32_t> verify_tokens_device_;
   std::vector<int32_t> verify_argmax_;  // scratch: main argmax of the N+1 verify rows
   // CUDA scratch for the verify top-1 ids. ArgmaxMainRows launches the proven batch-1 device
@@ -187,6 +189,7 @@ struct MtpGenerator {
 
   // --- Speculative-sampling (do_sample=true) state. ---
   bool sampling_{false};                // true when do_sample && temperature > 0: use rejection sampling
+  float verify_margin_threshold_{};
   int top_k_{};                         // top-k truncation shared by draft (q) and target (p) distributions
   float top_p_{};                       // top-p (nucleus) truncation
   float temperature_{1.0f};             // sampling temperature
@@ -206,6 +209,7 @@ struct MtpGenerator {
   // Loop carry state (see the design doc draft/verify invariant):
   int32_t next_token_{};  // token predicted for the current cache length L (not yet committed)
   size_t length_{};       // committed cache length L
+  size_t prompt_length_{};       // committed cache length L
   bool primed_{false};    // whether AppendTokens has run the prompt
   bool done_{false};
   // Pipelined draft: on an accepted step the next step's draft is computed ahead (fused into the

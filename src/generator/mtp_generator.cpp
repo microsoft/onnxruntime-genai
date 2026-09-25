@@ -11,6 +11,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+#include <chrono>
+#include <iostream>
+#include <limits>
 #include <random>
 
 namespace Generators {
@@ -126,7 +129,17 @@ MtpGenerator::MtpGenerator(const Model& main_model, const Model& mtp_model, cons
       mtp_params_->use_graph_capture ? (num_speculative_tokens_ + 1) : 1;
   mtp_ = CreateGenerator(mtp_model_, *mtp_params_);
 
-  hidden_size_ = main_model_.config_->model.decoder.hidden_size;
+  const auto main_hidden_shape = main_model_.session_info_.GetOutputShape(
+      main_model_.config_->model.mtp.main_hidden_states);
+  const auto mtp_hidden_shape = mtp_model_.session_info_.GetInputShape(
+      mtp_model_.config_->model.decoder.inputs.hidden_states);
+  if (main_hidden_shape.empty() || mtp_hidden_shape.empty() ||
+      main_hidden_shape.back() <= 0 || mtp_hidden_shape.back() <= 0 ||
+      main_hidden_shape.back() != mtp_hidden_shape.back()) {
+    throw std::runtime_error(
+        "MtpGenerator requires matching static main-output and head-input hidden-state widths");
+  }
+  hidden_size_ = static_cast<int>(main_hidden_shape.back());
   vocab_size_ = main_model_.config_->model.vocab_size;
   max_length_ = params.search.max_length;
 
@@ -136,6 +149,9 @@ MtpGenerator::MtpGenerator(const Model& main_model, const Model& mtp_model, cons
   // decoding (see GenerateStepMultiSample). Greedy (do_sample=false or temperature==0) keeps the
   // original argmax accept path.
   sampling_ = params.search.do_sample && params.search.temperature > 0.0f;
+  if (const char* value = std::getenv("ORTGENAI_MTP_VERIFY_MARGIN")) {
+    verify_margin_threshold_ = std::max(0.0f, std::strtof(value, nullptr));
+  }
   top_k_ = params.search.top_k;
   top_p_ = params.search.top_p;
   temperature_ = params.search.temperature;
@@ -197,6 +213,8 @@ MtpGenerator::MtpGenerator(const Model& main_model, const Model& mtp_model, cons
       head_tokens_device_ = mtp_model_.p_device_->Allocate<int32_t>(num_speculative_tokens_ + 1);
       auto head_tokens_cpu = head_tokens_device_.CpuSpan();
       std::fill(head_tokens_cpu.begin(), head_tokens_cpu.end(), head_non_pad);
+      head_step_token_device_ = mtp_model_.p_device_->Allocate<int32_t>(1);
+      head_step_token_device_.CpuSpan()[0] = head_non_pad;
 
       verify_tokens_device_ = main_model_.p_device_->Allocate<int32_t>(num_speculative_tokens_ + 1);
       // Logits::Update inspects the DeviceSpan's host mirror only to derive each row's unpadded
@@ -246,11 +264,21 @@ void MtpGenerator::ExtractHiddenPosition(OrtValue* hidden, int position) {
 }
 
 void MtpGenerator::CopyHiddenRow(OrtValue* hidden, int position, Tensor& dst) {
-  // hidden is [1, S, H] on the main model device; copy row `position` into dst ([1,1,H]).
-  auto src = ByteWrapTensor(*main_model_.p_device_, *hidden);
-  const size_t row_bytes = dst.GetByteSpan().size();
-  auto src_row = src.subspan(static_cast<size_t>(position) * row_bytes, row_bytes);
-  dst.GetByteSpan().CopyFrom(src_row);
+  CopyHiddenRows(hidden, position, 1, dst.GetByteSpan());
+}
+
+void MtpGenerator::CopyHiddenRows(
+    OrtValue* hidden, int first_position, int count, DeviceSpan<uint8_t> dst) {
+  const bool source_on_cpu =
+      hidden->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_CPU;
+  auto& source_device = source_on_cpu
+                            ? *GetDeviceInterface(DeviceType::CPU)
+                            : *main_model_.p_device_;
+  auto src = ByteWrapTensor(source_device, *hidden);
+  const size_t row_bytes = hidden_slice_->GetByteSpan().size();
+  const size_t bytes = static_cast<size_t>(count) * row_bytes;
+  dst.subspan(0, bytes).CopyFrom(
+      src.subspan(static_cast<size_t>(first_position) * row_bytes, bytes));
 }
 
 int32_t MtpGenerator::DraftHeadStep(int32_t token, bool need_draft) {
@@ -573,11 +601,8 @@ int32_t MtpGenerator::DraftNextToken(OrtValue* /*unused*/, int32_t token, bool n
 int32_t MtpGenerator::DraftTwo(OrtValue* hidden, int32_t tok0, int32_t tok1) {
   // Populate the [1,2,H] hidden buffer: row 0 = hidden@position L (pairs with tok0), row 1 =
   // hidden@position L+1 (pairs with tok1). `hidden` is the main model's [1,S,H] verify output.
-  auto src = ByteWrapTensor(*main_model_.p_device_, *hidden);
-  const size_t row_bytes = hidden_slice_->GetByteSpan().size();  // bytes of one [1,1,H] row
   auto dst = hidden_slice2_->GetByteSpan();
-  dst.subspan(0, row_bytes).CopyFrom(src.subspan(0, row_bytes));                  // row 0 <- hidden@0
-  dst.subspan(row_bytes, row_bytes).CopyFrom(src.subspan(row_bytes, row_bytes));  // row 1 <- hidden@1
+  CopyHiddenRows(hidden, 0, 2, dst);
 
   // One 2-token MTP forward: feeds tok0 (KV-advance) and tok1 (the next committed token); the
   // last-position logits give the draft for the token after tok1.
@@ -612,6 +637,7 @@ void MtpGenerator::AppendTokens(cpu_span<const int32_t> input_ids) {
     main_->AppendTokens(input_ids);
   }
   length_ = input_ids.size();
+  prompt_length_ = input_ids.size();
   sequence_.assign(input_ids.begin(), input_ids.end());
   emitted_sequence_ = sequence_;
   if (sequence_.size() >= static_cast<size_t>(max_length_)) {
@@ -712,6 +738,7 @@ void MtpGenerator::RunRound() {
     return;
   }
 
+
   if (sampling_)
     GenerateStepMultiSample(t);
   else if (num_speculative_tokens_ == 1)
@@ -768,22 +795,36 @@ void MtpGenerator::GenerateStepSingle(int32_t t) {
     has_pending_draft_ = true;
     length_ += 2;
   } else {
-    // 2b. Reject: roll back the speculative forward (restore recurrent state + crop KV to L),
-    //     then re-run the single correct token t. The pipelined draft (if any) is invalid.
+    // 2b. Reject. A windowed target can commit the state after t directly from verify row 0;
+    //     otherwise restore the snapshot and replay t.
     has_pending_draft_ = false;
-    main_->RewindToLength(length_);
-    std::array<int32_t, 1> rerun{t};
-    main_->AppendTokens(cpu_span<const int32_t>(rerun));
-    stats_.target_forward_passes++;
     stats_.correction_tokens++;
-    OrtValue* hidden = main_->state_->GetOutput(main_model_.config_->model.mtp.main_hidden_states.c_str());
-    ArgmaxMainRows(0, 1, &next_token_);
-    ExtractHiddenPosition(hidden, 0);
+    OrtValue* hidden =
+        main_->state_->GetOutput(main_model_.config_->model.mtp.main_hidden_states.c_str());
+    if (main_->CanCropRecurrentState()) {
+      main_->CropToAccepted(length_ + 1, 0);
+      next_token_ = m;
+      ExtractHiddenPosition(hidden, 0);
+    } else {
+      main_->RewindToLength(length_);
+      std::array<int32_t, 1> rerun{t};
+      main_->AppendTokens(cpu_span<const int32_t>(rerun));
+      stats_.target_forward_passes++;
+      hidden = main_->state_->GetOutput(
+          main_model_.config_->model.mtp.main_hidden_states.c_str());
+      ArgmaxMainRows(0, 1, &next_token_);
+      ExtractHiddenPosition(hidden, 0);
+    }
     length_ += 1;
   }
 }
 
 void MtpGenerator::GenerateStepMulti(int32_t t) {
+  using clock = std::chrono::steady_clock;
+  using milliseconds = std::chrono::duration<float, std::milli>;
+  const bool profile = std::getenv("ORTGENAI_MTP_PROFILE") != nullptr;
+  if (profile) main_model_.p_device_->Synchronize();
+  const auto draft_start = clock::now();
   const int N = std::min(num_speculative_tokens_, static_cast<int>(max_length_ - length_ - 1));
   stats_.rounds++;
   stats_.completed_rounds++;
@@ -827,14 +868,20 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
       current_token_device = head_tokens_device_.subspan(0, 1);
       current_token_device.CopyFrom(head_tokens_upload_.subspan(0, 1));
       mtp_->SetHiddenStates(hidden_slice_);
-      DraftHeadStepToDevice(current_token_device, drafts_device_.subspan(0, 1));
+      head_step_token_device_.CopyFrom(current_token_device);
+      DraftHeadStepToDevice(
+          head_step_token_device_, drafts_device_.subspan(0, 1));
     }
     pending_refeed_count_ = -1;
     head_start = head_len_ - 1;  // head KV length before t was appended
+    mtp_->SnapshotState();
     for (int k = 1; k < N; ++k) {
       mtp_->SetHiddenStates(head_out_hidden_);
-      DraftHeadStepToDevice(drafts_device_.subspan(static_cast<size_t>(k - 1), 1),
-                            drafts_device_.subspan(static_cast<size_t>(k), 1));
+      head_step_token_device_.CopyFrom(
+          drafts_device_.subspan(static_cast<size_t>(k - 1), 1));
+      DraftHeadStepToDevice(
+          head_step_token_device_,
+          drafts_device_.subspan(static_cast<size_t>(k), 1));
     }
   } else {
     if (pending_refeed_count_ > 0) {
@@ -854,10 +901,16 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
     }
     pending_refeed_count_ = -1;
     head_start = head_len_ - 1;
+    mtp_->SnapshotState();
     for (int k = 1; k < N; ++k) {
       mtp_->SetHiddenStates(head_out_hidden_);
       drafts_[k] = DraftHeadStep(drafts_[k - 1]);
     }
+  }
+  if (profile) {
+    main_model_.p_device_->Synchronize();
+    stats_.total_draft_ms +=
+        milliseconds(clock::now() - draft_start).count();
   }
 
   // --- Verify [t, d0..d_{N-1}] in a single batched main forward (the whole point of MTP: one
@@ -866,14 +919,17 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
   //     Flash attention), so a greedy argmax can occasionally differ on near-ties. This is the same
   //     tradeoff the N=1 verify already makes. The fallback reject path re-runs the committed prefix
   //     from its snapshot; a windowed recurrent state crops and commits directly from this verify. ---
-  // Snapshot the recurrent state so a rejected wide verify can replay the committed prefix with
-  // decode-consistent numerics. A model exported with a recurrent-state window commits directly out
-  // of the verify below and needs neither the replay nor the snapshot, which would otherwise cost
-  // 2*num_layers device copies on EVERY step.
+  // Snapshot the recurrent state so a rejected wide verify can either replay the committed prefix
+  // or apply the captured compact GatedDeltaNet transitions to the pre-verify state.
   const bool direct_commit = main_->CanCropRecurrentState();
-  if (!direct_commit) main_->SnapshotState();
+  main_->SnapshotState();
+  if (verify_margin_threshold_ > 0.0f) {
+    main_model_.p_device_->Synchronize();
+  }
 
   const bool device_verify_input = verify_tokens_device_.size() >= static_cast<size_t>(N + 1);
+  if (profile) main_model_.p_device_->Synchronize();
+  const auto target_start = clock::now();
   if (device_verify_input) {
     // Keep the entire draft -> target dependency on the shared CUDA stream. In particular, do not
     // call drafts_device_.CopyDeviceToCpu() before AppendTokens: that fence would expose the main
@@ -890,6 +946,11 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
     main_->AppendTokens(cpu_span<const int32_t>(verify_tokens_.data(), N + 1));
   }
   stats_.target_forward_passes++;
+  if (profile) {
+    main_model_.p_device_->Synchronize();
+    stats_.total_target_ms +=
+        milliseconds(clock::now() - target_start).count();
+  }
   ArgmaxMainRows(0, N + 1, verify_argmax_.data());  // main's real token after each verify position
 
   if (device_verify_input) {
@@ -909,6 +970,52 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
   // --- Longest accepted prefix (greedy match against the main model). ---
   int a = 0;
   while (a < N && drafts_[a] == verify_argmax_[a]) ++a;
+  const bool debug_mtp = std::getenv("ORTGENAI_MTP_DEBUG") != nullptr;
+  float minimum_verify_margin = std::numeric_limits<float>::infinity();
+  if (debug_mtp || verify_margin_threshold_ > 0.0f) {
+    OrtValue* raw =
+        main_->state_->GetOutput(main_model_.config_->model.decoder.outputs.logits.c_str());
+    const auto info = raw->GetTensorTypeAndShapeInfo();
+    const auto type = info->GetElementType();
+    const auto* base = static_cast<const uint8_t*>(raw->GetTensorRawData());
+    const size_t row_bytes = static_cast<size_t>(vocab_size_) * Ort::SizeOf(type);
+    if (debug_mtp) {
+      std::cerr << "[mtp] length=" << length_ << " N=" << N << " accepted=" << a
+                << " drafts=";
+      for (int row = 0; row < N; ++row) {
+        if (row) std::cerr << ',';
+        std::cerr << drafts_[row];
+      }
+      std::cerr << " target=";
+      for (int row = 0; row <= N; ++row) {
+        if (row) std::cerr << ',';
+        std::cerr << verify_argmax_[row];
+      }
+      std::cerr << " top2=";
+    }
+    for (int row = 0; row <= a; ++row) {
+      std::array<int32_t, 2> ids{};
+      std::array<float, 2> scores{};
+      const bool available = main_model_.p_device_->TopKScores(
+          base + static_cast<size_t>(row) * row_bytes, type, 1, vocab_size_, 2,
+          ids.data(), scores.data());
+      if (available) {
+        const float margin = scores[0] - scores[1];
+        minimum_verify_margin = std::min(minimum_verify_margin, margin);
+        if (debug_mtp) {
+          if (row) std::cerr << ';';
+          std::cerr << ids[0] << ':' << ids[1] << ':' << margin;
+        }
+      } else if (debug_mtp) {
+        if (row) std::cerr << ';';
+        std::cerr << "unavailable";
+      }
+    }
+    if (debug_mtp) std::cerr << '\n';
+  }
+  const bool consistency_replay =
+      verify_margin_threshold_ > 0.0f &&
+      minimum_verify_margin < verify_margin_threshold_;
   stats_.draft_tokens_evaluated +=
       (a < N) ? static_cast<size_t>(a + 1) : static_cast<size_t>(N);
   stats_.draft_tokens_accepted += static_cast<size_t>(a);
@@ -941,14 +1048,41 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
     // Row a is filled in by the finalize phase below from hidden_slice_.
     Tensor& hbuf = *refeed_multi_[a + 1];
     const size_t row_bytes = refeed_hidden_->GetByteSpan().size();
-    auto src = ByteWrapTensor(*main_model_.p_device_, *vhidden);
-    hbuf.GetByteSpan()
-        .subspan(0, static_cast<size_t>(a) * row_bytes)
-        .CopyFrom(src.subspan(0, static_cast<size_t>(a) * row_bytes));
+    CopyHiddenRows(vhidden, 0, a, hbuf.GetByteSpan());
     for (int k = 0; k < a; ++k) merged_tokens_[k] = drafts_[k];
   }
 
-  if (a == N) {
+  if (consistency_replay) {
+    verify_tokens_[0] = t;
+    for (int k = 0; k < a; ++k) verify_tokens_[k + 1] = drafts_[k];
+    if (std::getenv("ORTGENAI_MTP_FULL_REPLAY") != nullptr) {
+      main_->RewindToLength(0);
+      const size_t chunk = prefill_chunk_ > 0
+                               ? static_cast<size_t>(prefill_chunk_)
+                               : prompt_length_;
+      for (size_t offset = 0; offset < prompt_length_; offset += chunk) {
+        const size_t count = std::min(chunk, prompt_length_ - offset);
+        main_->AppendTokens(
+            cpu_span<const int32_t>(sequence_.data() + offset, count));
+        stats_.target_forward_passes++;
+      }
+      for (size_t index = prompt_length_; index < sequence_.size(); ++index) {
+        main_->AppendTokens(cpu_span<const int32_t>(&sequence_[index], 1));
+        stats_.target_forward_passes++;
+      }
+    } else {
+      main_->RewindToLength(length_);
+      main_model_.p_device_->Synchronize();
+      for (int row = 0; row <= a; ++row) {
+        main_->AppendTokens(cpu_span<const int32_t>(&verify_tokens_[row], 1));
+        stats_.target_forward_passes++;
+      }
+    }
+    OrtValue* replay_hidden = main_->state_->GetOutput(hs_name.c_str());
+    ArgmaxMainRows(0, 1, &next_token_);
+    CopyHiddenRow(replay_hidden, 0, *hidden_slice_);
+    length_ += static_cast<size_t>(a) + 1;
+  } else if (a == N) {
     // All drafts accepted: the batched verify already committed [t, d0..d_{N-1}] correctly, so the
     // main KV / recurrent state is exactly at L + (N+1). The bonus token is main's prediction at the
     // last verify row (mirrors the N=1 accept path, which likewise commits a batched-forward token).
@@ -973,13 +1107,26 @@ void MtpGenerator::GenerateStepMulti(int32_t t) {
     // bonus + its hidden from THIS forward keeps the carried state consistent with the committed
     // sequence (the a==0 case degenerates to the exact N=1 single-token decode re-run).
     main_->RewindToLength(length_);
+    if (verify_margin_threshold_ > 0.0f) {
+      main_model_.p_device_->Synchronize();
+    }
     verify_tokens_[0] = t;
     for (int k = 0; k < a; ++k) verify_tokens_[k + 1] = drafts_[k];
-    main_->AppendTokens(cpu_span<const int32_t>(verify_tokens_.data(), a + 1));
-    stats_.target_forward_passes++;
-    OrtValue* rhidden = main_->state_->GetOutput(hs_name.c_str());
-    ArgmaxMainRows(a, 1, &next_token_);         // main's token after the committed prefix
-    CopyHiddenRow(rhidden, a, *hidden_slice_);  // hidden paired with the bonus token
+    if (verify_margin_threshold_ > 0.0f) {
+      for (int row = 0; row <= a; ++row) {
+        main_->AppendTokens(cpu_span<const int32_t>(&verify_tokens_[row], 1));
+        stats_.target_forward_passes++;
+      }
+      OrtValue* rhidden = main_->state_->GetOutput(hs_name.c_str());
+      ArgmaxMainRows(0, 1, &next_token_);
+      CopyHiddenRow(rhidden, 0, *hidden_slice_);
+    } else {
+      main_->AppendTokens(cpu_span<const int32_t>(verify_tokens_.data(), a + 1));
+      stats_.target_forward_passes++;
+      OrtValue* rhidden = main_->state_->GetOutput(hs_name.c_str());
+      ArgmaxMainRows(a, 1, &next_token_);         // main's token after the committed prefix
+      CopyHiddenRow(rhidden, a, *hidden_slice_);  // hidden paired with the bonus token
+    }
     length_ += static_cast<size_t>(a) + 1;
   }
 
@@ -1101,11 +1248,7 @@ void MtpGenerator::GenerateStepMultiSample(int32_t t) {
   if (a > 0) {
     Tensor& hbuf = *refeed_multi_[a];
     const size_t row_bytes = refeed_hidden_->GetByteSpan().size();
-    auto dst = hbuf.GetByteSpan();
-    auto src = ByteWrapTensor(*main_model_.p_device_, *vhidden);
-    for (int k = 0; k < a; ++k)
-      dst.subspan(static_cast<size_t>(k) * row_bytes, row_bytes)
-          .CopyFrom(src.subspan(static_cast<size_t>(k) * row_bytes, row_bytes));
+    CopyHiddenRows(vhidden, 0, a, hbuf.GetByteSpan());
     mtp_->SetHiddenStates(refeed_multi_[a]);
     mtp_->AppendTokens(cpu_span<const int32_t>(drafts_.data(), a));  // d0..d_{a-1} with main hiddens
     stats_.draft_forward_passes++;

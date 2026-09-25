@@ -268,6 +268,7 @@ struct PyGeneratorParams {
     d["num_beams"] = params_->GetSearchNumber("num_beams");
     d["num_return_sequences"] = params_->GetSearchNumber("num_return_sequences");
     d["past_present_share_buffer"] = params_->GetSearchBool("past_present_share_buffer");
+    d["adaptive_chunking"] = params_->GetSearchBool("adaptive_chunking");
     d["random_seed"] = params_->GetSearchNumber("random_seed");
     d["repetition_penalty"] = params_->GetSearchNumber("repetition_penalty");
     d["temperature"] = params_->GetSearchNumber("temperature");
