@@ -592,8 +592,8 @@ def test_dense_gated_delta_net_supports_bfloat16_io():
 @pytest.mark.parametrize(
     ("use_paged_attention", "linear_attn_op", "state_window", "ep", "message"),
     [
-        (True, "linear_attention", 0, "webgpu", "CUDA execution provider"),
-        (False, "gated_delta_net", 0, "webgpu", "CUDA execution provider"),
+        (True, "linear_attention", 0, "cpu", "CUDA or WebGPU execution provider"),
+        (False, "gated_delta_net", 0, "cpu", "CUDA or WebGPU execution provider"),
         (True, "linear_attention", 1, "cuda", "require state_window=0"),
         (False, "gated_delta_net", 1, "cuda", "require state_window=0"),
     ],
@@ -613,6 +613,18 @@ def test_qwen35_gated_delta_net_option_validation(
             state_window,
             ep,
         )
+
+
+@pytest.mark.parametrize("use_paged_attention", [False, True])
+def test_qwen35_gated_delta_net_accepts_webgpu(use_paged_attention):
+    model = Qwen35TextModel.__new__(Qwen35TextModel)
+
+    model.validate_gated_delta_net_options(
+        use_paged_attention,
+        "gated_delta_net",
+        0,
+        "webgpu",
+    )
 
 
 def _packed_gated_delta_net_model(

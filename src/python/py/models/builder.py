@@ -272,6 +272,8 @@ def check_extra_options(
             raise ValueError("paged_block_size must be a power of two and at least 16.")
         if extra_options.get("max_batch_size", 1) > 256:
             raise ValueError("max_batch_size must be at most 256.")
+        if execution_provider == "webgpu" and "num_blocks" not in extra_options:
+            raise ValueError("WebGPU paged attention requires num_blocks to be a positive integer.")
 
         if "gpu_utilization_factor" in extra_options:
             try:
@@ -387,6 +389,13 @@ def check_extra_options(
     hf_details = get_hf_details(model_name, input_path, cache_dir, extra_options)
     config = hf_details["hf_config"]
     extra_options["hf_details"] = hf_details
+
+    if (
+        execution_provider == "webgpu"
+        and extra_options.get("use_paged_attention", False)
+        and getattr(config, "attn_logit_softcapping", 0.0) not in (None, 0.0)
+    ):
+        raise ValueError("WebGPU paged attention does not support non-zero attention softcap.")
 
     if "num_hidden_layers" in extra_options:
         num_hidden_layers = int(extra_options["num_hidden_layers"])
@@ -982,7 +991,7 @@ def get_args():
                     default of 4 in effect.
                 dflash2_fuse_gate_up = Experimental DFlash 2 MLP gate/up projection fusion.
                     Accepts true or false (default). Requires dflash2_path. Combines gate/up
-                    weights into one MatMul or MatMulNBits followed by Split. Preserves BF16
+                    weights into one MatMul or MatMulNBits followed by Split. Preserves EP-specific
                     activations and body quantization; does not change the target or LM head.
                     Requires re-export and workload-specific performance/quality validation.
                 fuse_mlp_gate_up = Fuse each target model MLP's gate/up projections into one
@@ -997,8 +1006,11 @@ def get_args():
                     format with matmulnbits_weights_prepacked=1 or 2 emits that fpA-intB layout for
                     projections the kernel supports (N % 64 for int4, N % 32 for int8); other
                     projections stay raw, and the drafter session disables fpA-intB selection for them.
-                    Body activations and KV caches remain bf16; this option does not quantize the
-                    drafter's KV cache. When the target LM head uses a reproducible symmetric default
+                    CUDA body activations and KV caches remain bf16. WebGPU uses the target I/O dtype,
+                    with FP32 residual/skip normalization and convolution-finish accumulation for FP16
+                    models. Finish outputs stay FP32 until after normalization; normalized outputs
+                    return to FP16. This option does not quantize the drafter's KV cache.
+                    When the target LM head uses a reproducible symmetric default
                     layout, the drafter head uses its actual bit width, block size, initializer names,
                     and prepack mode when eligible so `share_initializers` can fold it onto the target's
                     copy. Dense or unsupported target LM-head layouts keep the drafter head dense.
@@ -1017,8 +1029,8 @@ def get_args():
                     structured QuantConfig schema independently from the main model.
                 linear_attn_op = linear_attention/gated_delta_net: Select the recurrent operator for non-paged
                     Qwen3.5/3.8 exports. Default is linear_attention. Paged exports always use GatedDeltaNet and
-                    ignore this option. gated_delta_net is CUDA-only, requires state_window=0, and supports fp16
-                    or bf16 I/O.
+                    ignore this option. gated_delta_net requires CUDA or WebGPU and state_window=0. CUDA supports
+                    fp16 or bf16 I/O; WebGPU supports fp16.
                 state_update_capacity = Number of compact Qwen3.5/3.8 state updates to capture. Default is 0 (disabled).
                     Must be an integer from 0 through 8 and requires use_paged_attention=true. This experimental
                     contract requires Engine runtime work beyond the current onnxruntime-genai#2454 head.
@@ -1041,8 +1053,10 @@ def get_args():
                     prune_lm_head=true, adds a logits_indices input that selects the packed hidden states consumed
                     by generation or draft verification, so the model outputs [num_logits, vocab_size] logits.
                     By default, the model outputs [num_tokens, vocab_size] logits.
-                    Currently only supported for the CUDA execution provider with fp16 or bf16 precision. Cannot be
-                    combined with exclude_embeds or exclude_lm_head.
+                    Supports CUDA with fp16 or bf16 precision. WebGPU supports fp16 only for causal, full-context
+                    attention with zero softcap, FP16 KV caches, and no Q/K normalization inputs; for example,
+                    Gemma2's non-zero attention softcap is unsupported. Cannot be combined with exclude_embeds or
+                    exclude_lm_head.
                 paged_block_size = 16/32/64/128/256/...: Paged KV-cache block size used when use_paged_attention is set.
                     Must be a power of two and at least 16, which is what the ONNX Runtime PagedAttention op
                     accepts. Default is 256. Also written to the `engine.dynamic_batching` section of

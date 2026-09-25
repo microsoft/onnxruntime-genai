@@ -7,6 +7,7 @@
 #include "interface.h"
 #include "models/graph_executor.h"
 #include "models/io/kv_cache.h"
+#include "state_update_replay.h"
 
 namespace Generators {
 namespace WebGPU {
@@ -221,12 +222,61 @@ struct InterfaceImpl : DeviceInterface {
   bool ShouldZeroKeyValueCacheTensors() const override { return false; }
   bool SupportsOffsetTensorViews() const override { return false; }
   bool SupportsTransactionalFixedState() const override { return true; }
+  bool SupportsCompactStateReplay() const override { return true; }
 
   int GetKeyValueCacheQuantizationBits(const Config::SessionOptions& session_options) const override {
     return GetKvCacheQuantizationBits(session_options, to_string(GetType()));
   }
 
   void Synchronize() override {}  // Nothing to do?
+
+  void ReplayStateUpdates(const StateUpdateReplayDesc* descriptors, size_t count) override {
+    auto* cpu = GetDeviceInterface(DeviceType::CPU);
+    std::vector<StateUpdateReplayDesc> staged;
+    staged.reserve(count);
+    const auto stage_input = [cpu](DeviceSpan<const uint8_t> source) {
+      if (source.empty()) {
+        return DeviceSpan<const uint8_t>{};
+      }
+      auto destination = cpu->Allocate<uint8_t>(source.size());
+      destination.CopyFrom(source);
+      DeviceSpan<const uint8_t> view = destination;
+      return view;
+    };
+
+    for (size_t index = 0; index < count; ++index) {
+      const auto& source = descriptors[index];
+      staged.push_back(StateUpdateReplayDesc{
+          stage_input(source.source_state),
+          cpu->Allocate<uint8_t>(source.destination_state.size()),
+          stage_input(source.value),
+          stage_input(source.decay),
+          stage_input(source.key),
+          stage_input(source.delta),
+          source.channel_count,
+          source.state_width,
+          source.key_width,
+          source.key_head_count,
+          source.capacity,
+          source.kept_count,
+          source.element_size,
+          source.kind,
+      });
+    }
+
+    ReplayStateUpdatesOnCpu(staged.data(), staged.size());
+    for (size_t index = 0; index < count; ++index) {
+      auto destination = descriptors[index].destination_state;
+      destination.CopyFrom(staged[index].destination_state);
+    }
+    Synchronize();
+  }
+
+  void GetAvailableMemory(size_t& /*free_bytes*/, size_t& /*total_bytes*/) override {
+    throw std::runtime_error(
+        "WebGPU does not expose available device memory. Set "
+        "engine.dynamic_batching.num_blocks explicitly for PagedAttention models.");
+  }
 
   bool UpdateAttentionMask([[maybe_unused]] void* next_mask_data, void* mask_data, int batch_beam_size, [[maybe_unused]] int new_kv_length, int total_length, [[maybe_unused]] int max_length, bool update_only, ONNXTensorElementDataType type) override {
     if (batch_beam_size != 1 || !update_only) {
@@ -328,8 +378,9 @@ struct InterfaceImpl : DeviceInterface {
     // excluded because they are meaningless for the trivial initialization model.
     // Keep this list in sync with ParseWebGpuContextConfig in
     // onnxruntime/core/providers/webgpu/webgpu_provider_factory.cc.
-    constexpr std::array<std::string_view, 14> kWebGpuGlobalOptions = {
+    constexpr std::array<std::string_view, 15> kWebGpuGlobalOptions = {
         "deviceId",
+        "adapterIndex",
         "webgpuInstance",
         "webgpuDevice",
         "dawnProcTable",

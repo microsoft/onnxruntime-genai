@@ -219,22 +219,35 @@ class BlockDrafterBuilder:
         self.make_value(output, self.io_dtype, [rows, self.hidden_size])
         return output
 
-    def skip_rms_norm(self, name, root, skip, weight_tensor, rows, want_sum=True):
+    def skip_rms_norm(self, name, root, skip, weight_tensor, rows, want_sum=True, dtype=None):
+        dtype = self.io_dtype if dtype is None else dtype
         initializer_name = name[1:].replace("/", ".") + ".weight"
         self.make_initializer(weight_tensor, initializer_name, to=self.io_dtype)
+        inputs = [root, skip, initializer_name]
+        if dtype != self.io_dtype:
+            # Retain the residual sum at the accumulation dtype until the next normalization.
+            for i, value in enumerate(inputs):
+                if self.values[value].dtype != dtype:
+                    inputs[i] = self.unary(
+                        "Cast", f"{name}/input{i}/Cast", value, dtype, self.values[value].shape, to=dtype
+                    )
         output = self.out(name)
         summed_output = f"{name}/output_3"
         self.make_node(
             "SkipSimplifiedLayerNormalization",
-            [root, skip, initializer_name],
+            inputs,
             [output, "", "", summed_output] if want_sum else [output],
             name=name,
             domain="com.microsoft",
             epsilon=self.rms_eps,
         )
-        self.make_value(output, self.io_dtype, [rows, self.hidden_size])
+        self.make_value(output, dtype, [rows, self.hidden_size])
         if want_sum:
-            self.make_value(summed_output, self.io_dtype, [rows, self.hidden_size])
+            self.make_value(summed_output, dtype, [rows, self.hidden_size])
+        if dtype != self.io_dtype:
+            output = self.unary(
+                "Cast", f"{name}/Cast", output, self.io_dtype, [rows, self.hidden_size], to=self.io_dtype
+            )
         return output, (summed_output if want_sum else None)
 
     def make_embedding(self, name, rows):
@@ -525,8 +538,9 @@ class BlockDrafterBuilder:
             ("cumulative_sequence_lengths", ir.DataType.INT32, ["batch_size + 1"]),
             ("past_sequence_lengths", ir.DataType.INT32, ["batch_size"]),
             ("block_table", ir.DataType.INT32, ["batch_size", "max_num_blocks"]),
-            ("attention_metadata", ir.DataType.INT32, [3]),
         ]
+        if self.include_attention_metadata:
+            declarations.append(("attention_metadata", ir.DataType.INT32, [3]))
         for name, dtype, shape in declarations:
             self.graph.inputs.append(self.make_value(name, dtype, shape))
         # TODO: this is the target's block size. A drafter usually has the smaller head size and
@@ -615,7 +629,7 @@ class BlockDrafterBuilder:
                 "cumulative_sequence_lengths": "cumulative_sequence_lengths",
                 "past_sequence_lengths": "past_sequence_lengths",
                 "block_table": "block_table",
-                "attention_metadata": "attention_metadata",
+                "attention_metadata": "attention_metadata" if self.include_attention_metadata else "",
                 "past_key_names": "past_key_values.%d.key",
                 "past_value_names": "past_key_values.%d.value",
             },

@@ -482,23 +482,6 @@ struct StateSlotDescGpu {
   uint64_t slot_bytes;
 };
 
-struct StateUpdateReplayDescGpu {
-  const void* source_state;
-  void* destination_state;
-  const void* value;
-  const float* decay;
-  const float* key;
-  const float* delta;
-  uint64_t channel_count;
-  uint64_t state_width;
-  uint64_t key_width;
-  uint64_t key_head_count;
-  uint32_t capacity;
-  uint32_t kept_count;
-  uint32_t element_size;
-  uint32_t kind;
-};
-
 constexpr int kSlotCopyThreads = 256;
 constexpr int kSlotCopyBlocksPerTensor = 128;
 
@@ -593,11 +576,11 @@ void LaunchCopyStateSlots(const void* descs, int count, int src_slot, int dst_sl
       reinterpret_cast<const StateSlotDescGpu*>(descs), src_slot, dst_slot);
 }
 
-void LaunchReplayStateUpdates(const void* descs, int count, cudaStream_t stream) {
+void LaunchReplayStateUpdates(const StateUpdateReplayDescGpu* descs, int count,
+                              cudaStream_t stream) {
   if (count <= 0) return;
   const dim3 grid(kSlotCopyBlocksPerTensor, static_cast<unsigned>(count));
-  ReplayStateUpdatesKernel<<<grid, kSlotCopyThreads, 0, stream>>>(
-      reinterpret_cast<const StateUpdateReplayDescGpu*>(descs));
+  ReplayStateUpdatesKernel<<<grid, kSlotCopyThreads, 0, stream>>>(descs);
   CUDA_CHECK_LAUNCH();
 }
 

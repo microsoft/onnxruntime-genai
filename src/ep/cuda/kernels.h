@@ -6,6 +6,23 @@ namespace Generators {
 
 namespace cuda {
 
+struct StateUpdateReplayDescGpu {
+  const void* source_state;
+  void* destination_state;
+  const void* value;
+  const float* decay;
+  const float* key;
+  const float* delta;
+  uint64_t channel_count;
+  uint64_t state_width;
+  uint64_t key_width;
+  uint64_t key_head_count;
+  uint32_t capacity;
+  uint32_t kept_count;
+  uint32_t element_size;
+  uint32_t kind;
+};
+
 template <typename T>
 void Launch_UpdatePositionIds(T* positions, int batch_beam_size, int total_length, int new_kv_length, cudaStream_t stream);
 template <typename T>
@@ -65,7 +82,8 @@ void LaunchFinalizeCrossQK(cudaStream_t stream,
 // by `descs` (device memory, {base, slot_bytes} pairs). One launch replaces `count` memcpys.
 void LaunchCopyStateSlots(const void* descs, int count, int src_slot, int dst_slot, cudaStream_t stream);
 
-void LaunchReplayStateUpdates(const void* descs, int count, cudaStream_t stream);
+void LaunchReplayStateUpdates(const StateUpdateReplayDescGpu* descs, int count,
+                              cudaStream_t stream);
 
 }  // namespace cuda
 }  // namespace Generators
