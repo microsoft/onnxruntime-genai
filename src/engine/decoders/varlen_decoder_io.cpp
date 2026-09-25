@@ -109,8 +109,7 @@ AttentionMetadataValues GetAttentionMetadataForGraph(size_t max_query_len, size_
 }
 
 AttentionMetadataValues GetAttentionMetadataForGraphStep(
-    const StepPlan& plan, size_t block_table_columns, size_t block_size) {
-  const auto exact_metadata = GetAttentionMetadataForPlan(plan);
+    const AttentionMetadataValues& exact_metadata, size_t block_table_columns, size_t block_size) {
   // Every request in a capturable step carries the same token count, so the step's own query bound
   // is exactly the bound for every step this graph will serve.
   auto metadata = GetAttentionMetadataForGraph(
@@ -127,6 +126,12 @@ AttentionMetadataValues GetAttentionMetadataForGraphStep(
   return metadata;
 }
 
+AttentionMetadataValues GetAttentionMetadataForGraphStep(
+    const StepPlan& plan, size_t block_table_columns, size_t block_size) {
+  return GetAttentionMetadataForGraphStep(
+      GetAttentionMetadataForPlan(plan), block_table_columns, block_size);
+}
+
 std::array<int32_t, kAttentionMetadataElementCount> PackAttentionMetadata(
     const AttentionMetadataValues& metadata) {
   return {
@@ -136,14 +141,49 @@ std::array<int32_t, kAttentionMetadataElementCount> PackAttentionMetadata(
   };
 }
 
+std::vector<size_t> GetSelectedLogitsIndices(const StepPlan& plan) {
+  size_t row_count = plan.requests.size();
+  for (const auto& entry : plan.requests) {
+    row_count += entry.draft_token_count;
+  }
+  std::vector<size_t> indices;
+  indices.reserve(row_count);
+  for (const auto& entry : plan.requests) {
+    if (entry.logits_row_index < entry.packed_token_offset + entry.draft_token_count) {
+      throw std::runtime_error("Draft verification logits precede the request's packed token range.");
+    }
+    // CUDA Gather writes zeros for an out-of-range index instead of failing.
+    if (entry.logits_row_index >= plan.token_count) {
+      throw std::runtime_error("A selected logits row lies past the step's packed token range.");
+    }
+    for (size_t draft = entry.draft_token_count; draft > 0; --draft) {
+      indices.push_back(entry.logits_row_index - draft);
+    }
+    indices.push_back(entry.logits_row_index);
+  }
+  return indices;
+}
+
 bool DecoderLogitsArePerToken(const Model& model) {
-  // Logits with a symbolic batch_size first dimension hold one row per request; any other first
-  // dimension holds one row per packed token.
+  // Logits with a symbolic batch_size first dimension hold one row per request. Other first
+  // dimensions either hold every packed row or the rows selected through logits_indices.
   const auto logits_symbolic_shape =
       model.session_info_.GetOutputSymbolicShape(model.config_->model.decoder.outputs.logits);
   return logits_symbolic_shape.empty() ||
          logits_symbolic_shape[0] == nullptr ||
          std::string_view(logits_symbolic_shape[0]) != "batch_size";
+}
+
+bool DecoderLogitsAreSelected(const Model& model) {
+  const auto& name = model.config_->model.decoder.inputs.logits_indices;
+  if (name.empty() || !model.session_info_.HasInput(name)) {
+    return false;
+  }
+  if (!DecoderLogitsArePerToken(model)) {
+    throw std::runtime_error(
+        "A decoder with a logits_indices input must emit the selected rows, not batch_size logits rows.");
+  }
+  return true;
 }
 
 size_t PackedPositionIdPlanes(const Model& model) {
@@ -162,9 +202,11 @@ namespace {
 struct GraphBufferPlan {
   enum Slot {
     kInputIds,
+    kEmbeddings,
     kCumulativeSequenceLengths,
     kPastSequenceLengths,
     kPositionIds,
+    kLogitsIndices,
     kLogits,
     kHiddenStatesInput,
     kHiddenStates,
@@ -205,12 +247,21 @@ GraphBufferPlan PlanGraphBuffers(const Model& model, size_t position_planes,
   const int64_t hidden_size = model.config_->model.decoder.hidden_size;
 
   plan.buffers[GraphBufferPlan::kInputIds] = {Ort::TypeToTensorType<int64_t>, {rows}};
+  if (!model.config_->model.embedding.filename.empty()) {
+    const auto& name = model.config_->model.decoder.inputs.embeddings;
+    plan.buffers[GraphBufferPlan::kEmbeddings] = {
+        model.session_info_.GetInputDataType(name), {rows, hidden_size}};
+  }
   plan.buffers[GraphBufferPlan::kCumulativeSequenceLengths] = {Ort::TypeToTensorType<int32_t>,
                                                                {batch + 1}};
   plan.buffers[GraphBufferPlan::kPastSequenceLengths] = {Ort::TypeToTensorType<int32_t>, {batch}};
   if (position_planes != 0) {
     plan.buffers[GraphBufferPlan::kPositionIds] = {
         Ort::TypeToTensorType<int64_t>, {static_cast<int64_t>(position_planes) * rows}};
+  }
+  if (DecoderLogitsAreSelected(model)) {
+    plan.buffers[GraphBufferPlan::kLogitsIndices] = {
+        Ort::TypeToTensorType<int32_t>, {rows}};
   }
   plan.buffers[GraphBufferPlan::kLogits] = {
       model.session_info_.GetOutputDataType(model.config_->model.decoder.outputs.logits),
@@ -280,9 +331,11 @@ VarlenGraphBuffers::VarlenGraphBuffers(DecoderOnly_Model& model, size_t position
   };
 
   input_ids = make(GraphBufferPlan::kInputIds);
+  embeddings = make(GraphBufferPlan::kEmbeddings);
   cumulative_sequence_lengths = make(GraphBufferPlan::kCumulativeSequenceLengths);
   past_sequence_lengths = make(GraphBufferPlan::kPastSequenceLengths);
   position_ids = make(GraphBufferPlan::kPositionIds);
+  logits_indices = make(GraphBufferPlan::kLogitsIndices);
   logits = make(GraphBufferPlan::kLogits);
   hidden_states_input = make(GraphBufferPlan::kHiddenStatesInput);
   hidden_states = make(GraphBufferPlan::kHiddenStates);
@@ -311,7 +364,8 @@ VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
                                  std::shared_ptr<CacheManager> cache_manager,
                                  const ExecutionContext* execution_context,
                                  VarlenGraphBuffers* graph_buffers,
-                                 size_t position_planes)
+                                 size_t position_planes,
+                                 CpuEmbedding::Workspace* embedding_workspace)
     : DecoderIO(model, scheduled_requests, cache_manager),
       graph_buffers_{graph_buffers},
       plan_{execution_context ? execution_context->plan : nullptr},
@@ -320,13 +374,16 @@ VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
       input_ids_{execution_context ? execution_context->input_ids : DeviceSpan<int32_t>{}},
       hidden_states_input_{
           execution_context ? execution_context->hidden_states_input : nullptr},
-      position_planes_{position_planes} {
+      position_planes_{position_planes},
+      embedding_workspace_{embedding_workspace ? embedding_workspace : &local_embedding_workspace_} {
   logits_are_per_token_ = DecoderLogitsArePerToken(*model);
+  logits_are_selected_ = DecoderLogitsAreSelected(*model);
 
   PrepareInputIds(model, scheduled_requests);
   PreparePositionIds(model, scheduled_requests);
   PrepareAttentionMetadata(model, scheduled_requests);
   PrepareHiddenStatesInput(model, scheduled_requests);
+  PrepareLogitsIndices(model, scheduled_requests);
   PrepareLogits(model, scheduled_requests);
   PrepareHiddenStates(model, scheduled_requests);
   PrepareAuxHiddenStates(model, scheduled_requests);
@@ -482,8 +539,23 @@ void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, 
   cumulative_sequence_lengths_span.CopyCpuToDevice();
   sequence_lengths_span.CopyCpuToDevice();
 
-  input_names_.push_back(model->config_->model.decoder.inputs.input_ids.c_str());
-  inputs_.push_back(input_ids_tensor->GetOrtTensor());
+  if (model->cpu_embedding_) {
+    if (!device_input_ids.empty()) {
+      device_span.CopyDeviceToCpu();
+    }
+    std::unique_ptr<Tensor> owned_embeddings;
+    auto* embeddings = reshape(owned_embeddings, graph_buffers_ ? graph_buffers_->embeddings.get() : nullptr,
+                               model->cpu_embedding_->type_,
+                               {static_cast<int64_t>(num_tokens), model->cpu_embedding_->hidden_size_});
+    model->cpu_embedding_->Run(cpu_span, *embeddings, *embedding_workspace_);
+    input_names_.push_back(model->config_->model.decoder.inputs.embeddings.c_str());
+    inputs_.push_back(embeddings->GetOrtTensor());
+    if (owned_embeddings) owned_inputs_.push_back(std::move(owned_embeddings));
+  }
+  if (model->session_info_.HasInput(model->config_->model.decoder.inputs.input_ids)) {
+    input_names_.push_back(model->config_->model.decoder.inputs.input_ids.c_str());
+    inputs_.push_back(input_ids_tensor->GetOrtTensor());
+  }
 
   input_names_.push_back(model->config_->model.decoder.inputs.cumulative_sequence_lengths.c_str());
   inputs_.push_back(cumulative_sequence_lengths_tensor->GetOrtTensor());
@@ -631,8 +703,88 @@ size_t VarlenDecoderIO::TokenCount(ScheduledRequests& scheduled_requests) const 
                          });
 }
 
+void VarlenDecoderIO::PrepareLogitsIndices(
+    std::shared_ptr<DecoderOnly_Model> model,
+    ScheduledRequests& scheduled_requests) {
+  if (logits_are_per_token_) {
+    if (plan_) {
+      if (plan_->requests.size() != scheduled_requests.size()) {
+        throw std::runtime_error("Step plan size does not match logits batch size.");
+      }
+      for (size_t i = 0; i < plan_->requests.size(); ++i) {
+        const auto& entry = plan_->requests[i];
+        if (entry.request != scheduled_requests[i]) {
+          throw std::runtime_error("Step plan order does not match logits batch order.");
+        }
+      }
+      valid_token_indices_ = GetSelectedLogitsIndices(*plan_);
+    } else {
+      valid_token_indices_.reserve(scheduled_requests.size());
+      size_t running_length = 0;
+      for (const auto& request : scheduled_requests) {
+        valid_token_indices_.push_back(running_length + request->ScheduledTokenCount() - 1);
+        running_length += request->ScheduledTokenCount();
+      }
+    }
+  } else {
+    if (plan_ && std::any_of(plan_->requests.begin(), plan_->requests.end(),
+                             [](const RequestStepPlan& entry) {
+                               return entry.draft_token_count != 0;
+                             })) {
+      throw std::runtime_error(
+          "Verifying draft tokens requires a model whose logits have one row per packed token; "
+          "this model returned only one logits row per request.");
+    }
+    valid_token_indices_.reserve(scheduled_requests.size());
+    for (size_t i = 0; i < scheduled_requests.size(); ++i) {
+      valid_token_indices_.push_back(i);
+    }
+  }
+
+  if (!logits_are_selected_) {
+    return;
+  }
+
+  const auto& name = model->config_->model.decoder.inputs.logits_indices;
+  std::unique_ptr<Tensor> owned_indices;
+  Tensor* indices{};
+  const std::vector<int64_t> shape{static_cast<int64_t>(valid_token_indices_.size())};
+  if (graph_buffers_ != nullptr) {
+    if (!graph_buffers_->logits_indices) {
+      throw std::runtime_error("Captured decoder step has no persistent logits_indices buffer.");
+    }
+    if (valid_token_indices_.size() > graph_buffers_->max_token_rows) {
+      throw std::runtime_error("Selected logits rows exceed the persistent graph buffer capacity.");
+    }
+    graph_buffers_->logits_indices->CreateTensor(shape, /*make_static=*/true);
+    indices = graph_buffers_->logits_indices.get();
+  } else {
+    owned_indices = std::make_unique<Tensor>(model->p_device_inputs_, Ort::TypeToTensorType<int32_t>);
+    owned_indices->CreateTensor(shape);
+    indices = owned_indices.get();
+  }
+
+  auto device_span = indices->GetDeviceSpan<int32_t>();
+  auto cpu_span = device_span.CpuSpan();
+  for (size_t i = 0; i < valid_token_indices_.size(); ++i) {
+    if (valid_token_indices_[i] > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+      throw std::runtime_error("A selected logits row exceeds the int32 graph-input range.");
+    }
+    cpu_span[i] = static_cast<int32_t>(valid_token_indices_[i]);
+  }
+  device_span.CopyCpuToDevice();
+  input_names_.push_back(name.c_str());
+  inputs_.push_back(indices->GetOrtTensor());
+  if (owned_indices) {
+    owned_inputs_.push_back(std::move(owned_indices));
+  }
+}
+
 void VarlenDecoderIO::PrepareLogits(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests) {
-  const size_t logits_rows = logits_are_per_token_ ? TokenCount(scheduled_requests) : scheduled_requests.size();
+  const size_t logits_rows = logits_are_selected_
+                                 ? valid_token_indices_.size()
+                                 : (logits_are_per_token_ ? TokenCount(scheduled_requests)
+                                                          : scheduled_requests.size());
   const std::vector<int64_t> logits_shape = {
       static_cast<int64_t>(logits_rows),
       static_cast<int64_t>(model->config_->model.vocab_size)};
@@ -713,47 +865,6 @@ void VarlenDecoderIO::PrepareAuxHiddenStates(std::shared_ptr<DecoderOnly_Model> 
 }
 
 std::vector<DeviceSpan<float>> VarlenDecoderIO::ProcessLogits() {
-  // One row per request, plus the extra rows a speculative step needs to verify its drafts: the
-  // request's whole packed range ends with the row that predicts the token after the last draft.
-  std::vector<size_t> valid_token_indices;
-  valid_token_indices.reserve(scheduled_requests_.size());
-  if (logits_are_per_token_) {
-    if (plan_) {
-      const auto& plan = *plan_;
-      if (plan.requests.size() != scheduled_requests_.size()) {
-        throw std::runtime_error("Step plan size does not match logits batch size.");
-      }
-      for (size_t i = 0; i < plan.requests.size(); ++i) {
-        if (plan.requests[i].request != scheduled_requests_[i]) {
-          throw std::runtime_error("Step plan order does not match logits batch order.");
-        }
-        const auto& entry = plan.requests[i];
-        for (size_t draft = entry.draft_token_count; draft > 0; --draft) {
-          valid_token_indices.push_back(entry.logits_row_index - draft);
-        }
-        valid_token_indices.push_back(entry.logits_row_index);
-      }
-    } else {
-      for (size_t i = 0, running_length = 0; i < scheduled_requests_.size(); ++i) {
-        valid_token_indices.push_back(running_length + scheduled_requests_[i]->ScheduledTokenCount() - 1);
-        running_length += scheduled_requests_[i]->ScheduledTokenCount();
-      }
-    }
-  } else {
-    const auto* plan = plan_;
-    if (plan && std::any_of(plan->requests.begin(), plan->requests.end(),
-                            [](const RequestStepPlan& entry) {
-                              return entry.draft_token_count != 0;
-                            })) {
-      throw std::runtime_error(
-          "Verifying draft tokens requires a model whose logits have one row per packed token; "
-          "this model returned only one logits row per request.");
-    }
-    for (size_t i = 0; i < scheduled_requests_.size(); ++i) {
-      valid_token_indices.push_back(i);
-    }
-  }
-
   // The output shape is either [batch_size, vocab_size] or [num_tokens, vocab_size].
   const auto active_logits_shape = active_logits_->GetShape();
   const int64_t vocab_size = active_logits_shape[1];
@@ -761,13 +872,14 @@ std::vector<DeviceSpan<float>> VarlenDecoderIO::ProcessLogits() {
 
   auto logits_bytes = active_logits_->GetByteSpan();
   std::vector<decltype(logits_bytes)> logits_bytes_vector;
-  for (size_t i = 0; i < valid_token_indices.size(); ++i) {
-    auto logits_of_last_token = logits_bytes.subspan(valid_token_indices[i] * vocab_size * element_size, vocab_size * element_size);
+  for (size_t i = 0; i < valid_token_indices_.size(); ++i) {
+    const size_t output_row = logits_are_selected_ ? i : valid_token_indices_[i];
+    auto logits_of_last_token = logits_bytes.subspan(output_row * vocab_size * element_size, vocab_size * element_size);
     logits_bytes_vector.push_back(logits_of_last_token);
   }
 
   std::vector<DeviceSpan<float>> logits_vector;
-  const std::vector<int64_t> logits_shape{static_cast<int64_t>(valid_token_indices.size()),
+  const std::vector<int64_t> logits_shape{static_cast<int64_t>(valid_token_indices_.size()),
                                           vocab_size};
 
   const bool requires_cast = active_logits_->GetType() != Ort::TypeToTensorType<float>;
@@ -782,16 +894,16 @@ std::vector<DeviceSpan<float>> VarlenDecoderIO::ProcessLogits() {
 
   // Per-request logits occupy contiguous rows. Per-token logits do too on pure decode steps because
   // every request contributes exactly one token. Convert the whole batch in one launch in either case.
-  bool rows_are_contiguous = !valid_token_indices.empty();
-  for (size_t i = 0; i < valid_token_indices.size() && rows_are_contiguous; ++i) {
-    rows_are_contiguous = valid_token_indices[i] == i;
+  bool rows_are_contiguous = !valid_token_indices_.empty();
+  for (size_t i = 0; i < valid_token_indices_.size() && rows_are_contiguous; ++i) {
+    rows_are_contiguous = logits_are_selected_ || valid_token_indices_[i] == i;
   }
 
   if (requires_cast && rows_are_contiguous) {
     model_.p_device_inputs_->Cast(logits_bytes.Span().data(), logits_fp32_span.Span().data(),
                                   active_logits_->GetType(), Ort::TypeToTensorType<float>,
-                                  valid_token_indices.size() * static_cast<size_t>(vocab_size));
-    for (size_t i = 0; i < valid_token_indices.size(); ++i) {
+                                  valid_token_indices_.size() * static_cast<size_t>(vocab_size));
+    for (size_t i = 0; i < valid_token_indices_.size(); ++i) {
       logits_vector.push_back(logits_fp32_span.subspan(i * vocab_size, vocab_size));
     }
     return logits_vector;

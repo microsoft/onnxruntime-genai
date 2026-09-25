@@ -45,6 +45,7 @@ def _outputs_model(aux_option, *, num_layers=8, use_paged_attention=False):
     model.num_kv_heads = 2
     model.head_size = 8
     model.use_paged_attention = use_paged_attention
+    model.hidden_rows_dim = "num_tokens"
     model.output_names = {"hidden_states": "hidden_states", "logits": "logits"}
     model.output_types = {"hidden_states": ir.DataType.FLOAT16, "logits": ir.DataType.FLOAT16}
     model.output_shapes = {

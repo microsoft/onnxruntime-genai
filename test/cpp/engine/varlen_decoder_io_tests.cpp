@@ -134,6 +134,20 @@ TEST(VarlenDecoderIOTest, GraphStepFallsBackWhenReservationExceedsLiveKvLength) 
   EXPECT_EQ(metadata.max_kv_len_lower_bound, 1);
 }
 
+TEST(VarlenDecoderIOTest, GraphStepFallsBackForMixedKvLengthsBelowTheBucketBoundary) {
+  const AttentionMetadataValues exact_metadata{
+      /*max_query_len_bound=*/4,
+      /*max_kv_len_bound=*/1800,
+      /*max_kv_len_lower_bound=*/700};
+
+  const auto metadata = GetAttentionMetadataForGraphStep(
+      exact_metadata, /*block_table_columns=*/16, /*block_size=*/128);
+
+  EXPECT_EQ(metadata.max_query_len_bound, 4);
+  EXPECT_EQ(metadata.max_kv_len_bound, 2048);
+  EXPECT_EQ(metadata.max_kv_len_lower_bound, 1);
+}
+
 TEST(VarlenDecoderIOTest, GraphStepRejectsInsufficientUpperBounds) {
   StepPlan plan;
   RequestStepPlan request;
@@ -169,6 +183,75 @@ TEST(VarlenDecoderIOTest, GraphStepTakesItsQueryBoundFromTheStep) {
 
   EXPECT_EQ(metadata.max_query_len_bound, 4);
   EXPECT_EQ(metadata.max_kv_len_bound, 2048);
+}
+
+TEST(VarlenDecoderIOTest, SelectsOnlyConsumedLogitsRowsInRequestOrder) {
+  StepPlan plan;
+  RequestStepPlan verified;
+  verified.packed_token_offset = 0;
+  verified.logits_row_index = 3;
+  verified.draft_token_count = 3;
+  RequestStepPlan decode;
+  decode.packed_token_offset = 4;
+  decode.logits_row_index = 4;
+  RequestStepPlan prefill;
+  prefill.packed_token_offset = 5;
+  prefill.logits_row_index = 14;
+  plan.requests = {verified, decode, prefill};
+  plan.token_count = 15;
+
+  EXPECT_EQ(GetSelectedLogitsIndices(plan),
+            (std::vector<size_t>{0, 1, 2, 3, 4, 14}));
+}
+
+TEST(VarlenDecoderIOTest, RejectsVerificationRowsOutsideTheRequestRange) {
+  StepPlan plan;
+  RequestStepPlan invalid;
+  invalid.packed_token_offset = 4;
+  invalid.logits_row_index = 5;
+  invalid.draft_token_count = 2;
+  plan.requests = {invalid};
+  plan.token_count = 6;
+
+  EXPECT_THROW(GetSelectedLogitsIndices(plan), std::runtime_error);
+}
+
+TEST(VarlenDecoderIOTest, RejectsSelectedRowsPastThePackedStep) {
+  StepPlan plan;
+  RequestStepPlan invalid;
+  invalid.packed_token_offset = 0;
+  invalid.logits_row_index = 2;
+  plan.requests = {invalid};
+  plan.token_count = 2;
+
+  EXPECT_THROW(GetSelectedLogitsIndices(plan), std::runtime_error);
+}
+
+TEST(VarlenDecoderIOTest, SelectedLogitsModelGetsAPersistentIndicesBuffer) {
+  auto selected = std::dynamic_pointer_cast<DecoderOnly_Model>(LoadSyntheticPagedSelectedLogitsModel());
+  auto per_token = std::dynamic_pointer_cast<DecoderOnly_Model>(LoadSyntheticPagedPerTokenModel());
+  ASSERT_TRUE(selected);
+  ASSERT_TRUE(per_token);
+
+  EXPECT_TRUE(DecoderLogitsArePerToken(*selected));
+  EXPECT_TRUE(DecoderLogitsAreSelected(*selected));
+  EXPECT_FALSE(DecoderLogitsAreSelected(*per_token));
+
+  VarlenGraphBuffers selected_buffers{*selected, PackedPositionIdPlanes(*selected), kMaxDraftTokensPerStep + 1};
+  VarlenGraphBuffers per_token_buffers{*per_token, PackedPositionIdPlanes(*per_token), kMaxDraftTokensPerStep + 1};
+  ASSERT_NE(selected_buffers.logits_indices, nullptr);
+  EXPECT_EQ(selected_buffers.logits_indices->GetShape(),
+            (std::vector<int64_t>{static_cast<int64_t>(selected_buffers.max_token_rows)}));
+  EXPECT_EQ(per_token_buffers.logits_indices, nullptr);
+}
+
+TEST(VarlenDecoderIOTest, RejectsLogitsIndicesOnAPerRequestLogitsModel) {
+  auto model = LoadSyntheticPagedModel();
+  // Any real session input makes the model look like it accepts selected rows.
+  model->config_->model.decoder.inputs.logits_indices = "attention_metadata";
+
+  EXPECT_THROW(DecoderLogitsAreSelected(*model), std::runtime_error);
+  EXPECT_THROW(VarlenGraphBufferBytes(*model, PackedPositionIdPlanes(*model), 1), std::runtime_error);
 }
 
 TEST(VarlenDecoderIOTest, GraphBufferBytesIgnoreAWidthTheModelCannotUse) {
@@ -317,6 +400,26 @@ TEST(VarlenDecoderIOTest, GraphIdsReportEveryAssignedIdForRelease) {
   std::sort(assigned.begin(), assigned.end());
   std::sort(handed_out.begin(), handed_out.end());
   EXPECT_EQ(assigned, handed_out);
+}
+
+TEST(VarlenDecoderIOTest, ClearingRetiredGraphIdsRestoresTheOwnerBudget) {
+  GraphAnnotationIds ids;
+  std::vector<int> retired;
+  for (size_t shape = 1; shape <= GraphAnnotationIds::kMaxCapturedShapes; ++shape) {
+    retired.push_back(ids.Id(*DecodeGraphKey(shape, 1, 8, 0)));
+  }
+
+  std::vector<int> visited;
+  ids.ForEachAssignedId([&visited](int annotation_id) { visited.push_back(annotation_id); });
+  std::sort(retired.begin(), retired.end());
+  std::sort(visited.begin(), visited.end());
+  EXPECT_EQ(visited, retired);
+
+  ids.Clear();
+  EXPECT_EQ(ids.size(), 0u);
+  const int next = ids.Id(*DecodeGraphKey(1, 1, 8, 0));
+  EXPECT_GT(next, 0);
+  EXPECT_FALSE(std::binary_search(retired.begin(), retired.end(), next));
 }
 
 TEST(VarlenDecoderIOTest, PacksMetadataInOperatorContractOrder) {

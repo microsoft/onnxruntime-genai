@@ -12,6 +12,7 @@ import onnx_ir as ir
 import onnxruntime as ort
 import pytest
 import torch
+from quantization import QuantConfig
 
 from models.builders.base import Model
 from models.builders.dflash2 import DFlash2Builder
@@ -61,6 +62,19 @@ def _composite(aux_layers=AUX_LAYERS, use_paged_attention=True):
         head_size=128,
         num_layers=32,
         filename="model.onnx",
+        exclude_embeds=False,
+        exclude_lm_head=False,
+        is_lm_head_quantized=lambda: False,
+        onnx_dtype=ir.DataType.FLOAT16,
+        quantization_algo="default",
+        tied_quantized_embeddings=False,
+        quant_attrs={
+            "op_types_to_quantize": ("MatMul",),
+            "nodes_to_exclude": [],
+            "is_symmetric": True,
+            "matmul_block_size": 32,
+            "use_qdq": False,
+        },
         attention_attrs={"paged_block_size": 256},
         context_length=32768,
         original_context_length=131072,
@@ -177,6 +191,59 @@ def test_genai_config_gains_the_drafter_and_the_target_tap(tmp_path):
     assert config["model"]["dflash2"]["aux_hidden_state_layers"] == AUX_LAYERS
 
 
+@pytest.mark.parametrize(
+    ("sliding_window", "prefix_caching"),
+    [(0, False), (2048, True)],
+)
+def test_genai_config_disables_prefix_caching_only_for_full_attention_drafter(tmp_path, sliding_window, prefix_caching):
+    config_path = tmp_path / "genai_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "model": {"decoder": {}},
+                "engine": {"dynamic_batching": {}},
+            }
+        )
+    )
+    model = _composite()
+    model.dflash2 = types.SimpleNamespace(
+        genai_config_section=lambda: {
+            "filename": "dflash2.onnx",
+            "sliding_window": sliding_window,
+        }
+    )
+
+    model.add_dflash2_to_genai_config(str(tmp_path))
+
+    config = json.loads(config_path.read_text())
+    assert config["engine"]["dynamic_batching"].get("prefix_caching", True) is prefix_caching
+
+
+@pytest.mark.parametrize("prefix_caching", [False, True])
+def test_genai_config_preserves_explicit_prefix_caching_for_full_attention_drafter(tmp_path, prefix_caching):
+    config_path = tmp_path / "genai_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "model": {"decoder": {}},
+                "engine": {"dynamic_batching": {"prefix_caching": prefix_caching}},
+            }
+        )
+    )
+    model = _composite()
+    model.dflash2 = types.SimpleNamespace(
+        genai_config_section=lambda: {
+            "filename": "dflash2.onnx",
+            "sliding_window": 0,
+        }
+    )
+
+    model.add_dflash2_to_genai_config(str(tmp_path))
+
+    config = json.loads(config_path.read_text())
+    assert config["engine"]["dynamic_batching"]["prefix_caching"] is prefix_caching
+
+
 def test_dflash2_config_disables_inherited_fpa_intb_selection(tmp_path):
     builder = DFlash2Builder(
         _draft_checkpoint(tmp_path),
@@ -187,7 +254,6 @@ def test_dflash2_config_disables_inherited_fpa_intb_selection(tmp_path):
     )
 
     section = builder.genai_config_section()
-
     assert section["session_options"] == {"ep.cuda.fpa_intb_gemm": "0"}
 
 
@@ -345,6 +411,252 @@ def test_target_mlp_gate_up_fusion_rejects_one_sided_exclusion():
         model.make_mlp_proj_fused(0, mlp, "residual")
 
 
+@pytest.mark.parametrize("quant_type,bits", [("int4", 4), ("int8", 8)])
+def test_exact_name_quantization_override_is_forwarded_to_quantizer(quant_type, bits):
+    model = object.__new__(Model)
+    model.quant_config = types.SimpleNamespace(
+        weights=types.SimpleNamespace(
+            method="default",
+            overrides=[
+                types.SimpleNamespace(
+                    match={"name": "/model/layers.0/mlp/down_proj/MatMul"},
+                    type=quant_type,
+                    exclude=False,
+                )
+            ],
+        )
+    )
+    model.quant_type = None
+    model.quant_attrs = {}
+
+    model.make_quant_init(types.SimpleNamespace())
+
+    assert model.int4_customized_weight_config == {"/model/layers.0/mlp/down_proj/MatMul": {"bits": bits}}
+
+
+@pytest.mark.parametrize("match", [{"name": "/model/layers.0/mlp/down_proj/MatMul"}, {"preset": "last_matmul"}])
+def test_int8_quantization_override_rejects_qdq_format(match):
+    model = object.__new__(Model)
+    model.quant_config = types.SimpleNamespace(
+        weights=types.SimpleNamespace(
+            method="default",
+            overrides=[
+                types.SimpleNamespace(
+                    match=match,
+                    type="int8",
+                    exclude=False,
+                )
+            ],
+        )
+    )
+    model.quant_type = None
+    model.quant_attrs = {"use_qdq": True}
+
+    with pytest.raises(NotImplementedError, match="INT8 weight overrides are not supported with QDQ"):
+        model.make_quant_init(types.SimpleNamespace())
+
+
+def _exact_override_model(tmp_path, *, constant_weight):
+    node_name = "/probe/MatMul"
+    builder = DFlash2Builder(
+        _draft_checkpoint(tmp_path),
+        str(tmp_path),
+        ir.DataType.FLOAT16,
+        paged_block_size=256,
+        max_position_embeddings=128,
+    )
+    if constant_weight:
+        builder.matmul(node_name, "hidden_states", torch.ones((16, 32)), 32, 16, "num_block")
+    else:
+        builder.make_value("dynamic_weight", ir.DataType.FLOAT16, [32, 16])
+        builder.make_node("MatMul", ["hidden_states", "dynamic_weight"], ["output"], name=node_name)
+
+    override = types.SimpleNamespace(match={"name": node_name}, type="int8", exclude=False)
+    model = object.__new__(Model)
+    model.model = builder.model
+    model.exact_quant_override_names = {node_name}
+    model.exact_quant_overrides = {node_name: override}
+    model.quantization_algo = "default"
+    model.int4_customized_weight_config = {node_name: {"bits": 8}}
+    model.quant_attrs = {
+        "accuracy_level": 0,
+        "bits": 4,
+        "is_symmetric": True,
+        "matmul_block_size": 16,
+        "nodes_to_exclude": [],
+        "op_types_to_quantize": ("MatMul",),
+        "use_qdq": False,
+    }
+    model.matmul_attrs = {"weights_prepacked": 0}
+    model.ep = "cpu"
+    return model, node_name
+
+
+def test_exact_name_override_rejects_dynamic_weight(tmp_path):
+    model, _ = _exact_override_model(tmp_path, constant_weight=False)
+
+    with pytest.raises(ValueError, match="require a constant weight initializer"):
+        model.to_nbits()
+
+
+def test_legacy_exclusion_does_not_require_an_emitted_node(tmp_path):
+    model, _ = _exact_override_model(tmp_path, constant_weight=True)
+    missing_name = "/missing/MatMul"
+    model.quant_config = QuantConfig.from_extra_options(
+        {"nodes_to_exclude": [missing_name]}, precision="int4", execution_provider="cpu"
+    )
+    model.quant_type = None
+
+    model.make_quant_init(types.SimpleNamespace())
+    quantized = model.to_nbits()
+
+    assert any(node.name == "/probe/MatMul_Q4" for node in quantized.graph)
+
+
+def test_structured_exact_exclusion_requires_an_emitted_node(tmp_path):
+    model, _ = _exact_override_model(tmp_path, constant_weight=True)
+    missing_name = "/missing/MatMul"
+    model.quant_config = QuantConfig.from_dict(
+        {
+            "weights": {
+                "type": "int4",
+                "overrides": [{"match": {"name": missing_name}, "exclude": True}],
+            }
+        }
+    )
+    model.quant_type = None
+
+    model.make_quant_init(types.SimpleNamespace())
+    with pytest.raises(ValueError, match="did not match an emitted node"):
+        model.to_nbits()
+
+
+def test_exact_name_override_is_verified_after_quantization(tmp_path):
+    model, node_name = _exact_override_model(tmp_path, constant_weight=True)
+
+    quantized = model.to_nbits()
+    node = next(node for node in quantized.graph if node.name == f"{node_name}_Q8")
+
+    assert node.op_type == "MatMulNBits"
+    assert node.attributes["bits"].value == 8
+
+
+@pytest.mark.parametrize("preset", ["last_matmul", "mixed_layers", "linear_attn"])
+@pytest.mark.parametrize("quant_type,bits", [("int4", 4), ("int8", 8), (" INT8 ", 8)])
+def test_preset_quantization_override_initializes_the_node_map(preset, quant_type, bits):
+    model = object.__new__(Model)
+    model.quant_config = types.SimpleNamespace(
+        weights=types.SimpleNamespace(
+            method="default",
+            overrides=[types.SimpleNamespace(match={"preset": preset}, type=quant_type, exclude=False)],
+        )
+    )
+    model.quant_type = None
+    model.quant_attrs = {"nodes_to_exclude": []}
+    model.num_layers = 1
+    model.layer_types = ["linear_attention"]
+    model.mlp_attrs = {}
+
+    model.make_quant_init(types.SimpleNamespace())
+
+    assert model.int4_customized_weight_config
+    assert all(config == {"bits": bits} for config in model.int4_customized_weight_config.values())
+    if preset == "last_matmul":
+        assert model.int4_customized_weight_config == {"/lm_head/MatMul": {"bits": bits}}
+
+
+@pytest.mark.parametrize(
+    "match",
+    [{"preset": preset} for preset in ("last_matmul", "mixed_layers", "linear_attn")] + [{"name": "/lm_head/MatMul"}],
+)
+@pytest.mark.parametrize("quant_type", ["none", "fp16", "fp32", "bf16", "mxfp4", "nvfp4", "uint4", "uint8"])
+def test_weight_overrides_reject_formats_not_representable_by_bit_width(match, quant_type):
+    model = object.__new__(Model)
+    model.quant_config = QuantConfig.from_dict(
+        {"weights": {"type": "int4", "overrides": [{"match": match, "type": quant_type}]}}
+    )
+    model.quant_type = None
+    model.quant_attrs = {}
+
+    with pytest.raises(ValueError, match="weight overrides currently support only int4 or int8"):
+        model.make_quant_init(types.SimpleNamespace())
+
+
+def test_legacy_exclusion_wins_over_mixed_precision_preset():
+    quant_config = QuantConfig.from_extra_options(
+        {"matmul_mixed_precision": "last_matmul:int8", "nodes_to_exclude": ["/lm_head/MatMul"]},
+        precision="int4",
+    )
+    model = object.__new__(Model)
+    model.quant_config = quant_config
+    model.quant_type = None
+    model.quant_attrs = {"nodes_to_exclude": []}
+
+    model.make_quant_init(types.SimpleNamespace())
+
+    assert model.int4_customized_weight_config == {}
+    assert model.quant_attrs["nodes_to_exclude"] == ["/lm_head/MatMul"]
+
+
+@pytest.mark.parametrize("exclude_first", [False, True])
+def test_exact_quantization_rules_use_first_match(exclude_first):
+    node_name = "/lm_head/MatMul"
+    typed = types.SimpleNamespace(match={"name": node_name}, type="int8", exclude=False)
+    excluded = types.SimpleNamespace(match={"name": node_name}, type=None, exclude=True)
+    model = object.__new__(Model)
+    model.quant_config = types.SimpleNamespace(
+        weights=types.SimpleNamespace(
+            method="default",
+            overrides=[excluded, typed] if exclude_first else [typed, excluded],
+        )
+    )
+    model.quant_type = None
+    model.quant_attrs = {"nodes_to_exclude": [node_name]}
+
+    model.make_quant_init(types.SimpleNamespace())
+
+    if exclude_first:
+        assert model.int4_customized_weight_config == {}
+        assert model.quant_attrs["nodes_to_exclude"] == [node_name]
+    else:
+        assert model.int4_customized_weight_config == {node_name: {"bits": 8}}
+        assert model.quant_attrs["nodes_to_exclude"] == []
+
+
+def test_unsupported_typed_quantization_match_is_rejected():
+    model = object.__new__(Model)
+    model.quant_config = types.SimpleNamespace(
+        weights=types.SimpleNamespace(
+            method="default",
+            overrides=[types.SimpleNamespace(match={"name_regex": ".*down_proj.*"}, type="int8", exclude=False)],
+        )
+    )
+    model.quant_type = None
+
+    with pytest.raises(ValueError, match="only a preset or an exact node name"):
+        model.make_quant_init(types.SimpleNamespace())
+
+
+def test_int8_embedding_override_fails_until_export_is_supported():
+    model = object.__new__(Model)
+    model.quant_config = types.SimpleNamespace(
+        weights=types.SimpleNamespace(
+            method="default",
+            overrides=[
+                types.SimpleNamespace(
+                    match={"name": "/model/embed_tokens/Gather"},
+                    type="int8",
+                    exclude=False,
+                )
+            ],
+        )
+    )
+    model.quant_type = None
+
+    with pytest.raises(NotImplementedError, match="INT8 embedding export is not supported"):
+        model.make_quant_init(types.SimpleNamespace())
+
+
 def test_duplicate_node_names_are_rejected():
     builder = object.__new__(DFlash2Builder)
     builder.node_names = {"duplicate"}
@@ -395,6 +707,7 @@ def _quant_composite(
     last_matmul_type=None,
     io_dtype=ir.DataType.FLOAT16,
     ep="cuda",
+    use_qdq=False,
 ):
     model = _composite()
     model.decoder.exclude_lm_head = exclude_lm_head
@@ -408,6 +721,7 @@ def _quant_composite(
         "is_symmetric": True,
         "op_types_to_quantize": ["MatMul"],
         "nodes_to_exclude": [],
+        "use_qdq": use_qdq,
     }
     model.decoder.matmul_attrs = {"weights_prepacked": 1}
     if quantized_lm_head is None:
@@ -439,23 +753,59 @@ def test_precision_option_is_rejected_when_unknown(tmp_path, precision):
         )
 
 
-def test_precision_defaults_to_dense_bf16(tmp_path):
-    model = _composite()
+def test_precision_defaults_to_dense_bf16_with_adopted_target_head(tmp_path, monkeypatch):
+    captured = {}
+
+    class StubDFlash2Builder:
+        def __init__(self, *_args, **kwargs):
+            captured.update(kwargs)
+
+        def make_model(self):
+            pass
+
+    dflash2_module = importlib.import_module("models.builders.dflash2")
+    monkeypatch.setattr(dflash2_module, "DFlash2Builder", StubDFlash2Builder)
+    model = _quant_composite()
 
     model.make_dflash2_init(io_dtype=None, extra_options={"dflash2_path": _draft_checkpoint(tmp_path)})
+    model.make_dflash2_model(str(tmp_path))
 
     assert model.dflash2_attrs["precision"] == "bf16"
-    assert model.block_drafter_quant("bf16") is None
+    assert captured["quant"] is None
+    assert captured["lm_head_quant"] == {
+        "bits": 4,
+        "block_size": 32,
+        "prepack": 1,
+        "adopt_target": True,
+    }
 
 
 def test_quantized_drafter_reuses_the_targets_lm_head_names():
-    quant = _quant_composite().block_drafter_quant("int4")
+    model = _quant_composite()
+    quant = model.block_drafter_quant("int4")
 
     assert quant["bits"] == 4
     assert quant["block_size"] == 32
     assert quant["prepack"] == 1
     # Matching metadata lets the drafter adopt the target's exact quantized head during save.
-    assert quant["lm_head"] == {"bits": 4, "block_size": 32, "prepack": 1, "adopt_target": True}
+    assert model.block_drafter_lm_head_quant() == {
+        "bits": 4,
+        "block_size": 32,
+        "prepack": 1,
+        "adopt_target": True,
+    }
+
+
+def test_structured_drafter_quantization_does_not_inherit_target_layout():
+    quant_config = types.SimpleNamespace(
+        weights=types.SimpleNamespace(block_size=128),
+        format=types.SimpleNamespace(matmulnbits_weights_prepacked=0),
+    )
+
+    quant = _quant_composite().block_drafter_quant("int4", quant_config)
+
+    assert quant["block_size"] == 128
+    assert quant["prepack"] == 0
 
 
 @pytest.mark.parametrize(
@@ -474,26 +824,34 @@ def test_drafter_resolves_the_actual_target_lm_head_bit_width(onnx_dtype, last_m
     )
 
     head_bits, *_ = model.decoder.make_tied_quantized_embedding_input_names()
-    quant = model.block_drafter_quant("int4")
+    head_quant = model.block_drafter_lm_head_quant()
 
     assert head_bits == expected_bits
     if expected_bits == 4:
-        assert quant["lm_head"]["bits"] == expected_bits
+        assert head_quant["bits"] == expected_bits
     else:
         # The block-drafter quantizer cannot reproduce the target's Q8G initializer layout.
-        assert quant["lm_head"] is None
+        assert head_quant is None
 
 
 def test_dense_target_keeps_the_drafter_lm_head_dense():
     model = _quant_composite(weight_name=None, onnx_dtype=ir.DataType.FLOAT16)
 
-    assert model.block_drafter_quant("int4")["lm_head"] is None
+    assert model.block_drafter_lm_head_quant() is None
+
+
+# use_qdq makes the target write DequantizeLinear/MatMul over `*.weight_DQ_Q4`, so there is no
+# MatMulNBits to adopt and asking for one would abort the export.
+def test_qdq_target_keeps_the_drafter_lm_head_dense():
+    model = _quant_composite(use_qdq=True)
+
+    assert model.block_drafter_lm_head_quant() is None
 
 
 def test_prepacked_bf16_target_keeps_a_private_raw_quantized_drafter_head():
     model = _quant_composite(io_dtype=ir.DataType.BFLOAT16)
 
-    assert model.block_drafter_quant("int4")["lm_head"] == {
+    assert model.block_drafter_lm_head_quant() == {
         "bits": 4,
         "block_size": 32,
         "prepack": 0,
@@ -504,7 +862,7 @@ def test_prepacked_bf16_target_keeps_a_private_raw_quantized_drafter_head():
 def test_non_cuda_target_ignores_requested_prepack_for_shared_drafter_head():
     model = _quant_composite(ep="webgpu")
 
-    assert model.block_drafter_quant("int4")["lm_head"] == {
+    assert model.block_drafter_lm_head_quant() == {
         "bits": 4,
         "block_size": 32,
         "prepack": 0,
@@ -512,11 +870,40 @@ def test_non_cuda_target_ignores_requested_prepack_for_shared_drafter_head():
     }
 
 
+def _embed_quant_composite(**overrides):
+    model = _quant_composite()
+    model.decoder.quant_attrs["op_types_to_quantize"] = ["MatMul", "Gather"]
+    for name, value in overrides.items():
+        setattr(model.decoder, name, value)
+    return model
+
+
+def test_quantized_target_table_is_adopted_by_the_drafter():
+    assert _embed_quant_composite().block_drafter_embed_quant() == {"bits": 4, "block_size": 32}
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        # A dense target has no `model.embed_tokens.weight_Q4` to adopt.
+        {"onnx_dtype": ir.DataType.FLOAT16},
+        {"exclude_embeds": True},
+        # `rtn`/`k_quant` name the table differently.
+        {"quantization_algo": "k_quant"},
+        # shared_embeddings gathers from a reshape of the LM head weight instead of its own table.
+        {"tied_quantized_embeddings": True},
+    ],
+)
+def test_an_unadoptable_target_table_leaves_the_drafter_embedding_dense(overrides):
+    assert _embed_quant_composite(**overrides).block_drafter_embed_quant() is None
+
+
 def test_private_quantized_drafter_head_is_not_shared(tmp_path):
     model = _composite()
     model.dflash2 = types.SimpleNamespace(
         filename="dflash2.onnx",
         lm_head_quant={"bits": 4, "block_size": 32, "prepack": 0, "adopt_target": False},
+        adopt_target_tensors=lambda _target_model_path: None,
         save_model=lambda _output_dir: None,
     )
     captured = {}
@@ -529,12 +916,116 @@ def test_private_quantized_drafter_head_is_not_shared(tmp_path):
 
     model.save_dflash2_model(str(tmp_path))
 
-    assert captured["adopt_source_initializers"] == set()
-    assert captured["required_source_initializers"] == set()
+    assert captured["adopt_source_initializers"] == frozenset()
+    assert captured["required_source_initializers"] == frozenset()
     assert captured["excluded_source_initializers"] == {
         "lm_head.MatMul.weight_Q4",
         "lm_head.MatMul.weight_scales",
     }
+
+
+def test_off_policy_keeps_embedding_and_head_private(tmp_path):
+    model = _composite()
+    model.dflash2 = types.SimpleNamespace(
+        filename="dflash2.onnx",
+        lm_head_quant=None,
+        save_model=lambda _output_dir: None,
+    )
+    model.dflash2_shared_weight_policies = {"embedding": "off", "lm_head": "off"}
+    captured = {}
+
+    def share_initializers(*args, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    model.share_initializers = share_initializers
+
+    model.save_dflash2_model(str(tmp_path))
+
+    assert captured["excluded_source_initializers"] == {
+        "model.embed_tokens.weight",
+        "lm_head.MatMul.weight",
+    }
+
+
+def test_off_policy_uses_emitted_fp8_head_inventory(tmp_path):
+    model = _composite()
+    model.dflash2 = types.SimpleNamespace(
+        filename="dflash2.onnx",
+        lm_head_quant=None,
+        graph=types.SimpleNamespace(
+            initializers={
+                "model.embed_tokens.weight": object(),
+                "lm_head.MatMul.fp8_weight": object(),
+                "lm_head.MatMul.fp8_weight_scale": object(),
+            }
+        ),
+        save_model=lambda _output_dir: None,
+    )
+    model.dflash2_shared_weight_policies = {"embedding": "off", "lm_head": "off"}
+    captured = {}
+
+    def share_initializers(*args, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    model.share_initializers = share_initializers
+
+    model.save_dflash2_model(str(tmp_path))
+
+    assert captured["excluded_source_initializers"] == {
+        "model.embed_tokens.weight",
+        "lm_head.MatMul.fp8_weight",
+        "lm_head.MatMul.fp8_weight_scale",
+    }
+
+
+def test_off_policy_suppresses_unshared_adopted_head_warning(tmp_path, capsys):
+    model = _composite()
+    model.dflash2 = types.SimpleNamespace(
+        filename="dflash2.onnx",
+        lm_head_quant={"bits": 4, "block_size": 32, "prepack": 0, "adopt_target": True},
+        save_model=lambda _output_dir: None,
+    )
+    model.dflash2_shared_weight_policies = {"embedding": "auto", "lm_head": "off"}
+    model.share_initializers = lambda *args, **kwargs: []
+
+    model.save_dflash2_model(str(tmp_path))
+
+    assert "may no longer agree" not in capsys.readouterr().out
+
+
+def test_required_policy_requests_exact_target_adoption(tmp_path):
+    model = _composite()
+    model.dflash2 = types.SimpleNamespace(
+        filename="dflash2.onnx",
+        lm_head_quant=None,
+        save_model=lambda _output_dir: None,
+    )
+    model.dflash2_shared_weight_policies = {"embedding": "required", "lm_head": "required"}
+    required = {"model.embed_tokens.weight", "lm_head.MatMul.weight"}
+
+    def share_initializers(*args, **kwargs):
+        assert kwargs["adopt_source_initializers"] == required
+        assert kwargs["required_source_initializers"] == required
+        return [{"name": name} for name in required]
+
+    model.share_initializers = share_initializers
+
+    model.save_dflash2_model(str(tmp_path))
+
+
+def test_required_policy_rejects_a_private_quantized_head(tmp_path):
+    model = _composite()
+    model.dflash2 = types.SimpleNamespace(
+        filename="dflash2.onnx",
+        lm_head_quant={"bits": 4, "block_size": 32, "prepack": 0, "adopt_target": False},
+        save_model=lambda _output_dir: None,
+    )
+    model.dflash2_shared_weight_policies = {"embedding": "auto", "lm_head": "required"}
+
+    with pytest.raises(ValueError, match="required LM-head sharing is incompatible"):
+        model.save_dflash2_model(str(tmp_path))
 
 
 @pytest.mark.parametrize(
@@ -548,10 +1039,11 @@ def test_private_quantized_drafter_head_is_not_shared(tmp_path):
     ],
 )
 def test_unshareable_target_head_leaves_the_drafter_head_dense(kwargs):
-    quant = _quant_composite(**kwargs).block_drafter_quant("int4")
+    model = _quant_composite(**kwargs)
+    quant = model.block_drafter_quant("int4")
 
     assert quant["bits"] == 4
-    assert quant["lm_head"] is None
+    assert model.block_drafter_lm_head_quant() is None
 
 
 def test_quantized_body_emits_matmulnbits_without_transposing(tmp_path):
@@ -561,7 +1053,7 @@ def test_quantized_body_emits_matmulnbits_without_transposing(tmp_path):
         ir.DataType.FLOAT16,
         paged_block_size=256,
         max_position_embeddings=128,
-        quant={"bits": 4, "block_size": 8, "prepack": 0, "lm_head": None},
+        quant={"bits": 4, "block_size": 8, "prepack": 0},
     )
 
     builder.matmul("/probe/MatMul", "hidden_states", torch.ones((16, 8)), 8, 16, "num_block")
@@ -582,7 +1074,7 @@ def test_quantized_body_uses_ort_tie_breaking(tmp_path):
         ir.DataType.FLOAT16,
         paged_block_size=256,
         max_position_embeddings=128,
-        quant={"bits": 4, "block_size": 32, "prepack": 0, "lm_head": None},
+        quant={"bits": 4, "block_size": 32, "prepack": 0},
     )
     values = torch.tensor([[1.0, -1.0, 0.5, -0.5, 0.25, -0.25, 0.125, -0.125] * 4])
 
@@ -594,29 +1086,47 @@ def test_quantized_body_uses_ort_tie_breaking(tmp_path):
     np.testing.assert_array_equal(scales, [[0.125]])
 
 
-# The prepacked fpA_intB kernel takes FP16 activations only, so the bf16 body must ship the
-# plain blockwise layout even though the target it drafts for is prepacked.
-def test_bf16_body_never_prepacks_even_when_the_target_does(tmp_path):
+def test_bf16_body_honors_prepacked_weight_format(tmp_path):
     builder = DFlash2Builder(
         _draft_checkpoint(tmp_path),
         str(tmp_path),
         ir.DataType.FLOAT16,
         paged_block_size=256,
         max_position_embeddings=128,
-        quant={"bits": 4, "block_size": 8, "prepack": 1, "lm_head": None},
+        quant={"bits": 4, "block_size": 32, "prepack": 1},
     )
 
-    builder.matmul("/probe/MatMul", "hidden_states", torch.ones((16, 8)), 8, 16, "num_block")
+    builder.matmul("/probe/MatMul", "hidden_states", torch.ones((64, 64)), 64, 64, "num_block")
 
     node = next(node for node in builder.graph if node.name == "/probe/MatMul")
     assert builder.io_dtype == ir.DataType.BFLOAT16
+    assert node.attributes["weight_prepacked"].value == 1
+
+
+@pytest.mark.parametrize(("bits", "out_features"), [(4, 32), (8, 48)])
+def test_prepack_keeps_ineligible_output_width_raw(tmp_path, bits, out_features):
+    builder = DFlash2Builder(
+        _draft_checkpoint(tmp_path),
+        str(tmp_path),
+        ir.DataType.FLOAT16,
+        paged_block_size=256,
+        max_position_embeddings=128,
+        quant={"bits": bits, "block_size": 32, "prepack": 1},
+    )
+
+    builder.matmul("/probe/MatMul", "hidden_states", torch.ones((out_features, 64)), 64, out_features, "num_block")
+
+    node = next(node for node in builder.graph if node.name == "/probe/MatMul")
+    assert node.op_type == "MatMulNBits"
     assert "weight_prepacked" not in node.attributes
+    qweight = builder.graph.initializers[f"probe.MatMul.weight_Q{bits}"].const_value
+    assert tuple(qweight.shape) == (out_features, 2, 32 * bits // 8)
 
 
 @pytest.mark.parametrize("bits", [None, 4, 8])
 @pytest.mark.parametrize("fuse_gate_up", [False, True])
 def test_mlp_gate_up_fusion_preserves_weight_rows(tmp_path, bits, fuse_gate_up):
-    quant = {"bits": bits, "block_size": 8, "prepack": 0, "lm_head": None} if bits else None
+    quant = {"bits": bits, "block_size": 8, "prepack": 0} if bits else None
     builder = DFlash2Builder(
         _draft_checkpoint(tmp_path),
         str(tmp_path),
@@ -692,7 +1202,7 @@ def test_mlp_gate_up_fusion_execution_matches_unfused(tmp_path, bits):
             ir.DataType.FLOAT,
             paged_block_size=256,
             max_position_embeddings=128,
-            quant={"bits": bits, "block_size": 32, "prepack": 0, "lm_head": None} if bits else None,
+            quant={"bits": bits, "block_size": 32, "prepack": 0} if bits else None,
             fuse_gate_up=fused,
         )
         builder.io_dtype = ir.DataType.FLOAT
@@ -712,16 +1222,67 @@ def test_mlp_gate_up_fusion_execution_matches_unfused(tmp_path, bits):
         np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-6)
 
 
-def test_quantized_lm_head_matches_the_targets_initializer_names(tmp_path):
+def _quantized_head_builder(tmp_path, bits=4, block_size=8):
     builder = DFlash2Builder(
         _draft_checkpoint(tmp_path),
         str(tmp_path),
         ir.DataType.FLOAT16,
         paged_block_size=256,
         max_position_embeddings=128,
-        quant={"bits": 4, "block_size": 8, "prepack": 0, "lm_head": {"bits": 4, "block_size": 8, "prepack": 0}},
+        quant={
+            "bits": bits,
+            "block_size": block_size,
+            "prepack": 0,
+        },
+        lm_head_quant={"bits": bits, "block_size": block_size, "prepack": 0, "adopt_target": True},
     )
     builder.weights = {"lm_head.weight": torch.ones((builder.vocab_size, builder.hidden_size))}
+    return builder
+
+
+def _save_target(out_dir, node, initializers, hidden_size, vocab_size):
+    graph = onnx.helper.make_graph(
+        [node],
+        "target",
+        [onnx.helper.make_tensor_value_info("hidden_states", onnx.TensorProto.FLOAT16, ["rows", hidden_size])],
+        [onnx.helper.make_tensor_value_info("logits", onnx.TensorProto.FLOAT16, ["rows", vocab_size])],
+        [onnx.numpy_helper.from_array(array, name) for name, array in initializers.items()],
+    )
+    model = onnx.helper.make_model(
+        graph,
+        opset_imports=[onnx.helper.make_opsetid("", 21), onnx.helper.make_opsetid("com.microsoft", 1)],
+    )
+    path = os.path.join(out_dir, "model.onnx")
+    onnx.save_model(model, path, save_as_external_data=True, location="model.onnx.data", size_threshold=0)
+    return path
+
+
+def _save_quantized_target(out_dir, builder, bits=4, block_size=8, weight_prepacked=2):
+    columns = builder.hidden_size // block_size
+    qweight = np.arange(builder.vocab_size * columns * block_size * bits // 8, dtype=np.uint8).reshape(
+        builder.vocab_size, columns, block_size * bits // 8
+    )
+    scales = np.arange(builder.vocab_size * columns, dtype=np.float16).reshape(builder.vocab_size, columns)
+    initializers = {f"lm_head.MatMul.weight_Q{bits}": qweight, "lm_head.MatMul.weight_scales": scales}
+    node = onnx.helper.make_node(
+        "MatMulNBits",
+        ["hidden_states", *initializers],
+        ["logits"],
+        # The quantizer renames the target's node, so the drafter cannot find it by name.
+        name="/lm_head/MatMul_Q4",
+        domain="com.microsoft",
+        bits=bits,
+        block_size=block_size,
+        K=builder.hidden_size,
+        N=builder.vocab_size,
+        weight_prepacked=weight_prepacked,
+    )
+    path = _save_target(out_dir, node, initializers, builder.hidden_size, builder.vocab_size)
+    return path, qweight, scales
+
+
+def test_quantized_lm_head_matches_the_targets_initializer_names(tmp_path):
+    builder = _quantized_head_builder(tmp_path)
 
     output = builder.make_lm_head("hidden_states", "num_sample")
 
@@ -731,46 +1292,207 @@ def test_quantized_lm_head_matches_the_targets_initializer_names(tmp_path):
         "lm_head.MatMul.weight_Q4",
         "lm_head.MatMul.weight_scales",
     ]
-    # Scales ride at the target's dtype, not the drafter's bf16 body dtype, or they cannot fold.
-    assert builder.graph.initializers["lm_head.MatMul.weight_scales"].const_value.dtype == ir.DataType.FLOAT16
+    # The weights are the target's, so nothing is quantized or registered until adoption.
+    assert "lm_head.MatMul.weight_Q4" not in builder.graph.initializers
     assert builder.values[output].dtype == ir.DataType.FLOAT16
 
 
-@pytest.mark.parametrize(
-    "bits,hidden_size,vocab_size,prepack,external_dtype",
-    [
-        (4, 32, 32, 1, ir.DataType.FLOAT16),
-        (8, 32, 33, 1, ir.DataType.FLOAT16),
-        (4, 33, 64, 1, ir.DataType.FLOAT16),
-        (4, 32, 64, 2, ir.DataType.FLOAT16),
-        (4, 32, 64, 1, ir.DataType.BFLOAT16),
-    ],
-)
-def test_ineligible_lm_head_keeps_blockwise_layout(tmp_path, bits, hidden_size, vocab_size, prepack, external_dtype):
-    builder = DFlash2Builder(
-        _draft_checkpoint(tmp_path),
-        str(tmp_path),
-        external_dtype,
-        paged_block_size=256,
-        max_position_embeddings=128,
-        quant={
-            "bits": bits,
-            "block_size": 32,
-            "prepack": prepack,
-            "lm_head": {"bits": bits, "block_size": 32, "prepack": prepack},
-        },
+def test_quantized_lm_head_adopts_the_targets_bytes_and_attributes(tmp_path):
+    builder = _quantized_head_builder(tmp_path)
+    builder.make_lm_head("hidden_states", "num_sample")
+    target_path, qweight, scales = _save_quantized_target(tmp_path, builder)
+
+    builder.adopt_target_tensors(target_path)
+
+    initializers = builder.graph.initializers
+    np.testing.assert_array_equal(initializers["lm_head.MatMul.weight_Q4"].const_value.numpy(), qweight)
+    np.testing.assert_array_equal(initializers["lm_head.MatMul.weight_scales"].const_value.numpy(), scales)
+    node = next(node for node in builder.graph if node.name == "/lm_head/MatMul")
+    # The target's layout decision comes across with its bytes rather than being recomputed.
+    assert node.attributes["weight_prepacked"].value == 2
+    assert node.attributes["K"].value == builder.hidden_size
+    assert node.attributes["N"].value == builder.vocab_size
+    assert builder.lm_head_adoption is None
+
+
+def test_adopted_lm_head_survives_a_round_trip_to_disk(tmp_path):
+    builder = _quantized_head_builder(tmp_path)
+    builder.make_lm_head("hidden_states", "num_sample")
+    builder.graph.outputs.append(builder.values[builder.out("/lm_head/MatMul")])
+    builder.graph.inputs.append(builder.make_value("hidden_states", ir.DataType.FLOAT16, ["rows", builder.hidden_size]))
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    target_path, qweight, _ = _save_quantized_target(target_dir, builder)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    builder.adopt_target_tensors(target_path)
+    builder.save_model(str(out_dir))
+
+    saved = onnx.load(str(out_dir / builder.filename))
+    initializer = next(init for init in saved.graph.initializer if init.name == "lm_head.MatMul.weight_Q4")
+    np.testing.assert_array_equal(onnx.numpy_helper.to_array(initializer, base_dir=str(out_dir)), qweight)
+
+
+def test_saving_before_adoption_is_rejected(tmp_path):
+    builder = _quantized_head_builder(tmp_path)
+    builder.make_lm_head("hidden_states", "num_sample")
+
+    with pytest.raises(ValueError, match="adopt_target_tensors"):
+        builder.save_model(str(tmp_path))
+
+
+def _quantized_embedding_target(out_dir, builder, bits=4, block_size=64):
+    columns = builder.hidden_size // block_size
+    qweight = ir.tensor(
+        np.arange(builder.vocab_size * builder.hidden_size, dtype=np.uint8).reshape(
+            builder.vocab_size, builder.hidden_size
+        )
+        % 16,
+        dtype=ir.DataType.INT4,
+        name=f"model.embed_tokens.weight_Q{bits}",
     )
-    builder.hidden_size = hidden_size
-    builder.vocab_size = vocab_size
-    builder.weights = {"lm_head.weight": torch.ones((vocab_size, hidden_size))}
+    scales = np.arange(builder.vocab_size * columns, dtype=np.float16).reshape(builder.vocab_size, columns)
+    node = onnx.helper.make_node(
+        "GatherBlockQuantized",
+        [f"model.embed_tokens.weight_Q{bits}", "input_ids", "model.embed_tokens.weight_scales"],
+        ["embeddings"],
+        # The quantizer renames the target's node, so the drafter cannot find it by name.
+        name="/model/embed_tokens/Gather_Q4",
+        domain="com.microsoft",
+        block_size=block_size,
+        gather_axis=0,
+        quantize_axis=1,
+    )
+    graph = onnx.helper.make_graph(
+        [node],
+        "target",
+        [onnx.helper.make_tensor_value_info("input_ids", onnx.TensorProto.INT64, ["rows"])],
+        [onnx.helper.make_tensor_value_info("embeddings", onnx.TensorProto.FLOAT16, ["rows", builder.hidden_size])],
+        [
+            ir.to_proto(qweight),
+            onnx.numpy_helper.from_array(scales, "model.embed_tokens.weight_scales"),
+        ],
+    )
+    model = onnx.helper.make_model(
+        graph,
+        opset_imports=[onnx.helper.make_opsetid("", 21), onnx.helper.make_opsetid("com.microsoft", 1)],
+    )
+    path = os.path.join(out_dir, "model.onnx")
+    onnx.save_model(model, path, save_as_external_data=True, location="model.onnx.data", size_threshold=0)
+    return path, qweight.numpy(), scales
+
+
+def _quantized_embedding_builder(tmp_path, block_size=64):
+    builder = _quantized_head_builder(tmp_path)
+    builder.embed_quant = {"bits": 4, "block_size": block_size}
+    builder.weights["embed_tokens.weight"] = torch.ones((builder.vocab_size, builder.hidden_size))
+    return builder
+
+
+def test_a_dense_target_leaves_the_drafter_embedding_dense(tmp_path):
+    builder = _quantized_head_builder(tmp_path)
+    builder.weights["embed_tokens.weight"] = torch.ones((builder.vocab_size, builder.hidden_size))
+
+    builder.make_embedding("/dflash2/embed_tokens/Gather", "num_sample")
+
+    node = next(node for node in builder.graph if node.name == "/dflash2/embed_tokens/Gather")
+    assert node.op_type == "Gather"
+    assert "model.embed_tokens.weight" in builder.graph.initializers
+    assert builder.embed_adoption is None
+
+
+def test_quantized_embedding_matches_the_targets_initializer_names(tmp_path):
+    builder = _quantized_embedding_builder(tmp_path)
+
+    output = builder.make_embedding("/dflash2/embed_tokens/Gather", "num_sample")
+
+    node = next(node for node in builder.graph if node.name == "/dflash2/embed_tokens/Gather")
+    assert node.op_type == "GatherBlockQuantized"
+    assert [value.name for value in node.inputs] == [
+        "model.embed_tokens.weight_Q4",
+        "input_ids",
+        "model.embed_tokens.weight_scales",
+    ]
+    # The table is the target's, so nothing is quantized or registered until adoption.
+    assert "model.embed_tokens.weight_Q4" not in builder.graph.initializers
+    assert builder.values[output].dtype == ir.DataType.FLOAT16
+
+
+def test_quantized_embedding_adopts_the_targets_bytes_and_attributes(tmp_path):
+    builder = _quantized_embedding_builder(tmp_path, block_size=8)
+    builder.make_embedding("/dflash2/embed_tokens/Gather", "num_sample")
+    target_path, qweight, scales = _quantized_embedding_target(tmp_path, builder, block_size=64)
+
+    builder.adopt_target_tensors(target_path)
+
+    initializers = builder.graph.initializers
+    np.testing.assert_array_equal(initializers["model.embed_tokens.weight_Q4"].const_value.numpy(), qweight)
+    np.testing.assert_array_equal(initializers["model.embed_tokens.weight_scales"].const_value.numpy(), scales)
+    node = next(node for node in builder.graph if node.name == "/dflash2/embed_tokens/Gather")
+    # The target's block size comes across with its bytes rather than being recomputed.
+    assert node.attributes["block_size"].value == 64
+    assert node.attributes["gather_axis"].value == 0
+    assert builder.embed_adoption is None
+
+
+def test_saving_before_embedding_adoption_is_rejected(tmp_path):
+    builder = _quantized_embedding_builder(tmp_path)
+    builder.make_embedding("/dflash2/embed_tokens/Gather", "num_sample")
+
+    with pytest.raises(ValueError, match="adopt_target_tensors"):
+        builder.save_model(str(tmp_path))
+
+
+def test_a_target_embedding_the_drafter_cannot_adopt_is_rejected(tmp_path):
+    builder = _quantized_embedding_builder(tmp_path)
+    builder.make_embedding("/dflash2/embed_tokens/Gather", "num_sample")
+    initializers = {"model.embed_tokens.weight": np.ones((builder.vocab_size, builder.hidden_size), dtype=np.float16)}
+    node = onnx.helper.make_node(
+        "Gather", ["model.embed_tokens.weight", "hidden_states"], ["logits"], name="/model/embed_tokens/Gather"
+    )
+    target_path = _save_target(tmp_path, node, initializers, builder.hidden_size, builder.vocab_size)
+
+    with pytest.raises(ValueError, match="different input space"):
+        builder.adopt_target_tensors(target_path)
+
+
+def test_a_target_head_the_drafter_cannot_adopt_is_rejected(tmp_path):
+    builder = _quantized_head_builder(tmp_path)
+    builder.make_lm_head("hidden_states", "num_sample")
+    initializers = {
+        "lm_head.MatMul.fp8_weight": np.zeros((builder.vocab_size, builder.hidden_size), dtype=np.uint8),
+        "lm_head.MatMul.fp8_weight_scale": np.ones((builder.vocab_size, 1), dtype=np.float32),
+    }
+    node = onnx.helper.make_node(
+        "MatMulBlockQuantizedFp8Weight",
+        ["hidden_states", *initializers],
+        ["logits"],
+        name="/lm_head/MatMul",
+        domain="com.microsoft",
+        block_size=builder.hidden_size,
+    )
+    target_path = _save_target(tmp_path, node, initializers, builder.hidden_size, builder.vocab_size)
+
+    with pytest.raises(ValueError, match="reject nearly every draft"):
+        builder.adopt_target_tensors(target_path)
+
+
+# A prequantized head overrides `--precision`, and the drafter has to follow the target there:
+# scoring drafts with a head the target does not verify with collapses acceptance.
+def test_prequantized_fp8_target_head_overrides_the_requested_precision(tmp_path):
+    builder = _quantized_head_builder(tmp_path)
+    builder.weights = {
+        "lm_head.weight": torch.ones((builder.vocab_size, builder.hidden_size), dtype=torch.float8_e4m3fn),
+        "lm_head.weight_scale": torch.ones(()),
+    }
 
     builder.make_lm_head("hidden_states", "num_sample")
 
     node = next(node for node in builder.graph if node.name == "/lm_head/MatMul")
-    assert node.op_type == "MatMulNBits"
-    assert "weight_prepacked" not in node.attributes
-    weight = builder.graph.initializers[f"lm_head.MatMul.weight_Q{bits}"].const_value
-    assert tuple(weight.shape) == (vocab_size, (hidden_size + 31) // 32, 32 * bits // 8)
+    assert node.op_type == "MatMulBlockQuantizedFp8Weight"
+    assert builder.lm_head_quant is None
+    assert builder.lm_head_adoption is None
 
 
 @pytest.mark.parametrize("scale_shape", [(), (1,), (1, 32), (32, 1)])
@@ -846,6 +1568,43 @@ def test_drafter_uses_target_context_length(tmp_path, monkeypatch, fuse_gate_up)
 
     assert captured["max_position"] == model.decoder.context_length
     assert captured["fuse_gate_up"] is (str(fuse_gate_up).lower() == "true")
+
+
+def test_drafter_resolves_target_repository_to_local_snapshot(tmp_path, monkeypatch):
+    captured = {}
+    snapshot_dir = tmp_path / "snapshot"
+    snapshot_dir.mkdir()
+
+    class StubDFlash2Builder:
+        def __init__(self, _draft_dir, target_dir, _io_dtype, _paged_block_size, _max_position, **_kwargs):
+            captured["target_dir"] = target_dir
+
+        def make_model(self):
+            pass
+
+    dflash2_module = importlib.import_module("models.builders.dflash2")
+    monkeypatch.setattr(dflash2_module, "DFlash2Builder", StubDFlash2Builder)
+    monkeypatch.setattr(
+        "huggingface_hub.snapshot_download",
+        lambda repo_id, cache_dir, token: captured.update(
+            repo_id=repo_id, cache_dir=cache_dir, token=token
+        )
+        or str(snapshot_dir),
+    )
+    model = _composite()
+    model.decoder.model_name_or_path = "Qwen/Qwen3.8-27B"
+    model.decoder.cache_dir = str(tmp_path / "cache")
+    model.decoder.hf_token = False
+    model.make_dflash2_init(io_dtype=None, extra_options={"dflash2_path": _draft_checkpoint(tmp_path)})
+
+    model.make_dflash2_model("Qwen/Qwen3.8-27B")
+
+    assert captured == {
+        "repo_id": "Qwen/Qwen3.8-27B",
+        "cache_dir": str(tmp_path / "cache"),
+        "token": False,
+        "target_dir": str(snapshot_dir),
+    }
 
 
 def test_gate_up_fusion_defaults_off(tmp_path):

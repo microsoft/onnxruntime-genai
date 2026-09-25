@@ -6,9 +6,19 @@ DecoderOnly_Model::DecoderOnly_Model(std::unique_ptr<Config> config, OrtEnv& ort
     : Model{std::move(config)} {
   session_decoder_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
   session_info_.Add(*session_decoder_);
+  if (!config_->model.embedding.filename.empty()) {
+    if (!config_->engine.dynamic_batching) {
+      throw std::runtime_error("Decoder-only CPU embedding requires the dynamic-batching Engine.");
+    }
+    cpu_embedding_ = std::make_shared<CpuEmbedding>(*this, ort_env);
+    cpu_embedding_->ValidateConsumer(session_info_, config_->model.decoder.inputs.embeddings);
+  }
 }
 
 std::unique_ptr<State> DecoderOnly_Model::CreateState(DeviceSpan<int32_t> sequence_lengths_unk, const GeneratorParams& params) const {
+  if (cpu_embedding_) {
+    throw std::runtime_error("Decoder-only CPU embedding requires Engine rather than Generator.");
+  }
   return std::make_unique<DecoderOnly_State>(*this, sequence_lengths_unk, params);
 }
 
@@ -16,7 +26,7 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<
     : State{params, model},
       model_{model},
       kv_cache_(model_.p_device_kvcache_->CreateKeyValueCache(*this)),
-      recurrent_state_(CreateRecurrentState(*this)),
+      recurrent_state_(CreateRecurrentState(*this, /*graph_capture_variants_supported=*/true)),
       position_inputs_{model_.p_device_inputs_->CreatePositionInputs(*this, sequence_lengths_unk, model_.config_->model.decoder.inputs.attention_mask)} {
   input_ids_.Add();
   position_inputs_->Add();

@@ -23,6 +23,7 @@
 #include "engine_test_doubles.h"
 #include "engine/request_status.h"
 #include "models/preprocessing/genai_tokenizer.h"
+#include "models/session_options.h"
 
 namespace Generators {
 namespace test {
@@ -480,6 +481,123 @@ TEST_F(RequestLifecycleTest, StaticEngineRejectsModelConfiguredChunking) {
   }
 }
 
+TEST_F(RequestLifecycleTest, RuntimeProfilesRejectNonCudaModelVariant) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
+  Config::RuntimeProfile profile;
+  profile.id = "gpu-profile";
+  profile.eligibility.minimum_total_device_memory_bytes = 1;
+  profile.overlay.dynamic_batching.num_blocks = 64;
+  config->runtime_profiles.push_back(std::move(profile));
+  EXPECT_THROW(CreateModel(GetOrtEnv(), std::move(config)), std::runtime_error);
+}
+
+TEST_F(RequestLifecycleTest, RuntimeProfileLoadsWithImplicitCudaPluginDevice) {
+  if (FindRegisteredEpDevices("CUDAExecutionProvider").empty()) {
+    GTEST_SKIP() << "CUDA plugin is not registered";
+  }
+
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
+  config->engine.dynamic_batching = Config::Engine::DynamicBatching{};
+  config->model.decoder.session_options.providers = {"cuda"};
+  config->model.decoder.session_options.provider_options = {{"cuda", {}}};
+  Config::RuntimeProfile profile;
+  profile.id = "implicit-plugin-device";
+  profile.eligibility.minimum_total_device_memory_bytes = 1;
+  profile.overlay.dynamic_batching.num_blocks = 64;
+  config->runtime_profiles.push_back(std::move(profile));
+
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+
+  ASSERT_TRUE(model->config_->engine.dynamic_batching);
+  ASSERT_TRUE(model->config_->engine.dynamic_batching->num_blocks);
+  EXPECT_EQ(*model->config_->engine.dynamic_batching->num_blocks, 64u);
+}
+
+TEST_F(RequestLifecycleTest, CapabilitiesReportAppliedRuntimeProfileTuning) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
+  config->engine.dynamic_batching = Config::Engine::DynamicBatching{};
+  Config::RuntimeProfile profile;
+  profile.id = "larger-gpu";
+  profile.eligibility.minimum_total_device_memory_bytes = 1;
+  profile.overlay.dynamic_batching.max_batch_size = 12;
+  profile.overlay.dynamic_batching.max_scheduled_tokens = 3072;
+  config->runtime_profiles.push_back(std::move(profile));
+  ApplyRuntimeProfile(*config, 1);
+  config->runtime_profiles.clear();
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  auto engine = MakeDoublesEngine(model, /*capacity=*/12, EosToken(*model));
+
+  const auto capabilities = engine.engine->GetCapabilities();
+
+  EXPECT_EQ(capabilities.configured_max_batch_size, 12u);
+  EXPECT_EQ(capabilities.max_scheduled_tokens, 3072u);
+}
+
+TEST_F(RequestLifecycleTest, CapabilitiesReportDefaultStaticBatchSetting) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
+  config->engine.dynamic_batching.reset();
+  config->engine.static_batching.reset();
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  auto engine = MakeStaticDoublesEngine(model, /*capacity=*/4, EosToken(*model));
+
+  const auto capabilities = engine.engine->GetCapabilities();
+
+  EXPECT_EQ(capabilities.configured_max_batch_size, 4u);
+  EXPECT_EQ(capabilities.max_scheduled_tokens, 0u);
+  EXPECT_EQ(capabilities.max_request_length, 0u);
+
+  const auto configured_max_length = static_cast<size_t>(model->config_->search.max_length);
+  EXPECT_NO_THROW(engine.engine->CreateRequest());
+
+  RequestOptions boundary_options;
+  boundary_options.max_session_tokens = configured_max_length;
+  EXPECT_NO_THROW(engine.engine->CreateRequest(boundary_options));
+
+  RequestOptions excessive_options;
+  excessive_options.max_session_tokens = configured_max_length + 1;
+  try {
+    static_cast<void>(engine.engine->CreateRequest(excessive_options));
+    FAIL() << "Expected max_session_tokens above search.max_length to fail.";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string(error.what()).find("model-configured search.max_length"),
+              std::string::npos);
+    EXPECT_EQ(std::string(error.what()).find("max_request_length"),
+              std::string::npos);
+  }
+}
+
+TEST_F(RequestLifecycleTest, CapabilitiesReportExplicitStaticBatchSetting) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
+  config->engine.dynamic_batching.reset();
+  config->engine.static_batching = Config::Engine::StaticBatching{8};
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  auto engine = MakeStaticDoublesEngine(model, /*capacity=*/8, EosToken(*model));
+
+  const auto capabilities = engine.engine->GetCapabilities();
+
+  EXPECT_EQ(capabilities.configured_max_batch_size, 8u);
+  EXPECT_EQ(capabilities.max_scheduled_tokens, 0u);
+  EXPECT_EQ(capabilities.max_request_length, 0u);
+}
+
+TEST_F(RequestLifecycleTest, StaticEngineDoesNotLoadDisabledMtpHead) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/dummy-decoder");
+  config->model.type = "decoder";
+  config->engine.dynamic_batching.reset();
+  config->model.mtp.enabled = false;
+  config->model.mtp.filename = "missing-mtp-head.onnx";
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+
+  auto dependencies = Engine::CreateDependencies(model);
+
+  EXPECT_EQ(dependencies.mtp_model, nullptr);
+  EXPECT_EQ(dependencies.mtp_cache_manager, nullptr);
+  EXPECT_EQ(dependencies.mtp_model_executor, nullptr);
+  EXPECT_FALSE(model->config_->engine.hidden_states_output_required);
+  EXPECT_NO_THROW(static_cast<void>(
+      std::make_shared<Engine>(model, std::move(dependencies))));
+}
+
 // An Engine assembled from injected dependencies never runs Engine::CreateDependencies, so the
 // static scheduler keeps its own admission guard. Admission is rejected before the batch is
 // touched, leaving the Request retryable on a dynamic Engine.
@@ -567,6 +685,89 @@ TEST_F(RequestLifecycleTest, BeginTurnIsRejectedWhileActive) {
   EXPECT_THROW(request->BeginTurn(more), std::runtime_error);
   EXPECT_EQ(request->status_, RequestStatus::Active);
   EXPECT_EQ(request->CurrentSequenceLength(), length_before);
+}
+
+TEST_F(RequestLifecycleTest, RewindToTurnStartRejectsInvalidLifecycleAndUnknownTurn) {
+  auto request = NewRequest();
+  EXPECT_THROW(request->RewindToStartOfTurn(1), std::runtime_error);
+
+  const auto prompt = Prompt();
+  const uint64_t turn_id = request->BeginTurn(prompt);
+  EXPECT_THROW(request->RewindToStartOfTurn(turn_id), std::runtime_error);
+  request->Schedule();
+  EXPECT_THROW(request->RewindToStartOfTurn(turn_id), std::runtime_error);
+
+  ASSERT_TRUE(request->Cancel(turn_id));
+  ASSERT_EQ(RunOne(*engine_.engine).request, request);
+  const auto completed = request->Snapshot();
+  EXPECT_THROW(request->RewindToStartOfTurn(turn_id + 1), std::runtime_error);
+  const auto rejected = request->Snapshot();
+  EXPECT_EQ(rejected.current_sequence_length,
+            completed.current_sequence_length);
+  EXPECT_EQ(rejected.processed_sequence_length,
+            completed.processed_sequence_length);
+
+  EXPECT_NO_THROW(request->RewindToStartOfTurn(turn_id));
+  EXPECT_EQ(request->CurrentSequenceLength(), 0);
+  EXPECT_EQ(request->CurrentTurnId(), 1u);
+  EXPECT_EQ(request->FinishReason(),
+            GenerationFinishReason::Canceled);
+
+  request->Close();
+  EXPECT_THROW(request->RewindToStartOfTurn(turn_id), std::runtime_error);
+}
+
+TEST_F(RequestLifecycleTest, RewindToTurnStartPrunesBranchAndKeepsTurnIdsMonotonic) {
+  const auto prompt = Prompt();
+  auto request = CreateRequestWithPrompt(engine_.engine, prompt);
+  ASSERT_EQ(RunOne(*engine_.engine).request, request);
+  ASSERT_TRUE(request->IsTurnComplete());
+  const int64_t retained_length = request->CurrentSequenceLength();
+
+  const std::array<int32_t, 1> continuation{9};
+  const uint64_t discarded_turn =
+      request->BeginTurn(continuation, std::optional<size_t>{1});
+  ASSERT_EQ(discarded_turn, 2u);
+  ASSERT_EQ(RunOne(*engine_.engine).request, request);
+  ASSERT_TRUE(request->IsTurnComplete());
+
+  request->RewindToStartOfTurn(discarded_turn);
+  EXPECT_EQ(request->CurrentSequenceLength(), retained_length);
+
+  const uint64_t replacement_turn =
+      request->BeginTurn(continuation, std::optional<size_t>{1});
+  EXPECT_EQ(replacement_turn, 3u);
+  ASSERT_EQ(RunOne(*engine_.engine).request, request);
+  EXPECT_THROW(
+      request->RewindToStartOfTurn(discarded_turn),
+      std::runtime_error);
+  EXPECT_NO_THROW(request->RewindToStartOfTurn(1));
+  EXPECT_EQ(request->CurrentSequenceLength(), 0);
+  EXPECT_EQ(request->CurrentTurnId(), replacement_turn);
+}
+
+TEST_F(RequestLifecycleTest, ConsecutiveRewindsCanDiscardEarlierTurnsWithoutResidency) {
+  auto request = CreateRequestWithPrompt(engine_.engine, Prompt());
+  ASSERT_EQ(RunOne(*engine_.engine).request, request);
+  const std::array<int32_t, 1> continuation{9};
+  ASSERT_EQ(request->BeginTurn(continuation, std::optional<size_t>{1}), 2u);
+  ASSERT_EQ(RunOne(*engine_.engine).request, request);
+  ASSERT_TRUE(request->IsTurnComplete());
+  ASSERT_EQ(engine_.cache->AllocatedCount(), 1u);
+
+  request->RewindToStartOfTurn(2);
+  EXPECT_EQ(engine_.cache->AllocatedCount(), 0u);
+  EXPECT_FALSE(engine_.engine->HasPendingRequests());
+  EXPECT_NO_THROW(request->RewindToStartOfTurn(1));
+  EXPECT_EQ(request->CurrentSequenceLength(), 0);
+  EXPECT_EQ(request->ProcessedSequenceLength(), 0);
+  EXPECT_EQ(engine_.cache->AllocatedCount(), 0u);
+  EXPECT_FALSE(engine_.engine->HasPendingRequests());
+  EXPECT_THROW(request->RewindToStartOfTurn(2), std::runtime_error);
+
+  EXPECT_EQ(request->BeginTurn(continuation, std::optional<size_t>{1}), 3u);
+  EXPECT_EQ(RunOne(*engine_.engine).request, request);
+  EXPECT_TRUE(request->IsTurnComplete());
 }
 
 // After a turn completes, BeginTurn appends another input fragment and queues the resident request.

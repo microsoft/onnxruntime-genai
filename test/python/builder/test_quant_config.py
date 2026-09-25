@@ -89,9 +89,24 @@ def test_float_dtype_is_not_quantized():
 def test_from_dict_empty_uses_defaults():
     cfg = QuantConfig.from_dict({})
     assert cfg.io_dtype == "fp16"
+    assert cfg.checkpoint_policy == "preserve"
     assert cfg.weights.type == "none"
     assert cfg.moe.type == "int4"
-    assert cfg.runtime.use_qdq is False
+    assert cfg.format.use_qdq is False
+
+
+@pytest.mark.parametrize("weights_type", ["uint4", "uint8"])
+def test_unsigned_weights_default_to_asymmetric(weights_type):
+    weights = WeightsConfig.from_dict({"type": weights_type})
+
+    assert weights.symmetric is False
+    assert weights.to_dict()["symmetric"] is False
+
+
+@pytest.mark.parametrize("weights_type", ["uint4", "uint8"])
+def test_unsigned_weights_reject_explicit_symmetric_mode(weights_type):
+    with pytest.raises(ValueError, match="requires weights.symmetric=false"):
+        WeightsConfig.from_dict({"type": weights_type, "symmetric": True})
 
 
 def test_from_dict_accepts_quantization_wrapper():
@@ -108,6 +123,50 @@ def test_from_dict_rejects_unknown_top_level_field():
 def test_from_dict_rejects_bad_io_dtype():
     with pytest.raises(ValueError, match="io_dtype must be one of"):
         QuantConfig.from_dict({"io_dtype": "int4"})
+
+
+def test_from_dict_rejects_bad_checkpoint_policy():
+    with pytest.raises(ValueError, match="checkpoint_policy must be"):
+        QuantConfig.from_dict({"checkpoint_policy": "convert"})
+
+
+def test_from_dict_accepts_runtime_compatibility_alias():
+    cfg = QuantConfig.from_dict({"runtime": {"use_qdq": True}})
+    assert cfg.format.use_qdq is True
+    assert cfg.to_dict()["runtime"]["use_qdq"] is True
+    assert "checkpoint_policy" not in cfg.to_dict()
+
+
+def test_quant_config_positional_arguments_keep_legacy_order():
+    weights = WeightsConfig(type="int4")
+    moe = MoEConfig(type="none")
+    runtime = RuntimeConfig(use_qdq=True)
+
+    cfg = QuantConfig("bf16", weights, moe, runtime)
+
+    assert cfg.io_dtype == "bf16"
+    assert cfg.weights is weights
+    assert cfg.moe is moe
+    assert cfg.runtime is runtime
+
+
+@pytest.mark.parametrize(
+    "factory,data,field",
+    [
+        (WeightsConfig.from_dict, {"symmetric": "false"}, "weights.symmetric"),
+        (WeightsConfig.from_dict, {"symmetric": 0}, "weights.symmetric"),
+        (RuntimeConfig.from_dict, {"use_qdq": "false"}, "format.use_qdq"),
+        (Override.from_dict, {"match": {"name": "x"}, "exclude": 0}, "override.exclude"),
+    ],
+)
+def test_structured_booleans_require_json_booleans(factory, data, field):
+    with pytest.raises(ValueError, match=field):
+        factory(data)
+
+
+def test_from_dict_rejects_conflicting_format_alias():
+    with pytest.raises(ValueError, match="format and compatibility alias runtime conflict"):
+        QuantConfig.from_dict({"format": {"use_qdq": True}, "runtime": {"use_qdq": False}})
 
 
 def test_weights_rejects_bad_method():
@@ -140,6 +199,66 @@ def test_runtime_rejects_bad_prepacked():
         RuntimeConfig.from_dict({"matmulnbits_weights_prepacked": 3})
 
 
+@pytest.mark.parametrize(
+    "config_type,field,valid_values",
+    [
+        (WeightsConfig, "accuracy_level", range(5)),
+        (MoEConfig, "weights_prepacked", (-1, 0, 1)),
+        (RuntimeConfig, "matmulnbits_weights_prepacked", (0, 1, 2)),
+    ],
+)
+def test_structured_integer_fields_require_in_range_json_integers(config_type, field, valid_values):
+    invalid_values = (True, False, 0.0, 0.9, 1.5, 2.7, "1", None, min(valid_values) - 1, max(valid_values) + 1)
+    for value in invalid_values:
+        with pytest.raises(ValueError, match=field):
+            config_type.from_dict({field: value})
+        with pytest.raises(ValueError, match=field):
+            config_type(**{field: value})
+    for value in valid_values:
+        config = config_type.from_dict({field: value})
+        assert getattr(config, field) == value
+        assert config_type.from_dict(config.to_dict()) == config
+
+
+@pytest.mark.parametrize(
+    "op_types",
+    [
+        "MatMul",
+        "MatMul/Gather",
+        ("MatMul",),
+        {"MatMul": True},
+        None,
+        [],
+        [""],
+        ["matmul"],
+        ["Add"],
+        [1],
+        [None],
+        ["MatMul", ""],
+    ],
+)
+def test_structured_op_types_rejects_invalid_arrays(op_types):
+    with pytest.raises(ValueError, match="weights.op_types"):
+        WeightsConfig.from_dict({"op_types": op_types})
+
+
+@pytest.mark.parametrize("op_types", [["MatMul"], ["Gather"], ["MatMul", "Gather"]])
+def test_structured_op_types_accepts_supported_arrays(op_types):
+    config = WeightsConfig.from_dict({"op_types": op_types})
+    assert config.op_types == tuple(op_types)
+    assert WeightsConfig.from_dict(config.to_dict()) == config
+
+
+def test_extra_options_accepts_legacy_integer_strings():
+    config = QuantConfig.from_extra_options(
+        {"accuracy_level": "4", "qmoe_weights_prepacked": "-1", "matmulnbits_weights_prepacked": "2"},
+        precision="int4",
+    )
+    assert config.weights.accuracy_level == 4
+    assert config.moe.weights_prepacked == -1
+    assert config.runtime.matmulnbits_weights_prepacked == 2
+
+
 # ---------------------------------------------------------------------------
 # Overrides
 # ---------------------------------------------------------------------------
@@ -170,6 +289,11 @@ def test_override_rejects_type_and_exclude():
 def test_override_requires_type_or_exclude():
     with pytest.raises(ValueError, match="must set either"):
         Override.from_dict({"match": {"name": "x"}})
+
+
+def test_override_exclusion_requires_exact_name():
+    with pytest.raises(ValueError, match="require an exact node name"):
+        Override.from_dict({"match": {"name_regex": ".*mlp.*"}, "exclude": True})
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +403,18 @@ def test_extra_options_nodes_to_exclude_become_overrides():
     cfg = QuantConfig.from_extra_options({"nodes_to_exclude": ["/model/embed_tokens/Gather"]}, precision="int4")
     excludes = [o for o in cfg.weights.overrides if o.exclude]
     assert excludes == [Override(match={"name": "/model/embed_tokens/Gather"}, exclude=True)]
+    assert cfg.legacy_nodes_to_exclude == frozenset({"/model/embed_tokens/Gather"})
+
+
+def test_extra_options_nodes_to_exclude_precede_mixed_precision_presets():
+    # Legacy nodes_to_exclude is unconditional, so it must win first-match resolution
+    # against a preset that selects the same node.
+    cfg = QuantConfig.from_extra_options(
+        {"matmul_mixed_precision": "last_matmul:int8", "nodes_to_exclude": ["/lm_head/MatMul"]},
+        precision="int4",
+    )
+    assert cfg.weights.overrides[0] == Override(match={"name": "/lm_head/MatMul"}, exclude=True)
+    assert cfg.weights.overrides[1].match == {"preset": "last_matmul"}
 
 
 def test_extra_options_moe_quant_type_and_use_8bits_moe():

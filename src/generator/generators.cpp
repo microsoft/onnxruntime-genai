@@ -600,9 +600,11 @@ Generator::Generator(const Model& model, const GeneratorParams& params)
   if (params.speculative.ngram_size > 0)
     ValidateNGramDecoding(model, params);
 
-  // RNNT and TDT models don't use the traditional search/logits pipeline,
-  // so skip the standard validations and just create the state.
-  if (ModelType::IsTransducer(model.config_->model.type)) {
+  // RNNT/TDT/streaming-enc-dec-ASR models don't use the traditional
+  // search/logits pipeline; skip the standard validations and create the
+  // TransducerState-derived state directly.
+  const auto& model_type = model.config_->model.type;
+  if (ModelType::IsTransducer(model_type) || ModelType::IsStreamingEncDecASR(model_type)) {
     state_ = model.CreateState({}, params);
     transducer_state_ = dynamic_cast<TransducerState*>(state_.get());
     strategy_ = MakeDecodingStrategy(*this);
@@ -962,8 +964,15 @@ SpeculativeStats Generator::GetSpeculativeStats() const {
 }
 
 void Generator::RewindToLength(size_t new_length) {
-  if (model_->config_->model.type == "whisper" || model_->config_->model.type == "phi3v" || model_->config_->model.type == "decoder-pipeline" || model_->config_->model.type == "lfm2")
-    throw std::runtime_error("RewindTo is currently not supported for " + model_->config_->model.type + ".");
+  const auto& model_type = model_->config_->model.type;
+  // RNNT/TDT/streaming-enc-dec-ASR models (e.g. Moonshine) take the
+  // TransducerState path and never create search_, so rewind is unsupported.
+  // Fail clearly here before search_ is dereferenced below.
+  if (ModelType::IsTransducer(model_type) || ModelType::IsStreamingEncDecASR(model_type))
+    throw std::runtime_error("RewindTo is not supported for streaming ASR models (" + model_type + ").");
+  if (model_type == "whisper" || model_type == "phi3v" || model_type == "decoder-pipeline" ||
+      ModelType::IsLFM2(model_type) || model_type == "lfm2_vl" || model_type == "lfm2_audio")
+    throw std::runtime_error("RewindTo is currently not supported for " + model_type + ".");
   const size_t current_length = search_->GetSequenceLength();
   if (new_length > current_length)
     throw std::runtime_error("Cannot rewind to a length greater than the current sequence length");

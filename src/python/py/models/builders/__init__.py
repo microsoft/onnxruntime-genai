@@ -14,7 +14,7 @@ from .gptoss import GPTOSSModel
 from .granite import GraniteModel, GraniteMoEHybridModel
 from .hunyuan import HunyuanDenseV1Model
 from .internlm import InternLM2Model
-from .lfm2 import LFM2Model
+from .lfm2 import LFM2AudioModel, LFM2Model, LFM2MoEModel
 from .llama import LlamaModel
 from .mistral import Mistral3TextModel, MistralModel
 from .mtp import MTPModel
@@ -57,7 +57,9 @@ __all__ = [
     "GraniteModel",
     "HunyuanDenseV1Model",
     "InternLM2Model",
+    "LFM2AudioModel",
     "LFM2Model",
+    "LFM2MoEModel",
     "LlamaModel",
     "MTPModel",
     "Mistral3TextModel",
