@@ -129,6 +129,8 @@ TEST(MtpDecoderConfigTest, ProjectsPagedDecoderWithoutMainFixedState) {
   mtp.num_key_value_heads = 2;
   mtp.head_size = 64;
   mtp.inputs.hidden_states = "head_hidden";
+  mtp.inputs.past_indexer_names = "past.%d.indexer";
+  mtp.inputs.past_sequence_length = "past_sequence_length";
   mtp.outputs.hidden_states = "head_hidden_out";
   mtp.session_options.emplace();
   mtp.session_options->graph_optimization_level = ORT_DISABLE_ALL;
@@ -148,6 +150,9 @@ TEST(MtpDecoderConfigTest, ProjectsPagedDecoderWithoutMainFixedState) {
   EXPECT_EQ(head.hidden_size, 2048);
   EXPECT_EQ(head.inputs.hidden_states, "head_hidden");
   EXPECT_EQ(head.outputs.hidden_states, "head_hidden_out");
+  EXPECT_EQ(head.inputs.past_indexer_names, "past.%d.indexer");
+  EXPECT_EQ(head.inputs.past_sequence_length, "past_sequence_length");
+  EXPECT_EQ(head.outputs.present_indexer_names, "present.%d.indexer");
   EXPECT_EQ(head.inputs.block_table, "block_table");
   EXPECT_EQ(head.inputs.cumulative_sequence_lengths, "cumulative_sequence_lengths");
   EXPECT_EQ(head.inputs.past_sequence_lengths, "past_sequence_lengths");

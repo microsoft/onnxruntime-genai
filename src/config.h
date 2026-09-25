@@ -257,6 +257,23 @@ struct Config {
       } outputs;
     } embedding;
 
+    struct Engram {
+      std::string filename;
+      size_t cache_capacity{4096};
+      std::optional<SessionOptions> session_options;
+      std::optional<RunOptions> run_options;
+
+      struct Inputs {
+        std::string input_ids{Defaults::InputIdsName};
+        std::string past_tokens{"past_ple_tokens"};
+      } inputs;
+
+      struct Outputs {
+        std::string embeddings{"engram_embeddings"};
+        std::string present_tokens{"present_ple_tokens"};
+      } outputs;
+    } engram;
+
     struct Vision {
       std::string filename;
       std::optional<SessionOptions> session_options;
@@ -553,6 +570,7 @@ struct Config {
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};
         std::string embeddings{Defaults::InputsEmbedsName};
+        std::string engram_embeddings;
         std::string attention_mask{Defaults::AttentionMaskName};
         std::string position_ids{Defaults::PositionIdsName};
         std::string past_key_names{Defaults::PastKeyName};
@@ -621,6 +639,8 @@ struct Config {
         std::string present_indexer_names;
         std::string present_indexer_kv_buffer_names;
         std::string present_indexer_state_lengths_names;
+        std::string state_update_indexer_value_names;
+        std::string state_update_indexer_row_names;
         std::string state_update_conv_value_names{Defaults::StateUpdateConvValueName};
         std::string state_update_recurrent_capsule_names{Defaults::StateUpdateRecurrentCapsuleName};
         std::string state_update_ple_token_names;
@@ -695,6 +715,7 @@ struct Config {
         std::string past_key_names{Defaults::PastKeyName};
         std::string past_value_names{Defaults::PastValueName};
         std::string past_indexer_names;
+        std::string past_sequence_length;
       } inputs;
 
       struct Outputs {
@@ -788,6 +809,7 @@ struct Config {
     bool past_present_share_buffer{};  // The past/present kv tensors are shared and allocated once to max_length (cuda only)
     int random_seed{-1};               // -1 = Seed with random device, otherwise use value to seed RNG
     std::optional<size_t> chunk_size;  // Chunk size for prefill chunking during context processing. If present, chunking is enabled with the chunk size > 0.
+    bool adaptive_chunking{};          // Select a tuned prefill chunk size when chunk_size is not explicitly set.
     float blank_penalty{};             // Penalty applied to blank token logits in CTC/RNNT decoding. Default 0 means no penalty.
     bool audio_interleaved{};          // LFM2-Audio: alternate text tokens and audio frames by count (interleaved mode) rather than switching on <|audio_start|>.
     float audio_temperature{1.0f};     // LFM2-Audio: temperature the audio codes are sampled with. 0 takes the most likely code.

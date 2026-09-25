@@ -132,6 +132,7 @@ std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   decoder.inputs.past_key_names = mtp.inputs.past_key_names;
   decoder.inputs.past_value_names = mtp.inputs.past_value_names;
   decoder.inputs.past_indexer_names = mtp.inputs.past_indexer_names;
+  decoder.inputs.past_sequence_length = mtp.inputs.past_sequence_length;
   // The projection starts from a copy of the target config, so a per-token quantized target would
   // otherwise leak its scale name templates into the head. The head is always an unquantized
   // full-attention layer and declares no scale tensors, so clear them: leaving them in place would
@@ -492,6 +493,8 @@ struct DecoderInputs_Element : JSON::Element {
       v_.input_ids = JSON::Get<std::string_view>(value);
     } else if (name == "inputs_embeds") {
       v_.embeddings = JSON::Get<std::string_view>(value);
+    } else if (name == "engram_embeddings") {
+      v_.engram_embeddings = JSON::Get<std::string_view>(value);
     } else if (name == "attention_mask") {
       v_.attention_mask = JSON::Get<std::string_view>(value);
     } else if (name == "position_ids") {
@@ -589,6 +592,10 @@ struct DecoderOutputs_Element : JSON::Element {
       v_.present_value_names = JSON::Get<std::string_view>(value);
     } else if (name == "present_indexer_names") {
       v_.present_indexer_names = JSON::Get<std::string_view>(value);
+    } else if (name == "state_update_indexer_value_names") {
+      v_.state_update_indexer_value_names = JSON::Get<std::string_view>(value);
+    } else if (name == "state_update_indexer_row_names") {
+      v_.state_update_indexer_row_names = JSON::Get<std::string_view>(value);
     } else if (name == "present_key_scale_names") {
       v_.present_key_scale_names = JSON::Get<std::string_view>(value);
     } else if (name == "present_value_scale_names") {
@@ -1131,6 +1138,8 @@ struct MtpInputs_Element : JSON::Element {
       v_.past_value_names = JSON::Get<std::string_view>(value);
     } else if (name == "past_indexer_names") {
       v_.past_indexer_names = JSON::Get<std::string_view>(value);
+    } else if (name == "past_sequence_length") {
+      v_.past_sequence_length = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -2224,6 +2233,81 @@ struct Embedding_Element : JSON::Element {
   EmbeddingOutputs_Element outputs_{v_.outputs};
 };
 
+struct EngramInputs_Element : JSON::Element {
+  explicit EngramInputs_Element(Config::Model::Engram::Inputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "input_ids") {
+      v_.input_ids = JSON::Get<std::string_view>(value);
+    } else if (name == "past_tokens") {
+      v_.past_tokens = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Engram::Inputs& v_;
+};
+
+struct EngramOutputs_Element : JSON::Element {
+  explicit EngramOutputs_Element(Config::Model::Engram::Outputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "embeddings") {
+      v_.embeddings = JSON::Get<std::string_view>(value);
+    } else if (name == "present_tokens") {
+      v_.present_tokens = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Engram::Outputs& v_;
+};
+
+struct Engram_Element : JSON::Element {
+  explicit Engram_Element(Config::Model::Engram& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "filename") {
+      v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "cache_capacity") {
+      const double capacity = JSON::Get<double>(value);
+      if (capacity < 0 || capacity != std::trunc(capacity)) {
+        throw std::runtime_error("model.engram.cache_capacity must be a non-negative integer");
+      }
+      v_.cache_capacity = static_cast<size_t>(capacity);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "session_options") {
+      v_.session_options = Config::SessionOptions{};
+      session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
+      return *session_options_;
+    }
+    if (name == "run_options") {
+      v_.run_options = Config::RunOptions{};
+      run_options_ = std::make_unique<RunOptions_Element>(*v_.run_options);
+      return *run_options_;
+    }
+    if (name == "inputs") return inputs_;
+    if (name == "outputs") return outputs_;
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Engram& v_;
+  std::unique_ptr<SessionOptions_Element> session_options_;
+  std::unique_ptr<RunOptions_Element> run_options_;
+  EngramInputs_Element inputs_{v_.inputs};
+  EngramOutputs_Element outputs_{v_.outputs};
+};
+
 struct Model_Element : JSON::Element {
   explicit Model_Element(Config::Model& v)
       : v_{v}, block_drafter_alias_{v_.dflash2.configured_alias_is_dspark} {}
@@ -2334,6 +2418,9 @@ struct Model_Element : JSON::Element {
     if (name == "embedding") {
       return embedding_;
     }
+    if (name == "engram") {
+      return engram_;
+    }
     if (name == "speech") {
       return speech_;
     }
@@ -2375,6 +2462,7 @@ struct Model_Element : JSON::Element {
   Int_Array_Element tdt_durations_{v_.tdt_durations};
   Vision_Element vision_{v_.vision};
   Embedding_Element embedding_{v_.embedding};
+  Engram_Element engram_{v_.engram};
   Speech_Element speech_{v_.speech};
   AudioOutput_Element audio_output_{v_.audio_output};
   Joiner_Element joiner_{v_.joiner};
@@ -2483,6 +2571,8 @@ struct Search_Element : JSON::Element {
       } else {
         v_.chunk_size = std::nullopt;
       }
+    } else if (name == "adaptive_chunking") {
+      v_.adaptive_chunking = JSON::Get<bool>(value);
     } else if (name == "do_sample") {
       v_.do_sample = JSON::Get<bool>(value);
     } else if (name == "past_present_share_buffer") {
