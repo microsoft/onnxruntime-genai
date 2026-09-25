@@ -7,6 +7,7 @@
 #include "models/io/qwen_vl_position_inputs.h"
 #include <cstring>
 #include <algorithm>
+#include <future>
 #include <numeric>
 
 namespace Generators {
@@ -157,6 +158,16 @@ MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config,
   CreateSessionOptionsFromConfig(config_->model.embedding.session_options.has_value() ? config_->model.embedding.session_options.value() : config_->model.decoder.session_options, *embedding_session_options_, true, /*disable_graph_capture=*/true);
 
   embedding_session_ = CreateSession(ort_env, config_->model.embedding.filename, embedding_session_options_.get());
+  if (!config_->model.engram.filename.empty()) {
+    engram_session_options_ = OrtSessionOptions::Create();
+    CreateSessionOptionsFromConfig(
+        config_->model.engram.session_options.has_value()
+            ? config_->model.engram.session_options.value()
+            : config_->model.decoder.session_options,
+        *engram_session_options_, true, /*disable_graph_capture=*/true);
+    engram_session_ = CreateSession(
+        ort_env, config_->model.engram.filename, engram_session_options_.get());
+  }
   decoder_session_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
 
   const auto& audio_output = config_->model.audio_output;
@@ -183,6 +194,9 @@ MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config,
 
   session_info_.Add(*decoder_session_);
   session_info_.Add(*embedding_session_);
+  if (engram_session_) {
+    session_info_.Add(*engram_session_);
+  }
   if (speech) {
     session_info_.Add(*speech_session_);
   }
@@ -872,6 +886,237 @@ DeviceSpan<float> EmbeddingState::Run(int current_length, DeviceSpan<int32_t>& n
   return {};
 }
 
+EngramState::EngramState(
+    const MultiModalLanguageModel& model, const GeneratorParams& params)
+    : State{params, model},
+      model_{model} {
+  if (params.search.num_beams != 1) {
+    throw std::runtime_error(
+        "Engram-backed models currently support num_beams=1 only");
+  }
+  input_ids_index_ = inputs_.size();
+  inputs_.push_back(nullptr);
+  input_names_.push_back(model_.config_->model.engram.inputs.input_ids.c_str());
+  embeddings_type_ = model_.session_info_.GetOutputDataType(
+      model_.config_->model.engram.outputs.embeddings);
+  const auto embeddings_shape = model_.session_info_.GetOutputShape(
+      model_.config_->model.engram.outputs.embeddings);
+  if (embeddings_shape.empty() || embeddings_shape.back() <= 0) {
+    throw std::runtime_error("Engram embeddings must have a static width");
+  }
+  embeddings_width_ = embeddings_shape.back();
+  embeddings_output_index_ = outputs_.size();
+  outputs_.push_back(nullptr);
+  output_names_.push_back(model_.config_->model.engram.outputs.embeddings.c_str());
+
+  auto token_shape = model_.session_info_.GetInputShape(
+      model_.config_->model.engram.inputs.past_tokens);
+  if (token_shape.empty()) {
+    throw std::runtime_error("Engram token history must have a batch dimension");
+  }
+  if (token_shape[0] <= 0) token_shape[0] = params_->BatchBeamSize();
+  for (int64_t dimension : token_shape) {
+    if (dimension <= 0) {
+      throw std::runtime_error("Engram token history must have a static shape");
+    }
+  }
+
+  past_tokens_ = OrtValue::CreateTensor(
+      model_.allocator_cpu_, token_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  present_tokens_ = OrtValue::CreateTensor(
+      model_.allocator_cpu_, token_shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  InitializeTokens(*past_tokens_);
+  InitializeTokens(*present_tokens_);
+
+  past_input_index_ = inputs_.size();
+  inputs_.push_back(past_tokens_.get());
+  input_names_.push_back(model_.config_->model.engram.inputs.past_tokens.c_str());
+  present_output_index_ = outputs_.size();
+  outputs_.push_back(present_tokens_.get());
+  output_names_.push_back(model_.config_->model.engram.outputs.present_tokens.c_str());
+}
+
+void EngramState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens) {
+  const int64_t batch_size = params_->BatchBeamSize();
+  const int64_t sequence_length =
+      static_cast<int64_t>(next_tokens.size()) / batch_size;
+  input_ids_ = OrtValue::CreateTensor(
+      model_.allocator_cpu_,
+      std::array<int64_t, 2>{batch_size, sequence_length},
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  const auto tokens_cpu = next_tokens.CpuSpan();
+  auto* input_data = input_ids_->GetTensorMutableData<int64_t>();
+  std::transform(
+      tokens_cpu.begin(), tokens_cpu.end(), input_data,
+      [](int32_t token) { return static_cast<int64_t>(token); });
+  inputs_[input_ids_index_] = input_ids_.get();
+  embeddings_output_ = OrtValue::CreateTensor(
+      model_.allocator_cpu_,
+      std::array<int64_t, 3>{batch_size, sequence_length, embeddings_width_},
+      embeddings_type_);
+  outputs_[embeddings_output_index_] = embeddings_output_.get();
+  if (!first_run_) {
+    std::swap(past_tokens_, present_tokens_);
+    inputs_[past_input_index_] = past_tokens_.get();
+    outputs_[present_output_index_] = present_tokens_.get();
+  }
+
+  cache_hit_ = false;
+  active_cache_key_.reset();
+  if (sequence_length == 1 && model_.config_->model.engram.cache_capacity > 0) {
+    std::vector<int64_t> key;
+    const auto past_info = past_tokens_->GetTensorTypeAndShapeInfo();
+    const size_t past_count = past_info->GetElementCount();
+    const auto* past_data = past_tokens_->GetTensorData<int64_t>();
+    key.assign(past_data, past_data + past_count);
+    key.push_back(input_ids_->GetTensorData<int64_t>()[0]);
+    auto cached = cache_.find(key);
+    if (cached != cache_.end()) {
+      const auto output_info = embeddings_output_->GetTensorTypeAndShapeInfo();
+      const size_t output_bytes =
+          output_info->GetElementCount() * Ort::SizeOf(output_info->GetElementType());
+      if (cached->second.embeddings.size() == output_bytes &&
+          cached->second.present_tokens.size() ==
+              present_tokens_->GetTensorTypeAndShapeInfo()->GetElementCount()) {
+        std::memcpy(
+            embeddings_output_->GetTensorMutableRawData(),
+            cached->second.embeddings.data(), output_bytes);
+        std::copy(
+            cached->second.present_tokens.begin(),
+            cached->second.present_tokens.end(),
+            present_tokens_->GetTensorMutableData<int64_t>());
+        cache_hit_ = true;
+      }
+    }
+    active_cache_key_ = std::move(key);
+  }
+}
+
+DeviceSpan<float> EngramState::Run(
+    int current_length, DeviceSpan<int32_t>& next_tokens,
+    DeviceSpan<int32_t> next_indices) {
+  (void)current_length;
+  (void)next_indices;
+  if (model_.config_->model.engram.run_options.has_value()) {
+    State::SetRunOptions(model_.config_->model.engram.run_options.value());
+  }
+  if (!cache_hit_) {
+    State::Run(*model_.engram_session_);
+    if (active_cache_key_.has_value()) {
+      if (cache_.size() >= model_.config_->model.engram.cache_capacity) {
+        cache_.clear();
+      }
+      CacheEntry entry;
+      const auto output_info = embeddings_output_->GetTensorTypeAndShapeInfo();
+      const size_t output_bytes =
+          output_info->GetElementCount() * Ort::SizeOf(output_info->GetElementType());
+      const auto* output_data = static_cast<const uint8_t*>(
+          embeddings_output_->GetTensorRawData());
+      entry.embeddings.assign(output_data, output_data + output_bytes);
+      const auto* present_data = present_tokens_->GetTensorData<int64_t>();
+      const size_t present_count =
+          present_tokens_->GetTensorTypeAndShapeInfo()->GetElementCount();
+      entry.present_tokens.assign(present_data, present_data + present_count);
+      cache_[*active_cache_key_] = std::move(entry);
+    }
+  }
+  first_run_ = false;
+  return {};
+}
+
+void EngramState::CopyEmbeddingsTo(Embeddings& destination) {
+  if (!embeddings_output_ || !destination.Get()) {
+    throw std::runtime_error("Engram embeddings are not allocated");
+  }
+  const auto source_info = embeddings_output_->GetTensorTypeAndShapeInfo();
+  const auto destination_info = destination.Get()->GetTensorTypeAndShapeInfo();
+  if (source_info->GetElementType() != destination_info->GetElementType() ||
+      source_info->GetElementCount() != destination_info->GetElementCount()) {
+    throw std::runtime_error(
+        "Engram output must match the decoder Engram input type and shape");
+  }
+  ByteWrapTensor(*model_.p_device_inputs_, *destination.Get())
+      .CopyFrom(ByteWrapTensor(
+          *GetDeviceInterface(DeviceType::CPU), *embeddings_output_));
+}
+
+void EngramState::RewindTo(size_t index) {
+  if (index == 0) {
+    InitializeTokens(*past_tokens_);
+    InitializeTokens(*present_tokens_);
+    snapshot_valid_ = false;
+    first_run_ = true;
+    inputs_[past_input_index_] = past_tokens_.get();
+    outputs_[present_output_index_] = present_tokens_.get();
+    return;
+  }
+  if (!snapshot_valid_ || snapshot_position_ != index) {
+    throw std::runtime_error(
+        "EngramState cannot rewind to position " + std::to_string(index) +
+        " without a matching snapshot");
+  }
+  CopyTokens(*snapshot_tokens_, *present_tokens_);
+  if (std::getenv("ORTGENAI_MTP_DEBUG_STATE") != nullptr) {
+    const auto* expected = snapshot_tokens_->GetTensorData<int64_t>();
+    const auto* actual = present_tokens_->GetTensorData<int64_t>();
+    const size_t count =
+        snapshot_tokens_->GetTensorTypeAndShapeInfo()->GetElementCount();
+    if (!std::equal(expected, expected + count, actual)) {
+      throw std::runtime_error("EngramState snapshot restore mismatch");
+    }
+  }
+}
+
+void EngramState::SnapshotState(size_t position) {
+  if (!snapshot_tokens_) {
+    auto shape = present_tokens_->GetTensorTypeAndShapeInfo()->GetShape();
+    snapshot_tokens_ = OrtValue::CreateTensor(
+        model_.allocator_cpu_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+  }
+
+  CopyTokens(*present_tokens_, *snapshot_tokens_);
+  snapshot_position_ = position;
+  snapshot_valid_ = true;
+}
+
+void EngramState::CommitAcceptedPrefix(size_t token_count) {
+  if (!snapshot_valid_ || !snapshot_tokens_ || !input_ids_) {
+    throw std::runtime_error("EngramState accepted-prefix commit requires a snapshot and input tokens");
+  }
+  const auto input_info = input_ids_->GetTensorTypeAndShapeInfo();
+  const auto input_shape = input_info->GetShape();
+  if (input_shape.size() != 2 || input_shape[0] != 1 ||
+      token_count > static_cast<size_t>(input_shape[1])) {
+    throw std::runtime_error("EngramState accepted-prefix commit received an invalid token count");
+  }
+
+  CopyTokens(*snapshot_tokens_, *present_tokens_);
+  auto* history = present_tokens_->GetTensorMutableData<int64_t>();
+  const size_t history_size =
+      present_tokens_->GetTensorTypeAndShapeInfo()->GetElementCount();
+  const auto* tokens = input_ids_->GetTensorData<int64_t>();
+  for (size_t token_index = 0; token_index < token_count; ++token_index) {
+    if (history_size > 1) {
+      std::move(history + 1, history + history_size, history);
+    }
+    history[history_size - 1] = tokens[token_index];
+  }
+}
+
+void EngramState::InitializeTokens(OrtValue& tokens) {
+  auto* data = tokens.GetTensorMutableData<int64_t>();
+  const size_t count = tokens.GetTensorTypeAndShapeInfo()->GetElementCount();
+  std::fill_n(data, count, model_.config_->model.decoder.ple_token_pad_id);
+}
+
+void EngramState::CopyTokens(OrtValue& source, OrtValue& destination) {
+  const size_t bytes =
+      source.GetTensorTypeAndShapeInfo()->GetElementCount() * sizeof(int64_t);
+  std::memcpy(
+      destination.GetTensorMutableData<int64_t>(),
+      source.GetTensorData<int64_t>(), bytes);
+}
+
 DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params)
     : State{params, model},
       model_{model},
@@ -881,6 +1126,18 @@ DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int3
       ple_state_{CreatePleState(*this)},
       indexer_cache_{CreateIndexerCache(*this)} {
   inputs_embeds_.Add();
+  if (!model_.config_->model.engram.filename.empty()) {
+    const auto engram_input_shape = model_.session_info_.GetInputShape(
+        model_.config_->model.decoder.inputs.engram_embeddings);
+    if (engram_input_shape.empty() || engram_input_shape.back() <= 0) {
+      throw std::runtime_error("Decoder Engram input must have a static width");
+    }
+    engram_embeddings_ = std::make_unique<Embeddings>(
+        *this, Embeddings::Mode::Input,
+        model_.config_->model.decoder.inputs.engram_embeddings,
+        engram_input_shape.back());
+    engram_embeddings_->Add();
+  }
 
   // Gemma4: decoder accepts per_layer_inputs from the embedding model
   if (!model_.config_->model.decoder.inputs.per_layer_inputs.empty()) {
@@ -914,6 +1171,10 @@ DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int3
     ple_state_->Add();
   if (indexer_cache_)
     indexer_cache_->Add();
+  if (!model_.config_->model.decoder.outputs.hidden_states.empty()) {
+    hidden_states_output_ = std::make_unique<HiddenStatesOutputs>(*this);
+    hidden_states_output_->Add();
+  }
 }
 
 DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
@@ -922,6 +1183,8 @@ DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& nex
   }
 
   const int seq_len = static_cast<int>(inputs_embeds_.GetShape()[1]);
+  if (hidden_states_output_)
+    hidden_states_output_->Update(seq_len);
   const bool graph_capture_this_run = params_->use_graph_capture && seq_len == 1;
   int graph_capture_variant = recurrent_state_ ? recurrent_state_->GraphCaptureVariant() : 0;
   if (ple_state_) {
@@ -939,6 +1202,8 @@ DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& nex
     recurrent_state_->RestoreAfterGraphCapture(graph_id);
   }
   State::Run(*model_.decoder_session_, graph_capture_this_run, seq_len, graph_capture_variant);
+  if (recurrent_state_) recurrent_state_->SetForwardLength(seq_len);
+  if (ple_state_) ple_state_->SetForwardLength(seq_len);
   return logits_.Get();
 }
 
@@ -972,7 +1237,8 @@ void DecoderState::PrepareEmbeddingsForPrefill(size_t new_length) {
 }
 
 DeviceSpan<float> DecoderState::RunPrefillWithChunking(int current_length, DeviceSpan<int32_t>& next_tokens,
-                                                       DeviceSpan<int32_t> next_indices, size_t chunk_size) {
+                                                       DeviceSpan<int32_t> next_indices, size_t chunk_size,
+                                                       EngramState* engram_state) {
   if (model_.config_->model.decoder.run_options.has_value()) {
     State::SetRunOptions(model_.config_->model.decoder.run_options.value());
   }
@@ -980,11 +1246,19 @@ DeviceSpan<float> DecoderState::RunPrefillWithChunking(int current_length, Devic
   const size_t num_tokens = next_tokens.size();
   size_t processed_tokens = 0;
   int length = current_length - static_cast<int>(num_tokens);
+  std::future<void> next_engram;
 
   while (processed_tokens < num_tokens) {
     const size_t current_chunk_size = std::min(chunk_size, num_tokens - processed_tokens);
     auto chunk_tokens = next_tokens.subspan(processed_tokens, current_chunk_size);
     length += static_cast<int>(current_chunk_size);
+
+    if (next_engram.valid()) {
+      next_engram.get();
+    } else if (engram_state) {
+      engram_state->UpdateInputsOutputs(chunk_tokens);
+      engram_state->Run(length, chunk_tokens, next_indices);
+    }
 
     if (decoder_input_ids_) decoder_input_ids_->Update(chunk_tokens);
     position_inputs_->Update(chunk_tokens, length, static_cast<int>(current_chunk_size));
@@ -996,10 +1270,29 @@ DeviceSpan<float> DecoderState::RunPrefillWithChunking(int current_length, Devic
     if (indexer_cache_)
       indexer_cache_->Update(next_indices, length, static_cast<int>(current_chunk_size));
     logits_.Update(chunk_tokens, current_chunk_size);
+    if (hidden_states_output_)
+      hidden_states_output_->Update(static_cast<int>(current_chunk_size));
+    if (engram_state) {
+      engram_embeddings_->UpdateSequenceLength(current_chunk_size);
+      engram_state->CopyEmbeddingsTo(*engram_embeddings_);
+    }
 
     // Feed only this chunk's slice of the pre-computed embeddings to the decoder.
     inputs_embeds_.UseChunkView(processed_tokens, current_chunk_size);
     if (per_layer_inputs_) per_layer_inputs_->UseChunkView(processed_tokens, current_chunk_size);
+
+    const size_t next_offset = processed_tokens + current_chunk_size;
+    if (engram_state && next_offset < num_tokens) {
+      const size_t next_chunk_size = std::min(chunk_size, num_tokens - next_offset);
+      auto next_chunk_tokens = next_tokens.subspan(next_offset, next_chunk_size);
+      const int next_length = length + static_cast<int>(next_chunk_size);
+      next_engram = std::async(
+          std::launch::async,
+          [engram_state, next_chunk_tokens, next_indices, next_length]() mutable {
+            engram_state->UpdateInputsOutputs(next_chunk_tokens);
+            engram_state->Run(next_length, next_chunk_tokens, next_indices);
+          });
+    }
 
     // Graph capture is disabled during prefill chunking.
     State::Run(*model_.decoder_session_, /*graph_capture_this_run=*/false);
@@ -1012,6 +1305,49 @@ DeviceSpan<float> DecoderState::RunPrefillWithChunking(int current_length, Devic
 
   // Logits of the last chunk contain the logits for the last prompt token.
   return logits_.Get();
+}
+
+void DecoderState::RewindTo(size_t index) {
+  position_inputs_->RewindTo(index);
+  if (kv_cache_)
+    kv_cache_->RewindTo(index);
+  if (recurrent_state_)
+    recurrent_state_->RewindTo(index);
+  if (ple_state_)
+    ple_state_->RewindTo(index);
+  if (indexer_cache_)
+    indexer_cache_->RewindTo(index);
+}
+
+void DecoderState::SnapshotState(size_t position) {
+  if (recurrent_state_)
+    recurrent_state_->Snapshot(position);
+  if (ple_state_)
+    ple_state_->Snapshot(position);
+  if (indexer_cache_)
+    indexer_cache_->Snapshot(position);
+}
+
+bool DecoderState::HasCroppableRecurrentState() const {
+  return recurrent_state_ && recurrent_state_->IsWindowed() &&
+         (!ple_state_ || ple_state_->IsWindowed()) &&
+         (!indexer_cache_ || indexer_cache_->HasStateUpdates());
+}
+
+int64_t DecoderState::RecurrentStateWindow() const {
+  return recurrent_state_ ? recurrent_state_->StateWindow() : 1;
+}
+
+void DecoderState::CropToAccepted(size_t new_length, size_t recurrent_position) {
+  position_inputs_->RewindTo(new_length);
+  if (kv_cache_)
+    kv_cache_->RewindTo(new_length);
+  if (recurrent_state_)
+    recurrent_state_->CropToPosition(recurrent_position);
+  if (ple_state_)
+    ple_state_->CropToPosition(recurrent_position);
+  if (indexer_cache_)
+    indexer_cache_->CommitAcceptedPrefix(recurrent_position + 1);
 }
 
 void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int total_length, DeviceSpan<int32_t> beam_indices) {
@@ -1029,6 +1365,7 @@ void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int tot
     indexer_cache_->Update(beam_indices, total_length, static_cast<int>(new_length));
   logits_.Update(next_tokens, new_length);
   inputs_embeds_.UpdateSequenceLength(new_length);
+  if (engram_embeddings_) engram_embeddings_->UpdateSequenceLength(new_length);
   if (per_layer_inputs_) per_layer_inputs_->UpdateSequenceLength(new_length);
 }
 
@@ -1045,6 +1382,7 @@ void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int tot
     indexer_cache_->Update(beam_indices, total_length, static_cast<int>(new_length));
   logits_.Update(next_tokens, new_length);
   inputs_embeds_.UpdateSequenceLength(new_length);
+  if (engram_embeddings_) engram_embeddings_->UpdateSequenceLength(new_length);
   if (per_layer_inputs_) per_layer_inputs_->UpdateSequenceLength(new_length);
 }
 
@@ -1059,6 +1397,9 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& 
     speech_state_ = CreateSpeechState(model_, params);
   }
   embedding_state_ = std::make_unique<EmbeddingState>(model, params);
+  if (model_.engram_session_) {
+    engram_state_ = std::make_unique<EngramState>(model, params);
+  }
   decoder_state_ = std::make_unique<DecoderState>(model_, sequence_lengths, params);
   if (model_.depthformer_session_) {
     audio_output_ = std::make_unique<Lfm2AudioOutput>(model_, params);
@@ -1125,16 +1466,23 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
 
   // Prefill chunking (search.chunk_size): during the prompt stage the decoder can process the
   // prompt embeddings in several smaller runs to bound peak memory usage.
-  const auto& chunk_size_opt = params_->search.chunk_size;
   const size_t num_tokens = next_tokens.size();
+  auto chunk_size = params_->search.chunk_size.value_or(0);
+  if (chunk_size == 0 && params_->search.adaptive_chunking) {
+    chunk_size = num_tokens <= 32768 ? 512 : 1024;
+  }
   const bool has_multimodal_content = num_image_tokens_ != 0 || num_audio_tokens_ != 0;
-  const bool chunk_prefill = is_prompt_ && chunk_size_opt.has_value() && chunk_size_opt.value() > 0 &&
-                             num_tokens > chunk_size_opt.value() && decoder_state_->SupportsPrefillChunking(has_multimodal_content);
+  const bool chunk_prefill =
+      is_prompt_ && chunk_size > 0 && num_tokens > chunk_size &&
+      decoder_state_->SupportsPrefillChunking(has_multimodal_content);
 
   if (chunk_prefill) {
     decoder_state_->PrepareEmbeddingsForPrefill(num_tokens);
   } else {
     decoder_state_->UpdateInputsOutputs(next_tokens, current_length, next_indices);
+    if (engram_state_) {
+      engram_state_->UpdateInputsOutputs(next_tokens);
+    }
   }
 
   if (is_prompt_) {
@@ -1165,9 +1513,17 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
       embedding_state_->per_layer_inputs_->ReuseEmbeddingsBuffer(*decoder_state_->per_layer_inputs_);
     }
     embedding_state_->Run(current_length, next_tokens, next_indices);
+    if (engram_state_) {
+      if (!chunk_prefill) {
+        engram_state_->Run(current_length, next_tokens, next_indices);
+        engram_state_->CopyEmbeddingsTo(*decoder_state_->engram_embeddings_);
+      }
+    }
 
     auto logits = chunk_prefill
-                      ? decoder_state_->RunPrefillWithChunking(current_length, next_tokens, next_indices, chunk_size_opt.value())
+                      ? decoder_state_->RunPrefillWithChunking(
+                            current_length, next_tokens, next_indices, chunk_size,
+                            engram_state_.get())
                       : decoder_state_->Run(current_length, next_tokens, next_indices);
 
     is_prompt_ = false;
@@ -1188,6 +1544,10 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
   } else {
     embedding_state_->Run(current_length, next_tokens, next_indices);
   }
+  if (engram_state_) {
+    engram_state_->Run(current_length, next_tokens, next_indices);
+    engram_state_->CopyEmbeddingsTo(*decoder_state_->engram_embeddings_);
+  }
   auto logits = decoder_state_->Run(current_length, next_tokens, next_indices);
   return audio_output_ ? SampleAudioOrText(logits) : logits;
 }
@@ -1204,6 +1564,36 @@ DeviceSpan<float> MultiModalPipelineState::SampleAudioOrText(DeviceSpan<float> l
                              "\" output. Build the decoder with --extra_options include_hidden_states=true.");
   }
   return audio_output_->SampleFrame(*hidden_states);
+}
+
+void MultiModalPipelineState::RewindTo(size_t index) {
+  if (index == 0 && (num_image_tokens_ > 0 || num_audio_tokens_ > 0)) {
+    throw std::runtime_error(
+        "RewindTo(0) is not supported after multimodal encoder state is released");
+  }
+  decoder_state_->RewindTo(index);
+  if (engram_state_) engram_state_->RewindTo(index);
+  if (index == 0) is_prompt_ = true;
+}
+
+void MultiModalPipelineState::SnapshotState(size_t position) {
+  decoder_state_->SnapshotState(position);
+  if (engram_state_) engram_state_->SnapshotState(position);
+}
+
+bool MultiModalPipelineState::HasCroppableRecurrentState() const {
+  return decoder_state_->HasCroppableRecurrentState() && engram_state_;
+}
+
+int64_t MultiModalPipelineState::RecurrentStateWindow() const {
+  return decoder_state_->RecurrentStateWindow();
+}
+
+void MultiModalPipelineState::CropToAccepted(size_t new_length, size_t recurrent_position) {
+  decoder_state_->CropToAccepted(new_length, recurrent_position);
+  if (engram_state_) {
+    engram_state_->CommitAcceptedPrefix(recurrent_position + 1);
+  }
 }
 
 OrtValue* MultiModalPipelineState::GetInput(const char* name) {
