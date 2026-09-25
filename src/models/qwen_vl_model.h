@@ -47,6 +47,12 @@ struct Qwen2_5_VL_PipelineModel : public DecoderOnlyPipelineModel {
 
   // Vision pipeline shared across states (sessions reused).
   std::unique_ptr<QwenVisionPipeline> vision_pipeline_;
+
+  // Single-ONNX vision encoder, for models that export the encoder as one graph
+  // (e.g. Gemma-4) instead of Qwen's three-stage pipeline. Exactly one of
+  // vision_pipeline_ and vision_session_ is populated by the constructor.
+  std::unique_ptr<OrtSessionOptions> vision_session_options_;
+  std::unique_ptr<OrtSession> vision_session_;
 };
 
 struct Qwen2_5_VL_PipelineState : public DecoderOnlyPipelineState {
@@ -62,11 +68,16 @@ struct Qwen2_5_VL_PipelineState : public DecoderOnlyPipelineState {
  private:
   void InjectVisionEmbeddings(const std::string& embeddings_output_name);
 
+  // Runs a single-ONNX vision encoder and publishes image_features_value_.
+  void RunSingleSessionVision(const std::vector<ExtraInput>& extra_inputs);
+
   const Qwen2_5_VL_PipelineModel& vl_model_;
   bool vision_ran_{false};
   std::unique_ptr<OrtValue> image_features_value_;
-  std::vector<float> image_features_buffer_;  // backing storage for OrtValue
-  size_t image_embed_consumed_{0};            // Track how many vision embeddings we've injected
+  std::vector<float> image_features_buffer_;       // backing storage for OrtValue
+  std::unique_ptr<OrtValue> vision_output_owner_;  // keeps the encoder's output alive when
+                                                   // image_features_value_ is a reshaped view of it
+  size_t image_embed_consumed_{0};                 // Track how many vision embeddings we've injected
 };
 
 }  // namespace Generators

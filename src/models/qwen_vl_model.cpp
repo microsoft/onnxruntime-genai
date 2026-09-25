@@ -10,7 +10,27 @@ namespace Generators {
 
 Qwen2_5_VL_PipelineModel::Qwen2_5_VL_PipelineModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : DecoderOnlyPipelineModel(std::move(config), ort_env) {
-  if (config_->model.vision.pipeline.empty()) return;
+  if (config_->model.vision.pipeline.empty()) {
+    // No three-stage vision pipeline configured. Models such as Gemma-4 export the
+    // vision encoder as a single graph, so run it as one session.
+    if (!config_->model.vision.filename.empty()) {
+      vision_session_options_ = OrtSessionOptions::Create();
+      // Deliberately does not fall back to the decoder's session options: in a pipelined
+      // decoder those select the NPU, which cannot run an unquantized vision encoder.
+      // Absent vision session options therefore mean default (CPU) placement.
+      static const Config::SessionOptions kDefaultSessionOptions;
+      CreateSessionOptionsFromConfig(
+          config_->model.vision.session_options.has_value() ? *config_->model.vision.session_options
+                                                            : kDefaultSessionOptions,
+          *vision_session_options_, /*is_primary_session_options=*/false,
+          /*disable_graph_capture=*/true);
+      vision_session_ = CreateSession(ort_env, config_->model.vision.filename, vision_session_options_.get());
+      // The multimodal processor resolves pixel_values / pixel_position_ids types through
+      // session_info_, which the decoder pipeline populates with decoder sessions only.
+      session_info_.Add(*vision_session_);
+    }
+    return;
+  }
 
   // Find vision pipeline stage paths
   auto find_stage = [&](const std::string& id) -> std::string {
@@ -64,7 +84,14 @@ Qwen2_5_VL_PipelineState::Qwen2_5_VL_PipelineState(const Qwen2_5_VL_PipelineMode
 void Qwen2_5_VL_PipelineState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
   DecoderOnlyPipelineState::SetExtraInputs(extra_inputs);
 
-  if (vision_ran_ || !vl_model_.vision_pipeline_) return;
+  if (vision_ran_) return;
+
+  if (vl_model_.vision_session_) {
+    RunSingleSessionVision(extra_inputs);
+    return;
+  }
+
+  if (!vl_model_.vision_pipeline_) return;
 
   OrtValue* pixel_values_val = nullptr;
   OrtValue* image_grid_thw_val = nullptr;
@@ -150,6 +177,85 @@ void Qwen2_5_VL_PipelineState::SetExtraInputs(const std::vector<ExtraInput>& ext
   vision_ran_ = true;
 }
 
+void Qwen2_5_VL_PipelineState::RunSingleSessionVision(const std::vector<ExtraInput>& extra_inputs) {
+  const auto& pixel_name = vl_model_.config_->model.vision.inputs.pixel_values;
+
+  auto find_extra_input = [&extra_inputs](const std::string& name) -> OrtValue* {
+    for (const auto& input : extra_inputs) {
+      if (input.name == name) return input.tensor->GetOrtTensor();
+    }
+    return nullptr;
+  };
+
+  // A text-only request supplies no pixel_values; leave the embeddings untouched.
+  if (!find_extra_input(pixel_name)) return;
+
+  const auto input_names = vl_model_.vision_session_->GetInputNames();
+  std::vector<const char*> input_name_ptrs;
+  std::vector<const OrtValue*> input_values;
+  input_name_ptrs.reserve(input_names.size());
+  input_values.reserve(input_names.size());
+  for (const auto& name : input_names) {
+    OrtValue* value = find_extra_input(name);
+    if (!value) {
+      throw std::runtime_error("Vision encoder: required input '" + name +
+                               "' was not produced by the processor");
+    }
+    input_name_ptrs.push_back(name.c_str());
+    input_values.push_back(value);
+  }
+
+  const auto output_names = vl_model_.vision_session_->GetOutputNames();
+  if (output_names.empty()) {
+    throw std::runtime_error("Vision encoder: model has no outputs");
+  }
+  const auto& features_name = vl_model_.config_->model.vision.outputs.image_features;
+  size_t output_index = 0;
+  for (size_t i = 0; i < output_names.size(); ++i) {
+    if (output_names[i] == features_name) {
+      output_index = i;
+      break;
+    }
+  }
+  const char* output_name_ptrs[] = {output_names[output_index].c_str()};
+
+  OrtValue* raw_output = nullptr;
+  vl_model_.vision_session_->Run(nullptr, input_name_ptrs.data(), input_values.data(),
+                                 input_name_ptrs.size(), output_name_ptrs, &raw_output, 1);
+  vision_output_owner_ = std::unique_ptr<OrtValue>(raw_output);
+
+  auto output_info = vision_output_owner_->GetTensorTypeAndShapeInfo();
+  if (output_info->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+    std::unique_ptr<OrtValue> cast_output;
+    Cast(*vision_output_owner_, cast_output, *vl_model_.p_device_inputs_,
+         ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+    vision_output_owner_ = std::move(cast_output);
+    output_info = vision_output_owner_->GetTensorTypeAndShapeInfo();
+  }
+
+  // InjectVisionEmbeddings expects [num_image_tokens, hidden_size]. Encoders commonly
+  // emit a leading batch dimension, so collapse every leading dimension of size 1.
+  auto shape = output_info->GetShape();
+  while (shape.size() > 2 && shape.front() == 1) {
+    shape.erase(shape.begin());
+  }
+  if (shape.size() != 2) {
+    std::string printable;
+    for (auto dim : output_info->GetShape()) {
+      printable += (printable.empty() ? "" : ", ") + std::to_string(dim);
+    }
+    throw std::runtime_error("Vision encoder: expected image features of rank 2, got [" + printable + "]");
+  }
+
+  auto mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
+  std::span<float> data_span(vision_output_owner_->GetTensorMutableData<float>(),
+                             output_info->GetElementCount());
+  std::span<const int64_t> shape_span(shape.data(), shape.size());
+  image_features_value_ = OrtValue::CreateTensor<float>(*mem_info, data_span, shape_span);
+
+  vision_ran_ = true;
+}
+
 void Qwen2_5_VL_PipelineState::OnStageComplete(size_t stage_id) {
   if (stage_id != 0 || !vision_ran_) return;
 
@@ -174,7 +280,10 @@ void Qwen2_5_VL_PipelineState::InjectVisionEmbeddings(const std::string& embeddi
 
   auto vision_shape = image_features_value_->GetTensorTypeAndShapeInfo()->GetShape();
 
-  constexpr int32_t image_token_id = 151655;
+  const int32_t image_token_id = static_cast<int32_t>(vl_model_.config_->model.image_token_id);
+  if (image_token_id == 0) {
+    throw std::runtime_error("Vision embedding injection: model.image_token_id is not set in genai_config.json");
+  }
 
   if (!input_ids_ || !input_ids_->Get()) {
     throw std::runtime_error("Vision embedding injection: input_ids not available");
