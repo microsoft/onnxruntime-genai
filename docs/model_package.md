@@ -213,6 +213,11 @@ resolution and before Engine allocation.
         "maximum_total_device_memory_bytes": 34359738368
       },
       "overlay": {
+        "model": {
+          "decoder": {
+            "filename": "model_32gib.onnx"
+          }
+        },
         "engine": {
           "dynamic_batching": {
             "num_blocks": 768,
@@ -221,7 +226,11 @@ resolution and before Engine allocation.
           }
         },
         "search": {
-          "chunk_size": 512
+          "chunk_size": 512,
+          "max_length": 65536
+        },
+        "speculative": {
+          "max_draft_tokens": 6
         }
       }
     }
@@ -231,16 +240,19 @@ resolution and before Engine allocation.
 
 Profile IDs must be non-empty and unique. Every profile requires a minimum total-memory value;
 the maximum is optional and inclusive. Ranges must be valid and non-overlapping. Zero matches uses
-the base settings. `overlay` is typed and may contain any subset of these four fields:
+the base settings. `overlay` is typed and may contain any subset of these fields:
 
+- `model.decoder.filename`
 - `engine.dynamic_batching.num_blocks`
 - `engine.dynamic_batching.max_batch_size`
 - `engine.dynamic_batching.max_scheduled_tokens`
 - `search.chunk_size`
+- `search.max_length`
+- `speculative.max_draft_tokens`
 
 Omitted fields retain their base values. Every other config field is rejected from a runtime
-profile overlay. In particular, profiles cannot override `search.max_length`; applications set
-request/session policy independently.
+profile overlay. Alternate decoder graphs may share one external-data file; each graph still owns
+its graph-specific inputs, outputs, attributes, and small initializers.
 
 An overlaid `search.max_length` remains the default Engine Request length. The Engine's
 `max_request_length` capability reports the hard per-request limit derived from the resolved target

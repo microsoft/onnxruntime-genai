@@ -51,8 +51,10 @@ TEST(ConfigTest, ParsesAndAppliesOneMatchingRuntimeProfile) {
       "id":"larger-gpu",
       "eligibility":{"minimum_total_device_memory_bytes":34359738368},
       "overlay":{
+        "model":{"decoder":{"filename":"model_32gib.onnx"}},
         "engine":{"dynamic_batching":{"num_blocks":64,"max_batch_size":8}},
-        "search":{"chunk_size":512}
+        "search":{"chunk_size":512,"max_length":65536},
+        "speculative":{"max_draft_tokens":6}
       }
     }]
   })");
@@ -64,6 +66,9 @@ TEST(ConfigTest, ParsesAndAppliesOneMatchingRuntimeProfile) {
   EXPECT_EQ(config.engine.dynamic_batching->max_batch_size, 8u);
   EXPECT_EQ(config.engine.dynamic_batching->max_scheduled_tokens, 1024u);
   EXPECT_EQ(config.search.chunk_size, 512u);
+  EXPECT_EQ(config.search.max_length, 65536);
+  EXPECT_EQ(config.model.decoder.filename, "model_32gib.onnx");
+  EXPECT_EQ(config.speculative.max_draft_tokens, 6);
 }
 
 TEST(ConfigTest, RuntimeProfileUsesBaseWhenNoRangeMatches) {
@@ -247,12 +252,22 @@ TEST(ConfigTest, RejectsUnapprovedSearchOverlayField) {
                std::runtime_error);
 }
 
-TEST(ConfigTest, RejectsModelOverlayField) {
+TEST(ConfigTest, RejectsUnapprovedModelOverlayField) {
   Config config;
   EXPECT_THROW(OverlayConfig(config, R"({"runtime_profiles":[{
-    "id":"filename",
+    "id":"context-length",
     "eligibility":{"minimum_total_device_memory_bytes":1},
-    "overlay":{"model":{"decoder":{"filename":"decoder-large.onnx"}}}
+    "overlay":{"model":{"context_length":8192}}
+  }]})"),
+               std::runtime_error);
+}
+
+TEST(ConfigTest, RejectsEmptyRuntimeProfileDecoderFilename) {
+  Config config;
+  EXPECT_THROW(OverlayConfig(config, R"({"runtime_profiles":[{
+    "id":"empty-filename",
+    "eligibility":{"minimum_total_device_memory_bytes":1},
+    "overlay":{"model":{"decoder":{"filename":""}}}
   }]})"),
                std::runtime_error);
 }
@@ -270,12 +285,12 @@ TEST(ConfigTest, AppliesChunkSizeOnlyRuntimeProfileWithoutDynamicBatching) {
   EXPECT_EQ(config.search.chunk_size, 256u);
 }
 
-TEST(ConfigTest, RejectsRuntimeProfileMaxLengthOverride) {
+TEST(ConfigTest, RejectsNonPositiveRuntimeProfileMaxLength) {
   Config config;
   EXPECT_THROW(OverlayConfig(config, R"({"runtime_profiles":[{
     "id":"request-limit",
     "eligibility":{"minimum_total_device_memory_bytes":1},
-    "overlay":{"search":{"max_length":4096}}
+    "overlay":{"search":{"max_length":0}}
   }]})"),
                std::runtime_error);
 }

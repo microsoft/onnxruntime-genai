@@ -264,11 +264,7 @@ def normalize_target_quant_config(
     legacy_config = QuantConfig.from_extra_options(normalized_legacy, seed_precision, execution_provider)
     merged = merge_objects(quant_config_schema_dict(legacy_config), canonical)
     structured_weights = canonical.get("weights", {})
-    if (
-        "type" in structured_weights
-        and "symmetric" not in structured_weights
-        and "is_symmetric" not in legacy_options
-    ):
+    if "type" in structured_weights and "symmetric" not in structured_weights and "is_symmetric" not in legacy_options:
         merged["weights"].pop("symmetric", None)
 
     legacy_moe_explicit = "moe_quant_type" in legacy_options or "use_8bits_moe" in legacy_options
@@ -400,14 +396,10 @@ def normalize_drafter_quant_config(
     }
     quant_config = QuantConfig.from_dict(merge_objects(defaults, canonical))
     if drafter_type in ("dflash2", "dspark") and quant_config.io_dtype != "bf16":
-        raise ValueError(
-            f"{drafter_type} body io_dtype must be bf16 because its activations can exceed the fp16 range"
-        )
+        raise ValueError(f"{drafter_type} body io_dtype must be bf16 because its activations can exceed the fp16 range")
     if drafter_type == "mtp" and quant_config.io_dtype != target_io_dtype:
         # The MTP graph consumes the decoder hidden state directly; no exporter converts it.
-        raise ValueError(
-            f"MTP io_dtype must match the target io_dtype '{target_io_dtype}'"
-        )
+        raise ValueError(f"MTP io_dtype must match the target io_dtype '{target_io_dtype}'")
     if drafter_type == "dspark" and quant_config.weights.type != "none":
         raise ValueError("DSpark integer weight quantization is not supported")
     if drafter_type == "dspark":
@@ -450,7 +442,16 @@ def flatten_drafter_options(
         return None
     check_fields(
         options,
-        {"drafter_type", "path", "num_draft_tokens", "shared_weights", "quant_config", "attention", "optimizations", "dspark"},
+        {
+            "drafter_type",
+            "path",
+            "num_draft_tokens",
+            "shared_weights",
+            "quant_config",
+            "attention",
+            "optimizations",
+            "dspark",
+        },
         "drafter_options",
     )
     drafter_type = options.get("drafter_type")
@@ -459,11 +460,7 @@ def flatten_drafter_options(
     if drafter_type == "mtp" and flattened.get("exclude_mtp", False):
         raise ValueError("drafter_options.drafter_type=mtp conflicts with legacy extra_options.exclude_mtp")
 
-    legacy_drafters = {
-        name.removesuffix("_path")
-        for name in ("dflash2_path", "dspark_path")
-        if flattened.get(name)
-    }
+    legacy_drafters = {name.removesuffix("_path") for name in ("dflash2_path", "dspark_path") if flattened.get(name)}
     if legacy_drafters and legacy_drafters != {drafter_type}:
         raise ValueError(
             f"drafter_options.drafter_type={drafter_type} conflicts with legacy drafter selection "
@@ -555,9 +552,7 @@ def flatten_drafter_options(
     if any(policy not in ("auto", "required", "off") for policy in policies.values()):
         raise ValueError("shared weight policies must be auto, required, or off")
     if drafter_type != "dflash2" and any(policy != "auto" for policy in policies.values()):
-        raise ValueError(
-            f"explicit shared weight policies are not yet supported for drafter_type={drafter_type}"
-        )
+        raise ValueError(f"explicit shared weight policies are not yet supported for drafter_type={drafter_type}")
     flattened["_shared_weight_policies"] = policies
 
     dspark = options.get("dspark", {})
@@ -577,7 +572,9 @@ def flatten_speculative_options(options: dict[str, Any], flattened: dict[str, An
     check_fields(options, {"aux_hidden_state_layers", "state_update_capacity"}, "speculative_options")
     if "aux_hidden_state_layers" in options:
         layers = options["aux_hidden_state_layers"]
-        if not isinstance(layers, list) or any(isinstance(layer, bool) or not isinstance(layer, int) for layer in layers):
+        if not isinstance(layers, list) or any(
+            isinstance(layer, bool) or not isinstance(layer, int) for layer in layers
+        ):
             raise ValueError("speculative_options.aux_hidden_state_layers must be a list of integers")
         flattened["aux_hidden_state_layers"] = ",".join(str(layer) for layer in layers)
     if "state_update_capacity" in options:
@@ -604,7 +601,9 @@ def normalize_builder_config(
     here, although block-drafter config.json is read to resolve auxiliary taps.
     """
     legacy_options = copy.deepcopy(extra_options or {})
-    structured_present = any(value is not None for value in (target_options, drafter_options, speculative_options, runtime_config))
+    structured_present = any(
+        value is not None for value in (target_options, drafter_options, speculative_options, runtime_config)
+    )
     explicit_version = builder_config_version is not None
     version = int(builder_config_version) if explicit_version else 2 if structured_present else 1
     if version == 1 and structured_present:
@@ -638,9 +637,7 @@ def normalize_builder_config(
         legacy_search = load_json_object(search, "search")
         runtime = merge_objects({"search": legacy_search}, runtime)
 
-    flattened, quant_config, effective_precision = flatten_target_options(
-        target, legacy_options, precision, provider
-    )
+    flattened, quant_config, effective_precision = flatten_target_options(target, legacy_options, precision, provider)
     flatten_speculative_options(speculative, flattened)
     effective_drafter = flatten_drafter_options(drafter, flattened, provider)
     flattened["_runtime_config"] = runtime
@@ -705,17 +702,32 @@ def validate_model_dependent_config(effective_config: EffectiveBuilderConfig, mo
 
 def validate_runtime_config(runtime_config: dict[str, Any], generated_config: dict[str, Any]):
     """Check a runtime overlay against the completed exported configuration."""
-    check_fields(runtime_config, {"search", "speculative", "engine", "model"}, "runtime_config")
+    check_fields(runtime_config, {"search", "speculative", "engine", "model", "runtime_profiles"}, "runtime_config")
+    validate_runtime_profiles(runtime_config.get("runtime_profiles", []), generated_config)
     search = runtime_config.get("search", {})
     if not isinstance(search, dict):
         raise ValueError("runtime_config.search must be an object")
     check_fields(
         search,
         {
-            "batch_size", "blank_penalty", "chunk_size", "diversity_penalty", "do_sample",
-            "early_stopping", "length_penalty", "max_length", "min_length", "no_repeat_ngram_size",
-            "num_beams", "num_return_sequences", "past_present_share_buffer", "random_seed",
-            "repetition_penalty", "temperature", "top_k", "top_p",
+            "batch_size",
+            "blank_penalty",
+            "chunk_size",
+            "diversity_penalty",
+            "do_sample",
+            "early_stopping",
+            "length_penalty",
+            "max_length",
+            "min_length",
+            "no_repeat_ngram_size",
+            "num_beams",
+            "num_return_sequences",
+            "past_present_share_buffer",
+            "random_seed",
+            "repetition_penalty",
+            "temperature",
+            "top_k",
+            "top_p",
         },
         "runtime_config.search",
     )
@@ -786,7 +798,11 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
     check_fields(speculative, {"max_draft_tokens"}, "runtime_config.speculative")
     if "max_draft_tokens" in speculative:
         max_draft_tokens = speculative["max_draft_tokens"]
-        if isinstance(max_draft_tokens, bool) or not isinstance(max_draft_tokens, int) or not 1 <= max_draft_tokens <= 16:
+        if (
+            isinstance(max_draft_tokens, bool)
+            or not isinstance(max_draft_tokens, int)
+            or not 1 <= max_draft_tokens <= 16
+        ):
             raise ValueError("runtime_config.speculative.max_draft_tokens must be an integer between 1 and 16")
         generated_model = generated_config.get("model", {})
         capacities = [
@@ -801,9 +817,7 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
         if not capacities and not has_dynamic_mtp:
             raise ValueError("runtime_config references absent speculative configuration")
         if not has_dynamic_mtp and capacities and max_draft_tokens > min(capacities):
-            raise ValueError(
-                "runtime_config.speculative.max_draft_tokens exceeds the exported drafter/state capacity"
-            )
+            raise ValueError("runtime_config.speculative.max_draft_tokens exceeds the exported drafter/state capacity")
 
     engine = runtime_config.get("engine", {})
     if not isinstance(engine, dict):
@@ -895,8 +909,8 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
             generated_names = {name.casefold() for entry in generated_providers for name in entry}
             runtime_names = {name.casefold() for entry in runtime_providers for name in entry}
             if component_name in ("mtp", "dflash2", "dspark") and not generated_names:
-                decoder_providers = generated_components.get("decoder", {}).get("session_options", {}).get(
-                    "provider_options", []
+                decoder_providers = (
+                    generated_components.get("decoder", {}).get("session_options", {}).get("provider_options", [])
                 )
                 generated_providers = decoder_providers
                 generated_names = {name.casefold() for entry in decoder_providers for name in entry}
@@ -905,9 +919,7 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
                     f"runtime_config.model.{component_name}.session_options cannot change execution providers"
                 )
             generated_by_name = {
-                name.casefold(): options
-                for entry in generated_providers
-                for name, options in entry.items()
+                name.casefold(): options for entry in generated_providers for name, options in entry.items()
             }
             for entry in runtime_providers:
                 for provider_name, runtime_options in entry.items():
@@ -938,6 +950,104 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
                         )
 
 
+def validate_runtime_profiles(runtime_profiles: Any, generated_config: dict[str, Any]):
+    if not isinstance(runtime_profiles, list):
+        raise ValueError("runtime_config.runtime_profiles must be an array")
+
+    ids = set()
+    ranges = []
+    for index, profile in enumerate(runtime_profiles):
+        path = f"runtime_config.runtime_profiles[{index}]"
+        if not isinstance(profile, dict):
+            raise ValueError(f"{path} must be an object")
+        check_fields(profile, {"id", "eligibility", "overlay"}, path)
+        profile_id = profile.get("id")
+        if not isinstance(profile_id, str) or not profile_id:
+            raise ValueError(f"{path}.id must be a non-empty string")
+        if profile_id in ids:
+            raise ValueError(f"duplicate runtime profile id: {profile_id}")
+        ids.add(profile_id)
+
+        eligibility = profile.get("eligibility")
+        if not isinstance(eligibility, dict):
+            raise ValueError(f"{path}.eligibility must be an object")
+        check_fields(
+            eligibility,
+            {"minimum_total_device_memory_bytes", "maximum_total_device_memory_bytes"},
+            f"{path}.eligibility",
+        )
+        minimum = eligibility.get("minimum_total_device_memory_bytes")
+        maximum = eligibility.get("maximum_total_device_memory_bytes", 2**53 - 1)
+        for field_name, value in (
+            ("minimum_total_device_memory_bytes", minimum),
+            ("maximum_total_device_memory_bytes", maximum),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value > 2**53 - 1:
+                raise ValueError(f"{path}.eligibility.{field_name} must be a non-negative integer")
+        if maximum < minimum:
+            raise ValueError(f"{path}.eligibility maximum must not be below minimum")
+        ranges.append((minimum, maximum, profile_id))
+
+        overlay = profile.get("overlay")
+        if not isinstance(overlay, dict) or not overlay:
+            raise ValueError(f"{path}.overlay must be a non-empty object")
+        check_fields(overlay, {"model", "engine", "search", "speculative"}, f"{path}.overlay")
+
+        model = overlay.get("model", {})
+        if not isinstance(model, dict):
+            raise ValueError(f"{path}.overlay.model must be an object")
+        check_fields(model, {"decoder"}, f"{path}.overlay.model")
+        decoder = model.get("decoder", {})
+        if not isinstance(decoder, dict):
+            raise ValueError(f"{path}.overlay.model.decoder must be an object")
+        check_fields(decoder, {"filename"}, f"{path}.overlay.model.decoder")
+        if "filename" in decoder and (not isinstance(decoder["filename"], str) or not decoder["filename"]):
+            raise ValueError(f"{path}.overlay.model.decoder.filename must be a non-empty string")
+
+        engine = overlay.get("engine", {})
+        if not isinstance(engine, dict):
+            raise ValueError(f"{path}.overlay.engine must be an object")
+        check_fields(engine, {"dynamic_batching"}, f"{path}.overlay.engine")
+        dynamic_batching = engine.get("dynamic_batching", {})
+        if not isinstance(dynamic_batching, dict):
+            raise ValueError(f"{path}.overlay.engine.dynamic_batching must be an object")
+        check_fields(
+            dynamic_batching,
+            {"num_blocks", "max_batch_size", "max_scheduled_tokens"},
+            f"{path}.overlay.engine.dynamic_batching",
+        )
+        if dynamic_batching and "engine" not in generated_config:
+            raise ValueError(f"{path} references absent engine configuration")
+        for field_name, value in dynamic_batching.items():
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{path}.overlay.engine.dynamic_batching.{field_name} must be a positive integer")
+
+        search = overlay.get("search", {})
+        if not isinstance(search, dict):
+            raise ValueError(f"{path}.overlay.search must be an object")
+        check_fields(search, {"chunk_size", "max_length"}, f"{path}.overlay.search")
+        for field_name, value in search.items():
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{path}.overlay.search.{field_name} must be a positive integer")
+        context_length = generated_config.get("model", {}).get("context_length")
+        if "max_length" in search and isinstance(context_length, int) and search["max_length"] > context_length:
+            raise ValueError(f"{path}.overlay.search.max_length exceeds the exported model context_length")
+
+        speculative = overlay.get("speculative", {})
+        if not isinstance(speculative, dict):
+            raise ValueError(f"{path}.overlay.speculative must be an object")
+        check_fields(speculative, {"max_draft_tokens"}, f"{path}.overlay.speculative")
+        if "max_draft_tokens" in speculative:
+            value = speculative["max_draft_tokens"]
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 16:
+                raise ValueError(f"{path}.overlay.speculative.max_draft_tokens must be an integer between 1 and 16")
+
+    for index, (minimum, maximum, profile_id) in enumerate(ranges):
+        for other_minimum, other_maximum, other_id in ranges[index + 1 :]:
+            if minimum <= other_maximum and other_minimum <= maximum:
+                raise ValueError(f"runtime profile eligibility ranges overlap: {profile_id!r} and {other_id!r}")
+
+
 def apply_runtime_config(generated_config: dict[str, Any], runtime_config: dict[str, Any]) -> dict[str, Any]:
     """Apply a validated profile after all component sections exist."""
     if not runtime_config:
@@ -950,23 +1060,21 @@ def apply_runtime_config(generated_config: dict[str, Any], runtime_config: dict[
         if "provider_options" not in runtime_session:
             continue
         generated_components = baseline["model"]
-        generated_providers = generated_components[component_name].get("session_options", {}).get("provider_options", [])
+        generated_providers = (
+            generated_components[component_name].get("session_options", {}).get("provider_options", [])
+        )
         if component_name in ("mtp", "dflash2", "dspark") and not generated_providers:
-            generated_providers = generated_components.get("decoder", {}).get("session_options", {}).get(
-                "provider_options", []
+            generated_providers = (
+                generated_components.get("decoder", {}).get("session_options", {}).get("provider_options", [])
             )
         generated_by_name = {
-            name.casefold(): (name, options)
-            for entry in generated_providers
-            for name, options in entry.items()
+            name.casefold(): (name, options) for entry in generated_providers for name, options in entry.items()
         }
         merged_providers = []
         for entry in runtime_session["provider_options"]:
             for runtime_name, runtime_options in entry.items():
                 generated_name, generated_options = generated_by_name[runtime_name.casefold()]
-                merged_providers.append(
-                    {generated_name: merge_objects(generated_options, runtime_options)}
-                )
+                merged_providers.append({generated_name: merge_objects(generated_options, runtime_options)})
         runtime_session["provider_options"] = merged_providers
     dynamic_batching = overlay.get("engine", {}).get("dynamic_batching", {})
     generated_dynamic_batching = baseline.get("engine", {}).get("dynamic_batching", {})

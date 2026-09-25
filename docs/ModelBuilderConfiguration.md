@@ -362,6 +362,20 @@ Allow supported settings under:
 - `engine.dynamic_batching`, including batch/token limits and cache allocation.
 - `model.<existing-component>.session_options` and `run_options`, including
   supported provider, allocator, threading, and profiling options.
+- `runtime_profiles`, for typed CUDA memory-class overlays applied before model
+  and Engine construction.
+
+When every memory class uses the same ONNX graphs, place `runtime_profiles`
+directly inside `runtime_config`. Model Builder validates and writes the array
+to `genai_config.json` in the first export pass. No post-processing pass is
+needed. A profile overlay may change `engine.dynamic_batching`, `search.chunk_size`,
+`search.max_length`, and `speculative.max_draft_tokens`.
+
+An alternate graph may additionally set `model.decoder.filename`. The named
+graph must already be present in the package, for example because an Olive
+post-processing pass derived a different KV-cache variant while retaining the
+base graph's external weights. Do not set a different filename for a
+configuration-only profile.
 
 MTP accepts session and run options even when its generated component has no
 `session_options` object. MTP, DFlash2, and DSpark provider overlays use decoder

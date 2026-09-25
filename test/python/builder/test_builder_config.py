@@ -576,6 +576,30 @@ def test_runtime_merge_replaces_arrays_and_fixed_allocation():
     assert generated == original
 
 
+def test_runtime_adds_config_only_profile():
+    generated = {
+        "model": {"context_length": 262144, "decoder": {"filename": "model.onnx"}},
+        "engine": {"dynamic_batching": {"num_blocks": 800, "max_batch_size": 1}},
+        "search": {"max_length": 200001, "chunk_size": 512},
+        "speculative": {"max_draft_tokens": 7},
+    }
+    profile = {
+        "id": "32gib",
+        "eligibility": {"minimum_total_device_memory_bytes": 34359738368},
+        "overlay": {
+            "engine": {"dynamic_batching": {"num_blocks": 928, "max_batch_size": 8}},
+            "search": {"max_length": 65536},
+            "speculative": {"max_draft_tokens": 6},
+        },
+    }
+
+    updated = apply_runtime_config(generated, {"runtime_profiles": [profile]})
+
+    assert updated["runtime_profiles"] == [profile]
+    assert updated["model"]["decoder"]["filename"] == "model.onnx"
+    assert updated["engine"]["dynamic_batching"]["num_blocks"] == 800
+
+
 def test_runtime_rejects_protected_and_absent_components():
     generated = {"model": {"decoder": {}}, "engine": {"dynamic_batching": {"block_size": 256}}}
     with pytest.raises(ValueError, match="unknown runtime_config.engine.dynamic_batching"):

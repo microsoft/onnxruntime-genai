@@ -814,6 +814,10 @@ struct Config {
     } eligibility;
 
     struct Overlay {
+      struct Model {
+        std::optional<std::string> decoder_filename;
+      } model;
+
       struct DynamicBatching {
         std::optional<size_t> num_blocks;
         std::optional<size_t> max_batch_size;
@@ -822,7 +826,12 @@ struct Config {
 
       struct Search {
         std::optional<size_t> chunk_size;
+        std::optional<int> max_length;
       } search;
+
+      struct Speculative {
+        std::optional<int> max_draft_tokens;
+      } speculative;
     } overlay;
   };
   std::vector<RuntimeProfile> runtime_profiles;
