@@ -18,6 +18,7 @@ import pytest
 from _test_utils import register_webgpu_plugin
 
 _NUM_BLOCKS = 8
+_NUM_HIDDEN_LAYERS = 24
 _MODEL_ID = "Qwen/Qwen2.5-0.5B-Instruct"
 _PREFILL_TOKENS = np.asarray([1, 2, 3], dtype=np.int64)
 _DECODE_TOKENS = np.asarray([4], dtype=np.int64)
@@ -25,7 +26,7 @@ _BUILDER_PATH = Path(__file__).parents[3] / "src" / "python" / "py" / "models" /
 
 
 def _export_model(output_dir, precision, ep, paged=True):
-    extra_options = ["prune_lm_head=true", "num_hidden_layers=2", "hf_token=false"]
+    extra_options = ["prune_lm_head=true", "hf_token=false"]
     if paged:
         extra_options += [
             "use_paged_attention=true",
@@ -145,7 +146,7 @@ def _assert_logits_match(actual, expected):
     actual = actual.reshape(-1)
     expected = expected.reshape(-1)
     assert np.argmax(actual) == np.argmax(expected)
-    np.testing.assert_allclose(actual, expected, rtol=3e-2, atol=1e-1)
+    np.testing.assert_allclose(actual, expected, rtol=3e-2, atol=1.5e-1)
 
 
 def test_webgpu_paged_export_runs_prefill_and_decode(tmp_path):
@@ -161,6 +162,7 @@ def test_webgpu_paged_export_runs_prefill_and_decode(tmp_path):
 
     config = json.loads((output_dir / "genai_config.json").read_text(encoding="utf-8"))
     assert config["engine"]["dynamic_batching"]["num_blocks"] == _NUM_BLOCKS
+    assert config["model"]["decoder"]["num_hidden_layers"] == _NUM_HIDDEN_LAYERS
     assert config["model"]["decoder"]["inputs"]["attention_metadata"] == "attention_metadata"
 
     model_path = output_dir / config["model"]["decoder"]["filename"]
