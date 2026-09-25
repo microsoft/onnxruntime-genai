@@ -21,7 +21,7 @@ class GPTOSSModel(Model):
         self.moe_attrs["normalize_routing_weights"] = True
         self.moe_attrs["swiglu_fusion"] = 1
 
-    def load_mxfp4_experts(self, layer_id):
+    def get_mxfp4_loader(self):
         try:
             from loaders.gptoss import GptOssMXFP4Loader  # noqa: PLC0415
         except ImportError:
@@ -29,7 +29,13 @@ class GPTOSSModel(Model):
 
         if not hasattr(self, "mxfp4_loader"):
             self.mxfp4_loader = GptOssMXFP4Loader(self.model_name_or_path, self.cache_dir, self.hf_token)
-        return self.mxfp4_loader.prepare_experts(layer_id)
+        return self.mxfp4_loader
+
+    def load_mxfp4_experts(self, layer_id):
+        return self.get_mxfp4_loader().prepare_experts(layer_id)
+
+    def load_dense_mxfp4_experts(self, layer_id):
+        return self.get_mxfp4_loader().decode_experts(layer_id)
 
     def make_layernorm(self, layer_id, layernorm, skip, simple, location):
         if "final_norm" in location:
@@ -531,6 +537,11 @@ class GPTOSSModel(Model):
             self.make_moe_expert_initializers(layer_id, moe.experts)
         elif is_fp4_moe:
             self.make_moe_expert_initializers(layer_id, self.load_mxfp4_experts(layer_id))
+        elif self.moe_attrs["op_type"] == "QMoE":
+            gate_up_proj_layout, down_proj_layout = self.load_dense_mxfp4_experts(layer_id)
+            self.make_moe_expert_initializers(
+                layer_id, moe.experts, gate_up_proj_layout, down_proj_layout
+            )
         else:
             # HF GptOssExperts stores weights input-major, while every downstream consumer
             # expects output-major [E, N, K] with the contraction axis last.
