@@ -71,7 +71,7 @@ steps:
       addToPath: true
       architecture: '${{ parameters.arch }}'
 
-  - script: python -m pip install pybind11 wheel requests
+  - script: python -m pip install pybind11 wheel requests pybind11-stubgen numpy
     displayName: 'Install build-time Python deps (${{ pyVer }})'
 
   - powershell: |
