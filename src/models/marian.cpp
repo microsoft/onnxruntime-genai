@@ -5,6 +5,34 @@
 
 namespace Generators {
 
+namespace {
+constexpr std::string_view kCachedSourceProjectionPrefix{"cached_source_projection_"};
+
+std::string ShapeString(std::span<const int64_t> shape, std::span<const char* const> symbols = {}) {
+  std::string result{"["};
+  for (size_t i = 0; i < shape.size(); ++i) {
+    if (i != 0)
+      result += ", ";
+    result += shape[i] < 0 && !symbols.empty() && symbols[i][0] != '\0'
+                  ? symbols[i]
+                  : std::to_string(shape[i]);
+  }
+  return result + "]";
+}
+
+bool SameDimensions(const std::vector<int64_t>& left, const std::vector<const char*>& left_symbols,
+                    const std::vector<int64_t>& right, const std::vector<const char*>& right_symbols, size_t count) {
+  if (left.size() < count || right.size() < count)
+    return false;
+  for (size_t i = 0; i < count; ++i) {
+    if (left[i] != right[i] ||
+        (left[i] < 0 && std::strcmp(left_symbols[i], right_symbols[i]) != 0))
+      return false;
+  }
+  return true;
+}
+}  // namespace
+
 MarianModel::MarianModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
   encoder_session_options_ = OrtSessionOptions::Create();
@@ -13,6 +41,54 @@ MarianModel::MarianModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
   session_encoder_ = CreateSession(ort_env, config_->model.encoder.filename, encoder_session_options_.get());
   session_decoder_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
 
+  SessionInfo encoder_info, decoder_info;
+  encoder_info.Add(*session_encoder_);
+  decoder_info.Add(*session_decoder_);
+  std::set<std::string> cache_names;
+  for (const auto& name : session_encoder_->GetInputNames()) {
+    if (name.starts_with(kCachedSourceProjectionPrefix))
+      throw std::runtime_error("Marian cache '" + name + "' must not be an encoder input");
+  }
+  for (const auto& name : session_decoder_->GetOutputNames()) {
+    if (name.starts_with(kCachedSourceProjectionPrefix))
+      throw std::runtime_error("Marian cache '" + name + "' must not be a decoder output");
+  }
+  for (const auto& name : session_encoder_->GetOutputNames()) {
+    if (name.starts_with(kCachedSourceProjectionPrefix))
+      cache_names.insert(name);
+  }
+  for (const auto& name : session_decoder_->GetInputNames()) {
+    if (name.starts_with(kCachedSourceProjectionPrefix))
+      cache_names.insert(name);
+  }
+  for (const auto& name : cache_names) {
+    if (!encoder_info.HasOutput(name) || !decoder_info.HasInput(name)) {
+      throw std::runtime_error("Marian cache '" + name + "' requires an encoder output and a matching decoder input");
+    }
+    const auto input_shape = decoder_info.GetInputShape(name);
+    const auto output_shape = encoder_info.GetOutputShape(name);
+    const auto input_symbols = decoder_info.GetInputSymbolicShape(name);
+    const auto output_symbols = encoder_info.GetOutputSymbolicShape(name);
+    const auto input_type = decoder_info.GetInputDataType(name);
+    const auto output_type = encoder_info.GetOutputDataType(name);
+    const auto source_shape = encoder_info.GetOutputShape(config_->model.encoder.outputs.encoder_outputs);
+    const auto source_symbols = encoder_info.GetOutputSymbolicShape(config_->model.encoder.outputs.encoder_outputs);
+    if (input_shape.size() != 3 || output_shape.size() != 3 ||
+        !SameDimensions(input_shape, input_symbols, output_shape, output_symbols, 3) ||
+        !SameDimensions(output_shape, output_symbols, source_shape, source_symbols, 2) ||
+        output_shape[0] == 0 || output_shape[1] == 0 || output_shape[2] <= 0 ||
+        input_type != output_type ||
+        (output_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT && output_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16)) {
+      throw std::runtime_error(
+          "Marian cache '" + name +
+          "' requires matching float32 or float16 [batch, source, projection] tensors "
+          "with a fixed projection width and the encoder's batch/source dimensions: encoder output " +
+          ShapeString(output_shape, output_symbols) + " (type " + std::to_string(output_type) +
+          "), decoder input " + ShapeString(input_shape, input_symbols) + " (type " + std::to_string(input_type) +
+          "), encoder source " + ShapeString(source_shape, source_symbols));
+    }
+    cached_source_projections_.push_back({name, {output_shape[0], output_shape[1], output_shape[2]}, output_type});
+  }
   session_info_.Add(*session_decoder_);
   session_info_.Add(*session_encoder_);
 }
@@ -25,6 +101,10 @@ MarianLogits::MarianLogits(State& state)
 }
 
 std::unique_ptr<State> MarianModel::CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const {
+  if (!cached_source_projections_.empty() &&
+      (p_device_->GetType() != DeviceType::CPU || params.search.num_beams != 1 || !params.IsGreedySampling())) {
+    throw std::runtime_error("Marian cached projections support CPU greedy generation with one beam only");
+  }
   return std::make_unique<MarianState>(*this, sequence_lengths, params);
 }
 
@@ -32,6 +112,7 @@ MarianState::MarianState(const MarianModel& model, DeviceSpan<int32_t> sequence_
     : State{params, model},
       model_{model},
       encoder_attention_mask_{model, *this, sequence_lengths_unk, model_.config_->model.encoder.inputs.attention_mask},
+      cached_source_projections_(model.cached_source_projections_.size()),
       attention_mask_{model, *this, sequence_lengths_unk, model_.config_->model.decoder.inputs.encoder_attention_mask} {
 }
 
@@ -180,6 +261,19 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
 
     output_names_.push_back(model_.config_->model.encoder.outputs.encoder_outputs.c_str());
     outputs_.push_back(encoder_outputs_.get());
+    for (size_t i = 0; i < cached_source_projections_.size(); ++i) {
+      const auto& projection = model_.cached_source_projections_[i];
+      const std::array<int64_t, 3> shape{encoder_outputs_shape[0], encoder_outputs_shape[1], projection.shape[2]};
+      for (size_t dim = 0; dim < 2; ++dim) {
+        if (projection.shape[dim] >= 0 && projection.shape[dim] != shape[dim]) {
+          throw std::runtime_error("Marian cache '" + projection.name + "' declares " + ShapeString(projection.shape) +
+                                   " but the request requires " + ShapeString(shape));
+        }
+      }
+      cached_source_projections_[i] = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), shape, projection.type);
+      output_names_.push_back(projection.name.c_str());
+      outputs_.push_back(cached_source_projections_[i].get());
+    }
 
     if (model_.config_->model.encoder.run_options.has_value()) {
       State::SetRunOptions(model_.config_->model.encoder.run_options.value());
@@ -188,6 +282,10 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
 
     // Clear inputs and outputs for the decoder
     ClearIO();
+    for (size_t i = 0; i < cached_source_projections_.size(); ++i) {
+      input_names_.push_back(model_.cached_source_projections_[i].name.c_str());
+      inputs_.push_back(cached_source_projections_[i].get());
+    }
 
     // Initialize the decoder inputs and outputs
     decoder_input_ids_.name_ = model_.config_->model.decoder.inputs.input_ids.c_str();

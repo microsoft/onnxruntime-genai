@@ -680,7 +680,7 @@ bool Generator::IsGreedySampling() const {
 
 void Generator::InitializeSamplingMethod(const GeneratorParams& params) {
   const auto& search = params.search;
-  if (!search.do_sample || search.top_k == 1 || search.temperature == 0) {
+  if (params.IsGreedySampling()) {
     sampling_method_ = SamplingMethod::kGreedy;
   } else {
     if (search.num_beams != 1)
