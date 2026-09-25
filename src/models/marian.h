@@ -60,7 +60,12 @@ struct MarianModel : Model {
   std::unique_ptr<OrtSessionOptions> encoder_session_options_;
   std::unique_ptr<OrtSession> session_encoder_;  // encoder_decoder_init.onnx
   std::unique_ptr<OrtSession> session_decoder_;  // decoder.onnx
-  bool has_cached_source_projections_{};
+  struct CachedSourceProjection {
+    std::string name;
+    std::array<int64_t, 3> shape;
+    ONNXTensorElementDataType type;
+  };
+  std::vector<CachedSourceProjection> cached_source_projections_;
 };
 
 struct MarianState : State {
@@ -78,7 +83,7 @@ struct MarianState : State {
   DefaultInputIDs encoder_input_ids_{*this};
   DefaultPositionInputs encoder_attention_mask_;
   std::unique_ptr<OrtValue> encoder_outputs_;
-  std::array<std::unique_ptr<OrtValue>, 6> cached_source_projections_;
+  std::vector<std::unique_ptr<OrtValue>> cached_source_projections_;
 
   // Decoder IOs
   MarianInputIDs decoder_input_ids_{*this};
