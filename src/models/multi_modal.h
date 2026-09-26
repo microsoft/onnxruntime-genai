@@ -51,6 +51,13 @@ struct MultiModalLanguageModel : Model {
   std::unique_ptr<OrtSession> audio_embedding_session_;  // audio_codes -> audio_embeds, summed into the decoder's next input
   std::unique_ptr<OrtSessionOptions> depthformer_session_options_;
   std::unique_ptr<OrtSessionOptions> audio_embedding_session_options_;
+
+  // The device each sub-model session actually runs on. A sub-model whose config block carries
+  // its own `session_options` does not inherit the decoder's providers, so it can land on the CPU
+  // EP while the decoder is on a GPU one. The states below allocate against these, not p_device_.
+  DeviceInterface* vision_device_{};
+  DeviceInterface* speech_device_{};
+  DeviceInterface* embedding_device_{};
 };
 
 // Base VisionState: runs vision.onnx with a single State::Run() call.

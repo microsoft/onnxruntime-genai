@@ -411,6 +411,58 @@ def test_lfm2_vl_generation_matches_onnxruntime_reference(test_data_path, with_i
     np.testing.assert_array_equal(generator.get_sequence(0), _reference_generation(model_path, input_ids, num_tokens))
 
 
+def _model_on(model_dir: Path, provider: str | None) -> og.Model:
+    config = og.Config(os.fspath(model_dir))
+    config.clear_providers()
+    if provider is not None:
+        config.append_provider(provider)
+    try:
+        return og.Model(config)
+    except RuntimeError as error:
+        raise pytest.skip.Exception(f"{provider} execution provider is not usable here: {error}") from error
+
+
+def _generate_on(
+    model_dir: Path, provider: str | None, image_path: str, num_tokens: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Returns the generated sequence and the image features the embedding session read."""
+    model = _model_on(model_dir, provider)
+    processor = model.create_multimodal_processor()
+    params = og.GeneratorParams(model)
+    params.set_search_options(do_sample=False, max_length=2048)
+    generator = og.Generator(model, params)
+    generator.set_inputs(processor("<image>Describe this image.", images=og.Images.open(image_path)))
+    # The prompt has run and the vision state is gone, so this resolves to the embedding's input.
+    features = generator.get_input("image_features").copy()
+    for _ in range(num_tokens):
+        generator.generate_next_token()
+    return generator.get_sequence(0).copy(), features
+
+
+@pytest.mark.parametrize("provider", ["cuda", "webgpu"])
+@pytest.mark.parametrize("vision_placement", ["cpu", "decoder"])
+def test_lfm2_vl_decoder_on_another_provider_matches_cpu(test_data_path, tmp_path, provider, vision_placement):
+    # append_provider moves only the decoder: a sub-model with its own session_options stays on the
+    # CPU EP. "decoder" drops the vision block's session_options so vision follows the decoder and
+    # the embedding session alone stays on CPU, which is the only layout that stages image features
+    # across devices. Binding across devices corrupts the heap; a missing copy feeds features the stub
+    # embedding ignores, so they are compared directly.
+    if provider == "cuda" and not og.is_cuda_available():
+        pytest.skip("CUDA is not available in this build")
+
+    model_dir = _copy_model(test_data_path, tmp_path)
+    if vision_placement == "decoder":
+        _edit_json(model_dir / "genai_config.json", lambda config: config["model"]["vision"].pop("session_options"))
+    image_path = _image_path(test_data_path, "australia.jpg")
+
+    expected_tokens, expected_features = _generate_on(model_dir, None, image_path, num_tokens=8)
+    # A buffer that was never written can come back zero-filled, so all-zero features would prove nothing.
+    assert expected_features.any()
+    tokens, features = _generate_on(model_dir, provider, image_path, num_tokens=8)
+    np.testing.assert_array_equal(tokens, expected_tokens)
+    np.testing.assert_array_equal(features, expected_features)
+
+
 def test_lfm2_vl_rejects_rewind(test_data_path):
     generator, _ = _generate(
         _model_path(test_data_path), "<image>Hi", og.Images.open(_image_path(test_data_path, "cars.jpg")), num_tokens=1
