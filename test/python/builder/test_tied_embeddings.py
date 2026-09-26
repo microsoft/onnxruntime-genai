@@ -5,14 +5,16 @@ import sys
 import types
 from pathlib import Path
 
+import numpy as np
 import onnx_ir as ir
+import onnxruntime as ort
 import pytest
 import torch
 
 BUILDERS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
 sys.path.insert(0, str(BUILDERS_DIR.parent))
 
-from quantization import desugar_algo_config
+from quantization import QuantConfig, desugar_algo_config  # noqa: E402
 
 
 def _load_builder_module(module_name):
@@ -442,6 +444,87 @@ def test_make_embedding_uses_algo_specific_lm_head_initializer_names_for_tied_qu
     else:
         assert "lm_head.MatMul.weight_zp" not in gather_inputs
         assert "lm_head.MatMul.weight_zero_points" not in gather_inputs
+
+
+def _make_quantized_tied_embedding_graph(tmp_path, *, vocab_size, hidden_size, block_size, extra_options):
+    model = Model.__new__(Model)
+    model.use_paged_attention = False
+    model.ep = "cpu"
+    model.matmul_attrs = {"weights_prepacked": 0}
+    model.hidden_size = hidden_size
+    model.vocab_size = vocab_size
+    model.io_dtype = ir.DataType.FLOAT
+    model.input_names = {"input_ids": "input_ids"}
+    model.quant_type = None
+    model.quant_config = QuantConfig.from_extra_options(
+        {**extra_options, "block_size": block_size}, precision="int4", execution_provider="cpu"
+    )
+    model.quant_attrs = {
+        "accuracy_level": 0,
+        "matmul_block_size": block_size,
+        "bits": 4,
+        "is_symmetric": model.quant_config.weights.symmetric,
+        "op_types_to_quantize": ("MatMul",),
+        "nodes_to_exclude": [],
+        "algo_config": None,
+        "use_qdq": False,
+    }
+    model.make_quant_init(config=None)
+    model.tied_quantized_embeddings = True
+    model.tied_unquantized_embeddings = False
+
+    model.values = {}
+    model.node_names = set()
+    graph = ir.Graph(
+        inputs=(), outputs=(), nodes=(), opset_imports={"": 21, "com.microsoft": 1}, name="tied_embedding_test"
+    )
+    model.model = ir.Model(graph, ir_version=10)
+    graph.inputs.append(model.make_value("input_ids", ir.DataType.INT64, ["batch_size", "sequence_length"]))
+    graph.inputs.append(model.make_value("hidden_states", ir.DataType.FLOAT, model.make_hidden_state_shape()))
+
+    weight = torch.randn(vocab_size, hidden_size, generator=torch.Generator().manual_seed(0))
+    lm_head = types.SimpleNamespace(weight=weight, bias=None)
+    model.make_matmul_float(lm_head, "/lm_head/MatMul", "hidden_states", logits=True)
+    embeddings = model.make_embedding_lookup(weight, "/model/embed_tokens", lm_head)
+    graph.outputs.append(model.make_value(embeddings, ir.DataType.FLOAT, model.make_hidden_state_shape()))
+    graph.outputs.append(model.make_value("logits"))
+
+    quantized = model.to_nbits()
+    model_path = tmp_path / "tied_embedding.onnx"
+    ir.save(quantized, model_path)
+    return quantized, model_path
+
+
+@pytest.mark.parametrize(
+    "extra_options",
+    [
+        {},
+        {"algo_config": "rtn"},
+        {"algo_config": "rtn", "is_symmetric": False},
+        {"algo_config": "k_quant"},
+        {"algo_config": "rtn_last"},
+    ],
+    ids=["default", "rtn", "rtn_asymmetric", "k_quant", "rtn_last"],
+)
+@pytest.mark.parametrize("hidden_size, block_size", [(64, 32), (96, 64)])
+def test_tied_quantized_embeddings_read_the_quantized_lm_head_rows(tmp_path, extra_options, hidden_size, block_size):
+    # (96, 64) pads each quantized LM head row to whole blocks, which the lookup has to slice off.
+    vocab_size = 256
+    quantized, model_path = _make_quantized_tied_embedding_graph(
+        tmp_path, vocab_size=vocab_size, hidden_size=hidden_size, block_size=block_size, extra_options=extra_options
+    )
+
+    session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+    input_ids = np.linspace(0, vocab_size - 1, hidden_size).astype(np.int64)[None]
+    # One-hot hidden states make the LM head return the dequantized weight: logits[k, t] = W[t, k].
+    embeddings, logits = session.run(
+        None, {"input_ids": input_ids, "hidden_states": np.eye(hidden_size, dtype=np.float32)[None]}
+    )
+
+    assert embeddings.shape == (1, hidden_size, hidden_size)
+    np.testing.assert_allclose(embeddings[0], logits[0][:, input_ids[0]].T, rtol=1e-6, atol=1e-6)
+    slices = [node for node in quantized.graph if node.op_type == "Slice"]
+    assert len(slices) == (0 if hidden_size % block_size == 0 else 1)
 
 
 def _make_minimal_model_for_embedding_branches(
