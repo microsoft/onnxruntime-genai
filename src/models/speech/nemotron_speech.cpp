@@ -7,9 +7,9 @@
 #include <vector>
 
 #include "generator/generators.h"
-#include "../search.h"
+#include "search.h"
 #include "nemo_mel_spectrogram.h"
-#include "nemotron_speech.h"
+#include "models/speech/nemotron_speech.h"
 
 namespace Generators {
 

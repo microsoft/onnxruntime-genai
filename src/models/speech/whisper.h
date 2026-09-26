@@ -6,10 +6,10 @@
 #include <vector>
 
 #include "models/io/audio_features.h"
-#include "model.h"
+#include "models/model.h"
 #include "models/io/input_ids.h"
 #include "models/io/logits.h"
-#include "io/cross_kv_cache.h"
+#include "models/io/cross_kv_cache.h"
 #include "models/io/extra_inputs.h"
 
 namespace Generators {

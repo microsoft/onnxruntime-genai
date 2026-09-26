@@ -6,7 +6,7 @@
 
 #include "models/preprocessing/streaming_processor.h"
 #include "nemo_mel_spectrogram.h"
-#include "models/nemotron_speech.h"
+#include "models/speech/nemotron_speech.h"
 
 namespace Generators {
 

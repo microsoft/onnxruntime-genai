@@ -12,7 +12,7 @@
 #include <stdexcept>
 
 #include "generator/generators.h"
-#include "parakeet.h"
+#include "models/speech/parakeet.h"
 
 namespace Generators {
 

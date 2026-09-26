@@ -7,7 +7,7 @@
 #include <vector>
 
 #include "generator/generators.h"
-#include "silero_vad.h"
+#include "models/speech/silero_vad.h"
 
 namespace Generators {
 

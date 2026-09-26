@@ -1,7 +1,7 @@
-#include "qwen_vl_model.h"
-#include "model.h"
-#include "onnxruntime_api.h"
-#include "../logging.h"
+#include "models/vision/qwen_vl_model.h"
+#include "models/model.h"
+#include "models/onnxruntime_api.h"
+#include "logging.h"
 #include <iostream>
 #include <cstring>
 #include <algorithm>

@@ -1,4 +1,4 @@
-#include "qwen_vl_position_inputs.h"
+#include "models/io/qwen_vl_position_inputs.h"
 
 #include "generator/generators.h"
 #include "models/model.h"

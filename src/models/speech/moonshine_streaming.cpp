@@ -10,7 +10,7 @@
 #include <vector>
 
 #include "generator/generators.h"
-#include "moonshine_streaming.h"
+#include "models/speech/moonshine_streaming.h"
 
 namespace Generators {
 

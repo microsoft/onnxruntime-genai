@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 #include "generator/generators.h"
-#include "models/lfm2_audio_output.h"
+#include "models/io/lfm2_audio_output.h"
 #include "models/multi_modal.h"
 #include "models/utils.h"
 
