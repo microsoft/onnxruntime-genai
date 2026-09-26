@@ -598,6 +598,7 @@ Model::~Model() {
 }
 
 // Returns the device the session will run on: CPU when the options name no device-backed provider.
+// Non-primary options get CPU even when they name one, as SetProviderSessionOptions resolves no device for them.
 static DeviceInterface* AppendSessionProviders(Model& model,
                                                const Config::SessionOptions& config_session_options,
                                                OrtSessionOptions& session_options,

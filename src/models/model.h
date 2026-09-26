@@ -189,6 +189,7 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
   /// Returns the device a session created from these options will run on, or null when
   /// `append_providers` is false and the providers (and therefore the device) are not yet known.
   /// Do not pass that null to State: there it means "the decoder's device", not "unknown".
+  /// Non-primary options report CPU even when they append a device-backed provider.
   DeviceInterface* CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
                                                   OrtSessionOptions& session_options,
                                                   bool is_primary_session_options,
