@@ -7,6 +7,8 @@ Install the Android SDK and NDK. The ONNX Runtime instructions can be followed.
 https://onnxruntime.ai/docs/build/android.html#prerequisites
 
 Use the latest release Android NDK available.
+The Android AAR and test app use Java 17, Gradle 8.9, Android Gradle Plugin 8.7.2,
+and Android SDK platform 34 when telemetry is enabled with Room.
 
 
 ## Get the ONNX Runtime Android package
@@ -57,6 +59,14 @@ When telemetry is enabled, the AAR manifest declares `android.permission.INTERNE
 consuming application. They are required for the bundled 1DS transport to upload events and adapt
 transmission to network state. Build the AAR without telemetry if the application must not request
 these capabilities.
+
+Android AAR builds with telemetry store queued events using 1DS's Room implementation. The AAR
+includes its Room Java classes and declares `androidx.room:room-runtime:2.8.4` as a runtime
+dependency in its published Maven POM; Gradle consumers must allow that transitive dependency.
+Apps consuming a local AAR file directly must add `androidx.room:room-runtime:2.8.4` themselves.
+The AAR initializer registers the application context before the telemetry client starts.
+Native-only builds without Java bindings retain the bundled SQLite implementation; queued events
+from prior SQLite-based AARs are not migrated to Room.
 
 This AAR can be used in a test Android app. 
 See src\java\src\test\android\app\build.gradle for example of how to manually specify onnxruntime-android and a custom built onnxruntime-genai AAR as dependencies in build.gradle. 
