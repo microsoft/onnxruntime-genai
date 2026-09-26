@@ -60,14 +60,11 @@ class DFlash2Builder(BlockDrafterBuilder):
         lm_head_quant=None,
         embed_quant=None,
         fuse_gate_up=False,
+        compute_dtype=None,
     ):
         self.draft_dir = draft_dir
         self.target_dir = target_dir
-        # The drafter is a bf16 checkpoint and its activations genuinely leave the fp16 range
-        # (the fc output alone reaches ~1.4e4 and the MLP product overflows two layers in), so the
-        # body runs in bf16. Only the tensors it shares with the fp16 target -- the aux hidden
-        # states, the embedding table and the FP8 LM head -- stay at the target's dtype.
-        self.io_dtype = ir.DataType.BFLOAT16
+        self.io_dtype = compute_dtype or ir.DataType.BFLOAT16
         self.external_dtype = io_dtype
         if quant is not None:
             self.quant_bits = quant["bits"]

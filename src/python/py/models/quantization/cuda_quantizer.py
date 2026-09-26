@@ -90,14 +90,23 @@ def _preprocess_weights_for_mixed_gemm_torch(tensor, bits: int, sm: int):
     """
     torch = _get_torch()
     bits_a = 16  # fp16/bf16 activations
-    bits_b = 4 if bits == 4 else 8
+    bits_b = bits
 
     if tensor.dim() == 2:
         tensor = tensor.unsqueeze(0)
 
     permutation_map = {
         "16_8": [0, 1, 8, 9, 2, 3, 10, 11, 4, 5, 12, 13, 6, 7, 14, 15],
-        "16_4": [0, 1, 8, 9, 16, 17, 24, 25, 2, 3, 10, 11, 18, 19, 26, 27, 4, 5, 12, 13, 20, 21, 28, 29, 6, 7, 14, 15, 22, 23, 30, 31],  # fmt: skip
+        "16_4": [
+            0, 1, 8, 9, 16, 17, 24, 25, 2, 3, 10, 11, 18, 19, 26, 27,
+            4, 5, 12, 13, 20, 21, 28, 29, 6, 7, 14, 15, 22, 23, 30, 31,
+        ],
+        "16_2": [
+            0, 1, 8, 9, 16, 17, 24, 25, 32, 33, 40, 41, 48, 49, 56, 57,
+            2, 3, 10, 11, 18, 19, 26, 27, 34, 35, 42, 43, 50, 51, 58, 59,
+            4, 5, 12, 13, 20, 21, 28, 29, 36, 37, 44, 45, 52, 53, 60, 61,
+            6, 7, 14, 15, 22, 23, 30, 31, 38, 39, 46, 47, 54, 55, 62, 63,
+        ],
     }
     mma_shape_n = 8
     b_rows_per_mma = 8 * 16 // bits_b
@@ -117,13 +126,20 @@ def _preprocess_weights_for_mixed_gemm_torch(tensor, bits: int, sm: int):
 
     # subbyte_transpose
     original_shape = tensor.shape
-    if bits_b == 4:
+    if bits_b in (2, 4):
         u = tensor.view(torch.uint8)
-        high = (u >> 4).permute(0, 2, 1).unsqueeze(2)
-        low = ((u << 4) >> 4).permute(0, 2, 1).unsqueeze(2)
-        merged = torch.cat([low, high], dim=2).reshape(u.shape[0], -1, u.shape[1])
-        merged = merged[:, :, 0::2] + merged[:, :, 1::2] * 16
-        tensor = merged.view(torch.int8).reshape(original_shape)
+        mask = (1 << bits_b) - 1
+        fields = [((u >> shift) & mask).permute(0, 2, 1).unsqueeze(2) for shift in range(0, 8, bits_b)]
+        merged = torch.cat(fields, dim=2).reshape(u.shape[0], -1, u.shape[1])
+        pack = 8 // bits_b
+        packed = torch.zeros(
+            (merged.shape[0], merged.shape[1], merged.shape[2] // pack),
+            dtype=torch.uint8,
+            device=merged.device,
+        )
+        for field in range(pack):
+            packed |= merged[:, :, field::pack] << (field * bits_b)
+        tensor = packed.view(torch.int8).reshape(original_shape)
     else:
         tensor = tensor.permute(0, 2, 1).reshape(original_shape)
 
@@ -145,7 +161,7 @@ def _preprocess_weights_for_mixed_gemm_torch(tensor, bits: int, sm: int):
         t += -256 * (t > 127).to(torch.int64) + 128
         t = t.reshape(-1, 4)[:, [0, 2, 1, 3]].reshape(original_shape)
         tensor = t.to(torch.uint8).view(torch.int8)
-    else:
+    elif bits_b == 4:
         u = tensor.view(torch.uint8)
         high = (u >> 4).unsqueeze(-1)
         low = ((u << 4) >> 4).unsqueeze(-1)
@@ -155,6 +171,15 @@ def _preprocess_weights_for_mixed_gemm_torch(tensor, bits: int, sm: int):
         merged += -16 * (merged > 7).to(torch.int16) + 8
         merged = merged[:, :, 0::2] + merged[:, :, 1::2] * 16
         tensor = merged.to(torch.uint8).view(torch.int8)
+    else:
+        u = tensor.view(torch.uint8)
+        fields = torch.stack([(u >> shift) & 0x03 for shift in range(0, 8, 2)], dim=-1)
+        fields = fields.reshape(-1, 16)
+        fields = fields[:, [*range(0, 16, 2), *range(1, 16, 2)]].to(torch.int16)
+        fields += -4 * (fields > 1).to(torch.int16) + 2
+        fields = fields.reshape(-1, 4)
+        packed = sum(fields[:, field] << (field * 2) for field in range(4))
+        tensor = packed.to(torch.uint8).reshape(original_shape).view(torch.int8)
 
     return tensor.squeeze(0).contiguous()
 
@@ -169,24 +194,29 @@ def _pack_weights_for_cuda_mixed_gemm(q_weights, n: int, k: int, bits: int, forc
     torch = _get_torch()
     bits = int(bits)
     force_arch = int(force_arch)
-    if bits not in (4, 8):
-        raise ValueError(f"bits must be 4 or 8, got {bits}.")
+    if bits not in (2, 4, 8):
+        raise ValueError(f"bits must be 2, 4 or 8, got {bits}.")
     if force_arch not in (80, 90):
         raise ValueError(f"force_arch must be 80 (SM80) or 90 (SM90), got {force_arch}.")
+    if bits == 2 and force_arch != 80:
+        raise ValueError("2-bit weights support only the SM80 mixed-GEMM layout.")
     pack = 8 // bits
     device = _prepack_device()
 
     q = torch.as_tensor(np.ascontiguousarray(q_weights)).view(torch.uint8).reshape(n, k // pack).to(device)
 
     # Front-end adaptor: transpose ORT (N, K) -> (K, N) and convert unsigned -> signed int8.
-    if bits == 4:
-        low = (q & 0x0F).to(torch.int16)
-        high = (q >> 4).to(torch.int16)
+    if bits in (2, 4):
+        mask = (1 << bits) - 1
+        fields = [((q >> shift) & mask).to(torch.int16) for shift in range(0, 8, bits)]
         unpacked = torch.empty((n, k), dtype=torch.int16, device=device)
-        unpacked[:, 0::2] = low
-        unpacked[:, 1::2] = high
-        signed_t = (unpacked - 8).transpose(0, 1).contiguous()  # (K, N), zero point 8
-        packed_t = ((signed_t[:, 0::2] & 0x0F) | ((signed_t[:, 1::2] & 0x0F) << 4)).to(torch.uint8).view(torch.int8)
+        for field, values in enumerate(fields):
+            unpacked[:, field::pack] = values
+        signed_t = (unpacked - (1 << (bits - 1))).transpose(0, 1).contiguous()
+        packed_t = torch.zeros((k, n // pack), dtype=torch.int16, device=device)
+        for field in range(pack):
+            packed_t |= (signed_t[:, field::pack] & mask) << (field * bits)
+        packed_t = packed_t.to(torch.uint8).view(torch.int8)
     else:
         signed_t = (q.to(torch.int16) - 128).transpose(0, 1).contiguous()  # (K, N), zero point 128
         packed_t = signed_t.to(torch.uint8).view(torch.int8)
@@ -195,19 +225,16 @@ def _pack_weights_for_cuda_mixed_gemm(q_weights, n: int, k: int, bits: int, forc
     return out.reshape(-1).cpu().numpy()
 
 
-def _get_quantize_matmul_nbits():
-    """Return MatMulNBits blockwise quantizers from the ORT pybind module."""
+def _get_quantize_matmul_nbits(bits: int):
+    """Return the requested MatMulNBits blockwise quantizer from the ORT pybind module."""
     try:
-        from onnxruntime.capi._pybind_state import (  # noqa: PLC0415
-            quantize_matmul_4bits,
-            quantize_matmul_8bits,
-        )
-    except ImportError as e:
-        raise ImportError(
-            "CUDA blockwise quantization requires quantize_matmul_4bits and quantize_matmul_8bits from onnxruntime."
-        ) from e
+        from onnxruntime.capi import _pybind_state  # noqa: PLC0415
 
-    return quantize_matmul_4bits, quantize_matmul_8bits
+        return getattr(_pybind_state, f"quantize_matmul_{bits}bits")
+    except (AttributeError, ImportError) as e:
+        raise ImportError(
+            f"CUDA {bits}-bit blockwise quantization requires quantize_matmul_{bits}bits from onnxruntime."
+        ) from e
 
 
 class CudaQuantizer:
@@ -365,8 +392,8 @@ class CudaQuantizer:
         block_size = int(block_size)
         w = weights.detach().cpu().to(torch.float32).contiguous().numpy()
         n, k = w.shape
-        if bits not in (4, 8):
-            raise ValueError(f"Blockwise quantization only supports 4 or 8 bits, got {bits}.")
+        if bits not in (2, 4, 8):
+            raise ValueError(f"Blockwise quantization only supports 2, 4, or 8 bits, got {bits}.")
         if block_size <= 0:
             raise ValueError(f"Blockwise quantization requires a positive block_size, got {block_size}.")
         if signed_scale and not symmetric:
@@ -381,7 +408,9 @@ class CudaQuantizer:
         blob_size = (block_size + pack - 1) // pack
 
         if symmetric and not use_ort_quantizer:
-            if bits == 4:
+            if bits == 2:
+                qmin, qmax, scale_divisor, zero_point = (-2, 1, 2, 2) if unsigned_full_range else (-1, 1, 1, 2)
+            elif bits == 4:
                 qmin, qmax, scale_divisor, zero_point = (-8, 7, 8, 8) if unsigned_full_range else (-7, 7, 7, 8)
             else:
                 qmin, qmax, scale_divisor, zero_point = (
@@ -409,23 +438,27 @@ class CudaQuantizer:
             quantized = np.clip(np.rint(blocked / scales[:, :, np.newaxis]), qmin, qmax).astype(np.int16)
             quantized = (quantized + zero_point).astype(np.uint8)
 
-            if bits == 4:
+            if bits == 2:
+                qweight = np.zeros((n, num_blocks, blob_size), dtype=np.uint8)
+                for offset in range(4):
+                    values = quantized[:, :, offset::4]
+                    qweight[:, :, : values.shape[2]] |= (values & 0x3) << (2 * offset)
+            elif bits == 4:
                 qweight = np.zeros((n, num_blocks, blob_size), dtype=np.uint8)
                 qweight[:, :, : quantized[:, :, 0::2].shape[2]] = quantized[:, :, 0::2] & 0xF
                 qweight[:, :, : quantized[:, :, 1::2].shape[2]] |= (quantized[:, :, 1::2] & 0xF) << 4
             else:
                 qweight = quantized
 
-            zero_points = np.zeros((n, (num_blocks + 1) // 2 if bits == 4 else num_blocks), dtype=np.uint8)
+            zero_points = np.zeros((n, (num_blocks + pack - 1) // pack), dtype=np.uint8)
             return torch.from_numpy(qweight), torch.from_numpy(scales), torch.from_numpy(zero_points)
 
         w_t = np.ascontiguousarray(w.T)
         qweight = np.zeros((n, num_blocks, blob_size), dtype=np.uint8)
         scales = np.zeros((n, num_blocks), dtype=np.float32)
-        zero_points = np.zeros((n, (num_blocks + 1) // 2 if bits == 4 else num_blocks), dtype=np.uint8)
+        zero_points = np.zeros((n, (num_blocks + pack - 1) // pack), dtype=np.uint8)
 
-        quantize_matmul_4bits, quantize_matmul_8bits = _get_quantize_matmul_nbits()
-        quantize = quantize_matmul_4bits if bits == 4 else quantize_matmul_8bits
+        quantize = _get_quantize_matmul_nbits(bits)
         quantize(qweight, w_t, scales, zero_points, block_size, n, k, symmetric)
 
         if abs_scales and not (symmetric and signed_scale):

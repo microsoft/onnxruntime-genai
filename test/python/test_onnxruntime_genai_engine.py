@@ -201,10 +201,11 @@ def test_engine_capabilities(model):
 
 def test_engine_run_releases_gil(model):
     engine = og.Engine(model)
+    prompt = _PROMPT_LONG * 20
     request_options = og.RequestOptions()
-    request_options.set_max_session_tokens(len(_PROMPT_LONG) + 4)
+    request_options.set_max_session_tokens(len(prompt) + 4)
     request = engine.create_request(options=request_options)
-    request.begin_turn(np.asarray(_PROMPT_LONG, dtype=np.int32))
+    request.begin_turn(np.asarray(prompt, dtype=np.int32))
     event_buffer = engine.create_event_buffer(1)
 
     worker_ready = threading.Event()
