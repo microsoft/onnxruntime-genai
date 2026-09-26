@@ -9,7 +9,7 @@
 #      configured CMake environment.
 #
 #   2. FetchContent source build (default): when the package is not available, the
-#      SDK source (pinned in cmake/deps.txt) is downloaded, patched, and built locally.
+#      SDK source (pinned in cmake/deps.txt) is downloaded and built locally.
 #      This matches onnxruntime-genai's dependency model (ORT_HOME + FetchContent) and works
 #      on supported platforms since GenAI uses 1DS everywhere.
 #
@@ -57,15 +57,6 @@ message(STATUS "Telemetry: MSTelemetry::mat not found; building the 1DS SDK from
 
 include(FetchContent)
 
-# The FetchContent source requires a few deterministic CMake adjustments for nested include paths,
-# self-contained static dependencies, and Apple portability. Apply them without external tools.
-
-# Linux packages must not depend on a system libcurl. Build an internal HTTP(S)-only curl with
-# mbedTLS before configuring 1DS so its CURL::libcurl reference resolves to the static target.
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  include(${PROJECT_SOURCE_DIR}/cmake/telemetry/linux-http.cmake)
-endif()
-
 # Use the SDK's canonical build options. GenAI consumes only the C++ library and supplies all
 # dependencies needed by its packaged static/shared target.
 set(MATSDK_BUILD_HEADERS ON CACHE BOOL "Build 1DS SDK headers" FORCE)
@@ -85,10 +76,19 @@ set(MATSDK_BUILD_JNI_WRAPPER OFF CACHE BOOL "Disable 1DS JNI wrapper" FORCE)
 set(MATSDK_BUILD_PACKAGE OFF CACHE BOOL "Disable 1DS package generation" FORCE)
 set(MATSDK_BUILD_APPLE_HTTP ${APPLE} CACHE BOOL "Build the 1DS Apple HTTP client" FORCE)
 set(MATSDK_ANDROID_HTTP_CLIENT JAVA CACHE STRING "Use the 1DS Java HTTP bridge on Android" FORCE)
-set(MATSDK_CURL_PROVIDER SYSTEM CACHE STRING "Use GenAI's selected 1DS curl target" FORCE)
 set(MATSDK_CURL_TLS_BACKEND MBEDTLS CACHE STRING "Use mbedTLS for 1DS curl" FORCE)
-set(MATSDK_SQLITE_PROVIDER VENDORED CACHE STRING "Use bundled 1DS SQLite" FORCE)
-set(MATSDK_ZLIB_PROVIDER VENDORED CACHE STRING "Use bundled 1DS zlib" FORCE)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  set(MATSDK_CURL_PROVIDER FETCH CACHE STRING "Build the SDK's pinned curl with mbedTLS" FORCE)
+else()
+  set(MATSDK_CURL_PROVIDER SYSTEM CACHE STRING "Use the platform HTTP transport" FORCE)
+endif()
+if(APPLE)
+  set(MATSDK_SQLITE_PROVIDER SYSTEM CACHE STRING "Use Apple's system SQLite" FORCE)
+  set(MATSDK_ZLIB_PROVIDER SYSTEM CACHE STRING "Use Apple's system libz" FORCE)
+else()
+  set(MATSDK_SQLITE_PROVIDER MINIMAL CACHE STRING "Build the SDK's minimal private SQLite" FORCE)
+  set(MATSDK_ZLIB_PROVIDER VENDORED CACHE STRING "Build the SDK's private zlib" FORCE)
+endif()
 
 # BUILD_SHARED_LIBS is a global that onnxruntime-genai's own targets read after this module, and the SDK
 # selects mat's library type from it. Save it and restore it after the SDK is configured. Desktop and
@@ -102,17 +102,10 @@ else()
   set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build the 1DS SDK as a static library" FORCE)
 endif()
 
-set(_ortgenai_telemetry_patch
-  "${CMAKE_COMMAND}"
-  "-DSOURCE_DIR=<SOURCE_DIR>"
-  "-P"
-  "${PROJECT_SOURCE_DIR}/cmake/patches/cpp_client_telemetry/apply_patch.cmake")
-
 FetchContent_Declare(
   cpp_client_telemetry
   URL ${DEP_URL_cpp_client_telemetry}
   URL_HASH SHA1=${DEP_SHA1_cpp_client_telemetry}
-  PATCH_COMMAND ${_ortgenai_telemetry_patch}
   EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(cpp_client_telemetry)
@@ -180,7 +173,7 @@ if(MSVC)
       "$<$<COMPILE_LANGUAGE:CXX>:/w15038>")
     set_target_properties(mat PROPERTIES COMPILE_OPTIONS "${_ortgenai_mat_opts}")
   endif()
-  target_compile_options(mat PRIVATE /wd5038)
+  target_compile_options(mat PRIVATE /EHsc /wd5038)
 else()
   # Guard the SDK's bundled nlohmann/json.hpp use of infinity() against any -ffast-math /
   # -ffinite-math-only in the inherited flags.

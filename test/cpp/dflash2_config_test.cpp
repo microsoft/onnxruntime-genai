@@ -597,12 +597,10 @@ TEST(Dflash2ConfigTest, RunsFullAttentionDsparkAcrossRequestLifecycles) {
 
   int request_a_id = 0;
   int request_b_id = 0;
-  int request_c_id = 0;
   int request_d_id = 0;
   int request_e_id = 0;
   auto* request_a = reinterpret_cast<Request*>(&request_a_id);
   auto* request_b = reinterpret_cast<Request*>(&request_b_id);
-  auto* request_c = reinterpret_cast<Request*>(&request_c_id);
   auto* request_d = reinterpret_cast<Request*>(&request_d_id);
   auto* request_e = reinterpret_cast<Request*>(&request_e_id);
 
@@ -632,22 +630,27 @@ TEST(Dflash2ConfigTest, RunsFullAttentionDsparkAcrossRequestLifecycles) {
   EXPECT_EQ(drafts[0], (std::vector<int32_t>{14, 9, 8, 44}));
   EXPECT_EQ(drafts[1], (std::vector<int32_t>{31, 9, 8, 44}));
 
+  // Rewind releases only the selected request. It can replay from position zero while the peer
+  // continues from its existing drafter state.
   drafter.Release(request_a);
   Tensor reused_aux{device, Ort::TypeToTensorType<float>};
-  const std::array<int64_t, 2> reused_aux_shape{9, 1};
+  const std::array<int64_t, 2> reused_aux_shape{10, 1};
   reused_aux.CreateTensor(reused_aux_shape);
-  const std::array reused_feed{
-      Dflash2Drafter::Feed{.request = request_c, .aux_row_begin = 0, .aux_row_count = 9, .first_position = 0, .anchor_token = 15, .draft_eligible = true, .wants_drafts = true},
+  const std::array reused_feeds{
+      Dflash2Drafter::Feed{.request = request_a, .aux_row_begin = 0, .aux_row_count = 9, .first_position = 0, .anchor_token = 15, .draft_eligible = true, .wants_drafts = true},
+      Dflash2Drafter::Feed{.request = request_b, .aux_row_begin = 9, .aux_row_count = 1, .first_position = 13, .anchor_token = 16, .draft_eligible = true, .wants_drafts = true},
   };
-  drafter.Propose(reused_aux, reused_feed, drafts);
-  ASSERT_EQ(drafts.size(), 1u);
-  EXPECT_EQ(drafts[0], (std::vector<int32_t>{14, 0, 13, 6}));
+  drafter.Propose(reused_aux, reused_feeds, drafts);
+  ASSERT_EQ(drafts.size(), 2u);
+  EXPECT_EQ(drafts[0], (std::vector<int32_t>{13, 0, 13, 32}));
+  EXPECT_EQ(drafts[1], (std::vector<int32_t>{31, 13, 5, 32}));
+  EXPECT_EQ(drafter.AdmissionMisses(), 0u);
 
   Tensor failed_aux{device, Ort::TypeToTensorType<float>};
   const std::array<int64_t, 2> failed_aux_shape{1, 1};
   failed_aux.CreateTensor(failed_aux_shape);
   const std::array failed_feed{
-      Dflash2Drafter::Feed{.request = request_c, .aux_row_begin = 0, .aux_row_count = 1, .first_position = 10, .anchor_token = 16, .draft_eligible = true, .wants_drafts = true},
+      Dflash2Drafter::Feed{.request = request_a, .aux_row_begin = 0, .aux_row_count = 1, .first_position = 10, .anchor_token = 17, .draft_eligible = true, .wants_drafts = true},
   };
   EXPECT_THROW(drafter.Propose(failed_aux, failed_feed, drafts), std::logic_error);
   drafter.ReleaseAll();
@@ -962,17 +965,18 @@ TEST(Dflash2ConfigTest, JoinsOnlyFromAnEligibleTurnAtSequenceStart) {
 
 namespace {
 
-// Captures whatever WarnOnClampedDraftWidth logs for one config.
-std::string CapturedDraftWidthWarnings(const Config& config) {
+// Captures whatever the action logs as a warning.
+template <typename Action>
+std::string CapturedWarnings(Action&& action) {
   const fs_std::path log_path =
       fs_std::temp_directory_path() /
-      ("draft_width_warning_" + std::to_string(reinterpret_cast<uintptr_t>(&config)) + ".log");
+      ("draft_width_warning_" + std::to_string(reinterpret_cast<uintptr_t>(&action)) + ".log");
   fs_std::remove(log_path);
   SetLogString("filename", log_path.string());
   SetLogBool("enabled", true);
   SetLogBool("warning", true);
 
-  WarnOnClampedDraftWidth(config);
+  action();
 
   SetLogString("filename", "");
   SetLogBool("enabled", false);
@@ -982,6 +986,11 @@ std::string CapturedDraftWidthWarnings(const Config& config) {
   stream.close();
   fs_std::remove(log_path);
   return contents.str();
+}
+
+// Captures whatever WarnOnClampedDraftWidth logs for one config.
+std::string CapturedDraftWidthWarnings(const Config& config) {
+  return CapturedWarnings([&] { WarnOnClampedDraftWidth(config); });
 }
 
 }  // namespace
@@ -998,6 +1007,20 @@ TEST(Dflash2ConfigTest, WarnsWhenTheDrafterCannotSupplyTheConfiguredDraftWidth) 
   config.model.dflash2.is_dspark = true;
   EXPECT_NE(CapturedDraftWidthWarnings(config).find("model.dspark.num_draft_tokens"),
             std::string::npos);
+}
+
+TEST(Dflash2ConfigTest, WarnsWhenARuntimeProfileRaisesDraftWidthBeyondTheDrafter) {
+  Config config = MakeDflash2Config();
+  config.speculative.max_draft_tokens = 3;
+  Config::RuntimeProfile profile;
+  profile.id = "large";
+  profile.eligibility.minimum_total_device_memory_bytes = 1;
+  profile.overlay.speculative.max_draft_tokens = 5;
+  config.runtime_profiles.push_back(profile);
+
+  const auto warnings = CapturedWarnings([&] { ApplyRuntimeProfile(config, 1); });
+  EXPECT_EQ(config.speculative.max_draft_tokens, 5);
+  EXPECT_NE(warnings.find("model.dflash2.num_draft_tokens"), std::string::npos);
 }
 
 TEST(Dflash2ConfigTest, DoesNotWarnAboutHostingLimitsAtConfigLoad) {

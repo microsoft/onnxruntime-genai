@@ -2603,6 +2603,33 @@ struct RuntimeProfileDynamicBatching_Element : JSON::Element {
   Config::RuntimeProfile::Overlay::DynamicBatching& v_;
 };
 
+struct RuntimeProfileDecoder_Element : JSON::Element {
+  explicit RuntimeProfileDecoder_Element(Config::RuntimeProfile::Overlay::Model& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "filename") {
+      v_.decoder_filename = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::RuntimeProfile::Overlay::Model& v_;
+};
+
+struct RuntimeProfileModel_Element : JSON::Element {
+  explicit RuntimeProfileModel_Element(Config::RuntimeProfile::Overlay::Model& v) : decoder_{v} {}
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "decoder") return decoder_;
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  RuntimeProfileDecoder_Element decoder_;
+};
+
 struct RuntimeProfileEngine_Element : JSON::Element {
   explicit RuntimeProfileEngine_Element(Config::RuntimeProfile::Overlay::DynamicBatching& v)
       : dynamic_batching_{v} {}
@@ -2635,19 +2662,45 @@ struct RuntimeProfileSearch_Element : JSON::Element {
   Config::RuntimeProfile::Overlay::Search& v_;
 };
 
+struct RuntimeProfileSpeculative_Element : JSON::Element {
+  explicit RuntimeProfileSpeculative_Element(Config::RuntimeProfile::Overlay::Speculative& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    const auto parsed = SafeDoubleToInt(JSON::Get<double>(value), name);
+    if (parsed <= 0) {
+      throw std::out_of_range(std::string{name} + " must be > 0");
+    }
+    if (name == "max_draft_tokens") {
+      if (parsed > Speculative_Element::kMaxDraftTokens) {
+        throw std::out_of_range("max_draft_tokens must be <= " + std::to_string(Speculative_Element::kMaxDraftTokens));
+      }
+      v_.max_draft_tokens = parsed;
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::RuntimeProfile::Overlay::Speculative& v_;
+};
+
 struct RuntimeProfileOverlay_Element : JSON::Element {
   explicit RuntimeProfileOverlay_Element(Config::RuntimeProfile::Overlay& v)
-      : engine_{v.dynamic_batching}, search_{v.search} {}
+      : model_{v.model}, engine_{v.dynamic_batching}, search_{v.search}, speculative_{v.speculative} {}
 
   Element& OnObject(std::string_view name) override {
+    if (name == "model") return model_;
     if (name == "engine") return engine_;
     if (name == "search") return search_;
+    if (name == "speculative") return speculative_;
     throw JSON::unknown_value_error{};
   }
 
  private:
+  RuntimeProfileModel_Element model_;
   RuntimeProfileEngine_Element engine_;
   RuntimeProfileSearch_Element search_;
+  RuntimeProfileSpeculative_Element speculative_;
 };
 
 struct RuntimeProfile_Element : JSON::Element {
@@ -2692,6 +2745,46 @@ struct RuntimeProfiles_Element : JSON::Element {
   std::unique_ptr<RuntimeProfile_Element> element_;
 };
 
+namespace {
+
+// Validates that a config-specified filename/path stays inside the model directory.
+// Throws std::runtime_error if the path is absolute, contains a Windows drive/UNC root,
+// or contains a ".." path traversal component. Empty paths are allowed (no-op). The
+// optional context label is prepended to error messages so callers can identify which
+// config field caused the failure.
+void ValidateConfigPath(const std::string& path, std::string_view context = {}) {
+  if (path.empty()) return;
+
+  auto make_error = [&](const std::string& msg) -> std::string {
+    return context.empty() ? msg : (std::string{context} + ": " + msg);
+  };
+
+  // Reject absolute paths: Unix "/" or Windows drive letters "C:" / "C:\" or UNC "\\"
+  if (path[0] == '/' || path[0] == '\\') {
+    throw std::runtime_error(make_error("Config path must be a relative path under the model directory, got: " + path));
+  }
+#ifdef _WIN32
+  if (path.size() >= 2 && std::isalpha(static_cast<unsigned char>(path[0])) && path[1] == ':') {
+    throw std::runtime_error(make_error("Config path must be a relative path under the model directory, got: " + path));
+  }
+#endif
+
+  // Reject path traversal ".." components. Split on '/' and '\\' and check each component.
+  std::string component;
+  for (size_t i = 0; i <= path.size(); ++i) {
+    if (i == path.size() || path[i] == '/' || path[i] == '\\') {
+      if (component == "..") {
+        throw std::runtime_error(make_error("Config path must not contain path traversal (..): " + path));
+      }
+      component.clear();
+    } else {
+      component += path[i];
+    }
+  }
+}
+
+}  // namespace
+
 void ValidateRuntimeProfiles(const Config& config) {
   std::unordered_set<std::string> ids;
   for (const auto& profile : config.runtime_profiles) {
@@ -2713,8 +2806,17 @@ void ValidateRuntimeProfiles(const Config& config) {
     }
     const auto& batching = profile.overlay.dynamic_batching;
     const auto& search = profile.overlay.search;
-    if (!batching.num_blocks && !batching.max_batch_size &&
-        !batching.max_scheduled_tokens && !search.chunk_size) {
+    if (profile.overlay.model.decoder_filename && profile.overlay.model.decoder_filename->empty()) {
+      throw std::runtime_error("runtime profile '" + profile.id +
+                               "' has an empty model.decoder.filename");
+    }
+    if (profile.overlay.model.decoder_filename) {
+      ValidateConfigPath(*profile.overlay.model.decoder_filename,
+                         "runtime profile '" + profile.id + "' model.decoder.filename");
+    }
+    if (!profile.overlay.model.decoder_filename && !batching.num_blocks && !batching.max_batch_size &&
+        !batching.max_scheduled_tokens && !search.chunk_size &&
+        !profile.overlay.speculative.max_draft_tokens) {
       throw std::runtime_error("runtime profile '" + profile.id +
                                "' does not contain any overlay fields");
     }
@@ -3105,6 +3207,9 @@ void ApplyRuntimeProfile(Config& config, uint64_t total_device_memory_bytes) {
                              "' requires engine.dynamic_batching in the base config");
   }
   Config candidate{config};
+  if (selected->overlay.model.decoder_filename) {
+    candidate.model.decoder.filename = *selected->overlay.model.decoder_filename;
+  }
   if (has_batching_overlay) {
     auto& effective = *candidate.engine.dynamic_batching;
     if (batching.num_blocks) effective.num_blocks = batching.num_blocks;
@@ -3113,7 +3218,13 @@ void ApplyRuntimeProfile(Config& config, uint64_t total_device_memory_bytes) {
   }
   const auto& search = selected->overlay.search;
   if (search.chunk_size) candidate.search.chunk_size = search.chunk_size;
+  if (selected->overlay.speculative.max_draft_tokens) {
+    candidate.speculative.max_draft_tokens = *selected->overlay.speculative.max_draft_tokens;
+  }
   std::swap(config, candidate);
+  if (selected->overlay.speculative.max_draft_tokens) {
+    WarnOnClampedDraftWidth(config);
+  }
 }
 
 fs::path Config::ResolvePath(std::string_view value) const {
@@ -3140,42 +3251,6 @@ fs::path Config::ResolvePath(std::string_view value) const {
 // (model/processor/adapter loading) can rely on paths being safe. Centralising the checks
 // here keeps individual model families free of path-validation calls.
 namespace {
-
-// Validates that a config-specified filename/path stays inside the model directory.
-// Throws std::runtime_error if the path is absolute, contains a Windows drive/UNC root,
-// or contains a ".." path traversal component. Empty paths are allowed (no-op). The
-// optional context label is prepended to error messages so callers can identify which
-// config field caused the failure.
-void ValidateConfigPath(const std::string& path, std::string_view context = {}) {
-  if (path.empty()) return;
-
-  auto make_error = [&](const std::string& msg) -> std::string {
-    return context.empty() ? msg : (std::string{context} + ": " + msg);
-  };
-
-  // Reject absolute paths: Unix "/" or Windows drive letters "C:" / "C:\" or UNC "\\"
-  if (path[0] == '/' || path[0] == '\\') {
-    throw std::runtime_error(make_error("Config path must be a relative path under the model directory, got: " + path));
-  }
-#ifdef _WIN32
-  if (path.size() >= 2 && std::isalpha(static_cast<unsigned char>(path[0])) && path[1] == ':') {
-    throw std::runtime_error(make_error("Config path must be a relative path under the model directory, got: " + path));
-  }
-#endif
-
-  // Reject path traversal ".." components. Split on '/' and '\\' and check each component.
-  std::string component;
-  for (size_t i = 0; i <= path.size(); ++i) {
-    if (i == path.size() || path[i] == '/' || path[i] == '\\') {
-      if (component == "..") {
-        throw std::runtime_error(make_error("Config path must not contain path traversal (..): " + path));
-      }
-      component.clear();
-    } else {
-      component += path[i];
-    }
-  }
-}
 
 void ValidateModelPaths(const Config& config) {
   const auto& m = config.model;
