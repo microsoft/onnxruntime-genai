@@ -49,8 +49,8 @@ struct Embeddings {
   std::unique_ptr<OrtValue> chunk_view_;  // Non-owning view into embeddings_ used during prefill chunking
 
   // Output mode, cross-device pipelines only: buffer this session writes instead of the
-  // consumer's, plus the consumer buffer and its device to copy into afterwards. All null when
-  // the consumer's buffer can be bound directly, which is the common same-device case.
+  // consumer's, plus the consumer buffer and its device to copy into afterwards. staging_ and
+  // consumer_ are null when the consumer's buffer is bound directly (the same-device case).
   // consumer_ is only valid until the consumer's next UpdateSequenceLength.
   std::unique_ptr<OrtValue> staging_;
   OrtValue* consumer_{};
