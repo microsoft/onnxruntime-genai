@@ -13,6 +13,7 @@ if ((telemetryJavaSrcDir == null) != (telemetryResourceDir == null)) {
 	throw new GradleException('telemetryJavaSrcDir and telemetryResourceDir must be set together')
 }
 def telemetryEnabled = telemetryJavaSrcDir != null
+def roomVersion = '2.8.4'
 
 // Since Android requires a higher numbers indicating more recent versions
 // This function assumes the version number will be in format of A.B.C such as 1.7.0.
@@ -46,7 +47,7 @@ buildscript {
 		mavenCentral()
 	}
 	dependencies {
-		classpath 'com.android.tools.build:gradle:7.4.2'
+		classpath 'com.android.tools.build:gradle:8.7.2'
 
 		// NOTE: Do not place your application dependencies here; they belong
 		// in the individual module build.gradle files
@@ -61,7 +62,7 @@ allprojects {
 }
 
 android {
-	compileSdkVersion 32
+	compileSdkVersion 34
 
 	defaultConfig {
 		minSdkVersion minSdkVer
@@ -72,6 +73,11 @@ android {
 		testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
 		if (telemetryEnabled) {
 			consumerProguardFiles 'src/main/android/consumer-rules.pro'
+			javaCompileOptions {
+				annotationProcessorOptions {
+					arguments = ["room.schemaLocation": "$project.buildDir/schemas".toString()]
+				}
+			}
 		}
 	}
 
@@ -113,23 +119,14 @@ android {
 	namespace 'ai.onnxruntime.genai'
 }
 
-configurations {
-	javadocClasspath {
-		canBeConsumed = false
-		canBeResolved = true
-		extendsFrom compileOnly
-	}
-}
-
 task sourcesJar(type: Jar) {
 	archiveClassifier = "sources"
 	from android.sourceSets.main.java.srcDirs
 }
 
 task javadoc(type: Javadoc) {
-	source = android.sourceSets.main.java.srcDirs
+	source = fileTree('src/main/java')
 	classpath += project.files(android.getBootClasspath())
-	classpath += configurations.javadocClasspath
 }
 
 task javadocJar(type: Jar, dependsOn: javadoc) {
@@ -145,6 +142,8 @@ artifacts {
 dependencies {
 	if (telemetryEnabled) {
 		compileOnly 'androidx.annotation:annotation:1.7.1'
+		implementation "androidx.room:room-runtime:$roomVersion"
+		annotationProcessor "androidx.room:room-compiler:$roomVersion"
 	}
 	testImplementation 'org.junit.jupiter:junit-jupiter-api:5.7.0'
 	testImplementation 'org.junit.platform:junit-platform-launcher:1.10.1'
@@ -164,6 +163,16 @@ publishing {
 			artifact sourcesJar
 
 			pom {
+				if (telemetryEnabled) {
+					withXml {
+						def dependencies = asNode().appendNode('dependencies')
+						def room = dependencies.appendNode('dependency')
+						room.appendNode('groupId', 'androidx.room')
+						room.appendNode('artifactId', 'room-runtime')
+						room.appendNode('version', roomVersion)
+						room.appendNode('scope', 'runtime')
+					}
+				}
 				name = 'onnxruntime-genai'
 				description = defaultDescription
 				// TODO: Setup https://microsoft.github.io/onnxruntime-genai/ for equivalence with ORT?

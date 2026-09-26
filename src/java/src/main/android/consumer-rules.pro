@@ -3,3 +3,9 @@
 -keep class com.microsoft.applications.events.HttpClient$* { *; }
 -keep class com.microsoft.applications.events.HttpClientRequest { *; }
 -keep class com.microsoft.applications.events.HttpClientRequest$* { *; }
+-keep class com.microsoft.applications.events.OfflineRoom { *; }
+-keep class com.microsoft.applications.events.OfflineRoomDatabase { *; }
+-keep class com.microsoft.applications.events.OfflineRoomDatabase_Impl { *; }
+-keep class com.microsoft.applications.events.ByTenant { *; }
+-keep class com.microsoft.applications.events.StorageRecord { *; }
+-keep class com.microsoft.applications.events.StorageSetting { *; }
