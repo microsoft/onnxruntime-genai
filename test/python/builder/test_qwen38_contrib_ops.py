@@ -36,6 +36,7 @@ def make_sparse_model(paged):
     model.indexer_head_dim = 16
     model.indexer_budget = 32
     model.indexer_compress_ratio = 4
+    model.indexer_state_capacity = 32
     model.fixed_indexer_cache = not paged
     model.layernorm_attrs = {"epsilon": 1e-6}
     model.rope_attrs = {"interleaved": 0, "cast": {"use_fp32": True}}
@@ -57,10 +58,14 @@ def make_sparse_model(paged):
         "past_sequence_lengths": "past_sequence_lengths",
         "block_table": "block_table",
         "attention_metadata": "attention_metadata",
-        "sparse_attention.selected_indices": {3: "sparse_attention.3.selected_indices"},
-        "sparse_attention.selected_counts": {3: "sparse_attention.3.selected_counts"},
+        "past.indexer_kv_buffer": {3: "past.3.indexer_kv_buffer"},
+        "past.indexer_state_lengths": {3: "past.3.indexer_state_lengths"},
     }
-    model.output_names = {"present.indexer": {3: "present.3.indexer_key"}}
+    model.output_names = {
+        "present.indexer": {3: "present.3.indexer_key"},
+        "present.indexer_kv_buffer": {3: "present.3.indexer_kv_buffer"},
+        "present.indexer_state_lengths": {3: "present.3.indexer_state_lengths"},
+    }
     record_calls(
         model,
         [
@@ -146,6 +151,103 @@ def test_dense_cuda_indexer_cache_shapes_are_symbolic(monkeypatch):
     assert model.input_shapes["past.indexer"] == ["batch_size", "past_sequence_length", 16]
     assert model.output_shapes["present.indexer"] == ["batch_size", "total_sequence_length", 16]
     assert model.input_shapes["past_sequence_length"] == [1]
+
+
+def test_paged_indexer_state_shapes_are_fixed_capacity(monkeypatch):
+    def initialize_parent(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        self.io_dtype = io_dtype
+        self.ep = ep
+        self.use_paged_attention = True
+        self.context_length = 128
+        self.hidden_size = 16
+        self.layer_types = ["qwen_sparse_attention"]
+        self.input_names = {}
+        self.input_types = {}
+        self.input_shapes = {"attention_metadata": [1]}
+        self.output_names = {}
+        self.output_types = {}
+        self.output_shapes = {}
+        self.rope_attrs = {"cast": {"use_fp32": True}}
+        self.model = SimpleNamespace(metadata_props={})
+
+    monkeypatch.setattr(Qwen35MoETextModel, "__init__", initialize_parent)
+    config = SimpleNamespace(
+        hc_count=1,
+        ple_layer_ids=[],
+        ple_embed_dim=8,
+        ple_conv_kernel_size=2,
+        ngram_size=2,
+        eos_token_id=0,
+        heads_per_ngram=1,
+        indexer_n_heads=4,
+        indexer_kv_heads=1,
+        indexer_head_dim=16,
+        indexer_budget=32,
+        indexer_compress_ratio=4,
+        output_gate_type=None,
+        hidden_act="silu",
+    )
+
+    model = Qwen4ExpTextModel(config, ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cuda", None, {})
+
+    assert not model.fixed_indexer_cache
+    assert model.indexer_state_capacity == 32
+    assert model.input_shapes["past.indexer"] == ["batch_size", 32, 16]
+    assert model.input_shapes["past.indexer_kv_buffer"] == ["batch_size", 7, 16]
+    assert model.input_shapes["past.indexer_state_lengths"] == ["batch_size", 2]
+    assert model.output_shapes["present.indexer"] == model.input_shapes["past.indexer"]
+    assert model.output_shapes["present.indexer_kv_buffer"] == model.input_shapes["past.indexer_kv_buffer"]
+    assert model.output_shapes["present.indexer_state_lengths"] == model.input_shapes["past.indexer_state_lengths"]
+    assert "qwen4_exp.selected_index_names" not in model.model.metadata_props
+    assert "qwen4_exp.selected_count_names" not in model.model.metadata_props
+
+
+def test_qwen38_ple_conv_state_layout_tracks_packed_execution(monkeypatch):
+    def initialize_parent(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        self.io_dtype = io_dtype
+        self.ep = ep
+        self.use_paged_attention = extra_options["use_paged_attention"]
+        self.context_length = 128
+        self.hidden_size = 16
+        self.layer_types = ["linear_attention"]
+        self.input_names = {}
+        self.input_types = {}
+        self.input_shapes = {}
+        self.output_names = {}
+        self.output_types = {}
+        self.output_shapes = {}
+        self.rope_attrs = {"cast": {"use_fp32": True}}
+        self.model = SimpleNamespace(metadata_props={})
+
+    monkeypatch.setattr(Qwen35MoETextModel, "__init__", initialize_parent)
+    config = SimpleNamespace(
+        hc_count=2,
+        ple_layer_ids=[1],
+        ple_embed_dim=8,
+        ple_conv_kernel_size=4,
+        ngram_size=3,
+        eos_token_id=1,
+        heads_per_ngram=2,
+        indexer_n_heads=4,
+        indexer_kv_heads=1,
+        indexer_head_dim=16,
+        indexer_budget=32,
+        indexer_compress_ratio=4,
+        output_gate_type=None,
+        hidden_act="silu",
+    )
+
+    dense = Qwen4ExpTextModel(
+        config, ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cuda", None, {"use_paged_attention": False}
+    )
+    packed = Qwen4ExpTextModel(
+        config, ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cuda", None, {"use_paged_attention": True}
+    )
+
+    assert dense.input_shapes["past.ple_conv"] == ["batch_size", 9, 32]
+    assert packed.input_shapes["past.ple_conv"] == ["batch_size", 32, 9]
+    assert dense.output_shapes["present.ple_conv"] == dense.input_shapes["past.ple_conv"]
+    assert packed.output_shapes["present.ple_conv"] == packed.input_shapes["past.ple_conv"]
 
 
 def test_qwen38_gated_delta_net_expansion_emits_linear_attention():
@@ -798,22 +900,58 @@ def test_dense_qwen_sparse_attention_emits_indexer_and_dynamic_executor():
     assert attention["selected_kv_source"] == "main"
 
 
-def test_paged_qwen_sparse_attention_emits_shared_webgpu_schema():
+def test_paged_qwen_sparse_attention_emits_packed_indexer_and_shared_attention_schema():
     model = make_sparse_model(paged=True)
 
     model.make_qwen_sparse_attention(3, make_attention(), "hidden_states")
 
     nodes = emitted_nodes(model)
-    assert [op_type for op_type, _ in nodes] == ["SparsePagedAttention"]
-    attention = nodes[0][1]
+    assert [op_type for op_type, _ in nodes] == ["PackedSparseAttentionIndexer", "SparsePagedAttention"]
+    indexer = nodes[0][1]
+    assert indexer["inputs"][:8] == [
+        "/model/layers.3/attn/PackedSparseAttentionIndexer/query",
+        "/model/layers.3/attn/PackedSparseAttentionIndexer/key",
+        "model.layers.3.attn.indexer.q_norm.weight",
+        "model.layers.3.attn.indexer.k_norm.weight",
+        "cos_cache",
+        "sin_cache",
+        "cumulative_sequence_lengths",
+        "past_sequence_lengths",
+    ]
+    assert indexer["inputs"][12:] == [
+        "past.3.indexer_key",
+        "past.3.indexer_kv_buffer",
+        "",
+        "past.3.indexer_state_lengths",
+    ]
+    assert indexer["outputs"] == [
+        "/model/layers.3/attn/PackedSparseAttentionIndexer/output_0",
+        "/model/layers.3/attn/PackedSparseAttentionIndexer/output_1",
+        "present.3.indexer_key",
+        "present.3.indexer_kv_buffer",
+        "",
+        "present.3.indexer_state_lengths",
+    ]
+    assert indexer["state_capacity"] == 32
+    assert indexer["token_budget"] == 32
+    assert indexer["compress_ratio"] == 4
+
+    split = next(call for call in model.calls if call[0] == "make_split")
+    assert split[1][2] == [
+        "/model/layers.3/attn/PackedSparseAttentionIndexer/query",
+        "/model/layers.3/attn/PackedSparseAttentionIndexer/key",
+    ]
+    assert split[1][4] == [["num_tokens", 64], ["num_tokens", 16]]
+
+    attention = nodes[1][1]
     assert len(attention["inputs"]) == 22
     assert attention["inputs"][5:11] == [
         "cumulative_sequence_lengths",
         "past_sequence_lengths",
         "block_table",
         "",
-        "sparse_attention.3.selected_indices",
-        "sparse_attention.3.selected_counts",
+        "/model/layers.3/attn/PackedSparseAttentionIndexer/output_0",
+        "/model/layers.3/attn/PackedSparseAttentionIndexer/output_1",
     ]
     assert attention["inputs"][14:19] == ["cos_cache", "sin_cache", "", "q_norm", "k_norm"]
     assert attention["inputs"][21] == "attention_metadata"
@@ -989,6 +1127,49 @@ def test_paged_fp8_ple_uses_varlen_hash_and_quantized_gather():
     assert model.external_data_files == {
         "model.ple.ngram_embedding.weight": "engram.data"
     }
+    conv = next(kwargs for op_type, kwargs in nodes if op_type == "VarlenCausalConvWithState")
+    assert conv["inputs"] == [
+        "/model/layers.1/ple/EngramGate/FlattenNormed/output_0",
+        "model.layers.1.ple.conv1d.weight",
+        "cumulative_sequence_lengths",
+        "",
+        "past.1.ple_conv",
+    ]
+    assert conv["outputs"] == [
+        "/model/layers.1/ple/VarlenCausalConvWithState/output_0",
+        "present.1.ple_conv",
+    ]
+    assert conv["dilation"] == 3
+    assert not any(op_type == "CausalConvWithState" for op_type, _ in nodes)
+
+
+def test_paged_ple_emits_packed_engram_gate_shapes():
+    model, ple = make_ple_model(paged=True)
+
+    model.make_ple(1, ple, "hidden_states")
+
+    gate = next(kwargs for op_type, kwargs in emitted_nodes(model) if op_type == "EngramGate")
+    assert gate["inputs"][:3] == [
+        "/model/layers.1/ple/key_proj/Reshape/output_0",
+        "/model/layers.1/ple/query/Reshape/output_0",
+        "/model/layers.1/ple/value_proj/MatMul/output_0",
+    ]
+
+    reshapes = {args[0]: args for method, args, _ in model.calls if method == "make_reshape"}
+    assert reshapes["/model/layers.1/ple/key_proj/Reshape"][1][1] == "/model/constants/INT64/[-1, 2, 8]"
+    assert reshapes["/model/layers.1/ple/query/Reshape"][1][1] == "/model/constants/INT64/[-1, 2, 8]"
+    assert reshapes["/model/layers.1/ple/key_proj/Reshape"][3] == ["num_tokens", 2, 8]
+    assert reshapes["/model/layers.1/ple/query/Reshape"][3] == ["num_tokens", 2, 8]
+    assert reshapes["/model/layers.1/ple/EngramGate/Flatten"][1][1] == "/model/constants/INT64/[-1, 16]"
+    assert reshapes["/model/layers.1/ple/EngramGate/FlattenNormed"][1][1] == "/model/constants/INT64/[-1, 16]"
+
+    value_shapes = {
+        args[0]: args[2]
+        for method, args, _ in model.calls
+        if method == "make_value" and len(args) >= 3
+    }
+    assert value_shapes["/model/layers.1/ple/EngramGate/output_0"] == ["num_tokens", 2, 8]
+    assert value_shapes["/model/layers.1/ple/EngramGate/output_1"] == ["num_tokens", 2, 8]
 
 
 def test_ple_reuses_model_level_embedding_initializers():

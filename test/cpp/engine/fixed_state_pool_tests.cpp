@@ -231,6 +231,59 @@ TEST_F(FixedStatePoolTest, FreshRowsGatherZeroAndCommitPublishes) {
   ExpectInputRows(reservation, 0, 7.0f);  // Committed state is now gathered for the resident request.
 }
 
+TEST(FixedStatePoolComponentsTest, InitializesAndCommitsPleAndIndexerState) {
+  auto model = LoadSyntheticFixedComponentsModel();
+  FixedStatePool pool{model, 1};
+
+  auto requests = One(kRequestA);
+  {
+    auto reservation = pool.Reserve(requests);
+    ASSERT_EQ(reservation.Bindings().size(), 5u);
+    using Kind = Config::Model::Decoder::StateGroupKind;
+    EXPECT_EQ(reservation.Bindings()[0].kind, Kind::FixedPle);
+    EXPECT_STREQ(reservation.Bindings()[0].input_name, "past.0.ple_tokens");
+    EXPECT_STREQ(reservation.Bindings()[1].input_name, "past.0.ple_conv");
+    EXPECT_EQ(reservation.Bindings()[2].kind, Kind::FixedIndexer);
+    EXPECT_STREQ(reservation.Bindings()[2].input_name, "past.1.indexer_key");
+    EXPECT_STREQ(reservation.Bindings()[3].input_name, "past.1.indexer_kv_buffer");
+    EXPECT_STREQ(reservation.Bindings()[4].input_name, "past.1.indexer_state_lengths");
+
+    const auto& token_binding = reservation.Bindings()[0];
+    const auto* token_input = token_binding.input->GetTensorData<int64_t>();
+    EXPECT_EQ(token_input[0], 7);
+    EXPECT_EQ(token_input[1], 7);
+    std::fill_n(token_binding.output->GetTensorMutableData<int64_t>(), 2, 11);
+
+    for (size_t index = 1; index < 4; ++index) {
+      const auto& binding = reservation.Bindings()[index];
+      const auto elements = RowElements(*binding.input);
+      const auto* input = binding.input->GetTensorData<float>();
+      EXPECT_TRUE(std::all_of(input, input + elements, [](float value) { return value == 0.0f; }));
+      std::fill_n(binding.output->GetTensorMutableData<float>(), elements, 2.0f);
+    }
+    const auto& lengths_binding = reservation.Bindings()[4];
+    const auto* lengths_input = lengths_binding.input->GetTensorData<int32_t>();
+    EXPECT_EQ(lengths_input[0], 0);
+    EXPECT_EQ(lengths_input[1], 0);
+    std::fill_n(lengths_binding.output->GetTensorMutableData<int32_t>(), 2, 3);
+    reservation.Commit();
+  }
+
+  auto resident = pool.Reserve(requests);
+  const auto* token_input = resident.Bindings()[0].input->GetTensorData<int64_t>();
+  EXPECT_EQ(token_input[0], 11);
+  EXPECT_EQ(token_input[1], 11);
+  for (size_t index = 1; index < 4; ++index) {
+    const auto& binding = resident.Bindings()[index];
+    const auto elements = RowElements(*binding.input);
+    const auto* input = binding.input->GetTensorData<float>();
+    EXPECT_TRUE(std::all_of(input, input + elements, [](float value) { return value == 2.0f; }));
+  }
+  const auto* lengths_input = resident.Bindings()[4].input->GetTensorData<int32_t>();
+  EXPECT_EQ(lengths_input[0], 3);
+  EXPECT_EQ(lengths_input[1], 3);
+}
+
 TEST_F(FixedStatePoolTest, SlotReuseGathersZeroAfterRelease) {
   auto pool = MakePool(1);
   const auto handle_a = MakeResident(*pool, kRequestA, 5.0f);

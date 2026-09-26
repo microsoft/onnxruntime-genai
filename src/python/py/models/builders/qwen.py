@@ -989,33 +989,49 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         self.input_names["past.indexer"] = qsa_layers
         self.input_types["past.indexer"] = self.io_dtype
         self.fixed_indexer_cache = not self.use_paged_attention and self.ep == "cuda"
-        self.input_shapes["past.indexer"] = ["batch_size", "past_sequence_length", self.indexer_head_dim]
         self.output_names["present.indexer"] = qsa_outputs
         self.output_types["present.indexer"] = self.io_dtype
-        self.output_shapes["present.indexer"] = ["batch_size", "total_sequence_length", self.indexer_head_dim]
+        if self.use_paged_attention:
+            self.indexer_state_capacity = (
+                self.context_length + self.indexer_compress_ratio - 1
+            ) // self.indexer_compress_ratio
+            indexer_state_shape = ["batch_size", self.indexer_state_capacity, self.indexer_head_dim]
+            indexer_buffer_shape = [
+                "batch_size",
+                2 * self.indexer_compress_ratio - 1,
+                self.indexer_head_dim,
+            ]
+            indexer_lengths_shape = ["batch_size", 2]
+            self.input_shapes["past.indexer"] = indexer_state_shape
+            self.output_shapes["present.indexer"] = indexer_state_shape
+            self.input_names["past.indexer_kv_buffer"] = {
+                layer_id: f"past.{layer_id}.indexer_kv_buffer" for layer_id in qsa_layers
+            }
+            self.input_types["past.indexer_kv_buffer"] = self.io_dtype
+            self.input_shapes["past.indexer_kv_buffer"] = indexer_buffer_shape
+            self.output_names["present.indexer_kv_buffer"] = {
+                layer_id: f"present.{layer_id}.indexer_kv_buffer" for layer_id in qsa_layers
+            }
+            self.output_types["present.indexer_kv_buffer"] = self.io_dtype
+            self.output_shapes["present.indexer_kv_buffer"] = indexer_buffer_shape
+            self.input_names["past.indexer_state_lengths"] = {
+                layer_id: f"past.{layer_id}.indexer_state_lengths" for layer_id in qsa_layers
+            }
+            self.input_types["past.indexer_state_lengths"] = ir.DataType.INT32
+            self.input_shapes["past.indexer_state_lengths"] = indexer_lengths_shape
+            self.output_names["present.indexer_state_lengths"] = {
+                layer_id: f"present.{layer_id}.indexer_state_lengths" for layer_id in qsa_layers
+            }
+            self.output_types["present.indexer_state_lengths"] = ir.DataType.INT32
+            self.output_shapes["present.indexer_state_lengths"] = indexer_lengths_shape
+            self.input_shapes["attention_metadata"] = [5]
+        else:
+            self.input_shapes["past.indexer"] = ["batch_size", "past_sequence_length", self.indexer_head_dim]
+            self.output_shapes["present.indexer"] = ["batch_size", "total_sequence_length", self.indexer_head_dim]
         if self.fixed_indexer_cache:
             self.input_names["past_sequence_length"] = "past_sequence_length"
             self.input_types["past_sequence_length"] = ir.DataType.INT32
             self.input_shapes["past_sequence_length"] = [1]
-        if self.use_paged_attention:
-            capacity = self.indexer_budget + self.indexer_compress_ratio - 1
-            self.model.metadata_props["qwen4_exp.selected_index_names"] = "sparse_attention.%d.selected_indices"
-            self.model.metadata_props["qwen4_exp.selected_count_names"] = "sparse_attention.%d.selected_counts"
-            self.input_names["sparse_attention.selected_indices"] = {
-                layer_id: f"sparse_attention.{layer_id}.selected_indices" for layer_id in qsa_layers
-            }
-            self.input_types["sparse_attention.selected_indices"] = ir.DataType.INT32
-            self.input_shapes["sparse_attention.selected_indices"] = ["num_tokens", capacity]
-            self.input_names["sparse_attention.selected_counts"] = {
-                layer_id: f"sparse_attention.{layer_id}.selected_counts" for layer_id in qsa_layers
-            }
-            self.input_types["sparse_attention.selected_counts"] = ir.DataType.INT32
-            self.input_shapes["sparse_attention.selected_counts"] = ["num_tokens"]
-            del self.input_names["past.indexer"]
-            del self.output_names["present.indexer"]
-            del self.model.metadata_props["qwen4_exp.past_indexer_names"]
-            del self.model.metadata_props["qwen4_exp.present_indexer_names"]
-            self.input_shapes["attention_metadata"] = [5]
 
         ple_token_state = {layer_id: f"past.{layer_id}.ple_tokens" for layer_id in self.ple_layer_ids}
         ple_conv_state = {layer_id: f"past.{layer_id}.ple_conv" for layer_id in self.ple_layer_ids}
@@ -1026,11 +1042,12 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         self.input_shapes["past.ple_tokens"] = ["batch_size", self.ngram_size - 1]
         self.input_names["past.ple_conv"] = ple_conv_state
         self.input_types["past.ple_conv"] = self.io_dtype
-        self.input_shapes["past.ple_conv"] = [
-            "batch_size",
-            self.ple_conv_dilation * (self.ple_conv_kernel_size - 1),
-            self.hc_hidden_size,
-        ]
+        ple_conv_state_length = self.ple_conv_dilation * (self.ple_conv_kernel_size - 1)
+        self.input_shapes["past.ple_conv"] = (
+            ["batch_size", self.hc_hidden_size, ple_conv_state_length]
+            if self.use_paged_attention
+            else ["batch_size", ple_conv_state_length, self.hc_hidden_size]
+        )
         self.output_names["present.ple_tokens"] = present_ple_tokens
         self.output_types["present.ple_tokens"] = ir.DataType.INT64
         self.output_shapes["present.ple_tokens"] = ["batch_size", self.ngram_size - 1]
@@ -1071,17 +1088,61 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         decoder["inputs"]["past_ple_token_names"] = "past.%d.ple_tokens"
         decoder["inputs"]["past_ple_conv_names"] = "past.%d.ple_conv"
         decoder["inputs"]["past_indexer_names"] = "past.%d.indexer_key"
+        decoder["inputs"]["past_indexer_kv_buffer_names"] = "past.%d.indexer_kv_buffer"
+        decoder["inputs"]["past_indexer_state_lengths_names"] = "past.%d.indexer_state_lengths"
         if getattr(self, "fixed_indexer_cache", False):
             decoder["inputs"]["past_sequence_length"] = self.input_names["past_sequence_length"]
         decoder["outputs"]["present_ple_token_names"] = "present.%d.ple_tokens"
         decoder["outputs"]["present_ple_conv_names"] = "present.%d.ple_conv"
         decoder["outputs"]["present_indexer_names"] = "present.%d.indexer_key"
+        decoder["outputs"]["present_indexer_kv_buffer_names"] = "present.%d.indexer_kv_buffer"
+        decoder["outputs"]["present_indexer_state_lengths_names"] = "present.%d.indexer_state_lengths"
         decoder["ple_token_pad_id"] = self.ple_token_pad_id
         if self.ep != "cpu":
             session_options = decoder["session_options"]
             session_options["session.layer_assignment_settings"] = (
                 f"cpu(={self.CPU_EMBEDDING_ANNOTATION})"
             )
+
+    def make_decoder_state_groups(self, inputs, outputs):
+        state_groups = super().make_decoder_state_groups(inputs, outputs)
+        if not self.use_paged_attention:
+            return state_groups
+
+        qsa_layers = [
+            layer_id
+            for layer_id, layer_type in enumerate(self.layer_types)
+            if layer_type == "qwen_sparse_attention"
+        ]
+        if qsa_layers:
+            paged_group = next((group for group in state_groups if group["kind"] == "paged_kv"), None)
+            if paged_group is None:
+                state_groups.insert(0, self.make_paged_key_value_state_group(qsa_layers))
+            else:
+                paged_group["layer_ids"] = sorted(set(paged_group["layer_ids"] + qsa_layers))
+
+        if self.ple_layer_ids:
+            state_groups.append(
+                {
+                    "kind": "fixed_ple",
+                    "layer_ids": sorted(self.ple_layer_ids),
+                }
+            )
+
+        indexer_bindings = {
+            "past.indexer",
+            "past.indexer_kv_buffer",
+            "past.indexer_state_lengths",
+        }
+        if indexer_bindings.issubset(self.input_names):
+            if qsa_layers:
+                state_groups.append(
+                    {
+                        "kind": "fixed_indexer",
+                        "layer_ids": qsa_layers,
+                    }
+                )
+        return state_groups
 
     def make_gated_rms_norm(self, name, root_input, scale, gate, shape, epsilon=1e-5):
         output = f"{name}/output_0"
@@ -1401,55 +1462,132 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
 
         conv_weight = f"model.layers.{layer_id}.ple.conv1d.weight"
         self.make_initializer(ple.conv1d.weight, conv_weight, to=self.io_dtype)
-        conv_name = f"{basename}/CausalConvWithState"
+        conv_op_type = "VarlenCausalConvWithState" if self.use_paged_attention else "CausalConvWithState"
+        conv_name = f"{basename}/{conv_op_type}"
         conv_output = f"{conv_name}/output_0"
-        self.make_node(
-            "CausalConvWithState",
-            inputs=[
-                f"{gated_value_normed_flat}/output_0",
-                conv_weight,
-                "",
-                self.input_names["past.ple_conv"][layer_id],
-            ],
-            outputs=[conv_output, self.output_names["present.ple_conv"][layer_id]],
-            name=conv_name,
-            domain="com.microsoft",
-            ndim=1,
-            dilation=self.ple_conv_dilation,
-            channels_last=1,
-            activation="silu",
-        )
-        self.make_value(conv_output, self.io_dtype, ple_shape)
+        if self.use_paged_attention:
+            self.make_varlen_causal_conv_with_state(
+                conv_name,
+                root_input=f"{gated_value_normed_flat}/output_0",
+                weight=conv_weight,
+                cumulative_sequence_length=self.input_names["cumulative_sequence_lengths"],
+                bias="",
+                past_conv_state=self.input_names["past.ple_conv"][layer_id],
+                present_conv_state=self.output_names["present.ple_conv"][layer_id],
+                output_shape=ple_shape,
+                present_conv_shape=[
+                    "batch_size",
+                    self.hc_hidden_size,
+                    self.ple_conv_dilation * (self.ple_conv_kernel_size - 1),
+                ],
+                dilation=self.ple_conv_dilation,
+            )
+        else:
+            self.make_node(
+                "CausalConvWithState",
+                inputs=[
+                    f"{gated_value_normed_flat}/output_0",
+                    conv_weight,
+                    "",
+                    self.input_names["past.ple_conv"][layer_id],
+                ],
+                outputs=[conv_output, self.output_names["present.ple_conv"][layer_id]],
+                name=conv_name,
+                domain="com.microsoft",
+                ndim=1,
+                dilation=self.ple_conv_dilation,
+                channels_last=1,
+                activation="silu",
+            )
+            self.make_value(conv_output, self.io_dtype, ple_shape)
         add_name = f"{basename}/Add"
         self.make_add(add_name, [f"{gated_value_flat}/output_0", conv_output], self.io_dtype, ple_shape)
         return f"{add_name}/output_0"
 
     def make_qwen_sparse_attention(self, layer_id, attention, root_input):
-        indexer_proj = None if self.use_paged_attention else attention.indexer.index_qk_proj
-        self.make_attention_input_proj(layer_id, attention, root_input, indexer_proj=indexer_proj)
+        self.make_attention_input_proj(
+            layer_id,
+            attention,
+            root_input,
+            indexer_proj=attention.indexer.index_qk_proj,
+        )
         q_norm_weight, k_norm_weight = self.get_qk_norm_weight_names(layer_id)
         self.make_initializer(attention.q_norm.weight + 1, q_norm_weight, to=self.io_dtype)
         self.make_initializer(attention.k_norm.weight + 1, k_norm_weight, to=self.io_dtype)
         cos_cache, sin_cache = self.make_rotary_embedding_caches()
         past_k, past_v, present_k, present_v = self.make_key_value_cache_names(layer_id)
         capacity = self.indexer_budget + self.indexer_compress_ratio - 1
+        index_qk_path = self.attention_attrs.pop("indexer_qk_path", None)
+        if index_qk_path is None:
+            index_matmul = self.make_matmul(
+                attention.indexer.index_qk_proj,
+                f"/model/layers.{layer_id}/attn/indexer/index_qk_proj/MatMul",
+                root_input,
+            )
+            index_qk_path = f"{index_matmul}/output_0"
+        index_q_scale = f"model.layers.{layer_id}.attn.indexer.q_norm.weight"
+        index_k_scale = f"model.layers.{layer_id}.attn.indexer.k_norm.weight"
+        self.make_initializer(attention.indexer.q_layernorm.weight + 1, index_q_scale, to=self.io_dtype)
+        self.make_initializer(attention.indexer.k_layernorm.weight + 1, index_k_scale, to=self.io_dtype)
 
         if self.use_paged_attention:
-            selected_indices = self.input_names["sparse_attention.selected_indices"][layer_id]
-            selected_counts = self.input_names["sparse_attention.selected_counts"][layer_id]
+            if self.indexer_kv_heads != 1:
+                raise ValueError("PackedSparseAttentionIndexer requires indexer_kv_heads=1 for QSA.")
+            indexer_name = f"/model/layers.{layer_id}/attn/PackedSparseAttentionIndexer"
+            index_query = f"{indexer_name}/query"
+            index_key = f"{indexer_name}/key"
+            query_size = self.indexer_num_heads * self.indexer_head_dim
+            key_size = self.indexer_head_dim
+            self.make_split(
+                f"{indexer_name}/Split",
+                [index_qk_path, f"/model/constants/INT64/[{query_size}, {key_size}]"],
+                [index_query, index_key],
+                [self.io_dtype] * 2,
+                [["num_tokens", query_size], ["num_tokens", key_size]],
+                axis=-1,
+            )
+            selected_indices = f"{indexer_name}/output_0"
+            selected_counts = f"{indexer_name}/output_1"
+            self.make_node(
+                "PackedSparseAttentionIndexer",
+                inputs=[
+                    index_query,
+                    index_key,
+                    index_q_scale,
+                    index_k_scale,
+                    cos_cache,
+                    sin_cache,
+                    self.input_names["cumulative_sequence_lengths"],
+                    self.input_names["past_sequence_lengths"],
+                    "",
+                    "",
+                    "",
+                    "",
+                    self.input_names["past.indexer"][layer_id],
+                    self.input_names["past.indexer_kv_buffer"][layer_id],
+                    "",
+                    self.input_names["past.indexer_state_lengths"][layer_id],
+                ],
+                outputs=[
+                    selected_indices,
+                    selected_counts,
+                    self.output_names["present.indexer"][layer_id],
+                    self.output_names["present.indexer_kv_buffer"][layer_id],
+                    "",
+                    self.output_names["present.indexer_state_lengths"][layer_id],
+                ],
+                name=indexer_name,
+                domain="com.microsoft",
+                policy_mode="qsa",
+                compress_ratio=self.indexer_compress_ratio,
+                state_capacity=self.indexer_state_capacity,
+                token_budget=self.indexer_budget,
+                epsilon=self.layernorm_attrs["epsilon"],
+                scale=self.indexer_head_dim**-0.5,
+            )
+            self.make_value(selected_indices, ir.DataType.INT32, ["num_tokens", capacity])
+            self.make_value(selected_counts, ir.DataType.INT32, ["num_tokens"])
         else:
-            index_qk_path = self.attention_attrs.pop("indexer_qk_path", None)
-            if index_qk_path is None:
-                index_matmul = self.make_matmul(
-                    attention.indexer.index_qk_proj,
-                    f"/model/layers.{layer_id}/attn/indexer/index_qk_proj/MatMul",
-                    root_input,
-                )
-                index_qk_path = f"{index_matmul}/output_0"
-            index_q_scale = f"model.layers.{layer_id}.attn.indexer.q_norm.weight"
-            index_k_scale = f"model.layers.{layer_id}.attn.indexer.k_norm.weight"
-            self.make_initializer(attention.indexer.q_layernorm.weight + 1, index_q_scale, to=self.io_dtype)
-            self.make_initializer(attention.indexer.k_layernorm.weight + 1, index_k_scale, to=self.io_dtype)
             indexer_name = f"/model/layers.{layer_id}/attn/SparseAttentionIndexer"
             selected_indices = f"{indexer_name}/output_0"
             if self.fixed_indexer_cache:

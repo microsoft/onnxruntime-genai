@@ -169,6 +169,41 @@ TEST(DecoderStateGroupsConfigTest, ParsesSparseHybridManifest) {
   EXPECT_EQ(config.model.decoder.outputs.state_update_recurrent_capsule_names, "state_update.%d.recurrent_capsule");
 }
 
+TEST(DecoderStateGroupsConfigTest, ParsesPleAndPackedIndexerStateGroups) {
+  const auto config = LoadDecoderConfig(R"({
+    "num_hidden_layers": 2,
+    "inputs": {
+      "past_ple_token_names": "past.%d.ple_tokens",
+      "past_ple_conv_names": "past.%d.ple_conv",
+      "past_indexer_names": "past.%d.indexer_key",
+      "past_indexer_kv_buffer_names": "past.%d.indexer_kv_buffer",
+      "past_indexer_state_lengths_names": "past.%d.indexer_state_lengths"
+    },
+    "outputs": {
+      "present_ple_token_names": "present.%d.ple_tokens",
+      "present_ple_conv_names": "present.%d.ple_conv",
+      "present_indexer_names": "present.%d.indexer_key",
+      "present_indexer_kv_buffer_names": "present.%d.indexer_kv_buffer",
+      "present_indexer_state_lengths_names": "present.%d.indexer_state_lengths"
+    },
+    "state_groups": [
+      {"kind": "fixed_ple", "layer_ids": [0]},
+      {"kind": "fixed_indexer", "layer_ids": [1]}
+    ]
+  })");
+
+  ASSERT_TRUE(config.model.decoder.state_groups);
+  ASSERT_EQ(config.model.decoder.state_groups->size(), 2u);
+  EXPECT_EQ(config.model.decoder.state_groups->at(0).kind,
+            Config::Model::Decoder::StateGroupKind::FixedPle);
+  EXPECT_EQ(config.model.decoder.state_groups->at(1).kind,
+            Config::Model::Decoder::StateGroupKind::FixedIndexer);
+  EXPECT_EQ(config.model.decoder.inputs.past_indexer_kv_buffer_names,
+            "past.%d.indexer_kv_buffer");
+  EXPECT_EQ(config.model.decoder.outputs.present_indexer_state_lengths_names,
+            "present.%d.indexer_state_lengths");
+}
+
 TEST(DecoderStateGroupsConfigTest, OverlayValidationIsTransactional) {
   auto config = LoadDecoderConfig(R"({
     "num_hidden_layers": 1,

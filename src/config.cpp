@@ -513,6 +513,10 @@ struct DecoderInputs_Element : JSON::Element {
       v_.past_ple_token_names = JSON::Get<std::string_view>(value);
     } else if (name == "past_ple_conv_names") {
       v_.past_ple_conv_names = JSON::Get<std::string_view>(value);
+    } else if (name == "past_indexer_kv_buffer_names") {
+      v_.past_indexer_kv_buffer_names = JSON::Get<std::string_view>(value);
+    } else if (name == "past_indexer_state_lengths_names") {
+      v_.past_indexer_state_lengths_names = JSON::Get<std::string_view>(value);
     } else if (name == "state_update_capture_count") {
       v_.state_update_capture_count = JSON::Get<std::string_view>(value);
     } else if (name == "state_update_active") {
@@ -568,6 +572,10 @@ struct DecoderOutputs_Element : JSON::Element {
       v_.present_ple_token_names = JSON::Get<std::string_view>(value);
     } else if (name == "present_ple_conv_names") {
       v_.present_ple_conv_names = JSON::Get<std::string_view>(value);
+    } else if (name == "present_indexer_kv_buffer_names") {
+      v_.present_indexer_kv_buffer_names = JSON::Get<std::string_view>(value);
+    } else if (name == "present_indexer_state_lengths_names") {
+      v_.present_indexer_state_lengths_names = JSON::Get<std::string_view>(value);
     } else if (name == "state_update_conv_value_names") {
       v_.state_update_conv_value_names = JSON::Get<std::string_view>(value);
     } else if (name == "state_update_recurrent_capsule_names") {
@@ -723,6 +731,10 @@ struct StateGroup_Element : JSON::Element {
         v_.kind = DecoderStateGroupKind::FixedConv;
       } else if (kind == "fixed_recurrent") {
         v_.kind = DecoderStateGroupKind::FixedRecurrent;
+      } else if (kind == "fixed_ple") {
+        v_.kind = DecoderStateGroupKind::FixedPle;
+      } else if (kind == "fixed_indexer") {
+        v_.kind = DecoderStateGroupKind::FixedIndexer;
       } else if (kind == "fixed") {
         throw std::runtime_error(
             "Decoder state group kind 'fixed' is no longer supported; use 'fixed_conv' or "

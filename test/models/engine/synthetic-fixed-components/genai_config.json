@@ -1,0 +1,58 @@
+{
+  "model": {
+    "type": "gpt2",
+    "bos_token_id": 0,
+    "eos_token_id": 1,
+    "pad_token_id": 0,
+    "vocab_size": 16,
+    "context_length": 128,
+    "decoder": {
+      "filename": "decoder.onnx",
+      "num_attention_heads": 1,
+      "num_key_value_heads": 1,
+      "head_size": 1,
+      "hidden_size": 1,
+      "num_hidden_layers": 2,
+      "ple_token_pad_id": 7,
+      "session_options": {
+        "provider_options": []
+      },
+      "inputs": {
+        "input_ids": "input_ids",
+        "attention_mask": "attention_mask",
+        "position_ids": "position_ids",
+        "past_ple_token_names": "past.%d.ple_tokens",
+        "past_ple_conv_names": "past.%d.ple_conv",
+        "past_indexer_names": "past.%d.indexer_key",
+        "past_indexer_kv_buffer_names": "past.%d.indexer_kv_buffer",
+        "past_indexer_state_lengths_names": "past.%d.indexer_state_lengths"
+      },
+      "outputs": {
+        "logits": "logits",
+        "present_ple_token_names": "present.%d.ple_tokens",
+        "present_ple_conv_names": "present.%d.ple_conv",
+        "present_indexer_names": "present.%d.indexer_key",
+        "present_indexer_kv_buffer_names": "present.%d.indexer_kv_buffer",
+        "present_indexer_state_lengths_names": "present.%d.indexer_state_lengths"
+      },
+      "state_groups": [
+        {
+          "kind": "fixed_ple",
+          "layer_ids": [
+            0
+          ]
+        },
+        {
+          "kind": "fixed_indexer",
+          "layer_ids": [
+            1
+          ]
+        }
+      ]
+    }
+  },
+  "search": {
+    "max_length": 128,
+    "do_sample": false
+  }
+}

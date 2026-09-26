@@ -69,6 +69,10 @@ inline std::shared_ptr<Model> LoadSyntheticHybridModel() {
   return CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-hybrid");
 }
 
+inline std::shared_ptr<Model> LoadSyntheticFixedComponentsModel() {
+  return CreateModel(GetOrtEnv(), MODEL_PATH "engine/synthetic-fixed-components");
+}
+
 // Loads the tiny checked-in composite decoder used by the Engine composite-transaction tests. Its
 // config declares one paged_kv group (layers [1, 4]) alongside two fixed decoder state groups
 // (convolution [0, 3] and recurrent [2, 5]) plus engine.dynamic_batching, so CacheManager::Create

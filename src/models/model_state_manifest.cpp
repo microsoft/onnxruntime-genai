@@ -37,6 +37,17 @@ std::vector<StateBinding> StateBindingsFor(
       return {{"state", inputs.past_conv_names, outputs.present_conv_names}};
     case StateGroupKind::FixedRecurrent:
       return {{"state", inputs.past_recurrent_names, outputs.present_recurrent_names}};
+    case StateGroupKind::FixedPle:
+      return {
+          {"tokens", inputs.past_ple_token_names, outputs.present_ple_token_names},
+          {"conv", inputs.past_ple_conv_names, outputs.present_ple_conv_names},
+      };
+    case StateGroupKind::FixedIndexer:
+      return {
+          {"key", inputs.past_indexer_names, outputs.present_indexer_names},
+          {"kv_buffer", inputs.past_indexer_kv_buffer_names, outputs.present_indexer_kv_buffer_names},
+          {"state_lengths", inputs.past_indexer_state_lengths_names, outputs.present_indexer_state_lengths_names},
+      };
     case StateGroupKind::Invalid:
       return {};
   }
@@ -44,6 +55,13 @@ std::vector<StateBinding> StateBindingsFor(
 }
 
 bool IsFixedKind(StateGroupKind kind) {
+  return kind == StateGroupKind::FixedConv ||
+         kind == StateGroupKind::FixedRecurrent ||
+         kind == StateGroupKind::FixedPle ||
+         kind == StateGroupKind::FixedIndexer;
+}
+
+bool SupportsStateUpdate(StateGroupKind kind) {
   return kind == StateGroupKind::FixedConv ||
          kind == StateGroupKind::FixedRecurrent;
 }
@@ -66,6 +84,10 @@ std::string_view StateGroupKindName(StateGroupKind kind) {
       return "fixed_conv";
     case StateGroupKind::FixedRecurrent:
       return "fixed_recurrent";
+    case StateGroupKind::FixedPle:
+      return "fixed_ple";
+    case StateGroupKind::FixedIndexer:
+      return "fixed_indexer";
     case StateGroupKind::Invalid:
       return "invalid";
   }
@@ -337,7 +359,9 @@ bool ModelStateManifest::HasStateGroupKind(StateGroupKind kind) const {
 
 bool ModelStateManifest::HasFixedStateGroups() const {
   return HasStateGroupKind(StateGroupKind::FixedConv) ||
-         HasStateGroupKind(StateGroupKind::FixedRecurrent);
+         HasStateGroupKind(StateGroupKind::FixedRecurrent) ||
+         HasStateGroupKind(StateGroupKind::FixedPle) ||
+         HasStateGroupKind(StateGroupKind::FixedIndexer);
 }
 
 void ModelStateManifest::ValidateConfig(const Decoder& decoder) {
@@ -372,8 +396,9 @@ void ModelStateManifest::ValidateConfig(const Decoder& decoder) {
     if (group.state_update) {
       ++fixed_state_update_group_count;
       const auto& update = *group.state_update;
-      if (!IsFixedKind(group.kind)) {
-        throw std::runtime_error(group_label + " only fixed state groups support state_update");
+      if (!SupportsStateUpdate(group.kind)) {
+        throw std::runtime_error(
+            group_label + " does not support state_update; partial acceptance requires replay");
       }
       if (update.capacity < 1 || update.capacity > Decoder::MaxStateUpdateCapacity) {
         throw std::runtime_error(

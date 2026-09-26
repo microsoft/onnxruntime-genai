@@ -32,6 +32,7 @@ base_module = _load_builder_module("base")
 qwen_module = _load_builder_module("qwen")
 Model = base_module.Model
 Qwen35TextModel = qwen_module.Qwen35TextModel
+Qwen4ExpTextModel = qwen_module.Qwen4ExpTextModel
 
 
 def test_prequantized_linear_attention_gate_is_rejected():
@@ -232,6 +233,80 @@ def test_qwen38_official_geometry_emits_exact_sparse_groups(monkeypatch, tmp_pat
     assert decoder["outputs"]["present_recurrent_names"] == "present.%d.recurrent"
 
 
+def test_qwen4_exp_paged_state_groups_own_ple_and_sparse_kv():
+    model = _make_config_model(
+        Qwen4ExpTextModel,
+        layer_types=["linear_attention", "qwen_sparse_attention"],
+    )
+    model.ple_layer_ids = {0}
+
+    groups = model.make_decoder_state_groups({}, {})
+
+    assert groups == [
+        {"kind": "paged_kv", "layer_ids": [1]},
+        {"kind": "fixed_conv", "layer_ids": [0]},
+        {"kind": "fixed_recurrent", "layer_ids": [0]},
+        {"kind": "fixed_ple", "layer_ids": [0]},
+    ]
+
+
+def test_qwen4_exp_adds_indexer_group_only_with_complete_bindings():
+    model = _make_config_model(
+        Qwen4ExpTextModel,
+        layer_types=["qwen_sparse_attention"],
+    )
+    model.ple_layer_ids = set()
+    model.input_names.update(
+        {
+            "past.indexer": {0: "past.0.indexer_key"},
+            "past.indexer_kv_buffer": {0: "past.0.indexer_kv_buffer"},
+            "past.indexer_state_lengths": {0: "past.0.indexer_state_lengths"},
+        }
+    )
+
+    groups = model.make_decoder_state_groups({}, {})
+
+    assert groups == [
+        {"kind": "paged_kv", "layer_ids": [0]},
+        {"kind": "fixed_indexer", "layer_ids": [0]},
+    ]
+
+
+def test_qwen4_exp_config_emits_packed_indexer_state_group(monkeypatch, tmp_path):
+    model = _make_config_model(
+        Qwen4ExpTextModel,
+        layer_types=["qwen_sparse_attention"],
+    )
+    model.num_layers = 1
+    model.ple_layer_ids = set()
+    model.ple_token_pad_id = 248044
+    model.fixed_indexer_cache = False
+    model.input_names.update(
+        {
+            "past.indexer": {0: "past.0.indexer_key"},
+            "past.indexer_kv_buffer": {0: "past.0.indexer_kv_buffer"},
+            "past.indexer_state_lengths": {0: "past.0.indexer_state_lengths"},
+        }
+    )
+    model.output_names.update(
+        {
+            "present.indexer": {0: "present.0.indexer_key"},
+            "present.indexer_kv_buffer": {0: "present.0.indexer_kv_buffer"},
+            "present.indexer_state_lengths": {0: "present.0.indexer_state_lengths"},
+        }
+    )
+
+    decoder = _write_config(monkeypatch, tmp_path, model)["model"]["decoder"]
+
+    assert decoder["state_groups"] == [
+        {"kind": "paged_kv", "layer_ids": [0]},
+        {"kind": "fixed_indexer", "layer_ids": [0]},
+    ]
+    assert decoder["inputs"]["past_indexer_names"] == "past.%d.indexer_key"
+    assert decoder["inputs"]["past_indexer_kv_buffer_names"] == "past.%d.indexer_kv_buffer"
+    assert decoder["inputs"]["past_indexer_state_lengths_names"] == "past.%d.indexer_state_lengths"
+
+
 def test_qwen38_compact_state_update_bindings_are_emitted(monkeypatch, tmp_path):
     model = _make_config_model(Qwen35TextModel, layer_types=["linear_attention", "full_attention"])
     model.context_length_attrs["state_update_capacity"] = 3
@@ -308,6 +383,7 @@ def test_varlen_ops_emit_compact_state_updates_at_exact_slots():
     assert conv["inputs"] == ["x", "weight", "cu", "bias", "past", "capture_count"]
     assert conv["outputs"] == ["/conv/output_0", "present", "state_update.0.conv_value"]
     assert conv["state_update_capacity"] == 3
+    assert conv["dilation"] == 1
 
     model.make_varlen_gated_delta_net(
         "/gdn",
@@ -366,11 +442,13 @@ def test_varlen_ops_omit_compact_state_updates_at_zero_capacity():
         state_update_capacity=0,
         output_shape=["num_tokens", 48],
         present_conv_shape=["batch_size", 48, 3],
+        dilation=3,
     )
     conv = model.nodes[-1][1]
     assert conv["inputs"] == ["x", "weight", "cu", "bias", "past"]
     assert conv["outputs"] == ["/conv/output_0", "present"]
     assert "state_update_capacity" not in conv
+    assert conv["dilation"] == 3
 
     model.make_varlen_gated_delta_net(
         "/gdn",

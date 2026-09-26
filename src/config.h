@@ -401,6 +401,8 @@ struct Config {
         PagedKeyValue,
         FixedConv,
         FixedRecurrent,
+        FixedPle,
+        FixedIndexer,
       };
 
       enum class StateUpdateKind {
@@ -458,6 +460,8 @@ struct Config {
         std::string past_ple_token_names;
         std::string past_ple_conv_names;
         std::string past_indexer_names;
+        std::string past_indexer_kv_buffer_names;
+        std::string past_indexer_state_lengths_names;
         std::string state_update_capture_count{Defaults::StateUpdateCaptureCountName};  // Per-sequence capture count
         std::string state_update_active{Defaults::StateUpdateActiveName};               // Capture enable flag
 
@@ -491,6 +495,8 @@ struct Config {
         std::string present_ple_token_names;
         std::string present_ple_conv_names;
         std::string present_indexer_names;
+        std::string present_indexer_kv_buffer_names;
+        std::string present_indexer_state_lengths_names;
         std::string state_update_conv_value_names{Defaults::StateUpdateConvValueName};
         std::string state_update_recurrent_capsule_names{Defaults::StateUpdateRecurrentCapsuleName};
         std::string hidden_states;  // Last hidden state output (when exported with include_hidden_states; e.g. fed to the MTP head)

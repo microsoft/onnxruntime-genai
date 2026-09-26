@@ -47,6 +47,9 @@ examples/csharp/ModelChat/models
 
 !/test/models/engine/
 /test/models/engine/*
+!/test/models/engine/synthetic-fixed-components/
+!/test/models/engine/synthetic-fixed-components/decoder.onnx
+!/test/models/engine/synthetic-fixed-components/genai_config.json
 !/test/models/engine/synthetic-paged-scales/
 !/test/models/engine/synthetic-paged-scales/decoder.onnx
 !/test/models/engine/synthetic-paged-scales/genai_config.json

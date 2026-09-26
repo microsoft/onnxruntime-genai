@@ -2367,7 +2367,10 @@ class Model:
         if state_update_capacity:
             outputs.append(kwargs["state_update_value"])
 
-        attributes = {"activation": kwargs.get("activation", "silu")}
+        attributes = {
+            "activation": kwargs.get("activation", "silu"),
+            "dilation": kwargs.get("dilation", 1),
+        }
         if state_update_capacity:
             attributes["state_update_capacity"] = state_update_capacity
         self.make_node(

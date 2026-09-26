@@ -29,14 +29,33 @@ std::string ExpandBinding(const std::string& binding, int layer_id) {
   return name;
 }
 
-std::pair<const std::string&, const std::string&> FixedStateTemplates(
+struct FixedStateTemplate {
+  const std::string* input;
+  const std::string* output;
+  bool initialize_to_ple_token_pad_id{};
+};
+
+std::vector<FixedStateTemplate> FixedStateTemplates(
     const Config::Model::Decoder& decoder,
     StateGroupKind kind) {
   if (kind == StateGroupKind::FixedConv) {
-    return {decoder.inputs.past_conv_names, decoder.outputs.present_conv_names};
+    return {{&decoder.inputs.past_conv_names, &decoder.outputs.present_conv_names}};
   }
   if (kind == StateGroupKind::FixedRecurrent) {
-    return {decoder.inputs.past_recurrent_names, decoder.outputs.present_recurrent_names};
+    return {{&decoder.inputs.past_recurrent_names, &decoder.outputs.present_recurrent_names}};
+  }
+  if (kind == StateGroupKind::FixedPle) {
+    return {
+        {&decoder.inputs.past_ple_token_names, &decoder.outputs.present_ple_token_names, true},
+        {&decoder.inputs.past_ple_conv_names, &decoder.outputs.present_ple_conv_names},
+    };
+  }
+  if (kind == StateGroupKind::FixedIndexer) {
+    return {
+        {&decoder.inputs.past_indexer_names, &decoder.outputs.present_indexer_names},
+        {&decoder.inputs.past_indexer_kv_buffer_names, &decoder.outputs.present_indexer_kv_buffer_names},
+        {&decoder.inputs.past_indexer_state_lengths_names, &decoder.outputs.present_indexer_state_lengths_names},
+    };
   }
   throw std::logic_error("Fixed state pool received a non-fixed state group.");
 }
@@ -186,6 +205,7 @@ struct FixedStatePool::Impl {
     ONNXTensorElementDataType data_type{};
     std::vector<int64_t> session_shape;
     size_t row_bytes{};
+    std::optional<int64_t> initial_int64_value;
     Config::Model::Decoder::StateUpdateKind state_update_kind{};
     bool state_update_enabled{};
     size_t state_update_capacity{};
@@ -543,17 +563,22 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity)
   const auto& decoder = impl_->model->config_->model.decoder;
   for (const auto& group : manifest.StateGroups()) {
     if (group.kind != StateGroupKind::FixedConv &&
-        group.kind != StateGroupKind::FixedRecurrent) {
+        group.kind != StateGroupKind::FixedRecurrent &&
+        group.kind != StateGroupKind::FixedPle &&
+        group.kind != StateGroupKind::FixedIndexer) {
       continue;
     }
-    const auto [input_template, output_template] =
-        FixedStateTemplates(decoder, group.kind);
+    const auto binding_templates = FixedStateTemplates(decoder, group.kind);
     for (const int layer_id : group.layer_ids) {
+      for (const auto& binding_template : binding_templates) {
       Impl::TensorSpec spec;
       spec.kind = group.kind;
       spec.layer_id = layer_id;
-      spec.input_name = ExpandBinding(input_template, layer_id);
-      spec.output_name = ExpandBinding(output_template, layer_id);
+      spec.input_name = ExpandBinding(*binding_template.input, layer_id);
+      spec.output_name = ExpandBinding(*binding_template.output, layer_id);
+      if (binding_template.initialize_to_ple_token_pad_id) {
+        spec.initial_int64_value = decoder.ple_token_pad_id;
+      }
       spec.data_type =
           impl_->model->session_info_.GetInputDataType(spec.input_name);
       spec.session_shape =
@@ -652,6 +677,7 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity)
           "zeroing scratch allocation");
 
       impl_->tensors.push_back(std::move(spec));
+      }
     }
   }
 
@@ -743,7 +769,17 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity)
   try {
     for (auto& spec : impl_->tensors) {
       device_work_enqueued = true;
-      ByteWrapTensor(*impl_->device, *spec.zero_row).Zero();
+      if (spec.initial_int64_value) {
+        if (spec.data_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
+          throw std::runtime_error(
+              "PLE token state input '" + spec.input_name + "' must have int64 dtype.");
+        }
+        auto values = WrapTensor<int64_t>(*impl_->device, *spec.zero_row);
+        std::fill(values.CpuSpan().begin(), values.CpuSpan().end(), *spec.initial_int64_value);
+        values.CopyCpuToDevice();
+      } else {
+        ByteWrapTensor(*impl_->device, *spec.zero_row).Zero();
+      }
     }
     impl_->device->Synchronize();
   } catch (...) {
