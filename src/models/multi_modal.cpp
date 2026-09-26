@@ -95,66 +95,23 @@ int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs) {
 
 }  // namespace
 
-void CheckLfm2AudioSessionDevices(const Config& config, DeviceType decoder_device, DeviceType inputs_device,
-                                  bool with_audio) {
-  // Whether a buffer allocated on the device is device memory. OpenVINO allocates from the CPU and
-  // QNN from shared memory, both of which a CPU session can use.
-  const auto is_device_memory = [](DeviceType device) {
-    switch (device) {
-      case DeviceType::CUDA:
-      case DeviceType::DML:
-      case DeviceType::WEBGPU:
-      case DeviceType::NvTensorRtRtx:
-      case DeviceType::RyzenAI:
-      case DeviceType::AMDGPU:
-        return true;
-      default:
-        return false;
-    }
-  };
-  const auto check = [](const std::optional<Config::SessionOptions>& options, const char* graph,
-                        const char* buffers, DeviceType device) {
-    // Without session_options of its own a graph follows the decoder; with them, no provider but CPU
-    // leaves it on CPU.
-    if (!options.has_value() || !std::all_of(options->providers.begin(), options->providers.end(),
-                                             [](const std::string& provider) { return provider == "CPU"; })) {
-      return;
-    }
-    throw std::runtime_error(std::string("lfm2_audio: model.") + graph + ".session_options run the " + graph +
-                             " model on CPU, but " + buffers + " in " + to_string(device) +
-                             " memory, which it cannot use. Remove model." + graph +
-                             ".session_options so that it runs on the decoder's device.");
-  };
-
-  if (is_device_memory(inputs_device)) {
-    check(config.model.embedding.session_options, "embedding", "the decoder takes its inputs", inputs_device);
-  }
-  if (with_audio && is_device_memory(decoder_device)) {
-    check(config.model.speech.session_options, "speech", "the audio features are passed", decoder_device);
-    check(config.model.embedding.session_options, "embedding", "the audio features are passed", decoder_device);
-  }
-}
-
 MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech)
     : Model(std::move(config)) {
-  if (config_->model.type == "lfm2_audio") {
-    CheckLfm2AudioSessionDevices(*config_, p_device_->GetType(), p_device_inputs_->GetType(), /*with_audio=*/false);
-  }
   // The non-decoder models don't support graph capture because of control flow nodes, so disable graph capture for them
   if (vision) {
     vision_session_options_ = OrtSessionOptions::Create();
-    CreateSessionOptionsFromConfig(config_->model.vision.session_options.has_value() ? config_->model.vision.session_options.value() : config_->model.decoder.session_options, *vision_session_options_, true, /*disable_graph_capture=*/true);
+    vision_device_ = CreateSessionOptionsFromConfig(config_->model.vision.session_options.has_value() ? config_->model.vision.session_options.value() : config_->model.decoder.session_options, *vision_session_options_, true, /*disable_graph_capture=*/true);
     vision_session_ = CreateSession(ort_env, config_->model.vision.filename, vision_session_options_.get());
   }
 
   if (speech) {
     speech_session_options_ = OrtSessionOptions::Create();
-    CreateSessionOptionsFromConfig(config_->model.speech.session_options.has_value() ? config_->model.speech.session_options.value() : config_->model.decoder.session_options, *speech_session_options_, true, /*disable_graph_capture=*/true);
+    speech_device_ = CreateSessionOptionsFromConfig(config_->model.speech.session_options.has_value() ? config_->model.speech.session_options.value() : config_->model.decoder.session_options, *speech_session_options_, true, /*disable_graph_capture=*/true);
     speech_session_ = CreateSession(ort_env, config_->model.speech.filename, speech_session_options_.get());
   }
 
   embedding_session_options_ = OrtSessionOptions::Create();
-  CreateSessionOptionsFromConfig(config_->model.embedding.session_options.has_value() ? config_->model.embedding.session_options.value() : config_->model.decoder.session_options, *embedding_session_options_, true, /*disable_graph_capture=*/true);
+  embedding_device_ = CreateSessionOptionsFromConfig(config_->model.embedding.session_options.has_value() ? config_->model.embedding.session_options.value() : config_->model.decoder.session_options, *embedding_session_options_, true, /*disable_graph_capture=*/true);
 
   embedding_session_ = CreateSession(ort_env, config_->model.embedding.filename, embedding_session_options_.get());
   decoder_session_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
@@ -196,7 +153,7 @@ std::unique_ptr<State> MultiModalLanguageModel::CreateState(DeviceSpan<int32_t> 
 }
 
 VisionState::VisionState(const MultiModalLanguageModel& model, const GeneratorParams& params)
-    : State{params, model},
+    : State{params, model, model.vision_device_},
       model_{model} {}
 
 void VisionState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, const int64_t num_images, const int64_t num_image_tokens) {
@@ -607,7 +564,7 @@ DeviceSpan<float> PixtralVisionState::Run(int current_length, DeviceSpan<int32_t
     // Run into a separate output tensor, then copy into the combined feature buffer.
     std::vector<int64_t> sub_feat_shape = {num_feats, hidden_size};
     auto sub_feat = OrtValue::CreateTensor(
-        model_.p_device_->GetAllocator(), sub_feat_shape, feat_type);
+        p_session_device_->GetAllocator(), sub_feat_shape, feat_type);
 
     inputs_[pv_idx] = sub_pv.get();
     outputs_[0] = sub_feat.get();
@@ -616,9 +573,9 @@ DeviceSpan<float> PixtralVisionState::Run(int current_length, DeviceSpan<int32_t
 
     size_t feature_offset_bytes = static_cast<size_t>(feat_offset * hidden_size) * feat_elem_size;
     size_t feature_size_bytes = static_cast<size_t>(num_feats * hidden_size) * feat_elem_size;
-    ByteWrapTensor(*model_.p_device_, *feat_full)
+    ByteWrapTensor(*p_session_device_, *feat_full)
         .subspan(feature_offset_bytes, feature_size_bytes)
-        .CopyFrom(ByteWrapTensor(*model_.p_device_, *sub_feat));
+        .CopyFrom(ByteWrapTensor(*p_session_device_, *sub_feat));
 
     feat_offset += num_feats;
   }
@@ -645,7 +602,7 @@ std::unique_ptr<VisionState> CreateVisionState(const MultiModalLanguageModel& mo
 }
 
 SpeechState::SpeechState(const MultiModalLanguageModel& model, const GeneratorParams& params)
-    : State{params, model},
+    : State{params, model, model.speech_device_},
       model_{model} {}
 
 void SpeechState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, const int64_t num_audio_tokens) {
@@ -740,7 +697,7 @@ std::unique_ptr<OrtValue> Lfm2AudioSpeechState::RunClip(const SpeechBindings& bi
   clip_length->GetTensorMutableData<int64_t>()[0] = num_frames;
 
   auto clip_features = OrtValue::CreateTensor(
-      model_.p_device_->GetAllocator(),
+      p_session_device_->GetAllocator(),
       std::vector<int64_t>{1, tokens_per_clip_[static_cast<size_t>(index)], bindings.hidden_size},
       bindings.features_type);
 
@@ -759,8 +716,6 @@ std::unique_ptr<OrtValue> Lfm2AudioSpeechState::RunClip(const SpeechBindings& bi
 }
 
 DeviceSpan<float> Lfm2AudioSpeechState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
-  CheckLfm2AudioSessionDevices(*model_.config_, model_.p_device_->GetType(), model_.p_device_inputs_->GetType(),
-                               /*with_audio=*/true);
   if (model_.config_->model.speech.run_options.has_value()) {
     State::SetRunOptions(model_.config_->model.speech.run_options.value());
   }
@@ -772,7 +727,7 @@ DeviceSpan<float> Lfm2AudioSpeechState::Run(int current_length, DeviceSpan<int32
 
   const SpeechBindings bindings = ResolveBindings();
   const int64_t* frames_per_clip = inputs_[bindings.lengths_index]->GetTensorData<int64_t>();
-  auto features_bytes = ByteWrapTensor(*model_.p_device_, *outputs_[bindings.features_index]);
+  auto features_bytes = ByteWrapTensor(*p_session_device_, *outputs_[bindings.features_index]);
   const size_t feature_row_bytes = static_cast<size_t>(bindings.hidden_size) * Ort::SizeOf(bindings.features_type);
   size_t destination = 0;
 
@@ -789,7 +744,7 @@ DeviceSpan<float> Lfm2AudioSpeechState::Run(int current_length, DeviceSpan<int32
 
     auto clip_features = RunClip(bindings, clip, num_frames);
     const size_t clip_bytes = static_cast<size_t>(tokens_per_clip_[static_cast<size_t>(clip)]) * feature_row_bytes;
-    features_bytes.subspan(destination, clip_bytes).CopyFrom(ByteWrapTensor(*model_.p_device_, *clip_features));
+    features_bytes.subspan(destination, clip_bytes).CopyFrom(ByteWrapTensor(*p_session_device_, *clip_features));
     destination += clip_bytes;
   }
   return {};
@@ -817,7 +772,7 @@ std::unique_ptr<SpeechState> CreateSpeechState(const MultiModalLanguageModel& mo
 }
 
 EmbeddingState::EmbeddingState(const MultiModalLanguageModel& model, const GeneratorParams& params)
-    : State{params, model},
+    : State{params, model, model.embedding_device_},
       model_{model} {
   input_ids_.Add();
   inputs_embeds_.Add();
@@ -869,6 +824,12 @@ DeviceSpan<float> EmbeddingState::Run(int current_length, DeviceSpan<int32_t>& n
     State::SetRunOptions(model_.config_->model.embedding.run_options.value());
   }
   State::Run(*model_.embedding_session_);
+
+  // No-ops unless the decoder's buffers are on a device this session cannot write; then the
+  // outputs went to staging buffers that must be copied across.
+  inputs_embeds_.CopyToConsumer();
+  if (per_layer_inputs_) per_layer_inputs_->CopyToConsumer();
+
   return {};
 }
 

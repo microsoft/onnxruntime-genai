@@ -39,7 +39,9 @@ MultiModalFeatures::MultiModalFeatures(State& state, MultiModalFeatures::Mode mo
   // 4) Created as an input for embedding model (num_feature_tokens = 0)
   //    The tensor does not need to be pre-allocated because it will be created during (2).
   if (mode == MultiModalFeatures::Mode::Output) {
-    features_ = OrtValue::CreateTensor(model_.p_device_->GetAllocator(), shape_, type_);
+    // Written by the encoder session, so it lives on that session's device, not the decoder's
+    // (see SessionCanAccess).
+    features_ = OrtValue::CreateTensor(state_.p_session_device_->GetAllocator(), shape_, type_);
   }
 }
 
@@ -63,7 +65,7 @@ void MultiModalFeatures::Update(bool is_prompt) {
   // num_feature_tokens will be 0 when no image is provided
   if (!is_prompt && shape_[shape_.size() - 2] > 0) {  // if num_image_tokens > 0
     shape_[shape_.size() - 2] = 0;
-    features_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), shape_, type_);
+    features_ = OrtValue::CreateTensor(state_.p_session_device_inputs_->GetAllocator(), shape_, type_);
     state_.inputs_[index_] = features_.get();
   }
 }
@@ -73,16 +75,32 @@ void MultiModalFeatures::ReuseFeaturesBuffer(MultiModalFeatures& other) {
     throw std::runtime_error("Incorrect usage of the MultiModalFeatures inputs and outputs.");
   }
 
-  // Share the output MultiModalFeatures OrtValue* from other with the input MultiModalFeatures for this.
-  features_ = std::move(other.features_);
-  state_.inputs_[index_] = other.state_.outputs_[other.index_];
+  auto& producer_device = *other.state_.p_session_device_;
+  auto& consumer_device = *state_.p_session_device_inputs_;
+
+  if (SessionCanAccess(*state_.p_session_device_, producer_device)) {
+    // Share the output MultiModalFeatures OrtValue* from other with the input MultiModalFeatures for this.
+    features_ = std::move(other.features_);
+    state_.inputs_[index_] = other.state_.outputs_[other.index_];
+    return;
+  }
+
+  // The encoder ran on a device this session has no EP for, so its buffer cannot be bound here.
+  // Stage the features through a copy onto a device this session can read.
+  auto info = other.features_->GetTensorTypeAndShapeInfo();
+  auto producer_shape = info->GetShape();
+  features_ = OrtValue::CreateTensor(consumer_device.GetAllocator(), producer_shape, info->GetElementType());
+  if (info->GetElementCount() != 0) {
+    ByteWrapTensor(consumer_device, *features_).CopyFrom(ByteWrapTensor(producer_device, *other.features_));
+  }
+  state_.inputs_[index_] = features_.get();
 }
 
 void MultiModalFeatures::AllocateEmptyFeatures() {
   // Skip if already allocated (avoids redundant allocation when called from
   // both EmbeddingState::SetExtraInputs and the pipeline prompt path)
   if (features_ && state_.inputs_[index_] == features_.get()) return;
-  features_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), shape_, type_);
+  features_ = OrtValue::CreateTensor(state_.p_session_device_inputs_->GetAllocator(), shape_, type_);
   state_.inputs_[index_] = features_.get();
 }
 
@@ -95,9 +113,11 @@ void MultiModalFeatures::ReshapeFeatures(std::vector<int64_t> new_shape) {
   if (old_count != new_count || old_count == 0) return;
 
   auto old_features = std::move(features_);
-  features_ = OrtValue::CreateTensor(model_.p_device_->GetAllocator(), new_shape, type_);
-  auto src = ByteWrapTensor(*model_.p_device_, *old_features);
-  auto dst = ByteWrapTensor(*model_.p_device_, *features_);
+  // Only encoder outputs are reshaped; they live on the session's own device.
+  auto& device = *state_.p_session_device_;
+  features_ = OrtValue::CreateTensor(device.GetAllocator(), new_shape, type_);
+  auto src = ByteWrapTensor(device, *old_features);
+  auto dst = ByteWrapTensor(device, *features_);
   dst.CopyFrom(src);
   shape_ = std::move(new_shape);
   if (mode_ == Mode::Output && index_ != ~0U) {

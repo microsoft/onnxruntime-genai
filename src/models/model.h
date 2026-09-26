@@ -22,8 +22,18 @@ struct MultiModalProcessor;
 void Cast(OrtValue& input, std::unique_ptr<OrtValue>& output, DeviceInterface& device, ONNXTensorElementDataType type);
 void CheckResult(extError_t error);
 
+// True when a session running on `session_device` may be handed a tensor whose memory lives on
+// `buffer_device`. ORT moves tensor data between host memory and the devices the session has an EP
+// for; for memory on any other device it neither copies nor rejects the binding but treats the
+// device pointer as host memory. Tensors that fail this test must be staged through a copy.
+inline bool SessionCanAccess(const DeviceInterface& session_device, const DeviceInterface& buffer_device) {
+  return buffer_device.GetType() == DeviceType::CPU || buffer_device.GetType() == session_device.GetType();
+}
+
 struct State {
-  State(const GeneratorParams& params, const Model& model_);
+  // `session_device` is the device the ORT session this state drives runs on. Null means the
+  // model's own device, which is the case for every state that drives the decoder session.
+  State(const GeneratorParams& params, const Model& model_, DeviceInterface* session_device = nullptr);
   virtual ~State();
 
   virtual DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {}) = 0;
@@ -72,6 +82,13 @@ struct State {
   const Model& model_;
   bool session_terminated_{};
   std::shared_ptr<const GeneratorParams> params_;
+
+  // Devices to allocate this state's tensors from. They mirror Model::p_device_ /
+  // Model::p_device_inputs_ unless this state drives a sub-model session (vision, speech,
+  // embedding) that the config placed on a different execution provider. Bound outputs must come
+  // from p_session_device_ (see SessionCanAccess).
+  DeviceInterface* p_session_device_{};
+  DeviceInterface* p_session_device_inputs_{};
 
   std::vector<const char*> input_names_, output_names_;
   std::vector<std::string> adapter_names_;
@@ -169,12 +186,16 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   /// Create session options from config. Public so components like VAD can create
   /// properly configured sessions using the GenAI infrastructure.
-  void CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
-                                      OrtSessionOptions& session_options,
-                                      bool is_primary_session_options,
-                                      bool disable_graph_capture = false,
-                                      bool cloned_from_parent = false,
-                                      bool append_providers = true);
+  /// Returns the device a session created from these options will run on, or null when
+  /// `append_providers` is false and the providers (and therefore the device) are not yet known.
+  /// Do not pass that null to State: there it means "the decoder's device", not "unknown".
+  /// Non-primary options report CPU even when they append a device-backed provider.
+  DeviceInterface* CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
+                                                  OrtSessionOptions& session_options,
+                                                  bool is_primary_session_options,
+                                                  bool disable_graph_capture = false,
+                                                  bool cloned_from_parent = false,
+                                                  bool append_providers = true);
 
  protected:
   void CreateSessionOptions();

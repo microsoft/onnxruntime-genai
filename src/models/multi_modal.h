@@ -23,13 +23,6 @@
 
 namespace Generators {
 
-// lfm2_audio exchanges tensors with its embedding and speech sessions in buffers allocated on the
-// decoder's devices. Throws if either has session_options of its own that leave it on CPU while a
-// buffer it would be handed is device memory, which the session would treat as host memory and
-// corrupt: the decoder's inputs for the embedding session, and with_audio, the audio features for both.
-void CheckLfm2AudioSessionDevices(const Config& config, DeviceType decoder_device, DeviceType inputs_device,
-                                  bool with_audio);
-
 struct MultiModalLanguageModel : Model {
   MultiModalLanguageModel(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech);
   MultiModalLanguageModel(const MultiModalLanguageModel&) = delete;
@@ -51,6 +44,13 @@ struct MultiModalLanguageModel : Model {
   std::unique_ptr<OrtSession> audio_embedding_session_;  // audio_codes -> audio_embeds, summed into the decoder's next input
   std::unique_ptr<OrtSessionOptions> depthformer_session_options_;
   std::unique_ptr<OrtSessionOptions> audio_embedding_session_options_;
+
+  // The device each sub-model session actually runs on. A sub-model whose config block carries
+  // its own `session_options` does not inherit the decoder's providers, so it can land on the CPU
+  // EP while the decoder is on a GPU one. The states below allocate against these, not p_device_.
+  DeviceInterface* vision_device_{};
+  DeviceInterface* speech_device_{};
+  DeviceInterface* embedding_device_{};
 };
 
 // Base VisionState: runs vision.onnx with a single State::Run() call.

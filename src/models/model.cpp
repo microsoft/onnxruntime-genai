@@ -83,9 +83,13 @@ bool IsPathValuedSessionOption(std::string_view key) {
 
 }  // namespace
 
-State::State(const GeneratorParams& params, const Model& model)
+State::State(const GeneratorParams& params, const Model& model, DeviceInterface* session_device)
     : model_{model},
       params_{params.shared_from_this()},
+      p_session_device_{session_device ? session_device : model.p_device_},
+      // p_device_inputs_ was picked for the model's device (e.g. CPU for WebGPU without graph
+      // capture), so only a state on that device may use it.
+      p_session_device_inputs_{p_session_device_ == model.p_device_ ? model.p_device_inputs_ : p_session_device_},
       run_options_{OrtRunOptions::Create()},
       extra_outputs_{*this} {
   // Generate a random id for graph capture of the default (1-token) decode shape.
@@ -593,11 +597,13 @@ Model::~Model() {
 #endif
 }
 
-static void AppendSessionProviders(Model& model,
-                                   const Config::SessionOptions& config_session_options,
-                                   OrtSessionOptions& session_options,
-                                   bool is_primary_session_options,
-                                   bool disable_graph_capture = false) {
+// Returns the device the session will run on: CPU when the options name no device-backed provider.
+// Non-primary options get CPU even when they name one, as SetProviderSessionOptions resolves no device for them.
+static DeviceInterface* AppendSessionProviders(Model& model,
+                                               const Config::SessionOptions& config_session_options,
+                                               OrtSessionOptions& session_options,
+                                               bool is_primary_session_options,
+                                               bool disable_graph_capture = false) {
   auto session_device = SetProviderSessionOptions(session_options, config_session_options.providers,
                                                   config_session_options.provider_options, is_primary_session_options,
                                                   *model.config_, disable_graph_capture);
@@ -608,14 +614,16 @@ static void AppendSessionProviders(Model& model,
     throw std::runtime_error("Running a model with multiple providers is not supported. Encountered " +
                              to_string(session_device->GetType()) + " and " + to_string(model.p_device_->GetType()));
   }
+
+  return session_device ? session_device : GetDeviceInterface(DeviceType::CPU);
 }
 
-void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
-                                           OrtSessionOptions& session_options,
-                                           bool is_primary_session_options,
-                                           bool disable_graph_capture,
-                                           bool cloned_from_parent,
-                                           bool append_providers) {
+DeviceInterface* Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
+                                                       OrtSessionOptions& session_options,
+                                                       bool is_primary_session_options,
+                                                       bool disable_graph_capture,
+                                                       bool cloned_from_parent,
+                                                       bool append_providers) {
   // Default to a limit of 16 threads to optimize performance
   constexpr int min_thread_nums = 1;
   constexpr int max_thread_nums = 16;
@@ -786,9 +794,12 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     session_options.SetGraphOptimizationLevel(config_session_options.graph_optimization_level.value());
   }
 
-  if (append_providers) {
-    AppendSessionProviders(*this, config_session_options, session_options, is_primary_session_options, disable_graph_capture);
+  if (!append_providers) {
+    return nullptr;
   }
+
+  return AppendSessionProviders(*this, config_session_options, session_options, is_primary_session_options,
+                                disable_graph_capture);
 }
 
 void Model::CreateSessionOptions() {
