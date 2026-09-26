@@ -79,6 +79,7 @@ typedef struct OgaAudios OgaAudios;
 typedef struct OgaStringArray OgaStringArray;
 typedef struct OgaAdapters OgaAdapters;
 typedef struct OgaEngine OgaEngine;
+typedef struct OgaEngineCapabilities OgaEngineCapabilities;
 typedef struct OgaEngineEvent OgaEngineEvent;
 typedef struct OgaEngineEventBuffer OgaEngineEventBuffer;
 typedef struct OgaRequest OgaRequest;
@@ -1235,6 +1236,41 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaSetActiveAdapter(OgaGenerator* generator, 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateEngine(OgaModel* model, OgaEngine** out);
 
 /**
+ * \brief Returns a caller-owned snapshot of the Engine's configured runtime capabilities.
+ * This call must run on the Engine's owner thread.
+ * \param[in] engine The Engine to inspect.
+ * \param[out] out The capability snapshot. Destroy it with OgaDestroyEngineCapabilities.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineGetCapabilities(
+    const OgaEngine* engine, OgaEngineCapabilities** out);
+
+/**
+ * \brief Returns the configured maximum batch size.
+ * Static Engines without an explicit setting report the configured default of four. This value
+ * does not account for lower operational limits imposed by a scheduler implementation.
+ */
+OGA_EXPORT size_t OGA_API_CALL OgaEngineCapabilitiesGetConfiguredMaxBatchSize(
+    const OgaEngineCapabilities* capabilities);
+
+/** \brief Returns the dynamic scheduler's configured token budget, or zero for static batching. */
+OGA_EXPORT size_t OGA_API_CALL OgaEngineCapabilitiesGetMaxScheduledTokens(
+    const OgaEngineCapabilities* capabilities);
+
+/**
+ * \brief Returns the maximum logical token length of one Request, or zero when unavailable.
+ *
+ * The value reflects the resolved target cache after runtime-profile selection and auxiliary
+ * drafter allocations. It is an exclusive-use structural limit, not current free capacity. Zero
+ * means the cache-backed ceiling is unsupported or unavailable, including for non-paged Engines.
+ */
+OGA_EXPORT uint64_t OGA_API_CALL OgaEngineCapabilitiesGetMaxRequestLength(
+    const OgaEngineCapabilities* capabilities);
+
+/** \brief Destroys an Engine capability snapshot. */
+OGA_EXPORT void OGA_API_CALL OgaDestroyEngineCapabilities(
+    OgaEngineCapabilities* capabilities);
+
+/**
  * \brief Destroys the given engine.
  *
  * Destroying an engine closes every request bound to it. Surviving request handles remain valid
@@ -1360,7 +1396,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineHasPendingRequests(OgaEngine* engine
  *
  * \param[in] engine The owning Engine.
  * \param[in] options Nullable request-scoped options. Null options, or zero max_session_tokens, use
- * the model-configured search.max_length, which is also the ceiling for an explicit value.
+ * model-configured search.max_length capped by the Engine's max_request_length when that capability
+ * is nonzero. A zero capability means the ceiling is unavailable and preserves search.max_length.
  * \param[out] out The caller-owned Request handle.
  * \return OgaResult containing the error message if the operation failed, or nullptr on success.
  */
@@ -1377,9 +1414,11 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyRequestOptions(
 /**
  * \brief Sets the total tokens (prompt plus generated, across every Turn) the Request may reach.
  *
- * Zero restores the default, which is the model-configured search.max_length. A nonzero value may
- * be lower than that ceiling but never higher. This is the Request's one session limit: Search
- * completion, cache sizing, speculative bounds, and the MaxSessionTokens finish reason all use it.
+ * Zero restores the default, which is model-configured search.max_length capped by the Engine's
+ * max_request_length when that capability is nonzero. A nonzero value may not exceed the capability
+ * when available; otherwise it may not exceed search.max_length. This is the Request's one session
+ * limit: Search completion, cache sizing, speculative bounds, and the MaxSessionTokens finish reason
+ * all use it.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestOptionsSetMaxSessionTokens(
     OgaRequestOptions* options, uint64_t max_session_tokens);
@@ -1513,6 +1552,27 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestBeginTurn(
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestCancelTurn(
     OgaRequest* request, uint64_t turn_id, bool* out_cancelled);
+
+/**
+ * \brief Rewinds a completed Request to the sequence boundary before a Turn began.
+ *
+ * Rewind is synchronous and owner-thread-only. The current Turn must be complete, its events must
+ * have been drained, and its finish reason must not be Failed. turn_id must identify a Turn
+ * previously begun by this Request and still present in its active history. The named Turn and all
+ * later Turns are discarded. Turn IDs are never reused, and sampling continues from its current
+ * random stream rather than restoring a previous sampling state. The operation releases the
+ * Request's model-state ownership, including auxiliary MTP or DFlash/DSpark state; indexed prefix
+ * blocks may remain cached. Another rewind to an earlier retained Turn is allowed before the next
+ * OgaRequestBeginTurn even though the Request is no longer resident. That call creates a new Turn
+ * and replays the retained prefix together with its new input before generation, possibly adopting
+ * matching cached blocks.
+ *
+ * Dynamic paged Requests release their paged blocks and any fixed recurrent/convolution slot
+ * atomically. Static Requests are rewindable only when they are the sole resident row, because one
+ * row cannot be removed from a shared contiguous allocation. No event is emitted by rewind.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestRewindToStartOfTurn(
+    OgaRequest* request, uint64_t turn_id);
 
 /**
  * \brief Permanently closes a Request and releases its Engine resources.

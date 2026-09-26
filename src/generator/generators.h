@@ -70,6 +70,12 @@ DeviceSpan<T> WrapTensor(DeviceInterface& device, OrtValue& value) {
 
 DeviceSpan<uint8_t> ByteWrapTensor(DeviceInterface& device, OrtValue& value);
 
+// The interface that matches where a tensor's memory actually is. A model that runs on a device does
+// not necessarily keep its tensors there: WebGPU without graph capture leaves them host-side, and ORT
+// places some outputs on the CPU whatever the EP. Wrapping such a tensor with the device interface
+// hands a host pointer to the EP's copy, which crashes inside it.
+DeviceInterface& DeviceForTensor(const OrtValue& value, DeviceInterface& device);
+
 // OgaSequences are a vector of int32 vectors
 using TokenSequences = std::vector<std::vector<int32_t>>;
 

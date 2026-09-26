@@ -10,6 +10,11 @@ DeviceSpan<uint8_t> ByteWrapTensor(DeviceInterface& device, OrtValue& value) {
   return device.WrapMemory(std::span<uint8_t>{value.GetTensorMutableData<uint8_t>(), info->GetElementCount() * Ort::SizeOf(info->GetElementType())});
 }
 
+DeviceInterface& DeviceForTensor(const OrtValue& value, DeviceInterface& device) {
+  const bool on_cpu = value.GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_CPU;
+  return on_cpu ? *GetDeviceInterface(DeviceType::CPU) : device;
+}
+
 const char* TypeToString(ONNXTensorElementDataType type) {
   switch (type) {
     case Ort::TypeToTensorType<uint8_t>:

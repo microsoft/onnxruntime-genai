@@ -49,6 +49,9 @@ struct KeyValueCache {
 
 std::string ComposeKeyValueName(const std::string& template_string, int index);
 
+// Pipeline stages may use different EPs, so their KV policy cannot come from the top-level device.
+bool CanUseTopLevelDeviceKeyValueCachePolicy(const Model& model);
+
 // Returns true when the runtime uses a non-rewindable windowed KV cache.
 bool UsesNonRewindableWindowedKeyValueCache(
     const Model& model, const Config::Model::Decoder& decoder);

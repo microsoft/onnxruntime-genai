@@ -1,2 +1,4 @@
 --index-url https://download.pytorch.org/whl/cpu
 torch==2.12.0+cpu
+# Only for the optional Hugging Face image-processor parity tests; the CPU index has no Windows ARM64 wheel.
+torchvision==0.27.0+cpu; platform_machine != "ARM64"

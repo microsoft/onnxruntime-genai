@@ -50,6 +50,8 @@ class Gemma2Model(GemmaModel):
         self.layernorm_attrs["cast"]["root_input"] = original_cast_root_input
 
         self.make_attention(layer_id, layer.self_attn, root_input=self.layernorm_attrs["output_0"])
+        if layer_id == self.num_layers - 1 and self.prunes_hidden_rows():
+            self.make_selected_hidden_rows()
 
         # Adjust LayerNorm attributes for extra LayerNorm to insert
         # 1. Temporarily set root_input for LayerNorm to skip_input for post_attention_layernorm

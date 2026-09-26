@@ -27,6 +27,7 @@ def record_calls(model, method_names):
 def make_sparse_model(paged):
     model = object.__new__(Qwen4ExpTextModel)
     model.use_paged_attention = paged
+    model.hidden_rows_dim = "num_tokens"
     model.io_dtype = ir.DataType.FLOAT16
     model.num_attn_heads = 8
     model.num_kv_heads = 2

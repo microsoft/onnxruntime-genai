@@ -11,6 +11,10 @@ MoE blocks, normalization layers, and the language-model head. Builders can
 therefore traverse the same interface and emit ONNX graphs without depending
 on the source format's naming, layout, or quantization scheme.
 
+`TensorModule.can_reuse_as_embedding` tells builders whether a language-model
+head's storage can directly back an embedding lookup. Loaders set it to `false`
+for source formats whose packed weights require a format-specific operator.
+
 ## Loading Flow
 
 1. A builder selects a loader based on the input format and quantization

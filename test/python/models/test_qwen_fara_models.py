@@ -12,9 +12,11 @@ This file can be used in two ways:
 
 import argparse
 import importlib.util
+import json
 import logging
 import os
 import pathlib
+import shutil
 import sys
 from pathlib import Path
 
@@ -25,6 +27,8 @@ from _test_utils import register_webgpu_plugin, run_subprocess
 
 logging.basicConfig(format="%(asctime)s %(name)s [%(levelname)s] - %(message)s", level=logging.DEBUG)
 log = logging.getLogger("qwen-fara-vision-tests")
+
+_QWEN35_WEBGPU_GRAPH_CAPTURE_CHILD = "ORTGENAI_QWEN35_WEBGPU_GRAPH_CAPTURE_CHILD"
 
 
 @pytest.mark.parametrize("relative_model_path", [Path("qwen2-5-vl"), Path("qwen3-vl")])
@@ -767,6 +771,122 @@ def test_qwen3_5_hybrid_text_generation_webgpu(test_data_path):
     params.set_search_options(max_length=5)
     generator = og.Generator(model, params)
     assert generator is not None
+
+
+@pytest.mark.graph_capture
+@pytest.mark.skipif(not _webgpu_plugin_registered, reason="onnxruntime-ep-webgpu plugin not installed")
+def test_qwen3_5_hybrid_graph_capture_advances_recurrent_state_webgpu(tmp_path):
+    """Graph capture must preserve both directions of WebGPU recurrent-state double buffering."""
+    tracked_model_root = Path(__file__).parents[2] / "models"
+    if os.environ.get(_QWEN35_WEBGPU_GRAPH_CAPTURE_CHILD) != "1":
+        # validationMode is a process-wide WebGPU setting. Isolate this regression from earlier
+        # WebGPU tests that may already have initialized the context with the default mode.
+        test_node = f"{Path(__file__).resolve()}::{test_qwen3_5_hybrid_graph_capture_advances_recurrent_state_webgpu.__name__}"
+        run_subprocess(
+            [sys.executable, "-m", "pytest", "-sv", test_node],
+            env={_QWEN35_WEBGPU_GRAPH_CAPTURE_CHILD: "1"},
+            log=log,
+        )
+        return
+
+    model_path = tracked_model_root / "qwen3-5"
+    assert model_path.is_dir(), f"qwen3-5 test model not found at {model_path}"
+
+    text_config_path = tmp_path / "qwen3-5-text-only"
+    text_config_path.mkdir()
+    shutil.copyfile(model_path / "dummy_text_only.onnx", text_config_path / "dummy_text_only.onnx")
+    text_config = {
+        "model": {
+            "bos_token_id": 1,
+            "context_length": 64,
+            "decoder": {
+                "filename": "dummy_text_only.onnx",
+                "head_size": 256,
+                "hidden_size": 1024,
+                "inputs": {
+                    "input_ids": "input_ids",
+                    "attention_mask": "attention_mask",
+                    "position_ids": "position_ids",
+                    "past_key_names": "past_key_values.%d.key",
+                    "past_value_names": "past_key_values.%d.value",
+                    "past_conv_names": "past_key_values.%d.conv_state",
+                    "past_recurrent_names": "past_key_values.%d.recurrent_state",
+                },
+                "outputs": {
+                    "logits": "logits",
+                    "present_key_names": "present.%d.key",
+                    "present_value_names": "present.%d.value",
+                    "present_conv_names": "present.%d.conv_state",
+                    "present_recurrent_names": "present.%d.recurrent_state",
+                },
+                "num_attention_heads": 8,
+                "num_hidden_layers": 4,
+                "num_key_value_heads": 2,
+            },
+            "eos_token_id": 2,
+            "pad_token_id": 0,
+            "type": "qwen3_5_text",
+            "vocab_size": 248320,
+        },
+        "search": {"past_present_share_buffer": True},
+    }
+    (text_config_path / "genai_config.json").write_text(json.dumps(text_config), encoding="utf-8")
+
+    def run(run_model_path, enable_graph_capture, multimodal, test_rewind):
+        config = og.Config(os.fspath(run_model_path))
+        config.clear_providers()
+        config.append_provider("webgpu")
+        config.set_provider_option("webgpu", "enableGraphCapture", "1" if enable_graph_capture else "0")
+        # WebGPU context options are process-wide, so both model instances must use the same mode.
+        config.set_provider_option("webgpu", "validationMode", "disabled")
+        model = og.Model(config)
+        params = og.GeneratorParams(model)
+        params.set_search_options(do_sample=False, max_length=8)
+        generator = og.Generator(model, params)
+        prompt = [151652, 151655, 10, 20] if multimodal else [10, 20, 30, 40]
+        if multimodal:
+            inputs = og.NamedTensors()
+            inputs["input_ids"] = np.asarray([prompt], dtype=np.int32)
+            inputs["pixel_values"] = np.zeros((4, 1536), dtype=np.float32)
+            inputs["image_grid_thw"] = np.asarray([[1, 2, 2]], dtype=np.int64)
+            inputs["num_image_tokens"] = np.asarray([1], dtype=np.int64)
+            generator.set_inputs(inputs)
+        else:
+            generator.append_tokens(prompt)
+
+        # Exercise each direction of the recurrent-state double buffers. For the standard decoder,
+        # stop in the noncanonical direction and also verify its existing full-rewind support.
+        state_values_before_rewind = [float(generator.get_logits().reshape(-1)[0])]
+        for _ in range(2 if test_rewind else 3):
+            generator.generate_next_token()
+            state_values_before_rewind.append(float(generator.get_logits().reshape(-1)[0]))
+
+        if not test_rewind:
+            return state_values_before_rewind, None
+
+        generator.rewind_to(0)
+        generator.append_tokens(prompt)
+        state_values_after_rewind = [float(generator.get_logits().reshape(-1)[0])]
+        for _ in range(3):
+            generator.generate_next_token()
+            state_values_after_rewind.append(float(generator.get_logits().reshape(-1)[0]))
+
+        return state_values_before_rewind, state_values_after_rewind
+
+    # The fixture increments its recurrent state once per forward and exposes the previous value
+    # through logits. Values 2 and 3 require both graph-buffer variants to be rebound and replayed;
+    # the second text-only sequence also verifies that rewind restored the canonical buffer
+    # direction. Exercise both state implementations enabled by this change without adding new
+    # rewind behavior to multimodal generators.
+    for run_model_path, multimodal, test_rewind in (
+        (model_path, True, False),
+        (text_config_path, False, True),
+    ):
+        eager_state_values = run(run_model_path, False, multimodal, test_rewind)
+        captured_state_values = run(run_model_path, True, multimodal, test_rewind)
+        expected = ([0.0, 1.0, 2.0], [0.0, 1.0, 2.0, 3.0]) if test_rewind else ([0.0, 1.0, 2.0, 3.0], None)
+        assert eager_state_values == expected
+        assert captured_state_values == eager_state_values
 
 
 # Standalone runner functionality

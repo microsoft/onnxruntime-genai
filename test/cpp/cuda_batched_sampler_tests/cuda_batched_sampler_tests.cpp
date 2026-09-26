@@ -10,6 +10,7 @@
 #include <gtest/gtest.h>
 
 #include "generator/generators.h"
+#include "models/cpu_embedding.h"
 #include "ort_genai.h"
 #include "telemetry_test_environment.h"
 
@@ -74,6 +75,37 @@ TEST(DeviceSpanTests, DeviceInputKeepsPaddingMetadataSeparateFromTokenIdsCuda) {
                           [](int32_t token) { return token == non_pad_metadata; }));
   auto input_ids = input.CopyDeviceToCpu();
   EXPECT_TRUE(std::equal(token_ids.begin(), token_ids.end(), input_ids.begin()));
+}
+
+TEST(DeviceSpanTests, EmbeddingStagingSurvivesReuseGrowthAndTeardownCuda) {
+  [[maybe_unused]] auto model = CreateCudaModel();
+  auto* device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
+  const std::array<int64_t, 5> sizes{64, 32, 128, 16, 128};
+  std::vector<std::unique_ptr<Generators::Tensor>> outputs;
+  {
+    Generators::CpuEmbedding::Workspace workspace;
+    uint8_t* previous_host = nullptr;
+    size_t capacity = 0;
+    for (size_t step = 0; step < sizes.size(); ++step) {
+      auto output = std::make_unique<Generators::Tensor>(device, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+      output->CreateTensor(std::array<int64_t, 1>{sizes[step]});
+      auto staging = workspace.Prepare(*output);
+      auto host = staging.CpuSpan();
+      if (host.size() <= capacity) {
+        EXPECT_EQ(host.data(), previous_host);
+      }
+      capacity = std::max(capacity, host.size());
+      previous_host = host.data();
+      std::fill(host.begin(), host.end(), static_cast<uint8_t>(step + 1));
+      workspace.Upload();
+      outputs.push_back(std::move(output));
+    }
+  }
+  for (size_t step = 0; step < outputs.size(); ++step) {
+    auto bytes = outputs[step]->GetByteSpan();
+    const auto result = bytes.CopyDeviceToCpu();
+    EXPECT_TRUE(std::all_of(result.begin(), result.end(), [step](uint8_t value) { return value == step + 1; }));
+  }
 }
 
 TEST(SamplingTests, SchedulerOwnedSamplerHandlesHeterogeneousRowsCuda) {

@@ -12,6 +12,7 @@
 #include "block.h"
 #include "engine_invariants.h"
 #include "paged_cache_reservation.h"
+#include "prefix_cache.h"
 #include "request.h"
 #include "step_plan.h"
 
@@ -62,6 +63,11 @@ size_t ResolveConfiguredPagedBlockCount(size_t configured_num_blocks,
 // Windowed layers are excluded because their ring is sized separately.
 size_t PagedKeyValueCacheBytesPerBlock(const std::shared_ptr<Model>& model);
 
+// Resolves the configured prefix-cache flag, retention capacity, and target/auxiliary layout into
+// one policy shared by paged block retention and hybrid fixed-state checkpoint allocation.
+bool ResolvePrefixCachingEnabled(const std::shared_ptr<Model>& model,
+                                 size_t auxiliary_bytes_per_block);
+
 /*
  * PagedKeyValueCache manages a paged key-value cache for models that use the PagedAttention operator.
  * The cache is divided into blocks, each containing a fixed number of slots. Each slot holds
@@ -76,7 +82,9 @@ struct PagedKeyValueCache {
  public:
   explicit PagedKeyValueCache(std::shared_ptr<Model> model,
                               size_t auxiliary_bytes_per_block = 0,
-                              size_t auxiliary_reserved_memory_bytes = 0);
+                              size_t auxiliary_reserved_memory_bytes = 0,
+                              bool requires_prefix_checkpoint = false,
+                              size_t max_prefix_checkpoints = 0);
 
   bool CanAdd(std::shared_ptr<Request> request) const;
 
@@ -93,6 +101,31 @@ struct PagedKeyValueCache {
   size_t CommittedSlots(const void* request_id) const;
 
   PagedCacheReservation Reserve(std::span<const PagedCacheReservationRequest> requests);
+
+  PrefixCacheMatch MatchPrefix(std::span<const int32_t> tokens,
+                               size_t max_adoptable_tokens);
+  void RecordPrefixAdoptions(
+      const PagedCacheReservation& reservation) noexcept;
+  void RecordDeferredPrefixMatches(size_t count) noexcept;
+  void RecordPrefixPublicationRefusal() noexcept;
+  void SealCommittedBlocks(const void* request_id,
+                           std::span<const int32_t> tokens);
+  bool CanAttachPrefixCheckpoint(const void* request_id,
+                                 size_t token_count) const;
+  bool AttachPrefixCheckpoint(
+      const void* request_id,
+      std::shared_ptr<const FixedStatePrefixCheckpoint> checkpoint);
+  size_t ReclaimPrefixCheckpoints(size_t checkpoints_needed);
+  size_t ReclaimablePrefixCheckpoints() const;
+  bool PrefixCachingEnabled() const;
+  bool RequiresPrefixCheckpoint() const;
+  size_t BlockSize() const { return block_pool_->BlockSize(); }
+  size_t MaxRequestBlockCount() const {
+    return max_block_table_columns_ == 0
+               ? block_pool_->Capacity()
+               : std::min(block_pool_->Capacity(), max_block_table_columns_);
+  }
+  const PrefixCacheMetrics& PrefixMetrics() const;
 
   // Selects the active and pending requests whose immediate cache growth fits this step.
   StepPlanningResult PlanStepResources(StepPlan& plan) const;
@@ -251,6 +284,18 @@ struct PagedKeyValueCache {
 
   bool Windowed() const { return window_ring_blocks_ > 0; }
 
+  class RetainedBlockReclaimer final : public BlockReclaimer {
+   public:
+    explicit RetainedBlockReclaimer(PrefixCache& prefix_cache)
+        : prefix_cache_{prefix_cache} {}
+    size_t Reclaim(size_t blocks_needed) override {
+      return prefix_cache_.Reclaim(blocks_needed);
+    }
+
+   private:
+    PrefixCache& prefix_cache_;
+  };
+
   // Graph capture needs the block table at a device address that never moves and at a shape that
   // repeats across steps, so it gets a dedicated persistent tensor instead of the per-step CPU one.
   bool graph_capture_{};
@@ -259,6 +304,7 @@ struct PagedKeyValueCache {
   size_t max_block_table_columns_{};
   size_t max_block_table_rows_{};
   std::unique_ptr<Tensor> block_tables_tensor_;
+  std::unique_ptr<PrefixCache> prefix_cache_;
 };
 
 }  // namespace Generators
