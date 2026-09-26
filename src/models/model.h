@@ -31,6 +31,12 @@ struct State {
 
   virtual void RewindTo(size_t index) { (void)index; };
 
+  // Nonzero rewinds below this length are unsafe; 0 (default)
+  virtual size_t PromptLength() const { return 0; }
+
+  // False if RewindTo(index) is known to throw (e.g. an un-snapshotted recurrent state).
+  virtual bool CanRewindTo(size_t index) const { (void)index; return true; }
+
   // Snapshot/restore the model's recurrent state for speculative decoding. Default no-op
   // for models without recurrent state. SnapshotState() captures the conv/linear-attention
   // state at the current length; a later RewindTo(length) restores it (the attention KV

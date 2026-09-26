@@ -122,6 +122,9 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   bool IsPastPresentShareBufferEnabled(const std::string& model_type) const;
 };
 
+// True if new_length splits prompt
+bool RewindSplitsPrompt(size_t new_length, size_t prompt_length);
+
 struct Generator : LeakChecked<Generator> {
   enum class Action {
     standard,   // Default, set in any other case

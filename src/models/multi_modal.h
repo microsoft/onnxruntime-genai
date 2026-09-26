@@ -71,6 +71,7 @@ struct VisionState : State {
   int64_t num_images_{};
   ExtraInputs extra_inputs_{*this};  // Model inputs
   std::unique_ptr<MultiModalFeatures> image_features_;
+  bool needs_recompute_{true};  // SetExtraInputs re-arms this for new content.
 };
 
 // QwenVisionState: per-image slicing loop for Qwen2.5-VL / Qwen3-VL.
@@ -157,6 +158,7 @@ struct SpeechState : State {
   int64_t num_audio_tokens_;
   ExtraInputs extra_inputs_{*this};  // Model inputs
   std::unique_ptr<MultiModalFeatures> audio_features_;
+  bool needs_recompute_{true};  // SetExtraInputs re-arms this for new content.
 };
 
 // Lfm2AudioSpeechState: per-clip encoder loop for LFM2-Audio.
@@ -235,6 +237,9 @@ struct DecoderState : State {
 
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int current_length, DeviceSpan<int32_t> beam_indices);
+  void RewindTo(size_t index) override;
+  bool CanRewindTo(size_t index) const override;
+  void SnapshotState(size_t position) override;
 
   // Prefill chunking (see search.chunk_size). The embedding model still runs once over the whole
   // prompt (it is a lookup/projection), while the decoder prefill is split into several runs so the
@@ -255,7 +260,7 @@ struct DecoderState : State {
   std::unique_ptr<Embeddings> per_layer_inputs_;        // Optional model input (Gemma4: per-layer conditioning)
   std::unique_ptr<DefaultInputIDs> decoder_input_ids_;  // Optional model input (e.g., Gemma4 decoder needs input_ids)
   std::unique_ptr<PositionInputs> position_inputs_;     // Model input
-  std::unique_ptr<KeyValueCache> kv_cache_;             // Model input
+  std::unique_ptr<KeyValueCache> kv_cache_;             // Model input (ModelManaged for stateful models)
   std::unique_ptr<RecurrentState> recurrent_state_;     // Model input (for hybrid models)
   Logits logits_{*this};                                // Model output
 };
@@ -275,6 +280,14 @@ struct MultiModalPipelineState : State {
 
   OrtValue* GetOutput(const char* name) override;
 
+  void RewindTo(size_t index) override;
+  bool CanRewindTo(size_t index) const override { return !decoder_state_ || decoder_state_->CanRewindTo(index); }
+  void SnapshotState(size_t position) override {
+    if (decoder_state_) decoder_state_->SnapshotState(position);
+  }
+
+  size_t PromptLength() const override { return prompt_length_; }
+
  private:
   void UpdateInputsOutputs(const DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices,
                            int current_length);
@@ -292,6 +305,9 @@ struct MultiModalPipelineState : State {
   std::unique_ptr<Lfm2AudioOutput> audio_output_;  // LFM2-Audio speech output, when the model has it
   std::shared_ptr<Adapters> adapters_;
   bool is_prompt_{true};
+  size_t prompt_length_{};  // Set once the prompt finishes
+  // Set on first RewindTo(0); until then, features release after the prompt.
+  bool has_rewound_{false};
 
   const std::string vision_adapter_name_{"vision"};
   const std::string speech_adapter_name_{"speech"};
