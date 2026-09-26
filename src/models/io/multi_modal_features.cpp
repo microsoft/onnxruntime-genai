@@ -93,7 +93,6 @@ void MultiModalFeatures::ReuseFeaturesBuffer(MultiModalFeatures& other) {
   if (info->GetElementCount() != 0) {
     ByteWrapTensor(consumer_device, *features_).CopyFrom(ByteWrapTensor(producer_device, *other.features_));
   }
-  shape_ = std::move(producer_shape);
   state_.inputs_[index_] = features_.get();
 }
 

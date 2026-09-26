@@ -24,7 +24,7 @@ void CheckResult(extError_t error);
 
 // True when a session running on `session_device` may be handed a tensor whose memory lives on
 // `buffer_device`. ORT moves tensor data between host memory and the devices the session has an EP
-// for; for memory on any other device it does neither copy nor reject the binding, it treats the
+// for; for memory on any other device it neither copies nor rejects the binding but treats the
 // device pointer as host memory. Tensors that fail this test must be staged through a copy.
 inline bool SessionCanAccess(const DeviceInterface& session_device, const DeviceInterface& buffer_device) {
   return buffer_device.GetType() == DeviceType::CPU || buffer_device.GetType() == session_device.GetType();

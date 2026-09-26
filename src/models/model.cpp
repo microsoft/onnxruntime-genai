@@ -87,9 +87,8 @@ State::State(const GeneratorParams& params, const Model& model, DeviceInterface*
     : model_{model},
       params_{params.shared_from_this()},
       p_session_device_{session_device ? session_device : model.p_device_},
-      // p_device_inputs_ is the host-side shortcut the model picked for its own device, so it
-      // only applies to a state that runs on that device. A sub-model session placed elsewhere
-      // allocates its inputs from its own device.
+      // p_device_inputs_ was picked for the model's device (e.g. CPU for WebGPU without graph
+      // capture), so only a state on that device may use it.
       p_session_device_inputs_{p_session_device_ == model.p_device_ ? model.p_device_inputs_ : p_session_device_},
       run_options_{OrtRunOptions::Create()},
       extra_outputs_{*this} {
@@ -598,8 +597,7 @@ Model::~Model() {
 #endif
 }
 
-// Returns the device a session created from `session_options` will run on. A null `session_device`
-// means the options named no device-backed provider, so the session falls back to the CPU EP.
+// Returns the device the session will run on: CPU when the options name no device-backed provider.
 static DeviceInterface* AppendSessionProviders(Model& model,
                                                const Config::SessionOptions& config_session_options,
                                                OrtSessionOptions& session_options,

@@ -48,6 +48,8 @@ TEST(MultiModalDevicePlacementTests, SessionCanAccessOnlyHostOrItsOwnMemory) {
 TEST(MultiModalDevicePlacementTests, StateDefaultsToTheModelDevices) {
   auto model = std::make_shared<PlacementTestModel>();
   auto params = std::make_shared<Generators::GeneratorParams>(*model);
+  // A CPU model has p_device_inputs_ == p_device_, which would hide a state that picks the wrong one.
+  model->p_device_inputs_ = Generators::GetDeviceInterface(Generators::DeviceType::WEBGPU);
 
   PlacementTestState state{*params, *model, nullptr};
 
@@ -64,8 +66,8 @@ TEST(MultiModalDevicePlacementTests, StateOnAnotherDeviceKeepsItsOwnInputsDevice
   PlacementTestState state{*params, *model, elsewhere};
 
   EXPECT_EQ(state.p_session_device_, elsewhere);
-  // p_device_inputs_ is the host-side shortcut picked for the *model's* device, so a session that
-  // runs somewhere else must not allocate its inputs from it.
+  // p_device_inputs_ was picked for the *model's* device, so a session that runs somewhere else
+  // must not allocate its inputs from it.
   EXPECT_EQ(state.p_session_device_inputs_, elsewhere);
 }
 

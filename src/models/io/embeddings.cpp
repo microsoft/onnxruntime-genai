@@ -120,7 +120,7 @@ void Embeddings::ReuseEmbeddingsBuffer(const Embeddings& other) {
 }
 
 void Embeddings::CopyToConsumer() {
-  if (!staging_ || !consumer_)
+  if (!consumer_)
     return;
 
   if (staging_->GetTensorTypeAndShapeInfo()->GetElementCount() == 0)
