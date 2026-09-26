@@ -3,6 +3,7 @@
 
 #include "generator/generators.h"
 #include "models/model.h"
+#include "models/parallel_utils.h"
 #include "models/preprocessing/parakeet_processor.h"
 #include "runner.hpp"
 #include "c_api_utils.hpp"
@@ -91,8 +92,8 @@ std::unique_ptr<NamedTensors> ParakeetTdtProcessor::Process(const Tokenizer& /*t
   // 4. Package the normalized mel as the model input tensor.
   auto mel_value = OrtValue::CreateTensor<float>(
       allocator, std::vector<int64_t>{1, m.num_mels, static_cast<int64_t>(num_frames)});
-  std::memcpy(mel_value->GetTensorMutableData<float>(), norm_out.Data(),
-              static_cast<size_t>(m.num_mels) * num_frames * sizeof(float));
+  ParallelCopy(thread_pool_, norm_out.Data(), mel_value->GetTensorMutableData<float>(),
+               static_cast<size_t>(m.num_mels) * num_frames);
   named_tensors->emplace(std::string(Config::Defaults::AudioFeaturesName),
                          std::make_shared<Tensor>(std::move(mel_value)));
 

@@ -3,12 +3,50 @@
 
 #include "generator/generators.h"
 #include "models/model.h"
+#include "models/parallel_utils.h"
 #include "models/preprocessing/genai_tokenizer.h"
 #include "models/preprocessing/gemma4_multimodal_processor.h"
+
+#include <algorithm>
+#include <cstdint>
+#include <limits>
 
 namespace Generators {
 
 namespace {
+
+void ParallelCopyStridedRows(ThreadPool* thread_pool, const void* source,
+                             size_t source_row_elements, void* destination,
+                             size_t destination_row_elements, size_t row_count,
+                             size_t element_size) {
+  if (row_count != 0 &&
+      destination_row_elements > std::numeric_limits<size_t>::max() / row_count) {
+    throw std::overflow_error("Strided copy size overflow");
+  }
+  const size_t total_elements = row_count * destination_row_elements;
+  const double cost_per_element =
+      static_cast<double>(element_size * 2) * ParallelCost::kSchedulingCostScale /
+      (row_count == 1 ? 2.0 : 1.0);
+  ThreadPool::TryParallelFor(
+      thread_pool, detail::CheckedParallelSize(total_elements), cost_per_element,
+      [=](std::ptrdiff_t first, std::ptrdiff_t last) {
+        auto offset = static_cast<size_t>(first);
+        const auto end = static_cast<size_t>(last);
+        while (offset < end) {
+          const size_t row = offset / destination_row_elements;
+          const size_t offset_in_row = offset % destination_row_elements;
+          const size_t count =
+              std::min(end - offset, destination_row_elements - offset_in_row);
+          std::memcpy(static_cast<uint8_t*>(destination) +
+                          (row * destination_row_elements + offset_in_row) *
+                              element_size,
+                      static_cast<const uint8_t*>(source) +
+                          (row * source_row_elements + offset_in_row) * element_size,
+                      count * element_size);
+          offset += count;
+        }
+      });
+}
 
 // Simple literal string count (no regex overhead for fixed tokens)
 size_t CountOccurrences(const std::string& text, const std::string& token) {
@@ -263,7 +301,7 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
     CheckResult(OrtxTensorResultGetAt(audio_result.get(), 0, audio_features_owner.ToBeAssigned()));
     OrtxTensor* audio_features = audio_features_owner.get();
 
-    EmplaceProcessedTensor(*named_tensors, Config::Defaults::AudioEmbedsName, audio_features, audio_features_type_, allocator);
+    EmplaceProcessedTensor(thread_pool_, *named_tensors, Config::Defaults::AudioEmbedsName, audio_features, audio_features_type_, allocator);
 
     // Create input_features_mask: all-True for single-clip inference (no padding)
     // Shape matches audio features: [batch, time] bool
@@ -282,7 +320,10 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
     }
     {
       auto mask = OrtValue::CreateTensor<bool>(allocator, std::vector<int64_t>{batch_dim, time_dim});
-      std::fill_n(mask->GetTensorMutableData<bool>(), batch_dim * time_dim, true);
+      ParallelFill(thread_pool_,
+                   std::span<bool>{mask->GetTensorMutableData<bool>(),
+                                   static_cast<size_t>(batch_dim * time_dim)},
+                   true);
       named_tensors->emplace(std::string(Config::Defaults::AudioAttentionMaskName),
                              std::make_shared<Tensor>(std::move(mask)));
     }
@@ -336,9 +377,8 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
       const float* src = pv_data;
       const size_t src_row = static_cast<size_t>(num_padded_patches * patch_dim);
       const size_t dst_row = static_cast<size_t>(actual_patches * patch_dim);
-      for (int64_t b = 0; b < batch; ++b) {
-        std::memcpy(dst + b * dst_row, src + b * src_row, dst_row * sizeof(float));
-      }
+      ParallelCopyStridedRows(thread_pool_, src, src_row, dst, dst_row,
+                              static_cast<size_t>(batch), sizeof(float));
 
       // Cast to model's pixel_values type if needed (e.g. float32 -> float16)
       if (pixel_values_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
@@ -352,7 +392,7 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
                                std::make_shared<Tensor>(std::move(trimmed_target)));
       }
     } else {
-      EmplaceProcessedTensor(*named_tensors, Config::Defaults::PixelValuesName, pixel_values, pixel_values_type_, allocator);
+      EmplaceProcessedTensor(thread_pool_, *named_tensors, Config::Defaults::PixelValuesName, pixel_values, pixel_values_type_, allocator);
     }
 
     named_tensors->emplace(std::string(Config::Defaults::NumImageTokens), std::make_shared<Tensor>(std::move(num_img_tokens)));
@@ -380,18 +420,19 @@ std::unique_ptr<NamedTensors> Gemma4MultiModalProcessor::Process(const Tokenizer
         const auto* src = static_cast<const uint8_t*>(pos_data_raw);
         const size_t src_stride = static_cast<size_t>(num_padded_pos * pos_last_dim) * pos_elem_size;
         const size_t dst_stride = static_cast<size_t>(actual_patches * pos_last_dim) * pos_elem_size;
-        for (int64_t b = 0; b < pos_batch; ++b) {
-          std::memcpy(dst + b * dst_stride, src + b * src_stride, dst_stride);
-        }
+        ParallelCopyStridedRows(
+            thread_pool_, src, src_stride / pos_elem_size, dst,
+            dst_stride / pos_elem_size, static_cast<size_t>(pos_batch),
+            pos_elem_size);
         named_tensors->emplace(std::string(Config::Defaults::PixelPositionIdsName),
                                std::make_shared<Tensor>(std::move(trimmed_pos)));
       } else {
         if (pixel_position_ids_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
           named_tensors->emplace(std::string(Config::Defaults::PixelPositionIdsName),
-                                 std::make_shared<Tensor>(ProcessTensor<int32_t>(pixel_position_ids, allocator)));
+                                 std::make_shared<Tensor>(ProcessTensor<int32_t>(thread_pool_, pixel_position_ids, allocator)));
         } else {
           named_tensors->emplace(std::string(Config::Defaults::PixelPositionIdsName),
-                                 std::make_shared<Tensor>(ProcessTensor<int64_t>(pixel_position_ids, allocator)));
+                                 std::make_shared<Tensor>(ProcessTensor<int64_t>(thread_pool_, pixel_position_ids, allocator)));
         }
       }
     }
