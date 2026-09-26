@@ -437,7 +437,6 @@ class Model:
             "is_symmetric": self.quant_config.weights.symmetric,                           # Use symmetric zero-centered weight quantization
             "op_types_to_quantize": self.quant_config.weights.op_types,                    # Operator types eligible for weight quantization
             "nodes_to_exclude": nodes_to_exclude,                                          # Node names excluded from weight quantization
-            "algo_config": None,                                                           # Resolved in `make_quant_init` from the int4 method + int8 bit placement.
             "use_qdq": self.quant_config.runtime.use_qdq,                                  # Create QuantizeLinear/DequantizeLinear nodes for quantized weights instead of using MatMulNBits.
         }
         self.make_quant_init(config)
@@ -1134,9 +1133,6 @@ class Model:
         lm_head_config = customized_weight_config.get("/lm_head/MatMul")
         if lm_head_config is not None:
             self.matmul_mixed_precision["last_matmul"] = f"int{lm_head_config['bits']}"
-        self.quant_attrs["algo_config"] = self.make_algo_config(
-            self.quantization_algo, self.int4_customized_weight_config
-        )
 
         if self.quant_type is not None:
             # Create quantized attributes from quantization config
@@ -1822,6 +1818,15 @@ class Model:
                 quant_upgraded.process()
                 model_proto = quant_upgraded.model.model
         else:
+            algo_config = None
+            if base_method != "default":
+                # ORT's _generate_q4_node_config hard-codes 4 bits for RTN/k_quant MatMuls without a per-node entry.
+                weight_config = {
+                    node.name: {"bits": self.quant_attrs["bits"]}
+                    for node in self.model.graph
+                    if node.op_type == "MatMul"
+                }
+                algo_config = self.make_algo_config(base_method, {**weight_config, **customized_weight_config})
             quant = MatMulNBitsQuantizer(
                 model=ir.to_proto(self.model),
                 bits=self.quant_attrs["bits"],
@@ -1831,7 +1836,7 @@ class Model:
                 nodes_to_exclude=nodes_to_exclude,
                 quant_format=quant_format,
                 op_types_to_quantize=self.quant_attrs["op_types_to_quantize"],
-                algo_config=self.quant_attrs["algo_config"],
+                algo_config=algo_config,
             )
             quant.process()
             model_proto = quant.model.model

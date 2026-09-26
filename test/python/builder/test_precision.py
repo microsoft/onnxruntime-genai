@@ -16,6 +16,7 @@ import types
 from pathlib import Path
 
 import numpy as np
+import onnx
 import onnx_ir as ir
 import onnxruntime as ort
 import pytest
@@ -406,7 +407,6 @@ def _make_quant_model(bits):
         "nodes_to_exclude": [],
         "use_qdq": False,
         "op_types_to_quantize": ("MatMul",),
-        "algo_config": None,
     }
     return model
 
@@ -435,6 +435,54 @@ def test_to_nbits_forwards_requested_bits(monkeypatch, bits):
     assert _FakeQuantizer.captured is not None
     assert _FakeQuantizer.captured["bits"] == bits
     assert result == "quantized-proto"
+
+
+def _make_matmul_chain(node_names, width=64):
+    rng = np.random.default_rng(0)
+    nodes, initializers, hidden = [], [], "x"
+    for index, name in enumerate(node_names):
+        weight = onnx.numpy_helper.from_array(rng.standard_normal((width, width), dtype=np.float32), f"w{index}")
+        initializers.append(weight)
+        nodes.append(onnx.helper.make_node("MatMul", [hidden, weight.name], [f"y{index}"], name=name))
+        hidden = f"y{index}"
+    graph = onnx.helper.make_graph(
+        nodes,
+        "matmul_chain",
+        [onnx.helper.make_tensor_value_info("x", onnx.TensorProto.FLOAT, [1, width])],
+        [onnx.helper.make_tensor_value_info(hidden, onnx.TensorProto.FLOAT, [1, width])],
+        initializers,
+    )
+    return ir.from_proto(onnx.helper.make_model(graph, opset_imports=[onnx.helper.make_opsetid("", 21)]))
+
+
+DOWN_PROJ = "/model/layers.0/mlp/down_proj/MatMul"
+LM_HEAD = "/lm_head/MatMul"
+
+
+@pytest.mark.parametrize("method", ["default", "rtn", "k_quant"])
+@pytest.mark.parametrize(
+    "bits, options, expected",
+    [
+        (4, {}, {DOWN_PROJ: 4, LM_HEAD: 4}),
+        (8, {}, {DOWN_PROJ: 8, LM_HEAD: 8}),
+        (4, {"matmul_mixed_precision": "last_matmul:int8"}, {DOWN_PROJ: 4, LM_HEAD: 8}),
+        (8, {"matmul_mixed_precision": "last_matmul:int4"}, {DOWN_PROJ: 8, LM_HEAD: 4}),
+        (8, {"nodes_to_exclude": [LM_HEAD]}, {DOWN_PROJ: 8}),
+    ],
+)
+def test_to_nbits_quantizes_matmuls_to_requested_bits(method, bits, options, expected):
+    model = _make_quant_model(bits)
+    model.model = _make_matmul_chain([DOWN_PROJ, LM_HEAD])
+    model.quant_config = base_module.QuantConfig.from_extra_options(
+        {"algo_config": method, **options}, precision=f"int{bits}", execution_provider="cpu"
+    )
+    model.quant_type = None
+    model.make_quant_init(types.SimpleNamespace())
+
+    quantized = model.to_nbits()
+
+    emitted = {node.name: node.attributes["bits"].as_int() for node in quantized.graph if node.op_type == "MatMulNBits"}
+    assert emitted == {f"{name}_Q{node_bits}": node_bits for name, node_bits in expected.items()}
 
 
 def _run_check_extra_options(
