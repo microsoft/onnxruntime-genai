@@ -1086,23 +1086,41 @@ def test_quantized_body_uses_ort_tie_breaking(tmp_path):
     np.testing.assert_array_equal(scales, [[0.125]])
 
 
-# The prepacked fpA_intB kernel takes FP16 activations only, so the bf16 body must ship the
-# plain blockwise layout even though the target it drafts for is prepacked.
-def test_bf16_body_never_prepacks_even_when_the_target_does(tmp_path):
+def test_bf16_body_honors_prepacked_weight_format(tmp_path):
     builder = DFlash2Builder(
         _draft_checkpoint(tmp_path),
         str(tmp_path),
         ir.DataType.FLOAT16,
         paged_block_size=256,
         max_position_embeddings=128,
-        quant={"bits": 4, "block_size": 8, "prepack": 1},
+        quant={"bits": 4, "block_size": 32, "prepack": 1},
     )
 
-    builder.matmul("/probe/MatMul", "hidden_states", torch.ones((16, 8)), 8, 16, "num_block")
+    builder.matmul("/probe/MatMul", "hidden_states", torch.ones((64, 64)), 64, 64, "num_block")
 
     node = next(node for node in builder.graph if node.name == "/probe/MatMul")
     assert builder.io_dtype == ir.DataType.BFLOAT16
+    assert node.attributes["weight_prepacked"].value == 1
+
+
+@pytest.mark.parametrize(("bits", "out_features"), [(4, 32), (8, 48)])
+def test_prepack_keeps_ineligible_output_width_raw(tmp_path, bits, out_features):
+    builder = DFlash2Builder(
+        _draft_checkpoint(tmp_path),
+        str(tmp_path),
+        ir.DataType.FLOAT16,
+        paged_block_size=256,
+        max_position_embeddings=128,
+        quant={"bits": bits, "block_size": 32, "prepack": 1},
+    )
+
+    builder.matmul("/probe/MatMul", "hidden_states", torch.ones((out_features, 64)), 64, out_features, "num_block")
+
+    node = next(node for node in builder.graph if node.name == "/probe/MatMul")
+    assert node.op_type == "MatMulNBits"
     assert "weight_prepacked" not in node.attributes
+    qweight = builder.graph.initializers[f"probe.MatMul.weight_Q{bits}"].const_value
+    assert tuple(qweight.shape) == (out_features, 2, 32 * bits // 8)
 
 
 @pytest.mark.parametrize("bits", [None, 4, 8])
@@ -1550,6 +1568,43 @@ def test_drafter_uses_target_context_length(tmp_path, monkeypatch, fuse_gate_up)
 
     assert captured["max_position"] == model.decoder.context_length
     assert captured["fuse_gate_up"] is (str(fuse_gate_up).lower() == "true")
+
+
+def test_drafter_resolves_target_repository_to_local_snapshot(tmp_path, monkeypatch):
+    captured = {}
+    snapshot_dir = tmp_path / "snapshot"
+    snapshot_dir.mkdir()
+
+    class StubDFlash2Builder:
+        def __init__(self, _draft_dir, target_dir, _io_dtype, _paged_block_size, _max_position, **_kwargs):
+            captured["target_dir"] = target_dir
+
+        def make_model(self):
+            pass
+
+    dflash2_module = importlib.import_module("models.builders.dflash2")
+    monkeypatch.setattr(dflash2_module, "DFlash2Builder", StubDFlash2Builder)
+    monkeypatch.setattr(
+        "huggingface_hub.snapshot_download",
+        lambda repo_id, cache_dir, token: captured.update(
+            repo_id=repo_id, cache_dir=cache_dir, token=token
+        )
+        or str(snapshot_dir),
+    )
+    model = _composite()
+    model.decoder.model_name_or_path = "Qwen/Qwen3.8-27B"
+    model.decoder.cache_dir = str(tmp_path / "cache")
+    model.decoder.hf_token = False
+    model.make_dflash2_init(io_dtype=None, extra_options={"dflash2_path": _draft_checkpoint(tmp_path)})
+
+    model.make_dflash2_model("Qwen/Qwen3.8-27B")
+
+    assert captured == {
+        "repo_id": "Qwen/Qwen3.8-27B",
+        "cache_dir": str(tmp_path / "cache"),
+        "token": False,
+        "target_dir": str(snapshot_dir),
+    }
 
 
 def test_gate_up_fusion_defaults_off(tmp_path):

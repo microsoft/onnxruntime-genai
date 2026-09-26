@@ -1243,6 +1243,97 @@ TEST_F(EngineRunTest, StaticBatchingPreservesOrderingAndReusesResidentContinuati
   EXPECT_EQ(cache_observer->allocate_calls, allocations_before);
 }
 
+TEST_F(EngineRunTest, StaticSingleRowRewindReleasesAndReplaysContiguousCache) {
+  model_->config_->engine.dynamic_batching.reset();
+  auto cache = std::make_shared<StaticCacheManager>(model_);
+  auto* cache_observer = cache.get();
+  auto scheduler = Scheduler::Create(model_, cache);
+  auto executor = std::make_unique<RecordingModelExecutor>(
+      model_, cache, /*forced_token=*/5);
+  auto* executor_observer = executor.get();
+  EngineDependencies dependencies{
+      cache, std::move(scheduler), std::move(executor)};
+  auto engine =
+      std::make_shared<Engine>(model_, std::move(dependencies));
+  const auto prompt = Prompt(10);
+  auto request = CreateEngineRequest(engine);
+  request->BeginTurn(prompt, std::optional<size_t>{2});
+
+  while (!request->IsTurnComplete()) {
+    ASSERT_EQ(RunOne(*engine).request, request);
+  }
+  ASSERT_EQ(cache_observer->ResidentRequestCount(), 1u);
+  ASSERT_EQ(request->CurrentSequenceLength(),
+            static_cast<int64_t>(prompt.size() + 2));
+
+  const int64_t retained_length = request->CurrentSequenceLength();
+  const uint64_t discarded_turn =
+      request->BeginTurn(
+          std::array<int32_t, 1>{7}, std::optional<size_t>{1});
+  ASSERT_EQ(RunOne(*engine).request, request);
+  ASSERT_TRUE(request->IsTurnComplete());
+
+  request->RewindToStartOfTurn(discarded_turn);
+
+  EXPECT_EQ(request->CurrentSequenceLength(), retained_length);
+  EXPECT_EQ(request->ProcessedSequenceLength(), 0);
+  EXPECT_EQ(request->CurrentTurnId(), discarded_turn);
+  EXPECT_EQ(cache_observer->ResidentRequestCount(), 0u);
+  EXPECT_FALSE(engine->HasPendingRequests());
+
+  executor_observer->SetForcedToken(6);
+  const std::array<int32_t, 1> continuation{8};
+  EXPECT_EQ(
+      request->BeginTurn(
+          continuation, std::optional<size_t>{1}),
+      3u);
+  const auto continued = RunOne(*engine);
+  EXPECT_EQ(continued.request, request);
+  EXPECT_EQ(continued.token, 6);
+  EXPECT_NE(continued.flags & EngineEventFlagTurnFinished, 0u);
+  EXPECT_EQ(request->CurrentSequenceLength(),
+            static_cast<int64_t>(
+                retained_length + continuation.size() + 1));
+  EXPECT_EQ(request->ProcessedSequenceLength(),
+            static_cast<int64_t>(
+                retained_length + continuation.size()));
+  EXPECT_EQ(cache_observer->ResidentRequestCount(), 1u);
+}
+
+TEST_F(EngineRunTest, StaticMultiRowRewindIsRejectedWithoutMutation) {
+  model_->config_->engine.dynamic_batching.reset();
+  auto cache = std::make_shared<RecordingCacheManager>(
+      model_, /*capacity=*/4, nullptr,
+      /*supports_dynamic_batching=*/false);
+  auto scheduler = Scheduler::Create(model_, cache);
+  auto executor = std::make_unique<RecordingModelExecutor>(
+      model_, cache, /*forced_token=*/5);
+  EngineDependencies dependencies{
+      cache, std::move(scheduler), std::move(executor)};
+  auto engine =
+      std::make_shared<Engine>(model_, std::move(dependencies));
+  auto first = CreateEngineRequest(engine);
+  auto second = CreateEngineRequest(engine);
+  first->BeginTurn(Prompt(10), std::optional<size_t>{1});
+  second->BeginTurn(Prompt(20), std::optional<size_t>{1});
+
+  std::array<EngineEvent, 2> events;
+  ASSERT_EQ(engine->Run(events), 2u);
+  ASSERT_TRUE(first->IsTurnComplete());
+  ASSERT_TRUE(second->IsTurnComplete());
+  ASSERT_EQ(cache->ResidentRequestCount(), 2u);
+  const auto before = first->Snapshot();
+
+  EXPECT_THROW(first->RewindToStartOfTurn(1), std::runtime_error);
+
+  const auto after = first->Snapshot();
+  EXPECT_EQ(after.current_sequence_length,
+            before.current_sequence_length);
+  EXPECT_EQ(after.processed_sequence_length,
+            before.processed_sequence_length);
+  EXPECT_EQ(cache->ResidentRequestCount(), 2u);
+}
+
 TEST_F(EngineRunTest, StaticBatchReturnsAllRowEventsWhenCapacitySuffices) {
   model_->config_->engine.dynamic_batching.reset();
   auto cache = std::make_shared<RecordingCacheManager>(
@@ -2748,6 +2839,48 @@ TEST_F(EngineRunTest, RolledBackSpeculativeRunLeavesProposalPendingAndRetryable)
   EXPECT_EQ(request->TurnGeneratedTokens(), generated_after_prefill + 3);
 }
 
+TEST_F(EngineRunTest, RolledBackSampledSpeculativeRunRestoresRequestState) {
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/8, filler);
+  engine.cache->SetMaxDraftTokensPerStep(3);
+
+  auto control = std::make_shared<RequestPostProcessingControl>();
+  FailingPostProcessingDevice device{*model_->p_device_scoring_, control};
+  ScopedScoringDevice scoped_device{*model_, device};
+  TurnOptions sampled_options;
+  sampled_options.max_generated_tokens = 4;
+  sampled_options.do_sample = true;
+  sampled_options.top_k = 3;
+  sampled_options.temperature = 0.01f;
+  sampled_options.seed = 1234;
+  auto sampled =
+      CreateRequestWithPrompt(engine.engine, Prompt(10), sampled_options);
+  control->target_search_index = 1;
+  auto failing = CreateRequestWithPrompt(engine.engine, Prompt(20));
+
+  std::array<EngineEvent, 4> events;
+  ASSERT_EQ(engine.engine->Run(events), 2u);
+  const auto before = sampled->Snapshot();
+
+  sampled->SetDraftTokens(std::array<int32_t, 2>{11, 12});
+  engine.executor->SetVerifyRowTokens({11, 12, 21, filler});
+  control->fail = true;
+  const auto retryable = RunOne(*engine.engine);
+  EXPECT_EQ(retryable.flags, EngineEventFlagRetryable);
+
+  const auto restored = sampled->Snapshot();
+  EXPECT_EQ(restored.current_sequence_length,
+            before.current_sequence_length);
+  EXPECT_EQ(restored.processed_sequence_length,
+            before.processed_sequence_length);
+  EXPECT_EQ(sampled->PendingDraftTokenCount(), 2u);
+
+  control->fail = false;
+  ASSERT_EQ(engine.engine->Run(events), 4u);
+  ASSERT_TRUE(sampled->IsTurnComplete());
+}
+
 TEST_F(EngineRunTest, RolledBackTerminalDraftCanRetryWithoutProposal) {
   const int32_t eos = EosToken(*model_);
   const int32_t filler = eos == 5 ? 6 : 5;
@@ -2968,6 +3101,44 @@ TEST_F(EngineRunTest, CancelDropsTheMtpShadow) {
   EXPECT_EQ(engine.mtp_cache->AllocatedCount(), 0u);
 }
 
+TEST_F(EngineRunTest, RewindDropsTheMtpShadowAndRebuildsAfterReplay) {
+  model_ = LoadSyntheticPagedMtpModel();
+  const int32_t eos = EosToken(*model_);
+  const int32_t filler = eos == 5 ? 6 : 5;
+  auto engine = MakeMtpDoublesEngine(model_, filler);
+  auto request = CreateRequestWithPrompt(
+      engine.engine, Prompt(10));
+
+  std::array<EngineEvent, 8> storage;
+  ASSERT_GT(engine.engine->Run(storage), 0u);
+  ASSERT_EQ(engine.cache->AllocatedCount(), 1u);
+  ASSERT_EQ(engine.mtp_cache->AllocatedCount(), 1u);
+
+  engine.executor->SetForcedToken(eos);
+  bool turn_finished = false;
+  for (int attempt = 0; attempt < 8 && !turn_finished; ++attempt) {
+    const size_t count = engine.engine->Run(storage);
+    for (size_t i = 0; i < count; ++i) {
+      turn_finished |=
+          (storage[i].flags & EngineEventFlagTurnFinished) != 0;
+    }
+  }
+  ASSERT_TRUE(turn_finished);
+  ASSERT_EQ(engine.mtp_cache->AllocatedCount(), 1u);
+
+  request->RewindToStartOfTurn(1);
+  EXPECT_EQ(request->CurrentSequenceLength(), 0);
+  EXPECT_EQ(request->ProcessedSequenceLength(), 0);
+  EXPECT_EQ(engine.cache->AllocatedCount(), 0u);
+  EXPECT_EQ(engine.mtp_cache->AllocatedCount(), 0u);
+
+  engine.executor->SetForcedToken(filler);
+  request->BeginTurn(std::array<int32_t, 1>{7});
+  ASSERT_GT(engine.engine->Run(storage), 0u);
+  EXPECT_EQ(engine.cache->AllocatedCount(), 1u);
+  EXPECT_EQ(engine.mtp_cache->AllocatedCount(), 1u);
+}
+
 TEST_F(EngineRunTest, MtpCleanupFailureLeavesCancellationRetryable) {
   model_ = LoadSyntheticPagedMtpModel();
   const int32_t eos = EosToken(*model_);
@@ -3128,6 +3299,163 @@ TEST_F(EngineRunTest, EngineHostedMtpClampsTheConfiguredDraftWidth) {
 // the fixed state tensors are inspected and written by the execution callback in physical row order.
 // ---------------------------------------------------------------------------------------------
 
+TEST_F(EngineRunTest, RewindRejectsUndrainedEventsForOnlyThatRequest) {
+  auto engine =
+      MakeDoublesEngine(model_, /*capacity=*/2, EosToken(*model_));
+  auto first = CreateRequestWithPrompt(
+      engine.engine, Prompt(10));
+  auto second = CreateRequestWithPrompt(
+      engine.engine, Prompt(20));
+
+  const auto first_event = RunOne(*engine.engine);
+  ASSERT_EQ(first_event.request, first);
+  ASSERT_TRUE(first->IsTurnComplete());
+  ASSERT_TRUE(second->IsTurnComplete());
+  const auto second_before = second->Snapshot();
+
+  EXPECT_THROW(second->RewindToStartOfTurn(1), std::runtime_error);
+  const auto second_rejected = second->Snapshot();
+  EXPECT_EQ(second_rejected.current_sequence_length,
+            second_before.current_sequence_length);
+  EXPECT_EQ(second_rejected.processed_sequence_length,
+            second_before.processed_sequence_length);
+
+  // The retained event belongs only to the second Request, so it does not prevent rewinding the
+  // first Request whose terminal event was already delivered.
+  EXPECT_NO_THROW(first->RewindToStartOfTurn(1));
+  EXPECT_EQ(first->CurrentSequenceLength(), 0);
+  EXPECT_EQ(RunOne(*engine.engine).request, second);
+
+  EXPECT_NO_THROW(second->RewindToStartOfTurn(1));
+  EXPECT_EQ(second->CurrentSequenceLength(), 0);
+  EXPECT_FALSE(engine.engine->HasPendingRequests());
+  EXPECT_EQ(RunOne(*engine.engine).flags,
+            EngineEventFlagNone);
+}
+
+TEST_F(EngineRunTest, RewindRejectsFailedRequestWithoutMutation) {
+  auto engine =
+      MakeDoublesEngine(model_, /*capacity=*/1, /*forced_token=*/5);
+  auto request = CreateRequestWithPrompt(
+      engine.engine, Prompt(10));
+  engine.cache->SetUnserviceableRequest(request);
+  const auto failure = RunOne(*engine.engine);
+  ASSERT_EQ(failure.request, request);
+  ASSERT_NE(failure.flags & EngineEventFlagFailed, 0u);
+  ASSERT_EQ(request->FinishReason(),
+            GenerationFinishReason::Failed);
+  const auto before = request->Snapshot();
+
+  EXPECT_THROW(request->RewindToStartOfTurn(1), std::runtime_error);
+
+  const auto after = request->Snapshot();
+  EXPECT_EQ(after.status, before.status);
+  EXPECT_EQ(after.current_sequence_length,
+            before.current_sequence_length);
+  EXPECT_EQ(after.processed_sequence_length,
+            before.processed_sequence_length);
+}
+
+TEST_F(EngineRunTest, FailedReplayCannotBeginAnotherTurn) {
+  auto engine =
+      MakeDoublesEngine(model_, /*capacity=*/1, EosToken(*model_));
+  auto request = CreateRequestWithPrompt(
+      engine.engine, Prompt(10));
+  ASSERT_EQ(RunOne(*engine.engine).request, request);
+  ASSERT_TRUE(request->IsTurnComplete());
+
+  request->RewindToStartOfTurn(1);
+  request->BeginTurn(Prompt(20));
+  engine.cache->SetUnserviceableRequest(request);
+  const auto failure = RunOne(*engine.engine);
+  ASSERT_EQ(failure.request, request);
+  ASSERT_EQ(failure.error_code, EngineErrorCode::RequestUnserviceable);
+  ASSERT_EQ(request->FinishReason(), GenerationFinishReason::Failed);
+
+  engine.cache->SetUnserviceableRequest({});
+  EXPECT_THROW(request->BeginTurn(Prompt(30)), std::runtime_error);
+  EXPECT_FALSE(engine.engine->HasPendingRequests());
+}
+
+TEST_F(EngineRunTest, DynamicCompositeRewindReleasesAndRebuildsAllState) {
+  model_ = LoadSyntheticCompositeModel();
+  auto engine =
+      MakeCompositeDoublesEngine(model_, /*forced_token=*/5);
+  engine.executor->SetExecutionCallback(
+      [](ExecutionContext& context) {
+        for (const auto& binding :
+             context.fixed_state_bindings) {
+          FillFixedOutputRow(binding, 0, 7.0f);
+        }
+      });
+  const auto prompt = Prompt(10);
+  auto request = CreateEngineRequest(
+      engine.engine);
+  request->BeginTurn(prompt, std::optional<size_t>{1});
+
+  EngineEvent first_event;
+  while (engine.engine->HasPendingRequests() &&
+         first_event.flags == EngineEventFlagNone) {
+    first_event = RunOne(*engine.engine);
+  }
+  ASSERT_EQ(first_event.request, request);
+  ASSERT_TRUE(request->IsTurnComplete());
+  const auto before_cache = engine.cache->Snapshot();
+  const auto before_fixed =
+      engine.cache->FixedStateSnapshot();
+  ASSERT_EQ(before_cache.requests.size(), 1u);
+  ASSERT_TRUE(before_fixed.has_value());
+  EXPECT_EQ(before_fixed->committed_slots, 1u);
+
+  request->RewindToStartOfTurn(1);
+
+  const auto released_cache = engine.cache->Snapshot();
+  const auto released_fixed =
+      engine.cache->FixedStateSnapshot();
+  EXPECT_TRUE(released_cache.requests.empty());
+  EXPECT_EQ(released_cache.free_blocks,
+            released_cache.total_blocks);
+  ASSERT_TRUE(released_fixed.has_value());
+  EXPECT_EQ(released_fixed->committed_slots, 0u);
+  EXPECT_EQ(released_fixed->free_slots,
+            released_fixed->capacity);
+  EXPECT_EQ(request->CurrentSequenceLength(), 0);
+  EXPECT_EQ(request->ProcessedSequenceLength(), 0);
+  EXPECT_EQ(request->CurrentTurnId(), 1u);
+  EXPECT_FALSE(engine.engine->HasPendingRequests());
+
+  engine.executor->SetForcedToken(6);
+  const std::array<int32_t, 1> continuation{8};
+  EXPECT_EQ(
+      request->BeginTurn(
+          continuation, std::optional<size_t>{1}),
+      2u);
+  EngineEvent continued;
+  while (engine.engine->HasPendingRequests() &&
+         continued.flags == EngineEventFlagNone) {
+    continued = RunOne(*engine.engine);
+  }
+  ASSERT_EQ(continued.request, request);
+  EXPECT_EQ(continued.token, 6);
+  EXPECT_NE(continued.flags & EngineEventFlagTurnFinished,
+            0u);
+  EXPECT_EQ(request->CurrentSequenceLength(), 2);
+  EXPECT_EQ(request->ProcessedSequenceLength(), 1);
+
+  const auto rebuilt_cache = engine.cache->Snapshot();
+  const auto rebuilt_fixed =
+      engine.cache->FixedStateSnapshot();
+  ASSERT_EQ(rebuilt_cache.requests.size(), 1u);
+  EXPECT_EQ(rebuilt_cache.requests[0].request_id,
+            request.get());
+  EXPECT_EQ(rebuilt_cache.requests[0].used_slots, 1u);
+  ASSERT_TRUE(rebuilt_fixed.has_value());
+  EXPECT_EQ(rebuilt_fixed->committed_slots, 1u);
+  const auto& rebuilt_slot =
+      FixedSlotFor(*rebuilt_fixed, request.get());
+  EXPECT_EQ(rebuilt_slot.committed_tokens, 1u);
+}
+
 TEST_F(EngineRunTest, DensePagedModelHasNoFixedStateReservation) {
   model_ = LoadSyntheticPagedModel();
   auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
@@ -3199,6 +3527,67 @@ TEST_F(EngineRunTest, DensePagedPrefixCacheSkipsCommittedFullBlocks) {
   EXPECT_EQ(continuation_event.request, warm);
   EXPECT_EQ(continuation_event.usage.prompt_tokens, continuation.size());
   EXPECT_EQ(continuation_event.usage.cached_prompt_tokens, 0u);
+}
+
+TEST_F(EngineRunTest, RewindReleasesOnlyRequestReferencesToCachedPrefix) {
+  model_ = LoadSyntheticPagedModel();
+  auto& batching = *model_->config_->engine.dynamic_batching;
+  batching.block_size = 4;
+  batching.num_blocks = 16;
+  batching.prefix_caching = true;
+  auto engine = MakeCompositeDoublesEngine(model_, EosToken(*model_));
+  const std::array<int32_t, 9> prompt{2, 3, 4, 5, 6, 7, 8, 9, 10};
+
+  auto source = CreateRequestWithPrompt(engine.engine, prompt);
+  ASSERT_EQ(RunOne(*engine.engine).request, source);
+  auto peer = CreateRequestWithPrompt(engine.engine, prompt);
+  const auto peer_event = RunOne(*engine.engine);
+  ASSERT_EQ(peer_event.request, peer);
+  EXPECT_EQ(peer_event.usage.cached_prompt_tokens, 8u);
+
+  const auto shared = engine.cache->Snapshot();
+  ASSERT_EQ(shared.requests.size(), 2u);
+  ASSERT_GE(shared.requests[0].block_ids.size(), 2u);
+  const auto cached_ids = std::array{
+      shared.requests[0].block_ids[0], shared.requests[0].block_ids[1]};
+  for (const size_t id : cached_ids) {
+    const auto block = std::find_if(
+        shared.blocks.begin(), shared.blocks.end(),
+        [id](const auto& entry) { return entry.block_id == id; });
+    ASSERT_NE(block, shared.blocks.end());
+    EXPECT_TRUE(block->indexed);
+    EXPECT_EQ(block->ref_count, 3u);
+  }
+  EXPECT_TRUE(ValidateCacheInvariants(shared).empty());
+
+  source->RewindToStartOfTurn(1);
+  const auto one_owner = engine.cache->Snapshot();
+  ASSERT_EQ(one_owner.requests.size(), 1u);
+  EXPECT_EQ(one_owner.requests[0].request_id, peer.get());
+  for (const size_t id : cached_ids) {
+    const auto block = std::find_if(
+        one_owner.blocks.begin(), one_owner.blocks.end(),
+        [id](const auto& entry) { return entry.block_id == id; });
+    ASSERT_NE(block, one_owner.blocks.end());
+    EXPECT_EQ(block->ref_count, 2u);
+  }
+  EXPECT_TRUE(ValidateCacheInvariants(one_owner).empty());
+
+  peer->RewindToStartOfTurn(1);
+  const auto cache_only = engine.cache->Snapshot();
+  EXPECT_TRUE(cache_only.requests.empty());
+  EXPECT_EQ(cache_only.blocks.size(), cached_ids.size());
+  for (const auto& block : cache_only.blocks) {
+    EXPECT_TRUE(block.indexed);
+    EXPECT_EQ(block.ref_count, 1u);
+  }
+  EXPECT_TRUE(ValidateCacheInvariants(cache_only).empty());
+
+  ASSERT_EQ(source->BeginTurn(prompt, std::optional<size_t>{1}), 2u);
+  const auto replay_event = RunOne(*engine.engine);
+  EXPECT_EQ(replay_event.request, source);
+  EXPECT_EQ(replay_event.usage.cached_prompt_tokens, 8u);
+  EXPECT_TRUE(ValidateCacheInvariants(engine.cache->Snapshot()).empty());
 }
 
 TEST_F(EngineRunTest, CanceledUnstartedPromptIsNotCountedAsCurrentTurnCache) {

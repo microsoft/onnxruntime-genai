@@ -150,9 +150,15 @@ class BlockDrafterBuilder:
         ``MatMulNBits`` consumes ``[N, K]`` directly, so unlike the dense path the weight is
         not transposed. Repeat call sites reuse the initializer the first one registered.
         """
-        # Keep the BF16 drafter body in the portable raw blockwise layout. Its generated
-        # session options disable the target decoder's fpA_intB selection for these nodes.
-        prepack = self.quant_prepack if self.io_dtype == ir.DataType.FLOAT16 else 0
+        # Mirror prepack_matmulnbits_weights: nodes the fpA-intB kernel cannot run stay raw.
+        allowed_block_sizes = (32, 64, 128) if self.quant_prepack == 1 else (64, 128)
+        prepack = (
+            self.quant_prepack
+            if self.quant_block_size in allowed_block_sizes
+            and in_features % self.quant_block_size == 0
+            and out_features % (32 if self.quant_bits == 8 else 64) == 0
+            else 0
+        )
         qweight_name = f"{initializer_name}_Q{self.quant_bits}"
         scales_name = f"{initializer_name}_scales"
         if qweight_name not in self.values:
