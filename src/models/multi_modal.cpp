@@ -95,51 +95,8 @@ int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs) {
 
 }  // namespace
 
-void CheckLfm2AudioSessionDevices(const Config& config, DeviceType decoder_device, DeviceType inputs_device,
-                                  bool with_audio) {
-  // Whether a buffer allocated on the device is device memory. OpenVINO allocates from the CPU and
-  // QNN from shared memory, both of which a CPU session can use.
-  const auto is_device_memory = [](DeviceType device) {
-    switch (device) {
-      case DeviceType::CUDA:
-      case DeviceType::DML:
-      case DeviceType::WEBGPU:
-      case DeviceType::NvTensorRtRtx:
-      case DeviceType::RyzenAI:
-      case DeviceType::AMDGPU:
-        return true;
-      default:
-        return false;
-    }
-  };
-  const auto check = [](const std::optional<Config::SessionOptions>& options, const char* graph,
-                        const char* buffers, DeviceType device) {
-    // Without session_options of its own a graph follows the decoder; with them, no provider but CPU
-    // leaves it on CPU.
-    if (!options.has_value() || !std::all_of(options->providers.begin(), options->providers.end(),
-                                             [](const std::string& provider) { return provider == "CPU"; })) {
-      return;
-    }
-    throw std::runtime_error(std::string("lfm2_audio: model.") + graph + ".session_options run the " + graph +
-                             " model on CPU, but " + buffers + " in " + to_string(device) +
-                             " memory, which it cannot use. Remove model." + graph +
-                             ".session_options so that it runs on the decoder's device.");
-  };
-
-  if (is_device_memory(inputs_device)) {
-    check(config.model.embedding.session_options, "embedding", "the decoder takes its inputs", inputs_device);
-  }
-  if (with_audio && is_device_memory(decoder_device)) {
-    check(config.model.speech.session_options, "speech", "the audio features are passed", decoder_device);
-    check(config.model.embedding.session_options, "embedding", "the audio features are passed", decoder_device);
-  }
-}
-
 MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech)
     : Model(std::move(config)) {
-  if (config_->model.type == "lfm2_audio") {
-    CheckLfm2AudioSessionDevices(*config_, p_device_->GetType(), p_device_inputs_->GetType(), /*with_audio=*/false);
-  }
   // The non-decoder models don't support graph capture because of control flow nodes, so disable graph capture for them
   if (vision) {
     vision_session_options_ = OrtSessionOptions::Create();
@@ -759,8 +716,6 @@ std::unique_ptr<OrtValue> Lfm2AudioSpeechState::RunClip(const SpeechBindings& bi
 }
 
 DeviceSpan<float> Lfm2AudioSpeechState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
-  CheckLfm2AudioSessionDevices(*model_.config_, model_.p_device_->GetType(), model_.p_device_inputs_->GetType(),
-                               /*with_audio=*/true);
   if (model_.config_->model.speech.run_options.has_value()) {
     State::SetRunOptions(model_.config_->model.speech.run_options.value());
   }
