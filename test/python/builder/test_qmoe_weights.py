@@ -243,35 +243,6 @@ def test_moe_quant_type_mxfp4_requires_qmoe_precision(monkeypatch):
         _parse_extra_options(builder, ["moe_quant_type=mxfp4"], "fp16", "cuda")
 
 
-def test_mixed_width_qmoe_options_are_accepted(monkeypatch):
-    builder = _load_builder_cli_module(monkeypatch)
-    options = _parse_extra_options(
-        builder,
-        ["moe_quant_type=int4", "qmoe_fc1_type=int2", "qmoe_fc2_type=int4", "qmoe_block_size=64"],
-        "int4",
-        "cuda",
-    )
-
-    assert options["qmoe_fc1_type"] == "int2"
-    assert options["qmoe_fc2_type"] == "int4"
-    assert options["qmoe_block_size"] == "64"
-
-
-@pytest.mark.parametrize(
-    "execution_provider,block_size,error",
-    [("cpu", 64, "only supported on the CUDA EP"), ("cuda", 32, "require qmoe_block_size=64 or 128")],
-)
-def test_mixed_width_qmoe_options_validate_target(monkeypatch, execution_provider, block_size, error):
-    builder = _load_builder_cli_module(monkeypatch)
-    with pytest.raises(ValueError, match=error):
-        _parse_extra_options(
-            builder,
-            ["qmoe_fc1_type=int2", f"qmoe_block_size={block_size}"],
-            "int4",
-            execution_provider,
-        )
-
-
 @pytest.mark.parametrize("precision", ["fp16", "bf16", "fp32"])
 def test_moe_quant_type_nvfp4_accepts_floating_graph_precision(monkeypatch, precision):
     builder = _load_builder_cli_module(monkeypatch)
@@ -340,6 +311,21 @@ def test_make_moe_init_configures_mixed_width_cuda(fc1_type, fc2_type, expected)
         model.moe_attrs["fc3_expert_weight_bits"],
     ) == expected
     assert model.moe_attrs["weights_prepacked"] == 0
+
+
+def test_make_moe_init_accepts_noop_int4_projection_overrides():
+    model = Model.__new__(Model)
+    model.ep = "cpu"
+    model.moe_attrs = {"swiglu_limit": None}
+    model.quant_config = types.SimpleNamespace(
+        moe=MoEConfig(type="int4", fc1_type="int4", fc2_type="int4", block_size=32)
+    )
+
+    model.make_moe_init()
+
+    assert model.moe_attrs["expert_weight_bits"] == 4
+    assert "fc1_expert_weight_bits" not in model.moe_attrs
+    assert "fc2_expert_weight_bits" not in model.moe_attrs
 
 
 def test_mixed_width_expert_initializers_use_projection_bits():
@@ -479,7 +465,7 @@ def test_gptoss_integer_qmoe_decodes_mxfp4_checkpoint_experts():
     gate_up = torch.ones(2, 4, 8)
     down = torch.ones(2, 8, 2)
     calls = []
-    model.load_dense_mxfp4_experts = lambda layer_id: (gate_up, down)
+    model.load_mxfp4_experts = lambda layer_id, decode=False: (gate_up, down) if decode else None
     model.make_moe_expert_initializers = lambda *args: calls.append(args)
     model.make_initializer = lambda *args, **kwargs: None
     experts = types.SimpleNamespace(
@@ -620,7 +606,7 @@ def test_raw_blockwise_storage_drops_the_block_padding(ep, weights_prepacked, bi
     qweight, scales = model.make_qmoe_weights(weights)
     assert tuple(qweight.shape) == (3, expected_columns)
     assert tuple(scales.shape) == (3, 2)
-    padded, _ = cuda_quantizer_module.CudaQuantizer.qmoe_blockwise_quantize(weights, bits, 32)
+    padded, _ = cuda_quantizer_module.CudaQuantizer.matmulnbits_blockwise_quantize(weights, bits, 32)
     assert tuple(padded.shape) == (3, 2 * (32 // (8 // bits)))
     assert torch.equal(qweight, padded[:, :expected_columns])
 

@@ -278,6 +278,8 @@ class MoEConfig:
             projection_descriptor = resolve_dtype(projection_type)
             if descriptor.kind != "int" or projection_descriptor.kind != "int":
                 raise ValueError(f"moe.{field_name} is only supported for integer QMoE types")
+            if projection_descriptor.signed is not True or projection_descriptor.bits not in (2, 4, 8):
+                raise ValueError(f"moe.{field_name} must be int2, int4, or int8, got {projection_type}")
         self.block_size = _normalize_block_size(self.block_size)
         if descriptor.kind == "mx":
             # Microscaling FP4 mandates a fixed block size (mxfp4 -> 32, nvfp4 -> 16).
@@ -539,8 +541,6 @@ class QuantConfig:
         default_moe_block = 128 if execution_provider == "trt-rtx" else 32
         moe = MoEConfig(
             type=moe_quant_type,
-            fc1_type=extra_options.get("qmoe_fc1_type"),
-            fc2_type=extra_options.get("qmoe_fc2_type"),
             block_size=int(extra_options.get("qmoe_block_size", default_moe_block)),
             weights_prepacked=int(extra_options.get("qmoe_weights_prepacked", -1)),
         )

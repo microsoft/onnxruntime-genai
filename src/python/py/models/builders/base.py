@@ -5743,7 +5743,7 @@ class Model:
                 f"WebGPU QMoE requires expert input dimension K ({k}) to be divisible by "
                 f"qmoe_block_size ({block_size}); partial blocks are unsupported."
             )
-        qweight, scales = CudaQuantizer.qmoe_blockwise_quantize(weights, bits, block_size)
+        qweight, scales = CudaQuantizer.matmulnbits_blockwise_quantize(weights, bits, block_size)
         # QMoE validates raw storage as [E, N, K/pack]. Drop the quantizer's whole-block padding;
         # the scales retain ceil(K/block_size) columns. WebGPU partial blocks are rejected above.
         return qweight[:, : k // pack], scales

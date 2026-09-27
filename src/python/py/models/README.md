@@ -873,13 +873,6 @@ This scenario is for when you want to select the quantization scheme for MoE (QM
 
 This single option replaces the older per-type flags so new quantization schemes can be added without introducing a new flag each time. The `use_8bits_moe` flag is deprecated (use `moe_quant_type=int8`).
 
-Use `qmoe_fc1_type` and `qmoe_fc2_type` to override the gate/up and down-projection widths. These options accept `int2`, `int4`, or `int8`; INT2 and mixed-width exports require the CUDA EP and `qmoe_block_size=64` or `128`. Symmetric quantization is used without zero points so ONNX Runtime can select its packed INT GEMV path.
-
-```bash
-# GPT-OSS mixed-width QMoE: INT2 gate/up and INT4 down projection
-python -m onnxruntime_genai.models.builder -m openai/gpt-oss-20b -o gpt-oss-20b-int2-int4 -p int4 -e cuda --extra_options moe_quant_type=int4 qmoe_fc1_type=int2 qmoe_fc2_type=int4 qmoe_block_size=64
-```
-
 ```bash
 # From wheel (8-bit integer QMoE):
 python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options moe_quant_type=int8

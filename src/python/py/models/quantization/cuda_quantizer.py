@@ -398,6 +398,8 @@ class CudaQuantizer:
             raise ValueError(f"Blockwise quantization requires a positive block_size, got {block_size}.")
         if signed_scale and not symmetric:
             raise ValueError("signed_scale is only valid for symmetric blockwise quantization.")
+        if bits == 2 and (not symmetric or use_ort_quantizer):
+            raise ValueError("INT2 blockwise quantization supports only the local symmetric quantizer.")
         if use_ort_quantizer and symmetric and (not unsigned_full_range or not signed_scale):
             raise ValueError(
                 "The ORT symmetric MatMulNBits quantizer requires unsigned_full_range=true and signed_scale=true."
@@ -408,14 +410,11 @@ class CudaQuantizer:
         blob_size = (block_size + pack - 1) // pack
 
         if symmetric and not use_ort_quantizer:
-            if bits == 2:
-                qmin, qmax, scale_divisor, zero_point = (-2, 1, 2, 2) if unsigned_full_range else (-1, 1, 1, 2)
-            elif bits == 4:
-                qmin, qmax, scale_divisor, zero_point = (-8, 7, 8, 8) if unsigned_full_range else (-7, 7, 7, 8)
-            else:
-                qmin, qmax, scale_divisor, zero_point = (
-                    (-128, 127, 128, 128) if unsigned_full_range else (-127, 127, 127, 128)
-                )
+            half_range = 1 << (bits - 1)
+            qmax = half_range - 1
+            qmin = -half_range if unsigned_full_range else -qmax
+            scale_divisor = half_range if unsigned_full_range else qmax
+            zero_point = half_range
 
             padded_k = num_blocks * block_size
             if padded_k != k:
@@ -438,15 +437,12 @@ class CudaQuantizer:
             quantized = np.clip(np.rint(blocked / scales[:, :, np.newaxis]), qmin, qmax).astype(np.int16)
             quantized = (quantized + zero_point).astype(np.uint8)
 
-            if bits == 2:
+            if bits < 8:
                 qweight = np.zeros((n, num_blocks, blob_size), dtype=np.uint8)
-                for offset in range(4):
-                    values = quantized[:, :, offset::4]
-                    qweight[:, :, : values.shape[2]] |= (values & 0x3) << (2 * offset)
-            elif bits == 4:
-                qweight = np.zeros((n, num_blocks, blob_size), dtype=np.uint8)
-                qweight[:, :, : quantized[:, :, 0::2].shape[2]] = quantized[:, :, 0::2] & 0xF
-                qweight[:, :, : quantized[:, :, 1::2].shape[2]] |= (quantized[:, :, 1::2] & 0xF) << 4
+                mask = (1 << bits) - 1
+                for offset in range(pack):
+                    values = quantized[:, :, offset::pack]
+                    qweight[:, :, : values.shape[2]] |= (values & mask) << (offset * bits)
             else:
                 qweight = quantized
 
@@ -520,71 +516,6 @@ class CudaQuantizer:
             return qweight, scales, zero_points
 
         return qweight, scales
-
-    @staticmethod
-    def qmoe_blockwise_quantize(
-        weights: torch.Tensor,
-        bits: int,
-        block_size: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Quantize raw symmetric QMoE weights, including CUDA-only INT2 storage."""
-        torch = _get_torch()
-        bits = int(bits)
-        if bits not in (2, 4, 8):
-            raise ValueError(f"QMoE blockwise quantization only supports 2, 4, or 8 bits, got {bits}.")
-        if bits in (4, 8):
-            return CudaQuantizer.matmulnbits_blockwise_quantize(
-                weights,
-                bits,
-                block_size,
-                unsigned_full_range=True,
-                signed_scale=True,
-            )
-
-        qweight, scales, _ = CudaQuantizer._qmoe_symmetric_blockwise_quantize_impl(weights, bits, block_size)
-        return qweight.reshape(qweight.shape[0], -1).contiguous(), scales
-
-    @staticmethod
-    def _qmoe_symmetric_blockwise_quantize_impl(
-        weights: torch.Tensor,
-        bits: int,
-        block_size: int,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Return MLAS-grid QMoE storage without enabling INT2 MatMulNBits."""
-        torch = _get_torch()
-        bits = int(bits)
-        block_size = int(block_size)
-        if bits not in (2, 4, 8):
-            raise ValueError(f"QMoE blockwise quantization only supports 2, 4, or 8 bits, got {bits}.")
-        if block_size <= 0:
-            raise ValueError(f"QMoE blockwise quantization requires a positive block_size, got {block_size}.")
-
-        weights = weights.detach().cpu().to(torch.float32).contiguous()
-        n, k = weights.shape
-        pack = 8 // bits
-        num_blocks = (k + block_size - 1) // block_size
-        padded_k = num_blocks * block_size
-        if padded_k != k:
-            weights = torch.nn.functional.pad(weights, (0, padded_k - k))
-        blocked = weights.reshape(n, num_blocks, block_size)
-
-        qmin = -(1 << (bits - 1))
-        qmax = (1 << (bits - 1)) - 1
-        zero_point = 1 << (bits - 1)
-        argmax = blocked.abs().argmax(dim=2, keepdim=True)
-        scales = blocked.gather(2, argmax).squeeze(2) / float(qmin)
-        eps = torch.finfo(torch.float32).eps
-        scales = torch.where(scales.abs() < eps, torch.full_like(scales, eps), scales)
-        quantized = torch.clamp(torch.round(blocked / scales.unsqueeze(-1)), qmin, qmax).to(torch.int16)
-        quantized = (quantized + zero_point).to(torch.uint8)
-
-        blob_size = (block_size + pack - 1) // pack
-        qweight = torch.zeros((n, num_blocks, blob_size), dtype=torch.uint8)
-        for offset in range(pack):
-            values = quantized[:, :, offset::pack]
-            qweight[:, :, : values.shape[2]] |= (values & ((1 << bits) - 1)) << (offset * bits)
-        zero_points = torch.zeros((n, (num_blocks + pack - 1) // pack), dtype=torch.uint8)
-        return qweight.contiguous(), scales.contiguous(), zero_points
 
     @staticmethod
     def matmulnbits_prepacked_blockwise_quantize(
