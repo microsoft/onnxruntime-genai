@@ -81,3 +81,102 @@ graph = helper.make_graph(nodes, "synthetic-dspark", inputs, outputs, initialize
 model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)], ir_version=8)
 onnx.checker.check_model(model)
 onnx.save(model, Path(__file__).with_name("dspark.onnx"))
+
+# The windowed variant uses DFlash2's anchor row plus three draft rows.
+windowed = onnx.ModelProto()
+windowed.CopyFrom(model)
+for initializer in windowed.graph.initializer:
+    if initializer.name == "candidate_tail":
+        initializer.CopyFrom(helper.make_tensor("candidate_tail", TensorProto.INT64, [2], [3, 2]))
+    elif initializer.name == "score_tail":
+        initializer.CopyFrom(helper.make_tensor("score_tail", TensorProto.INT64, [3], [3, 2, 2]))
+for output in windowed.graph.output:
+    if output.name in ("draft_candidate_ids", "draft_scores"):
+        output.type.tensor_type.shape.dim[1].dim_value = 3
+windowed.graph.initializer.extend([
+    helper.make_tensor("zero_i32", TensorProto.INT32, [], [0]),
+    helper.make_tensor("one_i32", TensorProto.INT32, [], [1]),
+    helper.make_tensor("four_i32", TensorProto.INT32, [], [4]),
+    helper.make_tensor("five_i32", TensorProto.INT32, [], [5]),
+    helper.make_tensor("one_float", TensorProto.FLOAT, [], [1.0]),
+])
+for index, node in enumerate(windowed.graph.node):
+    if "draft_values_col" in node.output:
+        node.input[0] = "draft_values_with_cache"
+        cache_nodes = [
+            helper.make_node("Cast", ["batch"], ["batch_i32"], to=TensorProto.INT32),
+            helper.make_node("Range", ["zero_i32", "batch_i32", "one_i32"], ["batch_rows"]),
+            helper.make_node("Sub", ["row_length", "five_i32"], ["last_context_offset"]),
+            helper.make_node("Add", ["past_sequence_lengths", "last_context_offset"], ["last_position"]),
+            helper.make_node("Div", ["last_position", "four_i32"], ["last_column"]),
+            helper.make_node("Mod", ["last_position", "four_i32"], ["last_slot"]),
+            helper.make_node("Sub", ["past_sequence_lengths", "one_i32"], ["previous_unclamped"]),
+            helper.make_node("Max", ["previous_unclamped", "zero_i32"], ["previous_position"]),
+            helper.make_node("Div", ["previous_position", "four_i32"], ["previous_column"]),
+            helper.make_node("Mod", ["previous_position", "four_i32"], ["previous_slot"]),
+            helper.make_node("Unsqueeze", ["batch_rows", "axis1"], ["batch_rows_col"]),
+            helper.make_node("Unsqueeze", ["last_column", "axis1"], ["last_column_col"]),
+            helper.make_node("Unsqueeze", ["previous_column", "axis1"], ["previous_column_col"]),
+            helper.make_node(
+                "Concat", ["batch_rows_col", "previous_column_col"],
+                ["read_table_indices"], axis=1
+            ),
+            helper.make_node(
+                "Cast", ["read_table_indices"], ["read_table_indices_i64"], to=TensorProto.INT64
+            ),
+            helper.make_node("GatherND", ["block_table", "read_table_indices_i64"], ["previous_block"]),
+            helper.make_node("Unsqueeze", ["previous_block", "axis1"], ["previous_block_col"]),
+            helper.make_node("Unsqueeze", ["previous_slot", "axis1"], ["previous_slot_col"]),
+            helper.make_node(
+                "Concat",
+                ["batch_rows_col", "last_column_col"], ["write_table_indices"], axis=1
+            ),
+            helper.make_node(
+                "Cast", ["write_table_indices"], ["write_table_indices_i64"], to=TensorProto.INT64
+            ),
+            helper.make_node("GatherND", ["block_table", "write_table_indices_i64"], ["last_block"]),
+            helper.make_node("Unsqueeze", ["last_block", "axis1"], ["last_block_col"]),
+            helper.make_node("Unsqueeze", ["last_slot", "axis1"], ["last_slot_col"]),
+            helper.make_node("Sub", ["past_col", "past_col"], ["zero_col"]),
+            helper.make_node(
+                "Concat",
+                ["previous_block_col", "previous_slot_col", "zero_col", "zero_col"],
+                ["read_cache_indices"],
+                axis=1,
+            ),
+            helper.make_node(
+                "Cast", ["read_cache_indices"], ["read_cache_indices_i64"], to=TensorProto.INT64
+            ),
+            helper.make_node("GatherND", ["past_key_values.0.key", "read_cache_indices_i64"], ["cached_key"]),
+            helper.make_node(
+                "Concat",
+                ["last_block_col", "last_slot_col", "zero_col", "zero_col"],
+                ["write_cache_indices"],
+                axis=1,
+            ),
+            helper.make_node(
+                "Cast", ["write_cache_indices"], ["write_cache_indices_i64"], to=TensorProto.INT64
+            ),
+            helper.make_node("Cast", ["cached_key"], ["cached_key_int"], to=TensorProto.INT32),
+            helper.make_node("Unsqueeze", ["cached_key_int", "axis1"], ["cached_key_col"]),
+            helper.make_node(
+                "Concat", ["cached_key_col", "past_col", "row_length_col"],
+                ["draft_values_with_cache"], axis=1
+            ),
+            helper.make_node("Cast", ["last_position"], ["last_position_float"], to=TensorProto.FLOAT),
+            helper.make_node("Add", ["last_position_float", "one_float"], ["cache_updates"]),
+            helper.make_node(
+                "ScatterND",
+                ["past_key_values.0.key", "write_cache_indices_i64", "cache_updates"],
+                ["present.0.key"],
+            ),
+        ]
+        for cache_node in reversed(cache_nodes):
+            windowed.graph.node.insert(index, cache_node)
+        break
+for index, node in enumerate(windowed.graph.node):
+    if "present.0.key" in node.output and node.op_type == "Identity":
+        del windowed.graph.node[index]
+        break
+onnx.checker.check_model(windowed)
+onnx.save(windowed, Path(__file__).with_name("dflash2.onnx"))

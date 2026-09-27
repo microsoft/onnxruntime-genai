@@ -11,6 +11,8 @@
 #include <gtest/gtest.h>
 
 #include "engine/fixed_state_pool.h"
+#include "engine/prefix_cache.h"
+#include "dflash2_drafter.h"
 #include "engine_test_helpers.h"
 #include "models/model_state_manifest.h"
 
@@ -345,6 +347,57 @@ TEST_F(FixedStatePoolTest, PrefixCheckpointLeaseReleasesItsPreallocatedSlot) {
 
   EXPECT_EQ(pool.AvailablePrefixCheckpoints(), 1u);
   EXPECT_EQ(pool.Snapshot().checkpoint_count, 0u);
+}
+
+TEST_F(FixedStatePoolTest, DraftAttachmentRequiresExactFixedBoundaryAndRetainsLeasedReaders) {
+  constexpr size_t block_size = 4;
+  BlockPool blocks{block_size, 2};
+  PrefixCacheOptions options;
+  options.enabled = true;
+  options.max_blocks = 2;
+  options.requires_checkpoint = true;
+  options.max_checkpoints = 2;
+  FixedStatePool pool{model_, /*capacity=*/2, /*prefix_checkpoint_capacity=*/2};
+  PrefixCache index{blocks, options};
+  MakeResident(pool, kRequestA, 7.0f, /*target_tokens=*/block_size);
+  auto fixed = pool.CapturePrefixCheckpoint(kRequestA);
+  ASSERT_NE(fixed, nullptr);
+
+  const std::array<int32_t, 5> tokens{1, 2, 3, 4, 5};
+  auto owned = blocks.AllocateBlocks(block_size);
+  ASSERT_EQ(owned.size(), 1u);
+  auto registration = index.Register(owned.front(), std::span<const int32_t>(tokens).first(block_size), {});
+  ASSERT_NE(registration.identity, nullptr);
+  ASSERT_TRUE(index.AttachCheckpoint(registration.identity, fixed));
+
+  auto draft = std::make_shared<Dflash2PrefixCheckpoint>();
+  draft->token_count = block_size;
+  ASSERT_TRUE(index.CanAttachDraftCheckpoint(registration.identity, block_size));
+  EXPECT_FALSE(index.CanAttachDraftCheckpoint(registration.identity, block_size * 2));
+  auto other = pool.CapturePrefixCheckpoint(kRequestA);
+  ASSERT_NE(other, nullptr);
+  EXPECT_FALSE(index.AttachDraftCheckpoint(registration.identity, other, draft));
+  ASSERT_TRUE(index.AttachDraftCheckpoint(registration.identity, fixed, draft));
+  draft.reset();
+
+  {
+    auto match = index.Match(tokens, tokens.size() - 1);
+    EXPECT_EQ(match.token_count, block_size);
+    ASSERT_NE(match.draft_checkpoint, nullptr);
+    index.DropUnleasedDraftCheckpoints();
+    EXPECT_EQ(index.Match(tokens, tokens.size() - 1).draft_checkpoint, match.draft_checkpoint);
+  }
+  index.DropUnleasedDraftCheckpoints();
+  auto match = index.Match(tokens, tokens.size() - 1);
+  EXPECT_EQ(match.token_count, block_size);
+  EXPECT_EQ(match.draft_checkpoint, nullptr);
+  EXPECT_EQ(match.fixed_state_checkpoint, fixed);
+  match = {};
+  blocks.Free(owned);
+  EXPECT_EQ(index.Reclaim(1), 1u);
+  EXPECT_FALSE(index.CanAttachDraftCheckpoint(registration.identity, block_size));
+  EXPECT_FALSE(index.AttachDraftCheckpoint(registration.identity, fixed,
+                                          std::make_shared<Dflash2PrefixCheckpoint>()));
 }
 
 TEST_F(FixedStatePoolTest, PrefixCheckpointMustBelongToTheAdoptingPool) {

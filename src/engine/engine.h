@@ -98,6 +98,7 @@ struct EngineDependencies {
   std::shared_ptr<CacheManager> mtp_cache_manager;
   std::unique_ptr<ModelExecutor> mtp_model_executor;
   std::unique_ptr<Dflash2Drafter> dflash2_drafter;
+  bool dflash2_prefix_checkpoints_enabled{};
   // Test-only fault injection for allocation-sensitive durable error construction.
   EngineStepErrorFactory make_step_error{};
 };
@@ -301,6 +302,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
   bool mtp_disabled_{};
   // Present only when model.dflash2 names a block drafter. Owns its own session and paged cache.
   std::unique_ptr<Dflash2Drafter> dflash2_drafter_;
+  bool dflash2_prefix_checkpoints_enabled_{};
   std::vector<Dflash2Drafter::Feed> dflash2_feeds_;
   std::vector<std::vector<int32_t>> dflash2_drafts_;
   std::vector<std::vector<TargetTokenSelection>> dflash2_draft_distributions_;
