@@ -120,6 +120,66 @@ def test_qwen4_exp_composite_builds_declared_mtp(monkeypatch):
     assert model.mtp.extra_options["filename"] == "mtp.onnx"
 
 
+def test_qwen4_exp_text_only_composite_builds_declared_mtp(monkeypatch):
+    monkeypatch.setitem(Qwen4ExpModel.__init__.__globals__, "Qwen4ExpTextModel", FakeQwen4ExpComponent)
+    monkeypatch.setitem(Qwen4ExpModel.make_mtp_model.__globals__, "Qwen4ExpMTPTextModel", FakeQwen4ExpComponent)
+    text_config = SimpleNamespace(
+        mtp_num_hidden_layers=1,
+        bos_token_id=1,
+        eos_token_id=2,
+        pad_token_id=0,
+    )
+
+    model = Qwen4ExpModel(
+        SimpleNamespace(text_config=text_config),
+        ir.DataType.FLOAT16,
+        ir.DataType.FLOAT16,
+        "cuda",
+        None,
+        {"text_only": True},
+    )
+
+    assert model.text_only is True
+    assert model.model_type == "qwen4_exp_text"
+    assert model.decoder.model_type == "qwen4_exp_text"
+    assert isinstance(model.mtp, FakeQwen4ExpComponent)
+    assert model.decoder.extra_options["include_hidden_states"] is True
+
+
+def test_qwen4_exp_text_only_dispatches_composite_builder(monkeypatch, tmp_path):
+    from models import builder as builder_module
+
+    captured = {}
+
+    class FakeQwen4ExpModel:
+        def __init__(self, *args):
+            captured["args"] = args
+
+        def make_genai_config(self, *args):
+            pass
+
+        def save_processing(self, *args):
+            pass
+
+    config = SimpleNamespace(architectures=["Qwen4ExpForConditionalGeneration"])
+    monkeypatch.setattr(builder_module, "Qwen4ExpModel", FakeQwen4ExpModel)
+
+    builder_module.create_model(
+        "Qwen/Qwen3.8-Flash-Next",
+        str(tmp_path / "input"),
+        str(tmp_path / "output"),
+        "int4",
+        "cuda",
+        str(tmp_path / "cache"),
+        config_only=True,
+        text_only=True,
+        hf_details={"extra_kwargs": {}, "hf_name": "Qwen/Qwen3.8-Flash-Next", "hf_config": config},
+    )
+
+    assert captured["args"][0] is config
+    assert captured["args"][-1]["text_only"] is True
+
+
 def test_dense_config_only_composite_does_not_require_decoder_token_ids(monkeypatch):
     monkeypatch.setitem(Qwen35Model.__init__.__globals__, "Qwen35TextModel", FakeComponent)
 

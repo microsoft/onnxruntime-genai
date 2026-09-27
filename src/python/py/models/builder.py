@@ -775,11 +775,7 @@ def create_model(
         else:
             onnx_model.model_type = "qwen3_5_moe"
     elif config.architectures[0] == "Qwen4ExpForConditionalGeneration":
-        if extra_options.get("text_only", False):
-            onnx_model = Qwen4ExpTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-            onnx_model.model_type = "qwen4_exp_text"
-        else:
-            onnx_model = Qwen4ExpModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        onnx_model = Qwen4ExpModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "SmolLM3ForCausalLM":
         onnx_model = SmolLM3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "VideoChatFlashQwenForCausalLM":

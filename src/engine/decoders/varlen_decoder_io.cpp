@@ -280,15 +280,23 @@ GraphBufferPlan PlanGraphBuffers(const Model& model, size_t position_planes,
 
   const auto& hidden_states_input_name = model.config_->model.decoder.inputs.hidden_states;
   if (!hidden_states_input_name.empty() && model.session_info_.HasInput(hidden_states_input_name)) {
+    const auto shape = model.session_info_.GetInputShape(hidden_states_input_name);
+    if (shape.size() != 2 || shape[1] <= 0) {
+      throw std::runtime_error("hidden_states input must be 2-D with a static width.");
+    }
     plan.buffers[GraphBufferPlan::kHiddenStatesInput] = {
-        model.session_info_.GetInputDataType(hidden_states_input_name), {rows, hidden_size}};
+        model.session_info_.GetInputDataType(hidden_states_input_name), {rows, shape[1]}};
   }
 
   const auto& hidden_states_name = model.config_->model.decoder.outputs.hidden_states;
   if (model.config_->engine.hidden_states_output_required &&
       !hidden_states_name.empty() && model.session_info_.HasOutput(hidden_states_name)) {
+    const auto shape = model.session_info_.GetOutputShape(hidden_states_name);
+    if (shape.size() != 2 || shape[1] <= 0) {
+      throw std::runtime_error("hidden_states output must be 2-D with a static width.");
+    }
     plan.buffers[GraphBufferPlan::kHiddenStates] = {
-        model.session_info_.GetOutputDataType(hidden_states_name), {rows, hidden_size}};
+        model.session_info_.GetOutputDataType(hidden_states_name), {rows, shape[1]}};
   }
 
   const auto& aux_hidden_states_name = model.config_->model.decoder.outputs.aux_hidden_states;
@@ -841,9 +849,13 @@ void VarlenDecoderIO::PrepareHiddenStates(std::shared_ptr<DecoderOnly_Model> mod
   // Always one row per packed token, matching the packed input order, so a draft head can be fed
   // the hidden state of whichever tokens the verify step accepted. Note this is not necessarily
   // the logits row count: a pruned LM head emits only one logits row per request.
+  const auto shape = model->session_info_.GetOutputShape(hidden_states_name);
+  if (shape.size() != 2 || shape[1] <= 0) {
+    throw std::runtime_error("hidden_states output must be 2-D with a static width.");
+  }
   const std::vector<int64_t> hidden_states_shape = {
       static_cast<int64_t>(TokenCount(scheduled_requests)),
-      static_cast<int64_t>(model->config_->model.decoder.hidden_size)};
+      shape[1]};
   if (graph_buffers_ != nullptr && graph_buffers_->hidden_states != nullptr) {
     graph_buffers_->hidden_states->CreateTensor(hidden_states_shape, /*make_static=*/true);
     active_hidden_states_ = graph_buffers_->hidden_states.get();

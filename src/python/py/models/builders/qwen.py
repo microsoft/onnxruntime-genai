@@ -2626,11 +2626,12 @@ class Qwen4ExpModel(MTPModel):
         super().__init__()
         self.config = config
         self.extra_options = copy.deepcopy(extra_options)
+        self.text_only = self.extra_options.get("text_only", False)
         decoder_options = self.make_mtp_init(config, self.extra_options)
         self.decoder = Qwen4ExpTextModel(
             copy.deepcopy(config), io_dtype, onnx_dtype, ep, cache_dir, decoder_options
         )
-        self.decoder.model_type = "qwen3_5"
+        self.decoder.model_type = "qwen4_exp_text" if self.text_only else "qwen3_5"
         self.mtp = None
         if self.mtp_attrs["build"]:
             self.decoder.emit_pre_final_hidden_states = True
@@ -2649,7 +2650,7 @@ class Qwen4ExpModel(MTPModel):
         self.hf_remote = self.decoder.hf_remote
         self.context_length = self.decoder.context_length
         self.exclude_embeds = self.decoder.exclude_embeds
-        self.model_type = "qwen3_5"
+        self.model_type = self.decoder.model_type
 
     def make_mtp_init(self, config, extra_options):
         decoder_options = super().make_mtp_init(config, extra_options)
@@ -2701,6 +2702,8 @@ class Qwen4ExpModel(MTPModel):
             self.mtp_attrs["shared_initializers"] = self.share_initializers(
                 output_dir, self.decoder.filename, self.mtp.filename
             )
+        if self.text_only:
+            return
         if self.input_path is None:
             raise RuntimeError("make_model must be called before save_model.")
         weights = self.decoder.load_weights(self.input_path)
@@ -2721,6 +2724,10 @@ class Qwen4ExpModel(MTPModel):
 
     def make_genai_config(self, config, extra_kwargs, out_dir):
         self.decoder.make_genai_config(config.text_config, extra_kwargs, out_dir)
+        if self.text_only:
+            if self.mtp is not None:
+                self.add_mtp_to_genai_config(out_dir)
+            return
         config_path = os.path.join(out_dir, "genai_config.json")
         with open(config_path) as config_file:
             genai_config = json.load(config_file)
@@ -2768,7 +2775,7 @@ class Qwen4ExpModel(MTPModel):
                 "position_ids": "position_ids",
                 "past_key_names": "past_key_values.%d.key",
                 "past_value_names": "past_key_values.%d.value",
-                "past_indexer_names": "past_key_values.%d.indexer_key",
+                "past_indexer_names": "past.%d.indexer_key",
             },
             "outputs": {
                 "logits": "logits",

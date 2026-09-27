@@ -35,12 +35,13 @@ def _mtp_head(use_paged_attention):
     ],
 )
 def test_offset_rmsnorm_follows_the_model_token_layout(use_paged_attention, expected):
-    model, _ = _mtp_head(use_paged_attention)
+    model, graph = _mtp_head(use_paged_attention)
     model.make_value("root", model.io_dtype, shape=expected)
 
     output = model.make_offset_rmsnorm("/model/mtp/pre_fc_norm_hidden", "root", np.zeros(HIDDEN_SIZE, dtype=np.float32))
 
     assert [str(dim) for dim in model.values[output].shape] == [str(dim) for dim in expected]
+    assert graph.node(0).domain == ""
 
 
 @pytest.mark.parametrize(
