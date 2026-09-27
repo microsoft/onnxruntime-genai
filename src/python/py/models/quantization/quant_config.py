@@ -61,7 +61,6 @@ _DTYPES: dict[str, DtypeDescriptor] = {
     "int2": DtypeDescriptor("int2", "int", 2, signed=True),
     "int4": DtypeDescriptor("int4", "int", 4, signed=True),
     "uint4": DtypeDescriptor("uint4", "int", 4, signed=False),
-    "int2": DtypeDescriptor("int2", "int", 2, signed=True),
     "mxfp4": DtypeDescriptor("mxfp4", "mx", 4, block_size=32),
     "nvfp4": DtypeDescriptor("nvfp4", "mx", 4, block_size=16),
     "none": DtypeDescriptor("none", "float", 0),  # explicit "do not quantize this target"
@@ -206,8 +205,6 @@ class WeightsConfig:
 
     def __post_init__(self):
         descriptor = resolve_dtype(self.type)
-        if descriptor.kind == "int" and descriptor.bits not in (4, 8):
-            raise ValueError(f"weights.type={self.type} is unsupported; dense integer weights require int4 or int8")
         if self.symmetric is None:
             self.symmetric = descriptor.signed is not False
         else:

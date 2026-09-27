@@ -298,6 +298,8 @@ def test_base_rejects_packed_expert_quant_type_mismatch():
 def test_make_moe_init_configures_mixed_width_cuda(fc1_type, fc2_type, expected):
     model = Model.__new__(Model)
     model.ep = "cuda"
+    model.hidden_size = 128
+    model.intermediate_size = 128
     model.moe_attrs = {"swiglu_limit": None}
     model.quant_config = types.SimpleNamespace(
         moe=MoEConfig(type="int4", fc1_type=fc1_type, fc2_type=fc2_type, block_size=64)
@@ -311,6 +313,20 @@ def test_make_moe_init_configures_mixed_width_cuda(fc1_type, fc2_type, expected)
         model.moe_attrs["fc3_expert_weight_bits"],
     ) == expected
     assert model.moe_attrs["weights_prepacked"] == 0
+
+
+def test_make_moe_init_rejects_nondivisible_mixed_width_block_size():
+    model = Model.__new__(Model)
+    model.ep = "cuda"
+    model.hidden_size = 2880
+    model.intermediate_size = 2880
+    model.moe_attrs = {"swiglu_limit": None}
+    model.quant_config = types.SimpleNamespace(
+        moe=MoEConfig(type="int4", fc1_type="int2", fc2_type="int4", block_size=128)
+    )
+
+    with pytest.raises(ValueError, match="hidden_size=2880 and intermediate_size=2880"):
+        model.make_moe_init()
 
 
 def test_make_moe_init_accepts_noop_int4_projection_overrides():

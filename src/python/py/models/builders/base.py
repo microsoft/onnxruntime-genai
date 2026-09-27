@@ -1054,8 +1054,15 @@ class Model:
         if mixed_width or uses_int2:
             if self.ep != "cuda":
                 raise ValueError("INT2 and mixed-width QMoE are currently supported only on the CUDA EP.")
-            if self.quant_config.moe.block_size not in (64, 128):
+            block_size = self.quant_config.moe.block_size
+            if block_size not in (64, 128):
                 raise ValueError("INT2 and mixed-width CUDA QMoE require block_size 64 or 128.")
+            if self.hidden_size % block_size != 0 or self.intermediate_size % block_size != 0:
+                raise ValueError(
+                    "INT2 and mixed-width CUDA QMoE require hidden_size and intermediate_size "
+                    f"to be divisible by block_size {block_size}; got hidden_size={self.hidden_size} "
+                    f"and intermediate_size={self.intermediate_size}."
+                )
         if mixed_width:
             self.moe_attrs["fc1_expert_weight_bits"] = fc1_descriptor.bits
             self.moe_attrs["fc2_expert_weight_bits"] = fc2_descriptor.bits

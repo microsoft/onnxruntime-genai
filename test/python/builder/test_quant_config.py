@@ -213,9 +213,11 @@ def test_moe_mixed_width_rejects_unsigned_integer_type(projection_type):
         MoEConfig.from_dict({"type": "int4", "fc1_type": projection_type})
 
 
-def test_dense_weights_reject_int2():
-    with pytest.raises(ValueError, match="dense integer weights require int4 or int8"):
-        QuantConfig.from_dict({"weights": {"type": "int2"}})
+def test_dense_weights_accept_int2_for_component_validation():
+    config = QuantConfig.from_dict({"weights": {"type": "int2"}})
+
+    assert config.weights.type == "int2"
+    assert QuantConfig.from_dict(config.to_dict()) == config
 
 
 def test_runtime_rejects_bad_prepacked():

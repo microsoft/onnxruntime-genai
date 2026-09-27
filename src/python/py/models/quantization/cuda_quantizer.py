@@ -398,8 +398,8 @@ class CudaQuantizer:
             raise ValueError(f"Blockwise quantization requires a positive block_size, got {block_size}.")
         if signed_scale and not symmetric:
             raise ValueError("signed_scale is only valid for symmetric blockwise quantization.")
-        if bits == 2 and (not symmetric or use_ort_quantizer):
-            raise ValueError("INT2 blockwise quantization supports only the local symmetric quantizer.")
+        if bits == 2 and not symmetric:
+            raise ValueError("INT2 blockwise quantization supports only symmetric quantization.")
         if use_ort_quantizer and symmetric and (not unsigned_full_range or not signed_scale):
             raise ValueError(
                 "The ORT symmetric MatMulNBits quantizer requires unsigned_full_range=true and signed_scale=true."
