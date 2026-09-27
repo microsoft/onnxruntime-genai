@@ -920,6 +920,8 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         extra_options.setdefault("filename", "model.onnx" if text_only else "text.onnx")
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.use_cpu_embedding_gather = text_only
+        if self.use_paged_attention:
+            self.input_names.pop("position_ids", None)
         self.model.metadata_props["qwen4_exp.past_indexer_names"] = "past.%d.indexer_key"
         self.model.metadata_props["qwen4_exp.present_indexer_names"] = "present.%d.indexer_key"
         self.model.metadata_props["qwen4_exp.past_ple_token_names"] = "past.%d.ple_tokens"

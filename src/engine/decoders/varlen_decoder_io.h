@@ -20,6 +20,7 @@ struct AttentionMetadataValues {
 };
 
 inline constexpr size_t kAttentionMetadataElementCount = 3;
+inline constexpr size_t kSparseAttentionMetadataElementCount = 5;
 
 void ValidatePackedPositionIdsInput(
     ONNXTensorElementDataType data_type,
@@ -37,6 +38,8 @@ AttentionMetadataValues GetAttentionMetadataForGraphStep(
     const StepPlan& plan, size_t block_table_columns, size_t block_size);
 std::array<int32_t, kAttentionMetadataElementCount> PackAttentionMetadata(
     const AttentionMetadataValues& metadata);
+std::array<int32_t, kSparseAttentionMetadataElementCount> PackSparseAttentionMetadata(
+  const AttentionMetadataValues& metadata);
 
 // Packed token rows whose logits the Engine consumes, ordered exactly as ProcessLogits returns
 // them: every draft-verification row followed by the row that produces each request's next token.

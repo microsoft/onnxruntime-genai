@@ -435,6 +435,21 @@ TEST(VarlenDecoderIOTest, PacksMetadataInOperatorContractOrder) {
   EXPECT_EQ(packed[2], 257);
 }
 
+TEST(VarlenDecoderIOTest, PacksSelectedOnlySparseMetadataInOperatorContractOrder) {
+  AttentionMetadataValues metadata;
+  metadata.max_query_len_bound = 3;
+  metadata.max_kv_len_bound = 513;
+  metadata.max_kv_len_lower_bound = 257;
+  const auto packed = PackSparseAttentionMetadata(metadata);
+
+  static_assert(packed.size() == kSparseAttentionMetadataElementCount);
+  EXPECT_EQ(packed[0], 3);
+  EXPECT_EQ(packed[1], 0);
+  EXPECT_EQ(packed[2], 513);
+  EXPECT_EQ(packed[3], 0);
+  EXPECT_EQ(packed[4], 513);
+}
+
 TEST(VarlenDecoderIOTest, RejectsZeroSizedGraphBounds) {
   EXPECT_THROW(GetAttentionMetadataForGraph(/*max_query_len=*/1, /*block_table_columns=*/0, /*block_size=*/128),
                std::runtime_error);

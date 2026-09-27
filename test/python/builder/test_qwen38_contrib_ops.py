@@ -119,7 +119,7 @@ def test_dense_cuda_indexer_cache_shapes_are_symbolic(monkeypatch):
         self.use_paged_attention = False
         self.hidden_size = 16
         self.layer_types = ["qwen_sparse_attention"]
-        self.input_names = {}
+        self.input_names = {"position_ids": "position_ids"}
         self.input_types = {}
         self.input_shapes = {}
         self.output_names = {}
@@ -192,6 +192,8 @@ def test_paged_indexer_state_shapes_are_fixed_capacity(monkeypatch):
     model = Qwen4ExpTextModel(config, ir.DataType.FLOAT16, ir.DataType.FLOAT16, "cuda", None, {})
 
     assert not model.fixed_indexer_cache
+    assert "position_ids" not in model.input_names
+    assert model.input_shapes["attention_metadata"] == [5]
     assert model.indexer_state_capacity == 32
     assert model.input_shapes["past.indexer"] == ["batch_size", 32, 16]
     assert model.input_shapes["past.indexer_kv_buffer"] == ["batch_size", 7, 16]

@@ -141,6 +141,17 @@ std::array<int32_t, kAttentionMetadataElementCount> PackAttentionMetadata(
   };
 }
 
+std::array<int32_t, kSparseAttentionMetadataElementCount> PackSparseAttentionMetadata(
+    const AttentionMetadataValues& metadata) {
+  return {
+      metadata.max_query_len_bound,
+      0,
+      metadata.max_kv_len_bound,
+      0,
+      metadata.max_kv_len_bound,
+  };
+}
+
 std::vector<size_t> GetSelectedLogitsIndices(const StepPlan& plan) {
   size_t row_count = plan.requests.size();
   for (const auto& entry : plan.requests) {
@@ -641,12 +652,10 @@ void VarlenDecoderIO::PreparePositionIds(
   if (owned_position_ids) owned_inputs_.push_back(std::move(owned_position_ids));
 }
 
-// PagedAttention accepts an optional `attention_metadata` CPU input holding
-// [max_query_len_bound, max_kv_len_bound, max_kv_len_lower_bound]. The first two values are upper
-// bounds and the third value is a lower bound on the longest live KV sequence. The operator
-// uses them only to select a backend and to size its launch dimensions and workspaces, never as a
-// mask boundary. Supplying them lets the operator skip the device-to-host readback of the sequence
-// lengths, which otherwise forces a full stream synchronization inside every attention node.
+// PagedAttention accepts an optional three-value `attention_metadata` CPU input. Qwen's selected-only
+// SparsePagedAttention uses five values, with local-main and auxiliary bounds set to zero because it
+// selects entries exclusively from the main cache. These values select backends and size launch
+// dimensions and workspaces; they never form a mask boundary.
 //
 // The engine already has both quantities on the host while it builds the sequence length inputs, so
 // this costs nothing. Eager bounds are exact. Captured bounds describe the entire graph bucket so
@@ -681,7 +690,22 @@ void VarlenDecoderIO::PrepareAttentionMetadata(std::shared_ptr<DecoderOnly_Model
     metadata.max_kv_len_lower_bound = metadata.max_kv_len_bound;
   }
 
-  const auto packed_metadata = PackAttentionMetadata(metadata);
+  const auto metadata_shape = model->session_info_.GetInputShape(metadata_name);
+  if (metadata_shape.size() != 1) {
+    throw std::runtime_error("attention_metadata must be a one-dimensional input.");
+  }
+
+  std::vector<int32_t> packed_metadata;
+  if (metadata_shape[0] == static_cast<int64_t>(kAttentionMetadataElementCount)) {
+    const auto values = PackAttentionMetadata(metadata);
+    packed_metadata.assign(values.begin(), values.end());
+  } else if (metadata_shape[0] == static_cast<int64_t>(kSparseAttentionMetadataElementCount)) {
+    const auto values = PackSparseAttentionMetadata(metadata);
+    packed_metadata.assign(values.begin(), values.end());
+  } else {
+    throw std::runtime_error("attention_metadata must contain three or five values.");
+  }
+
   auto metadata_tensor = std::make_unique<Tensor>(GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<int32_t>);
   metadata_tensor->CreateTensor(std::vector<int64_t>{static_cast<int64_t>(packed_metadata.size())});
   auto metadata_span = metadata_tensor->GetDeviceSpan<int32_t>().CpuSpan();
