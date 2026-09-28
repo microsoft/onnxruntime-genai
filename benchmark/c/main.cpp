@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <iomanip>
 #include <random>
 #include <iostream>
@@ -19,6 +20,7 @@
 
 #include "ort_genai.h"
 
+#include "adapter_loader.h"
 #include "options.h"
 #include "resource_utils.h"
 
@@ -159,6 +161,30 @@ static std::unique_ptr<OgaGeneratorParams> MakeGeneratorParams(const benchmark::
   return params;
 }
 
+std::optional<benchmark::LoadedAdapter> LoadAdapterIfPresent(const benchmark::Options& opts) {
+  namespace fs = std::filesystem;
+  std::string adapter_path = opts.adapter_path;
+  if (adapter_path.empty()) {
+    const fs::path default_path = fs::path(opts.model_path) / "adapter.safetensors";
+    if (!fs::exists(default_path)) {
+      return std::nullopt;
+    }
+    adapter_path = default_path.string();
+  }
+
+  if (opts.verbose) {
+    std::cout << "Loading LoRA adapter weights from: " << adapter_path << "\n";
+  }
+  return benchmark::LoadSafetensors(adapter_path);
+}
+
+void BindAdapterIfPresent(OgaGenerator& generator, benchmark::BoundAdapter& bound_adapter) {
+  if (!bound_adapter.loaded) {
+    return;
+  }
+  benchmark::BindAdapterToGenerator(generator, bound_adapter);
+}
+
 void RunBenchmark(const benchmark::Options& opts) {
   std::unique_ptr<OgaModel> model;
   Duration model_creation_latency;
@@ -215,16 +241,26 @@ void RunBenchmark(const benchmark::Options& opts) {
 
   const size_t num_tokens = num_prompt_tokens + opts.num_tokens_to_generate;
   const auto generator_params = MakeGeneratorParams(opts, *model, num_tokens);
+  const auto loaded_adapter = LoadAdapterIfPresent(opts);
+  benchmark::BoundAdapter bound_adapter{};
+  if (loaded_adapter.has_value()) {
+    bound_adapter.loaded = &loaded_adapter.value();
+    if (opts.verbose) {
+      std::cout << "Loaded " << loaded_adapter->tensors.size() << " LoRA weight tensor(s).\n";
+    }
+  }
 
   std::optional<Duration> generator_creation_latency;
   auto create_generator = [&]() {
+    std::unique_ptr<OgaGenerator> result;
     if (generator_creation_latency.has_value()) {
-      return OgaGenerator::Create(*model, *generator_params);
+      result = OgaGenerator::Create(*model, *generator_params);
+    } else {
+      const auto generator_creation_start = Clock::now();
+      result = OgaGenerator::Create(*model, *generator_params);
+      generator_creation_latency = Clock::now() - generator_creation_start;
     }
-
-    const auto generator_creation_start = Clock::now();
-    auto result = OgaGenerator::Create(*model, *generator_params);
-    generator_creation_latency = Clock::now() - generator_creation_start;
+    BindAdapterIfPresent(*result, bound_adapter);
     return result;
   };
 

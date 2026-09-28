@@ -34,6 +34,7 @@ struct Options {
   // (one file per Run(): one for prefill, one per generated token for generation).
   bool profile_prefill{};
   bool profile_generation{};
+  std::string adapter_path;
 };
 
 Options ParseOptionsFromCommandLine(int argc, const char* const* argv);
