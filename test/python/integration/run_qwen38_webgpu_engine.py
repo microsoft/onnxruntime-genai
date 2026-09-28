@@ -208,6 +208,7 @@ def build_model(
     print(f"Exporting {label} Qwen3.8-27B INT4 for WebGPU", flush=True)
     print("Model Builder command:", " ".join(command), flush=True)
     subprocess.run(command, check=True)
+    identity = build_identity(repo_root, cache_dir, build_options, dflash2_draft_dir)
     metadata_path.write_text(json.dumps(identity, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
