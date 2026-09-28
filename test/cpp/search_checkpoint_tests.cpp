@@ -253,6 +253,43 @@ TEST_F(CudaSearchCheckpointTest, BatchedSamplerRollbackRestoresRequestRandomStat
             std::vector<int32_t>(first.begin(), first.end()));
 }
 
+// A per-turn reseed restarts an existing state's stream in place. The pooled index is not publicly
+// observable, so the contract is checked the way callers experience it: reseeding with the original
+// seed reproduces the original draw on the very same state object.
+TEST_F(CudaSearchCheckpointTest, ReseedStateRestartsTheStreamInPlace) {
+  auto sampler = model->p_device_scoring_->CreateBatchedSampler(
+      1, params->config.model.vocab_size);
+  ASSERT_NE(sampler, nullptr);
+
+  // A seed with a nonzero high half is accepted too; the classic int seed could never express one.
+  constexpr uint64_t seed = 0x1234'5678'9abc'def0ull;
+  auto state = sampler->CreateState(seed);
+  std::array<BatchedSamplerState*, 1> states{state.get()};
+  std::array<BatchedSamplingParams, 1> sampling_params{
+      BatchedSamplingParams{3, 1.0f, 1.0f}};
+
+  auto scores = params->p_device->Allocate<float>(4);
+  const std::array<float, 4> score_values{1.0f, 1.0f, 1.0f, -100.0f};
+  const auto sample_once = [&] {
+    std::copy(score_values.begin(), score_values.end(), scores.CpuSpan().begin());
+    scores.CopyCpuToDevice();
+    std::array<DeviceSpan<float>, 1> rows{scores.subspan(0, 4)};
+    auto tokens = sampler->Sample(
+        rows, sampling_params, states, params->config.model.vocab_size);
+    const auto host = tokens.CopyDeviceToCpu();
+    return std::vector<int32_t>(host.begin(), host.end());
+  };
+
+  const auto first = sample_once();
+  const auto advanced = sample_once();
+
+  sampler->ReseedState(*state, seed);
+  EXPECT_EQ(sample_once(), first);
+
+  // The same state object is still usable and still advances afterwards.
+  EXPECT_EQ(sample_once(), advanced);
+}
+
 TEST_F(CudaSearchCheckpointTest, ExternalSamplingRollbackRestoresSearchTailState) {
   auto external_params = CreateGeneratorParams(*model);
   external_params->search.batch_size = 1;

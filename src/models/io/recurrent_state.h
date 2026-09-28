@@ -10,7 +10,7 @@ namespace Generators {
 // Manages recurrent state tensors (conv_state + recurrent_state) for hybrid models.
 // Auto-discovers recurrent layers by probing session inputs.
 struct RecurrentState {
-  RecurrentState(State& state);
+  RecurrentState(State& state, bool graph_capture_variants_supported);
 
   void Add();
   void Update();
@@ -109,6 +109,6 @@ struct RecurrentState {
 };
 
 // Factory: returns nullptr if no recurrent layers are found in the session.
-std::unique_ptr<RecurrentState> CreateRecurrentState(State& state);
+std::unique_ptr<RecurrentState> CreateRecurrentState(State& state, bool graph_capture_variants_supported);
 
 }  // namespace Generators

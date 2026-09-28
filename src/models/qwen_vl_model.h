@@ -1,9 +1,39 @@
 #pragma once
 
+#include "span.h"
+
 #include "decoder_only_pipeline.h"
 #include "qwen_vl_vision.h"
 
 namespace Generators {
+
+inline void ValidateVisionEmbeddingShapes(std::span<const int64_t> embeddings_shape,
+                                          size_t embeddings_element_count,
+                                          std::span<const int64_t> vision_shape,
+                                          size_t input_token_count) {
+  if (embeddings_shape.size() != 2 && embeddings_shape.size() != 3) {
+    throw std::runtime_error("Vision embedding injection: expected embeddings rank 2 or 3, got " +
+                             std::to_string(embeddings_shape.size()));
+  }
+  if (vision_shape.size() != 2) {
+    throw std::runtime_error("Vision embedding injection: expected vision features rank 2, got " +
+                             std::to_string(vision_shape.size()));
+  }
+
+  const int64_t embedding_dim = embeddings_shape.back();
+  const int64_t vision_dim = vision_shape[1];
+  if (embedding_dim <= 0 || vision_dim != embedding_dim) {
+    throw std::runtime_error("Vision embedding injection: dimension mismatch - vision_dim=" + std::to_string(vision_dim) +
+                             ", embedding_dim=" + std::to_string(embedding_dim));
+  }
+  const size_t token_capacity = embeddings_element_count / static_cast<size_t>(embedding_dim);
+  if (input_token_count > token_capacity) {
+    throw std::runtime_error(
+        "Vision embedding injection: embeddings output cannot hold all input tokens "
+        "(input_token_count=" +
+        std::to_string(input_token_count) + ", capacity=" + std::to_string(token_capacity) + ")");
+  }
+}
 
 // Qwen2.5-VL pipeline model integrating vision pipeline + decoder pipeline.
 // Loads decoder pipeline sessions (handled by base) and constructs vision pipeline sessions.

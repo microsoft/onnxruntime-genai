@@ -9,6 +9,7 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <thread>
 #include <type_traits>  // for std::remove_const_t
 #include <utility>
 #include "config.h"
@@ -134,7 +135,10 @@ struct BatchedSamplingParams {
 struct BatchedSampler {
   virtual ~BatchedSampler() = default;
 
-  virtual std::unique_ptr<BatchedSamplerState> CreateState(int random_seed) = 0;
+  virtual std::unique_ptr<BatchedSamplerState> CreateState(uint64_t random_seed) = 0;
+  // Restarts an existing state's stream from `random_seed` without releasing or reacquiring any
+  // pooled resource the state holds, so a per-turn reseed neither leaks nor churns sampler slots.
+  virtual void ReseedState(BatchedSamplerState& state, uint64_t random_seed) = 0;
   virtual bool OwnsState(const BatchedSamplerState& state) const = 0;
   virtual bool SupportsTransactions() const { return false; }
   virtual void SaveStateForTransaction(std::span<BatchedSamplerState* const> /*states*/) {
@@ -208,9 +212,12 @@ struct StateUpdateReplayDesc {
 
 static_assert(std::is_trivially_copyable_v<StateUpdateReplayDesc>);
 
-// Increment whenever DeviceInterface's virtual layout changes. Dynamically loaded add-ons must
-// report this exact version before the host can safely call through the C++ interface.
-inline constexpr uint32_t kDeviceInterfaceVersion = 4;
+// Increment whenever a layout the add-on boundary depends on changes: DeviceInterface's virtual
+// layout, or the virtual or data layout of any type constructed by, passed to, or returned across
+// that boundary (Search, BatchedSampler, BatchedSamplerState, GeneratorParams, or Config).
+// Dynamically loaded add-ons must report this exact version before the host can safely call through
+// the C++ interface.
+inline constexpr uint32_t kDeviceInterfaceVersion = 6;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}
@@ -344,43 +351,96 @@ struct DeviceInterface {
   virtual void ReplayStateUpdates(const StateUpdateReplayDesc* /*descs*/, size_t /*count*/) {
     throw std::logic_error("Device does not support compact fixed-state replay.");
   }
+  // True for EPs where an OrtValue can bind a tensor view formed by adding a byte offset to the base
+  // address returned for persistent device storage. Keep last for vtable ABI stability.
+  virtual bool SupportsOffsetTensorViews() const { return false; }
+  // True when allocation, zeroing, ranged copies, tensor binding, and synchronization are qualified
+  // to complete fixed-state device work before FixedStatePool publishes a bank flip.
+  // Keep last for vtable ABI stability.
+  virtual bool SupportsTransactionalFixedState() const { return false; }
 };
 
 // A shared_ptr based type that we expose through our C API should inherit from this type.
 // ExternalAddRef must be called when returning an object through the C API
-// ExternalRelease must be called on the C API destroy method
-template <typename T>
-struct ExternalRefCountedTraits {
-  static constexpr bool notify_external_reference_changes = false;
-};
-
 template <typename T>
 struct ExternalRefCounted {
+  ExternalRefCounted() = default;
+  explicit ExternalRefCounted(
+      std::shared_ptr<std::atomic<bool>> final_release_pending) noexcept
+      : final_release_pending_{std::move(final_release_pending)} {}
+
   void ExternalAddRef() {
-    if (++ref_count_ == 1) {  // First reference?
-      external_owner_ = static_cast<T*>(this)->shared_from_this();
-      if constexpr (ExternalRefCountedTraits<T>::notify_external_reference_changes) {
-        static_assert(noexcept(std::declval<T&>().OnFirstExternalReference()));
-        static_cast<T*>(this)->OnFirstExternalReference();
-      }
+    ExternalReferenceLock lock{*this};
+    if (ref_count_ == 0) {
+      // Acquire the self-owner before publishing the first reference. If shared_from_this throws,
+      // the never-acquired/zero-reference state remains unchanged.
+      auto owner = static_cast<T*>(this)->shared_from_this();
+      external_owner_ = std::move(owner);
+      ref_count_ = 1;
+      external_lifecycle_started_ = true;
+    } else {
+      ++ref_count_;
     }
   }
 
   void ExternalRelease() noexcept {
-    if (--ref_count_ == 0) {
-      if constexpr (ExternalRefCountedTraits<T>::notify_external_reference_changes) {
-        static_assert(noexcept(std::declval<T&>().OnLastExternalReference()));
-        // Notify before releasing the self-owner so a type-specific last-release hook can only mark
-        // deferred work while the object is guaranteed to still be alive.
-        static_cast<T*>(this)->OnLastExternalReference();
+    std::shared_ptr<T> released_owner;
+    {
+      ExternalReferenceLock lock{*this};
+      assert(ref_count_ > 0);
+      if (--ref_count_ == 0) {
+        if (final_release_pending_) {
+          final_release_pending_->store(true, std::memory_order_release);
+        }
+        released_owner = std::move(external_owner_);
       }
-      external_owner_ = nullptr;
     }
+    // The self-owner may be the last strong reference. Destroy it only after releasing the member
+    // lock so object destruction never runs while code still accesses this object's synchronization.
+  }
+
+  // True only after an external lifecycle has started and its final handle has been released.
+  // A never-exposed object therefore remains distinct from an abandoned external object.
+  bool ExternalReferencesAbandoned() const noexcept {
+    ExternalReferenceLock lock{*this};
+    return external_lifecycle_started_ && ref_count_ == 0;
   }
 
  private:
+  void LockExternalReferences() const noexcept {
+    while (external_reference_lock_.test_and_set(std::memory_order_acquire)) {
+#if defined(USE_CXX17) || defined(__APPLE__)
+      std::this_thread::yield();
+#else
+      external_reference_lock_.wait(true, std::memory_order_relaxed);
+#endif
+    }
+  }
+
+  void UnlockExternalReferences() const noexcept {
+    external_reference_lock_.clear(std::memory_order_release);
+#if !defined(USE_CXX17) && !defined(__APPLE__)
+    external_reference_lock_.notify_one();
+#endif
+  }
+
+  struct ExternalReferenceLock {
+    explicit ExternalReferenceLock(const ExternalRefCounted& owner) noexcept
+        : owner_{owner} {
+      owner_.LockExternalReferences();
+    }
+    ~ExternalReferenceLock() noexcept {
+      owner_.UnlockExternalReferences();
+    }
+
+    const ExternalRefCounted& owner_;
+  };
+
   std::shared_ptr<T> external_owner_;  // shared_ptr to ourselves to keep us alive
-  std::atomic<int> ref_count_{};       // C API refcount (can't use only the shared_ptr)
+  std::shared_ptr<std::atomic<bool>> final_release_pending_;
+  int ref_count_{};                    // Guarded with external_owner_ and lifecycle state.
+  bool external_lifecycle_started_{};  // Distinguishes never exposed from finally released.
+  mutable std::atomic_flag external_reference_lock_ = ATOMIC_FLAG_INIT;
 };
 
 namespace Location {

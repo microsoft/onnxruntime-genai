@@ -14,6 +14,7 @@
 namespace Generators {
 
 struct Request;
+struct PrefixCacheMatch;
 
 using StepTransactionId = uint64_t;
 
@@ -25,6 +26,7 @@ struct StepPlanningConsistencyError : std::runtime_error {
 // packed recurrent-state operators checkpoint at most eight tokens, so no cache can roll back
 // further than a step of that length.
 inline constexpr size_t kMaxDraftTokensPerStep = 7;
+inline constexpr size_t kMaxGeneratedTokensPerStep = kMaxDraftTokensPerStep + 1;
 
 enum class StepOutcomeKind {
   NoWork,
@@ -69,6 +71,7 @@ struct RequestStepPlan {
   bool is_prefill{};
   bool newly_admitted{};
   size_t scheduling_order{};  // Logical scheduler order before physical execution ordering.
+  std::shared_ptr<const PrefixCacheMatch> prefix_match;
 };
 
 // Fixed decoder-state demand for a step, planned atomically with the paged-block demand so the

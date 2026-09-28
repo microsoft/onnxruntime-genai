@@ -11,11 +11,13 @@ MAX_LENGTH = 1024
 
 
 def require_request_event(event: og.EngineEvent) -> og.Request:
+    # This single-request workflow cannot continue after any failed turn, even if
+    # REQUEST_UNSERVICEABLE leaves the Engine itself healthy.
+    if event.flags & og.EngineEventFlags.FAILED:
+        raise RuntimeError(f"Generation failed; error_code={event.error_code}")
     if event.request is not None:
         return event.request
-    if event.flags & og.EngineEventFlags.FAILED:
-        outcome = "failed"
-    elif event.flags & og.EngineEventFlags.CAPACITY_BLOCKED:
+    if event.flags & og.EngineEventFlags.CAPACITY_BLOCKED:
         outcome = "was capacity-blocked"
     elif event.flags & og.EngineEventFlags.RETRYABLE:
         outcome = "reported a retryable failure"
@@ -34,11 +36,8 @@ def run(args: argparse.Namespace):
     tokenizer = og.Tokenizer(model)
     engine = og.Engine(model)
 
-    params = og.GeneratorParams(model)
-    params.set_search_options(
-        do_sample=False,
-        max_length=MAX_LENGTH,
-    )
+    request_options = og.RequestOptions()
+    request_options.set_max_session_tokens(MAX_LENGTH)
 
     system_message = json.dumps([{"role": "system", "content": ""}])
     system_tokens = tokenizer.encode(
@@ -46,7 +45,11 @@ def run(args: argparse.Namespace):
     )
     session_token_count = len(system_tokens)
     streaming_tokenizer = tokenizer.create_stream()
-    request = engine.create_request(params)
+    request = engine.create_request(options=request_options)
+    # Per-turn policy is resolved anew for every turn and never carries over, so the same options
+    # object is reused to ask for top-logit selection on each one.
+    turn_options = og.TurnOptions(request)
+    turn_options.set_do_sample(False)
     first_turn = True
 
     try:
@@ -74,7 +77,7 @@ def run(args: argparse.Namespace):
                 first_turn = False
             else:
                 input_tokens = np.asarray(turn_tokens, dtype=np.int32)
-            request.begin_turn(input_tokens)
+            request.begin_turn(input_tokens, turn_options)
 
             print("🤖 :", end="", flush=True)
 

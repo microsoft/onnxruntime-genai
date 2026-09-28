@@ -10,6 +10,7 @@
 #include <gtest/gtest.h>
 
 #include "generator/generators.h"
+#include "models/cpu_embedding.h"
 #include "ort_genai.h"
 #include "telemetry_test_environment.h"
 
@@ -76,6 +77,37 @@ TEST(DeviceSpanTests, DeviceInputKeepsPaddingMetadataSeparateFromTokenIdsCuda) {
   EXPECT_TRUE(std::equal(token_ids.begin(), token_ids.end(), input_ids.begin()));
 }
 
+TEST(DeviceSpanTests, EmbeddingStagingSurvivesReuseGrowthAndTeardownCuda) {
+  [[maybe_unused]] auto model = CreateCudaModel();
+  auto* device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
+  const std::array<int64_t, 5> sizes{64, 32, 128, 16, 128};
+  std::vector<std::unique_ptr<Generators::Tensor>> outputs;
+  {
+    Generators::CpuEmbedding::Workspace workspace;
+    uint8_t* previous_host = nullptr;
+    size_t capacity = 0;
+    for (size_t step = 0; step < sizes.size(); ++step) {
+      auto output = std::make_unique<Generators::Tensor>(device, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+      output->CreateTensor(std::array<int64_t, 1>{sizes[step]});
+      auto staging = workspace.Prepare(*output);
+      auto host = staging.CpuSpan();
+      if (host.size() <= capacity) {
+        EXPECT_EQ(host.data(), previous_host);
+      }
+      capacity = std::max(capacity, host.size());
+      previous_host = host.data();
+      std::fill(host.begin(), host.end(), static_cast<uint8_t>(step + 1));
+      workspace.Upload();
+      outputs.push_back(std::move(output));
+    }
+  }
+  for (size_t step = 0; step < outputs.size(); ++step) {
+    auto bytes = outputs[step]->GetByteSpan();
+    const auto result = bytes.CopyDeviceToCpu();
+    EXPECT_TRUE(std::all_of(result.begin(), result.end(), [step](uint8_t value) { return value == step + 1; }));
+  }
+}
+
 TEST(SamplingTests, SchedulerOwnedSamplerHandlesHeterogeneousRowsCuda) {
   constexpr int vocab_size = 5;
   [[maybe_unused]] auto model = CreateCudaModel();
@@ -112,6 +144,59 @@ TEST(SamplingTests, SchedulerOwnedSamplerHandlesHeterogeneousRowsCuda) {
   EXPECT_EQ(tokens[0], 1);
   EXPECT_EQ(tokens[1], 2);
   EXPECT_EQ(tokens[2], 3);
+}
+
+TEST(SamplingTests, SchedulerOwnedSamplerGreedyRowsDoNotAdvanceRngCuda) {
+  constexpr int vocab_size = 8;
+  [[maybe_unused]] auto model = CreateCudaModel();
+  auto* device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
+  auto sampler = device->CreateBatchedSampler(2, vocab_size);
+  ASSERT_NE(sampler, nullptr);
+
+  auto logits = device->Allocate<float>(2 * vocab_size);
+  const std::array<float, vocab_size> row_logits{
+      {0.0f, 0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f}};
+  std::copy(row_logits.begin(), row_logits.end(), logits.CpuSpan().begin());
+  std::copy(row_logits.begin(), row_logits.end(),
+            logits.CpuSpan().begin() + vocab_size);
+  logits.CopyCpuToDevice();
+  std::array<Generators::DeviceSpan<float>, 2> rows{
+      {logits.subspan(0, vocab_size),
+       logits.subspan(vocab_size, vocab_size)}};
+
+  constexpr uint64_t seed = 31337;
+  auto after_greedy = sampler->CreateState(seed);
+  auto untouched = sampler->CreateState(seed);
+  std::array<Generators::BatchedSamplerState*, 2> states{
+      {after_greedy.get(), untouched.get()}};
+
+  std::array<Generators::DeviceSpan<float>, 1> greedy_row{{rows[0]}};
+  const std::array<Generators::BatchedSamplingParams, 1> greedy_params{
+      {{1, 0.0f, 1.0f}}};
+  const std::array<Generators::BatchedSamplerState*, 1> greedy_state{
+      {after_greedy.get()}};
+  for (int step = 0; step < 5; ++step) {
+    const auto token =
+        sampler->Sample(greedy_row, greedy_params, greedy_state, vocab_size)
+            .CopyDeviceToCpu();
+    EXPECT_EQ(token[0], vocab_size - 1);
+  }
+
+  const std::array<Generators::BatchedSamplingParams, 2> sampled_params{
+      {{vocab_size, 1.0f, 1.0f}, {vocab_size, 1.0f, 1.0f}}};
+  std::vector<int32_t> sampled_tokens;
+  for (int step = 0; step < 16; ++step) {
+    const auto tokens =
+        sampler->Sample(rows, sampled_params, states, vocab_size)
+            .CopyDeviceToCpu();
+    EXPECT_EQ(tokens[0], tokens[1]) << "RNG diverged at sampled step " << step;
+    sampled_tokens.push_back(tokens[0]);
+  }
+  EXPECT_TRUE(std::any_of(sampled_tokens.begin() + 1, sampled_tokens.end(),
+                          [&](int32_t token) {
+                            return token != sampled_tokens.front();
+                          }))
+      << "Sampled output was constant, so RNG-stream equivalence was not exercised.";
 }
 
 TEST(LogitsMaskTests, UsesPaddedRowStrideForNonAlignedVocabularyCuda) {

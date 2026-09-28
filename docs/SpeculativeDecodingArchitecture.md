@@ -5,6 +5,10 @@ decoding. It is intended for maintainers changing proposal, verification, buffer
 guidance, sampling, continuation, or statistics behavior. For setup and public configuration, see
 [Speculative decoding](SpeculativeDecoding.md).
 
+This document's state machine belongs to the single-sequence `Generator` API. The dynamic Engine's
+caller-supplied greedy proposals use the Engine transaction and cache-reservation machinery instead;
+see [Paged Attention Engine](paged_attention_engine.md#caller-supplied-speculative-drafts).
+
 ## Source map
 
 | Area | Primary files |
@@ -393,7 +397,7 @@ External logits are intentionally restricted while a guided round has buffered t
 single externally meaningful grammar/logits position cannot be reconstructed from an arbitrary
 lookahead row without committing or discarding state.
 
-## External operations
+## Generator external operations
 
 | Operation | Idle | Draining or folded state | Result |
 | --- | --- | --- | --- |

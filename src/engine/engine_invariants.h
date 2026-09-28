@@ -43,6 +43,9 @@ struct RequestStateSnapshot {
   bool has_current_turn{};
   uint64_t current_turn_id{};
   GenerationFinishReason finish_reason{GenerationFinishReason::None};
+  // Caller-facing index into the turn's stop-string list, or -1. Valid (well-formed) whenever it is
+  // nonnegative exactly when finish_reason is StopString; see ValidateRequestInvariants().
+  int32_t matched_stop_string_index{-1};
 };
 
 // Immutable view of one Request's block ownership within the paged cache.
@@ -58,6 +61,15 @@ struct RequestReservationSnapshot {
   size_t committed_slots{};
   size_t target_slots{};
   std::vector<size_t> reserved_block_ids;
+  std::vector<size_t> adopted_block_ids;
+};
+
+struct CachedBlockSnapshot {
+  size_t block_id{};
+  size_t ref_count{};
+  size_t used_slots{};
+  bool full{};
+  bool indexed{};
 };
 
 struct WindowBlockPoolSnapshot {
@@ -76,7 +88,9 @@ struct PagedCacheSnapshot {
   size_t block_table_columns{};  // Padded block-table width the model sees, or 0 when unused.
   std::vector<RequestBlockSnapshot> requests;
   std::vector<size_t> transaction_reserved_block_ids;
+  std::vector<size_t> transaction_adopted_block_ids;
   std::vector<RequestReservationSnapshot> reservations;
+  std::vector<CachedBlockSnapshot> blocks;
   WindowBlockPoolSnapshot window_blocks;
 
   // Blocks currently owned by some Request (sum of per-Request block counts).

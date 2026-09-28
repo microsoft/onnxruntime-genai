@@ -64,8 +64,21 @@ ScenarioExecutionOutput MixedWorkloadScenario::Execute(const ScenarioConfig& con
   std::mt19937 prompt_random(kRandomSeed);
   auto decode_prompt = BuildRulerPromptTokens(prompt_length_k, *engineResources.tokenizer, prompt_random);
   auto prefill_prompt = BuildRulerPromptTokens(kPrefillPromptLengthK, *engineResources.tokenizer, prompt_random);
-  const size_t decode_prompt_count = decode_prompt->SequenceCount(0);
-  const size_t prefill_prompt_count = prefill_prompt->SequenceCount(0);
+  const size_t requested_decode_prompt_count = decode_prompt->SequenceCount(0);
+  const size_t requested_prefill_prompt_count = prefill_prompt->SequenceCount(0);
+  const size_t decode_prompt_count = FitPromptToSessionLimit(
+      requested_decode_prompt_count, static_cast<size_t>(config.generation_tokens),
+      engineResources.model_max_session_tokens);
+  const size_t prefill_prompt_count = FitPromptToSessionLimit(
+      requested_prefill_prompt_count, static_cast<size_t>(kPrefillGenerationTokens),
+      engineResources.model_max_session_tokens);
+  if (decode_prompt_count != requested_decode_prompt_count ||
+      prefill_prompt_count != requested_prefill_prompt_count) {
+    std::cout << tag << "Prompts fitted to the model session limit: decode "
+              << requested_decode_prompt_count << " -> " << decode_prompt_count
+              << ", prefill " << requested_prefill_prompt_count << " -> "
+              << prefill_prompt_count << " tokens" << std::endl;
+  }
 
   ScenarioExecutionOutput output;
   std::vector<double> decode_ttft_values;
@@ -79,8 +92,9 @@ ScenarioExecutionOutput MixedWorkloadScenario::Execute(const ScenarioConfig& con
   for (int run = 0; run < total_runs; ++run) {
     const bool is_warmup = run < config.warmup_runs;
 
-    // Co-schedule one 128K prefill with active decode requests in the same engine workload.
-    std::vector<std::unique_ptr<OgaGeneratorParams>> params;
+    // Co-schedule one long prefill with active decode requests in the same engine workload.
+    std::vector<std::unique_ptr<OgaRequestOptions>> request_options;
+    std::vector<std::unique_ptr<OgaTurnOptions>> turn_options;
     std::vector<std::unique_ptr<OgaRequest>> requests;
     std::vector<std::vector<int32_t>> request_tokens(static_cast<size_t>(config.concurrency));
     std::vector<size_t> prompt_counts(static_cast<size_t>(config.concurrency), decode_prompt_count);
@@ -89,7 +103,8 @@ ScenarioExecutionOutput MixedWorkloadScenario::Execute(const ScenarioConfig& con
     std::vector<std::chrono::steady_clock::time_point> last_token_time(static_cast<size_t>(config.concurrency));
     std::vector<std::vector<double>> request_itl_ms(static_cast<size_t>(config.concurrency));
     std::unordered_map<const OgaRequest*, size_t> request_indices;
-    params.reserve(static_cast<size_t>(config.concurrency));
+    request_options.reserve(static_cast<size_t>(config.concurrency));
+    turn_options.reserve(static_cast<size_t>(config.concurrency));
     requests.reserve(static_cast<size_t>(config.concurrency));
 
     const auto run_start = std::chrono::steady_clock::now();
@@ -102,14 +117,18 @@ ScenarioExecutionOutput MixedWorkloadScenario::Execute(const ScenarioConfig& con
       const int generation_tokens = i == 0 ? kPrefillGenerationTokens : config.generation_tokens;
       prompt_counts[static_cast<size_t>(i)] = prompt_count;
       target_generation_tokens[static_cast<size_t>(i)] = generation_tokens;
-      params.emplace_back(OgaGeneratorParams::Create(*engineResources.model));
-      params.back()->SetSearchOption("max_length", static_cast<double>(prompt_count + generation_tokens));
-      params.back()->SetSearchOption("random_seed", kRandomSeed);
+      request_options.emplace_back(OgaRequestOptions::Create());
+      request_options.back()->SetMaxSessionTokens(prompt_count + generation_tokens);
       request_tokens[static_cast<size_t>(i)].assign(prompt->SequenceData(0), prompt->SequenceData(0) + prompt_count);
       requests.emplace_back(
-          engineResources.engine->CreateRequest(*params.back()));
+          engineResources.engine->CreateRequest(request_options.back().get()));
       request_indices.emplace(requests.back().get(), static_cast<size_t>(i));
-      requests.back()->BeginTurn(prompt->SequenceData(0), prompt_count);
+      turn_options.push_back(requests.back()->CreateTurnOptions());
+      if (engineResources.uses_dynamic_batching) {
+        turn_options.back()->SetSeed(kRandomSeed);
+      }
+      requests.back()->BeginTurn(prompt->SequenceData(0), prompt_count,
+                                 turn_options.back().get());
     }
 
     // Measure whether the long prefill delays decode first-token and inter-token latency.
@@ -210,8 +229,12 @@ ScenarioExecutionOutput MixedWorkloadScenario::Execute(const ScenarioConfig& con
       {"e2e_ms", std::move(e2e_ms_values)},
       {"tokens_per_s", std::move(tokens_per_s_values)},
       {"prefill_ttft_ms", std::move(prefill_ttft_ms_values)},
+      {"requested_decode_prompt_tokens", requested_decode_prompt_count},
       {"decode_prompt_tokens", decode_prompt_count},
+      {"requested_prefill_prompt_tokens", requested_prefill_prompt_count},
       {"prefill_prompt_tokens", prefill_prompt_count},
+      {"prompt_truncated", decode_prompt_count != requested_decode_prompt_count ||
+                               prefill_prompt_count != requested_prefill_prompt_count},
       {"prefill_generation_tokens", kPrefillGenerationTokens},
       {"peak_host_memory_mb", BytesToMb(memory.PeakHostBytes())},
   };

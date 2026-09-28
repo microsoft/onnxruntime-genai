@@ -23,6 +23,11 @@
 #include <filesystem>
 #include <random>
 #include <string>
+#include <utility>
+
+#if defined(__linux__) && !defined(__ANDROID__)
+#include <unistd.h>
+#endif
 
 // Version string defined by the build system
 #ifndef ORTGENAI_VERSION
@@ -77,12 +82,54 @@ std::string GetToken() {
   return decoded;
 }
 
+enum class EventPriority {
+  Normal = MAT::EventLatency_Normal,
+  High = MAT::EventLatency_RealTime,
+  Critical = MAT::EventLatency_RealTime,
+};
+
+MAT::EventProperties MakeEvent(std::string event_name, EventPriority priority) {
+  MAT::EventProperties event(std::move(event_name));
+  event.SetLatency(static_cast<MAT::EventLatency>(priority));
+  event.SetPopsample(100.0);
+  event.SetLevel(DIAG_LEVEL_REQUIRED);
+  return event;
+}
+
 bool PrepareSampledEvent(MAT::EventProperties& event, std::string_view app_session_guid,
-                         uint32_t session_id) {
-  if (!TelemetryInternal::ShouldSampleSession(app_session_guid, session_id)) return false;
-  event.SetPopsample(TelemetryInternal::kModelSessionSampleRatePercent);
+                         uint32_t session_id,
+                         double sample_rate_percent =
+                             TelemetryInternal::kModelSessionSampleRatePercent) {
+  if (!TelemetryInternal::ShouldSampleSession(
+          app_session_guid, session_id, sample_rate_percent)) {
+    return false;
+  }
+  event.SetPopsample(sample_rate_percent);
   return true;
 }
+
+#if defined(__linux__) && !defined(__ANDROID__)
+std::string GetCertificateAuthorityBundlePath() {
+  if (const char* ssl_cert_file = std::getenv("SSL_CERT_FILE");
+      ssl_cert_file != nullptr && access(ssl_cert_file, R_OK) == 0) {
+    return ssl_cert_file;
+  }
+
+  constexpr const char* kCertificateAuthorityBundlePaths[] = {
+      "/etc/ssl/certs/ca-certificates.crt",
+      "/etc/pki/tls/certs/ca-bundle.crt",
+      "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+      "/etc/ssl/ca-bundle.pem",
+      "/etc/pki/tls/cacert.pem",
+      "/etc/ssl/cert.pem",
+      "/var/lib/ca-certificates/ca-bundle.pem",
+  };
+  for (const char* path : kCertificateAuthorityBundlePaths) {
+    if (access(path, R_OK) == 0) return path;
+  }
+  return {};
+}
+#endif
 
 // Generate a random v4 UUID as a hex string (e.g. "f81d4fae-7dec-41d0-8f12-00a0c91e6bf6").
 // Used for the process-wide AppSessionGuid (Tier 1 identity).
@@ -202,9 +249,24 @@ void GenAiTelemetry::Initialize() {
     auto& config = pending_impl->config;
     config[MAT::CFG_STR_COLLECTOR_URL] = "https://mobile.events.data.microsoft.com/OneCollector/1.0";
     config[MAT::CFG_STR_PRIMARY_TOKEN] = ikey;
+    config[MAT::CFG_BOOL_ENABLE_TRACE] = false;
     config[MAT::CFG_INT_TRACE_LEVEL_MASK] = 0;
     config[MAT::CFG_INT_SDK_MODE] = MAT::SdkModeTypes::SdkModeTypes_CS;
     config[MAT::CFG_INT_RAM_QUEUE_SIZE] = 512 * 1024;
+#if defined(__APPLE__)
+    // Apple system SQLite is process-global. Multiple libraries may embed 1DS in the same process,
+    // so let SQLite initialize lazily and never let an individual SDK copy shut it down.
+    config["skipSqliteInitAndShutdown"] = "true";
+#endif
+#if defined(_WIN32)
+    // The 1DS network detector leaves a netprofm.dll allocation at process exit.
+    config[MAT::CFG_BOOL_ENABLE_NET_DETECT] = false;
+#endif
+#if defined(__linux__) && !defined(__ANDROID__)
+    if (std::string ca_bundle = GetCertificateAuthorityBundlePath(); !ca_bundle.empty()) {
+      config[MAT::CFG_MAP_HTTP][MAT::CFG_STR_HTTP_SSL_CAINFO] = ca_bundle;
+    }
+#endif
 
     // Do not block process teardown to upload: persisted events are sent on the next
     // run. 0 keeps Shutdown non-blocking and avoids adding exit latency to host apps.
@@ -364,8 +426,12 @@ void GenAiTelemetry::LogProcessInfo() {
     const auto& device = GetDeviceInfo();
     warn_device_id_fallback = device.device_id_status == "Failed";
 
-    MAT::EventProperties event("OnnxRuntimeGenAI.ProcessInfo");
-    event.SetPopsample(100.0);
+    auto event = MakeEvent("ProcessInfo", EventPriority::Critical);
+    if (!PrepareSampledEvent(event, app_session_guid_, 0,
+                             TelemetryInternal::kCriticalEventSampleRatePercent)) {
+      emitted = true;
+      return;
+    }
     // sessionId 0 = process scope (model sessions are numbered from 1); ProcessInfo
     // correlates with model/generate events via the AppSessionGuid logger context.
     event.SetProperty("sessionId", static_cast<int64_t>(0));
@@ -377,6 +443,15 @@ void GenAiTelemetry::LogProcessInfo() {
     event.SetProperty("totalMemoryMB", static_cast<int64_t>(device.total_memory_mb));
     event.SetProperty("cpuModel", device.cpu_model);
     event.SetProperty("deviceIdStatus", device.device_id_status);
+    event.SetProperty("isContainer", device.is_container);
+    event.SetProperty("containerType", device.container_type);
+    event.SetProperty("isVirtualMachine", device.is_virtual_machine);
+    event.SetProperty("virtualizationType", device.virtualization_type);
+    event.SetProperty("isEmulator", device.is_emulator);
+    event.SetProperty("hostEnvironment", device.host_environment);
+    event.SetProperty("environmentDetectionConfidence",
+                      device.environment_detection_confidence);
+    event.SetProperty("deviceIdScope", device.device_id_scope);
 
     impl_->logger->LogEvent(event);
     // ProcessInfo captures PAL network context. Clearing it afterward is best effort.
@@ -400,7 +475,7 @@ bool GenAiTelemetry::LogModelLoadStart(uint32_t session_id) {
   bool emitted = false;
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
   RunLocked([&] {
-    MAT::EventProperties event("OnnxRuntimeGenAI.ModelLoadStart");
+    auto event = MakeEvent("ModelLoadStart", EventPriority::Normal);
     if (!PrepareSampledEvent(event, app_session_guid_, session_id)) return;
     event.SetProperty("sessionId", static_cast<int64_t>(session_id));
 
@@ -414,7 +489,7 @@ bool GenAiTelemetry::LogModelLoadStart(uint32_t session_id) {
 void GenAiTelemetry::LogModelLoad(uint32_t session_id, const ModelLoadInfo& info) {
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
   RunLocked([&] {
-    MAT::EventProperties event("OnnxRuntimeGenAI.ModelLoad");
+    auto event = MakeEvent("ModelLoad", EventPriority::Normal);
     if (!PrepareSampledEvent(event, app_session_guid_, session_id)) return;
     event.SetProperty("sessionId", static_cast<int64_t>(session_id));
     event.SetProperty("modelType", info.model_type);
@@ -443,7 +518,7 @@ void GenAiTelemetry::LogModelLoadEnd(uint32_t session_id, bool is_success,
                                      const std::string& error_message) {
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
   RunLocked([&] {
-    MAT::EventProperties event("OnnxRuntimeGenAI.ModelLoadEnd");
+    auto event = MakeEvent("ModelLoadEnd", EventPriority::Normal);
     if (!PrepareSampledEvent(event, app_session_guid_, session_id)) return;
     event.SetProperty("sessionId", static_cast<int64_t>(session_id));
     event.SetProperty("isSuccess", is_success);
@@ -463,7 +538,7 @@ void GenAiTelemetry::LogGeneratorCreate(uint32_t session_id, uint32_t generator_
                                         bool do_sample, bool use_graph_capture, bool has_guidance) {
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
   RunLocked([&] {
-    MAT::EventProperties event("OnnxRuntimeGenAI.GeneratorCreate");
+    auto event = MakeEvent("GeneratorCreate", EventPriority::Normal);
     if (!PrepareSampledEvent(event, app_session_guid_, session_id)) return;
     event.SetProperty("sessionId", static_cast<int64_t>(session_id));
     event.SetProperty("generatorId", static_cast<int64_t>(generator_id));
@@ -488,7 +563,7 @@ void GenAiTelemetry::LogGeneration(uint32_t session_id, uint32_t generator_id,
                                    int64_t start_timestamp_ms, int64_t end_timestamp_ms) {
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
   RunLocked([&] {
-    MAT::EventProperties start_event("OnnxRuntimeGenAI.GenerateStart");
+    auto start_event = MakeEvent("GenerateStart", EventPriority::Normal);
     if (!PrepareSampledEvent(start_event, app_session_guid_, session_id)) return;
     start_event.SetTimestamp(start_timestamp_ms);
     start_event.SetProperty("sessionId", static_cast<int64_t>(session_id));
@@ -497,7 +572,7 @@ void GenAiTelemetry::LogGeneration(uint32_t session_id, uint32_t generator_id,
     start_event.SetProperty("inputModality", input_modality);
     impl_->logger->LogEvent(start_event);
 
-    MAT::EventProperties end_event("OnnxRuntimeGenAI.GenerateEnd");
+    auto end_event = MakeEvent("GenerateEnd", EventPriority::Normal);
     if (!PrepareSampledEvent(end_event, app_session_guid_, session_id)) return;
     end_event.SetTimestamp(end_timestamp_ms);
     end_event.SetProperty("sessionId", static_cast<int64_t>(session_id));
@@ -517,7 +592,7 @@ void GenAiTelemetry::LogGeneration(uint32_t session_id, uint32_t generator_id,
 void GenAiTelemetry::LogAdapterActivated(uint32_t session_id, uint32_t generator_id) {
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
   RunLocked([&] {
-    MAT::EventProperties event("OnnxRuntimeGenAI.AdapterActivated");
+    auto event = MakeEvent("AdapterActivated", EventPriority::Normal);
     if (!PrepareSampledEvent(event, app_session_guid_, session_id)) return;
     event.SetProperty("sessionId", static_cast<int64_t>(session_id));
     event.SetProperty("generatorId", static_cast<int64_t>(generator_id));
@@ -533,8 +608,11 @@ void GenAiTelemetry::LogRuntimeError(uint32_t session_id,
                                      const std::string& context) {
 #if defined(ORTGENAI_ENABLE_TELEMETRY)
   RunLocked([&] {
-    MAT::EventProperties event("OnnxRuntimeGenAI.RuntimeError");
-    if (!PrepareSampledEvent(event, app_session_guid_, session_id)) return;
+    auto event = MakeEvent("RuntimeError", EventPriority::High);
+    if (!PrepareSampledEvent(event, app_session_guid_, session_id,
+                             TelemetryInternal::kCriticalEventSampleRatePercent)) {
+      return;
+    }
     event.SetProperty("sessionId", static_cast<int64_t>(session_id));
     event.SetProperty("errorType", error_type);
     event.SetProperty("errorMessage", ScrubStringForTelemetry(error_message));

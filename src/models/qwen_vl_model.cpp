@@ -166,19 +166,13 @@ void Qwen2_5_VL_PipelineState::InjectVisionEmbeddings(const std::string& embeddi
   }
 
   OrtValue* embeddings_ortvalue = it->second.get();
-  auto shape = embeddings_ortvalue->GetTensorTypeAndShapeInfo()->GetShape();
-  float* embeddings_data = embeddings_ortvalue->GetTensorMutableData<float>();
+  auto embeddings_info = embeddings_ortvalue->GetTensorTypeAndShapeInfo();
+  if (embeddings_info->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+    throw std::runtime_error("Vision embedding injection: embeddings output must have float elements");
+  }
+  auto shape = embeddings_info->GetShape();
 
   auto vision_shape = image_features_value_->GetTensorTypeAndShapeInfo()->GetShape();
-  const float* vision_data = image_features_value_->GetTensorData<float>();
-
-  const int64_t embedding_dim = shape[2];
-  const int64_t num_vision_tokens = vision_shape[0];
-  const int64_t vision_dim = vision_shape[1];
-  if (vision_dim != embedding_dim) {
-    throw std::runtime_error("Vision embedding injection: dimension mismatch - vision_dim=" + std::to_string(vision_dim) +
-                             ", embedding_dim=" + std::to_string(embedding_dim));
-  }
 
   constexpr int32_t image_token_id = 151655;
 
@@ -187,13 +181,18 @@ void Qwen2_5_VL_PipelineState::InjectVisionEmbeddings(const std::string& embeddi
   }
 
   OrtValue* input_ids_ortvalue = input_ids_->Get();
-  auto input_ids_shape = input_ids_ortvalue->GetTensorTypeAndShapeInfo()->GetShape();
+  auto input_ids_info = input_ids_ortvalue->GetTensorTypeAndShapeInfo();
   const int32_t* token_ids_cpu = input_ids_ortvalue->GetTensorData<int32_t>();
 
-  int64_t total_tokens = 1;
-  for (auto dim : input_ids_shape) total_tokens *= dim;
+  const size_t total_tokens = input_ids_info->GetElementCount();
+  ValidateVisionEmbeddingShapes(shape, embeddings_info->GetElementCount(), vision_shape, total_tokens);
+  float* embeddings_data = embeddings_ortvalue->GetTensorMutableData<float>();
+  const float* vision_data = image_features_value_->GetTensorData<float>();
+  const int64_t num_vision_tokens = vision_shape[0];
+  const int64_t embedding_dim = shape.back();
+  const int64_t vision_dim = vision_shape[1];
 
-  for (int64_t i = 0; i < total_tokens; ++i) {
+  for (size_t i = 0; i < total_tokens; ++i) {
     if (token_ids_cpu[i] == image_token_id && image_embed_consumed_ < static_cast<size_t>(num_vision_tokens)) {
       std::memcpy(embeddings_data + (i * embedding_dim),
                   vision_data + (image_embed_consumed_ * vision_dim),

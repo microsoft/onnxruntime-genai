@@ -6,10 +6,100 @@
       "component": {
         "type": "git",
         "git": {
-          "commitHash": "80dc998efced8ceb2be59756668a7e90e8bef917",
+          "commitHash": "a2e59f0e7065404b44dfe92a28aca47ba1378dc4",
           "repositoryUrl": "https://github.com/pybind/pybind11.git"
         },
         "comments": "pybind11"
+      }
+    },
+    {
+      "component": {
+        "type": "git",
+        "git": {
+          "commitHash": "530d5c8c84abd2a46f38583ee817743c9b3a42b4",
+          "repositoryUrl": "https://github.com/google/googletest.git"
+        },
+        "comments": "googletest"
+      }
+    },
+    {
+      "component": {
+        "type": "git",
+        "git": {
+          "commitHash": "55f373e164d3f092dd6c7a56e3de6f90c4c6f3dc",
+          "repositoryUrl": "https://github.com/microsoft/wil.git"
+        },
+        "comments": "microsoft_wil"
+      }
+    },
+    {
+      "component": {
+        "type": "git",
+        "git": {
+          "commitHash": "de28d93dfa9ebf3e473127c1c657e1920a5345ee",
+          "repositoryUrl": "https://github.com/microsoft/DirectX-Headers.git"
+        },
+        "comments": "directx_headers"
+      }
+    },
+    {
+      "component": {
+        "type": "git",
+        "git": {
+          "commitHash": "75129dc9da91f95c22d3f83087571a0759ed0d5c",
+          "repositoryUrl": "https://github.com/microsoft/onnxruntime-extensions.git"
+        },
+        "comments": "onnxruntime_extensions"
+      }
+    },
+    {
+      "component": {
+        "type": "git",
+        "git": {
+          "commitHash": "94fa39128ef184ffeda33845f6d333f332a34b4d",
+          "repositoryUrl": "https://github.com/microsoft/llguidance.git"
+        },
+        "comments": "llguidance"
+      }
+    },
+    {
+      "component": {
+        "type": "git",
+        "git": {
+          "commitHash": "b1fab721655c5c4b1b08a083d3cd29f163af75d0",
+          "repositoryUrl": "https://github.com/corrosion-rs/corrosion.git"
+        },
+        "comments": "corrosion"
+      }
+    },
+    {
+      "component": {
+        "type": "git",
+        "git": {
+          "commitHash": "88defca71f0f0afe406a892b32e61e0cf6d915fe",
+          "repositoryUrl": "https://github.com/microsoft/cpp_client_telemetry.git"
+        },
+        "comments": "cpp_client_telemetry"
+      }
+    },
+    {
+      "component": {
+        "type": "git",
+        "git": {
+          "commitHash": "68720b4837284335b2d63cb358f8f6ce65f5bc55",
+          "repositoryUrl": "https://github.com/curl/curl.git"
+        },
+        "comments": "curl"
+      }
+    },
+    {
+      "component": {
+        "type": "git",
+        "git": {
+          "commitHash": "068ff080b369adfac81509f9b57b2afabaf82dc5",
+          "repositoryUrl": "https://github.com/Mbed-TLS/mbedtls.git"
+        },
+        "comments": "mbedtls"
       }
     }
   ]

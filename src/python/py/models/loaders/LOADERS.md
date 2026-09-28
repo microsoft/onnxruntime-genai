@@ -11,6 +11,10 @@ MoE blocks, normalization layers, and the language-model head. Builders can
 therefore traverse the same interface and emit ONNX graphs without depending
 on the source format's naming, layout, or quantization scheme.
 
+`TensorModule.can_reuse_as_embedding` tells builders whether a language-model
+head's storage can directly back an embedding lookup. Loaders set it to `false`
+for source formats whose packed weights require a format-specific operator.
+
 ## Loading Flow
 
 1. A builder selects a loader based on the input format and quantization
@@ -24,9 +28,10 @@ on the source format's naming, layout, or quantization scheme.
 - `gguf.py` maps GGUF tensors and metadata to the common model structure.
 - `base.py` defines the shared quantized-model IR and base loading,
 	unpacking, and repacking behavior.
-- `awq.py`, `gptq.py`, `quark.py`, `olive.py`, and `modelopt.py` implement the
-	source-format-specific quantized
-	checkpoint loaders.
+- `awq.py`, `gptq.py`, `quark.py`, `olive.py`, `modelopt.py`, and `quant_auto.py`
+	implement the source-format-specific quantized checkpoint loaders.
+	See [`quant-auto.md`](quant-auto.md) for the `quant_auto` tensor layout and
+	tied-embedding design.
 - `quant_model.py` selects the concrete quantized loader for the requested
 	quantization format.
 

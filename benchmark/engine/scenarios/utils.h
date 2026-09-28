@@ -105,6 +105,8 @@ class MemorySampler {
 struct EngineResources {
   explicit EngineResources(const ScenarioConfig& config);
 
+  size_t model_max_session_tokens{};
+  bool uses_dynamic_batching{};
   std::unique_ptr<OgaConfig> oga_config;
   std::unique_ptr<OgaModel> model;
   std::unique_ptr<OgaTokenizer> tokenizer;
@@ -163,5 +165,7 @@ std::string ResolveModelPath(const std::string& model_path);
 EngineResources CreateEngineResources(const ScenarioConfig& config);
 std::unique_ptr<OgaSequences> BuildRulerPromptTokens(
     int prompt_length_k, const OgaTokenizer& tokenizer, std::mt19937& random);
+size_t FitPromptToSessionLimit(
+    size_t prompt_tokens, size_t generated_tokens, size_t max_session_tokens);
 
 }  // namespace engine_benchmark

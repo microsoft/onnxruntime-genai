@@ -2,8 +2,12 @@
 // Licensed under the MIT License.
 #pragma once
 
+#include <cassert>
+#include <cstdint>
+
 #include "ortx_utils.h"
 #include "../span.h"
+#include "onnxruntime_api.h"
 
 namespace Generators {
 
