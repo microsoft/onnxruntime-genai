@@ -424,7 +424,7 @@ prepare paths and coefficients, attention/KV caches, and INT4 `MatMulNBits` acti
 FP16. This policy is automatic and requires re-exporting older WebGPU drafters.
 
 ```bash
-python -m onnxruntime_genai.models.builder -i path_to_target_model -o path_to_output_folder -p int4 -e webgpu --extra_options use_paged_attention=true state_update_capacity=7 aux_hidden_state_layers=6,20,34,48,62 dflash2_path=path_to_dflash2_checkpoint dflash2_precision=int4
+python -m onnxruntime_genai.models.builder -i path_to_target_model -o path_to_output_folder -p int4 -e webgpu --extra_options use_paged_attention=true num_blocks=1024 state_update_capacity=7 aux_hidden_state_layers=6,20,34,48,62 dflash2_path=path_to_dflash2_checkpoint dflash2_precision=int4
 ```
 
 ```bash
