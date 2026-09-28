@@ -28,6 +28,9 @@ def drafter_session(pytestconfig, tmp_path_factory):
     config = json.loads((model_dir / "genai_config.json").read_text())
     if "WebGpuExecutionProvider" not in ort.get_available_providers():
         assert register_webgpu_plugin(), "WebGPU is required for this model test"
+        import onnxruntime_ep_webgpu as webgpu_ep  # noqa: PLC0415
+
+        ort.register_execution_provider_library(webgpu_ep.get_ep_name(), webgpu_ep.get_library_path())
     options = ort.SessionOptions()
     options.enable_profiling = True
     options.profile_file_prefix = str(tmp_path_factory.mktemp("dflash2-profile") / "profile")
