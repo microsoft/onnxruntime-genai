@@ -9,6 +9,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include "cuda_common.h"
+#include "kernels.h"
 
 namespace Generators {
 namespace cuda {
