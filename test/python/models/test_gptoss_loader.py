@@ -35,6 +35,25 @@ def test_pack_blocks_for_qmoe_preserves_fp4_codes():
     assert torch.equal(packed, expected)
 
 
+def test_prepare_experts_decodes_e2m1_values_and_e8m0_scales(tmp_path):
+    codes = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], dtype=torch.uint8)
+    packed = codes[0::2] | (codes[1::2] << 4)
+    blocks = packed.repeat(2).reshape(1, 1, 1, 16)
+    scales = torch.tensor([[[128]]], dtype=torch.uint8)
+    tensors = _projection_tensors()
+    tensors["model.layers.0.moe.experts.gate_up_proj_blocks"] = blocks
+    tensors["model.layers.0.moe.experts.gate_up_proj_scales"] = scales
+    save_file(tensors, tmp_path / "model.safetensors")
+
+    decoded, _ = GptOssMXFP4Loader(tmp_path).prepare_experts(0, decode=True)
+
+    expected = torch.tensor(
+        [0.0, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 0.0, -1.0, -2.0, -3.0, -4.0, -6.0, -8.0, -12.0]
+    ).repeat(2)
+    assert decoded.shape == (1, 1, 32)
+    assert torch.equal(decoded[0, 0], expected)
+
+
 def test_prepare_experts_preserves_mxfp4_scale_bytes(tmp_path):
     tensors = _projection_tensors()
     save_file(tensors, tmp_path / "model.safetensors")

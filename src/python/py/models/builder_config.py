@@ -253,6 +253,13 @@ def normalize_target_quant_config(
     canonical = canonical_quant_data(data)
     if "checkpoint_policy" in canonical:
         raise ValueError("target_options.quant_config.checkpoint_policy is not supported by target loaders")
+    target_weights = canonical.get("weights", {})
+    if (
+        target_weights.get("type") == "int2"
+        or canonical.get("moe", {}).get("type") == "int2"
+        or any(override.get("type") == "int2" for override in target_weights.get("overrides", []))
+    ):
+        raise ValueError("target_options.quant_config does not support int2; use drafter_options.quant_config")
     seed_precision = precision_from_quant_data(canonical, precision)
     normalized_legacy = copy.deepcopy(legacy_options)
     op_types = normalized_legacy.get("op_types_to_quantize")
@@ -392,14 +399,25 @@ def normalize_drafter_quant_config(
         "checkpoint_policy": "preserve",
         "weights": {"type": "none", "block_size": 32},
         "moe": {"type": "none", "block_size": 32, "weights_prepacked": 0},
-        "format": {"use_qdq": False, "matmulnbits_weights_prepacked": 0},
+        "format": {
+            "use_qdq": False,
+            "matmulnbits_weights_prepacked": 0,
+        },
     }
     quant_config = QuantConfig.from_dict(merge_objects(defaults, canonical))
-    if drafter_type in ("dflash2", "dspark") and quant_config.io_dtype != "bf16":
-        raise ValueError(f"{drafter_type} body io_dtype must be bf16 because its activations can exceed the fp16 range")
+    if drafter_type == "dspark" and quant_config.io_dtype != "bf16":
+        raise ValueError("dspark body io_dtype must be bf16 because its activations can exceed the fp16 range")
+    if drafter_type == "dflash2" and quant_config.io_dtype not in ("fp16", "bf16"):
+        raise ValueError("DFlash2 body io_dtype must be fp16 or bf16")
     if drafter_type == "mtp" and quant_config.io_dtype != target_io_dtype:
         # The MTP graph consumes the decoder hidden state directly; no exporter converts it.
         raise ValueError(f"MTP io_dtype must match the target io_dtype '{target_io_dtype}'")
+    if drafter_type == "mtp" and (
+        quant_config.weights.type == "int2"
+        or quant_config.moe.type == "int2"
+        or any(override.type == "int2" for override in quant_config.weights.overrides)
+    ):
+        raise ValueError("MTP quant_config does not support int2; use DFlash2")
     if drafter_type == "dspark" and quant_config.weights.type != "none":
         raise ValueError("DSpark integer weight quantization is not supported")
     if drafter_type == "dspark":
@@ -418,21 +436,28 @@ def normalize_drafter_quant_config(
         for field_name in ("accuracy_level", "op_types", "overrides"):
             if field_name in weights:
                 raise ValueError(f"DFlash2 weights.{field_name} is not supported")
-        if quant_config.weights.type not in ("none", "int4", "int8"):
-            raise ValueError("DFlash2 weights.type must be none, int4, or int8")
+        if quant_config.weights.type not in ("none", "int2", "int4", "int8"):
+            raise ValueError("DFlash2 weights.type must be none, int2, int4, or int8")
         if quant_config.weights.type != "none" and quant_config.weights.block_size not in (16, 32, 64, 128, 256):
             raise ValueError("DFlash2 integer weights.block_size must be one of 16, 32, 64, 128, or 256")
         if quant_config.weights.method != "default" or not quant_config.weights.symmetric:
             raise ValueError("DFlash2 supports only symmetric DEFAULT integer weight quantization")
         if quant_config.format.use_qdq:
             raise ValueError("DFlash2 body weights require QOperator format")
-        if quant_config.weights.type != "none" and quant_config.format.matmulnbits_weights_prepacked:
-            prepack_mode = quant_config.format.matmulnbits_weights_prepacked
-            allowed_block_sizes = (32, 64, 128) if prepack_mode == 1 else (64, 128)
-            if quant_config.weights.block_size not in allowed_block_sizes:
-                raise ValueError(
-                    f"DFlash2 prepacked body weights require block_size in {allowed_block_sizes} for mode {prepack_mode}"
-                )
+        prepack = quant_config.format.matmulnbits_weights_prepacked
+        if prepack and quant_config.weights.type == "none":
+            raise ValueError("DFlash2 offline prepacking requires integer weights")
+        if prepack == 2 and quant_config.weights.type == "int2":
+            raise ValueError("DFlash2 INT2 weights support only the SM80 prepacked layout")
+        if prepack and quant_config.weights.type == "int2" and quant_config.weights.block_size not in (64, 128):
+            raise ValueError("DFlash2 INT2 offline prepacking requires weights.block_size=64 or 128")
+        supported_blocks = (32, 64, 128) if prepack == 1 else (64, 128)
+        if (
+            prepack
+            and quant_config.weights.type in ("int4", "int8")
+            and quant_config.weights.block_size not in supported_blocks
+        ):
+            raise ValueError(f"DFlash2 INT4/INT8 offline prepacking requires weights.block_size in {supported_blocks}")
     if quant_config.moe.type != "none":
         raise ValueError(f"{drafter_type} does not support MoE expert quantization")
     if execution_provider != "cuda" and quant_config.format.matmulnbits_weights_prepacked:
@@ -647,6 +672,7 @@ def normalize_builder_config(
     flattened, quant_config, effective_precision = flatten_target_options(target, legacy_options, precision, provider)
     flatten_speculative_options(speculative, flattened)
     effective_drafter = flatten_drafter_options(drafter, flattened, provider)
+    validate_runtime_quantization_policy(runtime, effective_drafter, flattened, provider)
     flattened["_runtime_config"] = runtime
 
     effective_target = copy.deepcopy(target)
@@ -705,6 +731,46 @@ def validate_model_dependent_config(effective_config: EffectiveBuilderConfig, mo
         raise ValueError(
             "target_options.quant_config.moe.type is required for an MoE checkpoint when weights.type=none"
         )
+
+
+RUNTIME_TUNABLE_SESSION_OPTIONS = frozenset({"ep.cuda.fpa_intb_gemm"})
+
+
+def validate_runtime_quantization_policy(
+    runtime_config: dict[str, Any],
+    drafter_options: dict[str, Any] | None,
+    flattened: dict[str, Any],
+    execution_provider: str,
+):
+    """Validate runtime kernel selection against the exported quantization policy."""
+    model = runtime_config.get("model", {})
+    if not isinstance(model, dict):
+        return
+    enabled_components = []
+    for component_name, component_options in model.items():
+        if not isinstance(component_options, dict):
+            continue
+        session_options = component_options.get("session_options", {})
+        if not isinstance(session_options, dict) or "ep.cuda.fpa_intb_gemm" not in session_options:
+            continue
+        value = session_options["ep.cuda.fpa_intb_gemm"]
+        if value not in ("0", "1"):
+            raise ValueError(
+                f"runtime_config.model.{component_name}.session_options.ep.cuda.fpa_intb_gemm must be '0' or '1'"
+            )
+        if value == "1":
+            enabled_components.append(component_name)
+    if enabled_components and execution_provider != "cuda":
+        raise ValueError("runtime_config ep.cuda.fpa_intb_gemm=1 is supported only on CUDA")
+    if "dflash2" not in enabled_components:
+        return
+    if not drafter_options or drafter_options.get("drafter_type") != "dflash2":
+        return
+    quant_config = flattened.get("_drafter_quant_config")
+    if quant_config is None or quant_config.weights.type == "none":
+        raise ValueError("DFlash2 ep.cuda.fpa_intb_gemm=1 requires integer weights")
+    if quant_config.weights.type == "int2" and quant_config.weights.block_size not in (64, 128):
+        raise ValueError("DFlash2 INT2 fpA_intB requires weights.block_size=64 or 128")
 
 
 def validate_runtime_config(runtime_config: dict[str, Any], generated_config: dict[str, Any]):
@@ -887,8 +953,17 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
         for key, value in runtime_session.items():
             if key == "provider_options":
                 continue
+            if key == "ep.cuda.fpa_intb_gemm" and value not in ("0", "1"):
+                raise ValueError(
+                    f"runtime_config.model.{component_name}.session_options.ep.cuda.fpa_intb_gemm must be '0' or '1'"
+                )
             validate_session_option(key, value, f"runtime_config.model.{component_name}.session_options")
-            if key in generated_session and key != "log_id" and value != generated_session[key]:
+            if (
+                key in generated_session
+                and key != "log_id"
+                and key not in RUNTIME_TUNABLE_SESSION_OPTIONS
+                and value != generated_session[key]
+            ):
                 raise ValueError(
                     f"runtime_config.model.{component_name}.session_options cannot overwrite required session option '{key}'"
                 )

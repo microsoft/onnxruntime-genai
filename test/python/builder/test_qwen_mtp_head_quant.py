@@ -202,6 +202,19 @@ def test_mtp_quant_config_json_configures_targets_independently():
     assert quant_config.moe.type == "none"
 
 
+@pytest.mark.parametrize(
+    "quant_config",
+    [
+        {"weights": {"type": "int2"}},
+        {"moe": {"type": "int2"}},
+        {"weights": {"type": "int4", "overrides": [{"match": {"name": "/model/a/MatMul"}, "type": "int2"}]}},
+    ],
+)
+def test_legacy_mtp_quant_config_rejects_int2(quant_config):
+    with pytest.raises(ValueError, match="MTP quant_config does not support int2"):
+        _resolve({"mtp_quant_config": json.dumps(quant_config)})
+
+
 @pytest.mark.parametrize("shared_embeddings", [False, True])
 def test_mtp_quant_config_preserves_shared_embeddings_option(shared_embeddings):
     model = _resolve(

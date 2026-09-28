@@ -150,13 +150,17 @@ class BlockDrafterBuilder:
         ``MatMulNBits`` consumes ``[N, K]`` directly, so unlike the dense path the weight is
         not transposed. Repeat call sites reuse the initializer the first one registered.
         """
-        # Mirror prepack_matmulnbits_weights: nodes the fpA-intB kernel cannot run stay raw.
-        allowed_block_sizes = (32, 64, 128) if self.quant_prepack == 1 else (64, 128)
+        n_tile = {2: 128, 4: 64, 8: 32}.get(self.quant_bits)
+        supported_blocks = (32, 64, 128) if self.quant_prepack == 1 else (64, 128)
+        if self.quant_bits == 2:
+            supported_blocks = (64, 128)
         prepack = (
             self.quant_prepack
-            if self.quant_block_size in allowed_block_sizes
+            if n_tile
+            and out_features % n_tile == 0
+            and self.quant_block_size in supported_blocks
             and in_features % self.quant_block_size == 0
-            and out_features % (32 if self.quant_bits == 8 else 64) == 0
+            and (self.quant_bits != 2 or self.quant_prepack == 1)
             else 0
         )
         qweight_name = f"{initializer_name}_Q{self.quant_bits}"
