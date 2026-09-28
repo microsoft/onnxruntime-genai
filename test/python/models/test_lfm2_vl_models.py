@@ -27,6 +27,7 @@ from pathlib import Path
 import numpy as np
 import onnxruntime_genai as og
 import pytest
+from _test_utils import is_webgpu_ep_available
 
 IMAGE_TOKEN = "<image>"
 IMAGE_START_TOKEN = "<|image_start|>"
@@ -416,10 +417,7 @@ def _model_on(model_dir: Path, provider: str | None) -> og.Model:
     config.clear_providers()
     if provider is not None:
         config.append_provider(provider)
-    try:
-        return og.Model(config)
-    except RuntimeError as error:
-        raise pytest.skip.Exception(f"{provider} execution provider is not usable here: {error}") from error
+    return og.Model(config)
 
 
 def _generate_on(
@@ -449,6 +447,8 @@ def test_lfm2_vl_decoder_on_another_provider_matches_cpu(test_data_path, tmp_pat
     # embedding ignores, so they are compared directly.
     if provider == "cuda" and not og.is_cuda_available():
         pytest.skip("CUDA is not available in this build")
+    if provider == "webgpu" and not is_webgpu_ep_available():
+        pytest.skip("the WebGPU plug-in EP is not installed")
 
     model_dir = _copy_model(test_data_path, tmp_path)
     if vision_placement == "decoder":
