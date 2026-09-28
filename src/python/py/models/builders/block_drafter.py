@@ -14,7 +14,7 @@ from onnx_ir.tensor_adapters import TorchTensor, to_torch_dtype
 from quantization import CudaQuantizer
 from tqdm import tqdm
 
-from .base import DEFAULT_OPSET, Model
+from .base import Model
 
 
 # Deliberately not a `Model` subclass: a block drafter emits a hand-written graph, so it shares
@@ -41,16 +41,26 @@ class BlockDrafterBuilder:
     embed_adoption = None
 
     def make_graph(self, graph_name, const_prefix):
+        self.graph_attrs = {
+            "ai.onnx": 24,
+            "com.microsoft": 1,
+            "ir_version": 10,
+            "producer_name": "onnxruntime-genai",
+        }
         self.values: dict[str, ir.Value] = {}
         self.node_names: set[str] = set()
         self.graph = ir.Graph(
             inputs=(),
             outputs=(),
             nodes=(),
-            opset_imports={"": DEFAULT_OPSET, "com.microsoft": 1},
+            opset_imports={"": self.graph_attrs["ai.onnx"], "com.microsoft": self.graph_attrs["com.microsoft"]},
             name=graph_name,
         )
-        self.model = ir.Model(self.graph, ir_version=10, producer_name="onnxruntime-genai")
+        self.model = ir.Model(
+            self.graph,
+            ir_version=self.graph_attrs["ir_version"],
+            producer_name=self.graph_attrs["producer_name"],
+        )
         self.const_cache: dict[str, str] = {}
         self.const_prefix = const_prefix
 
