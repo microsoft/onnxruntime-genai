@@ -1004,6 +1004,11 @@ def get_args():
                     weights into one MatMul or MatMulNBits followed by Split. Preserves BF16
                     activations and body quantization; does not change the target or LM head.
                     Requires re-export and workload-specific performance/quality validation.
+                dflash2_fuse_qkv = Experimental DFlash 2 attention Q/K/V projection fusion.
+                    Accepts true or false (default). Requires dflash2_path. Stacks each layer's
+                    query-block rows over the shared context rows and projects both with one
+                    MatMul or MatMulNBits, feeding PagedAttention a packed QKV stream. Replaces
+                    five projections per layer with one; the Q computed for context rows is dropped.
                 fuse_mlp_gate_up = Fuse each target model MLP's gate/up projections into one
                     MatMul or MatMulNBits followed by Split. Default is false. Applies before
                     target weight quantization and requires unpacked, unadapted gate/up

@@ -1304,6 +1304,114 @@ def test_mlp_gate_up_fusion_execution_matches_unfused(tmp_path, bits):
         np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-6)
 
 
+def _attention_weights(generator, hidden, q_dim, kv_dim):
+    shapes = {
+        "q_proj": (q_dim, hidden),
+        "k_proj": (kv_dim, hidden),
+        "v_proj": (kv_dim, hidden),
+        "o_proj": (hidden, q_dim),
+    }
+    weights = {
+        f"layers.0.self_attn.{name}.weight": torch.randn(shape, generator=generator) / shape[1] ** 0.5
+        for name, shape in shapes.items()
+    }
+    weights["layers.0.self_attn.q_norm.weight"] = torch.ones(q_dim // 2)
+    weights["layers.0.self_attn.k_norm.weight"] = torch.ones(q_dim // 2)
+    return weights
+
+
+@pytest.mark.parametrize("bits", [None, 4])
+def test_qkv_fusion_feeds_packed_qkv_to_paged_attention(tmp_path, bits):
+    builder = DFlash2Builder(
+        _draft_checkpoint(tmp_path),
+        str(tmp_path),
+        ir.DataType.BFLOAT16,
+        paged_block_size=256,
+        max_position_embeddings=128,
+        quant={"bits": bits, "block_size": 8, "prepack": 0} if bits else None,
+        fuse_qkv=True,
+    )
+    builder.weights = _attention_weights(torch.Generator().manual_seed(7), 8, 8, 4)
+
+    builder._make_attention(0, "hidden_states", "ctx_n", "num_block")
+
+    nodes = {node.name: node for node in builder.graph}
+    projections = [node.name for node in builder.graph if node.op_type in ("MatMul", "MatMulNBits")]
+    assert projections == ["/dflash2/layers.0/attn/qkv_proj/MatMul", "/dflash2/layers.0/attn/o_proj/MatMul"]
+    rows = nodes["/dflash2/layers.0/attn/qkv_rows/Concat"]
+    assert [value.name for value in rows.inputs] == ["hidden_states", "ctx_n"]
+    assert rows.attributes["axis"].value == 0
+    qkv = nodes["/dflash2/layers.0/attn/qkv_proj/MatMul"]
+    assert qkv.inputs[0] is rows.outputs[0]
+    assert qkv.outputs[0].shape == ir.Shape(["num_rows", 16])
+    gather = nodes["/dflash2/layers.0/attn/qkv_gather"]
+    assert [value.name for value in gather.inputs] == [qkv.outputs[0].name, "qkv_row_map"]
+    attention = nodes["/dflash2/layers.0/attn/PagedAttention"]
+    assert attention.inputs[0] is gather.outputs[0]
+    assert all(value is None or value.name == "" for value in attention.inputs[1:3])
+    assert not any(node.op_type == "Split" for node in builder.graph)
+
+
+@pytest.mark.parametrize("bits", [None, 4, 8])
+def test_qkv_fusion_matches_unfused_projections(tmp_path, bits):
+    draft_dir = _draft_checkpoint(tmp_path)
+    hidden, q_dim, kv_dim = 32, 32, 16
+    weights = _attention_weights(torch.Generator().manual_seed(11), hidden, q_dim, kv_dim)
+    sessions = []
+    for fused in (False, True):
+        builder = DFlash2Builder(
+            draft_dir,
+            str(tmp_path),
+            ir.DataType.FLOAT,
+            paged_block_size=256,
+            max_position_embeddings=128,
+            quant={"bits": bits, "block_size": 32, "prepack": 0} if bits else None,
+            fuse_qkv=fused,
+        )
+        builder.io_dtype = ir.DataType.FLOAT
+        builder.hidden_size, builder.num_heads, builder.num_kv_heads, builder.head_size = hidden, 2, 1, 16
+        builder.weights = weights
+        for name, rows in (("hidden_states", "num_block"), ("ctx_n", "num_ctx")):
+            builder.graph.inputs.append(builder.make_value(name, ir.DataType.FLOAT, [rows, hidden]))
+        for name in ("qkv_row_map",) if fused else ("q_row_map", "qkv_row_map"):
+            builder.graph.inputs.append(builder.make_value(name, ir.DataType.INT32, ["num_tokens"]))
+        if fused:
+            outputs = [builder._make_packed_qkv(0, "hidden_states", "ctx_n")]
+        else:
+            ctx_kv = [
+                builder.matmul(
+                    f"/dflash2/layers.0/ctx_{proj[0]}/MatMul",
+                    "ctx_n",
+                    weights[f"layers.0.self_attn.{proj}.weight"],
+                    hidden,
+                    kv_dim,
+                    "num_ctx",
+                    weight_name=f"dflash2.layers.0.self_attn.{proj}.weight",
+                )
+                for proj in ("k_proj", "v_proj")
+            ]
+            outputs = list(builder._make_separate_qkv(0, "hidden_states", ctx_kv, "num_block"))
+        builder.graph.outputs.extend(builder.values[output] for output in outputs)
+        model = ir.serde.serialize_model(builder.model)
+        onnx.checker.check_model(model)
+        sessions.append(ort.InferenceSession(model.SerializeToString(), providers=["CPUExecutionProvider"]))
+
+    generator = torch.Generator().manual_seed(12)
+    for num_block, num_ctx in ((8, 1), (8, 5), (16, 3)):
+        # Context rows first, as the runtime packs each request; block rows index themselves.
+        inputs = {
+            "hidden_states": torch.randn((num_block, hidden), generator=generator).numpy(),
+            "ctx_n": torch.randn((num_ctx, hidden), generator=generator).numpy(),
+            "q_row_map": np.concatenate([np.zeros(num_ctx), np.arange(num_block)]).astype(np.int32),
+            "qkv_row_map": np.concatenate([num_block + np.arange(num_ctx), np.arange(num_block)]).astype(np.int32),
+        }
+        q, k, v = sessions[0].run(None, inputs)
+        (packed,) = sessions[1].run(None, {name: inputs[name] for name in ("hidden_states", "ctx_n", "qkv_row_map")})
+        np.testing.assert_allclose(packed[num_ctx:, :q_dim], q[num_ctx:], rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(packed[:, q_dim : q_dim + kv_dim], k, rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(packed[:, q_dim + kv_dim :], v, rtol=1e-5, atol=1e-5)
+
+
 def _quantized_head_builder(tmp_path, bits=4, block_size=8):
     builder = DFlash2Builder(
         _draft_checkpoint(tmp_path),
@@ -1696,6 +1804,47 @@ def test_gate_up_fusion_defaults_off(tmp_path):
     assert model.dflash2_attrs["fuse_gate_up"] is False
     builder = DFlash2Builder(model.dflash2_path, str(tmp_path), ir.DataType.BFLOAT16, 256, 128)
     assert builder.mlp_attrs["fuse_gate_up"] is False
+
+
+def test_qkv_fusion_defaults_off(tmp_path):
+    model = _composite()
+    model.make_dflash2_init(io_dtype=None, extra_options={"dflash2_path": _draft_checkpoint(tmp_path)})
+
+    assert model.dflash2_attrs["fuse_qkv"] is False
+    builder = DFlash2Builder(model.dflash2_path, str(tmp_path), ir.DataType.BFLOAT16, 256, 128)
+    assert builder.attn_attrs["fuse_qkv"] is False
+
+
+@pytest.mark.parametrize("fuse_qkv", [True, "true", "false"])
+def test_qkv_fusion_option_reaches_the_builder(tmp_path, monkeypatch, fuse_qkv):
+    captured = {}
+
+    class StubDFlash2Builder:
+        def __init__(self, *_args, **kwargs):
+            captured["fuse_qkv"] = kwargs["fuse_qkv"]
+
+        def make_model(self):
+            pass
+
+    monkeypatch.setattr(importlib.import_module("models.builders.dflash2"), "DFlash2Builder", StubDFlash2Builder)
+    model = _composite()
+    model.make_dflash2_init(
+        io_dtype=None, extra_options={"dflash2_path": _draft_checkpoint(tmp_path), "dflash2_fuse_qkv": fuse_qkv}
+    )
+
+    model.make_dflash2_model(str(tmp_path))
+
+    assert captured["fuse_qkv"] is (str(fuse_qkv).lower() == "true")
+
+
+@pytest.mark.parametrize("value", ["yes", "", 1, None])
+def test_qkv_fusion_rejects_invalid_option(tmp_path, value):
+    model = _composite()
+    with pytest.raises(ValueError, match="dflash2_fuse_qkv must be true or false"):
+        model.make_dflash2_init(
+            io_dtype=None,
+            extra_options={"dflash2_path": _draft_checkpoint(tmp_path), "dflash2_fuse_qkv": value},
+        )
 
 
 @pytest.mark.parametrize("value", ["yes", "", 1, None])
