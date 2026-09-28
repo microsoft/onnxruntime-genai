@@ -78,9 +78,10 @@ TEST(Dflash2GraphRestoreTest, ExtendedCachedPrefixReplaysWithoutStaleGraphOrLost
   auto config = CreateConfig(GetOrtEnv(), model_path);
   ASSERT_TRUE(IsGraphCaptureEnabled(config->model.decoder.session_options));
   ASSERT_TRUE(IsGraphCaptureEnabled(CreateDflash2Config(*config)->model.decoder.session_options));
-  auto model = OgaModel::Create(model_path);
+  auto oga_config = OgaConfig::Create(model_path);
+  oga_config->Overlay(R"({"engine":{"dynamic_batching":{"prefix_caching":true,"max_scheduled_tokens":512}}})");
+  auto model = OgaModel::Create(*oga_config);
   auto tokenizer = OgaTokenizer::Create(*model);
-  auto engine = OgaEngine::Create(*model);
 
   const std::string patch =
       "diff --git a/math.py b/math.py\n@@ -1,2 +1,3 @@\n"
@@ -100,9 +101,14 @@ TEST(Dflash2GraphRestoreTest, ExtendedCachedPrefixReplaysWithoutStaleGraphOrLost
   }
   auto extended = OgaSequences::Create();
   tokenizer->Encode((prompt + ending).c_str(), *extended);
-  ASSERT_EQ(initial->SequenceCount(0), 534u);
-  ASSERT_EQ(extended->SequenceCount(0), 1146u);
+  if (initial->SequenceCount(0) <= 512 || initial->SequenceCount(0) >= 768 ||
+      extended->SequenceCount(0) <= 1024 || extended->SequenceCount(0) >= 1280) {
+    GTEST_SKIP() << "The tokenizer must place the initial prompt between 512 and 768 tokens and "
+                    "the extended prompt between 1024 and 1280 tokens; got "
+                 << initial->SequenceCount(0) << " and " << extended->SequenceCount(0) << ".";
+  }
 
+  auto engine = OgaEngine::Create(*model);
   const auto cold = RunGraphRestoreTurn(*engine, *initial);
   const auto extension = RunGraphRestoreTurn(*engine, *extended);
   const auto replay = RunGraphRestoreTurn(*engine, *extended);
@@ -114,7 +120,10 @@ TEST(Dflash2GraphRestoreTest, ExtendedCachedPrefixReplaysWithoutStaleGraphOrLost
   EXPECT_GT(extension.accepted, 0u);
   EXPECT_GT(replay.proposed, 0u);
   EXPECT_GT(replay.accepted, 0u);
-  EXPECT_GT(repeated_replay.accepted, 0u);
+  EXPECT_EQ(replay.proposed, extension.proposed);
+  EXPECT_EQ(replay.accepted, extension.accepted);
+  EXPECT_EQ(repeated_replay.proposed, replay.proposed);
+  EXPECT_EQ(repeated_replay.accepted, replay.accepted);
   EXPECT_EQ(replay.output, extension.output);
   EXPECT_EQ(repeated_replay.output, extension.output);
 }

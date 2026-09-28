@@ -1756,18 +1756,22 @@ page size, before allocating cache resources. The drafter run is synchronous bec
 inputs and outputs are owned by one proposal call, so its run options cannot disable
 execution-provider synchronization.
 
-The direct drafter session captures uniform cold-request shapes with stable proposal buffers.
-A batch containing a request restored from a DFlash2 prefix checkpoint instead runs eagerly
-with graph id `-1`; previously captured cold shapes remain available to cold-only batches.
-This avoids stale proposals without discarding captured graphs on each cached admission.
+The direct drafter session captures uniform shapes with stable proposal buffers, including
+batches containing a request restored from a DFlash2 prefix checkpoint. Graph replay requires
+a CUDA EP with session-scoped device arenas: older plugin EPs shared an arena across target and
+drafter sessions, allowing another session to overwrite memory retained by a captured graph.
+No graphs are discarded on cached admission.
 On ORT builds without per-graph release, graph captures retired by buffer growth still live
 until their session is destroyed.
 The opt-in `Dflash2GraphRestoreTest.ExtendedCachedPrefixReplaysWithoutStaleGraphOrLostDrafts`
 exercises the real Engine with CUDA graph capture: set `D_FLASH2_GRAPH_TEST_MODEL` to a
 graph-enabled Qwen package with 256-token blocks and 512-token prefill, then run
-`engine_unit_tests` with `--ep_dir` pointing at its CUDA plugin directory and the test's
-`--gtest_filter`. It checks the 534-to-1146-token extension, two longer cached replays,
-draft acceptance, and output parity; ordinary CPU CI skips this model-dependent test.
+`engine_unit_tests` with `--ep_dir` pointing at a CUDA plugin with session-scoped device arenas
+and the test's `--gtest_filter`. The test enables prefix caching with a 512-token prefill chunk
+through a configuration overlay. With the reference tokenizer, it checks the 534-to-1146-token
+extension, two longer cached replays, draft acceptance, and output parity; a tokenizer whose
+prompt lengths fall outside the required cache-boundary ranges skips the test. Ordinary CPU CI
+skips this model-dependent test.
 
 If this optional post-commit drafter run fails, the Engine discards any partial proposal
 and still publishes the already committed target events.

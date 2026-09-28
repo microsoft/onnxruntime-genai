@@ -37,7 +37,7 @@ size_t Dflash2DraftWidth(size_t capability_limit, size_t configured_limit,
 size_t Dflash2GraphBlockTableColumnLimit(size_t context_length, size_t paged_block_size,
                                          size_t query_block_size);
 
-bool Dflash2GraphCaptureAllowed(bool enabled, bool uniform_ingest, bool has_restored_request,
+bool Dflash2GraphCaptureAllowed(bool enabled, bool uniform_ingest,
                                 size_t max_blocks, size_t max_columns) noexcept;
 
 // Reshapes a proposal tensor the drafter reuses between steps, replacing its buffer only when a
@@ -186,7 +186,6 @@ struct Dflash2Drafter {
   struct RequestState {
     std::vector<int32_t> blocks;
     size_t cached_positions{};  // Logical committed cursor; a windowed ring retains only its live tail.
-    bool restored_from_prefix{};
   };
 
   // Whether the drafter can carry this feed's request, admitting it to the pool when it can.
