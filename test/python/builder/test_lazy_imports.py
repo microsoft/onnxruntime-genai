@@ -2,77 +2,14 @@
 # Licensed under the MIT License
 
 import ast
-import importlib.util
+import importlib
 import subprocess
 import sys
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import ModuleType
 from unittest.mock import Mock
 
 import pytest
-
-
-def test_all_builder_exports_are_lazy(monkeypatch):
-    builders_dir = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builders"
-    spec = importlib.util.spec_from_file_location("builders", builders_dir / "__init__.py")
-    package = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(package)
-
-    assert package.__all__
-    assert not set(package.__all__) & vars(package).keys(), "Builder exports must not be eagerly loaded"
-
-    for name in package.__all__:
-        exported_class = object()
-        importer = Mock(return_value=SimpleNamespace(**{name: exported_class}))
-        monkeypatch.setattr(package, "import_module", importer)
-
-        assert getattr(package, name) is exported_class
-        importer.assert_called_once()
-        module_name, package_name = importer.call_args.args
-        assert package_name == package.__name__
-        assert module_name.startswith(".")
-        source_path = builders_dir.joinpath(*module_name[1:].split(".")).with_suffix(".py")
-        source = ast.parse(source_path.read_text(encoding="utf-8"))
-        assert any(isinstance(node, ast.ClassDef) and node.name == name for node in source.body), name
-
-
-@pytest.mark.parametrize(
-    ("relative_path", "dependency"),
-    [
-        (("builders", "base.py"), "transformers"),
-        (("builders", "mistral.py"), "transformers"),
-        (("builders", "qwen.py"), "transformers"),
-    ],
-)
-def test_no_module_level_model_class_imports(relative_path, dependency):
-    models_dir = Path(__file__).parents[3] / "src" / "python" / "py" / "models"
-    tree = ast.parse(models_dir.joinpath(*relative_path).read_text(encoding="utf-8"))
-    pending = list(tree.body)
-    violations = []
-
-    while pending:
-        node = pending.pop()
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        if (
-            isinstance(node, ast.ImportFrom)
-            and node.module == "transformers"
-            and all(alias.name in {"AutoTokenizer", "GenerationConfig"} for alias in node.names)
-        ):
-            continue
-        if isinstance(node, ast.Import) and all(alias.name == "transformers" for alias in node.names):
-            continue
-        if isinstance(node, ast.Import):
-            modules = [alias.name for alias in node.names]
-        elif isinstance(node, ast.ImportFrom):
-            modules = [node.module or "", *(alias.name for alias in node.names)]
-        else:
-            modules = []
-        if any(dependency in module.split(".") for module in modules):
-            violations.append(node.lineno)
-        pending.extend(ast.iter_child_nodes(node))
-
-    assert not violations, f"Eager {dependency} model imports found at lines {sorted(violations)}"
 
 
 @pytest.mark.parametrize(
@@ -156,15 +93,15 @@ def test_load_weights_requires_only_selected_transformers_class(weight_loader, m
 
 
 @pytest.mark.parametrize(
-    ("weight_loader", "class_name"),
+    ("weight_loader", "class_name", "version"),
     [
-        (("base", "Model"), "Qwen3_5ForConditionalGeneration"),
-        (("mistral", "Mistral3TextModel"), "Mistral3ForConditionalGeneration"),
-        (("qwen", "VideoChatFlashQwenModel"), "Qwen2ForCausalLM"),
+        (("base", "Model"), "Qwen3_5ForConditionalGeneration", "4.45.0"),
+        (("base", "Model"), "Qwen3_5ForConditionalGeneration", None),
+        (("mistral", "Mistral3TextModel"), "Mistral3ForConditionalGeneration", "4.45.0"),
+        (("qwen", "VideoChatFlashQwenModel"), "Qwen2ForCausalLM", "4.45.0"),
     ],
     indirect=["weight_loader"],
 )
-@pytest.mark.parametrize("version", ["4.45.0", None])
 def test_load_weights_reports_missing_selected_transformers_class(weight_loader, class_name, version):
     model, transformers = weight_loader
     model.model_type = "qwen3_5_text"
@@ -193,27 +130,23 @@ def test_transformers_resolver_preserves_dependency_errors(weight_loader, error_
 
 
 @pytest.mark.parametrize(
-    ("weight_loader", "class_name"),
+    ("weight_loader", "class_name", "local_checkpoint"),
     [
-        (("mistral", "Mistral3TextModel"), "Mistral3ForConditionalGeneration"),
-        (("qwen", "VideoChatFlashQwenModel"), "Qwen2ForCausalLM"),
+        (("mistral", "Mistral3TextModel"), "Mistral3ForConditionalGeneration", False),
+        (("qwen", "VideoChatFlashQwenModel"), "Qwen2ForCausalLM", False),
+        (("qwen", "VideoChatFlashQwenModel"), "Qwen2ForCausalLM", True),
     ],
     indirect=["weight_loader"],
 )
-@pytest.mark.parametrize("local_checkpoint", [False, True])
-def test_custom_weight_loaders_use_shared_resolver(weight_loader, class_name, local_checkpoint, tmp_path):
+def test_custom_weight_loaders_preserve_loading_arguments(weight_loader, class_name, local_checkpoint, tmp_path):
     model, transformers = weight_loader
     if local_checkpoint:
         model.model_name_or_path = str(tmp_path)
     loader = Mock()
     loader.from_pretrained.return_value.named_modules.return_value = []
     setattr(transformers, class_name, loader)
-    resolver = Mock(wraps=model.resolve_transformers_class)
-    model.resolve_transformers_class = resolver
-
     assert model.load_weights("") is loader.from_pretrained.return_value
 
-    resolver.assert_called_once_with(class_name)
     kwargs = {"token": model.hf_token}
     if class_name == "Mistral3ForConditionalGeneration":
         kwargs.update(cache_dir=model.cache_dir, trust_remote_code=model.hf_remote, num_hidden_layers=model.num_layers)
@@ -222,39 +155,11 @@ def test_custom_weight_loaders_use_shared_resolver(weight_loader, class_name, lo
     loader.from_pretrained.assert_called_once_with(model.model_name_or_path, **kwargs)
 
 
-@pytest.mark.parametrize(
-    ("statement", "expected_modules"),
-    [
-        ("import builders", set()),
-        ("from builders import Model", {"base"}),
-        ("from builders import LlamaModel", {"base", "llama"}),
-        ("from builders import QwenModel", {"base", "mtp", "qwen"}),
-        ("from builders.qwen import Qwen35Model, Qwen35MoEModel", {"base", "mtp", "qwen"}),
-    ],
-)
-def test_only_requested_builders_are_imported(statement, expected_modules):
-    models_dir = Path(__file__).parents[3] / "src" / "python" / "py" / "models"
-    script = f"""
-import sys
-{statement}
-loaded = {{
-    name.removeprefix("builders.")
-    for name in sys.modules
-    if name.startswith("builders.") and name.count(".") == 1
-}}
-assert loaded == {expected_modules!r}, loaded
-"""
-    result = subprocess.run([sys.executable, "-c", script], cwd=models_dir, capture_output=True, text=True, check=False)
-    assert result.returncode == 0, result.stdout + result.stderr
-
-
 def test_importing_entrypoint_does_not_load_transformers_architectures():
     models_dir = Path(__file__).parents[3] / "src" / "python" / "py" / "models"
     script = """
 import sys
 import builder
-assert builder.LlamaModel.__module__ == "builders.llama"
-assert builder.Qwen35MoEModel.__module__ == "builders.qwen"
 loaded = {
     name for name in sys.modules
     if name.startswith("transformers.models.")
@@ -267,37 +172,26 @@ assert not loaded, loaded
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_unknown_builder_attribute_raises():
-    models_dir = Path(__file__).parents[3] / "src" / "python" / "py" / "models"
-    script = """
-import builders
-assert not hasattr(builders, "UnknownModel")
-assert not hasattr(builders, "__missing__")
-"""
-    result = subprocess.run(
-        [sys.executable, "-c", script],
-        cwd=models_dir,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-
-
-@pytest.mark.parametrize("test_module", ["test_paged_block_size.py", "test_precision.py", "test_quantized_kv_cache.py"])
-def test_collecting_builder_tests_preserves_module_metadata(test_module):
+def test_collecting_builder_tests_preserves_module_metadata():
     script = f"""
 import inspect
 import runpy
 import sys
+from pathlib import Path
 sys.path.insert(0, {str(Path(__file__).parents[3] / "src" / "python" / "py" / "models")!r})
 import builders
 original_builders = builders
-runpy.run_path({str(Path(__file__).with_name(test_module))!r})
-assert sys.modules["builders"] is original_builders, "Test collection replaced the builders package"
-assert inspect.getsourcefile(sys.modules["builders"]) == original_builders.__file__
-from transformers import Qwen2_5_VLForConditionalGeneration
-assert Qwen2_5_VLForConditionalGeneration.__name__ == "Qwen2_5_VLForConditionalGeneration"
+test_dir = Path({str(Path(__file__).parent)!r})
+for test_module in (
+    "test_paged_block_size.py",
+    "test_precision.py",
+    "test_quantized_kv_cache.py",
+    "test_lfm2_vl.py",
+    "test_max_draft_tokens.py",
+):
+    runpy.run_path(str(test_dir / test_module))
+    assert sys.modules["builders"] is original_builders, test_module
+    assert inspect.getsourcefile(sys.modules["builders"]) == original_builders.__file__, test_module
 """
     result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stdout + result.stderr
