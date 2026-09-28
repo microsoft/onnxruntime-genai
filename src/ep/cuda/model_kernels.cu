@@ -657,14 +657,16 @@ __global__ void ReplayStateUpdatesKernel(const StateUpdateReplayDescGpu* __restr
       state = __fmul_rn(
           state,
           descriptor.decay[static_cast<uint64_t>(transition) * descriptor.channel_count + value_head]);
-      state = __fmaf_rn(
+      // Match GatedDeltaNet's separately rounded multiply and add. Contracting this update changes
+      // the target state after replaying an accepted prefix and can alter later greedy tokens.
+      const float update = __fmul_rn(
           descriptor.key[(static_cast<uint64_t>(transition) * descriptor.key_head_count + key_head) *
                              descriptor.key_width +
                          key_index],
           descriptor.delta[(static_cast<uint64_t>(transition) * descriptor.channel_count + value_head) *
                                descriptor.state_width +
-                           value_index],
-          state);
+                           value_index]);
+      state = __fadd_rn(state, update);
     }
     static_cast<float*>(descriptor.destination_state)[state_index] = state;
   }

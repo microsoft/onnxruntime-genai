@@ -26,6 +26,10 @@ void ValidatePackedPositionIdsInput(
     ONNXTensorElementDataType data_type,
     std::span<const int64_t> shape,
     std::span<const char* const> symbolic_shape = {});
+void ValidatePackedHiddenStatesInputShape(
+  std::span<const int64_t> shape,
+  size_t scheduled_token_rows,
+  std::span<const int64_t> model_shape);
 
 AttentionMetadataValues GetAttentionMetadataForPlan(const StepPlan& plan);
 // `max_query_len` is the number of new tokens every sequence contributes to steps served by this

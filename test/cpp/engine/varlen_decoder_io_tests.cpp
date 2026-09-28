@@ -53,6 +53,20 @@ TEST(VarlenDecoderIOTest, PackedHybridPositionIdsAcceptTokenVectorOrMropeMatrix)
                std::runtime_error);
 }
 
+TEST(VarlenDecoderIOTest, PackedHiddenStatesUseExportedInputWidth) {
+  EXPECT_NO_THROW(ValidatePackedHiddenStatesInputShape(
+    std::array<int64_t, 2>{3, 10240}, 3,
+    std::array<int64_t, 2>{-1, 10240}));
+  EXPECT_THROW(ValidatePackedHiddenStatesInputShape(
+           std::array<int64_t, 2>{3, 2560}, 3,
+           std::array<int64_t, 2>{-1, 10240}),
+         std::runtime_error);
+  EXPECT_THROW(ValidatePackedHiddenStatesInputShape(
+           std::array<int64_t, 2>{2, 10240}, 3,
+           std::array<int64_t, 2>{-1, 10240}),
+         std::runtime_error);
+}
+
 TEST(VarlenDecoderIOTest, EagerMetadataUsesExactStepBounds) {
   StepPlan plan;
   RequestStepPlan first;

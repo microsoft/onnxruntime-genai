@@ -37,6 +37,23 @@ void ValidatePackedPositionIdsInput(
   }
 }
 
+void ValidatePackedHiddenStatesInputShape(
+    std::span<const int64_t> shape,
+    size_t scheduled_token_rows,
+    std::span<const int64_t> model_shape) {
+  if (model_shape.size() != 2 || model_shape[1] <= 0) {
+    throw std::runtime_error(
+        "The decoder hidden_states input must have a positive static width.");
+  }
+  const std::array<int64_t, 2> expected_shape{
+      static_cast<int64_t>(scheduled_token_rows), model_shape[1]};
+  if (!std::equal(shape.begin(), shape.end(),
+                  expected_shape.begin(), expected_shape.end())) {
+    throw std::runtime_error(
+        "The packed hidden_states input shape does not match the scheduled token rows.");
+  }
+}
+
 namespace {
 
 int32_t CheckedMetadataLength(size_t value, const char* name) {
@@ -433,13 +450,9 @@ void VarlenDecoderIO::PrepareHiddenStatesInput(
 
   const auto info = hidden_states_input_->GetTensorTypeAndShapeInfo();
   const auto shape = info->GetShape();
-  const std::vector<int64_t> expected_shape = {
-      static_cast<int64_t>(TokenCount(scheduled_requests)),
-      static_cast<int64_t>(model->config_->model.decoder.hidden_size)};
-  if (shape != expected_shape) {
-    throw std::runtime_error(
-        "The packed hidden_states input shape does not match the scheduled token rows.");
-  }
+  const auto model_shape = model->session_info_.GetInputShape(hidden_states_name);
+  ValidatePackedHiddenStatesInputShape(
+      shape, TokenCount(scheduled_requests), model_shape);
   if (info->GetElementType() != model->session_info_.GetInputDataType(hidden_states_name)) {
     throw std::runtime_error(
         "The packed hidden_states input type does not match the decoder input type.");
@@ -451,7 +464,7 @@ void VarlenDecoderIO::PrepareHiddenStatesInput(
       throw std::runtime_error(
           "Captured decoder step has no persistent hidden_states input buffer.");
     }
-    graph_buffers_->hidden_states_input->CreateTensor(expected_shape, /*make_static=*/true);
+    graph_buffers_->hidden_states_input->CreateTensor(shape, /*make_static=*/true);
     graph_buffers_->hidden_states_input->GetByteSpan().CopyFrom(
         ByteWrapTensor(*model->p_device_inputs_, *hidden_states_input_));
     active_hidden_states_input = graph_buffers_->hidden_states_input->GetOrtTensor();

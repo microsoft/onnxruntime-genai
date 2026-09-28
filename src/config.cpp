@@ -146,13 +146,40 @@ std::unique_ptr<Config> CreateMtpDecoderConfig(const Config& config) {
   decoder.outputs.present_key_scale_names.clear();
   decoder.outputs.present_value_scale_names.clear();
 
-  // The MTP graph is one full-attention layer. Paged-attention metadata and block-table names are
+  // The MTP graph is one decoder layer. Paged-attention metadata and block-table names are
   // deliberately inherited above; fixed recurrent state and a main-model sliding window are not.
   decoder.layer_types.assign(static_cast<size_t>(mtp.num_hidden_layers), "full_attention");
   decoder.conv_cache_size = 0;
-  decoder.state_update_capacity = 0;
   decoder.sliding_window.reset();
-  decoder.state_groups.reset();
+  if (!mtp.inputs.past_indexer_names.empty() ||
+      !mtp.outputs.present_indexer_names.empty()) {
+    if (mtp.inputs.past_indexer_names.empty() ||
+        mtp.outputs.present_indexer_names.empty() ||
+        !decoder.state_groups) {
+      throw std::runtime_error(
+          "MTP indexer state requires matching input/output templates and a target fixed_indexer group.");
+    }
+    const auto indexer = std::find_if(
+        decoder.state_groups->begin(), decoder.state_groups->end(),
+        [](const Config::Model::Decoder::StateGroup& group) {
+          return group.kind == Config::Model::Decoder::StateGroupKind::FixedIndexer;
+        });
+    if (indexer == decoder.state_groups->end() || !indexer->state_update) {
+      throw std::runtime_error(
+          "MTP indexer state requires the target fixed_indexer state_update contract.");
+    }
+    auto projected_indexer = *indexer;
+    projected_indexer.layer_ids = {0};
+    // Chained head runs consume full present state. Compact replay is reserved for the target's
+    // verify transaction, which captures a whole speculative block in one invocation.
+    projected_indexer.state_update->enabled = false;
+    decoder.state_groups = std::vector<Config::Model::Decoder::StateGroup>{
+        {Config::Model::Decoder::StateGroupKind::PagedKeyValue, {0}, std::nullopt},
+        std::move(projected_indexer)};
+  } else {
+    decoder.state_update_capacity = 0;
+    decoder.state_groups.reset();
+  }
   decoder.pipeline.clear();
   // A chained draft feeds every stage the previous stage's hidden states, so the head must emit its
   // own hidden states. Record that before clearing the MTP section the demand was inferred from.

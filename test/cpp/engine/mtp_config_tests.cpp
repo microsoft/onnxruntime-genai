@@ -128,9 +128,7 @@ TEST(MtpDecoderConfigTest, ProjectsPagedDecoderWithoutMainFixedState) {
   mtp.num_key_value_heads = 2;
   mtp.head_size = 64;
   mtp.inputs.hidden_states = "head_hidden";
-  mtp.inputs.past_indexer_names = "past.%d.indexer";
   mtp.outputs.hidden_states = "head_hidden_out";
-  mtp.outputs.present_indexer_names = "present.%d.indexer";
   mtp.session_options.emplace();
   mtp.session_options->graph_optimization_level = ORT_DISABLE_ALL;
   mtp.session_options->config_entries = {
@@ -149,8 +147,6 @@ TEST(MtpDecoderConfigTest, ProjectsPagedDecoderWithoutMainFixedState) {
   EXPECT_EQ(head.hidden_size, 2048);
   EXPECT_EQ(head.inputs.hidden_states, "head_hidden");
   EXPECT_EQ(head.outputs.hidden_states, "head_hidden_out");
-  EXPECT_EQ(head.inputs.past_indexer_names, "past.%d.indexer");
-  EXPECT_EQ(head.outputs.present_indexer_names, "present.%d.indexer");
   EXPECT_EQ(head.inputs.block_table, "block_table");
   EXPECT_EQ(head.inputs.cumulative_sequence_lengths, "cumulative_sequence_lengths");
   EXPECT_EQ(head.inputs.past_sequence_lengths, "past_sequence_lengths");
@@ -187,6 +183,55 @@ TEST(MtpDecoderConfigTest, ProjectsPagedDecoderWithoutMainFixedState) {
   ASSERT_EQ(head.layer_types.size(), 1u);
   EXPECT_EQ(head.layer_types[0], "full_attention");
   EXPECT_THROW(CreateMtpDecoderConfig(*projected), std::runtime_error);
+}
+
+TEST(MtpDecoderConfigTest, ProjectsOneLayerFixedIndexerStateForTheHead) {
+  Config config;
+  auto& decoder = config.model.decoder;
+  decoder.num_hidden_layers = 48;
+  decoder.num_key_value_heads = 2;
+  decoder.head_size = 256;
+  decoder.hidden_size = 2560;
+  decoder.state_update_capacity = 7;
+  decoder.inputs.past_indexer_kv_buffer_names = "past.%d.indexer_kv_buffer";
+  decoder.inputs.past_indexer_state_lengths_names = "past.%d.indexer_state_lengths";
+  decoder.outputs.present_indexer_kv_buffer_names = "present.%d.indexer_kv_buffer";
+  decoder.outputs.present_indexer_state_lengths_names = "present.%d.indexer_state_lengths";
+  decoder.outputs.state_update_indexer_names = "state_update.%d.indexer";
+  decoder.state_groups = std::vector<Config::Model::Decoder::StateGroup>{
+      {Config::Model::Decoder::StateGroupKind::PagedKeyValue,
+       {3, 7}, std::nullopt},
+      {Config::Model::Decoder::StateGroupKind::FixedIndexer,
+       {3, 7}, Config::Model::Decoder::StateUpdate{7, true, 0, 4}}};
+
+  auto& mtp = config.model.mtp;
+  mtp.filename = "mtp.onnx";
+  mtp.num_hidden_layers = 1;
+  mtp.num_key_value_heads = 2;
+  mtp.head_size = 256;
+  mtp.inputs.past_indexer_names = "past.%d.indexer_key";
+  mtp.outputs.present_indexer_names = "present.%d.indexer_key";
+
+  const auto projected = CreateMtpDecoderConfig(config);
+  const auto& head = projected->model.decoder;
+  ASSERT_TRUE(head.state_groups.has_value());
+  ASSERT_EQ(head.state_groups->size(), 2u);
+  EXPECT_EQ((*head.state_groups)[0].kind,
+            Config::Model::Decoder::StateGroupKind::PagedKeyValue);
+  EXPECT_EQ((*head.state_groups)[0].layer_ids, std::vector<int>{0});
+  const auto& indexer = (*head.state_groups)[1];
+  EXPECT_EQ(indexer.kind,
+            Config::Model::Decoder::StateGroupKind::FixedIndexer);
+  EXPECT_EQ(indexer.layer_ids, std::vector<int>{0});
+  ASSERT_TRUE(indexer.state_update.has_value());
+  EXPECT_EQ(indexer.state_update->capacity, 7);
+  EXPECT_FALSE(indexer.state_update->enabled);
+  EXPECT_EQ(indexer.state_update->compress_ratio, 4);
+  EXPECT_EQ(head.state_update_capacity, 7);
+  EXPECT_EQ(head.inputs.past_indexer_kv_buffer_names,
+            "past.%d.indexer_kv_buffer");
+  EXPECT_EQ(head.outputs.state_update_indexer_names,
+            "state_update.%d.indexer");
 }
 
 // A per-token quantized target declares scale name templates on its decoder. The MTP projection

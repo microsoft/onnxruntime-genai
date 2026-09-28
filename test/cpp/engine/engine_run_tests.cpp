@@ -3026,6 +3026,20 @@ TEST_F(EngineRunTest, MtpPlanningFailureCommitsTargetStepWithoutDrafts) {
   EXPECT_EQ(engine.engine->GetSpeculativeStats().standard_fallback_steps, 1u);
 }
 
+TEST_F(EngineRunTest, MtpUsesExportedHiddenStateWidth) {
+  model_ = LoadSyntheticPagedMtpModel();
+  const int32_t eos = EosToken(*model_);
+  const int64_t exported_hidden_width = model_->config_->model.decoder.hidden_size * 2;
+  auto engine = MakeMtpDoublesEngine(model_, eos == 5 ? 6 : 5, exported_hidden_width);
+  auto request = CreateRequestWithPrompt(engine.engine, Prompt(10));
+
+  std::array<EngineEvent, 8> storage;
+  ASSERT_GT(engine.engine->Run(storage), 0u);
+  EXPECT_NE(storage.front().flags & EngineEventFlagFailed, EngineEventFlagFailed);
+  EXPECT_GT(request->PendingDraftTokenCount(), 0u);
+  EXPECT_GT(engine.mtp_executor->decode_calls, 0);
+}
+
 TEST_F(EngineRunTest, PersistentMtpFailureKeepsTheRequestAdvancing) {
   model_ = LoadSyntheticPagedMtpModel();
   const int32_t eos = EosToken(*model_);

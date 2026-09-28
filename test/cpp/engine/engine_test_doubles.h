@@ -825,14 +825,18 @@ inline CompositeDoublesEngine MakeCompositeDoublesEngine(std::shared_ptr<Model> 
 }
 
 inline MtpDoublesEngine MakeMtpDoublesEngine(std::shared_ptr<Model> model,
-                                             int32_t forced_token) {
+                                             int32_t forced_token,
+                                             int64_t hidden_states_width = 0) {
+  if (hidden_states_width == 0) {
+    hidden_states_width = model->config_->model.decoder.hidden_size;
+  }
   auto cache = std::make_shared<RecordingCacheManager>(model, /*capacity=*/8);
   cache->SetMaxDraftTokensPerStep(3);
   auto* cache_observer = cache.get();
   auto scheduler = Scheduler::Create(model, cache);
   auto executor = std::make_unique<RecordingModelExecutor>(
       model, cache, forced_token);
-  executor->EnableHiddenStatesOutput(model->config_->model.decoder.hidden_size);
+  executor->EnableHiddenStatesOutput(hidden_states_width);
   auto* executor_observer = executor.get();
 
   auto mtp_model = std::make_shared<DecoderOnly_Model>(
@@ -842,8 +846,7 @@ inline MtpDoublesEngine MakeMtpDoublesEngine(std::shared_ptr<Model> model,
   auto* mtp_cache_observer = mtp_cache.get();
   auto mtp_executor = std::make_unique<RecordingModelExecutor>(
       mtp_model, mtp_cache, forced_token);
-  mtp_executor->EnableHiddenStatesOutput(
-      mtp_model->config_->model.decoder.hidden_size);
+  mtp_executor->EnableHiddenStatesOutput(hidden_states_width);
   auto* mtp_executor_observer = mtp_executor.get();
 
   EngineDependencies dependencies{

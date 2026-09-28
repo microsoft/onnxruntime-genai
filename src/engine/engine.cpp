@@ -614,11 +614,12 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
     throw std::logic_error("The main decoder did not expose hidden states for its MTP head.");
   }
   const auto target_hidden_shape = target_hidden_states->GetShape();
-  const int64_t hidden_size = model_->config_->model.decoder.hidden_size;
-  if (target_hidden_shape !=
-      std::vector<int64_t>{static_cast<int64_t>(target_plan.token_count), hidden_size}) {
+  if (target_hidden_shape.size() != 2 ||
+      target_hidden_shape[0] != static_cast<int64_t>(target_plan.token_count) ||
+      target_hidden_shape[1] <= 0) {
     throw std::logic_error("The main decoder hidden-state shape does not match its packed step plan.");
   }
+  const int64_t hidden_size = target_hidden_shape[1];
   const auto hidden_type = target_hidden_states->GetType();
   const auto& mtp_hidden_name = mtp_model_->config_->model.decoder.inputs.hidden_states;
   if (hidden_type != mtp_model_->session_info_.GetInputDataType(mtp_hidden_name)) {
@@ -849,6 +850,12 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
     ScheduledRequests mtp_requests{step->plan, mtp_model_, nullptr, nullptr};
     ExecutionContext context{&step->plan};
     context.cache_reservation = step->reservation->PagedReservation();
+    context.fixed_state_slots = step->reservation->FixedStateSlots();
+    context.fixed_state_bindings = step->reservation->FixedStateBindings();
+    context.fixed_state_staging_bytes = step->reservation->FixedStateStagingBytes();
+    if (auto* fixed_reservation = step->reservation->FixedReservation()) {
+      context.fixed_state_binding_key = fixed_reservation->BindingLayoutKey();
+    }
     context.hidden_states_input = packed_hidden_states.GetOrtTensor();
     if (device_draft_chain) {
       context.run_options->AddConfigEntry("disable_synchronize_execution_providers", "1");
@@ -968,6 +975,12 @@ std::unique_ptr<Engine::MtpStep> Engine::PrepareMtpStep(
           chain_plan, mtp_model_, nullptr, nullptr);
       ExecutionContext chain_context{&chain_plan};
       chain_context.cache_reservation = step->reservation->PagedReservation();
+      chain_context.fixed_state_slots = step->reservation->FixedStateSlots();
+      chain_context.fixed_state_bindings = step->reservation->FixedStateBindings();
+      chain_context.fixed_state_staging_bytes = step->reservation->FixedStateStagingBytes();
+      if (auto* fixed_reservation = step->reservation->FixedReservation()) {
+        chain_context.fixed_state_binding_key = fixed_reservation->BindingLayoutKey();
+      }
       chain_context.hidden_states_input = feedback_hidden->GetOrtTensor();
       if (device_draft_chain) {
         chain_context.input_ids = packed_device_inputs;
