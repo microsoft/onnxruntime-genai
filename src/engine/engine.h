@@ -269,6 +269,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
   // feeds are captured before Request::CommitStep clears the accepted-draft counts they depend on.
   void PrepareDflash2Feeds(const StepPlan& plan, const std::vector<RequestStepResult>& results);
   void PublishDflash2Drafts(ScheduledRequests& scheduled_requests);
+  void ReleaseConsumedDflash2Checkpoints() noexcept;
   void PublishDflash2DraftResults();
   // Accounts for a recoverable DFlash 2 failure and decides whether the drafter stays enabled.
   void RecordDflash2Failure(std::exception_ptr error, bool contract_error);

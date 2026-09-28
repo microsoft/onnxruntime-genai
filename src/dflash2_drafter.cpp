@@ -802,6 +802,8 @@ bool Dflash2Drafter::RestorePrefix(const Feed& feed) {
       CopyDflash2RingBlocks(*caches_[layer], state.blocks, *checkpoint->caches[layer], contiguous);
     }
     model_->p_device_kvcache_->Synchronize();
+    // A captured proposal may retain the previous ring's device state when the same shape replays.
+    ReleaseCapturedGraphs();
     state.cached_positions = feed.first_position;
     requests_.emplace(feed.request, std::move(state));
     free_blocks_.resize(free_blocks_.size() - ring_blocks_);

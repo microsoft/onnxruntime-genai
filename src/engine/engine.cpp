@@ -536,6 +536,7 @@ void Engine::PublishDflash2Drafts(ScheduledRequests& scheduled_requests) {
                                 &dflash2_draft_distributions_)) {
     ++speculative_stats_.draft_forward_passes;
   }
+  ReleaseConsumedDflash2Checkpoints();
   PublishDflash2DraftResults();
   if (!dflash2_prefix_checkpoints_enabled_) {
     return;
@@ -561,6 +562,12 @@ void Engine::PublishDflash2Drafts(ScheduledRequests& scheduled_requests) {
     } catch (const std::bad_alloc&) {
       cache_manager_->RecordPrefixPublicationRefusal();
     }
+  }
+}
+
+void Engine::ReleaseConsumedDflash2Checkpoints() noexcept {
+  for (auto& feed : dflash2_feeds_) {
+    feed.prefix_checkpoint.reset();
   }
 }
 

@@ -53,6 +53,26 @@ struct EngineRunTestAccess {
   static int32_t DraftToken(const Request& request) {
     return request.draft_tokens_.front();
   }
+
+  static void SetCheckpointFeeds(
+      Engine& engine, std::span<const std::shared_ptr<const Dflash2PrefixCheckpoint>> checkpoints) {
+    engine.dflash2_feeds_.clear();
+    for (const auto& checkpoint : checkpoints) {
+      engine.dflash2_feeds_.push_back({.prefix_checkpoint = checkpoint, .first_position = 8});
+    }
+  }
+
+  static void ReleaseConsumedCheckpoints(Engine& engine) {
+    engine.ReleaseConsumedDflash2Checkpoints();
+  }
+
+  static bool HasCheckpointLease(const Engine& engine, size_t index) {
+    return engine.dflash2_feeds_.at(index).prefix_checkpoint != nullptr;
+  }
+
+  static size_t FeedFirstPosition(const Engine& engine, size_t index) {
+    return engine.dflash2_feeds_.at(index).first_position;
+  }
 };
 
 namespace {
@@ -375,6 +395,28 @@ class EngineRunTest : public ::testing::Test {
 
   std::shared_ptr<Model> model_;
 };
+
+TEST_F(EngineRunTest, ReleasesConsumedRestoreLeasesBeforeTheNextCapture) {
+  auto engine = MakeDoublesEngine(model_, /*capacity=*/2, EosToken(*model_));
+  auto first = std::make_shared<Dflash2PrefixCheckpoint>();
+  auto second = std::make_shared<Dflash2PrefixCheckpoint>();
+  std::weak_ptr<const Dflash2PrefixCheckpoint> first_lease = first;
+  std::weak_ptr<const Dflash2PrefixCheckpoint> second_lease = second;
+  std::array<std::shared_ptr<const Dflash2PrefixCheckpoint>, 2> held{first, second};
+  EngineRunTestAccess::SetCheckpointFeeds(*engine.engine, held);
+  first.reset();
+  second.reset();
+  held = {};
+  EXPECT_FALSE(first_lease.expired());
+  EXPECT_FALSE(second_lease.expired());
+
+  EngineRunTestAccess::ReleaseConsumedCheckpoints(*engine.engine);
+  EXPECT_TRUE(first_lease.expired());
+  EXPECT_TRUE(second_lease.expired());
+  EXPECT_FALSE(EngineRunTestAccess::HasCheckpointLease(*engine.engine, 0));
+  EXPECT_FALSE(EngineRunTestAccess::HasCheckpointLease(*engine.engine, 1));
+  EXPECT_EQ(EngineRunTestAccess::FeedFirstPosition(*engine.engine, 0), 8u);
+}
 
 TEST(ExternalRefCountedTest,
      DistinguishesNeverHeldHeldAbandonedAndReacquiredStates) {

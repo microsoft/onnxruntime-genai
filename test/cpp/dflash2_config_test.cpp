@@ -899,6 +899,62 @@ TEST(Dflash2ConfigTest, ExecutesWindowedRestoreAcrossRingWrap) {
   EXPECT_THROW(drafter.Propose(next_aux, damaged, proposals), std::logic_error);
 }
 
+TEST(Dflash2ConfigTest, CapturesAndRestoresExtendedWindowedPrefix) {
+  auto config = MakeDflash2Config();
+  config.config_path = fs::path{MODEL_PATH "engine/synthetic-dspark"};
+  auto& draft = config.model.dflash2;
+  draft.filename = "dflash2.onnx";
+  draft.num_hidden_layers = 1;
+  draft.num_key_value_heads = 1;
+  draft.head_size = 1;
+  draft.block_size = 4;
+  draft.num_draft_tokens = 3;
+  draft.selector_top_k = 2;
+  draft.sliding_window = 8;
+
+  auto model = std::make_shared<Dflash2Model>(CreateDflash2Config(config), GetOrtEnv());
+  const size_t ring_blocks = Dflash2Drafter::PoolBlocks(config, 4, 1);
+  Dflash2Drafter drafter{model, /*paged_block_size=*/4, ring_blocks * 2, /*max_requests=*/2};
+  int source_id = 0, replay_id = 0;
+  auto* source = reinterpret_cast<Request*>(&source_id);
+  auto* replay = reinterpret_cast<Request*>(&replay_id);
+  Tensor aux{GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<float>};
+  aux.CreateTensor(std::array<int64_t, 2>{8, 1});
+  std::vector<std::vector<int32_t>> proposals;
+
+  for (size_t position = 0; position < 24; position += 8) {
+    const std::array feeds{Dflash2Drafter::Feed{
+        .request = source, .aux_row_count = 8, .first_position = position, .anchor_token = 11, .draft_eligible = true, .wants_drafts = true}};
+    ASSERT_TRUE(drafter.Propose(aux, feeds, proposals));
+  }
+  auto initial = drafter.CapturePrefix(source, 24);
+  ASSERT_NE(initial, nullptr);
+  initial.reset();
+  const std::array extension{Dflash2Drafter::Feed{
+      .request = source, .aux_row_count = 8, .first_position = 24, .anchor_token = 11, .draft_eligible = true, .wants_drafts = true}};
+  ASSERT_TRUE(drafter.Propose(aux, extension, proposals));
+  auto extended = drafter.CapturePrefix(source, 32);
+  ASSERT_NE(extended, nullptr);
+
+  Tensor next_aux{GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<float>};
+  next_aux.CreateTensor(std::array<int64_t, 2>{1, 1});
+  next_aux.GetByteSpan().Zero();
+  const std::array uninterrupted{Dflash2Drafter::Feed{
+      .request = source, .aux_row_count = 1, .first_position = 32, .anchor_token = 12, .draft_eligible = true, .wants_drafts = true}};
+  ASSERT_TRUE(drafter.Propose(next_aux, uninterrupted, proposals));
+  const auto expected = proposals.front();
+  ASSERT_FALSE(expected.empty());
+
+  drafter.Release(source);
+  const std::array restored{Dflash2Drafter::Feed{
+      .request = replay, .prefix_checkpoint = extended, .aux_row_count = 1, .first_position = 32, .anchor_token = 12, .draft_eligible = true, .wants_drafts = true}};
+  ASSERT_TRUE(drafter.Propose(next_aux, restored, proposals));
+  EXPECT_EQ(proposals.front(), expected);
+  drafter.Release(replay);
+  ASSERT_TRUE(drafter.Propose(next_aux, restored, proposals));
+  EXPECT_EQ(proposals.front(), expected);
+}
+
 TEST(Dflash2ConfigTest, TrackedDsparkIngestsSampledTurnsAndResumesDrafting) {
   auto config = MakeDflash2Config();
   config.config_path = fs::path{MODEL_PATH "engine/synthetic-dspark"};
