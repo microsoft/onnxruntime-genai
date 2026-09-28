@@ -14,7 +14,8 @@ jobs:
   ${{ if eq(parameters.os, 'linux') }}:
     pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
   ${{ if eq(parameters.os, 'win') }}:
-    pool: 'onnxruntime-Win-CPU-2022'
+    pool:
+      name: 'onnxruntime-Win-CPU-2022'
   ${{ if eq(parameters.os, 'osx') }}:
     pool:
       name: AcesShared
