@@ -7,6 +7,7 @@
 
 #include "execution_context.h"
 #include "request.h"
+#include "request_index.h"
 
 namespace Generators {
 
@@ -71,6 +72,14 @@ struct ScheduledRequests {
                     std::shared_ptr<Model> model,
                     BatchedSampler* batched_sampler,
                     BatchedSamplingPlan* sampling_plan);
+
+  ScheduledRequests(std::shared_ptr<Model> model,
+                    BatchedSampler* batched_sampler,
+                    BatchedSamplingPlan* sampling_plan,
+                    size_t capacity);
+
+  void Reset(const StepPlan& plan);
+  void Clear();
 
   ExecutionContext& CreateExecutionContext();
 
@@ -149,6 +158,7 @@ struct ScheduledRequests {
   size_t transaction_checkpoint_count_{};
   bool transaction_uses_batched_sampler_{};
   bool sampler_checkpoint_active_{};
+  RequestIndex request_ids_;
 };
 
 }  // namespace Generators

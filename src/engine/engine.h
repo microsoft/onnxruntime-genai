@@ -257,7 +257,18 @@ struct Engine : std::enable_shared_from_this<Engine>,
     std::unique_ptr<CacheStepReservation> reservation;
   };
 
-  std::unique_ptr<MtpStep> PrepareMtpStep(
+  struct MtpFeed {
+    std::shared_ptr<Request> target;
+    std::shared_ptr<Request> shadow;
+    std::vector<int32_t> tokens;
+    size_t target_hidden_row{};
+    size_t max_draft_tokens{};
+    bool newly_created{};
+  };
+
+  struct MtpWorkspace;
+
+  MtpStep* PrepareMtpStep(
       const StepPlan& target_plan,
       const std::vector<RequestStepResult>& target_results,
       ScheduledRequests& target_requests);
@@ -297,6 +308,10 @@ struct Engine : std::enable_shared_from_this<Engine>,
   std::shared_ptr<CacheManager> mtp_cache_manager_;
   std::unique_ptr<ModelExecutor> mtp_model_executor_;
   std::unordered_map<const Request*, std::shared_ptr<Request>> mtp_requests_;
+  MtpStep mtp_step_;
+  std::vector<MtpFeed> mtp_feeds_;
+  std::vector<std::shared_ptr<Request>> mtp_checkpointed_shadows_;
+  std::unique_ptr<MtpWorkspace> mtp_workspace_;
   size_t mtp_consecutive_failures_{};
   bool mtp_disabled_{};
   // Present only when model.dflash2 names a block drafter. Owns its own session and paged cache.
@@ -308,8 +323,6 @@ struct Engine : std::enable_shared_from_this<Engine>,
   std::vector<std::pair<Request*, std::mt19937>> dflash2_rng_checkpoints_;
   size_t dflash2_consecutive_failures_{};
   bool dflash2_disabled_{};
-  DeviceSpan<int32_t> mtp_device_drafts_;
-  DeviceSpan<int32_t> mtp_device_chain_inputs_;
   EngineStepErrorFactory make_step_error_;
   const std::thread::id owner_thread_{std::this_thread::get_id()};
   EngineHealth health_{EngineHealth::Healthy};
