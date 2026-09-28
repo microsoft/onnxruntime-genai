@@ -53,6 +53,7 @@
   },
   "search": {
     "max_length": 128,
-    "do_sample": false
+    "do_sample": false,
+    "past_present_share_buffer": true
   }
 }

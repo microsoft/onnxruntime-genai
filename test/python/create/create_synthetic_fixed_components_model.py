@@ -104,7 +104,7 @@ def create_config(output_dir):
                 ],
             },
         },
-        "search": {"max_length": 128, "do_sample": False},
+        "search": {"max_length": 128, "do_sample": False, "past_present_share_buffer": True},
     }
     with open(os.path.join(output_dir, "genai_config.json"), "w") as file:
         json.dump(config, file, indent=2)

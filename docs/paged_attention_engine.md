@@ -1524,20 +1524,28 @@ allocation surface.
 
 A reservation accepts requests in scheduled row order and exposes ordered handles,
 bindings, and target tokens. A contiguous resident interval binds its active bank
-directly as model input and its inactive bank as model output. If resident banks
+directly as model input and its inactive bank as model output. When
+`search.past_present_share_buffer` is enabled on CUDA, the append-only fixed-indexer key
+input and output instead alias the same buffer; the separately double-buffered
+indexer length remains the publication boundary. If resident banks
 differ, the pool first copies only minority rows into a canonical bank and changes
 their selectors after synchronization; this representation-only normalization does
 not advance request state. New admissions and fragmented intervals gather committed
-or zero state into contiguous model inputs and use distinct staged outputs. No path
-binds an output over visible committed state. The reservation reports its input/output
+or zero state into contiguous model inputs and use staged outputs. The indexer key
+uses one shared staging buffer under the same option; other state keeps distinct
+input and output staging. No mutable visibility metadata is bound over visible
+committed state. The reservation reports its input/output
 binding footprint through the retained `PlannedStagingBytes` API; direct views overlap
 storage already counted by `PersistentBytes`.
 
-Every tensor is backed by two persistent `[capacity, row...]` banks, and each slot
+Every tensor is normally backed by two persistent `[capacity, row...]` banks, and each slot
 records which bank is currently active (holds its visible committed state). This
 double buffering lets the commit be split into three phases so that a composite
 Engine transaction can validate and stage all of its resources, synchronize once,
-and then publish them at a single infallible boundary:
+and then publish them at a single infallible boundary. The fixed-indexer key is the
+one exception when sharing is enabled: `PackedSparseAttentionIndexer` only appends
+keys, while its separately banked state length determines the committed prefix. A
+discard can therefore leave unreferenced appended bytes without exposing them.
 
 - **`ValidateCommit()`** is `const`, mutates nothing, and performs every host-side
   precondition check before device work begins. It proves every checkpointed slot
@@ -1548,8 +1556,9 @@ and then publish them at a single infallible boundary:
 - **`PrepareCommit()`** is the fallible device-completion phase: it re-validates,
   copies fallback outputs into the **inactive** bank, or replays a partially accepted
   compact update over a direct output, and synchronizes. A fully accepted direct
-  output needs no state copy. The active (visible) bank is never touched, so a
-  failure leaves committed state exactly as it was; it drains the device and marks
+  output needs no state copy. Shared indexer-key writes can touch only bytes beyond
+  the separately published committed length. A failure therefore leaves visible
+  committed state unchanged; it drains the device and marks
   the pool unhealthy because the inactive banks may be left partially written. The
   reservation becomes `Prepared`.
 - **`PublishCommit()`** is `noexcept` and performs no fallible or device work: it
@@ -1582,7 +1591,8 @@ bank is written by the commit that publishes it before it is ever gathered, and 
 slot's inactive bank is only ever written (never read) before it becomes active, so
 the persistent banks never need construction-time zeroing. The pool therefore does
 not zero on release, and does not zero gather or staged tensors. It reports its
-persistent bytes (both state banks and both staging buffers), reusable zeroing scratch bytes, and
+persistent bytes (normally both state banks and both staging buffers; one of each for
+a shared indexer key), reusable zeroing scratch bytes, and
 the active reservation's input/output binding footprint separately. The two-bank design trades roughly double
 the persistent footprint for a publish that is a host-only bank flip with no device
 copy, which is what lets `PublishCommit()` be `noexcept`.

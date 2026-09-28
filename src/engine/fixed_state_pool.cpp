@@ -42,6 +42,7 @@ struct FixedStateTemplate {
   const std::string* input;
   const std::string* output;
   bool initialize_to_ple_token_pad_id{};
+  bool share_past_present_buffer{};
 };
 
 std::vector<FixedStateTemplate> FixedStateTemplates(
@@ -61,7 +62,7 @@ std::vector<FixedStateTemplate> FixedStateTemplates(
   }
   if (kind == StateGroupKind::FixedIndexer) {
     return {
-        {&decoder.inputs.past_indexer_names, &decoder.outputs.present_indexer_names},
+        {&decoder.inputs.past_indexer_names, &decoder.outputs.present_indexer_names, false, true},
         {&decoder.inputs.past_indexer_kv_buffer_names, &decoder.outputs.present_indexer_kv_buffer_names},
         {&decoder.inputs.past_indexer_state_lengths_names, &decoder.outputs.present_indexer_state_lengths_names},
     };
@@ -221,6 +222,7 @@ struct FixedStatePool::Impl {
     std::vector<int64_t> session_shape;
     size_t row_bytes{};
     std::optional<int64_t> initial_int64_value;
+    bool share_past_present_buffer{};
     Config::Model::Decoder::StateUpdateKind state_update_kind{};
     bool state_update_enabled{};
     size_t state_update_capacity{};
@@ -233,9 +235,8 @@ struct FixedStatePool::Impl {
     size_t state_update_state_width{};
     size_t state_update_key_width{};
     size_t state_update_key_head_count{};
-    // Two persistent [capacity, row...] banks per tensor. Each slot reads its currently active bank
-    // and a commit stages into the inactive bank, so publish is a bank flip with no device work and
-    // a failed prepare cannot corrupt the visible (active) state. See PrepareCommit/PublishCommit.
+    // Fixed state normally uses two persistent [capacity, row...] banks. Append-only indexer keys
+    // may share those bank handles because separately published lengths govern their visibility.
     std::array<std::shared_ptr<OrtValue>, 2> banks;
     std::shared_ptr<OrtValue> checkpoint_bank;
     std::unique_ptr<OrtValue> zero_row;  // [1, row...] reusable zeroed gather source.
@@ -580,8 +581,9 @@ void FixedStateReservation::Discard() {
       state_ == FixedStateReservationState::Failed) {
     return;
   }
-  // Discard is valid from Reserved or Prepared. A Prepared reservation only wrote into inactive
-  // banks, so nothing visible has to be undone; only provisional slots are returned to the pool.
+  // Discard is valid from Reserved or Prepared. Ordinary state only wrote into inactive banks;
+  // shared indexer keys may contain appended data, but the uncommitted lengths keep it invisible.
+  // Nothing has to be undone, and only provisional slots are returned to the pool.
   pool_->Discard(*this);
 }
 
@@ -625,6 +627,10 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity,
       spec.layer_id = layer_id;
       spec.input_name = ExpandBinding(*binding_template.input, layer_id);
       spec.output_name = ExpandBinding(*binding_template.output, layer_id);
+      spec.share_past_present_buffer =
+          binding_template.share_past_present_buffer &&
+          impl_->model->config_->search.past_present_share_buffer &&
+          impl_->device->GetType() == DeviceType::CUDA;
       if (binding_template.initialize_to_ple_token_pad_id) {
         spec.initial_int64_value = decoder.ple_token_pad_id;
       }
@@ -710,11 +716,11 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity,
           spec.state_update_key_head_count = static_cast<size_t>(update.key_head_count);
         }
       }
-      // Two state banks and two staging buffers remain allocated for the pool lifetime.
+      const size_t state_allocation_count = spec.share_past_present_buffer ? 2 : 4;
       impl_->persistent_bytes = CheckedAdd(
           impl_->persistent_bytes,
           CheckedMultiply(CheckedMultiply(capacity, spec.row_bytes, "persistent allocation"),
-                          spec.banks.size() + 2, "persistent allocation"),
+                          state_allocation_count, "persistent allocation"),
           "persistent allocation");
       impl_->persistent_bytes = CheckedAdd(
           impl_->persistent_bytes,
@@ -792,10 +798,12 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity,
   for (auto& spec : impl_->tensors) {
     const auto bank_shape = StorageShape(capacity, spec.session_shape);
     const auto zero_shape = StorageShape(1, spec.session_shape);
-    for (auto& bank : spec.banks) {
-      bank = OrtValue::CreateTensor(
-          impl_->device->GetAllocator(), bank_shape, spec.data_type);
-    }
+    spec.banks[0] = OrtValue::CreateTensor(
+        impl_->device->GetAllocator(), bank_shape, spec.data_type);
+    spec.banks[1] = spec.share_past_present_buffer
+                        ? spec.banks[0]
+                        : OrtValue::CreateTensor(
+                              impl_->device->GetAllocator(), bank_shape, spec.data_type);
     if (prefix_checkpoint_capacity != 0) {
       spec.checkpoint_bank = OrtValue::CreateTensor(
           impl_->device->GetAllocator(),
@@ -806,8 +814,10 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity,
         impl_->device->GetAllocator(), zero_shape, spec.data_type);
     spec.gathered_staging = OrtValue::CreateTensor(
         impl_->device->GetAllocator(), bank_shape, spec.data_type);
-    spec.output_staging = OrtValue::CreateTensor(
-        impl_->device->GetAllocator(), bank_shape, spec.data_type);
+    spec.output_staging = spec.share_past_present_buffer
+                              ? spec.gathered_staging
+                              : OrtValue::CreateTensor(
+                                    impl_->device->GetAllocator(), bank_shape, spec.data_type);
     const auto allocate_state_update_staging = [&](const Impl::StateUpdateOutputSpec& output) {
       if (output.name.empty()) {
         return std::shared_ptr<OrtValue>{};
@@ -1239,6 +1249,9 @@ FixedStateReservation FixedStatePool::Reserve(
     bool normalization_enqueued = false;
     try {
       for (const auto& spec : impl_->tensors) {
+        if (spec.share_past_present_buffer) {
+          continue;
+        }
         for (const auto& row : plan) {
           const auto& slot = impl_->slots[row.slot_index];
           if (slot.active_bank == direct_active_bank) {
@@ -1649,10 +1662,9 @@ void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
   ValidateCommit(reservation);
 
   auto& storage = *reservation.storage_;
-  // Stage every committed row into each slot's inactive bank and synchronize. The active (visible)
-  // bank is never touched, so a failure here leaves committed state exactly as it was; we still
-  // drain the device before the staging buffers unwind and mark the pool unhealthy because the
-  // inactive banks may be left partially written.
+  // Stage every committed row and synchronize. Ordinary state goes to an inactive bank. Shared
+  // indexer keys are append-only and remain bounded by separately double-buffered lengths, so data
+  // written past the committed length is not visible before publication.
   try {
     std::vector<StateUpdateReplayDesc> replay_descriptors;
     if (storage.captures_state_updates) {
@@ -1727,9 +1739,9 @@ void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
     impl_->device->Synchronize();
   } catch (...) {
     // Record the failure and release this reservation's provisional slots before draining. The
-    // active banks were never touched, so committed state is intact; the inactive banks may be
-    // partially written, so the pool is marked unhealthy. The drain is best-effort because a sticky
-    // device error can make Synchronize itself throw, and the staging buffers are about to unwind.
+    // Ordinary active banks and published indexer lengths were not touched, so committed state is
+    // intact. Mark the pool unhealthy because a destination may be partially written. The drain is
+    // best-effort because a sticky device error can make Synchronize itself throw.
     impl_->healthy = false;
     reservation.state_ = FixedStateReservationState::Failed;
     ReleaseProvisionalSlots(reservation);

@@ -27,14 +27,16 @@ const void* const kRequestC = &kRequestStorageC;
 
 using Request = FixedStateReservationRequest;
 
-class OffsetTensorViewsUnsupportedDevice final : public DeviceInterface {
+class FixedStateTestDevice final : public DeviceInterface {
  public:
-  explicit OffsetTensorViewsUnsupportedDevice(
+  explicit FixedStateTestDevice(
       DeviceInterface& inner, DeviceType type = DeviceType::CPU,
-      bool supports_transactional_fixed_state = true)
+      bool supports_transactional_fixed_state = true,
+      bool supports_offset_tensor_views = false)
       : inner_{inner},
         type_{type},
-        supports_transactional_fixed_state_{supports_transactional_fixed_state} {}
+        supports_transactional_fixed_state_{supports_transactional_fixed_state},
+        supports_offset_tensor_views_{supports_offset_tensor_views} {}
 
   DeviceType GetType() const override { return type_; }
   void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
@@ -63,7 +65,7 @@ class OffsetTensorViewsUnsupportedDevice final : public DeviceInterface {
     return inner_.CreateKeyValueCache(state);
   }
   void Synchronize() override { inner_.Synchronize(); }
-  bool SupportsOffsetTensorViews() const override { return false; }
+  bool SupportsOffsetTensorViews() const override { return supports_offset_tensor_views_; }
   bool SupportsTransactionalFixedState() const override {
     return supports_transactional_fixed_state_;
   }
@@ -72,6 +74,7 @@ class OffsetTensorViewsUnsupportedDevice final : public DeviceInterface {
   DeviceInterface& inner_;
   DeviceType type_;
   bool supports_transactional_fixed_state_;
+  bool supports_offset_tensor_views_;
 };
 
 class ScopedKeyValueCacheDevice {
@@ -295,6 +298,10 @@ TEST_F(FixedStatePoolTest, FreshRowsGatherZeroAndCommitPublishes) {
 
 TEST(FixedStatePoolComponentsTest, InitializesAndCommitsPleAndIndexerState) {
   auto model = LoadSyntheticFixedComponentsModel();
+  FixedStateTestDevice cuda_device{*model->p_device_kvcache_, DeviceType::CUDA,
+                                   /*supports_transactional_fixed_state=*/true,
+                                   /*supports_offset_tensor_views=*/true};
+  ScopedKeyValueCacheDevice scoped_device{*model, cuda_device};
   FixedStatePool pool{model, 1};
 
   auto requests = One(kRequestA);
@@ -309,6 +316,12 @@ TEST(FixedStatePoolComponentsTest, InitializesAndCommitsPleAndIndexerState) {
     EXPECT_STREQ(reservation.Bindings()[2].input_name, "past.1.indexer_key");
     EXPECT_STREQ(reservation.Bindings()[3].input_name, "past.1.indexer_kv_buffer");
     EXPECT_STREQ(reservation.Bindings()[4].input_name, "past.1.indexer_state_lengths");
+    EXPECT_EQ(reservation.Bindings()[2].input->GetTensorMutableData<void>(),
+          reservation.Bindings()[2].output->GetTensorMutableData<void>());
+    EXPECT_NE(reservation.Bindings()[3].input->GetTensorMutableData<void>(),
+          reservation.Bindings()[3].output->GetTensorMutableData<void>());
+    EXPECT_NE(reservation.Bindings()[4].input->GetTensorMutableData<void>(),
+          reservation.Bindings()[4].output->GetTensorMutableData<void>());
 
     const auto& token_binding = reservation.Bindings()[0];
     const auto* token_input = token_binding.input->GetTensorData<int64_t>();
@@ -332,6 +345,12 @@ TEST(FixedStatePoolComponentsTest, InitializesAndCommitsPleAndIndexerState) {
   }
 
   auto resident = pool.Reserve(requests);
+  EXPECT_EQ(resident.Bindings()[2].input->GetTensorMutableData<void>(),
+            resident.Bindings()[2].output->GetTensorMutableData<void>());
+  EXPECT_NE(resident.Bindings()[3].input->GetTensorMutableData<void>(),
+            resident.Bindings()[3].output->GetTensorMutableData<void>());
+  EXPECT_NE(resident.Bindings()[4].input->GetTensorMutableData<void>(),
+            resident.Bindings()[4].output->GetTensorMutableData<void>());
   const auto* token_input = resident.Bindings()[0].input->GetTensorData<int64_t>();
   EXPECT_EQ(token_input[0], 11);
   EXPECT_EQ(token_input[1], 11);
@@ -344,6 +363,22 @@ TEST(FixedStatePoolComponentsTest, InitializesAndCommitsPleAndIndexerState) {
   const auto* lengths_input = resident.Bindings()[4].input->GetTensorData<int32_t>();
   EXPECT_EQ(lengths_input[0], 3);
   EXPECT_EQ(lengths_input[1], 3);
+}
+
+TEST(FixedStatePoolComponentsTest, KeepsSeparateIndexerKeyBuffersWhenSharingIsDisabled) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-fixed-components");
+  config->search.past_present_share_buffer = false;
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  FixedStateTestDevice cuda_device{*model->p_device_kvcache_, DeviceType::CUDA,
+                                   /*supports_transactional_fixed_state=*/true,
+                                   /*supports_offset_tensor_views=*/true};
+  ScopedKeyValueCacheDevice scoped_device{*model, cuda_device};
+  FixedStatePool pool{model, 1};
+
+  auto reservation = pool.Reserve(One(kRequestA));
+  ASSERT_EQ(reservation.Bindings().size(), 5u);
+  EXPECT_NE(reservation.Bindings()[2].input->GetTensorMutableData<void>(),
+            reservation.Bindings()[2].output->GetTensorMutableData<void>());
 }
 
 TEST_F(FixedStatePoolTest, SlotReuseGathersZeroAfterRelease) {
@@ -646,7 +681,7 @@ TEST_F(FixedStatePoolTest, UnsupportedOffsetViewsUseEquivalentStagingBindings) {
   }
 
   auto fallback_model = LoadSyntheticHybridModel();
-  OffsetTensorViewsUnsupportedDevice fallback_device{
+  FixedStateTestDevice fallback_device{
       *fallback_model->p_device_kvcache_};
   ScopedKeyValueCacheDevice scoped_device{*fallback_model, fallback_device};
   FixedStatePool fallback_pool{fallback_model, 3};
@@ -660,7 +695,7 @@ TEST_F(FixedStatePoolTest, GenericDeviceSupportsOrdinaryStagingWithoutStateUpdat
     group.state_update.reset();
   }
   auto generic_model = CreateModel(GetOrtEnv(), std::move(config));
-  OffsetTensorViewsUnsupportedDevice generic_device{
+  FixedStateTestDevice generic_device{
       *generic_model->p_device_kvcache_, DeviceType::DML};
   ScopedKeyValueCacheDevice scoped_device{*generic_model, generic_device};
   FixedStatePool pool{generic_model, 2};
@@ -692,7 +727,7 @@ TEST_F(FixedStatePoolTest, RejectsGenericDeviceWithoutTransactionalFixedStateSup
     group.state_update.reset();
   }
   auto generic_model = CreateModel(GetOrtEnv(), std::move(config));
-  OffsetTensorViewsUnsupportedDevice generic_device{
+  FixedStateTestDevice generic_device{
       *generic_model->p_device_kvcache_, DeviceType::DML, false};
   ScopedKeyValueCacheDevice scoped_device{*generic_model, generic_device};
 
@@ -708,7 +743,7 @@ TEST_F(FixedStatePoolTest, RejectsGenericDeviceWithoutTransactionalFixedStateSup
 
 TEST_F(FixedStatePoolTest, GenericDeviceRejectsCompactStateReplay) {
   auto replay_model = LoadSyntheticHybridModel();
-  OffsetTensorViewsUnsupportedDevice generic_device{
+  FixedStateTestDevice generic_device{
       *replay_model->p_device_kvcache_, DeviceType::DML};
   ScopedKeyValueCacheDevice scoped_device{*replay_model, generic_device};
 
