@@ -115,6 +115,9 @@ PrefixCacheMatch PrefixCache::Match(std::span<const int32_t> tokens,
     if (!it->second.block->IsFull()) {
       break;
     }
+    if (options_.requires_auxiliary && !it->second.auxiliary) {
+      break;
+    }
 
     hits.push_back(it);
     if (it->second.checkpoint &&
@@ -134,8 +137,14 @@ PrefixCacheMatch PrefixCache::Match(std::span<const int32_t> tokens,
   }
 
   match.blocks.reserve(hits.size());
+  if (options_.requires_auxiliary) {
+    match.auxiliary_blocks.reserve(hits.size());
+  }
   for (const auto& it : hits) {
     match.blocks.push_back(it->second.block);
+    if (options_.requires_auxiliary) {
+      match.auxiliary_blocks.push_back(it->second.auxiliary);
+    }
   }
   match.token_count = hits.size() * block_size;
   match.fixed_state_checkpoint = std::move(checkpoint);
@@ -147,7 +156,8 @@ PrefixCacheMatch PrefixCache::Match(std::span<const int32_t> tokens,
 PrefixCacheRegistration PrefixCache::Register(
     const std::shared_ptr<Block>& block,
     std::span<const int32_t> tokens,
-    const std::shared_ptr<const BlockIdentity>& parent) {
+    const std::shared_ptr<const BlockIdentity>& parent,
+    std::shared_ptr<const std::vector<uint8_t>> auxiliary) {
   if (!Enabled()) {
     return {PrefixCacheRegistrationStatus::CapacityRefused, nullptr};
   }
@@ -160,6 +170,9 @@ PrefixCacheRegistration PrefixCache::Register(
   if (block->HasIdentity()) {
     // Already indexed, which is the normal case for an adopted block being re-walked.
     return {PrefixCacheRegistrationStatus::Indexed, block->IdentityPtr()};
+  }
+  if (options_.requires_auxiliary && !auxiliary) {
+    throw std::logic_error("A DFlash prefix block cannot be indexed without auxiliary states.");
   }
   if (!block_pool_.Owns(block)) {
     throw std::runtime_error("Cannot index a block the pool does not own.");
@@ -204,7 +217,7 @@ PrefixCacheRegistration PrefixCache::Register(
   Entry* const parent_entry_ptr =
       parent_entry == entries_.end() ? nullptr : &parent_entry->second;
   auto [entry_it, inserted] = entries_.try_emplace(
-      hash, Entry{block, identity, nullptr, {}, {}, !parent_entry_ptr ? std::optional<size_t>{} : std::optional<size_t>{parent_entry_ptr->block->Id()}});
+      hash, Entry{block, identity, nullptr, std::move(auxiliary), {}, {}, !parent_entry_ptr ? std::optional<size_t>{} : std::optional<size_t>{parent_entry_ptr->block->Id()}});
   if (!inserted) {
     throw std::logic_error("Prefix cache identity became occupied during registration.");
   }

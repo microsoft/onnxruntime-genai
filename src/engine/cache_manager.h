@@ -105,7 +105,9 @@ struct CacheManager {
     return nullptr;
   }
   virtual void RecordDeferredPrefixMatches(size_t) noexcept {}
-  virtual void SealCommittedBlocks(const StepPlan&) {}
+  virtual void SealCommittedBlocks(const StepPlan&, Tensor* = nullptr) {}
+  virtual std::shared_ptr<const BlockIdentity> SealedPrefixIdentity(
+      const void*, size_t) const { return nullptr; }
   virtual void RecordPrefixPublicationRefusal() noexcept {}
   virtual const PrefixCacheMetrics* PrefixMetrics() const { return nullptr; }
 
@@ -207,7 +209,11 @@ struct PagedCacheManager : CacheManager {
   void RecordDeferredPrefixMatches(size_t count) noexcept override {
     key_value_cache_->RecordDeferredPrefixMatches(count);
   }
-  void SealCommittedBlocks(const StepPlan& plan) override;
+  void SealCommittedBlocks(const StepPlan& plan, Tensor* auxiliary = nullptr) override;
+  std::shared_ptr<const BlockIdentity> SealedPrefixIdentity(
+      const void* request_id, size_t token_count) const override {
+    return key_value_cache_->SealedPrefixIdentity(request_id, token_count);
+  }
   void RecordPrefixPublicationRefusal() noexcept override {
     key_value_cache_->RecordPrefixPublicationRefusal();
   }

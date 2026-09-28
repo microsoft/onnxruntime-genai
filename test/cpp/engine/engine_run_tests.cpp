@@ -3202,6 +3202,115 @@ TEST_F(EngineRunTest, DensePagedPrefixCacheSkipsCommittedFullBlocks) {
   EXPECT_EQ(continuation_event.usage.cached_prompt_tokens, 0u);
 }
 
+TEST_F(EngineRunTest, VerifiedDraftsExtendReusableTargetPrefix) {
+  model_ = LoadSyntheticPagedPerTokenModel();
+  auto& batching = *model_->config_->engine.dynamic_batching;
+  batching.block_size = 4;
+  batching.num_blocks = 16;
+  batching.prefix_caching = true;
+  auto engine = MakeCompositeDoublesEngine(model_, 11);
+  const std::array<int32_t, 5> prompt{2, 3, 4, 5, 6};
+
+  auto source = CreateRequestWithPrompt(engine.engine, prompt);
+  ASSERT_EQ(RunOne(*engine.engine).request, source);
+  ASSERT_EQ(source->ProcessedSequenceLength(), 5);
+  ASSERT_EQ(source->CurrentSequenceLength(), 6);
+
+  source->SetDraftTokens(std::array<int32_t, 3>{12, 13, 14});
+  engine.executor->SetVerifyRowTokens({12, 13, 21, 22});
+  std::array<EngineEvent, 3> events;
+  ASSERT_EQ(engine.engine->Run(events), events.size());
+  EXPECT_EQ(events[0].token, 12);
+  EXPECT_EQ(events[1].token, 13);
+  EXPECT_EQ(events[2].token, 21);
+  EXPECT_EQ(source->ProcessedSequenceLength(), 8);
+  const auto after_verify = engine.engine->PrefixCacheStats();
+  ASSERT_TRUE(after_verify.has_value());
+  EXPECT_EQ(after_verify->registered_blocks, 2u);
+  source->Close();
+  engine.executor->SetVerifyRowTokens({});
+  engine.executor->SetForcedToken(EosToken(*model_));
+
+  const std::array<int32_t, 9> replay{2, 3, 4, 5, 6, 11, 12, 13, 21};
+  auto warm = CreateRequestWithPrompt(engine.engine, replay);
+  engine.executor->SetExecutionCallback([&](ExecutionContext& context) {
+    ASSERT_EQ(context.plan->requests.size(), 1u);
+    EXPECT_EQ(context.plan->requests[0].unprocessed_token_count, 1u);
+    ASSERT_NE(context.plan->requests[0].prefix_match, nullptr);
+    EXPECT_EQ(context.plan->requests[0].prefix_match->token_count, 8u);
+  });
+  const auto warm_event = RunOne(*engine.engine);
+  EXPECT_EQ(warm_event.request, warm);
+  EXPECT_EQ(warm_event.flags, EngineEventFlagTurnFinished);
+  EXPECT_EQ(warm_event.error_code, EngineErrorCode::None);
+  EXPECT_EQ(warm->ProcessedSequenceLength(), 9);
+  EXPECT_EQ(warm_event.usage.cached_prompt_tokens, 8u);
+  const auto metrics = engine.engine->PrefixCacheStats();
+  ASSERT_TRUE(metrics.has_value());
+  EXPECT_EQ(metrics->hits, 1u);
+  EXPECT_EQ(metrics->matches, 1u);
+  EXPECT_EQ(metrics->registered_blocks, 2u);
+  EXPECT_EQ(metrics->matched_tokens, 8u);
+  EXPECT_TRUE(ValidateCacheInvariants(engine.cache->Snapshot()).empty());
+}
+
+TEST(EngineDflashPrefixTest, WarmPromptReplaysAuxiliaryStateWithoutGpuCheckpoints) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-paged-per-token");
+  auto& batching = *config->engine.dynamic_batching;
+  batching.block_size = 4;
+  // The graph fixes target KV at 128 blocks; the budget also reserves the DFlash pool.
+  batching.num_blocks = 152;
+  batching.prefix_caching = true;
+  config->search.chunk_size = 4;
+  auto& drafter = config->model.dflash2;
+  drafter.filename = (std::filesystem::path{".."} / "synthetic-dspark" /
+                      "dspark-fp16.onnx")
+                         .string();
+  drafter.num_hidden_layers = 1;
+  drafter.num_key_value_heads = 1;
+  drafter.head_size = 1;
+  drafter.block_size = 5;
+  drafter.num_draft_tokens = 4;
+  drafter.selector_top_k = 2;
+  drafter.mask_token_id = 31;
+  drafter.sliding_window = 8;
+  drafter.main_aux_hidden_states = "hidden_states";
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  auto engine = std::make_shared<Engine>(model);
+
+  const std::array<int32_t, 9> source_prompt{2, 3, 4, 5, 6, 7, 8, 9, 10};
+  auto source = CreateRequestWithPrompt(engine, source_prompt);
+  for (size_t i = 0; i < 3; ++i) {
+    const auto event = RunOne(*engine);
+    EXPECT_EQ(event.error_code, EngineErrorCode::None);
+  }
+  auto stats = engine->PrefixCacheStats();
+  ASSERT_TRUE(stats);
+  EXPECT_GE(stats->registered_blocks, 2u);
+  source->Close();
+
+  const std::array<int32_t, 10> warm_prompt{2, 3, 4, 5, 6, 7, 8, 9, 12, 13};
+  TurnOptions warm_options;
+  warm_options.max_generated_tokens = 2;
+  auto warm = CreateRequestWithPrompt(engine, warm_prompt, warm_options);
+  const auto drafts_before = engine->GetSpeculativeStats().draft_forward_passes;
+  bool saw_warm_completion = false;
+  for (size_t i = 0; i < 4; ++i) {
+    const auto event = RunOne(*engine);
+    EXPECT_EQ(event.error_code, EngineErrorCode::None);
+    if (event.request == warm && warm->IsTurnComplete()) {
+      EXPECT_EQ(event.usage.cached_prompt_tokens, 8u);
+      saw_warm_completion = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(saw_warm_completion);
+  stats = engine->PrefixCacheStats();
+  ASSERT_TRUE(stats);
+  EXPECT_GE(stats->hits, 1u);
+  EXPECT_GT(engine->GetSpeculativeStats().draft_forward_passes, drafts_before);
+}
+
 TEST_F(EngineRunTest, CanceledUnstartedPromptIsNotCountedAsCurrentTurnCache) {
   model_ = LoadSyntheticPagedModel();
   auto& batching = *model_->config_->engine.dynamic_batching;

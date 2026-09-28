@@ -131,6 +131,99 @@ TEST_F(PagedKeyValueCacheTest, ReportsCommittedBoundaryForResident) {
   EXPECT_THROW(cache_->CommittedSlots(this), StepPlanningConsistencyError);
 }
 
+TEST_F(PagedKeyValueCacheTest, ExposesOnlySealedCommittedPrefixIdentities) {
+  model_->config_->engine.dynamic_batching->prefix_caching = true;
+  cache_ = MakePagedCache(model_);
+  auto request = AddCommittedRequest({2, 3, 4, 5});
+
+  EXPECT_EQ(cache_->SealedPrefixIdentity(request.get(), 4), nullptr);
+  cache_->SealCommittedBlocks(request.get(), request->TokensCpu());
+  auto identity = cache_->SealedPrefixIdentity(request.get(), 4);
+  ASSERT_NE(identity, nullptr);
+  EXPECT_EQ(cache_->SealedPrefixIdentity(request.get(), 3), nullptr);
+  EXPECT_EQ(cache_->SealedPrefixIdentity(request.get(), 8), nullptr);
+  EXPECT_EQ(cache_->SealedPrefixIdentity(this, 4), nullptr);
+  cache_->Remove(request);
+  EXPECT_EQ(cache_->SealedPrefixIdentity(request.get(), 4), nullptr);
+}
+
+TEST_F(PagedKeyValueCacheTest, RetainsAuxiliaryRowsWithEveryMatchedDflashBlock) {
+  model_->config_->engine.dynamic_batching->prefix_caching = true;
+  model_->config_->model.dflash2.filename = "dflash2.onnx";
+  model_->config_->model.dflash2.sliding_window = 8;
+  cache_ = MakePagedCache(model_);
+  auto request = AddCommittedRequest({2, 3, 4, 5});
+  const std::array<uint8_t, 8> auxiliary{1, 2, 3, 4, 5, 6, 7, 8};
+
+  EXPECT_THROW(cache_->SealCommittedBlocks(request.get(), request->TokensCpu()),
+               std::logic_error);
+  cache_->SealCommittedBlocks(request.get(), request->TokensCpu(), 0, auxiliary);
+  const std::array<int32_t, 5> tokens{2, 3, 4, 5, 6};
+  auto match = cache_->MatchPrefix(tokens, tokens.size() - 1);
+  ASSERT_EQ(match.token_count, 4u);
+  ASSERT_EQ(match.auxiliary_blocks.size(), 1u);
+  EXPECT_EQ(*match.auxiliary_blocks[0],
+            (std::vector<uint8_t>{auxiliary.begin(), auxiliary.end()}));
+  cache_->Remove(request);
+  EXPECT_EQ(*match.auxiliary_blocks[0],
+            (std::vector<uint8_t>{auxiliary.begin(), auxiliary.end()}));
+}
+
+TEST_F(PagedKeyValueCacheTest, IndexesEveryFullBlockAcrossOneDflashPrefillStep) {
+  model_->config_->engine.dynamic_batching->prefix_caching = true;
+  model_->config_->model.dflash2.filename = "dflash2.onnx";
+  model_->config_->model.dflash2.sliding_window = 8;
+  cache_ = MakePagedCache(model_);
+  const std::array<int32_t, 8> prompt{2, 3, 4, 5, 6, 7, 8, 9};
+  auto request = CreateRequestWithPrompt(assign_target_, prompt);
+  cache_->Add(request);
+  cache_->AppendTokens(request);
+  const std::array<uint8_t, 8> auxiliary{10, 11, 12, 13, 14, 15, 16, 17};
+  cache_->SealCommittedBlocks(request.get(), request->TokensCpu(), 0, auxiliary);
+
+  const std::array<int32_t, 9> replay{2, 3, 4, 5, 6, 7, 8, 9, 10};
+  auto match = cache_->MatchPrefix(replay, replay.size() - 1);
+  ASSERT_EQ(match.token_count, 8u);
+  ASSERT_EQ(match.auxiliary_blocks.size(), 2u);
+  EXPECT_EQ(*match.auxiliary_blocks[0], (std::vector<uint8_t>{10, 11, 12, 13}));
+  EXPECT_EQ(*match.auxiliary_blocks[1], (std::vector<uint8_t>{14, 15, 16, 17}));
+}
+
+TEST_F(PagedKeyValueCacheTest, AccumulatesDflashAuxiliaryRowsAcrossPartialBlocks) {
+  model_->config_->engine.dynamic_batching->prefix_caching = true;
+  model_->config_->model.dflash2.filename = "dflash2.onnx";
+  model_->config_->model.dflash2.sliding_window = 8;
+  cache_ = MakePagedCache(model_);
+  const std::array<int32_t, 8> prompt{2, 3, 4, 5, 6, 7, 8, 9};
+  auto request = CreateRequestWithPrompt(assign_target_, prompt);
+  cache_->Add(request);
+
+  const auto commit_rows = [&](size_t first, size_t end,
+                               std::span<const uint8_t> rows) {
+    const std::array reservation_requests{
+        PagedCacheReservationRequest{request.get(), end, false},
+    };
+    auto reservation = cache_->Reserve(reservation_requests);
+    reservation.Commit();
+    cache_->SealCommittedBlocks(request.get(), prompt, first, rows);
+  };
+  const std::array<uint8_t, 2> first_rows{10, 11};
+  commit_rows(0, 2, first_rows);
+  const std::array<int32_t, 9> replay{2, 3, 4, 5, 6, 7, 8, 9, 10};
+  EXPECT_EQ(cache_->MatchPrefix(replay, replay.size() - 1).token_count, 0u);
+
+  const std::array<uint8_t, 3> middle_rows{12, 13, 14};
+  commit_rows(2, 5, middle_rows);
+  const std::array<uint8_t, 3> last_rows{15, 16, 17};
+  commit_rows(5, 8, last_rows);
+
+  auto match = cache_->MatchPrefix(replay, replay.size() - 1);
+  ASSERT_EQ(match.token_count, 8u);
+  ASSERT_EQ(match.auxiliary_blocks.size(), 2u);
+  EXPECT_EQ(*match.auxiliary_blocks[0], (std::vector<uint8_t>{10, 11, 12, 13}));
+  EXPECT_EQ(*match.auxiliary_blocks[1], (std::vector<uint8_t>{14, 15, 16, 17}));
+}
+
 TEST_F(PagedKeyValueCacheTest, ValidatedRemovalReleasesAndReindexesCommittedTables) {
   auto first = AddCommittedRequest({2, 3, 4, 5});
   auto second = AddCommittedRequest({6, 7, 8, 9});

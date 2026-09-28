@@ -128,6 +128,13 @@ those references, and commit transfers them to the request's block table. Newly
 completed full blocks are indexed only after the cache and request transaction
 commits.
 
+For a paged-only target, this also covers speculative verification: only the
+accepted draft prefix and the preceding unprocessed token advance committed KV
+slots, so full blocks completed by those tokens are indexed like ordinary
+decode blocks. Rejected proposals have no committed target KV to share. A later
+request whose prompt repeats the verified tokens can adopt those blocks, while
+still executing its final prompt token. This is target-prefix reuse, not reuse of unverified draft proposals.
+
 For a hybrid target with `fixed_conv` or `fixed_recurrent` groups, a paged-block
 match is usable only when the same prefix identity owns an immutable checkpoint
 of every fixed-state tensor. The fixed-state pool preallocates
@@ -160,9 +167,26 @@ sliding-window KV rings and auxiliary caches that mirror every target block when
 the setting keep loading with caching disabled for those layouts, and builders
 emit an explicit `false` opt-out. A
 fixed-size Engine-hosted auxiliary pool can coexist with target prefix caching.
-In particular, a DFlash 2 drafter that did not process the skipped prefix cannot
-join at a nonzero position, so that request keeps the valid target hit and runs
-target-only rather than shortening the target boundary.
+A windowed DFlash 2 drafter retains the target's auxiliary hidden-state rows
+alongside each indexed full prefix block, including blocks completed by accepted
+speculative tokens. A prefix match pins both the target KV blocks and their
+auxiliary rows. On admission, the drafter replays only the most recent
+`sliding_window + block_size` rows through its ordinary context path to
+reconstruct its own KV before proposing drafts. DFlash 2 projects context KV
+independently from each target auxiliary row; its query block never needs to
+recompute the target prefix. This adds no permanent GPU checkpoint rings, but
+retained host memory grows with the number of indexed target tokens times the
+auxiliary width. The replay adds a drafter forward pass to a warm admission.
+Full-attention drafters and Engine-hosted DSpark still reject explicit prefix
+caching under their separate compatibility guard.
+
+The target KV pool is allocated independently of whether prefix caching is
+enabled; retained prefix blocks share that pool with active requests and are
+reclaimed when needed. To reduce allocated GPU memory, lower
+`engine.dynamic_batching.gpu_utilization_factor` or set `num_blocks`, at the
+cost of capacity for concurrent sequences. Retained DFlash auxiliary rows
+share the target prefix cache's lifetime and are released with its blocks;
+they do not consume its GPU KV-block budget.
 
 Without dynamic batching, the engine uses the older static batching path. Static batching allocates and advances a batch as a unit. It does not use the transaction flow described below.
 

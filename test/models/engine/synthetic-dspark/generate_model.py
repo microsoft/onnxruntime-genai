@@ -81,3 +81,7 @@ graph = helper.make_graph(nodes, "synthetic-dspark", inputs, outputs, initialize
 model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)], ir_version=8)
 onnx.checker.check_model(model)
 onnx.save(model, Path(__file__).with_name("dspark.onnx"))
+
+model.graph.input[0].type.tensor_type.elem_type = TensorProto.FLOAT16
+onnx.checker.check_model(model)
+onnx.save(model, Path(__file__).with_name("dspark-fp16.onnx"))

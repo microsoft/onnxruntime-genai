@@ -45,6 +45,7 @@ struct PrefixCacheOptions {
   // Hybrid target models require a fixed-state checkpoint at the same boundary as the paged
   // blocks. Paged-only models leave this false and continue matching every complete block.
   bool requires_checkpoint{};
+  bool requires_auxiliary{};
   size_t max_checkpoints{};
   // Content hash used to address a block. Left null in production, where PrefixCache::ChainHash is
   // used. Overridable so the collision-verification path -- distinct contents landing on the same
@@ -58,6 +59,7 @@ struct PrefixCacheOptions {
 struct PrefixCacheMatch {
   size_t token_count{};
   std::vector<std::shared_ptr<Block>> blocks;
+  std::vector<std::shared_ptr<const std::vector<uint8_t>>> auxiliary_blocks;
   std::shared_ptr<const FixedStatePrefixCheckpoint> fixed_state_checkpoint;
 
   bool Empty() const { return blocks.empty(); }
@@ -144,7 +146,8 @@ class PrefixCache final : private BlockReferenceObserver {
   PrefixCacheRegistration Register(
       const std::shared_ptr<Block>& block,
       std::span<const int32_t> tokens,
-      const std::shared_ptr<const BlockIdentity>& parent);
+      const std::shared_ptr<const BlockIdentity>& parent,
+      std::shared_ptr<const std::vector<uint8_t>> auxiliary = nullptr);
 
   // Publishes and refreshes a match only after its adopting cache transaction commits.
   void RecordAdoption(
@@ -198,6 +201,7 @@ class PrefixCache final : private BlockReferenceObserver {
     std::shared_ptr<Block> block;
     std::shared_ptr<const BlockIdentity> identity;
     std::shared_ptr<const FixedStatePrefixCheckpoint> checkpoint;
+    std::shared_ptr<const std::vector<uint8_t>> auxiliary;
     std::list<Entry*>::iterator recency;
     std::list<Entry*>::iterator reference_state;
     std::optional<size_t> parent_block_id;

@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -12,6 +13,8 @@
 #include <gtest/gtest.h>
 
 #include "dflash2_drafter.h"
+#include "engine/block.h"
+#include "engine/prefix_cache.h"
 #include "engine/step_plan.h"
 #include "ort_genai.h"
 
@@ -535,6 +538,7 @@ TEST(Dflash2ConfigTest, AccountsForWindowedPagedCache) {
                 config, 16, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16),
             3072u);
   EXPECT_EQ(Dflash2Drafter::PoolBlocks(config, 8, 3), 15u);
+  EXPECT_EQ(Dflash2Drafter::PoolBlocks(config, 8, 3, 2), 25u);
   EXPECT_EQ(Dflash2Drafter::PoolBytes(
                 config, 8, 15, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16),
             23040u);
@@ -665,6 +669,156 @@ TEST(Dflash2ConfigTest, RunsFullAttentionDsparkAcrossRequestLifecycles) {
   EXPECT_EQ(drafts[1][2], 13);
   EXPECT_EQ(drafts[1][3], 64);
   EXPECT_EQ(drafter.AdmissionMisses(), 0u);
+}
+
+TEST(Dflash2ConfigTest, RestoresWindowedDrafterAtMatchingPrefixBoundary) {
+  auto config = MakeDflash2Config();
+  config.config_path = fs::path{MODEL_PATH "engine/synthetic-dspark"};
+  auto& block_drafter = config.model.dflash2;
+  block_drafter.filename = "dspark.onnx";
+  block_drafter.is_dspark = true;
+  block_drafter.num_hidden_layers = 1;
+  block_drafter.num_key_value_heads = 1;
+  block_drafter.head_size = 1;
+  block_drafter.block_size = 4;
+  block_drafter.num_draft_tokens = 4;
+  block_drafter.sliding_window = 8;
+
+  auto model = std::make_shared<Dflash2Model>(CreateDflash2Config(config), GetOrtEnv());
+  const size_t pool_blocks = Dflash2Drafter::PoolBlocks(config, 4, 2, 1);
+  Dflash2Drafter drafter{model, 4, pool_blocks, 2, 1};
+
+  int source_id = 0;
+  int warm_id = 0;
+  auto* source = reinterpret_cast<Request*>(&source_id);
+  auto* warm = reinterpret_cast<Request*>(&warm_id);
+  auto identity = std::make_shared<BlockIdentity>();
+  auto* device = GetDeviceInterface(DeviceType::CPU);
+  Tensor prefix_aux{device, Ort::TypeToTensorType<float>};
+  prefix_aux.CreateTensor(std::array<int64_t, 2>{8, 1});
+  prefix_aux.GetDeviceSpan<float>().Zero();
+  std::vector<std::vector<int32_t>> drafts;
+  const std::array prefix_feed{
+      Dflash2Drafter::Feed{.request = source, .aux_row_count = 8, .anchor_token = 11, .draft_eligible = true, .wants_drafts = true, .is_prefill = true, .sealed_prefix_identity = identity},
+  };
+  ASSERT_TRUE(drafter.Propose(prefix_aux, prefix_feed, drafts));
+
+  Tensor suffix_aux{device, Ort::TypeToTensorType<float>};
+  suffix_aux.CreateTensor(std::array<int64_t, 2>{1, 1});
+  suffix_aux.GetDeviceSpan<float>().Zero();
+  const std::array wrong_identity{
+      Dflash2Drafter::Feed{.request = warm, .aux_row_count = 1, .first_position = 8, .anchor_token = 12, .draft_eligible = true, .wants_drafts = true, .adopted_prefix_identity = std::make_shared<BlockIdentity>()},
+  };
+  EXPECT_FALSE(drafter.Propose(suffix_aux, wrong_identity, drafts));
+  EXPECT_TRUE(drafts[0].empty());
+
+  const std::array wrong_position{
+      Dflash2Drafter::Feed{.request = warm, .aux_row_count = 1, .first_position = 9, .anchor_token = 12, .draft_eligible = true, .wants_drafts = true, .adopted_prefix_identity = identity},
+  };
+  EXPECT_FALSE(drafter.Propose(suffix_aux, wrong_position, drafts));
+  EXPECT_TRUE(drafts[0].empty());
+
+  const std::array restored{
+      Dflash2Drafter::Feed{.request = warm, .aux_row_count = 1, .first_position = 8, .anchor_token = 12, .draft_eligible = true, .wants_drafts = true, .adopted_prefix_identity = identity},
+  };
+  ASSERT_TRUE(drafter.Propose(suffix_aux, restored, drafts));
+  ASSERT_EQ(drafts.size(), 1u);
+  EXPECT_EQ(drafts[0].size(), 4u);
+  const auto restored_drafts = drafts[0];
+
+  const std::array continued{
+      Dflash2Drafter::Feed{.request = source, .aux_row_count = 1, .first_position = 8, .anchor_token = 12, .draft_eligible = true, .wants_drafts = true},
+  };
+  ASSERT_TRUE(drafter.Propose(suffix_aux, continued, drafts));
+  ASSERT_EQ(drafts[0].size(), restored_drafts.size());
+  // The synthetic model exposes the sum of physical block IDs in its first proposal.
+  // Restoring into a different ring changes that diagnostic, not the other proposals.
+  EXPECT_NE(drafts[0][0], restored_drafts[0]);
+  EXPECT_TRUE(std::equal(drafts[0].begin() + 1, drafts[0].end(),
+                         restored_drafts.begin() + 1));
+
+  drafter.Release(source);
+  drafter.Release(warm);
+  int replacement_id = 0;
+  int missed_id = 0;
+  auto replacement_identity = std::make_shared<BlockIdentity>();
+  const std::array replacement_feed{
+      Dflash2Drafter::Feed{.request = reinterpret_cast<Request*>(&replacement_id),
+                           .aux_row_count = 8,
+                           .anchor_token = 11,
+                           .draft_eligible = true,
+                           .wants_drafts = true,
+                           .is_prefill = true,
+                           .sealed_prefix_identity = replacement_identity},
+  };
+  ASSERT_TRUE(drafter.Propose(prefix_aux, replacement_feed, drafts));
+  const std::array evicted_feed{
+      Dflash2Drafter::Feed{.request = reinterpret_cast<Request*>(&missed_id),
+                           .aux_row_count = 1,
+                           .first_position = 8,
+                           .anchor_token = 12,
+                           .draft_eligible = true,
+                           .wants_drafts = true,
+                           .adopted_prefix_identity = identity},
+  };
+  EXPECT_FALSE(drafter.Propose(suffix_aux, evicted_feed, drafts));
+  EXPECT_TRUE(drafts[0].empty());
+}
+
+TEST(Dflash2ConfigTest, ReplaysCachedAuxiliaryRowsWithoutCheckpointRings) {
+  auto config = MakeDflash2Config();
+  config.config_path = fs::path{MODEL_PATH "engine/synthetic-dspark"};
+  auto& block_drafter = config.model.dflash2;
+  block_drafter.filename = "dspark.onnx";
+  block_drafter.is_dspark = true;
+  block_drafter.num_hidden_layers = 1;
+  block_drafter.num_key_value_heads = 1;
+  block_drafter.head_size = 1;
+  block_drafter.block_size = 4;
+  block_drafter.num_draft_tokens = 4;
+  block_drafter.sliding_window = 8;
+
+  auto model = std::make_shared<Dflash2Model>(CreateDflash2Config(config), GetOrtEnv());
+  Dflash2Drafter drafter{model, 4, Dflash2Drafter::PoolBlocks(config, 4, 2), 2};
+  int source_id = 0;
+  int warm_id = 0;
+  auto* source = reinterpret_cast<Request*>(&source_id);
+  auto* warm = reinterpret_cast<Request*>(&warm_id);
+  auto* device = GetDeviceInterface(DeviceType::CPU);
+  Tensor prefix_aux{device, Ort::TypeToTensorType<float>};
+  prefix_aux.CreateTensor(std::array<int64_t, 2>{8, 1});
+  prefix_aux.GetDeviceSpan<float>().Zero();
+  std::vector<std::vector<int32_t>> drafts;
+  const std::array source_feed{
+      Dflash2Drafter::Feed{.request = source, .aux_row_count = 8, .anchor_token = 11, .draft_eligible = true, .wants_drafts = true},
+  };
+  ASSERT_TRUE(drafter.Propose(prefix_aux, source_feed, drafts));
+
+  auto match = std::make_shared<PrefixCacheMatch>();
+  match->token_count = 8;
+  match->blocks.push_back(std::make_shared<Block>(0, 4, 4));
+  match->blocks.push_back(std::make_shared<Block>(1, 4, 4));
+  for (size_t i = 0; i < 2; ++i) {
+    match->auxiliary_blocks.push_back(
+        std::make_shared<const std::vector<uint8_t>>(4 * sizeof(float), 0));
+  }
+  Dflash2Drafter::Feed warm_feed{
+      .request = warm, .aux_row_count = 1, .first_position = 8, .anchor_token = 12, .draft_eligible = true, .wants_drafts = true, .adopted_prefix_match = match};
+  ASSERT_TRUE(drafter.RestorePrefix(warm_feed));
+
+  Tensor suffix_aux{device, Ort::TypeToTensorType<float>};
+  suffix_aux.CreateTensor(std::array<int64_t, 2>{1, 1});
+  suffix_aux.GetDeviceSpan<float>().Zero();
+  const std::array warm_suffix{warm_feed};
+  ASSERT_TRUE(drafter.Propose(suffix_aux, warm_suffix, drafts));
+  const auto warm_drafts = drafts[0];
+  const std::array source_suffix{
+      Dflash2Drafter::Feed{.request = source, .aux_row_count = 1, .first_position = 8, .anchor_token = 12, .draft_eligible = true, .wants_drafts = true},
+  };
+  ASSERT_TRUE(drafter.Propose(suffix_aux, source_suffix, drafts));
+  ASSERT_EQ(warm_drafts.size(), drafts[0].size());
+  EXPECT_TRUE(std::equal(warm_drafts.begin() + 1, warm_drafts.end(),
+                         drafts[0].begin() + 1));
 }
 
 TEST(Dflash2ConfigTest, TrackedDsparkIngestsSampledTurnsAndResumesDrafting) {

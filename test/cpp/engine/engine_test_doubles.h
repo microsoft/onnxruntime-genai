@@ -290,7 +290,7 @@ struct RecordingCacheManager : CacheManager {
     return std::make_unique<Reservation>(*this, plan);
   }
 
-  void SealCommittedBlocks(const StepPlan&) override {
+  void SealCommittedBlocks(const StepPlan&, Tensor* = nullptr) override {
     if (std::exchange(throw_seal_bad_alloc_, false)) {
       throw std::bad_alloc{};
     }

@@ -54,6 +54,7 @@ class PagedCacheBlockTable {
   std::vector<std::shared_ptr<Block>> window_blocks_;
   size_t sealed_blocks_{};
   std::shared_ptr<const BlockIdentity> sealed_identity_;
+  std::vector<uint8_t> pending_auxiliary_;
   bool sealing_stopped_{};
   uint64_t mutation_generation_{};
 };

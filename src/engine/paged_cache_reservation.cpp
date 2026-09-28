@@ -76,6 +76,7 @@ PagedCacheBlockTable& PagedCacheBlockTable::operator=(
     window_blocks_ = std::move(other.window_blocks_);
     sealed_blocks_ = other.sealed_blocks_;
     sealed_identity_ = std::move(other.sealed_identity_);
+    pending_auxiliary_ = std::move(other.pending_auxiliary_);
     sealing_stopped_ = other.sealing_stopped_;
     mutation_generation_ = next_generation;
   }

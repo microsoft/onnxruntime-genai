@@ -388,16 +388,46 @@ std::shared_ptr<const PrefixCacheMatch> PagedCacheManager::MatchPrefix(
              : std::make_shared<const PrefixCacheMatch>(std::move(match));
 }
 
-void PagedCacheManager::SealCommittedBlocks(const StepPlan& plan) {
+void PagedCacheManager::SealCommittedBlocks(const StepPlan& plan, Tensor* auxiliary) {
   if (!key_value_cache_->PrefixCachingEnabled()) {
     return;
+  }
+  const bool needs_auxiliary = key_value_cache_->RequiresAuxiliaryPrefix();
+  std::span<const uint8_t> auxiliary_rows;
+  size_t row_bytes = 0;
+  if (needs_auxiliary) {
+    if (!auxiliary) {
+      throw std::logic_error("DFlash prefix publication requires target auxiliary states.");
+    }
+    const auto shape = auxiliary->GetShape();
+    if (shape.size() != 2 || shape[1] <= 0 ||
+        shape[0] < static_cast<int64_t>(plan.token_count)) {
+      throw std::logic_error("DFlash target auxiliary output has an invalid shape.");
+    }
+    row_bytes = static_cast<size_t>(shape[1]) * Ort::SizeOf(auxiliary->GetType());
+    auxiliary_rows = auxiliary->GetByteSpan().CopyDeviceToCpu();
   }
   for (const auto& entry : plan.requests) {
     if (fixed_state_pool_ && !entry.is_prefill) {
       continue;
     }
-    key_value_cache_->SealCommittedBlocks(
-        entry.request_id, entry.request->TokensCpu());
+    if (needs_auxiliary) {
+      const size_t first_position =
+          entry.target_cache_slots - entry.unprocessed_token_count;
+      const size_t processed =
+          static_cast<size_t>(entry.request->ProcessedSequenceLength());
+      if (processed < first_position ||
+          processed > entry.target_cache_slots ||
+          entry.packed_token_offset + entry.unprocessed_token_count > plan.token_count) {
+        throw std::logic_error("DFlash committed rows do not match the target step.");
+      }
+      key_value_cache_->SealCommittedBlocks(
+          entry.request_id, entry.request->TokensCpu(), first_position,
+          auxiliary_rows.subspan(entry.packed_token_offset * row_bytes,
+                                 (processed - first_position) * row_bytes));
+    } else {
+      key_value_cache_->SealCommittedBlocks(entry.request_id, entry.request->TokensCpu());
+    }
     if (!fixed_state_pool_ ||
         !key_value_cache_->CanAttachPrefixCheckpoint(
             entry.request_id, entry.target_cache_slots)) {
