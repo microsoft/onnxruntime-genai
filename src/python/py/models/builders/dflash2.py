@@ -65,7 +65,14 @@ class DFlash2Builder(BlockDrafterBuilder):
     ):
         self.draft_dir = draft_dir
         self.target_dir = target_dir
-        self.make_precision_init(io_dtype, ep)
+        self.io_dtype = ir.DataType.BFLOAT16 if ep == "cuda" else io_dtype
+        self.external_dtype = io_dtype
+        self.layernorm_attrs = {
+            # WebGPU lacks BF16; widen residual-producing paths until after normalization.
+            "residual_dtype": ir.DataType.FLOAT
+            if ep == "webgpu" and io_dtype == ir.DataType.FLOAT16
+            else self.io_dtype,
+        }
         if quant is not None:
             self.quant_bits = quant["bits"]
             self.quant_block_size = quant["block_size"]
@@ -120,16 +127,6 @@ class DFlash2Builder(BlockDrafterBuilder):
         self.input_embedding_scale = float(dfl.get("input_embedding_scale", 1.0))
         self.aux_hidden_size = self.hidden_size * len(self.target_layer_ids)
         self.make_graph("dflash2_graph", "dflash2")
-
-    def make_precision_init(self, io_dtype, ep):
-        self.io_dtype = ir.DataType.BFLOAT16 if ep == "cuda" else io_dtype
-        self.external_dtype = io_dtype
-        self.layernorm_attrs = {
-            # WebGPU lacks BF16; widen residual-producing paths until after normalization.
-            "residual_dtype": ir.DataType.FLOAT
-            if ep == "webgpu" and io_dtype == ir.DataType.FLOAT16
-            else self.io_dtype,
-        }
 
     # ------------------------------------------------------------ rope caches
 
