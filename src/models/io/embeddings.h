@@ -51,10 +51,16 @@ struct Embeddings {
   // Output mode, cross-device pipelines only: buffer this session writes instead of the
   // consumer's, plus the consumer buffer and its device to copy into afterwards. staging_ and
   // consumer_ are null when the consumer's buffer is bound directly (the same-device case).
-  // consumer_ is only valid until the consumer's next UpdateSequenceLength.
+  // consumer_ is only compared, never dereferenced: it dangles after the consumer's next
+  // UpdateSequenceLength, which creates the new tensor before freeing the old, so a new buffer
+  // always has a new address.
   std::unique_ptr<OrtValue> staging_;
+  std::vector<int64_t> staging_shape_;
   OrtValue* consumer_{};
   DeviceInterface* consumer_device_{};
+  // Wrapped once per consumer buffer, not per token: on CUDA the consumer's wrapper owns the pinned
+  // host mirror the copy stages through, so rewrapping every step would allocate and free it each time.
+  DeviceSpan<uint8_t> staging_bytes_, consumer_bytes_;
 
   size_t index_{};
 };

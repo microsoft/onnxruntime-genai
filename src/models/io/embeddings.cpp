@@ -103,6 +103,7 @@ void Embeddings::ReuseEmbeddingsBuffer(const Embeddings& other) {
     // Share the input embeddings OrtValue* from other with the output embedding for this.
     staging_ = nullptr;
     consumer_ = nullptr;
+    staging_bytes_ = consumer_bytes_ = {};
     state_.outputs_[index_] = consumer;
     return;
   }
@@ -110,23 +111,30 @@ void Embeddings::ReuseEmbeddingsBuffer(const Embeddings& other) {
   // The consumer allocated its input on a device this session has no EP for. Binding it as an
   // output would have ORT write host bytes over that device pointer, so write a staging buffer on
   // this session's own device instead and copy across in CopyToConsumer() once the session has run.
-  auto consumer_shape = consumer->GetTensorTypeAndShapeInfo()->GetShape();
-  if (!staging_ || staging_->GetTensorTypeAndShapeInfo()->GetShape() != consumer_shape) {
-    staging_ = OrtValue::CreateTensor(state_.p_session_device_->GetAllocator(), consumer_shape, type_);
+  if (consumer != consumer_) {
+    // The decoder reallocated for a new sequence length: size the staging buffer to match and rewrap
+    // both sides once here, so steady-state decoding reuses the wrappers and their host mirrors.
+    auto consumer_shape = consumer->GetTensorTypeAndShapeInfo()->GetShape();
+    if (!staging_ || staging_shape_ != consumer_shape) {
+      staging_ = OrtValue::CreateTensor(state_.p_session_device_->GetAllocator(), consumer_shape, type_);
+      staging_shape_ = std::move(consumer_shape);
+      staging_bytes_ = ByteWrapTensor(*state_.p_session_device_, *staging_);
+    }
+    consumer_ = consumer;
+    consumer_device_ = &consumer_device;
+    consumer_bytes_ = ByteWrapTensor(consumer_device, *consumer);
   }
-  consumer_ = consumer;
-  consumer_device_ = &consumer_device;
   state_.outputs_[index_] = staging_.get();
 }
 
 void Embeddings::CopyToConsumer() {
-  if (!consumer_)
+  if (!consumer_ || consumer_bytes_.empty())
     return;
 
-  if (staging_->GetTensorTypeAndShapeInfo()->GetElementCount() == 0)
-    return;
-
-  ByteWrapTensor(*consumer_device_, *consumer_).CopyFrom(ByteWrapTensor(*state_.p_session_device_, *staging_));
+  consumer_bytes_.CopyFrom(staging_bytes_);
+  // A copy onto a device is queued on its stream; wait for it so the next token cannot rewrite the
+  // host mirror while the transfer is still reading it.
+  consumer_device_->Synchronize();
 }
 
 }  // namespace Generators
