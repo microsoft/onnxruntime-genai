@@ -388,6 +388,7 @@ class Qwen35TextModel(Model):
         return {
             "state_update_capacity": capacity,
             "state_update_capture_count": self.input_names["state_update.capture_count"],
+            "state_update_active": self.input_names["state_update.active"],
             "state_update_value": self.output_names["state_update.conv_value"][layer_id],
             "state_update_value_shape": self.output_shapes["state_update.conv_value"],
         }
@@ -1035,6 +1036,43 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         self.output_types["present.ple_conv"] = self.io_dtype
         self.output_shapes["present.ple_conv"] = self.input_shapes["past.ple_conv"]
 
+        state_update_capacity = int(extra_options.get("state_update_capacity", 0)) if self.use_paged_attention else 0
+        if state_update_capacity and (self.ple_layer_ids or qsa_layers):
+            self.context_length_attrs["state_update_capacity"] = state_update_capacity
+            self.input_names["state_update.capture_count"] = "state_update_capture_count"
+            self.input_types["state_update.capture_count"] = ir.DataType.INT32
+            self.input_shapes["state_update.capture_count"] = ["batch_size"]
+            self.input_names["state_update.active"] = "state_update_active"
+            self.input_types["state_update.active"] = ir.DataType.INT32
+            self.input_shapes["state_update.active"] = [1]
+            self.output_names["state_update.ple_tokens"] = {
+                layer_id: f"state_update.{layer_id}.ple_tokens" for layer_id in self.ple_layer_ids
+            }
+            self.output_types["state_update.ple_tokens"] = ir.DataType.INT64
+            self.output_shapes["state_update.ple_tokens"] = [
+                "batch_size",
+                state_update_capacity,
+                self.ngram_size - 1,
+            ]
+            self.output_names["state_update.ple_conv_value"] = {
+                layer_id: f"state_update.{layer_id}.ple_conv_value" for layer_id in self.ple_layer_ids
+            }
+            self.output_types["state_update.ple_conv_value"] = self.io_dtype
+            self.output_shapes["state_update.ple_conv_value"] = [
+                "batch_size",
+                state_update_capacity,
+                self.hc_hidden_size,
+            ]
+            self.output_names["state_update.indexer"] = {
+                layer_id: f"state_update.{layer_id}.indexer" for layer_id in qsa_layers
+            }
+            self.output_types["state_update.indexer"] = self.io_dtype
+            self.output_shapes["state_update.indexer"] = [
+                "batch_size",
+                state_update_capacity,
+                self.indexer_head_dim,
+            ]
+
         self.input_names["input_ids"] = "input_ids"
         self.input_types["input_ids"] = ir.DataType.INT64
         self.input_shapes["input_ids"] = ["num_tokens"] if self.use_paged_attention else ["batch_size", "sequence_length"]
@@ -1102,12 +1140,13 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
                 paged_group["layer_ids"] = sorted(set(paged_group["layer_ids"] + qsa_layers))
 
         if self.ple_layer_ids:
-            state_groups.append(
-                {
-                    "kind": "fixed_ple",
-                    "layer_ids": sorted(self.ple_layer_ids),
-                }
-            )
+            group = {
+                "kind": "fixed_ple",
+                "layer_ids": sorted(self.ple_layer_ids),
+            }
+            if self.context_length_attrs["state_update_capacity"]:
+                group["state_update"] = {"capacity": self.context_length_attrs["state_update_capacity"]}
+            state_groups.append(group)
 
         indexer_bindings = {
             "past.indexer",
@@ -1116,12 +1155,16 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
         }
         if indexer_bindings.issubset(self.input_names):
             if qsa_layers:
-                state_groups.append(
-                    {
-                        "kind": "fixed_indexer",
-                        "layer_ids": qsa_layers,
+                group = {
+                    "kind": "fixed_indexer",
+                    "layer_ids": qsa_layers,
+                }
+                if self.context_length_attrs["state_update_capacity"]:
+                    group["state_update"] = {
+                        "capacity": self.context_length_attrs["state_update_capacity"],
+                        "compress_ratio": self.indexer_compress_ratio,
                     }
-                )
+                state_groups.append(group)
         return state_groups
 
     def make_gated_rms_norm(self, name, root_input, scale, gate, shape, epsilon=1e-5):
@@ -1319,16 +1362,23 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
                 eos,
             ]
         )
+        state_update_capacity = getattr(self, "context_length_attrs", {}).get("state_update_capacity", 0)
+        if self.use_paged_attention and state_update_capacity:
+            ngram_inputs.extend(["", "", self.input_names["state_update.capture_count"]])
+        ngram_outputs = [ngram_ids, self.output_names["present.ple_tokens"][layer_id]]
+        if self.use_paged_attention and state_update_capacity:
+            ngram_outputs.extend(["", self.output_names["state_update.ple_tokens"][layer_id]])
         self.make_node(
             ngram_op_type,
             inputs=ngram_inputs,
-            outputs=[ngram_ids, self.output_names["present.ple_tokens"][layer_id]],
+            outputs=ngram_outputs,
             name=ngram_name,
             domain="com.microsoft",
             max_ngram_size=self.ngram_size,
             n_head_per_ngram=self.heads_per_ngram,
             pad_id=embedding.eos_token_id,
             reset_on_eos=1,
+            **({"state_update_capacity": state_update_capacity} if self.use_paged_attention and state_update_capacity else {}),
         )
         ngram_heads = (self.ngram_size - 1) * self.heads_per_ngram
         self.make_value(
@@ -1461,6 +1511,17 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
                     self.ple_conv_dilation * (self.ple_conv_kernel_size - 1),
                 ],
                 dilation=self.ple_conv_dilation,
+                **(
+                    {
+                        "state_update_capacity": state_update_capacity,
+                        "state_update_capture_count": self.input_names["state_update.capture_count"],
+                        "state_update_active": self.input_names["state_update.active"],
+                        "state_update_value": self.output_names["state_update.ple_conv_value"][layer_id],
+                        "state_update_value_shape": self.output_shapes["state_update.ple_conv_value"],
+                    }
+                    if state_update_capacity
+                    else {}
+                ),
             )
         else:
             self.make_node(
@@ -1547,6 +1608,14 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
                     self.input_names["past.indexer_kv_buffer"][layer_id],
                     "",
                     self.input_names["past.indexer_state_lengths"][layer_id],
+                    *(
+                        [
+                            self.input_names["state_update.capture_count"],
+                            self.input_names["state_update.active"],
+                        ]
+                        if getattr(self, "context_length_attrs", {}).get("state_update_capacity", 0)
+                        else []
+                    ),
                 ],
                 outputs=[
                     selected_indices,
@@ -1555,6 +1624,11 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
                     self.output_names["present.indexer_kv_buffer"][layer_id],
                     "",
                     self.output_names["present.indexer_state_lengths"][layer_id],
+                    *(
+                        [self.output_names["state_update.indexer"][layer_id]]
+                        if getattr(self, "context_length_attrs", {}).get("state_update_capacity", 0)
+                        else []
+                    ),
                 ],
                 name=indexer_name,
                 domain="com.microsoft",
@@ -1564,6 +1638,11 @@ class Qwen4ExpTextModel(Qwen35MoETextModel, Qwen38):
                 token_budget=self.indexer_budget,
                 epsilon=self.layernorm_attrs["epsilon"],
                 scale=self.indexer_head_dim**-0.5,
+                **(
+                    {"state_update_capacity": self.context_length_attrs["state_update_capacity"]}
+                    if getattr(self, "context_length_attrs", {}).get("state_update_capacity", 0)
+                    else {}
+                ),
             )
             self.make_value(selected_indices, ir.DataType.INT32, ["num_tokens", capacity])
             self.make_value(selected_counts, ir.DataType.INT32, ["num_tokens"])

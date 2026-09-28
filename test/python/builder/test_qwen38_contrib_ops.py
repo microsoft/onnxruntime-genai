@@ -962,6 +962,25 @@ def test_paged_qwen_sparse_attention_emits_packed_indexer_and_shared_attention_s
     assert "causal" not in attention
 
 
+def test_paged_qwen_sparse_attention_appends_compact_update_abi():
+    model = make_sparse_model(paged=True)
+    model.context_length_attrs = {"state_update_capacity": 7}
+    model.input_names.update(
+        {
+            "state_update.capture_count": "state_update_capture_count",
+            "state_update.active": "state_update_active",
+        }
+    )
+    model.output_names["state_update.indexer"] = {3: "state_update.3.indexer"}
+
+    model.make_qwen_sparse_attention(3, make_attention(), "hidden_states")
+
+    indexer = emitted_nodes(model)[0][1]
+    assert indexer["inputs"][16:] == ["state_update_capture_count", "state_update_active"]
+    assert indexer["outputs"][6] == "state_update.3.indexer"
+    assert indexer["state_update_capacity"] == 7
+
+
 def test_qwen_attention_gate_uses_resolved_attention_output():
     model = object.__new__(Qwen4ExpTextModel)
     model.io_dtype = ir.DataType.FLOAT16
@@ -1144,6 +1163,36 @@ def test_paged_fp8_ple_uses_varlen_hash_and_quantized_gather():
     ]
     assert conv["dilation"] == 3
     assert not any(op_type == "CausalConvWithState" for op_type, _ in nodes)
+
+
+def test_paged_ple_appends_compact_token_and_conv_updates():
+    model, ple = make_ple_model(paged=True)
+    model.context_length_attrs = {"state_update_capacity": 7}
+    model.input_names.update(
+        {
+            "state_update.capture_count": "state_update_capture_count",
+            "state_update.active": "state_update_active",
+        }
+    )
+    model.output_names.update(
+        {
+            "state_update.ple_tokens": {1: "state_update.1.ple_tokens"},
+            "state_update.ple_conv_value": {1: "state_update.1.ple_conv_value"},
+        }
+    )
+    model.output_shapes = {"state_update.ple_conv_value": ["batch_size", 7, 16]}
+
+    model.make_ple(1, ple, "hidden_states")
+
+    nodes = emitted_nodes(model)
+    ngram = next(kwargs for op_type, kwargs in nodes if op_type == "VarlenNGramHashMapping")
+    assert ngram["inputs"][9] == "state_update_capture_count"
+    assert ngram["outputs"][3] == "state_update.1.ple_tokens"
+    assert ngram["state_update_capacity"] == 7
+    conv = next(kwargs for op_type, kwargs in nodes if op_type == "VarlenCausalConvWithState")
+    assert conv["inputs"][5:] == ["state_update_capture_count", "state_update_active"]
+    assert conv["outputs"][2] == "state_update.1.ple_conv_value"
+    assert conv["state_update_capacity"] == 7
 
 
 def test_paged_ple_emits_packed_engram_gate_shapes():

@@ -527,6 +527,8 @@ struct Config {
         Invalid,
         CausalConv,
         GatedDeltaNet,
+        Ple,
+        Indexer,
       };
 
       static constexpr int MaxStateUpdateCapacity = 8;
@@ -535,6 +537,7 @@ struct Config {
         int capacity{};
         bool enabled{true};
         int key_head_count{};
+        int compress_ratio{};
       };
 
       struct StateGroup {
@@ -619,6 +622,9 @@ struct Config {
         std::string present_indexer_state_lengths_names;
         std::string state_update_conv_value_names{Defaults::StateUpdateConvValueName};
         std::string state_update_recurrent_capsule_names{Defaults::StateUpdateRecurrentCapsuleName};
+        std::string state_update_ple_token_names;
+        std::string state_update_ple_conv_value_names;
+        std::string state_update_indexer_names;
         std::string hidden_states;  // Last hidden state output (when exported with include_hidden_states; e.g. fed to the MTP head)
         // Residual streams tapped at model.dflash2.aux_hidden_state_layers, concatenated on the
         // last axis. Empty unless the model was exported with aux_hidden_state_layers.

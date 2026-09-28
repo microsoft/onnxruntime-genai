@@ -1342,6 +1342,12 @@ class Model:
             outputs["state_update_conv_value_names"] = "state_update.%d.conv_value"
         if "state_update.recurrent_capsule" in self.output_names:
             outputs["state_update_recurrent_capsule_names"] = "state_update.%d.recurrent_capsule"
+        if "state_update.ple_tokens" in self.output_names:
+            outputs["state_update_ple_token_names"] = "state_update.%d.ple_tokens"
+        if "state_update.ple_conv_value" in self.output_names:
+            outputs["state_update_ple_conv_value_names"] = "state_update.%d.ple_conv_value"
+        if "state_update.indexer" in self.output_names:
+            outputs["state_update_indexer_names"] = "state_update.%d.indexer"
 
         genai_config = {
             "model": {
@@ -2568,6 +2574,7 @@ class Model:
         state_update_capacity = kwargs.get("state_update_capacity", 0)
         if state_update_capacity:
             inputs.append(kwargs["state_update_capture_count"])
+            inputs.append(kwargs.get("state_update_active", ""))
 
         output = f"{name}/output_0"
         present_conv = kwargs["present_conv_state"]

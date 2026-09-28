@@ -216,6 +216,7 @@ struct FixedStatePool::Impl {
   struct TensorSpec {
     StateGroupKind kind{};
     int layer_id{};
+    size_t component_index{};
     std::string input_name;
     std::string output_name;
     ONNXTensorElementDataType data_type{};
@@ -235,6 +236,8 @@ struct FixedStatePool::Impl {
     size_t state_update_state_width{};
     size_t state_update_key_width{};
     size_t state_update_key_head_count{};
+    size_t state_update_state_capacity{};
+    size_t state_update_compress_ratio{};
     // Fixed state normally uses two persistent [capacity, row...] banks. Append-only indexer keys
     // may share those bank handles because separately published lengths govern their visibility.
     std::array<std::shared_ptr<OrtValue>, 2> banks;
@@ -621,10 +624,12 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity,
     }
     const auto binding_templates = FixedStateTemplates(decoder, group.kind);
     for (const int layer_id : group.layer_ids) {
-      for (const auto& binding_template : binding_templates) {
+      for (size_t component_index = 0; component_index < binding_templates.size(); ++component_index) {
+      const auto& binding_template = binding_templates[component_index];
       Impl::TensorSpec spec;
       spec.kind = group.kind;
       spec.layer_id = layer_id;
+      spec.component_index = component_index;
       spec.input_name = ExpandBinding(*binding_template.input, layer_id);
       spec.output_name = ExpandBinding(*binding_template.output, layer_id);
       spec.share_past_present_buffer =
@@ -661,9 +666,17 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity,
       if (group.state_update) {
         const auto& update = *group.state_update;
         spec.state_update_enabled = update.enabled;
-        spec.state_update_kind = group.kind == StateGroupKind::FixedConv
-                                     ? Config::Model::Decoder::StateUpdateKind::CausalConv
-                                     : Config::Model::Decoder::StateUpdateKind::GatedDeltaNet;
+        if (group.kind == StateGroupKind::FixedConv) {
+          spec.state_update_kind = Config::Model::Decoder::StateUpdateKind::CausalConv;
+        } else if (group.kind == StateGroupKind::FixedRecurrent) {
+          spec.state_update_kind = Config::Model::Decoder::StateUpdateKind::GatedDeltaNet;
+        } else if (group.kind == StateGroupKind::FixedPle) {
+          spec.state_update_kind = component_index == 0
+                                       ? Config::Model::Decoder::StateUpdateKind::Ple
+                                       : Config::Model::Decoder::StateUpdateKind::CausalConv;
+        } else if (component_index == 0) {
+          spec.state_update_kind = Config::Model::Decoder::StateUpdateKind::Indexer;
+        }
         spec.state_update_capacity = static_cast<size_t>(update.capacity);
         spec.state_update_capture_count_name = decoder.inputs.state_update_capture_count;
         spec.state_update_active_name = decoder.inputs.state_update_active;
@@ -695,7 +708,13 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity,
         spec.state_update_value = load_update_output(
             group.kind == StateGroupKind::FixedConv
                 ? decoder.outputs.state_update_conv_value_names
-                : std::string{});
+            : group.kind == StateGroupKind::FixedPle && component_index == 0
+              ? decoder.outputs.state_update_ple_token_names
+            : group.kind == StateGroupKind::FixedPle && component_index == 1
+              ? decoder.outputs.state_update_ple_conv_value_names
+            : group.kind == StateGroupKind::FixedIndexer && component_index == 0
+              ? decoder.outputs.state_update_indexer_names
+              : std::string{});
         spec.state_update_capsule = load_update_output(
             group.kind == StateGroupKind::FixedRecurrent
                 ? decoder.outputs.state_update_recurrent_capsule_names
@@ -703,15 +722,24 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity,
         spec.state_update_row_bytes = CheckedAdd(
             spec.state_update_value.row_bytes, spec.state_update_capsule.row_bytes,
             "state_update staging allocation");
-        spec.state_update_channel_count = static_cast<size_t>(spec.session_shape[1]);
-        spec.state_update_state_width = static_cast<size_t>(spec.session_shape[2]);
-        if (group.kind == StateGroupKind::FixedConv) {
+        if (spec.state_update_kind == Config::Model::Decoder::StateUpdateKind::Ple) {
+          spec.state_update_channel_count = 1;
+          spec.state_update_state_width = geometry.row_element_count;
+        } else if (spec.state_update_kind == Config::Model::Decoder::StateUpdateKind::Indexer) {
+          spec.state_update_state_width = static_cast<size_t>(spec.session_shape[2]);
+          spec.state_update_state_capacity = static_cast<size_t>(spec.session_shape[1]);
+          spec.state_update_compress_ratio = static_cast<size_t>(update.compress_ratio);
+        } else if (spec.state_update_kind != Config::Model::Decoder::StateUpdateKind::Invalid) {
+          spec.state_update_channel_count = static_cast<size_t>(spec.session_shape[1]);
+          spec.state_update_state_width = static_cast<size_t>(spec.session_shape[2]);
+        }
+        if (spec.state_update_kind == Config::Model::Decoder::StateUpdateKind::CausalConv) {
           const size_t element_size = Ort::SizeOf(spec.data_type);
           if (element_size != 2 && element_size != 4) {
             throw std::runtime_error(
                 "Causal convolution state_update supports only 2-byte and 4-byte elements.");
           }
-        } else {
+        } else if (spec.state_update_kind == Config::Model::Decoder::StateUpdateKind::GatedDeltaNet) {
           spec.state_update_key_width = static_cast<size_t>(spec.session_shape[3]);
           spec.state_update_key_head_count = static_cast<size_t>(update.key_head_count);
         }
@@ -1686,6 +1714,10 @@ void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
           continue;
         }
 
+        if (spec.kind == StateGroupKind::FixedIndexer && spec.component_index != 0) {
+          continue;
+        }
+
         const auto& updates = storage.state_update_tensors[tensor_index];
         const auto row_pointer = [&](const std::unique_ptr<OrtValue>& tensor,
                                      size_t row_bytes) -> const uint8_t* {
@@ -1713,6 +1745,28 @@ void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
                                              spec.state_update_key_head_count *
                                              spec.state_update_key_width
                                  : nullptr;
+        const Impl::TensorSpec* indexer_buffer_spec{};
+        const Impl::TensorSpec* indexer_lengths_spec{};
+        size_t indexer_buffer_index{};
+        size_t indexer_lengths_index{};
+        if (spec.state_update_kind == Config::Model::Decoder::StateUpdateKind::Indexer) {
+          indexer_buffer_index = tensor_index + 1;
+          indexer_lengths_index = tensor_index + 2;
+          indexer_buffer_spec = &impl_->tensors[indexer_buffer_index];
+          indexer_lengths_spec = &impl_->tensors[indexer_lengths_index];
+        }
+        const auto sibling_source = [&](size_t index, const Impl::TensorSpec* sibling) -> const uint8_t* {
+          return sibling
+                     ? ByteWrapTensor(*impl_->device, *storage.gathered_inputs[index]).Span().data() +
+                           row * sibling->row_bytes
+                     : nullptr;
+        };
+        const auto sibling_destination = [&](const Impl::TensorSpec* sibling) -> uint8_t* {
+          return sibling
+                     ? ByteWrapTensor(*impl_->device, *sibling->banks[inactive_bank]).Span().data() +
+                           storage.handles[row].slot * sibling->row_bytes
+                     : nullptr;
+        };
         replay_descriptors.push_back(StateUpdateReplayDesc{
             source,
             destination,
@@ -1720,16 +1774,27 @@ void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
             decay,
             key,
             delta,
+            sibling_source(indexer_buffer_index, indexer_buffer_spec),
+            sibling_destination(indexer_buffer_spec),
+            reinterpret_cast<const int32_t*>(sibling_source(indexer_lengths_index, indexer_lengths_spec)),
+            reinterpret_cast<int32_t*>(sibling_destination(indexer_lengths_spec)),
             static_cast<uint64_t>(spec.state_update_channel_count),
             static_cast<uint64_t>(spec.state_update_state_width),
             static_cast<uint64_t>(spec.state_update_key_width),
             static_cast<uint64_t>(spec.state_update_key_head_count),
+            static_cast<uint64_t>(spec.state_update_state_capacity),
+            static_cast<uint64_t>(indexer_buffer_spec ? indexer_buffer_spec->session_shape[1] : 0),
             static_cast<uint32_t>(spec.state_update_capacity),
             static_cast<uint32_t>(kept_tokens),
             static_cast<uint32_t>(Ort::SizeOf(spec.data_type)),
+            static_cast<uint32_t>(spec.state_update_compress_ratio),
             spec.state_update_kind == Config::Model::Decoder::StateUpdateKind::CausalConv
-                ? StateUpdateReplayKind::CausalConv
-                : StateUpdateReplayKind::GatedDeltaNet,
+              ? StateUpdateReplayKind::CausalConv
+            : spec.state_update_kind == Config::Model::Decoder::StateUpdateKind::GatedDeltaNet
+              ? StateUpdateReplayKind::GatedDeltaNet
+            : spec.state_update_kind == Config::Model::Decoder::StateUpdateKind::Ple
+              ? StateUpdateReplayKind::Snapshot
+              : StateUpdateReplayKind::Indexer,
         });
       }
     }

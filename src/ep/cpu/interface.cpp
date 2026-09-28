@@ -211,6 +211,45 @@ struct CpuInterface : DeviceInterface {
   void ReplayStateUpdates(const StateUpdateReplayDesc* descriptors, size_t count) override {
     for (size_t descriptor_index = 0; descriptor_index < count; ++descriptor_index) {
       const auto& descriptor = descriptors[descriptor_index];
+      if (descriptor.kind == StateUpdateReplayKind::Snapshot) {
+        std::memcpy(
+            descriptor.destination_state,
+            static_cast<const uint8_t*>(descriptor.value) +
+                static_cast<uint64_t>(descriptor.kept_count - 1) * descriptor.state_width *
+                    descriptor.element_size,
+            descriptor.state_width * descriptor.element_size);
+        continue;
+      }
+      if (descriptor.kind == StateUpdateReplayKind::Indexer) {
+        const uint64_t key_row_bytes = descriptor.state_width * descriptor.element_size;
+        if (descriptor.destination_state != descriptor.source_state) {
+          std::memcpy(descriptor.destination_state, descriptor.source_state,
+                      descriptor.state_capacity * key_row_bytes);
+        }
+        if (descriptor.destination_aux_state != descriptor.source_aux_state) {
+          std::memcpy(descriptor.destination_aux_state, descriptor.source_aux_state,
+                      descriptor.aux_capacity * key_row_bytes);
+        }
+        int32_t key_length = descriptor.source_lengths[0];
+        int32_t buffer_length = descriptor.source_lengths[1];
+        for (uint32_t token = 0; token < descriptor.kept_count; ++token) {
+          const auto* payload = static_cast<const uint8_t*>(descriptor.value) +
+                                static_cast<uint64_t>(token) * key_row_bytes;
+          if (++buffer_length == static_cast<int32_t>(descriptor.compress_ratio)) {
+            std::memcpy(static_cast<uint8_t*>(descriptor.destination_state) +
+                            static_cast<uint64_t>(key_length++) * key_row_bytes,
+                        payload, key_row_bytes);
+            buffer_length = 0;
+          } else {
+            std::memcpy(static_cast<uint8_t*>(descriptor.destination_aux_state) +
+                            static_cast<uint64_t>(buffer_length - 1) * key_row_bytes,
+                        payload, key_row_bytes);
+          }
+        }
+        descriptor.destination_lengths[0] = key_length;
+        descriptor.destination_lengths[1] = buffer_length;
+        continue;
+      }
       if (descriptor.kind == StateUpdateReplayKind::CausalConv) {
         const auto* source = static_cast<const uint8_t*>(descriptor.source_state);
         auto* destination = static_cast<uint8_t*>(descriptor.destination_state);

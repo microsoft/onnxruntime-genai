@@ -141,9 +141,12 @@ Config::Model::Decoder MakePleAndIndexerDecoder() {
   decoder.outputs.present_indexer_names = "present.%d.indexer_key";
   decoder.outputs.present_indexer_kv_buffer_names = "present.%d.indexer_kv_buffer";
   decoder.outputs.present_indexer_state_lengths_names = "present.%d.indexer_state_lengths";
+    decoder.outputs.state_update_ple_token_names = "state_update.%d.ple_tokens";
+    decoder.outputs.state_update_ple_conv_value_names = "state_update.%d.ple_conv_value";
+    decoder.outputs.state_update_indexer_names = "state_update.%d.indexer";
   decoder.state_groups = std::vector<Decoder::StateGroup>{
-      Decoder::StateGroup{Decoder::StateGroupKind::FixedPle, {0}},
-      Decoder::StateGroup{Decoder::StateGroupKind::FixedIndexer, {1}}};
+      Decoder::StateGroup{Decoder::StateGroupKind::FixedPle, {0}, Decoder::StateUpdate{7}},
+      Decoder::StateGroup{Decoder::StateGroupKind::FixedIndexer, {1}, Decoder::StateUpdate{7, true, 0, 4}}};
   return decoder;
 }
 
@@ -164,6 +167,11 @@ FakeModelStateMetadata MakePleAndIndexerMetadata() {
            ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16, {-1, 7, 128});
   add_pair("past.1.indexer_state_lengths", "present.1.indexer_state_lengths",
            ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, {-1, 2});
+  metadata.AddInput("state_update_capture_count", ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, {-1});
+  metadata.AddInput("state_update_active", ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, {1});
+  metadata.AddOutput("state_update.0.ple_tokens", ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, {-1, 7, 2});
+  metadata.AddOutput("state_update.0.ple_conv_value", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16, {-1, 7, 16});
+  metadata.AddOutput("state_update.1.indexer", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16, {-1, 7, 128});
   return metadata;
 }
 
@@ -219,9 +227,15 @@ TEST(ModelStateManifestTest, RejectsMissingPackedIndexerComponent) {
   EXPECT_NE(message.find("past.0.ple_tokens"), std::string::npos) << message;
 }
 
-TEST(ModelStateManifestTest, RejectsStateUpdatesForPleAndIndexerGroups) {
+TEST(ModelStateManifestTest, RejectsMissingPleStateUpdateOutput) {
   auto decoder = MakePleAndIndexerDecoder();
-  decoder.state_groups->front().state_update = Config::Model::Decoder::StateUpdate{3};
+  decoder.outputs.state_update_ple_token_names.clear();
+  EXPECT_THROW(ModelStateManifest{decoder}, std::runtime_error);
+}
+
+TEST(ModelStateManifestTest, RejectsMissingIndexerReplayMetadata) {
+  auto decoder = MakePleAndIndexerDecoder();
+  decoder.state_groups->back().state_update->compress_ratio = 0;
   EXPECT_THROW(ModelStateManifest{decoder}, std::runtime_error);
 }
 

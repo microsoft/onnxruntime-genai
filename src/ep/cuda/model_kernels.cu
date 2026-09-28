@@ -489,13 +489,20 @@ struct StateUpdateReplayDescGpu {
   const float* decay;
   const float* key;
   const float* delta;
+  const void* source_aux_state;
+  void* destination_aux_state;
+  const int32_t* source_lengths;
+  int32_t* destination_lengths;
   uint64_t channel_count;
   uint64_t state_width;
   uint64_t key_width;
   uint64_t key_head_count;
+  uint64_t state_capacity;
+  uint64_t aux_capacity;
   uint32_t capacity;
   uint32_t kept_count;
   uint32_t element_size;
+  uint32_t compress_ratio;
   uint32_t kind;
 };
 
@@ -529,11 +536,90 @@ __global__ void CopyStateSlotsKernel(const StateSlotDescGpu* __restrict__ descs,
 
 __global__ void ReplayStateUpdatesKernel(const StateUpdateReplayDescGpu* __restrict__ descs) {
   const StateUpdateReplayDescGpu descriptor = descs[blockIdx.y];
+  const uint64_t stride = static_cast<uint64_t>(gridDim.x) * blockDim.x;
+  const uint64_t start = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+
+  if (descriptor.kind == 3) {
+    const uint64_t update_offset =
+        static_cast<uint64_t>(descriptor.kept_count - 1) * descriptor.state_width;
+    for (uint64_t index = start; index < descriptor.state_width; index += stride) {
+      const uint64_t source_index = update_offset + index;
+      if (descriptor.element_size == 8) {
+        static_cast<uint64_t*>(descriptor.destination_state)[index] =
+            static_cast<const uint64_t*>(descriptor.value)[source_index];
+      } else if (descriptor.element_size == 4) {
+        static_cast<uint32_t*>(descriptor.destination_state)[index] =
+            static_cast<const uint32_t*>(descriptor.value)[source_index];
+      }
+    }
+    return;
+  }
+
+  if (descriptor.kind == 4) {
+    const int32_t old_key_length = descriptor.source_lengths[0];
+    const int32_t old_buffer_length = descriptor.source_lengths[1];
+    const uint64_t new_block_count =
+        (static_cast<uint64_t>(old_buffer_length) + descriptor.kept_count) /
+        descriptor.compress_ratio;
+    const uint64_t new_buffer_length =
+        (static_cast<uint64_t>(old_buffer_length) + descriptor.kept_count) %
+        descriptor.compress_ratio;
+    const uint64_t work_entries = descriptor.state_capacity > descriptor.aux_capacity
+                      ? descriptor.state_capacity
+                      : descriptor.aux_capacity;
+    for (uint64_t index = start; index < work_entries * descriptor.state_width; index += stride) {
+      const uint64_t entry = index / descriptor.state_width;
+      const uint64_t component = index % descriptor.state_width;
+      if (entry < descriptor.state_capacity) {
+        uint64_t source_index = index;
+        const void* source = descriptor.source_state;
+        if (entry >= static_cast<uint64_t>(old_key_length) &&
+            entry < static_cast<uint64_t>(old_key_length) + new_block_count) {
+          const uint64_t completion_token =
+              descriptor.compress_ratio - old_buffer_length - 1 +
+              (entry - old_key_length) * descriptor.compress_ratio;
+          source = descriptor.value;
+          source_index = completion_token * descriptor.state_width + component;
+        }
+        if (descriptor.element_size == 2) {
+          static_cast<uint16_t*>(descriptor.destination_state)[index] =
+              static_cast<const uint16_t*>(source)[source_index];
+        } else {
+          static_cast<uint32_t*>(descriptor.destination_state)[index] =
+              static_cast<const uint32_t*>(source)[source_index];
+        }
+      }
+      if (entry < descriptor.aux_capacity) {
+        uint64_t source_index = index;
+        const void* source = descriptor.source_aux_state;
+        if (entry < new_buffer_length) {
+          const uint64_t virtual_position = new_block_count * descriptor.compress_ratio + entry;
+          const bool from_old_buffer = virtual_position < static_cast<uint64_t>(old_buffer_length);
+          source_index =
+              (from_old_buffer ? virtual_position : virtual_position - old_buffer_length) *
+                  descriptor.state_width +
+              component;
+          source = from_old_buffer ? descriptor.source_aux_state : descriptor.value;
+        }
+        if (descriptor.element_size == 2) {
+          static_cast<uint16_t*>(descriptor.destination_aux_state)[index] =
+              static_cast<const uint16_t*>(source)[source_index];
+        } else {
+          static_cast<uint32_t*>(descriptor.destination_aux_state)[index] =
+              static_cast<const uint32_t*>(source)[source_index];
+        }
+      }
+    }
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+      descriptor.destination_lengths[0] = old_key_length + static_cast<int32_t>(new_block_count);
+      descriptor.destination_lengths[1] = static_cast<int32_t>(new_buffer_length);
+    }
+    return;
+  }
+
   const uint64_t state_elements =
       descriptor.channel_count * descriptor.state_width *
       (descriptor.kind == 1 ? uint64_t{1} : descriptor.key_width);
-  const uint64_t stride = static_cast<uint64_t>(gridDim.x) * blockDim.x;
-  const uint64_t start = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
 
   for (uint64_t state_index = start; state_index < state_elements; state_index += stride) {
     if (descriptor.kind == 1) {

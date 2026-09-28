@@ -585,6 +585,12 @@ struct DecoderOutputs_Element : JSON::Element {
       v_.state_update_conv_value_names = JSON::Get<std::string_view>(value);
     } else if (name == "state_update_recurrent_capsule_names") {
       v_.state_update_recurrent_capsule_names = JSON::Get<std::string_view>(value);
+    } else if (name == "state_update_ple_token_names") {
+      v_.state_update_ple_token_names = JSON::Get<std::string_view>(value);
+    } else if (name == "state_update_ple_conv_value_names") {
+      v_.state_update_ple_conv_value_names = JSON::Get<std::string_view>(value);
+    } else if (name == "state_update_indexer_names") {
+      v_.state_update_indexer_names = JSON::Get<std::string_view>(value);
     } else if (name == "hidden_states") {
       v_.hidden_states = JSON::Get<std::string_view>(value);
     } else if (name == "aux_hidden_states") {
@@ -709,6 +715,13 @@ struct StateUpdate_Element : JSON::Element {
         throw std::runtime_error("Decoder state update key_head_count must be positive");
       }
       v_.key_head_count = static_cast<int>(count);
+    } else if (name == "compress_ratio") {
+      const auto ratio = SafeDoubleToInt64(
+          JSON::Get<double>(value), "model.decoder.state_groups.state_update.compress_ratio");
+      if (ratio < 1 || ratio > std::numeric_limits<int>::max()) {
+        throw std::runtime_error("Decoder state update compress_ratio must be positive");
+      }
+      v_.compress_ratio = static_cast<int>(ratio);
     } else if (name == "kind" || name == "capture_count" || name == "value" ||
                name == "active" || name == "capsule") {
       throw std::runtime_error(

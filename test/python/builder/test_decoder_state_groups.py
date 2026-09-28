@@ -340,6 +340,52 @@ def test_qwen4_exp_adds_indexer_group_only_with_complete_bindings():
     ]
 
 
+def test_qwen4_exp_emits_complete_compact_ple_and_indexer_manifest(monkeypatch, tmp_path):
+    model = _make_config_model(
+        Qwen4ExpTextModel,
+        layer_types=["linear_attention", "qwen_sparse_attention"],
+    )
+    model.num_layers = 2
+    model.ple_layer_ids = {0}
+    model.ple_token_pad_id = 1
+    model.indexer_compress_ratio = 4
+    model.linear_num_key_heads = 2
+    model.context_length_attrs["state_update_capacity"] = 7
+    model.input_names.update(
+        {
+            "state_update.capture_count": "state_update_capture_count",
+            "state_update.active": "state_update_active",
+            "past.indexer": {1: "past.1.indexer_key"},
+            "past.indexer_kv_buffer": {1: "past.1.indexer_kv_buffer"},
+            "past.indexer_state_lengths": {1: "past.1.indexer_state_lengths"},
+        }
+    )
+    model.output_names.update(
+        {
+            "state_update.ple_tokens": {0: "state_update.0.ple_tokens"},
+            "state_update.ple_conv_value": {0: "state_update.0.ple_conv_value"},
+            "state_update.indexer": {1: "state_update.1.indexer"},
+            "present.indexer": {1: "present.1.indexer_key"},
+            "present.indexer_kv_buffer": {1: "present.1.indexer_kv_buffer"},
+            "present.indexer_state_lengths": {1: "present.1.indexer_state_lengths"},
+        }
+    )
+
+    decoder = _write_config(monkeypatch, tmp_path, model)["model"]["decoder"]
+
+    assert decoder["outputs"]["state_update_ple_token_names"] == "state_update.%d.ple_tokens"
+    assert decoder["outputs"]["state_update_ple_conv_value_names"] == "state_update.%d.ple_conv_value"
+    assert decoder["outputs"]["state_update_indexer_names"] == "state_update.%d.indexer"
+    assert decoder["state_groups"][-2:] == [
+        {"kind": "fixed_ple", "layer_ids": [0], "state_update": {"capacity": 7}},
+        {
+            "kind": "fixed_indexer",
+            "layer_ids": [1],
+            "state_update": {"capacity": 7, "compress_ratio": 4},
+        },
+    ]
+
+
 def test_qwen4_exp_config_emits_packed_indexer_state_group(monkeypatch, tmp_path):
     model = _make_config_model(
         Qwen4ExpTextModel,
@@ -448,7 +494,7 @@ def test_varlen_ops_emit_compact_state_updates_at_exact_slots():
         state_update_value_shape=["batch_size", 3, 48],
     )
     conv = model.nodes[-1][1]
-    assert conv["inputs"] == ["x", "weight", "cu", "bias", "past", "capture_count"]
+    assert conv["inputs"] == ["x", "weight", "cu", "bias", "past", "capture_count", ""]
     assert conv["outputs"] == ["/conv/output_0", "present", "state_update.0.conv_value"]
     assert conv["state_update_capacity"] == 3
     assert conv["dilation"] == 1
@@ -771,6 +817,7 @@ def test_qwen38_packed_layer_reuses_declared_state_update_bindings(monkeypatch):
     assert model.make_conv_state_update_kwargs(0) == {
         "state_update_capacity": 3,
         "state_update_capture_count": model.input_names["state_update.capture_count"],
+        "state_update_active": model.input_names["state_update.active"],
         "state_update_value": model.output_names["state_update.conv_value"][0],
         "state_update_value_shape": model.output_shapes["state_update.conv_value"],
     }
