@@ -1434,6 +1434,11 @@ class Qwen35MoEModel(MTPModel):
             raise ValueError("dspark_path and dflash2_path are mutually exclusive.")
         if not self.decoder.use_paged_attention:
             raise ValueError("dspark_path requires use_paged_attention=true.")
+        if self.decoder.ep == "webgpu":
+            raise ValueError(
+                "dspark_path is not supported on WebGPU: the DSpark drafter requires "
+                "BF16 activations and KV caches, but WebGPU PagedAttention supports only FP16."
+            )
 
         num_draft_tokens = None
         if "dspark_num_draft_tokens" in extra_options:
