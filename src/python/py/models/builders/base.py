@@ -2986,7 +2986,9 @@ class Model:
         # is quantized. Quantized d_type in set_onnx_dtype is INT4/UINT4.
         if self.tied_quantized_embeddings and can_reuse_lm_head:
             bits, tied_weight_name, tied_weight_scale_name, tied_weight_zp_name = self.make_tied_quantized_embedding_input_names()
-            block_size = int(self.quant_attrs["matmul_block_size"])
+            # A pre-quantized LM head keeps the group size of its checkpoint.
+            is_prequantized = getattr(lm_head, "qweight", None) is not None
+            block_size = int(lm_head.group_size if is_prequantized else self.quant_attrs["matmul_block_size"])
 
             gather_name = f"{basename}/GatherBlockQuantized"
             gather_output = f"{gather_name}/output_0"
