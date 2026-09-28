@@ -809,6 +809,32 @@ def test_runtime_batching_validation_is_shared_with_profiles(in_profile, engine,
 
 
 @pytest.mark.parametrize("in_profile", [False, True])
+def test_runtime_config_rejects_webgpu_batch_size_greater_than_one(in_profile):
+    generated = {
+        "model": {
+            "decoder": {
+                "session_options": {"provider_options": [{"webgpu": {}}]},
+            }
+        },
+        "engine": {"dynamic_batching": {"max_batch_size": 1}},
+    }
+    runtime = {"engine": {"dynamic_batching": {"max_batch_size": 2}}}
+    if in_profile:
+        runtime = {
+            "runtime_profiles": [
+                {
+                    "id": "webgpu",
+                    "eligibility": {"minimum_total_device_memory_bytes": 1},
+                    "overlay": runtime,
+                }
+            ]
+        }
+
+    with pytest.raises(ValueError, match="max_batch_size must be 1 for WebGPU"):
+        apply_runtime_config(generated, runtime)
+
+
+@pytest.mark.parametrize("in_profile", [False, True])
 @pytest.mark.parametrize(
     "model,max_draft_tokens,error",
     [

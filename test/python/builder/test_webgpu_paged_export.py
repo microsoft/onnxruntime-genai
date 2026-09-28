@@ -33,7 +33,7 @@ def _export_model(output_dir, precision, ep, paged=True):
             "paged_block_size=256",
             "paged_chunk_size=256",
             f"num_blocks={_NUM_BLOCKS}",
-            "max_batch_size=2",
+            "max_batch_size=1",
             "max_scheduled_tokens=256",
         ]
     subprocess.run(
@@ -162,6 +162,9 @@ def test_webgpu_paged_export_runs_prefill_and_decode(tmp_path):
 
     config = json.loads((output_dir / "genai_config.json").read_text(encoding="utf-8"))
     assert config["engine"]["dynamic_batching"]["num_blocks"] == _NUM_BLOCKS
+    # This full-model path exposed incorrect results with multiple requests in one WebGPU batch.
+    # Keep the test at batch 1 until that correctness issue is fixed and the builder guard is removed.
+    assert config["engine"]["dynamic_batching"]["max_batch_size"] == 1
     assert config["model"]["decoder"]["num_hidden_layers"] == _NUM_HIDDEN_LAYERS
     assert config["model"]["decoder"]["inputs"]["attention_metadata"] == "attention_metadata"
 

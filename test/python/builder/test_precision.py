@@ -1138,6 +1138,32 @@ def test_webgpu_paged_attention_requires_num_blocks(monkeypatch):
         )
 
 
+@pytest.mark.parametrize("max_batch_size", ["2", "256"])
+def test_webgpu_paged_attention_rejects_batch_size_greater_than_one(monkeypatch, max_batch_size):
+    with pytest.raises(ValueError, match="max_batch_size=1 only"):
+        _run_check_extra_options(
+            monkeypatch,
+            {
+                "use_paged_attention": "true",
+                "num_blocks": "8",
+                "max_batch_size": max_batch_size,
+            },
+            precision="fp16",
+            execution_provider="webgpu",
+        )
+
+
+@pytest.mark.parametrize("max_batch_size", [None, "1"])
+def test_webgpu_paged_attention_uses_batch_size_one(monkeypatch, max_batch_size):
+    extra_options = {"use_paged_attention": "true", "num_blocks": "8"}
+    if max_batch_size is not None:
+        extra_options["max_batch_size"] = max_batch_size
+
+    _run_check_extra_options(monkeypatch, extra_options, precision="fp16", execution_provider="webgpu")
+
+    assert extra_options["max_batch_size"] == 1
+
+
 def test_paged_attention_normalizes_engine_options(monkeypatch):
     extra_options = {
         "use_paged_attention": "true",
