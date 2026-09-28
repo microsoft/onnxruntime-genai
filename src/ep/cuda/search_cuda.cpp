@@ -325,6 +325,23 @@ void GreedySearch_Cuda::MarkDoneAtMaxLength() {
 void GreedySearch_Cuda::CommitToken(int32_t token) {
   // The caller already selected this generated token, so skip sampling but retain generated-token
   // EOS, padding, and max-length behavior. Speculative decoding only calls this with batch_size 1.
+  const auto& eos_token_ids = params_->config.model.eos_token_id;
+  if (params_->BatchBeamSize() == 1 && !completion_pending_ && !IsDone() &&
+      std::find(eos_token_ids.begin(), eos_token_ids.end(), token) == eos_token_ids.end()) {
+    // The host already knows the outcome of CheckForEOSAndPad for a live sequence and a non-EOS
+    // token: nothing is padded and nothing finishes. Committing through two async copies from
+    // pageable memory (staged by the driver, so `token` can go out of scope) avoids a device round
+    // trip per accepted draft token.
+    CUDA_CHECK(cudaMemcpyAsync(next_tokens_.data(), &token, sizeof(int32_t), cudaMemcpyHostToDevice, GetStream()));
+    if (sequences_.GetSequenceLength() < sequences_.max_length_) {
+      int32_t* destination = sequences_.GetSequences().Span().data() + sequences_.GetSequenceLength();
+      CUDA_CHECK(cudaMemcpyAsync(destination, &token, sizeof(int32_t), cudaMemcpyHostToDevice, GetStream()));
+    }
+    next_tokens_buffer_.CpuSpan()[0] = token;
+    sequences_.AfterAppendNextTokens(next_tokens_buffer_, params_->BatchBeamSize());
+    MarkDoneAtMaxLength();
+    return;
+  }
   CUDA_CHECK(cudaMemcpyAsync(next_tokens_.data(), &token, sizeof(int32_t), cudaMemcpyHostToDevice, GetStream()));
   external_host_copy_ = false;
   LaunchNextTokensTail();

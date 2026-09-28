@@ -35,6 +35,102 @@ const char* device_label = "cuda";
 cuda_stream_holder g_stream;
 cudaStream_t GetStream() { return g_stream.get(); }
 
+namespace {
+
+// Every WrapMemory() view that touches its host mirror used to pin a fresh buffer with cudaHostAlloc
+// and release it with cudaFreeHost, several times per decode step. Both calls are slow and
+// cudaFreeHost also waits for the device, so small mirrors are recycled instead. A mirror released
+// while a host-to-device copy from it may still be queued is only reused once an event recorded
+// behind that copy has completed.
+class PinnedHostPool {
+ public:
+  static constexpr size_t kMinBytes = 256;
+  static constexpr size_t kMaxBytes = size_t{1} << 20;
+  static constexpr size_t kClasses = 13;  // 256 B .. 1 MiB
+  static constexpr size_t kMaxFreePerClass = 64;
+
+  // Never destroyed: pinned memory is returned to the driver at process exit, and a static
+  // destructor could otherwise run after the CUDA runtime has shut down.
+  static PinnedHostPool& Instance() {
+    static PinnedHostPool* pool = new PinnedHostPool();
+    return *pool;
+  }
+
+  static bool Pooled(size_t bytes) { return bytes <= kMaxBytes; }
+
+  uint8_t* Acquire(size_t bytes, size_t& capacity) {
+    const size_t cls = ClassOf(bytes);
+    capacity = kMinBytes << cls;
+    {
+      std::lock_guard<std::mutex> lock{mutex_};
+      auto& entries = free_[cls];
+      for (size_t i = entries.size(); i-- > 0;) {
+        Entry entry = entries[i];
+        if (entry.event) {
+          const cudaError_t status = ::cudaEventQuery(entry.event);
+          if (status == cudaErrorNotReady)
+            continue;
+          CUDA_CHECK(status);
+          events_.push_back(entry.event);
+        }
+        entries.erase(entries.begin() + static_cast<std::ptrdiff_t>(i));
+        return entry.p;
+      }
+    }
+    void* p{};
+    CUDA_CHECK(::cudaHostAlloc(&p, capacity, 0));
+    return static_cast<uint8_t*>(p);
+  }
+
+  void Release(uint8_t* p, size_t capacity, bool copy_pending) noexcept {
+    const size_t cls = ClassOf(capacity);
+    std::lock_guard<std::mutex> lock{mutex_};
+    auto& entries = free_[cls];
+    cudaEvent_t event{};
+    if (copy_pending) {
+      if (!events_.empty()) {
+        event = events_.back();
+        events_.pop_back();
+      } else if (::cudaEventCreateWithFlags(&event, cudaEventDisableTiming) != cudaSuccess) {
+        event = nullptr;
+      }
+      if (!event || ::cudaEventRecord(event, GetStream()) != cudaSuccess) {
+        // Without an event the copy cannot be tracked, so fall back to the synchronizing free.
+        if (event) events_.push_back(event);
+        ::cudaFreeHost(p);
+        return;
+      }
+    }
+    if (entries.size() >= kMaxFreePerClass) {
+      if (event) {
+        ::cudaEventSynchronize(event);
+        events_.push_back(event);
+      }
+      ::cudaFreeHost(p);
+      return;
+    }
+    entries.push_back(Entry{p, event});
+  }
+
+ private:
+  struct Entry {
+    uint8_t* p;
+    cudaEvent_t event;  // null when no copy from the buffer was outstanding at release
+  };
+
+  static size_t ClassOf(size_t bytes) {
+    size_t cls = 0;
+    while ((kMinBytes << cls) < bytes) ++cls;
+    return cls;
+  }
+
+  std::mutex mutex_;
+  std::vector<Entry> free_[kClasses];
+  std::vector<cudaEvent_t> events_;
+};
+
+}  // namespace
+
 struct GpuMemory final : DeviceBuffer {
   GpuMemory(size_t size) : owned_{true} {
     size_in_bytes_ = size;
@@ -49,26 +145,37 @@ struct GpuMemory final : DeviceBuffer {
   ~GpuMemory() override {
     if (owned_)
       ort_allocator_->Free(p_device_);
-    if (p_cpu_)
-      ::cudaFreeHost(p_cpu_);
+    if (p_cpu_) {
+      if (cpu_capacity_ != 0)
+        PinnedHostPool::Instance().Release(p_cpu_, cpu_capacity_, copy_to_device_pending_);
+      else
+        ::cudaFreeHost(p_cpu_);
+    }
   }
 
   const char* GetType() const override { return device_label; }
 
   void AllocateCpu() override {
-    if (!p_cpu_)
+    if (p_cpu_)
+      return;
+    if (PinnedHostPool::Pooled(size_in_bytes_)) {
+      p_cpu_ = PinnedHostPool::Instance().Acquire(size_in_bytes_, cpu_capacity_);
+    } else {
       CUDA_CHECK(::cudaHostAlloc(&p_cpu_, size_in_bytes_, 0));
+    }
   }
 
   void CopyDeviceToCpu() override {
     AllocateCpu();
     CUDA_CHECK(::cudaMemcpyAsync(p_cpu_, p_device_, size_in_bytes_, ::cudaMemcpyDeviceToHost, GetStream()));
     CUDA_CHECK(::cudaStreamSynchronize(GetStream()));
+    copy_to_device_pending_ = false;
   }
 
   void CopyCpuToDevice() override {
     assert(p_cpu_);
     CUDA_CHECK(::cudaMemcpyAsync(p_device_, p_cpu_, size_in_bytes_, ::cudaMemcpyHostToDevice, GetStream()));
+    copy_to_device_pending_ = true;
   }
 
   void CopyFromCpu(const void* source, size_t size_in_bytes) override {
@@ -88,7 +195,9 @@ struct GpuMemory final : DeviceBuffer {
     CUDA_CHECK(::cudaMemsetAsync(p_device_, 0, size_in_bytes_, GetStream()));
   }
 
-  bool owned_;  // If we own the memory, we delete it on destruction
+  bool owned_;             // If we own the memory, we delete it on destruction
+  size_t cpu_capacity_{};  // Nonzero when p_cpu_ came from PinnedHostPool
+  bool copy_to_device_pending_{};
 };
 
 template <typename T>
