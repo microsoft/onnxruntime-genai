@@ -944,6 +944,19 @@ class QuantizedModel:
     def repack_experts(self, experts):
         pass
 
+    def dequantize_gate_to_dense(self, module):
+        """Dequantize a pre-quantized gate projection and return a plain TensorModule.
+
+        Follows the same pattern as ModeloptModel.make_dense_linear_module: unpacks and
+        dequantizes the weight to float16 so the builder sees a dense projection and emits
+        a standard float MatMul instead of MatMulNBits.
+        """
+        self.prepare_quantized_tensor(module)
+        self.unpack(module)  # sets module.qweight to dequantized float16 [out, in] weight
+        dense = TensorModule()
+        dense.weight = module.qweight
+        return dense
+
     def repack_quantized_tensor(self, module, clear_g_idx):
         if module.qweight is None:
             return
@@ -963,8 +976,17 @@ class QuantizedModel:
                 if isinstance(module, QuantizedTensorModule):
                     self.repack_quantized_tensor(module, clear_g_idx)
 
-            for module in layer.linear_attn.__dict__.values():
-                if isinstance(module, QuantizedTensorModule):
+            # GatedDeltaNet decay/beta gate projections (in_proj_b, in_proj_a) must be
+            # dequantized to dense float16 — their outputs feed exp() and softplus() in
+            # the recurrence, so quantization error would be amplified there. All other
+            # linear_attn projections are repacked normally for int4 MatMulNBits.
+            _dense_gate_names = {"in_proj_b", "in_proj_a"}
+            for attr_name, module in list(layer.linear_attn.__dict__.items()):
+                if not isinstance(module, QuantizedTensorModule):
+                    continue
+                if attr_name in _dense_gate_names and module.qweight is not None:
+                    setattr(layer.linear_attn, attr_name, self.dequantize_gate_to_dense(module))
+                else:
                     self.repack_quantized_tensor(module, clear_g_idx)
 
             for module in layer.mlp.__dict__.values():
