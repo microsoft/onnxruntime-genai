@@ -76,13 +76,24 @@ def _composite(aux_layers=AUX_LAYERS, use_paged_attention=True, dflash2_path=Non
     return model
 
 
-def test_absent_option_builds_no_drafter(tmp_path):
-    model = _composite()
+@pytest.mark.parametrize("ep", ["cuda", "webgpu"])
+def test_absent_option_builds_no_drafter(tmp_path, ep):
+    model = _composite(ep=ep)
 
     model.make_dspark_init(io_dtype=None, extra_options={})
     model.make_dspark_model(str(tmp_path))
 
     assert model.dspark is None
+
+
+def test_webgpu_drafter_is_rejected_before_checkpoint_access(tmp_path):
+    model = _composite(ep="webgpu")
+
+    with pytest.raises(ValueError, match="dspark_path is not supported on WebGPU.*BF16"):
+        model.make_dspark_init(
+            io_dtype=ir.DataType.FLOAT16,
+            extra_options={"dspark_path": str(tmp_path / "missing-drafter")},
+        )
 
 
 def test_drafter_requires_paged_attention(tmp_path):
