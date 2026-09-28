@@ -138,6 +138,17 @@ warm outputs matched uncached greedy output and continued drafting. A small
 available hit does not guarantee a speedup: the 25,600-token prompt took
 12.4 s with replay versus 12.3 s uncached.
 
+For a no-restoration comparison, the original base commit's target-only
+build reused 39,936 tokens in about 420 ms on a warm prompt, with zero
+draft forward passes. A separate-process snapshot after the cold prompt
+measured approximately 2,706 MiB host RSS and 69,790 MiB GPU memory.
+Those GPU snapshots are not a fixed-pool memory comparison: the target pool
+is automatically sized from free memory and differs between builds. More
+importantly, the target-only build's third prompt in a four-prompt run
+produced different greedy tokens from the uncached control. Neither this
+timing nor four passing auxiliary-replay prompts establish universal
+correctness; the target-only mismatch needs separate investigation.
+
 ## Run
 
 ```bash
