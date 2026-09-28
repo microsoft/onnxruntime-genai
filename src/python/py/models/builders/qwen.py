@@ -1106,6 +1106,8 @@ class Qwen35MoEModel(MTPModel):
     def block_drafter_precision(self, extra_options, option_name):
         precision = str(extra_options.get(option_name, "bf16")).lower()
         allowed = {"bf16", "int4", "int8"}
+        if extra_options.get("_drafter_quant_config") is not None:
+            allowed.add("int2")
         if precision not in allowed:
             raise ValueError(f"{option_name} must be one of {sorted(allowed)}, got '{precision}'.")
         return precision
@@ -1114,7 +1116,7 @@ class Qwen35MoEModel(MTPModel):
         """Resolve weight-only quantization for a block-drafter body, or ``None`` to keep it dense."""
         if precision == "bf16":
             return None
-        bits = 4 if precision == "int4" else 8
+        bits = int(precision.removeprefix("int"))
         block_size = int(
             quant_config.weights.block_size
             if quant_config is not None
@@ -1126,7 +1128,11 @@ class Qwen35MoEModel(MTPModel):
             else self.decoder.matmul_attrs["weights_prepacked"]
         )
         prepack = requested_prepack if self.decoder.ep == "cuda" else 0
-        return {"bits": bits, "block_size": block_size, "prepack": prepack}
+        return {
+            "bits": bits,
+            "block_size": block_size,
+            "prepack": prepack,
+        }
 
     def block_drafter_lm_head_quant(self):
         """Resolve how a block drafter gets its LM head, or ``None`` to keep it dense.
@@ -1221,6 +1227,9 @@ class Qwen35MoEModel(MTPModel):
             extra_options.get("_shared_weight_policies", {"embedding": "auto", "lm_head": "auto"})
         )
         drafter_quant_config = extra_options.get("_drafter_quant_config")
+        drafter_io_dtype = (
+            drafter_quant_config.to_onnx_dtypes()[0] if drafter_quant_config is not None else ir.DataType.BFLOAT16
+        )
 
         num_draft_tokens = None
         if "dflash2_num_draft_tokens" in extra_options:
@@ -1236,6 +1245,7 @@ class Qwen35MoEModel(MTPModel):
             raise ValueError("dflash2_fuse_gate_up must be true or false.")
         self.dflash2_attrs = {
             "io_dtype": io_dtype,
+            "compute_dtype": drafter_io_dtype,
             "num_draft_tokens": num_draft_tokens,
             "precision": self.block_drafter_precision(extra_options, "dflash2_precision"),
             "quant_config": drafter_quant_config,
@@ -1259,7 +1269,16 @@ class Qwen35MoEModel(MTPModel):
         from .dflash2 import DFlash2Builder  # noqa: PLC0415
 
         print("Building DFlash 2 draft model -> dflash2.onnx")
-        target_dir = input_path if input_path and os.path.isdir(input_path) else self.decoder.model_name_or_path
+        if input_path and os.path.isdir(input_path):
+            target_dir = input_path
+        else:
+            from huggingface_hub import snapshot_download  # noqa: PLC0415
+
+            target_dir = snapshot_download(
+                self.decoder.model_name_or_path,
+                cache_dir=self.decoder.cache_dir,
+                token=self.decoder.hf_token,
+            )
         self.dflash2 = DFlash2Builder(
             self.dflash2_path,
             target_dir,
@@ -1274,6 +1293,7 @@ class Qwen35MoEModel(MTPModel):
             embed_quant=self.block_drafter_embed_quant(),
             fuse_gate_up=self.dflash2_attrs["fuse_gate_up"],
             include_attention_metadata=True,
+            compute_dtype=self.dflash2_attrs["compute_dtype"]
         )
         self.dflash2.make_model()
 

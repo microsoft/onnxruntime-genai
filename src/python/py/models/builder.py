@@ -29,6 +29,8 @@ from builders import (
     ErnieModel,
     Gemma2Model,
     Gemma3Model,
+    Gemma4MoEModel,
+    Gemma4Model,
     GemmaModel,
     GPTOSSModel,
     GraniteModel,
@@ -324,7 +326,7 @@ def check_extra_options(
 
     # `moe_quant_type` is the single option that selects the MoE quantization scheme. It replaces the
     # older per-type flags (`use_8bits_moe``) so new schemes can be added without a new flag.
-    supported_moe_quant_types = {"int4", "int8", "mxfp4", "nvfp4"}
+    supported_moe_quant_types = {"int2", "int4", "int8", "mxfp4", "nvfp4"}
 
     # Backward compatibility: `use_8bits_moe` is deprecated in favor of `moe_quant_type`.
     if "use_8bits_moe" in extra_options:
@@ -350,6 +352,13 @@ def check_extra_options(
                     "int4 build precision is what exports the quantized QMoE op, and the FP4 scheme only sets the "
                     "MoE expert weights to the FP4 encoding."
                 )
+
+    if extra_options.get("moe_quant_type") == "int2":
+        if execution_provider != "cuda":
+            raise ValueError("INT2 QMoE is only supported on the CUDA EP.")
+        qmoe_block_size = int(extra_options.get("qmoe_block_size", 32))
+        if qmoe_block_size not in (64, 128):
+            raise ValueError("INT2 CUDA QMoE requires qmoe_block_size=64 or 128.")
 
     if extra_options.get("exclude_lm_head", False) and extra_options.get("include_hidden_states", False):
         # 'exclude_lm_head' is for when 'hidden_states' are outputted and 'logits' are not outputted
@@ -689,6 +698,16 @@ def create_model(
         onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         if not onnx_model.exclude_embeds:
             onnx_model.model_type = "gemma3_vl_text"
+    elif config.architectures[0] == "Gemma4ForConditionalGeneration":
+        print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
+        print("WARNING: This is only generating the text component of the model. The vision and audio components are not supported.")
+        onnx_model = Gemma4MoEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        onnx_model.model_type = "gemma4_text"
+    elif config.architectures[0] == "Gemma4UnifiedForConditionalGeneration":
+        print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
+        print("WARNING: This is only generating the text component of the model. The vision and audio components are not supported.")
+        onnx_model = Gemma4Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        onnx_model.model_type = "gemma4_text"
     elif config.architectures[0] == "GptOssForCausalLM":
         print("WARNING: This model only supports symmetric quantization for `QMoE`.")
         if hasattr(config, "quantization_config") and config.quantization_config.get("quant_method") != "quark":
@@ -1001,9 +1020,11 @@ def get_args():
                 dflash2_precision = Weight precision for the DFlash 2 drafter body: bf16 (default),
                     int4, or int8. bf16 keeps every projection dense. int4/int8 emit `MatMulNBits`
                     at the target's block size for the attention and MLP projections, leaving the
-                    small dynamic-convolution and candidate-selector projections dense. The BF16
-                    body is emitted in the portable raw blockwise layout, and its session disables
-                    the target decoder's fpA-intB selection for those nodes.
+                    small dynamic-convolution and candidate-selector projections dense. The body
+                    uses the raw blockwise layout by default. On CUDA, a drafter quantization
+                    format with matmulnbits_weights_prepacked=1 or 2 emits that fpA-intB layout for
+                    projections the kernel supports (N % 64 for int4, N % 32 for int8); other
+                    projections stay raw, and the drafter session disables fpA-intB selection for them.
                     Body activations and KV caches remain bf16; this option does not quantize the
                     drafter's KV cache. When the target LM head uses a reproducible symmetric default
                     layout, the drafter head uses its actual bit width, block size, initializer names,
@@ -1109,7 +1130,8 @@ def get_args():
                     are returned to the driver instead of being retained as free arena blocks.
                 use_qdq = Use the QDQ decomposition for ops.
                     Use this option when you want to use quantize-dequantize ops. For example, you will have a quantized MatMul op instead of the MatMulNBits op.
-                moe_quant_type = int4/int8/mxfp4/nvfp4: Quantization scheme for MoE (QMoE) layers. Default is int4.
+                moe_quant_type = int2/int4/int8/mxfp4/nvfp4: Quantization scheme for MoE (QMoE) layers. Default is int4.
+                    int2 = 2-bit integer QMoE weights on CUDA. Requires qmoe_block_size=64 or 128.
                     int4 = 4-bit integer QMoE weights (expert_weight_bits=4, quant_type="int").
                     int8 = 8-bit integer QMoE weights (expert_weight_bits=8, quant_type="int").
                     mxfp4 = MXFP4 QMoE weights on the CUDA EP (quant_type="fp4", expert_weight_bits=4, block_size=32):

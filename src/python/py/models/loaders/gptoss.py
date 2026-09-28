@@ -103,7 +103,7 @@ class GptOssMXFP4Loader:
             .contiguous()
         )
 
-    def prepare_experts(self, layer_id):
+    def prepare_experts(self, layer_id, decode=False):
         prefix = f"model.layers.{layer_id}.moe.experts"
         gate_up_blocks = self.load_tensor(f"{prefix}.gate_up_proj_blocks")
         gate_up_scales = self.load_tensor(f"{prefix}.gate_up_proj_scales")
@@ -120,6 +120,21 @@ class GptOssMXFP4Loader:
                     f"GPT-OSS MXFP4 scales for layer {layer_id} {projection} must have shape "
                     f"{tuple(expected_scale_shape)}, got {tuple(scales.shape)}."
                 )
+
+        if decode:
+            magnitudes = torch.tensor((0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0), dtype=torch.float32)
+
+            def decode_projection(blocks, scales):
+                blocks = blocks.to(torch.uint8)
+                codes = torch.empty((*blocks.shape[:-1], 32), dtype=torch.uint8)
+                codes[..., 0::2] = blocks & 0x0F
+                codes[..., 1::2] = blocks >> 4
+                values = magnitudes[(codes & 0x07).long()]
+                values = torch.where((codes & 0x08) != 0, -values, values)
+                block_scales = torch.pow(2.0, scales.to(torch.float32) - 127.0)
+                return (values * block_scales.unsqueeze(-1)).reshape(blocks.shape[0], blocks.shape[1], -1).contiguous()
+
+            return decode_projection(gate_up_blocks, gate_up_scales), decode_projection(down_blocks, down_scales)
 
         experts = QuantizedExperts()
         experts.quant_type = "fp4"
