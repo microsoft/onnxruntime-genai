@@ -183,3 +183,10 @@ TEST(LFM2CacheLayerTypesValidationTest, Lfm2VlTextTypeUsesLfm2Runtime) {
   SkipIfModelUnavailable();
   ExpectLfm2Runtime("lfm2_vl_text", "vl_text_type");
 }
+
+// An LFM2-Audio checkpoint exported without exclude_embeds is labeled "lfm2_audio_text": a plain
+// LFM2 decoder rather than a stage of the speech pipeline.
+TEST(LFM2CacheLayerTypesValidationTest, Lfm2AudioTextTypeUsesLfm2Runtime) {
+  SkipIfModelUnavailable();
+  ExpectLfm2Runtime("lfm2_audio_text", "audio_text_type");
+}

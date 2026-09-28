@@ -16,6 +16,8 @@
 
 namespace Generators {
 
+inline constexpr size_t kDefaultStaticBatchSize = 4;
+
 struct Scheduler {
   /**
    * @brief Constructs a Scheduler instance with the specified model and cache manager.

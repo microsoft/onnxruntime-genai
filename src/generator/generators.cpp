@@ -971,7 +971,7 @@ void Generator::RewindToLength(size_t new_length) {
   if (ModelType::IsTransducer(model_type) || ModelType::IsStreamingEncDecASR(model_type))
     throw std::runtime_error("RewindTo is not supported for streaming ASR models (" + model_type + ").");
   if (model_type == "whisper" || model_type == "phi3v" || model_type == "decoder-pipeline" ||
-      ModelType::IsLFM2(model_type) || model_type == "lfm2_vl")
+      ModelType::IsLFM2(model_type) || model_type == "lfm2_vl" || model_type == "lfm2_audio")
     throw std::runtime_error("RewindTo is currently not supported for " + model_type + ".");
   const size_t current_length = search_->GetSequenceLength();
   if (new_length > current_length)

@@ -120,6 +120,11 @@ struct PagedKeyValueCache {
   bool PrefixCachingEnabled() const;
   bool RequiresPrefixCheckpoint() const;
   size_t BlockSize() const { return block_pool_->BlockSize(); }
+  size_t MaxRequestBlockCount() const {
+    return max_block_table_columns_ == 0
+               ? block_pool_->Capacity()
+               : std::min(block_pool_->Capacity(), max_block_table_columns_);
+  }
   const PrefixCacheMetrics& PrefixMetrics() const;
 
   // Selects the active and pending requests whose immediate cache growth fits this step.

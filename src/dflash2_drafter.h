@@ -12,6 +12,7 @@
 #include "models/model.h"
 #include "models/cpu_embedding.h"
 #include "engine/graph_annotation_ids.h"
+#include "decoding/speculative_sampling.h"
 
 namespace Generators {
 
@@ -36,6 +37,10 @@ Tensor& Dflash2StepTensor(std::unique_ptr<Tensor>& slot, DeviceInterface* device
 // so an untracked request can join only at position zero while its current turn is eligible to
 // draft. Tracked requests bypass this rule so every later turn keeps their cached context contiguous.
 bool Dflash2CanJoin(bool draft_eligible, size_t first_position) noexcept;
+
+TargetTokenSelection Dflash2IndependentDraftDistribution(
+    const int32_t* candidate_ids, const float* logits, size_t top_k,
+    float temperature, float top_p, float min_p);
 
 /**
  * @brief Hosts a DFlash 2 or DSpark block-drafter session.
@@ -93,6 +98,7 @@ struct Dflash2Drafter {
     int32_t anchor_token{};
     bool draft_eligible{};
     bool wants_drafts{};
+    bool wants_independent_sampling{};
   };
 
   /**
@@ -143,7 +149,8 @@ struct Dflash2Drafter {
    */
   // Returns true only when the drafter session executed.
   bool Propose(Tensor& aux_hidden_states, std::span<const Feed> feeds,
-               std::vector<std::vector<int32_t>>& drafts);
+               std::vector<std::vector<int32_t>>& drafts,
+               std::vector<std::vector<TargetTokenSelection>>* draft_distributions = nullptr);
 
   // Returns a request's blocks to the pool. Safe for requests the drafter never saw.
   void Release(const Request* request);

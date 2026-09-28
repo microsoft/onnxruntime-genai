@@ -313,6 +313,31 @@ void StaticCacheManager::Deallocate(std::vector<std::shared_ptr<Request>>& reque
   cache_allocated_requests_.clear();
 }
 
+void StaticCacheManager::ValidateRewind(
+    const std::shared_ptr<Request>& request) const {
+  if (!IsResident(request)) {
+    return;
+  }
+  if (cache_allocated_requests_.size() != 1) {
+    throw std::runtime_error(
+        "Static Engine Request rewind requires exactly one resident "
+        "Request because a row cannot be released independently from its "
+        "shared contiguous cache allocation.");
+  }
+}
+
+void StaticCacheManager::ReleaseForRewind(
+    const std::shared_ptr<Request>& request) {
+  ValidateRewind(request);
+  if (!IsResident(request)) {
+    return;
+  }
+  key_value_cache_.reset();
+  key_value_cache_state_.reset();
+  params_.reset();
+  cache_allocated_requests_.clear();
+}
+
 void StaticCacheManager::DetachRequestForTeardown(
     const std::shared_ptr<Request>& request) noexcept {
   if (!IsResident(request)) {
@@ -543,6 +568,35 @@ void PagedCacheManager::Deallocate(std::vector<std::shared_ptr<Request>>& reques
                                         allocated_to_remove.end(),
                                         request) != allocated_to_remove.end();
                      }),
+      cache_allocated_requests_.end());
+}
+
+void PagedCacheManager::ValidateRewind(
+    const std::shared_ptr<Request>& request) const {
+  if (!IsResident(request)) {
+    return;
+  }
+  key_value_cache_->ValidateRemove(request.get());
+  if (fixed_state_pool_) {
+    fixed_state_pool_->ValidateRelease(
+        fixed_state_pool_->HandleFor(request.get()));
+  }
+}
+
+void PagedCacheManager::ReleaseForRewind(
+    const std::shared_ptr<Request>& request) {
+  ValidateRewind(request);
+  if (!IsResident(request)) {
+    return;
+  }
+  // Deallocate builds temporary vectors; rewind publishes only after auxiliary state is released.
+  // The single-request path uses the already validated no-throw release primitives instead.
+  if (fixed_state_pool_) {
+    fixed_state_pool_->ReleaseValidated(fixed_state_pool_->HandleFor(request.get()));
+  }
+  key_value_cache_->RemoveValidated(request.get());
+  cache_allocated_requests_.erase(
+      std::remove(cache_allocated_requests_.begin(), cache_allocated_requests_.end(), request),
       cache_allocated_requests_.end());
 }
 

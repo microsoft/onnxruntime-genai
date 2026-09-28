@@ -67,6 +67,15 @@ def test_tokenizer_create_from_config_and_path(test_data_path):
     assert tokenizer_from_path.decode(tokenizer_from_config.encode(text)) == text
 
 
+def test_tokenizer_decodes_no_tokens_to_an_empty_string(test_data_path):
+    # What is left after the prompt when generation stops on its first token; it used to SIGFPE.
+    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    tokenizer = og.Tokenizer(model_path)
+
+    assert tokenizer.decode(np.array([], dtype=np.int32)) == ""
+    assert tokenizer.decode(np.arange(4, dtype=np.int32)[4:]) == ""
+
+
 def test_telemetry_control():
     og.disable_telemetry_events()
     og.enable_telemetry_events()
@@ -977,6 +986,26 @@ def test_whisper_preprocessing_multiple_audios(test_data_path, relative_model_pa
     decoder_prompt_tokens = ["<|startoftranscript|>", "<|en|>", "<|transcribe|>", "<|notimestamps|>"]
     prompts = ["".join(decoder_prompt_tokens)] * batch_size
     _ = processor(prompts, audios=audios)
+
+
+@pytest.mark.parametrize("opener", ["images", "audios"])
+def test_open_keeps_short_paths_alive(test_data_path, tmp_path, opener):
+    # The paths are copied into a vector first and only then turned into char pointers: a short
+    # string keeps its characters inside the string object, so taking the pointer as the vector
+    # grows leaves the earlier entries pointing at moved-from memory.
+    source = Path(test_data_path) / ("images/cars.jpg" if opener == "images" else "audios/jfk.flac")
+    suffix = source.suffix
+    short_dir = tmp_path / "s"
+    short_dir.mkdir()
+    paths = []
+    for index in range(4):
+        path = short_dir / f"{index}{suffix}"
+        shutil.copy(source, path)
+        paths.append(os.fspath(path))
+
+    opened = (og.Images if opener == "images" else og.Audios).open(*paths)
+
+    assert opened is not None
 
 
 def test_streaming_asr_create(asr_speech_model_path):

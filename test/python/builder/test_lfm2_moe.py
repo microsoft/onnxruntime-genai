@@ -320,6 +320,7 @@ def test_make_moe_router_shape_follows_the_token_layout(use_paged_attention, row
     model = Model.__new__(Model)
     model.moe_attrs = {"num_experts": 8}
     model.use_paged_attention = use_paged_attention
+    model.hidden_rows_dim = "num_tokens"
     assert model.make_moe_router_shape() == [rows, 8]
     assert model.make_moe_router_shape(last_dim=2) == [rows, 2]
 
