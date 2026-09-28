@@ -210,10 +210,6 @@ class Qwen35TextModel(Model):
         )
         super().make_inputs_and_outputs()
 
-    def is_packed_matmul_supported(self):
-        # Qwen-3.5 needs a separate Q projection to split its per-head Q and gate values.
-        return False
-
     def is_packed_attn_supported(self):
         return False
 
@@ -222,6 +218,9 @@ class Qwen35TextModel(Model):
         self.attention_attrs["q_norm"] = True
         self.attention_attrs["k_norm"] = True
         super().make_attention_init(config)
+        if self.use_paged_attention:
+            # The base paged path keeps Q/K/V separate under Q/K norm; this model splits them itself.
+            self.attention_attrs["use_packed_matmul"] = self.is_packed_matmul_supported()
 
     def is_fused_rope_supported(self):
         # Qwen-3.5 applies MRoPE manually before attention, not fused in the op

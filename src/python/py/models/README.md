@@ -488,6 +488,14 @@ python -m onnxruntime_genai.models.builder -i path_to_target_model -o path_to_ou
 python builder.py -i path_to_target_model -o path_to_output_folder -p int4 -e cuda --extra_options fuse_mlp_gate_up=true
 ```
 
+#### Qwen3.5/3.8 Q/K/V Projection Fusion
+
+Qwen3.5-family full-attention layers emit one packed Q/K/V `MatMul` or `MatMulNBits` followed by `Split`, including with paged attention, even though their Q projection is twice as wide because it carries a per-head output gate. The weights are concatenated before quantization, so the quantized values are unchanged. Projections that a checkpoint already quantized (FP8/NVFP4) stay separate. Set `disable_qkv_fusion=true` to keep three projections.
+
+```bash
+python -m onnxruntime_genai.models.builder -i path_to_target_model -o path_to_output_folder -p int4 -e cuda --extra_options use_paged_attention=true disable_qkv_fusion=true
+```
+
 #### Build a DSpark Block Drafter
 
 Set `dspark_path` to a DSpark checkpoint to export an auxiliary `dspark.onnx` block drafter beside a Qwen3.5 or Qwen3.8 target model. The target must use paged attention. SpecForge identifies the target layers whose outputs are tapped, while `aux_hidden_state_layers` identifies residual streams entering layers, so each configured auxiliary layer must be one greater than the corresponding `target_layer_ids` entry in the DSpark checkpoint. DSpark has no precision option of its own: its body is always BF16, and its embedding and LM head follow whatever format the target saved them in, adopted under the target's initializer names on the terms described for [DFlash 2](#build-a-dflash-2-block-drafter). `dspark_path` and `dflash2_path` are mutually exclusive, and selecting DSpark replaces rather than accompanies the target's MTP head.

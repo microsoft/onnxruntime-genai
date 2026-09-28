@@ -4629,6 +4629,15 @@ class Model:
             == getattr(k_dtype, "dtype", k_dtype)
             == getattr(v_dtype, "dtype", v_dtype)
         )
+        # Packing concatenates raw weights, so it cannot carry a checkpoint's own FP8/NVFP4 scales or exclusions.
+        pack_qkv = (
+            self.attention_attrs["use_packed_matmul"]
+            and qkv_dtype_equal
+            and all(
+                getattr(proj, "quant_type", "none") == "none" and not getattr(proj, "exclude_from_quantization", False)
+                for proj in (attention.q_proj, attention.k_proj, attention.v_proj)
+            )
+        )
 
         if self.attention_attrs["use_matmul_in_attn"]:
             # Make packed weights initializer
@@ -4640,7 +4649,7 @@ class Model:
 
         else:
             # Make MatMul nodes
-            if self.attention_attrs["use_packed_matmul"] and qkv_dtype_equal:
+            if pack_qkv:
                 # Combine 3 MatMuls into 1 packed MatMul
                 qkv_matmul_basename = f"/model/layers.{layer_id}/attn/qkv_proj/MatMul"
                 qkv_matmul_name = self.make_packed_matmul(
@@ -4675,7 +4684,7 @@ class Model:
 
         else:
             # Make Add nodes (if bias exists)
-            if self.attention_attrs["use_packed_matmul"] and qkv_dtype_equal and any_bias_exists:
+            if pack_qkv and any_bias_exists:
                 # Combine 3 Adds into 1 packed Add
                 qkv_add_name = f"/model/layers.{layer_id}/attn/qkv_proj/Add"
                 self.make_packed_add(
@@ -4704,25 +4713,26 @@ class Model:
         # (norm runs per-head before attention). Split here so downstream sees Q/K/V separately.
         # Placed after the (optional) packed Add so packed bias fusion is preserved.
         if (
-            self.attention_attrs["use_packed_matmul"]
-            and qkv_dtype_equal
+            pack_qkv
             and self.attention_attrs["q_norm"]
             and self.attention_attrs["k_norm"]
         ):
             split_name = f"/model/layers.{layer_id}/attn/qkv_proj/Split"
             split_outputs = [f"{split_name}/output_{i}" for i in range(3)]
+            # Q can be wider than q_size (e.g. Qwen3.5 packs a per-head output gate into q_proj).
+            q_width = getattr(attention.q_proj, "out_features", 0) or self.q_size
             self.make_split(
                 split_name,
                 inputs=[
                     self.attention_attrs["q_path"],
-                    f"/model/constants/INT64/[{self.q_size}, {self.kv_size}, {self.kv_size}]",
+                    f"/model/constants/INT64/[{q_width}, {self.kv_size}, {self.kv_size}]",
                 ],
                 outputs=split_outputs,
                 dtypes=[self.io_dtype] * 3,
                 shapes=[
-                    ["batch_size", "sequence_length", self.q_size],
-                    ["batch_size", "sequence_length", self.kv_size],
-                    ["batch_size", "sequence_length", self.kv_size],
+                    self.make_hidden_state_shape(last_dim=q_width),
+                    self.make_hidden_state_shape(last_dim=self.kv_size),
+                    self.make_hidden_state_shape(last_dim=self.kv_size),
                 ],
                 axis=-1,
             )
