@@ -52,14 +52,35 @@ def _builder(tmp_path):
     return base.Model(config, ir.DataType.FLOAT, ir.DataType.FLOAT, "cpu", str(tmp_path), {})
 
 
+@pytest.fixture
+def graph_attrs(tmp_path):
+    return _builder(tmp_path).graph_attrs
+
+
 def test_all_graph_builders_default_to_opset_24(tmp_path):
     model = _builder(tmp_path)
     drafter = BlockDrafterBuilder()
     drafter.make_graph("test_drafter", "/constants")
-    assert base.DEFAULT_OPSET == 24
-    for built in (model.model, drafter.model):
+    expected = {"ai.onnx": 24, "com.microsoft": 1, "ir_version": 10, "producer_name": "onnxruntime-genai"}
+    for builder in (model, drafter):
+        assert builder.graph_attrs == expected
+        built = builder.model
         assert dict(built.graph.opset_imports) == {"": 24, "com.microsoft": 1}
         assert built.ir_version == 10
+        assert built.producer_name == "onnxruntime-genai"
+
+
+def test_graph_attrs_are_per_instance(tmp_path):
+    first = _builder(tmp_path)
+    second = _builder(tmp_path)
+    first_drafter = BlockDrafterBuilder()
+    second_drafter = BlockDrafterBuilder()
+    first_drafter.make_graph("first", "/constants")
+    second_drafter.make_graph("second", "/constants")
+    first.graph_attrs["ai.onnx"] = 25
+    first_drafter.graph_attrs["ai.onnx"] = 26
+    assert second.graph_attrs["ai.onnx"] == 24
+    assert second_drafter.graph_attrs["ai.onnx"] == 24
 
 
 def test_tensor_scatter_uses_default_without_changing_imports(tmp_path):
@@ -86,9 +107,9 @@ def test_tensor_scatter_uses_default_without_changing_imports(tmp_path):
 
 @pytest.mark.parametrize("old_version", [21, 22])
 @pytest.mark.parametrize("op", UPDATED_OPS)
-def test_updated_schemas_preserve_existing_signatures(op, old_version):
+def test_updated_schemas_preserve_existing_signatures(op, old_version, graph_attrs):
     old = onnx.defs.get_schema(op, old_version, "")
-    new = onnx.defs.get_schema(op, base.DEFAULT_OPSET, "")
+    new = onnx.defs.get_schema(op, graph_attrs["ai.onnx"], "")
     assert (old.min_input, old.max_input, old.min_output, old.max_output) == (
         new.min_input,
         new.max_input,
@@ -132,7 +153,7 @@ def _compare_with_previous_opsets(model, inputs):
 
 
 @pytest.mark.parametrize("condition", [True, False])
-def test_shape_cast_topk_and_control_flow_match_previous_opsets(condition):
+def test_shape_cast_topk_and_control_flow_match_previous_opsets(condition, graph_attrs):
     def constant(name, values):
         return helper.make_node("Constant", [], [name], value=numpy_helper.from_array(np.array(values, dtype=np.int64)))
 
@@ -177,7 +198,10 @@ def test_shape_cast_topk_and_control_flow_match_previous_opsets(condition):
             helper.make_tensor_value_info("indices", TensorProto.INT64, [3, 1]),
         ],
     )
-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", base.DEFAULT_OPSET)], ir_version=10)
+    model = helper.make_model(
+        graph, opset_imports=[helper.make_opsetid("", graph_attrs["ai.onnx"])],
+        ir_version=graph_attrs["ir_version"], producer_name=graph_attrs["producer_name"],
+    )
     _compare_with_previous_opsets(
         model,
         {
@@ -189,7 +213,7 @@ def test_shape_cast_topk_and_control_flow_match_previous_opsets(condition):
 
 @pytest.mark.parametrize("dtype", [np.float32, np.float16])
 @pytest.mark.parametrize("blocked", [False, True])
-def test_qdq_default_dtypes_and_values_match_previous_opsets(dtype, blocked):
+def test_qdq_default_dtypes_and_values_match_previous_opsets(dtype, blocked, graph_attrs):
     tensor_type = helper.np_dtype_to_tensor_dtype(np.dtype(dtype))
     scales = np.array([[0.25, 0.5], [0.5, 0.25]] if blocked else 0.25, dtype=dtype)
     zeros = np.zeros(scales.shape, dtype=np.int8)
@@ -208,7 +232,10 @@ def test_qdq_default_dtypes_and_values_match_previous_opsets(dtype, blocked):
         ],
         [numpy_helper.from_array(scales, "scale"), numpy_helper.from_array(zeros, "zero")],
     )
-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", base.DEFAULT_OPSET)], ir_version=10)
+    model = helper.make_model(
+        graph, opset_imports=[helper.make_opsetid("", graph_attrs["ai.onnx"])],
+        ir_version=graph_attrs["ir_version"], producer_name=graph_attrs["producer_name"],
+    )
     _compare_with_previous_opsets(
         model,
         {"x": np.array([[-100, -1.125, 0.375, 100], [1.25, -0.125, 0, 2.75]], dtype=dtype)},

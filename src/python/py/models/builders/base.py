@@ -78,8 +78,6 @@ def load_text_backbone_adapter(
         parent.language_model = merged
     return base_container
 
-DEFAULT_OPSET = 24
-
 
 class Model:
     def __init__(
@@ -174,9 +172,16 @@ class Model:
         self.hf_remote = extra_options.get("hf_remote", False)
         self.revision = extra_options.get("base_revision")
 
+        self.graph_attrs = Model.default_graph_attrs()
+
         # States for building the model
-        self.make_graph("main_graph", opset=DEFAULT_OPSET)
-        self.graph.opset_imports["com.microsoft"] = 1
+        self.make_graph(
+            "main_graph",
+            opset=self.graph_attrs["ai.onnx"],
+            ir_version=self.graph_attrs["ir_version"],
+            producer_name=self.graph_attrs["producer_name"],
+        )
+        self.graph.opset_imports["com.microsoft"] = self.graph_attrs["com.microsoft"]
 
         # EP-specific variables
         self.ep = ep
@@ -2136,9 +2141,19 @@ class Model:
         ):
             self.make_value(output, ir.DataType.INT32, shape)
 
-    def make_graph(self, graph_name, opset=20, ir_version=10):
+    @staticmethod
+    def default_graph_attrs():
+        """Return the ONNX graph metadata used by the builders' default graphs."""
+        return {
+            "ai.onnx": 24,
+            "com.microsoft": 1,
+            "ir_version": 10,
+            "producer_name": "onnxruntime-genai",
+        }
+
+    def make_graph(self, graph_name, opset=20, ir_version=10, producer_name="onnxruntime-genai"):
         self.graph = ir.Graph(inputs=(), outputs=(), nodes=(), name=graph_name, opset_imports={"": opset})
-        self.model = ir.Model(self.graph, ir_version=ir_version, producer_name="onnxruntime-genai")
+        self.model = ir.Model(self.graph, ir_version=ir_version, producer_name=producer_name)
         self.values = {}
         self.node_names = set()
 
