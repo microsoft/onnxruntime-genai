@@ -138,17 +138,115 @@ TEST(CacheConfigTest, NewCacheFieldsTakePrecedenceOverLegacyWhenBothSet) {
   })");
 
   const auto& decoder = config.model.decoder;
+  // The new cache.* fields take precedence, and since runtime consumers only read the legacy
+  // decoder.sliding_window / decoder.conv_cache_size fields, those are overwritten to match the
+  // effective (new) value rather than left holding a value that has no effect at runtime.
   ASSERT_TRUE(decoder.sliding_window.has_value());
-  EXPECT_EQ(decoder.sliding_window->window_size, 111);
-  EXPECT_EQ(decoder.conv_cache_size, 22);
+  EXPECT_EQ(decoder.sliding_window->window_size, 222);
+  EXPECT_EQ(decoder.conv_cache_size, 33);
 
   ASSERT_TRUE(decoder.cache.has_value());
   ASSERT_TRUE(decoder.cache->kv_cache.has_value());
   ASSERT_TRUE(decoder.cache->kv_cache->sliding_window.has_value());
-  // The new cache.* fields take precedence and are not overwritten by the legacy ones.
   EXPECT_EQ(decoder.cache->kv_cache->sliding_window->window_size, 222);
   ASSERT_TRUE(decoder.cache->conv_cache.has_value());
   EXPECT_EQ(decoder.cache->conv_cache->cache_size, 33);
+}
+
+TEST(CacheConfigTest, NewFieldOnlySetPropagatesIntoLegacyRuntimeField) {
+  Config config;
+
+  // Only the new decoder.cache.* fields are set; the legacy fields are entirely absent. Since
+  // runtime consumers (decoder_only.cpp, paged_key_value_cache.cpp) only read the legacy fields,
+  // the effective new-field values must be mirrored into them too.
+  OverlayConfig(config, R"({
+    "model": {
+      "decoder": {
+        "cache": {
+          "kv_cache": {"sliding_window": {"window_size": 77}},
+          "conv_cache": {"cache_size": 9}
+        }
+      }
+    }
+  })");
+
+  const auto& decoder = config.model.decoder;
+  ASSERT_TRUE(decoder.sliding_window.has_value());
+  EXPECT_EQ(decoder.sliding_window->window_size, 77);
+  EXPECT_EQ(decoder.conv_cache_size, 9);
+}
+
+TEST(CacheConfigTest, ExplicitZeroConvCacheSizeIsNotOverwrittenByLegacy) {
+  Config config;
+
+  // An explicitly configured cache.conv_cache.cache_size: 0 must take precedence over a nonzero
+  // legacy conv_cache_size, since zero is a valid/meaningful explicit value (default/disabled),
+  // not an indication that the new field is absent.
+  OverlayConfig(config, R"({
+    "model": {
+      "decoder": {
+        "conv_cache_size": 42,
+        "cache": {"conv_cache": {"cache_size": 0}}
+      }
+    }
+  })");
+
+  const auto& decoder = config.model.decoder;
+  EXPECT_EQ(decoder.conv_cache_size, 0);
+  ASSERT_TRUE(decoder.cache.has_value());
+  ASSERT_TRUE(decoder.cache->conv_cache.has_value());
+  EXPECT_EQ(decoder.cache->conv_cache->cache_size, 0);
+}
+
+TEST(CacheConfigTest, RepeatedOverlayRefreshesStaleLegacyMirror) {
+  Config config;
+
+  // First overlay: only the legacy sliding_window is set, so it gets mirrored into
+  // decoder.cache.kv_cache.sliding_window.
+  OverlayConfig(config, R"({"model": {"decoder": {"sliding_window": {"window_size": 10}}}})");
+  ASSERT_TRUE(config.model.decoder.cache.has_value());
+  EXPECT_EQ(config.model.decoder.cache->kv_cache->sliding_window->window_size, 10);
+
+  // Second overlay (OverlayConfig copies the already-reconciled config as its starting point):
+  // only the legacy field changes again. The stale mirror from the first call must be refreshed
+  // rather than mistaken for an explicit new-field value that should "win" and block the update.
+  OverlayConfig(config, R"({"model": {"decoder": {"sliding_window": {"window_size": 20}}}})");
+  EXPECT_EQ(config.model.decoder.sliding_window->window_size, 20);
+  ASSERT_TRUE(config.model.decoder.cache->kv_cache->sliding_window.has_value());
+  EXPECT_EQ(config.model.decoder.cache->kv_cache->sliding_window->window_size, 20);
+}
+
+TEST(CacheConfigTest, OptionalNumericFieldsAcceptExplicitNull) {
+  Config config;
+
+  OverlayConfig(config, R"({
+    "model": {
+      "decoder": {
+        "cache": {
+          "global": {"prefix_cache_max_entries": null},
+          "kv_cache": {"num_blocks": null},
+          "recurrent_cache": {"state_size": null}
+        }
+      }
+    }
+  })");
+
+  const auto& cache = *config.model.decoder.cache;
+  EXPECT_FALSE(cache.global.prefix_cache_max_entries.has_value());
+  ASSERT_TRUE(cache.kv_cache.has_value());
+  EXPECT_FALSE(cache.kv_cache->num_blocks.has_value());
+  ASSERT_TRUE(cache.recurrent_cache.has_value());
+  EXPECT_FALSE(cache.recurrent_cache->state_size.has_value());
+}
+
+TEST(CacheConfigTest, CacheNullResetsPreviouslySetCache) {
+  Config config;
+
+  OverlayConfig(config, R"({"model": {"decoder": {"cache": {"conv_cache": {"cache_size": 5}}}}})");
+  ASSERT_TRUE(config.model.decoder.cache.has_value());
+
+  OverlayConfig(config, R"({"model": {"decoder": {"cache": null}}})");
+  EXPECT_FALSE(config.model.decoder.cache.has_value());
 }
 
 TEST(CacheConfigTest, DefaultsWhenCacheAbsent) {
