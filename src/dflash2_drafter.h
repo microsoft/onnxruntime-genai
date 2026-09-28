@@ -151,6 +151,7 @@ struct Dflash2Drafter {
   // A windowed drafter retains only a bounded ring, independently of the target context length.
   static size_t PrefixCheckpointBytes(const Config& config, size_t paged_block_size,
                                       ONNXTensorElementDataType cache_type);
+  bool CanCapturePrefix(const Request* request, size_t token_count) const;
   std::shared_ptr<const Dflash2PrefixCheckpoint> CapturePrefix(const Request* request,
                                                                size_t token_count);
 

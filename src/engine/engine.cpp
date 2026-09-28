@@ -548,7 +548,8 @@ void Engine::PublishDflash2Drafts(ScheduledRequests& scheduled_requests) {
       continue;
     }
     auto boundary = cache_manager_->DraftBoundary(entry.request_id, entry.target_cache_slots);
-    if (!boundary) {
+    if (!boundary ||
+        !dflash2_drafter_->CanCapturePrefix(feed.request, entry.target_cache_slots)) {
       continue;
     }
     try {

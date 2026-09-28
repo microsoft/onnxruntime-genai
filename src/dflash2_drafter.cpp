@@ -725,13 +725,19 @@ bool Dflash2Drafter::Admit(const Feed& feed) {
   return true;
 }
 
+bool Dflash2Drafter::CanCapturePrefix(const Request* request, size_t token_count) const {
+  const auto it = requests_.find(request);
+  return ring_blocks_ != 0 && it != requests_.end() &&
+         it->second.cached_positions == token_count &&
+         it->second.blocks.size() == ring_blocks_;
+}
+
 std::shared_ptr<const Dflash2PrefixCheckpoint> Dflash2Drafter::CapturePrefix(
     const Request* request, size_t token_count) {
-  const auto it = requests_.find(request);
-  if (ring_blocks_ == 0 || !prefix_checkpoint_.expired() || it == requests_.end() ||
-      it->second.cached_positions != token_count || it->second.blocks.size() != ring_blocks_) {
+  if (!CanCapturePrefix(request, token_count) || !prefix_checkpoint_.expired()) {
     return nullptr;
   }
+  const auto it = requests_.find(request);
   auto checkpoint = std::make_shared<Dflash2PrefixCheckpoint>();
   checkpoint->token_count = token_count;
   checkpoint->ring_blocks = ring_blocks_;
@@ -742,7 +748,16 @@ std::shared_ptr<const Dflash2PrefixCheckpoint> Dflash2Drafter::CapturePrefix(
     auto copy = std::make_unique<Tensor>(model_->p_device_kvcache_, cache_type_);
     auto shape = cache->GetShape();
     shape.front() = static_cast<int64_t>(ring_blocks_);
-    copy->CreateTensor(shape);
+    try {
+      copy->CreateTensor(shape);
+    } catch (const Ort::Exception& error) {
+      // ORT reports allocator failures through its status API, not std::bad_alloc.
+      if (error.GetOrtErrorCode() != ORT_FAIL &&
+          error.GetOrtErrorCode() != ORT_RUNTIME_EXCEPTION) {
+        throw;
+      }
+      throw std::bad_alloc{};
+    }
     checkpoint->caches.push_back(std::move(copy));
   }
   try {

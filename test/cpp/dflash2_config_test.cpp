@@ -14,7 +14,9 @@
 #include "dflash2_drafter.h"
 #include "engine/paged_key_value_cache.h"
 #include "engine/step_plan.h"
+#include "models/io/kv_cache.h"
 #include "ort_genai.h"
+#include "search.h"
 
 namespace Generators::test {
 namespace {
@@ -47,6 +49,44 @@ Config MakeDflash2Config() {
 struct TensorMetadata {
   ONNXTensorElementDataType data_type;
   std::vector<int64_t> shape;
+};
+
+class CheckpointAllocationDevice final : public DeviceInterface {
+ public:
+  CheckpointAllocationDevice(DeviceInterface& inner, Ort::Allocator& allocator)
+      : inner_{inner}, allocator_{allocator} {}
+
+  DeviceType GetType() const override { return inner_.GetType(); }
+  void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
+    inner_.InitOrt(api, allocator);
+  }
+  Ort::Allocator& GetAllocator() override { return allocator_; }
+  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
+    return inner_.GetMemoryInfo();
+  }
+  std::string GetExecutionProviderName() const override {
+    return inner_.GetExecutionProviderName();
+  }
+  std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
+    return inner_.AllocateBase(size);
+  }
+  std::shared_ptr<DeviceBuffer> WrapMemoryBase(void* memory, size_t size) override {
+    return inner_.WrapMemoryBase(memory, size);
+  }
+  std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override {
+    return inner_.CreateGreedy(params);
+  }
+  std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override {
+    return inner_.CreateBeam(params);
+  }
+  std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) override {
+    return inner_.CreateKeyValueCache(state);
+  }
+  void Synchronize() override { inner_.Synchronize(); }
+
+ private:
+  DeviceInterface& inner_;
+  Ort::Allocator& allocator_;
 };
 
 class FakeModelStateMetadata final : public ModelStateMetadata {
@@ -720,12 +760,39 @@ TEST(Dflash2ConfigTest, ExecutesWindowedRestoreAcrossRingWrap) {
         .request = source, .aux_row_count = 8, .first_position = position, .anchor_token = 11, .draft_eligible = true, .wants_drafts = true}};
     ASSERT_TRUE(drafter.Propose(aux, feeds, proposals));
   }
+  auto* device = model->p_device_kvcache_;
+  auto failing_allocator = Ort::Allocator::Create(
+      *model->session_, device->GetAllocator().GetInfo());
+  static_cast<OrtAllocator&>(*failing_allocator).Alloc =
+      [](OrtAllocator*, size_t) -> void* { throw std::bad_alloc{}; };
+  EXPECT_THROW(
+      OrtValue::CreateTensor(
+          *failing_allocator, std::array<int64_t, 1>{1}, Ort::TypeToTensorType<float>),
+      Ort::Exception);
+  CheckpointAllocationDevice failing_device{*device, *failing_allocator};
+  model->p_device_kvcache_ = &failing_device;
+  EXPECT_THROW(drafter.CapturePrefix(source, 24), std::bad_alloc);
+  model->p_device_kvcache_ = device;
+
   auto checkpoint = drafter.CapturePrefix(source, 24);
   ASSERT_NE(checkpoint, nullptr);
   EXPECT_EQ(checkpoint->ring_blocks, ring_blocks);
   Tensor next_aux{GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<float>};
   next_aux.CreateTensor(std::array<int64_t, 2>{1, 1});
   next_aux.GetByteSpan().Zero();
+  const std::array target_only{Dflash2Drafter::Feed{
+      .request = peer, .aux_row_count = 1, .first_position = 24, .anchor_token = 13, .draft_eligible = true, .wants_drafts = true}};
+  ASSERT_FALSE(drafter.Propose(next_aux, target_only, proposals));
+  EXPECT_TRUE(proposals.front().empty());
+  EXPECT_TRUE(drafter.CanCapturePrefix(source, 24));
+  EXPECT_FALSE(drafter.CanCapturePrefix(source, 23));
+  EXPECT_FALSE(drafter.CanCapturePrefix(peer, 25));
+  std::weak_ptr<const Dflash2PrefixCheckpoint> indexed_checkpoint = checkpoint;
+  if (drafter.CanCapturePrefix(peer, 25)) {
+    checkpoint.reset();
+  }
+  ASSERT_FALSE(indexed_checkpoint.expired());
+
   const std::array uninterrupted{Dflash2Drafter::Feed{
       .request = source, .aux_row_count = 1, .first_position = 24, .anchor_token = 12, .draft_eligible = true, .wants_drafts = true}};
   ASSERT_TRUE(drafter.Propose(next_aux, uninterrupted, proposals));
