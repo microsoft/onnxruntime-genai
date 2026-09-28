@@ -202,6 +202,24 @@ void Shutdown() {
   g_ort_globals.reset();
 }
 
+void ReleaseDeviceResources(std::string_view device_type) {
+  DeviceType type;
+  if (device_type == "CUDA") {
+    type = DeviceType::CUDA;
+  } else if (device_type == "NvTensorRtRtx") {
+    type = DeviceType::NvTensorRtRtx;
+  } else {
+    throw std::invalid_argument("ReleaseDeviceResources currently supports CUDA and NvTensorRtRtx devices.");
+  }
+
+  std::scoped_lock lock{g_ort_globals_mutex};
+  if (!g_ort_globals) {
+    return;
+  }
+
+  g_ort_globals->ReleaseDeviceResources(type);
+}
+
 OrtEnv& GetOrtEnv() {
   return *GetOrtGlobals()->env_;
 }
@@ -336,6 +354,34 @@ OrtGlobals::~OrtGlobals() {
   // 4. Finally the env. If genai held the last reference, ORT destroys the environment here,
   //    unregistering / unloading any still-registered EP libraries — by now nothing references them.
   env_.reset();
+}
+
+void OrtGlobals::ReleaseDeviceResources(DeviceType type) {
+  {
+    std::scoped_lock lock{graph_session_cache_.mutex_};
+    auto& sessions = graph_session_cache_.sessions_;
+    for (auto it = sessions.begin(); it != sessions.end();) {
+      if (it->second.device_type == type) {
+        it = sessions.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+
+  std::scoped_lock lock{device_interfaces_mutex_};
+  auto interface = device_interfaces_.find(type);
+  if (interface != device_interfaces_.end()) {
+    using ReleaseInterfaceResourcesFn = void (*)(const char*);
+    auto release_interface_resources = reinterpret_cast<ReleaseInterfaceResourcesFn>(
+        cuda_library_->GetSymbol("ReleaseInterfaceResources"));
+    if (!release_interface_resources) {
+      throw std::runtime_error("CUDA add-on library does not export ReleaseInterfaceResources.");
+    }
+    release_interface_resources(to_string(type).c_str());
+  }
+
+  device_allocators_[static_cast<int>(type)].Reset();
 }
 
 DeviceInterface* OrtGlobals::LoadCudaInterface(DeviceType type) {

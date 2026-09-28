@@ -186,6 +186,16 @@ void OGA_API_CALL OgaShutdown() {
   Generators::Shutdown();
 }
 
+OgaResult* OGA_API_CALL OgaReleaseDeviceResources(const char* device_type) {
+  OGA_TRY
+  if (!device_type) {
+    throw std::invalid_argument("device_type must not be null.");
+  }
+  Generators::ReleaseDeviceResources(device_type);
+  return nullptr;
+  OGA_CATCH
+}
+
 void OGA_API_CALL OgaSetTelemetryEnabled(bool enabled) {
   if (!Generators::GenAiTelemetry::IsDestroyed()) {
     Generators::GenAiTelemetry::Instance().SetEnabled(enabled);

@@ -308,14 +308,16 @@ void CheckResult(extError_t error) {
 // the allocator used is not destroyed until last. This keeps the allocator around until exit, after all other memory
 // has been destroyed. Without this, we will crash in the OnnxRuntime BFCArena code when deleting tensors due to the
 // arena already being destroyed.
-void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
+void OrtGlobals::EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
+  std::scoped_lock lock{device_interfaces_mutex_};
+
   // CPU Allocator is a special case, it's not in the owned 'allocator_device_' table below so we handle it separately
   // OpenVINO delegates to the CPU device allocator
   auto type = device.GetType();
   if (type == DeviceType::CPU || type == DeviceType::OpenVINO)
     return;
 
-  auto& allocator = GetOrtGlobals()->device_allocators_[static_cast<int>(type)];
+  auto& allocator = device_allocators_[static_cast<int>(type)];
   if (allocator.allocator_)
     return;
 
@@ -371,6 +373,10 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   // decode inputs). Devices that offer none leave the defaults in place.
   device.InitDeviceAllocators(user_provider_options, allocator.device_id_);
   allocator.host_accessible_allocator_ = device.GetHostAccessibleAllocator();
+}
+
+void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
+  GetOrtGlobals()->EnsureDeviceOrtInit(device, config);
 }
 
 // Update provider options using values from a parent if they are not already specified in the child.
