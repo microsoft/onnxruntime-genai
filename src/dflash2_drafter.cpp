@@ -1128,6 +1128,11 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   }
   if (graph_capture_enabled_) {
     run_options_->AddConfigEntry("gpu_graph_id", std::to_string(annotation_id).c_str());
+    // A replayed step that proposes drafts reads its outputs back below with a synchronizing copy,
+    // so the run itself need not wait for the device; the copy also drains the uploads from the
+    // step tensors' host mirrors before the next step rewrites them.
+    const bool async_run = capture && drafts_wanted && device->GetType() == DeviceType::CUDA;
+    run_options_->AddConfigEntry("disable_synchronize_execution_providers", async_run ? "1" : "0");
   }
 
   {

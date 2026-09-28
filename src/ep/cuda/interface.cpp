@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <cstdarg>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <random>
 #include <system_error>
@@ -191,16 +192,33 @@ struct GpuMemory final : DeviceBuffer {
     }
   }
 
+  // Copies up to this size run as kernels that read or write the pinned mirror in place (see
+  // cuda::LaunchCopyBytes); larger ones use the copy engine.
+  static constexpr size_t kKernelCopyMaxBytes = size_t{256} << 10;
+
   void CopyDeviceToCpu() override {
     AllocateCpu();
-    CUDA_CHECK(::cudaMemcpyAsync(p_cpu_, p_device_, size_in_bytes_, ::cudaMemcpyDeviceToHost, GetStream()));
+    if (size_in_bytes_ <= kKernelCopyMaxBytes) {
+      cuda::LaunchCopyBytes(p_cpu_, p_device_, size_in_bytes_, GetStream());
+    } else {
+      CUDA_CHECK(::cudaMemcpyAsync(p_cpu_, p_device_, size_in_bytes_, ::cudaMemcpyDeviceToHost, GetStream()));
+    }
     CUDA_CHECK(::cudaStreamSynchronize(GetStream()));
     copy_to_device_pending_ = false;
   }
 
   void CopyCpuToDevice() override {
     assert(p_cpu_);
-    CUDA_CHECK(::cudaMemcpyAsync(p_device_, p_cpu_, size_in_bytes_, ::cudaMemcpyHostToDevice, GetStream()));
+    if (size_in_bytes_ <= cuda::kMaxStoreBytes) {
+      // The launch captures the bytes, so the mirror is free again as soon as this returns.
+      cuda::LaunchStoreBytes(p_device_, p_cpu_, size_in_bytes_, GetStream());
+      return;
+    }
+    if (size_in_bytes_ <= kKernelCopyMaxBytes) {
+      cuda::LaunchCopyBytes(p_device_, p_cpu_, size_in_bytes_, GetStream());
+    } else {
+      CUDA_CHECK(::cudaMemcpyAsync(p_device_, p_cpu_, size_in_bytes_, ::cudaMemcpyHostToDevice, GetStream()));
+    }
     copy_to_device_pending_ = true;
   }
 
@@ -210,15 +228,24 @@ struct GpuMemory final : DeviceBuffer {
   }
 
   void CopyFrom(size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes) override {
-    if (source.GetType() == device_label)
-      CUDA_CHECK(::cudaMemcpyAsync(p_device_ + begin_dest, source.p_device_ + begin_source, size_in_bytes,
-                                   ::cudaMemcpyDeviceToDevice, GetStream()));
-    else
+    if (source.GetType() == device_label) {
+      if (size_in_bytes <= kKernelCopyMaxBytes) {
+        cuda::LaunchCopyBytes(p_device_ + begin_dest, source.p_device_ + begin_source, size_in_bytes, GetStream());
+      } else {
+        CUDA_CHECK(::cudaMemcpyAsync(p_device_ + begin_dest, source.p_device_ + begin_source, size_in_bytes,
+                                     ::cudaMemcpyDeviceToDevice, GetStream()));
+      }
+    } else {
       gp_genai->CopyThroughCpu(*this, begin_dest, source, begin_source, size_in_bytes);
+    }
   }
 
   void Zero() override {
-    CUDA_CHECK(::cudaMemsetAsync(p_device_, 0, size_in_bytes_, GetStream()));
+    if (size_in_bytes_ <= kKernelCopyMaxBytes) {
+      cuda::LaunchZeroBytes(p_device_, size_in_bytes_, GetStream());
+    } else {
+      CUDA_CHECK(::cudaMemsetAsync(p_device_, 0, size_in_bytes_, GetStream()));
+    }
   }
 
   bool owned_;             // If we own the memory, we delete it on destruction
@@ -689,13 +716,13 @@ struct CudaInterfaceImplBase : DeviceInterface {
     cudaStream_t stream = GetStream();
 
     // Copy only the small per-row top-1 indices back to the host (strided -> contiguous), then sync.
+    // A kernel writes the mapped pinned buffer directly, so the read-back stays on the compute engine.
     if (!argmax_host_ || argmax_host_count_ < static_cast<size_t>(num_rows)) {
       argmax_host_ = CudaMallocHostArray<int32_t>(num_rows);
       argmax_host_count_ = num_rows;
     }
-    CUDA_CHECK(cudaMemcpy2DAsync(argmax_host_.get(), sizeof(int32_t),
-                                 topk_data_->topk_indices, static_cast<size_t>(topk_data_->topk_stride) * sizeof(int32_t),
-                                 sizeof(int32_t), num_rows, cudaMemcpyDeviceToHost, stream));
+    cuda::LaunchGatherStridedInt32(topk_data_->topk_indices, topk_data_->topk_stride, argmax_host_.get(),
+                                   num_rows, stream);
     CUDA_CHECK(cudaStreamSynchronize(stream));
     std::memcpy(out_tokens, argmax_host_.get(), static_cast<size_t>(num_rows) * sizeof(int32_t));
     return true;
@@ -708,10 +735,8 @@ struct CudaInterfaceImplBase : DeviceInterface {
         !RunArgMax(logits, logits_type, num_rows, vocab_size))
       return false;
 
-    CUDA_CHECK(cudaMemcpy2DAsync(out_tokens.Span().data(), sizeof(int32_t),
-                                 topk_data_->topk_indices,
-                                 static_cast<size_t>(topk_data_->topk_stride) * sizeof(int32_t),
-                                 sizeof(int32_t), num_rows, cudaMemcpyDeviceToDevice, GetStream()));
+    cuda::LaunchGatherStridedInt32(topk_data_->topk_indices, topk_data_->topk_stride,
+                                   out_tokens.Span().data(), num_rows, GetStream());
     return true;
   }
 
@@ -735,12 +760,35 @@ struct CudaInterfaceImplBase : DeviceInterface {
       state_update_replay_descriptors_ = CudaMallocArray<StateUpdateReplayDesc>(count);
       state_update_replay_capacity_ = count;
     }
-    CUDA_CHECK(cudaMemcpyAsync(state_update_replay_descriptors_.get(), descriptors,
-                               count * sizeof(StateUpdateReplayDesc), cudaMemcpyHostToDevice,
-                               stream));
-    cuda::LaunchReplayStateUpdates(
-        state_update_replay_descriptors_.get(), static_cast<int>(count), stream);
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    // Gated-delta-net descriptors the fast kernel can take go first; the rest keep the generic one.
+    const auto fast = [](const StateUpdateReplayDesc& d) {
+      return d.kind == StateUpdateReplayKind::GatedDeltaNet && d.element_size == sizeof(float) &&
+             d.kept_count <= static_cast<uint32_t>(cuda::kMaxFastReplayTransitions) &&
+             d.key_width % 4 == 0 && d.key_width <= static_cast<uint64_t>(cuda::kMaxFastReplayKeyWidth) &&
+             d.channel_count * d.state_width <= static_cast<uint64_t>(std::numeric_limits<int>::max()) &&
+             (reinterpret_cast<uintptr_t>(d.source_state) & 0xF) == 0 &&
+             (reinterpret_cast<uintptr_t>(d.destination_state) & 0xF) == 0;
+    };
+    ordered_replay_descriptors_.assign(descriptors, descriptors + count);
+    const auto generic_begin = std::stable_partition(
+        ordered_replay_descriptors_.begin(), ordered_replay_descriptors_.end(), fast);
+    const int fast_count = static_cast<int>(generic_begin - ordered_replay_descriptors_.begin());
+    int fast_blocks = 0;
+    for (auto it = ordered_replay_descriptors_.begin(); it != generic_begin; ++it) {
+      fast_blocks = std::max(fast_blocks, cuda::ReplayGatedDeltaNetBlocks(static_cast<int>(it->channel_count),
+                                                                          static_cast<int>(it->state_width)));
+    }
+    // The descriptors travel as kernel arguments, so the caller's array may be released right away,
+    // and the device buffer is only reused behind this launch on the same stream. Nothing here waits
+    // for the device.
+    const auto* bytes = reinterpret_cast<const uint8_t*>(ordered_replay_descriptors_.data());
+    const size_t total = count * sizeof(StateUpdateReplayDesc);
+    for (size_t offset = 0; offset < total; offset += cuda::kMaxStoreBytes) {
+      cuda::LaunchStoreBytes(reinterpret_cast<uint8_t*>(state_update_replay_descriptors_.get()) + offset,
+                             bytes + offset, std::min(cuda::kMaxStoreBytes, total - offset), stream);
+    }
+    cuda::LaunchReplayStateUpdates(state_update_replay_descriptors_.get(), fast_count,
+                                   static_cast<int>(count) - fast_count, fast_blocks, stream);
   }
 
   bool TopKScores(const void* logits, ONNXTensorElementDataType logits_type, int num_rows, int vocab_size,
@@ -859,6 +907,7 @@ struct CudaInterfaceImplBase : DeviceInterface {
   std::mutex state_update_replay_mutex_;
   cuda_unique_ptr<StateUpdateReplayDesc> state_update_replay_descriptors_;
   size_t state_update_replay_capacity_{0};
+  std::vector<StateUpdateReplayDesc> ordered_replay_descriptors_;  // host scratch, fast kernel first
 };
 
 struct CudaInterfaceImpl final : CudaInterfaceImplBase {
@@ -870,6 +919,9 @@ struct CudaInterfaceImpl final : CudaInterfaceImplBase {
   }
   bool SupportsOffsetTensorViews() const override { return true; }
   bool SupportsTransactionalFixedState() const override { return true; }
+  bool RecyclesHostMirrorsAfterUpload(size_t bytes) const override {
+    return PinnedHostPool::Pooled(bytes);
+  }
   int GetWindowedKeyValueCacheSize(const Config::Model::Decoder& decoder,
                                    const Config::Search& search,
                                    int max_length) const override {
