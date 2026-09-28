@@ -173,11 +173,16 @@ a prefix into resident continuation turns. It still rejects target
 sliding-window KV rings and auxiliary caches that mirror every target block when
 `prefix_caching` is explicitly set to `true`. Existing configurations that omit
 the setting keep loading with caching disabled for those layouts, and builders
-emit an explicit `false` opt-out. A
-fixed-size Engine-hosted auxiliary pool can coexist with target prefix caching.
-In particular, a DFlash 2 drafter that did not process the skipped prefix cannot
-join at a nonzero position, so that request keeps the valid target hit and runs
-target-only rather than shortening the target boundary.
+emit an explicit `false` opt-out. A fixed-size Engine-hosted auxiliary pool
+can coexist with target prefix caching. For a windowed DFlash 2 drafter, one
+optional ring checkpoint can be attached to the exact indexed target boundary
+after its fixed-state checkpoint and the complete drafter proposal succeed.
+The ring is restored into newly allocated drafter blocks before a cached
+request joins at a nonzero position. An unleased older ring checkpoint may be
+replaced at a later boundary without evicting target blocks or fixed state.
+If the matching draft checkpoint is absent, the request retains the full
+target hit and runs target-only. Full-attention DSpark remains target-only
+after a nonzero-position prefix hit.
 
 Without dynamic batching, the engine uses the older static batching path. Static batching allocates and advances a batch as a unit. It does not use the transaction flow described below.
 
@@ -1751,10 +1756,26 @@ page size, before allocating cache resources. The drafter run is synchronous bec
 inputs and outputs are owned by one proposal call, so its run options cannot disable
 execution-provider synchronization.
 
-The direct drafter session also uses graph id `-1`: it reuses proposal tensor allocations but
-reshapes them for each step, so they cannot be captured safely. If this optional post-commit drafter
-run fails, the Engine discards any partial proposal and still publishes the already committed target
-events. A recoverable failure also makes the drafter forget every request it is currently tracking,
+The direct drafter session captures uniform shapes with stable proposal buffers, including
+batches containing a request restored from a DFlash2 prefix checkpoint. Graph replay requires
+a CUDA EP with session-scoped device arenas: older plugin EPs shared an arena across target and
+drafter sessions, allowing another session to overwrite memory retained by a captured graph.
+No graphs are discarded on cached admission.
+On ORT builds without per-graph release, graph captures retired by buffer growth still live
+until their session is destroyed.
+The opt-in `Dflash2GraphRestoreTest.ExtendedCachedPrefixReplaysWithoutStaleGraphOrLostDrafts`
+exercises the real Engine with CUDA graph capture: set `D_FLASH2_GRAPH_TEST_MODEL` to a
+graph-enabled Qwen package with 256-token blocks and 512-token prefill, then run
+`engine_unit_tests` with `--ep_dir` pointing at a CUDA plugin with session-scoped device arenas
+and the test's `--gtest_filter`. The test enables prefix caching with a 512-token prefill chunk
+through a configuration overlay. With the reference tokenizer, it checks the 534-to-1146-token
+extension, two longer cached replays, draft acceptance, and output parity; a tokenizer whose
+prompt lengths fall outside the required cache-boundary ranges skips the test. Ordinary CPU CI
+skips this model-dependent test.
+
+If this optional post-commit drafter run fails, the Engine discards any partial proposal
+and still publishes the already committed target events.
+A recoverable failure also makes the drafter forget every request it is currently tracking,
 because the step whose rows it failed to ingest leaves its cached context no longer contiguous with
 the target. Those in-flight requests finish without block drafts while requests admitted afterwards
 still get them, and the retry budget is therefore spent on real drafter failures: three consecutive
@@ -1782,7 +1803,14 @@ A windowed block drafter (DFlash 2) owns a fixed ring of cache blocks per maximu
 pool is sized for `max_batch_size` rings and its footprint is independent of context length. With
 automatic sizing, that pool is allocated before the target measures free memory. When `num_blocks`
 is explicit, its fixed footprint is instead validated and deducted from the byte budget represented
-by that baseline target block count before either cache pool is allocated. A full-attention block
+by that baseline target block count before either cache pool is allocated.
+A windowed DFlash 2 model with hybrid target prefix caching reserves one
+additional ring's bytes for its optional checkpoint, independent of context
+length. Readers lease the immutable snapshot through admission; replacing it
+cannot overwrite an in-flight adopter. If the budget cannot leave at least one
+target paged block after the auxiliary pool and snapshot reservation, the
+optional checkpoint is disabled and the existing target-only prefix behavior
+is retained. A full-attention block
 drafter (DSpark) instead mirrors the target pool: its bytes per target block and its fixed
 query-spill bytes are charged against the same budget before target capacity is selected, using the
 cache element type reported by the graph. That trade is explicit -- a DSpark drafter with the same
@@ -1798,8 +1826,9 @@ that capacity was occupied. A tracked request remains part of this capacity whil
 ingest-only, because retaining its cache is what lets a later greedy turn resume drafting.
 Rewind releases any tracked DFlash/DSpark state, including its cache blocks. On replay, a request
 that was previously sampled or admission-denied can try to join again if its new position-zero
-step is draft-eligible and capacity is available. A prefix-cache hit that skips position zero
-still prevents drafter admission, so rewind does not guarantee renewed drafting.
+step is draft-eligible and capacity is available. A nonzero-position hit also joins a windowed
+DFlash 2 drafter when its exact target boundary still has a draft checkpoint and a free ring.
+Otherwise it remains target-only; rewind does not guarantee renewed drafting.
 
 ## Backpressure and fairness
 
