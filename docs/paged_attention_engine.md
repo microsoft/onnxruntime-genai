@@ -1756,10 +1756,22 @@ page size, before allocating cache resources. The drafter run is synchronous bec
 inputs and outputs are owned by one proposal call, so its run options cannot disable
 execution-provider synchronization.
 
-The direct drafter session also uses graph id `-1`: it reuses proposal tensor allocations but
-reshapes them for each step, so they cannot be captured safely. If this optional post-commit drafter
-run fails, the Engine discards any partial proposal and still publishes the already committed target
-events. A recoverable failure also makes the drafter forget every request it is currently tracking,
+The direct drafter session captures uniform cold-request shapes with stable proposal buffers.
+A batch containing a request restored from a DFlash2 prefix checkpoint instead runs eagerly
+with graph id `-1`; previously captured cold shapes remain available to cold-only batches.
+This avoids stale proposals without discarding captured graphs on each cached admission.
+On ORT builds without per-graph release, graph captures retired by buffer growth still live
+until their session is destroyed.
+The opt-in `Dflash2GraphRestoreTest.ExtendedCachedPrefixReplaysWithoutStaleGraphOrLostDrafts`
+exercises the real Engine with CUDA graph capture: set `D_FLASH2_GRAPH_TEST_MODEL` to a
+graph-enabled Qwen package with 256-token blocks and 512-token prefill, then run
+`engine_unit_tests` with `--ep_dir` pointing at its CUDA plugin directory and the test's
+`--gtest_filter`. It checks the 534-to-1146-token extension, two longer cached replays,
+draft acceptance, and output parity; ordinary CPU CI skips this model-dependent test.
+
+If this optional post-commit drafter run fails, the Engine discards any partial proposal
+and still publishes the already committed target events.
+A recoverable failure also makes the drafter forget every request it is currently tracking,
 because the step whose rows it failed to ingest leaves its cached context no longer contiguous with
 the target. Those in-flight requests finish without block drafts while requests admitted afterwards
 still get them, and the retry budget is therefore spent on real drafter failures: three consecutive

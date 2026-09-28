@@ -955,6 +955,14 @@ TEST(Dflash2ConfigTest, CapturesAndRestoresExtendedWindowedPrefix) {
   EXPECT_EQ(proposals.front(), expected);
 }
 
+TEST(Dflash2ConfigTest, RestoredRequestsRunEagerly) {
+  EXPECT_TRUE(Dflash2GraphCaptureAllowed(true, true, false, 8, 8));
+  EXPECT_FALSE(Dflash2GraphCaptureAllowed(true, true, true, 8, 8));
+  EXPECT_FALSE(Dflash2GraphCaptureAllowed(true, false, false, 8, 8));
+  EXPECT_FALSE(Dflash2GraphCaptureAllowed(false, true, false, 8, 8));
+  EXPECT_FALSE(Dflash2GraphCaptureAllowed(true, true, false, 9, 8));
+}
+
 TEST(Dflash2ConfigTest, TrackedDsparkIngestsSampledTurnsAndResumesDrafting) {
   auto config = MakeDflash2Config();
   config.config_path = fs::path{MODEL_PATH "engine/synthetic-dspark"};

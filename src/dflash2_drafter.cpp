@@ -671,6 +671,11 @@ bool Dflash2CanJoin(bool draft_eligible, size_t first_position) noexcept {
   return draft_eligible && first_position == 0;
 }
 
+bool Dflash2GraphCaptureAllowed(bool enabled, bool uniform_ingest, bool has_restored_request,
+                                size_t max_blocks, size_t max_columns) noexcept {
+  return enabled && uniform_ingest && !has_restored_request && max_blocks <= max_columns;
+}
+
 void Dflash2Drafter::AllocateCache() {
   const size_t layers = static_cast<size_t>(config_.num_hidden_layers);
   const std::vector<int64_t> shape{static_cast<int64_t>(num_blocks_),
@@ -802,9 +807,8 @@ bool Dflash2Drafter::RestorePrefix(const Feed& feed) {
       CopyDflash2RingBlocks(*caches_[layer], state.blocks, *checkpoint->caches[layer], contiguous);
     }
     model_->p_device_kvcache_->Synchronize();
-    // A captured proposal may retain the previous ring's device state when the same shape replays.
-    ReleaseCapturedGraphs();
     state.cached_positions = feed.first_position;
+    state.restored_from_prefix = true;
     requests_.emplace(feed.request, std::move(state));
     free_blocks_.resize(free_blocks_.size() - ring_blocks_);
     return true;
@@ -1007,8 +1011,14 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   // Bucketing the width lets a growing context keep replaying one captured graph instead of
   // retiring one at every block boundary; columns past the live KV length are never read. Steps
   // that cannot be captured keep the exact width so their bound inputs are unchanged.
-  const bool graph_eligible = graph_capture_enabled_ && uniform_ingest &&
-                              max_blocks <= max_block_table_columns_;
+  const bool has_restored_request = std::any_of(served.begin(), served.end(), [&](size_t i) {
+    return requests_.at(feeds[i].request).restored_from_prefix;
+  });
+  // Restored rings must run eagerly: replaying a prior graph can return stale proposals.
+  // Retain cold graph IDs instead of forgetting them on every cached admission.
+  const bool graph_eligible = Dflash2GraphCaptureAllowed(
+      graph_capture_enabled_, uniform_ingest, has_restored_request,
+      max_blocks, max_block_table_columns_);
   const size_t block_table_columns =
       graph_eligible ? GetGraphBlockTableColumns(max_blocks, max_block_table_columns_)
                      : max_blocks;
