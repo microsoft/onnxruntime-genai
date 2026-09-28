@@ -48,10 +48,10 @@ inline QwenPatchLayout ResolveQwenPatchLayout(int64_t total_patches,
                              candidate_stride == max_grid_tokens;
 
   if (stride_padded) {
-    return {.padded_image_stride = candidate_stride};
+    return QwenPatchLayout{candidate_stride, 0};
   }
   if (temporal_padded) {
-    return {.temporal_multiplier = total_patches / total_hw};
+    return QwenPatchLayout{0, total_patches / total_hw};
   }
 
   throw std::runtime_error("pixel_values patch count (" + std::to_string(total_patches) +
