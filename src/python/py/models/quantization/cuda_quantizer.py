@@ -398,6 +398,8 @@ class CudaQuantizer:
             raise ValueError(f"Blockwise quantization requires a positive block_size, got {block_size}.")
         if signed_scale and not symmetric:
             raise ValueError("signed_scale is only valid for symmetric blockwise quantization.")
+        if bits == 2 and not symmetric:
+            raise ValueError("INT2 blockwise quantization supports only symmetric quantization.")
         if use_ort_quantizer and symmetric and (not unsigned_full_range or not signed_scale):
             raise ValueError(
                 "The ORT symmetric MatMulNBits quantizer requires unsigned_full_range=true and signed_scale=true."
@@ -408,14 +410,11 @@ class CudaQuantizer:
         blob_size = (block_size + pack - 1) // pack
 
         if symmetric and not use_ort_quantizer:
-            if bits == 2:
-                qmin, qmax, scale_divisor, zero_point = (-2, 1, 2, 2) if unsigned_full_range else (-1, 1, 1, 2)
-            elif bits == 4:
-                qmin, qmax, scale_divisor, zero_point = (-8, 7, 8, 8) if unsigned_full_range else (-7, 7, 7, 8)
-            else:
-                qmin, qmax, scale_divisor, zero_point = (
-                    (-128, 127, 128, 128) if unsigned_full_range else (-127, 127, 127, 128)
-                )
+            half_range = 1 << (bits - 1)
+            qmax = half_range - 1
+            qmin = -half_range if unsigned_full_range else -qmax
+            scale_divisor = half_range if unsigned_full_range else qmax
+            zero_point = half_range
 
             padded_k = num_blocks * block_size
             if padded_k != k:
@@ -438,15 +437,12 @@ class CudaQuantizer:
             quantized = np.clip(np.rint(blocked / scales[:, :, np.newaxis]), qmin, qmax).astype(np.int16)
             quantized = (quantized + zero_point).astype(np.uint8)
 
-            if bits == 2:
+            if bits < 8:
                 qweight = np.zeros((n, num_blocks, blob_size), dtype=np.uint8)
-                for offset in range(4):
-                    values = quantized[:, :, offset::4]
-                    qweight[:, :, : values.shape[2]] |= (values & 0x3) << (2 * offset)
-            elif bits == 4:
-                qweight = np.zeros((n, num_blocks, blob_size), dtype=np.uint8)
-                qweight[:, :, : quantized[:, :, 0::2].shape[2]] = quantized[:, :, 0::2] & 0xF
-                qweight[:, :, : quantized[:, :, 1::2].shape[2]] |= (quantized[:, :, 1::2] & 0xF) << 4
+                mask = (1 << bits) - 1
+                for offset in range(pack):
+                    values = quantized[:, :, offset::pack]
+                    qweight[:, :, : values.shape[2]] |= (values & mask) << (offset * bits)
             else:
                 qweight = quantized
 
