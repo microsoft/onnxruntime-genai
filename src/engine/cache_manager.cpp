@@ -393,6 +393,7 @@ void PagedCacheManager::SealCommittedBlocks(const StepPlan& plan, Tensor* auxili
     return;
   }
   const bool needs_auxiliary = key_value_cache_->RequiresAuxiliaryPrefix();
+  DeviceSpan<uint8_t> auxiliary_buffer;
   std::span<const uint8_t> auxiliary_rows;
   size_t row_bytes = 0;
   if (needs_auxiliary) {
@@ -405,7 +406,8 @@ void PagedCacheManager::SealCommittedBlocks(const StepPlan& plan, Tensor* auxili
       throw std::logic_error("DFlash target auxiliary output has an invalid shape.");
     }
     row_bytes = static_cast<size_t>(shape[1]) * Ort::SizeOf(auxiliary->GetType());
-    auxiliary_rows = auxiliary->GetByteSpan().CopyDeviceToCpu();
+    auxiliary_buffer = auxiliary->GetByteSpan();
+    auxiliary_rows = auxiliary_buffer.CopyDeviceToCpu();
   }
   for (const auto& entry : plan.requests) {
     if (fixed_state_pool_ && !entry.is_prefill) {

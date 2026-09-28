@@ -177,6 +177,8 @@ independently from each target auxiliary row; its query block never needs to
 recompute the target prefix. This adds no permanent GPU checkpoint rings, but
 retained host memory grows with the number of indexed target tokens times the
 auxiliary width. The replay adds a drafter forward pass to a warm admission.
+When projected DFlash K/V is narrower than the packed target auxiliary output,
+retaining auxiliary rows is not necessarily the minimum-total-memory design.
 Full-attention drafters and Engine-hosted DSpark still reject explicit prefix
 caching under their separate compatibility guard.
 
