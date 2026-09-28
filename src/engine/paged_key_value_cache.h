@@ -119,7 +119,7 @@ struct PagedKeyValueCache {
       const void* request_id,
       std::shared_ptr<const FixedStatePrefixCheckpoint> checkpoint);
   std::optional<DraftPrefixBoundary> DraftBoundary(const void* request_id,
-                                                    size_t token_count) const;
+                                                   size_t token_count) const;
   bool AttachDraftCheckpoint(const DraftPrefixBoundary& boundary,
                              std::shared_ptr<const Dflash2PrefixCheckpoint> checkpoint);
   void DropUnleasedDraftCheckpoints();

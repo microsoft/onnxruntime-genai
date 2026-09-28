@@ -397,7 +397,7 @@ TEST_F(FixedStatePoolTest, DraftAttachmentRequiresExactFixedBoundaryAndRetainsLe
   EXPECT_EQ(index.Reclaim(1), 1u);
   EXPECT_FALSE(index.CanAttachDraftCheckpoint(registration.identity, block_size));
   EXPECT_FALSE(index.AttachDraftCheckpoint(registration.identity, fixed,
-                                          std::make_shared<Dflash2PrefixCheckpoint>()));
+                                           std::make_shared<Dflash2PrefixCheckpoint>()));
 }
 
 TEST_F(FixedStatePoolTest, PrefixCheckpointMustBelongToTheAdoptingPool) {

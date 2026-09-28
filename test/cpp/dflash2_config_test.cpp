@@ -717,8 +717,7 @@ TEST(Dflash2ConfigTest, ExecutesWindowedRestoreAcrossRingWrap) {
 
   for (size_t position = 0; position < 24; position += 8) {
     const std::array feeds{Dflash2Drafter::Feed{
-        .request = source, .aux_row_count = 8, .first_position = position,
-        .anchor_token = 11, .draft_eligible = true, .wants_drafts = true}};
+        .request = source, .aux_row_count = 8, .first_position = position, .anchor_token = 11, .draft_eligible = true, .wants_drafts = true}};
     ASSERT_TRUE(drafter.Propose(aux, feeds, proposals));
   }
   auto checkpoint = drafter.CapturePrefix(source, 24);
@@ -726,9 +725,9 @@ TEST(Dflash2ConfigTest, ExecutesWindowedRestoreAcrossRingWrap) {
   EXPECT_EQ(checkpoint->ring_blocks, ring_blocks);
   Tensor next_aux{GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<float>};
   next_aux.CreateTensor(std::array<int64_t, 2>{1, 1});
+  next_aux.GetByteSpan().Zero();
   const std::array uninterrupted{Dflash2Drafter::Feed{
-      .request = source, .aux_row_count = 1, .first_position = 24,
-      .anchor_token = 12, .draft_eligible = true, .wants_drafts = true}};
+      .request = source, .aux_row_count = 1, .first_position = 24, .anchor_token = 12, .draft_eligible = true, .wants_drafts = true}};
   ASSERT_TRUE(drafter.Propose(next_aux, uninterrupted, proposals));
   ASSERT_EQ(proposals.size(), 1u);
   const auto expected = proposals.front();
@@ -737,12 +736,10 @@ TEST(Dflash2ConfigTest, ExecutesWindowedRestoreAcrossRingWrap) {
 
   drafter.Release(source);
   const std::array remap_feed{Dflash2Drafter::Feed{
-      .request = remap, .aux_row_count = 1, .anchor_token = 13,
-      .draft_eligible = true, .wants_drafts = true}};
+      .request = remap, .aux_row_count = 1, .anchor_token = 13, .draft_eligible = true, .wants_drafts = true}};
   ASSERT_TRUE(drafter.Propose(next_aux, remap_feed, proposals));
   const std::array resumed{Dflash2Drafter::Feed{
-      .request = restored, .prefix_checkpoint = checkpoint, .aux_row_count = 1,
-      .first_position = 24, .anchor_token = 12, .draft_eligible = true, .wants_drafts = true}};
+      .request = restored, .prefix_checkpoint = checkpoint, .aux_row_count = 1, .first_position = 24, .anchor_token = 12, .draft_eligible = true, .wants_drafts = true}};
   ASSERT_TRUE(drafter.Propose(next_aux, resumed, proposals));
   ASSERT_EQ(proposals.size(), 1u);
   EXPECT_EQ(proposals.front(), expected);
@@ -760,19 +757,16 @@ TEST(Dflash2ConfigTest, ExecutesWindowedRestoreAcrossRingWrap) {
   const std::array with_peer{
       wrong_position.front(),
       Dflash2Drafter::Feed{
-          .request = peer, .aux_row_count = 1, .anchor_token = 13,
-          .draft_eligible = true, .wants_drafts = true}};
+          .request = peer, .aux_row_count = 1, .anchor_token = 13, .draft_eligible = true, .wants_drafts = true}};
   EXPECT_TRUE(drafter.Propose(next_aux, with_peer, proposals));
   EXPECT_TRUE(proposals.front().empty());
   EXPECT_FALSE(proposals.back().empty());
   const std::array second_peer{Dflash2Drafter::Feed{
-      .request = extra, .aux_row_count = 1, .anchor_token = 14,
-      .draft_eligible = true, .wants_drafts = true}};
+      .request = extra, .aux_row_count = 1, .anchor_token = 14, .draft_eligible = true, .wants_drafts = true}};
   ASSERT_TRUE(drafter.Propose(next_aux, second_peer, proposals));
   const std::array full_pool{
       Dflash2Drafter::Feed{
-          .request = peer, .aux_row_count = 1, .first_position = 1,
-          .anchor_token = 15, .draft_eligible = true, .wants_drafts = true},
+          .request = peer, .aux_row_count = 1, .first_position = 1, .anchor_token = 15, .draft_eligible = true, .wants_drafts = true},
       resumed.front()};
   EXPECT_TRUE(drafter.Propose(next_aux, full_pool, proposals));
   EXPECT_FALSE(proposals.front().empty());
@@ -783,6 +777,33 @@ TEST(Dflash2ConfigTest, ExecutesWindowedRestoreAcrossRingWrap) {
   ASSERT_TRUE(drafter.Propose(next_aux, resumed, proposals));
   ASSERT_EQ(proposals.size(), 1u);
   EXPECT_FALSE(proposals.front().empty());
+
+  drafter.ReleaseAll();
+  auto alternate = resumed;
+  alternate.front().request = remap;
+  alternate.front().anchor_token = 13;
+  alternate.front().aux_row_count = 2;
+  Tensor alternate_aux{GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<float>};
+  alternate_aux.CreateTensor(std::array<int64_t, 2>{2, 1});
+  alternate_aux.GetByteSpan().Zero();
+  ASSERT_TRUE(drafter.Propose(alternate_aux, alternate, proposals));
+  ASSERT_EQ(proposals.size(), 1u);
+  const auto alternate_expected = proposals.front();
+  ASSERT_FALSE(alternate_expected.empty());
+  ASSERT_NE(alternate_expected, expected);
+  drafter.ReleaseAll();
+
+  Tensor paired_aux{GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<float>};
+  paired_aux.CreateTensor(std::array<int64_t, 2>{3, 1});
+  paired_aux.GetByteSpan().Zero();
+  auto paired_alternate = alternate.front();
+  paired_alternate.aux_row_begin = 1;
+  const std::array paired{resumed.front(), paired_alternate};
+  ASSERT_TRUE(drafter.Propose(paired_aux, paired, proposals));
+  ASSERT_EQ(proposals.size(), 2u);
+  EXPECT_EQ(proposals[0], expected);
+  EXPECT_EQ(proposals[1], alternate_expected);
+  drafter.ReleaseAll();
 
   auto missing_state = std::make_shared<Dflash2PrefixCheckpoint>();
   missing_state->token_count = checkpoint->token_count;
