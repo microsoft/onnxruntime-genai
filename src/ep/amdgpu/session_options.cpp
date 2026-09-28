@@ -126,7 +126,7 @@ DeviceInterface* AppendExecutionProvider(OrtSessionOptions& session_options,
   amdgpu_allocator.allocator_.reset();
   amdgpu_allocator.session_.reset();
   amdgpu_allocator.host_accessible_allocator_ = nullptr;
-  amdgpu_allocator.device_id_ = 0
+  amdgpu_allocator.device_id_ = 0;
   ResetAMDGPUInterfaceAllocatorState();
 
   AppendExecutionProviderV2(session_options, provider_options,
