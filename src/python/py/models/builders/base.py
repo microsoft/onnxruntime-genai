@@ -42,8 +42,6 @@ from transformers import (
 
 from quantization import KV_CACHE_CALIBRATION_QMAX, CudaQuantizer, QuantConfig, resolve_dtype
 
-DEFAULT_OPSET = 24
-
 
 class Model:
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
@@ -129,15 +127,26 @@ class Model:
         self.hf_token = extra_options.get("hf_token", True)
         self.hf_remote = extra_options.get("hf_remote", False)
 
+        self.graph_attrs = {
+            "ai.onnx": 24,
+            "com.microsoft": 1,
+            "ir_version": 10,
+            "producer_name": "onnxruntime-genai",
+        }
+
         # States for building the model
         self.graph = ir.Graph(
             inputs=(),
             outputs=(),
             nodes=(),
-            opset_imports={"": DEFAULT_OPSET, "com.microsoft": 1},
+            opset_imports={"": self.graph_attrs["ai.onnx"], "com.microsoft": self.graph_attrs["com.microsoft"]},
             name="main_graph",
         )
-        self.model = ir.Model(self.graph, ir_version=10, producer_name="onnxruntime-genai")
+        self.model = ir.Model(
+            self.graph,
+            ir_version=self.graph_attrs["ir_version"],
+            producer_name=self.graph_attrs["producer_name"],
+        )
         self.values = {}
 
         # EP-specific variables
