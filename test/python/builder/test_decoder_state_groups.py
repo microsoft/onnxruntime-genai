@@ -612,6 +612,7 @@ def test_qwen35_gated_delta_net_option_validation(
             linear_attn_op,
             state_window,
             ep,
+            base_module.ir.DataType.FLOAT16,
         )
 
 
@@ -624,6 +625,7 @@ def test_qwen35_gated_delta_net_accepts_webgpu(use_paged_attention):
         "gated_delta_net",
         0,
         "webgpu",
+        base_module.ir.DataType.FLOAT16,
     )
 
 

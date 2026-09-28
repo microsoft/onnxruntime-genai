@@ -62,10 +62,11 @@ class DFlash2Builder(BlockDrafterBuilder):
         fuse_gate_up=False,
         include_attention_metadata=True,
         ep="cuda",
+        compute_dtype=None,
     ):
         self.draft_dir = draft_dir
         self.target_dir = target_dir
-        self.io_dtype = ir.DataType.BFLOAT16 if ep == "cuda" else io_dtype
+        self.io_dtype = compute_dtype or (ir.DataType.BFLOAT16 if ep == "cuda" else io_dtype)
         self.external_dtype = io_dtype
         self.layernorm_attrs = {
             # WebGPU lacks BF16; widen residual-producing paths until after normalization.

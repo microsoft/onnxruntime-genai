@@ -437,7 +437,6 @@ class Model:
             "is_symmetric": self.quant_config.weights.symmetric,                           # Use symmetric zero-centered weight quantization
             "op_types_to_quantize": self.quant_config.weights.op_types,                    # Operator types eligible for weight quantization
             "nodes_to_exclude": nodes_to_exclude,                                          # Node names excluded from weight quantization
-            "algo_config": None,                                                           # Resolved in `make_quant_init` from the int4 method + int8 bit placement.
             "use_qdq": self.quant_config.runtime.use_qdq,                                  # Create QuantizeLinear/DequantizeLinear nodes for quantized weights instead of using MatMulNBits.
         }
         self.make_quant_init(config)
@@ -1047,6 +1046,26 @@ class Model:
         # exported models remain byte-identical to the flat-option path.
         moe_descriptor = resolve_dtype(self.quant_config.moe.type)
         self.moe_attrs["expert_weight_bits"] = moe_descriptor.bits
+        fc1_descriptor = resolve_dtype(getattr(self.quant_config.moe, "fc1_type", None) or self.quant_config.moe.type)
+        fc2_descriptor = resolve_dtype(getattr(self.quant_config.moe, "fc2_type", None) or self.quant_config.moe.type)
+        mixed_width = fc1_descriptor.bits != moe_descriptor.bits or fc2_descriptor.bits != moe_descriptor.bits
+        uses_int2 = 2 in (moe_descriptor.bits, fc1_descriptor.bits, fc2_descriptor.bits)
+        if mixed_width or uses_int2:
+            if self.ep != "cuda":
+                raise ValueError("INT2 and mixed-width QMoE are currently supported only on the CUDA EP.")
+            block_size = self.quant_config.moe.block_size
+            if block_size not in (64, 128):
+                raise ValueError("INT2 and mixed-width CUDA QMoE require block_size 64 or 128.")
+            if self.hidden_size % block_size != 0 or self.intermediate_size % block_size != 0:
+                raise ValueError(
+                    "INT2 and mixed-width CUDA QMoE require hidden_size and intermediate_size "
+                    f"to be divisible by block_size {block_size}; got hidden_size={self.hidden_size} "
+                    f"and intermediate_size={self.intermediate_size}."
+                )
+        if mixed_width:
+            self.moe_attrs["fc1_expert_weight_bits"] = fc1_descriptor.bits
+            self.moe_attrs["fc2_expert_weight_bits"] = fc2_descriptor.bits
+            self.moe_attrs["fc3_expert_weight_bits"] = fc1_descriptor.bits
 
         # MXFP4 and NVFP4 both resolve to the "mx" kind; the QMoE op tells them apart by dtype name
         # ("mxfp4" -> op "fp4", "nvfp4" -> op "nvfp4"). Integer dtypes use the plain "int" QMoE path.
@@ -1061,6 +1080,8 @@ class Model:
         # with CPU/WebGPU/TRT-RTX. Override via extra_options["qmoe_weights_prepacked"] (e.g. 0 to ship
         # raw [E, N, K/pack] weights and let the CUDA runtime PrePack hook transform them).
         self.moe_attrs["weights_prepacked"] = self.quant_config.moe.weights_prepacked
+        if mixed_width or uses_int2:
+            self.moe_attrs["weights_prepacked"] = 0
 
         if self.moe_attrs["swiglu_limit"] is None and self.ep == "trt-rtx":
             # TRT-RTX EP builds currently require QMoE swiglu_limit to be present on every MoE model;
@@ -1134,9 +1155,6 @@ class Model:
         lm_head_config = customized_weight_config.get("/lm_head/MatMul")
         if lm_head_config is not None:
             self.matmul_mixed_precision["last_matmul"] = f"int{lm_head_config['bits']}"
-        self.quant_attrs["algo_config"] = self.make_algo_config(
-            self.quantization_algo, self.int4_customized_weight_config
-        )
 
         if self.quant_type is not None:
             # Create quantized attributes from quantization config
@@ -1823,6 +1841,15 @@ class Model:
                 quant_upgraded.process()
                 model_proto = quant_upgraded.model.model
         else:
+            algo_config = None
+            if base_method != "default":
+                # ORT's _generate_q4_node_config hard-codes 4 bits for RTN/k_quant MatMuls without a per-node entry.
+                weight_config = {
+                    node.name: {"bits": self.quant_attrs["bits"]}
+                    for node in self.model.graph
+                    if node.op_type == "MatMul"
+                }
+                algo_config = self.make_algo_config(base_method, {**weight_config, **customized_weight_config})
             quant = MatMulNBitsQuantizer(
                 model=ir.to_proto(self.model),
                 bits=self.quant_attrs["bits"],
@@ -1832,7 +1859,7 @@ class Model:
                 nodes_to_exclude=nodes_to_exclude,
                 quant_format=quant_format,
                 op_types_to_quantize=self.quant_attrs["op_types_to_quantize"],
-                algo_config=self.quant_attrs["algo_config"],
+                algo_config=algo_config,
             )
             quant.process()
             model_proto = quant.model.model
@@ -5361,10 +5388,14 @@ class Model:
         gate_up_weights, gate_up_scales = [], []
         down_weights, down_scales = [], []
         for expert_id in range(self.moe_attrs["num_experts"]):
-            quantized_weight, scales = self.make_qmoe_weights(gate_up_weight[expert_id])
+            quantized_weight, scales = self.make_qmoe_weights(
+                gate_up_weight[expert_id], self.moe_attrs.get("fc1_expert_weight_bits")
+            )
             gate_up_weights.append(quantized_weight)
             gate_up_scales.append(scales)
-            quantized_weight, scales = self.make_qmoe_weights(down_weight[expert_id])
+            quantized_weight, scales = self.make_qmoe_weights(
+                down_weight[expert_id], self.moe_attrs.get("fc2_expert_weight_bits")
+            )
             down_weights.append(quantized_weight)
             down_scales.append(scales)
         self.make_initializer(torch.stack(gate_up_weights).to(torch.uint8), gate_up_name)
@@ -5534,6 +5565,10 @@ class Model:
             # Select the MXFP4/NVFP4 kernel path; integer QMoE leaves quant_type at its default.
             extra_kwargs["quant_type"] = quant_type
 
+        for attr_name in ("fc1_expert_weight_bits", "fc2_expert_weight_bits", "fc3_expert_weight_bits"):
+            if attr_name in self.moe_attrs:
+                extra_kwargs[attr_name] = self.moe_attrs[attr_name]
+
         # weights_prepacked is a tri-state CUDA QMoE attribute describing the expert-weight layout
         # (see make_qmoe_weights, which produces the matching bytes):
         #   -1       -> omit the attribute; the op treats weights as already
@@ -5566,7 +5601,8 @@ class Model:
         )
         self.make_value(output, self.io_dtype, shape=self.make_hidden_state_shape())
 
-    def make_qmoe_weights(self, weights):
+    def make_qmoe_weights(self, weights, bits=None):
+        bits = int(bits if bits is not None else self.moe_attrs["expert_weight_bits"])
         weights_prepacked = self.moe_attrs.get("weights_prepacked")
 
         if self.quant_attrs["qmoe_block_size"] <= 0:
@@ -5622,7 +5658,7 @@ class Model:
             )
             descriptor = "MatMulNBits-compatible" if weights_prepacked == 0 else "CUTLASS-prepacked"
             try:
-                qweight, scales = quantize_method(weights)
+                qweight, scales = quantize_method(weights, bits)
                 self.moe_attrs["block_size"] = block_size
                 return qweight, scales.to(torch.float16)
             except Exception as e:
@@ -5633,7 +5669,7 @@ class Model:
         # re-quantizes to this same grid, which makes it lossless, and the WebGPU kernel consumes the
         # MatMulNBits layout directly.
         try:
-            qweight, scales = self._matmulnbits_blockwise_quantize(weights)
+            qweight, scales = self._matmulnbits_blockwise_quantize(weights, bits)
             self.moe_attrs["block_size"] = block_size
             return qweight, scales.to(torch.float16)
         except Exception as e:
@@ -5673,7 +5709,7 @@ class Model:
             signed_scale=False,
         )
 
-    def _cutlass_prepacked_blockwise_quantize(self, weights):
+    def _cutlass_prepacked_blockwise_quantize(self, weights, bits=None):
         """Quantize a single expert's weights and CUTLASS-prepack them for the
         CUDA QMoE fpA_intB mixed-GEMM kernel.
 
@@ -5687,7 +5723,7 @@ class Model:
         ``[E, N, K/block_size]`` — the layout the QMoE op reads when
         ``weights_prepacked`` is left at its prepacked default.
         """
-        bits = int(self.moe_attrs["expert_weight_bits"])
+        bits = int(bits if bits is not None else self.moe_attrs["expert_weight_bits"])
         block_size = self.quant_attrs["qmoe_block_size"]
         return CudaQuantizer.qmoe_prepacked_blockwise_quantize(
             weights,
@@ -5697,7 +5733,7 @@ class Model:
             signed_scale=True,
         )
 
-    def _matmulnbits_blockwise_quantize(self, weights):
+    def _matmulnbits_blockwise_quantize(self, weights, bits=None):
         """Quantize per-expert weights with ONNX Runtime's MatMulNBits blockwise
         quantizer, matching the encoding the QMoE PrePack hook expects.
 
@@ -5708,7 +5744,7 @@ class Model:
         float scales (SIGNED by default on this blockwise path — the MLAS
         ``default`` convention). Layout matches ``quantize_matmul_{4,8}bits``.
         """
-        bits = int(self.moe_attrs["expert_weight_bits"])
+        bits = int(bits if bits is not None else self.moe_attrs["expert_weight_bits"])
         block_size = self.quant_attrs["qmoe_block_size"]
         pack = 8 // bits
         k = weights.shape[-1]
@@ -5720,13 +5756,7 @@ class Model:
                 f"WebGPU QMoE requires expert input dimension K ({k}) to be divisible by "
                 f"qmoe_block_size ({block_size}); partial blocks are unsupported."
             )
-        qweight, scales = CudaQuantizer.matmulnbits_blockwise_quantize(
-            weights,
-            bits,
-            block_size,
-            unsigned_full_range=True,
-            signed_scale=True,
-        )
+        qweight, scales = CudaQuantizer.matmulnbits_blockwise_quantize(weights, bits, block_size)
         # QMoE validates raw storage as [E, N, K/pack]. Drop the quantizer's whole-block padding;
         # the scales retain ceil(K/block_size) columns. WebGPU partial blocks are rejected above.
         return qweight[:, : k // pack], scales
