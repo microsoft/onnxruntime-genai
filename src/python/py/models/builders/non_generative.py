@@ -8,12 +8,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .clm import CLM_ARTIFACT_REVISION, export_clm_components, is_clm_artifact
+from .clm import (
+    clm_artifact_revision,
+    export_clm_components,
+    is_clm_artifact,
+    load_clm_checkpoint,
+)
 from .kev import (
-    KEV_ADAPTER_REVISION,
-    KEV_BASE_REVISION,
     export_kev_components,
     is_kev_artifact,
+    kev_policy,
     load_kev_checkpoint,
 )
 
@@ -51,17 +55,23 @@ def validate_model_specific_backbone(options, config) -> str:
     model_type = detect_model_specific_artifact(options.model_source)
     architecture = config.architectures[0]
     if model_type == "clm":
-        if options.artifact_revision != CLM_ARTIFACT_REVISION:
-            raise ValueError(f"CLM artifact_revision must be {CLM_ARTIFACT_REVISION}")
+        revision = clm_artifact_revision()
+        if options.artifact_revision != revision:
+            raise ValueError(f"CLM artifact_revision must be {revision}")
         if architecture != "Qwen3ForCausalLM":
             raise ValueError("CLM requires a Qwen3ForCausalLM backbone")
         if int(config.hidden_size) != 4096:
             raise ValueError("CLM requires the Qwen/Qwen3-8B hidden size (4096)")
     else:
-        if options.artifact_revision != KEV_ADAPTER_REVISION:
-            raise ValueError(f"KEV artifact_revision must be {KEV_ADAPTER_REVISION}")
-        if options.base_revision != KEV_BASE_REVISION:
-            raise ValueError(f"KEV base_revision must be {KEV_BASE_REVISION}")
+        policy = kev_policy()
+        if options.artifact_revision != policy["adapter_revision"]:
+            raise ValueError(
+                f"KEV artifact_revision must be {policy['adapter_revision']}"
+            )
+        if options.base_revision != policy["base_revision"]:
+            raise ValueError(
+                f"KEV base_revision must be {policy['base_revision']}"
+            )
         if architecture != "Qwen3_5ForConditionalGeneration":
             raise ValueError("KEV requires a Qwen3.5 dense backbone")
         if int(config.hidden_size) != 2560:
@@ -107,14 +117,22 @@ def prepare_model_specific_hf(options, extra_options, base_source: str | None = 
         "component": options.model_source,
     }
     if model_type == "kev":
-        if options.artifact_revision != KEV_ADAPTER_REVISION:
-            raise ValueError(f"KEV artifact_revision must be {KEV_ADAPTER_REVISION}")
-        if options.base_revision != KEV_BASE_REVISION:
-            raise ValueError(f"KEV base_revision must be {KEV_BASE_REVISION}")
+        policy = kev_policy()
+        if options.artifact_revision != policy["adapter_revision"]:
+            raise ValueError(
+                f"KEV artifact_revision must be {policy['adapter_revision']}"
+            )
+        if options.base_revision != policy["base_revision"]:
+            raise ValueError(
+                f"KEV base_revision must be {policy['base_revision']}"
+            )
         load_kev_checkpoint(options.model_source)
         extra_options["adapter_path"] = options.model_source
-    elif options.artifact_revision != CLM_ARTIFACT_REVISION:
-        raise ValueError(f"CLM artifact_revision must be {CLM_ARTIFACT_REVISION}")
+    else:
+        revision = clm_artifact_revision()
+        if options.artifact_revision != revision:
+            raise ValueError(f"CLM artifact_revision must be {revision}")
+        load_clm_checkpoint(options.model_source)
     return model_type
 
 
