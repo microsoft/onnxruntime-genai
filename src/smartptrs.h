@@ -239,6 +239,10 @@ struct DeviceInterface {
   // Null default -> callers keep the current device-memory path.
   virtual DeviceInterface* GetHostAccessibleDevice() { return nullptr; }
 
+  // True when this interface allocates memory the CPU reads and writes through the tensor's own
+  // pointer, so a CPU session may be handed it directly (see SessionCanAccess).
+  virtual bool IsHostAccessible() const { return false; }
+
   // Called once after the device allocator is created, so a device that offers additional
   // allocators (e.g. host-accessible memory) can set them up. The default sets up nothing.
   // `device_id` is the id the device allocator was created on.

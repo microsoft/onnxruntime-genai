@@ -315,6 +315,7 @@ struct PinnedInputsImpl : DeviceInterface {
   explicit PinnedInputsImpl(InterfaceImpl& base) : base_{base} {}
 
   DeviceType GetType() const override { return DeviceType::AMDGPU; }
+  bool IsHostAccessible() const override { return true; }  // See PinnedMemory
   void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override { base_.InitOrt(api, allocator); }
   Ort::Allocator& GetAllocator() override { return *base_.PinnedAllocator(); }
   Ort::Allocator* GetHostAccessibleAllocator() override { return base_.PinnedAllocator(); }
