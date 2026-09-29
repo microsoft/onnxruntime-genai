@@ -8,6 +8,7 @@ import json
 import sys
 from pathlib import Path
 
+import onnx
 import pytest
 
 MODELS_DIR = Path(__file__).parents[3] / "src" / "python" / "py" / "models"
@@ -15,10 +16,24 @@ sys.path.insert(0, str(MODELS_DIR))
 
 from builder_config import (  # noqa: E402
     apply_runtime_config,
+    export_component_package,
     load_json_object,
     normalize_builder_config,
     validate_model_dependent_config,
 )
+
+
+def _write_component_model(path, external_locations=()):
+    initializers = []
+    for index, location in enumerate(external_locations):
+        tensor = onnx.TensorProto(name=f"weight_{index}", data_type=onnx.TensorProto.FLOAT, dims=[1])
+        tensor.data_location = onnx.TensorProto.EXTERNAL
+        entry = tensor.external_data.add()
+        entry.key = "location"
+        entry.value = location
+        initializers.append(tensor)
+    graph = onnx.helper.make_graph([], "component", [], [], initializer=initializers)
+    path.write_bytes(onnx.helper.make_model(graph).SerializeToString())
 
 
 def test_legacy_configuration_preserves_options():
@@ -43,6 +58,232 @@ def test_structured_fields_select_version_two():
     assert effective.execution_provider == "cuda"
     assert effective.extra_options["_target_io_dtype"] == "bf16"
     assert effective.target_options["quant_config"]["moe"]["type"] == "int4"
+
+
+@pytest.mark.parametrize(
+    "component_options,match",
+    [
+        ({"heads": []}, "non-empty array"),
+        ({"heads": [{"name": "not/a-name", "source": "head.onnx"}]}, "must start with a letter"),
+        (
+            {
+                "heads": [
+                    {"name": "first", "source": "first.onnx", "filename": "head.onnx"},
+                    {"name": "second", "source": "second.onnx", "filename": "head.onnx"},
+                ]
+            },
+            "duplicate component filename",
+        ),
+        ({"heads": [{"name": "head", "source": "head.onnx", "filename": "../head.onnx"}]}, "without directories"),
+        (
+            {"heads": [{"name": "head", "source": "head.onnx", "inputs": {"indices": ""}}]},
+            "non-empty graph value name",
+        ),
+        (
+            {
+                "heads": [
+                    {
+                        "name": "head",
+                        "source": "head.onnx",
+                        "outputs": {"scores": "result", "labels": "result"},
+                    }
+                ]
+            },
+            "graph value names must be unique",
+        ),
+    ],
+)
+def test_component_options_validation(component_options, match):
+    with pytest.raises(ValueError, match=match):
+        normalize_builder_config("fp32", "cpu", component_options=component_options)
+
+
+def test_component_options_serialize_as_typed_structure():
+    effective = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={
+            "backbone": {"filename": "backbone.onnx"},
+            "heads": [{"name": "classification", "source": "source.onnx", "filename": "head.onnx"}],
+        },
+    )
+
+    assert effective.to_dict()["component_options"] == {
+        "backbone": {"filename": "backbone.onnx"},
+        "heads": [
+            {
+                "name": "classification",
+                "source": "source.onnx",
+                "filename": "head.onnx",
+                "inputs": {"hidden_states": "hidden_states"},
+                "outputs": {},
+            }
+        ],
+    }
+
+
+def test_component_options_configure_hidden_state_backbone():
+    effective = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": "head.onnx"}]},
+    )
+
+    assert effective.extra_options["exclude_lm_head"] is True
+    assert "include_hidden_states" not in effective.extra_options
+    assert effective.extra_options["filename"] == "model.onnx"
+
+
+def test_component_package_stages_multiple_named_heads(tmp_path):
+    first = tmp_path / "first-source.onnx"
+    second = tmp_path / "second-source.onnx"
+    _write_component_model(first)
+    _write_component_model(second)
+    effective = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={
+            "backbone": {"filename": "backbone.onnx"},
+            "heads": [
+                {"name": "classification", "source": str(first), "filename": "classification.onnx"},
+                {"name": "regression", "source": str(second), "filename": "regression.onnx"},
+            ],
+        },
+    )
+    output_dir = tmp_path / "package"
+    output_dir.mkdir()
+
+    export_component_package(effective.component_options, str(output_dir))
+
+    assert (output_dir / "classification.onnx").read_bytes() == first.read_bytes()
+    assert (output_dir / "regression.onnx").read_bytes() == second.read_bytes()
+    manifest = json.loads((output_dir / "component_manifest.json").read_text())
+    assert manifest == {
+        "schema_version": 1,
+        "model_type": "generic-non-generative",
+        "components": {
+            "backbone": {
+                "role": "backbone",
+                "filename": "backbone.onnx",
+                "outputs": {"hidden_states": "hidden_states"},
+            },
+            "classification": {
+                "role": "head",
+                "filename": "classification.onnx",
+                "inputs": {"hidden_states": "hidden_states"},
+                "outputs": {},
+            },
+            "regression": {
+                "role": "head",
+                "filename": "regression.onnx",
+                "inputs": {"hidden_states": "hidden_states"},
+                "outputs": {},
+            },
+        },
+    }
+
+
+def test_component_manifest_serializes_auxiliary_input_and_output_bindings():
+    effective = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={
+            "heads": [
+                {
+                    "name": "rich_head",
+                    "source": "head.onnx",
+                    "inputs": {
+                        "hidden_states": "encoder_output",
+                        "item_indices": "candidate_ids",
+                        "item_mask": "candidate_mask",
+                    },
+                    "outputs": {"scores": "ranking_scores", "features": "head_features"},
+                }
+            ]
+        },
+    )
+
+    component = effective.component_options.manifest_dict()["components"]["rich_head"]
+    assert component["inputs"] == {
+        "hidden_states": "encoder_output",
+        "item_indices": "candidate_ids",
+        "item_mask": "candidate_mask",
+    }
+    assert component["outputs"] == {"scores": "ranking_scores", "features": "head_features"}
+
+
+def test_component_package_copies_arbitrary_relative_external_data_files(tmp_path):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    graph = source_dir / "head.onnx"
+    _write_component_model(graph, ["weights/chunk-01.bin", "metadata.bin"])
+    (source_dir / "weights").mkdir()
+    (source_dir / "weights" / "chunk-01.bin").write_bytes(b"weights")
+    (source_dir / "metadata.bin").write_bytes(b"metadata")
+    output_dir = tmp_path / "package"
+    output_dir.mkdir()
+    effective = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={
+            "heads": [{"name": "head", "source": str(graph), "filename": "renamed-head.onnx"}]
+        },
+    )
+
+    export_component_package(effective.component_options, str(output_dir))
+
+    assert (output_dir / "renamed-head.onnx").is_file()
+    assert (output_dir / "weights" / "chunk-01.bin").read_bytes() == b"weights"
+    assert (output_dir / "metadata.bin").read_bytes() == b"metadata"
+
+
+def test_component_package_rejects_backbone_external_data_collision(tmp_path):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    graph = source_dir / "head.onnx"
+    _write_component_model(graph, ["backbone.onnx.data"])
+    (source_dir / "backbone.onnx.data").write_bytes(b"head")
+    output_dir = tmp_path / "package"
+    output_dir.mkdir()
+    (output_dir / "backbone.onnx").write_bytes(b"backbone graph")
+    (output_dir / "backbone.onnx.data").write_bytes(b"backbone weights")
+    effective = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={
+            "backbone": {"filename": "backbone.onnx"},
+            "heads": [{"name": "head", "source": str(graph)}],
+        },
+    )
+
+    with pytest.raises(ValueError, match="conflicts with packaged file"):
+        export_component_package(effective.component_options, str(output_dir))
+
+    assert (output_dir / "backbone.onnx.data").read_bytes() == b"backbone weights"
+    assert not (output_dir / "head.onnx").exists()
+
+
+@pytest.mark.parametrize(
+    "location",
+    ["../outside.bin", "/absolute.bin", "C:/absolute.bin", r"weights\\outside.bin"],
+)
+def test_component_package_rejects_unsafe_external_data_locations(tmp_path, location):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    graph = source_dir / "head.onnx"
+    _write_component_model(graph, [location])
+    output_dir = tmp_path / "package"
+    output_dir.mkdir()
+    effective = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": str(graph)}]},
+    )
+
+    with pytest.raises(ValueError, match="unsafe external data location"):
+        export_component_package(effective.component_options, str(output_dir))
+
+    assert not (output_dir / "head.onnx").exists()
 
 
 def test_unsigned_weight_type_defaults_to_asymmetric_quantization():
