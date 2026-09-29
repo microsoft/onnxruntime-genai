@@ -52,8 +52,10 @@ struct Manifest : JSON::Element {
   Components components;
   IgnoreElement ignored;
   void OnValue(std::string_view name, JSON::Value value) override {
-    if (name == "schema_version") schema_version = JSON::Get<double>(value);
-    else if (name == "model_type") model_type = std::string(JSON::Get<std::string_view>(value));
+    if (name == "schema_version")
+      schema_version = JSON::Get<double>(value);
+    else if (name == "model_type")
+      model_type = std::string(JSON::Get<std::string_view>(value));
   }
   Element& OnObject(std::string_view name) override {
     if (name.empty()) return *this;
@@ -103,9 +105,7 @@ std::unordered_map<std::string, fs::path> LoadComponents(fs::path root) {
 
   // Compatibility is deliberately restricted to the two released layouts.
   const std::pair<const char*, const char*> known[] = {
-      {"encoder", "encoder/model.onnx"}, {"state_head", "state_head/model.onnx"},
-      {"action_head", "action_head/model.onnx"}, {"scorer", "scorer/model.onnx"},
-      {"backbone", "backbone/model.onnx"}, {"pointer_head", "pointer_head/model.onnx"}};
+      {"encoder", "encoder/model.onnx"}, {"state_head", "state_head/model.onnx"}, {"action_head", "action_head/model.onnx"}, {"scorer", "scorer/model.onnx"}, {"backbone", "backbone/model.onnx"}, {"pointer_head", "pointer_head/model.onnx"}};
   for (const auto& [name, relative] : known) {
     fs::path candidate = root / relative;
     if (std::filesystem::is_regular_file(candidate.c_str())) result.emplace(name, std::move(candidate));
@@ -460,9 +460,7 @@ OgaResult* OGA_API_CALL OgaComponentSessionRun(
   auto& output = Required(out, "out");
   auto result = std::make_unique<OgaComponentTensors>();
   const auto input_values = Required(inputs, "inputs").Values();
-  result->values = Required(session, "session").value.Run(
-      input_values,
-      CopyStrings(output_names, output_count, "output_names"));
+  result->values = Required(session, "session").value.Run(input_values, CopyStrings(output_names, output_count, "output_names"));
   output = result.release();
   return nullptr;
   OGA_CAPI_CATCH

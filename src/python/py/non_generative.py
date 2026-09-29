@@ -17,12 +17,14 @@ from onnxruntime_genai.onnxruntime_genai import (
 class RankingSession:
     """CLM session with a bounded, session-local projected-action cache."""
 
-    def __init__(self, package_path: str | Path, providers: list[str] | None = None,
-                 cache_capacity: int = 256,
-                 cache_capacity_bytes: int = 64 * 1024 * 1024):
-        self._native = _RankingSession(
-            str(package_path), providers or [], cache_capacity, cache_capacity_bytes
-        )
+    def __init__(
+        self,
+        package_path: str | Path,
+        providers: list[str] | None = None,
+        cache_capacity: int = 256,
+        cache_capacity_bytes: int = 64 * 1024 * 1024,
+    ):
+        self._native = _RankingSession(str(package_path), providers or [], cache_capacity, cache_capacity_bytes)
 
     def rank(self, request: dict[str, Any]) -> dict[str, Any]:
         return self._native.run(request)
@@ -46,15 +48,24 @@ class RankingSession:
 class DecisionSession:
     """KEV session with bounded token/row and model-state prefix caches."""
 
-    def __init__(self, package_path: str | Path, providers: list[str] | None = None,
-                 cache_capacity: int = 512,
-                 cache_capacity_bytes: int = 16 * 1024 * 1024,
-                 prefix_reuse: bool = True,
-                 prefix_cache_capacity: int = 32,
-                 prefix_cache_capacity_bytes: int = 512 * 1024 * 1024):
+    def __init__(
+        self,
+        package_path: str | Path,
+        providers: list[str] | None = None,
+        cache_capacity: int = 512,
+        cache_capacity_bytes: int = 16 * 1024 * 1024,
+        prefix_reuse: bool = True,
+        prefix_cache_capacity: int = 32,
+        prefix_cache_capacity_bytes: int = 512 * 1024 * 1024,
+    ):
         self._native = _DecisionSession(
-            str(package_path), providers or [], cache_capacity, cache_capacity_bytes,
-            prefix_reuse, prefix_cache_capacity, prefix_cache_capacity_bytes
+            str(package_path),
+            providers or [],
+            cache_capacity,
+            cache_capacity_bytes,
+            prefix_reuse,
+            prefix_cache_capacity,
+            prefix_cache_capacity_bytes,
         )
 
     def decide(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -95,4 +106,4 @@ class DecisionSession:
     __call__ = decide
 
 
-__all__ = ["ComponentSession", "RankingSession", "DecisionSession"]
+__all__ = ["ComponentSession", "DecisionSession", "RankingSession"]

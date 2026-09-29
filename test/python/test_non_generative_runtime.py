@@ -13,9 +13,16 @@ import pytest
 
 
 class _NativeSession:
-    def __init__(self, path, providers, cache_capacity, cache_capacity_bytes,
-                 prefix_reuse=True, prefix_cache_capacity=32,
-                 prefix_cache_capacity_bytes=512 * 1024 * 1024):
+    def __init__(
+        self,
+        path,
+        providers,
+        cache_capacity,
+        cache_capacity_bytes,
+        prefix_reuse=True,
+        prefix_cache_capacity=32,
+        prefix_cache_capacity_bytes=512 * 1024 * 1024,
+    ):
         self.path = path
         self.providers = providers
         self.capacity = cache_capacity
@@ -32,9 +39,15 @@ class _NativeSession:
         return {"answer": {"type": "noul", "noul": 0.75}}
 
     def cache_stats(self):
-        return {"hits": 2, "misses": 1, "evictions": 0, "entries": 1,
-                "bytes": 8, "capacity": self.capacity,
-                "capacity_bytes": self.capacity_bytes}
+        return {
+            "hits": 2,
+            "misses": 1,
+            "evictions": 0,
+            "entries": 1,
+            "bytes": 8,
+            "capacity": self.capacity,
+            "capacity_bytes": self.capacity_bytes,
+        }
 
     def clear_cache(self):
         self.cleared += 1
@@ -47,10 +60,18 @@ class _NativeSession:
         self.capacity_bytes = capacity_bytes
 
     def prefix_cache_stats(self):
-        return {"hits": 0, "misses": 0, "evictions": 0, "entries": 0,
-                "bytes": 0, "capacity": self.prefix_capacity,
-                "capacity_bytes": self.prefix_capacity_bytes,
-                "prefix_runs": 0, "branch_runs": 0, "fallback_runs": 0}
+        return {
+            "hits": 0,
+            "misses": 0,
+            "evictions": 0,
+            "entries": 0,
+            "bytes": 0,
+            "capacity": self.prefix_capacity,
+            "capacity_bytes": self.prefix_capacity_bytes,
+            "prefix_runs": 0,
+            "branch_runs": 0,
+            "fallback_runs": 0,
+        }
 
     def set_prefix_cache_capacity(self, capacity, capacity_bytes):
         self.prefix_capacity = capacity
@@ -94,9 +115,7 @@ def test_python_session_is_thin_native_dict_adapter(runtime, session_name, metho
         "questions": {"q": {"type": "noul", "instructions": "Take umbrella?"}},
     }
     session = getattr(runtime, session_name)("/models/package", providers=["cuda"])
-    assert getattr(session, method_name)(request) == {
-        "answer": {"type": "noul", "noul": 0.75}
-    }
+    assert getattr(session, method_name)(request) == {"answer": {"type": "noul", "noul": 0.75}}
     assert session._native.path == "/models/package"
     assert session._native.providers == ["cuda"]
     assert session._native.requests == [request]
@@ -104,9 +123,7 @@ def test_python_session_is_thin_native_dict_adapter(runtime, session_name, metho
 
 @pytest.mark.parametrize("session_name", ["RankingSession", "DecisionSession"])
 def test_python_cache_controls(runtime, session_name):
-    session = getattr(runtime, session_name)(
-        "/models/package", cache_capacity=3, cache_capacity_bytes=99
-    )
+    session = getattr(runtime, session_name)("/models/package", cache_capacity=3, cache_capacity_bytes=99)
     assert session.cache_stats["capacity"] == 3
     session.clear_cache()
     session.invalidate_cache()
@@ -154,9 +171,11 @@ def test_exported_packages_cpu_cuda_parity(provider):
     stats = optimized.prefix_cache_stats
     assert stats["prefix_runs"] == 1
     assert stats["hits"] == 1
-    print({
-        "provider": provider or "cpu",
-        "full_seconds": full_seconds,
-        "optimized_seconds": optimized_seconds,
-        "cached_seconds": cached_seconds,
-    })
+    print(
+        {
+            "provider": provider or "cpu",
+            "full_seconds": full_seconds,
+            "optimized_seconds": optimized_seconds,
+            "cached_seconds": cached_seconds,
+        }
+    )

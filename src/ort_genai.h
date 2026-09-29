@@ -245,6 +245,7 @@ class OGA_CPP_ONLY RankingSession {
   OgaNonGenerativeCacheStats CacheStats() const;
   void ClearCache();
   void InvalidateCache();
+
  private:
   OgaRankingSessionHandle* handle_{};
 };
@@ -277,6 +278,7 @@ class OGA_CPP_ONLY DecisionSession {
   OgaKevPrefixReuseStats PrefixReuseStats() const;
   void ClearCache();
   void InvalidateCache();
+
  private:
   OgaDecisionSessionHandle* handle_{};
 };
