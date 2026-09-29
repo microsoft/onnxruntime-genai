@@ -19,6 +19,7 @@ env:
   CUDA_PATH: ${{ github.workspace }}\\cuda_sdk\\v12.8
   buildRoot: 'build/cuda/win-x64'
   binaryDir: 'build/cuda/win-x64/Release'
+  SCCACHE_DIR: ${{ github.workspace }}\sccache
   ORT_NUGET_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
   ORT_EP_NUGET_SOURCE: "https://pkgs.dev.azure.com/aiinfra/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
   ORT_EP_PYPI_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/"
@@ -111,7 +112,6 @@ jobs:
 
       - name: Build with build.py
         run: |
-          $env:SCCACHE_DIR = "${{ github.workspace }}\sccache"
           # Limit CUDA archs to SM 86 (matches the A10 runner GPU) to keep CI build
           # time and memory usage manageable.
           python -m pip install -r requirements-dev.txt
@@ -197,9 +197,18 @@ jobs:
         run: |
           ctest --test-dir $env:binaryDir\src\java --build-config Release --verbose --timeout 10800
 
+      - name: Verify CUDA EP
+        shell: pwsh
+        run: |
+          python -c "import onnxruntime_genai as og; assert og.is_cuda_available(), 'CUDA EP failed to load'"
+
       - name: Run the Python Tests
         run: |
-          python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\models" --e2e
+          python test/python/test_onnxruntime_genai.py `
+            --cwd "test\python" `
+            --test_models "test\models" `
+            --eps cuda `
+            --e2e
 
       - name: Verify Build Artifacts
         if: always()
