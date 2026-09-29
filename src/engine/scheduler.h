@@ -141,7 +141,6 @@ struct DynamicBatchScheduler : Scheduler {
   std::shared_ptr<Model> model_;
   std::shared_ptr<CacheManager> cache_manager_;
   std::vector<std::shared_ptr<Request>> requests_pool_;
-  std::optional<size_t> max_prefill_requests_per_step_;
 };
 
 std::unique_ptr<Scheduler> CreateScheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager);

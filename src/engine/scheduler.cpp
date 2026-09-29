@@ -9,19 +9,6 @@
 
 namespace Generators {
 
-namespace {
-
-bool UsesWebGpu(const Config::SessionOptions& session_options) {
-  return std::any_of(
-             session_options.provider_options.begin(),
-             session_options.provider_options.end(),
-             [](const Config::ProviderOptions& provider) { return provider.name == "WebGPU"; }) ||
-         std::find(session_options.providers.begin(), session_options.providers.end(), "WebGPU") !=
-             session_options.providers.end();
-}
-
-}  // namespace
-
 Scheduler::Scheduler(std::shared_ptr<Model> model)
     : model_{model} {
   size_t max_batch_size = kDefaultStaticBatchSize;
@@ -150,13 +137,7 @@ bool StaticBatchScheduler::HasPendingRequests() const {
 }
 
 DynamicBatchScheduler::DynamicBatchScheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager)
-    : Scheduler{model}, model_{model}, cache_manager_{cache_manager} {
-  // Two prefills packed into one WebGPU model run currently produce incorrect results. Limit only
-  // that unsafe phase: decodes still batch normally, and another prefill can be admitted next step.
-  if (UsesWebGpu(model_->config_->model.decoder.session_options)) {
-    max_prefill_requests_per_step_ = 1;
-  }
-}
+    : Scheduler{model}, model_{model}, cache_manager_{cache_manager} {}
 
 void DynamicBatchScheduler::AddRequest(std::shared_ptr<Request> request) {
   requests_pool_.reserve(requests_pool_.size() + 1);
@@ -282,8 +263,7 @@ StepPlanningResult DynamicBatchScheduler::PlanStep(StepPlan& plan) {
   budget_candidates.reserve(candidates.size());
   for (const auto& candidate : candidates)
     budget_candidates.push_back(candidate.budget);
-  const auto order = DecodeFirstCandidateOrder(
-      budget_candidates, max_prefill_requests_per_step_);
+  const auto order = DecodeFirstCandidateOrder(budget_candidates);
   plan.requests.reserve(candidates.size());
   for (size_t candidate_index : order) {
     auto entry = candidates[candidate_index].entry;

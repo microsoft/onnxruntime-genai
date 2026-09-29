@@ -920,6 +920,20 @@ def validate_runtime_config(runtime_config: dict[str, Any], generated_config: di
             raise ValueError(f"runtime_config.engine.dynamic_batching.{field_name} must be at most 2147483647")
     if dynamic_batching.get("max_batch_size", 1) > 256:
         raise ValueError("runtime_config.engine.dynamic_batching.max_batch_size must be at most 256")
+    decoder_providers = (
+        generated_config.get("model", {}).get("decoder", {}).get("session_options", {}).get("provider_options", [])
+    )
+    uses_webgpu = any(
+        provider_name.casefold() == "webgpu"
+        for provider in decoder_providers
+        for provider_name in provider
+    )
+    # Match the temporary builder guard for the multi-request correctness issue exercised by
+    # test_webgpu_paged_export; runtime overlays must not re-enable affected batches.
+    if uses_webgpu and dynamic_batching.get("max_batch_size", 1) > 1:
+        raise ValueError(
+            "runtime_config.engine.dynamic_batching.max_batch_size must be 1 for WebGPU paged attention"
+        )
     if "gpu_utilization_factor" in dynamic_batching:
         value = dynamic_batching["gpu_utilization_factor"]
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value <= 1:

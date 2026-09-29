@@ -19,8 +19,7 @@ struct DecodeFirstBudgetCandidate {
 };
 
 std::vector<size_t> DecodeFirstCandidateOrder(
-    std::span<const DecodeFirstBudgetCandidate> candidates,
-    std::optional<size_t> max_prefill_requests = std::nullopt);
+    std::span<const DecodeFirstBudgetCandidate> candidates);
 
 size_t DecodeFirstProvisionalRequestLimit(
     size_t max_scheduled_tokens,

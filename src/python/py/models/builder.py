@@ -275,6 +275,12 @@ def check_extra_options(
         if extra_options.get("max_batch_size", 1) > 256:
             raise ValueError("max_batch_size must be at most 256.")
         if execution_provider == "webgpu":
+            # The full-model WebGPU paged export test exposed incorrect results when a forward pass
+            # contains more than one request. Keep this temporary guard until multi-request
+            # PagedAttention correctness is fixed, then restore the normal dynamic-batch limit.
+            if extra_options.get("max_batch_size", 1) > 1:
+                raise ValueError("WebGPU paged attention currently supports max_batch_size=1 only.")
+            extra_options.setdefault("max_batch_size", 1)
             if "num_blocks" not in extra_options:
                 raise ValueError("WebGPU paged attention requires num_blocks to be a positive integer.")
 
@@ -1071,7 +1077,7 @@ def get_args():
                     by generation or draft verification, so the model outputs [num_logits, vocab_size] logits.
                     By default, the model outputs [num_tokens, vocab_size] logits.
                     Supports CUDA with fp16 or bf16 precision. WebGPU supports fp16 only for causal, full-context
-                    attention with zero softcap, FP16 KV caches, and no Q/K normalization inputs;
+                    attention with max_batch_size=1, zero softcap, FP16 KV caches, and no Q/K normalization inputs;
                     for example, Gemma2's non-zero attention softcap is unsupported. Cannot be combined with
                     exclude_embeds or exclude_lm_head.
                 paged_block_size = 16/32/64/128/256/...: Paged KV-cache block size used when use_paged_attention is set.
@@ -1099,8 +1105,9 @@ def get_args():
                     mode. Set to false to give every layer a full-length KV cache for comparison or compatibility.
                 gpu_utilization_factor = Fraction of available GPU memory used for the paged KV-cache. Default is 0.6.
                     Must be greater than 0 and at most 1.
-                max_batch_size = Maximum number of requests in a dynamic batch. Default is 100. Must be a
-                    positive integer no greater than 256.
+                max_batch_size = Maximum number of requests in a dynamic batch. Default is 100, except WebGPU
+                    paged attention defaults to and currently requires 1. Must be a positive integer no greater
+                    than 256.
                 max_scheduled_tokens = Maximum number of tokens the engine schedules into one forward pass.
                     Must be a positive integer and requires use_paged_attention=true. Written to the
                     `engine.dynamic_batching` section of genai_config.json. Bounds the peak prefill
