@@ -22,18 +22,20 @@ _NUM_HIDDEN_LAYERS = 24
 _MODEL_ID = "Qwen/Qwen2.5-0.5B-Instruct"
 _PREFILL_TOKENS = np.asarray([1, 2, 3], dtype=np.int64)
 _DECODE_TOKENS = np.asarray([4], dtype=np.int64)
+_ENGINE_PROMPTS = [[1, 2, 3], [4, 5, 6, 7, 8]]
+_MAX_NEW_TOKENS = 4
 _BUILDER_PATH = Path(__file__).parents[3] / "src" / "python" / "py" / "models" / "builder.py"
 
 
-def _export_model(output_dir, precision, ep, paged=True):
-    extra_options = ["prune_lm_head=true", "hf_token=false"]
+def _export_model(output_dir, precision, ep, paged=True, prune_lm_head=True):
+    extra_options = [f"prune_lm_head={str(prune_lm_head).lower()}", "hf_token=false"]
     if paged:
         extra_options += [
             "use_paged_attention=true",
             "paged_block_size=256",
             "paged_chunk_size=256",
             f"num_blocks={_NUM_BLOCKS}",
-            "max_batch_size=1",
+            "max_batch_size=2",
             "max_scheduled_tokens=256",
         ]
     subprocess.run(
@@ -104,29 +106,54 @@ def _run_step(session, tokens, past_length, caches):
     return output_by_name["logits"], next_caches
 
 
+def _run_packed_prefills(session, prompts, caches):
+    lengths = [len(prompt) for prompt in prompts]
+    cumulative_lengths = np.concatenate(([0], np.cumsum(lengths))).astype(np.int32)
+    inputs = {
+        "input_ids": np.concatenate(prompts).astype(np.int64),
+        "cumulative_sequence_lengths": cumulative_lengths,
+        "past_sequence_lengths": np.zeros(len(prompts), dtype=np.int32),
+        "block_table": np.arange(len(prompts), dtype=np.int32)[:, np.newaxis],
+        "attention_metadata": np.asarray([max(lengths), max(lengths), max(lengths)], dtype=np.int32),
+    }
+    if any(node_arg.name == "logits_indices" for node_arg in session.get_inputs()):
+        inputs["logits_indices"] = cumulative_lengths[1:] - 1
+    inputs.update(caches)
+    outputs = session.run(None, inputs)
+    return dict(zip((node_arg.name for node_arg in session.get_outputs()), outputs, strict=True))["logits"]
+
+
+def _create_engine_request(engine, prompt, max_new_tokens):
+    request_options = og.RequestOptions()
+    request_options.set_max_session_tokens(len(prompt) + max_new_tokens)
+    request = engine.create_request(options=request_options)
+    turn_options = og.TurnOptions(request)
+    turn_options.set_do_sample(False)
+    turn_options.set_min_generated_tokens(max_new_tokens)
+    turn_options.set_max_generated_tokens(max_new_tokens)
+    request.begin_turn(np.asarray(prompt, dtype=np.int32), turn_options)
+    return request
+
+
+def _record_engine_events(events, request_indices, outputs):
+    for event in events:
+        if event.flags & og.EngineEventFlags.TOKEN:
+            outputs[request_indices[event.request]].append(event.token)
+        if event.flags & og.EngineEventFlags.TURN_FINISHED:
+            event.request.close()
+
+
 def _run_engine(model, prompts, max_new_tokens):
     engine = og.Engine(model)
     outputs = [[] for _ in prompts]
-    requests = {}
-    for index, prompt in enumerate(prompts):
-        request_options = og.RequestOptions()
-        request_options.set_max_session_tokens(len(prompt) + max_new_tokens)
-        request = engine.create_request(options=request_options)
-        requests[request] = index
-        turn_options = og.TurnOptions(request)
-        turn_options.set_do_sample(False)
-        turn_options.set_min_generated_tokens(max_new_tokens)
-        turn_options.set_max_generated_tokens(max_new_tokens)
-        request.begin_turn(np.asarray(prompt, dtype=np.int32), turn_options)
+    request_indices = {
+        _create_engine_request(engine, prompt, max_new_tokens): index for index, prompt in enumerate(prompts)
+    }
 
     event_buffer = engine.create_event_buffer(len(prompts))
     steps = 0
     while engine.has_pending_requests():
-        for event in engine.run(event_buffer):
-            if event.flags & og.EngineEventFlags.TOKEN:
-                outputs[requests[event.request]].append(event.token)
-            if event.flags & og.EngineEventFlags.TURN_FINISHED:
-                event.request.close()
+        _record_engine_events(engine.run(event_buffer), request_indices, outputs)
         steps += 1
         assert steps <= max_new_tokens + 2, "Engine generation exceeded the expected step count"
     return outputs
@@ -149,7 +176,8 @@ def _assert_logits_match(actual, expected):
     np.testing.assert_allclose(actual, expected, rtol=3e-2, atol=1.5e-1)
 
 
-def test_webgpu_paged_export_runs_prefill_and_decode(tmp_path):
+@pytest.fixture(scope="module")
+def webgpu_paged_models(tmp_path_factory):
     if not register_webgpu_plugin():
         pytest.skip("onnxruntime-ep-webgpu plugin package is not installed.")
     webgpu_ep = importlib.import_module("onnxruntime_ep_webgpu")
@@ -157,32 +185,50 @@ def test_webgpu_paged_export_runs_prefill_and_decode(tmp_path):
     webgpu_provider = webgpu_ep.get_ep_name()
     ort.register_execution_provider_library(webgpu_provider, webgpu_ep.get_library_path())
 
+    tmp_path = tmp_path_factory.mktemp("webgpu-paged-export")
     output_dir = tmp_path / "webgpu-paged"
     _export_model(output_dir, "fp16", "webgpu")
 
     config = json.loads((output_dir / "genai_config.json").read_text(encoding="utf-8"))
     assert config["engine"]["dynamic_batching"]["num_blocks"] == _NUM_BLOCKS
-    # This full-model path exposed incorrect results with multiple requests in one WebGPU batch.
-    # Keep the test at batch 1 until that correctness issue is fixed and the builder guard is removed.
-    assert config["engine"]["dynamic_batching"]["max_batch_size"] == 1
+    assert config["engine"]["dynamic_batching"]["max_batch_size"] == 2
     assert config["model"]["decoder"]["num_hidden_layers"] == _NUM_HIDDEN_LAYERS
     assert config["model"]["decoder"]["inputs"]["attention_metadata"] == "attention_metadata"
 
-    model_path = output_dir / config["model"]["decoder"]["filename"]
-    session_options = ort.SessionOptions()
-    session_options.enable_profiling = True
-    session_options.profile_file_prefix = str(tmp_path / "webgpu-profile")
-    webgpu_devices = [device for device in ort.get_ep_devices() if device.ep_name == webgpu_provider]
-    assert webgpu_devices, (
-        f"No {webgpu_provider} device found after registering {webgpu_ep.get_library_path()}; "
-        f"discovered providers: {[device.ep_name for device in ort.get_ep_devices()]}"
-    )
-    session_options.add_provider_for_devices([webgpu_devices[0]], {})
-    webgpu_session = ort.InferenceSession(str(model_path), sess_options=session_options)
+    engine_output_dir = tmp_path / "webgpu-engine"
+    _export_model(engine_output_dir, "fp16", "webgpu", prune_lm_head=False)
+    engine_config = json.loads((engine_output_dir / "genai_config.json").read_text(encoding="utf-8"))
+    assert engine_config["engine"]["dynamic_batching"]["max_batch_size"] == 2
 
     cpu_output_dir = tmp_path / "cpu-reference"
     _export_model(cpu_output_dir, "fp32", "cpu", paged=False)
     cpu_model = og.Model(str(cpu_output_dir))
+
+    return output_dir, engine_output_dir, config, webgpu_provider, cpu_model, tmp_path
+
+
+def _create_webgpu_session(output_dir, config, webgpu_provider, *, profile_prefix=None):
+    model_path = output_dir / config["model"]["decoder"]["filename"]
+    session_options = ort.SessionOptions()
+    if profile_prefix is not None:
+        session_options.enable_profiling = True
+        session_options.profile_file_prefix = str(profile_prefix)
+    webgpu_devices = [device for device in ort.get_ep_devices() if device.ep_name == webgpu_provider]
+    assert webgpu_devices, f"No {webgpu_provider} device found; discovered: {[d.ep_name for d in ort.get_ep_devices()]}"
+    session_options.add_provider_for_devices([webgpu_devices[0]], {})
+    return ort.InferenceSession(str(model_path), sess_options=session_options)
+
+
+def test_webgpu_paged_export_runs_prefill_and_decode(webgpu_paged_models):
+    output_dir, _, config, webgpu_provider, cpu_model, tmp_path = webgpu_paged_models
+
+    webgpu_session = _create_webgpu_session(
+        output_dir,
+        config,
+        webgpu_provider,
+        profile_prefix=tmp_path / "webgpu-profile",
+    )
+
     cpu_prefill, cpu_decode = _run_cpu_reference(cpu_model)
 
     cache_inputs = {
@@ -220,12 +266,65 @@ def test_webgpu_paged_export_runs_prefill_and_decode(tmp_path):
     ]
     assert paged_attention_events, "PagedAttention was not assigned to WebGPUExecutionProvider"
 
-    engine_config = og.Config(str(output_dir))
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="WebGPU currently produces incorrect logits for simultaneous unequal packed prefills",
+)
+def test_webgpu_paged_simultaneous_unequal_prefills(webgpu_paged_models):
+    output_dir, _, config, webgpu_provider, cpu_model, _ = webgpu_paged_models
+    webgpu_session = _create_webgpu_session(output_dir, config, webgpu_provider)
+    cache_inputs = {
+        node_arg.name: np.zeros(_cache_shape(node_arg), dtype=_cache_dtype(node_arg))
+        for node_arg in webgpu_session.get_inputs()
+        if node_arg.name.startswith("past_key_values.")
+    }
+    prompts = [np.asarray(prompt, dtype=np.int64) for prompt in _ENGINE_PROMPTS]
+    actual = _run_packed_prefills(webgpu_session, prompts, cache_inputs)
+    expected = np.concatenate([_run_cpu_prefill(cpu_model, prompt) for prompt in prompts])
+
+    _assert_logits_match(actual, expected)
+
+
+def _run_cpu_prefill(model, tokens):
+    params = og.GeneratorParams(model)
+    params.set_search_options(do_sample=False, max_length=len(tokens) + 1)
+    generator = og.Generator(model, params)
+    generator.append_tokens(tokens[np.newaxis, :].astype(np.int32))
+    return np.array(generator.get_logits(), copy=True)
+
+
+def test_webgpu_paged_staggered_admission(webgpu_paged_models):
+    _, engine_output_dir, _, _, _, _ = webgpu_paged_models
+    engine_config = og.Config(str(engine_output_dir))
     engine_config.clear_providers()
     engine_config.append_provider("webgpu")
     engine_model = og.Model(engine_config)
-    prompts = [[1, 2, 3], [4, 5, 6, 7, 8]]
-    max_new_tokens = 4
-    isolated = [_run_engine(engine_model, [prompt], max_new_tokens)[0] for prompt in prompts]
-    assert all(len(tokens) == max_new_tokens for tokens in isolated)
-    assert _run_engine(engine_model, prompts, max_new_tokens) == isolated
+    isolated = [_run_engine(engine_model, [prompt], _MAX_NEW_TOKENS)[0] for prompt in _ENGINE_PROMPTS]
+    assert all(len(tokens) == _MAX_NEW_TOKENS for tokens in isolated)
+
+    engine = og.Engine(engine_model)
+    outputs = [[] for _ in _ENGINE_PROMPTS]
+    first_request = _create_engine_request(engine, _ENGINE_PROMPTS[0], _MAX_NEW_TOKENS)
+    request_indices = {first_request: 0}
+    event_buffer = engine.create_event_buffer(len(_ENGINE_PROMPTS))
+
+    _record_engine_events(engine.run(event_buffer), request_indices, outputs)
+    assert outputs[0], "First request produced no token before staggered admission"
+    assert engine.has_pending_requests(), "First request finished before staggered admission"
+
+    second_request = _create_engine_request(engine, _ENGINE_PROMPTS[1], _MAX_NEW_TOKENS)
+    request_indices[second_request] = 1
+    first_token_count = len(outputs[0])
+    _record_engine_events(engine.run(event_buffer), request_indices, outputs)
+    assert len(outputs[0]) == first_token_count + 1, "First request did not decode during staggered admission"
+    assert outputs[1], "Second request did not prefill during staggered admission"
+
+    steps = 2
+    while engine.has_pending_requests():
+        _record_engine_events(engine.run(event_buffer), request_indices, outputs)
+        steps += 1
+        assert steps <= _MAX_NEW_TOKENS + 2, "Engine generation exceeded the expected step count"
+
+    assert outputs == isolated
