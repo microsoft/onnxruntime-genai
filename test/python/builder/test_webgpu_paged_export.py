@@ -159,7 +159,7 @@ def _run_engine(model, prompts, max_new_tokens):
     return outputs
 
 
-def _run_cpu_reference(model):
+def _run_reference(model):
     params = og.GeneratorParams(model)
     params.set_search_options(do_sample=False, max_length=len(_PREFILL_TOKENS) + len(_DECODE_TOKENS) + 1)
     generator = og.Generator(model, params)
@@ -170,8 +170,9 @@ def _run_cpu_reference(model):
 
 
 def _assert_logits_match(actual, expected):
+    assert actual.dtype == np.float16
     actual = actual.reshape(-1)
-    expected = expected.reshape(-1)
+    expected = expected.astype(actual.dtype, copy=False).reshape(-1)
     assert np.argmax(actual) == np.argmax(expected)
     np.testing.assert_allclose(actual, expected, rtol=3e-2, atol=1.5e-1)
 
@@ -200,11 +201,14 @@ def webgpu_paged_models(tmp_path_factory):
     engine_config = json.loads((engine_output_dir / "genai_config.json").read_text(encoding="utf-8"))
     assert engine_config["engine"]["dynamic_batching"]["max_batch_size"] == 2
 
-    cpu_output_dir = tmp_path / "cpu-reference"
-    _export_model(cpu_output_dir, "fp32", "cpu", paged=False)
-    cpu_model = og.Model(str(cpu_output_dir))
+    reference_output_dir = tmp_path / "webgpu-reference"
+    _export_model(reference_output_dir, "fp16", "webgpu", paged=False)
+    reference_config = og.Config(str(reference_output_dir))
+    reference_config.clear_providers()
+    reference_config.append_provider("webgpu")
+    reference_model = og.Model(reference_config)
 
-    return output_dir, engine_output_dir, config, webgpu_provider, cpu_model, tmp_path
+    return output_dir, engine_output_dir, config, webgpu_provider, reference_model, tmp_path
 
 
 def _create_webgpu_session(output_dir, config, webgpu_provider, *, profile_prefix=None):
@@ -220,7 +224,7 @@ def _create_webgpu_session(output_dir, config, webgpu_provider, *, profile_prefi
 
 
 def test_webgpu_paged_export_runs_prefill_and_decode(webgpu_paged_models):
-    output_dir, _, config, webgpu_provider, cpu_model, tmp_path = webgpu_paged_models
+    output_dir, _, config, webgpu_provider, reference_model, tmp_path = webgpu_paged_models
 
     webgpu_session = _create_webgpu_session(
         output_dir,
@@ -229,7 +233,7 @@ def test_webgpu_paged_export_runs_prefill_and_decode(webgpu_paged_models):
         profile_prefix=tmp_path / "webgpu-profile",
     )
 
-    cpu_prefill, cpu_decode = _run_cpu_reference(cpu_model)
+    reference_prefill, reference_decode = _run_reference(reference_model)
 
     cache_inputs = {
         node_arg.name: np.zeros(_cache_shape(node_arg), dtype=_cache_dtype(node_arg))
@@ -239,7 +243,7 @@ def test_webgpu_paged_export_runs_prefill_and_decode(webgpu_paged_models):
     assert cache_inputs, "Exported model has no paged KV-cache inputs"
 
     webgpu_prefill, webgpu_caches = _run_step(webgpu_session, _PREFILL_TOKENS, 0, cache_inputs)
-    _assert_logits_match(webgpu_prefill, cpu_prefill)
+    _assert_logits_match(webgpu_prefill, reference_prefill)
     assert webgpu_prefill.size > 0
     assert np.isfinite(webgpu_prefill).all()
     assert all(np.isfinite(cache).all() for cache in webgpu_caches.values())
@@ -247,7 +251,7 @@ def test_webgpu_paged_export_runs_prefill_and_decode(webgpu_paged_models):
 
     prefill_caches = webgpu_caches
     webgpu_decode, webgpu_caches = _run_step(webgpu_session, _DECODE_TOKENS, len(_PREFILL_TOKENS), webgpu_caches)
-    _assert_logits_match(webgpu_decode, cpu_decode)
+    _assert_logits_match(webgpu_decode, reference_decode)
     assert webgpu_decode.size > 0
     assert webgpu_decode.shape[-1] == webgpu_prefill.shape[-1]
     assert np.isfinite(webgpu_decode).all()
@@ -273,7 +277,7 @@ def test_webgpu_paged_export_runs_prefill_and_decode(webgpu_paged_models):
     reason="WebGPU currently produces incorrect logits for simultaneous unequal packed prefills",
 )
 def test_webgpu_paged_simultaneous_unequal_prefills(webgpu_paged_models):
-    output_dir, _, config, webgpu_provider, cpu_model, _ = webgpu_paged_models
+    output_dir, _, config, webgpu_provider, reference_model, _ = webgpu_paged_models
     webgpu_session = _create_webgpu_session(output_dir, config, webgpu_provider)
     cache_inputs = {
         node_arg.name: np.zeros(_cache_shape(node_arg), dtype=_cache_dtype(node_arg))
@@ -282,12 +286,12 @@ def test_webgpu_paged_simultaneous_unequal_prefills(webgpu_paged_models):
     }
     prompts = [np.asarray(prompt, dtype=np.int64) for prompt in _ENGINE_PROMPTS]
     actual = _run_packed_prefills(webgpu_session, prompts, cache_inputs)
-    expected = np.concatenate([_run_cpu_prefill(cpu_model, prompt) for prompt in prompts])
+    expected = np.concatenate([_run_reference_prefill(reference_model, prompt) for prompt in prompts])
 
     _assert_logits_match(actual, expected)
 
 
-def _run_cpu_prefill(model, tokens):
+def _run_reference_prefill(model, tokens):
     params = og.GeneratorParams(model)
     params.set_search_options(do_sample=False, max_length=len(tokens) + 1)
     generator = og.Generator(model, params)
