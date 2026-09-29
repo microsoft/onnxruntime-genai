@@ -668,7 +668,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         internal static extern IntPtr OgaDecisionSessionGetPrefixReuseEnabled(IntPtr session, [MarshalAs(UnmanagedType.I1)] out bool enabled);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        internal static extern IntPtr OgaDecisionSessionGetPrefixReuseStatus(IntPtr session, out IntPtr status);
+        internal static extern IntPtr OgaDecisionSessionCopyPrefixReuseStatus(IntPtr session, IntPtr buffer, UIntPtr bufferCapacity, out UIntPtr requiredSize);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         internal static extern IntPtr OgaDecisionSessionSetPrefixCacheCapacity(IntPtr session, UIntPtr entries, UIntPtr bytes);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]

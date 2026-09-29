@@ -555,14 +555,18 @@ JNIEXPORT jlongArray JNICALL Java_ai_onnxruntime_genai_NonGenerativeNative_cache
   OgaNonGenerativeCacheStats stats{};
   if (ranking) {
     auto* session = reinterpret_cast<OgaRankingSessionHandle*>(handle);
-    if (operation == 0) status = OgaRankingSessionSetCacheCapacity(session, entries, bytes);
+    if (operation == 0)
+      status = OgaRankingSessionSetCacheCapacity(
+          session, static_cast<size_t>(entries), static_cast<size_t>(bytes));
     else if (operation == 1) status = OgaRankingSessionGetCacheStats(session, &stats);
     else if (operation == 2) status = OgaRankingSessionClearCache(session);
     else if (operation == 3) status = OgaRankingSessionInvalidateCache(session);
     else { ThrowException(env, "Invalid cache operation"); return nullptr; }
   } else {
     auto* session = reinterpret_cast<OgaDecisionSessionHandle*>(handle);
-    if (operation == 0) status = OgaDecisionSessionSetCacheCapacity(session, entries, bytes);
+    if (operation == 0)
+      status = OgaDecisionSessionSetCacheCapacity(
+          session, static_cast<size_t>(entries), static_cast<size_t>(bytes));
     else if (operation == 1) status = OgaDecisionSessionGetCacheStats(session, &stats);
     else if (operation == 2) status = OgaDecisionSessionClearCache(session);
     else if (operation == 3) status = OgaDecisionSessionInvalidateCache(session);
@@ -602,13 +606,23 @@ Java_ai_onnxruntime_genai_NonGenerativeNative_getDecisionPrefixReuseEnabled(
 JNIEXPORT jstring JNICALL
 Java_ai_onnxruntime_genai_NonGenerativeNative_getDecisionPrefixReuseStatus(
     JNIEnv* env, jclass, jlong handle) {
-  const char* status{};
-  if (ThrowIfError(env, OgaDecisionSessionGetPrefixReuseStatus(
-                            reinterpret_cast<OgaDecisionSessionHandle*>(handle),
-                            &status))) {
+  auto* session = reinterpret_cast<OgaDecisionSessionHandle*>(handle);
+  size_t required{};
+  if (ThrowIfError(env, OgaDecisionSessionCopyPrefixReuseStatus(
+                            session, nullptr, 0, &required))) {
     return nullptr;
   }
-  return env->NewStringUTF(status);
+  std::vector<char> status(required);
+  size_t copied{};
+  if (ThrowIfError(env, OgaDecisionSessionCopyPrefixReuseStatus(
+                            session, status.data(), status.size(), &copied))) {
+    return nullptr;
+  }
+  if (copied != required) {
+    ThrowException(env, "Prefix reuse status size changed during copy");
+    return nullptr;
+  }
+  return env->NewStringUTF(status.data());
 }
 
 JNIEXPORT void JNICALL

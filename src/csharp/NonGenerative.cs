@@ -553,7 +553,27 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             get { return SafeHandleAccess.Use(_handle, native => { Result.VerifySuccess(NativeMethods.OgaDecisionSessionGetPrefixReuseEnabled(native, out bool enabled)); return enabled; }); }
             set { SafeHandleAccess.Use(_handle, native => Result.VerifySuccess(NativeMethods.OgaDecisionSessionSetPrefixReuseEnabled(native, value))); }
         }
-        public string PrefixReuseStatus { get { return SafeHandleAccess.Use(_handle, native => { Result.VerifySuccess(NativeMethods.OgaDecisionSessionGetPrefixReuseStatus(native, out IntPtr status)); return StringUtils.FromUtf8(status); }); } }
+        public string PrefixReuseStatus
+        {
+            get
+            {
+                return SafeHandleAccess.Use(_handle, native =>
+                {
+                    Result.VerifySuccess(NativeMethods.OgaDecisionSessionCopyPrefixReuseStatus(
+                        native, IntPtr.Zero, UIntPtr.Zero, out UIntPtr required));
+                    int size = checked((int)required.ToUInt64());
+                    IntPtr buffer = Marshal.AllocHGlobal(size);
+                    try
+                    {
+                        Result.VerifySuccess(NativeMethods.OgaDecisionSessionCopyPrefixReuseStatus(
+                            native, buffer, required, out UIntPtr copied));
+                        if (copied != required) throw new OnnxRuntimeGenAIException("Prefix reuse status size changed during copy.");
+                        return StringUtils.FromUtf8(buffer);
+                    }
+                    finally { Marshal.FreeHGlobal(buffer); }
+                });
+            }
+        }
         public void SetPrefixCacheCapacity(ulong entries, ulong bytes) { SafeHandleAccess.Use(_handle, native => Result.VerifySuccess(NativeMethods.OgaDecisionSessionSetPrefixCacheCapacity(native, (UIntPtr)entries, (UIntPtr)bytes))); }
         public NonGenerativeCacheStats PrefixCacheStats { get { return SafeHandleAccess.Use(_handle, native => { Result.VerifySuccess(NativeMethods.OgaDecisionSessionGetPrefixCacheStats(native, out NativeMethods.NonGenerativeCacheStats s)); return RankingSession.ConvertStats(s); }); } }
         public KevPrefixReuseStats PrefixReuseStats { get { return SafeHandleAccess.Use(_handle, native => { Result.VerifySuccess(NativeMethods.OgaDecisionSessionGetPrefixReuseStats(native, out NativeMethods.KevPrefixReuseStats s)); return new KevPrefixReuseStats { PrefixRuns = s.PrefixRuns, BranchRuns = s.BranchRuns, FallbackRuns = s.FallbackRuns }; }); } }
