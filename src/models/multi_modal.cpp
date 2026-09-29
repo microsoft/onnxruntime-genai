@@ -384,7 +384,7 @@ DeviceSpan<float> EmbeddingState::Run(int current_length, DeviceSpan<int32_t>& n
   State::Run(*model_.embedding_session_);
 
   // No-ops unless the decoder's buffers are on a device this session cannot write; then the
-  // outputs went to staging buffers that must be copied across.
+  // outputs went to those buffers' host mirrors, which must be uploaded.
   inputs_embeds_.CopyToConsumer();
   if (per_layer_inputs_) per_layer_inputs_->CopyToConsumer();
 

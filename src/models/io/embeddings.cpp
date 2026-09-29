@@ -99,42 +99,49 @@ void Embeddings::ReuseEmbeddingsBuffer(const Embeddings& other) {
   OrtValue* consumer = other.state_.inputs_[other.index_];
   auto& consumer_device = *other.state_.p_session_device_inputs_;
 
+  // This session is about to rewrite the mirror that the last upload reads from. The wait is here
+  // rather than after the upload, so that it does not hold back the consumer's run.
+  if (upload_pending_) {
+    consumer_device_->Synchronize();
+    upload_pending_ = false;
+  }
+
   if (SessionCanAccess(*state_.p_session_device_, consumer_device)) {
     // Share the input embeddings OrtValue* from other with the output embedding for this.
-    staging_ = nullptr;
     consumer_ = nullptr;
-    staging_bytes_ = consumer_bytes_ = {};
+    consumer_device_ = nullptr;
+    consumer_bytes_ = {};
+    host_view_ = nullptr;
     state_.outputs_[index_] = consumer;
     return;
   }
 
   // The consumer allocated its input on a device this session has no EP for. Binding it as an
-  // output would have ORT write host bytes over that device pointer, so write a staging buffer on
-  // this session's own device instead and copy across in CopyToConsumer() once the session has run.
+  // output would have ORT write host bytes over that device pointer, so this session writes the
+  // buffer's host mirror instead, and CopyToConsumer() uploads it once the session has run.
   if (consumer != consumer_) {
-    // The decoder reallocated for a new sequence length: size the staging buffer to match and rewrap
-    // both sides once here, so steady-state decoding reuses the wrappers and their host mirrors.
-    auto consumer_shape = consumer->GetTensorTypeAndShapeInfo()->GetShape();
-    if (!staging_ || staging_shape_ != consumer_shape) {
-      staging_ = OrtValue::CreateTensor(state_.p_session_device_->GetAllocator(), consumer_shape, type_);
-      staging_shape_ = std::move(consumer_shape);
-      staging_bytes_ = ByteWrapTensor(*state_.p_session_device_, *staging_);
-    }
+    // The decoder reallocated for a new sequence length: wrap the new buffer once here, so decode
+    // steps reuse the wrapper and its mirror instead of allocating a mirror per step.
+    auto info = consumer->GetTensorTypeAndShapeInfo();
+    auto shape = info->GetShape();
+    consumer_bytes_ = ByteWrapTensor(consumer_device, *consumer);
+    auto mirror = consumer_bytes_.empty() ? std::span<uint8_t>{} : consumer_bytes_.CpuSpan();
+    host_view_ = OrtValue::CreateTensor(*OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault),
+                                        mirror.data(), mirror.size_bytes(), shape, info->GetElementType());
     consumer_ = consumer;
     consumer_device_ = &consumer_device;
-    consumer_bytes_ = ByteWrapTensor(consumer_device, *consumer);
   }
-  state_.outputs_[index_] = staging_.get();
+  state_.outputs_[index_] = host_view_.get();
 }
 
 void Embeddings::CopyToConsumer() {
   if (!consumer_ || consumer_bytes_.empty())
     return;
 
-  consumer_bytes_.CopyFrom(staging_bytes_);
-  // A copy onto a device is queued on its stream; wait for it so the next token cannot rewrite the
-  // host mirror while the transfer is still reading it.
-  consumer_device_->Synchronize();
+  // Queued on the consumer device's stream ahead of the consumer's run. ReuseEmbeddingsBuffer waits
+  // for it before the mirror is written again.
+  consumer_bytes_.CopyCpuToDevice();
+  upload_pending_ = true;
 }
 
 }  // namespace Generators
