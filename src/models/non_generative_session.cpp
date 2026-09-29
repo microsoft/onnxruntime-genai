@@ -4,8 +4,6 @@
 #include "../ort_genai_c_internal.h"
 
 #include <algorithm>
-#include <array>
-#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -185,7 +183,6 @@ std::string Scalar(const OgaStructuredValue& value, bool kev) {
     return *boolean ? (kev ? "True" : "true") : (kev ? "False" : "false");
   if (const auto* integer = Get<int64_t>(value)) return std::to_string(*integer);
   if (const auto* number = Get<double>(value)) {
-#if defined(__APPLE__)
     std::ostringstream stream;
     stream.imbue(std::locale::classic());
     stream << std::setprecision(std::numeric_limits<double>::max_digits10)
@@ -194,14 +191,6 @@ std::string Scalar(const OgaStructuredValue& value, bool kev) {
       throw std::invalid_argument(
           "structured floating-point value cannot be rendered");
     return stream.str();
-#else
-    std::array<char, 64> buffer{};
-    const auto [end, error] = std::to_chars(
-        buffer.data(), buffer.data() + buffer.size(), *number);
-    if (error != std::errc{})
-      throw std::invalid_argument("structured floating-point value cannot be rendered");
-    return std::string(buffer.data(), end);
-#endif
   }
   throw std::invalid_argument("structured value is not scalar");
 }
@@ -309,7 +298,8 @@ std::vector<T> CopyTensor(const OgaComponentTensor& tensor, OgaElementType expec
   if (tensor.type != expected || tensor.data.size() % sizeof(T))
     throw std::runtime_error("component output has unexpected element type");
   std::vector<T> result(tensor.data.size() / sizeof(T));
-  std::memcpy(result.data(), tensor.data.data(), tensor.data.size());
+  if (!tensor.data.empty())
+    std::memcpy(result.data(), tensor.data.data(), tensor.data.size());
   return result;
 }
 
@@ -495,7 +485,7 @@ FeedStorage BackboneFeeds(const NamedComponentSession& session, const TokenBatch
       if (dimensions[i] >= 0) continue;
       const auto symbol = i < info.symbolic_dimensions.size() ? info.symbolic_dimensions[i] : "";
       if (symbol.find("batch") != std::string::npos)
-        dimensions[i] = batch.rows;
+        dimensions[i] = static_cast<int64_t>(batch.rows);
       else if (symbol.find("past") != std::string::npos ||
                symbol.find("sequence") != std::string::npos)
         dimensions[i] = 0;
@@ -1360,7 +1350,8 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
     std::vector<int64_t> decide_indices;
     size_t max_options = 0;
     for (size_t i = 0; i < rows.size(); ++i) {
-      decide_indices.push_back(i * batch.width + rows[i].size() - 1);
+      decide_indices.push_back(
+          static_cast<int64_t>(i * batch.width + rows[i].size() - 1));
       max_options = std::max(max_options, option_indices[i].size());
     }
     if (!max_options)
@@ -1369,7 +1360,8 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
     std::vector<uint8_t> mask(rows.size() * max_options);
     for (size_t i = 0; i < rows.size(); ++i)
       for (size_t j = 0; j < option_indices[i].size(); ++j) {
-        padded[i * max_options + j] = option_indices[i][j] + i * batch.width;
+        padded[i * max_options + j] =
+            option_indices[i][j] + static_cast<int64_t>(i * batch.width);
         mask[i * max_options + j] = 1;
       }
     head.Add("hidden_states", hidden,
@@ -1395,7 +1387,7 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
   } else {
     std::vector<int64_t> decide_indices, indices;
     for (size_t i = 0; i < rows.size(); ++i) {
-      decide_indices.push_back(rows[i].size() - 1);
+      decide_indices.push_back(static_cast<int64_t>(rows[i].size() - 1));
       indices.insert(indices.end(), option_indices[i].begin(), option_indices[i].end());
     }
     head.Add("hidden_states", hidden,

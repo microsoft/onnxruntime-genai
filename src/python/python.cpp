@@ -79,7 +79,8 @@ struct PyComponentSession {
       pybind11::array array(ToNumpyDtype(
                                 static_cast<ONNXTensorElementDataType>(output.type)),
                             output.shape);
-      std::memcpy(array.mutable_data(), output.data.data(), output.data.size());
+      if (!output.data.empty())
+        std::memcpy(array.mutable_data(), output.data.data(), output.data.size());
       result[pybind11::str(output.name)] = std::move(array);
     }
     return result;

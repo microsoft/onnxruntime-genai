@@ -110,7 +110,15 @@ std::unordered_map<std::string, fs::path> LoadComponents(fs::path root) {
     fs::path candidate = root / relative;
     if (std::filesystem::is_regular_file(candidate.c_str())) result.emplace(name, std::move(candidate));
   }
-  if (result.size() != 4 && result.size() != 2)
+  const std::set<std::string> names = [&] {
+    std::set<std::string> values;
+    for (const auto& [name, _] : result) values.insert(name);
+    return values;
+  }();
+  const std::set<std::string> clm_names = {
+      "encoder", "state_head", "action_head", "scorer"};
+  const std::set<std::string> kev_names = {"backbone", "pointer_head"};
+  if (names != clm_names && names != kev_names)
     throw std::runtime_error("directory has no component_manifest.json and is not a recognized CLM/KEV layout");
   return result;
 }
@@ -177,7 +185,8 @@ std::vector<OgaComponentTensor> ComponentSession::Run(
     tensor.shape = info->GetShape();
     tensor.type = static_cast<OgaElementType>(info->GetElementType());
     tensor.data.resize(info->GetElementCount() * Ort::SizeOf(info->GetElementType()));
-    std::memcpy(tensor.data.data(), ort_outputs[i]->GetTensorRawData(), tensor.data.size());
+    if (!tensor.data.empty())
+      std::memcpy(tensor.data.data(), ort_outputs[i]->GetTensorRawData(), tensor.data.size());
     result.push_back(std::move(tensor));
   }
   return result;
