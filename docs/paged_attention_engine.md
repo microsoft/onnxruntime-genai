@@ -1758,8 +1758,13 @@ execution-provider synchronization.
 
 The direct drafter session captures uniform shapes with stable proposal buffers, including
 batches containing a request restored from a DFlash2 prefix checkpoint. Graph replay requires
-a CUDA EP with session-scoped device arenas: older plugin EPs shared an arena across target and
-drafter sessions, allowing another session to overwrite memory retained by a captured graph.
+a CUDA plugin EP containing the per-session device-arena fix in
+[microsoft/onnxruntime#32807](https://github.com/microsoft/onnxruntime/pull/32807)
+(merged as `4c868628f2db`). The published CUDA plugin EP `v0.1.0` predates this fix; check
+the plugin's build commit rather than the core ORT version until a containing release is
+identified. Older plugin EPs share an arena across target and drafter sessions, allowing
+one session to overwrite memory retained by another's captured graph. GenAI cannot detect
+this at runtime: bad or missing drafts, reduced target accuracy, or a hang can result.
 No graphs are discarded on cached admission.
 On ORT builds without per-graph release, graph captures retired by buffer growth still live
 until their session is destroyed.
