@@ -6117,7 +6117,7 @@ class Model:
                 cache_dir=self.cache_dir,
                 token=self.hf_token,
                 trust_remote_code=self.hf_remote,
-                revision=self.revision,
+                revision=getattr(self, "revision", None),
                 **extra_kwargs,
             )
 

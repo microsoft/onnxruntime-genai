@@ -252,7 +252,10 @@ def build_clm_model(checkpoint: dict) -> onnx.ModelProto:
         )
         nodes.extend(head_nodes)
         initializers.extend(head_initializers)
-    scale = min(math.exp(float(checkpoint["logit_scale"].item())), 100.0)
+    logit_scale = float(checkpoint["logit_scale"].item())
+    if not math.isfinite(logit_scale):
+        raise ValueError("CLM logit_scale must be finite")
+    scale = math.exp(min(logit_scale, math.log(100.0)))
     initializers.append(numpy_helper.from_array(np.asarray(scale, dtype=np.float32), "effective_logit_scale.value"))
     nodes.append(helper.make_node("Identity", ["effective_logit_scale.value"], ["effective_logit_scale"]))
     graph = helper.make_graph(

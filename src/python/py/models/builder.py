@@ -23,6 +23,7 @@ from builder_config import (
     export_component_package,
     load_json_object,
     normalize_builder_config,
+    validate_component_backbone_destination,
     validate_model_dependent_config,
 )
 from builders import (
@@ -825,6 +826,13 @@ def create_model(
     # Checked after the architecture dispatch above, which is where a checkpoint's quantization
     # metadata is dropped when the builder does not honor it.
     warn_if_checkpoint_overrides_precision(config, precision, onnx_dtype)
+
+    if effective_config is not None and effective_config.component_options is not None:
+        validate_component_backbone_destination(
+            effective_config.component_options,
+            output_dir,
+            require_exists=config_only,
+        )
 
     if not config_only:
         # Make ONNX model

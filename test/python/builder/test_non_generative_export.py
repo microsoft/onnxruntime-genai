@@ -127,6 +127,23 @@ def test_clm_l2_normalization_matches_f_normalize_epsilon_for_zero_output():
     np.testing.assert_array_equal(outputs[1], np.zeros((1, 2), dtype=np.float32))
 
 
+def test_clm_logit_scale_is_finite_and_clamped_before_exp():
+    checkpoint = _tiny_clm_checkpoint()
+    checkpoint["logit_scale"] = torch.tensor(1000.0)
+    outputs = ReferenceEvaluator(clm.build_clm_model(checkpoint)).run(
+        None,
+        {
+            "state_hidden_states": np.ones((1, 3), dtype=np.float32),
+            "action_hidden_states": np.ones((1, 3), dtype=np.float32),
+        },
+    )
+    assert outputs[2] == np.float32(100.0)
+
+    checkpoint["logit_scale"] = torch.tensor(float("nan"))
+    with pytest.raises(ValueError, match="logit_scale must be finite"):
+        clm.build_clm_model(checkpoint)
+
+
 def _tiny_kev_checkpoint():
     generator = torch.Generator().manual_seed(3)
     return {
@@ -213,6 +230,7 @@ def _write_kev_artifact(path, checkpoint=None):
             }
         )
     )
+    (path / "adapter_model.safetensors").write_bytes(b"synthetic")
     torch.save(checkpoint or _real_kev_checkpoint(), path / "head.pt")
 
 
@@ -255,7 +273,21 @@ def test_kev_tiny_graph_weights_masked_grouped_softmax_math():
 
     np.testing.assert_allclose(scores, expected_scores.numpy(), rtol=1e-6, atol=1e-6)
     np.testing.assert_allclose(probabilities, expected_probabilities.numpy(), rtol=1e-6, atol=1e-6)
-    assert [node.op_type for node in model.graph.node][-2:] == ["Where", "Softmax"]
+    assert [node.op_type for node in model.graph.node][-3:] == [
+        "Where",
+        "Softmax",
+        "Where",
+    ]
+    all_masked, _ = ReferenceEvaluator(model).run(
+        None,
+        {
+            "hidden_states": hidden.numpy(),
+            "decide_indices": decide,
+            "option_indices": options,
+            "option_mask": np.zeros_like(mask),
+        },
+    )
+    np.testing.assert_array_equal(all_masked, np.zeros_like(all_masked))
 
 
 def test_artifact_layout_dispatch_and_ambiguity(tmp_path):
@@ -271,6 +303,25 @@ def test_artifact_layout_dispatch_and_ambiguity(tmp_path):
     torch.save(_tiny_clm_checkpoint(), kev_dir / "checkpoint.pt")
     with pytest.raises(ValueError, match="ambiguous"):
         dispatch.detect_model_specific_artifact(kev_dir)
+
+
+def test_kev_artifact_requires_adapter_weights_and_lora_type(tmp_path):
+    source = tmp_path / "kev"
+    _write_kev_artifact(source)
+    (source / "adapter_model.safetensors").unlink()
+    assert not kev.is_kev_artifact(source)
+
+    (source / "adapter_model.safetensors").write_bytes(b"synthetic")
+    (source / "adapter_config.json").write_text(
+        json.dumps(
+            {
+                "peft_type": "IA3",
+                "base_model_name_or_path": kev.kev_policy()["base_model"],
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="peft_type must be LORA"):
+        kev.load_kev_checkpoint(source)
 
 
 def test_dispatch_validates_provenance_and_backbone(tmp_path):
@@ -308,9 +359,7 @@ def test_model_specific_hf_pipeline_keeps_base_tokenizer_and_component_separate(
     )
     extra_options = {}
 
-    dispatch.prepare_model_specific_hf(
-        kev_options, extra_options, policy["base_model"]
-    )
+    dispatch.prepare_model_specific_hf(kev_options, extra_options, policy["base_model"])
 
     assert extra_options["base_revision"] == policy["base_revision"]
     assert extra_options["adapter_path"] == str(kev_source)
@@ -345,9 +394,7 @@ def test_model_specific_hf_pipeline_keeps_base_tokenizer_and_component_separate(
         base_revision="caller-selected-qwen3-revision",
     )
     with pytest.raises(ValueError, match="hidden_size"):
-        dispatch.prepare_model_specific_hf(
-            malformed_options, {}, "Qwen/Qwen3-8B"
-        )
+        dispatch.prepare_model_specific_hf(malformed_options, {}, "Qwen/Qwen3-8B")
 
 
 def test_real_released_clm_layout_is_accepted(tmp_path):
@@ -402,3 +449,29 @@ def test_controlled_checkpoint_schema_and_shapes_fail_closed(tmp_path):
     )
     with pytest.raises(ValueError, match=r"q.weight.*\(256, 2560\)"):
         kev.load_kev_checkpoint(kev_dir)
+
+
+def test_model_specific_export_rejects_backbone_collision_and_manifest_symlink(
+    tmp_path,
+):
+    source = tmp_path / "clm"
+    source.mkdir()
+    torch.save(_real_clm_checkpoint(), source / "checkpoint.pt")
+    output = tmp_path / "package"
+    output.mkdir()
+    options = types.SimpleNamespace(
+        model_source=str(source),
+        artifact_revision=clm.clm_artifact_revision(),
+        base_revision="caller-pin",
+        backbone_filename="clm_heads.onnx",
+    )
+    with pytest.raises(ValueError, match="conflicts with model-specific head"):
+        dispatch.export_model_specific_components(options, output)
+
+    options.backbone_filename = "backbone.onnx"
+    outside = tmp_path / "outside.json"
+    outside.write_text("unchanged")
+    (output / "component_manifest.json").symlink_to(outside)
+    with pytest.raises(ValueError, match="destination contains symlink"):
+        dispatch.export_model_specific_components(options, output)
+    assert outside.read_text() == "unchanged"

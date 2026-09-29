@@ -35,7 +35,12 @@ def kev_policy() -> dict:
 def is_kev_artifact(source: str | Path) -> bool:
     """Return whether a directory has the KEV PEFT adapter/head file layout."""
     source = Path(source)
-    return source.is_dir() and (source / "adapter_config.json").is_file() and (source / "head.pt").is_file()
+    return (
+        source.is_dir()
+        and (source / "adapter_config.json").is_file()
+        and (source / "adapter_model.safetensors").is_file()
+        and (source / "head.pt").is_file()
+    )
 
 
 def load_kev_checkpoint(source: str | Path) -> dict:
@@ -55,8 +60,8 @@ def load_kev_checkpoint(source: str | Path) -> dict:
         adapter_config = json.loads((source / "adapter_config.json").read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
         raise ValueError("KEV adapter_config.json must be valid JSON") from error
-    if adapter_config.get("peft_type") is None:
-        raise ValueError("KEV adapter_config.json must describe a PEFT adapter")
+    if adapter_config.get("peft_type") != "LORA":
+        raise ValueError("KEV adapter_config.json peft_type must be LORA")
     if adapter_config.get("base_model_name_or_path") != policy["base_model"]:
         raise ValueError(
             "KEV adapter base_model_name_or_path must be "
@@ -125,6 +130,7 @@ def build_kev_model(checkpoint: dict) -> onnx.ModelProto:
         [
             numpy_helper.from_array(scale, "score_denominator"),
             numpy_helper.from_array(np.asarray(-3.4028235e38, dtype=np.float32), "masked_score"),
+            numpy_helper.from_array(np.asarray(0.0, dtype=np.float32), "zero_probability"),
             numpy_helper.from_array(np.asarray([1], dtype=np.int64), "unsqueeze_axis"),
             numpy_helper.from_array(np.asarray([1, 2], dtype=np.int64), "query_unsqueeze_axes"),
             numpy_helper.from_array(np.asarray([2], dtype=np.int64), "option_unsqueeze_axis"),
@@ -184,7 +190,12 @@ def build_kev_model(checkpoint: dict) -> onnx.ModelProto:
         # Mask before the final axis softmax so normalization occurs separately
         # within every question and padded options receive no probability mass.
         helper.make_node("Where", ["option_mask", "scores", "masked_score"], ["masked_scores"]),
-        helper.make_node("Softmax", ["masked_scores"], ["probabilities"], axis=-1),
+        helper.make_node("Softmax", ["masked_scores"], ["raw_probabilities"], axis=-1),
+        helper.make_node(
+            "Where",
+            ["option_mask", "raw_probabilities", "zero_probability"],
+            ["probabilities"],
+        ),
     ]
     graph = helper.make_graph(
         nodes,

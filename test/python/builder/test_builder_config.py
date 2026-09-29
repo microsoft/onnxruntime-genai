@@ -16,9 +16,11 @@ sys.path.insert(0, str(MODELS_DIR))
 
 from builder_config import (  # noqa: E402
     apply_runtime_config,
+    component_manifest_dict,
     export_component_package,
     load_json_object,
     normalize_builder_config,
+    validate_component_backbone_destination,
     validate_model_dependent_config,
 )
 
@@ -32,12 +34,8 @@ def _write_component_model(path, external_locations=()):
         entry.key = "location"
         entry.value = location
         initializers.append(tensor)
-    hidden = onnx.helper.make_tensor_value_info(
-        "hidden_states", onnx.TensorProto.FLOAT, [None, 4]
-    )
-    scores = onnx.helper.make_tensor_value_info(
-        "scores", onnx.TensorProto.FLOAT, [None, 4]
-    )
+    hidden = onnx.helper.make_tensor_value_info("hidden_states", onnx.TensorProto.FLOAT, [None, 4])
+    scores = onnx.helper.make_tensor_value_info("scores", onnx.TensorProto.FLOAT, [None, 4])
     graph = onnx.helper.make_graph(
         [onnx.helper.make_node("Identity", ["hidden_states"], ["scores"])],
         "component",
@@ -46,6 +44,11 @@ def _write_component_model(path, external_locations=()):
         initializer=initializers,
     )
     path.write_bytes(onnx.helper.make_model(graph).SerializeToString())
+
+
+def _write_backbone(output_dir, filename="model.onnx"):
+    output_dir.mkdir(exist_ok=True)
+    (output_dir / filename).write_bytes(b"backbone")
 
 
 def test_legacy_configuration_preserves_options():
@@ -164,7 +167,7 @@ def test_component_package_stages_multiple_named_heads(tmp_path):
         },
     )
     output_dir = tmp_path / "package"
-    output_dir.mkdir()
+    _write_backbone(output_dir, "backbone.onnx")
 
     export_component_package(effective.component_options, str(output_dir))
 
@@ -216,7 +219,7 @@ def test_component_manifest_serializes_auxiliary_input_and_output_bindings():
         },
     )
 
-    component = effective.component_options.manifest_dict()["components"]["rich_head"]
+    component = component_manifest_dict(effective.component_options)["components"]["rich_head"]
     assert component["inputs"] == {
         "hidden_states": "encoder_output",
         "item_indices": "candidate_ids",
@@ -234,13 +237,11 @@ def test_component_package_copies_arbitrary_relative_external_data_files(tmp_pat
     (source_dir / "weights" / "chunk-01.bin").write_bytes(b"weights")
     (source_dir / "metadata.bin").write_bytes(b"metadata")
     output_dir = tmp_path / "package"
-    output_dir.mkdir()
+    _write_backbone(output_dir)
     effective = normalize_builder_config(
         "fp32",
         "cpu",
-        component_options={
-            "heads": [{"name": "head", "source": str(graph), "filename": "renamed-head.onnx"}]
-        },
+        component_options={"heads": [{"name": "head", "source": str(graph), "filename": "renamed-head.onnx"}]},
     )
 
     export_component_package(effective.component_options, str(output_dir))
@@ -279,7 +280,7 @@ def test_component_package_validates_graph_binding_names(tmp_path):
     graph = tmp_path / "head.onnx"
     _write_component_model(graph)
     output_dir = tmp_path / "package"
-    output_dir.mkdir()
+    _write_backbone(output_dir)
     effective = normalize_builder_config(
         "fp32",
         "cpu",
@@ -322,19 +323,36 @@ def test_component_package_rejects_destination_symlink(tmp_path):
     outside = tmp_path / "outside.onnx"
     outside.write_bytes(b"unchanged")
     output_dir = tmp_path / "package"
-    output_dir.mkdir()
+    _write_backbone(output_dir)
     (output_dir / "head.onnx").symlink_to(outside)
     effective = normalize_builder_config(
         "fp32",
         "cpu",
-        component_options={
-            "heads": [{"name": "head", "source": str(graph)}]
-        },
+        component_options={"heads": [{"name": "head", "source": str(graph)}]},
     )
 
     with pytest.raises(ValueError, match="destination contains symlink"):
         export_component_package(effective.component_options, str(output_dir))
     assert outside.read_bytes() == b"unchanged"
+
+
+def test_component_backbone_rejects_symlink_and_missing_config_only_file(tmp_path):
+    output_dir = tmp_path / "package"
+    output_dir.mkdir()
+    outside = tmp_path / "outside.onnx"
+    outside.write_bytes(b"unchanged")
+    (output_dir / "model.onnx").symlink_to(outside)
+    options = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={"heads": [{"name": "head", "source": "head.onnx"}]},
+    ).component_options
+
+    with pytest.raises(ValueError, match="destination contains symlink"):
+        validate_component_backbone_destination(options, output_dir, require_exists=False)
+    (output_dir / "model.onnx").unlink()
+    with pytest.raises(ValueError, match="backbone does not exist"):
+        validate_component_backbone_destination(options, output_dir, require_exists=True)
 
 
 def test_generic_component_options_reject_revision_fields():
@@ -348,6 +366,7 @@ def test_generic_component_options_reject_revision_fields():
             },
         )
 
+
 @pytest.mark.parametrize(
     "location",
     ["../outside.bin", "/absolute.bin", "C:/absolute.bin", r"weights\\outside.bin"],
@@ -358,7 +377,7 @@ def test_component_package_rejects_unsafe_external_data_locations(tmp_path, loca
     graph = source_dir / "head.onnx"
     _write_component_model(graph, [location])
     output_dir = tmp_path / "package"
-    output_dir.mkdir()
+    _write_backbone(output_dir)
     effective = normalize_builder_config(
         "fp32",
         "cpu",

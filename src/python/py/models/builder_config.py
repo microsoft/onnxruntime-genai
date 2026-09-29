@@ -94,17 +94,6 @@ class HeadComponent:
     inputs: tuple[ComponentBinding, ...]
     outputs: tuple[ComponentBinding, ...]
 
-    def to_dict(self) -> dict[str, Any]:
-        """Return the JSON-ready declaration, preserving logical graph bindings."""
-        return {
-            "name": self.name,
-            "source": self.source,
-            "filename": self.filename,
-            "inputs": {binding.name: binding.graph_name for binding in self.inputs},
-            "outputs": {binding.name: binding.graph_name for binding in self.outputs},
-        }
-
-
 @dataclass(frozen=True)
 class ComponentOptions:
     """Describe either generic ONNX heads or one pinned model-specific artifact.
@@ -118,45 +107,6 @@ class ComponentOptions:
     model_source: str | None = None
     artifact_revision: str | None = None
     base_revision: str | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return the normalized builder configuration as JSON-ready data."""
-        result = {
-            "backbone": {"filename": self.backbone_filename},
-            "heads": [head.to_dict() for head in self.heads],
-        }
-        if self.model_source is not None:
-            result["model_source"] = self.model_source
-            result["artifact_revision"] = self.artifact_revision
-            result["base_revision"] = self.base_revision
-        return result
-
-    def manifest_dict(self) -> dict[str, Any]:
-        """Build the runtime-neutral manifest for generic pre-built heads."""
-        components = {
-            "backbone": {
-                "role": "backbone",
-                "filename": self.backbone_filename,
-                "outputs": {"hidden_states": "hidden_states"},
-            }
-        }
-        components.update(
-            {
-                head.name: {
-                    "role": "head",
-                    "filename": head.filename,
-                    "inputs": {binding.name: binding.graph_name for binding in head.inputs},
-                    "outputs": {binding.name: binding.graph_name for binding in head.outputs},
-                }
-                for head in self.heads
-            }
-        )
-        return {
-            "schema_version": 1,
-            "model_type": "generic-non-generative",
-            "components": components,
-        }
-
 
 @dataclass
 class EffectiveBuilderConfig:
@@ -190,8 +140,65 @@ class EffectiveBuilderConfig:
             "runtime_config": copy.deepcopy(self.runtime_config),
         }
         if self.component_options is not None:
-            result["component_options"] = self.component_options.to_dict()
+            result["component_options"] = component_options_dict(
+                self.component_options
+            )
         return result
+
+
+def head_component_dict(head: HeadComponent) -> dict[str, Any]:
+    """Serialize one immutable head declaration."""
+    return {
+        "name": head.name,
+        "source": head.source,
+        "filename": head.filename,
+        "inputs": {binding.name: binding.graph_name for binding in head.inputs},
+        "outputs": {binding.name: binding.graph_name for binding in head.outputs},
+    }
+
+
+def component_options_dict(options: ComponentOptions) -> dict[str, Any]:
+    """Serialize normalized component options."""
+    result = {
+        "backbone": {"filename": options.backbone_filename},
+        "heads": [head_component_dict(head) for head in options.heads],
+    }
+    if options.model_source is not None:
+        result["model_source"] = options.model_source
+        result["artifact_revision"] = options.artifact_revision
+        result["base_revision"] = options.base_revision
+    return result
+
+
+def component_manifest_dict(options: ComponentOptions) -> dict[str, Any]:
+    """Build the runtime-neutral manifest for generic pre-built heads."""
+    components = {
+        "backbone": {
+            "role": "backbone",
+            "filename": options.backbone_filename,
+            "outputs": {"hidden_states": "hidden_states"},
+        }
+    }
+    components.update(
+        {
+            head.name: {
+                "role": "head",
+                "filename": head.filename,
+                "inputs": {
+                    binding.name: binding.graph_name for binding in head.inputs
+                },
+                "outputs": {
+                    binding.name: binding.graph_name for binding in head.outputs
+                },
+            }
+            for head in options.heads
+        }
+    )
+    return {
+        "schema_version": 1,
+        "model_type": "generic-non-generative",
+        "components": components,
+    }
 
 
 def normalize_component_options(value: Any) -> ComponentOptions | None:
@@ -348,6 +355,9 @@ def export_component_package(options: ComponentOptions, output_dir: str):
     or destination conflicts raise ``ValueError``.
     """
     output_root = Path(output_dir).resolve()
+    validate_component_backbone_destination(
+        options, output_root, require_exists=True
+    )
     if options.model_source is not None:
         from builders.non_generative import export_model_specific_components  # noqa: PLC0415
 
@@ -380,9 +390,9 @@ def plan_component_package(
         add_component_copy(copy_plan, destination, source.resolve(), head.name)
         # Inspect external references before copying anything so an unsafe or
         # incomplete head cannot leave a partially staged component package.
-        for relative_path, external_source in find_external_data_files(
-            model, source, head.name
-        ):
+        external_files = find_external_data_files(model, source, head.name)
+        validate_component_model(source, head.name)
+        for relative_path, external_source in external_files:
             external_destination = output_root / relative_path
             validate_destination_path(
                 output_root, external_destination, head.name
@@ -391,7 +401,7 @@ def plan_component_package(
                 copy_plan, external_destination, external_source, head.name, reserved=reserved
             )
     return ComponentPackagePlan(
-        copies=tuple(copy_plan.items()), manifest=options.manifest_dict()
+        copies=tuple(copy_plan.items()), manifest=component_manifest_dict(options)
     )
 
 
@@ -481,6 +491,23 @@ def validate_destination_path(
         )
 
 
+def validate_component_backbone_destination(
+    options: ComponentOptions,
+    output_root: str | Path,
+    *,
+    require_exists: bool,
+) -> Path:
+    """Validate the backbone path before writing or packaging it."""
+    output_root = Path(output_root).resolve()
+    destination = output_root / options.backbone_filename
+    validate_destination_path(output_root, destination, "backbone")
+    if require_exists and not destination.is_file():
+        raise ValueError(
+            f"component backbone does not exist: {destination}"
+        )
+    return destination
+
+
 def load_component_model(
     model_path: Path, component_name: str
 ) -> onnx.ModelProto:
@@ -490,6 +517,17 @@ def load_component_model(
     except Exception as error:
         raise ValueError(
             f"component {component_name!r} source is not a readable ONNX model: "
+            f"{model_path}"
+        ) from error
+
+
+def validate_component_model(model_path: Path, component_name: str) -> None:
+    """Run the ONNX structural checker after external paths are validated."""
+    try:
+        onnx.checker.check_model(model_path)
+    except Exception as error:
+        raise ValueError(
+            f"component {component_name!r} source is not a valid ONNX model: "
             f"{model_path}"
         ) from error
 
