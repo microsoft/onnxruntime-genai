@@ -10,8 +10,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -30,6 +32,21 @@ public class NonGenerativeTest {
     assertThrows(
         IllegalArgumentException.class,
         () -> new StructuredQuestion("noul", new BigDecimal("1.25")));
+
+    Map<String, Object> cycle = new LinkedHashMap<>();
+    cycle.put("self", cycle);
+    assertThrows(
+        IllegalArgumentException.class, () -> new StructuredRequest(cycle, new LinkedHashMap<>()));
+
+    List<Object> root = new ArrayList<>();
+    List<Object> current = root;
+    for (int i = 0; i < 128; ++i) {
+      List<Object> child = new ArrayList<>();
+      current.add(child);
+      current = child;
+    }
+    assertThrows(
+        IllegalArgumentException.class, () -> new StructuredRequest(root, new LinkedHashMap<>()));
 
     Map<String, Object> answer = new LinkedHashMap<>();
     answer.put("id", "q");
@@ -94,8 +111,20 @@ public class NonGenerativeTest {
               }
               return null;
             });
-    Future<?> closeOne = executor.submit(() -> { start.await(); concurrent.close(); return null; });
-    Future<?> closeTwo = executor.submit(() -> { start.await(); concurrent.close(); return null; });
+    Future<?> closeOne =
+        executor.submit(
+            () -> {
+              start.await();
+              concurrent.close();
+              return null;
+            });
+    Future<?> closeTwo =
+        executor.submit(
+            () -> {
+              start.await();
+              concurrent.close();
+              return null;
+            });
     start.countDown();
     try {
       operation.get();
@@ -120,7 +149,23 @@ public class NonGenerativeTest {
     try (DecisionSession session = new DecisionSession(path);
         DirectoryTokenizer tokenizer = new DirectoryTokenizer(path)) {
       assertTrue(tokenizer.encode("rain").length > 0);
+      assertTrue(session.getPrefixReuseEnabled());
+      assertTrue(!session.getPrefixReuseStatus().isEmpty());
+      session.setPrefixReuseEnabled(false);
+      assertTrue(!session.getPrefixReuseEnabled());
+      session.setPrefixReuseEnabled(true);
+      session.setPrefixCacheCapacity(1, 1024 * 1024);
+      assertEquals(1, session.getPrefixCacheStats().entryCapacity);
       assertNotNull(session.decide(new StructuredRequest("rain", questions)).model);
+      PrefixReuseStats prefixStats = session.getPrefixReuseStats();
+      assertTrue(prefixStats.prefixRuns + prefixStats.branchRuns + prefixStats.fallbackRuns > 0);
+      session.clearCache();
+      assertEquals(0, session.getPrefixCacheStats().entries);
+
+      Map<String, Object> mutated = new LinkedHashMap<>();
+      StructuredRequest cyclicRequest = new StructuredRequest(mutated, questions);
+      mutated.put("self", mutated);
+      assertThrows(GenAIException.class, () -> session.decide(cyclicRequest));
     }
 
     final DecisionSession decision = new DecisionSession(path);
@@ -150,9 +195,21 @@ public class NonGenerativeTest {
               return null;
             });
     Future<?> closeDecision =
-        executor.submit(() -> { start.await(); decision.close(); decision.close(); return null; });
+        executor.submit(
+            () -> {
+              start.await();
+              decision.close();
+              decision.close();
+              return null;
+            });
     Future<?> closeTokenizer =
-        executor.submit(() -> { start.await(); tokenizer.close(); tokenizer.close(); return null; });
+        executor.submit(
+            () -> {
+              start.await();
+              tokenizer.close();
+              tokenizer.close();
+              return null;
+            });
     start.countDown();
     try {
       decide.get();

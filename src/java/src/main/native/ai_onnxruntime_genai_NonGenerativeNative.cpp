@@ -58,7 +58,36 @@ jobject MapGet(JNIEnv* env, jobject map, const char* key) {
   return value;
 }
 
-bool BuildValue(JNIEnv* env, jobject input, OgaStructuredValueHandle** out) {
+constexpr size_t kMaxStructuredDepth = 128;
+
+struct ActiveValueGuard {
+  explicit ActiveValueGuard(std::vector<jobject>& active) : active_(active) {}
+  ~ActiveValueGuard() { active_.pop_back(); }
+  std::vector<jobject>& active_;
+};
+
+bool EnterContainer(JNIEnv* env, jobject input, std::vector<jobject>& active, size_t depth) {
+  if (depth >= kMaxStructuredDepth) {
+    ThrowException(env, "Structured value exceeds the maximum nesting depth of 128");
+    return true;
+  }
+  for (jobject ancestor : active) {
+    if (env->IsSameObject(input, ancestor)) {
+      ThrowException(env, "Structured value contains a reference cycle");
+      return true;
+    }
+  }
+  active.push_back(input);
+  return false;
+}
+
+bool BuildValueWithContext(
+    JNIEnv* env, jobject input, OgaStructuredValueHandle** out,
+    std::vector<jobject>& active, size_t depth);
+
+bool BuildValueImpl(
+    JNIEnv* env, jobject input, OgaStructuredValueHandle** out,
+    std::vector<jobject>& active, size_t depth) {
   if (input == nullptr) return ThrowIfError(env, OgaCreateStructuredValueNull(out));
   jclass string_cls = env->FindClass("java/lang/String");
   jclass boolean_cls = env->FindClass("java/lang/Boolean");
@@ -93,6 +122,8 @@ bool BuildValue(JNIEnv* env, jobject input, OgaStructuredValueHandle** out) {
     return true;
   }
   if (env->IsInstanceOf(input, map_cls)) {
+    if (EnterContainer(env, input, active, depth)) return true;
+    ActiveValueGuard active_guard(active);
     if (ThrowIfError(env, OgaCreateStructuredValueObject(out))) return true;
     jobject entries = env->CallObjectMethod(
         input, env->GetMethodID(map_cls, "entrySet", "()Ljava/util/Set;"));
@@ -116,7 +147,7 @@ bool BuildValue(JNIEnv* env, jobject input, OgaStructuredValueHandle** out) {
         return true;
       }
       ValueOwner child;
-      if (BuildValue(env, value, &child.value)) {
+      if (BuildValueWithContext(env, value, &child.value, active, depth + 1)) {
         OgaDestroyStructuredValue(*out);
         *out = nullptr;
         return true;
@@ -134,6 +165,8 @@ bool BuildValue(JNIEnv* env, jobject input, OgaStructuredValueHandle** out) {
     return false;
   }
   if (env->IsInstanceOf(input, iterable_cls)) {
+    if (EnterContainer(env, input, active, depth)) return true;
+    ActiveValueGuard active_guard(active);
     if (ThrowIfError(env, OgaCreateStructuredValueArray(out))) return true;
     jobject iterator = env->CallObjectMethod(
         input, env->GetMethodID(iterable_cls, "iterator", "()Ljava/util/Iterator;"));
@@ -143,7 +176,7 @@ bool BuildValue(JNIEnv* env, jobject input, OgaStructuredValueHandle** out) {
     while (env->CallBooleanMethod(iterator, has_next)) {
       jobject item = env->CallObjectMethod(iterator, next);
       ValueOwner child;
-      if (BuildValue(env, item, &child.value) ||
+      if (BuildValueWithContext(env, item, &child.value, active, depth + 1) ||
           ThrowIfError(env, OgaStructuredValueArrayAppend(*out, child.value))) {
         OgaDestroyStructuredValue(*out);
         *out = nullptr;
@@ -155,6 +188,20 @@ bool BuildValue(JNIEnv* env, jobject input, OgaStructuredValueHandle** out) {
   }
   ThrowException(env, "Structured values support null, primitive numbers, strings, Maps, and Lists");
   return true;
+}
+
+bool BuildValueWithContext(
+    JNIEnv* env, jobject input, OgaStructuredValueHandle** out,
+    std::vector<jobject>& active, size_t depth) {
+  if (env->PushLocalFrame(32) < 0) return true;
+  const bool failed = BuildValueImpl(env, input, out, active, depth);
+  env->PopLocalFrame(nullptr);
+  return failed;
+}
+
+bool BuildValue(JNIEnv* env, jobject input, OgaStructuredValueHandle** out) {
+  std::vector<jobject> active;
+  return BuildValueWithContext(env, input, out, active, 0);
 }
 
 jobject ReadValue(JNIEnv* env, const OgaStructuredValueHandle* value) {
@@ -529,5 +576,82 @@ JNIEXPORT jlongArray JNICALL Java_ai_onnxruntime_genai_NonGenerativeNative_cache
       static_cast<jlong>(stats.byte_capacity)};
   jlongArray result = env->NewLongArray(7);
   env->SetLongArrayRegion(result, 0, 7, values);
+  return result;
+}
+
+JNIEXPORT void JNICALL
+Java_ai_onnxruntime_genai_NonGenerativeNative_setDecisionPrefixReuseEnabled(
+    JNIEnv* env, jclass, jlong handle, jboolean enabled) {
+  ThrowIfError(env, OgaDecisionSessionSetPrefixReuseEnabled(
+                        reinterpret_cast<OgaDecisionSessionHandle*>(handle),
+                        enabled == JNI_TRUE));
+}
+
+JNIEXPORT jboolean JNICALL
+Java_ai_onnxruntime_genai_NonGenerativeNative_getDecisionPrefixReuseEnabled(
+    JNIEnv* env, jclass, jlong handle) {
+  bool enabled{};
+  if (ThrowIfError(env, OgaDecisionSessionGetPrefixReuseEnabled(
+                            reinterpret_cast<OgaDecisionSessionHandle*>(handle),
+                            &enabled))) {
+    return JNI_FALSE;
+  }
+  return enabled ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jstring JNICALL
+Java_ai_onnxruntime_genai_NonGenerativeNative_getDecisionPrefixReuseStatus(
+    JNIEnv* env, jclass, jlong handle) {
+  const char* status{};
+  if (ThrowIfError(env, OgaDecisionSessionGetPrefixReuseStatus(
+                            reinterpret_cast<OgaDecisionSessionHandle*>(handle),
+                            &status))) {
+    return nullptr;
+  }
+  return env->NewStringUTF(status);
+}
+
+JNIEXPORT void JNICALL
+Java_ai_onnxruntime_genai_NonGenerativeNative_setDecisionPrefixCacheCapacity(
+    JNIEnv* env, jclass, jlong handle, jlong entries, jlong bytes) {
+  ThrowIfError(env, OgaDecisionSessionSetPrefixCacheCapacity(
+                        reinterpret_cast<OgaDecisionSessionHandle*>(handle),
+                        static_cast<size_t>(entries), static_cast<size_t>(bytes)));
+}
+
+JNIEXPORT jlongArray JNICALL
+Java_ai_onnxruntime_genai_NonGenerativeNative_getDecisionPrefixCacheStats(
+    JNIEnv* env, jclass, jlong handle) {
+  OgaNonGenerativeCacheStats stats{};
+  if (ThrowIfError(env, OgaDecisionSessionGetPrefixCacheStats(
+                            reinterpret_cast<OgaDecisionSessionHandle*>(handle),
+                            &stats))) {
+    return nullptr;
+  }
+  const jlong values[7] = {
+      static_cast<jlong>(stats.hits), static_cast<jlong>(stats.misses),
+      static_cast<jlong>(stats.evictions), static_cast<jlong>(stats.entries),
+      static_cast<jlong>(stats.bytes), static_cast<jlong>(stats.entry_capacity),
+      static_cast<jlong>(stats.byte_capacity)};
+  jlongArray result = env->NewLongArray(7);
+  env->SetLongArrayRegion(result, 0, 7, values);
+  return result;
+}
+
+JNIEXPORT jlongArray JNICALL
+Java_ai_onnxruntime_genai_NonGenerativeNative_getDecisionPrefixReuseStats(
+    JNIEnv* env, jclass, jlong handle) {
+  OgaKevPrefixReuseStats stats{};
+  if (ThrowIfError(env, OgaDecisionSessionGetPrefixReuseStats(
+                            reinterpret_cast<OgaDecisionSessionHandle*>(handle),
+                            &stats))) {
+    return nullptr;
+  }
+  const jlong values[3] = {
+      static_cast<jlong>(stats.prefix_runs),
+      static_cast<jlong>(stats.branch_runs),
+      static_cast<jlong>(stats.fallback_runs)};
+  jlongArray result = env->NewLongArray(3);
+  env->SetLongArrayRegion(result, 0, 3, values);
   return result;
 }

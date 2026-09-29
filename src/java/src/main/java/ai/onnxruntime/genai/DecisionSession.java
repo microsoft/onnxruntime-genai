@@ -52,6 +52,39 @@ public final class DecisionSession implements AutoCloseable {
     return new CacheStats(NonGenerativeNative.cache(nativeHandle, false, 1, 0, 0));
   }
 
+  public synchronized void setPrefixReuseEnabled(boolean enabled) throws GenAIException {
+    checkOpen();
+    NonGenerativeNative.setDecisionPrefixReuseEnabled(nativeHandle, enabled);
+  }
+
+  public synchronized boolean getPrefixReuseEnabled() throws GenAIException {
+    checkOpen();
+    return NonGenerativeNative.getDecisionPrefixReuseEnabled(nativeHandle);
+  }
+
+  public synchronized String getPrefixReuseStatus() throws GenAIException {
+    checkOpen();
+    return NonGenerativeNative.getDecisionPrefixReuseStatus(nativeHandle);
+  }
+
+  public synchronized void setPrefixCacheCapacity(long entries, long bytes) throws GenAIException {
+    checkOpen();
+    if (entries < 0 || bytes < 0) {
+      throw new IllegalArgumentException("Cache capacities must be non-negative");
+    }
+    NonGenerativeNative.setDecisionPrefixCacheCapacity(nativeHandle, entries, bytes);
+  }
+
+  public synchronized CacheStats getPrefixCacheStats() throws GenAIException {
+    checkOpen();
+    return new CacheStats(NonGenerativeNative.getDecisionPrefixCacheStats(nativeHandle));
+  }
+
+  public synchronized PrefixReuseStats getPrefixReuseStats() throws GenAIException {
+    checkOpen();
+    return new PrefixReuseStats(NonGenerativeNative.getDecisionPrefixReuseStats(nativeHandle));
+  }
+
   public synchronized void clearCache() throws GenAIException {
     checkOpen();
     NonGenerativeNative.cache(nativeHandle, false, 2, 0, 0);

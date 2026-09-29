@@ -6,6 +6,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Runtime.CompilerServices;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
@@ -96,10 +97,69 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
     internal sealed class NativeStructuredValue : IDisposable
     {
+        private const int MaxDepth = 128;
+
+        private sealed class ReferenceComparer : IEqualityComparer<object>
+        {
+            internal static readonly ReferenceComparer Instance = new ReferenceComparer();
+            public new bool Equals(object left, object right) { return ReferenceEquals(left, right); }
+            public int GetHashCode(object value) { return RuntimeHelpers.GetHashCode(value); }
+        }
+
         internal IntPtr Handle { get; private set; }
         private NativeStructuredValue(IntPtr handle) { Handle = handle; }
 
         internal static NativeStructuredValue Create(object value)
+        {
+            return Create(value, 0, new HashSet<object>(ReferenceComparer.Instance));
+        }
+
+        internal static void Validate(object value)
+        {
+            Validate(value, 0, new HashSet<object>(ReferenceComparer.Instance));
+        }
+
+        private static void EnterContainer(object value, int depth, HashSet<object> active)
+        {
+            if (depth >= MaxDepth)
+                throw new ArgumentException("Structured value exceeds the maximum nesting depth of 128.");
+            if (!active.Add(value))
+                throw new ArgumentException("Structured value contains a reference cycle.");
+        }
+
+        private static void Validate(object value, int depth, HashSet<object> active)
+        {
+            if (value == null || value is bool || value is string ||
+                value is float || value is double || value is decimal || IsInteger(value))
+                return;
+            if (value is IDictionary dictionary)
+            {
+                EnterContainer(value, depth, active);
+                try
+                {
+                    foreach (DictionaryEntry item in dictionary)
+                    {
+                        if (!(item.Key is string)) throw new ArgumentException("Structured object keys must be strings.");
+                        Validate(item.Value, depth + 1, active);
+                    }
+                }
+                finally { active.Remove(value); }
+                return;
+            }
+            if (value is IEnumerable enumerable)
+            {
+                EnterContainer(value, depth, active);
+                try
+                {
+                    foreach (object item in enumerable) Validate(item, depth + 1, active);
+                }
+                finally { active.Remove(value); }
+                return;
+            }
+            throw new ArgumentException("Structured values support null, primitive numbers, strings, dictionaries, and lists.", nameof(value));
+        }
+
+        private static NativeStructuredValue Create(object value, int depth, HashSet<object> active)
         {
             IntPtr handle;
             if (value == null)
@@ -112,30 +172,34 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                 Result.VerifySuccess(NativeMethods.OgaCreateStructuredValueDouble(Convert.ToDouble(value), out handle));
             else if (IsInteger(value))
                 Result.VerifySuccess(NativeMethods.OgaCreateStructuredValueInt64(Convert.ToInt64(value), out handle));
-            else if (value is IDictionary)
+            else if (value is IDictionary dictionary)
             {
+                EnterContainer(value, depth, active);
                 Result.VerifySuccess(NativeMethods.OgaCreateStructuredValueObject(out handle));
                 try
                 {
-                    foreach (DictionaryEntry item in (IDictionary)value)
+                    foreach (DictionaryEntry item in dictionary)
                     {
                         if (!(item.Key is string)) throw new ArgumentException("Structured object keys must be strings.");
-                        using (NativeStructuredValue child = Create(item.Value))
+                        using (NativeStructuredValue child = Create(item.Value, depth + 1, active))
                             Result.VerifySuccess(NativeMethods.OgaStructuredValueObjectAppend(handle, StringUtils.ToUtf8((string)item.Key), child.Handle));
                     }
                 }
                 catch { NativeMethods.OgaDestroyStructuredValue(handle); throw; }
+                finally { active.Remove(value); }
             }
-            else if (value is IEnumerable)
+            else if (value is IEnumerable enumerable)
             {
+                EnterContainer(value, depth, active);
                 Result.VerifySuccess(NativeMethods.OgaCreateStructuredValueArray(out handle));
                 try
                 {
-                    foreach (object item in (IEnumerable)value)
-                        using (NativeStructuredValue child = Create(item))
+                    foreach (object item in enumerable)
+                        using (NativeStructuredValue child = Create(item, depth + 1, active))
                             Result.VerifySuccess(NativeMethods.OgaStructuredValueArrayAppend(handle, child.Handle));
                 }
                 catch { NativeMethods.OgaDestroyStructuredValue(handle); throw; }
+                finally { active.Remove(value); }
             }
             else
                 throw new ArgumentException("Structured values support null, primitive numbers, strings, dictionaries, and lists.", nameof(value));
@@ -222,6 +286,8 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         public StructuredQuestion(string type, object instructions, object criteria = null)
         {
             if (string.IsNullOrEmpty(type)) throw new ArgumentException("Question type is required.", nameof(type));
+            NativeStructuredValue.Validate(instructions);
+            NativeStructuredValue.Validate(criteria);
             Type = type; Instructions = instructions; Criteria = criteria;
         }
     }
@@ -233,6 +299,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         public float? Temperature { get; set; }
         public StructuredRequest(object state, IDictionary<string, StructuredQuestion> questions)
         {
+            NativeStructuredValue.Validate(state);
             State = state;
             Questions = questions ?? throw new ArgumentNullException(nameof(questions));
         }
@@ -246,6 +313,11 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         public float? Temperature { get; set; }
         public FreeFormRankRequest(object state, object instructions, IDictionary<string, object> candidates)
         {
+            NativeStructuredValue.Validate(state);
+            NativeStructuredValue.Validate(instructions);
+            if (candidates != null)
+                foreach (KeyValuePair<string, object> candidate in candidates)
+                    NativeStructuredValue.Validate(candidate.Value);
             State = state; Instructions = instructions;
             Candidates = candidates ?? throw new ArgumentNullException(nameof(candidates));
         }
@@ -292,6 +364,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         public ulong Bytes { get; internal set; }
         public ulong EntryCapacity { get; internal set; }
         public ulong ByteCapacity { get; internal set; }
+    }
+
+    public sealed class KevPrefixReuseStats
+    {
+        public ulong PrefixRuns { get; internal set; }
+        public ulong BranchRuns { get; internal set; }
+        public ulong FallbackRuns { get; internal set; }
     }
 
     internal static class NonGenerativeMarshal
@@ -469,6 +548,15 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         public ModelResult Decide(StructuredRequest request) { return Execute(request, true); }
         public void SetCacheCapacity(ulong entries, ulong bytes) { SafeHandleAccess.Use(_handle, native => Result.VerifySuccess(NativeMethods.OgaDecisionSessionSetCacheCapacity(native, (UIntPtr)entries, (UIntPtr)bytes))); }
         public NonGenerativeCacheStats CacheStats { get { return SafeHandleAccess.Use(_handle, native => { Result.VerifySuccess(NativeMethods.OgaDecisionSessionGetCacheStats(native, out NativeMethods.NonGenerativeCacheStats s)); return RankingSession.ConvertStats(s); }); } }
+        public bool PrefixReuseEnabled
+        {
+            get { return SafeHandleAccess.Use(_handle, native => { Result.VerifySuccess(NativeMethods.OgaDecisionSessionGetPrefixReuseEnabled(native, out bool enabled)); return enabled; }); }
+            set { SafeHandleAccess.Use(_handle, native => Result.VerifySuccess(NativeMethods.OgaDecisionSessionSetPrefixReuseEnabled(native, value))); }
+        }
+        public string PrefixReuseStatus { get { return SafeHandleAccess.Use(_handle, native => { Result.VerifySuccess(NativeMethods.OgaDecisionSessionGetPrefixReuseStatus(native, out IntPtr status)); return StringUtils.FromUtf8(status); }); } }
+        public void SetPrefixCacheCapacity(ulong entries, ulong bytes) { SafeHandleAccess.Use(_handle, native => Result.VerifySuccess(NativeMethods.OgaDecisionSessionSetPrefixCacheCapacity(native, (UIntPtr)entries, (UIntPtr)bytes))); }
+        public NonGenerativeCacheStats PrefixCacheStats { get { return SafeHandleAccess.Use(_handle, native => { Result.VerifySuccess(NativeMethods.OgaDecisionSessionGetPrefixCacheStats(native, out NativeMethods.NonGenerativeCacheStats s)); return RankingSession.ConvertStats(s); }); } }
+        public KevPrefixReuseStats PrefixReuseStats { get { return SafeHandleAccess.Use(_handle, native => { Result.VerifySuccess(NativeMethods.OgaDecisionSessionGetPrefixReuseStats(native, out NativeMethods.KevPrefixReuseStats s)); return new KevPrefixReuseStats { PrefixRuns = s.PrefixRuns, BranchRuns = s.BranchRuns, FallbackRuns = s.FallbackRuns }; }); } }
         public void ClearCache() { SafeHandleAccess.Use(_handle, native => Result.VerifySuccess(NativeMethods.OgaDecisionSessionClearCache(native))); }
         public void InvalidateCache() { SafeHandleAccess.Use(_handle, native => Result.VerifySuccess(NativeMethods.OgaDecisionSessionInvalidateCache(native))); }
         public void Dispose() { _handle.Dispose(); }

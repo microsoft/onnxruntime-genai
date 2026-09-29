@@ -552,6 +552,12 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             internal UIntPtr Entries, Bytes, EntryCapacity, ByteCapacity;
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct KevPrefixReuseStats
+        {
+            internal ulong PrefixRuns, BranchRuns, FallbackRuns;
+        }
+
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         internal static extern IntPtr OgaCreateDirectoryTokenizer(byte[] path, out IntPtr tokenizer);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
@@ -657,6 +663,18 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         internal static extern IntPtr OgaDecisionSessionSetCacheCapacity(IntPtr session, UIntPtr entries, UIntPtr bytes);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         internal static extern IntPtr OgaDecisionSessionGetCacheStats(IntPtr session, out NonGenerativeCacheStats stats);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaDecisionSessionSetPrefixReuseEnabled(IntPtr session, [MarshalAs(UnmanagedType.I1)] bool enabled);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaDecisionSessionGetPrefixReuseEnabled(IntPtr session, [MarshalAs(UnmanagedType.I1)] out bool enabled);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaDecisionSessionGetPrefixReuseStatus(IntPtr session, out IntPtr status);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaDecisionSessionSetPrefixCacheCapacity(IntPtr session, UIntPtr entries, UIntPtr bytes);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaDecisionSessionGetPrefixCacheStats(IntPtr session, out NonGenerativeCacheStats stats);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaDecisionSessionGetPrefixReuseStats(IntPtr session, out KevPrefixReuseStats stats);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         internal static extern IntPtr OgaDecisionSessionClearCache(IntPtr session);
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]

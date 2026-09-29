@@ -47,9 +47,22 @@ final class NonGenerativeNative {
       Float temperature)
       throws GenAIException;
 
-  static native long[] cache(
-      long handle, boolean ranking, int operation, long entries, long bytes)
+  static native long[] cache(long handle, boolean ranking, int operation, long entries, long bytes)
       throws GenAIException;
+
+  static native void setDecisionPrefixReuseEnabled(long handle, boolean enabled)
+      throws GenAIException;
+
+  static native boolean getDecisionPrefixReuseEnabled(long handle) throws GenAIException;
+
+  static native String getDecisionPrefixReuseStatus(long handle) throws GenAIException;
+
+  static native void setDecisionPrefixCacheCapacity(long handle, long entries, long bytes)
+      throws GenAIException;
+
+  static native long[] getDecisionPrefixCacheStats(long handle) throws GenAIException;
+
+  static native long[] getDecisionPrefixReuseStats(long handle) throws GenAIException;
 
   private NonGenerativeNative() {}
 }

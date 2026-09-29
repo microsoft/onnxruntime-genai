@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -17,6 +18,22 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             Assert.Throws<ArgumentException>(() => new StructuredQuestion("", "prompt"));
             Assert.Throws<ArgumentNullException>(() => new StructuredRequest(null, null));
             Assert.Throws<ArgumentNullException>(() => new FreeFormRankRequest(null, null, null));
+
+            var cycle = new Hashtable();
+            cycle["self"] = cycle;
+            Assert.Throws<ArgumentException>(() => new StructuredRequest(
+                cycle, new Dictionary<string, StructuredQuestion>()));
+
+            IList root = new ArrayList();
+            IList current = root;
+            for (int i = 0; i < 128; ++i)
+            {
+                var child = new ArrayList();
+                current.Add(child);
+                current = child;
+            }
+            Assert.Throws<ArgumentException>(() => new StructuredRequest(
+                root, new Dictionary<string, StructuredQuestion>()));
         }
 
         [Fact]
@@ -103,6 +120,14 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 
             using (var session = new DecisionSession(path))
             {
+                Assert.True(session.PrefixReuseEnabled);
+                Assert.False(string.IsNullOrEmpty(session.PrefixReuseStatus));
+                session.PrefixReuseEnabled = false;
+                Assert.False(session.PrefixReuseEnabled);
+                session.PrefixReuseEnabled = true;
+                session.SetPrefixCacheCapacity(1, 1024 * 1024);
+                Assert.Equal((ulong)1, session.PrefixCacheStats.EntryCapacity);
+
                 ModelResult result = session.Decide(new StructuredRequest(
                     new Dictionary<string, object> { ["weather"] = "rain" },
                     new Dictionary<string, StructuredQuestion>
@@ -110,6 +135,21 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                         ["q"] = new StructuredQuestion("noul", "Take an umbrella?")
                     }));
                 Assert.NotEmpty(result.Answers);
+                Assert.True(session.PrefixReuseStats.PrefixRuns +
+                            session.PrefixReuseStats.BranchRuns +
+                            session.PrefixReuseStats.FallbackRuns > 0);
+                session.ClearCache();
+                Assert.Equal((ulong)0, session.PrefixCacheStats.Entries);
+
+                var mutated = new Hashtable();
+                var request = new StructuredRequest(
+                    mutated,
+                    new Dictionary<string, StructuredQuestion>
+                    {
+                        ["q"] = new StructuredQuestion("noul", "Take an umbrella?")
+                    });
+                mutated["self"] = mutated;
+                Assert.Throws<ArgumentException>(() => session.Decide(request));
             }
         }
     }
