@@ -144,6 +144,22 @@ def export_model_specific_components(options, output_root: Path):
     successful call writes the ONNX head and ``component_manifest.json``.
     """
     model_type = detect_model_specific_artifact(options.model_source)
+    head_filename = "clm_heads.onnx" if model_type == "clm" else "kev_head.onnx"
+    if options.backbone_filename.casefold() == head_filename.casefold():
+        raise ValueError(
+            "component backbone filename conflicts with model-specific head "
+            f"{head_filename!r}"
+        )
+    from builder_config import validate_destination_path  # noqa: PLC0415
+
+    validate_destination_path(
+        output_root, output_root / head_filename, f"{model_type} head"
+    )
+    validate_destination_path(
+        output_root,
+        output_root / "component_manifest.json",
+        "component manifest",
+    )
     if model_type == "clm":
         manifest = export_clm_components(options, output_root)
     else:
