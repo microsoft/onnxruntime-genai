@@ -5,9 +5,9 @@
 
 #include "generator/generators.h"
 #include "models/utils.h"
+#include "metadata_core_state.h"
 #include "ortx_tokenizer.h"
 
-#include <deque>
 #include <memory>
 #include <optional>
 #include <span>
@@ -18,82 +18,27 @@ namespace Generators {
 
 struct Config;
 struct Tensor;
-struct TokenTiming;
 
 struct Tokenizer;
-
-struct TimestampRecord {
-  std::string text;
-  int64_t start_frame{};
-  int64_t stop_frame{};
-  double start_time{};
-  double stop_time{};
-};
-
-// words and segments contain only records completed by the current decode or
-// finalize call. A list may be empty or contain multiple records when one
-// decoded token spans multiple boundaries; callers retain any desired history.
-struct TimestampDecodeResult {
-  std::string text;
-  std::vector<TimestampRecord> words;
-  std::vector<TimestampRecord> segments;
-};
-
-struct PendingTimestampSpan {
-  std::string text;
-  int64_t start_frame{};
-  int64_t stop_frame{};
-  bool active{false};
-};
-
-struct BufferedTokenTiming {
-  int64_t start_frame{};
-  int64_t stop_frame{};
-};
-
-struct TimestampTokenizerConfig {
-  Config::TimestampLevel level{Config::TimestampLevel::Off};
-  std::vector<std::string> segment_separators;
-  std::optional<int> segment_gap_threshold_frames;
-  int sample_rate{};
-  int hop_length{};
-  int subsampling_factor{};
-};
-
-struct TimestampDecodeState {
-  explicit TimestampDecodeState(const TimestampTokenizerConfig& config);
-
-  void ClearResult();
-  void Consume(const TokenTiming& token, const OrtxDetokenizeMetadata& metadata);
-  void Finalize(const OrtxDetokenizeMetadata& metadata);
-
-  Config::TimestampLevel level_{Config::TimestampLevel::Off};
-  std::vector<std::string> segment_separators_;
-  std::optional<int> segment_gap_threshold_frames_;
-  double seconds_per_frame_{};
-  std::deque<BufferedTokenTiming> pending_token_timings_;
-  size_t first_pending_token_index_{};
-  PendingTimestampSpan pending_segment_;
-  TimestampDecodeResult result_;
-
- private:
-  void ConsumeCompletedWords(const OrtxDetokenizeMetadata& metadata);
-  void PublishWord(std::string_view text, int64_t start_frame, int64_t stop_frame);
-  void CompleteSegment();
-};
 
 struct TokenizerStream : LeakChecked<TokenizerStream> {
   enum class DecodeMode {
     Unset,
     Text,
-    Timestamps,
+    Metadata,
   };
 
   TokenizerStream(const Tokenizer& tokenizer);
+  ~TokenizerStream();
+  TokenizerStream(const TokenizerStream&) = delete;
+  TokenizerStream& operator=(const TokenizerStream&) = delete;
+
+  std::shared_ptr<MetadataCoreState> CreateMetadataCoreState(const MetadataCoreConfig& config);
+  std::shared_ptr<MetadataCoreState> CreateMetadataCoreStateUsingTokenizerConfig();
+  const OgaTokenMetadataOutput& DecodeWithMetadata(const OgaTokenMetadataInput& token);
+  const OgaTokenMetadataOutput& FinalizeMetadata();
 
   const std::string& Decode(int32_t token);
-  const TimestampDecodeResult& DecodeWithTimestamps(const TokenTiming& token);
-  const TimestampDecodeResult& FinalizeTimestamps();
   void Reset();
 
  private:
@@ -101,8 +46,7 @@ struct TokenizerStream : LeakChecked<TokenizerStream> {
   OrtxPtr<OrtxObject> cache_;
   std::string chunk_;
   DecodeMode decode_mode_{DecodeMode::Unset};
-  // Null unless timestamp decoding is enabled and used; ordinary Decode has no accumulator work.
-  std::unique_ptr<TimestampDecodeState> timestamp_state_;
+  std::shared_ptr<MetadataCoreState> metadata_state_;
 };
 
 // Turn an array of ragged token sequences into a 2D input suitable for batching. Handles padding for the model.
@@ -112,6 +56,7 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
   Tokenizer(const Config& config);
 
   std::unique_ptr<TokenizerStream> CreateStream() const;
+  MetadataCoreConfig GetMetadataCoreConfig() const;
 
   void UpdateOptions(const char* const* keys, const char* const* values, size_t num_options);
   std::vector<int32_t> Encode(const char* text) const;
@@ -146,8 +91,7 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
   std::optional<int32_t> eot_token_id_;
   std::optional<int32_t> bor_token_id_;
   std::optional<int32_t> eor_token_id_;
-  // Empty for timestamp-disabled and unsupported models.
-  std::optional<TimestampTokenizerConfig> timestamp_config_;
+  MetadataCoreConfig metadata_config_;
 };
 
 }  // namespace Generators

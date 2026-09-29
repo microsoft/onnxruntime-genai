@@ -708,6 +708,8 @@ void SetProviderOption(Config& config, std::string_view provider_name, std::stri
 void OverlayConfig(Config& config, std::string_view json);
 int SafeDoubleToInt(double x, std::string_view name);
 std::optional<int> GetSegmentGapThresholdFrames(const Config::Model& model);
+std::optional<int> GetSegmentGapThresholdFrames(std::optional<double> seconds, int sample_rate,
+                                                int hop_length, int subsampling_factor);
 
 // Normalizes historical casings, short aliases, and full ORT names (e.g.
 // "CUDAExecutionProvider") to the canonical dispatch-table name; unknown names pass through.

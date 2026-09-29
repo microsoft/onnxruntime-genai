@@ -37,6 +37,7 @@ struct TransducerState : State {
   bool IsChunkDone() const { return chunk_done_; }
   std::span<const int32_t> GetStepTokens() const { return last_tokens_; }
   std::span<const TokenTiming> GetStepTokenTimings() const { return last_token_timings_; }
+  bool TimestampsEnabled() const { return timestamps_enabled_; }
   std::span<const int32_t> GetAllTokens() const { return all_tokens_; }
   size_t TokenCount() const { return all_tokens_.size(); }
 

@@ -61,6 +61,7 @@ if (useVad == "true") {
 
 using var tokenizer = new Tokenizer(model);
 using var tokenizerStream = tokenizer.CreateStream();
+if (timestampsEnabled) tokenizerStream.CreateMetadataCoreStateUsingTokenizerConfig();
 using var genParams = new GeneratorParams(model);
 using var generator = new Generator(model, genParams);
 Console.WriteLine(new string('-', 60));
@@ -96,7 +97,7 @@ if (flushInputs != null) {
 if (!timestampsEnabled) {
   // Ordinary decoding has no pending timestamp records.
 } else {
-  var result = tokenizerStream.FinalizeTimestamps();
+  var result = tokenizerStream.FinalizeMetadata();
   fullTranscript += FormatTimestampRecords(result, timestampLevel is "segment" or "all");
   if (timestampLevel == "all")
     allWordTranscript.Append(FormatTimestampRecords(result, false));
@@ -129,8 +130,9 @@ static string DecodeTokens(Generator generator, TokenizerStream tokenizerStream,
         text += tokenText;
       }
     } else {
-      foreach (var token in generator.GetNextTokensWithTimings()) {
-        var result = tokenizerStream.DecodeWithTimestamps(token);
+      var tokens = generator.GetNextTokensWithMetadata();
+      foreach (var token in tokens) {
+        var result = tokenizerStream.DecodeWithMetadata(token);
         string timestampedText = FormatTimestampRecords(result, timestampLevel is "segment" or "all");
         if (timestampLevel == "all")
           allWordTranscript.Append(FormatTimestampRecords(result, false));
@@ -142,8 +144,9 @@ static string DecodeTokens(Generator generator, TokenizerStream tokenizerStream,
   return text;
 }
 
-static string FormatTimestampRecords(TimestampDecodeResult result, bool useSegments) {
-  var records = useSegments ? result.Segments : result.Words;
+static string FormatTimestampRecords(TokenMetadataOutput result, bool useSegments) {
+  if (result.TimestampMetadata == null) return "";
+  var records = useSegments ? result.TimestampMetadata.Segments : result.TimestampMetadata.Words;
   return string.Concat(records.Select(record => {
     string text = useSegments ? record.Text : record.Text.Trim();
     string separator = useSegments && (text.Length == 0 || !char.IsWhiteSpace(text[0])) ? " " : "";

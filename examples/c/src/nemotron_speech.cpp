@@ -144,22 +144,17 @@ std::vector<float> LoadWav(const std::string& path, int target_sample_rate) {
   throw std::runtime_error("No data chunk found in WAV file");
 }
 
-void AppendTimestampRecords(const OgaTimestampDecodeResult& result, bool use_segments,
+void AppendTimestampRecords(const OgaTokenMetadataOutput& result, bool use_segments,
                             std::string& transcript, bool print_output = true) {
-  const size_t count = use_segments ? result.GetSegmentCount() : result.GetWordCount();
+  if (!result.timestampMetadata) return;
+  const auto& timestamps = *result.timestampMetadata;
+  const size_t count = use_segments ? timestamps.segment_count : timestamps.word_count;
+  const auto* records = use_segments ? timestamps.segments : timestamps.words;
   for (size_t index = 0; index < count; ++index) {
-    const char* text;
-    int64_t start_frame;
-    int64_t stop_frame;
-    double start_time;
-    double stop_time;
-    OgaCheckResult(use_segments
-                       ? OgaTimestampDecodeResultGetSegment(&result, index, &text, &start_frame, &stop_frame,
-                                                            &start_time, &stop_time)
-                       : OgaTimestampDecodeResultGetWord(&result, index, &text, &start_frame, &stop_frame,
-                                                         &start_time, &stop_time));
+    const auto& record = records[index];
+    const char* text = record.text;
     std::ostringstream output;
-    output << '[' << std::fixed << std::setprecision(2) << start_time << " - " << stop_time << ']';
+    output << '[' << std::fixed << std::setprecision(2) << record.start_time << " - " << record.stop_time << ']';
     if (use_segments) {
       if (text[0] == '\0' || !std::isspace(static_cast<unsigned char>(text[0]))) output << ' ';
       output << text;
@@ -191,8 +186,9 @@ std::string DecodeTokens(OgaGenerator& generator, OgaTokenizerStream& tokenizer_
         }
       }
     } else {
-      for (const auto& token : generator.GetNextTokensWithTimings()) {
-        const auto& result = tokenizer_stream.DecodeWithTimestamps(token);
+      const auto tokens = generator.GetNextTokensWithMetadata();
+      for (const auto& token : tokens) {
+        const auto& result = tokenizer_stream.DecodeWithMetadata(token);
         AppendTimestampRecords(result, use_segments, text);
         if (timestamp_level == "all") {
           AppendTimestampRecords(result, false, all_word_transcript, false);
@@ -234,6 +230,7 @@ void StreamingTranscribe(const std::string& model_path, const std::string& audio
 
   auto tokenizer = OgaTokenizer::Create(*model);
   auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
+  if (timestamps_enabled) tokenizer_stream->CreateMetadataCoreStateUsingTokenizerConfig();
   auto params = OgaGeneratorParams::Create(*model);
   auto generator = OgaGenerator::Create(*model, *params);
 
@@ -274,7 +271,7 @@ void StreamingTranscribe(const std::string& model_path, const std::string& audio
   if (!timestamps_enabled) {
     // Ordinary decoding has no pending timestamp records.
   } else {
-    const auto& result = tokenizer_stream->FinalizeTimestamps();
+    const auto& result = tokenizer_stream->FinalizeMetadata();
     AppendTimestampRecords(result, timestamp_level == "segment" || timestamp_level == "all",
                            full_transcript);
     if (timestamp_level == "all") {

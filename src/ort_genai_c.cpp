@@ -108,6 +108,7 @@ struct OgaStringArray : std::vector<std::string>, OgaAbstract {};
 struct OgaTensor : Generators::Tensor, OgaAbstract {};
 struct OgaTokenizer : Generators::Tokenizer, OgaAbstract {};
 struct OgaTokenizerStream : Generators::TokenizerStream, OgaAbstract {};
+struct OgaTokenMetadataCoreConfig : Generators::MetadataCoreConfig, OgaAbstract {};
 struct OgaEngine : Generators::Engine, OgaAbstract {};
 struct OgaEngineEvent : Generators::EngineEvent, OgaAbstract {};
 struct OgaEngineEventBuffer : Generators::EngineEventBuffer, OgaAbstract {};
@@ -707,15 +708,11 @@ OgaResult* OGA_API_CALL OgaGenerator_GetNextTokens(const OgaGenerator* generator
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGenerator_GetNextTokensWithTimings(const OgaGenerator* generator,
-                                                              const OgaTokenTiming** out,
-                                                              size_t* out_count) {
+OgaResult* OGA_API_CALL OgaGenerator_GetNextTokensWithMetadata(const OgaGenerator* generator, const OgaTokenMetadataInput** out, size_t* out_count) {
   OGA_TRY
-  static_assert(sizeof(OgaTokenTiming) == sizeof(Generators::TokenTiming));
-  static_assert(alignof(OgaTokenTiming) == alignof(Generators::TokenTiming));
-  const auto timings = generator->GetNextTokensWithTimings();
-  *out = reinterpret_cast<const OgaTokenTiming*>(timings.data());
-  *out_count = timings.size();
+  const auto tokens = generator->GetNextTokensWithMetadata();
+  *out = tokens.data();
+  *out_count = tokens.size();
   return nullptr;
   OGA_CATCH
 }
@@ -1219,85 +1216,55 @@ OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream* p, int32_t 
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaTokenizerStreamDecodeWithTimestamps(
-    OgaTokenizerStream* stream, const OgaTokenTiming* token, const OgaTimestampDecodeResult** out) {
+OgaResult* OGA_API_CALL OgaCreateTokenMetadataCoreConfig(OgaTokenMetadataCoreConfig** out) {
   OGA_TRY
-  if (!stream || !token || !out) throw std::invalid_argument("stream, token, and out must not be null");
-  const Generators::TokenTiming internal_token{token->token_id, token->start_frame, token->stop_frame};
-  *out = reinterpret_cast<const OgaTimestampDecodeResult*>(&stream->DecodeWithTimestamps(internal_token));
+  *out = ReturnUnique<OgaTokenMetadataCoreConfig>(std::make_unique<Generators::MetadataCoreConfig>());
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaTokenizerStreamFinalizeTimestamps(
-    OgaTokenizerStream* stream, const OgaTimestampDecodeResult** out) {
+OgaResult* OGA_API_CALL OgaTokenMetadataCoreConfigOverlay(OgaTokenMetadataCoreConfig* config, const char* json) {
   OGA_TRY
-  if (!stream || !out) throw std::invalid_argument("stream and out must not be null");
-  *out = reinterpret_cast<const OgaTimestampDecodeResult*>(&stream->FinalizeTimestamps());
+  Generators::OverlayMetadataCoreConfig(*config, json);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerStreamCreateMetadataCoreStateUsingTokenizerConfig(OgaTokenizerStream* stream) {
+  OGA_TRY
+  stream->CreateMetadataCoreStateUsingTokenizerConfig();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerStreamCreateMetadataCoreState(
+    OgaTokenizerStream* stream, const OgaTokenMetadataCoreConfig* config) {
+  OGA_TRY
+  stream->CreateMetadataCoreState(*config);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerStreamDecodeWithMetadata(
+    OgaTokenizerStream* stream, const OgaTokenMetadataInput* token, const OgaTokenMetadataOutput** out) {
+  OGA_TRY
+  *out = &stream->DecodeWithMetadata(*token);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerStreamFinalizeMetadata(OgaTokenizerStream* stream, const OgaTokenMetadataOutput** out) {
+  OGA_TRY
+  *out = &stream->FinalizeMetadata();
   return nullptr;
   OGA_CATCH
 }
 
 OgaResult* OGA_API_CALL OgaTokenizerStreamReset(OgaTokenizerStream* stream) {
   OGA_TRY
-  if (!stream) throw std::invalid_argument("stream must not be null");
   stream->Reset();
   return nullptr;
   OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaTimestampDecodeResultGetText(
-    const OgaTimestampDecodeResult* result, const char** out) {
-  OGA_TRY
-  if (!result || !out) throw std::invalid_argument("result and out must not be null");
-  const auto* internal = reinterpret_cast<const Generators::TimestampDecodeResult*>(result);
-  *out = internal->text.c_str();
-  return nullptr;
-  OGA_CATCH
-}
-
-size_t OGA_API_CALL OgaTimestampDecodeResultGetWordCount(const OgaTimestampDecodeResult* result) {
-  if (!result) return 0;
-  return reinterpret_cast<const Generators::TimestampDecodeResult*>(result)->words.size();
-}
-
-size_t OGA_API_CALL OgaTimestampDecodeResultGetSegmentCount(const OgaTimestampDecodeResult* result) {
-  if (!result) return 0;
-  return reinterpret_cast<const Generators::TimestampDecodeResult*>(result)->segments.size();
-}
-
-namespace {
-OgaResult* GetTimestampRecord(const OgaTimestampDecodeResult* result, size_t index, bool word,
-                              const char** text, int64_t* start_frame, int64_t* stop_frame,
-                              double* start_time, double* stop_time) {
-  OGA_TRY
-  if (!result || !text || !start_frame || !stop_frame || !start_time || !stop_time) {
-    throw std::invalid_argument("timestamp result outputs must not be null");
-  }
-  const auto* internal = reinterpret_cast<const Generators::TimestampDecodeResult*>(result);
-  const auto& records = word ? internal->words : internal->segments;
-  if (index >= records.size()) throw std::out_of_range("timestamp record index is out of range");
-  const auto& record = records[index];
-  *text = record.text.c_str();
-  *start_frame = record.start_frame;
-  *stop_frame = record.stop_frame;
-  *start_time = record.start_time;
-  *stop_time = record.stop_time;
-  return nullptr;
-  OGA_CATCH
-}
-}  // namespace
-
-OgaResult* OGA_API_CALL OgaTimestampDecodeResultGetWord(
-    const OgaTimestampDecodeResult* result, size_t index, const char** text,
-    int64_t* start_frame, int64_t* stop_frame, double* start_time, double* stop_time) {
-  return GetTimestampRecord(result, index, true, text, start_frame, stop_frame, start_time, stop_time);
-}
-
-OgaResult* OGA_API_CALL OgaTimestampDecodeResultGetSegment(
-    const OgaTimestampDecodeResult* result, size_t index, const char** text,
-    int64_t* start_frame, int64_t* stop_frame, double* start_time, double* stop_time) {
-  return GetTimestampRecord(result, index, false, text, start_frame, stop_frame, start_time, stop_time);
 }
 
 OgaResult* OGA_API_CALL OgaCreateTensorFromBuffer(void* data, const int64_t* shape_dims, size_t shape_dims_count, OgaElementType element_type, OgaTensor** out) {
@@ -2190,6 +2157,7 @@ void OGA_API_CALL OgaDestroyGeneratorParams(OgaGeneratorParams* p) { p->External
 void OGA_API_CALL OgaDestroyGenerator(OgaGenerator* p) { delete static_cast<Generators::Generator*>(p); }
 void OGA_API_CALL OgaDestroyTokenizer(OgaTokenizer* p) { p->ExternalRelease(); }
 void OGA_API_CALL OgaDestroyTokenizerStream(OgaTokenizerStream* p) { delete static_cast<Generators::TokenizerStream*>(p); }
+void OGA_API_CALL OgaDestroyTokenMetadataCoreConfig(OgaTokenMetadataCoreConfig* p) { delete static_cast<Generators::MetadataCoreConfig*>(p); }
 void OGA_API_CALL OgaDestroyTensor(OgaTensor* p) { p->ExternalRelease(); }
 void OGA_API_CALL OgaDestroyMultiModalProcessor(OgaMultiModalProcessor* p) { p->ExternalRelease(); }
 void OGA_API_CALL OgaDestroyImages(OgaImages* p) { delete static_cast<Generators::Images*>(p); }

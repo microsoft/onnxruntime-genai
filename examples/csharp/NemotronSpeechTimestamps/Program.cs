@@ -43,6 +43,7 @@ if (useVadOverride == "true") {
 
 using var tokenizer = new Tokenizer(model);
 using var tokenizerStream = tokenizer.CreateStream();
+tokenizerStream.CreateMetadataCoreStateUsingTokenizerConfig();
 using var generatorParams = new GeneratorParams(model);
 using var generator = new Generator(model, generatorParams);
 var timestampedTranscript = new StringBuilder();
@@ -65,7 +66,7 @@ if (flushInputs != null) {
   DecodeSegments(generator, tokenizerStream, timestampedTranscript);
 }
 
-AppendSegments(tokenizerStream.FinalizeTimestamps(), timestampedTranscript);
+AppendSegments(tokenizerStream.FinalizeMetadata(), timestampedTranscript);
 
 Console.WriteLine();
 Console.WriteLine(new string('=', 60));
@@ -76,14 +77,16 @@ static void DecodeSegments(Generator generator, TokenizerStream tokenizerStream,
                            StringBuilder timestampedTranscript) {
   while (!generator.IsDone()) {
     generator.GenerateNextToken();
-    foreach (var token in generator.GetNextTokensWithTimings()) {
-      AppendSegments(tokenizerStream.DecodeWithTimestamps(token), timestampedTranscript);
+    var tokens = generator.GetNextTokensWithMetadata();
+    foreach (var token in tokens) {
+        AppendSegments(tokenizerStream.DecodeWithMetadata(token), timestampedTranscript);
     }
   }
 }
 
-static void AppendSegments(TimestampDecodeResult result, StringBuilder timestampedTranscript) {
-  foreach (var segment in result.Segments) {
+static void AppendSegments(TokenMetadataOutput result, StringBuilder timestampedTranscript) {
+  if (result.TimestampMetadata == null) return;
+  foreach (var segment in result.TimestampMetadata.Segments) {
     string separator = segment.Text.Length > 0 && char.IsWhiteSpace(segment.Text[0]) ? "" : " ";
     string timestampedSegment = $"[{segment.StartTime:F2} - {segment.StopTime:F2}]{separator}{segment.Text}";
     timestampedTranscript.Append(timestampedSegment);

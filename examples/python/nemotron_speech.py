@@ -124,7 +124,10 @@ def load_audio(audio_path, sample_rate):
 
 
 def format_timestamp_records(result, use_segments):
-    records = result["segments"] if use_segments else result["words"]
+    timestamps = result["timestamp_metadata"]
+    if timestamps is None:
+        return ""
+    records = timestamps["segments"] if use_segments else timestamps["words"]
     formatted = []
     for record in records:
         text = record["text"] if use_segments else record["text"].strip()
@@ -151,9 +154,9 @@ def decode_tokens(generator, tokenizer_stream, timestamp_level, all_word_transcr
                 print(token_text, end="", flush=True)
                 text += token_text
         else:
-            timed_tokens = generator.get_next_tokens_with_timings()
-            for timed_token in timed_tokens:
-                result = tokenizer_stream.decode_with_timestamps(timed_token)
+            tokens = generator.get_next_tokens_with_metadata()
+            for token in tokens:
+                result = tokenizer_stream.decode_with_metadata(token)
                 timestamped_text = format_timestamp_records(
                     result, timestamp_level in ("segment", "all")
                 )
@@ -201,6 +204,8 @@ def simulate_microphone(model_path, audio_path, execution_provider, use_vad=None
 
     tokenizer = og.Tokenizer(model)
     tokenizer_stream = tokenizer.create_stream()
+    if timestamps_enabled:
+        tokenizer_stream.create_metadata_core_state_using_tokenizer_config()
     params = og.GeneratorParams(model)
     generator = og.Generator(model, params)
     # Per-generator language selection
@@ -241,7 +246,7 @@ def simulate_microphone(model_path, audio_path, execution_provider, use_vad=None
         # Ordinary decoding has no pending timestamp records.
         pass
     else:
-        final_result = tokenizer_stream.finalize_timestamps()
+        final_result = tokenizer_stream.finalize_metadata()
         full_transcript += format_timestamp_records(
             final_result, timestamp_level in ("segment", "all")
         )

@@ -71,7 +71,6 @@ typedef struct OgaModel OgaModel;
 typedef struct OgaSequences OgaSequences;
 typedef struct OgaTokenizer OgaTokenizer;
 typedef struct OgaTokenizerStream OgaTokenizerStream;
-typedef struct OgaTimestampDecodeResult OgaTimestampDecodeResult;
 typedef struct OgaTensor OgaTensor;
 typedef struct OgaImages OgaImages;
 typedef struct OgaNamedTensors OgaNamedTensors;
@@ -88,11 +87,50 @@ typedef struct OgaTurnOptions OgaTurnOptions;
 typedef struct OgaTurnUsage OgaTurnUsage;
 typedef struct OgaStreamingProcessor OgaStreamingProcessor;
 
-typedef struct OgaTokenTiming {
+/** Mutable metadata options. A tokenizer stream copies them when it creates its metadata state. */
+typedef struct OgaTokenMetadataCoreConfig OgaTokenMetadataCoreConfig;
+
+/** Half-open [start, stop) interval in absolute acoustic frames. */
+typedef struct OgaTokenMetadataAcousticFrameInterval {
+    int64_t start;
+    int64_t stop;
+} OgaTokenMetadataAcousticFrameInterval;
+
+/** One emitted token with an optional acoustic interval stored by value.
+ * The generator's returned array is borrowed, but individual records may be copied.
+ * A zero presence field means timing is unavailable or disabled.
+ */
+typedef struct OgaTokenMetadataInput {
     int32_t token_id;
+    int32_t has_token_acoustic_frame_interval;
+    OgaTokenMetadataAcousticFrameInterval token_acoustic_frame_interval;
+} OgaTokenMetadataInput;
+
+/** Completed word or segment with its text, frame bounds, and times in seconds. */
+typedef struct OgaTokenMetadataTimestampRecord {
+    const char* text;
     int64_t start_frame;
     int64_t stop_frame;
-} OgaTokenTiming;
+    double start_time;
+    double stop_time;
+} OgaTokenMetadataTimestampRecord;
+
+/** Word and segment events completed by the current decode/finalize call, not cumulative history. */
+typedef struct OgaTokenMetadataTimestamp {
+    const OgaTokenMetadataTimestampRecord* words;
+    size_t word_count;
+    const OgaTokenMetadataTimestampRecord* segments;
+    size_t segment_count;
+} OgaTokenMetadataTimestamp;
+
+/** Decoded text and optional timestamp events from one decode/finalize operation.
+ * Owned by the stream; all pointers expire at its next decode/finalize/reset or destruction.
+ * Feature data is NULL when disabled. Read fields directly; do not free these pointers.
+ */
+typedef struct OgaTokenMetadataOutput {
+    const char* text;
+    const OgaTokenMetadataTimestamp* timestampMetadata;
+} OgaTokenMetadataOutput;
 
 /**
  * \brief Reason why an Engine Request's generation turn stopped.
@@ -719,11 +757,10 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* 
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetNextTokens(const OgaGenerator* generator, const int32_t** out, size_t* out_count);
 
-/**
- * \brief Returns self-contained token and timing records from the most recent timestamp-enabled transducer step.
- * The returned pointer is valid until the next OgaGenerator call. The count is zero when timestamps are disabled.
+/** Read the latest generation step; does not advance generation.
+ * Returned records are borrowed until the next generator operation or destruction.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetNextTokensWithTimings(const OgaGenerator* generator, const OgaTokenTiming** out, size_t* out_count);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetNextTokensWithMetadata(const OgaGenerator* generator, const OgaTokenMetadataInput** out, size_t* out_count);
 
 /**
  * \brief Set a runtime option's name and value.
@@ -1072,16 +1109,30 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizerStream(OgaTokenizerStream*);
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream*, int32_t token, const char** out);
 
-/** Timestamp-aware decode on the existing stream. Results remain valid until its next operation. */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamDecodeWithTimestamps(OgaTokenizerStream*, const OgaTokenTiming* token, const OgaTimestampDecodeResult** out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamFinalizeTimestamps(OgaTokenizerStream*, const OgaTimestampDecodeResult** out);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamReset(OgaTokenizerStream*);
+/** Create an owned metadata configuration with all features disabled. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateTokenMetadataCoreConfig(OgaTokenMetadataCoreConfig** out);
+/** Apply a JSON overlay to the configuration. See docs/metadata_decode.md for settings. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenMetadataCoreConfigOverlay(OgaTokenMetadataCoreConfig*, const char* json);
+OGA_EXPORT void OGA_API_CALL OgaDestroyTokenMetadataCoreConfig(OgaTokenMetadataCoreConfig*);
 
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTimestampDecodeResultGetText(const OgaTimestampDecodeResult*, const char** out);
-OGA_EXPORT size_t OGA_API_CALL OgaTimestampDecodeResultGetWordCount(const OgaTimestampDecodeResult*);
-OGA_EXPORT size_t OGA_API_CALL OgaTimestampDecodeResultGetSegmentCount(const OgaTimestampDecodeResult*);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTimestampDecodeResultGetWord(const OgaTimestampDecodeResult*, size_t index, const char** text, int64_t* start_frame, int64_t* stop_frame, double* start_time, double* stop_time);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTimestampDecodeResultGetSegment(const OgaTimestampDecodeResult*, size_t index, const char** text, int64_t* start_frame, int64_t* stop_frame, double* start_time, double* stop_time);
+/** Explicitly create stream-owned metadata state using the tokenizer's model configuration.
+ * Call before decoding and again after Reset. Fails if a state already exists or decoding has started.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamCreateMetadataCoreStateUsingTokenizerConfig(OgaTokenizerStream*);
+
+/** Explicitly create stream-owned metadata state from copied per-stream settings.
+ * Requires a non-null config. Must precede decoding; Reset permits reinitialization.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamCreateMetadataCoreState(OgaTokenizerStream*, const OgaTokenMetadataCoreConfig* config);
+
+/** Decode a generated token record. Enabled timestamps require a present, valid interval.
+ * Requires explicit metadata state creation. Runs enabled post-processing before returning.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamDecodeWithMetadata(OgaTokenizerStream*, const OgaTokenMetadataInput* token, const OgaTokenMetadataOutput** out);
+/** Flush enabled metadata processing without generating or injecting a token. */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamFinalizeMetadata(OgaTokenizerStream*, const OgaTokenMetadataOutput** out);
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamReset(OgaTokenizerStream*);
 
 /** Create an OgaTensor from an optional user owned buffer. If a user owned buffer is supplied, the OgaTensor does
  * not own the memory (as it has no way to free it) so the 'data' parameter must be valid for the lifetime of the OgaTensor.

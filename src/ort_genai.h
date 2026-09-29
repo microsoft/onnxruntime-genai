@@ -466,14 +466,18 @@ struct OgaTokenizer : OgaAbstract {
   static void operator delete(void* p) { OgaDestroyTokenizer(reinterpret_cast<OgaTokenizer*>(p)); }
 };
 
-struct OgaTimestampDecodeResult : OgaAbstract {
-  const char* GetText() const {
-    const char* out;
-    OgaCheckResult(OgaTimestampDecodeResultGetText(this, &out));
-    return out;
+struct OgaTokenMetadataCoreConfig : OgaAbstract {
+  static std::unique_ptr<OgaTokenMetadataCoreConfig> Create() {
+    OgaTokenMetadataCoreConfig* config;
+    OgaCheckResult(OgaCreateTokenMetadataCoreConfig(&config));
+    return std::unique_ptr<OgaTokenMetadataCoreConfig>(config);
   }
-  size_t GetWordCount() const { return OgaTimestampDecodeResultGetWordCount(this); }
-  size_t GetSegmentCount() const { return OgaTimestampDecodeResultGetSegmentCount(this); }
+
+  void Overlay(const char* json) {
+    OgaCheckResult(OgaTokenMetadataCoreConfigOverlay(this, json));
+  }
+
+  static void operator delete(void* config) { OgaDestroyTokenMetadataCoreConfig(reinterpret_cast<OgaTokenMetadataCoreConfig*>(config)); }
 };
 
 struct OgaTokenizerStream : OgaAbstract {
@@ -500,18 +504,25 @@ struct OgaTokenizerStream : OgaAbstract {
     return out;
   }
 
-  // Word and segment collections are per-call events. Either may be empty or
-  // contain multiple completed records when one token spans multiple boundaries.
-  const OgaTimestampDecodeResult& DecodeWithTimestamps(const OgaTokenTiming& token) {
-    const OgaTimestampDecodeResult* out;
-    OgaCheckResult(OgaTokenizerStreamDecodeWithTimestamps(this, &token, &out));
+  void CreateMetadataCoreStateUsingTokenizerConfig() {
+    OgaCheckResult(OgaTokenizerStreamCreateMetadataCoreStateUsingTokenizerConfig(this));
+  }
+
+  void CreateMetadataCoreState(const OgaTokenMetadataCoreConfig& config) {
+    OgaCheckResult(OgaTokenizerStreamCreateMetadataCoreState(this, &config));
+  }
+
+  const OgaTokenMetadataOutput& DecodeWithMetadata(const OgaTokenMetadataInput& token) {
+    const OgaTokenMetadataOutput* out;
+    OgaCheckResult(OgaTokenizerStreamDecodeWithMetadata(this, &token, &out));
     return *out;
   }
-  const OgaTimestampDecodeResult& FinalizeTimestamps() {
-    const OgaTimestampDecodeResult* out;
-    OgaCheckResult(OgaTokenizerStreamFinalizeTimestamps(this, &out));
+  const OgaTokenMetadataOutput& FinalizeMetadata() {
+    const OgaTokenMetadataOutput* out;
+    OgaCheckResult(OgaTokenizerStreamFinalizeMetadata(this, &out));
     return *out;
   }
+
   void Reset() { OgaCheckResult(OgaTokenizerStreamReset(this)); }
 
   static void operator delete(void* p) { OgaDestroyTokenizerStream(reinterpret_cast<OgaTokenizerStream*>(p)); }
@@ -632,21 +643,13 @@ struct OgaGenerator : OgaAbstract {
   }
 #endif
 
-#if OGA_USE_SPAN
-  std::span<const OgaTokenTiming> GetNextTokensWithTimings() {
-    const OgaTokenTiming* out;
+  std::vector<OgaTokenMetadataInput> GetNextTokensWithMetadata() {
+    const OgaTokenMetadataInput* out;
     size_t out_count;
-    OgaCheckResult(OgaGenerator_GetNextTokensWithTimings(this, &out, &out_count));
-    return {out, out_count};
+    OgaCheckResult(OgaGenerator_GetNextTokensWithMetadata(this, &out, &out_count));
+    if (out_count == 0) return {};
+    return {out, out + out_count};
   }
-#else
-  std::vector<OgaTokenTiming> GetNextTokensWithTimings() {
-    const OgaTokenTiming* out;
-    size_t out_count;
-    OgaCheckResult(OgaGenerator_GetNextTokensWithTimings(this, &out, &out_count));
-    return std::vector<OgaTokenTiming>(out, out + out_count);
-  }
-#endif
 
   void RewindTo(size_t new_length) {
     OgaCheckResult(OgaGenerator_RewindTo(this, new_length));
