@@ -104,7 +104,7 @@ class GptOssMXFP4Loader:
         )
 
     def prepare_experts(self, layer_id, decode=False):
-        prefix = f"model.layers.{layer_id}.moe.experts"
+        prefix = f"model.layers.{layer_id}.mlp.experts"
         gate_up_blocks = self.load_tensor(f"{prefix}.gate_up_proj_blocks")
         gate_up_scales = self.load_tensor(f"{prefix}.gate_up_proj_scales")
         down_blocks = self.load_tensor(f"{prefix}.down_proj_blocks")

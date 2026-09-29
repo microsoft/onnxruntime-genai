@@ -1243,6 +1243,9 @@ class Qwen35MoEModel(MTPModel):
         fuse_gate_up = str(extra_options.get("dflash2_fuse_gate_up", False)).lower()
         if fuse_gate_up not in ("true", "false"):
             raise ValueError("dflash2_fuse_gate_up must be true or false.")
+        fuse_qkv = str(extra_options.get("dflash2_fuse_qkv", False)).lower()
+        if fuse_qkv not in ("true", "false"):
+            raise ValueError("dflash2_fuse_qkv must be true or false.")
         self.dflash2_attrs = {
             "io_dtype": io_dtype,
             "compute_dtype": drafter_io_dtype,
@@ -1250,6 +1253,7 @@ class Qwen35MoEModel(MTPModel):
             "precision": self.block_drafter_precision(extra_options, "dflash2_precision"),
             "quant_config": drafter_quant_config,
             "fuse_gate_up": fuse_gate_up == "true",
+            "fuse_qkv": fuse_qkv == "true",
         }
 
         with open(os.path.join(self.dflash2_path, "config.json"), encoding="utf-8") as handle:
@@ -1293,7 +1297,8 @@ class Qwen35MoEModel(MTPModel):
             embed_quant=self.block_drafter_embed_quant(),
             fuse_gate_up=self.dflash2_attrs["fuse_gate_up"],
             include_attention_metadata=True,
-            compute_dtype=self.dflash2_attrs["compute_dtype"]
+            compute_dtype=self.dflash2_attrs["compute_dtype"],
+            fuse_qkv=self.dflash2_attrs["fuse_qkv"],
         )
         self.dflash2.make_model()
 

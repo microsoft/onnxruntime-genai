@@ -26,6 +26,8 @@ class BlockDrafterBuilder:
     # projection dense; subclasses set these from the target's quantization settings so the
     # drafter lands in the same format as the model it drafts for.
     quant_bits = None
+    # False when Q comes from the same packed rows as K/V, so the graph has no `q_row_map` input.
+    uses_q_row_map = True
     quant_block_size = 32
     quant_prepack = 0
     # Set only when the target's own LM head is symmetric/`default` quantized, which is the one
@@ -533,6 +535,8 @@ class BlockDrafterBuilder:
         if self.include_attention_metadata:
             declarations.append(("attention_metadata", ir.DataType.INT32, [3]))
         for name, dtype, shape in declarations:
+            if name == "q_row_map" and not self.uses_q_row_map:
+                continue
             self.graph.inputs.append(self.make_value(name, dtype, shape))
         # TODO: this is the target's block size. A drafter usually has the smaller head size and
         # so the larger FlashAttention tile, which means the block that is fastest for the target
@@ -599,7 +603,7 @@ class BlockDrafterBuilder:
             raise
 
     def genai_config_section(self):
-        return {
+        section = {
             "filename": self.filename,
             "session_options": {"ep.cuda.fpa_intb_gemm": "0"},
             "num_hidden_layers": self.num_layers,
@@ -631,3 +635,6 @@ class BlockDrafterBuilder:
                 "present_value_names": "present.%d.value",
             },
         }
+        if not self.uses_q_row_map:
+            del section["inputs"]["q_row_map"]
+        return section

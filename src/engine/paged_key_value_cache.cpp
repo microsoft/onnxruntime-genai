@@ -332,6 +332,12 @@ size_t RequiredSlots(const std::shared_ptr<Request>& request) {
 
 }  // namespace
 
+size_t PagedCacheMemoryBudget(size_t available_memory_bytes, float gpu_utilization_factor) {
+  constexpr float memory_fragmentation_factor = 0.9f;
+  return static_cast<size_t>(
+      available_memory_bytes * memory_fragmentation_factor * gpu_utilization_factor);
+}
+
 size_t ComputePagedBlockCapacityFromBytes(size_t available_memory_bytes,
                                           float gpu_utilization_factor,
                                           size_t reserved_memory_bytes,
@@ -340,9 +346,7 @@ size_t ComputePagedBlockCapacityFromBytes(size_t available_memory_bytes,
   if (primary_bytes_per_block == 0) {
     throw std::invalid_argument("Paged cache bytes per block must be greater than zero");
   }
-  constexpr float memory_fragmentation_factor = 0.9f;
-  const auto budget = static_cast<size_t>(
-      available_memory_bytes * memory_fragmentation_factor * gpu_utilization_factor);
+  const auto budget = PagedCacheMemoryBudget(available_memory_bytes, gpu_utilization_factor);
   if (budget <= reserved_memory_bytes) {
     throw std::runtime_error("The key-value cache budget is too small to hold the reserved decoder state.");
   }
@@ -874,6 +878,38 @@ bool PagedKeyValueCache::AttachPrefixCheckpoint(
   const auto table_index = block_table_index_->Find(request_id);
   return prefix_cache_->AttachCheckpoint(
       block_tables_[*table_index].sealed_identity_, std::move(checkpoint));
+}
+
+std::optional<DraftPrefixBoundary> PagedKeyValueCache::DraftBoundary(
+    const void* request_id, size_t token_count) const {
+  if (!prefix_cache_->Enabled() || !prefix_cache_->Options().requires_checkpoint) {
+    return std::nullopt;
+  }
+  const auto table_index = block_table_index_->Find(request_id);
+  if (!table_index || *table_index >= block_tables_.size()) {
+    return std::nullopt;
+  }
+  const auto& table = block_tables_[*table_index];
+  if (token_count == 0 || token_count != table.committed_slots_ ||
+      token_count % block_pool_->BlockSize() != 0 ||
+      table.sealed_blocks_ != token_count / block_pool_->BlockSize()) {
+    return std::nullopt;
+  }
+  auto checkpoint = prefix_cache_->DraftBoundary(table.sealed_identity_, token_count);
+  if (!checkpoint) {
+    return std::nullopt;
+  }
+  return DraftPrefixBoundary{table.sealed_identity_, std::move(checkpoint)};
+}
+
+bool PagedKeyValueCache::AttachDraftCheckpoint(
+    const DraftPrefixBoundary& boundary,
+    std::shared_ptr<const Dflash2PrefixCheckpoint> checkpoint) {
+  return prefix_cache_->AttachDraftCheckpoint(boundary.first, boundary.second, std::move(checkpoint));
+}
+
+void PagedKeyValueCache::DropUnleasedDraftCheckpoints() {
+  prefix_cache_->DropUnleasedDraftCheckpoints();
 }
 
 size_t PagedKeyValueCache::ReclaimPrefixCheckpoints(
