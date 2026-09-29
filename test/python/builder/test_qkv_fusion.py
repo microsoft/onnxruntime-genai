@@ -63,7 +63,17 @@ def _model(model_type, extra_options, use_paged_attention=True):
     return model
 
 
-@pytest.mark.parametrize(("extra_options", "expected"), [({}, True), ({"disable_qkv_fusion": True}, False)])
+@pytest.mark.parametrize(
+    ("extra_options", "expected"),
+    [
+        ({}, True),
+        ({"fuse_qkv": True}, True),
+        ({"fuse_qkv": False}, False),
+        ({"disable_qkv_fusion": True}, False),
+        ({"disable_qkv_fusion": False}, True),
+        ({"disable_qkv_fusion": True, "fuse_qkv": True}, True),
+    ],
+)
 def test_qwen35_paged_packs_qkv_unless_disabled(extra_options, expected):
     model = _model(Qwen35TextModel, extra_options)
 
@@ -73,7 +83,17 @@ def test_qwen35_paged_packs_qkv_unless_disabled(extra_options, expected):
     assert model.attention_attrs["use_packed_matmul"] is expected
 
 
-@pytest.mark.parametrize(("extra_options", "expected"), [({}, True), ({"disable_qkv_fusion": True}, False)])
+@pytest.mark.parametrize(
+    ("extra_options", "expected"),
+    [
+        ({}, True),
+        ({"fuse_qkv": True}, True),
+        ({"fuse_qkv": False}, False),
+        ({"disable_qkv_fusion": True}, False),
+        ({"disable_qkv_fusion": False}, True),
+        ({"disable_qkv_fusion": True, "fuse_qkv": True}, True),
+    ],
+)
 def test_qwen35_gqa_packs_qkv_unless_disabled(extra_options, expected):
     model = _model(Qwen35TextModel, extra_options, use_paged_attention=False)
 

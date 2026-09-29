@@ -725,7 +725,9 @@ class Model:
         return (
             self.ep not in ["dml"]
             and not self.matmul_attrs["use_lora"]
-            and not self.extra_options.get("disable_qkv_fusion", False)
+            and self.extra_options.get(
+                "fuse_qkv", not self.extra_options.get("disable_qkv_fusion", False)
+            )
         )
 
     def is_fused_rope_supported(self):
@@ -770,7 +772,9 @@ class Model:
                 not self.matmul_attrs["use_lora"]
                 and not self.attention_attrs["q_norm"]
                 and not self.attention_attrs["k_norm"]
-                and not self.extra_options.get("disable_qkv_fusion", False)
+                and self.extra_options.get(
+                    "fuse_qkv", not self.extra_options.get("disable_qkv_fusion", False)
+                )
             )
 
             # Some architectures require a separate RoPE op before PagedAttention.
