@@ -12,10 +12,11 @@ HybridDecoderIO::HybridDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
                                  std::shared_ptr<CacheManager> cache_manager,
                                  const ExecutionContext& execution_context,
                                  VarlenGraphBuffers* graph_buffers,
-                                 size_t position_planes)
+                                 size_t position_planes,
+                                 CpuEmbedding::Workspace* embedding_workspace)
     : DecoderIO(model, scheduled_requests, cache_manager),
       varlen_io_{model, scheduled_requests, cache_manager,
-                 &execution_context, graph_buffers, position_planes} {
+                 &execution_context, graph_buffers, position_planes, embedding_workspace} {
   input_names_ = varlen_io_.input_names_;
   inputs_ = varlen_io_.inputs_;
   output_names_ = varlen_io_.output_names_;

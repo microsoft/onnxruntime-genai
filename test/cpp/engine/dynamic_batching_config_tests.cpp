@@ -58,6 +58,34 @@ TEST(DynamicBatchingConfigTest, ScheduledTokenBudgetAcceptsOverride) {
   EXPECT_EQ(config.engine.dynamic_batching->max_scheduled_tokens, 321u);
 }
 
+TEST(DynamicBatchingConfigTest, PrefixCachingDefaultsToEnabled) {
+  const auto config = LoadDynamicConfig(R"({ "max_batch_size": 4 })");
+
+  ASSERT_TRUE(config.engine.dynamic_batching.has_value());
+  EXPECT_TRUE(config.engine.dynamic_batching->prefix_caching);
+  EXPECT_FALSE(
+      config.engine.dynamic_batching->prefix_caching_explicitly_set);
+}
+
+TEST(DynamicBatchingConfigTest, PrefixCachingAcceptsExplicitDisable) {
+  const auto config =
+      LoadDynamicConfig(R"({ "prefix_caching": false })");
+
+  ASSERT_TRUE(config.engine.dynamic_batching.has_value());
+  EXPECT_FALSE(config.engine.dynamic_batching->prefix_caching);
+  EXPECT_TRUE(
+      config.engine.dynamic_batching->prefix_caching_explicitly_set);
+}
+
+TEST(CpuEmbeddingConfigTest, PrefaultDefaultsOnAndCanBeDisabled) {
+  const fs::path model_path{std::string{MODEL_PATH "engine/dummy-decoder"}};
+  const Config default_config{model_path, "{}"};
+  EXPECT_TRUE(default_config.model.embedding.prefault);
+
+  const Config cold_start_config{model_path, R"({ "model": { "embedding": { "prefault": false } } })"};
+  EXPECT_FALSE(cold_start_config.model.embedding.prefault);
+}
+
 class InvalidScheduledTokenBudgetTest
     : public ::testing::TestWithParam<const char*> {};
 

@@ -11,6 +11,7 @@ Run the model builder to create the desired ONNX model.
 """
 
 import argparse
+import json
 import os
 import sys
 import textwrap
@@ -20,17 +21,26 @@ from typing import Any
 
 import onnx_ir as ir
 import torch
+from builder_config import (
+    apply_runtime_config,
+    load_json_object,
+    normalize_builder_config,
+    validate_model_dependent_config,
+)
 from builders import (
     ChatGLMModel,
     ErnieModel,
     Gemma2Model,
     Gemma3Model,
+    Gemma4Model,
+    Gemma4MoEModel,
     GemmaModel,
     GPTOSSModel,
     GraniteModel,
     GraniteMoEHybridModel,
     HunyuanDenseV1Model,
     InternLM2Model,
+    LFM2AudioModel,
     LFM2Model,
     LFM2MoEModel,
     LlamaModel,
@@ -56,7 +66,7 @@ from builders import (
     WhisperModel,
 )
 from builders.qwen import Qwen35Model, Qwen35MoEModel
-from quantization import KV_CACHE_QUANT_SCHEMES, QuantConfig
+from quantization import KV_CACHE_QUANT_SCHEMES, QuantConfig, default_io_dtype
 from transformers import AutoConfig, AutoTokenizer
 
 try:
@@ -135,7 +145,13 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
     hf_token = extra_options.get("hf_token", True)
     hf_remote = extra_options.get("hf_remote", False)
 
-    config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
+    try:
+        config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
+    except ValueError:
+        # LFM2-Audio checkpoints have no model_type; their LFM2 decoder config is nested.
+        config = LFM2AudioModel.load_config(hf_name, token=hf_token, **extra_kwargs)
+        if config is None:
+            raise
     tokenizer = AutoTokenizer.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
     add_special_token_ids(config, tokenizer)
     if extra_options.get("adapter_path", False):
@@ -197,6 +213,8 @@ def check_extra_options(
 
     for key in bools:
         if key in extra_options:
+            if isinstance(extra_options[key], bool):
+                continue
             if extra_options[key] in {"false", "False", "0"}:
                 extra_options[key] = False
             elif extra_options[key] in {"true", "True", "1"}:
@@ -247,7 +265,12 @@ def check_extra_options(
     if "mtp_quant_config" in extra_options:
         mtp_quant_config = extra_options["mtp_quant_config"]
         if not isinstance(mtp_quant_config, QuantConfig):
-            mtp_quant_config = QuantConfig.from_json(mtp_quant_config)
+            mtp_quant_data = load_json_object(mtp_quant_config, "mtp_quant_config")
+            wrapped_data = mtp_quant_data.get("quantization", mtp_quant_data)
+            checkpoint_policy_explicit = "checkpoint_policy" in wrapped_data
+            mtp_quant_config = QuantConfig.from_dict(mtp_quant_data)
+            if not checkpoint_policy_explicit:
+                mtp_quant_config.checkpoint_policy = "requantize"
         extra_options["mtp_quant_config"] = mtp_quant_config
 
     if extra_options.get("use_paged_attention", False):
@@ -312,13 +335,14 @@ def check_extra_options(
         extra_options["hf_token"] = parse_hf_token(extra_options["hf_token"])
 
     if extra_options.get("op_types_to_quantize", False):
-        op_types_to_quantize = ()
-        for op_type in extra_options["op_types_to_quantize"].split("/"):
-            op_types_to_quantize += (op_type,)
-        extra_options["op_types_to_quantize"] = op_types_to_quantize
+        op_types = extra_options["op_types_to_quantize"]
+        extra_options["op_types_to_quantize"] = (
+            tuple(op_types.split("/")) if isinstance(op_types, str) else tuple(op_types)
+        )
 
     if extra_options.get("nodes_to_exclude", False):
-        extra_options["nodes_to_exclude"] = extra_options["nodes_to_exclude"].split(",")
+        excluded = extra_options["nodes_to_exclude"]
+        extra_options["nodes_to_exclude"] = excluded.split(",") if isinstance(excluded, str) else list(excluded)
 
     for key in ("qmoe_weights_prepacked", "matmulnbits_weights_prepacked"):
         if key in extra_options:
@@ -334,7 +358,7 @@ def check_extra_options(
 
     # `moe_quant_type` is the single option that selects the MoE quantization scheme. It replaces the
     # older per-type flags (`use_8bits_moe``) so new schemes can be added without a new flag.
-    supported_moe_quant_types = {"int4", "int8", "mxfp4", "nvfp4"}
+    supported_moe_quant_types = {"int2", "int4", "int8", "mxfp4", "nvfp4"}
 
     # Backward compatibility: `use_8bits_moe` is deprecated in favor of `moe_quant_type`.
     if "use_8bits_moe" in extra_options:
@@ -360,6 +384,13 @@ def check_extra_options(
                     "int4 build precision is what exports the quantized QMoE op, and the FP4 scheme only sets the "
                     "MoE expert weights to the FP4 encoding."
                 )
+
+    if extra_options.get("moe_quant_type") == "int2":
+        if execution_provider != "cuda":
+            raise ValueError("INT2 QMoE is only supported on the CUDA EP.")
+        qmoe_block_size = int(extra_options.get("qmoe_block_size", 32))
+        if qmoe_block_size not in (64, 128):
+            raise ValueError("INT2 CUDA QMoE requires qmoe_block_size=64 or 128.")
 
     if extra_options.get("exclude_lm_head", False) and extra_options.get("include_hidden_states", False):
         # 'exclude_lm_head' is for when 'hidden_states' are outputted and 'logits' are not outputted
@@ -463,9 +494,20 @@ def parse_extra_options(
     execution_provider,
     cache_dir,
     extra_options,
+    builder_config_version=None,
+    target_options=None,
+    drafter_options=None,
+    speculative_options=None,
+    runtime_config=None,
+    search=None,
 ):
     """
-    Parse key-value pairs that are separated by '='
+    Parse CLI KEY=VALUE options and normalize the structured envelope.
+
+    Structured keyword arguments may be dictionaries, inline JSON, or JSON file
+    paths. extra_options itself remains a list of KEY=VALUE strings. This step
+    also loads Hugging Face metadata required by create_model; it is not a
+    checkpoint-free validation API.
     """
     kv_pairs = {}
 
@@ -476,16 +518,31 @@ def parse_extra_options(
             key, value = kv_str.split("=", 1)
             kv_pairs[key.strip()] = value.strip()
 
+    effective_config = normalize_builder_config(
+        precision,
+        execution_provider,
+        kv_pairs,
+        builder_config_version=builder_config_version,
+        target_options=target_options,
+        drafter_options=drafter_options,
+        speculative_options=speculative_options,
+        runtime_config=runtime_config,
+        search=search,
+    )
+    kv_pairs = effective_config.extra_options
     print(f"Extra options: {kv_pairs}")
     check_extra_options(
         model_name,
         input_path,
         output_dir,
-        precision,
+        effective_config.precision,
         execution_provider,
         cache_dir,
         kv_pairs
     )
+    if "hf_details" in kv_pairs:
+        validate_model_dependent_config(effective_config, kv_pairs["hf_details"]["hf_config"])
+    kv_pairs["_effective_builder_config"] = effective_config
     return kv_pairs
 
 
@@ -493,20 +550,11 @@ def set_io_dtype(precision, execution_provider, extra_options) -> ir.DataType:
     """
     Set the input/output precision of the ONNX model based on the provided precision and execution provider.
     """
-    cpu_quant = precision in {"int4", "int8"} and execution_provider == "cpu"
-    fp32_webgpu = execution_provider == "webgpu" and extra_options.get("use_webgpu_fp32", False)
-    bf16_cuda = precision == "int4" and execution_provider in {"cuda", "trt-rtx"} and extra_options.get("use_cuda_bf16", False)
-
-    if precision == "fp32" or cpu_quant or fp32_webgpu:
-        # FP32 precision
-        return ir.DataType.FLOAT
-
-    if precision == "bf16" or bf16_cuda:
-        # BF16 precision
-        return ir.DataType.BFLOAT16
-
-    # FP16 precision
-    return ir.DataType.FLOAT16
+    return {
+        "fp32": ir.DataType.FLOAT,
+        "bf16": ir.DataType.BFLOAT16,
+        "fp16": ir.DataType.FLOAT16,
+    }[default_io_dtype(precision, execution_provider, extra_options)]
 
 
 def set_onnx_dtype(precision: str, extra_options: dict[str, Any]) -> ir.DataType:
@@ -717,6 +765,36 @@ def _create_model_impl(
     telemetry_state,
     **extra_options,
 ):
+    """Export using options prepared by parse_extra_options.
+
+    A standalone structured call still needs prepared hf_details. Python callers
+    must supply the positional precision argument (None is allowed for an
+    explicit target weight type), even when the CLI permits omitting it.
+    """
+    effective_config = extra_options.pop("_effective_builder_config", None)
+    structured = {
+        key: extra_options.pop(key)
+        for key in (
+            "builder_config_version",
+            "target_options",
+            "drafter_options",
+            "speculative_options",
+            "runtime_config",
+            "search",
+        )
+        if key in extra_options
+    }
+    if effective_config is None and structured:
+        effective_config = normalize_builder_config(
+            precision,
+            execution_provider,
+            extra_options,
+            **structured,
+        )
+        extra_options = effective_config.extra_options
+    if effective_config is not None:
+        precision = effective_config.precision
+
     overall_start = time.perf_counter()
     normalized_execution_provider = _normalize_execution_provider_name(execution_provider)
     if normalized_execution_provider != execution_provider:
@@ -737,10 +815,16 @@ def _create_model_impl(
     extra_kwargs = hf_details.pop("extra_kwargs")
     hf_name = hf_details.pop("hf_name")
     config = hf_details.pop("hf_config")
+    if effective_config is not None:
+        validate_model_dependent_config(effective_config, config)
 
     # Set input/output precision of ONNX model
-    io_dtype = set_io_dtype(precision, execution_provider, extra_options)
-    onnx_dtype = set_onnx_dtype(precision, extra_options)
+    quant_config = extra_options.get("_quant_config")
+    if quant_config is not None:
+        io_dtype, onnx_dtype = quant_config.to_onnx_dtypes()
+    else:
+        io_dtype = set_io_dtype(precision, execution_provider, extra_options)
+        onnx_dtype = set_onnx_dtype(precision, extra_options)
     config_only = extra_options.get("config_only", False)
 
     # List architecture options in alphabetical order
@@ -766,6 +850,16 @@ def _create_model_impl(
         onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         if not onnx_model.exclude_embeds:
             onnx_model.model_type = "gemma3_vl_text"
+    elif config.architectures[0] == "Gemma4ForConditionalGeneration":
+        print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
+        print("WARNING: This is only generating the text component of the model. The vision and audio components are not supported.")
+        onnx_model = Gemma4MoEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        onnx_model.model_type = "gemma4_text"
+    elif config.architectures[0] == "Gemma4UnifiedForConditionalGeneration":
+        print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
+        print("WARNING: This is only generating the text component of the model. The vision and audio components are not supported.")
+        onnx_model = Gemma4Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        onnx_model.model_type = "gemma4_text"
     elif config.architectures[0] == "GptOssForCausalLM":
         print("WARNING: This model only supports symmetric quantization for `QMoE`.")
         if hasattr(config, "quantization_config") and config.quantization_config.get("quant_method") != "quark":
@@ -789,6 +883,10 @@ def _create_model_impl(
         # With the embedding layer excluded the decoder is one stage of the LFM2-VL vision pipeline;
         # otherwise it is a standalone text model that happens to come from a VLM checkpoint.
         onnx_model.model_type = "lfm2_vl" if onnx_model.exclude_embeds else "lfm2_vl_text"
+    elif config.architectures[0] == "Lfm2AudioForConditionalGeneration":
+        onnx_model = LFM2AudioModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        # Same split as LFM2-VL: the decoder stage of the lfm2_audio pipeline, or a plain text model.
+        onnx_model.model_type = "lfm2_audio" if onnx_model.exclude_embeds else "lfm2_audio_text"
     elif config.architectures[0] == "LlamaForCausalLM":
         onnx_model = LlamaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "MistralForCausalLM":
@@ -874,6 +972,17 @@ def _create_model_impl(
             onnx_model.save_model(output_dir)
 
         onnx_model.make_genai_config(config, extra_kwargs, output_dir)
+        # Composite exporters append MTP/block-drafter sections after the decoder.
+        # Apply the profile after generation so component names are preserved.
+        runtime_config = effective_config.runtime_config if effective_config is not None else extra_options.get("_runtime_config", {})
+        if runtime_config:
+            config_path = os.path.join(output_dir, "genai_config.json")
+            with open(config_path, encoding="utf-8") as config_file:
+                genai_config = json.load(config_file)
+            genai_config = apply_runtime_config(genai_config, runtime_config)
+            with open(config_path, "w", encoding="utf-8") as config_file:
+                json.dump(genai_config, config_file, indent=4)
+
         onnx_model.save_processing(hf_name, extra_kwargs, output_dir)
         build_success = True
     finally:
@@ -976,9 +1085,10 @@ def get_args():
     parser.add_argument(
         "-p",
         "--precision",
-        required=True,
+        required=False,
+        default=None,
         choices=["int4", "int8", "bf16", "fp16", "fp32"],
-        help="Precision of model",
+        help="Precision of model. Optional when target_options.quant_config specifies the target weight type.",
     )
 
     parser.add_argument(
@@ -1123,6 +1233,13 @@ def get_args():
                     weights into one MatMul or MatMulNBits followed by Split. Preserves BF16
                     activations and body quantization; does not change the target or LM head.
                     Requires re-export and workload-specific performance/quality validation.
+                dflash2_fuse_qkv = Experimental DFlash 2 attention Q/K/V projection fusion.
+                    Accepts true or false (default). Requires dflash2_path. Stacks each layer's
+                    query-block rows over the shared context rows and projects both with one
+                    MatMul or MatMulNBits, feeding PagedAttention a packed QKV stream. Replaces
+                    five projections per layer with one; the Q computed for context rows is dropped.
+                    The fused drafter omits the q_row_map input, so it requires a runtime that
+                    treats q_row_map as optional; older runtimes reject the exported package.
                 fuse_mlp_gate_up = Fuse each target model MLP's gate/up projections into one
                     MatMul or MatMulNBits followed by Split. Default is false. Applies before
                     target weight quantization and requires unpacked, unadapted gate/up
@@ -1130,9 +1247,11 @@ def get_args():
                 dflash2_precision = Weight precision for the DFlash 2 drafter body: bf16 (default),
                     int4, or int8. bf16 keeps every projection dense. int4/int8 emit `MatMulNBits`
                     at the target's block size for the attention and MLP projections, leaving the
-                    small dynamic-convolution and candidate-selector projections dense. The BF16
-                    body is emitted in the portable raw blockwise layout, and its session disables
-                    the target decoder's fpA-intB selection for those nodes.
+                    small dynamic-convolution and candidate-selector projections dense. The body
+                    uses the raw blockwise layout by default. On CUDA, a drafter quantization
+                    format with matmulnbits_weights_prepacked=1 or 2 emits that fpA-intB layout for
+                    projections the kernel supports (N % 64 for int4, N % 32 for int8); other
+                    projections stay raw, and the drafter session disables fpA-intB selection for them.
                     Body activations and KV caches remain bf16; this option does not quantize the
                     drafter's KV cache. When the target LM head uses a reproducible symmetric default
                     layout, the drafter head uses its actual bit width, block size, initializer names,
@@ -1174,8 +1293,9 @@ def get_args():
                     It also removes `position_ids` when RoPE is fused; architectures with external MRoPE retain packed
                     position IDs (for example, Qwen3.5/3.8 uses [3, num_tokens]). The block_table,
                     cumulative_sequence_lengths, and past_sequence_lengths metadata inputs are added. With
-                    prune_lm_head=true, selects the final packed hidden state for each sequence so the model outputs
-                    [batch_size, vocab_size] logits. By default, the model outputs [num_tokens, vocab_size] logits.
+                    prune_lm_head=true, adds a logits_indices input that selects the packed hidden states consumed
+                    by generation or draft verification, so the model outputs [num_logits, vocab_size] logits.
+                    By default, the model outputs [num_tokens, vocab_size] logits.
                     Currently only supported for the CUDA execution provider with fp16 or bf16 precision. Cannot be
                     combined with exclude_embeds or exclude_lm_head.
                 paged_block_size = 16/32/64/128/256/...: Paged KV-cache block size used when use_paged_attention is set.
@@ -1235,7 +1355,8 @@ def get_args():
                     are returned to the driver instead of being retained as free arena blocks.
                 use_qdq = Use the QDQ decomposition for ops.
                     Use this option when you want to use quantize-dequantize ops. For example, you will have a quantized MatMul op instead of the MatMulNBits op.
-                moe_quant_type = int4/int8/mxfp4/nvfp4: Quantization scheme for MoE (QMoE) layers. Default is int4.
+                moe_quant_type = int2/int4/int8/mxfp4/nvfp4: Quantization scheme for MoE (QMoE) layers. Default is int4.
+                    int2 = 2-bit integer QMoE weights on CUDA. Requires qmoe_block_size=64 or 128.
                     int4 = 4-bit integer QMoE weights (expert_weight_bits=4, quant_type="int").
                     int8 = 8-bit integer QMoE weights (expert_weight_bits=8, quant_type="int").
                     mxfp4 = MXFP4 QMoE weights on the CUDA EP (quant_type="fp4", expert_weight_bits=4, block_size=32):
@@ -1275,6 +1396,38 @@ def get_args():
             """),
     )
 
+    parser.add_argument(
+        "--builder_config_version",
+        type=int,
+        default=None,
+        help="Structured model-builder configuration version. Version 2 enables the shared configuration envelope.",
+    )
+    parser.add_argument(
+        "--target_options",
+        default=None,
+        help="Target export options as an inline JSON object or JSON file path.",
+    )
+    parser.add_argument(
+        "--drafter_options",
+        default=None,
+        help="Drafter export options as an inline JSON object or JSON file path.",
+    )
+    parser.add_argument(
+        "--speculative_options",
+        default=None,
+        help="Speculative graph options as an inline JSON object or JSON file path.",
+    )
+    parser.add_argument(
+        "--runtime_config",
+        default=None,
+        help="Runtime configuration fragment as an inline JSON object or JSON file path.",
+    )
+    parser.add_argument(
+        "--search",
+        default=None,
+        help="Legacy search settings as an inline JSON object or JSON file path.",
+    )
+
     args = parser.parse_args()
     print(
         "Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, FP16 TRT-RTX, BF16 CUDA, BF16 TRT-RTX, INT8 CPU, INT8 CUDA, INT8 WebGPU, INT4 CPU, INT4 CUDA, INT4 DML, INT4 WebGPU"
@@ -1294,6 +1447,12 @@ if __name__ == "__main__":
         args.execution_provider,
         args.cache_dir,
         args.extra_options,
+        builder_config_version=args.builder_config_version,
+        target_options=args.target_options,
+        drafter_options=args.drafter_options,
+        speculative_options=args.speculative_options,
+        runtime_config=args.runtime_config,
+        search=args.search,
     )
     try:
         create_model(

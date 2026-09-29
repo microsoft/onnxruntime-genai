@@ -12,11 +12,14 @@ namespace Generators::TelemetryInternal {
 // 1DS popSample is metadata only; ShouldSampleSession performs the actual client-side sampling.
 inline constexpr double kModelSessionSampleRatePercent = 1.0;
 inline constexpr double kProcessEventSampleRatePercent = 1.0;
+inline constexpr double kCriticalEventSampleRatePercent = 100.0;
 
 static_assert(kModelSessionSampleRatePercent >= 0.0 &&
               kModelSessionSampleRatePercent <= 100.0);
 static_assert(kProcessEventSampleRatePercent >= 0.0 &&
               kProcessEventSampleRatePercent <= 100.0);
+static_assert(kCriticalEventSampleRatePercent >= 0.0 &&
+              kCriticalEventSampleRatePercent <= 100.0);
 
 inline uint64_t HashSamplingKey(std::string_view app_session_guid, uint32_t session_id) {
   uint64_t hash = 14695981039346656037ULL;

@@ -174,11 +174,11 @@ void SimpleDecoder::Decode(ScheduledRequests& scheduled_requests,
   } else if (has_fixed_state_groups_) {
     decoder_state = std::make_unique<HybridDecoderIO>(
         model_, scheduled_requests, cache_manager_, context,
-        capture ? graph_buffers_.get() : nullptr, position_planes_);
+        capture ? graph_buffers_.get() : nullptr, position_planes_, &embedding_workspace_);
   } else {
     decoder_state = std::make_unique<VarlenDecoderIO>(
         model_, scheduled_requests, cache_manager_, &context,
-        capture ? graph_buffers_.get() : nullptr, position_planes_);
+        capture ? graph_buffers_.get() : nullptr, position_planes_, &embedding_workspace_);
   }
 
   if (IsGraphCaptureEnabled(model_->config_->model.decoder.session_options) &&

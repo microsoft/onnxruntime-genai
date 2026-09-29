@@ -11,6 +11,7 @@ This document explains how the model builder is designed and how new contributio
   - [Compatibility](#compatibility)
 - [Implementation Details](#implementation-details)
   - [`Model`](#model)
+  - [Configuration Boundary](#configuration-boundary)
   - [Architecture Classes](#architecture-classes)
   - [`Attrs` Dictionaries](#attrs-dictionaries)
   - [`Make` Functions](#make-functions)
@@ -49,6 +50,25 @@ The models produced by the model builder should directly work in ONNX Runtime Ge
 The `Model` base class holds all of the information for making models. It auto-determines optimizations and quantizations that can be applied (e.g. replace MultiHeadAttention with GroupQueryAttention). It also holds all important attributes and the many functions that make the final ONNX model.
 
 After the final ONNX model is created, additional files are saved in the output folder to run with ONNX Runtime GenAI. These include the GenAI config and the pre-processing/post-processing files (e.g. tokenizer).
+
+### Configuration Boundary
+
+The experimental version-2 path adds grouped configuration entry points in
+`builder.py` and a normalization layer in `builder_config.py`. The current flow is:
+
+1. `parse_extra_options` collects legacy CLI strings and resolves structured policy.
+2. `check_extra_options` converts legacy values and loads Hugging Face metadata.
+3. `create_model` constructs the selected exporter, emits graphs, and saves them.
+4. The composite exporter writes the decoder and auxiliary runtime sections.
+5. The runtime fragment is merged into the completed `genai_config.json`.
+
+Legacy syntax is normalized before structured leaves are overlaid. A resolved
+`QuantConfig` is still export intent rather than a final graph manifest, so the
+builder separately validates emitted node names, tensor adoption, exporter
+capabilities, and runtime requirements.
+
+Do not move checkpoint unpacking into this layer or change the C++ runtime
+schema to accommodate builder inputs.
 
 ### Architecture Classes
 

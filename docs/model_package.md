@@ -189,6 +189,88 @@ auto model_ov = OgaModel::Create(*config);
 
 `OgaConfig::CreateFromPackageEp` requires the path to be a model package.
 
+## Runtime profiles
+
+The selected variant's `genai_config.json` may contain typed runtime profiles for CUDA GPU memory
+classes. Base `engine.dynamic_batching` values must remain safe for the minimum supported device;
+profiles are optional tuning upgrades applied once during Model creation, after provider/device
+resolution and before Engine allocation.
+
+Memory profiles currently require visible CUDA device 0, both as the current device and in
+the provider options. Explicit `hardware_device_id` filtering is not supported with profiles.
+To select a different physical GPU, set `CUDA_VISIBLE_DEVICES` before starting the process;
+that GPU becomes visible ordinal 0. This restriction prevents selecting a profile using one
+GPU's memory while loading its graph on another GPU.
+
+```json
+{
+  "engine": {
+    "dynamic_batching": {
+      "num_blocks": 512,
+      "max_batch_size": 8,
+      "max_scheduled_tokens": 2048
+    }
+  },
+  "runtime_profiles": [
+    {
+      "id": "24gib-to-32gib",
+      "eligibility": {
+        "minimum_total_device_memory_bytes": 25769803776,
+        "maximum_total_device_memory_bytes": 34359738368
+      },
+      "overlay": {
+        "model": {
+          "decoder": {
+            "filename": "model_32gib.onnx"
+          }
+        },
+        "engine": {
+          "dynamic_batching": {
+            "num_blocks": 768,
+            "max_batch_size": 12,
+            "max_scheduled_tokens": 3072
+          }
+        },
+        "search": {
+          "chunk_size": 512
+        },
+        "speculative": {
+          "max_draft_tokens": 6
+        }
+      }
+    }
+  ]
+}
+```
+
+Profile IDs must be non-empty and unique. Every profile requires a minimum total-memory value;
+the maximum is optional and inclusive. Ranges must be valid and non-overlapping. Zero matches uses
+the base settings. `overlay` is typed and may contain any subset of these fields:
+
+- `model.decoder.filename`
+- `engine.dynamic_batching.num_blocks`
+- `engine.dynamic_batching.max_batch_size`
+- `engine.dynamic_batching.max_scheduled_tokens`
+- `search.chunk_size`
+- `speculative.max_draft_tokens`
+
+Omitted fields retain their base values. Every other config field is rejected from a runtime
+profile overlay. In particular, profiles cannot override `search.max_length`; applications set
+request/session policy independently. Alternate decoder graphs may share one external-data file;
+each graph still owns its graph-specific inputs, outputs, attributes, and small initializers.
+
+The base `search.max_length` remains the default Engine Request length. The Engine's
+`max_request_length` capability reports the hard per-request limit derived from the resolved target
+cache and model context. A caller may explicitly choose a `max_session_tokens` value above the
+default but not above that capability when it is nonzero. A zero capability means the cache-backed
+ceiling is unavailable and preserves the `search.max_length` default and ceiling.
+
+Selection uses total device memory from the primary CUDA interface selected by the normal provider
+append path. The query intentionally uses the existing device-ID-agnostic interface for the current
+single-discrete-GPU scope. Distinguishing CUDA device ordinals on heterogeneous multi-GPU machines
+is deferred to a future interface change. Actual model and Engine allocation remains the
+authoritative fit check; profiles do not add a separate free-memory gate.
+
 ## Authoring notes
 
 - Every variant declared in the component's `variants` map must have its own directory

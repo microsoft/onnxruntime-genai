@@ -11,6 +11,11 @@
 
 namespace Generators {
 
+RequestRewindState::RequestRewindState() = default;
+RequestRewindState::RequestRewindState(RequestRewindState&&) noexcept = default;
+RequestRewindState& RequestRewindState::operator=(RequestRewindState&&) noexcept = default;
+RequestRewindState::~RequestRewindState() = default;
+
 namespace {
 
 // Preserves the existing host output for every seed that fits in 32 bits, so an Engine turn seeded
@@ -23,6 +28,12 @@ std::mt19937 MakeHostRandomGenerator(uint64_t seed) {
   }
   std::seed_seq seed_sequence{static_cast<uint32_t>(seed & 0xffffffffu),
                               static_cast<uint32_t>(seed >> 32)};
+  return std::mt19937{seed_sequence};
+}
+
+std::mt19937 MakeDraftRandomGenerator(uint64_t seed) {
+  std::seed_seq seed_sequence{static_cast<uint32_t>(seed & 0xffffffffu),
+                              static_cast<uint32_t>(seed >> 32), 0x44464c53u};
   return std::mt19937{seed_sequence};
 }
 
@@ -127,6 +138,7 @@ Request::Request(
       params_{CreateRequestParams(model, max_session_tokens)},
       current_seed_basis_{InitialSeedBasis(model.config_->search.random_seed)},
       rng_{MakeHostRandomGenerator(current_seed_basis_)},
+      draft_rng_{MakeDraftRandomGenerator(current_seed_basis_)},
       search_{CreateSearch(*params_)} {
   draft_tokens_.reserve(kMaxDraftTokensPerStep);
 
@@ -219,6 +231,15 @@ void Request::PrepareTurnAdmission(
   admission.prompt_sequence_length = prompt_sequence_length_;
   admission.processed_sequence_length = processed_sequence_length_;
 
+  if (turn_boundaries_.size() == turn_boundaries_.capacity()) {
+    const size_t available = turn_boundaries_.max_size() - turn_boundaries_.size();
+    if (available == 0) {
+      throw std::length_error("The request cannot record another turn boundary.");
+    }
+    const size_t growth =
+        std::min(std::max<size_t>(turn_boundaries_.size(), 4), available);
+    turn_boundaries_.reserve(turn_boundaries_.size() + growth);
+  }
   SaveStateForNewTurnTransaction();
   admission.transaction_started = true;
   search_->AppendTokens(device_tokens);
@@ -244,6 +265,8 @@ uint64_t Request::CommitTurnAdmission(
   guidance_logits_processor_ = std::move(admission.pending_guidance);
   guidance_transaction_checkpoint_.reset();
   turn_policy_ = admission.policy;
+  adopted_prefix_length_ = 0;
+  turn_cached_prompt_tokens_ = 0;
   // Every terminal path already discarded the previous turn's pending reseed, so this simply
   // records what this turn asked for: nothing when the seed is omitted, or a new basis that becomes
   // durable only once a sampling step commits.
@@ -253,6 +276,8 @@ uint64_t Request::CommitTurnAdmission(
   turn_generated_tokens_ = 0;
   current_turn_id_ = next_turn_id_;
   has_current_turn_ = true;
+  turn_boundaries_.push_back(
+      TurnBoundary{current_turn_id_, admission.host_token_count});
   if (next_turn_id_ == std::numeric_limits<uint64_t>::max()) {
     turn_id_exhausted_ = true;
   } else {
@@ -314,12 +339,14 @@ RequestTurnCounters Request::CompleteCancelFromEngine(
 void Request::MarkClosedFromEngine(const Engine& engine) noexcept {
   assert(BelongsTo(engine));
   status_ = RequestStatus::Closed;
+  needs_replay_after_rewind_ = false;
   guidance_transaction_checkpoint_.reset();
   guidance_logits_processor_.reset();
   stop_controller_.reset();
   stop_controller_transaction_checkpoint_ = 0;
   batched_sampler_state_.reset();
   std::vector<int32_t>{}.swap(draft_tokens_);
+  std::vector<TargetTokenSelection>{}.swap(draft_token_distributions_);
   staged_draft_count_ = 0;
   accepted_draft_count_ = 0;
   evaluated_draft_count_ = 0;
@@ -334,6 +361,7 @@ void Request::CompleteCloseFromEngine(const Engine& engine) noexcept {
 void Request::MarkFailedFromEngine(const Engine& engine) noexcept {
   assert(BelongsTo(engine));
   finish_reason_ = GenerationFinishReason::Failed;
+  needs_replay_after_rewind_ = false;
   // A fatal failure replaces any undelivered result and becomes the sole terminal outcome.
   matched_stop_string_index_ = -1;
 }
@@ -343,6 +371,7 @@ void Request::CompleteFailedTurnFromEngine(const Engine& engine) noexcept {
   assert(IsExecutable(status_));
   status_ = RequestStatus::TurnComplete;
   finish_reason_ = GenerationFinishReason::Failed;
+  needs_replay_after_rewind_ = false;
   matched_stop_string_index_ = -1;
   ReleaseTurnResources();
 }
@@ -364,6 +393,7 @@ void Request::ReleaseTurnResources() noexcept {
   // unserviceable failure happen between steps with nothing staged, and a fatal failure leaves the
   // Request unable to execute again at all.
   draft_tokens_.clear();
+  draft_token_distributions_.clear();
   staged_draft_count_ = 0;
   accepted_draft_count_ = 0;
   evaluated_draft_count_ = 0;
@@ -422,11 +452,13 @@ void Request::CompleteClose() noexcept {
   search_.reset();
   params_.reset();
   std::vector<int32_t>{}.swap(draft_tokens_);
+  std::vector<TargetTokenSelection>{}.swap(draft_token_distributions_);
   staged_draft_count_ = 0;
   accepted_draft_count_ = 0;
   evaluated_draft_count_ = 0;
   draft_verification_.Reset();
   std::vector<int32_t>{}.swap(tokens_host_);
+  std::vector<TurnBoundary>{}.swap(turn_boundaries_);
 }
 
 uint64_t Request::BeginTurn(
@@ -449,6 +481,18 @@ uint64_t Request::BeginTurn(
         "Cannot begin a turn after the request's engine has been destroyed.");
   }
   return engine->BeginTurn(shared_from_this(), tokens, options);
+}
+
+void Request::RewindToStartOfTurn(uint64_t turn_id) {
+  if (IsClosed(status_)) {
+    throw std::runtime_error("Cannot rewind a closed request.");
+  }
+  auto engine = engine_.lock();
+  if (!engine) {
+    throw std::runtime_error(
+        "Cannot rewind after the request's engine has been destroyed.");
+  }
+  engine->RewindRequestToStartOfTurn(shared_from_this(), turn_id);
 }
 
 int64_t Request::CurrentSequenceLength() const {
@@ -495,6 +539,7 @@ void Request::SetDraftTokens(std::span<const int32_t> tokens) {
   }
   if (tokens.empty()) {
     draft_tokens_.clear();
+    draft_token_distributions_.clear();
     return;
   }
   if (!IsExecuting(status_) || IsPrefill()) {
@@ -522,10 +567,30 @@ void Request::SetDraftTokens(std::span<const int32_t> tokens) {
     throw std::logic_error("The request host token mirror does not have reserved draft capacity.");
   }
   draft_tokens_.assign(tokens.begin(), tokens.end());
+  draft_token_distributions_.clear();
+}
+
+void Request::SetDraftTokenDistributions(
+    std::span<const TargetTokenSelection> distributions) {
+  std::vector<int32_t> tokens;
+  tokens.reserve(distributions.size());
+  for (const auto& distribution : distributions) {
+    if (distribution.indices.empty() || distribution.indices.size() != distribution.probs.size()) {
+      throw std::runtime_error("Each independent draft distribution must be non-empty and aligned.");
+    }
+    tokens.push_back(SampleSparseToken(distribution.indices, distribution.probs, draft_rng_));
+  }
+  SetDraftTokens(tokens);
+  draft_token_distributions_.assign(distributions.begin(), distributions.end());
 }
 
 std::span<const int32_t> Request::StagedDraftTokens() const {
   return std::span<const int32_t>{draft_tokens_}.subspan(0, staged_draft_count_);
+}
+
+std::span<const TargetTokenSelection> Request::StagedDraftTokenDistributions() const {
+  return std::span<const TargetTokenSelection>{draft_token_distributions_}.subspan(
+      0, std::min(staged_draft_count_, draft_token_distributions_.size()));
 }
 
 bool Request::IsStopToken(int32_t token) const {
@@ -796,6 +861,33 @@ std::span<const int32_t> Request::UnprocessedTokensCpu() const {
   return std::span<const int32_t>{tokens_host_}.subspan(begin, end - begin);
 }
 
+void Request::StagePrefixAdoption(size_t adopted_tokens) {
+  if (!IsQueued(status_) || prefix_adoption_staged_ ||
+      processed_sequence_length_ != 0 || adopted_tokens == 0 ||
+      adopted_tokens >= static_cast<size_t>(CurrentSequenceLength()) ||
+      adopted_tokens > tokens_host_.size()) {
+    throw std::runtime_error(
+        "A cached prefix can only be staged for an unprocessed queued request.");
+  }
+  processed_sequence_length_ = static_cast<int64_t>(adopted_tokens);
+  adopted_prefix_length_ = adopted_tokens;
+  const size_t turn_start = tokens_host_.size() - turn_prompt_tokens_;
+  turn_cached_prompt_tokens_ =
+      adopted_tokens > turn_start ? adopted_tokens - turn_start : 0;
+  prefix_adoption_staged_ = true;
+}
+
+void Request::RollbackPrefixAdoption() noexcept {
+  if (!prefix_adoption_staged_) {
+    return;
+  }
+  processed_sequence_length_ = 0;
+  adopted_prefix_length_ = 0;
+  turn_cached_prompt_tokens_ = 0;
+  prefix_adoption_staged_ = false;
+  scheduled_token_count_ = 0;
+}
+
 bool Request::IsTurnComplete() const {
   return status_ == RequestStatus::TurnComplete;
 }
@@ -975,6 +1067,7 @@ void Request::CommitStateForTransaction() {
   // never-sampled step leaves both the pending marker and the durable basis exactly as they were.
   if (pending_reseed_applied_) {
     current_seed_basis_ = *pending_reseed_;
+    draft_rng_ = MakeDraftRandomGenerator(current_seed_basis_);
     pending_reseed_.reset();
     pending_reseed_applied_ = false;
   }
@@ -994,6 +1087,7 @@ void Request::CommitStep(const RequestStepPlan& plan,
   // A verify step reserved cache slots for every draft; the rejected ones were never committed.
   processed_sequence_length_ =
       static_cast<int64_t>(plan.target_cache_slots - (plan.draft_token_count - accepted_drafts));
+  needs_replay_after_rewind_ = false;
   status_ = result.done ? RequestStatus::TurnComplete : RequestStatus::Active;
   if (result.done) {
     finish_reason_ = result.finish_reason;
@@ -1001,6 +1095,7 @@ void Request::CommitStep(const RequestStepPlan& plan,
     ReleaseTurnResources();
   }
   draft_tokens_.clear();
+  draft_token_distributions_.clear();
   staged_draft_count_ = 0;
   accepted_draft_count_ = 0;
   evaluated_draft_count_ = 0;
@@ -1210,6 +1305,7 @@ RequestStepResult Request::CompleteGeneration() {
   const auto next_tokens = search_->GetNextTokens().CpuSpan();
 
   const size_t sequence_length = static_cast<size_t>(CurrentSequenceLength());
+  needs_replay_after_rewind_ = false;
   size_t new_token_count{};
   int32_t token{};
   if (sequence_length > tokens_host_.size()) {
@@ -1225,7 +1321,6 @@ RequestStepResult Request::CompleteGeneration() {
     }
     turn_generated_tokens_ += new_token_count;
   }
-
   const bool turn_limit_reached =
       turn_policy_.max_generated_tokens &&
       turn_generated_tokens_ >= *turn_policy_.max_generated_tokens;
@@ -1251,6 +1346,50 @@ RequestStepResult Request::CompleteGeneration() {
   };
   StageVisibleTokens(result, new_token_count, std::nullopt);
   return result;
+}
+
+RequestRewindState Request::PrepareRewindToStartOfTurn(
+    uint64_t turn_id) const {
+  const auto boundary = std::find_if(
+      turn_boundaries_.begin(), turn_boundaries_.end(),
+      [turn_id](const TurnBoundary& candidate) {
+        return candidate.turn_id == turn_id;
+      });
+  if (boundary == turn_boundaries_.end()) {
+    throw std::runtime_error(
+        "Cannot rewind to unknown Turn ID " + std::to_string(turn_id) + ".");
+  }
+
+  RequestRewindState state;
+  state.sequence_length = boundary->sequence_length;
+  state.retained_turn_count =
+      static_cast<size_t>(boundary - turn_boundaries_.begin());
+  state.search = CreateSearch(*params_);
+  state.search->DeferCompletion(true);
+  if (state.sequence_length != 0) {
+    const std::span<const int32_t> retained_tokens{
+        tokens_host_.data(), state.sequence_length};
+    auto device_tokens =
+        AllocateOnDevice(*params_, retained_tokens);
+    state.search->AppendTokens(device_tokens);
+  }
+  return state;
+}
+
+void Request::CommitRewind(RequestRewindState&& state) noexcept {
+  assert(Generators::IsTurnComplete(status_));
+  assert(state.search);
+  assert(state.sequence_length <= tokens_host_.size());
+  search_ = std::move(state.search);
+  tokens_host_.resize(state.sequence_length);
+  turn_boundaries_.resize(state.retained_turn_count);
+  processed_sequence_length_ = 0;
+  prompt_sequence_length_ = 0;
+  scheduled_token_count_ = 0;
+  turn_prompt_tokens_ = 0;
+  turn_generated_tokens_ = 0;
+  ReleaseTurnResources();
+  needs_replay_after_rewind_ = true;
 }
 
 }  // namespace Generators

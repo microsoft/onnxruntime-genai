@@ -9,12 +9,12 @@
 from .base import Model
 from .chatglm import ChatGLMModel
 from .ernie import ErnieModel
-from .gemma import Gemma2Model, Gemma3Model, GemmaModel
+from .gemma import Gemma2Model, Gemma3Model, Gemma4MoEModel, Gemma4Model, GemmaModel
 from .gptoss import GPTOSSModel
 from .granite import GraniteModel, GraniteMoEHybridModel
 from .hunyuan import HunyuanDenseV1Model
 from .internlm import InternLM2Model
-from .lfm2 import LFM2Model, LFM2MoEModel
+from .lfm2 import LFM2AudioModel, LFM2Model, LFM2MoEModel
 from .llama import LlamaModel
 from .mistral import Mistral3TextModel, MistralModel
 from .mtp import MTPModel
@@ -52,11 +52,14 @@ __all__ = [
     "GPTOSSModel",
     "Gemma2Model",
     "Gemma3Model",
+    "Gemma4MoEModel",
+    "Gemma4Model",
     "GemmaModel",
     "GraniteMoEHybridModel",
     "GraniteModel",
     "HunyuanDenseV1Model",
     "InternLM2Model",
+    "LFM2AudioModel",
     "LFM2Model",
     "LFM2MoEModel",
     "LlamaModel",

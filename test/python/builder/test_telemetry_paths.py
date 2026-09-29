@@ -1,5 +1,6 @@
 import builtins
 import importlib.util
+import json
 import sys
 import types
 from pathlib import Path
@@ -310,3 +311,44 @@ def test_interrupted_build_is_not_reported_as_success(monkeypatch, tmp_path):
 
     assert telemetry_state["emitted"]
     assert captured["success"] is False
+
+
+def test_structured_runtime_config_is_applied_before_success_telemetry(monkeypatch, tmp_path):
+    captured = {}
+    config = types.SimpleNamespace(architectures=["LlamaForCausalLM"])
+    effective = types.SimpleNamespace(precision="fp16", runtime_config={"search": {"max_length": 128}})
+
+    class ConfigOnlyModel:
+        def make_genai_config(self, config, extra_kwargs, output_dir):
+            (Path(output_dir) / "genai_config.json").write_text('{"search": {}}', encoding="utf-8")
+
+        def save_processing(self, hf_name, extra_kwargs, output_dir):
+            captured["saved_config"] = json.loads((Path(output_dir) / "genai_config.json").read_text(encoding="utf-8"))
+
+    monkeypatch.setattr(builder_module, "set_io_dtype", lambda *args: object())
+    monkeypatch.setattr(builder_module, "set_onnx_dtype", lambda *args: object())
+    monkeypatch.setattr(builder_module, "validate_model_dependent_config", lambda *args: None)
+    monkeypatch.setattr(builder_module, "LlamaModel", lambda *args: ConfigOnlyModel())
+    monkeypatch.setattr(
+        builder_module,
+        "apply_runtime_config",
+        lambda generated, runtime: {"search": runtime["search"]},
+    )
+    monkeypatch.setattr(builder_module, "_emit_model_build_telemetry", lambda **kwargs: captured.update(kwargs))
+
+    builder_module._create_model_impl(
+        "model",
+        "",
+        str(tmp_path / "output"),
+        "int4",
+        "cpu",
+        str(tmp_path / "cache"),
+        {"emitted": False},
+        config_only=True,
+        _effective_builder_config=effective,
+        hf_details={"extra_kwargs": {}, "hf_name": "model", "hf_config": config},
+    )
+
+    assert captured["saved_config"] == {"search": {"max_length": 128}}
+    assert captured["success"] is True
+    assert captured["precision"] == "fp16"

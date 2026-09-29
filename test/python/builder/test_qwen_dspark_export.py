@@ -440,9 +440,18 @@ def test_drafter_uses_target_context_length(tmp_path, monkeypatch):
     assert captured["max_position"] == model.decoder.context_length
 
 
-def test_genai_config_gains_the_drafter_and_the_target_tap(tmp_path):
+@pytest.mark.parametrize("prefix_caching", [None, False, True])
+def test_genai_config_gains_the_drafter_and_the_target_tap(tmp_path, prefix_caching):
     config_path = tmp_path / "genai_config.json"
-    config_path.write_text(json.dumps({"model": {"decoder": {}}}))
+    dynamic_batching = {} if prefix_caching is None else {"prefix_caching": prefix_caching}
+    config_path.write_text(
+        json.dumps(
+            {
+                "model": {"decoder": {}},
+                "engine": {"dynamic_batching": dynamic_batching},
+            }
+        )
+    )
     model = _composite()
     model.dspark = types.SimpleNamespace(genai_config_section=lambda: {"filename": "dspark.onnx"})
 
@@ -452,12 +461,21 @@ def test_genai_config_gains_the_drafter_and_the_target_tap(tmp_path):
     assert config["model"]["decoder"]["outputs"]["aux_hidden_states"] == "aux_hidden_states"
     assert config["model"]["dspark"]["filename"] == "dspark.onnx"
     assert config["model"]["dspark"]["aux_hidden_state_layers"] == AUX_LAYERS
+    expected_prefix_caching = False if prefix_caching is None else prefix_caching
+    assert config["engine"]["dynamic_batching"]["prefix_caching"] is expected_prefix_caching
 
 
 def test_shared_initializers_are_recorded_once_on_both_sides(tmp_path):
     config_path = tmp_path / "genai_config.json"
     shared = {"name": "model.embed_tokens.weight", "filename": "model.onnx.data"}
-    config_path.write_text(json.dumps({"model": {"decoder": {"shared_initializers": [shared]}}}))
+    config_path.write_text(
+        json.dumps(
+            {
+                "model": {"decoder": {"shared_initializers": [shared]}},
+                "engine": {"dynamic_batching": {}},
+            }
+        )
+    )
     model = _composite()
     model.dspark = types.SimpleNamespace(genai_config_section=lambda: {"filename": "dspark.onnx"})
     model.dspark_shared_initializers = [shared]
