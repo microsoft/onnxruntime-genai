@@ -52,6 +52,23 @@ def test_manifest_mapping_arbitrary_filename_and_native_run(tmp_path):
     assert session.input_info["input"]["shape"] == [-1, 2]
 
 
+def test_zero_element_component_output_is_supported(tmp_path):
+    session = og.ComponentSession(str(_package(tmp_path)), "unusual.component", ["cpu"])
+    value = np.empty((0, 2), dtype=np.float32)
+    result = session.run({"input": value}, ["output"])
+    assert result["output"].shape == (0, 2)
+    assert result["output"].size == 0
+
+
+def test_legacy_partial_component_layout_is_rejected(tmp_path):
+    for relative in ("encoder/model.onnx", "state_head/model.onnx"):
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"synthetic")
+    with pytest.raises(RuntimeError, match="not a recognized CLM/KEV layout"):
+        og.ComponentSession(str(tmp_path), "encoder", ["cpu"])
+
+
 def test_manifest_traversal_is_rejected(tmp_path):
     tmp_path.mkdir(exist_ok=True)
     (tmp_path / "component_manifest.json").write_text(

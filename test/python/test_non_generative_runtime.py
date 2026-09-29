@@ -9,6 +9,7 @@ import time
 import types
 from pathlib import Path
 
+import onnxruntime_genai as og
 import pytest
 
 
@@ -144,8 +145,6 @@ def test_python_cache_controls(runtime, session_name):
 )
 @pytest.mark.parametrize("provider", [None, "cuda"])
 def test_exported_packages_cpu_cuda_parity(provider):
-    import onnxruntime_genai as og
-
     if provider == "cuda" and os.getenv("ORT_GENAI_RUN_NON_GENERATIVE_CUDA") != "1":
         pytest.skip("set ORT_GENAI_RUN_NON_GENERATIVE_CUDA=1 for CUDA")
     root_value = os.getenv("ORT_GENAI_NON_GENERATIVE_TEST_ROOT")
