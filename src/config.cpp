@@ -75,6 +75,7 @@ void InheritSessionOptions(const Config::SessionOptions& parent,
   if (!child.inter_op_num_threads) child.inter_op_num_threads = parent.inter_op_num_threads;
   if (!child.enable_cpu_mem_arena) child.enable_cpu_mem_arena = parent.enable_cpu_mem_arena;
   if (!child.enable_mem_pattern) child.enable_mem_pattern = parent.enable_mem_pattern;
+  if (!child.use_deterministic_compute) child.use_deterministic_compute = parent.use_deterministic_compute;
   if (!child.log_id) child.log_id = parent.log_id;
   if (!child.log_severity_level) child.log_severity_level = parent.log_severity_level;
   if (!child.log_verbosity_level) child.log_verbosity_level = parent.log_verbosity_level;
@@ -385,6 +386,8 @@ struct SessionOptions_Element : JSON::Element {
       v_.enable_cpu_mem_arena = JSON::Get<bool>(value);
     } else if (name == "enable_mem_pattern") {
       v_.enable_mem_pattern = JSON::Get<bool>(value);
+    } else if (name == "use_deterministic_compute") {
+      v_.use_deterministic_compute = JSON::Get<bool>(value);
     } else if (name == "graph_optimization_level") {
       v_.graph_optimization_level = GetGraphOptimizationLevel(JSON::Get<std::string_view>(value));
     } else if (name == "custom_ops_library") {

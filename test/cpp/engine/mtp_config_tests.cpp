@@ -108,6 +108,7 @@ TEST(MtpDecoderConfigTest, ProjectsPagedDecoderWithoutMainFixedState) {
   decoder.inputs.attention_metadata = "attention_metadata";
   decoder.session_options.providers = {"cuda"};
   decoder.session_options.intra_op_num_threads = 2;
+  decoder.session_options.use_deterministic_compute = true;
   decoder.session_options.config_entries = {
       {"parent_entry", "keep"}, {"overridden_entry", "parent"}};
   decoder.session_options.provider_options.push_back(
@@ -153,6 +154,9 @@ TEST(MtpDecoderConfigTest, ProjectsPagedDecoderWithoutMainFixedState) {
   EXPECT_EQ(head.inputs.attention_metadata, "attention_metadata");
   EXPECT_EQ(head.session_options.graph_optimization_level, ORT_DISABLE_ALL);
   EXPECT_EQ(head.session_options.intra_op_num_threads, 2);
+  EXPECT_EQ(head.session_options.use_deterministic_compute, true);
+  mtp.session_options->use_deterministic_compute = false;
+  EXPECT_EQ(CreateMtpDecoderConfig(config)->model.decoder.session_options.use_deterministic_compute, false);
   EXPECT_EQ(head.session_options.config_entries,
             (std::vector<Config::NamedString>{{"overridden_entry", "mtp"},
                                               {"mtp_entry", "head"},

@@ -12,6 +12,19 @@
 
 namespace Generators::test {
 
+TEST(ConfigTest, ParsesDeterministicCompute) {
+  Config config;
+  EXPECT_FALSE(config.model.decoder.session_options.use_deterministic_compute.has_value());
+  OverlayConfig(config, R"({"model":{"decoder":{"session_options":{"use_deterministic_compute":true}}}})");
+  EXPECT_EQ(config.model.decoder.session_options.use_deterministic_compute, true);
+  EXPECT_TRUE(config.model.decoder.session_options.config_entries.empty());
+  OverlayConfig(config, R"({"model":{"decoder":{"session_options":{"use_deterministic_compute":false}}}})");
+  EXPECT_EQ(config.model.decoder.session_options.use_deterministic_compute, false);
+  EXPECT_THROW(OverlayConfig(config,
+                            R"({"model":{"decoder":{"session_options":{"use_deterministic_compute":"true"}}}})"),
+               std::exception);
+}
+
 TEST(ConfigTest, ParsesStaticBatching) {
   Config config;
 

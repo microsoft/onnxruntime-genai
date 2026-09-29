@@ -632,6 +632,10 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     session_options.SetInterOpNumThreads(config_session_options.inter_op_num_threads.value());
   }
 
+  if (config_session_options.use_deterministic_compute.has_value()) {
+    session_options.SetDeterministicCompute(config_session_options.use_deterministic_compute.value());
+  }
+
   if (config_session_options.enable_cpu_mem_arena.has_value()) {
     if (config_session_options.enable_cpu_mem_arena.value())
       session_options.EnableCpuMemArena();

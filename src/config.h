@@ -133,6 +133,7 @@ struct Config {
     std::optional<int> inter_op_num_threads;
     std::optional<bool> enable_cpu_mem_arena;
     std::optional<bool> enable_mem_pattern;
+    std::optional<bool> use_deterministic_compute;
     std::optional<std::string> log_id;
     std::optional<int> log_severity_level;
     std::optional<int> log_verbosity_level;
