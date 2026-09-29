@@ -164,13 +164,13 @@ TEST(DeviceSpanTests, ReleasingMirrorsPastPoolLimitsDoesNotWaitCuda) {
     std::mutex mutex;
     std::condition_variable finished;
     bool done = false;
+    ASSERT_EQ(cudaLaunchHostFunc(stream, WaitForGate, &gate), cudaSuccess);
     // Opens the gate if a release waits for the device, so the test fails instead of hanging.
     std::thread watchdog{[&] {
       std::unique_lock<std::mutex> lock{mutex};
       finished.wait_for(lock, std::chrono::seconds{10}, [&] { return done; });
       gate = true;
     }};
-    ASSERT_EQ(cudaLaunchHostFunc(stream, WaitForGate, &gate), cudaSuccess);
     for (size_t i = 0; i < count; ++i) {
       auto view = device->WrapMemoryBase(destinations[i].Span().data(), size);
       view->AllocateCpu();
