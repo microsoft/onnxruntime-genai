@@ -243,6 +243,7 @@ struct Config {
       std::string filename;
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
+      bool prefault{true};
 
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};

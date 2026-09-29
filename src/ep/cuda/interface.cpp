@@ -48,6 +48,7 @@ class PinnedHostPool {
   static constexpr size_t kMaxBytes = size_t{1} << 20;
   static constexpr size_t kClasses = 13;  // 256 B .. 1 MiB
   static constexpr size_t kMaxFreePerClass = 64;
+  static constexpr size_t kMaxRetainedBytes = size_t{8} << 20;
 
   // Never destroyed: pinned memory is returned to the driver at process exit, and a static
   // destructor could otherwise run after the CUDA runtime has shut down.
@@ -74,6 +75,7 @@ class PinnedHostPool {
           events_.push_back(entry.event);
         }
         entries.erase(entries.begin() + static_cast<std::ptrdiff_t>(i));
+        retained_bytes_ -= capacity;
         return entry.p;
       }
     }
@@ -95,21 +97,30 @@ class PinnedHostPool {
         event = nullptr;
       }
       if (!event || ::cudaEventRecord(event, GetStream()) != cudaSuccess) {
-        // Without an event the copy cannot be tracked, so fall back to the synchronizing free.
-        if (event) events_.push_back(event);
+        ::cudaStreamSynchronize(GetStream());
+        if (event) ReturnEvent(event);
         ::cudaFreeHost(p);
         return;
       }
     }
-    if (entries.size() >= kMaxFreePerClass) {
+    if (entries.size() >= kMaxFreePerClass || retained_bytes_ + capacity > kMaxRetainedBytes) {
       if (event) {
         ::cudaEventSynchronize(event);
-        events_.push_back(event);
+        ReturnEvent(event);
       }
       ::cudaFreeHost(p);
       return;
     }
-    entries.push_back(Entry{p, event});
+    try {
+      entries.push_back(Entry{p, event});
+      retained_bytes_ += capacity;
+    } catch (...) {
+      if (event) {
+        ::cudaEventSynchronize(event);
+        ReturnEvent(event);
+      }
+      ::cudaFreeHost(p);
+    }
   }
 
  private:
@@ -124,9 +135,18 @@ class PinnedHostPool {
     return cls;
   }
 
+  void ReturnEvent(cudaEvent_t event) noexcept {
+    try {
+      events_.push_back(event);
+    } catch (...) {
+      ::cudaEventDestroy(event);
+    }
+  }
+
   std::mutex mutex_;
   std::vector<Entry> free_[kClasses];
   std::vector<cudaEvent_t> events_;
+  size_t retained_bytes_{};
 };
 
 }  // namespace

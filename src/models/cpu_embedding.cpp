@@ -43,7 +43,7 @@ CpuEmbedding::CpuEmbedding(Model& model, OrtEnv& env) : config_{model.config_->m
       run_options_->AddConfigEntry(key.c_str(), value.c_str());
     }
   }
-  Prefault(model.config_->model.vocab_size);
+  if (config_.prefault) Prefault(model.config_->model.vocab_size);
 }
 
 void CpuEmbedding::Prefault(int vocab_size) const {
