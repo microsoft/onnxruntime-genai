@@ -17,12 +17,9 @@
 //   ./model_asr --model_path /path/to/model --audio_file /path/to/audio.wav
 
 #include <chrono>
-#include <cctype>
 #include <cstring>
 #include <fstream>
-#include <iomanip>
 #include <iostream>
-#include <sstream>
 #include <string>
 #include <vector>
 
@@ -32,7 +29,6 @@
 struct AudioConfig {
   int sample_rate;
   int chunk_samples;
-  std::string timestamp_level;
 };
 
 AudioConfig LoadConfig(const std::string& model_path) {
@@ -45,7 +41,6 @@ AudioConfig LoadConfig(const std::string& model_path) {
   return {
       config["model"]["sample_rate"].get<int>(),
       config["model"]["chunk_samples"].get<int>(),
-      config["model"].value("timestamp_level", "off"),
   };
 }
 
@@ -154,55 +149,16 @@ std::vector<float> LoadWav(const std::string& path, int target_sample_rate) {
   throw std::runtime_error("No data chunk found in WAV file");
 }
 
-void AppendTimestampRecords(const OgaTokenMetadataOutput& result, bool use_segments,
-                            std::string& transcript, bool print_output = true) {
-  if (!result.timestampMetadata) return;
-  const auto& timestamps = *result.timestampMetadata;
-  const size_t count = use_segments ? timestamps.segment_count : timestamps.word_count;
-  const auto* records = use_segments ? timestamps.segments : timestamps.words;
-  for (size_t index = 0; index < count; ++index) {
-    const auto& record = records[index];
-    const char* text = record.text;
-    std::ostringstream output;
-    output << '[' << std::fixed << std::setprecision(2) << record.start_time << " - " << record.stop_time << ']';
-    if (use_segments) {
-      if (text[0] == '\0' || !std::isspace(static_cast<unsigned char>(text[0]))) output << ' ';
-      output << text;
-    } else {
-      while (std::isspace(static_cast<unsigned char>(*text))) ++text;
-      std::string_view word{text};
-      while (!word.empty() && std::isspace(static_cast<unsigned char>(word.back()))) word.remove_suffix(1);
-      output << word << ' ';
-    }
-    if (print_output) std::cout << output.str() << std::flush;
-    transcript += output.str();
-  }
-}
-
-std::string DecodeTokens(OgaGenerator& generator, OgaTokenizerStream& tokenizer_stream,
-                         const std::string& timestamp_level, std::string& all_word_transcript) {
+std::string DecodeTokens(OgaGenerator& generator, OgaTokenizerStream& tokenizer_stream) {
   std::string text;
-  const bool timestamps_enabled = timestamp_level != "off";
-  const bool use_segments = timestamp_level == "segment" || timestamp_level == "all";
   while (!generator.IsDone()) {
     generator.GenerateNextToken();
-    if (!timestamps_enabled) {
-      auto next_tokens = generator.GetNextTokens();
-      if (!next_tokens.empty()) {
-        const char* token_text = tokenizer_stream.Decode(next_tokens[0]);
-        if (token_text && token_text[0] != '\0') {
-          std::cout << token_text << std::flush;
-          text += token_text;
-        }
-      }
-    } else {
-      const auto tokens = generator.GetNextTokensWithMetadata();
-      for (const auto& token : tokens) {
-        const auto& result = tokenizer_stream.DecodeWithMetadata(token);
-        AppendTimestampRecords(result, use_segments, text);
-        if (timestamp_level == "all") {
-          AppendTimestampRecords(result, false, all_word_transcript, false);
-        }
+    auto next_tokens = generator.GetNextTokens();
+    if (!next_tokens.empty()) {
+      const char* token_text = tokenizer_stream.Decode(next_tokens[0]);
+      if (token_text && token_text[0] != '\0') {
+        std::cout << token_text << std::flush;
+        text += token_text;
       }
     }
   }
@@ -210,8 +166,7 @@ std::string DecodeTokens(OgaGenerator& generator, OgaTokenizerStream& tokenizer_
 }
 
 void StreamingTranscribe(const std::string& model_path, const std::string& audio_path, const std::string& use_vad_override = "") {
-  auto [sample_rate, chunk_samples, timestamp_level] = LoadConfig(model_path);
-  const bool timestamps_enabled = timestamp_level != "off";
+  auto [sample_rate, chunk_samples] = LoadConfig(model_path);
 
   std::cout << "Loading audio: " << audio_path << std::endl;
   auto audio = LoadWav(audio_path, sample_rate);
@@ -240,7 +195,6 @@ void StreamingTranscribe(const std::string& model_path, const std::string& audio
 
   auto tokenizer = OgaTokenizer::Create(*model);
   auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
-  if (timestamps_enabled) tokenizer_stream->CreateMetadataCoreStateUsingTokenizerConfig();
   auto params = OgaGeneratorParams::Create(*model);
   auto generator = OgaGenerator::Create(*model, *params);
 
@@ -250,7 +204,6 @@ void StreamingTranscribe(const std::string& model_path, const std::string& audio
 
   auto start = std::chrono::high_resolution_clock::now();
   std::string full_transcript;
-  std::string all_word_transcript;
   int chunks_total = 0;
   int chunks_processed = 0;
   int chunks_skipped = 0;
@@ -263,7 +216,7 @@ void StreamingTranscribe(const std::string& model_path, const std::string& audio
     if (inputs) {
       chunks_processed++;
       generator->SetInputs(*inputs);
-      full_transcript += DecodeTokens(*generator, *tokenizer_stream, timestamp_level, all_word_transcript);
+      full_transcript += DecodeTokens(*generator, *tokenizer_stream);
     } else {
       chunks_skipped++;
     }
@@ -274,18 +227,7 @@ void StreamingTranscribe(const std::string& model_path, const std::string& audio
     auto inputs = processor->Flush();
     if (inputs && inputs.get()) {
       generator->SetInputs(*inputs);
-      full_transcript += DecodeTokens(*generator, *tokenizer_stream, timestamp_level, all_word_transcript);
-    }
-  }
-
-  if (!timestamps_enabled) {
-    // Ordinary decoding has no pending timestamp records.
-  } else {
-    const auto& result = tokenizer_stream->FinalizeMetadata();
-    AppendTimestampRecords(result, timestamp_level == "segment" || timestamp_level == "all",
-                           full_transcript);
-    if (timestamp_level == "all") {
-      AppendTimestampRecords(result, false, all_word_transcript, false);
+      full_transcript += DecodeTokens(*generator, *tokenizer_stream);
     }
   }
 
@@ -295,9 +237,6 @@ void StreamingTranscribe(const std::string& model_path, const std::string& audio
   std::cout << "\n"
             << std::string(60, '=') << std::endl;
   std::cout << "  " << full_transcript << std::endl;
-  if (timestamp_level == "all") {
-    std::cout << "  Word timestamps: " << all_word_transcript << std::endl;
-  }
   std::cout << std::string(60, '=') << std::endl;
   std::cout << "  Audio: " << duration << "s | Wall: " << wall_time << "s | RTF: " << (duration / wall_time) << "x" << std::endl;
   if (use_vad == "true") {
