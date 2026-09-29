@@ -22,6 +22,20 @@ TEST(DecodeFirstSchedulerPolicyTest, OrdersDecodesFirstAndKeepsEachPhaseStable) 
             (std::vector<size_t>{1, 3, 0, 2}));
 }
 
+TEST(DecodeFirstSchedulerPolicyTest, PrefillLimitKeepsAllDecodesAndDefersAdditionalPrefills) {
+  const std::array candidates{
+      DecodeFirstBudgetCandidate{true, 8, std::nullopt},
+      DecodeFirstBudgetCandidate{false, 1, std::nullopt},
+      DecodeFirstBudgetCandidate{true, 4, std::nullopt},
+      DecodeFirstBudgetCandidate{false, 1, std::nullopt},
+  };
+
+  EXPECT_EQ(DecodeFirstCandidateOrder(candidates, 1),
+            (std::vector<size_t>{1, 3, 0}));
+  EXPECT_EQ(DecodeFirstCandidateOrder(candidates, 0),
+            (std::vector<size_t>{1, 3}));
+}
+
 TEST(DecodeFirstSchedulerPolicyTest, AccountsForEveryTokenExactly) {
   const std::array selected{
       DecodeFirstBudgetCandidate{false, 1, std::nullopt},

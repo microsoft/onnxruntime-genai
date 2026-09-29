@@ -369,10 +369,10 @@ python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p pr
 #### Build with Paged Attention
 
 > [!IMPORTANT]
-> WebGPU paged attention currently supports batch size 1 only. The full-model WebGPU
-> paged export test exposed incorrect results when a forward pass contains multiple
-> requests. Until that correctness issue is fixed, the builder defaults `max_batch_size`
-> to `1` for WebGPU and rejects values greater than `1`. This is a temporary restriction.
+> WebGPU paged attention temporarily schedules at most one prefill request per Engine step.
+> Multiple unequal prefills packed into the same forward pass can produce incorrect results.
+> Decode requests still batch up to `max_batch_size`, and waiting prefills are admitted on
+> later steps. This scheduling restriction can be removed after packed-prefill correctness is fixed.
 
 This scenario is for when you want to build a model that uses the `PagedAttention` operator so it can be served by ONNX Runtime GenAI's continuous-batching engine. When enabled, the builder replaces `GroupQueryAttention` with `PagedAttention`, packs all sequences of the batch into a single flattened token axis (`input_ids` becomes 1D), stores the KV-cache in paged `[num_blocks, block_size, num_key_value_heads, head_size]` buffers, and removes the `attention_mask` input in favor of the `block_table`, `cumulative_sequence_lengths`, and `past_sequence_lengths` metadata inputs. It also removes `position_ids` when RoPE is fused into attention; architectures that require an external MRoPE op retain packed position IDs (for example, Qwen3.5/3.8 uses `[3, num_tokens]`). Set `prune_lm_head=true` to add a `logits_indices` input, gather the packed hidden states consumed by generation or draft verification, and output `[num_logits, vocab_size]` logits. By default, it projects every packed hidden state and outputs `[num_tokens, vocab_size]` logits.
 
