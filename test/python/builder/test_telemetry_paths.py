@@ -139,15 +139,15 @@ def test_telemetry_fallback_restores_source_path(monkeypatch):
         monkeypatch.setitem(sys.modules, "onnxruntime_genai.telemetry", None)
         monkeypatch.setitem(sys.modules, "telemetry", telemetry_stub)
         builder_module._emit_model_build_telemetry(
-            action_name="create_model",
             duration_ms=1.0,
-            success=False,
             config=None,
             onnx_model=None,
             precision="fp16",
             execution_provider="cpu",
             output_dir="",
             extra_options={},
+            input_path="",
+            model_name="model",
         )
         assert sys.path == before
     finally:
@@ -155,7 +155,7 @@ def test_telemetry_fallback_restores_source_path(monkeypatch):
             sys.path.insert(source_index, source_root)
 
 
-def test_minimal_failure_telemetry_uses_sanitized_fallback_model_name(monkeypatch):
+def test_build_telemetry_sanitizes_model_name_and_normalizes_provider(monkeypatch):
     telemetry_stub = types.ModuleType("telemetry")
     captured = {}
 
@@ -169,25 +169,37 @@ def test_minimal_failure_telemetry_uses_sanitized_fallback_model_name(monkeypatc
     monkeypatch.setitem(sys.modules, "onnxruntime_genai", None)
     monkeypatch.setitem(sys.modules, "onnxruntime_genai.telemetry", None)
     monkeypatch.setitem(sys.modules, "telemetry", telemetry_stub)
+    onnx_model = types.SimpleNamespace(
+        model=types.SimpleNamespace(
+            graph=[
+                types.SimpleNamespace(op_type="MatMul", domain=""),
+                types.SimpleNamespace(op_type="GroupQueryAttention", domain="com.microsoft"),
+            ]
+        )
+    )
 
     builder_module._emit_model_build_telemetry(
-        action_name="create_model",
         duration_ms=1.0,
-        success=False,
         config=None,
-        onnx_model=None,
+        onnx_model=onnx_model,
         precision="fp16",
         execution_provider="NvTensorRtRtx",
         output_dir="",
         extra_options={},
-        fallback_model_name=r"C:\Users\alice\models\model.onnx",
+        input_path="model.gguf",
+        model_name=r"C:\Users\alice\models\model.onnx",
     )
 
     assert captured["model_name"] == "[path]"
     assert captured["execution_provider"] == "trt-rtx"
+    assert captured["source_format"] == "gguf"
+    assert captured["success"] is True
+    assert captured["num_onnx_operators"] == 2
+    assert captured["operator_types"] == "GroupQueryAttention,MatMul"
+    assert captured["has_custom_ops"] is True
 
 
-def test_failed_build_ignores_existing_output_artifacts(monkeypatch, tmp_path):
+def test_build_telemetry_counts_exported_artifacts(monkeypatch, tmp_path):
     telemetry_stub = types.ModuleType("telemetry")
     captured = {}
 
@@ -197,63 +209,30 @@ def test_failed_build_ignores_existing_output_artifacts(monkeypatch, tmp_path):
         def log_model_build(self, **kwargs):
             captured.update(kwargs)
 
-    (tmp_path / "stale.onnx").write_bytes(b"stale model")
+    (tmp_path / "model.onnx").write_bytes(b"model")
+    (tmp_path / "model.onnx.data").write_bytes(b"weights")
     telemetry_stub.GenAITelemetry = RecordingTelemetry
     monkeypatch.setitem(sys.modules, "onnxruntime_genai", None)
     monkeypatch.setitem(sys.modules, "onnxruntime_genai.telemetry", None)
     monkeypatch.setitem(sys.modules, "telemetry", telemetry_stub)
 
     builder_module._emit_model_build_telemetry(
-        action_name="create_model",
         duration_ms=1.0,
-        success=False,
         config=None,
         onnx_model=None,
         precision="fp16",
         execution_provider="cpu",
         output_dir=str(tmp_path),
         extra_options={},
+        input_path="",
+        model_name="model",
     )
 
-    assert captured["output_model_size_bytes"] == 0
+    assert captured["output_model_size_bytes"] == 12
 
 
-def test_pathlike_input_is_normalized_for_success(monkeypatch):
+def test_early_failure_does_not_report_a_successful_build(monkeypatch, tmp_path):
     captured = {}
-
-    def create_impl(*args, **kwargs):
-        assert captured["telemetry_initialized"]
-        captured["input_path"] = args[1]
-        return "created"
-
-    monkeypatch.setattr(
-        builder_module,
-        "_get_model_builder_telemetry",
-        lambda: captured.update(telemetry_initialized=True),
-    )
-    monkeypatch.setattr(builder_module, "_create_model_impl", create_impl)
-
-    assert (
-        builder_module.create_model(
-            "model",
-            Path("model.gguf"),
-            "output",
-            "fp16",
-            "cpu",
-            "cache",
-        )
-        == "created"
-    )
-    assert captured["input_path"] == "model.gguf"
-
-
-def test_pathlike_input_preserves_early_failure_telemetry(monkeypatch):
-    captured = {}
-
-    def fail_create(*args, **kwargs):
-        raise RuntimeError("early failure")
-
-    monkeypatch.setattr(builder_module, "_create_model_impl", fail_create)
     monkeypatch.setattr(builder_module, "_get_model_builder_telemetry", lambda: None)
     monkeypatch.setattr(
         builder_module,
@@ -261,18 +240,17 @@ def test_pathlike_input_preserves_early_failure_telemetry(monkeypatch):
         lambda **kwargs: captured.update(kwargs),
     )
 
-    with pytest.raises(RuntimeError, match="early failure"):
+    with pytest.raises(Exception, match="Hugging Face details not found"):
         builder_module.create_model(
             "model",
             Path("model.gguf"),
-            "output",
+            str(tmp_path / "output"),
             "fp16",
             "cpu",
-            "cache",
+            str(tmp_path / "cache"),
         )
 
-    assert captured["source_format"] == "gguf"
-    assert captured["fallback_model_name"] == "model.gguf"
+    assert captured == {}
 
 
 def test_interrupted_build_is_not_reported_as_success(monkeypatch, tmp_path):
@@ -286,22 +264,20 @@ def test_interrupted_build_is_not_reported_as_success(monkeypatch, tmp_path):
     monkeypatch.setattr(builder_module, "set_io_dtype", lambda *args: object())
     monkeypatch.setattr(builder_module, "set_onnx_dtype", lambda *args: object())
     monkeypatch.setattr(builder_module, "LlamaModel", lambda *args: InterruptedModel())
+    monkeypatch.setattr(builder_module, "_get_model_builder_telemetry", lambda: None)
     monkeypatch.setattr(
         builder_module,
         "_emit_model_build_telemetry",
         lambda **kwargs: captured.update(kwargs),
     )
-    telemetry_state = {"emitted": False}
-
     with pytest.raises(KeyboardInterrupt):
-        builder_module._create_model_impl(
+        builder_module.create_model(
             "model",
             "",
             str(tmp_path / "output"),
             "fp16",
             "cpu",
             str(tmp_path / "cache"),
-            telemetry_state,
             hf_details={
                 "extra_kwargs": {},
                 "hf_name": "model",
@@ -309,8 +285,7 @@ def test_interrupted_build_is_not_reported_as_success(monkeypatch, tmp_path):
             },
         )
 
-    assert telemetry_state["emitted"]
-    assert captured["success"] is False
+    assert captured == {}
 
 
 def test_structured_runtime_config_is_applied_before_success_telemetry(monkeypatch, tmp_path):
@@ -329,26 +304,32 @@ def test_structured_runtime_config_is_applied_before_success_telemetry(monkeypat
     monkeypatch.setattr(builder_module, "set_onnx_dtype", lambda *args: object())
     monkeypatch.setattr(builder_module, "validate_model_dependent_config", lambda *args: None)
     monkeypatch.setattr(builder_module, "LlamaModel", lambda *args: ConfigOnlyModel())
+    monkeypatch.setattr(builder_module, "_get_model_builder_telemetry", lambda: None)
     monkeypatch.setattr(
         builder_module,
         "apply_runtime_config",
         lambda generated, runtime: {"search": runtime["search"]},
     )
-    monkeypatch.setattr(builder_module, "_emit_model_build_telemetry", lambda **kwargs: captured.update(kwargs))
 
-    builder_module._create_model_impl(
+    def capture_event(**kwargs):
+        captured.update(kwargs)
+        captured["emitted_after_processing"] = "saved_config" in captured
+
+    monkeypatch.setattr(builder_module, "_emit_model_build_telemetry", capture_event)
+
+    builder_module.create_model(
         "model",
-        "",
+        Path("model.gguf"),
         str(tmp_path / "output"),
         "int4",
         "cpu",
         str(tmp_path / "cache"),
-        {"emitted": False},
         config_only=True,
         _effective_builder_config=effective,
         hf_details={"extra_kwargs": {}, "hf_name": "model", "hf_config": config},
     )
 
     assert captured["saved_config"] == {"search": {"max_length": 128}}
-    assert captured["success"] is True
+    assert captured["emitted_after_processing"] is True
     assert captured["precision"] == "fp16"
+    assert captured["input_path"] == "model.gguf"

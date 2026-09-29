@@ -22,6 +22,8 @@ ONNX Runtime GenAI uses the cross-platform 1DS SDK (cpp_client_telemetry) to sen
 
 Routine model, generation, adapter, and process information events use deterministic 1% client-side sampling; runtime error events are not sampled. Process information includes coarse container, virtual-machine, WSL, or emulator classification when detected. Python error events may include bounded, path-redacted stack metadata and immediate inner-exception details. Raw source lines, container identifiers, host names, and workload identifiers are not transmitted.
 
+Python model-builder events are emitted only after a successful build. Operator counts and types come from the in-memory graph and may differ from the saved graph after quantization.
+
 For ways to disable telemetry, see the [Disabling Telemetry](#disabling-telemetry) section below.
 
 ### Disabling Telemetry

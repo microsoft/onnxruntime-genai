@@ -620,17 +620,15 @@ def _shutdown_model_builder_telemetry(max_seconds: float = 1.0) -> None:
 
 
 def _emit_model_build_telemetry(
-    action_name: str,
     duration_ms: float,
-    success: bool,
     config,
     onnx_model,
     precision: str,
     execution_provider: str,
     output_dir: str,
     extra_options: dict[str, Any],
-    source_format: str = "huggingface",
-    fallback_model_name: str = "",
+    input_path: str,
+    model_name: str,
 ) -> None:
     try:
         telemetry = _get_model_builder_telemetry()
@@ -646,7 +644,7 @@ def _emit_model_build_telemetry(
         context_length = getattr(config, "max_position_embeddings", 0)
 
         output_model_size = 0
-        if success and os.path.isdir(output_dir):
+        if os.path.isdir(output_dir):
             for filename in os.listdir(output_dir):
                 file_path = os.path.join(output_dir, filename)
                 if os.path.isfile(file_path) and filename.endswith((".onnx", ".onnx_data", ".onnx.data")):
@@ -655,6 +653,7 @@ def _emit_model_build_telemetry(
         num_ops = 0
         op_types = ""
         has_custom_ops = False
+        # Saving can quantize a copy, so these in-memory counts may differ from the exported graph.
         if hasattr(onnx_model, "model") and onnx_model.model is not None:
             with suppress(Exception):
                 graph = onnx_model.model.graph
@@ -671,10 +670,10 @@ def _emit_model_build_telemetry(
         quant_type = str(getattr(onnx_model, "onnx_dtype", precision)).replace("DataType.", "")
 
         telemetry.log_model_build(
-            action=action_name,
+            action="create_model",
             duration_ms=duration_ms,
-            success=success,
-            model_name=_sanitize_path_value(getattr(config, "_name_or_path", "") or fallback_model_name),
+            success=True,
+            model_name=_sanitize_path_value(getattr(config, "_name_or_path", "") or model_name),
             model_type=str(model_type),
             hidden_size=hidden_size,
             num_layers=num_layers,
@@ -689,7 +688,7 @@ def _emit_model_build_telemetry(
             num_onnx_operators=num_ops,
             operator_types=op_types,
             has_custom_ops=has_custom_ops,
-            source_format=source_format,
+            source_format="gguf" if input_path and input_path.lower().endswith(".gguf") else "huggingface",
             has_adapter="adapter_path" in extra_options,
             extra_options=_sanitize_extra_options(extra_options),
         )
@@ -755,14 +754,13 @@ def warn_if_checkpoint_overrides_precision(config, precision, onnx_dtype):
 
 
 @torch.no_grad
-def _create_model_impl(
+def create_model(
     model_name,
     input_path,
     output_dir,
     precision,
     execution_provider,
     cache_dir,
-    telemetry_state,
     **extra_options,
 ):
     """Export using options prepared by parse_extra_options.
@@ -771,6 +769,9 @@ def _create_model_impl(
     must supply the positional precision argument (None is allowed for an
     explicit target weight type), even when the CLI permits omitting it.
     """
+    start = time.perf_counter()
+    _get_model_builder_telemetry()
+    input_path = os.fsdecode(input_path) if input_path else input_path
     effective_config = extra_options.pop("_effective_builder_config", None)
     structured = {
         key: extra_options.pop(key)
@@ -795,7 +796,6 @@ def _create_model_impl(
     if effective_config is not None:
         precision = effective_config.precision
 
-    overall_start = time.perf_counter()
     normalized_execution_provider = _normalize_execution_provider_name(execution_provider)
     if normalized_execution_provider != execution_provider:
         execution_provider = normalized_execution_provider
@@ -964,92 +964,34 @@ def _create_model_impl(
     # metadata is dropped when the builder does not honor it.
     warn_if_checkpoint_overrides_precision(config, precision, onnx_dtype)
 
-    source_format = "gguf" if input_path and input_path.lower().endswith(".gguf") else "huggingface"
-    build_success = False
-    try:
-        if not config_only:
-            onnx_model.make_model(input_path)
-            onnx_model.save_model(output_dir)
+    if not config_only:
+        onnx_model.make_model(input_path)
+        onnx_model.save_model(output_dir)
 
-        onnx_model.make_genai_config(config, extra_kwargs, output_dir)
-        # Composite exporters append MTP/block-drafter sections after the decoder.
-        # Apply the profile after generation so component names are preserved.
-        runtime_config = effective_config.runtime_config if effective_config is not None else extra_options.get("_runtime_config", {})
-        if runtime_config:
-            config_path = os.path.join(output_dir, "genai_config.json")
-            with open(config_path, encoding="utf-8") as config_file:
-                genai_config = json.load(config_file)
-            genai_config = apply_runtime_config(genai_config, runtime_config)
-            with open(config_path, "w", encoding="utf-8") as config_file:
-                json.dump(genai_config, config_file, indent=4)
+    onnx_model.make_genai_config(config, extra_kwargs, output_dir)
+    # Composite exporters append MTP/block-drafter sections after the decoder.
+    # Apply the profile after generation so component names are preserved.
+    runtime_config = effective_config.runtime_config if effective_config is not None else extra_options.get("_runtime_config", {})
+    if runtime_config:
+        config_path = os.path.join(output_dir, "genai_config.json")
+        with open(config_path, encoding="utf-8") as config_file:
+            genai_config = json.load(config_file)
+        genai_config = apply_runtime_config(genai_config, runtime_config)
+        with open(config_path, "w", encoding="utf-8") as config_file:
+            json.dump(genai_config, config_file, indent=4)
 
-        onnx_model.save_processing(hf_name, extra_kwargs, output_dir)
-        build_success = True
-    finally:
-        overall_duration_ms = (time.perf_counter() - overall_start) * 1000
-        telemetry_state["emitted"] = True
-        _emit_model_build_telemetry(
-            action_name="create_model",
-            duration_ms=overall_duration_ms,
-            success=build_success,
-            config=config,
-            onnx_model=onnx_model,
-            precision=precision,
-            execution_provider=execution_provider,
-            output_dir=output_dir,
-            extra_options=extra_options,
-            source_format=source_format,
-            fallback_model_name=model_name,
-        )
-
-
-def create_model(
-    model_name,
-    input_path,
-    output_dir,
-    precision,
-    execution_provider,
-    cache_dir,
-    **extra_options,
-):
-    """Create a model and emit a minimal failure event even before model selection."""
-    overall_start = time.perf_counter()
-    telemetry_state = {"emitted": False}
-    normalized_input_path = input_path
-    _get_model_builder_telemetry()
-    try:
-        if input_path:
-            normalized_input_path = os.fsdecode(input_path)
-        return _create_model_impl(
-            model_name,
-            normalized_input_path,
-            output_dir,
-            precision,
-            execution_provider,
-            cache_dir,
-            telemetry_state,
-            **extra_options,
-        )
-    except Exception:
-        if not telemetry_state["emitted"]:
-            _emit_model_build_telemetry(
-                action_name="create_model",
-                duration_ms=(time.perf_counter() - overall_start) * 1000,
-                success=False,
-                config=None,
-                onnx_model=None,
-                precision=precision,
-                execution_provider=execution_provider,
-                output_dir="",
-                extra_options=extra_options,
-                source_format=(
-                    "gguf"
-                    if isinstance(normalized_input_path, str) and normalized_input_path.lower().endswith(".gguf")
-                    else "huggingface"
-                ),
-                fallback_model_name=normalized_input_path or model_name,
-            )
-        raise
+    onnx_model.save_processing(hf_name, extra_kwargs, output_dir)
+    _emit_model_build_telemetry(
+        duration_ms=(time.perf_counter() - start) * 1000,
+        config=config,
+        onnx_model=onnx_model,
+        precision=precision,
+        execution_provider=execution_provider,
+        output_dir=output_dir,
+        extra_options=extra_options,
+        input_path=input_path,
+        model_name=model_name,
+    )
 
 
 def get_args():
