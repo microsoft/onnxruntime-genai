@@ -1189,6 +1189,12 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
     const auto row_key = row_key_builder.str();
     CachedKevTokens row_value;
     if (cache.Get(row_key, row_value)) {
+      if (row_value.tokens.size() > 8192 ||
+          state_value.tokens.size() > 8192 - row_value.tokens.size())
+        throw std::invalid_argument(
+            "state+question row exceeds 8192 tokens: " +
+            std::to_string(state_value.tokens.size() +
+                           row_value.tokens.size()));
       rows.push_back(std::move(row_value.tokens));
       option_indices.push_back(std::move(row_value.option_indices));
       continue;
@@ -1208,6 +1214,10 @@ OgaModelResult NativeDecisionSession::Decide(const OgaStructuredRequest& request
     if (row.size() > 8192)
       throw std::invalid_argument("state+question row exceeds 8192 tokens: " +
                                   std::to_string(row.size()));
+    if (state_value.tokens.size() > 8192 - row.size())
+      throw std::invalid_argument(
+          "state+question row exceeds 8192 tokens: " +
+          std::to_string(state_value.tokens.size() + row.size()));
     cache.Put(row_key, {row, indices});
     rows.push_back(std::move(row));
     option_indices.push_back(std::move(indices));

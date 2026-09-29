@@ -2,9 +2,12 @@
 // Licensed under the MIT License.
 #include "component_session.h"
 
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <cstring>
+#include <limits>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <variant>
@@ -207,11 +210,81 @@ std::vector<std::string> CopyStrings(const char* const* values, size_t count,
   return result;
 }
 
+struct TokenValue : JSON::Element {
+  std::string content;
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "content" &&
+        std::holds_alternative<std::string_view>(value))
+      content = std::string(JSON::Get<std::string_view>(value));
+  }
+};
+
+struct IgnoredTokenizerMetadata : JSON::Element {
+  void OnValue(std::string_view, JSON::Value) override {}
+  Element& OnObject(std::string_view) override { return *this; }
+  Element& OnArray(std::string_view) override { return *this; }
+};
+
+struct TokenizerMetadata : JSON::Element {
+  std::optional<int32_t> pad_token_id;
+  std::string pad_token;
+  TokenValue pad_token_object;
+  IgnoredTokenizerMetadata ignored;
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "pad_token_id" && std::holds_alternative<double>(value)) {
+      const auto number = JSON::Get<double>(value);
+      if (number < std::numeric_limits<int32_t>::min() ||
+          number > std::numeric_limits<int32_t>::max() ||
+          number != std::trunc(number))
+        throw std::runtime_error("tokenizer_config.json pad_token_id must be an integer");
+      pad_token_id = static_cast<int32_t>(number);
+    } else if (name == "pad_token" &&
+               std::holds_alternative<std::string_view>(value)) {
+      pad_token = std::string(JSON::Get<std::string_view>(value));
+    }
+  }
+  Element& OnObject(std::string_view name) override {
+    if (name.empty()) return *this;
+    if (name == "pad_token") return pad_token_object;
+    return ignored;
+  }
+  Element& OnArray(std::string_view name) override {
+    if (name.empty()) return *this;
+    return ignored;
+  }
+};
+
 Generators::Config DirectoryTokenizerConfig(const char* path) {
   if (!path) throw std::invalid_argument("package_path must not be null");
   Generators::Config config;
   config.config_path = fs::path(path);
   return config;
+}
+
+int32_t ResolvePadTokenId(
+    const char* path, const Generators::Tokenizer& tokenizer) {
+  const auto config_path = fs::path(path) / "tokenizer_config.json";
+  std::ifstream stream(config_path.c_str(), std::ios::binary);
+  if (!stream)
+    throw std::runtime_error("cannot open tokenizer_config.json");
+  std::stringstream buffer;
+  buffer << stream.rdbuf();
+  TokenizerMetadata metadata;
+  try {
+    JSON::Parse(metadata, buffer.str());
+  } catch (...) {
+    JSON::TranslateException("tokenizer_config.json");
+  }
+  if (metadata.pad_token_id) return *metadata.pad_token_id;
+  const auto& pad_token = metadata.pad_token.empty()
+                              ? metadata.pad_token_object.content
+                              : metadata.pad_token;
+  if (pad_token.empty()) return tokenizer.GetPadTokenId();
+  const auto ids = tokenizer.Encode(pad_token.c_str());
+  if (ids.size() != 1)
+    throw std::runtime_error(
+        "tokenizer_config.json pad_token must encode to exactly one token");
+  return ids.front();
 }
 
 }  // namespace
@@ -258,8 +331,11 @@ struct OGA_CAPI_HANDLE OgaComponentTensors {
 };
 
 struct OGA_CAPI_HANDLE OgaDirectoryTokenizer {
-  explicit OgaDirectoryTokenizer(const char* path) : value(DirectoryTokenizerConfig(path)) {}
+  explicit OgaDirectoryTokenizer(const char* path)
+      : value(DirectoryTokenizerConfig(path)),
+        pad_token_id(ResolvePadTokenId(path, value)) {}
   Generators::Tokenizer value;
+  int32_t pad_token_id;
 };
 
 struct OGA_CAPI_HANDLE OgaTokenIds {
@@ -472,7 +548,7 @@ OgaResult* OGA_API_CALL OgaDirectoryTokenizerEncode(
 OgaResult* OGA_API_CALL OgaDirectoryTokenizerGetPadTokenId(
     const OgaDirectoryTokenizer* tokenizer, int32_t* out) {
   OGA_CAPI_TRY
-  Required(out, "out") = Required(tokenizer, "tokenizer").value.GetPadTokenId();
+  Required(out, "out") = Required(tokenizer, "tokenizer").pad_token_id;
   return nullptr;
   OGA_CAPI_CATCH
 }

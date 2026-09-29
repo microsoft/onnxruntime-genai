@@ -131,8 +131,10 @@ def test_exported_packages_cpu_cuda_parity(provider):
 
     if provider == "cuda" and os.getenv("ORT_GENAI_RUN_NON_GENERATIVE_CUDA") != "1":
         pytest.skip("set ORT_GENAI_RUN_NON_GENERATIVE_CUDA=1 for CUDA")
-    root = Path(os.getenv("ORT_GENAI_NON_GENERATIVE_TEST_ROOT",
-                          "/home/asonawane/non-generative/exports/mobius"))
+    root_value = os.getenv("ORT_GENAI_NON_GENERATIVE_TEST_ROOT")
+    if not root_value:
+        pytest.skip("set ORT_GENAI_NON_GENERATIVE_TEST_ROOT to exported packages")
+    root = Path(root_value)
     kwargs = {"providers": [provider]} if provider else {}
     clm_request = json.loads((root / "clm-request.json").read_text())
     kev_request = json.loads((root / "kev-request.json").read_text())

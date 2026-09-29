@@ -540,7 +540,12 @@ inline NamedComponentSession::NamedComponentSession(
 inline NamedComponentSession::NamedComponentSession(OgaComponentSession* handle)
     : handle_(handle) {
   if (!handle_) throw std::invalid_argument("component session handle must not be null");
-  LoadMetadata();
+  try {
+    LoadMetadata();
+  } catch (...) {
+    OgaDestroyComponentSession(std::exchange(handle_, nullptr));
+    throw;
+  }
 }
 
 inline void NamedComponentSession::LoadMetadata() {
@@ -642,6 +647,7 @@ inline std::vector<int32_t> DirectoryTokenizer::Encode(const std::string& text) 
   const int32_t* data{};
   size_t count{};
   OgaCheckResult(OgaTokenIdsGetData(values.get(), &data, &count));
+  if (!count) return {};
   return {data, data + count};
 }
 inline int32_t DirectoryTokenizer::PadTokenId() const {
