@@ -493,6 +493,8 @@ python builder.py -i path_to_target_model -o path_to_output_folder -p int4 -e cu
 
 Qwen3.5-family full-attention layers emit one packed Q/K/V `MatMul` or `MatMulNBits` followed by `Split`, including with paged attention, even though their Q projection is twice as wide because it carries a per-head output gate. The weights are concatenated before quantization, so the quantized values are unchanged. Projections that a checkpoint already quantized (FP8/NVFP4) stay separate. QKV fusion defaults to `true`; set `fuse_qkv=false` to keep three projections. The deprecated `disable_qkv_fusion=true` spelling remains supported for compatibility.
 
+A layer also keeps its three projections when `nodes_to_exclude` or an exact-name weight override names one of its `q_proj`, `k_proj`, or `v_proj` MatMuls, when pre-quantized projections differ in group size or GPTQ `g_idx`, or, for Qwen3.5/3.8, when the `mixed_layers` preset upgrades its `v_proj` alone.
+
 ```bash
 # From wheel:
 python -m onnxruntime_genai.models.builder -i path_to_target_model -o path_to_output_folder -p int4 -e cuda --extra_options use_paged_attention=true fuse_qkv=false
