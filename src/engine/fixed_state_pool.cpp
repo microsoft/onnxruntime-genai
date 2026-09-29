@@ -737,10 +737,9 @@ FixedStatePool::FixedStatePool(std::shared_ptr<Model> model, size_t capacity,
         "Fixed state pools require qualified transactional device semantics.");
   }
   if (SupportsStateUpdates() &&
-      impl_->device->GetType() != DeviceType::CPU &&
-      impl_->device->GetType() != DeviceType::CUDA) {
+      !impl_->device->SupportsCompactStateReplay()) {
     throw std::runtime_error(
-        "Compact fixed state replay currently supports only CPU and CUDA devices.");
+        "Compact fixed state replay is not supported by this device.");
   }
   if (impl_->state_update_capacity != 0) {
     impl_->persistent_bytes = CheckedAdd(
@@ -1639,36 +1638,41 @@ void FixedStatePool::PrepareCommit(FixedStateReservation& reservation) {
         }
 
         const auto& updates = storage.state_update_tensors[tensor_index];
-        const auto row_pointer = [&](const std::unique_ptr<OrtValue>& tensor,
-                                     size_t row_bytes) -> const uint8_t* {
+        const auto row_view = [&](const std::unique_ptr<OrtValue>& tensor,
+                                  size_t row_bytes) -> DeviceSpan<const uint8_t> {
           if (!tensor) {
-            return nullptr;
+            return {};
           }
-          return ByteWrapTensor(*impl_->device, *tensor).Span().data() + row * row_bytes;
+          return ByteWrapTensor(*impl_->device, *tensor)
+              .subspan(row * row_bytes, row_bytes);
         };
-        const auto source = ByteWrapTensor(*impl_->device, *storage.gathered_inputs[tensor_index])
-                                .Span()
-                                .data() +
-                            row * spec.row_bytes;
+        const auto source =
+            ByteWrapTensor(*impl_->device, *storage.gathered_inputs[tensor_index])
+                .subspan(row * spec.row_bytes, spec.row_bytes);
         auto destination = ByteWrapTensor(*impl_->device, *spec.banks[inactive_bank])
-                               .Span()
-                               .data() +
-                           storage.handles[row].slot * spec.row_bytes;
-        const auto* capsule = reinterpret_cast<const float*>(
-            row_pointer(updates.capsule, spec.state_update_capsule.row_bytes));
-        const float* decay = capsule;
-        const float* key = capsule
-                               ? capsule + spec.state_update_capacity * spec.state_update_channel_count
-                               : nullptr;
-        const float* delta = key
-                                 ? key + spec.state_update_capacity *
-                                             spec.state_update_key_head_count *
-                                             spec.state_update_key_width
-                                 : nullptr;
+                               .subspan(storage.handles[row].slot * spec.row_bytes,
+                                        spec.row_bytes);
+        auto capsule = row_view(updates.capsule, spec.state_update_capsule.row_bytes);
+        DeviceSpan<const uint8_t> decay;
+        DeviceSpan<const uint8_t> key;
+        DeviceSpan<const uint8_t> delta;
+        if (!capsule.empty()) {
+          const size_t decay_bytes =
+              spec.state_update_capacity * spec.state_update_channel_count * sizeof(float);
+          const size_t key_bytes =
+              spec.state_update_capacity * spec.state_update_key_head_count *
+              spec.state_update_key_width * sizeof(float);
+          const size_t delta_bytes =
+              spec.state_update_capacity * spec.state_update_channel_count *
+              spec.state_update_state_width * sizeof(float);
+          decay = capsule.subspan(0, decay_bytes);
+          key = capsule.subspan(decay_bytes, key_bytes);
+          delta = capsule.subspan(decay_bytes + key_bytes, delta_bytes);
+        }
         replay_descriptors.push_back(StateUpdateReplayDesc{
             source,
             destination,
-            row_pointer(updates.value, spec.state_update_value.row_bytes),
+            row_view(updates.value, spec.state_update_value.row_bytes),
             decay,
             key,
             delta,

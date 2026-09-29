@@ -398,19 +398,40 @@ python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o pa
 python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e cuda -c cache_dir_to_store_temp_files --extra_options use_paged_attention=true prune_lm_head=true
 ```
 
+WebGPU requires a fixed cache capacity:
+
+```bash
+# From wheel:
+python -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e webgpu -c cache_dir_to_store_temp_files --extra_options use_paged_attention=true num_blocks=1024
+
+# From source:
+python builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p fp16 -e webgpu -c cache_dir_to_store_temp_files --extra_options use_paged_attention=true num_blocks=1024
+```
+
 #### Build a DFlash 2 Block Drafter
 
-Set `dflash2_path` to a DFlash 2 checkpoint to export an auxiliary `dflash2.onnx` block drafter beside a Qwen3.5 MoE target model. The target must use paged attention. SpecForge identifies the target layers whose outputs are tapped, while `aux_hidden_state_layers` identifies residual streams entering layers, so each configured auxiliary layer must be one greater than the corresponding `target_layer_ids` entry in the DFlash checkpoint. The drafter reuses the target's embedding and LM-head initializers, so both checkpoints must use compatible tensors.
+Set `dflash2_path` to a DFlash 2 checkpoint to export an auxiliary `dflash2.onnx` block drafter beside a Qwen3.5 or Qwen3.8 target model. The target must use paged attention. SpecForge identifies the target layers whose outputs are tapped, while `aux_hidden_state_layers` identifies residual streams entering layers, so each configured auxiliary layer must be one greater than the corresponding `target_layer_ids` entry in the DFlash checkpoint. The drafter reuses the target's embedding and LM-head initializers, so both checkpoints must use compatible tensors.
 
 `dflash2_num_draft_tokens` optionally overrides how many tokens the drafter proposes per step. It must be a positive integer no greater than the draft checkpoint's block size minus the anchor token; that checkpoint limit is also the default.
 
 `max_draft_tokens` writes `speculative.max_draft_tokens` into `genai_config.json`, capping how many drafted tokens the engine verifies each step. It must be between 1 and 16, and defaults to unset, which leaves the runtime default of 4 in effect. This differs from `dflash2_num_draft_tokens`: the drafter's exported block costs the same to run no matter how many of its tokens are verified, so raising this value buys extra accepted tokens for free until the wider verification step costs more than it saves. The best value is workload-specific and must be measured; it can be retuned on an already-exported model by editing the config.
 
-The legacy `dflash2_precision` option accepts `bf16` (default), `int4`, or `int8`. With builder configuration version 2, `drafter_options.quant_config` independently controls the DFlash 2 body and additionally supports `weights.type=int2`. Integer modes quantize the attention and MLP weights while keeping the small dynamic-convolution and selector projections dense. Body activations and KV caches default to BF16 for legacy exports; structured `drafter_options.quant_config.io_dtype` can select FP16 instead. This option does not quantize the drafter's KV cache. INT2 requires an ONNX Runtime build with 2-bit `MatMulNBits` support.
+The legacy `dflash2_precision` option accepts `bf16` (default), `int4`, or `int8`. With builder configuration version 2, `drafter_options.quant_config` independently controls the DFlash 2 body and additionally supports `weights.type=int2`. Integer modes quantize the attention and MLP weights while keeping the small dynamic-convolution and selector projections dense. Body activations and KV caches default to BF16 on CUDA; WebGPU requires FP16. Structured `drafter_options.quant_config.io_dtype` can select FP16 on CUDA but cannot select BF16 on WebGPU. This option does not quantize the drafter's KV cache. INT2 requires an ONNX Runtime build with 2-bit `MatMulNBits` support.
 
 The body uses portable raw blockwise weights by default. On CUDA, set `runtime_config.model.dflash2.session_options["ep.cuda.fpa_intb_gemm"]` to `"1"` to let the runtime prepack eligible raw weights, or set `drafter_options.quant_config.format.matmulnbits_weights_prepacked` to `1` (SM80) or `2` (SM90) to prepack eligible INT4/INT8 weights during export. INT2 offline prepacking supports only mode `1` with block size 64 or 128 and output width divisible by 128. Unsupported projections stay raw. BF16 x INT2 requires a full fpA-intB kernel build.
 
 Normally the LM head is not quantized separately: the drafter adopts the target's saved head, bytes and layout alike, so the two always agree and are deduplicated into one copy on disk. Its precision and block size remain the target's. If a BF16 target uses offline-prepacked weights, the drafter instead keeps a private raw INT4 head because the prepacked kernel requires FP16 activations. When the target's head uses a format the drafter cannot address by name, such as asymmetric, `use_qdq`, or `rtn`/`k_quant` layouts, the drafter's head stays dense. A head the checkpoint supplies already quantized (FP8) overrides `--precision` for the target and for the drafter alike. The embedding table works the same way: `op_types_to_quantize=MatMul/Gather` turns the target's `Gather` into `GatherBlockQuantized`, and the drafter adopts that table rather than keeping a dense copy. It has to, because the two graphs are deduplicated by initializer name — a target that renames the table while the drafter keeps a dense `Gather` costs more than the target saved. Under `shared_embeddings` the target gathers from its LM-head weight instead of a table of its own, so the drafter's embedding stays dense.
+
+WebGPU DFlash 2 uses FP16 activations and KV caches. Residual addition and
+`SkipSimplifiedLayerNormalization` execute in FP32, with persistent residual sums kept in FP32.
+Attention/MLP convolution **finish** multiply, mask, and accumulation paths also stay FP32 through
+the following skip normalization. Only normalized outputs are cast back to FP16. Convolution
+prepare paths and coefficients, attention/KV caches, and INT4 `MatMulNBits` activations remain
+FP16. This policy is automatic and requires re-exporting older WebGPU drafters.
+
+```bash
+python -m onnxruntime_genai.models.builder -i path_to_target_model -o path_to_output_folder -p int4 -e webgpu --extra_options use_paged_attention=true num_blocks=1024 state_update_capacity=7 aux_hidden_state_layers=6,20,34,48,62 dflash2_path=path_to_dflash2_checkpoint dflash2_precision=int4
+```
 
 ```bash
 python -m onnxruntime_genai.models.builder -i path_to_target_model -o path_to_output_folder -p int4 -e cuda --extra_options use_paged_attention=true aux_hidden_state_layers=2,12,22 dflash2_path=path_to_dflash2_checkpoint dflash2_precision=int4 max_draft_tokens=7
@@ -456,7 +477,7 @@ version 2 and an ONNX Runtime build with the full fpA-intB kernel set:
 Set `dflash2_fuse_gate_up=true` to experimentally combine each DFlash 2 MLP's gate and up
 projections into one `MatMul` or `MatMulNBits`, followed by `Split`. The default is `false`.
 This export-time option requires `dflash2_path` and supports all four `dflash2_precision`
-values. It preserves the selected body activation dtype and the existing quantization scheme; the target,
+values. It preserves the EP-specific body activation policy and the existing quantization scheme; the target,
 attention projections, and LM head are unchanged. Re-export the drafter to apply it and
 validate latency and quality on the deployment workload before enabling it in production.
 
@@ -486,7 +507,7 @@ Set `dspark_path` to a DSpark checkpoint to export an auxiliary `dspark.onnx` bl
 
 `dspark_num_draft_tokens` optionally overrides how many tokens the drafter proposes per step. It must be at least `2` and no greater than the checkpoint's trained `block_size`; the default is that checkpoint block size. `dspark_top_k` controls how many candidates the lattice keeps per block slot; it defaults to `16` and must be a positive integer no greater than the drafter vocabulary size. The score tensor and its host copy grow as `dspark_top_k` squared, so keep this value near the default unless a larger lattice has been benchmarked for the intended workload.
 
-The DSpark transformer body executes in BF16 even when the target uses FP16, so the selected execution provider and hardware must support BF16. Its KV cache consumes additional GPU memory: a full-attention DSpark layer adds a key/value entry for every target cache block and therefore reduces the target's maximum resident context under a fixed memory budget. A checkpoint configured uniformly for sliding-window attention uses its positive `sliding_window` instead; because the exported graph carries a single window for every layer, a checkpoint that windows only some of its layers (`max_window_layers` other than `0`, or a mixed `layer_types`) is rejected.
+The DSpark transformer body executes in BF16 even when the target uses FP16, so the selected execution provider and hardware must support BF16. DSpark export on WebGPU is rejected because WebGPU PagedAttention supports only FP16 activations and KV caches. Its KV cache consumes additional GPU memory: a full-attention DSpark layer adds a key/value entry for every target cache block and therefore reduces the target's maximum resident context under a fixed memory budget. A checkpoint configured uniformly for sliding-window attention uses its positive `sliding_window` instead; because the exported graph carries a single window for every layer, a checkpoint that windows only some of its layers (`max_window_layers` other than `0`, or a mixed `layer_types`) is rejected.
 
 ```bash
 # From wheel:
@@ -615,7 +636,7 @@ A multi-token verify forward can additionally carry a window of recurrent/conv s
 
 #### Compact State Updates (Qwen3.5/3.8)
 
-Paged Qwen3.5/3.8 exports can capture compact convolution and GatedDeltaNet transitions for speculative tokens instead of returning full recurrent-state checkpoints. Set `state_update_capacity=N` to reserve updates for up to `N` tokens. The capacity defaults to `0` (disabled) and requires `use_paged_attention=true`. It must be an integer from `0` through `8`, matching the kernel and runtime-parser bound, because the kernel packs every captured transition for a layer into a single fixed-width capsule output. Paged Qwen3.5/3.8 exports use GatedDeltaNet regardless of `linear_attn_op` and support CUDA with `fp16` or `bf16` model I/O. When enabled, `genai_config.json` records the capacity, the `state_update_capture_count` and `state_update_active` input bindings, and the per-layer convolution-value and recurrent-capsule output templates. All compact state-update inputs and outputs are omitted when `state_update_capacity=0`.
+Paged Qwen3.5/3.8 exports can capture compact convolution and GatedDeltaNet transitions for speculative tokens instead of returning full recurrent-state checkpoints. Set `state_update_capacity=N` to reserve updates for up to `N` tokens. The capacity defaults to `0` (disabled) and requires `use_paged_attention=true`. It must be an integer from `0` through `8`, matching the kernel and runtime-parser bound, because the kernel packs every captured transition for a layer into a single fixed-width capsule output. Paged Qwen3.5/3.8 exports use GatedDeltaNet regardless of `linear_attn_op` and support CUDA and WebGPU with `fp16` model I/O; CUDA also supports `bf16`. The Engine supports compact state updates on CPU, CUDA, and WebGPU. WebGPU currently stages compact partial-acceptance replay through CPU for correctness, so it is not yet performance optimized. When enabled, `genai_config.json` records the capacity, the `state_update_capture_count` and `state_update_active` input bindings, and the per-layer convolution-value and recurrent-capsule output templates. All compact state-update inputs and outputs are omitted when `state_update_capacity=0`.
 
 ```bash
 # From wheel:
@@ -627,7 +648,7 @@ python builder.py -m model_name -o path_to_output_folder -p bf16 -e cuda -c cach
 
 #### Select the Qwen3.5/3.8 Recurrent Operator
 
-This scenario is for when you want to choose which contrib operator implements the linear-attention layers of a non-paged Qwen3.5/3.8 export. `linear_attn_op` accepts `linear_attention` (the default), which emits `CausalConvWithState` + `LinearAttention`, or `gated_delta_net`, which emits `CausalConvWithState` + `GatedDeltaNet` with an FP32 V-major recurrent state and native Qwen gate arithmetic from the raw `A_log`/`dt_bias` initializers. `gated_delta_net` is CUDA-only, requires `state_window=0`, and supports `fp16` or `bf16` model I/O. Paged exports (`use_paged_attention=true`) always use GatedDeltaNet and therefore also require CUDA; they ignore this option. The default `linear_attention` path requires an ONNX Runtime kernel that implements the selected contrib operator.
+This scenario is for when you want to choose which contrib operator implements the linear-attention layers of a non-paged Qwen3.5/3.8 export. `linear_attn_op` accepts `linear_attention` (the default), which emits `CausalConvWithState` + `LinearAttention`, or `gated_delta_net`, which emits `CausalConvWithState` + `GatedDeltaNet` with an FP32 V-major recurrent state and native Qwen gate arithmetic from the raw `A_log`/`dt_bias` initializers. `gated_delta_net` requires CUDA or WebGPU and `state_window=0`; CUDA supports `fp16` or `bf16` model I/O, while WebGPU supports `fp16`. Paged exports (`use_paged_attention=true`) always use GatedDeltaNet and ignore this option. The default `linear_attention` path requires an ONNX Runtime kernel that implements the selected contrib operator.
 
 ```bash
 # From wheel:

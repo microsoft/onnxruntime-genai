@@ -395,7 +395,11 @@ def normalize_drafter_quant_config(
     # Drafter body defaults must not copy the target's overrides, KV policy, or
     # quantization layout. Borrowed embedding/head tensors need separate checks.
     defaults = {
-        "io_dtype": "bf16" if drafter_type in ("dflash2", "dspark") else target_io_dtype,
+        "io_dtype": (
+            "fp16" if drafter_type == "dflash2" and execution_provider == "webgpu"
+            else "bf16" if drafter_type in ("dflash2", "dspark")
+            else target_io_dtype
+        ),
         "checkpoint_policy": "preserve",
         "weights": {"type": "none", "block_size": 32},
         "moe": {"type": "none", "block_size": 32, "weights_prepacked": 0},
@@ -409,6 +413,8 @@ def normalize_drafter_quant_config(
         raise ValueError("dspark body io_dtype must be bf16 because its activations can exceed the fp16 range")
     if drafter_type == "dflash2" and quant_config.io_dtype not in ("fp16", "bf16"):
         raise ValueError("DFlash2 body io_dtype must be fp16 or bf16")
+    if drafter_type == "dflash2" and execution_provider == "webgpu" and quant_config.io_dtype != "fp16":
+        raise ValueError("WebGPU DFlash2 requires FP16 body activations and KV caches")
     if drafter_type == "mtp" and quant_config.io_dtype != target_io_dtype:
         # The MTP graph consumes the decoder hidden state directly; no exporter converts it.
         raise ValueError(f"MTP io_dtype must match the target io_dtype '{target_io_dtype}'")

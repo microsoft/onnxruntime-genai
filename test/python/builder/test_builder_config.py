@@ -261,6 +261,31 @@ def test_dflash2_policy_is_independent_from_target(tmp_path):
     assert effective.extra_options["aux_hidden_state_layers"] == "2,4"
 
 
+def test_webgpu_dflash2_defaults_to_fp16_body(tmp_path):
+    effective = normalize_builder_config(
+        "int4",
+        "webgpu",
+        target_options={"attention": {"implementation": "paged"}},
+        drafter_options={"drafter_type": "dflash2", "path": make_drafter_checkpoint(tmp_path)},
+    )
+
+    assert effective.drafter_options["quant_config"]["io_dtype"] == "fp16"
+
+
+def test_webgpu_dflash2_rejects_bf16_body(tmp_path):
+    with pytest.raises(ValueError, match="WebGPU DFlash2 requires FP16"):
+        normalize_builder_config(
+            "int4",
+            "webgpu",
+            target_options={"attention": {"implementation": "paged"}},
+            drafter_options={
+                "drafter_type": "dflash2",
+                "path": make_drafter_checkpoint(tmp_path),
+                "quant_config": {"io_dtype": "bf16"},
+            },
+        )
+
+
 def test_dflash2_accepts_fp16_body_dtype(tmp_path):
     effective = normalize_builder_config(
         "int4",
