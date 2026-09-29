@@ -3,6 +3,7 @@
 #include "generator/generators.h"
 #include "cpu_embedding.h"
 
+#include <algorithm>
 #include <array>
 #include <numeric>
 

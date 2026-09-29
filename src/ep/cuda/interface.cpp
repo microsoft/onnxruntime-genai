@@ -85,17 +85,9 @@ class PinnedHostPool {
   }
 
   void Release(uint8_t* p, size_t capacity, bool copy_pending) noexcept {
-    const size_t cls = ClassOf(capacity);
-    std::lock_guard<std::mutex> lock{mutex_};
-    auto& entries = free_[cls];
     cudaEvent_t event{};
     if (copy_pending) {
-      if (!events_.empty()) {
-        event = events_.back();
-        events_.pop_back();
-      } else if (::cudaEventCreateWithFlags(&event, cudaEventDisableTiming) != cudaSuccess) {
-        event = nullptr;
-      }
+      event = TakeEvent();
       if (!event || ::cudaEventRecord(event, GetStream()) != cudaSuccess) {
         ::cudaStreamSynchronize(GetStream());
         if (event) ReturnEvent(event);
@@ -103,24 +95,24 @@ class PinnedHostPool {
         return;
       }
     }
-    if (entries.size() >= kMaxFreePerClass || retained_bytes_ + capacity > kMaxRetainedBytes) {
-      if (event) {
-        ::cudaEventSynchronize(event);
-        ReturnEvent(event);
+    {
+      std::lock_guard<std::mutex> lock{mutex_};
+      auto& entries = free_[ClassOf(capacity)];
+      if (entries.size() < kMaxFreePerClass && retained_bytes_ + capacity <= kMaxRetainedBytes) {
+        try {
+          entries.push_back(Entry{p, event});
+          retained_bytes_ += capacity;
+          return;
+        } catch (...) {
+        }
       }
-      ::cudaFreeHost(p);
-      return;
     }
-    try {
-      entries.push_back(Entry{p, event});
-      retained_bytes_ += capacity;
-    } catch (...) {
-      if (event) {
-        ::cudaEventSynchronize(event);
-        ReturnEvent(event);
-      }
-      ::cudaFreeHost(p);
+    // Not retained. Free outside the lock because these calls wait for the device.
+    if (event) {
+      ::cudaEventSynchronize(event);
+      ReturnEvent(event);
     }
+    ::cudaFreeHost(p);
   }
 
  private:
@@ -135,7 +127,21 @@ class PinnedHostPool {
     return cls;
   }
 
+  cudaEvent_t TakeEvent() noexcept {
+    {
+      std::lock_guard<std::mutex> lock{mutex_};
+      if (!events_.empty()) {
+        const cudaEvent_t event = events_.back();
+        events_.pop_back();
+        return event;
+      }
+    }
+    cudaEvent_t event{};
+    return ::cudaEventCreateWithFlags(&event, cudaEventDisableTiming) == cudaSuccess ? event : nullptr;
+  }
+
   void ReturnEvent(cudaEvent_t event) noexcept {
+    std::lock_guard<std::mutex> lock{mutex_};
     try {
       events_.push_back(event);
     } catch (...) {

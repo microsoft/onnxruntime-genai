@@ -9,6 +9,7 @@
 #include "beam_search_scorer_cuda.cuh"
 #include "beam_search_scorer_cuda.h"
 #include "beam_search_topk.h"
+#include <algorithm>
 #include <queue>
 #include <random>
 
