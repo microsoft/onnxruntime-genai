@@ -571,12 +571,16 @@ def flatten_drafter_options(
             raise ValueError(f"{drafter_type} windowed KV cache is not supported")
 
     optimizations = options.get("optimizations", {})
-    check_fields(optimizations, {"fuse_mlp_gate_up"}, "drafter_options.optimizations")
+    check_fields(optimizations, {"fuse_mlp_gate_up", "fuse_qkv"}, "drafter_options.optimizations")
     fuse_gate_up = optimizations.get("fuse_mlp_gate_up", False)
     if fuse_gate_up and drafter_type != "dflash2":
         raise ValueError(f"fuse_mlp_gate_up is not supported for drafter_type={drafter_type}")
+    fuse_qkv = optimizations.get("fuse_qkv", False)
+    if "fuse_qkv" in optimizations and drafter_type != "dflash2":
+        raise ValueError(f"fuse_qkv is not supported for drafter_type={drafter_type}")
     if drafter_type == "dflash2":
         flattened["dflash2_fuse_gate_up"] = fuse_gate_up
+        flattened["dflash2_fuse_qkv"] = fuse_qkv
 
     shared_weights = options.get("shared_weights", {})
     check_fields(shared_weights, {"embedding", "lm_head"}, "drafter_options.shared_weights")

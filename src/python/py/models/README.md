@@ -460,12 +460,20 @@ values. It preserves the selected body activation dtype and the existing quantiz
 attention projections, and LM head are unchanged. Re-export the drafter to apply it and
 validate latency and quality on the deployment workload before enabling it in production.
 
+Set `dflash2_fuse_qkv=true` to experimentally replace each DFlash 2 layer's five attention
+projections (query-block Q/K/V plus context K/V) with one `MatMul` or `MatMulNBits` over the
+query-block rows stacked on the context rows. Its gathered output feeds `PagedAttention` as packed
+QKV. The default is `false`. The Q computed for context rows is discarded, so this trades a little
+extra prefill work for fewer launches at decode. A fused drafter has no `q_row_map` input, so it
+requires an ONNX Runtime GenAI release that treats `q_row_map` as optional; older runtimes reject
+the exported package. Both fusions can be combined:
+
 ```bash
 # From wheel:
-python -m onnxruntime_genai.models.builder -i path_to_target_model -o path_to_output_folder -p bf16 -e cuda --extra_options use_paged_attention=true aux_hidden_state_layers=6,20,34,48,62 dflash2_path=path_to_dflash2_checkpoint dflash2_precision=int4 dflash2_fuse_gate_up=true
+python -m onnxruntime_genai.models.builder -i path_to_target_model -o path_to_output_folder -p bf16 -e cuda --extra_options use_paged_attention=true aux_hidden_state_layers=6,20,34,48,62 dflash2_path=path_to_dflash2_checkpoint dflash2_precision=int4 dflash2_fuse_gate_up=true dflash2_fuse_qkv=true
 
 # From source:
-python builder.py -i path_to_target_model -o path_to_output_folder -p bf16 -e cuda --extra_options use_paged_attention=true aux_hidden_state_layers=6,20,34,48,62 dflash2_path=path_to_dflash2_checkpoint dflash2_precision=int4 dflash2_fuse_gate_up=true
+python builder.py -i path_to_target_model -o path_to_output_folder -p bf16 -e cuda --extra_options use_paged_attention=true aux_hidden_state_layers=6,20,34,48,62 dflash2_path=path_to_dflash2_checkpoint dflash2_precision=int4 dflash2_fuse_gate_up=true dflash2_fuse_qkv=true
 ```
 
 #### Fuse Target MLP Gate/Up Projections

@@ -297,6 +297,8 @@ ONNXTensorElementDataType ValidateDflash2ModelCompatibility(
   for (const auto* name : {&inputs.q_row_map, &inputs.qkv_row_map,
                            &inputs.block_row_index, &inputs.cumulative_sequence_lengths,
                            &inputs.past_sequence_lengths}) {
+    // A drafter that projects Q from the same packed rows as K/V has no use for `q_row_map`.
+    if (name == &inputs.q_row_map && !drafter_metadata.HasInput(*name)) continue;
     RequireTensor(drafter_metadata, *name, true, Ort::TypeToTensorType<int32_t>, 1);
     if (drafter_metadata.GetInputShape(*name)[0] >= 0 || !input_names.insert(*name).second) {
       throw std::runtime_error(
@@ -573,6 +575,7 @@ Dflash2Drafter::Dflash2Drafter(std::shared_ptr<Dflash2Model> model, size_t paged
   }
 
   const auto& inputs = config_.inputs;
+  has_q_row_map_ = model_->session_info_.HasInput(inputs.q_row_map);
   aux_type_ = model_->session_info_.GetInputDataType(inputs.aux_hidden_states);
   const auto aux_shape = model_->session_info_.GetInputShape(inputs.aux_hidden_states);
   if (aux_shape.size() != 2 || aux_shape[1] <= 0) {
@@ -1061,9 +1064,12 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
   }
 
   constexpr auto int32_type = Ort::TypeToTensorType<int32_t>;
-  auto& q_row_map = StepTensor(step_tensors_.q_row_map, device, int32_type,
-                               {static_cast<int64_t>(num_tokens)});
-  fill_int32(q_row_map, layout.q_row_map);
+  Tensor* q_row_map = nullptr;
+  if (has_q_row_map_) {
+    q_row_map = &StepTensor(step_tensors_.q_row_map, device, int32_type,
+                            {static_cast<int64_t>(num_tokens)});
+    fill_int32(*q_row_map, layout.q_row_map);
+  }
   auto& qkv_row_map = StepTensor(step_tensors_.qkv_row_map, device, int32_type,
                                  {static_cast<int64_t>(num_tokens)});
   fill_int32(qkv_row_map, layout.qkv_row_map);
@@ -1150,15 +1156,19 @@ bool Dflash2Drafter::Propose(Tensor& aux_hidden_states, std::span<const Feed> fe
 
   std::vector<const char*> input_names{
       config_.inputs.aux_hidden_states.c_str(), config_.inputs.input_ids.c_str(),
-      config_.inputs.q_row_map.c_str(), config_.inputs.qkv_row_map.c_str(),
+      config_.inputs.qkv_row_map.c_str(),
       config_.inputs.block_row_index.c_str(), config_.inputs.cumulative_sequence_lengths.c_str(),
       config_.inputs.past_sequence_lengths.c_str(), config_.inputs.block_table.c_str(),
       config_.inputs.attention_metadata.c_str()};
   std::vector<OrtValue*> inputs{packed_aux.GetOrtTensor(), input_ids.GetOrtTensor(),
-                                q_row_map.GetOrtTensor(), qkv_row_map.GetOrtTensor(),
+                                qkv_row_map.GetOrtTensor(),
                                 block_row_index.GetOrtTensor(), cumulative.GetOrtTensor(),
                                 past_lengths.GetOrtTensor(), block_table.GetOrtTensor(),
                                 metadata.GetOrtTensor()};
+  if (q_row_map) {
+    input_names.push_back(config_.inputs.q_row_map.c_str());
+    inputs.push_back(q_row_map->GetOrtTensor());
+  }
   if (embeddings) {
     input_names.push_back(config_.inputs.embeddings.c_str());
     inputs.push_back(embeddings->GetOrtTensor());

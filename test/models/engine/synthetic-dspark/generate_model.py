@@ -82,6 +82,19 @@ model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)], ir
 onnx.checker.check_model(model)
 onnx.save(model, Path(__file__).with_name("dspark.onnx"))
 
+# A packed-QKV drafter has no q_row_map input; its checksum column reports qkv_row_map instead.
+packed_qkv = onnx.ModelProto()
+packed_qkv.CopyFrom(model)
+for index, graph_input in enumerate(packed_qkv.graph.input):
+    if graph_input.name == "q_row_map":
+        del packed_qkv.graph.input[index]
+        break
+for node in packed_qkv.graph.node:
+    if "q_checksum" in node.output:
+        node.input[0] = "qkv_row_map"
+onnx.checker.check_model(packed_qkv)
+onnx.save(packed_qkv, Path(__file__).with_name("dspark_packed_qkv.onnx"))
+
 # The windowed variant uses DFlash2's anchor row plus three draft rows.
 windowed = onnx.ModelProto()
 windowed.CopyFrom(model)
@@ -93,13 +106,15 @@ for initializer in windowed.graph.initializer:
 for output in windowed.graph.output:
     if output.name in ("draft_candidate_ids", "draft_scores"):
         output.type.tensor_type.shape.dim[1].dim_value = 3
-windowed.graph.initializer.extend([
-    helper.make_tensor("zero_i32", TensorProto.INT32, [], [0]),
-    helper.make_tensor("one_i32", TensorProto.INT32, [], [1]),
-    helper.make_tensor("four_i32", TensorProto.INT32, [], [4]),
-    helper.make_tensor("five_i32", TensorProto.INT32, [], [5]),
-    helper.make_tensor("one_float", TensorProto.FLOAT, [], [1.0]),
-])
+windowed.graph.initializer.extend(
+    [
+        helper.make_tensor("zero_i32", TensorProto.INT32, [], [0]),
+        helper.make_tensor("one_i32", TensorProto.INT32, [], [1]),
+        helper.make_tensor("four_i32", TensorProto.INT32, [], [4]),
+        helper.make_tensor("five_i32", TensorProto.INT32, [], [5]),
+        helper.make_tensor("one_float", TensorProto.FLOAT, [], [1.0]),
+    ]
+)
 for index, node in enumerate(windowed.graph.node):
     if "draft_values_col" in node.output:
         node.input[0] = "draft_values_with_cache"
@@ -117,23 +132,13 @@ for index, node in enumerate(windowed.graph.node):
             helper.make_node("Unsqueeze", ["batch_rows", "axis1"], ["batch_rows_col"]),
             helper.make_node("Unsqueeze", ["last_column", "axis1"], ["last_column_col"]),
             helper.make_node("Unsqueeze", ["previous_column", "axis1"], ["previous_column_col"]),
-            helper.make_node(
-                "Concat", ["batch_rows_col", "previous_column_col"],
-                ["read_table_indices"], axis=1
-            ),
-            helper.make_node(
-                "Cast", ["read_table_indices"], ["read_table_indices_i64"], to=TensorProto.INT64
-            ),
+            helper.make_node("Concat", ["batch_rows_col", "previous_column_col"], ["read_table_indices"], axis=1),
+            helper.make_node("Cast", ["read_table_indices"], ["read_table_indices_i64"], to=TensorProto.INT64),
             helper.make_node("GatherND", ["block_table", "read_table_indices_i64"], ["previous_block"]),
             helper.make_node("Unsqueeze", ["previous_block", "axis1"], ["previous_block_col"]),
             helper.make_node("Unsqueeze", ["previous_slot", "axis1"], ["previous_slot_col"]),
-            helper.make_node(
-                "Concat",
-                ["batch_rows_col", "last_column_col"], ["write_table_indices"], axis=1
-            ),
-            helper.make_node(
-                "Cast", ["write_table_indices"], ["write_table_indices_i64"], to=TensorProto.INT64
-            ),
+            helper.make_node("Concat", ["batch_rows_col", "last_column_col"], ["write_table_indices"], axis=1),
+            helper.make_node("Cast", ["write_table_indices"], ["write_table_indices_i64"], to=TensorProto.INT64),
             helper.make_node("GatherND", ["block_table", "write_table_indices_i64"], ["last_block"]),
             helper.make_node("Unsqueeze", ["last_block", "axis1"], ["last_block_col"]),
             helper.make_node("Unsqueeze", ["last_slot", "axis1"], ["last_slot_col"]),
@@ -144,9 +149,7 @@ for index, node in enumerate(windowed.graph.node):
                 ["read_cache_indices"],
                 axis=1,
             ),
-            helper.make_node(
-                "Cast", ["read_cache_indices"], ["read_cache_indices_i64"], to=TensorProto.INT64
-            ),
+            helper.make_node("Cast", ["read_cache_indices"], ["read_cache_indices_i64"], to=TensorProto.INT64),
             helper.make_node("GatherND", ["past_key_values.0.key", "read_cache_indices_i64"], ["cached_key"]),
             helper.make_node(
                 "Concat",
@@ -154,14 +157,11 @@ for index, node in enumerate(windowed.graph.node):
                 ["write_cache_indices"],
                 axis=1,
             ),
-            helper.make_node(
-                "Cast", ["write_cache_indices"], ["write_cache_indices_i64"], to=TensorProto.INT64
-            ),
+            helper.make_node("Cast", ["write_cache_indices"], ["write_cache_indices_i64"], to=TensorProto.INT64),
             helper.make_node("Cast", ["cached_key"], ["cached_key_int"], to=TensorProto.INT32),
             helper.make_node("Unsqueeze", ["cached_key_int", "axis1"], ["cached_key_col"]),
             helper.make_node(
-                "Concat", ["cached_key_col", "past_col", "row_length_col"],
-                ["draft_values_with_cache"], axis=1
+                "Concat", ["cached_key_col", "past_col", "row_length_col"], ["draft_values_with_cache"], axis=1
             ),
             helper.make_node("Cast", ["last_position"], ["last_position_float"], to=TensorProto.FLOAT),
             helper.make_node("Add", ["last_position_float", "one_float"], ["cache_updates"]),

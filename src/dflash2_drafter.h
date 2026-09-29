@@ -207,6 +207,7 @@ struct Dflash2Drafter {
   // Context positions the drafter must keep behind the query block. Zero when it is not windowed,
   // in which case the whole sequence stays resident.
   size_t context_window_{};
+  bool has_q_row_map_{true};
   size_t ring_blocks_{};
   // Concurrent requests the pool was sized for, and the blocks a full-attention request's query
   // rows can need beyond the committed context the target pool already accounts for.
