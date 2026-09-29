@@ -96,36 +96,9 @@ functionality:
 
 ## Managed bindings
 
-The C# package exposes `DirectoryTokenizer`, low-level `ComponentSession`, and
-typed `RankingSession`/`DecisionSession` wrappers. They use safe handles and
-`IDisposable`; requests and results use ordinary dictionaries, lists, strings,
-booleans, and numeric types. Ranking sessions also expose free-form `Rank`.
-Provider names are accepted by each session constructor, and both typed
-sessions expose cache capacity, statistics, clear, and invalidate operations.
-Operations and `close()` are coordinated on each Java wrapper; concurrent close
-is idempotent and waits for an in-flight native operation. Structured numeric
-values accept only Java primitive wrappers (`Byte`, `Short`, `Integer`, `Long`,
-`Float`, and `Double`). The local Java build pins ORT 1.26, matching the native
-core and supporting the IR 12 package tests.
-`ComponentSession` accepts and returns `ComponentTensor` buffers and deliberately
-does not duplicate package-specific preprocessing. Safe-handle references cover
-each complete native call plus its borrowed-result accessor sequence, so a
-concurrent `Dispose` cannot release the native session underneath an operation.
-
-The Java package exposes `DirectoryTokenizer`, `RankingSession`, and
-`DecisionSession` as `AutoCloseable` classes. Structured values are represented
-by `Map`, `List`, strings, primitive wrappers, and null. Provider selection and
-all cache controls are available on both session types. Set
-`ORTGENAI_TEST_CLM_PACKAGE` and/or `ORTGENAI_TEST_KEV_PACKAGE` to opt into the
-managed real-package tests.
-
-The JavaScript package under `src/js` exposes synchronous Node-API
-`DirectoryTokenizer`, `RankingSession`, and `DecisionSession` wrappers. It uses
-the stable structured C builders/accessors, accepts provider lists, and exposes
-cache and KEV prefix-reuse controls and statistics. JavaScript safe integers
-map to int64; `bigint` supports the full signed int64 range. Build it in-tree
-with `ENABLE_JAVASCRIPT=ON`, or incrementally with
-`build.py --sdk javascript --prebuilt_genai_home ... --ort_home ...`.
+This change establishes the stable C ABI used by managed bindings. C#, Java,
+and JavaScript wrappers are intentionally delivered by the dependent managed
+bindings change rather than this native-runtime change.
 
 CLM caches only projected action embeddings, after the encoder and action head.
 The key includes canonical package identity and component/tokenizer

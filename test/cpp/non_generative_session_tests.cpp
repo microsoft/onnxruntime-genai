@@ -61,4 +61,7 @@ TEST(NonGenerativeSessionTest, RealPackagesRunWhenConfigured) {
   ranking.Run(request);
   EXPECT_LE(ranking.CacheStats().entries, 1u);
   EXPECT_GT(ranking.CacheStats().evictions, 0u);
+
+  request.state = std::string(100000, 'x');
+  EXPECT_THROW(decision.Decide(request), std::runtime_error);
 }
