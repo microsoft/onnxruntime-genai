@@ -5,11 +5,254 @@
 #include <pybind11/numpy.h>
 #define OGA_USE_SPAN 1
 #include "../models/onnxruntime_api.h"
+#include "../generator/generators.h"
+#include "../config.h"
+#include "../models/preprocessing/genai_tokenizer.h"
 #include "../ort_genai.h"
+#include <cstring>
+#include <filesystem>
 #include <iostream>
+#include <mutex>
 #include <optional>
+#include <unordered_map>
 
 using namespace pybind11::literals;
+
+ONNXTensorElementDataType ToTensorType(const pybind11::dtype& type);
+int ToNumpyType(ONNXTensorElementDataType type);
+pybind11::dtype ToNumpyDtype(ONNXTensorElementDataType type);
+
+struct PyComponentSession {
+  PyComponentSession(const std::string& package, const std::string& component,
+                     const std::vector<std::string>& providers)
+      : session_(package, component, providers) {}
+
+  pybind11::dict InputInfo() const {
+    pybind11::dict result;
+    for (const auto& tensor : session_.Inputs()) {
+      pybind11::dict info;
+      info["shape"] = tensor.shape;
+      info["symbols"] = tensor.symbolic_dimensions;
+      info["dtype"] = pybind11::str(ToNumpyDtype(
+          static_cast<ONNXTensorElementDataType>(tensor.type)));
+      info["onnx_type"] = static_cast<int>(tensor.type);
+      result[pybind11::str(tensor.name)] = std::move(info);
+    }
+    return result;
+  }
+
+  pybind11::dict Run(const pybind11::dict& feeds,
+                     std::optional<std::vector<std::string>> requested) {
+    std::vector<pybind11::array> arrays;
+    std::vector<OgaComponentInput> inputs;
+    arrays.reserve(feeds.size());
+    for (auto item : feeds) {
+      std::string name = pybind11::cast<std::string>(item.first);
+      pybind11::array array = pybind11::array::ensure(
+          item.second, pybind11::array::c_style);
+      if (!array)
+        throw std::runtime_error("component inputs must be contiguous numpy arrays");
+      arrays.push_back(array);
+      std::vector<int64_t> shape(array.ndim());
+      for (pybind11::ssize_t i = 0; i < array.ndim(); ++i) shape[i] = array.shape(i);
+      auto type = ToTensorType(array.dtype());
+      for (const auto& input : session_.Inputs()) {
+        if (input.name == name &&
+            static_cast<ONNXTensorElementDataType>(input.type) ==
+                ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16) {
+          if (!array.dtype().is(pybind11::dtype::of<uint16_t>()))
+            throw std::runtime_error("BF16 component inputs must use uint16 NumPy storage");
+          type = ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16;
+          break;
+        }
+      }
+      inputs.push_back({std::move(name), array.data(), static_cast<size_t>(array.nbytes()),
+                        std::move(shape), static_cast<OgaElementType>(type)});
+    }
+    std::vector<OgaComponentTensor> native_outputs;
+    {
+      pybind11::gil_scoped_release release;
+      native_outputs = session_.Run(inputs, requested.value_or(std::vector<std::string>{}));
+    }
+    pybind11::dict result;
+    for (const auto& output : native_outputs) {
+      pybind11::array array(ToNumpyDtype(
+          static_cast<ONNXTensorElementDataType>(output.type)), output.shape);
+      std::memcpy(array.mutable_data(), output.data.data(), output.data.size());
+      result[pybind11::str(output.name)] = std::move(array);
+    }
+    return result;
+  }
+
+  NamedComponentSession session_;
+};
+
+struct PyDirectoryTokenizer {
+  explicit PyDirectoryTokenizer(const std::string& path) : tokenizer_{path} {}
+  std::vector<int32_t> Encode(const std::string& value) const {
+    return tokenizer_.Encode(value);
+  }
+  int32_t PadTokenId() const { return tokenizer_.PadTokenId(); }
+  DirectoryTokenizer tokenizer_;
+};
+
+OgaStructuredValue ToStructuredValue(pybind11::handle value) {
+  if (value.is_none()) return {};
+  if (pybind11::isinstance<pybind11::bool_>(value))
+    return pybind11::cast<bool>(value);
+  if (pybind11::isinstance<pybind11::int_>(value))
+    return pybind11::cast<int64_t>(value);
+  if (pybind11::isinstance<pybind11::float_>(value))
+    return pybind11::cast<double>(value);
+  if (pybind11::isinstance<pybind11::str>(value))
+    return pybind11::cast<std::string>(value);
+  if (pybind11::isinstance<pybind11::dict>(value)) {
+    OgaStructuredValue::Object object;
+    for (auto item : pybind11::reinterpret_borrow<pybind11::dict>(value))
+      object.emplace_back(pybind11::cast<std::string>(item.first),
+                          ToStructuredValue(item.second));
+    return object;
+  }
+  if (pybind11::isinstance<pybind11::list>(value) ||
+      pybind11::isinstance<pybind11::tuple>(value)) {
+    OgaStructuredValue::Array array;
+    for (auto item : pybind11::reinterpret_borrow<pybind11::sequence>(value))
+      array.push_back(ToStructuredValue(item));
+    return array;
+  }
+  throw std::invalid_argument("structured values must be None, bool, number, string, list, or dict");
+}
+
+OgaStructuredRequest ToStructuredRequest(const pybind11::dict& value) {
+  OgaStructuredRequest request;
+  if (value.contains("state")) request.state = ToStructuredValue(value["state"]);
+  if (value.contains("temperature"))
+    request.temperature = pybind11::cast<float>(value["temperature"]);
+  if (!value.contains("questions") || !pybind11::isinstance<pybind11::dict>(value["questions"]))
+    throw std::invalid_argument("questions must be a non-empty object");
+  for (auto item : pybind11::reinterpret_borrow<pybind11::dict>(value["questions"])) {
+    const auto id = pybind11::cast<std::string>(item.first);
+    const auto question_value = pybind11::cast<pybind11::dict>(item.second);
+    OgaQuestion question;
+    question.type = pybind11::cast<std::string>(question_value["type"]);
+    if (question_value.contains("instructions"))
+      question.instructions = ToStructuredValue(question_value["instructions"]);
+    if (question_value.contains("criteria"))
+      question.criteria = ToStructuredValue(question_value["criteria"]);
+    request.questions.emplace_back(id, std::move(question));
+  }
+  return request;
+}
+
+pybind11::dict AnswerToPython(const OgaAnswer& answer) {
+  pybind11::dict result;
+  result["type"] = answer.type;
+  if (answer.noul) result["noul"] = *answer.noul;
+  if (answer.choice) result["choice"] = *answer.choice;
+  if (answer.score) result["score"] = *answer.score;
+  if (answer.confidence) result["confidence"] = *answer.confidence;
+  if (!answer.probabilities.empty()) {
+    pybind11::dict probabilities;
+    for (const auto& [key, probability] : answer.probabilities)
+      probabilities[pybind11::str(key)] = probability;
+    result["probabilities"] = std::move(probabilities);
+  }
+  if (!answer.legend.empty()) {
+    pybind11::dict legend;
+    for (const auto& [key, description] : answer.legend)
+      legend[pybind11::str(key)] = description;
+    result["legend"] = std::move(legend);
+  }
+  return result;
+}
+
+pybind11::dict ResultToPython(const OgaModelResult& value) {
+  pybind11::dict result;
+  for (const auto& [id, answer] : value.answers)
+    result[pybind11::str(id)] = AnswerToPython(answer);
+  return result;
+}
+
+struct PyRankingSession {
+  PyRankingSession(const std::string& path, const std::vector<std::string>& providers,
+                   size_t cache_capacity, size_t cache_capacity_bytes)
+      : session(path, providers) {
+    session.SetCacheCapacity(cache_capacity, cache_capacity_bytes);
+  }
+  pybind11::dict Run(const pybind11::dict& request) {
+    auto native_request = ToStructuredRequest(request);
+    OgaModelResult result;
+    {
+      pybind11::gil_scoped_release release;
+      result = session.Run(native_request);
+    }
+    return ResultToPython(result);
+  }
+  pybind11::dict CacheStats() const {
+    const auto stats = session.CacheStats();
+    pybind11::dict result;
+    result["hits"] = stats.hits;
+    result["misses"] = stats.misses;
+    result["evictions"] = stats.evictions;
+    result["entries"] = stats.entries;
+    result["bytes"] = stats.bytes;
+    result["capacity"] = stats.entry_capacity;
+    result["capacity_bytes"] = stats.byte_capacity;
+    return result;
+  }
+  RankingSession session;
+};
+
+struct PyDecisionSession {
+  PyDecisionSession(const std::string& path, const std::vector<std::string>& providers,
+                    size_t cache_capacity, size_t cache_capacity_bytes,
+                    bool prefix_reuse, size_t prefix_cache_capacity,
+                    size_t prefix_cache_capacity_bytes)
+      : session(path, providers) {
+    session.SetCacheCapacity(cache_capacity, cache_capacity_bytes);
+    session.SetPrefixReuseEnabled(prefix_reuse);
+    session.SetPrefixCacheCapacity(prefix_cache_capacity,
+                                   prefix_cache_capacity_bytes);
+  }
+  pybind11::dict Run(const pybind11::dict& request) {
+    auto native_request = ToStructuredRequest(request);
+    OgaModelResult result;
+    {
+      pybind11::gil_scoped_release release;
+      result = session.Decide(native_request);
+    }
+    return ResultToPython(result);
+  }
+  pybind11::dict CacheStats() const {
+    const auto stats = session.CacheStats();
+    pybind11::dict result;
+    result["hits"] = stats.hits;
+    result["misses"] = stats.misses;
+    result["evictions"] = stats.evictions;
+    result["entries"] = stats.entries;
+    result["bytes"] = stats.bytes;
+    result["capacity"] = stats.entry_capacity;
+    result["capacity_bytes"] = stats.byte_capacity;
+    return result;
+  }
+  pybind11::dict PrefixCacheStats() const {
+    const auto cache = session.PrefixCacheStats();
+    const auto reuse = session.PrefixReuseStats();
+    pybind11::dict result;
+    result["hits"] = cache.hits;
+    result["misses"] = cache.misses;
+    result["evictions"] = cache.evictions;
+    result["entries"] = cache.entries;
+    result["bytes"] = cache.bytes;
+    result["capacity"] = cache.entry_capacity;
+    result["capacity_bytes"] = cache.byte_capacity;
+    result["prefix_runs"] = reuse.prefix_runs;
+    result["branch_runs"] = reuse.branch_runs;
+    result["fallback_runs"] = reuse.fallback_runs;
+    return result;
+  }
+  DecisionSession session;
+};
 
 template <typename T>
 using ContiguousArray = pybind11::array_t<
@@ -142,6 +385,25 @@ int ToNumpyType(ONNXTensorElementDataType type) {
       return pybind11::detail::npy_api::NPY_DOUBLE_;
     default:
       throw std::runtime_error("Unsupported onnx type");
+  }
+}
+
+pybind11::dtype ToNumpyDtype(ONNXTensorElementDataType type) {
+    switch (type) {
+      case Ort::TypeToTensorType<bool>: return pybind11::dtype::of<bool>();
+      case Ort::TypeToTensorType<uint8_t>: return pybind11::dtype::of<uint8_t>();
+      case Ort::TypeToTensorType<int8_t>: return pybind11::dtype::of<int8_t>();
+      case Ort::TypeToTensorType<uint16_t>: return pybind11::dtype::of<uint16_t>();
+      case Ort::TypeToTensorType<int16_t>: return pybind11::dtype::of<int16_t>();
+      case Ort::TypeToTensorType<uint32_t>: return pybind11::dtype::of<uint32_t>();
+      case Ort::TypeToTensorType<int32_t>: return pybind11::dtype::of<int32_t>();
+      case Ort::TypeToTensorType<uint64_t>: return pybind11::dtype::of<uint64_t>();
+      case Ort::TypeToTensorType<int64_t>: return pybind11::dtype::of<int64_t>();
+      case Ort::TypeToTensorType<Ort::Float16_t>: return pybind11::dtype("float16");
+      case ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16: return pybind11::dtype::of<uint16_t>();
+      case Ort::TypeToTensorType<float>: return pybind11::dtype::of<float>();
+      case Ort::TypeToTensorType<double>: return pybind11::dtype::of<double>();
+      default: throw std::runtime_error("Unsupported onnx type");
   }
 }
 
@@ -484,6 +746,76 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         OgaShutdown();
       });
   m.add_object("_cleanup", cleanup);
+
+  pybind11::class_<PyComponentSession>(m, "ComponentSession",
+      "Uncached named-component ONNX Runtime session.")
+      .def(pybind11::init<const std::string&, const std::string&, const std::vector<std::string>&>(),
+           pybind11::arg("package_path"), pybind11::arg("component"),
+           pybind11::arg("providers") = std::vector<std::string>{})
+      .def_property_readonly("input_info", &PyComponentSession::InputInfo)
+      .def_property_readonly("input_names", [](const PyComponentSession& s) { return s.session_.InputNames(); })
+      .def_property_readonly("output_names", [](const PyComponentSession& s) { return s.session_.OutputNames(); })
+      .def("run", &PyComponentSession::Run, pybind11::arg("feeds"),
+           pybind11::arg("outputs") = std::nullopt);
+
+  pybind11::class_<PyDirectoryTokenizer>(m, "_DirectoryTokenizer")
+      .def(pybind11::init<const std::string&>())
+      .def("encode", &PyDirectoryTokenizer::Encode)
+      .def_property_readonly("pad_token_id", &PyDirectoryTokenizer::PadTokenId);
+
+  pybind11::class_<PyRankingSession>(m, "_RankingSession")
+      .def(pybind11::init<const std::string&, const std::vector<std::string>&,
+                          size_t, size_t>(),
+           pybind11::arg("package_path"),
+           pybind11::arg("providers") = std::vector<std::string>{},
+           pybind11::arg("cache_capacity") = size_t{256},
+           pybind11::arg("cache_capacity_bytes") = size_t{64 * 1024 * 1024})
+      .def("run", &PyRankingSession::Run)
+      .def("cache_stats", &PyRankingSession::CacheStats)
+      .def("clear_cache", [](PyRankingSession& self) { self.session.ClearCache(); })
+      .def("invalidate_cache", [](PyRankingSession& self) { self.session.InvalidateCache(); })
+      .def("set_cache_capacity",
+           [](PyRankingSession& self, size_t entries, size_t bytes) {
+             self.session.SetCacheCapacity(entries, bytes);
+           });
+
+  pybind11::class_<PyDecisionSession>(m, "_DecisionSession")
+      .def(pybind11::init<const std::string&, const std::vector<std::string>&,
+                          size_t, size_t, bool, size_t, size_t>(),
+           pybind11::arg("package_path"),
+           pybind11::arg("providers") = std::vector<std::string>{},
+           pybind11::arg("cache_capacity") = size_t{512},
+           pybind11::arg("cache_capacity_bytes") = size_t{16 * 1024 * 1024},
+           pybind11::arg("prefix_reuse") = true,
+           pybind11::arg("prefix_cache_capacity") = size_t{32},
+           pybind11::arg("prefix_cache_capacity_bytes") =
+               size_t{512 * 1024 * 1024})
+      .def("run", &PyDecisionSession::Run)
+      .def("cache_stats", &PyDecisionSession::CacheStats)
+      .def("prefix_cache_stats", &PyDecisionSession::PrefixCacheStats)
+      .def_property(
+          "prefix_reuse_enabled",
+          [](const PyDecisionSession& self) {
+            return self.session.PrefixReuseEnabled();
+          },
+          [](PyDecisionSession& self, bool enabled) {
+            self.session.SetPrefixReuseEnabled(enabled);
+          })
+      .def_property_readonly(
+          "prefix_reuse_status",
+          [](const PyDecisionSession& self) {
+            return self.session.PrefixReuseStatus();
+          })
+      .def("clear_cache", [](PyDecisionSession& self) { self.session.ClearCache(); })
+      .def("invalidate_cache", [](PyDecisionSession& self) { self.session.InvalidateCache(); })
+      .def("set_cache_capacity",
+           [](PyDecisionSession& self, size_t entries, size_t bytes) {
+             self.session.SetCacheCapacity(entries, bytes);
+           })
+      .def("set_prefix_cache_capacity",
+           [](PyDecisionSession& self, size_t entries, size_t bytes) {
+             self.session.SetPrefixCacheCapacity(entries, bytes);
+           });
 
   pybind11::class_<PyGeneratorParams>(m, "GeneratorParams")
       .def(pybind11::init<const OgaModel&>())
