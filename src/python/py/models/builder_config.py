@@ -14,10 +14,14 @@ import copy
 import json
 import math
 import os
+import re
+import shutil
 import warnings
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
+import onnx
 from quantization import QuantConfig
 
 STRUCTURED_FIELDS = (
@@ -25,6 +29,7 @@ STRUCTURED_FIELDS = (
     "drafter_options",
     "speculative_options",
     "runtime_config",
+    "component_options",
 )
 
 GRAPH_DERIVED_PROVIDER_OPTIONS = {
@@ -71,6 +76,88 @@ GRAPH_OPTIMIZATION_LEVELS = (
 )
 
 
+@dataclass(frozen=True)
+class ComponentBinding:
+    """Map a manifest-facing input or output name to an ONNX graph value."""
+
+    name: str
+    graph_name: str
+
+
+@dataclass(frozen=True)
+class HeadComponent:
+    """Describe one validated, pre-built head graph staged beside a backbone."""
+
+    name: str
+    source: str
+    filename: str
+    inputs: tuple[ComponentBinding, ...]
+    outputs: tuple[ComponentBinding, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the JSON-ready declaration, preserving logical graph bindings."""
+        return {
+            "name": self.name,
+            "source": self.source,
+            "filename": self.filename,
+            "inputs": {binding.name: binding.graph_name for binding in self.inputs},
+            "outputs": {binding.name: binding.graph_name for binding in self.outputs},
+        }
+
+
+@dataclass(frozen=True)
+class ComponentOptions:
+    """Describe either generic ONNX heads or one pinned model-specific artifact.
+
+    Generic packages populate ``heads``. Model-specific packages instead carry
+    ``model_source`` and immutable artifact/base revisions for later dispatch.
+    """
+
+    backbone_filename: str
+    heads: tuple[HeadComponent, ...]
+    model_source: str | None = None
+    artifact_revision: str | None = None
+    base_revision: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the normalized builder configuration as JSON-ready data."""
+        result = {
+            "backbone": {"filename": self.backbone_filename},
+            "heads": [head.to_dict() for head in self.heads],
+        }
+        if self.model_source is not None:
+            result["model_source"] = self.model_source
+            result["artifact_revision"] = self.artifact_revision
+            result["base_revision"] = self.base_revision
+        return result
+
+    def manifest_dict(self) -> dict[str, Any]:
+        """Build the runtime-neutral manifest for generic pre-built heads."""
+        components = {
+            "backbone": {
+                "role": "backbone",
+                "filename": self.backbone_filename,
+                "outputs": {"hidden_states": "hidden_states"},
+            }
+        }
+        components.update(
+            {
+                head.name: {
+                    "role": "head",
+                    "filename": head.filename,
+                    "inputs": {binding.name: binding.graph_name for binding in head.inputs},
+                    "outputs": {binding.name: binding.graph_name for binding in head.outputs},
+                }
+                for head in self.heads
+            }
+        )
+        return {
+            "schema_version": 1,
+            "model_type": "generic-non-generative",
+            "components": components,
+        }
+
+
 @dataclass
 class EffectiveBuilderConfig:
     """Carry normalized policy and the options consumed by existing exporters.
@@ -89,10 +176,11 @@ class EffectiveBuilderConfig:
     drafter_options: dict[str, Any] | None
     speculative_options: dict[str, Any]
     runtime_config: dict[str, Any]
+    component_options: ComponentOptions | None = None
     target_moe_explicit: bool = False
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "builder_config_version": self.version,
             "execution_provider": self.execution_provider,
             "precision": self.precision,
@@ -101,6 +189,248 @@ class EffectiveBuilderConfig:
             "speculative_options": copy.deepcopy(self.speculative_options),
             "runtime_config": copy.deepcopy(self.runtime_config),
         }
+        if self.component_options is not None:
+            result["component_options"] = self.component_options.to_dict()
+        return result
+
+
+def normalize_component_options(value: Any) -> ComponentOptions | None:
+    """Normalize generic or model-specific component configuration.
+
+    ``value`` may be a JSON object, inline JSON, or JSON-file path. Generic
+    declarations require at least one head; model-specific declarations require
+    a source and both revision pins. Invalid names, filenames, duplicate
+    bindings, mixed declaration forms, and missing pins raise ``ValueError``.
+    """
+    if value is None:
+        return None
+    data = load_json_object(value, "component_options")
+    check_fields(
+        data,
+        {"backbone", "heads", "model_source", "artifact_revision", "base_revision"},
+        "component_options",
+    )
+
+    backbone = data.get("backbone", {})
+    check_fields(backbone, {"filename"}, "component_options.backbone")
+    backbone_filename = backbone.get("filename", "model.onnx")
+    _validate_component_filename(backbone_filename, "component_options.backbone.filename")
+
+    model_source = data.get("model_source")
+    if model_source is not None and (
+        not isinstance(model_source, (str, os.PathLike)) or not os.fspath(model_source)
+    ):
+        raise ValueError("component_options.model_source must be a non-empty path")
+    heads_data = data.get("heads", [])
+    if not isinstance(heads_data, list) or (not heads_data and model_source is None):
+        raise ValueError("component_options.heads must be a non-empty array")
+    if model_source is not None and heads_data:
+        raise ValueError("component_options.model_source cannot be combined with pre-built heads")
+    for revision_name in ("artifact_revision", "base_revision"):
+        revision = data.get(revision_name)
+        if model_source is not None and (not isinstance(revision, str) or not revision.strip()):
+            raise ValueError(f"component_options.{revision_name} is required for model-specific exports")
+
+    heads = []
+    names = {"backbone"}
+    filenames = {backbone_filename.casefold()}
+    for index, head_data in enumerate(heads_data):
+        path = f"component_options.heads[{index}]"
+        check_fields(head_data, {"name", "source", "filename", "inputs", "outputs"}, path)
+        name = head_data.get("name")
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]*", name):
+            raise ValueError(f"{path}.name must start with a letter and contain only letters, digits, '.', '_', or '-'")
+        if name.casefold() in names:
+            raise ValueError(f"duplicate component name {name!r}")
+        source = head_data.get("source")
+        if not isinstance(source, (str, os.PathLike)) or not os.fspath(source):
+            raise ValueError(f"{path}.source must be a non-empty path")
+        source = os.fspath(source)
+        filename = head_data.get("filename", os.path.basename(source))
+        _validate_component_filename(filename, f"{path}.filename")
+        if filename.casefold() in filenames:
+            raise ValueError(f"duplicate component filename {filename!r}")
+        inputs = _normalize_component_bindings(
+            head_data.get("inputs", {"hidden_states": "hidden_states"}), f"{path}.inputs"
+        )
+        outputs = _normalize_component_bindings(head_data.get("outputs", {}), f"{path}.outputs")
+        names.add(name.casefold())
+        filenames.add(filename.casefold())
+        heads.append(
+            HeadComponent(name=name, source=source, filename=filename, inputs=inputs, outputs=outputs)
+        )
+    return ComponentOptions(
+        backbone_filename=backbone_filename,
+        heads=tuple(heads),
+        model_source=os.fspath(model_source) if model_source is not None else None,
+        artifact_revision=data.get("artifact_revision"),
+        base_revision=data.get("base_revision"),
+    )
+
+
+def _normalize_component_bindings(value: Any, path: str) -> tuple[ComponentBinding, ...]:
+    """Validate one logical-to-graph binding map and return immutable bindings.
+
+    ``path`` identifies the configuration field in errors. Empty names/values
+    and duplicate concrete graph names raise ``ValueError``.
+    """
+    if not isinstance(value, dict):
+        raise ValueError(f"{path} must be an object")
+    bindings = []
+    graph_names = set()
+    for name, graph_name in value.items():
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(f"{path} binding names must be non-empty strings")
+        if not isinstance(graph_name, str) or not graph_name.strip():
+            raise ValueError(f"{path}.{name} must be a non-empty graph value name")
+        if graph_name in graph_names:
+            raise ValueError(f"{path} graph value names must be unique; duplicate {graph_name!r}")
+        graph_names.add(graph_name)
+        bindings.append(ComponentBinding(name=name, graph_name=graph_name))
+    return tuple(bindings)
+
+
+def _validate_component_filename(value: Any, path: str):
+    """Require a simple relative ``.onnx`` filename safe for package staging."""
+    if (
+        not isinstance(value, str)
+        or not value
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*\.onnx", value)
+    ):
+        raise ValueError(f"{path} must be a relative ONNX filename without directories")
+
+
+def export_component_package(options: ComponentOptions, output_dir: str):
+    """Export component heads and their manifest into ``output_dir``.
+
+    Model-specific sources are delegated to their graph builders. Generic heads
+    and referenced external tensor files are copied only after every source and
+    destination has been validated; malformed ONNX, unsafe paths, missing data,
+    or destination conflicts raise ``ValueError``.
+    """
+    output_root = Path(output_dir).resolve()
+    if options.model_source is not None:
+        from builders.non_generative import export_model_specific_components  # noqa: PLC0415
+
+        export_model_specific_components(options, output_root)
+        return
+    copy_plan: dict[Path, Path] = {}
+    reserved = {
+        output_root / options.backbone_filename,
+        output_root / f"{options.backbone_filename}.data",
+        output_root / "component_manifest.json",
+        *(output_root / head.filename for head in options.heads),
+    }
+    reserved.update(path.resolve() for path in output_root.rglob("*") if path.is_file())
+
+    for head in options.heads:
+        source = Path(head.source)
+        if not source.is_file():
+            raise ValueError(f"component {head.name!r} source graph does not exist: {head.source}")
+        _add_component_copy(copy_plan, output_root / head.filename, source.resolve(), head.name)
+        # Inspect external references before copying anything so an unsafe or
+        # incomplete head cannot leave a partially staged component package.
+        for relative_path, external_source in _find_external_data_files(source, head.name):
+            external_destination = (output_root / relative_path).resolve()
+            try:
+                external_destination.relative_to(output_root)
+            except ValueError as error:
+                raise ValueError(
+                    f"component {head.name!r} has unsafe external data location {relative_path!r}"
+                ) from error
+            _add_component_copy(
+                copy_plan, external_destination, external_source, head.name, reserved=reserved
+            )
+
+    for destination, source in copy_plan.items():
+        if source == destination:
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+
+    with open(output_root / "component_manifest.json", "w", encoding="utf-8") as handle:
+        json.dump(options.manifest_dict(), handle, indent=4)
+
+
+def _add_component_copy(
+    copy_plan: dict[Path, Path],
+    destination: Path,
+    source: Path,
+    component_name: str,
+    reserved: set[Path] | None = None,
+):
+    """Add one validated source/destination pair to an atomic staging plan.
+
+    Conflicting sources or collisions with reserved package files raise
+    ``ValueError`` before filesystem writes begin.
+    """
+    existing = copy_plan.get(destination)
+    if existing is not None and existing != source:
+        raise ValueError(
+            f"component {component_name!r} file {destination.name!r} conflicts with another packaged file"
+        )
+    if reserved is not None and destination in reserved and source != destination:
+        raise ValueError(
+            f"component {component_name!r} external data conflicts with packaged file {destination.name!r}"
+        )
+    copy_plan[destination] = source
+
+
+def _find_external_data_files(model_path: Path, component_name: str) -> list[tuple[str, Path]]:
+    """Resolve a head graph's external tensor files without loading their data.
+
+    Returned locations remain relative to the graph directory. Absolute,
+    traversing, malformed, or missing locations raise ``ValueError`` to prevent
+    external-data references from escaping either source or destination roots.
+    """
+    try:
+        model = onnx.load(model_path, load_external_data=False)
+    except Exception as error:
+        raise ValueError(f"component {component_name!r} source is not a readable ONNX model: {model_path}") from error
+
+    source_root = model_path.resolve().parent
+    files = {}
+    for tensor in _iter_tensor_protos(model):
+        entries = {entry.key: entry.value for entry in tensor.external_data}
+        if tensor.data_location != onnx.TensorProto.EXTERNAL and not entries:
+            continue
+        location = entries.get("location")
+        if not location:
+            raise ValueError(f"component {component_name!r} has external tensor data without a location")
+        relative = Path(location)
+        if (
+            relative.is_absolute()
+            or "\\" in location
+            or ":" in location
+            or any(part in ("", ".", "..") for part in relative.parts)
+        ):
+            raise ValueError(f"component {component_name!r} has unsafe external data location {location!r}")
+        source = (source_root / relative).resolve()
+        try:
+            source.relative_to(source_root)
+        except ValueError as error:
+            raise ValueError(
+                f"component {component_name!r} has unsafe external data location {location!r}"
+            ) from error
+        if not source.is_file():
+            raise ValueError(
+                f"component {component_name!r} external data file does not exist: {location}"
+            )
+        files[location] = source
+    return list(files.items())
+
+
+def _iter_tensor_protos(message):
+    """Yield every nested TensorProto that may carry external-data metadata."""
+    if isinstance(message, onnx.TensorProto):
+        yield message
+        return
+    for field, value in message.ListFields():
+        if field.type != field.TYPE_MESSAGE:
+            continue
+        children = value if field.is_repeated else (value,)
+        for child in children:
+            yield from _iter_tensor_protos(child)
 
 
 def reject_duplicate_key(pairs):
@@ -625,6 +955,7 @@ def normalize_builder_config(
     speculative_options: Any = None,
     runtime_config: Any = None,
     search: Any = None,
+    component_options: Any = None,
 ) -> EffectiveBuilderConfig:
     """Select the legacy adapter or the structured configuration path.
 
@@ -634,7 +965,8 @@ def normalize_builder_config(
     """
     legacy_options = copy.deepcopy(extra_options or {})
     structured_present = any(
-        value is not None for value in (target_options, drafter_options, speculative_options, runtime_config)
+        value is not None
+        for value in (target_options, drafter_options, speculative_options, runtime_config, component_options)
     )
     explicit_version = builder_config_version is not None
     version = int(builder_config_version) if explicit_version else 2 if structured_present else 1
@@ -662,6 +994,7 @@ def normalize_builder_config(
         )
 
     target = load_json_object(target_options, "target_options")
+    components = normalize_component_options(component_options)
     drafter = None if drafter_options is None else load_json_object(drafter_options, "drafter_options")
     speculative = load_json_object(speculative_options, "speculative_options")
     runtime = load_json_object(runtime_config, "runtime_config")
@@ -670,6 +1003,11 @@ def normalize_builder_config(
         runtime = merge_objects({"search": legacy_search}, runtime)
 
     flattened, quant_config, effective_precision = flatten_target_options(target, legacy_options, precision, provider)
+    if components is not None:
+        if drafter is not None:
+            raise ValueError("component_options cannot be combined with drafter_options")
+        flattened["exclude_lm_head"] = True
+        flattened["filename"] = components.backbone_filename
     flatten_speculative_options(speculative, flattened)
     effective_drafter = flatten_drafter_options(drafter, flattened, provider)
     validate_runtime_quantization_policy(runtime, effective_drafter, flattened, provider)
@@ -688,6 +1026,7 @@ def normalize_builder_config(
         drafter_options=effective_drafter,
         speculative_options=speculative,
         runtime_config=runtime,
+        component_options=components,
         target_moe_explicit=target_moe_explicit,
     )
 
