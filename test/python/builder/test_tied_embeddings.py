@@ -468,6 +468,37 @@ def _make_tied_embedding_model(*, vocab_size, hidden_size, quant_attrs):
     return model
 
 
+def _make_builder_quantized_tied_embedding_model(
+    *, vocab_size, hidden_size, block_size, extra_options, ep="cpu", weights_prepacked=0
+):
+    # A float LM head that `to_nbits` quantizes, with the tied embedding lookup reading it.
+    quant_config = QuantConfig.from_extra_options(
+        {**extra_options, "block_size": block_size}, precision="int4", execution_provider=ep
+    )
+    model = _make_tied_embedding_model(
+        vocab_size=vocab_size,
+        hidden_size=hidden_size,
+        quant_attrs={
+            "accuracy_level": 0,
+            "matmul_block_size": block_size,
+            "bits": 4,
+            "is_symmetric": quant_config.weights.symmetric,
+            "op_types_to_quantize": ("MatMul",),
+            "nodes_to_exclude": [],
+            "algo_config": None,
+            "use_qdq": False,
+        },
+    )
+    model.ep = ep
+    model.matmul_attrs = {"weights_prepacked": weights_prepacked}
+    model.quant_type = None
+    model.quant_config = quant_config
+    model.make_quant_init(config=None)
+    weight = torch.randn(vocab_size, hidden_size, generator=torch.Generator().manual_seed(0))
+    _add_lm_head_and_tied_embeddings(model, types.SimpleNamespace(weight=weight, bias=None), model.make_matmul_float)
+    return model
+
+
 def _add_lm_head_and_tied_embeddings(model, lm_head, make_lm_head):
     model.values = {}
     model.node_names = set()
@@ -530,36 +561,37 @@ def _assert_embeddings_are_lm_head_rows(onnx_model, tmp_path, *, vocab_size, hid
 def test_tied_quantized_embeddings_read_the_quantized_lm_head_rows(tmp_path, extra_options, hidden_size, block_size):
     # (96, 64) pads each quantized LM head row to whole blocks, which the lookup has to slice off.
     vocab_size = 256
-    quant_config = QuantConfig.from_extra_options(
-        {**extra_options, "block_size": block_size}, precision="int4", execution_provider="cpu"
+    model = _make_builder_quantized_tied_embedding_model(
+        vocab_size=vocab_size, hidden_size=hidden_size, block_size=block_size, extra_options=extra_options
     )
-    model = _make_tied_embedding_model(
-        vocab_size=vocab_size,
-        hidden_size=hidden_size,
-        quant_attrs={
-            "accuracy_level": 0,
-            "matmul_block_size": block_size,
-            "bits": 4,
-            "is_symmetric": quant_config.weights.symmetric,
-            "op_types_to_quantize": ("MatMul",),
-            "nodes_to_exclude": [],
-            "algo_config": None,
-            "use_qdq": False,
-        },
-    )
-    model.ep = "cpu"
-    model.matmul_attrs = {"weights_prepacked": 0}
-    model.quant_type = None
-    model.quant_config = quant_config
-    model.make_quant_init(config=None)
-    weight = torch.randn(vocab_size, hidden_size, generator=torch.Generator().manual_seed(0))
-    _add_lm_head_and_tied_embeddings(model, types.SimpleNamespace(weight=weight, bias=None), model.make_matmul_float)
 
     quantized = model.to_nbits()
 
     _assert_embeddings_are_lm_head_rows(quantized, tmp_path, vocab_size=vocab_size, hidden_size=hidden_size)
     slices = [node for node in quantized.graph if node.op_type == "Slice"]
     assert len(slices) == (0 if hidden_size % block_size == 0 else 1)
+
+
+@pytest.mark.parametrize(
+    "extra_options", [{}, {"matmul_mixed_precision": "last_matmul:int8"}], ids=["int4_head", "int8_head"]
+)
+def test_cuda_prepacking_keeps_the_tied_lm_head_weight_raw(tmp_path, extra_options):
+    # The tied embedding reads the LM head weight in the raw blockwise layout.
+    vocab_size, hidden_size = 256, 64
+    model = _make_builder_quantized_tied_embedding_model(
+        vocab_size=vocab_size,
+        hidden_size=hidden_size,
+        block_size=32,
+        extra_options=extra_options,
+        ep="cuda",
+        weights_prepacked=1,
+    )
+
+    quantized = model.to_nbits()
+
+    lm_head = next(node for node in quantized.graph if node.op_type == "MatMulNBits")
+    assert "weight_prepacked" not in lm_head.attributes
+    _assert_embeddings_are_lm_head_rows(quantized, tmp_path, vocab_size=vocab_size, hidden_size=hidden_size)
 
 
 @pytest.mark.parametrize("with_zero_points", [False, True], ids=["symmetric", "asymmetric"])

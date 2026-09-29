@@ -1920,6 +1920,10 @@ class Model:
         force_arch = 90 if prepack_mode == 2 else 80
         allowed_block_sizes = (32, 64, 128) if prepack_mode == 1 else (64, 128)
         initializers = {init.name: init for init in model_proto.graph.initializer}
+        consumer_counts = {}
+        for node in model_proto.graph.node:
+            for name in node.input:
+                consumer_counts[name] = consumer_counts.get(name, 0) + 1
 
         candidates = 0
         prepacked = 0
@@ -1936,6 +1940,11 @@ class Model:
             if len(node.input) > 3 and node.input[3]:
                 continue
             if not all(key in attrs for key in ("bits", "block_size", "K", "N")):
+                continue
+            # Another reader of the weight (e.g. the tied embedding's GatherBlockQuantized)
+            # needs the raw blockwise layout, so the weight must stay unpacked.
+            if consumer_counts.get(node.input[1], 0) > 1:
+                print(f"Keeping '{node.input[1]}' in the raw layout because another node also reads it.")
                 continue
 
             candidates += 1
