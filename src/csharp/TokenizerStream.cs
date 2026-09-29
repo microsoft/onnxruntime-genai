@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using System;
+using System.Runtime.InteropServices;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
@@ -17,6 +18,16 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         internal IntPtr Handle { get { return _tokenizerStreamHandle; } }
 
+        public void CreateMetadataCoreStateUsingTokenizerConfig()
+        {
+            Result.VerifySuccess(NativeMethods.OgaTokenizerStreamCreateMetadataCoreStateUsingTokenizerConfig(_tokenizerStreamHandle));
+        }
+
+        public void CreateMetadataCoreState(TokenMetadataCoreConfig config)
+        {
+            Result.VerifySuccess(NativeMethods.OgaTokenizerStreamCreateMetadataCoreState(_tokenizerStreamHandle, config.Handle));
+        }
+
         public string Decode(int token)
         {
             IntPtr decodedStr = IntPtr.Zero;
@@ -24,26 +35,30 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             return StringUtils.FromUtf8(decodedStr);
         }
 
-        /// <summary>
-        /// Decodes one timed token and returns text plus word and segment events
-        /// completed by this call.
-        /// </summary>
-        /// <remarks>
-        /// Word and segment lists are never cumulative. Each may be empty or
-        /// contain multiple records when one token spans multiple boundaries.
-        /// </remarks>
-        public TimestampDecodeResult DecodeWithTimestamps(TokenTiming token)
+        public TokenMetadataOutput DecodeWithMetadata(TokenMetadataInput token)
         {
-            Result.VerifySuccess(NativeMethods.OgaTokenizerStreamDecodeWithTimestamps(
-                _tokenizerStreamHandle, in token, out IntPtr result));
-            return CopyTimestampResult(result);
+            var timing = token.TokenAcousticFrameInterval;
+            var interval = new NativeTokenMetadataAcousticFrameInterval
+            {
+                Start = timing?.start ?? 0,
+                Stop = timing?.stop ?? 0,
+            };
+            var nativeToken = new NativeTokenMetadataInput
+            {
+                TokenId = token.TokenId,
+                HasTokenAcousticFrameInterval = timing.HasValue ? 1 : 0,
+                TokenAcousticFrameInterval = interval,
+            };
+            Result.VerifySuccess(NativeMethods.OgaTokenizerStreamDecodeWithMetadata(
+                _tokenizerStreamHandle, in nativeToken, out IntPtr result));
+            return CopyMetadata(result);
         }
 
-        public TimestampDecodeResult FinalizeTimestamps()
+        public TokenMetadataOutput FinalizeMetadata()
         {
-            Result.VerifySuccess(NativeMethods.OgaTokenizerStreamFinalizeTimestamps(
+            Result.VerifySuccess(NativeMethods.OgaTokenizerStreamFinalizeMetadata(
                 _tokenizerStreamHandle, out IntPtr result));
-            return CopyTimestampResult(result);
+            return CopyMetadata(result);
         }
 
         public void Reset()
@@ -51,32 +66,29 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             Result.VerifySuccess(NativeMethods.OgaTokenizerStreamReset(_tokenizerStreamHandle));
         }
 
-        private static TimestampDecodeResult CopyTimestampResult(IntPtr result)
+        private static TokenMetadataOutput CopyMetadata(IntPtr result)
         {
-            Result.VerifySuccess(NativeMethods.OgaTimestampDecodeResultGetText(result, out IntPtr text));
-            var words = CopyTimestampRecords(result, true);
-            var segments = CopyTimestampRecords(result, false);
-            return new TimestampDecodeResult(StringUtils.FromUtf8(text), words, segments);
+            var native = Marshal.PtrToStructure<NativeTokenMetadataOutput>(result);
+            TokenMetadataTimestamp timestamps = null;
+            if (native.TimestampMetadata != IntPtr.Zero)
+            {
+                var source = Marshal.PtrToStructure<NativeTokenMetadataTimestamp>(native.TimestampMetadata);
+                timestamps = new TokenMetadataTimestamp(CopyTimestampRecords(source.Words, source.WordCount),
+                    CopyTimestampRecords(source.Segments, source.SegmentCount));
+            }
+            return new TokenMetadataOutput(StringUtils.FromUtf8(native.Text), timestamps);
         }
 
-        private static TimestampRecord[] CopyTimestampRecords(IntPtr result, bool words)
+        private static TokenMetadataTimestampRecord[] CopyTimestampRecords(IntPtr source, UIntPtr nativeCount)
         {
-            ulong count = (words
-                ? NativeMethods.OgaTimestampDecodeResultGetWordCount(result)
-                : NativeMethods.OgaTimestampDecodeResultGetSegmentCount(result)).ToUInt64();
-            var records = new TimestampRecord[count];
-            for (ulong index = 0; index < count; index++)
+            int count = checked((int)nativeCount.ToUInt64());
+            var records = new TokenMetadataTimestampRecord[count];
+            int stride = Marshal.SizeOf<NativeTokenMetadataTimestampRecord>();
+            for (int index = 0; index < count; index++)
             {
-                IntPtr status = words
-                    ? NativeMethods.OgaTimestampDecodeResultGetWord(
-                        result, (UIntPtr)index, out IntPtr text, out long startFrame, out long stopFrame,
-                        out double startTime, out double stopTime)
-                    : NativeMethods.OgaTimestampDecodeResultGetSegment(
-                        result, (UIntPtr)index, out text, out startFrame, out stopFrame,
-                        out startTime, out stopTime);
-                Result.VerifySuccess(status);
-                records[index] = new TimestampRecord(
-                    StringUtils.FromUtf8(text), startFrame, stopFrame, startTime, stopTime);
+                var record = Marshal.PtrToStructure<NativeTokenMetadataTimestampRecord>(IntPtr.Add(source, checked(index * stride)));
+                records[index] = new TokenMetadataTimestampRecord(
+                    StringUtils.FromUtf8(record.Text), record.StartFrame, record.StopFrame, record.StartTime, record.StopTime);
             }
             return records;
         }

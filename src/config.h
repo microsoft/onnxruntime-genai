@@ -903,6 +903,8 @@ void ApplyRuntimeProfile(Config& config, RuntimeProfileDeviceFacts device);
 void ApplyRuntimeProfile(Config& config, uint64_t total_device_memory_bytes);
 int SafeDoubleToInt(double x, std::string_view name);
 std::optional<int> GetSegmentGapThresholdFrames(const Config::Model& model);
+std::optional<int> GetSegmentGapThresholdFrames(std::optional<double> seconds, int sample_rate,
+                                                int hop_length, int subsampling_factor);
 
 // Logs a warning when the drafter's exported geometry is narrower than
 // speculative.max_draft_tokens. The engine clamps to the smallest bound at dispatch rather than

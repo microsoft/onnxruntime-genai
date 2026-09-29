@@ -98,11 +98,11 @@ void NemotronConfig::PopulateFromConfig(const Config& config) {
   segment_separators = config.model.segment_separators;
 
   if (TimestampsEnabled() && (sample_rate <= 0 || hop_length <= 0 || subsampling_factor <= 0)) {
-    throw std::runtime_error(
-        "Nemotron timestamps require positive sample_rate, hop_length, and subsampling_factor");
+    Log("warning", "Nemotron timestamps disabled: model configuration requires positive sample_rate, hop_length, and subsampling_factor");
+    timestamp_level = Config::TimestampLevel::Off;
   }
 
-  segment_gap_threshold_frames = GetSegmentGapThresholdFrames(config.model);
+  segment_gap_threshold_frames = TimestampsEnabled() ? GetSegmentGapThresholdFrames(config.model) : std::nullopt;
 
   // Vocab size from top-level config
   vocab_size = config.model.vocab_size;
