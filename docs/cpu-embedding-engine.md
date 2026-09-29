@@ -53,6 +53,7 @@ The implementation reuses `model.embedding`, with CPU-only session options:
   "model": {
     "embedding": {
       "filename": "embedding.onnx",
+      "prefault": true,
       "session_options": {"intra_op_num_threads": 1},
       "inputs": {"input_ids": "input_ids"},
       "outputs": {"inputs_embeds": "inputs_embeds"}
@@ -66,6 +67,12 @@ The implementation reuses `model.embedding`, with CPU-only session options:
 Retain the remaining configuration fields and enable `enable_cuda_graph` on the
 decoder/drafter as usual. Embedding session options are created independently;
 they do not inherit CUDA providers, graph capture, or CUDA shared initializers.
+
+By default, CPU embedding visits every vocabulary row when the model loads. This
+avoids first-use page faults during prefill and decode, but moves their cost into
+startup: loading the measured 248,320 x 5120 FP16 model took about 1.8 seconds
+longer. Set `model.embedding.prefault` to `false` for cold-start-sensitive workloads;
+the first lookup of each row may then page fault and increase TTFT or decode latency.
 
 Convert an existing packed model without re-exporting or copying its large weights:
 

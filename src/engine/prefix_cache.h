@@ -9,6 +9,7 @@
 #include <memory>
 #include <optional>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "../span.h"
@@ -36,6 +37,9 @@
 namespace Generators {
 
 class FixedStatePrefixCheckpoint;
+struct Dflash2PrefixCheckpoint;
+using DraftPrefixBoundary =
+    std::pair<std::shared_ptr<const BlockIdentity>, std::shared_ptr<const FixedStatePrefixCheckpoint>>;
 
 struct PrefixCacheOptions {
   bool enabled{};
@@ -59,6 +63,7 @@ struct PrefixCacheMatch {
   size_t token_count{};
   std::vector<std::shared_ptr<Block>> blocks;
   std::shared_ptr<const FixedStatePrefixCheckpoint> fixed_state_checkpoint;
+  std::shared_ptr<const Dflash2PrefixCheckpoint> draft_checkpoint;
 
   bool Empty() const { return blocks.empty(); }
 };
@@ -161,6 +166,14 @@ class PrefixCache final : private BlockReferenceObserver {
   bool AttachCheckpoint(
       const std::shared_ptr<const BlockIdentity>& identity,
       std::shared_ptr<const FixedStatePrefixCheckpoint> checkpoint);
+  bool CanAttachDraftCheckpoint(const std::shared_ptr<const BlockIdentity>& identity,
+                                size_t token_count) const;
+  std::shared_ptr<const FixedStatePrefixCheckpoint> DraftBoundary(
+      const std::shared_ptr<const BlockIdentity>& identity, size_t token_count) const;
+  bool AttachDraftCheckpoint(const std::shared_ptr<const BlockIdentity>& identity,
+                             const std::shared_ptr<const FixedStatePrefixCheckpoint>& fixed_checkpoint,
+                             std::shared_ptr<const Dflash2PrefixCheckpoint> draft_checkpoint);
+  void DropUnleasedDraftCheckpoints();
   size_t ReclaimCheckpoints(size_t checkpoints_needed);
   size_t ReclaimableCheckpoints() const;
   size_t CheckpointCount() const { return checkpoint_count_; }
@@ -198,6 +211,7 @@ class PrefixCache final : private BlockReferenceObserver {
     std::shared_ptr<Block> block;
     std::shared_ptr<const BlockIdentity> identity;
     std::shared_ptr<const FixedStatePrefixCheckpoint> checkpoint;
+    std::shared_ptr<const Dflash2PrefixCheckpoint> draft_checkpoint;
     std::list<Entry*>::iterator recency;
     std::list<Entry*>::iterator reference_state;
     std::optional<size_t> parent_block_id;

@@ -199,6 +199,12 @@ do not silently drop old gate/up names after fusion or change one projection's
 policy to match the other. An unsupported DSpark/MTP fusion request must fail,
 not be accepted just because the schema has the field.
 
+`drafter_options.optimizations.fuse_qkv` (DFlash2 only, default `false`) maps to
+`dflash2_fuse_qkv`. Each layer stacks its query-block rows over the shared context
+rows and projects both with one Q/K/V projection whose gathered output feeds
+`PagedAttention` as packed QKV. The fused drafter has no `q_row_map` input and
+therefore requires a runtime that treats `q_row_map` as optional.
+
 Fusion is distinct from selecting the CUDA fpA/intB kernel family. The legacy
 `enable_cuda_fpa_intb_gemm` option maps to the runtime decoder session entry
 `ep.cuda.fpa_intb_gemm`, whereas offline weight layout remains in
@@ -867,6 +873,7 @@ target/drafter/runtime envelope.
 | `dflash2_num_draft_tokens`, `dspark_num_draft_tokens` | `drafter_options.num_draft_tokens` |
 | `fuse_mlp_gate_up` | `target_options.optimizations.fuse_mlp_gate_up` |
 | `dflash2_fuse_gate_up` | `drafter_options.optimizations.fuse_mlp_gate_up` |
+| `dflash2_fuse_qkv` | `drafter_options.optimizations.fuse_qkv` |
 | `dspark_top_k` | `drafter_options.dspark.top_k` |
 | Existing automatic target/drafter tensor adoption | New `drafter_options.shared_weights` policies; preserve existing decisions for legacy-only calls |
 | `shared_embeddings` | Existing within-model tying; not an alias for cross-model `shared_weights` |
