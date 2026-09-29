@@ -2104,6 +2104,8 @@ struct Embedding_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "prefault") {
+      v_.prefault = JSON::Get<bool>(value);
     } else {
       throw JSON::unknown_value_error{};
     }

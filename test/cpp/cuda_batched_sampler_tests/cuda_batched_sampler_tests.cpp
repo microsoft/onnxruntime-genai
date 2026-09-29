@@ -108,6 +108,34 @@ TEST(DeviceSpanTests, EmbeddingStagingSurvivesReuseGrowthAndTeardownCuda) {
   }
 }
 
+TEST(DeviceSpanTests, PinnedMirrorIsNotReusedBeforePendingCopyCompletesCuda) {
+  [[maybe_unused]] auto model = CreateCudaModel();
+  auto* device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
+  constexpr size_t size = 1 << 20;
+  auto first = device->Allocate<uint8_t>(size);
+  auto second = device->Allocate<uint8_t>(size);
+  auto queued_work = device->Allocate<uint8_t>(size_t{64} << 20);
+  queued_work.Zero();
+
+  {
+    auto view = device->WrapMemoryBase(first.Span().data(), size);
+    view->AllocateCpu();
+    std::fill_n(view->p_cpu_, size, uint8_t{0x35});
+    view->CopyCpuToDevice();
+  }
+  {
+    auto view = device->WrapMemoryBase(second.Span().data(), size);
+    view->AllocateCpu();
+    std::fill_n(view->p_cpu_, size, uint8_t{0xA7});
+    view->CopyCpuToDevice();
+  }
+
+  const auto first_result = first.CopyDeviceToCpu();
+  const auto second_result = second.CopyDeviceToCpu();
+  EXPECT_TRUE(std::all_of(first_result.begin(), first_result.end(), [](uint8_t value) { return value == 0x35; }));
+  EXPECT_TRUE(std::all_of(second_result.begin(), second_result.end(), [](uint8_t value) { return value == 0xA7; }));
+}
+
 TEST(SamplingTests, SchedulerOwnedSamplerHandlesHeterogeneousRowsCuda) {
   constexpr int vocab_size = 5;
   [[maybe_unused]] auto model = CreateCudaModel();
