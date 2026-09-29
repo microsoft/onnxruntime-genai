@@ -18,6 +18,19 @@ struct ValueOwner {
   ~ValueOwner() { OgaDestroyStructuredValue(value); }
 };
 
+class LocalFrame {
+ public:
+  LocalFrame(JNIEnv* env, jint capacity) : env_(env), pushed_(env->PushLocalFrame(capacity) == 0) {}
+  ~LocalFrame() {
+    if (pushed_) env_->PopLocalFrame(nullptr);
+  }
+  explicit operator bool() const { return pushed_; }
+
+ private:
+  JNIEnv* env_;
+  bool pushed_;
+};
+
 jobject BoxLong(JNIEnv* env, jlong value) {
   jclass cls = env->FindClass("java/lang/Long");
   return env->NewObject(cls, env->GetMethodID(cls, "<init>", "(J)V"), value);
@@ -135,6 +148,11 @@ bool BuildValueImpl(
     jmethodID next = env->GetMethodID(iterator_cls, "next", "()Ljava/lang/Object;");
     jclass entry_cls = env->FindClass("java/util/Map$Entry");
     while (env->CallBooleanMethod(iterator, has_next)) {
+      LocalFrame frame(env, 32);
+      if (!frame) {
+        OgaDestroyStructuredRequest(request);
+        return nullptr;
+      }
       jobject entry = env->CallObjectMethod(iterator, next);
       jobject key = env->CallObjectMethod(
           entry, env->GetMethodID(entry_cls, "getKey", "()Ljava/lang/Object;"));
@@ -208,7 +226,8 @@ jobject ReadValue(JNIEnv* env, const OgaStructuredValueHandle* value) {
   OgaStructuredValueType type;
   if (ThrowIfError(env, OgaStructuredValueGetType(value, &type))) return nullptr;
   switch (type) {
-    case OgaStructuredValueType_Null: return nullptr;
+    case OgaStructuredValueType_Null:
+      return nullptr;
     case OgaStructuredValueType_Bool: {
       bool v;
       if (ThrowIfError(env, OgaStructuredValueGetBool(value, &v))) return nullptr;
@@ -316,7 +335,7 @@ OgaStructuredRequestHandle* BuildRequest(
     CString ctype{env, type};
     CString cid{env, id};
     if (ThrowIfError(env, OgaCreateQuestion(
-            ctype, instruction_value.value, criteria_value.value, &question)) ||
+                              ctype, instruction_value.value, criteria_value.value, &question)) ||
         ThrowIfError(env, OgaStructuredRequestAddQuestion(request, cid, question))) {
       OgaDestroyQuestion(question);
       OgaDestroyStructuredRequest(request);
@@ -345,6 +364,8 @@ jobject ReadModelResult(JNIEnv* env, const OgaModelResultHandle* result) {
   MapPut(env, root, "model", env->NewStringUTF(model));
   jobject answers = NewList(env);
   for (size_t i = 0; i < count; ++i) {
+    LocalFrame frame(env, 32);
+    if (!frame) return nullptr;
     jobject answer = NewMap(env);
     const char *id, *type, *text{};
     double number;
@@ -365,6 +386,8 @@ jobject ReadModelResult(JNIEnv* env, const OgaModelResultHandle* result) {
     size_t values;
     if (ThrowIfError(env, OgaModelResultGetProbabilityCount(result, i, &values))) return nullptr;
     for (size_t j = 0; j < values; ++j) {
+      LocalFrame value_frame(env, 8);
+      if (!value_frame) return nullptr;
       const char* key;
       if (ThrowIfError(env, OgaModelResultGetProbability(result, i, j, &key, &number))) return nullptr;
       MapPut(env, probabilities, key, BoxDouble(env, number));
@@ -373,13 +396,14 @@ jobject ReadModelResult(JNIEnv* env, const OgaModelResultHandle* result) {
     jobject legend = NewMap(env);
     if (ThrowIfError(env, OgaModelResultGetLegendCount(result, i, &values))) return nullptr;
     for (size_t j = 0; j < values; ++j) {
+      LocalFrame value_frame(env, 8);
+      if (!value_frame) return nullptr;
       const char *key, *value;
       if (ThrowIfError(env, OgaModelResultGetLegend(result, i, j, &key, &value))) return nullptr;
       MapPut(env, legend, key, env->NewStringUTF(value));
     }
     MapPut(env, answer, "legend", legend);
     ListAdd(env, answers, answer);
-    env->DeleteLocalRef(answer);
   }
   MapPut(env, root, "answers", answers);
   return root;
@@ -388,11 +412,15 @@ jobject ReadModelResult(JNIEnv* env, const OgaModelResultHandle* result) {
 
 JNIEXPORT jlong JNICALL Java_ai_onnxruntime_genai_NonGenerativeNative_createDirectoryTokenizer(
     JNIEnv* env, jclass, jstring path) {
-  if (!path) { ThrowException(env, "path must not be null"); return 0; }
+  if (!path) {
+    ThrowException(env, "path must not be null");
+    return 0;
+  }
   CString cpath{env, path};
   OgaDirectoryTokenizer* value{};
   return ThrowIfError(env, OgaCreateDirectoryTokenizer(cpath, &value))
-      ? 0 : reinterpret_cast<jlong>(value);
+             ? 0
+             : reinterpret_cast<jlong>(value);
 }
 JNIEXPORT void JNICALL Java_ai_onnxruntime_genai_NonGenerativeNative_destroyDirectoryTokenizer(
     JNIEnv*, jclass, jlong handle) {
@@ -403,7 +431,7 @@ JNIEXPORT jintArray JNICALL Java_ai_onnxruntime_genai_NonGenerativeNative_direct
   CString ctext{env, text};
   OgaTokenIds* ids{};
   if (ThrowIfError(env, OgaDirectoryTokenizerEncode(
-          reinterpret_cast<OgaDirectoryTokenizer*>(handle), ctext, &ids))) return nullptr;
+                            reinterpret_cast<OgaDirectoryTokenizer*>(handle), ctext, &ids))) return nullptr;
   const int32_t* data;
   size_t count;
   if (ThrowIfError(env, OgaTokenIdsGetData(ids, &data, &count))) {
@@ -419,7 +447,9 @@ JNIEXPORT jint JNICALL Java_ai_onnxruntime_genai_NonGenerativeNative_directoryTo
     JNIEnv* env, jclass, jlong handle) {
   int32_t value;
   return ThrowIfError(env, OgaDirectoryTokenizerGetPadTokenId(
-      reinterpret_cast<OgaDirectoryTokenizer*>(handle), &value)) ? 0 : value;
+                               reinterpret_cast<OgaDirectoryTokenizer*>(handle), &value))
+             ? 0
+             : value;
 }
 JNIEXPORT jlong JNICALL Java_ai_onnxruntime_genai_NonGenerativeNative_createRankingSession(
     JNIEnv* env, jclass, jstring path, jobjectArray provider_array) {
@@ -430,7 +460,8 @@ JNIEXPORT jlong JNICALL Java_ai_onnxruntime_genai_NonGenerativeNative_createRank
   for (const auto& provider : providers) pointers.push_back(provider.c_str());
   OgaRankingSessionHandle* value{};
   return ThrowIfError(env, OgaCreateRankingSession(cpath, pointers.data(), pointers.size(), &value))
-      ? 0 : reinterpret_cast<jlong>(value);
+             ? 0
+             : reinterpret_cast<jlong>(value);
 }
 JNIEXPORT jlong JNICALL Java_ai_onnxruntime_genai_NonGenerativeNative_createDecisionSession(
     JNIEnv* env, jclass, jstring path, jobjectArray provider_array) {
@@ -441,7 +472,8 @@ JNIEXPORT jlong JNICALL Java_ai_onnxruntime_genai_NonGenerativeNative_createDeci
   for (const auto& provider : providers) pointers.push_back(provider.c_str());
   OgaDecisionSessionHandle* value{};
   return ThrowIfError(env, OgaCreateDecisionSession(cpath, pointers.data(), pointers.size(), &value))
-      ? 0 : reinterpret_cast<jlong>(value);
+             ? 0
+             : reinterpret_cast<jlong>(value);
 }
 JNIEXPORT void JNICALL Java_ai_onnxruntime_genai_NonGenerativeNative_destroyRankingSession(
     JNIEnv*, jclass, jlong handle) {
@@ -458,10 +490,10 @@ JNIEXPORT jobject JNICALL Java_ai_onnxruntime_genai_NonGenerativeNative_execute(
   if (!request) return nullptr;
   OgaModelResultHandle* result{};
   OgaResult* status = ranking
-      ? OgaRankingSessionRun(reinterpret_cast<OgaRankingSessionHandle*>(handle), request, &result)
-      : (decide
-             ? OgaDecisionSessionDecide(reinterpret_cast<OgaDecisionSessionHandle*>(handle), request, &result)
-             : OgaDecisionSessionRun(reinterpret_cast<OgaDecisionSessionHandle*>(handle), request, &result));
+                          ? OgaRankingSessionRun(reinterpret_cast<OgaRankingSessionHandle*>(handle), request, &result)
+                          : (decide
+                                 ? OgaDecisionSessionDecide(reinterpret_cast<OgaDecisionSessionHandle*>(handle), request, &result)
+                                 : OgaDecisionSessionRun(reinterpret_cast<OgaDecisionSessionHandle*>(handle), request, &result));
   OgaDestroyStructuredRequest(request);
   if (ThrowIfError(env, status)) return nullptr;
   jobject converted = ReadModelResult(env, result);
@@ -490,10 +522,19 @@ JNIEXPORT jobject JNICALL Java_ai_onnxruntime_genai_NonGenerativeNative_rank(
   jmethodID next = env->GetMethodID(iterator_cls, "next", "()Ljava/lang/Object;");
   jclass entry_cls = env->FindClass("java/util/Map$Entry");
   while (env->CallBooleanMethod(iterator, has_next)) {
+    LocalFrame frame(env, 24);
+    if (!frame) {
+      OgaDestroyFreeFormRankRequest(request);
+      return nullptr;
+    }
     jobject entry = env->CallObjectMethod(iterator, next);
     jstring key = static_cast<jstring>(env->CallObjectMethod(entry, env->GetMethodID(entry_cls, "getKey", "()Ljava/lang/Object;")));
     jobject item = env->CallObjectMethod(entry, env->GetMethodID(entry_cls, "getValue", "()Ljava/lang/Object;"));
-    if (!key) { ThrowException(env, "Candidate keys must not be null"); OgaDestroyFreeFormRankRequest(request); return nullptr; }
+    if (!key) {
+      ThrowException(env, "Candidate keys must not be null");
+      OgaDestroyFreeFormRankRequest(request);
+      return nullptr;
+    }
     CString ckey{env, key};
     ValueOwner value;
     if (BuildValue(env, item, &value.value) ||
@@ -526,6 +567,11 @@ JNIEXPORT jobject JNICALL Java_ai_onnxruntime_genai_NonGenerativeNative_rank(
   MapPut(env, root, "model", env->NewStringUTF(model));
   jobject items = NewList(env);
   for (size_t i = 0; i < count; ++i) {
+    LocalFrame frame(env, 24);
+    if (!frame) {
+      OgaDestroyRankingResult(result);
+      return nullptr;
+    }
     size_t rank;
     const char* key;
     const OgaStructuredValueHandle* ranked_value;
@@ -558,19 +604,31 @@ JNIEXPORT jlongArray JNICALL Java_ai_onnxruntime_genai_NonGenerativeNative_cache
     if (operation == 0)
       status = OgaRankingSessionSetCacheCapacity(
           session, static_cast<size_t>(entries), static_cast<size_t>(bytes));
-    else if (operation == 1) status = OgaRankingSessionGetCacheStats(session, &stats);
-    else if (operation == 2) status = OgaRankingSessionClearCache(session);
-    else if (operation == 3) status = OgaRankingSessionInvalidateCache(session);
-    else { ThrowException(env, "Invalid cache operation"); return nullptr; }
+    else if (operation == 1)
+      status = OgaRankingSessionGetCacheStats(session, &stats);
+    else if (operation == 2)
+      status = OgaRankingSessionClearCache(session);
+    else if (operation == 3)
+      status = OgaRankingSessionInvalidateCache(session);
+    else {
+      ThrowException(env, "Invalid cache operation");
+      return nullptr;
+    }
   } else {
     auto* session = reinterpret_cast<OgaDecisionSessionHandle*>(handle);
     if (operation == 0)
       status = OgaDecisionSessionSetCacheCapacity(
           session, static_cast<size_t>(entries), static_cast<size_t>(bytes));
-    else if (operation == 1) status = OgaDecisionSessionGetCacheStats(session, &stats);
-    else if (operation == 2) status = OgaDecisionSessionClearCache(session);
-    else if (operation == 3) status = OgaDecisionSessionInvalidateCache(session);
-    else { ThrowException(env, "Invalid cache operation"); return nullptr; }
+    else if (operation == 1)
+      status = OgaDecisionSessionGetCacheStats(session, &stats);
+    else if (operation == 2)
+      status = OgaDecisionSessionClearCache(session);
+    else if (operation == 3)
+      status = OgaDecisionSessionInvalidateCache(session);
+    else {
+      ThrowException(env, "Invalid cache operation");
+      return nullptr;
+    }
   }
   if (ThrowIfError(env, status)) return nullptr;
   jlong values[7] = {

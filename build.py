@@ -910,7 +910,7 @@ def _build_sdk_cmake(args: argparse.Namespace, env: dict[str, str]):
     util.run(build_command, env=env)
 
     if args.sdk == "python" and not args.skip_wheel:
-        util.run(build_command + ["--target", "PyPackageBuild"], env=env)
+        util.run([*build_command, "--target", "PyPackageBuild"], env=env)
 
 
 def _build_sdk_csharp(args: argparse.Namespace, env: dict[str, str]):

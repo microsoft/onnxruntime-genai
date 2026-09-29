@@ -209,8 +209,7 @@ Napi::Object NewMap(Napi::Env env) {
 void SetDataProperty(
     Napi::Object& object, const std::string& key, const Napi::Value& value) {
   object.DefineProperty(Napi::PropertyDescriptor::Value(
-      key, value, static_cast<napi_property_attributes>(
-                      napi_writable | napi_enumerable | napi_configurable)));
+      key, value, static_cast<napi_property_attributes>(napi_writable | napi_enumerable | napi_configurable)));
 }
 
 Napi::Value ReadValue(Napi::Env env, const OgaStructuredValueHandle* value) {
@@ -500,10 +499,10 @@ class DirectoryTokenizer : public Napi::ObjectWrap<DirectoryTokenizer> {
  public:
   static Napi::Function Define(Napi::Env env) {
     return DefineClass(env, "DirectoryTokenizer", {
-      InstanceMethod("encode", &DirectoryTokenizer::Encode),
-      InstanceAccessor("padTokenId", &DirectoryTokenizer::PadTokenId, nullptr),
-      InstanceMethod("close", &DirectoryTokenizer::Close),
-    });
+                                                      InstanceMethod("encode", &DirectoryTokenizer::Encode),
+                                                      InstanceAccessor("padTokenId", &DirectoryTokenizer::PadTokenId, nullptr),
+                                                      InstanceMethod("close", &DirectoryTokenizer::Close),
+                                                  });
   }
 
   explicit DirectoryTokenizer(const Napi::CallbackInfo& info)
@@ -569,15 +568,15 @@ class RankingSession : public Napi::ObjectWrap<RankingSession> {
  public:
   static Napi::Function Define(Napi::Env env) {
     return DefineClass(env, "RankingSession", {
-      InstanceMethod("run", &RankingSession::Run),
-      InstanceMethod("rank", &RankingSession::Rank),
-      InstanceMethod("setCacheCapacity", &RankingSession::SetCacheCapacity),
-      InstanceMethod("getCacheStats", &RankingSession::GetCacheStats),
-      InstanceAccessor("cacheStats", &RankingSession::GetCacheStats, nullptr),
-      InstanceMethod("clearCache", &RankingSession::ClearCache),
-      InstanceMethod("invalidateCache", &RankingSession::InvalidateCache),
-      InstanceMethod("close", &RankingSession::Close),
-    });
+                                                  InstanceMethod("run", &RankingSession::Run),
+                                                  InstanceMethod("rank", &RankingSession::Rank),
+                                                  InstanceMethod("setCacheCapacity", &RankingSession::SetCacheCapacity),
+                                                  InstanceMethod("getCacheStats", &RankingSession::GetCacheStats),
+                                                  InstanceAccessor("cacheStats", &RankingSession::GetCacheStats, nullptr),
+                                                  InstanceMethod("clearCache", &RankingSession::ClearCache),
+                                                  InstanceMethod("invalidateCache", &RankingSession::InvalidateCache),
+                                                  InstanceMethod("close", &RankingSession::Close),
+                                              });
   }
 
   explicit RankingSession(const Napi::CallbackInfo& info)
@@ -603,20 +602,20 @@ class RankingSession : public Napi::ObjectWrap<RankingSession> {
   }
 
   Napi::Value Run(const Napi::CallbackInfo& info) {
-    std::lock_guard<std::mutex> lock(mutex_);
     if (info.Length() < 1) throw Napi::TypeError::New(info.Env(), "request is required");
     RequestOwner request;
     request.value = BuildRequest(info.Env(), info[0]);
+    std::lock_guard<std::mutex> lock(mutex_);
     ModelResultOwner result;
     Check(info.Env(), OgaRankingSessionRun(RequireOpen(info.Env()), request.value, &result.value));
     return ReadModelResult(info.Env(), result.value);
   }
 
   Napi::Value Rank(const Napi::CallbackInfo& info) {
-    std::lock_guard<std::mutex> lock(mutex_);
     if (info.Length() < 1) throw Napi::TypeError::New(info.Env(), "request is required");
     FreeFormOwner request;
     request.value = BuildFreeFormRequest(info.Env(), info[0]);
+    std::lock_guard<std::mutex> lock(mutex_);
     RankingResultOwner result;
     Check(info.Env(), OgaRankingSessionRank(RequireOpen(info.Env()), request.value, &result.value));
     return ReadRankingResult(info.Env(), result.value);
@@ -663,23 +662,20 @@ class DecisionSession : public Napi::ObjectWrap<DecisionSession> {
  public:
   static Napi::Function Define(Napi::Env env) {
     return DefineClass(env, "DecisionSession", {
-      InstanceMethod("run", &DecisionSession::Run),
-      InstanceMethod("decide", &DecisionSession::Decide),
-      InstanceMethod("setCacheCapacity", &DecisionSession::SetCacheCapacity),
-      InstanceMethod("getCacheStats", &DecisionSession::GetCacheStats),
-      InstanceAccessor("cacheStats", &DecisionSession::GetCacheStats, nullptr),
-      InstanceMethod("clearCache", &DecisionSession::ClearCache),
-      InstanceMethod("invalidateCache", &DecisionSession::InvalidateCache),
-      InstanceMethod("setPrefixCacheCapacity", &DecisionSession::SetPrefixCacheCapacity),
-      InstanceAccessor(
-          "prefixReuseEnabled",
-          &DecisionSession::GetPrefixReuseEnabled,
-          &DecisionSession::SetPrefixReuseEnabled),
-      InstanceAccessor("prefixReuseStatus", &DecisionSession::GetPrefixReuseStatus, nullptr),
-      InstanceAccessor("prefixCacheStats", &DecisionSession::GetPrefixCacheStats, nullptr),
-      InstanceAccessor("prefixReuseStats", &DecisionSession::GetPrefixReuseStats, nullptr),
-      InstanceMethod("close", &DecisionSession::Close),
-    });
+                                                   InstanceMethod("run", &DecisionSession::Run),
+                                                   InstanceMethod("decide", &DecisionSession::Decide),
+                                                   InstanceMethod("setCacheCapacity", &DecisionSession::SetCacheCapacity),
+                                                   InstanceMethod("getCacheStats", &DecisionSession::GetCacheStats),
+                                                   InstanceAccessor("cacheStats", &DecisionSession::GetCacheStats, nullptr),
+                                                   InstanceMethod("clearCache", &DecisionSession::ClearCache),
+                                                   InstanceMethod("invalidateCache", &DecisionSession::InvalidateCache),
+                                                   InstanceMethod("setPrefixCacheCapacity", &DecisionSession::SetPrefixCacheCapacity),
+                                                   InstanceAccessor("prefixReuseEnabled", &DecisionSession::GetPrefixReuseEnabled, &DecisionSession::SetPrefixReuseEnabled),
+                                                   InstanceAccessor("prefixReuseStatus", &DecisionSession::GetPrefixReuseStatus, nullptr),
+                                                   InstanceAccessor("prefixCacheStats", &DecisionSession::GetPrefixCacheStats, nullptr),
+                                                   InstanceAccessor("prefixReuseStats", &DecisionSession::GetPrefixReuseStats, nullptr),
+                                                   InstanceMethod("close", &DecisionSession::Close),
+                                               });
   }
 
   explicit DecisionSession(const Napi::CallbackInfo& info)
@@ -705,10 +701,10 @@ class DecisionSession : public Napi::ObjectWrap<DecisionSession> {
   }
 
   Napi::Value Execute(const Napi::CallbackInfo& info, bool decide) {
-    std::lock_guard<std::mutex> lock(mutex_);
     if (info.Length() < 1) throw Napi::TypeError::New(info.Env(), "request is required");
     RequestOwner request;
     request.value = BuildRequest(info.Env(), info[0]);
+    std::lock_guard<std::mutex> lock(mutex_);
     ModelResultOwner result;
     Check(info.Env(), decide
                           ? OgaDecisionSessionDecide(

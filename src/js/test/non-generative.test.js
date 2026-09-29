@@ -115,6 +115,20 @@ test(
   session.clearCache();
   assert.equal(session.cacheStats.entries, 0);
   session.invalidateCache();
+
+  const reentrant = new RankingSession(packagePath, ['cpu']);
+  const reentrantRequest = {
+    questions: { q: { type: 'noul', instructions: 'Is this suitable?' } },
+  };
+  Object.defineProperty(reentrantRequest, 'state', {
+    enumerable: true,
+    get() {
+      reentrant.close();
+      return { weather: 'rain' };
+    },
+  });
+  assert.throws(() => reentrant.run(reentrantRequest), /closed/);
+
   session.close();
   session.close();
   assert.throws(() => session.run(request), /closed/);

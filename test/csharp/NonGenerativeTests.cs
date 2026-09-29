@@ -18,6 +18,8 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             Assert.Throws<ArgumentException>(() => new StructuredQuestion("", "prompt"));
             Assert.Throws<ArgumentNullException>(() => new StructuredRequest(null, null));
             Assert.Throws<ArgumentNullException>(() => new FreeFormRankRequest(null, null, null));
+            Assert.Throws<ArgumentOutOfRangeException>(() => new StructuredRequest(
+                ulong.MaxValue, new Dictionary<string, StructuredQuestion>()));
 
             var cycle = new Hashtable();
             cycle["self"] = cycle;
@@ -150,6 +152,16 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                     });
                 mutated["self"] = mutated;
                 Assert.Throws<ArgumentException>(() => session.Decide(request));
+
+                var mutableState = new Dictionary<string, object>();
+                var unsignedRequest = new StructuredRequest(
+                    mutableState,
+                    new Dictionary<string, StructuredQuestion>
+                    {
+                        ["q"] = new StructuredQuestion("noul", "Take an umbrella?")
+                    });
+                mutableState["overflow"] = ulong.MaxValue;
+                Assert.Throws<ArgumentOutOfRangeException>(() => session.Decide(unsignedRequest));
             }
         }
     }

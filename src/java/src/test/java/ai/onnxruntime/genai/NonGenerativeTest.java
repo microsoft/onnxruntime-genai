@@ -91,6 +91,19 @@ public class NonGenerativeTest {
               .rank(new FreeFormRankRequest(state, "Choose the best activity", candidates))
               .items
               .size());
+
+      Map<String, Object> manyCandidates = new LinkedHashMap<>();
+      List<Object> finalCandidate = null;
+      for (int i = 0; i < 1000; ++i) {
+        List<Object> candidate = new ArrayList<>();
+        manyCandidates.put("candidate-" + i, candidate);
+        finalCandidate = candidate;
+      }
+      FreeFormRankRequest invalidRank =
+          new FreeFormRankRequest(state, "Choose", manyCandidates);
+      finalCandidate.add(new BigInteger("1"));
+      assertThrows(GenAIException.class, () -> session.rank(invalidRank));
+
       assertEquals(2, session.getCacheStats().entryCapacity);
       session.clearCache();
       assertEquals(0, session.getCacheStats().entries);
@@ -166,6 +179,18 @@ public class NonGenerativeTest {
       StructuredRequest cyclicRequest = new StructuredRequest(mutated, questions);
       mutated.put("self", mutated);
       assertThrows(GenAIException.class, () -> session.decide(cyclicRequest));
+
+      Map<String, StructuredQuestion> manyQuestions = new LinkedHashMap<>();
+      Map<String, Object> finalInstructions = null;
+      for (int i = 0; i < 1000; ++i) {
+        Map<String, Object> instructions = new LinkedHashMap<>();
+        manyQuestions.put("q-" + i, new StructuredQuestion("noul", instructions));
+        finalInstructions = instructions;
+      }
+      StructuredRequest invalidDecision =
+          new StructuredRequest("rain", manyQuestions);
+      finalInstructions.put("unsupported", new BigInteger("1"));
+      assertThrows(GenAIException.class, () -> session.decide(invalidDecision));
     }
 
     final DecisionSession decision = new DecisionSession(path);

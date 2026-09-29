@@ -130,8 +130,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         private static void Validate(object value, int depth, HashSet<object> active)
         {
             if (value == null || value is bool || value is string ||
-                value is float || value is double || value is decimal || IsInteger(value))
+                value is float || value is double || value is decimal)
                 return;
+            if (IsInteger(value))
+            {
+                ValidateIntegerRange(value);
+                return;
+            }
             if (value is IDictionary dictionary)
             {
                 EnterContainer(value, depth, active);
@@ -171,7 +176,10 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             else if (value is float || value is double || value is decimal)
                 Result.VerifySuccess(NativeMethods.OgaCreateStructuredValueDouble(Convert.ToDouble(value), out handle));
             else if (IsInteger(value))
+            {
+                ValidateIntegerRange(value);
                 Result.VerifySuccess(NativeMethods.OgaCreateStructuredValueInt64(Convert.ToInt64(value), out handle));
+            }
             else if (value is IDictionary dictionary)
             {
                 EnterContainer(value, depth, active);
@@ -210,6 +218,12 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         {
             return value is byte || value is sbyte || value is short || value is ushort ||
                    value is int || value is uint || value is long || value is ulong;
+        }
+
+        private static void ValidateIntegerRange(object value)
+        {
+            if (value is ulong unsigned && unsigned > long.MaxValue)
+                throw new ArgumentOutOfRangeException(nameof(value), "Structured integers must fit signed int64.");
         }
 
         internal static object Read(IntPtr value)
