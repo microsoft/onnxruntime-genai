@@ -142,3 +142,22 @@ jobs:
         run: |-
           copy $env:GITHUB_WORKSPACE\ort\lib\* .\$env:binaryDir\Release
           & .\$env:binaryDir\Release\unit_tests.exe --ep_dir $env:GITHUB_WORKSPACE\ort\ep
+
+      - name: Run required WebGPU Engine tests
+        run: |
+          & .\$env:binaryDir\Release\engine_unit_tests.exe --ep_dir $env:GITHUB_WORKSPACE\ort\ep --gtest_filter="WebGpuFixedStatePoolTest.*:FixedStatePoolTest.PrepareFailureDoesNotPublish:VarlenDecoderIOTest.PacksThreePlanePositionsInScheduledRequestOrder" --gtest_output="xml:webgpu-engine-tests.xml"
+          if ($LASTEXITCODE -ne 0) { throw "WebGPU Engine tests failed: $LASTEXITCODE" }
+          [xml]$results = Get-Content webgpu-engine-tests.xml
+          $required = @(
+            "WebGpuFixedStatePoolTest.CompactPartialAcceptanceReplaysConvAndGdn",
+            "WebGpuFixedStatePoolTest.AdversarialReplayPreservesRequestState",
+            "FixedStatePoolTest.PrepareFailureDoesNotPublish",
+            "VarlenDecoderIOTest.PacksThreePlanePositionsInScheduledRequestOrder"
+          )
+          foreach ($test in $required) {
+            $suite, $name = $test -split '\.', 2
+            $cases = @($results.SelectNodes("//testcase[@classname='$suite' and @name='$name']"))
+            if ($cases.Count -ne 1 -or $cases[0].status -ne "run" -or $cases[0].result -ne "completed" -or $cases[0].SelectSingleNode("skipped")) {
+              throw "Required WebGPU Engine test did not run: $test"
+            }
+          }

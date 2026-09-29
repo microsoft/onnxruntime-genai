@@ -31,16 +31,24 @@ def drafter_session(pytestconfig, tmp_path_factory):
         import onnxruntime_ep_webgpu as webgpu_ep  # noqa: PLC0415
 
         ort.register_execution_provider_library(webgpu_ep.get_ep_name(), webgpu_ep.get_library_path())
+    devices = [device for device in ort.get_ep_devices() if device.ep_name == "WebGpuExecutionProvider"]
+    assert devices, "Registered WebGPU plugin exposes no devices"
     options = ort.SessionOptions()
+    options.add_provider_for_devices([devices[0]], {})
     options.enable_profiling = True
     options.profile_file_prefix = str(tmp_path_factory.mktemp("dflash2-profile") / "profile")
     drafter = config["model"]["dflash2"]
     session = ort.InferenceSession(
-        str(model_dir / drafter["filename"]), sess_options=options, providers=["WebGpuExecutionProvider"]
+        str(model_dir / drafter["filename"]), sess_options=options, providers=[]
     )
+    assert devices[0].ep_name in session.get_providers(), "WebGPU was not selected for the drafter session"
+    target_options = ort.SessionOptions()
+    target_options.add_provider_for_devices([devices[0]], {})
     target = ort.InferenceSession(
-        str(model_dir / config["model"]["decoder"]["filename"]), providers=["WebGpuExecutionProvider"]
+        str(model_dir / config["model"]["decoder"]["filename"]), sess_options=target_options, providers=[]
     )
+    assert devices[0].ep_name in target.get_providers(), "WebGPU was not selected for the target session"
+    print(f"Selected {devices[0].ep_name}, device {devices[0].device.device_id} for drafter and target")
     tokenizer = AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
     yield session, target, tokenizer, config
     events = json.loads(Path(session.end_profiling()).read_text())
