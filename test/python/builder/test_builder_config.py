@@ -276,7 +276,8 @@ def test_dflash2_qkv_fusion_maps_to_legacy_option(tmp_path, fuse_qkv):
     assert effective.extra_options["dflash2_fuse_qkv"] is fuse_qkv
 
 
-def test_qkv_fusion_is_rejected_for_other_drafters(tmp_path):
+@pytest.mark.parametrize("fuse_qkv", [False, True])
+def test_qkv_fusion_is_rejected_for_other_drafters(tmp_path, fuse_qkv):
     with pytest.raises(ValueError, match="fuse_qkv is not supported for drafter_type=dspark"):
         normalize_builder_config(
             "int4",
@@ -285,7 +286,7 @@ def test_qkv_fusion_is_rejected_for_other_drafters(tmp_path):
             drafter_options={
                 "drafter_type": "dspark",
                 "path": make_drafter_checkpoint(tmp_path),
-                "optimizations": {"fuse_qkv": True},
+                "optimizations": {"fuse_qkv": fuse_qkv},
             },
         )
 

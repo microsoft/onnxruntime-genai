@@ -202,7 +202,8 @@ not be accepted just because the schema has the field.
 `drafter_options.optimizations.fuse_qkv` (DFlash2 only, default `false`) maps to
 `dflash2_fuse_qkv`. Each layer stacks its query-block rows over the shared context
 rows and projects both with one Q/K/V projection whose gathered output feeds
-`PagedAttention` as packed QKV.
+`PagedAttention` as packed QKV. The fused drafter has no `q_row_map` input and
+therefore requires a runtime that treats `q_row_map` as optional.
 
 Fusion is distinct from selecting the CUDA fpA/intB kernel family. The legacy
 `enable_cuda_fpa_intb_gemm` option maps to the runtime decoder session entry

@@ -576,7 +576,7 @@ def flatten_drafter_options(
     if fuse_gate_up and drafter_type != "dflash2":
         raise ValueError(f"fuse_mlp_gate_up is not supported for drafter_type={drafter_type}")
     fuse_qkv = optimizations.get("fuse_qkv", False)
-    if fuse_qkv and drafter_type != "dflash2":
+    if "fuse_qkv" in optimizations and drafter_type != "dflash2":
         raise ValueError(f"fuse_qkv is not supported for drafter_type={drafter_type}")
     if drafter_type == "dflash2":
         flattened["dflash2_fuse_gate_up"] = fuse_gate_up

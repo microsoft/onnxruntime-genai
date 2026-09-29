@@ -1354,7 +1354,9 @@ def test_qkv_fusion_feeds_packed_qkv_to_paged_attention(tmp_path, bits):
 
 @pytest.mark.parametrize("fuse_qkv", [False, True])
 def test_qkv_fusion_drops_the_query_row_map_input(tmp_path, fuse_qkv):
-    builder = DFlash2Builder(_draft_checkpoint(tmp_path), str(tmp_path), ir.DataType.BFLOAT16, 256, 128, fuse_qkv=fuse_qkv)
+    builder = DFlash2Builder(
+        _draft_checkpoint(tmp_path), str(tmp_path), ir.DataType.BFLOAT16, 256, 128, fuse_qkv=fuse_qkv
+    )
 
     builder.declare_io()
 
@@ -1386,7 +1388,7 @@ def test_qkv_fusion_matches_unfused_projections(tmp_path, bits):
         for name in ("qkv_row_map",) if fused else ("q_row_map", "qkv_row_map"):
             builder.graph.inputs.append(builder.make_value(name, ir.DataType.INT32, ["num_tokens"]))
         if fused:
-            outputs = [builder._make_packed_qkv(0, "hidden_states", "ctx_n")]
+            outputs = [builder.make_packed_qkv(0, "hidden_states", "ctx_n")]
         else:
             ctx_kv = [
                 builder.matmul(
@@ -1400,7 +1402,7 @@ def test_qkv_fusion_matches_unfused_projections(tmp_path, bits):
                 )
                 for proj in ("k_proj", "v_proj")
             ]
-            outputs = list(builder._make_separate_qkv(0, "hidden_states", ctx_kv, "num_block"))
+            outputs = list(builder.make_separate_qkv(0, "hidden_states", ctx_kv, "num_block"))
         builder.graph.outputs.extend(builder.values[output] for output in outputs)
         model = ir.serde.serialize_model(builder.model)
         onnx.checker.check_model(model)
@@ -1786,9 +1788,7 @@ def test_drafter_resolves_target_repository_to_local_snapshot(tmp_path, monkeypa
     monkeypatch.setattr(dflash2_module, "DFlash2Builder", StubDFlash2Builder)
     monkeypatch.setattr(
         "huggingface_hub.snapshot_download",
-        lambda repo_id, cache_dir, token: captured.update(
-            repo_id=repo_id, cache_dir=cache_dir, token=token
-        )
+        lambda repo_id, cache_dir, token: captured.update(repo_id=repo_id, cache_dir=cache_dir, token=token)
         or str(snapshot_dir),
     )
     model = _composite()

@@ -738,6 +738,42 @@ TEST(Dflash2ConfigTest, RunsFullAttentionDsparkAcrossRequestLifecycles) {
   EXPECT_EQ(drafter.AdmissionMisses(), 0u);
 }
 
+TEST(Dflash2ConfigTest, RunsPackedQkvDrafterWithoutQueryRowMap) {
+  auto config = MakeDflash2Config();
+  config.config_path = fs::path{MODEL_PATH "engine/synthetic-dspark"};
+  auto& dspark = config.model.dflash2;
+  dspark.filename = "dspark_packed_qkv.onnx";
+  dspark.is_dspark = true;
+  dspark.num_hidden_layers = 1;
+  dspark.num_key_value_heads = 1;
+  dspark.head_size = 1;
+  dspark.block_size = 4;
+  dspark.num_draft_tokens = 4;
+  dspark.sliding_window = 0;
+
+  auto model = std::make_shared<Dflash2Model>(CreateDflash2Config(config), GetOrtEnv());
+  ASSERT_FALSE(model->session_info_.HasInput(dspark.inputs.q_row_map));
+  Dflash2Drafter drafter{model, /*paged_block_size=*/4, /*num_blocks=*/10,
+                         /*max_requests=*/2};
+
+  int request_a_id = 0;
+  int request_b_id = 0;
+  auto* request_a = reinterpret_cast<Request*>(&request_a_id);
+  auto* request_b = reinterpret_cast<Request*>(&request_b_id);
+  Tensor aux{GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<float>};
+  aux.CreateTensor(std::array<int64_t, 2>{18, 1});
+  const std::array feeds{
+      Dflash2Drafter::Feed{.request = request_a, .aux_row_begin = 0, .aux_row_count = 9, .first_position = 0, .anchor_token = 11, .draft_eligible = true, .wants_drafts = true},
+      Dflash2Drafter::Feed{.request = request_b, .aux_row_begin = 9, .aux_row_count = 9, .first_position = 0, .anchor_token = 12, .draft_eligible = true, .wants_drafts = true},
+  };
+  std::vector<std::vector<int32_t>> drafts;
+  ASSERT_TRUE(drafter.Propose(aux, feeds, drafts));
+  ASSERT_EQ(drafts.size(), 2u);
+  // The last column sums qkv_row_map, a permutation of the 26 packed block and context rows.
+  EXPECT_EQ(drafts[0], (std::vector<int32_t>{6, 0, 13, 325}));
+  EXPECT_EQ(drafts[1], (std::vector<int32_t>{22, 0, 13, 325}));
+}
+
 TEST(Dflash2ConfigTest, ExecutesWindowedRestoreAcrossRingWrap) {
   auto config = MakeDflash2Config();
   config.config_path = fs::path{MODEL_PATH "engine/synthetic-dspark"};

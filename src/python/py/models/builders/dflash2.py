@@ -385,9 +385,9 @@ class DFlash2Builder(BlockDrafterBuilder):
         p = f"/dflash2/layers.{i}"
         w = self.weights
         if self.attn_attrs["fuse_qkv"]:
-            query, key, value = self._make_packed_qkv(i, x, context), "", ""
+            query, key, value = self.make_packed_qkv(i, x, context), "", ""
         else:
-            query, key, value = self._make_separate_qkv(i, x, context, rows_q)
+            query, key, value = self.make_separate_qkv(i, x, context, rows_q)
 
         q_norm = self.make_initializer(
             w[f"layers.{i}.self_attn.q_norm.weight"], f"dflash2.layers.{i}.self_attn.q_norm.weight", to=self.io_dtype
@@ -455,7 +455,7 @@ class DFlash2Builder(BlockDrafterBuilder):
             rows_q,
         )
 
-    def _make_packed_qkv(self, i, x, ctx_n):
+    def make_packed_qkv(self, i, x, ctx_n):
         """One projection over ``concat(block, context)`` rows, gathered into a packed QKV stream.
 
         The stacked rows are exactly what ``qkv_row_map`` indexes, so a single Gather orders Q, K
@@ -478,7 +478,7 @@ class DFlash2Builder(BlockDrafterBuilder):
         )
         return self.binary("Gather", f"{p}/attn/qkv_gather", qkv, "qkv_row_map", self.io_dtype, ["num_tokens", qkv_dim])
 
-    def _make_separate_qkv(self, i, x, ctx_kv, rows_q):
+    def make_separate_qkv(self, i, x, ctx_kv, rows_q):
         p = f"/dflash2/layers.{i}"
         w = self.weights
         q = self.matmul(

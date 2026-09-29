@@ -464,7 +464,9 @@ Set `dflash2_fuse_qkv=true` to experimentally replace each DFlash 2 layer's five
 projections (query-block Q/K/V plus context K/V) with one `MatMul` or `MatMulNBits` over the
 query-block rows stacked on the context rows. Its gathered output feeds `PagedAttention` as packed
 QKV. The default is `false`. The Q computed for context rows is discarded, so this trades a little
-extra prefill work for fewer launches at decode. Both fusions can be combined:
+extra prefill work for fewer launches at decode. A fused drafter has no `q_row_map` input, so it
+requires an ONNX Runtime GenAI release that treats `q_row_map` as optional; older runtimes reject
+the exported package. Both fusions can be combined:
 
 ```bash
 # From wheel:
