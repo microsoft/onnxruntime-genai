@@ -757,6 +757,8 @@ struct CudaInterfaceImplBase : DeviceInterface {
     std::scoped_lock lock{state_update_replay_mutex_};
     cudaStream_t stream = GetStream();
     if (state_update_replay_capacity_ < count) {
+      // An earlier replay launched without waiting may still read the buffer being replaced.
+      if (state_update_replay_descriptors_) CUDA_CHECK(cudaStreamSynchronize(stream));
       state_update_replay_descriptors_ = CudaMallocArray<StateUpdateReplayDesc>(count);
       state_update_replay_capacity_ = count;
     }
