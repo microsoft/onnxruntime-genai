@@ -11,6 +11,8 @@
 #include <gtest/gtest.h>
 
 #include "engine/fixed_state_pool.h"
+#include "engine/prefix_cache.h"
+#include "dflash2_drafter.h"
 #include "engine_test_helpers.h"
 #include "models/model_state_manifest.h"
 
@@ -26,6 +28,68 @@ const void* const kRequestB = &kRequestStorageB;
 const void* const kRequestC = &kRequestStorageC;
 
 using Request = FixedStateReservationRequest;
+
+class OffsetTensorViewsUnsupportedDevice final : public DeviceInterface {
+ public:
+  explicit OffsetTensorViewsUnsupportedDevice(
+      DeviceInterface& inner, DeviceType type = DeviceType::CPU,
+      bool supports_transactional_fixed_state = true)
+      : inner_{inner},
+        type_{type},
+        supports_transactional_fixed_state_{supports_transactional_fixed_state} {}
+
+  DeviceType GetType() const override { return type_; }
+  void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
+    inner_.InitOrt(api, allocator);
+  }
+  Ort::Allocator& GetAllocator() override { return inner_.GetAllocator(); }
+  std::unique_ptr<OrtMemoryInfo> GetMemoryInfo() const override {
+    return inner_.GetMemoryInfo();
+  }
+  std::string GetExecutionProviderName() const override {
+    return inner_.GetExecutionProviderName();
+  }
+  std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
+    return inner_.AllocateBase(size);
+  }
+  std::shared_ptr<DeviceBuffer> WrapMemoryBase(void* memory, size_t size) override {
+    return inner_.WrapMemoryBase(memory, size);
+  }
+  std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override {
+    return inner_.CreateGreedy(params);
+  }
+  std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override {
+    return inner_.CreateBeam(params);
+  }
+  std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) override {
+    return inner_.CreateKeyValueCache(state);
+  }
+  void Synchronize() override { inner_.Synchronize(); }
+  bool SupportsOffsetTensorViews() const override { return false; }
+  bool SupportsTransactionalFixedState() const override {
+    return supports_transactional_fixed_state_;
+  }
+
+ private:
+  DeviceInterface& inner_;
+  DeviceType type_;
+  bool supports_transactional_fixed_state_;
+};
+
+class ScopedKeyValueCacheDevice {
+ public:
+  ScopedKeyValueCacheDevice(Model& model, DeviceInterface& device)
+      : model_{model}, original_{model.p_device_kvcache_} {
+    model_.p_device_kvcache_ = &device;
+  }
+  ScopedKeyValueCacheDevice(const ScopedKeyValueCacheDevice&) = delete;
+  ScopedKeyValueCacheDevice& operator=(const ScopedKeyValueCacheDevice&) = delete;
+  ~ScopedKeyValueCacheDevice() { model_.p_device_kvcache_ = original_; }
+
+ private:
+  Model& model_;
+  DeviceInterface* original_;
+};
 
 // Builds a one-request reservation input in scheduled row order.
 std::array<Request, 1> One(const void* id, uint64_t target_tokens = 1,
@@ -244,6 +308,112 @@ TEST_F(FixedStatePoolTest, SlotReuseGathersZeroAfterRelease) {
   ExpectInputRows(reservation, 0, 0.0f);  // Reused slot must not leak the released request's state.
 }
 
+TEST_F(FixedStatePoolTest, PrefixCheckpointRestoresEveryFixedStateRow) {
+  FixedStatePool pool{model_, /*capacity=*/1,
+                      /*prefix_checkpoint_capacity=*/1};
+  const auto source = MakeResident(
+      pool, kRequestA, 7.0f, /*target_tokens=*/4);
+  auto checkpoint = pool.CapturePrefixCheckpoint(kRequestA);
+  ASSERT_NE(checkpoint, nullptr);
+  EXPECT_EQ(checkpoint->TokenCount(), 4u);
+  EXPECT_EQ(pool.AvailablePrefixCheckpoints(), 0u);
+  pool.Release(source);
+
+  const std::array<FixedStateReservationRequest, 1> requests{
+      FixedStateReservationRequest{
+          kRequestB, /*target_tokens=*/5, /*capture_count=*/0, checkpoint}};
+  {
+    auto reservation = pool.Reserve(requests);
+    EXPECT_FALSE(reservation.UsesDirectBindings());
+    ExpectInputRows(reservation, 0, 7.0f);
+    FillStagedRows(reservation, 0, 9.0f);
+    reservation.Commit();
+  }
+  EXPECT_EQ(pool.CommittedTokens(pool.HandleFor(kRequestB)), 5u);
+
+  checkpoint.reset();
+  EXPECT_EQ(pool.AvailablePrefixCheckpoints(), 0u);
+}
+
+TEST_F(FixedStatePoolTest, PrefixCheckpointLeaseReleasesItsPreallocatedSlot) {
+  FixedStatePool pool{model_, /*capacity=*/1,
+                      /*prefix_checkpoint_capacity=*/1};
+  MakeResident(pool, kRequestA, 3.0f, /*target_tokens=*/4);
+  auto checkpoint = pool.CapturePrefixCheckpoint(kRequestA);
+  ASSERT_NE(checkpoint, nullptr);
+  EXPECT_EQ(pool.Snapshot().checkpoint_count, 1u);
+
+  checkpoint.reset();
+
+  EXPECT_EQ(pool.AvailablePrefixCheckpoints(), 1u);
+  EXPECT_EQ(pool.Snapshot().checkpoint_count, 0u);
+}
+
+TEST_F(FixedStatePoolTest, DraftAttachmentRequiresExactFixedBoundaryAndRetainsLeasedReaders) {
+  constexpr size_t block_size = 4;
+  BlockPool blocks{block_size, 2};
+  PrefixCacheOptions options;
+  options.enabled = true;
+  options.max_blocks = 2;
+  options.requires_checkpoint = true;
+  options.max_checkpoints = 2;
+  FixedStatePool pool{model_, /*capacity=*/2, /*prefix_checkpoint_capacity=*/2};
+  PrefixCache index{blocks, options};
+  MakeResident(pool, kRequestA, 7.0f, /*target_tokens=*/block_size);
+  auto fixed = pool.CapturePrefixCheckpoint(kRequestA);
+  ASSERT_NE(fixed, nullptr);
+
+  const std::array<int32_t, 5> tokens{1, 2, 3, 4, 5};
+  auto owned = blocks.AllocateBlocks(block_size);
+  ASSERT_EQ(owned.size(), 1u);
+  auto registration = index.Register(owned.front(), std::span<const int32_t>(tokens).first(block_size), {});
+  ASSERT_NE(registration.identity, nullptr);
+  ASSERT_TRUE(index.AttachCheckpoint(registration.identity, fixed));
+
+  auto draft = std::make_shared<Dflash2PrefixCheckpoint>();
+  draft->token_count = block_size;
+  ASSERT_TRUE(index.CanAttachDraftCheckpoint(registration.identity, block_size));
+  EXPECT_FALSE(index.CanAttachDraftCheckpoint(registration.identity, block_size * 2));
+  auto other = pool.CapturePrefixCheckpoint(kRequestA);
+  ASSERT_NE(other, nullptr);
+  EXPECT_FALSE(index.AttachDraftCheckpoint(registration.identity, other, draft));
+  ASSERT_TRUE(index.AttachDraftCheckpoint(registration.identity, fixed, draft));
+  draft.reset();
+
+  {
+    auto match = index.Match(tokens, tokens.size() - 1);
+    EXPECT_EQ(match.token_count, block_size);
+    ASSERT_NE(match.draft_checkpoint, nullptr);
+    index.DropUnleasedDraftCheckpoints();
+    EXPECT_EQ(index.Match(tokens, tokens.size() - 1).draft_checkpoint, match.draft_checkpoint);
+  }
+  index.DropUnleasedDraftCheckpoints();
+  auto match = index.Match(tokens, tokens.size() - 1);
+  EXPECT_EQ(match.token_count, block_size);
+  EXPECT_EQ(match.draft_checkpoint, nullptr);
+  EXPECT_EQ(match.fixed_state_checkpoint, fixed);
+  match = {};
+  blocks.Free(owned);
+  EXPECT_EQ(index.Reclaim(1), 1u);
+  EXPECT_FALSE(index.CanAttachDraftCheckpoint(registration.identity, block_size));
+  EXPECT_FALSE(index.AttachDraftCheckpoint(registration.identity, fixed,
+                                           std::make_shared<Dflash2PrefixCheckpoint>()));
+}
+
+TEST_F(FixedStatePoolTest, PrefixCheckpointMustBelongToTheAdoptingPool) {
+  FixedStatePool source_pool{model_, /*capacity=*/1,
+                             /*prefix_checkpoint_capacity=*/1};
+  FixedStatePool destination_pool{model_, /*capacity=*/1,
+                                  /*prefix_checkpoint_capacity=*/1};
+  MakeResident(source_pool, kRequestA, 3.0f, /*target_tokens=*/4);
+  auto checkpoint = source_pool.CapturePrefixCheckpoint(kRequestA);
+  const std::array<FixedStateReservationRequest, 1> requests{
+      FixedStateReservationRequest{
+          kRequestB, /*target_tokens=*/5, /*capture_count=*/0, checkpoint}};
+
+  EXPECT_THROW(destination_pool.Reserve(requests), std::runtime_error);
+}
+
 TEST_F(FixedStatePoolTest, ValidateReleaseIsPureAndPublicationIsNoexcept) {
   auto pool = MakePool(1);
   const auto handle = MakeResident(*pool, kRequestA, 1.0f);
@@ -443,6 +613,113 @@ TEST_F(FixedStatePoolTest, DirectBindingsSupportContiguousRowsAtNonzeroOffset) {
   ASSERT_EQ(reservation.Handles()[1].slot, 2u);
   ExpectInputRows(reservation, 0, 22.0f);
   ExpectInputRows(reservation, 1, 33.0f);
+}
+
+TEST_F(FixedStatePoolTest, UnsupportedOffsetViewsUseEquivalentStagingBindings) {
+  auto run_scenario = [this](FixedStatePool& pool, bool expect_direct) {
+    const auto handle_a = MakeResident(pool, kRequestA, 11.0f);
+    MakeResident(pool, kRequestB, 22.0f);
+    MakeResident(pool, kRequestC, 33.0f);
+    pool.Release(handle_a);
+
+    const std::array<Request, 2> requests{
+        Request{kRequestB, 2}, Request{kRequestC, 2}};
+    {
+      auto reservation = pool.Reserve(requests);
+      EXPECT_EQ(reservation.UsesDirectBindings(), expect_direct);
+      ExpectInputRows(reservation, 0, 22.0f);
+      ExpectInputRows(reservation, 1, 33.0f);
+      FillStagedRows(reservation, 0, 44.0f);
+      FillStagedRows(reservation, 1, 55.0f);
+      reservation.Commit();
+    }
+
+    auto reservation = pool.Reserve(requests);
+    EXPECT_EQ(reservation.UsesDirectBindings(), expect_direct);
+    ExpectInputRows(reservation, 0, 44.0f);
+    ExpectInputRows(reservation, 1, 55.0f);
+  };
+
+  {
+    auto direct_pool = MakePool(3);
+    run_scenario(*direct_pool, true);
+  }
+
+  auto fallback_model = LoadSyntheticHybridModel();
+  OffsetTensorViewsUnsupportedDevice fallback_device{
+      *fallback_model->p_device_kvcache_};
+  ScopedKeyValueCacheDevice scoped_device{*fallback_model, fallback_device};
+  FixedStatePool fallback_pool{fallback_model, 3};
+  run_scenario(fallback_pool, false);
+}
+
+TEST_F(FixedStatePoolTest, GenericDeviceSupportsOrdinaryStagingWithoutStateUpdates) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-hybrid");
+  ASSERT_TRUE(config->model.decoder.state_groups.has_value());
+  for (auto& group : *config->model.decoder.state_groups) {
+    group.state_update.reset();
+  }
+  auto generic_model = CreateModel(GetOrtEnv(), std::move(config));
+  OffsetTensorViewsUnsupportedDevice generic_device{
+      *generic_model->p_device_kvcache_, DeviceType::DML};
+  ScopedKeyValueCacheDevice scoped_device{*generic_model, generic_device};
+  FixedStatePool pool{generic_model, 2};
+
+  EXPECT_FALSE(pool.SupportsStateUpdates());
+  EXPECT_EQ(pool.StateUpdateCapacity(), 0u);
+  const std::array<Request, 2> requests{
+      Request{kRequestA, 1}, Request{kRequestB, 1}};
+  {
+    auto reservation = pool.Reserve(requests);
+    EXPECT_FALSE(reservation.UsesDirectBindings());
+    ExpectInputRows(reservation, 0, 0.0f);
+    ExpectInputRows(reservation, 1, 0.0f);
+    FillStagedRows(reservation, 0, 44.0f);
+    FillStagedRows(reservation, 1, 55.0f);
+    reservation.Commit();
+  }
+
+  auto reservation = pool.Reserve(requests);
+  EXPECT_FALSE(reservation.UsesDirectBindings());
+  ExpectInputRows(reservation, 0, 44.0f);
+  ExpectInputRows(reservation, 1, 55.0f);
+}
+
+TEST_F(FixedStatePoolTest, RejectsGenericDeviceWithoutTransactionalFixedStateSupport) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-hybrid");
+  ASSERT_TRUE(config->model.decoder.state_groups.has_value());
+  for (auto& group : *config->model.decoder.state_groups) {
+    group.state_update.reset();
+  }
+  auto generic_model = CreateModel(GetOrtEnv(), std::move(config));
+  OffsetTensorViewsUnsupportedDevice generic_device{
+      *generic_model->p_device_kvcache_, DeviceType::DML, false};
+  ScopedKeyValueCacheDevice scoped_device{*generic_model, generic_device};
+
+  try {
+    FixedStatePool pool{generic_model, 2};
+    FAIL() << "Expected unqualified fixed-state device to be rejected.";
+  } catch (const std::runtime_error& error) {
+    EXPECT_STREQ(
+        error.what(),
+        "Fixed state pools require qualified transactional device semantics.");
+  }
+}
+
+TEST_F(FixedStatePoolTest, GenericDeviceRejectsCompactStateReplay) {
+  auto replay_model = LoadSyntheticHybridModel();
+  OffsetTensorViewsUnsupportedDevice generic_device{
+      *replay_model->p_device_kvcache_, DeviceType::DML};
+  ScopedKeyValueCacheDevice scoped_device{*replay_model, generic_device};
+
+  try {
+    FixedStatePool pool{replay_model, 2};
+    FAIL() << "Expected compact replay configuration to be rejected.";
+  } catch (const std::runtime_error& error) {
+    EXPECT_STREQ(
+        error.what(),
+        "Compact fixed state replay currently supports only CPU and CUDA devices.");
+  }
 }
 
 TEST_F(FixedStatePoolTest, AdmissionAlignsReusedSlotWithResidentBank) {

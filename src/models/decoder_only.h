@@ -1,5 +1,6 @@
 #pragma once
 #include "model.h"
+#include "cpu_embedding.h"
 #include "models/io/input_ids.h"
 #include "models/io/logits.h"
 #include "io/kv_cache.h"
@@ -16,6 +17,7 @@ struct DecoderOnly_Model : Model {
   std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths_unk, const GeneratorParams& params) const override;
 
   std::unique_ptr<OrtSession> session_decoder_;
+  std::shared_ptr<CpuEmbedding> cpu_embedding_;
 };
 
 struct DecoderOnly_State : State {

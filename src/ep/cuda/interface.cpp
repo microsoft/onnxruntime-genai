@@ -35,6 +35,128 @@ const char* device_label = "cuda";
 cuda_stream_holder g_stream;
 cudaStream_t GetStream() { return g_stream.get(); }
 
+namespace {
+
+// Every WrapMemory() view that touches its host mirror used to pin a fresh buffer with cudaHostAlloc
+// and release it with cudaFreeHost, several times per decode step. Both calls are slow and
+// cudaFreeHost also waits for the device, so small mirrors are recycled instead. A mirror released
+// while a host-to-device copy from it may still be queued is only reused once an event recorded
+// behind that copy has completed.
+class PinnedHostPool {
+ public:
+  static constexpr size_t kMinBytes = 256;
+  static constexpr size_t kMaxBytes = size_t{1} << 20;
+  static constexpr size_t kClasses = 13;  // 256 B .. 1 MiB
+  static constexpr size_t kMaxFreePerClass = 64;
+  static constexpr size_t kMaxRetainedBytes = size_t{8} << 20;
+
+  // Never destroyed: pinned memory is returned to the driver at process exit, and a static
+  // destructor could otherwise run after the CUDA runtime has shut down.
+  static PinnedHostPool& Instance() {
+    static PinnedHostPool* pool = new PinnedHostPool();
+    return *pool;
+  }
+
+  static bool Pooled(size_t bytes) { return bytes <= kMaxBytes; }
+
+  uint8_t* Acquire(size_t bytes, size_t& capacity) {
+    const size_t cls = ClassOf(bytes);
+    capacity = kMinBytes << cls;
+    {
+      std::lock_guard<std::mutex> lock{mutex_};
+      auto& entries = free_[cls];
+      for (size_t i = entries.size(); i-- > 0;) {
+        Entry entry = entries[i];
+        if (entry.event) {
+          const cudaError_t status = ::cudaEventQuery(entry.event);
+          if (status == cudaErrorNotReady)
+            continue;
+          CUDA_CHECK(status);
+          events_.push_back(entry.event);
+        }
+        entries.erase(entries.begin() + static_cast<std::ptrdiff_t>(i));
+        retained_bytes_ -= capacity;
+        return entry.p;
+      }
+    }
+    void* p{};
+    CUDA_CHECK(::cudaHostAlloc(&p, capacity, 0));
+    return static_cast<uint8_t*>(p);
+  }
+
+  void Release(uint8_t* p, size_t capacity, bool copy_pending) noexcept {
+    cudaEvent_t event{};
+    if (copy_pending) {
+      event = TakeEvent();
+      if (!event || ::cudaEventRecord(event, GetStream()) != cudaSuccess) {
+        ::cudaStreamSynchronize(GetStream());
+        if (event) ReturnEvent(event);
+        ::cudaFreeHost(p);
+        return;
+      }
+    }
+    {
+      std::lock_guard<std::mutex> lock{mutex_};
+      auto& entries = free_[ClassOf(capacity)];
+      if (entries.size() < kMaxFreePerClass && retained_bytes_ + capacity <= kMaxRetainedBytes) {
+        try {
+          entries.push_back(Entry{p, event});
+          retained_bytes_ += capacity;
+          return;
+        } catch (...) {
+        }
+      }
+    }
+    // Not retained. Free outside the lock because these calls wait for the device.
+    if (event) {
+      ::cudaEventSynchronize(event);
+      ReturnEvent(event);
+    }
+    ::cudaFreeHost(p);
+  }
+
+ private:
+  struct Entry {
+    uint8_t* p;
+    cudaEvent_t event;  // null when no copy from the buffer was outstanding at release
+  };
+
+  static size_t ClassOf(size_t bytes) {
+    size_t cls = 0;
+    while ((kMinBytes << cls) < bytes) ++cls;
+    return cls;
+  }
+
+  cudaEvent_t TakeEvent() noexcept {
+    {
+      std::lock_guard<std::mutex> lock{mutex_};
+      if (!events_.empty()) {
+        const cudaEvent_t event = events_.back();
+        events_.pop_back();
+        return event;
+      }
+    }
+    cudaEvent_t event{};
+    return ::cudaEventCreateWithFlags(&event, cudaEventDisableTiming) == cudaSuccess ? event : nullptr;
+  }
+
+  void ReturnEvent(cudaEvent_t event) noexcept {
+    std::lock_guard<std::mutex> lock{mutex_};
+    try {
+      events_.push_back(event);
+    } catch (...) {
+      ::cudaEventDestroy(event);
+    }
+  }
+
+  std::mutex mutex_;
+  std::vector<Entry> free_[kClasses];
+  std::vector<cudaEvent_t> events_;
+  size_t retained_bytes_{};
+};
+
+}  // namespace
+
 struct GpuMemory final : DeviceBuffer {
   GpuMemory(size_t size) : owned_{true} {
     size_in_bytes_ = size;
@@ -49,26 +171,37 @@ struct GpuMemory final : DeviceBuffer {
   ~GpuMemory() override {
     if (owned_)
       ort_allocator_->Free(p_device_);
-    if (p_cpu_)
-      ::cudaFreeHost(p_cpu_);
+    if (p_cpu_) {
+      if (cpu_capacity_ != 0)
+        PinnedHostPool::Instance().Release(p_cpu_, cpu_capacity_, copy_to_device_pending_);
+      else
+        ::cudaFreeHost(p_cpu_);
+    }
   }
 
   const char* GetType() const override { return device_label; }
 
   void AllocateCpu() override {
-    if (!p_cpu_)
+    if (p_cpu_)
+      return;
+    if (PinnedHostPool::Pooled(size_in_bytes_)) {
+      p_cpu_ = PinnedHostPool::Instance().Acquire(size_in_bytes_, cpu_capacity_);
+    } else {
       CUDA_CHECK(::cudaHostAlloc(&p_cpu_, size_in_bytes_, 0));
+    }
   }
 
   void CopyDeviceToCpu() override {
     AllocateCpu();
     CUDA_CHECK(::cudaMemcpyAsync(p_cpu_, p_device_, size_in_bytes_, ::cudaMemcpyDeviceToHost, GetStream()));
     CUDA_CHECK(::cudaStreamSynchronize(GetStream()));
+    copy_to_device_pending_ = false;
   }
 
   void CopyCpuToDevice() override {
     assert(p_cpu_);
     CUDA_CHECK(::cudaMemcpyAsync(p_device_, p_cpu_, size_in_bytes_, ::cudaMemcpyHostToDevice, GetStream()));
+    copy_to_device_pending_ = true;
   }
 
   void CopyFromCpu(const void* source, size_t size_in_bytes) override {
@@ -88,7 +221,9 @@ struct GpuMemory final : DeviceBuffer {
     CUDA_CHECK(::cudaMemsetAsync(p_device_, 0, size_in_bytes_, GetStream()));
   }
 
-  bool owned_;  // If we own the memory, we delete it on destruction
+  bool owned_;             // If we own the memory, we delete it on destruction
+  size_t cpu_capacity_{};  // Nonzero when p_cpu_ came from PinnedHostPool
+  bool copy_to_device_pending_{};
 };
 
 template <typename T>
@@ -706,7 +841,7 @@ struct CudaInterfaceImplBase : DeviceInterface {
   }
 
   void GetAvailableMemory(size_t& free_bytes, size_t& total_bytes) override {
-    cudaMemGetInfo(&free_bytes, &total_bytes);
+    CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
   }
 
   // Cached working set for the on-device ArgMax (Top-K, k=1) path.
@@ -728,6 +863,13 @@ struct CudaInterfaceImplBase : DeviceInterface {
 
 struct CudaInterfaceImpl final : CudaInterfaceImplBase {
   DeviceType GetType() const override { return DeviceType::CUDA; }
+  int GetDeviceId(const ProviderOptions*) override {
+    int device_id{};
+    CUDA_CHECK(cudaGetDevice(&device_id));
+    return device_id;
+  }
+  bool SupportsOffsetTensorViews() const override { return true; }
+  bool SupportsTransactionalFixedState() const override { return true; }
   int GetWindowedKeyValueCacheSize(const Config::Model::Decoder& decoder,
                                    const Config::Search& search,
                                    int max_length) const override {

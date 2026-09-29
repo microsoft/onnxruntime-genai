@@ -50,9 +50,14 @@ bool IsAttentionCacheNeeded(const Model& model) {
 
 }  // namespace
 
+bool CanUseTopLevelDeviceKeyValueCachePolicy(const Model& model) {
+  return model.config_->model.decoder.pipeline.empty();
+}
+
 bool UsesNonRewindableWindowedKeyValueCache(
     const Model& model, const Config::Model::Decoder& decoder) {
-  return model.p_device_kvcache_->UsesNonRewindableWindowedKeyValueCache(decoder);
+  return CanUseTopLevelDeviceKeyValueCachePolicy(model) &&
+         model.p_device_kvcache_->UsesNonRewindableWindowedKeyValueCache(decoder);
 }
 
 std::unique_ptr<KeyValueCache> CreateStandardKeyValueCache(State& state) {
@@ -75,8 +80,8 @@ std::unique_ptr<KeyValueCache> CreateStandardKeyValueCache(State& state) {
       state.model_.p_device_kvcache_->GetKeyValueCacheQuantizationBits(state.model_.config_->model.decoder.session_options);
 
   if (ShouldUseSharedPastPresentKeyValueCache(state)) {
-    const int windowed_cache_size = state.model_.p_device_kvcache_->GetWindowedKeyValueCacheSize(
-        state.model_.config_->model.decoder, state.params_->search, state.params_->search.max_length);
+    const int windowed_cache_size = GetWindowedKeyValueCacheSize(
+        state.model_, state.params_->search, state.params_->search.max_length);
     if (windowed_cache_size > 0) {
       return std::make_unique<EpManagedSlidingKeyValueCache>(state);
     }

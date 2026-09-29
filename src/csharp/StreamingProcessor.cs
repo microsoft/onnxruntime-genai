@@ -3,6 +3,8 @@
 
 using System;
 
+#nullable enable
+
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
     public class StreamingProcessor : IDisposable

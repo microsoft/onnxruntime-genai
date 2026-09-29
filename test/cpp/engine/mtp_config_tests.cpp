@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <filesystem>
+#include <fstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -15,6 +17,32 @@
 
 namespace Generators::test {
 namespace {
+
+namespace fs_std = std::filesystem;
+
+fs_std::path WriteDisabledMtpConfig() {
+  const auto root = fs_std::temp_directory_path() / "ortgenai_mtp_config_disabled";
+  std::error_code ec;
+  fs_std::remove_all(root, ec);
+  fs_std::create_directories(root);
+  std::ofstream out(root / "genai_config.json", std::ios::binary);
+  out << R"({
+    "model": {
+      "type": "tiny-test-model",
+      "vocab_size": 16,
+      "context_length": 32,
+      "decoder": { "filename": "model.onnx" },
+      "mtp": {
+        "enabled": false,
+        "filename": "mtp.onnx",
+        "main_hidden_states": "main_hidden",
+        "outputs": { "hidden_states": "head_feedback" }
+      }
+    },
+    "search": {}
+  })";
+  return root;
+}
 
 struct TensorMetadata {
   ONNXTensorElementDataType data_type;
@@ -56,6 +84,15 @@ class FakeModelStateMetadata final : public ModelStateMetadata {
 };
 
 }  // namespace
+
+TEST(MtpDecoderConfigTest, ParsesDisabledRuntimeToggle) {
+  const auto root = WriteDisabledMtpConfig();
+  const Config config{fs::path{root.string()}, {}};
+
+  EXPECT_FALSE(config.model.mtp.enabled);
+  EXPECT_FALSE(config.model.mtp.IsEnabled());
+  EXPECT_EQ(config.model.mtp.filename, "mtp.onnx");
+}
 
 TEST(MtpDecoderConfigTest, ProjectsPagedDecoderWithoutMainFixedState) {
   Config config;
@@ -200,6 +237,10 @@ TEST(MtpDecoderConfigTest, RejectsInvalidConfiguration) {
       EXPECT_NE(std::string_view{error.what()}.find(expected), std::string_view::npos);
     }
   };
+
+  mtp.enabled = false;
+  expect_error("model.mtp.enabled");
+  mtp.enabled = true;
 
   mtp.filename.clear();
   expect_error("filename");

@@ -57,21 +57,21 @@ class DFlash2Builder(BlockDrafterBuilder):
         filename="dflash2.onnx",
         num_draft_tokens=None,
         quant=None,
+        lm_head_quant=None,
+        embed_quant=None,
         fuse_gate_up=False,
+        compute_dtype=None,
     ):
         self.draft_dir = draft_dir
         self.target_dir = target_dir
-        # The drafter is a bf16 checkpoint and its activations genuinely leave the fp16 range
-        # (the fc output alone reaches ~1.4e4 and the MLP product overflows two layers in), so the
-        # body runs in bf16. Only the tensors it shares with the fp16 target -- the aux hidden
-        # states, the embedding table and the FP8 LM head -- stay at the target's dtype.
-        self.io_dtype = ir.DataType.BFLOAT16
+        self.io_dtype = compute_dtype or ir.DataType.BFLOAT16
         self.external_dtype = io_dtype
         if quant is not None:
             self.quant_bits = quant["bits"]
             self.quant_block_size = quant["block_size"]
             self.quant_prepack = quant["prepack"]
-            self.lm_head_quant = quant["lm_head"]
+        self.lm_head_quant = lm_head_quant
+        self.embed_quant = embed_quant
         self.filename = filename
         self.paged_block_size = paged_block_size
         self.mlp_attrs = {"fuse_gate_up": fuse_gate_up}
@@ -302,15 +302,7 @@ class DFlash2Builder(BlockDrafterBuilder):
             ctx_kv.append((k, v))
 
         # --- query path ---
-        self.make_initializer(w["embed_tokens.weight"], "model.embed_tokens.weight", to=self.external_dtype)
-        emb_ext = self.binary(
-            "Gather",
-            "/dflash2/embed_tokens/Gather",
-            "model.embed_tokens.weight",
-            "input_ids",
-            self.external_dtype,
-            [rows_q, self.hidden_size],
-        )
+        emb_ext = self.make_embedding("/dflash2/embed_tokens/Gather", rows_q)
         emb = self.unary(
             "Cast", "/dflash2/embed_tokens/Cast", emb_ext, self.io_dtype, [rows_q, self.hidden_size], to=self.io_dtype
         )

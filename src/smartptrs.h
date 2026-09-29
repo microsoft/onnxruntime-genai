@@ -217,7 +217,7 @@ static_assert(std::is_trivially_copyable_v<StateUpdateReplayDesc>);
 // that boundary (Search, BatchedSampler, BatchedSamplerState, GeneratorParams, or Config).
 // Dynamically loaded add-ons must report this exact version before the host can safely call through
 // the C++ interface.
-inline constexpr uint32_t kDeviceInterfaceVersion = 5;
+inline constexpr uint32_t kDeviceInterfaceVersion = 6;
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}
@@ -351,6 +351,13 @@ struct DeviceInterface {
   virtual void ReplayStateUpdates(const StateUpdateReplayDesc* /*descs*/, size_t /*count*/) {
     throw std::logic_error("Device does not support compact fixed-state replay.");
   }
+  // True for EPs where an OrtValue can bind a tensor view formed by adding a byte offset to the base
+  // address returned for persistent device storage. Keep last for vtable ABI stability.
+  virtual bool SupportsOffsetTensorViews() const { return false; }
+  // True when allocation, zeroing, ranged copies, tensor binding, and synchronization are qualified
+  // to complete fixed-state device work before FixedStatePool publishes a bank flip.
+  // Keep last for vtable ABI stability.
+  virtual bool SupportsTransactionalFixedState() const { return false; }
 };
 
 // A shared_ptr based type that we expose through our C API should inherit from this type.

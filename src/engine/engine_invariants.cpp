@@ -36,21 +36,22 @@ std::vector<InvariantViolation> ValidateCacheInvariants(const PagedCacheSnapshot
     violations.push_back(InvariantViolation{std::move(message)});
   };
 
-  // Total accounting: every block is free, transaction-reserved, or committed to one Request.
+  // Total accounting uses the physical block listing when shared/index-retained blocks exist.
   const size_t allocated = cache.AllocatedBlocks();
   const size_t transaction_reserved = cache.TransactionReservedBlocks();
   if (cache.free_blocks > cache.total_blocks) {
     add("free_blocks (" + std::to_string(cache.free_blocks) + ") exceeds total_blocks (" +
         std::to_string(cache.total_blocks) + ").");
   }
-  if (cache.free_blocks + transaction_reserved + allocated != cache.total_blocks) {
-    add("free (" + std::to_string(cache.free_blocks) + ") + transaction_reserved (" +
-        std::to_string(transaction_reserved) + ") + allocated (" +
-        std::to_string(allocated) + ") != total_blocks (" +
+  const size_t physical_blocks =
+      cache.blocks.empty() ? transaction_reserved + allocated : cache.blocks.size();
+  if (cache.free_blocks + physical_blocks != cache.total_blocks) {
+    add("free (" + std::to_string(cache.free_blocks) + ") + physical_blocks (" +
+        std::to_string(physical_blocks) + ") does not describe total_blocks (" +
         std::to_string(cache.total_blocks) + ").");
   }
 
-  // Single ownership: a physical block id appears in at most one Request's table.
+  std::unordered_map<size_t, size_t> expected_references;
   std::unordered_map<size_t, const void*> owner_of_block;
   std::unordered_set<const void*> seen_requests;
   size_t max_blocks_per_request = 0;
@@ -78,9 +79,12 @@ std::vector<InvariantViolation> ValidateCacheInvariants(const PagedCacheSnapshot
 
       const auto [it, inserted] = owner_of_block.emplace(block_id, request.request_id);
       if (!inserted && it->second != request.request_id) {
-        add("Block id " + std::to_string(block_id) + " is owned by more than one Request (" +
-            PtrId(it->second) + " and " + PtrId(request.request_id) + ").");
+        if (cache.blocks.empty()) {
+          add("Block id " + std::to_string(block_id) + " is owned by more than one Request (" +
+              PtrId(it->second) + " and " + PtrId(request.request_id) + ").");
+        }
       }
+      ++expected_references[block_id];
     }
 
     // Slot accounting: used + empty must fill exactly the owned blocks' capacity.
@@ -111,6 +115,16 @@ std::vector<InvariantViolation> ValidateCacheInvariants(const PagedCacheSnapshot
       add("Transaction-reserved block id " + std::to_string(block_id) +
           " is also committed to a Request.");
     }
+    ++expected_references[block_id];
+  }
+
+  std::unordered_set<size_t> adopted_blocks;
+  for (const size_t block_id : cache.transaction_adopted_block_ids) {
+    if (block_id >= cache.total_blocks) {
+      add("Transaction adopts out-of-range block id " + std::to_string(block_id) + ".");
+    }
+    adopted_blocks.insert(block_id);
+    ++expected_references[block_id];
   }
 
   std::unordered_set<const void*> reservation_requests;
@@ -135,9 +149,44 @@ std::vector<InvariantViolation> ValidateCacheInvariants(const PagedCacheSnapshot
             " is assigned to more than one Request delta.");
       }
     }
+    for (const size_t block_id : reservation.adopted_block_ids) {
+      if (adopted_blocks.find(block_id) == adopted_blocks.end()) {
+        add("Request " + PtrId(reservation.request_id) +
+            " references block id " + std::to_string(block_id) +
+            " that is not transaction-adopted.");
+      }
+    }
   }
   if (blocks_assigned_to_delta != reserved_blocks) {
     add("Not every transaction-reserved block belongs to exactly one Request delta.");
+  }
+
+  if (!cache.blocks.empty()) {
+    std::unordered_set<size_t> physical_ids;
+    for (const auto& block : cache.blocks) {
+      if (block.block_id >= cache.total_blocks ||
+          !physical_ids.insert(block.block_id).second) {
+        add("Physical block id " + std::to_string(block.block_id) +
+            " is out of range or duplicated.");
+        continue;
+      }
+      const size_t expected =
+          expected_references[block.block_id] + (block.indexed ? 1 : 0);
+      if (block.ref_count != expected) {
+        add("Block id " + std::to_string(block.block_id) +
+            " reference count (" + std::to_string(block.ref_count) +
+            ") does not match its owners (" + std::to_string(expected) + ").");
+      }
+      if (expected_references[block.block_id] > 1 &&
+          (!block.full || !block.indexed)) {
+        add("Shared block id " + std::to_string(block.block_id) +
+            " is not a full indexed prefix block.");
+      }
+      if (block.used_slots > cache.block_size) {
+        add("Block id " + std::to_string(block.block_id) +
+            " uses more slots than its capacity.");
+      }
+    }
   }
 
   const auto& window = cache.window_blocks;

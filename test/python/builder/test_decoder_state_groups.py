@@ -107,6 +107,52 @@ def _write_config(monkeypatch, tmp_path, model):
     return json.loads((tmp_path / "genai_config.json").read_text())
 
 
+def test_composite_config_resolves_nested_and_tokenizer_special_token_ids(monkeypatch, tmp_path):
+    hf_config = SimpleNamespace(
+        text_config=SimpleNamespace(bos_token_id=None, eos_token_id=248044, pad_token_id=None)
+    )
+    tokenizer = SimpleNamespace(
+        bos_token_id=None,
+        eos_token="<|im_end|>",
+        eos_token_id=248046,
+        pad_token_id=None,
+        convert_tokens_to_ids=lambda _token: 248046,
+    )
+    monkeypatch.setattr(base_module, "GenerationConfig", _NoGenerationConfig)
+    monkeypatch.setattr(base_module.AutoTokenizer, "from_pretrained", lambda *_args, **_kwargs: tokenizer)
+
+    model = _make_config_model(Qwen35TextModel)
+    model.model_name_or_path = "Qwen/Qwen3.5-2B"
+    config = Model.make_genai_config.__get__(model)
+    config(hf_config, {}, str(tmp_path))
+
+    output = json.loads((tmp_path / "genai_config.json").read_text())["model"]
+    assert output["bos_token_id"] == 1
+    assert output["eos_token_id"] == [248046, 248044]
+    assert output["pad_token_id"] == 248044
+
+
+@pytest.mark.parametrize("eos_token", [None, "<|im_end|>"])
+def test_special_token_resolution_ignores_unusable_tokenizer_eos(monkeypatch, eos_token):
+    def fail_conversion(_token):
+        raise ValueError("token conversion failed")
+
+    tokenizer = SimpleNamespace(
+        bos_token_id=None,
+        eos_token=eos_token,
+        eos_token_id=None,
+        pad_token_id=None,
+        convert_tokens_to_ids=fail_conversion,
+    )
+    monkeypatch.setattr(base_module.AutoTokenizer, "from_pretrained", lambda *_args, **_kwargs: tokenizer)
+
+    model = _make_config_model(Qwen35TextModel)
+    model.model_name_or_path = "Qwen/Qwen3.5-2B"
+    config = SimpleNamespace(bos_token_id=None, eos_token_id=248044, pad_token_id=None)
+
+    assert model.resolve_special_token_ids(config, {}) == (1, 248044, 248044)
+
+
 def _recording_model():
     model = Model.__new__(Model)
     model.io_dtype = base_module.ir.DataType.FLOAT16
@@ -141,6 +187,28 @@ def test_common_nonpaged_builder_preserves_manifest_absence(monkeypatch, tmp_pat
     )
 
     assert "state_groups" not in config["model"]["decoder"]
+
+
+@pytest.mark.parametrize(
+    "ep,enabled,prepacked,expected",
+    [
+        ("cuda", True, 0, True),
+        ("cuda", False, 0, False),
+        ("cuda", False, 1, True),
+        ("cpu", True, 0, False),
+    ],
+)
+def test_fpa_intb_session_option_selection(monkeypatch, tmp_path, ep, enabled, prepacked, expected):
+    model = _make_config_model(Model)
+    model.ep = ep
+    model.ep_attrs = {ep: {}}
+    model.extra_options["enable_cuda_fpa_intb_gemm"] = enabled
+    model.matmul_attrs["weights_prepacked"] = prepacked
+
+    config = _write_config(monkeypatch, tmp_path, model)
+
+    session_options = config["model"]["decoder"]["session_options"]
+    assert ("ep.cuda.fpa_intb_gemm" in session_options) is expected
 
 
 def test_qwen_all_attention_builder_emits_paged_kv_group(monkeypatch, tmp_path):
