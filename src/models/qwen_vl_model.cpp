@@ -8,6 +8,42 @@
 
 namespace Generators {
 
+namespace {
+
+// Creates a view of one image's slice of a tensor whose leading dimension is the image count.
+// The result borrows source's buffer and must not outlive it.
+std::unique_ptr<OrtValue> SliceLeadingImage(OrtValue& source, int64_t index) {
+  auto info = source.GetTensorTypeAndShapeInfo();
+  auto shape = info->GetShape();
+  const auto type = info->GetElementType();
+  int64_t per_image = 1;
+  for (size_t i = 1; i < shape.size(); ++i) per_image *= shape[i];
+  const size_t slice_bytes = static_cast<size_t>(per_image) * Ort::SizeOf(type);
+  shape[0] = 1;
+  auto* data = static_cast<uint8_t*>(source.GetTensorMutableRawData());
+  return OrtValue::CreateTensor(source.GetTensorMemoryInfo(), data + static_cast<size_t>(index) * slice_bytes,
+                                slice_bytes, shape, type);
+}
+
+// InjectVisionEmbeddings expects [num_image_tokens, hidden_size]. Encoders commonly emit a
+// leading batch dimension, so collapse every leading dimension of size 1.
+std::vector<int64_t> SqueezeToRank2(const std::vector<int64_t>& shape) {
+  std::vector<int64_t> squeezed = shape;
+  while (squeezed.size() > 2 && squeezed.front() == 1) {
+    squeezed.erase(squeezed.begin());
+  }
+  if (squeezed.size() != 2) {
+    std::string printable;
+    for (auto dim : shape) {
+      printable += (printable.empty() ? "" : ", ") + std::to_string(dim);
+    }
+    throw std::runtime_error("Vision encoder: expected image features of rank 2, got [" + printable + "]");
+  }
+  return squeezed;
+}
+
+}  // namespace
+
 Qwen2_5_VL_PipelineModel::Qwen2_5_VL_PipelineModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : DecoderOnlyPipelineModel(std::move(config), ort_env) {
   if (config_->model.vision.pipeline.empty()) {
@@ -205,6 +241,20 @@ void Qwen2_5_VL_PipelineState::RunSingleSessionVision(const std::vector<ExtraInp
     input_values.push_back(value);
   }
 
+  // Gemma-4's vision graph has a static batch of 1, so several images must be encoded one at a
+  // time and their features concatenated. This mirrors Gemma4VisionState on the multi-modal path.
+  const auto& position_name = vl_model_.config_->model.vision.inputs.pixel_position_ids;
+  size_t pixel_index = SIZE_MAX;
+  size_t position_index = SIZE_MAX;
+  for (size_t i = 0; i < input_names.size(); ++i) {
+    if (input_names[i] == pixel_name) pixel_index = i;
+    if (input_names[i] == position_name) position_index = i;
+  }
+  OrtValue* pixel_values = find_extra_input(pixel_name);
+  OrtValue* position_values = position_index == SIZE_MAX ? nullptr : find_extra_input(position_name);
+  const auto pixel_shape = pixel_values->GetTensorTypeAndShapeInfo()->GetShape();
+  const int64_t num_images = pixel_shape.size() == 3 ? pixel_shape[0] : 1;
+
   const auto output_names = vl_model_.vision_session_->GetOutputNames();
   if (output_names.empty()) {
     throw std::runtime_error("Vision encoder: model has no outputs");
@@ -219,35 +269,62 @@ void Qwen2_5_VL_PipelineState::RunSingleSessionVision(const std::vector<ExtraInp
   }
   const char* output_name_ptrs[] = {output_names[output_index].c_str()};
 
-  OrtValue* raw_output = nullptr;
-  vl_model_.vision_session_->Run(nullptr, input_name_ptrs.data(), input_values.data(),
-                                 input_name_ptrs.size(), output_name_ptrs, &raw_output, 1);
-  vision_output_owner_ = std::unique_ptr<OrtValue>(raw_output);
-
-  auto output_info = vision_output_owner_->GetTensorTypeAndShapeInfo();
-  if (output_info->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-    std::unique_ptr<OrtValue> cast_output;
-    Cast(*vision_output_owner_, cast_output, *vl_model_.p_device_inputs_,
-         ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-    vision_output_owner_ = std::move(cast_output);
-    output_info = vision_output_owner_->GetTensorTypeAndShapeInfo();
-  }
-
-  // InjectVisionEmbeddings expects [num_image_tokens, hidden_size]. Encoders commonly
-  // emit a leading batch dimension, so collapse every leading dimension of size 1.
-  auto shape = output_info->GetShape();
-  while (shape.size() > 2 && shape.front() == 1) {
-    shape.erase(shape.begin());
-  }
-  if (shape.size() != 2) {
-    std::string printable;
-    for (auto dim : output_info->GetShape()) {
-      printable += (printable.empty() ? "" : ", ") + std::to_string(dim);
+  auto run_encoder = [&]() {
+    OrtValue* raw_output = nullptr;
+    vl_model_.vision_session_->Run(nullptr, input_name_ptrs.data(), input_values.data(),
+                                   input_name_ptrs.size(), output_name_ptrs, &raw_output, 1);
+    std::unique_ptr<OrtValue> owned(raw_output);
+    if (owned->GetTensorTypeAndShapeInfo()->GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+      std::unique_ptr<OrtValue> cast_output;
+      Cast(*owned, cast_output, *vl_model_.p_device_inputs_, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+      owned = std::move(cast_output);
     }
-    throw std::runtime_error("Vision encoder: expected image features of rank 2, got [" + printable + "]");
-  }
+    return owned;
+  };
 
   auto mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
+
+  if (num_images > 1) {
+    if (pixel_index == SIZE_MAX) {
+      throw std::runtime_error("Vision encoder: multi-image input requires a '" + pixel_name + "' session input");
+    }
+    image_features_buffer_.clear();
+    int64_t hidden_size = 0;
+    for (int64_t image = 0; image < num_images; ++image) {
+      auto pixel_slice = SliceLeadingImage(*pixel_values, image);
+      input_values[pixel_index] = pixel_slice.get();
+      std::unique_ptr<OrtValue> position_slice;
+      if (position_values) {
+        position_slice = SliceLeadingImage(*position_values, image);
+        input_values[position_index] = position_slice.get();
+      }
+
+      auto features = run_encoder();
+      const auto features_info = features->GetTensorTypeAndShapeInfo();
+      const auto features_shape = SqueezeToRank2(features_info->GetShape());
+      if (hidden_size == 0) {
+        hidden_size = features_shape[1];
+      } else if (hidden_size != features_shape[1]) {
+        throw std::runtime_error("Vision encoder: image features changed hidden size between images");
+      }
+      const float* data = features->GetTensorMutableData<float>();
+      image_features_buffer_.insert(image_features_buffer_.end(), data, data + features_info->GetElementCount());
+    }
+
+    // The per-image outputs were copied out, so nothing from the session needs to stay alive.
+    vision_output_owner_.reset();
+    const std::vector<int64_t> combined_shape{static_cast<int64_t>(image_features_buffer_.size()) / hidden_size,
+                                              hidden_size};
+    image_features_value_ = OrtValue::CreateTensor<float>(*mem_info, std::span<float>(image_features_buffer_),
+                                                          std::span<const int64_t>(combined_shape));
+    vision_ran_ = true;
+    return;
+  }
+
+  vision_output_owner_ = run_encoder();
+  const auto output_info = vision_output_owner_->GetTensorTypeAndShapeInfo();
+  const auto shape = SqueezeToRank2(output_info->GetShape());
+
   std::span<float> data_span(vision_output_owner_->GetTensorMutableData<float>(),
                              output_info->GetElementCount());
   std::span<const int64_t> shape_span(shape.data(), shape.size());
