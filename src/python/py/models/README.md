@@ -157,6 +157,32 @@ merge recursively; arrays replace whole. The validator rejects absent engine or
 speculative capabilities, invalid allocation and draft limits, provider changes,
 and changes to graph-required session options.
 
+`component_options` is omitted by default. When present, it exports a
+final-hidden-state backbone without its LM/MTP heads and packages either generic
+pre-built ONNX heads or one pinned model-specific artifact. Generic declarations
+require a non-empty `heads` array with unique safe names and filenames; every
+logical input/output binding must name an actual graph input/output. Revision
+fields are rejected for generic heads. Model-specific declarations use
+`model_source` instead of `heads` and require non-empty `artifact_revision` and
+`base_revision` pins. Component mode cannot be combined with `drafter_options`.
+
+```bash
+# Generic head from a wheel:
+python -m onnxruntime_genai.models.builder -m Qwen/Qwen3-8B -o output -e cpu \
+  --component_options \
+  '{"backbone":{"filename":"backbone.onnx"},"heads":[{"name":"classifier","source":"classifier.onnx","inputs":{"hidden_states":"hidden_states"},"outputs":{"scores":"scores"}}]}'
+
+# Equivalent source invocation:
+python src/python/py/models/builder.py -m Qwen/Qwen3-8B -o output -e cpu \
+  --component_options component-options.json
+```
+
+Generic head graphs and confined external-data files are copied only after the
+complete package plan passes path, symlink, collision, and graph-binding
+validation. A model-specific configuration resolves its separate base model,
+tokenizer, adapter/head artifact, and immutable revisions before backbone
+export.
+
 For memory-dependent INT4/INT8 KV-cache graphs that share external weights, use
 the [KV-cache variant authoring workflow](../../../../docs/ModelBuilderConfiguration.md#authoring-kv-cache-variants).
 The supported `KVCacheVariant` API requires source and output graphs in the same

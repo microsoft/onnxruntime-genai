@@ -32,7 +32,19 @@ def _write_component_model(path, external_locations=()):
         entry.key = "location"
         entry.value = location
         initializers.append(tensor)
-    graph = onnx.helper.make_graph([], "component", [], [], initializer=initializers)
+    hidden = onnx.helper.make_tensor_value_info(
+        "hidden_states", onnx.TensorProto.FLOAT, [None, 4]
+    )
+    scores = onnx.helper.make_tensor_value_info(
+        "scores", onnx.TensorProto.FLOAT, [None, 4]
+    )
+    graph = onnx.helper.make_graph(
+        [onnx.helper.make_node("Identity", ["hidden_states"], ["scores"])],
+        "component",
+        [hidden],
+        [scores],
+        initializer=initializers,
+    )
     path.write_bytes(onnx.helper.make_model(graph).SerializeToString())
 
 
@@ -130,6 +142,7 @@ def test_component_options_configure_hidden_state_backbone():
     )
 
     assert effective.extra_options["exclude_lm_head"] is True
+    assert effective.extra_options["exclude_mtp"] is True
     assert "include_hidden_states" not in effective.extra_options
     assert effective.extra_options["filename"] == "model.onnx"
 
@@ -258,10 +271,82 @@ def test_component_package_rejects_backbone_external_data_collision(tmp_path):
 
     with pytest.raises(ValueError, match="conflicts with packaged file"):
         export_component_package(effective.component_options, str(output_dir))
-
     assert (output_dir / "backbone.onnx.data").read_bytes() == b"backbone weights"
     assert not (output_dir / "head.onnx").exists()
 
+
+def test_component_package_validates_graph_binding_names(tmp_path):
+    graph = tmp_path / "head.onnx"
+    _write_component_model(graph)
+    output_dir = tmp_path / "package"
+    output_dir.mkdir()
+    effective = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={
+            "heads": [
+                {
+                    "name": "head",
+                    "source": str(graph),
+                    "inputs": {"hidden_states": "missing_input"},
+                    "outputs": {"scores": "missing_output"},
+                }
+            ]
+        },
+    )
+
+    with pytest.raises(ValueError, match="unknown graph input"):
+        export_component_package(effective.component_options, str(output_dir))
+    assert not (output_dir / "head.onnx").exists()
+
+    effective = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={
+            "heads": [
+                {
+                    "name": "head",
+                    "source": str(graph),
+                    "outputs": {"scores": "missing_output"},
+                }
+            ]
+        },
+    )
+    with pytest.raises(ValueError, match="unknown graph output"):
+        export_component_package(effective.component_options, str(output_dir))
+
+
+def test_component_package_rejects_destination_symlink(tmp_path):
+    graph = tmp_path / "head.onnx"
+    _write_component_model(graph)
+    outside = tmp_path / "outside.onnx"
+    outside.write_bytes(b"unchanged")
+    output_dir = tmp_path / "package"
+    output_dir.mkdir()
+    (output_dir / "head.onnx").symlink_to(outside)
+    effective = normalize_builder_config(
+        "fp32",
+        "cpu",
+        component_options={
+            "heads": [{"name": "head", "source": str(graph)}]
+        },
+    )
+
+    with pytest.raises(ValueError, match="destination contains symlink"):
+        export_component_package(effective.component_options, str(output_dir))
+    assert outside.read_bytes() == b"unchanged"
+
+
+def test_generic_component_options_reject_revision_fields():
+    with pytest.raises(ValueError, match="artifact_revision requires model_source"):
+        normalize_builder_config(
+            "fp32",
+            "cpu",
+            component_options={
+                "artifact_revision": "unused",
+                "heads": [{"name": "head", "source": "head.onnx"}],
+            },
+        )
 
 @pytest.mark.parametrize(
     "location",

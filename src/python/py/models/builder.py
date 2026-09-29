@@ -1199,7 +1199,13 @@ def get_args():
     parser.add_argument(
         "--component_options",
         default=None,
-        help="Hidden-state backbone and named head components as an inline JSON object or JSON file path.",
+        help=(
+            "Optional hidden-state backbone plus generic pre-built heads or one "
+            "pinned model_source, as inline JSON or a JSON file. Generic heads "
+            "require unique safe names/files and valid graph bindings; "
+            "model_source requires artifact_revision and base_revision. "
+            "Cannot be combined with drafter_options; omitted by default."
+        ),
     )
     parser.add_argument(
         "--drafter_options",

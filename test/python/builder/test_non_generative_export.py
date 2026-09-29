@@ -54,6 +54,7 @@ def _tiny_clm_checkpoint():
 
 
 def _torch_clm_head(value, state):
+    value = F.normalize(value, dim=-1)
     value = F.gelu(F.linear(value, state["inp.weight"], state["inp.bias"]))
     for index in range(1):
         value = F.linear(value, state[f"hidden.{index}.weight"], state[f"hidden.{index}.bias"])
@@ -76,8 +77,8 @@ def test_clm_tiny_graph_structure_weights_and_math():
     assert op_types.count("Gemm") == 6
     assert op_types.count("Gelu") == 4
     assert op_types.count("LayerNormalization") == 2
-    assert op_types.count("ReduceL2") == 2
-    assert op_types.count("Max") == 2
+    assert op_types.count("ReduceL2") == 4
+    assert op_types.count("Max") == 4
     assert {item.name for item in model.graph.initializer} >= {
         "state.inp.weight",
         "state.hidden.0.weight",
@@ -99,6 +100,15 @@ def test_clm_tiny_graph_structure_weights_and_math():
         actual[1], _torch_clm_head(action_input, checkpoint["action_head"]), rtol=2e-5, atol=2e-5
     )
     assert actual[2] == np.float32(100.0)
+    scaled = ReferenceEvaluator(model).run(
+        None,
+        {
+            "state_hidden_states": (state_input * 7).numpy(),
+            "action_hidden_states": (action_input * 3).numpy(),
+        },
+    )
+    np.testing.assert_allclose(scaled[0], actual[0], rtol=2e-5, atol=2e-5)
+    np.testing.assert_allclose(scaled[1], actual[1], rtol=2e-5, atol=2e-5)
 
 
 def test_clm_l2_normalization_matches_f_normalize_epsilon_for_zero_output():
@@ -135,13 +145,44 @@ def _expanded(shape):
     return torch.zeros(1).expand(shape)
 
 
+def _real_clm_checkpoint():
+    head = {
+        "inp.weight": _expanded((1536, 4096)),
+        "inp.bias": _expanded((1536,)),
+        "hidden.0.weight": _expanded((1536, 1536)),
+        "hidden.0.bias": _expanded((1536,)),
+        "norms.0.weight": _expanded((1536,)),
+        "norms.0.bias": _expanded((1536,)),
+        "out.weight": _expanded((512, 1536)),
+        "out.bias": _expanded((512,)),
+    }
+    return {
+        "state_head": head,
+        "action_head": dict(head),
+        "logit_scale": torch.tensor(1.0),
+        "cfg": {
+            "model": "Qwen/Qwen3-8B",
+            "hidden_size": 4096,
+            "width": 1536,
+            "depth": 3,
+            "projection_dim": 512,
+            "activation": "gelu",
+            "layernorm": True,
+            "residual": False,
+        },
+        "hidden_size": 4096,
+        "projection_dim": 512,
+    }
+
+
 def _real_kev_checkpoint(state=None):
+    policy = kev.kev_policy()
     return {
         "args": {"seed": 17},
         "suite_sha256": "a" * 64,
         "init_source": "trained",
         "temperature_fit": {"method": "holdout"},
-        "base": kev.KEV_BASE_MODEL,
+        "base": policy["base_model"],
         "head": state
         or {
             "q.weight": _expanded((256, 2560)),
@@ -149,22 +190,28 @@ def _real_kev_checkpoint(state=None):
             "k.weight": _expanded((256, 2560)),
             "k.bias": _expanded((256,)),
         },
-        "base_revision": kev.KEV_BASE_REVISION,
+        "base_revision": policy["base_revision"],
         "lora": {"r": 16},
         "head_dim": 256,
         "option_isolation": False,
         "special_embeddings": {},
         "weights_dtype": "float32",
-        "temperature": kev.KEV_TEMPERATURE,
+        "temperature": policy["temperature"],
         "holdout": {"questions": 100},
         "lora_placement": ["q_proj", "v_proj"],
     }
 
 
 def _write_kev_artifact(path, checkpoint=None):
+    policy = kev.kev_policy()
     path.mkdir()
     (path / "adapter_config.json").write_text(
-        json.dumps({"peft_type": "LORA", "base_model_name_or_path": kev.KEV_BASE_MODEL})
+        json.dumps(
+            {
+                "peft_type": "LORA",
+                "base_model_name_or_path": policy["base_model"],
+            }
+        )
     )
     torch.save(checkpoint or _real_kev_checkpoint(), path / "head.pt")
 
@@ -172,7 +219,12 @@ def _write_kev_artifact(path, checkpoint=None):
 def test_kev_tiny_graph_weights_masked_grouped_softmax_math():
     checkpoint = _tiny_kev_checkpoint()
     model = kev.build_kev_model(checkpoint)
-    hidden = torch.tensor([[1.0, 0.0, 0.5], [0.0, 1.0, -0.5], [0.5, 0.5, 1.0]])
+    hidden = torch.tensor(
+        [
+            [[1.0, 0.0, 0.5], [0.0, 1.0, -0.5], [0.5, 0.5, 1.0]],
+            [[0.2, 0.8, -0.1], [0.4, -0.3, 0.9], [0.7, 0.1, 0.6]],
+        ]
+    )
     decide = np.asarray([0, 1], dtype=np.int64)
     options = np.asarray([[1, 2], [0, 2]], dtype=np.int64)
     mask = np.asarray([[True, False], [True, True]])
@@ -187,8 +239,17 @@ def test_kev_tiny_graph_weights_masked_grouped_softmax_math():
         },
     )
     state = checkpoint["state"]
-    q = F.linear(hidden[torch.from_numpy(decide)], state["q.weight"], state["q.bias"])
-    k = F.linear(hidden[torch.from_numpy(options)], state["k.weight"], state["k.bias"])
+    rows = torch.arange(hidden.shape[0])
+    q = F.linear(
+        hidden[rows, torch.from_numpy(decide)],
+        state["q.weight"],
+        state["q.bias"],
+    )
+    k = F.linear(
+        hidden[rows[:, None], torch.from_numpy(options)],
+        state["k.weight"],
+        state["k.bias"],
+    )
     expected_scores = (q[:, None, :] * k).sum(-1) / (math.sqrt(2) * 2.5)
     expected_probabilities = torch.softmax(expected_scores.masked_fill(~torch.from_numpy(mask), -torch.inf), dim=-1)
 
@@ -213,6 +274,7 @@ def test_artifact_layout_dispatch_and_ambiguity(tmp_path):
 
 
 def test_dispatch_validates_provenance_and_backbone(tmp_path):
+    policy = kev.kev_policy()
     source = tmp_path / "kev"
     _write_kev_artifact(source)
     config = types.SimpleNamespace(
@@ -221,8 +283,8 @@ def test_dispatch_validates_provenance_and_backbone(tmp_path):
     )
     options = types.SimpleNamespace(
         model_source=str(source),
-        artifact_revision=kev.KEV_ADAPTER_REVISION,
-        base_revision=kev.KEV_BASE_REVISION,
+        artifact_revision=policy["adapter_revision"],
+        base_revision=policy["base_revision"],
     )
     extra_options = {}
 
@@ -236,33 +298,36 @@ def test_dispatch_validates_provenance_and_backbone(tmp_path):
 
 
 def test_model_specific_hf_pipeline_keeps_base_tokenizer_and_component_separate(tmp_path):
+    policy = kev.kev_policy()
     kev_source = tmp_path / "kev"
     _write_kev_artifact(kev_source)
     kev_options = types.SimpleNamespace(
         model_source=str(kev_source),
-        artifact_revision=kev.KEV_ADAPTER_REVISION,
-        base_revision=kev.KEV_BASE_REVISION,
+        artifact_revision=policy["adapter_revision"],
+        base_revision=policy["base_revision"],
     )
     extra_options = {}
 
-    dispatch.prepare_model_specific_hf(kev_options, extra_options, kev.KEV_BASE_MODEL)
+    dispatch.prepare_model_specific_hf(
+        kev_options, extra_options, policy["base_model"]
+    )
 
-    assert extra_options["base_revision"] == kev.KEV_BASE_REVISION
+    assert extra_options["base_revision"] == policy["base_revision"]
     assert extra_options["adapter_path"] == str(kev_source)
     assert extra_options["_model_specific_hf"] == {
-        "base_model": kev.KEV_BASE_MODEL,
-        "base_revision": kev.KEV_BASE_REVISION,
-        "tokenizer": kev.KEV_BASE_MODEL,
+        "base_model": policy["base_model"],
+        "base_revision": policy["base_revision"],
+        "tokenizer": policy["base_model"],
         "adapter": str(kev_source),
         "component": str(kev_source),
     }
 
     clm_source = tmp_path / "clm"
     clm_source.mkdir()
-    torch.save(_tiny_clm_checkpoint(), clm_source / "checkpoint.pt")
+    torch.save(_real_clm_checkpoint(), clm_source / "checkpoint.pt")
     clm_options = types.SimpleNamespace(
         model_source=str(clm_source),
-        artifact_revision=clm.CLM_ARTIFACT_REVISION,
+        artifact_revision=clm.clm_artifact_revision(),
         base_revision="caller-selected-qwen3-revision",
     )
     clm_extra = {}
@@ -271,41 +336,27 @@ def test_model_specific_hf_pipeline_keeps_base_tokenizer_and_component_separate(
     assert clm_extra["_model_specific_hf"]["adapter"] is None
     assert clm_extra["_model_specific_hf"]["tokenizer"] == "Qwen/Qwen3-8B"
 
+    malformed_source = tmp_path / "malformed-clm"
+    malformed_source.mkdir()
+    torch.save(_tiny_clm_checkpoint(), malformed_source / "checkpoint.pt")
+    malformed_options = types.SimpleNamespace(
+        model_source=str(malformed_source),
+        artifact_revision=clm.clm_artifact_revision(),
+        base_revision="caller-selected-qwen3-revision",
+    )
+    with pytest.raises(ValueError, match="hidden_size"):
+        dispatch.prepare_model_specific_hf(
+            malformed_options, {}, "Qwen/Qwen3-8B"
+        )
+
 
 def test_real_released_clm_layout_is_accepted(tmp_path):
     source = tmp_path / "clm"
     source.mkdir()
-    head = {
-        "inp.weight": _expanded((1536, 4096)),
-        "inp.bias": _expanded((1536,)),
-        "hidden.0.weight": _expanded((1536, 1536)),
-        "hidden.0.bias": _expanded((1536,)),
-        "norms.0.weight": _expanded((1536,)),
-        "norms.0.bias": _expanded((1536,)),
-        "out.weight": _expanded((512, 1536)),
-        "out.bias": _expanded((512,)),
-    }
-    checkpoint = {
-        "state_head": head,
-        "action_head": dict(head),
-        "logit_scale": torch.tensor(1.0),
-        "cfg": {
-            "model": "Qwen/Qwen3-8B",
-            "hidden_size": 4096,
-            "width": 1536,
-            "depth": 3,
-            "projection_dim": 512,
-            "activation": "gelu",
-            "layernorm": True,
-            "residual": False,
-        },
-        "hidden_size": 4096,
-        "projection_dim": 512,
-    }
-    torch.save(checkpoint, source / "checkpoint.pt")
+    torch.save(_real_clm_checkpoint(), source / "checkpoint.pt")
 
     loaded = clm.load_clm_checkpoint(source)
-    clm._validate_head("state", loaded["state_head"], 4096, 1536, 512, 3)
+    clm.validate_head("state", loaded["state_head"], 4096, 1536, 512, 3)
     assert set(loaded["state_head"]) == {
         "inp.weight",
         "inp.bias",
@@ -319,12 +370,13 @@ def test_real_released_clm_layout_is_accepted(tmp_path):
 
 
 def test_real_released_kev_top_level_layout_is_accepted(tmp_path):
+    policy = kev.kev_policy()
     source = tmp_path / "kev"
     _write_kev_artifact(source)
     loaded = kev.load_kev_checkpoint(source)
     assert loaded["head_dim"] == 256
-    assert loaded["temperature"] == kev.KEV_TEMPERATURE
-    assert set(loaded["state"]) == kev.HEAD_KEYS
+    assert loaded["temperature"] == policy["temperature"]
+    assert set(loaded["state"]) == set(policy["head_keys"])
 
 
 def test_controlled_checkpoint_schema_and_shapes_fail_closed(tmp_path):
