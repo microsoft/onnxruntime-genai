@@ -6,16 +6,17 @@ the NDJSON streaming contract is genuinely tested.
 
 import http.server
 import json
-import os
 import socketserver
 import sys
 import threading
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src", "python", "py", "models"))
+sys.path.insert(0, str(Path(__file__).parents[3] / "src" / "python" / "py" / "models"))
 
-import llmman
+from loaders import llmman
 
 
 def _ndjson(*objs):
@@ -161,8 +162,83 @@ def test_rejects_an_empty_reference(ref):
         # A wildcard bind is meaningful to the server but not to a client.
         ("0.0.0.0:9999", "http://127.0.0.1:9999"),
         ("[::]:9999", "http://[::1]:9999"),
+        # The scheme and any path prefix (e.g. behind a reverse proxy) are kept.
+        ("https://example.com:8443", "https://example.com:8443"),
+        ("http://1.2.3.4:9999/llmman/", "http://1.2.3.4:9999/llmman"),
     ],
 )
 def test_endpoint_parsing(monkeypatch, host, want):
     monkeypatch.setenv(llmman.HOST_ENV, host)
     assert llmman.endpoint() == want
+
+
+@pytest.fixture
+def fake_pull(monkeypatch):
+    llmman.resolve_model.cache_clear()
+    calls = []
+
+    def pull_and_resolve(reference, progress=None):
+        calls.append(reference)
+        return "/models/" + reference
+
+    monkeypatch.setattr(llmman, "pull_and_resolve", pull_and_resolve)
+    yield calls
+    llmman.resolve_model.cache_clear()
+
+
+def test_resolve_input_pulls_an_oci_ref_once(fake_pull):
+    assert llmman.resolve_input("oci://ghcr.io/org/model:tag") == "/models/ghcr.io/org/model:tag"
+    assert llmman.resolve_input("oci://ghcr.io/org/model:tag") == "/models/ghcr.io/org/model:tag"
+    assert fake_pull == ["ghcr.io/org/model:tag"]
+
+
+@pytest.mark.parametrize("value", ["microsoft/Phi-3", "/local/dir", "model.gguf", "", None])
+def test_resolve_input_passes_everything_else_through(fake_pull, value):
+    assert llmman.resolve_input(value) == value
+    assert fake_pull == []
+
+
+def test_get_hf_details_reads_config_from_the_pulled_directory(fake_pull, monkeypatch, tmp_path):
+    builder = pytest.importorskip("builder")
+    seen = []
+
+    def from_pretrained(name, **kwargs):
+        seen.append(name)
+        return object()
+
+    monkeypatch.setattr(builder.AutoConfig, "from_pretrained", from_pretrained)
+    monkeypatch.setattr(builder.AutoTokenizer, "from_pretrained", from_pretrained)
+    monkeypatch.setattr(builder, "add_special_token_ids", lambda config, tokenizer: None)
+    monkeypatch.setattr(builder.os.path, "isdir", lambda path: path.startswith("/models/"))
+
+    # oci:// is accepted on either flag.
+    for model_name, input_path in [(None, "oci://ghcr.io/org/model:tag"), ("oci://ghcr.io/org/model:tag", "")]:
+        seen.clear()
+        details = builder.get_hf_details(model_name, input_path, str(tmp_path), {})
+        assert details["hf_name"] == "/models/ghcr.io/org/model:tag"
+        assert seen == [details["hf_name"]] * 2
+    assert fake_pull == ["ghcr.io/org/model:tag"]
+
+
+def test_load_weights_uses_the_pulled_directory(fake_pull, monkeypatch):
+    base = pytest.importorskip("builders.base")
+    quant_model = pytest.importorskip("loaders.quant_model")
+    seen = []
+
+    def from_pretrained(quant_type, input_path, **kwargs):
+        seen.append(input_path)
+        return object()
+
+    monkeypatch.setattr(quant_model.QuantModel, "from_pretrained", from_pretrained)
+    model = SimpleNamespace(
+        quant_type="awq",
+        quant_attrs={},
+        num_attn_heads=1,
+        num_kv_heads=1,
+        head_size=1,
+        intermediate_size=1,
+        num_layers=1,
+        extra_options={},
+    )
+    base.Model.load_weights(model, "oci://ghcr.io/org/model:tag")
+    assert seen == ["/models/ghcr.io/org/model:tag"]

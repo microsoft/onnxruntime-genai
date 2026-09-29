@@ -18,6 +18,7 @@ Contract (from llmman's src/cmd/serve.rs and src/daemon.rs):
   - ``llmman resolve --no-pull <ref>`` -> one line of JSON carrying ``path``.
 """
 
+import functools
 import ipaddress
 import json
 import logging
@@ -38,7 +39,7 @@ DEFAULT_PORT = 17434
 PROBE_TIMEOUT_SECONDS = 5
 
 
-def _connectable_host(host: str) -> str:
+def connectable_host(host: str) -> str:
     """Rewrite a wildcard bind host to its loopback equivalent."""
     try:
         ip = ipaddress.ip_address(host.strip("[]"))
@@ -50,14 +51,16 @@ def _connectable_host(host: str) -> str:
 
 
 def endpoint() -> str:
-    """The http origin of the llmman daemon, honouring LLMMAN_HOST."""
+    """The base URL of the llmman daemon, honouring LLMMAN_HOST."""
     raw = os.getenv(HOST_ENV, "").strip().strip("\"'")
     if not raw:
         return f"http://{DEFAULT_HOST}:{DEFAULT_PORT}"
 
+    scheme = "http"
     if "://" in raw:
-        raw = raw.split("://", 1)[1]
-    raw = raw.split("/", 1)[0]
+        scheme, raw = raw.split("://", 1)
+    raw, _, path = raw.partition("/")
+    path = path.strip("/")
 
     host, port = raw, DEFAULT_PORT
     if raw.startswith("["):  # bracketed IPv6, optionally with :port
@@ -73,10 +76,10 @@ def endpoint() -> str:
             host, port = maybe_host, int(maybe_port)
 
     host = host or DEFAULT_HOST
-    resolved = _connectable_host(host)
+    resolved = connectable_host(host)
     if ":" in resolved and not resolved.startswith("["):
         resolved = f"[{resolved}]"
-    return f"http://{resolved}:{port}"
+    return f"{scheme}://{resolved}:{port}" + (f"/{path}" if path else "")
 
 
 def llmman_bin() -> str:
@@ -236,16 +239,25 @@ def strip_scheme(value) -> str:
     return text
 
 
+@functools.cache
 def resolve_model(value) -> str:
-    """Pull an ``oci://`` reference through llmman and return the local path."""
+    """Pull an ``oci://`` reference through llmman and return the local path.
+
+    Cached, so resolving the same reference again does not pull twice.
+    """
     reference = strip_scheme(value).strip()
     if not reference:
         raise ValueError(f"empty OCI model reference: {value!r}")
 
-    def _progress(status, completed, total):
+    def report_progress(status, completed, total):
         if total:
             print(f"llmman: {status} ({completed}/{total} bytes)")
         else:
             print(f"llmman: {status}")
 
-    return pull_and_resolve(reference, progress=_progress)
+    return pull_and_resolve(reference, progress=report_progress)
+
+
+def resolve_input(value):
+    """Resolve an ``oci://`` reference to a local directory; pass anything else through."""
+    return resolve_model(value) if is_oci_ref(value) else value

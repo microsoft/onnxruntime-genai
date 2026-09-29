@@ -63,7 +63,7 @@ from builders import (
     WhisperModel,
 )
 from builders.qwen import Qwen35Model, Qwen35MoEModel
-import llmman
+from loaders import llmman
 from quantization import KV_CACHE_QUANT_SCHEMES, QuantConfig, default_io_dtype
 from transformers import AutoConfig, AutoTokenizer
 
@@ -106,6 +106,9 @@ def get_hf_details(model_name, input_path, cache_dir, extra_options):
     """
     Get Hugging Face details based on the provided inputs
     """
+    # Pull oci:// sources to a local directory (cached, so load_weights reuses it)
+    model_name, input_path = llmman.resolve_input(model_name), llmman.resolve_input(input_path)
+
     # Load model config
     extra_kwargs = {} if os.path.isdir(input_path) else {"cache_dir": cache_dir}
     hf_name = input_path if os.path.isdir(input_path) else model_name
@@ -838,7 +841,7 @@ def get_args():
         "--model_name",
         required=False,
         default=None,
-        help="Model name in Hugging Face. Do not use if providing an input path to a Hugging Face directory in -i/--input.",
+        help="Model name in Hugging Face, or an oci://<registry>/<repo>:<tag> reference. Do not use if providing an input path to a Hugging Face directory in -i/--input.",
     )
 
     parser.add_argument(
@@ -1195,18 +1198,6 @@ def get_args():
     )
 
     args = parser.parse_args()
-
-    # A CNCF ModelPack artifact is pulled through an llmman daemon and
-    # extracted; from here it is an ordinary Hugging Face directory, so
-    # os.path.isdir(input_path) is true and the rest of the builder is
-    # unchanged. Accepted on either flag, since a registry reference is
-    # equally a "model name" and an "input source".
-    if llmman.is_oci_ref(args.input):
-        args.input = llmman.resolve_model(args.input)
-    elif llmman.is_oci_ref(args.model_name):
-        args.input = llmman.resolve_model(args.model_name)
-        args.model_name = None
-
     print(
         "Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, FP16 TRT-RTX, BF16 CUDA, BF16 TRT-RTX, INT8 CPU, INT8 CUDA, INT8 WebGPU, INT4 CPU, INT4 CUDA, INT4 DML, INT4 WebGPU"
     )
