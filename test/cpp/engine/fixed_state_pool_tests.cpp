@@ -13,6 +13,7 @@
 #include "engine/fixed_state_pool.h"
 #include "engine_test_helpers.h"
 #include "models/model_state_manifest.h"
+#include "models/utils.h"
 
 namespace Generators {
 namespace test {
@@ -133,6 +134,20 @@ void ExpectInputRow(const FixedStateBinding& binding, size_t row,
   const auto* data = binding.input->GetTensorData<float>() + row * expected.size();
   for (size_t index = 0; index < expected.size(); ++index) {
     EXPECT_FLOAT_EQ(data[index], expected[index]);
+  }
+}
+
+void FillHalfTensor(OrtValue& tensor, float value) {
+  std::fill_n(tensor.GetTensorMutableData<Ort::Float16_t>(), RowElements(tensor),
+              Ort::Float16_t{FastFloat32ToFloat16(value)});
+}
+
+void ExpectHalfInputRow(const FixedStateBinding& binding,
+                        std::span<const float> expected) {
+  ASSERT_EQ(RowElements(*binding.input), expected.size());
+  const auto* data = binding.input->GetTensorData<Ort::Float16_t>();
+  for (size_t index = 0; index < expected.size(); ++index) {
+    EXPECT_FLOAT_EQ(ToFloat32(data[index]), expected[index]);
   }
 }
 
@@ -329,7 +344,12 @@ TEST(FixedStatePoolComponentsTest, InitializesAndCommitsPleAndIndexerState) {
     EXPECT_EQ(token_input[1], 7);
     std::fill_n(token_binding.output->GetTensorMutableData<int64_t>(), 2, 11);
 
-    for (size_t index = 1; index < 4; ++index) {
+    const auto& conv_binding = reservation.Bindings()[1];
+    const auto* conv_input = conv_binding.input->GetTensorData<Ort::Float16_t>();
+    EXPECT_TRUE(std::all_of(conv_input, conv_input + RowElements(*conv_binding.input),
+                            [](Ort::Float16_t value) { return ToFloat32(value) == 0.0f; }));
+    FillHalfTensor(*conv_binding.output, 2.0f);
+    for (size_t index = 2; index < 4; ++index) {
       const auto& binding = reservation.Bindings()[index];
       const auto elements = RowElements(*binding.input);
       const auto* input = binding.input->GetTensorData<float>();
@@ -354,7 +374,10 @@ TEST(FixedStatePoolComponentsTest, InitializesAndCommitsPleAndIndexerState) {
   const auto* token_input = resident.Bindings()[0].input->GetTensorData<int64_t>();
   EXPECT_EQ(token_input[0], 11);
   EXPECT_EQ(token_input[1], 11);
-  for (size_t index = 1; index < 4; ++index) {
+  ExpectHalfInputRow(resident.Bindings()[1], std::array<float, 12>{
+                                                     2, 2, 2, 2, 2, 2,
+                                                     2, 2, 2, 2, 2, 2});
+  for (size_t index = 2; index < 4; ++index) {
     const auto& binding = resident.Bindings()[index];
     const auto elements = RowElements(*binding.input);
     const auto* input = binding.input->GetTensorData<float>();
@@ -396,11 +419,12 @@ TEST(FixedStatePoolComponentsTest, ReplaysPleAndIndexerUpdatesAcrossBlockBoundar
       token_updates[token * 2] = static_cast<int64_t>(100 + token * 2);
       token_updates[token * 2 + 1] = static_cast<int64_t>(101 + token * 2);
     }
-    auto* conv_updates = bindings[1].state_update_value->GetTensorMutableData<float>();
+    auto* conv_updates = bindings[1].state_update_value->GetTensorMutableData<Ort::Float16_t>();
     auto* indexer_updates = bindings[2].state_update_value->GetTensorMutableData<float>();
     for (size_t token = 0; token < 7; ++token) {
       for (size_t channel = 0; channel < 4; ++channel) {
-        conv_updates[token * 4 + channel] = static_cast<float>(token * 10 + channel);
+        conv_updates[token * 4 + channel] =
+          Ort::Float16_t{FastFloat32ToFloat16(static_cast<float>(token * 10 + channel))};
       }
       indexer_updates[token * 2] = static_cast<float>(token * 10);
       indexer_updates[token * 2 + 1] = static_cast<float>(token * 10 + 1);
@@ -414,7 +438,7 @@ TEST(FixedStatePoolComponentsTest, ReplaysPleAndIndexerUpdatesAcrossBlockBoundar
   EXPECT_EQ(resident.Bindings()[0].input->GetTensorData<int64_t>()[1], 109);
   const std::array<float, 12> expected_conv{
       20, 30, 40, 21, 31, 41, 22, 32, 42, 23, 33, 43};
-  ExpectInputRow(resident.Bindings()[1], 0, expected_conv);
+  ExpectHalfInputRow(resident.Bindings()[1], expected_conv);
   const auto* key = resident.Bindings()[2].input->GetTensorData<float>();
   EXPECT_FLOAT_EQ(key[0], 30);
   EXPECT_FLOAT_EQ(key[1], 31);
@@ -432,7 +456,7 @@ TEST(FixedStatePoolComponentsTest, ReplaysIndexerUpdateAcrossBlockBoundaryFromTh
   {
     auto initial = pool.Reserve(One(kRequestA, 3));
     std::fill_n(initial.Bindings()[0].output->GetTensorMutableData<int64_t>(), 2, 7);
-    std::fill_n(initial.Bindings()[1].output->GetTensorMutableData<float>(), 12, 0.0f);
+    FillHalfTensor(*initial.Bindings()[1].output, 0.0f);
     std::fill_n(initial.Bindings()[2].output->GetTensorMutableData<float>(), 16, 9.0f);
     auto* buffer = initial.Bindings()[3].output->GetTensorMutableData<float>();
     std::copy_n(std::array<float, 6>{1, 2, 3, 4, 5, 6}.begin(), 6, buffer);
@@ -444,7 +468,7 @@ TEST(FixedStatePoolComponentsTest, ReplaysIndexerUpdateAcrossBlockBoundaryFromTh
   {
     auto reservation = pool.Reserve(One(kRequestA, 11, 7));
     std::fill_n(reservation.Bindings()[0].state_update_value->GetTensorMutableData<int64_t>(), 14, 8);
-    std::fill_n(reservation.Bindings()[1].state_update_value->GetTensorMutableData<float>(), 28, 0.0f);
+    FillHalfTensor(*reservation.Bindings()[1].state_update_value, 0.0f);
     auto* updates = reservation.Bindings()[2].state_update_value->GetTensorMutableData<float>();
     for (size_t token = 0; token < 7; ++token) {
       updates[token * 2] = static_cast<float>(100 + token * 10);
@@ -1169,6 +1193,38 @@ TEST_F(FixedStatePoolTest, DirectBindingStorageOutlivesPool) {
 }
 
 #if USE_CUDA
+TEST(CudaFixedStatePoolTest, ReplaysHalfSnapshotAtAcceptedPrefix) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-hybrid");
+  ClearProviders(*config);
+  SetProviderOption(*config, "cuda", {}, {});
+  auto model = CreateModel(GetOrtEnv(), std::move(config));
+  auto& device = *model->p_device_kvcache_;
+  const std::array<uint16_t, 12> values{
+      0x3c00, 0x4000, 0x4200, 0x4400,
+      0x4500, 0x4600, 0x4700, 0x4800,
+      0x4880, 0x4900, 0x4980, 0x4a00};
+  auto updates = device.Allocate<uint16_t>(values.size());
+  auto destination = device.Allocate<uint16_t>(4);
+  updates.CopyFromCpu(values);
+  destination.CopyFromCpu(std::array<uint16_t, 4>{});
+
+  StateUpdateReplayDesc descriptor{};
+  descriptor.kind = StateUpdateReplayKind::Snapshot;
+  descriptor.value = updates.Span().data();
+  descriptor.destination_state = destination.Span().data();
+  descriptor.state_width = 4;
+  descriptor.capacity = 3;
+  descriptor.kept_count = 2;
+  descriptor.element_size = sizeof(uint16_t);
+  device.ReplayStateUpdates(&descriptor, 1);
+
+  const auto actual = destination.CopyDeviceToCpu();
+  ASSERT_EQ(actual.size(), 4u);
+  for (size_t index = 0; index < actual.size(); ++index) {
+    EXPECT_EQ(actual[index], values[4 + index]);
+  }
+}
+
 TEST(CudaFixedStatePoolTest, CompactPartialAcceptanceReplaysConvAndGdn) {
   auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-hybrid");
   ClearProviders(*config);

@@ -547,6 +547,9 @@ __global__ void ReplayStateUpdatesKernel(const StateUpdateReplayDescGpu* __restr
       if (descriptor.element_size == 8) {
         static_cast<uint64_t*>(descriptor.destination_state)[index] =
             static_cast<const uint64_t*>(descriptor.value)[source_index];
+      } else if (descriptor.element_size == 2) {
+        static_cast<uint16_t*>(descriptor.destination_state)[index] =
+            static_cast<const uint16_t*>(descriptor.value)[source_index];
       } else if (descriptor.element_size == 4) {
         static_cast<uint32_t*>(descriptor.destination_state)[index] =
             static_cast<const uint32_t*>(descriptor.value)[source_index];

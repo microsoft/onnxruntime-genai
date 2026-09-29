@@ -35,7 +35,7 @@ def create_decoder(output_dir):
 
     state_specs = [
         ("ple_tokens", 0, TensorProto.INT64, [2]),
-        ("ple_conv", 0, TensorProto.FLOAT, [4, 3]),
+        ("ple_conv", 0, TensorProto.FLOAT16, [4, 3]),
         ("indexer_key", 1, TensorProto.FLOAT, [8, 2]),
         ("indexer_kv_buffer", 1, TensorProto.FLOAT, [2 * INDEXER_COMPRESS_RATIO - 1, 2]),
         ("indexer_state_lengths", 1, TensorProto.INT32, [2]),
@@ -50,7 +50,7 @@ def create_decoder(output_dir):
 
     update_specs = [
         ("state_update.0.ple_tokens", TensorProto.INT64, ["batch_size", STATE_UPDATE_CAPACITY, 2]),
-        ("state_update.0.ple_conv_value", TensorProto.FLOAT, ["batch_size", STATE_UPDATE_CAPACITY, 4]),
+        ("state_update.0.ple_conv_value", TensorProto.FLOAT16, ["batch_size", STATE_UPDATE_CAPACITY, 4]),
         ("state_update.1.indexer", TensorProto.FLOAT, ["batch_size", STATE_UPDATE_CAPACITY, 2]),
     ]
     for name, data_type, shape in update_specs:
