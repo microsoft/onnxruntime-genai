@@ -166,11 +166,12 @@ stream.CreateMetadataCoreState(config);
 The tokenizer reads `sample_rate`, `hop_length`, and `subsampling_factor` from
 `model` in the package's `genai_config.json`; do not repeat these fields in the
 metadata overlay. Levels are `off`, `word`, `segment`, and `all`; the default is
-`off`. The optional gap is specified in positive seconds (or `null` to disable
+`off`. The optional gap is specified in non-negative seconds (or `null` to disable
 it), then rounded to the nearest acoustic frame using the model's frame duration.
-Separators default to an empty list for an explicit config. If timestamps are
-requested without positive model timing values, a warning is logged and the
-timestamp level is set to `off`.
+Zero and positive gaps below half a frame split each word into its own segment.
+Separators default to an empty list for an explicit config. A model that requests
+timestamps without positive timing values, or an explicit metadata state that
+enables them without those values, fails rather than silently disabling timestamps.
 
 Overlays preserve omitted fields and replace supplied separator arrays; failed
 parsing leaves the config unchanged. Strings are decoded by the native JSON parser.

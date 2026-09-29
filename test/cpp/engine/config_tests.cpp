@@ -39,11 +39,17 @@ TEST(ConfigTest, RejectsInvalidTimestampConfiguration) {
   for (const char* json : {
            R"({"model":{"timestamp_level":"token"}})",
            R"({"model":{"segment_gap_threshold_frames":12}})",
-           R"({"model":{"segment_gap_threshold_seconds":0}})",
            R"({"model":{"segment_gap_threshold_seconds":-1}})"}) {
     Config config;
     EXPECT_THROW(OverlayConfig(config, json), std::runtime_error);
   }
+}
+
+TEST(ConfigTest, AcceptsZeroTimestampGap) {
+  Config config;
+  OverlayConfig(config, R"({"model":{"segment_gap_threshold_seconds":0}})");
+  ASSERT_TRUE(config.model.segment_gap_threshold_seconds.has_value());
+  EXPECT_EQ(GetSegmentGapThresholdFrames(config.model.segment_gap_threshold_seconds, 100, 10, 1), 0);
 }
 
 TEST(ConfigTest, ParsesStaticBatching) {

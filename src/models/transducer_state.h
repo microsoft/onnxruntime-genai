@@ -10,10 +10,10 @@
 #pragma once
 
 #include <cstdint>
-#include <span>
 #include <vector>
 
 #include "model.h"
+#include "span.h"
 
 namespace Generators {
 

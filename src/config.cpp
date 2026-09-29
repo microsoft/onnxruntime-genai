@@ -612,8 +612,8 @@ struct TimestampMetadataConfig_Element : JSON::Element {
         config_.segment_gap_threshold_seconds.reset();
       } else {
         const double threshold = JSON::Get<double>(value);
-        if (!std::isfinite(threshold) || threshold <= 0.0)
-          throw std::runtime_error("segment_gap_threshold_seconds must be finite and > 0");
+        if (!std::isfinite(threshold) || threshold < 0.0)
+          throw std::runtime_error("segment_gap_threshold_seconds must be finite and >= 0");
         config_.segment_gap_threshold_seconds = threshold;
       }
     } else {
@@ -2273,8 +2273,8 @@ struct Model_Element : JSON::Element {
         v_.segment_gap_threshold_seconds.reset();
       } else {
         const double threshold = JSON::Get<double>(value);
-        if (!std::isfinite(threshold) || threshold <= 0.0) {
-          throw std::runtime_error("segment_gap_threshold_seconds must be finite and > 0");
+        if (!std::isfinite(threshold) || threshold < 0.0) {
+          throw std::runtime_error("segment_gap_threshold_seconds must be finite and >= 0");
         }
         v_.segment_gap_threshold_seconds = threshold;
       }
@@ -2413,6 +2413,14 @@ int SafeDoubleToInt(double x, std::string_view name) {
   return static_cast<int>(x);
 }
 
+void ValidateTimestampConfiguration(const Config::Model& model) {
+  if (model.timestamp_level == Config::TimestampLevel::Off) return;
+  if (!ModelType::IsRNNT(model.type))
+    throw std::runtime_error("Timestamp metadata requires a nemotron_speech model");
+  if (model.sample_rate <= 0 || model.hop_length <= 0 || model.subsampling_factor <= 0)
+    throw std::runtime_error("Timestamp metadata requires positive sample_rate, hop_length, and subsampling_factor");
+}
+
 std::optional<int> GetSegmentGapThresholdFrames(const Config::Model& model) {
   return GetSegmentGapThresholdFrames(model.segment_gap_threshold_seconds, model.sample_rate,
                                       model.hop_length, model.subsampling_factor);
@@ -2421,8 +2429,8 @@ std::optional<int> GetSegmentGapThresholdFrames(const Config::Model& model) {
 std::optional<int> GetSegmentGapThresholdFrames(std::optional<double> seconds, int sample_rate,
                                                 int hop_length, int subsampling_factor) {
   if (!seconds) return std::nullopt;
-  if (!std::isfinite(*seconds) || *seconds <= 0.0) {
-    throw std::runtime_error("segment_gap_threshold_seconds must be finite and > 0");
+  if (!std::isfinite(*seconds) || *seconds < 0.0) {
+    throw std::runtime_error("segment_gap_threshold_seconds must be finite and >= 0");
   }
   if (sample_rate <= 0 || hop_length <= 0 || subsampling_factor <= 0) {
     throw std::runtime_error(

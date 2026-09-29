@@ -97,10 +97,7 @@ void NemotronConfig::PopulateFromConfig(const Config& config) {
   timestamp_level = config.model.timestamp_level;
   segment_separators = config.model.segment_separators;
 
-  if (TimestampsEnabled() && (sample_rate <= 0 || hop_length <= 0 || subsampling_factor <= 0)) {
-    Log("warning", "Nemotron timestamps disabled: model configuration requires positive sample_rate, hop_length, and subsampling_factor");
-    timestamp_level = Config::TimestampLevel::Off;
-  }
+  ValidateTimestampConfiguration(config.model);
 
   segment_gap_threshold_frames = TimestampsEnabled() ? GetSegmentGapThresholdFrames(config.model) : std::nullopt;
 

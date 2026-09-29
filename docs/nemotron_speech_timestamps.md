@@ -30,16 +30,17 @@ Add timestamp options under `model` in `genai_config.json`:
 present, it replaces the default separators (`.`, `?`, and `!`). An empty array disables
 separator-based completion.
 
-`segment_gap_threshold_seconds` is an optional positive number measured in seconds. It is converted
-to the nearest encoder-frame count using half-up rounding. For a model with 80 ms frames, `1.0`
+`segment_gap_threshold_seconds` is an optional non-negative number measured in seconds. Zero splits
+each word into its own segment; positive values shorter than half a frame round to the same behavior.
+It is converted to the nearest encoder-frame count using half-up rounding. For a model with 80 ms frames, `1.0`
 second becomes $1.0 / 0.08 = 12.5$, which rounds to 13 frames. Values below the half-frame boundary
 round down. Set it to `null` or omit it to disable gap-based completion.
 
 The frame duration comes from `sample_rate`, `hop_length`, and `subsampling_factor` under
 `model` in the same `genai_config.json`; do not repeat them in metadata overrides.
-If timestamps are requested but these values are missing or non-positive, a warning is logged
-and timestamp output is disabled (`off`). Unknown timestamp levels and non-positive or
-non-finite gap thresholds are rejected while loading the configuration.
+If timestamps are requested for a non-Nemotron model, or these values are missing or non-positive,
+model or tokenizer creation fails. Unknown timestamp levels and negative or non-finite gap
+thresholds are rejected while loading the configuration.
 
 ## Decoding
 
@@ -83,10 +84,10 @@ text.
 
 The Nemotron examples demonstrate the complete flow:
 
-- `examples/c/src/nemotron_speech.cpp`
-- `examples/csharp/NemotronSpeech/Program.cs`
+- `examples/c/src/model_asr.cpp`
+- `examples/csharp/ModelASR/Program.cs`
 - `examples/csharp/NemotronSpeechTimestamps/Program.cs`
-- `examples/python/nemotron_speech.py`
+- `examples/python/model-asr.py`
 
 The timestamp-focused C# sample enables segment mode and builds output only from completed segment
 events. It prints each segment as `[StartTime - StopTime] SegmentText`; it does not concatenate token

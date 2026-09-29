@@ -73,8 +73,7 @@ std::shared_ptr<MetadataCoreState> TokenizerStream::CreateMetadataCoreState(cons
   if (resolved.timestamps.level != Config::TimestampLevel::Off &&
       (resolved.timestamps.sample_rate <= 0 || resolved.timestamps.hop_length <= 0 ||
        resolved.timestamps.subsampling_factor <= 0)) {
-    Log("warning", "Timestamp metadata disabled: model configuration requires positive sample_rate, hop_length, and subsampling_factor");
-    resolved.timestamps.level = Config::TimestampLevel::Off;
+    throw std::runtime_error("Timestamp metadata requires positive sample_rate, hop_length, and subsampling_factor");
   }
   auto state = std::shared_ptr<MetadataCoreState>(new MetadataCoreState(resolved));
   const OrtxMetadataConfig producer_config{state->TimestampsEnabled()};
@@ -135,14 +134,9 @@ Tokenizer::Tokenizer(const Config& config) : bos_token_id_{config.model.bos_toke
                                              eot_token_id_{config.model.eot_token_id},
                                              bor_token_id_{config.model.bor_token_id},
                                              eor_token_id_{config.model.eor_token_id} {
+  ValidateTimestampConfiguration(config.model);
   // Default tokenizer options
-  const bool timestamps_requested = ModelType::IsRNNT(config.model.type) &&
-                                    config.model.timestamp_level != Config::TimestampLevel::Off;
-  const bool timing_available = config.model.sample_rate > 0 && config.model.hop_length > 0 &&
-                                config.model.subsampling_factor > 0;
-  if (timestamps_requested && !timing_available)
-    Log("warning", "Timestamp metadata disabled: model configuration requires positive sample_rate, hop_length, and subsampling_factor");
-  const bool timestamps_enabled = timestamps_requested && timing_available;
+  const bool timestamps_enabled = config.model.timestamp_level != Config::TimestampLevel::Off;
   const char* keys[] = {"add_special_tokens", "skip_special_tokens", "track_timestamp_metadata"};
   const char* values[] = {"false", "true", timestamps_enabled ? "true" : "false"};
 

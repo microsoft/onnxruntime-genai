@@ -67,6 +67,18 @@ def test_tokenizer_create_from_config_and_path(test_data_path):
     assert tokenizer_from_path.decode(tokenizer_from_config.encode(text)) == text
 
 
+@pytest.mark.parametrize("model_type,timing,reason", [
+    ("nemotron_speech", {}, "positive sample_rate"),
+    ("gpt2", {"sample_rate": 100, "hop_length": 10, "subsampling_factor": 1}, "nemotron_speech model"),
+])
+def test_requested_timestamps_reject_invalid_model_config(test_data_path, model_type, timing, reason):
+    model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    config = og.Config(model_path)
+    config.overlay(json.dumps({"model": {"type": model_type, "timestamp_level": "word", **timing}}))
+    with pytest.raises(RuntimeError, match=reason):
+        og.Model(config)
+
+
 def test_tokenizer_stream_timestamp_initialization(test_data_path):
     model_path = os.fspath(Path(test_data_path) / "models" / "hf-internal-testing" / "tiny-random-gpt2-fp32")
     config = og.Config(model_path)

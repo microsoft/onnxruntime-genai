@@ -872,6 +872,7 @@ void SetProviderOption(Config& config, std::string_view provider_name, std::stri
 void OverlayConfig(Config& config, std::string_view json);
 void ApplyRuntimeProfile(Config& config, uint64_t total_device_memory_bytes);
 int SafeDoubleToInt(double x, std::string_view name);
+void ValidateTimestampConfiguration(const Config::Model& model);
 std::optional<int> GetSegmentGapThresholdFrames(const Config::Model& model);
 std::optional<int> GetSegmentGapThresholdFrames(std::optional<double> seconds, int sample_rate,
                                                 int hop_length, int subsampling_factor);

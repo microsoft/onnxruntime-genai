@@ -582,6 +582,17 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             Assert.Equal(str, tokenizerFromPath.Decode(sequences[0]));
         }
 
+        [Theory]
+        [InlineData("{\"model\":{\"type\":\"nemotron_speech\",\"timestamp_level\":\"word\"}}", "positive sample_rate")]
+        [InlineData("{\"model\":{\"type\":\"gpt2\",\"timestamp_level\":\"word\",\"sample_rate\":100,\"hop_length\":10,\"subsampling_factor\":1}}", "nemotron_speech model")]
+        public void TestRequestedTimestampsRejectInvalidModelConfig(string overlay, string reason)
+        {
+            using var config = new Config(_tinyRandomGpt2ModelPath);
+            config.Overlay(overlay);
+            var error = Assert.Throws<OnnxRuntimeGenAIException>(() => new Model(config));
+            Assert.Contains(reason, error.Message);
+        }
+
         [Fact(DisplayName = "TestTokenizerStreamTimestampInitialization")]
         public void TestTokenizerStreamTimestampInitialization()
         {
