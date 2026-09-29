@@ -72,7 +72,9 @@ def mavenPwd = System.properties['mavenPwd']
 def mavenArtifactId = useCUDA == null ? project.name : project.name + "_gpu"
 
 def onnxruntimeArtifactId = useCUDA == null ? "onnxruntime" : "onnxruntime_gpu"
-def onnxruntimeVersion = System.properties["ONNXRUNTIME_VERSION"] ?: System.getenv("ONNXRUNTIME_VERSION") ?: "1.23.0"
+// Keep local tests aligned with the ORT version used to build the native core.
+// ORT 1.23 only supports ONNX IR <= 11 and cannot load current IR 12 packages.
+def onnxruntimeVersion = System.properties["ONNXRUNTIME_VERSION"] ?: System.getenv("ONNXRUNTIME_VERSION") ?: "1.26.0"
 
 def defaultDescription = 'ONNX Runtime GenAI is <TODO>'
 
@@ -215,7 +217,7 @@ test {
 	}
 
 	systemProperty "java.library.path", cmakeNativeLibDir
-	systemProperties System.getProperties().subMap(['USE_CUDA'])
+	systemProperties System.getProperties().subMap(['USE_CUDA', 'onnxruntime-genai.native.path'])
 	testLogging {
 		events "passed", "skipped", "failed"
 		showStandardStreams = true

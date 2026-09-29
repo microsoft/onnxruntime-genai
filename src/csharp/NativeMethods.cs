@@ -543,5 +543,207 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         public static extern IntPtr /* OgaResult* */ OgaStreamingProcessorGetOption(IntPtr /* OgaStreamingProcessor* */ processor,
                                                                                   byte[] /* const char* */ key,
                                                                                   out IntPtr /* const char** */ value);
+
+        // Stable non-generative C ABI.
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct NonGenerativeCacheStats
+        {
+            internal ulong Hits, Misses, Evictions;
+            internal UIntPtr Entries, Bytes, EntryCapacity, ByteCapacity;
+        }
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaCreateDirectoryTokenizer(byte[] path, out IntPtr tokenizer);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern void OgaDestroyDirectoryTokenizer(IntPtr tokenizer);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaDirectoryTokenizerEncode(IntPtr tokenizer, byte[] text, out IntPtr ids);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaDirectoryTokenizerGetPadTokenId(IntPtr tokenizer, out int id);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaTokenIdsGetData(IntPtr ids, out IntPtr data, out UIntPtr count);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern void OgaDestroyTokenIds(IntPtr ids);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaCreateStructuredValueNull(out IntPtr value);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaCreateStructuredValueBool([MarshalAs(UnmanagedType.I1)] bool value, out IntPtr result);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaCreateStructuredValueInt64(long value, out IntPtr result);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaCreateStructuredValueDouble(double value, out IntPtr result);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaCreateStructuredValueString(byte[] value, out IntPtr result);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaCreateStructuredValueArray(out IntPtr value);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaCreateStructuredValueObject(out IntPtr value);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaStructuredValueArrayAppend(IntPtr array, IntPtr value);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaStructuredValueObjectAppend(IntPtr obj, byte[] key, IntPtr value);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaStructuredValueGetType(IntPtr value, out int type);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaStructuredValueGetBool(IntPtr value, [MarshalAs(UnmanagedType.I1)] out bool result);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaStructuredValueGetInt64(IntPtr value, out long result);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaStructuredValueGetDouble(IntPtr value, out double result);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaStructuredValueGetString(IntPtr value, out IntPtr result);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaStructuredValueGetCount(IntPtr value, out UIntPtr result);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaStructuredValueGetArrayItem(IntPtr value, UIntPtr index, out IntPtr result);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaStructuredValueGetObjectItem(IntPtr value, UIntPtr index, out IntPtr key, out IntPtr result);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern void OgaDestroyStructuredValue(IntPtr value);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaCreateQuestion(byte[] type, IntPtr instructions, IntPtr criteria, out IntPtr question);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern void OgaDestroyQuestion(IntPtr question);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaCreateStructuredRequest(out IntPtr request);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaStructuredRequestSetState(IntPtr request, IntPtr state);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaStructuredRequestAddQuestion(IntPtr request, byte[] id, IntPtr question);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaStructuredRequestSetTemperature(IntPtr request, float temperature);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern void OgaDestroyStructuredRequest(IntPtr request);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaCreateFreeFormRankRequest(out IntPtr request);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaFreeFormRankRequestSetState(IntPtr request, IntPtr state);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaFreeFormRankRequestSetInstructions(IntPtr request, IntPtr instructions);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaFreeFormRankRequestAddCandidate(IntPtr request, byte[] key, IntPtr value);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaFreeFormRankRequestSetTemperature(IntPtr request, float temperature);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern void OgaDestroyFreeFormRankRequest(IntPtr request);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaCreateRankingSession(byte[] path, IntPtr providers, UIntPtr count, out IntPtr session);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern void OgaDestroyRankingSession(IntPtr session);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaRankingSessionRun(IntPtr session, IntPtr request, out IntPtr result);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaRankingSessionRank(IntPtr session, IntPtr request, out IntPtr result);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaRankingSessionSetCacheCapacity(IntPtr session, UIntPtr entries, UIntPtr bytes);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaRankingSessionGetCacheStats(IntPtr session, out NonGenerativeCacheStats stats);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaRankingSessionClearCache(IntPtr session);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaRankingSessionInvalidateCache(IntPtr session);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaCreateDecisionSession(byte[] path, IntPtr providers, UIntPtr count, out IntPtr session);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern void OgaDestroyDecisionSession(IntPtr session);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaDecisionSessionRun(IntPtr session, IntPtr request, out IntPtr result);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaDecisionSessionDecide(IntPtr session, IntPtr request, out IntPtr result);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaDecisionSessionSetCacheCapacity(IntPtr session, UIntPtr entries, UIntPtr bytes);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaDecisionSessionGetCacheStats(IntPtr session, out NonGenerativeCacheStats stats);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaDecisionSessionClearCache(IntPtr session);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaDecisionSessionInvalidateCache(IntPtr session);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaModelResultGetModel(IntPtr result, out IntPtr model);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaModelResultGetAnswerCount(IntPtr result, out UIntPtr count);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaModelResultGetAnswerId(IntPtr result, UIntPtr answer, out IntPtr value);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaModelResultGetAnswerType(IntPtr result, UIntPtr answer, out IntPtr value);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaModelResultGetAnswerNoul(IntPtr result, UIntPtr answer, out double value, [MarshalAs(UnmanagedType.I1)] out bool present);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaModelResultGetAnswerChoice(IntPtr result, UIntPtr answer, out IntPtr value, [MarshalAs(UnmanagedType.I1)] out bool present);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaModelResultGetAnswerScore(IntPtr result, UIntPtr answer, out double value, [MarshalAs(UnmanagedType.I1)] out bool present);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaModelResultGetAnswerConfidence(IntPtr result, UIntPtr answer, out double value, [MarshalAs(UnmanagedType.I1)] out bool present);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaModelResultGetProbabilityCount(IntPtr result, UIntPtr answer, out UIntPtr count);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaModelResultGetProbability(IntPtr result, UIntPtr answer, UIntPtr index, out IntPtr key, out double value);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaModelResultGetLegendCount(IntPtr result, UIntPtr answer, out UIntPtr count);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaModelResultGetLegend(IntPtr result, UIntPtr answer, UIntPtr index, out IntPtr key, out IntPtr value);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern void OgaDestroyModelResult(IntPtr result);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaRankingResultGetModel(IntPtr result, out IntPtr model);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaRankingResultGetCount(IntPtr result, out UIntPtr count);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaRankingResultGetRank(IntPtr result, UIntPtr index, out UIntPtr rank);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaRankingResultGetKey(IntPtr result, UIntPtr index, out IntPtr key);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaRankingResultGetValue(IntPtr result, UIntPtr index, out IntPtr value);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaRankingResultGetProbability(IntPtr result, UIntPtr index, out double probability);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern void OgaDestroyRankingResult(IntPtr result);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaCreateComponentSession(byte[] path, byte[] component, IntPtr providers, UIntPtr count, out IntPtr session);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern void OgaDestroyComponentSession(IntPtr session);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaComponentSessionGetInputCount(IntPtr session, out UIntPtr count);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaComponentSessionGetOutputCount(IntPtr session, out UIntPtr count);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaComponentSessionGetInputName(IntPtr session, UIntPtr index, out IntPtr name);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaComponentSessionGetOutputName(IntPtr session, UIntPtr index, out IntPtr name);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaComponentSessionGetInputType(IntPtr session, UIntPtr index, out ElementType type);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaComponentSessionGetInputShapeRank(IntPtr session, UIntPtr index, out UIntPtr rank);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaComponentSessionGetInputShapeDimension(IntPtr session, UIntPtr index, UIntPtr dimension, out long value);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaComponentSessionGetInputSymbolicDimension(IntPtr session, UIntPtr index, UIntPtr dimension, out IntPtr value);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaCreateComponentInputs(out IntPtr inputs);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern unsafe IntPtr OgaComponentInputsAdd(IntPtr inputs, byte[] name, void* data, UIntPtr byteCount, long[] shape, UIntPtr rank, ElementType type);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern void OgaDestroyComponentInputs(IntPtr inputs);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaComponentSessionRun(IntPtr session, IntPtr inputs, IntPtr outputNames, UIntPtr outputCount, out IntPtr tensors);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaComponentTensorsGetCount(IntPtr tensors, out UIntPtr count);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaComponentTensorsGetName(IntPtr tensors, UIntPtr index, out IntPtr name);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaComponentTensorsGetType(IntPtr tensors, UIntPtr index, out ElementType type);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaComponentTensorsGetShapeRank(IntPtr tensors, UIntPtr index, out UIntPtr rank);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaComponentTensorsGetShapeDimension(IntPtr tensors, UIntPtr index, UIntPtr dimension, out long value);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern IntPtr OgaComponentTensorsGetData(IntPtr tensors, UIntPtr index, out IntPtr data, out UIntPtr bytes);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        internal static extern void OgaDestroyComponentTensors(IntPtr tensors);
     }
 }

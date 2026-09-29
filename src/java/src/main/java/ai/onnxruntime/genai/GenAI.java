@@ -75,6 +75,12 @@ public final class GenAI {
 
   static native void shutdown();
 
+  static synchronized void shutdownIfLoaded() {
+    if (loaded) {
+      shutdown();
+    }
+  }
+
   /**
    * Turns ONNX Runtime GenAI telemetry events on or off.
    *
