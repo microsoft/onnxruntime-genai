@@ -82,22 +82,6 @@ After the final audio chunk, call `FinalizeMetadata()` or `finalize_metadata()` 
 its completed records. Finalization returns pending words and segments but no additional transcript
 text.
 
-The Nemotron examples demonstrate the complete flow:
-
-- `examples/c/src/model_asr.cpp`
-- `examples/csharp/ModelASR/Program.cs`
-- `examples/csharp/NemotronSpeechTimestamps/Program.cs`
-- `examples/python/model-asr.py`
-
-The timestamp-focused C# sample enables segment mode and builds output only from completed segment
-events. It prints each segment as `[StartTime - StopTime] SegmentText`; it does not concatenate token
-fragments.
-
-The general Nemotron examples render word mode as `[StartTime - StopTime]WordText` followed by one
-space, with no space after the interval. Segment mode renders
-`[StartTime - StopTime] SegmentText`. All mode reports both views separately: the segment-timestamp
-transcript followed by the per-word timestamp transcript.
-
 ## Interval semantics
 
 Frame and time intervals are half-open: `[start, stop)`. Each RNNT token initially covers one
