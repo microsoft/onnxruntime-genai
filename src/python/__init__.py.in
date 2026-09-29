@@ -21,3 +21,5 @@ except ImportError as e:
         from onnxruntime_genai.@PACKAGE_DIR_NAME@ import *
     else:
         raise e
+
+from .non_generative import DecisionSession, RankingSession
