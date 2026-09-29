@@ -6,10 +6,15 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <iomanip>
 #include <list>
+#include <limits>
+#include <locale>
+#include <mutex>
 #include <numeric>
 #include <regex>
 #include <sstream>
@@ -59,8 +64,11 @@ std::string PackageIdentity(const std::string& package_path,
       error.clear();
       continue;
     }
+    const auto modified_milliseconds =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            modified.time_since_epoch()).count();
     result << '|' << file << ':' << size << ':'
-           << modified.time_since_epoch().count();
+           << static_cast<long long>(modified_milliseconds);
   }
   return result.str();
 }
@@ -176,12 +184,23 @@ std::string Scalar(const OgaStructuredValue& value, bool kev) {
     return *boolean ? (kev ? "True" : "true") : (kev ? "False" : "false");
   if (const auto* integer = Get<int64_t>(value)) return std::to_string(*integer);
   if (const auto* number = Get<double>(value)) {
+#if defined(__APPLE__)
+    std::ostringstream stream;
+    stream.imbue(std::locale::classic());
+    stream << std::setprecision(std::numeric_limits<double>::max_digits10)
+           << *number;
+    if (!stream)
+      throw std::invalid_argument(
+          "structured floating-point value cannot be rendered");
+    return stream.str();
+#else
     std::array<char, 64> buffer{};
     const auto [end, error] = std::to_chars(
         buffer.data(), buffer.data() + buffer.size(), *number);
     if (error != std::errc{})
       throw std::invalid_argument("structured floating-point value cannot be rendered");
     return std::string(buffer.data(), end);
+#endif
   }
   throw std::invalid_argument("structured value is not scalar");
 }
