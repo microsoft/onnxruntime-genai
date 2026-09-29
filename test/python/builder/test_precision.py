@@ -1138,6 +1138,63 @@ def test_webgpu_paged_attention_requires_num_blocks(monkeypatch):
         )
 
 
+@pytest.mark.parametrize(
+    "legacy_allocation,runtime_allocation,expected_blocks",
+    [
+        ({}, {"num_blocks": 8}, 8),
+        ({"num_blocks": "16"}, {}, 16),
+        ({"num_blocks": "16"}, {"num_blocks": 8}, 8),
+        ({"gpu_utilization_factor": "0.6"}, {"num_blocks": 8}, 8),
+    ],
+)
+def test_webgpu_paged_attention_effective_block_budget(
+    monkeypatch, legacy_allocation, runtime_allocation, expected_blocks
+):
+    effective = builder_module.normalize_builder_config(
+        "fp16",
+        "webgpu",
+        {"use_paged_attention": "true", **legacy_allocation},
+        runtime_config={"engine": {"dynamic_batching": runtime_allocation}},
+    )
+    options = effective.extra_options
+    _run_check_extra_options(monkeypatch, options, precision="fp16", execution_provider="webgpu")
+
+    generated = {
+        "engine": {
+            "dynamic_batching": {
+                key: options[key]
+                for key in ("num_blocks", "gpu_utilization_factor")
+                if key in options
+            }
+        }
+    }
+    merged = builder_module.apply_runtime_config(generated, effective.runtime_config)
+    assert merged["engine"]["dynamic_batching"] == {"num_blocks": expected_blocks}
+
+
+@pytest.mark.parametrize(
+    "runtime_allocation,error",
+    [
+        ({"gpu_utilization_factor": 0.6}, "num_blocks.*positive integer"),
+        ({"num_blocks": 0}, "num_blocks.*positive integer"),
+        ({"num_blocks": None}, "num_blocks.*must not contain null"),
+    ],
+)
+def test_webgpu_paged_attention_rejects_runtime_removal_of_block_budget(
+    monkeypatch, runtime_allocation, error
+):
+    with pytest.raises(ValueError, match=error):
+        effective = builder_module.normalize_builder_config(
+            "fp16",
+            "webgpu",
+            {"use_paged_attention": "true", "num_blocks": "16"},
+            runtime_config={"engine": {"dynamic_batching": runtime_allocation}},
+        )
+        _run_check_extra_options(
+            monkeypatch, effective.extra_options, precision="fp16", execution_provider="webgpu"
+        )
+
+
 def test_paged_attention_normalizes_engine_options(monkeypatch):
     extra_options = {
         "use_paged_attention": "true",

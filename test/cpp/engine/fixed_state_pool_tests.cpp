@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <memory>
 #include <optional>
 #include <span>
@@ -14,6 +15,7 @@
 #include "engine_test_helpers.h"
 #include "models/model_state_manifest.h"
 #include "models/session_options.h"
+#include "models/utils.h"
 
 namespace Generators {
 namespace test {
@@ -66,7 +68,19 @@ class OffsetTensorViewsUnsupportedDevice final : public DeviceInterface {
     return inner_.CreateKeyValueCache(state);
   }
   void Synchronize() override { inner_.Synchronize(); }
-  bool SupportsOffsetTensorViews() const override { return false; }
+  bool SupportsOffsetTensorViews() const override { return allow_offset_views; }
+  void ReplayStateUpdates(const StateUpdateReplayDesc* descs, size_t count) override {
+    if (fail_replay && count > 0) {
+      inner_.ReplayStateUpdates(descs, 1);
+      inner_.Synchronize();
+      replayed_destination = descs[0].destination_state;
+      throw std::runtime_error("Injected failure after first replay write");
+    }
+    inner_.ReplayStateUpdates(descs, count);
+  }
+  bool allow_offset_views{false};
+  bool fail_replay{false};
+  DeviceSpan<uint8_t> replayed_destination;
   bool SupportsTransactionalFixedState() const override {
     return supports_transactional_fixed_state_;
   }
@@ -1000,6 +1014,54 @@ TEST_F(FixedStatePoolTest, DirectBindingStorageOutlivesPool) {
   }
 }
 
+TEST_F(FixedStatePoolTest, PrepareFailureDoesNotPublish) {
+    OffsetTensorViewsUnsupportedDevice device{*model_->p_device_kvcache_};
+    device.allow_offset_views = true;
+    ScopedKeyValueCacheDevice guard{*model_, device};
+    FixedStatePool pool{model_, 2};
+    MakeResident(pool, kRequestA, 4.0f, 2);
+    const auto handle = pool.HandleFor(kRequestA);
+    const auto generation = pool.StateGeneration(handle);
+    std::vector<DeviceSpan<float>> authoritative_state;
+    {
+      auto reservation = pool.Reserve(One(kRequestA, 2));
+      ASSERT_TRUE(reservation.UsesDirectBindings());
+      for (const auto& binding : reservation.Bindings()) {
+        authoritative_state.push_back(WrapTensor<float>(device, *binding.input));
+      }
+    }
+    {
+      const std::array<Request, 2> requests{Request{kRequestA, 6, 3}, Request{kRequestB, 4, 3}};
+      auto reservation = pool.Reserve(requests);
+      FillStagedRows(reservation, 0, 99.0f);
+      FillStagedRows(reservation, 1, 77.0f);
+      const std::array<float, 6> updates{10, 11, 20, 21, 30, 31};
+      for (const auto& binding : reservation.Bindings()) {
+        if (binding.state_update_value) FillConvUpdates(binding, 0, updates);
+      }
+      reservation.CommitPrefix(0, 4, 2);
+      device.fail_replay = true;
+      EXPECT_THROW(reservation.PrepareCommit(), std::runtime_error);
+      EXPECT_EQ(reservation.State(), FixedStateReservationState::Failed);
+      // Retained direct views refer to the authoritative bank, not this reservation's staging.
+      for (auto& state : authoritative_state) {
+        for (float value : state.CopyDeviceToCpu()) EXPECT_FLOAT_EQ(value, 4.0f);
+      }
+      EXPECT_EQ(pool.StateGeneration(handle), generation);
+      EXPECT_EQ(pool.CommittedTokens(handle), 2u);
+      EXPECT_FALSE(pool.OwnsCommittedSlot(kRequestB));
+      EXPECT_EQ(pool.Snapshot().reserved_slots, 0u);
+      EXPECT_FALSE(pool.Snapshot().healthy);
+      // Prove that the injected failure happened after a real inactive-bank write.
+      const std::array<float, 6> replayed{4, 10, 20, 4, 11, 21};
+      ASSERT_FALSE(device.replayed_destination.empty());
+      const auto actual = device.replayed_destination.CopyDeviceToCpu();
+      ASSERT_EQ(actual.size_bytes(), sizeof(replayed));
+      EXPECT_EQ(std::memcmp(actual.data(), replayed.data(), sizeof(replayed)), 0);
+    }
+    EXPECT_THROW(pool.Reserve(One(kRequestA, 3)), std::logic_error);
+  }
+
 void RunDeviceCompactPartialAcceptanceReplay(
     const std::shared_ptr<Model>& model, bool expect_direct_bindings) {
   auto& device = *model->p_device_kvcache_;
@@ -1071,6 +1133,206 @@ void RunDeviceCompactPartialAcceptanceReplay(
   expect_tensor(*reservation.Bindings()[3].input, expected_gdn);
 }
 
+void RunDeviceAdversarialReplay(const std::shared_ptr<Model>& model) {
+  auto& device = *model->p_device_kvcache_;
+  FixedStatePool pool{model, 3};
+  const std::array<const void*, 3> ids{kRequestA, kRequestB, kRequestC};
+  std::array<std::array<std::vector<float>, 4>, 3> expected;
+  const auto write_row = [&](OrtValue& tensor, size_t row, std::span<const float> values) {
+    auto data = WrapTensor<float>(device, tensor);
+    ASSERT_EQ(RowElements(tensor), values.size());
+    auto cpu = data.CopyDeviceToCpu();
+    std::copy(values.begin(), values.end(), cpu.begin() + row * values.size());
+    data.CopyCpuToDevice();
+  };
+  const auto check_rows = [&](FixedStateReservation& reservation, std::span<const size_t> order) {
+    for (size_t row = 0; row < order.size(); ++row) {
+      for (size_t layer = 0; layer < reservation.Bindings().size(); ++layer) {
+        const auto& values = expected[order[row]][layer];
+        auto data = WrapTensor<float>(device, *reservation.Bindings()[layer].input);
+        const auto actual = data.subspan(row * values.size(), values.size()).CopyDeviceToCpu();
+        ASSERT_EQ(actual.size(), values.size());
+        for (size_t index = 0; index < values.size(); ++index) {
+          EXPECT_FLOAT_EQ(actual[index], values[index])
+              << "request=" << order[row] << " binding=" << layer << " element=" << index;
+        }
+      }
+    }
+  };
+  for (size_t id = 0; id < ids.size(); ++id) {
+    auto reservation = pool.Reserve(One(ids[id], 1));
+    for (size_t layer = 0; layer < reservation.Bindings().size(); ++layer) {
+      auto& values = expected[id][layer];
+      values.resize(RowElements(*reservation.Bindings()[layer].output));
+      for (size_t index = 0; index < values.size(); ++index) {
+        values[index] = static_cast<float>(1 + 32 * id + 8 * layer + index) / 8;
+      }
+      write_row(*reservation.Bindings()[layer].output, 0, values);
+    }
+    reservation.Commit();
+  }
+  ASSERT_GT(pool.HandleFor(kRequestB).slot, 0u);
+  ASSERT_GT(pool.HandleFor(kRequestC).slot, 0u);
+
+  const std::array<size_t, 2> reversed{2, 1};
+  const std::array<Request, 2> requests{Request{kRequestC, 5, 3}, Request{kRequestB, 5, 3}};
+  {
+    auto reservation = pool.Reserve(requests);
+    ASSERT_FALSE(reservation.UsesDirectBindings());
+    check_rows(reservation, reversed);
+    for (size_t row = 0; row < reversed.size(); ++row) {
+      const size_t id = reversed[row];
+      for (size_t layer = 0; layer < reservation.Bindings().size(); ++layer) {
+        const auto& binding = reservation.Bindings()[layer];
+        auto& values = expected[id][layer];
+        std::vector<float> full_output(values.size());
+        for (size_t index = 0; index < values.size(); ++index) {
+          full_output[index] = static_cast<float>(80 + id * 16 + layer * 8 + index);
+        }
+        write_row(*binding.output, row, full_output);
+        if (binding.state_update_value) {
+          std::array<float, 6> updates;
+          for (size_t index = 0; index < updates.size(); ++index) {
+            updates[index] = static_cast<float>(10 + id * 8 + layer * 4 + index);
+          }
+          write_row(*binding.state_update_value, row, updates);
+          if (row == 0) {
+            for (size_t token = 0; token < 2; ++token) {
+              for (size_t channel = 0; channel < 2; ++channel) {
+                values[channel * 3] = values[channel * 3 + 1];
+                values[channel * 3 + 1] = values[channel * 3 + 2];
+                values[channel * 3 + 2] = updates[token * 2 + channel];
+              }
+            }
+          }
+        } else {
+          std::array<float, 24> capsule;
+          for (size_t token = 0; token < 3; ++token) {
+            for (size_t head = 0; head < 2; ++head) {
+              capsule[token * 2 + head] = head == 0 ? 0.5f : 0.25f;
+              capsule[6 + token * 2 + head] = static_cast<float>(1 + token + head + id);
+            }
+            for (size_t index = 0; index < 4; ++index) {
+              capsule[12 + token * 4 + index] = static_cast<float>(1 + layer + token + index) / 8;
+            }
+          }
+          write_row(*binding.state_update_capsule, row, capsule);
+          if (row == 0) {
+            for (size_t token = 0; token < 2; ++token) {
+              for (size_t head = 0; head < 2; ++head) {
+                for (size_t key = 0; key < 2; ++key) {
+                  for (size_t value = 0; value < 2; ++value) {
+                    auto& state = values[head * 4 + value * 2 + key];
+                    state = state * capsule[token * 2 + head] +
+                            capsule[6 + token * 2 + key] * capsule[12 + token * 4 + head * 2 + value];
+                  }
+                }
+              }
+            }
+          }
+        }
+        if (row == 1) values = full_output;
+      }
+    }
+    reservation.CommitPrefix(0, 4, 2);
+    reservation.CommitPrefix(1, 4, 4);
+    reservation.Commit();
+  }
+  EXPECT_EQ(pool.CommittedTokens(pool.HandleFor(kRequestC)), 3u);
+  EXPECT_EQ(pool.CommittedTokens(pool.HandleFor(kRequestB)), 5u);
+  EXPECT_EQ(pool.CommittedTokens(pool.HandleFor(kRequestA)), 1u);
+  EXPECT_EQ(pool.StateGeneration(pool.HandleFor(kRequestA)), 1u);
+  EXPECT_EQ(pool.StateGeneration(pool.HandleFor(kRequestB)), 2u);
+  EXPECT_EQ(pool.StateGeneration(pool.HandleFor(kRequestC)), 2u);
+  const std::array<size_t, 3> order{0, 1, 2};
+  const std::array<Request, 3> all{Request{kRequestA, 2}, Request{kRequestB, 6}, Request{kRequestC, 4}};
+  {
+    auto reservation = pool.Reserve(all);
+    check_rows(reservation, order);
+    for (size_t row = 0; row < order.size(); ++row) {
+      for (size_t layer = 0; layer < reservation.Bindings().size(); ++layer) {
+        auto& values = expected[row][layer];
+        for (auto& value : values) value += 0.5f;
+        write_row(*reservation.Bindings()[layer].output, row, values);
+      }
+    }
+    reservation.Commit();
+  }
+  {
+    auto reservation = pool.Reserve(all);
+    check_rows(reservation, order);
+    for (size_t row = 0; row < order.size(); ++row) {
+      for (size_t layer = 0; layer < reservation.Bindings().size(); ++layer) {
+        std::vector<float> poison(expected[row][layer].size(), -999.0f);
+        write_row(*reservation.Bindings()[layer].output, row, poison);
+      }
+    }
+    reservation.PrepareCommit();
+    reservation.Discard();
+  }
+  {
+    auto reservation = pool.Reserve(all);
+    check_rows(reservation, order);
+
+    // Two-byte-aligned subviews exercise FP16 convolution replay without changing the FP32 fixture.
+    std::array<Ort::Float16_t, 10> source, updates, destination;
+    for (size_t index = 0; index < source.size(); ++index) {
+      source[index] = Ort::Float16_t{FastFloat32ToFloat16(static_cast<float>(index))};
+      updates[index] = Ort::Float16_t{FastFloat32ToFloat16(-20.0f)};
+      destination[index] = Ort::Float16_t{FastFloat32ToFloat16(-10.0f - static_cast<float>(index))};
+    }
+    for (size_t token = 0; token < 3; ++token) {
+      for (size_t channel = 0; channel < 2; ++channel) {
+        updates[2 + token * 2 + channel] = Ort::Float16_t{FastFloat32ToFloat16(static_cast<float>(10 + token * 10 + channel))};
+      }
+    }
+    const auto upload = [&](const auto& values) {
+      auto buffer = device.Allocate<uint8_t>(sizeof(values));
+      std::memcpy(buffer.CpuSpan().data(), values.data(), sizeof(values));
+      buffer.CopyCpuToDevice();
+      return buffer;
+    };
+    auto source_buffer = upload(source);
+    auto update_buffer = upload(updates);
+    auto destination_buffer = upload(destination);
+    StateUpdateReplayDesc half_replay{
+        source_buffer.subspan(2, 12), destination_buffer.subspan(6, 12),
+        update_buffer.subspan(4, 12), {}, {}, {},
+        2, 3, 0, 0, 3, 2, sizeof(Ort::Float16_t), StateUpdateReplayKind::CausalConv};
+    device.ReplayStateUpdates(&half_replay, 1);
+    device.Synchronize();
+    const std::array<float, 6> half_expected{3, 10, 20, 6, 11, 21};
+    for (size_t index = 0; index < half_expected.size(); ++index) {
+      destination[3 + index] = Ort::Float16_t{FastFloat32ToFloat16(half_expected[index])};
+    }
+    const auto actual_destination = destination_buffer.CopyDeviceToCpu();
+    EXPECT_EQ(std::memcmp(actual_destination.data(), destination.data(), sizeof(destination)), 0);
+    const auto actual_source = source_buffer.CopyDeviceToCpu();
+    EXPECT_EQ(std::memcmp(actual_source.data(), source.data(), sizeof(source)), 0);
+    const auto actual_updates = update_buffer.CopyDeviceToCpu();
+    EXPECT_EQ(std::memcmp(actual_updates.data(), updates.data(), sizeof(updates)), 0);
+  }
+  const auto old_handle = pool.HandleFor(kRequestC);
+  pool.Release(old_handle);
+  {
+    auto reservation = pool.Reserve(One(kRequestC));
+    EXPECT_EQ(reservation.Handles()[0].slot, old_handle.slot);
+    EXPECT_NE(reservation.Handles()[0].generation, old_handle.generation);
+    for (auto& values : expected[2]) std::fill(values.begin(), values.end(), 0.0f);
+    const std::array<size_t, 1> reused{2};
+    check_rows(reservation, reused);
+    for (size_t layer = 0; layer < reservation.Bindings().size(); ++layer) {
+      for (size_t index = 0; index < expected[2][layer].size(); ++index) {
+        expected[2][layer][index] = static_cast<float>(layer * 8 + index + 1);
+      }
+      write_row(*reservation.Bindings()[layer].output, 0, expected[2][layer]);
+    }
+    reservation.Commit();
+  }
+  auto reservation = pool.Reserve(all);
+  check_rows(reservation, order);
+}
+
 #if USE_CUDA
 TEST(CudaFixedStatePoolTest, CompactPartialAcceptanceReplaysConvAndGdn) {
   auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-hybrid");
@@ -1078,6 +1340,13 @@ TEST(CudaFixedStatePoolTest, CompactPartialAcceptanceReplaysConvAndGdn) {
   SetProviderOption(*config, "cuda", {}, {});
   RunDeviceCompactPartialAcceptanceReplay(
       CreateModel(GetOrtEnv(), std::move(config)), true);
+}
+
+TEST(CudaFixedStatePoolTest, AdversarialReplayPreservesRequestState) {
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-hybrid");
+  ClearProviders(*config);
+  SetProviderOption(*config, "cuda", {}, {});
+  RunDeviceAdversarialReplay(CreateModel(GetOrtEnv(), std::move(config)));
 }
 #endif
 
@@ -1090,6 +1359,16 @@ TEST(WebGpuFixedStatePoolTest, CompactPartialAcceptanceReplaysConvAndGdn) {
   SetProviderOption(*config, "webgpu", {}, {});
   RunDeviceCompactPartialAcceptanceReplay(
       CreateModel(GetOrtEnv(), std::move(config)), false);
+}
+
+TEST(WebGpuFixedStatePoolTest, AdversarialReplayPreservesRequestState) {
+  if (FindRegisteredEpDevices("WebGpuExecutionProvider").empty()) {
+    GTEST_SKIP() << "No WebGPU EP device is registered.";
+  }
+  auto config = CreateConfig(GetOrtEnv(), MODEL_PATH "engine/synthetic-hybrid");
+  ClearProviders(*config);
+  SetProviderOption(*config, "webgpu", {}, {});
+  RunDeviceAdversarialReplay(CreateModel(GetOrtEnv(), std::move(config)));
 }
 
 TEST_F(FixedStatePoolTest, CapacityOverflowLeavesPoolUntouched) {

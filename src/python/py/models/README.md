@@ -156,6 +156,11 @@ Runtime fragments are applied after composite configuration generation. Objects
 merge recursively; arrays replace whole. The validator rejects absent engine or
 speculative capabilities, invalid allocation and draft limits, provider changes,
 and changes to graph-required session options.
+WebGPU paged attention requires a positive `num_blocks` in the effective
+allocation policy. This may come from legacy extra options or
+`runtime_config.engine.dynamic_batching.num_blocks`; the runtime overlay takes
+precedence. An overlay selecting `gpu_utilization_factor` replaces legacy fixed
+capacity and is therefore rejected for WebGPU.
 
 For memory-dependent INT4/INT8 KV-cache graphs that share external weights, use
 the [KV-cache variant authoring workflow](../../../../docs/ModelBuilderConfiguration.md#authoring-kv-cache-variants).

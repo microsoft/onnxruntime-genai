@@ -274,9 +274,6 @@ def check_extra_options(
             raise ValueError("paged_block_size must be a power of two and at least 16.")
         if extra_options.get("max_batch_size", 1) > 256:
             raise ValueError("max_batch_size must be at most 256.")
-        if execution_provider == "webgpu" and "num_blocks" not in extra_options:
-            raise ValueError("WebGPU paged attention requires num_blocks to be a positive integer.")
-
         if "gpu_utilization_factor" in extra_options:
             try:
                 gpu_utilization_factor = float(extra_options["gpu_utilization_factor"])
@@ -290,6 +287,20 @@ def check_extra_options(
         # utilization factor would be silently ignored.
         if "num_blocks" in extra_options and "gpu_utilization_factor" in extra_options:
             raise ValueError("num_blocks and gpu_utilization_factor are mutually exclusive.")
+
+        if execution_provider == "webgpu":
+            allocation = {
+                key: extra_options[key]
+                for key in ("num_blocks", "gpu_utilization_factor")
+                if key in extra_options
+            }
+            # Use the final runtime merge rules, including replacement of fixed allocation.
+            effective_config = apply_runtime_config(
+                {"engine": {"dynamic_batching": allocation}},
+                {"engine": extra_options.get("_runtime_config", {}).get("engine", {})},
+            )
+            if "num_blocks" not in effective_config["engine"]["dynamic_batching"]:
+                raise ValueError("WebGPU paged attention requires num_blocks to be a positive integer.")
     else:
         engine_only_options = [
             key for key in ("max_scheduled_tokens", "num_blocks") if key in extra_options

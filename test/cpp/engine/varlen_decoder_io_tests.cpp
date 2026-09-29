@@ -11,6 +11,7 @@
 #include "engine/decoders/varlen_decoder_io.h"
 #include "engine/paged_key_value_cache.h"
 #include "engine/step_plan.h"
+#include "engine_test_doubles.h"
 #include "engine_test_helpers.h"
 
 namespace Generators {
@@ -51,6 +52,57 @@ TEST(VarlenDecoderIOTest, PackedHybridPositionIdsAcceptTokenVectorOrMropeMatrix)
                    ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64,
                    std::array<int64_t, 1>{0}),
                std::runtime_error);
+}
+
+TEST(VarlenDecoderIOTest, PacksThreePlanePositionsInScheduledRequestOrder) {
+  auto model = std::dynamic_pointer_cast<DecoderOnly_Model>(LoadSyntheticPagedPerTokenModel());
+  auto cache = std::shared_ptr<CacheManager>{CacheManager::Create(model)};
+  auto engine = MakeDoublesEngine(model, 2, EosToken(*model)).engine;
+  auto first = CreateRequestWithPrompt(engine, std::array<int32_t, 7>{2, 3, 4, 5, 6, 7, 8});
+  auto second = CreateRequestWithPrompt(engine, std::array<int32_t, 5>{9, 8, 7, 6, 5});
+  for (const auto& request : {first, second}) {
+    request->Schedule();
+    RequestStepPlan prefix;
+    prefix.request = request;
+    prefix.request_id = request.get();
+    prefix.sequence_length_before = request->CurrentSequenceLength();
+    prefix.unprocessed_token_count = request == first ? 5 : 1;
+    prefix.target_cache_slots = prefix.unprocessed_token_count;
+    PrepareRequestStep(model, prefix);
+    request->CommitStep(prefix, {});
+  }
+  for (bool reversed : {true, false}) {
+    StepPlan plan;
+    const std::array<std::shared_ptr<Request>, 2> order =
+        reversed ? std::array{second, first} : std::array{first, second};
+    for (const auto& request : order) {
+      RequestStepPlan entry;
+      entry.request = request;
+      entry.request_id = request.get();
+      entry.sequence_length_before = request->CurrentSequenceLength();
+      entry.unprocessed_token_count = request == first ? 2 : 3;
+      entry.packed_token_offset = plan.token_count;
+      entry.logits_row_index = plan.token_count + entry.unprocessed_token_count - 1;
+      entry.target_cache_slots = request->ProcessedSequenceLength() + entry.unprocessed_token_count;
+      plan.token_count += entry.unprocessed_token_count;
+      plan.requests.push_back(entry);
+    }
+    ScheduledRequests scheduled{plan, model, nullptr, nullptr};
+    ExecutionContext context{&plan};
+    VarlenDecoderIO io{model, scheduled, cache, &context, nullptr, 3};
+    const auto position = std::find_if(io.input_names_.begin(), io.input_names_.end(), [&](const char* name) {
+      return model->config_->model.decoder.inputs.position_ids == name;
+    });
+    ASSERT_NE(position, io.input_names_.end());
+    auto& tensor = *io.inputs_[position - io.input_names_.begin()];
+    EXPECT_EQ(tensor.GetTensorTypeAndShapeInfo()->GetShape(), (std::vector<int64_t>{3, 5}));
+    const std::array<int64_t, 5> expected = reversed ? std::array<int64_t, 5>{1, 2, 3, 5, 6}
+                                                  : std::array<int64_t, 5>{5, 6, 1, 2, 3};
+    const auto* data = tensor.GetTensorData<int64_t>();
+    for (size_t plane = 0; plane < 3; ++plane) {
+      EXPECT_TRUE(std::equal(expected.begin(), expected.end(), data + plane * expected.size()));
+    }
+  }
 }
 
 TEST(VarlenDecoderIOTest, EagerMetadataUsesExactStepBounds) {
