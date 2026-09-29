@@ -43,6 +43,10 @@ namespace {
 // cudaFreeHost also waits for the device, so small mirrors are recycled instead. A mirror released
 // while a host-to-device copy from it may still be queued is only reused once an event recorded
 // behind that copy has completed.
+//
+// Release never waits for the device. A mirror that does not fit under the retention limits is
+// parked in an overflow list, where Acquire can still reuse it once its copy completes. Overflow
+// mirrors are freed only while the stream is idle, because cudaFreeHost waits for queued work.
 class PinnedHostPool {
  public:
   static constexpr size_t kMinBytes = 256;
@@ -67,17 +71,17 @@ class PinnedHostPool {
       std::lock_guard<std::mutex> lock{mutex_};
       auto& entries = free_[cls];
       for (size_t i = entries.size(); i-- > 0;) {
-        Entry entry = entries[i];
-        if (entry.event) {
-          const cudaError_t status = ::cudaEventQuery(entry.event);
-          if (status == cudaErrorNotReady)
-            continue;
-          CUDA_CHECK(status);
-          events_.push_back(entry.event);
-        }
+        if (!CopyCompletedLocked(entries[i])) continue;
+        uint8_t* p = entries[i].p;
         entries.erase(entries.begin() + static_cast<std::ptrdiff_t>(i));
         retained_bytes_ -= capacity;
-        return entry.p;
+        return p;
+      }
+      for (size_t i = overflow_.size(); i-- > 0;) {
+        if (overflow_[i].capacity != capacity || !CopyCompletedLocked(overflow_[i])) continue;
+        uint8_t* p = overflow_[i].p;
+        overflow_.erase(overflow_.begin() + static_cast<std::ptrdiff_t>(i));
+        return p;
       }
     }
     void* p{};
@@ -96,36 +100,99 @@ class PinnedHostPool {
         return;
       }
     }
+    bool has_overflow = false;
     {
       std::lock_guard<std::mutex> lock{mutex_};
-      auto& entries = free_[ClassOf(capacity)];
-      if (entries.size() < kMaxFreePerClass && retained_bytes_ + capacity <= kMaxRetainedBytes) {
-        try {
-          entries.push_back(Entry{p, event});
+      try {
+        const Entry entry{p, capacity, event};
+        if (FitsLocked(capacity)) {
+          free_[ClassOf(capacity)].push_back(entry);
           retained_bytes_ += capacity;
-          return;
-        } catch (...) {
+        } else {
+          overflow_.push_back(entry);
         }
+        has_overflow = !overflow_.empty();
+        p = nullptr;
+      } catch (...) {
       }
     }
-    // Not retained. Free outside the lock because these calls wait for the device.
-    if (event) {
-      ::cudaEventSynchronize(event);
-      ReturnEvent(event);
+    if (p) {
+      // No memory to track the mirror: wait for its copy and free it now.
+      if (event) {
+        ::cudaEventSynchronize(event);
+        ReturnEvent(event);
+      }
+      ::cudaFreeHost(p);
+      return;
     }
-    ::cudaFreeHost(p);
+    if (has_overflow) TrimOverflow();
   }
 
  private:
   struct Entry {
     uint8_t* p;
-    cudaEvent_t event;  // null when no copy from the buffer was outstanding at release
+    size_t capacity;
+    cudaEvent_t event;  // null once no copy from the buffer can be outstanding
   };
 
   static size_t ClassOf(size_t bytes) {
     size_t cls = 0;
     while ((kMinBytes << cls) < bytes) ++cls;
     return cls;
+  }
+
+  bool FitsLocked(size_t capacity) const {
+    return free_[ClassOf(capacity)].size() < kMaxFreePerClass &&
+           retained_bytes_ + capacity <= kMaxRetainedBytes;
+  }
+
+  bool CopyCompletedLocked(Entry& entry) {
+    if (!entry.event) return true;
+    const cudaError_t status = ::cudaEventQuery(entry.event);
+    if (status == cudaErrorNotReady) return false;
+    CUDA_CHECK(status);
+    events_.push_back(entry.event);
+    entry.event = nullptr;
+    return true;
+  }
+
+  // Moves overflow mirrors whose copies have completed under the retention limits, and frees the
+  // rest only while the stream is idle so that cudaFreeHost has no queued work to wait for.
+  void TrimOverflow() noexcept {
+    cudaStream_t stream = GetStream();
+    cudaStreamCaptureStatus capture = cudaStreamCaptureStatusNone;
+    const bool idle = ::cudaStreamIsCapturing(stream, &capture) == cudaSuccess &&
+                      capture == cudaStreamCaptureStatusNone && ::cudaStreamQuery(stream) == cudaSuccess;
+    for (;;) {
+      uint8_t* victim = nullptr;
+      {
+        std::lock_guard<std::mutex> lock{mutex_};
+        for (size_t i = overflow_.size(); i-- > 0 && !victim;) {
+          Entry& entry = overflow_[i];
+          // A query error leaves the entry for Acquire, which reports it.
+          if (entry.event) {
+            if (::cudaEventQuery(entry.event) != cudaSuccess) continue;
+            ReturnEventLocked(entry.event);
+            entry.event = nullptr;
+          }
+          if (FitsLocked(entry.capacity)) {
+            try {
+              free_[ClassOf(entry.capacity)].push_back(entry);
+              retained_bytes_ += entry.capacity;
+              overflow_.erase(overflow_.begin() + static_cast<std::ptrdiff_t>(i));
+              continue;
+            } catch (...) {
+            }
+          }
+          if (idle) {
+            victim = entry.p;
+            overflow_.erase(overflow_.begin() + static_cast<std::ptrdiff_t>(i));
+          }
+        }
+      }
+      if (!victim) return;
+      ::cudaFreeHost(victim);
+    }
   }
 
   cudaEvent_t TakeEvent() noexcept {
@@ -143,6 +210,10 @@ class PinnedHostPool {
 
   void ReturnEvent(cudaEvent_t event) noexcept {
     std::lock_guard<std::mutex> lock{mutex_};
+    ReturnEventLocked(event);
+  }
+
+  void ReturnEventLocked(cudaEvent_t event) noexcept {
     try {
       events_.push_back(event);
     } catch (...) {
@@ -152,6 +223,7 @@ class PinnedHostPool {
 
   std::mutex mutex_;
   std::vector<Entry> free_[kClasses];
+  std::vector<Entry> overflow_;  // released past the retention limits; not counted in them
   std::vector<cudaEvent_t> events_;
   size_t retained_bytes_{};
 };
