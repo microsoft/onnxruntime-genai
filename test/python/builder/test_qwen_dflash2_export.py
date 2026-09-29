@@ -733,8 +733,9 @@ def _quant_composite(
             Model.make_tied_quantized_embedding_input_names, model.decoder
         )
     else:
-        model.decoder.make_tied_quantized_embedding_input_names = lambda: (
+        model.decoder.make_tied_quantized_embedding_input_names = lambda _lm_head: (
             4,
+            32,
             weight_name,
             scales_name,
             zero_point_name,
@@ -887,14 +888,14 @@ def test_drafter_resolves_the_actual_target_lm_head_bit_width(onnx_dtype, last_m
         last_matmul_type=last_matmul_type,
     )
 
-    head_bits, *_ = model.decoder.make_tied_quantized_embedding_input_names()
+    head_bits, *_ = model.decoder.make_tied_quantized_embedding_input_names(None)
     head_quant = model.block_drafter_lm_head_quant()
 
     assert head_bits == expected_bits
     if expected_bits == 4:
         assert head_quant["bits"] == expected_bits
     else:
-        # The block-drafter quantizer cannot reproduce the target's Q8G initializer layout.
+        # Only a 4-bit target LM head is reused.
         assert head_quant is None
 
 

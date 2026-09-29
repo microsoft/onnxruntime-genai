@@ -1138,9 +1138,9 @@ class Qwen35MoEModel(MTPModel):
         """Resolve how a block drafter gets its LM head, or ``None`` to keep it dense.
 
         The drafter's LM head *is* the target's, so it reuses the target's initializers rather
-        than quantizing a second copy (see ``adopt_target_tensors``). Only the
-        symmetric/``default`` ``MatMulNBits`` convention is wired up here; any other algorithm
-        or output format leaves the head dense instead of guessing at initializer names.
+        than quantizing a second copy (see ``adopt_target_tensors``). Only the 4-bit
+        symmetric/``default`` ``MatMulNBits`` convention is wired up here; any other algorithm,
+        bit width or output format leaves the head dense instead of guessing at initializer names.
         """
         decoder = self.decoder
         if decoder.exclude_lm_head or not decoder.is_lm_head_quantized():
@@ -1151,7 +1151,16 @@ class Qwen35MoEModel(MTPModel):
                 "DequantizeLinear/MatMul pair instead of the MatMulNBits this exporter can reuse."
             )
             return None
-        head_bits, weight_name, scales_name, zero_point_name = decoder.make_tied_quantized_embedding_input_names()
+        target_lm_head = getattr(getattr(decoder, "weights", None), "lm_head", None)
+        head_bits, head_block_size, weight_name, scales_name, zero_point_name = (
+            decoder.make_tied_quantized_embedding_input_names(target_lm_head)
+        )
+        if head_bits != 4:
+            print(
+                f"Leaving the block drafter's LM head dense: only a 4-bit target LM head is reused, "
+                f"and the target's is {head_bits}-bit."
+            )
+            return None
         shareable = (
             weight_name == f"lm_head.MatMul.weight_Q{head_bits}"
             and scales_name == "lm_head.MatMul.weight_scales"
@@ -1173,7 +1182,7 @@ class Qwen35MoEModel(MTPModel):
             prepack = 0
         return {
             "bits": head_bits,
-            "block_size": int(decoder.quant_attrs["matmul_block_size"]),
+            "block_size": head_block_size,
             "prepack": prepack,
             "adopt_target": adopt_target,
         }
