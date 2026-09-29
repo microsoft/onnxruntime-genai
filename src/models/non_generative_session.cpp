@@ -713,7 +713,8 @@ std::pair<std::vector<float>, size_t> EncodeAndPool(
       norm += hidden[source + i] * hidden[source + i];
     norm = std::max(std::sqrt(norm), 1e-12);
     for (size_t i = 0; i < hidden_size; ++i)
-      pooled[row * hidden_size + i] = hidden[source + i] / norm;
+      pooled[row * hidden_size + i] =
+          static_cast<float>(hidden[source + i] / norm);
   }
   return {std::move(pooled), hidden_size};
 }
@@ -906,19 +907,26 @@ OgaModelResult NativeRankingSession::Run(const OgaStructuredRequest& request) {
       std::copy(cached[row].begin(), cached[row].end(),
                 action_projection.begin() + row * projection_size);
     }
-    FeedStorage scorer;
-    scorer.bytes.reserve(4);
-    scorer.inputs.reserve(4);
-    scorer.Add("state_projections", state_projection,
-               {static_cast<int64_t>(question_count), static_cast<int64_t>(projection_size)},
-               OgaElementType_float32);
-    scorer.Add("action_projections", action_projection,
-               {static_cast<int64_t>(candidate_count), static_cast<int64_t>(projection_size)},
-               OgaElementType_float32);
-    scorer.Add("temperature", std::vector<float>{request.temperature}, {}, OgaElementType_float32);
-    scorer.Add("candidate_owners", owners, {static_cast<int64_t>(owners.size())},
-               OgaElementType_int64);
-    const auto scorer_outputs = this->scorer->Run(scorer.inputs, {"probabilities"});
+    FeedStorage scorer_feeds;
+    scorer_feeds.bytes.reserve(4);
+    scorer_feeds.inputs.reserve(4);
+    scorer_feeds.Add(
+        "state_projections", state_projection,
+        {static_cast<int64_t>(question_count),
+         static_cast<int64_t>(projection_size)},
+        OgaElementType_float32);
+    scorer_feeds.Add(
+        "action_projections", action_projection,
+        {static_cast<int64_t>(candidate_count),
+         static_cast<int64_t>(projection_size)},
+        OgaElementType_float32);
+    scorer_feeds.Add("temperature", std::vector<float>{request.temperature},
+                     {}, OgaElementType_float32);
+    scorer_feeds.Add(
+        "candidate_owners", owners,
+        {static_cast<int64_t>(owners.size())}, OgaElementType_int64);
+    const auto scorer_outputs =
+        scorer->Run(scorer_feeds.inputs, {"probabilities"});
     const auto& probability_tensor = FindTensor(scorer_outputs, "probabilities");
     RequireShape(probability_tensor, {candidate_count}, "scorer probabilities");
     probabilities = FloatTensor(probability_tensor);
