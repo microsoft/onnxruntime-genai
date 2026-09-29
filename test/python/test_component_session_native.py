@@ -7,10 +7,9 @@ from pathlib import Path
 
 import numpy as np
 import onnx
+import onnxruntime_genai as og
 import pytest
 from onnx import TensorProto, helper
-
-import onnxruntime_genai as og
 
 
 def _package(root: Path, filename: str = "graphs/arbitrary-name.onnx") -> Path:
@@ -25,18 +24,22 @@ def _package(root: Path, filename: str = "graphs/arbitrary-name.onnx") -> Path:
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 18)])
     model.ir_version = 13
     onnx.save(model, model_path)
-    (root / "component_manifest.json").write_text(json.dumps({
-        "schema_version": 1,
-        "model_type": "synthetic",
-        "provenance": {"test": True},
-        "components": {
-            "unusual.component": {
-                "role": "test",
-                "filename": filename,
-                "inputs": {"x": "input"},
+    (root / "component_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "model_type": "synthetic",
+                "provenance": {"test": True},
+                "components": {
+                    "unusual.component": {
+                        "role": "test",
+                        "filename": filename,
+                        "inputs": {"x": "input"},
+                    }
+                },
             }
-        },
-    }))
+        )
+    )
     return root
 
 
@@ -51,11 +54,15 @@ def test_manifest_mapping_arbitrary_filename_and_native_run(tmp_path):
 
 def test_manifest_traversal_is_rejected(tmp_path):
     tmp_path.mkdir(exist_ok=True)
-    (tmp_path / "component_manifest.json").write_text(json.dumps({
-        "schema_version": 1,
-        "model_type": "synthetic",
-        "components": {"bad": {"filename": "../outside.onnx"}},
-    }))
+    (tmp_path / "component_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "model_type": "synthetic",
+                "components": {"bad": {"filename": "../outside.onnx"}},
+            }
+        )
+    )
     with pytest.raises(RuntimeError, match="traversal"):
         og.ComponentSession(str(tmp_path), "bad")
 
@@ -65,11 +72,15 @@ def test_manifest_symlink_escape_is_rejected(tmp_path):
     outside.write_bytes(b"fixture")
     link = tmp_path / "linked.onnx"
     link.symlink_to(outside)
-    (tmp_path / "component_manifest.json").write_text(json.dumps({
-        "schema_version": 1,
-        "model_type": "synthetic",
-        "components": {"bad": {"filename": "linked.onnx"}},
-    }))
+    (tmp_path / "component_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "model_type": "synthetic",
+                "components": {"bad": {"filename": "linked.onnx"}},
+            }
+        )
+    )
     with pytest.raises(RuntimeError, match="outside the package"):
         og.ComponentSession(str(tmp_path), "bad")
 
@@ -90,11 +101,15 @@ def test_bfloat16_uses_uint16_storage_with_onnx_type_metadata(tmp_path):
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 18)])
     model.ir_version = 13
     onnx.save(model, model_path)
-    (tmp_path / "component_manifest.json").write_text(json.dumps({
-        "schema_version": 1,
-        "model_type": "synthetic",
-        "components": {"bf16": {"filename": "bf16.onnx"}},
-    }))
+    (tmp_path / "component_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "model_type": "synthetic",
+                "components": {"bf16": {"filename": "bf16.onnx"}},
+            }
+        )
+    )
     session = og.ComponentSession(str(tmp_path), "bf16", ["cpu"])
     assert session.input_info["input"]["dtype"] == "uint16"
     assert session.input_info["input"]["onnx_type"] == TensorProto.BFLOAT16
@@ -111,13 +126,22 @@ def test_combined_clm_high_level_session(tmp_path):
     ids = helper.make_tensor_value_info("input_ids", TensorProto.INT64, [None, None])
     mask = helper.make_tensor_value_info("attention_mask", TensorProto.INT64, [None, None])
     hidden = helper.make_tensor_value_info("hidden_states", TensorProto.FLOAT, [None, None, 4])
-    backbone = helper.make_model(helper.make_graph([
-        helper.make_node("Unsqueeze", ["input_ids", "axes"], ["one"]),
-        helper.make_node("Cast", ["one"], ["float_one"], to=TensorProto.FLOAT),
-        helper.make_node("Concat", ["float_one"] * 4, ["hidden_states"], axis=2),
-    ], "backbone", [ids, mask], [hidden], [
-        helper.make_tensor("axes", TensorProto.INT64, [1], [2]),
-    ]), opset_imports=[helper.make_opsetid("", 18)])
+    backbone = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Unsqueeze", ["input_ids", "axes"], ["one"]),
+                helper.make_node("Cast", ["one"], ["float_one"], to=TensorProto.FLOAT),
+                helper.make_node("Concat", ["float_one"] * 4, ["hidden_states"], axis=2),
+            ],
+            "backbone",
+            [ids, mask],
+            [hidden],
+            [
+                helper.make_tensor("axes", TensorProto.INT64, [1], [2]),
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 18)],
+    )
     backbone.ir_version = 13
     onnx.save(backbone, tmp_path / "backbone.onnx")
 
@@ -126,27 +150,38 @@ def test_combined_clm_high_level_session(tmp_path):
     state_out = helper.make_tensor_value_info("state_embedding", TensorProto.FLOAT, [None, 4])
     action_out = helper.make_tensor_value_info("action_embedding", TensorProto.FLOAT, [None, 4])
     scale_out = helper.make_tensor_value_info("effective_logit_scale", TensorProto.FLOAT, [])
-    heads = helper.make_model(helper.make_graph([
-        helper.make_node("Identity", ["state_hidden_states"], ["state_embedding"]),
-        helper.make_node("Identity", ["action_hidden_states"], ["action_embedding"]),
-        helper.make_node("Identity", ["scale"], ["effective_logit_scale"]),
-    ], "heads", [state, action], [state_out, action_out, scale_out], [
-        helper.make_tensor("scale", TensorProto.FLOAT, [], [1.0]),
-    ]), opset_imports=[helper.make_opsetid("", 18)])
+    heads = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Identity", ["state_hidden_states"], ["state_embedding"]),
+                helper.make_node("Identity", ["action_hidden_states"], ["action_embedding"]),
+                helper.make_node("Identity", ["scale"], ["effective_logit_scale"]),
+            ],
+            "heads",
+            [state, action],
+            [state_out, action_out, scale_out],
+            [
+                helper.make_tensor("scale", TensorProto.FLOAT, [], [1.0]),
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 18)],
+    )
     heads.ir_version = 13
     onnx.save(heads, tmp_path / "clm_heads.onnx")
-    (tmp_path / "component_manifest.json").write_text(json.dumps({
-        "schema_version": 1,
-        "model_type": "clm-v0.1-8b",
-        "components": {
-            "backbone": {"filename": "backbone.onnx"},
-            "clm_heads": {"filename": "clm_heads.onnx"},
-        },
-    }))
+    (tmp_path / "component_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "model_type": "clm-v0.1-8b",
+                "components": {
+                    "backbone": {"filename": "backbone.onnx"},
+                    "clm_heads": {"filename": "clm_heads.onnx"},
+                },
+            }
+        )
+    )
     session = og.RankingSession(tmp_path, providers=["cpu"])
-    answer = session.rank({"state": "1", "questions": {
-        "q": {"type": "choice", "criteria": {"a": "1", "b": "2"}}
-    }})
+    answer = session.rank({"state": "1", "questions": {"q": {"type": "choice", "criteria": {"a": "1", "b": "2"}}}})
     assert answer["q"]["type"] == "choice"
     assert set(answer["q"]["probabilities"]) == {"a", "b"}
 
@@ -158,13 +193,22 @@ def test_flat_kev_high_level_session(tmp_path):
     ids = helper.make_tensor_value_info("input_ids", TensorProto.INT64, [None, None])
     mask = helper.make_tensor_value_info("attention_mask", TensorProto.INT64, [None, None])
     hidden = helper.make_tensor_value_info("hidden_states", TensorProto.FLOAT, [None, None, 4])
-    backbone = helper.make_model(helper.make_graph([
-        helper.make_node("Unsqueeze", ["input_ids", "axis2"], ["one"]),
-        helper.make_node("Cast", ["one"], ["float_one"], to=TensorProto.FLOAT),
-        helper.make_node("Concat", ["float_one"] * 4, ["hidden_states"], axis=2),
-    ], "backbone", [ids, mask], [hidden], [
-        helper.make_tensor("axis2", TensorProto.INT64, [1], [2]),
-    ]), opset_imports=[helper.make_opsetid("", 18)])
+    backbone = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Unsqueeze", ["input_ids", "axis2"], ["one"]),
+                helper.make_node("Cast", ["one"], ["float_one"], to=TensorProto.FLOAT),
+                helper.make_node("Concat", ["float_one"] * 4, ["hidden_states"], axis=2),
+            ],
+            "backbone",
+            [ids, mask],
+            [hidden],
+            [
+                helper.make_tensor("axis2", TensorProto.INT64, [1], [2]),
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 18)],
+    )
     backbone.ir_version = 13
     onnx.save(backbone, tmp_path / "backbone.onnx")
     head_inputs = [
@@ -174,27 +218,42 @@ def test_flat_kev_high_level_session(tmp_path):
         helper.make_tensor_value_info("option_mask", TensorProto.BOOL, [None, None]),
     ]
     probabilities = helper.make_tensor_value_info("probabilities", TensorProto.FLOAT, [None, None])
-    head = helper.make_model(helper.make_graph([
-        helper.make_node("Cast", ["option_mask"], ["values"], to=TensorProto.FLOAT),
-        helper.make_node("ReduceSum", ["values", "axis1"], ["total"], keepdims=1),
-        helper.make_node("Div", ["values", "total"], ["probabilities"]),
-    ], "head", head_inputs, [probabilities], [
-        helper.make_tensor("axis1", TensorProto.INT64, [1], [1]),
-    ]), opset_imports=[helper.make_opsetid("", 18)])
+    head = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Cast", ["option_mask"], ["values"], to=TensorProto.FLOAT),
+                helper.make_node("ReduceSum", ["values", "axis1"], ["total"], keepdims=1),
+                helper.make_node("Div", ["values", "total"], ["probabilities"]),
+            ],
+            "head",
+            head_inputs,
+            [probabilities],
+            [
+                helper.make_tensor("axis1", TensorProto.INT64, [1], [1]),
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 18)],
+    )
     head.ir_version = 13
     onnx.save(head, tmp_path / "kev_head.onnx")
-    (tmp_path / "component_manifest.json").write_text(json.dumps({
-        "schema_version": 1,
-        "model_type": "jaredpalmer/kev-4b",
-        "components": {
-            "backbone": {"filename": "backbone.onnx"},
-            "kev_head": {"filename": "kev_head.onnx"},
-        },
-    }))
-    answer = og.DecisionSession(tmp_path, providers=["cpu"]).decide({
-        "state": "1",
-        "questions": {"q": {"type": "noul", "criteria": {}}},
-    })
+    (tmp_path / "component_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "model_type": "jaredpalmer/kev-4b",
+                "components": {
+                    "backbone": {"filename": "backbone.onnx"},
+                    "kev_head": {"filename": "kev_head.onnx"},
+                },
+            }
+        )
+    )
+    answer = og.DecisionSession(tmp_path, providers=["cpu"]).decide(
+        {
+            "state": "1",
+            "questions": {"q": {"type": "noul", "criteria": {}}},
+        }
+    )
     assert answer == {"q": {"type": "noul", "noul": 0.5}}
 
 
@@ -206,48 +265,34 @@ def _stateful_kev_package(root: Path) -> Path:
         helper.make_tensor_value_info("input_ids", TensorProto.INT64, ["batch", "sequence"]),
         helper.make_tensor_value_info("attention_mask", TensorProto.INT64, ["batch", "total_sequence"]),
         helper.make_tensor_value_info("position_ids", TensorProto.INT64, ["batch", "sequence"]),
-        helper.make_tensor_value_info("past_key_values.0.key", TensorProto.FLOAT,
-                                      ["batch", 1, "past_sequence", 1]),
-        helper.make_tensor_value_info("past_key_values.0.value", TensorProto.FLOAT,
-                                      ["batch", 1, "past_sequence", 1]),
-        helper.make_tensor_value_info("past_key_values.1.conv_state", TensorProto.FLOAT,
-                                      ["batch", 1, 1]),
-        helper.make_tensor_value_info("past_key_values.1.recurrent_state", TensorProto.FLOAT,
-                                      ["batch", 1, 1, 1]),
+        helper.make_tensor_value_info("past_key_values.0.key", TensorProto.FLOAT, ["batch", 1, "past_sequence", 1]),
+        helper.make_tensor_value_info("past_key_values.0.value", TensorProto.FLOAT, ["batch", 1, "past_sequence", 1]),
+        helper.make_tensor_value_info("past_key_values.1.conv_state", TensorProto.FLOAT, ["batch", 1, 1]),
+        helper.make_tensor_value_info("past_key_values.1.recurrent_state", TensorProto.FLOAT, ["batch", 1, 1, 1]),
     ]
     outputs = [
-        helper.make_tensor_value_info("hidden_states", TensorProto.FLOAT,
-                                      ["batch", "sequence", 4]),
-        helper.make_tensor_value_info("present.0.key", TensorProto.FLOAT,
-                                      ["batch", 1, "total_sequence", 1]),
-        helper.make_tensor_value_info("present.0.value", TensorProto.FLOAT,
-                                      ["batch", 1, "total_sequence", 1]),
-        helper.make_tensor_value_info("present.1.conv_state", TensorProto.FLOAT,
-                                      ["batch", 1, 1]),
-        helper.make_tensor_value_info("present.1.recurrent_state", TensorProto.FLOAT,
-                                      ["batch", 1, 1, 1]),
+        helper.make_tensor_value_info("hidden_states", TensorProto.FLOAT, ["batch", "sequence", 4]),
+        helper.make_tensor_value_info("present.0.key", TensorProto.FLOAT, ["batch", 1, "total_sequence", 1]),
+        helper.make_tensor_value_info("present.0.value", TensorProto.FLOAT, ["batch", 1, "total_sequence", 1]),
+        helper.make_tensor_value_info("present.1.conv_state", TensorProto.FLOAT, ["batch", 1, 1]),
+        helper.make_tensor_value_info("present.1.recurrent_state", TensorProto.FLOAT, ["batch", 1, 1, 1]),
     ]
     nodes = [
         helper.make_node("Cast", ["input_ids"], ["ids_f"], to=TensorProto.FLOAT),
         helper.make_node("CumSum", ["ids_f", "axis1"], ["cumulative"]),
-        helper.make_node("Squeeze", ["past_key_values.1.recurrent_state", "axes123"],
-                         ["past_scalar"]),
+        helper.make_node("Squeeze", ["past_key_values.1.recurrent_state", "axes123"], ["past_scalar"]),
         helper.make_node("Unsqueeze", ["past_scalar", "axes12"], ["past_for_tokens"]),
         helper.make_node("Unsqueeze", ["cumulative", "axis2"], ["cumulative_3d"]),
         helper.make_node("Add", ["cumulative_3d", "past_for_tokens"], ["hidden_one"]),
         helper.make_node("Concat", ["hidden_one"] * 4, ["hidden_states"], axis=2),
         helper.make_node("Unsqueeze", ["ids_f", "axes13"], ["new_kv"]),
-        helper.make_node("Concat", ["past_key_values.0.key", "new_kv"],
-                         ["present.0.key"], axis=2),
-        helper.make_node("Concat", ["past_key_values.0.value", "new_kv"],
-                         ["present.0.value"], axis=2),
+        helper.make_node("Concat", ["past_key_values.0.key", "new_kv"], ["present.0.key"], axis=2),
+        helper.make_node("Concat", ["past_key_values.0.value", "new_kv"], ["present.0.value"], axis=2),
         helper.make_node("ReduceSum", ["ids_f", "axis1"], ["token_sum"], keepdims=1),
         helper.make_node("Unsqueeze", ["token_sum", "axis2"], ["token_sum_3d"]),
-        helper.make_node("Add", ["past_key_values.1.conv_state", "token_sum_3d"],
-                         ["present.1.conv_state"]),
+        helper.make_node("Add", ["past_key_values.1.conv_state", "token_sum_3d"], ["present.1.conv_state"]),
         helper.make_node("Unsqueeze", ["token_sum_3d", "axis3"], ["token_sum_4d"]),
-        helper.make_node("Add", ["past_key_values.1.recurrent_state", "token_sum_4d"],
-                         ["present.1.recurrent_state"]),
+        helper.make_node("Add", ["past_key_values.1.recurrent_state", "token_sum_4d"], ["present.1.recurrent_state"]),
     ]
     initializers = [
         helper.make_tensor("axis1", TensorProto.INT64, [1], [1]),
@@ -259,7 +304,8 @@ def _stateful_kev_package(root: Path) -> Path:
     ]
     backbone = helper.make_model(
         helper.make_graph(nodes, "stateful_backbone", inputs, outputs, initializers),
-        opset_imports=[helper.make_opsetid("", 18)])
+        opset_imports=[helper.make_opsetid("", 18)],
+    )
     backbone.ir_version = 13
     onnx.save(backbone, root / "backbone.onnx")
 
@@ -269,24 +315,36 @@ def _stateful_kev_package(root: Path) -> Path:
         helper.make_tensor_value_info("option_indices", TensorProto.INT64, [None, None]),
         helper.make_tensor_value_info("option_mask", TensorProto.BOOL, [None, None]),
     ]
-    head = helper.make_model(helper.make_graph([
-        helper.make_node("Gather", ["hidden_states", "option_indices"], ["selected"], axis=0),
-        helper.make_node("ReduceMean", ["selected", "axis2"], ["scores"], keepdims=0),
-        helper.make_node("Softmax", ["scores"], ["probabilities"], axis=1),
-    ], "stateful_head", head_inputs, [
-        helper.make_tensor_value_info("probabilities", TensorProto.FLOAT, [None, None]),
-    ], [helper.make_tensor("axis2", TensorProto.INT64, [1], [2])]),
-        opset_imports=[helper.make_opsetid("", 18)])
+    head = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Gather", ["hidden_states", "option_indices"], ["selected"], axis=0),
+                helper.make_node("ReduceMean", ["selected", "axis2"], ["scores"], keepdims=0),
+                helper.make_node("Softmax", ["scores"], ["probabilities"], axis=1),
+            ],
+            "stateful_head",
+            head_inputs,
+            [
+                helper.make_tensor_value_info("probabilities", TensorProto.FLOAT, [None, None]),
+            ],
+            [helper.make_tensor("axis2", TensorProto.INT64, [1], [2])],
+        ),
+        opset_imports=[helper.make_opsetid("", 18)],
+    )
     head.ir_version = 13
     onnx.save(head, root / "kev_head.onnx")
-    (root / "component_manifest.json").write_text(json.dumps({
-        "schema_version": 1,
-        "model_type": "synthetic-stateful-kev",
-        "components": {
-            "backbone": {"filename": "backbone.onnx"},
-            "kev_head": {"filename": "kev_head.onnx"},
-        },
-    }))
+    (root / "component_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "model_type": "synthetic-stateful-kev",
+                "components": {
+                    "backbone": {"filename": "backbone.onnx"},
+                    "kev_head": {"filename": "kev_head.onnx"},
+                },
+            }
+        )
+    )
     return root
 
 
@@ -310,9 +368,9 @@ def test_stateful_kev_prefix_reuse_parity_cache_and_isolation(tmp_path):
     assert optimized.prefix_cache_stats["hits"] == 1
     assert optimized.prefix_cache_stats["prefix_runs"] == 1
 
-    isolated = og.DecisionSession(package, providers=["cpu"]).decide({
-        "state": request["state"], "questions": {"two": request["questions"]["two"]}
-    })
+    isolated = og.DecisionSession(package, providers=["cpu"]).decide(
+        {"state": request["state"], "questions": {"two": request["questions"]["two"]}}
+    )
     assert isolated["two"] == optimized_result["two"]
     optimized.invalidate_cache()
     optimized.decide(request)
@@ -330,40 +388,58 @@ def test_malformed_clm_hidden_shape_returns_runtime_error(tmp_path):
     ids = helper.make_tensor_value_info("input_ids", TensorProto.INT64, [None, None])
     mask = helper.make_tensor_value_info("attention_mask", TensorProto.INT64, [None, None])
     hidden = helper.make_tensor_value_info("hidden_states", TensorProto.FLOAT, [None, None])
-    backbone = helper.make_model(helper.make_graph([
-        helper.make_node("Cast", ["input_ids"], ["hidden_states"], to=TensorProto.FLOAT),
-    ], "bad_backbone", [ids, mask], [hidden]), opset_imports=[helper.make_opsetid("", 18)])
+    backbone = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Cast", ["input_ids"], ["hidden_states"], to=TensorProto.FLOAT),
+            ],
+            "bad_backbone",
+            [ids, mask],
+            [hidden],
+        ),
+        opset_imports=[helper.make_opsetid("", 18)],
+    )
     backbone.ir_version = 13
     onnx.save(backbone, tmp_path / "backbone.onnx")
 
     state = helper.make_tensor_value_info("state_hidden_states", TensorProto.FLOAT, [None, 4])
     action = helper.make_tensor_value_info("action_hidden_states", TensorProto.FLOAT, [None, 4])
-    heads = helper.make_model(helper.make_graph([
-        helper.make_node("Identity", ["state_hidden_states"], ["state_embedding"]),
-        helper.make_node("Identity", ["action_hidden_states"], ["action_embedding"]),
-        helper.make_node("Identity", ["scale"], ["effective_logit_scale"]),
-    ], "heads", [state, action], [
-        helper.make_tensor_value_info("state_embedding", TensorProto.FLOAT, [None, 4]),
-        helper.make_tensor_value_info("action_embedding", TensorProto.FLOAT, [None, 4]),
-        helper.make_tensor_value_info("effective_logit_scale", TensorProto.FLOAT, []),
-    ], [helper.make_tensor("scale", TensorProto.FLOAT, [], [1.0])]),
-        opset_imports=[helper.make_opsetid("", 18)])
+    heads = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Identity", ["state_hidden_states"], ["state_embedding"]),
+                helper.make_node("Identity", ["action_hidden_states"], ["action_embedding"]),
+                helper.make_node("Identity", ["scale"], ["effective_logit_scale"]),
+            ],
+            "heads",
+            [state, action],
+            [
+                helper.make_tensor_value_info("state_embedding", TensorProto.FLOAT, [None, 4]),
+                helper.make_tensor_value_info("action_embedding", TensorProto.FLOAT, [None, 4]),
+                helper.make_tensor_value_info("effective_logit_scale", TensorProto.FLOAT, []),
+            ],
+            [helper.make_tensor("scale", TensorProto.FLOAT, [], [1.0])],
+        ),
+        opset_imports=[helper.make_opsetid("", 18)],
+    )
     heads.ir_version = 13
     onnx.save(heads, tmp_path / "clm_heads.onnx")
-    (tmp_path / "component_manifest.json").write_text(json.dumps({
-        "schema_version": 1,
-        "model_type": "clm-v0.1-8b",
-        "components": {
-            "backbone": {"filename": "backbone.onnx"},
-            "clm_heads": {"filename": "clm_heads.onnx"},
-        },
-    }))
+    (tmp_path / "component_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "model_type": "clm-v0.1-8b",
+                "components": {
+                    "backbone": {"filename": "backbone.onnx"},
+                    "clm_heads": {"filename": "clm_heads.onnx"},
+                },
+            }
+        )
+    )
 
     session = og.RankingSession(tmp_path, providers=["cpu"])
     with pytest.raises(RuntimeError, match="encoder hidden states must have rank 3"):
-        session.rank({"state": "1", "questions": {
-            "q": {"type": "choice", "criteria": {"a": "1", "b": "2"}}
-        }})
+        session.rank({"state": "1", "questions": {"q": {"type": "choice", "criteria": {"a": "1", "b": "2"}}}})
 
 
 def test_malformed_kev_probability_shape_returns_runtime_error(tmp_path):
@@ -374,42 +450,66 @@ def test_malformed_kev_probability_shape_returns_runtime_error(tmp_path):
     ids = helper.make_tensor_value_info("input_ids", TensorProto.INT64, [None, None])
     mask_input = helper.make_tensor_value_info("attention_mask", TensorProto.INT64, [None, None])
     hidden = helper.make_tensor_value_info("hidden_states", TensorProto.FLOAT, [None, None, 4])
-    backbone = helper.make_model(helper.make_graph([
-        helper.make_node("Unsqueeze", ["input_ids", "axis2"], ["one"]),
-        helper.make_node("Cast", ["one"], ["float_one"], to=TensorProto.FLOAT),
-        helper.make_node("Concat", ["float_one"] * 4, ["hidden_states"], axis=2),
-    ], "backbone", [ids, mask_input], [hidden], [
-        helper.make_tensor("axis2", TensorProto.INT64, [1], [2]),
-    ]), opset_imports=[helper.make_opsetid("", 18)])
+    backbone = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Unsqueeze", ["input_ids", "axis2"], ["one"]),
+                helper.make_node("Cast", ["one"], ["float_one"], to=TensorProto.FLOAT),
+                helper.make_node("Concat", ["float_one"] * 4, ["hidden_states"], axis=2),
+            ],
+            "backbone",
+            [ids, mask_input],
+            [hidden],
+            [
+                helper.make_tensor("axis2", TensorProto.INT64, [1], [2]),
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 18)],
+    )
     backbone.ir_version = 13
     onnx.save(backbone, tmp_path / "backbone.onnx")
 
     option_mask = helper.make_tensor_value_info("option_mask", TensorProto.BOOL, [None, None])
-    head = helper.make_model(helper.make_graph([
-        helper.make_node("Cast", ["option_mask"], ["values"], to=TensorProto.FLOAT),
-        helper.make_node("Reshape", ["values", "flat_shape"], ["probabilities"]),
-    ], "bad_head", [
-        helper.make_tensor_value_info("hidden_states", TensorProto.FLOAT, [None, 4]),
-        helper.make_tensor_value_info("decide_indices", TensorProto.INT64, [None]),
-        helper.make_tensor_value_info("option_indices", TensorProto.INT64, [None, None]),
-        option_mask,
-    ], [helper.make_tensor_value_info("probabilities", TensorProto.FLOAT, [None])], [
-        helper.make_tensor("flat_shape", TensorProto.INT64, [1], [-1]),
-    ]), opset_imports=[helper.make_opsetid("", 18)])
+    head = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node("Cast", ["option_mask"], ["values"], to=TensorProto.FLOAT),
+                helper.make_node("Reshape", ["values", "flat_shape"], ["probabilities"]),
+            ],
+            "bad_head",
+            [
+                helper.make_tensor_value_info("hidden_states", TensorProto.FLOAT, [None, 4]),
+                helper.make_tensor_value_info("decide_indices", TensorProto.INT64, [None]),
+                helper.make_tensor_value_info("option_indices", TensorProto.INT64, [None, None]),
+                option_mask,
+            ],
+            [helper.make_tensor_value_info("probabilities", TensorProto.FLOAT, [None])],
+            [
+                helper.make_tensor("flat_shape", TensorProto.INT64, [1], [-1]),
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 18)],
+    )
     head.ir_version = 13
     onnx.save(head, tmp_path / "kev_head.onnx")
-    (tmp_path / "component_manifest.json").write_text(json.dumps({
-        "schema_version": 1,
-        "model_type": "jaredpalmer/kev-4b",
-        "components": {
-            "backbone": {"filename": "backbone.onnx"},
-            "kev_head": {"filename": "kev_head.onnx"},
-        },
-    }))
+    (tmp_path / "component_manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "model_type": "jaredpalmer/kev-4b",
+                "components": {
+                    "backbone": {"filename": "backbone.onnx"},
+                    "kev_head": {"filename": "kev_head.onnx"},
+                },
+            }
+        )
+    )
 
     session = og.DecisionSession(tmp_path, providers=["cpu"])
     with pytest.raises(RuntimeError, match="KEV probability matrix must have rank 2"):
-        session.decide({
-            "state": "1",
-            "questions": {"q": {"type": "noul", "criteria": {}}},
-        })
+        session.decide(
+            {
+                "state": "1",
+                "questions": {"q": {"type": "noul", "criteria": {}}},
+            }
+        )

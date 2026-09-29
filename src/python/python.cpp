@@ -77,7 +77,8 @@ struct PyComponentSession {
     pybind11::dict result;
     for (const auto& output : native_outputs) {
       pybind11::array array(ToNumpyDtype(
-          static_cast<ONNXTensorElementDataType>(output.type)), output.shape);
+                                static_cast<ONNXTensorElementDataType>(output.type)),
+                            output.shape);
       std::memcpy(array.mutable_data(), output.data.data(), output.data.size());
       result[pybind11::str(output.name)] = std::move(array);
     }
@@ -389,21 +390,35 @@ int ToNumpyType(ONNXTensorElementDataType type) {
 }
 
 pybind11::dtype ToNumpyDtype(ONNXTensorElementDataType type) {
-    switch (type) {
-      case Ort::TypeToTensorType<bool>: return pybind11::dtype::of<bool>();
-      case Ort::TypeToTensorType<uint8_t>: return pybind11::dtype::of<uint8_t>();
-      case Ort::TypeToTensorType<int8_t>: return pybind11::dtype::of<int8_t>();
-      case Ort::TypeToTensorType<uint16_t>: return pybind11::dtype::of<uint16_t>();
-      case Ort::TypeToTensorType<int16_t>: return pybind11::dtype::of<int16_t>();
-      case Ort::TypeToTensorType<uint32_t>: return pybind11::dtype::of<uint32_t>();
-      case Ort::TypeToTensorType<int32_t>: return pybind11::dtype::of<int32_t>();
-      case Ort::TypeToTensorType<uint64_t>: return pybind11::dtype::of<uint64_t>();
-      case Ort::TypeToTensorType<int64_t>: return pybind11::dtype::of<int64_t>();
-      case Ort::TypeToTensorType<Ort::Float16_t>: return pybind11::dtype("float16");
-      case ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16: return pybind11::dtype::of<uint16_t>();
-      case Ort::TypeToTensorType<float>: return pybind11::dtype::of<float>();
-      case Ort::TypeToTensorType<double>: return pybind11::dtype::of<double>();
-      default: throw std::runtime_error("Unsupported onnx type");
+  switch (type) {
+    case Ort::TypeToTensorType<bool>:
+      return pybind11::dtype::of<bool>();
+    case Ort::TypeToTensorType<uint8_t>:
+      return pybind11::dtype::of<uint8_t>();
+    case Ort::TypeToTensorType<int8_t>:
+      return pybind11::dtype::of<int8_t>();
+    case Ort::TypeToTensorType<uint16_t>:
+      return pybind11::dtype::of<uint16_t>();
+    case Ort::TypeToTensorType<int16_t>:
+      return pybind11::dtype::of<int16_t>();
+    case Ort::TypeToTensorType<uint32_t>:
+      return pybind11::dtype::of<uint32_t>();
+    case Ort::TypeToTensorType<int32_t>:
+      return pybind11::dtype::of<int32_t>();
+    case Ort::TypeToTensorType<uint64_t>:
+      return pybind11::dtype::of<uint64_t>();
+    case Ort::TypeToTensorType<int64_t>:
+      return pybind11::dtype::of<int64_t>();
+    case Ort::TypeToTensorType<Ort::Float16_t>:
+      return pybind11::dtype("float16");
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16:
+      return pybind11::dtype::of<uint16_t>();
+    case Ort::TypeToTensorType<float>:
+      return pybind11::dtype::of<float>();
+    case Ort::TypeToTensorType<double>:
+      return pybind11::dtype::of<double>();
+    default:
+      throw std::runtime_error("Unsupported onnx type");
   }
 }
 
@@ -748,7 +763,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   m.add_object("_cleanup", cleanup);
 
   pybind11::class_<PyComponentSession>(m, "ComponentSession",
-      "Uncached named-component ONNX Runtime session.")
+                                       "Uncached named-component ONNX Runtime session.")
       .def(pybind11::init<const std::string&, const std::string&, const std::vector<std::string>&>(),
            pybind11::arg("package_path"), pybind11::arg("component"),
            pybind11::arg("providers") = std::vector<std::string>{})

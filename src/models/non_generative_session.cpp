@@ -41,8 +41,8 @@ std::string PackageIdentity(const std::string& package_path,
   for (const auto& provider : providers) result << "|provider=" << provider;
   static constexpr std::string_view files[] = {
       "component_manifest.json", "tokenizer.json", "tokenizer_config.json",
-      "encoder/model.onnx",      "backbone/model.onnx", "state_head/model.onnx",
-      "action_head/model.onnx",  "scorer/model.onnx",   "clm_heads/model.onnx",
+      "encoder/model.onnx", "backbone/model.onnx", "state_head/model.onnx",
+      "action_head/model.onnx", "scorer/model.onnx", "clm_heads/model.onnx",
       "pointer_head/model.onnx", "kev_head/model.onnx",
       "encoder/model.onnx.data", "backbone/model.onnx.data",
       "state_head/model.onnx.data", "action_head/model.onnx.data",
@@ -66,7 +66,8 @@ std::string PackageIdentity(const std::string& package_path,
     }
     const auto modified_milliseconds =
         std::chrono::duration_cast<std::chrono::milliseconds>(
-            modified.time_since_epoch()).count();
+            modified.time_since_epoch())
+            .count();
     result << '|' << file << ':' << size << ':'
            << static_cast<long long>(modified_milliseconds);
   }
@@ -651,10 +652,7 @@ size_t FloatVectorBytes(const std::vector<float>& value) {
 
 struct NativeRankingSession {
   NativeRankingSession(std::string path, std::vector<std::string> configured_providers)
-      : package_path(std::move(path)), providers(std::move(configured_providers)),
-        identity(PackageIdentity(package_path, providers)),
-        cache(kDefaultClmCacheEntries, kDefaultClmCacheBytes, FloatVectorBytes),
-        tokenizer(package_path), encoder(TryComponent(*this, "encoder", "backbone")) {
+      : package_path(std::move(path)), providers(std::move(configured_providers)), identity(PackageIdentity(package_path, providers)), cache(kDefaultClmCacheEntries, kDefaultClmCacheBytes, FloatVectorBytes), tokenizer(package_path), encoder(TryComponent(*this, "encoder", "backbone")) {
     try {
       combined = std::make_unique<NamedComponentSession>(Component("clm_heads"));
     } catch (const std::exception& error) {
@@ -1089,12 +1087,7 @@ void AddRepeatedState(FeedStorage& feeds, const KevStateBinding& binding,
 
 struct NativeDecisionSession {
   NativeDecisionSession(std::string path, std::vector<std::string> configured_providers)
-      : package_path(std::move(path)), providers(std::move(configured_providers)),
-        identity(PackageIdentity(package_path, providers)),
-        cache(kDefaultKevCacheEntries, kDefaultKevCacheBytes, KevTokenBytes),
-        prefix_cache(kDefaultKevPrefixCacheEntries, kDefaultKevPrefixCacheBytes,
-                     KevPrefixBytes),
-        tokenizer(package_path), backbone(Component("backbone")) {
+      : package_path(std::move(path)), providers(std::move(configured_providers)), identity(PackageIdentity(package_path, providers)), cache(kDefaultKevCacheEntries, kDefaultKevCacheBytes, KevTokenBytes), prefix_cache(kDefaultKevPrefixCacheEntries, kDefaultKevPrefixCacheBytes, KevPrefixBytes), tokenizer(package_path), backbone(Component("backbone")) {
     try {
       pointer = std::make_unique<NamedComponentSession>(Component("pointer_head"));
     } catch (const std::exception& error) {
@@ -1507,8 +1500,7 @@ void OptionalNumber(const std::optional<T>& source, T* value, bool* present) {
 
 struct OGA_CPP_ONLY OgaRankingSessionHandle {
   OgaRankingSessionHandle(std::string path, std::vector<std::string> providers)
-      : package_path(std::move(path)), providers(std::move(providers)),
-        value(package_path, this->providers) {}
+      : package_path(std::move(path)), providers(std::move(providers)), value(package_path, this->providers) {}
   std::string package_path;
   std::vector<std::string> providers;
   NativeRankingSession value;
@@ -1516,8 +1508,7 @@ struct OGA_CPP_ONLY OgaRankingSessionHandle {
 
 struct OGA_CPP_ONLY OgaDecisionSessionHandle {
   OgaDecisionSessionHandle(std::string path, std::vector<std::string> providers)
-      : package_path(std::move(path)), providers(std::move(providers)),
-        value(package_path, this->providers) {}
+      : package_path(std::move(path)), providers(std::move(providers)), value(package_path, this->providers) {}
   std::string package_path;
   std::vector<std::string> providers;
   NativeDecisionSession value;
@@ -1525,14 +1516,14 @@ struct OGA_CPP_ONLY OgaDecisionSessionHandle {
 
 extern "C" {
 
-#define OGA_CREATE_STRUCTURED_VALUE(name, expression)                         \
-  OgaResult* OGA_API_CALL name(OgaStructuredValueHandle** out) {             \
-    OGA_CAPI_TRY                                                             \
-    auto& output = CapiRequired(out, "out");                                 \
-    auto result = std::make_unique<OgaStructuredValue>(expression);          \
-    output = reinterpret_cast<OgaStructuredValueHandle*>(result.release());  \
-    return nullptr;                                                          \
-    OGA_CAPI_CATCH                                                           \
+#define OGA_CREATE_STRUCTURED_VALUE(name, expression)                       \
+  OgaResult* OGA_API_CALL name(OgaStructuredValueHandle** out) {            \
+    OGA_CAPI_TRY                                                            \
+    auto& output = CapiRequired(out, "out");                                \
+    auto result = std::make_unique<OgaStructuredValue>(expression);         \
+    output = reinterpret_cast<OgaStructuredValueHandle*>(result.release()); \
+    return nullptr;                                                         \
+    OGA_CAPI_CATCH                                                          \
   }
 
 OGA_CREATE_STRUCTURED_VALUE(OgaCreateStructuredValueNull, nullptr)
@@ -1613,15 +1604,15 @@ OgaResult* OGA_API_CALL OgaStructuredValueGetType(
   OGA_CAPI_CATCH
 }
 
-#define OGA_GET_STRUCTURED_SCALAR(name, type, alternative)                    \
-  OgaResult* OGA_API_CALL name(const OgaStructuredValueHandle* value,         \
+#define OGA_GET_STRUCTURED_SCALAR(name, type, alternative)                     \
+  OgaResult* OGA_API_CALL name(const OgaStructuredValueHandle* value,          \
                                type* out) {                                    \
-    OGA_CAPI_TRY                                                              \
-    const auto* item = std::get_if<alternative>(&Value(value).value);         \
-    if (!item) throw std::invalid_argument("structured value has wrong type");\
-    CapiRequired(out, "out") = *item;                                         \
-    return nullptr;                                                           \
-    OGA_CAPI_CATCH                                                            \
+    OGA_CAPI_TRY                                                               \
+    const auto* item = std::get_if<alternative>(&Value(value).value);          \
+    if (!item) throw std::invalid_argument("structured value has wrong type"); \
+    CapiRequired(out, "out") = *item;                                          \
+    return nullptr;                                                            \
+    OGA_CAPI_CATCH                                                             \
   }
 
 OGA_GET_STRUCTURED_SCALAR(OgaStructuredValueGetBool, bool, bool)
@@ -1902,17 +1893,17 @@ OgaResult* OGA_API_CALL OgaDecisionSessionCreateComponent(
   OGA_CAPI_CATCH
 }
 
-#define OGA_DECISION_RUN(name, method)                                         \
-  OgaResult* OGA_API_CALL name(                                                \
+#define OGA_DECISION_RUN(name, method)                                              \
+  OgaResult* OGA_API_CALL name(                                                     \
       OgaDecisionSessionHandle* session, const OgaStructuredRequestHandle* request, \
-      OgaModelResultHandle** out) {                                            \
-    OGA_CAPI_TRY                                                               \
-    auto& output = CapiRequired(out, "out");                                  \
-    auto result = std::make_unique<OgaModelResult>(                            \
-        CapiRequired(session, "session").value.method(Request(request)));      \
-    output = reinterpret_cast<OgaModelResultHandle*>(result.release());        \
-    return nullptr;                                                            \
-    OGA_CAPI_CATCH                                                             \
+      OgaModelResultHandle** out) {                                                 \
+    OGA_CAPI_TRY                                                                    \
+    auto& output = CapiRequired(out, "out");                                        \
+    auto result = std::make_unique<OgaModelResult>(                                 \
+        CapiRequired(session, "session").value.method(Request(request)));           \
+    output = reinterpret_cast<OgaModelResultHandle*>(result.release());             \
+    return nullptr;                                                                 \
+    OGA_CAPI_CATCH                                                                  \
   }
 
 OGA_DECISION_RUN(OgaDecisionSessionRun, Run)
@@ -1975,8 +1966,8 @@ OgaResult* OGA_API_CALL OgaDecisionSessionGetPrefixReuseStatus(
   // compatibility_status is immutable after construction and the disabled
   // literal has static storage, so this legacy borrowed pointer is stable.
   CapiRequired(out, "out") = value.prefix_reuse_enabled
-                                  ? value.compatibility_status.c_str()
-                                  : "disabled by policy";
+                                 ? value.compatibility_status.c_str()
+                                 : "disabled by policy";
   return nullptr;
   OGA_CAPI_CATCH
 }
@@ -2005,8 +1996,7 @@ OgaResult* OGA_API_CALL OgaDecisionSessionCopyPrefixReuseStatus(
 OgaResult* OGA_API_CALL OgaDecisionSessionSetPrefixCacheCapacity(
     OgaDecisionSessionHandle* session, size_t entry_capacity, size_t byte_capacity) {
   OGA_CAPI_TRY
-  CapiRequired(session, "session").value.SetPrefixCacheCapacity(
-      entry_capacity, byte_capacity);
+  CapiRequired(session, "session").value.SetPrefixCacheCapacity(entry_capacity, byte_capacity);
   return nullptr;
   OGA_CAPI_CATCH
 }
@@ -2079,14 +2069,14 @@ OgaResult* OGA_API_CALL OgaModelResultGetAnswerChoice(
   OGA_CAPI_CATCH
 }
 
-#define OGA_MODEL_OPTIONAL(name, member)                                      \
-  OgaResult* OGA_API_CALL name(                                               \
-      const OgaModelResultHandle* result, size_t answer, double* value,       \
-      bool* present) {                                                        \
-    OGA_CAPI_TRY                                                              \
-    OptionalNumber(AnswerAt(result, answer).member, value, present);          \
-    return nullptr;                                                           \
-    OGA_CAPI_CATCH                                                            \
+#define OGA_MODEL_OPTIONAL(name, member)                                \
+  OgaResult* OGA_API_CALL name(                                         \
+      const OgaModelResultHandle* result, size_t answer, double* value, \
+      bool* present) {                                                  \
+    OGA_CAPI_TRY                                                        \
+    OptionalNumber(AnswerAt(result, answer).member, value, present);    \
+    return nullptr;                                                     \
+    OGA_CAPI_CATCH                                                      \
   }
 OGA_MODEL_OPTIONAL(OgaModelResultGetAnswerScore, score)
 OGA_MODEL_OPTIONAL(OgaModelResultGetAnswerConfidence, confidence)
