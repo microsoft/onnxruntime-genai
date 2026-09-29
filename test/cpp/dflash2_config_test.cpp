@@ -127,13 +127,17 @@ class FakeModelStateMetadata final : public ModelStateMetadata {
   std::unordered_map<std::string, TensorMetadata> outputs_;
 };
 
-std::pair<FakeModelStateMetadata, FakeModelStateMetadata> MakeCompatibleMetadata() {
+std::pair<FakeModelStateMetadata, FakeModelStateMetadata> MakeCompatibleMetadata(
+    bool with_q_row_map = true) {
   FakeModelStateMetadata target;
   target.AddOutput("aux_hidden_states", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16, {-1, 64});
   FakeModelStateMetadata drafter;
   drafter.AddInput("aux_hidden_states", ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16, {-1, 64});
   drafter.AddInput("input_ids", ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, {-1});
-  for (const auto* name : {"q_row_map", "qkv_row_map", "block_row_index",
+  if (with_q_row_map) {
+    drafter.AddInput("q_row_map", ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, {-1});
+  }
+  for (const auto* name : {"qkv_row_map", "block_row_index",
                            "cumulative_sequence_lengths", "past_sequence_lengths"}) {
     drafter.AddInput(name, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, {-1});
   }
@@ -441,6 +445,12 @@ TEST(Dflash2ConfigTest, RequiresUniqueRuntimeInputNames) {
   config.model.dflash2.inputs.qkv_row_map = config.model.dflash2.inputs.q_row_map;
   const auto [target, drafter] = MakeCompatibleMetadata();
   EXPECT_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8), std::runtime_error);
+}
+
+TEST(Dflash2ConfigTest, AcceptsPackedQkvDrafterWithoutQueryRowMap) {
+  const auto config = MakeDflash2Config();
+  const auto [target, drafter] = MakeCompatibleMetadata(false);
+  EXPECT_NO_THROW(ValidateDflash2ModelCompatibility(config, target, drafter, 8));
 }
 
 TEST(Dflash2ConfigTest, RequiresCompleteDrafterContract) {

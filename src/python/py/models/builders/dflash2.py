@@ -77,6 +77,8 @@ class DFlash2Builder(BlockDrafterBuilder):
         self.paged_block_size = paged_block_size
         self.mlp_attrs = {"fuse_gate_up": fuse_gate_up}
         self.attn_attrs = {"fuse_qkv": fuse_qkv}
+        # An unconsumed graph input is copied to the CPU by ORT, which breaks CUDA graph capture.
+        self.uses_q_row_map = not fuse_qkv
 
         with open(os.path.join(draft_dir, "config.json")) as f:
             cfg = json.load(f)

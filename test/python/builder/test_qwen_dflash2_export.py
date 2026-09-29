@@ -1352,6 +1352,16 @@ def test_qkv_fusion_feeds_packed_qkv_to_paged_attention(tmp_path, bits):
     assert not any(node.op_type == "Split" for node in builder.graph)
 
 
+@pytest.mark.parametrize("fuse_qkv", [False, True])
+def test_qkv_fusion_drops_the_query_row_map_input(tmp_path, fuse_qkv):
+    builder = DFlash2Builder(_draft_checkpoint(tmp_path), str(tmp_path), ir.DataType.BFLOAT16, 256, 128, fuse_qkv=fuse_qkv)
+
+    builder.declare_io()
+
+    assert ("q_row_map" in {value.name for value in builder.graph.inputs}) is not fuse_qkv
+    assert ("q_row_map" in builder.genai_config_section()["inputs"]) is not fuse_qkv
+
+
 @pytest.mark.parametrize("bits", [None, 4, 8])
 def test_qkv_fusion_matches_unfused_projections(tmp_path, bits):
     draft_dir = _draft_checkpoint(tmp_path)
