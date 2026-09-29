@@ -18,7 +18,8 @@ bool EndsWithSeparator(std::string_view text, std::string_view separator) {
   while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back()))) {
     text.remove_suffix(1);
   }
-  return !separator.empty() && text.ends_with(separator);
+  return !separator.empty() && text.size() >= separator.size() &&
+         text.compare(text.size() - separator.size(), separator.size(), separator) == 0;
 }
 
 }  // namespace
@@ -65,7 +66,8 @@ void TimestampDecodeState::PublishWord(std::string_view word_text, int64_t start
 
   if (level_ == Config::TimestampLevel::Segment || level_ == Config::TimestampLevel::All) {
     if (pending_segment_.active && segment_gap_threshold_frames_ &&
-        start_frame - pending_segment_.stop_frame >= *segment_gap_threshold_frames_) {
+        (*segment_gap_threshold_frames_ == 0 ||
+         start_frame - pending_segment_.stop_frame >= *segment_gap_threshold_frames_)) {
       CompleteSegment();
     }
 

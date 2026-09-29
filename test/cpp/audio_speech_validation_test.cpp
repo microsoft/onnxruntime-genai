@@ -64,6 +64,7 @@ TEST(AudioSpeechValidationTests, NemotronEncoderOutputRankValidation) {
 
 TEST(AudioSpeechValidationTests, NemotronTimestampConfiguration) {
   Generators::Config config;
+  config.model.type = "nemotron_speech";
   config.model.timestamp_level = Generators::Config::TimestampLevel::All;
   config.model.sample_rate = 16000;
   config.model.hop_length = 160;
@@ -80,6 +81,7 @@ TEST(AudioSpeechValidationTests, NemotronTimestampConfiguration) {
 
 TEST(AudioSpeechValidationTests, NemotronTimestampGapRoundsToNearestFrame) {
   Generators::Config config;
+  config.model.type = "nemotron_speech";
   config.model.timestamp_level = Generators::Config::TimestampLevel::Segment;
   config.model.sample_rate = 16000;
   config.model.hop_length = 160;
@@ -102,15 +104,14 @@ TEST(AudioSpeechValidationTests, NemotronGlobalFrameUsesAbsoluteSampleOrigin) {
   EXPECT_THROW(Generators::GetNemotronGlobalFrame(-1, 0, 160, 8), std::runtime_error);
 }
 
-TEST(AudioSpeechValidationTests, NemotronTimestampsDisableWithoutFrameDurationParameters) {
+TEST(AudioSpeechValidationTests, NemotronTimestampsRejectMissingFrameDurationParameters) {
   Generators::Config config;
+  config.model.type = "nemotron_speech";
   config.model.timestamp_level = Generators::Config::TimestampLevel::Word;
   config.model.segment_gap_threshold_seconds = 1.0;
 
   Generators::NemotronConfig nemotron_config;
-  EXPECT_NO_THROW(nemotron_config.PopulateFromConfig(config));
-  EXPECT_EQ(nemotron_config.timestamp_level, Generators::Config::TimestampLevel::Off);
-  EXPECT_FALSE(nemotron_config.segment_gap_threshold_frames.has_value());
+  EXPECT_THROW(nemotron_config.PopulateFromConfig(config), std::runtime_error);
 }
 
 TEST(AudioSpeechValidationTests, TimestampSegmentGapSecondsRoundToNearestFrame) {
@@ -132,6 +133,28 @@ TEST(AudioSpeechValidationTests, TimestampSegmentGapSecondsRoundToNearestFrame) 
   state.Finalize({nullptr, 0, 3});
   ASSERT_EQ(state.result_.segments.size(), 2U);
   EXPECT_EQ(state.result_.segments[1].text, " third");
+}
+
+TEST(AudioSpeechValidationTests, ZeroAndSubFrameGapsSplitEachWord) {
+  for (double threshold : {0.0, 0.01}) {
+    for (int64_t second_start_frame : {int64_t{0}, int64_t{1}}) {
+      EXPECT_EQ(Generators::GetSegmentGapThresholdFrames(threshold, 100, 10, 1), 0);
+      const Generators::TimestampTokenizerConfig config{
+          Generators::Config::TimestampLevel::Segment, {}, threshold, 100, 10, 1};
+      Generators::TimestampDecodeState state{config};
+      const OrtxTimestampWordMetadata first{"first", 0, 1};
+      state.Consume({10, 0, 1}, {&first, 1, 1});
+      state.ClearResult();
+      const OrtxTimestampWordMetadata second{" second", 1, 2};
+      state.Consume({11, second_start_frame, second_start_frame + 1}, {&second, 1, 2});
+      ASSERT_EQ(state.result_.segments.size(), 1U);
+      EXPECT_EQ(state.result_.segments[0].text, "first");
+      state.ClearResult();
+      state.Finalize({nullptr, 0, 2});
+      ASSERT_EQ(state.result_.segments.size(), 1U);
+      EXPECT_EQ(state.result_.segments[0].text, " second");
+    }
+  }
 }
 
 TEST(AudioSpeechValidationTests, TimestampAccumulatorAttachesPunctuationAndCompletesSegment) {
@@ -423,19 +446,17 @@ TEST_F(MetadataCoreStateTests, ExplicitGapSecondsRoundUsingModelTiming) {
                                                       100, 10, 1), 3);
 }
 
-TEST_F(MetadataCoreStateTests, MissingModelTimingDisablesExplicitMetadata) {
+TEST_F(MetadataCoreStateTests, MissingModelTimingRejectsExplicitMetadata) {
   Generators::Config config{fs::path{MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32"}, ""};
   config.model.type = "nemotron_speech";
   config.model.timestamp_level = Generators::Config::TimestampLevel::All;
+  EXPECT_THROW(std::make_shared<Generators::Tokenizer>(config), std::runtime_error);
+  config.model.timestamp_level = Generators::Config::TimestampLevel::Off;
   auto missing_timing_tokenizer = std::make_shared<Generators::Tokenizer>(config);
-  EXPECT_EQ(missing_timing_tokenizer->GetMetadataCoreConfig().timestamps.level,
-            Generators::Config::TimestampLevel::Off);
   auto stream = missing_timing_tokenizer->CreateStream();
   Generators::MetadataCoreConfig requested;
   Generators::OverlayMetadataCoreConfig(requested, R"({"timestamps":{"level":"all"}})");
-  auto state = stream->CreateMetadataCoreState(requested);
-  EXPECT_FALSE(state->TimestampsEnabled());
-  EXPECT_EQ(stream->DecodeWithMetadata({tokens[0], 0, {}}).timestampMetadata, nullptr);
+  EXPECT_THROW(stream->CreateMetadataCoreState(requested), std::runtime_error);
 }
 
 TEST_F(MetadataCoreStateTests, TokenizerConfigurationIsAnIndependentCopy) {

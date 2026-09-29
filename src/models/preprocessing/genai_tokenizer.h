@@ -7,10 +7,10 @@
 #include "models/utils.h"
 #include "metadata_core_state.h"
 #include "ortx_tokenizer.h"
+#include "span.h"
 
 #include <memory>
 #include <optional>
-#include <span>
 #include <string>
 #include <vector>
 
