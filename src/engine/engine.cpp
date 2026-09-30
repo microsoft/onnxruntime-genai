@@ -481,7 +481,9 @@ void Engine::PrepareDflash2Feeds(const StepPlan& plan,
     const Proposal sampled_proposal =
         greedy ? Proposal::None : model_->config_->model.dflash2.sampled_proposal;
     const bool independent_sampling = sampled_proposal == Proposal::Independent;
-    const bool drafts_enabled = greedy || sampled_proposal != Proposal::None;
+    // A sampled turn without a positive top_k fails draft validation, so it should not take a slot.
+    const bool drafts_enabled =
+        greedy || (sampled_proposal != Proposal::None && entry.request->TurnPolicy().top_k > 0);
     const size_t accepted = entry.request->AcceptedDraftTokenCount();
     if (accepted > entry.draft_token_count) {
       throw std::logic_error("DFlash 2 observed more accepted drafts than the target planned.");
